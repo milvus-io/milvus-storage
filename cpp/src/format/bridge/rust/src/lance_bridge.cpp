@@ -104,6 +104,20 @@ uint64_t BlockingDataset::GetFragmentRowCount(uint64_t fragment_id) const {
   }
 }
 
+arrow::Result<std::vector<uint64_t>> BlockingDataset::EstimateFragmentColumnMemory(uint64_t fragment_id) const {
+  try {
+    auto estimates = ffi::estimate_fragment_column_memory(*impl_, fragment_id);
+    std::vector<uint64_t> memory_sizes;
+    memory_sizes.reserve(estimates.size());
+    for (const auto& estimate : estimates) {
+      memory_sizes.push_back(estimate.memory_size);
+    }
+    return memory_sizes;
+  } catch (const rust::cxxbridge1::Error& e) {
+    return arrow::Status::NotImplemented("Lance column memory size estimation is not available: ", e.what());
+  }
+}
+
 uint64_t BlockingDataset::EstimateFragmentMemory(uint64_t fragment_id) const {
   try {
     return ffi::estimate_fragment_memory(*impl_, fragment_id);

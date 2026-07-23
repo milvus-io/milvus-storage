@@ -1025,6 +1025,41 @@ TEST_P(APIWriterReaderTest, PerCallProjectionOverride) {
   }
 }
 
+TEST_P(APIWriterReaderTest, ChunkColumnEstimatedSizeMetadataIgnoresProjection) {
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  auto projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id"});
+  auto reader = Reader::create(cgs, schema_, projection, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+  ASSERT_AND_ASSIGN(auto chunk_sizes, chunk_reader->get_chunk_estimated_size());
+  ASSERT_AND_ASSIGN(auto column_sizes, chunk_reader->get_chunk_column_estimated_size());
+
+  ASSERT_EQ(column_sizes.size(), schema_->num_fields());
+  for (const auto& sizes : column_sizes) {
+    ASSERT_EQ(sizes.size(), chunk_sizes.size());
+  }
+
+  for (size_t chunk_idx = 0; chunk_idx < chunk_sizes.size(); ++chunk_idx) {
+    uint64_t column_total = 0;
+    for (const auto& sizes : column_sizes) {
+      column_total += sizes[chunk_idx];
+    }
+    EXPECT_EQ(column_total, chunk_sizes[chunk_idx]);
+  }
+
+  for (int field_idx = 0; field_idx < schema_->num_fields(); ++field_idx) {
+    ASSERT_AND_ASSIGN(auto sizes, chunk_reader->get_chunk_column_estimated_size(schema_->field(field_idx)->name()));
+    EXPECT_EQ(sizes, column_sizes[field_idx]);
+  }
+
+  EXPECT_TRUE(chunk_reader->get_chunk_column_estimated_size("missing").status().IsInvalid());
+}
+
 TEST_P(APIWriterReaderTest, MetadataCacheWarmupDoesNotFreezePerCallProjection) {
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
@@ -2029,7 +2064,7 @@ TEST_P(APIWriterReaderTest, TestEmptyFiles) {
   for (size_t i = 0; i < cgs->size(); ++i) {
     ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(i));
     ASSERT_EQ(chunk_reader->total_number_of_chunks(), 0);
-    ASSERT_AND_ASSIGN(auto chunk_size, chunk_reader->get_chunk_size());
+    ASSERT_AND_ASSIGN(auto chunk_size, chunk_reader->get_chunk_estimated_size());
     ASSERT_EQ(chunk_size.size(), 0);
     ASSERT_AND_ASSIGN(auto chunk_rows, chunk_reader->get_chunk_rows());
     ASSERT_EQ(chunk_rows.size(), 0);

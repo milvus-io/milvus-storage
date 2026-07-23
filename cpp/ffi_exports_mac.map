@@ -192,6 +192,7 @@ _loon_fiukey_column_group_read_fail
 _loon_fiukey_take_rows_fail
 _loon_fiukey_chunk_reader_read_fail
 _loon_fiukey_reader_open_fail
+_loon_fiukey_memory_size_estimation_fail
 # Transaction/Manifest
 _loon_fiukey_manifest_commit_fail
 _loon_fiukey_manifest_read_fail

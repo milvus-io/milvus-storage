@@ -545,6 +545,7 @@ _ffi.cdef(
     extern const char* loon_fiukey_take_rows_fail;
     extern const char* loon_fiukey_chunk_reader_read_fail;
     extern const char* loon_fiukey_reader_open_fail;
+    extern const char* loon_fiukey_memory_size_estimation_fail;
     extern const char* loon_fiukey_manifest_commit_fail;
     extern const char* loon_fiukey_manifest_read_fail;
     extern const char* loon_fiukey_manifest_write_fail;

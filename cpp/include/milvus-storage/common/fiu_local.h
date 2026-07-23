@@ -48,6 +48,7 @@
 #define FIUKEY_TAKE_ROWS_FAIL "take_rows.fail"
 #define FIUKEY_CHUNK_READER_READ_FAIL "chunk_reader.read.fail"
 #define FIUKEY_READER_OPEN_FAIL "reader.open.fail"
+#define FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL "memory_size_estimation.fail"
 
 // Transaction/Manifest fault points
 #define FIUKEY_MANIFEST_COMMIT_FAIL "manifest.commit.fail"

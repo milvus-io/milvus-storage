@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <stdexcept>
 #include <arrow/c/abi.h>
+#include <arrow/result.h>
 
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"
@@ -96,9 +97,13 @@ class BlockingDataset {
 
   uint64_t GetFragmentRowCount(uint64_t fragment_id) const;
 
+  // Top-level dataset columns in schema order; returns NotImplemented when estimation is unavailable.
+  arrow::Result<std::vector<uint64_t>> EstimateFragmentColumnMemory(uint64_t fragment_id) const;
+
   uint64_t EstimateFragmentMemory(uint64_t fragment_id) const;
 
-  // Get the schema of a specific fragment, exported as Arrow C schema
+  // Lance 7 exposes the current dataset schema through FileFragment::schema().
+  // It can include evolved nullable columns that are not physically stored in this fragment.
   void GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_schema) const;
 
   // Dataset-level scan: create a scanner for projected columns

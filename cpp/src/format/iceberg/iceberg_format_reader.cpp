@@ -389,10 +389,23 @@ arrow::Result<std::vector<RowGroupInfo>> IcebergFormatReader::build_logical_row_
     }
     uint64_t logical_rows = physical_rows - deletions_in_rg;
 
+    // Positional deletes do not expose the memory size of individual values, so
+    // estimate the logical row-group size by assuming deleted rows have the
+    // physical row group's average memory size.
+    uint64_t logical_memory_size = 0;
+    if (physical_rows != 0) {
+      // logical_rows <= physical_rows, so the quotient is at most prg.memory_size and is safe to cast to uint64_t.
+      logical_memory_size =
+          static_cast<uint64_t>(static_cast<unsigned __int128>(prg.memory_size) * logical_rows / physical_rows);
+    }
+    ARROW_ASSIGN_OR_RAISE(auto logical_column_memory_sizes,
+                          milvus_storage::DistributeMemorySizes(logical_memory_size, prg.column_memory_sizes));
+
     logical_row_group_infos.emplace_back(RowGroupInfo{
         .start_offset = logical_offset,
         .end_offset = logical_offset + logical_rows,
-        .memory_size = prg.memory_size,
+        .memory_size = logical_memory_size,
+        .column_memory_sizes = std::move(logical_column_memory_sizes),
     });
     logical_offset += logical_rows;
   }

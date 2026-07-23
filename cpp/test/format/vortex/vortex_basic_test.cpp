@@ -535,6 +535,74 @@ TEST_P(VortexBasicTest, TestBasicWrite) {
   ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
 }
 
+TEST_P(VortexBasicTest, RowGroupColumnMemorySizesUseFullFileSchema) {
+  api::SetValue(properties_, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "true");
+  api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "1000");
+  ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile(test_file_name_));
+
+  auto projection_schema = arrow::schema({schema_->field(0)});
+  auto vx_reader = vortex::VortexFormatReader(
+      file_system_, projection_schema, test_file_name_, properties_, std::vector<std::string>{"id"},
+      cgfile.Get<uint64_t>(api::kPropertyFileSize), cgfile.Get<uint64_t>(api::kPropertyFooterSize));
+  ASSERT_STATUS_OK(vx_reader.open());
+  ASSERT_AND_ASSIGN(auto row_group_infos, vx_reader.get_row_group_infos());
+
+  ASSERT_GT(row_group_infos.size(), 1u);
+  for (const auto& row_group_info : row_group_infos) {
+    EXPECT_TRUE(row_group_info.memory_size_available);
+    ASSERT_EQ(row_group_info.column_memory_sizes.size(), static_cast<size_t>(schema_->num_fields()));
+    EXPECT_GT(row_group_info.memory_size, 0u);
+    EXPECT_EQ(std::accumulate(row_group_info.column_memory_sizes.begin(), row_group_info.column_memory_sizes.end(),
+                              uint64_t{0}),
+              row_group_info.memory_size);
+  }
+}
+
+#ifdef BUILD_WITH_FIU
+TEST_P(VortexBasicTest, MemorySizeUnavailableDoesNotBlockOpen) {
+  ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile(test_file_name_));
+  const auto file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
+  const auto footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
+
+  auto assert_memory_size_unavailable = [](const std::vector<RowGroupInfo>& row_group_infos) {
+    ASSERT_FALSE(row_group_infos.empty());
+    for (const auto& row_group_info : row_group_infos) {
+      EXPECT_FALSE(row_group_info.memory_size_available);
+      EXPECT_EQ(row_group_info.memory_size, 0u);
+      EXPECT_TRUE(row_group_info.column_memory_sizes.empty());
+    }
+  };
+
+  {
+    ScopedFiuFault fault(FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL);
+    ASSERT_EQ(fault.enable_result(), 0);
+
+    auto reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
+                                             file_size, footer_size);
+    ASSERT_STATUS_OK(reader.open());
+    ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());
+    assert_memory_size_unavailable(row_group_infos);
+    ASSERT_AND_ASSIGN(auto chunked_array, reader.blocking_read(0, recordBatchsRows(), kSmallCoalescingWindow));
+    ASSERT_AND_ASSIGN(auto batch, ChunkedArrayToRecordBatch(chunked_array));
+    EXPECT_EQ(batch->num_rows(), recordBatchsRows());
+  }
+
+  vortex::VortexFormatReader::MetaTrait::MetadataPtr metadata;
+  {
+    ScopedFiuFault fault(FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL);
+    ASSERT_EQ(fault.enable_result(), 0);
+    ASSERT_AND_ASSIGN(metadata, vortex::VortexFormatReader::MetaTrait::load_metadata(cgfile, properties_, nullptr));
+  }
+  assert_memory_size_unavailable(metadata->row_group_infos);
+
+  ASSERT_AND_ASSIGN(auto cached_reader, vortex::VortexFormatReader::MetaTrait::create_from_metadata(
+                                            metadata, cgfile, schema_, data_columns(), ""));
+  ASSERT_AND_ASSIGN(auto rb_reader, cached_reader->read_with_range(0, recordBatchsRows()));
+  ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatchReader(rb_reader.get()));
+  EXPECT_EQ(table->num_rows(), recordBatchsRows());
+}
+#endif
+
 TEST_P(VortexBasicTest, FlushAllowsSubsequentWrites) {
   ASSERT_AND_ASSIGN(auto first_batch, MakeTestData(0, 1));
   ASSERT_AND_ASSIGN(auto second_batch, MakeTestData(1, 1));

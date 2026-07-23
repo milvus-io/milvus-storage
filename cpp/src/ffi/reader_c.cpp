@@ -176,7 +176,7 @@ LoonFFIResult loon_get_chunk_metadatas(LoonChunkReaderHandle reader,
 
     out_chunk_metadata->metadatas_size = 0;
     if (metadata_type & LOON_CHUNK_METADATA_ESTIMATED_MEMORY) {
-      auto estimated_mem_result = cpp_reader->get_chunk_size();
+      auto estimated_mem_result = cpp_reader->get_chunk_estimated_size();
       if (!estimated_mem_result.ok()) {
         // must be 0 because calloc and `number_of_chunks` will be updated at last.
         loon_free_chunk_metadatas(out_chunk_metadata);

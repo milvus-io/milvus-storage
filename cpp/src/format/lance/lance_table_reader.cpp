@@ -16,8 +16,9 @@
 
 #include <algorithm>
 #include <exception>
-#include <string>
 #include <iostream>
+#include <limits>
+#include <string>
 #include <utility>
 
 #include <arrow/chunked_array.h>  // keep this line before other arrow header
@@ -30,6 +31,7 @@
 #include <arrow/result.h>
 #include <fmt/format.h>
 
+#include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/lance/lance_common.h"
@@ -60,13 +62,47 @@ LanceTableReader::LanceTableReader(const std::string& uri,
       needed_columns_(needed_columns),
       fragment_reader_(nullptr) {}
 
-static std::vector<RowGroupInfo> create_row_group_infos(uint64_t rows_in_file,
-                                                        uint64_t logical_chunk_rows,
-                                                        uint64_t fragment_memory_size) {
+static arrow::Result<std::vector<uint64_t>> estimate_fragment_column_memory_sizes(const BlockingDataset& dataset,
+                                                                                  uint64_t fragment_id,
+                                                                                  size_t num_columns) {
+  FIU_RETURN_ON(FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL,
+                arrow::Status::NotImplemented("Injected fault: ", FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL));
+
+  // Lance 7 returns both this estimate and FileFragment::schema() in current
+  // dataset-schema order. Fields not physically present in the fragment have a
+  // zero estimate, so schema evolution does not require positional remapping.
+  ARROW_ASSIGN_OR_RAISE(auto memory_sizes, dataset.EstimateFragmentColumnMemory(fragment_id));
+  if (memory_sizes.size() != num_columns) {
+    return arrow::Status::Invalid("Lance column memory estimate count does not match the file schema: ",
+                                  memory_sizes.size(), " != ", num_columns);
+  }
+
+  uint64_t total_size = 0;
+  for (auto memory_size : memory_sizes) {
+    if (memory_size > std::numeric_limits<uint64_t>::max() - total_size) {
+      return arrow::Status::Invalid("Lance column memory estimates exceed the uint64_t range");
+    }
+    total_size += memory_size;
+  }
+  return memory_sizes;
+}
+
+static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos(
+    uint64_t rows_in_file,
+    uint64_t logical_chunk_rows,
+    const std::vector<uint64_t>& fragment_column_memory_sizes,
+    bool memory_size_available) {
   if (rows_in_file == 0) {
-    return {};
+    return std::vector<RowGroupInfo>{};
   }
   assert(logical_chunk_rows > 0);
+
+  uint64_t fragment_memory_size = 0;
+  if (memory_size_available) {
+    for (auto column_memory_size : fragment_column_memory_sizes) {
+      fragment_memory_size += column_memory_size;
+    }
+  }
 
   std::vector<RowGroupInfo> result;
   uint64_t last_offset = 0;
@@ -74,12 +110,20 @@ static std::vector<RowGroupInfo> create_row_group_infos(uint64_t rows_in_file,
 
   while (last_offset < rows_in_file) {
     uint64_t end_offset = std::min(last_offset + logical_chunk_rows, rows_in_file);
+    // end_offset <= rows_in_file, so the quotient is at most fragment_memory_size and is safe to cast to uint64_t.
     auto memory_offset =
-        static_cast<uint64_t>((static_cast<__uint128_t>(fragment_memory_size) * end_offset) / rows_in_file);
+        static_cast<uint64_t>((static_cast<unsigned __int128>(fragment_memory_size) * end_offset) / rows_in_file);
+    auto memory_size = memory_offset - last_memory_offset;
+    std::vector<uint64_t> column_memory_sizes;
+    if (memory_size_available) {
+      ARROW_ASSIGN_OR_RAISE(column_memory_sizes, DistributeMemorySizes(memory_size, fragment_column_memory_sizes));
+    }
     result.emplace_back(RowGroupInfo{
         .start_offset = last_offset,
         .end_offset = end_offset,
-        .memory_size = memory_offset - last_memory_offset,
+        .memory_size = memory_size,
+        .column_memory_sizes = std::move(column_memory_sizes),
+        .memory_size_available = memory_size_available,
     });
     last_offset = end_offset;
     last_memory_offset = memory_offset;
@@ -172,14 +216,35 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
   ARROW_ASSIGN_OR_RAISE(auto logical_chunk_rows,
                         milvus_storage::api::GetValue<uint64_t>(properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
 
-  auto fragment_memory_size = dataset->EstimateFragmentMemory(fragment_id);
+  auto column_memory_sizes_result =
+      estimate_fragment_column_memory_sizes(*dataset, fragment_id, static_cast<size_t>(file_schema->num_fields()));
+  const bool memory_size_available = column_memory_sizes_result.ok();
+  std::vector<uint64_t> fragment_column_memory_sizes;
+  if (memory_size_available) {
+    fragment_column_memory_sizes = std::move(column_memory_sizes_result).ValueOrDie();
+  } else {
+    // Memory statistics are optional. Do not retain the underlying failure in
+    // metadata: estimate APIs return a generic NotImplemented status instead.
+    // Keep the detailed reason in the debug log for diagnostics only.
+    LOG_STORAGE_DEBUG_ << "Lance column memory estimation is unavailable while loading metadata"
+                       << ", fragment_id=" << fragment_id
+                       << ", status=" << column_memory_sizes_result.status().ToString();
+  }
+  ARROW_ASSIGN_OR_RAISE(
+      auto row_group_infos,
+      create_row_group_infos(logical_rows, logical_chunk_rows, fragment_column_memory_sizes, memory_size_available));
 
   auto metadata = std::make_shared<Metadata>();
   metadata->cache_key = cache_key(file);
   metadata->path = file.path;
   metadata->file_schema = std::move(file_schema);
-  metadata->row_group_infos = create_row_group_infos(logical_rows, logical_chunk_rows, fragment_memory_size);
-  auto outer_metadata_size = sizeof(Metadata) + metadata->row_group_infos.size() * sizeof(RowGroupInfo);
+  metadata->row_group_infos = std::move(row_group_infos);
+  size_t column_memory_sizes_size = 0;
+  for (const auto& row_group_info : metadata->row_group_infos) {
+    column_memory_sizes_size += row_group_info.column_memory_sizes.size() * sizeof(uint64_t);
+  }
+  auto outer_metadata_size =
+      sizeof(Metadata) + metadata->row_group_infos.size() * sizeof(RowGroupInfo) + column_memory_sizes_size;
   metadata->cache_size = outer_metadata_size + file.Get<uint64_t>(milvus_storage::api::kPropertyFooterSize);
   metadata->payload = Payload{
       .base_uri = std::move(base_uri),
@@ -239,7 +304,6 @@ arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::cr
 
 arrow::Status LanceTableReader::open() {
   assert(!fragment_reader_);
-  ArrowSchema c_arrow_schema;
 
   if (!dataset_) {
     // uri_ is in Milvus format (scheme://address/bucket/key) so extfs.<alias>.*
@@ -255,7 +319,7 @@ arrow::Status LanceTableReader::open() {
     dataset_ = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config));
   }
 
-  // Always derive file schema from fragment metadata
+  // Lance 7 exposes the current dataset schema through FileFragment::schema().
   {
     ArrowSchema c_fragment_schema;
     try {
@@ -269,11 +333,11 @@ arrow::Status LanceTableReader::open() {
   // Build the read schema for fragment reader:
   // use user-provided schema if available, otherwise project file schema by needed_columns
   ARROW_ASSIGN_OR_RAISE(auto read_schema, build_read_schema(file_schema_, read_schema_, needed_columns_));
-  ARROW_RETURN_NOT_OK(arrow::ExportSchema(*read_schema, &c_arrow_schema));
 
   ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
 
-  auto fragment_memory_size = dataset_->EstimateFragmentMemory(fragment_id_);
+  ArrowSchema c_arrow_schema;
+  ARROW_RETURN_NOT_OK(arrow::ExportSchema(*read_schema, &c_arrow_schema));
 
   fragment_reader_ = BlockingFragmentReader::Open(*dataset_, fragment_id_, c_arrow_schema);
 
@@ -293,7 +357,23 @@ arrow::Status LanceTableReader::open() {
   } catch (const lance::LanceException& e) {
     return arrow::Status::IOError("Failed to get physical row count for fragment ", fragment_id_, ": ", e.what());
   }
-  row_group_infos_ = create_row_group_infos(logical_rows, logical_chunk_rows_, fragment_memory_size);
+
+  auto column_memory_sizes_result =
+      estimate_fragment_column_memory_sizes(*dataset_, fragment_id_, static_cast<size_t>(file_schema_->num_fields()));
+  const bool memory_size_available = column_memory_sizes_result.ok();
+  std::vector<uint64_t> fragment_column_memory_sizes;
+  if (memory_size_available) {
+    fragment_column_memory_sizes = std::move(column_memory_sizes_result).ValueOrDie();
+  } else {
+    // Memory statistics are optional. Do not retain the underlying failure in
+    // row-group metadata: estimate APIs return a generic NotImplemented status
+    // instead. Keep the detailed reason in the debug log for diagnostics only.
+    LOG_STORAGE_DEBUG_ << "Lance column memory estimation is unavailable while opening the reader"
+                       << ", fragment_id=" << fragment_id_
+                       << ", status=" << column_memory_sizes_result.status().ToString();
+  }
+  ARROW_ASSIGN_OR_RAISE(row_group_infos_, create_row_group_infos(logical_rows, logical_chunk_rows_,
+                                                                 fragment_column_memory_sizes, memory_size_available));
 
   return arrow::Status::OK();
 }

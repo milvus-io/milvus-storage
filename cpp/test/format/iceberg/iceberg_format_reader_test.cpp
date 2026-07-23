@@ -14,6 +14,8 @@
 
 #include <gtest/gtest.h>
 
+#include <numeric>
+
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <parquet/arrow/writer.h>
@@ -116,11 +118,21 @@ TEST_F(IcebergFormatReaderTest, NoDeletes) {
   WriteDataFile(10);
 
   ColumnGroupFile file{data_file_path_, 0, data_num_rows_, {}};
+  ASSERT_AND_ASSIGN(auto parquet_reader,
+                    FormatReader::create(nullptr, LOON_FORMAT_PARQUET, file, properties_, {}, nullptr));
+  ASSERT_AND_ASSIGN(auto parquet_rg_infos, parquet_reader->get_row_group_infos());
+  ASSERT_FALSE(parquet_rg_infos.empty());
   ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file, properties_,
                                                       std::vector<std::string>{"id"}, nullptr));
 
   ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
-  ASSERT_GE(rg_infos.size(), 1);
+  ASSERT_EQ(rg_infos.size(), parquet_rg_infos.size());
+  for (size_t i = 0; i < rg_infos.size(); ++i) {
+    EXPECT_EQ(rg_infos[i].start_offset, parquet_rg_infos[i].start_offset);
+    EXPECT_EQ(rg_infos[i].end_offset, parquet_rg_infos[i].end_offset);
+    EXPECT_EQ(rg_infos[i].memory_size, parquet_rg_infos[i].memory_size);
+    EXPECT_EQ(rg_infos[i].column_memory_sizes, parquet_rg_infos[i].column_memory_sizes);
+  }
 
   ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
   ASSERT_EQ(batch->num_rows(), data_num_rows_);
@@ -152,6 +164,68 @@ TEST_F(IcebergFormatReaderTest, PositionalDeleteGetChunk) {
   for (size_t i = 0; i < expected_ids.size(); ++i) {
     ASSERT_EQ(id_array->Value(i), expected_ids[i]) << "Mismatch at index " << i;
   }
+}
+
+TEST_F(IcebergFormatReaderTest, PartialDeletesScaleRowGroupMemorySizes) {
+  WriteDataFile(10);
+
+  ColumnGroupFile parquet_file{data_file_path_, 0, data_num_rows_, {}};
+  ASSERT_AND_ASSIGN(auto parquet_reader,
+                    FormatReader::create(nullptr, LOON_FORMAT_PARQUET, parquet_file, properties_, {}, nullptr));
+  ASSERT_AND_ASSIGN(auto physical_infos, parquet_reader->get_row_group_infos());
+  ASSERT_EQ(physical_infos.size(), 1);
+  ASSERT_FALSE(physical_infos[0].column_memory_sizes.empty());
+
+  WritePositionalDeleteFile(data_file_path_, {2, 5, 8});
+  auto metadata = MakeDeleteMetadataJson(delete_file_path_);
+  ColumnGroupFile iceberg_file{data_file_path_, 0, data_num_rows_, metadata};
+  ASSERT_AND_ASSIGN(auto iceberg_reader,
+                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, iceberg_file, properties_, {}, nullptr));
+  ASSERT_AND_ASSIGN(auto logical_infos, iceberg_reader->get_row_group_infos());
+  ASSERT_EQ(logical_infos.size(), 1);
+
+  const auto& physical = physical_infos[0];
+  const auto& logical = logical_infos[0];
+  const auto physical_rows = physical.end_offset - physical.start_offset;
+  ASSERT_EQ(physical_rows, 10);
+  const size_t logical_rows = 7;
+  const auto expected_total =
+      static_cast<uint64_t>(static_cast<unsigned __int128>(physical.memory_size) * logical_rows / physical_rows);
+  ASSERT_AND_ASSIGN(auto expected_columns,
+                    milvus_storage::DistributeMemorySizes(expected_total, physical.column_memory_sizes));
+
+  EXPECT_EQ(logical.start_offset, 0);
+  EXPECT_EQ(logical.end_offset, logical_rows);
+  EXPECT_EQ(logical.memory_size, expected_total);
+  EXPECT_EQ(logical.column_memory_sizes, expected_columns);
+  EXPECT_EQ(std::accumulate(logical.column_memory_sizes.begin(), logical.column_memory_sizes.end(), uint64_t{0}),
+            logical.memory_size);
+}
+
+TEST_F(IcebergFormatReaderTest, FullDeletesZeroRowGroupMemorySizes) {
+  WriteDataFile(10);
+
+  ColumnGroupFile parquet_file{data_file_path_, 0, data_num_rows_, {}};
+  ASSERT_AND_ASSIGN(auto parquet_reader,
+                    FormatReader::create(nullptr, LOON_FORMAT_PARQUET, parquet_file, properties_, {}, nullptr));
+  ASSERT_AND_ASSIGN(auto physical_infos, parquet_reader->get_row_group_infos());
+  ASSERT_EQ(physical_infos.size(), 1);
+  ASSERT_FALSE(physical_infos[0].column_memory_sizes.empty());
+
+  WritePositionalDeleteFile(data_file_path_, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9});
+  auto metadata = MakeDeleteMetadataJson(delete_file_path_);
+  ColumnGroupFile iceberg_file{data_file_path_, 0, 0, metadata};
+  ASSERT_AND_ASSIGN(auto iceberg_reader,
+                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, iceberg_file, properties_, {}, nullptr));
+  ASSERT_AND_ASSIGN(auto logical_infos, iceberg_reader->get_row_group_infos());
+  ASSERT_EQ(logical_infos.size(), 1);
+
+  const auto& logical = logical_infos[0];
+  EXPECT_EQ(logical.start_offset, 0);
+  EXPECT_EQ(logical.end_offset, 0);
+  EXPECT_EQ(logical.memory_size, 0);
+  EXPECT_EQ(logical.column_memory_sizes,
+            std::vector<uint64_t>(physical_infos[0].column_memory_sizes.size(), uint64_t{0}));
 }
 
 // Positional deletes — take() maps logical doc IDs to physical positions.

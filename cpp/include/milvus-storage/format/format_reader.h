@@ -38,10 +38,17 @@ struct RowGroupInfo {
   public:
   size_t start_offset;
   size_t end_offset;
-  size_t memory_size;
+  uint64_t memory_size;
+  std::vector<uint64_t> column_memory_sizes;
+  // `memory_size` is only a placeholder when this is false. The original
+  // statistics failure is intentionally not retained; public estimate APIs
+  // return a generic NotImplemented status instead.
+  bool memory_size_available = true;
 
   std::string ToString() const;
 };
+
+arrow::Result<std::vector<uint64_t>> DistributeMemorySizes(uint64_t total_size, const std::vector<uint64_t>& weights);
 
 template <typename Payload>
 struct FormatReaderMetadata {

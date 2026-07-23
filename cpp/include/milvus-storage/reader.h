@@ -88,9 +88,56 @@ class ChunkReader {
       const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) = 0;
 
   /**
-   * @brief Retrieves the metadata of chunks
+   * @brief Returns the estimated decoded-memory size of every chunk.
+   *
+   * The result is indexed by chunk. When per-column metadata is available, each
+   * estimate is the sum of the logical column group's fields, independently of
+   * the active projection; fields present only in a physical file are excluded.
+   * Formats without per-column metadata retain their aggregate estimate.
+   * Estimates may be zero when a chunk has no live rows or its known
+   * decoded-memory size is zero. Unavailable estimates are returned as an
+   * error, typically arrow::Status::NotImplemented, rather than as zero.
+   *
+   * @return One estimated size in bytes per chunk, or an error status.
    */
-  [[nodiscard]] virtual arrow::Result<std::vector<uint64_t>> get_chunk_size() = 0;
+  [[nodiscard]] virtual arrow::Result<std::vector<uint64_t>> get_chunk_estimated_size() = 0;
+
+  /**
+   * @brief Returns the estimated decoded-memory size of a top-level field in every chunk.
+   *
+   * The field is resolved against the logical column group, independently of
+   * the active projection. A field absent from a particular physical file has
+   * a known zero estimate for that chunk. Unavailable statistics are returned
+   * as an error rather than as zero.
+   *
+   * @param field_name Name of a unique top-level field in the column group.
+   * @return One estimated size in bytes per chunk, or an error status.
+   */
+  [[nodiscard]] virtual arrow::Result<std::vector<uint64_t>> get_chunk_column_estimated_size(
+      const std::string& field_name) = 0;
+
+  /**
+   * @brief Returns estimated decoded-memory sizes for every top-level field and chunk.
+   *
+   * The outer dimension follows logical column-group order and the inner
+   * dimension is indexed by chunk: result[column_index][chunk_index]. Results
+   * are independent of the active projection. Individual estimates may be
+   * zero only when the corresponding estimate is known to be zero. Unavailable
+   * estimates are returned as an error rather than as zero.
+   *
+   * @return Estimated sizes in bytes arranged as [column][chunk], or an error status.
+   */
+  [[nodiscard]] virtual arrow::Result<std::vector<std::vector<uint64_t>>> get_chunk_column_estimated_size() = 0;
+
+  /**
+   * @brief Returns the exact logical row count of every chunk.
+   *
+   * Unlike the estimated-size APIs, failures are returned as an error status
+   * and are never converted to a zero fallback. A returned zero is an exact
+   * row count for an empty logical chunk.
+   *
+   * @return One exact row count per chunk, or an error status.
+   */
   [[nodiscard]] virtual arrow::Result<std::vector<uint64_t>> get_chunk_rows() = 0;
 };
 
@@ -105,6 +152,11 @@ class ChunkReader {
  * This reader leverages the manifest system to understand the dataset structure,
  * including column groups, data layout, and metadata, providing optimized access
  * patterns for analytical workloads.
+ *
+ * Memory-estimation metadata is optional and is not required for normal data
+ * reads. When it is unavailable, reader creation and data access remain usable;
+ * only the chunk-size estimation APIs return arrow::Status::NotImplemented.
+ * The underlying statistics failure is not exposed through those APIs.
  */
 class Reader {
   public:
