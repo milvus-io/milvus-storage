@@ -8,7 +8,7 @@ the current async read implementation and its remaining limitations.
 Reference points:
 
 - Original proposal: `d6e6c8a0281674238ce71b7065043f9eb48bc14f`
-- Implementation baseline reviewed here: `9023e2684c047aa747baf12aa33fe78ed05aa73f`
+- Implementation baseline reviewed here: `cefa09c215212eb1fed02e2c2ce0cd66973a1200`
   plus the current working tree
 
 The async surface covers random reads:
@@ -61,7 +61,8 @@ This exposed two core problems:
    increasing repeated opens, row-group reads, and decode work.
 
 In the current implementation, `PackedRecordBatchReader` full scans still process
-column groups in a loop. This design addresses random chunk and take reads;
+column groups in a loop. The centralized task model is used by the async random
+chunk and take overrides. Synchronous random reads retain their legacy paths, and
 converting full scans to the same async model is out of scope.
 
 ## Solution: Centralized Task Planning + Async Execution
@@ -79,12 +80,13 @@ refined:
 | Clone an already-open `FormatReader` per task | Open an independent task reader, reusing cached immutable metadata when enabled |
 
 The executor change is a later design decision, not part of the original Problem
-statement. Parquet now inherits the executor from the consumed Folly chain, while
-Vortex keeps execution on its native Tokio runtime.
+statement. Parquet generator work inherits the executor from the consumed Folly
+chain. Vortex scan orchestration and collection run on its shared Tokio runtime,
+while physical I/O follows the filesystem backend.
 
 The implemented solution has four parts.
 
-1. **Build tasks before format execution.** `reader.cpp` uses
+1. **Build tasks before format execution.** The async overrides in `reader.cpp` use
    `ChunkTask::Build()` or `TakeTask::Build()` to create file-aware natural tasks.
    Take planning sees all required column groups and produces one flat task list.
 2. **Separate natural task construction from optional splitting.** Nested
@@ -95,9 +97,10 @@ The implemented solution has four parts.
    `ChunkTask` or `TakeTask`; they no longer expose a separate
    `get_natural_tasks()` interface or make async-path parallelism decisions.
 4. **Let the format own native execution.** Storage constructs and combines
-   `SemiFuture`s without calling `folly::via()`. Parquet inherits the executor from
-   the consumed Folly chain, Vortex runs on the shared Tokio runtime, and formats
-   without native async support use the synchronous ready-future fallback.
+   `SemiFuture`s without calling `folly::via()`. Parquet generator work inherits
+   the executor from the consumed Folly chain, Vortex scan orchestration and
+   collection run on the shared Tokio runtime, and formats without native async
+   support use the synchronous ready-future fallback.
 
 ### Architecture
 
@@ -139,41 +142,42 @@ ReaderImpl::take_async()
       v
   for each task
       |
-  synchronous reader create/open
-  cached metadata may be reused
+  format-specific reader acquisition
+      +-- metadata cache hit: synchronous create_from_metadata()
+      +-- Parquet cold/no-cache: deferred blocking open on consumed Folly chain
+      +-- Vortex cold/no-cache: deferred loader wrapping a native Tokio open
+      `-- Lance/Iceberg: synchronous fallback
       |
-      +--------------------+--------------------+
-      |                    |                    |
-      v                    v                    v
-  Parquet native        Vortex native    default sync fallback
-  Arrow generator       TOKIO_RT         inline synchronous call
-  caller Folly exec     Rust callback    ready future
-      |                    |                    |
-      +--------------------+--------------------+
-                           |
-                           v
-                   folly::collectAll()
-                           |
-                           v
-              group by CG -> reorder by original_positions
-                           |
-                           v
-                    build final table
+  format-specific read
+      +-- Parquet: Arrow generator on caller Folly executor
+      +-- Vortex: Tokio scan/collection; filesystem-owned physical I/O
+      `-- Lance/Iceberg: inline synchronous fallback
+      |
+  folly::collectAll()
+      |
+  group by CG -> reorder by original_positions
+      |
+  build final table
 ```
 
-There is deliberately no storage-level executor box in this diagram.
-`parallelism` is the task-splitting target, not a thread-pool size. Creating all
-task futures also does not mean that every backend submitted work to Folly; the
-backend-specific execution model determines where the task runs.
+There is deliberately no storage-level executor box in this diagram. On the
+task-based async path, `parallelism` is the task-splitting target, not a
+thread-pool size. Creating all task futures also does not mean that every backend
+submitted work to Folly; the backend-specific execution model determines where
+the task runs.
 
 ### Why It Works
 
 - **Cross-column-group fan-out:** take tasks from all required column groups are
-  represented in the same future set before `collectAll()`. Native async backends
-  can overlap data reads after each task's synchronous reader creation completes.
-- **No nested storage scheduling:** a planned storage task is executed directly by
-  one column-group reader and one format reader. Lower layers do not create another
-  storage task split.
+  represented in the same future set before `collectAll()`. On metadata-cache
+  hits, a stateful reader is reconstructed synchronously from cached metadata.
+  On cold or cache-disabled paths, Parquet defers blocking open work to the
+  consumed Folly chain, Vortex wraps a native Tokio open, and Lance/Iceberg may
+  still block while task futures are constructed. Native async data reads can
+  overlap after each task reader is ready.
+- **No nested async storage scheduling:** a planned async storage task is executed
+  directly by one column-group reader and one format reader. Lower async layers do
+  not create another storage task split.
 - **File-aware locality:** chunk natural tasks merge only physically contiguous
   ranges in one file. Take natural tasks keep all requested rows for one
   column-group file together before optional splitting.
@@ -181,8 +185,8 @@ backend-specific execution model determines where the task runs.
   fragments work, and the default policy splits only until the requested task
   target is reached when possible.
 - **Executor ownership stays outside storage:** callers can select the Folly
-  executor used by Parquet, while Vortex continues to use its native Tokio
-  runtime.
+  executor used by Parquet generator work. Vortex scan orchestration and
+  collection use Tokio, while its physical reads use the filesystem backend.
 - **Stable result semantics:** chunk indices and take rows are reconstructed in the
   caller-requested order after asynchronous fan-in.
 
@@ -205,22 +209,25 @@ These defaults execute the synchronous call immediately and return a ready
 `SemiFuture`. They preserve compatibility for other implementations; they do not
 make a synchronous implementation non-blocking.
 
-`ReaderImpl` and `ChunkReaderImpl` provide concrete overrides. Chunk and take
-reads use the task-based implementation described below; chunk-reader creation
-uses the async-shaped open chain.
+`ReaderImpl` and `ChunkReaderImpl` provide concrete async overrides. Their async
+chunk and take reads use the task-based implementation described below;
+chunk-reader creation uses the async-shaped open chain.
 
-The synchronous APIs remain separate:
+The synchronous APIs remain separate and do not call an async override or wait on
+one with `.get()`:
 
-- `ChunkReaderImpl::get_chunks(..., parallelism <= 1)` uses the synchronous path.
-- `ChunkReaderImpl::get_chunks(..., parallelism > 1)` calls the async task path and
-  waits with `.get()`.
-- `ReaderImpl::take(..., parallelism <= 1)` reads each required column group
-  synchronously.
-- `ReaderImpl::take(..., parallelism > 1)` calls the async task path and waits with
-  `.get()`.
-- For non-empty input with available column groups, `ReaderImpl::take_async()`
-  uses the async task path even when `parallelism == 1`. Empty-input and validation
-  failures can return a ready future before task construction.
+- `ChunkReaderImpl::get_chunks()` always calls its synchronous helper, which then
+  calls `ColumnGroupReader::get_chunks()`. With `parallelism <= 1` it reads
+  directly; with `parallelism > 1` the legacy column-group implementation uses
+  `ThreadPoolHolder` and `split_chunks()`.
+- `ReaderImpl::take()` always calls `take_tables_sync()` and visits the required
+  column groups serially. Within each column group,
+  `ColumnGroupLazyReader::take()` reads directly for `parallelism <= 1` or uses
+  `ThreadPoolHolder` and `split_row_indices()` for `parallelism > 1`.
+- For non-empty input, `ChunkReaderImpl::get_chunks_async()` and
+  `ReaderImpl::take_async()` use the centralized task path even when
+  `parallelism == 1`. Empty-input and validation failures can return a ready
+  future before task construction.
 
 ## Async Call Paths
 
@@ -232,11 +239,23 @@ ReaderImpl::get_chunk_reader_async()
   -> ChunkReaderImpl::open_async()
   -> ColumnGroupReader::create_async()
   -> ColumnGroupReaderImpl::open_async()
-  -> FormatReader::create_async() for each file
+  -> open_reader_for_file_async() for each file
+       -> cache enabled:
+            Parquet/Vortex -> deferred get_or_open_async()
+                              -> hit: cached metadata
+                              -> miss leader: load_metadata_async()
+                              -> synchronous create_from_metadata()
+            Lance/Iceberg  -> synchronous metadata-cache path
+       -> cache disabled:
+            FormatReader::create_async()
 ```
 
-This path is async-shaped, but format-reader creation and open are currently
-synchronous. See "Open and Metadata Loading" below.
+This chain has mixed execution semantics. On cache-disabled or cache-miss paths,
+Parquet defers a blocking open to the inherited Folly context, while Vortex wraps
+a native Tokio open. On a cache hit, neither format runs its metadata loader or
+calls `FormatReader::open_async()`; `create_from_metadata()` reconstructs reader
+state synchronously and may still open backend state. Lance and Iceberg retain
+the synchronous compatibility fallback. See "Open and Metadata Loading" below.
 
 ### Chunk Reads
 
@@ -364,7 +383,8 @@ The property `reader.async.task_split_strategy` selects one of three strategies:
 | `none` | Keep the natural tasks unchanged. |
 | `all` | Keep splitting until every task contains one chunk or one row. |
 
-`parallelism` is normalized to at least 1 before splitting.
+Missing or unrecognized property values select the default `parallelism` policy.
+The async callers normalize `parallelism` to at least 1 before splitting.
 
 Important semantics:
 
@@ -394,12 +414,18 @@ unless more task granularity was explicitly requested.
 
 ## Column-Group Execution Boundary
 
-The column-group interfaces execute tasks but do not plan them:
+The task-based async column-group interfaces execute tasks but do not plan them:
 
 ```cpp
 ColumnGroupReader::get_chunks_async(const ChunkTask& task)
 ColumnGroupLazyReader::take_async(const TakeTask& task)
 ```
+
+This boundary is specific to the async task path. The legacy synchronous
+`ColumnGroupReader::get_chunks()` and `ColumnGroupLazyReader::take()` methods
+still split their own inputs and schedule work through `ThreadPoolHolder` when
+the passed `parallelism` is greater than 1. A preconfigured singleton can then
+determine the actual pool size.
 
 For each task, the implementation opens an independent format reader, validates
 that the task belongs to the expected file, converts any global row positions to
@@ -408,9 +434,31 @@ file-local positions, and calls the corresponding `FormatReader` async method.
 This independent-reader model avoids concurrent mutation of a shared
 `FormatReader`. The async task path does not currently call `clone_reader()`.
 
-When metadata caching is enabled, independent readers can reuse immutable cached
-metadata. When it is disabled, multiple tasks for the same file can repeat reader
-creation and footer loading.
+When metadata caching is enabled, independent readers reuse immutable metadata.
+Parquet and Vortex use deferred `get_or_open_async()` lookup and singleflight: a
+cache hit returns the existing metadata, while only the miss leader runs the
+async loader. Lance and Iceberg use the synchronous cache loader. Every task
+still constructs an independent stateful reader from that metadata.
+
+When caching is disabled, each task uses `FormatReader::create_async()`. Parquet
+and Vortex follow their format-specific deferred open paths, while Lance and
+Iceberg may complete reader creation synchronously.
+
+The public `ChunkReader` API has no predicate argument and constructs its
+column-group reader with an empty predicate, so its async chunk path does not
+encounter filtered row counts. Predicate handling belongs to the full-scan
+`PackedRecordBatchReader` path and has narrower semantics:
+
+- Predicates are ignored when a scan requires more than one column group because
+  cross-group row alignment is not implemented.
+- Predicate support is format-specific. The base implementation is a no-op;
+  Vortex implements predicate parsing and pushdown, while Parquet currently does
+  not.
+- For a single-group predicate scan, `PackedRecordBatchReader` calls
+  `ColumnGroupReader::get_chunk()` one chunk at a time and avoids the batched
+  slicing path. Both lower-level batched methods,
+  `ColumnGroupReader::get_chunks()` and `get_chunks_async(ChunkTask)`, still slice
+  using pre-filter chunk sizes and are not safe with a non-empty predicate.
 
 ## FormatReader Contract
 
@@ -423,24 +471,46 @@ read_with_range_async(...)
 take_async(...)
 ```
 
-The default implementations call the synchronous operation immediately and wrap
-its result with `folly::makeSemiFuture(...)`. The wrapper itself does not select
-`ThreadPoolHolder`, call `folly::via()`, or choose another executor. Any runtime
-used inside the synchronous operation belongs to that backend's sync path.
+The compatibility defaults for `open_async()`, `read_with_range_async()`, and
+`take_async()` execute the synchronous operation immediately and return a ready
+`SemiFuture`. `FormatReader::create_async()` is different: it dispatches to
+`Format::create_reader_async()`. The base `Format` implementation is synchronous,
+while `PlainFormat` defers filesystem resolution, reader construction, and
+`open_async()` until the future is consumed.
 
-Current format behavior is:
+The storage wrappers do not select `ThreadPoolHolder`, call `folly::via()`, or
+choose a storage-owned Folly executor. A backend override may still submit work
+to its own runtime, as Vortex does with Tokio. Execution follows the selected
+format implementation and the consumed Folly chain.
 
-| Format | Open/create | Range/take |
+For cache-disabled reader creation, current `Format::create_reader_async()`
+behavior is:
+
+| Format | Cache-disabled factory/open | Range/take |
 |---|---|---|
-| Parquet | Synchronous ready-future wrapper | Native async Arrow generator path |
-| Vortex | Synchronous ready-future wrapper | Native async Rust/Tokio scan path |
-| Lance | Synchronous ready-future wrapper | Synchronous compatibility default |
-| Iceberg | Synchronous ready-future wrapper | Synchronous compatibility default |
+| Parquet | Deferred `PlainFormat` factory; `open_async()` defers blocking `open()` to the consumed Folly context | Native async Arrow generator path |
+| Vortex | Deferred `PlainFormat` factory; `open_async()` submits the native file open to Tokio | Native async Rust/Tokio scan and collection path |
+| Lance | Synchronous `Format` fallback | Synchronous compatibility default |
+| Iceberg | Synchronous `Format` fallback | Synchronous compatibility default |
+
+When metadata caching is enabled, both hits and misses bypass the format factory
+shown in the table. A miss runs the format's metadata loader: Parquet and Vortex
+use deferred `load_metadata_async()`, while Lance and Iceberg use synchronous
+`load_metadata()`. A hit skips that metadata load. Both outcomes then call
+`create_from_metadata()` synchronously to construct stateful reader state.
+
+Skipping the metadata load and `FormatReader::open_async()` does not mean that no
+backend object is opened. Vortex reuses the cached `VortexFile` directly. Parquet
+opens a file handle and constructs a new Arrow `FileReader`; that work can block,
+and readers configured with a key retriever may need to load their footer again
+because Parquet metadata is not cached in that configuration. Lance and Iceberg
+can also synchronously open their stateful backend readers from cached metadata.
 
 For Lance and Iceberg, calling an async-shaped method can block before it returns
 the `SemiFuture`. Splitting tasks does not make these format calls concurrent,
 because each synchronous fallback completes while the task-future list is being
-constructed.
+constructed. Synchronous work performed by a deferred Parquet cache-hit or cold
+path instead runs when the Folly chain is consumed.
 
 ## Parquet Execution Model
 
@@ -465,8 +535,10 @@ ParquetFormatReader::{read_with_range_async,take_async}
   per-task Arrow fan-out.
 - Arrow `StopToken` is checked before enqueue and before execution.
 - Submission exceptions are converted to Arrow errors.
-- The stored `folly::Executor::KeepAlive<>` prevents the underlying executor from
-  being destroyed while Arrow work is outstanding.
+- The stored `folly::Executor::KeepAlive<>` retains the underlying executor while
+  Arrow work is outstanding when that executor supports Folly keep-alive
+  ref-counting. Executors without that support provide a dummy keep-alive token
+  and do not gain the stronger lifetime guarantee.
 - `bridge_arrow_future()` retains the adapter until the Arrow future completes.
 
 Storage never chooses the Folly executor:
@@ -481,8 +553,8 @@ Therefore, `parallelism=N` alone does not create N Folly worker threads. Under t
 default policy it asks the splitter to reach N task units when possible; the final
 count can still be below N when tasks are indivisible or above N when the natural
 task count already exceeds N. CPU parallelism requires a multi-thread executor
-supplied by the caller. A synchronous wrapper that calls `.get()` directly does
-not provide that executor.
+supplied by the caller. Consuming the async future directly with `.get()` does not
+provide that multi-thread executor.
 
 Parquet enables Arrow pre-buffering. For CRT-backed S3 files, network I/O is driven
 by CRT async requests; the Folly adapter is used for Arrow generator work such as
@@ -511,7 +583,21 @@ not a second runtime.
 
 Vortex scan and materialization do not inherit a caller-supplied Folly executor.
 Attaching `.via()` can control later Folly continuations, but it does not move the
-Rust scan or its callback away from Tokio.
+Rust scan or collection onto that Folly executor. A successful scan callback, and
+failures produced after the Tokio task has been spawned, are invoked from that
+Tokio task. Setup failures detected before `TOKIO_RT.spawn()` may invoke the C
+callback synchronously on the calling thread, so the callback itself does not
+have an unconditional Tokio-thread guarantee.
+
+The range-read builder uses the same 8 MiB maximum coalescing window as the
+synchronous path. The first range read can synchronously create and cache an
+alternate Vortex view because the file was initially opened with the default
+1 MiB window. This opens another filesystem reader handle but reuses the loaded
+footer without issuing footer or data reads while the view is created. Scan
+orchestration and collection then run on Tokio. Physical reads follow the
+filesystem backend: a CRT-capable async reader uses CRT requests and callbacks;
+otherwise Vortex offloads synchronous `ReadAt()` calls to the Tokio blocking
+pool.
 
 The current Vortex async range implementation collects all batches before
 fulfilling the future, then exposes them through an Arrow reader. It is async with
@@ -525,36 +611,62 @@ resources before first Rust runtime use:
 - Arrow CPU pool capacity: `cpu_threads`
 - Arrow I/O pool capacity: `io_threads`
 - Tokio worker threads: `cpu_threads`
-- Tokio blocking threads: `io_threads`
+- Tokio maximum blocking-thread limit: `io_threads`
 
 If the Rust runtime is not explicitly configured, both Tokio limits default to
-`std::thread::available_parallelism()`.
+`std::thread::available_parallelism()`, falling back to 32 if that query fails.
 
 This configuration does not create or select a Folly executor for async reads.
 Parquet's explicit `FollyArrowExecutor` bypasses the global Arrow CPU pool for its
-async generator tasks, and Vortex runs on Tokio.
+async generator tasks. Vortex scan orchestration and collection run on Tokio;
+physical I/O remains owned by the selected filesystem backend.
 
 ## Open and Metadata Loading
 
-Open and metadata loading are not truly asynchronous in the current
-implementation:
+`FormatReader::create_async()` dispatches to `Format::create_reader_async()`; it
+does not call `FormatReader::create()` directly. `PlainFormat` defers filesystem
+resolution, reader construction, and `open_async()` until future consumption.
+This is the cache-disabled path used to create a fresh format reader.
 
-- `FormatReader::open_async()` calls `open()` before returning a ready future.
-- `FormatReader::create_async()` calls `FormatReader::create()` before returning a
-  ready future.
-- `Format::create_reader()` creates and opens the format reader synchronously.
-- `ColumnGroupReaderImpl::open_async()` composes these ready futures, so file opens
-  are not moved to an executor or made concurrent by `collectAll()`.
-- `ColumnGroupLazyReader::take_async()` opens its independent task reader
-  synchronously before calling the backend's async take method.
+With metadata caching enabled, reader acquisition takes a different path:
 
-For Parquet with CRT, the footer fast path may use `ReadAtAsyncInto()`, but it waits
-on `.result()` during open. The network operation uses CRT, while the public open
-call remains blocking.
+- Parquet and Vortex call deferred `get_or_open_async()`. Lookup occurs when the
+  returned Folly chain is consumed. A hit returns cached immutable metadata; a
+  miss leader runs `load_metadata_async()`, and same-key followers wait on the
+  shared result without blocking a thread.
+- After either a hit or a successful miss, `create_from_metadata()` runs
+  synchronously to create independent stateful reader state.
+- Lance and Iceberg use their synchronous metadata-cache loaders and synchronous
+  `create_from_metadata()` implementations.
 
-Consequently, `Reader::get_chunk_reader_async()` does not defer footer I/O. In the
-current implementation, format-reader create/open work runs synchronously while
-the method constructs its composed future.
+On a Parquet cache miss or cache-disabled path, `open_async()` is lazy but
+internally calls blocking `open()`. Its one-read footer fast path uses
+`ReadAtAsyncInto()` only when the build enables CRT, the opened file implements
+`NonBlockingReadAtFile`, no encryption key retriever is active, and valid manifest
+`file_size` and `footer_size` values are available. `open()` then waits on
+`.result()`: CRT drives the network request, but the Folly executor or waiting
+thread consuming the deferred operation remains blocked. Other cases use
+synchronous `ReadAt()` or Arrow's normal footer path.
+
+On a Vortex cache miss or cache-disabled path, filesystem lookup and URI parsing
+run in the consumed Folly continuation. `open_async()` then submits the native
+file open to the shared Tokio runtime, and immutable metadata is snapshotted after
+that open succeeds. On a cache hit, `create_from_metadata()` reuses the cached
+`VortexFile` and does not submit another Tokio open.
+
+Parquet cache hits also bypass `open_async()`, but synchronous
+`create_from_metadata()` constructs a new Arrow `FileReader`. When no key
+retriever is configured, cached Parquet footer metadata is reused. When a key
+retriever is configured, footer metadata is intentionally not cached, so reader
+construction may perform footer I/O again even if the underlying file is
+plaintext.
+
+Consequently, `Reader::get_chunk_reader_async()` has cache- and format-dependent
+behavior. Cold/no-cache Vortex opens natively on Tokio; cold/no-cache Parquet
+defers a blocking open to the consumed Folly context. Warm cache hits skip
+metadata loading and `FormatReader::open_async()` but still reconstruct reader
+state synchronously, which may include opening a file handle or backend reader.
+Lance and Iceberg may block before the composed future is returned.
 
 ## ThreadPoolHolder and Full Scans
 
@@ -583,7 +695,7 @@ Take planning groups rows by column group and file, and splitting appends new ta
 to the task list. Completion order therefore cannot be used as output order.
 `original_positions` is carried with every task and split. After `collectAll()`,
 each column group's tables are concatenated and reordered with
-`arrow::compute::Take()` before columns are combined into the final table.
+`CopySelectedRows()` before columns are combined into the final table.
 
 ## Error Handling and Lifetime
 
@@ -609,14 +721,24 @@ There is no end-to-end cancellation bridge from the public Folly future:
 
 ## Current Limitations
 
-1. Open/footer loading is synchronous despite async-shaped APIs.
+1. On cache-miss or cache-disabled paths, only Vortex has a native non-blocking
+   metadata/file open. Parquet defers a blocking open, while Lance and Iceberg
+   retain synchronous create/open and metadata loading. Cache hits skip metadata
+   loading and `FormatReader::open_async()` but may still synchronously open a
+   file handle or backend reader while reconstructing stateful reader state.
 2. Lance and Iceberg do not have native async range/take implementations.
-3. `parallelism` is only a task-count target; it does not guarantee CPU
-   concurrency or cap the number of in-flight backend operations.
+3. On the task-based async APIs, `parallelism` is only a task-count target; it
+   does not guarantee CPU concurrency or cap the number of in-flight backend
+   operations. The synchronous APIs retain their separate thread-pool semantics.
 4. `SplitAll` can create large future lists and repeat file or row-group work.
 5. Vortex async range reads collect the complete result before completing.
 6. The public async path has no end-to-end cancellation propagation.
 7. Full scans remain on the synchronous `PackedRecordBatchReader` path.
+8. The public random-read APIs do not expose predicates. Full-scan predicate
+   pushdown is limited to one column group and formats that implement it
+   (currently Vortex). The lower-level batched synchronous and async chunk methods
+   are not safe with a non-empty predicate because they slice using pre-filter
+   chunk sizes.
 
 ## Test Coverage
 
@@ -625,13 +747,21 @@ Relevant tests include:
 - `cpp/test/format/async_tasks_test.cpp`: task builders, validation, nested split
   traits, and async Arrow error macros
 - `cpp/test/format/column_groups_wr_test.cpp`: task-level chunk and take execution
-- `cpp/test/api_writer_reader_test.cpp`: public async API smoke coverage
+- `cpp/test/api_writer_reader_test.cpp`: public async APIs, Parquet caller-executor
+  propagation, and deferred reader creation from cached metadata
 - `cpp/test/format/parquet/folly_arrow_executor_test.cpp`: Folly-to-Arrow executor
   routing, `TransferAlways`, and direct `.get()` behavior
-- `cpp/test/format/format_reader_test.cpp`: Parquet decode submission to a
-  caller-supplied executor
-- `cpp/test/format/vortex/vortex_v2_test.cpp`: Vortex async error propagation
+- `cpp/test/format/format_reader_test.cpp`: Parquet/Vortex async open behavior,
+  deferred `PlainFormat` creation, async metadata loading, Parquet executor
+  routing, and synchronous creation of the Vortex large-window cached view
+- `cpp/test/format/format_reader_cache_test.cpp`: deferred cache loading,
+  same-key singleflight, sync/async interaction, lifetime, and failure retry
+- `cpp/test/format/vortex/vortex_basic_test.cpp`: Tokio scan panic propagated
+  through the async callback
+- `cpp/test/format/vortex/vortex_v2_test.cpp`: async row-index validation before
+  the Vortex FFI handoff
 
 The current tests do not directly cover every split policy's final task count,
-backpressure/concurrency limits, successful Vortex callback thread behavior, or
-end-to-end cancellation.
+backpressure/concurrency limits, successful Vortex scan callback thread behavior,
+the physical request shape produced by the 8 MiB Vortex coalescing window, a real
+CRT event-loop footer read, or end-to-end cancellation.

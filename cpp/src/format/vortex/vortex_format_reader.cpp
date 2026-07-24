@@ -1088,8 +1088,9 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>> Vort
     uint64_t start_offset, uint64_t end_offset) {
   assert(vxfile_);
 
-  // Match the default window so builder creation reuses the open file instead of synchronously reopening it.
-  FOLLY_ARROW_ASSIGN_OR_RAISE(auto scan_builder, vxfile_->CreateScanBuilder(kSmallCoalescingWindow));
+  // Match the synchronous range path's I/O coalescing. The first call may
+  // synchronously create a cached view, but it reuses the already-loaded footer.
+  FOLLY_ARROW_ASSIGN_OR_RAISE(auto scan_builder, vxfile_->CreateScanBuilder(kLargeCoalescingWindow));
   // Push projection, logical output conversion, predicate, and the half-open
   // file-local row range into a single native scan before handing it to Rust.
   if (!proj_cols_.empty()) {

@@ -688,7 +688,7 @@ TEST_P(FormatReaderTest, VortexOpenAsyncUsesTokioRuntime) {
   EXPECT_FALSE(row_group_infos.empty());
 }
 
-TEST_P(FormatReaderTest, VortexReadWithRangeAsyncDoesNotSynchronouslyReopenFile) {
+TEST_P(FormatReaderTest, VortexReadWithRangeAsyncCreatesLargeWindowViewSynchronously) {
   std::string format = GetParam();
   if (format != LOON_FORMAT_VORTEX) {
     GTEST_SKIP() << "Test vortex only.";
@@ -710,12 +710,15 @@ TEST_P(FormatReaderTest, VortexReadWithRangeAsyncDoesNotSynchronouslyReopenFile)
   const auto open_count_before_read =
       stats->open_path_count.load(std::memory_order_relaxed) + stats->open_info_count.load(std::memory_order_relaxed);
 
+  // The large coalescing window uses a separate cached Vortex view. Creating
+  // that view opens one reader handle on the caller thread but reuses the
+  // loaded footer; the range I/O and collection still run on Tokio.
   auto future = reader->read_with_range_async(0, test_batch_->num_rows());
 
   EXPECT_EQ(
       stats->open_path_count.load(std::memory_order_relaxed) + stats->open_info_count.load(std::memory_order_relaxed),
-      open_count_before_read);
-  EXPECT_NE(stats->get_open_thread(), caller_thread);
+      open_count_before_read + 1);
+  EXPECT_EQ(stats->get_open_thread(), caller_thread);
 
   ASSERT_AND_ASSIGN(auto batch_reader, std::move(future).get());
   ASSERT_AND_ASSIGN(auto batches, batch_reader->ToRecordBatches());
