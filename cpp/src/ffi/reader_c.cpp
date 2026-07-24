@@ -14,6 +14,7 @@
 
 #include "milvus-storage/ffi_c.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -546,6 +547,210 @@ LoonFFIResult loon_take(LoonReaderHandle reader,
   }
 
   RETURN_UNREACHABLE();
+}
+
+namespace {
+
+struct MaskedReaderFFIState {
+  std::shared_ptr<MaskedRecordBatchReader> stream;
+};
+
+struct RowMaskPrivateData {
+  std::shared_ptr<arrow::BooleanArray> keep_mask;
+};
+
+void release_row_mask(LoonRowMask* self) {
+  if (!self || !self->release) {
+    return;
+  }
+  delete reinterpret_cast<RowMaskPrivateData*>(self->private_data);
+  self->data = nullptr;
+  self->num_bits = 0;
+  self->num_bytes = 0;
+  self->bit_offset = 0;
+  self->private_data = nullptr;
+  self->release = nullptr;
+}
+
+MaskedReadOptions ConvertMaskedReadOptions(const LoonMaskedReadOptions* options) {
+  MaskedReadOptions cpp_options;
+  if (options == nullptr) {
+    return cpp_options;
+  }
+  if (options->visible_until_ts > 0) {
+    cpp_options.visible_until_ts = options->visible_until_ts;
+  }
+  if (options->pk_field_id > 0) {
+    cpp_options.pk_field_id = options->pk_field_id;
+  }
+  if (options->row_timestamp_field_id > 0) {
+    cpp_options.row_timestamp_field_id = options->row_timestamp_field_id;
+  }
+  return cpp_options;
+}
+
+}  // namespace
+
+LoonFFIResult loon_masked_reader_new(const LoonManifest* manifest,
+                                     ArrowSchema* schema,
+                                     const char* const* needed_columns,
+                                     size_t num_columns,
+                                     const ::LoonProperties* properties,
+                                     LoonMaskedReaderHandle* out_handle,
+                                     const LoonMaskedReadOptions* options,
+                                     const char* (*key_retriever)(const char* metadata)) {
+  if (!manifest || !schema || !properties || !out_handle) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: manifest, schema, properties, and out_handle must not be null");
+  }
+
+  try {
+    milvus_storage::api::Properties properties_map;
+    auto opt = ConvertFFIProperties(properties_map, properties);
+    if (opt != std::nullopt) {
+      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
+    }
+
+    auto schema_result = arrow::ImportSchema(schema);
+    if (!schema_result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, schema_result.status().ToString());
+    }
+
+    std::shared_ptr<Manifest> cpp_manifest;
+    auto import_st = milvus_storage::manifest_import(manifest, &cpp_manifest);
+    if (!import_st.ok()) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
+    }
+
+    auto reader = Reader::create(cpp_manifest, schema_result.ValueOrDie(),
+                                 convert_needed_columns(needed_columns, num_columns), properties_map);
+    // Install the decryption callback before building the (eagerly created) stream,
+    // so encrypted datasets/delta logs can be read through the masked reader path.
+    if (key_retriever != nullptr) {
+      reader->set_keyretriever([key_retriever](const std::string& metadata) -> std::string {
+        const char* result = key_retriever(metadata.c_str());
+        return result ? std::string(result) : std::string();
+      });
+    }
+    auto stream_result = reader->get_masked_record_batch_reader(ConvertMaskedReadOptions(options));
+    if (!stream_result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, stream_result.status().ToString());
+    }
+
+    auto state = std::make_unique<MaskedReaderFFIState>();
+    state->stream = stream_result.ValueOrDie();
+
+    *out_handle = reinterpret_cast<LoonMaskedReaderHandle>(state.release());
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
+LoonFFIResult loon_masked_reader_next(LoonMaskedReaderHandle handle,
+                                      ArrowArray** out_array,
+                                      ArrowSchema** out_schema,
+                                      LoonRowMask* out_row_mask) {
+  if (!handle || !out_array || !out_schema || !out_row_mask) {
+    RETURN_ERROR(LOON_INVALID_ARGS,
+                 "Invalid arguments: handle, out_array, out_schema, and out_row_mask must not be null");
+  }
+
+  *out_array = nullptr;
+  *out_schema = nullptr;
+  *out_row_mask = LoonRowMask{};
+
+  try {
+    auto* state = reinterpret_cast<MaskedReaderFFIState*>(handle);
+    MaskedRecordBatch masked_batch;
+    auto status = state->stream->ReadNext(&masked_batch);
+    if (!status.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+    }
+
+    if (!masked_batch.batch) {
+      RETURN_SUCCESS();
+    }
+    if (!masked_batch.keep_mask) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, "Masked batch keep_mask must not be null");
+    }
+    if (masked_batch.keep_mask->length() != masked_batch.batch->num_rows()) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, "Masked batch keep_mask length does not match record batch rows");
+    }
+
+    auto* array = static_cast<ArrowArray*>(malloc(sizeof(ArrowArray)));
+    auto* schema = static_cast<ArrowSchema*>(malloc(sizeof(ArrowSchema)));
+    if (!array || !schema) {
+      free(array);
+      free(schema);
+      RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to allocate masked reader ArrowArray/ArrowSchema");
+    }
+    array->release = nullptr;
+    schema->release = nullptr;
+    *out_array = array;
+    *out_schema = schema;
+
+    status = arrow::ExportRecordBatch(*masked_batch.batch, array);
+    if (!status.ok()) {
+      free(*out_array);
+      free(*out_schema);
+      *out_array = nullptr;
+      *out_schema = nullptr;
+      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+    }
+
+    status = arrow::ExportSchema(*masked_batch.batch->schema(), schema);
+    if (!status.ok()) {
+      if (array->release) {
+        array->release(array);
+      }
+      free(*out_array);
+      free(*out_schema);
+      *out_array = nullptr;
+      *out_schema = nullptr;
+      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+    }
+
+    auto* private_data = new RowMaskPrivateData{masked_batch.keep_mask};
+    const auto data = masked_batch.keep_mask->values()->data();
+    out_row_mask->data = data;
+    out_row_mask->num_bits = masked_batch.keep_mask->length();
+    out_row_mask->num_bytes =
+        static_cast<int64_t>((masked_batch.keep_mask->offset() + masked_batch.keep_mask->length() + 7) / 8);
+    out_row_mask->bit_offset = masked_batch.keep_mask->offset();
+    out_row_mask->private_data = private_data;
+    out_row_mask->release = release_row_mask;
+
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    if (*out_array && (*out_array)->release) {
+      (*out_array)->release(*out_array);
+    }
+    if (*out_schema && (*out_schema)->release) {
+      (*out_schema)->release(*out_schema);
+    }
+    free(*out_array);
+    free(*out_schema);
+    *out_array = nullptr;
+    *out_schema = nullptr;
+    loon_row_mask_free(out_row_mask);
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
+void loon_row_mask_free(LoonRowMask* bitset) {
+  if (bitset && bitset->release) {
+    bitset->release(bitset);
+  }
+}
+
+void loon_masked_reader_destroy(LoonMaskedReaderHandle handle) {
+  if (handle) {
+    delete reinterpret_cast<MaskedReaderFFIState*>(handle);
+  }
 }
 
 void loon_reader_destroy(LoonReaderHandle reader) {
