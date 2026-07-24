@@ -204,7 +204,7 @@ jobs:
 
           # Copy all dependency libraries from conan imports output
           if [ -d "cpp/build/Release/libs" ]; then
-            cp -P cpp/build/Release/libs/*.so* java/native/linux-x86_64/ || true
+            cp -a cpp/build/Release/libs/. java/native/linux-x86_64/
           fi
 
           java/patch_native_runpath.sh java/native/linux-x86_64
@@ -244,7 +244,7 @@ jobs:
           path: |
             java/target/scala-*/milvus-storage-*.jar
             java/target/scala-*/milvus-storage-*.pom
-            java/native/linux-x86_64/*.so*
+            java/native/linux-x86_64/
 
   publish-java:
     needs: build-java-linux
@@ -277,7 +277,7 @@ jobs:
       - name: Restore Native Libs
         run: |
           mkdir -p java/native/linux-x86_64
-          cp -P java_dist_temp/native/linux-x86_64/*.so* java/native/linux-x86_64/
+          cp -a java_dist_temp/native/linux-x86_64/. java/native/linux-x86_64/
 
       - name: Set Java Version
         working-directory: ./java

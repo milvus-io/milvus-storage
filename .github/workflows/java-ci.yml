@@ -93,7 +93,7 @@ jobs:
             exit 1
           fi
           cp "$JNI_LIB" "$MAIN_LIB" java/native/linux-x86_64/
-          cp -P cpp/build/Release/libs/*.so* java/native/linux-x86_64/ || true
+          cp -a cpp/build/Release/libs/. java/native/linux-x86_64/
           java/patch_native_runpath.sh java/native/linux-x86_64
           java/verify_native_dependencies.sh \
             java/native/linux-x86_64/libmilvus-storage-jni.so
