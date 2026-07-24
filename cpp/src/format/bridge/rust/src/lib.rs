@@ -328,7 +328,7 @@ pub mod vortex_ffi {
         fn with_row_range(self: &mut VortexScanBuilder, row_range_start: u64, row_range_end: u64);
         fn with_row_ranges(self: &mut VortexScanBuilder, starts: &[u64], ends: &[u64]);
         fn with_include_by_index(self: &mut VortexScanBuilder, include_by_index: &[u64]);
-        fn with_limit(self: &mut VortexScanBuilder, limit: usize);
+        fn with_limit(self: &mut VortexScanBuilder, limit: u64);
         unsafe fn with_output_schema(
             self: &mut VortexScanBuilder,
             output_schema: *mut u8,

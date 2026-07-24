@@ -12,16 +12,15 @@ use async_compat::Compat;
 #[cfg(feature = "s3-crt-async")]
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
-use futures::stream::BoxStream;
-use futures::{FutureExt, StreamExt};
+use futures::FutureExt;
 
+use vortex::array::buffer::BufferHandle;
 #[cfg(feature = "s3-crt-async")]
 use vortex::buffer::Alignment;
 use vortex::buffer::{ByteBuffer, ByteBufferMut};
 use vortex::error::{VortexError, VortexResult, vortex_err};
-use vortex::io::file::{CoalesceWindow, IntoReadSource, IoRequest, ReadSource, ReadSourceRef};
 use vortex::io::runtime::Handle;
-use vortex::io::{IoBuf, VortexWrite};
+use vortex::io::{CoalesceConfig, IoBuf, VortexReadAt, VortexWrite};
 
 //=============================================================================
 // IO Trace Collector
@@ -312,14 +311,11 @@ impl std::fmt::Display for LoonFfiError {
 impl std::error::Error for LoonFfiError {}
 
 fn ffi_err(err_code: i32, context: &str, message: String) -> VortexError {
-    VortexError::Generic(
-        Box::new(LoonFfiError {
-            err_code,
-            context: context.to_string(),
-            message,
-        }),
-        Box::new(std::backtrace::Backtrace::capture()),
-    )
+    vortex_err!(External: LoonFfiError {
+        err_code,
+        context: context.to_string(),
+        message,
+    })
 }
 
 // Helper to check LoonFFIResult and convert to VortexError if needed.
@@ -408,7 +404,6 @@ unsafe extern "C" fn async_read_callback(
 
         if bytes_read != expected_len {
             Err(vortex_err!(
-                Generic:
                 "Async readat returned {} bytes for range {}..{}, expected {}",
                 bytes_read,
                 start,
@@ -473,7 +468,7 @@ async fn read_async_via_ffi(
 
     let read_result = receiver
         .await
-        .map_err(|_| vortex_err!(Generic: "Async readat completion channel closed"))?;
+        .map_err(|_| vortex_err!("Async readat completion channel closed"))?;
     read_result
 }
 
@@ -531,9 +526,8 @@ impl ObjectStoreWriterInner {
     fn new(fs_rawptr: *mut c_void, path: &str) -> Result<Self, VortexError> {
         Ok(Self {
             inner: ThreadSafePtr::new(fs_rawptr),
-            path: CString::new(path).map_err(
-                |e| vortex_err!(Generic: "ObjectStoreWriterCpp path contains nul byte: {}", e),
-            )?,
+            path: CString::new(path)
+                .map_err(|e| vortex_err!("ObjectStoreWriterCpp path contains nul byte: {}", e))?,
             writer: Mutex::new(WriterSlot::Unopened),
         })
     }
@@ -591,9 +585,7 @@ impl ObjectStoreWriterInner {
                 let mut result = unsafe { loon_filesystem_writer_flush(writer.as_ptr()) };
                 check_loon_ffi_result(&mut result, "Failed to flush data to ObjectStoreWriterCpp")
             }
-            WriterSlot::Closed => Err(vortex_err!(
-                Generic: "cannot flush: ObjectStoreWriterCpp is closed"
-            )),
+            WriterSlot::Closed => Err(vortex_err!("cannot flush: ObjectStoreWriterCpp is closed")),
         }
     }
 
@@ -758,7 +750,7 @@ impl VortexWrite for ObjectStoreWriterCpp {
     }
 }
 
-pub(crate) const DEFAULT_COALESCING_WINDOW: CoalesceWindow = CoalesceWindow {
+pub(crate) const DEFAULT_COALESCING_WINDOW: CoalesceConfig = CoalesceConfig {
     distance: 1024 * 1024,     // 1 MB
     max_size: 1 * 1024 * 1024, // 1 MB
 };
@@ -810,7 +802,8 @@ pub struct ObjectStoreReadSourceCpp {
     reader: Arc<ReaderHandle>,
     path: String,
     uri: Arc<str>,
-    coalesce_window: Option<CoalesceWindow>,
+    coalesce_config: Option<CoalesceConfig>,
+    handle: Handle,
 }
 
 impl ObjectStoreReadSourceCpp {
@@ -818,7 +811,8 @@ impl ObjectStoreReadSourceCpp {
         fs_rawptr: *mut std::ffi::c_void,
         path: &str,
         file_size: u64,
-        coalesce_window: CoalesceWindow,
+        coalesce_config: CoalesceConfig,
+        handle: Handle,
     ) -> VortexResult<Self> {
         let mut reader_raw: *mut c_void = std::ptr::null_mut();
         let path_bytes = path.as_bytes();
@@ -857,37 +851,31 @@ impl ObjectStoreReadSourceCpp {
             }),
             path: path.to_string(),
             uri: vortex_read_source_uri(path),
-            coalesce_window: Some(coalesce_window),
+            coalesce_config: Some(coalesce_config),
+            handle,
         })
     }
 }
 
 // Drop is handled by Arc<ReaderHandle> which closes and destroys the reader.
 
-impl IntoReadSource for ObjectStoreReadSourceCpp {
-    fn into_read_source(self, handle: Handle) -> VortexResult<ReadSourceRef> {
-        Ok(Arc::new(ObjectStoreIoSourceCpp { io: self, handle }))
-    }
-}
-
-struct ObjectStoreIoSourceCpp {
-    io: ObjectStoreReadSourceCpp,
-    handle: Handle,
-}
-
-impl ReadSource for ObjectStoreIoSourceCpp {
-    fn uri(&self) -> &Arc<str> {
-        &self.io.uri
+impl VortexReadAt for ObjectStoreReadSourceCpp {
+    fn uri(&self) -> Option<&Arc<str>> {
+        Some(&self.uri)
     }
 
-    fn coalesce_window(&self) -> Option<CoalesceWindow> {
-        self.io.coalesce_window
+    fn coalesce_config(&self) -> Option<CoalesceConfig> {
+        self.coalesce_config
+    }
+
+    fn concurrency(&self) -> usize {
+        CONCURRENCY
     }
 
     fn size(&self) -> BoxFuture<'static, VortexResult<u64>> {
         // move owned values into the async block so the future is 'static
-        let inner = self.io.inner.clone();
-        let path = self.io.path.clone();
+        let inner = self.inner.clone();
+        let path = self.path.clone();
         let handle = self.handle.clone();
         Compat::new(async move {
             // Pass path as bytes to FFI (no allocation across FFI boundaries)
@@ -909,71 +897,55 @@ impl ReadSource for ObjectStoreIoSourceCpp {
 
                 Ok::<u64, std::io::Error>(out_size)
             });
-            let size: u64 = Compat::new(task)
-                .await
-                .map_err(|e| vortex_err!(Generic: "{}", e))?;
+            let size: u64 = Compat::new(task).await.map_err(|e| vortex_err!("{}", e))?;
             Ok(size)
         })
         .boxed()
     }
 
-    fn drive_send(
-        self: Arc<Self>,
-        requests: BoxStream<'static, IoRequest>,
-    ) -> BoxFuture<'static, ()> {
-        let self2 = self.clone();
-        requests
-            .map(move |req| -> BoxFuture<'static, ()> {
-                let reader = self.io.reader.clone();
+    fn read_at(
+        &self,
+        offset: u64,
+        length: usize,
+        alignment: vortex::buffer::Alignment,
+    ) -> BoxFuture<'static, VortexResult<BufferHandle>> {
+        let reader = self.reader.clone();
+        let handle = self.handle.clone();
 
-                let range = req.range();
-                let start = range.start;
-                let len = range.end - start;
+        async move {
+            let len = u64::try_from(length)
+                .map_err(|_| vortex_err!("read length does not fit in u64"))?;
 
-                let alignment = req.alignment();
+            #[cfg(feature = "s3-crt-async")]
+            if reader.supports_async {
+                let buffer = read_async_via_ffi(reader, offset, len, alignment).await?;
+                return Ok(BufferHandle::new_host(buffer));
+            }
 
-                #[cfg(feature = "s3-crt-async")]
-                if reader.supports_async {
-                    let fut =
-                        async move { read_async_via_ffi(reader, start, len, alignment).await };
-                    return async move { req.resolve(Compat::new(fut).await) }.boxed();
-                }
+            // Offload sync FFI to the blocking pool and reuse the pre-opened reader handle.
+            let blocking = handle.spawn_blocking(move || -> VortexResult<ByteBuffer> {
+                let trace_start = record_io_start();
+                let mut buffer = ByteBufferMut::with_capacity_aligned(length, alignment);
+                let out_data = buffer.spare_capacity_mut().as_mut_ptr().cast::<u8>();
 
-                // Offload sync FFI to blocking pool, reuse the pre-opened reader handle.
-                let blocking = self
-                    .handle
-                    .spawn_blocking(move || -> VortexResult<ByteBuffer> {
-                        let trace_start = record_io_start();
-                        let mut buffer =
-                            ByteBufferMut::with_capacity_aligned(len as usize, alignment);
-                        let out_data = buffer.spare_capacity_mut().as_mut_ptr().cast::<u8>();
-
-                        let mut result = unsafe {
-                            loon_filesystem_reader_readat(reader.as_ptr(), start, len, out_data)
-                        };
-
-                        check_loon_ffi_result(
-                            &mut result,
-                            "Failed to readat from ObjectStoreIoSourceCpp",
-                        )?;
-                        record_io_end(trace_start, start, len);
-
-                        unsafe { buffer.set_len(len as usize) };
-
-                        Ok(buffer.freeze())
-                    });
-
-                let fut = async move {
-                    let buffer: ByteBuffer = Compat::new(blocking).await?;
-                    Ok(buffer)
+                let mut result = unsafe {
+                    loon_filesystem_reader_readat(reader.as_ptr(), offset, len, out_data)
                 };
 
-                async move { req.resolve(Compat::new(fut).await) }.boxed()
-            })
-            .map(move |f| self2.handle.spawn(f))
-            .buffer_unordered(CONCURRENCY)
-            .collect::<()>()
-            .boxed()
+                check_loon_ffi_result(
+                    &mut result,
+                    "Failed to readat from ObjectStoreReadSourceCpp",
+                )?;
+                record_io_end(trace_start, offset, len);
+
+                unsafe { buffer.set_len(length) };
+                Ok(buffer.freeze())
+            });
+
+            let buffer: ByteBuffer = Compat::new(blocking).await?;
+            Ok(BufferHandle::new_host(buffer))
+        }
+        .boxed()
     }
 }
 

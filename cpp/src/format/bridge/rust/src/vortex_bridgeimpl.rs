@@ -8,31 +8,31 @@ use std::fmt::{Display, Formatter};
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
-use arrow_array::cast::AsArray;
-use arrow_array::ffi::FFI_ArrowSchema;
-use arrow_array::ffi_stream::FFI_ArrowArrayStream;
-use arrow_array::{
+use arrow_array58::cast::AsArray;
+use arrow_array58::ffi::FFI_ArrowSchema;
+use arrow_array58::ffi_stream::FFI_ArrowArrayStream;
+use arrow_array58::{
     Array, ArrayRef as ArrowArrayRef, FixedSizeBinaryArray, FixedSizeListArray, RecordBatch,
     RecordBatchReader, StructArray, UInt8Array, make_array,
 };
-use arrow_data::ArrayData;
-use arrow_data::ffi::FFI_ArrowArray;
-use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
+use arrow58::array::ArrayData;
+use arrow58::ffi::FFI_ArrowArray;
+use arrow_schema58::{ArrowError, DataType, Field, Schema, SchemaRef};
 
-use vortex::ArrayRef;
-use vortex::arrow::{FromArrowArray, IntoArrowArray};
+use vortex::array::ArrayRef;
+use vortex::array::arrow::{FromArrowArray, IntoArrowArray};
 use vortex::buffer::Buffer;
 use vortex::dtype::arrow::FromArrowType;
 use vortex::dtype::{DType as RustDType, DecimalDType, FieldName, Nullability, PType as RustPType};
 use vortex::error::VortexError;
 use vortex::expr::Expression;
+use vortex::expr::stats::Stat;
 use vortex::file::{OpenOptionsSessionExt, SegmentSpec, Writer};
 use vortex::io::runtime::BlockingRuntime;
 use vortex::layout::layouts::row_idx::row_idx;
+use vortex::layout::scan::scan_builder::ScanBuilder;
 use vortex::layout::{LayoutChildType, LayoutRef};
-use vortex::scan::ScanBuilder;
-use vortex::stats::Precision;
-use vortex::stats::Stat;
+use vortex::scan::selection::Selection;
 
 use vortex::file::VortexWriteOptions;
 use vortex::file::WriteStrategyBuilder;
@@ -159,7 +159,7 @@ pub(crate) fn nullability_from_bool(nullable: bool) -> Nullability {
 
 pub(crate) unsafe fn from_arrow(ffi_schema: *mut u8, non_nullable: bool) -> Result<Box<DType>> {
     let arrow_schema = unsafe { FFI_ArrowSchema::from_raw(ffi_schema as *mut FFI_ArrowSchema) };
-    let arrow_dtype = arrow_schema::DataType::try_from(&arrow_schema)?;
+    let arrow_dtype = arrow_schema58::DataType::try_from(&arrow_schema)?;
     Ok(Box::new(DType {
         inner: RustDType::from_arrow(&Field::new("_", arrow_dtype, !non_nullable)),
     }))
@@ -975,8 +975,8 @@ impl VortexWriter {
         let ffi_schema = unsafe { FFI_ArrowSchema::from_raw(in_schema as *mut FFI_ArrowSchema) };
         let arrow_schema = Schema::try_from(&ffi_schema)?;
 
-        let arrow_array_data = arrow_array::array::StructArray::from(
-            unsafe { arrow_array::ffi::from_ffi(ffi_array, &ffi_schema) }
+        let arrow_array_data = arrow_array58::array::StructArray::from(
+            unsafe { arrow_array58::ffi::from_ffi(ffi_array, &ffi_schema) }
                 .map_err(|e| VortexError::from(e))?,
         );
 
@@ -1013,7 +1013,7 @@ impl VortexWriter {
                     Arc::<[Stat]>::from(stats_options.clone()),
                 )
             } else {
-                WriteStrategyBuilder::new()
+                WriteStrategyBuilder::default()
                     .with_inline_array_node(true)
                     .build()
             };
@@ -1027,8 +1027,9 @@ impl VortexWriter {
         }
         let mut inner_writer = self.inner_writer.take().unwrap();
 
+        let converted_array = ArrayRef::from_arrow(&converted_array, false)?;
         VORTEX_RT
-            .block_on(inner_writer.push(ArrayRef::from_arrow(&converted_array, false)))
+            .block_on(inner_writer.push(converted_array))
             .map_err(|e| Box::new(VortexError::from(e)))?;
 
         self.inner_writer = Some(inner_writer);
@@ -1119,8 +1120,8 @@ impl CoalescingWindowKey {
 
 fn to_vortex_coalesce_window(
     window: &crate::vortex_ffi::CoalescingWindow,
-) -> vortex::io::file::CoalesceWindow {
-    vortex::io::file::CoalesceWindow {
+) -> vortex::io::CoalesceConfig {
+    vortex::io::CoalesceConfig {
         distance: window.distance,
         max_size: window.max_size,
     }
@@ -1147,6 +1148,7 @@ impl VortexFile {
             &self.path,
             self.file_size,
             to_vortex_coalesce_window(window),
+            VORTEX_RT.handle(),
         )
         .map_err(VortexError::from)?;
 
@@ -1155,7 +1157,7 @@ impl VortexFile {
             VORTEX_SESSION
                 .open_options()
                 .with_footer(footer)
-                .open(read_source)
+                .open(Arc::new(read_source))
                 .await
                 .map_err(VortexError::from)
         })?;
@@ -1258,18 +1260,14 @@ impl VortexFile {
 
         match stats_opt {
             None => vec![],
-            Some(arc_slice) => {
-                let mut sizes = Vec::with_capacity(arc_slice.len());
-                arc_slice.iter().for_each(|stats| {
+            Some(file_statistics) => {
+                let stats_sets = file_statistics.stats_sets();
+                let mut sizes = Vec::with_capacity(stats_sets.len());
+                stats_sets.iter().for_each(|stats| {
                     let byte_size = stats
                         .get_as::<u64>(Stat::UncompressedSizeInBytes, &RustPType::U64.into())
-                        .unwrap_or_else(|| Precision::inexact(u64::MAX))
-                        .into_inexact();
-
-                    let byte_size = match byte_size.as_inexact() {
-                        Some(v) => v,
-                        None => u64::MAX,
-                    };
+                        .into_inner()
+                        .unwrap_or(u64::MAX);
 
                     sizes.push(byte_size);
                 });
@@ -1403,6 +1401,7 @@ impl VortexFile {
         crate::vortex_layout_strategy_v2::prune_row_groups(
             self.inner.footer().layout(),
             self.inner.segment_source(),
+            self.inner.session(),
             &expr,
             candidate_row_group_ids,
         )
@@ -1574,6 +1573,7 @@ async fn open_file_impl(
         &path,
         file_size,
         to_vortex_coalesce_window(&default_window),
+        VORTEX_RT.handle(),
     )
     .map_err(VortexError::from)?;
     let mut open_options = VORTEX_SESSION.open_options();
@@ -1588,7 +1588,7 @@ async fn open_file_impl(
             open_options.with_initial_read_size(footer_size as usize + vortex::file::EOF_SIZE);
     }
     let file = open_options
-        .open(read_source)
+        .open(Arc::new(read_source))
         .await
         .map_err(VortexError::from)?;
 
@@ -1776,8 +1776,7 @@ impl VortexScanBuilder {
     pub(crate) fn with_include_by_index(&mut self, include_by_index: &[u64]) {
         self.row_range = None;
         self.row_ranges = None;
-        let selection =
-            vortex::scan::Selection::IncludeByIndex(Buffer::copy_from(include_by_index));
+        let selection = Selection::IncludeByIndex(Buffer::copy_from(include_by_index));
         // Per-index ranges enable sub-segment IO when indices are sparse, but cause
         // the same segment to be decoded once per requested index. Once the number
         // of indices exceeds the file's natural splits, multiple indices share a
@@ -1800,7 +1799,7 @@ impl VortexScanBuilder {
         });
     }
 
-    pub(crate) fn with_limit(&mut self, limit: usize) {
+    pub(crate) fn with_limit(&mut self, limit: u64) {
         take_mut::take(&mut self.inner, |inner| inner.with_limit(limit));
     }
 
@@ -1823,9 +1822,8 @@ impl VortexScanBuilder {
 }
 
 struct VortexRecordBatchReader {
-    iter: Box<dyn Iterator<Item = vortex::error::VortexResult<ArrayRef>> + Send>,
+    iter: Box<dyn Iterator<Item = vortex::error::VortexResult<RecordBatch>> + Send>,
     schema: SchemaRef,
-    data_type: DataType,
 }
 
 impl std::iter::Iterator for VortexRecordBatchReader {
@@ -1833,14 +1831,7 @@ impl std::iter::Iterator for VortexRecordBatchReader {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.iter.next() {
-            Some(result) => Some(
-                result
-                    .and_then(|chunk| {
-                        let arrow = chunk.into_arrow(&self.data_type)?;
-                        Ok(RecordBatch::from(arrow.as_struct().clone()))
-                    })
-                    .map_err(|e| ArrowError::ExternalError(Box::new(e))),
-            ),
+            Some(result) => Some(result.map_err(|e| ArrowError::ExternalError(Box::new(e)))),
             None => None,
         }
     }
@@ -1963,28 +1954,36 @@ pub(crate) unsafe fn scan_builder_into_stream(
     let empty_selection = matches!(row_ranges.as_ref(), Some(ranges) if ranges.is_empty())
         || matches!(row_range.as_ref(), Some(range) if range.start == range.end);
 
-    let iter: Box<dyn Iterator<Item = vortex::error::VortexResult<ArrayRef>> + Send> =
+    // Convert each split to Arrow inside the scan task. Vortex 0.75 keeps filters lazy in the
+    // returned ArrayRef, so converting in RecordBatchReader::next serializes the most expensive
+    // part of large takes onto the caller thread. ScanBuilder::map runs on the spawned split task,
+    // preserving the scan's parallelism while producing the same Arrow batches.
+    let inner = inner.map(move |chunk| {
+        let arrow = chunk.into_arrow(&data_type)?;
+        Ok(RecordBatch::from(arrow.as_struct().clone()))
+    });
+
+    let iter: Box<dyn Iterator<Item = vortex::error::VortexResult<RecordBatch>> + Send> =
         if empty_selection {
             Box::new(std::iter::empty())
         } else if let Some(row_ranges) = row_ranges {
             let scan = inner.prepare()?;
             let mut iters: Vec<
-                Box<dyn Iterator<Item = vortex::error::VortexResult<ArrayRef>> + Send>,
+                Box<dyn Iterator<Item = vortex::error::VortexResult<RecordBatch>> + Send>,
             > = Vec::with_capacity(row_ranges.len());
             for row_range in row_ranges {
                 iters.push(Box::new(
-                    scan.execute_array_iter(Some(row_range), &*VORTEX_RT)?,
+                    VORTEX_RT.block_on_stream(scan.execute_stream(Some(row_range))?),
                 ));
             }
             Box::new(iters.into_iter().flatten())
         } else {
             let scan = inner.prepare()?;
-            Box::new(scan.execute_array_iter(row_range, &*VORTEX_RT)?)
+            Box::new(VORTEX_RT.block_on_stream(scan.execute_stream(row_range)?))
         };
     let reader = VortexRecordBatchReader {
         iter,
         schema: vortex_schema,
-        data_type,
     };
 
     let final_reader: Box<dyn RecordBatchReader + Send> = if plan.is_some() {
