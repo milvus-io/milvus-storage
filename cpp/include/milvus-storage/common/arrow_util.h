@@ -16,10 +16,12 @@
 #include <memory>
 #include <cstdint>
 #include <string>
+#include <utility>
 
 #include <arrow/table.h>
 #include <arrow/result.h>
 #include <arrow/util/key_value_metadata.h>
+#include <folly/futures/Future.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/properties.h>
 #include <arrow/filesystem/filesystem.h>
@@ -27,6 +29,27 @@
 #include "milvus-storage/common/constants.h"
 
 namespace milvus_storage {
+
+namespace detail {
+
+// Converts an Arrow status into a ready error future for any
+// folly::SemiFuture<arrow::Result<T>> return type.
+class FollyArrowErrorFuture {
+  public:
+  // Store the setup failure until the enclosing function's Result<T> is inferred.
+  explicit FollyArrowErrorFuture(arrow::Status status) : status_(std::move(status)) {}
+
+  // Materialize a ready error future without requiring callers to spell T.
+  template <typename T>
+  operator folly::SemiFuture<arrow::Result<T>>() && {
+    return folly::makeSemiFuture(arrow::Result<T>(std::move(status_)));
+  }
+
+  private:
+  arrow::Status status_;
+};
+
+}  // namespace detail
 
 // Extract field_id from Arrow field.
 // Tries PARQUET:field_id metadata first, falls back to parsing field name as integer.
@@ -67,3 +90,26 @@ arrow::Result<std::string> GetEnvVar(const char* name);
 arrow::Result<std::string> GetEnvVar(const std::string& name);
 
 }  // namespace milvus_storage
+
+// Async counterparts of Arrow's early-return helpers. They keep validation and
+// setup failures on the same Result-bearing future path as backend failures.
+#define FOLLY_ARROW_RETURN_NOT_OK(status_expr)                                                \
+  do {                                                                                        \
+    auto _folly_arrow_status = (status_expr);                                                 \
+    if (!_folly_arrow_status.ok()) {                                                          \
+      return ::milvus_storage::detail::FollyArrowErrorFuture(std::move(_folly_arrow_status)); \
+    }                                                                                         \
+  } while (false)
+
+#define FOLLY_ARROW_ASSIGN_OR_RAISE_NAME_IMPL(x, y) x##y
+#define FOLLY_ARROW_ASSIGN_OR_RAISE_NAME(x, y) FOLLY_ARROW_ASSIGN_OR_RAISE_NAME_IMPL(x, y)
+
+#define FOLLY_ARROW_ASSIGN_OR_RAISE_IMPL(result_name, lhs, rexpr)                   \
+  auto&& result_name = (rexpr);                                                     \
+  if (!(result_name).ok()) {                                                        \
+    return ::milvus_storage::detail::FollyArrowErrorFuture((result_name).status()); \
+  }                                                                                 \
+  lhs = std::move(result_name).ValueUnsafe();
+
+#define FOLLY_ARROW_ASSIGN_OR_RAISE(lhs, rexpr) \
+  FOLLY_ARROW_ASSIGN_OR_RAISE_IMPL(FOLLY_ARROW_ASSIGN_OR_RAISE_NAME(_folly_arrow_result, __COUNTER__), lhs, rexpr)

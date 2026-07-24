@@ -15,8 +15,10 @@
 #include <gtest/gtest.h>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <numeric>
 #include <string>
@@ -42,6 +44,7 @@
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_writer.h"
 #include "test_env.h"
+#include "vortex_bridge.h"
 
 namespace milvus_storage {
 
@@ -150,6 +153,26 @@ class FailingRecordBatchReader : public arrow::RecordBatchReader {
   private:
   arrow::Status status_;
 };
+
+struct AsyncScanTestContext {
+  ArrowArrayStream stream{};
+  std::promise<std::string> completion;
+  std::shared_ptr<FileSystemWrapper> fs_holder;
+};
+
+void AsyncScanTestCallback(void* raw_ctx, ArrowArrayStream* out_stream, const char* error_msg) {
+  std::unique_ptr<AsyncScanTestContext> ctx(static_cast<AsyncScanTestContext*>(raw_ctx));
+
+  std::string error;
+  if (error_msg != nullptr) {
+    error = error_msg;
+    vortex::vortex_free_error_string(const_cast<char*>(error_msg));
+  }
+  if (out_stream != nullptr && out_stream->release != nullptr) {
+    out_stream->release(out_stream);
+  }
+  ctx->completion.set_value(std::move(error));
+}
 
 TEST(VortexErrorTest, StreamingReaderTranslatesReadNextBridgeError) {
   auto inner = std::make_shared<FailingRecordBatchReader>(
@@ -1339,6 +1362,37 @@ TEST_P(VortexBasicTest, TestBasicTake) {
   take_verify(vx_reader, all_rows, recordBatchsRows());
   // Note: vortex 0.56+ does not gracefully handle out-of-range indices (panics instead of returning error),
   // so we removed the out-of-range index tests.
+}
+
+TEST_P(VortexBasicTest, AsyncScanPanicCompletesCallbackWithError) {
+  ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile(test_file_name_));
+
+  const auto file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
+  const auto footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
+  auto fs_holder = std::make_shared<FileSystemWrapper>(file_system_);
+  ASSERT_AND_ASSIGN(auto vxfile, VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_,
+                                                  file_size, footer_size));
+  ASSERT_AND_ASSIGN(auto scan_builder, vxfile.CreateScanBuilder(kSmallCoalescingWindow));
+
+  // Bypass VortexFormatReader::take_async validation to exercise the Vortex task panic path.
+  const uint64_t out_of_range_index = vxfile.RowCount();
+  scan_builder.WithSplitRowIndices(false);
+  scan_builder.WithIncludeByIndex(&out_of_range_index, 1);
+
+  auto ctx = std::make_unique<AsyncScanTestContext>();
+  ctx->fs_holder = fs_holder;
+  auto completion = ctx->completion.get_future();
+  auto* raw_ctx = ctx.release();
+  const auto handle = std::move(scan_builder).IntoRawHandle();
+  vortex_scan_collect_async(handle, &raw_ctx->stream, AsyncScanTestCallback, raw_ctx);
+
+  // The FFI has no cancellation API, so raw_ctx must remain callback-owned on timeout.
+  ASSERT_EQ(completion.wait_for(std::chrono::seconds(5)), std::future_status::ready)
+      << "Tokio scan task panic dropped the callback";
+
+  const auto error = completion.get();
+  ASSERT_FALSE(error.empty());
+  EXPECT_NE(error.find("vortex async scan panicked"), std::string::npos) << error;
 }
 
 TEST_P(VortexBasicTest, FooterSizeMatchesActualFile) {

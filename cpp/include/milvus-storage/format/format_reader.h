@@ -25,6 +25,8 @@
 #include <arrow/status.h>
 #include <arrow/result.h>
 #include <arrow/record_batch.h>
+#include <arrow/table.h>
+#include <folly/futures/Future.h>
 
 #include "milvus-storage/properties.h"
 #include "milvus-storage/common/config.h"
@@ -85,6 +87,13 @@ class FormatReader {
   // `open` is typically used to open the file's footer.
   [[nodiscard]] virtual arrow::Status open() = 0;
 
+  // Async-shaped version of open. The default implementation runs open() on
+  // the caller thread and returns a ready future. Native async readers may override.
+  // Therefore the fallback can block before this method returns.
+  // FIXME(jiaqizho): Make concrete reader constructors non-public and require
+  // shared_ptr-returning factories so shared_from_this() is always valid in native async overrides.
+  [[nodiscard]] virtual folly::SemiFuture<arrow::Status> open_async();
+
   // get the row group infos
   [[nodiscard]] virtual arrow::Result<std::vector<RowGroupInfo>> get_row_group_infos() = 0;
 
@@ -106,6 +115,20 @@ class FormatReader {
   // there will be an additional memory copy.
   [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> read_with_range(
       const uint64_t& start_offset, const uint64_t& end_offset) = 0;
+
+  // Async version of read_with_range. Must be called on a cloned reader.
+  // The default implementation runs the sync method on the caller thread and
+  // returns a ready future. Native async readers may override.
+  // Concurrent callers must use independent reader state.
+  [[nodiscard]] virtual folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>>
+  read_with_range_async(uint64_t start_offset, uint64_t end_offset);
+
+  // Async version of take. Must be called on a cloned reader.
+  // The default implementation runs the sync method on the caller thread and
+  // returns a ready future. Native async readers may override.
+  // row_indices keep the same sorted/unique contract as take().
+  [[nodiscard]] virtual folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> take_async(
+      const std::vector<int64_t>& row_indices);
 
   // clone itself for multi-threading
   // if the reader is not thread-safe, then it should be cloned
@@ -147,6 +170,18 @@ class FormatReader {
       const std::vector<std::string>& needed_columns,
       const std::function<std::string(const std::string&)>& key_retriever);
 
+  // Delegate to the format's async factory. Plain formats defer open work until
+  // the future is consumed; formats without a native async path keep the
+  // synchronous fallback. The shared_ptr result is required because native
+  // async readers retain shared ownership while work is in flight.
+  static folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> create_async(
+      const std::shared_ptr<arrow::Schema>& read_schema,
+      const std::string& format,
+      const api::ColumnGroupFile& file,
+      const api::Properties& properties,
+      const std::vector<std::string>& needed_columns,
+      const std::function<std::string(const std::string&)>& key_retriever);
+
 };  // class FormatReader
 
 template <typename ReaderT>
@@ -177,6 +212,17 @@ concept FormatReaderWithMetadata =
       } -> std::same_as<arrow::Result<std::shared_ptr<ReaderT>>>;
       { metadata->row_group_infos } -> std::same_as<const std::vector<RowGroupInfo>&>;
       { metadata->file_schema } -> std::same_as<const std::shared_ptr<arrow::Schema>&>;
+    };
+
+// Identifies formats whose immutable metadata loader itself returns a future;
+// other formats use the synchronous cache fallback.
+template <typename ReaderT>
+concept FormatReaderWithAsyncMetadata =
+    FormatReaderWithMetadata<ReaderT> &&
+    requires(const api::ColumnGroupFile& file, const api::Properties& properties, const KeyRetriever& key_retriever) {
+      {
+        ReaderT::MetaTrait::load_metadata_async(file, properties, key_retriever)
+      } -> std::same_as<folly::SemiFuture<arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>>>;
     };
 
 template <typename ReaderT>

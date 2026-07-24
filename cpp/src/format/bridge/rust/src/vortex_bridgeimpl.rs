@@ -1537,12 +1537,7 @@ fn build_v2_row_group_units(root: &LayoutRef, field_name: &str) -> Result<Vec<u6
     let mut result = vec![2, 0];
     let mut total_units = 0u64;
 
-    collect_v2_row_group_units(
-        &data,
-        field_name,
-        &mut result,
-        &mut total_units,
-    )?;
+    collect_v2_row_group_units(&data, field_name, &mut result, &mut total_units)?;
     if total_units == 0 {
         if find_field_layout(&data, field_name)?.is_some() {
             let mut seg_ids = Vec::new();
@@ -1567,16 +1562,16 @@ fn build_v1_flat_units(root: &LayoutRef, field_name: &str) -> Result<Vec<u64>> {
     Ok(result)
 }
 
-pub(crate) unsafe fn open_file(
-    fswrapper_ptr: *mut u8,
-    path: &str,
+async fn open_file_impl(
+    fswrapper_addr: usize,
+    path: String,
     file_size: u64,
     footer_size: u64,
 ) -> Result<Box<VortexFile>> {
     let default_window = default_ffi_coalescing_window();
     let read_source = ObjectStoreReadSourceCpp::new(
-        fswrapper_ptr as *mut c_void,
-        path,
+        fswrapper_addr as *mut c_void,
+        &path,
         file_size,
         to_vortex_coalesce_window(&default_window),
     )
@@ -1592,21 +1587,110 @@ pub(crate) unsafe fn open_file(
         open_options =
             open_options.with_initial_read_size(footer_size as usize + vortex::file::EOF_SIZE);
     }
-    let file = VORTEX_RT.block_on(async move {
-        open_options
-            .open(read_source)
-            .await
-            .map_err(VortexError::from)
-    })?;
+    let file = open_options
+        .open(read_source)
+        .await
+        .map_err(VortexError::from)?;
 
     Ok(Box::new(VortexFile {
         inner: file,
-        fswrapper: crate::filesystem_c::ThreadSafePtr::new(fswrapper_ptr as *mut c_void),
-        path: path.to_string(),
+        fswrapper: crate::filesystem_c::ThreadSafePtr::new(fswrapper_addr as *mut c_void),
+        path,
         file_size,
         default_window: CoalescingWindowKey::from_ffi(&default_window),
         views_by_window: Mutex::new(HashMap::new()),
     }))
+}
+
+pub(crate) unsafe fn open_file(
+    fswrapper_ptr: *mut u8,
+    path: &str,
+    file_size: u64,
+    footer_size: u64,
+) -> Result<Box<VortexFile>> {
+    VORTEX_RT.block_on(open_file_impl(
+        fswrapper_ptr as usize,
+        path.to_string(),
+        file_size,
+        footer_size,
+    ))
+}
+
+type VortexOpenAsyncCallback =
+    unsafe extern "C" fn(ctx: *mut c_void, handle: usize, error_msg: *const std::ffi::c_char);
+
+fn open_callback_error(
+    callback: VortexOpenAsyncCallback,
+    ctx: *mut c_void,
+    message: impl ToString,
+) {
+    let message = message.to_string();
+    let c_message = std::ffi::CString::new(message)
+        .unwrap_or_else(|_| std::ffi::CString::new("vortex async open error").unwrap());
+    unsafe { callback(ctx, 0, c_message.into_raw()) };
+}
+
+/// Asynchronously open a Vortex file on the shared Tokio runtime and invoke
+/// callback exactly once with either an owned raw VortexFile handle or an error.
+///
+/// # Safety
+/// * fswrapper_ptr must remain valid until callback is invoked.
+/// * path must point to path_len readable bytes for the duration of this call.
+/// * callback and ctx must remain valid until callback is invoked.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vortex_open_file_async(
+    fswrapper_ptr: *mut u8,
+    path: *const u8,
+    path_len: usize,
+    file_size: u64,
+    footer_size: u64,
+    callback: VortexOpenAsyncCallback,
+    ctx: *mut c_void,
+) {
+    if path.is_null() && path_len != 0 {
+        open_callback_error(callback, ctx, "vortex async open received a null path");
+        return;
+    }
+
+    let path = if path_len == 0 {
+        String::new()
+    } else {
+        let path_bytes = unsafe { std::slice::from_raw_parts(path, path_len) };
+        match std::str::from_utf8(path_bytes) {
+            Ok(path) => path.to_string(),
+            Err(error) => {
+                open_callback_error(callback, ctx, format!("invalid UTF-8 path: {error}"));
+                return;
+            }
+        }
+    };
+
+    let fswrapper_addr = fswrapper_ptr as usize;
+    let ctx_addr = ctx as usize;
+    crate::TOKIO_RT.spawn(async move {
+        use futures::FutureExt;
+
+        match std::panic::AssertUnwindSafe(open_file_impl(
+            fswrapper_addr,
+            path,
+            file_size,
+            footer_size,
+        ))
+        .catch_unwind()
+        .await
+        {
+            Ok(Ok(file)) => {
+                let handle = Box::into_raw(file) as usize;
+                unsafe { callback(ctx_addr as *mut c_void, handle, std::ptr::null()) };
+            }
+            Ok(Err(error)) => open_callback_error(callback, ctx_addr as *mut c_void, error),
+            Err(_) => open_callback_error(
+                callback,
+                ctx_addr as *mut c_void,
+                "vortex async open panicked",
+            ),
+        }
+    });
 }
 
 pub(crate) struct VortexScanBuilder {
@@ -1800,6 +1884,48 @@ impl RecordBatchReader for ConvertingRecordBatchReader {
     }
 }
 
+/// Simple RecordBatchReader backed by a Vec<RecordBatch> iterator.
+struct VecBatchReader {
+    schema: SchemaRef,
+    batches: std::vec::IntoIter<RecordBatch>,
+}
+
+impl std::iter::Iterator for VecBatchReader {
+    type Item = std::result::Result<RecordBatch, ArrowError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.batches.next().map(Ok)
+    }
+}
+
+impl RecordBatchReader for VecBatchReader {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+fn array_to_record_batch(
+    array: ArrayRef,
+    data_type: &DataType,
+    original_schema: &Schema,
+    plan: Option<&VortexSchemaConversion>,
+) -> Result<RecordBatch> {
+    let arrow = array.into_arrow(data_type)?;
+    let batch = RecordBatch::from(arrow.as_struct().clone());
+    match plan {
+        Some(plan) => Ok(convert_record_batch_from_vortex(
+            &batch,
+            original_schema,
+            plan,
+        )?),
+        None => Ok(batch),
+    }
+}
+
+pub(crate) fn scan_builder_into_raw_handle(builder: Box<VortexScanBuilder>) -> usize {
+    Box::into_raw(builder) as usize
+}
+
 /// # Safety
 ///
 /// out_stream should be properly aligned according to the Arrow C stream interface and valid for write.
@@ -1877,6 +2003,155 @@ pub(crate) unsafe fn scan_builder_into_stream(
     // Arrow C stream interface
     unsafe { std::ptr::write(out_stream, stream) };
     Ok(())
+}
+
+type VortexAsyncCallback = unsafe extern "C" fn(
+    ctx: *mut c_void,
+    out_stream: *mut FFI_ArrowArrayStream,
+    error_msg: *const std::ffi::c_char,
+);
+
+fn callback_error(callback: VortexAsyncCallback, ctx: *mut c_void, message: impl ToString) {
+    let message = message.to_string();
+    let c_message = std::ffi::CString::new(message)
+        .unwrap_or_else(|_| std::ffi::CString::new("vortex async error").unwrap());
+    unsafe { callback(ctx, std::ptr::null_mut(), c_message.into_raw()) };
+}
+
+/// Free an error string previously allocated by vortex_scan_collect_async.
+///
+/// # Safety
+/// ptr must have been produced by CString::into_raw() inside this crate.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vortex_free_error_string(ptr: *mut std::ffi::c_char) {
+    if !ptr.is_null() {
+        unsafe {
+            drop(std::ffi::CString::from_raw(ptr));
+        }
+    }
+}
+
+/// Asynchronously collect all RecordBatches from a VortexScanBuilder and invoke
+/// callback exactly once when the scan completes.
+///
+/// # Safety
+/// * handle must have been produced by scan_builder_into_raw_handle.
+/// * out_stream must point to writable FFI_ArrowArrayStream storage.
+/// * callback must remain valid until invoked.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vortex_scan_collect_async(
+    handle: usize,
+    out_stream: *mut FFI_ArrowArrayStream,
+    callback: VortexAsyncCallback,
+    ctx: *mut c_void,
+) {
+    let builder = unsafe { Box::from_raw(handle as *mut VortexScanBuilder) };
+    let VortexScanBuilder {
+        mut inner,
+        filter,
+        output_schema,
+        original_schema,
+        conversion_plan,
+        row_range,
+        row_ranges,
+        split_row_indices_override: _,
+        num_natural_splits: _,
+    } = *builder;
+
+    if let Some(filter) = filter {
+        inner = inner.with_filter(filter);
+    }
+
+    let (vortex_schema, original_schema, plan) =
+        match (output_schema, original_schema, conversion_plan) {
+            (Some(vs), Some(os), plan) => (vs, os, plan),
+            (Some(vs), None, _) => (vs.clone(), vs, None),
+            (None, _, _) => match inner.dtype() {
+                Ok(dtype) => match dtype.to_arrow_schema() {
+                    Ok(schema) => {
+                        let schema = Arc::new(schema);
+                        (schema.clone(), schema, None)
+                    }
+                    Err(e) => {
+                        callback_error(callback, ctx, format!("schema error: {e}"));
+                        return;
+                    }
+                },
+                Err(e) => {
+                    callback_error(callback, ctx, format!("dtype error: {e}"));
+                    return;
+                }
+            },
+        };
+
+    let data_type = DataType::Struct(vortex_schema.fields().clone());
+    let empty_selection = matches!(row_ranges.as_ref(), Some(ranges) if ranges.is_empty())
+        || matches!(row_range.as_ref(), Some(range) if range.start == range.end);
+
+    let send_stream = out_stream as usize;
+    let send_ctx = ctx as usize;
+
+    crate::TOKIO_RT.spawn(async move {
+        use futures::{FutureExt, StreamExt};
+
+        let collect_result = std::panic::AssertUnwindSafe(async move {
+            let mut batches: Vec<RecordBatch> = Vec::new();
+            if !empty_selection {
+                if let Some(row_ranges) = row_ranges {
+                    let scan = inner.prepare()?;
+                    for row_range in row_ranges {
+                        let stream = scan.execute_array_stream(Some(row_range))?;
+                        futures::pin_mut!(stream);
+                        while let Some(item) = stream.next().await {
+                            let array = item?;
+                            batches.push(array_to_record_batch(
+                                array,
+                                &data_type,
+                                original_schema.as_ref(),
+                                plan.as_ref(),
+                            )?);
+                        }
+                    }
+                } else {
+                    let scan = inner.prepare()?;
+                    let stream = scan.execute_array_stream(row_range)?;
+                    futures::pin_mut!(stream);
+                    while let Some(item) = stream.next().await {
+                        let array = item?;
+                        batches.push(array_to_record_batch(
+                            array,
+                            &data_type,
+                            original_schema.as_ref(),
+                            plan.as_ref(),
+                        )?);
+                    }
+                }
+            }
+
+            let reader: Box<dyn RecordBatchReader + Send> = Box::new(VecBatchReader {
+                schema: original_schema,
+                batches: batches.into_iter(),
+            });
+            Ok::<FFI_ArrowArrayStream, anyhow::Error>(FFI_ArrowArrayStream::new(reader))
+        })
+        .catch_unwind()
+        .await;
+
+        match collect_result {
+            Ok(Ok(stream)) => {
+                let out_stream = send_stream as *mut FFI_ArrowArrayStream;
+                let ctx = send_ctx as *mut c_void;
+                unsafe { std::ptr::write(out_stream, stream) };
+                unsafe { callback(ctx, out_stream, std::ptr::null()) };
+            }
+            Ok(Err(error)) => callback_error(callback, send_ctx as *mut c_void, error),
+            Err(_) => callback_error(
+                callback,
+                send_ctx as *mut c_void,
+                "vortex async scan panicked",
+            ),
+        }
+    });
 }
 
 pub fn reset_io_trace_ffi() {

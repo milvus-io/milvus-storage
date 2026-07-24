@@ -19,6 +19,7 @@
 
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/properties.h"
+#include "milvus-storage/format/async_tasks.h"
 #include "milvus-storage/format/format_reader_cache.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/thread_pool.h"
@@ -39,6 +40,13 @@ class ColumnGroupLazyReader {
    */
   virtual arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices,
                                                             size_t parallelism = 1) = 0;
+
+  // Async execution of a pre-planned TakeTask (single file).
+  // Asynchronously prepares the target file reader, then submits async I/O.
+  // task.row_indices are column-group logical indices and are converted to
+  // file-local offsets before the format reader is invoked.
+  // Formats without a native async implementation may still complete inline.
+  virtual folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> take_async(const TakeTask& task) = 0;
 
   static arrow::Result<std::unique_ptr<ColumnGroupLazyReader>> create(
       const std::shared_ptr<arrow::Schema>& schema,

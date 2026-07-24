@@ -28,6 +28,8 @@
 
 #include <arrow/result.h>
 #include <arrow/status.h>
+#include <folly/futures/Future.h>
+#include <folly/futures/SharedPromise.h>
 
 #include "milvus-storage/format/format_reader.h"
 
@@ -53,7 +55,7 @@ class VortexFormatReader;
 // Cached metadata is immutable and can be reused to create independent
 // stateful readers with different projections or predicates.
 template <typename ReaderT>
-class FormatReaderMetadataCache final {
+class FormatReaderMetadataCache final : public std::enable_shared_from_this<FormatReaderMetadataCache<ReaderT>> {
   static_assert(FormatReaderWithMetadata<ReaderT>,
                 "ReaderT must derive from FormatReader and define MetaTrait with Payload, Metadata, MetadataPtr, "
                 "cache_key, load_metadata, and create_from_metadata.");
@@ -62,7 +64,14 @@ class FormatReaderMetadataCache final {
   using ReaderType = ReaderT;
   using Trait = typename FormatReader::template MetaTrait<ReaderT>;
   using MetadataPtr = typename Trait::MetadataPtr;
+  using MetadataResult = arrow::Result<MetadataPtr>;
   using MetadataLoader = std::function<arrow::Result<MetadataPtr>()>;
+  using AsyncMetadataLoader = std::function<folly::SemiFuture<MetadataResult>()>;
+
+  // Construct with shared ownership required by get_or_open_async().
+  [[nodiscard]] static std::shared_ptr<FormatReaderMetadataCache> Make() {
+    return std::shared_ptr<FormatReaderMetadataCache>(new FormatReaderMetadataCache());
+  }
 
   std::optional<MetadataPtr> get(const std::string& key) const;
 
@@ -70,20 +79,46 @@ class FormatReaderMetadataCache final {
 
   arrow::Result<MetadataPtr> get_or_open(const std::string& key, const MetadataLoader& load_fn);
 
+  // Coalesce same-key metadata loads and share the leader result with async followers.
+  // The returned future retains the cache; failures are published but not cached.
+  folly::SemiFuture<MetadataResult> get_or_open_async(const std::string& key, const AsyncMetadataLoader& load_fn);
+
   private:
+  // Force callers through Make() so shared_from_this() is always valid.
+  FormatReaderMetadataCache() = default;
+
   struct Entry {
     MetadataPtr metadata;
   };
 
-  // Per-key singleflight state. The first cache miss creates this marker and
-  // runs load_fn outside mutex_; waiters for the same key block on cv while
-  // unrelated keys can still load concurrently.
+  // Per-key singleflight state shared by synchronous and asynchronous callers.
+  // Async followers always receive a future. Sync followers block only behind
+  // sync leaders; waiting behind an async leader could starve its executor.
   struct InFlightLoad {
-    std::condition_variable cv;
+    enum LeaderType {
+      kAsync,
+      kSync,
+    };
+
+    // Record whether synchronous followers may safely block on this flight.
+    explicit InFlightLoad(LeaderType leader_type = kAsync) : leader_type(leader_type) {}
+
     bool done = false;
     arrow::Status status = arrow::Status::OK();
+    LeaderType leader_type;
+    std::condition_variable cv;
     MetadataPtr metadata;
+    folly::SharedPromise<MetadataResult> async_result;
   };
+
+  // Publish the leader's load result to the cache and every same-key waiter.
+  // Successful metadata is cached; failures are left uncached so a later call
+  // can retry. A successful leader adopts metadata already cached by an
+  // independent successful load; a failed leader still publishes its own error.
+  // Both paths remove the in-flight load and complete that leader's waiters.
+  MetadataResult complete_load(const std::string& key,
+                               const std::shared_ptr<InFlightLoad>& in_flight_load,
+                               MetadataResult load_result);
 
   mutable std::mutex mutex_;
   std::unordered_map<std::string, Entry> entries_;
@@ -96,7 +131,7 @@ class FormatReaderMetadataCache final {
 template <typename... ReaderTs>
 class FormatReaderMetadataCaches final {
   public:
-  FormatReaderMetadataCaches() : caches_(std::make_shared<FormatReaderMetadataCache<ReaderTs>>()...) {}
+  FormatReaderMetadataCaches() : caches_(FormatReaderMetadataCache<ReaderTs>::Make()...) {}
 
   template <typename ReaderT>
   [[nodiscard]] std::shared_ptr<FormatReaderMetadataCache<ReaderT>> get() const {
@@ -127,7 +162,7 @@ class MetadataCache final {
     std::lock_guard<std::mutex> lock(state_->mutex);
     auto [it, inserted] = state_->caches.try_emplace(std::type_index(typeid(ReaderT)));
     if (inserted || !it->second) {
-      it->second = std::make_shared<FormatReaderMetadataCache<ReaderT>>();
+      it->second = FormatReaderMetadataCache<ReaderT>::Make();
     }
     return std::static_pointer_cast<FormatReaderMetadataCache<ReaderT>>(it->second);
   }

@@ -30,7 +30,7 @@
 
 namespace milvus_storage::parquet {
 
-class ParquetFormatReader final : public FormatReader {
+class ParquetFormatReader final : public FormatReader, public std::enable_shared_from_this<ParquetFormatReader> {
   public:
   struct MetaTrait {
     struct Payload {
@@ -47,12 +47,23 @@ class ParquetFormatReader final : public FormatReader {
     static arrow::Result<MetadataPtr> load_metadata(const api::ColumnGroupFile& file,
                                                     const api::Properties& properties,
                                                     const milvus_storage::KeyRetriever& key_retriever);
+    // Defer footer/schema loading and return immutable metadata suitable for the cache.
+    static folly::SemiFuture<arrow::Result<MetadataPtr>> load_metadata_async(
+        const api::ColumnGroupFile& file,
+        const api::Properties& properties,
+        const milvus_storage::KeyRetriever& key_retriever);
     static arrow::Result<std::shared_ptr<ParquetFormatReader>> create_from_metadata(
         MetadataPtr metadata,
         const api::ColumnGroupFile& file,
         const std::shared_ptr<arrow::Schema>& read_schema,
         const std::vector<std::string>& needed_columns,
         const std::string& predicate);
+
+ private:
+    // Implementation detail, not part of FormatReaderWithMetadata. This helper
+    // lives in the nested MetaTrait only to access the reader's private state.
+    static arrow::Result<MetadataPtr> create_metadata_from_reader(const std::shared_ptr<ParquetFormatReader>& reader,
+                                                                  const api::ColumnGroupFile& file);
   };
 
   ParquetFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
@@ -65,6 +76,8 @@ class ParquetFormatReader final : public FormatReader {
 
   // open the file
   [[nodiscard]] arrow::Status open() override;
+  // Defer open() until future consumption and retain this reader until completion.
+  [[nodiscard]] folly::SemiFuture<arrow::Status> open_async() override;
 
   // get the row group infos
   [[nodiscard]] arrow::Result<std::vector<RowGroupInfo>> get_row_group_infos() override;
@@ -88,6 +101,15 @@ class ParquetFormatReader final : public FormatReader {
 
   [[nodiscard]] arrow::Result<std::shared_ptr<FormatReader>> clone_reader() override;
 
+  // Decode overlapping row groups with Arrow's async generator, then trim to
+  // the exact file-local half-open range. Arrow work inherits the consumer executor.
+  [[nodiscard]] folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>> read_with_range_async(
+      uint64_t start_offset, uint64_t end_offset) override;
+
+  // Decode each touched row group once, then remap the requested file-local rows.
+  [[nodiscard]] folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> take_async(
+      const std::vector<int64_t>& row_indices) override;
+
   [[nodiscard]] std::shared_ptr<arrow::Schema> get_schema() const override;
 
   private:
@@ -97,7 +119,7 @@ class ParquetFormatReader final : public FormatReader {
       const std::shared_ptr<::parquet::FileMetaData>& metadata);
   [[nodiscard]] arrow::Status set_needed_columns(const std::vector<std::string>& needed_columns);
 
-  ParquetFormatReader(const ParquetFormatReader& other, std::unique_ptr<::parquet::arrow::FileReader> file_reader);
+  ParquetFormatReader(const ParquetFormatReader& other, std::shared_ptr<::parquet::arrow::FileReader> file_reader);
 
   std::string path_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;

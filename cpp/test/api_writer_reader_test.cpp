@@ -16,8 +16,11 @@
 
 #include <unistd.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <numeric>
 #include <random>
 #include <utility>
 #include <vector>
@@ -26,6 +29,7 @@
 #include <arrow/filesystem/localfs.h>
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
+#include <folly/executors/CPUThreadPoolExecutor.h>
 
 #include "include/test_env.h"
 #include "milvus-storage/common/arrow_util.h"
@@ -54,6 +58,102 @@ constexpr int32_t kPrebufferFixedBinaryWidth = 2048;
 constexpr int64_t kPrebufferSmallHoleLimit = 1;
 constexpr int64_t kPrebufferLargeHoleLimit = 128LL * 1024;
 constexpr int64_t kPrebufferRangeSizeLimit = 64LL * 1024 * 1024;
+
+class CountingExecutor final : public folly::Executor {
+  public:
+  void add(folly::Func func) override {
+    add_count_.fetch_add(1, std::memory_order_relaxed);
+    executor_.add(std::move(func));
+  }
+
+  int add_count() const { return add_count_.load(std::memory_order_relaxed); }
+
+  private:
+  std::atomic<int> add_count_{0};
+  folly::CPUThreadPoolExecutor executor_{1};
+};
+
+class SyncOnlyChunkReader final : public ChunkReader {
+  public:
+  [[nodiscard]] size_t total_number_of_chunks() const override { return 3; }
+
+  [[nodiscard]] arrow::Result<std::vector<int64_t>> get_chunk_indices(
+      const std::vector<int64_t>& row_indices) override {
+    return row_indices;
+  }
+
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t /*chunk_index*/) override {
+    return nullptr;
+  }
+
+  [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
+      const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) override {
+    last_parallelism = parallelism;
+    last_chunk_indices = chunk_indices;
+    return std::vector<std::shared_ptr<arrow::RecordBatch>>(chunk_indices.size());
+  }
+
+  [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_estimated_size() override {
+    return std::vector<uint64_t>{0, 0, 0};
+  }
+
+  [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_column_estimated_size(
+      const std::string& /*field_name*/) override {
+    return arrow::Status::NotImplemented("Column estimates are not provided by this test reader");
+  }
+
+  [[nodiscard]] arrow::Result<std::vector<std::vector<uint64_t>>> get_chunk_column_estimated_size() override {
+    return arrow::Status::NotImplemented("Column estimates are not provided by this test reader");
+  }
+
+  [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_rows() override {
+    return std::vector<uint64_t>{0, 0, 0};
+  }
+
+  size_t last_parallelism = 0;
+  std::vector<int64_t> last_chunk_indices;
+};
+
+class SyncOnlyReader final : public Reader {
+  public:
+  [[nodiscard]] std::shared_ptr<ColumnGroups> get_column_groups() const override { return nullptr; }
+
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> get_record_batch_reader(
+      const std::string& /*predicate*/) const override {
+    return nullptr;
+  }
+
+  [[nodiscard]] arrow::Result<std::unique_ptr<ChunkReader>> get_chunk_reader(
+      int64_t column_group_index,
+      const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr) const override {
+    last_column_group_index = column_group_index;
+    last_chunk_needed_columns = needed_columns;
+    std::unique_ptr<ChunkReader> reader = std::make_unique<SyncOnlyChunkReader>();
+    return arrow::Result<std::unique_ptr<ChunkReader>>(std::move(reader));
+  }
+
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> take(
+      const std::vector<int64_t>& row_indices,
+      size_t parallelism = 1,
+      const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr) override {
+    last_row_indices = row_indices;
+    last_take_parallelism = parallelism;
+    last_take_needed_columns = needed_columns;
+    return arrow::Table::MakeEmpty(arrow::schema({}));
+  }
+
+  void set_keyretriever(const std::function<std::string(const std::string&)>& /*callback*/) override {}
+
+  mutable int64_t last_column_group_index = -1;
+  mutable std::shared_ptr<std::vector<std::string>> last_chunk_needed_columns;
+  size_t last_take_parallelism = 0;
+  std::vector<int64_t> last_row_indices;
+  std::shared_ptr<std::vector<std::string>> last_take_needed_columns;
+};
+
+#ifdef BUILD_WITH_FIU
+std::once_flag api_writer_reader_fiu_init_flag;
+#endif
 
 std::shared_ptr<arrow::Schema> MakePrebufferFixedBinarySchema() {
   auto embedding = arrow::field("embedding", arrow::fixed_size_binary(kPrebufferFixedBinaryWidth), false,
@@ -86,6 +186,34 @@ api::Properties MakePrebufferReadProperties(const api::Properties& base_properti
 }
 
 }  // namespace
+
+TEST(ChunkReaderDefaultAsyncTest, DefaultAsyncDelegatesToSyncGetChunks) {
+  SyncOnlyChunkReader reader;
+  std::vector<int64_t> chunk_indices = {2, 1};
+
+  ASSERT_AND_ASSIGN(auto chunks, std::move(reader.get_chunks_async(chunk_indices, 7)).get());
+
+  EXPECT_EQ(chunks.size(), chunk_indices.size());
+  EXPECT_EQ(reader.last_chunk_indices, chunk_indices);
+  EXPECT_EQ(reader.last_parallelism, 7);
+}
+
+TEST(ReaderDefaultAsyncTest, DefaultAsyncDelegatesToSyncMethods) {
+  SyncOnlyReader reader;
+  auto needed_columns = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"a"});
+
+  ASSERT_AND_ASSIGN(auto chunk_reader, std::move(reader.get_chunk_reader_async(5, needed_columns)).get());
+  EXPECT_NE(chunk_reader, nullptr);
+  EXPECT_EQ(reader.last_column_group_index, 5);
+  EXPECT_EQ(reader.last_chunk_needed_columns, needed_columns);
+
+  std::vector<int64_t> row_indices = {1, 3};
+  ASSERT_AND_ASSIGN(auto table, std::move(reader.take_async(row_indices, 9, needed_columns)).get());
+  EXPECT_EQ(table->num_columns(), 0);
+  EXPECT_EQ(reader.last_row_indices, row_indices);
+  EXPECT_EQ(reader.last_take_parallelism, 9);
+  EXPECT_EQ(reader.last_take_needed_columns, needed_columns);
+}
 
 // Verifies arr->Value(access_row) matches the CreateTestData pattern for col_name
 // evaluated at source_row. For a full-table read access_row == source_row; for take()
@@ -163,6 +291,7 @@ class APIWriterReaderTest : public ::testing::TestWithParam<std::tuple<std::stri
 
   void TearDown() override {
 #ifdef BUILD_WITH_FIU
+    std::call_once(api_writer_reader_fiu_init_flag, []() { FIU_INIT(); });
     FIU_DISABLE_FAULT(FIUKEY_WRITER_INIT_COLUMN_GROUP_WRITERS_FAIL);
 #endif
 
@@ -1060,6 +1189,42 @@ TEST_P(APIWriterReaderTest, ChunkColumnEstimatedSizeMetadataIgnoresProjection) {
   EXPECT_TRUE(chunk_reader->get_chunk_column_estimated_size("missing").status().IsInvalid());
 }
 
+TEST_P(APIWriterReaderTest, EmptyTakeHonorsProjection) {
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  const std::vector<std::string> default_columns = {"name", "id"};
+  auto default_projection = std::make_shared<std::vector<std::string>>(default_columns);
+  auto reader = Reader::create(cgs, schema_, default_projection, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  auto verify_empty_table = [](const std::shared_ptr<arrow::Table>& table,
+                               const std::vector<std::string>& expected_columns) {
+    ASSERT_NE(table, nullptr);
+    ASSERT_EQ(table->num_rows(), 0);
+    ASSERT_EQ(table->num_columns(), expected_columns.size());
+    for (size_t i = 0; i < expected_columns.size(); ++i) {
+      EXPECT_EQ(table->schema()->field(i)->name(), expected_columns[i]);
+    }
+  };
+
+  const std::vector<int64_t> empty_rows;
+  ASSERT_AND_ASSIGN(auto sync_default, reader->take(empty_rows, parallelism_));
+  verify_empty_table(sync_default, default_columns);
+  ASSERT_AND_ASSIGN(auto async_default, std::move(reader->take_async(empty_rows, parallelism_)).get());
+  verify_empty_table(async_default, default_columns);
+
+  const std::vector<std::string> override_columns = {"value"};
+  auto override_projection = std::make_shared<std::vector<std::string>>(override_columns);
+  ASSERT_AND_ASSIGN(auto sync_override, reader->take(empty_rows, parallelism_, override_projection));
+  verify_empty_table(sync_override, override_columns);
+  ASSERT_AND_ASSIGN(auto async_override,
+                    std::move(reader->take_async(empty_rows, parallelism_, override_projection)).get());
+  verify_empty_table(async_override, override_columns);
+}
+
 TEST_P(APIWriterReaderTest, MetadataCacheWarmupDoesNotFreezePerCallProjection) {
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
@@ -1597,6 +1762,272 @@ TEST_P(APIWriterReaderTest, TakeWithMultiFiles) {
     verify_take_result(verify_batch, batch, row_indices);
   }
 }
+
+TEST_P(APIWriterReaderTest, TakeAsyncMultiCGReorder) {
+  std::string patterns = "id, name|value, vector";
+
+  size_t written_rows = 0;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> batches_written;
+  for (int i = 0; i < 10; ++i) {
+    ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, written_rows, false, i * 50 /* num_of_rows */));
+    batches_written.emplace_back(batch);
+
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
+    auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+    ASSERT_STATUS_OK(writer->write(batch));
+    ASSERT_AND_ASSIGN(auto cgs, writer->close());
+    transaction->AppendFiles(*cgs);
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_GT(committed_version, 0);
+    written_rows += batch->num_rows();
+  }
+  ASSERT_AND_ASSIGN(auto verify_batch, arrow::ConcatenateRecordBatches(batches_written));
+
+  ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+  ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+  auto cgs = manifest->columnGroups();
+
+  auto cgs_ptr = std::make_shared<ColumnGroups>(cgs);
+  auto reader = Reader::create(cgs_ptr, schema_, nullptr, properties_);
+
+  auto do_take = [parallelism = parallelism_](
+                     const auto& reader,
+                     const auto& row_indices) -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
+    ARROW_ASSIGN_OR_RAISE(auto table, std::move(reader->take_async(row_indices, parallelism)).get());
+    ARROW_ASSIGN_OR_RAISE(auto batch, table->CombineChunksToBatch());
+    return batch;
+  };
+
+  auto verify_take_result = [](const auto& test_batch, const auto& take_result_batch, const auto& row_indices) {
+    ASSERT_EQ(take_result_batch->num_rows(), row_indices.size());
+    ASSERT_EQ(take_result_batch->num_columns(), test_batch->num_columns());
+    for (size_t i = 0; i < row_indices.size(); ++i) {
+      auto id_array = std::static_pointer_cast<arrow::Int64Array>(take_result_batch->column(0));
+      auto name_array = std::static_pointer_cast<arrow::StringArray>(take_result_batch->column(1));
+      auto value_array = std::static_pointer_cast<arrow::DoubleArray>(take_result_batch->column(2));
+
+      EXPECT_EQ(id_array->Value(i),
+                std::static_pointer_cast<arrow::Int64Array>(test_batch->column(0))->Value(row_indices[i]));
+      EXPECT_EQ(name_array->GetString(i),
+                std::static_pointer_cast<arrow::StringArray>(test_batch->column(1))->GetString(row_indices[i]));
+      EXPECT_EQ(value_array->Value(i),
+                std::static_pointer_cast<arrow::DoubleArray>(test_batch->column(2))->Value(row_indices[i]));
+    }
+  };
+
+  ASSERT_EQ(written_rows, 2250);
+
+  std::vector<int64_t> all_row_indices(written_rows);
+  std::iota(all_row_indices.begin(), all_row_indices.end(), 0);
+
+  std::vector<int64_t> sparse_cross_file;
+  for (size_t i = 0; i < written_rows; i += 37) {
+    sparse_cross_file.push_back(i);
+  }
+
+  ASSERT_AND_ASSIGN(auto random_indices, GenerateSortedUniqueArray(100, written_rows, true));
+
+  std::vector<std::vector<int64_t>> test_row_indices = {
+      {0}, {static_cast<int64_t>(written_rows) - 1}, sparse_cross_file, all_row_indices, random_indices,
+  };
+
+  for (const auto& row_indices : test_row_indices) {
+    ASSERT_AND_ASSIGN(auto batch, do_take(reader, row_indices));
+    verify_take_result(verify_batch, batch, row_indices);
+  }
+}
+
+TEST_P(APIWriterReaderTest, PublicTakeAsync) {
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  std::vector<int64_t> row_indices = {0, 3, 7, 50};
+
+  ASSERT_AND_ASSIGN(auto table, std::move(reader->take_async(row_indices, parallelism_)).get());
+  ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
+  ASSERT_EQ(batch->num_rows(), row_indices.size());
+  for (size_t i = 0; i < row_indices.size(); ++i) {
+    ExpectStandardTestValue(batch->column(0), "id", i, row_indices[i]);
+    ExpectStandardTestValue(batch->column(1), "name", i, row_indices[i]);
+    ExpectStandardTestValue(batch->column(2), "value", i, row_indices[i]);
+  }
+}
+
+TEST_P(APIWriterReaderTest, PublicGetChunksAsync) {
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+
+  ASSERT_AND_ASSIGN(auto chunks, std::move(chunk_reader->get_chunks_async({0}, parallelism_)).get());
+  ASSERT_EQ(chunks.size(), 1);
+  ASSERT_EQ(chunks[0]->num_rows(), test_batch_->num_rows());
+  ExpectStandardTestValue(chunks[0]->column(0), "id", 0);
+
+  ASSERT_AND_ASSIGN(auto empty_chunks, std::move(chunk_reader->get_chunks_async({}, parallelism_)).get());
+  EXPECT_TRUE(empty_chunks.empty());
+  ASSERT_STATUS_NOT_OK(std::move(chunk_reader->get_chunks_async({-1, 0}, parallelism_)).get());
+  ASSERT_STATUS_NOT_OK(std::move(chunk_reader->get_chunks_async(
+                                     {0, static_cast<int64_t>(chunk_reader->total_number_of_chunks())}, parallelism_))
+                           .get());
+}
+
+TEST_P(APIWriterReaderTest, PublicGetChunkReaderAsync) {
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+
+  ASSERT_AND_ASSIGN(auto chunk_reader, std::move(reader->get_chunk_reader_async(0)).get());
+  ASSERT_AND_ASSIGN(auto chunks, std::move(chunk_reader->get_chunks_async({0}, parallelism_)).get());
+  ASSERT_EQ(chunks.size(), 1);
+  ASSERT_EQ(chunks[0]->num_rows(), test_batch_->num_rows());
+  ExpectStandardTestValue(chunks[0]->column(0), "id", 0);
+}
+
+TEST_P(APIWriterReaderTest, PublicParquetAsyncAPIsPropagateCallerExecutor) {
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Parquet async open and read inherit the caller executor.";
+  }
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+
+  CountingExecutor open_executor;
+  auto open_future = reader->get_chunk_reader_async(0);
+  ASSERT_AND_ASSIGN(auto chunk_reader, std::move(open_future).via(&open_executor).get());
+  ASSERT_NE(chunk_reader, nullptr);
+  EXPECT_GT(open_executor.add_count(), 0);
+
+  CountingExecutor read_executor;
+  auto read_future = chunk_reader->get_chunks_async({0}, parallelism_);
+  ASSERT_AND_ASSIGN(auto chunks, std::move(read_future).via(&read_executor).get());
+  ASSERT_EQ(chunks.size(), 1);
+  ASSERT_EQ(chunks.front()->num_rows(), test_batch_->num_rows());
+  ExpectStandardTestValue(chunks.front()->column(0), "id", 0);
+  EXPECT_GT(read_executor.add_count(), 1);
+
+  const std::vector<int64_t> row_indices = {0, 3, 7};
+  CountingExecutor take_executor;
+  auto take_future = reader->take_async(row_indices, parallelism_);
+  ASSERT_AND_ASSIGN(auto table, std::move(take_future).via(&take_executor).get());
+  ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
+  ASSERT_EQ(batch->num_rows(), row_indices.size());
+  for (size_t i = 0; i < row_indices.size(); ++i) {
+    ExpectStandardTestValue(batch->column(0), "id", i, row_indices[i]);
+  }
+  EXPECT_GT(take_executor.add_count(), 1);
+}
+
+TEST_P(APIWriterReaderTest, PublicGetChunksAsyncDefersParquetReaderReopen) {
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Parquet creates an independent file reader from cached metadata.";
+  }
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  cgs->front()->files.front().properties.erase(api::kPropertyFileSize);
+  cgs->front()->files.front().properties.erase(api::kPropertyFooterSize);
+
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  ASSERT_AND_ASSIGN(auto chunk_reader, std::move(reader->get_chunk_reader_async(0)).get());
+
+  auto future = [&]() {
+    ScopedFiuFault fault(FIUKEY_FS_OPEN_INPUT_FAIL, false);
+    EXPECT_EQ(fault.enable_result(), 0);
+    return chunk_reader->get_chunks_async({0}, parallelism_);
+  }();
+
+  ASSERT_AND_ASSIGN(auto chunks, std::move(future).get());
+  ASSERT_EQ(chunks.size(), 1);
+  EXPECT_EQ(chunks.front()->num_rows(), test_batch_->num_rows());
+}
+
+TEST_P(APIWriterReaderTest, PublicTakeAsyncDefersColdCacheOpen) {
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  cgs->front()->files.front().properties.erase(api::kPropertyFileSize);
+  cgs->front()->files.front().properties.erase(api::kPropertyFooterSize);
+
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto future = [&]() {
+    ScopedFiuFault fault(FIUKEY_FS_OPEN_INPUT_FAIL, false);
+    EXPECT_EQ(fault.enable_result(), 0);
+    return reader->take_async({0, 3, 7}, parallelism_);
+  }();
+
+  ASSERT_AND_ASSIGN(auto table, std::move(future).get());
+  EXPECT_EQ(table->num_rows(), 3);
+}
+
+TEST_P(APIWriterReaderTest, TakeOutOfRangeWithParallelism) {
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+
+  {
+    std::vector<int64_t> row_indices = {0, 10, 99999};
+    ASSERT_STATUS_NOT_OK(reader->take(row_indices, parallelism_));
+  }
+
+  {
+    std::vector<int64_t> row_indices = {-1};
+    ASSERT_STATUS_NOT_OK(reader->take(row_indices, parallelism_));
+  }
+
+  {
+    ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+    std::vector<int64_t> bad_indices = {99999};
+    ASSERT_STATUS_NOT_OK(chunk_reader->get_chunks(bad_indices, parallelism_));
+  }
+}
+
+#ifdef BUILD_WITH_FIU
+TEST_P(APIWriterReaderTest, TakeRowsFailWithParallelism) {
+  std::call_once(api_writer_reader_fiu_init_flag, []() { FIU_INIT(); });
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+
+  std::vector<int64_t> row_indices = {0, 10, 50};
+
+  FIU_ENABLE_FAULT_ONETIME(FIUKEY_TAKE_ROWS_FAIL);
+
+  auto result = reader->take(row_indices, parallelism_);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().ToString().find("Injected fault") != std::string::npos);
+
+  ASSERT_AND_ASSIGN(auto table, reader->take(row_indices, parallelism_));
+  ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
+  EXPECT_EQ(batch->num_rows(), row_indices.size());
+
+  FIU_DISABLE_FAULT(FIUKEY_TAKE_ROWS_FAIL);
+}
+#endif  // BUILD_WITH_FIU
 
 TEST_P(APIWriterReaderTest, GetChucksTest) {
   // Test SizeBasedColumnGroupPolicy

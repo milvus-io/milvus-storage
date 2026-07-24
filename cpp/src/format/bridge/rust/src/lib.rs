@@ -337,6 +337,7 @@ pub mod vortex_ffi {
             builder: Box<VortexScanBuilder>,
             out_stream: *mut u8,
         ) -> Result<()>;
+        fn scan_builder_into_raw_handle(builder: Box<VortexScanBuilder>) -> usize;
 
         // IO trace
         fn reset_io_trace_ffi();

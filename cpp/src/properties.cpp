@@ -599,6 +599,11 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "Options: auto, true, false. auto keeps Vortex's density-based strategy.",
                       "auto",
                       ValidatePropertyType() + ValidatePropertyEnum<std::string>("auto", "true", "false")),
+    REGISTER_PROPERTY(PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY,
+                      PropertyType::STRING,
+                      "Async read task split strategy. Options: parallelism, none, all.",
+                      "parallelism",
+                      ValidatePropertyType() + ValidatePropertyEnum<std::string>("parallelism", "none", "all")),
 
     // --- transaction properties define ---
     REGISTER_PROPERTY(PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES,

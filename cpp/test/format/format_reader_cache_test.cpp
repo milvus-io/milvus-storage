@@ -56,6 +56,10 @@ using TestMetadataCaches = FormatReaderMetadataCaches<parquet::ParquetFormatRead
                                                       lance::LanceTableReader,
                                                       iceberg::IcebergFormatReader>;
 
+using ParquetMetadataCache = FormatReaderMetadataCache<parquet::ParquetFormatReader>;
+static_assert(!std::is_default_constructible_v<ParquetMetadataCache>);
+static_assert(std::same_as<decltype(ParquetMetadataCache::Make()), std::shared_ptr<ParquetMetadataCache>>);
+
 template <typename CacheT>
 typename CacheT::MetadataPtr MakeMetadata(std::string cache_key) {
   using Metadata = typename CacheT::Trait::Metadata;
@@ -318,6 +322,245 @@ arrow::Status RunSingleflightsConcurrentSameKey(const std::shared_ptr<CacheT>& c
     if (results[i].get() != metadata.get()) {
       return arrow::Status::Invalid("metadata cache caller ", i, " got unexpected metadata pointer");
     }
+  }
+  return arrow::Status::OK();
+}
+
+template <typename CacheT>
+arrow::Status RunAsyncDefersLookupAndLoaderUntilConsumed(const std::shared_ptr<CacheT>& cache) {
+  using MetadataPtr = typename CacheT::MetadataPtr;
+  const std::string key = "async-deferred-load";
+  auto loader_metadata = MakeMetadata<CacheT>(key + "-loader");
+  auto cached_metadata = MakeMetadata<CacheT>(key + "-cached");
+  int loader_calls = 0;
+
+  auto future = cache->get_or_open_async(key, [&]() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+    ++loader_calls;
+    return folly::makeSemiFuture(arrow::Result<MetadataPtr>(loader_metadata));
+  });
+
+  if (loader_calls != 0) {
+    return arrow::Status::Invalid("async metadata loader ran before future consumption");
+  }
+  ARROW_RETURN_NOT_OK(cache->add(key, cached_metadata));
+
+  auto result = std::move(future).get();
+  if (!result.ok()) {
+    return result.status();
+  }
+  if (loader_calls != 0) {
+    return arrow::Status::Invalid("async metadata loader ignored cache entry added before future consumption");
+  }
+  if (result.ValueOrDie().get() != cached_metadata.get()) {
+    return arrow::Status::Invalid("async metadata lookup did not observe cache entry added before consumption");
+  }
+  return arrow::Status::OK();
+}
+
+template <typename CacheT>
+arrow::Status RunAsyncFutureKeepsCacheAliveUntilCompletion() {
+  using MetadataPtr = typename CacheT::MetadataPtr;
+  const std::string key = "async-cache-lifetime";
+  auto metadata = MakeMetadata<CacheT>(key);
+  auto cache = CacheT::Make();
+  std::weak_ptr<CacheT> weak_cache = cache;
+
+  {
+    auto future = cache->get_or_open_async(key, [metadata]() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+      return folly::makeSemiFuture(arrow::Result<MetadataPtr>(metadata));
+    });
+    cache.reset();
+
+    if (weak_cache.expired()) {
+      return arrow::Status::Invalid("async metadata future did not keep cache alive before consumption");
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto loaded_metadata, std::move(future).get());
+    if (loaded_metadata.get() != metadata.get()) {
+      return arrow::Status::Invalid("async metadata future returned unexpected metadata");
+    }
+  }
+
+  if (!weak_cache.expired()) {
+    return arrow::Status::Invalid("async metadata future retained cache after completion");
+  }
+  return arrow::Status::OK();
+}
+
+template <typename CacheT>
+arrow::Status RunSyncLeaderSharesInFlightWithAsyncWaiter(const std::shared_ptr<CacheT>& cache) {
+  using MetadataPtr = typename CacheT::MetadataPtr;
+  const std::string key = "sync-leader-async-waiter";
+  auto metadata = MakeMetadata<CacheT>(key);
+
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool loader_entered = false;
+  bool release_loader = false;
+  int sync_loader_calls = 0;
+  int async_loader_calls = 0;
+
+  std::promise<arrow::Result<MetadataPtr>> sync_result_promise;
+  auto sync_result_future = sync_result_promise.get_future();
+  std::thread sync_thread([&, promise = std::move(sync_result_promise)]() mutable {
+    promise.set_value(cache->get_or_open(key, [&]() -> arrow::Result<MetadataPtr> {
+      ++sync_loader_calls;
+      std::unique_lock<std::mutex> lock(mutex);
+      loader_entered = true;
+      cv.notify_all();
+      cv.wait(lock, [&]() { return release_loader; });
+      return metadata;
+    }));
+  });
+
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    if (!cv.wait_for(lock, std::chrono::seconds(5), [&]() { return loader_entered; })) {
+      release_loader = true;
+      cv.notify_all();
+      lock.unlock();
+      sync_thread.join();
+      return arrow::Status::Invalid("timed out waiting for synchronous metadata loader");
+    }
+  }
+
+  auto async_result_future =
+      std::move(cache->get_or_open_async(key, [&]() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+        ++async_loader_calls;
+        return folly::makeSemiFuture(
+            arrow::Result<MetadataPtr>(arrow::Status::Invalid("async waiter must not run loader")));
+      })).toUnsafeFuture();
+  if (async_result_future.isReady()) {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      release_loader = true;
+    }
+    cv.notify_all();
+    sync_thread.join();
+    return arrow::Status::Invalid("async metadata waiter completed before synchronous leader");
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    release_loader = true;
+  }
+  cv.notify_all();
+  sync_thread.join();
+
+  auto sync_result = sync_result_future.get();
+  auto async_result = std::move(async_result_future).get();
+  if (!sync_result.ok()) {
+    return sync_result.status();
+  }
+  if (!async_result.ok()) {
+    return async_result.status();
+  }
+  if (sync_loader_calls != 1 || async_loader_calls != 0) {
+    return arrow::Status::Invalid("sync/async singleflight ran unexpected loaders: sync=", sync_loader_calls,
+                                  ", async=", async_loader_calls);
+  }
+  if (sync_result.ValueOrDie().get() != metadata.get() || async_result.ValueOrDie().get() != metadata.get()) {
+    return arrow::Status::Invalid("sync leader and async waiter received different metadata");
+  }
+  return arrow::Status::OK();
+}
+
+template <typename CacheT>
+arrow::Status RunAsyncLeaderDoesNotBlockSyncFollower(const std::shared_ptr<CacheT>& cache) {
+  using MetadataPtr = typename CacheT::MetadataPtr;
+  const std::string key = "async-leader-sync-waiter";
+  auto async_metadata = MakeMetadata<CacheT>(key + "-async");
+  auto sync_metadata = MakeMetadata<CacheT>(key + "-sync");
+  auto loader_promise = std::make_shared<folly::Promise<arrow::Result<MetadataPtr>>>();
+  int async_loader_calls = 0;
+  int sync_loader_calls = 0;
+
+  auto async_result_future =
+      std::move(cache->get_or_open_async(key, [&]() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+        ++async_loader_calls;
+        return loader_promise->getSemiFuture();
+      })).toUnsafeFuture();
+  if (async_loader_calls != 1 || async_result_future.isReady()) {
+    return arrow::Status::Invalid("async metadata leader did not start as expected");
+  }
+
+  std::promise<arrow::Result<MetadataPtr>> sync_result_promise;
+  auto sync_result_future = sync_result_promise.get_future();
+  std::thread sync_thread([&, promise = std::move(sync_result_promise)]() mutable {
+    promise.set_value(cache->get_or_open(key, [&]() -> arrow::Result<MetadataPtr> {
+      ++sync_loader_calls;
+      return sync_metadata;
+    }));
+  });
+
+  // A synchronous caller must not block behind an async leader: the async
+  // completion may require the same executor thread currently running the sync call.
+  if (sync_result_future.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+    loader_promise->setValue(arrow::Result<MetadataPtr>(async_metadata));
+    sync_thread.join();
+    (void)std::move(async_result_future).get();
+    return arrow::Status::Invalid("sync metadata follower blocked behind async leader");
+  }
+
+  sync_thread.join();
+  auto sync_result = sync_result_future.get();
+  if (!sync_result.ok()) {
+    return sync_result.status();
+  }
+
+  loader_promise->setValue(arrow::Result<MetadataPtr>(async_metadata));
+  auto async_result = std::move(async_result_future).get();
+  if (!async_result.ok()) {
+    return async_result.status();
+  }
+
+  if (async_loader_calls != 1 || sync_loader_calls != 1) {
+    return arrow::Status::Invalid("async leader and sync follower ran unexpected loaders: async=", async_loader_calls,
+                                  ", sync=", sync_loader_calls);
+  }
+  if (sync_result.ValueOrDie().get() != sync_metadata.get() || async_result.ValueOrDie().get() != sync_metadata.get()) {
+    return arrow::Status::Invalid("async leader and sync follower did not converge on cached sync metadata");
+  }
+  return arrow::Status::OK();
+}
+
+template <typename CacheT>
+arrow::Status RunAsyncFailuresDoNotPoisonCacheAndAllowRetry(const std::shared_ptr<CacheT>& cache) {
+  using MetadataPtr = typename CacheT::MetadataPtr;
+  auto metadata = MakeMetadata<CacheT>("async-failure-retry");
+
+  auto failed =
+      std::move(cache->get_or_open_async("async-error", []() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+        return folly::makeSemiFuture(arrow::Result<MetadataPtr>(arrow::Status::Invalid("async metadata load failed")));
+      })).get();
+  if (!failed.status().IsInvalid() || cache->get("async-error").has_value()) {
+    return arrow::Status::Invalid("async loader error poisoned metadata cache");
+  }
+
+  auto null_result =
+      std::move(cache->get_or_open_async("async-null", []() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+        return folly::makeSemiFuture(arrow::Result<MetadataPtr>(MetadataPtr{}));
+      })).get();
+  if (!null_result.status().IsInvalid() || cache->get("async-null").has_value()) {
+    return arrow::Status::Invalid("async null metadata poisoned cache");
+  }
+
+  auto exception_result =
+      std::move(cache->get_or_open_async("async-exception", []() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+        return folly::makeSemiFuture<arrow::Result<MetadataPtr>>(
+            folly::make_exception_wrapper<std::runtime_error>("async metadata loader exploded"));
+      })).get();
+  if (exception_result.ok() || cache->get("async-exception").has_value()) {
+    return arrow::Status::Invalid("async loader exception poisoned metadata cache");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(
+      auto retried,
+      std::move(cache->get_or_open_async("async-exception", [&]() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+        return folly::makeSemiFuture(arrow::Result<MetadataPtr>(metadata));
+      })).get());
+  if (retried.get() != metadata.get()) {
+    return arrow::Status::Invalid("async metadata retry returned unexpected pointer");
   }
   return arrow::Status::OK();
 }
@@ -754,6 +997,41 @@ TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenSingleflightsConcurrentSameK
   ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
     using CacheT = std::decay_t<decltype(*cache)>;
     return RunSingleflightsConcurrentSameKey<CacheT>(cache);
+  }));
+}
+
+TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenAsyncDefersLookupAndLoaderUntilConsumed) {
+  ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
+    using CacheT = std::decay_t<decltype(*cache)>;
+    return RunAsyncDefersLookupAndLoaderUntilConsumed<CacheT>(cache);
+  }));
+}
+
+TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenAsyncKeepsCacheAliveUntilFutureCompletes) {
+  ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
+    using CacheT = std::decay_t<decltype(*cache)>;
+    return RunAsyncFutureKeepsCacheAliveUntilCompletion<CacheT>();
+  }));
+}
+
+TEST_P(FormatReaderMetadataCacheParamTest, SyncLeaderSharesInFlightWithAsyncWaiter) {
+  ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
+    using CacheT = std::decay_t<decltype(*cache)>;
+    return RunSyncLeaderSharesInFlightWithAsyncWaiter<CacheT>(cache);
+  }));
+}
+
+TEST_P(FormatReaderMetadataCacheParamTest, AsyncLeaderDoesNotBlockSyncFollower) {
+  ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
+    using CacheT = std::decay_t<decltype(*cache)>;
+    return RunAsyncLeaderDoesNotBlockSyncFollower<CacheT>(cache);
+  }));
+}
+
+TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenAsyncFailuresDoNotPoisonCacheAndAllowRetry) {
+  ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
+    using CacheT = std::decay_t<decltype(*cache)>;
+    return RunAsyncFailuresDoNotPoisonCacheAndAllowRetry<CacheT>(cache);
   }));
 }
 

@@ -15,13 +15,16 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <mutex>
 #include <numeric>
 #include <random>
+#include <thread>
 
 #include <arrow/api.h>
 #include <arrow/extension_type.h>
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
+#include <folly/executors/CPUThreadPoolExecutor.h>
 #include <parquet/arrow/schema.h>
 #include <parquet/metadata.h>
 #include <parquet/type_fwd.h>
@@ -34,9 +37,13 @@
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/format_reader.h"
+#include "milvus-storage/format/iceberg/iceberg_format_reader.h"
+#include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/lance/lance_table_writer.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/parquet/parquet_writer.h"
+#include "milvus-storage/format/vortex/vortex_format_reader.h"
+#include "milvus-storage/format/vortex/vortex_writer.h"
 #include "test_env.h"
 
 namespace milvus_storage::test {
@@ -44,6 +51,11 @@ namespace milvus_storage::test {
 using namespace milvus_storage::api;
 
 namespace {
+
+static_assert(FormatReaderWithAsyncMetadata<parquet::ParquetFormatReader>);
+static_assert(FormatReaderWithAsyncMetadata<vortex::VortexFormatReader>);
+static_assert(!FormatReaderWithAsyncMetadata<lance::LanceTableReader>);
+static_assert(!FormatReaderWithAsyncMetadata<iceberg::IcebergFormatReader>);
 
 class NestedStructExtensionType : public arrow::ExtensionType {
   public:
@@ -87,6 +99,34 @@ struct FileSystemReadStats {
   std::atomic<int> open_path_count{0};
   std::atomic<int> open_info_count{0};
   std::atomic<int> async_read_into_count{0};
+
+  void record_open_thread() {
+    std::lock_guard<std::mutex> lock(open_thread_mutex);
+    open_thread = std::this_thread::get_id();
+  }
+
+  std::thread::id get_open_thread() const {
+    std::lock_guard<std::mutex> lock(open_thread_mutex);
+    return open_thread;
+  }
+
+  private:
+  mutable std::mutex open_thread_mutex;
+  std::thread::id open_thread;
+};
+
+class CountingExecutor final : public folly::Executor {
+  public:
+  void add(folly::Func func) override {
+    add_count_.fetch_add(1, std::memory_order_relaxed);
+    executor_.add(std::move(func));
+  }
+
+  int add_count() const { return add_count_.load(std::memory_order_relaxed); }
+
+  private:
+  std::atomic<int> add_count_{0};
+  folly::CPUThreadPoolExecutor executor_{1};
 };
 
 class AsyncCountingRandomAccessFile final : public arrow::io::RandomAccessFile,
@@ -146,11 +186,13 @@ class AsyncCountingFileSystem final : public arrow::fs::SubTreeFileSystem {
   arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string& path) override {
     ARROW_ASSIGN_OR_RAISE(auto file, arrow::fs::SubTreeFileSystem::OpenInputFile(path));
     stats_->open_path_count.fetch_add(1, std::memory_order_relaxed);
+    stats_->record_open_thread();
     return std::make_shared<AsyncCountingRandomAccessFile>(std::move(file), stats_);
   }
   arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const arrow::fs::FileInfo& info) override {
     ARROW_ASSIGN_OR_RAISE(auto file, arrow::fs::SubTreeFileSystem::OpenInputFile(info));
     stats_->open_info_count.fetch_add(1, std::memory_order_relaxed);
+    stats_->record_open_thread();
     return std::make_shared<AsyncCountingRandomAccessFile>(std::move(file), stats_);
   }
 
@@ -556,6 +598,218 @@ TEST_P(FormatReaderTest, ParquetFooterFastPathUsesCrtReadAtAsyncInto) {
 
   ASSERT_AND_ASSIGN(auto batch, reader.get_chunk(0));
   ASSERT_EQ(batch->num_rows(), test_batch_->num_rows());
+}
+
+TEST_P(FormatReaderTest, ParquetAsyncReadUsesCallerExecutorForDecode) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  const auto file_path = base_path_ + "/async_executor.parquet";
+  StorageConfig config;
+  ASSERT_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(schema_, fs_, file_path, config));
+  ASSERT_STATUS_OK(writer->Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer->Close());
+
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(schema_, LOON_FORMAT_PARQUET, file, properties_,
+                                                      /*needed_columns=*/{}, nullptr));
+
+  CountingExecutor executor;
+  auto future = reader->read_with_range_async(0, test_batch_->num_rows());
+  ASSERT_AND_ASSIGN(auto batch_reader, std::move(future).via(&executor).get());
+  ASSERT_AND_ASSIGN(auto batches, batch_reader->ToRecordBatches());
+
+  ASSERT_EQ(batches.size(), 1);
+  ASSERT_EQ(batches.front()->num_rows(), test_batch_->num_rows());
+  ASSERT_GT(executor.add_count(), 1);
+}
+
+TEST_P(FormatReaderTest, ParquetOpenAsyncUsesCallerExecutor) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  const auto file_path = base_path_ + "/async_open.parquet";
+  StorageConfig config;
+  ASSERT_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(schema_, fs_, file_path, config));
+  ASSERT_STATUS_OK(writer->Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer->Close());
+
+  auto stats = std::make_shared<FileSystemReadStats>();
+  auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
+  auto reader = std::make_shared<parquet::ParquetFormatReader>(
+      counting_fs, file_path, properties_, /*needed_columns=*/std::vector<std::string>{}, nullptr,
+      file.Get<uint64_t>(api::kPropertyFileSize), file.Get<uint64_t>(api::kPropertyFooterSize));
+
+  CountingExecutor executor;
+  std::weak_ptr<parquet::ParquetFormatReader> weak_reader = reader;
+  auto future = reader->open_async();
+  reader.reset();
+
+  EXPECT_EQ(stats->open_path_count.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(stats->open_info_count.load(std::memory_order_relaxed), 0);
+  ASSERT_FALSE(weak_reader.expired());
+
+  ASSERT_STATUS_OK(std::move(future).via(&executor).get());
+  EXPECT_GT(executor.add_count(), 0);
+  EXPECT_EQ(
+      stats->open_path_count.load(std::memory_order_relaxed) + stats->open_info_count.load(std::memory_order_relaxed),
+      1);
+}
+
+TEST_P(FormatReaderTest, VortexOpenAsyncUsesTokioRuntime) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_VORTEX) {
+    GTEST_SKIP() << "Test vortex only.";
+  }
+
+  const auto file_path = base_path_ + "/async_open.vortex";
+  ASSERT_AND_ASSIGN(auto writer, vortex::VortexFileWriter::Open(fs_, schema_, file_path, properties_));
+  ASSERT_STATUS_OK(writer->Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer->Close());
+
+  auto stats = std::make_shared<FileSystemReadStats>();
+  auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
+  auto reader = std::make_shared<vortex::VortexFormatReader>(
+      counting_fs, schema_, file_path, properties_, /*needed_columns=*/std::vector<std::string>{},
+      file.Get<uint64_t>(api::kPropertyFileSize), file.Get<uint64_t>(api::kPropertyFooterSize));
+
+  CountingExecutor executor;
+  const auto caller_thread = std::this_thread::get_id();
+  ASSERT_STATUS_OK(std::move(reader->open_async()).via(&executor).get());
+
+  EXPECT_NE(stats->get_open_thread(), caller_thread);
+  EXPECT_EQ(executor.add_count(), 0);
+  ASSERT_NE(reader->get_schema(), nullptr);
+  EXPECT_EQ(reader->get_schema()->num_fields(), schema_->num_fields());
+  ASSERT_AND_ASSIGN(auto row_group_infos, reader->get_row_group_infos());
+  EXPECT_FALSE(row_group_infos.empty());
+}
+
+TEST_P(FormatReaderTest, VortexReadWithRangeAsyncCreatesLargeWindowViewSynchronously) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_VORTEX) {
+    GTEST_SKIP() << "Test vortex only.";
+  }
+
+  const auto file_path = base_path_ + "/async_read_range.vortex";
+  ASSERT_AND_ASSIGN(auto writer, vortex::VortexFileWriter::Open(fs_, schema_, file_path, properties_));
+  ASSERT_STATUS_OK(writer->Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer->Close());
+
+  auto stats = std::make_shared<FileSystemReadStats>();
+  auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
+  auto reader = std::make_shared<vortex::VortexFormatReader>(
+      counting_fs, schema_, file_path, properties_, /*needed_columns=*/std::vector<std::string>{},
+      file.Get<uint64_t>(api::kPropertyFileSize), file.Get<uint64_t>(api::kPropertyFooterSize));
+
+  const auto caller_thread = std::this_thread::get_id();
+  ASSERT_STATUS_OK(std::move(reader->open_async()).get());
+  const auto open_count_before_read =
+      stats->open_path_count.load(std::memory_order_relaxed) + stats->open_info_count.load(std::memory_order_relaxed);
+
+  // The large coalescing window uses a separate cached Vortex view. Creating
+  // that view opens one reader handle on the caller thread but reuses the
+  // loaded footer; the range I/O and collection still run on Tokio.
+  auto future = reader->read_with_range_async(0, test_batch_->num_rows());
+
+  EXPECT_EQ(
+      stats->open_path_count.load(std::memory_order_relaxed) + stats->open_info_count.load(std::memory_order_relaxed),
+      open_count_before_read + 1);
+  EXPECT_EQ(stats->get_open_thread(), caller_thread);
+
+  ASSERT_AND_ASSIGN(auto batch_reader, std::move(future).get());
+  ASSERT_AND_ASSIGN(auto batches, batch_reader->ToRecordBatches());
+  int64_t row_count = 0;
+  for (const auto& batch : batches) {
+    row_count += batch->num_rows();
+  }
+  EXPECT_EQ(row_count, test_batch_->num_rows());
+}
+
+TEST_P(FormatReaderTest, VortexOpenAsyncReturnsFailureThroughFuture) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_VORTEX) {
+    GTEST_SKIP() << "Test vortex only.";
+  }
+
+  auto reader = std::make_shared<vortex::VortexFormatReader>(fs_, schema_, base_path_ + "/missing.vortex", properties_,
+                                                             /*needed_columns=*/std::vector<std::string>{});
+
+  auto status = std::move(reader->open_async()).get();
+  EXPECT_FALSE(status.ok());
+  EXPECT_TRUE(status.IsIOError()) << status.ToString();
+}
+
+TEST_P(FormatReaderTest, CreateAsyncDefersPlainFormatOpen) {
+  const auto& format = GetParam();
+  if (format != LOON_FORMAT_PARQUET && format != LOON_FORMAT_VORTEX) {
+    GTEST_SKIP() << "Test plain formats with native async open only.";
+  }
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto column_groups, writer->close());
+  ASSERT_EQ(column_groups->size(), 1);
+  ASSERT_EQ(column_groups->front()->files.size(), 1);
+
+  auto future = FormatReader::create_async(schema_, format, column_groups->front()->files.front(), properties_,
+                                           /*needed_columns=*/{}, nullptr);
+  EXPECT_FALSE(future.isReady());
+
+  CountingExecutor executor;
+  ASSERT_AND_ASSIGN(auto reader, std::move(future).via(&executor).get());
+  ASSERT_NE(reader, nullptr);
+  ASSERT_NE(reader->get_schema(), nullptr);
+  EXPECT_EQ(reader->get_schema()->num_fields(), schema_->num_fields());
+  EXPECT_GT(executor.add_count(), 0);
+}
+
+TEST_P(FormatReaderTest, ParquetLoadMetadataAsyncUsesCallerExecutor) {
+  if (GetParam() != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto column_groups, writer->close());
+  const auto& file = column_groups->front()->files.front();
+
+  auto future = parquet::ParquetFormatReader::MetaTrait::load_metadata_async(file, properties_, nullptr);
+  EXPECT_FALSE(future.isReady());
+
+  CountingExecutor executor;
+  ASSERT_AND_ASSIGN(auto metadata, std::move(future).via(&executor).get());
+  ASSERT_NE(metadata, nullptr);
+  ASSERT_NE(metadata->file_schema, nullptr);
+  EXPECT_FALSE(metadata->row_group_infos.empty());
+  EXPECT_GT(executor.add_count(), 0);
+}
+
+TEST_P(FormatReaderTest, VortexLoadMetadataAsyncUsesTokioOpen) {
+  if (GetParam() != LOON_FORMAT_VORTEX) {
+    GTEST_SKIP() << "Test vortex only.";
+  }
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_VORTEX, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto column_groups, writer->close());
+  const auto& file = column_groups->front()->files.front();
+
+  auto future = vortex::VortexFormatReader::MetaTrait::load_metadata_async(file, properties_, nullptr);
+  EXPECT_FALSE(future.isReady());
+
+  CountingExecutor executor;
+  ASSERT_AND_ASSIGN(auto metadata, std::move(future).via(&executor).get());
+  ASSERT_NE(metadata, nullptr);
+  ASSERT_NE(metadata->file_schema, nullptr);
+  EXPECT_FALSE(metadata->row_group_infos.empty());
+  EXPECT_GT(executor.add_count(), 0);
 }
 
 TEST_P(FormatReaderTest, TestReadWithRange) {

@@ -16,7 +16,9 @@
 
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
+#include <arrow/table.h>
 #include <arrow/type.h>
+#include <folly/futures/Future.h>
 
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/common/row_offset_heap.h"
@@ -86,6 +88,22 @@ class ChunkReader {
    */
   [[nodiscard]] virtual arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
       const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) = 0;
+
+  /**
+   * @brief Retrieves multiple chunks asynchronously by their indices.
+   *
+   * The returned future completes with the same ordered result as get_chunks().
+   * Duplicate chunk indices are preserved in the output.
+   *
+   * @note The default implementation invokes get_chunks() before returning a
+   *       ready future and may therefore block. Native implementations may defer work.
+   * @note In the task-based override, parallelism is a task-granularity target,
+   *       not a guaranteed concurrency limit.
+   */
+  [[nodiscard]] virtual folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>>
+  get_chunks_async(const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) {
+    return folly::makeSemiFuture(get_chunks(chunk_indices, parallelism));
+  }
 
   /**
    * @brief Returns the estimated decoded-memory size of every chunk.
@@ -304,6 +322,20 @@ class Reader {
       int64_t column_group_index, const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr) const = 0;
 
   /**
+   * @brief Asynchronously get a chunk reader for a specific column group.
+   *
+   * The returned future includes the format-reader open/footer work needed to
+   * initialize the chunk reader.
+   *
+   * @note The default implementation invokes get_chunk_reader() before returning
+   *       a ready future and may therefore block.
+   */
+  [[nodiscard]] virtual folly::SemiFuture<arrow::Result<std::unique_ptr<ChunkReader>>> get_chunk_reader_async(
+      int64_t column_group_index, const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr) const {
+    return folly::makeSemiFuture(get_chunk_reader(column_group_index, needed_columns));
+  }
+
+  /**
    * @brief Extracts specific rows by their global indices with parallel processing
    *
    * Efficiently retrieves rows at the specified global indices from across all
@@ -330,6 +362,23 @@ class Reader {
       const std::vector<int64_t>& row_indices,
       size_t parallelism = 1,
       const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr) = 0;
+
+  /**
+   * @brief Asynchronously extracts specific rows by their global indices.
+   *
+   * The returned future completes with the same ordered table as take().
+   *
+   * @note The default implementation invokes take() before returning a ready
+   *       future and may therefore block.
+   * @note In the task-based override, parallelism controls task splitting;
+   *       actual execution depends on the format backend and caller executor.
+   */
+  [[nodiscard]] virtual folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> take_async(
+      const std::vector<int64_t>& row_indices,
+      size_t parallelism = 1,
+      const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr) {
+    return folly::makeSemiFuture(take(row_indices, parallelism, needed_columns));
+  }
 
   /**
    * @brief Set a callback function to retrieve encryption keys based on metadata.

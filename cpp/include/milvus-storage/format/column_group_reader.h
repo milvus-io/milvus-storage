@@ -14,15 +14,40 @@
 
 #pragma once
 
+#include <string>
+#include <unordered_map>
+
 #include <arrow/filesystem/filesystem.h>
 
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/properties.h"
+#include "milvus-storage/format/async_tasks.h"
 #include "milvus-storage/format/format_reader_cache.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/thread_pool.h"
 
 namespace milvus_storage::api {
+
+using ColumnMemorySizes = std::unordered_map<std::string, uint64_t>;
+using ColumnMemorySizesPtr = std::shared_ptr<const ColumnMemorySizes>;
+
+struct ChunkInfo {
+  size_t file_index;               // current chunk belong which file
+  size_t row_offset_in_row_group;  // the starting row offset of this row group in its file
+  size_t row_offset_in_file;       // the starting row offset of file
+  size_t number_of_rows;           // number of rows in this row group
+  size_t row_group_index_in_file;  // the index of this row group in its file
+  size_t global_row_end;           // the ending row offset of this row group in the whole chunk reader
+  uint64_t avg_memory_size;        // average memory usage of this row group
+  // Keyed by the current file's field names so chunks from files with different
+  // physical column orders can share immutable metadata without normalization.
+  ColumnMemorySizesPtr column_memory_sizes;
+  // False means avg_memory_size is only a placeholder and column_memory_sizes is unavailable.
+  bool memory_size_available;
+
+  // Format all logical/file offset fields for diagnostics.
+  [[nodiscard]] std::string ToString() const;
+};
 
 class ColumnGroupReader {
   public:
@@ -43,6 +68,17 @@ class ColumnGroupReader {
   virtual arrow::Result<uint64_t> get_chunk_column_estimated_size(int64_t chunk_index, int col_idx) = 0;
   virtual arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) = 0;
 
+  // Get chunk info by index (for async task planning and splitting).
+  // The returned reference remains valid while the opened reader is unchanged.
+  virtual const ChunkInfo& get_chunk_info(int64_t chunk_index) const = 0;
+
+  // Async execution of a pre-planned ChunkTask.
+  // The task must come from ChunkTask::Build() or be a valid split of one.
+  // range_start/range_end are file-local half-open row offsets.
+  // Each task uses independent mutable FormatReader state.
+  virtual folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>> get_chunks_async(
+      const ChunkTask& task) = 0;
+
   // get the file schema of this column group (always derived from file metadata, not projected)
   virtual std::shared_ptr<arrow::Schema> get_schema() const = 0;
 
@@ -56,6 +92,17 @@ class ColumnGroupReader {
    * @return Unique pointer to the created chunk reader
    */
   [[nodiscard]] static arrow::Result<std::unique_ptr<ColumnGroupReader>> create(
+      const std::shared_ptr<arrow::Schema>& schema,
+      const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
+      const std::vector<std::string>& needed_columns,
+      const milvus_storage::api::Properties& properties,
+      const std::function<std::string(const std::string&)>& key_retriever,
+      const std::string& predicate = "",
+      const milvus_storage::MetadataCache& cache = milvus_storage::MetadataCache());
+
+  // Create and fully initialize a column-group reader through the async format
+  // factory. The returned future carries initialization errors and retains the reader.
+  [[nodiscard]] static folly::SemiFuture<arrow::Result<std::unique_ptr<ColumnGroupReader>>> create_async(
       const std::shared_ptr<arrow::Schema>& schema,
       const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
       const std::vector<std::string>& needed_columns,

@@ -33,11 +33,14 @@
 #include <arrow/table.h>
 #include <arrow/table_builder.h>
 #include <arrow/type.h>
+#include <arrow/util/async_generator.h>
 #include <arrow/util/key_value_metadata.h>
+#include <folly/futures/Promise.h>
 #include <parquet/arrow/schema.h>
 #include <parquet/metadata.h>
 #include <parquet/type_fwd.h>
 
+#include "milvus-storage/format/parquet/folly_arrow_executor.h"
 #include "milvus-storage/format/parquet/key_retriever.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/arrow_util.h"
@@ -289,7 +292,7 @@ static std::shared_ptr<::parquet::FileMetaData> try_parse_footer_metadata(
 #undef PARQUET_FOOTER_TRAILER_SIZE
 }
 
-static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parquet_file_reader(
+static arrow::Result<std::shared_ptr<::parquet::arrow::FileReader>> create_parquet_file_reader(
     const std::shared_ptr<arrow::fs::FileSystem>& fs,
     const std::string& file_path,
     const milvus_storage::api::Properties& properties,
@@ -348,7 +351,7 @@ static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parqu
   ARROW_RETURN_NOT_OK(builder.Open(std::move(parquet_file), reader_props, metadata));
   ARROW_RETURN_NOT_OK(
       builder.memory_pool(arrow::default_memory_pool())->properties(arrow_reader_props)->Build(&result));
-  return std::move(result);
+  return std::shared_ptr<::parquet::arrow::FileReader>(std::move(result));
 }
 
 std::string ParquetFormatReader::MetaTrait::cache_key(const api::ColumnGroupFile& file) {
@@ -363,51 +366,72 @@ std::string ParquetFormatReader::MetaTrait::cache_key(const api::ColumnGroupFile
   return key;
 }
 
+arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::MetaTrait::create_metadata_from_reader(
+    const std::shared_ptr<ParquetFormatReader>& reader, const api::ColumnGroupFile& file) {
+  if (!reader || !reader->file_reader_ || !reader->file_reader_->parquet_reader()) {
+    return arrow::Status::Invalid("Cannot create parquet metadata from an unopened reader");
+  }
+
+  auto parquet_metadata = reader->file_reader_->parquet_reader()->metadata();
+  if (!parquet_metadata) {
+    return arrow::Status::Invalid(fmt::format("Failed to get parquet file metadata. [path={}]", reader->path_));
+  }
+  if (!reader->schema_) {
+    return arrow::Status::Invalid(fmt::format("Failed to get parquet file schema. [path={}]", reader->path_));
+  }
+
+  auto metadata = std::make_shared<Metadata>();
+  metadata->cache_key = cache_key(file);
+  metadata->path = reader->path_;
+  metadata->file_schema = reader->schema_;
+  metadata->row_group_infos = reader->row_group_infos_;
+  metadata->cache_size = parquet_metadata->size();
+  metadata->payload.fs = reader->fs_;
+  if (!reader->key_retriever_) {
+    metadata->payload.parquet_metadata = std::move(parquet_metadata);
+  }
+  metadata->payload.properties = reader->properties_;
+  metadata->payload.key_retriever = reader->key_retriever_;
+
+  MetadataPtr metadata_ptr = std::move(metadata);
+  return metadata_ptr;
+}
+
 arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::MetaTrait::load_metadata(
     const api::ColumnGroupFile& file,
     const api::Properties& properties,
     const milvus_storage::KeyRetriever& key_retriever) {
   ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, file.path));
   ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
+  auto reader = std::make_shared<ParquetFormatReader>(std::move(fs), uri.key, properties, std::vector<std::string>{},
+                                                      key_retriever, file.Get<uint64_t>(api::kPropertyFileSize),
+                                                      file.Get<uint64_t>(api::kPropertyFooterSize));
+  ARROW_RETURN_NOT_OK(reader->open());
+  return create_metadata_from_reader(reader, file);
+}
 
-  const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
-  const auto footer_size = file.Get<uint64_t>(api::kPropertyFooterSize);
-
-  ARROW_ASSIGN_OR_RAISE(auto file_reader, create_parquet_file_reader(fs, uri.key, properties, key_retriever,
-                                                                     nullptr /* metadata */, file_size, footer_size));
-  if (!file_reader->parquet_reader()) {
-    return arrow::Status::Invalid(fmt::format("Failed to open parquet reader metadata. [path={}]", uri.key));
-  }
-
-  auto parquet_metadata = file_reader->parquet_reader()->metadata();
-  if (!parquet_metadata) {
-    return arrow::Status::Invalid(fmt::format("Failed to get parquet file metadata. [path={}]", uri.key));
-  }
-
-  std::shared_ptr<arrow::Schema> file_schema;
-  ARROW_RETURN_NOT_OK(file_reader->GetSchema(&file_schema));
-  if (!file_schema) {
-    return arrow::Status::Invalid(fmt::format("Failed to get parquet file schema. [path={}]", uri.key));
-  }
-
-  ARROW_ASSIGN_OR_RAISE(auto row_group_infos,
-                        create_row_group_infos_from_metadata(parquet_metadata, *file_schema, uri.key));
-
-  auto metadata = std::make_shared<Metadata>();
-  metadata->cache_key = cache_key(file);
-  metadata->path = uri.key;
-  metadata->file_schema = std::move(file_schema);
-  metadata->row_group_infos = std::move(row_group_infos);
-  metadata->cache_size = parquet_metadata->size();
-  metadata->payload.fs = std::move(fs);
-  if (!key_retriever) {
-    metadata->payload.parquet_metadata = std::move(parquet_metadata);
-  }
-  metadata->payload.properties = properties;
-  metadata->payload.key_retriever = key_retriever;
-
-  MetadataPtr metadata_ptr = std::move(metadata);
-  return metadata_ptr;
+folly::SemiFuture<arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr>>
+ParquetFormatReader::MetaTrait::load_metadata_async(const api::ColumnGroupFile& file,
+                                                    const api::Properties& properties,
+                                                    const milvus_storage::KeyRetriever& key_retriever) {
+  // Metadata loading is deferred so same-key cache followers can join the
+  // singleflight before footer work starts.
+  return folly::makeSemiFuture().deferValue(
+      [file, properties,
+       key_retriever](folly::Unit) -> folly::SemiFuture<arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr>> {
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, file.path));
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
+        auto reader = std::make_shared<ParquetFormatReader>(
+            std::move(fs), uri.key, properties, std::vector<std::string>{}, key_retriever,
+            file.Get<uint64_t>(api::kPropertyFileSize), file.Get<uint64_t>(api::kPropertyFooterSize));
+        // Keep the temporary reader alive until its immutable metadata snapshot
+        // has been built from the opened footer.
+        return reader->open_async().deferValue(
+            [reader = std::move(reader), file](arrow::Status status) -> arrow::Result<MetadataPtr> {
+              ARROW_RETURN_NOT_OK(status);
+              return create_metadata_from_reader(reader, file);
+            });
+      });
 }
 
 arrow::Result<std::shared_ptr<ParquetFormatReader>> ParquetFormatReader::MetaTrait::create_from_metadata(
@@ -469,6 +493,12 @@ arrow::Status ParquetFormatReader::open() {
   ARROW_ASSIGN_OR_RAISE(row_group_infos_, create_row_group_infos(file_reader_->parquet_reader()->metadata()));
 
   return set_needed_columns(needed_columns_);
+}
+
+folly::SemiFuture<arrow::Status> ParquetFormatReader::open_async() {
+  // Keep the reader alive until the deferred open() finishes.
+  auto self = shared_from_this();
+  return folly::makeSemiFuture().deferValue([self = std::move(self)](folly::Unit) { return self->open(); });
 }
 
 arrow::Result<std::vector<RowGroupInfo>> ParquetFormatReader::get_row_group_infos() { return row_group_infos_; }
@@ -830,7 +860,7 @@ arrow::Result<std::shared_ptr<FormatReader>> ParquetFormatReader::clone_reader()
 }
 
 ParquetFormatReader::ParquetFormatReader(const ParquetFormatReader& other,
-                                         std::unique_ptr<::parquet::arrow::FileReader> cloned_file_reader)
+                                         std::shared_ptr<::parquet::arrow::FileReader> cloned_file_reader)
     : path_(other.path_),
       fs_(other.fs_),
       schema_(other.schema_),
@@ -842,5 +872,195 @@ ParquetFormatReader::ParquetFormatReader(const ParquetFormatReader& other,
       projected_leaf_column_indices_(other.projected_leaf_column_indices_),
       row_group_infos_(other.row_group_infos_),
       file_reader_(std::move(cloned_file_reader)) {}
+
+namespace {
+
+template <typename T>
+folly::SemiFuture<arrow::Result<T>> bridge_arrow_future(
+    arrow::Future<T> arrow_future, std::shared_ptr<arrow::internal::Executor> executor_keep_alive) {
+  // Retain the executor adapter until Arrow invokes its completion callback,
+  // then bridge the Result into Folly without blocking a thread.
+  auto promise = std::make_shared<folly::Promise<arrow::Result<T>>>();
+  auto semi_future = promise->getSemiFuture();
+  arrow_future.AddCallback(
+      [promise, executor_keep_alive = std::move(executor_keep_alive)](const arrow::Result<T>& result) {
+        (void)executor_keep_alive;
+        promise->setValue(result);
+      });
+  return semi_future;
+}
+
+}  // namespace
+
+folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>> ParquetFormatReader::read_with_range_async(
+    uint64_t start_offset, uint64_t end_offset) {
+  using ResultType = arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>;
+
+  if (row_group_infos_.empty()) {
+    return folly::makeSemiFuture(
+        ResultType(arrow::Status::Invalid(fmt::format("Empty row group infos. [path={}]", path_))));
+  }
+
+  if (start_offset >= end_offset || start_offset < row_group_infos_.front().start_offset ||
+      end_offset > row_group_infos_.back().end_offset) {
+    return folly::makeSemiFuture(ResultType(arrow::Status::Invalid(
+        fmt::format("Invalid range: start_offset={}, end_offset={}. [path={}, valid_range=[{}, {}]]", start_offset,
+                    end_offset, path_, row_group_infos_.front().start_offset, row_group_infos_.back().end_offset))));
+  }
+
+  // The requested offsets are file-local and half-open. Parquet decodes whole
+  // overlapping row groups, so remember the first row-group boundary for trimming.
+  std::vector<int> rg_indices;
+  uint64_t first_rg_start_offset = 0;
+  bool first_rg_found = false;
+  for (size_t i = 0; i < row_group_infos_.size(); ++i) {
+    const auto& rg_info = row_group_infos_[i];
+    if (rg_info.end_offset > start_offset && rg_info.start_offset < end_offset) {
+      rg_indices.push_back(static_cast<int>(i));
+      if (!first_rg_found) {
+        first_rg_start_offset = rg_info.start_offset;
+        first_rg_found = true;
+      }
+    }
+  }
+
+  // These offsets describe the exact requested window inside the concatenated
+  // row-group output produced by the async generator.
+  uint64_t first_rg_slice_offset = start_offset - first_rg_start_offset;
+  uint64_t total_rows = end_offset - start_offset;
+
+  // The generator is configured with Parquet leaf indices, while the returned
+  // Arrow reader must expose the corresponding top-level projected schema.
+  auto projected_schema = schema_;
+  if (!needed_columns_.empty()) {
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    fields.reserve(needed_columns_.size());
+    for (const auto& column_name : needed_columns_) {
+      const int top_level_field_index = schema_->GetFieldIndex(column_name);
+      if (top_level_field_index < 0) {
+        return folly::makeSemiFuture(ResultType(
+            arrow::Status::Invalid(fmt::format("Column '{}' not found in schema. [path={}]", column_name, path_))));
+      }
+      fields.emplace_back(schema_->field(top_level_field_index));
+    }
+    projected_schema = arrow::schema(std::move(fields));
+  }
+
+  // Defer both generator work and executor binding until the future is consumed.
+  // Building this SemiFuture does not create or select a thread pool: Folly keeps
+  // a DeferredExecutor placeholder until via() or get() supplies the executor.
+  return folly::makeSemiFuture().deferExValue(
+      [file_reader = file_reader_, rg_indices = std::move(rg_indices),
+       projected_leaf_column_indices = projected_leaf_column_indices_, first_rg_slice_offset, total_rows,
+       projected_schema = std::move(projected_schema)](folly::Executor::KeepAlive<> executor,
+                                                       folly::Unit) mutable -> folly::SemiFuture<ResultType> {
+        // The callback now receives a concrete KeepAlive token for the consumer's
+        // executor. The Arrow adapter only retains that token and forwards work;
+        // it does not create an executor or worker thread.
+        auto arrow_executor = MakeFollyArrowExecutor(std::move(executor));
+        // file_reader is captured by shared ownership because Arrow may use it
+        // after this continuation returns.
+        FOLLY_ARROW_ASSIGN_OR_RAISE(
+            auto gen, file_reader->GetRecordBatchGenerator(file_reader, rg_indices, projected_leaf_column_indices,
+                                                           arrow_executor.get(), 0));
+
+        // Resolve the future only after all selected row groups are materialized;
+        // the returned RecordBatchReader is not progressively fed by the generator.
+        auto arrow_future = arrow::CollectAsyncGenerator(std::move(gen));
+        return bridge_arrow_future(
+            arrow_future.Then([first_rg_slice_offset, total_rows, projected_schema = std::move(projected_schema)](
+                                  std::vector<std::shared_ptr<arrow::RecordBatch>> batches)
+                                  -> arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> {
+              // Keep the projected schema even when Arrow produces no batches.
+              if (batches.empty()) {
+                return arrow::RecordBatchReader::Make({}, projected_schema);
+              }
+
+              // Drop rows before start_offset from the first overlapping row group.
+              if (first_rg_slice_offset > 0) {
+                batches[0] = batches[0]->Slice(first_rg_slice_offset);
+              }
+
+              // The last overlapping row group may extend past end_offset. Trim
+              // only that suffix after accounting for the first-row-group slice.
+              int64_t total_in_batches = 0;
+              for (const auto& batch : batches) {
+                total_in_batches += batch->num_rows();
+              }
+              if (total_in_batches > static_cast<int64_t>(total_rows)) {
+                int64_t excess = total_in_batches - static_cast<int64_t>(total_rows);
+                auto& last = batches.back();
+                last = last->Slice(0, last->num_rows() - excess);
+              }
+
+              return arrow::RecordBatchReader::Make(std::move(batches), projected_schema);
+            }),
+            std::move(arrow_executor));
+      });
+}
+
+folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> ParquetFormatReader::take_async(
+    const std::vector<int64_t>& row_indices) {
+  // Keep one row-group id per requested row for final remapping.
+  FOLLY_ARROW_ASSIGN_OR_RAISE(auto chunk_indices, get_chunk_indices(row_indices));
+
+  // take() requires sorted row indices, so row-group ids are nondecreasing and
+  // adjacent de-duplication is enough to decode every touched row group once.
+  auto unique_chunk_indices = chunk_indices;
+  unique_chunk_indices.erase(std::unique(unique_chunk_indices.begin(), unique_chunk_indices.end()),
+                             unique_chunk_indices.end());
+
+  // As with range reads, keep the executor unbound while constructing the
+  // SemiFuture. Folly binds its DeferredExecutor placeholder only when the
+  // consumer drives the future with via() or get().
+  return folly::makeSemiFuture().deferExValue(
+      [file_reader = file_reader_, row_indices, chunk_indices = std::move(chunk_indices),
+       unique_chunk_indices = std::move(unique_chunk_indices),
+       projected_leaf_column_indices = projected_leaf_column_indices_, row_group_infos = row_group_infos_](
+          folly::Executor::KeepAlive<> executor,
+          folly::Unit) mutable -> folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> {
+        // KeepAlive is now the concrete consumer executor token. This adapter
+        // forwards Arrow work to it without creating a separate thread pool.
+        auto arrow_executor = MakeFollyArrowExecutor(std::move(executor));
+        // Read complete row groups once. Exact row selection happens after the
+        // generator output is concatenated below.
+        FOLLY_ARROW_ASSIGN_OR_RAISE(
+            auto gen, file_reader->GetRecordBatchGenerator(file_reader, unique_chunk_indices,
+                                                           projected_leaf_column_indices, arrow_executor.get(), 0));
+
+        auto arrow_future = arrow::CollectAsyncGenerator(std::move(gen));
+        return bridge_arrow_future(
+            arrow_future.Then(
+                [row_indices = std::move(row_indices), chunk_indices = std::move(chunk_indices),
+                 unique_chunk_indices = std::move(unique_chunk_indices),
+                 row_group_infos = std::move(row_group_infos)](std::vector<std::shared_ptr<arrow::RecordBatch>> batches)
+                    -> arrow::Result<std::shared_ptr<arrow::Table>> {
+                  // Generator output is ordered by unique_chunk_indices. Record
+                  // each row group's base offset in the concatenated table.
+                  ARROW_ASSIGN_OR_RAISE(auto table, arrow::Table::FromRecordBatches(batches));
+
+                  std::unordered_map<int, int64_t> chunk_base_offsets;
+                  int64_t current_accumulated_rows = 0;
+                  for (int chunk_id : unique_chunk_indices) {
+                    chunk_base_offsets[chunk_id] = current_accumulated_rows;
+                    const auto& rg_info = row_group_infos[chunk_id];
+                    current_accumulated_rows += (rg_info.end_offset - rg_info.start_offset);
+                  }
+
+                  // Translate file-global row indices into offsets in the dense
+                  // table containing only the selected row groups.
+                  std::vector<int64_t> table_take_indices(row_indices.size());
+                  for (size_t i = 0; i < row_indices.size(); ++i) {
+                    int chunk_id = chunk_indices[i];
+                    table_take_indices[i] =
+                        chunk_base_offsets[chunk_id] + (row_indices[i] - row_group_infos[chunk_id].start_offset);
+                  }
+
+                  // Materialize exactly the requested rows in caller order.
+                  return CopySelectedRows(table, table_take_indices);
+                }),
+            std::move(arrow_executor));
+      });
+}
 
 }  // namespace milvus_storage::parquet
