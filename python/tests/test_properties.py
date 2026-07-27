@@ -113,3 +113,8 @@ class TestPropertyKeys:
         key = PropertyKeys.TRANSACTION_COMMIT_NUM_RETRIES
         assert isinstance(key, str)
         assert len(key) > 0
+
+    def test_paimon_scan_mode(self):
+        """Test the Paimon scan mode property key is accessible."""
+        assert PropertyKeys.PAIMON_SCAN_MODE == "paimon.scan_mode"
+        assert PropertyKeys.PAIMON_SNAPSHOT_ID == "paimon.snapshot_id"

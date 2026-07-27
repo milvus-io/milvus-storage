@@ -16,7 +16,8 @@
 // the manifest-based loon storage system.
 //
 // Usage:
-//   loon demo-table --type <type> --path <dir> [--rows N] [--deletes pos1,...]
+//   loon demo-table --type <type> --path <dir> [--scenario <scenario>]
+//                   [--rows N] [--deletes pos1,...]
 //   loon create     --format <format> --source <uri> --target <base_path>
 //                   --columns col1,col2,...  [--prop key=value ...]
 //   loon describe   <manifest_path> [--prop key=value ...]
@@ -46,8 +47,10 @@
 #include <folly/dynamic.h>
 #include <folly/json.h>
 #include "milvus-storage/format/iceberg/iceberg_common.h"
+#include "milvus-storage/format/paimon/paimon_common.h"
 #include "iceberg_bridge.h"
 #include "lance_bridge.h"
+#include "paimon_bridge.h"
 
 using milvus_storage::FilesystemCache;
 using milvus_storage::FormatReader;
@@ -127,6 +130,9 @@ static int DoDemoTable(int argc, char** argv) {
   std::string type;
   std::string path;
   uint64_t rows = 100;
+  uint32_t dimension = 0;
+  std::string scenario = "append-only";
+  bool scenario_explicit = false;
   std::vector<int64_t> deletes;
   std::vector<std::string> extra_props;
 
@@ -138,18 +144,27 @@ static int DoDemoTable(int argc, char** argv) {
       path = argv[++i];
     } else if (arg == "--rows" && i + 1 < argc) {
       rows = std::stoull(argv[++i]);
+    } else if (arg == "--dim" && i + 1 < argc) {
+      dimension = static_cast<uint32_t>(std::stoul(argv[++i]));
     } else if (arg == "--deletes" && i + 1 < argc) {
       deletes = ParseInt64List(argv[++i]);
+    } else if (arg == "--scenario" && i + 1 < argc) {
+      scenario = argv[++i];
+      scenario_explicit = true;
     } else if (arg == "--prop" && i + 1 < argc) {
       extra_props.emplace_back(argv[++i]);
+    } else {
+      std::cerr << "Error: unknown or incomplete demo-table argument '" << arg << "'" << std::endl;
+      return 1;
     }
   }
 
   if (type.empty() || path.empty()) {
     std::cerr << "Usage: loon demo-table --type <type> --path <dir>"
-              << " [--rows N] [--deletes pos1,pos2,...] [--prop key=value ...]" << std::endl;
+              << " [--rows N] [--dim N] [--deletes pos1,pos2,...] [--prop key=value ...]" << std::endl;
     std::cerr << std::endl;
-    std::cerr << "Types: iceberg" << std::endl;
+    std::cerr << "Types: iceberg, paimon" << std::endl;
+    std::cerr << "Paimon scenarios: append-only (default), merge-on-read, deletion-vector" << std::endl;
     std::cerr << std::endl;
     std::cerr << "Creates a demo table with schema (id int64, name string,"
               << " value float64)." << std::endl;
@@ -159,12 +174,71 @@ static int DoDemoTable(int argc, char** argv) {
     return 1;
   }
 
-  if (type != "iceberg") {
-    std::cerr << "Error: unsupported type '" << type << "'. Supported: iceberg" << std::endl;
+  if (type != "iceberg" && type != "paimon") {
+    std::cerr << "Error: unsupported type '" << type << "'. Supported: iceberg, paimon" << std::endl;
+    return 1;
+  }
+  if (type != "paimon" && scenario_explicit) {
+    std::cerr << "Error: --scenario is only valid for --type paimon" << std::endl;
+    return 1;
+  }
+  if (type != "paimon" && dimension > 0) {
+    std::cerr << "Error: --dim is only valid for --type paimon" << std::endl;
     return 1;
   }
 
   try {
+    if (type == "paimon") {
+      if (scenario != "append-only" && scenario != "merge-on-read" && scenario != "deletion-vector") {
+        std::cerr << "Error: unsupported Paimon scenario '" << scenario
+                  << "'. Supported: append-only, merge-on-read, deletion-vector" << std::endl;
+        return 1;
+      }
+      if (scenario == "deletion-vector" && deletes.empty()) {
+        std::cerr << "Error: deletion-vector requires --deletes pos1,pos2,..." << std::endl;
+        return 1;
+      }
+      if (scenario != "deletion-vector" && !deletes.empty()) {
+        std::cerr << "Error: --deletes is only valid with --scenario deletion-vector" << std::endl;
+        return 1;
+      }
+
+      milvus_storage::paimon::StorageOptions storage_options;
+      std::string table_path = path;
+      if (!extra_props.empty()) {
+        Properties properties;
+        SetValue(properties, PROPERTY_FS_ROOT_PATH, "/");
+        ApplyProps(properties, extra_props);
+        FilesystemCache::getInstance().clean();
+        auto config = FilesystemCache::resolve_config(properties, path);
+        if (!config.ok()) {
+          std::cerr << "Error resolving paimon storage configuration: " << config.status().ToString() << std::endl;
+          return 1;
+        }
+        storage_options = milvus_storage::paimon::ToStorageOptions(config.ValueOrDie());
+        table_path = milvus_storage::paimon::ToStandardUri(path);
+      } else {
+        table_path = ResolvePath(path);
+      }
+      const auto mode = scenario == "append-only" ? "append" : scenario == "merge-on-read" ? "mor" : scenario;
+      auto info = milvus_storage::paimon::CreateTestTable(table_path, rows, mode, deletes, storage_options, "parquet",
+                                                         dimension);
+      std::cout << "Created paimon table:" << std::endl;
+      std::cout << "  path:        " << info.table_location << std::endl;
+      std::cout << "  snapshot_id: " << info.snapshot_id << std::endl;
+      std::cout << "  snapshots:   [";
+      for (size_t index = 0; index < info.snapshot_ids.size(); ++index) {
+        if (index > 0) {
+          std::cout << ",";
+        }
+        std::cout << info.snapshot_ids[index];
+      }
+      std::cout << "]" << std::endl;
+      std::cout << "  scenario:    " << scenario << std::endl;
+      std::cout << "  rows:        " << rows << std::endl;
+      return 0;
+    }
+
     // Build storage options from properties (if any)
     std::unordered_map<std::string, std::string> storage_options;
     std::string table_path = path;
@@ -751,9 +825,11 @@ static void PrintUsage() {
             << std::endl
             << "demo-table:" << std::endl
             << "  loon demo-table --type <type> --path <dir> \\" << std::endl
-            << "                  [--rows N] [--deletes pos1,pos2,...]" << std::endl
+            << "                  [--scenario append-only|merge-on-read|deletion-vector] \\" << std::endl
+            << "                  [--rows N] [--dim N] [--deletes pos1,pos2,...] \\" << std::endl
+            << "                  [--prop key=value ...]" << std::endl
             << std::endl
-            << "  Types: iceberg" << std::endl
+            << "  Types: iceberg, paimon" << std::endl
             << std::endl
             << "create:" << std::endl
             << "  loon create --format <format> --source <uri> \\" << std::endl

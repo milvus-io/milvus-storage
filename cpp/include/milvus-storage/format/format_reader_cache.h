@@ -47,6 +47,10 @@ namespace parquet {
 class ParquetFormatReader;
 }  // namespace parquet
 
+namespace paimon {
+class PaimonFormatReader;
+}  // namespace paimon
+
 namespace vortex {
 class VortexFormatReader;
 }  // namespace vortex
@@ -182,6 +186,9 @@ class MetadataCache final {
     }
     if (format == LOON_FORMAT_ICEBERG_TABLE) {
       return std::forward<Visitor>(visitor)(get<iceberg::IcebergFormatReader>());
+    }
+    if (format == LOON_FORMAT_PAIMON_TABLE) {
+      return std::forward<Visitor>(visitor)(get<paimon::PaimonFormatReader>());
     }
 
     return ReturnT(arrow::Status::Invalid("Unknown column group format: ", format));

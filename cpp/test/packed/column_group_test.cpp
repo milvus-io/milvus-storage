@@ -28,8 +28,11 @@ class ColumnGroupTest : public ::testing::Test {
 
     for (int i = 0; i < num_columns; ++i) {
       std::vector<int32_t> values(num_rows, i);
-      auto array_data = arrow::ArrayData::Make(arrow::int32(), num_rows, {nullptr, arrow::Buffer::Wrap(values)});
-      arrays.push_back(arrow::MakeArray(array_data));
+      arrow::Int32Builder builder;
+      auto append_status = builder.AppendValues(values);
+      EXPECT_TRUE(append_status.ok()) << append_status.ToString();
+      auto array = builder.Finish();
+      arrays.push_back(array.ValueOrDie());
 
       std::string column_name = "column_" + std::to_string(i);
       schema_fields.push_back(arrow::field(column_name, arrow::int32()));

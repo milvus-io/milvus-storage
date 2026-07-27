@@ -53,6 +53,8 @@ _PROPERTY_KEY_MAPPING = {
     "READER_RECORD_BATCH_MAX_SIZE": "loon_properties_reader_record_batch_max_size",
     "READER_LOGICAL_CHUNK_ROWS": "loon_properties_reader_logical_chunk_rows",
     "READER_METADATA_CACHE_ENABLE": "loon_properties_reader_metadata_cache_enable",
+    "PAIMON_SCAN_MODE": "loon_properties_paimon_scan_mode",
+    "PAIMON_SNAPSHOT_ID": "loon_properties_paimon_snapshot_id",
     "TRANSACTION_COMMIT_NUM_RETRIES": "loon_properties_transaction_commit_num_retries",
 }
 

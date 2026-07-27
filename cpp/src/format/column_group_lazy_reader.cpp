@@ -39,6 +39,7 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
+#include "milvus-storage/format/paimon/paimon_format_reader.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 

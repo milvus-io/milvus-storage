@@ -129,6 +129,35 @@ TEST_F(BridgeTest, ExportImportColumnGroups) {
   loon_column_groups_destroy(ccgs);
 }
 
+TEST_F(BridgeTest, SetColumnGroupFileProperty) {
+  const char* columns[] = {"id"};
+  char format[] = "paimon-table";
+  char path[] = "file:///tmp/table";
+  char* paths[] = {path};
+  int64_t starts[] = {0};
+  int64_t ends[] = {10};
+  LoonColumnGroups* groups = nullptr;
+
+  auto result = loon_column_groups_create(columns, 1, format, paths, starts, ends, 1, &groups);
+  ASSERT_TRUE(loon_ffi_is_success(&result)) << loon_ffi_get_errmsg(&result);
+  loon_ffi_free_result(&result);
+  ASSERT_NE(groups, nullptr);
+
+  result = loon_column_group_file_set_property(groups, 0, 0, "metadata", "v1");
+  ASSERT_TRUE(loon_ffi_is_success(&result)) << loon_ffi_get_errmsg(&result);
+  loon_ffi_free_result(&result);
+  result = loon_column_group_file_set_property(groups, 0, 0, "metadata", "v2");
+  ASSERT_TRUE(loon_ffi_is_success(&result)) << loon_ffi_get_errmsg(&result);
+  loon_ffi_free_result(&result);
+
+  ColumnGroups imported;
+  ASSERT_STATUS_OK(column_groups_import(groups, &imported));
+  ASSERT_EQ(imported.size(), 1);
+  ASSERT_EQ(imported[0]->files.size(), 1);
+  EXPECT_EQ(imported[0]->files[0].Get<std::string>(kPropertyMetadata), "v2");
+  loon_column_groups_destroy(groups);
+}
+
 // Test empty column groups import
 TEST_F(BridgeTest, ImportEmptyColumnGroups) {
   LoonColumnGroups ccgs;

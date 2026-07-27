@@ -148,6 +148,10 @@ FFI_EXPORT extern const char* loon_properties_reader_async_task_split_strategy;
 // --- Export Iceberg property keys ---
 FFI_EXPORT extern const char* loon_properties_iceberg_snapshot_id;
 
+// --- Export Paimon property keys ---
+FFI_EXPORT extern const char* loon_properties_paimon_scan_mode;
+FFI_EXPORT extern const char* loon_properties_paimon_snapshot_id;
+
 // --- Export Transaction property keys ---
 FFI_EXPORT extern const char* loon_properties_transaction_commit_num_retries;
 
@@ -319,6 +323,13 @@ FFI_EXPORT LoonFFIResult loon_column_groups_create(const char** columns,
                                                    int64_t* end_indices,
                                                    size_t file_lens,
                                                    LoonColumnGroups** out_column_groups);
+
+/** Add or replace one property on a file owned by LoonColumnGroups. */
+FFI_EXPORT LoonFFIResult loon_column_group_file_set_property(LoonColumnGroups* column_groups,
+                                                             uint32_t column_group_index,
+                                                             uint32_t file_index,
+                                                             const char* key,
+                                                             const char* value);
 
 /**
  * @brief Destroys a LoonColumnGroups and frees all allocated memory

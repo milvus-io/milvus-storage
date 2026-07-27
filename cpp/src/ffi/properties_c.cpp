@@ -95,6 +95,10 @@ const char* loon_properties_reader_async_task_split_strategy = PROPERTY_READER_A
 // --- Define Iceberg property keys ---
 const char* loon_properties_iceberg_snapshot_id = PROPERTY_ICEBERG_SNAPSHOT_ID;
 
+// --- Define Paimon property keys ---
+const char* loon_properties_paimon_scan_mode = PROPERTY_PAIMON_SCAN_MODE;
+const char* loon_properties_paimon_snapshot_id = PROPERTY_PAIMON_SNAPSHOT_ID;
+
 // --- Define Transaction property keys ---
 const char* loon_properties_transaction_commit_num_retries = PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES;
 

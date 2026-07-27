@@ -15,12 +15,24 @@
 #include "milvus-storage/ffi_c.h"
 
 #include <cstring>
+#include <memory>
 
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/ffi_internal/bridge.h"
 #include "milvus-storage/manifest.h"
 
 using namespace milvus_storage::api;
+
+namespace {
+
+char* dup_cstr(const char* value) {
+  const auto size = std::strlen(value);
+  auto* copy = new char[size + 1];
+  std::memcpy(copy, value, size + 1);
+  return copy;
+}
+
+}  // namespace
 
 LoonFFIResult loon_column_groups_create(const char** columns,
                                         size_t col_lens,
@@ -66,6 +78,57 @@ LoonFFIResult loon_column_groups_create(const char** columns,
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
+LoonFFIResult loon_column_group_file_set_property(LoonColumnGroups* column_groups,
+                                                  uint32_t column_group_index,
+                                                  uint32_t file_index,
+                                                  const char* key,
+                                                  const char* value) {
+  if (column_groups == nullptr || key == nullptr || value == nullptr) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Column groups, property key, and property value must be non-null");
+  }
+  if (column_group_index >= column_groups->num_of_column_groups || column_groups->column_group_array == nullptr) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Column group index is out of range");
+  }
+  auto& column_group = column_groups->column_group_array[column_group_index];
+  if (file_index >= column_group.num_of_files || column_group.files == nullptr) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Column group file index is out of range");
+  }
+
+  try {
+    auto& file = column_group.files[file_index];
+    for (uint32_t index = 0; index < file.num_properties; ++index) {
+      if (std::strcmp(file.property_keys[index], key) == 0) {
+        std::unique_ptr<char[]> replacement(dup_cstr(value));
+        delete[] const_cast<char*>(file.property_values[index]);
+        file.property_values[index] = replacement.release();
+        RETURN_SUCCESS();
+      }
+    }
+
+    const auto old_size = file.num_properties;
+    auto keys = std::make_unique<const char*[]>(old_size + 1);
+    auto values = std::make_unique<const char*[]>(old_size + 1);
+    std::unique_ptr<char[]> new_key(dup_cstr(key));
+    std::unique_ptr<char[]> new_value(dup_cstr(value));
+    for (uint32_t index = 0; index < old_size; ++index) {
+      keys[index] = file.property_keys[index];
+      values[index] = file.property_values[index];
+    }
+    keys[old_size] = new_key.release();
+    values[old_size] = new_value.release();
+    delete[] file.property_keys;
+    delete[] file.property_values;
+    file.property_keys = keys.release();
+    file.property_values = values.release();
+    file.num_properties = old_size + 1;
+    RETURN_SUCCESS();
+  } catch (const std::exception& error) {
+    RETURN_EXCEPTION(error.what());
   }
 
   RETURN_UNREACHABLE();

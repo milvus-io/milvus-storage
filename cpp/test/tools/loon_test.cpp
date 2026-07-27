@@ -15,15 +15,18 @@
 #include <gtest/gtest.h>
 
 #include <arrow/api.h>
+#include <folly/json.h>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/layout.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/properties.h"
+#include "milvus-storage/format/format.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/transaction/transaction.h"
 #include "iceberg_bridge.h"
+#include "paimon_bridge.h"
 #include "test_env.h"
 
 namespace milvus_storage {
@@ -73,6 +76,104 @@ class LoonTest : public ::testing::Test {
   std::string table_dir_;
   std::string target_dir_;
 };
+
+void VerifyPaimonManifestRoundTrip(const std::string& source,
+                                   const std::string& target,
+                                   const std::string& mode,
+                                   const std::string& scan_mode,
+                                   uint64_t rows,
+                                   const std::vector<int64_t>& deletions,
+                                   const std::string& expected_path,
+                                   int64_t expected_rows,
+                                   const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                                   Properties properties,
+                                   const std::string& file_format = "parquet",
+                                   uint32_t dimension = 0) {
+  paimon::CreateTestTable(source, rows, mode, deletions, {}, file_format, dimension);
+  ASSERT_EQ(SetValue(properties, PROPERTY_PAIMON_SCAN_MODE, scan_mode.c_str()), std::nullopt);
+  ASSERT_AND_ASSIGN(auto* format, Format::get(LOON_FORMAT_PAIMON_TABLE));
+  ASSERT_AND_ASSIGN(auto files, format->explore(source, properties));
+  ASSERT_FALSE(files.empty());
+
+  for (const auto& file : files) {
+    auto metadata = folly::parseJson(file.Get<std::string>(kPropertyMetadata));
+    EXPECT_EQ(metadata["read_path"].asString(), expected_path);
+  }
+
+  const std::vector<std::string> columns =
+      dimension > 0 ? std::vector<std::string>{"pk", "label", "vector"} : std::vector<std::string>{"id", "name"};
+  ColumnGroups groups;
+  groups.push_back(std::make_shared<ColumnGroup>(
+      ColumnGroup{.columns = columns, .format = LOON_FORMAT_PAIMON_TABLE, .files = files}));
+  ASSERT_AND_ASSIGN(auto tx, Transaction::Open(fs, target));
+  tx->AppendFiles(groups);
+  ASSERT_AND_ASSIGN(auto version, tx->Commit());
+
+  ASSERT_AND_ASSIGN(auto manifest, Manifest::ReadFrom(fs, get_manifest_filepath(target, version)));
+  ASSERT_EQ(manifest->columnGroups().size(), 1);
+  const auto& round_tripped = manifest->columnGroups().front();
+  ASSERT_EQ(round_tripped->format, LOON_FORMAT_PAIMON_TABLE);
+  ASSERT_EQ(round_tripped->files.size(), files.size());
+
+  int64_t actual_rows = 0;
+  for (size_t index = 0; index < round_tripped->files.size(); ++index) {
+    EXPECT_EQ(round_tripped->files[index].Get<std::string>(kPropertyMetadata),
+              files[index].Get<std::string>(kPropertyMetadata));
+    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, round_tripped->files[index],
+                                                        properties, columns, nullptr));
+    ASSERT_AND_ASSIGN(auto row_groups, reader->get_row_group_infos());
+    for (size_t group = 0; group < row_groups.size(); ++group) {
+      ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(static_cast<int>(group)));
+      actual_rows += batch->num_rows();
+    }
+  }
+  EXPECT_EQ(actual_rows, expected_rows);
+}
+
+TEST_F(LoonTest, CreateAndReadPaimonAppend) {
+  VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_append", target_dir_ + "/paimon_append", "append", "auto", 30, {},
+                                "direct-file", 30, fs_, properties_);
+}
+
+TEST_F(LoonTest, CreateAndReadPaimonMergeOnRead) {
+  VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_mor", target_dir_ + "/paimon_mor", "mor", "auto", 30, {},
+                                "data-split", 30, fs_, properties_);
+}
+
+TEST_F(LoonTest, CreateAndReadPaimonDeletionVector) {
+  VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_dv", target_dir_ + "/paimon_dv", "deletion-vector", "auto", 30,
+                                {0, 5, 29}, "direct-file", 27, fs_, properties_);
+}
+
+TEST_F(LoonTest, CreateAndReadPaimonVortex) {
+  VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_vortex", target_dir_ + "/paimon_vortex", "append", "auto", 30, {},
+                                "direct-file", 30, fs_, properties_, "vortex");
+}
+
+TEST_F(LoonTest, CreateAndReadPaimonVortexMergeOnRead) {
+  VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_vortex_mor", target_dir_ + "/paimon_vortex_mor", "mor", "auto", 30,
+                                {}, "data-split", 30, fs_, properties_, "vortex");
+}
+
+TEST_F(LoonTest, CreateAndReadPaimonVortexDeletionVector) {
+  VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_vortex_dv", target_dir_ + "/paimon_vortex_dv", "deletion-vector",
+                                "auto", 30, {0, 5, 29}, "direct-file", 27, fs_, properties_, "vortex");
+}
+
+TEST_F(LoonTest, CreateAndReadPaimonVectorAppend) {
+  VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_vector_append", target_dir_ + "/paimon_vector_append", "append",
+                                "auto", 6, {}, "direct-file", 6, fs_, properties_, "parquet", 4);
+}
+
+TEST_F(LoonTest, CreateAndReadPaimonVectorMergeOnRead) {
+  VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_vector_mor", target_dir_ + "/paimon_vector_mor", "mor", "auto", 6,
+                                {}, "data-split", 6, fs_, properties_, "parquet", 4);
+}
+
+TEST_F(LoonTest, CreateAndReadPaimonVectorDeletionVector) {
+  VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_vector_dv", target_dir_ + "/paimon_vector_dv", "deletion-vector",
+                                "auto", 6, {0, 5}, "direct-file", 4, fs_, properties_, "parquet", 4);
+}
 
 // Create manifest from Iceberg table and read back sequentially
 TEST_F(LoonTest, CreateAndReadIceberg) {

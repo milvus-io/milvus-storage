@@ -47,6 +47,7 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
+#include "milvus-storage/format/paimon/paimon_format_reader.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 
@@ -625,25 +626,41 @@ ChunkRBMapResult ColumnGroupReaderImpl<ReaderT>::read_chunks_from_files(const st
       std::move(rbs.begin(), rbs.end(), std::back_inserter(rbs_in_file));
     }
 
-    // generate chunk_rb_map
+    // Generate chunk_rb_map. read_with_range streams in the reader's own
+    // batch sizes (a merge-read emits fixed-size batches regardless of the
+    // logical chunk layout), so one chunk may span several record batches:
+    // slice zero-copy when a chunk lands inside one batch, concatenate when
+    // it crosses batch boundaries.
     size_t rbs_idx = 0;
-    size_t rbs_offset = 0;
+    int64_t rbs_offset = 0;
     for (long long chunk_idx : chunk_idxs) {
       const auto& chunk_info = chunk_infos_[chunk_idx];
-      if (UNLIKELY(((rbs_in_file[rbs_idx]->num_rows() - rbs_offset) < chunk_info.number_of_rows))) {
-        return arrow::Status::Invalid(
-            fmt::format("Invalid slice of record batchs: {} out of {}, [chunk info={}]", chunk_info.number_of_rows,
-                        rbs_in_file[rbs_idx]->num_rows() - rbs_offset, chunk_info.ToString()));
+      int64_t remaining = chunk_info.number_of_rows;
+      std::vector<std::shared_ptr<arrow::RecordBatch>> pieces;
+      while (remaining > 0) {
+        if (UNLIKELY(rbs_idx >= rbs_in_file.size())) {
+          return arrow::Status::Invalid(
+              fmt::format("Record batches ended before the chunk was filled: {} rows missing, [chunk info={}]",
+                          remaining, chunk_info.ToString()));
+        }
+        const auto& rb = rbs_in_file[rbs_idx];
+        const int64_t available = rb->num_rows() - rbs_offset;
+        if (available <= 0) {
+          ++rbs_idx;
+          rbs_offset = 0;
+          continue;
+        }
+        const int64_t take = std::min(available, remaining);
+        pieces.emplace_back(rb->Slice(rbs_offset, take));
+        rbs_offset += take;
+        remaining -= take;
       }
-
-      auto rb = rbs_in_file[rbs_idx]->Slice(rbs_offset, chunk_info.number_of_rows);
-      chunk_rb_map[chunk_idx] = rb;
-      rbs_offset += chunk_info.number_of_rows;
-
-      assert(rbs_offset <= rbs_in_file[rbs_idx]->num_rows());
-      if (rbs_offset == rbs_in_file[rbs_idx]->num_rows()) {
-        rbs_idx++;
-        rbs_offset = 0;
+      if (pieces.size() == 1) {
+        chunk_rb_map[chunk_idx] = std::move(pieces.front());
+      } else {
+        ARROW_ASSIGN_OR_RAISE(auto table, arrow::Table::FromRecordBatches(pieces.front()->schema(), pieces));
+        ARROW_ASSIGN_OR_RAISE(auto combined, table->CombineChunksToBatch());
+        chunk_rb_map[chunk_idx] = std::move(combined);
       }
     }
   }

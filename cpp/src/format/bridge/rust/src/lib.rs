@@ -18,6 +18,9 @@ mod iceberg_bridgeimpl;
 mod iceberg_testutil;
 mod lance_bridgeimpl;
 mod lance_memory_estimator;
+mod paimon_bridgeimpl;
+mod paimon_split_serde;
+mod paimon_testutil;
 mod predicate_parser;
 mod rust_runtime;
 mod vortex_bridgeimpl;
@@ -27,6 +30,8 @@ mod filesystem_c;
 use iceberg_bridgeimpl::*;
 use iceberg_testutil::*;
 use lance_bridgeimpl::*;
+use paimon_bridgeimpl::*;
+use paimon_testutil::*;
 use rust_runtime::configure_rust_runtime;
 use vortex_bridgeimpl::*;
 
@@ -191,6 +196,81 @@ pub mod lance_ffi {
 
     }
 } // mod lance_ffi
+
+#[cxx::bridge(namespace = "milvus_storage::paimon::ffi")]
+pub mod paimon_ffi {
+    /// A single physical file or atomic DataSplit returned by Paimon planning.
+    struct PaimonFileInfo {
+        path: String,
+        read_path: String,
+        route_reason: String,
+        file_size: u64,
+        metadata_json: String,
+    }
+
+    extern "Rust" {
+        type BlockingPaimonDataSplitReader;
+
+        fn paimon_plan_files(
+            table_location: &str,
+            snapshot_id: i64,
+            scan_mode: &str,
+            storage_options_keys: Vec<String>,
+            storage_options_values: Vec<String>,
+        ) -> Result<Vec<PaimonFileInfo>>;
+
+        fn paimon_read_deletion_vector(
+            path: &str,
+            offset: u64,
+            length: u64,
+            expected_cardinality: i64,
+            storage_options_keys: Vec<String>,
+            storage_options_values: Vec<String>,
+        ) -> Result<Vec<u64>>;
+
+        fn paimon_open_data_split_reader(
+            metadata_json: &str,
+            expected_table_location: &str,
+            storage_options_keys: Vec<String>,
+            storage_options_values: Vec<String>,
+        ) -> Result<Box<BlockingPaimonDataSplitReader>>;
+
+        unsafe fn export_schema(
+            self: &BlockingPaimonDataSplitReader,
+            out_schema_ptr: *mut u8,
+        ) -> Result<()>;
+
+        unsafe fn open_stream(
+            self: &BlockingPaimonDataSplitReader,
+            projected_columns: Vec<String>,
+            out_stream_ptr: *mut u8,
+        ) -> Result<()>;
+    }
+}
+
+#[cxx::bridge(namespace = "milvus_storage::paimon::ffi")]
+pub mod paimon_test_ffi {
+    struct PaimonTestTableInfo {
+        table_location: String,
+        snapshot_id: i64,
+        snapshot_ids: Vec<i64>,
+    }
+
+    extern "Rust" {
+        /// Create a repository-owned local Paimon fixture through the public
+        /// paimon-rust writer/commit APIs.
+        fn paimon_create_test_table(
+            table_location: &str,
+            num_rows: u64,
+            mode: &str,
+            deleted_positions: Vec<i64>,
+            storage_options_keys: Vec<String>,
+            storage_options_values: Vec<String>,
+            file_format: &str,
+            dimension: u32,
+        ) -> Result<PaimonTestTableInfo>;
+    }
+}
 
 #[cxx::bridge(namespace = "milvus_storage::vortex::ffi")]
 pub mod vortex_ffi {

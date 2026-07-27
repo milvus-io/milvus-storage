@@ -101,6 +101,21 @@ url = "2"
 hmac = "0.12"
 sha1 = "0.10"
 base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
+crc32fast = "1"
+roaring = "0.11"
+# Paimon pins this release because 1.13.3 regressed its Linux Vortex tests.
+# Make the shared resolution explicit so the existing Lance/DataFusion edge is
+# updated from the older lockfile entry instead of producing two incompatible
+# solver choices.
+unicode-segmentation = "=1.13.2"
+
+# Apache Paimon reader/planner. Keep the exact revision and Cargo.lock together
+# until the APIs used by this bridge are available in a published release.
+# Paimon uses Arrow 58, which is already present for Lance and crosses the C++
+# boundary only through Arrow's C Data interface.
+paimon = { git = "https://github.com/apache/paimon-rust.git", rev = "7b54d44c487590f4d84952533f110ba16e9346a4", default-features = false, features = ["storage-memory", "storage-fs", "storage-s3", "storage-oss", "storage-azdls", "storage-gcs", "vortex"] }
 
 # SQL predicate parsing
 sqlparser = "0.55"
