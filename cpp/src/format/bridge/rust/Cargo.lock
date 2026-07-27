@@ -73,54 +73,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "anstream"
-version = "0.6.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43d5b281e737544384e969a5ccad3f1cdd24b48086a0fc1b2a5262a26b8f4f4a"
-dependencies = [
- "anstyle",
- "anstyle-parse",
- "anstyle-query",
- "anstyle-wincon",
- "colorchoice",
- "is_terminal_polyfill",
- "utf8parse",
-]
-
-[[package]]
 name = "anstyle"
 version = "1.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5192cca8006f1fd4f7237516f40fa183bb07f8fbdfedaa0036de5ea9b0b45e78"
-
-[[package]]
-name = "anstyle-parse"
-version = "0.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e7644824f0aa2c7b9384579234ef10eb7efb6a0deb83f9630a49594dd9c15c2"
-dependencies = [
- "utf8parse",
-]
-
-[[package]]
-name = "anstyle-query"
-version = "1.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
-dependencies = [
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "anstyle-wincon"
-version = "3.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
-dependencies = [
- "anstyle",
- "once_cell_polyfill",
- "windows-sys 0.61.2",
-]
 
 [[package]]
 name = "anyhow"
@@ -164,9 +120,9 @@ dependencies = [
 
 [[package]]
 name = "arc-swap"
-version = "1.8.0"
+version = "1.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51d03449bb8ca2cc2ef70869af31463d1ae5ccc8fa3e334b307203fbf815207e"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
 dependencies = [
  "rustversion",
 ]
@@ -1381,9 +1337,9 @@ checksum = "7d809780667f4410e7c41b07f52439b94d2bdf8528eeedc287fa38d3b7f95d82"
 
 [[package]]
 name = "better_io"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92fde17f91e7ba10b2a07f8dff29530b77144894bc6ae850fbc66e1276af0d28"
+checksum = "ef0a3155e943e341e557863e69a708999c94ede624e37865c8e2a91b94efa78f"
 
 [[package]]
 name = "bigdecimal"
@@ -1406,10 +1362,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230c5f1ca6a325a32553f8640d31ac9b49f2411e901e427570154868b46da4f7"
 
 [[package]]
-name = "bit-vec"
-version = "0.8.0"
+name = "bindgen"
+version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+dependencies = [
+ "bitflags 2.10.0",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.13.0",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash",
+ "shlex",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "bit-vec"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b71798fca2c1fe1086445a7258a4bc81e6e49dcd24c8d0dd9a1e57395b603f51"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "bitflags"
@@ -1618,6 +1595,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cexpr"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
+dependencies = [
+ "nom 7.1.3",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1675,13 +1661,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "clang-sys"
+version = "1.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b023947811758c97c59bf9d1c188fd619ad4718dcaa767947df1cadb14f39f4"
+dependencies = [
+ "glob",
+ "libc",
+ "libloading",
+]
+
+[[package]]
 name = "clap"
 version = "4.5.51"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c26d721170e0295f191a69bd9a1f93efcdb0aff38684b61ab5750468972e5f5"
 dependencies = [
  "clap_builder",
- "clap_derive",
 ]
 
 [[package]]
@@ -1690,22 +1686,9 @@ version = "4.5.51"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75835f0c7bf681bfd05abe44e965760fea999a5286c6eb2d59883634fd02011a"
 dependencies = [
- "anstream",
  "anstyle",
  "clap_lex",
  "strsim",
-]
-
-[[package]]
-name = "clap_derive"
-version = "4.5.49"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a0b5487afeab2deb2ff4e03a807ad1a03ac532ff5a2cee5d86884440c7f7671"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -1739,12 +1722,6 @@ dependencies = [
  "termcolor",
  "unicode-width",
 ]
-
-[[package]]
-name = "colorchoice"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
 
 [[package]]
 name = "combine"
@@ -1835,6 +1812,12 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "core_detect"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
 
 [[package]]
 name = "cpufeatures"
@@ -1997,13 +1980,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "cudarc"
-version = "0.17.8"
+name = "custom-labels"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bf99ab37ee7072d64d906aa2dada9a3422f1d975cdf8c8055a573bc84897ed8"
+checksum = "4121f4f539659ad975da5bc6702b7d7d6de59ff1bbaec328dfe7dd5058052ef2"
 dependencies = [
- "half",
- "libloading",
+ "bindgen",
+ "cc",
+ "libc",
+ "pin-project-lite",
 ]
 
 [[package]]
@@ -2958,9 +2943,9 @@ checksum = "f678cf4a922c215c63e0de95eb1ff08a958a81d47e485cf9da1e27bf6305cfa5"
 
 [[package]]
 name = "dtype_dispatch"
-version = "0.1.1"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3a5ccdfd6c5e7e2fea9c5cf256f2a08216047fab19c621c3da64e9ae4a1462d"
+checksum = "ab23e69df104e2fd85ee63a533a22d2132ef5975dc6b36f9f3e5a7305e4a8ed7"
 
 [[package]]
 name = "dunce"
@@ -3010,26 +2995,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "enum-map"
-version = "2.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6866f3bfdf8207509a033af1a75a7b08abda06bbaaeae6669323fd5a097df2e9"
-dependencies = [
- "enum-map-derive",
-]
-
-[[package]]
-name = "enum-map-derive"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f282cfdfe92516eb26c2af8589c274c7c17681f5ecc03c18255fe741c6aa64eb"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3053,7 +3018,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3094,16 +3059,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "exponential-decay-histogram"
-version = "0.1.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7962d7e9baab6ea05af175491fa6a8441f3bf461558037622142573d98dd6d6"
-dependencies = [
- "ordered-float 5.1.0",
- "rand 0.9.2",
-]
-
-[[package]]
 name = "ext-trait"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3140,12 +3095,12 @@ checksum = "f8eb564c5c7423d25c886fb561d1e4ee69f72354d16918afa32c08811f6b6a55"
 
 [[package]]
 name = "fastlanes"
-version = "0.5.0"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "414cb755aee48ff7b0907995d2949c68c8c17900970076dff6a808e18e592d71"
+checksum = "b9272a674b446f53253f66582596614e41552d14968a3d1aaa590576a91c1188"
 dependencies = [
- "arrayref",
  "const_for",
+ "core_detect",
  "num-traits",
  "paste",
  "seq-macro",
@@ -3247,9 +3202,12 @@ dependencies = [
 
 [[package]]
 name = "fsst-rs"
-version = "0.5.6"
+version = "0.5.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "561f2458a3407836ab8f1acc9113b8cda91b9d6378ba8dad13b2fe1a1d3af5ce"
+checksum = "9b13ac798afc0d9194eb4efefef8b9332efbd80b43f302a968cb8cb23b9d5360"
+dependencies = [
+ "rustc-hash",
+]
 
 [[package]]
 name = "fst"
@@ -3478,16 +3436,8 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "num-traits",
- "rand 0.9.2",
- "rand_distr",
  "zerocopy",
 ]
-
-[[package]]
-name = "handle"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52ed72152641d513a6084a3907bfcba3f35ae2d3335c22ce2242969c25ff8e46"
 
 [[package]]
 name = "hashbrown"
@@ -3500,6 +3450,10 @@ name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+dependencies = [
+ "ahash",
+ "allocator-api2",
+]
 
 [[package]]
 name = "hashbrown"
@@ -3526,6 +3480,11 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "heck"
@@ -4011,12 +3970,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "is_terminal_polyfill"
-version = "1.70.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
-
-[[package]]
 name = "itertools"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4165,7 +4118,7 @@ dependencies = [
  "fast-float2",
  "itoa",
  "jiff",
- "nom",
+ "nom 8.0.0",
  "num-traits",
  "ordered-float 5.1.0",
  "rand 0.9.2",
@@ -4670,6 +4623,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lasso"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e14eda50a3494b3bf7b9ce51c52434a761e383d7238ce1dd5dcec2fbc13e9fb"
+dependencies = [
+ "dashmap",
+ "hashbrown 0.14.5",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4982,6 +4945,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "minimal-lexical"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4993,9 +4962,9 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.1.0"
+version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69d83b0086dc8ecf3ce9ae2874b2d1290252e2a30720bea58a5c6639b0092873"
+checksum = "30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427"
 dependencies = [
  "libc",
  "wasi",
@@ -5030,28 +4999,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
-name = "multiversion"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7edb7f0ff51249dfda9ab96b5823695e15a052dc15074c9dbf3d118afaf2c201"
-dependencies = [
- "multiversion-macros",
- "target-features",
-]
-
-[[package]]
-name = "multiversion-macros"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b093064383341eb3271f42e381cb8f10a01459478446953953c75d24bd339fc0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
- "target-features",
-]
-
-[[package]]
 name = "murmur3"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5077,6 +5024,16 @@ name = "never-say-never"
 version = "6.6.666"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf5a574dadd7941adeaa71823ecba5e28331b8313fb2e1c6a5c7e5981ea53ad6"
+
+[[package]]
+name = "nom"
+version = "7.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
+dependencies = [
+ "memchr",
+ "minimal-lexical",
+]
 
 [[package]]
 name = "nom"
@@ -5321,16 +5278,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "once_cell_polyfill"
-version = "1.70.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
 name = "oneshot"
-version = "0.1.11"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ce411919553d3f9fa53a0880544cda985a112117a0444d5ff1e870a893d6ea"
+checksum = "cfe21416a02c693fb9f980befcb230ecc70b0b3d1cc4abf88b9675c4c1457f0c"
 
 [[package]]
 name = "opendal"
@@ -5743,9 +5694,9 @@ dependencies = [
 
 [[package]]
 name = "pco"
-version = "0.4.7"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "daea1197f2969fab4d5c6620eade5d46c98a8e9b04ad2bc3725fc5dfc4eb8a49"
+checksum = "553ccdc7f6999785559af4998c79712a5ab820e26b68bad9146609c19587ec82"
 dependencies = [
  "better_io",
  "dtype_dispatch",
@@ -6150,7 +6101,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6749,6 +6700,7 @@ dependencies = [
  "url",
  "uuid",
  "vortex",
+ "vortex-btrblocks",
 ]
 
 [[package]]
@@ -6796,7 +6748,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6854,7 +6806,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7018,16 +6970,6 @@ version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11fc7cc2c76d73e0f27ee52abbd64eec84d46f370c88371120433196934e4b7f"
 dependencies = [
- "serde",
-]
-
-[[package]]
-name = "serde-value"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3a1a3341211875ef120e117ea7fd5228530ae7e7036a779fdc9117be6b3282c"
-dependencies = [
- "ordered-float 2.10.1",
  "serde",
 ]
 
@@ -7248,9 +7190,9 @@ checksum = "56199f7ddabf13fe5074ce809e7d3f42b42ae711800501b5b16ea82ad029c39d"
 
 [[package]]
 name = "sketches-ddsketch"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1e9a774a6c28142ac54bb25d25562e6bcf957493a184f15ad4eebccb23e410a"
+checksum = "05e40b6cf54d988dc1a2223531b969c9a9e30906ad90ef64890c27b4bfbb46ea"
 
 [[package]]
 name = "slab"
@@ -7310,12 +7252,12 @@ checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
 
 [[package]]
 name = "socket2"
-version = "0.6.1"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17129e116933cf371d018bb80ae557e889637989d8638274fb25622827b03881"
+checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7381,6 +7323,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
+ "windows-sys 0.52.0",
  "windows-sys 0.59.0",
 ]
 
@@ -7518,12 +7461,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
-name = "target-features"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1bbb9f3c5c463a01705937a24fdabc5047929ac764b2d5b9cf681c1f5041ed5"
-
-[[package]]
 name = "tempfile"
 version = "3.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7533,7 +7470,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7547,9 +7484,9 @@ dependencies = [
 
 [[package]]
 name = "termtree"
-version = "0.5.1"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
+checksum = "d4d1330fe7f7f872cd05165130b10602d667b205fd85be09be2814b115d4ced9"
 
 [[package]]
 name = "thiserror"
@@ -7667,9 +7604,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.48.0"
+version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff360e02eab121e0bc37a2d3b4d4dc622e6eda3a8e5253d5435ecf5bd4c68408"
+checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
  "bytes",
  "libc",
@@ -7684,9 +7621,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-macros"
-version = "2.6.0"
+version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af407857209536a95c8e56f8231ef2c2e2aff839b22e07a1ffcbc617e9db9fa5"
+checksum = "6328af13490e73a9b4694030fafd93f8c8c6a9dede33e821c3fc63eddf8042ba"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7980,12 +7917,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
-name = "utf8parse"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
-
-[[package]]
 name = "uuid"
 version = "1.23.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8012,6 +7943,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vortex"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
  "vortex-alp",
  "vortex-array",
@@ -8020,7 +7952,6 @@ dependencies = [
  "vortex-bytebool",
  "vortex-datetime-parts",
  "vortex-decimal-byte-parts",
- "vortex-dtype",
  "vortex-error",
  "vortex-fastlanes",
  "vortex-file",
@@ -8034,7 +7965,6 @@ dependencies = [
  "vortex-pco",
  "vortex-proto",
  "vortex-runend",
- "vortex-scalar",
  "vortex-scan",
  "vortex-sequence",
  "vortex-session",
@@ -8047,6 +7977,7 @@ dependencies = [
 [[package]]
 name = "vortex-alp"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
  "itertools 0.14.0",
  "num-traits",
@@ -8054,104 +7985,110 @@ dependencies = [
  "rustc-hash",
  "vortex-array",
  "vortex-buffer",
- "vortex-dtype",
  "vortex-error",
  "vortex-fastlanes",
  "vortex-mask",
- "vortex-scalar",
+ "vortex-session",
  "vortex-utils",
 ]
 
 [[package]]
 name = "vortex-array"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
+ "arc-swap",
  "arcref",
- "arrow-arith 56.2.0",
- "arrow-array 56.2.0",
- "arrow-buffer 56.2.0",
- "arrow-data 56.2.0",
- "arrow-ord 56.2.0",
- "arrow-schema 56.2.0",
- "arrow-select 56.2.0",
- "arrow-string 56.2.0",
- "async-trait",
- "bitvec",
+ "arrow-arith 58.3.0",
+ "arrow-array 58.3.0",
+ "arrow-buffer 58.3.0",
+ "arrow-cast 58.3.0",
+ "arrow-data 58.3.0",
+ "arrow-ord 58.3.0",
+ "arrow-schema 58.3.0",
+ "arrow-select 58.3.0",
+ "arrow-string 58.3.0",
+ "async-lock",
+ "bytes",
  "cfg-if",
  "enum-iterator",
- "enum-map",
  "flatbuffers",
  "futures",
- "getrandom 0.3.4",
+ "half",
  "humansize",
  "inventory",
  "itertools 0.14.0",
- "log",
- "multiversion",
+ "jiff",
  "num-traits",
  "num_enum",
  "parking_lot",
  "paste",
  "pin-project-lite",
  "prost",
- "rand 0.9.2",
+ "rand 0.10.2",
  "rustc-hash",
  "simdutf8",
+ "smallvec",
  "static_assertions",
  "termtree",
+ "tracing",
+ "uuid",
+ "vortex-array-macros",
  "vortex-buffer",
- "vortex-compute",
- "vortex-dtype",
  "vortex-error",
  "vortex-flatbuffers",
- "vortex-io",
  "vortex-mask",
- "vortex-metrics",
  "vortex-proto",
- "vortex-scalar",
  "vortex-session",
  "vortex-utils",
- "vortex-vector",
+]
+
+[[package]]
+name = "vortex-array-macros"
+version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
 name = "vortex-btrblocks"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
- "getrandom 0.3.4",
  "itertools 0.14.0",
- "log",
  "num-traits",
- "rand 0.9.2",
- "rustc-hash",
+ "pco",
+ "rand 0.10.2",
  "vortex-alp",
  "vortex-array",
  "vortex-buffer",
+ "vortex-compressor",
  "vortex-datetime-parts",
  "vortex-decimal-byte-parts",
- "vortex-dtype",
  "vortex-error",
  "vortex-fastlanes",
  "vortex-fsst",
- "vortex-mask",
+ "vortex-pco",
  "vortex-runend",
- "vortex-scalar",
  "vortex-sequence",
  "vortex-sparse",
  "vortex-utils",
  "vortex-zigzag",
+ "vortex-zstd",
 ]
 
 [[package]]
 name = "vortex-buffer"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
- "arrow-buffer 56.2.0",
+ "arrow-buffer 58.3.0",
  "bitvec",
  "bytes",
- "cudarc",
  "itertools 0.14.0",
- "num-traits",
  "simdutf8",
  "vortex-error",
 ]
@@ -8159,152 +8096,125 @@ dependencies = [
 [[package]]
 name = "vortex-bytebool"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
  "num-traits",
  "vortex-array",
  "vortex-buffer",
- "vortex-dtype",
  "vortex-error",
  "vortex-mask",
- "vortex-scalar",
+ "vortex-session",
 ]
 
 [[package]]
-name = "vortex-compute"
+name = "vortex-compressor"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
- "arrow-array 56.2.0",
- "arrow-buffer 56.2.0",
- "arrow-schema 56.2.0",
+ "itertools 0.14.0",
  "num-traits",
+ "parking_lot",
+ "rand 0.10.2",
+ "rustc-hash",
+ "tracing",
+ "vortex-array",
  "vortex-buffer",
- "vortex-dtype",
  "vortex-error",
  "vortex-mask",
- "vortex-vector",
+ "vortex-utils",
 ]
 
 [[package]]
 name = "vortex-datetime-parts"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
  "num-traits",
  "prost",
  "vortex-array",
  "vortex-buffer",
- "vortex-dtype",
  "vortex-error",
  "vortex-mask",
- "vortex-scalar",
+ "vortex-session",
 ]
 
 [[package]]
 name = "vortex-decimal-byte-parts"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
  "num-traits",
  "prost",
  "vortex-array",
  "vortex-buffer",
- "vortex-dtype",
  "vortex-error",
  "vortex-mask",
- "vortex-scalar",
-]
-
-[[package]]
-name = "vortex-dtype"
-version = "0.1.0"
-dependencies = [
- "arrow-buffer 56.2.0",
- "arrow-schema 56.2.0",
- "flatbuffers",
- "half",
- "itertools 0.14.0",
- "jiff",
- "num-traits",
- "num_enum",
- "paste",
- "prost",
- "serde",
- "static_assertions",
- "vortex-buffer",
- "vortex-error",
- "vortex-flatbuffers",
- "vortex-proto",
- "vortex-utils",
+ "vortex-session",
 ]
 
 [[package]]
 name = "vortex-error"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
- "arrow-schema 56.2.0",
+ "arrow-schema 58.3.0",
  "flatbuffers",
  "jiff",
  "prost",
  "tokio",
- "url",
 ]
 
 [[package]]
 name = "vortex-fastlanes"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
- "arrayref",
- "arrow-buffer 56.2.0",
  "fastlanes",
  "itertools 0.14.0",
  "lending-iterator",
- "log",
  "num-traits",
  "prost",
- "static_assertions",
  "vortex-array",
  "vortex-buffer",
- "vortex-compute",
- "vortex-dtype",
  "vortex-error",
  "vortex-mask",
- "vortex-scalar",
- "vortex-utils",
- "vortex-vector",
+ "vortex-session",
 ]
 
 [[package]]
 name = "vortex-file"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
  "async-trait",
  "bytes",
- "cudarc",
  "flatbuffers",
  "futures",
- "getrandom 0.3.4",
  "itertools 0.14.0",
  "kanal",
- "log",
+ "moka",
+ "oneshot",
  "parking_lot",
+ "pin-project-lite",
  "tokio",
- "uuid",
+ "tracing",
  "vortex-alp",
  "vortex-array",
+ "vortex-btrblocks",
  "vortex-buffer",
  "vortex-bytebool",
  "vortex-datetime-parts",
  "vortex-decimal-byte-parts",
- "vortex-dtype",
  "vortex-error",
  "vortex-fastlanes",
  "vortex-flatbuffers",
  "vortex-fsst",
- "vortex-gpu",
  "vortex-io",
  "vortex-layout",
+ "vortex-mask",
  "vortex-metrics",
  "vortex-pco",
  "vortex-runend",
- "vortex-scalar",
  "vortex-scan",
  "vortex-sequence",
  "vortex-session",
@@ -8317,84 +8227,59 @@ dependencies = [
 [[package]]
 name = "vortex-flatbuffers"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
  "flatbuffers",
  "vortex-buffer",
+ "vortex-error",
 ]
 
 [[package]]
 name = "vortex-fsst"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
- "async-trait",
  "fsst-rs",
  "prost",
  "vortex-array",
  "vortex-buffer",
- "vortex-dtype",
  "vortex-error",
  "vortex-mask",
- "vortex-scalar",
- "vortex-vector",
-]
-
-[[package]]
-name = "vortex-gpu"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cudarc",
- "vortex-alp",
- "vortex-array",
- "vortex-buffer",
- "vortex-dtype",
- "vortex-error",
- "vortex-fastlanes",
- "vortex-gpu-kernels",
- "vortex-mask",
- "walkdir",
-]
-
-[[package]]
-name = "vortex-gpu-kernels"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "fastlanes",
+ "vortex-session",
 ]
 
 [[package]]
 name = "vortex-io"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
- "async-compat",
  "async-fs",
  "async-stream",
  "async-trait",
  "bytes",
- "cfg-if",
+ "custom-labels",
  "futures",
- "getrandom 0.3.4",
- "handle",
+ "glob",
  "kanal",
- "log",
  "oneshot",
  "parking_lot",
  "pin-project-lite",
  "smol",
  "tokio",
  "tracing",
+ "vortex-array",
  "vortex-buffer",
  "vortex-error",
  "vortex-metrics",
  "vortex-session",
+ "vortex-utils",
  "wasm-bindgen-futures",
 ]
 
 [[package]]
 name = "vortex-ipc"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
  "bytes",
  "flatbuffers",
@@ -8403,59 +8288,57 @@ dependencies = [
  "pin-project-lite",
  "vortex-array",
  "vortex-buffer",
- "vortex-dtype",
  "vortex-error",
  "vortex-flatbuffers",
+ "vortex-session",
 ]
 
 [[package]]
 name = "vortex-layout"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
  "arcref",
- "arrow-buffer 56.2.0",
+ "arrow-array 58.3.0",
+ "arrow-schema 58.3.0",
  "async-stream",
  "async-trait",
- "cudarc",
+ "bit-vec",
  "flatbuffers",
  "futures",
  "itertools 0.14.0",
  "kanal",
- "log",
  "moka",
  "once_cell",
  "oneshot",
  "parking_lot",
  "paste",
- "pco",
  "pin-project-lite",
  "prost",
  "rustc-hash",
+ "sketches-ddsketch",
  "termtree",
  "tokio",
- "uuid",
+ "tracing",
  "vortex-array",
  "vortex-btrblocks",
  "vortex-buffer",
- "vortex-decimal-byte-parts",
- "vortex-dtype",
  "vortex-error",
  "vortex-flatbuffers",
- "vortex-gpu",
  "vortex-io",
  "vortex-mask",
  "vortex-metrics",
- "vortex-pco",
- "vortex-scalar",
+ "vortex-runend",
+ "vortex-scan",
  "vortex-sequence",
  "vortex-session",
  "vortex-utils",
- "vortex-zstd",
 ]
 
 [[package]]
 name = "vortex-mask"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
  "itertools 0.14.0",
  "vortex-buffer",
@@ -8465,31 +8348,30 @@ dependencies = [
 [[package]]
 name = "vortex-metrics"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
- "getrandom 0.3.4",
  "parking_lot",
- "vortex-session",
- "witchcraft-metrics",
+ "sketches-ddsketch",
 ]
 
 [[package]]
 name = "vortex-pco"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
- "itertools 0.14.0",
  "pco",
  "prost",
  "vortex-array",
  "vortex-buffer",
- "vortex-dtype",
  "vortex-error",
  "vortex-mask",
- "vortex-scalar",
+ "vortex-session",
 ]
 
 [[package]]
 name = "vortex-proto"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
  "prost",
  "prost-types",
@@ -8498,85 +8380,59 @@ dependencies = [
 [[package]]
 name = "vortex-runend"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
- "arrow-array 56.2.0",
- "arrow-buffer 56.2.0",
+ "arrow-array 58.3.0",
  "itertools 0.14.0",
  "num-traits",
  "prost",
  "vortex-array",
  "vortex-buffer",
- "vortex-dtype",
  "vortex-error",
  "vortex-mask",
- "vortex-scalar",
-]
-
-[[package]]
-name = "vortex-scalar"
-version = "0.1.0"
-dependencies = [
- "arrow-array 56.2.0",
- "bytes",
- "itertools 0.14.0",
- "num-traits",
- "paste",
- "prost",
- "vortex-buffer",
- "vortex-dtype",
- "vortex-error",
- "vortex-proto",
- "vortex-utils",
+ "vortex-session",
 ]
 
 [[package]]
 name = "vortex-scan"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
- "arrow-array 56.2.0",
- "arrow-schema 56.2.0",
- "bit-vec",
- "cudarc",
+ "async-trait",
  "futures",
- "itertools 0.14.0",
- "log",
- "parking_lot",
- "sketches-ddsketch",
- "tokio",
+ "roaring",
+ "tracing",
  "vortex-array",
  "vortex-buffer",
- "vortex-dtype",
  "vortex-error",
- "vortex-gpu",
- "vortex-io",
- "vortex-layout",
  "vortex-mask",
- "vortex-metrics",
  "vortex-session",
 ]
 
 [[package]]
 name = "vortex-sequence"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
  "num-traits",
  "prost",
+ "smallvec",
  "vortex-array",
  "vortex-buffer",
- "vortex-dtype",
  "vortex-error",
- "vortex-io",
  "vortex-mask",
  "vortex-proto",
- "vortex-scalar",
- "vortex-vector",
+ "vortex-session",
 ]
 
 [[package]]
 name = "vortex-session"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
  "dashmap",
+ "lasso",
+ "parking_lot",
  "vortex-error",
  "vortex-utils",
 ]
@@ -8584,67 +8440,53 @@ dependencies = [
 [[package]]
 name = "vortex-sparse"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
  "itertools 0.14.0",
  "num-traits",
  "prost",
  "vortex-array",
  "vortex-buffer",
- "vortex-dtype",
  "vortex-error",
  "vortex-mask",
- "vortex-scalar",
- "vortex-vector",
+ "vortex-session",
 ]
 
 [[package]]
 name = "vortex-utils"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
  "dashmap",
- "hashbrown 0.16.1",
-]
-
-[[package]]
-name = "vortex-vector"
-version = "0.1.0"
-dependencies = [
- "paste",
- "static_assertions",
- "vortex-buffer",
- "vortex-dtype",
+ "hashbrown 0.17.1",
  "vortex-error",
- "vortex-mask",
 ]
 
 [[package]]
 name = "vortex-zigzag"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
- "itertools 0.14.0",
  "vortex-array",
  "vortex-buffer",
- "vortex-dtype",
  "vortex-error",
  "vortex-mask",
- "vortex-scalar",
+ "vortex-session",
  "zigzag",
 ]
 
 [[package]]
 name = "vortex-zstd"
 version = "0.1.0"
+source = "git+https://github.com/zilliztech/vortex?branch=v0.75.0-patched#d971ca99448387b723519a812b45efdb25abf7ab"
 dependencies = [
  "itertools 0.14.0",
  "prost",
  "vortex-array",
  "vortex-buffer",
- "vortex-dtype",
  "vortex-error",
  "vortex-mask",
- "vortex-scalar",
- "vortex-sparse",
- "vortex-vector",
+ "vortex-session",
  "zstd",
 ]
 
@@ -8813,7 +8655,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8881,7 +8723,7 @@ version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
 dependencies = [
- "windows-targets 0.52.6",
+ "windows-targets",
 ]
 
 [[package]]
@@ -8890,16 +8732,7 @@ version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.60.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2f500e4d28234f72040990ec9d39e3a6b950f9f22d3dba18416c35882612bcb"
-dependencies = [
- "windows-targets 0.53.5",
+ "windows-targets",
 ]
 
 [[package]]
@@ -8917,31 +8750,14 @@ version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973"
 dependencies = [
- "windows_aarch64_gnullvm 0.52.6",
- "windows_aarch64_msvc 0.52.6",
- "windows_i686_gnu 0.52.6",
- "windows_i686_gnullvm 0.52.6",
- "windows_i686_msvc 0.52.6",
- "windows_x86_64_gnu 0.52.6",
- "windows_x86_64_gnullvm 0.52.6",
- "windows_x86_64_msvc 0.52.6",
-]
-
-[[package]]
-name = "windows-targets"
-version = "0.53.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4945f9f551b88e0d65f3db0bc25c33b8acea4d9e41163edf90dcd0b19f9069f3"
-dependencies = [
- "windows-link",
- "windows_aarch64_gnullvm 0.53.1",
- "windows_aarch64_msvc 0.53.1",
- "windows_i686_gnu 0.53.1",
- "windows_i686_gnullvm 0.53.1",
- "windows_i686_msvc 0.53.1",
- "windows_x86_64_gnu 0.53.1",
- "windows_x86_64_gnullvm 0.53.1",
- "windows_x86_64_msvc 0.53.1",
+ "windows_aarch64_gnullvm",
+ "windows_aarch64_msvc",
+ "windows_i686_gnu",
+ "windows_i686_gnullvm",
+ "windows_i686_msvc",
+ "windows_x86_64_gnu",
+ "windows_x86_64_gnullvm",
+ "windows_x86_64_msvc",
 ]
 
 [[package]]
@@ -8951,22 +8767,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3"
 
 [[package]]
-name = "windows_aarch64_gnullvm"
-version = "0.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9d8416fa8b42f5c947f8482c43e7d89e73a173cead56d044f6a56104a6d1b53"
-
-[[package]]
 name = "windows_aarch64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469"
-
-[[package]]
-name = "windows_aarch64_msvc"
-version = "0.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9d782e804c2f632e395708e99a94275910eb9100b2114651e04744e9b125006"
 
 [[package]]
 name = "windows_i686_gnu"
@@ -8975,22 +8779,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e9b5ad5ab802e97eb8e295ac6720e509ee4c243f69d781394014ebfe8bbfa0b"
 
 [[package]]
-name = "windows_i686_gnu"
-version = "0.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "960e6da069d81e09becb0ca57a65220ddff016ff2d6af6a223cf372a506593a3"
-
-[[package]]
 name = "windows_i686_gnullvm"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66"
-
-[[package]]
-name = "windows_i686_gnullvm"
-version = "0.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa7359d10048f68ab8b09fa71c3daccfb0e9b559aed648a8f95469c27057180c"
 
 [[package]]
 name = "windows_i686_msvc"
@@ -8999,22 +8791,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
 
 [[package]]
-name = "windows_i686_msvc"
-version = "0.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e7ac75179f18232fe9c285163565a57ef8d3c89254a30685b57d83a38d326c2"
-
-[[package]]
 name = "windows_x86_64_gnu"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "147a5c80aabfbf0c7d901cb5895d1de30ef2907eb21fbbab29ca94c5b08b1a78"
-
-[[package]]
-name = "windows_x86_64_gnu"
-version = "0.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c3842cdd74a865a8066ab39c8a7a473c0778a3f29370b5fd6b4b9aa7df4a499"
 
 [[package]]
 name = "windows_x86_64_gnullvm"
@@ -9023,41 +8803,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d"
 
 [[package]]
-name = "windows_x86_64_gnullvm"
-version = "0.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ffa179e2d07eee8ad8f57493436566c7cc30ac536a3379fdf008f47f6bb7ae1"
-
-[[package]]
 name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
-name = "windows_x86_64_msvc"
-version = "0.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
-
-[[package]]
 name = "wit-bindgen"
 version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
-
-[[package]]
-name = "witchcraft-metrics"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "867a74dec702d742179279ab0b5bcab72ca5858c0c3ccf870bdb5c99f54d675b"
-dependencies = [
- "exponential-decay-histogram",
- "once_cell",
- "parking_lot",
- "serde",
- "serde-value",
-]
 
 [[package]]
 name = "writeable"
