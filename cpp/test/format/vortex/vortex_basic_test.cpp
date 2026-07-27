@@ -1364,7 +1364,7 @@ TEST_P(VortexBasicTest, TestBasicTake) {
   // so we removed the out-of-range index tests.
 }
 
-TEST_P(VortexBasicTest, AsyncScanPanicCompletesCallbackWithError) {
+TEST_P(VortexBasicTest, AsyncScanFailureCompletesCallbackWithError) {
   ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile(test_file_name_));
 
   const auto file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
@@ -1374,7 +1374,8 @@ TEST_P(VortexBasicTest, AsyncScanPanicCompletesCallbackWithError) {
                                                   file_size, footer_size));
   ASSERT_AND_ASSIGN(auto scan_builder, vxfile.CreateScanBuilder(kSmallCoalescingWindow));
 
-  // Bypass VortexFormatReader::take_async validation to exercise the Vortex task panic path.
+  // Bypass VortexFormatReader::take_async validation to exercise async scan failure handling.
+  // Older Vortex versions panic for an out-of-range index, while newer versions return an error.
   const uint64_t out_of_range_index = vxfile.RowCount();
   scan_builder.WithSplitRowIndices(false);
   scan_builder.WithIncludeByIndex(&out_of_range_index, 1);
@@ -1388,11 +1389,13 @@ TEST_P(VortexBasicTest, AsyncScanPanicCompletesCallbackWithError) {
 
   // The FFI has no cancellation API, so raw_ctx must remain callback-owned on timeout.
   ASSERT_EQ(completion.wait_for(std::chrono::seconds(5)), std::future_status::ready)
-      << "Tokio scan task panic dropped the callback";
+      << "Tokio scan task failure dropped the callback";
 
   const auto error = completion.get();
   ASSERT_FALSE(error.empty());
-  EXPECT_NE(error.find("vortex async scan panicked"), std::string::npos) << error;
+  EXPECT_TRUE(error.find("vortex async scan panicked") != std::string::npos ||
+              error.find("OutOfBounds") != std::string::npos)
+      << error;
 }
 
 TEST_P(VortexBasicTest, FooterSizeMatchesActualFile) {
