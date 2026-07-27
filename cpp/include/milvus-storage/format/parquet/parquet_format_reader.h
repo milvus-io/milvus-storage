@@ -38,6 +38,7 @@ class ParquetFormatReader final : public FormatReader, public std::enable_shared
       std::shared_ptr<::parquet::FileMetaData> parquet_metadata;
       api::Properties properties;
       milvus_storage::KeyRetriever key_retriever;
+      uint64_t file_size = 0;
     };
 
     using Metadata = FormatReaderMetadata<Payload>;
@@ -117,6 +118,7 @@ class ParquetFormatReader final : public FormatReader, public std::enable_shared
       const std::vector<int>& rg_indices_in_file);
   [[nodiscard]] arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos(
       const std::shared_ptr<::parquet::FileMetaData>& metadata);
+  [[nodiscard]] arrow::Status finish_open(std::shared_ptr<::parquet::arrow::FileReader> file_reader);
   [[nodiscard]] arrow::Status set_needed_columns(const std::vector<std::string>& needed_columns);
 
   ParquetFormatReader(const ParquetFormatReader& other, std::shared_ptr<::parquet::arrow::FileReader> file_reader);

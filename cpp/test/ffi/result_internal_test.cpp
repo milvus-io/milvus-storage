@@ -38,7 +38,7 @@ LoonFFIResult ReturnArrowError(const arrow::Status& status, int fallback) {
   RETURN_ARROW_ERROR(status, fallback, status.ToString());
 }
 
-class FailingAsyncRandomAccessFile final : public arrow::io::RandomAccessFile, public NonBlockingReadAtFile {
+class FailingAsyncRandomAccessFile final : public arrow::io::RandomAccessFile, public NonBlockingRandomAccessFile {
   public:
   explicit FailingAsyncRandomAccessFile(arrow::Status status)
       : file_(std::make_shared<arrow::io::BufferReader>("test payload")), status_(std::move(status)) {}
@@ -70,6 +70,7 @@ class FailingAsyncRandomAccessFile final : public arrow::io::RandomAccessFile, p
   arrow::Future<int64_t> ReadAtAsyncInto(int64_t, int64_t, uint8_t*) override {
     return arrow::Future<int64_t>::MakeFinished(status_);
   }
+  arrow::Future<int64_t> GetSizeAsync() override { return arrow::Future<int64_t>::MakeFinished(file_->GetSize()); }
   arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const arrow::io::IOContext& io_context,
                                                           int64_t position,
                                                           int64_t nbytes) override {
