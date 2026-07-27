@@ -15,12 +15,27 @@
 #include "milvus-storage/ffi_filesystem_metrics_c.h"
 
 #include "milvus-storage/ffi_internal/result.h"
+#include "milvus-storage/filesystem/metrics/buckets.h"
 #include "milvus-storage/filesystem/observable.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 
 using ::FileSystemWrapper;
 using milvus_storage::Observable;
+
+const int64_t* loon_fs_latency_bucket_bounds_us(int32_t* out_len) {
+  if (out_len) {
+    *out_len = static_cast<int32_t>(milvus_storage::metrics::kLatencyBoundsUs.size());
+  }
+  return milvus_storage::metrics::kLatencyBoundsUs.data();
+}
+
+const int64_t* loon_fs_size_bucket_bounds_bytes(int32_t* out_len) {
+  if (out_len) {
+    *out_len = static_cast<int32_t>(milvus_storage::metrics::kSizeBoundsBytes.size());
+  }
+  return milvus_storage::metrics::kSizeBoundsBytes.data();
+}
 
 LoonFFIResult loon_filesystem_get_metrics(FileSystemHandle handle, LoonFilesystemMetricsSnapshot* out_metrics) {
   try {
@@ -40,20 +55,37 @@ LoonFFIResult loon_filesystem_get_metrics(FileSystemHandle handle, LoonFilesyste
       RETURN_ERROR(LOON_INVALID_ARGS, "Filesystem metrics are not enabled");
     }
 
+    static_assert(LOON_OP_TYPE_COUNT == milvus_storage::kOpTypeCount, "op type count mismatch");
+    static_assert(LOON_STATUS_COUNT == milvus_storage::kStatusCount, "status count mismatch");
+    static_assert(LOON_TRANSFER_COUNT == milvus_storage::kTransferCount, "transfer count mismatch");
+
     auto snapshot = metrics->GetSnapshot();
-    out_metrics->read_count = snapshot.read_count;
-    out_metrics->write_count = snapshot.write_count;
-    out_metrics->read_bytes = snapshot.read_bytes;
-    out_metrics->write_bytes = snapshot.write_bytes;
-    out_metrics->get_file_info_count = snapshot.get_file_info_count;
-    out_metrics->create_dir_count = snapshot.create_dir_count;
-    out_metrics->delete_dir_count = snapshot.delete_dir_count;
-    out_metrics->delete_file_count = snapshot.delete_file_count;
-    out_metrics->move_count = snapshot.move_count;
-    out_metrics->copy_file_count = snapshot.copy_file_count;
-    out_metrics->failed_count = snapshot.failed_count;
-    out_metrics->multi_part_upload_created = snapshot.multi_part_upload_created;
-    out_metrics->multi_part_upload_finished = snapshot.multi_part_upload_finished;
+    for (int i = 0; i < LOON_OP_TYPE_COUNT; ++i) {
+      const auto& src = snapshot.ops[i];
+      auto& dst = out_metrics->ops[i];
+      for (int j = 0; j < LOON_STATUS_COUNT; ++j) {
+        dst.count_by_status[j] = src.count_by_status[j];
+      }
+      dst.retry_count = src.retry_count;
+      dst.latency_sum_us = src.latency_sum_us;
+      dst.latency_count = src.latency_count;
+      for (int j = 0; j < LOON_LATENCY_BUCKETS; ++j) {
+        dst.latency_buckets[j] = src.latency_buckets[j];
+      }
+    }
+    for (int i = 0; i < LOON_TRANSFER_COUNT; ++i) {
+      out_metrics->transfers[i].bytes_total = snapshot.transfers[i].bytes_total;
+      out_metrics->transfers[i].size_sum_bytes = snapshot.transfers[i].size_sum_bytes;
+      out_metrics->transfers[i].size_count = snapshot.transfers[i].size_count;
+      for (int j = 0; j < LOON_SIZE_BUCKETS; ++j) {
+        out_metrics->transfers[i].size_buckets[j] = snapshot.transfers[i].size_buckets[j];
+      }
+    }
+    out_metrics->in_flight = snapshot.in_flight;
+    out_metrics->open_connections = snapshot.open_connections;
+    out_metrics->idle_connections = snapshot.idle_connections;
+    out_metrics->pending_multipart_created = snapshot.pending_multipart_created;
+    out_metrics->pending_multipart_finished = snapshot.pending_multipart_finished;
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {

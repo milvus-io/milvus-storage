@@ -49,6 +49,7 @@
 #include <arrow/util/future.h>
 #include <arrow/util/key_value_metadata.h>
 #include "milvus-storage/common/log.h"
+#include "milvus-storage/filesystem/metrics/error_classify.h"
 #include <arrow/util/logging.h>
 #include <arrow/util/string.h>
 
@@ -372,6 +373,11 @@ Status ExceptionToStatus(const Azure::Core::RequestFailedException& exception,
   }
   return Status::IOError(std::forward<PrefixArgs>(prefix_args)..., " Azure Error: [",
                          exception.ErrorCode, "] ", exception.what());
+}
+
+// Map an Azure request failure to an OpStatus for metrics classification.
+milvus_storage::OpStatus ClassifyAzureError(const Azure::Core::RequestFailedException& exception) {
+  return milvus_storage::ClassifyHttpStatus(static_cast<int>(exception.StatusCode));
 }
 }  // namespace
 
@@ -1053,14 +1059,16 @@ class ObjectInputFile final : public io::RandomAccessFile {
 
 Status CreateEmptyBlockBlob(const Blobs::BlockBlobClient& block_blob_client,
                             const std::shared_ptr<milvus_storage::FilesystemMetrics>& metrics) {
+  std::optional<milvus_storage::ScopedOp> op;
   if (metrics) {
-    metrics->IncrementMultiPartUploadCreated();
+    op.emplace(metrics->StartOp(milvus_storage::OpType::MultipartCreate));
+    metrics->IncrementMultipartCreated();
   }
   try {
     block_blob_client.UploadFrom(nullptr, 0);
   } catch (const Storage::StorageException& exception) {
-    if (metrics) {
-      metrics->IncrementFailedCount();
+    if (op) {
+      op->Fail(ClassifyAzureError(exception));
     }
     return ExceptionToStatus(
         exception, "UploadFrom failed for '", block_blob_client.GetUrl(),
@@ -1072,8 +1080,10 @@ Status CreateEmptyBlockBlob(const Blobs::BlockBlobClient& block_blob_client,
 
 Status CreateEmptyBlockBlobConditional(Blobs::BlockBlobClient& block_blob_client,
                                        const std::shared_ptr<milvus_storage::FilesystemMetrics>& metrics) {
+  std::optional<milvus_storage::ScopedOp> op;
   if (metrics) {
-    metrics->IncrementMultiPartUploadCreated();
+    op.emplace(metrics->StartOp(milvus_storage::OpType::MultipartCreate));
+    metrics->IncrementMultipartCreated();
   }
   try {
     Blobs::UploadBlockBlobOptions options;
@@ -1081,8 +1091,8 @@ Status CreateEmptyBlockBlobConditional(Blobs::BlockBlobClient& block_blob_client
     auto body = Core::IO::MemoryBodyStream(nullptr, 0);
     block_blob_client.Upload(body, options);
   } catch (const Storage::StorageException& exception) {
-    if (metrics) {
-      metrics->IncrementFailedCount();
+    if (op) {
+      op->Fail(ClassifyAzureError(exception));
     }
     return ExceptionToStatus(
         exception, "Conditional upload failed for '", block_blob_client.GetUrl(),
@@ -1106,8 +1116,10 @@ Status CommitBlockList(std::shared_ptr<Storage::Blobs::BlockBlobClient> block_bl
                        const std::vector<std::string>& block_ids,
                        const Blobs::CommitBlockListOptions& options,
                        const std::shared_ptr<milvus_storage::FilesystemMetrics>& metrics) {
+  std::optional<milvus_storage::ScopedOp> op;
   if (metrics) {
-    metrics->IncrementMultiPartUploadFinished();
+    op.emplace(metrics->StartOp(milvus_storage::OpType::MultipartComplete));
+    metrics->IncrementMultipartFinished();
   }
   try {
     // CommitBlockList puts all block_ids in the latest element. That means in the case
@@ -1116,8 +1128,8 @@ Status CommitBlockList(std::shared_ptr<Storage::Blobs::BlockBlobClient> block_bl
     // https://learn.microsoft.com/en-us/rest/api/storageservices/put-block-list?tabs=microsoft-entra-id#request-body
     block_blob_client->CommitBlockList(block_ids, options);
   } catch (const Storage::StorageException& exception) {
-    if (metrics) {
-      metrics->IncrementFailedCount();
+    if (op) {
+      op->Fail(ClassifyAzureError(exception));
     }
     return ExceptionToStatus(
         exception, "CommitBlockList failed for '", block_blob_client->GetUrl(),
@@ -1129,22 +1141,23 @@ Status CommitBlockList(std::shared_ptr<Storage::Blobs::BlockBlobClient> block_bl
 Status StageBlock(Blobs::BlockBlobClient* block_blob_client, const std::string& id,
                   Core::IO::MemoryBodyStream& content, int64_t content_length,
                   const std::shared_ptr<milvus_storage::FilesystemMetrics>& metrics) {
+  std::optional<milvus_storage::ScopedXfer> op;
   if (metrics) {
-    metrics->IncrementWriteCount();
+    op.emplace(metrics->StartTransfer(milvus_storage::OpType::MultipartUploadPart));
   }
   try {
     block_blob_client->StageBlock(id, content);
   } catch (const Storage::StorageException& exception) {
-    if (metrics) {
-      metrics->IncrementFailedCount();
+    if (op) {
+      op->Fail(ClassifyAzureError(exception));
     }
     return ExceptionToStatus(
         exception, "StageBlock failed for '", block_blob_client->GetUrl(),
         "' new_block_id: '", id,
         "'. Staging new blocks is fundamental to streaming writes to blob storage.");
   }
-  if (metrics) {
-    metrics->IncrementWriteBytes(content_length);
+  if (op) {
+    op->RecordBytes(content_length);
   }
   return Status::OK();
 }
@@ -3442,7 +3455,8 @@ bool AzureFileSystem::Equals(const FileSystem& other) const {
 }
 
 Result<FileInfo> AzureFileSystem::GetFileInfo(const std::string& path) {
-  impl_->metrics()->IncrementGetFileInfoCount();
+  auto metrics_op = impl_->metrics()->StartOp(milvus_storage::OpType::Head);
+  auto op_result = [&]() -> Result<FileInfo> {
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   if (location.container.empty()) {
     DCHECK(location.path.empty());
@@ -3456,20 +3470,28 @@ Result<FileInfo> AzureFileSystem::GetFileInfo(const std::string& path) {
     return GetContainerPropsAsFileInfo(location, container_client);
   }
   return impl_->GetFileInfoOfPathWithinContainer(location);
+  }();
+  if (!op_result.ok()) metrics_op.Fail(milvus_storage::ClassifyArrowStatus(op_result.status()));
+  return op_result;
 }
 
 Result<FileInfoVector> AzureFileSystem::GetFileInfo(const FileSelector& select) {
-  impl_->metrics()->IncrementGetFileInfoCount();
+  auto metrics_op = impl_->metrics()->StartOp(milvus_storage::OpType::List);
+  auto op_result = [&]() -> Result<FileInfoVector> {
   Core::Context context;
   Azure::Nullable<int32_t> page_size_hint;  // unspecified
   FileInfoVector results;
   RETURN_NOT_OK(
       impl_->GetFileInfoWithSelector(context, page_size_hint, select, &results));
   return {std::move(results)};
+  }();
+  if (!op_result.ok()) metrics_op.Fail(milvus_storage::ClassifyArrowStatus(op_result.status()));
+  return op_result;
 }
 
 Status AzureFileSystem::CreateDir(const std::string& path, bool recursive) {
-  impl_->metrics()->IncrementCreateDirCount();
+  auto metrics_op = impl_->metrics()->StartOp(milvus_storage::OpType::CreateDir);
+  auto op_status = [&]() -> Status {
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   if (location.container.empty()) {
     return Status::Invalid("CreateDir requires a non-empty path.");
@@ -3510,10 +3532,14 @@ Status AzureFileSystem::CreateDir(const std::string& path, bool recursive) {
   }
   DCHECK_EQ(hns_support, HNSSupport::kDisabled);
   return impl_->CreateDirOnContainer(container_client, location, recursive);
+  }();
+  if (!op_status.ok()) metrics_op.Fail(milvus_storage::ClassifyArrowStatus(op_status));
+  return op_status;
 }
 
 Status AzureFileSystem::DeleteDir(const std::string& path) {
-  impl_->metrics()->IncrementDeleteDirCount();
+  auto metrics_op = impl_->metrics()->StartOp(milvus_storage::OpType::DeleteDir);
+  auto op_status = [&]() -> Status {
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   if (location.container.empty()) {
     return Status::Invalid("DeleteDir requires a non-empty path.");
@@ -3539,10 +3565,14 @@ Status AzureFileSystem::DeleteDir(const std::string& path) {
                                              /*require_dir_to_exist=*/true,
                                              /*preserve_dir_marker_blob=*/false,
                                              "DeleteDir");
+  }();
+  if (!op_status.ok()) metrics_op.Fail(milvus_storage::ClassifyArrowStatus(op_status));
+  return op_status;
 }
 
 Status AzureFileSystem::DeleteDirContents(const std::string& path, bool missing_dir_ok) {
-  impl_->metrics()->IncrementDeleteDirCount();
+  auto metrics_op = impl_->metrics()->StartOp(milvus_storage::OpType::DeleteDir);
+  auto op_status = [&]() -> Status {
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   if (location.container.empty()) {
     return internal::InvalidDeleteDirContents(location.all);
@@ -3563,6 +3593,9 @@ Status AzureFileSystem::DeleteDirContents(const std::string& path, bool missing_
                                              /*require_dir_to_exist=*/!missing_dir_ok,
                                              /*preserve_dir_marker_blob=*/true,
                                              "DeleteDirContents");
+  }();
+  if (!op_status.ok()) metrics_op.Fail(milvus_storage::ClassifyArrowStatus(op_status));
+  return op_status;
 }
 
 Status AzureFileSystem::DeleteRootDirContents() {
@@ -3570,7 +3603,8 @@ Status AzureFileSystem::DeleteRootDirContents() {
 }
 
 Status AzureFileSystem::DeleteFile(const std::string& path) {
-  impl_->metrics()->IncrementDeleteFileCount();
+  auto metrics_op = impl_->metrics()->StartOp(milvus_storage::OpType::DeleteFile);
+  auto op_status = [&]() -> Status {
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   if (location.container.empty()) {
     return Status::Invalid("DeleteFile requires a non-empty path.");
@@ -3595,10 +3629,14 @@ Status AzureFileSystem::DeleteFile(const std::string& path) {
   return impl_->DeleteFileOnContainer(container_client, location,
                                       /*require_file_to_exist=*/true,
                                       /*operation=*/"DeleteFile");
+  }();
+  if (!op_status.ok()) metrics_op.Fail(milvus_storage::ClassifyArrowStatus(op_status));
+  return op_status;
 }
 
 Status AzureFileSystem::Move(const std::string& src, const std::string& dest) {
-  impl_->metrics()->IncrementMoveCount();
+  auto metrics_op = impl_->metrics()->StartOp(milvus_storage::OpType::Move);
+  auto op_status = [&]() -> Status {
   ARROW_ASSIGN_OR_RAISE(auto src_location, AzureLocation::FromString(src));
   ARROW_ASSIGN_OR_RAISE(auto dest_location, AzureLocation::FromString(dest));
   if (src_location.container.empty()) {
@@ -3617,13 +3655,20 @@ Status AzureFileSystem::Move(const std::string& src, const std::string& dest) {
     return impl_->CreateContainerFromPath(src_location, dest_location);
   }
   return impl_->MovePath(src_location, dest_location);
+  }();
+  if (!op_status.ok()) metrics_op.Fail(milvus_storage::ClassifyArrowStatus(op_status));
+  return op_status;
 }
 
 Status AzureFileSystem::CopyFile(const std::string& src, const std::string& dest) {
-  impl_->metrics()->IncrementCopyFileCount();
+  auto metrics_op = impl_->metrics()->StartOp(milvus_storage::OpType::Copy);
+  auto op_status = [&]() -> Status {
   ARROW_ASSIGN_OR_RAISE(auto src_location, AzureLocation::FromString(src));
   ARROW_ASSIGN_OR_RAISE(auto dest_location, AzureLocation::FromString(dest));
   return impl_->CopyFile(src_location, dest_location);
+  }();
+  if (!op_status.ok()) metrics_op.Fail(milvus_storage::ClassifyArrowStatus(op_status));
+  return op_status;
 }
 
 Result<std::shared_ptr<io::InputStream>> AzureFileSystem::OpenInputStream(

@@ -82,6 +82,7 @@
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
+#include "milvus-storage/filesystem/metrics/error_classify.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/util_internal.h"
@@ -832,13 +833,13 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     ctx->request.SetRange(ToAwsString(FormatRange(position, nbytes)));
     ctx->request.SetResponseStreamFactory(AwsWriteableStreamFactory(out, nbytes));
 
-    ctx->metrics->IncrementReadCount();
+    ctx->op = std::make_shared<ScopedXfer>(ctx->metrics->StartTransfer(OpType::Read));
     ctx->client_lock->GetObjectAsync(
         ctx->request,
         [ctx](const Aws::S3Crt::S3CrtClient*, const S3CrtModel::GetObjectRequest&, S3CrtModel::GetObjectOutcome outcome,
               const std::shared_ptr<const Aws::Client::AsyncCallerContext>&) mutable {
           if (!outcome.IsSuccess()) {
-            ctx->metrics->IncrementFailedCount();
+            ctx->op->Fail(ClassifyHttpStatus(static_cast<int>(outcome.GetError().GetResponseCode())));
             ctx->future.MarkFinished(arrow::Result<int64_t>(ErrorToStatus("GetObject", outcome.GetError())));
             return;
           }
@@ -846,7 +847,7 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
           const auto& result = outcome.GetResult();
           const auto response_content_length = result.GetContentLength();
           if (response_content_length < 0 || response_content_length > ctx->nbytes) {
-            ctx->metrics->IncrementFailedCount();
+            ctx->op->Fail(OpStatus::Unknown);
             ctx->future.MarkFinished(arrow::Result<int64_t>(
                 arrow::Status::IOError("Unexpected GetObject Content-Length ", response_content_length,
                                        " for range read of ", ctx->nbytes, " bytes")));
@@ -856,7 +857,9 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
           const int64_t bytes_read = response_content_length;
           ctx->self->CacheContentLengthFromRead(result, ctx->position, bytes_read);
           if (bytes_read > 0) {
-            ctx->metrics->IncrementReadBytes(bytes_read);
+            ctx->op->RecordBytes(bytes_read);
+          } else {
+            ctx->op->Cancel();
           }
           ctx->future.MarkFinished(bytes_read);
         });
@@ -1043,6 +1046,7 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     S3CrtModel::GetObjectRequest request;
     std::shared_ptr<ObjectCrtInputFile> self;
     std::shared_ptr<FilesystemMetrics> metrics;
+    std::shared_ptr<ScopedXfer> op;
     int64_t position = 0;
     int64_t nbytes = 0;
   };

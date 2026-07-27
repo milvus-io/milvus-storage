@@ -320,19 +320,18 @@ static void test_filesystem_dir_operator(void) {
 }
 
 static void verify_filesystem_metrics_all_zero(LoonFilesystemMetricsSnapshot* metrics_snapshot) {
-  ck_assert_int_eq(metrics_snapshot->read_count, 0);
-  ck_assert_int_eq(metrics_snapshot->write_count, 0);
-  ck_assert_int_eq(metrics_snapshot->read_bytes, 0);
-  ck_assert_int_eq(metrics_snapshot->write_bytes, 0);
-  ck_assert_int_eq(metrics_snapshot->get_file_info_count, 0);
-  ck_assert_int_eq(metrics_snapshot->create_dir_count, 0);
-  ck_assert_int_eq(metrics_snapshot->delete_dir_count, 0);
-  ck_assert_int_eq(metrics_snapshot->delete_file_count, 0);
-  ck_assert_int_eq(metrics_snapshot->move_count, 0);
-  ck_assert_int_eq(metrics_snapshot->copy_file_count, 0);
-  ck_assert_int_eq(metrics_snapshot->failed_count, 0);
-  ck_assert_int_eq(metrics_snapshot->multi_part_upload_created, 0);
-  ck_assert_int_eq(metrics_snapshot->multi_part_upload_finished, 0);
+  for (int i = 0; i < LOON_OP_TYPE_COUNT; ++i) {
+    ck_assert_int_eq(metrics_snapshot->ops[i].latency_count, 0);
+    for (int j = 0; j < LOON_STATUS_COUNT; ++j) {
+      ck_assert_int_eq(metrics_snapshot->ops[i].count_by_status[j], 0);
+    }
+  }
+  for (int i = 0; i < LOON_TRANSFER_COUNT; ++i) {
+    ck_assert_int_eq(metrics_snapshot->transfers[i].bytes_total, 0);
+  }
+  ck_assert_int_eq(metrics_snapshot->in_flight, 0);
+  ck_assert_int_eq(metrics_snapshot->pending_multipart_created, 0);
+  ck_assert_int_eq(metrics_snapshot->pending_multipart_finished, 0);
 }
 
 static void test_filesystem_metrics(void) {
@@ -356,10 +355,10 @@ static void test_filesystem_metrics(void) {
   rc = loon_filesystem_get_metrics(fs_handle, &metrics_snapshot);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-  ck_assert_int_gt(metrics_snapshot.write_count, 0);
-  ck_assert_int_gt(metrics_snapshot.write_bytes, 0);
-  ck_assert_int_eq(metrics_snapshot.read_count, 0);
-  ck_assert_int_eq(metrics_snapshot.read_bytes, 0);
+  ck_assert_int_gt(metrics_snapshot.ops[LOON_OP_WRITE].count_by_status[LOON_STATUS_OK], 0);
+  ck_assert_int_gt(metrics_snapshot.transfers[LOON_XFER_WRITE].bytes_total, 0);
+  ck_assert_int_eq(metrics_snapshot.ops[LOON_OP_READ].count_by_status[LOON_STATUS_OK], 0);
+  ck_assert_int_eq(metrics_snapshot.transfers[LOON_XFER_READ].bytes_total, 0);
 
   loon_filesystem_destroy(fs_handle);
 }

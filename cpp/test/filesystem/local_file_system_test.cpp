@@ -111,16 +111,18 @@ TEST_F(LocalFsTest, Observable) {
 
   metrics = observable->GetMetrics();
 
-  ASSERT_EQ(metrics->GetReadCount(), 0);
-  ASSERT_EQ(metrics->GetWriteCount(), 1);
-  ASSERT_EQ(metrics->GetWriteBytes(), content_size);
-  ASSERT_EQ(metrics->GetReadBytes(), 0);
-  ASSERT_EQ(metrics->GetGetFileInfoCount(), 0);
-  ASSERT_EQ(metrics->GetCreateDirCount(), 0);
-  ASSERT_EQ(metrics->GetDeleteDirCount(), 0);
-  ASSERT_EQ(metrics->GetDeleteFileCount(), 0);
-  ASSERT_EQ(metrics->GetMoveCount(), 0);
-  ASSERT_EQ(metrics->GetCopyFileCount(), 0);
+  ASSERT_EQ(metrics->OpCount(OpType::Read, OpStatus::Ok), 0);
+  ASSERT_EQ(
+      (metrics->OpCount(OpType::Write, OpStatus::Ok) + metrics->OpCount(OpType::MultipartUploadPart, OpStatus::Ok)), 1);
+  ASSERT_EQ((metrics->TransferBytes(OpType::Write) + metrics->TransferBytes(OpType::MultipartUploadPart)),
+            content_size);
+  ASSERT_EQ(metrics->TransferBytes(OpType::Read), 0);
+  ASSERT_EQ(metrics->OpCount(OpType::Head), 0);
+  ASSERT_EQ(metrics->OpCount(OpType::CreateDir), 0);
+  ASSERT_EQ(metrics->OpCount(OpType::DeleteDir), 0);
+  ASSERT_EQ(metrics->OpCount(OpType::DeleteFile), 0);
+  ASSERT_EQ(metrics->OpCount(OpType::Move), 0);
+  ASSERT_EQ(metrics->OpCount(OpType::Copy), 0);
 }
 
 TEST_F(LocalFsTest, TestRootPath) {
@@ -191,14 +193,15 @@ TEST_F(LocalFsTest, TestMetricsAfterFileOperations) {
   ASSERT_NE(metrics, nullptr);
 
   metrics->Reset();
-  EXPECT_EQ(metrics->GetWriteCount(), 0);
-  EXPECT_EQ(metrics->GetReadCount(), 0);
-  EXPECT_EQ(metrics->GetWriteBytes(), 0);
-  EXPECT_EQ(metrics->GetReadBytes(), 0);
-  EXPECT_EQ(metrics->GetGetFileInfoCount(), 0);
-  EXPECT_EQ(metrics->GetCreateDirCount(), 0);
-  EXPECT_EQ(metrics->GetDeleteFileCount(), 0);
-  EXPECT_EQ(metrics->GetFailedCount(), 0);
+  EXPECT_EQ(
+      (metrics->OpCount(OpType::Write, OpStatus::Ok) + metrics->OpCount(OpType::MultipartUploadPart, OpStatus::Ok)), 0);
+  EXPECT_EQ(metrics->OpCount(OpType::Read, OpStatus::Ok), 0);
+  EXPECT_EQ((metrics->TransferBytes(OpType::Write) + metrics->TransferBytes(OpType::MultipartUploadPart)), 0);
+  EXPECT_EQ(metrics->TransferBytes(OpType::Read), 0);
+  EXPECT_EQ(metrics->OpCount(OpType::Head), 0);
+  EXPECT_EQ(metrics->OpCount(OpType::CreateDir), 0);
+  EXPECT_EQ(metrics->OpCount(OpType::DeleteFile), 0);
+  EXPECT_EQ(metrics->FailedCount(), 0);
 
   // Write a file
   std::string file_path = base_path_ + "/test-metrics-write.txt";
@@ -209,28 +212,32 @@ TEST_F(LocalFsTest, TestMetricsAfterFileOperations) {
   ASSERT_STATUS_OK(output_stream->Write(content.c_str(), content_size));
   ASSERT_STATUS_OK(output_stream->Close());
 
-  EXPECT_EQ(metrics->GetWriteCount(), 1);
-  EXPECT_EQ(metrics->GetWriteBytes(), content_size);
-  EXPECT_EQ(metrics->GetReadCount(), 0);
-  EXPECT_EQ(metrics->GetReadBytes(), 0);
+  EXPECT_EQ(
+      (metrics->OpCount(OpType::Write, OpStatus::Ok) + metrics->OpCount(OpType::MultipartUploadPart, OpStatus::Ok)), 1);
+  EXPECT_EQ((metrics->TransferBytes(OpType::Write) + metrics->TransferBytes(OpType::MultipartUploadPart)),
+            content_size);
+  EXPECT_EQ(metrics->OpCount(OpType::Read, OpStatus::Ok), 0);
+  EXPECT_EQ(metrics->TransferBytes(OpType::Read), 0);
 
   // Read the file
   ASSERT_AND_ASSIGN(auto input_stream, fs_->OpenInputStream(file_path));
   ASSERT_AND_ASSIGN(auto read_buffer, input_stream->Read(content_size));
   ASSERT_STATUS_OK(input_stream->Close());
 
-  EXPECT_EQ(metrics->GetReadCount(), 1);
-  EXPECT_EQ(metrics->GetReadBytes(), content_size);
-  EXPECT_EQ(metrics->GetWriteCount(), 1);  // Should remain unchanged
+  EXPECT_EQ(metrics->OpCount(OpType::Read, OpStatus::Ok), 1);
+  EXPECT_EQ(metrics->TransferBytes(OpType::Read), content_size);
+  EXPECT_EQ(
+      (metrics->OpCount(OpType::Write, OpStatus::Ok) + metrics->OpCount(OpType::MultipartUploadPart, OpStatus::Ok)),
+      1);  // Should remain unchanged
 
   // GetFileInfo operations
   ASSIGN_OR_ABORT(auto file_info, fs_->GetFileInfo(file_path));
   EXPECT_EQ(file_info.type(), arrow::fs::FileType::File);
-  EXPECT_GE(metrics->GetGetFileInfoCount(), 1);
+  EXPECT_GE(metrics->OpCount(OpType::Head), 1);
 
   // Delete file
   ASSERT_STATUS_OK(fs_->DeleteFile(file_path));
-  EXPECT_EQ(metrics->GetDeleteFileCount(), 1);
+  EXPECT_EQ(metrics->OpCount(OpType::DeleteFile), 1);
 
   // Verify file doesn't exist
   ASSIGN_OR_ABORT(auto deleted_info, fs_->GetFileInfo(file_path));
@@ -244,13 +251,13 @@ TEST_F(LocalFsTest, TestMetricsForDirectoryOperations) {
   ASSERT_NE(metrics, nullptr);
 
   metrics->Reset();
-  EXPECT_EQ(metrics->GetCreateDirCount(), 0);
-  EXPECT_EQ(metrics->GetDeleteDirCount(), 0);
+  EXPECT_EQ(metrics->OpCount(OpType::CreateDir), 0);
+  EXPECT_EQ(metrics->OpCount(OpType::DeleteDir), 0);
 
   // Create directory
   std::string dir_path = base_path_ + "/test-dir";
   ASSERT_STATUS_OK(fs_->CreateDir(dir_path, true));
-  EXPECT_EQ(metrics->GetCreateDirCount(), 1);
+  EXPECT_EQ(metrics->OpCount(OpType::CreateDir), 1);
 
   // GetFileInfo on directory
   ASSIGN_OR_ABORT(auto dir_info, fs_->GetFileInfo(dir_path));
@@ -258,7 +265,7 @@ TEST_F(LocalFsTest, TestMetricsForDirectoryOperations) {
 
   // Delete directory
   ASSERT_STATUS_OK(fs_->DeleteDir(dir_path));
-  EXPECT_EQ(metrics->GetDeleteDirCount(), 1);
+  EXPECT_EQ(metrics->OpCount(OpType::DeleteDir), 1);
 }
 
 TEST_F(LocalFsTest, TestMetricsForMoveAndCopy) {
@@ -268,8 +275,8 @@ TEST_F(LocalFsTest, TestMetricsForMoveAndCopy) {
   ASSERT_NE(metrics, nullptr);
 
   metrics->Reset();
-  EXPECT_EQ(metrics->GetMoveCount(), 0);
-  EXPECT_EQ(metrics->GetCopyFileCount(), 0);
+  EXPECT_EQ(metrics->OpCount(OpType::Move), 0);
+  EXPECT_EQ(metrics->OpCount(OpType::Copy), 0);
 
   // Create source file
   std::string src_path = base_path_ + "/source.txt";
@@ -281,7 +288,7 @@ TEST_F(LocalFsTest, TestMetricsForMoveAndCopy) {
   // Copy file
   std::string copy_path = base_path_ + "/copy.txt";
   ASSERT_STATUS_OK(fs_->CopyFile(src_path, copy_path));
-  EXPECT_EQ(metrics->GetCopyFileCount(), 1);
+  EXPECT_EQ(metrics->OpCount(OpType::Copy), 1);
 
   // Verify copy exists
   ASSIGN_OR_ABORT(auto copy_info, fs_->GetFileInfo(copy_path));
@@ -290,7 +297,7 @@ TEST_F(LocalFsTest, TestMetricsForMoveAndCopy) {
   // Move file
   std::string move_path = base_path_ + "/moved.txt";
   ASSERT_STATUS_OK(fs_->Move(src_path, move_path));
-  EXPECT_EQ(metrics->GetMoveCount(), 1);
+  EXPECT_EQ(metrics->OpCount(OpType::Move), 1);
 
   // Verify source doesn't exist and destination exists
   ASSIGN_OR_ABORT(auto src_info, fs_->GetFileInfo(src_path));
@@ -306,7 +313,7 @@ TEST_F(LocalFsTest, TestMetricsForFailedOperations) {
   ASSERT_NE(metrics, nullptr);
 
   metrics->Reset();
-  EXPECT_EQ(metrics->GetFailedCount(), 0);
+  EXPECT_EQ(metrics->FailedCount(), 0);
 
   // Try to delete non-existent file
   std::string non_existent = base_path_ + "/non-existent.txt";
@@ -314,13 +321,13 @@ TEST_F(LocalFsTest, TestMetricsForFailedOperations) {
   // This might succeed (no-op) or fail depending on implementation
   // But if it fails, it should increment failed count
   if (!status.ok()) {
-    EXPECT_GE(metrics->GetFailedCount(), 1);
+    EXPECT_GE(metrics->FailedCount(), 1);
   }
 
   // Try to open non-existent file for reading
   auto read_result = fs_->OpenInputStream(non_existent);
   ASSERT_STATUS_NOT_OK(read_result);
-  EXPECT_GE(metrics->GetFailedCount(), 1);
+  EXPECT_GE(metrics->FailedCount(), 1);
 }
 
 TEST_F(LocalFsTest, TestMetricsForMultipleReadsAndWrites) {
@@ -344,8 +351,10 @@ TEST_F(LocalFsTest, TestMetricsForMultipleReadsAndWrites) {
     files.push_back(file_path);
   }
 
-  EXPECT_EQ(metrics->GetWriteCount(), 5);
-  EXPECT_EQ(metrics->GetWriteBytes(), 5 * content_size);
+  EXPECT_EQ(
+      (metrics->OpCount(OpType::Write, OpStatus::Ok) + metrics->OpCount(OpType::MultipartUploadPart, OpStatus::Ok)), 5);
+  EXPECT_EQ((metrics->TransferBytes(OpType::Write) + metrics->TransferBytes(OpType::MultipartUploadPart)),
+            5 * content_size);
 
   // Read all files
   for (const auto& file_path : files) {
@@ -354,8 +363,8 @@ TEST_F(LocalFsTest, TestMetricsForMultipleReadsAndWrites) {
     ASSERT_STATUS_OK(input_stream->Close());
   }
 
-  EXPECT_EQ(metrics->GetReadCount(), 5);
-  EXPECT_EQ(metrics->GetReadBytes(), 5 * content_size);
+  EXPECT_EQ(metrics->OpCount(OpType::Read, OpStatus::Ok), 5);
+  EXPECT_EQ(metrics->TransferBytes(OpType::Read), 5 * content_size);
 }
 
 TEST_F(LocalFsTest, TestMetricsForRandomAccessFile) {
@@ -381,8 +390,8 @@ TEST_F(LocalFsTest, TestMetricsForRandomAccessFile) {
   ASSERT_AND_ASSIGN(auto buffer2, file->ReadAt(10, 10));
   ASSERT_STATUS_OK(file->Close());
 
-  EXPECT_EQ(metrics->GetReadCount(), 2);   // Two successful ReadAt calls
-  EXPECT_EQ(metrics->GetReadBytes(), 20);  // 10 + 10 bytes read
+  EXPECT_EQ(metrics->OpCount(OpType::Read, OpStatus::Ok), 2);  // Two successful ReadAt calls
+  EXPECT_EQ(metrics->TransferBytes(OpType::Read), 20);         // 10 + 10 bytes read
 }
 
 }  // namespace milvus_storage
