@@ -1,14 +1,14 @@
 name: error-handling-ratchet
 
+# No `paths` filter on purpose: the script runs in seconds, and a path-filtered
+# workflow marked as a required check would leave non-cpp PRs permanently
+# pending (the workflow never runs, so the required status never reports).
 on:
   push:
-    paths:
-      - 'cpp/**'
-      - '.github/workflows/error-handling-ratchet.yml'
   pull_request:
-    paths:
-      - 'cpp/**'
-      - '.github/workflows/error-handling-ratchet.yml'
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,5 +20,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: fetch base baseline
+        if: github.event_name == 'pull_request'
+        # The base branch's baseline closes the self-reference loophole:
+        # regenerating a raised baseline inside the PR cannot pass, because
+        # category totals are compared against what the base branch records.
+        # `|| true`: the base may predate the ratchet (bootstrap).
+        run: |
+          git fetch --depth=1 origin "${{ github.base_ref }}"
+          git show "FETCH_HEAD:cpp/scripts/error_handling_baseline.tsv" > /tmp/base_baseline.tsv 2>/dev/null || true
+
       - name: error-handling ratchet
-        run: bash cpp/scripts/error_handling_ratchet.sh check
+        run: bash cpp/scripts/error_handling_ratchet.sh check /tmp/base_baseline.tsv
