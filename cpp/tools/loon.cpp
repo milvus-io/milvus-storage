@@ -151,8 +151,7 @@ static int DoDemoTable(int argc, char** argv) {
     std::cerr << std::endl;
     std::cerr << "Types: iceberg" << std::endl;
     std::cerr << std::endl;
-    std::cerr << "Creates a demo table with schema (id int64, name string,"
-              << " value float64)." << std::endl;
+    std::cerr << "Creates a demo table with schema (id int64, name string," << " value float64)." << std::endl;
     std::cerr << R"(Data: id=0..N-1, name="row_0".."row_{N-1}", value=id*1.5)" << std::endl;
     std::cerr << std::endl;
     std::cerr << "For cloud storage, pass extfs.* properties via --prop." << std::endl;
@@ -192,7 +191,13 @@ static int DoDemoTable(int argc, char** argv) {
     }
 
     bool with_deletes = !deletes.empty();
-    auto info = milvus_storage::iceberg::CreateTestTable(table_path, rows, with_deletes, deletes, storage_options);
+    auto info_result =
+        milvus_storage::iceberg::CreateTestTable(table_path, rows, with_deletes, deletes, storage_options);
+    if (!info_result.ok()) {
+      std::cerr << "Failed to create iceberg table: " << info_result.status().ToString() << std::endl;
+      return 1;
+    }
+    auto info = std::move(*info_result);
 
     std::cout << "Created iceberg table:" << std::endl;
     std::cout << "  path:              " << table_path << std::endl;
@@ -283,12 +288,12 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreLance(const std::strin
   ARROW_ASSIGN_OR_RAISE(auto lance_base_uri, milvus_storage::lance::BuildLanceBaseUri(fs_config, resolved_dir));
   auto storage_options = milvus_storage::lance::ToStorageOptions(fs_config);
 
-  auto dataset = milvus_storage::lance::BlockingDataset::Open(lance_base_uri, storage_options);
-  auto fragment_ids = dataset->GetAllFragmentIds();
+  ARROW_ASSIGN_OR_RAISE(auto dataset, milvus_storage::lance::BlockingDataset::Open(lance_base_uri, storage_options));
+  ARROW_ASSIGN_OR_RAISE(auto fragment_ids, dataset->GetAllFragmentIds());
 
   std::vector<ColumnGroupFile> files;
   for (auto frag_id : fragment_ids) {
-    auto row_count = dataset->GetFragmentRowCount(frag_id);
+    ARROW_ASSIGN_OR_RAISE(auto row_count, dataset->GetFragmentRowCount(frag_id));
     files.emplace_back(
         ColumnGroupFile{milvus_storage::lance::MakeLanceUri(
                             milvus_storage::lance::ToMilvusLanceUri(lance_base_uri, fs_config.address), frag_id),
@@ -311,7 +316,7 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreIceberg(const std::str
   ARROW_ASSIGN_OR_RAISE(auto parsed_uri, StorageUri::Parse(source));
   ARROW_ASSIGN_OR_RAISE(auto iceberg_uri, StorageUri::Make(parsed_uri, false));
 
-  auto file_infos = milvus_storage::iceberg::PlanFiles(iceberg_uri, snapshot_id, storage_options);
+  ARROW_ASSIGN_OR_RAISE(auto file_infos, milvus_storage::iceberg::PlanFiles(iceberg_uri, snapshot_id, storage_options));
 
   std::vector<ColumnGroupFile> files;
   files.reserve(file_infos.size());
@@ -356,8 +361,7 @@ static int DoCreate(int argc, char** argv) {
 
   if (format.empty() || source.empty() || target.empty() || columns.empty()) {
     std::cerr << "Usage: loon create --format <format> --source <uri> "
-              << "--target <base_path> --columns col1,col2,... "
-              << "[--prop key=value ...]" << std::endl;
+              << "--target <base_path> --columns col1,col2,... " << "[--prop key=value ...]" << std::endl;
     std::cerr << std::endl;
     std::cerr << "Formats: parquet, vortex, lance-table, iceberg-table" << std::endl;
     std::cerr << std::endl;
@@ -563,8 +567,7 @@ static int DoDescribe(int argc, char** argv) {
 static int DoRead(int argc, char** argv) {
   if (argc < 1) {
     std::cerr << "Usage: loon read <manifest_path> --columns col1,col2,..."
-              << " [--take pos1,pos2,...] [--predicate \"expr\"]"
-              << " [--verbose] [--prop key=value ...]" << std::endl;
+              << " [--take pos1,pos2,...] [--predicate \"expr\"]" << " [--verbose] [--prop key=value ...]" << std::endl;
     return 1;
   }
   std::string manifest_path = argv[0];
@@ -635,8 +638,8 @@ static int DoRead(int argc, char** argv) {
       for (size_t fi = 0; fi < cg->files.size(); ++fi) {
         auto& f = cg->files[fi];
         std::cout << "    file[" << fi << "] path=" << f.path << "  range=[" << f.start_index << "," << f.end_index
-                  << ")"
-                  << "  has_metadata=" << (f.properties.count(kPropertyMetadata) > 0 ? "true" : "false") << std::endl;
+                  << ")" << "  has_metadata=" << (f.properties.count(kPropertyMetadata) > 0 ? "true" : "false")
+                  << std::endl;
         auto meta_it = f.properties.find(kPropertyMetadata);
         if (meta_it != f.properties.end()) {
           std::cout << "    metadata: " << meta_it->second << std::endl;

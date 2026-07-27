@@ -30,6 +30,9 @@
 #include <arrow/status.h>
 #include <arrow/result.h>
 #include <fmt/format.h>
+#include <arrow/util/io_util.h>
+
+#include <cerrno>
 
 #include "milvus-storage/format/lance/lance_common.h"
 
@@ -123,23 +126,31 @@ arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
   ARROW_ASSIGN_OR_RAISE(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
 
   if (!dataset_) {
-    try {
-      dataset_ = BlockingDataset::OpenUnique(lance_uri, storage_options);
-      origin_fids_ = dataset_->GetAllFragmentIds();
-      dataset_->WriteArrowArrayStream(&array_stream);
-    } catch (std::exception& e) {
-      // dataset does not exist
+    auto open_result = BlockingDataset::OpenUnique(lance_uri, storage_options);
+    if (open_result.ok()) {
+      dataset_ = std::move(*open_result);
+      ARROW_ASSIGN_OR_RAISE(origin_fids_, dataset_->GetAllFragmentIds());
+      ARROW_RETURN_NOT_OK(dataset_->WriteArrowArrayStream(&array_stream));
+    } else if (arrow::internal::ErrnoFromStatus(open_result.status()) == ENOENT) {
+      // The dataset does not exist yet: create it. Only a classified
+      // not-found takes this path — auth failures, corruption, or transient
+      // IO errors now propagate instead of silently creating a fresh dataset
+      // (the previous catch(std::exception) treated every failure as
+      // "does not exist").
       origin_fids_.clear();
-      dataset_ = BlockingDataset::WriteDataset(lance_uri, &array_stream, storage_options, data_storage_format_);
+      ARROW_ASSIGN_OR_RAISE(
+          dataset_, BlockingDataset::WriteDataset(lance_uri, &array_stream, storage_options, data_storage_format_));
+    } else {
+      return open_result.status();
     }
   } else {
-    dataset_->WriteArrowArrayStream(&array_stream);
+    ARROW_RETURN_NOT_OK(dataset_->WriteArrowArrayStream(&array_stream));
   }
   record_batches_.clear();
 
   std::vector<uint64_t> append_fids;
   std::vector<uint64_t> current_fids;
-  current_fids = dataset_->GetAllFragmentIds();
+  ARROW_ASSIGN_OR_RAISE(current_fids, dataset_->GetAllFragmentIds());
 
   if (current_fids.size() < origin_fids_.size()) {
     return arrow::Status::Invalid(

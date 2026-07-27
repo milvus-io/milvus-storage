@@ -277,7 +277,7 @@ class ExternalTableTest : public ::testing::TestWithParam<std::string> {
     ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
     auto storage_options = lance::ToStorageOptions(fs_config);
 
-    auto dataset = lance::BlockingDataset::Open(lance_uri, storage_options);
+    ARROW_ASSIGN_OR_RAISE(auto dataset, lance::BlockingDataset::Open(lance_uri, storage_options));
 
     // Build predicate like "id in (3, 10, 25)"
     std::string predicate = "id in (";
@@ -287,7 +287,7 @@ class ExternalTableTest : public ::testing::TestWithParam<std::string> {
       predicate += std::to_string(deleted_ids[i]);
     }
     predicate += ")";
-    dataset->DeleteRows(predicate);
+    ARROW_RETURN_NOT_OK(dataset->DeleteRows(predicate));
 
     return WriteResult{std::move(result.cgfile), result.schema, num_rows};
   }
@@ -301,8 +301,9 @@ class ExternalTableTest : public ::testing::TestWithParam<std::string> {
     auto table_uri = MakeTableUri(bucket, path);
     auto storage_options = iceberg::ToStorageOptions(fs_config_);
 
-    auto table_info = iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options);
-    auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+    ARROW_ASSIGN_OR_RAISE(auto table_info, iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options));
+    ARROW_ASSIGN_OR_RAISE(auto file_infos,
+                          iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options));
     if (file_infos.empty()) {
       return arrow::Status::Invalid("PlanFiles returned no files");
     }
@@ -321,8 +322,10 @@ class ExternalTableTest : public ::testing::TestWithParam<std::string> {
     auto table_uri = MakeTableUri(bucket, path);
     auto storage_options = iceberg::ToStorageOptions(fs_config_);
 
-    auto table_info = iceberg::CreateTestTable(table_uri, num_rows, true, deleted_ids, storage_options);
-    auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+    ARROW_ASSIGN_OR_RAISE(auto table_info,
+                          iceberg::CreateTestTable(table_uri, num_rows, true, deleted_ids, storage_options));
+    ARROW_ASSIGN_OR_RAISE(auto file_infos,
+                          iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options));
     if (file_infos.empty()) {
       return arrow::Status::Invalid("PlanFiles returned no files");
     }
@@ -519,8 +522,10 @@ class ExternalSplitColumnGroupTest : public ::testing::TestWithParam<std::string
     ARROW_ASSIGN_OR_RAISE(auto table_uri, MakeIcebergTableUri(test_base_ + "/iceberg"));
     auto storage_options = iceberg::ToStorageOptions(fs_config_);
 
-    auto table_info = iceberg::CreateTestTable(table_uri, kSplitExternalTotalRows, false, {}, storage_options);
-    auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+    ARROW_ASSIGN_OR_RAISE(auto table_info,
+                          iceberg::CreateTestTable(table_uri, kSplitExternalTotalRows, false, {}, storage_options));
+    ARROW_ASSIGN_OR_RAISE(auto file_infos,
+                          iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options));
     if (file_infos.size() != 1) {
       return arrow::Status::Invalid("Expected exactly one Iceberg data file, got ", file_infos.size());
     }
@@ -1390,9 +1395,10 @@ TEST_F(GcpS3CompatWriteTest, IcebergWriteAndPlanFiles) {
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(props_, config));
   auto storage_options = iceberg::ToStorageOptions(config);
 
-  auto table_info = iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options);
+  auto table_info = iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options).ValueOrDie();
 
-  auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  auto file_infos =
+      iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options).ValueOrDie();
   ASSERT_FALSE(file_infos.empty()) << "PlanFiles returned no files";
   ASSERT_EQ(file_infos[0].record_count, num_rows);
   std::cout << "[GCP S3-compat] iceberg-table write+PlanFiles OK: " << file_infos[0].data_file_path << " ("

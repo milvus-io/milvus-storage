@@ -303,8 +303,8 @@ TEST_F(LanceBasicTest, TestBasic) {
   }
 
   auto verify_reader = [&]() {
-    auto read_dataset = BlockingDataset::Open(lance_uri, storage_options);
-    const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds();
+    auto read_dataset = BlockingDataset::Open(lance_uri, storage_options).ValueOrDie();
+    const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds().ValueOrDie();
 
     uint64_t total_rows = 0;
     for (const auto& fragment_id : fragment_ids) {
@@ -367,7 +367,7 @@ TEST_F(LanceBasicTest, TestReaderHandlesFragmentMissingNullableDatasetColumn) {
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(appended_file.path));
   ArrowFileSystemConfig fs_config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
-  auto dataset = BlockingDataset::Open(ToStandardLanceUri(parsed_uri.first), ToStorageOptions(fs_config));
+  auto dataset = BlockingDataset::Open(ToStandardLanceUri(parsed_uri.first), ToStorageOptions(fs_config)).ValueOrDie();
 
   LanceTableReader reader(dataset, parsed_uri.second, nullptr, properties_);
   ASSERT_STATUS_OK(reader.open());
@@ -403,9 +403,9 @@ TEST_F(LanceBasicTest, TestRead) {
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, large_batch->num_rows());
 
-  auto read_dataset = BlockingDataset::Open(lance_uri, storage_options);
+  auto read_dataset = BlockingDataset::Open(lance_uri, storage_options).ValueOrDie();
 
-  const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds();
+  const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds().ValueOrDie();
   // The splitting conditions(`WriteParams`) in lance are very strict.
   // So the default setting will only generate one fragment.
   ASSERT_EQ(fragment_ids.size(), 1);
@@ -507,10 +507,10 @@ TEST_F(LanceBasicTest, EstimatedMemoryAccountsForDeletions) {
   ASSERT_STATUS_OK(writer.Write(batch));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, kRows);
-  auto dataset = BlockingDataset::Open(lance_uri, storage_options);
-  dataset->DeleteRows("id < 2000");
+  auto dataset = BlockingDataset::Open(lance_uri, storage_options).ValueOrDie();
+  ASSERT_STATUS_OK(dataset->DeleteRows("id < 2000"));
 
-  auto fragment_ids = dataset->GetAllFragmentIds();
+  auto fragment_ids = dataset->GetAllFragmentIds().ValueOrDie();
   ASSERT_EQ(fragment_ids.size(), 1);
   LanceTableReader reader(dataset, fragment_ids[0], id_schema, properties_);
   ASSERT_STATUS_OK(reader.open());
@@ -622,8 +622,8 @@ TEST_F(LanceBasicTest, LegacyFormatReadsWhenMemoryEstimateIsUnavailable) {
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, kRows);
 
-  auto dataset = BlockingDataset::Open(lance_uri, storage_options);
-  auto fragment_ids = dataset->GetAllFragmentIds();
+  auto dataset = BlockingDataset::Open(lance_uri, storage_options).ValueOrDie();
+  auto fragment_ids = dataset->GetAllFragmentIds().ValueOrDie();
   ASSERT_EQ(fragment_ids.size(), 1);
 
   auto estimate_result = dataset->EstimateFragmentColumnMemory(fragment_ids[0]);

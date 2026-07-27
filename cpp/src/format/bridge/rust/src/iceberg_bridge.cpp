@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "iceberg_bridge.h"
+#include "bridge_error.h"
 #include "bridge_util.h"
 
 #include "rust/cxx.h"
@@ -22,9 +23,10 @@ namespace milvus_storage::iceberg {
 
 using milvus_storage::ConvertStorageOptions;
 
-std::vector<IcebergFileInfo> PlanFiles(const std::string& metadata_location,
-                                       int64_t snapshot_id,
-                                       const std::unordered_map<std::string, std::string>& storage_options) {
+arrow::Result<std::vector<IcebergFileInfo>> PlanFiles(
+    const std::string& metadata_location,
+    int64_t snapshot_id,
+    const std::unordered_map<std::string, std::string>& storage_options) {
   try {
     rust::Vec<rust::String> keys, values;
     ConvertStorageOptions(storage_options, keys, values);
@@ -44,16 +46,16 @@ std::vector<IcebergFileInfo> PlanFiles(const std::string& metadata_location,
     }
     return result;
   } catch (const rust::cxxbridge1::Error& e) {
-    throw IcebergException(e.what());
+    return milvus_storage::bridge::MakeBridgeErrorStatus(e.what());
   }
 }
 
-IcebergTestTableInfo CreateTestTable(const std::string& table_dir,
-                                     uint64_t num_rows,
-                                     bool with_positional_deletes,
-                                     const std::vector<int64_t>& deleted_positions,
-                                     const std::unordered_map<std::string, std::string>& storage_options,
-                                     const std::string& record_scheme_override) {
+arrow::Result<IcebergTestTableInfo> CreateTestTable(const std::string& table_dir,
+                                                    uint64_t num_rows,
+                                                    bool with_positional_deletes,
+                                                    const std::vector<int64_t>& deleted_positions,
+                                                    const std::unordered_map<std::string, std::string>& storage_options,
+                                                    const std::string& record_scheme_override) {
   try {
     rust::Vec<int64_t> rust_positions;
     for (auto pos : deleted_positions) {
@@ -73,7 +75,7 @@ IcebergTestTableInfo CreateTestTable(const std::string& table_dir,
         std::string(result.data_file_uri.data(), result.data_file_uri.size()),
     };
   } catch (const rust::cxxbridge1::Error& e) {
-    throw IcebergException(e.what());
+    return milvus_storage::bridge::MakeBridgeErrorStatus(e.what());
   }
 }
 
