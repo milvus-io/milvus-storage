@@ -723,7 +723,7 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
 };
 
 #ifdef WITH_CRT
-class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonBlockingReadAtFile {
+class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonBlockingRandomAccessFile {
   protected:
   struct ReadState {
     explicit ReadState(int64_t size) : content_length(size) {}
@@ -796,6 +796,59 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     ARROW_RETURN_NOT_OK(CheckClosed());
     ARROW_RETURN_NOT_OK(EnsureHeadObject(/*need_metadata=*/false));
     return GetCachedContentLength();
+  }
+
+  Future<int64_t> GetSizeAsync() override {
+    auto status = CheckClosed();
+    if (!status.ok()) {
+      return FailedReadFuture(status);
+    }
+
+    const auto content_length = GetCachedContentLength();
+    if (content_length != kNoSize) {
+      return Future<int64_t>::MakeFinished(content_length);
+    }
+
+    auto maybe_client_lease = holder_->Acquire();
+    if (!maybe_client_lease.ok()) {
+      return FailedReadFuture(maybe_client_lease.status());
+    }
+
+    auto ctx = std::make_shared<AsyncHeadContext>();
+    ctx->future = Future<int64_t>::Make();
+    ctx->client_lease = std::move(maybe_client_lease).ValueOrDie();
+    ctx->read_state = read_state_;
+    ctx->path = path_;
+    ctx->request.SetBucket(ToAwsString(path_.bucket));
+    ctx->request.SetKey(ToAwsString(path_.key));
+
+    ctx->client_lease->HeadObjectAsync(
+        ctx->request, [ctx](const Aws::S3Crt::S3CrtClient*, const S3CrtModel::HeadObjectRequest&,
+                            const S3CrtModel::HeadObjectOutcome& outcome,
+                            const std::shared_ptr<const Aws::Client::AsyncCallerContext>&) mutable {
+          if (!outcome.IsSuccess()) {
+            if (outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
+              ctx->future.MarkFinished(arrow::Result<int64_t>(PathNotFound(ctx->path)));
+              return;
+            }
+            ctx->future.MarkFinished(arrow::Result<int64_t>(
+                ErrorToStatus(std::forward_as_tuple("When reading information for key '", ctx->path.key,
+                                                    "' in bucket '", ctx->path.bucket, "': "),
+                              "HeadObject", outcome.GetError())));
+            return;
+          }
+
+          const auto content_length = outcome.GetResult().GetContentLength();
+          if (content_length < 0) {
+            ctx->future.MarkFinished(
+                arrow::Result<int64_t>(arrow::Status::IOError("HeadObject returned a negative Content-Length")));
+            return;
+          }
+
+          ctx->read_state->content_length.store(content_length, std::memory_order_release);
+          ctx->future.MarkFinished(content_length);
+        });
+    return ctx->future;
   }
 
   arrow::Status Seek(int64_t position) override {
@@ -1048,6 +1101,16 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     std::shared_ptr<FilesystemMetrics> metrics;
     int64_t position = 0;
     int64_t nbytes = 0;
+  };
+
+  struct AsyncHeadContext {
+    // Keep the same non-owning CRT client lifetime model as AsyncReadContext.
+    // The path and read state remain valid without owning the file or holder.
+    Future<int64_t> future;
+    S3CrtClientLease client_lease;
+    S3CrtModel::HeadObjectRequest request;
+    std::shared_ptr<ReadState> read_state;
+    S3Path path;
   };
 
   std::shared_ptr<S3CrtClientHolder> holder_;
