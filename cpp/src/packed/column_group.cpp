@@ -56,16 +56,22 @@ arrow::Status ColumnGroup::Merge(const ColumnGroup& other) {
   return arrow::Status::OK();
 }
 
-std::shared_ptr<arrow::Table> ColumnGroup::Table() const {
+arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroup::Table() const {
   auto result = arrow::Table::FromRecordBatches(batches_);
-  if (result.ok()) {
-    return result.ValueOrDie();
-  } else {
-    throw std::runtime_error(result.status().message());
+  if (!result.ok()) {
+    // The status used to be stringified into a runtime_error here, destroying
+    // its StatusCode; propagate it unchanged instead.
+    return WrapExtendError(ExtendStatusCode::PackedUnexpected, "ColumnGroup::Table: failed to merge record batches",
+                           result.status());
   }
+  return result;
 }
 
-std::shared_ptr<arrow::Schema> ColumnGroup::Schema() const { return this->Table()->schema(); }
+std::shared_ptr<arrow::Schema> ColumnGroup::Schema() const {
+  // All batches in a group share one schema; avoid materializing the merged
+  // table (which can fail) just to read it.
+  return batches_.empty() ? nullptr : batches_.front()->schema();
+}
 
 std::shared_ptr<arrow::RecordBatch> ColumnGroup::GetRecordBatch(size_t index) const { return batches_[index]; }
 

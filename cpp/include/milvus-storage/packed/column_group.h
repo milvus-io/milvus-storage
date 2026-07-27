@@ -45,7 +45,7 @@ class ColumnGroup {
 
   arrow::Status Merge(const ColumnGroup& other);
 
-  std::shared_ptr<arrow::Table> Table() const;
+  arrow::Result<std::shared_ptr<arrow::Table>> Table() const;
 
   std::shared_ptr<arrow::Schema> Schema() const;
 

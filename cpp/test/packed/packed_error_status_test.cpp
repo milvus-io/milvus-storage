@@ -127,4 +127,36 @@ TEST_F(PackedErrorStatusTest, ReaderMissingPackedMetadataIsMetadataCorrupted) {
                                      "PackedMetadataCorrupted");
 }
 
+TEST_F(PackedErrorStatusTest, MakeReportsMissingFileAsStatusWithClassification) {
+  std::vector<std::string> paths = {path_ + "/missing.parquet"};
+
+  auto result = PackedRecordBatchReader::Make(fs_, paths, schema_, reader_memory_);
+  ASSERT_FALSE(result.ok());
+  const auto& status = result.status();
+  // The wrap preserves the filesystem's own not-found detail (WrapExtendError
+  // keeps the cause's detail), so consumers get the fine-grained
+  // classification the throwing constructor used to destroy.
+  EXPECT_NE(status.ToString().find("missing.parquet"), std::string::npos) << status.ToString();
+  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::ObjectNotExist) << status.ToString();
+}
+
+TEST_F(PackedErrorStatusTest, MakeReportsEmptyPathsAsInvalidArgs) {
+  std::vector<std::string> paths;
+
+  auto result = PackedRecordBatchReader::Make(fs_, paths, schema_, reader_memory_);
+  ASSERT_FALSE(result.ok());
+  ExpectPackedCode(result.status(), ExtendStatusCode::PackedInvalidArgs);
+}
+
+TEST_F(PackedErrorStatusTest, MakeSucceedsOnValidFile) {
+  SetupOneFile();
+  std::vector<std::string> paths = {one_file_path_};
+
+  ASSERT_AND_ASSIGN(auto reader, PackedRecordBatchReader::Make(fs_, paths, schema_, reader_memory_));
+  std::shared_ptr<arrow::RecordBatch> batch;
+  ASSERT_STATUS_OK(reader->ReadNext(&batch));
+  ASSERT_NE(batch, nullptr);
+  ASSERT_STATUS_OK(reader->Close());
+}
+
 }  // namespace milvus_storage
