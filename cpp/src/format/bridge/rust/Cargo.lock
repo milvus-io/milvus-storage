@@ -7212,6 +7212,7 @@ dependencies = [
  "object_store",
  "object_store_opendal",
  "opendal 0.56.0",
+ "opendal-core 0.58.0",
  "paimon",
  "parquet 56.2.0",
  "paste",

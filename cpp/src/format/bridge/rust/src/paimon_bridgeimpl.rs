@@ -874,13 +874,33 @@ struct PaimonStreamReader {
     schema: SchemaRef,
 }
 
+fn classify_stream_error(error: paimon::Error) -> ArrowError {
+    let message = error.to_string();
+    if matches!(
+        &error,
+        paimon::Error::IoUnexpected { source, .. } if source.is_temporary()
+    ) {
+        return ArrowError::IoError(
+            message,
+            std::io::Error::new(std::io::ErrorKind::Other, error),
+        );
+    }
+    if matches!(
+        &error,
+        paimon::Error::Unsupported { .. } | paimon::Error::IoUnsupported { .. }
+    ) {
+        return ArrowError::NotYetImplemented(message);
+    }
+    ArrowError::InvalidArgumentError(message)
+}
+
 impl Iterator for PaimonStreamReader {
     type Item = std::result::Result<RecordBatch, ArrowError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         TOKIO_RT
             .block_on(self.stream.next())
-            .map(|result| result.map_err(|error| ArrowError::ExternalError(Box::new(error))))
+            .map(|result| result.map_err(classify_stream_error))
     }
 }
 
@@ -969,6 +989,7 @@ impl BlockingPaimonDataSplitReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow58::ffi::FFI_ArrowArray;
     use paimon::spec::{BinaryRow, DataFileMeta};
     use paimon::{DeletionFile, RowRange};
 
@@ -1009,6 +1030,46 @@ mod tests {
             .with_raw_convertible(raw_convertible)
             .build()
             .unwrap()
+    }
+
+    fn stream_error_code(error: paimon::Error) -> i32 {
+        let stream = futures::stream::iter([Err(error)]).boxed();
+        let reader = PaimonStreamReader {
+            stream,
+            schema: std::sync::Arc::new(arrow_schema58::Schema::empty()),
+        };
+        let mut ffi_stream = FFI_ArrowArrayStream::new(Box::new(reader));
+        let mut array = FFI_ArrowArray::empty();
+        unsafe { ffi_stream.get_next.unwrap()(&mut ffi_stream, &mut array) }
+    }
+
+    #[test]
+    fn stream_errors_keep_retryability_across_arrow_ffi() {
+        let temporary = opendal58::Error::new(
+            opendal58::ErrorKind::RateLimited,
+            "temporary object-store failure",
+        )
+        .set_temporary();
+        let temporary = paimon::Error::IoUnexpected {
+            message: "stream read failed".to_string(),
+            source: Box::new(temporary),
+        };
+        assert_eq!(stream_error_code(temporary), 5); // EIO
+
+        let permanent = paimon::Error::IoUnexpected {
+            message: "stream read failed".to_string(),
+            source: Box::new(opendal58::Error::new(
+                opendal58::ErrorKind::PermissionDenied,
+                "permanent object-store failure",
+            )),
+        };
+        assert_eq!(stream_error_code(permanent), 22); // EINVAL
+
+        let invalid = paimon::Error::DataInvalid {
+            message: "corrupt record batch".to_string(),
+            source: None,
+        };
+        assert_eq!(stream_error_code(invalid), 22); // EINVAL
     }
 
     #[test]
