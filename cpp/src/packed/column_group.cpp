@@ -28,7 +28,12 @@ ColumnGroup::ColumnGroup(GroupId group_id,
                          const std::shared_ptr<arrow::RecordBatch>& batch)
     : group_id_(group_id), origin_column_indices_(origin_column_indices), memory_usage_(0) {
   batches_.emplace_back(batch);
-  memory_usage_ += GetRecordBatchMemorySize(batch);
+  auto batch_size = GetRecordBatchMemorySize(batch);
+  memory_usage_ += batch_size;
+  // Keep the same bookkeeping as AddRecordBatch: without these, size()==1
+  // paired with empty per-batch usages / a stale row count.
+  batch_memory_usage_.push_back(batch_size);
+  total_rows_ += batch ? batch->num_rows() : 0;
 }
 
 arrow::Status ColumnGroup::AddRecordBatch(const std::shared_ptr<arrow::RecordBatch>& batch) {
