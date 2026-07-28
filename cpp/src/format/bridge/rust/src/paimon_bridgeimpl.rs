@@ -46,9 +46,8 @@ const ERROR_NOT_IMPLEMENTED_PREFIX: &str = "[paimon:error=not-implemented]";
 const DELETION_VECTOR_MAGIC: u32 = 1_581_511_376;
 /// Magic of Paimon's 64-bit deletion vectors, from Java
 /// `org.apache.paimon.deletionvectors.Bitmap64DeletionVector.MAGIC_NUMBER`.
-/// The on-disk envelope is identical to the 32-bit format
-/// (`length | magic | bitmap | crc`), so the magic word is the only reliable
-/// discriminator; `DeletionFile` metadata carries no bitmap type.
+/// Java writes this magic little-endian and records the complete serialized
+/// size in `DeletionFile.length`, unlike the bitmap32 envelope.
 const DELETION_VECTOR_BITMAP64_MAGIC: u32 = 1_681_511_377;
 const MAX_DATA_SPLIT_METADATA_BYTES: usize = 12 * 1024 * 1024;
 /// Soft warning threshold for one atomic DataSplit. A split is the smallest
@@ -780,53 +779,78 @@ async fn read_deletion_vector_at(
         length >= 4,
         "Paimon deletion vector length is too small: {length}"
     );
-    let total_length = length
-        .checked_add(8)
-        .ok_or_else(|| anyhow!("Paimon deletion vector range length overflow"))?;
-    let end = offset
-        .checked_add(total_length)
-        .ok_or_else(|| anyhow!("Paimon deletion vector range end overflow"))?;
     let file_io = FileIO::from_path(path)?
         .with_props(storage_options)
         .build()?;
     let input = file_io.new_input(path)?;
     let file_size = input.metadata().await?.size;
+    let total_length = length
+        .checked_add(8)
+        .ok_or_else(|| anyhow!("Paimon deletion vector range length overflow"))?;
+    let requested_end = offset
+        .checked_add(total_length)
+        .ok_or_else(|| anyhow!("Paimon deletion vector range end overflow"))?;
+    let header_end = offset
+        .checked_add(8)
+        .ok_or_else(|| anyhow!("Paimon deletion vector header range overflow"))?;
     ensure!(
-        end <= file_size,
-        "Paimon deletion vector range [{offset}, {end}) exceeds file size {file_size}: {path}"
+        header_end <= file_size,
+        "Paimon deletion vector header range [{offset}, {header_end}) exceeds file size \
+         {file_size}: {path}"
     );
     let reader = input.reader().await?;
-    let bytes = reader.read(offset..end).await?;
+    let bytes = reader.read(offset..requested_end.min(file_size)).await?;
+    ensure!(
+        bytes.len() >= 8,
+        "Paimon deletion vector short header: expected 8 bytes, got {}",
+        bytes.len()
+    );
+
+    let declared_length = u32::from_be_bytes(bytes[0..4].try_into()?) as u64;
+    let big_endian_magic = u32::from_be_bytes(bytes[4..8].try_into()?);
+    if big_endian_magic != DELETION_VECTOR_MAGIC
+        && u32::from_le_bytes(bytes[4..8].try_into()?) == DELETION_VECTOR_BITMAP64_MAGIC
+    {
+        ensure!(
+            declared_length.checked_add(8) == Some(length),
+            "Paimon bitmap64 deletion vector length mismatch: descriptor {length}, payload \
+             {declared_length} plus 8-byte envelope"
+        );
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| anyhow!("Paimon bitmap64 deletion vector range end overflow"))?;
+        ensure!(
+            end <= file_size && bytes.len() >= usize::try_from(length)?,
+            "Paimon bitmap64 deletion vector range [{offset}, {end}) exceeds file size \
+             {file_size}: {path}"
+        );
+        bail!(
+            "{ERROR_NOT_IMPLEMENTED_PREFIX} Paimon bitmap64 deletion vectors \
+             (deletion-vectors.bitmap64=true) are not supported yet; rewrite the affected \
+             snapshot with deletion-vectors.bitmap64=false: {path}"
+        );
+    }
+    ensure!(
+        big_endian_magic == DELETION_VECTOR_MAGIC,
+        "invalid Paimon deletion vector magic: expected {DELETION_VECTOR_MAGIC}, got \
+         {big_endian_magic}"
+    );
+    ensure!(
+        declared_length == length,
+        "Paimon deletion vector length mismatch: descriptor {length}, payload {declared_length}"
+    );
+
+    ensure!(
+        requested_end <= file_size,
+        "Paimon deletion vector range [{offset}, {requested_end}) exceeds file size \
+         {file_size}: {path}"
+    );
     ensure!(
         bytes.len() == usize::try_from(total_length)?,
         "Paimon deletion vector short read: expected {total_length} bytes, got {}",
         bytes.len()
     );
 
-    let declared_length = u32::from_be_bytes(bytes[0..4].try_into()?) as u64;
-    ensure!(
-        declared_length == length,
-        "Paimon deletion vector length mismatch: descriptor {length}, payload {declared_length}"
-    );
-    let magic = u32::from_be_bytes(bytes[4..8].try_into()?);
-    if magic == DELETION_VECTOR_BITMAP64_MAGIC {
-        // TODO: Decode Paimon's OptimizedRoaringBitmap64 wire format once
-        // paimon-rust exposes a stable reader for it. StarRocks currently
-        // supports only the default bitmap32 format as well.
-        // Explicit terminal error: the roaring64 payload is a different wire
-        // format, and silently misreading it as roaring32 would corrupt the
-        // visible row set. The stable error marker lets the C++ boundary map
-        // this to NotImplemented instead of a retryable IO failure.
-        bail!(
-            "{ERROR_NOT_IMPLEMENTED_PREFIX} Paimon bitmap64 deletion vectors \
-             (deletion-vectors.bitmap64=true) are not \
-             supported yet; disable bitmap64 or use data-split scan mode: {path}"
-        );
-    }
-    ensure!(
-        magic == DELETION_VECTOR_MAGIC,
-        "invalid Paimon deletion vector magic: expected {DELETION_VECTOR_MAGIC}, got {magic}"
-    );
     let payload_end = usize::try_from(4 + length)?;
     let stored_crc = u32::from_be_bytes(bytes[payload_end..payload_end + 4].try_into()?);
     let mut crc = crc32fast::Hasher::new();
@@ -1477,23 +1501,20 @@ mod tests {
     fn bitmap64_deletion_vector_is_rejected_with_actionable_error() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("dv64-index");
-        // Bitmap64 shares the `length | magic | bitmap | crc` envelope; only
-        // the magic differs. Body/CRC content is irrelevant because the magic
-        // check fires first.
-        let body = [0u8; 16];
-        let length = 4u64 + body.len() as u64;
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&(length as u32).to_be_bytes());
-        bytes.extend_from_slice(&DELETION_VECTOR_BITMAP64_MAGIC.to_be_bytes());
-        bytes.extend_from_slice(&body);
-        bytes.extend_from_slice(&0u32.to_be_bytes());
-        std::fs::write(&path, &bytes).unwrap();
+        let bytes = include_bytes!("../testdata/paimon-java-bitmap64.dv");
+        let declared_length = u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as u64;
+        assert_eq!(declared_length + 8, bytes.len() as u64);
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            DELETION_VECTOR_BITMAP64_MAGIC
+        );
+        std::fs::write(&path, bytes).unwrap();
 
         let error = TOKIO_RT
             .block_on(read_deletion_vector_at(
                 path.to_str().unwrap(),
                 0,
-                length,
+                bytes.len() as u64,
                 -1,
                 &HashMap::new(),
             ))
@@ -1502,9 +1523,10 @@ mod tests {
         assert!(message.contains("bitmap64"), "{message}");
         assert!(message.contains("are not supported yet"), "{message}");
         assert!(
-            message.contains("disable bitmap64 or use data-split scan mode"),
+            message.contains("rewrite the affected snapshot"),
             "{message}"
         );
+        assert!(!message.contains("data-split"), "{message}");
     }
 
     #[test]
