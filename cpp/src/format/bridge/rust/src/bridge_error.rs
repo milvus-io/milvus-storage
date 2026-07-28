@@ -46,7 +46,9 @@ pub const LOON_FILE_NOT_FOUND: i32 = 12;
 /// Mirror of the ExtendStatusCode transient tags (`ffi_error_code.h` 101-112).
 pub const LOON_AWS_ERROR_PRECONDITION_FAILED: i32 = 103;
 pub const LOON_AWS_ERROR_ACCESS_DENIED: i32 = 105;
+pub const LOON_TRANSIENT_TIMEOUT: i32 = 108;
 pub const LOON_TRANSIENT_THROTTLING: i32 = 109;
+pub const LOON_TRANSIENT_SERVICE: i32 = 110;
 
 /// Bridge-private codes (>= 1000): decoded by cpp `bridge_error.cpp` into an
 /// arrow StatusCode, never forwarded as an FFI error code.
@@ -89,12 +91,19 @@ pub fn classify_lance_error(e: &LanceError) -> Option<i32> {
         | LanceError::DatasetNotFound { .. }
         | LanceError::IndexNotFound { .. }
         | LanceError::RefNotFound { .. }
-        | LanceError::VersionNotFound { .. }
-        | LanceError::FieldNotFound { .. } => Some(LOON_FILE_NOT_FOUND),
-        // Permanent data problems: retrying re-reads the same bytes.
-        LanceError::CorruptFile { .. }
+        | LanceError::VersionNotFound { .. } => Some(LOON_FILE_NOT_FOUND),
+        // Field/schema errors are caller/schema-evolution conditions, not
+        // corruption -- and they must NOT look like a missing dataset: the
+        // ENOENT classification drives create-if-missing in the lance writer,
+        // so tagging FieldNotFound as not-found could turn a projection typo
+        // into a dataset-creation attempt. Producer sites are mixed
+        // (library-assembled schemas vs user projections), so they stay
+        // untagged -> conservative non-retriable.
+        LanceError::FieldNotFound { .. }
         | LanceError::SchemaMismatch { .. }
-        | LanceError::Schema { .. } => Some(BRIDGE_ERRCODE_DATA_CORRUPT),
+        | LanceError::Schema { .. } => None,
+        // Permanent data problems: retrying re-reads the same bytes.
+        LanceError::CorruptFile { .. } => Some(BRIDGE_ERRCODE_DATA_CORRUPT),
         LanceError::NotSupported { .. } => Some(BRIDGE_ERRCODE_NOT_SUPPORTED),
         // Lance itself declares these retryable: the failed attempt is spent,
         // but a fresh attempt (new commit round) can succeed. This is the
@@ -117,8 +126,18 @@ pub fn classify_lance_error(e: &LanceError) -> Option<i32> {
                 object_store::Error::NotSupported { .. }
                 | object_store::Error::NotImplemented { .. },
             ) => Some(BRIDGE_ERRCODE_NOT_SUPPORTED),
-            // Generic and friends: object_store has already spent its own
-            // retry budget; no positive transient/permanent signal survives,
+            // Generic carries the post-retry HTTP failure. The typed carrier
+            // (client::retry::RetryError, which has .status()) is pub(crate)
+            // in object_store and cannot be downcast from here, so the status
+            // code is recovered from the stable Display pattern of
+            // RequestError::Status ("non-2xx status code: NNN"). Fail-safe by
+            // construction: if object_store ever rewords it, this returns
+            // None and the error lands in the conservative non-retriable
+            // bucket -- it can never mis-tag a permanent error as transient.
+            Some(object_store::Error::Generic { source, .. }) => {
+                classify_http_status_in_message(&source.to_string())
+            }
+            // Anything else: no positive transient/permanent signal survives,
             // so stay untagged (conservative).
             _ => None,
         },
@@ -126,6 +145,24 @@ pub fn classify_lance_error(e: &LanceError) -> Option<i32> {
         // feed lance are mostly assembled by this library itself, so blaming
         // the caller would misroute retries (see the 2007/2020/2021
         // demotions). Left untagged pending a producer-site audit.
+        _ => None,
+    }
+}
+
+/// Recover the HTTP status from object_store's post-retry error message
+/// ("Server returned non-2xx status code: NNN: ..."). Only well-known
+/// transient statuses are tagged; anything else stays untagged.
+fn classify_http_status_in_message(msg: &str) -> Option<i32> {
+    const PATTERN: &str = "non-2xx status code: ";
+    let idx = msg.find(PATTERN)?;
+    let digits: String = msg[idx + PATTERN.len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    match digits.parse::<u16>().ok()? {
+        408 => Some(LOON_TRANSIENT_TIMEOUT),
+        429 => Some(LOON_TRANSIENT_THROTTLING),
+        500 | 502 | 503 | 504 => Some(LOON_TRANSIENT_SERVICE),
         _ => None,
     }
 }
@@ -145,5 +182,68 @@ impl From<arrow58::error::ArrowError> for BridgeError {
             code: None,
             msg: e.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Compile-time version pin: LanceError's From impl only accepts the
+    // object_store version lance itself depends on. If this crate's
+    // object_store ever diverges from lance's, this test stops COMPILING,
+    // surfacing the downcast coupling instead of letting classify_lance_error
+    // silently fail at runtime.
+    #[test]
+    fn object_store_version_matches_lance() {
+        let e = LanceError::from(object_store::Error::NotFound {
+            path: "p".to_string(),
+            source: "gone".into(),
+        });
+        assert_eq!(classify_lance_error(&e), Some(LOON_FILE_NOT_FOUND));
+    }
+
+    #[test]
+    fn generic_throttle_status_is_tagged_transient() {
+        let e = LanceError::from(object_store::Error::Generic {
+            store: "S3",
+            source: "Error performing GET https://x in 30s, after 10 retries                      - Server returned non-2xx status code: 429: slow down"
+                .into(),
+        });
+        assert_eq!(classify_lance_error(&e), Some(LOON_TRANSIENT_THROTTLING));
+
+        let e503 = LanceError::from(object_store::Error::Generic {
+            store: "S3",
+            source: "Server returned non-2xx status code: 503: unavailable".into(),
+        });
+        assert_eq!(classify_lance_error(&e503), Some(LOON_TRANSIENT_SERVICE));
+    }
+
+    #[test]
+    fn generic_without_status_stays_untagged() {
+        let e = LanceError::from(object_store::Error::Generic {
+            store: "S3",
+            source: "connection reset by peer".into(),
+        });
+        assert_eq!(classify_lance_error(&e), None);
+        // 4xx that is NOT a known transient must never be tagged retryable.
+        let e404ish = LanceError::from(object_store::Error::Generic {
+            store: "S3",
+            source: "Server returned non-2xx status code: 400: bad request".into(),
+        });
+        assert_eq!(classify_lance_error(&e404ish), None);
+    }
+
+    #[test]
+    fn field_and_schema_errors_are_not_enoent() {
+        // FieldNotFound must never classify as file-not-found: ENOENT drives
+        // create-if-missing in the lance writer.
+        let e = LanceError::FieldNotFound {
+            source: lance_core::error::FieldNotFoundError {
+                field_name: "f".to_string(),
+                candidates: vec![],
+            },
+        };
+        assert_eq!(classify_lance_error(&e), None);
     }
 }

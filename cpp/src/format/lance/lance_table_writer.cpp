@@ -16,6 +16,7 @@
 
 #include "milvus-storage/format/lance/lance_table_writer.h"
 
+#include <memory>
 #include <string>
 #include <iostream>
 #include <unordered_set>
@@ -116,6 +117,18 @@ arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
 
   auto batch_iterator = std::make_shared<BatchIterator>(schema_, record_batches_);
   ARROW_RETURN_NOT_OK(ExportRecordBatchReader(batch_iterator, &array_stream));
+  // The exported stream owns the batch iterator (and thereby every buffered
+  // RecordBatch). The Rust write entry points take ownership immediately
+  // (ptr::replace with an empty stream, so `release` becomes null and this
+  // guard is a no-op) -- but the error returns BEFORE the stream is handed to
+  // Rust (open failure, fragment-id listing failure) would otherwise leak the
+  // whole write payload.
+  auto stream_guard = [](struct ArrowArrayStream* s) {
+    if (s->release != nullptr) {
+      s->release(s);
+    }
+  };
+  std::unique_ptr<struct ArrowArrayStream, decltype(stream_guard)> release_on_exit(&array_stream, stream_guard);
 
   // Get storage options from properties for cloud storage support
   ArrowFileSystemConfig fs_config;

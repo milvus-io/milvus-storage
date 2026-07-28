@@ -13,6 +13,10 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <arrow/util/io_util.h>
 #include <memory>
 #include <numeric>
 #include <random>
@@ -278,6 +282,49 @@ TEST_F(LanceBasicTest, DefaultStorageVersionIsV2_1) {
   ASSERT_AND_ASSIGN(auto storage_version, ReadLanceDataFileVersion());
   ASSERT_EQ(storage_version.major, 2);
   ASSERT_EQ(storage_version.minor, 1);
+}
+
+// Anchors the create-if-missing decision of LanceTableWriter::Close(): a
+// classified not-found (and only that) creates a fresh dataset.
+TEST_F(LanceBasicTest, CloseCreatesDatasetOnClassifiedNotFound) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "local-filesystem test";
+  }
+  LanceTableWriter writer(base_path_ + "/fresh-dataset", schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+  ASSERT_EQ(cgfile.end_index, test_batch_->num_rows());
+}
+
+// The other direction of the same decision -- the core semantic change of the
+// bridge-classification PR: an open failure that is NOT a classified not-found
+// (here: EACCES) must propagate instead of silently creating a new dataset,
+// as the old catch(std::exception) fallback did.
+TEST_F(LanceBasicTest, CloseDoesNotCreateDatasetOnNonNotFoundOpenError) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "local-filesystem test";
+  }
+  if (::geteuid() == 0) {
+    GTEST_SKIP() << "permission bits are ineffective for root";
+  }
+  auto* subtree = dynamic_cast<arrow::fs::SubTreeFileSystem*>(fs_.get());
+  ASSERT_NE(subtree, nullptr);
+  const boost::filesystem::path denied_dir =
+      boost::filesystem::path(subtree->base_path()) / arrow_base_path_ / "denied";
+  boost::filesystem::create_directories(denied_dir / "ds");
+  ::chmod(denied_dir.string().c_str(), 0000);
+
+  LanceTableWriter writer(base_path_ + "/denied/ds", schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  auto close_result = writer.Close();
+
+  ::chmod(denied_dir.string().c_str(), 0755);  // restore before asserting so TearDown can clean up
+
+  ASSERT_FALSE(close_result.ok());
+  const auto& status = close_result.status();
+  EXPECT_NE(arrow::internal::ErrnoFromStatus(status), ENOENT) << status.ToString();
+  // No dataset must have been created behind the failure.
+  EXPECT_FALSE(boost::filesystem::exists(denied_dir / "ds" / "_versions")) << "dataset was created despite the error";
 }
 
 TEST_F(LanceBasicTest, TestBasic) {

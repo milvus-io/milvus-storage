@@ -96,6 +96,22 @@ TEST(BridgeErrorTest, TranslatePreservesClassificationAndAddsContext) {
   EXPECT_EQ(decoded.message().find("__LOON_"), std::string::npos);
 }
 
+TEST(BridgeErrorTest, TranslateDoesNotDowngradeNonIOErrorStatuses) {
+  // Bridge errors only travel as IOError strings; statuses arrow itself
+  // produced (Invalid / OutOfMemory from ImportChunkedArray etc.) must pass
+  // through with their StatusCode intact -- re-decoding them would downgrade
+  // OOM (retriable 2034) into StorageError (non-retriable 2044).
+  auto invalid = TranslateBridgeStatus("ctx", arrow::Status::Invalid("bad schema"));
+  EXPECT_TRUE(invalid.IsInvalid()) << invalid.ToString();
+
+  auto oom = TranslateBridgeStatus("ctx", arrow::Status::OutOfMemory("alloc failed"));
+  ASSERT_TRUE(oom.IsOutOfMemory()) << oom.ToString();
+  EXPECT_EQ(ToSegcoreError(oom).get_error_code(), milvus::MemAllocateFailed);
+
+  auto not_impl = TranslateBridgeStatus("ctx", arrow::Status::NotImplemented("nope"));
+  EXPECT_TRUE(not_impl.IsNotImplemented()) << not_impl.ToString();
+}
+
 // End-to-end: a real lance open against a nonexistent local dataset must come
 // back as a classified not-found (ENOENT detail -> ObjectNotExist), not as an
 // exception and not as an opaque IOError.
