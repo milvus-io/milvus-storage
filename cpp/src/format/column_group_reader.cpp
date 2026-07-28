@@ -91,8 +91,8 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ReassembleChunks
     while (remaining > 0) {
       if (UNLIKELY(batch_index >= batches.size())) {
         return arrow::Status::Invalid(
-            fmt::format("Record batches ended before the chunk was filled: {} rows missing, [chunk info={}]",
-                        remaining, chunk_info.ToString()));
+            fmt::format("Record batches ended before the chunk was filled: {} rows missing, [chunk info={}]", remaining,
+                        chunk_info.ToString()));
       }
       const auto& batch = batches[batch_index];
       const int64_t available = batch->num_rows() - batch_offset;

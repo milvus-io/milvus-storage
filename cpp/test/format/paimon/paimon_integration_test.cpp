@@ -562,8 +562,8 @@ TEST_F(PaimonIntegrationTest, DataSplitChunksCarrySampledColumnMemorySizes) {
   column_group->files = {files.front()};
   auto schema = arrow::schema({arrow::field("id", arrow::int32()), arrow::field("name", arrow::utf8()),
                                arrow::field("value", arrow::float64())});
-  ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema, column_group, {"id", "name", "value"},
-                                                                properties_, nullptr));
+  ASSERT_AND_ASSIGN(
+      auto reader, api::ColumnGroupReader::create(schema, column_group, {"id", "name", "value"}, properties_, nullptr));
   ASSERT_GT(reader->total_number_of_chunks(), 0u);
 
   // Per-column estimates used to be unavailable on the data-split path: the

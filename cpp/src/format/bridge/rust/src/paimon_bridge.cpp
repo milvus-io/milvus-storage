@@ -49,8 +49,7 @@ std::vector<PaimonFileInfo> PlanFiles(const std::string& table_location,
     result.reserve(planned.size());
     for (const auto& info : planned) {
       result.push_back(PaimonFileInfo{std::string(info.path), std::string(info.read_path),
-                                      std::string(info.route_reason), info.file_size,
-                                      std::string(info.metadata_json)});
+                                      std::string(info.route_reason), info.file_size, std::string(info.metadata_json)});
     }
     return result;
   } catch (const rust::cxxbridge1::Error& error) {

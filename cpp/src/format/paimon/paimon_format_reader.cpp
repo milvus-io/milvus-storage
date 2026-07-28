@@ -115,9 +115,8 @@ uint64_t EstimateFieldByteWidth(const std::shared_ptr<arrow::DataType>& type) {
       uint64_t width = 0;
       for (const auto& field : type->fields()) {
         auto field_width = EstimateFieldByteWidth(field->type());
-        width = field_width > std::numeric_limits<uint64_t>::max() - width
-                    ? std::numeric_limits<uint64_t>::max()
-                    : width + field_width;
+        width = field_width > std::numeric_limits<uint64_t>::max() - width ? std::numeric_limits<uint64_t>::max()
+                                                                           : width + field_width;
       }
       return std::max<uint64_t>(width, 1);
     }
@@ -146,9 +145,8 @@ uint64_t EstimateRowByteWidth(const std::shared_ptr<arrow::Schema>& schema) {
   uint64_t width = 0;
   for (const auto& field : schema->fields()) {
     auto field_width = EstimateFieldByteWidth(field->type());
-    width = field_width > std::numeric_limits<uint64_t>::max() - width
-                ? std::numeric_limits<uint64_t>::max()
-                : width + field_width;
+    width = field_width > std::numeric_limits<uint64_t>::max() - width ? std::numeric_limits<uint64_t>::max()
+                                                                       : width + field_width;
   }
   return std::max<uint64_t>(width, 1);
 }
@@ -568,8 +566,7 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
         continue;
       }
       group.memory_size = EstimateMemorySize(rows, row_width);
-      ARROW_ASSIGN_OR_RAISE(group.column_memory_sizes,
-                            DistributeMemorySizes(group.memory_size, column_widths));
+      ARROW_ASSIGN_OR_RAISE(group.column_memory_sizes, DistributeMemorySizes(group.memory_size, column_widths));
       group.memory_size_available = true;
     }
 

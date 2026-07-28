@@ -222,7 +222,7 @@ static int DoDemoTable(int argc, char** argv) {
       }
       const auto mode = scenario == "append-only" ? "append" : scenario == "merge-on-read" ? "mor" : scenario;
       auto info = milvus_storage::paimon::CreateTestTable(table_path, rows, mode, deletes, storage_options, "parquet",
-                                                         dimension);
+                                                          dimension);
       std::cout << "Created paimon table:" << std::endl;
       std::cout << "  path:        " << info.table_location << std::endl;
       std::cout << "  snapshot_id: " << info.snapshot_id << std::endl;
