@@ -27,13 +27,19 @@ ColumnGroup::ColumnGroup(GroupId group_id,
                          const std::vector<int>& origin_column_indices,
                          const std::shared_ptr<arrow::RecordBatch>& batch)
     : group_id_(group_id), origin_column_indices_(origin_column_indices), memory_usage_(0) {
+  // A constructor has no status channel (AddRecordBatch rejects null with
+  // PackedInvalidArgs); a null batch yields an empty group instead of the
+  // previous null dereference below.
+  if (batch == nullptr) {
+    return;
+  }
   batches_.emplace_back(batch);
   auto batch_size = GetRecordBatchMemorySize(batch);
   memory_usage_ += batch_size;
   // Keep the same bookkeeping as AddRecordBatch: without these, size()==1
   // paired with empty per-batch usages / a stale row count.
   batch_memory_usage_.push_back(batch_size);
-  total_rows_ += batch ? batch->num_rows() : 0;
+  total_rows_ += batch->num_rows();
 }
 
 arrow::Status ColumnGroup::AddRecordBatch(const std::shared_ptr<arrow::RecordBatch>& batch) {
@@ -64,10 +70,13 @@ arrow::Status ColumnGroup::Merge(const ColumnGroup& other) {
 arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroup::Table() const {
   auto result = arrow::Table::FromRecordBatches(batches_);
   if (!result.ok()) {
-    // The status used to be stringified into a runtime_error here, destroying
-    // its StatusCode; propagate it unchanged instead.
-    return WrapExtendError(ExtendStatusCode::PackedUnexpected, "ColumnGroup::Table: failed to merge record batches",
-                           result.status());
+    // Keep the original StatusCode and detail (FromRecordBatches reports
+    // schema mismatch / empty group as Invalid, which classifies as
+    // DataFormatBroken downstream); only the message gains context. Wrapping
+    // into PackedUnexpected here would rewrite Invalid into IOError and
+    // degrade the classification to a generic StorageError.
+    return result.status().WithMessage("ColumnGroup::Table: failed to merge record batches: ",
+                                       result.status().message());
   }
   return result;
 }

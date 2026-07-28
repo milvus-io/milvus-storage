@@ -54,7 +54,10 @@ class ColumnGroup {
 
   /// Schema of the group's batches: the first batch's schema, or nullptr for
   /// an empty group. Does NOT validate that later batches match -- callers
-  /// needing validation should go through Table().
+  /// needing validation should go through Table(). Migration note: this
+  /// replaces the previous behavior of materializing the merged table (which
+  /// THREW std::runtime_error on an empty group or schema mismatch); check
+  /// for nullptr before dereferencing.
   std::shared_ptr<arrow::Schema> Schema() const;
 
   std::shared_ptr<arrow::RecordBatch> GetRecordBatch(size_t index) const;

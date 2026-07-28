@@ -163,6 +163,34 @@ TEST_F(PackedErrorStatusTest, MakeSucceedsOnValidFile) {
   ASSERT_STATUS_OK(reader->Close());
 }
 
+TEST_F(PackedErrorStatusTest, ColumnGroupTableSchemaMismatchIsDataFormatBroken) {
+  ColumnGroup group(0, {0});
+  ASSERT_STATUS_OK(group.AddRecordBatch(record_batch_));
+  // Second batch with a different schema: Table() must surface arrow's
+  // Invalid (-> DataFormatBroken/2024), not a wrapped generic storage error.
+  auto other_schema = arrow::schema({arrow::field("other", arrow::int8())});
+  arrow::Int8Builder builder;
+  ASSERT_STATUS_OK(builder.AppendValues({1, 2, 3}));
+  ASSERT_AND_ASSIGN(auto other_array, builder.Finish());
+  auto other_batch = arrow::RecordBatch::Make(other_schema, 3, {other_array});
+  ASSERT_STATUS_OK(group.AddRecordBatch(other_batch));
+
+  auto table_result = group.Table();
+  ASSERT_FALSE(table_result.ok());
+  EXPECT_TRUE(table_result.status().IsInvalid()) << table_result.status().ToString();
+  EXPECT_EQ(ToSegcoreError(table_result.status()).get_error_code(), milvus::DataFormatBroken)
+      << table_result.status().ToString();
+}
+
+TEST_F(PackedErrorStatusTest, ColumnGroupNullBatchConstructorYieldsEmptyGroup) {
+  // The batch-taking constructor has no status channel; a null batch must not
+  // crash (previous behavior dereferenced it) and yields an empty group.
+  ColumnGroup group(0, {0}, nullptr);
+  EXPECT_EQ(group.size(), 0);
+  EXPECT_EQ(group.GetTotalRows(), 0);
+  EXPECT_EQ(group.Schema(), nullptr);
+}
+
 // Integration regression for the fifth unguarded ValueOrDie
 // (file_reader.cpp: FileRowGroupReader::init, schema==nullptr branch): a
 // parquet file that passes the packed key-value metadata checks but whose
