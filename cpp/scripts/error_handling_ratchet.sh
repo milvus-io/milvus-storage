@@ -25,7 +25,14 @@
 #   throw : any `throw` statement (raw std exceptions, bridge exception types,
 #           rethrows). Ring-1 discipline: the library must not leak exceptions,
 #           so in library code ANY throw is a violation -- textual counting IS
-#           the semantic judgment for this category.
+#           the semantic judgment for this category. Comments are stripped
+#           before counting (gcc -fpreprocessed -E removes comments without
+#           expanding includes), so commented mentions do not count; string
+#           literals containing `throw` would still count (none exist today).
+#           A clang-query `cxxThrowExpr()` match would be exact but needs a
+#           compile_commands.json (a configured toolchain job); this gate
+#           stays toolchain-free, and the baseline flow can be reused if that
+#           upgrade happens.
 #
 # Deliberately NOT counted: ValueOrDie/ValueUnsafe (abort-capable accessors).
 # A text-level gate cannot tell the guarded FFI idiom (`.ok()` check + macro
@@ -81,7 +88,7 @@ collect() {
           *.cpp | *.cc | *.h | *.hpp) ;;
           *) continue ;;
         esac
-        throw_n=$(grep -cE '\bthrow\b' "$f" || true)
+        throw_n=$(gcc -fpreprocessed -dD -E -P "$f" 2>/dev/null | grep -cE '\bthrow\b' || true)
         if [ "$throw_n" -gt 0 ]; then printf 'throw\t%s\t%s\n' "$f" "$throw_n"; fi
       done | LC_ALL=C sort
 }

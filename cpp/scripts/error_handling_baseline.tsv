@@ -1,17 +1,11 @@
-throw	cpp/include/milvus-storage/common/fiu_local.h	2
 throw	cpp/src/common/metadata.cpp	4
 throw	cpp/src/ffi/ffi_fiu_c.cpp	1
-throw	cpp/src/ffi/reader_c.cpp	1
 throw	cpp/src/ffi/v2_column_groups_builder.cpp	5
-throw	cpp/src/filesystem/azure/azurefs.cc	4
-throw	cpp/src/filesystem/gcp/gcp_filesystem_producer.cpp	1
-throw	cpp/src/filesystem/s3/s3_filesystem_producer.cpp	1
 throw	cpp/src/format/bridge/rust/src/iceberg_bridge.cpp	2
 throw	cpp/src/format/bridge/rust/src/lance_bridge.cpp	21
 throw	cpp/src/format/iceberg/iceberg_common.cpp	2
 throw	cpp/src/format/lance/lance_common.cpp	2
 throw	cpp/src/format/vortex/vortex_translater.cpp	6
-throw	cpp/src/jni/jni_utils.cpp	1
 throw	cpp/src/manifest.cpp	1
 throw	cpp/src/packed/chunk_manager.cpp	2
 throw	cpp/src/packed/column_group.cpp	1
