@@ -25,10 +25,37 @@ jobs:
         # The base branch's baseline closes the self-reference loophole:
         # regenerating a raised baseline inside the PR cannot pass, because
         # category totals are compared against what the base branch records.
-        # `|| true`: the base may predate the ratchet (bootstrap).
+        #
+        # Assumptions and trust boundary (explicit):
+        # * Layer 2 trusts the baseline COMMITTED on the base rather than
+        #   recomputing from the base tree; the `push` trigger keeps that file
+        #   in sync with the base code under normal operation (drift shows up
+        #   as a red push build on the base branch).
+        # * Like any in-repo lint gate, the checker runs from the PR checkout;
+        #   the defense target is accidental regression, not a malicious PR
+        #   (edits to the gate itself are visible in the PR diff).
+        # * A fetch failure degrades to layer 1 only, with a visible warning:
+        #   blocking unrelated PRs on an infra flake costs more than briefly
+        #   losing the base-totals layer.
         run: |
-          git fetch --depth=1 origin "${{ github.base_ref }}"
-          git show "FETCH_HEAD:cpp/scripts/error_handling_baseline.tsv" > /tmp/base_baseline.tsv 2>/dev/null || true
+          BASELINE_PATH="cpp/scripts/error_handling_baseline.tsv"
+          # Anchor to the PR's recorded base commit, not the moving branch tip,
+          # so both sides of the comparison agree even if the base just moved.
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          if ! git fetch --depth=1 origin "$BASE_SHA"; then
+            echo "::warning::error-handling-ratchet: could not fetch base commit ${BASE_SHA}; base-totals layer skipped (exact-match layer still enforced)"
+            exit 0
+          fi
+          if git cat-file -e "${BASE_SHA}:${BASELINE_PATH}" 2>/dev/null; then
+            git show "${BASE_SHA}:${BASELINE_PATH}" > /tmp/base_baseline.tsv
+          else
+            # Bootstrap only: the base predates the ratchet. Any other reason
+            # for a missing file (e.g. the baseline was renamed but this
+            # workflow still points at the old path) must NOT silently disable
+            # the layer -- hence the existence check above instead of a blanket
+            # `|| true` on `git show`.
+            echo "::notice::error-handling-ratchet: no baseline at base commit (bootstrap); base-totals layer skipped"
+          fi
 
       - name: error-handling ratchet
         run: bash cpp/scripts/error_handling_ratchet.sh check /tmp/base_baseline.tsv
