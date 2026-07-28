@@ -30,7 +30,7 @@ namespace {
 
 // One marker, one parser: must stay byte-identical to the constants in
 // rust/src/bridge_error.rs and rust/src/filesystem_c.rs.
-constexpr std::string_view kBridgeErrCodeMarker = "__LOON_VORTEX_FFI_ERRCODE__=";
+constexpr std::string_view kBridgeErrCodeMarker = "__LOON_RUST_BRIDGE_ERRCODE__=";
 
 struct ParsedBridgeError {
   std::string message;

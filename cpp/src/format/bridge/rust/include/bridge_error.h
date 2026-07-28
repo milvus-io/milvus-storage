@@ -27,7 +27,7 @@ namespace milvus_storage::bridge {
 //
 // The cxx boundary only carries an error as a display string; the Rust side
 // (rust/src/bridge_error.rs, vortex's filesystem_c.rs) embeds the
-// classification as "__LOON_VORTEX_FFI_ERRCODE__=<code>; message". The
+// classification as "__LOON_RUST_BRIDGE_ERRCODE__=<code>; message". The
 // helpers here parse and strip that marker and rebuild a structured
 // arrow::Status:
 //   * code 12 (LOON_FILE_NOT_FOUND)      -> IOError + ENOENT detail

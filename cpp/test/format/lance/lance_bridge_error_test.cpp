@@ -33,7 +33,7 @@
 namespace milvus_storage::bridge {
 namespace {
 
-constexpr const char* kMarker = "__LOON_VORTEX_FFI_ERRCODE__=";
+constexpr const char* kMarker = "__LOON_RUST_BRIDGE_ERRCODE__=";
 
 TEST(BridgeErrorTest, NotFoundCodeBecomesEnoentDetail) {
   auto status = MakeBridgeErrorStatus(std::string(kMarker) + "12; dataset was not found");

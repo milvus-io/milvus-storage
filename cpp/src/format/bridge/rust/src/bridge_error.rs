@@ -39,7 +39,7 @@ use lance::Error as LanceError;
 
 /// Must stay byte-identical to the vortex marker in `filesystem_c.rs` and the
 /// parser constant in cpp `bridge_error.cpp` — one marker, one parser.
-pub const BRIDGE_ERRCODE_MARKER: &str = "__LOON_VORTEX_FFI_ERRCODE__=";
+pub const BRIDGE_ERRCODE_MARKER: &str = "__LOON_RUST_BRIDGE_ERRCODE__=";
 
 /// Mirrors LOON_FILE_NOT_FOUND in `ffi_error_code.h`.
 pub const LOON_FILE_NOT_FOUND: i32 = 12;
