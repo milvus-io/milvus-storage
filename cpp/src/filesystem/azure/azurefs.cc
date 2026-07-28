@@ -23,6 +23,7 @@
 #include <optional>
 
 #include "milvus-storage/filesystem/azure/azurefs.h"
+#include "milvus-storage/filesystem/azure/azure_sas_token_policy.h"
 #include "milvus-storage/filesystem/azure/azurefs_internal.h"
 #include "milvus-storage/common/extend_status.h"
 #include "arrow/io/memory.h"
@@ -392,6 +393,8 @@ bool AzureOptions::Equals(const AzureOptions& other) const {
              other.storage_shared_key_credential_->AccountName;
     case CredentialKind::kSASToken:
       return sas_token_ == other.sas_token_;
+    case CredentialKind::kDynamicSASToken:
+      return sas_token_policy_->Equals(*other.sas_token_policy_);
     case CredentialKind::kClientSecret:
     case CredentialKind::kCLI:
     case CredentialKind::kManagedIdentity:
@@ -485,6 +488,18 @@ Status AzureOptions::ConfigureSASCredential(const std::string& sas_token) {
   return Status::OK();
 }
 
+Status AzureOptions::ConfigureSASTokenPolicy(std::shared_ptr<AzureSasTokenPolicy> policy) {
+  if (account_name.empty()) {
+    return Status::Invalid("AzureOptions doesn't contain a valid account name");
+  }
+  if (!policy) {
+    return Status::Invalid("AzureOptions requires a valid SAS token policy");
+  }
+  credential_kind_ = CredentialKind::kDynamicSASToken;
+  sas_token_policy_ = std::move(policy);
+  return Status::OK();
+}
+
 Status AzureOptions::ConfigureClientSecretCredential(const std::string& tenant_id,
                                                      const std::string& client_id,
                                                      const std::string& client_secret) {
@@ -549,6 +564,11 @@ Result<std::unique_ptr<Blobs::BlobServiceClient>> AzureOptions::MakeBlobServiceC
     case CredentialKind::kSASToken:
       return std::make_unique<Blobs::BlobServiceClient>(AccountBlobUrl(account_name) +
                                                         sas_token_);
+    case CredentialKind::kDynamicSASToken: {
+      Blobs::BlobClientOptions options;
+      options.PerOperationPolicies.emplace_back(sas_token_policy_->Clone());
+      return std::make_unique<Blobs::BlobServiceClient>(AccountBlobUrl(account_name), options);
+    }
   }
   return Status::Invalid("AzureOptions doesn't contain a valid auth configuration");
 }
@@ -584,6 +604,11 @@ AzureOptions::MakeDataLakeServiceClient() const {
     case CredentialKind::kSASToken:
       return std::make_unique<DataLake::DataLakeServiceClient>(
           AccountBlobUrl(account_name) + sas_token_);
+    case CredentialKind::kDynamicSASToken: {
+      DataLake::DataLakeClientOptions options;
+      options.PerOperationPolicies.emplace_back(sas_token_policy_->Clone());
+      return std::make_unique<DataLake::DataLakeServiceClient>(AccountDfsUrl(account_name), options);
+    }
   }
   return Status::Invalid("AzureOptions doesn't contain a valid auth configuration");
 }

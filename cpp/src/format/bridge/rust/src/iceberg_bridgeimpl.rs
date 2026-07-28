@@ -26,8 +26,11 @@ use iceberg::table::StaticTable;
 use iceberg_storage_opendal::OpenDalStorageFactory;
 
 use crate::aliyun_oss_provider::AliyunOssStorageFactory;
+use crate::azure_sas_provider::{AzureBrokerClient, AzureBrokerConfig};
 use crate::gcp_impersonation::{DEFAULT_TOKEN_LIFETIME_SECS, fetch_impersonated_bearer};
 use crate::iceberg_ffi::IcebergFileInfo;
+
+const CLOUD_PROVIDER_KEY: &str = "cloud_provider";
 
 /// Internal representation for a delete file reference, serialized to JSON.
 #[derive(serde::Serialize)]
@@ -46,20 +49,66 @@ pub(crate) fn vec_to_hashmap(keys: Vec<String>, values: Vec<String>) -> HashMap<
     keys.into_iter().zip(values.into_iter()).collect()
 }
 
-/// Intercepts `oss://` so per-tenant `oss.role-arn` can reach opendal —
-/// upstream `OpenDalStorageFactory::Oss` only carries endpoint/AK/SK.
-/// Every other scheme is a pure pass-through to upstream.
-fn storage_factory_for_scheme(scheme: &str) -> anyhow::Result<Arc<dyn StorageFactory>> {
-    if scheme == "oss" {
-        return Ok(Arc::new(AliyunOssStorageFactory::default()));
+/// Consumes the bridge-private cloud provider and resolves any credentials
+/// that Iceberg/OpenDAL cannot obtain directly from the remaining options.
+pub(crate) async fn prepare_cloud_storage_options(
+    props: &mut HashMap<String, String>,
+) -> anyhow::Result<()> {
+    let cloud_provider = props.remove(CLOUD_PROVIDER_KEY);
+
+    match cloud_provider.as_deref() {
+        Some("azure") => {
+            if let Some(config) = AzureBrokerConfig::extract(props)? {
+                let client = AzureBrokerClient::new(config)?;
+                let credential = match client.fetch(chrono::Utc::now()).await {
+                    Ok(credential) => credential,
+                    Err(error) => {
+                        eprintln!(
+                            "Warning: Azure SAS credential broker fetch failed: {}, has_cached_sas=false, cached_expired=false",
+                            error
+                        );
+                        return Err(error);
+                    }
+                };
+                props.insert("adls.sas-token".to_string(), credential.token);
+            }
+        }
+        Some("gcp") => {
+            // iceberg-rust does not treat `gcs.service-account` as an
+            // impersonation target. Replace it with a pre-fetched bearer for
+            // this short-lived operation.
+            if let Some(target_sa) = props.remove("gcs.service-account")
+                && !target_sa.is_empty()
+            {
+                let bearer = fetch_impersonated_bearer(
+                    &target_sa,
+                    std::time::Duration::from_secs(DEFAULT_TOKEN_LIFETIME_SECS),
+                )
+                .await?;
+                props.insert("gcs.oauth2.token".to_string(), bearer);
+            }
+        }
+        Some("aws") => {
+            // OpenDAL consumes the S3 and STS options directly.
+        }
+        Some("aliyun") => {
+            // AliyunOssStorageFactory consumes the OSS role options.
+        }
+        None => {
+            // Local files do not carry a cloud provider.
+        }
+        Some(provider) => anyhow::bail!("Unsupported Iceberg cloud provider: {provider}"),
     }
-    upstream_opendal_factory(scheme)
+
+    Ok(())
 }
 
 /// Scheme → `iceberg-storage-opendal` variant. Hand-written because 0.9
 /// ships no `from_scheme` helper; collapse when upstream adds one.
 fn upstream_opendal_factory(scheme: &str) -> anyhow::Result<Arc<dyn StorageFactory>> {
     match scheme {
+        // The upstream OSS factory does not carry per-tenant `oss.role-arn`.
+        "oss" => Ok(Arc::new(AliyunOssStorageFactory::default())),
         "s3" | "s3a" => Ok(Arc::new(OpenDalStorageFactory::S3 {
             configured_scheme: scheme.to_string(),
             customized_credential_load: None,
@@ -91,7 +140,7 @@ pub(crate) fn build_file_io(
     scheme: &str,
     props: &HashMap<String, String>,
 ) -> anyhow::Result<iceberg::io::FileIO> {
-    let factory = storage_factory_for_scheme(scheme)?;
+    let factory = upstream_opendal_factory(scheme)?;
     let mut builder = FileIOBuilder::new(factory);
     for (k, v) in props {
         builder = builder.with_prop(k, v);
@@ -258,26 +307,7 @@ pub fn iceberg_plan_files(
 
     TOKIO_RT.block_on(async {
         let mut props = vec_to_hashmap(storage_options_keys, storage_options_values);
-
-        // GCP cross-tenant impersonation: iceberg-rust 0.8's gcs_config_parse
-        // doesn't recognize `gcs.service-account` as an impersonation target —
-        // it's silently dropped, reqsign falls through to VM metadata, and
-        // requests go out as the VM's default SA instead of the target. Swap
-        // the key for a pre-fetched impersonated bearer via `gcs.oauth2.token`
-        // (which opendal's GcsConfig.token accepts as a static bearer). A
-        // 1-hour token covers plan_files' transient metadata/manifest reads
-        // with room to spare; no refresh needed. See
-        // `docs/iceberg-gcp-impersonation-analysis.md`.
-        if let Some(target_sa) = props.remove("gcs.service-account") {
-            if !target_sa.is_empty() {
-                let bearer = fetch_impersonated_bearer(
-                    &target_sa,
-                    std::time::Duration::from_secs(DEFAULT_TOKEN_LIFETIME_SECS),
-                )
-                .await?;
-                props.insert("gcs.oauth2.token".to_string(), bearer);
-            }
-        }
+        prepare_cloud_storage_options(&mut props).await?;
 
         // Normalize URI for opendal and detect FileIO scheme in one pass.
         // For Azure ABFSS, expands scheme://container/path to container@endpoint format.

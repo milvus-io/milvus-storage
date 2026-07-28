@@ -43,7 +43,10 @@ use lance::session::Session;
 use lance_io::object_store::{ObjectStoreRegistry, StorageOptionsAccessor};
 use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
 
+use crate::azure_sas_provider::{AzureBrokerConfig, AzureSasStorageOptionsProvider};
 use crate::gcp_impersonation::{ImpersonatingGcsStoreProvider, REFRESH_OFFSET_SECS};
+
+const CLOUD_PROVIDER_KEY: &str = "cloud_provider";
 
 #[derive(Clone)]
 pub struct BlockingDataset {
@@ -92,65 +95,6 @@ impl BlockingDataset {
         params: Option<WriteParams>,
     ) -> Result<Self> {
         let inner = TOKIO_RT.block_on(Dataset::write(reader, uri, params))?;
-        Self::new(inner)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn open(
-        uri: &str,
-        version: Option<i32>,
-        block_size: Option<i32>,
-        index_cache_size_bytes: i64,
-        metadata_cache_size_bytes: i64,
-        storage_options: HashMap<String, String>,
-        serialized_manifest: Option<&[u8]>,
-        aws_credentials: Option<object_store::aws::AwsCredentialProvider>,
-        s3_credentials_refresh_offset_seconds: Option<u64>,
-        // Caller-supplied Session, e.g. one whose ObjectStoreRegistry has the
-        // GCS scheme overridden with an ImpersonatingGcsStoreProvider. When
-        // None, lance falls back to its own default session (default registry).
-        session: Option<Arc<Session>>,
-    ) -> Result<Self> {
-        let mut store_params = ObjectStoreParams {
-            block_size: block_size.map(|size| size as usize),
-            storage_options_accessor: Some(Arc::new(
-                StorageOptionsAccessor::with_static_options(storage_options.clone()),
-            )),
-            ..Default::default()
-        };
-        if let Some(offset_seconds) = s3_credentials_refresh_offset_seconds {
-            store_params.s3_credentials_refresh_offset =
-                std::time::Duration::from_secs(offset_seconds);
-        }
-        if let Some(creds) = aws_credentials {
-            store_params.aws_credentials = Some(creds);
-        }
-        let params = ReadParams {
-            index_cache_size_bytes: index_cache_size_bytes as usize,
-            metadata_cache_size_bytes: metadata_cache_size_bytes as usize,
-            store_options: Some(store_params),
-            ..Default::default()
-        };
-
-        let mut builder = DatasetBuilder::from_uri(uri).with_read_params(params);
-
-        if let Some(ver) = version {
-            builder = builder.with_version(ver as u64);
-        }
-        builder = builder.with_storage_options(storage_options);
-        if let Some(offset_seconds) = s3_credentials_refresh_offset_seconds {
-            builder = builder
-                .with_s3_credentials_refresh_offset(std::time::Duration::from_secs(offset_seconds));
-        }
-        if let Some(session) = session {
-            builder = builder.with_session(session);
-        }
-
-        if let Some(serialized_manifest) = serialized_manifest {
-            builder = builder.with_serialized_manifest(serialized_manifest)?;
-        }
-
-        let inner = TOKIO_RT.block_on(builder.load())?;
         Self::new(inner)
     }
 
@@ -515,8 +459,7 @@ impl GcpImpersonationConfig {
 ///
 /// A fresh `Session` is built per call so that two concurrent opens with
 /// different target SAs cannot collide on a shared registry. Cache sizes
-/// match the values the FFI entry points already pass to `BlockingDataset::open`
-/// (zero — index/metadata caches are managed by the caller, not us).
+/// remain zero because index/metadata caches are managed by the caller.
 fn build_gcp_impersonation_session(config: &GcpImpersonationConfig) -> Arc<Session> {
     let registry = ObjectStoreRegistry::default();
     registry.insert(
@@ -530,62 +473,114 @@ fn build_gcp_impersonation_session(config: &GcpImpersonationConfig) -> Arc<Sessi
     Arc::new(Session::new(0, 0, Arc::new(registry)))
 }
 
-/// Pick a per-call Session if any cross-tenant credential feature is active.
-/// The two supported features are mutually exclusive at the URI level (a URI
-/// is either `gs://` or `oss://`), so at most one override is installed per
-/// call. Returns `None` when no override is needed, so lance falls back to
-/// its default session.
-fn pick_custom_session(
-    storage_options: &mut HashMap<String, String>,
-) -> Result<Option<Arc<Session>>> {
-    if let Some(cfg) = GcpImpersonationConfig::extract(storage_options)? {
-        return Ok(Some(build_gcp_impersonation_session(&cfg)));
-    }
-    if storage_options.contains_key("oss_role_arn") {
-        return Ok(Some(crate::aliyun_oss_provider::build_aliyun_oss_session()));
-    }
-    Ok(None)
-}
-
 pub fn open_dataset(
     uri: &str,
     storage_options_keys: Vec<String>,
     storage_options_values: Vec<String>,
 ) -> Result<Box<BlockingDataset>> {
     let mut storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
+    let cloud_provider = storage_options.remove(CLOUD_PROVIDER_KEY);
+    if let Some(cloud_provider) = cloud_provider.as_deref()
+        && !matches!(cloud_provider, "aws" | "azure" | "gcp" | "aliyun")
+    {
+        return Err(LanceError::invalid_input(format!(
+            "Unsupported Lance cloud provider: {cloud_provider}"
+        )));
+    }
 
-    // Extract ARN fields from storage_options (set by lance::ToStorageOptions on the C++ side)
-    let role_arn = storage_options.remove("aws_role_arn").unwrap_or_default();
-    let session_name = storage_options.remove("aws_session_name").unwrap_or_default();
-    let external_id = storage_options.remove("aws_external_id").unwrap_or_default();
-    let refresh_secs_str = storage_options.remove("aws_credential_refresh_secs").unwrap_or_default();
-    let credential_refresh_secs: u64 = refresh_secs_str.parse().unwrap_or(0);
-
-    let assume_role = AssumeRoleConfig::parse(&role_arn, &session_name, &external_id, credential_refresh_secs)?;
-
-    let aws_creds = match &assume_role {
-        Some(config) => Some(TOKIO_RT.block_on(config.build_credentials())?),
-        None => None,
-    };
-
-    // Install a custom lance Session for cross-tenant credential features:
-    // - GCP Service Account Impersonation under the `gs` scheme
-    //   (lance-io's stock GCS provider only accepts a static bearer token
-    //   via `google_storage_token`, no refresh hook — we replace wholesale).
-    // - Aliyun per-tenant `role_arn` under the `oss` scheme
-    //   (lance-io's stock OSS provider only forwards 4 storage_options keys
-    //   — we add `oss_role_arn` / `oss_role_session_name` forwarding).
-    // At most one override is installed per call (URIs are mutually exclusive).
-    let custom_session = pick_custom_session(&mut storage_options)?;
+    // Configure each cloud provider's cross-tenant credential path in one
+    // place. AWS and Azure use ObjectStoreParams directly, while GCP and
+    // Aliyun require a per-call Session with an overridden object-store provider.
+    let mut store_params = ObjectStoreParams::default();
+    let mut custom_session = None;
+    match cloud_provider.as_deref() {
+        Some("aws") => {
+            // Lance accepts a refreshable AWS credential provider directly.
+            let role_arn = storage_options.remove("aws_role_arn").unwrap_or_default();
+            let session_name = storage_options
+                .remove("aws_session_name")
+                .unwrap_or_default();
+            let external_id = storage_options.remove("aws_external_id").unwrap_or_default();
+            let refresh_secs_str = storage_options
+                .remove("aws_credential_refresh_secs")
+                .unwrap_or_default();
+            let credential_refresh_secs: u64 = refresh_secs_str.parse().unwrap_or(0);
+            let assume_role = AssumeRoleConfig::parse(
+                &role_arn,
+                &session_name,
+                &external_id,
+                credential_refresh_secs,
+            )?;
+            store_params.aws_credentials = match &assume_role {
+                Some(config) => Some(TOKIO_RT.block_on(config.build_credentials())?),
+                None => None,
+            };
+        }
+        Some("azure") => {
+            // Lance refreshes Azure credentials through StorageOptionsAccessor;
+            // the broker-backed provider supplies a fresh SAS token as needed.
+            store_params.storage_options_accessor = match AzureBrokerConfig::extract(
+                &mut storage_options,
+            )
+            .map_err(|error| LanceError::invalid_input(error.to_string()))?
+            {
+                Some(config) => {
+                    // Emulator and unsigned modes bypass SAS authentication, so
+                    // force both off when the broker is configured.
+                    storage_options.insert(
+                        "azure_storage_use_emulator".to_string(),
+                        "false".to_string(),
+                    );
+                    storage_options
+                        .insert("azure_skip_signature".to_string(), "false".to_string());
+                    let provider = Arc::new(
+                        AzureSasStorageOptionsProvider::new(config)
+                            .map_err(|error| LanceError::invalid_input(error.to_string()))?,
+                    );
+                    // Preserve the static Azure settings and overlay refreshed SAS
+                    // values returned by the provider.
+                    Some(Arc::new(StorageOptionsAccessor::with_initial_and_provider(
+                        storage_options.clone(),
+                        provider,
+                    )))
+                }
+                None => None,
+            };
+        }
+        Some("gcp") => {
+            // Lance's stock GCS provider cannot refresh impersonated access
+            // tokens, so replace the `gs` provider for this dataset only.
+            custom_session = GcpImpersonationConfig::extract(&mut storage_options)?
+                .map(|config| build_gcp_impersonation_session(&config));
+        }
+        Some("aliyun") if storage_options.contains_key("oss_role_arn") => {
+            // Lance's stock OSS provider does not forward the role ARN options.
+            custom_session = Some(crate::aliyun_oss_provider::build_aliyun_oss_session());
+        }
+        _ => {}
+    }
 
     // Do not pass credential_refresh_secs as s3_credentials_refresh_offset here:
     // AwsCredentialAdapter already handles refresh internally with REFRESH_OFFSET_SECS.
     // Passing the full session TTL (e.g. 900s) as the offset would cause Lance to
     // consider credentials expired immediately after issuance (credential thrashing).
-    let ds = BlockingDataset::open(
-        uri, None, None, 0, 0, storage_options, None, aws_creds, None, custom_session,
-    )?;
-    Ok(Box::new(ds))
+    if store_params.storage_options_accessor.is_none() {
+        store_params.storage_options_accessor = Some(Arc::new(
+            StorageOptionsAccessor::with_static_options(storage_options),
+        ));
+    }
+    let read_params = ReadParams {
+        index_cache_size_bytes: 0,
+        metadata_cache_size_bytes: 0,
+        store_options: Some(store_params),
+        ..Default::default()
+    };
+    let mut builder = DatasetBuilder::from_uri(uri).with_read_params(read_params);
+    if let Some(session) = custom_session {
+        builder = builder.with_session(session);
+    }
+    let inner = TOKIO_RT.block_on(builder.load())?;
+    Ok(Box::new(BlockingDataset::new(inner)?))
 }
 
 pub unsafe fn write_dataset(
@@ -596,10 +591,78 @@ pub unsafe fn write_dataset(
     data_storage_format: LanceDataStorageFormat,
 ) -> Result<Box<BlockingDataset>> {
     let mut storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
-    // Symmetric with `open_dataset`: install a custom Session on WriteParams
-    // for GCP impersonation or Aliyun role_arn. `WriteParams::store_registry()`
-    // reads through Session for object-store creation during write.
-    let custom_session = pick_custom_session(&mut storage_options)?;
+    let cloud_provider = storage_options.remove(CLOUD_PROVIDER_KEY);
+    if let Some(cloud_provider) = cloud_provider.as_deref()
+        && !matches!(cloud_provider, "aws" | "azure" | "gcp" | "aliyun")
+    {
+        return Err(LanceError::invalid_input(format!(
+            "Unsupported Lance cloud provider: {cloud_provider}"
+        )));
+    }
+    // Keep write-side credential selection symmetric with open_dataset.
+    let mut store_params = ObjectStoreParams::default();
+    let mut custom_session = None;
+    match cloud_provider.as_deref() {
+        Some("aws") => {
+            let role_arn = storage_options.remove("aws_role_arn").unwrap_or_default();
+            let session_name = storage_options
+                .remove("aws_session_name")
+                .unwrap_or_default();
+            let external_id = storage_options.remove("aws_external_id").unwrap_or_default();
+            let refresh_secs_str = storage_options
+                .remove("aws_credential_refresh_secs")
+                .unwrap_or_default();
+            let credential_refresh_secs: u64 = refresh_secs_str.parse().unwrap_or(0);
+            let assume_role = AssumeRoleConfig::parse(
+                &role_arn,
+                &session_name,
+                &external_id,
+                credential_refresh_secs,
+            )?;
+            store_params.aws_credentials = match &assume_role {
+                Some(config) => Some(TOKIO_RT.block_on(config.build_credentials())?),
+                None => None,
+            };
+        }
+        Some("azure") => {
+            store_params.storage_options_accessor = match AzureBrokerConfig::extract(
+                &mut storage_options,
+            )
+            .map_err(|error| LanceError::invalid_input(error.to_string()))?
+            {
+                Some(config) => {
+                    storage_options.insert(
+                        "azure_storage_use_emulator".to_string(),
+                        "false".to_string(),
+                    );
+                    storage_options
+                        .insert("azure_skip_signature".to_string(), "false".to_string());
+                    let provider = Arc::new(
+                        AzureSasStorageOptionsProvider::new(config)
+                            .map_err(|error| LanceError::invalid_input(error.to_string()))?,
+                    );
+                    Some(Arc::new(StorageOptionsAccessor::with_initial_and_provider(
+                        storage_options.clone(),
+                        provider,
+                    )))
+                }
+                None => None,
+            };
+        }
+        Some("gcp") => {
+            custom_session = GcpImpersonationConfig::extract(&mut storage_options)?
+                .map(|config| build_gcp_impersonation_session(&config));
+        }
+        Some("aliyun") if storage_options.contains_key("oss_role_arn") => {
+            custom_session = Some(crate::aliyun_oss_provider::build_aliyun_oss_session());
+        }
+        _ => {}
+    }
+    if store_params.storage_options_accessor.is_none() {
+        store_params.storage_options_accessor = Some(Arc::new(
+            StorageOptionsAccessor::with_static_options(storage_options),
+        ));
+    }
 
     let stream_ptr = stream_ptr as *mut FFI_ArrowArrayStream;
     let stream = unsafe { std::ptr::replace(stream_ptr, FFI_ArrowArrayStream::empty()) };
@@ -624,12 +687,7 @@ pub unsafe fn write_dataset(
         auto_cleanup: Some(AutoCleanupParams::default()),
         ..Default::default()
     };
-    write_params.store_params = Some(ObjectStoreParams {
-        storage_options_accessor: Some(Arc::new(
-            StorageOptionsAccessor::with_static_options(storage_options),
-        )),
-        ..Default::default()
-    });
+    write_params.store_params = Some(store_params);
 
     let inner = TOKIO_RT.block_on(Dataset::write(reader, uri, Some(write_params)))?;
     Ok(Box::new(BlockingDataset::new(inner)?))

@@ -416,8 +416,9 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
     REGISTER_PROPERTY(PROPERTY_FS_LOAD_FREQUENCY,
                       PropertyType::INT32,
                       "Lifetime in seconds for cross-tenant temporary credentials (AWS STS AssumeRole, "
-                      "GCP IAM service-account impersonation). Providers that mint short-lived tokens "
-                      "use this as the requested TTL and refresh ahead of expiry. Upper bound here is "
+                      "GCP IAM service-account impersonation, Azure credential broker). Providers that "
+                      "mint short-lived tokens use this as the requested TTL and refresh ahead of expiry. "
+                      "Upper bound here is "
                       "the AWS STS hard cap; GCP IAM further caps at 3600s (enforced per-provider).",
                       900,
                       ValidatePropertyType() + ValidatePropertyRange<int32_t>(900, 43200)),
@@ -448,6 +449,21 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
     REGISTER_PROPERTY(PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT,
                       PropertyType::STRING,
                       "The target GCP service account email for cross-project impersonation.",
+                      "",
+                      std::nullopt),
+    REGISTER_PROPERTY(PROPERTY_FS_AZURE_CLIENT_ID,
+                      PropertyType::STRING,
+                      "The Azure client ID sent to the temporary credential broker.",
+                      "",
+                      std::nullopt),
+    REGISTER_PROPERTY(PROPERTY_FS_AZURE_TENANT_ID,
+                      PropertyType::STRING,
+                      "The Azure tenant ID sent to the temporary credential broker.",
+                      "",
+                      std::nullopt),
+    REGISTER_PROPERTY(PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT,
+                      PropertyType::STRING,
+                      "The HTTP(S) endpoint used to obtain temporary Azure SAS credentials.",
                       "",
                       std::nullopt),
     // --- writer properties define ---

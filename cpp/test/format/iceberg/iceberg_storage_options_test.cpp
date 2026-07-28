@@ -34,6 +34,7 @@ static ArrowFileSystemConfig MakeAwsConfig() {
 TEST_F(IcebergStorageOptionsTest, AwsKeys) {
   auto opts = ToStorageOptions(MakeAwsConfig());
 
+  EXPECT_EQ(opts["cloud_provider"], kCloudProviderAWS);
   EXPECT_EQ(opts["s3.access-key-id"], "AKIAIOSFODNN7EXAMPLE");
   EXPECT_EQ(opts["s3.secret-access-key"], "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
   EXPECT_EQ(opts["s3.region"], "us-west-2");
@@ -50,9 +51,44 @@ TEST_F(IcebergStorageOptionsTest, AzureKeys) {
 
   auto opts = ToStorageOptions(config);
 
+  EXPECT_EQ(opts["cloud_provider"], kCloudProviderAzure);
   EXPECT_EQ(opts["adls.account-name"], "myaccount");
   EXPECT_EQ(opts["adls.account-key"], "myaccountkey");
   EXPECT_EQ(opts.count("azure_storage_account_name"), 0);
+}
+
+TEST_F(IcebergStorageOptionsTest, AzureCredentialBrokerKeysExcludeFallbackCredentials) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderAzure;
+  config.access_key_id = "myaccount";
+  config.access_key_value = "must-not-be-forwarded";
+  config.bucket_name = "mycontainer";
+  config.region = "westus3";
+  config.address = "core.windows.net";
+  config.use_iam = true;
+  config.azure_client_id = "client-id";
+  config.azure_tenant_id = "tenant-id";
+  config.azure_credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
+  config.load_frequency = 3600;
+  config.request_timeout_ms = 5000;
+
+  auto opts = ToStorageOptions(config);
+
+  EXPECT_EQ(opts["adls.account-name"], "myaccount");
+  EXPECT_EQ(opts["adls.endpoint-suffix"], "core.windows.net");
+  EXPECT_EQ(opts["azure_broker_endpoint"], "http://credential-broker/v1/credentials/assume-role");
+  EXPECT_EQ(opts["azure_broker_client_id"], "client-id");
+  EXPECT_EQ(opts["azure_broker_tenant_id"], "tenant-id");
+  EXPECT_EQ(opts["azure_broker_account_name"], "myaccount");
+  EXPECT_EQ(opts["azure_broker_region"], "westus3");
+  EXPECT_EQ(opts["azure_broker_bucket"], "mycontainer");
+  EXPECT_EQ(opts["azure_broker_duration_seconds"], "3600");
+  EXPECT_EQ(opts["azure_broker_request_timeout_ms"], "5000");
+  EXPECT_EQ(opts.count("adls.account-key"), 0);
+  EXPECT_EQ(opts.count("adls.client-id"), 0);
+  EXPECT_EQ(opts.count("adls.tenant-id"), 0);
+  EXPECT_EQ(opts.count("adls.sas-token"), 0);
 }
 
 TEST_F(IcebergStorageOptionsTest, AliyunKeys) {
@@ -66,6 +102,7 @@ TEST_F(IcebergStorageOptionsTest, AliyunKeys) {
 
   auto opts = ToStorageOptions(config);
 
+  EXPECT_EQ(opts["cloud_provider"], kCloudProviderAliyun);
   EXPECT_EQ(opts["oss.access-key-id"], "LTAI5tExample");
   EXPECT_EQ(opts["oss.access-key-secret"], "OSSSecretExample");
   EXPECT_EQ(opts["oss.endpoint"], "https://oss-cn-hangzhou.aliyuncs.com");
@@ -119,6 +156,7 @@ TEST_F(IcebergStorageOptionsTest, GcpImpersonation) {
 
   auto opts = ToStorageOptions(config);
 
+  EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
   EXPECT_EQ(opts["gcs.service-account"], "target-sa@customer-project.iam.gserviceaccount.com");
 }
 
@@ -126,7 +164,9 @@ TEST_F(IcebergStorageOptionsTest, GcpDefaultCredentials) {
   ArrowFileSystemConfig config;
   config.storage_type = "remote";
   config.cloud_provider = kCloudProviderGCP;
-  EXPECT_TRUE(ToStorageOptions(config).empty());
+  auto opts = ToStorageOptions(config);
+  EXPECT_EQ(opts.size(), 1);
+  EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
 }
 
 TEST_F(IcebergStorageOptionsTest, BareEndpointUsesHttpWhenSslDisabled) {

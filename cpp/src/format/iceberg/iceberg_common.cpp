@@ -69,13 +69,19 @@ std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSys
   };
 
   const auto& provider = config.cloud_provider;
+  // Bridge-private dispatch key. The Rust entry point removes it before
+  // forwarding the remaining options to Iceberg/OpenDAL.
+  options["cloud_provider"] = provider;
   LOG_STORAGE_DEBUG_ << fmt::format(
       "provider={}, endpoint={}, use_ssl={}, use_iam={}, has_aksk={}, role_arn={}, external_id_set={}, "
-      "gcp_target_sa={}",
+      "gcp_target_sa={}, azure_broker_enabled={}, azure_client_id_set={}, azure_tenant_id_set={}, "
+      "azure_credential_endpoint_set={}",
       provider, config.address, config.use_ssl, config.use_iam,
       !config.access_key_id.empty() && !config.access_key_value.empty(),
       config.role_arn.empty() ? "(empty)" : config.role_arn, !config.external_id.empty(),
-      config.gcp_target_service_account.empty() ? "(empty)" : config.gcp_target_service_account);
+      config.gcp_target_service_account.empty() ? "(empty)" : config.gcp_target_service_account,
+      config.IsAzureCredentialBrokerEnabled(), !config.azure_client_id.empty(), !config.azure_tenant_id.empty(),
+      !config.azure_credential_endpoint.empty());
   if (provider == kCloudProviderAWS) {
     if (!config.role_arn.empty()) {
       // AssumeRole: set ARN fields + region/endpoint; do NOT set AKSK so opendal
@@ -100,7 +106,16 @@ std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSys
     // Pass the endpoint suffix so the Rust bridge can reconstruct the full
     // Azure DFS endpoint (account.dfs.suffix) from scheme://container/path URIs.
     set("adls.endpoint-suffix", config.address);
-    if (config.use_iam) {
+    if (config.IsAzureCredentialBrokerEnabled()) {
+      set("azure_broker_endpoint", config.azure_credential_endpoint);
+      set("azure_broker_client_id", config.azure_client_id);
+      set("azure_broker_tenant_id", config.azure_tenant_id);
+      set("azure_broker_account_name", config.access_key_id);
+      set("azure_broker_region", config.region);
+      set("azure_broker_bucket", config.bucket_name);
+      options["azure_broker_duration_seconds"] = std::to_string(config.load_frequency);
+      options["azure_broker_request_timeout_ms"] = std::to_string(config.request_timeout_ms);
+    } else if (config.use_iam) {
       auto* client_id = std::getenv("AZURE_CLIENT_ID");
       if (client_id)
         set("adls.client-id", client_id);

@@ -64,6 +64,7 @@ namespace io = arrow::io;
 
 class TestAzureFileSystem;
 class TestAzureOptions;
+class AzureSasTokenPolicy;
 
 /// Options for the AzureFileSystem implementation.
 ///
@@ -135,6 +136,7 @@ struct ARROW_EXPORT AzureOptions {
     kAnonymous,
     kStorageSharedKey,
     kSASToken,
+    kDynamicSASToken,
     kClientSecret,
     kManagedIdentity,
     kCLI,
@@ -144,6 +146,7 @@ struct ARROW_EXPORT AzureOptions {
 
   std::shared_ptr<Azure::Storage::StorageSharedKeyCredential> storage_shared_key_credential_;
   std::string sas_token_;
+  std::shared_ptr<AzureSasTokenPolicy> sas_token_policy_;
   mutable std::shared_ptr<Azure::Core::Credentials::TokenCredential> token_credential_;
 
   public:
@@ -208,6 +211,7 @@ struct ARROW_EXPORT AzureOptions {
   Status ConfigureAnonymousCredential();
   Status ConfigureAccountKeyCredential(const std::string& account_key);
   Status ConfigureSASCredential(const std::string& sas_token);
+  Status ConfigureSASTokenPolicy(std::shared_ptr<AzureSasTokenPolicy> policy);
   Status ConfigureClientSecretCredential(const std::string& tenant_id,
                                          const std::string& client_id,
                                          const std::string& client_secret);
