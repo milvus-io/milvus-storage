@@ -342,15 +342,13 @@ TEST_F(PaimonIntegrationTest, DirectFileFragmentRangeUsesPostDeletionLogicalRows
 }
 
 TEST_F(PaimonIntegrationTest, DataSplitChunksSpanMergeReadBatches) {
-  // One default logical chunk (8192 rows) spans many merge-read batches
-  // (1024 rows each): the generic chunk loader must reassemble chunks across
-  // batch boundaries instead of assuming chunk-aligned batches. Small
-  // fixtures never catch this because every chunk fits one batch.
+  // A logical chunk spans many merge-read batches (1024 rows each).
   constexpr uint64_t kRows = 8192 + 1024;
   paimon::CreateTestTable(table_dir_, kRows, "mor");
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
   ASSERT_EQ(ReadPath(files.front()), "data-split");
+  ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "8192"), std::nullopt);
 
   auto column_group = std::make_shared<api::ColumnGroup>();
   column_group->columns = {"id"};
@@ -366,6 +364,22 @@ TEST_F(PaimonIntegrationTest, DataSplitChunksSpanMergeReadBatches) {
   ASSERT_EQ(batches.size(), chunk_indices.size());
   int64_t next_id = 0;
   for (const auto& batch : batches) {
+    auto ids = std::dynamic_pointer_cast<arrow::Int32Array>(batch->column(0));
+    ASSERT_NE(ids, nullptr);
+    for (int64_t row = 0; row < ids->length(); ++row) {
+      ASSERT_EQ(ids->Value(row), static_cast<int32_t>(next_id++));
+    }
+  }
+  EXPECT_EQ(next_id, static_cast<int64_t>(kRows));
+
+  auto tasks = api::ChunkTask::Build(chunk_indices, [&reader](int64_t chunk_index) -> const api::ChunkInfo& {
+    return reader->get_chunk_info(chunk_index);
+  });
+  ASSERT_EQ(tasks.size(), 1);
+  ASSERT_AND_ASSIGN(auto async_batches, std::move(reader->get_chunks_async(tasks.front())).get());
+  ASSERT_EQ(async_batches.size(), chunk_indices.size());
+  next_id = 0;
+  for (const auto& batch : async_batches) {
     auto ids = std::dynamic_pointer_cast<arrow::Int32Array>(batch->column(0));
     ASSERT_NE(ids, nullptr);
     for (int64_t row = 0; row < ids->length(); ++row) {

@@ -78,6 +78,48 @@ arrow::Result<ColumnMemorySizesPtr> BuildColumnMemorySizes(const arrow::Schema& 
   return std::static_pointer_cast<const ColumnMemorySizes>(column_memory_sizes);
 }
 
+arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ReassembleChunks(
+    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches, const std::vector<ChunkInfo>& chunk_infos) {
+  std::vector<std::shared_ptr<arrow::RecordBatch>> result;
+  result.reserve(chunk_infos.size());
+  size_t batch_index = 0;
+  int64_t batch_offset = 0;
+
+  for (const auto& chunk_info : chunk_infos) {
+    int64_t remaining = chunk_info.number_of_rows;
+    std::vector<std::shared_ptr<arrow::RecordBatch>> pieces;
+    while (remaining > 0) {
+      if (UNLIKELY(batch_index >= batches.size())) {
+        return arrow::Status::Invalid(
+            fmt::format("Record batches ended before the chunk was filled: {} rows missing, [chunk info={}]",
+                        remaining, chunk_info.ToString()));
+      }
+      const auto& batch = batches[batch_index];
+      const int64_t available = batch->num_rows() - batch_offset;
+      if (available <= 0) {
+        ++batch_index;
+        batch_offset = 0;
+        continue;
+      }
+      const int64_t rows = std::min(available, remaining);
+      pieces.emplace_back(batch->Slice(batch_offset, rows));
+      batch_offset += rows;
+      remaining -= rows;
+    }
+
+    if (pieces.size() == 1) {
+      result.emplace_back(std::move(pieces.front()));
+    } else if (!pieces.empty()) {
+      ARROW_ASSIGN_OR_RAISE(auto table, arrow::Table::FromRecordBatches(pieces.front()->schema(), pieces));
+      ARROW_ASSIGN_OR_RAISE(auto combined, table->CombineChunksToBatch());
+      result.emplace_back(std::move(combined));
+    } else {
+      return arrow::Status::Invalid("Cannot reassemble an empty logical chunk");
+    }
+  }
+  return result;
+}
+
 }  // namespace
 
 template <typename ReaderT>
@@ -626,42 +668,14 @@ ChunkRBMapResult ColumnGroupReaderImpl<ReaderT>::read_chunks_from_files(const st
       std::move(rbs.begin(), rbs.end(), std::back_inserter(rbs_in_file));
     }
 
-    // Generate chunk_rb_map. read_with_range streams in the reader's own
-    // batch sizes (a merge-read emits fixed-size batches regardless of the
-    // logical chunk layout), so one chunk may span several record batches:
-    // slice zero-copy when a chunk lands inside one batch, concatenate when
-    // it crosses batch boundaries.
-    size_t rbs_idx = 0;
-    int64_t rbs_offset = 0;
-    for (long long chunk_idx : chunk_idxs) {
-      const auto& chunk_info = chunk_infos_[chunk_idx];
-      int64_t remaining = chunk_info.number_of_rows;
-      std::vector<std::shared_ptr<arrow::RecordBatch>> pieces;
-      while (remaining > 0) {
-        if (UNLIKELY(rbs_idx >= rbs_in_file.size())) {
-          return arrow::Status::Invalid(
-              fmt::format("Record batches ended before the chunk was filled: {} rows missing, [chunk info={}]",
-                          remaining, chunk_info.ToString()));
-        }
-        const auto& rb = rbs_in_file[rbs_idx];
-        const int64_t available = rb->num_rows() - rbs_offset;
-        if (available <= 0) {
-          ++rbs_idx;
-          rbs_offset = 0;
-          continue;
-        }
-        const int64_t take = std::min(available, remaining);
-        pieces.emplace_back(rb->Slice(rbs_offset, take));
-        rbs_offset += take;
-        remaining -= take;
-      }
-      if (pieces.size() == 1) {
-        chunk_rb_map[chunk_idx] = std::move(pieces.front());
-      } else {
-        ARROW_ASSIGN_OR_RAISE(auto table, arrow::Table::FromRecordBatches(pieces.front()->schema(), pieces));
-        ARROW_ASSIGN_OR_RAISE(auto combined, table->CombineChunksToBatch());
-        chunk_rb_map[chunk_idx] = std::move(combined);
-      }
+    std::vector<ChunkInfo> requested_chunk_infos;
+    requested_chunk_infos.reserve(chunk_idxs.size());
+    for (auto chunk_idx : chunk_idxs) {
+      requested_chunk_infos.emplace_back(chunk_infos_[chunk_idx]);
+    }
+    ARROW_ASSIGN_OR_RAISE(auto chunks, ReassembleChunks(rbs_in_file, requested_chunk_infos));
+    for (size_t index = 0; index < chunk_idxs.size(); ++index) {
+      chunk_rb_map[chunk_idxs[index]] = std::move(chunks[index]);
     }
   }
   return chunk_rb_map;
@@ -840,28 +854,7 @@ ColumnGroupReaderImpl<ReaderT>::get_chunks_async(const ChunkTask& task) {
               (void)reader;
               ARROW_ASSIGN_OR_RAISE(auto rb_reader, std::move(rb_reader_result));
               ARROW_ASSIGN_OR_RAISE(auto rbs, rb_reader->ToRecordBatches());
-
-              // A format may coalesce the range into different batch boundaries;
-              // slice it back into one result per logical chunk.
-              std::vector<std::shared_ptr<arrow::RecordBatch>> result;
-              result.reserve(chunk_infos.size());
-              size_t rbs_idx = 0;
-              size_t rbs_offset = 0;
-              for (const auto& chunk_info : chunk_infos) {
-                if (UNLIKELY(rbs_idx >= rbs.size() ||
-                             (rbs[rbs_idx]->num_rows() - rbs_offset) < chunk_info.number_of_rows)) {
-                  return arrow::Status::Invalid(fmt::format(
-                      "Invalid slice of record batches in async read: [chunk_info={}]", chunk_info.ToString()));
-                }
-                auto rb = rbs[rbs_idx]->Slice(rbs_offset, chunk_info.number_of_rows);
-                result.push_back(std::move(rb));
-                rbs_offset += chunk_info.number_of_rows;
-                if (rbs_offset == rbs[rbs_idx]->num_rows()) {
-                  rbs_idx++;
-                  rbs_offset = 0;
-                }
-              }
-              return result;
+              return ReassembleChunks(rbs, chunk_infos);
             });
       });
 }
