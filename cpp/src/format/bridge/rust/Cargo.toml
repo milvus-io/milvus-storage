@@ -111,11 +111,10 @@ roaring = "0.11"
 # solver choices.
 unicode-segmentation = "=1.13.2"
 
-# Apache Paimon reader/planner. Keep the exact revision and Cargo.lock together
-# until the APIs used by this bridge are available in a published release.
+# Apache Paimon reader/planner. Keep the exact release and Cargo.lock together.
 # Paimon uses Arrow 58, which is already present for Lance and crosses the C++
 # boundary only through Arrow's C Data interface.
-paimon = { git = "https://github.com/apache/paimon-rust.git", rev = "7b54d44c487590f4d84952533f110ba16e9346a4", default-features = false, features = ["storage-memory", "storage-fs", "storage-s3", "storage-oss", "storage-azdls", "storage-gcs", "vortex"] }
+paimon = { version = "=0.3.0", default-features = false, features = ["storage-memory", "storage-fs", "storage-s3", "storage-oss", "storage-azdls", "storage-gcs", "vortex"] }
 
 # SQL predicate parsing
 sqlparser = "0.55"

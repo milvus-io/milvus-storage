@@ -5933,7 +5933,8 @@ checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 [[package]]
 name = "paimon"
 version = "0.3.0"
-source = "git+https://github.com/apache/paimon-rust.git?rev=7b54d44c487590f4d84952533f110ba16e9346a4#7b54d44c487590f4d84952533f110ba16e9346a4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525d11131f96bd6fe858c39b1a662179fee701e49fee92dad273445c56e936dc"
 dependencies = [
  "apache-avro",
  "arrow-arith 58.3.0",
