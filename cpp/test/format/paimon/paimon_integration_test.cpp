@@ -363,7 +363,9 @@ TEST_F(PaimonIntegrationTest, DataSplitChunksSpanMergeReadBatches) {
   ASSERT_AND_ASSIGN(auto batches, reader->get_chunks(chunk_indices, 2));
   ASSERT_EQ(batches.size(), chunk_indices.size());
   int64_t next_id = 0;
-  for (const auto& batch : batches) {
+  for (size_t index = 0; index < batches.size(); ++index) {
+    const auto& batch = batches[index];
+    ASSERT_EQ(batch->num_rows(), reader->get_chunk_info(chunk_indices[index]).number_of_rows);
     auto ids = std::dynamic_pointer_cast<arrow::Int32Array>(batch->column(0));
     ASSERT_NE(ids, nullptr);
     for (int64_t row = 0; row < ids->length(); ++row) {
@@ -379,7 +381,9 @@ TEST_F(PaimonIntegrationTest, DataSplitChunksSpanMergeReadBatches) {
   ASSERT_AND_ASSIGN(auto async_batches, std::move(reader->get_chunks_async(tasks.front())).get());
   ASSERT_EQ(async_batches.size(), chunk_indices.size());
   next_id = 0;
-  for (const auto& batch : async_batches) {
+  for (size_t index = 0; index < async_batches.size(); ++index) {
+    const auto& batch = async_batches[index];
+    ASSERT_EQ(batch->num_rows(), reader->get_chunk_info(chunk_indices[index]).number_of_rows);
     auto ids = std::dynamic_pointer_cast<arrow::Int32Array>(batch->column(0));
     ASSERT_NE(ids, nullptr);
     for (int64_t row = 0; row < ids->length(); ++row) {
