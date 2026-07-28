@@ -21,13 +21,19 @@
 # violations are grandfathered in a checked-in baseline and burned down over
 # time; this script keeps the count from ever growing back.
 #
-# Categories counted (per line, per file):
-#   abort : ValueOrDie( / ValueUnsafe( / MoveValueUnsafe(
-#           An unguarded call aborts the whole process; even guarded calls are
-#           counted so the baseline shrinks monotonically as sites migrate to
-#           ARROW_ASSIGN_OR_RAISE.
+# Category counted (per line, per file):
 #   throw : any `throw` statement (raw std exceptions, bridge exception types,
-#           rethrows). Ring-1 discipline: the library must not leak exceptions.
+#           rethrows). Ring-1 discipline: the library must not leak exceptions,
+#           so in library code ANY throw is a violation -- textual counting IS
+#           the semantic judgment for this category.
+#
+# Deliberately NOT counted: ValueOrDie/ValueUnsafe (abort-capable accessors).
+# A text-level gate cannot tell the guarded FFI idiom (`.ok()` check + macro
+# return + ValueOrDie -- the house style in cpp/src/ffi/) from an unguarded
+# abort path, so counting them would only nag legitimate additions without
+# distinguishing dangerous ones (maintainer feedback on #596). Unguarded
+# aborts remain a review concern; a future clang-query-based check could
+# reintroduce them with real semantic discrimination.
 #
 # Scope: git-tracked *.cpp / *.cc / *.h / *.hpp under cpp/src and cpp/include.
 # cpp/test is out of scope; vendored or generated trees are excluded simply by
@@ -75,9 +81,7 @@ collect() {
           *.cpp | *.cc | *.h | *.hpp) ;;
           *) continue ;;
         esac
-        abort_n=$(grep -cE 'ValueOrDie\(|ValueUnsafe\(|MoveValueUnsafe\(' "$f" || true)
         throw_n=$(grep -cE '\bthrow\b' "$f" || true)
-        if [ "$abort_n" -gt 0 ]; then printf 'abort\t%s\t%s\n' "$f" "$abort_n"; fi
         if [ "$throw_n" -gt 0 ]; then printf 'throw\t%s\t%s\n' "$f" "$throw_n"; fi
       done | LC_ALL=C sort
 }
