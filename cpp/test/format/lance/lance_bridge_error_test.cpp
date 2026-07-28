@@ -96,6 +96,23 @@ TEST(BridgeErrorTest, TranslatePreservesClassificationAndAddsContext) {
   EXPECT_EQ(decoded.message().find("__LOON_"), std::string::npos);
 }
 
+TEST(BridgeErrorTest, TranslateDecodesMarkerRegardlessOfStatusCode) {
+  // Mid-scan stream errors surface as whatever code the arrow C-stream import
+  // assigns (the exporter maps Rust errors to EINVAL => Invalid, not IOError)
+  // while still carrying the marker. Discrimination must be on marker
+  // presence: a marker inside an Invalid must decode to the tagged class.
+  auto midscan = TranslateBridgeStatus("stream", arrow::Status::Invalid(std::string(kMarker) + "109; throttled"));
+  auto detail = ExtendStatusDetail::UnwrapStatus(midscan);
+  ASSERT_NE(detail, nullptr) << midscan.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientThrottling);
+  EXPECT_TRUE(detail->retryable());
+  EXPECT_EQ(midscan.message().find("__LOON_"), std::string::npos) << midscan.ToString();
+  EXPECT_EQ(ToSegcoreError(midscan).get_error_code(), milvus::StorageTransientError);
+
+  auto midscan_notfound = TranslateBridgeStatus("stream", arrow::Status::Invalid(std::string(kMarker) + "12; gone"));
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(midscan_notfound), ENOENT) << midscan_notfound.ToString();
+}
+
 TEST(BridgeErrorTest, TranslateDoesNotDowngradeNonIOErrorStatuses) {
   // Bridge errors only travel as IOError strings; statuses arrow itself
   // produced (Invalid / OutOfMemory from ImportChunkedArray etc.) must pass

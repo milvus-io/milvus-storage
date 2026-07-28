@@ -400,7 +400,12 @@ async fn call_assume_role_with_oidc(
         .await
         .map_err(|e| format!("AssumeRoleWithOIDC body read: {e}"))?;
     if !status.is_success() {
-        return Err(format!("AssumeRoleWithOIDC HTTP {status}: {text}"));
+        // Canonical pattern so classify_http_status_in_message can recover the
+        // class (429/503 transient, 403 auth) downstream.
+        return Err(format!(
+            "AssumeRoleWithOIDC failed: non-2xx status code: {}: {text}",
+            status.as_u16()
+        ));
     }
 
     #[derive(serde::Deserialize)]
@@ -1295,7 +1300,10 @@ pub(crate) mod ram {
             .await
             .map_err(|e| format!("sts:AssumeRole body read: {e}"))?;
         if !status.is_success() {
-            return Err(format!("sts:AssumeRole HTTP {status}: {text}"));
+            return Err(format!(
+                "sts:AssumeRole failed: non-2xx status code: {}: {text}",
+                status.as_u16()
+            ));
         }
 
         #[derive(Deserialize)]

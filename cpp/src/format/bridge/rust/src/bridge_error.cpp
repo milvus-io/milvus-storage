@@ -138,12 +138,17 @@ arrow::Status TranslateBridgeStatus(std::string_view context, const arrow::Statu
   if (status.ok()) {
     return status;
   }
-  if (ExtendStatusDetail::UnwrapStatus(status) || arrow::internal::ErrnoFromStatus(status) == ENOENT ||
-      !status.IsIOError()) {
-    // Already structured, or not a bridge-encoded carrier at all: bridge
-    // errors only ever surface as IOError strings (arrow FFI stringification),
-    // so re-decoding e.g. an Invalid or OutOfMemory from arrow itself would
-    // DOWNGRADE its StatusCode to IOError. Pass those through untouched.
+  if (ExtendStatusDetail::UnwrapStatus(status) || arrow::internal::ErrnoFromStatus(status) == ENOENT) {
+    // Already structured -- nothing to decode.
+    return WithBridgeContext(context, status);
+  }
+  // Discriminate on MARKER PRESENCE, not on StatusCode: mid-scan stream
+  // errors arrive as whatever code the arrow C-stream import assigns (the
+  // exporter maps Rust errors to EINVAL, so they surface as Invalid, NOT
+  // IOError), still carrying the marker. Statuses without the marker (arrow's
+  // own Invalid / OutOfMemory / NotImplemented) pass through untouched so
+  // their StatusCode is never downgraded.
+  if (status.message().find(kBridgeErrCodeMarker) == std::string::npos) {
     return WithBridgeContext(context, status);
   }
   return WithBridgeContext(context, MakeBridgeErrorStatus(status.message()));

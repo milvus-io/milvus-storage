@@ -160,6 +160,7 @@ fn classify_http_status_in_message(msg: &str) -> Option<i32> {
         .take_while(|c| c.is_ascii_digit())
         .collect();
     match digits.parse::<u16>().ok()? {
+        401 | 403 => Some(LOON_AWS_ERROR_ACCESS_DENIED),
         408 => Some(LOON_TRANSIENT_TIMEOUT),
         429 => Some(LOON_TRANSIENT_THROTTLING),
         500 | 502 | 503 | 504 => Some(LOON_TRANSIENT_SERVICE),
@@ -217,6 +218,17 @@ mod tests {
             source: "Server returned non-2xx status code: 503: unavailable".into(),
         });
         assert_eq!(classify_lance_error(&e503), Some(LOON_TRANSIENT_SERVICE));
+
+        // Credential-path auth failures (canonical pattern emitted by the
+        // gcp/aliyun providers) map to access-denied, not transient.
+        let e403 = LanceError::from(object_store::Error::Generic {
+            store: "S3",
+            source: "sts:AssumeRole failed: non-2xx status code: 403: forbidden".into(),
+        });
+        assert_eq!(
+            classify_lance_error(&e403),
+            Some(LOON_AWS_ERROR_ACCESS_DENIED)
+        );
     }
 
     #[test]
