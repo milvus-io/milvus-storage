@@ -45,6 +45,8 @@ FFI_EXPORT extern const int loon_errcode_invalid_properties;
 FFI_EXPORT extern const int loon_errcode_fault_inject;
 FFI_EXPORT extern const int loon_errcode_not_support;
 FFI_EXPORT extern const int loon_errcode_file_not_found;
+FFI_EXPORT extern const int loon_errcode_source_not_found;
+FFI_EXPORT extern const int loon_errcode_source_access_denied;
 
 FFI_EXPORT extern const int loon_errcode_aws_no_such_upload;
 FFI_EXPORT extern const int loon_errcode_aws_conflict;
@@ -81,7 +83,36 @@ FFI_EXPORT const char* loon_ffi_get_errmsg(LoonFFIResult* result);
 // free the message string inside LoonFFIResult
 FFI_EXPORT void loon_ffi_free_result(LoonFFIResult* result);
 
+// --- Error classification ---
+//
+// Every error code answers two questions, and both come from ONE category:
+//   * whose problem is it -- the caller's request/config, or the system's?
+//   * can a retry help    -- only a transient error.
+//
+// Invariant: loon_ffi_is_retryable_errcode(c) is true exactly when
+// loon_ffi_error_category(c) == loon_error_category_transient. A user error is
+// never retriable: report it to whoever made the request instead.
+//
+// An unrecognized code returns loon_error_category_unknown, which consumers
+// MUST treat as permanent -- never retry a failure that cannot be classified.
+//
+// docs/error-codes.md lists every code with its category, retriability and the
+// AWS S3 / Aliyun OSS error code it corresponds to.
+FFI_EXPORT extern const int loon_error_category_unknown;
+FFI_EXPORT extern const int loon_error_category_user;
+FFI_EXPORT extern const int loon_error_category_transient;
+FFI_EXPORT extern const int loon_error_category_permanent;
+
 FFI_EXPORT int loon_ffi_is_retryable_errcode(int err_code);
+
+// Category of an error code; see loon_error_category_* above.
+FFI_EXPORT int loon_ffi_error_category(int err_code);
+
+// Stable, human-readable name of an error code ("AwsErrorNotFound", ...),
+// suitable as a log field or metric label. Returns "Unknown error(undefined)"
+// for an unrecognized code. The returned string is a static literal: do NOT
+// free it, and it outlives any LoonFFIResult.
+FFI_EXPORT const char* loon_ffi_error_name(int err_code);
 
 // ==================== End of Result C Interface ====================
 

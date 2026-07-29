@@ -28,36 +28,38 @@
 #include "common/EasyAssert.h"
 
 namespace milvus_storage {
+
+/// \brief Whose problem an error is, and therefore whether retrying can help.
+///
+/// This is the single classification axis; `retryable` is derived from it
+/// (`retryable == (category == Transient)`). See the invariant documented in
+/// ffi_error_code.h. Values match the LOON_ERROR_CATEGORY_* constants so the
+/// same number crosses the C ABI.
+enum class ErrorCategory : char {
+  /// The code is outside the documented set. Consumers must treat it as
+  /// Permanent (never retry something we cannot classify).
+  Unknown = LOON_ERROR_CATEGORY_UNKNOWN,
+  /// The caller's request or configuration is wrong. Never retriable; report
+  /// it back to whoever made the request.
+  User = LOON_ERROR_CATEGORY_USER,
+  /// A system condition that may clear on its own. Retriable.
+  Transient = LOON_ERROR_CATEGORY_TRANSIENT,
+  /// A system condition that will not clear by itself (missing data, bad
+  /// credentials, corruption, our own bug). Never retriable.
+  Permanent = LOON_ERROR_CATEGORY_PERMANENT,
+};
+
+/// \brief Error codes that can be attached to an arrow::Status and survive to
+/// the FFI / segcore boundary.
+///
+/// Generated from LOON_EXTEND_STATUS_CODE_LIST -- see ffi_error_code.h for the
+/// table, including each code's category and its AWS S3 / Aliyun OSS
+/// counterpart. Values are the C ABI contract and must never be renumbered.
+/// arrow::StatusCode's largest value is 45, so these all start at 50.
 enum class ExtendStatusCode : char {
-  // arrow::StatusCode biggest is 45.
-  // Packed-specific error codes.
-  PackedInvalidArgs = 50,
-  PackedStorageIO = 51,
-  PackedMetadataCorrupted = 52,
-  PackedFileCorrupted = 53,
-  PackedArrowError = 54,
-  PackedUnexpected = 55,
-
-  AwsErrorNoSuchUpload = LOON_AWS_ERROR_NO_SUCH_UPLOAD,
-  AwsErrorConflict = LOON_AWS_ERROR_CONFLICT,
-  AwsErrorPreConditionFailed = LOON_AWS_ERROR_PRECONDITION_FAILED,
-  // Permanently-failing object-storage errors that must NOT be classified as
-  // transient/retriable by consumers: the object/bucket is gone (retrying or
-  // rerouting to another replica hits the same shared object store and fails
-  // identically), the credentials/permissions are wrong, or the AWS SDK itself
-  // judged the error non-retryable (AWSError::ShouldRetry() == false).
-  AwsErrorNotFound = LOON_AWS_ERROR_NOT_FOUND,          // NoSuchKey / NoSuchBucket / ResourceNotFound
-  AwsErrorAccessDenied = LOON_AWS_ERROR_ACCESS_DENIED,  // AccessDenied / InvalidAccessKeyId / SignatureDoesNotMatch
-  AwsErrorNonRetryable = LOON_AWS_ERROR_NON_RETRYABLE,  // any other error with ShouldRetry() == false
-
-  StorageTransientNetwork = LOON_TRANSIENT_NETWORK,
-  StorageTransientTimeout = LOON_TRANSIENT_TIMEOUT,
-  StorageTransientThrottling = LOON_TRANSIENT_THROTTLING,
-  StorageTransientService = LOON_TRANSIENT_SERVICE,
-
-  // Transaction-specific error codes
-  TxnExhaustedRetry = LOON_TXN_EXHAUSTED_RETRY,
-  TxnResolutionFailed = LOON_TXN_RESOLUTION_FAILED,
+#define MILVUS_STORAGE_EXTEND_STATUS_ENUM_ENTRY(name, code, symbol, category, s3_code) name = (code),
+  LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_EXTEND_STATUS_ENUM_ENTRY)
+#undef MILVUS_STORAGE_EXTEND_STATUS_ENUM_ENTRY
 };
 
 class ExtendStatusDetail : public arrow::StatusDetail {
@@ -76,7 +78,12 @@ class ExtendStatusDetail : public arrow::StatusDetail {
   /// \brief Get the extra error info
   [[nodiscard]] std::string extra_info() const;
 
+  /// \brief Whether retrying can help. Derived from the code, not stored.
   [[nodiscard]] bool retryable() const;
+
+  /// \brief Who owns this failure: the caller (User) or us (Transient /
+  /// Permanent). Derived from the code, not stored.
+  [[nodiscard]] ErrorCategory category() const;
 
   /// \brief Get the human-readable name of the status code.
   [[nodiscard]] std::string CodeAsString() const;
@@ -94,11 +101,20 @@ class ExtendStatusDetail : public arrow::StatusDetail {
   private:
   ExtendStatusCode code_;
   std::string extra_info_;
-  bool retryable_ = false;
 };
 
 std::optional<ExtendStatusCode> ExtendStatusCodeFromInt(int code);
+
+/// \brief The category of an ExtendStatusCode: who owns the failure.
+ErrorCategory CategoryForExtendStatusCode(ExtendStatusCode code);
+
+/// \brief Whether retrying can help. Derived state: true iff the category is
+/// Transient. Kept as a named helper because it is what most consumers ask.
 bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code);
+
+/// \brief The AWS S3 / Aliyun OSS error code this maps to, or "" when the
+/// condition has no object-storage counterpart (packed/transaction codes).
+std::string_view S3CodeForExtendStatusCode(ExtendStatusCode code);
 
 arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info = "");
 

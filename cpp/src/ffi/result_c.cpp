@@ -19,65 +19,65 @@
 #include "milvus-storage/ffi_c.h"
 #include "milvus-storage/ffi_internal/result.h"
 
+namespace {
+
+// The one place every FFI error code is described. Both halves are generated
+// from the tables in ffi_error_code.h, so a code cannot be named here and
+// classified differently in extend_status.cpp.
+struct LoonErrorMetadata {
+  int code;
+  const char* name;
+  int category;
+  const char* s3_code;
+};
+
+constexpr LoonErrorMetadata kLoonErrorMetadata[] = {
+#define MILVUS_STORAGE_INTERNAL_ERROR_ENTRY(name, code, symbol, category, s3_code) {(code), name, (category), s3_code},
+    LOON_INTERNAL_ERROR_CODE_LIST(MILVUS_STORAGE_INTERNAL_ERROR_ENTRY)
+#undef MILVUS_STORAGE_INTERNAL_ERROR_ENTRY
+#define MILVUS_STORAGE_EXTEND_ERROR_ENTRY(name, code, symbol, category, s3_code) {(code), #name, (category), s3_code},
+        LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_EXTEND_ERROR_ENTRY)
+#undef MILVUS_STORAGE_EXTEND_ERROR_ENTRY
+};
+
+const LoonErrorMetadata* FindLoonErrorMetadata(int code) {
+  for (const auto& metadata : kLoonErrorMetadata) {
+    if (metadata.code == code) {
+      return &metadata;
+    }
+  }
+  return nullptr;
+}
+
+constexpr const char* kUnknownErrorName = "Unknown error(undefined)";
+
+}  // namespace
+
 extern "C" {
 
 extern FFI_EXPORT const int loon_errcode_success = LOON_SUCCESS;
-extern FFI_EXPORT const int loon_errcode_invalid_args = LOON_INVALID_ARGS;
-extern FFI_EXPORT const int loon_errcode_memory = LOON_MEMORY_ERROR;
-extern FFI_EXPORT const int loon_errcode_arrow = LOON_ARROW_ERROR;
-extern FFI_EXPORT const int loon_errcode_logical = LOON_LOGICAL_ERROR;
-extern FFI_EXPORT const int loon_errcode_got_exception = LOON_GOT_EXCEPTION;
-extern FFI_EXPORT const int loon_errcode_unreachable = LOON_UNREACHABLE_ERROR;
-extern FFI_EXPORT const int loon_errcode_invalid_properties = LOON_INVALID_PROPERTIES;
-extern FFI_EXPORT const int loon_errcode_fault_inject = LOON_FAULT_INJECT_ERROR;
-extern FFI_EXPORT const int loon_errcode_not_support = LOON_NOT_SUPPORT;
-extern FFI_EXPORT const int loon_errcode_file_not_found = LOON_FILE_NOT_FOUND;
-extern FFI_EXPORT const int loon_errcode_aws_no_such_upload = LOON_AWS_ERROR_NO_SUCH_UPLOAD;
-extern FFI_EXPORT const int loon_errcode_aws_conflict = LOON_AWS_ERROR_CONFLICT;
-extern FFI_EXPORT const int loon_errcode_aws_precondition_failed = LOON_AWS_ERROR_PRECONDITION_FAILED;
-extern FFI_EXPORT const int loon_errcode_aws_not_found = LOON_AWS_ERROR_NOT_FOUND;
-extern FFI_EXPORT const int loon_errcode_aws_access_denied = LOON_AWS_ERROR_ACCESS_DENIED;
-extern FFI_EXPORT const int loon_errcode_aws_non_retryable = LOON_AWS_ERROR_NON_RETRYABLE;
-extern FFI_EXPORT const int loon_errcode_transient_network = LOON_TRANSIENT_NETWORK;
-extern FFI_EXPORT const int loon_errcode_transient_timeout = LOON_TRANSIENT_TIMEOUT;
-extern FFI_EXPORT const int loon_errcode_transient_throttling = LOON_TRANSIENT_THROTTLING;
-extern FFI_EXPORT const int loon_errcode_transient_service = LOON_TRANSIENT_SERVICE;
-extern FFI_EXPORT const int loon_errcode_txn_exhausted_retry = LOON_TXN_EXHAUSTED_RETRY;
-extern FFI_EXPORT const int loon_errcode_txn_resolution_failed = LOON_TXN_RESOLUTION_FAILED;
+
+#define MILVUS_STORAGE_ERRCODE_CONSTANT(name, code, symbol, category, s3_code) \
+  extern FFI_EXPORT const int loon_errcode_##symbol = (code);
+LOON_INTERNAL_ERROR_CODE_LIST(MILVUS_STORAGE_ERRCODE_CONSTANT)
+LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_ERRCODE_CONSTANT)
+#undef MILVUS_STORAGE_ERRCODE_CONSTANT
+
+extern FFI_EXPORT const int loon_error_category_unknown = LOON_ERROR_CATEGORY_UNKNOWN;
+extern FFI_EXPORT const int loon_error_category_user = LOON_ERROR_CATEGORY_USER;
+extern FFI_EXPORT const int loon_error_category_transient = LOON_ERROR_CATEGORY_TRANSIENT;
+extern FFI_EXPORT const int loon_error_category_permanent = LOON_ERROR_CATEGORY_PERMANENT;
 
 }  // extern "C"
 
 std::string error_to_string(int code) {
-  static const std::unordered_map<int, std::string> error_strings = {
-      {LOON_SUCCESS, "Success"},
-      {LOON_INVALID_ARGS, "Invalid args"},
-      {LOON_MEMORY_ERROR, "Memory allocation failed"},
-      {LOON_ARROW_ERROR, "Internal error"},
-      {LOON_LOGICAL_ERROR, "Logical error"},
-      {LOON_GOT_EXCEPTION, "Got exception"},
-      {LOON_UNREACHABLE_ERROR, "Unreachable code"},
-      {LOON_INVALID_PROPERTIES, "Invalid properties"},
-      {LOON_FAULT_INJECT_ERROR, "Fault injection error"},
-      {LOON_NOT_SUPPORT, "Not supported"},
-      {LOON_FILE_NOT_FOUND, "File not found"},
-      {LOON_AWS_ERROR_NO_SUCH_UPLOAD, "AwsErrorNoSuchUpload"},
-      {LOON_AWS_ERROR_CONFLICT, "AwsErrorConflict"},
-      {LOON_AWS_ERROR_PRECONDITION_FAILED, "AwsErrorPreConditionFailed"},
-      {LOON_AWS_ERROR_NOT_FOUND, "AwsErrorNotFound"},
-      {LOON_AWS_ERROR_ACCESS_DENIED, "AwsErrorAccessDenied"},
-      {LOON_AWS_ERROR_NON_RETRYABLE, "AwsErrorNonRetryable"},
-      {LOON_TRANSIENT_NETWORK, "StorageTransientNetwork"},
-      {LOON_TRANSIENT_TIMEOUT, "StorageTransientTimeout"},
-      {LOON_TRANSIENT_THROTTLING, "StorageTransientThrottling"},
-      {LOON_TRANSIENT_SERVICE, "StorageTransientService"},
-      {LOON_TXN_EXHAUSTED_RETRY, "TxnExhaustedRetry"},
-      {LOON_TXN_RESOLUTION_FAILED, "TxnResolutionFailed"},
-  };
-
-  if (auto it = error_strings.find(code); it != error_strings.end()) {
-    return it->second;
+  if (code == LOON_SUCCESS) {
+    return "Success";
   }
-  return "Unknown error(undefined)";
+  if (const auto* metadata = FindLoonErrorMetadata(code); metadata != nullptr) {
+    return metadata->name;
+  }
+  return kUnknownErrorName;
 }
 
 int loon_ffi_is_success(LoonFFIResult* result) {
@@ -98,7 +98,25 @@ void loon_ffi_free_result(LoonFFIResult* result) {
   free(result->message);
 }
 
+int loon_ffi_error_category(int err_code) {
+  if (const auto* metadata = FindLoonErrorMetadata(err_code); metadata != nullptr) {
+    return metadata->category;
+  }
+  return LOON_ERROR_CATEGORY_UNKNOWN;
+}
+
+// Retriability is derived, never stored separately: an error is worth retrying
+// exactly when it is transient. Unknown codes are non-retriable by omission.
 int loon_ffi_is_retryable_errcode(int err_code) {
-  auto code = milvus_storage::ExtendStatusCodeFromInt(err_code);
-  return code.has_value() && milvus_storage::DefaultRetryableForExtendStatusCode(*code);
+  return loon_ffi_error_category(err_code) == LOON_ERROR_CATEGORY_TRANSIENT;
+}
+
+const char* loon_ffi_error_name(int err_code) {
+  if (err_code == LOON_SUCCESS) {
+    return "Success";
+  }
+  if (const auto* metadata = FindLoonErrorMetadata(err_code); metadata != nullptr) {
+    return metadata->name;
+  }
+  return kUnknownErrorName;
 }

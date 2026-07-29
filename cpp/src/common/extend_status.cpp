@@ -32,28 +32,22 @@ const char* kErrorDetailTypeId = "milvus_storage::ExtendStatusDetail";
 struct ExtendStatusCodeMetadata {
   ExtendStatusCode code;
   std::string_view name;
-  bool retryable;
+  ErrorCategory category;
+  std::string_view s3_code;
+
+  // Derived, never stored: a code is retriable exactly when it is Transient.
+  // Storing a second bool is how the two answers drift apart.
+  [[nodiscard]] constexpr bool retryable() const { return category == ErrorCategory::Transient; }
 };
 
+// Generated from the single table in ffi_error_code.h, which is also the source
+// for the FFI constants, error_to_string and loon_ffi_error_category. Editing
+// this array by hand is not possible on purpose.
 constexpr ExtendStatusCodeMetadata kExtendStatusCodeMetadata[] = {
-    {ExtendStatusCode::PackedInvalidArgs, "PackedInvalidArgs", false},
-    {ExtendStatusCode::PackedStorageIO, "PackedStorageIO", false},
-    {ExtendStatusCode::PackedMetadataCorrupted, "PackedMetadataCorrupted", false},
-    {ExtendStatusCode::PackedFileCorrupted, "PackedFileCorrupted", false},
-    {ExtendStatusCode::PackedArrowError, "PackedArrowError", false},
-    {ExtendStatusCode::PackedUnexpected, "PackedUnexpected", false},
-    {ExtendStatusCode::AwsErrorNoSuchUpload, "AwsErrorNoSuchUpload", true},
-    {ExtendStatusCode::AwsErrorConflict, "AwsErrorConflict", false},
-    {ExtendStatusCode::AwsErrorPreConditionFailed, "AwsErrorPreConditionFailed", false},
-    {ExtendStatusCode::AwsErrorNotFound, "AwsErrorNotFound", false},
-    {ExtendStatusCode::AwsErrorAccessDenied, "AwsErrorAccessDenied", false},
-    {ExtendStatusCode::AwsErrorNonRetryable, "AwsErrorNonRetryable", false},
-    {ExtendStatusCode::StorageTransientNetwork, "StorageTransientNetwork", true},
-    {ExtendStatusCode::StorageTransientTimeout, "StorageTransientTimeout", true},
-    {ExtendStatusCode::StorageTransientThrottling, "StorageTransientThrottling", true},
-    {ExtendStatusCode::StorageTransientService, "StorageTransientService", true},
-    {ExtendStatusCode::TxnExhaustedRetry, "TxnExhaustedRetry", false},
-    {ExtendStatusCode::TxnResolutionFailed, "TxnResolutionFailed", false},
+#define MILVUS_STORAGE_EXTEND_STATUS_METADATA_ENTRY(name, code, symbol, category, s3_code) \
+  {ExtendStatusCode::name, #name, static_cast<ErrorCategory>(category), s3_code},
+    LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_EXTEND_STATUS_METADATA_ENTRY)
+#undef MILVUS_STORAGE_EXTEND_STATUS_METADATA_ENTRY
 };
 
 const ExtendStatusCodeMetadata* FindExtendStatusCodeMetadata(ExtendStatusCode code) {
@@ -76,12 +70,11 @@ const ExtendStatusCodeMetadata* FindExtendStatusCodeMetadata(int code) {
 
 }  // namespace
 
-ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code)
-    : code_{code}, retryable_{DefaultRetryableForExtendStatusCode(code)} {}
+ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code) : code_{code} {}
 ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code, const char* extra_info)
     : ExtendStatusDetail(code, std::string(extra_info)) {}
 ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code, std::string extra_info)
-    : code_{code}, extra_info_(std::move(extra_info)), retryable_{DefaultRetryableForExtendStatusCode(code)} {}
+    : code_{code}, extra_info_(std::move(extra_info)) {}
 
 const char* ExtendStatusDetail::type_id() const { return kErrorDetailTypeId; }
 
@@ -91,7 +84,10 @@ ExtendStatusCode ExtendStatusDetail::code() const { return code_; }
 
 std::string ExtendStatusDetail::extra_info() const { return extra_info_; }
 
-bool ExtendStatusDetail::retryable() const { return retryable_; }
+// Derived from the code, never stored: see ExtendStatusCodeMetadata::retryable().
+bool ExtendStatusDetail::retryable() const { return DefaultRetryableForExtendStatusCode(code_); }
+
+ErrorCategory ExtendStatusDetail::category() const { return CategoryForExtendStatusCode(code_); }
 
 std::string ExtendStatusDetail::CodeAsString() const {
   if (const auto* metadata = FindExtendStatusCodeMetadata(code()); metadata != nullptr) {
@@ -116,11 +112,24 @@ std::optional<ExtendStatusCode> ExtendStatusCodeFromInt(int code) {
   return std::nullopt;
 }
 
-bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code) {
+ErrorCategory CategoryForExtendStatusCode(ExtendStatusCode code) {
   if (const auto* metadata = FindExtendStatusCodeMetadata(code); metadata != nullptr) {
-    return metadata->retryable;
+    return metadata->category;
   }
-  return false;
+  // An out-of-range value is not classifiable; consumers must treat Unknown as
+  // Permanent rather than guess.
+  return ErrorCategory::Unknown;
+}
+
+bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code) {
+  return CategoryForExtendStatusCode(code) == ErrorCategory::Transient;
+}
+
+std::string_view S3CodeForExtendStatusCode(ExtendStatusCode code) {
+  if (const auto* metadata = FindExtendStatusCodeMetadata(code); metadata != nullptr) {
+    return metadata->s3_code;
+  }
+  return {};
 }
 
 arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info) {

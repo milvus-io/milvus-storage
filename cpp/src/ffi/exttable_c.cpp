@@ -63,8 +63,12 @@ LoonFFIResult loon_exttable_explore(const char** columns,
     auto fmt_res = milvus_storage::Format::get(format_str);
     RETURN_ARROW_ERROR_IF(fmt_res.status(), LOON_INVALID_ARGS, fmt_res.status().ToString());
 
+    // explore_dir and the credentials in `properties` come straight from the
+    // user's external-source definition, so a missing bucket or a rejected key
+    // here is a user error, not a system failure. See
+    // UserSourceErrorCodeFromStatus().
     auto files_result = fmt_res.ValueOrDie()->explore(explore_dir, properties_map);
-    RETURN_ARROW_ERROR_IF(files_result.status(), LOON_ARROW_ERROR, files_result.status().ToString());
+    RETURN_USER_SOURCE_ERROR_IF(files_result.status(), LOON_ARROW_ERROR, files_result.status().ToString());
     auto files = files_result.ValueOrDie();
 
     std::vector<std::string> columns_cpp;
@@ -134,12 +138,13 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
                           "': ", uri_res.status().ToString());
     std::string resolved_path = uri_res->scheme.empty() ? file_path : uri_res->key;
 
+    // file_path is user-supplied: not-found / access-denied are user errors.
     auto file_info_res = fs->GetFileInfo(resolved_path);
-    RETURN_ARROW_ERROR_IF(file_info_res.status(), LOON_ARROW_ERROR, file_info_res.status().ToString());
+    RETURN_USER_SOURCE_ERROR_IF(file_info_res.status(), LOON_ARROW_ERROR, file_info_res.status().ToString());
     auto file_info = file_info_res.ValueOrDie();
 
     if (file_info.type() == arrow::fs::FileType::NotFound) {
-      RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", file_path);
+      RETURN_ERROR(LOON_SOURCE_NOT_FOUND, "File not found: ", file_path);
     }
     if (file_info.type() != arrow::fs::FileType::File) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Path is not a file: ", file_path);

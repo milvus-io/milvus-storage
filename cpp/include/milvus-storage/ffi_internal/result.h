@@ -96,6 +96,43 @@ inline std::optional<milvus_storage::ExtendStatusCode> ExtendStatusCodeFromFFIEr
   return milvus_storage::ffi_internal::ExtendStatusCodeFromFFIErrorCode(err_code);
 }
 
+/// \brief Classify a failure that happened while touching a location the USER
+/// named, re-tagging the two conditions whose owner depends on the call site.
+///
+/// The same object-store condition means opposite things depending on whose
+/// path it is. A missing object on an internally generated path is a system
+/// failure (a GC race, lost data, stale metadata) that an operator must look
+/// at; a missing bucket that the user typed into an external-source URI is a
+/// user error that no retry and no operator can fix. The storage layer that
+/// raises the error cannot tell the two apart -- only the entry point knows
+/// where the path came from, so ONLY entry points that accept a user-supplied
+/// location may call this.
+///
+/// Everything else keeps the classification the producing layer attached.
+inline int UserSourceErrorCodeFromStatus(const arrow::Status& status, int fallback = LOON_ARROW_ERROR) {
+  auto code = FFIErrorCodeFromExtendStatus(status, fallback);
+  switch (code) {
+    case LOON_AWS_ERROR_NOT_FOUND:
+    case LOON_FILE_NOT_FOUND:
+      return LOON_SOURCE_NOT_FOUND;
+    case LOON_AWS_ERROR_ACCESS_DENIED:
+      return LOON_SOURCE_ACCESS_DENIED;
+    default:
+      return code;
+  }
+}
+
+/// Same contract as RETURN_ARROW_ERROR_IF, for a status produced while reaching
+/// a user-supplied location. See UserSourceErrorCodeFromStatus().
+#define RETURN_USER_SOURCE_ERROR_IF(status, fallback, ...)                         \
+  do {                                                                             \
+    auto ffi_status__ = (status);                                                  \
+    if (!ffi_status__.ok()) {                                                      \
+      auto ffi_err_code__ = UserSourceErrorCodeFromStatus(ffi_status__, fallback); \
+      RETURN_ERROR(ffi_err_code__, ##__VA_ARGS__);                                 \
+    }                                                                              \
+  } while (0)
+
 template <typename... Args>
 LoonFFIResult CreateFFIResult(int code, Args&&... args) {
   LoonFFIResult result;
