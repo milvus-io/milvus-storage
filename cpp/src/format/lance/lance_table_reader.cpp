@@ -468,7 +468,8 @@ arrow::Result<std::shared_ptr<arrow::Table>> LanceTableReader::take(const std::v
 
   // out of range
   if (chunkedarray->num_chunks() == 0) {
-    return arrow::Status::Invalid(fmt::format("out of row range [0, {}]", fragment_reader_->RowCount().ValueOr(0)));
+    ARROW_ASSIGN_OR_RAISE(auto row_count, fragment_reader_->RowCount());
+    return arrow::Status::Invalid(fmt::format("out of row range [0, {}]", row_count));
   }
 
   std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;

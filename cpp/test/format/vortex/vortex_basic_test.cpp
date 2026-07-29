@@ -218,8 +218,9 @@ TEST(VortexErrorTest, StreamingReaderTranslatesCloseBridgeError) {
 }
 
 TEST(VortexErrorTest, MapsBridgeErrorCodesToStatusDetails) {
-  auto file_not_found_status = MakeVortexErrorStatus(
-      "Failed to read vortex file", fmt::format("__LOON_RUST_BRIDGE_ERRCODE__={}; file not found", LOON_FILE_NOT_FOUND));
+  auto file_not_found_status =
+      MakeVortexErrorStatus("Failed to read vortex file",
+                            fmt::format("__LOON_RUST_BRIDGE_ERRCODE__={}; file not found", LOON_FILE_NOT_FOUND));
   EXPECT_TRUE(file_not_found_status.IsIOError());
   EXPECT_EQ(arrow::internal::ErrnoFromStatus(file_not_found_status), ENOENT);
   EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(file_not_found_status), nullptr);
@@ -233,8 +234,9 @@ TEST(VortexErrorTest, MapsBridgeErrorCodesToStatusDetails) {
   EXPECT_EQ(aws_not_found_detail->code(), ExtendStatusCode::AwsErrorNotFound);
   EXPECT_FALSE(aws_not_found_detail->retryable());
 
-  auto timeout_status = MakeVortexErrorStatus(
-      "Failed to read vortex file", fmt::format("__LOON_RUST_BRIDGE_ERRCODE__={}; read failed", LOON_TRANSIENT_TIMEOUT));
+  auto timeout_status =
+      MakeVortexErrorStatus("Failed to read vortex file",
+                            fmt::format("__LOON_RUST_BRIDGE_ERRCODE__={}; read failed", LOON_TRANSIENT_TIMEOUT));
   auto timeout_detail = ExtendStatusDetail::UnwrapStatus(timeout_status);
   ASSERT_NE(timeout_detail, nullptr);
   EXPECT_EQ(timeout_detail->code(), ExtendStatusCode::StorageTransientTimeout);

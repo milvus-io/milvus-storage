@@ -33,12 +33,14 @@ namespace milvus_storage::bridge {
 //   * code 12 (LOON_FILE_NOT_FOUND)      -> IOError + ENOENT detail
 //   * ExtendStatusCode values (101-112)  -> IOError + ExtendStatusDetail
 //   * bridge-private codes (>= 1000, never cross the C ABI):
+//       1000 unclassified   -> plain IOError          (conservative fallback)
 //       1001 data-corrupt   -> Status::Invalid       (permanent data error)
 //       1002 not-supported  -> Status::NotImplemented
 //   * no / unknown marker                -> plain IOError (conservative
 //     non-retriable fallback; never invent retriability)
 
 // Bridge-private marker codes; keep in sync with rust/src/bridge_error.rs.
+inline constexpr int kBridgeErrCodeUnclassified = 1000;
 inline constexpr int kBridgeErrCodeDataCorrupt = 1001;
 inline constexpr int kBridgeErrCodeNotSupported = 1002;
 

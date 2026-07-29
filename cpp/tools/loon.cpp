@@ -151,7 +151,8 @@ static int DoDemoTable(int argc, char** argv) {
     std::cerr << std::endl;
     std::cerr << "Types: iceberg" << std::endl;
     std::cerr << std::endl;
-    std::cerr << "Creates a demo table with schema (id int64, name string," << " value float64)." << std::endl;
+    std::cerr << "Creates a demo table with schema (id int64, name string,"
+              << " value float64)." << std::endl;
     std::cerr << R"(Data: id=0..N-1, name="row_0".."row_{N-1}", value=id*1.5)" << std::endl;
     std::cerr << std::endl;
     std::cerr << "For cloud storage, pass extfs.* properties via --prop." << std::endl;
@@ -361,7 +362,8 @@ static int DoCreate(int argc, char** argv) {
 
   if (format.empty() || source.empty() || target.empty() || columns.empty()) {
     std::cerr << "Usage: loon create --format <format> --source <uri> "
-              << "--target <base_path> --columns col1,col2,... " << "[--prop key=value ...]" << std::endl;
+              << "--target <base_path> --columns col1,col2,... "
+              << "[--prop key=value ...]" << std::endl;
     std::cerr << std::endl;
     std::cerr << "Formats: parquet, vortex, lance-table, iceberg-table" << std::endl;
     std::cerr << std::endl;
@@ -567,7 +569,8 @@ static int DoDescribe(int argc, char** argv) {
 static int DoRead(int argc, char** argv) {
   if (argc < 1) {
     std::cerr << "Usage: loon read <manifest_path> --columns col1,col2,..."
-              << " [--take pos1,pos2,...] [--predicate \"expr\"]" << " [--verbose] [--prop key=value ...]" << std::endl;
+              << " [--take pos1,pos2,...] [--predicate \"expr\"]"
+              << " [--verbose] [--prop key=value ...]" << std::endl;
     return 1;
   }
   std::string manifest_path = argv[0];
@@ -638,8 +641,8 @@ static int DoRead(int argc, char** argv) {
       for (size_t fi = 0; fi < cg->files.size(); ++fi) {
         auto& f = cg->files[fi];
         std::cout << "    file[" << fi << "] path=" << f.path << "  range=[" << f.start_index << "," << f.end_index
-                  << ")" << "  has_metadata=" << (f.properties.count(kPropertyMetadata) > 0 ? "true" : "false")
-                  << std::endl;
+                  << ")"
+                  << "  has_metadata=" << (f.properties.count(kPropertyMetadata) > 0 ? "true" : "false") << std::endl;
         auto meta_it = f.properties.find(kPropertyMetadata);
         if (meta_it != f.properties.end()) {
           std::cout << "    metadata: " << meta_it->second << std::endl;

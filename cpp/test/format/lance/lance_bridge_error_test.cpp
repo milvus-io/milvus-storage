@@ -111,6 +111,17 @@ TEST(BridgeErrorTest, TranslateDecodesMarkerRegardlessOfStatusCode) {
 
   auto midscan_notfound = TranslateBridgeStatus("stream", arrow::Status::Invalid(std::string(kMarker) + "12; gone"));
   EXPECT_EQ(arrow::internal::ErrnoFromStatus(midscan_notfound), ENOENT) << midscan_notfound.ToString();
+
+  // Rust now emits bridge-private code 1000 when it cannot classify the
+  // underlying error. Arrow C-stream exposes it as Invalid/EINVAL, but the
+  // marker must restore the conservative plain-IO fallback rather than
+  // misreporting a network/opaque failure as DataFormatBroken.
+  auto midscan_unclassified =
+      TranslateBridgeStatus("stream", arrow::Status::Invalid(std::string(kMarker) + "1000; connection reset"));
+  EXPECT_TRUE(midscan_unclassified.IsIOError()) << midscan_unclassified.ToString();
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(midscan_unclassified), nullptr);
+  EXPECT_EQ(ToSegcoreError(midscan_unclassified).get_error_code(), milvus::StorageError);
+  EXPECT_EQ(midscan_unclassified.message().find("__LOON_"), std::string::npos);
 }
 
 TEST(BridgeErrorTest, TranslateDoesNotDowngradeNonIOErrorStatuses) {

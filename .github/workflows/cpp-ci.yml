@@ -67,6 +67,14 @@ jobs:
         run: |
           make build USE_ASAN=True BUILD_TYPE=Release
 
+      - name: Test Rust bridge error classifier
+        working-directory: ./cpp
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/cpp/build/Release/cargo/build
+          RUSTFLAGS: -C force-frame-pointers=yes
+        run: |
+          cargo test --locked --manifest-path src/format/bridge/rust/Cargo.toml --lib bridge_error::tests
+
       - name: Save rust build cache
         if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4

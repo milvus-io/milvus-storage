@@ -106,6 +106,11 @@ arrow::Status MakeBridgeErrorStatus(std::string_view message) {
     switch (*parsed.ffi_err_code) {
       case LOON_FILE_NOT_FOUND:
         return arrow::Status::IOError(parsed.message).WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
+      case kBridgeErrCodeUnclassified:
+        // Explicit marker used by Rust when no more specific classification is
+        // available. It must still be decoded so Arrow C-stream's Invalid/EINVAL
+        // wrapper does not turn an opaque IO failure into DataFormatBroken.
+        break;
       case kBridgeErrCodeDataCorrupt:
         return arrow::Status::Invalid(parsed.message);
       case kBridgeErrCodeNotSupported:

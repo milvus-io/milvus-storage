@@ -29,11 +29,14 @@
 //!   matching `ExtendStatusDetail` (or an ENOENT detail for 12).
 //! * Bridge-private values (>= 1000, never cross the C ABI): the C++ side
 //!   converts them straight into an arrow StatusCode and they cease to exist.
+//!   Code 1000 is the explicit unclassified fallback; carrying it is important
+//!   for stream errors because Arrow's C stream maps every Rust error to
+//!   `Invalid` before C++ gets a chance to restore the original class.
 //!
 //! Classification discipline ("producer owns classification", conservative):
-//! only signals the producer positively identifies are tagged; everything else
-//! stays untagged and lands in the consumer's non-retriable fallback bucket.
-//! Never invent retriability.
+//! only signals the producer positively identifies get a semantic code;
+//! everything else carries the explicit unclassified marker and lands in the
+//! consumer's non-retriable fallback bucket. Never invent retriability.
 
 use lance::Error as LanceError;
 
@@ -52,6 +55,7 @@ pub const LOON_TRANSIENT_SERVICE: i32 = 110;
 
 /// Bridge-private codes (>= 1000): decoded by cpp `bridge_error.cpp` into an
 /// arrow StatusCode, never forwarded as an FFI error code.
+pub const BRIDGE_ERRCODE_UNCLASSIFIED: i32 = 1000;
 pub const BRIDGE_ERRCODE_DATA_CORRUPT: i32 = 1001;
 pub const BRIDGE_ERRCODE_NOT_SUPPORTED: i32 = 1002;
 
@@ -65,10 +69,13 @@ pub struct BridgeError {
 
 impl std::fmt::Display for BridgeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.code {
-            Some(code) => write!(f, "{BRIDGE_ERRCODE_MARKER}{code}; {}", self.msg),
-            None => write!(f, "{}", self.msg),
-        }
+        // Always carry a marker. In synchronous cxx calls an unmarked error
+        // would still become a plain IOError, but during Arrow C-stream
+        // iteration it first becomes Invalid/EINVAL. The explicit fallback
+        // marker lets the C++ decoder restore that stream error to IOError
+        // instead of misreporting it as DataFormatBroken.
+        let code = self.code.unwrap_or(BRIDGE_ERRCODE_UNCLASSIFIED);
+        write!(f, "{BRIDGE_ERRCODE_MARKER}{code}; {}", self.msg)
     }
 }
 
@@ -79,9 +86,9 @@ impl std::error::Error for BridgeError {}
 /// impls below.
 pub type BridgeResult<T> = std::result::Result<T, BridgeError>;
 
-/// Classify a `lance::Error` into a marker code. `None` = not positively
-/// identified -> stays untagged -> conservative non-retriable fallback on the
-/// consumer side.
+/// Classify a `lance::Error` into a semantic marker code. `None` = not
+/// positively identified; `Display` emits the explicit unclassified marker so
+/// the consumer can still restore the conservative non-retriable IO fallback.
 pub fn classify_lance_error(e: &LanceError) -> Option<i32> {
     match e {
         // The object/dataset/index/ref/version is gone. Retrying hits the same
@@ -244,6 +251,20 @@ mod tests {
             source: "Server returned non-2xx status code: 400: bad request".into(),
         });
         assert_eq!(classify_lance_error(&e404ish), None);
+    }
+
+    #[test]
+    fn unclassified_errors_still_carry_the_bridge_marker() {
+        let error = BridgeError {
+            code: None,
+            msg: "connection reset by peer".to_string(),
+        };
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{BRIDGE_ERRCODE_MARKER}{BRIDGE_ERRCODE_UNCLASSIFIED}; connection reset by peer"
+            )
+        );
     }
 
     #[test]
