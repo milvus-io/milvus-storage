@@ -58,6 +58,8 @@ FFI_EXPORT extern const int loon_errcode_transient_throttling;
 FFI_EXPORT extern const int loon_errcode_transient_service;
 FFI_EXPORT extern const int loon_errcode_txn_exhausted_retry;
 FFI_EXPORT extern const int loon_errcode_txn_resolution_failed;
+FFI_EXPORT extern const int loon_errcode_lance_write_contention;
+FFI_EXPORT extern const int loon_errcode_lance_resource_not_found;
 
 // usage example(caller must free the message string):
 //

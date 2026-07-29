@@ -31,7 +31,7 @@ namespace milvus_storage::bridge {
 // helpers here parse and strip that marker and rebuild a structured
 // arrow::Status:
 //   * code 12 (LOON_FILE_NOT_FOUND)      -> IOError + ENOENT detail
-//   * ExtendStatusCode values (101-112)  -> IOError + ExtendStatusDetail
+//   * ExtendStatusCode values (101-114)  -> IOError + ExtendStatusDetail
 //   * bridge-private codes (>= 1000, never cross the C ABI):
 //       1000 unclassified   -> plain IOError          (conservative fallback)
 //       1001 data-corrupt   -> Status::Invalid       (permanent data error)

@@ -34,6 +34,8 @@ _ERROR_CODE_SYMBOLS = (
     "loon_errcode_transient_service",
     "loon_errcode_txn_exhausted_retry",
     "loon_errcode_txn_resolution_failed",
+    "loon_errcode_lance_write_contention",
+    "loon_errcode_lance_resource_not_found",
 )
 
 # Chunk metadata type flags from ffi_c.h
@@ -115,6 +117,8 @@ _ffi.cdef(
     extern int loon_errcode_transient_service;
     extern int loon_errcode_txn_exhausted_retry;
     extern int loon_errcode_txn_resolution_failed;
+    extern int loon_errcode_lance_write_contention;
+    extern int loon_errcode_lance_resource_not_found;
 
     int loon_ffi_is_success(LoonFFIResult* result);
     const char* loon_ffi_get_errmsg(LoonFFIResult* result);

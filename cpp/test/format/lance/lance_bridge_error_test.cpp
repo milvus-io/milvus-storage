@@ -45,14 +45,32 @@ TEST(BridgeErrorTest, NotFoundCodeBecomesEnoentDetail) {
   EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::ObjectNotExist);
 }
 
-TEST(BridgeErrorTest, TransientCodeBecomesRetryableExtendDetail) {
-  auto status = MakeBridgeErrorStatus(std::string(kMarker) + "109; too much write contention");
+TEST(BridgeErrorTest, LanceContentionHasItsOwnRetryableDetail) {
+  auto status = MakeBridgeErrorStatus(std::string(kMarker) + "113; too much write contention");
   ASSERT_TRUE(status.IsIOError());
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr);
+  EXPECT_EQ(detail->code(), ExtendStatusCode::LanceWriteContention);
+  EXPECT_TRUE(detail->retryable());
+  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::StorageTransientError);
+}
+
+TEST(BridgeErrorTest, ObjectStoreThrottlingKeepsCode109) {
+  auto status = MakeBridgeErrorStatus(std::string(kMarker) + "109; S3 SlowDown");
   auto detail = ExtendStatusDetail::UnwrapStatus(status);
   ASSERT_NE(detail, nullptr);
   EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientThrottling);
   EXPECT_TRUE(detail->retryable());
-  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::StorageTransientError);
+}
+
+TEST(BridgeErrorTest, LanceResourceNotFoundDoesNotBecomeDatasetEnoent) {
+  auto status = MakeBridgeErrorStatus(std::string(kMarker) + "114; version 7 not found");
+  ASSERT_TRUE(status.IsIOError());
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr);
+  EXPECT_EQ(detail->code(), ExtendStatusCode::LanceResourceNotFound);
+  EXPECT_NE(arrow::internal::ErrnoFromStatus(status), ENOENT);
+  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::ObjectNotExist);
 }
 
 TEST(BridgeErrorTest, BridgePrivateCodesMapToArrowStatusCodes) {

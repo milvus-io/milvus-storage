@@ -58,6 +58,11 @@ enum class ExtendStatusCode : char {
   // Transaction-specific error codes
   TxnExhaustedRetry = LOON_TXN_EXHAUSTED_RETRY,
   TxnResolutionFailed = LOON_TXN_RESOLUTION_FAILED,
+
+  // Lance-specific error codes. These preserve Lance semantics without
+  // overloading object-storage throttling or the dataset-absence ENOENT signal.
+  LanceWriteContention = LOON_LANCE_WRITE_CONTENTION,
+  LanceResourceNotFound = LOON_LANCE_RESOURCE_NOT_FOUND,
 };
 
 class ExtendStatusDetail : public arrow::StatusDetail {

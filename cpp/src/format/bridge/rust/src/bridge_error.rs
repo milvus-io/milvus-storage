@@ -24,8 +24,8 @@
 //! established in `filesystem_c.rs`.
 //!
 //! Code space carried by the marker:
-//! * LOON / ExtendStatusCode values (`ffi_error_code.h`): 12 = file-not-found,
-//!   101-112 = AWS/transient/txn extend codes. The C++ side rebuilds the
+//! * LOON / ExtendStatusCode values (`ffi_error_code.h`): 12 = dataset-not-found,
+//!   101-114 = AWS/transient/txn/Lance extend codes. The C++ side rebuilds the
 //!   matching `ExtendStatusDetail` (or an ENOENT detail for 12).
 //! * Bridge-private values (>= 1000, never cross the C ABI): the C++ side
 //!   converts them straight into an arrow StatusCode and they cease to exist.
@@ -52,6 +52,10 @@ pub const LOON_AWS_ERROR_ACCESS_DENIED: i32 = 105;
 pub const LOON_TRANSIENT_TIMEOUT: i32 = 108;
 pub const LOON_TRANSIENT_THROTTLING: i32 = 109;
 pub const LOON_TRANSIENT_SERVICE: i32 = 110;
+/// Lance-specific ExtendStatusCode values. Keep separate from object-store
+/// throttling and from code 12, which is the create-if-missing signal.
+pub const LOON_LANCE_WRITE_CONTENTION: i32 = 113;
+pub const LOON_LANCE_RESOURCE_NOT_FOUND: i32 = 114;
 
 /// Bridge-private codes (>= 1000): decoded by cpp `bridge_error.cpp` into an
 /// arrow StatusCode, never forwarded as an FFI error code.
@@ -94,11 +98,14 @@ pub fn classify_lance_error(e: &LanceError) -> Option<i32> {
         // The object/dataset/index/ref/version is gone. Retrying hits the same
         // store and fails identically; consumers can distinguish "data
         // missing" from a generic storage failure.
+        LanceError::DatasetNotFound { .. } => Some(LOON_FILE_NOT_FOUND),
+        // These are missing resources *inside* an existing Lance dataset. They
+        // remain fine-grained ObjectNotExist downstream, but must not carry
+        // ENOENT: LanceTableWriter consumes ENOENT as "dataset absent -> create".
         LanceError::NotFound { .. }
-        | LanceError::DatasetNotFound { .. }
         | LanceError::IndexNotFound { .. }
         | LanceError::RefNotFound { .. }
-        | LanceError::VersionNotFound { .. } => Some(LOON_FILE_NOT_FOUND),
+        | LanceError::VersionNotFound { .. } => Some(LOON_LANCE_RESOURCE_NOT_FOUND),
         // Field/schema errors are caller/schema-evolution conditions, not
         // corruption -- and they must NOT look like a missing dataset: the
         // ENOENT classification drives create-if-missing in the lance writer,
@@ -116,12 +123,15 @@ pub fn classify_lance_error(e: &LanceError) -> Option<i32> {
         // but a fresh attempt (new commit round) can succeed. This is the
         // producer's own classification, not invented here.
         LanceError::RetryableCommitConflict { .. } | LanceError::TooMuchWriteContention { .. } => {
-            Some(LOON_TRANSIENT_THROTTLING)
+            Some(LOON_LANCE_WRITE_CONTENTION)
         }
         // IO wraps the underlying object_store error as a boxed source;
         // downcast to recover the typed variant.
         LanceError::IO { source, .. } => match source.downcast_ref::<object_store::Error>() {
-            Some(object_store::Error::NotFound { .. }) => Some(LOON_FILE_NOT_FOUND),
+            // A missing object while operating inside a dataset is not proof
+            // that the dataset itself is absent. Preserve ObjectNotExist
+            // without emitting the writer's create-if-missing ENOENT signal.
+            Some(object_store::Error::NotFound { .. }) => Some(LOON_LANCE_RESOURCE_NOT_FOUND),
             Some(
                 object_store::Error::PermissionDenied { .. }
                 | object_store::Error::Unauthenticated { .. },
@@ -208,7 +218,48 @@ mod tests {
             path: "p".to_string(),
             source: "gone".into(),
         });
-        assert_eq!(classify_lance_error(&e), Some(LOON_FILE_NOT_FOUND));
+        assert_eq!(
+            classify_lance_error(&e),
+            Some(LOON_LANCE_RESOURCE_NOT_FOUND)
+        );
+    }
+
+    #[test]
+    fn dataset_not_found_is_the_only_create_if_missing_signal() {
+        let dataset_missing = LanceError::dataset_not_found("dataset", "gone".into());
+        assert_eq!(
+            classify_lance_error(&dataset_missing),
+            Some(LOON_FILE_NOT_FOUND)
+        );
+
+        let resource_missing = LanceError::not_found("manifest");
+        assert_eq!(
+            classify_lance_error(&resource_missing),
+            Some(LOON_LANCE_RESOURCE_NOT_FOUND)
+        );
+
+        let version_missing = LanceError::VersionNotFound {
+            message: "version 7".to_string(),
+        };
+        assert_eq!(
+            classify_lance_error(&version_missing),
+            Some(LOON_LANCE_RESOURCE_NOT_FOUND)
+        );
+    }
+
+    #[test]
+    fn lance_contention_does_not_reuse_object_store_throttling() {
+        let contention = LanceError::too_much_write_contention("writers are busy");
+        assert_eq!(
+            classify_lance_error(&contention),
+            Some(LOON_LANCE_WRITE_CONTENTION)
+        );
+
+        let conflict = LanceError::retryable_commit_conflict_source(7, "conflict".into());
+        assert_eq!(
+            classify_lance_error(&conflict),
+            Some(LOON_LANCE_WRITE_CONTENTION)
+        );
     }
 
     #[test]

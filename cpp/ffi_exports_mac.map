@@ -29,6 +29,8 @@ _loon_errcode_transient_throttling
 _loon_errcode_transient_service
 _loon_errcode_txn_exhausted_retry
 _loon_errcode_txn_resolution_failed
+_loon_errcode_lance_write_contention
+_loon_errcode_lance_resource_not_found
 
 # Properties interface
 _loon_properties_create
