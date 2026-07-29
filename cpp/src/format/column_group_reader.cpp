@@ -354,15 +354,15 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> ColumnGroupReaderImpl
                             })
         .deferValue([file, read_schema = schema_, needed_columns = needed_columns_,
                      predicate = predicate_](arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>&& metadata_result)
-                        -> arrow::Result<std::shared_ptr<ReaderT>> {
-          ARROW_ASSIGN_OR_RAISE(auto metadata, std::move(metadata_result));
-          return FormatReader::create_from_metadata<ReaderT>(std::move(metadata), file, read_schema, needed_columns,
-                                                             predicate);
+                        -> folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> {
+          FOLLY_ARROW_ASSIGN_OR_RAISE(auto metadata, std::move(metadata_result));
+          return ReaderT::MetaTrait::create_from_metadata_async(std::move(metadata), file, read_schema, needed_columns,
+                                                                predicate);
         });
   }
 
-  // Formats without an async metadata loader keep the synchronous cache path;
-  // constructing this ready future may therefore block.
+  // Formats without a complete async metadata path keep the synchronous cache
+  // path; constructing this ready future may therefore block.
   return folly::makeSemiFuture(open_reader_for_file(file_index));
 }
 

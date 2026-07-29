@@ -69,6 +69,12 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
         const std::shared_ptr<arrow::Schema>& read_schema,
         const std::vector<std::string>& needed_columns,
         const std::string& predicate);
+    static folly::SemiFuture<arrow::Result<std::shared_ptr<VortexFormatReader>>> create_from_metadata_async(
+        MetadataPtr metadata,
+        const api::ColumnGroupFile& file,
+        const std::shared_ptr<arrow::Schema>& read_schema,
+        const std::vector<std::string>& needed_columns,
+        const std::string& predicate);
 
  private:
     // Implementation detail, not part of FormatReaderWithMetadata. This helper

@@ -475,6 +475,19 @@ arrow::Result<std::shared_ptr<ParquetFormatReader>> ParquetFormatReader::MetaTra
   return reader;
 }
 
+folly::SemiFuture<arrow::Result<std::shared_ptr<ParquetFormatReader>>>
+ParquetFormatReader::MetaTrait::create_from_metadata_async(MetadataPtr metadata,
+                                                           const api::ColumnGroupFile& file,
+                                                           const std::shared_ptr<arrow::Schema>& read_schema,
+                                                           const std::vector<std::string>& needed_columns,
+                                                           const std::string& predicate) {
+  return folly::makeSemiFuture().deferValue(
+      [metadata = std::move(metadata), file, read_schema, needed_columns,
+       predicate](folly::Unit) -> arrow::Result<std::shared_ptr<ParquetFormatReader>> {
+        return create_from_metadata(std::move(metadata), file, read_schema, needed_columns, predicate);
+      });
+}
+
 arrow::Status ParquetFormatReader::open() {
   assert(file_reader_ == nullptr);
 

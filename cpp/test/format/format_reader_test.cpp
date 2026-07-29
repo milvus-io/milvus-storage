@@ -812,6 +812,33 @@ TEST_P(FormatReaderTest, VortexLoadMetadataAsyncUsesTokioOpen) {
   EXPECT_GT(executor.add_count(), 0);
 }
 
+TEST_P(FormatReaderTest, VortexCreateFromMetadataAsyncDefersAndAppliesReadState) {
+  if (GetParam() != LOON_FORMAT_VORTEX) {
+    GTEST_SKIP() << "Test vortex only.";
+  }
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_VORTEX, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto column_groups, writer->close());
+  const auto& file = column_groups->front()->files.front();
+  ASSERT_AND_ASSIGN(auto metadata, FormatReader::load_metadata<vortex::VortexFormatReader>(file, properties_, nullptr));
+
+  auto id_schema = arrow::schema({schema_->field(0)});
+  auto future = vortex::VortexFormatReader::MetaTrait::create_from_metadata_async(std::move(metadata), file, id_schema,
+                                                                                  {"id"}, "id > 1000000");
+  EXPECT_FALSE(future.isReady());
+
+  CountingExecutor executor;
+  ASSERT_AND_ASSIGN(auto reader, std::move(future).via(&executor).get());
+  EXPECT_GT(executor.add_count(), 0);
+
+  ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+  EXPECT_EQ(batch->num_rows(), 0);
+  ASSERT_EQ(batch->num_columns(), 1);
+  EXPECT_EQ(batch->schema()->field(0)->name(), "id");
+}
+
 TEST_P(FormatReaderTest, TestReadWithRange) {
   std::string format = GetParam();
   ASSERT_AND_ASSIGN(auto two_cols_schema, CreateTestSchema(std::array<bool, 4>{true, false, false, true}));
