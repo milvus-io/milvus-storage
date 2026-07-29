@@ -69,6 +69,16 @@ std::string ReadPath(const api::ColumnGroupFile& file) {
   return folly::parseJson(file.Get<std::string>(api::kPropertyMetadata))["read_path"].asString();
 }
 
+std::string LocalFilePath(std::string path) {
+  if (path.rfind("file://", 0) == 0) {
+    return path.substr(7);
+  }
+  if (path.rfind("file:", 0) == 0) {
+    return path.substr(5);
+  }
+  return path;
+}
+
 int64_t ReadAllRows(const std::shared_ptr<FormatReader>& reader) {
   auto infos = reader->get_row_group_infos().ValueOrDie();
   int64_t rows = 0;
@@ -192,6 +202,14 @@ TEST_F(PaimonIntegrationTest, MergeOnReadTableFailsClosedAsNotImplemented) {
   EXPECT_NE(message.find("data-split reading"), std::string::npos) << message;
 }
 
+TEST_F(PaimonIntegrationTest, InvalidScanModeFailsAsInvalid) {
+  paimon::CreateTestTable(table_dir_, 10, "append");
+
+  auto files = Explore("invalid-mode");
+  ASSERT_FALSE(files.ok());
+  EXPECT_TRUE(files.status().IsInvalid()) << files.status().ToString();
+}
+
 TEST_F(PaimonIntegrationTest, MalformedMetadataTypesFailClosed) {
   paimon::CreateTestTable(table_dir_, 10, "append");
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
@@ -237,12 +255,7 @@ TEST_F(PaimonIntegrationTest, JavaBitmap64DeletionVectorFailsClosedAsNotImplemen
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x07, 0x00, 0x89, 0xde, 0xf4, 0x64};
 
   auto descriptor = folly::parseJson(files.front().Get<std::string>(api::kPropertyMetadata));
-  auto dv_path = descriptor["deletion_file"]["path"].asString();
-  if (dv_path.rfind("file://", 0) == 0) {
-    dv_path = dv_path.substr(7);
-  } else if (dv_path.rfind("file:", 0) == 0) {
-    dv_path = dv_path.substr(5);
-  }
+  auto dv_path = LocalFilePath(descriptor["deletion_file"]["path"].asString());
   {
     std::ofstream out(dv_path, std::ios::binary | std::ios::trunc);
     ASSERT_TRUE(out.is_open());
@@ -298,7 +311,49 @@ TEST_F(PaimonIntegrationTest, AutoUsesDirectFileAndAppliesDeletionVector) {
   tampered.Set(api::kPropertyMetadata, folly::toJson(descriptor));
   auto invalid = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, tampered, properties_, {"id"}, nullptr);
   ASSERT_FALSE(invalid.ok());
-  EXPECT_TRUE(invalid.status().IsIOError());
+  EXPECT_TRUE(invalid.status().IsInvalid()) << invalid.status().ToString();
+}
+
+TEST_F(PaimonIntegrationTest, CorruptDeletionVectorCrcFailsAsInvalid) {
+  paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1, 5, 9});
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+
+  const auto descriptor = folly::parseJson(files.front().Get<std::string>(api::kPropertyMetadata));
+  const auto& deletion = descriptor["deletion_file"];
+  const auto path = LocalFilePath(deletion["path"].asString());
+  const auto crc_offset = deletion["offset"].asInt() + 4 + deletion["length"].asInt();
+  std::fstream stream(path, std::ios::binary | std::ios::in | std::ios::out);
+  ASSERT_TRUE(stream.is_open());
+  stream.seekg(crc_offset);
+  char crc_byte = 0;
+  stream.read(&crc_byte, 1);
+  ASSERT_EQ(stream.gcount(), 1);
+  stream.clear();
+  stream.seekp(crc_offset);
+  crc_byte ^= 1;
+  stream.write(&crc_byte, 1);
+  ASSERT_TRUE(stream.good());
+  stream.close();
+
+  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
+  ASSERT_FALSE(reader.ok());
+  EXPECT_TRUE(reader.status().IsInvalid()) << reader.status().ToString();
+  EXPECT_NE(reader.status().ToString().find("CRC mismatch"), std::string::npos);
+}
+
+TEST_F(PaimonIntegrationTest, MissingDeletionVectorFileRemainsIOError) {
+  paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1, 5, 9});
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+
+  auto descriptor = folly::parseJson(files.front().Get<std::string>(api::kPropertyMetadata));
+  descriptor["deletion_file"]["path"] = fmt::format("file://{}/missing.dv", table_dir_);
+  files.front().Set(api::kPropertyMetadata, folly::toJson(descriptor));
+
+  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
+  ASSERT_FALSE(reader.ok());
+  EXPECT_TRUE(reader.status().IsIOError()) << reader.status().ToString();
 }
 
 TEST_F(PaimonIntegrationTest, DirectFileFragmentRangeUsesPostDeletionLogicalRows) {

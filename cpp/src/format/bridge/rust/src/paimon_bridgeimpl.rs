@@ -36,6 +36,17 @@ const DELETION_VECTOR_MAGIC: u32 = 1_581_511_376;
 /// size in `DeletionFile.length`, unlike the bitmap32 envelope.
 const DELETION_VECTOR_BITMAP64_MAGIC: u32 = 1_681_511_377;
 
+// These stable markers are consumed by ClassifyPaimonError at the C++ boundary.
+// Keep classification at the point where an error is known to be terminal;
+// unclassified storage and network errors retain retryable IOError semantics.
+fn invalid_message(message: impl std::fmt::Display) -> String {
+    format!("{ERROR_INVALID_PREFIX} {message}")
+}
+
+fn not_implemented_message(message: impl std::fmt::Display) -> String {
+    format!("{ERROR_NOT_IMPLEMENTED_PREFIX} {message}")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScanMode {
     Auto,
@@ -47,10 +58,12 @@ impl ScanMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "" | "auto" => Ok(Self::Auto),
             "direct-file" => Ok(Self::DirectFile),
-            "data-split" => {
-                bail!("{ERROR_NOT_IMPLEMENTED_PREFIX} Paimon data-split reads are not supported")
-            }
-            other => bail!("invalid Paimon scan mode '{other}'; expected auto or direct-file"),
+            "data-split" => bail!(not_implemented_message(
+                "Paimon data-split reads are not supported"
+            )),
+            other => bail!(invalid_message(format_args!(
+                "invalid Paimon scan mode '{other}'; expected auto or direct-file"
+            ))),
         }
     }
 }
@@ -93,7 +106,8 @@ impl TableReadSemantics {
         Ok(Self {
             merge_engine: (!schema.primary_keys().is_empty())
                 .then(|| options.merge_engine())
-                .transpose()?,
+                .transpose()
+                .with_context(|| invalid_message("invalid Paimon merge-engine table option"))?,
             deletion_vectors_enabled: options.deletion_vectors_enabled(),
             deletion_vectors_merge_on_read: options.deletion_vectors_merge_on_read(),
             has_blob_fields: !options.blob_fields().is_empty(),
@@ -125,9 +139,11 @@ pub(crate) fn options_from_vecs(
 ) -> Result<HashMap<String, String>> {
     ensure!(
         keys.len() == values.len(),
-        "storage option key/value count mismatch: {} keys, {} values",
-        keys.len(),
-        values.len()
+        invalid_message(format_args!(
+            "storage option key/value count mismatch: {} keys, {} values",
+            keys.len(),
+            values.len()
+        ))
     );
     Ok(keys.into_iter().zip(values).collect())
 }
@@ -165,7 +181,11 @@ async fn ensure_pinned_snapshot_exists(
     let snapshot_path = manager.snapshot_path(snapshot_id);
     let input = file_io
         .new_input(&snapshot_path)
-        .with_context(|| format!("cannot address Paimon snapshot file '{snapshot_path}'"))?;
+        .with_context(|| {
+            invalid_message(format_args!(
+                "cannot address Paimon snapshot file '{snapshot_path}'"
+            ))
+        })?;
     let exists = input.exists().await.with_context(|| {
         format!("cannot check Paimon snapshot {snapshot_id} for table {table_location}")
     })?;
@@ -183,12 +203,12 @@ async fn ensure_pinned_snapshot_exists(
         format!("cannot resolve the latest Paimon snapshot for table {table_location}")
     })?;
     let bound = |value: Option<i64>| value.map_or_else(|| "none".to_string(), |id| id.to_string());
-    bail!(
-        "{ERROR_INVALID_PREFIX} Paimon snapshot {snapshot_id} no longer exists for table {table_location} \
+    bail!(invalid_message(format_args!(
+        "Paimon snapshot {snapshot_id} no longer exists for table {table_location} \
          (earliest={}, latest={}); refresh the external collection",
         bound(earliest),
         bound(latest)
-    )
+    )))
 }
 
 async fn load_table(
@@ -197,14 +217,26 @@ async fn load_table(
     snapshot_id: Option<i64>,
 ) -> Result<Table> {
     let file_io = FileIO::from_path(table_location)
-        .with_context(|| format!("cannot infer Paimon storage from '{table_location}'"))?
+        .with_context(|| {
+            invalid_message(format_args!(
+                "cannot infer Paimon storage from '{table_location}'"
+            ))
+        })?
         .with_props(storage_options)
         .build()
-        .with_context(|| format!("cannot build Paimon FileIO for '{table_location}'"))?;
+        .with_context(|| {
+            invalid_message(format_args!(
+                "cannot build Paimon FileIO for '{table_location}'"
+            ))
+        })?;
     let schema = SchemaManager::new(file_io.clone(), table_location.to_string())
         .latest()
         .await?
-        .ok_or_else(|| anyhow!("Paimon table has no schema: {table_location}"))?;
+        .ok_or_else(|| {
+            anyhow!(invalid_message(format_args!(
+                "Paimon table has no schema: {table_location}"
+            )))
+        })?;
     if let Some(snapshot_id) = snapshot_id {
         ensure_pinned_snapshot_exists(&file_io, table_location, snapshot_id).await?;
     }
@@ -227,7 +259,10 @@ async fn load_table(
         // is unreadable. Both are terminal states for this descriptor.
         ensure!(
             table.has_resolved_travel_snapshot(),
-            "{ERROR_INVALID_PREFIX} Paimon snapshot {snapshot_id} no longer exists for table {table_location}; refresh the external collection"
+            invalid_message(format_args!(
+                "Paimon snapshot {snapshot_id} no longer exists for table {table_location}; \
+                 refresh the external collection"
+            ))
         );
         Ok(table)
     } else {
@@ -384,36 +419,40 @@ fn decide_route(
     match mode {
         ScanMode::Auto => match direct_file_ineligibility(split, table_schema_id, table) {
             None => Ok(()),
-            Some((reason, detail)) => bail!(
-                "{ERROR_NOT_IMPLEMENTED_PREFIX} Paimon split requires data-split reading \
-                 ({}): {detail}",
+            Some((reason, detail)) => bail!(not_implemented_message(format_args!(
+                "Paimon split requires data-split reading ({}): {detail}",
                 reason.as_str()
-            ),
+            ))),
         },
         ScanMode::DirectFile => match direct_file_ineligibility(split, table_schema_id, table) {
             None => Ok(()),
-            Some((_, detail)) => bail!(
-                "{ERROR_NOT_IMPLEMENTED_PREFIX} Paimon split cannot use direct-file: {detail}"
-            ),
+            Some((_, detail)) => bail!(not_implemented_message(format_args!(
+                "Paimon split cannot use direct-file: {detail}"
+            ))),
         },
     }
 }
 
 fn checked_non_negative(value: i64, name: &str) -> Result<u64> {
-    u64::try_from(value).with_context(|| format!("Paimon {name} is negative: {value}"))
+    u64::try_from(value).with_context(|| {
+        invalid_message(format_args!("Paimon {name} is negative: {value}"))
+    })
 }
 
 fn deletion_descriptor(file: &DeletionFile) -> Result<DeletionFileDescriptor> {
     ensure!(
         !file.path().is_empty(),
-        "Paimon deletion vector path is empty"
+        invalid_message("Paimon deletion vector path is empty")
     );
     Ok(DeletionFileDescriptor {
         path: file.path().to_string(),
         offset: checked_non_negative(file.offset(), "deletion vector offset")?,
         length: {
             let length = checked_non_negative(file.length(), "deletion vector length")?;
-            ensure!(length > 0, "Paimon deletion vector length is zero");
+            ensure!(
+                length > 0,
+                invalid_message("Paimon deletion vector length is zero")
+            );
             length
         },
         cardinality: file.cardinality().unwrap_or(-1),
@@ -466,8 +505,11 @@ pub fn paimon_plan_files(
                 };
                 ensure!(
                     deleted_rows <= physical_rows,
-                    "Paimon deletion cardinality {deleted_rows} exceeds physical row count {physical_rows} for {}",
-                    file.file_name
+                    invalid_message(format_args!(
+                        "Paimon deletion cardinality {deleted_rows} exceeds physical row count \
+                         {physical_rows} for {}",
+                        file.file_name
+                    ))
                 );
                 let record_count = physical_rows - deleted_rows;
                 // Empty data files do not become zero-row column groups.
@@ -515,34 +557,72 @@ async fn read_deletion_vector_at(
     storage_options: &HashMap<String, String>,
 ) -> Result<Vec<u64>> {
     ensure!(
-        length >= 4,
-        "Paimon deletion vector length is too small: {length}"
+        expected_cardinality >= -1,
+        invalid_message(format_args!(
+            "Paimon deletion vector cardinality is invalid: {expected_cardinality}"
+        ))
     );
-    let file_io = FileIO::from_path(path)?
+    ensure!(
+        length >= 4,
+        invalid_message(format_args!(
+            "Paimon deletion vector length is too small: {length}"
+        ))
+    );
+    let file_io = FileIO::from_path(path)
+        .with_context(|| {
+            invalid_message(format_args!(
+                "cannot infer Paimon deletion vector storage from '{path}'"
+            ))
+        })?
         .with_props(storage_options)
-        .build()?;
-    let input = file_io.new_input(path)?;
+        .build()
+        .with_context(|| {
+            invalid_message(format_args!(
+                "cannot build Paimon deletion vector FileIO for '{path}'"
+            ))
+        })?;
+    let input = file_io.new_input(path).with_context(|| {
+        invalid_message(format_args!(
+            "cannot address Paimon deletion vector file '{path}'"
+        ))
+    })?;
     let file_size = input.metadata().await?.size;
     let total_length = length
         .checked_add(8)
-        .ok_or_else(|| anyhow!("Paimon deletion vector range length overflow"))?;
+        .ok_or_else(|| {
+            anyhow!(invalid_message(
+                "Paimon deletion vector range length overflow"
+            ))
+        })?;
     let requested_end = offset
         .checked_add(total_length)
-        .ok_or_else(|| anyhow!("Paimon deletion vector range end overflow"))?;
+        .ok_or_else(|| {
+            anyhow!(invalid_message(
+                "Paimon deletion vector range end overflow"
+            ))
+        })?;
     let header_end = offset
         .checked_add(8)
-        .ok_or_else(|| anyhow!("Paimon deletion vector header range overflow"))?;
+        .ok_or_else(|| {
+            anyhow!(invalid_message(
+                "Paimon deletion vector header range overflow"
+            ))
+        })?;
     ensure!(
         header_end <= file_size,
-        "Paimon deletion vector header range [{offset}, {header_end}) exceeds file size \
-         {file_size}: {path}"
+        invalid_message(format_args!(
+            "Paimon deletion vector header range [{offset}, {header_end}) exceeds file size \
+             {file_size}: {path}"
+        ))
     );
     let reader = input.reader().await?;
     let bytes = reader.read(offset..requested_end.min(file_size)).await?;
     ensure!(
         bytes.len() >= 8,
-        "Paimon deletion vector short header: expected 8 bytes, got {}",
-        bytes.len()
+        invalid_message(format_args!(
+            "Paimon deletion vector short header: expected 8 bytes, got {}",
+            bytes.len()
+        ))
     );
 
     let declared_length = u32::from_be_bytes(bytes[0..4].try_into()?) as u64;
@@ -555,61 +635,94 @@ async fn read_deletion_vector_at(
     {
         ensure!(
             declared_length.checked_add(8) == Some(length),
-            "Paimon bitmap64 deletion vector length mismatch: descriptor {length}, payload \
-             {declared_length} plus 8-byte envelope"
+            invalid_message(format_args!(
+                "Paimon bitmap64 deletion vector length mismatch: descriptor {length}, payload \
+                 {declared_length} plus 8-byte envelope"
+            ))
         );
         let end = offset
             .checked_add(length)
-            .ok_or_else(|| anyhow!("Paimon bitmap64 deletion vector range end overflow"))?;
+            .ok_or_else(|| {
+                anyhow!(invalid_message(
+                    "Paimon bitmap64 deletion vector range end overflow"
+                ))
+            })?;
+        let bitmap64_length = usize::try_from(length).with_context(|| {
+            invalid_message("Paimon bitmap64 deletion vector length exceeds addressable memory")
+        })?;
         ensure!(
-            end <= file_size && bytes.len() >= usize::try_from(length)?,
-            "Paimon bitmap64 deletion vector range [{offset}, {end}) exceeds file size \
-             {file_size}: {path}"
+            end <= file_size && bytes.len() >= bitmap64_length,
+            invalid_message(format_args!(
+                "Paimon bitmap64 deletion vector range [{offset}, {end}) exceeds file size \
+                 {file_size}: {path}"
+            ))
         );
-        bail!(
-            "{ERROR_NOT_IMPLEMENTED_PREFIX} Paimon bitmap64 deletion vectors \
-             (deletion-vectors.bitmap64=true) are not supported yet; rewrite the affected \
-             snapshot with deletion-vectors.bitmap64=false: {path}"
-        );
+        bail!(not_implemented_message(format_args!(
+            "Paimon bitmap64 deletion vectors (deletion-vectors.bitmap64=true) are not \
+             supported yet; rewrite the affected snapshot with \
+             deletion-vectors.bitmap64=false: {path}"
+        )));
     }
     ensure!(
         big_endian_magic == DELETION_VECTOR_MAGIC,
-        "invalid Paimon deletion vector magic: expected {DELETION_VECTOR_MAGIC}, got \
-         {big_endian_magic}"
+        invalid_message(format_args!(
+            "invalid Paimon deletion vector magic: expected {DELETION_VECTOR_MAGIC}, got \
+             {big_endian_magic}"
+        ))
     );
     ensure!(
         declared_length == length,
-        "Paimon deletion vector length mismatch: descriptor {length}, payload {declared_length}"
+        invalid_message(format_args!(
+            "Paimon deletion vector length mismatch: descriptor {length}, payload \
+             {declared_length}"
+        ))
     );
 
     ensure!(
         requested_end <= file_size,
-        "Paimon deletion vector range [{offset}, {requested_end}) exceeds file size \
-         {file_size}: {path}"
+        invalid_message(format_args!(
+            "Paimon deletion vector range [{offset}, {requested_end}) exceeds file size \
+             {file_size}: {path}"
+        ))
     );
+    let expected_total_length = usize::try_from(total_length).with_context(|| {
+        invalid_message("Paimon deletion vector range length exceeds addressable memory")
+    })?;
     ensure!(
-        bytes.len() == usize::try_from(total_length)?,
-        "Paimon deletion vector short read: expected {total_length} bytes, got {}",
-        bytes.len()
+        bytes.len() == expected_total_length,
+        invalid_message(format_args!(
+            "Paimon deletion vector short read: expected {total_length} bytes, got {}",
+            bytes.len()
+        ))
     );
 
-    let payload_end = usize::try_from(4 + length)?;
+    let payload_end = usize::try_from(4 + length).with_context(|| {
+        invalid_message("Paimon deletion vector payload length exceeds addressable memory")
+    })?;
     let stored_crc = u32::from_be_bytes(bytes[payload_end..payload_end + 4].try_into()?);
     let mut crc = crc32fast::Hasher::new();
     crc.update(&bytes[4..payload_end]);
     let actual_crc = crc.finalize();
     ensure!(
         stored_crc == actual_crc,
-        "Paimon deletion vector CRC mismatch: expected {stored_crc}, got {actual_crc}"
+        invalid_message(format_args!(
+            "Paimon deletion vector CRC mismatch: expected {stored_crc}, got {actual_crc}"
+        ))
     );
     let mut bitmap_input = Cursor::new(&bytes[8..payload_end]);
     let bitmap = RoaringBitmap::deserialize_from(&mut bitmap_input)
-        .context("cannot deserialize Paimon roaring deletion vector")?;
+        .with_context(|| invalid_message("cannot deserialize Paimon roaring deletion vector"))?;
     if expected_cardinality >= 0 {
+        let expected_cardinality = u64::try_from(expected_cardinality).with_context(|| {
+            invalid_message("Paimon deletion vector cardinality exceeds the supported range")
+        })?;
         ensure!(
-            bitmap.len() == u64::try_from(expected_cardinality)?,
-            "Paimon deletion vector cardinality mismatch: expected {expected_cardinality}, got {}",
-            bitmap.len()
+            bitmap.len() == expected_cardinality,
+            invalid_message(format_args!(
+                "Paimon deletion vector cardinality mismatch: expected {expected_cardinality}, \
+                 got {}",
+                bitmap.len()
+            ))
         );
     }
     Ok(bitmap.iter().map(u64::from).collect())
@@ -676,6 +789,23 @@ mod tests {
             .with_raw_convertible(raw_convertible)
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn scan_mode_errors_are_classified() {
+        let invalid = ScanMode::parse("invalid-mode").unwrap_err();
+        assert!(
+            invalid.to_string().contains(ERROR_INVALID_PREFIX),
+            "{invalid}"
+        );
+
+        let unsupported = ScanMode::parse("data-split").unwrap_err();
+        assert!(
+            unsupported
+                .to_string()
+                .contains(ERROR_NOT_IMPLEMENTED_PREFIX),
+            "{unsupported}"
+        );
     }
 
     #[test]
@@ -1019,29 +1149,33 @@ mod tests {
             .unwrap();
         assert_eq!(positions, vec![1, 9]);
 
+        let cardinality_error = TOKIO_RT
+            .block_on(read_deletion_vector_at(
+                path.to_str().unwrap(),
+                0,
+                length,
+                3,
+                &HashMap::new(),
+            ))
+            .unwrap_err();
         assert!(
-            TOKIO_RT
-                .block_on(read_deletion_vector_at(
-                    path.to_str().unwrap(),
-                    0,
-                    length,
-                    3,
-                    &HashMap::new(),
-                ))
-                .is_err()
+            cardinality_error.to_string().contains(ERROR_INVALID_PREFIX),
+            "{cardinality_error}"
         );
 
         std::fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
+        let short_read_error = TOKIO_RT
+            .block_on(read_deletion_vector_at(
+                path.to_str().unwrap(),
+                0,
+                length,
+                2,
+                &HashMap::new(),
+            ))
+            .unwrap_err();
         assert!(
-            TOKIO_RT
-                .block_on(read_deletion_vector_at(
-                    path.to_str().unwrap(),
-                    0,
-                    length,
-                    2,
-                    &HashMap::new(),
-                ))
-                .is_err()
+            short_read_error.to_string().contains(ERROR_INVALID_PREFIX),
+            "{short_read_error}"
         );
 
         std::fs::write(&path, &bytes).unwrap();
@@ -1049,16 +1183,18 @@ mod tests {
         let last = bytes.len() - 1;
         bytes[last] ^= 1;
         std::fs::write(&path, bytes).unwrap();
+        let crc_error = TOKIO_RT
+            .block_on(read_deletion_vector_at(
+                path.to_str().unwrap(),
+                0,
+                length,
+                2,
+                &HashMap::new(),
+            ))
+            .unwrap_err();
         assert!(
-            TOKIO_RT
-                .block_on(read_deletion_vector_at(
-                    path.to_str().unwrap(),
-                    0,
-                    length,
-                    2,
-                    &HashMap::new(),
-                ))
-                .is_err()
+            crc_error.to_string().contains(ERROR_INVALID_PREFIX),
+            "{crc_error}"
         );
     }
 }
