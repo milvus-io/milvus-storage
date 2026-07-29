@@ -364,7 +364,11 @@ static void test_exttable_get_file_info_file_not_found(void) {
   rc = loon_exttable_get_file_info("parquet", "/tmp/nonexistent-path-12345.parquet", &rp, &num_rows);
 
   ck_assert(!loon_ffi_is_success(&rc));
-  ck_assert_int_eq(rc.err_code, loon_errcode_file_not_found);
+  // The path came from the caller, so this is a user error, not a system
+  // failure on an internally generated path (which is loon_errcode_file_not_found).
+  ck_assert_int_eq(rc.err_code, loon_errcode_source_not_found);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  ck_assert(!loon_ffi_is_retryable_errcode(rc.err_code));
   ck_assert(rc.message != NULL);
   printf("Expected error: %s\n", loon_ffi_get_errmsg(&rc));
 

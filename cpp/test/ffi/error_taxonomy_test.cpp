@@ -47,11 +47,11 @@ const std::vector<CodeRow>& AllCodes() {
   static const std::vector<CodeRow> rows = {
 #define MILVUS_STORAGE_TEST_INTERNAL_ROW(name, code, symbol, category, s3_code) \
   {(code), name, (category), s3_code, false},
-      LOON_INTERNAL_ERROR_CODE_LIST(MILVUS_STORAGE_TEST_INTERNAL_ROW)
+    LOON_INTERNAL_ERROR_CODE_LIST(MILVUS_STORAGE_TEST_INTERNAL_ROW)
 #undef MILVUS_STORAGE_TEST_INTERNAL_ROW
 #define MILVUS_STORAGE_TEST_EXTEND_ROW(name, code, symbol, category, s3_code) \
   {(code), #name, (category), s3_code, true},
-          LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_TEST_EXTEND_ROW)
+        LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_TEST_EXTEND_ROW)
 #undef MILVUS_STORAGE_TEST_EXTEND_ROW
   };
   return rows;
