@@ -22,6 +22,14 @@ _ERROR_CODE_SYMBOLS = (
     "loon_errcode_fault_inject",
     "loon_errcode_not_support",
     "loon_errcode_file_not_found",
+    "loon_errcode_source_not_found",
+    "loon_errcode_source_access_denied",
+    "loon_errcode_packed_invalid_args",
+    "loon_errcode_packed_storage_io",
+    "loon_errcode_packed_metadata_corrupted",
+    "loon_errcode_packed_file_corrupted",
+    "loon_errcode_packed_arrow_error",
+    "loon_errcode_packed_unexpected",
     "loon_errcode_aws_no_such_upload",
     "loon_errcode_aws_conflict",
     "loon_errcode_aws_precondition_failed",
@@ -34,6 +42,18 @@ _ERROR_CODE_SYMBOLS = (
     "loon_errcode_transient_service",
     "loon_errcode_txn_exhausted_retry",
     "loon_errcode_txn_resolution_failed",
+)
+
+# Error categories from ffi_c.h. Every error code maps to exactly one of these,
+# and retriability is derived from it: only TRANSIENT is worth retrying, a USER
+# error must be reported to whoever made the request, and an unrecognized code
+# reports UNKNOWN and must be treated as permanent.
+# See docs/error-codes.md for the full table.
+_ERROR_CATEGORY_SYMBOLS = (
+    "loon_error_category_unknown",
+    "loon_error_category_user",
+    "loon_error_category_transient",
+    "loon_error_category_permanent",
 )
 
 # Chunk metadata type flags from ffi_c.h
@@ -103,6 +123,14 @@ _ffi.cdef(
     extern int loon_errcode_fault_inject;
     extern int loon_errcode_not_support;
     extern int loon_errcode_file_not_found;
+    extern int loon_errcode_source_not_found;
+    extern int loon_errcode_source_access_denied;
+    extern int loon_errcode_packed_invalid_args;
+    extern int loon_errcode_packed_storage_io;
+    extern int loon_errcode_packed_metadata_corrupted;
+    extern int loon_errcode_packed_file_corrupted;
+    extern int loon_errcode_packed_arrow_error;
+    extern int loon_errcode_packed_unexpected;
     extern int loon_errcode_aws_no_such_upload;
     extern int loon_errcode_aws_conflict;
     extern int loon_errcode_aws_precondition_failed;
@@ -116,10 +144,17 @@ _ffi.cdef(
     extern int loon_errcode_txn_exhausted_retry;
     extern int loon_errcode_txn_resolution_failed;
 
+    extern int loon_error_category_unknown;
+    extern int loon_error_category_user;
+    extern int loon_error_category_transient;
+    extern int loon_error_category_permanent;
+
     int loon_ffi_is_success(LoonFFIResult* result);
     const char* loon_ffi_get_errmsg(LoonFFIResult* result);
     void loon_ffi_free_result(LoonFFIResult* result);
     int loon_ffi_is_retryable_errcode(int err_code);
+    int loon_ffi_error_category(int err_code);
+    const char* loon_ffi_error_name(int err_code);
 
     // ==================== Properties C Interface ====================
     typedef struct LoonProperty {
@@ -640,13 +675,13 @@ def get_library() -> MilvusStorageLib:
 
 
 def _load_error_code_constants(lib) -> None:
-    """Load FFI error code constants from exported native symbols."""
-    for name in _ERROR_CODE_SYMBOLS:
+    """Load FFI error code and category constants from exported native symbols."""
+    for name in _ERROR_CODE_SYMBOLS + _ERROR_CATEGORY_SYMBOLS:
         globals()[name] = int(getattr(lib, name))
 
 
 def __getattr__(name: str):
-    if name in _ERROR_CODE_SYMBOLS:
+    if name in _ERROR_CODE_SYMBOLS or name in _ERROR_CATEGORY_SYMBOLS:
         get_library()
         return globals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

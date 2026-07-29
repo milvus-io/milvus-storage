@@ -8,6 +8,12 @@
     loon_ffi_get_errmsg;
     loon_ffi_free_result;
     loon_ffi_is_retryable_errcode;
+    loon_ffi_error_category;
+    loon_ffi_error_name;
+    loon_error_category_unknown;
+    loon_error_category_user;
+    loon_error_category_transient;
+    loon_error_category_permanent;
     loon_errcode_success;
     loon_errcode_invalid_args;
     loon_errcode_memory;
@@ -19,6 +25,14 @@
     loon_errcode_fault_inject;
     loon_errcode_not_support;
     loon_errcode_file_not_found;
+    loon_errcode_source_not_found;
+    loon_errcode_source_access_denied;
+    loon_errcode_packed_invalid_args;
+    loon_errcode_packed_storage_io;
+    loon_errcode_packed_metadata_corrupted;
+    loon_errcode_packed_file_corrupted;
+    loon_errcode_packed_arrow_error;
+    loon_errcode_packed_unexpected;
     loon_errcode_aws_no_such_upload;
     loon_errcode_aws_conflict;
     loon_errcode_aws_precondition_failed;
