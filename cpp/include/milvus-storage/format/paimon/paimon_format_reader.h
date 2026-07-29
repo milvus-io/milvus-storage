@@ -60,6 +60,7 @@ class PaimonFormatReader final : public FormatReader {
       const uint64_t& start_offset, const uint64_t& end_offset) override;
   [[nodiscard]] arrow::Result<std::shared_ptr<FormatReader>> clone_reader() override;
   [[nodiscard]] std::shared_ptr<arrow::Schema> get_schema() const override;
+  [[nodiscard]] arrow::Status set_predicate(const std::string& predicate) override;
 
   private:
   PaimonFormatReader(MetaTrait::MetadataPtr metadata,

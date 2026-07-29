@@ -318,6 +318,15 @@ class DirectDeletionReader final : public arrow::RecordBatchReader {
   std::shared_ptr<const std::vector<int64_t>> deletions_;
 };
 
+arrow::Status ValidatePredicatePushdown(const PaimonFormatReader::MetaTrait::Payload& payload,
+                                        const std::string& predicate) {
+  if (predicate.empty() || payload.data_format != "vortex" || !payload.sorted_deletions ||
+      payload.sorted_deletions->empty()) {
+    return arrow::Status::OK();
+  }
+  return arrow::Status::NotImplemented("Paimon Vortex predicate pushdown is not supported with deletion vectors");
+}
+
 }  // namespace
 
 std::string PaimonFormatReader::MetaTrait::cache_key(const api::ColumnGroupFile& file) {
@@ -449,6 +458,7 @@ arrow::Result<std::shared_ptr<PaimonFormatReader>> PaimonFormatReader::MetaTrait
   if (!metadata) {
     return arrow::Status::Invalid("Cannot create Paimon reader from null metadata");
   }
+  ARROW_RETURN_NOT_OK(ValidatePredicatePushdown(metadata->payload, predicate));
   ARROW_ASSIGN_OR_RAISE(auto output_schema, ProjectSchema(metadata->file_schema, read_schema, needed_columns));
   std::shared_ptr<FormatReader> direct_file_reader;
   if (metadata->payload.data_format == "parquet") {
@@ -595,5 +605,15 @@ arrow::Result<std::shared_ptr<FormatReader>> PaimonFormatReader::clone_reader() 
 }
 
 std::shared_ptr<arrow::Schema> PaimonFormatReader::get_schema() const { return metadata_->file_schema; }
+
+arrow::Status PaimonFormatReader::set_predicate(const std::string& predicate) {
+  if (!direct_file_reader_) {
+    return arrow::Status::Invalid("Paimon direct-file reader is unavailable");
+  }
+  ARROW_RETURN_NOT_OK(ValidatePredicatePushdown(metadata_->payload, predicate));
+  ARROW_RETURN_NOT_OK(direct_file_reader_->set_predicate(predicate));
+  predicate_ = predicate;
+  return arrow::Status::OK();
+}
 
 }  // namespace milvus_storage::paimon

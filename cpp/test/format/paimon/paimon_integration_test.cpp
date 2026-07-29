@@ -150,6 +150,28 @@ TEST_F(PaimonIntegrationTest, VortexDeletionVectorUsesDirectFile) {
   }
 }
 
+TEST_F(PaimonIntegrationTest, VortexPredicateWithDeletionVectorFailsClosed) {
+  paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1, 5, 9}, "vortex");
+
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+
+  auto column_group = std::make_shared<api::ColumnGroup>();
+  column_group->columns = {"id", "name"};
+  column_group->format = LOON_FORMAT_PAIMON_TABLE;
+  column_group->files = {files.front()};
+  auto schema = arrow::schema({arrow::field("id", arrow::int32()), arrow::field("name", arrow::utf8())});
+
+  for (const auto* cache_enabled : {"true", "false"}) {
+    SCOPED_TRACE(cache_enabled);
+    ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, cache_enabled), std::nullopt);
+    auto reader =
+        api::ColumnGroupReader::create(schema, column_group, {"id", "name"}, properties_, nullptr, "name >= 'row_2'");
+    ASSERT_FALSE(reader.ok());
+    EXPECT_TRUE(reader.status().IsNotImplemented()) << reader.status().ToString();
+  }
+}
+
 TEST_F(PaimonIntegrationTest, ReadsSpecifiedSnapshot) {
   constexpr uint64_t kRows = 9;
   auto snapshot_id = paimon::CreateTestTable(table_dir_, kRows, "append");
