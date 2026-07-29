@@ -1,6 +1,7 @@
 .PHONY: build clean test test-all test-cloud-storage \
 	python-lib java-lib package \
 	fix-format check-format fix-tidy check-tidy \
+	check-error-ratchet update-error-ratchet \
 	aws gcp azure aliyun tencent huawei
 
 TEST_THREADS ?= 4
@@ -131,6 +132,12 @@ check-format:
 	@set -e; for dir in $(FORMAT_DIRS); do \
 		find $$dir -type f \( ! -name "*.pb.h" \) \( -iname "*.c" -o -iname "*.h" -o -iname "*.cpp" \) -exec clang-format --dry-run --Werror {} +; \
 	done
+
+check-error-ratchet:
+	@bash scripts/error_handling_ratchet.sh check
+
+update-error-ratchet:
+	@bash scripts/error_handling_ratchet.sh update
 
 check-tidy:
 	python3 ./scripts/run-clang-tidy.py -p build/${build_type}
