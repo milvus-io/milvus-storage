@@ -854,7 +854,12 @@ class ExternalTableAzureArnTest : public ::testing::TestWithParam<std::string> {
     auto milvus_path = iceberg::ToMilvusUri(file_infos[0].data_file_path, address_);
     api::ColumnGroupFile cg_file{milvus_path, 0, static_cast<int64_t>(file_infos[0].record_count), {}};
     std::cout << "[Azure ARN Test] Iceberg cgfile: " << cg_file.ToString() << std::endl;
-    auto explore_dir = iceberg::ToMilvusUri(table_info.metadata_location, address_);
+    // Match the Milvus external-source contract. The Rust Iceberg bridge must
+    // translate this alias to a fully-qualified ABFSS URI for OpenDAL.
+    ARROW_ASSIGN_OR_RAISE(auto explore_uri, StorageUri::Parse(table_info.metadata_location, false));
+    explore_uri.scheme = "azure";
+    explore_uri.address = address_;
+    ARROW_ASSIGN_OR_RAISE(auto explore_dir, StorageUri::Make(explore_uri));
     return ArnWriteResult{std::move(cg_file), nullptr, num_rows, explore_dir, table_info.snapshot_id};
   }
 };

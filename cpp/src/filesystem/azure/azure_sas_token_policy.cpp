@@ -160,6 +160,13 @@ arrow::Result<std::string> AzureSasTokenPolicy::FetchSasToken(TimePoint now, Tim
       return arrow::Status::IOError(
           "Azure SAS credential broker response field 'credentials.sessionToken' must not be empty");
     }
+    const auto sas_query_parameters = Azure::Core::Url("?" + sas_token).GetQueryParameters();
+    const auto signature = sas_query_parameters.find("sig");
+    if (signature == sas_query_parameters.end() || signature->second.empty()) {
+      return arrow::Status::IOError(
+          "Azure SAS credential broker response field 'credentials.sessionToken' must contain a non-empty 'sig' "
+          "query parameter");
+    }
 
     const auto parsed = Azure::DateTime::Parse(broker_response.token.expired_at, Azure::DateTime::DateFormat::Rfc3339);
     const auto expiration = static_cast<std::chrono::system_clock::time_point>(parsed);

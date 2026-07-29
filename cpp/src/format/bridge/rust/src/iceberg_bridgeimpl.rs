@@ -156,8 +156,8 @@ pub(crate) fn build_file_io(
 ///
 /// Returns `(normalized_uri, io_scheme)`:
 /// - S3/GCS/local: URI unchanged, scheme mapped (e.g. "s3a" → "s3")
-/// - Azure ABFSS: `abfss://container/path` expanded to
-///   `abfss://container@{account}.dfs.{suffix}/path`, scheme → "abfss"
+/// - Azure: Milvus `azure://container/path` is canonicalized to ABFSS, then
+///   expanded to `abfss://container@{account}.dfs.{suffix}/path`
 pub(crate) fn normalize_uri(uri: &str, props: &HashMap<String, String>) -> (String, String) {
     let scheme_end = match uri.find("://") {
         Some(pos) => pos,
@@ -165,29 +165,39 @@ pub(crate) fn normalize_uri(uri: &str, props: &HashMap<String, String>) -> (Stri
     };
     let authority_start = scheme_end + 3;
     let rest = &uri[authority_start..];
-    match &uri[..scheme_end] {
-        "abfss" | "abfs" => {
+    let scheme = &uri[..scheme_end];
+    match scheme {
+        "azure" | "abfss" | "abfs" => {
+            // `azure` is the Milvus external-source scheme. Iceberg/OpenDAL
+            // requires a standard Azure Data Lake Storage scheme.
+            let normalized_scheme = if scheme == "azure" { "abfss" } else { scheme };
             // Only check for '@' in the authority (before the first '/').
             // Paths can legitimately contain '@' (e.g. abfss://container/user@org/file).
             let authority = rest.split('/').next().unwrap_or(rest);
             let normalized = if authority.contains('@') {
-                uri.to_string() // already in container@endpoint format
+                format!("{normalized_scheme}://{rest}")
             } else {
                 let account = match props.get("adls.account-name") {
                     Some(a) if !a.is_empty() => a,
-                    _ => return (uri.to_string(), "abfss".to_string()),
+                    _ => {
+                        return (
+                            format!("{normalized_scheme}://{rest}"),
+                            "abfss".to_string(),
+                        );
+                    }
                 };
                 let suffix = props
                     .get("adls.endpoint-suffix")
                     .map(|s| s.as_str())
                     .unwrap_or("core.windows.net");
-                let scheme = &uri[..authority_start];
                 if let Some(slash) = rest.find('/') {
                     let container = &rest[..slash];
                     let path = &rest[slash..];
-                    format!("{}{}@{}.dfs.{}{}", scheme, container, account, suffix, path)
+                    format!(
+                        "{normalized_scheme}://{container}@{account}.dfs.{suffix}{path}"
+                    )
                 } else {
-                    format!("{}{}@{}.dfs.{}", scheme, rest, account, suffix)
+                    format!("{normalized_scheme}://{rest}@{account}.dfs.{suffix}")
                 }
             };
             (normalized, "abfss".to_string())
@@ -486,6 +496,14 @@ mod tests {
         assert_eq!(
             normalize_uri("abfss://mycontainer/some/path", &props).0,
             "abfss://mycontainer@myaccount.dfs.core.windows.net/some/path"
+        );
+        // Milvus Azure URI → standard ABFSS URI for Iceberg/OpenDAL.
+        assert_eq!(
+            normalize_uri("azure://mycontainer/some/path", &props),
+            (
+                "abfss://mycontainer@myaccount.dfs.core.windows.net/some/path".to_string(),
+                "abfss".to_string()
+            )
         );
         // Already has @ → unchanged
         assert_eq!(

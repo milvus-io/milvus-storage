@@ -218,6 +218,11 @@ impl AzureBrokerClient {
         if token.is_empty() {
             bail!("empty_sas");
         }
+        if !url::form_urlencoded::parse(token.as_bytes())
+            .any(|(key, value)| key == "sig" && !value.is_empty())
+        {
+            bail!("missing_sas_signature");
+        }
         let expires_at = DateTime::parse_from_rfc3339(&credentials.expired_at)
             .map_err(|_| anyhow!("invalid_expiration"))?
             .with_timezone(&Utc);
@@ -370,6 +375,9 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
     use super::*;
 
     fn config() -> AzureBrokerConfig {
@@ -469,6 +477,45 @@ mod tests {
             ),
         ]);
         assert!(AzureBrokerConfig::extract(&mut invalid).is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_sas_without_non_empty_signature() {
+        for token in ["sv=1", "sv=1&sig="] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let now = Utc::now();
+            let response_body = serde_json::json!({
+                "success": true,
+                "credentials": {
+                    "tempAk": "account",
+                    "sessionToken": token,
+                    "expiredAt": (now + chrono::Duration::hours(1)).to_rfc3339(),
+                }
+            })
+            .to_string();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 4096];
+                socket.read(&mut request).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+
+            let mut broker_config = config();
+            broker_config.endpoint = format!("http://{address}");
+            let client = AzureBrokerClient::new(broker_config).unwrap();
+            let error = match client.fetch(now).await {
+                Ok(_) => panic!("expected SAS signature validation failure"),
+                Err(error) => error,
+            };
+            assert_eq!(error.to_string(), "missing_sas_signature");
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]
