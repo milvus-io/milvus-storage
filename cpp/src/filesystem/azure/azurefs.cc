@@ -108,6 +108,62 @@ using arrow::fs::internal::RemoveLeadingSlash;
 using arrow::fs::internal::RemoveTrailingSlash;
 using arrow::fs::internal::SplitAbstractPath;
 using arrow::fs::internal::ValidateAbstractPathParts;
+
+// Declared in azurefs_internal.h. Kept out of the anonymous namespace so it can
+// be unit-tested without an Azure account.
+//
+// The codes are cloud-neutral despite the `AwsError*` prefix (see the naming
+// discussion in #574): they carry the meaning, not the vendor.
+std::optional<milvus_storage::ExtendStatusCode> ClassifyAzureError(
+    int http_status, std::string_view error_code) {
+  // No response at all: connection refused/reset, DNS failure, TLS handshake
+  // failure. The textbook retriable case.
+  if (http_status == 0) {
+    return milvus_storage::ExtendStatusCode::StorageTransientNetwork;
+  }
+
+  switch (http_status) {
+    case 412:  // Precondition Failed
+      return milvus_storage::ExtendStatusCode::AwsErrorPreConditionFailed;
+    case 409:  // Conflict
+      // Only the "blob already exists" flavour is the precondition-style
+      // conflict this maps to. Other 409s (lease held, container being deleted)
+      // are a different condition and stay unclassified rather than guessed at.
+      return error_code == "BlobAlreadyExists"
+                 ? std::optional{
+                       milvus_storage::ExtendStatusCode::AwsErrorPreConditionFailed}
+                 : std::nullopt;
+    case 404:  // Not Found
+      // The blob/container is gone. Permanent: a retry, or a reroute to another
+      // replica, reaches the same storage account and fails identically.
+      return milvus_storage::ExtendStatusCode::AwsErrorNotFound;
+    case 401:  // Unauthorized
+    case 403:  // Forbidden
+      // Bad or expired credentials, or the SAS/RBAC grant does not cover this
+      // operation. Permanent until an operator fixes the configuration.
+      return milvus_storage::ExtendStatusCode::AwsErrorAccessDenied;
+    case 408:  // Request Timeout
+      return milvus_storage::ExtendStatusCode::StorageTransientTimeout;
+    case 429:  // Too Many Requests
+      return milvus_storage::ExtendStatusCode::StorageTransientThrottling;
+    case 503:  // Service Unavailable
+      // 503 is overloaded on Azure Storage: ErrorCode "ServerBusy" is
+      // throttling, anything else is a genuine availability blip. Both are
+      // retriable, but keeping them apart lets a consumer apply throttle-aware
+      // backoff to the one that calls for it.
+      return error_code == "ServerBusy"
+                 ? milvus_storage::ExtendStatusCode::StorageTransientThrottling
+                 : milvus_storage::ExtendStatusCode::StorageTransientService;
+    case 500:  // Internal Server Error
+    case 502:  // Bad Gateway
+    case 504:  // Gateway Timeout
+      return milvus_storage::ExtendStatusCode::StorageTransientService;
+    default:
+      // Not positively identified -> stay untagged -> conservative
+      // non-retriable. Never invent retriability.
+      return std::nullopt;
+  }
+}
 }  // namespace internal
 // --- End namespace bridge ---
 
@@ -360,18 +416,20 @@ std::string BuildBaseUrl(const std::string& scheme, const std::string& authority
 template <typename... PrefixArgs>
 Status ExceptionToStatus(const Azure::Core::RequestFailedException& exception,
                          PrefixArgs&&... prefix_args) {
-  if (exception.StatusCode == Http::HttpStatusCode::PreconditionFailed ||
-      (exception.StatusCode == Http::HttpStatusCode::Conflict &&
-       exception.ErrorCode == "BlobAlreadyExists")) {
-    std::stringstream ss;
-    (ss << ... << std::forward<PrefixArgs>(prefix_args));
-    ss << " Azure Error: [" << exception.ErrorCode << "] " << exception.what();
-    auto message = ss.str();
-    return milvus_storage::MakeExtendError(
-        milvus_storage::ExtendStatusCode::AwsErrorPreConditionFailed, message, message);
+  // A TransportException never received a response, so StatusCode is left at
+  // its None (0) default -- see internal::ClassifyAzureError.
+  auto code = internal::ClassifyAzureError(static_cast<int>(exception.StatusCode),
+                                           exception.ErrorCode);
+  if (!code.has_value()) {
+    return Status::IOError(std::forward<PrefixArgs>(prefix_args)..., " Azure Error: [",
+                           exception.ErrorCode, "] ", exception.what());
   }
-  return Status::IOError(std::forward<PrefixArgs>(prefix_args)..., " Azure Error: [",
-                         exception.ErrorCode, "] ", exception.what());
+
+  std::stringstream ss;
+  (ss << ... << std::forward<PrefixArgs>(prefix_args));
+  ss << " Azure Error: [" << exception.ErrorCode << "] " << exception.what();
+  auto message = ss.str();
+  return milvus_storage::MakeExtendError(*code, message, message);
 }
 }  // namespace
 

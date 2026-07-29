@@ -180,7 +180,12 @@ arrow::Status GcpFileSystemProducer::InitS3Compat(const ArrowFileSystemConfig& f
 
     auto status = InitializeS3(global_options);
     if (!status.ok()) {
-      init_status = arrow::Status::Invalid("GcpFileSystemProducer failed to initialize S3: ", status.ToString());
+      // Keep the original status code and detail. Stringifying into
+      // Status::Invalid turned a credential/network init failure into a
+      // data-class error (segcore DataFormatBroken/2024) and destroyed whatever
+      // classification the cause carried.
+      init_status = arrow::Status(status.code(), "GcpFileSystemProducer failed to initialize S3: " + status.message(),
+                                  status.detail());
       return;
     }
 
