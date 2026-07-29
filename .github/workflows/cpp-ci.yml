@@ -29,8 +29,12 @@ jobs:
 
       # Conan 2.x CMakeDeps doesn't propagate system_libs through shared library targets,
       # so libaio (required by folly) must be explicitly installed and linked.
+      # protobuf-compiler is needed by the Rust bridge test step below: `cargo test`
+      # uses the dev profile, which rebuilds the dependency tree and runs
+      # lance-encoding's build script (prost-build wants protoc). The Build step
+      # above gets protoc from conan, but that environment is not inherited here.
       - name: Install system libraries
-        run: sudo apt-get update && sudo apt-get install -y libaio-dev
+        run: sudo apt-get update && sudo apt-get install -y libaio-dev protobuf-compiler
 
       - name: Setup Rust
         id: rust-toolchain
