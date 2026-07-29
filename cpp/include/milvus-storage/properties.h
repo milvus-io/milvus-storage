@@ -164,6 +164,10 @@ struct PropertyInfo {
 // --- Define Iceberg property keys ---
 #define PROPERTY_ICEBERG_SNAPSHOT_ID "iceberg.snapshot_id"
 
+// --- Define Paimon property keys ---
+#define PROPERTY_PAIMON_SCAN_MODE "paimon.scan_mode"
+#define PROPERTY_PAIMON_SNAPSHOT_ID "paimon.snapshot_id"
+
 // --- Define Transaction property keys ---
 #define PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES "transaction.commit.num-retries"
 

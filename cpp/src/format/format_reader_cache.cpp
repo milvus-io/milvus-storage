@@ -18,6 +18,7 @@
 #include <utility>
 
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
+#include "milvus-storage/format/paimon/paimon_format_reader.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
@@ -246,5 +247,6 @@ template class FormatReaderMetadataCache<parquet::ParquetFormatReader>;
 template class FormatReaderMetadataCache<vortex::VortexFormatReader>;
 template class FormatReaderMetadataCache<lance::LanceTableReader>;
 template class FormatReaderMetadataCache<iceberg::IcebergFormatReader>;
+template class FormatReaderMetadataCache<paimon::PaimonFormatReader>;
 
 }  // namespace milvus_storage

@@ -101,6 +101,12 @@ url = "2"
 hmac = "0.12"
 sha1 = "0.10"
 base64 = "0.22"
+crc32fast = "1"
+roaring = "0.11"
+
+# Apache Paimon planner and test writer. Keep the exact release and Cargo.lock
+# together. Paimon uses the Arrow 58 already present for Lance.
+paimon = { version = "=0.3.0", default-features = false, features = ["storage-fs", "storage-s3", "storage-oss", "storage-azdls", "storage-gcs", "vortex"] }
 
 # SQL predicate parsing
 sqlparser = "0.55"

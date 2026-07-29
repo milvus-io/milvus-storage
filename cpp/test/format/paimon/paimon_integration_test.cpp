@@ -1,0 +1,409 @@
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include <gtest/gtest.h>
+
+#include <filesystem>
+#include <fstream>
+#include <numeric>
+
+#include <arrow/api.h>
+#include <fmt/format.h>
+#include <folly/json.h>
+
+#include "milvus-storage/common/config.h"
+#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/format/column_group_reader.h"
+#include "milvus-storage/format/format.h"
+#include "milvus-storage/format/format_reader.h"
+#include "milvus-storage/format/paimon/paimon_common.h"
+#include "milvus-storage/format/paimon/paimon_format_reader.h"
+#include "milvus-storage/properties.h"
+#include "paimon_bridge.h"
+#include "test_env.h"
+
+namespace milvus_storage::test {
+namespace {
+
+class PaimonIntegrationTest : public ::testing::Test {
+  protected:
+  void SetUp() override {
+    if (IsCloudEnv()) {
+      GTEST_SKIP() << "Paimon integration fixtures require a local filesystem";
+    }
+    ASSERT_STATUS_OK(InitTestProperties(properties_));
+    ASSERT_EQ(api::SetValue(properties_, PROPERTY_FS_ROOT_PATH, "/"), std::nullopt);
+    ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "4"), std::nullopt);
+    FilesystemCache::getInstance().clean();
+    table_dir_ = "/tmp/milvus-storage-paimon-integration";
+    std::filesystem::remove_all(table_dir_);
+  }
+
+  void TearDown() override {
+    std::filesystem::remove_all(table_dir_);
+    FilesystemCache::getInstance().clean();
+  }
+
+  arrow::Result<std::vector<api::ColumnGroupFile>> Explore(const std::string& mode) {
+    if (auto error = api::SetValue(properties_, PROPERTY_PAIMON_SCAN_MODE, mode.c_str()); error) {
+      return arrow::Status::Invalid(*error);
+    }
+    ARROW_ASSIGN_OR_RAISE(auto* format, Format::get(LOON_FORMAT_PAIMON_TABLE));
+    return format->explore(table_dir_, properties_);
+  }
+
+  api::Properties properties_;
+  std::string table_dir_;
+};
+
+std::string ReadPath(const api::ColumnGroupFile& file) {
+  return folly::parseJson(file.Get<std::string>(api::kPropertyMetadata))["read_path"].asString();
+}
+
+int64_t ReadAllRows(const std::shared_ptr<FormatReader>& reader) {
+  auto infos = reader->get_row_group_infos().ValueOrDie();
+  int64_t rows = 0;
+  for (size_t index = 0; index < infos.size(); ++index) {
+    rows += reader->get_chunk(static_cast<int>(index)).ValueOrDie()->num_rows();
+  }
+  return rows;
+}
+
+TEST_F(PaimonIntegrationTest, AutoUsesDirectFileForAppendParquet) {
+  constexpr uint64_t kRows = 12;
+  paimon::CreateTestTable(table_dir_, kRows, "append");
+
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_FALSE(files.empty());
+  for (const auto& file : files) {
+    EXPECT_EQ(ReadPath(file), "direct-file");
+    EXPECT_GT(file.Get<uint64_t>(api::kPropertyFileSize), 0);
+  }
+
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
+                                                      {"id", "name"}, nullptr));
+  EXPECT_EQ(ReadAllRows(reader), files.front().end_index);
+}
+
+TEST_F(PaimonIntegrationTest, AutoUsesDirectFileForAppendVortex) {
+  constexpr uint64_t kRows = 17;
+  paimon::CreateTestTable(table_dir_, kRows, "append", {}, "vortex");
+
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+  EXPECT_EQ(ReadPath(files.front()), "direct-file");
+  EXPECT_GT(files.front().Get<uint64_t>(api::kPropertyFileSize), 0);
+  const auto descriptor = folly::parseJson(files.front().Get<std::string>(api::kPropertyMetadata));
+  EXPECT_EQ(descriptor["data_format"].asString(), "vortex");
+
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
+                                                      {"id", "name"}, nullptr));
+  EXPECT_EQ(ReadAllRows(reader), static_cast<int64_t>(kRows));
+
+  ASSERT_AND_ASSIGN(auto taken, reader->take({0, 4, 16}));
+  ASSERT_EQ(taken->num_rows(), 3);
+  const std::vector<int32_t> expected = {0, 4, 16};
+  for (int64_t row = 0; row < taken->num_rows(); ++row) {
+    ASSERT_AND_ASSIGN(auto scalar, taken->column(0)->GetScalar(row));
+    ASSERT_NE(std::dynamic_pointer_cast<arrow::Int32Scalar>(scalar), nullptr);
+    EXPECT_EQ(std::dynamic_pointer_cast<arrow::Int32Scalar>(scalar)->value, expected[row]);
+  }
+
+  ASSERT_AND_ASSIGN(auto range, reader->read_with_range(3, 9));
+  ASSERT_AND_ASSIGN(auto range_table, arrow::Table::FromRecordBatchReader(range.get()));
+  ASSERT_EQ(range_table->num_rows(), 6);
+  ASSERT_AND_ASSIGN(auto first, range_table->column(0)->GetScalar(0));
+  ASSERT_AND_ASSIGN(auto last, range_table->column(0)->GetScalar(5));
+  EXPECT_EQ(std::dynamic_pointer_cast<arrow::Int32Scalar>(first)->value, 3);
+  EXPECT_EQ(std::dynamic_pointer_cast<arrow::Int32Scalar>(last)->value, 8);
+
+  ASSERT_AND_ASSIGN(auto clone, reader->clone_reader());
+  EXPECT_EQ(ReadAllRows(clone), static_cast<int64_t>(kRows));
+}
+
+TEST_F(PaimonIntegrationTest, VortexDeletionVectorUsesDirectFile) {
+  constexpr uint64_t kRows = 10;
+  paimon::CreateTestTable(table_dir_, kRows, "deletion-vector", {1, 5, 9}, "vortex");
+
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+  EXPECT_EQ(ReadPath(files.front()), "direct-file");
+  EXPECT_EQ(files.front().end_index, 7);
+
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
+                                                      {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto taken, reader->take({0, 1, 4, 6}));
+  ASSERT_EQ(taken->num_rows(), 4);
+  const std::vector<int32_t> expected = {0, 2, 6, 8};
+  for (int64_t row = 0; row < taken->num_rows(); ++row) {
+    ASSERT_AND_ASSIGN(auto scalar, taken->column(0)->GetScalar(row));
+    EXPECT_EQ(std::dynamic_pointer_cast<arrow::Int32Scalar>(scalar)->value, expected[row]);
+  }
+}
+
+TEST_F(PaimonIntegrationTest, ReadsSpecifiedSnapshot) {
+  constexpr uint64_t kRows = 9;
+  auto snapshot_id = paimon::CreateTestTable(table_dir_, kRows, "append");
+  ASSERT_EQ(api::SetValue(properties_, PROPERTY_PAIMON_SNAPSHOT_ID, std::to_string(snapshot_id).c_str()), std::nullopt);
+
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_FALSE(files.empty());
+  EXPECT_EQ(files.front().end_index, static_cast<int64_t>(kRows));
+}
+
+TEST_F(PaimonIntegrationTest, MergeOnReadTableFailsClosedAsNotImplemented) {
+  paimon::CreateTestTable(table_dir_, 10, "mor");
+
+  auto files = Explore("auto");
+  ASSERT_FALSE(files.ok());
+  EXPECT_TRUE(files.status().IsNotImplemented()) << files.status().ToString();
+  const auto message = files.status().ToString();
+  EXPECT_NE(message.find("data-split reading"), std::string::npos) << message;
+}
+
+TEST_F(PaimonIntegrationTest, MalformedMetadataTypesFailClosed) {
+  paimon::CreateTestTable(table_dir_, 10, "append");
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+
+  auto descriptor = folly::parseJson(files.front().Get<std::string>(api::kPropertyMetadata));
+  descriptor["record_count"] = "ten";
+  files.front().Set(api::kPropertyMetadata, folly::toJson(descriptor));
+  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
+  ASSERT_FALSE(reader.ok());
+  EXPECT_TRUE(reader.status().IsInvalid());
+  EXPECT_NE(reader.status().ToString().find("field types"), std::string::npos);
+}
+
+TEST_F(PaimonIntegrationTest, MalformedDeletionMetadataTypesFailClosed) {
+  paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1});
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+
+  auto descriptor = folly::parseJson(files.front().Get<std::string>(api::kPropertyMetadata));
+  descriptor["deletion_file"]["offset"] = "zero";
+  files.front().Set(api::kPropertyMetadata, folly::toJson(descriptor));
+  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
+  ASSERT_FALSE(reader.ok());
+  EXPECT_TRUE(reader.status().IsInvalid());
+  EXPECT_NE(reader.status().ToString().find("deletion_file has invalid field types"), std::string::npos);
+}
+
+TEST_F(PaimonIntegrationTest, JavaBitmap64DeletionVectorFailsClosedAsNotImplemented) {
+  paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1});
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+  ASSERT_EQ(ReadPath(files.front()), "direct-file");
+
+  // Serialized by Paimon Java 1.2.0 with deletion-vectors.bitmap64=true:
+  // big-endian outer data length, little-endian bitmap64 magic (1681511377)
+  // and RoaringTreemap payload; DeletionFile.length covers the complete
+  // 64-byte serialized value rather than bitmap32's payload-only length.
+  static constexpr unsigned char kJavaBitmap64[] = {
+      0x00, 0x00, 0x00, 0x38, 0xd1, 0xd3, 0x39, 0x64, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x3a, 0x30, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3a, 0x30, 0x00, 0x00, 0x01, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x07, 0x00, 0x89, 0xde, 0xf4, 0x64};
+
+  auto descriptor = folly::parseJson(files.front().Get<std::string>(api::kPropertyMetadata));
+  auto dv_path = descriptor["deletion_file"]["path"].asString();
+  if (dv_path.rfind("file://", 0) == 0) {
+    dv_path = dv_path.substr(7);
+  } else if (dv_path.rfind("file:", 0) == 0) {
+    dv_path = dv_path.substr(5);
+  }
+  {
+    std::ofstream out(dv_path, std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(out.is_open());
+    out.write(reinterpret_cast<const char*>(kJavaBitmap64), sizeof(kJavaBitmap64));
+  }
+  descriptor["deletion_file"]["offset"] = 0;
+  descriptor["deletion_file"]["length"] = static_cast<int64_t>(sizeof(kJavaBitmap64));
+  files.front().Set(api::kPropertyMetadata, folly::toJson(descriptor));
+
+  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
+  ASSERT_FALSE(reader.ok());
+  EXPECT_TRUE(reader.status().IsNotImplemented()) << reader.status().ToString();
+  const auto message = reader.status().ToString();
+  EXPECT_NE(message.find("bitmap64"), std::string::npos) << message;
+  EXPECT_NE(message.find("deletion-vectors.bitmap64=false"), std::string::npos) << message;
+}
+
+TEST_F(PaimonIntegrationTest, AutoUsesDirectFileAndAppliesDeletionVector) {
+  constexpr uint64_t kRows = 10;
+  paimon::CreateTestTable(table_dir_, kRows, "deletion-vector", {1, 5, 9});
+
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+  ASSERT_EQ(ReadPath(files.front()), "direct-file");
+  ASSERT_EQ(files.front().end_index, 7);
+
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
+                                                      {"id", "name"}, nullptr));
+  EXPECT_EQ(ReadAllRows(reader), 7);
+
+  ASSERT_AND_ASSIGN(auto taken, reader->take({0, 1, 4, 6}));
+  ASSERT_EQ(taken->num_rows(), 4);
+  auto ids = std::dynamic_pointer_cast<arrow::Int32Array>(taken->column(0)->chunk(0));
+  ASSERT_NE(ids, nullptr);
+  EXPECT_EQ(ids->Value(0), 0);
+  EXPECT_EQ(ids->Value(1), 2);
+  EXPECT_EQ(ids->Value(2), 6);
+  EXPECT_EQ(ids->Value(3), 8);
+
+  ASSERT_AND_ASSIGN(auto range, reader->read_with_range(1, 5));
+  ASSERT_AND_ASSIGN(auto range_table, arrow::Table::FromRecordBatchReader(range.get()));
+  ASSERT_EQ(range_table->num_rows(), 4);
+  auto range_ids = std::dynamic_pointer_cast<arrow::Int32Array>(range_table->column(0)->chunk(0));
+  ASSERT_NE(range_ids, nullptr);
+  EXPECT_EQ(range_ids->Value(0), 2);
+  EXPECT_EQ(range_ids->Value(1), 3);
+  EXPECT_EQ(range_ids->Value(2), 4);
+  EXPECT_EQ(range_ids->Value(3), 6);
+
+  auto tampered = files.front();
+  auto descriptor = folly::parseJson(tampered.Get<std::string>(api::kPropertyMetadata));
+  descriptor["deletion_file"]["cardinality"] = 99;
+  tampered.Set(api::kPropertyMetadata, folly::toJson(descriptor));
+  auto invalid = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, tampered, properties_, {"id"}, nullptr);
+  ASSERT_FALSE(invalid.ok());
+  EXPECT_TRUE(invalid.status().IsIOError());
+}
+
+TEST_F(PaimonIntegrationTest, DirectFileFragmentRangeUsesPostDeletionLogicalRows) {
+  paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1, 5, 9});
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+  ASSERT_EQ(ReadPath(files.front()), "direct-file");
+
+  auto fragment = files.front();
+  fragment.start_index = 1;
+  fragment.end_index = 5;
+  auto column_group = std::make_shared<api::ColumnGroup>();
+  column_group->columns = {"id"};
+  column_group->format = LOON_FORMAT_PAIMON_TABLE;
+  column_group->files = {std::move(fragment)};
+  auto schema = arrow::schema({arrow::field("id", arrow::int32())});
+  ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema, column_group, {"id"}, properties_, nullptr));
+  ASSERT_EQ(reader->total_rows(), 4);
+
+  std::vector<int64_t> chunk_indices(reader->total_number_of_chunks());
+  std::iota(chunk_indices.begin(), chunk_indices.end(), 0);
+  ASSERT_AND_ASSIGN(auto batches, reader->get_chunks(chunk_indices, 1));
+  std::vector<int32_t> ids;
+  for (const auto& batch : batches) {
+    auto values = std::dynamic_pointer_cast<arrow::Int32Array>(batch->column(0));
+    ASSERT_NE(values, nullptr);
+    for (int64_t row = 0; row < values->length(); ++row) {
+      ids.push_back(values->Value(row));
+    }
+  }
+  EXPECT_EQ(ids, (std::vector<int32_t>{2, 3, 4, 6}));
+}
+
+TEST_F(PaimonIntegrationTest, ExplicitDirectFileRejectsMergeOnRead) {
+  paimon::CreateTestTable(table_dir_, 10, "mor");
+  auto files = Explore("direct-file");
+  ASSERT_FALSE(files.ok());
+  EXPECT_NE(files.status().ToString().find("cannot use direct-file"), std::string::npos);
+}
+
+TEST_F(PaimonIntegrationTest, DataSplitDescriptorFailsClosedAsNotImplemented) {
+  paimon::CreateTestTable(table_dir_, 10, "append");
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+
+  auto descriptor = folly::parseJson(files.front().Get<std::string>(api::kPropertyMetadata));
+  descriptor["read_path"] = "data-split";
+  files.front().Set(api::kPropertyMetadata, folly::toJson(descriptor));
+  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
+  ASSERT_FALSE(reader.ok());
+  EXPECT_TRUE(reader.status().IsNotImplemented()) << reader.status().ToString();
+}
+
+TEST_F(PaimonIntegrationTest, FullyDeletedTableProducesNoEntries) {
+  constexpr uint64_t kRows = 6;
+  paimon::CreateTestTable(table_dir_, kRows, "deletion-vector", {0, 1, 2, 3, 4, 5});
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  EXPECT_TRUE(files.empty());
+}
+
+TEST_F(PaimonIntegrationTest, MissingTableFailsAndWriterIsReadOnly) {
+  table_dir_ += "-missing";
+  auto files = Explore("auto");
+  ASSERT_FALSE(files.ok());
+
+  ASSERT_AND_ASSIGN(auto* format, Format::get(LOON_FORMAT_PAIMON_TABLE));
+  auto writer = format->create_writer(nullptr, arrow::schema({arrow::field("id", arrow::int32())}), "unused", "unused",
+                                      properties_);
+  ASSERT_FALSE(writer.ok());
+  EXPECT_TRUE(writer.status().IsNotImplemented());
+}
+
+TEST(PaimonErrorClassification, MarkersMapToTerminalStatuses) {
+  const std::runtime_error expired(
+      "[paimon:error=invalid] Paimon snapshot 3 no longer exists for table file:///t (earliest=5, latest=9); refresh "
+      "the external collection");
+  EXPECT_TRUE(paimon::ClassifyPaimonError("plan", expired).IsInvalid());
+
+  const std::runtime_error corrupt("[paimon:error=invalid] invalid Paimon metadata");
+  EXPECT_TRUE(paimon::ClassifyPaimonError("open", corrupt).IsInvalid());
+
+  const std::runtime_error unsupported(
+      "[paimon:error=not-implemented] Paimon direct-file does not support format: orc");
+  EXPECT_TRUE(paimon::ClassifyPaimonError("read", unsupported).IsNotImplemented());
+
+  // Unmarked messages are never promoted to a terminal class.
+  const std::runtime_error transient("connection reset by peer while reading snapshot-9");
+  EXPECT_TRUE(paimon::ClassifyPaimonError("plan", transient).IsIOError());
+}
+
+TEST_F(PaimonIntegrationTest, MissingPinnedSnapshotFailsPlanAsInvalidWithBounds) {
+  auto snapshot_id = paimon::CreateTestTable(table_dir_, 10, "append");
+  ASSERT_EQ(api::SetValue(properties_, PROPERTY_PAIMON_SNAPSHOT_ID, std::to_string(snapshot_id + 1000).c_str()),
+            std::nullopt);
+
+  auto files = Explore("auto");
+  ASSERT_FALSE(files.ok());
+  EXPECT_TRUE(files.status().IsInvalid()) << files.status().ToString();
+  const auto message = files.status().ToString();
+  EXPECT_NE(message.find("no longer exists"), std::string::npos) << message;
+  EXPECT_NE(message.find("earliest="), std::string::npos) << message;
+  EXPECT_NE(message.find(fmt::format("latest={}", snapshot_id)), std::string::npos) << message;
+  EXPECT_NE(message.find("refresh the external collection"), std::string::npos) << message;
+}
+
+TEST_F(PaimonIntegrationTest, VortexRowGroupsUseDecodedSchemaMemorySizes) {
+  constexpr uint64_t kRows = 17;
+  paimon::CreateTestTable(table_dir_, kRows, "append", {}, "vortex");
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+  ASSERT_EQ(ReadPath(files.front()), "direct-file");
+
+  const auto descriptor = folly::parseJson(files.front().Get<std::string>(api::kPropertyMetadata));
+  EXPECT_EQ(descriptor.count("estimated_bytes"), 0);
+
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
+                                                      {"id", "name"}, nullptr));
+  ASSERT_AND_ASSIGN(auto infos, reader->get_row_group_infos());
+  ASSERT_FALSE(infos.empty());
+  size_t total_memory = 0;
+  for (const auto& info : infos) {
+    const auto rows = info.end_offset - info.start_offset;
+    EXPECT_GT(info.memory_size, rows) << info.ToString();
+    total_memory += info.memory_size;
+  }
+  EXPECT_GT(total_memory, kRows);
+}
+
+}  // namespace
+}  // namespace milvus_storage::test

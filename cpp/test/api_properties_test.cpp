@@ -159,6 +159,26 @@ TEST_F(APIPropertiesTest, vortex_split_row_indices_mode) {
   EXPECT_NE(SetValue(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES, "invalid"), std::nullopt);
 }
 
+TEST_F(APIPropertiesTest, paimon_scan_mode) {
+  milvus_storage::api::Properties pp{};
+
+  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_PAIMON_SCAN_MODE), "auto");
+
+  for (const auto* mode : {"auto", "direct-file"}) {
+    EXPECT_EQ(SetValue(pp, PROPERTY_PAIMON_SCAN_MODE, mode), std::nullopt);
+    EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_PAIMON_SCAN_MODE), mode);
+  }
+
+  EXPECT_NE(SetValue(pp, PROPERTY_PAIMON_SCAN_MODE, "data-split"), std::nullopt);
+  EXPECT_STREQ(loon_properties_paimon_scan_mode, PROPERTY_PAIMON_SCAN_MODE);
+
+  EXPECT_EQ(GetValueNoError<int64_t>(pp, PROPERTY_PAIMON_SNAPSHOT_ID), -1);
+  EXPECT_EQ(SetValue(pp, PROPERTY_PAIMON_SNAPSHOT_ID, "42"), std::nullopt);
+  EXPECT_EQ(GetValueNoError<int64_t>(pp, PROPERTY_PAIMON_SNAPSHOT_ID), 42);
+  EXPECT_NE(SetValue(pp, PROPERTY_PAIMON_SNAPSHOT_ID, "-2"), std::nullopt);
+  EXPECT_STREQ(loon_properties_paimon_snapshot_id, PROPERTY_PAIMON_SNAPSHOT_ID);
+}
+
 TEST_F(APIPropertiesTest, reader_metadata_cache_enable_property) {
   milvus_storage::api::Properties pp{};
 
