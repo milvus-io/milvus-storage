@@ -96,7 +96,7 @@ TEST(AzureErrorClassification, StatusZeroWithoutTransportIsNotRetriable) {
   EXPECT_EQ(ToSegcoreErrorCode(*transport), milvus::StorageTransientError);
 }
 
-TEST(AzureErrorClassification, PermanentStatusesAreNotRetriable) {
+TEST(AzureErrorClassification, NonRetriableStatusesNeverLookTransient) {
   struct Case {
     int http_status;
     std::string_view error_code;
@@ -107,10 +107,11 @@ TEST(AzureErrorClassification, PermanentStatusesAreNotRetriable) {
       // Not-found is fine-grained: a consumer can tell "data missing" from a
       // generic storage failure, matching what the S3 path already reports.
       {404, "BlobNotFound", ExtendStatusCode::AwsErrorNotFound, milvus::ObjectNotExist},
-      {401, "", ExtendStatusCode::AwsErrorAccessDenied, milvus::StorageError},
-      {403, "AuthenticationFailed", ExtendStatusCode::AwsErrorAccessDenied, milvus::StorageError},
-      {412, "ConditionNotMet", ExtendStatusCode::AwsErrorPreConditionFailed, milvus::StorageError},
-      {409, "BlobAlreadyExists", ExtendStatusCode::AwsErrorPreConditionFailed, milvus::StorageError},
+      // Config, not Permanent: the credentials are operator configuration, so
+      // this has to reach whoever owns the deployment (2006) rather than be
+      // filed as a generic storage failure (2044). Non-retriable either way.
+      {401, "", ExtendStatusCode::AwsErrorAccessDenied, milvus::ConfigInvalid},
+      {403, "AuthenticationFailed", ExtendStatusCode::AwsErrorAccessDenied, milvus::ConfigInvalid},
   };
 
   for (const auto& c : cases) {
@@ -119,9 +120,37 @@ TEST(AzureErrorClassification, PermanentStatusesAreNotRetriable) {
     EXPECT_EQ(*code, c.expected) << c.http_status;
     EXPECT_FALSE(DefaultRetryableForExtendStatusCode(*code)) << c.http_status;
     EXPECT_EQ(ToSegcoreErrorCode(*code), c.segcore) << c.http_status;
-    // A permanent failure must never look transient, or a consumer retry-storms
-    // a request that can never succeed.
+    // A non-retriable failure must never look transient, or a consumer
+    // retry-storms a request that can never succeed.
     EXPECT_NE(ToSegcoreErrorCode(*code), milvus::StorageTransientError) << c.http_status;
+  }
+}
+
+// 412 and 409-already-exists used to sit in the test above, asserted permanent
+// and non-retriable. They are Conflict: someone else won a race, and unlike a
+// permanent failure a retry CAN succeed -- but only a re-read-then-retry, not a
+// resend of the same conditional request, which fails identically forever.
+//
+// That is why Conflict is its own category rather than part of Transient, and
+// why these cases need their own test: the two properties a permanent failure
+// has (never retry, never look transient) are exactly the two these do not.
+TEST(AzureErrorClassification, PreconditionFailuresAreConflictNotPermanent) {
+  struct Case {
+    int http_status;
+    std::string_view error_code;
+  };
+  const Case cases[] = {
+      {412, "ConditionNotMet"},
+      {409, "BlobAlreadyExists"},
+  };
+
+  for (const auto& c : cases) {
+    auto code = ClassifyAzureError(c.http_status, c.error_code, /*transport_failure=*/false);
+    ASSERT_TRUE(code.has_value()) << c.http_status << " " << c.error_code;
+    EXPECT_EQ(*code, ExtendStatusCode::AwsErrorPreConditionFailed) << c.http_status;
+    EXPECT_EQ(CategoryForExtendStatusCode(*code), ErrorCategory::Conflict) << c.http_status;
+    EXPECT_TRUE(DefaultRetryableForExtendStatusCode(*code)) << c.http_status;
+    EXPECT_EQ(ToSegcoreErrorCode(*code), milvus::StorageTransientError) << c.http_status;
   }
 }
 
