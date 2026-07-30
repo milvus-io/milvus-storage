@@ -13,6 +13,10 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <arrow/util/io_util.h>
 #include <memory>
 #include <numeric>
 #include <random>
@@ -280,6 +284,49 @@ TEST_F(LanceBasicTest, DefaultStorageVersionIsV2_1) {
   ASSERT_EQ(storage_version.minor, 1);
 }
 
+// Anchors the create-if-missing decision of LanceTableWriter::Close(): a
+// classified not-found (and only that) creates a fresh dataset.
+TEST_F(LanceBasicTest, CloseCreatesDatasetOnClassifiedNotFound) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "local-filesystem test";
+  }
+  LanceTableWriter writer(base_path_ + "/fresh-dataset", schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+  ASSERT_EQ(cgfile.end_index, test_batch_->num_rows());
+}
+
+// The other direction of the same decision -- the core semantic change of the
+// bridge-classification PR: an open failure that is NOT a classified not-found
+// (here: EACCES) must propagate instead of silently creating a new dataset,
+// as the old catch(std::exception) fallback did.
+TEST_F(LanceBasicTest, CloseDoesNotCreateDatasetOnNonNotFoundOpenError) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "local-filesystem test";
+  }
+  if (::geteuid() == 0) {
+    GTEST_SKIP() << "permission bits are ineffective for root";
+  }
+  auto* subtree = dynamic_cast<arrow::fs::SubTreeFileSystem*>(fs_.get());
+  ASSERT_NE(subtree, nullptr);
+  const boost::filesystem::path denied_dir =
+      boost::filesystem::path(subtree->base_path()) / arrow_base_path_ / "denied";
+  boost::filesystem::create_directories(denied_dir / "ds");
+  ::chmod(denied_dir.string().c_str(), 0000);
+
+  LanceTableWriter writer(base_path_ + "/denied/ds", schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  auto close_result = writer.Close();
+
+  ::chmod(denied_dir.string().c_str(), 0755);  // restore before asserting so TearDown can clean up
+
+  ASSERT_FALSE(close_result.ok());
+  const auto& status = close_result.status();
+  EXPECT_NE(arrow::internal::ErrnoFromStatus(status), ENOENT) << status.ToString();
+  // No dataset must have been created behind the failure.
+  EXPECT_FALSE(boost::filesystem::exists(denied_dir / "ds" / "_versions")) << "dataset was created despite the error";
+}
+
 TEST_F(LanceBasicTest, TestBasic) {
   size_t num_of_batches = 10;
   if (IsCloudEnv()) {
@@ -303,8 +350,8 @@ TEST_F(LanceBasicTest, TestBasic) {
   }
 
   auto verify_reader = [&]() {
-    auto read_dataset = BlockingDataset::Open(lance_uri, storage_options);
-    const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds();
+    auto read_dataset = BlockingDataset::Open(lance_uri, storage_options).ValueOrDie();
+    const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds().ValueOrDie();
 
     uint64_t total_rows = 0;
     for (const auto& fragment_id : fragment_ids) {
@@ -367,7 +414,7 @@ TEST_F(LanceBasicTest, TestReaderHandlesFragmentMissingNullableDatasetColumn) {
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(appended_file.path));
   ArrowFileSystemConfig fs_config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
-  auto dataset = BlockingDataset::Open(ToStandardLanceUri(parsed_uri.first), ToStorageOptions(fs_config));
+  auto dataset = BlockingDataset::Open(ToStandardLanceUri(parsed_uri.first), ToStorageOptions(fs_config)).ValueOrDie();
 
   LanceTableReader reader(dataset, parsed_uri.second, nullptr, properties_);
   ASSERT_STATUS_OK(reader.open());
@@ -403,9 +450,9 @@ TEST_F(LanceBasicTest, TestRead) {
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, large_batch->num_rows());
 
-  auto read_dataset = BlockingDataset::Open(lance_uri, storage_options);
+  auto read_dataset = BlockingDataset::Open(lance_uri, storage_options).ValueOrDie();
 
-  const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds();
+  const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds().ValueOrDie();
   // The splitting conditions(`WriteParams`) in lance are very strict.
   // So the default setting will only generate one fragment.
   ASSERT_EQ(fragment_ids.size(), 1);
@@ -507,10 +554,10 @@ TEST_F(LanceBasicTest, EstimatedMemoryAccountsForDeletions) {
   ASSERT_STATUS_OK(writer.Write(batch));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, kRows);
-  auto dataset = BlockingDataset::Open(lance_uri, storage_options);
-  dataset->DeleteRows("id < 2000");
+  auto dataset = BlockingDataset::Open(lance_uri, storage_options).ValueOrDie();
+  ASSERT_STATUS_OK(dataset->DeleteRows("id < 2000"));
 
-  auto fragment_ids = dataset->GetAllFragmentIds();
+  auto fragment_ids = dataset->GetAllFragmentIds().ValueOrDie();
   ASSERT_EQ(fragment_ids.size(), 1);
   LanceTableReader reader(dataset, fragment_ids[0], id_schema, properties_);
   ASSERT_STATUS_OK(reader.open());
@@ -622,8 +669,8 @@ TEST_F(LanceBasicTest, LegacyFormatReadsWhenMemoryEstimateIsUnavailable) {
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, kRows);
 
-  auto dataset = BlockingDataset::Open(lance_uri, storage_options);
-  auto fragment_ids = dataset->GetAllFragmentIds();
+  auto dataset = BlockingDataset::Open(lance_uri, storage_options).ValueOrDie();
+  auto fragment_ids = dataset->GetAllFragmentIds().ValueOrDie();
   ASSERT_EQ(fragment_ids.size(), 1);
 
   auto estimate_result = dataset->EstimateFragmentColumnMemory(fragment_ids[0]);

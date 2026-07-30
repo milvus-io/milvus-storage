@@ -176,7 +176,7 @@ void AsyncScanTestCallback(void* raw_ctx, ArrowArrayStream* out_stream, const ch
 
 TEST(VortexErrorTest, StreamingReaderTranslatesReadNextBridgeError) {
   auto inner = std::make_shared<FailingRecordBatchReader>(
-      arrow::Status::IOError(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; readat failed", LOON_TRANSIENT_NETWORK)));
+      arrow::Status::IOError(fmt::format("__LOON_RUST_BRIDGE_ERRCODE__={}; readat failed", LOON_TRANSIENT_NETWORK)));
   auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
 
   std::shared_ptr<arrow::RecordBatch> batch;
@@ -186,12 +186,12 @@ TEST(VortexErrorTest, StreamingReaderTranslatesReadNextBridgeError) {
   ASSERT_NE(detail, nullptr) << status.ToString();
   EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork);
   EXPECT_TRUE(detail->retryable());
-  EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
+  EXPECT_EQ(status.ToString().find("__LOON_RUST_BRIDGE_ERRCODE__"), std::string::npos);
 }
 
 TEST(VortexErrorTest, StreamingReaderTranslatesReadNextFileNotFound) {
   auto inner = std::make_shared<FailingRecordBatchReader>(
-      arrow::Status::IOError(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; file not found", LOON_FILE_NOT_FOUND)));
+      arrow::Status::IOError(fmt::format("__LOON_RUST_BRIDGE_ERRCODE__={}; file not found", LOON_FILE_NOT_FOUND)));
   auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
 
   std::shared_ptr<arrow::RecordBatch> batch;
@@ -200,12 +200,12 @@ TEST(VortexErrorTest, StreamingReaderTranslatesReadNextFileNotFound) {
   EXPECT_TRUE(status.IsIOError());
   EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
   EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
-  EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
+  EXPECT_EQ(status.ToString().find("__LOON_RUST_BRIDGE_ERRCODE__"), std::string::npos);
 }
 
 TEST(VortexErrorTest, StreamingReaderTranslatesCloseBridgeError) {
   auto inner = std::make_shared<FailingRecordBatchReader>(
-      arrow::Status::IOError(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; close failed", LOON_TRANSIENT_TIMEOUT)));
+      arrow::Status::IOError(fmt::format("__LOON_RUST_BRIDGE_ERRCODE__={}; close failed", LOON_TRANSIENT_TIMEOUT)));
   auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
 
   auto status = reader->Close();
@@ -214,27 +214,29 @@ TEST(VortexErrorTest, StreamingReaderTranslatesCloseBridgeError) {
   ASSERT_NE(detail, nullptr) << status.ToString();
   EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientTimeout);
   EXPECT_TRUE(detail->retryable());
-  EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
+  EXPECT_EQ(status.ToString().find("__LOON_RUST_BRIDGE_ERRCODE__"), std::string::npos);
 }
 
 TEST(VortexErrorTest, MapsBridgeErrorCodesToStatusDetails) {
-  auto file_not_found_status = MakeVortexErrorStatus(
-      "Failed to read vortex file", fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; file not found", LOON_FILE_NOT_FOUND));
+  auto file_not_found_status =
+      MakeVortexErrorStatus("Failed to read vortex file",
+                            fmt::format("__LOON_RUST_BRIDGE_ERRCODE__={}; file not found", LOON_FILE_NOT_FOUND));
   EXPECT_TRUE(file_not_found_status.IsIOError());
   EXPECT_EQ(arrow::internal::ErrnoFromStatus(file_not_found_status), ENOENT);
   EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(file_not_found_status), nullptr);
-  EXPECT_EQ(file_not_found_status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
+  EXPECT_EQ(file_not_found_status.ToString().find("__LOON_RUST_BRIDGE_ERRCODE__"), std::string::npos);
 
   auto aws_not_found_status =
       MakeVortexErrorStatus("Failed to read vortex file",
-                            fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; object not found", LOON_AWS_ERROR_NOT_FOUND));
+                            fmt::format("__LOON_RUST_BRIDGE_ERRCODE__={}; object not found", LOON_AWS_ERROR_NOT_FOUND));
   auto aws_not_found_detail = ExtendStatusDetail::UnwrapStatus(aws_not_found_status);
   ASSERT_NE(aws_not_found_detail, nullptr);
   EXPECT_EQ(aws_not_found_detail->code(), ExtendStatusCode::AwsErrorNotFound);
   EXPECT_FALSE(aws_not_found_detail->retryable());
 
-  auto timeout_status = MakeVortexErrorStatus(
-      "Failed to read vortex file", fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; read failed", LOON_TRANSIENT_TIMEOUT));
+  auto timeout_status =
+      MakeVortexErrorStatus("Failed to read vortex file",
+                            fmt::format("__LOON_RUST_BRIDGE_ERRCODE__={}; read failed", LOON_TRANSIENT_TIMEOUT));
   auto timeout_detail = ExtendStatusDetail::UnwrapStatus(timeout_status);
   ASSERT_NE(timeout_detail, nullptr);
   EXPECT_EQ(timeout_detail->code(), ExtendStatusCode::StorageTransientTimeout);
@@ -243,26 +245,26 @@ TEST(VortexErrorTest, MapsBridgeErrorCodesToStatusDetails) {
 
   auto upload_status =
       MakeVortexErrorStatus("Failed to close Vortex file",
-                            fmt::format("outer __LOON_VORTEX_FFI_ERRCODE__={}; Failed to close ObjectStoreWriterCpp",
+                            fmt::format("outer __LOON_RUST_BRIDGE_ERRCODE__={}; Failed to close ObjectStoreWriterCpp",
                                         LOON_AWS_ERROR_NO_SUCH_UPLOAD));
   auto upload_detail = ExtendStatusDetail::UnwrapStatus(upload_status);
   ASSERT_NE(upload_detail, nullptr);
   EXPECT_EQ(upload_detail->code(), ExtendStatusCode::AwsErrorNoSuchUpload);
   EXPECT_TRUE(upload_detail->retryable());
-  EXPECT_EQ(upload_status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
+  EXPECT_EQ(upload_status.ToString().find("__LOON_RUST_BRIDGE_ERRCODE__"), std::string::npos);
 
   auto network_status = MakeVortexErrorStatus(
       "Failed to import vortex chunked array",
-      arrow::Status::IOError(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; readat failed", LOON_TRANSIENT_NETWORK)));
+      arrow::Status::IOError(fmt::format("__LOON_RUST_BRIDGE_ERRCODE__={}; readat failed", LOON_TRANSIENT_NETWORK)));
   auto network_detail = ExtendStatusDetail::UnwrapStatus(network_status);
   ASSERT_NE(network_detail, nullptr);
   EXPECT_EQ(network_detail->code(), ExtendStatusCode::StorageTransientNetwork);
   EXPECT_TRUE(network_detail->retryable());
-  EXPECT_EQ(network_status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
+  EXPECT_EQ(network_status.ToString().find("__LOON_RUST_BRIDGE_ERRCODE__"), std::string::npos);
 
   auto txn_status =
       MakeVortexErrorStatus("Failed to write Vortex file",
-                            fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; commit failed", LOON_TXN_EXHAUSTED_RETRY));
+                            fmt::format("__LOON_RUST_BRIDGE_ERRCODE__={}; commit failed", LOON_TXN_EXHAUSTED_RETRY));
   auto txn_detail = ExtendStatusDetail::UnwrapStatus(txn_status);
   ASSERT_NE(txn_detail, nullptr);
   EXPECT_EQ(txn_detail->code(), ExtendStatusCode::TxnExhaustedRetry);

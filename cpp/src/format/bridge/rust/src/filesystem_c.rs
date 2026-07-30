@@ -289,7 +289,7 @@ unsafe extern "C" {
     ) -> LoonFFIResult;
 }
 
-const LOON_VORTEX_FFI_ERRCODE_MARKER: &str = "__LOON_VORTEX_FFI_ERRCODE__=";
+const LOON_RUST_BRIDGE_ERRCODE_MARKER: &str = "__LOON_RUST_BRIDGE_ERRCODE__=";
 
 #[derive(Debug)]
 struct LoonFfiError {
@@ -302,7 +302,7 @@ impl std::fmt::Display for LoonFfiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{LOON_VORTEX_FFI_ERRCODE_MARKER}{}; {}: {}",
+            "{LOON_RUST_BRIDGE_ERRCODE_MARKER}{}; {}: {}",
             self.err_code, self.context, self.message
         )
     }

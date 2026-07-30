@@ -192,7 +192,13 @@ static int DoDemoTable(int argc, char** argv) {
     }
 
     bool with_deletes = !deletes.empty();
-    auto info = milvus_storage::iceberg::CreateTestTable(table_path, rows, with_deletes, deletes, storage_options);
+    auto info_result =
+        milvus_storage::iceberg::CreateTestTable(table_path, rows, with_deletes, deletes, storage_options);
+    if (!info_result.ok()) {
+      std::cerr << "Failed to create iceberg table: " << info_result.status().ToString() << std::endl;
+      return 1;
+    }
+    auto info = std::move(*info_result);
 
     std::cout << "Created iceberg table:" << std::endl;
     std::cout << "  path:              " << table_path << std::endl;
@@ -283,12 +289,12 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreLance(const std::strin
   ARROW_ASSIGN_OR_RAISE(auto lance_base_uri, milvus_storage::lance::BuildLanceBaseUri(fs_config, resolved_dir));
   auto storage_options = milvus_storage::lance::ToStorageOptions(fs_config);
 
-  auto dataset = milvus_storage::lance::BlockingDataset::Open(lance_base_uri, storage_options);
-  auto fragment_ids = dataset->GetAllFragmentIds();
+  ARROW_ASSIGN_OR_RAISE(auto dataset, milvus_storage::lance::BlockingDataset::Open(lance_base_uri, storage_options));
+  ARROW_ASSIGN_OR_RAISE(auto fragment_ids, dataset->GetAllFragmentIds());
 
   std::vector<ColumnGroupFile> files;
   for (auto frag_id : fragment_ids) {
-    auto row_count = dataset->GetFragmentRowCount(frag_id);
+    ARROW_ASSIGN_OR_RAISE(auto row_count, dataset->GetFragmentRowCount(frag_id));
     files.emplace_back(
         ColumnGroupFile{milvus_storage::lance::MakeLanceUri(
                             milvus_storage::lance::ToMilvusLanceUri(lance_base_uri, fs_config.address), frag_id),
@@ -311,7 +317,7 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreIceberg(const std::str
   ARROW_ASSIGN_OR_RAISE(auto parsed_uri, StorageUri::Parse(source));
   ARROW_ASSIGN_OR_RAISE(auto iceberg_uri, StorageUri::Make(parsed_uri, false));
 
-  auto file_infos = milvus_storage::iceberg::PlanFiles(iceberg_uri, snapshot_id, storage_options);
+  ARROW_ASSIGN_OR_RAISE(auto file_infos, milvus_storage::iceberg::PlanFiles(iceberg_uri, snapshot_id, storage_options));
 
   std::vector<ColumnGroupFile> files;
   files.reserve(file_infos.size());

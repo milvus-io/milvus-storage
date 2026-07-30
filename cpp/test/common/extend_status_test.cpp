@@ -91,6 +91,8 @@ TEST_F(ExtendStatusTest, TestExtendStatusCodeRetryability) {
   EXPECT_EQ(ExtendStatusCodeFromInt(50), ExtendStatusCode::PackedInvalidArgs);
   EXPECT_EQ(ExtendStatusCodeFromInt(LOON_AWS_ERROR_NO_SUCH_UPLOAD), ExtendStatusCode::AwsErrorNoSuchUpload);
   EXPECT_EQ(ExtendStatusCodeFromInt(LOON_TRANSIENT_NETWORK), ExtendStatusCode::StorageTransientNetwork);
+  EXPECT_EQ(ExtendStatusCodeFromInt(LOON_LANCE_WRITE_CONTENTION), ExtendStatusCode::LanceWriteContention);
+  EXPECT_EQ(ExtendStatusCodeFromInt(LOON_LANCE_RESOURCE_NOT_FOUND), ExtendStatusCode::LanceResourceNotFound);
   EXPECT_FALSE(ExtendStatusCodeFromInt(3).has_value());
 
   EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::PackedInvalidArgs));
@@ -106,6 +108,8 @@ TEST_F(ExtendStatusTest, TestExtendStatusCodeRetryability) {
   EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::StorageTransientService));
   EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::TxnExhaustedRetry));
   EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::TxnResolutionFailed));
+  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::LanceWriteContention));
+  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::LanceResourceNotFound));
 
   auto status = MakeExtendError(ExtendStatusCode::StorageTransientNetwork, "network", "detail");
   auto detail = ExtendStatusDetail::UnwrapStatus(status);
@@ -121,6 +125,8 @@ TEST_F(ExtendStatusTest, TestExtendStatusDetail) {
     EXPECT_EQ(static_cast<int>(ExtendStatusCode::StorageTransientTimeout), LOON_TRANSIENT_TIMEOUT);
     EXPECT_EQ(static_cast<int>(ExtendStatusCode::StorageTransientThrottling), LOON_TRANSIENT_THROTTLING);
     EXPECT_EQ(static_cast<int>(ExtendStatusCode::StorageTransientService), LOON_TRANSIENT_SERVICE);
+    EXPECT_EQ(static_cast<int>(ExtendStatusCode::LanceWriteContention), LOON_LANCE_WRITE_CONTENTION);
+    EXPECT_EQ(static_cast<int>(ExtendStatusCode::LanceResourceNotFound), LOON_LANCE_RESOURCE_NOT_FOUND);
   }
 
   // CodeAsString
@@ -134,6 +140,8 @@ TEST_F(ExtendStatusTest, TestExtendStatusDetail) {
     EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::StorageTransientThrottling).CodeAsString(),
               "StorageTransientThrottling");
     EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::StorageTransientService).CodeAsString(), "StorageTransientService");
+    EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::LanceWriteContention).CodeAsString(), "LanceWriteContention");
+    EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::LanceResourceNotFound).CodeAsString(), "LanceResourceNotFound");
   }
 
   // ToString
@@ -270,6 +278,8 @@ TEST_F(ExtendStatusTest, ExtendCodesMapToSegcoreErrorCode) {
       {ExtendStatusCode::StorageTransientService, milvus::StorageTransientError},
       {ExtendStatusCode::TxnExhaustedRetry, milvus::StorageError},
       {ExtendStatusCode::TxnResolutionFailed, milvus::StorageError},
+      {ExtendStatusCode::LanceWriteContention, milvus::StorageTransientError},
+      {ExtendStatusCode::LanceResourceNotFound, milvus::ObjectNotExist},
   };
 
   for (const auto& test_case : cases) {
@@ -304,6 +314,7 @@ TEST_F(ExtendStatusTest, PermanentS3ErrorsAreNotRetriable) {
   const Case cases[] = {
       // not-found is fine-grained: ObjectNotExist(2017), still permanent
       {ExtendStatusCode::AwsErrorNotFound, "AwsErrorNotFound", milvus::ObjectNotExist},
+      {ExtendStatusCode::LanceResourceNotFound, "LanceResourceNotFound", milvus::ObjectNotExist},
       {ExtendStatusCode::AwsErrorAccessDenied, "AwsErrorAccessDenied", milvus::StorageError},
       {ExtendStatusCode::AwsErrorNonRetryable, "AwsErrorNonRetryable", milvus::StorageError},
   };
