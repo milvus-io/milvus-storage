@@ -104,6 +104,74 @@ TEST_F(PaimonIntegrationTest, AutoUsesDirectFileForAppendParquet) {
   EXPECT_EQ(ReadAllRows(reader), files.front().end_index);
 }
 
+TEST_F(PaimonIntegrationTest, ReadsWithoutMetadataCache) {
+  constexpr uint64_t kRows = 12;
+  paimon::CreateTestTable(table_dir_, kRows, "append");
+
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_FALSE(files.empty());
+  auto column_group = std::make_shared<api::ColumnGroup>();
+  column_group->columns = {"id", "name"};
+  column_group->format = LOON_FORMAT_PAIMON_TABLE;
+  column_group->files = files;
+  auto schema = arrow::schema({arrow::field("id", arrow::int32()), arrow::field("name", arrow::utf8())});
+  ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, "false"), std::nullopt);
+
+  ASSERT_AND_ASSIGN(auto reader,
+                    api::ColumnGroupReader::create(schema, column_group, {"id", "name"}, properties_, nullptr));
+  EXPECT_EQ(reader->total_rows(), static_cast<int64_t>(kRows));
+  std::vector<int64_t> chunk_indices(reader->total_number_of_chunks());
+  std::iota(chunk_indices.begin(), chunk_indices.end(), 0);
+  ASSERT_AND_ASSIGN(auto batches, reader->get_chunks(chunk_indices, 1));
+  EXPECT_EQ(std::accumulate(batches.begin(), batches.end(), int64_t{0},
+                            [](int64_t rows, const auto& batch) { return rows + batch->num_rows(); }),
+            static_cast<int64_t>(kRows));
+}
+
+TEST_F(PaimonIntegrationTest, DeletionVectorReadsBypassDisabledMetadataCache) {
+  constexpr uint64_t kRows = 10;
+  paimon::CreateTestTable(table_dir_, kRows, "deletion-vector", {1, 5, 9});
+
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+  auto column_group = std::make_shared<api::ColumnGroup>();
+  column_group->columns = {"id", "name"};
+  column_group->format = LOON_FORMAT_PAIMON_TABLE;
+  column_group->files = files;
+  auto schema = arrow::schema({arrow::field("id", arrow::int32()), arrow::field("name", arrow::utf8())});
+  ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, "false"), std::nullopt);
+
+  const auto key = paimon::PaimonFormatReader::MetaTrait::cache_key(files.front());
+  const std::vector<int32_t> expected_ids = {0, 2, 3, 4, 6, 7, 8};
+  MetadataCache cache;
+  for (int round = 0; round < 2; ++round) {
+    ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema, column_group, {"id", "name"}, properties_,
+                                                                  nullptr, "", cache));
+    ASSERT_EQ(reader->total_rows(), static_cast<int64_t>(expected_ids.size()));
+    std::vector<int64_t> chunk_indices(reader->total_number_of_chunks());
+    std::iota(chunk_indices.begin(), chunk_indices.end(), 0);
+    ASSERT_AND_ASSIGN(auto batches, reader->get_chunks(chunk_indices, 1));
+    std::vector<int32_t> ids;
+    for (const auto& batch : batches) {
+      auto column = std::dynamic_pointer_cast<arrow::Int32Array>(batch->column(0));
+      ASSERT_NE(column, nullptr);
+      for (int64_t row = 0; row < column->length(); ++row) {
+        ids.push_back(column->Value(row));
+      }
+    }
+    EXPECT_EQ(ids, expected_ids);
+    // Deletion positions must be reloaded per reader: the caller cache stays
+    // empty, proving the disabled flag bypasses it instead of being ignored.
+    EXPECT_FALSE(cache.get<paimon::PaimonFormatReader>()->get(key).has_value());
+  }
+
+  ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, "true"), std::nullopt);
+  ASSERT_AND_ASSIGN(auto cached_reader, api::ColumnGroupReader::create(schema, column_group, {"id", "name"},
+                                                                       properties_, nullptr, "", cache));
+  ASSERT_EQ(cached_reader->total_rows(), static_cast<int64_t>(expected_ids.size()));
+  EXPECT_TRUE(cache.get<paimon::PaimonFormatReader>()->get(key).has_value());
+}
+
 TEST_F(PaimonIntegrationTest, AutoUsesDirectFileForAppendVortex) {
   constexpr uint64_t kRows = 17;
   paimon::CreateTestTable(table_dir_, kRows, "append", {}, "vortex");
