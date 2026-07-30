@@ -357,17 +357,19 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
 
   size_t direct_cache_size = 0;
   if (parsed.data_format == "parquet") {
-    ARROW_ASSIGN_OR_RAISE(metadata->payload.parquet_metadata,
+    ARROW_ASSIGN_OR_RAISE(auto parquet_metadata,
                           parquet::ParquetFormatReader::MetaTrait::load_metadata(file, properties, key_retriever));
-    metadata->file_schema = metadata->payload.parquet_metadata->file_schema;
-    metadata->payload.direct_physical_row_groups = metadata->payload.parquet_metadata->row_group_infos;
-    direct_cache_size = metadata->payload.parquet_metadata->cache_size;
+    metadata->file_schema = parquet_metadata->file_schema;
+    metadata->payload.direct_physical_row_groups = parquet_metadata->row_group_infos;
+    direct_cache_size = parquet_metadata->cache_size;
+    metadata->payload.direct_file_metadata = std::move(parquet_metadata);
   } else if (parsed.data_format == "vortex") {
-    ARROW_ASSIGN_OR_RAISE(metadata->payload.vortex_metadata,
+    ARROW_ASSIGN_OR_RAISE(auto vortex_metadata,
                           vortex::VortexFormatReader::MetaTrait::load_metadata(file, properties, key_retriever));
-    metadata->file_schema = metadata->payload.vortex_metadata->file_schema;
-    metadata->payload.direct_physical_row_groups = metadata->payload.vortex_metadata->row_group_infos;
-    direct_cache_size = metadata->payload.vortex_metadata->cache_size;
+    metadata->file_schema = vortex_metadata->file_schema;
+    metadata->payload.direct_physical_row_groups = vortex_metadata->row_group_infos;
+    direct_cache_size = vortex_metadata->cache_size;
+    metadata->payload.direct_file_metadata = std::move(vortex_metadata);
   } else {
     return arrow::Status::NotImplemented("Paimon direct-file does not support format: ", parsed.data_format);
   }
@@ -462,16 +464,24 @@ arrow::Result<std::shared_ptr<PaimonFormatReader>> PaimonFormatReader::MetaTrait
   ARROW_ASSIGN_OR_RAISE(auto output_schema, ProjectSchema(metadata->file_schema, read_schema, needed_columns));
   std::shared_ptr<FormatReader> direct_file_reader;
   if (metadata->payload.data_format == "parquet") {
+    auto cached =
+        std::get_if<parquet::ParquetFormatReader::MetaTrait::MetadataPtr>(&metadata->payload.direct_file_metadata);
+    if (cached == nullptr) {
+      return arrow::Status::Invalid("Paimon cached metadata does not match data format parquet");
+    }
     std::shared_ptr<parquet::ParquetFormatReader> parquet_reader;
-    ARROW_ASSIGN_OR_RAISE(parquet_reader,
-                          parquet::ParquetFormatReader::MetaTrait::create_from_metadata(
-                              metadata->payload.parquet_metadata, file, read_schema, needed_columns, predicate));
+    ARROW_ASSIGN_OR_RAISE(parquet_reader, parquet::ParquetFormatReader::MetaTrait::create_from_metadata(
+                                              *cached, file, read_schema, needed_columns, predicate));
     direct_file_reader = std::static_pointer_cast<FormatReader>(std::move(parquet_reader));
   } else if (metadata->payload.data_format == "vortex") {
+    auto cached =
+        std::get_if<vortex::VortexFormatReader::MetaTrait::MetadataPtr>(&metadata->payload.direct_file_metadata);
+    if (cached == nullptr) {
+      return arrow::Status::Invalid("Paimon cached metadata does not match data format vortex");
+    }
     std::shared_ptr<vortex::VortexFormatReader> vortex_reader;
-    ARROW_ASSIGN_OR_RAISE(vortex_reader,
-                          vortex::VortexFormatReader::MetaTrait::create_from_metadata(
-                              metadata->payload.vortex_metadata, file, read_schema, needed_columns, predicate));
+    ARROW_ASSIGN_OR_RAISE(vortex_reader, vortex::VortexFormatReader::MetaTrait::create_from_metadata(
+                                             *cached, file, read_schema, needed_columns, predicate));
     direct_file_reader = std::static_pointer_cast<FormatReader>(std::move(vortex_reader));
   } else {
     return arrow::Status::NotImplemented("Paimon direct-file does not support format: ", metadata->payload.data_format);

@@ -14,6 +14,7 @@
 
 #include <memory>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "milvus-storage/format/format_reader.h"
@@ -27,8 +28,14 @@ class PaimonFormatReader final : public FormatReader {
   struct MetaTrait {
     struct Payload {
       std::string data_format;
-      parquet::ParquetFormatReader::MetaTrait::MetadataPtr parquet_metadata;
-      vortex::VortexFormatReader::MetaTrait::MetadataPtr vortex_metadata;
+      // Direct-file reads delegate to the underlying Parquet/Vortex reader, so
+      // the payload keeps that reader's parsed metadata (the alternative
+      // matching data_format) to avoid reopening and reparsing the data file
+      // each time a reader is created from this cached entry.
+      std::variant<std::monostate,
+                   parquet::ParquetFormatReader::MetaTrait::MetadataPtr,
+                   vortex::VortexFormatReader::MetaTrait::MetadataPtr>
+          direct_file_metadata;
       std::vector<RowGroupInfo> direct_physical_row_groups;
       std::shared_ptr<const std::vector<int64_t>> sorted_deletions;
       uint64_t record_count = 0;
