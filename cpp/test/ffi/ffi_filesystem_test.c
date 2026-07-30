@@ -907,18 +907,27 @@ static void test_retryable_errcode_helper(void) {
   ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_transient_throttling));
   ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_transient_service));
   ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_aws_no_such_upload));
+  // Conflict class is retriable too, with a different strategy: re-read state,
+  // then re-submit. Categories keep the strategies apart.
+  ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_aws_conflict));
+  ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_aws_precondition_failed));
+  ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_txn_exhausted_retry));
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_aws_conflict), loon_error_category_conflict);
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_transient_throttling), loon_error_category_throttled);
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_invalid_properties), loon_error_category_config);
 
   ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_success));
   ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_arrow));
   ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_file_not_found));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_conflict));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_precondition_failed));
   ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_not_found));
   ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_access_denied));
   ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_non_retryable));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_txn_exhausted_retry));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_txn_resolution_failed));
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_storage_config_invalid));
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_source_uri_invalid));
+  // An unrecognized code degrades to the unknown category, which consumers must
+  // treat as permanent: never retry what you cannot classify.
   ck_assert(!loon_ffi_is_retryable_errcode(99999));
+  ck_assert_int_eq(loon_ffi_error_category(99999), loon_error_category_unknown);
 }
 
 void run_filesystem_suite(void) {

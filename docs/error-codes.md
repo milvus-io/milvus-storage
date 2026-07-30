@@ -1,19 +1,45 @@
 # milvus-storage error codes
 
-Every error milvus-storage returns to an upper layer answers two questions:
+Every error milvus-storage returns to an upper layer carries a **category**, and
+the category is chosen so that each one maps to exactly **one consumer action**.
+That is the test for whether a category earns its place: if two conditions call
+for the same action they belong together; if one needs a different action it
+needs its own category.
 
-- **Whose problem is it?** the caller's request/config (`User`), or ours (`Transient` / `Permanent`).
-- **Can a retry help?** only `Transient`.
+| category | consumer action | retry |
+|---|---|---|
+| **User** | return it to the caller; do not alert | no |
+| **Config** | alert an operator; do not blame the caller | no |
+| **Transient** | retry with normal backoff | yes |
+| **Throttled** | back off per Retry-After **and shed concurrency** — a normal retry makes it worse | yes |
+| **Conflict** | **re-read state, rebase, re-submit** — replaying the same bytes fails identically | yes |
+| **Permanent** | alert a developer | no |
 
-Both come from one value, the **category**, so the two answers cannot drift apart:
+Two pairs look redundant and are not:
+
+- **User vs Config** both mean "do not retry", but differ in *who fixes it*.
+  Reporting a misconfigured endpoint as the caller's fault sends the user
+  editing their query forever, and never pages the person who can fix it.
+- **Transient vs Throttled vs Conflict** are all retriable, but a single retry
+  strategy is wrong for two of them: retrying into a throttling store amplifies
+  the overload, and replaying a conditional write that lost a race fails
+  identically every time.
+
+Retriability is therefore **derived, never stored**:
 
 ```
-retryable  ==  (category == Transient)
+retryable == (Transient || Throttled || Conflict)
 ```
 
-A single `retryable` bool would not be enough: `User` and `Permanent` are both non-retriable
-but need opposite handling — report a `User` error back to whoever made the request, page an
-operator for a `Permanent` one.
+`Unknown` is not a seventh kind of error and no producer emits it. It is what a
+**consumer** reports for a code newer than itself, and it must be handled as
+`Permanent`: never retry what you cannot classify.
+
+Consumers branch on the **category** (closed, six values, exhaustive). The
+**code** is for diagnosis — logs, metrics, and the finer policy decisions a
+category cannot express (which backoff curve, which alert route). New codes can
+be added without breaking a consumer, because every code belongs to one of the
+six.
 
 The table below is generated from `LOON_INTERNAL_ERROR_CODE_LIST` and
 `LOON_EXTEND_STATUS_CODE_LIST` in

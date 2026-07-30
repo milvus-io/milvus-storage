@@ -11,6 +11,9 @@ _loon_ffi_error_name
 _loon_error_category_unknown
 _loon_error_category_user
 _loon_error_category_transient
+_loon_error_category_config
+_loon_error_category_throttled
+_loon_error_category_conflict
 _loon_error_category_permanent
 _loon_errcode_success
 _loon_errcode_invalid_args
@@ -43,6 +46,8 @@ _loon_errcode_transient_throttling
 _loon_errcode_transient_service
 _loon_errcode_txn_exhausted_retry
 _loon_errcode_txn_resolution_failed
+_loon_errcode_storage_config_invalid
+_loon_errcode_source_uri_invalid
 
 # Properties interface
 _loon_properties_create

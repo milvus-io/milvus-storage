@@ -35,9 +35,13 @@ struct ExtendStatusCodeMetadata {
   ErrorCategory category;
   std::string_view s3_code;
 
-  // Derived, never stored: a code is retriable exactly when it is Transient.
-  // Storing a second bool is how the two answers drift apart.
-  [[nodiscard]] constexpr bool retryable() const { return category == ErrorCategory::Transient; }
+  // Derived, never stored. Three of the six categories are worth retrying,
+  // each with a different strategy (plain backoff / Retry-After + shedding /
+  // re-read and rebase). Storing a second bool is how the two answers drift.
+  [[nodiscard]] constexpr bool retryable() const {
+    return category == ErrorCategory::Transient || category == ErrorCategory::Throttled ||
+           category == ErrorCategory::Conflict;
+  }
 };
 
 // Generated from the single table in ffi_error_code.h, which is also the source
@@ -122,7 +126,9 @@ ErrorCategory CategoryForExtendStatusCode(ExtendStatusCode code) {
 }
 
 bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code) {
-  return CategoryForExtendStatusCode(code) == ErrorCategory::Transient;
+  auto category = CategoryForExtendStatusCode(code);
+  return category == ErrorCategory::Transient || category == ErrorCategory::Throttled ||
+         category == ErrorCategory::Conflict;
 }
 
 std::string_view S3CodeForExtendStatusCode(ExtendStatusCode code) {
@@ -217,10 +223,24 @@ milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
     case ExtendStatusCode::AwsErrorPreConditionFailed:
     case ExtendStatusCode::TxnExhaustedRetry:
     case ExtendStatusCode::TxnResolutionFailed:
-      // S3 precondition / transaction failures: conservatively permanent here
-      // (the precondition genuinely failed, or the transaction-level retry
-      // budget is already spent).
-      return milvus::StorageError;  // 2044
+      // Conflict: another writer won the race. Retriable, but only by a
+      // consumer that re-reads state before re-submitting -- replaying the
+      // same conditional write fails identically. 2045 is the closest segcore
+      // code; the rebase semantics live in the ExtendStatusCode, which the
+      // in-process transaction layer reads directly.
+      //
+      // This supersedes the previous "conservatively permanent" treatment: a
+      // spent retry budget belongs to whichever loop spent it, and says
+      // nothing about an outer attempt made later, in a different contention
+      // window.
+      return milvus::StorageTransientError;  // 2045
+    case ExtendStatusCode::StorageConfigInvalid:
+      // Operator configuration is unusable. Non-retriable and NOT the caller's
+      // fault, so it must not surface as InvalidParameter/2042.
+      return milvus::ConfigInvalid;  // 2006
+    case ExtendStatusCode::SourceUriInvalid:
+      // The location string came from the caller.
+      return milvus::InvalidParameter;  // 2042
     case ExtendStatusCode::AwsErrorNotFound:
       // The object/bucket is gone: permanent, and fine-grained -- consumers can
       // distinguish "data missing" (stale loadinfo, GC'd file) from a generic

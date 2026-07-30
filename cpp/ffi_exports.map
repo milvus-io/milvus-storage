@@ -13,6 +13,9 @@
     loon_error_category_unknown;
     loon_error_category_user;
     loon_error_category_transient;
+    loon_error_category_config;
+    loon_error_category_throttled;
+    loon_error_category_conflict;
     loon_error_category_permanent;
     loon_errcode_success;
     loon_errcode_invalid_args;
@@ -45,6 +48,8 @@
     loon_errcode_transient_service;
     loon_errcode_txn_exhausted_retry;
     loon_errcode_txn_resolution_failed;
+    loon_errcode_storage_config_invalid;
+    loon_errcode_source_uri_invalid;
 
     # Properties interface
     loon_properties_create;

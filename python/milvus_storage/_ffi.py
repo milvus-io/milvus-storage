@@ -42,6 +42,8 @@ _ERROR_CODE_SYMBOLS = (
     "loon_errcode_transient_service",
     "loon_errcode_txn_exhausted_retry",
     "loon_errcode_txn_resolution_failed",
+    "loon_errcode_storage_config_invalid",
+    "loon_errcode_source_uri_invalid",
 )
 
 # Error categories from ffi_c.h. Every error code maps to exactly one of these,
@@ -52,7 +54,10 @@ _ERROR_CODE_SYMBOLS = (
 _ERROR_CATEGORY_SYMBOLS = (
     "loon_error_category_unknown",
     "loon_error_category_user",
+    "loon_error_category_config",
     "loon_error_category_transient",
+    "loon_error_category_throttled",
+    "loon_error_category_conflict",
     "loon_error_category_permanent",
 )
 
@@ -143,10 +148,15 @@ _ffi.cdef(
     extern int loon_errcode_transient_service;
     extern int loon_errcode_txn_exhausted_retry;
     extern int loon_errcode_txn_resolution_failed;
+    extern int loon_errcode_storage_config_invalid;
+    extern int loon_errcode_source_uri_invalid;
 
     extern int loon_error_category_unknown;
     extern int loon_error_category_user;
+    extern int loon_error_category_config;
     extern int loon_error_category_transient;
+    extern int loon_error_category_throttled;
+    extern int loon_error_category_conflict;
     extern int loon_error_category_permanent;
 
     int loon_ffi_is_success(LoonFFIResult* result);

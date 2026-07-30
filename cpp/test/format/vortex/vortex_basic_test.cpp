@@ -266,7 +266,9 @@ TEST(VortexErrorTest, MapsBridgeErrorCodesToStatusDetails) {
   auto txn_detail = ExtendStatusDetail::UnwrapStatus(txn_status);
   ASSERT_NE(txn_detail, nullptr);
   EXPECT_EQ(txn_detail->code(), ExtendStatusCode::TxnExhaustedRetry);
-  EXPECT_FALSE(txn_detail->retryable());
+  // Conflict class: the spent budget belongs to the loop that spent it and says
+  // nothing about an outer attempt made later, in a different contention window.
+  EXPECT_TRUE(txn_detail->retryable());
 
   auto plain_status = MakeVortexErrorStatus("Failed to read vortex file", "decode failed");
   EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(plain_status), nullptr);

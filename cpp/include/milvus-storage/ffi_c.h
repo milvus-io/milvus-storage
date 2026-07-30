@@ -60,6 +60,8 @@ FFI_EXPORT extern const int loon_errcode_transient_throttling;
 FFI_EXPORT extern const int loon_errcode_transient_service;
 FFI_EXPORT extern const int loon_errcode_txn_exhausted_retry;
 FFI_EXPORT extern const int loon_errcode_txn_resolution_failed;
+FFI_EXPORT extern const int loon_errcode_storage_config_invalid;
+FFI_EXPORT extern const int loon_errcode_source_uri_invalid;
 
 // usage example(caller must free the message string):
 //
@@ -89,9 +91,12 @@ FFI_EXPORT void loon_ffi_free_result(LoonFFIResult* result);
 //   * whose problem is it -- the caller's request/config, or the system's?
 //   * can a retry help    -- only a transient error.
 //
-// Invariant: loon_ffi_is_retryable_errcode(c) is true exactly when
-// loon_ffi_error_category(c) == loon_error_category_transient. A user error is
-// never retriable: report it to whoever made the request instead.
+// Invariant: loon_ffi_is_retryable_errcode(c) is true exactly when the category
+// is one of transient / throttled / conflict. They are kept apart because each
+// needs a different retry strategy: plain backoff, Retry-After plus concurrency
+// shedding, and re-read-then-rebase respectively. A user or config error is
+// never retriable -- report the first to the caller, alert an operator for the
+// second.
 //
 // An unrecognized code returns loon_error_category_unknown, which consumers
 // MUST treat as permanent -- never retry a failure that cannot be classified.
@@ -100,7 +105,10 @@ FFI_EXPORT void loon_ffi_free_result(LoonFFIResult* result);
 // AWS S3 / Aliyun OSS error code it corresponds to.
 FFI_EXPORT extern const int loon_error_category_unknown;
 FFI_EXPORT extern const int loon_error_category_user;
+FFI_EXPORT extern const int loon_error_category_config;
 FFI_EXPORT extern const int loon_error_category_transient;
+FFI_EXPORT extern const int loon_error_category_throttled;
+FFI_EXPORT extern const int loon_error_category_conflict;
 FFI_EXPORT extern const int loon_error_category_permanent;
 
 FFI_EXPORT int loon_ffi_is_retryable_errcode(int err_code);

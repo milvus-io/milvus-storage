@@ -83,16 +83,38 @@ TEST(ErrorTaxonomyTest, CodeValuesAreUnique) {
 // Requirement 2 + 3, tied together: retriability is not an independent bit, it
 // is the Transient category. This is what keeps "whose fault" and "should I
 // retry" from drifting apart.
-TEST(ErrorTaxonomyTest, RetryableIsExactlyTransient) {
+TEST(ErrorTaxonomyTest, RetryableIsExactlyTheThreeRetriableCategories) {
   for (const auto& row : AllCodes()) {
     const bool retryable = loon_ffi_is_retryable_errcode(row.code) != 0;
-    EXPECT_EQ(retryable, row.category == LOON_ERROR_CATEGORY_TRANSIENT) << row.name;
+    const bool expected = row.category == LOON_ERROR_CATEGORY_TRANSIENT ||
+                          row.category == LOON_ERROR_CATEGORY_THROTTLED || row.category == LOON_ERROR_CATEGORY_CONFLICT;
+    EXPECT_EQ(retryable, expected) << row.name;
 
-    if (row.category == LOON_ERROR_CATEGORY_USER) {
-      EXPECT_FALSE(retryable) << row.name << ": a user error must never be retried";
+    // The two non-retriable categories differ in who fixes it, not in whether
+    // to retry -- both must stay out of every retry loop.
+    if (row.category == LOON_ERROR_CATEGORY_USER || row.category == LOON_ERROR_CATEGORY_CONFIG) {
+      EXPECT_FALSE(retryable) << row.name << ": caller/operator must fix this, retrying cannot";
     }
     if (row.category == LOON_ERROR_CATEGORY_PERMANENT) {
       EXPECT_FALSE(retryable) << row.name << ": a permanent error must never be retried";
+    }
+  }
+}
+
+// Every code must land in one of the six; the enum is closed. UNKNOWN is a
+// consumer-side degradation value and must never be produced.
+TEST(ErrorTaxonomyTest, CategoriesAreClosedAndNoProducerEmitsUnknown) {
+  for (const auto& row : AllCodes()) {
+    switch (row.category) {
+      case LOON_ERROR_CATEGORY_USER:
+      case LOON_ERROR_CATEGORY_CONFIG:
+      case LOON_ERROR_CATEGORY_TRANSIENT:
+      case LOON_ERROR_CATEGORY_THROTTLED:
+      case LOON_ERROR_CATEGORY_CONFLICT:
+      case LOON_ERROR_CATEGORY_PERMANENT:
+        break;
+      default:
+        FAIL() << row.name << " has category " << row.category << ", which is outside the closed six";
     }
   }
 }
@@ -125,7 +147,10 @@ TEST(ErrorTaxonomyTest, ExtendStatusAgreesWithFfiView) {
     EXPECT_EQ(DefaultRetryableForExtendStatusCode(*code), loon_ffi_is_retryable_errcode(row.code) != 0) << row.name;
     EXPECT_EQ(S3CodeForExtendStatusCode(*code), std::string_view(row.s3_code)) << row.name;
     EXPECT_EQ(ExtendStatusDetail(*code).CodeAsString(), std::string(row.name));
-    EXPECT_EQ(ExtendStatusDetail(*code).retryable(), row.category == LOON_ERROR_CATEGORY_TRANSIENT) << row.name;
+    EXPECT_EQ(ExtendStatusDetail(*code).retryable(), row.category == LOON_ERROR_CATEGORY_TRANSIENT ||
+                                                         row.category == LOON_ERROR_CATEGORY_THROTTLED ||
+                                                         row.category == LOON_ERROR_CATEGORY_CONFLICT)
+        << row.name;
     EXPECT_EQ(static_cast<int>(ExtendStatusDetail(*code).category()), row.category) << row.name;
   }
 }
@@ -147,8 +172,19 @@ TEST(ErrorTaxonomyTest, SegcoreMappingMatchesCategory) {
       case LOON_ERROR_CATEGORY_USER:
         EXPECT_EQ(segcore, milvus::InvalidParameter) << row.name << " is a user error but does not map to 2042";
         break;
+      case LOON_ERROR_CATEGORY_CONFIG:
+        // Must NOT be 2042: a misconfigured deployment is not the API caller's
+        // fault, and reporting it as one sends the user editing their request.
+        EXPECT_EQ(segcore, milvus::ConfigInvalid) << row.name << " is a config error but does not map to 2006";
+        EXPECT_NE(segcore, milvus::InvalidParameter) << row.name << " blames the caller for an operator problem";
+        break;
       case LOON_ERROR_CATEGORY_TRANSIENT:
-        EXPECT_EQ(segcore, milvus::StorageTransientError) << row.name << " is transient but does not map to 2045";
+      case LOON_ERROR_CATEGORY_THROTTLED:
+      case LOON_ERROR_CATEGORY_CONFLICT:
+        // All three are retriable, so they share the one retriable segcore
+        // code. The strategy difference (backoff / Retry-After / rebase) is
+        // carried by the ExtendStatusCode, not by the segcore code.
+        EXPECT_EQ(segcore, milvus::StorageTransientError) << row.name << " is retriable but does not map to 2045";
         break;
       case LOON_ERROR_CATEGORY_PERMANENT:
         EXPECT_NE(segcore, milvus::StorageTransientError) << row.name << " is permanent but maps to retriable 2045";
@@ -189,9 +225,15 @@ TEST(ErrorTaxonomyTest, ExportedConstantsMatchMacros) {
   EXPECT_EQ(loon_errcode_txn_exhausted_retry, LOON_TXN_EXHAUSTED_RETRY);
   EXPECT_EQ(loon_errcode_txn_resolution_failed, LOON_TXN_RESOLUTION_FAILED);
 
+  EXPECT_EQ(loon_errcode_storage_config_invalid, LOON_STORAGE_CONFIG_INVALID);
+  EXPECT_EQ(loon_errcode_source_uri_invalid, LOON_SOURCE_URI_INVALID);
+
   EXPECT_EQ(loon_error_category_unknown, LOON_ERROR_CATEGORY_UNKNOWN);
   EXPECT_EQ(loon_error_category_user, LOON_ERROR_CATEGORY_USER);
+  EXPECT_EQ(loon_error_category_config, LOON_ERROR_CATEGORY_CONFIG);
   EXPECT_EQ(loon_error_category_transient, LOON_ERROR_CATEGORY_TRANSIENT);
+  EXPECT_EQ(loon_error_category_throttled, LOON_ERROR_CATEGORY_THROTTLED);
+  EXPECT_EQ(loon_error_category_conflict, LOON_ERROR_CATEGORY_CONFLICT);
   EXPECT_EQ(loon_error_category_permanent, LOON_ERROR_CATEGORY_PERMANENT);
 }
 
@@ -247,9 +289,26 @@ TEST(ErrorTaxonomyTest, S3VocabularyIsPinned) {
 // Documented divergences from AWS's own client/server split. Pinned so that
 // changing one is a deliberate edit to both the table and docs/error-codes.md.
 TEST(ErrorTaxonomyTest, DocumentedDivergencesFromAws) {
-  // AWS: NoSuchUpload is a 404 client error. Ours: transient -- our retry is at
-  // the operation level and starts a fresh multipart upload.
-  EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::AwsErrorNoSuchUpload), ErrorCategory::Transient);
+  // AWS: NoSuchUpload is a 404 client error. Ours: Conflict -- the upload state
+  // another actor invalidated is gone, and the fix is to start a fresh upload,
+  // i.e. re-establish state and re-submit rather than replay.
+  EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::AwsErrorNoSuchUpload), ErrorCategory::Conflict);
+
+  // AWS treats 409/412 as terminal client errors. Ours: Conflict, which is
+  // retriable -- but only after re-reading. This is the whole reason Conflict
+  // is not folded into Transient: a consumer that replays the same conditional
+  // write instead of re-reading spins forever.
+  EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::AwsErrorConflict), ErrorCategory::Conflict);
+  EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::AwsErrorPreConditionFailed), ErrorCategory::Conflict);
+  // A spent retry budget belongs to the loop that spent it and says nothing
+  // about an outer attempt made later, in a different contention window.
+  EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::TxnExhaustedRetry), ErrorCategory::Conflict);
+
+  // Throttling is retriable like the other transients but must not share their
+  // strategy: a plain backoff-and-retry against a throttling store amplifies
+  // the overload it is reacting to.
+  EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::StorageTransientThrottling), ErrorCategory::Throttled);
+  EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::StorageTransientService), ErrorCategory::Transient);
 
   // AWS: NoSuchKey/NoSuchBucket are 4xx client errors. Ours: permanent SYSTEM
   // errors, because on an internal path the caller never chose the key. The
@@ -266,6 +325,12 @@ TEST(ErrorTaxonomyTest, DocumentedDivergencesFromAws) {
   // are our own bugs -- retrying reproduces them.
   EXPECT_EQ(loon_ffi_error_category(LOON_LOGICAL_ERROR), LOON_ERROR_CATEGORY_PERMANENT);
   EXPECT_EQ(loon_ffi_error_category(LOON_ARROW_ERROR), LOON_ERROR_CATEGORY_PERMANENT);
+
+  // Operator configuration is not the API caller's fault. Both are
+  // non-retriable, but only one should be reported back as a bad request.
+  EXPECT_EQ(loon_ffi_error_category(LOON_INVALID_PROPERTIES), LOON_ERROR_CATEGORY_CONFIG);
+  EXPECT_EQ(loon_ffi_error_category(LOON_STORAGE_CONFIG_INVALID), LOON_ERROR_CATEGORY_CONFIG);
+  EXPECT_EQ(loon_ffi_error_category(LOON_SOURCE_URI_INVALID), LOON_ERROR_CATEGORY_USER);
 }
 
 }  // namespace milvus_storage::test

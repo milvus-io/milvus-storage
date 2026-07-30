@@ -36,16 +36,24 @@ namespace milvus_storage {
 /// ffi_error_code.h. Values match the LOON_ERROR_CATEGORY_* constants so the
 /// same number crosses the C ABI.
 enum class ErrorCategory : char {
-  /// The code is outside the documented set. Consumers must treat it as
-  /// Permanent (never retry something we cannot classify).
+  /// The code is outside the documented set -- a producer newer than this
+  /// consumer. Must be handled as Permanent: never retry what you cannot
+  /// classify. No producer ever emits this.
   Unknown = LOON_ERROR_CATEGORY_UNKNOWN,
-  /// The caller's request or configuration is wrong. Never retriable; report
-  /// it back to whoever made the request.
+  /// The caller's request is wrong. Return it to the caller; do not alert.
   User = LOON_ERROR_CATEGORY_USER,
-  /// A system condition that may clear on its own. Retriable.
+  /// The deployment is wrong (credentials, endpoint, unusable properties).
+  /// Alert an operator; do not blame the caller.
+  Config = LOON_ERROR_CATEGORY_CONFIG,
+  /// May clear on its own. Retry with normal backoff.
   Transient = LOON_ERROR_CATEGORY_TRANSIENT,
-  /// A system condition that will not clear by itself (missing data, bad
-  /// credentials, corruption, our own bug). Never retriable.
+  /// The store is rate-limiting us. Back off per Retry-After and shed
+  /// concurrency -- a normal retry makes it worse.
+  Throttled = LOON_ERROR_CATEGORY_THROTTLED,
+  /// Someone else won a race. Re-read state, rebase, re-submit. Replaying the
+  /// same bytes fails identically.
+  Conflict = LOON_ERROR_CATEGORY_CONFLICT,
+  /// Our bug, or the data is gone. Alert a developer; never retry.
   Permanent = LOON_ERROR_CATEGORY_PERMANENT,
 };
 

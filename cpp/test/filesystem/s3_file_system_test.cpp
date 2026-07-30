@@ -675,7 +675,9 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     auto detail = ExtendStatusDetail::UnwrapStatus(status);
     ASSERT_NE(detail, nullptr);
     EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorPreConditionFailed);
-    EXPECT_FALSE(detail->retryable());
+    // Conflict class: retriable, but only by a caller that re-reads before
+    // re-submitting. Replaying the same conditional write fails identically.
+    EXPECT_TRUE(detail->retryable());
   }
 
   // CONFLICT
@@ -688,7 +690,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     auto detail = ExtendStatusDetail::UnwrapStatus(status);
     ASSERT_NE(detail, nullptr);
     EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorConflict);
-    EXPECT_FALSE(detail->retryable());
+    EXPECT_TRUE(detail->retryable());
   }
 
   // Generic UNKNOWN IOError with no recognized permanent or transient signal

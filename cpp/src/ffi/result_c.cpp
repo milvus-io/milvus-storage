@@ -65,7 +65,10 @@ LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_ERRCODE_CONSTANT)
 
 extern FFI_EXPORT const int loon_error_category_unknown = LOON_ERROR_CATEGORY_UNKNOWN;
 extern FFI_EXPORT const int loon_error_category_user = LOON_ERROR_CATEGORY_USER;
+extern FFI_EXPORT const int loon_error_category_config = LOON_ERROR_CATEGORY_CONFIG;
 extern FFI_EXPORT const int loon_error_category_transient = LOON_ERROR_CATEGORY_TRANSIENT;
+extern FFI_EXPORT const int loon_error_category_throttled = LOON_ERROR_CATEGORY_THROTTLED;
+extern FFI_EXPORT const int loon_error_category_conflict = LOON_ERROR_CATEGORY_CONFLICT;
 extern FFI_EXPORT const int loon_error_category_permanent = LOON_ERROR_CATEGORY_PERMANENT;
 
 }  // extern "C"
@@ -106,9 +109,12 @@ int loon_ffi_error_category(int err_code) {
 }
 
 // Retriability is derived, never stored separately: an error is worth retrying
-// exactly when it is transient. Unknown codes are non-retriable by omission.
+// when it is transient, throttled or a conflict -- each with its own strategy.
+// Unknown codes are non-retriable by omission.
 int loon_ffi_is_retryable_errcode(int err_code) {
-  return loon_ffi_error_category(err_code) == LOON_ERROR_CATEGORY_TRANSIENT;
+  const int category = loon_ffi_error_category(err_code);
+  return category == LOON_ERROR_CATEGORY_TRANSIENT || category == LOON_ERROR_CATEGORY_THROTTLED ||
+         category == LOON_ERROR_CATEGORY_CONFLICT;
 }
 
 const char* loon_ffi_error_name(int err_code) {

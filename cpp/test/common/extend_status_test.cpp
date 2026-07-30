@@ -55,13 +55,19 @@ TEST_F(ExtendStatusTest, TestMakeExtendError) {
     EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorPreConditionFailed);
   }
 
-  auto non_retryable = MakeExtendError(ExtendStatusCode::AwsErrorConflict, "conflict", "detail");
+  // AwsErrorConflict is Conflict class: retriable, but only after a re-read.
+  auto conflict = MakeExtendError(ExtendStatusCode::AwsErrorConflict, "conflict", "detail");
+  auto conflict_detail = ExtendStatusDetail::UnwrapStatus(conflict);
+  ASSERT_NE(conflict_detail, nullptr);
+  EXPECT_TRUE(conflict_detail->retryable());
+  // PackedMetadataCorrupted stays permanent -- re-reading gives the same bytes.
+  auto non_retryable = MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted, "corrupt", "detail");
   auto non_retryable_detail = ExtendStatusDetail::UnwrapStatus(non_retryable);
   ASSERT_NE(non_retryable_detail, nullptr);
   EXPECT_FALSE(non_retryable_detail->retryable());
 
   arrow::Status (*make_extend_error)(ExtendStatusCode, std::string, std::string) = &MakeExtendError;
-  auto explicit_three_arg = make_extend_error(ExtendStatusCode::AwsErrorConflict, "conflict", "detail");
+  auto explicit_three_arg = make_extend_error(ExtendStatusCode::PackedFileCorrupted, "corrupt", "detail");
   auto explicit_three_arg_detail = ExtendStatusDetail::UnwrapStatus(explicit_three_arg);
   ASSERT_NE(explicit_three_arg_detail, nullptr);
   EXPECT_FALSE(explicit_three_arg_detail->retryable());
@@ -95,8 +101,8 @@ TEST_F(ExtendStatusTest, TestExtendStatusCodeRetryability) {
 
   EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::PackedInvalidArgs));
   EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNoSuchUpload));
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorConflict));
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorPreConditionFailed));
+  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorConflict));
+  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorPreConditionFailed));
   EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNotFound));
   EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorAccessDenied));
   EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNonRetryable));
@@ -104,8 +110,8 @@ TEST_F(ExtendStatusTest, TestExtendStatusCodeRetryability) {
   EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::StorageTransientTimeout));
   EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::StorageTransientThrottling));
   EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::StorageTransientService));
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::TxnExhaustedRetry));
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::TxnResolutionFailed));
+  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::TxnExhaustedRetry));
+  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::TxnResolutionFailed));
 
   auto status = MakeExtendError(ExtendStatusCode::StorageTransientNetwork, "network", "detail");
   auto detail = ExtendStatusDetail::UnwrapStatus(status);
@@ -258,8 +264,10 @@ TEST_F(ExtendStatusTest, ExtendCodesMapToSegcoreErrorCode) {
       {ExtendStatusCode::PackedArrowError, milvus::StorageError},
       {ExtendStatusCode::PackedUnexpected, milvus::StorageError},
       {ExtendStatusCode::AwsErrorNoSuchUpload, milvus::StorageTransientError},
-      {ExtendStatusCode::AwsErrorConflict, milvus::StorageError},
-      {ExtendStatusCode::AwsErrorPreConditionFailed, milvus::StorageError},
+      // Conflict class: retriable by a consumer that re-reads before
+      // re-submitting. Was 2044 before the six-category split.
+      {ExtendStatusCode::AwsErrorConflict, milvus::StorageTransientError},
+      {ExtendStatusCode::AwsErrorPreConditionFailed, milvus::StorageTransientError},
       // permanently-failing S3 errors: must never be transient/2045
       {ExtendStatusCode::AwsErrorNotFound, milvus::ObjectNotExist},
       {ExtendStatusCode::AwsErrorAccessDenied, milvus::StorageError},
@@ -268,8 +276,8 @@ TEST_F(ExtendStatusTest, ExtendCodesMapToSegcoreErrorCode) {
       {ExtendStatusCode::StorageTransientTimeout, milvus::StorageTransientError},
       {ExtendStatusCode::StorageTransientThrottling, milvus::StorageTransientError},
       {ExtendStatusCode::StorageTransientService, milvus::StorageTransientError},
-      {ExtendStatusCode::TxnExhaustedRetry, milvus::StorageError},
-      {ExtendStatusCode::TxnResolutionFailed, milvus::StorageError},
+      {ExtendStatusCode::TxnExhaustedRetry, milvus::StorageTransientError},
+      {ExtendStatusCode::TxnResolutionFailed, milvus::StorageTransientError},
   };
 
   for (const auto& test_case : cases) {
@@ -381,7 +389,7 @@ TEST_F(ExtendStatusTest, ExtendStatusConvertsToSegcoreError) {
     auto status = MakeExtendError(ExtendStatusCode::AwsErrorConflict, "conflict", "detail");
     auto error = ToSegcoreError(status);
 
-    EXPECT_EQ(error.get_error_code(), milvus::StorageError);
+    EXPECT_EQ(error.get_error_code(), milvus::StorageTransientError);
     EXPECT_NE(std::string(error.what()).find("AwsErrorConflict"), std::string::npos);
   }
 }
