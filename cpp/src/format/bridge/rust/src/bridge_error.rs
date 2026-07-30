@@ -48,6 +48,7 @@ pub const BRIDGE_ERRCODE_MARKER: &str = "__LOON_RUST_BRIDGE_ERRCODE__=";
 pub const LOON_FILE_NOT_FOUND: i32 = 12;
 /// Mirror of the ExtendStatusCode transient tags (`ffi_error_code.h` 101-112).
 pub const LOON_AWS_ERROR_PRECONDITION_FAILED: i32 = 103;
+pub const LOON_AWS_ERROR_NOT_FOUND: i32 = 104;
 pub const LOON_AWS_ERROR_ACCESS_DENIED: i32 = 105;
 pub const LOON_TRANSIENT_TIMEOUT: i32 = 108;
 pub const LOON_TRANSIENT_THROTTLING: i32 = 109;
@@ -212,6 +213,100 @@ fn classify_http_status_in_message(msg: &str) -> Option<i32> {
     }
 }
 
+/// Classify an `opendal::Error`. This is iceberg's IO layer (via
+/// iceberg-storage-opendal), the counterpart of `object_store` under lance.
+///
+/// opendal carries the producer's own retriability verdict in
+/// `is_temporary()`, so unlike the object_store path we do not have to recover
+/// anything from prose.
+pub fn classify_opendal_error(e: &opendal::Error) -> Option<i32> {
+    use opendal::ErrorKind;
+    match e.kind() {
+        ErrorKind::NotFound => Some(LOON_AWS_ERROR_NOT_FOUND),
+        ErrorKind::PermissionDenied => Some(LOON_AWS_ERROR_ACCESS_DENIED),
+        ErrorKind::ConditionNotMatch => Some(LOON_AWS_ERROR_PRECONDITION_FAILED),
+        ErrorKind::RateLimited => Some(LOON_TRANSIENT_THROTTLING),
+        ErrorKind::Unsupported => Some(BRIDGE_ERRCODE_NOT_SUPPORTED),
+        // ConfigInvalid is the caller's/operator's mistake, not ours and not
+        // the store's. There is no user-error code on this channel yet, so it
+        // stays untagged rather than being mislabelled as a storage failure.
+        // Revisit once the user/system axis lands.
+        ErrorKind::ConfigInvalid => None,
+        // No specific kind, but opendal itself says the condition may clear.
+        // Taking the producer's verdict rather than inventing one.
+        _ if e.is_temporary() => Some(LOON_TRANSIENT_SERVICE),
+        _ => None,
+    }
+}
+
+/// Classify an `iceberg::Error`.
+///
+/// Scope note: iceberg's Rust side only *plans* (`iceberg_plan_files`); the
+/// data files it returns are read by the C++ parquet reader on the C++
+/// filesystem, which already classifies. So this covers metadata/manifest
+/// access and snapshot resolution, not the read path.
+pub fn classify_iceberg_error(e: &iceberg::Error) -> Option<i32> {
+    use iceberg::ErrorKind;
+    match e.kind() {
+        // The table or namespace the caller pointed at does not exist.
+        ErrorKind::TableNotFound | ErrorKind::NamespaceNotFound => Some(LOON_AWS_ERROR_NOT_FOUND),
+        ErrorKind::PreconditionFailed => Some(LOON_AWS_ERROR_PRECONDITION_FAILED),
+        ErrorKind::FeatureUnsupported => Some(BRIDGE_ERRCODE_NOT_SUPPORTED),
+        // Malformed table metadata / manifest: re-reading the same bytes gives
+        // the same result.
+        ErrorKind::DataInvalid => Some(BRIDGE_ERRCODE_DATA_CORRUPT),
+        // Write-path conditions. plan_files is read-only so these should not
+        // occur; leaving them untagged avoids diluting the CAS-specific
+        // conflict code with a second meaning.
+        ErrorKind::TableAlreadyExists
+        | ErrorKind::NamespaceAlreadyExists
+        | ErrorKind::CatalogCommitConflicts => None,
+        // Unexpected is iceberg's catch-all: the real signal, if any, is the
+        // opendal error further down the chain, which the anyhow walk below
+        // recovers.
+        _ => None,
+    }
+}
+
+/// Classify an error that reached the bridge boundary as `anyhow::Error`.
+///
+/// anyhow keeps the concrete types, so walking the chain recovers the typed
+/// error a `?` erased. First positive identification wins; everything else
+/// stays untagged and lands in the conservative non-retriable bucket.
+pub fn classify_anyhow_error(e: &anyhow::Error) -> Option<i32> {
+    for cause in e.chain() {
+        if let Some(iceberg_error) = cause.downcast_ref::<iceberg::Error>() {
+            if let Some(code) = classify_iceberg_error(iceberg_error) {
+                return Some(code);
+            }
+        }
+        if let Some(opendal_error) = cause.downcast_ref::<opendal::Error>() {
+            if let Some(code) = classify_opendal_error(opendal_error) {
+                return Some(code);
+            }
+        }
+    }
+    None
+}
+
+impl From<iceberg::Error> for BridgeError {
+    fn from(e: iceberg::Error) -> Self {
+        BridgeError {
+            code: classify_iceberg_error(&e),
+            msg: e.to_string(),
+        }
+    }
+}
+
+impl From<anyhow::Error> for BridgeError {
+    fn from(e: anyhow::Error) -> Self {
+        BridgeError {
+            code: classify_anyhow_error(&e),
+            msg: format!("{e:#}"),
+        }
+    }
+}
+
 impl From<LanceError> for BridgeError {
     fn from(e: LanceError) -> Self {
         BridgeError {
@@ -294,6 +389,121 @@ mod tests {
     // lance-io/src/scheduler.rs), so on any batched read a throttle arrives as
     // Wrapped(IO(object_store::Generic)) rather than IO(..). Before unwrapping,
     // that turned the single most retriable condition into a permanent error.
+    // Version pin for the iceberg IO path.
+    //
+    // iceberg-storage-opendal turns every IO failure into
+    //   Error::new(ErrorKind::Unexpected, "Failure in doing io operation")
+    //       .with_source(opendal_error)
+    // (see its utils::from_opendal_error). So the iceberg kind carries no IO
+    // signal at all -- the only signal is the typed opendal error in the
+    // source chain, and recovering it depends on THIS crate's opendal being
+    // the same version iceberg-storage-opendal links. A version skew makes the
+    // downcast return None silently and every iceberg IO failure would fall
+    // into the untagged bucket.
+    //
+    // This reproduces that exact shape, so a skew fails the test instead of
+    // quietly degrading. A compile-time pin is not possible here:
+    // `with_source` accepts any error type, so it would not constrain the
+    // version.
+    #[test]
+    fn opendal_cause_is_recoverable_through_the_iceberg_wrapper() {
+        let as_storage_opendal_builds_it = iceberg::Error::new(
+            iceberg::ErrorKind::Unexpected,
+            "Failure in doing io operation",
+        )
+        .with_source(opendal::Error::new(
+            opendal::ErrorKind::RateLimited,
+            "slow down",
+        ));
+
+        // The iceberg kind alone yields nothing -- everything is Unexpected.
+        assert_eq!(classify_iceberg_error(&as_storage_opendal_builds_it), None);
+
+        // The chain walk is what recovers it.
+        let wrapped = anyhow::Error::from(as_storage_opendal_builds_it).context("plan files");
+        assert_eq!(classify_anyhow_error(&wrapped), Some(LOON_TRANSIENT_THROTTLING));
+    }
+
+    #[test]
+    fn iceberg_kinds_are_classified() {
+        use iceberg::ErrorKind;
+        let cases = [
+            (ErrorKind::TableNotFound, Some(LOON_AWS_ERROR_NOT_FOUND)),
+            (ErrorKind::NamespaceNotFound, Some(LOON_AWS_ERROR_NOT_FOUND)),
+            (ErrorKind::PreconditionFailed, Some(LOON_AWS_ERROR_PRECONDITION_FAILED)),
+            (ErrorKind::FeatureUnsupported, Some(BRIDGE_ERRCODE_NOT_SUPPORTED)),
+            (ErrorKind::DataInvalid, Some(BRIDGE_ERRCODE_DATA_CORRUPT)),
+            // Write-path conflicts stay untagged rather than diluting the
+            // CAS-specific conflict code; plan_files is read-only anyway.
+            (ErrorKind::TableAlreadyExists, None),
+            (ErrorKind::CatalogCommitConflicts, None),
+            // Catch-all: the signal, if any, lives in the opendal cause.
+            (ErrorKind::Unexpected, None),
+        ];
+        for (kind, expected) in cases {
+            let e = iceberg::Error::new(kind, "boom");
+            assert_eq!(classify_iceberg_error(&e), expected, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn opendal_kinds_are_classified() {
+        use opendal::ErrorKind as OdKind;
+        let cases = [
+            (OdKind::NotFound, Some(LOON_AWS_ERROR_NOT_FOUND)),
+            (OdKind::PermissionDenied, Some(LOON_AWS_ERROR_ACCESS_DENIED)),
+            (OdKind::ConditionNotMatch, Some(LOON_AWS_ERROR_PRECONDITION_FAILED)),
+            (OdKind::RateLimited, Some(LOON_TRANSIENT_THROTTLING)),
+            (OdKind::Unsupported, Some(BRIDGE_ERRCODE_NOT_SUPPORTED)),
+            // Caller/operator mistake; no user-error code on this channel yet.
+            (OdKind::ConfigInvalid, None),
+            (OdKind::Unexpected, None),
+        ];
+        for (kind, expected) in cases {
+            let e = opendal::Error::new(kind, "boom");
+            assert_eq!(classify_opendal_error(&e), expected, "{kind:?}");
+        }
+
+        // opendal's own retriability bit is honoured when no specific kind
+        // applies -- taking the producer's verdict rather than inventing one.
+        let temporary = opendal::Error::new(OdKind::Unexpected, "flaky").set_temporary();
+        assert_eq!(classify_opendal_error(&temporary), Some(LOON_TRANSIENT_SERVICE));
+    }
+
+    // The point of the anyhow walk: `?` erases the concrete type into
+    // anyhow::Error, and every iceberg entry point does that several times
+    // over. Without walking the chain the classification is lost.
+    #[test]
+    fn anyhow_chain_recovers_the_typed_cause() {
+        let throttled: anyhow::Error =
+            opendal::Error::new(opendal::ErrorKind::RateLimited, "slow down").into();
+        let wrapped = throttled.context("load table metadata");
+        assert_eq!(classify_anyhow_error(&wrapped), Some(LOON_TRANSIENT_THROTTLING));
+
+        let missing: anyhow::Error =
+            iceberg::Error::new(iceberg::ErrorKind::TableNotFound, "no table").into();
+        assert_eq!(
+            classify_anyhow_error(&missing.context("plan files")),
+            Some(LOON_AWS_ERROR_NOT_FOUND)
+        );
+
+        // Nothing classifiable in the chain stays untagged.
+        let opaque = anyhow::anyhow!("metadata_location must not be empty");
+        assert_eq!(classify_anyhow_error(&opaque), None);
+
+        // And the BridgeError conversion carries the code plus a full
+        // `{:#}` chain rendering, so context is not lost.
+        let converted = BridgeError::from(
+            anyhow::Error::from(opendal::Error::new(
+                opendal::ErrorKind::PermissionDenied,
+                "denied",
+            ))
+            .context("open manifest"),
+        );
+        assert_eq!(converted.code, Some(LOON_AWS_ERROR_ACCESS_DENIED));
+        assert!(converted.msg.contains("open manifest"), "{}", converted.msg);
+    }
+
     #[test]
     fn wrapped_errors_keep_the_inner_classification() {
         let throttled = LanceError::from(object_store::Error::Generic {
