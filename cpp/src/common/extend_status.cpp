@@ -89,7 +89,7 @@ ExtendStatusCode ExtendStatusDetail::code() const { return code_; }
 std::string ExtendStatusDetail::extra_info() const { return extra_info_; }
 
 // Derived from the code, never stored: see ExtendStatusCodeMetadata::retryable().
-bool ExtendStatusDetail::retryable() const { return DefaultRetryableForExtendStatusCode(code_); }
+bool ExtendStatusDetail::retryable() const { return RetryableForExtendStatusCode(code_); }
 
 ErrorCategory ExtendStatusDetail::category() const { return CategoryForExtendStatusCode(code_); }
 
@@ -125,7 +125,7 @@ ErrorCategory CategoryForExtendStatusCode(ExtendStatusCode code) {
   return ErrorCategory::Unknown;
 }
 
-bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code) {
+bool RetryableForExtendStatusCode(ExtendStatusCode code) {
   auto category = CategoryForExtendStatusCode(code);
   return category == ErrorCategory::Transient || category == ErrorCategory::Conflict;
 }

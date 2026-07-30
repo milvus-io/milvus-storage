@@ -580,7 +580,7 @@ TEST_F(ExternalFilesystemTest, UnparseableUriIsClassifiedAsConfigNotGuessedAsUse
                                   << " failure instead of 'your location is wrong': " << result.status().ToString();
     EXPECT_EQ(*code, ExtendStatusCode::StorageConfigInvalid) << c.what;
     EXPECT_EQ(CategoryForExtendStatusCode(*code), ErrorCategory::Config) << c.what;
-    EXPECT_FALSE(DefaultRetryableForExtendStatusCode(*code)) << c.what;
+    EXPECT_FALSE(RetryableForExtendStatusCode(*code)) << c.what;
     EXPECT_EQ(ToSegcoreError(result.status()).get_error_code(), milvus::ConfigInvalid) << c.what;
     // Never 2042: this producer does not know whose string it is, and blaming
     // the caller is the more expensive of the two possible mistakes.
@@ -611,7 +611,7 @@ TEST_F(ExternalFilesystemTest, UnusableExtfsConfigIsClassifiedAsConfigError) {
     ASSERT_TRUE(code.has_value()) << c.what << ": arrived unclassified: " << fs_result.status().ToString();
     EXPECT_EQ(*code, ExtendStatusCode::StorageConfigInvalid) << c.what;
     EXPECT_EQ(CategoryForExtendStatusCode(*code), ErrorCategory::Config) << c.what;
-    EXPECT_FALSE(DefaultRetryableForExtendStatusCode(*code)) << c.what;
+    EXPECT_FALSE(RetryableForExtendStatusCode(*code)) << c.what;
     // 2006 ConfigInvalid, not 2044 StorageError: nobody retries out of a
     // malformed extfs.* key, and it has to page whoever wrote it.
     EXPECT_EQ(ToSegcoreError(fs_result.status()).get_error_code(), milvus::ConfigInvalid) << c.what;

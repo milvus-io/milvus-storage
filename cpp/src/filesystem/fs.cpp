@@ -251,17 +251,18 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
     if (result.azure_client_id.empty() || result.azure_tenant_id.empty() || result.azure_credential_endpoint.empty() ||
         result.access_key_id.empty() || result.bucket_name.empty() || result.region.empty() ||
         result.request_timeout_ms <= 0) {
-      return arrow::Status::Invalid(
-          "Azure credential broker mode requires fs.azure_client_id, fs.azure_tenant_id, "
-          "fs.azure_credential_endpoint, fs.access_key_id, fs.bucket_name, fs.region, and a positive "
-          "fs.request_timeout_ms");
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                "Azure credential broker mode requires fs.azure_client_id, fs.azure_tenant_id, "
+                                "fs.azure_credential_endpoint, fs.access_key_id, fs.bucket_name, fs.region, and a "
+                                "positive fs.request_timeout_ms");
     }
 
     arrow::util::Uri endpoint;
     auto endpoint_status = endpoint.Parse(result.azure_credential_endpoint);
     if (!endpoint_status.ok() || endpoint.host().empty() ||
         (endpoint.scheme() != "http" && endpoint.scheme() != "https")) {
-      return arrow::Status::Invalid("fs.azure_credential_endpoint must be a valid HTTP(S) URL");
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                "fs.azure_credential_endpoint must be a valid HTTP(S) URL");
     }
   }
   return arrow::Status::OK();

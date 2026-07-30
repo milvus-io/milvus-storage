@@ -112,11 +112,28 @@ inline std::optional<milvus_storage::ExtendStatusCode> ExtendStatusCodeFromFFIEr
 inline int UserSourceErrorCodeFromStatus(const arrow::Status& status, int fallback = LOON_ARROW_ERROR) {
   auto code = FFIErrorCodeFromExtendStatus(status, fallback);
   switch (code) {
+    // The object the user named is not there, or their credentials for it were
+    // rejected.
     case LOON_AWS_ERROR_NOT_FOUND:
     case LOON_FILE_NOT_FOUND:
-      return LOON_SOURCE_INVALID;
     case LOON_AWS_ERROR_ACCESS_DENIED:
       return LOON_SOURCE_INVALID;
+
+    // The location spec itself does not work: a URI that will not parse, an
+    // unusable extfs.* property, a bucket that is not there.
+    //
+    // These default to Config because a producer cannot tell an operator's
+    // milvus.yaml from a user's DDL. At THIS entry point we can: everything
+    // here came from the user's external-source definition, so leaving them
+    // Config tells the user to go find an operator for a string they typed
+    // themselves. Missing this mapping is what made a malformed user URI
+    // regress from "your parameter is wrong" to "configuration error" when 116
+    // was merged into 115.
+    case LOON_STORAGE_CONFIG_INVALID:
+    case LOON_AWS_ERROR_BUCKET_NOT_FOUND:
+    case LOON_INVALID_PROPERTIES:
+      return LOON_SOURCE_INVALID;
+
     default:
       return code;
   }

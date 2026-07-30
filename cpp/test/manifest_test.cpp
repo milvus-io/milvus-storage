@@ -586,7 +586,7 @@ TEST_F(ManifestTest, CorruptManifestIsClassifiedCorrupted) {
                                << " storage failure rather than as corrupt data: " << result.status().ToString();
     EXPECT_EQ(detail->code(), ExtendStatusCode::ManifestCorrupted) << c.what;
     EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::Corrupted) << c.what;
-    EXPECT_FALSE(DefaultRetryableForExtendStatusCode(detail->code())) << c.what;
+    EXPECT_FALSE(RetryableForExtendStatusCode(detail->code())) << c.what;
     EXPECT_EQ(ToSegcoreError(result.status()).get_error_code(), milvus::DataFormatBroken) << c.what;
   }
 }

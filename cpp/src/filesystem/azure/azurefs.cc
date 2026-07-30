@@ -135,7 +135,14 @@ std::optional<milvus_storage::ExtendStatusCode> ClassifyAzureError(
 
   switch (http_status) {
     case 412:  // Precondition Failed
-      return milvus_storage::ExtendStatusCode::AwsErrorPreConditionFailed;
+      // Same discipline as the 409 below, which this used to ignore: classify
+      // only the flavour we positively identify. Azure answers 412 for a
+      // genuine etag/condition mismatch AND for lease problems
+      // (LeaseIdMismatch..., LeaseNotPresent...), which are a different
+      // condition. Calling every 412 a precondition conflict was a guess.
+      return error_code == "ConditionNotMet"
+                 ? std::optional{milvus_storage::ExtendStatusCode::AwsErrorPreConditionFailed}
+                 : std::nullopt;
     case 409:  // Conflict
       // Only the "blob already exists" flavour is the precondition-style
       // conflict this maps to. Other 409s (lease held, container being deleted)
@@ -145,8 +152,10 @@ std::optional<milvus_storage::ExtendStatusCode> ClassifyAzureError(
                        milvus_storage::ExtendStatusCode::AwsErrorPreConditionFailed}
                  : std::nullopt;
     case 404:  // Not Found
-      // The blob/container is gone. Permanent: a retry, or a reroute to another
-      // replica, reaches the same storage account and fails identically.
+      // The blob/container is gone. Missing, not Permanent: this layer will not
+      // say whether that is a GC race or lost data -- the consumer re-reads its
+      // metadata and decides. A plain retry reaches the same storage account
+      // and fails identically, so it is not Transient either.
       return milvus_storage::ExtendStatusCode::AwsErrorNotFound;
     case 401:  // Unauthorized
     case 403:  // Forbidden

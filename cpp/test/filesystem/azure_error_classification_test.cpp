@@ -64,7 +64,7 @@ TEST(AzureErrorClassification, TransientStatusesAreRetriable) {
     auto code = ClassifyAzureError(c.http_status, c.error_code, /*transport_failure=*/false);
     ASSERT_TRUE(code.has_value()) << c.http_status << " " << c.error_code;
     EXPECT_EQ(*code, c.expected) << c.http_status << " " << c.error_code;
-    EXPECT_TRUE(DefaultRetryableForExtendStatusCode(*code)) << c.http_status;
+    EXPECT_TRUE(RetryableForExtendStatusCode(*code)) << c.http_status;
     EXPECT_EQ(ToSegcoreErrorCode(*code), milvus::StorageTransientError) << c.http_status;
   }
 
@@ -73,7 +73,7 @@ TEST(AzureErrorClassification, TransientStatusesAreRetriable) {
   auto transport = ClassifyAzureError(0, "", /*transport_failure=*/true);
   ASSERT_TRUE(transport.has_value());
   EXPECT_EQ(*transport, ExtendStatusCode::StorageTransientNetwork);
-  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(*transport));
+  EXPECT_TRUE(RetryableForExtendStatusCode(*transport));
 }
 
 // The counter-example that makes `transport_failure` load-bearing.
@@ -118,7 +118,7 @@ TEST(AzureErrorClassification, NonRetriableStatusesNeverLookTransient) {
     auto code = ClassifyAzureError(c.http_status, c.error_code, /*transport_failure=*/false);
     ASSERT_TRUE(code.has_value()) << c.http_status << " " << c.error_code;
     EXPECT_EQ(*code, c.expected) << c.http_status;
-    EXPECT_FALSE(DefaultRetryableForExtendStatusCode(*code)) << c.http_status;
+    EXPECT_FALSE(RetryableForExtendStatusCode(*code)) << c.http_status;
     EXPECT_EQ(ToSegcoreErrorCode(*code), c.segcore) << c.http_status;
     // A non-retriable failure must never look transient, or a consumer
     // retry-storms a request that can never succeed.
@@ -149,7 +149,7 @@ TEST(AzureErrorClassification, PreconditionFailuresAreConflictNotPermanent) {
     ASSERT_TRUE(code.has_value()) << c.http_status << " " << c.error_code;
     EXPECT_EQ(*code, ExtendStatusCode::AwsErrorPreConditionFailed) << c.http_status;
     EXPECT_EQ(CategoryForExtendStatusCode(*code), ErrorCategory::Conflict) << c.http_status;
-    EXPECT_TRUE(DefaultRetryableForExtendStatusCode(*code)) << c.http_status;
+    EXPECT_TRUE(RetryableForExtendStatusCode(*code)) << c.http_status;
     EXPECT_EQ(ToSegcoreErrorCode(*code), milvus::StorageTransientError) << c.http_status;
   }
 }

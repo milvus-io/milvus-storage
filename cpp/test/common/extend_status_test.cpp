@@ -99,22 +99,22 @@ TEST_F(ExtendStatusTest, TestExtendStatusCodeRetryability) {
   EXPECT_EQ(ExtendStatusCodeFromInt(LOON_TRANSIENT_NETWORK), ExtendStatusCode::StorageTransientNetwork);
   EXPECT_FALSE(ExtendStatusCodeFromInt(3).has_value());
 
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::PackedInvalidArgs));
+  EXPECT_FALSE(RetryableForExtendStatusCode(ExtendStatusCode::PackedInvalidArgs));
   // Missing, not Conflict: resending against a dead upload id fails identically
   // every time. Only a NEW upload helps, and that decision belongs to the layer
   // that owns the write, not to a blind retry here.
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNoSuchUpload));
-  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorConflict));
-  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorPreConditionFailed));
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNotFound));
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorAccessDenied));
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNonRetryable));
-  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::StorageTransientNetwork));
-  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::StorageTransientTimeout));
-  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::StorageTransientThrottling));
-  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::StorageTransientService));
-  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::TxnExhaustedRetry));
-  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::TxnResolutionFailed));
+  EXPECT_FALSE(RetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNoSuchUpload));
+  EXPECT_TRUE(RetryableForExtendStatusCode(ExtendStatusCode::AwsErrorConflict));
+  EXPECT_TRUE(RetryableForExtendStatusCode(ExtendStatusCode::AwsErrorPreConditionFailed));
+  EXPECT_FALSE(RetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNotFound));
+  EXPECT_FALSE(RetryableForExtendStatusCode(ExtendStatusCode::AwsErrorAccessDenied));
+  EXPECT_FALSE(RetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNonRetryable));
+  EXPECT_TRUE(RetryableForExtendStatusCode(ExtendStatusCode::StorageTransientNetwork));
+  EXPECT_TRUE(RetryableForExtendStatusCode(ExtendStatusCode::StorageTransientTimeout));
+  EXPECT_TRUE(RetryableForExtendStatusCode(ExtendStatusCode::StorageTransientThrottling));
+  EXPECT_TRUE(RetryableForExtendStatusCode(ExtendStatusCode::StorageTransientService));
+  EXPECT_TRUE(RetryableForExtendStatusCode(ExtendStatusCode::TxnExhaustedRetry));
+  EXPECT_TRUE(RetryableForExtendStatusCode(ExtendStatusCode::TxnResolutionFailed));
 
   auto status = MakeExtendError(ExtendStatusCode::StorageTransientNetwork, "network", "detail");
   auto detail = ExtendStatusDetail::UnwrapStatus(status);

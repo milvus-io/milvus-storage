@@ -366,20 +366,34 @@ arrow::Status Manifest::serialize(std::ostream& output_stream) const {
 }
 
 arrow::Status Manifest::deserialize(std::istream& input_stream) {
-  // ManifestCorrupted rather than a bare Status::Invalid. Everything reaching
-  // this lambda got far enough to attempt a parse and failed on the bytes --
-  // bad MILV magic, a truncated stream, an avro body that does not decode -- so
-  // this is the one place entitled to say "corrupted". It used to return an
-  // untagged Invalid and reach segcore as DataFormatBroken only by way of the
-  // coarse fallback; now that the fallback no longer guesses corruption, an
-  // untagged status here would silently downgrade to a generic storage error.
-  auto error = [this](const std::string& msg) {
+  auto reset_state = [this]() {
     column_groups_.clear();
     delta_logs_.clear();
     stats_.clear();
     indexes_.clear();
     lob_files_.clear();
+  };
+
+  // Only for failures that are DEFINITELY the bytes: bad MILV magic, a stream
+  // too short to hold a header, an avro body that does not decode. Saying
+  // "corrupted" is a claim about the data, and a claim that reaches an operator
+  // as "quarantine this file", so it must not be made on anything else.
+  //
+  // In particular NOT for std::bad_alloc or an unknown exception -- both used to
+  // reach this same lambda, which turned an OOM into a non-retriable
+  // DataFormatBroken and could have had a perfectly good manifest quarantined.
+  auto corrupted = [this, reset_state](const std::string& msg) {
+    reset_state();
     return MakeExtendErrorMsg(ExtendStatusCode::ManifestCorrupted, msg);
+  };
+
+  // Everything that failed for a reason other than the content. Left untagged
+  // on purpose: the coarse fallback maps OutOfMemory to a retriable 2034 and
+  // anything else to StorageError, which is the honest answer when we do not
+  // know what happened.
+  auto failed = [this, reset_state](arrow::Status status) {
+    reset_state();
+    return status;
   };
 
   try {
@@ -387,7 +401,7 @@ arrow::Status Manifest::deserialize(std::istream& input_stream) {
     char header[4] = {};
     input_stream.read(header, 4);
     if (!input_stream || input_stream.gcount() < 4) {
-      return error("Cannot deserialize Manifest: stream is empty or too short");
+      return corrupted("Cannot deserialize Manifest: stream is empty or too short");
     }
     input_stream.clear();
     input_stream.seekg(0);
@@ -397,7 +411,7 @@ arrow::Status Manifest::deserialize(std::istream& input_stream) {
       auto avro_input = avro::istreamInputStream(input_stream);
       avro::DataFileReader<Manifest> reader(std::move(avro_input), getManifestSchema());
       if (!reader.read(*this)) {
-        return error("Failed to deserialize Manifest: no record in Avro file");
+        return corrupted("Failed to deserialize Manifest: no record in Avro file");
       }
       version_ = MANIFEST_VERSION;
     } else {
@@ -406,11 +420,17 @@ arrow::Status Manifest::deserialize(std::istream& input_stream) {
 
     return arrow::Status::OK();
   } catch (const avro::Exception& e) {
-    return error(fmt::format("Failed to deserialize Manifest: {}", e.what()));  // NOLINT
+    // avro refused the body. That is the content.
+    return corrupted(fmt::format("Failed to deserialize Manifest: {}", e.what()));  // NOLINT
+  } catch (const std::bad_alloc&) {
+    // OutOfMemory, so the coarse fallback lands on MemAllocateFailed/2034 and
+    // the caller may retry. Calling this corruption would be both wrong and
+    // non-retriable.
+    return failed(arrow::Status::OutOfMemory("Failed to deserialize Manifest: out of memory"));
   } catch (const std::exception& e) {
-    return error(fmt::format("Failed to deserialize Manifest: {}", e.what()));  // NOLINT
+    return failed(arrow::Status::UnknownError(fmt::format("Failed to deserialize Manifest: {}", e.what())));  // NOLINT
   } catch (...) {
-    return error("Failed to deserialize Manifest: unknown error (possibly invalid or empty stream)");
+    return failed(arrow::Status::UnknownError("Failed to deserialize Manifest: unknown exception"));
   }
 }
 

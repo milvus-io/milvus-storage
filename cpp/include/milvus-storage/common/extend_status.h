@@ -118,17 +118,44 @@ class ExtendStatusDetail : public arrow::StatusDetail {
   private:
   ExtendStatusCode code_;
   std::string extra_info_;
+
+  // Reserved, never read, never written. This used to be `bool retryable_`, a
+  // stored copy of state that is now derived from the code -- storing it was
+  // how the two answers drifted apart, which is the whole point of this class.
+  //
+  // The byte stays because removing it is an ABI break, not a cleanup. This
+  // class ships in an installed header, its constructors are exported from the
+  // shared library, and the project sets no SOVERSION; dropping the field takes
+  // sizeof from 48 to 40, so a consumer compiled against the old header reads
+  // past an allocation the library made at the new size. Reclaim it in a
+  // release that bumps the ABI on purpose.
+  bool reserved_was_retryable_ = false;
 };
+
+// Pins the layout so the field above cannot be reclaimed by accident. If this
+// fires, you changed the ABI of a type that ships in an installed header from a
+// library with no SOVERSION -- decide that deliberately and bump the version,
+// do not silence the assert.
+static_assert(sizeof(ExtendStatusDetail) == 48, "ExtendStatusDetail layout is ABI; see reserved_was_retryable_");
 
 std::optional<ExtendStatusCode> ExtendStatusCodeFromInt(int code);
 
 /// \brief The category of an ExtendStatusCode: who owns the failure.
 ErrorCategory CategoryForExtendStatusCode(ExtendStatusCode code);
 
-/// \brief Whether retrying can help. Derived state, never stored per code: true
-/// iff the category is Transient or Conflict. Kept as a named helper
-/// because it is the question most consumers actually ask.
-bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code);
+/// \brief Whether retrying can help: true iff the category is Transient or
+/// Conflict.
+///
+/// Derived from the code, never stored. Storing it would create a second source
+/// of truth that nothing keeps in sync -- when AwsErrorNoSuchUpload moved from
+/// Conflict to Missing, deriving made every existing and future detail correct
+/// at once, whereas a stored copy would have left every already-constructed
+/// one, and every producer that passed the old value, silently wrong.
+///
+/// (Was DefaultRetryableForExtendStatusCode. The prefix was a leftover from
+/// when the value could be supplied at construction, and implied a non-default
+/// answer exists. It does not.)
+bool RetryableForExtendStatusCode(ExtendStatusCode code);
 
 /// \brief The AWS S3 / Aliyun OSS error code this maps to, or "" when the
 /// condition has no object-storage counterpart (packed/transaction codes).

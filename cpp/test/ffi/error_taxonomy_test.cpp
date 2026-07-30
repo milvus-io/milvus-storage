@@ -144,7 +144,7 @@ TEST(ErrorTaxonomyTest, ExtendStatusAgreesWithFfiView) {
     }
 
     EXPECT_EQ(static_cast<int>(CategoryForExtendStatusCode(*code)), row.category) << row.name;
-    EXPECT_EQ(DefaultRetryableForExtendStatusCode(*code), loon_ffi_is_retryable_errcode(row.code) != 0) << row.name;
+    EXPECT_EQ(RetryableForExtendStatusCode(*code), loon_ffi_is_retryable_errcode(row.code) != 0) << row.name;
     EXPECT_EQ(S3CodeForExtendStatusCode(*code), std::string_view(row.s3_code)) << row.name;
     EXPECT_EQ(ExtendStatusDetail(*code).CodeAsString(), std::string(row.name));
     EXPECT_EQ(ExtendStatusDetail(*code).retryable(),
@@ -209,11 +209,11 @@ TEST(ErrorTaxonomyTest, SegcoreMappingMatchesCategory) {
         // re-reads the manifest and decides.
         EXPECT_EQ(segcore, milvus::ObjectNotExist) << row.name << " is Missing but does not map to 2017";
         EXPECT_NE(segcore, milvus::StorageTransientError) << row.name << " invents retriability for a missing object";
-        EXPECT_FALSE(DefaultRetryableForExtendStatusCode(code)) << row.name;
+        EXPECT_FALSE(RetryableForExtendStatusCode(code)) << row.name;
         break;
       case LOON_ERROR_CATEGORY_CORRUPTED:
         EXPECT_EQ(segcore, milvus::DataFormatBroken) << row.name << " is Corrupted but does not map to 2024";
-        EXPECT_FALSE(DefaultRetryableForExtendStatusCode(code)) << row.name;
+        EXPECT_FALSE(RetryableForExtendStatusCode(code)) << row.name;
         break;
       case LOON_ERROR_CATEGORY_PERMANENT:
         EXPECT_NE(segcore, milvus::StorageTransientError) << row.name << " is permanent but maps to retriable 2045";
@@ -338,7 +338,7 @@ TEST(ErrorTaxonomyTest, DocumentedDivergencesFromAws) {
   // guess; milvus re-reads and decides. The user-supplied counterpart is
   // LOON_SOURCE_INVALID, which IS a user error.
   EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::AwsErrorNotFound), ErrorCategory::Missing);
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNotFound));
+  EXPECT_FALSE(RetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNotFound));
 
   // AWS: NoSuchBucket is grouped with NoSuchKey. We split it: nothing was lost,
   // and no re-read produces a bucket. It is a deployment pointing at something
@@ -353,7 +353,7 @@ TEST(ErrorTaxonomyTest, DocumentedDivergencesFromAws) {
   // consumer behaviour this layer cannot guarantee; a resend against the dead
   // upload id fails identically forever.
   EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::AwsErrorNoSuchUpload), ErrorCategory::Missing);
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNoSuchUpload));
+  EXPECT_FALSE(RetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNoSuchUpload));
   EXPECT_EQ(loon_ffi_error_category(LOON_SOURCE_INVALID), LOON_ERROR_CATEGORY_USER);
 
   // AWS: AccessDenied is a 403 client error. Ours: permanent system error --
