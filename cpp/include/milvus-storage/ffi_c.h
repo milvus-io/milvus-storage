@@ -31,37 +31,24 @@ extern "C" {
 #include <stdint.h>
 #include "arrow/c/abi.h"
 
+#include "milvus-storage/ffi_internal/ffi_error_code.h"
+
 // ==================== Result C Interface ====================
 
 // --- Export error codes ---
+//
+// Generated from the same X-macro table that defines the constants in
+// result_c.cpp and that drives the linker export maps. These used to be written
+// out by hand, which is how six `loon_errcode_packed_*` symbols ended up
+// exported and consumed by the Python binding while having no declaration here
+// at all. A table that is transcribed by hand is a table that drifts.
 FFI_EXPORT extern const int loon_errcode_success;
-FFI_EXPORT extern const int loon_errcode_invalid_args;
-FFI_EXPORT extern const int loon_errcode_memory;
-FFI_EXPORT extern const int loon_errcode_arrow;
-FFI_EXPORT extern const int loon_errcode_logical;
-FFI_EXPORT extern const int loon_errcode_got_exception;
-FFI_EXPORT extern const int loon_errcode_unreachable;
-FFI_EXPORT extern const int loon_errcode_invalid_properties;
-FFI_EXPORT extern const int loon_errcode_fault_inject;
-FFI_EXPORT extern const int loon_errcode_not_support;
-FFI_EXPORT extern const int loon_errcode_file_not_found;
-FFI_EXPORT extern const int loon_errcode_source_not_found;
-FFI_EXPORT extern const int loon_errcode_source_access_denied;
 
-FFI_EXPORT extern const int loon_errcode_aws_no_such_upload;
-FFI_EXPORT extern const int loon_errcode_aws_conflict;
-FFI_EXPORT extern const int loon_errcode_aws_precondition_failed;
-FFI_EXPORT extern const int loon_errcode_aws_not_found;
-FFI_EXPORT extern const int loon_errcode_aws_access_denied;
-FFI_EXPORT extern const int loon_errcode_aws_non_retryable;
-FFI_EXPORT extern const int loon_errcode_transient_network;
-FFI_EXPORT extern const int loon_errcode_transient_timeout;
-FFI_EXPORT extern const int loon_errcode_transient_throttling;
-FFI_EXPORT extern const int loon_errcode_transient_service;
-FFI_EXPORT extern const int loon_errcode_txn_exhausted_retry;
-FFI_EXPORT extern const int loon_errcode_txn_resolution_failed;
-FFI_EXPORT extern const int loon_errcode_storage_config_invalid;
-FFI_EXPORT extern const int loon_errcode_source_uri_invalid;
+#define MILVUS_STORAGE_ERRCODE_DECL(name, code, symbol, category, s3_code) \
+  FFI_EXPORT extern const int loon_errcode_##symbol;
+LOON_INTERNAL_ERROR_CODE_LIST(MILVUS_STORAGE_ERRCODE_DECL)
+LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_ERRCODE_DECL)
+#undef MILVUS_STORAGE_ERRCODE_DECL
 
 // usage example(caller must free the message string):
 //

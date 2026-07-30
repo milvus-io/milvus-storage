@@ -47,9 +47,12 @@ _ERROR_CODE_SYMBOLS = (
 )
 
 # Error categories from ffi_c.h. Every error code maps to exactly one of these,
-# and retriability is derived from it: only TRANSIENT is worth retrying, a USER
-# error must be reported to whoever made the request, and an unrecognized code
-# reports UNKNOWN and must be treated as permanent.
+# and retriability is derived from the category rather than stored per code:
+# TRANSIENT, THROTTLED and CONFLICT are worth retrying; USER, CONFIG and
+# PERMANENT are not, and an unrecognized code reports UNKNOWN, which must be
+# treated as permanent because inventing retriability is the more expensive
+# mistake. A USER or CONFIG error must be reported to whoever made the request
+# or owns the deployment -- retrying it just burns the budget.
 # See docs/error-codes.md for the full table.
 _ERROR_CATEGORY_SYMBOLS = (
     "loon_error_category_unknown",

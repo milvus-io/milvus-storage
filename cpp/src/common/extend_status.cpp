@@ -138,9 +138,40 @@ std::string_view S3CodeForExtendStatusCode(ExtendStatusCode code) {
   return {};
 }
 
+namespace {
+
+// The conditions we detect before issuing any IO: nothing was attempted, so
+// reporting them as an IO failure would be a lie, and `ToSegcoreError`'s
+// fallback would file them under DataFormatBroken rather than as bad input.
+//
+// Deliberately a small explicit set rather than a function of the category.
+// Category answers "who owns this"; the arrow code answers "what failed". A
+// Config failure can be either -- unusable `extfs.*` properties never touch the
+// network, an S3 403 already did.
+bool IsPreIoValidationFailure(ExtendStatusCode code) {
+  switch (code) {
+    case ExtendStatusCode::PackedInvalidArgs:
+    case ExtendStatusCode::StorageConfigInvalid:
+    case ExtendStatusCode::SourceUriInvalid:
+      return true;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
 arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info) {
-  auto arrow_code =
-      code == ExtendStatusCode::PackedInvalidArgs ? arrow::StatusCode::Invalid : arrow::StatusCode::IOError;
+  // arrow's StatusCode says what kind of operation failed; our category says
+  // who owns the failure. They are not the same axis and must not be derived
+  // from each other: an S3 403 is owned by whoever configured the credentials
+  // (Config) but it is still, to arrow and to every caller branching on
+  // `IsIOError()`, an IO failure.
+  //
+  // Invalid is therefore reserved for the conditions detected *before* any IO
+  // is attempted -- a malformed argument, an unparseable URI, unusable
+  // configuration. Everything else is IOError.
+  auto arrow_code = IsPreIoValidationFailure(code) ? arrow::StatusCode::Invalid : arrow::StatusCode::IOError;
   return {arrow_code, std::move(message), std::make_shared<ExtendStatusDetail>(code, std::move(extra_info))};
 }
 
@@ -248,10 +279,13 @@ milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
       // shared object store and fails identically.
       return milvus::ObjectNotExist;  // 2017, permanent
     case ExtendStatusCode::AwsErrorAccessDenied:
+      // Operator credentials, not the caller's request and not a bug of ours.
+      // Non-retriable either way, but it must page whoever owns the config
+      // rather than be filed as a generic storage failure.
+      return milvus::ConfigInvalid;  // 2006
     case ExtendStatusCode::AwsErrorNonRetryable:
-      // Bad credentials/permissions, or the AWS SDK itself judged the error
-      // non-retryable. Same rule: never transient/2045, or querynode would
-      // retry-storm a request that can never succeed.
+      // The SDK's catch-all for "I judged this non-retryable": no condition
+      // identified, so the conservative permanent bucket.
       return milvus::StorageError;  // 2044, permanent
   }
   return milvus::StorageError;  // out-of-range value: safe non-retriable fallback

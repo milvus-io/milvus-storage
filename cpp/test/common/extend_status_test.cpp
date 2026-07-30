@@ -270,7 +270,10 @@ TEST_F(ExtendStatusTest, ExtendCodesMapToSegcoreErrorCode) {
       {ExtendStatusCode::AwsErrorPreConditionFailed, milvus::StorageTransientError},
       // permanently-failing S3 errors: must never be transient/2045
       {ExtendStatusCode::AwsErrorNotFound, milvus::ObjectNotExist},
-      {ExtendStatusCode::AwsErrorAccessDenied, milvus::StorageError},
+      // Config, not Permanent: the credentials are the operator's, so this has
+      // to reach whoever owns the deployment rather than be filed as a generic
+      // storage failure. Still non-retriable.
+      {ExtendStatusCode::AwsErrorAccessDenied, milvus::ConfigInvalid},
       {ExtendStatusCode::AwsErrorNonRetryable, milvus::StorageError},
       {ExtendStatusCode::StorageTransientNetwork, milvus::StorageTransientError},
       {ExtendStatusCode::StorageTransientTimeout, milvus::StorageTransientError},
@@ -312,7 +315,7 @@ TEST_F(ExtendStatusTest, PermanentS3ErrorsAreNotRetriable) {
   const Case cases[] = {
       // not-found is fine-grained: ObjectNotExist(2017), still permanent
       {ExtendStatusCode::AwsErrorNotFound, "AwsErrorNotFound", milvus::ObjectNotExist},
-      {ExtendStatusCode::AwsErrorAccessDenied, "AwsErrorAccessDenied", milvus::StorageError},
+      {ExtendStatusCode::AwsErrorAccessDenied, "AwsErrorAccessDenied", milvus::ConfigInvalid},
       {ExtendStatusCode::AwsErrorNonRetryable, "AwsErrorNonRetryable", milvus::StorageError},
   };
   for (const auto& test_case : cases) {

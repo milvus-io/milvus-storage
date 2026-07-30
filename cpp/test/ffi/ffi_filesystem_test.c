@@ -914,7 +914,7 @@ static void test_retryable_errcode_helper(void) {
   ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_txn_exhausted_retry));
   ck_assert_int_eq(loon_ffi_error_category(loon_errcode_aws_conflict), loon_error_category_conflict);
   ck_assert_int_eq(loon_ffi_error_category(loon_errcode_transient_throttling), loon_error_category_throttled);
-  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_invalid_properties), loon_error_category_config);
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_invalid_properties), loon_error_category_user);
 
   ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_success));
   ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_arrow));

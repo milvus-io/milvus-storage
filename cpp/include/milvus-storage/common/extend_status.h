@@ -21,6 +21,7 @@
 
 #include <arrow/status.h>
 #include <arrow/result.h>
+#include <arrow/util/string_builder.h>
 
 #include "milvus-storage/ffi_internal/ffi_error_code.h"
 
@@ -116,8 +117,9 @@ std::optional<ExtendStatusCode> ExtendStatusCodeFromInt(int code);
 /// \brief The category of an ExtendStatusCode: who owns the failure.
 ErrorCategory CategoryForExtendStatusCode(ExtendStatusCode code);
 
-/// \brief Whether retrying can help. Derived state: true iff the category is
-/// Transient. Kept as a named helper because it is what most consumers ask.
+/// \brief Whether retrying can help. Derived state, never stored per code: true
+/// iff the category is Transient, Throttled or Conflict. Kept as a named helper
+/// because it is the question most consumers actually ask.
 bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code);
 
 /// \brief The AWS S3 / Aliyun OSS error code this maps to, or "" when the
@@ -125,6 +127,18 @@ bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code);
 std::string_view S3CodeForExtendStatusCode(ExtendStatusCode code);
 
 arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info = "");
+
+/// \brief Variadic form, mirroring `arrow::Status::Invalid(a, b, c)`.
+///
+/// Exists so that an already-correct site that builds its message out of pieces
+/// can be given a classification without rewriting how it builds that message.
+/// Every unclassified `Status::Invalid(...)` we convert is one fewer failure
+/// that reaches segcore as an untyped IOError, so the conversion needs to be
+/// cheap enough that nobody skips it.
+template <typename... Args>
+arrow::Status MakeExtendErrorMsg(ExtendStatusCode code, Args&&... args) {
+  return MakeExtendError(code, arrow::util::StringBuilder(std::forward<Args>(args)...));
+}
 
 arrow::Status WrapExtendError(ExtendStatusCode code, std::string message, const arrow::Status& cause);
 

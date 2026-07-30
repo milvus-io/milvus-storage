@@ -15,6 +15,9 @@
 #include <gtest/gtest.h>
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/properties.h"
+#include <optional>
+
+#include "milvus-storage/common/extend_status.h"
 
 namespace milvus_storage::test {
 
@@ -530,6 +533,95 @@ TEST_F(ExternalFilesystemTest, ResolveConfigWithQueryComponent) {
   ASSERT_TRUE(rel.ok()) << rel.status().ToString();
   EXPECT_EQ(rel.ValueOrDie().bucket_name, "default-bucket");
   EXPECT_EQ(rel.ValueOrDie().access_key_id, "default_key");
+}
+
+// ==================== Classification of config / URI failures ====================
+//
+// These are the tests the rest of the taxonomy suite cannot substitute for.
+// Every other test compares the tables to each other -- category table against
+// segcore switch against FFI constants -- and those all pass whether or not any
+// layer ever emits the code. StorageConfigInvalid and SourceUriInvalid shipped
+// for a while with no producer at all and every self-consistency test stayed
+// green. So: call the real entry points with real bad input and read the code
+// back off the Status.
+
+namespace {
+
+std::optional<ExtendStatusCode> CodeOf(const arrow::Status& status) {
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  return detail ? std::optional{detail->code()} : std::nullopt;
+}
+
+}  // namespace
+
+TEST_F(ExternalFilesystemTest, UnparseableUriIsClassifiedAsUserError) {
+  struct Case {
+    const char* uri;
+    const char* what;
+  };
+  const Case cases[] = {
+      {"s3://", "no bucket and no key"},
+      {"s3:///", "empty after scheme"},
+      {"s3://my-bucket", "host only, no path to take the bucket from"},
+  };
+
+  for (const auto& c : cases) {
+    auto result = StorageUri::Parse(c.uri);
+    ASSERT_FALSE(result.ok()) << c.what;
+    auto code = CodeOf(result.status());
+    ASSERT_TRUE(code.has_value()) << c.what << ": arrived unclassified, so segcore sees a generic"
+                                  << " failure instead of 'your URI is wrong': " << result.status().ToString();
+    EXPECT_EQ(*code, ExtendStatusCode::SourceUriInvalid) << c.what;
+    EXPECT_EQ(CategoryForExtendStatusCode(*code), ErrorCategory::User) << c.what;
+    EXPECT_FALSE(DefaultRetryableForExtendStatusCode(*code)) << c.what;
+    EXPECT_EQ(ToSegcoreError(result.status()).get_error_code(), milvus::InvalidParameter) << c.what;
+    // Detected before any IO was attempted, so it must not masquerade as one.
+    EXPECT_TRUE(result.status().IsInvalid()) << c.what;
+  }
+}
+
+TEST_F(ExternalFilesystemTest, UnusableExtfsConfigIsClassifiedAsConfigError) {
+  struct Case {
+    const char* key;
+    const char* what;
+  };
+  const Case cases[] = {
+      {"extfs.prod", "missing property name after fs name"},
+      {"extfs..address", "empty filesystem name"},
+      {"extfs.prod.", "empty property name"},
+  };
+
+  for (const auto& c : cases) {
+    api::Properties props;
+    props[c.key] = std::string("value");
+
+    auto fs_result = FilesystemCache::getInstance().get(props, "s3://test.com/bucket/key");
+    ASSERT_FALSE(fs_result.ok()) << c.what;
+    auto code = CodeOf(fs_result.status());
+    ASSERT_TRUE(code.has_value()) << c.what << ": arrived unclassified: " << fs_result.status().ToString();
+    EXPECT_EQ(*code, ExtendStatusCode::StorageConfigInvalid) << c.what;
+    EXPECT_EQ(CategoryForExtendStatusCode(*code), ErrorCategory::Config) << c.what;
+    EXPECT_FALSE(DefaultRetryableForExtendStatusCode(*code)) << c.what;
+    // 2006 ConfigInvalid, not 2044 StorageError: nobody retries out of a
+    // malformed extfs.* key, and it has to page whoever wrote it.
+    EXPECT_EQ(ToSegcoreError(fs_result.status()).get_error_code(), milvus::ConfigInvalid) << c.what;
+    EXPECT_TRUE(fs_result.status().IsInvalid()) << c.what;
+  }
+}
+
+TEST_F(ExternalFilesystemTest, UnknownCloudProviderIsClassifiedAsConfigError) {
+  api::Properties props;
+  props["extfs.myfs.address"] = std::string("s3.amazonaws.com");
+  props["extfs.myfs.bucket_name"] = std::string("my-bucket");
+  props["extfs.myfs.storage_type"] = std::string("remote");
+  props["extfs.myfs.cloud_provider"] = std::string("not-a-real-cloud");
+
+  auto fs_result = FilesystemCache::getInstance().get(props, "s3://s3.amazonaws.com/my-bucket/data/f.parquet");
+  ASSERT_FALSE(fs_result.ok());
+  auto code = CodeOf(fs_result.status());
+  ASSERT_TRUE(code.has_value()) << "arrived unclassified: " << fs_result.status().ToString();
+  EXPECT_EQ(*code, ExtendStatusCode::StorageConfigInvalid);
+  EXPECT_EQ(ToSegcoreError(fs_result.status()).get_error_code(), milvus::ConfigInvalid);
 }
 
 }  // namespace milvus_storage::test

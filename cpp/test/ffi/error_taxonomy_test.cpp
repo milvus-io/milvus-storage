@@ -318,7 +318,7 @@ TEST(ErrorTaxonomyTest, DocumentedDivergencesFromAws) {
 
   // AWS: AccessDenied is a 403 client error. Ours: permanent system error --
   // the credentials are operator configuration, not part of the request.
-  EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::AwsErrorAccessDenied), ErrorCategory::Permanent);
+  EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::AwsErrorAccessDenied), ErrorCategory::Config);
   EXPECT_EQ(loon_ffi_error_category(LOON_SOURCE_ACCESS_DENIED), LOON_ERROR_CATEGORY_USER);
 
   // AWS: InternalError (500) is retriable. Ours: LOON_LOGICAL_ERROR and friends
@@ -328,7 +328,10 @@ TEST(ErrorTaxonomyTest, DocumentedDivergencesFromAws) {
 
   // Operator configuration is not the API caller's fault. Both are
   // non-retriable, but only one should be reported back as a bad request.
-  EXPECT_EQ(loon_ffi_error_category(LOON_INVALID_PROPERTIES), LOON_ERROR_CATEGORY_CONFIG);
+  // The caller built a malformed properties array (duplicate key, bad index):
+  // its bug, not the deployment's. Unusable deployment configuration is
+  // LOON_STORAGE_CONFIG_INVALID.
+  EXPECT_EQ(loon_ffi_error_category(LOON_INVALID_PROPERTIES), LOON_ERROR_CATEGORY_USER);
   EXPECT_EQ(loon_ffi_error_category(LOON_STORAGE_CONFIG_INVALID), LOON_ERROR_CATEGORY_CONFIG);
   EXPECT_EQ(loon_ffi_error_category(LOON_SOURCE_URI_INVALID), LOON_ERROR_CATEGORY_USER);
 }

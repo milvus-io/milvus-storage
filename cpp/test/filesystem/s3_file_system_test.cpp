@@ -90,7 +90,8 @@ TEST_F(S3UnitTest, TestErrorToStatusPermanentVsTransient) {
     ASSERT_NE(detail, nullptr);
     EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorNotFound);
   }
-  // AccessDenied: permanent, tagged AwsErrorAccessDenied.
+  // AccessDenied: non-retriable, tagged AwsErrorAccessDenied (category Config --
+  // operator credentials, so it lands on 2006 ConfigInvalid, not 2044).
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::ACCESS_DENIED, Aws::Client::RetryableType::NOT_RETRYABLE, "AccessDenied", "forbidden");

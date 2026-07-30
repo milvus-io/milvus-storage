@@ -104,33 +104,36 @@ and it survives to the FFI boundary *and* to segcore.
 | `PackedFileCorrupted` | 53 | Permanent | no | — | 2024 `DataFormatBroken` | Packed file body is corrupt |
 | `PackedArrowError` | 54 | Permanent | no | — | 2044 `StorageError` | Arrow failure inside packed |
 | `PackedUnexpected` | 55 | Permanent | no | `InternalError` | 2044 `StorageError` | Packed internal error |
-| `AwsErrorNoSuchUpload` | 101 | **Transient** | **yes** | `NoSuchUpload` | 2045 `StorageTransientError` | Multipart upload state is gone |
-| `AwsErrorConflict` | 102 | Permanent | no | `OperationAborted` | 2044 `StorageError` | Concurrent-modification conflict |
-| `AwsErrorPreConditionFailed` | 103 | Permanent | no | `PreconditionFailed` | 2044 `StorageError` | Conditional write precondition failed |
+| `AwsErrorNoSuchUpload` | 101 | **Conflict** | **yes** | `NoSuchUpload` | 2045 `StorageTransientError` | Multipart upload state is gone |
+| `AwsErrorConflict` | 102 | **Conflict** | **yes** | `OperationAborted` | 2045 `StorageTransientError` | Concurrent-modification conflict |
+| `AwsErrorPreConditionFailed` | 103 | **Conflict** | **yes** | `PreconditionFailed` | 2045 `StorageTransientError` | Conditional write precondition failed |
 | `AwsErrorNotFound` | 104 | Permanent | no | `NoSuchKey` / `NoSuchBucket` | 2017 `ObjectNotExist` | Object/bucket gone on an internal path |
-| `AwsErrorAccessDenied` | 105 | Permanent | no | `AccessDenied` / `InvalidAccessKeyId` / `SignatureDoesNotMatch` | 2044 `StorageError` | Credentials or permissions wrong |
+| `AwsErrorAccessDenied` | 105 | Config | no | `AccessDenied` / `InvalidAccessKeyId` / `SignatureDoesNotMatch` | 2006 `ConfigInvalid` | Credentials or permissions wrong |
 | `AwsErrorNonRetryable` | 106 | Permanent | no | — | 2044 `StorageError` | AWS SDK judged it non-retryable (`ShouldRetry() == false`) |
 | `StorageTransientNetwork` | 107 | **Transient** | **yes** | `RequestTimeout` | 2045 `StorageTransientError` | Connection reset / refused / aborted |
 | `StorageTransientTimeout` | 108 | **Transient** | **yes** | `RequestTimeout` | 2045 `StorageTransientError` | Request timed out |
-| `StorageTransientThrottling` | 109 | **Transient** | **yes** | `SlowDown` / `TooManyRequests` (429) | 2045 `StorageTransientError` | Object store throttled us |
+| `StorageTransientThrottling` | 109 | **Throttled** | **yes** | `SlowDown` / `TooManyRequests` (429) | 2045 `StorageTransientError` | Object store throttled us |
 | `StorageTransientService` | 110 | **Transient** | **yes** | `ServiceUnavailable` / `InternalError` (5xx) | 2045 `StorageTransientError` | Object store returned a server error |
-| `TxnExhaustedRetry` | 111 | Permanent | no | — | 2044 `StorageError` | Manifest transaction spent its own retry budget |
-| `TxnResolutionFailed` | 112 | Permanent | no | — | 2044 `StorageError` | Manifest merge/resolution failed |
+| `TxnExhaustedRetry` | 111 | **Conflict** | **yes** | — | 2045 `StorageTransientError` | Manifest transaction spent its own retry budget |
+| `TxnResolutionFailed` | 112 | **Conflict** | **yes** | — | 2045 `StorageTransientError` | Manifest merge/resolution failed |
+| `StorageConfigInvalid` | 115 | Config | no | `InvalidArgument` | 2006 `ConfigInvalid` | Deployment storage config is unusable: unknown cloud provider or storage type, malformed `extfs.*` property |
+| `SourceUriInvalid` | 116 | **User** | no | `InvalidArgument` | 2042 `InvalidParameter` | A location string does not parse: missing bucket, missing path, empty scheme |
 
 ## Alignment with AWS S3 / Aliyun OSS, and where it deliberately differs
 
 The vocabulary follows the S3 REST error codes (Aliyun OSS, Tencent COS, Huawei OBS and MinIO
 use the same names for these conditions), and the default rule is S3's own split: **4xx is the
-caller's problem, 5xx and 408/429 are ours and retriable**. Five places break that rule on
+caller's problem, 5xx and 408/429 are ours and retriable**. Six places break that rule on
 purpose — each is pinned by a test in `error_taxonomy_test.cpp`.
 
 | # | Code | AWS says | We say | Why |
 |---|---|---|---|---|
-| 1 | `AwsErrorNoSuchUpload` (101) | 404, client error | **Transient, retriable** | Our retry is at the *operation* level: it starts a fresh multipart upload, which then succeeds. Retrying is genuinely useful here. |
+| 1 | `AwsErrorNoSuchUpload` (101) | 404, client error | **Conflict, retriable** | Our retry is at the *operation* level: it starts a fresh multipart upload, which then succeeds. Retrying is genuinely useful, but it is contention rather than a service blip, so it is Conflict rather than Transient — a caller that backs off on load should not treat this as a signal to back off. |
 | 2 | `AwsErrorNotFound` (104) | 404, client error | **Permanent system error** | On an internally generated path the caller never chose the key; a missing object means a GC race or lost data, which an operator must see. The user-supplied counterpart is `LOON_SOURCE_NOT_FOUND` (13), which *is* a user error. |
-| 3 | `AwsErrorAccessDenied` (105) | 403, client error | **Permanent system error** | The credentials are operator configuration, not part of the caller's request. The user-supplied counterpart is `LOON_SOURCE_ACCESS_DENIED` (14). |
+| 3 | `AwsErrorAccessDenied` (105) | 403, client error | **Config** | The credentials are operator configuration, not part of the caller's request — so it is neither the caller's fault (User) nor something to file as a generic storage failure (Permanent). It has to page whoever owns the deployment, which is what `2006 ConfigInvalid` says and `2044 StorageError` does not. The user-supplied counterpart is `LOON_SOURCE_ACCESS_DENIED` (14). |
 | 4 | `LOON_LOGICAL_ERROR` (4), `LOON_ARROW_ERROR` (3), `LOON_GOT_EXCEPTION` (5), `LOON_UNREACHABLE_ERROR` (6) | `InternalError` (500) is retriable | **Permanent** | These are our own bugs. Retrying reproduces them and turns a bug into a retry storm. |
 | 5 | `StorageTransientTimeout` (108) | `RequestTimeout` is 400 (4xx) | **Transient, retriable** | AWS itself retries `RequestTimeout`; the 4xx status is a historical quirk, not a statement about ownership. |
+| 6 | `AwsErrorConflict` (102), `AwsErrorPreConditionFailed` (103), `TxnExhaustedRetry` (111), `TxnResolutionFailed` (112) | 409/412 are client errors; the transaction codes have no S3 name | **Conflict, retriable** | Lost a race, not made a bad request. The retry that helps is a *re-read-then-retry* at the transaction level, not a blind resend — which is exactly why Conflict is a category of its own rather than being folded into Transient. |
 
 Conditions with **no object-storage counterpart** (the `—` rows above): the packed-layer codes
 (51–55), corruption (52, 53), the manifest-transaction codes (111, 112), local memory (2) and
@@ -141,7 +144,8 @@ them. An empty `s3_code` in the table is the documented way of saying "no counte
 
 `not-found` and `access-denied` are the same object-store condition with two different owners:
 
-- an object on a path **milvus generated** → system failure (`AwsErrorNotFound` 104 / `AwsErrorAccessDenied` 105);
+- an object on a path **milvus generated** → not the caller's problem (`AwsErrorNotFound` 104,
+  a Permanent system failure / `AwsErrorAccessDenied` 105, a Config failure);
 - a bucket or key the **user typed** into an external-source definition → user error
   (`LOON_SOURCE_NOT_FOUND` 13 / `LOON_SOURCE_ACCESS_DENIED` 14).
 
@@ -164,7 +168,8 @@ A taxonomy is only as good as the layers that populate it. Current state:
 | Azure filesystem | **No** — one classified case, the rest are plain `IOError`. See [#595](https://github.com/milvus-io/milvus-storage/issues/595) |
 | Local filesystem | **Almost none** — one classified case |
 | Paimon (Rust `FileIO` / opendal, a separate IO stack that never reaches the C++ classifier) | **No** |
-| Format layer (`Status::Invalid` for schema/type/URI problems) | **No** — these reach segcore as `2024 DataFormatBroken`, i.e. user mistakes reported as data corruption |
+| Format layer (`Status::Invalid` for schema/type problems) | **No** — these reach segcore as `2024 DataFormatBroken`. Sampling them shows most are internal contract violations rather than user mistakes, so `DataFormatBroken` is misleading in a different direction than first assumed: it reports our bugs as corrupt data. Either way the caller cannot act on it. |
+| Filesystem config and URI parsing (`fs.cpp`) | **Yes** — `StorageConfigInvalid` (115) and `SourceUriInvalid` (116) |
 
 Anything not classified arrives as `LOON_ARROW_ERROR` (3) / plain `arrow::Status`, and is
 therefore treated as **permanent, non-retriable** — conservative by design, but it means the
