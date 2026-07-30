@@ -83,7 +83,7 @@ TEST_F(ColumnGroupTest, CreateTable) {
   auto record_batch = CreateRecordBatch(3, 5);
   ASSERT_STATUS_OK(column_group.AddRecordBatch(record_batch));
 
-  auto table = column_group.Table();
+  ASSERT_AND_ASSIGN(auto table, column_group.Table());
 
   // Check the properties of the table
   ASSERT_EQ(table->num_columns(), 3);

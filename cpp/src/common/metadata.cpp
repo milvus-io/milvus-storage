@@ -178,9 +178,7 @@ int64_t RowGroupMetadata::row_offset() const { return row_offset_; }
 
 std::string RowGroupMetadata::ToString() const {
   std::stringstream ss;
-  ss << "memory_size=" << memory_size_ << ","
-     << "row_num=" << row_num_ << ","
-     << "row_offset=" << row_offset_;
+  ss << "memory_size=" << memory_size_ << "," << "row_num=" << row_num_ << "," << "row_offset=" << row_offset_;
   return ss.str();
 }
 
@@ -291,6 +289,12 @@ arrow::Result<std::shared_ptr<PackedFileMetadata>> PackedFileMetadata::Make(
     const std::shared_ptr<parquet::FileMetaData>& metadata) {
   // deserialize row group metadata
   auto key_value_metadata = metadata->key_value_metadata();
+  if (key_value_metadata == nullptr) {
+    // A foreign parquet file without any key-value metadata used to crash
+    // here on the null dereference below.
+    return arrow::Status::Invalid(fmt::format(
+        "Not a packed parquet file: no key-value metadata present. [num_row_groups={}]", metadata->num_row_groups()));
+  }
   auto row_group_meta = key_value_metadata->Get(ROW_GROUP_META_KEY);
   if (!row_group_meta.ok()) {
     return arrow::Status::Invalid(

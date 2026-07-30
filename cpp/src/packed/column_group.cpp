@@ -27,8 +27,19 @@ ColumnGroup::ColumnGroup(GroupId group_id,
                          const std::vector<int>& origin_column_indices,
                          const std::shared_ptr<arrow::RecordBatch>& batch)
     : group_id_(group_id), origin_column_indices_(origin_column_indices), memory_usage_(0) {
+  // A constructor has no status channel (AddRecordBatch rejects null with
+  // PackedInvalidArgs); a null batch yields an empty group instead of the
+  // previous null dereference below.
+  if (batch == nullptr) {
+    return;
+  }
   batches_.emplace_back(batch);
-  memory_usage_ += GetRecordBatchMemorySize(batch);
+  auto batch_size = GetRecordBatchMemorySize(batch);
+  memory_usage_ += batch_size;
+  // Keep the same bookkeeping as AddRecordBatch: without these, size()==1
+  // paired with empty per-batch usages / a stale row count.
+  batch_memory_usage_.push_back(batch_size);
+  total_rows_ += batch->num_rows();
 }
 
 arrow::Status ColumnGroup::AddRecordBatch(const std::shared_ptr<arrow::RecordBatch>& batch) {
@@ -56,16 +67,25 @@ arrow::Status ColumnGroup::Merge(const ColumnGroup& other) {
   return arrow::Status::OK();
 }
 
-std::shared_ptr<arrow::Table> ColumnGroup::Table() const {
+arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroup::Table() const {
   auto result = arrow::Table::FromRecordBatches(batches_);
-  if (result.ok()) {
-    return result.ValueOrDie();
-  } else {
-    throw std::runtime_error(result.status().message());
+  if (!result.ok()) {
+    // Keep the original StatusCode and detail (FromRecordBatches reports
+    // schema mismatch / empty group as Invalid, which classifies as
+    // DataFormatBroken downstream); only the message gains context. Wrapping
+    // into PackedUnexpected here would rewrite Invalid into IOError and
+    // degrade the classification to a generic StorageError.
+    return result.status().WithMessage("ColumnGroup::Table: failed to merge record batches: ",
+                                       result.status().message());
   }
+  return result;
 }
 
-std::shared_ptr<arrow::Schema> ColumnGroup::Schema() const { return this->Table()->schema(); }
+std::shared_ptr<arrow::Schema> ColumnGroup::Schema() const {
+  // All batches in a group share one schema; avoid materializing the merged
+  // table (which can fail) just to read it.
+  return batches_.empty() ? nullptr : batches_.front()->schema();
+}
 
 std::shared_ptr<arrow::RecordBatch> ColumnGroup::GetRecordBatch(size_t index) const { return batches_[index]; }
 

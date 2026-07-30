@@ -45,8 +45,19 @@ class ColumnGroup {
 
   arrow::Status Merge(const ColumnGroup& other);
 
-  std::shared_ptr<arrow::Table> Table() const;
+  /// Merge all batches into one table. Source-compat note: this returns
+  /// arrow::Result since the abort/throw cleanup (the previous signature
+  /// threw std::runtime_error on merge failure). Schema consistency across
+  /// batches is validated here (by Table::FromRecordBatches), not in
+  /// AddRecordBatch.
+  arrow::Result<std::shared_ptr<arrow::Table>> Table() const;
 
+  /// Schema of the group's batches: the first batch's schema, or nullptr for
+  /// an empty group. Does NOT validate that later batches match -- callers
+  /// needing validation should go through Table(). Migration note: this
+  /// replaces the previous behavior of materializing the merged table (which
+  /// THREW std::runtime_error on an empty group or schema mismatch); check
+  /// for nullptr before dereferencing.
   std::shared_ptr<arrow::Schema> Schema() const;
 
   std::shared_ptr<arrow::RecordBatch> GetRecordBatch(size_t index) const;
@@ -71,7 +82,7 @@ class ColumnGroup {
   std::vector<std::shared_ptr<arrow::RecordBatch>> batches_;
   size_t memory_usage_;
   std::vector<int> origin_column_indices_;
-  int64_t total_rows_;
+  int64_t total_rows_ = 0;
 };
 
 struct ColumnGroupState {

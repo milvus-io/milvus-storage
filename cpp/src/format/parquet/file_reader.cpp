@@ -99,7 +99,9 @@ arrow::Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs
       return status;
     }
     schema_ = file_schema;
-    field_id_list_ = FieldIDList::Make(schema_).ValueOrDie();
+    // FieldIDList::Make fails when a field lacks PARQUET:field_id metadata;
+    // ValueOrDie here aborted the whole process on such (data-dependent) files.
+    ARROW_ASSIGN_OR_RAISE(field_id_list_, FieldIDList::Make(schema_));
     for (size_t i = 0; i < field_id_list_.size(); ++i) {
       needed_columns_.emplace_back(i);
     }

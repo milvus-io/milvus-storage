@@ -71,20 +71,37 @@ arrow::Result<std::shared_ptr<PackedFileMetadata>> MakePackedMetadata(
 
 }  // namespace
 
+PackedRecordBatchReader::PackedRecordBatchReader(int64_t buffer_size)
+    : memory_limit_(buffer_size <= 0 ? INT64_MAX : buffer_size),
+      memory_used_(0),
+      row_limit_(0),
+      absolute_row_position_(0),
+      read_count_(0) {}
+
+arrow::Result<std::unique_ptr<PackedRecordBatchReader>> PackedRecordBatchReader::Make(
+    const std::shared_ptr<arrow::fs::FileSystem>& fs,
+    std::vector<std::string>& paths,
+    const std::shared_ptr<arrow::Schema>& schema,
+    int64_t buffer_size,
+    parquet::ReaderProperties reader_props,
+    parquet::ArrowReaderProperties arrow_reader_props) {
+  auto reader = std::unique_ptr<PackedRecordBatchReader>(new PackedRecordBatchReader(buffer_size));
+  ARROW_RETURN_NOT_OK(reader->init(fs, paths, schema, reader_props, arrow_reader_props));
+  return reader;
+}
+
 PackedRecordBatchReader::PackedRecordBatchReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                                  std::vector<std::string>& paths,
                                                  const std::shared_ptr<arrow::Schema>& schema,
                                                  int64_t buffer_size,
                                                  parquet::ReaderProperties reader_props,
                                                  parquet::ArrowReaderProperties arrow_reader_props)
-    : memory_limit_(buffer_size <= 0 ? INT64_MAX : buffer_size),
-      memory_used_(0),
-      row_limit_(0),
-      absolute_row_position_(0),
-      read_count_(0) {
+    : PackedRecordBatchReader(buffer_size) {
   auto status = init(fs, paths, schema, reader_props, arrow_reader_props);
   if (!status.ok()) {
     LOG_STORAGE_ERROR_ << "Error initializing PackedRecordBatchReader: " << status.ToString();
+    // Deprecated path (see reader.h): stringifies the status and destroys its
+    // classification. Migrate to Make().
     throw std::runtime_error(status.ToString());
   }
 }

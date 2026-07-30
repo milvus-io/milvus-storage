@@ -47,6 +47,19 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
    * @param buffer_size The max buffer size of the packed reader.
    * @param reader_props The reader properties.
    */
+  /// Preferred entry point: reports open failures as a status (with the
+  /// classification the underlying layers attached) instead of throwing.
+  static arrow::Result<std::unique_ptr<PackedRecordBatchReader>> Make(
+      const std::shared_ptr<arrow::fs::FileSystem>& fs,
+      std::vector<std::string>& paths,
+      const std::shared_ptr<arrow::Schema>& schema,
+      int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
+      ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties(),
+      ::parquet::ArrowReaderProperties arrow_reader_props = ::parquet::default_arrow_reader_properties());
+
+  /// Deprecated in favor of Make(): a failed open THROWS std::runtime_error
+  /// with the stringified status, destroying its classification. Kept only
+  /// until direct-link consumers migrate; do not add new call sites.
   PackedRecordBatchReader(
       const std::shared_ptr<arrow::fs::FileSystem>& fs,
       std::vector<std::string>& paths,
@@ -79,6 +92,10 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   arrow::Status Close() override;
 
   private:
+  /// Member-init only; used by Make() so initialization failures can be
+  /// reported as a status instead of a constructor exception.
+  explicit PackedRecordBatchReader(int64_t buffer_size);
+
   arrow::Status init(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                      std::vector<std::string>& paths,
                      const std::shared_ptr<arrow::Schema>& origin_schema,
