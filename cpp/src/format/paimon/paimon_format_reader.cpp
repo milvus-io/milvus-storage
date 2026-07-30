@@ -23,8 +23,9 @@
 #include <arrow/compute/api.h>
 #include <arrow/table.h>
 #include <fmt/format.h>
-#include <folly/json/json.h>
+#include <nlohmann/json.hpp>
 
+#include "milvus-storage/common/log.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/paimon/paimon_common.h"
 #include "paimon_bridge.h"
@@ -42,50 +43,48 @@ constexpr uint64_t kUnknownColumnBytes = 16;
 struct ParsedMetadata {
   std::string data_format;
   uint64_t record_count = 0;
-  folly::dynamic deletion_file;
+  nlohmann::json deletion_file;
 };
 
 arrow::Result<ParsedMetadata> ParseMetadata(const std::string& json) {
-  folly::dynamic value;
+  int64_t version;
+  std::string read_path;
+  int64_t record_count;
+  std::string data_format;
+  nlohmann::json deletion_file;
   try {
-    value = folly::parseJson(json);
-  } catch (const std::exception& error) {
-    return arrow::Status::Invalid("Cannot parse Paimon metadata: ", error.what());
+    auto value = nlohmann::json::parse(json);
+    if (!value.is_object()) {
+      return arrow::Status::Invalid("Paimon metadata must be a JSON object");
+    }
+    version = value.value("version", int64_t{0});
+    read_path = value.value("read_path", std::string{});
+    record_count = value.value("record_count", int64_t{0});
+    data_format = value.value("data_format", std::string{});
+    deletion_file = value.value("deletion_file", nlohmann::json(nullptr));
+  } catch (const nlohmann::json::exception& error) {
+    return arrow::Status::Invalid("Paimon metadata has invalid JSON or field types: ", error.what());
   }
-  if (!value.isObject()) {
-    return arrow::Status::Invalid("Paimon metadata must be a JSON object");
+  LOG_STORAGE_DEBUG_ << "Paimon metadata version=" << version;
+  if (read_path != "direct-file") {
+    return read_path == "data-split" ? arrow::Status::NotImplemented("Paimon data-split reads are not supported")
+                                     : arrow::Status::Invalid("Paimon metadata read_path must be direct-file");
   }
-  try {
-    auto version = value.getDefault("version", 0).asInt();
-    if (version != 1) {
-      return arrow::Status::Invalid("Unsupported Paimon metadata version: ", version);
-    }
-    auto read_path = value.getDefault("read_path", "").asString();
-    if (read_path == "data-split") {
-      return arrow::Status::NotImplemented("Paimon data-split reads are not supported");
-    }
-    if (read_path != "direct-file") {
-      return arrow::Status::Invalid("Paimon metadata read_path must be direct-file");
-    }
-    auto record_count = value.getDefault("record_count", 0).asInt();
-    if (record_count < 0) {
-      return arrow::Status::Invalid("Paimon metadata has negative record_count");
-    }
-    return ParsedMetadata{
-        .data_format = value.getDefault("data_format", "").asString(),
-        .record_count = static_cast<uint64_t>(record_count),
-        .deletion_file = value.getDefault("deletion_file", nullptr),
-    };
-  } catch (const std::exception& error) {
-    return arrow::Status::Invalid("Paimon metadata has invalid field types: ", error.what());
+  if (record_count < 0) {
+    return arrow::Status::Invalid("Paimon metadata has negative record_count");
   }
+  return ParsedMetadata{
+      .data_format = std::move(data_format),
+      .record_count = static_cast<uint64_t>(record_count),
+      .deletion_file = std::move(deletion_file),
+  };
 }
 
 uint64_t SaturatingMultiply(uint64_t left, uint64_t right) {
   if (left == 0 || right == 0) {
     return 0;
   }
-  if (left > std::numeric_limits<uint64_t>::max() / right) {
+  if (left > (std::numeric_limits<uint64_t>::max() / right)) {
     return std::numeric_limits<uint64_t>::max();
   }
   return left * right;
@@ -395,8 +394,8 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
   }
 
   auto deletions = std::make_shared<std::vector<int64_t>>();
-  if (!parsed.deletion_file.isNull()) {
-    if (!parsed.deletion_file.isObject()) {
+  if (!parsed.deletion_file.is_null()) {
+    if (!parsed.deletion_file.is_object()) {
       return arrow::Status::Invalid("Paimon deletion_file must be an object");
     }
     std::string path;
@@ -404,11 +403,11 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
     int64_t length = -1;
     int64_t cardinality = -1;
     try {
-      path = parsed.deletion_file.getDefault("path", "").asString();
-      offset = parsed.deletion_file.getDefault("offset", -1).asInt();
-      length = parsed.deletion_file.getDefault("length", -1).asInt();
-      cardinality = parsed.deletion_file.getDefault("cardinality", -1).asInt();
-    } catch (const std::exception& error) {
+      path = parsed.deletion_file.value("path", std::string{});
+      offset = parsed.deletion_file.value("offset", int64_t{-1});
+      length = parsed.deletion_file.value("length", int64_t{-1});
+      cardinality = parsed.deletion_file.value("cardinality", int64_t{-1});
+    } catch (const nlohmann::json::exception& error) {
       return arrow::Status::Invalid("Paimon deletion_file has invalid field types: ", error.what());
     }
     if (path.empty() || offset < 0 || length < 0) {

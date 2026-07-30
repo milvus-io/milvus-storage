@@ -14,7 +14,7 @@
 
 #include <exception>
 
-#include <folly/json/json.h>
+#include <nlohmann/json.hpp>
 
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/paimon/paimon_common.h"
@@ -44,12 +44,15 @@ arrow::Result<std::vector<api::ColumnGroupFile>> PaimonFormat::explore(const std
   for (const auto& info : planned) {
     int64_t record_count = -1;
     try {
-      auto metadata = folly::parseJson(info.metadata_json);
-      if (metadata.getDefault("read_path", "").asString() != "direct-file") {
+      auto metadata = nlohmann::json::parse(info.metadata_json);
+      if (!metadata.is_object()) {
+        return arrow::Status::Invalid("Paimon planning metadata must be a JSON object");
+      }
+      if (metadata.value("read_path", std::string{}) != "direct-file") {
         return arrow::Status::Invalid("Paimon planner returned a non-direct metadata descriptor");
       }
-      record_count = metadata.getDefault("record_count", -1).asInt();
-    } catch (const std::exception& error) {
+      record_count = metadata.value("record_count", int64_t{-1});
+    } catch (const nlohmann::json::exception& error) {
       return arrow::Status::Invalid("Invalid Paimon planning metadata: ", error.what());
     }
     if (record_count < 0) {
