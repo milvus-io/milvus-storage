@@ -44,12 +44,21 @@ arrow::Result<std::vector<uint64_t>> DistributeMemorySizes(uint64_t total_size, 
   }
 
   uint64_t allocated = 0;
-  for (size_t i = 0; i + 1 < weights.size(); ++i) {
+  size_t remainder_index = 0;
+  for (size_t i = 0; i < weights.size(); ++i) {
+    if (weights[i] != 0) {
+      remainder_index = i;
+    }
     // weights[i] <= total_weight, so the quotient is at most total_size and is safe to cast back to uint64_t.
     result[i] = static_cast<uint64_t>(static_cast<unsigned __int128>(total_size) * weights[i] / total_weight);
     allocated += result[i];
   }
-  result.back() = total_size - allocated;
+
+  // Integer division may leave a remainder. Assign it to the last non-zero
+  // weight so the estimates still sum exactly to total_size without charging
+  // a physically missing column solely because of rounding.
+  const auto remainder = total_size - allocated;
+  result[remainder_index] += remainder;
   return result;
 }
 

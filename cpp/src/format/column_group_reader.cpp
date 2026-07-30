@@ -16,10 +16,8 @@
 
 #include <algorithm>
 #include <future>
-#include <limits>
 #include <numeric>
 #include <sstream>
-#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -55,30 +53,6 @@ namespace milvus_storage::api {
 using milvus_storage::RowGroupInfo;
 using ChunkRBMapResult = arrow::Result<std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>>>;
 
-namespace {
-
-arrow::Result<ColumnMemorySizesPtr> BuildColumnMemorySizes(const arrow::Schema& file_schema,
-                                                           const std::vector<uint64_t>& sizes) {
-  if (sizes.empty()) {
-    return ColumnMemorySizesPtr{};
-  }
-  if (sizes.size() != static_cast<size_t>(file_schema.num_fields())) {
-    return arrow::Status::Invalid("Column memory size count does not match the file schema");
-  }
-
-  auto column_memory_sizes = std::make_shared<ColumnMemorySizes>();
-  column_memory_sizes->reserve(sizes.size());
-  for (int field_index = 0; field_index < file_schema.num_fields(); ++field_index) {
-    const auto& field_name = file_schema.field(field_index)->name();
-    if (!column_memory_sizes->emplace(field_name, sizes[field_index]).second) {
-      return arrow::Status::Invalid("Duplicate field name in file schema: ", field_name);
-    }
-  }
-  return std::static_pointer_cast<const ColumnMemorySizes>(column_memory_sizes);
-}
-
-}  // namespace
-
 template <typename ReaderT>
 class ColumnGroupReaderImpl : public ColumnGroupReader {
   public:
@@ -104,7 +78,7 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
       const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) override;
 
   [[nodiscard]] arrow::Result<uint64_t> get_chunk_estimated_size(int64_t chunk_index) override;
-  [[nodiscard]] arrow::Result<uint64_t> get_chunk_column_estimated_size(int64_t chunk_index, int col_idx) override;
+  [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_column_estimated_sizes(int64_t chunk_index) override;
   [[nodiscard]] arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) override;
 
   [[nodiscard]] const ChunkInfo& get_chunk_info(int64_t chunk_index) const override;
@@ -187,27 +161,6 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::append_file_metadata(size_t file_i
     return arrow::Status::OK();
   }
 
-  auto current_file_schema = format_readers_[file_idx] ? format_readers_[file_idx]->get_schema() : nullptr;
-  auto build_column_memory_sizes = [&](const std::vector<uint64_t>& sizes) -> ColumnMemorySizesPtr {
-    if (sizes.empty()) {
-      return nullptr;
-    }
-    if (!current_file_schema) {
-      LOG_STORAGE_DEBUG_ << "Column memory sizes are unavailable because the file schema is missing"
-                         << ", path=" << cg_file.path;
-      return nullptr;
-    }
-    auto result = BuildColumnMemorySizes(*current_file_schema, sizes);
-    if (!result.ok()) {
-      // Column estimates are optional. Preserve the total chunk estimate and
-      // normal reads; the public column-estimate API returns NotImplemented.
-      LOG_STORAGE_DEBUG_ << "Column memory sizes are unavailable"
-                         << ", path=" << cg_file.path << ", status=" << result.status().ToString();
-      return nullptr;
-    }
-    return std::move(result).ValueOrDie();
-  };
-
   size_t rows_in_file = 0;
   if ((cg_file.start_index != 0 || cg_file.end_index != row_group_in_file.back().end_offset)) {
     // A manifest file may expose only a subrange of its physical contents.
@@ -232,16 +185,6 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::append_file_metadata(size_t file_i
           chunk_memory_size = static_cast<uint64_t>(static_cast<unsigned __int128>(row_group_in_file[j].memory_size) *
                                                     overlap_rows / row_group_rows);
         }
-        ColumnMemorySizesPtr column_memory_sizes;
-        if (row_group_in_file[j].memory_size_available && !row_group_in_file[j].column_memory_sizes.empty()) {
-          auto scaled_sizes = DistributeMemorySizes(chunk_memory_size, row_group_in_file[j].column_memory_sizes);
-          if (scaled_sizes.ok()) {
-            column_memory_sizes = build_column_memory_sizes(*scaled_sizes);
-          } else {
-            LOG_STORAGE_DEBUG_ << "Column memory size scaling is unavailable"
-                               << ", path=" << cg_file.path << ", status=" << scaled_sizes.status().ToString();
-          }
-        }
 
         rows_in_file += overlap_rows;
         // global_row_end is exclusive across the whole column group and powers
@@ -254,7 +197,6 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::append_file_metadata(size_t file_i
             .row_group_index_in_file = j,
             .global_row_end = rows_in_all_files + rows_in_file,
             .avg_memory_size = chunk_memory_size,
-            .column_memory_sizes = std::move(column_memory_sizes),
             .memory_size_available = row_group_in_file[j].memory_size_available,
         });
       }
@@ -270,9 +212,6 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::append_file_metadata(size_t file_i
           .row_group_index_in_file = j,
           .global_row_end = rows_in_all_files + rows_in_file,
           .avg_memory_size = row_group_in_file[j].memory_size,
-          .column_memory_sizes = row_group_in_file[j].memory_size_available
-                                     ? build_column_memory_sizes(row_group_in_file[j].column_memory_sizes)
-                                     : nullptr,
           .memory_size_available = row_group_in_file[j].memory_size_available,
       });
     }
@@ -716,34 +655,12 @@ arrow::Result<uint64_t> ColumnGroupReaderImpl<ReaderT>::get_chunk_estimated_size
   if (!chunk_info.memory_size_available) {
     return arrow::Status::NotImplemented("Chunk memory size estimate is not available");
   }
-  if (!chunk_info.column_memory_sizes) {
-    return chunk_info.avg_memory_size;
-  }
-
-  // Files in one column group may have evolved physical schemas and can retain
-  // columns removed from the logical group. Sum the logical column estimates
-  // so physical-only columns are excluded while the result remains independent
-  // of the active projection.
-  uint64_t total_size = 0;
-  std::unordered_set<std::string_view> seen_columns;
-  seen_columns.reserve(column_group_->columns.size());
-  for (size_t col_idx = 0; col_idx < column_group_->columns.size(); ++col_idx) {
-    const auto& column_name = column_group_->columns[col_idx];
-    if (!seen_columns.emplace(column_name).second) {
-      return arrow::Status::Invalid("Duplicate column in column group: ", column_name);
-    }
-    ARROW_ASSIGN_OR_RAISE(auto column_size, get_chunk_column_estimated_size(chunk_index, static_cast<int>(col_idx)));
-    if (column_size > std::numeric_limits<uint64_t>::max() - total_size) {
-      return arrow::Status::Invalid("Chunk column memory sizes exceed the uint64_t range");
-    }
-    total_size += column_size;
-  }
-  return total_size;
+  return chunk_info.avg_memory_size;
 }
 
 template <typename ReaderT>
-arrow::Result<uint64_t> ColumnGroupReaderImpl<ReaderT>::get_chunk_column_estimated_size(int64_t chunk_index,
-                                                                                        int col_idx) {
+arrow::Result<std::vector<uint64_t>> ColumnGroupReaderImpl<ReaderT>::get_chunk_column_estimated_sizes(
+    int64_t chunk_index) {
   assert(opened_);
   if (UNLIKELY(chunk_index < 0 || chunk_index >= chunk_infos_.size())) {
     return arrow::Status::Invalid(
@@ -751,19 +668,35 @@ arrow::Result<uint64_t> ColumnGroupReaderImpl<ReaderT>::get_chunk_column_estimat
   }
 
   const auto& chunk_info = chunk_infos_[chunk_index];
-  const auto& column_memory_sizes = chunk_info.column_memory_sizes;
   if (!chunk_info.memory_size_available) {
     return arrow::Status::NotImplemented("Column memory size estimate is not available");
   }
-  if (!column_memory_sizes) {
-    return arrow::Status::NotImplemented("Column memory size metadata is not available for this format");
+
+  assert(chunk_info.file_index < format_readers_.size());
+  const auto& format_reader = format_readers_[chunk_info.file_index];
+  assert(format_reader);
+  auto file_schema = format_reader->get_schema();
+  assert(file_schema);
+
+  ARROW_ASSIGN_OR_RAISE(auto row_group_memory_sizes,
+                        format_reader->get_rg_column_memsz(chunk_info.row_group_index_in_file));
+  assert(row_group_memory_sizes.size() == static_cast<size_t>(file_schema->num_fields()));
+
+  for (int field_index = 0; field_index < file_schema->num_fields(); ++field_index) {
+    if (file_schema->GetFieldIndex(file_schema->field(field_index)->name()) != field_index) {
+      return arrow::Status::NotImplemented("Column memory sizes are unavailable for a schema with duplicate fields");
+    }
   }
-  if (UNLIKELY(col_idx < 0 || static_cast<size_t>(col_idx) >= column_group_->columns.size())) {
-    return arrow::Status::Invalid(
-        fmt::format("Column index out of range: {} out of {}", col_idx, column_group_->columns.size()));
+
+  ARROW_ASSIGN_OR_RAISE(auto physical_sizes, DistributeMemorySizes(chunk_info.avg_memory_size, row_group_memory_sizes));
+  std::vector<uint64_t> result(column_group_->columns.size(), 0);
+  for (size_t column_index = 0; column_index < column_group_->columns.size(); ++column_index) {
+    const auto field_index = file_schema->GetFieldIndex(column_group_->columns[column_index]);
+    if (field_index >= 0) {
+      result[column_index] = physical_sizes[field_index];
+    }
   }
-  const auto it = column_memory_sizes->find(column_group_->columns[col_idx]);
-  return it == column_memory_sizes->end() ? uint64_t{0} : it->second;
+  return result;
 }
 
 template <typename ReaderT>

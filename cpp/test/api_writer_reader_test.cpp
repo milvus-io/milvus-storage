@@ -97,11 +97,6 @@ class SyncOnlyChunkReader final : public ChunkReader {
     return std::vector<uint64_t>{0, 0, 0};
   }
 
-  [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_column_estimated_size(
-      const std::string& /*field_name*/) override {
-    return arrow::Status::NotImplemented("Column estimates are not provided by this test reader");
-  }
-
   [[nodiscard]] arrow::Result<std::vector<std::vector<uint64_t>>> get_chunk_column_estimated_size() override {
     return arrow::Status::NotImplemented("Column estimates are not provided by this test reader");
   }
@@ -1180,13 +1175,6 @@ TEST_P(APIWriterReaderTest, ChunkColumnEstimatedSizeMetadataIgnoresProjection) {
     }
     EXPECT_EQ(column_total, chunk_sizes[chunk_idx]);
   }
-
-  for (int field_idx = 0; field_idx < schema_->num_fields(); ++field_idx) {
-    ASSERT_AND_ASSIGN(auto sizes, chunk_reader->get_chunk_column_estimated_size(schema_->field(field_idx)->name()));
-    EXPECT_EQ(sizes, column_sizes[field_idx]);
-  }
-
-  EXPECT_TRUE(chunk_reader->get_chunk_column_estimated_size("missing").status().IsInvalid());
 }
 
 TEST_P(APIWriterReaderTest, EmptyTakeHonorsProjection) {

@@ -49,6 +49,7 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
       uint64_t physical_row_count = 0;
       uint64_t num_deletions = 0;
       uint64_t logical_chunk_rows = 0;
+      std::shared_ptr<const std::vector<uint64_t>> column_memory_weights;
       milvus_storage::api::Properties properties;
     };
 
@@ -73,6 +74,8 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
 
   // get the row group infos
   [[nodiscard]] arrow::Result<std::vector<RowGroupInfo>> get_row_group_infos() override;
+
+  [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_rg_column_memsz(int64_t row_group_index) const override;
 
   // get the chunk
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(const int& row_group_index) override;
@@ -104,6 +107,7 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
 
   uint64_t logical_chunk_rows_;
   uint64_t num_deletions_ = 0;  // physical_rows - logical_rows
+  std::shared_ptr<const std::vector<uint64_t>> column_memory_weights_;
   std::vector<RowGroupInfo> row_group_infos_;
   std::unique_ptr<BlockingFragmentReader> fragment_reader_;
 };

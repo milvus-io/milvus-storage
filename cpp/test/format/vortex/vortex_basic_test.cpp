@@ -571,13 +571,13 @@ TEST_P(VortexBasicTest, RowGroupColumnMemorySizesUseFullFileSchema) {
   ASSERT_AND_ASSIGN(auto row_group_infos, vx_reader.get_row_group_infos());
 
   ASSERT_GT(row_group_infos.size(), 1u);
-  for (const auto& row_group_info : row_group_infos) {
-    EXPECT_TRUE(row_group_info.memory_size_available);
-    ASSERT_EQ(row_group_info.column_memory_sizes.size(), static_cast<size_t>(schema_->num_fields()));
-    EXPECT_GT(row_group_info.memory_size, 0u);
-    EXPECT_EQ(std::accumulate(row_group_info.column_memory_sizes.begin(), row_group_info.column_memory_sizes.end(),
-                              uint64_t{0}),
-              row_group_info.memory_size);
+  for (size_t row_group_index = 0; row_group_index < row_group_infos.size(); ++row_group_index) {
+    EXPECT_TRUE(row_group_infos[row_group_index].memory_size_available);
+    ASSERT_AND_ASSIGN(auto memory_sizes, vx_reader.get_rg_column_memsz(row_group_index));
+    ASSERT_EQ(memory_sizes.size(), static_cast<size_t>(schema_->num_fields()));
+    EXPECT_GT(row_group_infos[row_group_index].memory_size, 0u);
+    EXPECT_EQ(std::accumulate(memory_sizes.begin(), memory_sizes.end(), uint64_t{0}),
+              row_group_infos[row_group_index].memory_size);
   }
 }
 
@@ -592,7 +592,6 @@ TEST_P(VortexBasicTest, MemorySizeUnavailableDoesNotBlockOpen) {
     for (const auto& row_group_info : row_group_infos) {
       EXPECT_FALSE(row_group_info.memory_size_available);
       EXPECT_EQ(row_group_info.memory_size, 0u);
-      EXPECT_TRUE(row_group_info.column_memory_sizes.empty());
     }
   };
 
@@ -605,6 +604,7 @@ TEST_P(VortexBasicTest, MemorySizeUnavailableDoesNotBlockOpen) {
     ASSERT_STATUS_OK(reader.open());
     ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());
     assert_memory_size_unavailable(row_group_infos);
+    EXPECT_TRUE(reader.get_rg_column_memsz(0).status().IsNotImplemented());
     ASSERT_AND_ASSIGN(auto chunked_array, reader.blocking_read(0, recordBatchsRows(), kSmallCoalescingWindow));
     ASSERT_AND_ASSIGN(auto batch, ChunkedArrayToRecordBatch(chunked_array));
     EXPECT_EQ(batch->num_rows(), recordBatchsRows());
@@ -620,6 +620,7 @@ TEST_P(VortexBasicTest, MemorySizeUnavailableDoesNotBlockOpen) {
 
   ASSERT_AND_ASSIGN(auto cached_reader, vortex::VortexFormatReader::MetaTrait::create_from_metadata(
                                             metadata, cgfile, schema_, data_columns(), ""));
+  EXPECT_TRUE(cached_reader->get_rg_column_memsz(0).status().IsNotImplemented());
   ASSERT_AND_ASSIGN(auto rb_reader, cached_reader->read_with_range(0, recordBatchsRows()));
   ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatchReader(rb_reader.get()));
   EXPECT_EQ(table->num_rows(), recordBatchsRows());

@@ -15,7 +15,6 @@
 #pragma once
 
 #include <string>
-#include <unordered_map>
 
 #include <arrow/filesystem/filesystem.h>
 
@@ -28,9 +27,6 @@
 
 namespace milvus_storage::api {
 
-using ColumnMemorySizes = std::unordered_map<std::string, uint64_t>;
-using ColumnMemorySizesPtr = std::shared_ptr<const ColumnMemorySizes>;
-
 struct ChunkInfo {
   size_t file_index;               // current chunk belong which file
   size_t row_offset_in_row_group;  // the starting row offset of this row group in its file
@@ -39,10 +35,7 @@ struct ChunkInfo {
   size_t row_group_index_in_file;  // the index of this row group in its file
   size_t global_row_end;           // the ending row offset of this row group in the whole chunk reader
   uint64_t avg_memory_size;        // average memory usage of this row group
-  // Keyed by the current file's field names so chunks from files with different
-  // physical column orders can share immutable metadata without normalization.
-  ColumnMemorySizesPtr column_memory_sizes;
-  // False means avg_memory_size is only a placeholder and column_memory_sizes is unavailable.
+  // False means avg_memory_size is only a placeholder and column estimates are unavailable.
   bool memory_size_available;
 
   // Format all logical/file offset fields for diagnostics.
@@ -65,7 +58,7 @@ class ColumnGroupReader {
       const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) = 0;
 
   virtual arrow::Result<uint64_t> get_chunk_estimated_size(int64_t chunk_index) = 0;
-  virtual arrow::Result<uint64_t> get_chunk_column_estimated_size(int64_t chunk_index, int col_idx) = 0;
+  virtual arrow::Result<std::vector<uint64_t>> get_chunk_column_estimated_sizes(int64_t chunk_index) = 0;
   virtual arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) = 0;
 
   // Get chunk info by index (for async task planning and splitting).

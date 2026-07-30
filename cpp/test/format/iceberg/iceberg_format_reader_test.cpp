@@ -131,7 +131,9 @@ TEST_F(IcebergFormatReaderTest, NoDeletes) {
     EXPECT_EQ(rg_infos[i].start_offset, parquet_rg_infos[i].start_offset);
     EXPECT_EQ(rg_infos[i].end_offset, parquet_rg_infos[i].end_offset);
     EXPECT_EQ(rg_infos[i].memory_size, parquet_rg_infos[i].memory_size);
-    EXPECT_EQ(rg_infos[i].column_memory_sizes, parquet_rg_infos[i].column_memory_sizes);
+    ASSERT_AND_ASSIGN(auto iceberg_memory_sizes, reader->get_rg_column_memsz(i));
+    ASSERT_AND_ASSIGN(auto parquet_memory_sizes, parquet_reader->get_rg_column_memsz(i));
+    EXPECT_EQ(iceberg_memory_sizes, parquet_memory_sizes);
   }
 
   ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
@@ -174,7 +176,8 @@ TEST_F(IcebergFormatReaderTest, PartialDeletesScaleRowGroupMemorySizes) {
                     FormatReader::create(nullptr, LOON_FORMAT_PARQUET, parquet_file, properties_, {}, nullptr));
   ASSERT_AND_ASSIGN(auto physical_infos, parquet_reader->get_row_group_infos());
   ASSERT_EQ(physical_infos.size(), 1);
-  ASSERT_FALSE(physical_infos[0].column_memory_sizes.empty());
+  ASSERT_AND_ASSIGN(auto physical_memory_sizes, parquet_reader->get_rg_column_memsz(0));
+  ASSERT_FALSE(physical_memory_sizes.empty());
 
   WritePositionalDeleteFile(data_file_path_, {2, 5, 8});
   auto metadata = MakeDeleteMetadataJson(delete_file_path_);
@@ -192,13 +195,14 @@ TEST_F(IcebergFormatReaderTest, PartialDeletesScaleRowGroupMemorySizes) {
   const auto expected_total =
       static_cast<uint64_t>(static_cast<unsigned __int128>(physical.memory_size) * logical_rows / physical_rows);
   ASSERT_AND_ASSIGN(auto expected_columns,
-                    milvus_storage::DistributeMemorySizes(expected_total, physical.column_memory_sizes));
+                    milvus_storage::DistributeMemorySizes(expected_total, physical_memory_sizes));
+  ASSERT_AND_ASSIGN(auto logical_memory_sizes, iceberg_reader->get_rg_column_memsz(0));
 
   EXPECT_EQ(logical.start_offset, 0);
   EXPECT_EQ(logical.end_offset, logical_rows);
   EXPECT_EQ(logical.memory_size, expected_total);
-  EXPECT_EQ(logical.column_memory_sizes, expected_columns);
-  EXPECT_EQ(std::accumulate(logical.column_memory_sizes.begin(), logical.column_memory_sizes.end(), uint64_t{0}),
+  EXPECT_EQ(logical_memory_sizes, expected_columns);
+  EXPECT_EQ(std::accumulate(logical_memory_sizes.begin(), logical_memory_sizes.end(), uint64_t{0}),
             logical.memory_size);
 }
 
@@ -210,7 +214,8 @@ TEST_F(IcebergFormatReaderTest, FullDeletesZeroRowGroupMemorySizes) {
                     FormatReader::create(nullptr, LOON_FORMAT_PARQUET, parquet_file, properties_, {}, nullptr));
   ASSERT_AND_ASSIGN(auto physical_infos, parquet_reader->get_row_group_infos());
   ASSERT_EQ(physical_infos.size(), 1);
-  ASSERT_FALSE(physical_infos[0].column_memory_sizes.empty());
+  ASSERT_AND_ASSIGN(auto physical_memory_sizes, parquet_reader->get_rg_column_memsz(0));
+  ASSERT_FALSE(physical_memory_sizes.empty());
 
   WritePositionalDeleteFile(data_file_path_, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9});
   auto metadata = MakeDeleteMetadataJson(delete_file_path_);
@@ -224,8 +229,8 @@ TEST_F(IcebergFormatReaderTest, FullDeletesZeroRowGroupMemorySizes) {
   EXPECT_EQ(logical.start_offset, 0);
   EXPECT_EQ(logical.end_offset, 0);
   EXPECT_EQ(logical.memory_size, 0);
-  EXPECT_EQ(logical.column_memory_sizes,
-            std::vector<uint64_t>(physical_infos[0].column_memory_sizes.size(), uint64_t{0}));
+  ASSERT_AND_ASSIGN(auto logical_memory_sizes, iceberg_reader->get_rg_column_memsz(0));
+  EXPECT_EQ(logical_memory_sizes, std::vector<uint64_t>(physical_memory_sizes.size(), uint64_t{0}));
 }
 
 // Positional deletes — take() maps logical doc IDs to physical positions.

@@ -375,9 +375,10 @@ TEST_F(LanceBasicTest, TestReaderHandlesFragmentMissingNullableDatasetColumn) {
 
   ASSERT_AND_ASSIGN(auto row_groups, reader.get_row_group_infos());
   ASSERT_FALSE(row_groups.empty());
-  for (const auto& row_group : row_groups) {
-    ASSERT_EQ(row_group.column_memory_sizes.size(), static_cast<size_t>(evolved_schema->num_fields()));
-    EXPECT_EQ(row_group.column_memory_sizes.back(), 0);
+  for (size_t row_group_index = 0; row_group_index < row_groups.size(); ++row_group_index) {
+    ASSERT_AND_ASSIGN(auto memory_sizes, reader.get_rg_column_memsz(row_group_index));
+    ASSERT_EQ(memory_sizes.size(), static_cast<size_t>(evolved_schema->num_fields()));
+    EXPECT_EQ(memory_sizes.back(), 0);
   }
 
   ASSERT_AND_ASSIGN(auto table, reader.take({0, 1}));
@@ -422,10 +423,10 @@ TEST_F(LanceBasicTest, TestRead) {
   ASSERT_EQ(estimated_memory_size, read_dataset->EstimateFragmentMemory(fragment_ids[0]));
   ASSERT_EQ(std::accumulate(fragment_column_memory_sizes.begin(), fragment_column_memory_sizes.end(), uint64_t{0}),
             estimated_memory_size);
-  for (const auto& rg : rgs) {
-    ASSERT_EQ(rg.column_memory_sizes.size(), schema_->num_fields());
-    ASSERT_EQ(std::accumulate(rg.column_memory_sizes.begin(), rg.column_memory_sizes.end(), uint64_t{0}),
-              rg.memory_size);
+  for (size_t row_group_index = 0; row_group_index < rgs.size(); ++row_group_index) {
+    ASSERT_AND_ASSIGN(auto memory_sizes, reader.get_rg_column_memsz(row_group_index));
+    ASSERT_EQ(memory_sizes.size(), schema_->num_fields());
+    ASSERT_EQ(std::accumulate(memory_sizes.begin(), memory_sizes.end(), uint64_t{0}), rgs[row_group_index].memory_size);
   }
 
   auto verify_recordbatch = [&](const std::shared_ptr<arrow::RecordBatch>& batch, auto start_ridx, auto num_of_row) {
@@ -472,7 +473,9 @@ TEST_F(LanceBasicTest, TestRead) {
       ASSERT_EQ(projection_rgs[rg_idx].start_offset, rgs[rg_idx].start_offset);
       ASSERT_EQ(projection_rgs[rg_idx].end_offset, rgs[rg_idx].end_offset);
       ASSERT_EQ(projection_rgs[rg_idx].memory_size, rgs[rg_idx].memory_size);
-      ASSERT_EQ(projection_rgs[rg_idx].column_memory_sizes, rgs[rg_idx].column_memory_sizes);
+      ASSERT_AND_ASSIGN(auto projection_memory_sizes, projection_reader.get_rg_column_memsz(rg_idx));
+      ASSERT_AND_ASSIGN(auto memory_sizes, reader.get_rg_column_memsz(rg_idx));
+      ASSERT_EQ(projection_memory_sizes, memory_sizes);
     }
 
     for (size_t rg_idx = 0; rg_idx < rgs.size(); rg_idx++) {
@@ -571,7 +574,6 @@ TEST_F(LanceBasicTest, MemorySizeEstimationFailureDoesNotBlockOpen) {
     for (const auto& row_group_info : row_group_infos) {
       EXPECT_FALSE(row_group_info.memory_size_available);
       EXPECT_EQ(row_group_info.memory_size, 0u);
-      EXPECT_TRUE(row_group_info.column_memory_sizes.empty());
     }
   };
 
@@ -583,6 +585,7 @@ TEST_F(LanceBasicTest, MemorySizeEstimationFailureDoesNotBlockOpen) {
     ASSERT_STATUS_OK(reader.open());
     ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());
     assert_memory_size_unavailable(row_group_infos);
+    EXPECT_TRUE(reader.get_rg_column_memsz(0).status().IsNotImplemented());
     ASSERT_AND_ASSIGN(auto chunk, reader.get_chunk(0));
     EXPECT_GT(chunk->num_rows(), 0);
   }
@@ -598,6 +601,7 @@ TEST_F(LanceBasicTest, MemorySizeEstimationFailureDoesNotBlockOpen) {
 
   ASSERT_AND_ASSIGN(auto cached_reader, LanceTableReader::MetaTrait::create_from_metadata(
                                             metadata, cgfile, schema_, std::vector<std::string>{}, ""));
+  EXPECT_TRUE(cached_reader->get_rg_column_memsz(0).status().IsNotImplemented());
   ASSERT_AND_ASSIGN(auto chunk, cached_reader->get_chunk(0));
   EXPECT_GT(chunk->num_rows(), 0);
 }
@@ -633,10 +637,10 @@ TEST_F(LanceBasicTest, LegacyFormatReadsWhenMemoryEstimateIsUnavailable) {
   ASSERT_STATUS_OK(reader.open());
   ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());
   ASSERT_FALSE(row_group_infos.empty());
-  for (const auto& row_group_info : row_group_infos) {
-    EXPECT_FALSE(row_group_info.memory_size_available);
-    EXPECT_EQ(row_group_info.memory_size, 0);
-    EXPECT_TRUE(row_group_info.column_memory_sizes.empty());
+  for (size_t row_group_index = 0; row_group_index < row_group_infos.size(); ++row_group_index) {
+    EXPECT_FALSE(row_group_infos[row_group_index].memory_size_available);
+    EXPECT_EQ(row_group_infos[row_group_index].memory_size, 0);
+    EXPECT_TRUE(reader.get_rg_column_memsz(row_group_index).status().IsNotImplemented());
   }
 
   ASSERT_AND_ASSIGN(auto rb_reader, reader.read_with_range(0, kRows));
@@ -655,7 +659,6 @@ TEST_F(LanceBasicTest, LegacyFormatReadsWhenMemoryEstimateIsUnavailable) {
   ASSERT_AND_ASSIGN(auto chunk_reader, api_reader->get_chunk_reader(0));
   EXPECT_TRUE(chunk_reader->get_chunk_estimated_size().status().IsNotImplemented());
   EXPECT_TRUE(chunk_reader->get_chunk_column_estimated_size().status().IsNotImplemented());
-  EXPECT_TRUE(chunk_reader->get_chunk_column_estimated_size("vector").status().IsNotImplemented());
   ASSERT_AND_ASSIGN(auto chunk, chunk_reader->get_chunk(0));
   ASSERT_GT(chunk->num_rows(), 0);
 
@@ -703,9 +706,13 @@ TEST_F(LanceBasicTest, CachedCreateReaderReappliesProjection) {
   ASSERT_AND_ASSIGN(auto id_rgs, id_reader->get_row_group_infos());
   ASSERT_FALSE(id_rgs.empty());
   ASSERT_EQ(id_rgs.size(), metadata->row_group_infos.size());
+  ASSERT_NE(metadata->payload.column_memory_weights, nullptr);
   for (size_t rg_idx = 0; rg_idx < id_rgs.size(); ++rg_idx) {
     ASSERT_EQ(id_rgs[rg_idx].memory_size, metadata->row_group_infos[rg_idx].memory_size);
-    ASSERT_EQ(id_rgs[rg_idx].column_memory_sizes, metadata->row_group_infos[rg_idx].column_memory_sizes);
+    ASSERT_AND_ASSIGN(auto expected_memory_sizes, DistributeMemorySizes(metadata->row_group_infos[rg_idx].memory_size,
+                                                                        *metadata->payload.column_memory_weights));
+    ASSERT_AND_ASSIGN(auto memory_sizes, id_reader->get_rg_column_memsz(rg_idx));
+    ASSERT_EQ(memory_sizes, expected_memory_sizes);
   }
   ASSERT_AND_ASSIGN(auto id_chunk, id_reader->get_chunk(0));
   ASSERT_EQ(id_chunk->num_columns(), 1);

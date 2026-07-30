@@ -261,19 +261,15 @@ static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos(
       return arrow::Status::Invalid("Vortex row range exceeds the file row count");
     }
     uint64_t memory_size = 0;
-    std::vector<uint64_t> column_memory_sizes;
     if (memory_size_estimate) {
       // row_range <= rows_in_file, so the quotient is at most the file memory size and is safe to cast to uint64_t.
       memory_size = static_cast<uint64_t>(static_cast<unsigned __int128>(memory_size_estimate->total_size) * row_range /
                                           rows_in_file);
-      ARROW_ASSIGN_OR_RAISE(column_memory_sizes,
-                            DistributeMemorySizes(memory_size, memory_size_estimate->column_sizes));
     }
     result.emplace_back(RowGroupInfo{
         .start_offset = last_offset,
         .end_offset = last_offset + row_range,
         .memory_size = memory_size,
-        .column_memory_sizes = std::move(column_memory_sizes),
         .memory_size_available = memory_size_estimate.has_value(),
     });
     last_offset += row_range;
@@ -472,6 +468,7 @@ arrow::Result<VortexFormatReader::MetaTrait::MetadataPtr> VortexFormatReader::Me
               .fs_holder = reader->fs_holder_,
               .vxfile = reader->vxfile_,
               .logical_chunk_rows = reader->logical_chunk_rows_,
+              .column_memory_weights = reader->column_memory_weights_,
               .properties = reader->properties_,
           },
   });
@@ -581,6 +578,7 @@ VortexFormatReader::VortexFormatReader(MetaTrait::MetadataPtr metadata,
       footer_size_(footer_size),
       file_schema_(metadata->file_schema),
       logical_chunk_rows_(metadata->payload.logical_chunk_rows),
+      column_memory_weights_(metadata->payload.column_memory_weights),
       row_group_infos_(metadata->row_group_infos),
       vxfile_(metadata->payload.vxfile) {
   if (read_schema_ && read_schema_->num_fields() == 0) {
@@ -608,6 +606,10 @@ arrow::Status VortexFormatReader::open() {
   ARROW_ASSIGN_OR_RAISE(row_group_infos_,
                         create_row_group_infos(vxfile_->RowCount(), recalc_row_ranges(row_ranges, logical_chunk_rows_),
                                                memory_size_estimate));
+  column_memory_weights_ =
+      memory_size_estimate
+          ? std::make_shared<const std::vector<uint64_t>>(std::move(memory_size_estimate->column_sizes))
+          : nullptr;
 
   return arrow::Status::OK();
 }
@@ -656,8 +658,13 @@ folly::SemiFuture<arrow::Status> VortexFormatReader::open_async() {
         auto row_group_infos,
         create_row_group_infos(vxfile->RowCount(), recalc_row_ranges(row_ranges, self->logical_chunk_rows_),
                                memory_size_estimate));
+    auto column_memory_weights =
+        memory_size_estimate
+            ? std::make_shared<const std::vector<uint64_t>>(std::move(memory_size_estimate->column_sizes))
+            : nullptr;
     self->vxfile_ = std::move(vxfile);
     self->file_schema_ = std::move(file_schema);
+    self->column_memory_weights_ = std::move(column_memory_weights);
     self->row_group_infos_ = std::move(row_group_infos);
     return arrow::Status::OK();
   };
@@ -706,6 +713,17 @@ arrow::Result<std::shared_ptr<arrow::Schema>> VortexFormatReader::output_schema(
 arrow::Result<std::vector<RowGroupInfo>> VortexFormatReader::get_row_group_infos() {
   assert(vxfile_);
   return row_group_infos_;
+}
+
+arrow::Result<std::vector<uint64_t>> VortexFormatReader::get_rg_column_memsz(int64_t row_group_index) const {
+  if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_.size()) {
+    return arrow::Status::Invalid(
+        fmt::format("Vortex row group index {} out of range {}", row_group_index, row_group_infos_.size()));
+  }
+  if (!row_group_infos_[row_group_index].memory_size_available || !column_memory_weights_) {
+    return arrow::Status::NotImplemented("Vortex column memory size statistics are not available");
+  }
+  return DistributeMemorySizes(row_group_infos_[row_group_index].memory_size, *column_memory_weights_);
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> VortexFormatReader::get_chunk(const int& row_group_index) {

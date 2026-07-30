@@ -41,7 +41,6 @@ struct RowGroupInfo {
   size_t start_offset;
   size_t end_offset;
   uint64_t memory_size;
-  std::vector<uint64_t> column_memory_sizes;
   // `memory_size` is only a placeholder when this is false. The original
   // statistics failure is intentionally not retained; public estimate APIs
   // return a generic NotImplemented status instead.
@@ -96,6 +95,10 @@ class FormatReader {
 
   // get the row group infos
   [[nodiscard]] virtual arrow::Result<std::vector<RowGroupInfo>> get_row_group_infos() = 0;
+
+  // Get per-column memory estimates for one row group in physical file schema order.
+  // The returned values sum to RowGroupInfo::memory_size.
+  [[nodiscard]] virtual arrow::Result<std::vector<uint64_t>> get_rg_column_memsz(int64_t row_group_index) const = 0;
 
   // get the chunk
   [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(const int& row_group_index) = 0;

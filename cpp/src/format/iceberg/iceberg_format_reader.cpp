@@ -393,19 +393,17 @@ arrow::Result<std::vector<RowGroupInfo>> IcebergFormatReader::build_logical_row_
     // estimate the logical row-group size by assuming deleted rows have the
     // physical row group's average memory size.
     uint64_t logical_memory_size = 0;
-    if (physical_rows != 0) {
+    if (prg.memory_size_available && physical_rows != 0) {
       // logical_rows <= physical_rows, so the quotient is at most prg.memory_size and is safe to cast to uint64_t.
       logical_memory_size =
           static_cast<uint64_t>(static_cast<unsigned __int128>(prg.memory_size) * logical_rows / physical_rows);
     }
-    ARROW_ASSIGN_OR_RAISE(auto logical_column_memory_sizes,
-                          milvus_storage::DistributeMemorySizes(logical_memory_size, prg.column_memory_sizes));
 
     logical_row_group_infos.emplace_back(RowGroupInfo{
         .start_offset = logical_offset,
         .end_offset = logical_offset + logical_rows,
         .memory_size = logical_memory_size,
-        .column_memory_sizes = std::move(logical_column_memory_sizes),
+        .memory_size_available = prg.memory_size_available,
     });
     logical_offset += logical_rows;
   }
@@ -431,6 +429,17 @@ int64_t IcebergFormatReader::logical_to_physical(int64_t logical_offset) const {
 }
 
 arrow::Result<std::vector<RowGroupInfo>> IcebergFormatReader::get_row_group_infos() { return logical_row_group_infos_; }
+
+arrow::Result<std::vector<uint64_t>> IcebergFormatReader::get_rg_column_memsz(int64_t row_group_index) const {
+  if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= logical_row_group_infos_.size()) {
+    return arrow::Status::Invalid(fmt::format("Iceberg row group index out of range: {}", row_group_index));
+  }
+  if (!logical_row_group_infos_[row_group_index].memory_size_available) {
+    return arrow::Status::NotImplemented("Iceberg column memory size statistics are not available");
+  }
+  ARROW_ASSIGN_OR_RAISE(auto physical_sizes, inner_reader_->get_rg_column_memsz(row_group_index));
+  return DistributeMemorySizes(logical_row_group_infos_[row_group_index].memory_size, physical_sizes);
+}
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> IcebergFormatReader::get_chunk(const int& row_group_index) {
   // Check if this logical row group has zero rows (e.g. all rows deleted)

@@ -114,15 +114,10 @@ static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos(
     auto memory_offset =
         static_cast<uint64_t>((static_cast<unsigned __int128>(fragment_memory_size) * end_offset) / rows_in_file);
     auto memory_size = memory_offset - last_memory_offset;
-    std::vector<uint64_t> column_memory_sizes;
-    if (memory_size_available) {
-      ARROW_ASSIGN_OR_RAISE(column_memory_sizes, DistributeMemorySizes(memory_size, fragment_column_memory_sizes));
-    }
     result.emplace_back(RowGroupInfo{
         .start_offset = last_offset,
         .end_offset = end_offset,
         .memory_size = memory_size,
-        .column_memory_sizes = std::move(column_memory_sizes),
         .memory_size_available = memory_size_available,
     });
     last_offset = end_offset;
@@ -239,10 +234,7 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
   metadata->path = file.path;
   metadata->file_schema = std::move(file_schema);
   metadata->row_group_infos = std::move(row_group_infos);
-  size_t column_memory_sizes_size = 0;
-  for (const auto& row_group_info : metadata->row_group_infos) {
-    column_memory_sizes_size += row_group_info.column_memory_sizes.size() * sizeof(uint64_t);
-  }
+  const auto column_memory_sizes_size = fragment_column_memory_sizes.size() * sizeof(uint64_t);
   auto outer_metadata_size =
       sizeof(Metadata) + metadata->row_group_infos.size() * sizeof(RowGroupInfo) + column_memory_sizes_size;
   metadata->cache_size = outer_metadata_size + file.Get<uint64_t>(milvus_storage::api::kPropertyFooterSize);
@@ -254,6 +246,9 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
       .physical_row_count = physical_rows,
       .num_deletions = physical_rows - logical_rows,
       .logical_chunk_rows = logical_chunk_rows,
+      .column_memory_weights =
+          memory_size_available ? std::make_shared<const std::vector<uint64_t>>(std::move(fragment_column_memory_sizes))
+                                : nullptr,
       .properties = properties,
   };
 
@@ -282,6 +277,7 @@ arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::cr
   reader->file_schema_ = metadata->file_schema;
   reader->logical_chunk_rows_ = metadata->payload.logical_chunk_rows;
   reader->num_deletions_ = metadata->payload.num_deletions;
+  reader->column_memory_weights_ = metadata->payload.column_memory_weights;
   reader->row_group_infos_ = metadata->row_group_infos;
 
   ARROW_ASSIGN_OR_RAISE(auto requested_schema, build_read_schema(reader->file_schema_, read_schema, needed_columns));
@@ -374,6 +370,9 @@ arrow::Status LanceTableReader::open() {
   }
   ARROW_ASSIGN_OR_RAISE(row_group_infos_, create_row_group_infos(logical_rows, logical_chunk_rows_,
                                                                  fragment_column_memory_sizes, memory_size_available));
+  column_memory_weights_ = memory_size_available
+                               ? std::make_shared<const std::vector<uint64_t>>(std::move(fragment_column_memory_sizes))
+                               : nullptr;
 
   return arrow::Status::OK();
 }
@@ -383,6 +382,16 @@ std::shared_ptr<arrow::Schema> LanceTableReader::get_schema() const { return fil
 arrow::Result<std::vector<RowGroupInfo>> LanceTableReader::get_row_group_infos() {
   assert(fragment_reader_);
   return row_group_infos_;
+}
+
+arrow::Result<std::vector<uint64_t>> LanceTableReader::get_rg_column_memsz(int64_t row_group_index) const {
+  if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_.size()) {
+    return arrow::Status::Invalid("Lance row group index out of range: ", row_group_index);
+  }
+  if (!row_group_infos_[row_group_index].memory_size_available || !column_memory_weights_) {
+    return arrow::Status::NotImplemented("Lance column memory size statistics are not available");
+  }
+  return DistributeMemorySizes(row_group_infos_[row_group_index].memory_size, *column_memory_weights_);
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> LanceTableReader::get_chunk(const int& row_group_index) {
