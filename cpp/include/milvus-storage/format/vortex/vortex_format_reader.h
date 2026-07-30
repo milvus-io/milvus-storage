@@ -46,6 +46,7 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
       std::shared_ptr<FileSystemWrapper> fs_holder;
       std::shared_ptr<VortexFile> vxfile;
       uint64_t logical_chunk_rows = 0;
+      std::shared_ptr<const std::vector<uint64_t>> column_memory_weights;
       api::Properties properties;
     };
 
@@ -93,6 +94,8 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
 
   // get the row group infos
   [[nodiscard]] arrow::Result<std::vector<RowGroupInfo>> get_row_group_infos() override;
+
+  [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_rg_column_memsz(int64_t row_group_index) const override;
 
   // get the chunk
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(const int& row_group_index) override;
@@ -175,6 +178,7 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
   std::shared_ptr<arrow::Schema> file_schema_;  // always derived from file in open()
 
   uint64_t logical_chunk_rows_ = 0;
+  std::shared_ptr<const std::vector<uint64_t>> column_memory_weights_;
   std::vector<RowGroupInfo> row_group_infos_;
   std::shared_ptr<VortexFile> vxfile_;
   std::unique_ptr<expr::Expr> parsed_predicate_;

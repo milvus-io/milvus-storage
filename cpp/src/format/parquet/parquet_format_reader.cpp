@@ -83,15 +83,10 @@ static arrow::Result<std::vector<RowGroupInfo>> try_build_row_group_infos(
 }
 
 static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos_from_metadata(
-    const std::shared_ptr<::parquet::FileMetaData>& metadata,
-    const arrow::Schema& file_schema,
-    const std::string& path) {
+    const std::shared_ptr<::parquet::FileMetaData>& metadata, const std::string& path) {
   // Keep the existing row-group memory estimate as the total-size anchor: prefer
   // Milvus private metadata when available, otherwise fall back to the Parquet
-  // footer's total byte size. Parquet leaf-column uncompressed sizes are used only
-  // as relative weights. Leaves belonging to a nested top-level Arrow field are
-  // aggregated so column_memory_sizes follows the complete file-schema order and
-  // sums exactly to the row group's memory_size.
+  // footer's total byte size.
   assert(metadata);
   if (!metadata) {
     return arrow::Status::Invalid(fmt::format("Failed to get parquet file metadata for file: {}", path));
@@ -119,60 +114,16 @@ static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos_from_meta
     }
   }
 
-  // Map every top-level Arrow field to a half-open range of physical Parquet
-  // leaf columns. For example, offsets [0, 1, 3] mean field 0 owns leaf [0, 1)
-  // and field 1 owns leaves [1, 3).
-  const auto leaf_column_offsets_by_field = get_leaf_column_offsets_by_field(file_schema);
-
-  // The private row-group metadata and the Parquet footer must describe the
-  // same row groups, while the Arrow schema must expand to every Parquet leaf.
-  if (row_group_infos.size() != static_cast<size_t>(metadata->num_row_groups()) ||
-      leaf_column_offsets_by_field.back() != metadata->num_columns()) {
+  if (row_group_infos.size() != static_cast<size_t>(metadata->num_row_groups())) {
     return arrow::Status::Invalid(
-        fmt::format("Parquet row-group metadata does not match the file schema. [path={}]", path));
-  }
-
-  for (int row_group_index = 0; row_group_index < metadata->num_row_groups(); ++row_group_index) {
-    auto row_group_meta = metadata->RowGroup(row_group_index);
-
-    // Build one weight per top-level Arrow field. Nested fields contribute the
-    // sum of total_uncompressed_size from all physical leaves below that field.
-    std::vector<uint64_t> column_weights;
-    column_weights.reserve(file_schema.num_fields());
-    for (int field_index = 0; field_index < file_schema.num_fields(); ++field_index) {
-      uint64_t field_weight = 0;
-      for (int leaf_column_index = leaf_column_offsets_by_field[field_index];
-           leaf_column_index < leaf_column_offsets_by_field[field_index + 1]; ++leaf_column_index) {
-        auto uncompressed_size = row_group_meta->ColumnChunk(leaf_column_index)->total_uncompressed_size();
-        if (uncompressed_size < 0) {
-          return arrow::Status::Invalid(
-              fmt::format("Parquet column uncompressed size is negative. [path={}, row_group={}, column={}]", path,
-                          row_group_index, leaf_column_index));
-        }
-        auto column_weight = static_cast<uint64_t>(uncompressed_size);
-        if (column_weight > std::numeric_limits<uint64_t>::max() - field_weight) {
-          return arrow::Status::Invalid(
-              fmt::format("Parquet top-level column size exceeds the uint64_t range. [path={}, row_group={}, field={}]",
-                          path, row_group_index, field_index));
-        }
-        field_weight += column_weight;
-      }
-      column_weights.emplace_back(field_weight);
-    }
-
-    // The Parquet sizes above define only the relative column proportions.
-    // Normalize them against the existing row-group memory estimate so the
-    // resulting column sizes sum exactly to memory_size.
-    ARROW_ASSIGN_OR_RAISE(row_group_infos[row_group_index].column_memory_sizes,
-                          DistributeMemorySizes(row_group_infos[row_group_index].memory_size, column_weights));
+        fmt::format("Parquet row-group metadata count does not match the footer. [path={}]", path));
   }
   return row_group_infos;
 }
 
 arrow::Result<std::vector<RowGroupInfo>> ParquetFormatReader::create_row_group_infos(
     const std::shared_ptr<::parquet::FileMetaData>& metadata) {
-  assert(schema_);
-  return create_row_group_infos_from_metadata(metadata, *schema_, path_);
+  return create_row_group_infos_from_metadata(metadata, path_);
 }
 
 ParquetFormatReader::ParquetFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
@@ -502,6 +453,52 @@ folly::SemiFuture<arrow::Status> ParquetFormatReader::open_async() {
 }
 
 arrow::Result<std::vector<RowGroupInfo>> ParquetFormatReader::get_row_group_infos() { return row_group_infos_; }
+
+arrow::Result<std::vector<uint64_t>> ParquetFormatReader::get_rg_column_memsz(int64_t row_group_index) const {
+  if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_.size()) {
+    return arrow::Status::Invalid(fmt::format("Parquet row group index out of range: {}", row_group_index));
+  }
+  if (!schema_ || !file_reader_ || !file_reader_->parquet_reader()) {
+    return arrow::Status::Invalid(fmt::format("Parquet reader metadata is not initialized. [path={}]", path_));
+  }
+
+  auto metadata = file_reader_->parquet_reader()->metadata();
+  if (!metadata || row_group_index >= metadata->num_row_groups()) {
+    return arrow::Status::Invalid(
+        fmt::format("Parquet row group metadata is not available. [path={}, row_group={}]", path_, row_group_index));
+  }
+
+  const auto leaf_column_offsets_by_field = get_leaf_column_offsets_by_field(*schema_);
+  if (leaf_column_offsets_by_field.back() != metadata->num_columns()) {
+    return arrow::Status::Invalid(
+        fmt::format("Parquet row-group metadata does not match the file schema. [path={}]", path_));
+  }
+
+  auto row_group_meta = metadata->RowGroup(static_cast<int>(row_group_index));
+  std::vector<uint64_t> column_weights;
+  column_weights.reserve(schema_->num_fields());
+  for (int field_index = 0; field_index < schema_->num_fields(); ++field_index) {
+    uint64_t field_weight = 0;
+    for (int leaf_column_index = leaf_column_offsets_by_field[field_index];
+         leaf_column_index < leaf_column_offsets_by_field[field_index + 1]; ++leaf_column_index) {
+      auto uncompressed_size = row_group_meta->ColumnChunk(leaf_column_index)->total_uncompressed_size();
+      if (uncompressed_size < 0) {
+        return arrow::Status::Invalid(
+            fmt::format("Parquet column uncompressed size is negative. [path={}, row_group={}, column={}]", path_,
+                        row_group_index, leaf_column_index));
+      }
+      auto column_weight = static_cast<uint64_t>(uncompressed_size);
+      if (column_weight > std::numeric_limits<uint64_t>::max() - field_weight) {
+        return arrow::Status::Invalid(
+            fmt::format("Parquet top-level column size exceeds the uint64_t range. [path={}, row_group={}, field={}]",
+                        path_, row_group_index, field_index));
+      }
+      field_weight += column_weight;
+    }
+    column_weights.emplace_back(field_weight);
+  }
+  return DistributeMemorySizes(row_group_infos_[row_group_index].memory_size, column_weights);
+}
 
 // Parquet uses a single schema_ (always derived from the file footer) rather than
 // separate read_schema_/file_schema_ like Lance/Vortex. Projection needs both

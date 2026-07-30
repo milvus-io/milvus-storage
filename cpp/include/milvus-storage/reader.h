@@ -108,10 +108,9 @@ class ChunkReader {
   /**
    * @brief Returns the estimated decoded-memory size of every chunk.
    *
-   * The result is indexed by chunk. When per-column metadata is available, each
-   * estimate is the sum of the logical column group's fields, independently of
-   * the active projection; fields present only in a physical file are excluded.
-   * Formats without per-column metadata retain their aggregate estimate.
+   * The result is indexed by chunk and contains the aggregate estimate recorded
+   * for that chunk. It is independent of the active projection and may include
+   * physical-file fields that are not present in the logical column group.
    * Estimates may be zero when a chunk has no live rows or its known
    * decoded-memory size is zero. Unavailable estimates are returned as an
    * error, typically arrow::Status::NotImplemented, rather than as zero.
@@ -119,20 +118,6 @@ class ChunkReader {
    * @return One estimated size in bytes per chunk, or an error status.
    */
   [[nodiscard]] virtual arrow::Result<std::vector<uint64_t>> get_chunk_estimated_size() = 0;
-
-  /**
-   * @brief Returns the estimated decoded-memory size of a top-level field in every chunk.
-   *
-   * The field is resolved against the logical column group, independently of
-   * the active projection. A field absent from a particular physical file has
-   * a known zero estimate for that chunk. Unavailable statistics are returned
-   * as an error rather than as zero.
-   *
-   * @param field_name Name of a unique top-level field in the column group.
-   * @return One estimated size in bytes per chunk, or an error status.
-   */
-  [[nodiscard]] virtual arrow::Result<std::vector<uint64_t>> get_chunk_column_estimated_size(
-      const std::string& field_name) = 0;
 
   /**
    * @brief Returns estimated decoded-memory sizes for every top-level field and chunk.

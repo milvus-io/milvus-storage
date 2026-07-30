@@ -542,8 +542,6 @@ class ChunkReaderImpl : public ChunkReader {
   [[nodiscard]] folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>> get_chunks_async(
       const std::vector<int64_t>& chunk_indices, size_t parallelism) override;
   [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_estimated_size() override;
-  [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_column_estimated_size(
-      const std::string& field_name) override;
   [[nodiscard]] arrow::Result<std::vector<std::vector<uint64_t>>> get_chunk_column_estimated_size() override;
   [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_rows() override;
 
@@ -792,31 +790,14 @@ arrow::Result<std::vector<uint64_t>> ChunkReaderImpl::get_chunk_estimated_size()
   return result;
 }
 
-arrow::Result<std::vector<uint64_t>> ChunkReaderImpl::get_chunk_column_estimated_size(const std::string& field_name) {
-  const auto field = std::find(column_group_->columns.begin(), column_group_->columns.end(), field_name);
-  if (field == column_group_->columns.end()) {
-    return arrow::Status::Invalid(fmt::format("Column '{}' is not part of the column group", field_name));
-  }
-  if (std::find(std::next(field), column_group_->columns.end(), field_name) != column_group_->columns.end()) {
-    return arrow::Status::Invalid(fmt::format("Column '{}' is duplicated in the column group", field_name));
-  }
-  const auto col_idx = static_cast<int>(std::distance(column_group_->columns.begin(), field));
-
-  const auto total_chunks = total_number_of_chunks();
-  std::vector<uint64_t> result(total_chunks);
-  for (size_t i = 0; i < total_chunks; ++i) {
-    ARROW_ASSIGN_OR_RAISE(result[i], chunk_reader_->get_chunk_column_estimated_size(i, col_idx));
-  }
-  return result;
-}
-
 arrow::Result<std::vector<std::vector<uint64_t>>> ChunkReaderImpl::get_chunk_column_estimated_size() {
   const auto total_chunks = total_number_of_chunks();
   std::vector<std::vector<uint64_t>> result(column_group_->columns.size(), std::vector<uint64_t>(total_chunks));
-  for (size_t col_idx = 0; col_idx < column_group_->columns.size(); ++col_idx) {
-    for (size_t chunk_idx = 0; chunk_idx < total_chunks; ++chunk_idx) {
-      ARROW_ASSIGN_OR_RAISE(result[col_idx][chunk_idx],
-                            chunk_reader_->get_chunk_column_estimated_size(chunk_idx, static_cast<int>(col_idx)));
+  for (size_t chunk_idx = 0; chunk_idx < total_chunks; ++chunk_idx) {
+    ARROW_ASSIGN_OR_RAISE(auto chunk_column_sizes, chunk_reader_->get_chunk_column_estimated_sizes(chunk_idx));
+    assert(chunk_column_sizes.size() == column_group_->columns.size());
+    for (size_t col_idx = 0; col_idx < column_group_->columns.size(); ++col_idx) {
+      result[col_idx][chunk_idx] = chunk_column_sizes[col_idx];
     }
   }
   return result;

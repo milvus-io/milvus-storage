@@ -208,6 +208,11 @@ TEST(FormatReaderUtilityTest, MemorySizeDistributionAvoidsIntermediateOverflow) 
   EXPECT_EQ(distributed, (std::vector<uint64_t>{4 * kGiB, 4 * kGiB}));
 }
 
+TEST(FormatReaderUtilityTest, MemorySizeDistributionKeepsZeroWeightsZero) {
+  ASSERT_AND_ASSIGN(auto distributed, DistributeMemorySizes(3, {10, 10, 0}));
+  EXPECT_EQ(distributed, (std::vector<uint64_t>{1, 2, 0}));
+}
+
 class FormatReaderTest : public ::testing::TestWithParam<std::string> {
   protected:
   void SetUp() override {
@@ -282,9 +287,9 @@ TEST_P(FormatReaderTest, EstimatedMemorySizesAreReasonable) {
   std::vector<uint64_t> actual_column_sizes(schema_->num_fields(), 0);
   for (size_t chunk_idx = 0; chunk_idx < row_group_infos.size(); ++chunk_idx) {
     const auto& row_group_info = row_group_infos[chunk_idx];
-    ASSERT_EQ(row_group_info.column_memory_sizes.size(), static_cast<size_t>(schema_->num_fields()));
-    EXPECT_EQ(std::accumulate(row_group_info.column_memory_sizes.begin(), row_group_info.column_memory_sizes.end(),
-                              uint64_t{0}),
+    ASSERT_AND_ASSIGN(auto row_group_memory_sizes, format_reader->get_rg_column_memsz(chunk_idx));
+    ASSERT_EQ(row_group_memory_sizes.size(), static_cast<size_t>(schema_->num_fields()));
+    EXPECT_EQ(std::accumulate(row_group_memory_sizes.begin(), row_group_memory_sizes.end(), uint64_t{0}),
               row_group_info.memory_size);
 
     ASSERT_AND_ASSIGN(auto chunk, format_reader->get_chunk(chunk_idx));
@@ -292,7 +297,7 @@ TEST_P(FormatReaderTest, EstimatedMemorySizesAreReasonable) {
     estimated_total_size += row_group_info.memory_size;
     actual_total_size += GetRecordBatchMemorySize(chunk);
     for (int column_idx = 0; column_idx < schema_->num_fields(); ++column_idx) {
-      estimated_column_sizes[column_idx] += row_group_info.column_memory_sizes[column_idx];
+      estimated_column_sizes[column_idx] += row_group_memory_sizes[column_idx];
       actual_column_sizes[column_idx] += GetArrowArrayMemorySize(chunk->column(column_idx));
     }
   }
@@ -388,30 +393,40 @@ TEST_P(FormatReaderTest, MultiFileColumnEstimatesFollowFieldNames) {
 
   std::vector<uint64_t> expected_id_sizes;
   std::vector<uint64_t> expected_name_sizes;
-  for (const auto& row_group : ordered_row_groups) {
-    ASSERT_EQ(row_group.column_memory_sizes.size(), 2);
-    expected_id_sizes.emplace_back(row_group.column_memory_sizes[0]);
-    expected_name_sizes.emplace_back(row_group.column_memory_sizes[1]);
+  std::vector<uint64_t> expected_chunk_sizes;
+  for (size_t row_group_index = 0; row_group_index < ordered_row_groups.size(); ++row_group_index) {
+    ASSERT_AND_ASSIGN(auto memory_sizes, ordered_format_reader->get_rg_column_memsz(row_group_index));
+    ASSERT_EQ(memory_sizes.size(), 2);
+    expected_id_sizes.emplace_back(memory_sizes[0]);
+    expected_name_sizes.emplace_back(memory_sizes[1]);
+    expected_chunk_sizes.emplace_back(ordered_row_groups[row_group_index].memory_size);
   }
-  for (const auto& row_group : reordered_row_groups) {
-    ASSERT_EQ(row_group.column_memory_sizes.size(), 2);
-    expected_name_sizes.emplace_back(row_group.column_memory_sizes[0]);
-    expected_id_sizes.emplace_back(row_group.column_memory_sizes[1]);
+  for (size_t row_group_index = 0; row_group_index < reordered_row_groups.size(); ++row_group_index) {
+    ASSERT_AND_ASSIGN(auto memory_sizes, reordered_format_reader->get_rg_column_memsz(row_group_index));
+    ASSERT_EQ(memory_sizes.size(), 2);
+    expected_name_sizes.emplace_back(memory_sizes[0]);
+    expected_id_sizes.emplace_back(memory_sizes[1]);
+    expected_chunk_sizes.emplace_back(reordered_row_groups[row_group_index].memory_size);
+    if (row_group_index == 0) {
+      EXPECT_NE(memory_sizes[0], memory_sizes[1]);
+    }
   }
-  for (const auto& row_group : id_only_row_groups) {
-    ASSERT_EQ(row_group.column_memory_sizes.size(), 1);
-    expected_id_sizes.emplace_back(row_group.column_memory_sizes[0]);
+  for (size_t row_group_index = 0; row_group_index < id_only_row_groups.size(); ++row_group_index) {
+    ASSERT_AND_ASSIGN(auto memory_sizes, id_only_format_reader->get_rg_column_memsz(row_group_index));
+    ASSERT_EQ(memory_sizes.size(), 1);
+    expected_id_sizes.emplace_back(memory_sizes[0]);
     expected_name_sizes.emplace_back(0);
+    expected_chunk_sizes.emplace_back(id_only_row_groups[row_group_index].memory_size);
   }
-  for (const auto& row_group : extra_column_row_groups) {
-    ASSERT_EQ(row_group.column_memory_sizes.size(), 3);
-    expected_id_sizes.emplace_back(row_group.column_memory_sizes[0]);
-    expected_name_sizes.emplace_back(row_group.column_memory_sizes[1]);
-    EXPECT_GT(row_group.column_memory_sizes[2], 0);
-    EXPECT_LT(row_group.column_memory_sizes[0] + row_group.column_memory_sizes[1], row_group.memory_size);
+  for (size_t row_group_index = 0; row_group_index < extra_column_row_groups.size(); ++row_group_index) {
+    ASSERT_AND_ASSIGN(auto memory_sizes, extra_column_format_reader->get_rg_column_memsz(row_group_index));
+    ASSERT_EQ(memory_sizes.size(), 3);
+    expected_id_sizes.emplace_back(memory_sizes[0]);
+    expected_name_sizes.emplace_back(memory_sizes[1]);
+    expected_chunk_sizes.emplace_back(extra_column_row_groups[row_group_index].memory_size);
+    EXPECT_GT(memory_sizes[2], 0);
+    EXPECT_LT(memory_sizes[0] + memory_sizes[1], extra_column_row_groups[row_group_index].memory_size);
   }
-  ASSERT_FALSE(reordered_row_groups.empty());
-  ASSERT_NE(reordered_row_groups.front().column_memory_sizes[0], reordered_row_groups.front().column_memory_sizes[1]);
 
   auto combined_group = std::make_shared<api::ColumnGroup>(*ordered_groups->front());
   combined_group->files.insert(combined_group->files.end(), reordered_groups->front()->files.begin(),
@@ -432,21 +447,13 @@ TEST_P(FormatReaderTest, MultiFileColumnEstimatesFollowFieldNames) {
     ASSERT_NE(reader, nullptr);
     ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0, id_projection));
 
-    ASSERT_AND_ASSIGN(auto id_sizes, chunk_reader->get_chunk_column_estimated_size("id"));
-    ASSERT_AND_ASSIGN(auto name_sizes, chunk_reader->get_chunk_column_estimated_size("name"));
-    EXPECT_EQ(id_sizes, expected_id_sizes);
-    EXPECT_EQ(name_sizes, expected_name_sizes);
-
     ASSERT_AND_ASSIGN(auto all_sizes, chunk_reader->get_chunk_column_estimated_size());
     ASSERT_EQ(all_sizes.size(), 2);
     EXPECT_EQ(all_sizes[0], expected_id_sizes);
     EXPECT_EQ(all_sizes[1], expected_name_sizes);
 
     ASSERT_AND_ASSIGN(auto chunk_sizes, chunk_reader->get_chunk_estimated_size());
-    ASSERT_EQ(chunk_sizes.size(), expected_id_sizes.size());
-    for (size_t chunk_idx = 0; chunk_idx < chunk_sizes.size(); ++chunk_idx) {
-      EXPECT_EQ(chunk_sizes[chunk_idx], expected_id_sizes[chunk_idx] + expected_name_sizes[chunk_idx]);
-    }
+    EXPECT_EQ(chunk_sizes, expected_chunk_sizes);
   }
 }
 
@@ -498,7 +505,9 @@ TEST_P(FormatReaderTest, MissingPhysicalColumnEstimateIsZero) {
     ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
     ASSERT_EQ(chunk_reader->total_number_of_chunks(), 2);
 
-    ASSERT_AND_ASSIGN(auto name_sizes, chunk_reader->get_chunk_column_estimated_size("name"));
+    ASSERT_AND_ASSIGN(auto column_sizes, chunk_reader->get_chunk_column_estimated_size());
+    ASSERT_EQ(column_sizes.size(), 2);
+    const auto& name_sizes = column_sizes[1];
     ASSERT_EQ(name_sizes.size(), 2);
     EXPECT_GT(name_sizes[0], 0);
     EXPECT_EQ(name_sizes[1], 0);
@@ -550,10 +559,9 @@ TEST_P(FormatReaderTest, ReadParquetWithoutMeta) {
     ASSERT_EQ(row_group_infos[i].start_offset, i * test_batch_->num_rows());
     ASSERT_EQ(row_group_infos[i].end_offset, (i + 1) * test_batch_->num_rows());
     ASSERT_GT(row_group_infos[i].memory_size, 0);
-    ASSERT_EQ(row_group_infos[i].column_memory_sizes.size(), schema_->num_fields());
-    ASSERT_EQ(std::accumulate(row_group_infos[i].column_memory_sizes.begin(),
-                              row_group_infos[i].column_memory_sizes.end(), uint64_t{0}),
-              row_group_infos[i].memory_size);
+    ASSERT_AND_ASSIGN(auto memory_sizes, format_reader->get_rg_column_memsz(i));
+    ASSERT_EQ(memory_sizes.size(), schema_->num_fields());
+    ASSERT_EQ(std::accumulate(memory_sizes.begin(), memory_sizes.end(), uint64_t{0}), row_group_infos[i].memory_size);
     ASSERT_AND_ASSIGN(auto rb, format_reader->get_chunk(i));
     ASSERT_EQ(rb->num_rows(), test_batch_->num_rows());
   }
@@ -1173,14 +1181,13 @@ TEST_P(FormatReaderTest, NestedProjectionPreservesTopLevelColumns) {
     };
     ASSERT_AND_ASSIGN(auto expected_column_sizes,
                       DistributeMemorySizes(metadata->row_group_infos[0].memory_size, top_level_weights));
-    ASSERT_EQ(metadata->row_group_infos[0].column_memory_sizes, expected_column_sizes);
     ASSERT_EQ(std::accumulate(expected_column_sizes.begin(), expected_column_sizes.end(), uint64_t{0}),
               metadata->row_group_infos[0].memory_size);
 
     ASSERT_AND_ASSIGN(auto projected_reader, parquet::ParquetFormatReader::MetaTrait::create_from_metadata(
                                                  metadata, file, nested_schema, std::vector<std::string>{"note"}, ""));
-    ASSERT_AND_ASSIGN(auto projected_row_group_infos, projected_reader->get_row_group_infos());
-    ASSERT_EQ(projected_row_group_infos[0].column_memory_sizes, expected_column_sizes);
+    ASSERT_AND_ASSIGN(auto projected_memory_sizes, projected_reader->get_rg_column_memsz(0));
+    ASSERT_EQ(projected_memory_sizes, expected_column_sizes);
   }
 
   auto assert_batch_equal = [](const std::shared_ptr<arrow::RecordBatch>& actual,
