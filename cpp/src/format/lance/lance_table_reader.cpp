@@ -31,6 +31,7 @@
 #include <arrow/result.h>
 #include <fmt/format.h>
 
+#include "bridge_error.h"
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -182,32 +183,18 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, base_uri));
   auto lance_uri = ToStandardLanceUri(base_uri);
 
-  std::shared_ptr<BlockingDataset> dataset;
-  try {
-    dataset = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config));
-  } catch (const std::exception& e) {
-    return arrow::Status::IOError("Failed to open Lance dataset for metadata: ", e.what());
-  }
+  ARROW_ASSIGN_OR_RAISE(std::shared_ptr<BlockingDataset> dataset,
+                        BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config)));
 
   std::shared_ptr<arrow::Schema> file_schema;
   {
     ArrowSchema c_fragment_schema;
-    try {
-      dataset->GetFragmentSchema(fragment_id, c_fragment_schema);
-    } catch (const LanceException& e) {
-      return arrow::Status::IOError(fmt::format("Failed to get fragment schema: {}", e.what()));
-    }
+    ARROW_RETURN_NOT_OK(dataset->GetFragmentSchema(fragment_id, c_fragment_schema));
     ARROW_ASSIGN_OR_RAISE(file_schema, arrow::ImportSchema(&c_fragment_schema));
   }
 
-  uint64_t logical_rows = 0;
-  uint64_t physical_rows = 0;
-  try {
-    logical_rows = dataset->GetFragmentRowCount(fragment_id);
-    physical_rows = dataset->GetFragmentPhysicalRowCount(fragment_id);
-  } catch (const LanceException& e) {
-    return arrow::Status::IOError("Failed to get row counts for Lance fragment ", fragment_id, ": ", e.what());
-  }
+  ARROW_ASSIGN_OR_RAISE(uint64_t logical_rows, dataset->GetFragmentRowCount(fragment_id));
+  ARROW_ASSIGN_OR_RAISE(uint64_t physical_rows, dataset->GetFragmentPhysicalRowCount(fragment_id));
   if (physical_rows < logical_rows) {
     return arrow::Status::Invalid("Fragment ", fragment_id, " has inconsistent metadata: physical_rows (",
                                   physical_rows, ") < logical_rows (", logical_rows, ")");
@@ -288,16 +275,17 @@ arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::cr
   ArrowSchema c_arrow_schema;
   ARROW_RETURN_NOT_OK(arrow::ExportSchema(*requested_schema, &c_arrow_schema));
 
-  try {
-    reader->fragment_reader_ =
-        BlockingFragmentReader::Open(*metadata->payload.dataset, metadata->payload.fragment_id, c_arrow_schema);
-  } catch (const LanceException& e) {
+  auto fragment_reader_result =
+      BlockingFragmentReader::Open(*metadata->payload.dataset, metadata->payload.fragment_id, c_arrow_schema);
+  if (!fragment_reader_result.ok()) {
     if (c_arrow_schema.release) {
       c_arrow_schema.release(&c_arrow_schema);
     }
-    return arrow::Status::IOError("Failed to open Lance fragment reader for fragment ", metadata->payload.fragment_id,
-                                  ": ", e.what());
+    return milvus_storage::bridge::WithBridgeContext(
+        fmt::format("Failed to open Lance fragment reader for fragment {}", metadata->payload.fragment_id),
+        fragment_reader_result.status());
   }
+  reader->fragment_reader_ = std::move(*fragment_reader_result);
 
   return reader;
 }
@@ -316,17 +304,13 @@ arrow::Status LanceTableReader::open() {
                        << ", role_arn=" << (fs_config.role_arn.empty() ? "(empty)" : fs_config.role_arn)
                        << ", external_id_set=" << (fs_config.external_id.empty() ? "false" : "true")
                        << ", use_iam=" << fs_config.use_iam;
-    dataset_ = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config));
+    ARROW_ASSIGN_OR_RAISE(dataset_, BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config)));
   }
 
   // Lance 7 exposes the current dataset schema through FileFragment::schema().
   {
     ArrowSchema c_fragment_schema;
-    try {
-      dataset_->GetFragmentSchema(fragment_id_, c_fragment_schema);
-    } catch (const LanceException& e) {
-      return arrow::Status::IOError(fmt::format("Failed to get fragment schema: {}", e.what()));
-    }
+    ARROW_RETURN_NOT_OK(dataset_->GetFragmentSchema(fragment_id_, c_fragment_schema));
     ARROW_ASSIGN_OR_RAISE(file_schema_, arrow::ImportSchema(&c_fragment_schema));
   }
 
@@ -339,23 +323,32 @@ arrow::Status LanceTableReader::open() {
   ArrowSchema c_arrow_schema;
   ARROW_RETURN_NOT_OK(arrow::ExportSchema(*read_schema, &c_arrow_schema));
 
-  fragment_reader_ = BlockingFragmentReader::Open(*dataset_, fragment_id_, c_arrow_schema);
+  {
+    auto fragment_reader_result = BlockingFragmentReader::Open(*dataset_, fragment_id_, c_arrow_schema);
+    if (!fragment_reader_result.ok()) {
+      if (c_arrow_schema.release) {
+        c_arrow_schema.release(&c_arrow_schema);
+      }
+      return milvus_storage::bridge::WithBridgeContext(
+          fmt::format("Failed to open Lance fragment reader for fragment {}", fragment_id_),
+          fragment_reader_result.status());
+    }
+    fragment_reader_ = std::move(*fragment_reader_result);
+  }
 
   // Lance's read_range accepts logical indices (post-deletion) and internally
   // patches the range to skip deleted rows. So row_group_infos uses logical row count.
   // However, read_range's batch_size is applied to the *physical* range after
   // patch_range_for_deletions, so we add num_deletions_ to batch_size to ensure
   // each read produces a single output batch.
-  auto logical_rows = fragment_reader_->RowCount();
-  try {
-    auto physical_rows = dataset_->GetFragmentPhysicalRowCount(fragment_id_);
+  ARROW_ASSIGN_OR_RAISE(uint64_t logical_rows, fragment_reader_->RowCount());
+  {
+    ARROW_ASSIGN_OR_RAISE(uint64_t physical_rows, dataset_->GetFragmentPhysicalRowCount(fragment_id_));
     if (physical_rows < logical_rows) {
       return arrow::Status::Invalid("Fragment ", fragment_id_, " has inconsistent metadata: physical_rows (",
                                     physical_rows, ") < logical_rows (", logical_rows, ")");
     }
     num_deletions_ = physical_rows - logical_rows;
-  } catch (const lance::LanceException& e) {
-    return arrow::Status::IOError("Failed to get physical row count for fragment ", fragment_id_, ": ", e.what());
   }
 
   auto column_memory_sizes_result =
@@ -396,9 +389,15 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> LanceTableReader::get_chunk(c
   // We add num_deletions_ to mitigate (1), but (2) is not addressed — if Lance
   // splits at page boundaries, chunk(0) will silently lose trailing rows in Release
   // builds (assert is a no-op). A robust fix would combine all chunks here.
-  ArrowArrayStream array_stream =
-      fragment_reader_->ReadRangesAsStream(start_idx, end_idx, end_idx - start_idx + num_deletions_);
-  ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));
+  ARROW_ASSIGN_OR_RAISE(ArrowArrayStream array_stream,
+                        fragment_reader_->ReadRangesAsStream(start_idx, end_idx, end_idx - start_idx + num_deletions_));
+  // ImportChunkedArray drains the stream: mid-scan bridge errors surface here
+  // as raw marker-encoded strings and must be decoded (see bridge_error.h).
+  auto chunked_result = arrow::ImportChunkedArray(&array_stream);
+  if (!chunked_result.ok()) {
+    return milvus_storage::bridge::TranslateBridgeStatus("Failed to read lance chunk", chunked_result.status());
+  }
+  auto chunkedarray = std::move(*chunked_result);
   assert(chunkedarray != nullptr && chunkedarray->num_chunks() == 1);
   return arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0));
 }
@@ -437,10 +436,15 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> LanceTableReader
     const auto& end_rg_info = row_group_infos_[rg_range.second];
 
     // batch_size adds num_deletions_ for the same reason as get_chunk — see comment there.
-    ArrowArrayStream array_stream =
+    ARROW_ASSIGN_OR_RAISE(
+        ArrowArrayStream array_stream,
         fragment_reader_->ReadRangesAsStream(start_rg_info.start_offset, end_rg_info.end_offset,
-                                             end_rg_info.end_offset - start_rg_info.start_offset + num_deletions_);
-    ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));
+                                             end_rg_info.end_offset - start_rg_info.start_offset + num_deletions_));
+    auto chunked_result = arrow::ImportChunkedArray(&array_stream);
+    if (!chunked_result.ok()) {
+      return milvus_storage::bridge::TranslateBridgeStatus("Failed to read lance chunks", chunked_result.status());
+    }
+    auto chunkedarray = std::move(*chunked_result);
     assert(chunkedarray != nullptr);
 
     // assign to rbs
@@ -455,12 +459,17 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> LanceTableReader
 
 arrow::Result<std::shared_ptr<arrow::Table>> LanceTableReader::take(const std::vector<int64_t>& row_indices) {
   assert(fragment_reader_);
-  ArrowArrayStream array_stream = fragment_reader_->TakeAsStream(row_indices, row_indices.size());
-  ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));
+  ARROW_ASSIGN_OR_RAISE(ArrowArrayStream array_stream, fragment_reader_->TakeAsStream(row_indices, row_indices.size()));
+  auto chunked_result = arrow::ImportChunkedArray(&array_stream);
+  if (!chunked_result.ok()) {
+    return milvus_storage::bridge::TranslateBridgeStatus("Failed to take lance rows", chunked_result.status());
+  }
+  auto chunkedarray = std::move(*chunked_result);
 
   // out of range
   if (chunkedarray->num_chunks() == 0) {
-    return arrow::Status::Invalid(fmt::format("out of row range [0, {}]", fragment_reader_->RowCount()));
+    ARROW_ASSIGN_OR_RAISE(auto row_count, fragment_reader_->RowCount());
+    return arrow::Status::Invalid(fmt::format("out of row range [0, {}]", row_count));
   }
 
   std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
@@ -477,9 +486,13 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> LanceTableReader::read_
   assert(fragment_reader_);
   // Lance's read_range accepts logical indices directly.
   // batch_size adds num_deletions_ for the same reason as get_chunk — see comment there.
-  ArrowArrayStream array_stream =
-      fragment_reader_->ReadRangesAsStream(start_offset, end_offset, end_offset - start_offset + num_deletions_);
-  return arrow::ImportRecordBatchReader(&array_stream);
+  ARROW_ASSIGN_OR_RAISE(
+      ArrowArrayStream array_stream,
+      fragment_reader_->ReadRangesAsStream(start_offset, end_offset, end_offset - start_offset + num_deletions_));
+  ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&array_stream));
+  // The stream stays live in the caller: wrap it so mid-scan bridge errors are
+  // decoded on every ReadNext instead of surfacing as raw marker strings.
+  return milvus_storage::bridge::WrapBridgeRecordBatchReader(std::move(reader), "Failed to read lance record batch");
 }
 
 arrow::Result<std::shared_ptr<FormatReader>> LanceTableReader::clone_reader() {

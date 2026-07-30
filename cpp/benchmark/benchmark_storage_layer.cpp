@@ -310,11 +310,7 @@ class StorageLayerFixture : public FormatBenchFixtureBase<> {
     ArrowArrayStream stream;
     ARROW_RETURN_NOT_OK(arrow::ExportRecordBatchReader(batch_reader, &stream));
 
-    try {
-      auto dataset = lance::BlockingDataset::WriteDataset(lance_uri, &stream, storage_options);
-    } catch (const lance::LanceException& e) {
-      return arrow::Status::IOError("Lance write failed: ", e.what());
-    }
+    ARROW_RETURN_NOT_OK(lance::BlockingDataset::WriteDataset(lance_uri, &stream, storage_options).status());
     return arrow::Status::OK();
   }
 
@@ -539,13 +535,13 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_OpenRead)(::benchmark::State
 
   // Lambda to read lance dataset
   auto read_lance = [&](bool collect_stats, int64_t& out_rows, int64_t& out_bytes) -> arrow::Status {
-    auto dataset = lance::BlockingDataset::Open(lance_uri, storage_options);
+    ARROW_ASSIGN_OR_RAISE(auto dataset, lance::BlockingDataset::Open(lance_uri, storage_options));
 
     ArrowSchema c_schema;
     ARROW_RETURN_NOT_OK(arrow::ExportSchema(*schema_, &c_schema));
 
-    auto scanner = dataset->Scan(c_schema, 8192);
-    auto stream = scanner->OpenStream();
+    ARROW_ASSIGN_OR_RAISE(auto scanner, dataset->Scan(c_schema, 8192));
+    ARROW_ASSIGN_OR_RAISE(auto stream, scanner->OpenStream());
 
     ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&stream));
 
@@ -612,12 +608,12 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_Take)(::benchmark::State& st
 
   // Lambda to take from lance dataset
   auto take_lance = [&](bool collect_stats, int64_t& out_rows, int64_t& out_bytes) -> arrow::Status {
-    auto dataset = lance::BlockingDataset::Open(lance_uri, storage_options);
+    ARROW_ASSIGN_OR_RAISE(auto dataset, lance::BlockingDataset::Open(lance_uri, storage_options));
 
     ArrowSchema c_schema;
     ARROW_RETURN_NOT_OK(arrow::ExportSchema(*schema_, &c_schema));
 
-    auto stream = dataset->Take(indices, c_schema);
+    ARROW_ASSIGN_OR_RAISE(auto stream, dataset->Take(indices, c_schema));
 
     ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&stream));
 
@@ -718,13 +714,13 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_MultiReader)(::benchmark::St
     for (int i = 0; i < num_readers; ++i) {
       reader_threads.emplace_back([&, i]() {
         auto read_all = [&]() -> arrow::Status {
-          auto dataset = lance::BlockingDataset::Open(lance_uri, storage_options);
+          ARROW_ASSIGN_OR_RAISE(auto dataset, lance::BlockingDataset::Open(lance_uri, storage_options));
 
           ArrowSchema c_schema;
           ARROW_RETURN_NOT_OK(arrow::ExportSchema(*schema_, &c_schema));
 
-          auto scanner = dataset->Scan(c_schema, 8192);
-          auto stream = scanner->OpenStream();
+          ARROW_ASSIGN_OR_RAISE(auto scanner, dataset->Scan(c_schema, 8192));
+          ARROW_ASSIGN_OR_RAISE(auto stream, scanner->OpenStream());
 
           ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&stream));
 

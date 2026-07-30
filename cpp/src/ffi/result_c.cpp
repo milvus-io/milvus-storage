@@ -44,6 +44,8 @@ extern FFI_EXPORT const int loon_errcode_transient_throttling = LOON_TRANSIENT_T
 extern FFI_EXPORT const int loon_errcode_transient_service = LOON_TRANSIENT_SERVICE;
 extern FFI_EXPORT const int loon_errcode_txn_exhausted_retry = LOON_TXN_EXHAUSTED_RETRY;
 extern FFI_EXPORT const int loon_errcode_txn_resolution_failed = LOON_TXN_RESOLUTION_FAILED;
+extern FFI_EXPORT const int loon_errcode_lance_write_contention = LOON_LANCE_WRITE_CONTENTION;
+extern FFI_EXPORT const int loon_errcode_lance_resource_not_found = LOON_LANCE_RESOURCE_NOT_FOUND;
 
 }  // extern "C"
 
@@ -72,6 +74,8 @@ std::string error_to_string(int code) {
       {LOON_TRANSIENT_SERVICE, "StorageTransientService"},
       {LOON_TXN_EXHAUSTED_RETRY, "TxnExhaustedRetry"},
       {LOON_TXN_RESOLUTION_FAILED, "TxnResolutionFailed"},
+      {LOON_LANCE_WRITE_CONTENTION, "LanceWriteContention"},
+      {LOON_LANCE_RESOURCE_NOT_FOUND, "LanceResourceNotFound"},
   };
 
   if (auto it = error_strings.find(code); it != error_strings.end()) {

@@ -13,98 +13,109 @@
 // limitations under the License.
 
 #include "lance_bridge.h"
+#include "bridge_error.h"
 #include "bridge_util.h"
 
 #include <memory>
+#include <utility>
 
 namespace milvus_storage::lance {
 
 void ReplaceLanceRuntime(uint32_t num_threads) {}
 
 using milvus_storage::ConvertStorageOptions;
+using milvus_storage::bridge::MakeBridgeErrorStatus;
 
-std::shared_ptr<BlockingDataset> BlockingDataset::Open(const std::string& uri, const StorageOptions& storage_options) {
+namespace {
+
+// Run a bridge call, translating the marker-encoded rust::Error into a
+// structured arrow error (see bridge_error.h). No exception leaves this
+// library.
+template <typename Fn>
+auto CatchRustResult(Fn&& fn) -> arrow::Result<decltype(fn())> {
   try {
+    return fn();
+  } catch (const rust::cxxbridge1::Error& e) {
+    return MakeBridgeErrorStatus(e.what());
+  }
+}
+
+template <typename Fn>
+arrow::Status CatchRustStatus(Fn&& fn) {
+  try {
+    fn();
+    return arrow::Status::OK();
+  } catch (const rust::cxxbridge1::Error& e) {
+    return MakeBridgeErrorStatus(e.what());
+  }
+}
+
+}  // namespace
+
+arrow::Result<std::shared_ptr<BlockingDataset>> BlockingDataset::Open(const std::string& uri,
+                                                                      const StorageOptions& storage_options) {
+  return CatchRustResult([&] {
     rust::Vec<rust::String> keys, values;
     ConvertStorageOptions(storage_options, keys, values);
     return std::make_shared<BlockingDataset>(
         ffi::open_dataset(rust::Str(uri.data(), uri.length()), std::move(keys), std::move(values)));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+  });
 }
 
-std::unique_ptr<BlockingDataset> BlockingDataset::OpenUnique(const std::string& uri,
-                                                             const StorageOptions& storage_options) {
-  try {
+arrow::Result<std::unique_ptr<BlockingDataset>> BlockingDataset::OpenUnique(const std::string& uri,
+                                                                            const StorageOptions& storage_options) {
+  return CatchRustResult([&] {
     rust::Vec<rust::String> keys, values;
     ConvertStorageOptions(storage_options, keys, values);
     return std::make_unique<BlockingDataset>(
         ffi::open_dataset(rust::Str(uri.data(), uri.length()), std::move(keys), std::move(values)));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+  });
 }
 
-std::unique_ptr<BlockingDataset> BlockingDataset::WriteDataset(const std::string& uri,
-                                                               struct ArrowArrayStream* stream,
-                                                               const StorageOptions& storage_options,
-                                                               LanceDataStorageFormat format) {
-  try {
+arrow::Result<std::unique_ptr<BlockingDataset>> BlockingDataset::WriteDataset(const std::string& uri,
+                                                                              struct ArrowArrayStream* stream,
+                                                                              const StorageOptions& storage_options,
+                                                                              LanceDataStorageFormat format) {
+  return CatchRustResult([&] {
     rust::Vec<rust::String> keys, values;
     ConvertStorageOptions(storage_options, keys, values);
     auto ffi_format = static_cast<ffi::LanceDataStorageFormat>(format);
     return std::make_unique<BlockingDataset>(ffi::write_dataset(rust::Str(uri.data(), uri.length()),
                                                                 reinterpret_cast<uint8_t*>(stream), std::move(keys),
                                                                 std::move(values), ffi_format));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+  });
 }
 
-void BlockingDataset::DeleteRows(const std::string& predicate) {
-  try {
-    ffi::dataset_delete_rows(*impl_, rust::Str(predicate.data(), predicate.length()));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+arrow::Status BlockingDataset::DeleteRows(const std::string& predicate) {
+  return CatchRustStatus([&] { ffi::dataset_delete_rows(*impl_, rust::Str(predicate.data(), predicate.length())); });
 }
 
-std::vector<uint64_t> BlockingDataset::GetAllFragmentIds() const {
-  try {
+arrow::Result<std::vector<uint64_t>> BlockingDataset::GetAllFragmentIds() const {
+  return CatchRustResult([&] {
     auto fragment_ids = impl_->get_all_fragment_ids();
-    return {fragment_ids.begin(), fragment_ids.end()};
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+    return std::vector<uint64_t>{fragment_ids.begin(), fragment_ids.end()};
+  });
 }
 
-std::vector<uint64_t> BlockingDataset::GetFragmentDeletionPositions(uint64_t fragment_id) const {
-  try {
+arrow::Result<std::vector<uint64_t>> BlockingDataset::GetFragmentDeletionPositions(uint64_t fragment_id) const {
+  return CatchRustResult([&] {
     auto positions = ffi::get_fragment_deletion_positions(*impl_, fragment_id);
-    return {positions.begin(), positions.end()};
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+    return std::vector<uint64_t>{positions.begin(), positions.end()};
+  });
 }
 
-uint64_t BlockingDataset::GetFragmentPhysicalRowCount(uint64_t fragment_id) const {
-  try {
-    return ffi::get_fragment_physical_row_count(*impl_, fragment_id);
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+arrow::Result<uint64_t> BlockingDataset::GetFragmentPhysicalRowCount(uint64_t fragment_id) const {
+  return CatchRustResult([&] { return ffi::get_fragment_physical_row_count(*impl_, fragment_id); });
 }
 
-uint64_t BlockingDataset::GetFragmentRowCount(uint64_t fragment_id) const {
-  try {
-    return ffi::get_fragment_row_count(*impl_, fragment_id);
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+arrow::Result<uint64_t> BlockingDataset::GetFragmentRowCount(uint64_t fragment_id) const {
+  return CatchRustResult([&] { return ffi::get_fragment_row_count(*impl_, fragment_id); });
 }
 
 arrow::Result<std::vector<uint64_t>> BlockingDataset::EstimateFragmentColumnMemory(uint64_t fragment_id) const {
+  // Estimation is a best-effort sizing hint: failures degrade to
+  // NotImplemented so callers fall back to coarser estimates instead of
+  // failing the open (see the reader-side NotImplemented handling).
   try {
     auto estimates = ffi::estimate_fragment_column_memory(*impl_, fragment_id);
     std::vector<uint64_t> memory_sizes;
@@ -126,131 +137,102 @@ uint64_t BlockingDataset::EstimateFragmentMemory(uint64_t fragment_id) const {
   }
 }
 
-void BlockingDataset::GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_schema) const {
-  try {
-    ffi::get_fragment_schema(*impl_, fragment_id, reinterpret_cast<uint8_t*>(&out_schema));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+arrow::Status BlockingDataset::GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_schema) const {
+  return CatchRustStatus(
+      [&] { ffi::get_fragment_schema(*impl_, fragment_id, reinterpret_cast<uint8_t*>(&out_schema)); });
 }
 
-void BlockingDataset::WriteArrowArrayStream(struct ArrowArrayStream* stream) {
-  try {
-    impl_->write_stream(reinterpret_cast<uint8_t*>(stream));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+arrow::Status BlockingDataset::WriteArrowArrayStream(struct ArrowArrayStream* stream) {
+  return CatchRustStatus([&] { impl_->write_stream(reinterpret_cast<uint8_t*>(stream)); });
 }
 
-std::unique_ptr<BlockingFragmentReader> BlockingFragmentReader::Open(const BlockingDataset& dataset,
-                                                                     uint64_t fragment_id,
-                                                                     ArrowSchema& schema) {
-  try {
+arrow::Result<std::unique_ptr<BlockingFragmentReader>> BlockingFragmentReader::Open(const BlockingDataset& dataset,
+                                                                                    uint64_t fragment_id,
+                                                                                    ArrowSchema& schema) {
+  return CatchRustResult([&] {
     auto impl = ffi::open_fragment_reader(dataset.Impl(), fragment_id, reinterpret_cast<uint8_t*>(&schema));
     return std::make_unique<BlockingFragmentReader>(std::move(impl));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+  });
 }
 
-uint64_t BlockingFragmentReader::RowCount() const {
-  try {
-    return impl_->number_of_rows();
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+arrow::Result<uint64_t> BlockingFragmentReader::RowCount() const {
+  return CatchRustResult([&] { return impl_->number_of_rows(); });
 }
 
-void BlockingFragmentReader::TakeAsSingleBatch(const std::vector<int64_t>& indices, ArrowArray& out_array) {
-  try {
+arrow::Status BlockingFragmentReader::TakeAsSingleBatch(const std::vector<int64_t>& indices, ArrowArray& out_array) {
+  return CatchRustStatus([&] {
     std::vector<uint32_t> uint32_indices(indices.begin(), indices.end());
     rust::Slice<const uint32_t> indices_slice(uint32_indices.data(), uint32_indices.size());
     impl_->take_as_single_batch(indices_slice, reinterpret_cast<uint8_t*>(&out_array));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+  });
 }
 
-ArrowArrayStream BlockingFragmentReader::TakeAsStream(const std::vector<int64_t>& indices, uint32_t batch_size) {
-  try {
+arrow::Result<ArrowArrayStream> BlockingFragmentReader::TakeAsStream(const std::vector<int64_t>& indices,
+                                                                     uint32_t batch_size) {
+  return CatchRustResult([&] {
     ArrowArrayStream stream;
     std::vector<uint32_t> uint32_indices(indices.begin(), indices.end());
     rust::Slice<const uint32_t> indices_slice(uint32_indices.data(), uint32_indices.size());
     impl_->take_as_stream(indices_slice, batch_size, reinterpret_cast<uint8_t*>(&stream));
     return stream;
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+  });
 }
 
-ArrowArrayStream BlockingFragmentReader::ReadAllAsStream(uint32_t batch_size) {
-  try {
+arrow::Result<ArrowArrayStream> BlockingFragmentReader::ReadAllAsStream(uint32_t batch_size) {
+  return CatchRustResult([&] {
     ArrowArrayStream stream;
     impl_->read_all_as_stream(batch_size, reinterpret_cast<uint8_t*>(&stream));
     return stream;
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+  });
 }
 
-ArrowArrayStream BlockingFragmentReader::ReadRangesAsStream(uint32_t row_range_start,
-                                                            uint32_t row_range_end,
-                                                            uint32_t batch_size) {
-  try {
+arrow::Result<ArrowArrayStream> BlockingFragmentReader::ReadRangesAsStream(uint32_t row_range_start,
+                                                                           uint32_t row_range_end,
+                                                                           uint32_t batch_size) {
+  return CatchRustResult([&] {
     ArrowArrayStream stream;
     impl_->read_ranges_as_stream(row_range_start, row_range_end, batch_size, reinterpret_cast<uint8_t*>(&stream));
     return stream;
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+  });
 }
 
-std::unique_ptr<BlockingScanner> BlockingDataset::Scan(ArrowSchema& schema, uint32_t batch_size) {
-  try {
+arrow::Result<std::unique_ptr<BlockingScanner>> BlockingDataset::Scan(ArrowSchema& schema, uint32_t batch_size) {
+  return CatchRustResult([&] {
     auto impl = ffi::create_scanner(*impl_, reinterpret_cast<uint8_t*>(&schema), batch_size);
     return std::make_unique<BlockingScanner>(std::move(impl));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+  });
 }
 
 LanceIOStats BlockingDataset::IOStatsIncremental() {
+  // Statistics are advisory: never fail a read path over a stats hiccup.
   try {
     auto stats = impl_->io_stats_incremental();
     return {stats.read_iops, stats.read_bytes};
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
+  } catch (const rust::cxxbridge1::Error&) {
+    return {};
   }
 }
 
-ArrowArrayStream BlockingDataset::Take(const std::vector<int64_t>& indices, ArrowSchema& schema) {
-  try {
+arrow::Result<ArrowArrayStream> BlockingDataset::Take(const std::vector<int64_t>& indices, ArrowSchema& schema) {
+  return CatchRustResult([&] {
     ArrowArrayStream stream;
     std::vector<uint64_t> uint64_indices(indices.begin(), indices.end());
     rust::Slice<const uint64_t> indices_slice(uint64_indices.data(), uint64_indices.size());
     ffi::dataset_take(*impl_, indices_slice, reinterpret_cast<uint8_t*>(&schema), reinterpret_cast<uint8_t*>(&stream));
     return stream;
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+  });
 }
 
-uint64_t BlockingScanner::CountRows() const {
-  try {
-    return impl_->count_rows();
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+arrow::Result<uint64_t> BlockingScanner::CountRows() const {
+  return CatchRustResult([&] { return impl_->count_rows(); });
 }
 
-ArrowArrayStream BlockingScanner::OpenStream() {
-  try {
+arrow::Result<ArrowArrayStream> BlockingScanner::OpenStream() {
+  return CatchRustResult([&] {
     ArrowArrayStream stream;
     impl_->open_stream(reinterpret_cast<uint8_t*>(&stream));
     return stream;
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+  });
 }
 
 }  // namespace milvus_storage::lance

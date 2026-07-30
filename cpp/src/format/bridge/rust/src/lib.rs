@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod aliyun_oss_provider;
+mod bridge_error;
 mod gcp_impersonation;
 mod iceberg_bridgeimpl;
 mod iceberg_testutil;
@@ -123,10 +124,8 @@ pub mod lance_ffi {
             dataset: &BlockingDataset,
             fragment_id: u64,
         ) -> Result<Vec<LanceColumnMemoryEstimate>>;
-        pub fn estimate_fragment_memory(
-            dataset: &BlockingDataset,
-            fragment_id: u64,
-        ) -> Result<u64>;
+        pub fn estimate_fragment_memory(dataset: &BlockingDataset, fragment_id: u64)
+        -> Result<u64>;
         pub unsafe fn get_fragment_schema(
             dataset: &BlockingDataset,
             fragment_id: u64,

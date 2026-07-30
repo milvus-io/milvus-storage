@@ -164,13 +164,22 @@ async fn fetch_impersonated_access_token(
         .send()
         .await
         .and_then(|r| r.error_for_status())
-        .map_err(|e| object_store::Error::Generic {
-            store: IMPERSONATION_STORE_NAME,
-            source: format!(
-                "metadata server token request failed (this code path requires running on a \
-                 GCE VM with a default service account attached): {e}"
-            )
-            .into(),
+        .map_err(|e| {
+            // Prefix the canonical pattern while the typed StatusCode is in
+            // hand, so classify_http_status_in_message (bridge_error.rs) can
+            // recover transience/auth class downstream.
+            let status_prefix = e
+                .status()
+                .map(|s| format!("non-2xx status code: {}: ", s.as_u16()))
+                .unwrap_or_default();
+            object_store::Error::Generic {
+                store: IMPERSONATION_STORE_NAME,
+                source: format!(
+                    "{status_prefix}metadata server token request failed (this code path requires \
+                     running on a GCE VM with a default service account attached): {e}"
+                )
+                .into(),
+            }
         })?;
     let vm_token: MetadataTokenResponse = vm_resp.json().await.map_err(|e| object_store::Error::Generic {
         store: IMPERSONATION_STORE_NAME,
@@ -191,13 +200,19 @@ async fn fetch_impersonated_access_token(
         .send()
         .await
         .and_then(|r| r.error_for_status())
-        .map_err(|e| object_store::Error::Generic {
-            store: IMPERSONATION_STORE_NAME,
-            source: format!(
-                "IAM generateAccessToken({target_sa}) failed (the VM SA likely lacks \
-                 roles/iam.serviceAccountTokenCreator on the target SA): {e}"
-            )
-            .into(),
+        .map_err(|e| {
+            let status_prefix = e
+                .status()
+                .map(|s| format!("non-2xx status code: {}: ", s.as_u16()))
+                .unwrap_or_default();
+            object_store::Error::Generic {
+                store: IMPERSONATION_STORE_NAME,
+                source: format!(
+                    "{status_prefix}IAM generateAccessToken({target_sa}) failed (the VM SA likely \
+                     lacks roles/iam.serviceAccountTokenCreator on the target SA): {e}"
+                )
+                .into(),
+            }
         })?;
     iam_resp.json().await.map_err(|e| object_store::Error::Generic {
         store: IMPERSONATION_STORE_NAME,

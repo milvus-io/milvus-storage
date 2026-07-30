@@ -16,6 +16,7 @@
 
 #include "milvus-storage/format/lance/lance_table_writer.h"
 
+#include <memory>
 #include <string>
 #include <iostream>
 #include <unordered_set>
@@ -30,6 +31,9 @@
 #include <arrow/status.h>
 #include <arrow/result.h>
 #include <fmt/format.h>
+#include <arrow/util/io_util.h>
+
+#include <cerrno>
 
 #include "milvus-storage/format/lance/lance_common.h"
 
@@ -113,6 +117,18 @@ arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
 
   auto batch_iterator = std::make_shared<BatchIterator>(schema_, record_batches_);
   ARROW_RETURN_NOT_OK(ExportRecordBatchReader(batch_iterator, &array_stream));
+  // The exported stream owns the batch iterator (and thereby every buffered
+  // RecordBatch). The Rust write entry points take ownership immediately
+  // (ptr::replace with an empty stream, so `release` becomes null and this
+  // guard is a no-op) -- but the error returns BEFORE the stream is handed to
+  // Rust (open failure, fragment-id listing failure) would otherwise leak the
+  // whole write payload.
+  auto stream_guard = [](struct ArrowArrayStream* s) {
+    if (s->release != nullptr) {
+      s->release(s);
+    }
+  };
+  std::unique_ptr<struct ArrowArrayStream, decltype(stream_guard)> release_on_exit(&array_stream, stream_guard);
 
   // Get storage options from properties for cloud storage support
   ArrowFileSystemConfig fs_config;
@@ -123,23 +139,31 @@ arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
   ARROW_ASSIGN_OR_RAISE(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
 
   if (!dataset_) {
-    try {
-      dataset_ = BlockingDataset::OpenUnique(lance_uri, storage_options);
-      origin_fids_ = dataset_->GetAllFragmentIds();
-      dataset_->WriteArrowArrayStream(&array_stream);
-    } catch (std::exception& e) {
-      // dataset does not exist
+    auto open_result = BlockingDataset::OpenUnique(lance_uri, storage_options);
+    if (open_result.ok()) {
+      dataset_ = std::move(*open_result);
+      ARROW_ASSIGN_OR_RAISE(origin_fids_, dataset_->GetAllFragmentIds());
+      ARROW_RETURN_NOT_OK(dataset_->WriteArrowArrayStream(&array_stream));
+    } else if (arrow::internal::ErrnoFromStatus(open_result.status()) == ENOENT) {
+      // The dataset does not exist yet: create it. Only a classified
+      // not-found takes this path — auth failures, corruption, or transient
+      // IO errors now propagate instead of silently creating a fresh dataset
+      // (the previous catch(std::exception) treated every failure as
+      // "does not exist").
       origin_fids_.clear();
-      dataset_ = BlockingDataset::WriteDataset(lance_uri, &array_stream, storage_options, data_storage_format_);
+      ARROW_ASSIGN_OR_RAISE(
+          dataset_, BlockingDataset::WriteDataset(lance_uri, &array_stream, storage_options, data_storage_format_));
+    } else {
+      return open_result.status();
     }
   } else {
-    dataset_->WriteArrowArrayStream(&array_stream);
+    ARROW_RETURN_NOT_OK(dataset_->WriteArrowArrayStream(&array_stream));
   }
   record_batches_.clear();
 
   std::vector<uint64_t> append_fids;
   std::vector<uint64_t> current_fids;
-  current_fids = dataset_->GetAllFragmentIds();
+  ARROW_ASSIGN_OR_RAISE(current_fids, dataset_->GetAllFragmentIds());
 
   if (current_fids.size() < origin_fids_.size()) {
     return arrow::Status::Invalid(

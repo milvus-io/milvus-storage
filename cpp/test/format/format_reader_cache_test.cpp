@@ -670,8 +670,9 @@ class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std:
     std::vector<iceberg::IcebergFileInfo> file_infos;
     try {
       auto storage_options = iceberg::ToStorageOptions(fs_config_);
-      table_info = iceberg::CreateTestTable(table_uri, kExpectedRows, false, {}, storage_options);
-      file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+      table_info = iceberg::CreateTestTable(table_uri, kExpectedRows, false, {}, storage_options).ValueOrDie();
+      file_infos =
+          iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options).ValueOrDie();
     } catch (const std::exception& e) {
       return arrow::Status::IOError("Failed to create Iceberg stress table: ", e.what());
     }

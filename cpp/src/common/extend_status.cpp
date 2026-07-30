@@ -54,6 +54,8 @@ constexpr ExtendStatusCodeMetadata kExtendStatusCodeMetadata[] = {
     {ExtendStatusCode::StorageTransientService, "StorageTransientService", true},
     {ExtendStatusCode::TxnExhaustedRetry, "TxnExhaustedRetry", false},
     {ExtendStatusCode::TxnResolutionFailed, "TxnResolutionFailed", false},
+    {ExtendStatusCode::LanceWriteContention, "LanceWriteContention", true},
+    {ExtendStatusCode::LanceResourceNotFound, "LanceResourceNotFound", false},
 };
 
 const ExtendStatusCodeMetadata* FindExtendStatusCodeMetadata(ExtendStatusCode code) {
@@ -203,6 +205,7 @@ milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
     case ExtendStatusCode::StorageTransientTimeout:
     case ExtendStatusCode::StorageTransientThrottling:
     case ExtendStatusCode::StorageTransientService:
+    case ExtendStatusCode::LanceWriteContention:
       return milvus::StorageTransientError;  // 2045
     case ExtendStatusCode::AwsErrorConflict:
     case ExtendStatusCode::AwsErrorPreConditionFailed:
@@ -213,6 +216,7 @@ milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
       // budget is already spent).
       return milvus::StorageError;  // 2044
     case ExtendStatusCode::AwsErrorNotFound:
+    case ExtendStatusCode::LanceResourceNotFound:
       // The object/bucket is gone: permanent, and fine-grained -- consumers can
       // distinguish "data missing" (stale loadinfo, GC'd file) from a generic
       // storage failure. Never transient/2045: a retry/reroute hits the same

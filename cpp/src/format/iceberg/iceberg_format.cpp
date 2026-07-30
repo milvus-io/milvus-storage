@@ -35,7 +35,7 @@ arrow::Result<std::vector<api::ColumnGroupFile>> IcebergFormat::explore(const st
   ARROW_ASSIGN_OR_RAISE(auto parsed_uri, StorageUri::Parse(explore_dir));
   ARROW_ASSIGN_OR_RAISE(auto iceberg_uri, StorageUri::Make(parsed_uri, false));
 
-  auto file_infos = iceberg::PlanFiles(iceberg_uri, snapshot_id, storage_options);
+  ARROW_ASSIGN_OR_RAISE(auto file_infos, iceberg::PlanFiles(iceberg_uri, snapshot_id, storage_options));
 
   std::vector<api::ColumnGroupFile> files;
   files.reserve(file_infos.size());

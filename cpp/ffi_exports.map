@@ -31,6 +31,8 @@
     loon_errcode_transient_service;
     loon_errcode_txn_exhausted_retry;
     loon_errcode_txn_resolution_failed;
+    loon_errcode_lance_write_contention;
+    loon_errcode_lance_resource_not_found;
 
     # Properties interface
     loon_properties_create;

@@ -246,7 +246,26 @@ fn build_delete_metadata(task: &FileScanTask) -> Vec<DeleteFileRef> {
         .collect()
 }
 
+/// cxx entry point. Classification happens here and only here: the body below
+/// keeps using `anyhow` so `?` stays ergonomic, and `BridgeError::from` walks
+/// the anyhow chain once at the boundary to recover the typed
+/// `iceberg::Error` / `opendal::Error` that `?` erased.
 pub fn iceberg_plan_files(
+    metadata_location: &str,
+    snapshot_id: i64,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
+) -> crate::bridge_error::BridgeResult<Vec<IcebergFileInfo>> {
+    iceberg_plan_files_impl(
+        metadata_location,
+        snapshot_id,
+        storage_options_keys,
+        storage_options_values,
+    )
+    .map_err(crate::bridge_error::BridgeError::from)
+}
+
+fn iceberg_plan_files_impl(
     metadata_location: &str,
     snapshot_id: i64,
     storage_options_keys: Vec<String>,
