@@ -14,6 +14,9 @@
 
 #pragma once
 
+#include <memory>
+
+#include <arrow/result.h>
 #include <arrow/status.h>
 
 #include "milvus-storage/ffi_c.h"
@@ -25,7 +28,10 @@ namespace milvus_storage {
 namespace api {
 class Manifest;
 struct ColumnGroup;
+enum class DeltaLogType;
 }  // namespace api
+
+arrow::Result<milvus_storage::api::DeltaLogType> parse_delta_log_type(uint32_t delta_log_type);
 
 // Main functions for exporting/importing Manifest (includes column groups, delta logs, and stats)
 // Export function allocates and returns the structure - caller must call loon_manifest_destroy to free

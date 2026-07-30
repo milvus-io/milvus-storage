@@ -69,7 +69,8 @@ struct LobFileInfo {
 enum class DeltaLogType {
   PRIMARY_KEY = 0,  // Primary key delete (default)
   POSITIONAL = 1,   // Positional delete
-  EQUALITY = 2,     // Equality delete
+  // Value 2 is retired: equality delete was never shipped; it is expressed as a predicate delete.
+  PREDICATE = 3,  // Predicate delete event log
 };
 
 /**

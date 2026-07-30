@@ -108,6 +108,10 @@
 
     # Reader interface
     loon_reader_new;
+    loon_alive_reader_new;
+    loon_alive_reader_next;
+    loon_alive_bitset_free;
+    loon_alive_reader_destroy;
     loon_reader_set_keyretriever;
     loon_get_record_batch_reader;
     loon_get_chunk_reader;
