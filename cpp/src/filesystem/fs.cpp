@@ -14,9 +14,12 @@
 
 #include "milvus-storage/filesystem/fs.h"
 
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
+#include <type_traits>
 
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/filesystem/gcp/gcp_filesystem_producer.h"
@@ -54,6 +57,91 @@ static std::map<std::string, CloudProviderType> CloudProviderType_Map = {
     {kCloudProviderAzure, CloudProviderType::AZURE},
     {kCloudProviderTencent, CloudProviderType::TENCENTCLOUD},
     {kCloudProviderHuawei, CloudProviderType::HUAWEICLOUD}};
+
+bool ArrowFileSystemConfig::IsAzureCredentialBrokerEnabled() const {
+  return cloud_provider == kCloudProviderAzure &&
+         (!azure_client_id.empty() || !azure_tenant_id.empty() || !azure_credential_endpoint.empty());
+}
+
+std::string ArrowFileSystemConfig::GetCacheKey() const {
+  size_t seed = 0;
+  auto hash_combine = [&seed](const auto& value) {
+    using ValueType = std::decay_t<decltype(value)>;
+    seed ^= std::hash<ValueType>{}(value) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+  };
+
+  hash_combine(storage_type);
+
+  // bypass local
+  if (storage_type == "local") {
+    hash_combine(root_path);
+    return "fs:" + std::to_string(seed);
+  }
+
+  hash_combine(cloud_provider);
+  hash_combine(address);
+  hash_combine(bucket_name);
+  hash_combine(region);
+  hash_combine(use_ssl);
+  hash_combine(ssl_ca_cert);
+  hash_combine(use_virtual_host);
+  hash_combine(request_timeout_ms);
+  hash_combine(max_connections);
+  hash_combine(multi_part_upload_size);
+  hash_combine(tls_min_version);
+  hash_combine(background_writes);
+  hash_combine(use_crc32c_checksum);
+  hash_combine(s3_crt_async_read);
+  hash_combine(load_frequency);
+
+  if (IsAzureCredentialBrokerEnabled()) {
+    hash_combine(access_key_id);
+    hash_combine(azure_client_id);
+    hash_combine(azure_tenant_id);
+    hash_combine(azure_credential_endpoint);
+  } else if (cloud_provider == kCloudProviderGCP) {
+    hash_combine(use_iam);
+    if (use_iam) {
+      hash_combine(gcp_target_service_account);
+    } else {
+      hash_combine(access_key_id);
+      hash_combine(access_key_value);
+    }
+  } else if (!role_arn.empty()) {
+    hash_combine(role_arn);
+    hash_combine(session_name);
+    hash_combine(external_id);
+  } else {
+    hash_combine(use_iam);
+    // Azure use the access_key_id as account name.
+    if (!use_iam || cloud_provider == kCloudProviderAzure) {
+      hash_combine(access_key_id);
+      hash_combine(access_key_value);
+    }
+  }
+
+  // return the hash key
+  return "fs:" + std::to_string(seed);
+}
+
+std::string ArrowFileSystemConfig::ToString() const {
+  std::stringstream ss;
+  ss << "[address=" << address << ", bucket_name=" << bucket_name << ", root_path=" << root_path
+     << ", storage_type=" << storage_type << ", cloud_provider=" << cloud_provider << ", log_level=" << log_level
+     << ", region=" << region << ", use_ssl=" << std::boolalpha << use_ssl
+     << ", ssl_ca_cert_length=" << ssl_ca_cert.size()  // only print cert length
+     << ", use_iam=" << std::boolalpha << use_iam << ", use_virtual_host=" << std::boolalpha << use_virtual_host
+     << ", request_timeout_ms=" << request_timeout_ms << ", max_connections=" << max_connections
+     << ", tls_min_version=" << (tls_min_version.empty() ? "(default)" : tls_min_version)
+     << ", use_crc32c_checksum=" << std::boolalpha << use_crc32c_checksum << ", s3_crt_async_read=" << std::boolalpha
+     << s3_crt_async_read;
+  if (!alias.empty()) {
+    ss << ", alias=" << alias;
+  }
+  ss << "]";
+
+  return ss.str();
+}
 
 arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config) {
   auto storage_type = StorageType_Map[config.storage_type];
@@ -149,6 +237,30 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
   ARROW_ASSIGN_OR_RAISE(result.s3_crt_async_read, api::GetValue<bool>(properties_map, PROPERTY_FS_S3_CRT_ASYNC_READ));
   ARROW_ASSIGN_OR_RAISE(result.gcp_target_service_account,
                         api::GetValue<std::string>(properties_map, PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT));
+  ARROW_ASSIGN_OR_RAISE(result.azure_client_id,
+                        api::GetValue<std::string>(properties_map, PROPERTY_FS_AZURE_CLIENT_ID));
+  ARROW_ASSIGN_OR_RAISE(result.azure_tenant_id,
+                        api::GetValue<std::string>(properties_map, PROPERTY_FS_AZURE_TENANT_ID));
+  ARROW_ASSIGN_OR_RAISE(result.azure_credential_endpoint,
+                        api::GetValue<std::string>(properties_map, PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT));
+
+  if (result.cloud_provider == kCloudProviderAzure && result.IsAzureCredentialBrokerEnabled()) {
+    if (result.azure_client_id.empty() || result.azure_tenant_id.empty() || result.azure_credential_endpoint.empty() ||
+        result.access_key_id.empty() || result.bucket_name.empty() || result.region.empty() ||
+        result.request_timeout_ms <= 0) {
+      return arrow::Status::Invalid(
+          "Azure credential broker mode requires fs.azure_client_id, fs.azure_tenant_id, "
+          "fs.azure_credential_endpoint, fs.access_key_id, fs.bucket_name, fs.region, and a positive "
+          "fs.request_timeout_ms");
+    }
+
+    arrow::util::Uri endpoint;
+    auto endpoint_status = endpoint.Parse(result.azure_credential_endpoint);
+    if (!endpoint_status.ok() || endpoint.host().empty() ||
+        (endpoint.scheme() != "http" && endpoint.scheme() != "https")) {
+      return arrow::Status::Invalid("fs.azure_credential_endpoint must be a valid HTTP(S) URL");
+    }
+  }
   return arrow::Status::OK();
 }
 

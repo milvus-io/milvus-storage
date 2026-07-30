@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod aliyun_oss_provider;
+mod azure_sas_provider;
 mod gcp_impersonation;
 mod iceberg_bridgeimpl;
 mod iceberg_testutil;

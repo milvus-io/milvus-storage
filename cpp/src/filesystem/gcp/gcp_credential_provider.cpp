@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -69,6 +70,11 @@ class OAuth2BearerProvider : public GcpCredentialProvider {
                            << "; request will proceed without Authorization, server will reply 401/403";
       return std::nullopt;
     }
+    // AuthorizationHeader is called for every GCS request. Confirm that the
+    // provider can obtain a token once without logging every object operation.
+    std::call_once(success_log_once_, [this] {
+      LOG_STORAGE_DEBUG_ << "GCP OAuth2 token obtained successfully: credential_type=" << credential_type_;
+    });
     return *header;
   }
 
@@ -77,18 +83,23 @@ class OAuth2BearerProvider : public GcpCredentialProvider {
   }
 
   protected:
-  explicit OAuth2BearerProvider(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials)
-      : credentials_(std::move(credentials)) {}
+  OAuth2BearerProvider(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials,
+                       std::string credential_type)
+      : credentials_(std::move(credentials)), credential_type_(std::move(credential_type)) {}
 
   private:
   std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials_;
+  std::string credential_type_;
+  std::once_flag success_log_once_;
 };
 
 // VM / ADC identity: ComputeEngineCredentials on GCE, or application default
 // credentials elsewhere (GOOGLE_APPLICATION_CREDENTIALS, gcloud auth, etc).
 class IamVmProvider : public OAuth2BearerProvider {
   public:
-  IamVmProvider() : OAuth2BearerProvider(MakeInternalCredentials(google::cloud::MakeGoogleDefaultCredentials())) {}
+  IamVmProvider()
+      : OAuth2BearerProvider(MakeInternalCredentials(google::cloud::MakeGoogleDefaultCredentials()),
+                             "application_default") {}
 };
 
 // Service Account Impersonation: VM/ADC identity impersonates a target SA,
@@ -97,7 +108,8 @@ class IamImpersonateProvider : public OAuth2BearerProvider {
   public:
   IamImpersonateProvider(const std::string& target_service_account, int token_lifetime_seconds)
       : OAuth2BearerProvider(
-            MakeInternalCredentials(MakeImpersonationPublicCreds(target_service_account, token_lifetime_seconds))) {}
+            MakeInternalCredentials(MakeImpersonationPublicCreds(target_service_account, token_lifetime_seconds)),
+            "service_account_impersonation") {}
 
   private:
   static std::shared_ptr<google::cloud::Credentials> MakeImpersonationPublicCreds(const std::string& target_sa,

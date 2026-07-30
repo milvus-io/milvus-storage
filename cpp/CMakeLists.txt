@@ -92,6 +92,7 @@ list(APPEND LINK_LIBS
   arrow::arrow
   Boost::boost
   protobuf::protobuf
+  nlohmann_json::nlohmann_json
   AWS::aws-sdk-cpp-identity-management
   google-cloud-cpp::storage
   ${AVRO_TARGET}

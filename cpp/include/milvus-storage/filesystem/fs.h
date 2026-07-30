@@ -20,9 +20,7 @@
 #include <map>
 #include <shared_mutex>
 #include <unordered_map>
-#include <functional>
 #include <list>
-#include <type_traits>
 
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/util/uri.h>
@@ -204,6 +202,11 @@ struct ArrowFileSystemConfig {
   // Target service account email to impersonate (e.g., "sa@project.iam.gserviceaccount.com")
   std::string gcp_target_service_account = "";
 
+  // Azure broker-backed temporary SAS authentication.
+  std::string azure_client_id = "";
+  std::string azure_tenant_id = "";
+  std::string azure_credential_endpoint = "";
+
   // Lifetime requested for cross-tenant temporary credentials, in seconds.
   // Shared across providers that mint short-lived tokens:
   //   - AWS STS AssumeRole: STS session length (valid range [900, 43200],
@@ -213,8 +216,9 @@ struct ArrowFileSystemConfig {
   //     `iamcredentials.generateAccessToken`; rejected at provider-build time
   //     if outside [900, 3600] (the `iam.allowServiceAccountCredentialLifetimeExtension`
   //     org-policy escape hatch is not plumbed through).
-  // Lance/iceberg readers refresh the credential ahead of expiry using this
-  // value as the TTL, so it doubles as the effective refresh interval.
+  //   - Azure credential broker: requested SAS lifetime.
+  // Long-lived readers refresh credentials ahead of expiry; one-shot readers
+  // request credentials with this lifetime when they start.
   // Ignored by providers that don't mint temporary credentials (plain AKSK,
   // Azure account key, etc.).
   int32_t load_frequency = 900;
@@ -245,6 +249,15 @@ struct ArrowFileSystemConfig {
                                                  ArrowFileSystemConfig& result);
 
   /**
+   * @brief Return whether Azure credential broker authentication was requested.
+   *
+   * For Azure, any broker-specific property enables this mode so incomplete
+   * configurations are rejected during validation instead of silently falling
+   * back to another Azure authentication mechanism.
+   */
+  [[nodiscard]] bool IsAzureCredentialBrokerEnabled() const;
+
+  /**
    * @brief Get the cache key for this filesystem configuration
    *
    * The cache key includes filesystem location, client behavior, and credential
@@ -252,80 +265,9 @@ struct ArrowFileSystemConfig {
    * that target the same bucket with different credentials (for example,
    * different role_arn values).
    */
-  [[nodiscard]] std::string GetCacheKey() const {
-    size_t seed = 0;
-    auto hash_combine = [&seed](const auto& value) {
-      using ValueType = std::decay_t<decltype(value)>;
-      seed ^= std::hash<ValueType>{}(value) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
-    };
+  [[nodiscard]] std::string GetCacheKey() const;
 
-    hash_combine(storage_type);
-
-    // bypass local
-    if (storage_type == "local") {
-      hash_combine(root_path);
-      return "fs:" + std::to_string(seed);
-    }
-
-    hash_combine(cloud_provider);
-    hash_combine(address);
-    hash_combine(bucket_name);
-    hash_combine(region);
-    hash_combine(use_ssl);
-    hash_combine(ssl_ca_cert);
-    hash_combine(use_virtual_host);
-    hash_combine(request_timeout_ms);
-    hash_combine(max_connections);
-    hash_combine(multi_part_upload_size);
-    hash_combine(tls_min_version);
-    hash_combine(background_writes);
-    hash_combine(use_crc32c_checksum);
-    hash_combine(s3_crt_async_read);
-    hash_combine(load_frequency);
-
-    if (cloud_provider == kCloudProviderGCP) {
-      hash_combine(use_iam);
-      if (use_iam) {
-        hash_combine(gcp_target_service_account);
-      } else {
-        hash_combine(access_key_id);
-        hash_combine(access_key_value);
-      }
-    } else if (!role_arn.empty()) {
-      hash_combine(role_arn);
-      hash_combine(session_name);
-      hash_combine(external_id);
-    } else {
-      hash_combine(use_iam);
-      // Azure use the access_key_id as account name.
-      if (!use_iam || cloud_provider == kCloudProviderAzure) {
-        hash_combine(access_key_id);
-        hash_combine(access_key_value);
-      }
-    }
-
-    // return the hash key
-    return "fs:" + std::to_string(seed);
-  }
-
-  [[nodiscard]] std::string ToString() const {
-    std::stringstream ss;
-    ss << "[address=" << address << ", bucket_name=" << bucket_name << ", root_path=" << root_path
-       << ", storage_type=" << storage_type << ", cloud_provider=" << cloud_provider << ", log_level=" << log_level
-       << ", region=" << region << ", use_ssl=" << std::boolalpha << use_ssl
-       << ", ssl_ca_cert_length=" << ssl_ca_cert.size()  // only print cert length
-       << ", use_iam=" << std::boolalpha << use_iam << ", use_virtual_host=" << std::boolalpha << use_virtual_host
-       << ", request_timeout_ms=" << request_timeout_ms << ", max_connections=" << max_connections
-       << ", tls_min_version=" << (tls_min_version.empty() ? "(default)" : tls_min_version)
-       << ", use_crc32c_checksum=" << std::boolalpha << use_crc32c_checksum << ", s3_crt_async_read=" << std::boolalpha
-       << s3_crt_async_read;
-    if (!alias.empty()) {
-      ss << ", alias=" << alias;
-    }
-    ss << "]";
-
-    return ss.str();
-  }
+  [[nodiscard]] std::string ToString() const;
 };
 
 arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config);

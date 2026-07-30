@@ -58,6 +58,7 @@ static ArrowFileSystemConfig MakeAwsConfig() {
 TEST_F(LanceStorageOptionsTest, AwsKeys) {
   auto opts = ToStorageOptions(MakeAwsConfig());
 
+  EXPECT_EQ(opts["cloud_provider"], kCloudProviderAWS);
   EXPECT_EQ(opts["aws_access_key_id"], "AKIAIOSFODNN7EXAMPLE");
   EXPECT_EQ(opts["aws_secret_access_key"], "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
   EXPECT_EQ(opts["aws_region"], "us-west-2");
@@ -77,10 +78,44 @@ TEST_F(LanceStorageOptionsTest, AzureKeys) {
 
   auto opts = ToStorageOptions(config);
 
+  EXPECT_EQ(opts["cloud_provider"], kCloudProviderAzure);
   EXPECT_EQ(opts["azure_storage_account_name"], "myaccount");
   EXPECT_EQ(opts["azure_storage_account_key"], "myaccountkey");
   EXPECT_EQ(opts["azure_endpoint"], "https://myaccount.blob.core.windows.net");
   EXPECT_EQ(opts.count("adls.account-name"), 0);
+}
+
+TEST_F(LanceStorageOptionsTest, AzureCredentialBrokerKeysExcludeFallbackCredentials) {
+  ScopedUnsetAzurite no_azurite;
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderAzure;
+  config.access_key_id = "myaccount";
+  config.access_key_value = "must-not-be-forwarded";
+  config.bucket_name = "mycontainer";
+  config.region = "westus3";
+  config.address = "core.windows.net";
+  config.use_ssl = true;
+  config.use_iam = true;
+  config.azure_client_id = "client-id";
+  config.azure_tenant_id = "tenant-id";
+  config.azure_credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
+  config.load_frequency = 3600;
+  config.request_timeout_ms = 5000;
+
+  auto opts = ToStorageOptions(config);
+
+  EXPECT_EQ(opts["azure_storage_account_name"], "myaccount");
+  EXPECT_EQ(opts["azure_broker_endpoint"], "http://credential-broker/v1/credentials/assume-role");
+  EXPECT_EQ(opts["azure_broker_client_id"], "client-id");
+  EXPECT_EQ(opts["azure_broker_tenant_id"], "tenant-id");
+  EXPECT_EQ(opts["azure_broker_account_name"], "myaccount");
+  EXPECT_EQ(opts["azure_broker_region"], "westus3");
+  EXPECT_EQ(opts["azure_broker_bucket"], "mycontainer");
+  EXPECT_EQ(opts["azure_broker_duration_seconds"], "3600");
+  EXPECT_EQ(opts["azure_broker_request_timeout_ms"], "5000");
+  EXPECT_EQ(opts.count("azure_storage_account_key"), 0);
+  EXPECT_EQ(opts.count("azure_storage_sas_token"), 0);
 }
 
 TEST_F(LanceStorageOptionsTest, AliyunKeys) {
@@ -95,6 +130,7 @@ TEST_F(LanceStorageOptionsTest, AliyunKeys) {
 
   auto opts = ToStorageOptions(config);
 
+  EXPECT_EQ(opts["cloud_provider"], kCloudProviderAliyun);
   EXPECT_EQ(opts["oss_access_key_id"], "LTAI5tExample");
   EXPECT_EQ(opts["oss_secret_access_key"], "OSSSecretExample");
   EXPECT_EQ(opts["oss_region"], "oss-cn-hangzhou");
@@ -110,6 +146,7 @@ TEST_F(LanceStorageOptionsTest, GcpImpersonation) {
 
   auto opts = ToStorageOptions(config);
 
+  EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
   // Bridge-private keys; not forwarded to lance-io / object_store.
   EXPECT_EQ(opts["gcp_target_service_account"], "target-sa@customer-project.iam.gserviceaccount.com");
   EXPECT_EQ(opts["gcp_credential_refresh_secs"], "1800");
@@ -124,7 +161,8 @@ TEST_F(LanceStorageOptionsTest, GcpDefaultCredentials) {
 
   // No gcp_target_service_account → no impersonation keys; lance-io falls back
   // to the default credential chain (VM metadata).
-  EXPECT_TRUE(opts.empty());
+  EXPECT_EQ(opts.size(), 1);
+  EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
 }
 
 TEST_F(LanceStorageOptionsTest, LocalEmpty) {

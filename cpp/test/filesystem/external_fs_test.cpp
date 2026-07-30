@@ -315,6 +315,47 @@ TEST_F(ExternalFilesystemTest, ExtractExternalFsPropertiesTypeConversion) {
   EXPECT_EQ(config.alias, "myfs");
 }
 
+TEST_F(ExternalFilesystemTest, AzureCredentialBrokerConfigValidation) {
+  api::Properties props;
+  props[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+  props[PROPERTY_FS_CLOUD_PROVIDER] = std::string(kCloudProviderAzure);
+  props[PROPERTY_FS_ACCESS_KEY_ID] = std::string("account");
+  props[PROPERTY_FS_BUCKET_NAME] = std::string("container");
+  props[PROPERTY_FS_REGION] = std::string("westus3");
+  props[PROPERTY_FS_AZURE_CLIENT_ID] = std::string("client");
+  props[PROPERTY_FS_AZURE_TENANT_ID] = std::string("tenant");
+  props[PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT] = std::string("http://credential-broker/v1/credentials/assume-role");
+
+  auto config_result = FilesystemCache::resolve_config(props);
+  ASSERT_TRUE(config_result.ok()) << config_result.status().ToString();
+  EXPECT_TRUE(config_result->IsAzureCredentialBrokerEnabled());
+  EXPECT_EQ(config_result->azure_client_id, "client");
+  EXPECT_EQ(config_result->azure_tenant_id, "tenant");
+  EXPECT_EQ(config_result->azure_credential_endpoint, "http://credential-broker/v1/credentials/assume-role");
+
+  auto non_azure_config = *config_result;
+  non_azure_config.cloud_provider = kCloudProviderAWS;
+  EXPECT_FALSE(non_azure_config.IsAzureCredentialBrokerEnabled());
+
+  auto partial = props;
+  partial.erase(PROPERTY_FS_AZURE_TENANT_ID);
+  auto partial_result = FilesystemCache::resolve_config(partial);
+  ASSERT_FALSE(partial_result.ok());
+  EXPECT_TRUE(partial_result.status().IsInvalid());
+
+  auto invalid_endpoint = props;
+  invalid_endpoint[PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT] = std::string("file:///tmp/credentials");
+  auto invalid_endpoint_result = FilesystemCache::resolve_config(invalid_endpoint);
+  ASSERT_FALSE(invalid_endpoint_result.ok());
+  EXPECT_TRUE(invalid_endpoint_result.status().IsInvalid());
+
+  auto missing_host = props;
+  missing_host[PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT] = std::string("http:///credentials");
+  auto missing_host_result = FilesystemCache::resolve_config(missing_host);
+  ASSERT_FALSE(missing_host_result.ok());
+  EXPECT_TRUE(missing_host_result.status().IsInvalid());
+}
+
 TEST_F(ExternalFilesystemTest, ExtractExternalFsRejectsUndefinedProperty) {
   api::Properties props;
 

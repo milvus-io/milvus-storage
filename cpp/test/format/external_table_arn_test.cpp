@@ -49,6 +49,7 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/format/format.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/format/lance/lance_common.h"
 #include "milvus-storage/format/lance/lance_table_writer.h"
@@ -78,6 +79,31 @@ struct ArnWriteResult {
   std::string explore_dir;      // Full URI with address for loon_exttable_explore
   int64_t iceberg_snapshot_id;  // Only used for iceberg
 };
+
+static arrow::Result<ArnWriteResult> WritePlainFormatFile(const std::string& format,
+                                                          uint64_t num_rows,
+                                                          const ArrowFileSystemPtr& write_fs,
+                                                          const api::Properties& write_props,
+                                                          const std::string& test_base,
+                                                          const std::string& uri_scheme,
+                                                          const std::string& address,
+                                                          const std::string& bucket) {
+  if (format != LOON_FORMAT_PARQUET && format != LOON_FORMAT_VORTEX) {
+    return arrow::Status::Invalid("Expected a plain file format, got: ", format);
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
+  ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
+  auto dir = test_base + "/" + format;
+  auto file_path = dir + "/data." + format;
+  ARROW_ASSIGN_OR_RAISE(auto* format_impl, Format::get(format));
+  ARROW_ASSIGN_OR_RAISE(auto writer, format_impl->create_writer(write_fs, schema, file_path, dir, write_props));
+  ARROW_RETURN_NOT_OK(writer->Write(batch));
+  ARROW_ASSIGN_OR_RAISE(auto cgfile, writer->Close());
+
+  auto explore_dir = uri_scheme + "://" + address + "/" + bucket + "/" + dir + "/";
+  return ArnWriteResult{std::move(cgfile), std::move(schema), num_rows, std::move(explore_dir), 0};
+}
 
 class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
   protected:
@@ -144,6 +170,8 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
       return CreateLanceTable(num_rows);
     } else if (format == LOON_FORMAT_ICEBERG_TABLE) {
       return CreateIcebergTable(num_rows);
+    } else if (format == LOON_FORMAT_PARQUET || format == LOON_FORMAT_VORTEX) {
+      return WritePlainFormatFile(format, num_rows, write_fs_, write_props_, test_base_, "s3", address_, arn_bucket_);
     }
     return arrow::Status::Invalid("Unknown format: " + format);
   }
@@ -314,9 +342,10 @@ TEST_P(ExternalTableArnTest, ReadWithArnRole) {
   loon_properties_free(&loon_props);
 }
 
-INSTANTIATE_TEST_SUITE_P(ArnFormats,
-                         ExternalTableArnTest,
-                         ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE));
+INSTANTIATE_TEST_SUITE_P(
+    ArnFormats,
+    ExternalTableArnTest,
+    ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE, LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX));
 
 // ---------------------------------------------------------------------------
 // Lance-only: verify credential refresh works with short load_frequency.
@@ -390,14 +419,6 @@ TEST_F(ExternalTableArnTest, LanceCredentialRefresh) {
 #define GCP_IMP_ENV_SECRET_KEY "GCP_IMP_TEST_ENV_SECRET_KEY"  // HMAC secret key (for write)
 #define GCP_IMP_ENV_TARGET_SA "GCP_IMP_TEST_ENV_TARGET_SA"    // Target SA email (for read via impersonation)
 
-struct GcpImpWriteResult {
-  api::ColumnGroupFile cgfile;
-  std::shared_ptr<arrow::Schema> schema;  // nullptr for Iceberg
-  uint64_t num_rows;
-  std::string explore_dir;      // Full URI with address for loon_exttable_explore
-  int64_t iceberg_snapshot_id;  // Only used for iceberg
-};
-
 class ExternalTableGcpImpersonationTest : public ::testing::TestWithParam<std::string> {
   protected:
   void SetUp() override {
@@ -440,6 +461,18 @@ class ExternalTableGcpImpersonationTest : public ::testing::TestWithParam<std::s
     api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_VALUE, gcp_sk_.c_str());
     api::SetValue(write_props_, PROPERTY_FS_USE_SSL, "true");
 
+    // Parquet and Vortex use the native C++ filesystem. Configure GCP HMAC
+    // directly so the process installs the GCP HTTP factory rather than the
+    // incompatible AWS factory used by the Rust S3-compatible write path.
+    api::SetValue(plain_write_props_, PROPERTY_FS_STORAGE_TYPE, "remote");
+    api::SetValue(plain_write_props_, PROPERTY_FS_CLOUD_PROVIDER, kCloudProviderGCP);
+    api::SetValue(plain_write_props_, PROPERTY_FS_ADDRESS, address_.c_str());
+    api::SetValue(plain_write_props_, PROPERTY_FS_BUCKET_NAME, bucket_.c_str());
+    api::SetValue(plain_write_props_, PROPERTY_FS_REGION, "auto");
+    api::SetValue(plain_write_props_, PROPERTY_FS_ACCESS_KEY_ID, gcp_ak_.c_str());
+    api::SetValue(plain_write_props_, PROPERTY_FS_ACCESS_KEY_VALUE, gcp_sk_.c_str());
+    api::SetValue(plain_write_props_, PROPERTY_FS_USE_SSL, "true");
+
     // --- Read properties: extfs.gcpsa.* with gcp_target_service_account ---
     // use_iam=true is required to reach IamImpersonateProvider on the C++
     // side (gcp_credential_provider.cpp:160); without it the producer falls
@@ -459,18 +492,20 @@ class ExternalTableGcpImpersonationTest : public ::testing::TestWithParam<std::s
     test_base_ = "zc/gcp-imp-test-" + std::to_string(ts);
   }
 
-  // No TearDown cleanup: we intentionally don't call GetFileSystem() anywhere in
-  // this fixture. Doing so with cloud_provider=aws would install the AWS S3
-  // HttpClientFactory, which collides with the GCP factory that loon_exttable_
-  // explore installs later (see b5f8eef: "one cloud provider per process").
-  // Test data is left in the customer bucket; rely on bucket lifecycle rules.
+  // No TearDown cleanup: Lance and Iceberg write through the S3-compatible
+  // endpoint, while Parquet and Vortex use the native GCP filesystem. Avoid
+  // another filesystem lookup after the read path has installed its HTTP
+  // factory. Test data is left in the customer bucket; rely on lifecycle rules.
   void TearDown() override { FilesystemCache::getInstance().clean(); }
 
-  arrow::Result<GcpImpWriteResult> CreateTestTable(const std::string& format, uint64_t num_rows) {
+  arrow::Result<ArnWriteResult> CreateTestTable(const std::string& format, uint64_t num_rows) {
     if (format == LOON_FORMAT_LANCE_TABLE) {
       return CreateLanceTable(num_rows);
     } else if (format == LOON_FORMAT_ICEBERG_TABLE) {
       return CreateIcebergTable(num_rows);
+    } else if (format == LOON_FORMAT_PARQUET || format == LOON_FORMAT_VORTEX) {
+      ARROW_ASSIGN_OR_RAISE(auto write_fs, GetFileSystem(plain_write_props_));
+      return WritePlainFormatFile(format, num_rows, write_fs, plain_write_props_, test_base_, "gs", address_, bucket_);
     }
     return arrow::Status::Invalid("Unknown format: " + format);
   }
@@ -488,11 +523,12 @@ class ExternalTableGcpImpersonationTest : public ::testing::TestWithParam<std::s
   std::string target_sa_;
 
   api::Properties write_props_;
+  api::Properties plain_write_props_;
   api::Properties read_props_;
   std::string test_base_;
 
   private:
-  arrow::Result<GcpImpWriteResult> CreateLanceTable(uint64_t num_rows) {
+  arrow::Result<ArnWriteResult> CreateLanceTable(uint64_t num_rows) {
     ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
     ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
     auto path = test_base_ + "/lance";
@@ -502,10 +538,10 @@ class ExternalTableGcpImpersonationTest : public ::testing::TestWithParam<std::s
     std::cout << "[GCP Imp Test] Lance cgfile: " << cgfile.ToString() << std::endl;
     // explore_dir: gs://address/bucket/path (with address for extfs matching)
     auto explore_dir = "gs://" + address_ + "/" + bucket_ + "/" + path;
-    return GcpImpWriteResult{std::move(cgfile), schema, num_rows, explore_dir, 0};
+    return ArnWriteResult{std::move(cgfile), schema, num_rows, explore_dir, 0};
   }
 
-  arrow::Result<GcpImpWriteResult> CreateIcebergTable(uint64_t num_rows) {
+  arrow::Result<ArnWriteResult> CreateIcebergTable(uint64_t num_rows) {
     auto path = test_base_ + "/iceberg";
     // Physical write goes via S3-compat (opendal routes s3:// → S3 backend +
     // HMAC, the only HMAC-capable door to GCS). But pass record_scheme_override
@@ -526,7 +562,7 @@ class ExternalTableGcpImpersonationTest : public ::testing::TestWithParam<std::s
     auto milvus_path = iceberg::ToMilvusUri(table_info.data_file_uri, address_);
     api::ColumnGroupFile cg_file{milvus_path, 0, static_cast<int64_t>(num_rows), {}};
     std::cout << "[GCP Imp Test] Iceberg cgfile: " << cg_file.ToString() << std::endl;
-    return GcpImpWriteResult{std::move(cg_file), nullptr, num_rows, explore_dir, table_info.snapshot_id};
+    return ArnWriteResult{std::move(cg_file), nullptr, num_rows, explore_dir, table_info.snapshot_id};
   }
 };
 
@@ -667,9 +703,272 @@ TEST_P(ExternalTableGcpImpersonationTest, ReadWithImpersonation) {
   loon_properties_free(&loon_props);
 }
 
-INSTANTIATE_TEST_SUITE_P(GcpImpersonationFormats,
-                         ExternalTableGcpImpersonationTest,
-                         ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE));
+INSTANTIATE_TEST_SUITE_P(
+    GcpImpersonationFormats,
+    ExternalTableGcpImpersonationTest,
+    ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE, LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX));
+
+// ===========================================================================
+// Integration tests for reading external Azure tables via brokered SAS tokens.
+//
+// Test data is written, discovered, and read using only the Azure broker
+// configuration. All four external-table formats are covered, exercising both
+// the Rust broker path and the C++ Azure token policy.
+//
+// Required environment variables (all must be set, otherwise tests are skipped):
+// ===========================================================================
+#define AZURE_ARN_ENV_ADDRESS "AZURE_ARN_TEST_ENV_ADDRESS"  // Endpoint suffix (e.g. "core.windows.net")
+#define AZURE_ARN_ENV_REGION "AZURE_ARN_TEST_ENV_REGION"
+#define AZURE_ARN_ENV_CONTAINER "AZURE_ARN_TEST_ENV_CONTAINER"
+#define AZURE_ARN_ENV_ACCOUNT_NAME "AZURE_ARN_TEST_ENV_ACCOUNT_NAME"
+#define AZURE_ARN_ENV_CLIENT_ID "AZURE_ARN_TEST_ENV_CLIENT_ID"
+#define AZURE_ARN_ENV_TENANT_ID "AZURE_ARN_TEST_ENV_TENANT_ID"
+#define AZURE_ARN_ENV_CREDENTIAL_ENDPOINT "AZURE_ARN_TEST_ENV_CREDENTIAL_ENDPOINT"
+
+class ExternalTableAzureArnTest : public ::testing::TestWithParam<std::string> {
+  protected:
+  void SetUp() override {
+    // Customer-side Azure storage account.
+    address_ = GetEnvVar(AZURE_ARN_ENV_ADDRESS).ValueOr("");
+    region_ = GetEnvVar(AZURE_ARN_ENV_REGION).ValueOr("");
+    container_ = GetEnvVar(AZURE_ARN_ENV_CONTAINER).ValueOr("");
+    account_name_ = GetEnvVar(AZURE_ARN_ENV_ACCOUNT_NAME).ValueOr("");
+    client_id_ = GetEnvVar(AZURE_ARN_ENV_CLIENT_ID).ValueOr("");
+    tenant_id_ = GetEnvVar(AZURE_ARN_ENV_TENANT_ID).ValueOr("");
+    credential_endpoint_ = GetEnvVar(AZURE_ARN_ENV_CREDENTIAL_ENDPOINT).ValueOr("");
+
+    if (address_.empty() || region_.empty() || container_.empty() || account_name_.empty() || client_id_.empty() ||
+        tenant_id_.empty() || credential_endpoint_.empty()) {
+      GTEST_SKIP() << "Azure ARN tests require all env vars: " << AZURE_ARN_ENV_ADDRESS << ", " << AZURE_ARN_ENV_REGION
+                   << ", " << AZURE_ARN_ENV_CONTAINER << ", " << AZURE_ARN_ENV_ACCOUNT_NAME << ", "
+                   << AZURE_ARN_ENV_CLIENT_ID << ", " << AZURE_ARN_ENV_TENANT_ID << ", "
+                   << AZURE_ARN_ENV_CREDENTIAL_ENDPOINT;
+    }
+
+    // The broker-issued SAS includes write/delete permissions, so test setup and
+    // cleanup exercise the same authentication path as the read under test.
+    api::SetValue(write_props_, PROPERTY_FS_STORAGE_TYPE, "remote");
+    api::SetValue(write_props_, PROPERTY_FS_CLOUD_PROVIDER, kCloudProviderAzure);
+    api::SetValue(write_props_, PROPERTY_FS_ADDRESS, address_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_BUCKET_NAME, container_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_REGION, region_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_ID, account_name_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_AZURE_CLIENT_ID, client_id_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_AZURE_TENANT_ID, tenant_id_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT, credential_endpoint_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_LOAD_FREQUENCY, "3600");
+    api::SetValue(write_props_, PROPERTY_FS_REQUEST_TIMEOUT_MS, "10000");
+    api::SetValue(write_props_, PROPERTY_FS_USE_SSL, "true");
+
+    // Read properties: broker configuration only. No account key is forwarded.
+    api::SetValue(read_props_, "extfs.azsas.storage_type", "remote");
+    api::SetValue(read_props_, "extfs.azsas.cloud_provider", kCloudProviderAzure);
+    api::SetValue(read_props_, "extfs.azsas.address", address_.c_str());
+    api::SetValue(read_props_, "extfs.azsas.bucket_name", container_.c_str());
+    api::SetValue(read_props_, "extfs.azsas.region", region_.c_str());
+    api::SetValue(read_props_, "extfs.azsas.access_key_id", account_name_.c_str());
+    api::SetValue(read_props_, "extfs.azsas.azure_client_id", client_id_.c_str());
+    api::SetValue(read_props_, "extfs.azsas.azure_tenant_id", tenant_id_.c_str());
+    api::SetValue(read_props_, "extfs.azsas.azure_credential_endpoint", credential_endpoint_.c_str());
+    api::SetValue(read_props_, "extfs.azsas.load_frequency", "3600");
+    api::SetValue(read_props_, "extfs.azsas.request_timeout_ms", "10000");
+    api::SetValue(read_props_, "extfs.azsas.use_ssl", "true");
+
+    FilesystemCache::getInstance().clean();
+
+    auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+    test_base_ = "zc/azure-arn-test-" + std::to_string(ts);
+    manifest_root_ = "/tmp/milvus-storage-azure-arn-test";
+
+    api::SetValue(manifest_props_, PROPERTY_FS_STORAGE_TYPE, "local");
+    api::SetValue(manifest_props_, PROPERTY_FS_ROOT_PATH, manifest_root_.c_str());
+
+    ASSERT_AND_ASSIGN(write_fs_, GetFileSystem(write_props_));
+    ASSERT_AND_ASSIGN(manifest_fs_, GetFileSystem(manifest_props_));
+  }
+
+  void TearDown() override {
+    if (write_fs_) {
+      (void)DeleteTestDir(write_fs_, test_base_);
+    }
+    if (manifest_fs_) {
+      (void)DeleteTestDir(manifest_fs_, test_base_);
+    }
+    FilesystemCache::getInstance().clean();
+  }
+
+  arrow::Result<ArnWriteResult> CreateTestTable(const std::string& format, uint64_t num_rows) {
+    if (format == LOON_FORMAT_LANCE_TABLE) {
+      return CreateLanceTable(num_rows);
+    } else if (format == LOON_FORMAT_ICEBERG_TABLE) {
+      return CreateIcebergTable(num_rows);
+    } else if (format == LOON_FORMAT_PARQUET || format == LOON_FORMAT_VORTEX) {
+      return WritePlainFormatFile(format, num_rows, write_fs_, write_props_, test_base_, "az", address_, container_);
+    }
+    return arrow::Status::Invalid("Unknown format: " + format);
+  }
+
+  std::string address_;
+  std::string region_;
+  std::string container_;
+  std::string account_name_;
+  std::string client_id_;
+  std::string tenant_id_;
+  std::string credential_endpoint_;
+
+  api::Properties write_props_;
+  api::Properties read_props_;
+  api::Properties manifest_props_;
+  ArrowFileSystemPtr write_fs_;
+  ArrowFileSystemPtr manifest_fs_;
+  std::string test_base_;
+  std::string manifest_root_;
+
+  private:
+  arrow::Result<ArnWriteResult> CreateLanceTable(uint64_t num_rows) {
+    ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
+    ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
+    auto path = test_base_ + "/lance";
+    lance::LanceTableWriter writer(path, schema, write_props_);
+    ARROW_RETURN_NOT_OK(writer.Write(batch));
+    ARROW_ASSIGN_OR_RAISE(auto cgfile, writer.Close());
+    std::cout << "[Azure ARN Test] Lance cgfile: " << cgfile.ToString() << std::endl;
+    auto explore_dir = "az://" + address_ + "/" + container_ + "/" + path;
+    return ArnWriteResult{std::move(cgfile), schema, num_rows, explore_dir, 0};
+  }
+
+  arrow::Result<ArnWriteResult> CreateIcebergTable(uint64_t num_rows) {
+    auto path = test_base_ + "/iceberg";
+    auto table_uri = "abfss://" + container_ + "/" + path;
+
+    ArrowFileSystemConfig write_config;
+    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(write_props_, write_config));
+    auto storage_options = iceberg::ToStorageOptions(write_config);
+
+    auto table_info = iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options);
+    auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+    if (file_infos.empty()) {
+      return arrow::Status::Invalid("PlanFiles returned no files");
+    }
+
+    auto milvus_path = iceberg::ToMilvusUri(file_infos[0].data_file_path, address_);
+    api::ColumnGroupFile cg_file{milvus_path, 0, static_cast<int64_t>(file_infos[0].record_count), {}};
+    std::cout << "[Azure ARN Test] Iceberg cgfile: " << cg_file.ToString() << std::endl;
+    // Match the Milvus external-source contract. The Rust Iceberg bridge must
+    // translate this alias to a fully-qualified ABFSS URI for OpenDAL.
+    ARROW_ASSIGN_OR_RAISE(auto explore_uri, StorageUri::Parse(table_info.metadata_location, false));
+    explore_uri.scheme = "azure";
+    explore_uri.address = address_;
+    ARROW_ASSIGN_OR_RAISE(auto explore_dir, StorageUri::Make(explore_uri));
+    return ArnWriteResult{std::move(cg_file), nullptr, num_rows, explore_dir, table_info.snapshot_id};
+  }
+};
+
+TEST_P(ExternalTableAzureArnTest, ReadWithBrokeredSas) {
+  const auto& format = GetParam();
+  const uint64_t num_rows = 100;
+
+  // Step 1: Write test data using a brokered SAS token.
+  ASSERT_AND_ASSIGN(auto result, CreateTestTable(format, num_rows));
+
+  std::cout << "[Azure ARN Test] Format: " << format << std::endl;
+  std::cout << "[Azure ARN Test] Written to: " << result.cgfile.path << std::endl;
+  std::cout << "[Azure ARN Test] Explore dir: " << result.explore_dir << std::endl;
+
+  // Step 2: Build properties for loon_exttable_explore.
+  auto manifest_base = test_base_ + "/manifest";
+  std::vector<std::pair<std::string, std::string>> props = {
+      // The manifest is local; only external table access goes through Azure.
+      {PROPERTY_FS_STORAGE_TYPE, "local"},
+      {PROPERTY_FS_ROOT_PATH, manifest_root_},
+      // extfs.azsas: brokered SAS access to the customer container.
+      {"extfs.azsas.storage_type", "remote"},
+      {"extfs.azsas.cloud_provider", kCloudProviderAzure},
+      {"extfs.azsas.address", address_},
+      {"extfs.azsas.bucket_name", container_},
+      {"extfs.azsas.region", region_},
+      {"extfs.azsas.access_key_id", account_name_},
+      {"extfs.azsas.azure_client_id", client_id_},
+      {"extfs.azsas.azure_tenant_id", tenant_id_},
+      {"extfs.azsas.azure_credential_endpoint", credential_endpoint_},
+      {"extfs.azsas.load_frequency", "3600"},
+      {"extfs.azsas.request_timeout_ms", "10000"},
+      {"extfs.azsas.use_ssl", "true"},
+  };
+  if (format == LOON_FORMAT_ICEBERG_TABLE) {
+    props.emplace_back(PROPERTY_ICEBERG_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id));
+  }
+
+  std::vector<const char*> c_keys, c_values;
+  c_keys.reserve(props.size());
+  c_values.reserve(props.size());
+  for (const auto& [k, v] : props) {
+    c_keys.push_back(k.c_str());
+    c_values.push_back(v.c_str());
+  }
+
+  LoonProperties loon_props = {};
+  auto rc = loon_properties_create(c_keys.data(), c_values.data(), c_keys.size(), &loon_props);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+
+  // Step 3: Discover files through the brokered SAS and write the manifest.
+  const char* columns_arr[] = {"id", "name", "value"};
+  uint64_t out_num_files = 0;
+  char* out_manifest_path = nullptr;
+
+  rc = loon_exttable_explore(columns_arr, 3, format.c_str(), manifest_base.c_str(), result.explore_dir.c_str(),
+                             &loon_props, &out_num_files, &out_manifest_path);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_GT(out_num_files, 0u);
+  ASSERT_NE(out_manifest_path, nullptr);
+
+  std::cout << "[Azure ARN Test] loon_exttable_explore: found " << out_num_files
+            << " files, manifest=" << out_manifest_path << std::endl;
+
+  // Step 4: Read the generated manifest.
+  LoonManifest* out_manifest = nullptr;
+  rc = loon_exttable_read_manifest(out_manifest_path, &loon_props, &out_manifest);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_NE(out_manifest, nullptr);
+  ASSERT_EQ(out_manifest->column_groups.num_of_column_groups, 1u);
+
+  auto* cg = &out_manifest->column_groups.column_group_array[0];
+  ASSERT_EQ(cg->num_of_files, out_num_files);
+
+  // Step 5: Read the discovered data using the broker configuration.
+  std::vector<std::string> columns = {"id", "name", "value"};
+  int64_t total_rows = 0;
+  for (uint64_t f = 0; f < cg->num_of_files; ++f) {
+    auto& loon_file = cg->files[f];
+    api::ColumnGroupFile cgfile;
+    cgfile.path = loon_file.path;
+    cgfile.start_index = loon_file.start_index;
+    cgfile.end_index = loon_file.end_index;
+    if (loon_file.property_keys != nullptr) {
+      for (uint32_t p = 0; p < loon_file.num_properties; ++p) {
+        cgfile.properties[loon_file.property_keys[p]] = loon_file.property_values[p];
+      }
+    }
+
+    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, format, cgfile, read_props_, columns, nullptr));
+    ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
+    for (size_t i = 0; i < rg_infos.size(); ++i) {
+      ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
+      total_rows += batch->num_rows();
+    }
+  }
+  ASSERT_EQ(total_rows, static_cast<int64_t>(num_rows));
+  std::cout << "[Azure ARN Test] FormatReader read " << total_rows << " rows via brokered SAS OK" << std::endl;
+
+  loon_manifest_destroy(out_manifest);
+  free(out_manifest_path);
+  loon_properties_free(&loon_props);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AzureArnFormats,
+    ExternalTableAzureArnTest,
+    ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE, LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX));
 
 // ===========================================================================
 // Integration test for reading external OSS tables via Aliyun
@@ -687,7 +986,7 @@ INSTANTIATE_TEST_SUITE_P(GcpImpersonationFormats,
 // then read back using only the role_arn. This mirrors the AWS ARN test.
 //
 // Iceberg now works through the bridge-local `AliyunOssStorageFactory`
-// registered in `iceberg_bridgeimpl.rs::storage_factory_for_scheme` — stock
+// registered in `iceberg_bridgeimpl.rs::upstream_opendal_factory` — stock
 // iceberg-storage-opendal's `OssConfig` still drops `role_arn` /
 // `security_token` / `oidc-*`, which is why we route `oss://` to our own
 // `Storage` impl instead of `OpenDalStorageFactory::Oss`.
@@ -915,7 +1214,6 @@ class ExternalTableAliyunArnTest : public ::testing::Test {
   std::string test_base_;
 };
 
-// Lance-only: see fixture-level comment for why Iceberg isn't covered.
 TEST_F(ExternalTableAliyunArnTest, ReadLanceWithArnRole) {
   const uint64_t num_rows = 100;
 
@@ -1239,6 +1537,91 @@ TEST_F(ExternalTableAliyunArnTest, ReadTwoParquetFilesWithArnRole) {
   loon_properties_free(&loon_props);
 }
 
+// Vortex follows the same plain-format path as Parquet. This verifies that
+// discovery, metadata loading, and data reads all use the customer role ARN.
+TEST_F(ExternalTableAliyunArnTest, ReadVortexWithArnRole) {
+  const uint64_t num_rows = 100;
+
+  ASSERT_AND_ASSIGN(auto result, WritePlainFormatFile(LOON_FORMAT_VORTEX, num_rows, write_fs_, write_props_, test_base_,
+                                                      "oss", address_, arn_bucket_));
+
+  std::cout << "[Aliyun ARN Test] Vortex explore dir: " << result.explore_dir << std::endl;
+  std::cout << "[Aliyun ARN Test] Role ARN: " << role_arn_ << std::endl;
+
+  auto manifest_base = test_base_ + "/manifest";
+  std::vector<std::pair<std::string, std::string>> props = {
+      {PROPERTY_FS_STORAGE_TYPE, "remote"},    {PROPERTY_FS_CLOUD_PROVIDER, our_cloud_provider_},
+      {PROPERTY_FS_ADDRESS, our_address_},     {PROPERTY_FS_BUCKET_NAME, our_bucket_},
+      {PROPERTY_FS_REGION, our_region_},       {PROPERTY_FS_ACCESS_KEY_ID, our_ak_},
+      {PROPERTY_FS_ACCESS_KEY_VALUE, our_sk_}, {PROPERTY_FS_USE_SSL, "true"},
+      {"extfs.arn.storage_type", "remote"},    {"extfs.arn.cloud_provider", kCloudProviderAliyun},
+      {"extfs.arn.address", address_},         {"extfs.arn.bucket_name", arn_bucket_},
+      {"extfs.arn.region", region_},           {"extfs.arn.use_ssl", "true"},
+      {"extfs.arn.role_arn", role_arn_},
+  };
+
+  std::vector<const char*> c_keys, c_values;
+  c_keys.reserve(props.size());
+  c_values.reserve(props.size());
+  for (const auto& [k, v] : props) {
+    c_keys.push_back(k.c_str());
+    c_values.push_back(v.c_str());
+  }
+
+  LoonProperties loon_props = {};
+  auto rc = loon_properties_create(c_keys.data(), c_values.data(), c_keys.size(), &loon_props);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+
+  const char* columns_arr[] = {"id", "name", "value"};
+  uint64_t out_num_files = 0;
+  char* out_manifest_path = nullptr;
+  rc = loon_exttable_explore(columns_arr, 3, LOON_FORMAT_VORTEX, manifest_base.c_str(), result.explore_dir.c_str(),
+                             &loon_props, &out_num_files, &out_manifest_path);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_EQ(out_num_files, 1u);
+  ASSERT_NE(out_manifest_path, nullptr);
+
+  LoonManifest* out_manifest = nullptr;
+  rc = loon_exttable_read_manifest(out_manifest_path, &loon_props, &out_manifest);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_NE(out_manifest, nullptr);
+  ASSERT_EQ(out_manifest->column_groups.num_of_column_groups, 1u);
+
+  auto* cg = &out_manifest->column_groups.column_group_array[0];
+  ASSERT_EQ(cg->num_of_files, 1u);
+
+  auto& loon_file = cg->files[0];
+  uint64_t file_rows = 0;
+  rc = loon_exttable_get_file_info(LOON_FORMAT_VORTEX, loon_file.path, &loon_props, &file_rows);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_EQ(file_rows, num_rows);
+
+  api::ColumnGroupFile cgfile;
+  cgfile.path = loon_file.path;
+  cgfile.start_index = loon_file.start_index;
+  cgfile.end_index = loon_file.end_index;
+  if (loon_file.property_keys != nullptr) {
+    for (uint32_t p = 0; p < loon_file.num_properties; ++p) {
+      cgfile.properties[loon_file.property_keys[p]] = loon_file.property_values[p];
+    }
+  }
+
+  std::vector<std::string> columns = {"id", "name", "value"};
+  ASSERT_AND_ASSIGN(auto reader,
+                    FormatReader::create(result.schema, LOON_FORMAT_VORTEX, cgfile, read_props_, columns, nullptr));
+  ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
+  int64_t total_rows_read = 0;
+  for (size_t i = 0; i < rg_infos.size(); ++i) {
+    ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
+    total_rows_read += batch->num_rows();
+  }
+  ASSERT_EQ(total_rows_read, static_cast<int64_t>(num_rows));
+
+  loon_manifest_destroy(out_manifest);
+  free(out_manifest_path);
+  loon_properties_free(&loon_props);
+}
+
 // ===========================================================================
 // Aliyun OIDC chain integration test (`AliyunOIDCAssumeRoleChainProvider` on
 // the C++ side, `apply_oidc_chain_if_requested` on the Rust side).
@@ -1346,7 +1729,7 @@ class ExternalTableAliyunOIDCArnTest : public ::testing::Test {
     FilesystemCache::getInstance().clean();
   }
 
-  // FFI properties payload shared by all three formats. Iceberg additionally
+  // FFI properties payload shared by all four formats. Iceberg additionally
   // needs PROPERTY_ICEBERG_SNAPSHOT_ID; callers append.
   std::vector<std::pair<std::string, std::string>> BaseProps() const {
     std::vector<std::pair<std::string, std::string>> props = {
@@ -1648,6 +2031,81 @@ TEST_F(ExternalTableAliyunOIDCArnTest, ReadTwoParquetFilesWithOIDCChain) {
     }
   }
   ASSERT_EQ(total_rows_read, static_cast<int64_t>(total_rows));
+
+  loon_manifest_destroy(out_manifest);
+  free(out_manifest_path);
+  loon_properties_free(&loon_props);
+}
+
+// Vortex also uses the native C++ filesystem, so it must exercise the OIDC
+// chain independently of the Rust-backed Lance and Iceberg paths.
+TEST_F(ExternalTableAliyunOIDCArnTest, ReadVortexWithOIDCChain) {
+  const uint64_t num_rows = 100;
+
+  ASSERT_AND_ASSIGN(auto result, WritePlainFormatFile(LOON_FORMAT_VORTEX, num_rows, write_fs_, write_props_, test_base_,
+                                                      "oss", address_, arn_bucket_));
+
+  std::cout << "[Aliyun OIDC Test] Vortex explore dir: " << result.explore_dir << std::endl;
+
+  auto manifest_base = test_base_ + "/manifest";
+  auto props = BaseProps();
+
+  std::vector<const char*> c_keys, c_values;
+  c_keys.reserve(props.size());
+  c_values.reserve(props.size());
+  for (const auto& [k, v] : props) {
+    c_keys.push_back(k.c_str());
+    c_values.push_back(v.c_str());
+  }
+
+  LoonProperties loon_props = {};
+  auto rc = loon_properties_create(c_keys.data(), c_values.data(), c_keys.size(), &loon_props);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+
+  const char* columns_arr[] = {"id", "name", "value"};
+  uint64_t out_num_files = 0;
+  char* out_manifest_path = nullptr;
+  rc = loon_exttable_explore(columns_arr, 3, LOON_FORMAT_VORTEX, manifest_base.c_str(), result.explore_dir.c_str(),
+                             &loon_props, &out_num_files, &out_manifest_path);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_EQ(out_num_files, 1u);
+  ASSERT_NE(out_manifest_path, nullptr);
+
+  LoonManifest* out_manifest = nullptr;
+  rc = loon_exttable_read_manifest(out_manifest_path, &loon_props, &out_manifest);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_NE(out_manifest, nullptr);
+  ASSERT_EQ(out_manifest->column_groups.num_of_column_groups, 1u);
+
+  auto* cg = &out_manifest->column_groups.column_group_array[0];
+  ASSERT_EQ(cg->num_of_files, 1u);
+
+  auto& loon_file = cg->files[0];
+  uint64_t file_rows = 0;
+  rc = loon_exttable_get_file_info(LOON_FORMAT_VORTEX, loon_file.path, &loon_props, &file_rows);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_EQ(file_rows, num_rows);
+
+  api::ColumnGroupFile cgfile;
+  cgfile.path = loon_file.path;
+  cgfile.start_index = loon_file.start_index;
+  cgfile.end_index = loon_file.end_index;
+  if (loon_file.property_keys != nullptr) {
+    for (uint32_t p = 0; p < loon_file.num_properties; ++p) {
+      cgfile.properties[loon_file.property_keys[p]] = loon_file.property_values[p];
+    }
+  }
+
+  std::vector<std::string> columns = {"id", "name", "value"};
+  ASSERT_AND_ASSIGN(auto reader,
+                    FormatReader::create(result.schema, LOON_FORMAT_VORTEX, cgfile, read_props_, columns, nullptr));
+  ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
+  int64_t total_rows_read = 0;
+  for (size_t i = 0; i < rg_infos.size(); ++i) {
+    ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
+    total_rows_read += batch->num_rows();
+  }
+  ASSERT_EQ(total_rows_read, static_cast<int64_t>(num_rows));
 
   loon_manifest_destroy(out_manifest);
   free(out_manifest_path);

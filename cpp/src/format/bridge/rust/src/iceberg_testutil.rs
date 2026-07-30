@@ -34,7 +34,9 @@ use iceberg::spec::{
 };
 
 use crate::TOKIO_RT;
-use crate::iceberg_bridgeimpl::{build_file_io, denormalize_uri, normalize_uri, vec_to_hashmap};
+use crate::iceberg_bridgeimpl::{
+    build_file_io, denormalize_uri, normalize_uri, prepare_cloud_storage_options, vec_to_hashmap,
+};
 use crate::iceberg_test_ffi::IcebergTestTableInfo;
 
 /// Write a Parquet record batch to bytes in memory.
@@ -81,7 +83,8 @@ pub fn iceberg_create_test_table(
         (!record_scheme_override.is_empty()).then_some(record_scheme_override);
 
     TOKIO_RT.block_on(async {
-        let props = vec_to_hashmap(storage_options_keys, storage_options_values);
+        let mut props = vec_to_hashmap(storage_options_keys, storage_options_values);
+        prepare_cloud_storage_options(&mut props).await?;
 
         // Normalize URI for opendal and detect FileIO scheme in one pass.
         let (resolved_dir, scheme) = normalize_uri(table_dir, &props);

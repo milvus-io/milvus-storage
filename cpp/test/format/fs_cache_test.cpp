@@ -193,6 +193,37 @@ TEST_F(FileSystemCacheTest, GcpCacheKeyUsesImpersonationIdentityOnly) {
   EXPECT_NE(base.GetCacheKey(), different_target_sa.GetCacheKey());
 }
 
+TEST_F(FileSystemCacheTest, AzureBrokerCacheKeyUsesBrokerIdentity) {
+  ArrowFileSystemConfig base;
+  base.storage_type = "remote";
+  base.cloud_provider = kCloudProviderAzure;
+  base.address = "core.windows.net";
+  base.bucket_name = "container";
+  base.region = "westus3";
+  base.access_key_id = "account";
+  base.azure_client_id = "client-a";
+  base.azure_tenant_id = "tenant-a";
+  base.azure_credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
+  base.load_frequency = 3600;
+
+  auto different_client = base;
+  different_client.azure_client_id = "client-b";
+  EXPECT_NE(base.GetCacheKey(), different_client.GetCacheKey());
+
+  auto different_tenant = base;
+  different_tenant.azure_tenant_id = "tenant-b";
+  EXPECT_NE(base.GetCacheKey(), different_tenant.GetCacheKey());
+
+  auto different_endpoint = base;
+  different_endpoint.azure_credential_endpoint = "https://other-broker/v1/credentials/assume-role";
+  EXPECT_NE(base.GetCacheKey(), different_endpoint.GetCacheKey());
+
+  auto different_static_secret = base;
+  different_static_secret.access_key_value = "unused";
+  different_static_secret.use_iam = true;
+  EXPECT_EQ(base.GetCacheKey(), different_static_secret.GetCacheKey());
+}
+
 TEST_F(FileSystemCacheTest, CacheKeyIgnoresAlias) {
   ArrowFileSystemConfig base;
   base.storage_type = "remote";

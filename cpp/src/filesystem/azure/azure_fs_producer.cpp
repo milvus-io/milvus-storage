@@ -16,6 +16,7 @@
 #include <cassert>
 
 #include "milvus-storage/filesystem/azure/azurefs.h"
+#include "milvus-storage/filesystem/azure/azure_sas_token_policy.h"
 #include "milvus-storage/common/log.h"
 
 #include "milvus-storage/common/macro.h"
@@ -51,7 +52,20 @@ arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
   }
   options.background_writes = config_.background_writes;
 
-  if (config_.use_iam) {
+  if (config_.IsAzureCredentialBrokerEnabled()) {
+    fs::AzureSasBrokerConfig broker_config{
+        .endpoint = config_.azure_credential_endpoint,
+        .region = config_.region,
+        .bucket = config_.bucket_name,
+        .client_id = config_.azure_client_id,
+        .tenant_id = config_.azure_tenant_id,
+        .account_name = config_.access_key_id,
+        .duration_seconds = config_.load_frequency,
+        .request_timeout_ms = config_.request_timeout_ms,
+    };
+    ARROW_RETURN_NOT_OK(
+        options.ConfigureSASTokenPolicy(std::make_shared<fs::AzureSasTokenPolicy>(std::move(broker_config))));
+  } else if (config_.use_iam) {
     const char* federated_token = getenv("AZURE_FEDERATED_TOKEN_FILE");
     if (federated_token != nullptr && strlen(federated_token) > 0) {
       // Workload Identity
