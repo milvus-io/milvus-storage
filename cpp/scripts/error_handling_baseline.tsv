@@ -8,6 +8,5 @@ throw	cpp/src/format/lance/lance_common.cpp	2
 throw	cpp/src/format/vortex/vortex_translater.cpp	6
 throw	cpp/src/manifest.cpp	1
 throw	cpp/src/packed/chunk_manager.cpp	2
-throw	cpp/src/packed/column_group.cpp	1
 throw	cpp/src/packed/reader.cpp	1
 throw	cpp/src/properties.cpp	1
