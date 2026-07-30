@@ -158,7 +158,7 @@ std::vector<uint64_t> EstimateColumnByteWidths(const std::shared_ptr<arrow::Sche
 }
 
 arrow::Result<std::vector<RowGroupInfo>> MakeDirectLogicalRowGroups(const std::vector<RowGroupInfo>& physical,
-                                                                    const std::vector<int64_t>& deletions) {
+                                                                    const std::vector<uint64_t>& deletions) {
   if (deletions.empty()) {
     return physical;
   }
@@ -169,8 +169,8 @@ arrow::Result<std::vector<RowGroupInfo>> MakeDirectLogicalRowGroups(const std::v
     if (group.end_offset < group.start_offset) {
       return arrow::Status::Invalid("Invalid physical Paimon row group: ", group.ToString());
     }
-    auto first = std::lower_bound(deletions.begin(), deletions.end(), static_cast<int64_t>(group.start_offset));
-    auto last = std::lower_bound(deletions.begin(), deletions.end(), static_cast<int64_t>(group.end_offset));
+    auto first = std::lower_bound(deletions.begin(), deletions.end(), group.start_offset);
+    auto last = std::lower_bound(deletions.begin(), deletions.end(), group.end_offset);
     auto deleted = static_cast<uint64_t>(std::distance(first, last));
     auto physical_rows = static_cast<uint64_t>(group.end_offset - group.start_offset);
     if (deleted > physical_rows) {
@@ -223,15 +223,15 @@ arrow::Result<std::shared_ptr<arrow::Schema>> ProjectSchema(const std::shared_pt
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> FilterBatch(const std::shared_ptr<arrow::RecordBatch>& batch,
                                                                uint64_t physical_start,
-                                                               const std::vector<int64_t>& deletions) {
+                                                               const std::vector<uint64_t>& deletions) {
   if (deletions.empty() || batch->num_rows() == 0) {
     return batch;
   }
   std::vector<int64_t> keep;
   keep.reserve(batch->num_rows());
-  auto deletion = std::lower_bound(deletions.begin(), deletions.end(), static_cast<int64_t>(physical_start));
+  auto deletion = std::lower_bound(deletions.begin(), deletions.end(), physical_start);
   for (int64_t row = 0; row < batch->num_rows(); ++row) {
-    auto physical = static_cast<int64_t>(physical_start) + row;
+    auto physical = physical_start + static_cast<uint64_t>(row);
     while (deletion != deletions.end() && *deletion < physical) {
       ++deletion;
     }
@@ -288,7 +288,7 @@ class DirectDeletionReader final : public arrow::RecordBatchReader {
   public:
   DirectDeletionReader(std::shared_ptr<arrow::RecordBatchReader> source,
                        uint64_t physical_start,
-                       std::shared_ptr<const std::vector<int64_t>> deletions)
+                       std::shared_ptr<const std::vector<uint64_t>> deletions)
       : source_(std::move(source)), physical_position_(physical_start), deletions_(std::move(deletions)) {}
 
   std::shared_ptr<arrow::Schema> schema() const override { return source_->schema(); }
@@ -314,7 +314,7 @@ class DirectDeletionReader final : public arrow::RecordBatchReader {
   private:
   std::shared_ptr<arrow::RecordBatchReader> source_;
   uint64_t physical_position_;
-  std::shared_ptr<const std::vector<int64_t>> deletions_;
+  std::shared_ptr<const std::vector<uint64_t>> deletions_;
 };
 
 arrow::Status ValidatePredicatePushdown(const PaimonFormatReader::MetaTrait::Payload& payload,
@@ -393,7 +393,7 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
     }
   }
 
-  auto deletions = std::make_shared<std::vector<int64_t>>();
+  auto deletions = std::make_shared<std::vector<uint64_t>>();
   if (!parsed.deletion_file.is_null()) {
     if (!parsed.deletion_file.is_object()) {
       return arrow::Status::Invalid("Paimon deletion_file must be an object");
@@ -418,13 +418,10 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
                                           cardinality, storage_options);
       deletions->reserve(positions.size());
       for (auto position : positions) {
-        if (position > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-          return arrow::Status::Invalid("Paimon deletion position exceeds int64 range");
-        }
         if (position >= physical_rows) {
           return arrow::Status::Invalid("Paimon deletion position exceeds physical row count");
         }
-        deletions->push_back(static_cast<int64_t>(position));
+        deletions->push_back(position);
       }
     } catch (const std::exception& error) {
       // bitmap64 deletion vectors surface as NotImplemented instead of a
@@ -443,7 +440,7 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
     return arrow::Status::Invalid("Paimon direct-file row count mismatch: descriptor=", parsed.record_count,
                                   ", reader=", logical_rows);
   }
-  metadata->cache_size = direct_cache_size + deletions->size() * sizeof(int64_t) + metadata_json.size() +
+  metadata->cache_size = direct_cache_size + deletions->size() * sizeof(uint64_t) + metadata_json.size() +
                          physical_groups.size() * sizeof(RowGroupInfo);
 
   MetadataPtr result = metadata;
@@ -558,13 +555,13 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> PaimonFormatRead
   return output;
 }
 
-int64_t PaimonFormatReader::logical_to_physical(int64_t logical_offset) const {
+uint64_t PaimonFormatReader::logical_to_physical(uint64_t logical_offset) const {
   const auto& deletions = *metadata_->payload.sorted_deletions;
-  int64_t physical = logical_offset;
-  const auto physical_rows = static_cast<int64_t>(metadata_->payload.physical_row_count);
+  uint64_t physical = logical_offset;
+  const auto physical_rows = metadata_->payload.physical_row_count;
   for (size_t iteration = 0; iteration <= deletions.size(); ++iteration) {
     auto deleted =
-        static_cast<int64_t>(std::upper_bound(deletions.begin(), deletions.end(), physical) - deletions.begin());
+        static_cast<uint64_t>(std::upper_bound(deletions.begin(), deletions.end(), physical) - deletions.begin());
     auto next = logical_offset + deleted;
     if (next == physical) {
       return std::min(physical, physical_rows);
@@ -581,12 +578,15 @@ arrow::Result<std::shared_ptr<arrow::Table>> PaimonFormatReader::take(const std:
   std::vector<int64_t> physical;
   physical.reserve(indices.size());
   for (auto index : indices) {
-    physical.push_back(logical_to_physical(index));
-  }
-  for (auto index : physical) {
-    if (index < 0 || static_cast<uint64_t>(index) >= metadata_->payload.physical_row_count) {
+    if (index < 0 || static_cast<uint64_t>(index) >= metadata_->payload.record_count) {
       return arrow::Status::Invalid("Paimon direct-file take index is out of range");
     }
+    auto physical_index = logical_to_physical(static_cast<uint64_t>(index));
+    if (physical_index >= metadata_->payload.physical_row_count ||
+        physical_index > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+      return arrow::Status::Invalid("Paimon direct-file physical index is out of range");
+    }
+    physical.push_back(static_cast<int64_t>(physical_index));
   }
   return direct_file_reader_->take(physical);
 }
@@ -600,8 +600,8 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> PaimonFormatReader::rea
     ARROW_ASSIGN_OR_RAISE(auto empty, arrow::RecordBatch::MakeEmpty(output_schema_));
     return arrow::RecordBatchReader::Make({empty});
   }
-  auto physical_start = static_cast<uint64_t>(logical_to_physical(static_cast<int64_t>(start)));
-  auto physical_end = static_cast<uint64_t>(logical_to_physical(static_cast<int64_t>(end - 1)) + 1);
+  auto physical_start = logical_to_physical(start);
+  auto physical_end = logical_to_physical(end - 1) + 1;
   ARROW_ASSIGN_OR_RAISE(auto source, direct_file_reader_->read_with_range(physical_start, physical_end));
   return std::make_shared<DirectDeletionReader>(std::move(source), physical_start, metadata_->payload.sorted_deletions);
 }

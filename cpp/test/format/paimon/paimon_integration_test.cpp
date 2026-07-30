@@ -295,6 +295,13 @@ TEST_F(PaimonIntegrationTest, AutoUsesDirectFileAndAppliesDeletionVector) {
   EXPECT_EQ(ids->Value(2), 6);
   EXPECT_EQ(ids->Value(3), 8);
 
+  auto negative_take = reader->take({-1});
+  ASSERT_FALSE(negative_take.ok());
+  EXPECT_TRUE(negative_take.status().IsInvalid());
+  auto past_end_take = reader->take({7});
+  ASSERT_FALSE(past_end_take.ok());
+  EXPECT_TRUE(past_end_take.status().IsInvalid());
+
   ASSERT_AND_ASSIGN(auto range, reader->read_with_range(1, 5));
   ASSERT_AND_ASSIGN(auto range_table, arrow::Table::FromRecordBatchReader(range.get()));
   ASSERT_EQ(range_table->num_rows(), 4);

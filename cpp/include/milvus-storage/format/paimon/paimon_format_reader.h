@@ -37,7 +37,7 @@ class PaimonFormatReader final : public FormatReader {
                    vortex::VortexFormatReader::MetaTrait::MetadataPtr>
           direct_file_metadata;
       std::vector<RowGroupInfo> direct_physical_row_groups;
-      std::shared_ptr<const std::vector<int64_t>> sorted_deletions;
+      std::shared_ptr<const std::vector<uint64_t>> sorted_deletions;
       uint64_t record_count = 0;
       uint64_t physical_row_count = 0;
     };
@@ -80,7 +80,7 @@ class PaimonFormatReader final : public FormatReader {
 
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> filter_direct_batch(
       const std::shared_ptr<arrow::RecordBatch>& batch, uint64_t physical_start) const;
-  [[nodiscard]] int64_t logical_to_physical(int64_t logical_offset) const;
+  [[nodiscard]] uint64_t logical_to_physical(uint64_t logical_offset) const;
 
   MetaTrait::MetadataPtr metadata_;
   api::ColumnGroupFile file_;
