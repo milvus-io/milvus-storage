@@ -15,6 +15,8 @@
 #include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/format/vortex/vortex_footer_reader.h"
 
+#include "milvus-storage/format/vortex/vortex_footer_internal.h"
+
 #include <algorithm>
 #include <limits>
 #include <memory>
@@ -318,18 +320,30 @@ arrow::Status VortexFooterReader::Impl::OpenSparseVortexFile() {
   return arrow::Status::OK();
 }
 
+namespace internal {
+
+arrow::Status CheckVortexFooterRange(const std::vector<uint64_t>& footer_range,
+                                     uint64_t file_size,
+                                     const std::string& path) {
+  // Three ways the descriptor can contradict the file it describes: it is not a
+  // {offset, length} pair at all, the offset starts past the end, or the length
+  // runs off the end from that offset. The last is written as
+  // `length > file_size - offset` rather than `offset + length > file_size`
+  // because both are uint64 and the sum wraps.
+  if (footer_range.size() != 2 || footer_range[0] > file_size || footer_range[1] > file_size - footer_range[0]) {
+    return MakeExtendErrorMsg(ExtendStatusCode::PackedFileCorrupted,
+                              fmt::format("Invalid vortex footer byte range for {}", path));
+  }
+  return arrow::Status::OK();
+}
+
+}  // namespace internal
+
 arrow::Status VortexFooterReader::Impl::LoadFooter(const std::shared_ptr<arrow::io::RandomAccessFile>& input_file) {
   const auto eof_size = VortexEofSize();
   auto finish_opened_footer = [&]() -> arrow::Status {
     ARROW_ASSIGN_OR_RAISE(auto footer_range, vxfile->FooterByteRange(file_size));
-    if (footer_range.size() != 2 || footer_range[0] > file_size || footer_range[1] > file_size - footer_range[0]) {
-      // Parsed, and the parse says the footer contradicts the file: the range
-      // is malformed or points past the end. That is corruption, and it needs
-      // to be tagged -- an untagged Invalid now lands on a generic 2044,
-      // because the coarse fallback stopped guessing DataFormatBroken.
-      return MakeExtendErrorMsg(ExtendStatusCode::PackedFileCorrupted,
-                                fmt::format("Invalid vortex footer byte range for {}", path));
-    }
+    ARROW_RETURN_NOT_OK(internal::CheckVortexFooterRange(footer_range, file_size, path));
     footer_size = footer_range[1] > eof_size ? footer_range[1] - eof_size : 0;
     rows = vxfile->RowCount();
     return arrow::Status::OK();

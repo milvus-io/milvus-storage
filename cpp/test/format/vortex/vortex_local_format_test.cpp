@@ -18,6 +18,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -39,7 +40,9 @@
 #include <boost/filesystem/operations.hpp>
 
 #include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/format/vortex/vortex_footer_internal.h"
 #include "milvus-storage/format/vortex/vortex_footer_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_planner.h"
@@ -627,6 +630,62 @@ TEST_F(VortexLocalFormatTest, TestTranslaterRejectsInvalidInputs) {
   auto local_fs = std::make_shared<arrow::fs::LocalFileSystem>();
   ASSERT_STATUS_NOT_OK(
       VortexTranslater::Make(cell_metas, file_system_, test_file_name_, local_fs, "test-file.vx.sparse").status());
+}
+
+// The footer descriptor claims a byte range; this checks it against the file it
+// came from. Corruption, not a bad argument -- the bytes were parsed and found
+// to contradict the file, which is the one thing entitled to say Corrupted.
+//
+// Tests the rule, not the path to it. The guard sits behind
+// VortexFile::OpenUnique, which is handed the same file_size the check later
+// uses, so no amount of tampering with file_size reaches it -- inflate and the
+// tail read runs past EOF into sparse zeroes, deflate and it lands mid-file;
+// either way the EOF trailer fails to parse and OpenUnique rejects the file
+// first. An end-to-end case needs a hand-built vortex file whose trailer parses
+// but whose descriptor lies, and no such fixture exists in this tree. Saying so
+// here rather than leaving a green test to imply coverage it does not have.
+TEST(VortexFooterRangeTest, RangeThatContradictsTheFileIsCorruption) {
+  constexpr uint64_t kFileSize = 1000;
+
+  struct Case {
+    std::vector<uint64_t> range;
+    const char* what;
+  };
+  const Case bad[] = {
+      {{}, "empty -- not a pair"},
+      {{100}, "one element -- not a pair"},
+      {{100, 200, 300}, "three elements -- not a pair"},
+      {{kFileSize + 1, 0}, "offset past the end"},
+      {{0, kFileSize + 1}, "length past the end from offset 0"},
+      {{900, 200}, "offset in range, but offset+length past the end"},
+      // The check is written as `length > file_size - offset` precisely so this
+      // does not wrap to a pass.
+      {{1, std::numeric_limits<uint64_t>::max()}, "length that would overflow offset+length"},
+  };
+
+  for (const auto& c : bad) {
+    auto status = vortex::internal::CheckVortexFooterRange(c.range, kFileSize, "some.vortex");
+    ASSERT_FALSE(status.ok()) << c.what;
+
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << c.what << ": arrived unclassified, so real corruption reaches segcore as a"
+                               << " generic storage failure: " << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::PackedFileCorrupted) << c.what;
+    EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::Corrupted) << c.what;
+    EXPECT_FALSE(RetryableForExtendStatusCode(detail->code())) << c.what;
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::DataFormatBroken) << c.what;
+    EXPECT_NE(status.ToString().find("some.vortex"), std::string::npos) << c.what;
+  }
+
+  const Case good[] = {
+      {{0, 0}, "empty range at the start"},
+      {{0, kFileSize}, "the whole file"},
+      {{kFileSize, 0}, "empty range exactly at the end"},
+      {{900, 100}, "ends exactly at the end"},
+  };
+  for (const auto& c : good) {
+    EXPECT_TRUE(vortex::internal::CheckVortexFooterRange(c.range, kFileSize, "some.vortex").ok()) << c.what;
+  }
 }
 
 }  // namespace milvus_storage
