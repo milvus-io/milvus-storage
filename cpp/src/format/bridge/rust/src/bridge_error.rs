@@ -127,41 +127,68 @@ pub fn classify_lance_error(e: &LanceError) -> Option<i32> {
         }
         // IO wraps the underlying object_store error as a boxed source;
         // downcast to recover the typed variant.
-        LanceError::IO { source, .. } => match source.downcast_ref::<object_store::Error>() {
-            // A missing object while operating inside a dataset is not proof
-            // that the dataset itself is absent. Preserve ObjectNotExist
-            // without emitting the writer's create-if-missing ENOENT signal.
-            Some(object_store::Error::NotFound { .. }) => Some(LOON_LANCE_RESOURCE_NOT_FOUND),
-            Some(
-                object_store::Error::PermissionDenied { .. }
-                | object_store::Error::Unauthenticated { .. },
-            ) => Some(LOON_AWS_ERROR_ACCESS_DENIED),
-            Some(object_store::Error::Precondition { .. }) => {
-                Some(LOON_AWS_ERROR_PRECONDITION_FAILED)
-            }
-            Some(
-                object_store::Error::NotSupported { .. }
-                | object_store::Error::NotImplemented { .. },
-            ) => Some(BRIDGE_ERRCODE_NOT_SUPPORTED),
-            // Generic carries the post-retry HTTP failure. The typed carrier
-            // (client::retry::RetryError, which has .status()) is pub(crate)
-            // in object_store and cannot be downcast from here, so the status
-            // code is recovered from the stable Display pattern of
-            // RequestError::Status ("non-2xx status code: NNN"). Fail-safe by
-            // construction: if object_store ever rewords it, this returns
-            // None and the error lands in the conservative non-retriable
-            // bucket -- it can never mis-tag a permanent error as transient.
-            Some(object_store::Error::Generic { source, .. }) => {
-                classify_http_status_in_message(&source.to_string())
-            }
-            // Anything else: no positive transient/permanent signal survives,
-            // so stay untagged (conservative).
-            _ => None,
-        },
+        LanceError::IO { source, .. } => classify_boxed_source(source.as_ref()),
+        // Wrappers that carry a classified error inside. lance-io's batch read
+        // scheduler stashes the failing task's error and re-wraps it on drop
+        // (`Error::wrapped(...)` in lance-io/src/scheduler.rs), and the encoding
+        // decoder does the same, so a plain S3 throttle on any batched read
+        // arrives here as Wrapped(IO(object_store::Generic)) rather than IO.
+        // Without unwrapping, a retriable failure would be reported as a
+        // permanent one -- the classification is already there, just one box
+        // deeper. Recursion terminates because each step strips one layer.
+        LanceError::Wrapped { error, .. } => classify_boxed_source(error.as_ref()),
+        LanceError::External { source } => classify_boxed_source(source.as_ref()),
         // InvalidInput deliberately NOT tagged as caller input: the strings we
         // feed lance are mostly assembled by this library itself, so blaming
         // the caller would misroute retries (see the 2007/2020/2021
         // demotions). Left untagged pending a producer-site audit.
+        _ => None,
+    }
+}
+
+/// Classify a boxed error carried by `LanceError::IO` / `Wrapped` / `External`.
+///
+/// The box can hold either the underlying `object_store::Error` or another
+/// `LanceError` that some layer re-wrapped, so try both. Anything else stays
+/// untagged (conservative non-retriable).
+fn classify_boxed_source(
+    source: &(dyn std::error::Error + Send + Sync + 'static),
+) -> Option<i32> {
+    if let Some(store_error) = source.downcast_ref::<object_store::Error>() {
+        return classify_object_store_error(store_error);
+    }
+    if let Some(lance_error) = source.downcast_ref::<LanceError>() {
+        return classify_lance_error(lance_error);
+    }
+    None
+}
+
+/// Classify the typed `object_store::Error` that backs lance's IO.
+fn classify_object_store_error(error: &object_store::Error) -> Option<i32> {
+    match error {
+        // A missing object while operating inside a dataset is not proof that
+        // the dataset itself is absent. Preserve ObjectNotExist without
+        // emitting the writer's create-if-missing ENOENT signal.
+        object_store::Error::NotFound { .. } => Some(LOON_LANCE_RESOURCE_NOT_FOUND),
+        object_store::Error::PermissionDenied { .. }
+        | object_store::Error::Unauthenticated { .. } => Some(LOON_AWS_ERROR_ACCESS_DENIED),
+        object_store::Error::Precondition { .. } => Some(LOON_AWS_ERROR_PRECONDITION_FAILED),
+        object_store::Error::NotSupported { .. } | object_store::Error::NotImplemented { .. } => {
+            Some(BRIDGE_ERRCODE_NOT_SUPPORTED)
+        }
+        // Generic carries the post-retry HTTP failure. The typed carrier
+        // (client::retry::RetryError, which has .status()) is pub(crate) in
+        // object_store and cannot be downcast from here, so the status code is
+        // recovered from the stable Display pattern of RequestError::Status
+        // ("non-2xx status code: NNN"). Fail-safe by construction: if
+        // object_store ever rewords it, this returns None and the error lands
+        // in the conservative non-retriable bucket -- it can never mis-tag a
+        // permanent error as transient.
+        object_store::Error::Generic { source, .. } => {
+            classify_http_status_in_message(&source.to_string())
+        }
+        // Anything else: no positive transient/permanent signal survives, so
+        // stay untagged (conservative).
         _ => None,
     }
 }
@@ -260,6 +287,54 @@ mod tests {
             classify_lance_error(&conflict),
             Some(LOON_LANCE_WRITE_CONTENTION)
         );
+    }
+
+    // lance-io's batch read scheduler stashes the failing task's error and
+    // re-wraps it when the batch drops (`Error::wrapped(...)`,
+    // lance-io/src/scheduler.rs), so on any batched read a throttle arrives as
+    // Wrapped(IO(object_store::Generic)) rather than IO(..). Before unwrapping,
+    // that turned the single most retriable condition into a permanent error.
+    #[test]
+    fn wrapped_errors_keep_the_inner_classification() {
+        let throttled = LanceError::from(object_store::Error::Generic {
+            store: "S3",
+            source: "Server returned non-2xx status code: 503: slow down".into(),
+        });
+        assert_eq!(
+            classify_lance_error(&throttled),
+            Some(LOON_TRANSIENT_SERVICE)
+        );
+
+        let wrapped = LanceError::wrapped(Box::new(throttled));
+        assert_eq!(classify_lance_error(&wrapped), Some(LOON_TRANSIENT_SERVICE));
+
+        // Nested wrapping keeps working: each step strips one layer.
+        let twice = LanceError::wrapped(Box::new(LanceError::wrapped(Box::new(
+            LanceError::from(object_store::Error::NotFound {
+                path: "a/b".to_string(),
+                source: "missing".into(),
+            }),
+        ))));
+        assert_eq!(
+            classify_lance_error(&twice),
+            Some(LOON_LANCE_RESOURCE_NOT_FOUND)
+        );
+
+        // A box holding the object_store error directly is classified too.
+        let external = LanceError::External {
+            source: Box::new(object_store::Error::PermissionDenied {
+                path: "a/b".to_string(),
+                source: "denied".into(),
+            }),
+        };
+        assert_eq!(
+            classify_lance_error(&external),
+            Some(LOON_AWS_ERROR_ACCESS_DENIED)
+        );
+
+        // A wrapper with nothing classifiable inside stays untagged.
+        let opaque = LanceError::wrapped(Box::new(std::io::Error::other("opaque")));
+        assert_eq!(classify_lance_error(&opaque), None);
     }
 
     #[test]
