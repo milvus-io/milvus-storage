@@ -48,12 +48,20 @@ namespace internal {
 /// Takes the raw HTTP status rather than the SDK enum so it can be unit-tested
 /// without an Azure account or a synthesized SDK exception.
 ///
-/// \param http_status the HTTP status code, or 0 when the request never
-///        received a response (a transport failure: connection refused/reset,
-///        DNS, TLS).
+/// \param http_status the HTTP status code, or 0 when the exception carries no
+///        response. 0 alone does NOT mean "network failure": Azure's
+///        `RequestFailedException(std::string)` also leaves `StatusCode` at
+///        `None`, and `PollUntilDone` raises exactly that when a copy operation
+///        ends in a failed state. Only `transport_failure` may be treated as
+///        retriable.
 /// \param error_code the Azure `ErrorCode` string, used only where the HTTP
 ///        status alone is ambiguous (409 and 503).
-std::optional<milvus_storage::ExtendStatusCode> ClassifyAzureError(int http_status, std::string_view error_code);
+/// \param transport_failure true only for `Azure::Core::Http::TransportException`
+///        -- the request never reached the service (connection refused/reset,
+///        DNS, TLS). `http_status` is ignored when this is set.
+std::optional<milvus_storage::ExtendStatusCode> ClassifyAzureError(int http_status,
+                                                                   std::string_view error_code,
+                                                                   bool transport_failure);
 
 enum class HierarchicalNamespaceSupport {
   kUnknown = 0,
