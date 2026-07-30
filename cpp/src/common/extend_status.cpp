@@ -74,6 +74,33 @@ const ExtendStatusCodeMetadata* FindExtendStatusCodeMetadata(int code) {
 
 }  // namespace
 
+namespace {
+
+// ABI guard for ExtendStatusDetail. Compares against a mirror of its members
+// rather than a hardcoded size, because the size is platform-dependent:
+// libc++'s std::string is 24 bytes and libstdc++'s is 32, so the same layout is
+// 48 bytes on macOS and 56 on Linux. A previous version of this asserted `== 48`
+// and broke every Linux build -- including the Java and Python jobs, which
+// compile the same C++ core -- while passing locally on macOS. Only the DELTA
+// is portable: one bool plus its padding.
+//
+// If this fires, someone changed the layout of a type that ships in an
+// installed header from a library with no SOVERSION. Decide that on purpose and
+// bump the version; do not adjust the mirror to match.
+struct ExtendStatusDetailAbiMirror : arrow::StatusDetail {
+  const char* type_id() const override { return nullptr; }
+  std::string ToString() const override { return {}; }
+
+  ExtendStatusCode code_;
+  std::string extra_info_;
+  bool reserved_was_retryable_;
+};
+
+static_assert(sizeof(ExtendStatusDetail) == sizeof(ExtendStatusDetailAbiMirror),
+              "ExtendStatusDetail layout changed -- see reserved_was_retryable_");
+
+}  // namespace
+
 ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code) : code_{code} {}
 ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code, const char* extra_info)
     : ExtendStatusDetail(code, std::string(extra_info)) {}

@@ -120,24 +120,23 @@ class ExtendStatusDetail : public arrow::StatusDetail {
   std::string extra_info_;
 
   // Reserved: written once by its own initializer, never read, never assigned.
-  // This used to be `bool retryable_`, a
-  // stored copy of state that is now derived from the code -- storing it was
-  // how the two answers drifted apart, which is the whole point of this class.
+  // This used to be `bool retryable_`, a stored copy of state that is now
+  // derived from the code -- storing it was how the two answers drifted apart,
+  // which is the whole point of this class.
   //
   // The byte stays because removing it is an ABI break, not a cleanup. This
   // class ships in an installed header, its constructors are exported from the
-  // shared library, and the project sets no SOVERSION; dropping the field takes
-  // sizeof from 48 to 40, so a consumer compiled against the old header reads
-  // past an allocation the library made at the new size. Reclaim it in a
-  // release that bumps the ABI on purpose.
+  // shared library, and the project sets no SOVERSION; dropping the field
+  // shrinks every instance by one bool plus its padding, so a consumer compiled
+  // against the old header reads past an allocation the library made at the new
+  // size. Reclaim it in a release that bumps the ABI on purpose.
+  //
+  // The guard against that lives in extend_status.cpp rather than here. It has
+  // to compare against a mirror of these members, not a constant: the absolute
+  // size is platform-dependent, because libc++'s std::string is 24 bytes and
+  // libstdc++'s is 32.
   bool reserved_was_retryable_ = false;
 };
-
-// Pins the layout so the field above cannot be reclaimed by accident. If this
-// fires, you changed the ABI of a type that ships in an installed header from a
-// library with no SOVERSION -- decide that deliberately and bump the version,
-// do not silence the assert.
-static_assert(sizeof(ExtendStatusDetail) == 48, "ExtendStatusDetail layout is ABI; see reserved_was_retryable_");
 
 std::optional<ExtendStatusCode> ExtendStatusCodeFromInt(int code);
 
