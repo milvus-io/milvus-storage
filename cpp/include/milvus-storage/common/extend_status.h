@@ -119,7 +119,8 @@ class ExtendStatusDetail : public arrow::StatusDetail {
   ExtendStatusCode code_;
   std::string extra_info_;
 
-  // Reserved, never read, never written. This used to be `bool retryable_`, a
+  // Reserved: written once by its own initializer, never read, never assigned.
+  // This used to be `bool retryable_`, a
   // stored copy of state that is now derived from the code -- storing it was
   // how the two answers drifted apart, which is the whole point of this class.
   //

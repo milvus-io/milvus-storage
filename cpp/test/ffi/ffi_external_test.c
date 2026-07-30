@@ -298,7 +298,11 @@ static void test_exttable_get_file_info_directory_error(const char* format) {
   rc = loon_exttable_get_file_info(format, relative_path, &rp, &num_rows);
 
   ck_assert(!loon_ffi_is_success(&rc));
-  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  /* The path came from the user's external-source definition and points at a
+     directory. That is their input being wrong, not the API being misused, so
+     it re-tags to SOURCE_INVALID rather than staying INVALID_ARGS -- the same
+     move made for the not-found case. */
+  ck_assert_int_eq(rc.err_code, loon_errcode_source_invalid);
   ck_assert(rc.message != NULL);
   printf("Expected error for directory: %s\n", loon_ffi_get_errmsg(&rc));
 
@@ -342,7 +346,11 @@ static void test_exttable_get_file_info_invalid_format(void) {
   rc = loon_exttable_get_file_info("invalid_format", file_path, &rp, &num_rows);
 
   ck_assert(!loon_ffi_is_success(&rc));
-  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  /* Same rule: every argument this entry point takes -- location, properties,
+     format -- comes from the user's external-source definition, so an
+     unrecognised format is a user error. Only the null-pointer guards stay on
+     the internal codes. */
+  ck_assert_int_eq(rc.err_code, loon_errcode_source_invalid);
   ck_assert(rc.message != NULL);
   printf("Expected error: %s\n", loon_ffi_get_errmsg(&rc));
 

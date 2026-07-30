@@ -340,23 +340,34 @@ TEST_F(ExternalFilesystemTest, AzureCredentialBrokerConfigValidation) {
   non_azure_config.cloud_provider = kCloudProviderAWS;
   EXPECT_FALSE(non_azure_config.IsAzureCredentialBrokerEnabled());
 
+  // The three rejection paths below were already executed by this test, but it
+  // only ever asserted IsInvalid() -- so replacing the classified status with a
+  // plain arrow::Status::Invalid at either producer would have left it green.
+  // The path was covered; the classification was not. AssertBrokerConfigError
+  // pins the part that actually reaches an operator.
+  auto AssertBrokerConfigError = [](const arrow::Status& status, const char* what) {
+    ASSERT_FALSE(status.ok()) << what;
+    EXPECT_TRUE(status.IsInvalid()) << what;  // detected before any IO
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << what << ": arrived unclassified, so a broken deployment reaches segcore"
+                               << " as a generic storage failure: " << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageConfigInvalid) << what;
+    EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::Config) << what;
+    EXPECT_FALSE(RetryableForExtendStatusCode(detail->code())) << what;
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::ConfigInvalid) << what;
+  };
+
   auto partial = props;
   partial.erase(PROPERTY_FS_AZURE_TENANT_ID);
-  auto partial_result = FilesystemCache::resolve_config(partial);
-  ASSERT_FALSE(partial_result.ok());
-  EXPECT_TRUE(partial_result.status().IsInvalid());
+  AssertBrokerConfigError(FilesystemCache::resolve_config(partial).status(), "missing azure_tenant_id");
 
   auto invalid_endpoint = props;
   invalid_endpoint[PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT] = std::string("file:///tmp/credentials");
-  auto invalid_endpoint_result = FilesystemCache::resolve_config(invalid_endpoint);
-  ASSERT_FALSE(invalid_endpoint_result.ok());
-  EXPECT_TRUE(invalid_endpoint_result.status().IsInvalid());
+  AssertBrokerConfigError(FilesystemCache::resolve_config(invalid_endpoint).status(), "non-HTTP endpoint scheme");
 
   auto missing_host = props;
   missing_host[PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT] = std::string("http:///credentials");
-  auto missing_host_result = FilesystemCache::resolve_config(missing_host);
-  ASSERT_FALSE(missing_host_result.ok());
-  EXPECT_TRUE(missing_host_result.status().IsInvalid());
+  AssertBrokerConfigError(FilesystemCache::resolve_config(missing_host).status(), "endpoint with no host");
 }
 
 TEST_F(ExternalFilesystemTest, ExtractExternalFsRejectsUndefinedProperty) {

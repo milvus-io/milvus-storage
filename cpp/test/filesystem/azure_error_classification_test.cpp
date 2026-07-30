@@ -165,6 +165,15 @@ TEST(AzureErrorClassification, UnidentifiedStatusesStayUntagged) {
 
   // 409 that is not "already exists" is a different condition; not guessed at.
   EXPECT_FALSE(ClassifyAzureError(409, "LeaseIdMissing", /*transport_failure=*/false).has_value());
+
+  // 412 gets the same treatment, which it did not used to. Azure answers 412
+  // both for a genuine etag mismatch and for lease problems; classifying every
+  // 412 as a precondition conflict was a guess, and it sat directly above the
+  // 409 case that already refused to guess.
+  EXPECT_FALSE(ClassifyAzureError(412, "LeaseIdMismatchWithBlobOperation", /*transport_failure=*/false).has_value());
+  EXPECT_FALSE(ClassifyAzureError(412, "LeaseNotPresentWithBlobOperation", /*transport_failure=*/false).has_value());
+  EXPECT_FALSE(ClassifyAzureError(412, "", /*transport_failure=*/false).has_value());
+  EXPECT_EQ(SegcoreCodeFor(412, "LeaseIdMismatchWithBlobOperation"), milvus::StorageError);
   EXPECT_EQ(SegcoreCodeFor(409, "LeaseIdMissing"), milvus::StorageError);
 }
 

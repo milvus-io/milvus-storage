@@ -289,6 +289,54 @@ TEST(ErrorTaxonomyTest, UserSuppliedLocationRetagsNotFoundAndAccessDenied) {
   EXPECT_EQ(UserSourceErrorCodeFromStatus(arrow::Status::Invalid("plain"), LOON_LOGICAL_ERROR), LOON_LOGICAL_ERROR);
 }
 
+// The location spec itself, as opposed to the object it names. These three
+// default to Config because a producer cannot tell an operator's milvus.yaml
+// from a user's DDL -- but at an entry point that is contractually handed a
+// user-supplied location, it can.
+//
+// This test exists because the mapping was missing and nothing noticed. Merging
+// SourceUriInvalid(116) into StorageConfigInvalid(115) silently moved a
+// malformed user URI from User/2042 to Config/2006, so a user who typo'd a URI
+// in external-table DDL was told to go find an operator. The compensating
+// re-tag was promised and not written, and no assertion anywhere would have
+// caught it.
+TEST(ErrorTaxonomyTest, UserSuppliedLocationRetagsTheLocationSpecItself) {
+  struct Case {
+    ExtendStatusCode produced;
+    int internal_code;
+    const char* what;
+  };
+  const Case cases[] = {
+      {ExtendStatusCode::StorageConfigInvalid, LOON_STORAGE_CONFIG_INVALID, "unparseable URI / unusable extfs.*"},
+      {ExtendStatusCode::AwsErrorBucketNotFound, LOON_AWS_ERROR_BUCKET_NOT_FOUND, "bucket the user named is gone"},
+  };
+
+  for (const auto& c : cases) {
+    auto status = MakeExtendError(c.produced, "bad location", "bad location");
+
+    // Off a user-supplied location entry point: User.
+    EXPECT_EQ(UserSourceErrorCodeFromStatus(status, LOON_ARROW_ERROR), LOON_SOURCE_INVALID) << c.what;
+    EXPECT_EQ(loon_ffi_error_category(LOON_SOURCE_INVALID), LOON_ERROR_CATEGORY_USER) << c.what;
+
+    // Everywhere else the producer's Config verdict stands, because nothing
+    // there knows whose string it was.
+    EXPECT_EQ(FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR), c.internal_code) << c.what;
+    EXPECT_EQ(loon_ffi_error_category(c.internal_code), LOON_ERROR_CATEGORY_CONFIG) << c.what;
+  }
+
+  // Properties are part of the same definition -- the credentials and extfs.*
+  // keys in an external-source DDL are the user's, and exttable_c.cpp says so
+  // in its own comment.
+  EXPECT_EQ(UserSourceErrorCodeFromStatus(arrow::Status::Invalid("x"), LOON_INVALID_PROPERTIES), LOON_SOURCE_INVALID);
+  EXPECT_EQ(loon_ffi_error_category(LOON_INVALID_PROPERTIES), LOON_ERROR_CATEGORY_CONFIG);
+
+  // Neither re-tag touches retriability: a throttle reached through a
+  // user-supplied path is still a throttle.
+  auto throttled = MakeExtendError(ExtendStatusCode::StorageTransientThrottling, "slow", "slow");
+  EXPECT_TRUE(loon_ffi_is_retryable_errcode(UserSourceErrorCodeFromStatus(throttled, LOON_ARROW_ERROR)));
+  EXPECT_FALSE(loon_ffi_is_retryable_errcode(LOON_SOURCE_INVALID));
+}
+
 // Requirement 4: the codes line up with the AWS S3 / Aliyun OSS vocabulary, so
 // an operator can map a milvus-storage code to what the object store reported.
 // Deliberate divergences are documented in docs/error-codes.md.
