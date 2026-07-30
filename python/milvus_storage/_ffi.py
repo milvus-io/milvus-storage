@@ -22,8 +22,7 @@ _ERROR_CODE_SYMBOLS = (
     "loon_errcode_fault_inject",
     "loon_errcode_not_support",
     "loon_errcode_file_not_found",
-    "loon_errcode_source_not_found",
-    "loon_errcode_source_access_denied",
+    "loon_errcode_source_invalid",
     "loon_errcode_packed_invalid_args",
     "loon_errcode_packed_storage_io",
     "loon_errcode_packed_metadata_corrupted",
@@ -43,24 +42,31 @@ _ERROR_CODE_SYMBOLS = (
     "loon_errcode_txn_exhausted_retry",
     "loon_errcode_txn_resolution_failed",
     "loon_errcode_storage_config_invalid",
-    "loon_errcode_source_uri_invalid",
+    "loon_errcode_manifest_corrupted",
+    "loon_errcode_aws_bucket_not_found",
 )
 
 # Error categories from ffi_c.h. Every error code maps to exactly one of these,
 # and retriability is derived from the category rather than stored per code:
-# TRANSIENT, THROTTLED and CONFLICT are worth retrying; USER, CONFIG and
-# PERMANENT are not, and an unrecognized code reports UNKNOWN, which must be
-# treated as permanent because inventing retriability is the more expensive
-# mistake. A USER or CONFIG error must be reported to whoever made the request
-# or owns the deployment -- retrying it just burns the budget.
+# TRANSIENT and CONFLICT are worth retrying -- with different strategies, which
+# is why they stay apart: plain backoff for one, re-read-then-rebase for the
+# other. The other five never are. USER goes back to whoever made the request,
+# CONFIG to whoever owns the deployment, PERMANENT to a developer. MISSING means
+# the named object is not there, and this library deliberately refuses to say
+# whether that is a GC race or data loss -- re-read your metadata and decide.
+# CORRUPTED means a layer that actually parsed the bytes found them wrong: act
+# on the data, not the request. An unrecognized code reports UNKNOWN and must be
+# treated as permanent, because inventing retriability is the more expensive
+# mistake.
 # See docs/error-codes.md for the full table.
 _ERROR_CATEGORY_SYMBOLS = (
     "loon_error_category_unknown",
     "loon_error_category_user",
     "loon_error_category_config",
     "loon_error_category_transient",
-    "loon_error_category_throttled",
     "loon_error_category_conflict",
+    "loon_error_category_missing",
+    "loon_error_category_corrupted",
     "loon_error_category_permanent",
 )
 
@@ -131,8 +137,7 @@ _ffi.cdef(
     extern int loon_errcode_fault_inject;
     extern int loon_errcode_not_support;
     extern int loon_errcode_file_not_found;
-    extern int loon_errcode_source_not_found;
-    extern int loon_errcode_source_access_denied;
+    extern int loon_errcode_source_invalid;
     extern int loon_errcode_packed_invalid_args;
     extern int loon_errcode_packed_storage_io;
     extern int loon_errcode_packed_metadata_corrupted;
@@ -152,14 +157,16 @@ _ffi.cdef(
     extern int loon_errcode_txn_exhausted_retry;
     extern int loon_errcode_txn_resolution_failed;
     extern int loon_errcode_storage_config_invalid;
-    extern int loon_errcode_source_uri_invalid;
+    extern int loon_errcode_manifest_corrupted;
+    extern int loon_errcode_aws_bucket_not_found;
 
     extern int loon_error_category_unknown;
     extern int loon_error_category_user;
     extern int loon_error_category_config;
     extern int loon_error_category_transient;
-    extern int loon_error_category_throttled;
     extern int loon_error_category_conflict;
+    extern int loon_error_category_missing;
+    extern int loon_error_category_corrupted;
     extern int loon_error_category_permanent;
 
     int loon_ffi_is_success(LoonFFIResult* result);

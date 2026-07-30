@@ -439,20 +439,21 @@ arrow::Result<StorageUri> StorageUri::Parse(const std::string& uri, bool include
 
   std::string path = parsed.path();
   if (path.empty()) {
-    return MakeExtendErrorMsg(ExtendStatusCode::SourceUriInvalid, "Storage URI missing bucket and key: ", uri);
+    return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid, "Storage URI missing bucket and key: ", uri);
   }
   if (path[0] == '/') {
     path = path.substr(1);
   }
   if (path.empty()) {
-    return MakeExtendErrorMsg(ExtendStatusCode::SourceUriInvalid, "Storage URI missing bucket/container name: ", uri);
+    return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                              "Storage URI missing bucket/container name: ", uri);
   }
 
   if (include_address) {
     result.address = host;
     size_t slash_pos = path.find('/');
     if (slash_pos == std::string::npos) {
-      return MakeExtendErrorMsg(ExtendStatusCode::SourceUriInvalid, "Missing path in storage URI: ", uri);
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid, "Missing path in storage URI: ", uri);
     }
     result.bucket_name = path.substr(0, slash_pos);
     result.key = path.substr(slash_pos + 1);
@@ -465,7 +466,7 @@ arrow::Result<StorageUri> StorageUri::Parse(const std::string& uri, bool include
   }
 
   if (result.bucket_name.empty()) {
-    return MakeExtendErrorMsg(ExtendStatusCode::SourceUriInvalid,
+    return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
                               "Missing bucket/container name in storage URI: ", uri);
   }
 
@@ -474,13 +475,14 @@ arrow::Result<StorageUri> StorageUri::Parse(const std::string& uri, bool include
 
 arrow::Result<std::string> StorageUri::Make(const StorageUri& uri, bool include_address) {
   if (uri.scheme.empty()) {
-    return MakeExtendErrorMsg(ExtendStatusCode::SourceUriInvalid, "StorageUri::Make: scheme must not be empty");
+    return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid, "StorageUri::Make: scheme must not be empty");
   }
   if (uri.bucket_name.empty()) {
-    return MakeExtendErrorMsg(ExtendStatusCode::SourceUriInvalid, "StorageUri::Make: bucket_name must not be empty");
+    return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                              "StorageUri::Make: bucket_name must not be empty");
   }
   if (uri.key.empty()) {
-    return MakeExtendErrorMsg(ExtendStatusCode::SourceUriInvalid, "StorageUri::Make: key must not be empty");
+    return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid, "StorageUri::Make: key must not be empty");
   }
 
   if (!include_address) {

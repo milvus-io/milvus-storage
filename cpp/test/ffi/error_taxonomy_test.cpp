@@ -83,11 +83,10 @@ TEST(ErrorTaxonomyTest, CodeValuesAreUnique) {
 // Requirement 2 + 3, tied together: retriability is not an independent bit, it
 // is the Transient category. This is what keeps "whose fault" and "should I
 // retry" from drifting apart.
-TEST(ErrorTaxonomyTest, RetryableIsExactlyTheThreeRetriableCategories) {
+TEST(ErrorTaxonomyTest, RetryableIsExactlyTheTwoRetriableCategories) {
   for (const auto& row : AllCodes()) {
     const bool retryable = loon_ffi_is_retryable_errcode(row.code) != 0;
-    const bool expected = row.category == LOON_ERROR_CATEGORY_TRANSIENT ||
-                          row.category == LOON_ERROR_CATEGORY_THROTTLED || row.category == LOON_ERROR_CATEGORY_CONFLICT;
+    const bool expected = row.category == LOON_ERROR_CATEGORY_TRANSIENT || row.category == LOON_ERROR_CATEGORY_CONFLICT;
     EXPECT_EQ(retryable, expected) << row.name;
 
     // The two non-retriable categories differ in who fixes it, not in whether
@@ -101,7 +100,7 @@ TEST(ErrorTaxonomyTest, RetryableIsExactlyTheThreeRetriableCategories) {
   }
 }
 
-// Every code must land in one of the six; the enum is closed. UNKNOWN is a
+// Every code must land in one of the seven; the enum is closed. UNKNOWN is a
 // consumer-side degradation value and must never be produced.
 TEST(ErrorTaxonomyTest, CategoriesAreClosedAndNoProducerEmitsUnknown) {
   for (const auto& row : AllCodes()) {
@@ -109,12 +108,13 @@ TEST(ErrorTaxonomyTest, CategoriesAreClosedAndNoProducerEmitsUnknown) {
       case LOON_ERROR_CATEGORY_USER:
       case LOON_ERROR_CATEGORY_CONFIG:
       case LOON_ERROR_CATEGORY_TRANSIENT:
-      case LOON_ERROR_CATEGORY_THROTTLED:
       case LOON_ERROR_CATEGORY_CONFLICT:
+      case LOON_ERROR_CATEGORY_MISSING:
+      case LOON_ERROR_CATEGORY_CORRUPTED:
       case LOON_ERROR_CATEGORY_PERMANENT:
         break;
       default:
-        FAIL() << row.name << " has category " << row.category << ", which is outside the closed six";
+        FAIL() << row.name << " has category " << row.category << ", which is outside the closed seven";
     }
   }
 }
@@ -147,9 +147,8 @@ TEST(ErrorTaxonomyTest, ExtendStatusAgreesWithFfiView) {
     EXPECT_EQ(DefaultRetryableForExtendStatusCode(*code), loon_ffi_is_retryable_errcode(row.code) != 0) << row.name;
     EXPECT_EQ(S3CodeForExtendStatusCode(*code), std::string_view(row.s3_code)) << row.name;
     EXPECT_EQ(ExtendStatusDetail(*code).CodeAsString(), std::string(row.name));
-    EXPECT_EQ(ExtendStatusDetail(*code).retryable(), row.category == LOON_ERROR_CATEGORY_TRANSIENT ||
-                                                         row.category == LOON_ERROR_CATEGORY_THROTTLED ||
-                                                         row.category == LOON_ERROR_CATEGORY_CONFLICT)
+    EXPECT_EQ(ExtendStatusDetail(*code).retryable(),
+              row.category == LOON_ERROR_CATEGORY_TRANSIENT || row.category == LOON_ERROR_CATEGORY_CONFLICT)
         << row.name;
     EXPECT_EQ(static_cast<int>(ExtendStatusDetail(*code).category()), row.category) << row.name;
   }
@@ -170,21 +169,51 @@ TEST(ErrorTaxonomyTest, SegcoreMappingMatchesCategory) {
 
     switch (row.category) {
       case LOON_ERROR_CATEGORY_USER:
-        EXPECT_EQ(segcore, milvus::InvalidParameter) << row.name << " is a user error but does not map to 2042";
+        // Unreachable by construction, and that IS the invariant. Only an entry
+        // point contractually handed a user-supplied location can know the
+        // input came from a user, so User is producible exclusively by the
+        // re-tagging in exttable_c.cpp -- never by a layer that merely attaches
+        // an ExtendStatusDetail, which has no idea who supplied the string.
+        // If this fires, someone classified a producer-side code as User and
+        // milvus will tell an end user their query is wrong for something they
+        // did not do.
+        FAIL() << row.name
+               << " is an ExtendStatusCode classified User. Producer-side codes cannot know "
+                  "whose input failed; classify it Config and let the entry point re-tag.";
         break;
       case LOON_ERROR_CATEGORY_CONFIG:
-        // Must NOT be 2042: a misconfigured deployment is not the API caller's
-        // fault, and reporting it as one sends the user editing their request.
-        EXPECT_EQ(segcore, milvus::ConfigInvalid) << row.name << " is a config error but does not map to 2006";
+        // The load-bearing half is the NE: a misconfigured deployment is not
+        // the API caller's fault, and reporting it as one sends the user
+        // editing their request forever while nobody pages the person who can
+        // fix it.
+        //
+        // The EQ is deliberately a set, not a single value. It used to pin
+        // ConfigInvalid alone, which was really "2006 happens to be the only
+        // config-shaped code we use". BucketInvalid is equally config-shaped and
+        // strictly more precise for a bucket that is not there, so pinning one
+        // value would have forced a less accurate mapping to satisfy a test.
+        EXPECT_TRUE(segcore == milvus::ConfigInvalid || segcore == milvus::BucketInvalid)
+            << row.name << " is a config error but maps to " << segcore << ", which is not config-shaped";
         EXPECT_NE(segcore, milvus::InvalidParameter) << row.name << " blames the caller for an operator problem";
         break;
       case LOON_ERROR_CATEGORY_TRANSIENT:
-      case LOON_ERROR_CATEGORY_THROTTLED:
       case LOON_ERROR_CATEGORY_CONFLICT:
-        // All three are retriable, so they share the one retriable segcore
-        // code. The strategy difference (backoff / Retry-After / rebase) is
-        // carried by the ExtendStatusCode, not by the segcore code.
+        // Both are retriable, so they share the one retriable segcore code. The
+        // strategy difference (plain backoff vs re-read-and-rebase) is carried
+        // by the ExtendStatusCode, not by the segcore code.
         EXPECT_EQ(segcore, milvus::StorageTransientError) << row.name << " is retriable but does not map to 2045";
+        break;
+      case LOON_ERROR_CATEGORY_MISSING:
+        // Never 2045. This layer cannot tell a GC race from real data loss, so
+        // it refuses to answer the retry question rather than guessing; milvus
+        // re-reads the manifest and decides.
+        EXPECT_EQ(segcore, milvus::ObjectNotExist) << row.name << " is Missing but does not map to 2017";
+        EXPECT_NE(segcore, milvus::StorageTransientError) << row.name << " invents retriability for a missing object";
+        EXPECT_FALSE(DefaultRetryableForExtendStatusCode(code)) << row.name;
+        break;
+      case LOON_ERROR_CATEGORY_CORRUPTED:
+        EXPECT_EQ(segcore, milvus::DataFormatBroken) << row.name << " is Corrupted but does not map to 2024";
+        EXPECT_FALSE(DefaultRetryableForExtendStatusCode(code)) << row.name;
         break;
       case LOON_ERROR_CATEGORY_PERMANENT:
         EXPECT_NE(segcore, milvus::StorageTransientError) << row.name << " is permanent but maps to retriable 2045";
@@ -210,8 +239,7 @@ TEST(ErrorTaxonomyTest, ExportedConstantsMatchMacros) {
   EXPECT_EQ(loon_errcode_fault_inject, LOON_FAULT_INJECT_ERROR);
   EXPECT_EQ(loon_errcode_not_support, LOON_NOT_SUPPORT);
   EXPECT_EQ(loon_errcode_file_not_found, LOON_FILE_NOT_FOUND);
-  EXPECT_EQ(loon_errcode_source_not_found, LOON_SOURCE_NOT_FOUND);
-  EXPECT_EQ(loon_errcode_source_access_denied, LOON_SOURCE_ACCESS_DENIED);
+  EXPECT_EQ(loon_errcode_source_invalid, LOON_SOURCE_INVALID);
   EXPECT_EQ(loon_errcode_aws_no_such_upload, LOON_AWS_ERROR_NO_SUCH_UPLOAD);
   EXPECT_EQ(loon_errcode_aws_conflict, LOON_AWS_ERROR_CONFLICT);
   EXPECT_EQ(loon_errcode_aws_precondition_failed, LOON_AWS_ERROR_PRECONDITION_FAILED);
@@ -226,13 +254,11 @@ TEST(ErrorTaxonomyTest, ExportedConstantsMatchMacros) {
   EXPECT_EQ(loon_errcode_txn_resolution_failed, LOON_TXN_RESOLUTION_FAILED);
 
   EXPECT_EQ(loon_errcode_storage_config_invalid, LOON_STORAGE_CONFIG_INVALID);
-  EXPECT_EQ(loon_errcode_source_uri_invalid, LOON_SOURCE_URI_INVALID);
 
   EXPECT_EQ(loon_error_category_unknown, LOON_ERROR_CATEGORY_UNKNOWN);
   EXPECT_EQ(loon_error_category_user, LOON_ERROR_CATEGORY_USER);
   EXPECT_EQ(loon_error_category_config, LOON_ERROR_CATEGORY_CONFIG);
   EXPECT_EQ(loon_error_category_transient, LOON_ERROR_CATEGORY_TRANSIENT);
-  EXPECT_EQ(loon_error_category_throttled, LOON_ERROR_CATEGORY_THROTTLED);
   EXPECT_EQ(loon_error_category_conflict, LOON_ERROR_CATEGORY_CONFLICT);
   EXPECT_EQ(loon_error_category_permanent, LOON_ERROR_CATEGORY_PERMANENT);
 }
@@ -242,16 +268,16 @@ TEST(ErrorTaxonomyTest, ExportedConstantsMatchMacros) {
 TEST(ErrorTaxonomyTest, UserSuppliedLocationRetagsNotFoundAndAccessDenied) {
   auto not_found = MakeExtendError(ExtendStatusCode::AwsErrorNotFound, "missing", "missing");
   EXPECT_EQ(FFIErrorCodeFromExtendStatus(not_found, LOON_ARROW_ERROR), LOON_AWS_ERROR_NOT_FOUND);
-  EXPECT_EQ(UserSourceErrorCodeFromStatus(not_found, LOON_ARROW_ERROR), LOON_SOURCE_NOT_FOUND);
-  EXPECT_EQ(loon_ffi_error_category(LOON_SOURCE_NOT_FOUND), LOON_ERROR_CATEGORY_USER);
+  EXPECT_EQ(UserSourceErrorCodeFromStatus(not_found, LOON_ARROW_ERROR), LOON_SOURCE_INVALID);
+  EXPECT_EQ(loon_ffi_error_category(LOON_SOURCE_INVALID), LOON_ERROR_CATEGORY_USER);
 
   auto denied = MakeExtendError(ExtendStatusCode::AwsErrorAccessDenied, "denied", "denied");
-  EXPECT_EQ(UserSourceErrorCodeFromStatus(denied, LOON_ARROW_ERROR), LOON_SOURCE_ACCESS_DENIED);
-  EXPECT_EQ(loon_ffi_error_category(LOON_SOURCE_ACCESS_DENIED), LOON_ERROR_CATEGORY_USER);
+  EXPECT_EQ(UserSourceErrorCodeFromStatus(denied, LOON_ARROW_ERROR), LOON_SOURCE_INVALID);
+  EXPECT_EQ(loon_ffi_error_category(LOON_SOURCE_INVALID), LOON_ERROR_CATEGORY_USER);
 
   auto enoent = arrow::Status::IOError("missing").WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
   EXPECT_EQ(FFIErrorCodeFromExtendStatus(enoent, LOON_ARROW_ERROR), LOON_FILE_NOT_FOUND);
-  EXPECT_EQ(UserSourceErrorCodeFromStatus(enoent, LOON_ARROW_ERROR), LOON_SOURCE_NOT_FOUND);
+  EXPECT_EQ(UserSourceErrorCodeFromStatus(enoent, LOON_ARROW_ERROR), LOON_SOURCE_INVALID);
 
   // A transient failure stays transient: only ownership is re-tagged, never
   // retriability.
@@ -289,11 +315,6 @@ TEST(ErrorTaxonomyTest, S3VocabularyIsPinned) {
 // Documented divergences from AWS's own client/server split. Pinned so that
 // changing one is a deliberate edit to both the table and docs/error-codes.md.
 TEST(ErrorTaxonomyTest, DocumentedDivergencesFromAws) {
-  // AWS: NoSuchUpload is a 404 client error. Ours: Conflict -- the upload state
-  // another actor invalidated is gone, and the fix is to start a fresh upload,
-  // i.e. re-establish state and re-submit rather than replay.
-  EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::AwsErrorNoSuchUpload), ErrorCategory::Conflict);
-
   // AWS treats 409/412 as terminal client errors. Ours: Conflict, which is
   // retriable -- but only after re-reading. This is the whole reason Conflict
   // is not folded into Transient: a consumer that replays the same conditional
@@ -307,33 +328,98 @@ TEST(ErrorTaxonomyTest, DocumentedDivergencesFromAws) {
   // Throttling is retriable like the other transients but must not share their
   // strategy: a plain backoff-and-retry against a throttling store amplifies
   // the overload it is reacting to.
-  EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::StorageTransientThrottling), ErrorCategory::Throttled);
+  EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::StorageTransientThrottling), ErrorCategory::Transient);
   EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::StorageTransientService), ErrorCategory::Transient);
 
-  // AWS: NoSuchKey/NoSuchBucket are 4xx client errors. Ours: permanent SYSTEM
-  // errors, because on an internal path the caller never chose the key. The
-  // user-supplied counterpart is LOON_SOURCE_NOT_FOUND, which IS a user error.
-  EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::AwsErrorNotFound), ErrorCategory::Permanent);
-  EXPECT_EQ(loon_ffi_error_category(LOON_SOURCE_NOT_FOUND), LOON_ERROR_CATEGORY_USER);
+  // AWS: NoSuchKey is a 4xx client error. Ours: Missing -- on an internal path
+  // the caller never chose the key, so it is not their fault, and it is not
+  // Permanent either because re-reading the manifest may well show the file was
+  // legitimately collected. We refuse to answer the retry question rather than
+  // guess; milvus re-reads and decides. The user-supplied counterpart is
+  // LOON_SOURCE_INVALID, which IS a user error.
+  EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::AwsErrorNotFound), ErrorCategory::Missing);
+  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNotFound));
+
+  // AWS: NoSuchBucket is grouped with NoSuchKey. We split it: nothing was lost,
+  // and no re-read produces a bucket. It is a deployment pointing at something
+  // that is not there, so Config -- and it lands on BucketInvalid/2016, which
+  // milvus already had and we were not using.
+  EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::AwsErrorBucketNotFound), ErrorCategory::Config);
+  EXPECT_EQ(ToSegcoreErrorCode(ExtendStatusCode::AwsErrorBucketNotFound), milvus::BucketInvalid);
+  EXPECT_NE(ToSegcoreErrorCode(ExtendStatusCode::AwsErrorBucketNotFound), milvus::ObjectNotExist);
+
+  // AWS: NoSuchUpload is a 404 client error, and we used to call it Conflict and
+  // retriable on the theory that our retry starts a fresh upload. That assumed a
+  // consumer behaviour this layer cannot guarantee; a resend against the dead
+  // upload id fails identically forever.
+  EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::AwsErrorNoSuchUpload), ErrorCategory::Missing);
+  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNoSuchUpload));
+  EXPECT_EQ(loon_ffi_error_category(LOON_SOURCE_INVALID), LOON_ERROR_CATEGORY_USER);
 
   // AWS: AccessDenied is a 403 client error. Ours: permanent system error --
   // the credentials are operator configuration, not part of the request.
   EXPECT_EQ(CategoryForExtendStatusCode(ExtendStatusCode::AwsErrorAccessDenied), ErrorCategory::Config);
-  EXPECT_EQ(loon_ffi_error_category(LOON_SOURCE_ACCESS_DENIED), LOON_ERROR_CATEGORY_USER);
+  EXPECT_EQ(loon_ffi_error_category(LOON_SOURCE_INVALID), LOON_ERROR_CATEGORY_USER);
 
   // AWS: InternalError (500) is retriable. Ours: LOON_LOGICAL_ERROR and friends
   // are our own bugs -- retrying reproduces them.
   EXPECT_EQ(loon_ffi_error_category(LOON_LOGICAL_ERROR), LOON_ERROR_CATEGORY_PERMANENT);
   EXPECT_EQ(loon_ffi_error_category(LOON_ARROW_ERROR), LOON_ERROR_CATEGORY_PERMANENT);
 
-  // Operator configuration is not the API caller's fault. Both are
-  // non-retriable, but only one should be reported back as a bad request.
-  // The caller built a malformed properties array (duplicate key, bad index):
-  // its bug, not the deployment's. Unusable deployment configuration is
-  // LOON_STORAGE_CONFIG_INVALID.
-  EXPECT_EQ(loon_ffi_error_category(LOON_INVALID_PROPERTIES), LOON_ERROR_CATEGORY_USER);
+  // Nothing below the FFI entry points may call itself User: only an entry
+  // point contractually handed a user-supplied location knows the input came
+  // from a user. A property value that will not parse could equally be a
+  // milvus.yaml mistake or a segcore hard-coded one, and the producer cannot
+  // tell -- so it is Config, and paging an operator for what turns out to be a
+  // user typo costs less than telling a user to fix a deployment they cannot
+  // touch.
+  EXPECT_EQ(loon_ffi_error_category(LOON_INVALID_PROPERTIES), LOON_ERROR_CATEGORY_CONFIG);
   EXPECT_EQ(loon_ffi_error_category(LOON_STORAGE_CONFIG_INVALID), LOON_ERROR_CATEGORY_CONFIG);
-  EXPECT_EQ(loon_ffi_error_category(LOON_SOURCE_URI_INVALID), LOON_ERROR_CATEGORY_USER);
+  EXPECT_EQ(loon_ffi_error_category(LOON_NOT_SUPPORT), LOON_ERROR_CATEGORY_CONFIG);
+  // The one code that IS User, and the only one: minted exclusively by the
+  // re-tagging at loon_exttable_explore / loon_exttable_get_file_info.
+  EXPECT_EQ(loon_ffi_error_category(LOON_SOURCE_INVALID), LOON_ERROR_CATEGORY_USER);
+  // Caller misuse across the C ABI is a developer's problem, not a user's.
+  EXPECT_EQ(loon_ffi_error_category(LOON_INVALID_ARGS), LOON_ERROR_CATEGORY_PERMANENT);
+}
+
+// 2024 DataFormatBroken must have exactly one source: a producer that actually
+// parsed the bytes and found them wrong. The coarse arrow-status fallback used
+// to guess it from Status::Invalid, which meant that of the ~380 unclassified
+// Invalid sites in cpp/src -- null-pointer preconditions, missing config,
+// caller contract violations -- every one arrived at segcore claiming the data
+// was corrupt. An alert that is mostly false is worse than no alert.
+//
+// This is the machine-checkable form of the Corrupted discipline: it is easier
+// to verify "the fallback never produces 2024" than "only a layer that parsed
+// the bytes says Corrupted", and the two are equivalent in effect.
+TEST(ErrorTaxonomyTest, CoarseFallbackNeverClaimsCorruption) {
+  const arrow::Status unclassified[] = {
+      arrow::Status::Invalid("Cannot add null column group"),
+      arrow::Status::Invalid("batch schema does not match writer schema"),
+      arrow::Status::TypeError("unexpected arrow type"),
+      arrow::Status::KeyError("missing key"),
+      arrow::Status::IOError("connection reset"),
+      arrow::Status::UnknownError("something"),
+  };
+  for (const auto& status : unclassified) {
+    ASSERT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr) << status.ToString();
+    auto code = ToSegcoreError(status).get_error_code();
+    EXPECT_NE(code, milvus::DataFormatBroken)
+        << status.ToString() << " reached segcore claiming corrupt data, without anyone having read a byte";
+  }
+
+  // ...while a producer that DID parse the bytes still gets there.
+  for (auto corrupt : {ExtendStatusCode::PackedMetadataCorrupted, ExtendStatusCode::PackedFileCorrupted,
+                       ExtendStatusCode::ManifestCorrupted}) {
+    auto status = MakeExtendError(corrupt, "bad bytes", "bad bytes");
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::DataFormatBroken);
+  }
+
+  // The ENOENT rung is untouched: a filesystem answering "no such file" IS a
+  // definitive not-found, which is the Missing discipline, not a guess.
+  auto enoent = arrow::Status::IOError("missing").WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
+  EXPECT_EQ(ToSegcoreError(enoent).get_error_code(), milvus::ObjectNotExist);
 }
 
 }  // namespace milvus_storage::test

@@ -114,9 +114,9 @@ inline int UserSourceErrorCodeFromStatus(const arrow::Status& status, int fallba
   switch (code) {
     case LOON_AWS_ERROR_NOT_FOUND:
     case LOON_FILE_NOT_FOUND:
-      return LOON_SOURCE_NOT_FOUND;
+      return LOON_SOURCE_INVALID;
     case LOON_AWS_ERROR_ACCESS_DENIED:
-      return LOON_SOURCE_ACCESS_DENIED;
+      return LOON_SOURCE_INVALID;
     default:
       return code;
   }

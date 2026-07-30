@@ -131,7 +131,7 @@ TEST(FFIInternalResultTest, MapsStatusDetailsToFfiResults) {
   ASSERT_TRUE(code.has_value());
   EXPECT_EQ(*code, ExtendStatusCode::AwsErrorNotFound);
 
-  EXPECT_TRUE(loon_ffi_is_retryable_errcode(LOON_AWS_ERROR_NO_SUCH_UPLOAD));
+  EXPECT_FALSE(loon_ffi_is_retryable_errcode(LOON_AWS_ERROR_NO_SUCH_UPLOAD));
   EXPECT_FALSE(loon_ffi_is_retryable_errcode(LOON_AWS_ERROR_ACCESS_DENIED));
 
   auto throttling_status = MakeExtendError(ExtendStatusCode::StorageTransientThrottling, "throttled", "throttled");

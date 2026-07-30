@@ -248,7 +248,10 @@ TEST(VortexErrorTest, MapsBridgeErrorCodesToStatusDetails) {
   auto upload_detail = ExtendStatusDetail::UnwrapStatus(upload_status);
   ASSERT_NE(upload_detail, nullptr);
   EXPECT_EQ(upload_detail->code(), ExtendStatusCode::AwsErrorNoSuchUpload);
-  EXPECT_TRUE(upload_detail->retryable());
+  // Was EXPECT_TRUE. The bridge faithfully carries the code across FFI, which is
+  // what this test is for; whether the condition is retriable is the taxonomy's
+  // call, and it is not -- a dead upload id cannot be resent into life.
+  EXPECT_FALSE(upload_detail->retryable());
   EXPECT_EQ(upload_status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
 
   auto network_status = MakeVortexErrorStatus(

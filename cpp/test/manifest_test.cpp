@@ -17,12 +17,14 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <sstream>
 #include <vector>
 
 #include <arrow/api.h>
 #include <arrow/filesystem/localfs.h>
 
 #include "milvus-storage/column_groups.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/layout.h"
 #include "milvus-storage/manifest.h"
@@ -546,6 +548,47 @@ TEST_F(ManifestTest, ColumnGroupsXFormatsXFiles) {
   // Indexes
   ASSERT_EQ(read_back->indexes().size(), 1);
   EXPECT_EQ(read_back->indexes()[0].properties.at("M"), "32");
+}
+
+// ManifestCorrupted(117) exists because the coarse arrow-status fallback no
+// longer guesses DataFormatBroken for a plain Status::Invalid. Without an
+// explicit code here, a manifest that does not parse would silently downgrade
+// from "your data is corrupt" to a generic storage error.
+//
+// These drive the real Manifest::deserialize rather than synthesizing the code,
+// because the table entry was pinned while the code path that justifies it had
+// no coverage at all -- exactly the "dead code that looks alive" shape the
+// producer gate exists to catch, one level down.
+TEST_F(ManifestTest, CorruptManifestIsClassifiedCorrupted) {
+  struct Case {
+    const char* bytes;
+    const char* what;
+  };
+  const Case cases[] = {
+      {"", "empty file"},
+      {"ab", "shorter than the 4-byte format header"},
+      {"NOPE----not-a-manifest", "readable length, but neither avro nor MILV magic"},
+  };
+
+  for (const auto& c : cases) {
+    // Through the public ReadFrom, not deserialize -- that one is private, and
+    // reaching past it would test a path no caller can take.
+    std::string path = base_path_ + "/corrupt.manifest";
+    ASSERT_AND_ASSIGN(auto out, fs_->OpenOutputStream(path));
+    ASSERT_STATUS_OK(out->Write(c.bytes, static_cast<int64_t>(std::string(c.bytes).size())));
+    ASSERT_STATUS_OK(out->Close());
+    Manifest::CleanCache();
+
+    auto result = Manifest::ReadFrom(fs_, path);
+    ASSERT_FALSE(result.ok()) << c.what;
+    auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+    ASSERT_NE(detail, nullptr) << c.what << ": arrived unclassified, so it reaches segcore as a generic"
+                               << " storage failure rather than as corrupt data: " << result.status().ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::ManifestCorrupted) << c.what;
+    EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::Corrupted) << c.what;
+    EXPECT_FALSE(DefaultRetryableForExtendStatusCode(detail->code())) << c.what;
+    EXPECT_EQ(ToSegcoreError(result.status()).get_error_code(), milvus::DataFormatBroken) << c.what;
+  }
 }
 
 }  // namespace milvus_storage::test

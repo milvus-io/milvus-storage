@@ -35,12 +35,12 @@ struct ExtendStatusCodeMetadata {
   ErrorCategory category;
   std::string_view s3_code;
 
-  // Derived, never stored. Three of the six categories are worth retrying,
-  // each with a different strategy (plain backoff / Retry-After + shedding /
-  // re-read and rebase). Storing a second bool is how the two answers drift.
+  // Derived, never stored. Two of the seven categories are worth retrying, and
+  // they need different strategies (plain backoff vs re-read-and-rebase), which
+  // is why they stay separate rather than collapsing into one retriable flag.
+  // Storing a second bool is how the two answers drift apart.
   [[nodiscard]] constexpr bool retryable() const {
-    return category == ErrorCategory::Transient || category == ErrorCategory::Throttled ||
-           category == ErrorCategory::Conflict;
+    return category == ErrorCategory::Transient || category == ErrorCategory::Conflict;
   }
 };
 
@@ -127,8 +127,7 @@ ErrorCategory CategoryForExtendStatusCode(ExtendStatusCode code) {
 
 bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code) {
   auto category = CategoryForExtendStatusCode(code);
-  return category == ErrorCategory::Transient || category == ErrorCategory::Throttled ||
-         category == ErrorCategory::Conflict;
+  return category == ErrorCategory::Transient || category == ErrorCategory::Conflict;
 }
 
 std::string_view S3CodeForExtendStatusCode(ExtendStatusCode code) {
@@ -141,8 +140,11 @@ std::string_view S3CodeForExtendStatusCode(ExtendStatusCode code) {
 namespace {
 
 // The conditions we detect before issuing any IO: nothing was attempted, so
-// reporting them as an IO failure would be a lie, and `ToSegcoreError`'s
-// fallback would file them under DataFormatBroken rather than as bad input.
+// reporting them as an IO failure would be a lie. (This used to add "and the
+// fallback would file them under DataFormatBroken" -- no longer true, and the
+// fallback change is precisely why: an unclassified Invalid now lands on
+// StorageError. The arrow-code choice still matters on its own, because callers
+// branch on IsIOError.)
 //
 // Deliberately a small explicit set rather than a function of the category.
 // Category answers "who owns this"; the arrow code answers "what failed". A
@@ -152,7 +154,6 @@ bool IsPreIoValidationFailure(ExtendStatusCode code) {
   switch (code) {
     case ExtendStatusCode::PackedInvalidArgs:
     case ExtendStatusCode::StorageConfigInvalid:
-    case ExtendStatusCode::SourceUriInvalid:
       return true;
     default:
       return false;
@@ -226,7 +227,10 @@ arrow::Status WrapExtendError(ExtendStatusCode code, std::string message, const 
 milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
   switch (code) {
     case ExtendStatusCode::PackedInvalidArgs:
-      return milvus::InvalidParameter;  // 2042, caller's fault (non-retriable input)
+      // Internal API misuse (null batch, column index out of range, path/group
+      // count mismatch) -- our bug, not an end user's parameter. 2042 would
+      // make milvus tell a user their query is wrong.
+      return milvus::StorageError;  // 2044
     case ExtendStatusCode::PackedStorageIO:
       // Conservatively non-retriable, but this is a DORMANT branch: no live
       // consumer routes a Packed* status here (the packed C-APIs hardcode
@@ -241,10 +245,6 @@ milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
     case ExtendStatusCode::PackedArrowError:
     case ExtendStatusCode::PackedUnexpected:
       return milvus::StorageError;  // 2044, permanent internal storage error
-    case ExtendStatusCode::AwsErrorNoSuchUpload:
-      // The SDK has exhausted retries for the failed multipart upload state,
-      // but an outer operation retry can create a fresh upload and succeed.
-      return milvus::StorageTransientError;  // 2045
     case ExtendStatusCode::StorageTransientNetwork:
     case ExtendStatusCode::StorageTransientTimeout:
     case ExtendStatusCode::StorageTransientThrottling:
@@ -265,13 +265,22 @@ milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
       // nothing about an outer attempt made later, in a different contention
       // window.
       return milvus::StorageTransientError;  // 2045
+    case ExtendStatusCode::ManifestCorrupted:
+      return milvus::DataFormatBroken;  // 2024
+    case ExtendStatusCode::AwsErrorBucketNotFound:
+      // Not ObjectNotExist: nothing was lost. The deployment names a bucket
+      // that is not there, and milvus has a code that says exactly that.
+      return milvus::BucketInvalid;  // 2016
     case ExtendStatusCode::StorageConfigInvalid:
-      // Operator configuration is unusable. Non-retriable and NOT the caller's
-      // fault, so it must not surface as InvalidParameter/2042.
+      // The storage location spec -- property map, URI, or both -- is unusable.
+      // Non-retriable, and NOT reported as the caller's fault: this producer
+      // cannot tell whether the strings came from the operator's config or from
+      // a user's external-source definition. An entry point that knows they
+      // came from a user re-tags to LOON_SOURCE_INVALID; everything else lands
+      // here, because paging an operator for a user typo costs less than
+      // telling a user to fix a broken deployment they cannot touch.
       return milvus::ConfigInvalid;  // 2006
-    case ExtendStatusCode::SourceUriInvalid:
-      // The location string came from the caller.
-      return milvus::InvalidParameter;  // 2042
+    case ExtendStatusCode::AwsErrorNoSuchUpload:
     case ExtendStatusCode::AwsErrorNotFound:
       // The object/bucket is gone: permanent, and fine-grained -- consumers can
       // distinguish "data missing" (stale loadinfo, GC'd file) from a generic
@@ -317,10 +326,25 @@ milvus::SegcoreError ToSegcoreError(const arrow::Status& status) {
     code = milvus::MemAllocateFailed;  // 2034, retriable
   } else if (status.IsIOError()) {
     code = milvus::StorageError;  // 2044, non-retriable
-  } else if (status.IsInvalid() || status.IsTypeError() || status.IsKeyError()) {
-    code = milvus::DataFormatBroken;  // 2024, permanent corruption
   } else {
-    code = milvus::StorageError;  // 2044, permanent internal error
+    // Everything else, INCLUDING arrow's Invalid/TypeError/KeyError, lands on
+    // the conservative permanent bucket.
+    //
+    // This used to map Invalid to DataFormatBroken/2024, which quietly poisoned
+    // that signal: of the ~380 unclassified Status::Invalid sites in cpp/src,
+    // almost none are corrupt bytes. They are null-pointer preconditions
+    // ("Cannot add null column group"), missing configuration
+    // ("AZURE_CLIENT_ID environment variable is not set") and caller contract
+    // violations ("batch schema does not match writer schema"). Reporting those
+    // as "your data is corrupt" sends people to inspect a file when the bug is
+    // in code or config -- and once most corruption alerts are false, nobody
+    // reads any of them.
+    //
+    // 2024 now has exactly one source: a producer that actually parsed the
+    // bytes and found them wrong. Guessing it from a coarse arrow StatusCode is
+    // not a cheaper version of that; the information was gone before this
+    // function was reached.
+    code = milvus::StorageError;  // 2044
   }
   return {code, status.ToString()};
 }

@@ -33,7 +33,7 @@ namespace milvus_storage {
 /// \brief Whose problem an error is, and therefore whether retrying can help.
 ///
 /// This is the single classification axis; `retryable` is derived from it
-/// (`retryable == (category == Transient)`). See the invariant documented in
+/// (`retryable == (Transient || Conflict)`). See the invariant documented in
 /// ffi_error_code.h. Values match the LOON_ERROR_CATEGORY_* constants so the
 /// same number crosses the C ABI.
 enum class ErrorCategory : char {
@@ -48,13 +48,21 @@ enum class ErrorCategory : char {
   Config = LOON_ERROR_CATEGORY_CONFIG,
   /// May clear on its own. Retry with normal backoff.
   Transient = LOON_ERROR_CATEGORY_TRANSIENT,
-  /// The store is rate-limiting us. Back off per Retry-After and shed
-  /// concurrency -- a normal retry makes it worse.
-  Throttled = LOON_ERROR_CATEGORY_THROTTLED,
   /// Someone else won a race. Re-read state, rebase, re-submit. Replaying the
   /// same bytes fails identically.
   Conflict = LOON_ERROR_CATEGORY_CONFLICT,
-  /// Our bug, or the data is gone. Alert a developer; never retry.
+  /// The named object is not there. Re-read the metadata, THEN decide -- this
+  /// layer deliberately does not answer the retry question, because it cannot
+  /// tell a GC race from real data loss and will not invent an answer.
+  /// Only a producer holding a definitive not-found from the store may say
+  /// this; it is never inferred from an unclassified failure.
+  Missing = LOON_ERROR_CATEGORY_MISSING,
+  /// The bytes are wrong. Act on the DATA: quarantine, re-fetch from a replica,
+  /// rebuild. Only a producer that actually PARSED the bytes and found them
+  /// malformed may say this -- see the CoarseFallbackNeverClaimsCorruption test
+  /// for the machine-checked form of that rule.
+  Corrupted = LOON_ERROR_CATEGORY_CORRUPTED,
+  /// Our bug. Alert a developer; never retry.
   Permanent = LOON_ERROR_CATEGORY_PERMANENT,
 };
 
@@ -90,8 +98,8 @@ class ExtendStatusDetail : public arrow::StatusDetail {
   /// \brief Whether retrying can help. Derived from the code, not stored.
   [[nodiscard]] bool retryable() const;
 
-  /// \brief Who owns this failure: the caller (User) or us (Transient /
-  /// Permanent). Derived from the code, not stored.
+  /// \brief Who owns this failure, and what the consumer should do about it.
+  /// Derived from the code, never stored.
   [[nodiscard]] ErrorCategory category() const;
 
   /// \brief Get the human-readable name of the status code.
@@ -118,7 +126,7 @@ std::optional<ExtendStatusCode> ExtendStatusCodeFromInt(int code);
 ErrorCategory CategoryForExtendStatusCode(ExtendStatusCode code);
 
 /// \brief Whether retrying can help. Derived state, never stored per code: true
-/// iff the category is Transient, Throttled or Conflict. Kept as a named helper
+/// iff the category is Transient or Conflict. Kept as a named helper
 /// because it is the question most consumers actually ask.
 bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code);
 

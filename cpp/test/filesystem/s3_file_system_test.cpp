@@ -465,6 +465,10 @@ TEST_F(S3UnitTest, TestS3ErrorClassification) {
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::NO_SUCH_BUCKET, Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchBucket", "not found");
+    // Still grouped with not-found here, and that is not a contradiction of
+    // the AwsErrorBucketNotFound block below: IsNotFound answers "is the path
+    // absent", the classifier answers "whose problem is it". See the comment
+    // on IsNotFound.
     EXPECT_TRUE(fs::internal::IsNotFound(error));
   }
   // IsNotFound — resource
@@ -527,13 +531,47 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     }
   };
 
-  // NO_SUCH_UPLOAD
+  // NO_SUCH_UPLOAD -- classified, but NOT through AssertRetryableCode. The
+  // upload id the caller held is gone; resending against it fails identically
+  // every time, so only starting a fresh upload helps and that decision belongs
+  // to the layer that owns the write. Missing, not retriable.
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::NO_SUCH_UPLOAD,
                                                    Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchUpload",
                                                    "Upload not found");
     auto status = fs::internal::ErrorToStatus("test_prefix", "CompleteMultipart", error);
-    AssertRetryableCode(status, ExtendStatusCode::AwsErrorNoSuchUpload);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorNoSuchUpload);
+    EXPECT_EQ(detail->category(), ErrorCategory::Missing);
+    EXPECT_FALSE(detail->retryable());
+  }
+
+  // NO_SUCH_BUCKET is deliberately NOT the same code as a missing key: nothing
+  // was lost, and re-reading metadata cannot conjure a bucket. It is a
+  // deployment pointing somewhere that does not exist.
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::NO_SUCH_BUCKET, Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchBucket", "bucket gone");
+    auto status = fs::internal::ErrorToStatus("test_prefix", "GetObject", error);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorBucketNotFound);
+    EXPECT_EQ(detail->category(), ErrorCategory::Config);
+    EXPECT_FALSE(detail->retryable());
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::BucketInvalid);  // 2016, not 2017
+  }
+
+  // A missing KEY keeps ObjectNotExist -- the two must not collapse back.
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::NO_SUCH_KEY,
+                                                   Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchKey", "key gone");
+    auto status = fs::internal::ErrorToStatus("test_prefix", "GetObject", error);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorNotFound);
+    EXPECT_EQ(detail->category(), ErrorCategory::Missing);
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::ObjectNotExist);  // 2017
   }
 
   // AWS SDK retryable error

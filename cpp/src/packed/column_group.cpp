@@ -70,11 +70,15 @@ arrow::Status ColumnGroup::Merge(const ColumnGroup& other) {
 arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroup::Table() const {
   auto result = arrow::Table::FromRecordBatches(batches_);
   if (!result.ok()) {
-    // Keep the original StatusCode and detail (FromRecordBatches reports
-    // schema mismatch / empty group as Invalid, which classifies as
-    // DataFormatBroken downstream); only the message gains context. Wrapping
-    // into PackedUnexpected here would rewrite Invalid into IOError and
-    // degrade the classification to a generic StorageError.
+    // Keep the original StatusCode and detail; only the message gains context.
+    //
+    // The reason is no longer the one this comment used to give. An
+    // unclassified Invalid no longer becomes DataFormatBroken -- both this and
+    // a PackedUnexpected wrap now reach segcore as StorageError, so there is no
+    // classification to preserve on that axis. What is still worth preserving
+    // is the arrow StatusCode itself: callers branch on IsIOError, and
+    // rewriting a pre-IO schema mismatch into an IO failure would be a lie
+    // about what happened.
     return result.status().WithMessage("ColumnGroup::Table: failed to merge record batches: ",
                                        result.status().message());
   }

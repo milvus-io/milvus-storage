@@ -366,13 +366,20 @@ arrow::Status Manifest::serialize(std::ostream& output_stream) const {
 }
 
 arrow::Status Manifest::deserialize(std::istream& input_stream) {
+  // ManifestCorrupted rather than a bare Status::Invalid. Everything reaching
+  // this lambda got far enough to attempt a parse and failed on the bytes --
+  // bad MILV magic, a truncated stream, an avro body that does not decode -- so
+  // this is the one place entitled to say "corrupted". It used to return an
+  // untagged Invalid and reach segcore as DataFormatBroken only by way of the
+  // coarse fallback; now that the fallback no longer guesses corruption, an
+  // untagged status here would silently downgrade to a generic storage error.
   auto error = [this](const std::string& msg) {
     column_groups_.clear();
     delta_logs_.clear();
     stats_.clear();
     indexes_.clear();
     lob_files_.clear();
-    return arrow::Status::Invalid(msg);
+    return MakeExtendErrorMsg(ExtendStatusCode::ManifestCorrupted, msg);
   };
 
   try {

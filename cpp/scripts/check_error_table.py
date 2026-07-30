@@ -18,7 +18,7 @@
 1. **Documentation drift.** `docs/error-codes.md` restates every code's
    category, retriability, S3 name and segcore code. Those four columns are
    transcribed from the source, so they drift silently -- and did: the table
-   still described three categories after the code moved to six. Here they are
+   still described three categories after the code moved on. Here they are
    re-derived from the X-macro table and the `ToSegcoreErrorCode` switch and
    compared. `--fix` rewrites them.
 
@@ -35,6 +35,7 @@ Run with no arguments to check, `--fix` to rewrite the doc table.
 from __future__ import annotations
 
 import argparse
+import collections
 import re
 import subprocess
 import sys
@@ -57,7 +58,7 @@ NON_PRODUCER = {
     "cpp/include/milvus-storage/ffi_c.h",
 }
 
-RETRYABLE_CATEGORIES = {"TRANSIENT", "THROTTLED", "CONFLICT"}
+RETRYABLE_CATEGORIES = {"TRANSIENT", "CONFLICT"}
 
 # milvus::ErrorCode numeric values, from milvus-common's include/common/EasyAssert.h.
 # Duplicated here because that header lives in another repo and arrives via conan;
@@ -231,6 +232,82 @@ def main() -> int:
     rows = doc_rows()
 
     problems: list[str] = []
+
+    # --- 0. no duplicated exported symbol, in any of the four hand-kept lists ---
+    #
+    # Merging two codes is a DELETE plus a KEEP. Doing it as a rename instead
+    # produces a verbatim duplicate line, which is a compile error in the C
+    # definitions and silent drift everywhere else -- that is exactly how this
+    # check came to exist. The four lists cannot be macro-generated (different
+    # languages and formats), so they get a gate.
+    symbol_lists = {
+        "cpp/ffi_exports.map": r"^\s*(loon_[a-z0-9_]+);",
+        "cpp/ffi_exports_mac.map": r"^\s*_(loon_[a-z0-9_]+)\s*$",
+        # Only the category constants here: the loon_errcode_* declarations are
+        # generated from the X-macro table and a regex cannot see them, which is
+        # fine -- generated declarations cannot drift. The categories are still
+        # hand-written, so they can, and did.
+        "cpp/include/milvus-storage/ffi_c.h": r"^FFI_EXPORT extern const int (loon_error_category_[a-z0-9_]+);",
+        "python/milvus_storage/_ffi.py": r'^\s*"(loon_[a-z0-9_]+)",\s*$',
+    }
+    seen_per_list = {}
+    for rel, pattern in symbol_lists.items():
+        path = ROOT / rel
+        if not path.exists():
+            problems.append(f"{rel} is missing -- the symbol lists moved without updating this gate")
+            continue
+        names = re.findall(pattern, path.read_text(), re.M)
+        seen_per_list[rel] = set(names)
+        for name, n in collections.Counter(names).items():
+            if n > 1:
+                problems.append(
+                    f"{rel} lists {name} {n} times. Merging two codes means deleting one, "
+                    f"not renaming it onto the other."
+                )
+
+    # The four lists must agree on the TAXONOMY surface. They deliberately do
+    # not agree on everything -- the linker maps export every loon_* function
+    # too, and the python binding only cdefs what it uses -- so compare just the
+    # error codes and categories, which is the part this PR owns and the part a
+    # merge can silently unbalance.
+    def taxonomy_only(names):
+        return {n for n in names if n.startswith(("loon_errcode_", "loon_error_category_"))}
+
+    # ffi_c.h is excluded from the cross-list comparison on purpose: its
+    # loon_errcode_* declarations are generated from the X-macro table, so a
+    # regex cannot see them -- and generated declarations cannot drift, which is
+    # why they were generated. It stays in the duplicate check above, because
+    # its category constants are still written by hand and that is exactly where
+    # a merge-by-rename left a duplicate.
+    if len(seen_per_list) == len(symbol_lists):
+        reference = taxonomy_only(seen_per_list["cpp/ffi_exports.map"])
+        for rel, names in seen_per_list.items():
+            if rel == "cpp/ffi_exports.map":
+                continue
+            # ffi_c.h only contributes its hand-written category constants, so
+            # compare it against that slice rather than the whole surface.
+            if rel == "cpp/include/milvus-storage/ffi_c.h":
+                reference_here = {n for n in reference if n.startswith("loon_error_category_")}
+                missing = reference_here - names
+                extra = names - reference_here
+                if missing:
+                    problems.append(f"{rel} is missing category constants {sorted(missing)}")
+                if extra:
+                    problems.append(f"{rel} declares category constants {sorted(extra)} that are not exported")
+                continue
+            mine = taxonomy_only(names)
+            missing = reference - mine
+            extra = mine - reference
+            if missing:
+                problems.append(
+                    f"{rel} is missing {sorted(missing)}, which ffi_exports.map exports. "
+                    f"An exported-but-unbound code is invisible to that consumer."
+                )
+            if extra:
+                problems.append(
+                    f"{rel} names {sorted(extra)}, which ffi_exports.map does not export. "
+                    f"That fails to link."
+                )
 
     # --- 1. every ExtendStatusCode needs a producer ---
     for c in codes:

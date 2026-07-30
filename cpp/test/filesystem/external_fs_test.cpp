@@ -540,7 +540,7 @@ TEST_F(ExternalFilesystemTest, ResolveConfigWithQueryComponent) {
 // These are the tests the rest of the taxonomy suite cannot substitute for.
 // Every other test compares the tables to each other -- category table against
 // segcore switch against FFI constants -- and those all pass whether or not any
-// layer ever emits the code. StorageConfigInvalid and SourceUriInvalid shipped
+// layer ever emits the code. StorageConfigInvalid and StorageConfigInvalid shipped
 // for a while with no producer at all and every self-consistency test stayed
 // green. So: call the real entry points with real bad input and read the code
 // back off the Status.
@@ -554,7 +554,14 @@ std::optional<ExtendStatusCode> CodeOf(const arrow::Status& status) {
 
 }  // namespace
 
-TEST_F(ExternalFilesystemTest, UnparseableUriIsClassifiedAsUserError) {
+// This test used to assert User, and was renamed rather than relaxed when 116
+// merged into 115. The reason is the point of the merge: StorageUri::Parse is
+// called for BOTH a location the user typed into an external-source definition
+// and a path milvus generated itself, and it cannot tell them apart. Guessing
+// User here would tell an operator's broken deployment "your query is wrong";
+// guessing at this layer at all is the mistake. Config is the honest answer,
+// and the entry points that DO know re-tag to LOON_SOURCE_INVALID.
+TEST_F(ExternalFilesystemTest, UnparseableUriIsClassifiedAsConfigNotGuessedAsUser) {
   struct Case {
     const char* uri;
     const char* what;
@@ -570,11 +577,14 @@ TEST_F(ExternalFilesystemTest, UnparseableUriIsClassifiedAsUserError) {
     ASSERT_FALSE(result.ok()) << c.what;
     auto code = CodeOf(result.status());
     ASSERT_TRUE(code.has_value()) << c.what << ": arrived unclassified, so segcore sees a generic"
-                                  << " failure instead of 'your URI is wrong': " << result.status().ToString();
-    EXPECT_EQ(*code, ExtendStatusCode::SourceUriInvalid) << c.what;
-    EXPECT_EQ(CategoryForExtendStatusCode(*code), ErrorCategory::User) << c.what;
+                                  << " failure instead of 'your location is wrong': " << result.status().ToString();
+    EXPECT_EQ(*code, ExtendStatusCode::StorageConfigInvalid) << c.what;
+    EXPECT_EQ(CategoryForExtendStatusCode(*code), ErrorCategory::Config) << c.what;
     EXPECT_FALSE(DefaultRetryableForExtendStatusCode(*code)) << c.what;
-    EXPECT_EQ(ToSegcoreError(result.status()).get_error_code(), milvus::InvalidParameter) << c.what;
+    EXPECT_EQ(ToSegcoreError(result.status()).get_error_code(), milvus::ConfigInvalid) << c.what;
+    // Never 2042: this producer does not know whose string it is, and blaming
+    // the caller is the more expensive of the two possible mistakes.
+    EXPECT_NE(ToSegcoreError(result.status()).get_error_code(), milvus::InvalidParameter) << c.what;
     // Detected before any IO was attempted, so it must not masquerade as one.
     EXPECT_TRUE(result.status().IsInvalid()) << c.what;
   }

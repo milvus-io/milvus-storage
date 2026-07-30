@@ -75,15 +75,21 @@ FFI_EXPORT void loon_ffi_free_result(LoonFFIResult* result);
 // --- Error classification ---
 //
 // Every error code answers two questions, and both come from ONE category:
-//   * whose problem is it -- the caller's request/config, or the system's?
-//   * can a retry help    -- only a transient error.
+//   * whose problem is it -- the caller, the deployment, or the system?
+//   * can a retry help, and what kind?
 //
 // Invariant: loon_ffi_is_retryable_errcode(c) is true exactly when the category
-// is one of transient / throttled / conflict. They are kept apart because each
-// needs a different retry strategy: plain backoff, Retry-After plus concurrency
-// shedding, and re-read-then-rebase respectively. A user or config error is
-// never retriable -- report the first to the caller, alert an operator for the
-// second.
+// is transient or conflict. They stay apart because the retry differs: plain
+// backoff for one, re-read-then-rebase for the other, and replaying a lost race
+// byte-for-byte fails identically forever.
+//
+// The other five are never retriable, for different reasons: report a user
+// error to the caller, alert an operator for a config error, alert a developer
+// for a permanent one. Missing means the named object is not there -- this
+// library refuses to guess whether that is a GC race or data loss, so the
+// consumer re-reads its metadata and decides. Corrupted means a layer that
+// actually parsed the bytes found them wrong; act on the data, not the
+// request.
 //
 // An unrecognized code returns loon_error_category_unknown, which consumers
 // MUST treat as permanent -- never retry a failure that cannot be classified.
@@ -94,8 +100,9 @@ FFI_EXPORT extern const int loon_error_category_unknown;
 FFI_EXPORT extern const int loon_error_category_user;
 FFI_EXPORT extern const int loon_error_category_config;
 FFI_EXPORT extern const int loon_error_category_transient;
-FFI_EXPORT extern const int loon_error_category_throttled;
 FFI_EXPORT extern const int loon_error_category_conflict;
+FFI_EXPORT extern const int loon_error_category_missing;
+FFI_EXPORT extern const int loon_error_category_corrupted;
 FFI_EXPORT extern const int loon_error_category_permanent;
 
 FFI_EXPORT int loon_ffi_is_retryable_errcode(int err_code);

@@ -163,11 +163,13 @@ TEST_F(PackedErrorStatusTest, MakeSucceedsOnValidFile) {
   ASSERT_STATUS_OK(reader->Close());
 }
 
-TEST_F(PackedErrorStatusTest, ColumnGroupTableSchemaMismatchIsDataFormatBroken) {
+TEST_F(PackedErrorStatusTest, ColumnGroupTableSchemaMismatchIsNotCalledCorruption) {
   ColumnGroup group(0, {0});
   ASSERT_STATUS_OK(group.AddRecordBatch(record_batch_));
-  // Second batch with a different schema: Table() must surface arrow's
-  // Invalid (-> DataFormatBroken/2024), not a wrapped generic storage error.
+  // Second batch with a different schema. Table() must surface arrow's own
+  // Invalid rather than wrapping it, so the message survives -- but the segcore
+  // landing is StorageError, NOT DataFormatBroken: mismatched batches are the
+  // caller's contract violation, not corrupt bytes on disk.
   auto other_schema = arrow::schema({arrow::field("other", arrow::int8())});
   arrow::Int8Builder builder;
   ASSERT_STATUS_OK(builder.AppendValues({1, 2, 3}));
@@ -178,7 +180,14 @@ TEST_F(PackedErrorStatusTest, ColumnGroupTableSchemaMismatchIsDataFormatBroken) 
   auto table_result = group.Table();
   ASSERT_FALSE(table_result.ok());
   EXPECT_TRUE(table_result.status().IsInvalid()) << table_result.status().ToString();
-  EXPECT_EQ(ToSegcoreError(table_result.status()).get_error_code(), milvus::DataFormatBroken)
+  // Renamed from ...IsDataFormatBroken, because that was the wrong answer and
+  // this case is the clearest argument for changing it. "Schema at index 1 was
+  // different" is a caller handing us mismatched batches -- a contract
+  // violation, not corrupt bytes on disk. Reporting it as DataFormatBroken sent
+  // whoever read the alert to inspect a file that is perfectly fine.
+  EXPECT_EQ(ToSegcoreError(table_result.status()).get_error_code(), milvus::StorageError)
+      << table_result.status().ToString();
+  EXPECT_NE(ToSegcoreError(table_result.status()).get_error_code(), milvus::DataFormatBroken)
       << table_result.status().ToString();
 }
 

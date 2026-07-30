@@ -96,6 +96,24 @@ inline std::optional<std::string> BucketRegionFromError(const Aws::Client::AWSEr
   return std::nullopt;
 }
 
+/// \brief Existence predicate: "is this path absent?" -- NOT a classification.
+///
+/// Deliberately still groups NO_SUCH_BUCKET with not-found, even though the
+/// classifier 70 lines below now splits them (bucket -> Config/BucketInvalid,
+/// key -> Missing/ObjectNotExist). The two answer different questions: a caller
+/// asking "does this exist?" gets the same answer either way, while a caller
+/// asking "whose problem is this?" does not. Both tests in
+/// s3_file_system_test.cpp are therefore correct despite looking contradictory.
+///
+/// Two things about this function are nonetheless suspect, and are left alone
+/// on purpose because it gates control flow at 11 call sites in
+/// s3_filesystem.cpp and changing that does not belong in a classification
+/// change:
+///   * NO_SUCH_KEY is absent, so a genuine missing key returns false here while
+///     the classifier calls it Missing. That looks like a plain omission.
+///   * At s3_filesystem.cpp's allow_not_found gate, a missing BUCKET is
+///     currently swallowed as a benign absent object.
+/// Tracked separately.
 inline bool IsNotFound(const Aws::Client::AWSError<Aws::S3::S3Errors>& error) {
   const auto error_type = error.GetErrorType();
   return (error_type == Aws::S3::S3Errors::NO_SUCH_BUCKET || error_type == Aws::S3::S3Errors::RESOURCE_NOT_FOUND);
@@ -167,7 +185,21 @@ inline std::optional<arrow::Status> tryMakePermanentExtendArrowError(Aws::S3::S3
                                                                      Aws::Http::HttpResponseCode response_code,
                                                                      const std::string& message) {
   switch (error_type) {
+    case Aws::S3::S3Errors::NO_SUCH_UPLOAD:
+      // Lives here, not in tryMakeRetryableExtendArrowError, even though it sat
+      // there for a while. The category comes from the X-macro table rather
+      // than from which helper produced the status, so the output was correct
+      // either way -- but a Missing code in the function whose result the
+      // caller binds to `retryable_status`, alongside REQUEST_TIMEOUT and
+      // SLOW_DOWN, is a trap for the next reader. Its Missing siblings
+      // NO_SUCH_KEY and NO_SUCH_BUCKET are here.
+      return MakeExtendError(ExtendStatusCode::AwsErrorNoSuchUpload, message, message /* extra_info */);
     case Aws::S3::S3Errors::NO_SUCH_BUCKET:
+      // Split out of the not-found group on purpose. A missing bucket is not
+      // data loss and re-reading the manifest cannot conjure one -- the
+      // deployment points somewhere that does not exist, which is a
+      // configuration fix, not an object to go looking for.
+      return MakeExtendError(ExtendStatusCode::AwsErrorBucketNotFound, message, message /* extra_info */);
     case Aws::S3::S3Errors::NO_SUCH_KEY:
     case Aws::S3::S3Errors::RESOURCE_NOT_FOUND:
       return MakeExtendError(ExtendStatusCode::AwsErrorNotFound, message, message /* extra_info */);
@@ -194,8 +226,6 @@ std::optional<arrow::Status> tryMakeRetryableExtendArrowError(const Aws::Client:
                                                               Aws::S3::S3Errors error_type,
                                                               const std::string& message) {
   switch (error_type) {
-    case Aws::S3::S3Errors::NO_SUCH_UPLOAD:
-      return MakeExtendError(ExtendStatusCode::AwsErrorNoSuchUpload, message, message /* extra_info */);
     case Aws::S3::S3Errors::REQUEST_TIMEOUT:
       return MakeExtendError(ExtendStatusCode::StorageTransientTimeout, message, message /* extra_info */);
     case Aws::S3::S3Errors::THROTTLING:

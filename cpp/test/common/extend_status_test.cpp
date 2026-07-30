@@ -100,7 +100,10 @@ TEST_F(ExtendStatusTest, TestExtendStatusCodeRetryability) {
   EXPECT_FALSE(ExtendStatusCodeFromInt(3).has_value());
 
   EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::PackedInvalidArgs));
-  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNoSuchUpload));
+  // Missing, not Conflict: resending against a dead upload id fails identically
+  // every time. Only a NEW upload helps, and that decision belongs to the layer
+  // that owns the write, not to a blind retry here.
+  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNoSuchUpload));
   EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorConflict));
   EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorPreConditionFailed));
   EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNotFound));
@@ -252,7 +255,8 @@ TEST_F(ExtendStatusTest, ExtendCodesMapToSegcoreErrorCode) {
 
   const Case cases[] = {
       // input (non-retriable)
-      {ExtendStatusCode::PackedInvalidArgs, milvus::InvalidParameter},
+      // Internal API misuse, not an end user's parameter: 2044, not 2042.
+      {ExtendStatusCode::PackedInvalidArgs, milvus::StorageError},
       // PackedStorageIO: conservatively non-retriable StorageError, but a dormant
       // branch (no live consumer). The live no-detail plain-arrow read path also
       // maps plain IOError to StorageError, tested separately below.
@@ -263,9 +267,9 @@ TEST_F(ExtendStatusTest, ExtendCodesMapToSegcoreErrorCode) {
       // permanent internal storage errors
       {ExtendStatusCode::PackedArrowError, milvus::StorageError},
       {ExtendStatusCode::PackedUnexpected, milvus::StorageError},
-      {ExtendStatusCode::AwsErrorNoSuchUpload, milvus::StorageTransientError},
+      {ExtendStatusCode::AwsErrorNoSuchUpload, milvus::ObjectNotExist},
       // Conflict class: retriable by a consumer that re-reads before
-      // re-submitting. Was 2044 before the six-category split.
+      // re-submitting. Was 2044 before the category split.
       {ExtendStatusCode::AwsErrorConflict, milvus::StorageTransientError},
       {ExtendStatusCode::AwsErrorPreConditionFailed, milvus::StorageTransientError},
       // permanently-failing S3 errors: must never be transient/2045
@@ -334,11 +338,17 @@ TEST_F(ExtendStatusTest, PermanentS3ErrorsAreNotRetriable) {
 
 TEST_F(ExtendStatusTest, PlainArrowStatusFallsBackToCoarseClassification) {
   // No ExtendStatusDetail attached -> coarse arrow status classification.
-  // Plain Invalid means malformed *stored* data here -> permanent corruption.
+  //
+  // A plain Invalid does NOT mean malformed stored data, which is what this
+  // test used to assert. Of the ~380 unclassified Status::Invalid sites in
+  // cpp/src, almost none are corrupt bytes -- they are null-pointer
+  // preconditions, missing configuration and caller contract violations.
+  // Claiming corruption for all of them made 2024 an alert nobody could trust.
   {
-    auto error = ToSegcoreError(arrow::Status::Invalid("corrupt bytes"));
-    EXPECT_EQ(error.get_error_code(), milvus::DataFormatBroken);
-    EXPECT_NE(std::string(error.what()).find("corrupt bytes"), std::string::npos);
+    auto error = ToSegcoreError(arrow::Status::Invalid("some precondition failed"));
+    EXPECT_EQ(error.get_error_code(), milvus::StorageError);
+    EXPECT_NE(error.get_error_code(), milvus::DataFormatBroken);
+    EXPECT_NE(std::string(error.what()).find("some precondition failed"), std::string::npos);
   }
   // Plain IOError -> non-retriable StorageError. This is the live read path
   // (FileRowGroupReader / v3 api::Reader / ArrowFileSystem); after shared SDK
