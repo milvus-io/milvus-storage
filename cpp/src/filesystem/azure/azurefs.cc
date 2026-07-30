@@ -108,6 +108,72 @@ using arrow::fs::internal::RemoveLeadingSlash;
 using arrow::fs::internal::RemoveTrailingSlash;
 using arrow::fs::internal::SplitAbstractPath;
 using arrow::fs::internal::ValidateAbstractPathParts;
+
+// Declared in azurefs_internal.h. Kept out of the anonymous namespace so it can
+// be unit-tested without an Azure account.
+//
+// The codes are cloud-neutral despite the `AwsError*` prefix (see the naming
+// discussion in #574): they carry the meaning, not the vendor.
+std::optional<milvus_storage::ExtendStatusCode> ClassifyAzureError(
+    int http_status, std::string_view error_code, bool transport_failure) {
+  // The request never reached the service: connection refused/reset, DNS
+  // failure, TLS handshake failure. The textbook retriable case.
+  //
+  // This is keyed on the exception's dynamic type, NOT on `http_status == 0`.
+  // `RequestFailedException(std::string)` also leaves StatusCode at None, and
+  // PollUntilDone raises exactly that when a copy operation ends in a failed
+  // state -- treating that as a network blip would turn a definitively failed
+  // copy into an infinitely retriable one.
+  if (transport_failure) {
+    return milvus_storage::ExtendStatusCode::StorageTransientNetwork;
+  }
+  // No response and not a transport failure: not positively identified.
+  if (http_status == 0) {
+    return std::nullopt;
+  }
+
+  switch (http_status) {
+    case 412:  // Precondition Failed
+      return milvus_storage::ExtendStatusCode::AwsErrorPreConditionFailed;
+    case 409:  // Conflict
+      // Only the "blob already exists" flavour is the precondition-style
+      // conflict this maps to. Other 409s (lease held, container being deleted)
+      // are a different condition and stay unclassified rather than guessed at.
+      return error_code == "BlobAlreadyExists"
+                 ? std::optional{
+                       milvus_storage::ExtendStatusCode::AwsErrorPreConditionFailed}
+                 : std::nullopt;
+    case 404:  // Not Found
+      // The blob/container is gone. Permanent: a retry, or a reroute to another
+      // replica, reaches the same storage account and fails identically.
+      return milvus_storage::ExtendStatusCode::AwsErrorNotFound;
+    case 401:  // Unauthorized
+    case 403:  // Forbidden
+      // Bad or expired credentials, or the SAS/RBAC grant does not cover this
+      // operation. Permanent until an operator fixes the configuration.
+      return milvus_storage::ExtendStatusCode::AwsErrorAccessDenied;
+    case 408:  // Request Timeout
+      return milvus_storage::ExtendStatusCode::StorageTransientTimeout;
+    case 429:  // Too Many Requests
+      return milvus_storage::ExtendStatusCode::StorageTransientThrottling;
+    case 503:  // Service Unavailable
+      // 503 is overloaded on Azure Storage: ErrorCode "ServerBusy" is
+      // throttling, anything else is a genuine availability blip. Both are
+      // retriable, but keeping them apart lets a consumer apply throttle-aware
+      // backoff to the one that calls for it.
+      return error_code == "ServerBusy"
+                 ? milvus_storage::ExtendStatusCode::StorageTransientThrottling
+                 : milvus_storage::ExtendStatusCode::StorageTransientService;
+    case 500:  // Internal Server Error
+    case 502:  // Bad Gateway
+    case 504:  // Gateway Timeout
+      return milvus_storage::ExtendStatusCode::StorageTransientService;
+    default:
+      // Not positively identified -> stay untagged -> conservative
+      // non-retriable. Never invent retriability.
+      return std::nullopt;
+  }
+}
 }  // namespace internal
 // --- End namespace bridge ---
 
@@ -360,18 +426,24 @@ std::string BuildBaseUrl(const std::string& scheme, const std::string& authority
 template <typename... PrefixArgs>
 Status ExceptionToStatus(const Azure::Core::RequestFailedException& exception,
                          PrefixArgs&&... prefix_args) {
-  if (exception.StatusCode == Http::HttpStatusCode::PreconditionFailed ||
-      (exception.StatusCode == Http::HttpStatusCode::Conflict &&
-       exception.ErrorCode == "BlobAlreadyExists")) {
-    std::stringstream ss;
-    (ss << ... << std::forward<PrefixArgs>(prefix_args));
-    ss << " Azure Error: [" << exception.ErrorCode << "] " << exception.what();
-    auto message = ss.str();
-    return milvus_storage::MakeExtendError(
-        milvus_storage::ExtendStatusCode::AwsErrorPreConditionFailed, message, message);
+  // Discriminate on the dynamic type: TransportException means the request
+  // never reached the service. Its StatusCode is None, but so is that of a
+  // plain RequestFailedException(std::string), which PollUntilDone raises for
+  // a failed copy -- see internal::ClassifyAzureError.
+  const bool transport_failure =
+      dynamic_cast<const Azure::Core::Http::TransportException*>(&exception) != nullptr;
+  auto code = internal::ClassifyAzureError(static_cast<int>(exception.StatusCode),
+                                           exception.ErrorCode, transport_failure);
+  if (!code.has_value()) {
+    return Status::IOError(std::forward<PrefixArgs>(prefix_args)..., " Azure Error: [",
+                           exception.ErrorCode, "] ", exception.what());
   }
-  return Status::IOError(std::forward<PrefixArgs>(prefix_args)..., " Azure Error: [",
-                         exception.ErrorCode, "] ", exception.what());
+
+  std::stringstream ss;
+  (ss << ... << std::forward<PrefixArgs>(prefix_args));
+  ss << " Azure Error: [" << exception.ErrorCode << "] " << exception.what();
+  auto message = ss.str();
+  return milvus_storage::MakeExtendError(*code, message, message);
 }
 }  // namespace
 
@@ -2693,6 +2765,11 @@ class AzureFileSystem::Impl {
                                    location.path, ": ", container_client.GetUrl());
         }
         std::vector<std::string> failed_blob_names;
+        // Keep the first per-blob failure as a classified Status. Discarding
+        // the exception and synthesizing a plain IOError below would drop the
+        // classification of every sub-response, so a 429/503 inside a batch
+        // delete would still be reported as a permanent storage error.
+        std::optional<Status> first_failure_status;
         for (auto& [blob_name_view, deferred_response] : deferred_responses) {
           bool success = true;
           try {
@@ -2700,20 +2777,36 @@ class AzureFileSystem::Impl {
             success = delete_result.Value.Deleted;
           } catch (const Storage::StorageException& exception) {
             success = false;
+            if (!first_failure_status.has_value()) {
+              first_failure_status = ExceptionToStatus(exception, "Failed to delete blob: ",
+                                                       blob_name_view, ": ");
+            }
           }
           if (!success) {
             failed_blob_names.emplace_back(blob_name_view);
           }
         }
         if (!failed_blob_names.empty()) {
+          std::stringstream message_stream;
           if (failed_blob_names.size() == 1) {
-            return Status::IOError("Failed to delete a blob: ", failed_blob_names[0],
-                                   ": " + container_client.GetUrl());
+            message_stream << "Failed to delete a blob: " << failed_blob_names[0] << ": "
+                           << container_client.GetUrl();
           } else {
-            return Status::IOError("Failed to delete blobs: [",
-                                   arrow::internal::JoinStrings(failed_blob_names, ", "),
-                                   "]: " + container_client.GetUrl());
+            message_stream << "Failed to delete blobs: ["
+                           << arrow::internal::JoinStrings(failed_blob_names, ", ")
+                           << "]: " << container_client.GetUrl();
           }
+          auto message = message_stream.str();
+          if (first_failure_status.has_value()) {
+            // Reuse the cause's code and detail so the classification survives;
+            // the message still names every blob that failed. A sub-response
+            // that reports Deleted=false without throwing carries nothing to
+            // preserve, so those fall back to the plain IOError below.
+            return Status(first_failure_status->code(),
+                          message + " " + first_failure_status->message(),
+                          first_failure_status->detail());
+          }
+          return Status::IOError(message);
         }
       }
       return Status::OK();
