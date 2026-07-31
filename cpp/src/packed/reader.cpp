@@ -60,11 +60,19 @@ arrow::Result<std::shared_ptr<PackedFileMetadata>> MakePackedMetadata(
                              fmt::format("Failed to parse packed file metadata. [path={}]", path), result.status());
     }
     return result;
+  } catch (const std::bad_alloc&) {
+    // OutOfMemory classifies as the retriable memory code, not corruption --
+    // calling it corruption would be both wrong and non-retriable. Same split
+    // as Manifest deserialization.
+    return arrow::Status::OutOfMemory(
+        fmt::format("Failed to parse packed file metadata: out of memory. [path={}]", path));
   } catch (const std::exception& e) {
     return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
                            fmt::format("Failed to parse packed file metadata. [path={}, error={}]", path, e.what()));
   } catch (...) {
-    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+    // Unknown exception: unclassified, so it may not claim corruption -- only
+    // a producer that parsed the bytes and found them wrong may say that.
+    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
                            fmt::format("Failed to parse packed file metadata with unknown exception. [path={}]", path));
   }
 }
@@ -345,12 +353,14 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
     std::vector<std::shared_ptr<arrow::ArrayData>> batch_data;
     try {
       batch_data = chunk_manager_->SliceChunksByMaxContiguousSlice(row_limit_ - absolute_row_position_, tables_);
+    } catch (const std::bad_alloc&) {
+      return arrow::Status::OutOfMemory("Packed file chunk slicing ran out of memory");
     } catch (const std::exception& e) {
       return MakeExtendError(ExtendStatusCode::PackedFileCorrupted,
                              fmt::format("Packed file chunk layout is corrupted: {}", e.what()));
     } catch (...) {
-      return MakeExtendError(ExtendStatusCode::PackedFileCorrupted,
-                             "Packed file chunk layout is corrupted with unknown exception");
+      return MakeExtendError(ExtendStatusCode::PackedUnexpected,
+                             "Packed file chunk slicing failed with unknown exception");
     }
     int64_t chunk_size = chunk_manager_->GetChunkSize();
     absolute_row_position_ += chunk_size;

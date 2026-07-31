@@ -183,9 +183,15 @@
   /* Catch-all for a C++ exception escaping an FFI entry point. */                                                    \
   X("Got exception", LOON_GOT_EXCEPTION, got_exception, LOON_ERROR_CATEGORY_PERMANENT, "InternalError")               \
   X("Unreachable code", LOON_UNREACHABLE_ERROR, unreachable, LOON_ERROR_CATEGORY_PERMANENT, "InternalError")          \
-  /* The caller built a malformed properties array: duplicate key, null key or                                        \
-     value. That is the caller's construction bug, not a deployment problem --                                        \
-     unusable deployment configuration is StorageConfigInvalid. */                                                    \
+  /* Two producer families share this code. (1) loon_properties_create's                                              \
+     structural checks -- duplicate key, null key or value: the FFI caller's                                          \
+     marshalling bug, vanishingly rare. (2) ConvertFFIProperties rejecting a                                          \
+     registered property whose value fails its validator (type, enum, range):                                         \
+     on every non-exttable path those values arrive from deployment                                                   \
+     configuration (StorageConfig / milvus.yaml), which an operator can                                               \
+     actually fix. Config is chosen for that dominant case; the exttable entry                                        \
+     points, whose property values come from a user's DDL, re-tag this to                                             \
+     LOON_SOURCE_INVALID. */                                                                                          \
   X("Invalid properties", LOON_INVALID_PROPERTIES, invalid_properties, LOON_ERROR_CATEGORY_CONFIG, "InvalidArgument") \
   /* Test-only fault injection. */                                                                                    \
   X("Fault injection error", LOON_FAULT_INJECT_ERROR, fault_inject, LOON_ERROR_CATEGORY_PERMANENT, "")                \

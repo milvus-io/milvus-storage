@@ -159,6 +159,21 @@ TEST(FFIInternalResultTest, MapsPlainPathNotFoundToFileNotFound) {
   EXPECT_EQ(FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR), LOON_FILE_NOT_FOUND);
 }
 
+TEST(FFIInternalResultTest, MapsOutOfMemoryToRetriableMemoryError) {
+  auto oom = arrow::Status::OutOfMemory("malloc of size 42 failed");
+
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(oom, LOON_ARROW_ERROR), LOON_MEMORY_ERROR);
+  // The exttable manifest entry point passes LOON_SOURCE_INVALID as its
+  // fallback; an OOM must classify as Transient memory pressure there, not
+  // degrade to a User error.
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(oom, LOON_SOURCE_INVALID), LOON_MEMORY_ERROR);
+  EXPECT_EQ(UserSourceErrorCodeFromStatus(oom, LOON_SOURCE_INVALID), LOON_MEMORY_ERROR);
+  // A status that carries an explicit classification still wins over the
+  // arrow-code inference.
+  auto classified = MakeExtendError(ExtendStatusCode::StorageTransientThrottling, "throttled", "throttled");
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(classified, LOON_ARROW_ERROR), LOON_TRANSIENT_THROTTLING);
+}
+
 TEST(FFIInternalResultTest, AsyncReadCallbackPreservesExtendStatusCode) {
   auto status = MakeExtendError(ExtendStatusCode::StorageTransientNetwork, "network", "network detail");
   auto file = std::make_shared<FailingAsyncRandomAccessFile>(status);

@@ -86,6 +86,14 @@ inline int FFIErrorCodeFromExtendStatus(const arrow::Status& status, int fallbac
     return milvus_storage::ffi_internal::FFIErrorCodeFromExtendStatusCode(detail->code(), fallback);
   }
 
+  // An allocation failure needs no ExtendStatusDetail to be classified: arrow
+  // already says OutOfMemory, and LOON_MEMORY_ERROR is Transient. Without this
+  // branch an OOM fell to the call site's fallback -- Permanent in general, and
+  // User at the entry points that pass LOON_SOURCE_INVALID.
+  if (status.IsOutOfMemory()) {
+    return LOON_MEMORY_ERROR;
+  }
+
   if (arrow::internal::ErrnoFromStatus(status) == ENOENT) {
     return LOON_FILE_NOT_FOUND;
   }

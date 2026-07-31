@@ -81,9 +81,12 @@ LoonFFIResult loon_exttable_explore(const char** columns,
     cgs.push_back(
         std::make_shared<ColumnGroup>(ColumnGroup{.columns = columns_cpp, .format = format_str, .files = files}));
 
-    // commit the column groups
+    // commit the column groups. This filesystem is the storage the manifest
+    // gets committed to (base_path), not the user's explore location -- keep
+    // the producer's classification rather than re-tagging a commit-side
+    // bucket/credential/missing failure as the user's error.
     auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map);
-    RETURN_USER_SOURCE_ERROR_IF(fs_result.status(), LOON_ARROW_ERROR, fs_result.status().ToString());
+    RETURN_ARROW_ERROR_IF(fs_result.status(), LOON_ARROW_ERROR, fs_result.status().ToString());
     auto transaction_result = Transaction::Open(fs_result.ValueOrDie(), base_path);
     RETURN_ARROW_ERROR_IF(transaction_result.status(), LOON_LOGICAL_ERROR, transaction_result.status().ToString());
     auto transaction = std::move(transaction_result.ValueOrDie());
@@ -168,19 +171,6 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
   RETURN_UNREACHABLE();
 }
 
-static arrow::Result<std::shared_ptr<milvus_storage::api::Manifest>> read_manifest(const char* path,
-                                                                                   const ::LoonProperties* properties) {
-  milvus_storage::api::Properties properties_map;
-
-  auto opt = milvus_storage::api::ConvertFFIProperties(properties_map, properties);
-  if (opt != std::nullopt) {
-    return arrow::Status::Invalid("Failed to parse properties [", opt->c_str(), "]");
-  }
-
-  ARROW_ASSIGN_OR_RAISE(auto fs, milvus_storage::FilesystemCache::getInstance().get(properties_map, path));
-  return milvus_storage::api::Manifest::ReadFrom(fs, path);
-}
-
 LoonFFIResult loon_exttable_read_manifest(const char* manifest_file_path,
                                           const ::LoonProperties* properties,
                                           LoonManifest** out_manifest) {
@@ -190,8 +180,23 @@ LoonFFIResult loon_exttable_read_manifest(const char* manifest_file_path,
   }
 
   try {
-    auto manifest_res = read_manifest(manifest_file_path, properties);
-    RETURN_USER_SOURCE_ERROR_IF(manifest_res.status(), LOON_SOURCE_INVALID, manifest_res.status().ToString());
+    // Unlike explore/get_file_info, this entry point is NOT handed a
+    // user-supplied location: manifest_file_path is the path
+    // loon_exttable_explore generated and milvus stored. A missing manifest is
+    // a GC race or lost data (Missing); a rejected credential or absent bucket
+    // is deployment configuration (Config). The producer's classification
+    // stands -- nothing here may re-tag to LOON_SOURCE_INVALID.
+    milvus_storage::api::Properties properties_map;
+    auto opt = milvus_storage::api::ConvertFFIProperties(properties_map, properties);
+    if (opt != std::nullopt) {
+      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
+    }
+
+    auto fs_res = milvus_storage::FilesystemCache::getInstance().get(properties_map, manifest_file_path);
+    RETURN_ARROW_ERROR_IF(fs_res.status(), LOON_ARROW_ERROR, fs_res.status().ToString());
+
+    auto manifest_res = milvus_storage::api::Manifest::ReadFrom(fs_res.ValueOrDie(), manifest_file_path);
+    RETURN_ARROW_ERROR_IF(manifest_res.status(), LOON_ARROW_ERROR, manifest_res.status().ToString());
     auto manifest = manifest_res.ValueOrDie();
 
     // Export full manifest including column groups, delta logs, and stats
