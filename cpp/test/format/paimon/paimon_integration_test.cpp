@@ -534,7 +534,7 @@ TEST_F(PaimonIntegrationTest, MissingPinnedSnapshotFailsPlanAsInvalidWithBounds)
   EXPECT_NE(message.find("refresh the external collection"), std::string::npos) << message;
 }
 
-TEST_F(PaimonIntegrationTest, VortexRowGroupsUseDecodedSchemaMemorySizes) {
+TEST_F(PaimonIntegrationTest, VortexWithoutMemoryStatisticsReturnsNotImplemented) {
   constexpr uint64_t kRows = 17;
   paimon::CreateTestTable(table_dir_, kRows, "append", {}, "vortex");
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
@@ -544,17 +544,16 @@ TEST_F(PaimonIntegrationTest, VortexRowGroupsUseDecodedSchemaMemorySizes) {
   const auto descriptor = folly::parseJson(files.front().Get<std::string>(api::kPropertyMetadata));
   EXPECT_EQ(descriptor.count("estimated_bytes"), 0);
 
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
-                                                      {"id", "name"}, nullptr));
-  ASSERT_AND_ASSIGN(auto infos, reader->get_row_group_infos());
-  ASSERT_FALSE(infos.empty());
-  size_t total_memory = 0;
-  for (const auto& info : infos) {
-    const auto rows = info.end_offset - info.start_offset;
-    EXPECT_GT(info.memory_size, rows) << info.ToString();
-    total_memory += info.memory_size;
-  }
-  EXPECT_GT(total_memory, kRows);
+  auto column_group = std::make_shared<api::ColumnGroup>();
+  column_group->columns = {"id", "name"};
+  column_group->format = LOON_FORMAT_PAIMON_TABLE;
+  column_group->files = files;
+  auto schema = arrow::schema({arrow::field("id", arrow::int32()), arrow::field("name", arrow::utf8())});
+  ASSERT_AND_ASSIGN(auto reader,
+                    api::ColumnGroupReader::create(schema, column_group, {"id", "name"}, properties_, nullptr));
+  ASSERT_GT(reader->total_number_of_chunks(), 0);
+  auto estimate = reader->get_chunk_estimated_size(0);
+  EXPECT_TRUE(estimate.status().IsNotImplemented()) << estimate.status().ToString();
 }
 
 }  // namespace

@@ -33,13 +33,6 @@
 namespace milvus_storage::paimon {
 namespace {
 
-// Conservative decoded Arrow widths for formats that do not expose per-group
-// memory metadata. This remains independent of compressed file bytes: Segment
-// sizing and load estimation keep the same logical-row/Take semantics as
-// Iceberg, while storage cache cells no longer see the old one-byte placeholder.
-constexpr uint64_t kVariableWidthColumnBytes = 32;
-constexpr uint64_t kUnknownColumnBytes = 16;
-
 struct ParsedMetadata {
   std::string data_format;
   uint64_t record_count = 0;
@@ -80,83 +73,6 @@ arrow::Result<ParsedMetadata> ParseMetadata(const std::string& json) {
   };
 }
 
-uint64_t SaturatingMultiply(uint64_t left, uint64_t right) {
-  if (left == 0 || right == 0) {
-    return 0;
-  }
-  if (left > (std::numeric_limits<uint64_t>::max() / right)) {
-    return std::numeric_limits<uint64_t>::max();
-  }
-  return left * right;
-}
-
-size_t EstimateMemorySize(uint64_t rows, uint64_t row_width) {
-  auto bytes = SaturatingMultiply(rows, std::max<uint64_t>(row_width, 1));
-  return static_cast<size_t>(std::min<uint64_t>(bytes, std::numeric_limits<size_t>::max()));
-}
-
-uint64_t EstimateFieldByteWidth(const std::shared_ptr<arrow::DataType>& type) {
-  if (!type) {
-    return kUnknownColumnBytes;
-  }
-  switch (type->id()) {
-    case arrow::Type::FIXED_SIZE_LIST: {
-      auto list = std::static_pointer_cast<arrow::FixedSizeListType>(type);
-      return SaturatingMultiply(static_cast<uint64_t>(std::max<int32_t>(1, list->list_size())),
-                                EstimateFieldByteWidth(list->value_type()));
-    }
-    case arrow::Type::STRUCT: {
-      uint64_t width = 0;
-      for (const auto& field : type->fields()) {
-        auto field_width = EstimateFieldByteWidth(field->type());
-        width = field_width > std::numeric_limits<uint64_t>::max() - width ? std::numeric_limits<uint64_t>::max()
-                                                                           : width + field_width;
-      }
-      return std::max<uint64_t>(width, 1);
-    }
-    case arrow::Type::STRING:
-    case arrow::Type::LARGE_STRING:
-    case arrow::Type::STRING_VIEW:
-    case arrow::Type::BINARY:
-    case arrow::Type::LARGE_BINARY:
-    case arrow::Type::BINARY_VIEW:
-    case arrow::Type::LIST:
-    case arrow::Type::LARGE_LIST:
-    case arrow::Type::MAP:
-      return kVariableWidthColumnBytes;
-    default: {
-      auto width = type->byte_width();
-      return width > 0 ? static_cast<uint64_t>(width) : kUnknownColumnBytes;
-    }
-  }
-}
-
-// Estimated decoded bytes per row from the file schema.
-uint64_t EstimateRowByteWidth(const std::shared_ptr<arrow::Schema>& schema) {
-  if (!schema || schema->num_fields() == 0) {
-    return static_cast<uint64_t>(kUnknownColumnBytes);
-  }
-  uint64_t width = 0;
-  for (const auto& field : schema->fields()) {
-    auto field_width = EstimateFieldByteWidth(field->type());
-    width = field_width > std::numeric_limits<uint64_t>::max() - width ? std::numeric_limits<uint64_t>::max()
-                                                                       : width + field_width;
-  }
-  return std::max<uint64_t>(width, 1);
-}
-
-std::vector<uint64_t> EstimateColumnByteWidths(const std::shared_ptr<arrow::Schema>& schema) {
-  std::vector<uint64_t> widths;
-  if (!schema) {
-    return widths;
-  }
-  widths.reserve(schema->num_fields());
-  for (const auto& field : schema->fields()) {
-    widths.push_back(EstimateFieldByteWidth(field->type()));
-  }
-  return widths;
-}
-
 arrow::Result<std::vector<RowGroupInfo>> MakeDirectLogicalRowGroups(const std::vector<RowGroupInfo>& physical,
                                                                     const std::vector<uint64_t>& deletions) {
   if (deletions.empty()) {
@@ -178,19 +94,13 @@ arrow::Result<std::vector<RowGroupInfo>> MakeDirectLogicalRowGroups(const std::v
     }
     auto logical_rows = physical_rows - deleted;
     uint64_t logical_memory_size = 0;
-    if (physical_rows != 0) {
+    if (group.memory_size_available && physical_rows != 0) {
       logical_memory_size =
           static_cast<uint64_t>(static_cast<unsigned __int128>(group.memory_size) * logical_rows / physical_rows);
-    }
-    std::vector<uint64_t> logical_column_memory_sizes;
-    if (group.memory_size_available) {
-      ARROW_ASSIGN_OR_RAISE(logical_column_memory_sizes,
-                            DistributeMemorySizes(logical_memory_size, group.column_memory_sizes));
     }
     result.push_back(RowGroupInfo{.start_offset = static_cast<size_t>(logical_start),
                                   .end_offset = static_cast<size_t>(logical_start + logical_rows),
                                   .memory_size = logical_memory_size,
-                                  .column_memory_sizes = std::move(logical_column_memory_sizes),
                                   .memory_size_available = group.memory_size_available});
     logical_start += logical_rows;
   }
@@ -376,23 +286,6 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
   uint64_t physical_rows = physical_groups.empty() ? 0 : physical_groups.back().end_offset;
   metadata->payload.physical_row_count = physical_rows;
 
-  if (parsed.data_format == "vortex") {
-    // Some Vortex files produced by Paimon do not carry decoded-size
-    // statistics. Keep the shared Vortex reader, but avoid publishing a zero
-    // load estimate for non-empty files by falling back to schema widths.
-    const auto column_widths = EstimateColumnByteWidths(metadata->file_schema);
-    const auto row_width = EstimateRowByteWidth(metadata->file_schema);
-    for (auto& group : physical_groups) {
-      const auto rows = static_cast<uint64_t>(group.end_offset - group.start_offset);
-      if (rows == 0 || group.memory_size != 0) {
-        continue;
-      }
-      group.memory_size = EstimateMemorySize(rows, row_width);
-      ARROW_ASSIGN_OR_RAISE(group.column_memory_sizes, DistributeMemorySizes(group.memory_size, column_widths));
-      group.memory_size_available = true;
-    }
-  }
-
   auto deletions = std::make_shared<std::vector<uint64_t>>();
   if (!parsed.deletion_file.is_null()) {
     if (!parsed.deletion_file.is_object()) {
@@ -511,6 +404,18 @@ arrow::Status PaimonFormatReader::open() {
 
 arrow::Result<std::vector<RowGroupInfo>> PaimonFormatReader::get_row_group_infos() {
   return metadata_->row_group_infos;
+}
+
+arrow::Result<std::vector<uint64_t>> PaimonFormatReader::get_rg_column_memsz(int64_t row_group_index) const {
+  if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= metadata_->row_group_infos.size()) {
+    return arrow::Status::Invalid("Paimon row group index out of range: ", row_group_index);
+  }
+  const auto& logical_group = metadata_->row_group_infos[row_group_index];
+  if (!logical_group.memory_size_available) {
+    return arrow::Status::NotImplemented("Paimon column memory size statistics are not available");
+  }
+  ARROW_ASSIGN_OR_RAISE(auto physical_sizes, direct_file_reader_->get_rg_column_memsz(row_group_index));
+  return DistributeMemorySizes(logical_group.memory_size, physical_sizes);
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> PaimonFormatReader::filter_direct_batch(
