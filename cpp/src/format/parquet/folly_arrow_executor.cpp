@@ -18,6 +18,7 @@
 #include <utility>
 
 #include <arrow/status.h>
+#include <folly/executors/InlineExecutor.h>
 
 namespace milvus_storage::parquet {
 namespace {
@@ -29,7 +30,8 @@ class FollyArrowExecutor final : public arrow::internal::Executor {
   FollyArrowExecutor(folly::Executor::KeepAlive<> executor, int capacity)
       : executor_(std::move(executor)), capacity_(capacity) {}
 
-  // Capacity is an Arrow scheduling hint; it does not create additional workers.
+  // Folly's base Executor has no worker-count API. Capacity is a caller-provided
+  // Arrow scheduling hint; it does not create additional workers.
   int GetCapacity() override { return capacity_; }
 
   protected:
@@ -72,7 +74,19 @@ class FollyArrowExecutor final : public arrow::internal::Executor {
 
 }  // namespace
 
-std::shared_ptr<arrow::internal::Executor> MakeFollyArrowExecutor(folly::Executor::KeepAlive<> executor, int capacity) {
+arrow::Result<std::shared_ptr<arrow::internal::Executor>> MakeFollyArrowExecutor(folly::Executor::KeepAlive<> executor,
+                                                                                 int capacity) {
+  if (!executor) {
+    return arrow::Status::Invalid("Parquet async reads require a Folly executor");
+  }
+  // InlineLikeExecutor::add() runs work on the submitting thread. Arrow may
+  // submit Parquet decode work while an S3 future is completing on a CRT event
+  // loop, so accepting an inline executor could move that decode onto the CRT
+  // thread. Do not choose a fallback here; require the storage caller to bind a
+  // non-inline executor.
+  if (dynamic_cast<folly::InlineLikeExecutor*>(executor.get()) != nullptr) {
+    return arrow::Status::Invalid("Parquet async reads require a non-inline Folly executor");
+  }
   return std::make_shared<FollyArrowExecutor>(std::move(executor), capacity);
 }
 

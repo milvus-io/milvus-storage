@@ -957,7 +957,7 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>> Parq
         // The callback now receives a concrete KeepAlive token for the consumer's
         // executor. The Arrow adapter only retains that token and forwards work;
         // it does not create an executor or worker thread.
-        auto arrow_executor = MakeFollyArrowExecutor(std::move(executor));
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto arrow_executor, MakeFollyArrowExecutor(std::move(executor)));
         // file_reader is captured by shared ownership because Arrow may use it
         // after this continuation returns.
         FOLLY_ARROW_ASSIGN_OR_RAISE(
@@ -1021,7 +1021,7 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> ParquetFormatRea
           folly::Unit) mutable -> folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> {
         // KeepAlive is now the concrete consumer executor token. This adapter
         // forwards Arrow work to it without creating a separate thread pool.
-        auto arrow_executor = MakeFollyArrowExecutor(std::move(executor));
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto arrow_executor, MakeFollyArrowExecutor(std::move(executor)));
         // Read complete row groups once. Exact row selection happens after the
         // generator output is concatenated below.
         FOLLY_ARROW_ASSIGN_OR_RAISE(

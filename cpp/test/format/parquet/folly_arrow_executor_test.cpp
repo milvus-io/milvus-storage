@@ -15,10 +15,13 @@
 #include <gtest/gtest.h>
 
 #include <functional>
+#include <string>
 #include <thread>
 
 #include <arrow/util/future.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
+#include <folly/executors/InlineExecutor.h>
+#include <folly/executors/QueuedImmediateExecutor.h>
 #include <folly/futures/Promise.h>
 
 #include "milvus-storage/format/parquet/folly_arrow_executor.h"
@@ -30,7 +33,9 @@ size_t CurrentThreadId() { return std::hash<std::thread::id>{}(std::this_thread:
 
 TEST(FollyArrowExecutorTest, RoutesSubmittedTaskToFollyExecutor) {
   folly::CPUThreadPoolExecutor folly_executor(1);
-  auto arrow_executor = MakeFollyArrowExecutor(folly::getKeepAliveToken(folly_executor), 1);
+  auto maybe_arrow_executor = MakeFollyArrowExecutor(folly::getKeepAliveToken(folly_executor), 1);
+  ASSERT_TRUE(maybe_arrow_executor.ok()) << maybe_arrow_executor.status().ToString();
+  auto arrow_executor = std::move(maybe_arrow_executor).ValueUnsafe();
   const auto caller_thread = CurrentThreadId();
 
   auto maybe_future = arrow_executor->Submit([] { return CurrentThreadId(); });
@@ -42,7 +47,9 @@ TEST(FollyArrowExecutorTest, RoutesSubmittedTaskToFollyExecutor) {
 
 TEST(FollyArrowExecutorTest, TransferAlwaysRunsContinuationOnFollyExecutor) {
   folly::CPUThreadPoolExecutor folly_executor(1);
-  auto arrow_executor = MakeFollyArrowExecutor(folly::getKeepAliveToken(folly_executor), 1);
+  auto maybe_arrow_executor = MakeFollyArrowExecutor(folly::getKeepAliveToken(folly_executor), 1);
+  ASSERT_TRUE(maybe_arrow_executor.ok()) << maybe_arrow_executor.status().ToString();
+  auto arrow_executor = std::move(maybe_arrow_executor).ValueUnsafe();
   const auto caller_thread = CurrentThreadId();
 
   auto source = arrow::Future<>::Make();
@@ -59,7 +66,11 @@ TEST(FollyArrowExecutorTest, DeferredArrowTaskRunsOnWaitingThreadWithoutVia) {
 
   auto future = folly::makeSemiFuture().deferExValue(
       [](folly::Executor::KeepAlive<> executor, folly::Unit) -> folly::SemiFuture<arrow::Result<size_t>> {
-        auto arrow_executor = MakeFollyArrowExecutor(std::move(executor), 1);
+        auto maybe_arrow_executor = MakeFollyArrowExecutor(std::move(executor), 1);
+        if (!maybe_arrow_executor.ok()) {
+          return folly::makeSemiFuture(arrow::Result<size_t>(maybe_arrow_executor.status()));
+        }
+        auto arrow_executor = std::move(maybe_arrow_executor).ValueUnsafe();
         auto maybe_arrow_future = arrow_executor->Submit([] { return CurrentThreadId(); });
         if (!maybe_arrow_future.ok()) {
           return folly::makeSemiFuture(arrow::Result<size_t>(maybe_arrow_future.status()));
@@ -79,6 +90,26 @@ TEST(FollyArrowExecutorTest, DeferredArrowTaskRunsOnWaitingThreadWithoutVia) {
   auto result = std::move(future).get();
   ASSERT_TRUE(result.ok()) << result.status().ToString();
   EXPECT_EQ(result.ValueUnsafe(), caller_thread);
+}
+
+TEST(FollyArrowExecutorTest, RejectsEmptyExecutor) {
+  auto result = MakeFollyArrowExecutor(folly::Executor::KeepAlive<>{}, 1);
+
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid()) << result.status().ToString();
+  EXPECT_NE(result.status().ToString().find("executor"), std::string::npos);
+}
+
+TEST(FollyArrowExecutorTest, RejectsInlineLikeExecutors) {
+  auto expect_rejected = [](folly::Executor& executor) {
+    auto result = MakeFollyArrowExecutor(folly::getKeepAliveToken(executor), 1);
+    ASSERT_FALSE(result.ok());
+    EXPECT_TRUE(result.status().IsInvalid()) << result.status().ToString();
+    EXPECT_NE(result.status().ToString().find("non-inline"), std::string::npos);
+  };
+
+  expect_rejected(folly::InlineExecutor::instance());
+  expect_rejected(folly::QueuedImmediateExecutor::instance());
 }
 
 }  // namespace

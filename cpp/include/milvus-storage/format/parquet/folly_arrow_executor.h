@@ -16,6 +16,7 @@
 
 #include <memory>
 
+#include <arrow/result.h>
 #include <arrow/util/thread_pool.h>
 #include <folly/Executor.h>
 
@@ -23,7 +24,9 @@ namespace milvus_storage::parquet {
 
 // Adapt the Folly executor inherited from the consuming future chain for
 // Arrow's async generator while retaining its KeepAlive for outstanding work.
-std::shared_ptr<arrow::internal::Executor> MakeFollyArrowExecutor(folly::Executor::KeepAlive<> executor,
-                                                                  int capacity = 1);
+// Reject InlineLikeExecutor because it may run Arrow work on the submitting
+// thread, which can be a CRT callback thread.
+arrow::Result<std::shared_ptr<arrow::internal::Executor>> MakeFollyArrowExecutor(folly::Executor::KeepAlive<> executor,
+                                                                                 int capacity = 1);
 
 }  // namespace milvus_storage::parquet

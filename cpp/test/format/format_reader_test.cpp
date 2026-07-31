@@ -25,6 +25,7 @@
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
+#include <folly/executors/InlineExecutor.h>
 #include <parquet/arrow/schema.h>
 #include <parquet/metadata.h>
 #include <parquet/type_fwd.h>
@@ -623,6 +624,34 @@ TEST_P(FormatReaderTest, ParquetAsyncReadUsesCallerExecutorForDecode) {
   ASSERT_EQ(batches.size(), 1);
   ASSERT_EQ(batches.front()->num_rows(), test_batch_->num_rows());
   ASSERT_GT(executor.add_count(), 1);
+}
+
+TEST_P(FormatReaderTest, ParquetAsyncReadRejectsInlineExecutor) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  const auto file_path = base_path_ + "/async_inline_executor.parquet";
+  StorageConfig config;
+  ASSERT_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(schema_, fs_, file_path, config));
+  ASSERT_STATUS_OK(writer->Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer->Close());
+
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(schema_, LOON_FORMAT_PARQUET, file, properties_,
+                                                      /*needed_columns=*/{}, nullptr));
+
+  auto range_result = std::move(reader->read_with_range_async(0, test_batch_->num_rows()))
+                          .via(&folly::InlineExecutor::instance())
+                          .get();
+  ASSERT_FALSE(range_result.ok());
+  EXPECT_TRUE(range_result.status().IsInvalid()) << range_result.status().ToString();
+  EXPECT_NE(range_result.status().ToString().find("non-inline"), std::string::npos);
+
+  auto take_result = std::move(reader->take_async({0})).via(&folly::InlineExecutor::instance()).get();
+  ASSERT_FALSE(take_result.ok());
+  EXPECT_TRUE(take_result.status().IsInvalid()) << take_result.status().ToString();
+  EXPECT_NE(take_result.status().ToString().find("non-inline"), std::string::npos);
 }
 
 TEST_P(FormatReaderTest, ParquetOpenAsyncUsesCallerExecutor) {
