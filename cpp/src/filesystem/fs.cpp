@@ -14,6 +14,8 @@
 
 #include "milvus-storage/filesystem/fs.h"
 
+#include <cctype>
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -421,7 +423,31 @@ arrow::Result<StorageUri> StorageUri::Parse(const std::string& uri, bool include
 
   StorageUri result;
 
-  // If parsing fails or scheme is empty, treat as relative path
+  // A string with no scheme is a relative path, and that is a legitimate,
+  // extremely common input -- so it stays a success.
+  //
+  // A string that HAS a scheme but will not parse is different: "s3://bucket/%ZZ"
+  // or "http://[::1" is a URI the caller meant, written wrong. Treating it as a
+  // relative path silently sent it to whatever fs.* the deployment defaults to,
+  // where it failed later as a missing key -- pointing the reader at the object
+  // store instead of at the malformed string. The scheme test is deliberately
+  // syntactic (RFC 3986 shape) rather than a list of known schemes, so a typo'd
+  // scheme is still reported as a bad URI rather than a filename.
+  if (!status.ok()) {
+    // RFC 3986 shape is "scheme:" -- the "//" authority is optional, so keying
+    // on the literal "://" let "s3:/bucket/%ZZ" through to be treated as a
+    // local relative path. Requiring at least two scheme characters keeps a
+    // Windows-style "C:\..." out.
+    const auto colon = uri.find(':');
+    const bool looks_like_uri =
+        colon != std::string::npos && colon > 1 && std::isalpha(static_cast<unsigned char>(uri.front())) != 0 &&
+        std::all_of(uri.begin(), uri.begin() + static_cast<std::ptrdiff_t>(colon),
+                    [](unsigned char c) { return std::isalnum(c) != 0 || c == '+' || c == '-' || c == '.'; });
+    if (looks_like_uri) {
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                "Storage URI is malformed and cannot be parsed: ", uri, " (", status.message(), ")");
+    }
+  }
   if (!status.ok() || parsed.scheme().empty()) {
     result.scheme = "";
     result.address = "";

@@ -94,6 +94,13 @@ const char* loon_ffi_get_errmsg(LoonFFIResult* result) {
   if (loon_ffi_is_success(result)) {
     return nullptr;
   }
+  if (result->message == nullptr) {
+    // CreateFFIResult gives up the message rather than allocate while handling
+    // an out-of-memory error. Callers feed this straight into printf-style
+    // formatting, where a null is undefined behaviour -- hand them something
+    // static instead. The code on the result still says what happened.
+    return "(error message unavailable: formatting it failed, likely out of memory)";
+  }
   return result->message;
 }
 

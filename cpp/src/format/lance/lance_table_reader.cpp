@@ -180,6 +180,11 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
   std::shared_ptr<BlockingDataset> dataset;
   try {
     dataset = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config));
+  } catch (const std::bad_alloc&) {
+    // Answered before the generic handler: routed there, memory pressure --
+    // the one condition a retry is most likely to resolve -- came back as a
+    // permanent error. Enforced by cpp/scripts/check_oom_handlers.py.
+    return arrow::Status::OutOfMemory("Out of memory in the lance table reader");
   } catch (const std::exception& e) {
     return arrow::Status::IOError("Failed to open Lance dataset for metadata: ", e.what());
   }

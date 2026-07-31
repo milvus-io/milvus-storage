@@ -318,6 +318,16 @@ fn ffi_err(err_code: i32, context: &str, message: String) -> VortexError {
     })
 }
 
+/// Same marker channel, for classifications made outside this module.
+///
+/// The marker was built for round-tripping codes the C++ filesystem shim
+/// produced; it works just as well for a verdict the Rust side reaches on its
+/// own, which is what the vortex bridge needs in order to report a parse
+/// failure as corruption rather than as an unclassified IOError.
+pub(crate) fn vortex_marker_error(err_code: i32, context: &str, message: String) -> VortexError {
+    ffi_err(err_code, context, message)
+}
+
 // Helper to check LoonFFIResult and convert to VortexError if needed.
 fn check_loon_ffi_result(result: &mut LoonFFIResult, context: &str) -> Result<(), VortexError> {
     if result.err_code != 0 {

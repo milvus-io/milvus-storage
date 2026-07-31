@@ -146,6 +146,9 @@
 // data was lost -- someone pointed the deployment at a bucket that is not
 // there, which is a configuration fix.
 #define LOON_AWS_ERROR_BUCKET_NOT_FOUND 118
+// A vortex file does not parse. Same category and landing as 117; separate so
+// a corruption alert says which format failed without parsing the message.
+#define LOON_VORTEX_FILE_CORRUPTED 119
 
 // ===========================================================================
 // THE error tables. Everything downstream -- the exported `loon_errcode_*`
@@ -268,4 +271,15 @@
   /* internally generated path is a deployment pointing somewhere that does not */                                     \
   /* exist, not data loss: re-reading the manifest cannot conjure a bucket.     */                                     \
   X(AwsErrorBucketNotFound, LOON_AWS_ERROR_BUCKET_NOT_FOUND, aws_bucket_not_found, LOON_ERROR_CATEGORY_CONFIG,         \
-    "NoSuchBucket")
+    "NoSuchBucket")                                                                                                    \
+  /* A vortex file will not parse: flatbuffer/protobuf decode failure, a serde  */                                     \
+  /* error, an offset outside the file, or a file too short to hold its EOF     */                                     \
+  /* trailer. Mostly minted in our Rust bridge, which is the only layer holding */                                     \
+  /* a typed VortexError and therefore the only one able to tell "the bytes are */                                     \
+  /* wrong" from "the read failed" -- by the time C++ sees it, it is a string.  */                                     \
+  /* The C++ reader mints it too, for the two shapes it can judge without      */                                      \
+  /* parsing: an object shorter than the trailer, and a footer descriptor that  */                                     \
+  /* points outside the file. A RECORDED size that contradicts an intact object */                                     \
+  /* is NOT this -- that is ManifestCorrupted, because the bytes are fine and   */                                     \
+  /* the metadata is not.                                                       */                                     \
+  X(VortexFileCorrupted, LOON_VORTEX_FILE_CORRUPTED, vortex_file_corrupted, LOON_ERROR_CATEGORY_CORRUPTED, "")

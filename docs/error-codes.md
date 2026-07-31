@@ -85,13 +85,59 @@ build (`ToSegcoreErrorCode` is a no-`default` switch under `-Werror=switch`) or
 
 ## How to consume it
 
+Handle all eight. Collapsing the tail into "permanent" is the mistake this
+taxonomy exists to prevent: it makes `Conflict` skip the re-read that would let
+the retry succeed, makes `Missing` give up where re-reading the manifest would
+have resolved it, and reports a `Config` or `Corrupted` failure to whoever
+happened to issue the request instead of to whoever can act on it.
+
 ```c
-int category = loon_ffi_error_category(result.err_code);
-if (category == loon_error_category_transient) {          // retry
-} else if (category == loon_error_category_user) {        // report to the requester, never retry
-} else {                                                  // permanent or unknown: fail and alert
+// Success first. loon_ffi_error_category(LOON_SUCCESS) is UNKNOWN -- the
+// category function answers "which kind of failure", and success is not one --
+// so classifying without this check drops every successful call into the final
+// branch and alerts on it as a permanent failure.
+if (loon_ffi_is_success(&result)) {
+  /* ... use the result ... */
+  loon_ffi_free_result(&result);
+  return;
 }
+
+// if/else, not switch: the loon_error_category_* symbols are `extern const int`
+// (see ffi_c.h), and C requires case labels to be integer constant
+// expressions. A switch over them does not compile.
+int category = loon_ffi_error_category(result.err_code);
+if (category == loon_error_category_transient) {
+  /* Back off and send the same request again. */
+} else if (category == loon_error_category_conflict) {
+  /* Also retriable, but NOT a replay: re-read the state, rebase, re-submit.
+     Sending the same bytes fails identically every time. */
+} else if (category == loon_error_category_missing) {
+  /* Re-read the metadata, THEN decide. This layer refuses to guess whether the
+     object was collected or lost, because it cannot tell; you can. */
+} else if (category == loon_error_category_user) {
+  /* Return it to the caller. Do not retry, do not alert. */
+} else if (category == loon_error_category_config) {
+  /* Alert an operator -- credentials, endpoint, a bucket that is not there.
+     Never retry, and never blame the caller. */
+} else if (category == loon_error_category_corrupted) {
+  /* Act on the DATA: quarantine this copy, re-fetch from a replica, rebuild. */
+} else if (category == loon_error_category_permanent) {
+  /* Our bug. Alert a developer; retrying reproduces it. */
+} else {
+  /* loon_error_category_unknown -- a code newer than this consumer.
+     Treat as permanent. Never retry what you cannot classify. */
+}
+
+/* Always, on every path. The message is strdup'd by the library, so a retry
+   loop that classifies and loops without freeing leaks once per attempt --
+   which is once per attempt of exactly the failures you retry most. */
+loon_ffi_free_result(&result);
 ```
+
+`loon_ffi_is_retryable_errcode(result.err_code)` answers the retry question on
+its own, and agrees with the switch by construction -- it is exactly
+`Transient || Conflict`. Use it when retriability is all you need; use the
+category when you need to know what to DO.
 
 `loon_ffi_error_category` is a pure function of the code, so it needs no room in
 `LoonFFIResult` and a consumer can classify a code it has never seen. An unrecognized code
@@ -139,7 +185,7 @@ and it survives to the FFI boundary *and* to segcore.
 | `AwsErrorNoSuchUpload` | 101 | Missing | no | `NoSuchUpload` | 2017 `ObjectNotExist` | Multipart upload state is gone |
 | `AwsErrorConflict` | 102 | **Conflict** | **yes** | `OperationAborted` | 2045 `StorageTransientError` | Concurrent-modification conflict |
 | `AwsErrorPreConditionFailed` | 103 | **Conflict** | **yes** | `PreconditionFailed` | 2045 `StorageTransientError` | Conditional write precondition failed |
-| `AwsErrorNotFound` | 104 | Missing | no | `NoSuchKey` / `NoSuchBucket` | 2017 `ObjectNotExist` | Object/bucket gone on an internal path |
+| `AwsErrorNotFound` | 104 | Missing | no | `NoSuchKey` | 2017 `ObjectNotExist` | An object on an internally generated path is gone. A missing BUCKET is no longer this -- it is `AwsErrorBucketNotFound` (118), Config, because re-reading metadata cannot produce a bucket |
 | `AwsErrorAccessDenied` | 105 | Config | no | `AccessDenied` / `InvalidAccessKeyId` / `SignatureDoesNotMatch` | 2006 `ConfigInvalid` | Credentials or permissions wrong |
 | `AwsErrorNonRetryable` | 106 | Permanent | no | — | 2044 `StorageError` | AWS SDK judged it non-retryable (`ShouldRetry() == false`) |
 | `StorageTransientNetwork` | 107 | **Transient** | **yes** | `RequestTimeout` | 2045 `StorageTransientError` | Connection reset / refused / aborted |
@@ -149,8 +195,9 @@ and it survives to the FFI boundary *and* to segcore.
 | `TxnExhaustedRetry` | 111 | **Conflict** | **yes** | — | 2045 `StorageTransientError` | Manifest transaction spent its own retry budget |
 | `TxnResolutionFailed` | 112 | **Conflict** | **yes** | — | 2045 `StorageTransientError` | Manifest merge/resolution failed |
 | `StorageConfigInvalid` | 115 | Config | no | `InvalidArgument` | 2006 `ConfigInvalid` | Deployment storage config is unusable: unknown cloud provider or storage type, malformed `extfs.*` property |
-| `ManifestCorrupted` | 117 | Corrupted | no | — | 2024 `DataFormatBroken` | The manifest does not parse: bad MILV magic, truncated stream, avro body that does not decode |
+| `ManifestCorrupted` | 117 | Corrupted | no | — | 2024 `DataFormatBroken` | The manifest does not parse: bad MILV magic, truncated stream, avro body that does not decode. Also used when a size the manifest RECORDED contradicts an intact object -- the bytes are fine, so blaming them would have a good file quarantined |
 | `AwsErrorBucketNotFound` | 118 | Config | no | `NoSuchBucket` | 2016 `BucketInvalid` | The bucket the deployment names does not exist — not data loss, and no amount of re-reading metadata produces one |
+| `VortexFileCorrupted` | 119 | Corrupted | no | — | 2024 `DataFormatBroken` | A vortex file does not decode: flatbuffer/protobuf failure, serde error, an offset outside the file, or a file too short to hold its EOF trailer. Mostly classified in our Rust bridge — the only layer holding a typed `VortexError`, since by the time C++ sees the failure it is a string. The C++ reader mints it for the two shapes it can judge without parsing: a file shorter than the trailer, and a footer descriptor pointing outside the file |
 
 ## Alignment with AWS S3 / Aliyun OSS, and where it deliberately differs
 
@@ -180,7 +227,8 @@ them. An empty `s3_code` in the table is the documented way of saying "no counte
 `not-found` and `access-denied` are the same object-store condition with two different owners:
 
 - an object on a path **milvus generated** → not the caller's problem (`AwsErrorNotFound` 104,
-  a Permanent system failure / `AwsErrorAccessDenied` 105, a Config failure);
+  a **Missing** failure -- re-read the metadata and decide, since this layer cannot tell a GC
+  race from real loss / `AwsErrorAccessDenied` 105, a Config failure);
 - a bucket or key the **user typed** into an external-source definition → user error
   (`LOON_SOURCE_INVALID` 13, which covers both -- see the code's own comment for why
   not-found and access-denied cannot be split accurately at this layer).

@@ -22,6 +22,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <optional>
 #include <shared_mutex>
 #include <thread>
@@ -76,6 +77,7 @@
 #include <aws/s3/model/UploadPartRequest.h>
 #ifdef WITH_CRT
 #include <aws/s3-crt/model/GetObjectRequest.h>
+#include <aws/s3-crt/model/HeadBucketRequest.h>
 #include <aws/s3-crt/model/HeadObjectRequest.h>
 #endif
 
@@ -663,7 +665,29 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
     auto outcome = client_lock.Move()->HeadObject(req);
     if (!outcome.IsSuccess()) {
-      if (IsNotFound(outcome.GetError())) {
+      // Two different not-founds. A missing KEY is ENOENT -- the caller
+      // re-reads its metadata and decides (GC race vs data loss). A missing
+      // BUCKET must not be flattened into that: no amount of re-reading
+      // metadata produces a bucket.
+      //
+      // The typed check alone is not enough: HEAD responses carry no body, so
+      // on AWS proper a missing bucket ALSO arrives as a generic 404
+      // (RESOURCE_NOT_FOUND) -- NO_SUCH_BUCKET only shows up on S3-compatibles
+      // that type their HEAD errors. One HeadBucket, on the already-failed
+      // path, settles which absence this is; if even that cannot answer, the
+      // key-level ENOENT stands, which is the pre-existing behaviour.
+      if (IsNotFound(outcome.GetError()) && outcome.GetError().GetErrorType() != Aws::S3::S3Errors::NO_SUCH_BUCKET) {
+        S3Model::HeadBucketRequest bucket_req;
+        bucket_req.SetBucket(ToAwsString(path_.bucket));
+        ARROW_ASSIGN_OR_RAISE(auto bucket_lock, holder_->Lock());
+        auto bucket_outcome = bucket_lock.Move()->HeadBucket(bucket_req);
+        if (!bucket_outcome.IsSuccess() && IsNotFound(bucket_outcome.GetError())) {
+          auto message = std::string("Bucket '") + path_.bucket +
+                         "' does not exist: the deployment points at a bucket that is not there, which is a "
+                         "configuration fix, not an object to go looking for. (HeadObject for key '" +
+                         path_.key + "' returned 404.)";
+          return MakeExtendError(ExtendStatusCode::AwsErrorBucketNotFound, message, message);
+        }
         return PathNotFound(path_);
       }
       return ErrorToStatus(
@@ -981,7 +1005,23 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
     auto outcome = client_lock.Move()->HeadObject(req);
     if (!outcome.IsSuccess()) {
-      if (outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
+      // Same bucket/key split as the non-CRT read path, including the
+      // HeadBucket probe: HEAD errors are bodyless on AWS proper, so the typed
+      // NO_SUCH_BUCKET check alone never fires there.
+      if (outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND &&
+          static_cast<Aws::S3::S3Errors>(outcome.GetError().GetErrorType()) != Aws::S3::S3Errors::NO_SUCH_BUCKET) {
+        S3CrtModel::HeadBucketRequest bucket_req;
+        bucket_req.SetBucket(ToAwsString(path_.bucket));
+        ARROW_ASSIGN_OR_RAISE(auto bucket_lock, holder_->Lock());
+        auto bucket_outcome = bucket_lock.Move()->HeadBucket(bucket_req);
+        if (!bucket_outcome.IsSuccess() &&
+            bucket_outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
+          auto message = std::string("Bucket '") + path_.bucket +
+                         "' does not exist: the deployment points at a bucket that is not there, which is a "
+                         "configuration fix, not an object to go looking for. (HeadObject for key '" +
+                         path_.key + "' returned 404.)";
+          return MakeExtendError(ExtendStatusCode::AwsErrorBucketNotFound, message, message);
+        }
         return PathNotFound(path_);
       }
       return ErrorToStatus(
@@ -2241,34 +2281,334 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
         std::string_view("FullListBucketScan"));
   }
 
-  // Delete multiple objects at once
-  Future<> DeleteObjectsAsync(const std::string& bucket, const std::vector<std::string>& keys) {
+  // One logical delete -- a bare key list, or a whole directory walked page by
+  // page -- becomes many DeleteObjects calls, and failures can land in any of
+  // them at either level: the request itself, or individual keys inside an
+  // HTTP 200. A single status has to answer for all of it, so all of it is
+  // recorded here and judged once at the end.
+  //
+  // Judging per response was wrong three ways at once: AllFinished kept
+  // whichever failure arrived first, request-level failures never reached the
+  // tally at all, and each listing page built its own. A page of SlowDown
+  // beside a page of AccessDenied came back retryable or not depending on
+  // scheduling, with the other page's keys missing from the message.
+  // One logical delete -- a key list, or a directory walked page by page --
+  // becomes many DeleteObjects calls, and failures land at two levels: the
+  // request, and individual keys inside an HTTP 200. A single status answers
+  // for all of it.
+  //
+  // The rule is a precedence ladder, and it is a ladder on purpose. Earlier
+  // versions asked whether the set agreed -- on the code, then on the category,
+  // then on retriability -- with a fallback when it did not. That is a partial
+  // order with holes, and every review round found another combination that
+  // landed in one. A total order has no holes: every mix has exactly one
+  // answer, and the whole table can be enumerated in a test.
+  //
+  // Highest rung present wins, because the more demanding action is the safe
+  // one. Telling a caller to retry a batch containing an AccessDenied promises
+  // something retrying cannot deliver; telling it to alert an operator for a
+  // batch containing a SlowDown costs one wasted look, and GC re-drives the
+  // deletes anyway. The counts below keep both visible either way.
+  struct DeleteErrorTally {
+    static constexpr size_t kMaxSampleLines = 20;
+    static constexpr size_t kMaxSampleBytes = 8 * 1024;
+    static constexpr size_t kMaxLineBytes = 512;
+    // Per FIELD, applied before concatenation.
+    static constexpr size_t kMaxFieldBytes = 200;
+
+    // Corrupted > Permanent > Config > Missing > Conflict > Transient.
+    // Unclassified sits at the Permanent rung: the taxonomy's own rule is that
+    // a code you cannot classify is handled as permanent -- never retry what
+    // you cannot explain -- so an unknown member must not be out-voted into
+    // retriability by a known-transient one.
+    enum class Rung : int {
+      kNone = 0,
+      kTransient = 1,
+      kConflict = 2,
+      kMissing = 3,
+      kConfig = 4,
+      kPermanentOrUnknown = 5,
+      kCorrupted = 6,
+    };
+
+    static Rung RungFor(std::optional<ErrorCategory> category) {
+      if (!category.has_value()) {
+        return Rung::kPermanentOrUnknown;
+      }
+      switch (*category) {
+        case ErrorCategory::Corrupted:
+          return Rung::kCorrupted;
+        case ErrorCategory::Config:
+          return Rung::kConfig;
+        case ErrorCategory::Missing:
+          return Rung::kMissing;
+        case ErrorCategory::Conflict:
+          return Rung::kConflict;
+        case ErrorCategory::Transient:
+          return Rung::kTransient;
+        case ErrorCategory::User:
+        case ErrorCategory::Permanent:
+        case ErrorCategory::Unknown:
+          break;
+      }
+      return Rung::kPermanentOrUnknown;
+    }
+
+    std::mutex mutex;
+    std::stringstream sample;
+    size_t sampled = 0;
+    size_t sample_bytes = 0;
+    size_t count = 0;
+    // Bounded by the size of the code table, never by the backend's vocabulary.
+    std::map<int, size_t> code_histogram;
+    size_t unclassified_count = 0;
+    size_t out_of_memory_count = 0;
+
+    Rung highest = Rung::kNone;
+    // Which code to report for the winning rung -- chosen from codes that
+    // actually occurred. A fixed representative per category invented errors
+    // that never happened: two BucketNotFound came back as AccessDenied, which
+    // also downgraded segcore from BucketInvalid to the vaguer ConfigInvalid,
+    // and two Network came back as Service. The retry bit was right and
+    // everything else was fiction.
+    std::optional<ExtendStatusCode> rung_code;
+    bool rung_code_conflict = false;
+    bool any_throttle = false;
+    // Kept so a lone request-level failure comes back exactly as produced --
+    // same code, same detail, same message -- rather than reconstructed.
+    arrow::Status sole_request_error;
+    size_t request_error_count = 0;
+
+    void Note(std::optional<ExtendStatusCode> code, bool out_of_memory, const std::string& line) {
+      std::lock_guard<std::mutex> lock(mutex);
+      ++count;
+      if (code.has_value()) {
+        ++code_histogram[static_cast<int>(*code)];
+        any_throttle = any_throttle || (*code == ExtendStatusCode::StorageTransientThrottling);
+      } else if (out_of_memory) {
+        ++out_of_memory_count;
+      } else {
+        ++unclassified_count;
+      }
+      if (sampled < kMaxSampleLines && sample_bytes < kMaxSampleBytes) {
+        auto truncated = line.substr(0, std::min<size_t>(line.size(), kMaxLineBytes));
+        if (truncated.size() < line.size()) {
+          truncated += "... (truncated)";
+        }
+        sample << truncated << "\n";
+        sample_bytes += truncated.size() + 1;
+        ++sampled;
+      }
+      // Arrow's OOM carries its classification in its own status code with no
+      // ExtendStatusDetail, so it is placed on the Transient rung explicitly
+      // rather than by looking a code up.
+      const auto rung =
+          out_of_memory ? Rung::kTransient
+                        : RungFor(code.has_value() ? std::optional{CategoryForExtendStatusCode(*code)} : std::nullopt);
+      if (rung > highest) {
+        // A new highest rung starts its own vote for the code that represents it.
+        highest = rung;
+        rung_code = code;
+        rung_code_conflict = false;
+      } else if (rung == highest && rung_code != code) {
+        rung_code_conflict = true;
+      }
+    }
+
+    void RecordKeyError(const std::string& key, const std::string& code, const std::string& message) {
+      std::optional<ExtendStatusCode> mapped;
+      if (code == "AccessDenied") {
+        mapped = ExtendStatusCode::AwsErrorAccessDenied;
+      } else if (code == "SlowDown" || code == "RequestLimitExceeded" || code == "Throttling") {
+        mapped = ExtendStatusCode::StorageTransientThrottling;
+      } else if (code == "InternalError" || code == "ServiceUnavailable") {
+        mapped = ExtendStatusCode::StorageTransientService;
+      } else if (code == "RequestTimeout") {
+        mapped = ExtendStatusCode::StorageTransientTimeout;
+      } else if (code == "OperationAborted") {
+        // A conflicting operation is already in progress on this key: someone
+        // else won the race, so re-read and re-submit.
+        mapped = ExtendStatusCode::AwsErrorConflict;
+      }
+      // The backend's raw code appears in the capped sample line; it never
+      // becomes a histogram key.
+      // Each part is clipped before anything is concatenated. Clipping the
+      // finished line still allocated the whole thing first -- a one-megabyte
+      // backend message cost a megabyte to produce a 600-byte report.
+      Note(mapped, /*out_of_memory=*/false,
+           "- key '" + Clip(key, kMaxFieldBytes) + "' (" + Clip(code, kMaxFieldBytes) +
+               "): " + Clip(message, kMaxFieldBytes));
+    }
+
+    void RecordRequestError(const arrow::Status& status) {
+      std::optional<ExtendStatusCode> code;
+      if (auto detail = ExtendStatusDetail::UnwrapStatus(status)) {
+        code = detail->code();
+      }
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        ++request_error_count;
+        if (request_error_count == 1) {
+          sole_request_error = status;
+        }
+      }
+      // status.ToString() is the expensive part -- it materialises message and
+      // detail together -- so the message is clipped from the status's own
+      // fields rather than from the rendered string.
+      Note(code, status.IsOutOfMemory(),
+           "- request failed: " + Clip(std::string(arrow::Status::CodeAsString(status.code())), kMaxFieldBytes) + ": " +
+               Clip(status.message(), kMaxFieldBytes));
+    }
+
+    static std::string Clip(const std::string& text, size_t limit) {
+      if (text.size() <= limit) {
+        return text;
+      }
+      return text.substr(0, limit) + "...(+" + std::to_string(text.size() - limit) + "B)";
+    }
+
+    arrow::Status Finish(const std::string& bucket) {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (count == 0) {
+        return arrow::Status::OK();
+      }
+      if (count == 1 && request_error_count == 1) {
+        // Rebuilt bounded rather than returned as-is: the lone-failure fast
+        // path was the last way an unbounded backend message reached the
+        // caller, and it carried the whole thing twice, in message and detail.
+        // The code and its detail are what the caller acts on; those are kept.
+        const auto& original = sole_request_error;
+        if (original.message().size() <= kMaxSampleBytes) {
+          return original;
+        }
+        auto clipped = Clip(original.message(), kMaxSampleBytes);
+        if (auto detail = ExtendStatusDetail::UnwrapStatus(original)) {
+          return MakeExtendError(detail->code(), clipped, /*extra_info=*/"");
+        }
+        return original.WithMessage(clipped);
+      }
+
+      auto message = "Got " + std::to_string(count) + " errors when deleting objects in S3 bucket '" + bucket + "'";
+      if (count > sampled) {
+        message += " (showing " + std::to_string(sampled) + ", " + std::to_string(count - sampled) + " omitted)";
+      }
+      message += ". By code:";
+      for (const auto& [code_value, n] : code_histogram) {
+        auto as_code = ExtendStatusCodeFromInt(code_value);
+        message += " " +
+                   (as_code.has_value() ? ExtendStatusDetail(*as_code).CodeAsString() : std::to_string(code_value)) +
+                   "=" + std::to_string(n);
+      }
+      if (out_of_memory_count != 0) {
+        message += " out-of-memory=" + std::to_string(out_of_memory_count);
+      }
+      if (unclassified_count != 0) {
+        message += " unclassified=" + std::to_string(unclassified_count);
+      }
+      message += "\n" + sample.str();
+
+      // One rung, one answer. extra_info is left empty: duplicating the whole
+      // report into it doubled every byte of an already-large message.
+      // Everything on the winning rung agreed on one code: report THAT code.
+      // This is the common case -- a batch of identical failures -- and the
+      // only way the specific code survives at all.
+      if (!rung_code_conflict && rung_code.has_value()) {
+        return MakeExtendError(*rung_code, message, /*extra_info=*/"");
+      }
+
+      // Genuinely different codes on one rung -- Network beside Timeout, say.
+      // Report the most frequent code that ACTUALLY OCCURRED on that rung,
+      // ties broken by the lower numeric code so the answer is deterministic.
+      // Falling back to a fixed representative reported Service/110 for a set
+      // containing no service failure at all: the retry bit was right, and the
+      // code, the metric and the diagnosis were all describing something that
+      // never happened.
+      {
+        std::optional<ExtendStatusCode> best;
+        size_t best_count = 0;
+        for (const auto& [code_value, n] : code_histogram) {
+          auto as_code = ExtendStatusCodeFromInt(code_value);
+          if (!as_code.has_value() || RungFor(CategoryForExtendStatusCode(*as_code)) != highest) {
+            continue;
+          }
+          if (n > best_count) {
+            best = as_code;
+            best_count = n;
+          }
+        }
+        if (best.has_value()) {
+          return MakeExtendError(*best, message, /*extra_info=*/"");
+        }
+      }
+
+      // Nothing on the winning rung carries a code of ours -- an all-OOM set,
+      // or an unclassified one. Those are answered below.
+      switch (highest) {
+        case Rung::kCorrupted:
+          return MakeExtendError(ExtendStatusCode::ManifestCorrupted, message, /*extra_info=*/"");
+        case Rung::kConfig:
+          return MakeExtendError(ExtendStatusCode::AwsErrorAccessDenied, message, /*extra_info=*/"");
+        case Rung::kMissing:
+          return MakeExtendError(ExtendStatusCode::AwsErrorNotFound, message, /*extra_info=*/"");
+        case Rung::kConflict:
+          return MakeExtendError(ExtendStatusCode::AwsErrorConflict, message, /*extra_info=*/"");
+        case Rung::kTransient:
+          if (any_throttle) {
+            // 109 rather than the generic 110 whenever anything was throttled:
+            // it is what makes rate limiting visible in metrics on its own.
+            return MakeExtendError(ExtendStatusCode::StorageTransientThrottling, message, /*extra_info=*/"");
+          }
+          if (out_of_memory_count != 0 && code_histogram.empty()) {
+            // Only memory pressure, no object-store failure. Minting a
+            // structured 5xx code here would point metrics at the wrong system.
+            return arrow::Status::OutOfMemory(message);
+          }
+          return MakeExtendError(ExtendStatusCode::StorageTransientService, message, /*extra_info=*/"");
+        case Rung::kPermanentOrUnknown:
+        case Rung::kNone:
+          break;
+      }
+      // Permanent or unclassified: there is no object-store code to mint, and
+      // an unclassified IOError is the honest answer -- consumers treat it as
+      // permanent, which is what this rung means.
+      return arrow::Status::IOError(message);
+    }
+  };
+
+  // Delete multiple objects at once.
+  //
+  // `tally` lets a caller that issues several of these -- the directory walk --
+  // pool every failure into one verdict. Passing none means this call is the
+  // whole logical delete and settles its own.
+  Future<> DeleteObjectsAsync(const std::string& bucket,
+                              const std::vector<std::string>& keys,
+                              std::shared_ptr<DeleteErrorTally> shared_tally = nullptr) {
+    auto tally = shared_tally ? shared_tally : std::make_shared<DeleteErrorTally>();
+    const bool owns_tally = (shared_tally == nullptr);
+
     struct DeleteCallback {
       std::string bucket;
+      std::shared_ptr<DeleteErrorTally> tally;
 
       arrow::Status operator()(const S3Model::DeleteObjectsOutcome& outcome) const {
+        // Recorded, never returned: returning here would let AllFinished pick a
+        // winner among chunks and discard the rest.
         if (!outcome.IsSuccess()) {
-          return ErrorToStatus("DeleteObjects", outcome.GetError());
+          tally->RecordRequestError(ErrorToStatus("DeleteObjects", outcome.GetError()));
+          return arrow::Status::OK();
         }
         // Also need to check per-key errors, even on successful outcome
         // See
         // https://docs.aws.amazon.com/fr_fr/AmazonS3/latest/API/multiobjectdeleteapi.html
-        const auto& errors = outcome.GetResult().GetErrors();
-        if (!errors.empty()) {
-          std::stringstream ss;
-          ss << "Got the following " << errors.size() << " errors when deleting objects in S3 bucket '" << bucket
-             << "':\n";
-          for (const auto& error : errors) {
-            ss << "- key '" << error.GetKey() << "': " << error.GetMessage() << "\n";
-          }
-          return arrow::Status::IOError(ss.str());
+        for (const auto& error : outcome.GetResult().GetErrors()) {
+          tally->RecordKeyError(error.GetKey(), error.GetCode(), error.GetMessage());
         }
         return arrow::Status::OK();
       }
     };
 
     const auto chunk_size = static_cast<size_t>(kMultipleDeleteMaxKeys);
-    const DeleteCallback delete_cb{bucket};
+    const DeleteCallback delete_cb{bucket, tally};
 
     std::vector<Future<>> futures;
     futures.reserve(arrow::bit_util::CeilDiv(keys.size(), chunk_size));
@@ -2308,7 +2648,11 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
       futures.push_back(std::move(fut));
     }
 
-    return AllFinished(futures);
+    // Only the owner settles the verdict; a shared tally is finished by the
+    // caller once every page has reported.
+    return AllFinished(futures).Then([tally, bucket, owns_tally]() -> arrow::Status {
+      return owns_tally ? tally->Finish(bucket) : arrow::Status::OK();
+    });
   }
 
   arrow::Status DeleteObjects(const std::string& bucket, const std::vector<std::string>& keys) {
@@ -2367,43 +2711,61 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
   }
 
   Future<> DoDeleteDirContentsAsync(const std::string& bucket, const std::string& key) {
-    return RunInScheduler([bucket, key](arrow::util::AsyncTaskScheduler* scheduler, S3FileSystem::Impl* self) {
-      scheduler->AddSimpleTask(
-          [=] {
-            FileSelector select;
-            select.base_dir = bucket + kSep + key;
-            select.recursive = true;
-            select.allow_not_found = false;
+    // One tally for the entire walk. Every listing page's delete records into
+    // it and nobody settles until the walk is done, so a mixed set across pages
+    // is seen as mixed rather than as whichever page finished first.
+    auto tally = std::make_shared<DeleteErrorTally>();
+    return RunInScheduler([bucket, key, tally](arrow::util::AsyncTaskScheduler* scheduler, S3FileSystem::Impl* self) {
+             scheduler->AddSimpleTask(
+                 [=] {
+                   FileSelector select;
+                   select.base_dir = bucket + kSep + key;
+                   select.recursive = true;
+                   select.allow_not_found = false;
 
-            FileInfoGenerator file_infos = self->GetFileInfoGenerator(select);
+                   FileInfoGenerator file_infos = self->GetFileInfoGenerator(select);
 
-            auto handle_file_infos = [=](const std::vector<FileInfo>& file_infos) {
-              std::vector<std::string> file_paths;
-              for (const auto& file_info : file_infos) {
-                DCHECK_GT(file_info.path().size(), bucket.size());
-                auto file_path = file_info.path().substr(bucket.size() + 1);
-                if (file_info.IsDirectory()) {
-                  // The selector returns FileInfo objects for directories with a
-                  // a path that never ends in a trailing slash, but for AWS the file
-                  // needs to have a trailing slash to recognize it as directory
-                  // (https://github.com/apache/arrow/issues/38618)
-                  DCHECK_OK(arrow::fs::internal::AssertNoTrailingSlash(file_path));
-                  file_path = file_path + kSep;
+                   auto handle_file_infos = [=](const std::vector<FileInfo>& file_infos) {
+                     std::vector<std::string> file_paths;
+                     for (const auto& file_info : file_infos) {
+                       DCHECK_GT(file_info.path().size(), bucket.size());
+                       auto file_path = file_info.path().substr(bucket.size() + 1);
+                       if (file_info.IsDirectory()) {
+                         // The selector returns FileInfo objects for directories with a
+                         // a path that never ends in a trailing slash, but for AWS the file
+                         // needs to have a trailing slash to recognize it as directory
+                         // (https://github.com/apache/arrow/issues/38618)
+                         DCHECK_OK(arrow::fs::internal::AssertNoTrailingSlash(file_path));
+                         file_path = file_path + kSep;
+                       }
+                       file_paths.push_back(std::move(file_path));
+                     }
+                     scheduler->AddSimpleTask(
+                         [=, file_paths = std::move(file_paths)] {
+                           return self->DeleteObjectsAsync(bucket, file_paths, tally);
+                         },
+                         std::string_view("DeleteDirContentsDeleteTask"));
+                     return arrow::Status::OK();
+                   };
+
+                   return VisitAsyncGenerator(arrow::AsyncGenerator<std::vector<FileInfo>>(std::move(file_infos)),
+                                              std::move(handle_file_infos));
+                 },
+                 std::string_view("ListFilesForDelete"));
+             return arrow::Status::OK();
+           })
+        // Settle the whole walk here. A scheduler-level failure (listing itself
+        // broke) still wins -- it is already classified and means the delete
+        // never completed -- but the per-key detail gathered before it is
+        // folded into the message rather than dropped.
+        .Then([tally, bucket]() -> arrow::Status { return tally->Finish(bucket); },
+              [tally, bucket](const arrow::Status& walk_error) -> arrow::Status {
+                auto collected = tally->Finish(bucket);
+                if (collected.ok()) {
+                  return walk_error;
                 }
-                file_paths.push_back(std::move(file_path));
-              }
-              scheduler->AddSimpleTask(
-                  [=, file_paths = std::move(file_paths)] { return self->DeleteObjectsAsync(bucket, file_paths); },
-                  std::string_view("DeleteDirContentsDeleteTask"));
-              return arrow::Status::OK();
-            };
-
-            return VisitAsyncGenerator(arrow::AsyncGenerator<std::vector<FileInfo>>(std::move(file_infos)),
-                                       std::move(handle_file_infos));
-          },
-          std::string_view("ListFilesForDelete"));
-      return arrow::Status::OK();
-    });
+                return walk_error.WithMessage(walk_error.message() + " Additionally, " + collected.message());
+              });
   }
 
   Future<> DeleteDirContentsAsync(const std::string& bucket, const std::string& key) {

@@ -51,6 +51,7 @@
     loon_errcode_storage_config_invalid;
     loon_errcode_manifest_corrupted;
     loon_errcode_aws_bucket_not_found;
+    loon_errcode_vortex_file_corrupted;
 
     # Properties interface
     loon_properties_create;

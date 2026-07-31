@@ -387,6 +387,12 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
     }
     *out = arrow::RecordBatch::Make(schema_, chunk_size, arrays);
     return arrow::Status::OK();
+  } catch (const std::bad_alloc&) {
+    // Ahead of the generic handler on purpose: bad_alloc reaching that one was
+    // relabelled PackedUnexpected, i.e. permanent, so the OOM inference added at the FFI
+    // boundary never saw it. Memory pressure is retriable -- another node, or
+    // this one later, may have the memory.
+    return arrow::Status::OutOfMemory("Packed reader read next ran out of memory");
   } catch (const std::exception& e) {
     return MakeExtendError(ExtendStatusCode::PackedUnexpected,
                            fmt::format("Packed reader read next failed unexpectedly: {}", e.what()));
@@ -418,6 +424,11 @@ arrow::Status PackedRecordBatchReader::Close() {
     metadata_list_.clear();
     memory_used_ = 0;
     return arrow::Status::OK();
+  } catch (const std::bad_alloc&) {
+    // Answered before the generic handler: routed there, memory pressure --
+    // the one condition a retry is most likely to resolve -- came back
+    // permanent. Enforced by cpp/scripts/check_oom_handlers.py.
+    return arrow::Status::OutOfMemory("Packed reader close ran out of memory");
   } catch (const std::exception& e) {
     return MakeExtendError(ExtendStatusCode::PackedUnexpected,
                            fmt::format("Packed reader close failed unexpectedly: {}", e.what()));

@@ -209,6 +209,14 @@ arrow::Status WrapExtendError(ExtendStatusCode code, std::string message, const 
   if (cause.detail()) {
     return {cause.code(), std::move(wrapped_message), cause.detail()};
   }
+  // A raw OutOfMemory needs no detail to be classified, and stamping `code`
+  // over it would flip the retry verdict: every wrapper's code here is
+  // Permanent-ish, while OOM is Transient -- another node, or this one later,
+  // may have the memory. Keep arrow's own code so the coarse fallback still
+  // lands on MEMORY_ERROR / 2034.
+  if (cause.IsOutOfMemory()) {
+    return {cause.code(), std::move(wrapped_message), nullptr};
+  }
   return MakeExtendError(code, std::move(wrapped_message), cause_message);
 }
 
@@ -293,6 +301,7 @@ milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
       // window.
       return milvus::StorageTransientError;  // 2045
     case ExtendStatusCode::ManifestCorrupted:
+    case ExtendStatusCode::VortexFileCorrupted:
       return milvus::DataFormatBroken;  // 2024
     case ExtendStatusCode::AwsErrorBucketNotFound:
       // Not ObjectNotExist: nothing was lost. The deployment names a bucket

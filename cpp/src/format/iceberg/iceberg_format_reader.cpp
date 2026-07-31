@@ -149,6 +149,11 @@ arrow::Result<std::shared_ptr<const std::unordered_set<int64_t>>> LoadPositional
   folly::dynamic parsed;
   try {
     parsed = folly::parseJson(json_str);
+  } catch (const std::bad_alloc&) {
+    // Answered before the generic handler: routed there, memory pressure --
+    // the one condition a retry is most likely to resolve -- came back as a
+    // permanent error. Enforced by cpp/scripts/check_oom_handlers.py.
+    return arrow::Status::OutOfMemory("Out of memory in the iceberg format reader");
   } catch (const std::exception& e) {
     return arrow::Status::Invalid(fmt::format("Failed to parse delete metadata JSON: {}", e.what()));
   }

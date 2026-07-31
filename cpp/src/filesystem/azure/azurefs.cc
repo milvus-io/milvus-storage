@@ -116,7 +116,8 @@ using arrow::fs::internal::ValidateAbstractPathParts;
 // The codes are cloud-neutral despite the `AwsError*` prefix (see the naming
 // discussion in #574): they carry the meaning, not the vendor.
 std::optional<milvus_storage::ExtendStatusCode> ClassifyAzureError(
-    int http_status, std::string_view error_code, bool transport_failure) {
+    int http_status, std::string_view error_code, bool transport_failure,
+    std::string_view reason_phrase) {
   // The request never reached the service: connection refused/reset, DNS
   // failure, TLS handshake failure. The textbook retriable case.
   //
@@ -152,8 +153,27 @@ std::optional<milvus_storage::ExtendStatusCode> ClassifyAzureError(
                        milvus_storage::ExtendStatusCode::AwsErrorPreConditionFailed}
                  : std::nullopt;
     case 404:  // Not Found
-      // The blob/container is gone. Missing, not Permanent: this layer will not
-      // say whether that is a GC race or lost data -- the consumer re-reads its
+      // A missing CONTAINER is not a missing blob, and the two need opposite
+      // things from the consumer. Re-reading the manifest can resolve a missing
+      // blob -- it was collected, or it moved. No amount of re-reading produces
+      // a container: the deployment points at one that is not there, which an
+      // operator fixes. Same split S3 already makes between NO_SUCH_BUCKET and
+      // NO_SUCH_KEY; Azure just reports it differently.
+      //
+      // Both signals are checked because Azure sometimes leaves ErrorCode empty
+      // and puts it in the ReasonPhrase -- see IsContainerNotFound, which is
+      // where these strings come from.
+      // Blob and Data Lake are the same container reached through two APIs and
+      // they spell its absence differently -- FilesystemNotFound is the ADLS
+      // Gen2 code. Missing either spelling sends an operator's problem to the
+      // caller as a missing object.
+      if (error_code == "ContainerNotFound" || error_code == "FilesystemNotFound" ||
+          reason_phrase == "The specified container does not exist." ||
+          reason_phrase == "The specified filesystem does not exist.") {
+        return milvus_storage::ExtendStatusCode::AwsErrorBucketNotFound;
+      }
+      // The blob is gone. Missing, not Permanent: this layer will not say
+      // whether that is a GC race or lost data -- the consumer re-reads its
       // metadata and decides. A plain retry reaches the same storage account
       // and fails identically, so it is not Transient either.
       return milvus_storage::ExtendStatusCode::AwsErrorNotFound;
@@ -167,6 +187,11 @@ std::optional<milvus_storage::ExtendStatusCode> ClassifyAzureError(
     case 429:  // Too Many Requests
       return milvus_storage::ExtendStatusCode::StorageTransientThrottling;
     case 503:  // Service Unavailable
+      // Our own marker first: the SAS policy uses a 503 to carry a transport
+      // failure, because HTTP cannot say "the connection dropped".
+      if (error_code == internal::kSyntheticBrokerNetworkErrorCode) {
+        return milvus_storage::ExtendStatusCode::StorageTransientNetwork;
+      }
       // 503 is overloaded on Azure Storage: ErrorCode "ServerBusy" is
       // throttling, anything else is a genuine availability blip. Both are
       // retriable, but keeping them apart lets a consumer apply throttle-aware
@@ -445,7 +470,8 @@ Status ExceptionToStatus(const Azure::Core::RequestFailedException& exception,
   const bool transport_failure =
       dynamic_cast<const Azure::Core::Http::TransportException*>(&exception) != nullptr;
   auto code = internal::ClassifyAzureError(static_cast<int>(exception.StatusCode),
-                                           exception.ErrorCode, transport_failure);
+                                           exception.ErrorCode, transport_failure,
+                                           exception.ReasonPhrase);
   if (!code.has_value()) {
     return Status::IOError(std::forward<PrefixArgs>(prefix_args)..., " Azure Error: [",
                            exception.ErrorCode, "] ", exception.what());
@@ -735,10 +761,18 @@ Status CrossContainerMoveNotImplemented(const AzureLocation& src,
       "' requires moving data between containers, which is not implemented.");
 }
 
-bool IsContainerNotFound(const Storage::StorageException& e) {
+// Takes the BASE exception type on purpose: every try block in this file
+// ultimately catches Core::RequestFailedException -- directly, or as the
+// trailing clause of a pair -- so that a TransportException, a sibling of
+// StorageException that the SDK rethrows after its retries are exhausted,
+// reaches ExceptionToStatus and classifies as transient network instead of
+// escaping as an uncaught exception (and, on the paths Rust drives through the
+// read callbacks, undefined behaviour across the C ABI). All three members
+// read here live on the base.
+bool IsContainerNotFound(const Core::RequestFailedException& e) {
   // In some situations, only the ReasonPhrase is set and the
   // ErrorCode is empty, so we check both.
-  if (e.ErrorCode == "ContainerNotFound" ||
+  if (e.ErrorCode == "ContainerNotFound" || e.ErrorCode == "FilesystemNotFound" ||
       e.ReasonPhrase == "The specified container does not exist." ||
       e.ReasonPhrase == "The specified filesystem does not exist.") {
     DCHECK_EQ(e.StatusCode, Http::HttpStatusCode::NotFound);
@@ -1034,7 +1068,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
       }
       RETURN_NOT_OK(CacheContentLengthFromRead(result.Value));
       return bytes_read;
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       return ExceptionToStatus(
           exception, "DownloadTo from '", blob_client_->GetUrl(), "' at position ",
           position, " for ", nbytes,
@@ -1104,8 +1138,19 @@ class ObjectInputFile final : public io::RandomAccessFile {
       }
       SetCachedContentLength(content_length);
       return Status::OK();
-    } catch (const Storage::StorageException& exception) {
-      if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
+    } catch (const Core::RequestFailedException& exception) {
+      // Two different 404s. A missing BLOB is ENOENT: the caller re-reads its
+      // metadata and decides (GC race vs data loss). A missing CONTAINER must
+      // not report as ENOENT-style absence -- no amount of re-reading metadata
+      // produces a container, someone pointed the deployment at one that is
+      // not there. Falling through lets ExceptionToStatus classify it as
+      // AwsErrorBucketNotFound (Config), the same split S3 makes between
+      // NO_SUCH_KEY and NO_SUCH_BUCKET. This is the read path, so it is where
+      // that difference reaches milvus; the delete/GetFileInfo 404 handlers
+      // stay as they are on purpose, because absence satisfies a delete and is
+      // a value, not an error, for GetFileInfo.
+      if (exception.StatusCode == Http::HttpStatusCode::NotFound &&
+          !IsContainerNotFound(exception)) {
         return PathNotFound(location_);
       }
       return ExceptionToStatus(exception, "GetProperties failed for '",
@@ -1164,7 +1209,7 @@ Status CreateEmptyBlockBlob(const Blobs::BlockBlobClient& block_blob_client,
   }
   try {
     block_blob_client.UploadFrom(nullptr, 0);
-  } catch (const Storage::StorageException& exception) {
+  } catch (const Core::RequestFailedException& exception) {
     if (metrics) {
       metrics->IncrementFailedCount();
     }
@@ -1186,7 +1231,7 @@ Status CreateEmptyBlockBlobConditional(Blobs::BlockBlobClient& block_blob_client
     options.AccessConditions.IfNoneMatch = Azure::ETag::Any();
     auto body = Core::IO::MemoryBodyStream(nullptr, 0);
     block_blob_client.Upload(body, options);
-  } catch (const Storage::StorageException& exception) {
+  } catch (const Core::RequestFailedException& exception) {
     if (metrics) {
       metrics->IncrementFailedCount();
     }
@@ -1201,7 +1246,7 @@ Result<Blobs::Models::GetBlockListResult> GetBlockList(
     std::shared_ptr<Blobs::BlockBlobClient> block_blob_client) {
   try {
     return block_blob_client->GetBlockList().Value;
-  } catch (Storage::StorageException& exception) {
+  } catch (const Core::RequestFailedException& exception) {
     return ExceptionToStatus(
         exception, "GetBlockList failed for '", block_blob_client->GetUrl(),
         "'. Cannot write to a file without first fetching the existing block list.");
@@ -1221,7 +1266,7 @@ Status CommitBlockList(std::shared_ptr<Storage::Blobs::BlockBlobClient> block_bl
     // previously committed blocks.
     // https://learn.microsoft.com/en-us/rest/api/storageservices/put-block-list?tabs=microsoft-entra-id#request-body
     block_blob_client->CommitBlockList(block_ids, options);
-  } catch (const Storage::StorageException& exception) {
+  } catch (const Core::RequestFailedException& exception) {
     if (metrics) {
       metrics->IncrementFailedCount();
     }
@@ -1240,7 +1285,7 @@ Status StageBlock(Blobs::BlockBlobClient* block_blob_client, const std::string& 
   }
   try {
     block_blob_client->StageBlock(id, content);
-  } catch (const Storage::StorageException& exception) {
+  } catch (const Core::RequestFailedException& exception) {
     if (metrics) {
       metrics->IncrementFailedCount();
     }
@@ -1315,7 +1360,7 @@ class ObjectAppendStream final : public io::OutputStream {
         }
         content_length_ = properties.Value.BlobSize;
         pos_ = content_length_;
-      } catch (const Storage::StorageException& exception) {
+      } catch (const Core::RequestFailedException& exception) {
         if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
           // No file exists but on flat namespace its possible there is a directory
           // marker or an implied directory. Ensure there is no directory before starting
@@ -1661,7 +1706,7 @@ Result<HNSSupport> CheckIfHierarchicalNamespaceIsEnabled(
     // Azurite issue detected.
     DCHECK(IsDfsEmulator(options));
     return HNSSupport::kDisabled;
-  } catch (const Storage::StorageException& exception) {
+  } catch (const Core::RequestFailedException& exception) {
     // Flat namespace storage accounts with "soft delete" enabled return
     //
     //   "Conflict - This endpoint does not support BlobStorageEvents
@@ -1695,9 +1740,11 @@ Result<HNSSupport> CheckIfHierarchicalNamespaceIsEnabled(
                                  "Check for Hierarchical Namespace support on '",
                                  adlfs_client.GetUrl(), "' failed.");
     }
-  } catch (const Azure::Core::Http::TransportException& exception) {
-    return ExceptionToStatus(exception, "Check for Hierarchical Namespace support on '",
-                             adlfs_client.GetUrl(), "' failed.");
+  } catch (const std::bad_alloc&) {
+    // Answered before the generic handler: routed there, memory pressure --
+    // the one condition a retry is most likely to resolve -- came back
+    // permanent. Enforced by cpp/scripts/check_oom_handlers.py.
+    return arrow::Status::OutOfMemory("Out of memory while checking Hierarchical Namespace support");
   } catch (const std::exception& exception) {
     return Status::UnknownError(
         "Check for Hierarchical Namespace support on '", adlfs_client.GetUrl(),
@@ -1731,7 +1778,7 @@ Result<FileInfo> GetContainerPropsAsFileInfo(const AzureLocation& location,
     info.set_type(FileType::Directory);
     info.set_mtime(std::chrono::system_clock::time_point{properties.Value.LastModified});
     return info;
-  } catch (const Storage::StorageException& exception) {
+  } catch (const Core::RequestFailedException& exception) {
     if (IsContainerNotFound(exception)) {
       info.set_type(FileType::NotFound);
       return info;
@@ -1747,7 +1794,7 @@ Status CreateContainerIfNotExists(const std::string& container_name,
   try {
     container_client.CreateIfNotExists();
     return Status::OK();
-  } catch (const Storage::StorageException& exception) {
+  } catch (const Core::RequestFailedException& exception) {
     return ExceptionToStatus(exception, "Failed to create a container: ", container_name,
                              ": ", container_client.GetUrl());
   }
@@ -1840,7 +1887,7 @@ class LeaseGuard {
     DCHECK(release_attempt_pending_);
     try {
       lease_client_->Release();
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       return ExceptionToStatus(exception, "Failed to release the ",
                                lease_client_->GetLeaseId(), " lease");
     }
@@ -1883,7 +1930,7 @@ class LeaseGuard {
       break_or_expires_at_ =
           std::min(break_or_expires_at_,
                    SteadyClock::now() + break_period.ValueOr(std::chrono::seconds{0}));
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       return ExceptionToStatus(exception, "Failed to break the ",
                                lease_client_->GetLeaseId(), " lease expiring in ",
                                remaining_time_ms().count(), "ms");
@@ -2081,7 +2128,7 @@ class AzureFileSystem::Impl {
       info.set_mtime(
           std::chrono::system_clock::time_point{properties.Value.LastModified});
       return info;
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
         return FileInfo{location.all, FileType::NotFound};
       }
@@ -2156,7 +2203,7 @@ class AzureFileSystem::Impl {
       }
       info.set_type(FileType::NotFound);
       return info;
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       if (IsContainerNotFound(exception)) {
         return FileInfo{location.all, FileType::NotFound};
       }
@@ -2216,7 +2263,7 @@ class AzureFileSystem::Impl {
           RETURN_NOT_OK(on_container(container));
         }
       }
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       return ExceptionToStatus(exception, "Failed to list account containers.");
     }
     return Status::OK();
@@ -2271,7 +2318,7 @@ class AzureFileSystem::Impl {
           }
         }
       }
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       if (IsContainerNotFound(exception) || exception.ErrorCode == "PathNotFound") {
         found = false;
       } else {
@@ -2384,7 +2431,7 @@ class AzureFileSystem::Impl {
           RETURN_NOT_OK(process_prefix(list_response.BlobPrefixes[blob_prefix_index]));
         }
       }
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       if (IsContainerNotFound(exception)) {
         found = false;
       } else {
@@ -2523,7 +2570,7 @@ class AzureFileSystem::Impl {
       if (container_info.type() == FileType::NotFound) {
         try {
           container_client.CreateIfNotExists();
-        } catch (const Storage::StorageException& exception) {
+        } catch (const Core::RequestFailedException& exception) {
           return ExceptionToStatus(exception, "Failed to create directory '",
                                    location.all, "': ", container_client.GetUrl());
         }
@@ -2550,7 +2597,7 @@ class AzureFileSystem::Impl {
         const auto& nonexistent_location = nonexistent_locations[i - 1];
         try {
           create_if_not_exists(container_client, nonexistent_location);
-        } catch (const Storage::StorageException& exception) {
+        } catch (const Core::RequestFailedException& exception) {
           return ExceptionToStatus(exception, "Failed to create directory '",
                                    location.all, "': ", container_client.GetUrl());
         }
@@ -2568,7 +2615,7 @@ class AzureFileSystem::Impl {
       try {
         create_if_not_exists(container_client, location);
         return Status::OK();
-      } catch (const Storage::StorageException& exception) {
+      } catch (const Core::RequestFailedException& exception) {
         if (IsContainerNotFound(exception)) {
           auto parent = location.parent();
           return PathNotFound(parent);
@@ -2680,7 +2727,7 @@ class AzureFileSystem::Impl {
     try {
       EnsureEmptyDirExistsImplThatThrows(container_client, location.path);
       return Status::OK();
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       return ExceptionToStatus(
           exception, operation_name, " failed to ensure empty directory marker '",
           location.path, "' exists in container: ", container_client.GetUrl());
@@ -2698,7 +2745,7 @@ class AzureFileSystem::Impl {
       // Only the "*IfExists" functions ever set Deleted to false.
       // All the others either succeed or throw an exception.
       DCHECK(response.Value.Deleted);
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       if (IsContainerNotFound(exception)) {
         return PathNotFound(location);
       }
@@ -2794,7 +2841,7 @@ class AzureFileSystem::Impl {
           if (!deferred_responses.empty()) {
             container_client.SubmitBatch(batch);
           }
-        } catch (const Storage::StorageException& exception) {
+        } catch (const Core::RequestFailedException& exception) {
           return ExceptionToStatus(exception, "Failed to delete blobs in a directory: ",
                                    location.path, ": ", container_client.GetUrl());
         }
@@ -2809,7 +2856,7 @@ class AzureFileSystem::Impl {
           try {
             auto delete_result = deferred_response.GetResponse();
             success = delete_result.Value.Deleted;
-          } catch (const Storage::StorageException& exception) {
+          } catch (const Core::RequestFailedException& exception) {
             success = false;
             if (!first_failure_status.has_value()) {
               first_failure_status = ExceptionToStatus(exception, "Failed to delete blob: ",
@@ -2844,7 +2891,7 @@ class AzureFileSystem::Impl {
         }
       }
       return Status::OK();
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       return ExceptionToStatus(exception,
                                "Failed to list blobs in a directory: ", location.path,
                                ": ", container_client.GetUrl());
@@ -2880,7 +2927,7 @@ class AzureFileSystem::Impl {
       // Only the "*IfExists" functions ever set Deleted to false.
       // All the others either succeed or throw an exception.
       DCHECK(response.Value.Deleted);
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       if (exception.ErrorCode == "FilesystemNotFound" ||
           exception.ErrorCode == "PathNotFound") {
         if (require_dir_to_exist) {
@@ -2907,7 +2954,7 @@ class AzureFileSystem::Impl {
             auto sub_directory_client = adlfs_client.GetDirectoryClient(path.Name);
             try {
               sub_directory_client.DeleteRecursive();
-            } catch (const Storage::StorageException& exception) {
+            } catch (const Core::RequestFailedException& exception) {
               return ExceptionToStatus(
                   exception, "Failed to delete a sub directory: ", location.container,
                   kDelimiter, path.Name, ": ", sub_directory_client.GetUrl());
@@ -2919,7 +2966,7 @@ class AzureFileSystem::Impl {
             auto sub_file_client = adlfs_client.GetFileClient(path.Name);
             try {
               sub_file_client.Delete();
-            } catch (const Storage::StorageException& exception) {
+            } catch (const Core::RequestFailedException& exception) {
               return ExceptionToStatus(
                   exception, "Failed to delete a sub file: ", location.container,
                   kDelimiter, path.Name, ": ", sub_file_client.GetUrl());
@@ -2928,7 +2975,7 @@ class AzureFileSystem::Impl {
         }
       }
       return Status::OK();
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       if (missing_dir_ok && exception.StatusCode == Http::HttpStatusCode::NotFound) {
         return Status::OK();
       }
@@ -2957,7 +3004,7 @@ class AzureFileSystem::Impl {
     try {
       [[maybe_unused]] auto result = lease_client->Acquire(lease_duration);
       DCHECK_EQ(result.Value.LeaseId, lease_client->GetLeaseId());
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       if (IsContainerNotFound(exception)) {
         if (allow_missing_container) {
           return nullptr;
@@ -2997,7 +3044,7 @@ class AzureFileSystem::Impl {
     try {
       [[maybe_unused]] auto result = lease_client->Acquire(lease_duration);
       DCHECK_EQ(result.Value.LeaseId, lease_client->GetLeaseId());
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
         if (allow_missing) {
           return nullptr;
@@ -3072,7 +3119,7 @@ class AzureFileSystem::Impl {
       // Only the "*IfExists" functions ever set Deleted to false.
       // All the others either succeed or throw an exception.
       DCHECK(response.Value.Deleted);
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
         // ErrorCode can be "FilesystemNotFound", "PathNotFound"...
         if (require_file_to_exist) {
@@ -3164,7 +3211,7 @@ class AzureFileSystem::Impl {
       // Only the "*IfExists" functions ever set Deleted to false.
       // All the others either succeed or throw an exception.
       DCHECK(response.Value.Deleted);
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
         return check_if_location_exists_as_dir();
       }
@@ -3229,7 +3276,7 @@ class AzureFileSystem::Impl {
         if (!dest_is_empty) {
           return NotEmpty(dest);
         }
-      } catch (const Storage::StorageException& exception) {
+      } catch (const Core::RequestFailedException& exception) {
         return ExceptionToStatus(exception, "Failed to check that '", dest.container,
                                  "' is empty: ", dest_container_client.GetUrl());
       }
@@ -3244,11 +3291,12 @@ class AzureFileSystem::Impl {
         src_lease_guard.BreakBeforeDeletion(kTimeNeededForContainerRename);
         blob_service_client_->RenameBlobContainer(src.container, dest.container, options);
         src_lease_guard.Forget();
-      } catch (const Storage::StorageException& exception) {
-        if (exception.StatusCode == Http::HttpStatusCode::BadRequest &&
+      } catch (const Core::RequestFailedException& exception) {
+        const auto* storage_exception = dynamic_cast<const Storage::StorageException*>(&exception);
+        if (storage_exception && exception.StatusCode == Http::HttpStatusCode::BadRequest &&
             exception.ErrorCode == "InvalidQueryParameterValue") {
-          auto param_name = exception.AdditionalInformation.find("QueryParameterName");
-          if (param_name != exception.AdditionalInformation.end() &&
+          auto param_name = storage_exception->AdditionalInformation.find("QueryParameterName");
+          if (param_name != storage_exception->AdditionalInformation.end() &&
               param_name->second == "comp") {
             return ExceptionToStatus(
                 exception, "The 'rename' operation is not supported on containers. ",
@@ -3295,11 +3343,11 @@ class AzureFileSystem::Impl {
           src_lease_guard.BreakBeforeDeletion(kTimeNeededForContainerDeletion);
           src_container_client.Delete(options);
           src_lease_guard.Forget();
-        } catch (const Storage::StorageException& exception) {
+        } catch (const Core::RequestFailedException& exception) {
           return ExceptionToStatus(exception, "Failed to delete empty container: '",
                                    src.container, "': ", src_container_client.GetUrl());
         }
-      } catch (const Storage::StorageException& exception) {
+      } catch (const Core::RequestFailedException& exception) {
         return ExceptionToStatus(exception, "Unable to replace empty container: '",
                                  dest.all, "': ", dest_container_client.GetUrl());
       }
@@ -3440,7 +3488,7 @@ class AzureFileSystem::Impl {
       src_lease_guard.BreakBeforeDeletion(kTimeNeededForFileOrDirectoryRename);
       src_adlfs_client.RenameFile(src_path, dest_path, options);
       src_lease_guard.Forget();
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Core::RequestFailedException& exception) {
       // https://learn.microsoft.com/en-gb/rest/api/storageservices/datalakestoragegen2/path/create
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
         if (exception.ErrorCode == "PathNotFound") {
@@ -3528,8 +3576,9 @@ class AzureFileSystem::Impl {
       return ExceptionToStatus(
           exception, "Failed to start blob copy or poll status of ongoing copy. (",
           src_url, " -> ", dest_blob_client.GetUrl(), ")");
-    } catch (const Azure::Core::RequestFailedException& exception) {
-      // A GetProperties call inside PollUntilDone returned a failed CopyStatus.
+    } catch (const Core::RequestFailedException& exception) {
+      // A GetProperties call inside PollUntilDone returned a failed CopyStatus --
+      // or, since this is the trailing base-type clause, a TransportException.
       return ExceptionToStatus(exception, "Failed to copy blob. (", src_url, " -> ",
                                dest_blob_client.GetUrl(), ")");
     }

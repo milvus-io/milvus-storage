@@ -21,6 +21,7 @@
 #include <arrow/util/io_util.h>
 
 #include <cerrno>
+#include <exception>
 #include <optional>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -35,9 +36,38 @@
     return LoonFFIResult{LOON_SUCCESS, nullptr}; \
   } while (0)
 
-#define RETURN_EXCEPTION(...)                                                                  \
-  do {                                                                                         \
-    return CreateFFIResult((LOON_GOT_EXCEPTION), __func__, " Got exception: ", ##__VA_ARGS__); \
+/// The code for the exception currently being handled.
+///
+/// Call only from inside a catch block. Everything is LOON_GOT_EXCEPTION -- our
+/// bug, Permanent, never retry -- except std::bad_alloc, which is memory
+/// pressure: another node, or this one later, may have the memory.
+///
+/// This exists because the two halves of "we ran out of memory" disagreed. An
+/// arrow OutOfMemory status already mapped to LOON_MEMORY_ERROR and came back
+/// retriable; the identical condition arriving as a thrown std::bad_alloc hit
+/// the catch-all at every FFI entry point and came back Permanent. Same event,
+/// opposite instruction, decided by which layer happened to notice it.
+///
+/// Rethrowing to recover the type is the only way to see it: the catch blocks
+/// bind std::exception& and RETURN_EXCEPTION is handed a string. Doing it here
+/// fixes all ~55 entry points without touching one of them.
+inline int FFIExceptionErrorCode() {
+  try {
+    auto current = std::current_exception();
+    if (!current) {
+      return LOON_GOT_EXCEPTION;
+    }
+    std::rethrow_exception(current);
+  } catch (const std::bad_alloc&) {
+    return LOON_MEMORY_ERROR;
+  } catch (...) {
+  }
+  return LOON_GOT_EXCEPTION;
+}
+
+#define RETURN_EXCEPTION(...)                                                                     \
+  do {                                                                                            \
+    return CreateFFIResult(FFIExceptionErrorCode(), __func__, " Got exception: ", ##__VA_ARGS__); \
   } while (0)
 
 #define RETURN_ERROR(code, ...)                    \
@@ -158,21 +188,36 @@ inline int UserSourceErrorCodeFromStatus(const arrow::Status& status, int fallba
     }                                                                              \
   } while (0)
 
+// The place every ERROR result is materialized, so the place that must
+// not throw: every caller is either about to cross the C ABI or already inside
+// a catch block doing so, and an exception here is undefined behaviour.
+//
+// The case that makes this real is the one this function is most likely to hit:
+// reporting an out-of-memory error. Formatting the message allocates, and under
+// genuine memory pressure that allocation can itself throw bad_alloc -- from
+// inside the handler for the first one. The code still crosses the boundary;
+// only the message is given up. loon_ffi_free_result is free(), which accepts
+// null, and loon_ffi_get_errmsg's consumers already handle a null message.
 template <typename... Args>
-LoonFFIResult CreateFFIResult(int code, Args&&... args) {
+LoonFFIResult CreateFFIResult(int code, Args&&... args) noexcept {
   LoonFFIResult result;
-  std::ostringstream ss;
   assert(code != LOON_SUCCESS);
-
-  ss << "ERROR: " << error_to_string(code) << "(code " << code << ") details: ";
-  if constexpr (sizeof...(Args) > 0) {
-    (ss << ... << std::forward<Args>(args));
-  } else {
-    ss << "<no details>";
-  }
-
   result.err_code = code;
-  result.message = strdup(ss.str().c_str());
+  result.message = nullptr;
+
+  try {
+    std::ostringstream ss;
+    ss << "ERROR: " << error_to_string(code) << "(code " << code << ") details: ";
+    if constexpr (sizeof...(Args) > 0) {
+      (ss << ... << std::forward<Args>(args));
+    } else {
+      ss << "<no details>";
+    }
+    result.message = strdup(ss.str().c_str());
+  } catch (...) {
+    // Keep the code, drop the message. Better a terse error than no error --
+    // and infinitely better than throwing across the C ABI.
+  }
 
   return result;
 }

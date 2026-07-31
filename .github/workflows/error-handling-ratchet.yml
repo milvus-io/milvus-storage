@@ -65,3 +65,7 @@ jobs:
       - name: error taxonomy (dead codes + doc drift)
         if: '!cancelled()'
         run: python3 cpp/scripts/check_error_table.py
+
+      - name: OOM survives every classifying catch-all
+        if: '!cancelled()'
+        run: python3 cpp/scripts/check_oom_handlers.py

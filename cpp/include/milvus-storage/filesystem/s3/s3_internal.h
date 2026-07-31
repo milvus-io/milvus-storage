@@ -183,7 +183,8 @@ inline std::string S3ErrorToString(Aws::S3::S3Errors error_type) {
 
 inline std::optional<arrow::Status> tryMakePermanentExtendArrowError(Aws::S3::S3Errors error_type,
                                                                      Aws::Http::HttpResponseCode response_code,
-                                                                     const std::string& message) {
+                                                                     const std::string& message,
+                                                                     std::string_view exception_name = {}) {
   switch (error_type) {
     case Aws::S3::S3Errors::NO_SUCH_UPLOAD:
       // Lives here, not in tryMakeRetryableExtendArrowError, even though it sat
@@ -212,6 +213,16 @@ inline std::optional<arrow::Status> tryMakePermanentExtendArrowError(Aws::S3::S3
         case Aws::Http::HttpResponseCode::PRECONDITION_FAILED:
           return MakeExtendError(ExtendStatusCode::AwsErrorPreConditionFailed, message, message /* extra_info */);
         case Aws::Http::HttpResponseCode::CONFLICT:
+          // 409 is overloaded. A lost race (conditional write, concurrent
+          // commit) is Conflict: re-read state and re-submit. BucketNotEmpty
+          // and InvalidBucketState are 409s too, but they are answers about
+          // the bucket, not about a race -- replaying cannot change either.
+          // Blocklist the known-permanent shapes rather than allowlist the
+          // races, so the transaction commit path keeps its Conflict verdict
+          // across S3-compatible stores whose race spellings differ.
+          if (exception_name == "BucketNotEmpty" || exception_name == "InvalidBucketState") {
+            return std::nullopt;
+          }
           return MakeExtendError(ExtendStatusCode::AwsErrorConflict, message, message /* extra_info */);
         default:
           return std::nullopt;
@@ -277,6 +288,41 @@ arrow::Status ErrorToStatus(const std::string& prefix,
   // XXX Handle fine-grained error types
   // See
   // https://sdk.amazonaws.com/cpp/api/LATEST/namespace_aws_1_1_s3.html#ae3f82f8132b619b6e91c88a9f1bde371
+  // CoreErrors and S3Errors share a numeric space only by accident: the S3
+  // enum continues where the core one stops, so casting a core code into it
+  // names whichever S3 error happens to sit at that number. MEMORY_ALLOCATION
+  // (26) is the one that matters -- it arrived as a nameless S3 error, missed
+  // every arm below, and fell through to AwsErrorNonRetryable, making a local
+  // allocation failure permanent while every other OOM path in this PR makes
+  // it retriable. Answer the core codes on their own terms first.
+  //
+  // The bound is SERVICE_EXTENSION_START_RANGE (128), which is where the SDK
+  // stops numbering core errors and service enums begin -- not VALIDATION (14),
+  // which is merely one core code among many. Gating on VALIDATION made this
+  // whole block unreachable for the three codes it exists for
+  // (UNRECOGNIZED_CLIENT=17, INVALID_SIGNATURE=21, MEMORY_ALLOCATION=26): they
+  // sit above it, so every one still fell through to the S3 cast.
+  if (static_cast<int>(error.GetErrorType()) <
+      static_cast<int>(Aws::Client::CoreErrors::SERVICE_EXTENSION_START_RANGE)) {
+    const auto core = static_cast<Aws::Client::CoreErrors>(error.GetErrorType());
+    std::string core_message = "AWS Error during " + operation + " operation: " + error.GetMessage();
+    switch (core) {
+      case Aws::Client::CoreErrors::MEMORY_ALLOCATION:
+        // Ours, local, and retriable: another node -- or this one later -- may
+        // have the memory.
+        return arrow::Status::OutOfMemory(core_message);
+      case Aws::Client::CoreErrors::UNRECOGNIZED_CLIENT:
+      case Aws::Client::CoreErrors::MISSING_AUTHENTICATION_TOKEN:
+      case Aws::Client::CoreErrors::INVALID_CLIENT_TOKEN_ID:
+      case Aws::Client::CoreErrors::INVALID_SIGNATURE:
+        // Credentials the deployment supplied are not accepted. An operator
+        // fixes this; it is not the caller's request and not our bug.
+        return MakeExtendError(ExtendStatusCode::AwsErrorAccessDenied, core_message, core_message);
+      default:
+        break;
+    }
+  }
+
   auto error_type = static_cast<Aws::S3::S3Errors>(error.GetErrorType());
   std::stringstream ss;
   ss << S3ErrorToString(error_type);
@@ -297,7 +343,8 @@ arrow::Status ErrorToStatus(const std::string& prefix,
                         wrong_region_msg.value_or("");
   LOG_STORAGE_WARNING_ << message;
 
-  if (auto permanent_status = tryMakePermanentExtendArrowError(error_type, error.GetResponseCode(), message);
+  if (auto permanent_status = tryMakePermanentExtendArrowError(error_type, error.GetResponseCode(), message,
+                                                               std::string_view(error.GetExceptionName()));
       permanent_status.has_value()) {
     return permanent_status.value();
   }

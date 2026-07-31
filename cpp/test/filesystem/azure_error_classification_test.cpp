@@ -30,8 +30,10 @@
 namespace milvus_storage::fs::internal {
 namespace {
 
-milvus::ErrorCode SegcoreCodeFor(int http_status, std::string_view error_code = "") {
-  auto code = ClassifyAzureError(http_status, error_code, /*transport_failure=*/false);
+milvus::ErrorCode SegcoreCodeFor(int http_status,
+                                 std::string_view error_code = "",
+                                 std::string_view reason_phrase = "") {
+  auto code = ClassifyAzureError(http_status, error_code, /*transport_failure=*/false, reason_phrase);
   if (!code.has_value()) {
     // Untagged: this is what the caller actually produces -- a plain IOError.
     return ToSegcoreError(arrow::Status::IOError("azure failure")).get_error_code();
@@ -188,6 +190,36 @@ TEST(AzureErrorClassification, ClosesTheTwoGapsFrom595) {
   // (b) A missing blob is distinguishable from a generic storage failure.
   EXPECT_EQ(SegcoreCodeFor(404, "BlobNotFound"), milvus::ObjectNotExist);
   EXPECT_NE(SegcoreCodeFor(404, "BlobNotFound"), SegcoreCodeFor(400, ""));
+}
+
+// A missing container is a deployment mistake, a missing blob may be a GC race.
+// Azure answers 404 to both; before this split the consumer was told to re-read
+// its metadata in a case where no metadata could ever produce a container.
+TEST(AzureErrorClassification, MissingContainerIsConfigNotMissing) {
+  // Azure reports it either way -- ErrorCode when it has one, ReasonPhrase when
+  // it does not. Both must reach the same verdict, or the classification would
+  // depend on which form the service happened to send.
+  const std::vector<std::pair<std::string_view, std::string_view>> container_gone = {
+      {"ContainerNotFound", ""},
+      {"", "The specified container does not exist."},
+      {"", "The specified filesystem does not exist."},
+  };
+  for (const auto& [error_code, reason] : container_gone) {
+    auto code = ClassifyAzureError(404, error_code, /*transport_failure=*/false, reason);
+    ASSERT_TRUE(code.has_value()) << error_code << "/" << reason;
+    EXPECT_EQ(*code, ExtendStatusCode::AwsErrorBucketNotFound) << error_code << "/" << reason;
+    EXPECT_EQ(CategoryForExtendStatusCode(*code), ErrorCategory::Config) << error_code << "/" << reason;
+    EXPECT_EQ(SegcoreCodeFor(404, error_code, reason), milvus::BucketInvalid) << error_code << "/" << reason;
+  }
+
+  // A missing blob keeps the old verdict. This is the half that must NOT move:
+  // upgrading it to Config would page an operator for what is routinely a GC
+  // race the consumer resolves by itself.
+  auto blob = ClassifyAzureError(404, "BlobNotFound", /*transport_failure=*/false, "");
+  ASSERT_TRUE(blob.has_value());
+  EXPECT_EQ(*blob, ExtendStatusCode::AwsErrorNotFound);
+  EXPECT_EQ(CategoryForExtendStatusCode(*blob), ErrorCategory::Missing);
+  EXPECT_EQ(SegcoreCodeFor(404, "BlobNotFound"), milvus::ObjectNotExist);
 }
 
 }  // namespace milvus_storage::fs::internal

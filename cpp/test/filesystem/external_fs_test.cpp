@@ -581,6 +581,18 @@ TEST_F(ExternalFilesystemTest, UnparseableUriIsClassifiedAsConfigNotGuessedAsUse
       {"s3://", "no bucket and no key"},
       {"s3:///", "empty after scheme"},
       {"s3://my-bucket", "host only, no path to take the bucket from"},
+      // These parse-FAIL rather than parsing into something incomplete, which
+      // is a different path through StorageUri::Parse and used to be silently
+      // swallowed: the whole string became a relative key against whatever
+      // fs.* the deployment defaults to, and the eventual complaint pointed at
+      // a missing object instead of at the malformed location.
+      {"s3://bucket/%ZZ", "invalid percent-escape"},
+      {"s3://bucket/a b", "unescaped space"},
+      {"http://[::1", "unterminated IPv6 literal"},
+      // Single slash: RFC 3986's authority component is optional, so this is
+      // still a scheme'd URI. Keying the check on the literal "://" let it
+      // through as a local relative path.
+      {"s3:/bucket/%ZZ", "scheme with no authority, still malformed"},
   };
 
   for (const auto& c : cases) {
@@ -598,6 +610,27 @@ TEST_F(ExternalFilesystemTest, UnparseableUriIsClassifiedAsConfigNotGuessedAsUse
     EXPECT_NE(ToSegcoreError(result.status()).get_error_code(), milvus::InvalidParameter) << c.what;
     // Detected before any IO was attempted, so it must not masquerade as one.
     EXPECT_TRUE(result.status().IsInvalid()) << c.what;
+  }
+}
+
+// ...but a string with no scheme is a relative path, which is legitimate and
+// extremely common. The malformed-URI check above keys on RFC 3986 shape, not
+// on a list of known schemes, so this pins that it did not become a trap for
+// ordinary filenames.
+//
+// Only strings arrow FAILS to parse reach that check at all, which is why
+// "C:/data/x.parquet" is absent here: arrow parses it successfully with
+// scheme "c", so it never had a chance to be mistaken for a bad URI. That is
+// pre-existing behaviour of the parser, not of this classification.
+TEST_F(ExternalFilesystemTest, RelativePathsAreStillAcceptedAfterTheMalformedUriCheck) {
+  const char* relative[] = {
+      "some/dir/file.parquet", "file.parquet", "a b/c d.parquet", "100%-done/x.parquet", "./x", "../y/z",
+  };
+  for (const auto* path : relative) {
+    auto result = StorageUri::Parse(path);
+    ASSERT_TRUE(result.ok()) << path << " -> " << result.status().ToString();
+    EXPECT_TRUE(result->scheme.empty()) << path;
+    EXPECT_EQ(result->key, path);
   }
 }
 

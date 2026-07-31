@@ -49,6 +49,7 @@ _loon_errcode_txn_resolution_failed
 _loon_errcode_storage_config_invalid
 _loon_errcode_manifest_corrupted
 _loon_errcode_aws_bucket_not_found
+_loon_errcode_vortex_file_corrupted
 
 # Properties interface
 _loon_properties_create

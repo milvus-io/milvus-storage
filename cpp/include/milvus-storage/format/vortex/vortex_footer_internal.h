@@ -15,9 +15,11 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include <arrow/filesystem/filesystem.h>
 #include <arrow/status.h>
 
 namespace milvus_storage::vortex::internal {
@@ -43,7 +45,7 @@ namespace milvus_storage::vortex::internal {
 ///        exactly two elements, {offset, length}
 /// \param file_size the size the file actually has
 /// \param path used only for the message
-/// \return OK when the range fits inside the file; a PackedFileCorrupted status
+/// \return OK when the range fits inside the file; a VortexFileCorrupted status
 ///         otherwise. Corrupted rather than a bare Invalid because the bytes
 ///         were parsed and found to contradict the file -- and because an
 ///         untagged Invalid now lands on a generic StorageError, the coarse
@@ -51,5 +53,25 @@ namespace milvus_storage::vortex::internal {
 arrow::Status CheckVortexFooterRange(const std::vector<uint64_t>& footer_range,
                                      uint64_t file_size,
                                      const std::string& path);
+
+/// \brief Decide whether a caller-supplied file size was ever true, before a
+/// final verdict about the file's bytes is allowed to stand.
+///
+/// Every vortex read is anchored at the file size. When the caller supplied it
+/// (from a manifest) and the operation failed with either an unclassified error
+/// or a corruption claim, one stat settles whether the anchor itself was wrong:
+/// on a mismatch the failure becomes ManifestCorrupted -- the bytes were never
+/// judged, the metadata was -- and on a match (or when the stat cannot answer)
+/// the original status stands. Failures already classified as anything other
+/// than corruption (retryable, missing, config) pass through untouched, as does
+/// ENOENT; an OK status or a supplied_size of 0 (the "stat it yourself"
+/// sentinel) short-circuits, so the healthy path never pays for this.
+///
+/// Shared by VortexFooterReader::Open and VortexFormatReader's sync/async opens
+/// so that every reader anchored on a manifest size gets the same correction.
+arrow::Status ReconcileSuppliedVortexSize(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                                          const std::string& path,
+                                          uint64_t supplied_size,
+                                          arrow::Status status);
 
 }  // namespace milvus_storage::vortex::internal

@@ -138,11 +138,28 @@ static arrow::Status column_groups_export_internal(const ColumnGroups& cgs, Loon
 
 arrow::Status column_groups_export(const ColumnGroups& cgs, LoonColumnGroups** out_ccgs) {
   assert(out_ccgs != nullptr);
+  // Cleared before anything can throw. The handlers below inspect *out_ccgs to
+  // decide whether to destroy a partially built result, and when the very
+  // first allocation is what failed it had never been written -- so the
+  // cleanup path read an indeterminate pointer and, if it looked non-null,
+  // freed it.
+  *out_ccgs = nullptr;
 
   try {
     *out_ccgs = new LoonColumnGroups();
     ARROW_RETURN_NOT_OK(column_groups_export_internal(cgs, *out_ccgs));
     return arrow::Status::OK();
+  } catch (const std::bad_alloc&) {
+    // Ahead of the generic handler: routed there it became UnknownError and
+    // then LOON_LOGICAL_ERROR -- our bug, never retry -- for what is memory
+    // pressure another node, or this one later, can satisfy. This function
+    // allocates the whole exported structure, so it is one of the likeliest
+    // places to meet a real OOM.
+    if (*out_ccgs) {
+      loon_column_groups_destroy(*out_ccgs);
+      *out_ccgs = nullptr;
+    }
+    return arrow::Status::OutOfMemory("Out of memory in column_groups_export");
   } catch (const std::exception& e) {
     if (*out_ccgs) {
       loon_column_groups_destroy(*out_ccgs);
@@ -179,6 +196,8 @@ arrow::Status column_groups_import(const LoonColumnGroups* ccgs, ColumnGroups* o
 arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifest>& manifest,
                               LoonManifest** out_cmanifest) {
   assert(manifest != nullptr && out_cmanifest != nullptr);
+  // Cleared before anything can throw -- same reason as column_groups_export.
+  *out_cmanifest = nullptr;
 
   try {
     // Value-initialize to ensure all pointers are nullptr
@@ -232,12 +251,18 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
     const auto& stats = manifest->stats();
     if (!stats.empty()) {
       size_t num_stats = stats.size();
+      // Every one of these is value-initialized, counts included. The two
+      // uint32_t arrays used not to be, and num_stats was published before the
+      // per-entry loop ran -- so an allocation failing partway left the
+      // destructor iterating stat_file_counts[i] garbage and calling delete[]
+      // on whatever the indeterminate count reached. The pointer arrays were
+      // already zeroed for exactly this reason; the counts were the gap.
       (*out_cmanifest)->stats.stat_keys = new const char* [num_stats] {};
       (*out_cmanifest)->stats.stat_files = new const char** [num_stats] {};
-      (*out_cmanifest)->stats.stat_file_counts = new uint32_t[num_stats];
+      (*out_cmanifest)->stats.stat_file_counts = new uint32_t[num_stats]{};
       (*out_cmanifest)->stats.stat_metadata_keys = new const char** [num_stats] {};
       (*out_cmanifest)->stats.stat_metadata_values = new const char** [num_stats] {};
-      (*out_cmanifest)->stats.stat_metadata_counts = new uint32_t[num_stats];
+      (*out_cmanifest)->stats.stat_metadata_counts = new uint32_t[num_stats]{};
       (*out_cmanifest)->stats.num_stats = num_stats;
 
       size_t idx = 0;
@@ -313,6 +338,17 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
     }
 
     return arrow::Status::OK();
+  } catch (const std::bad_alloc&) {
+    // Ahead of the generic handler: routed there it became UnknownError and
+    // then LOON_LOGICAL_ERROR -- our bug, never retry -- for what is memory
+    // pressure another node, or this one later, can satisfy. This function
+    // allocates the whole exported structure, so it is one of the likeliest
+    // places to meet a real OOM.
+    if (*out_cmanifest) {
+      loon_manifest_destroy(*out_cmanifest);
+      *out_cmanifest = nullptr;
+    }
+    return arrow::Status::OutOfMemory("Out of memory in manifest_export");
   } catch (const std::exception& e) {
     if (*out_cmanifest) {
       loon_manifest_destroy(*out_cmanifest);

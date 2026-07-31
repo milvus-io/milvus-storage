@@ -168,6 +168,11 @@ def find_producers(codes: list[dict]) -> dict[str, list[str]]:
             # filesystem/s3/s3_internal.h, so both trees are in scope. Internal
             # codes are emitted as RETURN_ERROR(LOON_X, ...), ExtendStatusCodes
             # as MakeExtendError(ExtendStatusCode::X, ...) -- one grep, both.
+            # The Rust bridge counts as a producer tree. Some codes exist only
+            # because it is the only layer holding a typed VortexError -- by the
+            # time C++ sees the failure it is a string, so the classification
+            # has to happen there or not at all. It refers to the codes by the
+            # same LOON_* names.
             ["git", "grep", "-n", "-E", "ExtendStatusCode::|LOON_[A-Z0-9_]+", "--", "cpp/src", "cpp/include"],
             cwd=ROOT,
             capture_output=True,
@@ -179,6 +184,10 @@ def find_producers(codes: list[dict]) -> dict[str, list[str]]:
         sys.exit(f"check_error_table: git grep failed: {proc.stderr.strip()}")
 
     producers: dict[str, list[str]] = {k: [] for k in keys}
+    # An ExtendStatusCode can be produced by name (`ExtendStatusCode::Foo`) or,
+    # from the Rust bridge which cannot include the header, by its LOON_* macro
+    # name. Both count.
+    alias = {c["raw_value"]: c["key"] for c in codes if c["raw_value"].startswith("LOON_")}
     for line in proc.stdout.splitlines():
         parts = line.split(":", 2)
         if len(parts) < 3:
@@ -192,6 +201,7 @@ def find_producers(codes: list[dict]) -> dict[str, list[str]]:
             continue
         for m in re.finditer(r"(?:ExtendStatusCode::([A-Za-z0-9_]+)|\b(LOON_[A-Z0-9_]+)\b)", rest):
             key = m.group(1) or m.group(2)
+            key = alias.get(key, key)
             if key in producers:
                 producers[key].append(f"{path}:{lineno}")
     return producers
@@ -307,6 +317,44 @@ def main() -> int:
                 problems.append(
                     f"{rel} names {sorted(extra)}, which ffi_exports.map does not export. "
                     f"That fails to link."
+                )
+
+    # --- 0a. every code in the X-macro table must actually be exported ---
+    #
+    # The cross-list comparison above uses ffi_exports.map as the reference, so
+    # it can only catch lists that disagree with EACH OTHER. A brand-new code
+    # missing from all of them is perfectly consistent and completely invisible:
+    # that is how LOON_VORTEX_FILE_CORRUPTED shipped absent from both linker
+    # maps and the python cdef while this script printed OK. The X-macro table
+    # is the source of truth, so it -- not one of the hand-kept copies -- is
+    # what the lists have to be measured against.
+    EXPORT_LISTS = ("cpp/ffi_exports.map", "cpp/ffi_exports_mac.map", "python/milvus_storage/_ffi.py")
+    for c in codes:
+        want = f"loon_errcode_{c['symbol']}"
+        absent = [rel for rel in EXPORT_LISTS if rel in seen_per_list and want not in seen_per_list[rel]]
+        if absent:
+            problems.append(
+                f"{c['name']} ({c['value']}) is in the X-macro table but {want} is missing from "
+                f"{sorted(absent)}. An unexported code cannot be linked against, so the consumer "
+                f"that needs it cannot name it."
+            )
+
+    # --- 0b. Rust-side LOON_* constants must agree with the C header ---
+    #
+    # The Rust bridge cannot include ffi_error_code.h, so it redeclares the
+    # codes it produces. That is a fifth hand-kept list, and the kind this gate
+    # exists to police: a code renumbered in the header and not in Rust would
+    # silently start emitting a number C++ no longer recognises, which
+    # MakeVortexBridgeErrorStatus then drops on the floor as unclassified.
+    header_values = {c["raw_value"]: c["value"] for c in codes if c["raw_value"].startswith("LOON_")}
+    for rs in sorted((ROOT / "cpp/src/format/bridge/rust/src").rglob("*.rs")):
+        for name, value in re.findall(r"const\s+(LOON_[A-Z0-9_]+)\s*:\s*i32\s*=\s*(\d+)", rs.read_text()):
+            expected = header_values.get(name)
+            if expected is None:
+                problems.append(f"{rs.relative_to(ROOT)} declares {name}, which ffi_error_code.h does not define")
+            elif expected != int(value):
+                problems.append(
+                    f"{rs.relative_to(ROOT)} has {name} = {value}, ffi_error_code.h says {expected}"
                 )
 
     # --- 1. every ExtendStatusCode needs a producer ---

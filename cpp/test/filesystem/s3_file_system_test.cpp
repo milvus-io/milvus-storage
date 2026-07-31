@@ -137,6 +137,84 @@ TEST_F(S3UnitTest, TestErrorToStatusPermanentVsTransient) {
   }
 }
 
+// The SDK's own core errors, which are not S3 errors at all.
+//
+// CoreErrors and S3Errors share a numeric space only because the S3 enum
+// continues where the core one stops, so casting a core code into it names
+// whichever S3 error happens to sit at that number. These three then missed
+// every arm and fell through to AwsErrorNonRetryable -- a local allocation
+// failure reported as permanent, and rejected credentials reported as a
+// generic storage failure instead of something an operator can fix.
+//
+// This test exists because the first attempt at the fix gated on
+// CoreErrors::VALIDATION (14) while the codes it handles are 17, 21 and 26 --
+// the branch could not execute, and nothing said so.
+TEST_F(S3UnitTest, CoreErrorsAreClassifiedBeforeTheS3Cast) {
+  {
+    Aws::Client::AWSError<Aws::Client::CoreErrors> error(
+        Aws::Client::CoreErrors::MEMORY_ALLOCATION, Aws::Client::RetryableType::NOT_RETRYABLE, "OOM", "alloc failed");
+    auto status = fs::internal::ErrorToStatus("test", error);
+    ASSERT_STATUS_NOT_OK(status);
+    EXPECT_TRUE(status.IsOutOfMemory()) << status.ToString();
+    // Retriable through the coarse mapping: another node, or this one later,
+    // may have the memory.
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::MemAllocateFailed);
+  }
+
+  for (auto core : {Aws::Client::CoreErrors::UNRECOGNIZED_CLIENT, Aws::Client::CoreErrors::INVALID_SIGNATURE}) {
+    Aws::Client::AWSError<Aws::Client::CoreErrors> error(core, Aws::Client::RetryableType::NOT_RETRYABLE, "Auth",
+                                                         "bad credentials");
+    auto status = fs::internal::ErrorToStatus("test", error);
+    ASSERT_STATUS_NOT_OK(status);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorAccessDenied);
+    EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::Config);
+    EXPECT_FALSE(detail->retryable());
+  }
+}
+
+TEST_F(S3UnitTest, Conflict409IsNotForPermanentBucketStates) {
+  // A 409 with no recognized-permanent name is a race: Conflict, retryable,
+  // re-read state and re-submit. This is what the transaction commit path
+  // relies on, so it must survive the blocklist below.
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::UNKNOWN,
+                                                   Aws::Client::RetryableType::NOT_RETRYABLE, "OperationAborted",
+                                                   "conditional request conflict");
+    error.SetResponseCode(Aws::Http::HttpResponseCode::CONFLICT);
+    auto status = fs::internal::ErrorToStatus("test", error);
+    ASSERT_STATUS_NOT_OK(status);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorConflict);
+    EXPECT_TRUE(detail->retryable());
+  }
+
+  // But not every 409 is a race. BucketNotEmpty and InvalidBucketState are
+  // answers about the bucket -- replaying the same request cannot change
+  // either, so classifying them Conflict would put a permanent condition into
+  // a retry loop.
+  for (const char* name : {"BucketNotEmpty", "InvalidBucketState"}) {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::UNKNOWN,
+                                                   Aws::Client::RetryableType::NOT_RETRYABLE, name, "permanent 409");
+    error.SetResponseCode(Aws::Http::HttpResponseCode::CONFLICT);
+    auto status = fs::internal::ErrorToStatus("test", error);
+    SCOPED_TRACE(name);
+    ASSERT_STATUS_NOT_OK(status);
+    // Today these land unclassified (plain IOError): the blocklist returns
+    // nullopt and the SDK-verdict fallback is gated on a recognized error
+    // type. Pinned so a future reclassification is a conscious choice -- the
+    // one outcome that must never come back is retryable Conflict.
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    EXPECT_EQ(detail, nullptr);
+    if (detail != nullptr) {
+      EXPECT_NE(detail->code(), ExtendStatusCode::AwsErrorConflict);
+      EXPECT_FALSE(detail->retryable());
+    }
+  }
+}
+
 TEST_F(S3UnitTest, TestSignRequest) {
   // GET
   {

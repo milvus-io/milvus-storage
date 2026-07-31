@@ -44,6 +44,7 @@ _ERROR_CODE_SYMBOLS = (
     "loon_errcode_storage_config_invalid",
     "loon_errcode_manifest_corrupted",
     "loon_errcode_aws_bucket_not_found",
+    "loon_errcode_vortex_file_corrupted",
 )
 
 # Error categories from ffi_c.h. Every error code maps to exactly one of these,
@@ -159,6 +160,7 @@ _ffi.cdef(
     extern int loon_errcode_storage_config_invalid;
     extern int loon_errcode_manifest_corrupted;
     extern int loon_errcode_aws_bucket_not_found;
+    extern int loon_errcode_vortex_file_corrupted;
 
     extern int loon_error_category_unknown;
     extern int loon_error_category_user;
