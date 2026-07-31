@@ -20,11 +20,12 @@
 
 namespace milvus_storage {
 
-class NonBlockingReadAtFile {
+class NonBlockingRandomAccessFile {
   public:
-  virtual ~NonBlockingReadAtFile() = default;
+  virtual ~NonBlockingRandomAccessFile() = default;
 
   virtual arrow::Future<int64_t> ReadAtAsyncInto(int64_t position, int64_t nbytes, uint8_t* out) = 0;
+  virtual arrow::Future<int64_t> GetSizeAsync() = 0;
 };
 
 }  // namespace milvus_storage

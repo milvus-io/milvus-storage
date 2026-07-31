@@ -223,6 +223,8 @@ template <typename ReaderT>
 concept FormatReaderWithAsyncMetadata =
     FormatReaderWithMetadata<ReaderT> &&
     requires(const api::ColumnGroupFile& file, const api::Properties& properties, const KeyRetriever& key_retriever) {
+      // FIXME(jiaqizho): Add create_from_metadata_async() to this contract so
+      // cache-backed async readers cannot re-enter a synchronous I/O path.
       {
         ReaderT::MetaTrait::load_metadata_async(file, properties, key_retriever)
       } -> std::same_as<folly::SemiFuture<arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>>>;
