@@ -17,10 +17,11 @@
 #ifdef WITH_CRT
 
 #include <algorithm>
+#include <condition_variable>
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <shared_mutex>
 #include <utility>
 #include <vector>
 
@@ -54,58 +55,107 @@ inline arrow::Status ErrorS3Finalized() { return arrow::Status::Invalid("S3 subs
 
 }  // namespace
 
-// ------------ Implementation of S3CrtClientHolder ------------
-Aws::S3Crt::S3CrtClient* S3CrtClientLock::get() { return client_.get(); }
-Aws::S3Crt::S3CrtClient* S3CrtClientLock::operator->() { return client_.get(); }
-S3CrtClientLock S3CrtClientLock::Move() { return std::move(*this); }
+class S3CrtClientOperationState {
+  public:
+  std::mutex mutex;
+  std::condition_variable cv;
+  std::size_t active_operations = 0;
+  bool closing = false;
+};
 
-S3CrtClientHolder::S3CrtClientHolder(std::weak_ptr<S3CrtClientFinalizer> finalizer,
+// ------------ Implementation of S3CrtClientHolder ------------
+S3CrtClientLease::S3CrtClientLease(S3CrtClientLease&& other) noexcept
+    : client_(std::exchange(other.client_, nullptr)), operation_state_(std::move(other.operation_state_)) {}
+
+S3CrtClientLease& S3CrtClientLease::operator=(S3CrtClientLease&& other) noexcept {
+  if (this != &other) {
+    Release();
+    client_ = std::exchange(other.client_, nullptr);
+    operation_state_ = std::move(other.operation_state_);
+  }
+  return *this;
+}
+
+S3CrtClientLease::~S3CrtClientLease() { Release(); }
+
+Aws::S3Crt::S3CrtClient* S3CrtClientLease::operator->() const { return client_; }
+
+void S3CrtClientLease::Release() {
+  client_ = nullptr;
+  auto operation_state = std::move(operation_state_);
+  if (!operation_state) {
+    return;
+  }
+
+  bool notify = false;
+  {
+    std::lock_guard lock(operation_state->mutex);
+    DCHECK_GT(operation_state->active_operations, 0);
+    notify = --operation_state->active_operations == 0;
+  }
+  if (notify) {
+    operation_state->cv.notify_all();
+  }
+}
+
+S3CrtClientHolder::S3CrtClientHolder(std::shared_ptr<S3CrtClientFinalizer> finalizer,
                                      std::shared_ptr<Aws::S3Crt::S3CrtClient> client,
                                      std::shared_ptr<FilesystemMetrics> metrics)
-    : finalizer_(std::move(finalizer)), client_(std::move(client)), metrics_(std::move(metrics)) {}
+    : finalizer_(std::move(finalizer)),
+      operation_state_(std::make_shared<S3CrtClientOperationState>()),
+      client_(std::move(client)),
+      metrics_(std::move(metrics)) {}
 
-arrow::Result<S3CrtClientLock> S3CrtClientHolder::Lock() {
-  std::shared_ptr<S3CrtClientFinalizer> finalizer;
-  std::shared_ptr<Aws::S3Crt::S3CrtClient> client;
+S3CrtClientHolder::~S3CrtClientHolder() { Finalize(); }
+
+arrow::Result<S3CrtClientLease> S3CrtClientHolder::Acquire() {
+  S3CrtClientLease lease;
   {
-    std::unique_lock lock(mutex_);
-    finalizer = finalizer_.lock();
-    client = client_;
+    std::lock_guard operation_lock(operation_state_->mutex);
+    if (operation_state_->closing || finalizer_->finalized_.load(std::memory_order_acquire)) {
+      return ErrorS3Finalized();
+    }
+    DCHECK(client_) << "inconsistent S3CrtClientHolder";
+    ++operation_state_->active_operations;
+    lease.client_ = client_.get();
+    lease.operation_state_ = operation_state_;
   }
-  if (!finalizer) {
-    return ErrorS3Finalized();
-  }
-
-  S3CrtClientLock client_lock;
-  client_lock.lock_ = finalizer->LockShared();
-  if (finalizer->finalized_) {
-    return ErrorS3Finalized();
-  }
-  DCHECK(client) << "inconsistent S3CrtClientHolder";
-  client_lock.client_ = std::move(client);
-  return client_lock;
+  return lease;
 }
 
 void S3CrtClientHolder::Finalize() {
   std::shared_ptr<Aws::S3Crt::S3CrtClient> client;
   {
-    std::unique_lock lock(mutex_);
+    std::unique_lock lock(operation_state_->mutex);
+    operation_state_->closing = true;
+    operation_state_->cv.wait(lock, [this] { return operation_state_->active_operations == 0; });
     client = std::move(client_);
   }
+  if (!client) {
+    return;
+  }
+
+  // S3CrtClient::~S3CrtClient waits for the native CRT client shutdown
+  // callback. This runs only after every operation lease has left its callback
+  // and always on the thread finalizing/destroying the holder.
+  client.reset();
+  finalizer_->ClientDestroyed();
 }
 
 std::shared_ptr<FilesystemMetrics> S3CrtClientHolder::GetMetrics() const { return metrics_; }
 
-using CrtClientHolderList = std::vector<std::weak_ptr<S3CrtClientHolder>>;
-
 arrow::Result<std::shared_ptr<S3CrtClientHolder>> S3CrtClientFinalizer::AddClient(
     std::shared_ptr<Aws::S3Crt::S3CrtClient> client, std::shared_ptr<FilesystemMetrics> metrics) {
-  std::unique_lock lock(mutex_);
-  if (finalized_) {
+  std::lock_guard lock(mutex_);
+  if (finalized_.load(std::memory_order_acquire)) {
     return ErrorS3Finalized();
   }
+  DCHECK(client);
+  DCHECK_EQ(client.use_count(), 1) << "S3CrtClientHolder must be the sole shared owner";
 
-  auto holder = std::make_shared<S3CrtClientHolder>(shared_from_this(), std::move(client), std::move(metrics));
+  auto holder = std::shared_ptr<S3CrtClientHolder>(
+      new S3CrtClientHolder(shared_from_this(), std::move(client), std::move(metrics)));
+  ++live_clients_;
 
   auto end = std::remove_if(holders_.begin(), holders_.end(),
                             [](const std::weak_ptr<S3CrtClientHolder>& holder) { return holder.expired(); });
@@ -115,21 +165,39 @@ arrow::Result<std::shared_ptr<S3CrtClientHolder>> S3CrtClientFinalizer::AddClien
 }
 
 void S3CrtClientFinalizer::Finalize() {
-  std::unique_lock lock(mutex_);
-  finalized_ = true;
-
-  CrtClientHolderList finalizing = std::move(holders_);
-  lock.unlock();
-
-  for (auto&& weak_holder : finalizing) {
-    auto holder = weak_holder.lock();
-    if (holder) {
-      holder->Finalize();
+  std::vector<std::shared_ptr<S3CrtClientHolder>> finalizing;
+  {
+    std::lock_guard lock(mutex_);
+    if (!finalized_.exchange(true, std::memory_order_acq_rel)) {
+      finalizing.reserve(holders_.size());
+      for (auto&& weak_holder : holders_) {
+        if (auto holder = weak_holder.lock()) {
+          finalizing.emplace_back(std::move(holder));
+        }
+      }
+      holders_.clear();
     }
   }
+
+  for (auto&& holder : finalizing) {
+    holder->Finalize();
+  }
+
+  std::unique_lock lock(mutex_);
+  cv_.wait(lock, [this] { return live_clients_ == 0; });
 }
 
-std::shared_lock<std::shared_mutex> S3CrtClientFinalizer::LockShared() { return std::shared_lock(mutex_); }
+void S3CrtClientFinalizer::ClientDestroyed() {
+  bool notify = false;
+  {
+    std::lock_guard lock(mutex_);
+    DCHECK_GT(live_clients_, 0);
+    notify = --live_clients_ == 0;
+  }
+  if (notify) {
+    cv_.notify_all();
+  }
+}
 
 std::shared_ptr<S3CrtClientFinalizer> GetCrtClientFinalizer() {
   static auto finalizer = std::make_shared<S3CrtClientFinalizer>();

@@ -134,6 +134,8 @@ struct AwsInstance {
         return;
       }
 #ifdef WITH_CRT
+      // This waits until every holder-owned CRT client has finished its
+      // synchronous destructor. No CRT client may outlive ShutdownAPI().
       crt_client_finalizer->Finalize();
 #endif
       client_finalizer->Finalize();

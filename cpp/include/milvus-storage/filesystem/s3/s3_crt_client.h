@@ -16,10 +16,12 @@
 
 #ifdef WITH_CRT
 
+#include <atomic>
+#include <condition_variable>
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <shared_mutex>
 #include <vector>
 
 #include <arrow/result.h>
@@ -43,32 +45,55 @@ template <>
 arrow::Result<std::shared_ptr<S3CrtClientHolder>> ClientBuilder<Aws::S3Crt::S3CrtClient>::BuildClient(
     std::optional<arrow::io::IOContext> io_context, std::shared_ptr<FilesystemMetrics> metrics);
 
-class S3CrtClientLock {
+class S3CrtClientOperationState;
+class S3CrtClientFinalizer;
+
+/// A move-only lease for one CRT client operation.
+///
+/// The lease deliberately contains only a non-owning client pointer and
+/// operation state. In particular, it must never own S3CrtClient,
+/// S3CrtClientHolder, or ObjectCrtInputFile. This makes it safe to release the
+/// lease on a CRT callback thread without running the CRT client destructor
+/// there.
+class S3CrtClientLease {
   public:
-  Aws::S3Crt::S3CrtClient* get();
-  Aws::S3Crt::S3CrtClient* operator->();
-  S3CrtClientLock Move();
+  S3CrtClientLease() = default;
+  S3CrtClientLease(const S3CrtClientLease&) = delete;
+  S3CrtClientLease& operator=(const S3CrtClientLease&) = delete;
+  S3CrtClientLease(S3CrtClientLease&& other) noexcept;
+  S3CrtClientLease& operator=(S3CrtClientLease&& other) noexcept;
+  ~S3CrtClientLease();
+
+  Aws::S3Crt::S3CrtClient* operator->() const;
 
   protected:
   friend class S3CrtClientHolder;
-  std::shared_lock<std::shared_mutex> lock_;
-  std::shared_ptr<Aws::S3Crt::S3CrtClient> client_;
-};
+  void Release();
 
-class S3CrtClientFinalizer;
+  Aws::S3Crt::S3CrtClient* client_ = nullptr;
+  std::shared_ptr<S3CrtClientOperationState> operation_state_;
+};
 
 class S3CrtClientHolder {
   public:
-  arrow::Result<S3CrtClientLock> Lock();
-  S3CrtClientHolder(std::weak_ptr<S3CrtClientFinalizer> finalizer,
-                    std::shared_ptr<Aws::S3Crt::S3CrtClient> client,
-                    std::shared_ptr<FilesystemMetrics> metrics);
-  void Finalize();
+  /// Acquire a non-owning client pointer protected by an operation lease.
+  /// No lock is held while the caller uses the client.
+  arrow::Result<S3CrtClientLease> Acquire();
+  /// The last holder reference must not be released from a native CRT callback.
+  ~S3CrtClientHolder();
   std::shared_ptr<FilesystemMetrics> GetMetrics() const;
 
   protected:
-  std::mutex mutex_;
-  std::weak_ptr<S3CrtClientFinalizer> finalizer_;
+  friend class S3CrtClientFinalizer;
+  S3CrtClientHolder(std::shared_ptr<S3CrtClientFinalizer> finalizer,
+                    std::shared_ptr<Aws::S3Crt::S3CrtClient> client,
+                    std::shared_ptr<FilesystemMetrics> metrics);
+  void Finalize();
+
+  std::shared_ptr<S3CrtClientFinalizer> finalizer_;
+  std::shared_ptr<S3CrtClientOperationState> operation_state_;
+  // The holder is the sole shared owner of the client. Operation leases must
+  // never copy this shared_ptr.
   std::shared_ptr<Aws::S3Crt::S3CrtClient> client_;
   std::shared_ptr<FilesystemMetrics> metrics_;
 };
@@ -79,14 +104,20 @@ class S3CrtClientFinalizer : public std::enable_shared_from_this<S3CrtClientFina
   public:
   arrow::Result<std::shared_ptr<S3CrtClientHolder>> AddClient(std::shared_ptr<Aws::S3Crt::S3CrtClient> client,
                                                               std::shared_ptr<FilesystemMetrics> metrics);
+  /// Close all holders and wait until every CRT client destructor has returned.
+  /// This is an S3 lifecycle operation and must not be called from a CRT
+  /// callback.
   void Finalize();
-  std::shared_lock<std::shared_mutex> LockShared();
 
   protected:
   friend class S3CrtClientHolder;
-  std::shared_mutex mutex_;
+  void ClientDestroyed();
+
+  std::mutex mutex_;
+  std::condition_variable cv_;
   ClientHolderList holders_;
-  bool finalized_ = false;
+  std::size_t live_clients_ = 0;
+  std::atomic<bool> finalized_{false};
 };
 
 std::shared_ptr<S3CrtClientFinalizer> GetCrtClientFinalizer();
