@@ -767,6 +767,66 @@ TEST_F(TransactionTest, IndexMultipleColumnsDeprecationTest) {
 
 // ==================== LOB Files Tests ====================
 
+TEST_F(TransactionTest, DeclaredFieldIdsSetOnce) {
+  // First transaction declares pk/row-timestamp field ids alongside data.
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy1.parquet"));
+    txn->AddColumnGroup(manifest->columnGroups()[0]);
+    txn->SetPrimaryKeyField(100).SetRowTimestampField(102);
+    ASSERT_AND_ASSIGN(auto version, txn->Commit());
+    ASSERT_EQ(version, 1);
+  }
+
+  // Declarations are persisted and survive unrelated commits.
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto read_manifest, txn->GetManifest());
+    EXPECT_EQ(read_manifest->pkFieldId(), 100);
+    EXPECT_EQ(read_manifest->rowTimestampFieldId(), 102);
+    txn->UpdateStat("bloom_filter.100", Statistics{.paths = {base_path_ + "/stat.bin"}});
+    ASSERT_AND_ASSIGN(auto version, txn->Commit());
+    ASSERT_EQ(version, 2);
+  }
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto read_manifest, txn->GetManifest());
+    EXPECT_EQ(read_manifest->pkFieldId(), 100);
+    EXPECT_EQ(read_manifest->rowTimestampFieldId(), 102);
+  }
+
+  // Re-declaring the same value is a no-op commit-wise; a different value fails.
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    txn->SetPrimaryKeyField(100);
+    ASSERT_AND_ASSIGN(auto version, txn->Commit());
+    ASSERT_EQ(version, 3);
+  }
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    txn->SetPrimaryKeyField(101);
+    auto result = txn->Commit();
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(result.status().ToString().find("already declared"), std::string::npos);
+  }
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    txn->SetRowTimestampField(103);
+    auto result = txn->Commit();
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(result.status().ToString().find("already declared"), std::string::npos);
+  }
+
+  // Non-positive field ids are rejected at commit.
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    txn->SetPrimaryKeyField(0);
+    auto result = txn->Commit();
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(result.status().ToString().find("must be > 0"), std::string::npos);
+  }
+}
+
 TEST_F(TransactionTest, AddLobFile) {
   // Create initial transaction to set up manifest
   ASSERT_AND_ASSIGN(auto txn1, Transaction::Open(fs_, base_path_));

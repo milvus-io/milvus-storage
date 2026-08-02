@@ -127,6 +127,58 @@ class EvaluatingMaskedRecordBatchReader final : public MaskedRecordBatchReader {
   std::shared_ptr<std::vector<std::string>> output_columns_;
 };
 
+class EvaluatingDeletedTsReader final : public DeletedTsReader {
+  public:
+  EvaluatingDeletedTsReader(std::shared_ptr<arrow::RecordBatchReader> base_reader,
+                            std::shared_ptr<DeleteEvaluator> evaluator)
+      : base_reader_(std::move(base_reader)), evaluator_(std::move(evaluator)) {}
+
+  arrow::Status ReadNext(std::shared_ptr<arrow::Int64Array>* out) override {
+    if (out == nullptr) {
+      return arrow::Status::Invalid("DeletedTsReader output must not be null");
+    }
+    std::shared_ptr<arrow::RecordBatch> batch;
+    ARROW_RETURN_NOT_OK(base_reader_->ReadNext(&batch));
+    if (!batch) {
+      *out = nullptr;
+      return arrow::Status::OK();
+    }
+    ARROW_ASSIGN_OR_RAISE(*out, EvaluateDeletedTs(evaluator_, batch));
+    return arrow::Status::OK();
+  }
+
+  private:
+  std::shared_ptr<arrow::RecordBatchReader> base_reader_;
+  std::shared_ptr<DeleteEvaluator> evaluator_;
+};
+
+// Fast path for datasets without any delete: emits all-zero chunks derived
+// from the manifest row count without touching any data file.
+class AllAliveDeletedTsReader final : public DeletedTsReader {
+  public:
+  AllAliveDeletedTsReader(int64_t total_rows, int64_t chunk_rows)
+      : remaining_rows_(total_rows), chunk_rows_(chunk_rows > 0 ? chunk_rows : total_rows) {}
+
+  arrow::Status ReadNext(std::shared_ptr<arrow::Int64Array>* out) override {
+    if (out == nullptr) {
+      return arrow::Status::Invalid("DeletedTsReader output must not be null");
+    }
+    if (remaining_rows_ <= 0) {
+      *out = nullptr;
+      return arrow::Status::OK();
+    }
+    const int64_t rows = std::min(remaining_rows_, chunk_rows_);
+    ARROW_ASSIGN_OR_RAISE(auto buffer, milvus_storage::MakeZeroedInt64Buffer(rows));
+    *out = std::make_shared<arrow::Int64Array>(rows, std::move(buffer), nullptr, 0);
+    remaining_rows_ -= rows;
+    return arrow::Status::OK();
+  }
+
+  private:
+  int64_t remaining_rows_;
+  int64_t chunk_rows_;
+};
+
 }  // namespace
 
 class PackedRecordBatchReader final : public arrow::RecordBatchReader {
@@ -899,6 +951,52 @@ class ReaderImpl : public Reader {
     ARROW_RETURN_NOT_OK(base_reader->open());
     return std::make_shared<EvaluatingMaskedRecordBatchReader>(std::move(base_reader), std::move(evaluator),
                                                                needed_columns_);
+  }
+
+  [[nodiscard]] arrow::Result<std::shared_ptr<DeletedTsReader>> get_deleted_ts_reader(
+      const MaskedReadOptions& options) const override {
+    if (!manifest_) {
+      return arrow::Status::Invalid("Deleted-ts reader requires a manifest-aware Reader");
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto evaluator, CreateDeleteEvaluator(manifest_, schema_, properties_, options,
+                                                                key_retriever_callback_, DeleteEvalMode::DELETED_TS));
+
+    if (DeleteEvaluatorEmpty(evaluator)) {
+      int64_t total_rows = 0;
+      if (!cgs_->empty() && (*cgs_)[0]) {
+        for (const auto& file : (*cgs_)[0]->files) {
+          total_rows += file.end_index - file.start_index;
+        }
+      }
+      const auto chunk_rows =
+          milvus_storage::api::GetValueNoError<int64_t>(properties_, PROPERTY_READER_RECORD_BATCH_MAX_ROWS);
+      return std::make_shared<AllAliveDeletedTsReader>(total_rows, chunk_rows);
+    }
+
+    // Only the evaluator's own columns (pk / row timestamp / predicate fields)
+    // are read; this stream never returns data columns.
+    auto evaluator_columns = std::make_shared<std::vector<std::string>>(DeleteEvaluatorNeededColumns(evaluator));
+    ARROW_ASSIGN_OR_RAISE(auto resolved_columns, resolve_needed_columns(schema_, evaluator_columns));
+    auto needed_column_groups = collect_required_column_groups(resolved_columns);
+    std::shared_ptr<arrow::Schema> projected_schema = nullptr;
+    if (schema_) {
+      std::vector<std::shared_ptr<arrow::Field>> needed_fields;
+      for (const auto& column_name : resolved_columns) {
+        auto field = schema_->GetFieldByName(column_name);
+        if (field != nullptr) {
+          needed_fields.emplace_back(field);
+        }
+      }
+      projected_schema = arrow::schema(needed_fields);
+    }
+
+    auto metadata_cache = get_metadata_cache();
+    auto base_reader =
+        std::make_shared<PackedRecordBatchReader>(needed_column_groups, std::move(metadata_cache), projected_schema,
+                                                  resolved_columns, properties_, key_retriever_callback_, "");
+    ARROW_RETURN_NOT_OK(base_reader->open());
+    return std::make_shared<EvaluatingDeletedTsReader>(std::move(base_reader), std::move(evaluator));
   }
 
   /**

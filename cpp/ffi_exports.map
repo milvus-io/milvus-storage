@@ -82,10 +82,13 @@
 
     # Reader interface
     loon_reader_new;
-    loon_alive_reader_new;
-    loon_alive_reader_next;
-    loon_alive_bitset_free;
-    loon_alive_reader_destroy;
+    loon_masked_reader_new;
+    loon_masked_reader_next;
+    loon_row_mask_free;
+    loon_masked_reader_destroy;
+    loon_deleted_ts_reader_new;
+    loon_deleted_ts_reader_next;
+    loon_deleted_ts_reader_destroy;
     loon_reader_set_keyretriever;
     loon_get_record_batch_reader;
     loon_get_chunk_reader;
@@ -126,6 +129,8 @@
     loon_transaction_add_column_group;
     loon_transaction_append_files;
     loon_transaction_add_delta_log;
+    loon_transaction_set_primary_key_field;
+    loon_transaction_set_row_timestamp_field;
     loon_transaction_update_stat;
 
     # External table interface

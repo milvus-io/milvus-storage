@@ -577,6 +577,10 @@ struct MaskedReaderFFIState {
   std::shared_ptr<MaskedRecordBatchReader> stream;
 };
 
+struct DeletedTsReaderFFIState {
+  std::shared_ptr<DeletedTsReader> stream;
+};
+
 struct RowMaskPrivateData {
   std::shared_ptr<arrow::BooleanArray> keep_mask;
 };
@@ -772,6 +776,111 @@ void loon_row_mask_free(LoonRowMask* bitset) {
 void loon_masked_reader_destroy(LoonMaskedReaderHandle handle) {
   if (handle) {
     delete reinterpret_cast<MaskedReaderFFIState*>(handle);
+  }
+}
+
+LoonFFIResult loon_deleted_ts_reader_new(const LoonManifest* manifest,
+                                         ArrowSchema* schema,
+                                         const ::LoonProperties* properties,
+                                         const LoonMaskedReadOptions* options,
+                                         const char* (*key_retriever)(const char* metadata),
+                                         LoonDeletedTsReaderHandle* out_handle) {
+  if (!manifest || !schema || !properties || !out_handle) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: manifest, schema, properties, and out_handle must not be null");
+  }
+
+  try {
+    milvus_storage::api::Properties properties_map;
+    auto opt = ConvertFFIProperties(properties_map, properties);
+    if (opt != std::nullopt) {
+      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
+    }
+
+    auto schema_result = arrow::ImportSchema(schema);
+    if (!schema_result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, schema_result.status().ToString());
+    }
+
+    std::shared_ptr<Manifest> cpp_manifest;
+    auto import_st = milvus_storage::manifest_import(manifest, &cpp_manifest);
+    if (!import_st.ok()) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
+    }
+
+    auto reader = Reader::create(cpp_manifest, schema_result.ValueOrDie(), nullptr, properties_map);
+    // Install the decryption callback before building the (eagerly created) stream.
+    if (key_retriever != nullptr) {
+      reader->set_keyretriever([key_retriever](const std::string& metadata) -> std::string {
+        const char* result = key_retriever(metadata.c_str());
+        return result ? std::string(result) : std::string();
+      });
+    }
+    auto stream_result = reader->get_deleted_ts_reader(ConvertMaskedReadOptions(options));
+    if (!stream_result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, stream_result.status().ToString());
+    }
+
+    auto state = std::make_unique<DeletedTsReaderFFIState>();
+    state->stream = stream_result.ValueOrDie();
+
+    *out_handle = reinterpret_cast<LoonDeletedTsReaderHandle>(state.release());
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
+LoonFFIResult loon_deleted_ts_reader_next(LoonDeletedTsReaderHandle handle, ArrowArray** out_array) {
+  if (!handle || !out_array) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_array must not be null");
+  }
+
+  *out_array = nullptr;
+
+  try {
+    auto* state = reinterpret_cast<DeletedTsReaderFFIState*>(handle);
+    std::shared_ptr<arrow::Int64Array> chunk;
+    auto status = state->stream->ReadNext(&chunk);
+    if (!status.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+    }
+    if (!chunk) {
+      RETURN_SUCCESS();
+    }
+
+    auto* array = static_cast<ArrowArray*>(malloc(sizeof(ArrowArray)));
+    if (!array) {
+      RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to allocate deleted-ts ArrowArray");
+    }
+    array->release = nullptr;
+
+    status = arrow::ExportArray(*chunk, array);
+    if (!status.ok()) {
+      free(array);
+      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+    }
+
+    *out_array = array;
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    if (*out_array) {
+      if ((*out_array)->release) {
+        (*out_array)->release(*out_array);
+      }
+      free(*out_array);
+      *out_array = nullptr;
+    }
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
+void loon_deleted_ts_reader_destroy(LoonDeletedTsReaderHandle handle) {
+  if (handle) {
+    delete reinterpret_cast<DeletedTsReaderFFIState*>(handle);
   }
 }
 

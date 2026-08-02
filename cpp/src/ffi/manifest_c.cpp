@@ -282,6 +282,40 @@ LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle,
   RETURN_UNREACHABLE();
 }
 
+LoonFFIResult loon_transaction_set_primary_key_field(LoonTransactionHandle handle, int64_t field_id) {
+  if (!handle) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
+  }
+  if (field_id <= 0) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: primary-key field id must be > 0");
+  }
+  try {
+    reinterpret_cast<Transaction*>(handle)->SetPrimaryKeyField(field_id);
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
+LoonFFIResult loon_transaction_set_row_timestamp_field(LoonTransactionHandle handle, int64_t field_id) {
+  if (!handle) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
+  }
+  if (field_id <= 0) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: row-timestamp field id must be > 0");
+  }
+  try {
+    reinterpret_cast<Transaction*>(handle)->SetRowTimestampField(field_id);
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
 LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
                                            const char* key,
                                            const char* const* files,

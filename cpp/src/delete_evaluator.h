@@ -32,17 +32,32 @@ namespace api {
 
 class DeleteEvaluator;
 
+// Consumption mode, fixed at creation: it decides the load-time delete
+// structures, the compiled predicate expression shape, and the evaluation path.
+enum class DeleteEvalMode {
+  // Boolean alive mask under the visible_until_ts snapshot (compaction).
+  KEEP_MASK,
+  // Per-row earliest applicable delete timestamp, 0 = alive (query-side load).
+  DELETED_TS,
+};
+
 arrow::Result<std::shared_ptr<DeleteEvaluator>> CreateDeleteEvaluator(
     std::shared_ptr<Manifest> manifest,
     std::shared_ptr<arrow::Schema> schema,
     Properties properties,
     MaskedReadOptions options,
-    std::function<std::string(const std::string&)> key_retriever);
+    std::function<std::string(const std::string&)> key_retriever,
+    DeleteEvalMode mode = DeleteEvalMode::KEEP_MASK);
 
 const std::vector<std::string>& DeleteEvaluatorNeededColumns(const std::shared_ptr<DeleteEvaluator>& evaluator);
 
+bool DeleteEvaluatorEmpty(const std::shared_ptr<DeleteEvaluator>& evaluator);
+
 arrow::Result<std::shared_ptr<arrow::BooleanArray>> EvaluateDeleteKeepMask(
     const std::shared_ptr<DeleteEvaluator>& evaluator, const std::shared_ptr<arrow::RecordBatch>& batch);
+
+arrow::Result<std::shared_ptr<arrow::Int64Array>> EvaluateDeletedTs(const std::shared_ptr<DeleteEvaluator>& evaluator,
+                                                                    const std::shared_ptr<arrow::RecordBatch>& batch);
 
 }  // namespace api
 }  // namespace milvus_storage

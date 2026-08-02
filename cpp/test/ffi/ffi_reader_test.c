@@ -1337,6 +1337,81 @@ static void test_alive_reader_noop_mask(void) {
   loon_properties_free(&rp);
 }
 
+// Combined pk + predicate deltas through the query-side deleted-ts stream.
+// Base rows: ts {10..50}, pk {1..5}. Pk deltas: pk2@25, pk3@35. Predicate
+// delta: "pk = 2 or payload = 'three'" @35. Expected earliest deleted_ts per
+// row: {0, 25, 35, 0, 0} (pk2 row: min(25, 35) = 25).
+static void test_deleted_ts_reader(void) {
+  LoonColumnGroups* data_cgs = NULL;
+  LoonColumnGroups* pk_delta_cgs = NULL;
+  LoonColumnGroups* predicate_delta_cgs = NULL;
+  struct ArrowSchema* schema;
+  LoonFFIResult rc;
+  LoonProperties rp;
+  LoonDeletedTsReaderHandle deleted_ts_reader;
+  LoonManifest manifest;
+  LoonMaskedReadOptions options;
+
+  create_alive_pk_base_file("reader-deleted-ts-base", &data_cgs);
+  create_alive_pk_delta_file("reader-deleted-ts-pk-delta", &pk_delta_cgs);
+  create_alive_predicate_delta_file("reader-deleted-ts-predicate-delta", &predicate_delta_cgs);
+  schema = create_alive_pk_schema();
+
+  const char* delta_paths[] = {pk_delta_cgs->column_group_array[0].files[0].path,
+                               predicate_delta_cgs->column_group_array[0].files[0].path};
+  uint32_t delta_num_entries[] = {2, 1};
+  uint32_t delta_types[] = {LOON_DELTA_LOG_TYPE_PRIMARY_KEY, LOON_DELTA_LOG_TYPE_PREDICATE};
+
+  memset(&manifest, 0, sizeof(manifest));
+  manifest.column_groups = *data_cgs;
+  manifest.delta_logs.delta_log_paths = delta_paths;
+  manifest.delta_logs.delta_log_num_entries = delta_num_entries;
+  manifest.delta_logs.delta_log_types = delta_types;
+  manifest.delta_logs.num_delta_logs = 2;
+
+  memset(&options, 0, sizeof(options));
+  options.pk_field_id = 2;
+  options.row_timestamp_field_id = 1;
+
+  rc = create_test_reader_pp(&rp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_deleted_ts_reader_new(&manifest, schema, &rp, &options, NULL /*key_retriever*/, &deleted_ts_reader);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  const int64_t expected[] = {0, 25, 35, 0, 0};
+  int64_t offset = 0;
+  while (true) {
+    struct ArrowArray* out_array = NULL;
+    rc = loon_deleted_ts_reader_next(deleted_ts_reader, &out_array);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    if (out_array == NULL) {
+      break;
+    }
+    ck_assert(out_array->buffers != NULL);
+    ck_assert(out_array->buffers[1] != NULL);
+    const int64_t* values = (const int64_t*)out_array->buffers[1];
+    for (int64_t i = 0; i < out_array->length; ++i) {
+      ck_assert(offset < 5);
+      ck_assert_msg(values[out_array->offset + i] == expected[offset], "deleted_ts at row %" PRId64 ": %" PRId64,
+                    offset, values[out_array->offset + i]);
+      ++offset;
+    }
+    out_array->release(out_array);
+    free(out_array);
+  }
+  ck_assert_int_eq(offset, 5);
+
+  loon_deleted_ts_reader_destroy(deleted_ts_reader);
+  loon_column_groups_destroy(predicate_delta_cgs);
+  loon_column_groups_destroy(pk_delta_cgs);
+  loon_column_groups_destroy(data_cgs);
+  if (schema->release) {
+    schema->release(schema);
+  }
+  free(schema);
+  loon_properties_free(&rp);
+}
+
 static void test_out_schema(void) {
   LoonColumnGroups* out_cgs = NULL;
   struct ArrowSchema* schema;
@@ -1454,6 +1529,7 @@ void run_reader_suite(void) {
   RUN_TEST(test_alive_reader_noop_mask);
   RUN_TEST(test_alive_reader_primary_key_delete_mask);
   RUN_TEST(test_alive_reader_predicate_delete_mask);
+  RUN_TEST(test_deleted_ts_reader);
   RUN_TEST(test_file_encryption);
   RUN_TEST(test_reader_error_handling);
 }

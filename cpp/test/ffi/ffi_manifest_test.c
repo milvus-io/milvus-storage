@@ -312,6 +312,15 @@ static void test_add_delta_log(void) {
   rc = loon_transaction_add_delta_log(tranhandle, "delta_log_path_2.log", 200, LOON_DELTA_LOG_TYPE_PREDICATE);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
+  // Declare field semantics; non-positive ids are rejected up front
+  rc = loon_transaction_set_primary_key_field(tranhandle, 0);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+  rc = loon_transaction_set_primary_key_field(tranhandle, 100);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_transaction_set_row_timestamp_field(tranhandle, 1);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
   // Commit
   rc = loon_transaction_commit(tranhandle, &committed_version);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
@@ -340,6 +349,10 @@ static void test_add_delta_log(void) {
   ck_assert_int_eq(cmanifest->delta_logs.delta_log_num_entries[1], 200);
   ck_assert_int_eq(cmanifest->delta_logs.delta_log_types[0], LOON_DELTA_LOG_TYPE_PRIMARY_KEY);
   ck_assert_int_eq(cmanifest->delta_logs.delta_log_types[1], LOON_DELTA_LOG_TYPE_PREDICATE);
+
+  // Verify declared field semantics survived the commit round-trip
+  ck_assert_int_eq((int)cmanifest->pk_field_id, 100);
+  ck_assert_int_eq((int)cmanifest->row_timestamp_field_id, 1);
   // Clean up - this will also test the delta_logs cleanup path in loon_manifest_destroy
   loon_manifest_destroy(cmanifest);
   loon_transaction_destroy(read_transaction);

@@ -80,10 +80,13 @@ _loon_filesystem_reset_metrics
 
 # Reader interface
 _loon_reader_new
-_loon_alive_reader_new
-_loon_alive_reader_next
-_loon_alive_bitset_free
-_loon_alive_reader_destroy
+_loon_masked_reader_new
+_loon_masked_reader_next
+_loon_row_mask_free
+_loon_masked_reader_destroy
+_loon_deleted_ts_reader_new
+_loon_deleted_ts_reader_next
+_loon_deleted_ts_reader_destroy
 _loon_reader_set_keyretriever
 _loon_get_record_batch_reader
 _loon_get_chunk_reader
@@ -124,6 +127,8 @@ _loon_transaction_drop_column
 _loon_transaction_add_column_group
 _loon_transaction_append_files
 _loon_transaction_add_delta_log
+_loon_transaction_set_primary_key_field
+_loon_transaction_set_row_timestamp_field
 _loon_transaction_update_stat
 
 # External table interface

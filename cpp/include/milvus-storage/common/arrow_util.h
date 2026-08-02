@@ -66,4 +66,9 @@ arrow::Result<std::string> GetEnvVar(const char* name);
 
 arrow::Result<std::string> GetEnvVar(const std::string& name);
 
+// Allocates an int64-sized buffer (length elements) zero-initialized. Callers
+// that need a zero-filled Int64Array (0 as a value sentinel) wrap the returned
+// buffer, mutating it by index first if required.
+arrow::Result<std::shared_ptr<arrow::Buffer>> MakeZeroedInt64Buffer(int64_t length);
+
 }  // namespace milvus_storage

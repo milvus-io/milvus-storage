@@ -41,7 +41,7 @@ Updates::~Updates() = default;
 bool Updates::hasChanges() const {
   return !dropped_columns_.empty() || !added_column_groups_.empty() || !appended_files_.empty() ||
          !added_delta_logs_.empty() || !added_stats_.empty() || !added_indexes_.empty() || !dropped_indexes_.empty() ||
-         !added_lob_files_.empty();
+         !added_lob_files_.empty() || pk_field_id_.has_value() || row_timestamp_field_id_.has_value();
 }
 
 void Updates::DropColumn(const std::string& column_name) { dropped_columns_.push_back(column_name); }
@@ -55,6 +55,10 @@ void Updates::AddDeltaLog(const DeltaLog& delta_log) { added_delta_logs_.push_ba
 void Updates::UpdateStat(const std::string& key, const Statistics& stat) { added_stats_[key] = stat; }
 
 void Updates::AddLobFile(const LobFileInfo& lob_file) { added_lob_files_.push_back(lob_file); }
+
+void Updates::SetPrimaryKeyField(int64_t field_id) { pk_field_id_ = field_id; }
+
+void Updates::SetRowTimestampField(int64_t field_id) { row_timestamp_field_id_ = field_id; }
 
 const std::vector<std::string>& Updates::GetDroppedColumns() const { return dropped_columns_; }
 
@@ -77,6 +81,10 @@ const std::vector<Index>& Updates::GetAddedIndexes() const { return added_indexe
 const std::vector<std::pair<std::string, std::string>>& Updates::GetDroppedIndexes() const { return dropped_indexes_; }
 
 const std::vector<LobFileInfo>& Updates::GetAddedLobFiles() const { return added_lob_files_; }
+
+const std::optional<int64_t>& Updates::GetPrimaryKeyField() const { return pk_field_id_; }
+
+const std::optional<int64_t>& Updates::GetRowTimestampField() const { return row_timestamp_field_id_; }
 
 // ==================== Helper Functions ====================
 
@@ -225,6 +233,26 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   for (const auto& lob_file : updates.GetAddedLobFiles()) {
     lob_files.push_back(lob_file);
   }
+
+  // Apply declared field semantics (set-once: a declared field id is immutable)
+  auto apply_declared_field = [](const std::optional<int64_t>& update, int64_t& declared,
+                                 const char* role) -> arrow::Status {
+    if (!update.has_value()) {
+      return arrow::Status::OK();
+    }
+    if (*update <= 0) {
+      return arrow::Status::Invalid(fmt::format("{} field id must be > 0, got {}", role, *update));
+    }
+    if (declared != 0 && declared != *update) {
+      return arrow::Status::Invalid(
+          fmt::format("{} field id is already declared as {} and cannot be changed to {}", role, declared, *update));
+    }
+    declared = *update;
+    return arrow::Status::OK();
+  };
+  ARROW_RETURN_NOT_OK(apply_declared_field(updates.GetPrimaryKeyField(), base->pkFieldId(), "Primary-key"));
+  ARROW_RETURN_NOT_OK(
+      apply_declared_field(updates.GetRowTimestampField(), base->rowTimestampFieldId(), "Row-timestamp"));
 
   // Apply append files
   for (const auto& new_cgs : updates.GetAppendedFiles()) {
@@ -507,6 +535,16 @@ Transaction& Transaction::DropIndex(const std::string& column_name, const std::s
 
 Transaction& Transaction::AddLobFile(const LobFileInfo& lob_file) {
   updates_.AddLobFile(lob_file);
+  return *this;
+}
+
+Transaction& Transaction::SetPrimaryKeyField(int64_t field_id) {
+  updates_.SetPrimaryKeyField(field_id);
+  return *this;
+}
+
+Transaction& Transaction::SetRowTimestampField(int64_t field_id) {
+  updates_.SetRowTimestampField(field_id);
   return *this;
 }
 

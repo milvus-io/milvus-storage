@@ -171,6 +171,8 @@ TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
 
   // Create manifest with all components
   auto manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats);
+  manifest->pkFieldId() = 100;
+  manifest->rowTimestampFieldId() = 1;
 
   // Export manifest
   LoonManifest* cmanifest = nullptr;
@@ -178,6 +180,10 @@ TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
 
   // Verify exported manifest
   ASSERT_NE(cmanifest, nullptr);
+
+  // Verify declared field semantics
+  ASSERT_EQ(cmanifest->pk_field_id, 100);
+  ASSERT_EQ(cmanifest->row_timestamp_field_id, 1);
 
   // Verify column groups
   ASSERT_EQ(cmanifest->column_groups.num_of_column_groups, 1);
@@ -207,6 +213,10 @@ TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
 
   // Verify imported manifest
   ASSERT_NE(imported_manifest, nullptr);
+
+  // Verify imported declared field semantics
+  ASSERT_EQ(imported_manifest->pkFieldId(), 100);
+  ASSERT_EQ(imported_manifest->rowTimestampFieldId(), 1);
 
   // Verify imported column groups
   ASSERT_EQ(imported_manifest->columnGroups().size(), 1);
@@ -278,6 +288,8 @@ TEST_F(BridgeTest, ExportImportManifestEmpty) {
   ASSERT_TRUE(imported_manifest->columnGroups().empty());
   ASSERT_TRUE(imported_manifest->deltaLogs().empty());
   ASSERT_TRUE(imported_manifest->stats().empty());
+  ASSERT_EQ(imported_manifest->pkFieldId(), 0);
+  ASSERT_EQ(imported_manifest->rowTimestampFieldId(), 0);
 
   // Clean up
   loon_manifest_destroy(cmanifest);

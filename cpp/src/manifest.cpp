@@ -195,6 +195,8 @@ struct codec_traits<milvus_storage::api::Manifest> {
     avro::encode(e, m.stats());
     avro::encode(e, m.indexes());
     avro::encode(e, m.lobFiles());
+    avro::encode(e, m.pkFieldId());
+    avro::encode(e, m.rowTimestampFieldId());
   }
 
   static void decode(Decoder& d, milvus_storage::api::Manifest& m) {
@@ -203,6 +205,8 @@ struct codec_traits<milvus_storage::api::Manifest> {
     avro::decode(d, m.stats());
     avro::decode(d, m.indexes());
     avro::decode(d, m.lobFiles());
+    avro::decode(d, m.pkFieldId());
+    avro::decode(d, m.rowTimestampFieldId());
   }
 };
 
@@ -263,7 +267,9 @@ static const char* const MANIFEST_SCHEMA_JSON = R"({
         {"name": "valid_rows", "type": "long"},
         {"name": "file_size_bytes", "type": "long"}
       ]
-    }}, "default": []}
+    }}, "default": []},
+    {"name": "pk_field_id", "type": "long", "default": 0},
+    {"name": "row_timestamp_field_id", "type": "long", "default": 0}
   ]
 })";
 
@@ -333,7 +339,9 @@ Manifest::Manifest(const Manifest& other)
       delta_logs_(other.delta_logs_),
       stats_(other.stats_),
       indexes_(other.indexes_),
-      lob_files_(other.lob_files_) {}
+      lob_files_(other.lob_files_),
+      pk_field_id_(other.pk_field_id_),
+      row_timestamp_field_id_(other.row_timestamp_field_id_) {}
 
 Manifest& Manifest::operator=(const Manifest& other) {
   if (this != &other) {
@@ -343,6 +351,8 @@ Manifest& Manifest::operator=(const Manifest& other) {
     stats_ = other.stats_;
     indexes_ = other.indexes_;
     lob_files_ = other.lob_files_;
+    pk_field_id_ = other.pk_field_id_;
+    row_timestamp_field_id_ = other.row_timestamp_field_id_;
   }
   return *this;
 }
@@ -372,6 +382,8 @@ arrow::Status Manifest::deserialize(std::istream& input_stream) {
     stats_.clear();
     indexes_.clear();
     lob_files_.clear();
+    pk_field_id_ = 0;
+    row_timestamp_field_id_ = 0;
     return arrow::Status::Invalid(msg);
   };
 
@@ -473,6 +485,10 @@ void Manifest::deserializeLegacy(std::istream& input_stream) {
   } else {
     lob_files_.clear();
   }
+
+  // Legacy (pre-OCF) manifests predate declared field semantics.
+  pk_field_id_ = 0;
+  row_timestamp_field_id_ = 0;
 }
 
 std::shared_ptr<ColumnGroup> Manifest::getColumnGroup(const std::string& column_name) const {

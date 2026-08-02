@@ -34,14 +34,14 @@ class Manifest;
 struct MaskedReadOptions {
   std::optional<uint64_t> visible_until_ts;
   // Primary-key field id. milvus-storage has no inherent primary-key concept, so
-  // PRIMARY_KEY delta logs require the caller to declare which schema field is
-  // the primary key. Required whenever the manifest contains PRIMARY_KEY deltas;
-  // unused by predicate deletes.
+  // PRIMARY_KEY delta logs need a declared primary-key field id. It can come
+  // from the manifest declaration (Transaction::SetPrimaryKeyField) or from this
+  // option; when both exist they must match. Unused by predicate deletes.
   std::optional<int64_t> pk_field_id;
-  // Row-timestamp field id. milvus-storage has no inherent row-timestamp field
-  // either, so the caller must declare which schema field carries the per-row
-  // timestamp used for `row_ts <= delete_ts`. Required whenever the manifest
-  // contains any delete (PRIMARY_KEY or PREDICATE).
+  // Row-timestamp field id: which schema field carries the per-row timestamp
+  // used for `row_ts <= delete_ts`. Needed whenever the manifest contains any
+  // delete (PRIMARY_KEY or PREDICATE); same manifest-or-option sourcing as
+  // pk_field_id.
   std::optional<int64_t> row_timestamp_field_id;
 };
 
@@ -54,6 +54,26 @@ class MaskedRecordBatchReader {
   public:
   virtual ~MaskedRecordBatchReader() = default;
   virtual arrow::Status ReadNext(MaskedRecordBatch* out) = 0;
+};
+
+/**
+ * @brief Streams per-row earliest applicable delete timestamps for a dataset.
+ *
+ * Contract:
+ *  - Rows follow the dataset's global row order (the same order every record
+ *    batch reader over this manifest yields); the running position across
+ *    chunks IS the global row offset — that alignment is the whole point of
+ *    this stream for query-side consumers.
+ *  - Each value is the earliest delete timestamp applying to the row
+ *    (smallest delete_ts >= row_ts among matching deletes); 0 means alive.
+ *  - Chunk boundaries are unspecified; only the concatenation is meaningful,
+ *    and its total length equals the dataset row count.
+ */
+class DeletedTsReader {
+  public:
+  virtual ~DeletedTsReader() = default;
+  /// Sets *out to the next chunk, or nullptr at end of stream.
+  virtual arrow::Status ReadNext(std::shared_ptr<arrow::Int64Array>* out) = 0;
 };
 
 /**
@@ -277,6 +297,17 @@ class Reader {
       const std::string& predicate) const = 0;
 
   [[nodiscard]] virtual arrow::Result<std::shared_ptr<MaskedRecordBatchReader>> get_masked_record_batch_reader(
+      const MaskedReadOptions& options) const = 0;
+
+  /**
+   * @brief Get a delete-info stream for query-side loading (see DeletedTsReader)
+   *
+   * Requires a manifest-aware Reader. Data columns are never returned; the
+   * evaluator-internal columns (primary key, row timestamp, predicate fields)
+   * are read internally as needed. `needed_columns` passed at Reader creation
+   * is ignored by this stream.
+   */
+  [[nodiscard]] virtual arrow::Result<std::shared_ptr<DeletedTsReader>> get_deleted_ts_reader(
       const MaskedReadOptions& options) const = 0;
 
   /**

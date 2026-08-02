@@ -15,11 +15,13 @@
 #include "milvus-storage/common/arrow_util.h"
 
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <vector>
 
 #include <arrow/array.h>
 #include <arrow/array/concatenate.h>
+#include <arrow/buffer.h>
 #include <arrow/compute/api.h>
 #include <arrow/type.h>
 #include <arrow/table.h>
@@ -197,5 +199,14 @@ arrow::Result<std::string> GetEnvVar(const char* name) {
 }
 
 arrow::Result<std::string> GetEnvVar(const std::string& name) { return GetEnvVar(name.c_str()); }
+
+arrow::Result<std::shared_ptr<arrow::Buffer>> MakeZeroedInt64Buffer(int64_t length) {
+  if (length < 0) {
+    return arrow::Status::Invalid("Int64 buffer length must be >= 0");
+  }
+  ARROW_ASSIGN_OR_RAISE(auto buffer, arrow::AllocateBuffer(length * static_cast<int64_t>(sizeof(int64_t))));
+  std::memset(buffer->mutable_data(), 0, static_cast<size_t>(buffer->size()));
+  return std::shared_ptr<arrow::Buffer>(std::move(buffer));
+}
 
 }  // namespace milvus_storage

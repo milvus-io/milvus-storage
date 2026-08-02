@@ -37,7 +37,8 @@ namespace milvus_storage::api {
 // - Version 3: Changed stats from map<string, vector<string>> to map<string, Statistics>
 // - Version 4: Changed ColumnGroupFile fields (metadata) to properties map
 // - Version 5: Added lob_files field for LOB (Large Object) file metadata
-constexpr int32_t MANIFEST_VERSION = 5;
+// - Version 6: Added pk_field_id / row_timestamp_field_id declared-field-semantics fields
+constexpr int32_t MANIFEST_VERSION = 6;
 
 /**
  * @brief Metadata for a single LOB (Large Object) file
@@ -192,6 +193,23 @@ class Manifest final {
   }
 
   /**
+   * @brief Declared primary-key field id (0 = undeclared)
+   *
+   * Dataset-level fact about which schema field is the primary key. The writer
+   * declares it once; consumers (e.g. delete evaluation) decide how to use it.
+   */
+  [[nodiscard]] int64_t& pkFieldId() { return pk_field_id_; }
+  [[nodiscard]] const int64_t& pkFieldId() const { return pk_field_id_; }
+
+  /**
+   * @brief Declared row-timestamp field id (0 = undeclared)
+   *
+   * Dataset-level fact about which schema field carries the per-row timestamp.
+   */
+  [[nodiscard]] int64_t& rowTimestampFieldId() { return row_timestamp_field_id_; }
+  [[nodiscard]] const int64_t& rowTimestampFieldId() const { return row_timestamp_field_id_; }
+
+  /**
    * @brief Get the manifest format version
    */
   [[nodiscard]] int32_t version() const { return version_; }
@@ -237,6 +255,8 @@ class Manifest final {
   std::map<std::string, Statistics> stats_;  ///< Stats entries keyed by stat name
   std::vector<Index> indexes_;               ///< Index entries for columns
   std::vector<LobFileInfo> lob_files_;       ///< LOB file metadata for TEXT/BLOB columns
+  int64_t pk_field_id_ = 0;                  ///< Declared primary-key field id (0 = undeclared)
+  int64_t row_timestamp_field_id_ = 0;       ///< Declared row-timestamp field id (0 = undeclared)
 
   static milvus_storage::LRUCache<std::string, std::shared_ptr<Manifest>>& getCache();
 };

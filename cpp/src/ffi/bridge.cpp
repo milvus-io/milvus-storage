@@ -188,6 +188,10 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
     const auto& cgs = manifest->columnGroups();
     ARROW_RETURN_NOT_OK(column_groups_export_internal(cgs, &(*out_cmanifest)->column_groups));
 
+    // Export declared field semantics (0 = undeclared)
+    (*out_cmanifest)->pk_field_id = manifest->pkFieldId();
+    (*out_cmanifest)->row_timestamp_field_id = manifest->rowTimestampFieldId();
+
     // Export delta logs with explicit type tags.
     const auto& delta_logs = manifest->deltaLogs();
     if (!delta_logs.empty()) {
@@ -355,6 +359,10 @@ arrow::Status manifest_import(const LoonManifest* cmanifest,
   // Create Manifest. Indexes and LOB files are not represented in this import path today.
   *out_manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats);
 
+  // Import declared field semantics (0 = undeclared)
+  (*out_manifest)->pkFieldId() = cmanifest->pk_field_id;
+  (*out_manifest)->rowTimestampFieldId() = cmanifest->row_timestamp_field_id;
+
   return arrow::Status::OK();
 }
 
@@ -398,6 +406,10 @@ std::string manifest_debug_string(const LoonManifest* cmanifest) {
   }
 
   std::string result = "LoonManifest:\n";
+
+  // Declared field semantics
+  result += fmt::format("  pk_field_id={}, row_timestamp_field_id={}\n", cmanifest->pk_field_id,
+                        cmanifest->row_timestamp_field_id);
 
   // Column groups
   result += "  " + column_groups_debug_string(&cmanifest->column_groups);

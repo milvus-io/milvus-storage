@@ -365,6 +365,65 @@ TEST_F(MaskedRecordBatchReaderTest, ManifestReaderAppliesInt64PrimaryKeyDeletes)
   ExpectMaskedReaderEof(masked_reader);
 }
 
+TEST_F(MaskedRecordBatchReaderTest, ManifestDeclaredFieldIdsEnableDeletes) {
+  ASSERT_AND_ASSIGN(auto pk_schema, CreatePkSchema(arrow::int64()));
+  ASSERT_AND_ASSIGN(auto batch, CreateInt64PkBatch(pk_schema));
+  auto manifest = WriteManifest(pk_schema, batch);
+  ASSERT_NE(manifest, nullptr);
+
+  ASSERT_AND_ASSIGN(auto delta_batch, CreateInt64DeltaBatch({2, 3}, {25, 35}));
+  ASSERT_AND_ASSIGN(auto delta_file, WriteDeltaLog("/delta-manifest-declared", delta_batch));
+  AddPkDeltaLog(manifest.get(), delta_file, delta_batch->num_rows());
+
+  // No MaskedReadOptions field ids: the manifest declaration alone must suffice.
+  manifest->pkFieldId() = 100;
+  manifest->rowTimestampFieldId() = 1;
+
+  auto reader = api::Reader::create(manifest, pk_schema, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+  ASSERT_AND_ASSIGN(auto masked_reader, reader->get_masked_record_batch_reader(api::MaskedReadOptions{}));
+
+  api::MaskedRecordBatch masked_batch;
+  ASSERT_OK(masked_reader->ReadNext(&masked_batch));
+  ASSERT_NE(masked_batch.batch, nullptr);
+  ExpectRowMask(masked_batch.keep_mask, {true, false, false, true});
+  ExpectMaskedReaderEof(masked_reader);
+}
+
+TEST_F(MaskedRecordBatchReaderTest, OptionsConflictingWithManifestDeclarationFail) {
+  ASSERT_AND_ASSIGN(auto pk_schema, CreatePkSchema(arrow::int64()));
+  ASSERT_AND_ASSIGN(auto batch, CreateInt64PkBatch(pk_schema));
+  auto manifest = WriteManifest(pk_schema, batch);
+  ASSERT_NE(manifest, nullptr);
+
+  ASSERT_AND_ASSIGN(auto delta_batch, CreateInt64DeltaBatch({2}, {25}));
+  ASSERT_AND_ASSIGN(auto delta_file, WriteDeltaLog("/delta-conflicting-declared", delta_batch));
+  AddPkDeltaLog(manifest.get(), delta_file, delta_batch->num_rows());
+
+  manifest->pkFieldId() = 100;
+  manifest->rowTimestampFieldId() = 1;
+
+  auto reader = api::Reader::create(manifest, pk_schema, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  auto pk_conflict = reader->get_masked_record_batch_reader(api::MaskedReadOptions{.pk_field_id = 101});
+  ASSERT_FALSE(pk_conflict.ok());
+  EXPECT_NE(pk_conflict.status().ToString().find("Primary-key field id mismatch"), std::string::npos);
+
+  auto ts_conflict = reader->get_masked_record_batch_reader(api::MaskedReadOptions{.row_timestamp_field_id = 2});
+  ASSERT_FALSE(ts_conflict.ok());
+  EXPECT_NE(ts_conflict.status().ToString().find("Row-timestamp field id mismatch"), std::string::npos);
+
+  // Matching explicit options remain accepted.
+  ASSERT_AND_ASSIGN(auto masked_reader, reader->get_masked_record_batch_reader(
+                                            api::MaskedReadOptions{.pk_field_id = 100, .row_timestamp_field_id = 1}));
+  api::MaskedRecordBatch masked_batch;
+  ASSERT_OK(masked_reader->ReadNext(&masked_batch));
+  ASSERT_NE(masked_batch.batch, nullptr);
+  ExpectRowMask(masked_batch.keep_mask, {true, false, true, true});
+  ExpectMaskedReaderEof(masked_reader);
+}
+
 TEST_F(MaskedRecordBatchReaderTest, ManifestReaderAppliesStringPrimaryKeyDeletes) {
   ASSERT_AND_ASSIGN(auto pk_schema, CreatePkSchema(arrow::utf8()));
   ASSERT_AND_ASSIGN(auto batch, CreateStringPkBatch(pk_schema));
@@ -647,6 +706,195 @@ TEST_F(MaskedRecordBatchReaderPredicateSqlTest, UnsupportedPredicateSqlFailsRead
   auto result = reader->get_masked_record_batch_reader(api::MaskedReadOptions{.row_timestamp_field_id = 1});
   ASSERT_FALSE(result.ok());
   EXPECT_NE(result.status().ToString().find("Unknown column"), std::string::npos);
+}
+
+class DeletedTsReaderTest : public MaskedRecordBatchReaderPredicateSqlTest {
+  protected:
+  void CollectDeletedTs(const std::shared_ptr<api::DeletedTsReader>& reader, std::vector<int64_t>* out) {
+    ASSERT_NE(reader, nullptr);
+    while (true) {
+      std::shared_ptr<arrow::Int64Array> chunk;
+      ASSERT_OK(reader->ReadNext(&chunk));
+      if (!chunk) {
+        break;
+      }
+      for (int64_t i = 0; i < chunk->length(); ++i) {
+        ASSERT_FALSE(chunk->IsNull(i));
+        out->push_back(chunk->Value(i));
+      }
+    }
+    // EOF is sticky.
+    std::shared_ptr<arrow::Int64Array> chunk;
+    ASSERT_OK(reader->ReadNext(&chunk));
+    EXPECT_EQ(chunk, nullptr);
+  }
+
+  void ExpectDeletedTs(const std::shared_ptr<api::DeletedTsReader>& reader, const std::vector<int64_t>& expected) {
+    std::vector<int64_t> actual;
+    CollectDeletedTs(reader, &actual);
+    EXPECT_EQ(actual, expected);
+  }
+};
+
+TEST_F(DeletedTsReaderTest, ColumnGroupsReaderRejectsDeletedTsRead) {
+  auto manifest = WriteManifest();
+  auto column_groups = std::make_shared<api::ColumnGroups>(manifest->columnGroups());
+  auto reader = api::Reader::create(column_groups, schema_, nullptr, properties_);
+
+  auto result = reader->get_deleted_ts_reader(api::MaskedReadOptions{});
+  ASSERT_FALSE(result.ok());
+  EXPECT_NE(result.status().ToString().find("manifest-aware"), std::string::npos);
+}
+
+TEST_F(DeletedTsReaderTest, NoDeltasEmitsAllZero) {
+  auto manifest = WriteManifest();
+  auto reader = api::Reader::create(manifest, schema_, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  ASSERT_AND_ASSIGN(auto deleted_ts_reader, reader->get_deleted_ts_reader(api::MaskedReadOptions{}));
+  ExpectDeletedTs(deleted_ts_reader, std::vector<int64_t>(test_batch_->num_rows(), 0));
+}
+
+TEST_F(DeletedTsReaderTest, PkDeletesReportEarliestApplicableTs) {
+  ASSERT_AND_ASSIGN(auto pk_schema, CreatePkSchema(arrow::int64()));
+  ASSERT_AND_ASSIGN(auto batch, CreateInt64PkBatch(pk_schema));  // pks {1,2,3,4}, ts {10,20,30,40}
+  auto manifest = WriteManifest(pk_schema, batch);
+  ASSERT_NE(manifest, nullptr);
+
+  // pk1 deleted at {5,20}: row_ts=10 -> earliest applicable is 20 (5 targets a
+  // pre-reinsert row). pk2 deleted at {15,25}: row_ts=20 -> 25. pk3 at {35} ->
+  // 35. pk4 at {39}: row_ts=40 -> not applicable, alive.
+  ASSERT_AND_ASSIGN(auto delta_batch, CreateInt64DeltaBatch({1, 1, 2, 2, 3, 4}, {5, 20, 15, 25, 35, 39}));
+  ASSERT_AND_ASSIGN(auto delta_file, WriteDeltaLog("/deleted-ts-pk-int64", delta_batch));
+  AddPkDeltaLog(manifest.get(), delta_file, delta_batch->num_rows());
+
+  auto reader = api::Reader::create(manifest, pk_schema, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+  ASSERT_AND_ASSIGN(auto deleted_ts_reader, reader->get_deleted_ts_reader(api::MaskedReadOptions{
+                                                .pk_field_id = 100, .row_timestamp_field_id = 1}));
+  ExpectDeletedTs(deleted_ts_reader, {20, 25, 35, 0});
+}
+
+TEST_F(DeletedTsReaderTest, StringPkDeletesReportEarliestApplicableTs) {
+  ASSERT_AND_ASSIGN(auto pk_schema, CreatePkSchema(arrow::utf8()));
+  ASSERT_AND_ASSIGN(auto batch, CreateStringPkBatch(pk_schema));  // pks {a,b,c}, ts {10,20,30}
+  auto manifest = WriteManifest(pk_schema, batch);
+  ASSERT_NE(manifest, nullptr);
+
+  ASSERT_AND_ASSIGN(auto delta_batch, CreateStringDeltaBatch({"a", "a", "b"}, {5, 15, 20}));
+  ASSERT_AND_ASSIGN(auto delta_file, WriteDeltaLog("/deleted-ts-pk-string", delta_batch));
+  AddPkDeltaLog(manifest.get(), delta_file, delta_batch->num_rows());
+
+  auto reader = api::Reader::create(manifest, pk_schema, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+  ASSERT_AND_ASSIGN(auto deleted_ts_reader, reader->get_deleted_ts_reader(api::MaskedReadOptions{
+                                                .pk_field_id = 100, .row_timestamp_field_id = 1}));
+  ExpectDeletedTs(deleted_ts_reader, {15, 20, 0});
+}
+
+TEST_F(DeletedTsReaderTest, PredicateDeletesReportEarliestPerRow) {
+  auto schema = CreatePredicateSchema();
+  ASSERT_AND_ASSIGN(auto batch, CreatePredicateDataBatch(schema));  // ts {10..50}, values {50,150,250,350,450}
+  auto manifest = WriteManifest(schema, batch);
+  ASSERT_NE(manifest, nullptr);
+
+  // Same predicate deleted at {25,45}: rows matching value > 100 pick the
+  // earliest ts >= their row_ts; row_ts=50 has none and stays alive.
+  ASSERT_AND_ASSIGN(auto delta_batch, CreatePredicateDeltaBatch({45, 25}, {"value > 100", "value > 100"}));
+  ASSERT_AND_ASSIGN(auto delta_file, WriteDeltaLog("/deleted-ts-predicate", delta_batch));
+  AddPredicateDeltaLog(manifest.get(), delta_file, delta_batch->num_rows());
+
+  auto reader = api::Reader::create(manifest, schema, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+  ASSERT_AND_ASSIGN(auto deleted_ts_reader,
+                    reader->get_deleted_ts_reader(api::MaskedReadOptions{.row_timestamp_field_id = 1}));
+  ExpectDeletedTs(deleted_ts_reader, {0, 25, 45, 45, 0});
+}
+
+TEST_F(DeletedTsReaderTest, PkAndPredicateDeletesMergeToEarliest) {
+  auto schema = CreatePredicateSchema();
+  ASSERT_AND_ASSIGN(auto batch, CreatePredicateDataBatch(schema));  // pks {1..5}, ts {10..50}
+  auto manifest = WriteManifest(schema, batch);
+  ASSERT_NE(manifest, nullptr);
+
+  // Row pk=2 (ts=20): pk delete at 35 vs predicate delete at 25 -> 25.
+  // Row pk=3 (ts=30): pk delete at 32 vs predicate delete at 45 -> 32.
+  ASSERT_AND_ASSIGN(auto pk_delta_batch, CreateInt64DeltaBatch({2, 3}, {35, 32}));
+  ASSERT_AND_ASSIGN(auto pk_delta_file, WriteDeltaLog("/deleted-ts-merge-pk", pk_delta_batch));
+  AddPkDeltaLog(manifest.get(), pk_delta_file, pk_delta_batch->num_rows());
+
+  ASSERT_AND_ASSIGN(auto predicate_delta_batch, CreatePredicateDeltaBatch({25, 45}, {"pk = 2", "pk = 3"}));
+  ASSERT_AND_ASSIGN(auto predicate_delta_file, WriteDeltaLog("/deleted-ts-merge-predicate", predicate_delta_batch));
+  AddPredicateDeltaLog(manifest.get(), predicate_delta_file, predicate_delta_batch->num_rows());
+
+  auto reader = api::Reader::create(manifest, schema, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+  ASSERT_AND_ASSIGN(auto deleted_ts_reader, reader->get_deleted_ts_reader(api::MaskedReadOptions{
+                                                .pk_field_id = 100, .row_timestamp_field_id = 1}));
+  ExpectDeletedTs(deleted_ts_reader, {0, 25, 32, 0, 0});
+}
+
+TEST_F(DeletedTsReaderTest, VisibleUntilFiltersDeleteEvents) {
+  auto schema = CreatePredicateSchema();
+  ASSERT_AND_ASSIGN(auto batch, CreatePredicateDataBatch(schema));
+  auto manifest = WriteManifest(schema, batch);
+  ASSERT_NE(manifest, nullptr);
+
+  ASSERT_AND_ASSIGN(auto delta_batch, CreatePredicateDeltaBatch({25, 45}, {"value > 100", "value > 100"}));
+  ASSERT_AND_ASSIGN(auto delta_file, WriteDeltaLog("/deleted-ts-visible-until", delta_batch));
+  AddPredicateDeltaLog(manifest.get(), delta_file, delta_batch->num_rows());
+
+  auto reader = api::Reader::create(manifest, schema, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+  ASSERT_AND_ASSIGN(auto deleted_ts_reader, reader->get_deleted_ts_reader(api::MaskedReadOptions{
+                                                .visible_until_ts = 30, .row_timestamp_field_id = 1}));
+  // Only the ts=25 event is visible; row_ts=30/40/50 have no applicable delete.
+  ExpectDeletedTs(deleted_ts_reader, {0, 25, 0, 0, 0});
+}
+
+TEST_F(DeletedTsReaderTest, ManifestDeclaredFieldIdsApply) {
+  ASSERT_AND_ASSIGN(auto pk_schema, CreatePkSchema(arrow::int64()));
+  ASSERT_AND_ASSIGN(auto batch, CreateInt64PkBatch(pk_schema));
+  auto manifest = WriteManifest(pk_schema, batch);
+  ASSERT_NE(manifest, nullptr);
+
+  ASSERT_AND_ASSIGN(auto delta_batch, CreateInt64DeltaBatch({2}, {25}));
+  ASSERT_AND_ASSIGN(auto delta_file, WriteDeltaLog("/deleted-ts-manifest-declared", delta_batch));
+  AddPkDeltaLog(manifest.get(), delta_file, delta_batch->num_rows());
+
+  manifest->pkFieldId() = 100;
+  manifest->rowTimestampFieldId() = 1;
+
+  auto reader = api::Reader::create(manifest, pk_schema, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+  ASSERT_AND_ASSIGN(auto deleted_ts_reader, reader->get_deleted_ts_reader(api::MaskedReadOptions{}));
+  ExpectDeletedTs(deleted_ts_reader, {0, 25, 0, 0});
+}
+
+TEST_F(DeletedTsReaderTest, NullRowTimestampStaysAlive) {
+  auto schema = arrow::schema(
+      {arrow::field("pk", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"})),
+       arrow::field("Timestamp", arrow::int64(), true, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"1"}))});
+  arrow::Int64Builder pk_builder;
+  arrow::Int64Builder ts_builder;
+  ASSERT_OK(pk_builder.AppendValues({1, 2}));
+  ASSERT_OK(ts_builder.Append(10));
+  ASSERT_OK(ts_builder.AppendNull());
+  ASSERT_AND_ASSIGN(auto pk_array, pk_builder.Finish());
+  ASSERT_AND_ASSIGN(auto ts_array, ts_builder.Finish());
+  auto batch = arrow::RecordBatch::Make(schema, 2, {pk_array, ts_array});
+  auto manifest = WriteManifest(schema, batch);
+  ASSERT_NE(manifest, nullptr);
+
+  ASSERT_AND_ASSIGN(auto delta_batch, CreateInt64DeltaBatch({1, 2}, {15, 15}));
+  ASSERT_AND_ASSIGN(auto delta_file, WriteDeltaLog("/deleted-ts-null-row-ts", delta_batch));
+  AddPkDeltaLog(manifest.get(), delta_file, delta_batch->num_rows());
+
+  auto reader = api::Reader::create(manifest, schema, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+  ASSERT_AND_ASSIGN(auto deleted_ts_reader, reader->get_deleted_ts_reader(api::MaskedReadOptions{
+                                                .pk_field_id = 100, .row_timestamp_field_id = 1}));
+  ExpectDeletedTs(deleted_ts_reader, {15, 0});
 }
 
 }  // namespace

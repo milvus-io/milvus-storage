@@ -87,6 +87,32 @@ static void MarkRowDeleted(uint8_t* mask, int64_t index, int64_t& alive_count) {
   }
 }
 
+// Returns the earliest delete timestamp in the ascending `sorted_ts` list that
+// applies to a row inserted at `row_ts` (row_ts <= delete_ts), or 0 when none.
+static uint64_t EarliestApplicableDeleteTs(const std::vector<uint64_t>& sorted_ts, uint64_t row_ts) {
+  auto it = std::lower_bound(sorted_ts.begin(), sorted_ts.end(), row_ts);
+  return it == sorted_ts.end() ? 0 : *it;
+}
+
+// Min-merges a selector's candidate delete timestamp into deleted_ts[row].
+// `unresolved` counts rows still at 0; `max_assigned_bound` is a monotone upper
+// bound of all assigned values (never decreased on overwrite), which keeps the
+// selector early-out conservative but always safe.
+static void MergeEarlierDeleteTs(
+    int64_t* deleted_ts, int64_t row, uint64_t candidate, int64_t& unresolved, uint64_t& max_assigned_bound) {
+  if (candidate == 0) {
+    return;
+  }
+  const auto current = static_cast<uint64_t>(deleted_ts[row]);
+  if (current == 0) {
+    --unresolved;
+  } else if (current <= candidate) {
+    return;
+  }
+  deleted_ts[row] = static_cast<int64_t>(candidate);
+  max_assigned_bound = std::max(max_assigned_bound, candidate);
+}
+
 static arrow::Result<int> FindFieldIndexByFieldId(const std::shared_ptr<arrow::Schema>& schema, int64_t field_id) {
   if (!schema) {
     return arrow::Status::Invalid("Schema is required to resolve field id ", field_id);
@@ -173,26 +199,78 @@ class DeleteEvaluator {
       std::shared_ptr<arrow::Schema> schema,
       Properties properties,
       MaskedReadOptions options,
-      std::function<std::string(const std::string&)> key_retriever) {
+      std::function<std::string(const std::string&)> key_retriever,
+      DeleteEvalMode mode) {
     if (!manifest) {
       return arrow::Status::Invalid("DeleteEvaluator requires manifest");
     }
     auto evaluator = std::shared_ptr<DeleteEvaluator>(new DeleteEvaluator(
-        std::move(manifest), std::move(schema), std::move(properties), options, std::move(key_retriever)));
+        std::move(manifest), std::move(schema), std::move(properties), options, std::move(key_retriever), mode));
+    ARROW_RETURN_NOT_OK(evaluator->ResolveDeclaredFields());
     ARROW_RETURN_NOT_OK(evaluator->LoadDeltaLogs());
+    evaluator->FinalizeDeleteTsLists();
     ARROW_RETURN_NOT_OK(evaluator->BuildPredicateExpressions());
     ARROW_RETURN_NOT_OK(evaluator->ResolveNeededColumns());
     return evaluator;
   }
 
   [[nodiscard]] bool empty() const {
-    return int64_pk_delete_ts_.empty() && string_pk_delete_ts_.empty() && predicate_delete_expressions_.empty();
+    return int64_pk_delete_ts_.empty() && string_pk_delete_ts_.empty() && predicate_delete_expressions_.empty() &&
+           int64_pk_delete_ts_lists_.empty() && string_pk_delete_ts_lists_.empty() && predicate_selectors_.empty();
   }
 
   [[nodiscard]] const std::vector<std::string>& NeededColumns() const { return needed_columns_; }
 
+  arrow::Result<std::shared_ptr<arrow::Int64Array>> EvaluateDeletedTs(
+      const std::shared_ptr<arrow::RecordBatch>& batch) const {
+    if (mode_ != DeleteEvalMode::DELETED_TS) {
+      return arrow::Status::Invalid("DeleteEvaluator was not created in DELETED_TS mode");
+    }
+    if (!batch) {
+      return arrow::Status::Invalid("Cannot evaluate deleted_ts for null batch");
+    }
+    const int64_t num_rows = batch->num_rows();
+    ARROW_ASSIGN_OR_RAISE(auto buffer, milvus_storage::MakeZeroedInt64Buffer(num_rows));
+    if (empty() || num_rows == 0) {
+      return std::make_shared<arrow::Int64Array>(num_rows, std::move(buffer), nullptr, 0);
+    }
+
+    auto* deleted_ts = reinterpret_cast<int64_t*>(buffer->mutable_data());
+    ARROW_ASSIGN_OR_RAISE(auto timestamp_field_id, RowTimestampFieldId());
+    ARROW_ASSIGN_OR_RAISE(auto ts_index, FindRequiredFieldIndex(batch->schema(), timestamp_field_id, "row timestamp"));
+    auto ts_array = std::dynamic_pointer_cast<arrow::Int64Array>(batch->column(ts_index));
+    if (!ts_array) {
+      return arrow::Status::Invalid("Row timestamp column must be int64");
+    }
+
+    int64_t unresolved = num_rows;
+    uint64_t max_assigned_bound = 0;
+    if (HasPrimaryKeyDeletes()) {
+      ARROW_ASSIGN_OR_RAISE(auto pk_index, FindRequiredFieldIndex(batch->schema(), *pk_field_id_, "primary key"));
+      switch (batch->column(pk_index)->type_id()) {
+        case arrow::Type::INT64:
+          EvaluateInt64PrimaryKeyDeletedTs(batch, pk_index, *ts_array, deleted_ts, unresolved, max_assigned_bound);
+          break;
+        case arrow::Type::STRING:
+          EvaluateStringPrimaryKeyDeletedTs(batch, pk_index, *ts_array, deleted_ts, unresolved, max_assigned_bound);
+          break;
+        default:
+          return arrow::Status::Invalid(
+              fmt::format("Unsupported primary-key column type: {}", batch->column(pk_index)->type()->ToString()));
+      }
+    }
+    if (HasPredicateDeletes()) {
+      ARROW_RETURN_NOT_OK(EvaluateSelectorDeletedTs(batch, *ts_array, deleted_ts, unresolved, max_assigned_bound));
+    }
+
+    return std::make_shared<arrow::Int64Array>(num_rows, std::move(buffer), nullptr, 0);
+  }
+
   arrow::Result<std::shared_ptr<arrow::BooleanArray>> EvaluateKeepMask(
       const std::shared_ptr<arrow::RecordBatch>& batch) const {
+    if (mode_ != DeleteEvalMode::KEEP_MASK) {
+      return arrow::Status::Invalid("DeleteEvaluator was not created in KEEP_MASK mode");
+    }
     if (!batch) {
       return arrow::Status::Invalid("Cannot evaluate delete mask for null batch");
     }
@@ -239,18 +317,52 @@ class DeleteEvaluator {
                   std::shared_ptr<arrow::Schema> schema,
                   Properties properties,
                   MaskedReadOptions options,
-                  std::function<std::string(const std::string&)> key_retriever)
+                  std::function<std::string(const std::string&)> key_retriever,
+                  DeleteEvalMode mode)
       : manifest_(std::move(manifest)),
         schema_(std::move(schema)),
         properties_(std::move(properties)),
         options_(options),
-        key_retriever_(std::move(key_retriever)) {}
+        key_retriever_(std::move(key_retriever)),
+        mode_(mode) {}
 
-  [[nodiscard]] bool HasPrimaryKeyDeletes() const {
-    return !int64_pk_delete_ts_.empty() || !string_pk_delete_ts_.empty();
+  // Merges caller-declared field ids with the manifest-declared ones into
+  // options_. An explicitly passed option must agree with a manifest
+  // declaration; a silent pick between conflicting ids could delete wrong rows.
+  arrow::Status ResolveDeclaredFields() {
+    ARROW_ASSIGN_OR_RAISE(options_.pk_field_id,
+                          ResolveDeclaredFieldId(manifest_->pkFieldId(), options_.pk_field_id, "Primary-key"));
+    ARROW_ASSIGN_OR_RAISE(
+        options_.row_timestamp_field_id,
+        ResolveDeclaredFieldId(manifest_->rowTimestampFieldId(), options_.row_timestamp_field_id, "Row-timestamp"));
+    return arrow::Status::OK();
   }
 
-  [[nodiscard]] bool HasPredicateDeletes() const { return !predicate_delete_expressions_.empty(); }
+  static arrow::Result<std::optional<int64_t>> ResolveDeclaredFieldId(int64_t manifest_field_id,
+                                                                      const std::optional<int64_t>& option_field_id,
+                                                                      const char* role) {
+    if (manifest_field_id != 0 && option_field_id.has_value() && *option_field_id != manifest_field_id) {
+      return arrow::Status::Invalid(
+          fmt::format("{} field id mismatch: manifest declares {} but MaskedReadOptions has {}", role,
+                      manifest_field_id, *option_field_id));
+    }
+    if (option_field_id.has_value()) {
+      return option_field_id;
+    }
+    if (manifest_field_id != 0) {
+      return std::optional<int64_t>(manifest_field_id);
+    }
+    return std::optional<int64_t>{};
+  }
+
+  [[nodiscard]] bool HasPrimaryKeyDeletes() const {
+    return !int64_pk_delete_ts_.empty() || !string_pk_delete_ts_.empty() || !int64_pk_delete_ts_lists_.empty() ||
+           !string_pk_delete_ts_lists_.empty();
+  }
+
+  [[nodiscard]] bool HasPredicateDeletes() const {
+    return !predicate_delete_expressions_.empty() || !predicate_selectors_.empty();
+  }
 
   arrow::Status LoadDeltaLogs() {
     for (const auto& delta_log : manifest_->deltaLogs()) {
@@ -302,8 +414,8 @@ class DeleteEvaluator {
     }
     if (!options_.pk_field_id.has_value()) {
       return arrow::Status::Invalid(
-          "PRIMARY_KEY delta logs require MaskedReadOptions.pk_field_id: milvus-storage has no primary-key concept, so "
-          "the caller must supply the primary-key field id.");
+          "PRIMARY_KEY delta logs require a declared primary-key field id: milvus-storage has no primary-key concept, "
+          "so it must come from the manifest declaration or MaskedReadOptions.pk_field_id.");
     }
     pk_field_id_ = *options_.pk_field_id;
 
@@ -323,13 +435,14 @@ class DeleteEvaluator {
     return arrow::Status::OK();
   }
 
-  // milvus-storage has no inherent row-timestamp field, so the caller must declare
-  // which schema field id carries the per-row timestamp (row_ts <= delete_ts).
+  // milvus-storage has no inherent row-timestamp field, so which schema field
+  // carries the per-row timestamp (row_ts <= delete_ts) must be declared, via
+  // the manifest or the caller's options.
   arrow::Result<int64_t> RowTimestampFieldId() const {
     if (!options_.row_timestamp_field_id.has_value()) {
       return arrow::Status::Invalid(
-          "Delete handling requires MaskedReadOptions.row_timestamp_field_id: milvus-storage has no inherent "
-          "row-timestamp field; the caller must declare it.");
+          "Delete handling requires a declared row-timestamp field id: milvus-storage has no inherent row-timestamp "
+          "field; it must come from the manifest declaration or MaskedReadOptions.row_timestamp_field_id.");
     }
     return *options_.row_timestamp_field_id;
   }
@@ -430,10 +543,11 @@ class DeleteEvaluator {
     return reader->Close();
   }
 
-  // Accumulates predicate delete rows, deduplicating by predicate SQL and keeping
-  // the maximum delete timestamp per predicate: a row matching the predicate is
-  // deleted iff row_ts <= any of its delete timestamps, i.e. row_ts <= max. This
-  // collapses N delete events sharing a predicate into a single expression.
+  // Accumulates predicate delete rows, deduplicating by predicate SQL.
+  // KEEP_MASK keeps only max(delete_ts) per predicate: a row matching the
+  // predicate is deleted iff row_ts <= any of its delete timestamps, i.e.
+  // row_ts <= max. DELETED_TS must keep every timestamp (which one applies
+  // depends on each row's row_ts), collected here and sorted afterwards.
   arrow::Status AccumulatePredicateDeletes(const arrow::Int64Array& delete_ts_array,
                                            const arrow::Array& predicate_sql_array,
                                            const std::string& path) {
@@ -449,16 +563,43 @@ class DeleteEvaluator {
         continue;
       }
       ARROW_ASSIGN_OR_RAISE(auto predicate_sql, GetPredicateSqlValue(predicate_sql_array, i, path));
-      auto& max_delete_ts = predicate_max_ts_[predicate_sql];
-      max_delete_ts = std::max(max_delete_ts, delete_ts);
+      if (mode_ == DeleteEvalMode::KEEP_MASK) {
+        auto& max_delete_ts = predicate_max_ts_[predicate_sql];
+        max_delete_ts = std::max(max_delete_ts, delete_ts);
+      } else if (delete_ts != 0) {
+        // ts=0 is reserved as the deleted_ts alive sentinel; such an event could
+        // only ever apply to rows at row_ts=0, so it is dropped here.
+        predicate_delete_ts_lists_[predicate_sql].push_back(delete_ts);
+      }
     }
     return arrow::Status::OK();
+  }
+
+  // Sorts and dedups the per-selector timestamp lists collected at load time
+  // (DELETED_TS mode only; KEEP_MASK collapses to max scalars at load).
+  void FinalizeDeleteTsLists() {
+    auto sort_and_dedup = [](std::vector<uint64_t>& ts_list) {
+      std::sort(ts_list.begin(), ts_list.end());
+      ts_list.erase(std::unique(ts_list.begin(), ts_list.end()), ts_list.end());
+    };
+    for (auto& [pk, ts_list] : int64_pk_delete_ts_lists_) {
+      sort_and_dedup(ts_list);
+    }
+    for (auto& [pk, ts_list] : string_pk_delete_ts_lists_) {
+      sort_and_dedup(ts_list);
+    }
+    for (auto& [predicate_sql, ts_list] : predicate_delete_ts_lists_) {
+      sort_and_dedup(ts_list);
+    }
   }
 
   // Compiles one Arrow expression per unique predicate from the deduplicated map.
   // Parse/bind failures are surfaced here and abort evaluator creation: a
   // predicate that fails to compile is a correctness error, never skipped.
   arrow::Status BuildPredicateExpressions() {
+    if (mode_ == DeleteEvalMode::DELETED_TS) {
+      return BuildPredicateSelectors();
+    }
     if (predicate_max_ts_.empty()) {
       return arrow::Status::OK();
     }
@@ -472,6 +613,29 @@ class DeleteEvaluator {
       (void)bound_expr;
       predicate_delete_expressions_.push_back(std::move(delete_expr));
     }
+    return arrow::Status::OK();
+  }
+
+  // DELETED_TS predicates are compiled bare (no row-ts conjunct): the timestamp
+  // logic lives in the per-row binary search against the selector's ts list.
+  // Selectors are ordered by ascending minimum ts so evaluation can stop once
+  // no remaining selector can improve any row's earliest delete ts.
+  arrow::Status BuildPredicateSelectors() {
+    if (predicate_delete_ts_lists_.empty()) {
+      return arrow::Status::OK();
+    }
+    predicate_selectors_.reserve(predicate_delete_ts_lists_.size());
+    for (auto& [predicate_sql, ts_list] : predicate_delete_ts_lists_) {
+      ARROW_ASSIGN_OR_RAISE(auto predicate_expr, ParseSqlPredicateToArrowExpression(predicate_sql, schema_));
+      ARROW_ASSIGN_OR_RAISE(auto bound_expr, predicate_expr.Bind(*schema_));
+      (void)bound_expr;
+      predicate_selectors_.push_back(PredicateSelector{std::move(predicate_expr), std::move(ts_list)});
+    }
+    predicate_delete_ts_lists_.clear();
+    std::sort(predicate_selectors_.begin(), predicate_selectors_.end(),
+              [](const PredicateSelector& a, const PredicateSelector& b) {
+                return a.delete_ts.front() < b.delete_ts.front();
+              });
     return arrow::Status::OK();
   }
 
@@ -489,8 +653,12 @@ class DeleteEvaluator {
       if (options_.visible_until_ts.has_value() && delete_ts > *options_.visible_until_ts) {
         continue;
       }
-      auto& old_ts = int64_pk_delete_ts_[pk_array.Value(i)];
-      old_ts = std::max(old_ts, delete_ts);
+      if (mode_ == DeleteEvalMode::KEEP_MASK) {
+        auto& old_ts = int64_pk_delete_ts_[pk_array.Value(i)];
+        old_ts = std::max(old_ts, delete_ts);
+      } else if (delete_ts != 0) {
+        int64_pk_delete_ts_lists_[pk_array.Value(i)].push_back(delete_ts);
+      }
     }
     return arrow::Status::OK();
   }
@@ -509,8 +677,12 @@ class DeleteEvaluator {
       if (options_.visible_until_ts.has_value() && delete_ts > *options_.visible_until_ts) {
         continue;
       }
-      auto& old_ts = string_pk_delete_ts_[pk_array.GetString(i)];
-      old_ts = std::max(old_ts, delete_ts);
+      if (mode_ == DeleteEvalMode::KEEP_MASK) {
+        auto& old_ts = string_pk_delete_ts_[pk_array.GetString(i)];
+        old_ts = std::max(old_ts, delete_ts);
+      } else if (delete_ts != 0) {
+        string_pk_delete_ts_lists_[pk_array.GetString(i)].push_back(delete_ts);
+      }
     }
     return arrow::Status::OK();
   }
@@ -545,7 +717,7 @@ class DeleteEvaluator {
       ARROW_ASSIGN_OR_RAISE(auto timestamp_field_id, RowTimestampFieldId());
       ARROW_RETURN_NOT_OK(add_field_id(timestamp_field_id, "Row timestamp"));
     }
-    for (const auto& expression : predicate_delete_expressions_) {
+    auto add_expression_fields = [&](const cp::Expression& expression) -> arrow::Status {
       for (const auto& field_ref : cp::FieldsInExpression(expression)) {
         const auto* name = field_ref.name();
         if (name == nullptr) {
@@ -554,6 +726,13 @@ class DeleteEvaluator {
         }
         ARROW_RETURN_NOT_OK(add_column_name(*name, "Predicate delete"));
       }
+      return arrow::Status::OK();
+    };
+    for (const auto& expression : predicate_delete_expressions_) {
+      ARROW_RETURN_NOT_OK(add_expression_fields(expression));
+    }
+    for (const auto& selector : predicate_selectors_) {
+      ARROW_RETURN_NOT_OK(add_expression_fields(selector.expression));
     }
     return arrow::Status::OK();
   }
@@ -600,6 +779,93 @@ class DeleteEvaluator {
       auto it = string_pk_delete_ts_.find(pk_array->GetView(i));
       if (it != string_pk_delete_ts_.end() && static_cast<uint64_t>(ts_array.Value(i)) <= it->second) {
         MarkRowDeleted(mask, i, alive_count);
+      }
+    }
+    return arrow::Status::OK();
+  }
+
+  void EvaluateInt64PrimaryKeyDeletedTs(const std::shared_ptr<arrow::RecordBatch>& batch,
+                                        int pk_index,
+                                        const arrow::Int64Array& ts_array,
+                                        int64_t* deleted_ts,
+                                        int64_t& unresolved,
+                                        uint64_t& max_assigned_bound) const {
+    auto pk_array = std::static_pointer_cast<arrow::Int64Array>(batch->column(pk_index));
+    for (int64_t i = 0; i < batch->num_rows(); ++i) {
+      if (pk_array->IsNull(i) || ts_array.IsNull(i)) {
+        continue;
+      }
+      auto it = int64_pk_delete_ts_lists_.find(pk_array->Value(i));
+      if (it == int64_pk_delete_ts_lists_.end()) {
+        continue;
+      }
+      auto candidate = EarliestApplicableDeleteTs(it->second, static_cast<uint64_t>(ts_array.Value(i)));
+      MergeEarlierDeleteTs(deleted_ts, i, candidate, unresolved, max_assigned_bound);
+    }
+  }
+
+  void EvaluateStringPrimaryKeyDeletedTs(const std::shared_ptr<arrow::RecordBatch>& batch,
+                                         int pk_index,
+                                         const arrow::Int64Array& ts_array,
+                                         int64_t* deleted_ts,
+                                         int64_t& unresolved,
+                                         uint64_t& max_assigned_bound) const {
+    auto pk_array = std::static_pointer_cast<arrow::StringArray>(batch->column(pk_index));
+    for (int64_t i = 0; i < batch->num_rows(); ++i) {
+      if (pk_array->IsNull(i) || ts_array.IsNull(i)) {
+        continue;
+      }
+      auto it = string_pk_delete_ts_lists_.find(pk_array->GetView(i));
+      if (it == string_pk_delete_ts_lists_.end()) {
+        continue;
+      }
+      auto candidate = EarliestApplicableDeleteTs(it->second, static_cast<uint64_t>(ts_array.Value(i)));
+      MergeEarlierDeleteTs(deleted_ts, i, candidate, unresolved, max_assigned_bound);
+    }
+  }
+
+  arrow::Status EvaluateSelectorDeletedTs(const std::shared_ptr<arrow::RecordBatch>& batch,
+                                          const arrow::Int64Array& ts_array,
+                                          int64_t* deleted_ts,
+                                          int64_t& unresolved,
+                                          uint64_t& max_assigned_bound) const {
+    ARROW_ASSIGN_OR_RAISE(auto exec_batch, cp::MakeExecBatch(*batch->schema(), arrow::Datum(batch)));
+    // Same one-time bind caching as the KEEP_MASK path; kept parallel to
+    // predicate_selectors_ by index.
+    if (bound_selector_expressions_.empty()) {
+      bound_selector_expressions_.reserve(predicate_selectors_.size());
+      for (const auto& selector : predicate_selectors_) {
+        ARROW_ASSIGN_OR_RAISE(auto bound_expr, selector.expression.Bind(*batch->schema()));
+        bound_selector_expressions_.push_back(std::move(bound_expr));
+      }
+    }
+    for (size_t k = 0; k < predicate_selectors_.size(); ++k) {
+      const auto& selector = predicate_selectors_[k];
+      // Selectors are ordered by ascending min ts: once every row is assigned a
+      // value <= this selector's minimum, no remaining selector can lower any
+      // row's earliest delete ts.
+      if (unresolved == 0 && max_assigned_bound <= selector.delete_ts.front()) {
+        break;
+      }
+      ARROW_ASSIGN_OR_RAISE(auto result_datum, cp::ExecuteScalarExpression(bound_selector_expressions_[k], exec_batch));
+      if (!result_datum.is_array()) {
+        return arrow::Status::Invalid("Predicate delete expression must produce a boolean array");
+      }
+      auto result_array = result_datum.make_array();
+      if (result_array->type_id() != arrow::Type::BOOL) {
+        return arrow::Status::Invalid("Predicate delete expression must produce boolean values, got ",
+                                      result_array->type()->ToString());
+      }
+      if (result_array->length() != batch->num_rows()) {
+        return arrow::Status::Invalid("Predicate delete expression result length mismatch");
+      }
+      const auto& match_mask = *std::static_pointer_cast<arrow::BooleanArray>(result_array);
+      for (int64_t i = 0; i < match_mask.length(); ++i) {
+        if (match_mask.IsNull(i) || !match_mask.Value(i) || ts_array.IsNull(i)) {
+          continue;
+        }
+        auto candidate = EarliestApplicableDeleteTs(selector.delete_ts, static_cast<uint64_t>(ts_array.Value(i)));
+        MergeEarlierDeleteTs(deleted_ts, i, candidate, unresolved, max_assigned_bound);
       }
     }
     return arrow::Status::OK();
@@ -653,7 +919,11 @@ class DeleteEvaluator {
   Properties properties_;
   MaskedReadOptions options_;
   std::function<std::string(const std::string&)> key_retriever_;
+  DeleteEvalMode mode_;
   std::optional<int64_t> pk_field_id_;
+
+  // KEEP_MASK structures: per selector only max(delete_ts) is needed for the
+  // snapshot boolean (all loaded events are already <= visible_until_ts).
   std::unordered_map<int64_t, uint64_t> int64_pk_delete_ts_;
   std::unordered_map<std::string, uint64_t, TransparentStringHash, std::equal_to<>> string_pk_delete_ts_;
   // predicate SQL -> max delete timestamp, deduplicated at load time; compiled
@@ -663,6 +933,21 @@ class DeleteEvaluator {
   // Predicate expressions bound to the (stable) evaluation batch schema, cached
   // on the first batch to avoid re-binding on every batch.
   mutable std::vector<cp::Expression> bound_predicate_expressions_;
+
+  // DELETED_TS structures: every selector keeps its full ascending deduped ts
+  // list because which event applies depends on each row's row_ts.
+  std::unordered_map<int64_t, std::vector<uint64_t>> int64_pk_delete_ts_lists_;
+  std::unordered_map<std::string, std::vector<uint64_t>, TransparentStringHash, std::equal_to<>>
+      string_pk_delete_ts_lists_;
+  // predicate SQL -> delete ts list; drained into predicate_selectors_ after loading.
+  std::unordered_map<std::string, std::vector<uint64_t>> predicate_delete_ts_lists_;
+  struct PredicateSelector {
+    cp::Expression expression;        // bare predicate, no row-ts conjunct
+    std::vector<uint64_t> delete_ts;  // ascending, deduped, non-empty
+  };
+  std::vector<PredicateSelector> predicate_selectors_;  // ascending by delete_ts.front()
+  mutable std::vector<cp::Expression> bound_selector_expressions_;
+
   std::vector<std::string> needed_columns_;
 };
 
@@ -671,18 +956,26 @@ arrow::Result<std::shared_ptr<DeleteEvaluator>> CreateDeleteEvaluator(
     std::shared_ptr<arrow::Schema> schema,
     Properties properties,
     MaskedReadOptions options,
-    std::function<std::string(const std::string&)> key_retriever) {
+    std::function<std::string(const std::string&)> key_retriever,
+    DeleteEvalMode mode) {
   return DeleteEvaluator::Create(std::move(manifest), std::move(schema), std::move(properties), options,
-                                 std::move(key_retriever));
+                                 std::move(key_retriever), mode);
 }
 
 const std::vector<std::string>& DeleteEvaluatorNeededColumns(const std::shared_ptr<DeleteEvaluator>& evaluator) {
   return evaluator->NeededColumns();
 }
 
+bool DeleteEvaluatorEmpty(const std::shared_ptr<DeleteEvaluator>& evaluator) { return evaluator->empty(); }
+
 arrow::Result<std::shared_ptr<arrow::BooleanArray>> EvaluateDeleteKeepMask(
     const std::shared_ptr<DeleteEvaluator>& evaluator, const std::shared_ptr<arrow::RecordBatch>& batch) {
   return evaluator->EvaluateKeepMask(batch);
+}
+
+arrow::Result<std::shared_ptr<arrow::Int64Array>> EvaluateDeletedTs(const std::shared_ptr<DeleteEvaluator>& evaluator,
+                                                                    const std::shared_ptr<arrow::RecordBatch>& batch) {
+  return evaluator->EvaluateDeletedTs(batch);
 }
 
 }  // namespace milvus_storage::api

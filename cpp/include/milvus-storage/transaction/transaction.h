@@ -15,6 +15,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <memory>
 #include <vector>
@@ -55,6 +56,8 @@ class Updates {
   void DropColumn(const std::string& column_name);
   void DropIndex(const std::string& column_name, const std::string& index_type);
   void AddLobFile(const LobFileInfo& lob_file);
+  void SetPrimaryKeyField(int64_t field_id);
+  void SetRowTimestampField(int64_t field_id);
   [[nodiscard]] const std::vector<std::shared_ptr<ColumnGroup>>& GetAddedColumnGroups() const;
   [[nodiscard]] const std::vector<std::vector<std::shared_ptr<ColumnGroup>>>& GetAppendedFiles() const;
   [[nodiscard]] const std::vector<DeltaLog>& GetAddedDeltaLogs() const;
@@ -63,6 +66,8 @@ class Updates {
   [[nodiscard]] const std::vector<std::string>& GetDroppedColumns() const;
   [[nodiscard]] const std::vector<std::pair<std::string, std::string>>& GetDroppedIndexes() const;
   [[nodiscard]] const std::vector<LobFileInfo>& GetAddedLobFiles() const;
+  [[nodiscard]] const std::optional<int64_t>& GetPrimaryKeyField() const;
+  [[nodiscard]] const std::optional<int64_t>& GetRowTimestampField() const;
 
   private:
   // Column changes
@@ -84,6 +89,10 @@ class Updates {
 
   // LOB file changes
   std::vector<LobFileInfo> added_lob_files_;  // New LOB files to add
+
+  // Declared field semantics changes (nullopt = not touched by this transaction)
+  std::optional<int64_t> pk_field_id_;
+  std::optional<int64_t> row_timestamp_field_id_;
 };
 
 /**
@@ -267,6 +276,28 @@ class Transaction {
    * @return Reference to this transaction for method chaining
    */
   Transaction& AddLobFile(const LobFileInfo& lob_file);
+
+  /**
+   * @brief Declare which schema field is the dataset's primary key
+   *
+   * Records a dataset-level fact, not a usage contract: consumers (e.g. delete
+   * evaluation) decide how to use it. Set-once: committing a value that differs
+   * from an already-declared one fails; re-declaring the same value is a no-op.
+   *
+   * @param field_id Primary-key field id (must be > 0)
+   * @return Reference to this transaction for method chaining
+   */
+  Transaction& SetPrimaryKeyField(int64_t field_id);
+
+  /**
+   * @brief Declare which schema field carries the per-row timestamp
+   *
+   * Same set-once semantics as SetPrimaryKeyField().
+   *
+   * @param field_id Row-timestamp field id (must be > 0)
+   * @return Reference to this transaction for method chaining
+   */
+  Transaction& SetRowTimestampField(int64_t field_id);
 
   private:
   // Private constructor - use Open() factory method instead

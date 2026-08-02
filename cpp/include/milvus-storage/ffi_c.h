@@ -273,6 +273,10 @@ typedef struct LoonManifest {
 
   // LOB files (TEXT column metadata)
   LoonLobFiles lob_files;
+
+  // Declared field semantics (0 = undeclared)
+  int64_t pk_field_id;
+  int64_t row_timestamp_field_id;
 } LoonManifest;
 
 /**
@@ -571,13 +575,14 @@ typedef struct LoonRowMask {
 typedef struct LoonMaskedReadOptions {
   // 0 means no timestamp upper bound.
   uint64_t visible_until_ts;
-  // Primary-key field id. milvus-storage has no inherent primary-key concept, so
-  // the caller must supply it when the manifest contains PRIMARY_KEY delta logs.
-  // 0 means unset (no primary key); valid primary-key field ids are > 0.
+  // Primary-key field id. Needed when the manifest contains PRIMARY_KEY delta
+  // logs; may be left 0 when the manifest itself declares it
+  // (loon_transaction_set_primary_key_field). A non-zero value must match a
+  // non-zero manifest declaration. Valid primary-key field ids are > 0.
   int64_t pk_field_id;
   // Row-timestamp field id (the per-row timestamp used for row_ts <= delete_ts).
-  // Required when the manifest contains any delete log. 0 means unset; valid
-  // row-timestamp field ids are > 0.
+  // Needed when the manifest contains any delete log; same manifest-or-option
+  // sourcing as pk_field_id. 0 means unset; valid field ids are > 0.
   int64_t row_timestamp_field_id;
 } LoonMaskedReadOptions;
 
@@ -619,6 +624,47 @@ FFI_EXPORT LoonFFIResult loon_masked_reader_next(LoonMaskedReaderHandle handle,
 FFI_EXPORT void loon_row_mask_free(LoonRowMask* bitset);
 
 FFI_EXPORT void loon_masked_reader_destroy(LoonMaskedReaderHandle handle);
+
+/// Opaque handle for the query-side delete-info stream
+typedef uintptr_t LoonDeletedTsReaderHandle;
+
+/**
+ * @brief Creates a delete-info stream over a dataset (see loon_deleted_ts_reader_next)
+ *
+ * Data columns are never returned; the columns needed to evaluate deletes
+ * (primary key, row timestamp, predicate fields) are read internally.
+ *
+ * @param manifest Dataset manifest
+ * @param schema Arrow schema with PARQUET:field_id metadata
+ * @param properties Read configuration properties
+ * @param options Same options as the masked reader (visible_until_ts, field ids)
+ * @param key_retriever Optional decryption-key callback, NULL when not encrypted
+ * @param out_handle Output (caller must call loon_deleted_ts_reader_destroy)
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_deleted_ts_reader_new(const LoonManifest* manifest,
+                                                    struct ArrowSchema* schema,
+                                                    const LoonProperties* properties,
+                                                    const LoonMaskedReadOptions* options,
+                                                    const char* (*key_retriever)(const char* metadata),
+                                                    LoonDeletedTsReaderHandle* out_handle);
+
+/**
+ * @brief Fetches the next chunk of per-row earliest delete timestamps
+ *
+ * Rows follow the dataset's global row order; the running position across
+ * chunks is the global row offset. Each value is the earliest delete timestamp
+ * applying to the row, 0 = alive. Chunk boundaries are unspecified; the
+ * concatenated length equals the dataset row count.
+ *
+ * @param handle Deleted-ts reader handle
+ * @param out_array Output int64 Arrow array; set to NULL at end of stream.
+ *        On success the caller owns it: call (*out_array)->release() then free(*out_array).
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_deleted_ts_reader_next(LoonDeletedTsReaderHandle handle, struct ArrowArray** out_array);
+
+FFI_EXPORT void loon_deleted_ts_reader_destroy(LoonDeletedTsReaderHandle handle);
 
 /**
  * @brief Sets a key retriever callback for dynamic key retrieval
@@ -807,6 +853,29 @@ FFI_EXPORT LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle ha
                                                         const char* path,
                                                         int64_t num_entries,
                                                         uint32_t delta_log_type);
+
+/**
+ * @brief Declare which schema field is the dataset's primary key
+ *
+ * Records a dataset-level fact in the manifest; consumers decide how to use it.
+ * Set-once: committing a value that differs from an already-declared one fails.
+ *
+ * @param handle Transaction handle
+ * @param field_id Primary-key field id (must be > 0)
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_transaction_set_primary_key_field(LoonTransactionHandle handle, int64_t field_id);
+
+/**
+ * @brief Declare which schema field carries the per-row timestamp
+ *
+ * Same set-once semantics as loon_transaction_set_primary_key_field.
+ *
+ * @param handle Transaction handle
+ * @param field_id Row-timestamp field id (must be > 0)
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_transaction_set_row_timestamp_field(LoonTransactionHandle handle, int64_t field_id);
 
 /**
  * @brief Add a stat entry to the transaction updates

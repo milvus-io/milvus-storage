@@ -16,11 +16,17 @@
 
 #include <filesystem>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include <arrow/api.h>
 #include <arrow/filesystem/localfs.h>
+#include <avro/Compiler.hh>
+#include <avro/DataFile.hh>
+#include <avro/Generic.hh>
+#include <avro/GenericDatum.hh>
+#include <avro/Stream.hh>
 
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/common/config.h"
@@ -214,6 +220,103 @@ TEST_F(ManifestTest, LobFilesRoundTrip) {
   ASSERT_EQ(field102.size(), 1);
 
   EXPECT_TRUE(read_back->getLobFilesForField(999).empty());
+}
+
+TEST_F(ManifestTest, ReadsPreDeclaredFieldIdManifest) {
+  // A manifest written by a pre-v6 writer lacks pk_field_id /
+  // row_timestamp_field_id; Avro schema resolution must fill the defaults.
+  static const char* const kV5SchemaJson = R"({
+    "type": "record",
+    "name": "Manifest",
+    "namespace": "milvus_storage",
+    "fields": [
+      {"name": "column_groups", "type": {"type": "array", "items": {
+        "type": "record", "name": "ColumnGroup", "fields": [
+          {"name": "columns", "type": {"type": "array", "items": "string"}},
+          {"name": "files", "type": {"type": "array", "items": {
+            "type": "record", "name": "ColumnGroupFile", "fields": [
+              {"name": "path", "type": "string"},
+              {"name": "start_index", "type": "long", "default": 0},
+              {"name": "end_index", "type": "long", "default": 0},
+              {"name": "properties", "type": {"type": "map", "values": "string"}, "default": {}}
+            ]
+          }}},
+          {"name": "format", "type": "string"}
+        ]
+      }}},
+      {"name": "delta_logs", "type": {"type": "array", "items": {
+        "type": "record", "name": "DeltaLog", "fields": [
+          {"name": "path", "type": "string"},
+          {"name": "type", "type": "int"},
+          {"name": "num_entries", "type": "long"}
+        ]
+      }}},
+      {"name": "stats", "type": {"type": "map", "values": {
+        "type": "record", "name": "Statistics", "fields": [
+          {"name": "paths", "type": {"type": "array", "items": "string"}},
+          {"name": "metadata", "type": {"type": "map", "values": "string"}, "default": {}}
+        ]
+      }}, "default": {}},
+      {"name": "indexes", "type": {"type": "array", "items": {
+        "type": "record", "name": "Index", "fields": [
+          {"name": "column_name", "type": "string"},
+          {"name": "index_type", "type": "string"},
+          {"name": "path", "type": "string"},
+          {"name": "properties", "type": {"type": "map", "values": "string"}, "default": {}}
+        ]
+      }}, "default": []},
+      {"name": "lob_files", "type": {"type": "array", "items": {
+        "type": "record", "name": "LobFileInfo", "fields": [
+          {"name": "path", "type": "string"},
+          {"name": "field_id", "type": "long"},
+          {"name": "total_rows", "type": "long"},
+          {"name": "valid_rows", "type": "long"},
+          {"name": "file_size_bytes", "type": "long"}
+        ]
+      }}, "default": []}
+    ]
+  })";
+
+  auto old_schema = avro::compileJsonSchemaFromString(kV5SchemaJson);
+  std::ostringstream oss;
+  {
+    avro::DataFileWriter<avro::GenericDatum> writer(avro::ostreamOutputStream(oss), old_schema);
+    writer.write(avro::GenericDatum(old_schema));
+    writer.close();
+  }
+
+  std::string path = get_manifest_filepath(base_path_, 1);
+  ASSERT_AND_ASSIGN(auto out_stream, fs_->OpenOutputStream(path));
+  const std::string bytes = oss.str();
+  ASSERT_STATUS_OK(out_stream->Write(bytes.data(), static_cast<int64_t>(bytes.size())));
+  ASSERT_STATUS_OK(out_stream->Close());
+
+  Manifest::CleanCache();
+  ASSERT_AND_ASSIGN(auto read_back, Manifest::ReadFrom(fs_, path));
+  EXPECT_TRUE(read_back->columnGroups().empty());
+  EXPECT_TRUE(read_back->deltaLogs().empty());
+  EXPECT_EQ(read_back->pkFieldId(), 0);
+  EXPECT_EQ(read_back->rowTimestampFieldId(), 0);
+}
+
+TEST_F(ManifestTest, DeclaredFieldIdsRoundTrip) {
+  // Default: undeclared reads back as 0.
+  Manifest undeclared;
+  auto undeclared_back = RoundTrip(undeclared);
+  EXPECT_EQ(undeclared_back->pkFieldId(), 0);
+  EXPECT_EQ(undeclared_back->rowTimestampFieldId(), 0);
+
+  Manifest manifest;
+  manifest.pkFieldId() = 100;
+  manifest.rowTimestampFieldId() = 1;
+  auto read_back = RoundTrip(manifest, 2);
+  EXPECT_EQ(read_back->pkFieldId(), 100);
+  EXPECT_EQ(read_back->rowTimestampFieldId(), 1);
+
+  // Copy construction/assignment must carry the declarations.
+  Manifest copied(*read_back);
+  EXPECT_EQ(copied.pkFieldId(), 100);
+  EXPECT_EQ(copied.rowTimestampFieldId(), 1);
 }
 
 TEST_F(ManifestTest, FullManifestRoundTrip) {
