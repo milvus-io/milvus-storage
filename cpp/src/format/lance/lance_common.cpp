@@ -42,6 +42,7 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
     if (endpoint.find("http://") == 0)
       options["allow_http"] = "true";
   };
+  auto set_credential_cache_key = [&]() { options["milvus_fs_cache_key"] = config.GetCacheKey(); };
 
   const auto& provider = config.cloud_provider;
   LOG_STORAGE_DEBUG_ << fmt::format(
@@ -58,6 +59,7 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
   set("cloud_provider", provider);
   if (provider == kCloudProviderAWS) {
     if (!config.role_arn.empty()) {
+      set_credential_cache_key();
       // AssumeRole: set region/endpoint + ARN fields; do NOT set AKSK so the
       // Rust layer uses the default credential chain (EC2 metadata / env vars)
       // as base credential for the STS AssumeRole call.
@@ -102,7 +104,7 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
         options["allow_http"] = "true";
     }
   } else if (provider == kCloudProviderGCP) {
-    if (!config.gcp_target_service_account.empty()) {
+    if (config.use_iam && !config.gcp_target_service_account.empty()) {
       // Bridge-private keys consumed by Rust `open_dataset`/`write_dataset`/
       // `drop` (see lance_bridgeimpl.rs). The bridge strips them out of
       // storage_options and installs an ImpersonatingGcsStoreProvider that
@@ -123,6 +125,7 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
     // Otherwise uses default credentials (VM metadata)
   } else if (provider == kCloudProviderAliyun) {
     if (!config.role_arn.empty()) {
+      set_credential_cache_key();
       // Per-tenant Aliyun role_arn. Machine identity
       // (ALIBABA_CLOUD_OIDC_TOKEN_FILE / OIDC_PROVIDER_ARN / ROLE_ARN) stays
       // in process env for the Rust AliyunOssStoreProvider to resolve the

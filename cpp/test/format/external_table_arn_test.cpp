@@ -1729,6 +1729,33 @@ class ExternalTableAliyunOIDCArnTest : public ::testing::Test {
     FilesystemCache::getInstance().clean();
   }
 
+  class ScopedOidcTokenFileOverride {
+ public:
+    explicit ScopedOidcTokenFileOverride(const std::string& value) {
+      const char* old_value = std::getenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE");
+      if (old_value != nullptr) {
+        had_old_value_ = true;
+        old_value_ = old_value;
+      }
+      setenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE", value.c_str(), 1);
+    }
+
+    ~ScopedOidcTokenFileOverride() {
+      if (had_old_value_) {
+        setenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE", old_value_.c_str(), 1);
+      } else {
+        unsetenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE");
+      }
+    }
+
+    ScopedOidcTokenFileOverride(const ScopedOidcTokenFileOverride&) = delete;
+    ScopedOidcTokenFileOverride& operator=(const ScopedOidcTokenFileOverride&) = delete;
+
+ private:
+    std::string old_value_;
+    bool had_old_value_ = false;
+  };
+
   // FFI properties payload shared by all four formats. Iceberg additionally
   // needs PROPERTY_ICEBERG_SNAPSHOT_ID; callers append.
   std::vector<std::pair<std::string, std::string>> BaseProps() const {
@@ -1886,6 +1913,74 @@ TEST_F(ExternalTableAliyunOIDCArnTest, ReadLanceWithOIDCChain) {
   loon_properties_free(&loon_props);
 }
 
+TEST_F(ExternalTableAliyunOIDCArnTest, LanceProviderCacheHitDoesNotReloadOidcToken) {
+  const uint64_t num_rows = 100;
+  ASSERT_AND_ASSIGN(auto result, CreateLanceTable(num_rows));
+
+  auto session_name = "lance-cache-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  auto cache_read_props = read_props_;
+  api::SetValue(cache_read_props, "extfs.arn.session_name", session_name.c_str());
+
+  ASSERT_AND_ASSIGN(auto fs_config, FilesystemCache::resolve_config(cache_read_props, result.explore_dir.c_str()));
+  auto storage_options = lance::ToStorageOptions(fs_config);
+  auto cache_key = storage_options.find("milvus_fs_cache_key");
+  ASSERT_NE(cache_key, storage_options.end());
+  ASSERT_EQ(cache_key->second, fs_config.GetCacheKey());
+
+  auto props = BaseProps();
+  props.emplace_back("extfs.arn.session_name", session_name);
+  std::vector<const char*> c_keys, c_values;
+  c_keys.reserve(props.size());
+  c_values.reserve(props.size());
+  for (const auto& [k, v] : props) {
+    c_keys.push_back(k.c_str());
+    c_values.push_back(v.c_str());
+  }
+
+  LoonProperties loon_props = {};
+  auto rc = loon_properties_create(c_keys.data(), c_values.data(), c_keys.size(), &loon_props);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+
+  const char* columns_arr[] = {"id", "name", "value"};
+  uint64_t out_num_files = 0;
+  char* out_manifest_path = nullptr;
+  auto manifest_base = test_base_ + "/lance-cache-manifest";
+  rc = loon_exttable_explore(columns_arr, 3, LOON_FORMAT_LANCE_TABLE, manifest_base.c_str(), result.explore_dir.c_str(),
+                             &loon_props, &out_num_files, &out_manifest_path);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_GT(out_num_files, 0u);
+  ASSERT_NE(out_manifest_path, nullptr);
+  free(out_manifest_path);
+  loon_properties_free(&loon_props);
+
+  {
+    ScopedOidcTokenFileOverride invalid_token_file("/path/that/does/not/exist/milvus-storage-oidc-token");
+    std::vector<std::string> columns = {"id", "name", "value"};
+    constexpr size_t cache_hit_iterations = 1000;
+    std::shared_ptr<FormatReader> reader;
+    std::cout << "[Aliyun OIDC Cache Test] Lance: starting " << cache_hit_iterations
+              << " cache-hit opens with an invalid token file; no additional STS request logs are expected"
+              << std::endl;
+    for (size_t iteration = 0; iteration < cache_hit_iterations; ++iteration) {
+      SCOPED_TRACE(::testing::Message() << "cache hit iteration " << iteration);
+      ASSERT_AND_ASSIGN(reader, FormatReader::create(result.schema, LOON_FORMAT_LANCE_TABLE, result.cgfile,
+                                                     cache_read_props, columns, nullptr));
+    }
+    std::cout << "[Aliyun OIDC Cache Test] Lance: completed " << cache_hit_iterations << " cache-hit opens"
+              << std::endl;
+
+    ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
+    ValidateRowGroupInfos(rg_infos, num_rows);
+
+    int64_t total_rows = 0;
+    for (size_t i = 0; i < rg_infos.size(); ++i) {
+      ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
+      total_rows += batch->num_rows();
+    }
+    ASSERT_EQ(total_rows, static_cast<int64_t>(num_rows));
+  }
+}
+
 // Iceberg variant for the same OIDC chain. This reuses BaseProps() for the
 // our-side manifest bucket plus extfs.arn.* read credentials, and appends the
 // snapshot id required by the Iceberg bridge.
@@ -1954,6 +2049,66 @@ TEST_F(ExternalTableAliyunOIDCArnTest, ReadIcebergWithOIDCChain) {
 
   loon_manifest_destroy(out_manifest);
   free(out_manifest_path);
+  loon_properties_free(&loon_props);
+}
+
+TEST_F(ExternalTableAliyunOIDCArnTest, IcebergFactoryCacheHitDoesNotReloadOidcToken) {
+  const uint64_t num_rows = 100;
+  ASSERT_AND_ASSIGN(auto result, CreateIcebergTable(num_rows));
+
+  auto session_name = "iceberg-cache-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  auto cache_read_props = read_props_;
+  api::SetValue(cache_read_props, "extfs.arn.session_name", session_name.c_str());
+  api::SetValue(cache_read_props, PROPERTY_ICEBERG_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id).c_str());
+
+  ASSERT_AND_ASSIGN(auto fs_config, FilesystemCache::resolve_config(cache_read_props, result.explore_dir.c_str()));
+  auto storage_options = iceberg::ToStorageOptions(fs_config);
+  auto cache_key = storage_options.find("milvus_fs_cache_key");
+  ASSERT_NE(cache_key, storage_options.end());
+  ASSERT_EQ(cache_key->second, fs_config.GetCacheKey());
+
+  auto props = BaseProps();
+  props.emplace_back("extfs.arn.session_name", session_name);
+  props.emplace_back(PROPERTY_ICEBERG_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id));
+  std::vector<const char*> c_keys, c_values;
+  c_keys.reserve(props.size());
+  c_values.reserve(props.size());
+  for (const auto& [k, v] : props) {
+    c_keys.push_back(k.c_str());
+    c_values.push_back(v.c_str());
+  }
+
+  LoonProperties loon_props = {};
+  auto rc = loon_properties_create(c_keys.data(), c_values.data(), c_keys.size(), &loon_props);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+
+  const char* columns_arr[] = {"id", "name", "value"};
+  uint64_t first_num_files = 0;
+  char* first_manifest_path = nullptr;
+  auto first_manifest_base = test_base_ + "/iceberg-cache-manifest-first";
+  rc = loon_exttable_explore(columns_arr, 3, LOON_FORMAT_ICEBERG_TABLE, first_manifest_base.c_str(),
+                             result.explore_dir.c_str(), &loon_props, &first_num_files, &first_manifest_path);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_GT(first_num_files, 0u);
+  ASSERT_NE(first_manifest_path, nullptr);
+  free(first_manifest_path);
+
+  {
+    ScopedOidcTokenFileOverride invalid_token_file("/path/that/does/not/exist/milvus-storage-oidc-token");
+    constexpr size_t cache_hit_iterations = 1000;
+    ASSERT_AND_ASSIGN(auto* iceberg_format, Format::get(LOON_FORMAT_ICEBERG_TABLE));
+    std::cout << "[Aliyun OIDC Cache Test] Iceberg: starting " << cache_hit_iterations
+              << " cache-hit explores with an invalid token file; no additional STS request logs are expected"
+              << std::endl;
+    for (size_t iteration = 0; iteration < cache_hit_iterations; ++iteration) {
+      SCOPED_TRACE(::testing::Message() << "cache hit iteration " << iteration);
+      ASSERT_AND_ASSIGN(auto files, iceberg_format->explore(result.explore_dir, cache_read_props));
+      ASSERT_EQ(files.size(), first_num_files);
+    }
+    std::cout << "[Aliyun OIDC Cache Test] Iceberg: completed " << cache_hit_iterations << " cache-hit explores"
+              << std::endl;
+  }
+
   loon_properties_free(&loon_props);
 }
 

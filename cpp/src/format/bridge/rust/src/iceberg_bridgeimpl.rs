@@ -17,20 +17,26 @@ use crate::TOKIO_RT;
 use arrow_array::Array;
 use futures::TryStreamExt;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use iceberg::TableIdent;
 use iceberg::io::{FileIOBuilder, LocalFsStorageFactory, MemoryStorageFactory, StorageFactory};
 use iceberg::scan::FileScanTask;
 use iceberg::table::StaticTable;
 use iceberg_storage_opendal::OpenDalStorageFactory;
-
 use crate::aliyun_oss_provider::AliyunOssStorageFactory;
+use crate::aws_arn_provider::{AssumeRoleConfig, build_iceberg_factory};
 use crate::azure_sas_provider::{AzureBrokerClient, AzureBrokerConfig};
+use crate::cloud_provider_cache::{
+    CACHE_CAPACITY, CACHE_KEY, GlobalLruCache,
+};
 use crate::gcp_impersonation::{DEFAULT_TOKEN_LIFETIME_SECS, fetch_impersonated_bearer};
 use crate::iceberg_ffi::IcebergFileInfo;
 
 const CLOUD_PROVIDER_KEY: &str = "cloud_provider";
+
+static ICEBERG_FACTORY_CACHE: LazyLock<GlobalLruCache<Arc<dyn StorageFactory>>> =
+    LazyLock::new(|| GlobalLruCache::new(CACHE_CAPACITY));
 
 /// Internal representation for a delete file reference, serialized to JSON.
 #[derive(serde::Serialize)]
@@ -105,10 +111,77 @@ pub(crate) async fn prepare_cloud_storage_options(
 
 /// Scheme → `iceberg-storage-opendal` variant. Hand-written because 0.9
 /// ships no `from_scheme` helper; collapse when upstream adds one.
-fn upstream_opendal_factory(scheme: &str) -> anyhow::Result<Arc<dyn StorageFactory>> {
+async fn upstream_opendal_factory(
+    uri: &str,
+    scheme: &str,
+    props: &mut HashMap<String, String>,
+) -> anyhow::Result<Arc<dyn StorageFactory>> {
+    let cache_key = props.remove(CACHE_KEY).filter(|key| !key.is_empty());
+    let cloud_provider = props.get(CLOUD_PROVIDER_KEY).cloned();
+    let assume_role = if cloud_provider.as_deref() == Some("aws") {
+        let role_arn = props
+            .remove("client.assume-role.arn")
+            .unwrap_or_default();
+        let session_name = props
+            .remove("client.assume-role.session-name")
+            .unwrap_or_default();
+        let external_id = props
+            .remove("client.assume-role.external-id")
+            .unwrap_or_default();
+        let region = props.get("s3.region").cloned().unwrap_or_default();
+        let credential_refresh_secs = props
+            .remove("aws_credential_refresh_secs")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        AssumeRoleConfig::parse(
+            &role_arn,
+            &session_name,
+            &external_id,
+            &region,
+            credential_refresh_secs,
+        )?
+    } else {
+        None
+    };
+
     match scheme {
         // The upstream OSS factory does not carry per-tenant `oss.role-arn`.
+        "oss" if cloud_provider.as_deref() == Some("aliyun")
+            && props.contains_key("oss.role-arn") =>
+        {
+            match cache_key.as_deref() {
+                Some(cache_key) => ICEBERG_FACTORY_CACHE
+                    .get(cache_key, || async {
+                        let factory = Arc::new(
+                            AliyunOssStorageFactory::from_uri(uri, props).await?,
+                        ) as Arc<dyn StorageFactory>;
+                        eprintln!(
+                            "created cloud cache entry: consumer=iceberg, cloud=aliyun, mechanism=role"
+                        );
+                        Ok::<_, anyhow::Error>(factory)
+                    })
+                    .await,
+                None => Ok(Arc::new(
+                    AliyunOssStorageFactory::from_uri(uri, props).await?,
+                )),
+            }
+        }
         "oss" => Ok(Arc::new(AliyunOssStorageFactory::default())),
+        "s3" | "s3a" if assume_role.is_some() => {
+            let config = assume_role.as_ref().unwrap();
+            match cache_key.as_deref() {
+                Some(cache_key) => ICEBERG_FACTORY_CACHE
+                    .get(cache_key, || async {
+                        let factory = build_iceberg_factory(scheme, config).await?;
+                        eprintln!(
+                            "created cloud cache entry: consumer=iceberg, cloud=aws, mechanism=assume_role"
+                        );
+                        Ok::<_, anyhow::Error>(factory)
+                    })
+                    .await,
+                None => Ok(build_iceberg_factory(scheme, config).await?),
+            }
+        }
         "s3" | "s3a" => Ok(Arc::new(OpenDalStorageFactory::S3 {
             configured_scheme: scheme.to_string(),
             customized_credential_load: None,
@@ -136,13 +209,15 @@ fn upstream_opendal_factory(scheme: &str) -> anyhow::Result<Arc<dyn StorageFacto
     }
 }
 
-pub(crate) fn build_file_io(
+pub(crate) async fn build_file_io(
+    uri: &str,
     scheme: &str,
-    props: &HashMap<String, String>,
+    props: &mut HashMap<String, String>,
 ) -> anyhow::Result<iceberg::io::FileIO> {
-    let factory = upstream_opendal_factory(scheme)?;
+    let factory = upstream_opendal_factory(uri, scheme, props).await?;
+    prepare_cloud_storage_options(props).await?;
     let mut builder = FileIOBuilder::new(factory);
-    for (k, v) in props {
+    for (k, v) in props.iter() {
         builder = builder.with_prop(k, v);
     }
     // `FileIOBuilder::build` became infallible in iceberg 0.9 (was
@@ -317,13 +392,12 @@ pub fn iceberg_plan_files(
 
     TOKIO_RT.block_on(async {
         let mut props = vec_to_hashmap(storage_options_keys, storage_options_values);
-        prepare_cloud_storage_options(&mut props).await?;
 
         // Normalize URI for opendal and detect FileIO scheme in one pass.
         // For Azure ABFSS, expands scheme://container/path to container@endpoint format.
         let (resolved_location, scheme) = normalize_uri(metadata_location, &props);
 
-        let file_io = build_file_io(&scheme, &props)?;
+        let file_io = build_file_io(&resolved_location, &scheme, &mut props).await?;
 
         // Load table metadata directly from location (no catalog needed)
         let table_ident = TableIdent::from_strs(["default", "table"])?;
