@@ -190,11 +190,11 @@
      structural checks -- duplicate key, null key or value: the FFI caller's                                          \
      marshalling bug, vanishingly rare. (2) ConvertFFIProperties rejecting a                                          \
      registered property whose value fails its validator (type, enum, range):                                         \
-     those values arrive from deployment configuration (StorageConfig /                                              \
+     those values arrive from deployment configuration (StorageConfig /                                               \
      milvus.yaml), which an operator can actually fix. External-table calls                                           \
      carry the same fs.* configuration alongside user extfs.* properties;                                             \
      ConvertFFIProperties validates the former here, while the latter are                                             \
-     classified later at the user-source boundary. */                                                                \
+     classified later at the user-source boundary. */                                                                 \
   X("Invalid properties", LOON_INVALID_PROPERTIES, invalid_properties, LOON_ERROR_CATEGORY_CONFIG, "InvalidArgument") \
   /* Test-only fault injection. */                                                                                    \
   X("Fault injection error", LOON_FAULT_INJECT_ERROR, fault_inject, LOON_ERROR_CATEGORY_PERMANENT, "")                \
@@ -246,7 +246,7 @@
   X(AwsErrorAccessDenied, LOON_AWS_ERROR_ACCESS_DENIED, aws_access_denied, LOON_ERROR_CATEGORY_CONFIG, "AccessDenied") \
   /* Any other error the AWS SDK itself judged non-retryable (ShouldRetry() == false). */                              \
   X(AwsErrorNonRetryable, LOON_AWS_ERROR_NON_RETRYABLE, aws_non_retryable, LOON_ERROR_CATEGORY_PERMANENT, "")          \
-  X(StorageTransientNetwork, LOON_TRANSIENT_NETWORK, transient_network, LOON_ERROR_CATEGORY_TRANSIENT, "")            \
+  X(StorageTransientNetwork, LOON_TRANSIENT_NETWORK, transient_network, LOON_ERROR_CATEGORY_TRANSIENT, "")             \
   X(StorageTransientTimeout, LOON_TRANSIENT_TIMEOUT, transient_timeout, LOON_ERROR_CATEGORY_TRANSIENT,                 \
     "RequestTimeout")                                                                                                  \
   X(StorageTransientThrottling, LOON_TRANSIENT_THROTTLING, transient_throttling, LOON_ERROR_CATEGORY_TRANSIENT,        \
