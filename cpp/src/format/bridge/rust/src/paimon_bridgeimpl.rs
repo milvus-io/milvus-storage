@@ -29,6 +29,9 @@ use crate::paimon_ffi::PaimonFileInfo;
 const METADATA_VERSION: u32 = 1;
 const ERROR_INVALID_PREFIX: &str = "[paimon:error=invalid]";
 const ERROR_NOT_IMPLEMENTED_PREFIX: &str = "[paimon:error=not-implemented]";
+const ERROR_NOT_FOUND_PREFIX: &str = "[paimon:error=not-found]";
+const ERROR_TRANSIENT_THROTTLING_PREFIX: &str = "[paimon:error=transient-throttling]";
+const ERROR_TRANSIENT_SERVICE_PREFIX: &str = "[paimon:error=transient-service]";
 const DELETION_VECTOR_MAGIC: u32 = 1_581_511_376;
 /// Magic of Paimon's 64-bit deletion vectors, from Java
 /// `org.apache.paimon.deletionvectors.Bitmap64DeletionVector.MAGIC_NUMBER`.
@@ -36,15 +39,54 @@ const DELETION_VECTOR_MAGIC: u32 = 1_581_511_376;
 /// size in `DeletionFile.length`, unlike the bitmap32 envelope.
 const DELETION_VECTOR_BITMAP64_MAGIC: u32 = 1_681_511_377;
 
-// These stable markers are consumed by ClassifyPaimonError at the C++ boundary.
-// Keep classification at the point where an error is known to be terminal;
-// unclassified storage and network errors retain retryable IOError semantics.
+// CXX carries Rust errors as strings. These stable markers are consumed only
+// by the C++ bridge, which converts them into Arrow statuses before returning
+// to format callers.
 fn invalid_message(message: impl std::fmt::Display) -> String {
     format!("{ERROR_INVALID_PREFIX} {message}")
 }
 
 fn not_implemented_message(message: impl std::fmt::Display) -> String {
     format!("{ERROR_NOT_IMPLEMENTED_PREFIX} {message}")
+}
+
+fn classify_bridge_error(error: anyhow::Error) -> anyhow::Error {
+    let message = format!("{error:#}");
+    if [ERROR_INVALID_PREFIX, ERROR_NOT_IMPLEMENTED_PREFIX]
+        .iter()
+        .any(|marker| message.contains(marker))
+    {
+        return error;
+    }
+
+    let marker = error.chain().find_map(|cause| {
+        let error = cause.downcast_ref::<paimon::Error>()?;
+        match error {
+            paimon::Error::IoUnexpected { source, .. } => {
+                let kind = source.kind().into_static();
+                if kind == "NotFound" {
+                    Some(ERROR_NOT_FOUND_PREFIX)
+                } else if source.is_temporary() && kind == "RateLimited" {
+                    Some(ERROR_TRANSIENT_THROTTLING_PREFIX)
+                } else if source.is_temporary() {
+                    Some(ERROR_TRANSIENT_SERVICE_PREFIX)
+                } else {
+                    None
+                }
+            }
+            paimon::Error::Unsupported { .. } | paimon::Error::IoUnsupported { .. } => {
+                Some(ERROR_NOT_IMPLEMENTED_PREFIX)
+            }
+            paimon::Error::DataInvalid { .. }
+            | paimon::Error::DataTypeInvalid { .. }
+            | paimon::Error::ConfigInvalid { .. }
+            | paimon::Error::DataUnexpected { .. }
+            | paimon::Error::FileIndexFormatInvalid { .. }
+            | paimon::Error::ParquetDataUnexpected { .. } => Some(ERROR_INVALID_PREFIX),
+            _ => None,
+        }
+    });
+    marker.map_or(error, |marker| anyhow!("{marker} {message}"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -493,8 +535,9 @@ pub fn paimon_plan_files(
     storage_options_keys: Vec<String>,
     storage_options_values: Vec<String>,
 ) -> Result<Vec<PaimonFileInfo>> {
-    let mode = ScanMode::parse(scan_mode)?;
-    let options = options_from_vecs(storage_options_keys, storage_options_values)?;
+    let mode = ScanMode::parse(scan_mode).map_err(classify_bridge_error)?;
+    let options = options_from_vecs(storage_options_keys, storage_options_values)
+        .map_err(classify_bridge_error)?;
     TOKIO_RT.block_on(async move {
         let snapshot_id = (snapshot_id >= 0).then_some(snapshot_id);
         let table = load_table(table_location, &options, snapshot_id).await?;
@@ -543,6 +586,7 @@ pub fn paimon_plan_files(
         }
         Ok(result)
     })
+    .map_err(classify_bridge_error)
 }
 
 async fn read_deletion_vector(
@@ -748,7 +792,8 @@ pub fn paimon_read_deletion_vector(
     storage_options_keys: Vec<String>,
     storage_options_values: Vec<String>,
 ) -> Result<Vec<u64>> {
-    let options = options_from_vecs(storage_options_keys, storage_options_values)?;
+    let options = options_from_vecs(storage_options_keys, storage_options_values)
+        .map_err(classify_bridge_error)?;
     TOKIO_RT.block_on(read_deletion_vector_at(
         path,
         offset,
@@ -756,6 +801,7 @@ pub fn paimon_read_deletion_vector(
         expected_cardinality,
         &options,
     ))
+    .map_err(classify_bridge_error)
 }
 
 #[cfg(test)]

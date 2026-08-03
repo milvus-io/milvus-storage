@@ -12,37 +12,20 @@
 
 #pragma once
 
-#include <exception>
 #include <string>
 #include <unordered_map>
 
+#include <arrow/result.h>
 #include <arrow/status.h>
 
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage::paimon {
 
-std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSystemConfig& config);
+arrow::Result<std::unordered_map<std::string, std::string>> ToStorageOptions(const ArrowFileSystemConfig& config);
 
 std::string ToStandardUri(const std::string& milvus_uri);
 
 std::string ToMilvusUri(const std::string& standard_uri, const std::string& address);
-
-/// Classify a Paimon bridge exception into an arrow Status without inverting
-/// transient-vs-terminal semantics. The bridge FFI carries messages only, so
-/// the Rust side marks terminal input-state errors with stable prefixes:
-///
-/// - "[paimon:error=invalid]" (expired snapshot, corrupt descriptor) maps
-///   to Status::Invalid — retrying cannot help, the collection must be
-///   refreshed/rebuilt;
-/// - "[paimon:error=not-implemented]" (e.g. bitmap64 deletion vectors) maps to
-///   Status::NotImplemented;
-/// - everything else keeps the caller-provided default (typically IOError,
-///   which stays retryable).
-///
-/// The classification is one-directional on purpose: an unmarked message is
-/// never promoted to Invalid, so transient storage failures cannot become
-/// terminal.
-arrow::Status ClassifyPaimonError(const std::string& context, const std::exception& error);
 
 }  // namespace milvus_storage::paimon

@@ -12,8 +12,6 @@
 
 #include "milvus-storage/format/paimon/paimon_format.h"
 
-#include <exception>
-
 #include <nlohmann/json.hpp>
 
 #include "milvus-storage/filesystem/fs.h"
@@ -30,14 +28,8 @@ arrow::Result<std::vector<api::ColumnGroupFile>> PaimonFormat::explore(const std
   ARROW_ASSIGN_OR_RAISE(auto snapshot_id, api::GetValue<int64_t>(properties, PROPERTY_PAIMON_SNAPSHOT_ID));
   auto table_location = paimon::ToStandardUri(explore_dir);
 
-  std::vector<paimon::PaimonFileInfo> planned;
-  try {
-    planned = paimon::PlanFiles(table_location, snapshot_id, scan_mode, paimon::ToStorageOptions(fs_config));
-  } catch (const std::exception& error) {
-    // Keep terminal input-state errors (e.g. an expired pinned snapshot)
-    // Invalid instead of collapsing everything into a retryable IOError.
-    return paimon::ClassifyPaimonError("Failed to plan Paimon table", error);
-  }
+  ARROW_ASSIGN_OR_RAISE(auto storage_options, paimon::ToStorageOptions(fs_config));
+  ARROW_ASSIGN_OR_RAISE(auto planned, paimon::PlanFiles(table_location, snapshot_id, scan_mode, storage_options));
 
   std::vector<api::ColumnGroupFile> files;
   files.reserve(planned.size());

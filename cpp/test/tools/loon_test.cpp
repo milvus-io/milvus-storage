@@ -85,7 +85,7 @@ void VerifyPaimonManifestRoundTrip(const std::string& source,
                                    const Properties& properties,
                                    const std::string& file_format = "parquet",
                                    uint32_t dimension = 0) {
-  paimon::CreateTestTable(source, rows, mode, deletions, file_format, dimension);
+  ASSERT_STATUS_OK(paimon::CreateTestTable(source, rows, mode, deletions, file_format, dimension).status());
   ASSERT_AND_ASSIGN(auto* format, Format::get(LOON_FORMAT_PAIMON_TABLE));
   ASSERT_AND_ASSIGN(auto files, format->explore(source, properties));
   ASSERT_FALSE(files.empty());

@@ -13,19 +13,16 @@
 #pragma once
 
 #include <cstdint>
-#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
+
+#include <arrow/result.h>
 
 namespace milvus_storage::paimon {
 
 using StorageOptions = std::unordered_map<std::string, std::string>;
-
-class PaimonException : public std::runtime_error {
-  public:
-  explicit PaimonException(const std::string& message) : std::runtime_error(message) {}
-};
 
 struct PaimonFileInfo {
   std::string path;
@@ -33,22 +30,24 @@ struct PaimonFileInfo {
   std::string metadata_json;
 };
 
-std::vector<PaimonFileInfo> PlanFiles(const std::string& table_location,
-                                      int64_t snapshot_id,
-                                      const std::string& scan_mode,
-                                      const StorageOptions& storage_options);
+arrow::Status MakePaimonBridgeErrorStatus(std::string_view message);
 
-std::vector<uint64_t> ReadDeletionVector(const std::string& path,
-                                         uint64_t offset,
-                                         uint64_t length,
-                                         int64_t expected_cardinality,
-                                         const StorageOptions& storage_options);
+arrow::Result<std::vector<PaimonFileInfo>> PlanFiles(const std::string& table_location,
+                                                     int64_t snapshot_id,
+                                                     const std::string& scan_mode,
+                                                     const StorageOptions& storage_options);
 
-int64_t CreateTestTable(const std::string& table_location,
-                        uint64_t num_rows,
-                        const std::string& mode,
-                        const std::vector<int64_t>& deleted_positions = {},
-                        const std::string& file_format = "parquet",
-                        uint32_t dimension = 0);
+arrow::Result<std::vector<uint64_t>> ReadDeletionVector(const std::string& path,
+                                                        uint64_t offset,
+                                                        uint64_t length,
+                                                        int64_t expected_cardinality,
+                                                        const StorageOptions& storage_options);
+
+arrow::Result<int64_t> CreateTestTable(const std::string& table_location,
+                                       uint64_t num_rows,
+                                       const std::string& mode,
+                                       const std::vector<int64_t>& deleted_positions = {},
+                                       const std::string& file_format = "parquet",
+                                       uint32_t dimension = 0);
 
 }  // namespace milvus_storage::paimon

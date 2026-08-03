@@ -12,17 +12,20 @@
 
 #include <gtest/gtest.h>
 
+#include <cerrno>
 #include <filesystem>
 #include <fstream>
 #include <numeric>
 
 #include <arrow/api.h>
 #include <arrow/io/file.h>
+#include <arrow/util/io_util.h>
 #include <fmt/format.h>
 #include <folly/json.h>
 #include <parquet/arrow/writer.h>
 
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/column_group_reader.h"
 #include "milvus-storage/format/format.h"
@@ -110,7 +113,7 @@ arrow::Status RewriteParquetWithRowGroups(const std::string& path, int32_t rows_
 
 TEST_F(PaimonIntegrationTest, AutoUsesDirectFileForAppendParquet) {
   constexpr uint64_t kRows = 12;
-  paimon::CreateTestTable(table_dir_, kRows, "append");
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "append").status());
 
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_FALSE(files.empty());
@@ -126,7 +129,7 @@ TEST_F(PaimonIntegrationTest, AutoUsesDirectFileForAppendParquet) {
 
 TEST_F(PaimonIntegrationTest, ReadsWithoutMetadataCache) {
   constexpr uint64_t kRows = 12;
-  paimon::CreateTestTable(table_dir_, kRows, "append");
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "append").status());
 
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_FALSE(files.empty());
@@ -150,7 +153,7 @@ TEST_F(PaimonIntegrationTest, ReadsWithoutMetadataCache) {
 
 TEST_F(PaimonIntegrationTest, DeletionVectorReadsBypassDisabledMetadataCache) {
   constexpr uint64_t kRows = 10;
-  paimon::CreateTestTable(table_dir_, kRows, "deletion-vector", {1, 5, 9});
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "deletion-vector", {1, 5, 9}).status());
 
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
@@ -194,7 +197,7 @@ TEST_F(PaimonIntegrationTest, DeletionVectorReadsBypassDisabledMetadataCache) {
 
 TEST_F(PaimonIntegrationTest, AutoUsesDirectFileForAppendVortex) {
   constexpr uint64_t kRows = 17;
-  paimon::CreateTestTable(table_dir_, kRows, "append", {}, "vortex");
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "append", {}, "vortex").status());
 
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
@@ -230,7 +233,7 @@ TEST_F(PaimonIntegrationTest, AutoUsesDirectFileForAppendVortex) {
 
 TEST_F(PaimonIntegrationTest, VortexDeletionVectorUsesDirectFile) {
   constexpr uint64_t kRows = 10;
-  paimon::CreateTestTable(table_dir_, kRows, "deletion-vector", {1, 5, 9}, "vortex");
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "deletion-vector", {1, 5, 9}, "vortex").status());
 
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
@@ -249,7 +252,7 @@ TEST_F(PaimonIntegrationTest, VortexDeletionVectorUsesDirectFile) {
 }
 
 TEST_F(PaimonIntegrationTest, VortexPredicateWithDeletionVectorFailsClosed) {
-  paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1, 5, 9}, "vortex");
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1, 5, 9}, "vortex").status());
 
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
@@ -272,7 +275,7 @@ TEST_F(PaimonIntegrationTest, VortexPredicateWithDeletionVectorFailsClosed) {
 
 TEST_F(PaimonIntegrationTest, ReadsSpecifiedSnapshot) {
   constexpr uint64_t kRows = 9;
-  auto snapshot_id = paimon::CreateTestTable(table_dir_, kRows, "append");
+  ASSERT_AND_ASSIGN(auto snapshot_id, paimon::CreateTestTable(table_dir_, kRows, "append"));
   ASSERT_EQ(api::SetValue(properties_, PROPERTY_PAIMON_SNAPSHOT_ID, std::to_string(snapshot_id).c_str()), std::nullopt);
 
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
@@ -281,7 +284,7 @@ TEST_F(PaimonIntegrationTest, ReadsSpecifiedSnapshot) {
 }
 
 TEST_F(PaimonIntegrationTest, MergeOnReadTableFailsClosedAsNotImplemented) {
-  paimon::CreateTestTable(table_dir_, 10, "mor");
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 10, "mor").status());
 
   auto files = Explore("auto");
   ASSERT_FALSE(files.ok());
@@ -291,7 +294,7 @@ TEST_F(PaimonIntegrationTest, MergeOnReadTableFailsClosedAsNotImplemented) {
 }
 
 TEST_F(PaimonIntegrationTest, InvalidScanModeFailsAsInvalid) {
-  paimon::CreateTestTable(table_dir_, 10, "append");
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 10, "append").status());
 
   auto files = Explore("invalid-mode");
   ASSERT_FALSE(files.ok());
@@ -299,7 +302,7 @@ TEST_F(PaimonIntegrationTest, InvalidScanModeFailsAsInvalid) {
 }
 
 TEST_F(PaimonIntegrationTest, MalformedMetadataTypesFailClosed) {
-  paimon::CreateTestTable(table_dir_, 10, "append");
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 10, "append").status());
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
 
@@ -313,7 +316,7 @@ TEST_F(PaimonIntegrationTest, MalformedMetadataTypesFailClosed) {
 }
 
 TEST_F(PaimonIntegrationTest, MalformedDeletionMetadataTypesFailClosed) {
-  paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1});
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1}).status());
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
 
@@ -327,7 +330,7 @@ TEST_F(PaimonIntegrationTest, MalformedDeletionMetadataTypesFailClosed) {
 }
 
 TEST_F(PaimonIntegrationTest, JavaBitmap64DeletionVectorFailsClosedAsNotImplemented) {
-  paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1});
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1}).status());
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
   ASSERT_EQ(ReadPath(files.front()), "direct-file");
@@ -363,7 +366,7 @@ TEST_F(PaimonIntegrationTest, JavaBitmap64DeletionVectorFailsClosedAsNotImplemen
 
 TEST_F(PaimonIntegrationTest, AutoUsesDirectFileAndAppliesDeletionVector) {
   constexpr uint64_t kRows = 10;
-  paimon::CreateTestTable(table_dir_, kRows, "deletion-vector", {1, 5, 9});
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "deletion-vector", {1, 5, 9}).status());
 
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
@@ -410,7 +413,7 @@ TEST_F(PaimonIntegrationTest, AutoUsesDirectFileAndAppliesDeletionVector) {
 }
 
 TEST_F(PaimonIntegrationTest, CorruptDeletionVectorCrcFailsAsInvalid) {
-  paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1, 5, 9});
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1, 5, 9}).status());
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
 
@@ -438,7 +441,7 @@ TEST_F(PaimonIntegrationTest, CorruptDeletionVectorCrcFailsAsInvalid) {
 }
 
 TEST_F(PaimonIntegrationTest, MissingDeletionVectorFileRemainsIOError) {
-  paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1, 5, 9});
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1, 5, 9}).status());
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
 
@@ -449,10 +452,11 @@ TEST_F(PaimonIntegrationTest, MissingDeletionVectorFileRemainsIOError) {
   auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
   ASSERT_FALSE(reader.ok());
   EXPECT_TRUE(reader.status().IsIOError()) << reader.status().ToString();
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(reader.status()), ENOENT);
 }
 
 TEST_F(PaimonIntegrationTest, DirectFileFragmentRangeUsesPostDeletionLogicalRows) {
-  paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1, 5, 9});
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1, 5, 9}).status());
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
   ASSERT_EQ(ReadPath(files.front()), "direct-file");
@@ -483,14 +487,14 @@ TEST_F(PaimonIntegrationTest, DirectFileFragmentRangeUsesPostDeletionLogicalRows
 }
 
 TEST_F(PaimonIntegrationTest, ExplicitDirectFileRejectsMergeOnRead) {
-  paimon::CreateTestTable(table_dir_, 10, "mor");
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 10, "mor").status());
   auto files = Explore("direct-file");
   ASSERT_FALSE(files.ok());
   EXPECT_NE(files.status().ToString().find("cannot use direct-file"), std::string::npos);
 }
 
 TEST_F(PaimonIntegrationTest, DataSplitDescriptorFailsClosedAsNotImplemented) {
-  paimon::CreateTestTable(table_dir_, 10, "append");
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 10, "append").status());
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
 
@@ -504,13 +508,13 @@ TEST_F(PaimonIntegrationTest, DataSplitDescriptorFailsClosedAsNotImplemented) {
 
 TEST_F(PaimonIntegrationTest, FullyDeletedTableProducesNoEntries) {
   constexpr uint64_t kRows = 6;
-  paimon::CreateTestTable(table_dir_, kRows, "deletion-vector", {0, 1, 2, 3, 4, 5});
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "deletion-vector", {0, 1, 2, 3, 4, 5}).status());
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   EXPECT_TRUE(files.empty());
 }
 
 TEST_F(PaimonIntegrationTest, FullyDeletedTrailingRowGroupIsNotExposedAsChunk) {
-  paimon::CreateTestTable(table_dir_, 12, "deletion-vector", {8, 9, 10, 11});
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 12, "deletion-vector", {8, 9, 10, 11}).status());
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
   ASSERT_STATUS_OK(RewriteParquetWithRowGroups(LocalFilePath(files.front().path), 4, 3));
@@ -546,26 +550,21 @@ TEST_F(PaimonIntegrationTest, MissingTableFailsAndWriterIsReadOnly) {
   EXPECT_TRUE(writer.status().IsNotImplemented());
 }
 
-TEST(PaimonErrorClassification, MarkersMapToTerminalStatuses) {
-  const std::runtime_error expired(
-      "[paimon:error=invalid] Paimon snapshot 3 no longer exists for table file:///t (earliest=5, latest=9); refresh "
-      "the external collection");
-  EXPECT_TRUE(paimon::ClassifyPaimonError("plan", expired).IsInvalid());
+TEST(PaimonBridgeErrorClassification, MarkersMapToArrowStatuses) {
+  EXPECT_TRUE(paimon::MakePaimonBridgeErrorStatus("[paimon:error=invalid] invalid metadata").IsInvalid());
+  EXPECT_TRUE(paimon::MakePaimonBridgeErrorStatus("[paimon:error=not-implemented] direct-file does not support orc")
+                  .IsNotImplemented());
 
-  const std::runtime_error corrupt("[paimon:error=invalid] invalid Paimon metadata");
-  EXPECT_TRUE(paimon::ClassifyPaimonError("open", corrupt).IsInvalid());
+  auto transient = paimon::MakePaimonBridgeErrorStatus("[paimon:error=transient-throttling] object store rate limit");
+  auto detail = ExtendStatusDetail::UnwrapStatus(transient);
+  ASSERT_NE(detail, nullptr);
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientThrottling);
 
-  const std::runtime_error unsupported(
-      "[paimon:error=not-implemented] Paimon direct-file does not support format: orc");
-  EXPECT_TRUE(paimon::ClassifyPaimonError("read", unsupported).IsNotImplemented());
-
-  // Unmarked messages are never promoted to a terminal class.
-  const std::runtime_error transient("connection reset by peer while reading snapshot-9");
-  EXPECT_TRUE(paimon::ClassifyPaimonError("plan", transient).IsIOError());
+  EXPECT_TRUE(paimon::MakePaimonBridgeErrorStatus("unclassified storage failure").IsIOError());
 }
 
 TEST_F(PaimonIntegrationTest, MissingPinnedSnapshotFailsPlanAsInvalidWithBounds) {
-  auto snapshot_id = paimon::CreateTestTable(table_dir_, 10, "append");
+  ASSERT_AND_ASSIGN(auto snapshot_id, paimon::CreateTestTable(table_dir_, 10, "append"));
   ASSERT_EQ(api::SetValue(properties_, PROPERTY_PAIMON_SNAPSHOT_ID, std::to_string(snapshot_id + 1000).c_str()),
             std::nullopt);
 
@@ -581,7 +580,7 @@ TEST_F(PaimonIntegrationTest, MissingPinnedSnapshotFailsPlanAsInvalidWithBounds)
 
 TEST_F(PaimonIntegrationTest, VortexWithoutMemoryStatisticsReturnsNotImplemented) {
   constexpr uint64_t kRows = 17;
-  paimon::CreateTestTable(table_dir_, kRows, "append", {}, "vortex");
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "append", {}, "vortex").status());
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
   ASSERT_EQ(ReadPath(files.front()), "direct-file");

@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "milvus-storage/format/paimon/paimon_common.h"
+#include "test_env.h"
 
 namespace milvus_storage::paimon::test {
 namespace {
@@ -30,7 +31,7 @@ ArrowFileSystemConfig MakeAwsConfig() {
 }
 
 TEST(PaimonStorageOptionsTest, AwsStaticCredentialsAndAddressing) {
-  auto options = ToStorageOptions(MakeAwsConfig());
+  ASSERT_AND_ASSIGN(auto options, ToStorageOptions(MakeAwsConfig()));
   EXPECT_EQ(options.at("s3.access-key"), "access-key");
   EXPECT_EQ(options.at("s3.secret-key"), "secret-key");
   EXPECT_EQ(options.at("s3.region"), "us-west-2");
@@ -39,24 +40,25 @@ TEST(PaimonStorageOptionsTest, AwsStaticCredentialsAndAddressing) {
 
   auto virtual_host = MakeAwsConfig();
   virtual_host.use_virtual_host = true;
-  EXPECT_EQ(ToStorageOptions(virtual_host).at("s3.path-style-access"), "false");
+  ASSERT_AND_ASSIGN(auto virtual_host_options, ToStorageOptions(virtual_host));
+  EXPECT_EQ(virtual_host_options.at("s3.path-style-access"), "false");
 }
 
 TEST(PaimonStorageOptionsTest, DelegatedCredentialsFailClosed) {
   auto config = MakeAwsConfig();
   config.role_arn = "arn:aws:iam::123456789012:role/paimon-reader";
-  EXPECT_THROW(ToStorageOptions(config), std::runtime_error);
+  EXPECT_TRUE(ToStorageOptions(config).status().IsNotImplemented());
 
   config.role_arn.clear();
   config.cloud_provider = kCloudProviderGCP;
   config.gcp_target_service_account = "target@project.iam.gserviceaccount.com";
-  EXPECT_THROW(ToStorageOptions(config), std::runtime_error);
+  EXPECT_TRUE(ToStorageOptions(config).status().IsNotImplemented());
 }
 
 TEST(PaimonStorageOptionsTest, AwsIamUsesDefaultCredentialChain) {
   auto config = MakeAwsConfig();
   config.use_iam = true;
-  auto options = ToStorageOptions(config);
+  ASSERT_AND_ASSIGN(auto options, ToStorageOptions(config));
   EXPECT_EQ(options.count("s3.access-key"), 0);
   EXPECT_EQ(options.count("s3.secret-key"), 0);
 }
@@ -65,16 +67,19 @@ TEST(PaimonStorageOptionsTest, EndpointSchemeIsNormalized) {
   auto config = MakeAwsConfig();
   config.address = "localhost:9000";
   config.use_ssl = false;
-  EXPECT_EQ(ToStorageOptions(config).at("s3.endpoint"), "http://localhost:9000");
+  ASSERT_AND_ASSIGN(auto path_style_options, ToStorageOptions(config));
+  EXPECT_EQ(path_style_options.at("s3.endpoint"), "http://localhost:9000");
 
   config.address = "https://s3.us-west-2.amazonaws.com";
-  EXPECT_EQ(ToStorageOptions(config).at("s3.endpoint"), "https://s3.us-west-2.amazonaws.com");
+  ASSERT_AND_ASSIGN(auto virtual_host_options, ToStorageOptions(config));
+  EXPECT_EQ(virtual_host_options.at("s3.endpoint"), "https://s3.us-west-2.amazonaws.com");
 }
 
 TEST(PaimonStorageOptionsTest, LocalIsEmpty) {
   ArrowFileSystemConfig config;
   config.storage_type = "local";
-  EXPECT_TRUE(ToStorageOptions(config).empty());
+  ASSERT_AND_ASSIGN(auto options, ToStorageOptions(config));
+  EXPECT_TRUE(options.empty());
 }
 
 TEST(PaimonStorageOptionsTest, AliyunStaticCredentials) {
@@ -86,7 +91,7 @@ TEST(PaimonStorageOptionsTest, AliyunStaticCredentials) {
   config.access_key_id = "oss-access-key";
   config.access_key_value = "oss-secret-key";
 
-  auto options = ToStorageOptions(config);
+  ASSERT_AND_ASSIGN(auto options, ToStorageOptions(config));
   EXPECT_EQ(options.at("fs.oss.endpoint"), "https://oss-cn-hangzhou.aliyuncs.com");
   EXPECT_EQ(options.at("fs.oss.accessKeyId"), config.access_key_id);
   EXPECT_EQ(options.at("fs.oss.accessKeySecret"), config.access_key_value);
@@ -101,7 +106,7 @@ TEST(PaimonStorageOptionsTest, AzureAccountKey) {
   config.access_key_id = "account";
   config.access_key_value = "account-key";
 
-  auto options = ToStorageOptions(config);
+  ASSERT_AND_ASSIGN(auto options, ToStorageOptions(config));
   EXPECT_EQ(options.at("azure.endpoint"), "https://account.dfs.core.windows.net");
   EXPECT_EQ(options.at("azure.account-name"), "account");
   EXPECT_EQ(options.at("azure.account-key"), "account-key");
@@ -116,7 +121,7 @@ TEST(PaimonStorageOptionsTest, GcpStaticAndAnonymous) {
   config.gcp_credential_json = R"({"type":"service_account"})";
   config.gcp_native_without_auth = true;
 
-  auto options = ToStorageOptions(config);
+  ASSERT_AND_ASSIGN(auto options, ToStorageOptions(config));
   EXPECT_EQ(options.at("gcs.endpoint"), "https://storage.googleapis.com");
   EXPECT_EQ(options.at("gcs.credential"), config.gcp_credential_json);
   EXPECT_EQ(options.at("gcs.allow-anonymous"), "true");
@@ -125,7 +130,7 @@ TEST(PaimonStorageOptionsTest, GcpStaticAndAnonymous) {
 TEST(PaimonStorageOptionsTest, UnsupportedProviderFailsClosed) {
   auto config = MakeAwsConfig();
   config.cloud_provider = kCloudProviderTencent;
-  EXPECT_THROW(ToStorageOptions(config), std::runtime_error);
+  EXPECT_TRUE(ToStorageOptions(config).status().IsNotImplemented());
 }
 
 TEST(PaimonStorageOptionsTest, MilvusUriConversion) {

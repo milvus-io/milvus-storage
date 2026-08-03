@@ -13,26 +13,10 @@
 #include "milvus-storage/format/paimon/paimon_common.h"
 
 #include <cstdlib>
-#include <stdexcept>
-#include <string_view>
 
 namespace milvus_storage::paimon {
 
-arrow::Status ClassifyPaimonError(const std::string& context, const std::exception& error) {
-  const std::string_view message{error.what()};
-  // Stable marker prefixes produced by the Rust bridge for terminal errors.
-  // Do not infer status from human-readable prose: wording may evolve while
-  // these markers remain part of the FFI contract.
-  if (message.find("[paimon:error=invalid]") != std::string_view::npos) {
-    return arrow::Status::Invalid(context, ": ", error.what());
-  }
-  if (message.find("[paimon:error=not-implemented]") != std::string_view::npos) {
-    return arrow::Status::NotImplemented(context, ": ", error.what());
-  }
-  return arrow::Status::IOError(context, ": ", error.what());
-}
-
-std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSystemConfig& config) {
+arrow::Result<std::unordered_map<std::string, std::string>> ToStorageOptions(const ArrowFileSystemConfig& config) {
   std::unordered_map<std::string, std::string> options;
   auto set = [&options](const std::string& key, const std::string& value) {
     if (!value.empty()) {
@@ -50,10 +34,10 @@ std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSys
   // integration. Reject them instead of silently falling back to another
   // credential source.
   if (!config.role_arn.empty()) {
-    throw std::runtime_error("Paimon role ARN credentials are not supported");
+    return arrow::Status::NotImplemented("Paimon role ARN credentials are not supported");
   }
   if (!config.gcp_target_service_account.empty()) {
-    throw std::runtime_error("Paimon GCS service account impersonation is not supported");
+    return arrow::Status::NotImplemented("Paimon GCS service account impersonation is not supported");
   }
   if (config.cloud_provider == kCloudProviderAWS) {
     set("s3.endpoint", endpoint());
@@ -96,7 +80,7 @@ std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSys
     }
     return options;
   }
-  throw std::runtime_error("Unsupported cloud provider for Paimon: " + config.cloud_provider);
+  return arrow::Status::NotImplemented("Unsupported cloud provider for Paimon: ", config.cloud_provider);
 }
 
 std::string ToStandardUri(const std::string& milvus_uri) {

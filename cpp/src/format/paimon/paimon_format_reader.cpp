@@ -251,12 +251,7 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
   }
   ARROW_ASSIGN_OR_RAISE(auto parsed, ParseMetadata(metadata_json));
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, file.path));
-  StorageOptions storage_options;
-  try {
-    storage_options = ToStorageOptions(fs_config);
-  } catch (const std::exception& error) {
-    return arrow::Status::Invalid("Cannot create Paimon storage options: ", error.what());
-  }
+  ARROW_ASSIGN_OR_RAISE(auto storage_options, ToStorageOptions(fs_config));
 
   auto metadata = std::make_shared<Metadata>();
   metadata->cache_key = cache_key(file);
@@ -306,20 +301,15 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
     if (path.empty() || offset < 0 || length < 0) {
       return arrow::Status::Invalid("Paimon deletion_file has invalid path or range");
     }
-    try {
-      auto positions = ReadDeletionVector(path, static_cast<uint64_t>(offset), static_cast<uint64_t>(length),
-                                          cardinality, storage_options);
-      deletions->reserve(positions.size());
-      for (auto position : positions) {
-        if (position >= physical_rows) {
-          return arrow::Status::Invalid("Paimon deletion position exceeds physical row count");
-        }
-        deletions->push_back(position);
+    ARROW_ASSIGN_OR_RAISE(auto positions,
+                          ReadDeletionVector(path, static_cast<uint64_t>(offset), static_cast<uint64_t>(length),
+                                             cardinality, storage_options));
+    deletions->reserve(positions.size());
+    for (auto position : positions) {
+      if (position >= physical_rows) {
+        return arrow::Status::Invalid("Paimon deletion position exceeds physical row count");
       }
-    } catch (const std::exception& error) {
-      // bitmap64 deletion vectors surface as NotImplemented instead of a
-      // retryable IOError; transient read failures stay IOError.
-      return ClassifyPaimonError("Cannot read Paimon deletion vector", error);
+      deletions->push_back(position);
     }
   }
   std::sort(deletions->begin(), deletions->end());
