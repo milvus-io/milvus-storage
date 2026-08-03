@@ -359,6 +359,18 @@ fn direct_file_ineligibility(
                 ),
             ));
         }
+        if table.merge_engine == Some(MergeEngine::Deduplicate)
+            && !table.deletion_vectors_enabled
+            && file.delete_row_count.is_none()
+        {
+            return Some((
+                RouteReason::MergeSemantics,
+                format!(
+                    "legacy primary-key data file '{}' has no delete row count",
+                    file.file_name
+                ),
+            ));
+        }
         if file.delete_row_count.is_some_and(|count| count > 0) {
             return Some((
                 RouteReason::MergeSemantics,
@@ -1030,6 +1042,39 @@ mod tests {
             has_blob_fields: false,
         };
         assert!(decide_route(ScanMode::Auto, &compacted, 0, materialized_dv).is_ok());
+
+        let mut legacy_file = test_file("legacy.parquet");
+        legacy_file.level = 1;
+        let legacy = DataSplit::builder()
+            .with_snapshot(7)
+            .with_partition(BinaryRow::new(0))
+            .with_bucket(3)
+            .with_bucket_path("file:///tmp/table/bucket-0".to_string())
+            .with_total_buckets(4)
+            .with_data_files(vec![legacy_file])
+            .with_raw_convertible(true)
+            .build()
+            .unwrap();
+        let deduplicate = TableReadSemantics {
+            merge_engine: Some(MergeEngine::Deduplicate),
+            ..Default::default()
+        };
+        let error = decide_route(ScanMode::Auto, &legacy, 0, deduplicate).unwrap_err();
+        assert!(
+            error.to_string().contains("has no delete row count"),
+            "{error}"
+        );
+        // Append-only tables do not assign merge semantics to the missing
+        // statistic and remain safe for direct-file reads.
+        assert!(decide_route(ScanMode::Auto, &legacy, 0, TableReadSemantics::default()).is_ok());
+        // Paimon scans hide level-0 files from first-row tables and read the
+        // remaining compacted files through the raw path. A missing legacy
+        // delete count alone therefore does not require merge-on-read.
+        let first_row = TableReadSemantics {
+            merge_engine: Some(MergeEngine::FirstRow),
+            ..Default::default()
+        };
+        assert!(decide_route(ScanMode::Auto, &legacy, 0, first_row).is_ok());
 
         let blob_table = TableReadSemantics {
             has_blob_fields: true,
