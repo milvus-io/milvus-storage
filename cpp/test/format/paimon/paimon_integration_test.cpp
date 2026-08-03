@@ -17,8 +17,10 @@
 #include <numeric>
 
 #include <arrow/api.h>
+#include <arrow/io/file.h>
 #include <fmt/format.h>
 #include <folly/json.h>
+#include <parquet/arrow/writer.h>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -86,6 +88,24 @@ int64_t ReadAllRows(const std::shared_ptr<FormatReader>& reader) {
     rows += reader->get_chunk(static_cast<int>(index)).ValueOrDie()->num_rows();
   }
   return rows;
+}
+
+arrow::Status RewriteParquetWithRowGroups(const std::string& path, int32_t rows_per_group, int32_t group_count) {
+  auto schema = arrow::schema({arrow::field("id", arrow::int32(), false)});
+  ARROW_ASSIGN_OR_RAISE(auto sink, arrow::io::FileOutputStream::Open(path));
+  ARROW_ASSIGN_OR_RAISE(auto writer, ::parquet::arrow::FileWriter::Open(*schema, arrow::default_memory_pool(), sink));
+  for (int32_t group = 0; group < group_count; ++group) {
+    arrow::Int32Builder builder;
+    for (int32_t row = 0; row < rows_per_group; ++row) {
+      ARROW_RETURN_NOT_OK(builder.Append(group * rows_per_group + row));
+    }
+    ARROW_ASSIGN_OR_RAISE(auto ids, builder.Finish());
+    auto batch = arrow::RecordBatch::Make(schema, rows_per_group, {std::move(ids)});
+    ARROW_RETURN_NOT_OK(writer->NewBufferedRowGroup());
+    ARROW_RETURN_NOT_OK(writer->WriteRecordBatch(*batch));
+  }
+  ARROW_RETURN_NOT_OK(writer->Close());
+  return sink->Close();
 }
 
 TEST_F(PaimonIntegrationTest, AutoUsesDirectFileForAppendParquet) {
@@ -487,6 +507,31 @@ TEST_F(PaimonIntegrationTest, FullyDeletedTableProducesNoEntries) {
   paimon::CreateTestTable(table_dir_, kRows, "deletion-vector", {0, 1, 2, 3, 4, 5});
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   EXPECT_TRUE(files.empty());
+}
+
+TEST_F(PaimonIntegrationTest, FullyDeletedTrailingRowGroupIsNotExposedAsChunk) {
+  paimon::CreateTestTable(table_dir_, 12, "deletion-vector", {8, 9, 10, 11});
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+  ASSERT_STATUS_OK(RewriteParquetWithRowGroups(LocalFilePath(files.front().path), 4, 3));
+
+  auto column_group = std::make_shared<api::ColumnGroup>();
+  column_group->columns = {"id"};
+  column_group->format = LOON_FORMAT_PAIMON_TABLE;
+  column_group->files = files;
+  auto schema = arrow::schema({arrow::field("id", arrow::int32())});
+  ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema, column_group, {"id"}, properties_, nullptr));
+  ASSERT_EQ(reader->total_number_of_chunks(), 2);
+
+  ASSERT_AND_ASSIGN(auto batches, reader->get_chunks({0, 1}, 1));
+  std::vector<int32_t> ids;
+  for (const auto& batch : batches) {
+    const auto& values = static_cast<const arrow::Int32Array&>(*batch->column(0));
+    for (int64_t row = 0; row < values.length(); ++row) {
+      ids.push_back(values.Value(row));
+    }
+  }
+  EXPECT_EQ(ids, (std::vector<int32_t>{0, 1, 2, 3, 4, 5, 6, 7}));
 }
 
 TEST_F(PaimonIntegrationTest, MissingTableFailsAndWriterIsReadOnly) {

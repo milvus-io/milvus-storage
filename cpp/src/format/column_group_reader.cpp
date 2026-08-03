@@ -204,12 +204,16 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::append_file_metadata(size_t file_i
     }
   } else {
     for (size_t j = 0; j < row_group_in_file.size(); ++j) {
-      rows_in_file += (row_group_in_file[j].end_offset - row_group_in_file[j].start_offset);
+      const auto row_group_rows = row_group_in_file[j].end_offset - row_group_in_file[j].start_offset;
+      if (row_group_rows == 0) {
+        continue;
+      }
+      rows_in_file += row_group_rows;
       chunk_infos_.emplace_back(ChunkInfo{
           .file_index = file_idx,
           .row_offset_in_row_group = 0,
           .row_offset_in_file = row_group_in_file[j].start_offset,
-          .number_of_rows = row_group_in_file[j].end_offset - row_group_in_file[j].start_offset,
+          .number_of_rows = row_group_rows,
           .row_group_index_in_file = j,
           .global_row_end = rows_in_all_files + rows_in_file,
           .avg_memory_size = row_group_in_file[j].memory_size,
