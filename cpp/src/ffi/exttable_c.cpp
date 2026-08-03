@@ -57,15 +57,15 @@ LoonFFIResult loon_exttable_explore(const char** columns,
 
     auto opt = milvus_storage::api::ConvertFFIProperties(properties_map, properties);
     if (opt != std::nullopt) {
-      RETURN_ERROR(LOON_SOURCE_INVALID, "Failed to parse properties [", opt->c_str(), "]");
+      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
     }
 
     auto fmt_res = milvus_storage::Format::get(format_str);
     RETURN_USER_SOURCE_ERROR_IF(fmt_res.status(), LOON_SOURCE_INVALID, fmt_res.status().ToString());
 
-    // explore_dir and the credentials in `properties` come straight from the
-    // user's external-source definition, so a missing bucket or a rejected key
-    // here is a user error, not a system failure. See
+    // explore_dir and the extfs.* credentials come straight from the user's
+    // external-source definition, so a missing bucket or a rejected key here
+    // is a user error, not a system failure. See
     // UserSourceErrorCodeFromStatus().
     auto files_result = fmt_res.ValueOrDie()->explore(explore_dir, properties_map);
     RETURN_USER_SOURCE_ERROR_IF(files_result.status(), LOON_ARROW_ERROR, files_result.status().ToString());
@@ -125,7 +125,7 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
 
     auto opt = milvus_storage::api::ConvertFFIProperties(properties_map, properties);
     if (opt != std::nullopt) {
-      RETURN_ERROR(LOON_SOURCE_INVALID, "Failed to parse properties [", opt->c_str(), "]");
+      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
     }
 
     auto fmt_res = milvus_storage::Format::get(format_str);

@@ -157,19 +157,12 @@ inline int UserSourceErrorCodeFromStatus(const arrow::Status& status, int fallba
     case LOON_AWS_ERROR_ACCESS_DENIED:
       return LOON_SOURCE_INVALID;
 
-    // The location spec itself does not work: a URI that will not parse, an
-    // unusable extfs.* property, a bucket that is not there.
-    //
-    // These default to Config because a producer cannot tell an operator's
-    // milvus.yaml from a user's DDL. At THIS entry point we can: everything
-    // here came from the user's external-source definition, so leaving them
-    // Config tells the user to go find an operator for a string they typed
-    // themselves. Missing this mapping is what made a malformed user URI
-    // regress from "your parameter is wrong" to "configuration error" when 116
-    // was merged into 115.
+    // The user-source location itself does not work: its URI/extfs properties
+    // are unusable, or its bucket is not there. These codes default to Config
+    // because the producer cannot know the value's provenance; this boundary
+    // can, because the failing operation was resolving the user's source.
     case LOON_STORAGE_CONFIG_INVALID:
     case LOON_AWS_ERROR_BUCKET_NOT_FOUND:
-    case LOON_INVALID_PROPERTIES:
       return LOON_SOURCE_INVALID;
 
     default:

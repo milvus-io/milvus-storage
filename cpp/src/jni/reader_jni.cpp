@@ -69,8 +69,9 @@ extern "C" LoonFFIResult loon_record_batch_reader_new(LoonReaderHandle reader,
 
     auto result = cpp_reader->get_record_batch_reader(predicate_str);
     // RETURN_ARROW_ERROR_IF, not a flat LOON_ARROW_ERROR: the status may carry
-    // an ExtendStatusDetail (transient, conflict, corruption, OOM), and the
-    // Java consumer's retry decision depends on that code surviving this hop.
+    // an ExtendStatusDetail (transient, conflict, corruption, OOM). Preserve
+    // it for diagnostics and future structured consumers; today's JNI
+    // exception surface does not branch on most of these codes yet.
     RETURN_ARROW_ERROR_IF(result.status(), LOON_ARROW_ERROR, result.status().ToString());
 
     auto* holder = new RecordBatchReaderHolder{result.ValueOrDie()};

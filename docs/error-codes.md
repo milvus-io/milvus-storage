@@ -163,7 +163,7 @@ carry an `ExtendStatusDetail`.
 | `LOON_LOGICAL_ERROR` | 4 | Permanent | no | `InternalError` | Internal invariant violated (our bug) |
 | `LOON_GOT_EXCEPTION` | 5 | Permanent | no | `InternalError` | A C++ exception escaped an FFI entry point |
 | `LOON_UNREACHABLE_ERROR` | 6 | Permanent | no | `InternalError` | Reached code that should be unreachable |
-| `LOON_INVALID_PROPERTIES` | 7 | Config | no | `InvalidArgument` | The caller's properties are malformed or unusable |
+| `LOON_INVALID_PROPERTIES` | 7 | Config | no | `InvalidArgument` | Registered deployment/storage properties are invalid, or the FFI property map is malformed |
 | `LOON_FAULT_INJECT_ERROR` | 8 | Permanent | no | — | Test-only fault injection |
 | `LOON_NOT_SUPPORT` | 9 | Config | no | `NotImplemented` | The caller asked for a feature/format this build lacks |
 | `LOON_FILE_NOT_FOUND` | 12 | Missing | no | `NoSuchKey` | An object on an **internally generated** path is missing (GC race, lost data, stale metadata) |
@@ -188,7 +188,7 @@ and it survives to the FFI boundary *and* to segcore.
 | `AwsErrorNotFound` | 104 | Missing | no | `NoSuchKey` | 2017 `ObjectNotExist` | An object on an internally generated path is gone. A missing BUCKET is no longer this -- it is `AwsErrorBucketNotFound` (118), Config, because re-reading metadata cannot produce a bucket |
 | `AwsErrorAccessDenied` | 105 | Config | no | `AccessDenied` / `InvalidAccessKeyId` / `SignatureDoesNotMatch` | 2006 `ConfigInvalid` | Credentials or permissions wrong |
 | `AwsErrorNonRetryable` | 106 | Permanent | no | — | 2044 `StorageError` | AWS SDK judged it non-retryable (`ShouldRetry() == false`) |
-| `StorageTransientNetwork` | 107 | **Transient** | **yes** | `RequestTimeout` | 2045 `StorageTransientError` | Connection reset / refused / aborted |
+| `StorageTransientNetwork` | 107 | **Transient** | **yes** | — | 2045 `StorageTransientError` | Connection reset / refused / aborted |
 | `StorageTransientTimeout` | 108 | **Transient** | **yes** | `RequestTimeout` | 2045 `StorageTransientError` | Request timed out |
 | `StorageTransientThrottling` | 109 | **Transient** | **yes** | `SlowDown` / `TooManyRequests` (429) | 2045 `StorageTransientError` | Object store throttled us |
 | `StorageTransientService` | 110 | **Transient** | **yes** | `ServiceUnavailable` / `InternalError` (5xx) | 2045 `StorageTransientError` | Object store returned a server error |

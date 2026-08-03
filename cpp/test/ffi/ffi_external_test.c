@@ -346,10 +346,8 @@ static void test_exttable_get_file_info_invalid_format(void) {
   rc = loon_exttable_get_file_info("invalid_format", file_path, &rp, &num_rows);
 
   ck_assert(!loon_ffi_is_success(&rc));
-  /* Same rule: every argument this entry point takes -- location, properties,
-     format -- comes from the user's external-source definition, so an
-     unrecognised format is a user error. Only the null-pointer guards stay on
-     the internal codes. */
+  /* The format came from the user's external-source definition, so an
+     unrecognised format is a user error. */
   ck_assert_int_eq(rc.err_code, loon_errcode_source_invalid);
   ck_assert(rc.message != NULL);
   printf("Expected error: %s\n", loon_ffi_get_errmsg(&rc));
@@ -385,39 +383,31 @@ static void test_exttable_get_file_info_file_not_found(void) {
   loon_properties_free(&rp);
 }
 
-/* A property VALUE that fails its validator, arriving at an entry point whose
-   properties are the user's.
+/* The real Milvus caller passes one mixed property map: deployment fs.* and
+   writer.* values plus user-source extfs.<collection>.* values.
 
-   This branch -- "Failed to parse properties" in exttable_c.cpp -- had no test
-   at all. The three source_invalid assertions above exercise the directory,
-   bad-format and not-found paths; none of them reaches ConvertFFIProperties,
-   so nothing noticed if these two entry points stopped calling the failure the
-   user's. That is not hypothetical: the User classification here is a literal
-   at each call site, not something UserSourceErrorCodeFromStatus derives, so a
-   one-word edit reverts it silently.
-
-   fs.storage_type is a registered property whose validator admits only "local"
-   and "remote", and at these entry points the value came out of an
-   external-source DDL. Config here would send someone to find an operator for
-   a string they typed themselves. */
-static void test_exttable_property_value_is_user_error(void) {
-  const char* keys[] = {"fs.storage_type"};
-  const char* vals[] = {"not-a-storage-type"};
+   ConvertFFIProperties validates registered top-level properties here;
+   extfs.* is copied through and validated later, where the entry point still
+   has enough context to classify it as LOON_SOURCE_INVALID. Therefore a
+   failure in this branch belongs to deployment configuration, not the user. */
+static void test_exttable_top_level_property_value_is_config_error(void) {
+  const char* keys[] = {"fs.storage_type", "extfs.42.storage_type"};
+  const char* vals[] = {"not-a-storage-type", "remote"};
   const char* columns[] = {"a"};
   LoonProperties rp;
   uint64_t num_rows = 0;
   uint64_t num_files = 0;
   char* cg_path = NULL;
 
-  LoonFFIResult rc = loon_properties_create(keys, vals, 1, &rp);
+  LoonFFIResult rc = loon_properties_create(keys, vals, 2, &rp);
   ck_assert_msg(loon_ffi_is_success(&rc), "structural creation must not validate values: %s", loon_ffi_get_errmsg(&rc));
   loon_ffi_free_result(&rc);
 
   rc = loon_exttable_get_file_info("parquet", "/tmp/whatever.parquet", &rp, &num_rows);
 
   ck_assert(!loon_ffi_is_success(&rc));
-  ck_assert_int_eq(rc.err_code, loon_errcode_source_invalid);
-  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_properties);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_config);
   ck_assert(!loon_ffi_is_retryable_errcode(rc.err_code));
   ck_assert(rc.message != NULL);
   /* Assert WHICH branch answered, not just what it answered. Without this the
@@ -431,16 +421,14 @@ static void test_exttable_property_value_is_user_error(void) {
   printf("Expected error for bad property value: %s\n", loon_ffi_get_errmsg(&rc));
   loon_ffi_free_result(&rc);
 
-  /* The same upgrade was made at the other entry point, and it needs its own
-     case: nothing else in the suite drives explore()'s property branch, so half
-     the change would otherwise ship unguarded. The paths below are never
-     reached -- ConvertFFIProperties runs before any of them is touched. */
+  /* The same mixed map reaches explore(). The paths below are never reached --
+     ConvertFFIProperties runs before any of them is touched. */
   rc = loon_exttable_explore((const char**)columns, 1, "parquet", "/tmp/whatever-base", "/tmp/whatever-dir", &rp,
                              &num_files, &cg_path);
 
   ck_assert(!loon_ffi_is_success(&rc));
-  ck_assert_int_eq(rc.err_code, loon_errcode_source_invalid);
-  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_properties);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_config);
   ck_assert(!loon_ffi_is_retryable_errcode(rc.err_code));
   ck_assert_msg(strstr(loon_ffi_get_errmsg(&rc), "Failed to parse properties") != NULL,
                 "expected the property-validator branch, got: %s", loon_ffi_get_errmsg(&rc));
@@ -829,7 +817,7 @@ void run_external_suite(void) {
   RUN_TEST(test_exttable_get_file_info_invalid_format);
   RUN_TEST(test_exttable_get_file_info_file_not_found);
   RUN_TEST(test_exttable_read_manifest_missing_is_not_user_error);
-  RUN_TEST(test_exttable_property_value_is_user_error);
+  RUN_TEST(test_exttable_top_level_property_value_is_config_error);
   RUN_TEST(test_column_groups_create);
   RUN_TEST(test_column_groups_create_then_read);
 }

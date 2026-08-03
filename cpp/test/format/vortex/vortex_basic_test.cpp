@@ -242,6 +242,20 @@ TEST(VortexErrorTest, MarkerIsParsedRegardlessOfTheWrappingStatusCode) {
     ASSERT_NE(detail, nullptr) << status.ToString();
     EXPECT_TRUE(detail->retryable()) << status.ToString();
   }
+
+  // Internal fallback codes do not have an ExtendStatusDetail, but the wire
+  // marker is still transport metadata and must not leak into user text.
+  {
+    auto inner = std::make_shared<FailingRecordBatchReader>(
+        arrow::Status::Invalid(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; arrow read failed", LOON_ARROW_ERROR)));
+    auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
+    std::shared_ptr<arrow::RecordBatch> batch;
+    auto status = reader->ReadNext(&batch);
+    EXPECT_TRUE(status.IsInvalid()) << status.ToString();
+    EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
+    EXPECT_NE(status.ToString().find("arrow read failed"), std::string::npos);
+    EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos) << status.ToString();
+  }
 }
 
 TEST(VortexErrorTest, StreamingReaderTranslatesReadNextOutOfMemory) {
@@ -250,8 +264,11 @@ TEST(VortexErrorTest, StreamingReaderTranslatesReadNextOutOfMemory) {
   // come back as arrow's own OutOfMemory -- retriable memory pressure, 2034 --
   // not flatten into a permanent IOError, which is what happened when the
   // bridge only restored FILE_NOT_FOUND and ExtendStatusCodes.
+  // The lazy Arrow C Stream re-materialises ExternalError as Invalid/EINVAL,
+  // so exercise the real carrier rather than the IOError shape that already
+  // worked before marker-first parsing was added.
   auto inner = std::make_shared<FailingRecordBatchReader>(
-      arrow::Status::IOError(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; allocation failed", LOON_MEMORY_ERROR)));
+      arrow::Status::Invalid(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; allocation failed", LOON_MEMORY_ERROR)));
   auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
 
   std::shared_ptr<arrow::RecordBatch> batch;
@@ -260,12 +277,14 @@ TEST(VortexErrorTest, StreamingReaderTranslatesReadNextOutOfMemory) {
   EXPECT_TRUE(status.IsOutOfMemory()) << status.ToString();
   EXPECT_EQ(FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR), LOON_MEMORY_ERROR);
   EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::MemAllocateFailed);
+  EXPECT_NE(status.ToString().find("allocation failed"), std::string::npos);
   EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
 }
 
 TEST(VortexErrorTest, StreamingReaderTranslatesReadNextFileNotFound) {
+  // Same real C Stream carrier as the OOM case above.
   auto inner = std::make_shared<FailingRecordBatchReader>(
-      arrow::Status::IOError(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; file not found", LOON_FILE_NOT_FOUND)));
+      arrow::Status::Invalid(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; file not found", LOON_FILE_NOT_FOUND)));
   auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
 
   std::shared_ptr<arrow::RecordBatch> batch;
@@ -274,6 +293,9 @@ TEST(VortexErrorTest, StreamingReaderTranslatesReadNextFileNotFound) {
   EXPECT_TRUE(status.IsIOError());
   EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
   EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR), LOON_FILE_NOT_FOUND);
+  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::ObjectNotExist);
+  EXPECT_NE(status.ToString().find("file not found"), std::string::npos);
   EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
 }
 

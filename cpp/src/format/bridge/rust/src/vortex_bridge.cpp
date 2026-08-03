@@ -191,19 +191,21 @@ arrow::Status MakeVortexErrorStatus(std::string_view context, const arrow::Statu
   if (ExtendStatusDetail::UnwrapStatus(parsed_status)) {
     return MakeExtendErrorWithContext(context, parsed_status);
   }
-  // No marker. Now arrow's own classification is the best information there
-  // is, and OutOfMemory is the one that matters: rebuilding it as an IOError
-  // turns retriable memory pressure into 2044.
-  if (!status.IsIOError()) {
-    return status.WithMessage(JoinContextAndMessage(context, status.message()));
-  }
-  // The bridge also restores codes that carry no ExtendStatusDetail --
-  // OutOfMemory from marker 2, ENOENT from marker 12. WithMessage keeps the
-  // arrow code and any errno detail while prepending the context; rebuilding
-  // as a fresh IOError here threw both away, which un-did the restoration one
-  // line above it.
-  if (!parsed_status.IsIOError()) {
+  // LOON_MEMORY_ERROR and LOON_FILE_NOT_FOUND are represented by arrow's own
+  // status code / errno detail rather than ExtendStatusDetail. Restore them
+  // before consulting the wrapper type: the Arrow C Stream carries lazy-read
+  // failures as Invalid/EINVAL even when the embedded marker is more precise.
+  if (parsed_status.IsOutOfMemory()) {
     return parsed_status.WithMessage(JoinContextAndMessage(context, parsed_status.message()));
+  }
+  if (arrow::internal::ErrnoFromStatus(parsed_status) == ENOENT) {
+    return MakeIOErrorWithContext(context, parsed_status);
+  }
+  // No marker that maps to a richer Arrow status. Arrow's own classification
+  // is now the best information there is; use the parsed message so an
+  // internal fallback marker does not leak into user text.
+  if (!status.IsIOError()) {
+    return status.WithMessage(JoinContextAndMessage(context, parsed_status.message()));
   }
   return MakeIOErrorWithContext(context, parsed_status);
 }

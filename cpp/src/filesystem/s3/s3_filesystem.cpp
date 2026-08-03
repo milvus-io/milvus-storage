@@ -2755,16 +2755,13 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
              return arrow::Status::OK();
            })
         // Settle the whole walk here. A scheduler-level failure (listing itself
-        // broke) still wins -- it is already classified and means the delete
-        // never completed -- but the per-key detail gathered before it is
-        // folded into the message rather than dropped.
+        // broke, or a delete task could not be submitted) is one more member of
+        // the same logical delete, so it must go through the same precedence
+        // ladder as failures already collected from completed requests.
         .Then([tally, bucket]() -> arrow::Status { return tally->Finish(bucket); },
               [tally, bucket](const arrow::Status& walk_error) -> arrow::Status {
-                auto collected = tally->Finish(bucket);
-                if (collected.ok()) {
-                  return walk_error;
-                }
-                return walk_error.WithMessage(walk_error.message() + " Additionally, " + collected.message());
+                tally->RecordRequestError(walk_error);
+                return tally->Finish(bucket);
               });
   }
 

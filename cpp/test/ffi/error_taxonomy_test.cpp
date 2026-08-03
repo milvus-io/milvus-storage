@@ -324,10 +324,12 @@ TEST(ErrorTaxonomyTest, UserSuppliedLocationRetagsTheLocationSpecItself) {
     EXPECT_EQ(loon_ffi_error_category(c.internal_code), LOON_ERROR_CATEGORY_CONFIG) << c.what;
   }
 
-  // Properties are part of the same definition -- the credentials and extfs.*
-  // keys in an external-source DDL are the user's, and exttable_c.cpp says so
-  // in its own comment.
-  EXPECT_EQ(UserSourceErrorCodeFromStatus(arrow::Status::Invalid("x"), LOON_INVALID_PROPERTIES), LOON_SOURCE_INVALID);
+  // The external-table property map is mixed: registered fs.* / writer.*
+  // values are deployment configuration, while user extfs.* values are
+  // validated later and arrive here as StorageConfigInvalid. A bare
+  // InvalidProperties fallback therefore keeps its Config owner.
+  EXPECT_EQ(UserSourceErrorCodeFromStatus(arrow::Status::Invalid("x"), LOON_INVALID_PROPERTIES),
+            LOON_INVALID_PROPERTIES);
   EXPECT_EQ(loon_ffi_error_category(LOON_INVALID_PROPERTIES), LOON_ERROR_CATEGORY_CONFIG);
 
   // Neither re-tag touches retriability: a throttle reached through a
@@ -353,8 +355,10 @@ TEST(ErrorTaxonomyTest, S3VocabularyIsPinned) {
   EXPECT_EQ(s3_of(ExtendStatusCode::StorageTransientTimeout), "RequestTimeout");
   EXPECT_EQ(s3_of(ExtendStatusCode::PackedInvalidArgs), "InvalidArgument");
 
-  // Transaction and corruption codes have no object-storage counterpart; an
-  // empty string is the documented way to say so.
+  // Network transport failures, transaction failures and corruption have no
+  // object-storage response code; an empty string is the documented way to
+  // say so.
+  EXPECT_EQ(s3_of(ExtendStatusCode::StorageTransientNetwork), "");
   EXPECT_EQ(s3_of(ExtendStatusCode::TxnExhaustedRetry), "");
   EXPECT_EQ(s3_of(ExtendStatusCode::TxnResolutionFailed), "");
   EXPECT_EQ(s3_of(ExtendStatusCode::PackedFileCorrupted), "");
