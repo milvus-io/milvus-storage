@@ -68,14 +68,12 @@ class PaimonFormatReader final : public FormatReader {
       const uint64_t& start_offset, const uint64_t& end_offset) override;
   [[nodiscard]] arrow::Result<std::shared_ptr<FormatReader>> clone_reader() override;
   [[nodiscard]] std::shared_ptr<arrow::Schema> get_schema() const override;
-  [[nodiscard]] arrow::Status set_predicate(const std::string& predicate) override;
 
   private:
   PaimonFormatReader(MetaTrait::MetadataPtr metadata,
                      api::ColumnGroupFile file,
                      std::shared_ptr<arrow::Schema> read_schema,
                      std::vector<std::string> needed_columns,
-                     std::string predicate,
                      std::shared_ptr<FormatReader> direct_file_reader,
                      std::shared_ptr<arrow::Schema> output_schema);
 
@@ -87,7 +85,6 @@ class PaimonFormatReader final : public FormatReader {
   api::ColumnGroupFile file_;
   std::shared_ptr<arrow::Schema> read_schema_;
   std::vector<std::string> needed_columns_;
-  std::string predicate_;
   std::shared_ptr<FormatReader> direct_file_reader_;
   std::shared_ptr<arrow::Schema> output_schema_;
 };

@@ -227,15 +227,6 @@ class DirectDeletionReader final : public arrow::RecordBatchReader {
   std::shared_ptr<const std::vector<uint64_t>> deletions_;
 };
 
-arrow::Status ValidatePredicatePushdown(const PaimonFormatReader::MetaTrait::Payload& payload,
-                                        const std::string& predicate) {
-  if (predicate.empty() || payload.data_format != "vortex" || !payload.sorted_deletions ||
-      payload.sorted_deletions->empty()) {
-    return arrow::Status::OK();
-  }
-  return arrow::Status::NotImplemented("Paimon Vortex predicate pushdown is not supported with deletion vectors");
-}
-
 }  // namespace
 
 std::string PaimonFormatReader::MetaTrait::cache_key(const api::ColumnGroupFile& file) {
@@ -335,11 +326,10 @@ arrow::Result<std::shared_ptr<PaimonFormatReader>> PaimonFormatReader::MetaTrait
     const api::ColumnGroupFile& file,
     const std::shared_ptr<arrow::Schema>& read_schema,
     const std::vector<std::string>& needed_columns,
-    const std::string& predicate) {
+    const std::string& /*predicate*/) {
   if (!metadata) {
     return arrow::Status::Invalid("Cannot create Paimon reader from null metadata");
   }
-  ARROW_RETURN_NOT_OK(ValidatePredicatePushdown(metadata->payload, predicate));
   ARROW_ASSIGN_OR_RAISE(auto output_schema, ProjectSchema(metadata->file_schema, read_schema, needed_columns));
   std::shared_ptr<FormatReader> direct_file_reader;
   if (metadata->payload.data_format == "parquet") {
@@ -350,7 +340,7 @@ arrow::Result<std::shared_ptr<PaimonFormatReader>> PaimonFormatReader::MetaTrait
     }
     std::shared_ptr<parquet::ParquetFormatReader> parquet_reader;
     ARROW_ASSIGN_OR_RAISE(parquet_reader, parquet::ParquetFormatReader::MetaTrait::create_from_metadata(
-                                              *cached, file, read_schema, needed_columns, predicate));
+                                              *cached, file, read_schema, needed_columns, ""));
     direct_file_reader = std::static_pointer_cast<FormatReader>(std::move(parquet_reader));
   } else if (metadata->payload.data_format == "vortex") {
     auto cached =
@@ -360,28 +350,25 @@ arrow::Result<std::shared_ptr<PaimonFormatReader>> PaimonFormatReader::MetaTrait
     }
     std::shared_ptr<vortex::VortexFormatReader> vortex_reader;
     ARROW_ASSIGN_OR_RAISE(vortex_reader, vortex::VortexFormatReader::MetaTrait::create_from_metadata(
-                                             *cached, file, read_schema, needed_columns, predicate));
+                                             *cached, file, read_schema, needed_columns, ""));
     direct_file_reader = std::static_pointer_cast<FormatReader>(std::move(vortex_reader));
   } else {
     return arrow::Status::NotImplemented("Paimon direct-file does not support format: ", metadata->payload.data_format);
   }
-  return std::shared_ptr<PaimonFormatReader>(
-      new PaimonFormatReader(std::move(metadata), file, read_schema, needed_columns, predicate,
-                             std::move(direct_file_reader), std::move(output_schema)));
+  return std::shared_ptr<PaimonFormatReader>(new PaimonFormatReader(
+      std::move(metadata), file, read_schema, needed_columns, std::move(direct_file_reader), std::move(output_schema)));
 }
 
 PaimonFormatReader::PaimonFormatReader(MetaTrait::MetadataPtr metadata,
                                        api::ColumnGroupFile file,
                                        std::shared_ptr<arrow::Schema> read_schema,
                                        std::vector<std::string> needed_columns,
-                                       std::string predicate,
                                        std::shared_ptr<FormatReader> direct_file_reader,
                                        std::shared_ptr<arrow::Schema> output_schema)
     : metadata_(std::move(metadata)),
       file_(std::move(file)),
       read_schema_(std::move(read_schema)),
       needed_columns_(std::move(needed_columns)),
-      predicate_(std::move(predicate)),
       direct_file_reader_(std::move(direct_file_reader)),
       output_schema_(std::move(output_schema)) {}
 
@@ -503,21 +490,11 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> PaimonFormatReader::rea
 
 arrow::Result<std::shared_ptr<FormatReader>> PaimonFormatReader::clone_reader() {
   ARROW_ASSIGN_OR_RAISE(auto cloned,
-                        MetaTrait::create_from_metadata(metadata_, file_, read_schema_, needed_columns_, predicate_));
+                        MetaTrait::create_from_metadata(metadata_, file_, read_schema_, needed_columns_, ""));
   ARROW_RETURN_NOT_OK(cloned->open());
   return std::static_pointer_cast<FormatReader>(cloned);
 }
 
 std::shared_ptr<arrow::Schema> PaimonFormatReader::get_schema() const { return metadata_->file_schema; }
-
-arrow::Status PaimonFormatReader::set_predicate(const std::string& predicate) {
-  if (!direct_file_reader_) {
-    return arrow::Status::Invalid("Paimon direct-file reader is unavailable");
-  }
-  ARROW_RETURN_NOT_OK(ValidatePredicatePushdown(metadata_->payload, predicate));
-  ARROW_RETURN_NOT_OK(direct_file_reader_->set_predicate(predicate));
-  predicate_ = predicate;
-  return arrow::Status::OK();
-}
 
 }  // namespace milvus_storage::paimon
