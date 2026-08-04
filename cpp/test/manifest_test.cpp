@@ -107,6 +107,39 @@ TEST_F(ManifestTest, ColumnGroupsRoundTrip) {
   EXPECT_EQ(rcg->files[0].end_index, 100);
 }
 
+// Absolute URIs survive the round trip.
+//
+// Every other test here uses relative paths, which is why a change to how
+// ToAbsolute parses left this broken and green: the manifest wrote fine and
+// would not read back, because the parse mode being used expects the URI's
+// path to be "bucket/key" while a standard s3://bucket/key.parquet puts the
+// bucket in the host. External tables store paths in exactly that form.
+TEST_F(ManifestTest, AbsoluteUriPathsRoundTrip) {
+  const std::vector<std::string> absolute = {
+      "s3://my-bucket/data/file1.parquet",
+      "s3://my-bucket/deeply/nested/key/file2.parquet",
+      "gs://another-bucket/f.parquet",
+      // Endpoint-style, the form the other parse mode expects -- both must work.
+      "s3://s3.us-east-1.amazonaws.com/my-bucket/f.parquet",
+  };
+
+  ColumnGroups cgs;
+  for (const auto& path : absolute) {
+    cgs.push_back(MakeCG({"id"}, LOON_FORMAT_PARQUET, {{.path = path, .start_index = 0, .end_index = 1}}));
+  }
+
+  Manifest manifest(cgs);
+  auto read_back = RoundTrip(manifest);
+
+  ASSERT_EQ(read_back->columnGroups().size(), absolute.size());
+  for (size_t i = 0; i < absolute.size(); ++i) {
+    ASSERT_EQ(read_back->columnGroups()[i]->files.size(), 1u) << absolute[i];
+    // Unchanged: an absolute path is already absolute, so ToAbsolute must
+    // return it as it was rather than gluing base_path onto it.
+    EXPECT_EQ(read_back->columnGroups()[i]->files[0].path, absolute[i]);
+  }
+}
+
 TEST_F(ManifestTest, DeltaLogsRoundTrip) {
   DeltaLog d1{
       .path = get_delta_filepath(base_path_, "del1.parquet"), .type = DeltaLogType::PRIMARY_KEY, .num_entries = 50};

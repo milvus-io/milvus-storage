@@ -209,6 +209,24 @@ inline std::optional<arrow::Status> tryMakePermanentExtendArrowError(Aws::S3::S3
     case Aws::S3::S3Errors::SIGNATURE_DOES_NOT_MATCH:
       return MakeExtendError(ExtendStatusCode::AwsErrorAccessDenied, message, message /* extra_info */);
     case Aws::S3::S3Errors::UNKNOWN:
+      // The SDK models only a fraction of what a store can answer, and
+      // everything it does not model arrives here nameless. Credential
+      // failures are the ones that matter: ExpiredToken and its relatives left
+      // as bare IOErrors reached an external-table caller as LOON_ARROW_ERROR
+      // -- a generic internal failure -- when the caller's own credentials
+      // were the thing at fault and they are the only one who can fix them.
+      //
+      // Matched on the error NAME as well as the status, because
+      // S3-compatible stores spell 401/403 inconsistently while the token
+      // names are stable across them.
+      if (exception_name == "ExpiredToken" || exception_name == "ExpiredTokenException" ||
+          exception_name == "InvalidToken" || exception_name == "TokenRefreshRequired" ||
+          exception_name == "InvalidAccessKeyId" || exception_name == "SignatureDoesNotMatch" ||
+          exception_name == "AccessDenied" || exception_name == "InvalidSecurity" ||
+          response_code == Aws::Http::HttpResponseCode::UNAUTHORIZED ||
+          response_code == Aws::Http::HttpResponseCode::FORBIDDEN) {
+        return MakeExtendError(ExtendStatusCode::AwsErrorAccessDenied, message, message /* extra_info */);
+      }
       switch (response_code) {
         case Aws::Http::HttpResponseCode::PRECONDITION_FAILED:
           return MakeExtendError(ExtendStatusCode::AwsErrorPreConditionFailed, message, message /* extra_info */);

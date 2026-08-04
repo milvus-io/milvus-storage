@@ -165,11 +165,24 @@ struct ParsedFieldUnits {
   std::vector<ParsedFieldUnit> units;
 };
 
+// Classified here rather than in the bridge, because THIS is the layer that
+// knows where the segment id came from. Down in segment_bytes an out-of-range
+// id is indistinguishable from a caller passing a bad number -- an API misuse,
+// not corruption -- and tagging it there would mint quarantine orders for
+// ordinary argument mistakes. The ids reaching this function were read out of
+// the file's own layout, so a range the file cannot satisfy means the file
+// contradicts itself.
 static arrow::Result<ByteRange> ReadFlatSegmentByteRange(const VortexFile& vxfile, uint64_t flat_segment_id) {
-  ARROW_ASSIGN_OR_RAISE(auto bytes, vxfile.SegmentBytes(flat_segment_id));
+  auto bytes_result = vxfile.SegmentBytes(flat_segment_id);
+  if (!bytes_result.ok()) {
+    return MakeExtendErrorMsg(ExtendStatusCode::VortexFileCorrupted,
+                              "Vortex layout names a segment the file does not have: id=", flat_segment_id, " (",
+                              bytes_result.status().message(), ")");
+  }
+  auto bytes = std::move(bytes_result).ValueOrDie();
   if (bytes.size() != 2 || bytes[1] == 0) {
-    return arrow::Status::Invalid(
-        fmt::format("Invalid vortex flat segment byte range for segment {}", flat_segment_id));
+    return MakeExtendErrorMsg(ExtendStatusCode::VortexFileCorrupted,
+                              "Invalid vortex flat segment byte range for segment ", flat_segment_id);
   }
   return ByteRange{bytes[0], bytes[1]};
 }
@@ -201,7 +214,12 @@ static arrow::Result<ParsedFieldUnits> ParseFieldUnits(const VortexFile& vxfile,
   auto raw_offsets = std::move(raw_offsets_result).ValueOrDie();
 
   if (raw_offsets.size() < 2) {
-    return arrow::Status::Invalid(fmt::format("Invalid vortex field layout units for {}", field_name));
+    // These offsets came out of the file's layout, not from an argument -- a
+    // shape the layout cannot describe is the file contradicting itself, and a
+    // bare Invalid reached segcore as a generic 2044 instead of 2024.
+    return MakeExtendErrorMsg(ExtendStatusCode::VortexFileCorrupted,
+                              "Vortex field layout units are malformed for field ", field_name, " (",
+                              raw_offsets.size(), " offsets, need at least 2)");
   }
 
   if (file_schema && !file_schema->GetFieldByName(field_name)) {

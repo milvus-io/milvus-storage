@@ -147,7 +147,14 @@ inline std::optional<milvus_storage::ExtendStatusCode> ExtendStatusCodeFromFFIEr
 /// location may call this.
 ///
 /// Everything else keeps the classification the producing layer attached.
-inline int UserSourceErrorCodeFromStatus(const arrow::Status& status, int fallback = LOON_ARROW_ERROR) {
+/// \param location_is_user_supplied whether the location that failed is one the
+///        caller named -- an absolute URI or explicit extfs.* properties --
+///        rather than a relative path the deployment's own configuration
+///        resolves. Only the former may re-tag a configuration failure as the
+///        user's.
+inline int UserSourceErrorCodeFromStatus(const arrow::Status& status,
+                                         int fallback = LOON_ARROW_ERROR,
+                                         bool location_is_user_supplied = true) {
   auto code = FFIErrorCodeFromExtendStatus(status, fallback);
   switch (code) {
     // The object the user named is not there, or their credentials for it were
@@ -157,13 +164,18 @@ inline int UserSourceErrorCodeFromStatus(const arrow::Status& status, int fallba
     case LOON_AWS_ERROR_ACCESS_DENIED:
       return LOON_SOURCE_INVALID;
 
-    // The user-source location itself does not work: its URI/extfs properties
-    // are unusable, or its bucket is not there. These codes default to Config
-    // because the producer cannot know the value's provenance; this boundary
-    // can, because the failing operation was resolving the user's source.
+    // The location spec itself does not work: its URI/extfs properties are
+    // unusable, or its bucket is not there.
+    //
+    // Gated on the location actually being one the user named. A RELATIVE
+    // external path is resolved against the deployment's default fs.*
+    // configuration, so a missing fs.azure_tenant_id surfaced here as
+    // LOON_SOURCE_INVALID -- telling the caller their DDL was wrong about a
+    // setting only an operator can reach. The retry verdict was the same
+    // either way; the person sent to fix it was not.
     case LOON_STORAGE_CONFIG_INVALID:
     case LOON_AWS_ERROR_BUCKET_NOT_FOUND:
-      return LOON_SOURCE_INVALID;
+      return location_is_user_supplied ? LOON_SOURCE_INVALID : code;
 
     default:
       return code;
@@ -179,6 +191,18 @@ inline int UserSourceErrorCodeFromStatus(const arrow::Status& status, int fallba
       auto ffi_err_code__ = UserSourceErrorCodeFromStatus(ffi_status__, fallback); \
       RETURN_ERROR(ffi_err_code__, ##__VA_ARGS__);                                 \
     }                                                                              \
+  } while (0)
+
+/// Same, for entry points whose location may be relative -- in which case the
+/// deployment's own fs.* configuration is what resolved it, and a
+/// configuration failure is the operator's rather than the caller's.
+#define RETURN_USER_SOURCE_ERROR_IF_AT(status, fallback, user_supplied, ...)                      \
+  do {                                                                                            \
+    auto ffi_status__ = (status);                                                                 \
+    if (!ffi_status__.ok()) {                                                                     \
+      auto ffi_err_code__ = UserSourceErrorCodeFromStatus(ffi_status__, fallback, user_supplied); \
+      RETURN_ERROR(ffi_err_code__, ##__VA_ARGS__);                                                \
+    }                                                                                             \
   } while (0)
 
 // The place every ERROR result is materialized, so the place that must

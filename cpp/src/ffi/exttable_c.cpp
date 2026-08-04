@@ -67,8 +67,12 @@ LoonFFIResult loon_exttable_explore(const char** columns,
     // external-source definition, so a missing bucket or a rejected key here
     // is a user error, not a system failure. See
     // UserSourceErrorCodeFromStatus().
+    // Same provenance question as get_file_info: only an absolute explore_dir
+    // is a location the caller chose.
+    const bool location_is_user_supplied = milvus_storage::HasUriScheme(explore_dir);
     auto files_result = fmt_res.ValueOrDie()->explore(explore_dir, properties_map);
-    RETURN_USER_SOURCE_ERROR_IF(files_result.status(), LOON_ARROW_ERROR, files_result.status().ToString());
+    RETURN_USER_SOURCE_ERROR_IF_AT(files_result.status(), LOON_ARROW_ERROR, location_is_user_supplied,
+                                   files_result.status().ToString());
     auto files = files_result.ValueOrDie();
 
     std::vector<std::string> columns_cpp;
@@ -131,9 +135,16 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
     auto fmt_res = milvus_storage::Format::get(format_str);
     RETURN_USER_SOURCE_ERROR_IF(fmt_res.status(), LOON_SOURCE_INVALID, fmt_res.status().ToString());
 
-    // Resolve filesystem and validate file existence before creating reader
+    // Resolve filesystem and validate file existence before creating reader.
+    //
+    // Whether a config failure here is the caller's depends on whether they
+    // named a concrete location. An absolute URI is theirs; a relative path is
+    // resolved against the deployment's own fs.* settings, and blaming the
+    // caller for those sent them to fix something only an operator can reach.
+    const bool location_is_user_supplied = milvus_storage::HasUriScheme(file_path);
     auto fs_res = milvus_storage::FilesystemCache::getInstance().get(properties_map, file_path);
-    RETURN_USER_SOURCE_ERROR_IF(fs_res.status(), LOON_ARROW_ERROR, fs_res.status().ToString());
+    RETURN_USER_SOURCE_ERROR_IF_AT(fs_res.status(), LOON_ARROW_ERROR, location_is_user_supplied,
+                                   fs_res.status().ToString());
     auto fs = fs_res.ValueOrDie();
 
     auto uri_res = milvus_storage::StorageUri::Parse(file_path);

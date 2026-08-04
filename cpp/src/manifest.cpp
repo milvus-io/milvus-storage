@@ -298,20 +298,20 @@ static inline arrow::Result<std::string> ToAbsolute(const std::string& path,
     return path;
   }
 
-  auto uri_result = milvus_storage::StorageUri::Parse(path);
-  if (!uri_result.ok()) {
-    // Re-tagged, not propagated. StorageUri::Parse answers
-    // StorageConfigInvalid because it usually judges a location an operator
-    // typed -- but this path came out of a manifest we just decoded
-    // successfully, so nothing in the deployment's configuration is wrong.
-    // Asking an operator to fix storage settings for bytes the manifest itself
-    // carries sends them at the wrong thing entirely; the manifest's content
-    // is what contradicts itself. Both verdicts refuse a retry, but they point
-    // at different people.
-    return MakeExtendErrorMsg(ExtendStatusCode::ManifestCorrupted, "Manifest contains an unparseable path: ", path,
-                              " (", uri_result.status().message(), ")");
-  }
-  if (!uri_result.ValueOrDie().scheme.empty()) {
+  // Only the scheme matters here, so only the scheme is asked for.
+  //
+  // A full parse was wrong in both of its modes, and each mode broke a
+  // different real path: the endpoint mode rejects "s3://bucket/key.parquet"
+  // because the URI's own path has no slash to split a bucket out of, and the
+  // bucket mode rejects "local:///dir/file" because the host is empty. Neither
+  // fact has anything to do with what this function does, which is decide
+  // whether a path is already absolute.
+  //
+  // The original bug this replaced -- gluing an unparseable URI onto base_path
+  // and caching the result -- is fixed the same way: anything with a scheme is
+  // returned untouched. If it is also malformed, the filesystem layer says so
+  // when something tries to open it, with the classification it already has.
+  if (milvus_storage::HasUriScheme(path)) {
     return path;
   }
 
