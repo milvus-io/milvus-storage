@@ -1703,8 +1703,31 @@ fn corruption_code_for(err: &VortexError) -> Option<i32> {
             // missing layout segment" on HEALTHY files by trying a too-small
             // footer read first. Tagging those would mint corruption verdicts
             // on the happy path.
-            msg.as_ref()
-                .contains("Malformed file, invalid magic bytes")
+            //
+            // The list below is therefore an allowlist of bails that can only
+            // come from persisted metadata contradicting itself, never from
+            // the retry loop's deliberate under-read:
+            //
+            //   * invalid magic bytes -- the trailer is not a trailer
+            //   * truncated metadata  -- the file claims more than it holds
+            //   * trailing metadata   -- it holds more than it claims
+            //   * child count mismatch -- the layout promises children the
+            //     serialised form does not contain
+            //
+            // Each states a disagreement between two things the FILE says. A
+            // too-small read cannot produce any of them: it produces "Unknown
+            // DType variant" and "Postscript missing layout segment", which
+            // stay out of this list for exactly that reason.
+            const CORRUPTION_BAILS: [&str; 4] = [
+                "Malformed file, invalid magic bytes",
+                "truncated metadata",
+                "trailing metadata",
+                "children, got",
+            ];
+            let text = msg.as_ref();
+            CORRUPTION_BAILS
+                .iter()
+                .any(|needle| text.contains(needle))
                 .then_some(LOON_VORTEX_FILE_CORRUPTED)
         }
         // Io / ObjectStore are read failures, not bad bytes. Everything else is

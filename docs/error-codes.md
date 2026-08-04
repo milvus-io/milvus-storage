@@ -246,7 +246,7 @@ A taxonomy is only as good as the layers that populate it. Current state:
 |---|---|
 | S3 filesystem — AWS, Aliyun OSS, Tencent COS, Huawei OBS, MinIO (`s3_internal.h`) | **Yes**, full: 101–110 |
 | GCS (`GcpFileSystemProducer`, which builds an `S3FileSystem`) | **Yes**, inherits the S3 classifier |
-| Vortex bridge | **Yes** — round-trips the FFI code through the C++ filesystem shim |
+| Vortex bridge | **Partly** — I/O errors round-trip their FFI code through the C++ shim, and decode failures that name a contradiction inside the file (bad magic, truncated or trailing metadata, a child count the layout does not match) classify as `VortexFileCorrupted`. Other decode bails stay unclassified on purpose: the footer reader deliberately provokes some of them on healthy files, so tagging them would mint quarantine orders for intact data |
 | Lance / Iceberg bridges | In flight — see [#597](https://github.com/milvus-io/milvus-storage/pull/597) |
 | Packed layer | Partial: `Packed*` (50–55) |
 | Azure filesystem | **No** — one classified case, the rest are plain `IOError`. See [#595](https://github.com/milvus-io/milvus-storage/issues/595) |

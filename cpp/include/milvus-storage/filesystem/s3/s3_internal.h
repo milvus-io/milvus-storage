@@ -219,11 +219,19 @@ inline std::optional<arrow::Status> tryMakePermanentExtendArrowError(Aws::S3::S3
       // Matched on the error NAME as well as the status, because
       // S3-compatible stores spell 401/403 inconsistently while the token
       // names are stable across them.
+      // A token that EXPIRED is not the same as a token that is wrong. Role,
+      // IAM and STS providers refresh on the next request -- GetAWSCredentials
+      // calls RefreshIfExpired -- so retrying is exactly what resolves these,
+      // and reporting them as a permanent configuration error stops the retry
+      // that would have worked. A malformed or unauthorised credential is the
+      // configuration error.
       if (exception_name == "ExpiredToken" || exception_name == "ExpiredTokenException" ||
-          exception_name == "InvalidToken" || exception_name == "TokenRefreshRequired" ||
-          exception_name == "InvalidAccessKeyId" || exception_name == "SignatureDoesNotMatch" ||
-          exception_name == "AccessDenied" || exception_name == "InvalidSecurity" ||
-          response_code == Aws::Http::HttpResponseCode::UNAUTHORIZED ||
+          exception_name == "TokenRefreshRequired") {
+        return MakeExtendError(ExtendStatusCode::StorageTransientService, message, message /* extra_info */);
+      }
+      if (exception_name == "InvalidToken" || exception_name == "InvalidAccessKeyId" ||
+          exception_name == "SignatureDoesNotMatch" || exception_name == "AccessDenied" ||
+          exception_name == "InvalidSecurity" || response_code == Aws::Http::HttpResponseCode::UNAUTHORIZED ||
           response_code == Aws::Http::HttpResponseCode::FORBIDDEN) {
         return MakeExtendError(ExtendStatusCode::AwsErrorAccessDenied, message, message /* extra_info */);
       }

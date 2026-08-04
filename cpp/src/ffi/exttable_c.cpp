@@ -154,7 +154,11 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
 
     // file_path is user-supplied: not-found / access-denied are user errors.
     auto file_info_res = fs->GetFileInfo(resolved_path);
-    RETURN_USER_SOURCE_ERROR_IF(file_info_res.status(), LOON_ARROW_ERROR, file_info_res.status().ToString());
+    // Authentication usually fails HERE rather than while resolving the
+    // filesystem, so this carries the same provenance -- otherwise a rejected
+    // deployment credential still came back as the caller's fault.
+    RETURN_USER_SOURCE_ERROR_IF_AT(file_info_res.status(), LOON_ARROW_ERROR, location_is_user_supplied,
+                                   file_info_res.status().ToString());
     auto file_info = file_info_res.ValueOrDie();
 
     if (file_info.type() == arrow::fs::FileType::NotFound) {
@@ -167,10 +171,12 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
     // Create a ColumnGroupFile to pass to the reader factory
     ColumnGroupFile cg_file{std::string(file_path), 0, 0, {}};
     auto reader_res = fmt_res.ValueOrDie()->create_reader(nullptr, cg_file, properties_map, {}, nullptr);
-    RETURN_USER_SOURCE_ERROR_IF(reader_res.status(), LOON_ARROW_ERROR, reader_res.status().ToString());
+    RETURN_USER_SOURCE_ERROR_IF_AT(reader_res.status(), LOON_ARROW_ERROR, location_is_user_supplied,
+                                   reader_res.status().ToString());
 
     auto rg_infos_res = reader_res.ValueOrDie()->get_row_group_infos();
-    RETURN_USER_SOURCE_ERROR_IF(rg_infos_res.status(), LOON_ARROW_ERROR, rg_infos_res.status().ToString());
+    RETURN_USER_SOURCE_ERROR_IF_AT(rg_infos_res.status(), LOON_ARROW_ERROR, location_is_user_supplied,
+                                   rg_infos_res.status().ToString());
     auto& rg_infos = rg_infos_res.ValueOrDie();
     *out_num_of_rows = rg_infos.empty() ? 0 : rg_infos.back().end_offset;
 

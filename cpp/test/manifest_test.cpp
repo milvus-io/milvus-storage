@@ -107,20 +107,24 @@ TEST_F(ManifestTest, ColumnGroupsRoundTrip) {
   EXPECT_EQ(rcg->files[0].end_index, 100);
 }
 
-// Absolute URIs survive the round trip.
+// Absolute URIs survive the round trip -- in the form this library actually
+// consumes, and only that form.
 //
-// Every other test here uses relative paths, which is why a change to how
-// ToAbsolute parses left this broken and green: the manifest wrote fine and
-// would not read back, because the parse mode being used expects the URI's
-// path to be "bucket/key" while a standard s3://bucket/key.parquet puts the
-// bucket in the host. External tables store paths in exactly that form.
+// The URI convention here is scheme://ENDPOINT/bucket/key, not the AWS-console
+// s3://bucket/key. StorageUri::Parse rejects the latter, and so therefore do
+// FilesystemCache::resolve_config and PlainFormat::create_reader, which parse
+// the stored path again on the way to opening it.
+//
+// An earlier version of this test asserted that s3://bucket/key.parquet
+// round-trips, which it does -- textually. That made it look like support
+// existed when nothing downstream can open such a path, which is a worse
+// failure than no test: it documents a capability that is not there. The
+// unsupported form is pinned separately below, by its classification.
 TEST_F(ManifestTest, AbsoluteUriPathsRoundTrip) {
   const std::vector<std::string> absolute = {
-      "s3://my-bucket/data/file1.parquet",
-      "s3://my-bucket/deeply/nested/key/file2.parquet",
-      "gs://another-bucket/f.parquet",
-      // Endpoint-style, the form the other parse mode expects -- both must work.
-      "s3://s3.us-east-1.amazonaws.com/my-bucket/f.parquet",
+      "s3://s3.us-east-1.amazonaws.com/my-bucket/data/file1.parquet",
+      "s3://minio.internal:9000/my-bucket/deeply/nested/file2.parquet",
+      "local:///local/dir/_data/f.parquet",
   };
 
   ColumnGroups cgs;
@@ -136,7 +140,29 @@ TEST_F(ManifestTest, AbsoluteUriPathsRoundTrip) {
     ASSERT_EQ(read_back->columnGroups()[i]->files.size(), 1u) << absolute[i];
     // Unchanged: an absolute path is already absolute, so ToAbsolute must
     // return it as it was rather than gluing base_path onto it.
-    EXPECT_EQ(read_back->columnGroups()[i]->files[0].path, absolute[i]);
+    EXPECT_EQ(read_back->columnGroups()[i]->files[0].path, absolute[i]) << absolute[i];
+
+    // And the consumption chain can still parse what came back -- the check
+    // the string comparison above does not make. Both resolve_config and
+    // create_reader re-parse the stored path; a path that survives the manifest
+    // but not this is a path nothing can open.
+    auto reparsed = StorageUri::Parse(read_back->columnGroups()[i]->files[0].path);
+    ASSERT_TRUE(reparsed.ok()) << absolute[i] << " -> " << reparsed.status().ToString();
+    EXPECT_FALSE(reparsed->key.empty()) << absolute[i];
+  }
+}
+
+// The console form is not supported, and says so in a way an operator can act
+// on rather than failing later as a missing object.
+TEST_F(ManifestTest, ConsoleStyleUriIsRejectedAsConfigNotSilentlyMangled) {
+  for (const char* path : {"s3://my-bucket/key.parquet", "gs://my-bucket/key.parquet"}) {
+    auto parsed = StorageUri::Parse(path);
+    ASSERT_FALSE(parsed.ok()) << path << ": if this now parses, the convention changed and"
+                              << " AbsoluteUriPathsRoundTrip should cover this form too";
+    auto detail = ExtendStatusDetail::UnwrapStatus(parsed.status());
+    ASSERT_NE(detail, nullptr) << path << " arrived unclassified: " << parsed.status().ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageConfigInvalid) << path;
+    EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::Config) << path;
   }
 }
 

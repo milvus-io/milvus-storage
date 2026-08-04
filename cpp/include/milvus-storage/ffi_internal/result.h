@@ -161,8 +161,20 @@ inline int UserSourceErrorCodeFromStatus(const arrow::Status& status,
     // rejected.
     case LOON_AWS_ERROR_NOT_FOUND:
     case LOON_FILE_NOT_FOUND:
-    case LOON_AWS_ERROR_ACCESS_DENIED:
+      // The object the caller named is not there. True whichever filesystem
+      // resolved the path, because the NAME is theirs either way.
       return LOON_SOURCE_INVALID;
+
+    case LOON_AWS_ERROR_ACCESS_DENIED:
+      // Credentials, on the other hand, belong to whoever supplied the
+      // location. For an absolute URI that is the caller, with their own
+      // extfs.* keys; for a relative path the deployment's fs.* credentials
+      // are what got rejected, and telling the caller their source is invalid
+      // sends them to fix a secret they cannot see. Authentication usually
+      // fails during listing or GetFileInfo rather than at resolution, so this
+      // arm is reached on the same paths as the config one below and needs the
+      // same gate.
+      return location_is_user_supplied ? LOON_SOURCE_INVALID : code;
 
     // The location spec itself does not work: its URI/extfs properties are
     // unusable, or its bucket is not there.
