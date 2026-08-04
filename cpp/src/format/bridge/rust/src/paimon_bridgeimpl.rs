@@ -116,6 +116,7 @@ enum RouteReason {
     RowRange,
     SchemaEvolution,
     DataEvolution,
+    PartitionColumns,
     DedicatedVectorFile,
     UnsupportedFormat,
 }
@@ -127,6 +128,7 @@ impl RouteReason {
             Self::RowRange => "row-range",
             Self::SchemaEvolution => "schema-evolution",
             Self::DataEvolution => "data-evolution",
+            Self::PartitionColumns => "partition-columns",
             Self::DedicatedVectorFile => "dedicated-vector-file",
             Self::UnsupportedFormat => "unsupported-format",
         }
@@ -139,6 +141,7 @@ struct TableReadSemantics {
     deletion_vectors_enabled: bool,
     deletion_vectors_merge_on_read: bool,
     has_blob_fields: bool,
+    has_partition_keys: bool,
 }
 
 impl TableReadSemantics {
@@ -153,6 +156,7 @@ impl TableReadSemantics {
             deletion_vectors_enabled: options.deletion_vectors_enabled(),
             deletion_vectors_merge_on_read: options.deletion_vectors_merge_on_read(),
             has_blob_fields: !options.blob_fields().is_empty(),
+            has_partition_keys: !schema.partition_keys().is_empty(),
         })
     }
 }
@@ -330,6 +334,12 @@ fn direct_file_ineligibility(
     table_schema_id: i64,
     table: TableReadSemantics,
 ) -> Option<(RouteReason, String)> {
+    if table.has_partition_keys {
+        return Some((
+            RouteReason::PartitionColumns,
+            "partition columns require values from the Paimon split descriptor".to_string(),
+        ));
+    }
     if table.has_blob_fields {
         return Some((
             RouteReason::DataEvolution,
@@ -1065,6 +1075,7 @@ mod tests {
             deletion_vectors_enabled: true,
             deletion_vectors_merge_on_read: true,
             has_blob_fields: false,
+            has_partition_keys: false,
         };
         assert!(decide_route(ScanMode::Auto, &raw, 0, aggregation_mor_dv).is_err());
 
@@ -1086,6 +1097,7 @@ mod tests {
             deletion_vectors_enabled: true,
             deletion_vectors_merge_on_read: false,
             has_blob_fields: false,
+            has_partition_keys: false,
         };
         assert!(decide_route(ScanMode::Auto, &compacted, 0, materialized_dv).is_ok());
 
@@ -1127,6 +1139,13 @@ mod tests {
             ..Default::default()
         };
         assert!(decide_route(ScanMode::Auto, &raw, 0, blob_table).is_err());
+
+        let partitioned_table = TableReadSemantics {
+            has_partition_keys: true,
+            ..Default::default()
+        };
+        let error = decide_route(ScanMode::Auto, &raw, 0, partitioned_table).unwrap_err();
+        assert!(error.to_string().contains("partition columns"), "{error}");
     }
 
     #[test]
