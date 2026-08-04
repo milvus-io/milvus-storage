@@ -13,6 +13,7 @@
 #include "milvus-storage/format/paimon/paimon_format_reader.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <exception>
 #include <limits>
@@ -437,39 +438,38 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> PaimonFormatRead
   return output;
 }
 
-uint64_t PaimonFormatReader::logical_to_physical(uint64_t logical_offset) const {
+arrow::Result<std::vector<int64_t>> PaimonFormatReader::logical_to_physical(
+    const std::vector<int64_t>& logical_offsets) const {
+#ifndef NDEBUG
+  assert(std::is_sorted(logical_offsets.begin(), logical_offsets.end()));
+#endif
   const auto& deletions = *metadata_->payload.sorted_deletions;
-  uint64_t physical = logical_offset;
-  const auto physical_rows = metadata_->payload.physical_row_count;
-  for (size_t iteration = 0; iteration <= deletions.size(); ++iteration) {
-    auto deleted =
-        static_cast<uint64_t>(std::upper_bound(deletions.begin(), deletions.end(), physical) - deletions.begin());
-    auto next = logical_offset + deleted;
-    if (next == physical) {
-      return std::min(physical, physical_rows);
+  size_t deletion_index = 0;
+  std::vector<int64_t> physical_offsets;
+  physical_offsets.reserve(logical_offsets.size());
+  for (auto logical_offset : logical_offsets) {
+    if (logical_offset < 0 || static_cast<uint64_t>(logical_offset) >= metadata_->payload.record_count) {
+      return arrow::Status::Invalid("Paimon direct-file take index is out of range");
     }
-    physical = std::min(next, physical_rows);
+    auto physical = static_cast<uint64_t>(logical_offset) + static_cast<uint64_t>(deletion_index);
+    while (deletion_index < deletions.size() && deletions[deletion_index] <= physical) {
+      ++physical;
+      ++deletion_index;
+    }
+    if (physical >= metadata_->payload.physical_row_count ||
+        physical > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+      return arrow::Status::Invalid("Paimon direct-file physical index is out of range");
+    }
+    physical_offsets.push_back(static_cast<int64_t>(physical));
   }
-  return physical_rows;
+  return physical_offsets;
 }
 
 arrow::Result<std::shared_ptr<arrow::Table>> PaimonFormatReader::take(const std::vector<int64_t>& indices) {
   if (indices.empty()) {
     return arrow::Table::MakeEmpty(output_schema_);
   }
-  std::vector<int64_t> physical;
-  physical.reserve(indices.size());
-  for (auto index : indices) {
-    if (index < 0 || static_cast<uint64_t>(index) >= metadata_->payload.record_count) {
-      return arrow::Status::Invalid("Paimon direct-file take index is out of range");
-    }
-    auto physical_index = logical_to_physical(static_cast<uint64_t>(index));
-    if (physical_index >= metadata_->payload.physical_row_count ||
-        physical_index > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-      return arrow::Status::Invalid("Paimon direct-file physical index is out of range");
-    }
-    physical.push_back(static_cast<int64_t>(physical_index));
-  }
+  ARROW_ASSIGN_OR_RAISE(auto physical, logical_to_physical(indices));
   return direct_file_reader_->take(physical);
 }
 
@@ -482,8 +482,10 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> PaimonFormatReader::rea
     ARROW_ASSIGN_OR_RAISE(auto empty, arrow::RecordBatch::MakeEmpty(output_schema_));
     return arrow::RecordBatchReader::Make({empty});
   }
-  auto physical_start = logical_to_physical(start);
-  auto physical_end = logical_to_physical(end - 1) + 1;
+  ARROW_ASSIGN_OR_RAISE(auto physical,
+                        logical_to_physical({static_cast<int64_t>(start), static_cast<int64_t>(end - 1)}));
+  auto physical_start = static_cast<uint64_t>(physical.front());
+  auto physical_end = static_cast<uint64_t>(physical.back()) + 1;
   ARROW_ASSIGN_OR_RAISE(auto source, direct_file_reader_->read_with_range(physical_start, physical_end));
   return std::make_shared<DirectDeletionReader>(std::move(source), physical_start, metadata_->payload.sorted_deletions);
 }

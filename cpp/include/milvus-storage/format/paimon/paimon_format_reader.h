@@ -79,7 +79,8 @@ class PaimonFormatReader final : public FormatReader {
 
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> filter_direct_batch(
       const std::shared_ptr<arrow::RecordBatch>& batch, uint64_t physical_start) const;
-  [[nodiscard]] uint64_t logical_to_physical(uint64_t logical_offset) const;
+  [[nodiscard]] arrow::Result<std::vector<int64_t>> logical_to_physical(
+      const std::vector<int64_t>& logical_offsets) const;
 
   MetaTrait::MetadataPtr metadata_;
   api::ColumnGroupFile file_;
