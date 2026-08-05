@@ -559,10 +559,19 @@ TEST(PaimonBridgeErrorClassification, MarkersMapToArrowStatuses) {
   EXPECT_TRUE(paimon::MakePaimonBridgeErrorStatus("[paimon:error=not-implemented] direct-file does not support orc")
                   .IsNotImplemented());
 
+  auto not_found = paimon::MakePaimonBridgeErrorStatus("[paimon:error=not-found] missing object");
+  EXPECT_TRUE(not_found.IsIOError());
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(not_found), ENOENT);
+
   auto transient = paimon::MakePaimonBridgeErrorStatus("[paimon:error=transient-throttling] object store rate limit");
   auto detail = ExtendStatusDetail::UnwrapStatus(transient);
   ASSERT_NE(detail, nullptr);
   EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientThrottling);
+
+  transient = paimon::MakePaimonBridgeErrorStatus("[paimon:error=transient-service] object store unavailable");
+  detail = ExtendStatusDetail::UnwrapStatus(transient);
+  ASSERT_NE(detail, nullptr);
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientService);
 
   EXPECT_TRUE(paimon::MakePaimonBridgeErrorStatus("unclassified storage failure").IsIOError());
 }
