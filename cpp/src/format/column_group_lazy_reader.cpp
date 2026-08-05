@@ -210,14 +210,15 @@ ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file_async(size_t file_index
                             })
         .deferValue([file, read_schema = schema_, needed_columns = needed_columns_](
                         arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>&& metadata_result)
-                        -> arrow::Result<std::shared_ptr<ReaderT>> {
-          ARROW_ASSIGN_OR_RAISE(auto metadata, std::move(metadata_result));
-          return FormatReader::create_from_metadata<ReaderT>(std::move(metadata), file, read_schema, needed_columns,
-                                                             "");
+                        -> folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> {
+          FOLLY_ARROW_ASSIGN_OR_RAISE(auto metadata, std::move(metadata_result));
+          return ReaderT::MetaTrait::create_from_metadata_async(std::move(metadata), file, read_schema, needed_columns,
+                                                                "");
         });
   }
 
-  // Synchronous metadata formats may block here before returning their ready future.
+  // Formats without a complete async metadata path may block here before
+  // returning their ready future.
   return folly::makeSemiFuture(open_reader_for_file(file_index));
 }
 

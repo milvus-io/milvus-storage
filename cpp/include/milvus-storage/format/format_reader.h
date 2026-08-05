@@ -217,15 +217,23 @@ concept FormatReaderWithMetadata =
       { metadata->file_schema } -> std::same_as<const std::shared_ptr<arrow::Schema>&>;
     };
 
-// Identifies formats whose immutable metadata loader itself returns a future;
-// other formats use the synchronous cache fallback.
+// Identifies formats whose immutable metadata load and reader reconstruction
+// both return futures; other formats use the synchronous cache fallback.
 template <typename ReaderT>
 concept FormatReaderWithAsyncMetadata =
-    FormatReaderWithMetadata<ReaderT> &&
-    requires(const api::ColumnGroupFile& file, const api::Properties& properties, const KeyRetriever& key_retriever) {
+    FormatReaderWithMetadata<ReaderT> && requires(const api::ColumnGroupFile& file,
+                                                  const api::Properties& properties,
+                                                  const KeyRetriever& key_retriever,
+                                                  typename ReaderT::MetaTrait::MetadataPtr metadata,
+                                                  const std::shared_ptr<arrow::Schema>& read_schema,
+                                                  const std::vector<std::string>& needed_columns,
+                                                  const std::string& predicate) {
       {
         ReaderT::MetaTrait::load_metadata_async(file, properties, key_retriever)
       } -> std::same_as<folly::SemiFuture<arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>>>;
+      {
+        ReaderT::MetaTrait::create_from_metadata_async(metadata, file, read_schema, needed_columns, predicate)
+      } -> std::same_as<folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>>>;
     };
 
 template <typename ReaderT>

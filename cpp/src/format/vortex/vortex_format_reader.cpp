@@ -533,6 +533,19 @@ arrow::Result<std::shared_ptr<VortexFormatReader>> VortexFormatReader::MetaTrait
   return reader;
 }
 
+folly::SemiFuture<arrow::Result<std::shared_ptr<VortexFormatReader>>>
+VortexFormatReader::MetaTrait::create_from_metadata_async(MetadataPtr metadata,
+                                                          const api::ColumnGroupFile& file,
+                                                          const std::shared_ptr<arrow::Schema>& read_schema,
+                                                          const std::vector<std::string>& needed_columns,
+                                                          const std::string& predicate) {
+  return folly::makeSemiFuture().deferValue(
+      [metadata = std::move(metadata), file, read_schema, needed_columns,
+       predicate](folly::Unit) -> arrow::Result<std::shared_ptr<VortexFormatReader>> {
+        return create_from_metadata(std::move(metadata), file, read_schema, needed_columns, predicate);
+      });
+}
+
 VortexFormatReader::VortexFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                        const std::shared_ptr<arrow::Schema>& schema,
                                        const std::string& path,
