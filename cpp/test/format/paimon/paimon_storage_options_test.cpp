@@ -123,7 +123,7 @@ TEST(PaimonStorageOptionsTest, GcpStaticAndAnonymous) {
 
   ASSERT_AND_ASSIGN(auto options, ToStorageOptions(config));
   EXPECT_EQ(options.at("gcs.endpoint"), "https://storage.googleapis.com");
-  EXPECT_EQ(options.at("gcs.credential"), config.gcp_credential_json);
+  EXPECT_EQ(options.at("gcs.credential"), "eyJ0eXBlIjoic2VydmljZV9hY2NvdW50In0=");
   EXPECT_EQ(options.at("gcs.allow-anonymous"), "true");
 }
 

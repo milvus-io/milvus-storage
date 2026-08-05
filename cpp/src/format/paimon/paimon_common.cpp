@@ -14,6 +14,8 @@
 
 #include <cstdlib>
 
+#include <arrow/util/base64.h>
+
 namespace milvus_storage::paimon {
 
 arrow::Result<std::unordered_map<std::string, std::string>> ToStorageOptions(const ArrowFileSystemConfig& config) {
@@ -74,7 +76,7 @@ arrow::Result<std::unordered_map<std::string, std::string>> ToStorageOptions(con
   }
   if (config.cloud_provider == kCloudProviderGCP) {
     set("gcs.endpoint", endpoint());
-    set("gcs.credential", config.gcp_credential_json);
+    set("gcs.credential", arrow::util::base64_encode(config.gcp_credential_json));
     if (config.gcp_native_without_auth) {
       options["gcs.allow-anonymous"] = "true";
     }
