@@ -182,6 +182,12 @@ arrow::Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::Record
 
     ARROW_RETURN_NOT_OK(balanceMaxHeap());
     return arrow::Status::OK();
+  } catch (const std::bad_alloc&) {
+    // Ahead of the generic handler on purpose: bad_alloc reaching that one was
+    // relabelled PackedUnexpected, i.e. permanent, so the OOM inference added at the FFI
+    // boundary never saw it. Memory pressure is retriable -- another node, or
+    // this one later, may have the memory.
+    return arrow::Status::OutOfMemory("Packed writer write ran out of memory");
   } catch (const std::exception& e) {
     return MakeExtendError(ExtendStatusCode::PackedUnexpected,
                            fmt::format("Packed writer write failed unexpectedly: {}", e.what()));
@@ -209,6 +215,11 @@ arrow::Status PackedRecordBatchWriter::Close() {
       closed_ = true;
     }
     return status;
+  } catch (const std::bad_alloc&) {
+    // Answered before the generic handler: routed there, memory pressure --
+    // the one condition a retry is most likely to resolve -- came back
+    // permanent. Enforced by cpp/scripts/check_oom_handlers.py.
+    return arrow::Status::OutOfMemory("Packed writer close ran out of memory");
   } catch (const std::exception& e) {
     return MakeExtendError(ExtendStatusCode::PackedUnexpected,
                            fmt::format("Packed writer close failed unexpectedly: {}", e.what()));
@@ -231,6 +242,11 @@ arrow::Result<std::vector<size_t>> PackedRecordBatchWriter::Tell() const {
       positions[writer_idx] = tell_result.ValueOrDie();
     }
     return positions;
+  } catch (const std::bad_alloc&) {
+    // Answered before the generic handler: routed there, memory pressure --
+    // the one condition a retry is most likely to resolve -- came back
+    // permanent. Enforced by cpp/scripts/check_oom_handlers.py.
+    return arrow::Status::OutOfMemory("Packed writer tell ran out of memory");
   } catch (const std::exception& e) {
     return MakeExtendError(ExtendStatusCode::PackedUnexpected,
                            fmt::format("Packed writer tell failed unexpectedly: {}", e.what()));

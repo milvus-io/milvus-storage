@@ -21,6 +21,7 @@
 
 #include <arrow/status.h>
 #include <arrow/result.h>
+#include <arrow/util/string_builder.h>
 
 #include "milvus-storage/ffi_internal/ffi_error_code.h"
 
@@ -28,36 +29,54 @@
 #include "common/EasyAssert.h"
 
 namespace milvus_storage {
+
+/// \brief Whose problem an error is, and therefore whether retrying can help.
+///
+/// This is the single classification axis; `retryable` is derived from it
+/// (`retryable == (Transient || Conflict)`). See the invariant documented in
+/// ffi_error_code.h. Values match the LOON_ERROR_CATEGORY_* constants so the
+/// same number crosses the C ABI.
+enum class ErrorCategory : char {
+  /// The code is outside the documented set -- a producer newer than this
+  /// consumer. Must be handled as Permanent: never retry what you cannot
+  /// classify. No producer ever emits this.
+  Unknown = LOON_ERROR_CATEGORY_UNKNOWN,
+  /// The caller's request is wrong. Return it to the caller; do not alert.
+  User = LOON_ERROR_CATEGORY_USER,
+  /// The deployment is wrong (credentials, endpoint, unusable properties).
+  /// Alert an operator; do not blame the caller.
+  Config = LOON_ERROR_CATEGORY_CONFIG,
+  /// May clear on its own. Retry with normal backoff.
+  Transient = LOON_ERROR_CATEGORY_TRANSIENT,
+  /// Someone else won a race. Re-read state, rebase, re-submit. Replaying the
+  /// same bytes fails identically.
+  Conflict = LOON_ERROR_CATEGORY_CONFLICT,
+  /// The named object is not there. Re-read the metadata, THEN decide -- this
+  /// layer deliberately does not answer the retry question, because it cannot
+  /// tell a GC race from real data loss and will not invent an answer.
+  /// Only a producer holding a definitive not-found from the store may say
+  /// this; it is never inferred from an unclassified failure.
+  Missing = LOON_ERROR_CATEGORY_MISSING,
+  /// The bytes are wrong. Act on the DATA: quarantine, re-fetch from a replica,
+  /// rebuild. Only a producer that actually PARSED the bytes and found them
+  /// malformed may say this -- see the CoarseFallbackNeverClaimsCorruption test
+  /// for the machine-checked form of that rule.
+  Corrupted = LOON_ERROR_CATEGORY_CORRUPTED,
+  /// Our bug. Alert a developer; never retry.
+  Permanent = LOON_ERROR_CATEGORY_PERMANENT,
+};
+
+/// \brief Error codes that can be attached to an arrow::Status and survive to
+/// the FFI / segcore boundary.
+///
+/// Generated from LOON_EXTEND_STATUS_CODE_LIST -- see ffi_error_code.h for the
+/// table, including each code's category and its AWS S3 / Aliyun OSS
+/// counterpart. Values are the C ABI contract and must never be renumbered.
+/// arrow::StatusCode's largest value is 45, so these all start at 50.
 enum class ExtendStatusCode : char {
-  // arrow::StatusCode biggest is 45.
-  // Packed-specific error codes.
-  PackedInvalidArgs = 50,
-  PackedStorageIO = 51,
-  PackedMetadataCorrupted = 52,
-  PackedFileCorrupted = 53,
-  PackedArrowError = 54,
-  PackedUnexpected = 55,
-
-  AwsErrorNoSuchUpload = LOON_AWS_ERROR_NO_SUCH_UPLOAD,
-  AwsErrorConflict = LOON_AWS_ERROR_CONFLICT,
-  AwsErrorPreConditionFailed = LOON_AWS_ERROR_PRECONDITION_FAILED,
-  // Permanently-failing object-storage errors that must NOT be classified as
-  // transient/retriable by consumers: the object/bucket is gone (retrying or
-  // rerouting to another replica hits the same shared object store and fails
-  // identically), the credentials/permissions are wrong, or the AWS SDK itself
-  // judged the error non-retryable (AWSError::ShouldRetry() == false).
-  AwsErrorNotFound = LOON_AWS_ERROR_NOT_FOUND,          // NoSuchKey / NoSuchBucket / ResourceNotFound
-  AwsErrorAccessDenied = LOON_AWS_ERROR_ACCESS_DENIED,  // AccessDenied / InvalidAccessKeyId / SignatureDoesNotMatch
-  AwsErrorNonRetryable = LOON_AWS_ERROR_NON_RETRYABLE,  // any other error with ShouldRetry() == false
-
-  StorageTransientNetwork = LOON_TRANSIENT_NETWORK,
-  StorageTransientTimeout = LOON_TRANSIENT_TIMEOUT,
-  StorageTransientThrottling = LOON_TRANSIENT_THROTTLING,
-  StorageTransientService = LOON_TRANSIENT_SERVICE,
-
-  // Transaction-specific error codes
-  TxnExhaustedRetry = LOON_TXN_EXHAUSTED_RETRY,
-  TxnResolutionFailed = LOON_TXN_RESOLUTION_FAILED,
+#define MILVUS_STORAGE_EXTEND_STATUS_ENUM_ENTRY(name, code, symbol, category, s3_code) name = (code),
+  LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_EXTEND_STATUS_ENUM_ENTRY)
+#undef MILVUS_STORAGE_EXTEND_STATUS_ENUM_ENTRY
 };
 
 class ExtendStatusDetail : public arrow::StatusDetail {
@@ -76,7 +95,12 @@ class ExtendStatusDetail : public arrow::StatusDetail {
   /// \brief Get the extra error info
   [[nodiscard]] std::string extra_info() const;
 
+  /// \brief Whether retrying can help. Derived from the code, not stored.
   [[nodiscard]] bool retryable() const;
+
+  /// \brief Who owns this failure, and what the consumer should do about it.
+  /// Derived from the code, never stored.
+  [[nodiscard]] ErrorCategory category() const;
 
   /// \brief Get the human-readable name of the status code.
   [[nodiscard]] std::string CodeAsString() const;
@@ -94,13 +118,62 @@ class ExtendStatusDetail : public arrow::StatusDetail {
   private:
   ExtendStatusCode code_;
   std::string extra_info_;
-  bool retryable_ = false;
+
+  // Reserved: written once by its own initializer, never read, never assigned.
+  // This used to be `bool retryable_`, a stored copy of state that is now
+  // derived from the code -- storing it was how the two answers drifted apart,
+  // which is the whole point of this class.
+  //
+  // The byte stays because removing it is an ABI break, not a cleanup. This
+  // class ships in an installed header, its constructors are exported from the
+  // shared library, and the project sets no SOVERSION; dropping the field
+  // shrinks every instance by one bool plus its padding, so a consumer compiled
+  // against the old header reads past an allocation the library made at the new
+  // size. Reclaim it in a release that bumps the ABI on purpose.
+  //
+  // The guard against that lives in extend_status.cpp rather than here. It has
+  // to compare against a mirror of these members, not a constant: the absolute
+  // size is platform-dependent, because libc++'s std::string is 24 bytes and
+  // libstdc++'s is 32.
+  bool reserved_was_retryable_ = false;
 };
 
 std::optional<ExtendStatusCode> ExtendStatusCodeFromInt(int code);
-bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code);
+
+/// \brief The category of an ExtendStatusCode: who owns the failure.
+ErrorCategory CategoryForExtendStatusCode(ExtendStatusCode code);
+
+/// \brief Whether retrying can help: true iff the category is Transient or
+/// Conflict.
+///
+/// Derived from the code, never stored. Storing it would create a second source
+/// of truth that nothing keeps in sync -- when AwsErrorNoSuchUpload moved from
+/// Conflict to Missing, deriving made every existing and future detail correct
+/// at once, whereas a stored copy would have left every already-constructed
+/// one, and every producer that passed the old value, silently wrong.
+///
+/// (Was DefaultRetryableForExtendStatusCode. The prefix was a leftover from
+/// when the value could be supplied at construction, and implied a non-default
+/// answer exists. It does not.)
+bool RetryableForExtendStatusCode(ExtendStatusCode code);
+
+/// \brief The AWS S3 / Aliyun OSS error code this maps to, or "" when the
+/// condition has no object-storage counterpart (packed/transaction codes).
+std::string_view S3CodeForExtendStatusCode(ExtendStatusCode code);
 
 arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info = "");
+
+/// \brief Variadic form, mirroring `arrow::Status::Invalid(a, b, c)`.
+///
+/// Exists so that an already-correct site that builds its message out of pieces
+/// can be given a classification without rewriting how it builds that message.
+/// Every unclassified `Status::Invalid(...)` we convert is one fewer failure
+/// that reaches segcore as an untyped IOError, so the conversion needs to be
+/// cheap enough that nobody skips it.
+template <typename... Args>
+arrow::Status MakeExtendErrorMsg(ExtendStatusCode code, Args&&... args) {
+  return MakeExtendError(code, arrow::util::StringBuilder(std::forward<Args>(args)...));
+}
 
 arrow::Status WrapExtendError(ExtendStatusCode code, std::string message, const arrow::Status& cause);
 

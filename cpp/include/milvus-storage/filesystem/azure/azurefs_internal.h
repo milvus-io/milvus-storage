@@ -59,9 +59,26 @@ namespace internal {
 /// \param transport_failure true only for `Azure::Core::Http::TransportException`
 ///        -- the request never reached the service (connection refused/reset,
 ///        DNS, TLS). `http_status` is ignored when this is set.
+/// \param reason_phrase the exception's ReasonPhrase, used only to tell a
+///        missing CONTAINER from a missing blob on a 404. Azure sometimes
+///        leaves ErrorCode empty and says it there instead -- the same reason
+///        IsContainerNotFound checks both. Defaulted so the many call sites
+///        that only have a status and an error code keep compiling; omitting it
+///        costs nothing but the container/blob distinction.
+/// Error code the SAS policy stamps on a synthetic response when the broker
+/// could not be reached at all.
+///
+/// HTTP has no status meaning "the connection dropped", and the policy can
+/// only answer with a response -- so the transient SUBTYPE travels in the
+/// error code. Without it a transport failure was reported as a service blip:
+/// still retriable, but network problems vanished from the metrics that would
+/// show them.
+inline constexpr const char* kSyntheticBrokerNetworkErrorCode = "LoonBrokerNetworkFailure";
+
 std::optional<milvus_storage::ExtendStatusCode> ClassifyAzureError(int http_status,
                                                                    std::string_view error_code,
-                                                                   bool transport_failure);
+                                                                   bool transport_failure,
+                                                                   std::string_view reason_phrase = {});
 
 enum class HierarchicalNamespaceSupport {
   kUnknown = 0,

@@ -30,8 +30,10 @@
 namespace milvus_storage::fs::internal {
 namespace {
 
-milvus::ErrorCode SegcoreCodeFor(int http_status, std::string_view error_code = "") {
-  auto code = ClassifyAzureError(http_status, error_code, /*transport_failure=*/false);
+milvus::ErrorCode SegcoreCodeFor(int http_status,
+                                 std::string_view error_code = "",
+                                 std::string_view reason_phrase = "") {
+  auto code = ClassifyAzureError(http_status, error_code, /*transport_failure=*/false, reason_phrase);
   if (!code.has_value()) {
     // Untagged: this is what the caller actually produces -- a plain IOError.
     return ToSegcoreError(arrow::Status::IOError("azure failure")).get_error_code();
@@ -64,7 +66,7 @@ TEST(AzureErrorClassification, TransientStatusesAreRetriable) {
     auto code = ClassifyAzureError(c.http_status, c.error_code, /*transport_failure=*/false);
     ASSERT_TRUE(code.has_value()) << c.http_status << " " << c.error_code;
     EXPECT_EQ(*code, c.expected) << c.http_status << " " << c.error_code;
-    EXPECT_TRUE(DefaultRetryableForExtendStatusCode(*code)) << c.http_status;
+    EXPECT_TRUE(RetryableForExtendStatusCode(*code)) << c.http_status;
     EXPECT_EQ(ToSegcoreErrorCode(*code), milvus::StorageTransientError) << c.http_status;
   }
 
@@ -73,7 +75,7 @@ TEST(AzureErrorClassification, TransientStatusesAreRetriable) {
   auto transport = ClassifyAzureError(0, "", /*transport_failure=*/true);
   ASSERT_TRUE(transport.has_value());
   EXPECT_EQ(*transport, ExtendStatusCode::StorageTransientNetwork);
-  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(*transport));
+  EXPECT_TRUE(RetryableForExtendStatusCode(*transport));
 }
 
 // The counter-example that makes `transport_failure` load-bearing.
@@ -96,7 +98,7 @@ TEST(AzureErrorClassification, StatusZeroWithoutTransportIsNotRetriable) {
   EXPECT_EQ(ToSegcoreErrorCode(*transport), milvus::StorageTransientError);
 }
 
-TEST(AzureErrorClassification, PermanentStatusesAreNotRetriable) {
+TEST(AzureErrorClassification, NonRetriableStatusesNeverLookTransient) {
   struct Case {
     int http_status;
     std::string_view error_code;
@@ -107,21 +109,50 @@ TEST(AzureErrorClassification, PermanentStatusesAreNotRetriable) {
       // Not-found is fine-grained: a consumer can tell "data missing" from a
       // generic storage failure, matching what the S3 path already reports.
       {404, "BlobNotFound", ExtendStatusCode::AwsErrorNotFound, milvus::ObjectNotExist},
-      {401, "", ExtendStatusCode::AwsErrorAccessDenied, milvus::StorageError},
-      {403, "AuthenticationFailed", ExtendStatusCode::AwsErrorAccessDenied, milvus::StorageError},
-      {412, "ConditionNotMet", ExtendStatusCode::AwsErrorPreConditionFailed, milvus::StorageError},
-      {409, "BlobAlreadyExists", ExtendStatusCode::AwsErrorPreConditionFailed, milvus::StorageError},
+      // Config, not Permanent: the credentials are operator configuration, so
+      // this has to reach whoever owns the deployment (2006) rather than be
+      // filed as a generic storage failure (2044). Non-retriable either way.
+      {401, "", ExtendStatusCode::AwsErrorAccessDenied, milvus::ConfigInvalid},
+      {403, "AuthenticationFailed", ExtendStatusCode::AwsErrorAccessDenied, milvus::ConfigInvalid},
   };
 
   for (const auto& c : cases) {
     auto code = ClassifyAzureError(c.http_status, c.error_code, /*transport_failure=*/false);
     ASSERT_TRUE(code.has_value()) << c.http_status << " " << c.error_code;
     EXPECT_EQ(*code, c.expected) << c.http_status;
-    EXPECT_FALSE(DefaultRetryableForExtendStatusCode(*code)) << c.http_status;
+    EXPECT_FALSE(RetryableForExtendStatusCode(*code)) << c.http_status;
     EXPECT_EQ(ToSegcoreErrorCode(*code), c.segcore) << c.http_status;
-    // A permanent failure must never look transient, or a consumer retry-storms
-    // a request that can never succeed.
+    // A non-retriable failure must never look transient, or a consumer
+    // retry-storms a request that can never succeed.
     EXPECT_NE(ToSegcoreErrorCode(*code), milvus::StorageTransientError) << c.http_status;
+  }
+}
+
+// 412 and 409-already-exists used to sit in the test above, asserted permanent
+// and non-retriable. They are Conflict: someone else won a race, and unlike a
+// permanent failure a retry CAN succeed -- but only a re-read-then-retry, not a
+// resend of the same conditional request, which fails identically forever.
+//
+// That is why Conflict is its own category rather than part of Transient, and
+// why these cases need their own test: the two properties a permanent failure
+// has (never retry, never look transient) are exactly the two these do not.
+TEST(AzureErrorClassification, PreconditionFailuresAreConflictNotPermanent) {
+  struct Case {
+    int http_status;
+    std::string_view error_code;
+  };
+  const Case cases[] = {
+      {412, "ConditionNotMet"},
+      {409, "BlobAlreadyExists"},
+  };
+
+  for (const auto& c : cases) {
+    auto code = ClassifyAzureError(c.http_status, c.error_code, /*transport_failure=*/false);
+    ASSERT_TRUE(code.has_value()) << c.http_status << " " << c.error_code;
+    EXPECT_EQ(*code, ExtendStatusCode::AwsErrorPreConditionFailed) << c.http_status;
+    EXPECT_EQ(CategoryForExtendStatusCode(*code), ErrorCategory::Conflict) << c.http_status;
+    EXPECT_TRUE(RetryableForExtendStatusCode(*code)) << c.http_status;
+    EXPECT_EQ(ToSegcoreErrorCode(*code), milvus::StorageTransientError) << c.http_status;
   }
 }
 
@@ -136,6 +167,15 @@ TEST(AzureErrorClassification, UnidentifiedStatusesStayUntagged) {
 
   // 409 that is not "already exists" is a different condition; not guessed at.
   EXPECT_FALSE(ClassifyAzureError(409, "LeaseIdMissing", /*transport_failure=*/false).has_value());
+
+  // 412 gets the same treatment, which it did not used to. Azure answers 412
+  // both for a genuine etag mismatch and for lease problems; classifying every
+  // 412 as a precondition conflict was a guess, and it sat directly above the
+  // 409 case that already refused to guess.
+  EXPECT_FALSE(ClassifyAzureError(412, "LeaseIdMismatchWithBlobOperation", /*transport_failure=*/false).has_value());
+  EXPECT_FALSE(ClassifyAzureError(412, "LeaseNotPresentWithBlobOperation", /*transport_failure=*/false).has_value());
+  EXPECT_FALSE(ClassifyAzureError(412, "", /*transport_failure=*/false).has_value());
+  EXPECT_EQ(SegcoreCodeFor(412, "LeaseIdMismatchWithBlobOperation"), milvus::StorageError);
   EXPECT_EQ(SegcoreCodeFor(409, "LeaseIdMissing"), milvus::StorageError);
 }
 
@@ -150,6 +190,36 @@ TEST(AzureErrorClassification, ClosesTheTwoGapsFrom595) {
   // (b) A missing blob is distinguishable from a generic storage failure.
   EXPECT_EQ(SegcoreCodeFor(404, "BlobNotFound"), milvus::ObjectNotExist);
   EXPECT_NE(SegcoreCodeFor(404, "BlobNotFound"), SegcoreCodeFor(400, ""));
+}
+
+// A missing container is a deployment mistake, a missing blob may be a GC race.
+// Azure answers 404 to both; before this split the consumer was told to re-read
+// its metadata in a case where no metadata could ever produce a container.
+TEST(AzureErrorClassification, MissingContainerIsConfigNotMissing) {
+  // Azure reports it either way -- ErrorCode when it has one, ReasonPhrase when
+  // it does not. Both must reach the same verdict, or the classification would
+  // depend on which form the service happened to send.
+  const std::vector<std::pair<std::string_view, std::string_view>> container_gone = {
+      {"ContainerNotFound", ""},
+      {"", "The specified container does not exist."},
+      {"", "The specified filesystem does not exist."},
+  };
+  for (const auto& [error_code, reason] : container_gone) {
+    auto code = ClassifyAzureError(404, error_code, /*transport_failure=*/false, reason);
+    ASSERT_TRUE(code.has_value()) << error_code << "/" << reason;
+    EXPECT_EQ(*code, ExtendStatusCode::AwsErrorBucketNotFound) << error_code << "/" << reason;
+    EXPECT_EQ(CategoryForExtendStatusCode(*code), ErrorCategory::Config) << error_code << "/" << reason;
+    EXPECT_EQ(SegcoreCodeFor(404, error_code, reason), milvus::BucketInvalid) << error_code << "/" << reason;
+  }
+
+  // A missing blob keeps the old verdict. This is the half that must NOT move:
+  // upgrading it to Config would page an operator for what is routinely a GC
+  // race the consumer resolves by itself.
+  auto blob = ClassifyAzureError(404, "BlobNotFound", /*transport_failure=*/false, "");
+  ASSERT_TRUE(blob.has_value());
+  EXPECT_EQ(*blob, ExtendStatusCode::AwsErrorNotFound);
+  EXPECT_EQ(CategoryForExtendStatusCode(*blob), ErrorCategory::Missing);
+  EXPECT_EQ(SegcoreCodeFor(404, "BlobNotFound"), milvus::ObjectNotExist);
 }
 
 }  // namespace milvus_storage::fs::internal

@@ -298,7 +298,11 @@ static void test_exttable_get_file_info_directory_error(const char* format) {
   rc = loon_exttable_get_file_info(format, relative_path, &rp, &num_rows);
 
   ck_assert(!loon_ffi_is_success(&rc));
-  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  /* The path came from the user's external-source definition and points at a
+     directory. That is their input being wrong, not the API being misused, so
+     it re-tags to SOURCE_INVALID rather than staying INVALID_ARGS -- the same
+     move made for the not-found case. */
+  ck_assert_int_eq(rc.err_code, loon_errcode_source_invalid);
   ck_assert(rc.message != NULL);
   printf("Expected error for directory: %s\n", loon_ffi_get_errmsg(&rc));
 
@@ -342,7 +346,9 @@ static void test_exttable_get_file_info_invalid_format(void) {
   rc = loon_exttable_get_file_info("invalid_format", file_path, &rp, &num_rows);
 
   ck_assert(!loon_ffi_is_success(&rc));
-  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  /* The format came from the user's external-source definition, so an
+     unrecognised format is a user error. */
+  ck_assert_int_eq(rc.err_code, loon_errcode_source_invalid);
   ck_assert(rc.message != NULL);
   printf("Expected error: %s\n", loon_ffi_get_errmsg(&rc));
 
@@ -364,12 +370,71 @@ static void test_exttable_get_file_info_file_not_found(void) {
   rc = loon_exttable_get_file_info("parquet", "/tmp/nonexistent-path-12345.parquet", &rp, &num_rows);
 
   ck_assert(!loon_ffi_is_success(&rc));
-  ck_assert_int_eq(rc.err_code, loon_errcode_file_not_found);
+  // The path came from the caller, so this is a user error, not a system
+  // failure on an internally generated path (which is loon_errcode_file_not_found).
+  ck_assert_int_eq(rc.err_code, loon_errcode_source_invalid);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  ck_assert(!loon_ffi_is_retryable_errcode(rc.err_code));
   ck_assert(rc.message != NULL);
   printf("Expected error: %s\n", loon_ffi_get_errmsg(&rc));
 
   // Clean up
   loon_ffi_free_result(&rc);
+  loon_properties_free(&rp);
+}
+
+/* The real Milvus caller passes one mixed property map: deployment fs.* and
+   writer.* values plus user-source extfs.<collection>.* values.
+
+   ConvertFFIProperties validates registered top-level properties here;
+   extfs.* is copied through and validated later, where the entry point still
+   has enough context to classify it as LOON_SOURCE_INVALID. Therefore a
+   failure in this branch belongs to deployment configuration, not the user. */
+static void test_exttable_top_level_property_value_is_config_error(void) {
+  const char* keys[] = {"fs.storage_type", "extfs.42.storage_type"};
+  const char* vals[] = {"not-a-storage-type", "remote"};
+  const char* columns[] = {"a"};
+  LoonProperties rp;
+  uint64_t num_rows = 0;
+  uint64_t num_files = 0;
+  char* cg_path = NULL;
+
+  LoonFFIResult rc = loon_properties_create(keys, vals, 2, &rp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "structural creation must not validate values: %s", loon_ffi_get_errmsg(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_exttable_get_file_info("parquet", "/tmp/whatever.parquet", &rp, &num_rows);
+
+  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_properties);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_config);
+  ck_assert(!loon_ffi_is_retryable_errcode(rc.err_code));
+  ck_assert(rc.message != NULL);
+  /* Assert WHICH branch answered, not just what it answered. Without this the
+     test passes for the wrong reason: /tmp/whatever.parquet does not exist, so
+     a valid property value merely walks further into the same function and
+     trips the not-found guard, which returns the same code 13, the same User
+     category and the same non-NULL message. Mutation-checked -- replacing the
+     bad value with "local" left every other assertion here satisfied. */
+  ck_assert_msg(strstr(loon_ffi_get_errmsg(&rc), "Failed to parse properties") != NULL,
+                "expected the property-validator branch, got: %s", loon_ffi_get_errmsg(&rc));
+  printf("Expected error for bad property value: %s\n", loon_ffi_get_errmsg(&rc));
+  loon_ffi_free_result(&rc);
+
+  /* The same mixed map reaches explore(). The paths below are never reached --
+     ConvertFFIProperties runs before any of them is touched. */
+  rc = loon_exttable_explore((const char**)columns, 1, "parquet", "/tmp/whatever-base", "/tmp/whatever-dir", &rp,
+                             &num_files, &cg_path);
+
+  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_properties);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_config);
+  ck_assert(!loon_ffi_is_retryable_errcode(rc.err_code));
+  ck_assert_msg(strstr(loon_ffi_get_errmsg(&rc), "Failed to parse properties") != NULL,
+                "expected the property-validator branch, got: %s", loon_ffi_get_errmsg(&rc));
+  printf("Expected explore error for bad property value: %s\n", loon_ffi_get_errmsg(&rc));
+  loon_ffi_free_result(&rc);
+
   loon_properties_free(&rp);
 }
 
@@ -716,6 +781,32 @@ static void test_exttable_explore_file_paths_valid(void) {
   loon_properties_free(&rp);
 }
 
+static void test_exttable_read_manifest_missing_is_not_user_error(void) {
+  LoonFFIResult rc;
+  LoonProperties rp;
+  LoonManifest* out_cmanifest = NULL;
+
+  rc = create_test_external_pp(&rp, "parquet");
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  /* The manifest path is generated by loon_exttable_explore and stored by
+     milvus -- never typed by a user. A manifest that is gone is a GC race or
+     lost data: Missing, so milvus re-reads its metadata and decides.
+     Re-tagging it to SOURCE_INVALID told a user their request was wrong for a
+     file they never named. */
+  rc = loon_exttable_read_manifest("/tmp/nonexistent-manifest-dir-98765/manifest_v1.avro", &rp, &out_cmanifest);
+
+  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, loon_errcode_file_not_found);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_missing);
+  ck_assert(!loon_ffi_is_retryable_errcode(rc.err_code));
+  ck_assert(rc.message != NULL);
+  printf("Expected error for missing manifest: %s\n", loon_ffi_get_errmsg(&rc));
+
+  loon_ffi_free_result(&rc);
+  loon_properties_free(&rp);
+}
+
 void run_external_suite(void) {
   RUN_TEST(test_exttable_explore_and_read);
   RUN_TEST(test_exttable_explore_file_paths_valid);
@@ -725,6 +816,8 @@ void run_external_suite(void) {
   RUN_TEST(test_exttable_get_file_info_directory_error_vortex);
   RUN_TEST(test_exttable_get_file_info_invalid_format);
   RUN_TEST(test_exttable_get_file_info_file_not_found);
+  RUN_TEST(test_exttable_read_manifest_missing_is_not_user_error);
+  RUN_TEST(test_exttable_top_level_property_value_is_config_error);
   RUN_TEST(test_column_groups_create);
   RUN_TEST(test_column_groups_create_then_read);
 }

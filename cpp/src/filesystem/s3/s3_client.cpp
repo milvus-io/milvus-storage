@@ -154,7 +154,7 @@ arrow::Result<std::string> S3Client::GetBucketRegionFromError(const std::string&
     return region;
   } else if (error.GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
     // Permanent: the bucket does not exist; a retry/reroute fails identically.
-    return MakeExtendError(ExtendStatusCode::AwsErrorNotFound, "Bucket '" + bucket + "' not found",
+    return MakeExtendError(ExtendStatusCode::AwsErrorBucketNotFound, "Bucket '" + bucket + "' not found",
                            "" /* extra_info */);
   } else {
     return arrow::Status::IOError("When resolving region for bucket: ", bucket);
@@ -176,7 +176,7 @@ arrow::Result<std::string> S3Client::GetBucketRegion(const std::string& bucket,
     return region;
   } else if (outcome.GetResult().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
     // Permanent: the bucket does not exist; a retry/reroute fails identically.
-    return MakeExtendError(ExtendStatusCode::AwsErrorNotFound,
+    return MakeExtendError(ExtendStatusCode::AwsErrorBucketNotFound,
                            "Bucket '" + std::string(request.GetBucket().c_str()) + "' not found", "" /* extra_info */);
   } else {
     return arrow::Status::IOError("When resolving region for bucket '", request.GetBucket(),

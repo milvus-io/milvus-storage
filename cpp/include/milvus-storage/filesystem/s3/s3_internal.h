@@ -96,6 +96,24 @@ inline std::optional<std::string> BucketRegionFromError(const Aws::Client::AWSEr
   return std::nullopt;
 }
 
+/// \brief Existence predicate: "is this path absent?" -- NOT a classification.
+///
+/// Deliberately still groups NO_SUCH_BUCKET with not-found, even though the
+/// classifier 70 lines below now splits them (bucket -> Config/BucketInvalid,
+/// key -> Missing/ObjectNotExist). The two answer different questions: a caller
+/// asking "does this exist?" gets the same answer either way, while a caller
+/// asking "whose problem is this?" does not. Both tests in
+/// s3_file_system_test.cpp are therefore correct despite looking contradictory.
+///
+/// Two things about this function are nonetheless suspect, and are left alone
+/// on purpose because it gates control flow at 11 call sites in
+/// s3_filesystem.cpp and changing that does not belong in a classification
+/// change:
+///   * NO_SUCH_KEY is absent, so a genuine missing key returns false here while
+///     the classifier calls it Missing. That looks like a plain omission.
+///   * At s3_filesystem.cpp's allow_not_found gate, a missing BUCKET is
+///     currently swallowed as a benign absent object.
+/// Tracked separately.
 inline bool IsNotFound(const Aws::Client::AWSError<Aws::S3::S3Errors>& error) {
   const auto error_type = error.GetErrorType();
   return (error_type == Aws::S3::S3Errors::NO_SUCH_BUCKET || error_type == Aws::S3::S3Errors::RESOURCE_NOT_FOUND);
@@ -165,9 +183,24 @@ inline std::string S3ErrorToString(Aws::S3::S3Errors error_type) {
 
 inline std::optional<arrow::Status> tryMakePermanentExtendArrowError(Aws::S3::S3Errors error_type,
                                                                      Aws::Http::HttpResponseCode response_code,
-                                                                     const std::string& message) {
+                                                                     const std::string& message,
+                                                                     std::string_view exception_name = {}) {
   switch (error_type) {
+    case Aws::S3::S3Errors::NO_SUCH_UPLOAD:
+      // Lives here, not in tryMakeRetryableExtendArrowError, even though it sat
+      // there for a while. The category comes from the X-macro table rather
+      // than from which helper produced the status, so the output was correct
+      // either way -- but a Missing code in the function whose result the
+      // caller binds to `retryable_status`, alongside REQUEST_TIMEOUT and
+      // SLOW_DOWN, is a trap for the next reader. Its Missing siblings
+      // NO_SUCH_KEY and NO_SUCH_BUCKET are here.
+      return MakeExtendError(ExtendStatusCode::AwsErrorNoSuchUpload, message, message /* extra_info */);
     case Aws::S3::S3Errors::NO_SUCH_BUCKET:
+      // Split out of the not-found group on purpose. A missing bucket is not
+      // data loss and re-reading the manifest cannot conjure one -- the
+      // deployment points somewhere that does not exist, which is a
+      // configuration fix, not an object to go looking for.
+      return MakeExtendError(ExtendStatusCode::AwsErrorBucketNotFound, message, message /* extra_info */);
     case Aws::S3::S3Errors::NO_SUCH_KEY:
     case Aws::S3::S3Errors::RESOURCE_NOT_FOUND:
       return MakeExtendError(ExtendStatusCode::AwsErrorNotFound, message, message /* extra_info */);
@@ -176,10 +209,46 @@ inline std::optional<arrow::Status> tryMakePermanentExtendArrowError(Aws::S3::S3
     case Aws::S3::S3Errors::SIGNATURE_DOES_NOT_MATCH:
       return MakeExtendError(ExtendStatusCode::AwsErrorAccessDenied, message, message /* extra_info */);
     case Aws::S3::S3Errors::UNKNOWN:
+      // The SDK models only a fraction of what a store can answer, and
+      // everything it does not model arrives here nameless. Credential
+      // failures are the ones that matter: ExpiredToken and its relatives left
+      // as bare IOErrors reached an external-table caller as LOON_ARROW_ERROR
+      // -- a generic internal failure -- when the caller's own credentials
+      // were the thing at fault and they are the only one who can fix them.
+      //
+      // Matched on the error NAME as well as the status, because
+      // S3-compatible stores spell 401/403 inconsistently while the token
+      // names are stable across them.
+      // A token that EXPIRED is not the same as a token that is wrong. Role,
+      // IAM and STS providers refresh on the next request -- GetAWSCredentials
+      // calls RefreshIfExpired -- so retrying is exactly what resolves these,
+      // and reporting them as a permanent configuration error stops the retry
+      // that would have worked. A malformed or unauthorised credential is the
+      // configuration error.
+      if (exception_name == "ExpiredToken" || exception_name == "ExpiredTokenException" ||
+          exception_name == "TokenRefreshRequired") {
+        return MakeExtendError(ExtendStatusCode::StorageTransientService, message, message /* extra_info */);
+      }
+      if (exception_name == "InvalidToken" || exception_name == "InvalidAccessKeyId" ||
+          exception_name == "SignatureDoesNotMatch" || exception_name == "AccessDenied" ||
+          exception_name == "InvalidSecurity" || response_code == Aws::Http::HttpResponseCode::UNAUTHORIZED ||
+          response_code == Aws::Http::HttpResponseCode::FORBIDDEN) {
+        return MakeExtendError(ExtendStatusCode::AwsErrorAccessDenied, message, message /* extra_info */);
+      }
       switch (response_code) {
         case Aws::Http::HttpResponseCode::PRECONDITION_FAILED:
           return MakeExtendError(ExtendStatusCode::AwsErrorPreConditionFailed, message, message /* extra_info */);
         case Aws::Http::HttpResponseCode::CONFLICT:
+          // 409 is overloaded. A lost race (conditional write, concurrent
+          // commit) is Conflict: re-read state and re-submit. BucketNotEmpty
+          // and InvalidBucketState are 409s too, but they are answers about
+          // the bucket, not about a race -- replaying cannot change either.
+          // Blocklist the known-permanent shapes rather than allowlist the
+          // races, so the transaction commit path keeps its Conflict verdict
+          // across S3-compatible stores whose race spellings differ.
+          if (exception_name == "BucketNotEmpty" || exception_name == "InvalidBucketState") {
+            return std::nullopt;
+          }
           return MakeExtendError(ExtendStatusCode::AwsErrorConflict, message, message /* extra_info */);
         default:
           return std::nullopt;
@@ -194,8 +263,6 @@ std::optional<arrow::Status> tryMakeRetryableExtendArrowError(const Aws::Client:
                                                               Aws::S3::S3Errors error_type,
                                                               const std::string& message) {
   switch (error_type) {
-    case Aws::S3::S3Errors::NO_SUCH_UPLOAD:
-      return MakeExtendError(ExtendStatusCode::AwsErrorNoSuchUpload, message, message /* extra_info */);
     case Aws::S3::S3Errors::REQUEST_TIMEOUT:
       return MakeExtendError(ExtendStatusCode::StorageTransientTimeout, message, message /* extra_info */);
     case Aws::S3::S3Errors::THROTTLING:
@@ -247,6 +314,41 @@ arrow::Status ErrorToStatus(const std::string& prefix,
   // XXX Handle fine-grained error types
   // See
   // https://sdk.amazonaws.com/cpp/api/LATEST/namespace_aws_1_1_s3.html#ae3f82f8132b619b6e91c88a9f1bde371
+  // CoreErrors and S3Errors share a numeric space only by accident: the S3
+  // enum continues where the core one stops, so casting a core code into it
+  // names whichever S3 error happens to sit at that number. MEMORY_ALLOCATION
+  // (26) is the one that matters -- it arrived as a nameless S3 error, missed
+  // every arm below, and fell through to AwsErrorNonRetryable, making a local
+  // allocation failure permanent while every other OOM path in this PR makes
+  // it retriable. Answer the core codes on their own terms first.
+  //
+  // The bound is SERVICE_EXTENSION_START_RANGE (128), which is where the SDK
+  // stops numbering core errors and service enums begin -- not VALIDATION (14),
+  // which is merely one core code among many. Gating on VALIDATION made this
+  // whole block unreachable for the three codes it exists for
+  // (UNRECOGNIZED_CLIENT=17, INVALID_SIGNATURE=21, MEMORY_ALLOCATION=26): they
+  // sit above it, so every one still fell through to the S3 cast.
+  if (static_cast<int>(error.GetErrorType()) <
+      static_cast<int>(Aws::Client::CoreErrors::SERVICE_EXTENSION_START_RANGE)) {
+    const auto core = static_cast<Aws::Client::CoreErrors>(error.GetErrorType());
+    std::string core_message = "AWS Error during " + operation + " operation: " + error.GetMessage();
+    switch (core) {
+      case Aws::Client::CoreErrors::MEMORY_ALLOCATION:
+        // Ours, local, and retriable: another node -- or this one later -- may
+        // have the memory.
+        return arrow::Status::OutOfMemory(core_message);
+      case Aws::Client::CoreErrors::UNRECOGNIZED_CLIENT:
+      case Aws::Client::CoreErrors::MISSING_AUTHENTICATION_TOKEN:
+      case Aws::Client::CoreErrors::INVALID_CLIENT_TOKEN_ID:
+      case Aws::Client::CoreErrors::INVALID_SIGNATURE:
+        // Credentials the deployment supplied are not accepted. An operator
+        // fixes this; it is not the caller's request and not our bug.
+        return MakeExtendError(ExtendStatusCode::AwsErrorAccessDenied, core_message, core_message);
+      default:
+        break;
+    }
+  }
+
   auto error_type = static_cast<Aws::S3::S3Errors>(error.GetErrorType());
   std::stringstream ss;
   ss << S3ErrorToString(error_type);
@@ -267,7 +369,8 @@ arrow::Status ErrorToStatus(const std::string& prefix,
                         wrong_region_msg.value_or("");
   LOG_STORAGE_WARNING_ << message;
 
-  if (auto permanent_status = tryMakePermanentExtendArrowError(error_type, error.GetResponseCode(), message);
+  if (auto permanent_status = tryMakePermanentExtendArrowError(error_type, error.GetResponseCode(), message,
+                                                               std::string_view(error.GetExceptionName()));
       permanent_status.has_value()) {
     return permanent_status.value();
   }

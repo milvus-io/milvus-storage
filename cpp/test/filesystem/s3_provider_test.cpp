@@ -17,10 +17,13 @@
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <functional>
+#include <future>
 #include <mutex>
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <string>
 #include <thread>
@@ -41,7 +44,9 @@
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/arrow_util.h"
 #include "test_env.h"
 
@@ -141,6 +146,7 @@ struct MockResponseSpec {
   Aws::Http::HttpResponseCode code;
   std::string body;
   Aws::Http::HeaderValueCollection headers;
+  std::function<void()> on_request;
 };
 
 class MockHttpClient : public Aws::Http::HttpClient {
@@ -151,18 +157,27 @@ class MockHttpClient : public Aws::Http::HttpClient {
       const std::shared_ptr<Aws::Http::HttpRequest>& request,
       Aws::Utils::RateLimits::RateLimiterInterface* readLimiter = nullptr,
       Aws::Utils::RateLimits::RateLimiterInterface* writeLimiter = nullptr) const override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    recorded_requests_.push_back(request);
+    std::optional<MockResponseSpec> matched;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      recorded_requests_.push_back(request);
 
-    auto uri = request->GetURIString();
-
-    // Find a matching response queue by URL substring
-    for (auto& [url_key, q] : response_map_) {
-      if (!q.empty() && uri.find(url_key) != Aws::String::npos) {
-        auto spec = q.front();
-        q.pop();
-        return BuildResponse(request, spec);
+      auto uri = request->GetURIString();
+      // Find a matching response queue by URL substring.
+      for (auto& [url_key, q] : response_map_) {
+        if (!q.empty() && uri.find(url_key) != Aws::String::npos) {
+          matched = std::move(q.front());
+          q.pop();
+          break;
+        }
       }
+    }
+
+    if (matched.has_value()) {
+      if (matched->on_request) {
+        matched->on_request();
+      }
+      return BuildResponse(request, *matched);
     }
 
     // Default: return 404 for unmatched requests (e.g., background SDK requests)
@@ -174,8 +189,9 @@ class MockHttpClient : public Aws::Http::HttpClient {
   void EnqueueResponse(const std::string& url_match,
                        Aws::Http::HttpResponseCode code,
                        const std::string& body,
-                       const Aws::Http::HeaderValueCollection& headers = {}) {
-    response_map_[url_match].push({code, body, headers});
+                       const Aws::Http::HeaderValueCollection& headers = {},
+                       std::function<void()> on_request = {}) {
+    response_map_[url_match].push({code, body, headers, std::move(on_request)});
   }
 
   std::vector<std::shared_ptr<Aws::Http::HttpRequest>> GetRecordedRequests() const {
@@ -304,6 +320,84 @@ TEST_F(S3ProviderTest, TestMockInfrastructure) {
                                    Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
   auto response2 = client->MakeRequest(request2);
   EXPECT_EQ(response2->GetResponseCode(), Aws::Http::HttpResponseCode::NOT_FOUND);
+}
+
+TEST_F(S3ProviderTest, DeleteDirCombinesCollectedConfigWithLaterListingFailure) {
+  constexpr const char* kBucket = "aggregation-test-bucket";
+
+  const std::string first_list_page = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>aggregation-test-bucket</Name>
+  <Prefix></Prefix>
+  <KeyCount>1</KeyCount>
+  <MaxKeys>1000</MaxKeys>
+  <IsTruncated>true</IsTruncated>
+  <Contents>
+    <Key>dir/file</Key>
+    <LastModified>2026-08-03T00:00:00.000Z</LastModified>
+    <ETag>&quot;etag&quot;</ETag>
+    <Size>1</Size>
+    <StorageClass>STANDARD</StorageClass>
+  </Contents>
+  <NextContinuationToken>next-page</NextContinuationToken>
+</ListBucketResult>)xml";
+  const std::string delete_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Error>
+    <Key>dir/file</Key>
+    <Code>AccessDenied</Code>
+    <Message>delete denied by policy</Message>
+  </Error>
+</DeleteResult>)xml";
+  const std::string listing_error = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<Error>
+  <Code>SlowDown</Code>
+  <Message>listing throttled</Message>
+  <RequestId>request-id</RequestId>
+</Error>)xml";
+
+  auto xml_headers = [](const std::string& body) {
+    Aws::Http::HeaderValueCollection headers;
+    headers["content-type"] = "application/xml";
+    headers["content-length"] = std::to_string(body.size());
+    return headers;
+  };
+  // Pagination and page deletes run concurrently. Once the delete request has
+  // started, Arrow's scheduler waits for that submitted task before settling
+  // the later listing failure, so the AccessDenied is in the tally first.
+  std::promise<void> delete_started_promise;
+  auto delete_started = delete_started_promise.get_future().share();
+
+  mock_client_->EnqueueResponse("list-type=2", Aws::Http::HttpResponseCode::OK, first_list_page,
+                                xml_headers(first_list_page));
+  mock_client_->EnqueueResponse("list-type=2", Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE, listing_error,
+                                xml_headers(listing_error), [delete_started] {
+                                  EXPECT_EQ(delete_started.wait_for(std::chrono::seconds(5)), std::future_status::ready)
+                                      << "second listing failure arrived before the first page's delete started";
+                                });
+  mock_client_->EnqueueResponse("?delete", Aws::Http::HttpResponseCode::OK, delete_result, xml_headers(delete_result),
+                                [&delete_started_promise] { delete_started_promise.set_value(); });
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  auto status = fs->DeleteDirContents(kBucket, /*missing_dir_ok=*/false);
+
+  ASSERT_STATUS_NOT_OK(status);
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorAccessDenied) << status.ToString();
+  EXPECT_EQ(detail->category(), ErrorCategory::Config);
+  EXPECT_FALSE(detail->retryable());
+  EXPECT_NE(status.message().find("AccessDenied"), std::string::npos) << status.ToString();
+  EXPECT_NE(status.message().find("listing throttled"), std::string::npos) << status.ToString();
 }
 
 // ============================================================================

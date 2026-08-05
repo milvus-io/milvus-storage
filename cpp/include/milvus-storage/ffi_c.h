@@ -31,33 +31,24 @@ extern "C" {
 #include <stdint.h>
 #include "arrow/c/abi.h"
 
+#include "milvus-storage/ffi_internal/ffi_error_code.h"
+
 // ==================== Result C Interface ====================
 
 // --- Export error codes ---
+//
+// Generated from the same X-macro table that defines the constants in
+// result_c.cpp and that drives the linker export maps. These used to be written
+// out by hand, which is how six `loon_errcode_packed_*` symbols ended up
+// exported and consumed by the Python binding while having no declaration here
+// at all. A table that is transcribed by hand is a table that drifts.
 FFI_EXPORT extern const int loon_errcode_success;
-FFI_EXPORT extern const int loon_errcode_invalid_args;
-FFI_EXPORT extern const int loon_errcode_memory;
-FFI_EXPORT extern const int loon_errcode_arrow;
-FFI_EXPORT extern const int loon_errcode_logical;
-FFI_EXPORT extern const int loon_errcode_got_exception;
-FFI_EXPORT extern const int loon_errcode_unreachable;
-FFI_EXPORT extern const int loon_errcode_invalid_properties;
-FFI_EXPORT extern const int loon_errcode_fault_inject;
-FFI_EXPORT extern const int loon_errcode_not_support;
-FFI_EXPORT extern const int loon_errcode_file_not_found;
 
-FFI_EXPORT extern const int loon_errcode_aws_no_such_upload;
-FFI_EXPORT extern const int loon_errcode_aws_conflict;
-FFI_EXPORT extern const int loon_errcode_aws_precondition_failed;
-FFI_EXPORT extern const int loon_errcode_aws_not_found;
-FFI_EXPORT extern const int loon_errcode_aws_access_denied;
-FFI_EXPORT extern const int loon_errcode_aws_non_retryable;
-FFI_EXPORT extern const int loon_errcode_transient_network;
-FFI_EXPORT extern const int loon_errcode_transient_timeout;
-FFI_EXPORT extern const int loon_errcode_transient_throttling;
-FFI_EXPORT extern const int loon_errcode_transient_service;
-FFI_EXPORT extern const int loon_errcode_txn_exhausted_retry;
-FFI_EXPORT extern const int loon_errcode_txn_resolution_failed;
+#define MILVUS_STORAGE_ERRCODE_DECL(name, code, symbol, category, s3_code) \
+  FFI_EXPORT extern const int loon_errcode_##symbol;
+LOON_INTERNAL_ERROR_CODE_LIST(MILVUS_STORAGE_ERRCODE_DECL)
+LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_ERRCODE_DECL)
+#undef MILVUS_STORAGE_ERRCODE_DECL
 
 // usage example(caller must free the message string):
 //
@@ -81,7 +72,49 @@ FFI_EXPORT const char* loon_ffi_get_errmsg(LoonFFIResult* result);
 // free the message string inside LoonFFIResult
 FFI_EXPORT void loon_ffi_free_result(LoonFFIResult* result);
 
+// --- Error classification ---
+//
+// Every error code answers two questions, and both come from ONE category:
+//   * whose problem is it -- the caller, the deployment, or the system?
+//   * can a retry help, and what kind?
+//
+// Invariant: loon_ffi_is_retryable_errcode(c) is true exactly when the category
+// is transient or conflict. They stay apart because the retry differs: plain
+// backoff for one, re-read-then-rebase for the other, and replaying a lost race
+// byte-for-byte fails identically forever.
+//
+// The other five are never retriable, for different reasons: report a user
+// error to the caller, alert an operator for a config error, alert a developer
+// for a permanent one. Missing means the named object is not there -- this
+// library refuses to guess whether that is a GC race or data loss, so the
+// consumer re-reads its metadata and decides. Corrupted means a layer that
+// actually parsed the bytes found them wrong; act on the data, not the
+// request.
+//
+// An unrecognized code returns loon_error_category_unknown, which consumers
+// MUST treat as permanent -- never retry a failure that cannot be classified.
+//
+// docs/error-codes.md lists every code with its category, retriability and the
+// AWS S3 / Aliyun OSS error code it corresponds to.
+FFI_EXPORT extern const int loon_error_category_unknown;
+FFI_EXPORT extern const int loon_error_category_user;
+FFI_EXPORT extern const int loon_error_category_config;
+FFI_EXPORT extern const int loon_error_category_transient;
+FFI_EXPORT extern const int loon_error_category_conflict;
+FFI_EXPORT extern const int loon_error_category_missing;
+FFI_EXPORT extern const int loon_error_category_corrupted;
+FFI_EXPORT extern const int loon_error_category_permanent;
+
 FFI_EXPORT int loon_ffi_is_retryable_errcode(int err_code);
+
+// Category of an error code; see loon_error_category_* above.
+FFI_EXPORT int loon_ffi_error_category(int err_code);
+
+// Stable, human-readable name of an error code ("AwsErrorNotFound", ...),
+// suitable as a log field or metric label. Returns "Unknown error(undefined)"
+// for an unrecognized code. The returned string is a static literal: do NOT
+// free it, and it outlives any LoonFFIResult.
+FFI_EXPORT const char* loon_ffi_error_name(int err_code);
 
 // ==================== End of Result C Interface ====================
 

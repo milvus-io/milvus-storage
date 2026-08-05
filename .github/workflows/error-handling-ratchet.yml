@@ -59,3 +59,13 @@ jobs:
 
       - name: error-handling ratchet
         run: bash cpp/scripts/error_handling_ratchet.sh check /tmp/base_baseline.tsv
+
+      # Runs even when the ratchet fails: the two gates catch different rot, and
+      # seeing both failures at once beats a second round-trip through CI.
+      - name: error taxonomy (dead codes + doc drift)
+        if: '!cancelled()'
+        run: python3 cpp/scripts/check_error_table.py
+
+      - name: OOM survives every classifying catch-all
+        if: '!cancelled()'
+        run: python3 cpp/scripts/check_oom_handlers.py

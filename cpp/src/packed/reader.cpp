@@ -60,11 +60,19 @@ arrow::Result<std::shared_ptr<PackedFileMetadata>> MakePackedMetadata(
                              fmt::format("Failed to parse packed file metadata. [path={}]", path), result.status());
     }
     return result;
+  } catch (const std::bad_alloc&) {
+    // OutOfMemory classifies as the retriable memory code, not corruption --
+    // calling it corruption would be both wrong and non-retriable. Same split
+    // as Manifest deserialization.
+    return arrow::Status::OutOfMemory(
+        fmt::format("Failed to parse packed file metadata: out of memory. [path={}]", path));
   } catch (const std::exception& e) {
     return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
                            fmt::format("Failed to parse packed file metadata. [path={}, error={}]", path, e.what()));
   } catch (...) {
-    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+    // Unknown exception: unclassified, so it may not claim corruption -- only
+    // a producer that parsed the bytes and found them wrong may say that.
+    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
                            fmt::format("Failed to parse packed file metadata with unknown exception. [path={}]", path));
   }
 }
@@ -345,12 +353,14 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
     std::vector<std::shared_ptr<arrow::ArrayData>> batch_data;
     try {
       batch_data = chunk_manager_->SliceChunksByMaxContiguousSlice(row_limit_ - absolute_row_position_, tables_);
+    } catch (const std::bad_alloc&) {
+      return arrow::Status::OutOfMemory("Packed file chunk slicing ran out of memory");
     } catch (const std::exception& e) {
       return MakeExtendError(ExtendStatusCode::PackedFileCorrupted,
                              fmt::format("Packed file chunk layout is corrupted: {}", e.what()));
     } catch (...) {
-      return MakeExtendError(ExtendStatusCode::PackedFileCorrupted,
-                             "Packed file chunk layout is corrupted with unknown exception");
+      return MakeExtendError(ExtendStatusCode::PackedUnexpected,
+                             "Packed file chunk slicing failed with unknown exception");
     }
     int64_t chunk_size = chunk_manager_->GetChunkSize();
     absolute_row_position_ += chunk_size;
@@ -377,6 +387,12 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
     }
     *out = arrow::RecordBatch::Make(schema_, chunk_size, arrays);
     return arrow::Status::OK();
+  } catch (const std::bad_alloc&) {
+    // Ahead of the generic handler on purpose: bad_alloc reaching that one was
+    // relabelled PackedUnexpected, i.e. permanent, so the OOM inference added at the FFI
+    // boundary never saw it. Memory pressure is retriable -- another node, or
+    // this one later, may have the memory.
+    return arrow::Status::OutOfMemory("Packed reader read next ran out of memory");
   } catch (const std::exception& e) {
     return MakeExtendError(ExtendStatusCode::PackedUnexpected,
                            fmt::format("Packed reader read next failed unexpectedly: {}", e.what()));
@@ -408,6 +424,11 @@ arrow::Status PackedRecordBatchReader::Close() {
     metadata_list_.clear();
     memory_used_ = 0;
     return arrow::Status::OK();
+  } catch (const std::bad_alloc&) {
+    // Answered before the generic handler: routed there, memory pressure --
+    // the one condition a retry is most likely to resolve -- came back
+    // permanent. Enforced by cpp/scripts/check_oom_handlers.py.
+    return arrow::Status::OutOfMemory("Packed reader close ran out of memory");
   } catch (const std::exception& e) {
     return MakeExtendError(ExtendStatusCode::PackedUnexpected,
                            fmt::format("Packed reader close failed unexpectedly: {}", e.what()));

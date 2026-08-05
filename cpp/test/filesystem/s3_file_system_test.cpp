@@ -90,7 +90,8 @@ TEST_F(S3UnitTest, TestErrorToStatusPermanentVsTransient) {
     ASSERT_NE(detail, nullptr);
     EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorNotFound);
   }
-  // AccessDenied: permanent, tagged AwsErrorAccessDenied.
+  // AccessDenied: non-retriable, tagged AwsErrorAccessDenied (category Config --
+  // operator credentials, so it lands on 2006 ConfigInvalid, not 2044).
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::ACCESS_DENIED, Aws::Client::RetryableType::NOT_RETRYABLE, "AccessDenied", "forbidden");
@@ -133,6 +134,84 @@ TEST_F(S3UnitTest, TestErrorToStatusPermanentVsTransient) {
     ASSERT_NE(detail, nullptr);
     EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientThrottling);
     EXPECT_TRUE(detail->retryable());
+  }
+}
+
+// The SDK's own core errors, which are not S3 errors at all.
+//
+// CoreErrors and S3Errors share a numeric space only because the S3 enum
+// continues where the core one stops, so casting a core code into it names
+// whichever S3 error happens to sit at that number. These three then missed
+// every arm and fell through to AwsErrorNonRetryable -- a local allocation
+// failure reported as permanent, and rejected credentials reported as a
+// generic storage failure instead of something an operator can fix.
+//
+// This test exists because the first attempt at the fix gated on
+// CoreErrors::VALIDATION (14) while the codes it handles are 17, 21 and 26 --
+// the branch could not execute, and nothing said so.
+TEST_F(S3UnitTest, CoreErrorsAreClassifiedBeforeTheS3Cast) {
+  {
+    Aws::Client::AWSError<Aws::Client::CoreErrors> error(
+        Aws::Client::CoreErrors::MEMORY_ALLOCATION, Aws::Client::RetryableType::NOT_RETRYABLE, "OOM", "alloc failed");
+    auto status = fs::internal::ErrorToStatus("test", error);
+    ASSERT_STATUS_NOT_OK(status);
+    EXPECT_TRUE(status.IsOutOfMemory()) << status.ToString();
+    // Retriable through the coarse mapping: another node, or this one later,
+    // may have the memory.
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::MemAllocateFailed);
+  }
+
+  for (auto core : {Aws::Client::CoreErrors::UNRECOGNIZED_CLIENT, Aws::Client::CoreErrors::INVALID_SIGNATURE}) {
+    Aws::Client::AWSError<Aws::Client::CoreErrors> error(core, Aws::Client::RetryableType::NOT_RETRYABLE, "Auth",
+                                                         "bad credentials");
+    auto status = fs::internal::ErrorToStatus("test", error);
+    ASSERT_STATUS_NOT_OK(status);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorAccessDenied);
+    EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::Config);
+    EXPECT_FALSE(detail->retryable());
+  }
+}
+
+TEST_F(S3UnitTest, Conflict409IsNotForPermanentBucketStates) {
+  // A 409 with no recognized-permanent name is a race: Conflict, retryable,
+  // re-read state and re-submit. This is what the transaction commit path
+  // relies on, so it must survive the blocklist below.
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::UNKNOWN,
+                                                   Aws::Client::RetryableType::NOT_RETRYABLE, "OperationAborted",
+                                                   "conditional request conflict");
+    error.SetResponseCode(Aws::Http::HttpResponseCode::CONFLICT);
+    auto status = fs::internal::ErrorToStatus("test", error);
+    ASSERT_STATUS_NOT_OK(status);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorConflict);
+    EXPECT_TRUE(detail->retryable());
+  }
+
+  // But not every 409 is a race. BucketNotEmpty and InvalidBucketState are
+  // answers about the bucket -- replaying the same request cannot change
+  // either, so classifying them Conflict would put a permanent condition into
+  // a retry loop.
+  for (const char* name : {"BucketNotEmpty", "InvalidBucketState"}) {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::UNKNOWN,
+                                                   Aws::Client::RetryableType::NOT_RETRYABLE, name, "permanent 409");
+    error.SetResponseCode(Aws::Http::HttpResponseCode::CONFLICT);
+    auto status = fs::internal::ErrorToStatus("test", error);
+    SCOPED_TRACE(name);
+    ASSERT_STATUS_NOT_OK(status);
+    // Today these land unclassified (plain IOError): the blocklist returns
+    // nullopt and the SDK-verdict fallback is gated on a recognized error
+    // type. Pinned so a future reclassification is a conscious choice -- the
+    // one outcome that must never come back is retryable Conflict.
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    EXPECT_EQ(detail, nullptr);
+    if (detail != nullptr) {
+      EXPECT_NE(detail->code(), ExtendStatusCode::AwsErrorConflict);
+      EXPECT_FALSE(detail->retryable());
+    }
   }
 }
 
@@ -464,6 +543,10 @@ TEST_F(S3UnitTest, TestS3ErrorClassification) {
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::NO_SUCH_BUCKET, Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchBucket", "not found");
+    // Still grouped with not-found here, and that is not a contradiction of
+    // the AwsErrorBucketNotFound block below: IsNotFound answers "is the path
+    // absent", the classifier answers "whose problem is it". See the comment
+    // on IsNotFound.
     EXPECT_TRUE(fs::internal::IsNotFound(error));
   }
   // IsNotFound — resource
@@ -526,13 +609,47 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     }
   };
 
-  // NO_SUCH_UPLOAD
+  // NO_SUCH_UPLOAD -- classified, but NOT through AssertRetryableCode. The
+  // upload id the caller held is gone; resending against it fails identically
+  // every time, so only starting a fresh upload helps and that decision belongs
+  // to the layer that owns the write. Missing, not retriable.
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::NO_SUCH_UPLOAD,
                                                    Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchUpload",
                                                    "Upload not found");
     auto status = fs::internal::ErrorToStatus("test_prefix", "CompleteMultipart", error);
-    AssertRetryableCode(status, ExtendStatusCode::AwsErrorNoSuchUpload);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorNoSuchUpload);
+    EXPECT_EQ(detail->category(), ErrorCategory::Missing);
+    EXPECT_FALSE(detail->retryable());
+  }
+
+  // NO_SUCH_BUCKET is deliberately NOT the same code as a missing key: nothing
+  // was lost, and re-reading metadata cannot conjure a bucket. It is a
+  // deployment pointing somewhere that does not exist.
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::NO_SUCH_BUCKET, Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchBucket", "bucket gone");
+    auto status = fs::internal::ErrorToStatus("test_prefix", "GetObject", error);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorBucketNotFound);
+    EXPECT_EQ(detail->category(), ErrorCategory::Config);
+    EXPECT_FALSE(detail->retryable());
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::BucketInvalid);  // 2016, not 2017
+  }
+
+  // A missing KEY keeps ObjectNotExist -- the two must not collapse back.
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::NO_SUCH_KEY,
+                                                   Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchKey", "key gone");
+    auto status = fs::internal::ErrorToStatus("test_prefix", "GetObject", error);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorNotFound);
+    EXPECT_EQ(detail->category(), ErrorCategory::Missing);
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::ObjectNotExist);  // 2017
   }
 
   // AWS SDK retryable error
@@ -675,7 +792,9 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     auto detail = ExtendStatusDetail::UnwrapStatus(status);
     ASSERT_NE(detail, nullptr);
     EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorPreConditionFailed);
-    EXPECT_FALSE(detail->retryable());
+    // Conflict class: retriable, but only by a caller that re-reads before
+    // re-submitting. Replaying the same conditional write fails identically.
+    EXPECT_TRUE(detail->retryable());
   }
 
   // CONFLICT
@@ -688,7 +807,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     auto detail = ExtendStatusDetail::UnwrapStatus(status);
     ASSERT_NE(detail, nullptr);
     EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorConflict);
-    EXPECT_FALSE(detail->retryable());
+    EXPECT_TRUE(detail->retryable());
   }
 
   // Generic UNKNOWN IOError with no recognized permanent or transient signal

@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 
+#include <arrow/c/bridge.h>
 #include <arrow/record_batch.h>
 #include <arrow/util/io_util.h>
 
@@ -142,6 +143,15 @@ arrow::Status MakeVortexBridgeErrorStatus(std::string_view message) {
     if (*parsed.ffi_err_code == LOON_FILE_NOT_FOUND) {
       return arrow::Status::IOError(parsed.message).WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
     }
+    // The other internal code that can cross this bridge: an allocation failure
+    // inside a filesystem callback (RETURN_EXCEPTION infers bad_alloc into
+    // LOON_MEMORY_ERROR). Restore it as arrow's own OutOfMemory so the retry
+    // verdict survives -- FFIErrorCodeFromExtendStatus and ToSegcoreError both
+    // classify that as retriable memory pressure, whereas falling through here
+    // flattened it into a permanent IOError.
+    if (*parsed.ffi_err_code == LOON_MEMORY_ERROR) {
+      return arrow::Status::OutOfMemory(parsed.message);
+    }
     if (auto code = ExtendStatusCodeFromInt(*parsed.ffi_err_code); code.has_value()) {
       return MakeExtendError(*code, parsed.message, parsed.message);
     }
@@ -163,10 +173,39 @@ arrow::Status MakeVortexErrorStatus(std::string_view context, const arrow::Statu
   if (arrow::internal::ErrnoFromStatus(status) == ENOENT) {
     return MakeIOErrorWithContext(context, status);
   }
+  // The marker is looked for FIRST, whatever arrow status code happens to be
+  // carrying it.
+  //
+  // An earlier version checked `!IsIOError()` before parsing, on the reasoning
+  // that a status arrow had already typed should keep its type. That is true
+  // for a status arrow produced -- but the bridge's wire format does not
+  // always arrive as an IOError. The lazy sync stream wraps its errors in
+  // ArrowError::ExternalError, and the Arrow C Stream boundary re-materialises
+  // those as Invalid/EINVAL, so every marker coming back through get_chunk,
+  // take and read_with_range short-circuited past the parse: corruption
+  // reported 2044 instead of 2024, and transient failures reported 2044
+  // instead of retrying. The marker is unambiguous -- it cannot occur by
+  // accident -- so its presence, not the wrapper's type, is what decides.
   auto message = status.message();
   auto parsed_status = MakeVortexBridgeErrorStatus(message);
   if (ExtendStatusDetail::UnwrapStatus(parsed_status)) {
     return MakeExtendErrorWithContext(context, parsed_status);
+  }
+  // LOON_MEMORY_ERROR and LOON_FILE_NOT_FOUND are represented by arrow's own
+  // status code / errno detail rather than ExtendStatusDetail. Restore them
+  // before consulting the wrapper type: the Arrow C Stream carries lazy-read
+  // failures as Invalid/EINVAL even when the embedded marker is more precise.
+  if (parsed_status.IsOutOfMemory()) {
+    return parsed_status.WithMessage(JoinContextAndMessage(context, parsed_status.message()));
+  }
+  if (arrow::internal::ErrnoFromStatus(parsed_status) == ENOENT) {
+    return MakeIOErrorWithContext(context, parsed_status);
+  }
+  // No marker that maps to a richer Arrow status. Arrow's own classification
+  // is now the best information there is; use the parsed message so an
+  // internal fallback marker does not leak into user text.
+  if (!status.IsIOError()) {
+    return status.WithMessage(JoinContextAndMessage(context, parsed_status.message()));
   }
   return MakeIOErrorWithContext(context, parsed_status);
 }

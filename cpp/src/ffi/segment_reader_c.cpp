@@ -111,7 +111,7 @@ LoonFFIResult loon_segment_reader_open(const char* segment_path,
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -133,7 +133,7 @@ LoonFFIResult loon_segment_reader_get_stream(LoonSegmentReaderHandle handle, Arr
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -169,7 +169,7 @@ LoonFFIResult loon_segment_reader_take(LoonSegmentReaderHandle handle,
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -195,7 +195,7 @@ LoonFFIResult loon_segment_reader_get_filtered_stream(LoonSegmentReaderHandle ha
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -229,7 +229,7 @@ LoonFFIResult loon_segment_reader_get_chunk_reader(LoonSegmentReaderHandle handl
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();

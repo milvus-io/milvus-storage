@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/format/vortex/vortex_footer_reader.h"
+
+#include "milvus-storage/format/vortex/vortex_footer_internal.h"
 
 #include <algorithm>
 #include <limits>
@@ -27,6 +30,7 @@
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/io/interfaces.h>
 #include <arrow/type.h>
+#include <arrow/util/io_util.h>
 #include <fmt/format.h>
 
 #include "milvus-storage/common/log.h"
@@ -123,9 +127,17 @@ static arrow::Result<uint64_t> ResolveInitialFooterBodySize(uint64_t file_size,
 
   if (footer_size != 0) {
     if (file_size < eof_size || footer_size > file_size - eof_size) {
-      return arrow::Status::Invalid(
-          fmt::format("Vortex footer body size exceeds file size, file_size={}, footer_size={}, eof_size={}", file_size,
-                      footer_size, eof_size));
+      // A recorded footer size that cannot fit inside the file it describes is
+      // the metadata contradicting itself -- nothing was read, so this says
+      // nothing about the object's bytes. Left as a bare Invalid it reached
+      // segcore as a generic 2044, and the size reconciliation on the way out
+      // of Open() does not catch it either: that compares file_size, which is
+      // correct here. ManifestCorrupted points at the thing that is wrong.
+      return MakeExtendErrorMsg(
+          ExtendStatusCode::ManifestCorrupted,
+          fmt::format("Recorded vortex footer size cannot fit in the file it describes: file_size={}, footer_size={}, "
+                      "eof_size={}. The object was never read, so this is the metadata that needs attention.",
+                      file_size, footer_size, eof_size));
     }
     return footer_size;
   }
@@ -153,11 +165,24 @@ struct ParsedFieldUnits {
   std::vector<ParsedFieldUnit> units;
 };
 
+// Classified here rather than in the bridge, because THIS is the layer that
+// knows where the segment id came from. Down in segment_bytes an out-of-range
+// id is indistinguishable from a caller passing a bad number -- an API misuse,
+// not corruption -- and tagging it there would mint quarantine orders for
+// ordinary argument mistakes. The ids reaching this function were read out of
+// the file's own layout, so a range the file cannot satisfy means the file
+// contradicts itself.
 static arrow::Result<ByteRange> ReadFlatSegmentByteRange(const VortexFile& vxfile, uint64_t flat_segment_id) {
-  ARROW_ASSIGN_OR_RAISE(auto bytes, vxfile.SegmentBytes(flat_segment_id));
+  auto bytes_result = vxfile.SegmentBytes(flat_segment_id);
+  if (!bytes_result.ok()) {
+    return MakeExtendErrorMsg(ExtendStatusCode::VortexFileCorrupted,
+                              "Vortex layout names a segment the file does not have: id=", flat_segment_id, " (",
+                              bytes_result.status().message(), ")");
+  }
+  auto bytes = std::move(bytes_result).ValueOrDie();
   if (bytes.size() != 2 || bytes[1] == 0) {
-    return arrow::Status::Invalid(
-        fmt::format("Invalid vortex flat segment byte range for segment {}", flat_segment_id));
+    return MakeExtendErrorMsg(ExtendStatusCode::VortexFileCorrupted,
+                              "Invalid vortex flat segment byte range for segment ", flat_segment_id);
   }
   return ByteRange{bytes[0], bytes[1]};
 }
@@ -189,7 +214,12 @@ static arrow::Result<ParsedFieldUnits> ParseFieldUnits(const VortexFile& vxfile,
   auto raw_offsets = std::move(raw_offsets_result).ValueOrDie();
 
   if (raw_offsets.size() < 2) {
-    return arrow::Status::Invalid(fmt::format("Invalid vortex field layout units for {}", field_name));
+    // These offsets came out of the file's layout, not from an argument -- a
+    // shape the layout cannot describe is the file contradicting itself, and a
+    // bare Invalid reached segcore as a generic 2044 instead of 2024.
+    return MakeExtendErrorMsg(ExtendStatusCode::VortexFileCorrupted,
+                              "Vortex field layout units are malformed for field ", field_name, " (",
+                              raw_offsets.size(), " offsets, need at least 2)");
   }
 
   if (file_schema && !file_schema->GetFieldByName(field_name)) {
@@ -248,6 +278,8 @@ static arrow::Result<ParsedFieldUnits> ParseFieldUnits(const VortexFile& vxfile,
 
 struct VortexFooterReader::Impl {
   arrow::Status ResolveFileSize(const std::shared_ptr<arrow::fs::FileSystem>& fs);
+  arrow::Status CheckFileLongEnough() const;
+  bool file_size_was_supplied = false;
   arrow::Status PrepareRangeFile();
   arrow::Status OpenSparseVortexFile();
   arrow::Status LoadFooter(const std::shared_ptr<arrow::io::RandomAccessFile>& input_file);
@@ -271,6 +303,7 @@ struct VortexFooterReader::Impl {
 
 arrow::Status VortexFooterReader::Impl::ResolveFileSize(const std::shared_ptr<arrow::fs::FileSystem>& fs) {
   if (file_size != 0) {
+    file_size_was_supplied = true;
     return arrow::Status::OK();
   }
 
@@ -285,6 +318,26 @@ arrow::Status VortexFooterReader::Impl::ResolveFileSize(const std::shared_ptr<ar
     return arrow::Status::Invalid(fmt::format("Vortex file size is unavailable: {}", path));
   }
   file_size = static_cast<uint64_t>(info.size());
+  return arrow::Status::OK();
+}
+
+arrow::Status VortexFooterReader::Impl::CheckFileLongEnough() const {
+  // A vortex file cannot be shorter than its EOF trailer. Checked here rather
+  // than left to the Rust side: this is the zero-length object a failed or
+  // aborted write leaves behind -- one of the most common corruption shapes in
+  // object storage -- and vortex reports it as "Initial read must be at least
+  // EOF_SIZE", a generic bail that also fires benignly from LoadFooter's own
+  // expanding-retry loop. The intent is unambiguous here and is not there.
+  //
+  // Deliberately trusts file_size even when the caller supplied it. Whether the
+  // caller's number was TRUE is a different question with a single owner --
+  // ReconcileSuppliedVortexSize, on the way out of Open() -- so that every failure
+  // anchored on a wrong size gets the same correction, not just this one.
+  if (file_size < VortexEofSize()) {
+    return MakeExtendErrorMsg(ExtendStatusCode::VortexFileCorrupted,
+                              "Vortex file is too short to hold its trailer: ", path, " (", file_size,
+                              " bytes, minimum ", VortexEofSize(), ")");
+  }
   return arrow::Status::OK();
 }
 
@@ -317,13 +370,114 @@ arrow::Status VortexFooterReader::Impl::OpenSparseVortexFile() {
   return arrow::Status::OK();
 }
 
+namespace internal {
+
+arrow::Status CheckVortexFooterRange(const std::vector<uint64_t>& footer_range,
+                                     uint64_t file_size,
+                                     const std::string& path) {
+  // Three ways the descriptor can contradict the file it describes: it is not a
+  // {offset, length} pair at all, the offset starts past the end, or the length
+  // runs off the end from that offset. The last is written as
+  // `length > file_size - offset` rather than `offset + length > file_size`
+  // because both are uint64 and the sum wraps.
+  if (footer_range.size() != 2 || footer_range[0] > file_size || footer_range[1] > file_size - footer_range[0]) {
+    return MakeExtendErrorMsg(ExtendStatusCode::VortexFileCorrupted,
+                              fmt::format("Invalid vortex footer byte range for {}", path));
+  }
+  return arrow::Status::OK();
+}
+
+arrow::Status ReconcileSuppliedVortexSize(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                                          const std::string& path,
+                                          uint64_t supplied_size,
+                                          arrow::Status status) {
+  // Everything a vortex reader does is anchored at the file size: the trailer
+  // read, the footer range, every retry window. When the caller supplied that
+  // number, a failure says nothing about the object until the number is
+  // confirmed -- the reads may all have landed at the wrong offsets in a
+  // perfectly good file. That matters most for 119, which instructs a human to
+  // quarantine data: a stale manifest entry plus a healthy object must not
+  // produce it. It equally rescues the opposite direction, where a truncated
+  // object plus a stale larger size failed mid-read and shipped as an
+  // unclassified StorageError.
+  //
+  // Only FINAL verdicts are second-guessed -- an unclassified failure, or a
+  // corruption claim. A failure already classified retryable/missing/config
+  // carries its own instruction and passes through; if the size is wrong it
+  // will be back here on a later attempt with a final verdict.
+  if (status.ok() || supplied_size == 0 || !fs) {
+    return status;
+  }
+  if (arrow::internal::ErrnoFromStatus(status) == ENOENT) {
+    // Missing is not corrupt, and stat would only rediscover the ENOENT.
+    return status;
+  }
+  if (status.IsOutOfMemory()) {
+    // Retryable without needing a detail -- arrow's own code IS the
+    // classification (the bridge restores marker 2 to exactly this). Letting
+    // it fall through would rewrite memory pressure into ManifestCorrupted on
+    // a size mismatch, trading a retry that could succeed for a metadata
+    // alarm.
+    return status;
+  }
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  if (detail && detail->code() != ExtendStatusCode::VortexFileCorrupted) {
+    return status;
+  }
+
+  // One stat, on a path that has already failed. What happens when it cannot
+  // answer depends on which way the doubt cuts. An UNCLASSIFIED failure may
+  // stand unverified -- it instructs nobody to do anything. A corruption claim
+  // may not: 119 tells a human to quarantine data, and it was minted under an
+  // anchor we could not confirm, so letting it stand would issue that order on
+  // evidence we know might be wrong.
+  const bool claims_corruption = detail != nullptr;
+  auto info_res = fs->GetFileInfo(path);
+  if (!info_res.ok()) {
+    if (!claims_corruption) {
+      return status;
+    }
+    // The stat's own status is the honest answer -- often classified transient
+    // by the filesystem layer, in which case the retry re-runs this
+    // verification with better luck.
+    return info_res.status().WithMessage(
+        fmt::format("Could not verify the recorded size of {} while handling a corruption verdict; refusing to let "
+                    "the unverified verdict stand. Original failure: {}. Stat failed: {}",
+                    path, status.ToString(), info_res.status().message()));
+  }
+  const auto& info = *info_res;
+  if (info.type() == arrow::fs::FileType::NotFound) {
+    // The object is gone. Missing is not corrupt, whatever the parse said --
+    // it was parsing reads against an object that no longer exists.
+    return arrow::fs::internal::PathNotFound(path);
+  }
+  if (!info.IsFile() || info.size() < 0) {
+    if (!claims_corruption) {
+      return status;
+    }
+    return arrow::Status::IOError("Cannot verify the recorded size of ", path,
+                                  " (not a regular file); refusing to let an unverified corruption verdict stand. "
+                                  "Original failure: ",
+                                  status.ToString());
+  }
+  if (static_cast<uint64_t>(info.size()) == supplied_size) {
+    return status;
+  }
+
+  return MakeExtendErrorMsg(ExtendStatusCode::ManifestCorrupted, "Recorded vortex file size is wrong for ", path,
+                            ": recorded ", supplied_size, " bytes, actual ", info.size(),
+                            ". Every read was anchored at the recorded size, so the failure below says nothing about "
+                            "the object's bytes; the metadata that describes it is what needs attention. ",
+                            status.ToString());
+}
+
+}  // namespace internal
+
 arrow::Status VortexFooterReader::Impl::LoadFooter(const std::shared_ptr<arrow::io::RandomAccessFile>& input_file) {
   const auto eof_size = VortexEofSize();
   auto finish_opened_footer = [&]() -> arrow::Status {
     ARROW_ASSIGN_OR_RAISE(auto footer_range, vxfile->FooterByteRange(file_size));
-    if (footer_range.size() != 2 || footer_range[0] > file_size || footer_range[1] > file_size - footer_range[0]) {
-      return arrow::Status::Invalid(fmt::format("Invalid vortex footer byte range for {}", path));
-    }
+    ARROW_RETURN_NOT_OK(internal::CheckVortexFooterRange(footer_range, file_size, path));
     footer_size = footer_range[1] > eof_size ? footer_range[1] - eof_size : 0;
     rows = vxfile->RowCount();
     return arrow::Status::OK();
@@ -448,19 +602,28 @@ arrow::Status VortexFooterReader::Open(const std::shared_ptr<arrow::fs::FileSyst
   }
 
   ARROW_RETURN_NOT_OK(impl_->ResolveFileSize(fs));
-  ARROW_RETURN_NOT_OK(impl_->PrepareRangeFile());
-  ARROW_ASSIGN_OR_RAISE(auto input_file, fs->OpenInputFile(impl_->path));
 
-  ARROW_RETURN_NOT_OK(impl_->LoadFooter(input_file));
-  if (load_zonemap) {
-    ARROW_RETURN_NOT_OK(impl_->LoadZoneMaps(input_file));
-    // Vortex caches segments covered by its footer tail read. Reopen after
-    // zonemap bytes are materialized so pruning cannot read sparse zero-fill
-    // data from that internal cache.
-    ARROW_RETURN_NOT_OK(impl_->OpenSparseVortexFile());
-  }
-  ARROW_RETURN_NOT_OK(impl_->LoadFileSchema());
-  return arrow::Status::OK();
+  // Everything below is anchored at file_size. Failures leave through
+  // ReconcileSuppliedVortexSize, which decides whether a caller-supplied size was
+  // ever true before letting a verdict about the bytes stand.
+  auto status = [&]() -> arrow::Status {
+    ARROW_RETURN_NOT_OK(impl_->CheckFileLongEnough());
+    ARROW_RETURN_NOT_OK(impl_->PrepareRangeFile());
+    ARROW_ASSIGN_OR_RAISE(auto input_file, fs->OpenInputFile(impl_->path));
+
+    ARROW_RETURN_NOT_OK(impl_->LoadFooter(input_file));
+    if (load_zonemap) {
+      ARROW_RETURN_NOT_OK(impl_->LoadZoneMaps(input_file));
+      // Vortex caches segments covered by its footer tail read. Reopen after
+      // zonemap bytes are materialized so pruning cannot read sparse zero-fill
+      // data from that internal cache.
+      ARROW_RETURN_NOT_OK(impl_->OpenSparseVortexFile());
+    }
+    ARROW_RETURN_NOT_OK(impl_->LoadFileSchema());
+    return arrow::Status::OK();
+  }();
+  return internal::ReconcileSuppliedVortexSize(fs, impl_->path, impl_->file_size_was_supplied ? impl_->file_size : 0,
+                                               std::move(status));
 }
 
 bool VortexFooterReader::opened() const { return impl_->vxfile != nullptr; }

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
+#include "milvus-storage/format/vortex/vortex_footer_internal.h"
 
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/format/vortex/vortex_planner.h"
@@ -399,14 +400,34 @@ static std::optional<MemorySizeEstimate> estimate_memory_sizes(const VortexFile&
 struct VortexOpenAsyncContext {
   folly::Promise<arrow::Status> promise;
   std::function<arrow::Status(uintptr_t)> initialize;
+  // For ReconcileSuppliedVortexSize on the failure path: the async open is
+  // anchored at a manifest-recorded size exactly like the sync one, and a
+  // failure under a wrong size must blame the metadata on both.
+  std::shared_ptr<arrow::fs::FileSystem> fs;
+  std::string path;
+  uint64_t supplied_size = 0;
 };
 
 template <typename T>
 static void set_vortex_callback_exception(folly::Promise<T>& promise,
                                           const char* operation,
-                                          const char* message) noexcept {
+                                          const char* message,
+                                          bool out_of_memory = false) noexcept {
   try {
-    promise.setValue(T(arrow::Status::IOError(fmt::format("{}: {}", operation, message))));
+    // An OOM keeps arrow's own code: rebuilding it as an IOError made memory
+    // pressure permanent, and this helper sits on the async path where the
+    // caller has no other way to learn what happened.
+    auto status = out_of_memory ? arrow::Status::OutOfMemory(fmt::format("{}: {}", operation, message))
+                                : arrow::Status::IOError(fmt::format("{}: {}", operation, message));
+    promise.setValue(T(std::move(status)));
+  } catch (const std::bad_alloc&) {
+    // Formatting the message needed memory we do not have. Try once more with
+    // a static string rather than dropping the promise on the floor -- an
+    // unfulfilled promise hangs whoever is waiting on it.
+    try {
+      promise.setValue(T(arrow::Status::OutOfMemory("vortex async callback ran out of memory")));
+    } catch (...) {
+    }
   } catch (...) {
     // No further error reporting is safe from a callback crossing the C ABI.
   }
@@ -421,7 +442,8 @@ static void vortex_open_async_callback(void* ctx_raw, uintptr_t handle, const ch
 
   try {
     if (error) {
-      ctx->promise.setValue(MakeVortexErrorStatus("Failed to open vortex file", error.get()));
+      ctx->promise.setValue(vortex::internal::ReconcileSuppliedVortexSize(
+          ctx->fs, ctx->path, ctx->supplied_size, MakeVortexErrorStatus("Failed to open vortex file", error.get())));
       return;
     }
 
@@ -431,6 +453,9 @@ static void vortex_open_async_callback(void* ctx_raw, uintptr_t handle, const ch
     }
 
     ctx->promise.setValue(ctx->initialize(handle));
+  } catch (const std::bad_alloc& e) {
+    set_vortex_callback_exception(ctx->promise, "Failed to import opened vortex file", e.what(),
+                                  /*out_of_memory=*/true);
   } catch (const std::exception& e) {
     set_vortex_callback_exception(ctx->promise, "Failed to import opened vortex file", e.what());
   } catch (...) {
@@ -609,7 +634,16 @@ arrow::Status VortexFormatReader::open() {
   if (read_schema_ && read_schema_->num_fields() == 0) {
     read_schema_ = nullptr;
   }
-  ARROW_ASSIGN_OR_RAISE(vxfile_, open_shared_vortex_file(fs_holder_, path_, file_size_, footer_size_));
+  auto vxfile_res = open_shared_vortex_file(fs_holder_, path_, file_size_, footer_size_);
+  if (!vxfile_res.ok()) {
+    // file_size_ is caller-supplied (from the manifest on milvus's path); a
+    // failure anchored on a wrong size is about the metadata, not the bytes.
+    // Zero means "not supplied" and passes through. See
+    // ReconcileSuppliedVortexSize.
+    return vortex::internal::ReconcileSuppliedVortexSize(fs_holder_->get(), path_, file_size_,
+                                                         std::move(vxfile_res).status());
+  }
+  vxfile_ = std::move(vxfile_res).ValueOrDie();
 
   // Always derive full file schema from file metadata
   ARROW_ASSIGN_OR_RAISE(file_schema_, import_vortex_file_schema(*vxfile_));
@@ -657,6 +691,9 @@ folly::SemiFuture<arrow::Status> VortexFormatReader::open_async() {
   }
 
   auto ctx = std::make_unique<VortexOpenAsyncContext>();
+  ctx->fs = fs_holder_->get();
+  ctx->path = path_;
+  ctx->supplied_size = file_size_;
   auto semi_future = ctx->promise.getSemiFuture();
   // The callback imports the owned Rust handle and publishes reader state only
   // after schema and logical chunk metadata have both been derived successfully.
@@ -852,6 +889,13 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read_with_plan(const VortexR
   if (!stream.ok()) {
     return MakeVortexErrorStatus("Failed to read vortex file with plan", stream.status());
   }
+  // Deliberately NOT wrapped in the error-translating reader. ArrowArrayStream
+  // is a C ABI: its get_last_error carries a string and nothing else, so a
+  // StatusDetail cannot cross it. Translating here would strip the
+  // __LOON_VORTEX_FFI_ERRCODE__ marker -- the only channel a raw-stream
+  // consumer has for recovering the code -- and hand back a status whose detail
+  // is then flattened away by the export anyway. The marker stays as the wire
+  // format; consumers of this entry point parse it.
   return std::move(stream).ValueOrDie();
 }
 
@@ -878,6 +922,13 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read_row_ids_with_plan(const
   if (!stream.ok()) {
     return MakeVortexErrorStatus("Failed to read vortex row ids with plan", stream.status());
   }
+  // Deliberately NOT wrapped in the error-translating reader. ArrowArrayStream
+  // is a C ABI: its get_last_error carries a string and nothing else, so a
+  // StatusDetail cannot cross it. Translating here would strip the
+  // __LOON_VORTEX_FFI_ERRCODE__ marker -- the only channel a raw-stream
+  // consumer has for recovering the code -- and hand back a status whose detail
+  // is then flattened away by the export anyway. The marker stays as the wire
+  // format; consumers of this entry point parse it.
   return std::move(stream).ValueOrDie();
 }
 
@@ -904,6 +955,13 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start,
   if (!stream.ok()) {
     return MakeVortexErrorStatus("Failed to read vortex file", stream.status());
   }
+  // Deliberately NOT wrapped in the error-translating reader. ArrowArrayStream
+  // is a C ABI: its get_last_error carries a string and nothing else, so a
+  // StatusDetail cannot cross it. Translating here would strip the
+  // __LOON_VORTEX_FFI_ERRCODE__ marker -- the only channel a raw-stream
+  // consumer has for recovering the code -- and hand back a status whose detail
+  // is then flattened away by the export anyway. The marker stays as the wire
+  // format; consumers of this entry point parse it.
   return std::move(stream).ValueOrDie();
 }
 
@@ -1038,6 +1096,9 @@ static void vortex_take_async_callback(void* ctx_raw,
     }
 
     ctx->promise.setValue(arrow::Table::FromRecordBatches(rbs));
+  } catch (const std::bad_alloc& e) {
+    set_vortex_callback_exception(ctx->promise, "Failed to process vortex take result", e.what(),
+                                  /*out_of_memory=*/true);
   } catch (const std::exception& e) {
     set_vortex_callback_exception(ctx->promise, "Failed to process vortex take result", e.what());
   } catch (...) {
@@ -1069,6 +1130,9 @@ static void vortex_read_range_async_callback(void* ctx_raw,
       return;
     }
     ctx->promise.setValue(internal::WrapVortexRecordBatchReader(reader_result.ValueOrDie()));
+  } catch (const std::bad_alloc& e) {
+    set_vortex_callback_exception(ctx->promise, "Failed to process vortex range-read result", e.what(),
+                                  /*out_of_memory=*/true);
   } catch (const std::exception& e) {
     set_vortex_callback_exception(ctx->promise, "Failed to process vortex range-read result", e.what());
   } catch (...) {
