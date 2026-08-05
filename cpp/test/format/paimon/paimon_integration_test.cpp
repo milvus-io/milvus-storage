@@ -464,6 +464,32 @@ TEST_F(PaimonIntegrationTest, DirectFileFragmentRangeUsesPostDeletionLogicalRows
   EXPECT_EQ(ids, (std::vector<int32_t>{2, 3, 4, 6}));
 }
 
+TEST_F(PaimonIntegrationTest, IgnoredPredicatePreservesDirectFileFragmentRange) {
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 10, "deletion-vector", {1, 5, 9}).status());
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+
+  auto fragment = files.front();
+  fragment.start_index = 1;
+  fragment.end_index = 5;
+  auto column_group = std::make_shared<api::ColumnGroup>();
+  column_group->columns = {"id"};
+  column_group->format = LOON_FORMAT_PAIMON_TABLE;
+  column_group->files = {std::move(fragment)};
+  auto schema = arrow::schema({arrow::field("id", arrow::int32())});
+  ASSERT_AND_ASSIGN(auto reader,
+                    api::ColumnGroupReader::create(schema, column_group, {"id"}, properties_, nullptr, "id >= 0"));
+
+  ASSERT_EQ(reader->total_number_of_chunks(), 1);
+  ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+  const auto& ids = static_cast<const arrow::Int32Array&>(*batch->column(0));
+  ASSERT_EQ(ids.length(), 4);
+  EXPECT_EQ(ids.Value(0), 2);
+  EXPECT_EQ(ids.Value(1), 3);
+  EXPECT_EQ(ids.Value(2), 4);
+  EXPECT_EQ(ids.Value(3), 6);
+}
+
 TEST_F(PaimonIntegrationTest, ExplicitDirectFileRejectsMergeOnRead) {
   ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 10, "mor").status());
   auto files = Explore("direct-file");
