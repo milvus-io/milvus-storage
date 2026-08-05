@@ -15,6 +15,7 @@
 #include <cerrno>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <numeric>
 
 #include <arrow/api.h>
@@ -259,6 +260,33 @@ TEST_F(PaimonIntegrationTest, ReadsSpecifiedSnapshot) {
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_FALSE(files.empty());
   EXPECT_EQ(files.front().end_index, static_cast<int64_t>(kRows));
+}
+
+TEST_F(PaimonIntegrationTest, ScanOptionsAreValidatedForLatestAndPinnedSnapshots) {
+  ASSERT_AND_ASSIGN(auto snapshot_id, paimon::CreateTestTable(table_dir_, 1, "append"));
+
+  std::ifstream input(fmt::format("{}/schema/schema-0", table_dir_));
+  ASSERT_TRUE(input.is_open());
+  auto latest_schema =
+      folly::parseJson(std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()));
+  latest_schema["id"] = 1;
+  latest_schema["options"]["scan.watermark"] = "5";
+  std::ofstream output(fmt::format("{}/schema/schema-1", table_dir_));
+  ASSERT_TRUE(output.is_open());
+  output << folly::toJson(latest_schema);
+  ASSERT_TRUE(output.good());
+  output.close();
+
+  auto files = Explore("auto");
+  ASSERT_FALSE(files.ok());
+  EXPECT_TRUE(files.status().IsNotImplemented()) << files.status().ToString();
+  EXPECT_NE(files.status().ToString().find("scan.watermark"), std::string::npos);
+
+  ASSERT_EQ(api::SetValue(properties_, PROPERTY_PAIMON_SNAPSHOT_ID, std::to_string(snapshot_id).c_str()), std::nullopt);
+  files = Explore("auto");
+  ASSERT_FALSE(files.ok());
+  EXPECT_TRUE(files.status().IsNotImplemented()) << files.status().ToString();
+  EXPECT_NE(files.status().ToString().find("scan.watermark"), std::string::npos);
 }
 
 TEST_F(PaimonIntegrationTest, MergeOnReadTableFailsClosedAsNotImplemented) {

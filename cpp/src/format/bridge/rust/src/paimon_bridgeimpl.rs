@@ -15,7 +15,7 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use paimon::catalog::Identifier;
 use paimon::io::{FileIO, FileRead};
-use paimon::spec::{MergeEngine, SCAN_SNAPSHOT_ID_OPTION};
+use paimon::spec::{CoreOptions, MergeEngine, SCAN_SNAPSHOT_ID_OPTION};
 use paimon::table::{SchemaManager, SnapshotManager};
 use paimon::{DataSplit, DeletionFile, Table};
 use roaring::RoaringBitmap;
@@ -251,6 +251,11 @@ async fn load_table(
             ))
         })?;
     let schema_manager = SchemaManager::new(file_io.clone(), table_location.to_string());
+    let latest_schema = schema_manager.latest().await?.ok_or_else(|| {
+        anyhow!(invalid_message(format_args!(
+            "Paimon table has no schema: {table_location}"
+        )))
+    })?;
     let schema = match snapshot_id {
         Some(snapshot_id) => {
             // Resolve the snapshot and its historical schema strictly. Paimon
@@ -264,24 +269,20 @@ async fn load_table(
                 table_location,
                 snapshot_id,
             )?;
-            let schema = pinned_metadata_result(
+            let historical_schema = pinned_metadata_result(
                 schema_manager.schema(snapshot.schema_id()).await,
                 table_location,
                 snapshot_id,
             )?;
-            let mut options = schema.options().clone();
+            // Match Paimon's time-travel semantics: use the historical
+            // fields and keys with the current table options.
+            let mut options = latest_schema.options().clone();
             options.insert(SCAN_SNAPSHOT_ID_OPTION.to_string(), snapshot_id.to_string());
-            schema.copy_with_replaced_options(options)
+            historical_schema.copy_with_replaced_options(options)
         }
-        None => {
-            let schema = schema_manager.latest().await?.ok_or_else(|| {
-                anyhow!(invalid_message(format_args!(
-                    "Paimon table has no schema: {table_location}"
-                )))
-            })?;
-            (*schema).clone()
-        }
+        None => (*latest_schema).clone(),
     };
+    CoreOptions::new(schema.options()).validate_scan_options()?;
     Ok(Table::new(
         file_io,
         Identifier::new("unknown", table_name(table_location)),
@@ -1121,6 +1122,62 @@ mod tests {
         };
         let error = decide_route(ScanMode::Auto, &raw, 0, partitioned_table).unwrap_err();
         assert!(error.to_string().contains("partition columns"), "{error}");
+    }
+
+    #[test]
+    fn pinned_snapshot_uses_historical_schema_with_latest_options() {
+        let directory = tempfile::tempdir().unwrap();
+        let table_location = directory.path().join("snap-table");
+        let table_location = table_location.to_str().unwrap();
+        let snapshot_id = crate::paimon_testutil::paimon_create_test_table(
+            table_location,
+            10,
+            "append",
+            Vec::new(),
+            "parquet",
+            0,
+        )
+        .unwrap();
+
+        let schema0_path = format!("{table_location}/schema/schema-0");
+        let mut historical_schema: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&schema0_path).unwrap()).unwrap();
+        historical_schema["options"]["test.snapshot-option"] = serde_json::json!("historical");
+        std::fs::write(
+            &schema0_path,
+            serde_json::to_vec(&historical_schema).unwrap(),
+        )
+        .unwrap();
+
+        let mut latest_schema = historical_schema;
+        latest_schema["id"] = serde_json::json!(1);
+        latest_schema["options"]["test.snapshot-option"] = serde_json::json!("latest");
+        std::fs::write(
+            format!("{table_location}/schema/schema-1"),
+            serde_json::to_vec(&latest_schema).unwrap(),
+        )
+        .unwrap();
+
+        let table = TOKIO_RT
+            .block_on(load_table(
+                table_location,
+                &HashMap::new(),
+                Some(snapshot_id),
+            ))
+            .unwrap();
+        assert_eq!(table.schema().id(), 0);
+        assert_eq!(
+            table
+                .schema()
+                .options()
+                .get("test.snapshot-option")
+                .map(String::as_str),
+            Some("latest")
+        );
+        assert_eq!(
+            table.schema().options().get(SCAN_SNAPSHOT_ID_OPTION),
+            Some(&snapshot_id.to_string())
+        );
     }
 
     #[test]
