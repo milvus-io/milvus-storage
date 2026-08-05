@@ -541,7 +541,7 @@ TEST(PaimonBridgeErrorClassification, MarkersMapToArrowStatuses) {
   EXPECT_TRUE(paimon::MakePaimonBridgeErrorStatus("unclassified storage failure").IsIOError());
 }
 
-TEST_F(PaimonIntegrationTest, MissingPinnedSnapshotFailsPlanAsInvalidWithBounds) {
+TEST_F(PaimonIntegrationTest, MissingPinnedSnapshotFailsPlanAsInvalidWithRefresh) {
   ASSERT_AND_ASSIGN(auto snapshot_id, paimon::CreateTestTable(table_dir_, 10, "append"));
   ASSERT_EQ(api::SetValue(properties_, PROPERTY_PAIMON_SNAPSHOT_ID, std::to_string(snapshot_id + 1000).c_str()),
             std::nullopt);
@@ -550,9 +550,8 @@ TEST_F(PaimonIntegrationTest, MissingPinnedSnapshotFailsPlanAsInvalidWithBounds)
   ASSERT_FALSE(files.ok());
   EXPECT_TRUE(files.status().IsInvalid()) << files.status().ToString();
   const auto message = files.status().ToString();
-  EXPECT_NE(message.find("no longer exists"), std::string::npos) << message;
-  EXPECT_NE(message.find("earliest="), std::string::npos) << message;
-  EXPECT_NE(message.find(fmt::format("latest={}", snapshot_id)), std::string::npos) << message;
+  EXPECT_NE(message.find("required metadata"), std::string::npos) << message;
+  EXPECT_NE(message.find("was not found"), std::string::npos) << message;
   EXPECT_NE(message.find("refresh the external collection"), std::string::npos) << message;
 }
 

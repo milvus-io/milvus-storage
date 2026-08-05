@@ -15,7 +15,7 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use paimon::catalog::Identifier;
 use paimon::io::{FileIO, FileRead};
-use paimon::spec::MergeEngine;
+use paimon::spec::{MergeEngine, SCAN_SNAPSHOT_ID_OPTION};
 use paimon::table::{SchemaManager, SnapshotManager};
 use paimon::{DataSplit, DeletionFile, Table};
 use roaring::RoaringBitmap;
@@ -204,57 +204,32 @@ fn table_name(location: &str) -> String {
         .to_string()
 }
 
-/// Prove that the pinned snapshot exists before time travel pins it.
-///
-/// `Table::copy_with_time_travel` mirrors Java's `tryTimeTravel` and swallows
-/// EVERY resolution failure into a silent fallback, so a transient storage
-/// error while loading `snapshot-N` would be indistinguishable from the
-/// snapshot having expired. This probe separates the three states:
-///
-/// - confirmed present -> continue into time travel;
-/// - confirmed absent (`exists()` returned `Ok(false)`) -> a terminal
-///   input-state error carrying the earliest/latest bounds and the
-///   "refresh the external collection" advice (the C++ boundary maps this
-///   marker to `Status::Invalid`);
-/// - storage error -> propagated as-is WITHOUT the refresh advice so it keeps
-///   retryable IO semantics.
-async fn ensure_pinned_snapshot_exists(
-    file_io: &FileIO,
+fn pinned_metadata_result<T>(
+    result: paimon::Result<T>,
     table_location: &str,
     snapshot_id: i64,
-) -> Result<()> {
-    let manager = SnapshotManager::new(file_io.clone(), table_location.to_string());
-    let snapshot_path = manager.snapshot_path(snapshot_id);
-    let input = file_io
-        .new_input(&snapshot_path)
-        .with_context(|| {
-            invalid_message(format_args!(
-                "cannot address Paimon snapshot file '{snapshot_path}'"
+) -> Result<T> {
+    result.map_err(|error| {
+        let not_found = match &error {
+            paimon::Error::IoUnexpected { source, .. } => {
+                source.kind().into_static() == "NotFound"
+            }
+            paimon::Error::DataInvalid { message, .. } => {
+                message.starts_with("snapshot file does not exist:")
+            }
+            _ => false,
+        };
+        if not_found {
+            anyhow!(invalid_message(format_args!(
+                "required metadata for Paimon snapshot {snapshot_id} was not found in table \
+                 {table_location}; refresh the external collection"
+            )))
+        } else {
+            anyhow!(error).context(format!(
+                "cannot resolve Paimon snapshot {snapshot_id} for table {table_location}"
             ))
-        })?;
-    let exists = input.exists().await.with_context(|| {
-        format!("cannot check Paimon snapshot {snapshot_id} for table {table_location}")
-    })?;
-    if exists {
-        return Ok(());
-    }
-    // The snapshot file is confirmed missing. Resolve the live bounds so the
-    // error is actionable. A failed bound lookup keeps IO semantics: without
-    // bounds the non-existence story is no longer complete, and the caller
-    // may retry.
-    let earliest = manager.earliest_snapshot_id().await.with_context(|| {
-        format!("cannot resolve the earliest Paimon snapshot for table {table_location}")
-    })?;
-    let latest = manager.get_latest_snapshot_id().await.with_context(|| {
-        format!("cannot resolve the latest Paimon snapshot for table {table_location}")
-    })?;
-    let bound = |value: Option<i64>| value.map_or_else(|| "none".to_string(), |id| id.to_string());
-    bail!(invalid_message(format_args!(
-        "Paimon snapshot {snapshot_id} no longer exists for table {table_location} \
-         (earliest={}, latest={}); refresh the external collection",
-        bound(earliest),
-        bound(latest)
-    )))
+        }
+    })
 }
 
 async fn load_table(
@@ -275,45 +250,45 @@ async fn load_table(
                 "cannot build Paimon FileIO for '{table_location}'"
             ))
         })?;
-    let schema = SchemaManager::new(file_io.clone(), table_location.to_string())
-        .latest()
-        .await?
-        .ok_or_else(|| {
-            anyhow!(invalid_message(format_args!(
-                "Paimon table has no schema: {table_location}"
-            )))
-        })?;
-    if let Some(snapshot_id) = snapshot_id {
-        ensure_pinned_snapshot_exists(&file_io, table_location, snapshot_id).await?;
-    }
-    let table = Table::new(
+    let schema_manager = SchemaManager::new(file_io.clone(), table_location.to_string());
+    let schema = match snapshot_id {
+        Some(snapshot_id) => {
+            // Resolve the snapshot and its historical schema strictly. Paimon
+            // 0.3's copy_with_time_travel intentionally swallows resolution
+            // failures, which would turn retryable storage errors into an
+            // unresolved table.
+            let snapshot_manager =
+                SnapshotManager::new(file_io.clone(), table_location.to_string());
+            let snapshot = pinned_metadata_result(
+                snapshot_manager.get_snapshot(snapshot_id).await,
+                table_location,
+                snapshot_id,
+            )?;
+            let schema = pinned_metadata_result(
+                schema_manager.schema(snapshot.schema_id()).await,
+                table_location,
+                snapshot_id,
+            )?;
+            let mut options = schema.options().clone();
+            options.insert(SCAN_SNAPSHOT_ID_OPTION.to_string(), snapshot_id.to_string());
+            schema.copy_with_replaced_options(options)
+        }
+        None => {
+            let schema = schema_manager.latest().await?.ok_or_else(|| {
+                anyhow!(invalid_message(format_args!(
+                    "Paimon table has no schema: {table_location}"
+                )))
+            })?;
+            (*schema).clone()
+        }
+    };
+    Ok(Table::new(
         file_io,
         Identifier::new("unknown", table_name(table_location)),
         table_location.to_string(),
-        (*schema).clone(),
+        schema,
         None,
-    );
-    if let Some(snapshot_id) = snapshot_id {
-        let table = table
-            .copy_with_time_travel(HashMap::from([(
-                "scan.snapshot-id".to_string(),
-                snapshot_id.to_string(),
-            )]))
-            .await?;
-        // The probe above already proved existence; reaching this branch means
-        // the snapshot disappeared in between (expiration race) or its content
-        // is unreadable. Both are terminal states for this descriptor.
-        ensure!(
-            table.has_resolved_travel_snapshot(),
-            invalid_message(format_args!(
-                "Paimon snapshot {snapshot_id} no longer exists for table {table_location}; \
-                 refresh the external collection"
-            ))
-        );
-        Ok(table)
-    } else {
-        Ok(table)
-    }
+    ))
 }
 
 fn file_format(path: &str) -> &'static str {
@@ -1149,7 +1124,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_pinned_snapshot_reports_bounds_and_refresh_advice() {
+    fn missing_pinned_snapshot_requests_external_collection_refresh() {
         let directory = tempfile::tempdir().unwrap();
         let table_location = directory.path().join("snap-table");
         let table_location = table_location.to_str().unwrap();
@@ -1164,17 +1139,22 @@ mod tests {
         .unwrap();
 
         // A pinned snapshot that exists must load.
-        TOKIO_RT
+        let table = TOKIO_RT
             .block_on(load_table(
                 table_location,
                 &HashMap::new(),
                 Some(snapshot_id),
             ))
             .unwrap();
+        let expected_snapshot_id = snapshot_id.to_string();
+        assert_eq!(
+            table.schema().options().get(SCAN_SNAPSHOT_ID_OPTION),
+            Some(&expected_snapshot_id)
+        );
 
         // A confirmed-missing snapshot is a terminal input-state error with
-        // the live bounds and the refresh advice (the C++ boundary keys the
-        // Invalid classification off that marker).
+        // refresh advice (the C++ boundary keys the Invalid classification
+        // off that marker).
         let error = TOKIO_RT
             .block_on(load_table(
                 table_location,
@@ -1183,12 +1163,8 @@ mod tests {
             ))
             .unwrap_err();
         let message = format!("{error:#}");
-        assert!(message.contains("no longer exists"), "{message}");
-        assert!(message.contains("earliest=1"), "{message}");
-        assert!(
-            message.contains(&format!("latest={snapshot_id}")),
-            "{message}"
-        );
+        assert!(message.contains("required metadata"), "{message}");
+        assert!(message.contains("was not found"), "{message}");
         assert!(
             message.contains("refresh the external collection"),
             "{message}"
@@ -1196,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_snapshot_content_does_not_claim_nonexistence_bounds() {
+    fn corrupt_snapshot_content_does_not_request_refresh() {
         let directory = tempfile::tempdir().unwrap();
         let table_location = directory.path().join("snap-table");
         let table_location = table_location.to_str().unwrap();
@@ -1209,9 +1185,8 @@ mod tests {
             0,
         )
         .unwrap();
-        // Corrupt the pinned snapshot file: the existence probe passes, time
-        // travel fails to resolve, and the error is the terminal fallback
-        // message without fabricated earliest/latest bounds.
+        // Corrupt metadata is invalid data, not evidence that the snapshot
+        // expired. It must not carry refresh advice.
         let snapshot_file = format!("{table_location}/snapshot/snapshot-{snapshot_id}");
         std::fs::write(&snapshot_file, b"{not json").unwrap();
         let error = TOKIO_RT
@@ -1222,11 +1197,37 @@ mod tests {
             ))
             .unwrap_err();
         let message = format!("{error:#}");
+        assert!(message.contains("snapshot JSON invalid"), "{message}");
+        assert!(!message.contains("was not found"), "{message}");
+        assert!(!message.contains("refresh the external collection"), "{message}");
+
+        let message = format!("{:#}", classify_bridge_error(error));
+        assert!(message.contains(ERROR_INVALID_PREFIX), "{message}");
+    }
+
+    #[test]
+    fn transient_snapshot_resolution_error_remains_retryable() {
+        // Inject the read failure returned after SnapshotManager's existence
+        // check. This must retain retryable service semantics and must not be
+        // converted into snapshot-expiration advice.
+        let source = opendal_paimon::Error::new(
+            opendal_paimon::ErrorKind::Unexpected,
+            "injected transient snapshot read failure",
+        )
+        .set_temporary();
+        let error = paimon::Error::IoUnexpected {
+            message: "cannot read snapshot".to_string(),
+            source: Box::new(source),
+        };
+        let error = pinned_metadata_result::<()>(Err(error), "s3://bucket/table", 7)
+            .unwrap_err();
+        let message = format!("{:#}", classify_bridge_error(error));
         assert!(
-            message.contains("refresh the external collection"),
+            message.contains(ERROR_TRANSIENT_SERVICE_PREFIX),
             "{message}"
         );
-        assert!(!message.contains("earliest="), "{message}");
+        assert!(!message.contains(ERROR_INVALID_PREFIX), "{message}");
+        assert!(!message.contains("refresh the external collection"), "{message}");
     }
 
     #[test]
