@@ -61,13 +61,23 @@ arrow::Result<std::unordered_map<std::string, std::string>> ToStorageOptions(con
     set("azure.endpoint", endpoint());
     set("azure.account-name", config.access_key_id);
     if (config.use_iam) {
-      if (const auto* value = std::getenv("AZURE_CLIENT_ID"))
-        set("azure.client-id", value);
-      if (const auto* value = std::getenv("AZURE_CLIENT_SECRET"))
-        set("azure.client-secret", value);
-      if (const auto* value = std::getenv("AZURE_TENANT_ID"))
-        set("azure.tenant-id", value);
-      if (const auto* value = std::getenv("AZURE_AUTHORITY_HOST"))
+      auto nonempty_env = [](const char* name) -> const char* {
+        const auto* value = std::getenv(name);
+        return value && *value != '\0' ? value : nullptr;
+      };
+      const auto* client_id = nonempty_env("AZURE_CLIENT_ID");
+      const auto* client_secret = nonempty_env("AZURE_CLIENT_SECRET");
+      const auto* tenant_id = nonempty_env("AZURE_TENANT_ID");
+      if (nonempty_env("AZURE_FEDERATED_TOKEN_FILE") && !(client_id && client_secret && tenant_id)) {
+        return arrow::Status::NotImplemented("Paimon Azure workload identity credentials are not supported");
+      }
+      if (client_id)
+        set("azure.client-id", client_id);
+      if (client_secret)
+        set("azure.client-secret", client_secret);
+      if (tenant_id)
+        set("azure.tenant-id", tenant_id);
+      if (const auto* value = nonempty_env("AZURE_AUTHORITY_HOST"))
         set("azure.authority-host", value);
     } else {
       set("azure.account-key", config.access_key_value);

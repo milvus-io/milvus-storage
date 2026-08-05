@@ -10,6 +10,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cstdlib>
+#include <optional>
+#include <string>
+
 #include <gtest/gtest.h>
 
 #include "milvus-storage/format/paimon/paimon_common.h"
@@ -17,6 +21,29 @@
 
 namespace milvus_storage::paimon::test {
 namespace {
+
+class ScopedEnvVar {
+  public:
+  ScopedEnvVar(const char* name, const char* value) : name_(name) {
+    if (const auto* old_value = std::getenv(name)) {
+      old_value_ = old_value;
+    }
+    if (value) {
+      setenv(name, value, 1);
+    } else {
+      unsetenv(name);
+    }
+  }
+
+  ~ScopedEnvVar() { old_value_ ? setenv(name_.c_str(), old_value_->c_str(), 1) : unsetenv(name_.c_str()); }
+
+  ScopedEnvVar(const ScopedEnvVar&) = delete;
+  ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
+
+  private:
+  std::string name_;
+  std::optional<std::string> old_value_;
+};
 
 ArrowFileSystemConfig MakeAwsConfig() {
   ArrowFileSystemConfig config;
@@ -110,6 +137,26 @@ TEST(PaimonStorageOptionsTest, AzureAccountKey) {
   EXPECT_EQ(options.at("azure.endpoint"), "https://account.dfs.core.windows.net");
   EXPECT_EQ(options.at("azure.account-name"), "account");
   EXPECT_EQ(options.at("azure.account-key"), "account-key");
+}
+
+TEST(PaimonStorageOptionsTest, AzureWorkloadIdentityRequiresCompleteServicePrincipal) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderAzure;
+  config.use_iam = true;
+
+  ScopedEnvVar token("AZURE_FEDERATED_TOKEN_FILE", "/var/run/secrets/azure/tokens/azure-identity-token");
+  ScopedEnvVar client_id("AZURE_CLIENT_ID", "client-id");
+  ScopedEnvVar tenant_id("AZURE_TENANT_ID", "tenant-id");
+  ScopedEnvVar missing_secret("AZURE_CLIENT_SECRET", nullptr);
+
+  EXPECT_TRUE(ToStorageOptions(config).status().IsNotImplemented());
+
+  ScopedEnvVar client_secret("AZURE_CLIENT_SECRET", "client-secret");
+  ASSERT_AND_ASSIGN(auto options, ToStorageOptions(config));
+  EXPECT_EQ(options.at("azure.client-id"), "client-id");
+  EXPECT_EQ(options.at("azure.client-secret"), "client-secret");
+  EXPECT_EQ(options.at("azure.tenant-id"), "tenant-id");
 }
 
 TEST(PaimonStorageOptionsTest, GcpStaticAndAnonymous) {
