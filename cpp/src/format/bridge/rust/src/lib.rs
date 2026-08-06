@@ -13,7 +13,9 @@
 // limitations under the License.
 
 mod aliyun_oss_provider;
+mod aws_arn_provider;
 mod azure_sas_provider;
+mod cloud_provider_cache;
 mod gcp_impersonation;
 mod iceberg_bridgeimpl;
 mod iceberg_testutil;

@@ -88,7 +88,7 @@ use lance::session::Session;
 use lance::{Error as LanceError, Result as LanceResult};
 use lance_io::object_store::{
     DEFAULT_CLOUD_IO_PARALLELISM, ObjectStore, ObjectStoreParams, ObjectStoreProvider,
-    ObjectStoreRegistry, StorageOptions,
+    ObjectStoreRegistry,
 };
 
 use iceberg::io::{
@@ -107,6 +107,10 @@ const OSS_DEFAULT_DOWNLOAD_RETRIES: usize = 3;
 const ALIYUN_OSS_STORE_NAME: &str = "aliyun_oss";
 const OSS_CREDENTIAL_REFRESH_SECS_KEY: &str = "oss_credential_refresh_secs";
 const DEFAULT_OSS_CREDENTIAL_REFRESH_SECS: u64 = 50 * 60;
+const DEFAULT_ALIYUN_STS_DURATION_SECS: u64 = 60 * 60;
+const ALIYUN_STS_MIN_SESSION_DURATION_SECS: u64 = 15 * 60;
+const ALIYUN_STS_REFRESH_GRACE_SECS: u64 = 3 * 60;
+const ALIYUN_STS_MAX_SESSION_DURATION_SECS: u64 = 12 * 60 * 60;
 const REFRESH_LOCK_RETRY_MS: u64 = 10;
 
 // ============================================================================
@@ -298,13 +302,14 @@ pub(crate) fn build_oss_config_from_iceberg_opts(
 pub(crate) async fn apply_oidc_chain_if_requested(
     config_map: &mut HashMap<String, String>,
 ) -> Result<(), String> {
-    apply_oidc_chain_if_requested_with_expiration(config_map)
+    apply_oidc_chain_if_requested_with_expiration(config_map, DEFAULT_ALIYUN_STS_DURATION_SECS)
         .await
         .map(|_| ())
 }
 
 async fn apply_oidc_chain_if_requested_with_expiration(
     config_map: &mut HashMap<String, String>,
+    duration_seconds: u64,
 ) -> Result<Option<u64>, String> {
     // RAM mode owns this config_map; do not double-resolve.
     if std::env::var(ram::AUTH_MODE_ENV).as_deref() == Ok(ram::AUTH_MODE_RAM) {
@@ -351,6 +356,7 @@ async fn apply_oidc_chain_if_requested_with_expiration(
         &target_role_arn,
         &session_name,
         &external_id,
+        duration_seconds,
     )
     .await?;
     let expires_at_ms = outer.expires_at_ms;
@@ -432,18 +438,19 @@ async fn call_assume_role_with_oidc(
 /// callers, plain AK/SK callers, and any caller without the env var flipped
 /// fall straight through. Lance `role_arn` stores wrap this one-shot swap in
 /// [`RefreshableAliyunOssStore`] so long-lived scans rebuild the opendal store
-/// on the configured refresh interval. Iceberg intentionally calls this from
-/// `create_operator()` for each I/O operation instead of keeping a cache.
+/// shortly before the server-provided expiration. Iceberg role factories own
+/// the same refreshable store shape for their configured bucket.
 pub(crate) async fn apply_ram_mode_if_requested(
     config_map: &mut HashMap<String, String>,
 ) -> Result<(), String> {
-    apply_ram_mode_if_requested_with_expiration(config_map)
+    apply_ram_mode_if_requested_with_expiration(config_map, DEFAULT_ALIYUN_STS_DURATION_SECS)
         .await
         .map(|_| ())
 }
 
 async fn apply_ram_mode_if_requested_with_expiration(
     config_map: &mut HashMap<String, String>,
+    duration_seconds: u64,
 ) -> Result<Option<u64>, String> {
     if std::env::var(ram::AUTH_MODE_ENV).as_deref() != Ok(ram::AUTH_MODE_RAM) {
         return Ok(None);
@@ -456,7 +463,9 @@ async fn apply_ram_mode_if_requested_with_expiration(
         .cloned()
         .unwrap_or_else(ram::default_session_name);
     let external_id = config_map.get("external_id").cloned().unwrap_or_default();
-    let creds = ram::fetch_assume_role_creds(&role_arn, &session_name, &external_id).await?;
+    let creds =
+        ram::fetch_assume_role_creds(&role_arn, &session_name, &external_id, duration_seconds)
+            .await?;
     let expires_at_ms = creds.expires_at_ms;
     ram::apply_credentials(config_map, creds);
     Ok(expires_at_ms)
@@ -474,7 +483,7 @@ fn parse_aliyun_expiration_to_ms(s: &str) -> Result<u64, String> {
     u64::try_from(dt.timestamp_millis()).map_err(|_| format!("pre-epoch Expiration: {s}"))
 }
 
-fn parse_oss_credential_refresh_interval(
+fn parse_oss_credential_duration(
     storage_options: &HashMap<String, String>,
 ) -> Result<Duration, String> {
     let Some(raw) = storage_options.get(OSS_CREDENTIAL_REFRESH_SECS_KEY) else {
@@ -483,40 +492,19 @@ fn parse_oss_credential_refresh_interval(
     let secs = raw.parse::<u64>().map_err(|e| {
         format!("{OSS_CREDENTIAL_REFRESH_SECS_KEY} must be a positive integer seconds value: {e}")
     })?;
-    if secs == 0 {
+    if !(ALIYUN_STS_MIN_SESSION_DURATION_SECS..=ALIYUN_STS_MAX_SESSION_DURATION_SECS)
+        .contains(&secs)
+    {
         return Err(format!(
-            "{OSS_CREDENTIAL_REFRESH_SECS_KEY} must be greater than 0"
+            "{OSS_CREDENTIAL_REFRESH_SECS_KEY} must be in [{ALIYUN_STS_MIN_SESSION_DURATION_SECS}, \
+             {ALIYUN_STS_MAX_SESSION_DURATION_SECS}], got {secs}"
         ));
     }
     Ok(Duration::from_secs(secs))
 }
 
-fn duration_millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-}
-
-fn should_refresh(last_refresh_at_ms: u64, now_ms: u64, refresh_interval: Duration) -> bool {
-    now_ms >= last_refresh_at_ms.saturating_add(duration_millis(refresh_interval))
-}
-
-fn validate_refresh_interval_before_expiration(
-    refresh_interval: Duration,
-    issued_at_ms: u64,
-    expires_at_ms: u64,
-) -> Result<(), String> {
-    if expires_at_ms <= issued_at_ms {
-        return Err("Aliyun STS credentials are already expired".to_string());
-    }
-    let lifetime_ms = expires_at_ms - issued_at_ms;
-    let refresh_ms = duration_millis(refresh_interval);
-    if refresh_ms >= lifetime_ms {
-        return Err(format!(
-            "Aliyun OSS credential refresh interval {}s must be less than server credential lifetime {}s",
-            refresh_interval.as_secs(),
-            lifetime_ms / 1000
-        ));
-    }
-    Ok(())
+fn credential_is_fresh(expires_at_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_add(ALIYUN_STS_REFRESH_GRACE_SECS * 1000) < expires_at_ms
 }
 
 fn aliyun_object_store_error(message: impl Into<String>) -> object_store::Error {
@@ -529,29 +517,44 @@ fn aliyun_object_store_error(message: impl Into<String>) -> object_store::Error 
 
 #[derive(Clone)]
 struct CachedAliyunOssStore {
+    config_map: HashMap<String, String>,
     store: Arc<dyn OSObjectStore>,
-    refreshed_at_ms: u64,
+    expires_at_ms: u64,
 }
 
 #[derive(Clone)]
-struct RefreshableAliyunOssStore {
+pub(crate) struct RefreshableAliyunOssStore {
     base_config: HashMap<String, String>,
-    refresh_interval: Duration,
+    credential_duration: Duration,
     cache: Arc<RwLock<Option<CachedAliyunOssStore>>>,
 }
 
 impl RefreshableAliyunOssStore {
-    fn new(base_config: HashMap<String, String>, refresh_interval: Duration) -> Self {
+    pub(crate) fn new(base_config: HashMap<String, String>, credential_duration: Duration) -> Self {
         Self {
             base_config,
-            refresh_interval,
+            credential_duration,
             cache: Arc::new(RwLock::new(None)),
         }
     }
 
+    fn validate_bucket(&self, requested_bucket: &str) -> Result<(), String> {
+        let configured_bucket = self
+            .base_config
+            .get("bucket")
+            .expect("Aliyun OSS base config always contains a bucket");
+        if requested_bucket != configured_bucket {
+            return Err(format!(
+                "Cross-bucket Aliyun OSS access is unsupported: configured bucket \
+                 '{configured_bucket}', requested bucket '{requested_bucket}'"
+            ));
+        }
+        Ok(())
+    }
+
     fn cached_store_is_fresh(&self, cached: &Option<CachedAliyunOssStore>) -> bool {
         match cached {
-            Some(c) => !should_refresh(c.refreshed_at_ms, now_ms(), self.refresh_interval),
+            Some(c) => credential_is_fresh(c.expires_at_ms, now_ms()),
             None => false,
         }
     }
@@ -591,43 +594,63 @@ impl RefreshableAliyunOssStore {
         Ok(Some(store))
     }
 
+    async fn current_config(&self) -> ObjectStoreResult<HashMap<String, String>> {
+        self.current_store().await?;
+        let cached = self.cache.read().await;
+        Ok(cached
+            .as_ref()
+            .expect("current_store initializes the Aliyun OSS cache")
+            .config_map
+            .clone())
+    }
+
     async fn refresh_store(&self) -> ObjectStoreResult<CachedAliyunOssStore> {
         let mut config_map = self.base_config.clone();
+        let duration_seconds = self.credential_duration.as_secs();
 
-        let ram_expires_at_ms = apply_ram_mode_if_requested_with_expiration(&mut config_map)
-            .await
-            .map_err(|e| {
-                aliyun_object_store_error(format!("Aliyun RAM-mode credential refresh failed: {e}"))
-            })?;
-        let oidc_expires_at_ms = apply_oidc_chain_if_requested_with_expiration(&mut config_map)
-            .await
-            .map_err(|e| {
-                aliyun_object_store_error(format!(
-                    "Aliyun OIDC chain credential refresh failed: {e}"
-                ))
-            })?;
+        let ram_expires_at_ms =
+            apply_ram_mode_if_requested_with_expiration(&mut config_map, duration_seconds)
+                .await
+                .map_err(|e| {
+                    aliyun_object_store_error(format!(
+                        "Aliyun RAM-mode credential refresh failed: {e}"
+                    ))
+                })?;
+        let oidc_expires_at_ms =
+            apply_oidc_chain_if_requested_with_expiration(&mut config_map, duration_seconds)
+                .await
+                .map_err(|e| {
+                    aliyun_object_store_error(format!(
+                        "Aliyun OIDC chain credential refresh failed: {e}"
+                    ))
+                })?;
         let expires_at_ms = ram_expires_at_ms.or(oidc_expires_at_ms).ok_or_else(|| {
             aliyun_object_store_error(
                 "Aliyun role_arn credential refresh did not return an Expiration",
             )
         })?;
-        let refreshed_at_ms = now_ms();
+        let received_at_ms = now_ms();
+        if expires_at_ms <= received_at_ms {
+            return Err(aliyun_object_store_error(
+                "Aliyun STS credentials are already expired",
+            ));
+        }
+        if !credential_is_fresh(expires_at_ms, received_at_ms) {
+            return Err(aliyun_object_store_error(format!(
+                "Aliyun STS credentials expire within the {}s refresh grace",
+                ALIYUN_STS_REFRESH_GRACE_SECS
+            )));
+        }
 
-        validate_refresh_interval_before_expiration(
-            self.refresh_interval,
-            refreshed_at_ms,
-            expires_at_ms,
-        )
-        .map_err(aliyun_object_store_error)?;
-
-        let operator = Operator::from_iter::<Oss>(config_map)
+        let operator = Operator::from_iter::<Oss>(config_map.clone())
             .map_err(|e| {
                 aliyun_object_store_error(format!("Failed to create OSS operator: {e:?}"))
             })?
             .finish();
         Ok(CachedAliyunOssStore {
+            config_map,
             store: Arc::new(OpendalStore::new(operator)) as Arc<dyn OSObjectStore>,
-            refreshed_at_ms,
+            expires_at_ms,
         })
     }
 }
@@ -635,7 +658,7 @@ impl RefreshableAliyunOssStore {
 impl fmt::Debug for RefreshableAliyunOssStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RefreshableAliyunOssStore")
-            .field("refresh_interval", &self.refresh_interval)
+            .field("credential_duration", &self.credential_duration)
             .field("has_role_arn", &self.base_config.contains_key("role_arn"))
             .finish_non_exhaustive()
     }
@@ -645,8 +668,8 @@ impl fmt::Display for RefreshableAliyunOssStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "RefreshableAliyunOssStore(refresh_interval={}s)",
-            self.refresh_interval.as_secs()
+            "RefreshableAliyunOssStore(credential_duration={}s)",
+            self.credential_duration.as_secs()
         )
     }
 }
@@ -755,8 +778,42 @@ impl OSObjectStore for RefreshableAliyunOssStore {
 // Lance: ObjectStoreProvider
 // ============================================================================
 
-#[derive(Default, Debug)]
-pub struct AliyunOssStoreProvider;
+#[derive(Clone, Debug)]
+pub struct AliyunOssStoreProvider {
+    store: Arc<RefreshableAliyunOssStore>,
+}
+
+impl AliyunOssStoreProvider {
+    pub(crate) async fn from_uri(
+        uri: &str,
+        storage_options: &HashMap<String, String>,
+    ) -> LanceResult<Self> {
+        let base_path = Url::parse(uri).map_err(|error| {
+            LanceError::invalid_input(format!("Invalid OSS URL {uri}: {error}"))
+        })?;
+        let bucket = base_path
+            .host_str()
+            .ok_or_else(|| LanceError::invalid_input("OSS URL must contain bucket name"))?
+            .to_string();
+        let config_map = build_oss_config_from_lance_opts(
+            bucket,
+            &base_path,
+            storage_options,
+        )
+        .map_err(LanceError::invalid_input)?;
+        let credential_duration = parse_oss_credential_duration(storage_options)
+            .map_err(LanceError::invalid_input)?;
+        let store = Arc::new(RefreshableAliyunOssStore::new(
+            config_map,
+            credential_duration,
+        ));
+        store.current_store().await.map_err(|error| LanceError::IO {
+            source: Box::new(error),
+            location: location!(),
+        })?;
+        Ok(Self { store })
+    }
+}
 
 #[async_trait::async_trait]
 impl ObjectStoreProvider for AliyunOssStoreProvider {
@@ -765,38 +822,18 @@ impl ObjectStoreProvider for AliyunOssStoreProvider {
         base_path: Url,
         params: &ObjectStoreParams,
     ) -> LanceResult<ObjectStore> {
-        let block_size = params.block_size.unwrap_or(OSS_DEFAULT_BLOCK_SIZE);
-        let storage_options = StorageOptions(params.storage_options().cloned().unwrap_or_default());
-
-        let bucket = base_path
+        let requested_bucket = base_path
             .host_str()
-            .ok_or_else(|| LanceError::invalid_input("OSS URL must contain bucket name"))?
-            .to_string();
-
-        let config_map = build_oss_config_from_lance_opts(bucket, &base_path, &storage_options.0)
+            .ok_or_else(|| LanceError::invalid_input("OSS URL must contain bucket name"))?;
+        // The refreshable store owns an OpenDAL operator bound to its configured
+        // bucket. Reject cross-bucket reuse instead of routing the object key to
+        // that bucket silently.
+        self.store
+            .validate_bucket(requested_bucket)
             .map_err(LanceError::invalid_input)?;
 
-        let inner = if config_map.contains_key("role_arn") {
-            let refresh_interval = parse_oss_credential_refresh_interval(&storage_options.0)
-                .map_err(LanceError::invalid_input)?;
-            let refreshable =
-                Arc::new(RefreshableAliyunOssStore::new(config_map, refresh_interval));
-            refreshable
-                .current_store()
-                .await
-                .map_err(|e| LanceError::IO {
-                    source: Box::new(e),
-                    location: location!(),
-                })?;
-            refreshable as Arc<dyn OSObjectStore>
-        } else {
-            let operator = Operator::from_iter::<Oss>(config_map)
-                .map_err(|e| {
-                    LanceError::invalid_input(format!("Failed to create OSS operator: {:?}", e))
-                })?
-                .finish();
-            Arc::new(OpendalStore::new(operator)) as Arc<dyn OSObjectStore>
-        };
+        let block_size = params.block_size.unwrap_or(OSS_DEFAULT_BLOCK_SIZE);
+        let inner = self.store.clone() as Arc<dyn OSObjectStore>;
 
         let mut url = base_path;
         if !url.path().ends_with('/') {
@@ -828,9 +865,11 @@ impl ObjectStoreProvider for AliyunOssStoreProvider {
 /// prevents concurrent opens with different roles from colliding on a
 /// shared registry. Cache sizes of zero match what the FFI entry points
 /// already pass to `BlockingDataset::open`.
-pub fn build_aliyun_oss_session() -> Arc<Session> {
+pub fn build_aliyun_oss_session(
+    provider: Arc<dyn ObjectStoreProvider>,
+) -> Arc<Session> {
     let registry = ObjectStoreRegistry::default();
-    registry.insert("oss", Arc::new(AliyunOssStoreProvider::default()));
+    registry.insert("oss", provider);
     Arc::new(Session::new(0, 0, Arc::new(registry)))
 }
 
@@ -846,17 +885,61 @@ fn from_opendal_error(e: opendal::Error) -> IcebergError {
     .with_source(e)
 }
 
-/// `StorageFactory` produces an [`AliyunOssStorage`] wrapping the iceberg
-/// `StorageConfig` props. Cross-process serialization (via `typetag`) is
-/// trivial because the factory is a unit struct.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct AliyunOssStorageFactory;
+pub struct AliyunOssStorageFactory {
+    #[serde(skip)]
+    store: Option<Arc<RefreshableAliyunOssStore>>,
+}
+
+impl AliyunOssStorageFactory {
+    pub(crate) async fn from_uri(
+        uri: &str,
+        storage_options: &HashMap<String, String>,
+    ) -> IcebergResult<Self> {
+        let base_path = Url::parse(uri).map_err(|error| {
+            IcebergError::new(
+                IcebergErrorKind::DataInvalid,
+                format!("Invalid OSS URL {uri}: {error}"),
+            )
+        })?;
+        let bucket = base_path
+            .host_str()
+            .ok_or_else(|| {
+                IcebergError::new(
+                    IcebergErrorKind::DataInvalid,
+                    format!("Invalid OSS URL {uri}, missing bucket"),
+                )
+            })?
+            .to_string();
+        let config_map = build_oss_config_from_iceberg_opts(
+            bucket,
+            &base_path,
+            storage_options,
+        )
+        .map_err(|error| IcebergError::new(IcebergErrorKind::DataInvalid, error))?;
+        let credential_duration = parse_oss_credential_duration(storage_options)
+            .map_err(|error| IcebergError::new(IcebergErrorKind::DataInvalid, error))?;
+        let store = Arc::new(RefreshableAliyunOssStore::new(
+            config_map,
+            credential_duration,
+        ));
+        store.current_store().await.map_err(|error| {
+            IcebergError::new(
+                IcebergErrorKind::Unexpected,
+                "Aliyun OSS credential resolution failed",
+            )
+            .with_source(error)
+        })?;
+        Ok(Self { store: Some(store) })
+    }
+}
 
 #[typetag::serde(name = "AliyunOssStorageFactory")]
 impl StorageFactory for AliyunOssStorageFactory {
     fn build(&self, config: &StorageConfig) -> IcebergResult<Arc<dyn IcebergStorage>> {
         Ok(Arc::new(AliyunOssStorage {
             props: Arc::new(config.props().clone()),
+            store: self.store.clone(),
         }))
     }
 }
@@ -872,13 +955,11 @@ impl StorageFactory for AliyunOssStorageFactory {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AliyunOssStorage {
     props: Arc<HashMap<String, String>>,
+    #[serde(skip)]
+    store: Option<Arc<RefreshableAliyunOssStore>>,
 }
 
 impl AliyunOssStorage {
-    /// Derive bucket from the absolute `oss://bucket/key` path, then build
-    /// and return an opendal `Operator` for that bucket along with the
-    /// relative path (the `key` part) to use with it. Mirrors
-    /// `OpenDalStorage::create_operator` + `oss_config_build`.
     async fn create_operator(&self, path: &str) -> IcebergResult<(Operator, String)> {
         let url = Url::parse(path).map_err(|e| {
             IcebergError::new(
@@ -886,35 +967,45 @@ impl AliyunOssStorage {
                 format!("Invalid oss url: {path}: {e}"),
             )
         })?;
-        let bucket = url
-            .host_str()
-            .ok_or_else(|| {
+        let requested_bucket = url.host_str().ok_or_else(|| {
+            IcebergError::new(
+                IcebergErrorKind::DataInvalid,
+                format!("Invalid oss url: {path}, missing bucket"),
+            )
+        })?;
+        let config_map = if let Some(store) = &self.store {
+            store
+                .validate_bucket(requested_bucket)
+                .map_err(|error| IcebergError::new(IcebergErrorKind::DataInvalid, error))?;
+            store.current_config().await.map_err(|error| {
                 IcebergError::new(
-                    IcebergErrorKind::DataInvalid,
-                    format!("Invalid oss url: {path}, missing bucket"),
+                    IcebergErrorKind::Unexpected,
+                    "Aliyun OSS credential resolution failed",
                 )
+                .with_source(error)
             })?
-            .to_string();
-
-        let mut config_map = build_oss_config_from_iceberg_opts(bucket, &url, &self.props)
-            .map_err(|e| IcebergError::new(IcebergErrorKind::DataInvalid, e))?;
-
-        apply_ram_mode_if_requested(&mut config_map)
-            .await
-            .map_err(|e| {
-                IcebergError::new(
-                    IcebergErrorKind::Unexpected,
-                    format!("Aliyun RAM-mode credential resolution failed: {e}"),
-                )
-            })?;
-        apply_oidc_chain_if_requested(&mut config_map)
-            .await
-            .map_err(|e| {
-                IcebergError::new(
-                    IcebergErrorKind::Unexpected,
-                    format!("Aliyun OIDC chain credential resolution failed: {e}"),
-                )
-            })?;
+        } else {
+            let mut config_map =
+                build_oss_config_from_iceberg_opts(requested_bucket.to_string(), &url, &self.props)
+                    .map_err(|e| IcebergError::new(IcebergErrorKind::DataInvalid, e))?;
+            apply_ram_mode_if_requested(&mut config_map)
+                .await
+                .map_err(|e| {
+                    IcebergError::new(
+                        IcebergErrorKind::Unexpected,
+                        format!("Aliyun RAM-mode credential resolution failed: {e}"),
+                    )
+                })?;
+            apply_oidc_chain_if_requested(&mut config_map)
+                .await
+                .map_err(|e| {
+                    IcebergError::new(
+                        IcebergErrorKind::Unexpected,
+                        format!("Aliyun OIDC chain credential resolution failed: {e}"),
+                    )
+                })?;
+            config_map
+        };
 
         let op = Operator::from_iter::<Oss>(config_map)
             .map_err(|e| {
@@ -925,7 +1016,7 @@ impl AliyunOssStorage {
             })?
             .finish();
 
-        let prefix = format!("oss://{}/", op.info().name());
+        let prefix = format!("oss://{requested_bucket}/");
         let relative = path
             .strip_prefix(&prefix)
             .ok_or_else(|| {
@@ -1112,10 +1203,19 @@ pub(crate) mod ram {
         role_arn: &str,
         role_session_name: &str,
         external_id: &str,
+        duration_seconds: u64,
     ) -> Result<AssumeRoleCreds, String> {
         let client = build_http_client()?;
         let caller = fetch_imds_credentials(&client).await?;
-        call_assume_role(&client, &caller, role_arn, role_session_name, external_id).await
+        call_assume_role(
+            &client,
+            &caller,
+            role_arn,
+            role_session_name,
+            external_id,
+            duration_seconds,
+        )
+        .await
     }
 
     /// Build a reqwest client with short timeouts tuned for IMDS + STS. IMDS
@@ -1243,6 +1343,7 @@ pub(crate) mod ram {
         role_arn: &str,
         role_session_name: &str,
         external_id: &str,
+        duration_seconds: u64,
     ) -> Result<AssumeRoleCreds, String> {
         // BTreeMap for deterministic ASCII ordering of keys (POP v1 requirement).
         let mut params = std::collections::BTreeMap::new();
@@ -1257,6 +1358,8 @@ pub(crate) mod ram {
         if !external_id.is_empty() {
             params.insert("ExternalId", external_id);
         }
+        let duration_seconds = duration_seconds.to_string();
+        params.insert("DurationSeconds", &duration_seconds);
         params.insert("Format", "JSON");
         params.insert("RoleArn", role_arn);
         params.insert("RoleSessionName", role_session_name);
@@ -1394,12 +1497,65 @@ pub(crate) mod ram {
 
 #[cfg(test)]
 mod tests {
+    use crate::cloud_provider_cache::GlobalLruCache;
+
     use super::*;
 
     fn opts(kvs: &[(&str, &str)]) -> HashMap<String, String> {
         kvs.iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    fn refreshable_store() -> Arc<RefreshableAliyunOssStore> {
+        Arc::new(RefreshableAliyunOssStore::new(
+            opts(&[("bucket", "my-bucket")]),
+            Duration::from_secs(900),
+        ))
+    }
+
+    #[test]
+    fn load_frequency_is_aliyun_sts_duration() {
+        assert_eq!(
+            parse_oss_credential_duration(&HashMap::new()).unwrap(),
+            Duration::from_secs(DEFAULT_OSS_CREDENTIAL_REFRESH_SECS)
+        );
+        for seconds in [
+            ALIYUN_STS_MIN_SESSION_DURATION_SECS,
+            3600,
+            ALIYUN_STS_MAX_SESSION_DURATION_SECS,
+        ] {
+            let value = seconds.to_string();
+            let storage_options = opts(&[(OSS_CREDENTIAL_REFRESH_SECS_KEY, &value)]);
+            assert_eq!(
+                parse_oss_credential_duration(&storage_options).unwrap(),
+                Duration::from_secs(seconds)
+            );
+        }
+
+        for seconds in [
+            ALIYUN_STS_MIN_SESSION_DURATION_SECS - 1,
+            ALIYUN_STS_MAX_SESSION_DURATION_SECS + 1,
+        ] {
+            let value = seconds.to_string();
+            let storage_options = opts(&[(OSS_CREDENTIAL_REFRESH_SECS_KEY, &value)]);
+            assert!(parse_oss_credential_duration(&storage_options).is_err());
+        }
+    }
+
+    #[test]
+    fn aliyun_credentials_refresh_within_expiration_grace() {
+        let expires_at_ms = 1_000_000;
+        let grace_ms = ALIYUN_STS_REFRESH_GRACE_SECS * 1000;
+        assert!(credential_is_fresh(
+            expires_at_ms,
+            expires_at_ms - grace_ms - 1
+        ));
+        assert!(!credential_is_fresh(
+            expires_at_ms,
+            expires_at_ms - grace_ms
+        ));
+        assert!(!credential_is_fresh(expires_at_ms, expires_at_ms));
     }
 
     #[test]
@@ -1530,5 +1686,112 @@ mod tests {
         )
         .unwrap_err();
         assert!(iceberg_err.contains("OSS endpoint is required"));
+    }
+
+    #[tokio::test]
+    async fn lance_provider_is_reused() {
+        let cache: GlobalLruCache<Arc<dyn ObjectStoreProvider>> = GlobalLruCache::new(2);
+        let first = cache
+            .get("aliyun", || async {
+                Ok::<_, ()>(Arc::new(AliyunOssStoreProvider {
+                    store: refreshable_store(),
+                })
+                    as Arc<dyn ObjectStoreProvider>)
+            })
+            .await
+            .unwrap();
+        let second = cache
+            .get("aliyun", || async {
+                Ok::<_, ()>(Arc::new(AliyunOssStoreProvider {
+                    store: refreshable_store(),
+                })
+                    as Arc<dyn ObjectStoreProvider>)
+            })
+            .await
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn lance_provider_rejects_cross_bucket() {
+        let provider = AliyunOssStoreProvider {
+            store: refreshable_store(),
+        };
+        let error = provider
+            .new_store(
+                Url::parse("oss://other-bucket/path").unwrap(),
+                &ObjectStoreParams::default(),
+            )
+            .await
+            .err()
+            .expect("cross-bucket Lance store should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("configured bucket 'my-bucket', requested bucket 'other-bucket'")
+        );
+    }
+
+    #[tokio::test]
+    async fn iceberg_factory_is_reused() {
+        let cache: GlobalLruCache<Arc<dyn StorageFactory>> = GlobalLruCache::new(2);
+        let first = cache
+            .get("aliyun", || async {
+                Ok::<_, ()>(Arc::new(AliyunOssStorageFactory {
+                    store: Some(refreshable_store()),
+                }) as Arc<dyn StorageFactory>)
+            })
+            .await
+            .unwrap();
+        let second = cache
+            .get("aliyun", || async {
+                Ok::<_, ()>(Arc::new(AliyunOssStorageFactory {
+                    store: Some(refreshable_store()),
+                }) as Arc<dyn StorageFactory>)
+            })
+            .await
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn iceberg_storage_preserves_raw_object_key() {
+        let storage = AliyunOssStorage {
+            props: Arc::new(opts(&[
+                ("oss.endpoint", "oss-cn-hangzhou.aliyuncs.com"),
+                ("oss.access-key-id", "test-access-key-id"),
+                ("oss.access-key-secret", "test-access-key-secret"),
+            ])),
+            store: None,
+        };
+        let path = "oss://my-bucket/dir/a b/中文/%25/literal/../file+name.parquet";
+        let (_, relative) = storage.create_operator(path).await.unwrap();
+
+        assert_eq!(
+            relative,
+            "dir/a b/中文/%25/literal/../file+name.parquet"
+        );
+    }
+
+    #[tokio::test]
+    async fn iceberg_storage_rejects_cross_bucket() {
+        let storage = AliyunOssStorage {
+            props: Arc::new(HashMap::new()),
+            store: Some(refreshable_store()),
+        };
+        let error = storage
+            .create_operator("oss://other-bucket/path")
+            .await
+            .err()
+            .expect("cross-bucket Iceberg storage should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("configured bucket 'my-bucket', requested bucket 'other-bucket'")
+        );
     }
 }

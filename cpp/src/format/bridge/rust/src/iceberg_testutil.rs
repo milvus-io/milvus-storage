@@ -35,7 +35,7 @@ use iceberg::spec::{
 
 use crate::TOKIO_RT;
 use crate::iceberg_bridgeimpl::{
-    build_file_io, denormalize_uri, normalize_uri, prepare_cloud_storage_options, vec_to_hashmap,
+    build_file_io, denormalize_uri, normalize_uri, vec_to_hashmap,
 };
 use crate::iceberg_test_ffi::IcebergTestTableInfo;
 
@@ -84,7 +84,6 @@ pub fn iceberg_create_test_table(
 
     TOKIO_RT.block_on(async {
         let mut props = vec_to_hashmap(storage_options_keys, storage_options_values);
-        prepare_cloud_storage_options(&mut props).await?;
 
         // Normalize URI for opendal and detect FileIO scheme in one pass.
         let (resolved_dir, scheme) = normalize_uri(table_dir, &props);
@@ -95,7 +94,7 @@ pub fn iceberg_create_test_table(
 
         // Build FileIO with storage options via the shared scheme-dispatch
         // helper; iceberg 0.9 no longer accepts a bare scheme string.
-        let file_io = build_file_io(&scheme, &props)?;
+        let file_io = build_file_io(&resolved_dir, &scheme, &mut props).await?;
 
         // Create directories for local filesystem only (S3 has no directories)
         if is_local {

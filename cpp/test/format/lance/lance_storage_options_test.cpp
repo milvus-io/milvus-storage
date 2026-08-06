@@ -116,6 +116,7 @@ TEST_F(LanceStorageOptionsTest, AzureCredentialBrokerKeysExcludeFallbackCredenti
   EXPECT_EQ(opts["azure_broker_request_timeout_ms"], "5000");
   EXPECT_EQ(opts.count("azure_storage_account_key"), 0);
   EXPECT_EQ(opts.count("azure_storage_sas_token"), 0);
+  EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
 }
 
 TEST_F(LanceStorageOptionsTest, AliyunKeys) {
@@ -141,6 +142,7 @@ TEST_F(LanceStorageOptionsTest, GcpImpersonation) {
   ArrowFileSystemConfig config;
   config.storage_type = "remote";
   config.cloud_provider = kCloudProviderGCP;
+  config.use_iam = true;
   config.gcp_target_service_account = "target-sa@customer-project.iam.gserviceaccount.com";
   config.load_frequency = 1800;
 
@@ -150,6 +152,19 @@ TEST_F(LanceStorageOptionsTest, GcpImpersonation) {
   // Bridge-private keys; not forwarded to lance-io / object_store.
   EXPECT_EQ(opts["gcp_target_service_account"], "target-sa@customer-project.iam.gserviceaccount.com");
   EXPECT_EQ(opts["gcp_credential_refresh_secs"], "1800");
+  EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
+}
+
+TEST_F(LanceStorageOptionsTest, GcpTargetServiceAccountRequiresIam) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderGCP;
+  config.gcp_target_service_account = "target-sa@customer-project.iam.gserviceaccount.com";
+
+  auto opts = ToStorageOptions(config);
+
+  EXPECT_EQ(opts.size(), 1);
+  EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
 }
 
 TEST_F(LanceStorageOptionsTest, GcpDefaultCredentials) {

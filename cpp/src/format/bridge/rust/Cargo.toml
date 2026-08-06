@@ -15,6 +15,7 @@ s3-crt-async = []
 # common dependencies
 anyhow = "1.0.99"
 futures = "0.3.31"
+lru = "0.16"
 paste = "1.0.15"
 take_mut = "0.2.2"
 async-compat = "0.2.5"

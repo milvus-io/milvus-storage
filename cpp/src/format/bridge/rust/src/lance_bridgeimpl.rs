@@ -8,7 +8,7 @@ use futures::stream::StreamExt;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::result::Result as RustResult;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use tokio::runtime::Handle;
 
 use arrow_array58::Array;
@@ -40,13 +40,26 @@ use lance_table::utils::stream::ReadBatchFutStream;
 
 use lance::io::ObjectStoreParams;
 use lance::session::Session;
-use lance_io::object_store::{ObjectStoreRegistry, StorageOptionsAccessor};
+use lance_io::object_store::{
+    ObjectStoreProvider, ObjectStoreRegistry, StorageOptionsAccessor,
+};
 use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
 
+use crate::aliyun_oss_provider::{AliyunOssStoreProvider, build_aliyun_oss_session};
+use crate::aws_arn_provider::{
+    AssumeRoleConfig, build_lance_provider as build_aws_arn_provider,
+    build_lance_session as build_aws_arn_session,
+};
 use crate::azure_sas_provider::{AzureBrokerConfig, AzureSasStorageOptionsProvider};
+use crate::cloud_provider_cache::{
+    CACHE_CAPACITY, CACHE_KEY, GlobalLruCache,
+};
 use crate::gcp_impersonation::{ImpersonatingGcsStoreProvider, REFRESH_OFFSET_SECS};
 
 const CLOUD_PROVIDER_KEY: &str = "cloud_provider";
+
+static LANCE_PROVIDER_CACHE: LazyLock<GlobalLruCache<Arc<dyn ObjectStoreProvider>>> =
+    LazyLock::new(|| GlobalLruCache::new(CACHE_CAPACITY));
 
 #[derive(Clone)]
 pub struct BlockingDataset {
@@ -329,78 +342,6 @@ impl BlockingDataset {
 
 use crate::iceberg_bridgeimpl::vec_to_hashmap;
 
-/// Configuration for AWS STS AssumeRole credentials.
-struct AssumeRoleConfig {
-    role_arn: String,
-    session_name: String,
-    external_id: String,
-    credential_refresh_secs: u64,
-}
-
-impl AssumeRoleConfig {
-    /// Parse from raw parameters. Returns None if role_arn is empty.
-    /// Returns Err if credential_refresh_secs is out of range [900, 43200].
-    /// 43200s (12h) is AWS STS `AssumeRole`'s hard upper bound on
-    /// `DurationSeconds`, reachable only when the target IAM role's
-    /// `MaxSessionDuration` is raised from the 3600s default.
-    fn parse(
-        role_arn: &str,
-        session_name: &str,
-        external_id: &str,
-        credential_refresh_secs: u64,
-    ) -> Result<Option<Self>> {
-        if role_arn.is_empty() {
-            return Ok(None);
-        }
-        if credential_refresh_secs < 900 || credential_refresh_secs > 43200 {
-            return Err(LanceError::invalid_input(
-                format!(
-                    "credential_refresh_secs must be in [900, 43200], got {}",
-                    credential_refresh_secs
-                ),
-            ));
-        }
-        Ok(Some(Self {
-            role_arn: role_arn.to_string(),
-            session_name: session_name.to_string(),
-            external_id: external_id.to_string(),
-            credential_refresh_secs,
-        }))
-    }
-
-    /// Build AWS credentials by calling STS AssumeRole.
-    async fn build_credentials(&self) -> Result<object_store::aws::AwsCredentialProvider> {
-        use aws_config::sts::AssumeRoleProvider;
-        use lance_io::object_store::providers::aws::AwsCredentialAdapter;
-
-        // session_length = STS token TTL (credential_refresh_secs, e.g. 900s).
-        // refresh_offset = how early before expiry AwsCredentialAdapter triggers a
-        //   refresh.  Must be strictly less than session_length, otherwise the cache
-        //   is considered expired immediately after issuance and every credential
-        //   check triggers a new STS call (credential thrashing).
-        //   Use a fixed 300s offset to leave enough safety margin.
-        const REFRESH_OFFSET_SECS: u64 = 300;
-
-        let mut builder = AssumeRoleProvider::builder(&self.role_arn)
-            .session_length(std::time::Duration::from_secs(self.credential_refresh_secs));
-
-        if !self.session_name.is_empty() {
-            builder = builder.session_name(&self.session_name);
-        }
-        if !self.external_id.is_empty() {
-            builder = builder.external_id(&self.external_id);
-        }
-
-        // build() auto-loads base credentials from the default chain (IAM / IRSA / env vars)
-        let assume_role_provider = builder.build().await;
-
-        Ok(Arc::new(AwsCredentialAdapter::new(
-            Arc::new(assume_role_provider),
-            std::time::Duration::from_secs(REFRESH_OFFSET_SECS),
-        )))
-    }
-}
-
 /// GCP cross-tenant impersonation parameters extracted from `storage_options`.
 ///
 /// The C++ side (`lance::ToStorageOptions` in `lance_common.cpp`) stamps these
@@ -479,6 +420,7 @@ pub fn open_dataset(
     storage_options_values: Vec<String>,
 ) -> Result<Box<BlockingDataset>> {
     let mut storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
+    let credential_cache_key = storage_options.remove(CACHE_KEY);
     let cloud_provider = storage_options.remove(CLOUD_PROVIDER_KEY);
     if let Some(cloud_provider) = cloud_provider.as_deref()
         && !matches!(cloud_provider, "aws" | "azure" | "gcp" | "aliyun")
@@ -489,18 +431,18 @@ pub fn open_dataset(
     }
 
     // Configure each cloud provider's cross-tenant credential path in one
-    // place. AWS and Azure use ObjectStoreParams directly, while GCP and
-    // Aliyun require a per-call Session with an overridden object-store provider.
+    // place. AWS, GCP, and Aliyun use a per-call Session with an overridden
+    // object-store provider, while Azure uses ObjectStoreParams directly.
     let mut store_params = ObjectStoreParams::default();
     let mut custom_session = None;
     match cloud_provider.as_deref() {
         Some("aws") => {
-            // Lance accepts a refreshable AWS credential provider directly.
             let role_arn = storage_options.remove("aws_role_arn").unwrap_or_default();
             let session_name = storage_options
                 .remove("aws_session_name")
                 .unwrap_or_default();
             let external_id = storage_options.remove("aws_external_id").unwrap_or_default();
+            let region = storage_options.get("aws_region").cloned().unwrap_or_default();
             let refresh_secs_str = storage_options
                 .remove("aws_credential_refresh_secs")
                 .unwrap_or_default();
@@ -509,12 +451,25 @@ pub fn open_dataset(
                 &role_arn,
                 &session_name,
                 &external_id,
+                &region,
                 credential_refresh_secs,
             )?;
-            store_params.aws_credentials = match &assume_role {
-                Some(config) => Some(TOKIO_RT.block_on(config.build_credentials())?),
-                None => None,
-            };
+            if let Some(config) = &assume_role {
+                let provider = match credential_cache_key.as_deref().filter(|key| !key.is_empty()) {
+                    Some(cache_key) => TOKIO_RT.block_on(LANCE_PROVIDER_CACHE.get(
+                        cache_key,
+                        || async {
+                            let provider = build_aws_arn_provider(config).await?;
+                            eprintln!(
+                                "created cloud cache entry: consumer=lance, cloud=aws, mechanism=assume_role"
+                            );
+                            Ok::<_, LanceError>(provider)
+                        },
+                    ))?,
+                    None => TOKIO_RT.block_on(build_aws_arn_provider(config))?,
+                };
+                custom_session = Some(build_aws_arn_session(provider));
+            }
         }
         Some("azure") => {
             // Lance refreshes Azure credentials through StorageOptionsAccessor;
@@ -554,14 +509,31 @@ pub fn open_dataset(
                 .map(|config| build_gcp_impersonation_session(&config));
         }
         Some("aliyun") if storage_options.contains_key("oss_role_arn") => {
-            // Lance's stock OSS provider does not forward the role ARN options.
-            custom_session = Some(crate::aliyun_oss_provider::build_aliyun_oss_session());
+            let provider = match credential_cache_key.as_deref().filter(|key| !key.is_empty()) {
+                Some(cache_key) => TOKIO_RT.block_on(LANCE_PROVIDER_CACHE.get(
+                    cache_key,
+                    || async {
+                        let provider = Arc::new(
+                            AliyunOssStoreProvider::from_uri(uri, &storage_options).await?,
+                        ) as Arc<dyn ObjectStoreProvider>;
+                        eprintln!(
+                            "created cloud cache entry: consumer=lance, cloud=aliyun, mechanism=role"
+                        );
+                        Ok::<_, LanceError>(provider)
+                    },
+                ))?,
+                None => Arc::new(TOKIO_RT.block_on(AliyunOssStoreProvider::from_uri(
+                    uri,
+                    &storage_options,
+                ))?) as Arc<dyn ObjectStoreProvider>,
+            };
+            custom_session = Some(build_aliyun_oss_session(provider));
         }
         _ => {}
     }
 
     // Do not pass credential_refresh_secs as s3_credentials_refresh_offset here:
-    // AwsCredentialAdapter already handles refresh internally with REFRESH_OFFSET_SECS.
+    // The AWS ARN credential provider handles refresh internally with REFRESH_OFFSET_SECS.
     // Passing the full session TTL (e.g. 900s) as the offset would cause Lance to
     // consider credentials expired immediately after issuance (credential thrashing).
     if store_params.storage_options_accessor.is_none() {
@@ -591,6 +563,7 @@ pub unsafe fn write_dataset(
     data_storage_format: LanceDataStorageFormat,
 ) -> Result<Box<BlockingDataset>> {
     let mut storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
+    let credential_cache_key = storage_options.remove(CACHE_KEY);
     let cloud_provider = storage_options.remove(CLOUD_PROVIDER_KEY);
     if let Some(cloud_provider) = cloud_provider.as_deref()
         && !matches!(cloud_provider, "aws" | "azure" | "gcp" | "aliyun")
@@ -609,6 +582,7 @@ pub unsafe fn write_dataset(
                 .remove("aws_session_name")
                 .unwrap_or_default();
             let external_id = storage_options.remove("aws_external_id").unwrap_or_default();
+            let region = storage_options.get("aws_region").cloned().unwrap_or_default();
             let refresh_secs_str = storage_options
                 .remove("aws_credential_refresh_secs")
                 .unwrap_or_default();
@@ -617,12 +591,25 @@ pub unsafe fn write_dataset(
                 &role_arn,
                 &session_name,
                 &external_id,
+                &region,
                 credential_refresh_secs,
             )?;
-            store_params.aws_credentials = match &assume_role {
-                Some(config) => Some(TOKIO_RT.block_on(config.build_credentials())?),
-                None => None,
-            };
+            if let Some(config) = &assume_role {
+                let provider = match credential_cache_key.as_deref().filter(|key| !key.is_empty()) {
+                    Some(cache_key) => TOKIO_RT.block_on(LANCE_PROVIDER_CACHE.get(
+                        cache_key,
+                        || async {
+                            let provider = build_aws_arn_provider(config).await?;
+                            eprintln!(
+                                "created cloud cache entry: consumer=lance, cloud=aws, mechanism=assume_role"
+                            );
+                            Ok::<_, LanceError>(provider)
+                        },
+                    ))?,
+                    None => TOKIO_RT.block_on(build_aws_arn_provider(config))?,
+                };
+                custom_session = Some(build_aws_arn_session(provider));
+            }
         }
         Some("azure") => {
             store_params.storage_options_accessor = match AzureBrokerConfig::extract(
@@ -654,7 +641,25 @@ pub unsafe fn write_dataset(
                 .map(|config| build_gcp_impersonation_session(&config));
         }
         Some("aliyun") if storage_options.contains_key("oss_role_arn") => {
-            custom_session = Some(crate::aliyun_oss_provider::build_aliyun_oss_session());
+            let provider = match credential_cache_key.as_deref().filter(|key| !key.is_empty()) {
+                Some(cache_key) => TOKIO_RT.block_on(LANCE_PROVIDER_CACHE.get(
+                    cache_key,
+                    || async {
+                        let provider = Arc::new(
+                            AliyunOssStoreProvider::from_uri(uri, &storage_options).await?,
+                        ) as Arc<dyn ObjectStoreProvider>;
+                        eprintln!(
+                            "created cloud cache entry: consumer=lance, cloud=aliyun, mechanism=role"
+                        );
+                        Ok::<_, LanceError>(provider)
+                    },
+                ))?,
+                None => Arc::new(TOKIO_RT.block_on(AliyunOssStoreProvider::from_uri(
+                    uri,
+                    &storage_options,
+                ))?) as Arc<dyn ObjectStoreProvider>,
+            };
+            custom_session = Some(build_aliyun_oss_session(provider));
         }
         _ => {}
     }
