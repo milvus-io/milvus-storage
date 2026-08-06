@@ -45,6 +45,7 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
+#include "milvus-storage/format/paimon/paimon_format_reader.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 
@@ -203,12 +204,16 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::append_file_metadata(size_t file_i
     }
   } else {
     for (size_t j = 0; j < row_group_in_file.size(); ++j) {
-      rows_in_file += (row_group_in_file[j].end_offset - row_group_in_file[j].start_offset);
+      const auto row_group_rows = row_group_in_file[j].end_offset - row_group_in_file[j].start_offset;
+      if (row_group_rows == 0) {
+        continue;
+      }
+      rows_in_file += row_group_rows;
       chunk_infos_.emplace_back(ChunkInfo{
           .file_index = file_idx,
           .row_offset_in_row_group = 0,
           .row_offset_in_file = row_group_in_file[j].start_offset,
-          .number_of_rows = row_group_in_file[j].end_offset - row_group_in_file[j].start_offset,
+          .number_of_rows = row_group_rows,
           .row_group_index_in_file = j,
           .global_row_end = rows_in_all_files + rows_in_file,
           .avg_memory_size = row_group_in_file[j].memory_size,
@@ -449,10 +454,11 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ColumnGroupReaderImpl<ReaderT
   }
   ARROW_ASSIGN_OR_RAISE(auto rb, format_readers_[chunk_info.file_index]->get_chunk(chunk_info.row_group_index_in_file));
 
-  // With predicate, Vortex's WithRowRange + WithFilter already produced the
-  // correct subset; skip slicing since filtered row counts don't match
-  // pre-filter chunk metadata.
-  if (predicate_.empty() && (chunk_info.row_offset_in_row_group != 0 || chunk_info.number_of_rows != rb->num_rows())) {
+  // Vortex applies the predicate before returning this row group, so its row
+  // count no longer matches the pre-filter chunk metadata. Other formats use
+  // the default no-op predicate hook and still need fragment slicing here.
+  const bool predicate_applied = !predicate_.empty() && column_group_->format == LOON_FORMAT_VORTEX;
+  if (!predicate_applied && (chunk_info.row_offset_in_row_group != 0 || chunk_info.number_of_rows != rb->num_rows())) {
     rb = rb->Slice(chunk_info.row_offset_in_row_group, chunk_info.number_of_rows);
   }
 

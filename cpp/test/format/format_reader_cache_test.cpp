@@ -39,6 +39,7 @@
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
+#include "milvus-storage/format/paimon/paimon_format_reader.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "milvus-storage/properties.h"
@@ -54,7 +55,8 @@ namespace {
 using TestMetadataCaches = FormatReaderMetadataCaches<parquet::ParquetFormatReader,
                                                       vortex::VortexFormatReader,
                                                       lance::LanceTableReader,
-                                                      iceberg::IcebergFormatReader>;
+                                                      iceberg::IcebergFormatReader,
+                                                      paimon::PaimonFormatReader>;
 
 using ParquetMetadataCache = FormatReaderMetadataCache<parquet::ParquetFormatReader>;
 static_assert(!std::is_default_constructible_v<ParquetMetadataCache>);
@@ -93,6 +95,9 @@ arrow::Status VisitFormatReaderMetadataCachesForFormat(const std::string& format
   }
   if (format == LOON_FORMAT_ICEBERG_TABLE) {
     return std::forward<Visitor>(visitor)(caches.get<iceberg::IcebergFormatReader>());
+  }
+  if (format == LOON_FORMAT_PAIMON_TABLE) {
+    return std::forward<Visitor>(visitor)(caches.get<paimon::PaimonFormatReader>());
   }
   return arrow::Status::Invalid("Unknown column group format: ", format);
 }
@@ -1074,10 +1079,13 @@ TEST(FormatReaderMetadataCacheTest, MetadataCacheDispatchRejectsUnknownFormat) {
   EXPECT_TRUE(unknown_result.status().IsInvalid()) << unknown_result.status().ToString();
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    Formats,
-    FormatReaderMetadataCacheParamTest,
-    ::testing::Values(LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX, LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE));
+INSTANTIATE_TEST_SUITE_P(Formats,
+                         FormatReaderMetadataCacheParamTest,
+                         ::testing::Values(LOON_FORMAT_PARQUET,
+                                           LOON_FORMAT_VORTEX,
+                                           LOON_FORMAT_LANCE_TABLE,
+                                           LOON_FORMAT_ICEBERG_TABLE,
+                                           LOON_FORMAT_PAIMON_TABLE));
 
 TEST_P(FormatReaderMetadataCacheStressTest, ConcurrentReaderCacheOpenAndRead) {
   const auto format = GetParam();

@@ -101,6 +101,12 @@ url = "2"
 hmac = "0.12"
 sha1 = "0.10"
 base64 = "0.22"
+crc32fast = "1"
+roaring = "0.11"
+
+# Apache Paimon planner and test writer. Keep the exact release and Cargo.lock
+# together. Paimon uses the Arrow 58 already present for Lance.
+paimon = { version = "=0.3.0", default-features = false, features = ["storage-fs", "storage-s3", "storage-oss", "storage-azdls", "storage-gcs", "vortex"] }
 
 # SQL predicate parsing
 sqlparser = "0.55"
@@ -110,6 +116,8 @@ cxx = "1.0.184"
 
 [dev-dependencies]
 tempfile = "3"
+# Match Paimon's OpenDAL type in snapshot error-classification tests.
+opendal-paimon = { package = "opendal-core", version = "=0.58.0" }
 
 [build-dependencies]
 cxx-build = "1.0.184"

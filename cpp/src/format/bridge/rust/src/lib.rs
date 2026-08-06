@@ -19,6 +19,8 @@ mod iceberg_bridgeimpl;
 mod iceberg_testutil;
 mod lance_bridgeimpl;
 mod lance_memory_estimator;
+mod paimon_bridgeimpl;
+mod paimon_testutil;
 mod predicate_parser;
 mod rust_runtime;
 mod vortex_bridgeimpl;
@@ -28,6 +30,8 @@ mod filesystem_c;
 use iceberg_bridgeimpl::*;
 use iceberg_testutil::*;
 use lance_bridgeimpl::*;
+use paimon_bridgeimpl::*;
+use paimon_testutil::*;
 use rust_runtime::configure_rust_runtime;
 use vortex_bridgeimpl::*;
 
@@ -192,6 +196,51 @@ pub mod lance_ffi {
 
     }
 } // mod lance_ffi
+
+#[cxx::bridge(namespace = "milvus_storage::paimon::ffi")]
+pub mod paimon_ffi {
+    /// A physical file that Paimon determined is safe to read directly.
+    struct PaimonFileInfo {
+        path: String,
+        file_size: u64,
+        metadata_json: String,
+    }
+
+    extern "Rust" {
+        fn paimon_plan_files(
+            table_location: &str,
+            snapshot_id: i64,
+            scan_mode: &str,
+            storage_options_keys: Vec<String>,
+            storage_options_values: Vec<String>,
+        ) -> Result<Vec<PaimonFileInfo>>;
+
+        fn paimon_read_deletion_vector(
+            path: &str,
+            offset: u64,
+            length: u64,
+            expected_cardinality: i64,
+            storage_options_keys: Vec<String>,
+            storage_options_values: Vec<String>,
+        ) -> Result<Vec<u64>>;
+    }
+}
+
+#[cxx::bridge(namespace = "milvus_storage::paimon::ffi")]
+pub mod paimon_test_ffi {
+    extern "Rust" {
+        /// Create a repository-owned local Paimon fixture through the public
+        /// paimon-rust writer/commit APIs.
+        fn paimon_create_test_table(
+            table_location: &str,
+            num_rows: u64,
+            mode: &str,
+            deleted_positions: Vec<i64>,
+            file_format: &str,
+            dimension: u32,
+        ) -> Result<i64>;
+    }
+}
 
 #[cxx::bridge(namespace = "milvus_storage::vortex::ffi")]
 pub mod vortex_ffi {
