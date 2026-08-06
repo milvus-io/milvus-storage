@@ -724,12 +724,22 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
 
 #ifdef WITH_CRT
 class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonBlockingReadAtFile {
+  protected:
+  struct ReadState {
+    explicit ReadState(int64_t size) : content_length(size) {}
+
+    std::atomic<int64_t> content_length;
+  };
+
   public:
   ObjectCrtInputFile(std::shared_ptr<S3CrtClientHolder> holder,
                      const arrow::io::IOContext& io_context,
                      const S3Path& path,
                      int64_t size = kNoSize)
-      : holder_(std::move(holder)), io_context_(io_context), path_(path), content_length_(size) {}
+      : holder_(std::move(holder)),
+        io_context_(io_context),
+        path_(path),
+        read_state_(std::make_shared<ReadState>(size)) {}
 
   arrow::Status Init() {
     const auto content_length = GetCachedContentLength();
@@ -815,15 +825,15 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
       return Future<int64_t>::MakeFinished(0);
     }
 
-    auto maybe_client_lock = holder_->Lock();
-    if (!maybe_client_lock.ok()) {
-      return FailedReadFuture(maybe_client_lock.status());
+    auto maybe_client_lease = holder_->Acquire();
+    if (!maybe_client_lease.ok()) {
+      return FailedReadFuture(maybe_client_lease.status());
     }
 
     auto ctx = std::make_shared<AsyncReadContext>();
     ctx->future = Future<int64_t>::Make();
-    ctx->client_lock = std::move(maybe_client_lock).ValueOrDie().Move();
-    ctx->self = std::dynamic_pointer_cast<ObjectCrtInputFile>(shared_from_this());
+    ctx->client_lease = std::move(maybe_client_lease).ValueOrDie();
+    ctx->read_state = read_state_;
     ctx->metrics = holder_->GetMetrics();
     ctx->position = position;
     ctx->nbytes = nbytes;
@@ -832,8 +842,10 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     ctx->request.SetRange(ToAwsString(FormatRange(position, nbytes)));
     ctx->request.SetResponseStreamFactory(AwsWriteableStreamFactory(out, nbytes));
 
+    // Keep public continuations off the native CRT callback thread.
+    auto public_future = io_context_.executor()->TransferAlways(ctx->future);
     ctx->metrics->IncrementReadCount();
-    ctx->client_lock->GetObjectAsync(
+    ctx->client_lease->GetObjectAsync(
         ctx->request,
         [ctx](const Aws::S3Crt::S3CrtClient*, const S3CrtModel::GetObjectRequest&, S3CrtModel::GetObjectOutcome outcome,
               const std::shared_ptr<const Aws::Client::AsyncCallerContext>&) mutable {
@@ -854,13 +866,19 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
           }
 
           const int64_t bytes_read = response_content_length;
-          ctx->self->CacheContentLengthFromRead(result, ctx->position, bytes_read);
+          auto content_length = GetObjectSizeFromReadResult(result, ctx->position);
+          if (content_length) {
+            DCHECK_LE(ctx->position + bytes_read, *content_length);
+            int64_t expected = kNoSize;
+            ctx->read_state->content_length.compare_exchange_strong(
+                expected, *content_length, std::memory_order_acq_rel, std::memory_order_acquire);
+          }
           if (bytes_read > 0) {
             ctx->metrics->IncrementReadBytes(bytes_read);
           }
           ctx->future.MarkFinished(bytes_read);
         });
-    return ctx->future;
+    return public_future;
   }
 
   arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
@@ -978,8 +996,8 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     req.SetBucket(ToAwsString(path_.bucket));
     req.SetKey(ToAwsString(path_.key));
 
-    ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
-    auto outcome = client_lock.Move()->HeadObject(req);
+    ARROW_ASSIGN_OR_RAISE(auto client_lease, holder_->Acquire());
+    auto outcome = client_lease->HeadObject(req);
     if (!outcome.IsSuccess()) {
       if (outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
         return PathNotFound(path_);
@@ -1000,27 +1018,10 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     return arrow::Status::OK();
   }
 
-  template <typename ObjectResult>
-  void CacheContentLengthFromRead(const ObjectResult& result, int64_t position, int64_t bytes_read) {
-    auto content_length = GetObjectSizeFromReadResult(result, position);
-    if (!content_length) {
-      return;
-    }
-
-    DCHECK_LE(position + bytes_read, *content_length);
-    SetCachedContentLengthIfAbsent(*content_length);
-  }
-
-  int64_t GetCachedContentLength() const { return content_length_.load(std::memory_order_acquire); }
+  int64_t GetCachedContentLength() const { return read_state_->content_length.load(std::memory_order_acquire); }
 
   void SetCachedContentLength(int64_t content_length) {
-    content_length_.store(content_length, std::memory_order_release);
-  }
-
-  void SetCachedContentLengthIfAbsent(int64_t content_length) {
-    int64_t expected = kNoSize;
-    content_length_.compare_exchange_strong(expected, content_length, std::memory_order_acq_rel,
-                                            std::memory_order_acquire);
+    read_state_->content_length.store(content_length, std::memory_order_release);
   }
 
   bool HasCachedMetadata() const {
@@ -1038,10 +1039,13 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
   }
 
   struct AsyncReadContext {
+    // AWS CRT retains this context through the callback. Never add owning
+    // references to S3CrtClient, S3CrtClientHolder, or ObjectCrtInputFile here.
+    // The lease owns only operation state and a non-owning client pointer.
     Future<int64_t> future;
-    S3CrtClientLock client_lock;
+    S3CrtClientLease client_lease;
     S3CrtModel::GetObjectRequest request;
-    std::shared_ptr<ObjectCrtInputFile> self;
+    std::shared_ptr<ReadState> read_state;
     std::shared_ptr<FilesystemMetrics> metrics;
     int64_t position = 0;
     int64_t nbytes = 0;
@@ -1054,7 +1058,7 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
   bool closed_ = false;
   int64_t pos_ = 0;
   mutable std::mutex metadata_mutex_;
-  std::atomic<int64_t> content_length_{kNoSize};
+  std::shared_ptr<ReadState> read_state_;
   std::shared_ptr<const arrow::KeyValueMetadata> metadata_;
 };
 #endif  // WITH_CRT
