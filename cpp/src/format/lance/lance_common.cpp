@@ -26,6 +26,7 @@ namespace milvus_storage::lance {
 
 StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
   StorageOptions options;
+  options["milvus_lance_io_parallelism"] = std::to_string(config.lance_io_parallelism);
   if (config.storage_type == "local") {
     return options;
   }
