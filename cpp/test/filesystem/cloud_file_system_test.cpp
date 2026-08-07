@@ -660,9 +660,8 @@ TEST_F(CloudFsTest, OpenInputFileWithFileInfoUsesKnownSize) {
   EXPECT_EQ(eof_buf->size(), 0);
 
   if (metrics != nullptr) {
-    auto after_get_size = metrics->GetSnapshot();
-    EXPECT_EQ(after_get_size.read_count, 0);
-    EXPECT_EQ(after_get_size.read_bytes, 0);
+    EXPECT_EQ(metrics->OpCount(OpType::Read, OpStatus::Ok), 0);
+    EXPECT_EQ(metrics->TransferBytes(OpType::Read), 0);
   }
 }
 
@@ -687,23 +686,24 @@ TEST_F(CloudFsTest, OpenInputFileMetricsStayLazyAfterCachedRead) {
 
   metrics->Reset();
   ASSERT_AND_ASSIGN(auto file, fs_->OpenInputFile(path));
-  auto after_open = metrics->GetSnapshot();
-  EXPECT_EQ(after_open.read_count, 0);
-  EXPECT_EQ(after_open.read_bytes, 0);
+  int64_t open_read_count = metrics->OpCount(OpType::Read, OpStatus::Ok);
+  int64_t open_read_bytes = metrics->TransferBytes(OpType::Read);
+  EXPECT_EQ(open_read_count, 0);
+  EXPECT_EQ(open_read_bytes, 0);
 
   ASSERT_AND_ASSIGN(auto read_buf, file->ReadAt(0, content.size() + 1024));
   EXPECT_EQ(read_buf->ToString(), content);
-  auto after_read = metrics->GetSnapshot();
-  EXPECT_GT(after_read.read_count, after_open.read_count);
-  EXPECT_GT(after_read.read_bytes, after_open.read_bytes);
+  int64_t read_read_count = metrics->OpCount(OpType::Read, OpStatus::Ok);
+  int64_t read_read_bytes = metrics->TransferBytes(OpType::Read);
+  EXPECT_GT(read_read_count, open_read_count);
+  EXPECT_GT(read_read_bytes, open_read_bytes);
 
   ASSERT_STATUS_OK(fs_->DeleteFile(path));
 
   ASSERT_AND_ASSIGN(auto size, file->GetSize());
   EXPECT_EQ(size, static_cast<int64_t>(content.size()));
-  auto after_get_size = metrics->GetSnapshot();
-  EXPECT_EQ(after_get_size.read_count, after_read.read_count);
-  EXPECT_EQ(after_get_size.read_bytes, after_read.read_bytes);
+  EXPECT_EQ(metrics->OpCount(OpType::Read, OpStatus::Ok), read_read_count);
+  EXPECT_EQ(metrics->TransferBytes(OpType::Read), read_read_bytes);
 }
 
 TEST_F(CloudFsTest, OverwriteExistingFile) {

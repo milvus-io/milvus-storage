@@ -30,39 +30,6 @@ static constexpr auto local_uri_scheme = "file://";
 
 /// \brief Wrapper for LocalFileSystem that implements Observable and UploadConditional
 class LocalFileSystemWrapper : public arrow::fs::LocalFileSystem, public UploadConditional, public Observable {
-  private:
-  // Macros to simplify metrics tracking
-#define TRACK_METRICS(counter, call)    \
-  do {                                  \
-    metrics_->counter();                \
-    auto result = call;                 \
-    if (!result.ok()) {                 \
-      metrics_->IncrementFailedCount(); \
-    }                                   \
-    return result;                      \
-  } while (0)
-
-#define TRACK_METRICS_AND_WRAP(counter, call, WrapperType)                          \
-  do {                                                                              \
-    metrics_->counter();                                                            \
-    auto result = call;                                                             \
-    if (!result.ok()) {                                                             \
-      metrics_->IncrementFailedCount();                                             \
-      return result.status();                                                       \
-    }                                                                               \
-    return std::make_shared<WrapperType>(std::move(result.ValueOrDie()), metrics_); \
-  } while (0)
-
-#define WRAP_WITH_METRICS(call, WrapperType)                                        \
-  do {                                                                              \
-    auto result = call;                                                             \
-    if (!result.ok()) {                                                             \
-      metrics_->IncrementFailedCount();                                             \
-      return result.status();                                                       \
-    }                                                                               \
-    return std::make_shared<WrapperType>(std::move(result.ValueOrDie()), metrics_); \
-  } while (0)
-
   public:
   explicit LocalFileSystemWrapper(const arrow::fs::LocalFileSystemOptions& options)
       : arrow::fs::LocalFileSystem(options), metrics_(std::make_shared<FilesystemMetrics>()) {}
@@ -71,66 +38,135 @@ class LocalFileSystemWrapper : public arrow::fs::LocalFileSystem, public UploadC
 
   // Override methods to track metrics
   arrow::Result<arrow::fs::FileInfo> GetFileInfo(const std::string& path) override {
-    TRACK_METRICS(IncrementGetFileInfoCount, arrow::fs::LocalFileSystem::GetFileInfo(path));
+    auto op = metrics_->StartOp(OpType::Head);
+    auto result = arrow::fs::LocalFileSystem::GetFileInfo(path);
+    if (!result.ok())
+      op.Fail(ClassifyArrowStatus(result.status()));
+    return result;
   }
 
   arrow::Result<std::vector<arrow::fs::FileInfo>> GetFileInfo(const arrow::fs::FileSelector& select) override {
-    TRACK_METRICS(IncrementGetFileInfoCount, arrow::fs::LocalFileSystem::GetFileInfo(select));
+    auto op = metrics_->StartOp(OpType::List);
+    auto result = arrow::fs::LocalFileSystem::GetFileInfo(select);
+    if (!result.ok())
+      op.Fail(ClassifyArrowStatus(result.status()));
+    return result;
   }
 
   arrow::Status CreateDir(const std::string& path, bool recursive) override {
-    TRACK_METRICS(IncrementCreateDirCount, arrow::fs::LocalFileSystem::CreateDir(path, recursive));
+    auto op = metrics_->StartOp(OpType::CreateDir);
+    auto st = arrow::fs::LocalFileSystem::CreateDir(path, recursive);
+    if (!st.ok())
+      op.Fail(ClassifyArrowStatus(st));
+    return st;
   }
 
   arrow::Status DeleteDir(const std::string& path) override {
-    TRACK_METRICS(IncrementDeleteDirCount, arrow::fs::LocalFileSystem::DeleteDir(path));
+    auto op = metrics_->StartOp(OpType::DeleteDir);
+    auto st = arrow::fs::LocalFileSystem::DeleteDir(path);
+    if (!st.ok())
+      op.Fail(ClassifyArrowStatus(st));
+    return st;
   }
 
   arrow::Status DeleteFile(const std::string& path) override {
-    TRACK_METRICS(IncrementDeleteFileCount, arrow::fs::LocalFileSystem::DeleteFile(path));
+    auto op = metrics_->StartOp(OpType::DeleteFile);
+    auto st = arrow::fs::LocalFileSystem::DeleteFile(path);
+    if (!st.ok())
+      op.Fail(ClassifyArrowStatus(st));
+    return st;
   }
 
   arrow::Status Move(const std::string& src, const std::string& dest) override {
-    TRACK_METRICS(IncrementMoveCount, arrow::fs::LocalFileSystem::Move(src, dest));
+    auto op = metrics_->StartOp(OpType::Move);
+    auto st = arrow::fs::LocalFileSystem::Move(src, dest);
+    if (!st.ok())
+      op.Fail(ClassifyArrowStatus(st));
+    return st;
   }
 
   arrow::Status CopyFile(const std::string& src, const std::string& dest) override {
-    TRACK_METRICS(IncrementCopyFileCount, arrow::fs::LocalFileSystem::CopyFile(src, dest));
+    auto op = metrics_->StartOp(OpType::Copy);
+    auto st = arrow::fs::LocalFileSystem::CopyFile(src, dest);
+    if (!st.ok())
+      op.Fail(ClassifyArrowStatus(st));
+    return st;
   }
 
   arrow::Result<std::shared_ptr<arrow::io::InputStream>> OpenInputStream(const std::string& path) override {
-    WRAP_WITH_METRICS(arrow::fs::LocalFileSystem::OpenInputStream(path), MetricsInputStream);
+    auto op = metrics_->StartOp(OpType::OpenInput);
+    auto result = arrow::fs::LocalFileSystem::OpenInputStream(path);
+    if (!result.ok()) {
+      op.Fail(ClassifyArrowStatus(result.status()));
+      return result.status();
+    }
+    return std::make_shared<MetricsInputStream>(std::move(result.ValueOrDie()), metrics_);
   }
 
   arrow::Result<std::shared_ptr<arrow::io::InputStream>> OpenInputStream(const arrow::fs::FileInfo& info) override {
-    WRAP_WITH_METRICS(arrow::fs::LocalFileSystem::OpenInputStream(info.path()), MetricsInputStream);
+    auto op = metrics_->StartOp(OpType::OpenInput);
+    auto result = arrow::fs::LocalFileSystem::OpenInputStream(info.path());
+    if (!result.ok()) {
+      op.Fail(ClassifyArrowStatus(result.status()));
+      return result.status();
+    }
+    return std::make_shared<MetricsInputStream>(std::move(result.ValueOrDie()), metrics_);
   }
 
   arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string& path) override {
-    WRAP_WITH_METRICS(arrow::fs::LocalFileSystem::OpenInputFile(path), MetricsRandomAccessFile);
+    auto op = metrics_->StartOp(OpType::OpenInput);
+    auto result = arrow::fs::LocalFileSystem::OpenInputFile(path);
+    if (!result.ok()) {
+      op.Fail(ClassifyArrowStatus(result.status()));
+      return result.status();
+    }
+    return std::make_shared<MetricsRandomAccessFile>(std::move(result.ValueOrDie()), metrics_);
   }
 
   arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const arrow::fs::FileInfo& info) override {
-    WRAP_WITH_METRICS(arrow::fs::LocalFileSystem::OpenInputFile(info.path()), MetricsRandomAccessFile);
+    auto op = metrics_->StartOp(OpType::OpenInput);
+    auto result = arrow::fs::LocalFileSystem::OpenInputFile(info.path());
+    if (!result.ok()) {
+      op.Fail(ClassifyArrowStatus(result.status()));
+      return result.status();
+    }
+    return std::make_shared<MetricsRandomAccessFile>(std::move(result.ValueOrDie()), metrics_);
   }
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override {
-    TRACK_METRICS_AND_WRAP(IncrementWriteCount, arrow::fs::LocalFileSystem::OpenOutputStream(path, metadata),
-                           MetricsOutputStream);
+    auto op = metrics_->StartOp(OpType::OpenOutput);
+    auto result = arrow::fs::LocalFileSystem::OpenOutputStream(path, metadata);
+    if (!result.ok()) {
+      op.Fail(ClassifyArrowStatus(result.status()));
+      return result.status();
+    }
+    return std::make_shared<MetricsOutputStream>(std::move(result.ValueOrDie()), metrics_);
   }
 
   arrow::Status DeleteDirContents(const std::string& path, bool missing_dir_ok) override {
-    TRACK_METRICS(IncrementDeleteDirCount, arrow::fs::LocalFileSystem::DeleteDirContents(path, missing_dir_ok));
+    auto op = metrics_->StartOp(OpType::DeleteDir);
+    auto st = arrow::fs::LocalFileSystem::DeleteDirContents(path, missing_dir_ok);
+    if (!st.ok())
+      op.Fail(ClassifyArrowStatus(st));
+    return st;
   }
 
   arrow::Status DeleteRootDirContents() override {
-    TRACK_METRICS(IncrementDeleteDirCount, arrow::fs::LocalFileSystem::DeleteRootDirContents());
+    auto op = metrics_->StartOp(OpType::DeleteDir);
+    auto st = arrow::fs::LocalFileSystem::DeleteRootDirContents();
+    if (!st.ok())
+      op.Fail(ClassifyArrowStatus(st));
+    return st;
   }
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenAppendStream(
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override {
-    TRACK_METRICS(IncrementWriteCount, arrow::fs::LocalFileSystem::OpenAppendStream(path, metadata));
+    auto op = metrics_->StartOp(OpType::OpenOutput);
+    auto result = arrow::fs::LocalFileSystem::OpenAppendStream(path, metadata);
+    if (!result.ok())
+      op.Fail(ClassifyArrowStatus(result.status()));
+    return result;
   }
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(
@@ -139,14 +175,18 @@ class LocalFileSystemWrapper : public arrow::fs::LocalFileSystem, public UploadC
     static std::mutex local_conditional_write_mutex;
     std::scoped_lock lock(local_conditional_write_mutex);
 
-    auto file_info_result = arrow::fs::LocalFileSystem::GetFileInfo(path);
+    arrow::Result<arrow::fs::FileInfo> file_info_result = [&] {
+      auto op = metrics_->StartOp(OpType::Head);
+      auto result = arrow::fs::LocalFileSystem::GetFileInfo(path);
+      if (!result.ok())
+        op.Fail(ClassifyArrowStatus(result.status()));
+      return result;
+    }();
     if (!file_info_result.ok()) {
-      metrics_->IncrementFailedCount();
       return file_info_result.status();
     }
     auto file_info = file_info_result.ValueOrDie();
     if (file_info.type() == arrow::fs::FileType::File) {
-      metrics_->IncrementFailedCount();
       return MakeExtendError(ExtendStatusCode::AwsErrorConflict, "File already exists: " + path, "");
     }
     return OpenOutputStream(path, metadata);
@@ -154,10 +194,6 @@ class LocalFileSystemWrapper : public arrow::fs::LocalFileSystem, public UploadC
 
   private:
   std::shared_ptr<FilesystemMetrics> metrics_;
-
-#undef TRACK_METRICS
-#undef TRACK_METRICS_AND_WRAP
-#undef WRAP_WITH_METRICS
 };
 
 arrow::Result<ArrowFileSystemPtr> LocalFileSystemProducer::Make() {

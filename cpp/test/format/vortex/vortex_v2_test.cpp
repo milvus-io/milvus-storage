@@ -387,7 +387,7 @@ TEST_F(VortexV2Test, TestInlineArrayNodeSubSegmentRead) {
 
   // Check IO: reading 1 row of 512 bytes should read far less than the full file
   // Full file is ~5MB; sub-segment read should be well under 1MB
-  auto read_bytes = metrics->GetReadBytes();
+  auto read_bytes = metrics->TransferBytes(OpType::Read);
   ASSERT_EQ(read_bytes, fsb_width) << "Sub-segment read of 1 row should be exactly " << fsb_width << " bytes, got "
                                    << read_bytes;
 }

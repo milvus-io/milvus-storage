@@ -50,6 +50,7 @@
 #include <aws/s3/model/UploadPartRequest.h>
 
 #include "milvus-storage/common/path_util.h"
+#include "milvus-storage/filesystem/metrics/error_classify.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/util_internal.h"
@@ -67,6 +68,18 @@ namespace milvus_storage {
 
 namespace S3Model = Aws::S3::Model;
 static inline constexpr auto kBucketRegionHeaderName = "x-amz-bucket-region";
+
+// Map an AWS S3 error to an OpStatus for metrics classification.
+static OpStatus ClassifyS3Error(const AWSError<S3Errors>& e) {
+  const int http = static_cast<int>(e.GetResponseCode());
+  const auto type = e.GetErrorType();
+  const bool throttle = type == S3Errors::SLOW_DOWN || type == S3Errors::THROTTLING ||
+                        http == static_cast<int>(Aws::Http::HttpResponseCode::TOO_MANY_REQUESTS) ||
+                        http == static_cast<int>(Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE);
+  const bool timeout = type == S3Errors::REQUEST_TIMEOUT || type == S3Errors::REQUEST_TIME_TOO_SKEWED;
+  const bool connect = type == S3Errors::NETWORK_CONNECTION;
+  return ClassifyS3(http, throttle, timeout, connect);
+}
 
 inline arrow::Status ErrorS3Finalized() { return arrow::Status::Invalid("S3 subsystem is finalized"); }
 
@@ -204,7 +217,8 @@ S3Model::CompleteMultipartUploadOutcome S3Client::CompleteMultipartUploadWithErr
   // which parses the XML response for embedded errors.
 
   std::optional<AWSError<Aws::Client::CoreErrors>> aws_error;
-  metrics_->IncrementMultiPartUploadFinished();
+  auto op = metrics_->StartOp(OpType::MultipartComplete);
+  metrics_->IncrementMultipartFinished();
 
   auto handler = [&](const Aws::Http::HttpRequest* http_req, Aws::Http::HttpResponse* http_resp,
                      long long) {  // NOLINT runtime/int
@@ -248,10 +262,14 @@ S3Model::CompleteMultipartUploadOutcome S3Client::CompleteMultipartUploadWithErr
   }
 
   for (int32_t retries = 0;; retries++) {
+    if (retries > 0) {
+      op.RecordRetry();
+    }
     aws_error.reset();
     auto outcome = Aws::S3::S3Client::S3Client::CompleteMultipartUpload(request);
     if (!outcome.IsSuccess()) {
       // Error returned in HTTP headers (or client failure)
+      op.Fail(ClassifyS3Error(outcome.GetError()));
       return outcome;
     }
     if (!aws_error.has_value()) {
@@ -273,51 +291,52 @@ S3Model::CompleteMultipartUploadOutcome S3Client::CompleteMultipartUploadWithErr
   }
 
   DCHECK(aws_error.has_value());
-  metrics_->IncrementFailedCount();
   auto s3_error = AWSError<S3Errors>(std::move(aws_error).value());
+  op.Fail(ClassifyS3Error(s3_error));
   return S3Model::CompleteMultipartUploadOutcome(std::move(s3_error));
 }
 
 // Metrics related functions
 S3Model::CreateMultipartUploadOutcome S3Client::CreateMultipartUpload(
     const Aws::S3::Model::CreateMultipartUploadRequest& request) const {
-  metrics_->IncrementMultiPartUploadCreated();
+  auto op = metrics_->StartOp(OpType::MultipartCreate);
+  metrics_->IncrementMultipartCreated();
   auto outcome = Aws::S3::S3Client::CreateMultipartUpload(request);
   if (!outcome.IsSuccess()) {
-    metrics_->IncrementFailedCount();
+    op.Fail(ClassifyS3Error(outcome.GetError()));
   }
   return outcome;
 }
 
 S3Model::UploadPartOutcome S3Client::UploadPart(const Aws::S3::Model::UploadPartRequest& request) const {
-  metrics_->IncrementWriteCount();
+  auto op = metrics_->StartTransfer(OpType::MultipartUploadPart);
   auto outcome = Aws::S3::S3Client::UploadPart(request);
   if (!outcome.IsSuccess()) {
-    metrics_->IncrementFailedCount();
+    op.Fail(ClassifyS3Error(outcome.GetError()));
   } else {
-    metrics_->IncrementWriteBytes(request.GetContentLength());
+    op.RecordBytes(request.GetContentLength());
   }
   return outcome;
 }
 
 S3Model::PutObjectOutcome S3Client::PutObject(const Aws::S3::Model::PutObjectRequest& request) const {
-  metrics_->IncrementWriteCount();
+  auto op = metrics_->StartTransfer(OpType::Write);
   auto outcome = Aws::S3::S3Client::PutObject(request);
   if (!outcome.IsSuccess()) {
-    metrics_->IncrementFailedCount();
+    op.Fail(ClassifyS3Error(outcome.GetError()));
   } else {
-    metrics_->IncrementWriteBytes(request.GetContentLength());
+    op.RecordBytes(request.GetContentLength());
   }
   return outcome;
 }
 
 S3Model::GetObjectOutcome S3Client::GetObject(const Aws::S3::Model::GetObjectRequest& request) const {
-  metrics_->IncrementReadCount();
+  auto op = metrics_->StartTransfer(OpType::Read);
   auto outcome = Aws::S3::S3Client::GetObject(request);
   if (!outcome.IsSuccess()) {
-    metrics_->IncrementFailedCount();
+    op.Fail(ClassifyS3Error(outcome.GetError()));
   } else {
-    metrics_->IncrementReadBytes(outcome.GetResult().GetContentLength());
+    op.RecordBytes(outcome.GetResult().GetContentLength());
   }
   return outcome;
 }
