@@ -75,6 +75,7 @@ use url::Url;
 use lance::{Error as LanceError, Result as LanceResult};
 use lance_io::object_store::{
     ObjectStore, ObjectStoreParams, ObjectStoreProvider, DEFAULT_CLOUD_IO_PARALLELISM,
+    throttle::{AimdThrottleConfig, AimdThrottledStore},
 };
 
 /// lance-io's `DEFAULT_CLOUD_BLOCK_SIZE` is crate-private; mirror its 64 KiB
@@ -444,6 +445,12 @@ impl ObjectStoreProvider for ImpersonatingGcsStoreProvider {
             location: location!(),
         })?;
         let inner = Arc::new(built) as Arc<dyn OSObjectStore>;
+        let throttle_config = AimdThrottleConfig::from_storage_options(params.storage_options())?;
+        let inner = if throttle_config.is_disabled() {
+            inner
+        } else {
+            Arc::new(AimdThrottledStore::new(inner, throttle_config)?) as Arc<dyn OSObjectStore>
+        };
 
         Ok(ObjectStore::new(
             inner,
@@ -463,6 +470,31 @@ impl ObjectStoreProvider for ImpersonatingGcsStoreProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn impersonation_store_uses_aimd_throttle() {
+        let params = ObjectStoreParams {
+            storage_options_accessor: Some(Arc::new(
+                lance_io::object_store::StorageOptionsAccessor::with_static_options(HashMap::from([
+                    ("lance_aimd_initial_rate".to_string(), "10".to_string()),
+                    ("lance_aimd_max_rate".to_string(), "10".to_string()),
+                ])),
+            )),
+            ..Default::default()
+        };
+        let provider = ImpersonatingGcsStoreProvider::new(
+            "target@example.iam.gserviceaccount.com".to_string(),
+            Duration::from_secs(DEFAULT_TOKEN_LIFETIME_SECS),
+            Duration::from_secs(REFRESH_OFFSET_SECS),
+        );
+
+        let store = provider
+            .new_store(Url::parse("gs://bucket/path").unwrap(), &params)
+            .await
+            .unwrap();
+
+        assert!(format!("{:?}", store.inner).contains("AimdThrottledStore"));
+    }
 
     #[test]
     fn parse_rfc3339_basic() {

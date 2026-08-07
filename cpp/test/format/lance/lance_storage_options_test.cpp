@@ -164,9 +164,10 @@ TEST_F(LanceStorageOptionsTest, GcpTargetServiceAccountRequiresIam) {
 
   auto opts = ToStorageOptions(config);
 
-  EXPECT_EQ(opts.size(), 2);
   EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
   EXPECT_EQ(opts["milvus_lance_io_parallelism"], "64");
+  EXPECT_EQ(opts.count("gcp_target_service_account"), 0);
+  EXPECT_EQ(opts.count("gcp_credential_refresh_secs"), 0);
 }
 
 TEST_F(LanceStorageOptionsTest, GcpDefaultCredentials) {
@@ -178,9 +179,10 @@ TEST_F(LanceStorageOptionsTest, GcpDefaultCredentials) {
 
   // No gcp_target_service_account → no impersonation keys; lance-io falls back
   // to the default credential chain (VM metadata).
-  EXPECT_EQ(opts.size(), 2);
   EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
   EXPECT_EQ(opts["milvus_lance_io_parallelism"], "64");
+  EXPECT_EQ(opts.count("gcp_target_service_account"), 0);
+  EXPECT_EQ(opts.count("gcp_credential_refresh_secs"), 0);
 }
 
 TEST_F(LanceStorageOptionsTest, LocalContainsOnlyLanceIoParallelism) {
@@ -192,6 +194,24 @@ TEST_F(LanceStorageOptionsTest, LocalContainsOnlyLanceIoParallelism) {
 
   EXPECT_EQ(opts.size(), 1);
   EXPECT_EQ(opts["milvus_lance_io_parallelism"], "17");
+}
+
+TEST_F(LanceStorageOptionsTest, AimdRatesAreForwarded) {
+  auto config = MakeAwsConfig();
+
+  auto opts = ToStorageOptions(config);
+  EXPECT_EQ(opts["lance_aimd_initial_rate"], "2000");
+  EXPECT_EQ(opts["lance_aimd_max_rate"], "5000");
+
+  config.iops_initial_rate = 4000;
+  config.iops_max_rate = 5000;
+  opts = ToStorageOptions(config);
+  EXPECT_EQ(opts["lance_aimd_initial_rate"], "4000");
+  EXPECT_EQ(opts["lance_aimd_max_rate"], "5000");
+
+  config.iops_max_rate = 0;
+  opts = ToStorageOptions(config);
+  EXPECT_EQ(opts["lance_aimd_max_rate"], "0");
 }
 
 TEST_F(LanceStorageOptionsTest, BareEndpointUsesHttpWhenSslDisabled) {

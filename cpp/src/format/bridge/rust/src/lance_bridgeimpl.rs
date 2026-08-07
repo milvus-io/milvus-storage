@@ -73,9 +73,10 @@ static IO_DOMAIN_HASHERS: LazyLock<[RandomState; 2]> =
 /// Identifies datasets that may share one Lance scan scheduler.
 ///
 /// `store_prefix` scopes the key to one object-store namespace. The configuration
-/// fingerprint further separates endpoints and explicit authentication settings
-/// that can otherwise resolve to the same prefix. Parallelism is intentionally not
-/// part of the key: the first live scheduler establishes the limit for that domain.
+/// fingerprint further separates endpoints, explicit authentication, and ObjectStore
+/// behavior settings that can otherwise resolve to the same prefix. Parallelism is
+/// intentionally not part of the key: the first live scheduler establishes the limit
+/// for that domain.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct IoDomainKey {
     store_prefix: String,
@@ -113,9 +114,10 @@ fn extract_lance_io_parallelism(
 
 /// Builds an order-independent, process-local fingerprint for scheduler isolation.
 ///
-/// Explicit store and authentication options participate in the fingerprint, while
-/// scheduler tuning and provider-cache bookkeeping do not. This only partitions
-/// scheduler reuse; it is not a credential validation or security mechanism.
+/// Explicit store, authentication, and ObjectStore behavior options participate in
+/// the fingerprint, while scheduler capacity and provider-cache bookkeeping do not.
+/// This only partitions scheduler reuse; it is not a credential validation or security
+/// mechanism.
 fn store_config_fingerprint(storage_options: &HashMap<String, String>) -> [u64; 2] {
     // Environment-backed ObjectStore settings and the identity resolved by a
     // default credential chain are not visible here. Callers must keep them

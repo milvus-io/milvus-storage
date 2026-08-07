@@ -89,6 +89,7 @@ use lance::{Error as LanceError, Result as LanceResult};
 use lance_io::object_store::{
     DEFAULT_CLOUD_IO_PARALLELISM, ObjectStore, ObjectStoreParams, ObjectStoreProvider,
     ObjectStoreRegistry,
+    throttle::{AimdThrottleConfig, AimdThrottledStore},
 };
 
 use iceberg::io::{
@@ -834,6 +835,12 @@ impl ObjectStoreProvider for AliyunOssStoreProvider {
 
         let block_size = params.block_size.unwrap_or(OSS_DEFAULT_BLOCK_SIZE);
         let inner = self.store.clone() as Arc<dyn OSObjectStore>;
+        let throttle_config = AimdThrottleConfig::from_storage_options(params.storage_options())?;
+        let inner = if throttle_config.is_disabled() {
+            inner
+        } else {
+            Arc::new(AimdThrottledStore::new(inner, throttle_config)?) as Arc<dyn OSObjectStore>
+        };
 
         let mut url = base_path;
         if !url.path().ends_with('/') {
@@ -1512,6 +1519,29 @@ mod tests {
             opts(&[("bucket", "my-bucket")]),
             Duration::from_secs(900),
         ))
+    }
+
+    #[tokio::test]
+    async fn lance_role_store_uses_aimd_throttle() {
+        let params = ObjectStoreParams {
+            storage_options_accessor: Some(Arc::new(
+                lance_io::object_store::StorageOptionsAccessor::with_static_options(opts(&[
+                    ("lance_aimd_initial_rate", "10"),
+                    ("lance_aimd_max_rate", "10"),
+                ])),
+            )),
+            ..Default::default()
+        };
+        let provider = AliyunOssStoreProvider {
+            store: refreshable_store(),
+        };
+
+        let store = provider
+            .new_store(Url::parse("oss://my-bucket/path").unwrap(), &params)
+            .await
+            .unwrap();
+
+        assert!(format!("{:?}", store.inner).contains("AimdThrottledStore"));
     }
 
     #[test]
