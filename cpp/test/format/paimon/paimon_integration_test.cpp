@@ -727,6 +727,20 @@ TEST_F(PaimonIntegrationTest, MalformedDataSplitDescriptorFailsAsInvalid) {
   EXPECT_TRUE(reader.status().IsInvalid()) << reader.status().ToString();
 }
 
+TEST_F(PaimonIntegrationTest, ZeroRowDataSplitDescriptorFailsAsInvalid) {
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 10, "append").status());
+  ASSERT_AND_ASSIGN(auto files, Explore("data-split"));
+  ASSERT_EQ(files.size(), 1);
+
+  auto descriptor = folly::parseJson(files.front().Get<std::string>(api::kPropertyMetadata));
+  descriptor["record_count"] = 0;
+  files.front().Set(api::kPropertyMetadata, folly::toJson(descriptor));
+  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
+  ASSERT_FALSE(reader.ok());
+  EXPECT_TRUE(reader.status().IsInvalid()) << reader.status().ToString();
+  EXPECT_NE(reader.status().ToString().find("zero record_count"), std::string::npos);
+}
+
 TEST_F(PaimonIntegrationTest, FullyDeletedTableProducesNoEntries) {
   constexpr uint64_t kRows = 6;
   ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "deletion-vector", {0, 1, 2, 3, 4, 5}).status());

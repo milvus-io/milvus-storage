@@ -100,6 +100,9 @@ arrow::Result<ParsedMetadata> ParseMetadata(const std::string& json) {
   if (record_count < 0) {
     return arrow::Status::Invalid("Paimon metadata has negative record_count");
   }
+  if (read_path == kDataSplitReadPath && record_count == 0) {
+    return arrow::Status::Invalid("Paimon data-split metadata has zero record_count");
+  }
   return ParsedMetadata{
       .read_path = std::move(read_path),
       .data_format = std::move(data_format),
