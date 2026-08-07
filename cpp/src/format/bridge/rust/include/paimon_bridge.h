@@ -35,6 +35,10 @@ struct PaimonFileInfo {
   std::string metadata_json;
 };
 
+struct PaimonTestTableInfo {
+  std::vector<int64_t> snapshot_ids;
+};
+
 arrow::Status MakePaimonBridgeErrorStatus(std::string_view message);
 
 arrow::Result<std::vector<PaimonFileInfo>> PlanFiles(const std::string& table_location,
@@ -47,6 +51,14 @@ arrow::Result<std::vector<uint64_t>> ReadDeletionVector(const std::string& path,
                                                         uint64_t length,
                                                         int64_t expected_cardinality,
                                                         const StorageOptions& storage_options);
+
+arrow::Result<PaimonTestTableInfo> CreateTestTableInfo(const std::string& table_location,
+                                                       uint64_t num_rows,
+                                                       const std::string& mode,
+                                                       const std::vector<int64_t>& deleted_positions = {},
+                                                       const StorageOptions& storage_options = {},
+                                                       const std::string& file_format = "parquet",
+                                                       uint32_t dimension = 0);
 
 arrow::Result<int64_t> CreateTestTable(const std::string& table_location,
                                        uint64_t num_rows,

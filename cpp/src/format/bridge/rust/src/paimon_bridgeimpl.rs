@@ -1658,15 +1658,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let table_location = directory.path().join("snap-table");
         let table_location = table_location.to_str().unwrap();
-        let snapshot_id = crate::paimon_testutil::paimon_create_test_table(
+        let table_info = crate::paimon_testutil::paimon_create_test_table(
             table_location,
             10,
             "append",
+            Vec::new(),
+            Vec::new(),
             Vec::new(),
             "parquet",
             0,
         )
         .unwrap();
+        let snapshot_id = *table_info.snapshot_ids.last().unwrap();
 
         let schema0_path = format!("{table_location}/schema/schema-0");
         let mut historical_schema: serde_json::Value =
@@ -1714,15 +1717,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let table_location = directory.path().join("snap-table");
         let table_location = table_location.to_str().unwrap();
-        let snapshot_id = crate::paimon_testutil::paimon_create_test_table(
+        let table_info = crate::paimon_testutil::paimon_create_test_table(
             table_location,
             10,
             "append",
+            Vec::new(),
+            Vec::new(),
             Vec::new(),
             "parquet",
             0,
         )
         .unwrap();
+        let snapshot_id = *table_info.snapshot_ids.last().unwrap();
 
         // A pinned snapshot that exists must load.
         let table = TOKIO_RT
@@ -1762,15 +1768,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let table_location = directory.path().join("snap-table");
         let table_location = table_location.to_str().unwrap();
-        let snapshot_id = crate::paimon_testutil::paimon_create_test_table(
+        let table_info = crate::paimon_testutil::paimon_create_test_table(
             table_location,
             10,
             "append",
+            Vec::new(),
+            Vec::new(),
             Vec::new(),
             "parquet",
             0,
         )
         .unwrap();
+        let snapshot_id = *table_info.snapshot_ids.last().unwrap();
         // Corrupt metadata is invalid data, not evidence that the snapshot
         // expired. It must not carry refresh advice.
         let snapshot_file = format!("{table_location}/snapshot/snapshot-{snapshot_id}");

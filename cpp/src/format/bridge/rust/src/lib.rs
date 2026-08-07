@@ -251,6 +251,10 @@ pub mod paimon_ffi {
 
 #[cxx::bridge(namespace = "milvus_storage::paimon::ffi")]
 pub mod paimon_test_ffi {
+    struct PaimonTestTableInfo {
+        snapshot_ids: Vec<i64>,
+    }
+
     extern "Rust" {
         /// Create a repository-owned local Paimon fixture through the public
         /// paimon-rust writer/commit APIs.
@@ -259,9 +263,11 @@ pub mod paimon_test_ffi {
             num_rows: u64,
             mode: &str,
             deleted_positions: Vec<i64>,
+            storage_options_keys: Vec<String>,
+            storage_options_values: Vec<String>,
             file_format: &str,
             dimension: u32,
-        ) -> Result<i64>;
+        ) -> Result<PaimonTestTableInfo>;
     }
 }
 
