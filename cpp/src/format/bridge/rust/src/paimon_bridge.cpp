@@ -114,20 +114,74 @@ arrow::Result<std::vector<uint64_t>> ReadDeletionVector(const std::string& path,
   });
 }
 
+arrow::Result<PaimonTestTableInfo> CreateTestTableInfo(const std::string& table_location,
+                                                       uint64_t num_rows,
+                                                       const std::string& mode,
+                                                       const std::vector<int64_t>& deleted_positions,
+                                                       const StorageOptions& storage_options,
+                                                       const std::string& file_format,
+                                                       uint32_t dimension) {
+  return CatchRustResult<PaimonTestTableInfo>([&]() {
+    rust::Vec<int64_t> positions;
+    positions.reserve(deleted_positions.size());
+    for (auto position : deleted_positions) {
+      positions.push_back(position);
+    }
+    rust::Vec<rust::String> keys;
+    rust::Vec<rust::String> values;
+    ConvertStorageOptions(storage_options, keys, values);
+    auto info =
+        ffi::paimon_create_test_table(rust::Str(table_location), num_rows, rust::Str(mode), std::move(positions),
+                                      std::move(keys), std::move(values), rust::Str(file_format), dimension);
+    return PaimonTestTableInfo{{info.snapshot_ids.begin(), info.snapshot_ids.end()}};
+  });
+}
+
 arrow::Result<int64_t> CreateTestTable(const std::string& table_location,
                                        uint64_t num_rows,
                                        const std::string& mode,
                                        const std::vector<int64_t>& deleted_positions,
                                        const std::string& file_format,
                                        uint32_t dimension) {
-  return CatchRustResult<int64_t>([&]() {
-    rust::Vec<int64_t> positions;
-    positions.reserve(deleted_positions.size());
-    for (auto position : deleted_positions) {
-      positions.push_back(position);
-    }
-    return ffi::paimon_create_test_table(rust::Str(table_location), num_rows, rust::Str(mode), std::move(positions),
-                                         rust::Str(file_format), dimension);
+  ARROW_ASSIGN_OR_RAISE(
+      auto info, CreateTestTableInfo(table_location, num_rows, mode, deleted_positions, {}, file_format, dimension));
+  if (info.snapshot_ids.empty()) {
+    return arrow::Status::Invalid("Paimon test table has no committed snapshot");
+  }
+  return info.snapshot_ids.back();
+}
+
+arrow::Result<std::unique_ptr<BlockingPaimonDataSplitReader>> BlockingPaimonDataSplitReader::Open(
+    const std::string& metadata_json,
+    const std::string& expected_table_location,
+    const StorageOptions& storage_options) {
+  return CatchRustResult<std::unique_ptr<BlockingPaimonDataSplitReader>>([&]() {
+    rust::Vec<rust::String> keys;
+    rust::Vec<rust::String> values;
+    ConvertStorageOptions(storage_options, keys, values);
+    return std::make_unique<BlockingPaimonDataSplitReader>(ffi::paimon_open_data_split_reader(
+        rust::Str(metadata_json), rust::Str(expected_table_location), std::move(keys), std::move(values)));
+  });
+}
+
+arrow::Status BlockingPaimonDataSplitReader::ExportSchema(ArrowSchema* schema) const {
+  if (schema == nullptr) {
+    return arrow::Status::Invalid("cannot export Paimon schema into a null pointer");
+  }
+  try {
+    impl_->export_schema(reinterpret_cast<uint8_t*>(schema));
+    return arrow::Status::OK();
+  } catch (const rust::cxxbridge1::Error& error) {
+    return MakePaimonBridgeErrorStatus(error.what());
+  }
+}
+
+arrow::Result<ArrowArrayStream> BlockingPaimonDataSplitReader::OpenStream(
+    const std::vector<std::string>& projected_columns) const {
+  return CatchRustResult<ArrowArrayStream>([&]() {
+    ArrowArrayStream stream{};
+    impl_->open_stream(projected_columns, reinterpret_cast<uint8_t*>(&stream));
+    return stream;
   });
 }
 

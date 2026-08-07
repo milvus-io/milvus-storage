@@ -23,10 +23,14 @@
 
 namespace milvus_storage::paimon {
 
+class BlockingPaimonDataSplitReader;
+class DataSplitStreamCursor;
+
 class PaimonFormatReader final : public FormatReader {
   public:
   struct MetaTrait {
     struct Payload {
+      std::string read_path;
       std::string data_format;
       // Direct-file reads delegate to the underlying Parquet/Vortex reader, so
       // the payload keeps that reader's parsed metadata (the alternative
@@ -38,6 +42,12 @@ class PaimonFormatReader final : public FormatReader {
           direct_file_metadata;
       std::vector<RowGroupInfo> direct_physical_row_groups;
       std::shared_ptr<const std::vector<uint64_t>> sorted_deletions;
+      // Shared projection-agnostic bridge handle for the data-split read
+      // path. Creating it resolves the table schema and the pinned snapshot;
+      // sharing it across every reader built from this cached metadata keeps
+      // that cost per-descriptor instead of per-reader. Streams opened from
+      // it are per-reader and per-projection.
+      std::shared_ptr<BlockingPaimonDataSplitReader> split_reader_handle;
       uint64_t record_count = 0;
       uint64_t physical_row_count = 0;
     };
@@ -70,23 +80,31 @@ class PaimonFormatReader final : public FormatReader {
   [[nodiscard]] std::shared_ptr<arrow::Schema> get_schema() const override;
 
   private:
+  [[nodiscard]] bool is_data_split() const;
   PaimonFormatReader(MetaTrait::MetadataPtr metadata,
                      api::ColumnGroupFile file,
                      std::shared_ptr<arrow::Schema> read_schema,
                      std::vector<std::string> needed_columns,
                      std::shared_ptr<FormatReader> direct_file_reader,
+                     std::shared_ptr<BlockingPaimonDataSplitReader> split_reader,
+                     std::vector<std::string> split_columns,
                      std::shared_ptr<arrow::Schema> output_schema);
 
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> filter_direct_batch(
       const std::shared_ptr<arrow::RecordBatch>& batch, uint64_t physical_start) const;
   [[nodiscard]] arrow::Result<std::vector<int64_t>> logical_to_physical(
       const std::vector<int64_t>& logical_offsets) const;
+  [[nodiscard]] arrow::Result<std::unique_ptr<DataSplitStreamCursor>> make_data_split_cursor() const;
 
   MetaTrait::MetadataPtr metadata_;
   api::ColumnGroupFile file_;
   std::shared_ptr<arrow::Schema> read_schema_;
   std::vector<std::string> needed_columns_;
   std::shared_ptr<FormatReader> direct_file_reader_;
+  // Shared with (and owned by) the cached metadata payload; streams opened
+  // from it carry this reader's own projection in split_columns_.
+  std::shared_ptr<BlockingPaimonDataSplitReader> split_reader_;
+  std::vector<std::string> split_columns_;
   std::shared_ptr<arrow::Schema> output_schema_;
 };
 

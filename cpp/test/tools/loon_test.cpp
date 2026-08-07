@@ -125,6 +125,11 @@ TEST_F(LoonTest, CreateAndReadPaimonAppend) {
                                 properties_);
 }
 
+TEST_F(LoonTest, CreateAndReadPaimonMergeOnRead) {
+  VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_mor", target_dir_ + "/paimon_mor", "mor", 30, {}, fs_,
+                                properties_);
+}
+
 TEST_F(LoonTest, CreateAndReadPaimonDeletionVector) {
   VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_dv", target_dir_ + "/paimon_dv", "deletion-vector", 30, {0, 5, 29},
                                 fs_, properties_);
