@@ -751,9 +751,9 @@ TEST_F(LanceBasicTest, CloudWideTableDuplicatedFragmentTakeRateLimitRepro) {
     GTEST_SKIP() << "This Lance rate-limit reproduction requires cloud storage.";
   }
 
-  constexpr uint32_t kLanceIoParallelism = 32;
+  constexpr uint32_t kLanceIoParallelism = 64;
   constexpr uint64_t kMaxPeakIops = 5'500;
-  api::SetValue(properties_, PROPERTY_FS_LANCE_IO_PARALLELISM, "32");
+  api::SetValue(properties_, PROPERTY_FS_LANCE_IO_PARALLELISM, "64");
 
   ArrowFileSystemConfig fs_config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
@@ -765,7 +765,7 @@ TEST_F(LanceBasicTest, CloudWideTableDuplicatedFragmentTakeRateLimitRepro) {
   api::SetValue(properties_, "extfs.default.region", fs_config.region.c_str());
   api::SetValue(properties_, "extfs.default.access_key_id", fs_config.access_key_id.c_str());
   api::SetValue(properties_, "extfs.default.access_key_value", fs_config.access_key_value.c_str());
-  api::SetValue(properties_, "extfs.default.lance_io_parallelism", "32");
+  api::SetValue(properties_, "extfs.default.lance_io_parallelism", "64");
   if (fs_config.use_ssl) {
     api::SetValue(properties_, "extfs.default.use_ssl", "true");
   }
@@ -804,9 +804,16 @@ TEST_F(LanceBasicTest, CloudWideTableDuplicatedFragmentTakeRateLimitRepro) {
 
   ASSERT_AND_ASSIGN(auto parsed_lance_uri, ParseLanceUri(written_file.path));
   const auto lance_uri = ToStandardLanceUri(parsed_lance_uri.first);
-  std::shared_ptr<BlockingDataset> io_stats_dataset;
-  ASSERT_NO_THROW(io_stats_dataset = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config)));
-  ASSERT_NE(io_stats_dataset, nullptr);
+  // IOStatsIncremental is test-only and reads a dataset-local ObjectStore tracker.
+  // The shared scheduler retains the ObjectStore from its first dataset, so keep
+  // that owner alive while later Reader datasets generate the measured I/O.
+  std::shared_ptr<BlockingDataset> io_stats_owner_dataset;
+  ASSERT_NO_THROW(io_stats_owner_dataset = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config)));
+  ASSERT_NE(io_stats_owner_dataset, nullptr);
+  std::shared_ptr<BlockingDataset> non_owner_dataset;
+  ASSERT_NO_THROW(non_owner_dataset = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config)));
+  ASSERT_NE(non_owner_dataset, nullptr);
+  ASSERT_NE(io_stats_owner_dataset.get(), non_owner_dataset.get());
 
   auto column_group = std::make_shared<api::ColumnGroup>();
   column_group->columns = std::move(column_names);
@@ -844,11 +851,12 @@ TEST_F(LanceBasicTest, CloudWideTableDuplicatedFragmentTakeRateLimitRepro) {
     std::chrono::steady_clock::time_point timestamp;
     uint64_t iops;
   };
-  io_stats_dataset->IOStatsIncremental();
+  io_stats_owner_dataset->IOStatsIncremental();
+  non_owner_dataset->IOStatsIncremental();
   uint64_t total_iops = 0;
   uint64_t total_bytes_read = 0;
   auto collect_io_stats = [&]() {
-    const auto stats = io_stats_dataset->IOStatsIncremental();
+    const auto stats = io_stats_owner_dataset->IOStatsIncremental();
     total_iops += stats.read_iops;
     total_bytes_read += stats.read_bytes;
   };
@@ -893,6 +901,12 @@ TEST_F(LanceBasicTest, CloudWideTableDuplicatedFragmentTakeRateLimitRepro) {
   ASSERT_GT(total_bytes_read, 0);
   ASSERT_LE(peak_one_second_iops, kMaxPeakIops)
       << "Shared Lance scheduler exceeded aggregate IOPS target across all Reader instances";
+
+  // Although both handles share the scheduler, IOStatsIncremental is not a
+  // scheduler/domain metric. Only the first owner's tracker receives these reads.
+  const auto non_owner_stats = non_owner_dataset->IOStatsIncremental();
+  ASSERT_EQ(non_owner_stats.read_iops, 0);
+  ASSERT_EQ(non_owner_stats.read_bytes, 0);
 
   for (size_t reader_index = 0; reader_index < take_futures.size(); ++reader_index) {
     SCOPED_TRACE("reader_index=" + std::to_string(reader_index));

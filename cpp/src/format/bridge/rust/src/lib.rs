@@ -85,7 +85,7 @@ pub mod lance_ffi {
         V2_3 = 3,
     }
 
-    /// IO statistics returned by io_stats_incremental (read-and-reset)
+    /// Test-only Lance IO statistics with read-and-reset semantics.
     struct LanceIOStats {
         read_iops: u64,
         read_bytes: u64,
@@ -99,6 +99,11 @@ pub mod lance_ffi {
     extern "Rust" {
 
         type BlockingDataset;
+        /// Test instrumentation for the ObjectStore retained by this dataset.
+        ///
+        /// When datasets share a ScanScheduler, scheduled reads are tracked by the
+        /// ObjectStore captured from the dataset that created that scheduler. This
+        /// method therefore must not be interpreted as per-dataset accounting.
         pub fn io_stats_incremental(self: &BlockingDataset) -> LanceIOStats;
         pub fn open_dataset(
             uri: &str,

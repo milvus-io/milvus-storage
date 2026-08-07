@@ -214,6 +214,7 @@ std::unique_ptr<BlockingScanner> BlockingDataset::Scan(ArrowSchema& schema, uint
   }
 }
 
+#ifdef BUILD_GTEST
 LanceIOStats BlockingDataset::IOStatsIncremental() {
   try {
     auto stats = impl_->io_stats_incremental();
@@ -222,6 +223,7 @@ LanceIOStats BlockingDataset::IOStatsIncremental() {
     throw LanceException(e.what());
   }
 }
+#endif  // BUILD_GTEST
 
 ArrowArrayStream BlockingDataset::Take(const std::vector<int64_t>& indices, ArrowSchema& schema) {
   try {
