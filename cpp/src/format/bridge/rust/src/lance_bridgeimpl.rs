@@ -66,7 +66,6 @@ use crate::gcp_impersonation::{
 const CLOUD_PROVIDER_KEY: &str = "cloud_provider";
 const LANCE_IO_PARALLELISM_KEY: &str = "milvus_lance_io_parallelism";
 const MAX_LANCE_IO_PARALLELISM: usize = 256;
-const IO_DOMAIN_FINGERPRINT_VERSION: &str = "milvus-lance-io-domain-v1";
 
 static LANCE_PROVIDER_CACHE: LazyLock<GlobalLruCache<Arc<dyn ObjectStoreProvider>>> =
     LazyLock::new(|| GlobalLruCache::new(CACHE_CAPACITY));
@@ -74,18 +73,33 @@ static LANCE_AZURE_PROVIDER_CACHE: LazyLock<
     GlobalLruCache<Arc<AzureSasStorageOptionsProvider>>,
 > = LazyLock::new(|| GlobalLruCache::new(CACHE_CAPACITY));
 
+// Keep only an opaque, process-local representation of storage options in the
+// scheduler registry. Two independent hashers make accidental collisions unlikely.
 static IO_DOMAIN_HASHERS: LazyLock<[RandomState; 2]> =
     LazyLock::new(|| [RandomState::new(), RandomState::new()]);
 
+/// Identifies datasets that may share one Lance scan scheduler.
+///
+/// `store_prefix` scopes the key to one object-store namespace. The configuration
+/// fingerprint further separates endpoints and explicit authentication settings
+/// that can otherwise resolve to the same prefix. Parallelism is intentionally not
+/// part of the key: the first live scheduler establishes the limit for that domain.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct IoDomainKey {
     store_prefix: String,
     store_config_fingerprint: [u64; 2],
 }
 
+// Weak values let the registry reuse active schedulers without extending their
+// lifetime after all datasets in the domain have been dropped.
 static LANCE_IO_SCHEDULERS: LazyLock<Mutex<HashMap<IoDomainKey, Weak<ScanScheduler>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Removes and validates the bridge-only parallelism option.
+///
+/// An absent value or zero leaves Lance's default per-dataset scheduling in place.
+/// Removing the option also prevents it from reaching an ObjectStore provider that
+/// does not understand this Milvus-specific setting.
 fn extract_lance_io_parallelism(
     storage_options: &mut HashMap<String, String>,
 ) -> Result<Option<usize>> {
@@ -105,6 +119,11 @@ fn extract_lance_io_parallelism(
     Ok((parallelism != 0).then_some(parallelism))
 }
 
+/// Builds an order-independent, process-local fingerprint for scheduler isolation.
+///
+/// Explicit store and authentication options participate in the fingerprint, while
+/// scheduler tuning and provider-cache bookkeeping do not. This only partitions
+/// scheduler reuse; it is not a credential validation or security mechanism.
 fn store_config_fingerprint(storage_options: &HashMap<String, String>) -> [u64; 2] {
     // Environment-backed ObjectStore settings and the identity resolved by a
     // default credential chain are not visible here. Callers must keep them
@@ -115,6 +134,7 @@ fn store_config_fingerprint(storage_options: &HashMap<String, String>) -> [u64; 
         .iter()
         .filter(|(key, _)| key.as_str() != LANCE_IO_PARALLELISM_KEY && key.as_str() != CACHE_KEY)
         .collect::<Vec<_>>();
+    // HashMap iteration order is unstable, so canonicalize both keys and values.
     options.sort_unstable_by(|(left_key, left_value), (right_key, right_value)| {
         left_key
             .cmp(right_key)
@@ -123,7 +143,6 @@ fn store_config_fingerprint(storage_options: &HashMap<String, String>) -> [u64; 
 
     std::array::from_fn(|index| {
         let mut hasher = IO_DOMAIN_HASHERS[index].build_hasher();
-        IO_DOMAIN_FINGERPRINT_VERSION.hash(&mut hasher);
         options.len().hash(&mut hasher);
         for (key, value) in &options {
             key.hash(&mut hasher);
@@ -133,6 +152,11 @@ fn store_config_fingerprint(storage_options: &HashMap<String, String>) -> [u64; 
     })
 }
 
+/// Returns the ObjectStore owned by a shared scheduler.
+///
+/// The process-wide `LANCE_IO_THREADS` override remains authoritative. Otherwise,
+/// when the requested capacity differs, create a lightweight Lance wrapper around
+/// the already-authenticated inner store instead of rebuilding a cloud client.
 fn scheduler_object_store(
     object_store: &Arc<ObjectStore>,
     uri: &str,
@@ -152,6 +176,8 @@ fn scheduler_object_store(
     })?;
     let storage_options = StorageOptions::new(storage_options.clone());
     let download_retry_count = storage_options.download_retry_count();
+    // Preserve the initialized provider, credential chain, and transport. Only
+    // wrapper-level scheduler capacity and derived ObjectStore metadata change.
     Ok(Arc::new(ObjectStore::new(
         object_store.inner.clone(),
         location,
@@ -165,6 +191,11 @@ fn scheduler_object_store(
     )))
 }
 
+/// Returns the single active ScanScheduler for an I/O domain.
+///
+/// The registry lock covers lookup, construction, and insertion so concurrent opens
+/// cannot create competing schedulers for the same domain. Only weak references are
+/// retained, allowing a later open to create a fresh scheduler after the domain is idle.
 fn shared_scan_scheduler(
     key: IoDomainKey,
     object_store: &Arc<ObjectStore>,
@@ -182,6 +213,7 @@ fn shared_scan_scheduler(
         return Ok(scheduler);
     }
 
+    // Sweep expired weak entries only on a registry miss; active hits stay O(1).
     schedulers.retain(|_, scheduler| scheduler.strong_count() != 0);
     let scheduler_store = scheduler_object_store(object_store, uri, storage_options, parallelism)?;
     let scheduler = TOKIO_RT.block_on(async {
@@ -198,9 +230,8 @@ fn shared_scan_scheduler(
 pub struct BlockingDataset {
     pub(crate) inner: Dataset,
     object_store: Arc<lance::io::ObjectStore>,
-    // Cached readers can open multiple fragment readers against the same dataset
-    // concurrently. Keep Lance's scan scheduler dataset-scoped and serialize the
-    // open phase, which touches Lance's async metadata/read caches.
+    // The scheduler is dataset-local by default and domain-shared when explicitly
+    // configured. Serialize fragment open, which touches Lance's async metadata/read caches.
     scan_scheduler: Arc<OnceLock<Arc<ScanScheduler>>>,
     fragment_open_mutex: Arc<Mutex<()>>,
 }
@@ -621,6 +652,8 @@ pub fn open_dataset(
 ) -> Result<Box<BlockingDataset>> {
     let mut storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
     let lance_io_parallelism = extract_lance_io_parallelism(&mut storage_options)?;
+    // Fingerprint before provider-specific setup consumes explicit endpoint and
+    // authentication options that must separate scheduler domains.
     let io_domain_fingerprint =
         lance_io_parallelism.map(|_| store_config_fingerprint(&storage_options));
     let scheduler_storage_options = lance_io_parallelism.map(|_| {
@@ -641,6 +674,8 @@ pub fn open_dataset(
     }
     let inner = TOKIO_RT.block_on(builder.load())?;
     let dataset = BlockingDataset::new(inner)?;
+    // Domain sharing is opt-in and cloud-only. Other stores keep the lazy,
+    // dataset-local scheduler installed by fragment_read_config.
     if let (Some(parallelism), Some(store_config_fingerprint), Some(storage_options)) = (
         lance_io_parallelism,
         io_domain_fingerprint,

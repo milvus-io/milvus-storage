@@ -47,11 +47,13 @@ class LanceException : public std::runtime_error {
 class BlockingFragmentReader;
 class BlockingScanner;
 
-/// Lance IO statistics (read-and-reset semantics)
+#ifdef BUILD_GTEST
+/// Test-only Lance IO statistics with read-and-reset semantics.
 struct LanceIOStats {
   uint64_t read_iops = 0;
   uint64_t read_bytes = 0;
 };
+#endif  // BUILD_GTEST
 
 /// Storage options type for S3/cloud access (key-value pairs).
 using StorageOptions = std::unordered_map<std::string, std::string>;
@@ -112,8 +114,13 @@ class BlockingDataset {
   // Dataset-level take: random access by global row indices
   ArrowArrayStream Take(const std::vector<int64_t>& indices, ArrowSchema& schema);
 
-  /// Read and reset IO statistics for this dataset's object store.
+#ifdef BUILD_GTEST
+  /// Test-only instrumentation for Lance's ObjectStore counters.
+  ///
+  /// With a shared ScanScheduler, reads are charged to the ObjectStore captured
+  /// from the dataset that created the scheduler. This is not per-dataset accounting.
   LanceIOStats IOStatsIncremental();
+#endif  // BUILD_GTEST
 
   const ffi::BlockingDataset& Impl() const { return *impl_; }
 
