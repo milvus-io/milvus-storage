@@ -70,9 +70,8 @@ use iceberg::io::{
 use iceberg::{Error as IcebergError, ErrorKind as IcebergErrorKind, Result as IcebergResult};
 use iceberg_storage_opendal::OpenDalStorageFactory;
 use object_store::{
-    ClientOptions, CredentialProvider, ObjectStore as OSObjectStore, Result as ObjectStoreResult,
-    RetryConfig,
     gcp::{GcpCredential, GoogleCloudStorageBuilder, GoogleConfigKey},
+    CredentialProvider, ObjectStore as OSObjectStore, Result as ObjectStoreResult, RetryConfig,
 };
 use serde::{Deserialize, Serialize};
 use snafu::location;
@@ -86,7 +85,8 @@ use lance::session::Session;
 use lance::{Error as LanceError, Result as LanceResult};
 use lance_io::object_store::{
     DEFAULT_CLOUD_IO_PARALLELISM, ObjectStore, ObjectStoreParams, ObjectStoreProvider,
-    ObjectStoreRegistry,
+    ObjectStoreRegistry, StorageOptions,
+    throttle::{AimdThrottleConfig, AimdThrottledStore},
 };
 
 /// lance-io's `DEFAULT_CLOUD_BLOCK_SIZE` is crate-private; mirror its 64 KiB
@@ -413,8 +413,15 @@ impl ObjectStoreProvider for ImpersonatingGcsStoreProvider {
         params: &ObjectStoreParams,
     ) -> LanceResult<ObjectStore> {
         let block_size = params.block_size.unwrap_or(GCS_DEFAULT_BLOCK_SIZE);
-        let storage_options: HashMap<String, String> =
-            params.storage_options().cloned().unwrap_or_default();
+        let mut storage_options =
+            StorageOptions::new(params.storage_options().cloned().unwrap_or_default());
+        storage_options.with_env_gcs();
+        let client_max_retries = storage_options.client_max_retries();
+        let retry_config = RetryConfig {
+            backoff: Default::default(),
+            max_retries: client_max_retries,
+            retry_timeout: Duration::from_secs(storage_options.client_retry_timeout()),
+        };
 
         // Forward any GCS-recognized config keys the caller passed (endpoint
         // overrides, retry knobs, etc.) — but never forward credential keys
@@ -433,10 +440,10 @@ impl ObjectStoreProvider for ImpersonatingGcsStoreProvider {
 
         let mut builder = GoogleCloudStorageBuilder::new()
             .with_url(base_path.as_ref())
-            .with_retry(RetryConfig::default())
-            .with_client_options(ClientOptions::default());
+            .with_retry(retry_config)
+            .with_client_options(storage_options.client_options()?);
 
-        for (key, value) in storage_options.iter() {
+        for (key, value) in &storage_options.0 {
             let lower = key.to_ascii_lowercase();
             if credential_keys.contains(&lower.as_str()) {
                 continue;
@@ -455,6 +462,19 @@ impl ObjectStoreProvider for ImpersonatingGcsStoreProvider {
             location: location!(),
         })?;
         let inner = Arc::new(built) as Arc<dyn OSObjectStore>;
+        let throttle_config = AimdThrottleConfig::from_storage_options(params.storage_options())?;
+        let inner = if throttle_config.is_disabled() {
+            inner
+        } else if client_max_retries == 0 {
+            eprintln!(
+                "Warning: AIMD throttle disabled: the current implementation relies on the object store \
+                 client surfacing retry errors, which requires client_max_retries > 0. \
+                 No throttle or retry layer will be applied."
+            );
+            inner
+        } else {
+            Arc::new(AimdThrottledStore::new(inner, throttle_config)?) as Arc<dyn OSObjectStore>
+        };
 
         Ok(ObjectStore::new(
             inner,
@@ -665,6 +685,55 @@ mod tests {
     use tokio::sync::{Barrier, Notify};
 
     use super::*;
+    use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn impersonation_store_uses_aimd_throttle_when_client_retries_enabled() {
+        let params = ObjectStoreParams {
+            storage_options_accessor: Some(Arc::new(
+                lance_io::object_store::StorageOptionsAccessor::with_static_options(HashMap::from([
+                    ("client_max_retries".to_string(), "1".to_string()),
+                    ("lance_aimd_initial_rate".to_string(), "10".to_string()),
+                    ("lance_aimd_max_rate".to_string(), "10".to_string()),
+                ])),
+            )),
+            ..Default::default()
+        };
+        let provider = ImpersonatingGcsStoreProvider::new(Arc::new(credential_provider(
+            "target@example.iam.gserviceaccount.com",
+        )));
+
+        let store = provider
+            .new_store(Url::parse("gs://bucket/path").unwrap(), &params)
+            .await
+            .unwrap();
+
+        assert!(format!("{:?}", store.inner).contains("AimdThrottledStore"));
+    }
+
+    #[tokio::test]
+    async fn impersonation_store_skips_aimd_when_client_retries_disabled() {
+        let params = ObjectStoreParams {
+            storage_options_accessor: Some(Arc::new(
+                lance_io::object_store::StorageOptionsAccessor::with_static_options(HashMap::from([
+                    ("client_max_retries".to_string(), "0".to_string()),
+                    ("lance_aimd_initial_rate".to_string(), "10".to_string()),
+                    ("lance_aimd_max_rate".to_string(), "10".to_string()),
+                ])),
+            )),
+            ..Default::default()
+        };
+        let provider = ImpersonatingGcsStoreProvider::new(Arc::new(credential_provider(
+            "target@example.iam.gserviceaccount.com",
+        )));
+
+        let store = provider
+            .new_store(Url::parse("gs://bucket/path").unwrap(), &params)
+            .await
+            .unwrap();
+
+        assert!(!format!("{:?}", store.inner).contains("AimdThrottledStore"));
+    }
 
     fn impersonation_config(target_sa: &str) -> GcpImpersonationConfig {
         GcpImpersonationConfig {

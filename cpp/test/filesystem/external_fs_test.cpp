@@ -270,6 +270,8 @@ TEST_F(ExternalFilesystemTest, ExtractExternalFsPropertiesTypeConversion) {
   props["extfs.myfs.max_connections"] = std::string("200");
   props["extfs.myfs.multi_part_upload_size"] = std::string("20971520");
   props["extfs.myfs.load_frequency"] = std::string("1800");
+  props["extfs.myfs.iops_initial_rate"] = std::string("4000");
+  props["extfs.myfs.iops_max_rate"] = std::string("5000");
 
   // resolve_config should succeed and produce correctly typed values
   auto config_result =
@@ -310,6 +312,8 @@ TEST_F(ExternalFilesystemTest, ExtractExternalFsPropertiesTypeConversion) {
   EXPECT_EQ(config.max_connections, 200u);
   EXPECT_EQ(config.multi_part_upload_size, 20971520);
   EXPECT_EQ(config.load_frequency, 1800);
+  EXPECT_EQ(config.iops_initial_rate, 4000u);
+  EXPECT_EQ(config.iops_max_rate, 5000u);
 
   // Verify alias
   EXPECT_EQ(config.alias, "myfs");

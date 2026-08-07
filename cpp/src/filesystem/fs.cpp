@@ -237,6 +237,12 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
   ARROW_ASSIGN_OR_RAISE(result.s3_crt_async_read, api::GetValue<bool>(properties_map, PROPERTY_FS_S3_CRT_ASYNC_READ));
   ARROW_ASSIGN_OR_RAISE(result.lance_io_parallelism,
                         api::GetValue<uint32_t>(properties_map, PROPERTY_FS_LANCE_IO_PARALLELISM));
+  ARROW_ASSIGN_OR_RAISE(result.iops_initial_rate,
+                        api::GetValue<uint32_t>(properties_map, PROPERTY_FS_IOPS_INITIAL_RATE));
+  ARROW_ASSIGN_OR_RAISE(result.iops_max_rate, api::GetValue<uint32_t>(properties_map, PROPERTY_FS_IOPS_MAX_RATE));
+  if (result.iops_max_rate > 0 && result.iops_initial_rate > result.iops_max_rate) {
+    return arrow::Status::Invalid("fs.iops_initial_rate must not exceed fs.iops_max_rate");
+  }
   ARROW_ASSIGN_OR_RAISE(result.gcp_target_service_account,
                         api::GetValue<std::string>(properties_map, PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT));
   ARROW_ASSIGN_OR_RAISE(result.azure_client_id,

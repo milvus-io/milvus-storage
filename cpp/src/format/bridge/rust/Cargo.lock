@@ -4304,8 +4304,7 @@ dependencies = [
 [[package]]
 name = "lance-arrow"
 version = "7.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "253f4a0a70580c985b91e65e9ca6cad644825a4078de28d8efbacf3ffbd7ecdc"
+source = "git+https://github.com/zilliztech/lance?rev=b13b89169b283e47ae9b2dd13e12a6a9863c3908#b13b89169b283e47ae9b2dd13e12a6a9863c3908"
 dependencies = [
  "arrow-array 58.3.0",
  "arrow-buffer 58.3.0",
@@ -4337,8 +4336,7 @@ dependencies = [
 [[package]]
 name = "lance-core"
 version = "7.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13f84020da5a484e2f07dd1796e09785ed7cd889857ebc4cb77e32ef214ee594"
+source = "git+https://github.com/zilliztech/lance?rev=b13b89169b283e47ae9b2dd13e12a6a9863c3908#b13b89169b283e47ae9b2dd13e12a6a9863c3908"
 dependencies = [
  "arrow-array 58.3.0",
  "arrow-buffer 58.3.0",
@@ -4561,8 +4559,7 @@ dependencies = [
 [[package]]
 name = "lance-io"
 version = "7.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bab8c98ef1b870b20541d27f3ca4efdf7c9f5c25214233be07d231ba88900219"
+source = "git+https://github.com/zilliztech/lance?rev=b13b89169b283e47ae9b2dd13e12a6a9863c3908#b13b89169b283e47ae9b2dd13e12a6a9863c3908"
 dependencies = [
  "arrow 58.3.0",
  "arrow-arith 58.3.0",
@@ -4623,8 +4620,7 @@ dependencies = [
 [[package]]
 name = "lance-namespace"
 version = "7.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "014e8332ca0615506342e0d3af608639864b68396973be14239f09c9f21f1fc2"
+source = "git+https://github.com/zilliztech/lance?rev=b13b89169b283e47ae9b2dd13e12a6a9863c3908#b13b89169b283e47ae9b2dd13e12a6a9863c3908"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",

@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <barrier>
 #include <chrono>
+#include <cstdlib>
 #include <future>
 #include <iostream>
 #include <memory>
@@ -125,6 +126,17 @@ class LanceBasicTest : public ::testing::Test {
 
     return arrow::Status::Invalid("No Lance data file found under ", arrow_base_path_);
   }
+
+  struct CloudTakeIops {
+    uint64_t total_iops = 0;
+    uint64_t peak_one_second_iops = 0;
+  };
+
+  void RunCloudWideTableDuplicatedFragmentTake(int64_t column_count,
+                                               int64_t row_count,
+                                               size_t column_group_file_count,
+                                               size_t reader_count,
+                                               CloudTakeIops& result);
 
   protected:
   std::shared_ptr<arrow::fs::FileSystem> fs_;
@@ -746,18 +758,13 @@ TEST_F(LanceBasicTest, CachedCreateReaderReappliesProjection) {
   }
 }
 
-TEST_F(LanceBasicTest, CloudWideTableDuplicatedFragmentTakeRateLimitRepro) {
-  if (!IsCloudEnv()) {
-    GTEST_SKIP() << "This Lance rate-limit reproduction requires cloud storage.";
-  }
-
-  constexpr uint32_t kLanceIoParallelism = 64;
-  constexpr uint64_t kMaxPeakIops = 5'500;
-  api::SetValue(properties_, PROPERTY_FS_LANCE_IO_PARALLELISM, "64");
-
+void LanceBasicTest::RunCloudWideTableDuplicatedFragmentTake(int64_t column_count,
+                                                             int64_t row_count,
+                                                             size_t column_group_file_count,
+                                                             size_t reader_count,
+                                                             CloudTakeIops& result) {
   ArrowFileSystemConfig fs_config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
-  ASSERT_EQ(fs_config.lance_io_parallelism, kLanceIoParallelism);
   api::SetValue(properties_, "extfs.default.storage_type", fs_config.storage_type.c_str());
   api::SetValue(properties_, "extfs.default.cloud_provider", fs_config.cloud_provider.c_str());
   api::SetValue(properties_, "extfs.default.address", fs_config.address.c_str());
@@ -765,7 +772,9 @@ TEST_F(LanceBasicTest, CloudWideTableDuplicatedFragmentTakeRateLimitRepro) {
   api::SetValue(properties_, "extfs.default.region", fs_config.region.c_str());
   api::SetValue(properties_, "extfs.default.access_key_id", fs_config.access_key_id.c_str());
   api::SetValue(properties_, "extfs.default.access_key_value", fs_config.access_key_value.c_str());
-  api::SetValue(properties_, "extfs.default.lance_io_parallelism", "64");
+  api::SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, "true");
+  const auto lance_io_parallelism = std::to_string(fs_config.lance_io_parallelism);
+  api::SetValue(properties_, "extfs.default.lance_io_parallelism", lance_io_parallelism.c_str());
   if (fs_config.use_ssl) {
     api::SetValue(properties_, "extfs.default.use_ssl", "true");
   }
@@ -773,34 +782,29 @@ TEST_F(LanceBasicTest, CloudWideTableDuplicatedFragmentTakeRateLimitRepro) {
     api::SetValue(properties_, "extfs.default.use_iam", "true");
   }
 
-  constexpr int64_t kColumnCount = 1'024;
-  constexpr int64_t kRowCount = 16'384;
-  constexpr size_t kColumnGroupFileCount = 10;
-  constexpr size_t kReaderCount = 10;
-
   std::vector<std::shared_ptr<arrow::Field>> fields;
   std::vector<std::string> column_names;
-  fields.reserve(kColumnCount);
-  column_names.reserve(kColumnCount);
-  for (int64_t column = 0; column < kColumnCount; ++column) {
+  fields.reserve(column_count);
+  column_names.reserve(column_count);
+  for (int64_t column = 0; column < column_count; ++column) {
     column_names.emplace_back("column_" + std::to_string(column));
     fields.emplace_back(arrow::field(column_names.back(), arrow::int64(), false));
   }
   auto wide_schema = arrow::schema(std::move(fields));
 
-  std::vector<int64_t> row_values(kRowCount);
+  std::vector<int64_t> row_values(row_count);
   std::iota(row_values.begin(), row_values.end(), 0);
   arrow::Int64Builder value_builder;
   ASSERT_STATUS_OK(value_builder.AppendValues(row_values));
   std::shared_ptr<arrow::Array> values;
   ASSERT_STATUS_OK(value_builder.Finish(&values));
-  std::vector<std::shared_ptr<arrow::Array>> columns(kColumnCount, values);
-  auto wide_batch = arrow::RecordBatch::Make(wide_schema, kRowCount, std::move(columns));
+  std::vector<std::shared_ptr<arrow::Array>> columns(column_count, values);
+  auto wide_batch = arrow::RecordBatch::Make(wide_schema, row_count, std::move(columns));
 
   LanceTableWriter writer(base_path_, wide_schema, properties_);
   ASSERT_STATUS_OK(writer.Write(wide_batch));
   ASSERT_AND_ASSIGN(auto written_file, writer.Close());
-  ASSERT_EQ(written_file.end_index - written_file.start_index, kRowCount);
+  ASSERT_EQ(written_file.end_index - written_file.start_index, row_count);
 
   ASSERT_AND_ASSIGN(auto parsed_lance_uri, ParseLanceUri(written_file.path));
   const auto lance_uri = ToStandardLanceUri(parsed_lance_uri.first);
@@ -818,27 +822,35 @@ TEST_F(LanceBasicTest, CloudWideTableDuplicatedFragmentTakeRateLimitRepro) {
   auto column_group = std::make_shared<api::ColumnGroup>();
   column_group->columns = std::move(column_names);
   column_group->format = LOON_FORMAT_LANCE_TABLE;
-  column_group->files.assign(kColumnGroupFileCount, written_file);
+  column_group->files.assign(column_group_file_count, written_file);
   auto column_groups = std::make_shared<api::ColumnGroups>();
   column_groups->emplace_back(std::move(column_group));
 
   std::vector<int64_t> first_row_indices;
-  first_row_indices.reserve(kColumnGroupFileCount);
-  for (size_t file = 0; file < kColumnGroupFileCount; ++file) {
-    first_row_indices.emplace_back(static_cast<int64_t>(file) * kRowCount);
+  first_row_indices.reserve(column_group_file_count);
+  for (size_t file = 0; file < column_group_file_count; ++file) {
+    first_row_indices.emplace_back(static_cast<int64_t>(file) * row_count);
   }
 
   std::vector<std::unique_ptr<api::Reader>> readers;
-  readers.reserve(kReaderCount);
-  for (size_t reader_index = 0; reader_index < kReaderCount; ++reader_index) {
+  readers.reserve(reader_count);
+  for (size_t reader_index = 0; reader_index < reader_count; ++reader_index) {
     auto reader = api::Reader::create(column_groups, wide_schema, nullptr, properties_);
     ASSERT_NE(reader, nullptr);
     readers.emplace_back(std::move(reader));
   }
 
-  std::barrier start_barrier(static_cast<std::ptrdiff_t>(kReaderCount + 1));
+  // Reader::take opens Lance metadata lazily, and IOStats counts those list
+  // requests as read_iops. Warm each Reader's metadata cache before resetting
+  // the tracker so the measured interval contains only fragment reads.
+  for (auto& reader : readers) {
+    ASSERT_AND_ASSIGN(auto metadata_reader, reader->get_chunk_reader(0));
+    ASSERT_GT(metadata_reader->total_number_of_chunks(), 0);
+  }
+
+  std::barrier start_barrier(static_cast<std::ptrdiff_t>(reader_count + 1));
   std::vector<std::future<arrow::Result<std::shared_ptr<arrow::Table>>>> take_futures;
-  take_futures.reserve(kReaderCount);
+  take_futures.reserve(reader_count);
   for (size_t reader_index = 0; reader_index < readers.size(); ++reader_index) {
     take_futures.emplace_back(
         std::async(std::launch::async, [reader = readers[reader_index].get(), &first_row_indices, &start_barrier]() {
@@ -894,13 +906,15 @@ TEST_F(LanceBasicTest, CloudWideTableDuplicatedFragmentTakeRateLimitRepro) {
   }
   const auto take_seconds = std::chrono::duration<double>(take_finished_at - take_started_at).count();
   const auto average_iops = static_cast<double>(total_iops) / take_seconds;
-  std::cout << "[ LANCE_IO_STATS ] parallelism=" << kLanceIoParallelism << ", read_iops=" << total_iops
+  std::cout << "[ LANCE_IO_STATS ] parallelism=" << fs_config.lance_io_parallelism << ", read_iops=" << total_iops
             << ", read_bytes=" << total_bytes_read << ", duration_s=" << take_seconds
             << ", average_iops=" << average_iops << ", peak_1s_iops=" << peak_one_second_iops << std::endl;
   ASSERT_GT(total_iops, 0);
   ASSERT_GT(total_bytes_read, 0);
-  ASSERT_LE(peak_one_second_iops, kMaxPeakIops)
-      << "Shared Lance scheduler exceeded aggregate IOPS target across all Reader instances";
+  result = CloudTakeIops{
+      .total_iops = total_iops,
+      .peak_one_second_iops = peak_one_second_iops,
+  };
 
   // Although both handles share the scheduler, IOStatsIncremental is not a
   // scheduler/domain metric. Only the first owner's tracker receives these reads.
@@ -912,11 +926,11 @@ TEST_F(LanceBasicTest, CloudWideTableDuplicatedFragmentTakeRateLimitRepro) {
     SCOPED_TRACE("reader_index=" + std::to_string(reader_index));
     ASSERT_AND_ASSIGN(auto table, take_futures[reader_index].get());
     ASSERT_STATUS_OK(table->ValidateFull());
-    ASSERT_EQ(table->num_rows(), static_cast<int64_t>(kColumnGroupFileCount));
-    ASSERT_EQ(table->num_columns(), kColumnCount);
+    ASSERT_EQ(table->num_rows(), static_cast<int64_t>(column_group_file_count));
+    ASSERT_EQ(table->num_columns(), column_count);
 
     ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
-    for (int column_index : {0, static_cast<int>(kColumnCount - 1)}) {
+    for (int column_index : {0, static_cast<int>(column_count - 1)}) {
       auto column = std::dynamic_pointer_cast<arrow::Int64Array>(batch->column(column_index));
       ASSERT_NE(column, nullptr);
       for (int64_t row = 0; row < column->length(); ++row) {
@@ -924,6 +938,60 @@ TEST_F(LanceBasicTest, CloudWideTableDuplicatedFragmentTakeRateLimitRepro) {
       }
     }
   }
+}
+
+TEST_F(LanceBasicTest, CloudWideTableDuplicatedFragmentTakeRateLimitRepro) {
+  if (!IsCloudEnv()) {
+    GTEST_SKIP() << "This Lance rate-limit reproduction requires cloud storage.";
+  }
+
+  constexpr uint32_t kLanceIoParallelism = 64;
+  constexpr uint64_t kMaxPeakIops = 5'500;
+  api::SetValue(properties_, PROPERTY_FS_LANCE_IO_PARALLELISM, "64");
+
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_EQ(fs_config.lance_io_parallelism, kLanceIoParallelism);
+
+  CloudTakeIops result;
+  RunCloudWideTableDuplicatedFragmentTake(1'024, 16'384, 10, 10, result);
+  ASSERT_LE(result.peak_one_second_iops, kMaxPeakIops)
+      << "Shared Lance scheduler exceeded aggregate IOPS target across all Reader instances";
+}
+
+TEST_F(LanceBasicTest, CloudConfiguredAimdRateLimit) {
+  if (!IsCloudEnv()) {
+    GTEST_SKIP() << "This Lance AIMD rate-limit test requires cloud storage.";
+  }
+
+  constexpr uint32_t kAimdRate = 1'500;
+  constexpr uint64_t kMaxPeakIops = kAimdRate + 250;
+  const auto aimd_rate = std::to_string(kAimdRate);
+  api::SetValue(properties_, PROPERTY_FS_LANCE_IO_PARALLELISM, "64");
+  api::SetValue(properties_, PROPERTY_FS_IOPS_INITIAL_RATE, aimd_rate.c_str());
+  api::SetValue(properties_, PROPERTY_FS_IOPS_MAX_RATE, aimd_rate.c_str());
+  // Reader creation resolves the external filesystem independently.
+  api::SetValue(properties_, "extfs.default.iops_initial_rate", aimd_rate.c_str());
+  api::SetValue(properties_, "extfs.default.iops_max_rate", aimd_rate.c_str());
+
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_EQ(fs_config.iops_initial_rate, kAimdRate);
+  ASSERT_EQ(fs_config.iops_max_rate, kAimdRate);
+
+  const char* previous_burst_capacity = std::getenv("LANCE_AIMD_BURST_CAPACITY");
+  const bool had_previous_burst_capacity = previous_burst_capacity != nullptr;
+  const std::string saved_burst_capacity = had_previous_burst_capacity ? previous_burst_capacity : "";
+  ASSERT_EQ(setenv("LANCE_AIMD_BURST_CAPACITY", "0", 1), 0);
+  CloudTakeIops result;
+  RunCloudWideTableDuplicatedFragmentTake(256, 8'192, 8, 4, result);
+  if (had_previous_burst_capacity) {
+    EXPECT_EQ(setenv("LANCE_AIMD_BURST_CAPACITY", saved_burst_capacity.c_str(), 1), 0);
+  } else {
+    EXPECT_EQ(unsetenv("LANCE_AIMD_BURST_CAPACITY"), 0);
+  }
+  ASSERT_GT(result.total_iops, kAimdRate * 2);
+  ASSERT_LE(result.peak_one_second_iops, kMaxPeakIops) << "Lance ObjectStore exceeded the configured AIMD IOPS target";
 }
 
 // Test that storage options are correctly passed through writer and reader

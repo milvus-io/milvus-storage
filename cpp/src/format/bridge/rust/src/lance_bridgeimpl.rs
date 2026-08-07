@@ -47,7 +47,9 @@ use lance_io::object_store::{
 };
 use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
 
-use crate::aliyun_oss_provider::{AliyunOssStoreProvider, build_aliyun_oss_session};
+use crate::aliyun_oss_provider::{
+    AimdAliyunOssStoreProvider, AliyunOssStoreProvider, build_aliyun_oss_session,
+};
 use crate::aws_arn_provider::{
     AssumeRoleConfig, build_lance_provider as build_aws_arn_provider,
     build_lance_session as build_aws_arn_session,
@@ -81,9 +83,10 @@ static IO_DOMAIN_HASHERS: LazyLock<[RandomState; 2]> =
 /// Identifies datasets that may share one Lance scan scheduler.
 ///
 /// `store_prefix` scopes the key to one object-store namespace. The configuration
-/// fingerprint further separates endpoints and explicit authentication settings
-/// that can otherwise resolve to the same prefix. Parallelism is intentionally not
-/// part of the key: the first live scheduler establishes the limit for that domain.
+/// fingerprint further separates endpoints, explicit authentication, and ObjectStore
+/// behavior settings that can otherwise resolve to the same prefix. Parallelism is
+/// intentionally not part of the key: the first live scheduler establishes the limit
+/// for that domain.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct IoDomainKey {
     store_prefix: String,
@@ -121,9 +124,10 @@ fn extract_lance_io_parallelism(
 
 /// Builds an order-independent, process-local fingerprint for scheduler isolation.
 ///
-/// Explicit store and authentication options participate in the fingerprint, while
-/// scheduler tuning and provider-cache bookkeeping do not. This only partitions
-/// scheduler reuse; it is not a credential validation or security mechanism.
+/// Explicit store, authentication, and ObjectStore behavior options participate in
+/// the fingerprint, while scheduler capacity and provider-cache bookkeeping do not.
+/// This only partitions scheduler reuse; it is not a credential validation or security
+/// mechanism.
 fn store_config_fingerprint(storage_options: &HashMap<String, String>) -> [u64; 2] {
     // Environment-backed ObjectStore settings and the identity resolved by a
     // default credential chain are not visible here. Callers must keep them
@@ -609,24 +613,28 @@ fn build_object_store_params(
                 custom_session = Some(build_gcp_impersonation_session(provider));
             }
         }
-        Some("aliyun") if storage_options.contains_key("oss_role_arn") => {
-            let provider = match credential_cache_key.as_deref().filter(|key| !key.is_empty()) {
-                Some(cache_key) => TOKIO_RT.block_on(LANCE_PROVIDER_CACHE.get(
-                    cache_key,
-                    || async {
-                        let provider = Arc::new(
-                            AliyunOssStoreProvider::from_uri(uri, &storage_options).await?,
-                        ) as Arc<dyn ObjectStoreProvider>;
-                        eprintln!(
-                            "created cloud cache entry: consumer=lance, cloud=aliyun, mechanism=role"
-                        );
-                        Ok::<_, LanceError>(provider)
-                    },
-                ))?,
-                None => Arc::new(TOKIO_RT.block_on(AliyunOssStoreProvider::from_uri(
-                    uri,
-                    &storage_options,
-                ))?) as Arc<dyn ObjectStoreProvider>,
+        Some("aliyun") => {
+            let provider = if storage_options.contains_key("oss_role_arn") {
+                match credential_cache_key.as_deref().filter(|key| !key.is_empty()) {
+                    Some(cache_key) => TOKIO_RT.block_on(LANCE_PROVIDER_CACHE.get(
+                        cache_key,
+                        || async {
+                            let provider = Arc::new(
+                                AliyunOssStoreProvider::from_uri(uri, &storage_options).await?,
+                            ) as Arc<dyn ObjectStoreProvider>;
+                            eprintln!(
+                                "created cloud cache entry: consumer=lance, cloud=aliyun, mechanism=role"
+                            );
+                            Ok::<_, LanceError>(provider)
+                        },
+                    ))?,
+                    None => Arc::new(TOKIO_RT.block_on(AliyunOssStoreProvider::from_uri(
+                        uri,
+                        &storage_options,
+                    ))?) as Arc<dyn ObjectStoreProvider>,
+                }
+            } else {
+                Arc::new(AimdAliyunOssStoreProvider) as Arc<dyn ObjectStoreProvider>
             };
             custom_session = Some(build_aliyun_oss_session(provider));
         }
@@ -1374,6 +1382,8 @@ mod tests {
                 "azure_broker_tenant_id".to_string(),
                 "tenant-id".to_string(),
             ),
+            ("lance_aimd_initial_rate".to_string(), "10".to_string()),
+            ("lance_aimd_max_rate".to_string(), "100".to_string()),
         ]);
         let base_fingerprint = store_config_fingerprint(&base);
         for key in base.keys() {
