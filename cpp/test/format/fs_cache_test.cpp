@@ -238,6 +238,20 @@ TEST_F(FileSystemCacheTest, CacheKeyIgnoresAlias) {
   EXPECT_EQ(base.GetCacheKey(), with_alias.GetCacheKey());
 }
 
+TEST_F(FileSystemCacheTest, CacheKeyIgnoresLanceIoParallelism) {
+  ArrowFileSystemConfig base;
+  base.storage_type = "remote";
+  base.cloud_provider = kCloudProviderAWS;
+  base.address = "s3.amazonaws.com";
+  base.bucket_name = "shared-bucket";
+  base.access_key_id = "ak";
+  base.access_key_value = "sk";
+
+  auto different_parallelism = base;
+  different_parallelism.lance_io_parallelism = 256;
+  EXPECT_EQ(base.GetCacheKey(), different_parallelism.GetCacheKey());
+}
+
 TEST_F(FileSystemCacheTest, FilesystemCacheSeparatesSameBucketWithDifferentCredentials) {
   auto make_props = [](const std::string& access_key, const std::string& secret_key) {
     api::Properties props;

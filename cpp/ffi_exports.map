@@ -63,6 +63,9 @@
     loon_properties_fs_external_id;
     loon_properties_fs_load_frequency;
     loon_properties_fs_s3_crt_async_read;
+    loon_properties_fs_lance_io_parallelism;
+    loon_properties_fs_iops_initial_rate;
+    loon_properties_fs_iops_max_rate;
     loon_properties_writer_policy;
     loon_properties_writer_format;
     loon_properties_writer_schema_base_patterns;

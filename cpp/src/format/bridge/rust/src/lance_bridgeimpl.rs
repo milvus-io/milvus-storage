@@ -5,11 +5,13 @@ use crate::TOKIO_RT;
 
 use futures::TryStreamExt;
 use futures::stream::StreamExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::RandomState};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::ops::Range;
 use std::result::Result as RustResult;
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 use tokio::runtime::Handle;
+use url::Url;
 
 use arrow_array58::Array;
 use arrow_array58::ffi::FFI_ArrowArray;
@@ -41,7 +43,7 @@ use lance_table::utils::stream::ReadBatchFutStream;
 use lance::io::ObjectStoreParams;
 use lance::session::Session;
 use lance_io::object_store::{
-    ObjectStoreProvider, ObjectStoreRegistry, StorageOptionsAccessor,
+    ObjectStore, ObjectStoreProvider, ObjectStoreRegistry, StorageOptions, StorageOptionsAccessor,
 };
 use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
 
@@ -57,17 +59,173 @@ use crate::cloud_provider_cache::{
 use crate::gcp_impersonation::{ImpersonatingGcsStoreProvider, REFRESH_OFFSET_SECS};
 
 const CLOUD_PROVIDER_KEY: &str = "cloud_provider";
+const LANCE_IO_PARALLELISM_KEY: &str = "milvus_lance_io_parallelism";
+const MAX_LANCE_IO_PARALLELISM: usize = 256;
 
 static LANCE_PROVIDER_CACHE: LazyLock<GlobalLruCache<Arc<dyn ObjectStoreProvider>>> =
     LazyLock::new(|| GlobalLruCache::new(CACHE_CAPACITY));
+
+// Keep only an opaque, process-local representation of storage options in the
+// scheduler registry. Two independent hashers make accidental collisions unlikely.
+static IO_DOMAIN_HASHERS: LazyLock<[RandomState; 2]> =
+    LazyLock::new(|| [RandomState::new(), RandomState::new()]);
+
+/// Identifies datasets that may share one Lance scan scheduler.
+///
+/// `store_prefix` scopes the key to one object-store namespace. The configuration
+/// fingerprint further separates endpoints, explicit authentication, and ObjectStore
+/// behavior settings that can otherwise resolve to the same prefix. Parallelism is
+/// intentionally not part of the key: the first live scheduler establishes the limit
+/// for that domain.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct IoDomainKey {
+    store_prefix: String,
+    store_config_fingerprint: [u64; 2],
+}
+
+// Weak values let the registry reuse active schedulers without extending their
+// lifetime after all datasets in the domain have been dropped.
+static LANCE_IO_SCHEDULERS: LazyLock<Mutex<HashMap<IoDomainKey, Weak<ScanScheduler>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Removes and validates the bridge-only parallelism option.
+///
+/// An absent value or zero leaves Lance's default per-dataset scheduling in place.
+/// Removing the option also prevents it from reaching an ObjectStore provider that
+/// does not understand this Milvus-specific setting.
+fn extract_lance_io_parallelism(
+    storage_options: &mut HashMap<String, String>,
+) -> Result<Option<usize>> {
+    let Some(value) = storage_options.remove(LANCE_IO_PARALLELISM_KEY) else {
+        return Ok(None);
+    };
+    let parallelism = value.parse::<usize>().map_err(|_| {
+        LanceError::invalid_input(format!(
+            "{LANCE_IO_PARALLELISM_KEY} must be an integer in [0, {MAX_LANCE_IO_PARALLELISM}], got '{value}'"
+        ))
+    })?;
+    if parallelism > MAX_LANCE_IO_PARALLELISM {
+        return Err(LanceError::invalid_input(format!(
+            "{LANCE_IO_PARALLELISM_KEY} must be in [0, {MAX_LANCE_IO_PARALLELISM}], got {parallelism}"
+        )));
+    }
+    Ok((parallelism != 0).then_some(parallelism))
+}
+
+/// Builds an order-independent, process-local fingerprint for scheduler isolation.
+///
+/// Explicit store, authentication, and ObjectStore behavior options participate in
+/// the fingerprint, while scheduler capacity and provider-cache bookkeeping do not.
+/// This only partitions scheduler reuse; it is not a credential validation or security
+/// mechanism.
+fn store_config_fingerprint(storage_options: &HashMap<String, String>) -> [u64; 2] {
+    // Environment-backed ObjectStore settings and the identity resolved by a
+    // default credential chain are not visible here. Callers must keep them
+    // stable while a shared scheduler for the same store is active. Authentication
+    // identities that may vary should be selected through the storage options passed
+    // to this bridge instead of dynamically mutating process-wide credential sources.
+    let mut options = storage_options
+        .iter()
+        .filter(|(key, _)| key.as_str() != LANCE_IO_PARALLELISM_KEY && key.as_str() != CACHE_KEY)
+        .collect::<Vec<_>>();
+    // HashMap iteration order is unstable, so canonicalize both keys and values.
+    options.sort_unstable_by(|(left_key, left_value), (right_key, right_value)| {
+        left_key
+            .cmp(right_key)
+            .then_with(|| left_value.cmp(right_value))
+    });
+
+    std::array::from_fn(|index| {
+        let mut hasher = IO_DOMAIN_HASHERS[index].build_hasher();
+        options.len().hash(&mut hasher);
+        for (key, value) in &options {
+            key.hash(&mut hasher);
+            value.hash(&mut hasher);
+        }
+        hasher.finish()
+    })
+}
+
+/// Returns the ObjectStore owned by a shared scheduler.
+///
+/// The process-wide `LANCE_IO_THREADS` override remains authoritative. Otherwise,
+/// when the requested capacity differs, create a lightweight Lance wrapper around
+/// the already-authenticated inner store instead of rebuilding a cloud client.
+fn scheduler_object_store(
+    object_store: &Arc<ObjectStore>,
+    uri: &str,
+    storage_options: &HashMap<String, String>,
+    parallelism: usize,
+) -> Result<Arc<ObjectStore>> {
+    if std::env::var_os("LANCE_IO_THREADS").is_some()
+        || object_store.io_parallelism() == parallelism
+    {
+        return Ok(object_store.clone());
+    }
+
+    let location = Url::parse(uri).map_err(|error| {
+        LanceError::invalid_input(format!(
+            "Failed to parse Lance dataset URI '{uri}' for shared I/O scheduling: {error}"
+        ))
+    })?;
+    let storage_options = StorageOptions::new(storage_options.clone());
+    let download_retry_count = storage_options.download_retry_count();
+    // Preserve the initialized provider, credential chain, and transport. Only
+    // wrapper-level scheduler capacity and derived ObjectStore metadata change.
+    Ok(Arc::new(ObjectStore::new(
+        object_store.inner.clone(),
+        location,
+        Some(object_store.block_size()),
+        None,
+        object_store.use_constant_size_upload_parts,
+        object_store.list_is_lexically_ordered,
+        parallelism,
+        download_retry_count,
+        Some(&storage_options.0),
+    )))
+}
+
+/// Returns the single active ScanScheduler for an I/O domain.
+///
+/// The registry lock covers lookup, construction, and insertion so concurrent opens
+/// cannot create competing schedulers for the same domain. Only weak references are
+/// retained, allowing a later open to create a fresh scheduler after the domain is idle.
+fn shared_scan_scheduler(
+    key: IoDomainKey,
+    object_store: &Arc<ObjectStore>,
+    uri: &str,
+    storage_options: &HashMap<String, String>,
+    parallelism: usize,
+) -> Result<Arc<ScanScheduler>> {
+    let mut schedulers = LANCE_IO_SCHEDULERS
+        .lock()
+        .map_err(|_| LanceError::Internal {
+            message: "Lance I/O scheduler registry mutex poisoned".into(),
+            location: snafu::location!(),
+        })?;
+    if let Some(scheduler) = schedulers.get(&key).and_then(Weak::upgrade) {
+        return Ok(scheduler);
+    }
+
+    // Sweep expired weak entries only on a registry miss; active hits stay O(1).
+    schedulers.retain(|_, scheduler| scheduler.strong_count() != 0);
+    let scheduler_store = scheduler_object_store(object_store, uri, storage_options, parallelism)?;
+    let scheduler = TOKIO_RT.block_on(async {
+        ScanScheduler::new(
+            scheduler_store.clone(),
+            SchedulerConfig::max_bandwidth(&scheduler_store),
+        )
+    });
+    schedulers.insert(key, Arc::downgrade(&scheduler));
+    Ok(scheduler)
+}
 
 #[derive(Clone)]
 pub struct BlockingDataset {
     pub(crate) inner: Dataset,
     object_store: Arc<lance::io::ObjectStore>,
-    // Cached readers can open multiple fragment readers against the same dataset
-    // concurrently. Keep Lance's scan scheduler dataset-scoped and serialize the
-    // open phase, which touches Lance's async metadata/read caches.
+    // The scheduler is dataset-local by default and domain-shared when explicitly
+    // configured. Serialize fragment open, which touches Lance's async metadata/read caches.
     scan_scheduler: Arc<OnceLock<Arc<ScanScheduler>>>,
     fragment_open_mutex: Arc<Mutex<()>>,
 }
@@ -420,6 +578,16 @@ pub fn open_dataset(
     storage_options_values: Vec<String>,
 ) -> Result<Box<BlockingDataset>> {
     let mut storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
+    let lance_io_parallelism = extract_lance_io_parallelism(&mut storage_options)?;
+    // Fingerprint before provider-specific setup consumes explicit endpoint and
+    // authentication options that must separate scheduler domains.
+    let io_domain_fingerprint =
+        lance_io_parallelism.map(|_| store_config_fingerprint(&storage_options));
+    let scheduler_storage_options = lance_io_parallelism.map(|_| {
+        let mut options = storage_options.clone();
+        options.remove(CACHE_KEY);
+        options
+    });
     let credential_cache_key = storage_options.remove(CACHE_KEY);
     let cloud_provider = storage_options.remove(CLOUD_PROVIDER_KEY);
     if let Some(cloud_provider) = cloud_provider.as_deref()
@@ -552,7 +720,31 @@ pub fn open_dataset(
         builder = builder.with_session(session);
     }
     let inner = TOKIO_RT.block_on(builder.load())?;
-    Ok(Box::new(BlockingDataset::new(inner)?))
+    let dataset = BlockingDataset::new(inner)?;
+    // Domain sharing is opt-in and cloud-only. Other stores keep the lazy,
+    // dataset-local scheduler installed by fragment_read_config.
+    if let (Some(parallelism), Some(store_config_fingerprint), Some(storage_options)) = (
+        lance_io_parallelism,
+        io_domain_fingerprint,
+        scheduler_storage_options.as_ref(),
+    ) && dataset.object_store.is_cloud()
+    {
+        let scheduler = shared_scan_scheduler(
+            IoDomainKey {
+                store_prefix: dataset.object_store.store_prefix.clone(),
+                store_config_fingerprint,
+            },
+            &dataset.object_store,
+            uri,
+            storage_options,
+            parallelism,
+        )?;
+        dataset
+            .scan_scheduler
+            .set(scheduler)
+            .expect("a newly opened BlockingDataset has no scan scheduler");
+    }
+    Ok(Box::new(dataset))
 }
 
 pub unsafe fn write_dataset(
@@ -563,6 +755,9 @@ pub unsafe fn write_dataset(
     data_storage_format: LanceDataStorageFormat,
 ) -> Result<Box<BlockingDataset>> {
     let mut storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
+    // The storage Lance writer is available only in test builds. Shared I/O scheduling is a
+    // reader feature, so discard the option emitted by the common C++ storage-options path.
+    storage_options.remove(LANCE_IO_PARALLELISM_KEY);
     let credential_cache_key = storage_options.remove(CACHE_KEY);
     let cloud_provider = storage_options.remove(CLOUD_PROVIDER_KEY);
     if let Some(cloud_provider) = cloud_provider.as_deref()
@@ -1228,4 +1423,279 @@ pub unsafe fn dataset_take(
     let out_stream_ptr = out_stream as *mut FFI_ArrowArrayStream;
     unsafe { std::ptr::write(out_stream_ptr, ffi_stream) };
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use object_store::memory::InMemory;
+
+    #[test]
+    fn lance_io_parallelism_validation() {
+        for (value, expected) in [
+            ("0", None),
+            ("1", Some(1)),
+            ("64", Some(64)),
+            ("256", Some(256)),
+        ] {
+            let mut options =
+                HashMap::from([(LANCE_IO_PARALLELISM_KEY.to_string(), value.to_string())]);
+            assert_eq!(
+                extract_lance_io_parallelism(&mut options).unwrap(),
+                expected
+            );
+            assert!(!options.contains_key(LANCE_IO_PARALLELISM_KEY));
+        }
+
+        for value in ["257", "-1", "invalid"] {
+            let mut options =
+                HashMap::from([(LANCE_IO_PARALLELISM_KEY.to_string(), value.to_string())]);
+            assert!(extract_lance_io_parallelism(&mut options).is_err());
+        }
+
+        assert_eq!(
+            extract_lance_io_parallelism(&mut HashMap::new()).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn store_fingerprint_is_order_independent_and_ignores_private_keys() {
+        let first = HashMap::from([
+            ("cloud_provider".to_string(), "aws".to_string()),
+            (
+                "aws_endpoint".to_string(),
+                "https://s3.example.com".to_string(),
+            ),
+            ("aws_region".to_string(), "us-west-2".to_string()),
+        ]);
+        let second = HashMap::from([
+            ("aws_region".to_string(), "us-west-2".to_string()),
+            ("cloud_provider".to_string(), "aws".to_string()),
+            (
+                "aws_endpoint".to_string(),
+                "https://s3.example.com".to_string(),
+            ),
+        ]);
+        assert_eq!(
+            store_config_fingerprint(&first),
+            store_config_fingerprint(&second)
+        );
+
+        let mut with_private_keys = first.clone();
+        with_private_keys.insert(CACHE_KEY.to_string(), "provider-cache-key".to_string());
+        with_private_keys.insert(LANCE_IO_PARALLELISM_KEY.to_string(), "256".to_string());
+        assert_eq!(
+            store_config_fingerprint(&first),
+            store_config_fingerprint(&with_private_keys)
+        );
+    }
+
+    #[test]
+    fn store_fingerprint_tracks_object_store_and_credential_inputs() {
+        let base = HashMap::from([
+            ("cloud_provider".to_string(), "aws".to_string()),
+            (
+                "aws_endpoint".to_string(),
+                "https://s3.example.com".to_string(),
+            ),
+            ("aws_region".to_string(), "us-west-2".to_string()),
+            ("aws_access_key_id".to_string(), "access-key".to_string()),
+            (
+                "aws_secret_access_key".to_string(),
+                "secret-key".to_string(),
+            ),
+            ("aws_role_arn".to_string(), "role-arn".to_string()),
+            ("aws_session_name".to_string(), "session".to_string()),
+            ("aws_external_id".to_string(), "external-id".to_string()),
+            ("aws_credential_refresh_secs".to_string(), "900".to_string()),
+            (
+                "gcp_target_service_account".to_string(),
+                "target@example.iam.gserviceaccount.com".to_string(),
+            ),
+            (
+                "azure_broker_endpoint".to_string(),
+                "https://broker.example.com".to_string(),
+            ),
+            (
+                "azure_broker_client_id".to_string(),
+                "client-id".to_string(),
+            ),
+            (
+                "azure_broker_tenant_id".to_string(),
+                "tenant-id".to_string(),
+            ),
+        ]);
+        let base_fingerprint = store_config_fingerprint(&base);
+        for key in base.keys() {
+            let mut changed = base.clone();
+            changed.insert(key.clone(), format!("{}-changed", base[key]));
+            assert_ne!(
+                base_fingerprint,
+                store_config_fingerprint(&changed),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn scheduler_object_store_changes_only_the_requested_capacity() {
+        if std::env::var_os("LANCE_IO_THREADS").is_some() {
+            return;
+        }
+
+        let object_store = Arc::new(ObjectStore::new(
+            Arc::new(InMemory::new()),
+            Url::parse("s3://shared-bucket/dataset").unwrap(),
+            Some(64 * 1024),
+            None,
+            false,
+            true,
+            64,
+            3,
+            None,
+        ));
+        let unchanged = scheduler_object_store(
+            &object_store,
+            "s3://shared-bucket/dataset",
+            &HashMap::new(),
+            64,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&object_store, &unchanged));
+
+        let custom = scheduler_object_store(
+            &object_store,
+            "s3://shared-bucket/dataset",
+            &HashMap::new(),
+            17,
+        )
+        .unwrap();
+        assert!(!Arc::ptr_eq(&object_store, &custom));
+        assert_eq!(custom.block_size(), object_store.block_size());
+        assert_eq!(custom.io_parallelism(), 17);
+        assert_eq!(custom.store_prefix, object_store.store_prefix);
+    }
+
+    #[test]
+    fn scheduler_registry_reuses_active_scheduler_without_retaining_it() {
+        let object_store = Arc::new(ObjectStore::new(
+            Arc::new(InMemory::new()),
+            Url::parse("s3://shared-bucket/dataset").unwrap(),
+            Some(64 * 1024),
+            None,
+            false,
+            true,
+            64,
+            3,
+            None,
+        ));
+        let key = IoDomainKey {
+            store_prefix: object_store.store_prefix.clone(),
+            store_config_fingerprint: [0x1234, 0x5678],
+        };
+        let options = HashMap::new();
+
+        let first = shared_scan_scheduler(
+            key.clone(),
+            &object_store,
+            "s3://shared-bucket/dataset-a",
+            &options,
+            64,
+        )
+        .unwrap();
+        let second = shared_scan_scheduler(
+            key.clone(),
+            &object_store,
+            "s3://shared-bucket/dataset-b",
+            &options,
+            64,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let later_value = shared_scan_scheduler(
+            key.clone(),
+            &object_store,
+            "s3://shared-bucket/dataset-c",
+            &options,
+            1,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&first, &later_value));
+
+        let different_fingerprint = shared_scan_scheduler(
+            IoDomainKey {
+                store_prefix: object_store.store_prefix.clone(),
+                store_config_fingerprint: [0x1234, 0x5679],
+            },
+            &object_store,
+            "s3://shared-bucket/dataset-d",
+            &options,
+            64,
+        )
+        .unwrap();
+        assert!(!Arc::ptr_eq(&first, &different_fingerprint));
+
+        let scheduler = Arc::downgrade(&first);
+        drop(first);
+        drop(second);
+        drop(later_value);
+        assert!(scheduler.upgrade().is_none());
+
+        let replacement = shared_scan_scheduler(
+            key,
+            &object_store,
+            "s3://shared-bucket/dataset-e",
+            &options,
+            64,
+        )
+        .unwrap();
+        assert!(!Weak::ptr_eq(&scheduler, &Arc::downgrade(&replacement)));
+    }
+
+    #[test]
+    fn scheduler_registry_get_or_create_is_atomic() {
+        let object_store = Arc::new(ObjectStore::new(
+            Arc::new(InMemory::new()),
+            Url::parse("s3://concurrent-bucket/dataset").unwrap(),
+            Some(64 * 1024),
+            None,
+            false,
+            true,
+            64,
+            3,
+            None,
+        ));
+        let key = IoDomainKey {
+            store_prefix: object_store.store_prefix.clone(),
+            store_config_fingerprint: [0x9abc, 0xdef0],
+        };
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let threads = (0..8)
+            .map(|_| {
+                let object_store = object_store.clone();
+                let key = key.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    shared_scan_scheduler(
+                        key,
+                        &object_store,
+                        "s3://concurrent-bucket/dataset",
+                        &HashMap::new(),
+                        64,
+                    )
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let schedulers = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        for scheduler in schedulers.iter().skip(1) {
+            assert!(Arc::ptr_eq(&schedulers[0], scheduler));
+        }
+    }
 }

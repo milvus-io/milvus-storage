@@ -1729,29 +1729,30 @@ class ExternalTableAliyunOIDCArnTest : public ::testing::Test {
     FilesystemCache::getInstance().clean();
   }
 
-  class ScopedOidcTokenFileOverride {
+  class ScopedEnvVarOverride {
  public:
-    explicit ScopedOidcTokenFileOverride(const std::string& value) {
-      const char* old_value = std::getenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE");
+    ScopedEnvVarOverride(const char* name, const std::string& value) : name_(name) {
+      const char* old_value = std::getenv(name_.c_str());
       if (old_value != nullptr) {
         had_old_value_ = true;
         old_value_ = old_value;
       }
-      setenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE", value.c_str(), 1);
+      setenv(name_.c_str(), value.c_str(), 1);
     }
 
-    ~ScopedOidcTokenFileOverride() {
+    ~ScopedEnvVarOverride() {
       if (had_old_value_) {
-        setenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE", old_value_.c_str(), 1);
+        setenv(name_.c_str(), old_value_.c_str(), 1);
       } else {
-        unsetenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE");
+        unsetenv(name_.c_str());
       }
     }
 
-    ScopedOidcTokenFileOverride(const ScopedOidcTokenFileOverride&) = delete;
-    ScopedOidcTokenFileOverride& operator=(const ScopedOidcTokenFileOverride&) = delete;
+    ScopedEnvVarOverride(const ScopedEnvVarOverride&) = delete;
+    ScopedEnvVarOverride& operator=(const ScopedEnvVarOverride&) = delete;
 
  private:
+    std::string name_;
     std::string old_value_;
     bool had_old_value_ = false;
   };
@@ -1851,12 +1852,23 @@ TEST_F(ExternalTableAliyunOIDCArnTest, ReadLanceWithOIDCChain) {
   const uint64_t num_rows = 100;
   ASSERT_AND_ASSIGN(auto result, CreateLanceTable(num_rows));
 
+  // Keep the write leg on its normal settings, then force only the ARN read
+  // leg through a zero-burst 1 IOPS token bucket. The rate must be explicit
+  // extfs config because storage options take precedence over AIMD env vars.
+  auto rate_limited_read_props = read_props_;
+  api::SetValue(rate_limited_read_props, "extfs.arn.iops_initial_rate", "1");
+  api::SetValue(rate_limited_read_props, "extfs.arn.iops_max_rate", "1");
+  ScopedEnvVarOverride burst_capacity("LANCE_AIMD_BURST_CAPACITY", "0");
+  ScopedEnvVarOverride max_retries("LANCE_AIMD_MAX_RETRIES", "3");
+
   std::cout << "[Aliyun OIDC Test] Lance written to: " << result.cgfile.path << std::endl;
   std::cout << "[Aliyun OIDC Test] Role ARN: " << role_arn_ << (external_id_.empty() ? "" : " (with external_id)")
             << std::endl;
 
   auto manifest_base = test_base_ + "/manifest";
   auto props = BaseProps();
+  props.emplace_back("extfs.arn.iops_initial_rate", "1");
+  props.emplace_back("extfs.arn.iops_max_rate", "1");
 
   std::vector<const char*> c_keys, c_values;
   c_keys.reserve(props.size());
@@ -1872,6 +1884,7 @@ TEST_F(ExternalTableAliyunOIDCArnTest, ReadLanceWithOIDCChain) {
   const char* columns_arr[] = {"id", "name", "value"};
   uint64_t out_num_files = 0;
   char* out_manifest_path = nullptr;
+  auto read_start = std::chrono::steady_clock::now();
   rc = loon_exttable_explore(columns_arr, 3, LOON_FORMAT_LANCE_TABLE, manifest_base.c_str(), result.explore_dir.c_str(),
                              &loon_props, &out_num_files, &out_manifest_path);
   ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
@@ -1898,8 +1911,8 @@ TEST_F(ExternalTableAliyunOIDCArnTest, ReadLanceWithOIDCChain) {
         cgfile.properties[loon_file.property_keys[p]] = loon_file.property_values[p];
       }
     }
-    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, LOON_FORMAT_LANCE_TABLE, cgfile, read_props_,
-                                                        columns, nullptr));
+    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, LOON_FORMAT_LANCE_TABLE, cgfile,
+                                                        rate_limited_read_props, columns, nullptr));
     ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
     for (size_t i = 0; i < rg_infos.size(); ++i) {
       ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
@@ -1907,6 +1920,10 @@ TEST_F(ExternalTableAliyunOIDCArnTest, ReadLanceWithOIDCChain) {
     }
   }
   ASSERT_EQ(total_rows, static_cast<int64_t>(num_rows));
+  auto read_elapsed_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - read_start).count();
+  std::cout << "[Aliyun OIDC Test] 1 IOPS ARN read phase: " << read_elapsed_ms << " ms" << std::endl;
+  EXPECT_GE(read_elapsed_ms, 3000) << "Aliyun ARN reads bypassed the configured AIMD rate limit";
 
   loon_manifest_destroy(out_manifest);
   free(out_manifest_path);
@@ -1954,7 +1971,8 @@ TEST_F(ExternalTableAliyunOIDCArnTest, LanceProviderCacheHitDoesNotReloadOidcTok
   loon_properties_free(&loon_props);
 
   {
-    ScopedOidcTokenFileOverride invalid_token_file("/path/that/does/not/exist/milvus-storage-oidc-token");
+    ScopedEnvVarOverride invalid_token_file("ALIBABA_CLOUD_OIDC_TOKEN_FILE",
+                                            "/path/that/does/not/exist/milvus-storage-oidc-token");
     std::vector<std::string> columns = {"id", "name", "value"};
     constexpr size_t cache_hit_iterations = 1000;
     std::shared_ptr<FormatReader> reader;
@@ -2094,7 +2112,8 @@ TEST_F(ExternalTableAliyunOIDCArnTest, IcebergFactoryCacheHitDoesNotReloadOidcTo
   free(first_manifest_path);
 
   {
-    ScopedOidcTokenFileOverride invalid_token_file("/path/that/does/not/exist/milvus-storage-oidc-token");
+    ScopedEnvVarOverride invalid_token_file("ALIBABA_CLOUD_OIDC_TOKEN_FILE",
+                                            "/path/that/does/not/exist/milvus-storage-oidc-token");
     constexpr size_t cache_hit_iterations = 1000;
     ASSERT_AND_ASSIGN(auto* iceberg_format, Format::get(LOON_FORMAT_ICEBERG_TABLE));
     std::cout << "[Aliyun OIDC Cache Test] Iceberg: starting " << cache_hit_iterations

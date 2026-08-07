@@ -162,6 +162,9 @@ _ffi.cdef(
     extern const char* loon_properties_fs_external_id;
     extern const char* loon_properties_fs_load_frequency;
     extern const char* loon_properties_fs_s3_crt_async_read;
+    extern const char* loon_properties_fs_lance_io_parallelism;
+    extern const char* loon_properties_fs_iops_initial_rate;
+    extern const char* loon_properties_fs_iops_max_rate;
     extern const char* loon_properties_writer_policy;
     extern const char* loon_properties_writer_format;
     extern const char* loon_properties_writer_schema_base_patterns;

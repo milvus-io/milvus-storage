@@ -64,6 +64,7 @@ TEST_F(LanceStorageOptionsTest, AwsKeys) {
   EXPECT_EQ(opts["aws_region"], "us-west-2");
   EXPECT_EQ(opts["aws_endpoint"], "https://s3.us-west-2.amazonaws.com");
   EXPECT_EQ(opts.count("s3.access-key-id"), 0);
+  EXPECT_EQ(opts["milvus_lance_io_parallelism"], "64");
 }
 
 TEST_F(LanceStorageOptionsTest, AzureKeys) {
@@ -163,8 +164,10 @@ TEST_F(LanceStorageOptionsTest, GcpTargetServiceAccountRequiresIam) {
 
   auto opts = ToStorageOptions(config);
 
-  EXPECT_EQ(opts.size(), 1);
   EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
+  EXPECT_EQ(opts["milvus_lance_io_parallelism"], "64");
+  EXPECT_EQ(opts.count("gcp_target_service_account"), 0);
+  EXPECT_EQ(opts.count("gcp_credential_refresh_secs"), 0);
 }
 
 TEST_F(LanceStorageOptionsTest, GcpDefaultCredentials) {
@@ -176,14 +179,39 @@ TEST_F(LanceStorageOptionsTest, GcpDefaultCredentials) {
 
   // No gcp_target_service_account → no impersonation keys; lance-io falls back
   // to the default credential chain (VM metadata).
-  EXPECT_EQ(opts.size(), 1);
   EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
+  EXPECT_EQ(opts["milvus_lance_io_parallelism"], "64");
+  EXPECT_EQ(opts.count("gcp_target_service_account"), 0);
+  EXPECT_EQ(opts.count("gcp_credential_refresh_secs"), 0);
 }
 
-TEST_F(LanceStorageOptionsTest, LocalEmpty) {
+TEST_F(LanceStorageOptionsTest, LocalContainsOnlyLanceIoParallelism) {
   ArrowFileSystemConfig config;
   config.storage_type = "local";
-  EXPECT_TRUE(ToStorageOptions(config).empty());
+  config.lance_io_parallelism = 17;
+
+  auto opts = ToStorageOptions(config);
+
+  EXPECT_EQ(opts.size(), 1);
+  EXPECT_EQ(opts["milvus_lance_io_parallelism"], "17");
+}
+
+TEST_F(LanceStorageOptionsTest, AimdRatesAreForwarded) {
+  auto config = MakeAwsConfig();
+
+  auto opts = ToStorageOptions(config);
+  EXPECT_EQ(opts["lance_aimd_initial_rate"], "2000");
+  EXPECT_EQ(opts["lance_aimd_max_rate"], "5000");
+
+  config.iops_initial_rate = 4000;
+  config.iops_max_rate = 5000;
+  opts = ToStorageOptions(config);
+  EXPECT_EQ(opts["lance_aimd_initial_rate"], "4000");
+  EXPECT_EQ(opts["lance_aimd_max_rate"], "5000");
+
+  config.iops_max_rate = 0;
+  opts = ToStorageOptions(config);
+  EXPECT_EQ(opts["lance_aimd_max_rate"], "0");
 }
 
 TEST_F(LanceStorageOptionsTest, BareEndpointUsesHttpWhenSslDisabled) {
