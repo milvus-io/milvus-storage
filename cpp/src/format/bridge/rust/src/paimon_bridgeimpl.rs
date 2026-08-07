@@ -997,23 +997,15 @@ struct PaimonStreamReader {
 }
 
 fn classify_stream_error(error: paimon::Error) -> ArrowError {
-    let message = error.to_string();
-    if matches!(
-        &error,
-        paimon::Error::IoUnexpected { source, .. } if source.is_temporary()
-    ) {
-        return ArrowError::IoError(
-            message,
-            std::io::Error::new(std::io::ErrorKind::Other, error),
-        );
-    }
-    if matches!(
-        &error,
-        paimon::Error::Unsupported { .. } | paimon::Error::IoUnsupported { .. }
-    ) {
+    let classified = classify_bridge_error(anyhow!(error));
+    let message = format!("{classified:#}");
+    if message.contains(ERROR_NOT_IMPLEMENTED_PREFIX) {
         return ArrowError::NotYetImplemented(message);
     }
-    ArrowError::InvalidArgumentError(message)
+    if message.contains(ERROR_INVALID_PREFIX) {
+        return ArrowError::InvalidArgumentError(message);
+    }
+    ArrowError::IoError(message.clone(), std::io::Error::other(message))
 }
 
 impl Iterator for PaimonStreamReader {
@@ -1179,7 +1171,7 @@ mod tests {
             .unwrap()
     }
 
-    fn stream_error_code(error: paimon::Error) -> i32 {
+    fn stream_error(error: paimon::Error) -> (i32, String) {
         let stream = futures::stream::iter([Err(error)]).boxed();
         let reader = PaimonStreamReader {
             stream,
@@ -1187,11 +1179,22 @@ mod tests {
         };
         let mut ffi_stream = FFI_ArrowArrayStream::new(Box::new(reader));
         let mut array = FFI_ArrowArray::empty();
-        unsafe { ffi_stream.get_next.unwrap()(&mut ffi_stream, &mut array) }
+        let code = unsafe { ffi_stream.get_next.unwrap()(&mut ffi_stream, &mut array) };
+        let message = unsafe {
+            let error = ffi_stream.get_last_error.unwrap()(&mut ffi_stream);
+            if error.is_null() {
+                String::new()
+            } else {
+                std::ffi::CStr::from_ptr(error)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
+        (code, message)
     }
 
     #[test]
-    fn stream_errors_keep_retryability_across_arrow_ffi() {
+    fn stream_errors_keep_classification_across_arrow_ffi() {
         let temporary = opendal_paimon::Error::new(
             opendal_paimon::ErrorKind::RateLimited,
             "temporary object-store failure",
@@ -1201,7 +1204,39 @@ mod tests {
             message: "stream read failed".to_string(),
             source: Box::new(temporary),
         };
-        assert_eq!(stream_error_code(temporary), 5); // EIO
+        let (code, message) = stream_error(temporary);
+        assert_eq!(code, 5); // EIO
+        assert!(
+            message.contains(ERROR_TRANSIENT_THROTTLING_PREFIX),
+            "{message}"
+        );
+
+        let temporary = opendal_paimon::Error::new(
+            opendal_paimon::ErrorKind::Unexpected,
+            "temporary object-store failure",
+        )
+        .set_temporary();
+        let temporary = paimon::Error::IoUnexpected {
+            message: "stream read failed".to_string(),
+            source: Box::new(temporary),
+        };
+        let (code, message) = stream_error(temporary);
+        assert_eq!(code, 5); // EIO
+        assert!(
+            message.contains(ERROR_TRANSIENT_SERVICE_PREFIX),
+            "{message}"
+        );
+
+        let not_found = paimon::Error::IoUnexpected {
+            message: "stream read failed".to_string(),
+            source: Box::new(opendal_paimon::Error::new(
+                opendal_paimon::ErrorKind::NotFound,
+                "missing object",
+            )),
+        };
+        let (code, message) = stream_error(not_found);
+        assert_eq!(code, 5); // EIO
+        assert!(message.contains(ERROR_NOT_FOUND_PREFIX), "{message}");
 
         let permanent = paimon::Error::IoUnexpected {
             message: "stream read failed".to_string(),
@@ -1210,13 +1245,17 @@ mod tests {
                 "permanent object-store failure",
             )),
         };
-        assert_eq!(stream_error_code(permanent), 22); // EINVAL
+        let (code, message) = stream_error(permanent);
+        assert_eq!(code, 5); // EIO
+        assert!(!message.contains(ERROR_INVALID_PREFIX), "{message}");
 
         let invalid = paimon::Error::DataInvalid {
             message: "corrupt record batch".to_string(),
             source: None,
         };
-        assert_eq!(stream_error_code(invalid), 22); // EINVAL
+        let (code, message) = stream_error(invalid);
+        assert_eq!(code, 22); // EINVAL
+        assert!(message.contains(ERROR_INVALID_PREFIX), "{message}");
     }
 
     #[test]

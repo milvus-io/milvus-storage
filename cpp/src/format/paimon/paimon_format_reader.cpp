@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <string_view>
 #include <utility>
 
 #include <arrow/array/builder_primitive.h>
@@ -37,6 +38,34 @@ namespace milvus_storage::paimon {
 namespace {
 
 constexpr size_t kMaxPaimonMetadataBytes = 12 * 1024 * 1024;
+constexpr std::string_view kPaimonErrorMarker = "[paimon:error=";
+
+arrow::Status TranslatePaimonStreamStatus(arrow::Status status) {
+  if (status.ok() || status.message().find(kPaimonErrorMarker) == std::string_view::npos) {
+    return status;
+  }
+  return MakePaimonBridgeErrorStatus(status.message());
+}
+
+class PaimonErrorTranslatingReader final : public arrow::RecordBatchReader {
+  public:
+  explicit PaimonErrorTranslatingReader(std::shared_ptr<arrow::RecordBatchReader> inner) : inner_(std::move(inner)) {}
+
+  std::shared_ptr<arrow::Schema> schema() const override { return inner_->schema(); }
+
+  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override {
+    return TranslatePaimonStreamStatus(inner_->ReadNext(batch));
+  }
+
+  arrow::Status Close() override { return TranslatePaimonStreamStatus(inner_->Close()); }
+
+  private:
+  std::shared_ptr<arrow::RecordBatchReader> inner_;
+};
+
+std::shared_ptr<arrow::RecordBatchReader> WrapPaimonStreamReader(std::shared_ptr<arrow::RecordBatchReader> inner) {
+  return std::make_shared<PaimonErrorTranslatingReader>(std::move(inner));
+}
 
 struct ParsedMetadata {
   std::string read_path;
@@ -616,7 +645,8 @@ arrow::Status PaimonFormatReader::open() {
 arrow::Result<std::unique_ptr<DataSplitStreamCursor>> PaimonFormatReader::make_data_split_cursor() const {
   ARROW_ASSIGN_OR_RAISE(auto stream, split_reader_->OpenStream(split_columns_));
   ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&stream));
-  return std::make_unique<DataSplitStreamCursor>(std::move(reader), metadata_->payload.record_count);
+  return std::make_unique<DataSplitStreamCursor>(WrapPaimonStreamReader(std::move(reader)),
+                                                 metadata_->payload.record_count);
 }
 
 arrow::Result<std::vector<RowGroupInfo>> PaimonFormatReader::get_row_group_infos() {
