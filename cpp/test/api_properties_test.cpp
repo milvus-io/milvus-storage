@@ -193,6 +193,27 @@ TEST_F(APIPropertiesTest, reader_metadata_cache_enable_property) {
   EXPECT_STREQ(loon_properties_reader_metadata_cache_enable, PROPERTY_READER_METADATA_CACHE_ENABLE);
 }
 
+TEST_F(APIPropertiesTest, lance_io_parallelism_property) {
+  milvus_storage::api::Properties pp{};
+
+  EXPECT_EQ(GetValueNoError<uint32_t>(pp, PROPERTY_FS_LANCE_IO_PARALLELISM), 64u);
+
+  for (const char* value : {"0", "1", "64", "256"}) {
+    EXPECT_EQ(SetValue(pp, PROPERTY_FS_LANCE_IO_PARALLELISM, value), std::nullopt);
+  }
+  EXPECT_EQ(GetValueNoError<uint32_t>(pp, PROPERTY_FS_LANCE_IO_PARALLELISM), 256u);
+
+  for (const char* value : {"257", "-1", "invalid"}) {
+    EXPECT_NE(SetValue(pp, PROPERTY_FS_LANCE_IO_PARALLELISM, value), std::nullopt);
+  }
+
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(pp, fs_config));
+  EXPECT_EQ(fs_config.lance_io_parallelism, 256u);
+
+  EXPECT_STREQ(loon_properties_fs_lance_io_parallelism, PROPERTY_FS_LANCE_IO_PARALLELISM);
+}
+
 TEST_F(APIPropertiesTest, async_task_split_strategy) {
   milvus_storage::api::Properties pp{};
 

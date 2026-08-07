@@ -116,6 +116,7 @@ FFI_EXPORT extern const char* loon_properties_fs_tls_min_version;
 FFI_EXPORT extern const char* loon_properties_fs_background_writes;
 FFI_EXPORT extern const char* loon_properties_fs_use_crc32c_checksum;
 FFI_EXPORT extern const char* loon_properties_fs_s3_crt_async_read;
+FFI_EXPORT extern const char* loon_properties_fs_lance_io_parallelism;
 
 // --- Export Writer property keys ---
 FFI_EXPORT extern const char* loon_properties_writer_policy;

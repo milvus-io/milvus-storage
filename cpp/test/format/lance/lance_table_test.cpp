@@ -13,11 +13,17 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+#include <algorithm>
+#include <barrier>
+#include <chrono>
+#include <future>
+#include <iostream>
 #include <memory>
 #include <numeric>
 #include <random>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 #include <cstdint>
 
@@ -737,6 +743,186 @@ TEST_F(LanceBasicTest, CachedCreateReaderReappliesProjection) {
   for (int64_t i = 0; i < value_chunk->num_rows(); ++i) {
     const auto row = static_cast<int64_t>(value_rgs[0].start_offset) + i;
     ASSERT_DOUBLE_EQ(value_array->Value(i), row * 1.5);
+  }
+}
+
+TEST_F(LanceBasicTest, CloudWideTableDuplicatedFragmentTakeRateLimitRepro) {
+  if (!IsCloudEnv()) {
+    GTEST_SKIP() << "This Lance rate-limit reproduction requires cloud storage.";
+  }
+
+  constexpr uint32_t kLanceIoParallelism = 64;
+  constexpr uint64_t kMaxPeakIops = 5'500;
+  api::SetValue(properties_, PROPERTY_FS_LANCE_IO_PARALLELISM, "64");
+
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_EQ(fs_config.lance_io_parallelism, kLanceIoParallelism);
+  api::SetValue(properties_, "extfs.default.storage_type", fs_config.storage_type.c_str());
+  api::SetValue(properties_, "extfs.default.cloud_provider", fs_config.cloud_provider.c_str());
+  api::SetValue(properties_, "extfs.default.address", fs_config.address.c_str());
+  api::SetValue(properties_, "extfs.default.bucket_name", fs_config.bucket_name.c_str());
+  api::SetValue(properties_, "extfs.default.region", fs_config.region.c_str());
+  api::SetValue(properties_, "extfs.default.access_key_id", fs_config.access_key_id.c_str());
+  api::SetValue(properties_, "extfs.default.access_key_value", fs_config.access_key_value.c_str());
+  api::SetValue(properties_, "extfs.default.lance_io_parallelism", "64");
+  if (fs_config.use_ssl) {
+    api::SetValue(properties_, "extfs.default.use_ssl", "true");
+  }
+  if (fs_config.use_iam) {
+    api::SetValue(properties_, "extfs.default.use_iam", "true");
+  }
+
+  constexpr int64_t kColumnCount = 1'024;
+  constexpr int64_t kRowCount = 16'384;
+  constexpr size_t kColumnGroupFileCount = 10;
+  constexpr size_t kReaderCount = 10;
+
+  std::vector<std::shared_ptr<arrow::Field>> fields;
+  std::vector<std::string> column_names;
+  fields.reserve(kColumnCount);
+  column_names.reserve(kColumnCount);
+  for (int64_t column = 0; column < kColumnCount; ++column) {
+    column_names.emplace_back("column_" + std::to_string(column));
+    fields.emplace_back(arrow::field(column_names.back(), arrow::int64(), false));
+  }
+  auto wide_schema = arrow::schema(std::move(fields));
+
+  std::vector<int64_t> row_values(kRowCount);
+  std::iota(row_values.begin(), row_values.end(), 0);
+  arrow::Int64Builder value_builder;
+  ASSERT_STATUS_OK(value_builder.AppendValues(row_values));
+  std::shared_ptr<arrow::Array> values;
+  ASSERT_STATUS_OK(value_builder.Finish(&values));
+  std::vector<std::shared_ptr<arrow::Array>> columns(kColumnCount, values);
+  auto wide_batch = arrow::RecordBatch::Make(wide_schema, kRowCount, std::move(columns));
+
+  LanceTableWriter writer(base_path_, wide_schema, properties_);
+  ASSERT_STATUS_OK(writer.Write(wide_batch));
+  ASSERT_AND_ASSIGN(auto written_file, writer.Close());
+  ASSERT_EQ(written_file.end_index - written_file.start_index, kRowCount);
+
+  ASSERT_AND_ASSIGN(auto parsed_lance_uri, ParseLanceUri(written_file.path));
+  const auto lance_uri = ToStandardLanceUri(parsed_lance_uri.first);
+  // IOStatsIncremental is test-only and reads a dataset-local ObjectStore tracker.
+  // The shared scheduler retains the ObjectStore from its first dataset, so keep
+  // that owner alive while later Reader datasets generate the measured I/O.
+  std::shared_ptr<BlockingDataset> io_stats_owner_dataset;
+  ASSERT_NO_THROW(io_stats_owner_dataset = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config)));
+  ASSERT_NE(io_stats_owner_dataset, nullptr);
+  std::shared_ptr<BlockingDataset> non_owner_dataset;
+  ASSERT_NO_THROW(non_owner_dataset = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config)));
+  ASSERT_NE(non_owner_dataset, nullptr);
+  ASSERT_NE(io_stats_owner_dataset.get(), non_owner_dataset.get());
+
+  auto column_group = std::make_shared<api::ColumnGroup>();
+  column_group->columns = std::move(column_names);
+  column_group->format = LOON_FORMAT_LANCE_TABLE;
+  column_group->files.assign(kColumnGroupFileCount, written_file);
+  auto column_groups = std::make_shared<api::ColumnGroups>();
+  column_groups->emplace_back(std::move(column_group));
+
+  std::vector<int64_t> first_row_indices;
+  first_row_indices.reserve(kColumnGroupFileCount);
+  for (size_t file = 0; file < kColumnGroupFileCount; ++file) {
+    first_row_indices.emplace_back(static_cast<int64_t>(file) * kRowCount);
+  }
+
+  std::vector<std::unique_ptr<api::Reader>> readers;
+  readers.reserve(kReaderCount);
+  for (size_t reader_index = 0; reader_index < kReaderCount; ++reader_index) {
+    auto reader = api::Reader::create(column_groups, wide_schema, nullptr, properties_);
+    ASSERT_NE(reader, nullptr);
+    readers.emplace_back(std::move(reader));
+  }
+
+  std::barrier start_barrier(static_cast<std::ptrdiff_t>(kReaderCount + 1));
+  std::vector<std::future<arrow::Result<std::shared_ptr<arrow::Table>>>> take_futures;
+  take_futures.reserve(kReaderCount);
+  for (size_t reader_index = 0; reader_index < readers.size(); ++reader_index) {
+    take_futures.emplace_back(
+        std::async(std::launch::async, [reader = readers[reader_index].get(), &first_row_indices, &start_barrier]() {
+          start_barrier.arrive_and_wait();
+          return reader->take(first_row_indices);
+        }));
+  }
+
+  struct IopsSample {
+    std::chrono::steady_clock::time_point timestamp;
+    uint64_t iops;
+  };
+  io_stats_owner_dataset->IOStatsIncremental();
+  non_owner_dataset->IOStatsIncremental();
+  uint64_t total_iops = 0;
+  uint64_t total_bytes_read = 0;
+  auto collect_io_stats = [&]() {
+    const auto stats = io_stats_owner_dataset->IOStatsIncremental();
+    total_iops += stats.read_iops;
+    total_bytes_read += stats.read_bytes;
+  };
+  const auto take_started_at = std::chrono::steady_clock::now();
+  start_barrier.arrive_and_wait();
+
+  std::vector<IopsSample> iops_samples;
+  while (true) {
+    collect_io_stats();
+    iops_samples.emplace_back(IopsSample{
+        .timestamp = std::chrono::steady_clock::now(),
+        .iops = total_iops,
+    });
+    const bool all_ready = std::all_of(take_futures.begin(), take_futures.end(), [](auto& future) {
+      return future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+    });
+    if (all_ready) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  const auto take_finished_at = std::chrono::steady_clock::now();
+  collect_io_stats();
+  iops_samples.emplace_back(IopsSample{.timestamp = take_finished_at, .iops = total_iops});
+
+  uint64_t peak_one_second_iops = 0;
+  size_t window_start = 0;
+  for (size_t window_end = 0; window_end < iops_samples.size(); ++window_end) {
+    while (window_start < window_end &&
+           iops_samples[window_end].timestamp - iops_samples[window_start].timestamp > std::chrono::seconds(1)) {
+      ++window_start;
+    }
+    peak_one_second_iops =
+        std::max(peak_one_second_iops, iops_samples[window_end].iops - iops_samples[window_start].iops);
+  }
+  const auto take_seconds = std::chrono::duration<double>(take_finished_at - take_started_at).count();
+  const auto average_iops = static_cast<double>(total_iops) / take_seconds;
+  std::cout << "[ LANCE_IO_STATS ] parallelism=" << kLanceIoParallelism << ", read_iops=" << total_iops
+            << ", read_bytes=" << total_bytes_read << ", duration_s=" << take_seconds
+            << ", average_iops=" << average_iops << ", peak_1s_iops=" << peak_one_second_iops << std::endl;
+  ASSERT_GT(total_iops, 0);
+  ASSERT_GT(total_bytes_read, 0);
+  ASSERT_LE(peak_one_second_iops, kMaxPeakIops)
+      << "Shared Lance scheduler exceeded aggregate IOPS target across all Reader instances";
+
+  // Although both handles share the scheduler, IOStatsIncremental is not a
+  // scheduler/domain metric. Only the first owner's tracker receives these reads.
+  const auto non_owner_stats = non_owner_dataset->IOStatsIncremental();
+  ASSERT_EQ(non_owner_stats.read_iops, 0);
+  ASSERT_EQ(non_owner_stats.read_bytes, 0);
+
+  for (size_t reader_index = 0; reader_index < take_futures.size(); ++reader_index) {
+    SCOPED_TRACE("reader_index=" + std::to_string(reader_index));
+    ASSERT_AND_ASSIGN(auto table, take_futures[reader_index].get());
+    ASSERT_STATUS_OK(table->ValidateFull());
+    ASSERT_EQ(table->num_rows(), static_cast<int64_t>(kColumnGroupFileCount));
+    ASSERT_EQ(table->num_columns(), kColumnCount);
+
+    ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
+    for (int column_index : {0, static_cast<int>(kColumnCount - 1)}) {
+      auto column = std::dynamic_pointer_cast<arrow::Int64Array>(batch->column(column_index));
+      ASSERT_NE(column, nullptr);
+      for (int64_t row = 0; row < column->length(); ++row) {
+        EXPECT_EQ(column->Value(row), 0);
+      }
+    }
   }
 }
 
