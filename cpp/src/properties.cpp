@@ -585,15 +585,15 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
         int64_t(32LL * 1024 * 1024),                                                            // 32 MB
         ValidatePropertyType() + ValidatePropertyRange<int64_t>(1, 4LL * 1024 * 1024 * 1024)),  // max 4 GB
 
-    REGISTER_PROPERTY(
-        PROPERTY_READER_LOGICAL_CHUNK_ROWS,
-        PropertyType::UINT64,
-        "The logical chunk rows for Vortex/Lance-table reader, notice that the actual chunk rows maybe smaller."
-        "Although vortex does not divide according to row groups, but it still have the split strategy to"
-        "split the row ranges(default strategy is base on the layout rows). So this property can help to"
-        "control the rows read per chunk. The actual chunk rows is min(logical_chunk_rows, layout_rows).",
-        uint64_t(8192),  // 8192 rows
-        ValidatePropertyType() + ValidatePropertyRange<uint64_t>(1, UINT64_MAX)),
+    REGISTER_PROPERTY(PROPERTY_READER_LOGICAL_CHUNK_ROWS,
+                      PropertyType::UINT64,
+                      "The logical chunk rows for Vortex/Lance-table/Paimon data-split readers; the actual chunk rows "
+                      "may be smaller. "
+                      "Although vortex does not divide according to row groups, but it still have the split strategy to"
+                      "split the row ranges(default strategy is base on the layout rows). So this property can help to"
+                      "control the rows read per chunk. The actual chunk rows is min(logical_chunk_rows, layout_rows).",
+                      uint64_t(8192),  // 8192 rows
+                      ValidatePropertyType() + ValidatePropertyRange<uint64_t>(1, UINT64_MAX)),
     REGISTER_PROPERTY(PROPERTY_READER_METADATA_CACHE_ENABLE,
                       PropertyType::BOOL,
                       "Whether to cache reusable format reader metadata while reading.",
@@ -623,9 +623,9 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
 
     REGISTER_PROPERTY(PROPERTY_PAIMON_SCAN_MODE,
                       PropertyType::STRING,
-                      "Paimon split routing mode: auto or direct-file.",
+                      "Paimon split routing mode: auto, direct-file, or data-split.",
                       "auto",
-                      ValidatePropertyType() + ValidatePropertyEnum<std::string>("auto", "direct-file")),
+                      ValidatePropertyType() + ValidatePropertyEnum<std::string>("auto", "direct-file", "data-split")),
     REGISTER_PROPERTY(PROPERTY_PAIMON_SNAPSHOT_ID,
                       PropertyType::INT64,
                       "Paimon snapshot ID. -1 reads the latest snapshot.",

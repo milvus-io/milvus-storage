@@ -35,17 +35,19 @@ arrow::Result<std::vector<api::ColumnGroupFile>> PaimonFormat::explore(const std
   files.reserve(planned.size());
   for (const auto& info : planned) {
     int64_t record_count = -1;
+    std::string read_path;
     try {
       auto metadata = nlohmann::json::parse(info.metadata_json);
       if (!metadata.is_object()) {
         return arrow::Status::Invalid("Paimon planning metadata must be a JSON object");
       }
-      if (metadata.value("read_path", std::string{}) != "direct-file") {
-        return arrow::Status::Invalid("Paimon planner returned a non-direct metadata descriptor");
-      }
-      record_count = metadata.value("record_count", int64_t{-1});
+      read_path = metadata.value(paimon::kReadPathKey, std::string{});
+      record_count = metadata.value(paimon::kRecordCountKey, int64_t{-1});
     } catch (const nlohmann::json::exception& error) {
       return arrow::Status::Invalid("Invalid Paimon planning metadata: ", error.what());
+    }
+    if (read_path != paimon::kDirectFileReadPath && read_path != paimon::kDataSplitReadPath) {
+      return arrow::Status::Invalid("Paimon planning metadata has an invalid read_path: ", read_path);
     }
     if (record_count < 0) {
       return arrow::Status::Invalid("Paimon planning metadata has an invalid record_count");
@@ -55,7 +57,7 @@ arrow::Result<std::vector<api::ColumnGroupFile>> PaimonFormat::explore(const std
     }
     api::ColumnGroupFile file{paimon::ToMilvusUri(info.path, fs_config.address), 0, record_count, {}};
     file.Set(api::kPropertyMetadata, info.metadata_json);
-    if (info.file_size > 0) {
+    if (read_path == paimon::kDirectFileReadPath && info.file_size > 0) {
       file.Set(api::kPropertyFileSize, info.file_size);
     }
     files.push_back(std::move(file));

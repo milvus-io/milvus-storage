@@ -34,6 +34,7 @@
 #include "milvus-storage/format/paimon/paimon_common.h"
 #include "milvus-storage/format/paimon/paimon_format_reader.h"
 #include "milvus-storage/properties.h"
+#include "milvus-storage/reader.h"
 #include "paimon_bridge.h"
 #include "test_env.h"
 
@@ -289,14 +290,36 @@ TEST_F(PaimonIntegrationTest, ScanOptionsAreValidatedForLatestAndPinnedSnapshots
   EXPECT_NE(files.status().ToString().find("scan.watermark"), std::string::npos);
 }
 
-TEST_F(PaimonIntegrationTest, MergeOnReadTableFailsClosedAsNotImplemented) {
-  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 10, "mor").status());
+TEST_F(PaimonIntegrationTest, ExplicitDataSplitReadsAppendTable) {
+  constexpr uint64_t kRows = 10;
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "append").status());
 
-  auto files = Explore("auto");
-  ASSERT_FALSE(files.ok());
-  EXPECT_TRUE(files.status().IsNotImplemented()) << files.status().ToString();
-  const auto message = files.status().ToString();
-  EXPECT_NE(message.find("data-split reading"), std::string::npos) << message;
+  ASSERT_AND_ASSIGN(auto files, Explore("data-split"));
+  ASSERT_EQ(files.size(), 1);
+  EXPECT_EQ(ReadPath(files.front()), "data-split");
+  ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, "false"), std::nullopt);
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
+                                                      {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto row_groups, reader->get_row_group_infos());
+  ASSERT_FALSE(row_groups.empty());
+  EXPECT_FALSE(row_groups.front().memory_size_available);
+  auto column_sizes = reader->get_rg_column_memsz(0);
+  ASSERT_FALSE(column_sizes.ok());
+  EXPECT_TRUE(column_sizes.status().IsNotImplemented()) << column_sizes.status().ToString();
+  EXPECT_EQ(ReadAllRows(reader), static_cast<int64_t>(kRows));
+
+  auto column_group = std::make_shared<api::ColumnGroup>();
+  column_group->columns = {"id"};
+  column_group->format = LOON_FORMAT_PAIMON_TABLE;
+  column_group->files = files;
+  auto schema = arrow::schema({arrow::field("id", arrow::int32())});
+  MetadataCache cache;
+  ASSERT_AND_ASSIGN(auto column_group_reader,
+                    api::ColumnGroupReader::create(schema, column_group, {"id"}, properties_, nullptr, "", cache));
+  EXPECT_EQ(column_group_reader->total_rows(), static_cast<int64_t>(kRows));
+  EXPECT_FALSE(cache.get<paimon::PaimonFormatReader>()
+                   ->get(paimon::PaimonFormatReader::MetaTrait::cache_key(files.front()))
+                   .has_value());
 }
 
 TEST_F(PaimonIntegrationTest, InvalidScanModeFailsAsInvalid) {
@@ -525,7 +548,136 @@ TEST_F(PaimonIntegrationTest, ExplicitDirectFileRejectsMergeOnRead) {
   EXPECT_NE(files.status().ToString().find("cannot use direct-file"), std::string::npos);
 }
 
-TEST_F(PaimonIntegrationTest, DataSplitDescriptorFailsClosedAsNotImplemented) {
+TEST_F(PaimonIntegrationTest, AutoUsesDataSplitForMergeOnRead) {
+  constexpr uint64_t kRows = 17;
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "mor").status());
+
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+  ASSERT_EQ(ReadPath(files.front()), "data-split");
+
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
+                                                      {"id", "name"}, nullptr));
+  EXPECT_EQ(ReadAllRows(reader), static_cast<int64_t>(kRows));
+}
+
+TEST_F(PaimonIntegrationTest, DataSplitSupportsRangeAndCloneReads) {
+  constexpr uint64_t kRows = 17;
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "mor").status());
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
+                                                      {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto range, reader->read_with_range(3, 9));
+  ASSERT_AND_ASSIGN(auto range_table, arrow::Table::FromRecordBatchReader(range.get()));
+  EXPECT_EQ(range_table->num_rows(), 6);
+  for (int64_t row = 0; row < range_table->num_rows(); ++row) {
+    ASSERT_AND_ASSIGN(auto scalar, range_table->column(0)->GetScalar(row));
+    auto id = std::dynamic_pointer_cast<arrow::Int32Scalar>(scalar);
+    ASSERT_NE(id, nullptr);
+    EXPECT_EQ(id->value, row + 3);
+  }
+
+  ASSERT_AND_ASSIGN(auto clone, reader->clone_reader());
+  ASSERT_AND_ASSIGN(auto cloned_head, clone->get_chunk(0));
+  EXPECT_EQ(cloned_head->num_rows(), 4);
+}
+
+TEST_F(PaimonIntegrationTest, DataSplitLogicalChunkSpansPaimonBatches) {
+  constexpr uint64_t kRows = 10000;
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "mor").status());
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+  ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "8192"), std::nullopt);
+
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
+                                                      {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+  ASSERT_EQ(batch->num_rows(), 8192);
+  auto ids = std::dynamic_pointer_cast<arrow::Int32Array>(batch->column(0));
+  ASSERT_NE(ids, nullptr);
+  EXPECT_EQ(ids->Value(0), 0);
+  EXPECT_EQ(ids->Value(8191), 8191);
+}
+
+TEST_F(PaimonIntegrationTest, DataSplitReadsNonContiguousChunks) {
+  constexpr uint64_t kRows = 4096;
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "mor").status());
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+  ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "512"), std::nullopt);
+
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
+                                                      {"id"}, nullptr));
+  const std::vector<int> chunks = {0, 2, 4, 6};
+  ASSERT_AND_ASSIGN(auto batches, reader->get_chunks(chunks));
+  ASSERT_EQ(batches.size(), chunks.size());
+  for (size_t index = 0; index < batches.size(); ++index) {
+    auto ids = std::dynamic_pointer_cast<arrow::Int32Array>(batches[index]->column(0));
+    ASSERT_NE(ids, nullptr);
+    ASSERT_EQ(ids->length(), 512);
+    EXPECT_EQ(ids->Value(0), chunks[index] * 512);
+    EXPECT_EQ(ids->Value(511), chunks[index] * 512 + 511);
+  }
+}
+
+TEST_F(PaimonIntegrationTest, DataSplitTakeCompactsSparseBatches) {
+  constexpr uint64_t kRows = 4096;
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "mor").status());
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
+                                                      {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto taken, reader->take({0, 2048, 4095}));
+  ASSERT_EQ(taken->num_rows(), 3);
+
+  int64_t value_buffer_bytes = 0;
+  const auto& id_column = taken->column(0);
+  for (const auto& chunk : id_column->chunks()) {
+    ASSERT_GE(chunk->data()->buffers.size(), 2);
+    ASSERT_NE(chunk->data()->buffers[1], nullptr);
+    value_buffer_bytes += chunk->data()->buffers[1]->size();
+  }
+  EXPECT_LE(value_buffer_bytes, static_cast<int64_t>(3 * sizeof(int32_t)));
+
+  const std::vector<int32_t> expected = {0, 2048, 4095};
+  for (int64_t row = 0; row < taken->num_rows(); ++row) {
+    ASSERT_AND_ASSIGN(auto scalar, id_column->GetScalar(row));
+    ASSERT_NE(std::dynamic_pointer_cast<arrow::Int32Scalar>(scalar), nullptr);
+    EXPECT_EQ(std::dynamic_pointer_cast<arrow::Int32Scalar>(scalar)->value, expected[row]);
+  }
+}
+
+TEST_F(PaimonIntegrationTest, AsyncDataSplitChunksSpanSourceBatches) {
+  constexpr uint64_t kRows = 10000;
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "mor").status());
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+  ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "8192"), std::nullopt);
+
+  auto column_groups = std::make_shared<api::ColumnGroups>();
+  column_groups->push_back(std::make_shared<api::ColumnGroup>(
+      api::ColumnGroup{.columns = {"id"}, .format = LOON_FORMAT_PAIMON_TABLE, .files = {files.front()}}));
+  auto schema = arrow::schema({arrow::field("id", arrow::int32())});
+  auto reader = api::Reader::create(column_groups, schema, nullptr, properties_);
+  ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+
+  const std::vector<int64_t> chunks = {0, 1};
+  ASSERT_AND_ASSIGN(auto batches, std::move(chunk_reader->get_chunks_async(chunks, 8)).get());
+  ASSERT_EQ(batches.size(), chunks.size());
+  for (size_t index = 0; index < batches.size(); ++index) {
+    auto ids = std::dynamic_pointer_cast<arrow::Int32Array>(batches[index]->column(0));
+    ASSERT_NE(ids, nullptr);
+    const int64_t expected_rows = index == 0 ? 8192 : 1808;
+    ASSERT_EQ(ids->length(), expected_rows);
+    EXPECT_EQ(ids->Value(0), chunks[index] * 8192);
+    EXPECT_EQ(ids->Value(expected_rows - 1), chunks[index] * 8192 + expected_rows - 1);
+  }
+}
+
+TEST_F(PaimonIntegrationTest, MalformedDataSplitDescriptorFailsAsInvalid) {
   ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 10, "append").status());
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
@@ -535,7 +687,7 @@ TEST_F(PaimonIntegrationTest, DataSplitDescriptorFailsClosedAsNotImplemented) {
   files.front().Set(api::kPropertyMetadata, folly::toJson(descriptor));
   auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
   ASSERT_FALSE(reader.ok());
-  EXPECT_TRUE(reader.status().IsNotImplemented()) << reader.status().ToString();
+  EXPECT_TRUE(reader.status().IsInvalid()) << reader.status().ToString();
 }
 
 TEST_F(PaimonIntegrationTest, FullyDeletedTableProducesNoEntries) {

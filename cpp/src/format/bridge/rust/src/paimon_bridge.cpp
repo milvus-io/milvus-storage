@@ -131,4 +131,38 @@ arrow::Result<int64_t> CreateTestTable(const std::string& table_location,
   });
 }
 
+arrow::Result<std::unique_ptr<BlockingPaimonDataSplitReader>> BlockingPaimonDataSplitReader::Open(
+    const std::string& metadata_json,
+    const std::string& expected_table_location,
+    const StorageOptions& storage_options) {
+  return CatchRustResult<std::unique_ptr<BlockingPaimonDataSplitReader>>([&]() {
+    rust::Vec<rust::String> keys;
+    rust::Vec<rust::String> values;
+    ConvertStorageOptions(storage_options, keys, values);
+    return std::make_unique<BlockingPaimonDataSplitReader>(ffi::paimon_open_data_split_reader(
+        rust::Str(metadata_json), rust::Str(expected_table_location), std::move(keys), std::move(values)));
+  });
+}
+
+arrow::Status BlockingPaimonDataSplitReader::ExportSchema(ArrowSchema* schema) const {
+  if (schema == nullptr) {
+    return arrow::Status::Invalid("cannot export Paimon schema into a null pointer");
+  }
+  try {
+    impl_->export_schema(reinterpret_cast<uint8_t*>(schema));
+    return arrow::Status::OK();
+  } catch (const rust::cxxbridge1::Error& error) {
+    return MakePaimonBridgeErrorStatus(error.what());
+  }
+}
+
+arrow::Result<ArrowArrayStream> BlockingPaimonDataSplitReader::OpenStream(
+    const std::vector<std::string>& projected_columns) const {
+  return CatchRustResult<ArrowArrayStream>([&]() {
+    ArrowArrayStream stream{};
+    impl_->open_stream(projected_columns, reinterpret_cast<uint8_t*>(&stream));
+    return stream;
+  });
+}
+
 }  // namespace milvus_storage::paimon

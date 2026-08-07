@@ -12,13 +12,18 @@
 
 #pragma once
 
+#include <arrow/c/abi.h>
+
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
 
 #include <arrow/result.h>
+#include "rust/cxx.h"
+#include "rust-bridge/lib.h"
 
 namespace milvus_storage::paimon {
 
@@ -49,5 +54,30 @@ arrow::Result<int64_t> CreateTestTable(const std::string& table_location,
                                        const std::vector<int64_t>& deleted_positions = {},
                                        const std::string& file_format = "parquet",
                                        uint32_t dimension = 0);
+
+/// Projection-agnostic handle over one decoded DataSplit. `Open` performs the
+/// expensive work (descriptor decode, schema resolution, pinned-snapshot time
+/// travel) once; `OpenStream` starts a merge-read stream with a per-call
+/// projection, so one handle can be shared by every reader created from the
+/// same cached metadata.
+class BlockingPaimonDataSplitReader {
+  public:
+  static arrow::Result<std::unique_ptr<BlockingPaimonDataSplitReader>> Open(const std::string& metadata_json,
+                                                                            const std::string& expected_table_location,
+                                                                            const StorageOptions& storage_options);
+
+  explicit BlockingPaimonDataSplitReader(rust::Box<ffi::BlockingPaimonDataSplitReader> impl) : impl_(std::move(impl)) {}
+
+  BlockingPaimonDataSplitReader(BlockingPaimonDataSplitReader&&) noexcept = default;
+  BlockingPaimonDataSplitReader& operator=(BlockingPaimonDataSplitReader&&) noexcept = default;
+  BlockingPaimonDataSplitReader(const BlockingPaimonDataSplitReader&) = delete;
+  BlockingPaimonDataSplitReader& operator=(const BlockingPaimonDataSplitReader&) = delete;
+
+  arrow::Status ExportSchema(ArrowSchema* schema) const;
+  arrow::Result<ArrowArrayStream> OpenStream(const std::vector<std::string>& projected_columns) const;
+
+  private:
+  rust::Box<ffi::BlockingPaimonDataSplitReader> impl_;
+};
 
 }  // namespace milvus_storage::paimon
