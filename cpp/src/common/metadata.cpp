@@ -59,6 +59,11 @@ arrow::Result<FieldIDList> FieldIDList::Make(const std::shared_ptr<arrow::Schema
     auto field = metadata->Get(ARROW_FIELD_ID_KEY).ValueOrDie();
     try {
       field_ids.Add(std::stoll(field));
+    } catch (const std::bad_alloc&) {
+      // Answered before the generic handler: routed there, memory pressure --
+      // the one condition a retry is most likely to resolve -- came back as a
+      // permanent error. Enforced by cpp/scripts/check_oom_handlers.py.
+      return arrow::Status::OutOfMemory("Out of memory while parsing metadata");
     } catch (const std::exception& e) {
       return arrow::Status::Invalid(fmt::format("Invalid field id: '{}'. [field_index={}, field_name={}, error={}]",
                                                 field,                     // NOLINT

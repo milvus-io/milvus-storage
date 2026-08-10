@@ -28,6 +28,29 @@
 namespace milvus_storage {
 using namespace milvus_storage::api;
 
+// PUBLISH-THEN-FILL, everywhere in this file.
+//
+// Every `new` below can throw, and the only caller that can react is a
+// catch-all that calls the matching loon_*_destroy on the partially built
+// result. So the destroy function has to be able to SEE what has been allocated
+// so far -- which means an array and its count go into the output struct
+// immediately, zero-initialized, and get filled in place afterwards. Building
+// into a local and assigning at the end hides everything already allocated from
+// the only code that could free it.
+//
+// The zero-initializing `{}` on each `new T*[n]` is load-bearing twice over.
+// Without it a partially filled array leaks its filled entries, and -- worse --
+// destroy_column_group_file walks `num_properties` entries and delete[]s them
+// unconditionally, so indeterminate pointers there are a heap corruption, not a
+// leak. `delete[] nullptr` is a well-defined no-op, which is what makes the
+// half-built state safe to hand to destroy.
+//
+// This is deliberately not an RAII builder. A builder would have to restate the
+// ownership layout of these C structs a second time, in parallel with the
+// destroy functions that already describe it -- two descriptions to keep in
+// sync, and the one that runs in production is the destroy path either way.
+// Making the half-built state safe for THAT path is the smaller and more
+// directly testable claim.
 static void export_column_group_file(const ColumnGroupFile* cgf, LoonColumnGroupFile* ccgf) {
   // Copy path
   size_t path_len = cgf->path.length();
@@ -41,10 +64,24 @@ static void export_column_group_file(const ColumnGroupFile* cgf, LoonColumnGroup
 
   // Copy properties
   size_t num_props = cgf->properties.size();
-  ccgf->num_properties = num_props;
+  ccgf->num_properties = 0;
+  ccgf->property_keys = nullptr;
+  ccgf->property_values = nullptr;
   if (num_props > 0) {
-    ccgf->property_keys = new const char*[num_props];
-    ccgf->property_values = new const char*[num_props];
+    // Both arrays, then the count. The unique_ptrs matter: if the second
+    // allocation throws, the first is freed on the way out and the struct is
+    // still all-null, rather than holding a keys array with no values array.
+    //
+    // destroy now checks the two arrays independently, so this is the second
+    // line of defense rather than the guarantee -- but it is the cheap one, and
+    // "only ever publish a consistent pair" is a rule a reader can apply
+    // without going to read the destroy function.
+    auto keys = std::make_unique<const char*[]>(num_props);
+    auto values = std::make_unique<const char*[]>(num_props);
+    ccgf->property_keys = keys.release();
+    ccgf->property_values = values.release();
+    ccgf->num_properties = num_props;
+
     size_t idx = 0;
     for (const auto& [k, v] : cgf->properties) {
       auto* key = new char[k.size() + 1];
@@ -55,27 +92,24 @@ static void export_column_group_file(const ColumnGroupFile* cgf, LoonColumnGroup
       ccgf->property_values[idx] = val;
       ++idx;
     }
-  } else {
-    ccgf->property_keys = nullptr;
-    ccgf->property_values = nullptr;
   }
 }
 
 static void export_column_group(const ColumnGroup* cg, LoonColumnGroup* ccg) {
   assert(cg != nullptr && ccg != nullptr);
 
-  // export columns - allocate memory for column names
+  // export columns - array and count published before the strings exist, so a
+  // throw mid-loop leaves destroy_column_group a well-formed half-filled array.
   size_t num_of_columns = cg->columns.size();
-  const char** columns = new const char*[num_of_columns];
+  ccg->columns = new const char*[num_of_columns]();
+  ccg->num_of_columns = num_of_columns;
   for (size_t i = 0; i < num_of_columns; i++) {
     size_t len = cg->columns[i].length();
     char* col_str = new char[len + 1];
     std::memcpy(col_str, cg->columns[i].c_str(), len);
     col_str[len] = '\0';
-    columns[i] = col_str;
+    ccg->columns[i] = col_str;
   }
-  ccg->columns = columns;
-  ccg->num_of_columns = num_of_columns;
 
   // export format - allocate memory for format string
   size_t format_len = cg->format.length();
@@ -84,14 +118,15 @@ static void export_column_group(const ColumnGroup* cg, LoonColumnGroup* ccg) {
   format[format_len] = '\0';
   ccg->format = format;
 
-  // export files
+  // export files - same discipline. The `{}` also matters on its own: these are
+  // POD C structs, so default-init would leave every member indeterminate and
+  // destroy would delete[] garbage rather than leak.
   size_t num_of_files = cg->files.size();
-  auto* files = new LoonColumnGroupFile[num_of_files];
-  for (size_t i = 0; i < num_of_files; i++) {
-    export_column_group_file(&cg->files[i], files + i);
-  }
-  ccg->files = files;
+  ccg->files = new LoonColumnGroupFile[num_of_files]{};
   ccg->num_of_files = num_of_files;
+  for (size_t i = 0; i < num_of_files; i++) {
+    export_column_group_file(&cg->files[i], ccg->files + i);
+  }
 }
 
 static void import_column_group_file(const LoonColumnGroupFile* in_ccgf, ColumnGroupFile* cgf) {
@@ -138,11 +173,28 @@ static arrow::Status column_groups_export_internal(const ColumnGroups& cgs, Loon
 
 arrow::Status column_groups_export(const ColumnGroups& cgs, LoonColumnGroups** out_ccgs) {
   assert(out_ccgs != nullptr);
+  // Cleared before anything can throw. The handlers below inspect *out_ccgs to
+  // decide whether to destroy a partially built result, and when the very
+  // first allocation is what failed it had never been written -- so the
+  // cleanup path read an indeterminate pointer and, if it looked non-null,
+  // freed it.
+  *out_ccgs = nullptr;
 
   try {
     *out_ccgs = new LoonColumnGroups();
     ARROW_RETURN_NOT_OK(column_groups_export_internal(cgs, *out_ccgs));
     return arrow::Status::OK();
+  } catch (const std::bad_alloc&) {
+    // Ahead of the generic handler: routed there it became UnknownError and
+    // then LOON_LOGICAL_ERROR -- our bug -- when the machine had simply run out
+    // of memory. Both verdicts are non-retriable; what differs is where they
+    // send whoever reads the log. This function allocates the whole exported
+    // structure, so it is one of the likeliest places to meet a real OOM.
+    if (*out_ccgs) {
+      loon_column_groups_destroy(*out_ccgs);
+      *out_ccgs = nullptr;
+    }
+    return arrow::Status::OutOfMemory("Out of memory in column_groups_export");
   } catch (const std::exception& e) {
     if (*out_ccgs) {
       loon_column_groups_destroy(*out_ccgs);
@@ -179,6 +231,8 @@ arrow::Status column_groups_import(const LoonColumnGroups* ccgs, ColumnGroups* o
 arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifest>& manifest,
                               LoonManifest** out_cmanifest) {
   assert(manifest != nullptr && out_cmanifest != nullptr);
+  // Cleared before anything can throw -- same reason as column_groups_export.
+  *out_cmanifest = nullptr;
 
   try {
     // Value-initialize to ensure all pointers are nullptr
@@ -232,12 +286,18 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
     const auto& stats = manifest->stats();
     if (!stats.empty()) {
       size_t num_stats = stats.size();
+      // Every one of these is value-initialized, counts included. The two
+      // uint32_t arrays used not to be, and num_stats was published before the
+      // per-entry loop ran -- so an allocation failing partway left the
+      // destructor iterating stat_file_counts[i] garbage and calling delete[]
+      // on whatever the indeterminate count reached. The pointer arrays were
+      // already zeroed for exactly this reason; the counts were the gap.
       (*out_cmanifest)->stats.stat_keys = new const char* [num_stats] {};
       (*out_cmanifest)->stats.stat_files = new const char** [num_stats] {};
-      (*out_cmanifest)->stats.stat_file_counts = new uint32_t[num_stats];
+      (*out_cmanifest)->stats.stat_file_counts = new uint32_t[num_stats]{};
       (*out_cmanifest)->stats.stat_metadata_keys = new const char** [num_stats] {};
       (*out_cmanifest)->stats.stat_metadata_values = new const char** [num_stats] {};
-      (*out_cmanifest)->stats.stat_metadata_counts = new uint32_t[num_stats];
+      (*out_cmanifest)->stats.stat_metadata_counts = new uint32_t[num_stats]{};
       (*out_cmanifest)->stats.num_stats = num_stats;
 
       size_t idx = 0;
@@ -249,9 +309,14 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
         key_str[key_len] = '\0';
         (*out_cmanifest)->stats.stat_keys[idx] = key_str;
 
-        // Copy file paths
+        // Copy file paths. The count goes in BEFORE the strings, for the same
+        // reason the outer arrays do: destroy walks stat_file_counts[idx], so
+        // publishing it afterwards means every string allocated before a throw
+        // is invisible to the only code that could free it. The array is
+        // value-initialized, so the not-yet-filled slots are delete[] nullptr.
         size_t num_files = stat.paths.size();
         (*out_cmanifest)->stats.stat_files[idx] = new const char* [num_files] {};
+        (*out_cmanifest)->stats.stat_file_counts[idx] = num_files;
         for (size_t j = 0; j < num_files; j++) {
           size_t file_len = stat.paths[j].length();
           char* file_str = new char[file_len + 1];
@@ -259,13 +324,14 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
           file_str[file_len] = '\0';
           (*out_cmanifest)->stats.stat_files[idx][j] = file_str;
         }
-        (*out_cmanifest)->stats.stat_file_counts[idx] = num_files;
 
         // Copy metadata
         size_t num_metadata = stat.metadata.size();
         if (num_metadata > 0) {
+          // Both arrays, then the count, then the strings -- see above.
           (*out_cmanifest)->stats.stat_metadata_keys[idx] = new const char* [num_metadata] {};
           (*out_cmanifest)->stats.stat_metadata_values[idx] = new const char* [num_metadata] {};
+          (*out_cmanifest)->stats.stat_metadata_counts[idx] = num_metadata;
           size_t m_idx = 0;
           for (const auto& [meta_key, meta_val] : stat.metadata) {
             size_t mk_len = meta_key.length();
@@ -282,7 +348,6 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
             m_idx++;
           }
         }
-        (*out_cmanifest)->stats.stat_metadata_counts[idx] = num_metadata;
         idx++;
       }
     }
@@ -313,6 +378,17 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
     }
 
     return arrow::Status::OK();
+  } catch (const std::bad_alloc&) {
+    // Ahead of the generic handler: routed there it became UnknownError and
+    // then LOON_LOGICAL_ERROR -- our bug -- when the machine had simply run out
+    // of memory. Both verdicts are non-retriable; what differs is where they
+    // send whoever reads the log. This function allocates the whole exported
+    // structure, so it is one of the likeliest places to meet a real OOM.
+    if (*out_cmanifest) {
+      loon_manifest_destroy(*out_cmanifest);
+      *out_cmanifest = nullptr;
+    }
+    return arrow::Status::OutOfMemory("Out of memory in manifest_export");
   } catch (const std::exception& e) {
     if (*out_cmanifest) {
       loon_manifest_destroy(*out_cmanifest);

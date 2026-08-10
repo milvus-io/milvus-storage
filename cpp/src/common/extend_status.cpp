@@ -32,28 +32,18 @@ const char* kErrorDetailTypeId = "milvus_storage::ExtendStatusDetail";
 struct ExtendStatusCodeMetadata {
   ExtendStatusCode code;
   std::string_view name;
-  bool retryable;
+  ErrorCategory category;
+  std::string_view s3_code;
 };
 
+// Generated from the single table in ffi_error_code.h, which is also the source
+// for the FFI constants, error_to_string and loon_ffi_error_category. Editing
+// this array by hand is not possible on purpose.
 constexpr ExtendStatusCodeMetadata kExtendStatusCodeMetadata[] = {
-    {ExtendStatusCode::PackedInvalidArgs, "PackedInvalidArgs", false},
-    {ExtendStatusCode::PackedStorageIO, "PackedStorageIO", false},
-    {ExtendStatusCode::PackedMetadataCorrupted, "PackedMetadataCorrupted", false},
-    {ExtendStatusCode::PackedFileCorrupted, "PackedFileCorrupted", false},
-    {ExtendStatusCode::PackedArrowError, "PackedArrowError", false},
-    {ExtendStatusCode::PackedUnexpected, "PackedUnexpected", false},
-    {ExtendStatusCode::AwsErrorNoSuchUpload, "AwsErrorNoSuchUpload", true},
-    {ExtendStatusCode::AwsErrorConflict, "AwsErrorConflict", false},
-    {ExtendStatusCode::AwsErrorPreConditionFailed, "AwsErrorPreConditionFailed", false},
-    {ExtendStatusCode::AwsErrorNotFound, "AwsErrorNotFound", false},
-    {ExtendStatusCode::AwsErrorAccessDenied, "AwsErrorAccessDenied", false},
-    {ExtendStatusCode::AwsErrorNonRetryable, "AwsErrorNonRetryable", false},
-    {ExtendStatusCode::StorageTransientNetwork, "StorageTransientNetwork", true},
-    {ExtendStatusCode::StorageTransientTimeout, "StorageTransientTimeout", true},
-    {ExtendStatusCode::StorageTransientThrottling, "StorageTransientThrottling", true},
-    {ExtendStatusCode::StorageTransientService, "StorageTransientService", true},
-    {ExtendStatusCode::TxnExhaustedRetry, "TxnExhaustedRetry", false},
-    {ExtendStatusCode::TxnResolutionFailed, "TxnResolutionFailed", false},
+#define MILVUS_STORAGE_EXTEND_STATUS_METADATA_ENTRY(name, code, symbol, category, s3_code) \
+  {ExtendStatusCode::name, #name, static_cast<ErrorCategory>(category), s3_code},
+    LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_EXTEND_STATUS_METADATA_ENTRY)
+#undef MILVUS_STORAGE_EXTEND_STATUS_METADATA_ENTRY
 };
 
 const ExtendStatusCodeMetadata* FindExtendStatusCodeMetadata(ExtendStatusCode code) {
@@ -76,12 +66,26 @@ const ExtendStatusCodeMetadata* FindExtendStatusCodeMetadata(int code) {
 
 }  // namespace
 
-ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code)
-    : code_{code}, retryable_{DefaultRetryableForExtendStatusCode(code)} {}
+namespace {
+
+// ABI guard for ExtendStatusDetail. Compares against a mirror of its members
+// rather than a hardcoded size, because the size is platform-dependent:
+// libc++'s std::string is 24 bytes and libstdc++'s is 32, so the same layout is
+// 48 bytes on macOS and 56 on Linux. A previous version of this asserted `== 48`
+// and broke every Linux build -- including the Java and Python jobs, which
+// compile the same C++ core -- while passing locally on macOS. Only the DELTA
+// is portable: one bool plus its padding.
+//
+// If this fires, someone changed the layout of a type that ships in an
+// installed header from a library with no SOVERSION. Decide that on purpose and
+// bump the version; do not adjust the mirror to match.
+}  // namespace
+
+ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code) : code_{code} {}
 ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code, const char* extra_info)
     : ExtendStatusDetail(code, std::string(extra_info)) {}
 ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code, std::string extra_info)
-    : code_{code}, extra_info_(std::move(extra_info)), retryable_{DefaultRetryableForExtendStatusCode(code)} {}
+    : code_{code}, extra_info_(std::move(extra_info)) {}
 
 const char* ExtendStatusDetail::type_id() const { return kErrorDetailTypeId; }
 
@@ -91,7 +95,7 @@ ExtendStatusCode ExtendStatusDetail::code() const { return code_; }
 
 std::string ExtendStatusDetail::extra_info() const { return extra_info_; }
 
-bool ExtendStatusDetail::retryable() const { return retryable_; }
+ErrorCategory ExtendStatusDetail::category() const { return CategoryForExtendStatusCode(code_); }
 
 std::string ExtendStatusDetail::CodeAsString() const {
   if (const auto* metadata = FindExtendStatusCodeMetadata(code()); metadata != nullptr) {
@@ -116,16 +120,58 @@ std::optional<ExtendStatusCode> ExtendStatusCodeFromInt(int code) {
   return std::nullopt;
 }
 
-bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code) {
+ErrorCategory CategoryForExtendStatusCode(ExtendStatusCode code) {
   if (const auto* metadata = FindExtendStatusCodeMetadata(code); metadata != nullptr) {
-    return metadata->retryable;
+    return metadata->category;
   }
-  return false;
+  // An out-of-range value is not classifiable. Unknown, which is a real answer
+  // and not a synonym for Permanent: nothing here established anything.
+  return ErrorCategory::Unknown;
 }
 
+std::string_view S3CodeForExtendStatusCode(ExtendStatusCode code) {
+  if (const auto* metadata = FindExtendStatusCodeMetadata(code); metadata != nullptr) {
+    return metadata->s3_code;
+  }
+  return {};
+}
+
+namespace {
+
+// The conditions we detect before issuing any IO: nothing was attempted, so
+// reporting them as an IO failure would be a lie. (This used to add "and the
+// fallback would file them under DataFormatBroken" -- no longer true, and the
+// fallback change is precisely why: an unclassified Invalid now lands on
+// StorageError. The arrow-code choice still matters on its own, because callers
+// branch on IsIOError.)
+//
+// Deliberately a small explicit set rather than a function of the category.
+// Category answers "who owns this"; the arrow code answers "what failed". A
+// Config failure can be either -- unusable `extfs.*` properties never touch the
+// network, an S3 403 already did.
+bool IsPreIoValidationFailure(ExtendStatusCode code) {
+  switch (code) {
+    case ExtendStatusCode::PackedInvalidArgs:
+    case ExtendStatusCode::StorageConfigInvalid:
+      return true;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
 arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info) {
-  auto arrow_code =
-      code == ExtendStatusCode::PackedInvalidArgs ? arrow::StatusCode::Invalid : arrow::StatusCode::IOError;
+  // arrow's StatusCode says what kind of operation failed; our category says
+  // who owns the failure. They are not the same axis and must not be derived
+  // from each other: an S3 403 is owned by whoever configured the credentials
+  // (Config) but it is still, to arrow and to every caller branching on
+  // `IsIOError()`, an IO failure.
+  //
+  // Invalid is therefore reserved for the conditions detected *before* any IO
+  // is attempted -- a malformed argument, an unparseable URI, unusable
+  // configuration. Everything else is IOError.
+  auto arrow_code = IsPreIoValidationFailure(code) ? arrow::StatusCode::Invalid : arrow::StatusCode::IOError;
   return {arrow_code, std::move(message), std::make_shared<ExtendStatusDetail>(code, std::move(extra_info))};
 }
 
@@ -135,131 +181,16 @@ arrow::Status WrapExtendError(ExtendStatusCode code, std::string message, const 
   if (cause.detail()) {
     return {cause.code(), std::move(wrapped_message), cause.detail()};
   }
+  // A raw OutOfMemory needs no detail to be classified, and stamping `code`
+  // over it would destroy the one thing that says WHAT failed. The retry
+  // verdict no longer differs -- OOM is non-retriable now, same as the wrapper
+  // codes -- so this passthrough is purely about diagnosis: an operator reading
+  // "manifest read failed" instead of "out of memory" goes looking at the
+  // manifest. Keep arrow's own code so the coarse fallback still reports OOM.
+  if (cause.IsOutOfMemory()) {
+    return {cause.code(), std::move(wrapped_message), nullptr};
+  }
   return MakeExtendError(code, std::move(wrapped_message), cause_message);
-}
-
-// Map a producer-side ExtendStatusCode to the shared milvus ErrorCode that the
-// segcore boundary (and ultimately the Go retry policy) consumes. This is the
-// single place milvus-storage classifies its own codes ("producer owns
-// classification").
-//
-// It is deliberately a switch with NO `default:` plus a post-switch fallback:
-//   * a `default:` inside the switch would suppress -Wswitch, so a newly added
-//     ExtendStatusCode could silently fall through to the wrong bucket;
-//   * the post-switch `return` satisfies -Wreturn-type and guards out-of-range
-//     values, without suppressing the exhaustiveness warning.
-// The surrounding pragma turns -Wswitch into an error so adding an
-// ExtendStatusCode without classifying it here breaks the build (the
-// extend_status_test.cpp coverage is the runtime backstop).
-//
-// Retriability model (do not repeat the "v2 retries, v3 doesn't" myth):
-// object-storage IO retry does NOT live in the packed / format / api::Reader
-// layers. It lives once in the shared S3 ArrowFileSystem (AWS SDK
-// DefaultRetryStrategy), which every read path -- v1 binlog, v2
-// FileRowGroupReader, v3 api::Reader -- runs on top of. So an IO error that
-// propagates up here already spent the S3 SDK retry budget, equally for v2 and
-// v3; there is no per-generation retry asymmetry.
-//
-// Retriability is therefore decided by whether a DISTINCT upper-layer retry can
-// still help: querynode can reroute a failed read to another replica/node (a
-// different network path / endpoint), or the failure was a node-local transient.
-// Plain IO does not assume that path and is classified conservatively as
-// non-retriable StorageError/2044.
-//
-// Two callers reach segcore ErrorCode differently:
-//   1. A status carrying an ExtendStatusDetail (Packed*/Aws*/Txn) is classified
-//      by this switch. NOTE: as of this writing NO live milvus consumer routes a
-//      Packed* status through here -- packed_reader_c/packed_writer_c hardcode
-//      FileReadFailed/FileWriteFailed and drop the ExtendStatusCode -- so this
-//      switch is a reserved, forward-looking classification, not a hot path.
-//   2. A status with NO detail (plain arrow) is the LIVE segcore/storage read
-//      path; its plain IO is classified as non-retriable StorageError/2044 via
-//      the no-detail fallback of ToSegcoreError below, NOT this switch.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic error "-Wswitch"
-milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
-  switch (code) {
-    case ExtendStatusCode::PackedInvalidArgs:
-      return milvus::InvalidParameter;  // 2042, caller's fault (non-retriable input)
-    case ExtendStatusCode::PackedStorageIO:
-      // Conservatively non-retriable, but this is a DORMANT branch: no live
-      // consumer routes a Packed* status here (the packed C-APIs hardcode
-      // FileReadFailed/FileWriteFailed and drop the code). Do NOT justify this
-      // with "v2 retries internally" -- the S3 SDK retry is shared by v2 and v3
-      // alike. If a real direct-link consumer ever appears, revisit: validate
-      // its retry semantics before changing this non-retriable classification.
-      return milvus::StorageError;  // 2044 (dormant; conservative)
-    case ExtendStatusCode::PackedMetadataCorrupted:
-    case ExtendStatusCode::PackedFileCorrupted:
-      return milvus::DataFormatBroken;  // 2024, permanent data corruption
-    case ExtendStatusCode::PackedArrowError:
-    case ExtendStatusCode::PackedUnexpected:
-      return milvus::StorageError;  // 2044, permanent internal storage error
-    case ExtendStatusCode::AwsErrorNoSuchUpload:
-      // The SDK has exhausted retries for the failed multipart upload state,
-      // but an outer operation retry can create a fresh upload and succeed.
-      return milvus::StorageTransientError;  // 2045
-    case ExtendStatusCode::StorageTransientNetwork:
-    case ExtendStatusCode::StorageTransientTimeout:
-    case ExtendStatusCode::StorageTransientThrottling:
-    case ExtendStatusCode::StorageTransientService:
-      return milvus::StorageTransientError;  // 2045
-    case ExtendStatusCode::AwsErrorConflict:
-    case ExtendStatusCode::AwsErrorPreConditionFailed:
-    case ExtendStatusCode::TxnExhaustedRetry:
-    case ExtendStatusCode::TxnResolutionFailed:
-      // S3 precondition / transaction failures: conservatively permanent here
-      // (the precondition genuinely failed, or the transaction-level retry
-      // budget is already spent).
-      return milvus::StorageError;  // 2044
-    case ExtendStatusCode::AwsErrorNotFound:
-      // The object/bucket is gone: permanent, and fine-grained -- consumers can
-      // distinguish "data missing" (stale loadinfo, GC'd file) from a generic
-      // storage failure. Never transient/2045: a retry/reroute hits the same
-      // shared object store and fails identically.
-      return milvus::ObjectNotExist;  // 2017, permanent
-    case ExtendStatusCode::AwsErrorAccessDenied:
-    case ExtendStatusCode::AwsErrorNonRetryable:
-      // Bad credentials/permissions, or the AWS SDK itself judged the error
-      // non-retryable. Same rule: never transient/2045, or querynode would
-      // retry-storm a request that can never succeed.
-      return milvus::StorageError;  // 2044, permanent
-  }
-  return milvus::StorageError;  // out-of-range value: safe non-retriable fallback
-}
-#pragma GCC diagnostic pop
-
-milvus::SegcoreError ToSegcoreError(const arrow::Status& status) {
-  if (status.ok()) {
-    return milvus::SegcoreError::success();
-  }
-
-  auto detail = ExtendStatusDetail::UnwrapStatus(status);
-  if (detail) {
-    return {ToSegcoreErrorCode(detail->code()), status.ToString()};
-  }
-
-  if (arrow::internal::ErrnoFromStatus(status) == ENOENT) {
-    return {milvus::ObjectNotExist, status.ToString()};
-  }
-
-  // No structured ExtendStatusDetail attached: this is the LIVE read path (plain
-  // arrow from FileRowGroupReader / v3 api::Reader / ArrowFileSystem). Plain
-  // filesystem not-found is handled above through ENOENT. Other propagated IO
-  // errors already spent the shared S3 SDK retry budget and are classified
-  // conservatively as non-retriable StorageError/2044. OOM is retriable;
-  // malformed data is permanent corruption; anything else internal.
-  milvus::ErrorCode code;
-  if (status.IsOutOfMemory()) {
-    code = milvus::MemAllocateFailed;  // 2034, retriable
-  } else if (status.IsIOError()) {
-    code = milvus::StorageError;  // 2044, non-retriable
-  } else if (status.IsInvalid() || status.IsTypeError() || status.IsKeyError()) {
-    code = milvus::DataFormatBroken;  // 2024, permanent corruption
-  } else {
-    code = milvus::StorageError;  // 2044, permanent internal error
-  }
-  return {code, status.ToString()};
 }
 
 }  // namespace milvus_storage

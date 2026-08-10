@@ -901,28 +901,31 @@ static void test_threadpool_invalid_args(void) {
   loon_ffi_free_result(&rc);
 }
 
-static void test_retryable_errcode_helper(void) {
-  ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_transient_network));
-  ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_transient_timeout));
-  ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_transient_throttling));
-  ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_transient_service));
-  ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_aws_no_such_upload));
+static void test_error_category_helper(void) {
+  /* The category is a coarse restatement of the code, nothing more. There is
+     deliberately no retry predicate to test: whether an operation may be redone
+     depends on the operation, which this library is never told. */
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_transient_network), loon_error_category_transient);
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_transient_timeout), loon_error_category_transient);
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_transient_throttling), loon_error_category_transient);
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_transient_service), loon_error_category_transient);
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_aws_conflict), loon_error_category_conflict);
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_aws_precondition_failed), loon_error_category_conflict);
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_txn_exhausted_retry), loon_error_category_conflict);
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_memory), loon_error_category_permanent);
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_invalid_properties), loon_error_category_config);
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_aws_not_found), loon_error_category_missing);
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_aws_no_such_upload), loon_error_category_missing);
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_aws_access_denied), loon_error_category_config);
 
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_success));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_arrow));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_file_not_found));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_conflict));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_precondition_failed));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_not_found));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_access_denied));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_non_retryable));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_txn_exhausted_retry));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_txn_resolution_failed));
-  ck_assert(!loon_ffi_is_retryable_errcode(99999));
+  /* Success is not a failure, so it has no category; an unrecognized code
+     degrades to unknown rather than being guessed at. */
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_success), loon_error_category_unknown);
+  ck_assert_int_eq(loon_ffi_error_category(99999), loon_error_category_unknown);
 }
 
 void run_filesystem_suite(void) {
-  RUN_TEST(test_retryable_errcode_helper);
+  RUN_TEST(test_error_category_helper);
   RUN_TEST(test_threadpool_invalid_args);
   RUN_TEST(test_filesystem_write_and_read);
   RUN_TEST(test_filesystem_direct_write_and_read);

@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 
+#include <arrow/c/bridge.h>
 #include <arrow/record_batch.h>
 #include <arrow/util/io_util.h>
 
@@ -62,28 +63,53 @@ class VortexErrorTranslatingReader final : public arrow::RecordBatchReader {
   std::shared_ptr<arrow::RecordBatchReader> inner_;
 };
 
+// The marker channel is a STRING channel, and the strings it travels in are not
+// all ours: vortex puts persisted names -- field names, layout names -- into
+// its error text, so the bytes of a file can reach this parser, and a nested
+// LoonFfiError puts a second marker in there all by itself.
+//
+// The producer's envelope is `<marker><digits>; ` and it is always written
+// FIRST (LoonFfiError's Display, filesystem_c.rs, emits the code before it
+// appends the context and the backend message). So the rule is: take the first
+// occurrence that actually has that shape, and treat everything after it as
+// message text.
+//
+// An earlier version refused to classify at all when it saw a second marker.
+// That threw away the genuine leading code every time a message merely
+// contained the literal -- a nested filesystem error lost its ENOENT, a
+// transient network failure decayed into an anonymous IOError -- and the test
+// written alongside it pinned that loss as if it were the goal.
+//
+// This is not forgery-proof and is not trying to be: a crafted field name that
+// lands in the CONTEXT, ahead of the producer's own marker, still wins. A
+// string protocol cannot fix that. The fix is a typed channel across the cxx
+// boundary; until then the blast radius is bounded by what the codes can ask
+// for, on a file the forger already controls.
 ParsedVortexBridgeError ParseVortexBridgeError(std::string_view error) {
-  auto marker_pos = error.find(kVortexFfiErrCodeMarker);
-  if (marker_pos == std::string_view::npos) {
-    return {std::string(error), std::nullopt};
+  size_t search_from = 0;
+  while (true) {
+    auto marker_pos = error.find(kVortexFfiErrCodeMarker, search_from);
+    if (marker_pos == std::string_view::npos) {
+      return {std::string(error), std::nullopt};
+    }
+    auto code_start = marker_pos + kVortexFfiErrCodeMarker.size();
+    auto code_end = code_start;
+    while (code_end < error.size() && error[code_end] >= '0' && error[code_end] <= '9') {
+      ++code_end;
+    }
+    // Digits terminated by ';' is the producer's shape and nothing else writes
+    // it; a bare mention of the marker inside a name is skipped rather than
+    // allowed to shadow a real envelope further along.
+    if (code_end != code_start && code_end < error.size() && error[code_end] == ';') {
+      int ffi_err_code = 0;
+      auto parsed = std::from_chars(error.data() + code_start, error.data() + code_end, ffi_err_code);
+      if (parsed.ec != std::errc()) {
+        return {std::string(error), std::nullopt};
+      }
+      return {StripBridgeMarker(error, marker_pos, code_end), ffi_err_code};
+    }
+    search_from = code_start;
   }
-
-  auto code_start = marker_pos + kVortexFfiErrCodeMarker.size();
-  auto code_end = code_start;
-  while (code_end < error.size() && error[code_end] >= '0' && error[code_end] <= '9') {
-    ++code_end;
-  }
-  if (code_end == code_start) {
-    return {std::string(error), std::nullopt};
-  }
-
-  int ffi_err_code = 0;
-  auto parse_result = std::from_chars(error.data() + code_start, error.data() + code_end, ffi_err_code);
-  if (parse_result.ec != std::errc()) {
-    return {std::string(error), std::nullopt};
-  }
-
-  return {StripBridgeMarker(error, marker_pos, code_end), ffi_err_code};
 }
 
 std::string JoinContextAndMessage(std::string_view context, std::string_view message) {
@@ -142,6 +168,16 @@ arrow::Status MakeVortexBridgeErrorStatus(std::string_view message) {
     if (*parsed.ffi_err_code == LOON_FILE_NOT_FOUND) {
       return arrow::Status::IOError(parsed.message).WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
     }
+    // The other internal code that can cross this bridge: an allocation failure
+    // inside a filesystem callback (RETURN_EXCEPTION infers bad_alloc into
+    // LOON_MEMORY_ERROR). Restore it as arrow's own OutOfMemory so the CAUSE
+    // survives -- FFIErrorCodeFromExtendStatus and ToSegcoreError both keep it
+    // recognizable as an allocation failure, whereas falling through here
+    // flattened it into an anonymous IOError. The retry verdict is the same
+    // either way: OOM is not retriable (see ffi_error_code.h).
+    if (*parsed.ffi_err_code == LOON_MEMORY_ERROR) {
+      return arrow::Status::OutOfMemory(parsed.message);
+    }
     if (auto code = ExtendStatusCodeFromInt(*parsed.ffi_err_code); code.has_value()) {
       return MakeExtendError(*code, parsed.message, parsed.message);
     }
@@ -163,10 +199,39 @@ arrow::Status MakeVortexErrorStatus(std::string_view context, const arrow::Statu
   if (arrow::internal::ErrnoFromStatus(status) == ENOENT) {
     return MakeIOErrorWithContext(context, status);
   }
+  // The marker is looked for FIRST, whatever arrow status code happens to be
+  // carrying it.
+  //
+  // An earlier version checked `!IsIOError()` before parsing, on the reasoning
+  // that a status arrow had already typed should keep its type. That is true
+  // for a status arrow produced -- but the bridge's wire format does not
+  // always arrive as an IOError. The lazy sync stream wraps its errors in
+  // ArrowError::ExternalError, and the Arrow C Stream boundary re-materialises
+  // those as Invalid/EINVAL, so every marker coming back through get_chunk,
+  // take and read_with_range short-circuited past the parse: corruption
+  // reported 2044 instead of 2024, and transient failures reported 2044
+  // instead of retrying. The marker is unambiguous -- it cannot occur by
+  // accident -- so its presence, not the wrapper's type, is what decides.
   auto message = status.message();
   auto parsed_status = MakeVortexBridgeErrorStatus(message);
   if (ExtendStatusDetail::UnwrapStatus(parsed_status)) {
     return MakeExtendErrorWithContext(context, parsed_status);
+  }
+  // LOON_MEMORY_ERROR and LOON_FILE_NOT_FOUND are represented by arrow's own
+  // status code / errno detail rather than ExtendStatusDetail. Restore them
+  // before consulting the wrapper type: the Arrow C Stream carries lazy-read
+  // failures as Invalid/EINVAL even when the embedded marker is more precise.
+  if (parsed_status.IsOutOfMemory()) {
+    return parsed_status.WithMessage(JoinContextAndMessage(context, parsed_status.message()));
+  }
+  if (arrow::internal::ErrnoFromStatus(parsed_status) == ENOENT) {
+    return MakeIOErrorWithContext(context, parsed_status);
+  }
+  // No marker that maps to a richer Arrow status. Arrow's own classification
+  // is now the best information there is; use the parsed message so an
+  // internal fallback marker does not leak into user text.
+  if (!status.IsIOError()) {
+    return status.WithMessage(JoinContextAndMessage(context, parsed_status.message()));
   }
   return MakeIOErrorWithContext(context, parsed_status);
 }

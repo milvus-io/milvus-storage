@@ -82,11 +82,18 @@ static void destroy_column_group_file(LoonColumnGroupFile* ccgf) {
     ccgf->path = nullptr;
   }
 
-  // Free properties
-  if (ccgf->property_keys) {
+  // Free properties. Both arrays are checked independently: the export path
+  // publishes them together, but this destroy also runs on a half-built struct
+  // after an allocation failure, and assuming one implies the other is how a
+  // cleanup path turns an OOM into a null dereference.
+  if (ccgf->property_keys || ccgf->property_values) {
     for (uint32_t i = 0; i < ccgf->num_properties; i++) {
-      delete[] const_cast<char*>(ccgf->property_keys[i]);
-      delete[] const_cast<char*>(ccgf->property_values[i]);
+      if (ccgf->property_keys) {
+        delete[] const_cast<char*>(ccgf->property_keys[i]);
+      }
+      if (ccgf->property_values) {
+        delete[] const_cast<char*>(ccgf->property_values[i]);
+      }
     }
     delete[] ccgf->property_keys;
     delete[] ccgf->property_values;

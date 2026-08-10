@@ -38,6 +38,7 @@
 #include <boost/filesystem/operations.hpp>
 
 #include "milvus-storage/common/extend_status.h"
+#include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/ffi_c.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -174,6 +175,16 @@ void AsyncScanTestCallback(void* raw_ctx, ArrowArrayStream* out_stream, const ch
   ctx->completion.set_value(std::move(error));
 }
 
+namespace {
+// The classification this library owns, for a status that may carry none.
+// Replaces the old "what milvus code does this become" assertions: that mapping
+// lives with the consumer now.
+std::optional<ErrorCategory> CategoryOfStatus(const arrow::Status& status) {
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  return detail ? std::optional<ErrorCategory>(detail->category()) : std::nullopt;
+}
+}  // namespace
+
 TEST(VortexErrorTest, StreamingReaderTranslatesReadNextBridgeError) {
   auto inner = std::make_shared<FailingRecordBatchReader>(
       arrow::Status::IOError(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; readat failed", LOON_TRANSIENT_NETWORK)));
@@ -185,13 +196,107 @@ TEST(VortexErrorTest, StreamingReaderTranslatesReadNextBridgeError) {
   auto detail = ExtendStatusDetail::UnwrapStatus(status);
   ASSERT_NE(detail, nullptr) << status.ToString();
   EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork);
-  EXPECT_TRUE(detail->retryable());
+  EXPECT_EQ(detail->category(), ErrorCategory::Transient);
+  EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
+}
+
+// A marker arriving on a NON-IOError status is still a marker.
+//
+// The existing tests in this suite hand-build IOErrors, which is why they
+// never caught this: the real sync path wraps its errors in
+// ArrowError::ExternalError and the Arrow C Stream boundary re-materialises
+// those as Invalid/EINVAL. The translator used to check the wrapper's type
+// before parsing, so every marker coming back through get_chunk, take and
+// read_with_range was skipped -- corruption reported 2044 instead of 2024, and
+// transient failures reported 2044 instead of being retried.
+//
+// The marker cannot occur by accident, so its presence is what decides, not
+// the status code carrying it.
+TEST(VortexErrorTest, MarkerIsParsedRegardlessOfTheWrappingStatusCode) {
+  struct Case {
+    arrow::Status (*make)(const std::string&);
+    const char* what;
+  };
+  const Case wrappers[] = {
+      {[](const std::string& m) { return arrow::Status::Invalid(m); }, "Invalid, as the C stream produces"},
+      {[](const std::string& m) { return arrow::Status::UnknownError(m); }, "UnknownError"},
+      {[](const std::string& m) { return arrow::Status::ExecutionError(m); }, "ExecutionError"},
+      {[](const std::string& m) { return arrow::Status::IOError(m); }, "IOError, the shape that already worked"},
+  };
+
+  for (const auto& wrapper : wrappers) {
+    SCOPED_TRACE(wrapper.what);
+    auto inner = std::make_shared<FailingRecordBatchReader>(
+        wrapper.make(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; malformed file", LOON_VORTEX_FILE_CORRUPTED)));
+    auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
+
+    std::shared_ptr<arrow::RecordBatch> batch;
+    auto status = reader->ReadNext(&batch);
+
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::VortexFileCorrupted);
+    EXPECT_EQ(CategoryOfStatus(status), ErrorCategory::Corrupted);
+    EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos) << status.ToString();
+  }
+
+  // And a retriable code through the same non-IOError wrapper, because that is
+  // the half where losing the marker silently costs a retry.
+  {
+    auto inner = std::make_shared<FailingRecordBatchReader>(arrow::Status::Invalid(
+        fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; connection reset", LOON_TRANSIENT_NETWORK)));
+    auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
+    std::shared_ptr<arrow::RecordBatch> batch;
+    auto status = reader->ReadNext(&batch);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->category(), ErrorCategory::Transient) << status.ToString();
+  }
+
+  // Internal fallback codes do not have an ExtendStatusDetail, but the wire
+  // marker is still transport metadata and must not leak into user text.
+  {
+    auto inner = std::make_shared<FailingRecordBatchReader>(
+        arrow::Status::Invalid(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; arrow read failed", LOON_ARROW_ERROR)));
+    auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
+    std::shared_ptr<arrow::RecordBatch> batch;
+    auto status = reader->ReadNext(&batch);
+    EXPECT_TRUE(status.IsInvalid()) << status.ToString();
+    EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
+    EXPECT_NE(status.ToString().find("arrow read failed"), std::string::npos);
+    EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos) << status.ToString();
+  }
+}
+
+TEST(VortexErrorTest, StreamingReaderTranslatesReadNextOutOfMemory) {
+  // A filesystem callback that ran out of memory crosses the bridge as marker
+  // code 2 (RETURN_EXCEPTION infers bad_alloc into LOON_MEMORY_ERROR). It must
+  // come back as arrow's own OutOfMemory -- still NAMED as an allocation
+  // failure -- not flatten into an anonymous IOError, which is what happened
+  // when the bridge only restored FILE_NOT_FOUND and ExtendStatusCodes. The
+  // retry verdict is the same either way: OOM is not retriable.
+  // The lazy Arrow C Stream re-materialises ExternalError as Invalid/EINVAL,
+  // so exercise the real carrier rather than the IOError shape that already
+  // worked before marker-first parsing was added.
+  auto inner = std::make_shared<FailingRecordBatchReader>(
+      arrow::Status::Invalid(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; allocation failed", LOON_MEMORY_ERROR)));
+  auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
+
+  std::shared_ptr<arrow::RecordBatch> batch;
+  auto status = reader->ReadNext(&batch);
+
+  EXPECT_TRUE(status.IsOutOfMemory()) << status.ToString();
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR), LOON_MEMORY_ERROR);
+  EXPECT_FALSE((loon_ffi_error_category(LOON_MEMORY_ERROR) == LOON_ERROR_CATEGORY_TRANSIENT));
+  EXPECT_NE(CategoryOfStatus(status), ErrorCategory::Corrupted);
+  EXPECT_NE(status.ToString().find("allocation failed"), std::string::npos);
   EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
 }
 
 TEST(VortexErrorTest, StreamingReaderTranslatesReadNextFileNotFound) {
+  // Same real C Stream carrier as the OOM case above.
   auto inner = std::make_shared<FailingRecordBatchReader>(
-      arrow::Status::IOError(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; file not found", LOON_FILE_NOT_FOUND)));
+      arrow::Status::Invalid(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; file not found", LOON_FILE_NOT_FOUND)));
   auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
 
   std::shared_ptr<arrow::RecordBatch> batch;
@@ -200,6 +305,8 @@ TEST(VortexErrorTest, StreamingReaderTranslatesReadNextFileNotFound) {
   EXPECT_TRUE(status.IsIOError());
   EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
   EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR), LOON_FILE_NOT_FOUND);
+  EXPECT_NE(status.ToString().find("file not found"), std::string::npos);
   EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
 }
 
@@ -213,8 +320,73 @@ TEST(VortexErrorTest, StreamingReaderTranslatesCloseBridgeError) {
   auto detail = ExtendStatusDetail::UnwrapStatus(status);
   ASSERT_NE(detail, nullptr) << status.ToString();
   EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientTimeout);
-  EXPECT_TRUE(detail->retryable());
+  EXPECT_EQ(detail->category(), ErrorCategory::Transient);
   EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
+}
+
+// The marker travels inside vortex's error TEXT, and vortex puts persisted
+// names -- field names, layout names -- into that text. A nested LoonFfiError
+// also puts a second marker in there by itself. So these pin which occurrence
+// wins, and specifically that a genuine code is NOT lost because the message
+// it carries happens to mention the marker.
+//
+// An earlier version of this test asserted the opposite -- that a second marker
+// made the whole status unclassified -- and pinned a real code-loss bug as if
+// it were the goal: a nested filesystem failure lost its ENOENT, and a
+// transient network failure decayed into an anonymous IOError.
+TEST(VortexErrorTest, MarkerEnvelopeTakesTheProducersCode) {
+  // Baseline: the producer's exact shape classifies.
+  {
+    auto status = MakeVortexBridgeErrorStatus(
+        fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; malformed file", LOON_VORTEX_FILE_CORRUPTED));
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::VortexFileCorrupted);
+  }
+
+  // The producer writes its marker FIRST and appends the backend message after
+  // it, so a marker inside that message is text -- the leading code wins and
+  // survives. This is the case the old duplicate-marker guard destroyed.
+  {
+    auto status = MakeVortexBridgeErrorStatus(
+        fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; field '__LOON_VORTEX_FFI_ERRCODE__={}; ' not found",
+                    LOON_TRANSIENT_NETWORK, LOON_VORTEX_FILE_CORRUPTED));
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork) << status.ToString();
+  }
+
+  // Same shape for the two internal codes that are restored rather than turned
+  // into an ExtendStatusCode: losing these was the sharpest half of the bug.
+  {
+    auto status = MakeVortexBridgeErrorStatus(fmt::format(
+        "__LOON_VORTEX_FFI_ERRCODE__={}; reading '__LOON_VORTEX_FFI_ERRCODE__=119; '", LOON_FILE_NOT_FOUND));
+    EXPECT_TRUE(status.IsIOError()) << status.ToString();
+    EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT) << status.ToString();
+  }
+  {
+    auto status = MakeVortexBridgeErrorStatus(fmt::format(
+        "__LOON_VORTEX_FFI_ERRCODE__={}; alloc for '__LOON_VORTEX_FFI_ERRCODE__=119; '", LOON_MEMORY_ERROR));
+    EXPECT_TRUE(status.IsOutOfMemory()) << status.ToString();
+  }
+
+  // A mention that is not the producer's shape is skipped, not allowed to
+  // shadow a real envelope further along.
+  {
+    auto status = MakeVortexBridgeErrorStatus(
+        fmt::format("no such field '__LOON_VORTEX_FFI_ERRCODE__=119_column', __LOON_VORTEX_FFI_ERRCODE__={}; while "
+                    "reading",
+                    LOON_TRANSIENT_TIMEOUT));
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientTimeout) << status.ToString();
+  }
+
+  // No envelope anywhere: unclassified, message intact.
+  {
+    auto status = MakeVortexBridgeErrorStatus("field '__LOON_VORTEX_FFI_ERRCODE__=' is missing");
+    EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr) << status.ToString();
+  }
 }
 
 TEST(VortexErrorTest, MapsBridgeErrorCodesToStatusDetails) {
@@ -231,14 +403,14 @@ TEST(VortexErrorTest, MapsBridgeErrorCodesToStatusDetails) {
   auto aws_not_found_detail = ExtendStatusDetail::UnwrapStatus(aws_not_found_status);
   ASSERT_NE(aws_not_found_detail, nullptr);
   EXPECT_EQ(aws_not_found_detail->code(), ExtendStatusCode::AwsErrorNotFound);
-  EXPECT_FALSE(aws_not_found_detail->retryable());
+  EXPECT_NE(aws_not_found_detail->category(), ErrorCategory::Transient);
 
   auto timeout_status = MakeVortexErrorStatus(
       "Failed to read vortex file", fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; read failed", LOON_TRANSIENT_TIMEOUT));
   auto timeout_detail = ExtendStatusDetail::UnwrapStatus(timeout_status);
   ASSERT_NE(timeout_detail, nullptr);
   EXPECT_EQ(timeout_detail->code(), ExtendStatusCode::StorageTransientTimeout);
-  EXPECT_TRUE(timeout_detail->retryable());
+  EXPECT_EQ(timeout_detail->category(), ErrorCategory::Transient);
   EXPECT_NE(timeout_status.ToString().find("Failed to read vortex file: read failed"), std::string::npos);
 
   auto upload_status =
@@ -248,7 +420,10 @@ TEST(VortexErrorTest, MapsBridgeErrorCodesToStatusDetails) {
   auto upload_detail = ExtendStatusDetail::UnwrapStatus(upload_status);
   ASSERT_NE(upload_detail, nullptr);
   EXPECT_EQ(upload_detail->code(), ExtendStatusCode::AwsErrorNoSuchUpload);
-  EXPECT_TRUE(upload_detail->retryable());
+  // Was EXPECT_TRUE. The bridge faithfully carries the code across FFI, which is
+  // what this test is for; whether the condition is retriable is the taxonomy's
+  // call, and it is not -- a dead upload id cannot be resent into life.
+  EXPECT_NE(upload_detail->category(), ErrorCategory::Transient);
   EXPECT_EQ(upload_status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
 
   auto network_status = MakeVortexErrorStatus(
@@ -257,7 +432,7 @@ TEST(VortexErrorTest, MapsBridgeErrorCodesToStatusDetails) {
   auto network_detail = ExtendStatusDetail::UnwrapStatus(network_status);
   ASSERT_NE(network_detail, nullptr);
   EXPECT_EQ(network_detail->code(), ExtendStatusCode::StorageTransientNetwork);
-  EXPECT_TRUE(network_detail->retryable());
+  EXPECT_EQ(network_detail->category(), ErrorCategory::Transient);
   EXPECT_EQ(network_status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
 
   auto txn_status =
@@ -266,7 +441,10 @@ TEST(VortexErrorTest, MapsBridgeErrorCodesToStatusDetails) {
   auto txn_detail = ExtendStatusDetail::UnwrapStatus(txn_status);
   ASSERT_NE(txn_detail, nullptr);
   EXPECT_EQ(txn_detail->code(), ExtendStatusCode::TxnExhaustedRetry);
-  EXPECT_FALSE(txn_detail->retryable());
+  // Conflict class: reachable as Conflict so the transaction layer can rebase,
+  // but not retriable -- replaying the same commit loses the same race.
+  EXPECT_EQ(txn_detail->category(), ErrorCategory::Conflict);
+  EXPECT_NE(txn_detail->category(), ErrorCategory::Transient);
 
   auto plain_status = MakeVortexErrorStatus("Failed to read vortex file", "decode failed");
   EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(plain_status), nullptr);
@@ -724,7 +902,7 @@ TEST_P(VortexBasicTest, CloudFiuWriterErrorsCarryStatusDetails) {
   auto detail = ExtendStatusDetail::UnwrapStatus(status);
   ASSERT_NE(detail, nullptr) << status.ToString();
   EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork) << status.ToString();
-  EXPECT_TRUE(detail->retryable()) << status.ToString();
+  EXPECT_EQ(detail->category(), ErrorCategory::Transient) << status.ToString();
   EXPECT_NE(status.ToString().find(FIUKEY_S3FS_WRITER_CLOSE_FAIL), std::string::npos) << status.ToString();
 
   ASSERT_STATUS_OK(DeleteTestDir(file_system_, base_path));
@@ -772,7 +950,7 @@ TEST_P(VortexBasicTest, CloudFiuReaderErrorsCarryStatusDetails) {
   auto detail = ExtendStatusDetail::UnwrapStatus(status);
   ASSERT_NE(detail, nullptr) << status.ToString();
   EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork) << status.ToString();
-  EXPECT_TRUE(detail->retryable()) << status.ToString();
+  EXPECT_EQ(detail->category(), ErrorCategory::Transient) << status.ToString();
   EXPECT_NE(status.ToString().find(FIUKEY_S3FS_READER_READAT_FAIL), std::string::npos) << status.ToString();
 
   ASSERT_STATUS_OK(DeleteTestDir(file_system_, base_path));

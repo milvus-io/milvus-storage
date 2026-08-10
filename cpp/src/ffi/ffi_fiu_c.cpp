@@ -88,7 +88,10 @@ LoonFFIResult loon_fiu_enable(const char* name, uint32_t name_len, int one_time)
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    // RETURN_EXCEPTION rather than a literal code: it recovers the exception
+    // type, so a bad_alloc is reported as an allocation failure rather than as
+    // an unattributed internal error.
+    RETURN_EXCEPTION(e.what());
   }
 }
 
@@ -110,7 +113,10 @@ LoonFFIResult loon_fiu_disable(const char* name, uint32_t name_len) {
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    // RETURN_EXCEPTION rather than a literal code: it recovers the exception
+    // type, so a bad_alloc is reported as an allocation failure rather than as
+    // an unattributed internal error.
+    RETURN_EXCEPTION(e.what());
   }
 }
 

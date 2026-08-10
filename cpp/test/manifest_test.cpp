@@ -17,12 +17,14 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <sstream>
 #include <vector>
 
 #include <arrow/api.h>
 #include <arrow/filesystem/localfs.h>
 
 #include "milvus-storage/column_groups.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/layout.h"
 #include "milvus-storage/manifest.h"
@@ -103,6 +105,65 @@ TEST_F(ManifestTest, ColumnGroupsRoundTrip) {
   ASSERT_EQ(rcg->files.size(), 1);
   EXPECT_EQ(rcg->files[0].start_index, 0);
   EXPECT_EQ(rcg->files[0].end_index, 100);
+}
+
+// Absolute URIs survive the round trip -- in the form this library actually
+// consumes, and only that form.
+//
+// The URI convention here is scheme://ENDPOINT/bucket/key, not the AWS-console
+// s3://bucket/key. StorageUri::Parse rejects the latter, and so therefore do
+// FilesystemCache::resolve_config and PlainFormat::create_reader, which parse
+// the stored path again on the way to opening it.
+//
+// An earlier version of this test asserted that s3://bucket/key.parquet
+// round-trips, which it does -- textually. That made it look like support
+// existed when nothing downstream can open such a path, which is a worse
+// failure than no test: it documents a capability that is not there. The
+// unsupported form is pinned separately below, by its classification.
+TEST_F(ManifestTest, AbsoluteUriPathsRoundTrip) {
+  const std::vector<std::string> absolute = {
+      "s3://s3.us-east-1.amazonaws.com/my-bucket/data/file1.parquet",
+      "s3://minio.internal:9000/my-bucket/deeply/nested/file2.parquet",
+      "local:///local/dir/_data/f.parquet",
+  };
+
+  ColumnGroups cgs;
+  for (const auto& path : absolute) {
+    cgs.push_back(MakeCG({"id"}, LOON_FORMAT_PARQUET, {{.path = path, .start_index = 0, .end_index = 1}}));
+  }
+
+  Manifest manifest(cgs);
+  auto read_back = RoundTrip(manifest);
+
+  ASSERT_EQ(read_back->columnGroups().size(), absolute.size());
+  for (size_t i = 0; i < absolute.size(); ++i) {
+    ASSERT_EQ(read_back->columnGroups()[i]->files.size(), 1u) << absolute[i];
+    // Unchanged: an absolute path is already absolute, so ToAbsolute must
+    // return it as it was rather than gluing base_path onto it.
+    EXPECT_EQ(read_back->columnGroups()[i]->files[0].path, absolute[i]) << absolute[i];
+
+    // And the consumption chain can still parse what came back -- the check
+    // the string comparison above does not make. Both resolve_config and
+    // create_reader re-parse the stored path; a path that survives the manifest
+    // but not this is a path nothing can open.
+    auto reparsed = StorageUri::Parse(read_back->columnGroups()[i]->files[0].path);
+    ASSERT_TRUE(reparsed.ok()) << absolute[i] << " -> " << reparsed.status().ToString();
+    EXPECT_FALSE(reparsed->key.empty()) << absolute[i];
+  }
+}
+
+// The console form is not supported, and says so in a way an operator can act
+// on rather than failing later as a missing object.
+TEST_F(ManifestTest, ConsoleStyleUriIsRejectedAsConfigNotSilentlyMangled) {
+  for (const char* path : {"s3://my-bucket/key.parquet", "gs://my-bucket/key.parquet"}) {
+    auto parsed = StorageUri::Parse(path);
+    ASSERT_FALSE(parsed.ok()) << path << ": if this now parses, the convention changed and"
+                              << " AbsoluteUriPathsRoundTrip should cover this form too";
+    auto detail = ExtendStatusDetail::UnwrapStatus(parsed.status());
+    ASSERT_NE(detail, nullptr) << path << " arrived unclassified: " << parsed.status().ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageConfigInvalid) << path;
+    EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::Config) << path;
+  }
 }
 
 TEST_F(ManifestTest, DeltaLogsRoundTrip) {
@@ -546,6 +607,46 @@ TEST_F(ManifestTest, ColumnGroupsXFormatsXFiles) {
   // Indexes
   ASSERT_EQ(read_back->indexes().size(), 1);
   EXPECT_EQ(read_back->indexes()[0].properties.at("M"), "32");
+}
+
+// ManifestCorrupted(117) exists because the coarse arrow-status fallback no
+// longer guesses DataFormatBroken for a plain Status::Invalid. Without an
+// explicit code here, a manifest that does not parse would silently downgrade
+// from "your data is corrupt" to a generic storage error.
+//
+// These drive the real Manifest::deserialize rather than synthesizing the code,
+// because the table entry was pinned while the code path that justifies it had
+// no coverage at all -- exactly the "dead code that looks alive" shape the
+// producer gate exists to catch, one level down.
+TEST_F(ManifestTest, CorruptManifestIsClassifiedCorrupted) {
+  struct Case {
+    const char* bytes;
+    const char* what;
+  };
+  const Case cases[] = {
+      {"", "empty file"},
+      {"ab", "shorter than the 4-byte format header"},
+      {"NOPE----not-a-manifest", "readable length, but neither avro nor MILV magic"},
+  };
+
+  for (const auto& c : cases) {
+    // Through the public ReadFrom, not deserialize -- that one is private, and
+    // reaching past it would test a path no caller can take.
+    std::string path = base_path_ + "/corrupt.manifest";
+    ASSERT_AND_ASSIGN(auto out, fs_->OpenOutputStream(path));
+    ASSERT_STATUS_OK(out->Write(c.bytes, static_cast<int64_t>(std::string(c.bytes).size())));
+    ASSERT_STATUS_OK(out->Close());
+    Manifest::CleanCache();
+
+    auto result = Manifest::ReadFrom(fs_, path);
+    ASSERT_FALSE(result.ok()) << c.what;
+    auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+    ASSERT_NE(detail, nullptr) << c.what << ": arrived unclassified, so it reaches segcore as a generic"
+                               << " storage failure rather than as corrupt data: " << result.status().ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::ManifestCorrupted) << c.what;
+    EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::Corrupted) << c.what;
+    EXPECT_FALSE((CategoryForExtendStatusCode(detail->code()) == ErrorCategory::Transient)) << c.what;
+  }
 }
 
 }  // namespace milvus_storage::test

@@ -22,6 +22,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <optional>
 #include <shared_mutex>
 #include <thread>
@@ -76,6 +77,7 @@
 #include <aws/s3/model/UploadPartRequest.h>
 #ifdef WITH_CRT
 #include <aws/s3-crt/model/GetObjectRequest.h>
+#include <aws/s3-crt/model/HeadBucketRequest.h>
 #include <aws/s3-crt/model/HeadObjectRequest.h>
 #endif
 
@@ -663,7 +665,29 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
     auto outcome = client_lock.Move()->HeadObject(req);
     if (!outcome.IsSuccess()) {
-      if (IsNotFound(outcome.GetError())) {
+      // Two different not-founds. A missing KEY is ENOENT -- the caller
+      // re-reads its metadata and decides (GC race vs data loss). A missing
+      // BUCKET must not be flattened into that: no amount of re-reading
+      // metadata produces a bucket.
+      //
+      // The typed check alone is not enough: HEAD responses carry no body, so
+      // on AWS proper a missing bucket ALSO arrives as a generic 404
+      // (RESOURCE_NOT_FOUND) -- NO_SUCH_BUCKET only shows up on S3-compatibles
+      // that type their HEAD errors. One HeadBucket, on the already-failed
+      // path, settles which absence this is; if even that cannot answer, the
+      // key-level ENOENT stands, which is the pre-existing behaviour.
+      if (IsNotFound(outcome.GetError()) && outcome.GetError().GetErrorType() != Aws::S3::S3Errors::NO_SUCH_BUCKET) {
+        S3Model::HeadBucketRequest bucket_req;
+        bucket_req.SetBucket(ToAwsString(path_.bucket));
+        ARROW_ASSIGN_OR_RAISE(auto bucket_lock, holder_->Lock());
+        auto bucket_outcome = bucket_lock.Move()->HeadBucket(bucket_req);
+        if (!bucket_outcome.IsSuccess() && IsNotFound(bucket_outcome.GetError())) {
+          auto message = std::string("Bucket '") + path_.bucket +
+                         "' does not exist: the deployment points at a bucket that is not there, which is a "
+                         "configuration fix, not an object to go looking for. (HeadObject for key '" +
+                         path_.key + "' returned 404.)";
+          return MakeExtendError(ExtendStatusCode::AwsErrorBucketNotFound, message, message);
+        }
         return PathNotFound(path_);
       }
       return ErrorToStatus(
@@ -981,7 +1005,23 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
     auto outcome = client_lock.Move()->HeadObject(req);
     if (!outcome.IsSuccess()) {
-      if (outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
+      // Same bucket/key split as the non-CRT read path, including the
+      // HeadBucket probe: HEAD errors are bodyless on AWS proper, so the typed
+      // NO_SUCH_BUCKET check alone never fires there.
+      if (outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND &&
+          static_cast<Aws::S3::S3Errors>(outcome.GetError().GetErrorType()) != Aws::S3::S3Errors::NO_SUCH_BUCKET) {
+        S3CrtModel::HeadBucketRequest bucket_req;
+        bucket_req.SetBucket(ToAwsString(path_.bucket));
+        ARROW_ASSIGN_OR_RAISE(auto bucket_lock, holder_->Lock());
+        auto bucket_outcome = bucket_lock.Move()->HeadBucket(bucket_req);
+        if (!bucket_outcome.IsSuccess() &&
+            bucket_outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
+          auto message = std::string("Bucket '") + path_.bucket +
+                         "' does not exist: the deployment points at a bucket that is not there, which is a "
+                         "configuration fix, not an object to go looking for. (HeadObject for key '" +
+                         path_.key + "' returned 404.)";
+          return MakeExtendError(ExtendStatusCode::AwsErrorBucketNotFound, message, message);
+        }
         return PathNotFound(path_);
       }
       return ErrorToStatus(
@@ -2241,34 +2281,192 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
         std::string_view("FullListBucketScan"));
   }
 
-  // Delete multiple objects at once
-  Future<> DeleteObjectsAsync(const std::string& bucket, const std::vector<std::string>& keys) {
+  // One logical delete -- a bare key list, or a whole directory walked page by
+  // page -- becomes many DeleteObjects calls, and failures can land in any of
+  // them at either level: the request itself, or individual keys inside an
+  // HTTP 200. A single status has to answer for all of it, so all of it is
+  // recorded here and judged once at the end.
+  //
+  // Judging per response was wrong three ways at once: AllFinished kept
+  // whichever failure arrived first, request-level failures never reached the
+  // tally at all, and each listing page built its own. A page of SlowDown
+  // beside a page of AccessDenied came back retryable or not depending on
+  // scheduling, with the other page's keys missing from the message.
+  //
+  // Recording rather than returning is the point: a chunk that answers with a
+  // failed Status lets AllFinished pick one winner and discard the rest, so an
+  // AccessDenied on chunk 1 vanishes behind a timeout on chunk 7.
+  //
+  // ONE CATEGORY OR NOTHING. If every member failed the same kind of way, that
+  // is what happened and the batch says so. If they disagree -- or if any
+  // member arrived with no classification at all -- the batch is Unknown, and
+  // the individual failures are in the message.
+  //
+  // Two earlier rules were tried and both are worse. First-wins let a throttle
+  // that finished early hide a denial that finished late, so half the time a
+  // caller was told to retry an operation containing something no retry can
+  // fix. A precedence ladder fixed that but had to be fed EVERY failure by
+  // EVERY call site to work -- and it was not: the Azure side never ranked the
+  // blobs that came back `Deleted=false` without throwing, so a mix of those
+  // and a 503 answered "Transient", violating the ladder's own invariant in
+  // the same change that documented it. A rule that can be implemented halfway
+  // will be. This one cannot: an unclassified member is a disagreement by
+  // construction, and there is no path that skips it.
+  //
+  // Returning the representative AS ITSELF matters beyond the code: a Status
+  // carries more than the code this tally extracts. PathNotFound arrives as an
+  // IOError whose detail is arrow's ERRNO detail -- a different kind from
+  // ExtendStatusDetail -- and DeleteDirContents' missing_dir_ok recognizes a
+  // missing directory by asking ErrnoFromStatus for ENOENT. Rebuilding it as a
+  // fresh IOError silently broke "delete this directory if it exists", which is
+  // the first thing most callers do, and took 513 tests with it.
+  //
+  // The message names up to kMaxLines failures, each field clipped before
+  // anything is concatenated -- a backend message can be a megabyte long and
+  // there can be a thousand of them.
+  struct DeleteErrorTally {
+    static constexpr size_t kMaxLines = 20;
+    static constexpr size_t kMaxFieldBytes = 200;
+
+    static constexpr size_t kMaxMessageBytes = 8 * 1024;
+
+    std::mutex mutex;
+    std::stringstream sample;
+    size_t sampled = 0;
+    size_t count = 0;
+    // The category every member has agreed on so far, and the first failure
+    // that carried it. A request-level failure has a Status of its own and is
+    // kept whole -- that is what carries arrow's errno detail through; a
+    // per-key failure does not, because S3 reports those as code and message
+    // inside an HTTP 200, so for those only the mapped code survives.
+    std::optional<ErrorCategory> shared_category;
+    bool mixed = false;
+    arrow::Status representative_status;
+    std::optional<ExtendStatusCode> representative_code;
+
+    static std::string Clip(const std::string& text, size_t limit) {
+      if (text.size() <= limit) {
+        return text;
+      }
+      return text.substr(0, limit) + "...(+" + std::to_string(text.size() - limit) + "B)";
+    }
+
+    void Note(std::optional<ExtendStatusCode> code, const std::string& line, const arrow::Status* status = nullptr) {
+      std::lock_guard<std::mutex> lock(mutex);
+      ++count;
+      // An unclassified member counts as its own category, so a batch holding
+      // one can never be "all the same" -- which is the property that keeps
+      // this rule from being implementable halfway.
+      const auto category = code.has_value() ? CategoryForExtendStatusCode(*code) : ErrorCategory::Unknown;
+      if (count == 1) {
+        shared_category = category;
+        representative_code = code;
+        representative_status = status != nullptr ? *status : arrow::Status::OK();
+      } else if (category != shared_category) {
+        mixed = true;
+      }
+      if (sampled < kMaxLines) {
+        sample << line << "\n";
+        ++sampled;
+      }
+    }
+
+    void RecordKeyError(const std::string& key, const std::string& code, const std::string& message) {
+      std::optional<ExtendStatusCode> mapped;
+      if (code == "AccessDenied") {
+        mapped = ExtendStatusCode::AwsErrorAccessDenied;
+      } else if (code == "SlowDown" || code == "RequestLimitExceeded" || code == "Throttling") {
+        mapped = ExtendStatusCode::StorageTransientThrottling;
+      } else if (code == "InternalError" || code == "ServiceUnavailable") {
+        mapped = ExtendStatusCode::StorageTransientService;
+      } else if (code == "RequestTimeout") {
+        mapped = ExtendStatusCode::StorageTransientTimeout;
+      } else if (code == "OperationAborted") {
+        // The same fact the request-level path reports: a conflicting operation
+        // is already in progress on this key. It used to be mapped to a
+        // transient here and to AwsErrorConflict there, on the argument that a
+        // delete is idempotent so a resend is safe -- but that is a statement
+        // about the OPERATION, which this table does not know and no longer
+        // decides. One condition, one code; the caller knows it is deleting.
+        mapped = ExtendStatusCode::AwsErrorConflict;
+      }
+      Note(mapped, "- key '" + Clip(key, kMaxFieldBytes) + "' (" + Clip(code, kMaxFieldBytes) +
+                       "): " + Clip(message, kMaxFieldBytes));
+    }
+
+    void RecordRequestError(const arrow::Status& status) {
+      std::optional<ExtendStatusCode> code;
+      if (auto detail = ExtendStatusDetail::UnwrapStatus(status)) {
+        code = detail->code();
+      }
+      // Clipped from the status's own fields rather than from ToString(), which
+      // materialises message and detail together and is the expensive part.
+      Note(code,
+           "- request failed: " + Clip(std::string(arrow::Status::CodeAsString(status.code())), kMaxFieldBytes) + ": " +
+               Clip(status.message(), kMaxFieldBytes),
+           &status);
+    }
+
+    arrow::Status Finish(const std::string& bucket) {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (count == 0) {
+        return arrow::Status::OK();
+      }
+      auto message =
+          "Failed to delete " + std::to_string(count) + " object(s) in S3 bucket '" + bucket + "':\n" + sample.str();
+      if (count > sampled) {
+        message += "  ...and " + std::to_string(count - sampled) + " more\n";
+      }
+      if (!mixed) {
+        // WithMessage keeps the representative's code AND its detail -- both
+        // kinds, which is how a lone PathNotFound carries its ENOENT out here.
+        if (!representative_status.ok()) {
+          return representative_status.WithMessage(Clip(message, kMaxMessageBytes));
+        }
+        if (representative_code.has_value()) {
+          return MakeExtendError(*representative_code, message, /*extra_info=*/"");
+        }
+      }
+      // Members disagreed, or one of them was never classified. An unclassified
+      // IOError naming every failure is the honest answer.
+      return arrow::Status::IOError(message);
+    }
+  };
+
+  // Delete multiple objects at once.
+  //
+  // `tally` lets a caller that issues several of these -- the directory walk --
+  // pool every failure into one verdict. Passing none means this call is the
+  // whole logical delete and settles its own.
+  Future<> DeleteObjectsAsync(const std::string& bucket,
+                              const std::vector<std::string>& keys,
+                              std::shared_ptr<DeleteErrorTally> shared_tally = nullptr) {
+    auto tally = shared_tally ? shared_tally : std::make_shared<DeleteErrorTally>();
+    const bool owns_tally = (shared_tally == nullptr);
+
     struct DeleteCallback {
       std::string bucket;
+      std::shared_ptr<DeleteErrorTally> tally;
 
       arrow::Status operator()(const S3Model::DeleteObjectsOutcome& outcome) const {
+        // Recorded, never returned: returning here would let AllFinished pick a
+        // winner among chunks and discard the rest.
         if (!outcome.IsSuccess()) {
-          return ErrorToStatus("DeleteObjects", outcome.GetError());
+          tally->RecordRequestError(ErrorToStatus("DeleteObjects", outcome.GetError()));
+          return arrow::Status::OK();
         }
         // Also need to check per-key errors, even on successful outcome
         // See
         // https://docs.aws.amazon.com/fr_fr/AmazonS3/latest/API/multiobjectdeleteapi.html
-        const auto& errors = outcome.GetResult().GetErrors();
-        if (!errors.empty()) {
-          std::stringstream ss;
-          ss << "Got the following " << errors.size() << " errors when deleting objects in S3 bucket '" << bucket
-             << "':\n";
-          for (const auto& error : errors) {
-            ss << "- key '" << error.GetKey() << "': " << error.GetMessage() << "\n";
-          }
-          return arrow::Status::IOError(ss.str());
+        for (const auto& error : outcome.GetResult().GetErrors()) {
+          tally->RecordKeyError(error.GetKey(), error.GetCode(), error.GetMessage());
         }
         return arrow::Status::OK();
       }
     };
 
     const auto chunk_size = static_cast<size_t>(kMultipleDeleteMaxKeys);
-    const DeleteCallback delete_cb{bucket};
+    const DeleteCallback delete_cb{bucket, tally};
 
     std::vector<Future<>> futures;
     futures.reserve(arrow::bit_util::CeilDiv(keys.size(), chunk_size));
@@ -2300,15 +2498,49 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
             "Content-MD5",
             Aws::Utils::HashingUtils::Base64Encode(Aws::Utils::HashingUtils::CalculateMD5(req.SerializePayload())));
       }
-      ARROW_ASSIGN_OR_RAISE(
-          auto fut, SubmitIO(io_context_, [holder = holder_, req = std::move(req), delete_cb]() -> arrow::Status {
-            ARROW_ASSIGN_OR_RAISE(auto client_lock, holder->Lock());
+      // Every exit from a chunk goes through the tally, for the same reason
+      // DeleteCallback records instead of returning: a chunk that answers with
+      // a failed Status lets AllFinished pick ONE winner among the chunks and
+      // throw the rest away, so an AccessDenied recorded by chunk 1 would be
+      // replaced by a shutdown error from chunk 7.
+      auto submit_result =
+          SubmitIO(io_context_, [holder = holder_, req = std::move(req), delete_cb, tally]() -> arrow::Status {
+            auto maybe_client_lock = holder->Lock();
+            if (!maybe_client_lock.ok()) {
+              // The client was finalized under us (shutdown). None of this
+              // chunk's keys were attempted, which is a failure of this delete
+              // and belongs in the tally like any other.
+              tally->RecordRequestError(maybe_client_lock.status());
+              return arrow::Status::OK();
+            }
+            auto client_lock = std::move(maybe_client_lock).ValueOrDie();
             return delete_cb(client_lock.Move()->DeleteObjects(req));
-          }));
-      futures.push_back(std::move(fut));
+          });
+      if (!submit_result.ok()) {
+        // The IO pool refused the task. Recorded and the loop continues:
+        // returning here abandoned the futures already in flight AND every
+        // error they had recorded, reporting the submit failure alone.
+        tally->RecordRequestError(submit_result.status());
+        continue;
+      }
+      futures.push_back(std::move(submit_result).ValueOrDie());
     }
 
-    return AllFinished(futures);
+    // Only the owner settles the verdict; a shared tally is finished by the
+    // caller once every page has reported.
+    //
+    // The failure arm is not redundant. A single-argument Then() runs nothing
+    // when the future fails, so any way a chunk still ends up failed -- task
+    // cancellation, a future broken without its callback running -- skipped
+    // Finish() entirely and discarded everything the other chunks recorded.
+    return AllFinished(futures).Then(
+        [tally, bucket, owns_tally]() -> arrow::Status {
+          return owns_tally ? tally->Finish(bucket) : arrow::Status::OK();
+        },
+        [tally, bucket, owns_tally](const arrow::Status& fan_out_error) -> arrow::Status {
+          tally->RecordRequestError(fan_out_error);
+          return owns_tally ? tally->Finish(bucket) : fan_out_error;
+        });
   }
 
   arrow::Status DeleteObjects(const std::string& bucket, const std::vector<std::string>& keys) {
@@ -2367,43 +2599,58 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
   }
 
   Future<> DoDeleteDirContentsAsync(const std::string& bucket, const std::string& key) {
-    return RunInScheduler([bucket, key](arrow::util::AsyncTaskScheduler* scheduler, S3FileSystem::Impl* self) {
-      scheduler->AddSimpleTask(
-          [=] {
-            FileSelector select;
-            select.base_dir = bucket + kSep + key;
-            select.recursive = true;
-            select.allow_not_found = false;
+    // One tally for the entire walk. Every listing page's delete records into
+    // it and nobody settles until the walk is done, so a mixed set across pages
+    // is seen as mixed rather than as whichever page finished first.
+    auto tally = std::make_shared<DeleteErrorTally>();
+    return RunInScheduler([bucket, key, tally](arrow::util::AsyncTaskScheduler* scheduler, S3FileSystem::Impl* self) {
+             scheduler->AddSimpleTask(
+                 [=] {
+                   FileSelector select;
+                   select.base_dir = bucket + kSep + key;
+                   select.recursive = true;
+                   select.allow_not_found = false;
 
-            FileInfoGenerator file_infos = self->GetFileInfoGenerator(select);
+                   FileInfoGenerator file_infos = self->GetFileInfoGenerator(select);
 
-            auto handle_file_infos = [=](const std::vector<FileInfo>& file_infos) {
-              std::vector<std::string> file_paths;
-              for (const auto& file_info : file_infos) {
-                DCHECK_GT(file_info.path().size(), bucket.size());
-                auto file_path = file_info.path().substr(bucket.size() + 1);
-                if (file_info.IsDirectory()) {
-                  // The selector returns FileInfo objects for directories with a
-                  // a path that never ends in a trailing slash, but for AWS the file
-                  // needs to have a trailing slash to recognize it as directory
-                  // (https://github.com/apache/arrow/issues/38618)
-                  DCHECK_OK(arrow::fs::internal::AssertNoTrailingSlash(file_path));
-                  file_path = file_path + kSep;
-                }
-                file_paths.push_back(std::move(file_path));
-              }
-              scheduler->AddSimpleTask(
-                  [=, file_paths = std::move(file_paths)] { return self->DeleteObjectsAsync(bucket, file_paths); },
-                  std::string_view("DeleteDirContentsDeleteTask"));
-              return arrow::Status::OK();
-            };
+                   auto handle_file_infos = [=](const std::vector<FileInfo>& file_infos) {
+                     std::vector<std::string> file_paths;
+                     for (const auto& file_info : file_infos) {
+                       DCHECK_GT(file_info.path().size(), bucket.size());
+                       auto file_path = file_info.path().substr(bucket.size() + 1);
+                       if (file_info.IsDirectory()) {
+                         // The selector returns FileInfo objects for directories with a
+                         // a path that never ends in a trailing slash, but for AWS the file
+                         // needs to have a trailing slash to recognize it as directory
+                         // (https://github.com/apache/arrow/issues/38618)
+                         DCHECK_OK(arrow::fs::internal::AssertNoTrailingSlash(file_path));
+                         file_path = file_path + kSep;
+                       }
+                       file_paths.push_back(std::move(file_path));
+                     }
+                     scheduler->AddSimpleTask(
+                         [=, file_paths = std::move(file_paths)] {
+                           return self->DeleteObjectsAsync(bucket, file_paths, tally);
+                         },
+                         std::string_view("DeleteDirContentsDeleteTask"));
+                     return arrow::Status::OK();
+                   };
 
-            return VisitAsyncGenerator(arrow::AsyncGenerator<std::vector<FileInfo>>(std::move(file_infos)),
-                                       std::move(handle_file_infos));
-          },
-          std::string_view("ListFilesForDelete"));
-      return arrow::Status::OK();
-    });
+                   return VisitAsyncGenerator(arrow::AsyncGenerator<std::vector<FileInfo>>(std::move(file_infos)),
+                                              std::move(handle_file_infos));
+                 },
+                 std::string_view("ListFilesForDelete"));
+             return arrow::Status::OK();
+           })
+        // Settle the whole walk here. A scheduler-level failure (listing itself
+        // broke, or a delete task could not be submitted) is one more member of
+        // the same logical delete, so it must go through the same precedence
+        // ladder as failures already collected from completed requests.
+        .Then([tally, bucket]() -> arrow::Status { return tally->Finish(bucket); },
+              [tally, bucket](const arrow::Status& walk_error) -> arrow::Status {
+                tally->RecordRequestError(walk_error);
+                return tally->Finish(bucket);
+              });
   }
 
   Future<> DeleteDirContentsAsync(const std::string& bucket, const std::string& key) {

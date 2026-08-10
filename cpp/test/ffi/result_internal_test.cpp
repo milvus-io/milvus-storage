@@ -131,8 +131,8 @@ TEST(FFIInternalResultTest, MapsStatusDetailsToFfiResults) {
   ASSERT_TRUE(code.has_value());
   EXPECT_EQ(*code, ExtendStatusCode::AwsErrorNotFound);
 
-  EXPECT_TRUE(loon_ffi_is_retryable_errcode(LOON_AWS_ERROR_NO_SUCH_UPLOAD));
-  EXPECT_FALSE(loon_ffi_is_retryable_errcode(LOON_AWS_ERROR_ACCESS_DENIED));
+  EXPECT_FALSE((loon_ffi_error_category(LOON_AWS_ERROR_NO_SUCH_UPLOAD) == LOON_ERROR_CATEGORY_TRANSIENT));
+  EXPECT_FALSE((loon_ffi_error_category(LOON_AWS_ERROR_ACCESS_DENIED) == LOON_ERROR_CATEGORY_TRANSIENT));
 
   auto throttling_status = MakeExtendError(ExtendStatusCode::StorageTransientThrottling, "throttled", "throttled");
   auto throttling_result = ReturnArrowErrorIf(throttling_status, LOON_ARROW_ERROR);
@@ -157,6 +157,24 @@ TEST(FFIInternalResultTest, MapsPlainPathNotFoundToFileNotFound) {
   auto status = arrow::Status::IOError("missing-file").WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
 
   EXPECT_EQ(FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR), LOON_FILE_NOT_FOUND);
+}
+
+TEST(FFIInternalResultTest, MapsOutOfMemoryToMemoryError) {
+  auto oom = arrow::Status::OutOfMemory("malloc of size 42 failed");
+
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(oom, LOON_ARROW_ERROR), LOON_MEMORY_ERROR);
+  // Non-retriable, but still named: the allocation failure must not be filed
+  // under "some exception" (see oom_preservation_test).
+  EXPECT_FALSE((loon_ffi_error_category(LOON_MEMORY_ERROR) == LOON_ERROR_CATEGORY_TRANSIENT));
+  // The exttable manifest entry point passes LOON_SOURCE_INVALID as its
+  // fallback; an OOM must classify as an allocation failure there, not
+  // degrade to a User error.
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(oom, LOON_SOURCE_INVALID), LOON_MEMORY_ERROR);
+  EXPECT_EQ(UserSourceErrorCodeFromStatus(oom, LOON_SOURCE_INVALID), LOON_MEMORY_ERROR);
+  // A status that carries an explicit classification still wins over the
+  // arrow-code inference.
+  auto classified = MakeExtendError(ExtendStatusCode::StorageTransientThrottling, "throttled", "throttled");
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(classified, LOON_ARROW_ERROR), LOON_TRANSIENT_THROTTLING);
 }
 
 TEST(FFIInternalResultTest, AsyncReadCallbackPreservesExtendStatusCode) {

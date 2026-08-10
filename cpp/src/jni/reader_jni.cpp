@@ -68,9 +68,11 @@ extern "C" LoonFFIResult loon_record_batch_reader_new(LoonReaderHandle reader,
     std::string predicate_str = predicate ? predicate : "";
 
     auto result = cpp_reader->get_record_batch_reader(predicate_str);
-    if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
-    }
+    // RETURN_ARROW_ERROR_IF, not a flat LOON_ARROW_ERROR: the status may carry
+    // an ExtendStatusDetail (transient, conflict, corruption, OOM). Preserve
+    // it for diagnostics and future structured consumers; today's JNI
+    // exception surface does not branch on most of these codes yet.
+    RETURN_ARROW_ERROR_IF(result.status(), LOON_ARROW_ERROR, result.status().ToString());
 
     auto* holder = new RecordBatchReaderHolder{result.ValueOrDie()};
     *out_handle = reinterpret_cast<LoonRecordBatchReaderHandle>(holder);
@@ -93,9 +95,7 @@ extern "C" LoonFFIResult loon_record_batch_reader_read_next(LoonRecordBatchReade
     auto* holder = reinterpret_cast<RecordBatchReaderHolder*>(handle);
     std::shared_ptr<arrow::RecordBatch> batch;
     auto status = holder->reader->ReadNext(&batch);
-    if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
-    }
+    RETURN_ARROW_ERROR_IF(status, LOON_ARROW_ERROR, status.ToString());
 
     // PackedRecordBatchReader::ReadNext can hand back a RecordBatch whose
     // column arrays carry a non-zero `offset` — this happens whenever the
@@ -122,9 +122,7 @@ extern "C" LoonFFIResult loon_record_batch_reader_read_next(LoonRecordBatchReade
             fresh_cols.push_back(col);
           } else {
             auto concat_result = arrow::Concatenate({col}, arrow::default_memory_pool());
-            if (!concat_result.ok()) {
-              RETURN_ERROR(LOON_ARROW_ERROR, concat_result.status().ToString());
-            }
+            RETURN_ARROW_ERROR_IF(concat_result.status(), LOON_ARROW_ERROR, concat_result.status().ToString());
             fresh_cols.push_back(concat_result.ValueOrDie());
           }
         }
@@ -132,9 +130,7 @@ extern "C" LoonFFIResult loon_record_batch_reader_read_next(LoonRecordBatchReade
       }
 
       auto export_status = arrow::ExportRecordBatch(*batch, out_array, out_schema);
-      if (!export_status.ok()) {
-        RETURN_ERROR(LOON_ARROW_ERROR, export_status.ToString());
-      }
+      RETURN_ARROW_ERROR_IF(export_status, LOON_ARROW_ERROR, export_status.ToString());
     } else {  // batch == nullptr
       out_array->release = nullptr;
       out_schema->release = nullptr;

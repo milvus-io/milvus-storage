@@ -434,11 +434,15 @@ arrow::Result<int64_t> Transaction::Commit() {
       continue;
     }
 
-    // Other errors (not conflict-related) should be returned immediately
-    return arrow::Status::IOError(
+    // Other errors (not conflict-related) are returned immediately. WithMessage
+    // keeps the arrow status code and the ExtendStatusDetail: rebuilding the
+    // failure as a fresh IOError via ToString() stripped a classified
+    // Transient/AccessDenied/Missing write failure down to an unclassified,
+    // non-retriable error -- on the one path where retryability matters most.
+    return status.WithMessage(
         fmt::format("Commit failed: write manifest error, "
                     "[read_version={}][latest_version={}][committed_version={}]: {}",
-                    read_version_, latest_version, committed_version, status.ToString()));
+                    read_version_, latest_version, committed_version, status.message()));
   }
 
   // This should never be reached, but included for safety
@@ -556,8 +560,11 @@ arrow::Status Transaction::write_manifest(const std::shared_ptr<Manifest>& manif
                                           int64_t old_version,
                                           int64_t new_version) {
   // Fault injection point for testing
+  // Injected as a classified transient rather than a bare IOError so tests can
+  // pin that Commit() preserves the classification end-to-end.
   FIU_RETURN_ON(FIUKEY_MANIFEST_WRITE_FAIL,
-                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_MANIFEST_WRITE_FAIL)));
+                MakeExtendError(ExtendStatusCode::StorageTransientNetwork,
+                                fmt::format("Injected fault: {}", FIUKEY_MANIFEST_WRITE_FAIL)));
 
   // Fault injection point: sleep before committing (writing) the manifest.
   // Used to construct concurrent commit conflicts in tests by letting another

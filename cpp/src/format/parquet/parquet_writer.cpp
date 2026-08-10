@@ -227,7 +227,15 @@ arrow::Status ParquetFileWriter::init() {
   }
 
   if (!sink_result.ok()) {
-    return arrow::Status::IOError(fmt::format("Failed to open output stream: {}", sink_result.status().ToString()));
+    // WithMessage, not a rebuilt IOError: opening an output stream on Azure or
+    // S3 issues a request immediately, so this status may already carry a
+    // classification -- a 403, a 429, a 5xx. Rebuilding it from ToString()
+    // dropped the StatusDetail, and everything downstream then saw an
+    // unclassified failure: the plain writer reported a generic internal
+    // error, and the packed writer's WrapExtendError, finding no detail to
+    // preserve, stamped PackedStorageIO over it.
+    return sink_result.status().WithMessage(
+        fmt::format("Failed to open output stream: {}", sink_result.status().message()));
   }
   sink_ = std::move(sink_result).ValueOrDie();
 

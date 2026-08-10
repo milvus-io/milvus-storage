@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include <arrow/filesystem/filesystem.h>
+#include <arrow/util/io_util.h>
 #include <parquet/arrow/writer.h>
 
 #include "milvus-storage/common/extend_status.h"
@@ -141,7 +143,10 @@ TEST_F(PackedErrorStatusTest, MakeReportsMissingFileAsStatusWithClassification) 
   // keeps the cause's detail), so consumers get the fine-grained
   // classification the throwing constructor used to destroy.
   EXPECT_NE(status.ToString().find("missing.parquet"), std::string::npos) << status.ToString();
-  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::ObjectNotExist) << status.ToString();
+  // The not-found travels as errno on the status, which is how the filesystem
+  // reported it -- WrapExtendError keeps the cause's detail rather than
+  // replacing it with a classification this layer would have had to invent.
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT) << status.ToString();
 }
 
 TEST_F(PackedErrorStatusTest, MakeReportsEmptyPathsAsInvalidArgs) {
@@ -163,11 +168,13 @@ TEST_F(PackedErrorStatusTest, MakeSucceedsOnValidFile) {
   ASSERT_STATUS_OK(reader->Close());
 }
 
-TEST_F(PackedErrorStatusTest, ColumnGroupTableSchemaMismatchIsDataFormatBroken) {
+TEST_F(PackedErrorStatusTest, ColumnGroupTableSchemaMismatchIsNotCalledCorruption) {
   ColumnGroup group(0, {0});
   ASSERT_STATUS_OK(group.AddRecordBatch(record_batch_));
-  // Second batch with a different schema: Table() must surface arrow's
-  // Invalid (-> DataFormatBroken/2024), not a wrapped generic storage error.
+  // Second batch with a different schema. Table() must surface arrow's own
+  // Invalid rather than wrapping it, so the message survives -- but the segcore
+  // landing is StorageError, NOT DataFormatBroken: mismatched batches are the
+  // caller's contract violation, not corrupt bytes on disk.
   auto other_schema = arrow::schema({arrow::field("other", arrow::int8())});
   arrow::Int8Builder builder;
   ASSERT_STATUS_OK(builder.AppendValues({1, 2, 3}));
@@ -178,8 +185,15 @@ TEST_F(PackedErrorStatusTest, ColumnGroupTableSchemaMismatchIsDataFormatBroken) 
   auto table_result = group.Table();
   ASSERT_FALSE(table_result.ok());
   EXPECT_TRUE(table_result.status().IsInvalid()) << table_result.status().ToString();
-  EXPECT_EQ(ToSegcoreError(table_result.status()).get_error_code(), milvus::DataFormatBroken)
-      << table_result.status().ToString();
+  // Renamed from ...IsDataFormatBroken, because that was the wrong answer and
+  // this case is the clearest argument for changing it. "Schema at index 1 was
+  // different" is a caller handing us mismatched batches -- a contract
+  // violation, not corrupt bytes on disk. Reporting it as DataFormatBroken sent
+  // whoever read the alert to inspect a file that is perfectly fine.
+  auto detail = ExtendStatusDetail::UnwrapStatus(table_result.status());
+  if (detail != nullptr) {
+    EXPECT_NE(detail->category(), ErrorCategory::Corrupted) << table_result.status().ToString();
+  }
 }
 
 TEST_F(PackedErrorStatusTest, ColumnGroupNullBatchConstructorYieldsEmptyGroup) {
@@ -234,6 +248,48 @@ TEST_F(PackedErrorStatusTest, FileRowGroupReaderMissingFieldIdsIsStatusNotAbort)
   ASSERT_FALSE(result.ok());
   EXPECT_TRUE(result.status().IsInvalid()) << result.status().ToString();
   EXPECT_NE(result.status().ToString().find("field"), std::string::npos) << result.status().ToString();
+}
+
+// An open that fails at the object store already carries a classification --
+// Azure and S3 both issue a request when the output stream is opened, so a 403
+// or a 429 arrives fully typed. The parquet writer used to rebuild that status
+// as a fresh IOError from ToString(), and the detail went with it: the plain
+// writer reported a generic internal failure, and the packed writer's
+// WrapExtendError, finding nothing to preserve, stamped PackedStorageIO over a
+// transient the caller could have acted on.
+//
+// Driven by a filesystem that fails the open on purpose rather than by fault
+// injection: the FIU point lives on FileSystemProxy, so whether it fires
+// depends on whether the fixture's filesystem happens to be wrapped in one --
+// which differs between a local run and CI, and made the first version of this
+// test pass locally and fail against minio.
+namespace {
+class FailingOpenFileSystem final : public arrow::fs::SubTreeFileSystem {
+  public:
+  explicit FailingOpenFileSystem(std::shared_ptr<arrow::fs::FileSystem> base)
+      : arrow::fs::SubTreeFileSystem("", std::move(base)) {}
+
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
+      const std::string&, const std::shared_ptr<const arrow::KeyValueMetadata>&) override {
+    return MakeExtendError(ExtendStatusCode::StorageTransientNetwork, "connection reset while opening",
+                           "connection reset while opening");
+  }
+};
+}  // namespace
+
+TEST_F(PackedErrorStatusTest, OpenFailureKeepsItsClassificationThroughTheWriter) {
+  auto failing_fs = std::make_shared<FailingOpenFileSystem>(fs_);
+  std::vector<std::string> paths = {path_ + "/open-fail.parquet"};
+  std::vector<std::vector<int>> column_groups = {{0, 1, 2}};
+
+  auto writer =
+      PackedRecordBatchWriter::Make(failing_fs, paths, schema_, storage_config_, column_groups, writer_memory_);
+  ASSERT_FALSE(writer.ok());
+
+  auto detail = ExtendStatusDetail::UnwrapStatus(writer.status());
+  ASSERT_NE(detail, nullptr) << writer.status().ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork) << writer.status().ToString();
+  EXPECT_NE(detail->code(), ExtendStatusCode::PackedStorageIO) << "the open's own verdict was overwritten";
 }
 
 }  // namespace milvus_storage

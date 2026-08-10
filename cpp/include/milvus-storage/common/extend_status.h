@@ -21,43 +21,67 @@
 
 #include <arrow/status.h>
 #include <arrow/result.h>
+#include <arrow/util/string_builder.h>
 
 #include "milvus-storage/ffi_internal/ffi_error_code.h"
 
 // from milvus-common repo
-#include "common/EasyAssert.h"
 
 namespace milvus_storage {
+
+/// \brief A coarse statement of WHAT happened, for a caller that does not want
+/// to switch over every code.
+///
+/// It says nothing about what to do next. This library does not know the
+/// caller's operation, so it cannot know whether the operation is safe to redo,
+/// whether a handle must be rebuilt first, or who should be paged; a category
+/// that named those things would be guessing on the caller's behalf. Deciding
+/// belongs to whoever knows the request -- the code and the message are the
+/// facts that decision is made from.
+///
+/// Values match the LOON_ERROR_CATEGORY_* constants so the same number crosses
+/// the C ABI.
+enum class ErrorCategory : char {
+  /// This layer could not determine what happened -- a failure that arrived
+  /// carrying no classification of ours, or a batch whose members disagreed.
+  /// Also what a consumer reports for a code newer than itself. It is NOT a
+  /// synonym for Permanent: nothing here established that the condition cannot
+  /// clear.
+  Unknown = LOON_ERROR_CATEGORY_UNKNOWN,
+  /// The location string we were handed does not name a usable object. Only an
+  /// entry point contractually given a user-supplied location may say this; no
+  /// layer below may classify itself User.
+  User = LOON_ERROR_CATEGORY_USER,
+  /// The deployment's own settings or credentials are unusable -- endpoint,
+  /// region, key, a property that fails its validator.
+  Config = LOON_ERROR_CATEGORY_CONFIG,
+  /// A condition that may clear on its own: a timeout, a throttle, a 5xx.
+  Transient = LOON_ERROR_CATEGORY_TRANSIENT,
+  /// Someone else changed the object between our read and our write.
+  Conflict = LOON_ERROR_CATEGORY_CONFLICT,
+  /// The named object is not there. Only a producer holding a DEFINITIVE
+  /// not-found from the store may say this; it is never inferred from an
+  /// unclassified failure.
+  Missing = LOON_ERROR_CATEGORY_MISSING,
+  /// A layer parsed the bytes and found them wrong. Only a producer that
+  /// actually PARSED them may say this -- see the
+  /// CoarseFallbackNeverClaimsCorruption test for the machine-checked form.
+  Corrupted = LOON_ERROR_CATEGORY_CORRUPTED,
+  /// A bug on our side, or data that is gone.
+  Permanent = LOON_ERROR_CATEGORY_PERMANENT,
+};
+
+/// \brief Error codes that can be attached to an arrow::Status and survive to
+/// the FFI / segcore boundary.
+///
+/// Generated from LOON_EXTEND_STATUS_CODE_LIST -- see ffi_error_code.h for the
+/// table, including each code's category and its AWS S3 / Aliyun OSS
+/// counterpart. Values are the C ABI contract and must never be renumbered.
+/// arrow::StatusCode's largest value is 45, so these all start at 50.
 enum class ExtendStatusCode : char {
-  // arrow::StatusCode biggest is 45.
-  // Packed-specific error codes.
-  PackedInvalidArgs = 50,
-  PackedStorageIO = 51,
-  PackedMetadataCorrupted = 52,
-  PackedFileCorrupted = 53,
-  PackedArrowError = 54,
-  PackedUnexpected = 55,
-
-  AwsErrorNoSuchUpload = LOON_AWS_ERROR_NO_SUCH_UPLOAD,
-  AwsErrorConflict = LOON_AWS_ERROR_CONFLICT,
-  AwsErrorPreConditionFailed = LOON_AWS_ERROR_PRECONDITION_FAILED,
-  // Permanently-failing object-storage errors that must NOT be classified as
-  // transient/retriable by consumers: the object/bucket is gone (retrying or
-  // rerouting to another replica hits the same shared object store and fails
-  // identically), the credentials/permissions are wrong, or the AWS SDK itself
-  // judged the error non-retryable (AWSError::ShouldRetry() == false).
-  AwsErrorNotFound = LOON_AWS_ERROR_NOT_FOUND,          // NoSuchKey / NoSuchBucket / ResourceNotFound
-  AwsErrorAccessDenied = LOON_AWS_ERROR_ACCESS_DENIED,  // AccessDenied / InvalidAccessKeyId / SignatureDoesNotMatch
-  AwsErrorNonRetryable = LOON_AWS_ERROR_NON_RETRYABLE,  // any other error with ShouldRetry() == false
-
-  StorageTransientNetwork = LOON_TRANSIENT_NETWORK,
-  StorageTransientTimeout = LOON_TRANSIENT_TIMEOUT,
-  StorageTransientThrottling = LOON_TRANSIENT_THROTTLING,
-  StorageTransientService = LOON_TRANSIENT_SERVICE,
-
-  // Transaction-specific error codes
-  TxnExhaustedRetry = LOON_TXN_EXHAUSTED_RETRY,
-  TxnResolutionFailed = LOON_TXN_RESOLUTION_FAILED,
+#define MILVUS_STORAGE_EXTEND_STATUS_ENUM_ENTRY(name, code, symbol, category, s3_code) name = (code),
+  LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_EXTEND_STATUS_ENUM_ENTRY)
+#undef MILVUS_STORAGE_EXTEND_STATUS_ENUM_ENTRY
 };
 
 class ExtendStatusDetail : public arrow::StatusDetail {
@@ -76,7 +100,9 @@ class ExtendStatusDetail : public arrow::StatusDetail {
   /// \brief Get the extra error info
   [[nodiscard]] std::string extra_info() const;
 
-  [[nodiscard]] bool retryable() const;
+  /// \brief The coarse statement of what happened. Derived from the code,
+  /// never stored.
+  [[nodiscard]] ErrorCategory category() const;
 
   /// \brief Get the human-readable name of the status code.
   [[nodiscard]] std::string CodeAsString() const;
@@ -94,18 +120,31 @@ class ExtendStatusDetail : public arrow::StatusDetail {
   private:
   ExtendStatusCode code_;
   std::string extra_info_;
-  bool retryable_ = false;
 };
 
 std::optional<ExtendStatusCode> ExtendStatusCodeFromInt(int code);
-bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code);
+
+/// \brief The category of an ExtendStatusCode: who owns the failure.
+ErrorCategory CategoryForExtendStatusCode(ExtendStatusCode code);
+
+/// \brief The AWS S3 / Aliyun OSS error code this maps to, or "" when the
+/// condition has no object-storage counterpart (packed/transaction codes).
+std::string_view S3CodeForExtendStatusCode(ExtendStatusCode code);
 
 arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info = "");
 
+/// \brief Variadic form, mirroring `arrow::Status::Invalid(a, b, c)`.
+///
+/// Exists so that an already-correct site that builds its message out of pieces
+/// can be given a classification without rewriting how it builds that message.
+/// Every unclassified `Status::Invalid(...)` we convert is one fewer failure
+/// that reaches segcore as an untyped IOError, so the conversion needs to be
+/// cheap enough that nobody skips it.
+template <typename... Args>
+arrow::Status MakeExtendErrorMsg(ExtendStatusCode code, Args&&... args) {
+  return MakeExtendError(code, arrow::util::StringBuilder(std::forward<Args>(args)...));
+}
+
 arrow::Status WrapExtendError(ExtendStatusCode code, std::string message, const arrow::Status& cause);
-
-milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code);
-
-milvus::SegcoreError ToSegcoreError(const arrow::Status& status);
 
 }  // namespace milvus_storage

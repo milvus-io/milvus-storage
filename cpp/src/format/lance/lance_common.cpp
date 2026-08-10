@@ -169,6 +169,11 @@ arrow::Result<std::pair<std::string, uint64_t>> ParseLanceUri(const std::string&
   uint64_t fragment_id = 0;
   try {
     fragment_id = std::stoull(uri.substr(pos + kLanceUriDelimiter.length()));
+  } catch (const std::bad_alloc&) {
+    // Answered before the generic handler: routed there, memory pressure --
+    // the one condition a retry is most likely to resolve -- came back as a
+    // permanent error. Enforced by cpp/scripts/check_oom_handlers.py.
+    return arrow::Status::OutOfMemory("Out of memory in the lance bridge");
   } catch (const std::exception& e) {
     return arrow::Status::Invalid(fmt::format("Invalid fragment_id in uri: {}", uri));
   }

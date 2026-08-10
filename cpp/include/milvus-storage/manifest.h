@@ -224,10 +224,10 @@ class Manifest final {
   [[nodiscard]] arrow::Status serialize(std::ostream& output_stream) const;
   arrow::Status deserialize(std::istream& input_stream);
 
-  void deserializeLegacy(std::istream& input_stream);
+  [[nodiscard]] arrow::Status deserializeLegacy(std::istream& input_stream);
 
   [[nodiscard]] Manifest toRelativePaths(const std::string& base_path) const;
-  void ToAbsolutePaths(const std::string& base_path);
+  [[nodiscard]] arrow::Status ToAbsolutePaths(const std::string& base_path);
 
   private:
   int32_t version_;                          ///< Manifest format version

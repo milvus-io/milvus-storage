@@ -55,6 +55,10 @@ class FollyArrowExecutor final : public arrow::internal::Executor {
           std::move(stop_callback)(stop_token.Poll());
         }
       });
+    } catch (const std::bad_alloc&) {
+      // See cpp/scripts/check_oom_handlers.py: a generic handler discards the
+      // exception type, and a discarded bad_alloc becomes a permanent error.
+      return arrow::Status::OutOfMemory("Out of memory submitting a task to the Folly executor");
     } catch (const std::exception& e) {
       return arrow::Status::UnknownError("Failed to submit task to Folly executor: ", e.what());
     } catch (...) {

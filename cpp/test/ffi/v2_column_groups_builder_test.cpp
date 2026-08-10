@@ -21,6 +21,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -111,6 +112,99 @@ TEST(V2ColumnGroupsBuilder, RejectsRowCountLengthMismatch) {
   std::vector<std::vector<std::string>> files = {{"f0.parquet", "f1.parquet"}};
   std::vector<std::vector<int64_t>> rcs = {{5}};
   EXPECT_THROW(BuildLoonColumnGroups(cols, files, rcs), std::invalid_argument);
+}
+
+// The half-built states destroy has to survive.
+//
+// Every allocation in bridge.cpp's export path can throw, and the only recovery
+// is a catch-all handing the partially built result to loon_column_groups_destroy.
+// So the states below are not hypothetical -- they are exactly what the export
+// leaves behind when an allocation fails at each step, and destroy has to free
+// what exists and touch nothing that does not.
+//
+// Building them by hand rather than by injecting an OOM is deliberate: an
+// injected failure proves one interleaving, while these enumerate the shapes.
+// Run under ASAN, a mistake here is a use-after-free or a leak, not a pass.
+namespace {
+
+// Same allocator the export path uses, so destroy's delete[] matches.
+char* DupForExport(const char* s) {
+  size_t len = std::strlen(s);
+  char* out = new char[len + 1];
+  std::memcpy(out, s, len + 1);
+  return out;
+}
+
+LoonColumnGroups* NewGroupsWithOneEmptyGroup() {
+  auto* cgs = new LoonColumnGroups();
+  cgs->column_group_array = new LoonColumnGroup[1]{};
+  cgs->num_of_column_groups = 1;
+  return cgs;
+}
+
+}  // namespace
+
+TEST(V2ColumnGroupsBuilderPartialState, DestroysColumnArrayFilledOnlyPartway) {
+  // Export publishes the columns array and its count, then fills the strings.
+  // A throw on the second string leaves the first one live and the rest null.
+  auto* cgs = NewGroupsWithOneEmptyGroup();
+  LoonColumnGroup& g = cgs->column_group_array[0];
+  g.columns = new const char*[3]();
+  g.num_of_columns = 3;
+  g.columns[0] = DupForExport("100");
+
+  loon_column_groups_destroy(cgs);
+}
+
+TEST(V2ColumnGroupsBuilderPartialState, DestroysFileArrayFilledOnlyPartway) {
+  // Same for the files array. The value-initialization matters here in its own
+  // right: LoonColumnGroupFile is a POD C struct, so without `{}` every member
+  // of the unreached entries would be indeterminate and destroy would delete[]
+  // garbage rather than skip a null.
+  auto* cgs = NewGroupsWithOneEmptyGroup();
+  LoonColumnGroup& g = cgs->column_group_array[0];
+  g.files = new LoonColumnGroupFile[2]{};
+  g.num_of_files = 2;
+  g.files[0].path = DupForExport("g0/f0.parquet");
+
+  loon_column_groups_destroy(cgs);
+}
+
+TEST(V2ColumnGroupsBuilderPartialState, DestroysPropertiesWithOnlyKeysAllocated) {
+  // The state that used to be a null dereference rather than a leak: destroy
+  // gated both property arrays on property_keys alone, so a throw between the
+  // two allocations crashed the cleanup path. Export now publishes both before
+  // the count, and destroy checks them independently -- either half alone must
+  // still be safe.
+  auto* cgs = NewGroupsWithOneEmptyGroup();
+  LoonColumnGroup& g = cgs->column_group_array[0];
+  g.files = new LoonColumnGroupFile[1]{};
+  g.num_of_files = 1;
+  g.files[0].path = DupForExport("g0/f0.parquet");
+  g.files[0].property_keys = new const char*[2]();
+  g.files[0].property_values = nullptr;
+  g.files[0].num_properties = 2;
+  g.files[0].property_keys[0] = DupForExport("k0");
+
+  loon_column_groups_destroy(cgs);
+}
+
+TEST(V2ColumnGroupsBuilderPartialState, DestroysPropertiesFilledOnlyPartway) {
+  // Both arrays present, the key of a pair copied and its value not: the exact
+  // interleaving of the export loop.
+  auto* cgs = NewGroupsWithOneEmptyGroup();
+  LoonColumnGroup& g = cgs->column_group_array[0];
+  g.files = new LoonColumnGroupFile[1]{};
+  g.num_of_files = 1;
+  g.files[0].path = DupForExport("g0/f0.parquet");
+  g.files[0].property_keys = new const char*[2]();
+  g.files[0].property_values = new const char*[2]();
+  g.files[0].num_properties = 2;
+  g.files[0].property_keys[0] = DupForExport("k0");
+  g.files[0].property_values[0] = DupForExport("v0");
+  g.files[0].property_keys[1] = DupForExport("k1");
+
+  loon_column_groups_destroy(cgs);
 }
 
 }  // namespace milvus_storage::test

@@ -17,10 +17,13 @@
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <functional>
+#include <future>
 #include <mutex>
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <string>
 #include <thread>
@@ -41,7 +44,9 @@
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/arrow_util.h"
 #include "test_env.h"
 
@@ -141,6 +146,7 @@ struct MockResponseSpec {
   Aws::Http::HttpResponseCode code;
   std::string body;
   Aws::Http::HeaderValueCollection headers;
+  std::function<void()> on_request;
 };
 
 class MockHttpClient : public Aws::Http::HttpClient {
@@ -151,18 +157,27 @@ class MockHttpClient : public Aws::Http::HttpClient {
       const std::shared_ptr<Aws::Http::HttpRequest>& request,
       Aws::Utils::RateLimits::RateLimiterInterface* readLimiter = nullptr,
       Aws::Utils::RateLimits::RateLimiterInterface* writeLimiter = nullptr) const override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    recorded_requests_.push_back(request);
+    std::optional<MockResponseSpec> matched;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      recorded_requests_.push_back(request);
 
-    auto uri = request->GetURIString();
-
-    // Find a matching response queue by URL substring
-    for (auto& [url_key, q] : response_map_) {
-      if (!q.empty() && uri.find(url_key) != Aws::String::npos) {
-        auto spec = q.front();
-        q.pop();
-        return BuildResponse(request, spec);
+      auto uri = request->GetURIString();
+      // Find a matching response queue by URL substring.
+      for (auto& [url_key, q] : response_map_) {
+        if (!q.empty() && uri.find(url_key) != Aws::String::npos) {
+          matched = std::move(q.front());
+          q.pop();
+          break;
+        }
       }
+    }
+
+    if (matched.has_value()) {
+      if (matched->on_request) {
+        matched->on_request();
+      }
+      return BuildResponse(request, *matched);
     }
 
     // Default: return 404 for unmatched requests (e.g., background SDK requests)
@@ -174,8 +189,9 @@ class MockHttpClient : public Aws::Http::HttpClient {
   void EnqueueResponse(const std::string& url_match,
                        Aws::Http::HttpResponseCode code,
                        const std::string& body,
-                       const Aws::Http::HeaderValueCollection& headers = {}) {
-    response_map_[url_match].push({code, body, headers});
+                       const Aws::Http::HeaderValueCollection& headers = {},
+                       std::function<void()> on_request = {}) {
+    response_map_[url_match].push({code, body, headers, std::move(on_request)});
   }
 
   std::vector<std::shared_ptr<Aws::Http::HttpRequest>> GetRecordedRequests() const {
@@ -304,6 +320,143 @@ TEST_F(S3ProviderTest, TestMockInfrastructure) {
                                    Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
   auto response2 = client->MakeRequest(request2);
   EXPECT_EQ(response2->GetResponseCode(), Aws::Http::HttpResponseCode::NOT_FOUND);
+}
+
+// Deleting a directory that is not there, with missing_dir_ok, must succeed.
+//
+// That is the first thing most callers do, and it works by asking
+// ErrnoFromStatus for ENOENT -- so the walk's status has to still BE the
+// status the filesystem produced, errno detail and all. Collecting failures
+// into a tally and rebuilding one from the message text silently broke it,
+// and every fixture whose SetUp clears its directory went with it: 513 tests.
+TEST_F(S3ProviderTest, DeleteDirContentsToleratesAMissingDirectory) {
+  constexpr const char* kBucket = "missing-dir-bucket";
+
+  // An empty listing under a non-empty prefix is how S3 says "that directory is
+  // not there": the walk turns it into PathNotFound, an IOError carrying
+  // arrow's ERRNO detail rather than a classification of ours.
+  const std::string empty_listing = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>missing-dir-bucket</Name>
+  <Prefix>nope/</Prefix>
+  <KeyCount>0</KeyCount>
+  <MaxKeys>1000</MaxKeys>
+  <IsTruncated>false</IsTruncated>
+</ListBucketResult>)xml";
+
+  auto xml_headers = [](const std::string& body) {
+    Aws::Http::HeaderValueCollection headers;
+    headers["content-type"] = "application/xml";
+    headers["content-length"] = std::to_string(body.size());
+    return headers;
+  };
+  mock_client_->EnqueueResponse("list-type=2", Aws::Http::HttpResponseCode::OK, empty_listing,
+                                xml_headers(empty_listing));
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+
+  // The whole point of missing_dir_ok: nothing to delete is not a failure. It
+  // works by asking ErrnoFromStatus for ENOENT, so the walk's status has to
+  // still BE the status the filesystem produced -- summarizing it into a fresh
+  // IOError silently broke "clear this directory if it exists", which is the
+  // first thing most callers do.
+  ASSERT_STATUS_OK(fs->DeleteDirContents(std::string(kBucket) + "/nope", /*missing_dir_ok=*/true));
+}
+
+TEST_F(S3ProviderTest, DeleteDirCombinesCollectedConfigWithLaterListingFailure) {
+  constexpr const char* kBucket = "aggregation-test-bucket";
+
+  const std::string first_list_page = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>aggregation-test-bucket</Name>
+  <Prefix></Prefix>
+  <KeyCount>1</KeyCount>
+  <MaxKeys>1000</MaxKeys>
+  <IsTruncated>true</IsTruncated>
+  <Contents>
+    <Key>dir/file</Key>
+    <LastModified>2026-08-03T00:00:00.000Z</LastModified>
+    <ETag>&quot;etag&quot;</ETag>
+    <Size>1</Size>
+    <StorageClass>STANDARD</StorageClass>
+  </Contents>
+  <NextContinuationToken>next-page</NextContinuationToken>
+</ListBucketResult>)xml";
+  const std::string delete_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Error>
+    <Key>dir/file</Key>
+    <Code>AccessDenied</Code>
+    <Message>delete denied by policy</Message>
+  </Error>
+</DeleteResult>)xml";
+  const std::string listing_error = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<Error>
+  <Code>SlowDown</Code>
+  <Message>listing throttled</Message>
+  <RequestId>request-id</RequestId>
+</Error>)xml";
+
+  auto xml_headers = [](const std::string& body) {
+    Aws::Http::HeaderValueCollection headers;
+    headers["content-type"] = "application/xml";
+    headers["content-length"] = std::to_string(body.size());
+    return headers;
+  };
+  // Pagination and page deletes run concurrently. Once the delete request has
+  // started, Arrow's scheduler waits for that submitted task before settling
+  // the later listing failure -- so the AccessDenied reaches the tally FIRST.
+  //
+  // That ordering is what makes the companion test below meaningful: this one
+  // would pass under plain first-wins too, so on its own it pins nothing about
+  // the ladder.
+  std::promise<void> delete_started_promise;
+  auto delete_started = delete_started_promise.get_future().share();
+
+  mock_client_->EnqueueResponse("list-type=2", Aws::Http::HttpResponseCode::OK, first_list_page,
+                                xml_headers(first_list_page));
+  mock_client_->EnqueueResponse("list-type=2", Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE, listing_error,
+                                xml_headers(listing_error), [delete_started] {
+                                  EXPECT_EQ(delete_started.wait_for(std::chrono::seconds(5)), std::future_status::ready)
+                                      << "second listing failure arrived before the first page's delete started";
+                                });
+  mock_client_->EnqueueResponse("?delete", Aws::Http::HttpResponseCode::OK, delete_result, xml_headers(delete_result),
+                                [&delete_started_promise] { delete_started_promise.set_value(); });
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  auto status = fs->DeleteDirContents(kBucket, /*missing_dir_ok=*/false);
+
+  ASSERT_STATUS_NOT_OK(status);
+
+  // A denied delete and a throttled listing are not the same kind of failure,
+  // so the batch does not claim to be either one. Reporting the AccessDenied
+  // would hide that objects also went undeleted for a reason that may clear;
+  // reporting the throttle would invite a retry that can never finish.
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr) << status.ToString();
+
+  // What the tally buys is that nothing is LOST. Letting the first failed
+  // future win would have discarded the other page's keys entirely; both
+  // survive into the message.
+  EXPECT_NE(status.message().find("AccessDenied"), std::string::npos) << status.ToString();
+  EXPECT_NE(status.message().find("listing throttled"), std::string::npos) << status.ToString();
 }
 
 // ============================================================================
@@ -1761,6 +1914,152 @@ TEST_F(S3ProviderTest, TestAliyunOIDCChainProviderEmptySessionNameDefaults) {
   const auto value_end = body.find('&', value_start);
   const auto value = body.substr(value_start, value_end - value_start);
   EXPECT_FALSE(value.empty());
+}
+
+// The direction plain first-wins gets WRONG: a throttled key is deleted (and
+// recorded) BEFORE a denied one.
+//
+// Two pages, each with one key. Page 1's delete answers SlowDown, page 2's
+// answers AccessDenied, and the walk records them in that order -- no promise
+// juggling needed, because per-key errors enter the tally as their page's
+// delete completes.
+//
+// Under first-wins this batch answers "SlowDown", and a caller that believes it
+// retries a directory delete containing a key it will never be allowed to
+// remove -- forever. Transient sits at the bottom of the ladder precisely so
+// the later AccessDenied still decides.
+TEST_F(S3ProviderTest, DeleteDirDoesNotLetAnEarlyThrottleHideALaterDenial) {
+  constexpr const char* kBucket = "late-denial-bucket";
+
+  auto list_page = [](const char* key, bool truncated) {
+    return std::string(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>late-denial-bucket</Name>
+  <Prefix></Prefix>
+  <KeyCount>1</KeyCount>
+  <MaxKeys>1000</MaxKeys>
+  <IsTruncated>)xml") +
+           (truncated ? "true" : "false") + R"xml(</IsTruncated>
+  <Contents>
+    <Key>)xml" +
+           key +
+           R"xml(</Key>
+    <LastModified>2026-08-03T00:00:00.000Z</LastModified>
+    <ETag>&quot;etag&quot;</ETag>
+    <Size>1</Size>
+    <StorageClass>STANDARD</StorageClass>
+  </Contents>)xml" +
+           (truncated ? "\n  <NextContinuationToken>next-page</NextContinuationToken>" : "") + R"xml(
+</ListBucketResult>)xml";
+  };
+  auto delete_error = [](const char* key, const char* code, const char* msg) {
+    return std::string(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Error>
+    <Key>)xml") +
+           key + R"xml(</Key>
+    <Code>)xml" +
+           code +
+           R"xml(</Code>
+    <Message>)xml" +
+           msg +
+           R"xml(</Message>
+  </Error>
+</DeleteResult>)xml";
+  };
+
+  auto xml_headers = [](const std::string& body) {
+    Aws::Http::HeaderValueCollection headers;
+    headers["content-type"] = "application/xml";
+    headers["content-length"] = std::to_string(body.size());
+    return headers;
+  };
+
+  const auto page1 = list_page("dir/throttled", /*truncated=*/true);
+  const auto page2 = list_page("dir/denied", /*truncated=*/false);
+  const auto slow_down = delete_error("dir/throttled", "SlowDown", "please slow down");
+  const auto denied = delete_error("dir/denied", "AccessDenied", "delete denied by policy");
+
+  mock_client_->EnqueueResponse("list-type=2", Aws::Http::HttpResponseCode::OK, page1, xml_headers(page1));
+  mock_client_->EnqueueResponse("?delete", Aws::Http::HttpResponseCode::OK, slow_down, xml_headers(slow_down));
+  mock_client_->EnqueueResponse("list-type=2", Aws::Http::HttpResponseCode::OK, page2, xml_headers(page2));
+  mock_client_->EnqueueResponse("?delete", Aws::Http::HttpResponseCode::OK, denied, xml_headers(denied));
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  auto status = fs->DeleteDirContents(kBucket, /*missing_dir_ok=*/false);
+
+  ASSERT_STATUS_NOT_OK(status);
+
+  // Same verdict as the test above, whose failures arrive in the OPPOSITE
+  // order. That is the whole point of the pair: the answer is a property of the
+  // batch, not of which callback finished first. First-wins failed exactly
+  // here, reporting a throttle and inviting a retry that can never finish.
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr) << status.ToString();
+
+  // Neither reason is lost.
+  EXPECT_NE(status.message().find("AccessDenied"), std::string::npos) << status.ToString();
+  EXPECT_NE(status.message().find("SlowDown"), std::string::npos) << status.ToString();
+}
+
+// The other half of the rule: when every member failed the same KIND of way,
+// the batch says so. Without this the rule would quietly degrade into "more
+// than one failure means Unknown", and the commonest real case -- a whole
+// directory that cannot be deleted because the policy forbids it -- would stop
+// telling an operator the one thing they need.
+TEST_F(S3ProviderTest, DeleteDirKeepsTheVerdictWhenEveryFailureAgrees) {
+  constexpr const char* kBucket = "all-denied-bucket";
+
+  const std::string listing = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>all-denied-bucket</Name>
+  <Prefix></Prefix>
+  <KeyCount>2</KeyCount>
+  <MaxKeys>1000</MaxKeys>
+  <IsTruncated>false</IsTruncated>
+  <Contents><Key>dir/a</Key><LastModified>2026-08-03T00:00:00.000Z</LastModified><ETag>&quot;e&quot;</ETag><Size>1</Size><StorageClass>STANDARD</StorageClass></Contents>
+  <Contents><Key>dir/b</Key><LastModified>2026-08-03T00:00:00.000Z</LastModified><ETag>&quot;e&quot;</ETag><Size>1</Size><StorageClass>STANDARD</StorageClass></Contents>
+</ListBucketResult>)xml";
+  const std::string both_denied = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Error><Key>dir/a</Key><Code>AccessDenied</Code><Message>denied</Message></Error>
+  <Error><Key>dir/b</Key><Code>AccessDenied</Code><Message>denied</Message></Error>
+</DeleteResult>)xml";
+
+  auto xml_headers = [](const std::string& body) {
+    Aws::Http::HeaderValueCollection headers;
+    headers["content-type"] = "application/xml";
+    headers["content-length"] = std::to_string(body.size());
+    return headers;
+  };
+  mock_client_->EnqueueResponse("list-type=2", Aws::Http::HttpResponseCode::OK, listing, xml_headers(listing));
+  mock_client_->EnqueueResponse("?delete", Aws::Http::HttpResponseCode::OK, both_denied, xml_headers(both_denied));
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  auto status = fs->DeleteDirContents(kBucket, /*missing_dir_ok=*/false);
+
+  ASSERT_STATUS_NOT_OK(status);
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorAccessDenied) << status.ToString();
+  EXPECT_EQ(detail->category(), ErrorCategory::Config);
 }
 
 }  // namespace milvus_storage

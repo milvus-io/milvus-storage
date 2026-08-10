@@ -14,6 +14,8 @@
 
 #include "milvus-storage/filesystem/fs.h"
 
+#include <cctype>
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -24,6 +26,7 @@
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/filesystem/gcp/gcp_filesystem_producer.h"
 #include "milvus-storage/filesystem/local_fs_producer.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/common/lrucache.h"
 
@@ -165,12 +168,14 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
           return S3FileSystemProducer(config).Make();
         }
         default: {
-          return arrow::Status::Invalid("Unsupported cloud provider: " + config.cloud_provider);
+          return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                    "Unsupported cloud provider: " + config.cloud_provider);
         }
       }
     }
     default: {
-      return arrow::Status::Invalid("Unsupported storage type: " + config.storage_type);
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                "Unsupported storage type: " + config.storage_type);
     }
   }
 }
@@ -248,17 +253,18 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
     if (result.azure_client_id.empty() || result.azure_tenant_id.empty() || result.azure_credential_endpoint.empty() ||
         result.access_key_id.empty() || result.bucket_name.empty() || result.region.empty() ||
         result.request_timeout_ms <= 0) {
-      return arrow::Status::Invalid(
-          "Azure credential broker mode requires fs.azure_client_id, fs.azure_tenant_id, "
-          "fs.azure_credential_endpoint, fs.access_key_id, fs.bucket_name, fs.region, and a positive "
-          "fs.request_timeout_ms");
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                "Azure credential broker mode requires fs.azure_client_id, fs.azure_tenant_id, "
+                                "fs.azure_credential_endpoint, fs.access_key_id, fs.bucket_name, fs.region, and a "
+                                "positive fs.request_timeout_ms");
     }
 
     arrow::util::Uri endpoint;
     auto endpoint_status = endpoint.Parse(result.azure_credential_endpoint);
     if (!endpoint_status.ok() || endpoint.host().empty() ||
         (endpoint.scheme() != "http" && endpoint.scheme() != "https")) {
-      return arrow::Status::Invalid("fs.azure_credential_endpoint must be a valid HTTP(S) URL");
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                "fs.azure_credential_endpoint must be a valid HTTP(S) URL");
     }
   }
   return arrow::Status::OK();
@@ -291,19 +297,22 @@ arrow::Result<std::unordered_map<std::string, api::Properties>> ExtractExternalF
     std::string remainder = key.substr(prefix.size());
     size_t dot_pos = remainder.find('.');
     if (dot_pos == std::string::npos) {
-      return arrow::Status::Invalid("Invalid external filesystem property format: '", key,
-                                    "'. Expected format: extfs.<name>.<property>");
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                "Invalid external filesystem property format: '", key,
+                                "'. Expected format: extfs.<name>.<property>");
     }
 
     std::string fs_name = remainder.substr(0, dot_pos);
     std::string fs_property = remainder.substr(dot_pos + 1);
 
     if (fs_name.empty()) {
-      return arrow::Status::Invalid("Empty external filesystem name in property: '", key, "'");
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid, "Empty external filesystem name in property: '",
+                                key, "'");
     }
 
     if (fs_property.empty()) {
-      return arrow::Status::Invalid("Empty property name in external filesystem property: '", key, "'");
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                "Empty property name in external filesystem property: '", key, "'");
     }
 
     // Map to standard fs.* property name, convert through SetValue for proper type resolution
@@ -311,7 +320,8 @@ arrow::Result<std::unordered_map<std::string, api::Properties>> ExtractExternalF
     if (auto err =
             api::SetValue(external_fs_map[fs_name], standard_key.c_str(), std::get<std::string>(value).c_str(), false);
         err) {
-      return arrow::Status::Invalid("Failed to set external fs property '", standard_key, "': ", *err);
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid, "Failed to set external fs property '",
+                                standard_key, "': ", *err);
     }
   }
 
@@ -391,9 +401,10 @@ arrow::Result<ArrowFileSystemConfig> FilesystemCache::resolve_config(const api::
         }
       }
 
-      return arrow::Status::Invalid("No matching external filesystem config (extfs.*) found for URI '", path,
-                                    "' (address='", uri.address, "', bucket='", uri.bucket_name,
-                                    "'). Please check your extfs.* properties.");
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                "No matching external filesystem config (extfs.*) found for URI '", path,
+                                "' (address='", uri.address, "', bucket='", uri.bucket_name,
+                                "'). Please check your extfs.* properties.");
     }
   }
 
@@ -412,7 +423,31 @@ arrow::Result<StorageUri> StorageUri::Parse(const std::string& uri, bool include
 
   StorageUri result;
 
-  // If parsing fails or scheme is empty, treat as relative path
+  // A string with no scheme is a relative path, and that is a legitimate,
+  // extremely common input -- so it stays a success.
+  //
+  // A string that HAS a scheme but will not parse is different: "s3://bucket/%ZZ"
+  // or "http://[::1" is a URI the caller meant, written wrong. Treating it as a
+  // relative path silently sent it to whatever fs.* the deployment defaults to,
+  // where it failed later as a missing key -- pointing the reader at the object
+  // store instead of at the malformed string. The scheme test is deliberately
+  // syntactic (RFC 3986 shape) rather than a list of known schemes, so a typo'd
+  // scheme is still reported as a bad URI rather than a filename.
+  if (!status.ok()) {
+    // RFC 3986 shape is "scheme:" -- the "//" authority is optional, so keying
+    // on the literal "://" let "s3:/bucket/%ZZ" through to be treated as a
+    // local relative path. Requiring at least two scheme characters keeps a
+    // Windows-style "C:\..." out.
+    const auto colon = uri.find(':');
+    const bool looks_like_uri =
+        colon != std::string::npos && colon > 1 && std::isalpha(static_cast<unsigned char>(uri.front())) != 0 &&
+        std::all_of(uri.begin(), uri.begin() + static_cast<std::ptrdiff_t>(colon),
+                    [](unsigned char c) { return std::isalnum(c) != 0 || c == '+' || c == '-' || c == '.'; });
+    if (looks_like_uri) {
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                "Storage URI is malformed and cannot be parsed: ", uri, " (", status.message(), ")");
+    }
+  }
   if (!status.ok() || parsed.scheme().empty()) {
     result.scheme = "";
     result.address = "";
@@ -431,20 +466,21 @@ arrow::Result<StorageUri> StorageUri::Parse(const std::string& uri, bool include
 
   std::string path = parsed.path();
   if (path.empty()) {
-    return arrow::Status::Invalid("Storage URI missing bucket and key: ", uri);
+    return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid, "Storage URI missing bucket and key: ", uri);
   }
   if (path[0] == '/') {
     path = path.substr(1);
   }
   if (path.empty()) {
-    return arrow::Status::Invalid("Storage URI missing bucket/container name: ", uri);
+    return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                              "Storage URI missing bucket/container name: ", uri);
   }
 
   if (include_address) {
     result.address = host;
     size_t slash_pos = path.find('/');
     if (slash_pos == std::string::npos) {
-      return arrow::Status::Invalid("Missing path in storage URI: ", uri);
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid, "Missing path in storage URI: ", uri);
     }
     result.bucket_name = path.substr(0, slash_pos);
     result.key = path.substr(slash_pos + 1);
@@ -457,7 +493,8 @@ arrow::Result<StorageUri> StorageUri::Parse(const std::string& uri, bool include
   }
 
   if (result.bucket_name.empty()) {
-    return arrow::Status::Invalid("Missing bucket/container name in storage URI: ", uri);
+    return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                              "Missing bucket/container name in storage URI: ", uri);
   }
 
   return result;
@@ -465,13 +502,14 @@ arrow::Result<StorageUri> StorageUri::Parse(const std::string& uri, bool include
 
 arrow::Result<std::string> StorageUri::Make(const StorageUri& uri, bool include_address) {
   if (uri.scheme.empty()) {
-    return arrow::Status::Invalid("StorageUri::Make: scheme must not be empty");
+    return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid, "StorageUri::Make: scheme must not be empty");
   }
   if (uri.bucket_name.empty()) {
-    return arrow::Status::Invalid("StorageUri::Make: bucket_name must not be empty");
+    return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                              "StorageUri::Make: bucket_name must not be empty");
   }
   if (uri.key.empty()) {
-    return arrow::Status::Invalid("StorageUri::Make: key must not be empty");
+    return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid, "StorageUri::Make: key must not be empty");
   }
 
   if (!include_address) {

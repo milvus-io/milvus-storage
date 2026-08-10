@@ -61,10 +61,18 @@ LoonFFIResult loon_exttable_explore(const char** columns,
     }
 
     auto fmt_res = milvus_storage::Format::get(format_str);
-    RETURN_ARROW_ERROR_IF(fmt_res.status(), LOON_INVALID_ARGS, fmt_res.status().ToString());
+    RETURN_USER_SOURCE_ERROR_IF(fmt_res.status(), LOON_SOURCE_INVALID, fmt_res.status().ToString());
 
+    // explore_dir and the extfs.* credentials come straight from the user's
+    // external-source definition, so a missing bucket or a rejected key here
+    // is a user error, not a system failure. See
+    // UserSourceErrorCodeFromStatus().
+    // Same provenance question as get_file_info: only an absolute explore_dir
+    // is a location the caller chose.
+    const bool location_is_user_supplied = milvus_storage::HasUriScheme(explore_dir);
     auto files_result = fmt_res.ValueOrDie()->explore(explore_dir, properties_map);
-    RETURN_ARROW_ERROR_IF(files_result.status(), LOON_ARROW_ERROR, files_result.status().ToString());
+    RETURN_USER_SOURCE_ERROR_IF_AT(files_result.status(), LOON_ARROW_ERROR, location_is_user_supplied,
+                                   files_result.status().ToString());
     auto files = files_result.ValueOrDie();
 
     std::vector<std::string> columns_cpp;
@@ -77,7 +85,10 @@ LoonFFIResult loon_exttable_explore(const char** columns,
     cgs.push_back(
         std::make_shared<ColumnGroup>(ColumnGroup{.columns = columns_cpp, .format = format_str, .files = files}));
 
-    // commit the column groups
+    // commit the column groups. This filesystem is the storage the manifest
+    // gets committed to (base_path), not the user's explore location -- keep
+    // the producer's classification rather than re-tagging a commit-side
+    // bucket/credential/missing failure as the user's error.
     auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map);
     RETURN_ARROW_ERROR_IF(fs_result.status(), LOON_ARROW_ERROR, fs_result.status().ToString());
     auto transaction_result = Transaction::Open(fs_result.ValueOrDie(), base_path);
@@ -122,36 +133,50 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
     }
 
     auto fmt_res = milvus_storage::Format::get(format_str);
-    RETURN_ARROW_ERROR_IF(fmt_res.status(), LOON_INVALID_ARGS, fmt_res.status().ToString());
+    RETURN_USER_SOURCE_ERROR_IF(fmt_res.status(), LOON_SOURCE_INVALID, fmt_res.status().ToString());
 
-    // Resolve filesystem and validate file existence before creating reader
+    // Resolve filesystem and validate file existence before creating reader.
+    //
+    // Whether a config failure here is the caller's depends on whether they
+    // named a concrete location. An absolute URI is theirs; a relative path is
+    // resolved against the deployment's own fs.* settings, and blaming the
+    // caller for those sent them to fix something only an operator can reach.
+    const bool location_is_user_supplied = milvus_storage::HasUriScheme(file_path);
     auto fs_res = milvus_storage::FilesystemCache::getInstance().get(properties_map, file_path);
-    RETURN_ARROW_ERROR_IF(fs_res.status(), LOON_ARROW_ERROR, fs_res.status().ToString());
+    RETURN_USER_SOURCE_ERROR_IF_AT(fs_res.status(), LOON_ARROW_ERROR, location_is_user_supplied,
+                                   fs_res.status().ToString());
     auto fs = fs_res.ValueOrDie();
 
     auto uri_res = milvus_storage::StorageUri::Parse(file_path);
-    RETURN_ARROW_ERROR_IF(uri_res.status(), LOON_ARROW_ERROR, "Failed to parse file_path URI '", file_path,
-                          "': ", uri_res.status().ToString());
+    RETURN_USER_SOURCE_ERROR_IF(uri_res.status(), LOON_SOURCE_INVALID, "Failed to parse file_path URI '", file_path,
+                                "': ", uri_res.status().ToString());
     std::string resolved_path = uri_res->scheme.empty() ? file_path : uri_res->key;
 
+    // file_path is user-supplied: not-found / access-denied are user errors.
     auto file_info_res = fs->GetFileInfo(resolved_path);
-    RETURN_ARROW_ERROR_IF(file_info_res.status(), LOON_ARROW_ERROR, file_info_res.status().ToString());
+    // Authentication usually fails HERE rather than while resolving the
+    // filesystem, so this carries the same provenance -- otherwise a rejected
+    // deployment credential still came back as the caller's fault.
+    RETURN_USER_SOURCE_ERROR_IF_AT(file_info_res.status(), LOON_ARROW_ERROR, location_is_user_supplied,
+                                   file_info_res.status().ToString());
     auto file_info = file_info_res.ValueOrDie();
 
     if (file_info.type() == arrow::fs::FileType::NotFound) {
-      RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", file_path);
+      RETURN_ERROR(LOON_SOURCE_INVALID, "File not found: ", file_path);
     }
     if (file_info.type() != arrow::fs::FileType::File) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Path is not a file: ", file_path);
+      RETURN_ERROR(LOON_SOURCE_INVALID, "Path is not a file: ", file_path);
     }
 
     // Create a ColumnGroupFile to pass to the reader factory
     ColumnGroupFile cg_file{std::string(file_path), 0, 0, {}};
     auto reader_res = fmt_res.ValueOrDie()->create_reader(nullptr, cg_file, properties_map, {}, nullptr);
-    RETURN_ARROW_ERROR_IF(reader_res.status(), LOON_ARROW_ERROR, reader_res.status().ToString());
+    RETURN_USER_SOURCE_ERROR_IF_AT(reader_res.status(), LOON_ARROW_ERROR, location_is_user_supplied,
+                                   reader_res.status().ToString());
 
     auto rg_infos_res = reader_res.ValueOrDie()->get_row_group_infos();
-    RETURN_ARROW_ERROR_IF(rg_infos_res.status(), LOON_ARROW_ERROR, rg_infos_res.status().ToString());
+    RETURN_USER_SOURCE_ERROR_IF_AT(rg_infos_res.status(), LOON_ARROW_ERROR, location_is_user_supplied,
+                                   rg_infos_res.status().ToString());
     auto& rg_infos = rg_infos_res.ValueOrDie();
     *out_num_of_rows = rg_infos.empty() ? 0 : rg_infos.back().end_offset;
 
@@ -163,19 +188,6 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
   RETURN_UNREACHABLE();
 }
 
-static arrow::Result<std::shared_ptr<milvus_storage::api::Manifest>> read_manifest(const char* path,
-                                                                                   const ::LoonProperties* properties) {
-  milvus_storage::api::Properties properties_map;
-
-  auto opt = milvus_storage::api::ConvertFFIProperties(properties_map, properties);
-  if (opt != std::nullopt) {
-    return arrow::Status::Invalid("Failed to parse properties [", opt->c_str(), "]");
-  }
-
-  ARROW_ASSIGN_OR_RAISE(auto fs, milvus_storage::FilesystemCache::getInstance().get(properties_map, path));
-  return milvus_storage::api::Manifest::ReadFrom(fs, path);
-}
-
 LoonFFIResult loon_exttable_read_manifest(const char* manifest_file_path,
                                           const ::LoonProperties* properties,
                                           LoonManifest** out_manifest) {
@@ -185,7 +197,22 @@ LoonFFIResult loon_exttable_read_manifest(const char* manifest_file_path,
   }
 
   try {
-    auto manifest_res = read_manifest(manifest_file_path, properties);
+    // Unlike explore/get_file_info, this entry point is NOT handed a
+    // user-supplied location: manifest_file_path is the path
+    // loon_exttable_explore generated and milvus stored. A missing manifest is
+    // a GC race or lost data (Missing); a rejected credential or absent bucket
+    // is deployment configuration (Config). The producer's classification
+    // stands -- nothing here may re-tag to LOON_SOURCE_INVALID.
+    milvus_storage::api::Properties properties_map;
+    auto opt = milvus_storage::api::ConvertFFIProperties(properties_map, properties);
+    if (opt != std::nullopt) {
+      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
+    }
+
+    auto fs_res = milvus_storage::FilesystemCache::getInstance().get(properties_map, manifest_file_path);
+    RETURN_ARROW_ERROR_IF(fs_res.status(), LOON_ARROW_ERROR, fs_res.status().ToString());
+
+    auto manifest_res = milvus_storage::api::Manifest::ReadFrom(fs_res.ValueOrDie(), manifest_file_path);
     RETURN_ARROW_ERROR_IF(manifest_res.status(), LOON_ARROW_ERROR, manifest_res.status().ToString());
     auto manifest = manifest_res.ValueOrDie();
 

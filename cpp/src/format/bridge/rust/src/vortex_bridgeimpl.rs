@@ -1192,6 +1192,60 @@ impl VortexFile {
         &self,
         window: crate::vortex_ffi::CoalescingWindow,
     ) -> Result<Box<VortexScanBuilder>> {
+        guard_decoder_panic(&self.path, "scan_builder", || self.scan_builder_unguarded(window))
+    }
+
+    pub(crate) fn scan_builder_with_schema(
+        &self,
+        in_schema: *mut u8,
+    ) -> Result<Box<VortexScanBuilder>> {
+        guard_decoder_panic(&self.path, "scan_builder_with_schema", || self.scan_builder_with_schema_unguarded(in_schema))
+    }
+
+    pub(crate) unsafe fn get_schema(&self, out_schema: *mut u8) -> Result<()> {
+        guard_decoder_panic(&self.path, "get_schema", || unsafe { self.get_schema_unguarded(out_schema) })
+    }
+
+    pub(crate) fn splits(&self) -> Result<Vec<u64>> {
+        guard_decoder_panic(&self.path, "splits", || self.splits_unguarded())
+    }
+
+    pub(crate) fn row_group_zone_map_count(&self) -> Result<u64> {
+        guard_decoder_panic(&self.path, "row_group_zone_map_count", || self.row_group_zone_map_count_unguarded())
+    }
+
+    pub(crate) fn row_group_zone_map_data_before_zones(&self) -> Result<bool> {
+        guard_decoder_panic(&self.path, "row_group_zone_map_data_before_zones", || self.row_group_zone_map_data_before_zones_unguarded())
+    }
+
+    pub(crate) fn zone_map_segment_ids(&self) -> Result<Vec<u64>> {
+        guard_decoder_panic(&self.path, "zone_map_segment_ids", || self.zone_map_segment_ids_unguarded())
+    }
+
+    pub(crate) fn footer_byte_range(&self, file_size: u64) -> Result<Vec<u64>> {
+        guard_decoder_panic(&self.path, "footer_byte_range", || self.footer_byte_range_unguarded(file_size))
+    }
+
+    pub(crate) fn segment_bytes(&self, flat_segment_id: u64) -> Result<Vec<u64>> {
+        guard_decoder_panic(&self.path, "segment_bytes", || self.segment_bytes_unguarded(flat_segment_id))
+    }
+
+    pub(crate) fn field_layout_units(&self, field_name: &str) -> Result<Vec<u64>> {
+        guard_decoder_panic(&self.path, "field_layout_units", || self.field_layout_units_unguarded(field_name))
+    }
+
+    pub(crate) fn prune_row_groups(
+        &self,
+        predicate: &str,
+        candidate_row_group_ids: &[u64],
+    ) -> Result<Vec<u64>> {
+        guard_decoder_panic(&self.path, "prune_row_groups", || self.prune_row_groups_unguarded(predicate, candidate_row_group_ids))
+    }
+
+    fn scan_builder_unguarded(
+        &self,
+        window: crate::vortex_ffi::CoalescingWindow,
+    ) -> Result<Box<VortexScanBuilder>> {
         let file = self.open_with_coalescing_window(window)?;
         let num_natural_splits = file.splits().map_err(VortexError::from)?.len();
         Ok(Box::new(VortexScanBuilder {
@@ -1207,7 +1261,7 @@ impl VortexFile {
         }))
     }
 
-    pub(crate) fn scan_builder_with_schema(
+    fn scan_builder_with_schema_unguarded(
         &self,
         in_schema: *mut u8,
     ) -> Result<Box<VortexScanBuilder>> {
@@ -1234,7 +1288,7 @@ impl VortexFile {
         }))
     }
 
-    pub(crate) unsafe fn get_schema(&self, out_schema: *mut u8) -> Result<()> {
+    unsafe fn get_schema_unguarded(&self, out_schema: *mut u8) -> Result<()> {
         let dtype = self.inner.dtype();
         let arrow_schema = dtype.to_arrow_schema()?;
         let ffi_schema = FFI_ArrowSchema::try_from(&arrow_schema)?;
@@ -1242,9 +1296,9 @@ impl VortexFile {
         Ok(())
     }
 
-    pub(crate) fn splits(&self) -> Result<Vec<u64>> {
+    fn splits_unguarded(&self) -> Result<Vec<u64>> {
         // get the Vec<Range<u64>> from the inner file
-        let ranges = self.inner.splits().map_err(|e| VortexError::from(e))?;
+        let ranges = self.inner.splits().map_err(VortexError::from)?;
 
         // map each Range<u64> to its end (right-hand side)
         let ends = ranges
@@ -1286,7 +1340,7 @@ impl VortexFile {
             .to_string()
     }
 
-    pub(crate) fn row_group_zone_map_count(&self) -> Result<u64> {
+    fn row_group_zone_map_count_unguarded(&self) -> Result<u64> {
         let root = self.inner.footer().layout();
         if root.encoding_id().as_ref() != LAYOUT_ID {
             return Ok(0);
@@ -1294,7 +1348,7 @@ impl VortexFile {
         Ok(root.child(1)?.row_count())
     }
 
-    pub(crate) fn row_group_zone_map_data_before_zones(&self) -> Result<bool> {
+    fn row_group_zone_map_data_before_zones_unguarded(&self) -> Result<bool> {
         let root = self.inner.footer().layout();
         if root.encoding_id().as_ref() != LAYOUT_ID {
             return Ok(false);
@@ -1326,7 +1380,7 @@ impl VortexFile {
         Ok(max_data_offset < min_zones_offset)
     }
 
-    pub(crate) fn zone_map_segment_ids(&self) -> Result<Vec<u64>> {
+    fn zone_map_segment_ids_unguarded(&self) -> Result<Vec<u64>> {
         let root = self.inner.footer().layout();
         let mut segment_ids = Vec::new();
         collect_zone_map_segment_ids(root, &mut segment_ids)?;
@@ -1334,22 +1388,26 @@ impl VortexFile {
     }
 
     /// Returns [offset, length] for the full footer/tail region.
-    pub(crate) fn footer_byte_range(&self, file_size: u64) -> Result<Vec<u64>> {
+    fn footer_byte_range_unguarded(&self, file_size: u64) -> Result<Vec<u64>> {
         let footer = self.inner.footer();
         let footer_start = footer_start_from_segments(footer.segment_map())?;
         if footer_start > file_size {
-            anyhow::bail!(
+            // Reported as a plain error. The C++ footer reader does its own
+            // bounds check on the bytes it read itself, and that is where a
+            // corruption verdict belongs: claiming it from here means claiming
+            // it from a string, which is the thing this bridge stopped doing.
+            return Err(anyhow::anyhow!(
                 "Vortex footer start {} exceeds file size {}",
                 footer_start,
                 file_size
-            );
+            ));
         } else {
             Ok(vec![footer_start, file_size - footer_start])
         }
     }
 
     /// Returns [offset, length] for a given flat segment ID.
-    pub(crate) fn segment_bytes(&self, flat_segment_id: u64) -> Result<Vec<u64>> {
+    fn segment_bytes_unguarded(&self, flat_segment_id: u64) -> Result<Vec<u64>> {
         let footer = self.inner.footer();
         let segment_map = footer.segment_map();
         let idx = flat_segment_id as usize;
@@ -1372,7 +1430,7 @@ impl VortexFile {
     ///                 flat_segment_id0, flat_segment_id1, ...]
     ///
     /// V2 units use row-group granularity. V1 units use field/flat granularity.
-    pub(crate) fn field_layout_units(&self, field_name: &str) -> Result<Vec<u64>> {
+    fn field_layout_units_unguarded(&self, field_name: &str) -> Result<Vec<u64>> {
         let footer = self.inner.footer();
         let root = footer.layout();
 
@@ -1385,7 +1443,7 @@ impl VortexFile {
         Ok(units)
     }
 
-    pub(crate) fn prune_row_groups(
+    fn prune_row_groups_unguarded(
         &self,
         predicate: &str,
         candidate_row_group_ids: &[u64],
@@ -1405,7 +1463,10 @@ impl VortexFile {
             &expr,
             candidate_row_group_ids,
         )
-        .map_err(Into::into)
+        // Pruning decodes zone-map segments, so a FlatBuffers/Serde failure
+        // here is the same corruption it would be anywhere else -- Into::into
+        // stringified it into a generic 2044.
+        .map_err(anyhow::Error::new)
     }
 }
 
@@ -1561,6 +1622,41 @@ fn build_v1_flat_units(root: &LayoutRef, field_name: &str) -> Result<Vec<u64>> {
     Ok(result)
 }
 
+/// Turn a panic escaping the vortex decoder into a classified error.
+///
+/// These are `extern "Rust"` entry points: cxx converts a returned Err into a
+/// C++ exception, but an unwinding PANIC crossing that boundary aborts the
+/// process. Three altered bytes in a healthy file's footer were enough to reach
+/// one -- a single corrupt object could take down the node, which no error code
+/// helps with afterwards.
+///
+/// The verdict is deliberately NOT corruption. A panic is the decoder losing
+/// its footing, not the decoder reporting bad bytes, and it is just as likely
+/// to be a bug here or a misused runtime as a damaged file. Calling it
+/// corruption sends an operator to quarantine and rebuild an object that may be
+/// perfectly intact -- and the rebuilt copy would panic identically. It lands
+/// in the same bucket as any other failure this layer cannot explain: report
+/// it, do not retry it, do not accuse the data.
+///
+/// The payload is the only thing that says WHERE the decoder died, so it is
+/// carried into the message rather than replaced by the word "panicked".
+fn panic_to_error(payload: &Box<dyn std::any::Any + Send>, op: &str) -> VortexError {
+    let detail = payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "non-string panic payload".to_string());
+    vortex::error::vortex_err!("vortex decoder panicked in {op}: {detail}")
+}
+
+fn guard_decoder_panic<T>(path: &str, op: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(result) => result,
+        Err(payload) => Err(anyhow::Error::new(panic_to_error(&payload, &format!("{op} for {path}")))),
+    }
+}
+
+
 async fn open_file_impl(
     fswrapper_addr: usize,
     path: String,
@@ -1608,12 +1704,14 @@ pub(crate) unsafe fn open_file(
     file_size: u64,
     footer_size: u64,
 ) -> Result<Box<VortexFile>> {
-    VORTEX_RT.block_on(open_file_impl(
-        fswrapper_ptr as usize,
-        path.to_string(),
-        file_size,
-        footer_size,
-    ))
+    guard_decoder_panic(path, "open_file", || {
+        VORTEX_RT.block_on(open_file_impl(
+            fswrapper_ptr as usize,
+            path.to_string(),
+            file_size,
+            footer_size,
+        ))
+    })
 }
 
 type VortexOpenAsyncCallback =
@@ -1684,10 +1782,14 @@ pub unsafe extern "C" fn vortex_open_file_async(
                 unsafe { callback(ctx_addr as *mut c_void, handle, std::ptr::null()) };
             }
             Ok(Err(error)) => open_callback_error(callback, ctx_addr as *mut c_void, error),
-            Err(_) => open_callback_error(
+            // Same verdict the sync path reaches through guard_decoder_panic:
+            // the same three smashed bytes must not classify differently just
+            // because milvus opened the file asynchronously. Dropping the
+            // payload also threw away the only clue about where it died.
+            Err(payload) => open_callback_error(
                 callback,
                 ctx_addr as *mut c_void,
-                "vortex async open panicked",
+                panic_to_error(&payload, "open_file_async"),
             ),
         }
     });
@@ -1830,8 +1932,30 @@ impl std::iter::Iterator for VortexRecordBatchReader {
     type Item = Result<RecordBatch, ArrowError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.iter.next() {
-            Some(result) => Some(result.map_err(|e| ArrowError::ExternalError(Box::new(e)))),
+        // The pull itself is guarded, not just its error. Decoding happens
+        // lazily inside iter.next(), so a panic there fires BEFORE any map_err
+        // and unwinds straight out of the Arrow C stream callback -- the
+        // entry-point guards never see this boundary, and a one-byte-corrupt
+        // file that opens cleanly aborted the process on its first batch.
+        let pulled =
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.iter.next())) {
+                Ok(item) => item,
+                Err(payload) => {
+                    return Some(Err(ArrowError::ExternalError(Box::new(
+                        panic_to_error(&payload, "record batch stream"),
+                    ))));
+                }
+            };
+        match pulled {
+            // tag_if_corruption, so the marker rides the ArrowError's Display
+            // through the FFI stream; VortexErrorTranslatingReader on the C++
+            // side parses it back out of ReadNext's message. Without this the
+            // sync path stringified the typed error and corruption found while
+            // STREAMING batches landed on 2044, while the async collector's
+            // identical failure landed on 2024.
+            Some(result) => {
+                Some(result.map_err(|e| ArrowError::ExternalError(Box::new(e))))
+            }
             None => None,
         }
     }
@@ -1920,7 +2044,29 @@ pub(crate) fn scan_builder_into_raw_handle(builder: Box<VortexScanBuilder>) -> u
 /// # Safety
 ///
 /// out_stream should be properly aligned according to the Arrow C stream interface and valid for write.
+// Every typed bail before the reader exists goes through tag_if_corruption,
+// same as the batch iterator after it -- a Serde/FlatBuffers failure while
+// PREPARING the scan is the same corruption as one while streaming it, and
+// untagged it stringified into a generic 2044.
+//
+// Panic-guarded, like every other extern "Rust" entry point on the decoder.
+// This one was not, and the hole was real rather than theoretical: the guard at
+// line ~2255 sits INSIDE the per-split decode task, so it covers into_arrow and
+// nothing else. `inner.prepare()`, `execute_stream()` and `block_on_stream()`
+// all run out here on the caller's thread, and a panic in any of them -- a
+// vortex invariant, a nested-runtime misuse, an out-of-range split index --
+// unwinds straight across the cxx boundary and aborts the process. An error
+// code, whichever one, is strictly better than taking the node down.
 pub(crate) unsafe fn scan_builder_into_stream(
+    builder: Box<VortexScanBuilder>,
+    out_stream: *mut u8,
+) -> Result<()> {
+    guard_decoder_panic("<scan>", "scan_builder_into_stream", || unsafe {
+        scan_builder_into_stream_unguarded(builder, out_stream)
+    })
+}
+
+unsafe fn scan_builder_into_stream_unguarded(
     builder: Box<VortexScanBuilder>,
     out_stream: *mut u8,
 ) -> Result<()> {
@@ -1959,8 +2105,20 @@ pub(crate) unsafe fn scan_builder_into_stream(
     // part of large takes onto the caller thread. ScanBuilder::map runs on the spawned split task,
     // preserving the scan's parallelism while producing the same Arrow batches.
     let inner = inner.map(move |chunk| {
-        let arrow = chunk.into_arrow(&data_type)?;
-        Ok(RecordBatch::from(arrow.as_struct().clone()))
+        // Caught HERE, inside the decode task, because the outer guard on the
+        // stream pull only ever sees the runtime's secondary panic ("Runtime
+        // dropped task without completing it") once this task has already died.
+        // The real cause -- "range end index N out of range", "output buffer
+        // sized too small" -- exists only on this side; without this it reached
+        // the caller as stderr noise while the returned error said nothing
+        // about what actually broke.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let arrow = chunk.into_arrow(&data_type)?;
+            Ok::<RecordBatch, VortexError>(RecordBatch::from(arrow.as_struct().clone()))
+        })) {
+            Ok(result) => result,
+            Err(payload) => Err(panic_to_error(&payload, "record batch decode")),
+        }
     });
 
     let iter: Box<dyn Iterator<Item = vortex::error::VortexResult<RecordBatch>> + Send> =
@@ -2072,12 +2230,16 @@ pub unsafe extern "C" fn vortex_scan_collect_async(
                         (schema.clone(), schema, None)
                     }
                     Err(e) => {
-                        callback_error(callback, ctx, format!("schema error: {e}"));
+                        callback_error(
+                            callback,
+                            ctx,
+                            format!("schema error: {}", e),
+                        );
                         return;
                     }
                 },
                 Err(e) => {
-                    callback_error(callback, ctx, format!("dtype error: {e}"));
+                    callback_error(callback, ctx, format!("dtype error: {}", e));
                     return;
                 }
             },
@@ -2143,11 +2305,17 @@ pub unsafe extern "C" fn vortex_scan_collect_async(
                 unsafe { std::ptr::write(out_stream, stream) };
                 unsafe { callback(ctx, out_stream, std::ptr::null()) };
             }
-            Ok(Err(error)) => callback_error(callback, send_ctx as *mut c_void, error),
-            Err(_) => callback_error(
+            Ok(Err(error)) => {
+                callback_error(callback, send_ctx as *mut c_void, error.to_string())
+            }
+            // Same verdict and same detail the sync stream now produces --
+            // dropping the payload left an operator with "panicked" and nothing
+            // to act on, and dropping the marker made the async path report
+            // 2044 for bytes the sync path calls 119.
+            Err(payload) => callback_error(
                 callback,
                 send_ctx as *mut c_void,
-                "vortex async scan panicked",
+                panic_to_error(&payload, "async scan"),
             ),
         }
     });

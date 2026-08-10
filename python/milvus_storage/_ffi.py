@@ -22,18 +22,45 @@ _ERROR_CODE_SYMBOLS = (
     "loon_errcode_fault_inject",
     "loon_errcode_not_support",
     "loon_errcode_file_not_found",
+    "loon_errcode_source_invalid",
+    "loon_errcode_packed_invalid_args",
+    "loon_errcode_packed_storage_io",
+    "loon_errcode_packed_metadata_corrupted",
+    "loon_errcode_packed_file_corrupted",
+    "loon_errcode_packed_arrow_error",
+    "loon_errcode_packed_unexpected",
     "loon_errcode_aws_no_such_upload",
     "loon_errcode_aws_conflict",
     "loon_errcode_aws_precondition_failed",
     "loon_errcode_aws_not_found",
     "loon_errcode_aws_access_denied",
-    "loon_errcode_aws_non_retryable",
     "loon_errcode_transient_network",
     "loon_errcode_transient_timeout",
     "loon_errcode_transient_throttling",
     "loon_errcode_transient_service",
+    "loon_errcode_transient_unspecified",
     "loon_errcode_txn_exhausted_retry",
     "loon_errcode_txn_resolution_failed",
+    "loon_errcode_storage_config_invalid",
+    "loon_errcode_manifest_corrupted",
+    "loon_errcode_aws_bucket_not_found",
+    "loon_errcode_vortex_file_corrupted",
+)
+
+# Error categories from ffi_c.h. Each is a coarse statement of what happened,
+# not of what to do about it: milvus-storage is never told what operation the
+# caller was performing, so whether the work can be redone, or who should hear
+# about the failure, is the caller's to decide. Match on the code when you need
+# precision, on the category when you do not. See docs/error-codes.md.
+_ERROR_CATEGORY_SYMBOLS = (
+    "loon_error_category_unknown",
+    "loon_error_category_user",
+    "loon_error_category_config",
+    "loon_error_category_transient",
+    "loon_error_category_conflict",
+    "loon_error_category_missing",
+    "loon_error_category_corrupted",
+    "loon_error_category_permanent",
 )
 
 # Chunk metadata type flags from ffi_c.h
@@ -103,23 +130,44 @@ _ffi.cdef(
     extern int loon_errcode_fault_inject;
     extern int loon_errcode_not_support;
     extern int loon_errcode_file_not_found;
+    extern int loon_errcode_source_invalid;
+    extern int loon_errcode_packed_invalid_args;
+    extern int loon_errcode_packed_storage_io;
+    extern int loon_errcode_packed_metadata_corrupted;
+    extern int loon_errcode_packed_file_corrupted;
+    extern int loon_errcode_packed_arrow_error;
+    extern int loon_errcode_packed_unexpected;
     extern int loon_errcode_aws_no_such_upload;
     extern int loon_errcode_aws_conflict;
     extern int loon_errcode_aws_precondition_failed;
     extern int loon_errcode_aws_not_found;
     extern int loon_errcode_aws_access_denied;
-    extern int loon_errcode_aws_non_retryable;
     extern int loon_errcode_transient_network;
     extern int loon_errcode_transient_timeout;
     extern int loon_errcode_transient_throttling;
     extern int loon_errcode_transient_service;
+    extern int loon_errcode_transient_unspecified;
     extern int loon_errcode_txn_exhausted_retry;
     extern int loon_errcode_txn_resolution_failed;
+    extern int loon_errcode_storage_config_invalid;
+    extern int loon_errcode_manifest_corrupted;
+    extern int loon_errcode_aws_bucket_not_found;
+    extern int loon_errcode_vortex_file_corrupted;
+
+    extern int loon_error_category_unknown;
+    extern int loon_error_category_user;
+    extern int loon_error_category_config;
+    extern int loon_error_category_transient;
+    extern int loon_error_category_conflict;
+    extern int loon_error_category_missing;
+    extern int loon_error_category_corrupted;
+    extern int loon_error_category_permanent;
 
     int loon_ffi_is_success(LoonFFIResult* result);
     const char* loon_ffi_get_errmsg(LoonFFIResult* result);
     void loon_ffi_free_result(LoonFFIResult* result);
-    int loon_ffi_is_retryable_errcode(int err_code);
+    int loon_ffi_error_category(int err_code);
+    const char* loon_ffi_error_name(int err_code);
 
     // ==================== Properties C Interface ====================
     typedef struct LoonProperty {
@@ -642,13 +690,13 @@ def get_library() -> MilvusStorageLib:
 
 
 def _load_error_code_constants(lib) -> None:
-    """Load FFI error code constants from exported native symbols."""
-    for name in _ERROR_CODE_SYMBOLS:
+    """Load FFI error code and category constants from exported native symbols."""
+    for name in _ERROR_CODE_SYMBOLS + _ERROR_CATEGORY_SYMBOLS:
         globals()[name] = int(getattr(lib, name))
 
 
 def __getattr__(name: str):
-    if name in _ERROR_CODE_SYMBOLS:
+    if name in _ERROR_CODE_SYMBOLS or name in _ERROR_CATEGORY_SYMBOLS:
         get_library()
         return globals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

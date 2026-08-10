@@ -291,15 +291,27 @@ static inline std::string ToRelative(const std::string& path,
   return path;
 }
 
-static inline std::string ToAbsolute(const std::string& path,
-                                     const std::optional<std::string>& base_path,
-                                     const std::string& dir_path) {
+static inline arrow::Result<std::string> ToAbsolute(const std::string& path,
+                                                    const std::optional<std::string>& base_path,
+                                                    const std::string& dir_path) {
   if (!base_path.has_value()) {
     return path;
   }
 
-  auto uri_result = milvus_storage::StorageUri::Parse(path);
-  if (uri_result.ok() && !uri_result.ValueOrDie().scheme.empty()) {
+  // Only the scheme matters here, so only the scheme is asked for.
+  //
+  // A full parse was wrong in both of its modes, and each mode broke a
+  // different real path: the endpoint mode rejects "s3://bucket/key.parquet"
+  // because the URI's own path has no slash to split a bucket out of, and the
+  // bucket mode rejects "local:///dir/file" because the host is empty. Neither
+  // fact has anything to do with what this function does, which is decide
+  // whether a path is already absolute.
+  //
+  // The original bug this replaced -- gluing an unparseable URI onto base_path
+  // and caching the result -- is fixed the same way: anything with a scheme is
+  // returned untouched. If it is also malformed, the filesystem layer says so
+  // when something tries to open it, with the classification it already has.
+  if (milvus_storage::HasUriScheme(path)) {
     return path;
   }
 
@@ -357,6 +369,13 @@ arrow::Status Manifest::serialize(std::ostream& output_stream) const {
     return arrow::Status::OK();
   } catch (const avro::Exception& e) {
     return arrow::Status::Invalid(fmt::format("Failed to serialize Manifest: {}", e.what()));  // NOLINT
+  } catch (const std::bad_alloc&) {
+    // Ahead of the generic handler on purpose: bad_alloc reaching that one was
+    // relabelled a plain Invalid, so the OOM inference added at the FFI
+    // boundary never saw it. Both are non-retriable; what is lost is the
+    // diagnosis -- "Invalid" sends someone hunting a serialization bug when
+    // the machine simply ran out of memory.
+    return arrow::Status::OutOfMemory("Failed to serialize Manifest: out of memory");
   } catch (const std::exception& e) {
     return arrow::Status::Invalid(
         fmt::format("Failed to serialize Manifest (std::exception): {}", e.what()));  // NOLINT
@@ -366,13 +385,33 @@ arrow::Status Manifest::serialize(std::ostream& output_stream) const {
 }
 
 arrow::Status Manifest::deserialize(std::istream& input_stream) {
-  auto error = [this](const std::string& msg) {
+  auto reset_state = [this]() {
     column_groups_.clear();
     delta_logs_.clear();
     stats_.clear();
     indexes_.clear();
     lob_files_.clear();
-    return arrow::Status::Invalid(msg);
+  };
+
+  // Only for failures that are DEFINITELY the bytes: bad MILV magic, a stream
+  // too short to hold a header, an avro body that does not decode. Saying
+  // "corrupted" is a claim about the data, and a claim that reaches an operator
+  // as "quarantine this file", so it must not be made on anything else.
+  //
+  // In particular NOT for std::bad_alloc or an unknown exception -- both used to
+  // reach this same lambda, which turned an OOM into DataFormatBroken and could
+  // have had a perfectly good manifest quarantined and rebuilt.
+  auto corrupted = [this, reset_state](const std::string& msg) {
+    reset_state();
+    return MakeExtendErrorMsg(ExtendStatusCode::ManifestCorrupted, msg);
+  };
+
+  // Everything that failed for a reason other than the content. Left untagged
+  // on purpose: the coarse fallback maps these to StorageError, which is the
+  // honest answer when we do not know what happened.
+  auto failed = [this, reset_state](arrow::Status status) {
+    reset_state();
+    return status;
   };
 
   try {
@@ -380,7 +419,7 @@ arrow::Status Manifest::deserialize(std::istream& input_stream) {
     char header[4] = {};
     input_stream.read(header, 4);
     if (!input_stream || input_stream.gcount() < 4) {
-      return error("Cannot deserialize Manifest: stream is empty or too short");
+      return corrupted("Cannot deserialize Manifest: stream is empty or too short");
     }
     input_stream.clear();
     input_stream.seekg(0);
@@ -390,24 +429,37 @@ arrow::Status Manifest::deserialize(std::istream& input_stream) {
       auto avro_input = avro::istreamInputStream(input_stream);
       avro::DataFileReader<Manifest> reader(std::move(avro_input), getManifestSchema());
       if (!reader.read(*this)) {
-        return error("Failed to deserialize Manifest: no record in Avro file");
+        return corrupted("Failed to deserialize Manifest: no record in Avro file");
       }
       version_ = MANIFEST_VERSION;
-    } else {
-      deserializeLegacy(input_stream);
+    } else if (auto legacy = deserializeLegacy(input_stream); !legacy.ok()) {
+      // Through corrupted(), not returned directly. The helper does two things
+      // a bare return does not: it prefixes the message the way every other
+      // exit from this function does, and it calls reset_state(). Back when
+      // this was a throw, the catch below did both. Returning the status
+      // skipped both -- leaving a half-populated Manifest behind on the one
+      // path that says the bytes were bad, while every other error exit here
+      // resets.
+      return corrupted(fmt::format("Failed to deserialize Manifest: {}", legacy.message()));
     }
 
     return arrow::Status::OK();
   } catch (const avro::Exception& e) {
-    return error(fmt::format("Failed to deserialize Manifest: {}", e.what()));  // NOLINT
+    // avro refused the body. That is the content.
+    return corrupted(fmt::format("Failed to deserialize Manifest: {}", e.what()));  // NOLINT
+  } catch (const std::bad_alloc&) {
+    // OutOfMemory, not corruption. Both are non-retriable, so the split is
+    // about what it tells whoever reads it: corruption sends someone to
+    // quarantine and rebuild a file whose bytes were never examined.
+    return failed(arrow::Status::OutOfMemory("Failed to deserialize Manifest: out of memory"));
   } catch (const std::exception& e) {
-    return error(fmt::format("Failed to deserialize Manifest: {}", e.what()));  // NOLINT
+    return failed(arrow::Status::UnknownError(fmt::format("Failed to deserialize Manifest: {}", e.what())));  // NOLINT
   } catch (...) {
-    return error("Failed to deserialize Manifest: unknown error (possibly invalid or empty stream)");
+    return failed(arrow::Status::UnknownError("Failed to deserialize Manifest: unknown exception"));
   }
 }
 
-void Manifest::deserializeLegacy(std::istream& input_stream) {
+arrow::Status Manifest::deserializeLegacy(std::istream& input_stream) {
   auto avro_input = avro::istreamInputStream(input_stream);
   auto decoder = avro::binaryDecoder();
   decoder->init(*avro_input);
@@ -415,7 +467,16 @@ void Manifest::deserializeLegacy(std::istream& input_stream) {
   int32_t magic = 0;
   avro::decode(*decoder, magic);
   if (magic != MANIFEST_MAGIC) {
-    throw avro::Exception("Invalid MILV magic number");
+    // Was `throw avro::Exception(...)` caught by its immediate caller. Using an
+    // exception for an expected outcome meant a bad magic number and a genuine
+    // avro decode failure arrived at the same handler, and only landed on the
+    // right code because both were routed to `corrupted()`.
+    //
+    // The status is deliberately bare -- no message prefix, no state reset. The
+    // caller applies both by passing it through `corrupted()`, which is where
+    // that policy lives for every other failure in deserialize(). A first cut
+    // returned this straight up the stack and silently dropped the reset.
+    return MakeExtendErrorMsg(ExtendStatusCode::ManifestCorrupted, "Invalid MILV magic number");
   }
 
   int32_t version = 0;
@@ -473,6 +534,7 @@ void Manifest::deserializeLegacy(std::istream& input_stream) {
   } else {
     lob_files_.clear();
   }
+  return arrow::Status::OK();
 }
 
 std::shared_ptr<ColumnGroup> Manifest::getColumnGroup(const std::string& column_name) const {
@@ -530,34 +592,36 @@ Manifest Manifest::toRelativePaths(const std::string& base_path) const {
   return copy_manifest;
 }
 
-void Manifest::ToAbsolutePaths(const std::string& base_path) {
+arrow::Status Manifest::ToAbsolutePaths(const std::string& base_path) {
+  const std::optional<std::string> base(base_path);
   for (auto& column_group : column_groups_) {
     for (auto& file : column_group->files) {
-      file.path = ToAbsolute(file.path, std::optional<std::string>(base_path), milvus_storage::kDataPath);
+      ARROW_ASSIGN_OR_RAISE(file.path, ToAbsolute(file.path, base, milvus_storage::kDataPath));
     }
   }
 
   // denormalize delta log paths (convert relative to absolute)
   for (auto& delta_log : delta_logs_) {
-    delta_log.path = ToAbsolute(delta_log.path, std::optional<std::string>(base_path), milvus_storage::kDeltaPath);
+    ARROW_ASSIGN_OR_RAISE(delta_log.path, ToAbsolute(delta_log.path, base, milvus_storage::kDeltaPath));
   }
 
   // denormalize stats paths (convert relative to absolute)
   for (auto& [key, stat] : stats_) {
     for (auto& path : stat.paths) {
-      path = ToAbsolute(path, std::optional<std::string>(base_path), milvus_storage::kStatsPath);
+      ARROW_ASSIGN_OR_RAISE(path, ToAbsolute(path, base, milvus_storage::kStatsPath));
     }
   }
 
   // denormalize index paths (convert relative to absolute)
   for (auto& idx : indexes_) {
-    idx.path = ToAbsolute(idx.path, std::optional<std::string>(base_path), milvus_storage::kIndexPath);
+    ARROW_ASSIGN_OR_RAISE(idx.path, ToAbsolute(idx.path, base, milvus_storage::kIndexPath));
   }
 
   // denormalize LOB file paths (convert relative to absolute)
   for (auto& lob_file : lob_files_) {
-    lob_file.path = ToAbsolute(lob_file.path, std::optional<std::string>(base_path), milvus_storage::kLobPath);
+    ARROW_ASSIGN_OR_RAISE(lob_file.path, ToAbsolute(lob_file.path, base, milvus_storage::kLobPath));
   }
+  return arrow::Status::OK();
 }
 
 // Manifest files are small (~KB) and immutable once written, so caching
@@ -610,7 +674,7 @@ arrow::Result<std::shared_ptr<Manifest>> Manifest::ReadFrom(const milvus_storage
   ARROW_RETURN_NOT_OK(manifest->deserialize(in));
 
   std::string base_path = milvus_storage::base_path_for_manifest(path);
-  manifest->ToAbsolutePaths(base_path);
+  ARROW_RETURN_NOT_OK(manifest->ToAbsolutePaths(base_path));
 
   cache.put(cache_key, manifest);
   return manifest;
