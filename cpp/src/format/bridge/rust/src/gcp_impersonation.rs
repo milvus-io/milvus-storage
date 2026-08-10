@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright Zilliz
 
-//! GCP Service Account Impersonation for lance-io.
+//! GCP Service Account Impersonation for Lance and Iceberg.
 //!
 //! Neither `object_store` (lance-io's default GCS backend) nor `opendal`
 //! natively supports the "VM default SA → IAM `generateAccessToken` →
 //! impersonated target SA" flow. The closest config keys both expect a JSON
 //! file path or already-issued credential, not a target-SA email.
 //!
-//! This module plugs the missing piece in by implementing two traits:
+//! This module plugs the missing piece into both storage stacks:
 //!
 //! * [`ImpersonatingGcsCredentialProvider`] — `object_store::CredentialProvider`
 //!   that, on each `get_credential()` call, returns a cached impersonated
@@ -17,8 +17,11 @@
 //!   that builds a `GoogleCloudStorageBuilder` wired to the credential
 //!   provider above, and is registered against the `gs` scheme to override
 //!   lance-io's default GCS provider for opens that opt in.
+//! * [`GcpImpersonationStorageFactory`] / [`GcpImpersonationStorage`] —
+//!   thin Iceberg wrappers that inject the current token and delegate storage
+//!   behavior to `iceberg-storage-opendal`.
 //!
-//! Wiring lives in `lance_bridgeimpl.rs`, which extracts the bridge-private
+//! Lance wiring lives in `lance_bridgeimpl.rs`, which extracts the bridge-private
 //! `gcp_target_service_account` and `gcp_credential_refresh_secs` keys from
 //! `storage_options` and installs this provider into a per-call `Session`'s
 //! `ObjectStoreRegistry`.
@@ -55,16 +58,23 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use object_store::{
-    gcp::{GcpCredential, GoogleCloudStorageBuilder, GoogleConfigKey},
-    ClientOptions, CredentialProvider, ObjectStore as OSObjectStore, RetryConfig,
-    Result as ObjectStoreResult,
+use iceberg::io::{
+    FileMetadata, FileRead, FileWrite, GCS_DISABLE_CONFIG_LOAD, GCS_DISABLE_VM_METADATA,
+    GCS_TOKEN, InputFile, OutputFile, Storage as IcebergStorage, StorageConfig, StorageFactory,
 };
-use serde::Deserialize;
+use iceberg::{Error as IcebergError, ErrorKind as IcebergErrorKind, Result as IcebergResult};
+use iceberg_storage_opendal::OpenDalStorageFactory;
+use object_store::{
+    ClientOptions, CredentialProvider, ObjectStore as OSObjectStore, Result as ObjectStoreResult,
+    RetryConfig,
+    gcp::{GcpCredential, GoogleCloudStorageBuilder, GoogleConfigKey},
+};
+use serde::{Deserialize, Serialize};
 use snafu::location;
 use std::str::FromStr;
 use tokio::sync::RwLock;
@@ -72,9 +82,11 @@ use url::Url;
 
 // lance-core's error types aren't a direct dep of the bridge; re-use lance's
 // re-export (`lance::{Error, Result}` forwards to `lance_core`).
+use lance::session::Session;
 use lance::{Error as LanceError, Result as LanceResult};
 use lance_io::object_store::{
-    ObjectStore, ObjectStoreParams, ObjectStoreProvider, DEFAULT_CLOUD_IO_PARALLELISM,
+    DEFAULT_CLOUD_IO_PARALLELISM, ObjectStore, ObjectStoreParams, ObjectStoreProvider,
+    ObjectStoreRegistry,
 };
 
 /// lance-io's `DEFAULT_CLOUD_BLOCK_SIZE` is crate-private; mirror its 64 KiB
@@ -83,14 +95,50 @@ const GCS_DEFAULT_BLOCK_SIZE: usize = 64 * 1024;
 /// Mirrors lance-io's hard-coded download retry count (also crate-private).
 const GCS_DEFAULT_DOWNLOAD_RETRIES: usize = 3;
 
-/// Default IAM `generateAccessToken` lifetime in seconds (max without an org
-/// policy raising the cap).
-pub const DEFAULT_TOKEN_LIFETIME_SECS: u64 = 3600;
-
 /// How long before the cached token's expiry we trigger a refresh. Mirrors
 /// the AWS path's `REFRESH_OFFSET_SECS = 300` so callers see consistent
 /// refresh behavior across providers.
 pub const REFRESH_OFFSET_SECS: u64 = 300;
+
+pub(crate) const LANCE_TARGET_SERVICE_ACCOUNT: &str = "gcp_target_service_account";
+pub(crate) const ICEBERG_TARGET_SERVICE_ACCOUNT: &str = "gcs.service-account";
+pub(crate) const TOKEN_LIFETIME_SECONDS: &str = "gcp_credential_refresh_secs";
+
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct GcpImpersonationConfig {
+    target_sa: String,
+    token_lifetime_secs: u64,
+}
+
+impl GcpImpersonationConfig {
+    pub(crate) fn extract(
+        options: &mut HashMap<String, String>,
+        target_key: &str,
+    ) -> anyhow::Result<Option<Self>> {
+        let target_sa = options.remove(target_key).unwrap_or_default();
+        let lifetime = options
+            .remove(TOKEN_LIFETIME_SECONDS)
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        if target_sa.is_empty() {
+            return Ok(None);
+        }
+        if !(900..=3600).contains(&lifetime) {
+            anyhow::bail!("gcp_credential_refresh_secs must be in [900, 3600], got {lifetime}");
+        }
+        Ok(Some(Self {
+            target_sa,
+            token_lifetime_secs: lifetime,
+        }))
+    }
+}
+
+impl fmt::Debug for GcpImpersonationConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GcpImpersonationConfig")
+            .finish_non_exhaustive()
+    }
+}
 
 /// Scope passed to `generateAccessToken`. `cloud-platform` is the broadest
 /// OAuth scope; the actual GCS permissions come from IAM bindings on the
@@ -143,13 +191,12 @@ struct GenerateAccessTokenResponse {
 }
 
 /// Neutral store name used in `object_store::Error::Generic` from the shared
-/// token-fetch helper; keeps error messages meaningful across both Lance
-/// (cached provider) and iceberg (one-shot) callers.
+/// token-fetch helper used by both Lance and Iceberg.
 const IMPERSONATION_STORE_NAME: &str = "gcp_impersonation";
 
 /// Run the VM-SA → IAM `generateAccessToken(target_sa)` exchange end-to-end
-/// and return the raw `accessToken` + `expireTime`. Shared by the cached
-/// Lance `CredentialProvider` and the one-shot iceberg bridge path.
+/// and return the raw `accessToken` + `expireTime` for the shared refreshable
+/// provider.
 async fn fetch_impersonated_access_token(
     http_client: &reqwest::Client,
     target_sa: &str,
@@ -203,25 +250,6 @@ async fn fetch_impersonated_access_token(
         store: IMPERSONATION_STORE_NAME,
         source: format!("generateAccessToken response was not valid JSON: {e}").into(),
     })
-}
-
-/// One-shot impersonated bearer fetch (no caching, no refresh).
-///
-/// Used by the iceberg bridge's `plan_files` path: iceberg-rust's
-/// `gcs_config_parse` doesn't recognize `gcs.service-account` as an
-/// impersonation target, so the bridge intercepts the key, calls this, and
-/// swaps it for `gcs.oauth2.token` (opendal bakes that into `GcsConfig.token`
-/// with `usize::MAX` expiry). A 1-hour token is plenty for a transient
-/// metadata/manifest read sweep — see
-/// `docs/iceberg-gcp-impersonation-analysis.md` for why refresh isn't needed
-/// here, in contrast to long-lived Lance scans.
-pub async fn fetch_impersonated_bearer(
-    target_sa: &str,
-    token_lifetime: Duration,
-) -> ObjectStoreResult<String> {
-    let client = build_http_client();
-    let resp = fetch_impersonated_access_token(&client, target_sa, token_lifetime).await?;
-    Ok(resp.access_token)
 }
 
 #[derive(Clone)]
@@ -286,40 +314,40 @@ impl ImpersonatingGcsCredentialProvider {
         }
     }
 
-    /// Fast path with read lock; on miss, escalate to write lock and refresh.
-    /// Returns `Ok(None)` when the write lock is contended so the outer
-    /// `get_credential` can back off briefly and retry — this matches the
-    /// pattern lance-io uses on the AWS side.
-    async fn try_get_credential(&self) -> ObjectStoreResult<Option<Arc<GcpCredential>>> {
+    /// Fast path with read lock; on miss, wait for the write lock and refresh.
+    async fn get_credential_with<F, Fut>(&self, fetch: F) -> ObjectStoreResult<Arc<GcpCredential>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = ObjectStoreResult<CachedToken>>,
+    {
         {
             let cached = self.cache.read().await;
             if !self.needs_refresh(&cached) {
                 if let Some(c) = &*cached {
-                    return Ok(Some(c.credential.clone()));
+                    return Ok(c.credential.clone());
                 }
             }
         }
 
-        let Ok(mut cache) = self.cache.try_write() else {
-            return Ok(None);
-        };
+        let mut cache = self.cache.write().await;
 
         // Double-check after acquiring write lock — another task may have
         // just refreshed.
         if !self.needs_refresh(&cache) {
             if let Some(c) = &*cache {
-                return Ok(Some(c.credential.clone()));
+                return Ok(c.credential.clone());
             }
         }
 
-        let token = self.fetch_impersonated_token().await?;
+        let token = fetch().await?;
         *cache = Some(token.clone());
-        Ok(Some(token.credential))
+        Ok(token.credential)
     }
 
     async fn fetch_impersonated_token(&self) -> ObjectStoreResult<CachedToken> {
         let iam_body =
-            fetch_impersonated_access_token(&self.http_client, &self.target_sa, self.token_lifetime).await?;
+            fetch_impersonated_access_token(&self.http_client, &self.target_sa, self.token_lifetime)
+                .await?;
 
         // Compute the expiry from IAM's RFC3339 `expireTime`. We rely on IAM's
         // clock rather than `now + lifetime` so clock skew between us and
@@ -346,15 +374,8 @@ impl CredentialProvider for ImpersonatingGcsCredentialProvider {
     type Credential = GcpCredential;
 
     async fn get_credential(&self) -> ObjectStoreResult<Arc<Self::Credential>> {
-        // Retry loop — `try_get_credential` returns `None` only when the write
-        // lock is held by an in-flight refresh. Yield briefly and retry; the
-        // refresher will populate the cache in well under the sleep budget.
-        loop {
-            if let Some(cred) = self.try_get_credential().await? {
-                return Ok(cred);
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        self.get_credential_with(|| self.fetch_impersonated_token())
+            .await
     }
 }
 
@@ -375,18 +396,12 @@ fn parse_rfc3339_to_ms(s: &str) -> Result<u64, String> {
 /// for that registry only — other schemes and other registries are unaffected.
 #[derive(Debug)]
 pub struct ImpersonatingGcsStoreProvider {
-    target_sa: String,
-    token_lifetime: Duration,
-    refresh_offset: Duration,
+    credentials: Arc<ImpersonatingGcsCredentialProvider>,
 }
 
 impl ImpersonatingGcsStoreProvider {
-    pub fn new(target_sa: String, token_lifetime: Duration, refresh_offset: Duration) -> Self {
-        Self {
-            target_sa,
-            token_lifetime,
-            refresh_offset,
-        }
+    fn new(credentials: Arc<ImpersonatingGcsCredentialProvider>) -> Self {
+        Self { credentials }
     }
 }
 
@@ -431,13 +446,9 @@ impl ObjectStoreProvider for ImpersonatingGcsStoreProvider {
             }
         }
 
-        let credential_provider: Arc<dyn CredentialProvider<Credential = GcpCredential>> =
-            Arc::new(ImpersonatingGcsCredentialProvider::new(
-                self.target_sa.clone(),
-                self.token_lifetime,
-                self.refresh_offset,
-            ));
-        builder = builder.with_credentials(credential_provider);
+        let credentials: Arc<dyn CredentialProvider<Credential = GcpCredential>> =
+            self.credentials.clone();
+        builder = builder.with_credentials(credentials);
 
         let built = builder.build().map_err(|e| LanceError::IO {
             source: Box::new(e),
@@ -460,24 +471,396 @@ impl ObjectStoreProvider for ImpersonatingGcsStoreProvider {
     }
 }
 
+pub(crate) async fn build_lance_provider(
+    config: &GcpImpersonationConfig,
+) -> LanceResult<Arc<dyn ObjectStoreProvider>> {
+    let credentials = Arc::new(ImpersonatingGcsCredentialProvider::new(
+        config.target_sa.clone(),
+        Duration::from_secs(config.token_lifetime_secs),
+        Duration::from_secs(REFRESH_OFFSET_SECS),
+    ));
+    credentials
+        .get_credential()
+        .await
+        .map_err(|error| LanceError::io_source(Box::new(error)))?;
+    Ok(Arc::new(ImpersonatingGcsStoreProvider::new(credentials)))
+}
+
+pub(crate) fn build_lance_session(provider: Arc<dyn ObjectStoreProvider>) -> Arc<Session> {
+    let registry = ObjectStoreRegistry::default();
+    registry.insert("gs", provider);
+    Arc::new(Session::new(0, 0, Arc::new(registry)))
+}
+
+fn gcp_iceberg_credential_error(error: object_store::Error) -> IcebergError {
+    IcebergError::new(
+        IcebergErrorKind::Unexpected,
+        format!("GCP impersonation credential resolution failed: {error}"),
+    )
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct GcpImpersonationStorageFactory {
+    #[serde(skip)]
+    provider: Option<Arc<ImpersonatingGcsCredentialProvider>>,
+}
+
+impl GcpImpersonationStorageFactory {
+    pub(crate) async fn new(config: GcpImpersonationConfig) -> IcebergResult<Self> {
+        let provider = Arc::new(ImpersonatingGcsCredentialProvider::new(
+            config.target_sa,
+            Duration::from_secs(config.token_lifetime_secs),
+            Duration::from_secs(REFRESH_OFFSET_SECS),
+        ));
+        provider
+            .get_credential()
+            .await
+            .map_err(gcp_iceberg_credential_error)?;
+        Ok(Self {
+            provider: Some(provider),
+        })
+    }
+}
+
+impl fmt::Debug for GcpImpersonationStorageFactory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GcpImpersonationStorageFactory")
+            .field("has_runtime_provider", &self.provider.is_some())
+            .finish()
+    }
+}
+
+#[typetag::serde(name = "GcpImpersonationStorageFactory")]
+impl StorageFactory for GcpImpersonationStorageFactory {
+    fn build(&self, config: &StorageConfig) -> IcebergResult<Arc<dyn IcebergStorage>> {
+        let provider = self.provider.clone().ok_or_else(|| {
+            IcebergError::new(
+                IcebergErrorKind::Unexpected,
+                "GCP impersonation runtime provider is unavailable",
+            )
+        })?;
+        Ok(Arc::new(GcpImpersonationStorage {
+            props: Arc::new(config.props().clone()),
+            provider: Some(provider),
+            cached_storage: Arc::new(RwLock::new(None)),
+        }))
+    }
+}
+
+#[derive(Clone)]
+struct CachedGcpImpersonationStorage {
+    credential: Arc<GcpCredential>,
+    storage: Arc<dyn IcebergStorage>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct GcpImpersonationStorage {
+    #[serde(skip)]
+    props: Arc<HashMap<String, String>>,
+    #[serde(skip)]
+    provider: Option<Arc<ImpersonatingGcsCredentialProvider>>,
+    #[serde(skip)]
+    cached_storage: Arc<RwLock<Option<CachedGcpImpersonationStorage>>>,
+}
+
+impl fmt::Debug for GcpImpersonationStorage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GcpImpersonationStorage")
+            .field("has_runtime_provider", &self.provider.is_some())
+            .finish()
+    }
+}
+
+impl GcpImpersonationStorage {
+    async fn current_storage(&self) -> IcebergResult<Arc<dyn IcebergStorage>> {
+        let provider = self.provider.as_ref().ok_or_else(|| {
+            IcebergError::new(
+                IcebergErrorKind::Unexpected,
+                "GCP impersonation runtime provider is unavailable",
+            )
+        })?;
+        let credential = provider
+            .get_credential()
+            .await
+            .map_err(gcp_iceberg_credential_error)?;
+        {
+            let cached = self.cached_storage.read().await;
+            if let Some(cached) = cached.as_ref()
+                && Arc::ptr_eq(&cached.credential, &credential)
+            {
+                return Ok(cached.storage.clone());
+            }
+        }
+
+        let mut cached = self.cached_storage.write().await;
+        if let Some(cached) = cached.as_ref()
+            && Arc::ptr_eq(&cached.credential, &credential)
+        {
+            return Ok(cached.storage.clone());
+        }
+
+        let mut props = self.props.as_ref().clone();
+        props.insert(GCS_TOKEN.to_string(), credential.bearer.clone());
+        props.insert(GCS_DISABLE_VM_METADATA.to_string(), "true".to_string());
+        props.insert(GCS_DISABLE_CONFIG_LOAD.to_string(), "true".to_string());
+        let storage = OpenDalStorageFactory::Gcs.build(&StorageConfig::from_props(props))?;
+        *cached = Some(CachedGcpImpersonationStorage {
+            credential,
+            storage: storage.clone(),
+        });
+        Ok(storage)
+    }
+}
+
+#[typetag::serde(name = "GcpImpersonationStorage")]
+#[async_trait]
+impl IcebergStorage for GcpImpersonationStorage {
+    async fn exists(&self, path: &str) -> IcebergResult<bool> {
+        self.current_storage().await?.exists(path).await
+    }
+
+    async fn metadata(&self, path: &str) -> IcebergResult<FileMetadata> {
+        self.current_storage().await?.metadata(path).await
+    }
+
+    async fn read(&self, path: &str) -> IcebergResult<bytes::Bytes> {
+        self.current_storage().await?.read(path).await
+    }
+
+    async fn reader(&self, path: &str) -> IcebergResult<Box<dyn FileRead>> {
+        self.current_storage().await?.reader(path).await
+    }
+
+    async fn write(&self, path: &str, bytes: bytes::Bytes) -> IcebergResult<()> {
+        self.current_storage().await?.write(path, bytes).await
+    }
+
+    async fn writer(&self, path: &str) -> IcebergResult<Box<dyn FileWrite>> {
+        self.current_storage().await?.writer(path).await
+    }
+
+    async fn delete(&self, path: &str) -> IcebergResult<()> {
+        self.current_storage().await?.delete(path).await
+    }
+
+    async fn delete_prefix(&self, path: &str) -> IcebergResult<()> {
+        self.current_storage().await?.delete_prefix(path).await
+    }
+
+    fn new_input(&self, path: &str) -> IcebergResult<InputFile> {
+        Ok(InputFile::new(Arc::new(self.clone()), path.to_string()))
+    }
+
+    fn new_output(&self, path: &str) -> IcebergResult<OutputFile> {
+        Ok(OutputFile::new(Arc::new(self.clone()), path.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::future::join_all;
+    use iceberg::io::{StorageConfig, StorageFactory};
+    use tokio::sync::{Barrier, Notify};
+
     use super::*;
+
+    fn impersonation_config(target_sa: &str) -> GcpImpersonationConfig {
+        GcpImpersonationConfig {
+            target_sa: target_sa.to_string(),
+            token_lifetime_secs: 3600,
+        }
+    }
+
+    fn credential_provider(target_sa: &str) -> ImpersonatingGcsCredentialProvider {
+        ImpersonatingGcsCredentialProvider::new(
+            target_sa.to_string(),
+            Duration::from_secs(3600),
+            Duration::from_secs(300),
+        )
+    }
+
+    #[tokio::test]
+    async fn get_credential_refresh_is_single_flight() {
+        const CALLERS: usize = 100;
+
+        let provider = Arc::new(credential_provider("target@example.com"));
+        let fetch_started = Arc::new(Notify::new());
+        let release_fetch = Arc::new(Notify::new());
+        let fetch_calls = Arc::new(AtomicUsize::new(0));
+        let start = Arc::new(Barrier::new(CALLERS + 1));
+        let tasks = (0..CALLERS)
+            .map(|_| {
+                let provider = provider.clone();
+                let fetch_started = fetch_started.clone();
+                let release_fetch = release_fetch.clone();
+                let fetch_calls = fetch_calls.clone();
+                let start = start.clone();
+                tokio::spawn(async move {
+                    start.wait().await;
+                    provider
+                        .get_credential_with(|| async move {
+                            fetch_calls.fetch_add(1, Ordering::SeqCst);
+                            fetch_started.notify_one();
+                            release_fetch.notified().await;
+                            Ok(CachedToken {
+                                credential: Arc::new(GcpCredential {
+                                    bearer: "single-flight".to_string(),
+                                }),
+                                expires_at_ms: ImpersonatingGcsCredentialProvider::now_ms()
+                                    + 3_600_000,
+                            })
+                        })
+                        .await
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        start.wait().await;
+        fetch_started.notified().await;
+        assert_eq!(fetch_calls.load(Ordering::SeqCst), 1);
+        release_fetch.notify_one();
+
+        let credentials = join_all(tasks)
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        assert_eq!(fetch_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            credentials
+                .iter()
+                .all(|credential| Arc::ptr_eq(credential, &credentials[0]))
+        );
+    }
+
+    #[test]
+    fn extracts_and_removes_private_options() {
+        for target_key in [LANCE_TARGET_SERVICE_ACCOUNT, ICEBERG_TARGET_SERVICE_ACCOUNT] {
+            let mut options = HashMap::from([
+                (target_key.to_string(), "target@example.com".to_string()),
+                (TOKEN_LIFETIME_SECONDS.to_string(), "3600".to_string()),
+                ("public_option".to_string(), "value".to_string()),
+            ]);
+
+            let config = GcpImpersonationConfig::extract(&mut options, target_key)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(config, impersonation_config("target@example.com"));
+            assert!(!options.contains_key(target_key));
+            assert!(!options.contains_key(TOKEN_LIFETIME_SECONDS));
+            assert_eq!(options["public_option"], "value");
+        }
+    }
+
+    #[test]
+    fn rejects_missing_or_out_of_range_token_lifetime() {
+        for lifetime in [None, Some("invalid"), Some("899"), Some("3601")] {
+            let mut options = HashMap::from([(
+                LANCE_TARGET_SERVICE_ACCOUNT.to_string(),
+                "target@example.com".to_string(),
+            )]);
+            if let Some(lifetime) = lifetime {
+                options.insert(TOKEN_LIFETIME_SECONDS.to_string(), lifetime.to_string());
+            }
+
+            assert!(
+                GcpImpersonationConfig::extract(&mut options, LANCE_TARGET_SERVICE_ACCOUNT)
+                    .is_err()
+            );
+        }
+
+        for lifetime in ["900", "3600"] {
+            let mut options = HashMap::from([
+                (
+                    LANCE_TARGET_SERVICE_ACCOUNT.to_string(),
+                    "target@example.com".to_string(),
+                ),
+                (TOKEN_LIFETIME_SECONDS.to_string(), lifetime.to_string()),
+            ]);
+            assert!(
+                GcpImpersonationConfig::extract(&mut options, LANCE_TARGET_SERVICE_ACCOUNT)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn iceberg_factory_build_does_not_resolve_credentials() {
+        let factory = GcpImpersonationStorageFactory {
+            provider: Some(Arc::new(credential_provider("target@example.com"))),
+        };
+
+        let _storage = factory.build(&StorageConfig::new()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn iceberg_storage_reuses_delegated_storage_until_token_changes() {
+        let provider = Arc::new(credential_provider("target@example.com"));
+        let first_credential = Arc::new(GcpCredential {
+            bearer: "cached-token".to_string(),
+        });
+        *provider.cache.write().await = Some(CachedToken {
+            credential: first_credential,
+            expires_at_ms: ImpersonatingGcsCredentialProvider::now_ms() + 3_600_000,
+        });
+        let storage = GcpImpersonationStorage {
+            props: Arc::new(HashMap::new()),
+            provider: Some(provider.clone()),
+            cached_storage: Arc::new(RwLock::new(None)),
+        };
+
+        let first = storage.current_storage().await.unwrap();
+        let second = storage.current_storage().await.unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        *provider.cache.write().await = Some(CachedToken {
+            credential: Arc::new(GcpCredential {
+                bearer: "refreshed-token".to_string(),
+            }),
+            expires_at_ms: ImpersonatingGcsCredentialProvider::now_ms() + 3_600_000,
+        });
+        let refreshed = storage.current_storage().await.unwrap();
+        assert!(!Arc::ptr_eq(&first, &refreshed));
+    }
+
+    #[test]
+    fn iceberg_factory_and_storage_serialization_omit_runtime_credentials() {
+        let provider = Arc::new(credential_provider("secret-target@example.com"));
+        let factory = GcpImpersonationStorageFactory {
+            provider: Some(provider.clone()),
+        };
+        let storage = GcpImpersonationStorage {
+            props: Arc::new(HashMap::from([(
+                iceberg::io::GCS_SERVICE_PATH.to_string(),
+                "https://secret-endpoint".to_string(),
+            )])),
+            provider: Some(provider),
+            cached_storage: Arc::new(RwLock::new(None)),
+        };
+
+        for serialized in [
+            serde_json::to_string(&factory).unwrap(),
+            serde_json::to_string(&storage).unwrap(),
+        ] {
+            assert!(!serialized.contains("secret-target"));
+            assert!(!serialized.contains("secret-endpoint"));
+        }
+    }
 
     #[test]
     fn parse_rfc3339_basic() {
-        // `2026-04-17T03:23:14Z` → known epoch ms
         let ms = parse_rfc3339_to_ms("2026-04-17T03:23:14Z").unwrap();
-        // sanity bounds: between 2026-01-01 and 2027-01-01 in ms
         assert!(ms > 1_767_225_600_000);
         assert!(ms < 1_798_761_600_000);
     }
 
     #[test]
     fn parse_rfc3339_pre_epoch_rejected() {
-        // An `expireTime` before 1970 would have timestamp_millis() < 0 and,
-        // without explicit handling, wrap to a huge u64 that makes
-        // `needs_refresh` never fire. Must surface as an error instead.
         let err = parse_rfc3339_to_ms("1969-12-31T23:59:59Z").unwrap_err();
         assert!(err.contains("pre-epoch"));
     }
@@ -499,45 +882,26 @@ mod tests {
 
     #[test]
     fn needs_refresh_when_empty() {
-        let provider = ImpersonatingGcsCredentialProvider::new(
-            "x@y.iam.gserviceaccount.com".to_string(),
-            Duration::from_secs(3600),
-            Duration::from_secs(300),
-        );
+        let provider = credential_provider("x@y.iam.gserviceaccount.com");
         assert!(provider.needs_refresh(&None));
     }
 
     #[test]
     fn needs_refresh_within_offset() {
-        let provider = ImpersonatingGcsCredentialProvider::new(
-            "x@y.iam.gserviceaccount.com".to_string(),
-            Duration::from_secs(3600),
-            Duration::from_secs(300),
-        );
-        // Token expires in 100s, refresh offset is 300s → must refresh.
-        let expires_soon = ImpersonatingGcsCredentialProvider::now_ms() + 100_000;
+        let provider = credential_provider("x@y.iam.gserviceaccount.com");
         let cached = Some(CachedToken {
-            credential: Arc::new(GcpCredential {
-                bearer: "x".into(),
-            }),
-            expires_at_ms: expires_soon,
+            credential: Arc::new(GcpCredential { bearer: "x".into() }),
+            expires_at_ms: ImpersonatingGcsCredentialProvider::now_ms() + 100_000,
         });
         assert!(provider.needs_refresh(&cached));
     }
 
     #[test]
     fn no_refresh_when_fresh() {
-        let provider = ImpersonatingGcsCredentialProvider::new(
-            "x@y.iam.gserviceaccount.com".to_string(),
-            Duration::from_secs(3600),
-            Duration::from_secs(300),
-        );
-        let expires_far = ImpersonatingGcsCredentialProvider::now_ms() + 3_600_000;
+        let provider = credential_provider("x@y.iam.gserviceaccount.com");
         let cached = Some(CachedToken {
-            credential: Arc::new(GcpCredential {
-                bearer: "x".into(),
-            }),
-            expires_at_ms: expires_far,
+            credential: Arc::new(GcpCredential { bearer: "x".into() }),
+            expires_at_ms: ImpersonatingGcsCredentialProvider::now_ms() + 3_600_000,
         });
         assert!(!provider.needs_refresh(&cached));
     }

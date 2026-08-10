@@ -83,6 +83,7 @@ TEST_F(LanceStorageOptionsTest, AzureKeys) {
   EXPECT_EQ(opts["azure_storage_account_key"], "myaccountkey");
   EXPECT_EQ(opts["azure_endpoint"], "https://myaccount.blob.core.windows.net");
   EXPECT_EQ(opts.count("adls.account-name"), 0);
+  EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
 }
 
 TEST_F(LanceStorageOptionsTest, AzureCredentialBrokerKeysExcludeFallbackCredentials) {
@@ -116,7 +117,7 @@ TEST_F(LanceStorageOptionsTest, AzureCredentialBrokerKeysExcludeFallbackCredenti
   EXPECT_EQ(opts["azure_broker_request_timeout_ms"], "5000");
   EXPECT_EQ(opts.count("azure_storage_account_key"), 0);
   EXPECT_EQ(opts.count("azure_storage_sas_token"), 0);
-  EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
+  EXPECT_EQ(opts["milvus_fs_cache_key"], config.GetCacheKey());
 }
 
 TEST_F(LanceStorageOptionsTest, AliyunKeys) {
@@ -152,7 +153,7 @@ TEST_F(LanceStorageOptionsTest, GcpImpersonation) {
   // Bridge-private keys; not forwarded to lance-io / object_store.
   EXPECT_EQ(opts["gcp_target_service_account"], "target-sa@customer-project.iam.gserviceaccount.com");
   EXPECT_EQ(opts["gcp_credential_refresh_secs"], "1800");
-  EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
+  EXPECT_EQ(opts["milvus_fs_cache_key"], config.GetCacheKey());
 }
 
 TEST_F(LanceStorageOptionsTest, GcpTargetServiceAccountRequiresIam) {
@@ -165,6 +166,7 @@ TEST_F(LanceStorageOptionsTest, GcpTargetServiceAccountRequiresIam) {
 
   EXPECT_EQ(opts.size(), 1);
   EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
+  EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
 }
 
 TEST_F(LanceStorageOptionsTest, GcpDefaultCredentials) {
@@ -178,6 +180,7 @@ TEST_F(LanceStorageOptionsTest, GcpDefaultCredentials) {
   // to the default credential chain (VM metadata).
   EXPECT_EQ(opts.size(), 1);
   EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
+  EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
 }
 
 TEST_F(LanceStorageOptionsTest, LocalEmpty) {

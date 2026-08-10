@@ -22,6 +22,12 @@ use std::time::Duration;
 use anyhow::{Result as AnyResult, anyhow, bail};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use iceberg::io::{
+    ADLS_SAS_TOKEN, FileMetadata, FileRead, FileWrite, InputFile, OutputFile,
+    Storage as IcebergStorage, StorageConfig, StorageFactory,
+};
+use iceberg::{Error as IcebergError, ErrorKind as IcebergErrorKind, Result as IcebergResult};
+use iceberg_storage_opendal::OpenDalStorageFactory;
 use lance_core::error::{Error as LanceError, Result as LanceResult};
 use lance_io::object_store::StorageOptionsProvider;
 use serde::{Deserialize, Serialize};
@@ -314,18 +320,15 @@ impl AzureSasStorageOptionsProvider {
             "Azure SAS credential broker failure: {error}"
         ))))
     }
-}
 
-#[async_trait]
-impl StorageOptionsProvider for AzureSasStorageOptionsProvider {
-    async fn fetch_storage_options(&self) -> LanceResult<Option<HashMap<String, String>>> {
+    pub(crate) async fn current_credential(&self) -> AnyResult<AzureSasCredential> {
         let mut now = (self.clock)();
         {
             let cached = self.cached.read().await;
             if let Some(credential) = cached.as_ref()
                 && Self::is_fresh(credential, now)
             {
-                return Ok(Some(Self::to_options(credential)));
+                return Ok(credential.clone());
             }
         }
 
@@ -334,14 +337,13 @@ impl StorageOptionsProvider for AzureSasStorageOptionsProvider {
         if let Some(credential) = cached.as_ref()
             && Self::is_fresh(credential, now)
         {
-            return Ok(Some(Self::to_options(credential)));
+            return Ok(credential.clone());
         }
 
         match self.fetcher.fetch(now).await {
             Ok(credential) => {
-                let options = Self::to_options(&credential);
-                *cached = Some(credential);
-                Ok(Some(options))
+                *cached = Some(credential.clone());
+                Ok(credential)
             }
             Err(error) => {
                 let has_cached_sas = cached.is_some();
@@ -351,22 +353,208 @@ impl StorageOptionsProvider for AzureSasStorageOptionsProvider {
                     .unwrap_or(false);
                 eprintln!(
                     "Warning: Azure SAS credential broker refresh failed: {}, has_cached_sas={}, cached_expired={}",
-                    error,
-                    has_cached_sas,
-                    cached_expired
+                    error, has_cached_sas, cached_expired
                 );
-                if let Some(credential) = cached.as_ref() {
-                    Ok(Some(Self::to_options(credential)))
-                } else {
-                    Err(Self::lance_error(&error))
-                }
+                Err(error)
             }
         }
+    }
+}
+
+#[async_trait]
+impl StorageOptionsProvider for AzureSasStorageOptionsProvider {
+    async fn fetch_storage_options(&self) -> LanceResult<Option<HashMap<String, String>>> {
+        self.current_credential()
+            .await
+            .map(|credential| Some(Self::to_options(&credential)))
+            .map_err(|error| Self::lance_error(&error))
     }
 
     fn provider_id(&self) -> String {
         self.provider_id.clone()
     }
+}
+
+fn azure_iceberg_credential_error(error: anyhow::Error) -> IcebergError {
+    IcebergError::new(
+        IcebergErrorKind::Unexpected,
+        format!("Azure SAS credential resolution failed: {error}"),
+    )
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct AzureSasStorageFactory {
+    inner: OpenDalStorageFactory,
+    #[serde(skip)]
+    provider: Option<Arc<AzureSasStorageOptionsProvider>>,
+}
+
+impl AzureSasStorageFactory {
+    pub(crate) async fn new(
+        inner: OpenDalStorageFactory,
+        config: AzureBrokerConfig,
+    ) -> IcebergResult<Self> {
+        let provider = Arc::new(
+            AzureSasStorageOptionsProvider::new(config).map_err(azure_iceberg_credential_error)?,
+        );
+        provider
+            .current_credential()
+            .await
+            .map_err(azure_iceberg_credential_error)?;
+        Ok(Self {
+            inner,
+            provider: Some(provider),
+        })
+    }
+}
+
+impl fmt::Debug for AzureSasStorageFactory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AzureSasStorageFactory")
+            .field("has_runtime_provider", &self.provider.is_some())
+            .finish()
+    }
+}
+
+#[typetag::serde(name = "AzureSasStorageFactory")]
+impl StorageFactory for AzureSasStorageFactory {
+    fn build(&self, config: &StorageConfig) -> IcebergResult<Arc<dyn IcebergStorage>> {
+        let provider = self.provider.clone().ok_or_else(|| {
+            IcebergError::new(
+                IcebergErrorKind::Unexpected,
+                "Azure SAS runtime provider is unavailable",
+            )
+        })?;
+        Ok(Arc::new(AzureSasStorage {
+            inner: self.inner.clone(),
+            props: Arc::new(config.props().clone()),
+            provider: Some(provider),
+            cached_storage: Arc::new(RwLock::new(None)),
+        }))
+    }
+}
+
+#[derive(Clone)]
+struct CachedAzureSasStorage {
+    token: String,
+    storage: Arc<dyn IcebergStorage>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct AzureSasStorage {
+    inner: OpenDalStorageFactory,
+    #[serde(skip)]
+    props: Arc<HashMap<String, String>>,
+    #[serde(skip)]
+    provider: Option<Arc<AzureSasStorageOptionsProvider>>,
+    #[serde(skip)]
+    cached_storage: Arc<RwLock<Option<CachedAzureSasStorage>>>,
+}
+
+impl fmt::Debug for AzureSasStorage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AzureSasStorage")
+            .field("has_runtime_provider", &self.provider.is_some())
+            .finish()
+    }
+}
+
+impl AzureSasStorage {
+    async fn current_storage(&self) -> IcebergResult<Arc<dyn IcebergStorage>> {
+        let provider = self.provider.as_ref().ok_or_else(|| {
+            IcebergError::new(
+                IcebergErrorKind::Unexpected,
+                "Azure SAS runtime provider is unavailable",
+            )
+        })?;
+        let credential = provider
+            .current_credential()
+            .await
+            .map_err(azure_iceberg_credential_error)?;
+        let token = credential.token;
+        {
+            let cached = self.cached_storage.read().await;
+            if let Some(cached) = cached.as_ref()
+                && cached.token == token
+            {
+                return Ok(cached.storage.clone());
+            }
+        }
+
+        let mut cached = self.cached_storage.write().await;
+        if let Some(cached) = cached.as_ref()
+            && cached.token == token
+        {
+            return Ok(cached.storage.clone());
+        }
+
+        let mut props = self.props.as_ref().clone();
+        props.insert(ADLS_SAS_TOKEN.to_string(), token.clone());
+        let storage = self.inner.build(&StorageConfig::from_props(props))?;
+        *cached = Some(CachedAzureSasStorage {
+            token,
+            storage: storage.clone(),
+        });
+        Ok(storage)
+    }
+}
+
+#[typetag::serde(name = "AzureSasStorage")]
+#[async_trait]
+impl IcebergStorage for AzureSasStorage {
+    async fn exists(&self, path: &str) -> IcebergResult<bool> {
+        self.current_storage().await?.exists(path).await
+    }
+
+    async fn metadata(&self, path: &str) -> IcebergResult<FileMetadata> {
+        self.current_storage().await?.metadata(path).await
+    }
+
+    async fn read(&self, path: &str) -> IcebergResult<bytes::Bytes> {
+        self.current_storage().await?.read(path).await
+    }
+
+    async fn reader(&self, path: &str) -> IcebergResult<Box<dyn FileRead>> {
+        self.current_storage().await?.reader(path).await
+    }
+
+    async fn write(&self, path: &str, bytes: bytes::Bytes) -> IcebergResult<()> {
+        self.current_storage().await?.write(path, bytes).await
+    }
+
+    async fn writer(&self, path: &str) -> IcebergResult<Box<dyn FileWrite>> {
+        self.current_storage().await?.writer(path).await
+    }
+
+    async fn delete(&self, path: &str) -> IcebergResult<()> {
+        self.current_storage().await?.delete(path).await
+    }
+
+    async fn delete_prefix(&self, path: &str) -> IcebergResult<()> {
+        self.current_storage().await?.delete_prefix(path).await
+    }
+
+    fn new_input(&self, path: &str) -> IcebergResult<InputFile> {
+        Ok(InputFile::new(Arc::new(self.clone()), path.to_string()))
+    }
+
+    fn new_output(&self, path: &str) -> IcebergResult<OutputFile> {
+        Ok(OutputFile::new(Arc::new(self.clone()), path.to_string()))
+    }
+}
+
+pub(crate) async fn build_lance_provider(
+    config: AzureBrokerConfig,
+) -> LanceResult<Arc<AzureSasStorageOptionsProvider>> {
+    let provider = Arc::new(
+        AzureSasStorageOptionsProvider::new(config)
+            .map_err(|error| LanceError::invalid_input(error.to_string()))?,
+    );
+    provider
+        .current_credential()
+        .await
+        .map_err(|error| AzureSasStorageOptionsProvider::lance_error(&error))?;
+    Ok(provider)
 }
 
 #[cfg(test)]
@@ -375,8 +563,11 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use futures::future::join_all;
+    use iceberg::io::{StorageConfig, StorageFactory};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tokio::sync::{Barrier, Notify};
 
     use super::*;
 
@@ -393,9 +584,15 @@ mod tests {
         }
     }
 
+    fn inner_factory() -> OpenDalStorageFactory {
+        serde_json::from_str(r#"{"Azdls":{"configured_scheme":"Abfss"}}"#).unwrap()
+    }
+
     struct MockFetcher {
         responses: Mutex<VecDeque<Result<AzureSasCredential, &'static str>>>,
         calls: AtomicUsize,
+        started: Option<Arc<Notify>>,
+        release: Option<Arc<Notify>>,
     }
 
     impl MockFetcher {
@@ -403,6 +600,21 @@ mod tests {
             Self {
                 responses: Mutex::new(responses.into()),
                 calls: AtomicUsize::new(0),
+                started: None,
+                release: None,
+            }
+        }
+
+        fn with_gate(
+            responses: Vec<Result<AzureSasCredential, &'static str>>,
+            started: Arc<Notify>,
+            release: Arc<Notify>,
+        ) -> Self {
+            Self {
+                responses: Mutex::new(responses.into()),
+                calls: AtomicUsize::new(0),
+                started: Some(started),
+                release: Some(release),
             }
         }
     }
@@ -411,6 +623,12 @@ mod tests {
     impl AzureSasFetcher for MockFetcher {
         async fn fetch(&self, _now: DateTime<Utc>) -> AnyResult<AzureSasCredential> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(started) = &self.started {
+                started.notify_one();
+            }
+            if let Some(release) = &self.release {
+                release.notified().await;
+            }
             self.responses
                 .lock()
                 .unwrap()
@@ -418,6 +636,80 @@ mod tests {
                 .unwrap_or(Err("no_response"))
                 .map_err(|error| anyhow!(error))
         }
+    }
+
+    fn credential(now: DateTime<Utc>, signature: &str) -> AzureSasCredential {
+        AzureSasCredential {
+            token: format!("sv=1&sig={signature}"),
+            expires_at: now + chrono::Duration::hours(1),
+        }
+    }
+
+    fn test_provider(
+        fetcher: Arc<dyn AzureSasFetcher>,
+        now: DateTime<Utc>,
+    ) -> Arc<AzureSasStorageOptionsProvider> {
+        Arc::new(AzureSasStorageOptionsProvider::with_fetcher(
+            config(),
+            fetcher,
+            Arc::new(move || now),
+        ))
+    }
+
+    #[tokio::test]
+    async fn iceberg_factory_build_does_not_fetch_credentials() {
+        let now = Utc::now();
+        let fetcher = Arc::new(MockFetcher::new(vec![Ok(credential(now, "warm"))]));
+        let provider = test_provider(fetcher.clone(), now);
+        provider.current_credential().await.unwrap();
+        let factory = AzureSasStorageFactory {
+            inner: inner_factory(),
+            provider: Some(provider),
+        };
+
+        let _storage = factory.build(&StorageConfig::new()).unwrap();
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn iceberg_storage_reuses_delegated_storage_until_sas_changes() {
+        let now = Utc::now();
+        let provider = test_provider(Arc::new(MockFetcher::new(Vec::new())), now);
+        *provider.cached.write().await = Some(credential(now, "first"));
+        let storage = AzureSasStorage {
+            inner: inner_factory(),
+            props: Arc::new(HashMap::new()),
+            provider: Some(provider.clone()),
+            cached_storage: Arc::new(RwLock::new(None)),
+        };
+
+        let first = storage.current_storage().await.unwrap();
+        let second = storage.current_storage().await.unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        *provider.cached.write().await = Some(credential(now, "second"));
+        let refreshed = storage.current_storage().await.unwrap();
+        assert!(!Arc::ptr_eq(&first, &refreshed));
+    }
+
+    #[test]
+    fn iceberg_storage_serialization_does_not_retain_unrelated_props() {
+        let now = Utc::now();
+        let factory = AzureSasStorageFactory {
+            inner: inner_factory(),
+            provider: Some(test_provider(Arc::new(MockFetcher::new(Vec::new())), now)),
+        };
+        let storage = factory
+            .build(
+                &StorageConfig::new()
+                    .with_prop(iceberg::io::ADLS_AUTHORITY_HOST, "https://login.example")
+                    .with_prop("unrelated.secret", "props-secret-sentinel"),
+            )
+            .unwrap();
+
+        let serialized = serde_json::to_string(&storage).unwrap();
+        assert!(!serialized.contains("props-secret-sentinel"));
+        assert!(!serialized.contains("unrelated.secret"));
     }
 
     #[test]
@@ -441,12 +733,16 @@ mod tests {
                 "azure_storage_account_name".to_string(),
                 "account".to_string(),
             ),
+            (
+                "adls.endpoint-suffix".to_string(),
+                "core.windows.net".to_string(),
+            ),
         ]);
-
         let extracted = AzureBrokerConfig::extract(&mut options).unwrap().unwrap();
         assert_eq!(extracted, config());
         assert!(BROKER_KEYS.iter().all(|key| !options.contains_key(*key)));
         assert_eq!(options["azure_storage_account_name"], "account");
+        assert_eq!(options["adls.endpoint-suffix"], "core.windows.net");
     }
 
     #[test]
@@ -519,7 +815,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn caches_and_retries_failed_refresh_with_old_token() {
+    async fn returns_refresh_error_with_cached_token() {
         let now = Arc::new(Mutex::new(Utc::now()));
         let initial_now = *now.lock().unwrap();
         let fetcher = Arc::new(MockFetcher::new(vec![
@@ -541,19 +837,22 @@ mod tests {
             Arc::new(move || *clock_now.lock().unwrap()),
         );
 
-        let first = provider.fetch_storage_options().await.unwrap().unwrap();
-        assert_eq!(first["azure_storage_sas_token"], "sv=1&sig=old");
+        let first = provider.current_credential().await.unwrap();
+        assert_eq!(first.token, "sv=1&sig=old");
 
         *now.lock().unwrap() += chrono::Duration::seconds(61);
-        let fallback1 = provider.fetch_storage_options().await.unwrap().unwrap();
-        let fallback2 = provider.fetch_storage_options().await.unwrap().unwrap();
-        assert_eq!(fallback1["azure_storage_sas_token"], "sv=1&sig=old");
-        assert_eq!(fallback2["azure_storage_sas_token"], "sv=1&sig=old");
-        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 3);
+        let error = provider.current_credential().await.err().unwrap();
+        assert_eq!(error.to_string(), "http_status=500");
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 2);
 
         *now.lock().unwrap() += chrono::Duration::seconds(60);
-        let refreshed = provider.fetch_storage_options().await.unwrap().unwrap();
-        assert_eq!(refreshed["azure_storage_sas_token"], "sv=2&sig=new");
+        assert!(*now.lock().unwrap() > initial_now + chrono::Duration::seconds(120));
+        let error = provider.current_credential().await.err().unwrap();
+        assert_eq!(error.to_string(), "http_status=500");
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 3);
+
+        let refreshed = provider.current_credential().await.unwrap();
+        assert_eq!(refreshed.token, "sv=2&sig=new");
         assert_eq!(fetcher.calls.load(Ordering::SeqCst), 4);
     }
 
@@ -563,7 +862,111 @@ mod tests {
         let fetcher = Arc::new(MockFetcher::new(vec![Err("transport_error")]));
         let provider =
             AzureSasStorageOptionsProvider::with_fetcher(config(), fetcher, Arc::new(move || now));
-        assert!(provider.fetch_storage_options().await.is_err());
+        assert!(provider.current_credential().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn current_credential_refresh_is_single_flight() {
+        const CALLERS: usize = 100;
+
+        let now = Utc::now();
+        let fetch_started = Arc::new(Notify::new());
+        let release_fetch = Arc::new(Notify::new());
+        let fetcher = Arc::new(MockFetcher::with_gate(
+            vec![Ok(AzureSasCredential {
+                token: "sv=1&sig=single-flight".to_string(),
+                expires_at: now + chrono::Duration::hours(1),
+            })],
+            fetch_started.clone(),
+            release_fetch.clone(),
+        ));
+        let provider = Arc::new(AzureSasStorageOptionsProvider::with_fetcher(
+            config(),
+            fetcher.clone(),
+            Arc::new(move || now),
+        ));
+        *provider.cached.write().await = Some(AzureSasCredential {
+            token: "sv=1&sig=stale".to_string(),
+            expires_at: now + chrono::Duration::seconds(1),
+        });
+
+        let start = Arc::new(Barrier::new(CALLERS + 1));
+        let attempted = Arc::new(AtomicUsize::new(0));
+        let all_callers_attempted = Arc::new(Notify::new());
+        let tasks = (0..CALLERS)
+            .map(|_| {
+                let provider = provider.clone();
+                let start = start.clone();
+                let attempted = attempted.clone();
+                let all_callers_attempted = all_callers_attempted.clone();
+                tokio::spawn(async move {
+                    start.wait().await;
+                    if attempted.fetch_add(1, Ordering::SeqCst) + 1 == CALLERS {
+                        all_callers_attempted.notify_one();
+                    }
+                    provider.current_credential().await.unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        start.wait().await;
+        all_callers_attempted.notified().await;
+        fetch_started.notified().await;
+        assert_eq!(attempted.load(Ordering::SeqCst), CALLERS);
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+        release_fetch.notify_one();
+
+        let credentials = join_all(tasks)
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+
+        assert!(
+            credentials
+                .iter()
+                .all(|credential| credential.token == "sv=1&sig=single-flight")
+        );
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn lance_provider_warms_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = requests.clone();
+        let response_body = serde_json::json!({
+            "success": true,
+            "credentials": {
+                "tempAk": "account",
+                "sessionToken": "sv=1&sig=warmed",
+                "expiredAt": (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+            }
+        })
+        .to_string();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            server_requests.fetch_add(1, Ordering::SeqCst);
+            let mut request = [0_u8; 4096];
+            socket.read(&mut request).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut broker_config = config();
+        broker_config.endpoint = format!("http://{address}");
+        let provider = build_lance_provider(broker_config).await.unwrap();
+        server.await.unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+
+        let options = provider.fetch_storage_options().await.unwrap().unwrap();
+        assert_eq!(options["azure_storage_sas_token"], "sv=1&sig=warmed");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 
     #[test]

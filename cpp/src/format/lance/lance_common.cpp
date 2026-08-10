@@ -83,6 +83,7 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
   } else if (provider == kCloudProviderAzure) {
     set("azure_storage_account_name", config.access_key_id);
     if (config.IsAzureCredentialBrokerEnabled()) {
+      set_credential_cache_key();
       set("azure_broker_endpoint", config.azure_credential_endpoint);
       set("azure_broker_client_id", config.azure_client_id);
       set("azure_broker_tenant_id", config.azure_tenant_id);
@@ -105,6 +106,7 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
     }
   } else if (provider == kCloudProviderGCP) {
     if (config.use_iam && !config.gcp_target_service_account.empty()) {
+      set_credential_cache_key();
       // Bridge-private keys consumed by Rust `open_dataset`/`write_dataset`/
       // `drop` (see lance_bridgeimpl.rs). The bridge strips them out of
       // storage_options and installs an ImpersonatingGcsStoreProvider that
