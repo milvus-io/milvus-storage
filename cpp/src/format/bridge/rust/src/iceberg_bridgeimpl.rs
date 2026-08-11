@@ -26,17 +26,33 @@ use iceberg::table::StaticTable;
 use iceberg_storage_opendal::OpenDalStorageFactory;
 use crate::aliyun_oss_provider::AliyunOssStorageFactory;
 use crate::aws_arn_provider::{AssumeRoleConfig, build_iceberg_factory};
-use crate::azure_sas_provider::{AzureBrokerClient, AzureBrokerConfig};
+use crate::azure_sas_provider::{AzureBrokerConfig, AzureSasStorageFactory};
 use crate::cloud_provider_cache::{
     CACHE_CAPACITY, CACHE_KEY, GlobalLruCache,
 };
-use crate::gcp_impersonation::{DEFAULT_TOKEN_LIFETIME_SECS, fetch_impersonated_bearer};
+use crate::gcp_impersonation::{
+    GcpImpersonationConfig, GcpImpersonationStorageFactory, ICEBERG_TARGET_SERVICE_ACCOUNT,
+};
 use crate::iceberg_ffi::IcebergFileInfo;
 
 const CLOUD_PROVIDER_KEY: &str = "cloud_provider";
 
 static ICEBERG_FACTORY_CACHE: LazyLock<GlobalLruCache<Arc<dyn StorageFactory>>> =
     LazyLock::new(|| GlobalLruCache::new(CACHE_CAPACITY));
+
+fn azdls_factory(scheme: &str) -> anyhow::Result<OpenDalStorageFactory> {
+    // `OpenDalStorageFactory::Azdls { configured_scheme }` is public, but
+    // `AzureStorageScheme` is not re-exported by iceberg-storage-opendal.
+    let variant = match scheme {
+        "abfs" => "Abfs",
+        "abfss" => "Abfss",
+        "wasb" => "Wasb",
+        "wasbs" => "Wasbs",
+        _ => anyhow::bail!("Unsupported Azure storage scheme: {scheme}"),
+    };
+    let json = format!(r#"{{"Azdls":{{"configured_scheme":"{variant}"}}}}"#);
+    serde_json::from_str(&json).map_err(|error| anyhow::anyhow!("construct Azdls factory: {error}"))
+}
 
 /// Internal representation for a delete file reference, serialized to JSON.
 #[derive(serde::Serialize)]
@@ -55,58 +71,14 @@ pub(crate) fn vec_to_hashmap(keys: Vec<String>, values: Vec<String>) -> HashMap<
     keys.into_iter().zip(values.into_iter()).collect()
 }
 
-/// Consumes the bridge-private cloud provider and resolves any credentials
-/// that Iceberg/OpenDAL cannot obtain directly from the remaining options.
+/// Consumes and validates the bridge-private cloud provider selector.
 pub(crate) async fn prepare_cloud_storage_options(
     props: &mut HashMap<String, String>,
 ) -> anyhow::Result<()> {
-    let cloud_provider = props.remove(CLOUD_PROVIDER_KEY);
-
-    match cloud_provider.as_deref() {
-        Some("azure") => {
-            if let Some(config) = AzureBrokerConfig::extract(props)? {
-                let client = AzureBrokerClient::new(config)?;
-                let credential = match client.fetch(chrono::Utc::now()).await {
-                    Ok(credential) => credential,
-                    Err(error) => {
-                        eprintln!(
-                            "Warning: Azure SAS credential broker fetch failed: {}, has_cached_sas=false, cached_expired=false",
-                            error
-                        );
-                        return Err(error);
-                    }
-                };
-                props.insert("adls.sas-token".to_string(), credential.token);
-            }
-        }
-        Some("gcp") => {
-            // iceberg-rust does not treat `gcs.service-account` as an
-            // impersonation target. Replace it with a pre-fetched bearer for
-            // this short-lived operation.
-            if let Some(target_sa) = props.remove("gcs.service-account")
-                && !target_sa.is_empty()
-            {
-                let bearer = fetch_impersonated_bearer(
-                    &target_sa,
-                    std::time::Duration::from_secs(DEFAULT_TOKEN_LIFETIME_SECS),
-                )
-                .await?;
-                props.insert("gcs.oauth2.token".to_string(), bearer);
-            }
-        }
-        Some("aws") => {
-            // OpenDAL consumes the S3 and STS options directly.
-        }
-        Some("aliyun") => {
-            // AliyunOssStorageFactory consumes the OSS role options.
-        }
-        None => {
-            // Local files do not carry a cloud provider.
-        }
+    match props.remove(CLOUD_PROVIDER_KEY).as_deref() {
+        Some("aws" | "azure" | "gcp" | "aliyun") | None => Ok(()),
         Some(provider) => anyhow::bail!("Unsupported Iceberg cloud provider: {provider}"),
     }
-
-    Ok(())
 }
 
 /// Scheme → `iceberg-storage-opendal` variant. Hand-written because 0.9
@@ -118,6 +90,16 @@ async fn upstream_opendal_factory(
 ) -> anyhow::Result<Arc<dyn StorageFactory>> {
     let cache_key = props.remove(CACHE_KEY).filter(|key| !key.is_empty());
     let cloud_provider = props.get(CLOUD_PROVIDER_KEY).cloned();
+    let azure_broker = if cloud_provider.as_deref() == Some("azure") {
+        AzureBrokerConfig::extract(props)?
+    } else {
+        None
+    };
+    let gcp_impersonation = if cloud_provider.as_deref() == Some("gcp") {
+        GcpImpersonationConfig::extract(props, ICEBERG_TARGET_SERVICE_ACCOUNT)?
+    } else {
+        None
+    };
     let assume_role = if cloud_provider.as_deref() == Some("aws") {
         let role_arn = props
             .remove("client.assume-role.arn")
@@ -145,6 +127,42 @@ async fn upstream_opendal_factory(
     };
 
     match scheme {
+        "abfs" | "abfss" | "wasb" | "wasbs" if azure_broker.is_some() => {
+            let config = azure_broker.expect("guarded by is_some");
+            let inner = azdls_factory(scheme)?;
+            let scoped_cache_key = cache_key
+                .as_deref()
+                .map(|cache_key| format!("azure:{scheme}:{cache_key}"));
+            match scoped_cache_key.as_deref() {
+                Some(cache_key) => ICEBERG_FACTORY_CACHE
+                    .get(cache_key, || async {
+                        let factory = Arc::new(AzureSasStorageFactory::new(inner, config).await?)
+                            as Arc<dyn StorageFactory>;
+                        eprintln!(
+                            "created cloud cache entry: consumer=iceberg, cloud=azure, mechanism=broker_sas"
+                        );
+                        Ok::<_, anyhow::Error>(factory)
+                    })
+                    .await,
+                None => Ok(Arc::new(AzureSasStorageFactory::new(inner, config).await?)),
+            }
+        }
+        "gs" if gcp_impersonation.is_some() => {
+            let config = gcp_impersonation.expect("guarded by is_some");
+            match cache_key.as_deref() {
+                Some(cache_key) => ICEBERG_FACTORY_CACHE
+                    .get(cache_key, || async {
+                        let factory = Arc::new(GcpImpersonationStorageFactory::new(config).await?)
+                            as Arc<dyn StorageFactory>;
+                        eprintln!(
+                            "created cloud cache entry: consumer=iceberg, cloud=gcp, mechanism=service_account_impersonation"
+                        );
+                        Ok::<_, anyhow::Error>(factory)
+                    })
+                    .await,
+                None => Ok(Arc::new(GcpImpersonationStorageFactory::new(config).await?)),
+            }
+        }
         // The upstream OSS factory does not carry per-tenant `oss.role-arn`.
         "oss" if cloud_provider.as_deref() == Some("aliyun")
             && props.contains_key("oss.role-arn") =>
@@ -187,22 +205,7 @@ async fn upstream_opendal_factory(
             customized_credential_load: None,
         })),
         "gs" => Ok(Arc::new(OpenDalStorageFactory::Gcs)),
-        "abfs" | "abfss" | "wasb" | "wasbs" => {
-            // `OpenDalStorageFactory::Azdls { configured_scheme }` is pub,
-            // but its `AzureStorageScheme` field type isn't `pub use`'d in
-            // lib.rs — round-trip via the pub `Deserialize` impl instead.
-            let variant = match scheme {
-                "abfs" => "Abfs",
-                "abfss" => "Abfss",
-                "wasb" => "Wasb",
-                "wasbs" => "Wasbs",
-                _ => unreachable!(),
-            };
-            let json = format!(r#"{{"Azdls":{{"configured_scheme":"{variant}"}}}}"#);
-            let factory: OpenDalStorageFactory = serde_json::from_str(&json)
-                .map_err(|e| anyhow::anyhow!("construct Azdls factory: {e}"))?;
-            Ok(Arc::new(factory))
-        }
+        "abfs" | "abfss" | "wasb" | "wasbs" => Ok(Arc::new(azdls_factory(scheme)?)),
         "file" => Ok(Arc::new(LocalFsStorageFactory)),
         "memory" => Ok(Arc::new(MemoryStorageFactory)),
         other => anyhow::bail!("Unsupported scheme for iceberg FileIO: {other}"),
@@ -474,7 +477,219 @@ pub fn iceberg_plan_files(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
+    use crate::azure_sas_provider::{
+        AZURE_BROKER_ACCOUNT_NAME, AZURE_BROKER_BUCKET, AZURE_BROKER_CLIENT_ID,
+        AZURE_BROKER_DURATION_SECONDS, AZURE_BROKER_ENDPOINT, AZURE_BROKER_REGION,
+        AZURE_BROKER_REQUEST_TIMEOUT_MS, AZURE_BROKER_TENANT_ID,
+    };
+    use crate::gcp_impersonation::{
+        GcpImpersonationConfig, ICEBERG_TARGET_SERVICE_ACCOUNT, TOKEN_LIFETIME_SECONDS,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    const AZURE_PRIVATE_KEYS: [&str; 8] = [
+        AZURE_BROKER_ENDPOINT,
+        AZURE_BROKER_CLIENT_ID,
+        AZURE_BROKER_TENANT_ID,
+        AZURE_BROKER_ACCOUNT_NAME,
+        AZURE_BROKER_REGION,
+        AZURE_BROKER_BUCKET,
+        AZURE_BROKER_DURATION_SECONDS,
+        AZURE_BROKER_REQUEST_TIMEOUT_MS,
+    ];
+
+    fn azure_broker_props() -> HashMap<String, String> {
+        HashMap::from([
+            (
+                AZURE_BROKER_ENDPOINT.to_string(),
+                "http://127.0.0.1:1".to_string(),
+            ),
+            (AZURE_BROKER_CLIENT_ID.to_string(), "client".to_string()),
+            (AZURE_BROKER_TENANT_ID.to_string(), "tenant".to_string()),
+            (AZURE_BROKER_ACCOUNT_NAME.to_string(), "account".to_string()),
+            (AZURE_BROKER_REGION.to_string(), "westus3".to_string()),
+            (AZURE_BROKER_BUCKET.to_string(), "container".to_string()),
+            (
+                AZURE_BROKER_DURATION_SECONDS.to_string(),
+                "3600".to_string(),
+            ),
+            (
+                AZURE_BROKER_REQUEST_TIMEOUT_MS.to_string(),
+                "20".to_string(),
+            ),
+            (
+                "adls.endpoint-suffix".to_string(),
+                "core.windows.net".to_string(),
+            ),
+        ])
+    }
+
+    fn gcp_impersonation_props() -> HashMap<String, String> {
+        HashMap::from([
+            (
+                ICEBERG_TARGET_SERVICE_ACCOUNT.to_string(),
+                "target@example.com".to_string(),
+            ),
+            (TOKEN_LIFETIME_SECONDS.to_string(), "3600".to_string()),
+        ])
+    }
+
+    #[tokio::test]
+    async fn prepare_cloud_storage_options_only_removes_supported_selector() {
+        for (provider, static_options) in [
+            (
+                "azure",
+                HashMap::from([
+                    ("adls.account-name".to_string(), "account".to_string()),
+                    (
+                        "adls.endpoint-suffix".to_string(),
+                        "core.windows.net".to_string(),
+                    ),
+                    ("adls.sas-token".to_string(), "static-sas".to_string()),
+                ]),
+            ),
+            (
+                "gcp",
+                HashMap::from([
+                    (
+                        "gcs.service-account-key".to_string(),
+                        "static-key".to_string(),
+                    ),
+                    ("gcs.oauth2.token".to_string(), "static-token".to_string()),
+                ]),
+            ),
+        ] {
+            let mut props = static_options.clone();
+            props.insert(CLOUD_PROVIDER_KEY.to_string(), provider.to_string());
+
+            prepare_cloud_storage_options(&mut props).await.unwrap();
+
+            assert_eq!(props, static_options);
+        }
+
+        for provider in ["aws", "aliyun"] {
+            let mut props = HashMap::from([
+                (CLOUD_PROVIDER_KEY.to_string(), provider.to_string()),
+                ("ordinary.option".to_string(), "value".to_string()),
+            ]);
+            prepare_cloud_storage_options(&mut props).await.unwrap();
+            assert_eq!(
+                props,
+                HashMap::from([("ordinary.option".to_string(), "value".to_string())])
+            );
+        }
+    }
+
+    #[test]
+    fn azure_and_gcp_private_options_are_removed_by_their_parsers() {
+        let mut azure_props = azure_broker_props();
+        azure_props.insert("ordinary.option".to_string(), "value".to_string());
+
+        assert!(
+            AzureBrokerConfig::extract(&mut azure_props)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            AZURE_PRIVATE_KEYS
+                .iter()
+                .all(|key| !azure_props.contains_key(*key))
+        );
+        assert_eq!(azure_props["adls.endpoint-suffix"], "core.windows.net");
+        assert_eq!(azure_props["ordinary.option"], "value");
+
+        let mut gcp_props = gcp_impersonation_props();
+        gcp_props.insert("ordinary.option".to_string(), "value".to_string());
+        assert!(
+            GcpImpersonationConfig::extract(&mut gcp_props, ICEBERG_TARGET_SERVICE_ACCOUNT,)
+                .unwrap()
+                .is_some()
+        );
+        assert!(!gcp_props.contains_key(ICEBERG_TARGET_SERVICE_ACCOUNT));
+        assert!(!gcp_props.contains_key(TOKEN_LIFETIME_SECONDS));
+        assert_eq!(gcp_props["ordinary.option"], "value");
+    }
+
+    #[tokio::test]
+    async fn unsupported_cloud_provider_is_rejected() {
+        let mut props =
+            HashMap::from([(CLOUD_PROVIDER_KEY.to_string(), "unsupported".to_string())]);
+
+        let error = prepare_cloud_storage_options(&mut props).await.unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Unsupported Iceberg cloud provider: unsupported"
+        );
+        assert!(!props.contains_key(CLOUD_PROVIDER_KEY));
+    }
+
+    #[tokio::test]
+    async fn azure_factory_cache_separates_resolved_schemes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = requests.clone();
+        let response_body = serde_json::json!({
+            "success": true,
+            "credentials": {
+                "tempAk": "account",
+                "sessionToken": "sv=1&sig=scheme-separated",
+                "expiredAt": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+            }
+        })
+        .to_string();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                server_requests.fetch_add(1, Ordering::SeqCst);
+                let mut request = [0_u8; 4096];
+                socket.read(&mut request).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let cache_key = "test-azure-resolved-scheme-separation";
+        let mut abfss_props = azure_broker_props();
+        abfss_props.insert(
+            AZURE_BROKER_ENDPOINT.to_string(),
+            format!("http://{address}"),
+        );
+        abfss_props.insert(CLOUD_PROVIDER_KEY.to_string(), "azure".to_string());
+        abfss_props.insert(CACHE_KEY.to_string(), cache_key.to_string());
+
+        let mut wasbs_props = abfss_props.clone();
+        let abfss_factory = upstream_opendal_factory(
+            "abfss://container@account.dfs.core.windows.net/metadata/table.json",
+            "abfss",
+            &mut abfss_props,
+        )
+        .await
+        .unwrap();
+        let wasbs_factory = upstream_opendal_factory(
+            "wasbs://container@account.blob.core.windows.net/metadata/table.json",
+            "wasbs",
+            &mut wasbs_props,
+        )
+        .await
+        .unwrap();
+
+        assert!(!Arc::ptr_eq(&abfss_factory, &wasbs_factory));
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        server.abort();
+        let _ = server.await;
+    }
 
     #[test]
     fn test_vec_to_hashmap() {

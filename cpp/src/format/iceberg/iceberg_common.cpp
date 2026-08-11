@@ -112,6 +112,7 @@ std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSys
     // Azure DFS endpoint (account.dfs.suffix) from scheme://container/path URIs.
     set("adls.endpoint-suffix", config.address);
     if (config.IsAzureCredentialBrokerEnabled()) {
+      set_credential_cache_key();
       set("azure_broker_endpoint", config.azure_credential_endpoint);
       set("azure_broker_client_id", config.azure_client_id);
       set("azure_broker_tenant_id", config.azure_tenant_id);
@@ -132,13 +133,15 @@ std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSys
     }
   } else if (provider == kCloudProviderGCP) {
     if (config.use_iam && !config.gcp_target_service_account.empty()) {
-      // Bridge-private: iceberg-rust 0.8's gcs_config_parse doesn't recognize
-      // this key as an impersonation target (it would be silently dropped).
-      // Instead, iceberg_bridgeimpl.rs::iceberg_plan_files intercepts it,
-      // fetches a token via VM-SA → IAM.generateAccessToken, and swaps it for
-      // `gcs.oauth2.token` before building the FileIO. See
-      // `docs/iceberg-gcp-impersonation-analysis.md`.
+      set_credential_cache_key();
+      // Bridge-private: the Rust bridge consumes this target before building
+      // FileIO, warms a refreshable impersonation provider inside the typed
+      // factory LRU, and reuses it while creating a fresh GCS operator for
+      // each Iceberg storage operation.
       set("gcs.service-account", config.gcp_target_service_account);
+      if (config.load_frequency > 0) {
+        options["gcp_credential_refresh_secs"] = std::to_string(config.load_frequency);
+      }
     }
     // Otherwise uses default credentials (VM metadata)
   } else if (provider == kCloudProviderAliyun) {

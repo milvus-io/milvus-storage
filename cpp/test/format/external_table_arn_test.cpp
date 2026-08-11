@@ -35,14 +35,21 @@
 #define ARN_ENV_ROLE_ARN "ARN_TEST_ENV_ROLE_ARN"        // IAM role ARN to assume for reading
 
 #include <gtest/gtest.h>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
+#include <stdexcept>
 #include <thread>
 
 #include <arrow/api.h>
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
+#include <boost/asio.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
+#include <curl/curl.h>
 #include <parquet/arrow/writer.h>
 #include <parquet/properties.h>
 
@@ -725,6 +732,110 @@ INSTANTIATE_TEST_SUITE_P(
 #define AZURE_ARN_ENV_TENANT_ID "AZURE_ARN_TEST_ENV_TENANT_ID"
 #define AZURE_ARN_ENV_CREDENTIAL_ENDPOINT "AZURE_ARN_TEST_ENV_CREDENTIAL_ENDPOINT"
 
+class OneShotHttpPostRelay {
+  public:
+  explicit OneShotHttpPostRelay(std::string upstream_endpoint)
+      : upstream_endpoint_(std::move(upstream_endpoint)),
+        acceptor_(io_context_, boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address_v4("127.0.0.1"), 0)) {
+    endpoint_ = "http://127.0.0.1:" + std::to_string(acceptor_.local_endpoint().port());
+    acceptor_.async_accept([this](const boost::system::error_code& error, boost::asio::ip::tcp::socket socket) {
+      if (error) {
+        return;
+      }
+
+      boost::system::error_code close_error;
+      acceptor_.close(close_error);
+      request_count_.fetch_add(1, std::memory_order_relaxed);
+
+      try {
+        boost::beast::flat_buffer buffer;
+        boost::beast::http::request<boost::beast::http::string_body> request;
+        boost::beast::http::read(socket, buffer, request);
+
+        std::string response_body;
+        char curl_error[CURL_ERROR_SIZE] = {};
+        auto* curl = curl_easy_init();
+        if (curl == nullptr) {
+          throw std::runtime_error("curl_easy_init failed");
+        }
+        auto* headers = curl_slist_append(nullptr, "Content-Type: application/json");
+        headers = curl_slist_append(headers, "Expect:");
+        curl_easy_setopt(curl, CURLOPT_URL, upstream_endpoint_.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request.body().data());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(request.body().size()));
+        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 10000L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 30000L);
+        curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, curl_error);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &OneShotHttpPostRelay::AppendResponseBody);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+
+        auto curl_status = curl_easy_perform(curl);
+        long response_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        if (curl_status != CURLE_OK) {
+          throw std::runtime_error(curl_error[0] == '\0' ? curl_easy_strerror(curl_status) : curl_error);
+        }
+        if (response_code < 100 || response_code > 599) {
+          throw std::runtime_error("upstream returned an invalid HTTP status");
+        }
+
+        boost::beast::http::response<boost::beast::http::string_body> response(
+            static_cast<boost::beast::http::status>(response_code), request.version());
+        response.set(boost::beast::http::field::content_type, "application/json");
+        response.keep_alive(false);
+        response.body() = std::move(response_body);
+        response.prepare_payload();
+        boost::beast::http::write(socket, response);
+      } catch (const std::exception& error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        error_ = error.what();
+      }
+
+      boost::system::error_code shutdown_error;
+      socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, shutdown_error);
+    });
+    worker_ = std::thread([this] { io_context_.run(); });
+  }
+
+  ~OneShotHttpPostRelay() {
+    io_context_.stop();
+    if (worker_.joinable()) {
+      worker_.join();
+    }
+  }
+
+  const std::string& endpoint() const { return endpoint_; }
+
+  size_t request_count() const { return request_count_.load(std::memory_order_relaxed); }
+
+  std::string error() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return error_;
+  }
+
+  private:
+  static size_t AppendResponseBody(char* data, size_t size, size_t count, void* output) {
+    auto bytes = size * count;
+    static_cast<std::string*>(output)->append(data, bytes);
+    return bytes;
+  }
+
+  std::string upstream_endpoint_;
+  boost::asio::io_context io_context_;
+  boost::asio::ip::tcp::acceptor acceptor_;
+  std::thread worker_;
+  std::string endpoint_;
+  std::atomic<size_t> request_count_{0};
+  mutable std::mutex mutex_;
+  std::string error_;
+};
+
 class ExternalTableAzureArnTest : public ::testing::TestWithParam<std::string> {
   protected:
   void SetUp() override {
@@ -963,6 +1074,64 @@ TEST_P(ExternalTableAzureArnTest, ReadWithBrokeredSas) {
   loon_manifest_destroy(out_manifest);
   free(out_manifest_path);
   loon_properties_free(&loon_props);
+}
+
+TEST_P(ExternalTableAzureArnTest, ProviderCacheFetchesBrokeredSasOnce) {
+  const auto& format = GetParam();
+  if (format != LOON_FORMAT_LANCE_TABLE && format != LOON_FORMAT_ICEBERG_TABLE) {
+    GTEST_SKIP() << "Azure provider cache is used only by Lance and Iceberg";
+  }
+
+  const uint64_t num_rows = 100;
+  ASSERT_AND_ASSIGN(auto result, CreateTestTable(format, num_rows));
+
+  OneShotHttpPostRelay broker_relay(credential_endpoint_);
+  auto cache_read_props = read_props_;
+  api::SetValue(cache_read_props, "extfs.azsas.azure_credential_endpoint", broker_relay.endpoint().c_str());
+  ASSERT_AND_ASSIGN(auto fs_config, FilesystemCache::resolve_config(cache_read_props, result.explore_dir.c_str()));
+
+  constexpr size_t cache_hit_iterations = 10;
+  if (format == LOON_FORMAT_LANCE_TABLE) {
+    auto storage_options = lance::ToStorageOptions(fs_config);
+    auto cache_key = storage_options.find("milvus_fs_cache_key");
+    ASSERT_NE(cache_key, storage_options.end());
+    ASSERT_EQ(cache_key->second, fs_config.GetCacheKey());
+
+    std::vector<std::string> columns = {"id", "name", "value"};
+    std::shared_ptr<FormatReader> reader;
+    for (size_t iteration = 0; iteration < cache_hit_iterations; ++iteration) {
+      SCOPED_TRACE(::testing::Message() << "cache hit iteration " << iteration);
+      ASSERT_AND_ASSIGN(reader,
+                        FormatReader::create(result.schema, format, result.cgfile, cache_read_props, columns, nullptr));
+    }
+
+    ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
+    ValidateRowGroupInfos(rg_infos, num_rows);
+    int64_t total_rows = 0;
+    for (size_t i = 0; i < rg_infos.size(); ++i) {
+      ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
+      total_rows += batch->num_rows();
+    }
+    ASSERT_EQ(total_rows, static_cast<int64_t>(num_rows));
+  } else {
+    auto snapshot_id = std::to_string(result.iceberg_snapshot_id);
+    api::SetValue(cache_read_props, PROPERTY_ICEBERG_SNAPSHOT_ID, snapshot_id.c_str());
+
+    auto storage_options = iceberg::ToStorageOptions(fs_config);
+    auto cache_key = storage_options.find("milvus_fs_cache_key");
+    ASSERT_NE(cache_key, storage_options.end());
+    ASSERT_EQ(cache_key->second, fs_config.GetCacheKey());
+
+    ASSERT_AND_ASSIGN(auto* iceberg_format, Format::get(format));
+    for (size_t iteration = 0; iteration < cache_hit_iterations; ++iteration) {
+      SCOPED_TRACE(::testing::Message() << "cache hit iteration " << iteration);
+      ASSERT_AND_ASSIGN(auto files, iceberg_format->explore(result.explore_dir, cache_read_props));
+      ASSERT_FALSE(files.empty());
+    }
+  }
+
+  ASSERT_EQ(broker_relay.request_count(), 1u);
+  ASSERT_TRUE(broker_relay.error().empty()) << broker_relay.error();
 }
 
 INSTANTIATE_TEST_SUITE_P(

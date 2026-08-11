@@ -55,6 +55,7 @@ TEST_F(IcebergStorageOptionsTest, AzureKeys) {
   EXPECT_EQ(opts["adls.account-name"], "myaccount");
   EXPECT_EQ(opts["adls.account-key"], "myaccountkey");
   EXPECT_EQ(opts.count("azure_storage_account_name"), 0);
+  EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
 }
 
 TEST_F(IcebergStorageOptionsTest, AzureCredentialBrokerKeysExcludeFallbackCredentials) {
@@ -89,7 +90,7 @@ TEST_F(IcebergStorageOptionsTest, AzureCredentialBrokerKeysExcludeFallbackCreden
   EXPECT_EQ(opts.count("adls.client-id"), 0);
   EXPECT_EQ(opts.count("adls.tenant-id"), 0);
   EXPECT_EQ(opts.count("adls.sas-token"), 0);
-  EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
+  EXPECT_EQ(opts["milvus_fs_cache_key"], config.GetCacheKey());
 }
 
 TEST_F(IcebergStorageOptionsTest, AliyunKeys) {
@@ -155,12 +156,14 @@ TEST_F(IcebergStorageOptionsTest, GcpImpersonation) {
   config.cloud_provider = kCloudProviderGCP;
   config.use_iam = true;
   config.gcp_target_service_account = "target-sa@customer-project.iam.gserviceaccount.com";
+  config.load_frequency = 1800;
 
   auto opts = ToStorageOptions(config);
 
   EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
   EXPECT_EQ(opts["gcs.service-account"], "target-sa@customer-project.iam.gserviceaccount.com");
-  EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
+  EXPECT_EQ(opts["gcp_credential_refresh_secs"], "1800");
+  EXPECT_EQ(opts["milvus_fs_cache_key"], config.GetCacheKey());
 }
 
 TEST_F(IcebergStorageOptionsTest, GcpTargetServiceAccountRequiresIam) {
@@ -173,6 +176,7 @@ TEST_F(IcebergStorageOptionsTest, GcpTargetServiceAccountRequiresIam) {
 
   EXPECT_EQ(opts.size(), 1);
   EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
+  EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
 }
 
 TEST_F(IcebergStorageOptionsTest, GcpDefaultCredentials) {
@@ -182,6 +186,7 @@ TEST_F(IcebergStorageOptionsTest, GcpDefaultCredentials) {
   auto opts = ToStorageOptions(config);
   EXPECT_EQ(opts.size(), 1);
   EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
+  EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
 }
 
 TEST_F(IcebergStorageOptionsTest, BareEndpointUsesHttpWhenSslDisabled) {
