@@ -25,6 +25,7 @@
 //                   [--take pos1,pos2,...] [--predicate "expr"]
 //                   [--verbose] [--prop key=value ...]
 
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -88,6 +89,14 @@ static std::vector<std::string> Split(const std::string& s, char delim) {
   return parts;
 }
 
+template <typename T>
+static bool ParseUnsigned(std::string_view input, T& output) {
+  const auto* begin = input.data();
+  const auto* end = begin + input.size();
+  const auto [parsed_end, error] = std::from_chars(begin, end, output);
+  return error == std::errc{} && parsed_end == end;
+}
+
 static std::vector<int64_t> ParseInt64List(const std::string& s) {
   std::vector<int64_t> result;
   for (const auto& part : Split(s, ',')) {
@@ -143,9 +152,15 @@ static int DoDemoTable(int argc, char** argv) {
     } else if (arg == "--path" && i + 1 < argc) {
       path = argv[++i];
     } else if (arg == "--rows" && i + 1 < argc) {
-      rows = std::stoull(argv[++i]);
+      if (!ParseUnsigned(argv[++i], rows)) {
+        std::cerr << "Error: --rows requires an unsigned integer" << std::endl;
+        return 1;
+      }
     } else if (arg == "--dim" && i + 1 < argc) {
-      dimension = static_cast<uint32_t>(std::stoul(argv[++i]));
+      if (!ParseUnsigned(argv[++i], dimension)) {
+        std::cerr << "Error: --dim requires an unsigned integer" << std::endl;
+        return 1;
+      }
     } else if (arg == "--scenario" && i + 1 < argc) {
       scenario = argv[++i];
       scenario_explicit = true;
