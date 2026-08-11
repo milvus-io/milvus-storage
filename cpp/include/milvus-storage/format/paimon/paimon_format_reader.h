@@ -80,7 +80,6 @@ class PaimonFormatReader final : public FormatReader {
   [[nodiscard]] std::shared_ptr<arrow::Schema> get_schema() const override;
 
   private:
-  [[nodiscard]] bool is_data_split() const;
   PaimonFormatReader(MetaTrait::MetadataPtr metadata,
                      api::ColumnGroupFile file,
                      std::shared_ptr<arrow::Schema> read_schema,
@@ -89,6 +88,7 @@ class PaimonFormatReader final : public FormatReader {
                      std::shared_ptr<BlockingPaimonDataSplitReader> split_reader,
                      std::vector<std::string> split_columns,
                      std::shared_ptr<arrow::Schema> output_schema);
+  [[nodiscard]] bool is_data_split() const;
 
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> filter_direct_batch(
       const std::shared_ptr<arrow::RecordBatch>& batch, uint64_t physical_start) const;
