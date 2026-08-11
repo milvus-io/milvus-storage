@@ -195,6 +195,7 @@ struct codec_traits<milvus_storage::api::Manifest> {
     avro::encode(e, m.stats());
     avro::encode(e, m.indexes());
     avro::encode(e, m.lobFiles());
+    avro::encode(e, m.minorVersion());
   }
 
   static void decode(Decoder& d, milvus_storage::api::Manifest& m) {
@@ -203,6 +204,13 @@ struct codec_traits<milvus_storage::api::Manifest> {
     avro::decode(d, m.stats());
     avro::decode(d, m.indexes());
     avro::decode(d, m.lobFiles());
+
+    // The persistent value is consumed for schema compatibility.  The public
+    // marker is derived from indexes(), which keeps old and malformed records
+    // consistent with the current manifest-state invariant.
+    int32_t encoded_minor_version = 0;
+    avro::decode(d, encoded_minor_version);
+    static_cast<void>(encoded_minor_version);
   }
 };
 
@@ -263,7 +271,8 @@ static const char* const MANIFEST_SCHEMA_JSON = R"({
         {"name": "valid_rows", "type": "long"},
         {"name": "file_size_bytes", "type": "long"}
       ]
-    }}, "default": []}
+    }}, "default": []},
+    {"name": "minor_version", "type": "int", "default": 0}
   ]
 })";
 

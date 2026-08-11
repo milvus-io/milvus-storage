@@ -36,6 +36,14 @@ namespace milvus_storage::api::transaction {
 static constexpr int64_t LATEST = -1;
 
 /**
+ * @brief Metadata needed to publish an immutable manifest revision.
+ */
+struct ManifestCommitInfo {
+  int64_t manifest_version;
+  int32_t manifest_minor_version;
+};
+
+/**
  * @brief Transaction updates tracking class
  *
  * Records all changes made during a transaction that can be used by the resolver
@@ -195,6 +203,14 @@ class Transaction {
   // Returns the committed version number on success
   arrow::Result<int64_t> Commit();
 
+  /**
+   * @brief Commit and return the revision together with its feature marker.
+   *
+   * The marker lets a metadata publisher persist the manifest reference and
+   * its index-information state atomically.
+   */
+  arrow::Result<ManifestCommitInfo> CommitWithInfo();
+
   // Get manifest on read version
   // Returns empty manifest if read_version_ is 0 (no manifest exists)
   arrow::Result<std::shared_ptr<Manifest>> GetManifest();
@@ -245,6 +261,14 @@ class Transaction {
    * @return Reference to this transaction for method chaining
    */
   Transaction& UpdateStat(const std::string& key, const Statistics& stat);
+
+  /**
+   * @brief Record or replace metadata for an already-written index file.
+   *
+   * This method only records Index metadata. It does not perform index-file
+   * I/O or return a file handle.
+   */
+  Transaction& AddIndexInfo(const Index& index);
 
   /**
    * @brief Add or replace an index

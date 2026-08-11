@@ -286,6 +286,58 @@ static void test_add_column_group(void) {
   loon_properties_free(&pp);
 }
 
+static void test_add_index_info_and_commit_with_info(void) {
+  LoonProperties pp;
+  LoonFFIResult rc;
+  LoonTransactionHandle transaction = 0;
+  LoonTransactionHandle read_transaction = 0;
+  LoonManifest* cmanifest = NULL;
+  LoonManifestCommitInfo commit_info = {0};
+  const char* property_keys[] = {"index_id", "build_id"};
+  const char* property_values[] = {"100", "101"};
+  LoonIndexInfo index_info = {
+      .column_name = "vector",
+      .index_type = "HNSW",
+      .path = "vector-hnsw.idx",
+      .property_keys = property_keys,
+      .property_values = property_values,
+      .num_properties = 2,
+  };
+
+  create_test_pp(&pp);
+  FileSystemHandle fs = get_fs(&pp);
+  recreate_dir(fs, TEST_BASE_PATH);
+
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &transaction);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  rc = loon_transaction_add_index_info(transaction, &index_info);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  rc = loon_transaction_commit_with_info(transaction, &commit_info);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert_int_eq(commit_info.manifest_version, 1);
+  ck_assert_int_eq(commit_info.manifest_minor_version, 1);
+  loon_transaction_destroy(transaction);
+
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &read_transaction);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_transaction_get_manifest(read_transaction, &cmanifest);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert_int_eq(cmanifest->minor_version, 1);
+  ck_assert_int_eq(cmanifest->indexes.num_indexes, 1);
+  ck_assert_str_eq(cmanifest->indexes.indexes[0].column_name, "vector");
+  ck_assert_str_eq(cmanifest->indexes.indexes[0].index_type, "HNSW");
+  ck_assert_str_eq(cmanifest->indexes.indexes[0].path, TEST_BASE_PATH "/_index/vector-hnsw.idx");
+  ck_assert_int_eq(cmanifest->indexes.indexes[0].num_properties, 2);
+
+  loon_manifest_destroy(cmanifest);
+  loon_transaction_destroy(read_transaction);
+  clean_test_dir(fs, TEST_BASE_PATH);
+  loon_filesystem_destroy(fs);
+  loon_properties_free(&pp);
+}
+
 // Test loon_transaction_add_delta_log
 static void test_add_delta_log(void) {
   LoonTransactionHandle tranhandle;
@@ -759,6 +811,8 @@ void run_manifest_suite(void) {
   RUN_TEST(test_abort);
   loon_reset_context();
   RUN_TEST(test_add_column_group);
+  loon_reset_context();
+  RUN_TEST(test_add_index_info_and_commit_with_info);
   loon_reset_context();
   RUN_TEST(test_add_delta_log);
   loon_reset_context();

@@ -259,6 +259,56 @@ TEST_F(BridgeTest, ExportImportManifestEmpty) {
   loon_manifest_destroy(cmanifest);
 }
 
+TEST_F(BridgeTest, ExportImportManifestWithIndexInfoAndMinorVersion) {
+  std::vector<Index> indexes = {{.column_name = "vector",
+                                 .index_type = "HNSW",
+                                 .path = "_index/vector-hnsw.idx",
+                                 .properties = {{"index_id", "10"}, {"build_id", "20"}}}};
+  auto manifest = std::make_shared<Manifest>(ColumnGroups{}, std::vector<DeltaLog>{},
+                                             std::map<std::string, Statistics>{}, indexes);
+
+  LoonManifest* cmanifest = nullptr;
+  ASSERT_STATUS_OK(manifest_export(manifest, &cmanifest));
+  ASSERT_NE(cmanifest, nullptr);
+  ASSERT_EQ(cmanifest->minor_version, static_cast<int32_t>(ManifestMinorVersion::INDEX_INFO));
+  ASSERT_EQ(cmanifest->indexes.num_indexes, 1);
+  const auto& cindex = cmanifest->indexes.indexes[0];
+  ASSERT_STREQ(cindex.column_name, "vector");
+  ASSERT_STREQ(cindex.index_type, "HNSW");
+  ASSERT_STREQ(cindex.path, "_index/vector-hnsw.idx");
+  ASSERT_EQ(cindex.num_properties, 2);
+
+  std::shared_ptr<Manifest> imported_manifest;
+  ASSERT_STATUS_OK(manifest_import(cmanifest, &imported_manifest));
+  ASSERT_NE(imported_manifest, nullptr);
+  ASSERT_EQ(imported_manifest->minorVersion(), static_cast<int32_t>(ManifestMinorVersion::INDEX_INFO));
+  const auto* imported_index = imported_manifest->getIndex("vector", "HNSW");
+  ASSERT_NE(imported_index, nullptr);
+  EXPECT_EQ(imported_index->path, "_index/vector-hnsw.idx");
+  EXPECT_EQ(imported_index->properties.at("index_id"), "10");
+  EXPECT_EQ(imported_index->properties.at("build_id"), "20");
+
+  loon_manifest_destroy(cmanifest);
+}
+
+TEST_F(BridgeTest, ManifestDestroyReleasesIndexInfo) {
+  std::vector<Index> indexes = {{.column_name = "vector",
+                                 .index_type = "HNSW",
+                                 .path = "_index/vector-hnsw.idx",
+                                 .properties = {{"index_id", "10"}, {"build_id", "20"}}}};
+
+  // Repeat the complete ownership cycle so sanitizer-enabled builds verify
+  // every index allocation has a matching release in loon_manifest_destroy.
+  for (int i = 0; i < 16; ++i) {
+    auto manifest = std::make_shared<Manifest>(ColumnGroups{}, std::vector<DeltaLog>{},
+                                               std::map<std::string, Statistics>{}, indexes);
+    LoonManifest* cmanifest = nullptr;
+    ASSERT_STATUS_OK(manifest_export(manifest, &cmanifest));
+    ASSERT_NE(cmanifest, nullptr);
+    loon_manifest_destroy(cmanifest);
+  }
+}
+
 // Test export column groups with empty input
 TEST_F(BridgeTest, ExportEmptyColumnGroups) {
   ColumnGroups cgs;
@@ -315,7 +365,8 @@ TEST_F(BridgeTest, ManifestDebugStringValid) {
   std::map<std::string, Statistics> stats;
   stats["stat_key"] = Statistics{{"stat_file.parquet"}, {}};
 
-  auto manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats);
+  std::vector<LobFileInfo> lob_files = {{"lobs/100/_data/lob.vortex", 100, 20, 18, 1024}};
+  auto manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats, std::vector<Index>{}, lob_files);
 
   LoonManifest* cmanifest = nullptr;
   ASSERT_STATUS_OK(manifest_export(manifest, &cmanifest));
@@ -325,6 +376,9 @@ TEST_F(BridgeTest, ManifestDebugStringValid) {
   ASSERT_TRUE(result.find("DeltaLogs") != std::string::npos);
   ASSERT_TRUE(result.find("delta.log") != std::string::npos);
   ASSERT_TRUE(result.find("Stats") != std::string::npos);
+  ASSERT_TRUE(result.find("LobFiles(num_files=1)") != std::string::npos);
+  ASSERT_TRUE(result.find("field_id=100") != std::string::npos);
+  ASSERT_TRUE(result.find("file_size_bytes=1024") != std::string::npos);
 
   loon_manifest_destroy(cmanifest);
 }

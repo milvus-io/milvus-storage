@@ -239,6 +239,66 @@ TEST_F(TransactionTest, AddFieldTest) {
   }
 }
 
+TEST_F(TransactionTest, AddIndexInfoPublishesMinorVersionAndPreservesAddIndexCompatibility) {
+  Index first_index{.column_name = "vector",
+                    .index_type = "hnsw",
+                    .path = base_path_ + "/_index/vector-v1.idx",
+                    .properties = {{"index_id", "100"}, {"build_id", "101"}}};
+
+  // Index bytes are already written by the caller. The transaction publishes
+  // only their metadata and reports the minor version to the metadata layer.
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    transaction->AddIndexInfo(first_index);
+    ASSERT_AND_ASSIGN(auto commit_info, transaction->CommitWithInfo());
+    EXPECT_EQ(commit_info.manifest_version, 1);
+    EXPECT_EQ(commit_info.manifest_minor_version, static_cast<int32_t>(ManifestMinorVersion::INDEX_INFO));
+  }
+
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+    ASSERT_EQ(manifest->minorVersion(), static_cast<int32_t>(ManifestMinorVersion::INDEX_INFO));
+    const auto* index = manifest->getIndex("vector", "hnsw");
+    ASSERT_NE(index, nullptr);
+    EXPECT_EQ(index->path, first_index.path);
+    EXPECT_EQ(index->properties, first_index.properties);
+  }
+
+  // AddIndex remains source-compatible and replaces the matching metadata.
+  Index replacement_index = first_index;
+  replacement_index.path = base_path_ + "/_index/vector-v2.idx";
+  replacement_index.properties["build_id"] = "102";
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    transaction->AddIndex(replacement_index);
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    EXPECT_EQ(committed_version, 2);
+  }
+
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+    ASSERT_EQ(manifest->indexes().size(), 1);
+    ASSERT_NE(manifest->getIndex("vector", "hnsw"), nullptr);
+    EXPECT_EQ(manifest->getIndex("vector", "hnsw")->path, replacement_index.path);
+  }
+
+  // Removing the final index resets the marker in the committed manifest.
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    transaction->DropIndex("vector", "hnsw");
+    ASSERT_AND_ASSIGN(auto commit_info, transaction->CommitWithInfo());
+    EXPECT_EQ(commit_info.manifest_version, 3);
+    EXPECT_EQ(commit_info.manifest_minor_version, static_cast<int32_t>(ManifestMinorVersion::NONE));
+  }
+
+  ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+  ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+  EXPECT_TRUE(manifest->indexes().empty());
+  EXPECT_EQ(manifest->minorVersion(), static_cast<int32_t>(ManifestMinorVersion::NONE));
+}
+
 TEST_F(TransactionTest, ConflictResolveOverwriteTest) {
   // initial 5 commit with one column group
   for (size_t i = 0; i < 5; ++i) {

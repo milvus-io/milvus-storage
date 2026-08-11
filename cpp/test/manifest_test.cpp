@@ -85,6 +85,7 @@ TEST_F(ManifestTest, EmptyManifestRoundTrip) {
   EXPECT_TRUE(read_back->stats().empty());
   EXPECT_TRUE(read_back->indexes().empty());
   EXPECT_TRUE(read_back->lobFiles().empty());
+  EXPECT_EQ(read_back->minorVersion(), static_cast<int32_t>(ManifestMinorVersion::NONE));
 }
 
 TEST_F(ManifestTest, ColumnGroupsRoundTrip) {
@@ -166,9 +167,11 @@ TEST_F(ManifestTest, IndexesRoundTrip) {
   auto read_back = RoundTrip(manifest);
 
   ASSERT_EQ(read_back->indexes().size(), 2);
+  EXPECT_EQ(read_back->minorVersion(), static_cast<int32_t>(ManifestMinorVersion::INDEX_INFO));
 
   const Index* found_hnsw = read_back->getIndex("vector", "hnsw");
   ASSERT_NE(found_hnsw, nullptr);
+  EXPECT_EQ(found_hnsw->path, idx1.path);
   EXPECT_EQ(found_hnsw->properties.at("M"), "16");
   EXPECT_EQ(found_hnsw->properties.at("ef_construction"), "128");
 

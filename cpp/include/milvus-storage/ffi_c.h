@@ -267,6 +267,31 @@ typedef struct LoonLobFiles {
 } LoonLobFiles;
 
 /**
+ * @brief Metadata for one already-written index file.
+ */
+typedef struct LoonIndexInfo {
+  const char* column_name;
+  const char* index_type;
+  const char* path;
+  const char** property_keys;
+  const char** property_values;
+  uint32_t num_properties;
+} LoonIndexInfo;
+
+typedef struct LoonIndexes {
+  LoonIndexInfo* indexes;
+  uint32_t num_indexes;
+} LoonIndexes;
+
+/**
+ * @brief Result of committing a manifest revision.
+ */
+typedef struct LoonManifestCommitInfo {
+  int64_t manifest_version;
+  int32_t manifest_minor_version;
+} LoonManifestCommitInfo;
+
+/**
  * @brief C structure representing a Manifest
  */
 typedef struct LoonManifest {
@@ -281,10 +306,19 @@ typedef struct LoonManifest {
 
   // LOB files (TEXT column metadata)
   LoonLobFiles lob_files;
+
+  // Index metadata and persistent feature marker. Appended to retain the
+  // layout of the existing prefix for older consumers.
+  LoonIndexes indexes;
+  int32_t minor_version;
 } LoonManifest;
 
 /**
  * @brief Destroys a CManifest and frees all allocated memory
+ *
+ * A manifest returned by this library owns all of its nested storage,
+ * including index strings, index property arrays, and their entries. Release
+ * it only with this function.
  *
  * @param manifest CManifest to destroy (can be null)
  */
@@ -725,6 +759,16 @@ FFI_EXPORT LoonFFIResult loon_transaction_get_read_version(LoonTransactionHandle
 FFI_EXPORT LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out_committed_version);
 
 /**
+ * @brief Commits a transaction and returns the complete manifest reference.
+ *
+ * @param handle Transaction handle
+ * @param out_commit_info Output committed revision and manifest minor version
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_transaction_commit_with_info(LoonTransactionHandle handle,
+                                                           LoonManifestCommitInfo* out_commit_info);
+
+/**
  * @brief Destroys a Transaction
  *
  * @param handle Transaction handle to destroy
@@ -797,6 +841,15 @@ FFI_EXPORT LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle hand
                                                       const char* const* metadata_keys,
                                                       const char* const* metadata_values,
                                                       size_t metadata_len);
+
+/**
+ * @brief Record metadata for an index file that has already been written.
+ *
+ * The transaction stores metadata only; it does not create or write the file
+ * identified by index_info->path.
+ */
+FFI_EXPORT LoonFFIResult loon_transaction_add_index_info(LoonTransactionHandle handle,
+                                                         const LoonIndexInfo* index_info);
 
 /**
  * @brief Add a LOB file info to the transaction updates

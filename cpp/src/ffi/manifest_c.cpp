@@ -99,6 +99,27 @@ LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out
   RETURN_UNREACHABLE();
 }
 
+LoonFFIResult loon_transaction_commit_with_info(LoonTransactionHandle handle,
+                                                LoonManifestCommitInfo* out_commit_info) {
+  if (!handle || !out_commit_info) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_commit_info must not be null");
+  }
+  try {
+    auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+    auto commit_result = cpp_transaction->CommitWithInfo();
+    RETURN_ARROW_ERROR_IF(commit_result.status(), LOON_LOGICAL_ERROR, commit_result.status().ToString());
+
+    const auto& commit_info = commit_result.ValueOrDie();
+    out_commit_info->manifest_version = commit_info.manifest_version;
+    out_commit_info->manifest_minor_version = commit_info.manifest_minor_version;
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
 void loon_transaction_destroy(LoonTransactionHandle handle) {
   if (handle) {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
@@ -271,6 +292,36 @@ LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
   RETURN_UNREACHABLE();
 }
 
+LoonFFIResult loon_transaction_add_index_info(LoonTransactionHandle handle, const LoonIndexInfo* index_info) {
+  if (!handle || !index_info || !index_info->column_name || !index_info->index_type || !index_info->path) {
+    RETURN_ERROR(LOON_INVALID_ARGS,
+                 "Invalid arguments: handle, index_info, column_name, index_type, and path must not be null");
+  }
+  if (index_info->num_properties > 0 && (!index_info->property_keys || !index_info->property_values)) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: index properties must not be null");
+  }
+  try {
+    Index index;
+    index.column_name = index_info->column_name;
+    index.index_type = index_info->index_type;
+    index.path = index_info->path;
+    for (uint32_t i = 0; i < index_info->num_properties; ++i) {
+      if (!index_info->property_keys[i] || !index_info->property_values[i]) {
+        RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: index property key and value must not be null");
+      }
+      index.properties[index_info->property_keys[i]] = index_info->property_values[i];
+    }
+
+    auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+    cpp_transaction->AddIndexInfo(index);
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
 LoonFFIResult loon_transaction_add_lob_file(LoonTransactionHandle handle, const LoonLobFileInfo* lob_file) {
   if (!handle || !lob_file) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and lob_file must not be null");
@@ -381,6 +432,31 @@ void loon_manifest_destroy(LoonManifest* cmanifest) {
     cmanifest->lob_files.files = nullptr;
   }
   cmanifest->lob_files.num_files = 0;
+
+  // Destroy indexes
+  if (cmanifest->indexes.indexes) {
+    for (uint32_t i = 0; i < cmanifest->indexes.num_indexes; ++i) {
+      auto& index = cmanifest->indexes.indexes[i];
+      delete[] const_cast<char*>(index.column_name);
+      delete[] const_cast<char*>(index.index_type);
+      delete[] const_cast<char*>(index.path);
+      if (index.property_keys) {
+        for (uint32_t j = 0; j < index.num_properties; ++j) {
+          delete[] const_cast<char*>(index.property_keys[j]);
+        }
+        delete[] index.property_keys;
+      }
+      if (index.property_values) {
+        for (uint32_t j = 0; j < index.num_properties; ++j) {
+          delete[] const_cast<char*>(index.property_values[j]);
+        }
+        delete[] index.property_values;
+      }
+    }
+    delete[] cmanifest->indexes.indexes;
+    cmanifest->indexes.indexes = nullptr;
+  }
+  cmanifest->indexes.num_indexes = 0;
 
   // Free the structure itself
   delete cmanifest;

@@ -197,6 +197,9 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
     (*out_cmanifest)->stats.num_stats = 0;
     (*out_cmanifest)->lob_files.files = nullptr;
     (*out_cmanifest)->lob_files.num_files = 0;
+    (*out_cmanifest)->indexes.indexes = nullptr;
+    (*out_cmanifest)->indexes.num_indexes = 0;
+    (*out_cmanifest)->minor_version = manifest->minorVersion();
 
     // Export column groups directly into embedded structure
     const auto& cgs = manifest->columnGroups();
@@ -312,6 +315,42 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
       }
     }
 
+    // Export indexes.
+    const auto& indexes = manifest->indexes();
+    if (!indexes.empty()) {
+      // Publish each allocation in the output structure immediately. If a
+      // later allocation throws, the catch block below delegates cleanup of
+      // this partially constructed object to loon_manifest_destroy().
+      (*out_cmanifest)->indexes.indexes = new LoonIndexInfo[indexes.size()]{};
+      (*out_cmanifest)->indexes.num_indexes = static_cast<uint32_t>(indexes.size());
+
+      for (size_t i = 0; i < indexes.size(); ++i) {
+        const auto& index = indexes[i];
+        auto& out_index = (*out_cmanifest)->indexes.indexes[i];
+
+        auto copy_string = [](const std::string& value) {
+          auto* result = new char[value.size() + 1];
+          std::memcpy(result, value.c_str(), value.size() + 1);
+          return result;
+        };
+
+        out_index.column_name = copy_string(index.column_name);
+        out_index.index_type = copy_string(index.index_type);
+        out_index.path = copy_string(index.path);
+        out_index.num_properties = static_cast<uint32_t>(index.properties.size());
+        if (!index.properties.empty()) {
+          out_index.property_keys = new const char* [index.properties.size()] {};
+          out_index.property_values = new const char* [index.properties.size()] {};
+          size_t property_index = 0;
+          for (const auto& [key, value] : index.properties) {
+            out_index.property_keys[property_index] = copy_string(key);
+            out_index.property_values[property_index] = copy_string(value);
+            ++property_index;
+          }
+        }
+      }
+    }
+
     return arrow::Status::OK();
   } catch (const std::exception& e) {
     if (*out_cmanifest) {
@@ -369,8 +408,45 @@ arrow::Status manifest_import(const LoonManifest* cmanifest,
     stats[key] = std::move(stat);
   }
 
+  // Import index metadata.
+  std::vector<Index> indexes;
+  indexes.reserve(cmanifest->indexes.num_indexes);
+  for (uint32_t i = 0; i < cmanifest->indexes.num_indexes; ++i) {
+    const auto& in_index = cmanifest->indexes.indexes[i];
+    if (!in_index.column_name || !in_index.index_type || !in_index.path) {
+      return arrow::Status::Invalid("Index metadata requires column_name, index_type, and path");
+    }
+    if (in_index.num_properties > 0 && (!in_index.property_keys || !in_index.property_values)) {
+      return arrow::Status::Invalid("Index metadata properties are missing");
+    }
+
+    Index index;
+    index.column_name = in_index.column_name;
+    index.index_type = in_index.index_type;
+    index.path = in_index.path;
+    for (uint32_t j = 0; j < in_index.num_properties; ++j) {
+      if (!in_index.property_keys[j] || !in_index.property_values[j]) {
+        return arrow::Status::Invalid("Index metadata property key or value is null");
+      }
+      index.properties[in_index.property_keys[j]] = in_index.property_values[j];
+    }
+    indexes.push_back(std::move(index));
+  }
+
+  // Import LOB files too so an FFI manifest round trip preserves every field.
+  std::vector<LobFileInfo> lob_files;
+  lob_files.reserve(cmanifest->lob_files.num_files);
+  for (uint32_t i = 0; i < cmanifest->lob_files.num_files; ++i) {
+    const auto& in_lob = cmanifest->lob_files.files[i];
+    if (!in_lob.path) {
+      return arrow::Status::Invalid("LOB file path is null");
+    }
+    lob_files.emplace_back(in_lob.path, in_lob.field_id, in_lob.total_rows, in_lob.valid_rows,
+                           in_lob.file_size_bytes);
+  }
+
   // Create Manifest
-  *out_manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats);
+  *out_manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats, indexes, lob_files);
 
   return arrow::Status::OK();
 }
@@ -445,6 +521,25 @@ std::string manifest_debug_string(const LoonManifest* cmanifest) {
                               cmanifest->stats.stat_metadata_values[i][j]);
       }
     }
+  }
+
+  result += fmt::format("  LobFiles(num_files={}):\n", cmanifest->lob_files.num_files);
+  for (uint32_t i = 0; i < cmanifest->lob_files.num_files; ++i) {
+    const auto& lob_file = cmanifest->lob_files.files[i];
+    result += fmt::format(
+        "    LobFile[{}]: path={}, field_id={}, total_rows={}, valid_rows={}, file_size_bytes={}\n", i,
+        lob_file.path ? lob_file.path : "(null)", lob_file.field_id, lob_file.total_rows, lob_file.valid_rows,
+        lob_file.file_size_bytes);
+  }
+
+  result += fmt::format("  Indexes(num_indexes={}, minor_version={}):\n", cmanifest->indexes.num_indexes,
+                        cmanifest->minor_version);
+  for (uint32_t i = 0; i < cmanifest->indexes.num_indexes; ++i) {
+    const auto& index = cmanifest->indexes.indexes[i];
+    result += fmt::format("    Index[{}]: column_name={}, index_type={}, path={}, num_properties={}\n", i,
+                          index.column_name ? index.column_name : "(null)",
+                          index.index_type ? index.index_type : "(null)", index.path ? index.path : "(null)",
+                          index.num_properties);
   }
 
   return result;

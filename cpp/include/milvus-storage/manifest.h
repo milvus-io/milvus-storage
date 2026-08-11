@@ -40,6 +40,18 @@ namespace milvus_storage::api {
 constexpr int32_t MANIFEST_VERSION = 5;
 
 /**
+ * @brief Persistent feature marker for a manifest revision.
+ *
+ * This is intentionally distinct from MANIFEST_VERSION, which denotes the
+ * serialization format.  The value is derived from the final manifest state:
+ * a manifest with index metadata is INDEX_INFO and one without it is NONE.
+ */
+enum class ManifestMinorVersion : int32_t {
+  NONE = 0,
+  INDEX_INFO = 1,
+};
+
+/**
  * @brief Metadata for a single LOB (Large Object) file
  *
  * LOB files store large text/binary data separately from the main columnar storage.
@@ -194,6 +206,17 @@ class Manifest final {
    * @brief Get the manifest format version
    */
   [[nodiscard]] int32_t version() const { return version_; }
+
+  /**
+   * @brief Get the persistent feature marker for this manifest revision.
+   *
+   * The marker is stored in the Avro record, but is derived from index
+   * metadata so every producer observes the same invariant.
+   */
+  [[nodiscard]] int32_t minorVersion() const {
+    return indexes_.empty() ? static_cast<int32_t>(ManifestMinorVersion::NONE)
+                            : static_cast<int32_t>(ManifestMinorVersion::INDEX_INFO);
+  }
 
   /**
    * @brief Read a manifest from filesystem, using cache for immutable manifests.
