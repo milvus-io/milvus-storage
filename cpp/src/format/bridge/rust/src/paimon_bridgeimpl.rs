@@ -1121,6 +1121,8 @@ impl BlockingPaimonDataSplitReader {
         projected_columns: Vec<String>,
         out_stream_ptr: *mut u8,
     ) -> Result<()> {
+        // FIXME(yanbinyang): Reuse file metadata across projected streams once
+        // paimon-rust exposes a scan-scoped read context, avoiding repeated footer reads.
         let mut builder = self.table.new_read_builder();
         if !projected_columns.is_empty() {
             let projected_refs = projected_columns
