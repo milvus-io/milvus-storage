@@ -38,6 +38,8 @@ namespace milvus_storage::paimon {
 namespace {
 
 constexpr size_t kMaxPaimonMetadataBytes = 12 * 1024 * 1024;
+// Rust emits this prefix from paimon_bridgeimpl.rs; detailed marker mapping is
+// centralized in MakePaimonBridgeErrorStatus.
 constexpr std::string_view kPaimonErrorMarker = "[paimon:error=";
 
 arrow::Status TranslatePaimonStreamStatus(arrow::Status status) {

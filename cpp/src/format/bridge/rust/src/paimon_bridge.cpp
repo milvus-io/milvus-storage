@@ -25,6 +25,7 @@
 namespace milvus_storage::paimon {
 namespace {
 
+// Keep these markers in sync with ERROR_*_PREFIX in paimon_bridgeimpl.rs.
 constexpr std::string_view kInvalidMarker = "[paimon:error=invalid]";
 constexpr std::string_view kNotImplementedMarker = "[paimon:error=not-implemented]";
 constexpr std::string_view kNotFoundMarker = "[paimon:error=not-found]";

@@ -807,6 +807,37 @@ TEST(PaimonBridgeErrorClassification, MarkersMapToArrowStatuses) {
   EXPECT_TRUE(paimon::MakePaimonBridgeErrorStatus("unclassified storage failure").IsIOError());
 }
 
+TEST_F(PaimonIntegrationTest, DataSplitMidStreamNotFoundPreservesErrno) {
+  constexpr uint64_t kRows = 12;
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "append").status());
+
+  ASSERT_AND_ASSIGN(auto files, Explore("data-split"));
+  ASSERT_EQ(files.size(), 1);
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
+                                                      {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto stream, reader->read_with_range(0, kRows));
+
+  size_t removed_files = 0;
+  for (const auto& entry : std::filesystem::recursive_directory_iterator(table_dir_)) {
+    if (entry.is_regular_file() && entry.path().extension() == ".parquet") {
+      ASSERT_TRUE(std::filesystem::remove(entry.path()));
+      ++removed_files;
+    }
+  }
+  ASSERT_GT(removed_files, 0);
+
+  std::shared_ptr<arrow::RecordBatch> batch;
+  arrow::Status status;
+  do {
+    status = stream->ReadNext(&batch);
+  } while (status.ok() && batch);
+
+  ASSERT_FALSE(status.ok());
+  EXPECT_TRUE(status.IsIOError()) << status.ToString();
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
+  EXPECT_EQ(status.ToString().find("[paimon:error="), std::string::npos);
+}
+
 TEST_F(PaimonIntegrationTest, MissingPinnedSnapshotFailsPlanAsInvalidWithRefresh) {
   ASSERT_AND_ASSIGN(auto snapshot_id, paimon::CreateTestTable(table_dir_, 10, "append"));
   ASSERT_EQ(api::SetValue(properties_, PROPERTY_PAIMON_SNAPSHOT_ID, std::to_string(snapshot_id + 1000).c_str()),

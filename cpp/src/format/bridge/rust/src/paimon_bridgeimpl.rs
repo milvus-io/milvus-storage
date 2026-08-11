@@ -51,7 +51,8 @@ const MAX_DATA_SPLIT_METADATA_BYTES: usize = 12 * 1024 * 1024;
 
 // CXX carries Rust errors as strings. These stable markers are consumed only
 // by the C++ bridge, which converts them into Arrow statuses before returning
-// to format callers.
+// to format callers. Keep their spelling in sync with paimon_bridge.cpp and
+// paimon_format_reader.cpp.
 fn invalid_message(message: impl std::fmt::Display) -> String {
     format!("{ERROR_INVALID_PREFIX} {message}")
 }
@@ -69,6 +70,21 @@ fn classify_bridge_error(error: anyhow::Error) -> anyhow::Error {
         return error;
     }
 
+    // Paimon's Parquet adapter stringifies FileRead errors before wrapping them.
+    if let Some((_, storage_error)) =
+        message.split_once("IO operation failed on underlying storage: ")
+    {
+        let marker = if storage_error.starts_with("NotFound (") {
+            Some(ERROR_NOT_FOUND_PREFIX)
+        } else if storage_error.starts_with("RateLimited (temporary)") {
+            Some(ERROR_TRANSIENT_THROTTLING_PREFIX)
+        } else if storage_error.contains("(temporary)") {
+            Some(ERROR_TRANSIENT_SERVICE_PREFIX)
+        } else {
+            None
+        };
+        return marker.map_or(error, |marker| anyhow!("{marker} {message}"));
+    }
     let marker = error.chain().find_map(|cause| {
         let error = cause.downcast_ref::<paimon::Error>()?;
         match error {
@@ -1191,6 +1207,36 @@ mod tests {
             }
         };
         (code, message)
+    }
+
+    #[test]
+    fn stringified_stream_errors_keep_storage_classification() {
+        let cases = [
+            (
+                "IO operation failed on underlying storage: NotFound (permanent)",
+                Some(ERROR_NOT_FOUND_PREFIX),
+            ),
+            (
+                "IO operation failed on underlying storage: RateLimited (temporary)",
+                Some(ERROR_TRANSIENT_THROTTLING_PREFIX),
+            ),
+            (
+                "IO operation failed on underlying storage: Unexpected (temporary)",
+                Some(ERROR_TRANSIENT_SERVICE_PREFIX),
+            ),
+            (
+                "IO operation failed on underlying storage: PermissionDenied (permanent)",
+                None,
+            ),
+        ];
+        for (message, marker) in cases {
+            let classified = format!("{:#}", classify_bridge_error(anyhow!(message)));
+            if let Some(marker) = marker {
+                assert!(classified.contains(marker), "{classified}");
+            } else {
+                assert!(!classified.contains("[paimon:error="), "{classified}");
+            }
+        }
     }
 
     #[test]
