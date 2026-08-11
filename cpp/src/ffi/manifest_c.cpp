@@ -282,8 +282,31 @@ LoonFFIResult loon_transaction_add_index_info(LoonTransactionHandle handle, cons
   try {
     Index index;
     index.column_name = index_info->column_name;
+    if (index_info->index_name) {
+      index.index_name = index_info->index_name;
+    }
     index.index_type = index_info->index_type;
     index.path = index_info->path;
+    index.field_id = index_info->field_id;
+    index.index_id = index_info->index_id;
+    index.build_id = index_info->build_id;
+    index.index_version = index_info->index_version;
+    index.num_rows = index_info->num_rows;
+    index.serialized_size = index_info->serialized_size;
+    index.mem_size = index_info->mem_size;
+    index.current_index_version = index_info->current_index_version;
+    index.current_scalar_index_version = index_info->current_scalar_index_version;
+    index.index_store_path_version = index_info->index_store_path_version;
+    if (index_info->num_index_file_keys > 0 && !index_info->index_file_keys) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: index file keys must not be null");
+    }
+    index.index_file_keys.reserve(index_info->num_index_file_keys);
+    for (uint32_t i = 0; i < index_info->num_index_file_keys; ++i) {
+      if (!index_info->index_file_keys[i]) {
+        RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: index file key must not be null");
+      }
+      index.index_file_keys.emplace_back(index_info->index_file_keys[i]);
+    }
     for (uint32_t i = 0; i < index_info->num_properties; ++i) {
       if (!index_info->property_keys[i] || !index_info->property_values[i]) {
         RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: index property key and value must not be null");
@@ -417,8 +440,15 @@ void loon_manifest_destroy(LoonManifest* cmanifest) {
     for (uint32_t i = 0; i < cmanifest->indexes.num_indexes; ++i) {
       auto& index = cmanifest->indexes.indexes[i];
       delete[] const_cast<char*>(index.column_name);
+      delete[] const_cast<char*>(index.index_name);
       delete[] const_cast<char*>(index.index_type);
       delete[] const_cast<char*>(index.path);
+      if (index.index_file_keys) {
+        for (uint32_t j = 0; j < index.num_index_file_keys; ++j) {
+          delete[] const_cast<char*>(index.index_file_keys[j]);
+        }
+        delete[] index.index_file_keys;
+      }
       if (index.property_keys) {
         for (uint32_t j = 0; j < index.num_properties; ++j) {
           delete[] const_cast<char*>(index.property_keys[j]);

@@ -259,34 +259,70 @@ TEST_F(BridgeTest, ExportImportManifestEmpty) {
   loon_manifest_destroy(cmanifest);
 }
 
-TEST_F(BridgeTest, ExportImportManifestWithIndexInfoAndMinorVersion) {
+TEST_F(BridgeTest, ExportImportManifestWithIndexInfo) {
   std::vector<Index> indexes = {{.column_name = "vector",
+                                 .index_name = "vector_hnsw",
                                  .index_type = "HNSW",
-                                 .path = "_index/vector-hnsw.idx",
-                                 .properties = {{"index_id", "10"}, {"build_id", "20"}}}};
-  auto manifest = std::make_shared<Manifest>(ColumnGroups{}, std::vector<DeltaLog>{},
-                                             std::map<std::string, Statistics>{}, indexes);
+                                 .path = "_index/vector-hnsw",
+                                 .field_id = 100,
+                                 .index_id = 10,
+                                 .build_id = 20,
+                                 .index_version = 3,
+                                 .num_rows = 1000,
+                                 .serialized_size = 1024,
+                                 .mem_size = 2048,
+                                 .current_index_version = 15,
+                                 .current_scalar_index_version = 7,
+                                 .index_store_path_version = 1,
+                                 .index_file_keys = {"index.bin", "raw_data.bin"},
+                                 .properties = {{"metric_type", "COSINE"}, {"M", "16"}}}};
+  auto manifest =
+      std::make_shared<Manifest>(ColumnGroups{}, std::vector<DeltaLog>{}, std::map<std::string, Statistics>{}, indexes);
 
   LoonManifest* cmanifest = nullptr;
   ASSERT_STATUS_OK(manifest_export(manifest, &cmanifest));
   ASSERT_NE(cmanifest, nullptr);
-  ASSERT_EQ(cmanifest->minor_version, static_cast<int32_t>(ManifestMinorVersion::INDEX_INFO));
   ASSERT_EQ(cmanifest->indexes.num_indexes, 1);
   const auto& cindex = cmanifest->indexes.indexes[0];
   ASSERT_STREQ(cindex.column_name, "vector");
+  ASSERT_STREQ(cindex.index_name, "vector_hnsw");
   ASSERT_STREQ(cindex.index_type, "HNSW");
-  ASSERT_STREQ(cindex.path, "_index/vector-hnsw.idx");
+  ASSERT_STREQ(cindex.path, "_index/vector-hnsw");
+  ASSERT_EQ(cindex.field_id, 100);
+  ASSERT_EQ(cindex.index_id, 10);
+  ASSERT_EQ(cindex.build_id, 20);
+  ASSERT_EQ(cindex.index_version, 3);
+  ASSERT_EQ(cindex.num_rows, 1000);
+  ASSERT_EQ(cindex.serialized_size, 1024);
+  ASSERT_EQ(cindex.mem_size, 2048);
+  ASSERT_EQ(cindex.current_index_version, 15);
+  ASSERT_EQ(cindex.current_scalar_index_version, 7);
+  ASSERT_EQ(cindex.index_store_path_version, 1);
+  ASSERT_EQ(cindex.num_index_file_keys, 2);
+  ASSERT_STREQ(cindex.index_file_keys[0], "index.bin");
+  ASSERT_STREQ(cindex.index_file_keys[1], "raw_data.bin");
   ASSERT_EQ(cindex.num_properties, 2);
 
   std::shared_ptr<Manifest> imported_manifest;
   ASSERT_STATUS_OK(manifest_import(cmanifest, &imported_manifest));
   ASSERT_NE(imported_manifest, nullptr);
-  ASSERT_EQ(imported_manifest->minorVersion(), static_cast<int32_t>(ManifestMinorVersion::INDEX_INFO));
   const auto* imported_index = imported_manifest->getIndex("vector", "HNSW");
   ASSERT_NE(imported_index, nullptr);
-  EXPECT_EQ(imported_index->path, "_index/vector-hnsw.idx");
-  EXPECT_EQ(imported_index->properties.at("index_id"), "10");
-  EXPECT_EQ(imported_index->properties.at("build_id"), "20");
+  EXPECT_EQ(imported_index->index_name, "vector_hnsw");
+  EXPECT_EQ(imported_index->path, "_index/vector-hnsw");
+  EXPECT_EQ(imported_index->field_id, 100);
+  EXPECT_EQ(imported_index->index_id, 10);
+  EXPECT_EQ(imported_index->build_id, 20);
+  EXPECT_EQ(imported_index->index_version, 3);
+  EXPECT_EQ(imported_index->num_rows, 1000);
+  EXPECT_EQ(imported_index->serialized_size, 1024);
+  EXPECT_EQ(imported_index->mem_size, 2048);
+  EXPECT_EQ(imported_index->current_index_version, 15);
+  EXPECT_EQ(imported_index->current_scalar_index_version, 7);
+  EXPECT_EQ(imported_index->index_store_path_version, 1);
+  EXPECT_EQ(imported_index->index_file_keys, std::vector<std::string>({"index.bin", "raw_data.bin"}));
+  EXPECT_EQ(imported_index->properties.at("metric_type"), "COSINE");
+  EXPECT_EQ(imported_index->properties.at("M"), "16");
 
   loon_manifest_destroy(cmanifest);
 }

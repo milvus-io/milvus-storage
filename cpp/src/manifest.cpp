@@ -142,15 +142,39 @@ template <>
 struct codec_traits<milvus_storage::api::Index> {
   static void encode(Encoder& e, const milvus_storage::api::Index& idx) {
     avro::encode(e, idx.column_name);
+    avro::encode(e, idx.index_name);
     avro::encode(e, idx.index_type);
     avro::encode(e, idx.path);
+    avro::encode(e, idx.field_id);
+    avro::encode(e, idx.index_id);
+    avro::encode(e, idx.build_id);
+    avro::encode(e, idx.index_version);
+    avro::encode(e, idx.num_rows);
+    avro::encode(e, idx.serialized_size);
+    avro::encode(e, idx.mem_size);
+    avro::encode(e, idx.current_index_version);
+    avro::encode(e, idx.current_scalar_index_version);
+    avro::encode(e, idx.index_store_path_version);
+    avro::encode(e, idx.index_file_keys);
     avro::encode(e, idx.properties);
   }
 
   static void decode(Decoder& d, milvus_storage::api::Index& idx) {
     avro::decode(d, idx.column_name);
+    avro::decode(d, idx.index_name);
     avro::decode(d, idx.index_type);
     avro::decode(d, idx.path);
+    avro::decode(d, idx.field_id);
+    avro::decode(d, idx.index_id);
+    avro::decode(d, idx.build_id);
+    avro::decode(d, idx.index_version);
+    avro::decode(d, idx.num_rows);
+    avro::decode(d, idx.serialized_size);
+    avro::decode(d, idx.mem_size);
+    avro::decode(d, idx.current_index_version);
+    avro::decode(d, idx.current_scalar_index_version);
+    avro::decode(d, idx.index_store_path_version);
+    avro::decode(d, idx.index_file_keys);
     avro::decode(d, idx.properties);
   }
 };
@@ -195,7 +219,6 @@ struct codec_traits<milvus_storage::api::Manifest> {
     avro::encode(e, m.stats());
     avro::encode(e, m.indexes());
     avro::encode(e, m.lobFiles());
-    avro::encode(e, m.minorVersion());
   }
 
   static void decode(Decoder& d, milvus_storage::api::Manifest& m) {
@@ -204,13 +227,6 @@ struct codec_traits<milvus_storage::api::Manifest> {
     avro::decode(d, m.stats());
     avro::decode(d, m.indexes());
     avro::decode(d, m.lobFiles());
-
-    // The persistent value is consumed for schema compatibility.  The public
-    // marker is derived from indexes(), which keeps old and malformed records
-    // consistent with the current manifest-state invariant.
-    int32_t encoded_minor_version = 0;
-    avro::decode(d, encoded_minor_version);
-    static_cast<void>(encoded_minor_version);
   }
 };
 
@@ -258,8 +274,20 @@ static const char* const MANIFEST_SCHEMA_JSON = R"({
     {"name": "indexes", "type": {"type": "array", "items": {
       "type": "record", "name": "Index", "fields": [
         {"name": "column_name", "type": "string"},
+        {"name": "index_name", "type": "string", "default": ""},
         {"name": "index_type", "type": "string"},
         {"name": "path", "type": "string"},
+        {"name": "field_id", "type": "long", "default": 0},
+        {"name": "index_id", "type": "long", "default": 0},
+        {"name": "build_id", "type": "long", "default": 0},
+        {"name": "index_version", "type": "long", "default": 0},
+        {"name": "num_rows", "type": "long", "default": 0},
+        {"name": "serialized_size", "type": "long", "default": 0},
+        {"name": "mem_size", "type": "long", "default": 0},
+        {"name": "current_index_version", "type": "int", "default": 0},
+        {"name": "current_scalar_index_version", "type": "int", "default": 0},
+        {"name": "index_store_path_version", "type": "int", "default": 0},
+        {"name": "index_file_keys", "type": {"type": "array", "items": "string"}, "default": []},
         {"name": "properties", "type": {"type": "map", "values": "string"}, "default": {}}
       ]
     }}, "default": []},
@@ -271,8 +299,7 @@ static const char* const MANIFEST_SCHEMA_JSON = R"({
         {"name": "valid_rows", "type": "long"},
         {"name": "file_size_bytes", "type": "long"}
       ]
-    }}, "default": []},
-    {"name": "minor_version", "type": "int", "default": 0}
+    }}, "default": []}
   ]
 })";
 

@@ -85,7 +85,6 @@ TEST_F(ManifestTest, EmptyManifestRoundTrip) {
   EXPECT_TRUE(read_back->stats().empty());
   EXPECT_TRUE(read_back->indexes().empty());
   EXPECT_TRUE(read_back->lobFiles().empty());
-  EXPECT_EQ(read_back->minorVersion(), static_cast<int32_t>(ManifestMinorVersion::NONE));
 }
 
 TEST_F(ManifestTest, ColumnGroupsRoundTrip) {
@@ -154,8 +153,20 @@ TEST_F(ManifestTest, StatsRoundTrip) {
 
 TEST_F(ManifestTest, IndexesRoundTrip) {
   Index idx1{.column_name = "vector",
+             .index_name = "vector_hnsw",
              .index_type = "hnsw",
-             .path = get_index_filepath(base_path_, "vec_hnsw.idx"),
+             .path = get_index_filepath(base_path_, "vec_hnsw"),
+             .field_id = 100,
+             .index_id = 200,
+             .build_id = 300,
+             .index_version = 4,
+             .num_rows = 1000,
+             .serialized_size = 1024,
+             .mem_size = 2048,
+             .current_index_version = 15,
+             .current_scalar_index_version = 7,
+             .index_store_path_version = 1,
+             .index_file_keys = {"index.bin", "raw_data.bin"},
              .properties = {{"M", "16"}, {"ef_construction", "128"}}};
 
   Index idx2{.column_name = "id",
@@ -167,16 +178,28 @@ TEST_F(ManifestTest, IndexesRoundTrip) {
   auto read_back = RoundTrip(manifest);
 
   ASSERT_EQ(read_back->indexes().size(), 2);
-  EXPECT_EQ(read_back->minorVersion(), static_cast<int32_t>(ManifestMinorVersion::INDEX_INFO));
-
   const Index* found_hnsw = read_back->getIndex("vector", "hnsw");
   ASSERT_NE(found_hnsw, nullptr);
+  EXPECT_EQ(found_hnsw->index_name, idx1.index_name);
   EXPECT_EQ(found_hnsw->path, idx1.path);
+  EXPECT_EQ(found_hnsw->field_id, idx1.field_id);
+  EXPECT_EQ(found_hnsw->index_id, idx1.index_id);
+  EXPECT_EQ(found_hnsw->build_id, idx1.build_id);
+  EXPECT_EQ(found_hnsw->index_version, idx1.index_version);
+  EXPECT_EQ(found_hnsw->num_rows, idx1.num_rows);
+  EXPECT_EQ(found_hnsw->serialized_size, idx1.serialized_size);
+  EXPECT_EQ(found_hnsw->mem_size, idx1.mem_size);
+  EXPECT_EQ(found_hnsw->current_index_version, idx1.current_index_version);
+  EXPECT_EQ(found_hnsw->current_scalar_index_version, idx1.current_scalar_index_version);
+  EXPECT_EQ(found_hnsw->index_store_path_version, idx1.index_store_path_version);
+  EXPECT_EQ(found_hnsw->index_file_keys, idx1.index_file_keys);
   EXPECT_EQ(found_hnsw->properties.at("M"), "16");
   EXPECT_EQ(found_hnsw->properties.at("ef_construction"), "128");
 
   const Index* found_inv = read_back->getIndex("id", "inverted");
   ASSERT_NE(found_inv, nullptr);
+  EXPECT_EQ(found_inv->field_id, 0);
+  EXPECT_TRUE(found_inv->index_file_keys.empty());
   EXPECT_TRUE(found_inv->properties.empty());
 }
 

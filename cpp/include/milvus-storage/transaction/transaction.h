@@ -255,13 +255,6 @@ class Transaction {
   Transaction& AddIndexInfo(const Index& index);
 
   /**
-   * @brief Add or replace an index
-   * @param index Index to add (replaces if same column_name + index_type exists)
-   * @return Reference to this transaction for method chaining
-   */
-  Transaction& AddIndex(const Index& index);
-
-  /**
    * @brief Drop an index by column name and type
    * @param column_name Column the index is on
    * @param index_type Type of the index

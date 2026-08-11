@@ -500,10 +500,6 @@ Transaction& Transaction::AddIndexInfo(const Index& index) {
   return *this;
 }
 
-Transaction& Transaction::AddIndex(const Index& index) {
-  return AddIndexInfo(index);
-}
-
 Transaction& Transaction::DropIndex(const std::string& column_name, const std::string& index_type) {
   updates_.DropIndex(column_name, index_type);
   return *this;

@@ -267,12 +267,29 @@ typedef struct LoonLobFiles {
 } LoonLobFiles;
 
 /**
- * @brief Metadata for one already-written index file.
+ * @brief Metadata for one completed index artifact.
+ *
+ * Fields through index_file_keys are the typed metadata required to load an
+ * artifact. property_keys/property_values are reserved for index-specific
+ * parameters such as metric_type and Knowhere options.
  */
 typedef struct LoonIndexInfo {
   const char* column_name;
+  const char* index_name;
   const char* index_type;
-  const char* path;
+  const char* path;  ///< Artifact directory/prefix
+  int64_t field_id;
+  int64_t index_id;
+  int64_t build_id;
+  int64_t index_version;
+  int64_t num_rows;
+  int64_t serialized_size;
+  int64_t mem_size;
+  int32_t current_index_version;
+  int32_t current_scalar_index_version;
+  int32_t index_store_path_version;
+  const char** index_file_keys;
+  uint32_t num_index_file_keys;
   const char** property_keys;
   const char** property_values;
   uint32_t num_properties;
@@ -299,10 +316,9 @@ typedef struct LoonManifest {
   // LOB files (TEXT column metadata)
   LoonLobFiles lob_files;
 
-  // Index metadata and persistent feature marker. Appended to retain the
-  // layout of the existing prefix for older consumers.
+  // Index metadata. Appended to retain the layout of the existing prefix for
+  // older consumers.
   LoonIndexes indexes;
-  int32_t minor_version;
 } LoonManifest;
 
 /**
@@ -830,8 +846,7 @@ FFI_EXPORT LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle hand
  * The transaction stores metadata only; it does not create or write the file
  * identified by index_info->path.
  */
-FFI_EXPORT LoonFFIResult loon_transaction_add_index_info(LoonTransactionHandle handle,
-                                                         const LoonIndexInfo* index_info);
+FFI_EXPORT LoonFFIResult loon_transaction_add_index_info(LoonTransactionHandle handle, const LoonIndexInfo* index_info);
 
 /**
  * @brief Add a LOB file info to the transaction updates

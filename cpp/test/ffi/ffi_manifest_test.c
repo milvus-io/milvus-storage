@@ -293,12 +293,26 @@ static void test_add_index_info_and_commit(void) {
   LoonTransactionHandle read_transaction = 0;
   LoonManifest* cmanifest = NULL;
   int64_t committed_version = 0;
-  const char* property_keys[] = {"index_id", "build_id"};
-  const char* property_values[] = {"100", "101"};
+  const char* index_file_keys[] = {"index.bin", "raw_data.bin"};
+  const char* property_keys[] = {"metric_type", "M"};
+  const char* property_values[] = {"COSINE", "16"};
   LoonIndexInfo index_info = {
       .column_name = "vector",
+      .index_name = "vector_hnsw",
       .index_type = "HNSW",
-      .path = "vector-hnsw.idx",
+      .path = "vector-hnsw",
+      .field_id = 100,
+      .index_id = 200,
+      .build_id = 300,
+      .index_version = 4,
+      .num_rows = 1000,
+      .serialized_size = 1024,
+      .mem_size = 2048,
+      .current_index_version = 15,
+      .current_scalar_index_version = 7,
+      .index_store_path_version = 1,
+      .index_file_keys = index_file_keys,
+      .num_index_file_keys = 2,
       .property_keys = property_keys,
       .property_values = property_values,
       .num_properties = 2,
@@ -323,11 +337,24 @@ static void test_add_index_info_and_commit(void) {
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   rc = loon_transaction_get_manifest(read_transaction, &cmanifest);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
-  ck_assert_int_eq(cmanifest->minor_version, 1);
   ck_assert_int_eq(cmanifest->indexes.num_indexes, 1);
   ck_assert_str_eq(cmanifest->indexes.indexes[0].column_name, "vector");
+  ck_assert_str_eq(cmanifest->indexes.indexes[0].index_name, "vector_hnsw");
   ck_assert_str_eq(cmanifest->indexes.indexes[0].index_type, "HNSW");
-  ck_assert_str_eq(cmanifest->indexes.indexes[0].path, TEST_BASE_PATH "/_index/vector-hnsw.idx");
+  ck_assert_str_eq(cmanifest->indexes.indexes[0].path, TEST_BASE_PATH "/_index/vector-hnsw");
+  ck_assert_int_eq(cmanifest->indexes.indexes[0].field_id, 100);
+  ck_assert_int_eq(cmanifest->indexes.indexes[0].index_id, 200);
+  ck_assert_int_eq(cmanifest->indexes.indexes[0].build_id, 300);
+  ck_assert_int_eq(cmanifest->indexes.indexes[0].index_version, 4);
+  ck_assert_int_eq(cmanifest->indexes.indexes[0].num_rows, 1000);
+  ck_assert_int_eq(cmanifest->indexes.indexes[0].serialized_size, 1024);
+  ck_assert_int_eq(cmanifest->indexes.indexes[0].mem_size, 2048);
+  ck_assert_int_eq(cmanifest->indexes.indexes[0].current_index_version, 15);
+  ck_assert_int_eq(cmanifest->indexes.indexes[0].current_scalar_index_version, 7);
+  ck_assert_int_eq(cmanifest->indexes.indexes[0].index_store_path_version, 1);
+  ck_assert_int_eq(cmanifest->indexes.indexes[0].num_index_file_keys, 2);
+  ck_assert_str_eq(cmanifest->indexes.indexes[0].index_file_keys[0], "index.bin");
+  ck_assert_str_eq(cmanifest->indexes.indexes[0].index_file_keys[1], "raw_data.bin");
   ck_assert_int_eq(cmanifest->indexes.indexes[0].num_properties, 2);
 
   loon_manifest_destroy(cmanifest);

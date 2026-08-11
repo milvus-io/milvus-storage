@@ -37,20 +37,8 @@ namespace milvus_storage::api {
 // - Version 3: Changed stats from map<string, vector<string>> to map<string, Statistics>
 // - Version 4: Changed ColumnGroupFile fields (metadata) to properties map
 // - Version 5: Added lob_files field for LOB (Large Object) file metadata
-// - Version 6: Added minor_version to supplement Index metadata with a presence marker
+// - Version 6: Bumped to supplement Index metadata for transaction publication
 constexpr int32_t MANIFEST_VERSION = 6;
-
-/**
- * @brief Persistent feature marker for a manifest revision.
- *
- * This is intentionally distinct from MANIFEST_VERSION, which denotes the
- * serialization format.  The value is derived from the final manifest state:
- * a manifest with index metadata is INDEX_INFO and one without it is NONE.
- */
-enum class ManifestMinorVersion : int32_t {
-  NONE = 0,
-  INDEX_INFO = 1,
-};
 
 /**
  * @brief Metadata for a single LOB (Large Object) file
@@ -97,14 +85,26 @@ struct DeltaLog {
 /**
  * @brief Index metadata for a column
  *
- * The properties map provides flexibility for index builders to store additional
- * metadata such as index_id, build_id, version, num_rows, index_size, metric_type,
- * and algorithm-specific parameters (M, efConstruction, etc.).
+ * Fields through index_file_keys are the completed artifact's typed load
+ * metadata.  Properties are reserved for index-type-specific parameters, such
+ * as metric_type, M, and efConstruction.
  */
 struct Index {
-  std::string column_name;  ///< Column this index is built on
+  std::string column_name;  ///< Column this index is built on; field_id is authoritative for loading
+  std::string index_name;   ///< User-visible index name carried in the QueryNode load request
   std::string index_type;   ///< Index type: "hnsw", "ivf-sq", "ivf-pq", "inverted", "bitmap", "ordered"
-  std::string path;         ///< Relative path to index file in _index/ directory
+  std::string path;         ///< Artifact directory/prefix; combine with index_file_keys for full file paths
+  int64_t field_id = 0;
+  int64_t index_id = 0;
+  int64_t build_id = 0;
+  int64_t index_version = 0;
+  int64_t num_rows = 0;
+  int64_t serialized_size = 0;  ///< Total object-storage bytes
+  int64_t mem_size = 0;         ///< Estimated loaded memory bytes
+  int32_t current_index_version = 0;
+  int32_t current_scalar_index_version = 0;
+  int32_t index_store_path_version = 0;
+  std::vector<std::string> index_file_keys;       ///< File names relative to path
   std::map<std::string, std::string> properties;  ///< Index-specific properties
 };
 
@@ -207,17 +207,6 @@ class Manifest final {
    * @brief Get the manifest format version
    */
   [[nodiscard]] int32_t version() const { return version_; }
-
-  /**
-   * @brief Get the persistent feature marker for this manifest revision.
-   *
-   * The marker is stored in the Avro record, but is derived from index
-   * metadata so every producer observes the same invariant.
-   */
-  [[nodiscard]] int32_t minorVersion() const {
-    return indexes_.empty() ? static_cast<int32_t>(ManifestMinorVersion::NONE)
-                            : static_cast<int32_t>(ManifestMinorVersion::INDEX_INFO);
-  }
 
   /**
    * @brief Read a manifest from filesystem, using cache for immutable manifests.
