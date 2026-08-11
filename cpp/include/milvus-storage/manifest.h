@@ -37,7 +37,8 @@ namespace milvus_storage::api {
 // - Version 3: Changed stats from map<string, vector<string>> to map<string, Statistics>
 // - Version 4: Changed ColumnGroupFile fields (metadata) to properties map
 // - Version 5: Added lob_files field for LOB (Large Object) file metadata
-constexpr int32_t MANIFEST_VERSION = 5;
+// - Version 6: Added minor_version to supplement Index metadata with a presence marker
+constexpr int32_t MANIFEST_VERSION = 6;
 
 /**
  * @brief Persistent feature marker for a manifest revision.

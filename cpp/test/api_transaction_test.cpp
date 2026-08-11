@@ -246,13 +246,12 @@ TEST_F(TransactionTest, AddIndexInfoPublishesMinorVersionAndPreservesAddIndexCom
                     .properties = {{"index_id", "100"}, {"build_id", "101"}}};
 
   // Index bytes are already written by the caller. The transaction publishes
-  // only their metadata and reports the minor version to the metadata layer.
+  // only their metadata.
   {
     ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
     transaction->AddIndexInfo(first_index);
-    ASSERT_AND_ASSIGN(auto commit_info, transaction->CommitWithInfo());
-    EXPECT_EQ(commit_info.manifest_version, 1);
-    EXPECT_EQ(commit_info.manifest_minor_version, static_cast<int32_t>(ManifestMinorVersion::INDEX_INFO));
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    EXPECT_EQ(committed_version, 1);
   }
 
   {
@@ -288,9 +287,8 @@ TEST_F(TransactionTest, AddIndexInfoPublishesMinorVersionAndPreservesAddIndexCom
   {
     ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
     transaction->DropIndex("vector", "hnsw");
-    ASSERT_AND_ASSIGN(auto commit_info, transaction->CommitWithInfo());
-    EXPECT_EQ(commit_info.manifest_version, 3);
-    EXPECT_EQ(commit_info.manifest_minor_version, static_cast<int32_t>(ManifestMinorVersion::NONE));
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    EXPECT_EQ(committed_version, 3);
   }
 
   ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));

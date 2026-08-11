@@ -346,11 +346,6 @@ Transaction::Transaction(const milvus_storage::ArrowFileSystemPtr& fs,
       retry_limit_(retry_limit) {}
 
 arrow::Result<int64_t> Transaction::Commit() {
-  ARROW_ASSIGN_OR_RAISE(auto commit_info, CommitWithInfo());
-  return commit_info.manifest_version;
-}
-
-arrow::Result<ManifestCommitInfo> Transaction::CommitWithInfo() {
   // Fault injection point for testing
   FIU_RETURN_ON(FIUKEY_MANIFEST_COMMIT_FAIL,
                 arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_MANIFEST_COMMIT_FAIL)));
@@ -412,15 +407,12 @@ arrow::Result<ManifestCommitInfo> Transaction::CommitWithInfo() {
     // Try to commit the resolved manifest
     auto status = write_manifest(resolved_manifest, latest_version, committed_version);
 
-    // If commit succeeded, return all metadata needed for publication.
+    // If commit succeeded, return the committed revision.
     if (status.ok()) {
       LOG_STORAGE_DEBUG_ << fmt::format(
           "Manifest committed successfully: [committed_version={}][read_version={}][retries={}]", committed_version,
           read_version_, retry_count);
-      return ManifestCommitInfo{
-          .manifest_version = committed_version,
-          .manifest_minor_version = resolved_manifest->minorVersion(),
-      };
+      return committed_version;
     }
 
     // If commit failed due to conflict (file already exists), retry if within limit

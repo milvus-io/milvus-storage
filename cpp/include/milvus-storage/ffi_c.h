@@ -284,14 +284,6 @@ typedef struct LoonIndexes {
 } LoonIndexes;
 
 /**
- * @brief Result of committing a manifest revision.
- */
-typedef struct LoonManifestCommitInfo {
-  int64_t manifest_version;
-  int32_t manifest_minor_version;
-} LoonManifestCommitInfo;
-
-/**
  * @brief C structure representing a Manifest
  */
 typedef struct LoonManifest {
@@ -757,16 +749,6 @@ FFI_EXPORT LoonFFIResult loon_transaction_get_read_version(LoonTransactionHandle
  * @return result of FFI
  */
 FFI_EXPORT LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out_committed_version);
-
-/**
- * @brief Commits a transaction and returns the complete manifest reference.
- *
- * @param handle Transaction handle
- * @param out_commit_info Output committed revision and manifest minor version
- * @return result of FFI
- */
-FFI_EXPORT LoonFFIResult loon_transaction_commit_with_info(LoonTransactionHandle handle,
-                                                           LoonManifestCommitInfo* out_commit_info);
 
 /**
  * @brief Destroys a Transaction

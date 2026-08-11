@@ -286,13 +286,13 @@ static void test_add_column_group(void) {
   loon_properties_free(&pp);
 }
 
-static void test_add_index_info_and_commit_with_info(void) {
+static void test_add_index_info_and_commit(void) {
   LoonProperties pp;
   LoonFFIResult rc;
   LoonTransactionHandle transaction = 0;
   LoonTransactionHandle read_transaction = 0;
   LoonManifest* cmanifest = NULL;
-  LoonManifestCommitInfo commit_info = {0};
+  int64_t committed_version = 0;
   const char* property_keys[] = {"index_id", "build_id"};
   const char* property_values[] = {"100", "101"};
   LoonIndexInfo index_info = {
@@ -314,10 +314,9 @@ static void test_add_index_info_and_commit_with_info(void) {
   rc = loon_transaction_add_index_info(transaction, &index_info);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-  rc = loon_transaction_commit_with_info(transaction, &commit_info);
+  rc = loon_transaction_commit(transaction, &committed_version);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
-  ck_assert_int_eq(commit_info.manifest_version, 1);
-  ck_assert_int_eq(commit_info.manifest_minor_version, 1);
+  ck_assert_int_eq(committed_version, 1);
   loon_transaction_destroy(transaction);
 
   rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &read_transaction);
@@ -812,7 +811,7 @@ void run_manifest_suite(void) {
   loon_reset_context();
   RUN_TEST(test_add_column_group);
   loon_reset_context();
-  RUN_TEST(test_add_index_info_and_commit_with_info);
+  RUN_TEST(test_add_index_info_and_commit);
   loon_reset_context();
   RUN_TEST(test_add_delta_log);
   loon_reset_context();

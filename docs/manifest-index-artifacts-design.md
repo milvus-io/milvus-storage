@@ -103,7 +103,7 @@ The Avro schema adds:
 }
 ```
 
-`MANIFEST_VERSION` keeps its existing format-compatibility meaning. It must not be changed solely because a manifest contains an index.
+`MANIFEST_VERSION` keeps its format-compatibility meaning. Version 6 adds the persistent `minor_version` field, which supplements existing `Index` metadata with a marker that index information is present.
 
 ### Invariant
 
@@ -148,31 +148,10 @@ Index index{
 
 ARROW_ASSIGN_OR_RAISE(auto txn, Transaction::Open(fs, base_path, 42, IndexResolver));
 txn->AddIndexInfo(index);
-ARROW_ASSIGN_OR_RAISE(auto committed, txn->CommitWithInfo());
+ARROW_ASSIGN_OR_RAISE(auto committed, txn->Commit());
 ```
 
 `source_manifest_version` is an engine convention stored in `properties`, not a new `Index` field. It allows DataCoord and the resolver to reject publication of an index built from stale source data.
-
-### Commit result
-
-Keep the existing ABI/API:
-
-```cpp
-arrow::Result<int64_t> Transaction::Commit();
-```
-
-Add an opt-in result for the DataCoord publishing path:
-
-```cpp
-struct ManifestCommitInfo {
-  int64_t manifest_version;
-  int32_t manifest_minor_version;
-};
-
-arrow::Result<ManifestCommitInfo> Transaction::CommitWithInfo();
-```
-
-The new result reports the committed manifest revision and its persistent minor version. It does not include `has_index_info`, which is derivable from the minor version.
 
 ### Conflict rules
 
@@ -249,7 +228,7 @@ If manifest metadata cannot be read, garbage collection must fail closed for tha
 
 The required additive interfaces are:
 
-- C/C++ FFI exposure for `AddIndexInfo` and `CommitWithInfo`;
+- C/C++ FFI exposure for `AddIndexInfo`;
 - manifest metadata export support for existing `Index` entries and `minor_version`;
 - `datapb.SegmentInfo`, manifest-update messages, and load metadata carrying `manifest_minor_version`;
 - Go bindings that forward the completed `Index` information, rather than index bytes, from the build/publish path.

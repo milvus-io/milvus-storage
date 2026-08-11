@@ -99,27 +99,6 @@ LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out
   RETURN_UNREACHABLE();
 }
 
-LoonFFIResult loon_transaction_commit_with_info(LoonTransactionHandle handle,
-                                                LoonManifestCommitInfo* out_commit_info) {
-  if (!handle || !out_commit_info) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_commit_info must not be null");
-  }
-  try {
-    auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
-    auto commit_result = cpp_transaction->CommitWithInfo();
-    RETURN_ARROW_ERROR_IF(commit_result.status(), LOON_LOGICAL_ERROR, commit_result.status().ToString());
-
-    const auto& commit_info = commit_result.ValueOrDie();
-    out_commit_info->manifest_version = commit_info.manifest_version;
-    out_commit_info->manifest_minor_version = commit_info.manifest_minor_version;
-    RETURN_SUCCESS();
-  } catch (std::exception& e) {
-    RETURN_EXCEPTION(e.what());
-  }
-
-  RETURN_UNREACHABLE();
-}
-
 void loon_transaction_destroy(LoonTransactionHandle handle) {
   if (handle) {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
