@@ -67,6 +67,7 @@ class PaimonFormatReader final : public FormatReader {
         const std::string& predicate);
   };
 
+  ~PaimonFormatReader() override;
   [[nodiscard]] arrow::Status open() override;
   [[nodiscard]] arrow::Result<std::vector<RowGroupInfo>> get_row_group_infos() override;
   [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_rg_column_memsz(int64_t row_group_index) const override;
@@ -106,6 +107,9 @@ class PaimonFormatReader final : public FormatReader {
   std::shared_ptr<BlockingPaimonDataSplitReader> split_reader_;
   std::vector<std::string> split_columns_;
   std::shared_ptr<arrow::Schema> output_schema_;
+  // Retain only the forward cursor used by the non-thread-safe get_chunk path.
+  // Batch and range operations keep independent streams.
+  std::unique_ptr<DataSplitStreamCursor> data_split_cursor_;
 };
 
 }  // namespace milvus_storage::paimon

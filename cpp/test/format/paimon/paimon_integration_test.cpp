@@ -659,6 +659,24 @@ TEST_F(PaimonIntegrationTest, DataSplitReadsNonContiguousChunks) {
   }
 }
 
+TEST_F(PaimonIntegrationTest, DataSplitSupportsForwardAndBackwardChunkReads) {
+  constexpr uint64_t kRows = 4096;
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "mor").status());
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+  ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "512"), std::nullopt);
+
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
+                                                      {"id"}, nullptr));
+  for (auto chunk : {1, 2, 3, 1, 2}) {
+    ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(chunk));
+    const auto& ids = static_cast<const arrow::Int64Array&>(*batch->column(0));
+    ASSERT_EQ(ids.length(), 512);
+    EXPECT_EQ(ids.Value(0), chunk * 512);
+    EXPECT_EQ(ids.Value(511), chunk * 512 + 511);
+  }
+}
+
 TEST_F(PaimonIntegrationTest, DataSplitTakeCompactsSparseBatches) {
   constexpr uint64_t kRows = 4096;
   ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "mor").status());

@@ -340,6 +340,8 @@ class DataSplitStreamCursor {
     return output;
   }
 
+  [[nodiscard]] uint64_t position() const { return position_; }
+
   arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> TakeRows(const std::vector<int64_t>& row_indices) {
     int64_t previous = -1;
     for (auto row : row_indices) {
@@ -439,6 +441,8 @@ class DataSplitStreamCursor {
   uint64_t position_ = 0;
   uint64_t declared_rows_;
 };
+
+PaimonFormatReader::~PaimonFormatReader() = default;
 
 namespace {
 
@@ -703,8 +707,20 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> PaimonFormatReader::get_chunk
     return arrow::Status::Invalid("Paimon row group index out of range: ", row_group_index);
   }
   if (is_data_split()) {
-    ARROW_ASSIGN_OR_RAISE(auto chunks, get_chunks({row_group_index}));
-    return chunks.front();
+    const auto& group = metadata_->row_group_infos[row_group_index];
+    if (!data_split_cursor_ || group.start_offset < data_split_cursor_->position()) {
+      ARROW_ASSIGN_OR_RAISE(data_split_cursor_, make_data_split_cursor());
+    }
+    auto batches = data_split_cursor_->ReadRange(group.start_offset, group.end_offset);
+    if (!batches.ok()) {
+      data_split_cursor_.reset();
+      return batches.status();
+    }
+    auto batch = CombineBatches(*batches, output_schema_);
+    if (!batch.ok()) {
+      data_split_cursor_.reset();
+    }
+    return batch;
   }
   const auto& group = metadata_->row_group_infos[row_group_index];
   if (group.start_offset == group.end_offset) {
