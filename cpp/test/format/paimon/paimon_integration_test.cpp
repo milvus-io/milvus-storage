@@ -687,6 +687,33 @@ TEST_F(PaimonIntegrationTest, DataSplitTakeCompactsSparseBatches) {
   }
 }
 
+TEST_F(PaimonIntegrationTest, DataSplitHonorsReadSchemaForTakeAndRange) {
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 17, "mor").status());
+  ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+  ASSERT_EQ(files.size(), 1);
+
+  auto read_schema = arrow::schema({arrow::field("id", arrow::int64(), false)});
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(read_schema, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
+                                                      {"id"}, nullptr));
+
+  ASSERT_AND_ASSIGN(auto taken, reader->take({0, 8, 16}));
+  EXPECT_TRUE(taken->schema()->Equals(*read_schema));
+  ASSERT_EQ(taken->num_rows(), 3);
+
+  ASSERT_AND_ASSIGN(auto range, reader->read_with_range(3, 9));
+  ASSERT_AND_ASSIGN(auto range_table, arrow::Table::FromRecordBatchReader(range.get()));
+  EXPECT_TRUE(range_table->schema()->Equals(*read_schema));
+  EXPECT_EQ(range_table->num_rows(), 6);
+
+  auto incompatible_schema = arrow::schema({arrow::field("id", arrow::int32())});
+  ASSERT_AND_ASSIGN(auto incompatible_reader, FormatReader::create(incompatible_schema, LOON_FORMAT_PAIMON_TABLE,
+                                                                   files.front(), properties_, {"id"}, nullptr));
+  auto incompatible = incompatible_reader->take({0});
+  ASSERT_FALSE(incompatible.ok());
+  EXPECT_TRUE(incompatible.status().IsInvalid()) << incompatible.status().ToString();
+  EXPECT_NE(incompatible.status().ToString().find("schema mismatch"), std::string::npos);
+}
+
 TEST_F(PaimonIntegrationTest, AsyncDataSplitChunksSpanSourceBatches) {
   constexpr uint64_t kRows = 10000;
   ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "mor").status());

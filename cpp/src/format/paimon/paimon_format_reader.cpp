@@ -49,24 +49,47 @@ arrow::Status TranslatePaimonStreamStatus(arrow::Status status) {
   return MakePaimonBridgeErrorStatus(status.message());
 }
 
-class PaimonErrorTranslatingReader final : public arrow::RecordBatchReader {
+class PaimonStreamReader final : public arrow::RecordBatchReader {
   public:
-  explicit PaimonErrorTranslatingReader(std::shared_ptr<arrow::RecordBatchReader> inner) : inner_(std::move(inner)) {}
+  PaimonStreamReader(std::shared_ptr<arrow::RecordBatchReader> inner, std::shared_ptr<arrow::Schema> output_schema)
+      : inner_(std::move(inner)), output_schema_(std::move(output_schema)) {}
 
-  std::shared_ptr<arrow::Schema> schema() const override { return inner_->schema(); }
+  std::shared_ptr<arrow::Schema> schema() const override { return output_schema_; }
 
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override {
-    return TranslatePaimonStreamStatus(inner_->ReadNext(batch));
+    ARROW_RETURN_NOT_OK(TranslatePaimonStreamStatus(inner_->ReadNext(batch)));
+    if (!*batch) {
+      return arrow::Status::OK();
+    }
+    if ((*batch)->num_columns() != output_schema_->num_fields()) {
+      return arrow::Status::Invalid("Paimon data-split stream returned an unexpected column count");
+    }
+    for (int index = 0; index < output_schema_->num_fields(); ++index) {
+      const auto& actual = (*batch)->schema()->field(index);
+      const auto& expected = output_schema_->field(index);
+      if (actual->name() != expected->name() || !actual->type()->Equals(expected->type())) {
+        return arrow::Status::Invalid("Paimon data-split stream schema mismatch at column ", index, ": expected ",
+                                      expected->ToString(), ", got ", actual->ToString());
+      }
+      if (!expected->nullable() && (*batch)->column(index)->null_count() != 0) {
+        return arrow::Status::Invalid("Paimon data-split stream returned nulls for non-nullable column: ",
+                                      expected->name());
+      }
+    }
+    *batch = arrow::RecordBatch::Make(output_schema_, (*batch)->num_rows(), (*batch)->columns());
+    return arrow::Status::OK();
   }
 
   arrow::Status Close() override { return TranslatePaimonStreamStatus(inner_->Close()); }
 
   private:
   std::shared_ptr<arrow::RecordBatchReader> inner_;
+  std::shared_ptr<arrow::Schema> output_schema_;
 };
 
-std::shared_ptr<arrow::RecordBatchReader> WrapPaimonStreamReader(std::shared_ptr<arrow::RecordBatchReader> inner) {
-  return std::make_shared<PaimonErrorTranslatingReader>(std::move(inner));
+std::shared_ptr<arrow::RecordBatchReader> WrapPaimonStreamReader(std::shared_ptr<arrow::RecordBatchReader> inner,
+                                                                 std::shared_ptr<arrow::Schema> output_schema) {
+  return std::make_shared<PaimonStreamReader>(std::move(inner), std::move(output_schema));
 }
 
 struct ParsedMetadata {
@@ -650,7 +673,7 @@ arrow::Status PaimonFormatReader::open() {
 arrow::Result<std::unique_ptr<DataSplitStreamCursor>> PaimonFormatReader::make_data_split_cursor() const {
   ARROW_ASSIGN_OR_RAISE(auto stream, split_reader_->OpenStream(split_columns_));
   ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&stream));
-  return std::make_unique<DataSplitStreamCursor>(WrapPaimonStreamReader(std::move(reader)),
+  return std::make_unique<DataSplitStreamCursor>(WrapPaimonStreamReader(std::move(reader), output_schema_),
                                                  metadata_->payload.record_count);
 }
 
