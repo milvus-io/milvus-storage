@@ -14,7 +14,11 @@
 
 #include <cerrno>
 #include <string_view>
+#include <utility>
 
+#include <arrow/array.h>
+#include <arrow/record_batch.h>
+#include <arrow/type.h>
 #include <arrow/util/io_util.h>
 
 #include "bridge_util.h"
@@ -31,6 +35,7 @@ constexpr std::string_view kNotImplementedMarker = "[paimon:error=not-implemente
 constexpr std::string_view kNotFoundMarker = "[paimon:error=not-found]";
 constexpr std::string_view kTransientThrottlingMarker = "[paimon:error=transient-throttling]";
 constexpr std::string_view kTransientServiceMarker = "[paimon:error=transient-service]";
+constexpr std::string_view kPaimonErrorMarker = "[paimon:error=";
 
 std::string StripMarker(std::string_view message, std::string_view marker) {
   auto position = message.find(marker);
@@ -57,6 +62,51 @@ arrow::Result<T> CatchRustResult(Fn&& fn) {
   }
 }
 
+arrow::Status TranslatePaimonStreamStatus(arrow::Status status) {
+  if (status.ok() || status.message().find(kPaimonErrorMarker) == std::string_view::npos) {
+    return status;
+  }
+  return MakePaimonBridgeErrorStatus(status.message());
+}
+
+class PaimonStreamReader final : public arrow::RecordBatchReader {
+  public:
+  PaimonStreamReader(std::shared_ptr<arrow::RecordBatchReader> inner, std::shared_ptr<arrow::Schema> output_schema)
+      : inner_(std::move(inner)), output_schema_(std::move(output_schema)) {}
+
+  std::shared_ptr<arrow::Schema> schema() const override { return output_schema_; }
+
+  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override {
+    ARROW_RETURN_NOT_OK(TranslatePaimonStreamStatus(inner_->ReadNext(batch)));
+    if (!*batch) {
+      return arrow::Status::OK();
+    }
+    if ((*batch)->num_columns() != output_schema_->num_fields()) {
+      return arrow::Status::Invalid("Paimon data-split stream returned an unexpected column count");
+    }
+    for (int index = 0; index < output_schema_->num_fields(); ++index) {
+      const auto& actual = (*batch)->schema()->field(index);
+      const auto& expected = output_schema_->field(index);
+      if (actual->name() != expected->name() || !actual->type()->Equals(expected->type())) {
+        return arrow::Status::Invalid("Paimon data-split stream schema mismatch at column ", index, ": expected ",
+                                      expected->ToString(), ", got ", actual->ToString());
+      }
+      if (!expected->nullable() && (*batch)->column(index)->null_count() != 0) {
+        return arrow::Status::Invalid("Paimon data-split stream returned nulls for non-nullable column: ",
+                                      expected->name());
+      }
+    }
+    *batch = arrow::RecordBatch::Make(output_schema_, (*batch)->num_rows(), (*batch)->columns());
+    return arrow::Status::OK();
+  }
+
+  arrow::Status Close() override { return TranslatePaimonStreamStatus(inner_->Close()); }
+
+  private:
+  std::shared_ptr<arrow::RecordBatchReader> inner_;
+  std::shared_ptr<arrow::Schema> output_schema_;
+};
+
 }  // namespace
 
 arrow::Status MakePaimonBridgeErrorStatus(std::string_view message) {
@@ -80,6 +130,13 @@ arrow::Status MakePaimonBridgeErrorStatus(std::string_view message) {
   }
   return arrow::Status::IOError(message);
 }
+
+namespace internal {
+std::shared_ptr<arrow::RecordBatchReader> WrapPaimonRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner,
+                                                                      std::shared_ptr<arrow::Schema> output_schema) {
+  return std::make_shared<PaimonStreamReader>(std::move(inner), std::move(output_schema));
+}
+}  // namespace internal
 
 arrow::Result<std::vector<PaimonFileInfo>> PlanFiles(const std::string& table_location,
                                                      int64_t snapshot_id,

@@ -72,6 +72,23 @@ class PaimonIntegrationTest : public ::testing::Test {
   std::string table_dir_;
 };
 
+class FailingRecordBatchReader : public arrow::RecordBatchReader {
+  public:
+  explicit FailingRecordBatchReader(arrow::Status status) : status_(std::move(status)) {}
+
+  std::shared_ptr<arrow::Schema> schema() const override { return arrow::schema({}); }
+
+  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override {
+    *batch = nullptr;
+    return status_;
+  }
+
+  arrow::Status Close() override { return status_; }
+
+  private:
+  arrow::Status status_;
+};
+
 std::string ReadPath(const api::ColumnGroupFile& file) {
   return folly::parseJson(file.Get<std::string>(api::kPropertyMetadata))["read_path"].asString();
 }
@@ -852,7 +869,35 @@ TEST(PaimonBridgeErrorClassification, MarkersMapToArrowStatuses) {
   EXPECT_TRUE(paimon::MakePaimonBridgeErrorStatus("unclassified storage failure").IsIOError());
 }
 
-TEST_F(PaimonIntegrationTest, DataSplitMidStreamNotFoundPreservesErrno) {
+TEST(PaimonBridgeErrorClassification, StreamReaderTranslatesReadNextNotFound) {
+  auto inner =
+      std::make_shared<FailingRecordBatchReader>(arrow::Status::IOError("[paimon:error=not-found] missing object"));
+  auto reader = paimon::internal::WrapPaimonRecordBatchReader(std::move(inner), arrow::schema({}));
+
+  std::shared_ptr<arrow::RecordBatch> batch;
+  auto status = reader->ReadNext(&batch);
+
+  EXPECT_TRUE(status.IsIOError()) << status.ToString();
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
+  EXPECT_EQ(status.ToString().find("[paimon:error="), std::string::npos);
+}
+
+TEST(PaimonBridgeErrorClassification, StreamReaderTranslatesReadNextThrottling) {
+  auto inner = std::make_shared<FailingRecordBatchReader>(
+      arrow::Status::IOError("[paimon:error=transient-throttling] object store rate limit"));
+  auto reader = paimon::internal::WrapPaimonRecordBatchReader(std::move(inner), arrow::schema({}));
+
+  std::shared_ptr<arrow::RecordBatch> batch;
+  auto status = reader->ReadNext(&batch);
+
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientThrottling);
+  EXPECT_TRUE(detail->retryable());
+  EXPECT_EQ(status.ToString().find("[paimon:error="), std::string::npos);
+}
+
+TEST_F(PaimonIntegrationTest, DataSplitMissingObjectPreservesErrno) {
   constexpr uint64_t kRows = 12;
   ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "append").status());
 
@@ -860,8 +905,9 @@ TEST_F(PaimonIntegrationTest, DataSplitMidStreamNotFoundPreservesErrno) {
   ASSERT_EQ(files.size(), 1);
   ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
                                                       {"id"}, nullptr));
-  ASSERT_AND_ASSIGN(auto stream, reader->read_with_range(0, kRows));
 
+  // Delete before opening the stream so the assertion is independent of
+  // paimon-rust's eager/lazy open behavior and POSIX unlink semantics.
   size_t removed_files = 0;
   for (const auto& entry : std::filesystem::recursive_directory_iterator(table_dir_)) {
     if (entry.is_regular_file() && entry.path().extension() == ".parquet") {
@@ -871,11 +917,17 @@ TEST_F(PaimonIntegrationTest, DataSplitMidStreamNotFoundPreservesErrno) {
   }
   ASSERT_GT(removed_files, 0);
 
-  std::shared_ptr<arrow::RecordBatch> batch;
+  auto stream = reader->read_with_range(0, kRows);
   arrow::Status status;
-  do {
-    status = stream->ReadNext(&batch);
-  } while (status.ok() && batch);
+  if (!stream.ok()) {
+    status = stream.status();
+  } else {
+    auto stream_reader = stream.ValueOrDie();
+    std::shared_ptr<arrow::RecordBatch> batch;
+    do {
+      status = stream_reader->ReadNext(&batch);
+    } while (status.ok() && batch);
+  }
 
   ASSERT_FALSE(status.ok());
   EXPECT_TRUE(status.IsIOError()) << status.ToString();

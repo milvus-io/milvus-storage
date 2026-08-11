@@ -25,6 +25,11 @@
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"
 
+namespace arrow {
+class RecordBatchReader;
+class Schema;
+}  // namespace arrow
+
 namespace milvus_storage::paimon {
 
 using StorageOptions = std::unordered_map<std::string, std::string>;
@@ -40,6 +45,11 @@ struct PaimonTestTableInfo {
 };
 
 arrow::Status MakePaimonBridgeErrorStatus(std::string_view message);
+
+namespace internal {
+std::shared_ptr<arrow::RecordBatchReader> WrapPaimonRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner,
+                                                                      std::shared_ptr<arrow::Schema> output_schema);
+}  // namespace internal
 
 arrow::Result<std::vector<PaimonFileInfo>> PlanFiles(const std::string& table_location,
                                                      int64_t snapshot_id,
