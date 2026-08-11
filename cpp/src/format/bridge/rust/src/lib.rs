@@ -243,7 +243,7 @@ pub mod paimon_ffi {
 
         unsafe fn open_stream(
             self: &BlockingPaimonDataSplitReader,
-            projected_columns: &CxxVector<CxxString>,
+            projected_columns: Vec<String>,
             out_stream_ptr: *mut u8,
         ) -> Result<()>;
     }

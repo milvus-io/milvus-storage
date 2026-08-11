@@ -20,7 +20,6 @@ use arrow58::ffi_stream::FFI_ArrowArrayStream;
 use arrow58::record_batch::{RecordBatch, RecordBatchReader};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use cxx::{CxxString, CxxVector};
 use futures::{StreamExt, stream::BoxStream};
 use paimon::catalog::Identifier;
 use paimon::io::{FileIO, FileRead};
@@ -1110,7 +1109,7 @@ impl BlockingPaimonDataSplitReader {
     /// from one shared handle are safe.
     pub unsafe fn open_stream(
         &self,
-        projected_columns: &CxxVector<CxxString>,
+        projected_columns: Vec<String>,
         out_stream_ptr: *mut u8,
     ) -> Result<()> {
         unsafe { self.open_stream_impl(projected_columns, out_stream_ptr) }
@@ -1119,16 +1118,15 @@ impl BlockingPaimonDataSplitReader {
 
     unsafe fn open_stream_impl(
         &self,
-        projected_columns: &CxxVector<CxxString>,
+        projected_columns: Vec<String>,
         out_stream_ptr: *mut u8,
     ) -> Result<()> {
         let mut builder = self.table.new_read_builder();
         if !projected_columns.is_empty() {
             let projected_refs = projected_columns
                 .iter()
-                .map(|column| column.to_str())
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .with_context(|| invalid_message("Paimon projection contains invalid UTF-8"))?;
+                .map(String::as_str)
+                .collect::<Vec<_>>();
             builder.with_projection(&projected_refs)?;
         }
         let read = builder.new_read()?;

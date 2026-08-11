@@ -237,8 +237,13 @@ arrow::Status BlockingPaimonDataSplitReader::ExportSchema(ArrowSchema* schema) c
 arrow::Result<ArrowArrayStream> BlockingPaimonDataSplitReader::OpenStream(
     const std::vector<std::string>& projected_columns) const {
   return CatchRustResult<ArrowArrayStream>([&]() {
+    rust::Vec<rust::String> columns;
+    columns.reserve(projected_columns.size());
+    for (const auto& column : projected_columns) {
+      columns.push_back(rust::String(column));
+    }
     ArrowArrayStream stream{};
-    impl_->open_stream(projected_columns, reinterpret_cast<uint8_t*>(&stream));
+    impl_->open_stream(std::move(columns), reinterpret_cast<uint8_t*>(&stream));
     return stream;
   });
 }
