@@ -74,7 +74,7 @@ arrow::Result<int64_t> CreateTestTable(const std::string& table_location,
 /// same cached metadata.
 class BlockingPaimonDataSplitReader {
   public:
-  static arrow::Result<std::unique_ptr<BlockingPaimonDataSplitReader>> Open(const std::string& metadata_json,
+  static arrow::Result<std::shared_ptr<BlockingPaimonDataSplitReader>> Open(const std::string& metadata_json,
                                                                             const std::string& expected_table_location,
                                                                             const StorageOptions& storage_options);
 

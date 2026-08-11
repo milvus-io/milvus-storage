@@ -152,15 +152,15 @@ arrow::Result<int64_t> CreateTestTable(const std::string& table_location,
   return info.snapshot_ids.back();
 }
 
-arrow::Result<std::unique_ptr<BlockingPaimonDataSplitReader>> BlockingPaimonDataSplitReader::Open(
+arrow::Result<std::shared_ptr<BlockingPaimonDataSplitReader>> BlockingPaimonDataSplitReader::Open(
     const std::string& metadata_json,
     const std::string& expected_table_location,
     const StorageOptions& storage_options) {
-  return CatchRustResult<std::unique_ptr<BlockingPaimonDataSplitReader>>([&]() {
+  return CatchRustResult<std::shared_ptr<BlockingPaimonDataSplitReader>>([&]() {
     rust::Vec<rust::String> keys;
     rust::Vec<rust::String> values;
     ConvertStorageOptions(storage_options, keys, values);
-    return std::make_unique<BlockingPaimonDataSplitReader>(ffi::paimon_open_data_split_reader(
+    return std::make_shared<BlockingPaimonDataSplitReader>(ffi::paimon_open_data_split_reader(
         rust::Str(metadata_json), rust::Str(expected_table_location), std::move(keys), std::move(values)));
   });
 }
