@@ -499,7 +499,20 @@ void Manifest::deserializeLegacy(std::istream& input_stream) {
   }
 
   if (version >= 2) {
-    avro::decode(*decoder, indexes_);
+    // Raw MILV manifests predate the typed Index load metadata added in
+    // version 6. Decode their original four-field layout explicitly instead
+    // of using codec_traits<Index>, which expects the new fields.
+    indexes_.clear();
+    for (size_t n = decoder->arrayStart(); n != 0; n = decoder->arrayNext()) {
+      for (size_t i = 0; i < n; ++i) {
+        Index index;
+        avro::decode(*decoder, index.column_name);
+        avro::decode(*decoder, index.index_type);
+        avro::decode(*decoder, index.path);
+        avro::decode(*decoder, index.properties);
+        indexes_.push_back(std::move(index));
+      }
+    }
   } else {
     indexes_.clear();
   }

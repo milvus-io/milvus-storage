@@ -498,6 +498,9 @@ TEST_F(ColumnGroupsTest, LegacyV2Deserialize) {
   EXPECT_TRUE(deserialized->stats().empty());
   EXPECT_EQ(deserialized->indexes().size(), 1);
   EXPECT_EQ(deserialized->indexes()[0].index_type, "ivf");
+  EXPECT_TRUE(deserialized->indexes()[0].index_name.empty());
+  EXPECT_EQ(deserialized->indexes()[0].field_id, 0);
+  EXPECT_TRUE(deserialized->indexes()[0].index_file_keys.empty());
 }
 
 TEST_F(ColumnGroupsTest, IndexRoundTripPreservesData) {
