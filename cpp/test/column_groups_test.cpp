@@ -324,13 +324,21 @@ static void encodeDeltaLog(avro::Encoder& e, const DeltaLog& dl) {
 
 static void encodeIndex(avro::Encoder& e, const Index& idx) {
   avro::encode(e, idx.column_name);
+  avro::encode(e, idx.index_name);
   avro::encode(e, idx.index_type);
   avro::encode(e, idx.path);
-  // The legacy test fixture uses the original Avro map representation.  The
-  // public Index now uses unordered_map for lookup efficiency, while the
-  // compatibility encoder remains independent of the implementation type.
-  std::map<std::string, std::string> properties(idx.properties.begin(), idx.properties.end());
-  avro::encode(e, properties);
+  avro::encode(e, idx.field_id);
+  avro::encode(e, idx.index_id);
+  avro::encode(e, idx.build_id);
+  avro::encode(e, idx.index_version);
+  avro::encode(e, idx.num_rows);
+  avro::encode(e, idx.serialized_size);
+  avro::encode(e, idx.mem_size);
+  avro::encode(e, idx.current_index_version);
+  avro::encode(e, idx.current_scalar_index_version);
+  avro::encode(e, idx.index_store_path_version);
+  avro::encode(e, idx.index_file_keys);
+  avro::encode(e, idx.properties);
 }
 
 static void encodeStatistics(avro::Encoder& e, const Statistics& stat) {
@@ -391,7 +399,7 @@ static std::string encodeLegacyManifest(int32_t version,
     avro::encode(*encoder, legacy_stats);
   }
 
-  if (version >= 2) {
+  if (version >= 6) {
     encoder->arrayStart();
     if (!indexes.empty()) {
       encoder->setItemCount(indexes.size());
@@ -400,6 +408,11 @@ static std::string encodeLegacyManifest(int32_t version,
         encodeIndex(*encoder, idx);
       }
     }
+    encoder->arrayEnd();
+  }
+
+  if (version >= 5) {
+    encoder->arrayStart();
     encoder->arrayEnd();
   }
 
@@ -447,16 +460,8 @@ TEST_F(ColumnGroupsTest, LegacyV3Deserialize) {
   stat.metadata = {{"k", "v"}};
   stats["key"] = stat;
 
-  std::vector<Index> indexes;
-  Index idx;
-  idx.column_name = "col";
-  idx.index_type = "hnsw";
-  idx.path = "i.idx";
-  idx.properties = {{"M", "8"}};
-  indexes.push_back(idx);
-
   auto legacy_cgs = MakeLegacyCgs(test_cgs_, base_path_);
-  std::string legacy_bytes = encodeLegacyManifest(3, legacy_cgs, {}, stats, indexes);
+  std::string legacy_bytes = encodeLegacyManifest(3, legacy_cgs, {}, stats, {});
 
   ASSERT_NE(legacy_bytes.substr(0, 4), std::string("Obj\x01", 4));
 
@@ -464,8 +469,7 @@ TEST_F(ColumnGroupsTest, LegacyV3Deserialize) {
 
   EXPECT_EQ(deserialized->columnGroups().size(), 2);
   EXPECT_EQ(deserialized->stats().at("key").metadata.at("k"), "v");
-  EXPECT_EQ(deserialized->indexes().size(), 1);
-  EXPECT_EQ(deserialized->indexes()[0].properties.at("M"), "8");
+  EXPECT_TRUE(deserialized->indexes().empty());
 }
 
 TEST_F(ColumnGroupsTest, LegacyV1Deserialize) {
@@ -485,26 +489,59 @@ TEST_F(ColumnGroupsTest, LegacyV1Deserialize) {
 }
 
 TEST_F(ColumnGroupsTest, LegacyV2Deserialize) {
-  std::vector<Index> indexes;
-  Index idx;
-  idx.column_name = "col";
-  idx.index_type = "ivf";
-  idx.path = "v2.idx";
-  idx.properties = {};
-  indexes.push_back(idx);
-
   auto legacy_cgs = MakeLegacyCgs(test_cgs_, base_path_);
-  std::string legacy_bytes = encodeLegacyManifest(2, legacy_cgs, {}, {}, indexes);
+  std::string legacy_bytes = encodeLegacyManifest(2, legacy_cgs, {}, {}, {});
 
   ASSERT_AND_ASSIGN(auto deserialized, WriteLegacyAndReadBack(fs_, base_path_, legacy_bytes, 3));
 
   EXPECT_EQ(deserialized->columnGroups().size(), 2);
   EXPECT_TRUE(deserialized->stats().empty());
-  EXPECT_EQ(deserialized->indexes().size(), 1);
-  EXPECT_EQ(deserialized->indexes()[0].index_type, "ivf");
-  EXPECT_TRUE(deserialized->indexes()[0].index_name.empty());
-  EXPECT_EQ(deserialized->indexes()[0].field_id, 0);
-  EXPECT_TRUE(deserialized->indexes()[0].index_file_keys.empty());
+  EXPECT_TRUE(deserialized->indexes().empty());
+}
+
+TEST_F(ColumnGroupsTest, LegacyV6Deserialize) {
+  Index index;
+  index.column_name = "embedding";
+  index.index_name = "embedding_hnsw";
+  index.index_type = "HNSW";
+  index.path = "embedding_hnsw";
+  index.field_id = 101;
+  index.index_id = 102;
+  index.build_id = 103;
+  index.index_version = 104;
+  index.num_rows = 105;
+  index.serialized_size = 106;
+  index.mem_size = 107;
+  index.current_index_version = 108;
+  index.current_scalar_index_version = 109;
+  index.index_store_path_version = 110;
+  index.index_file_keys = {"index_params", "data"};
+  index.properties = {{"M", "16"}, {"metric_type", "COSINE"}};
+
+  auto legacy_cgs = MakeLegacyCgs(test_cgs_, base_path_);
+  std::string legacy_bytes = encodeLegacyManifest(6, legacy_cgs, {}, {}, {index});
+
+  ASSERT_AND_ASSIGN(auto deserialized, WriteLegacyAndReadBack(fs_, base_path_, legacy_bytes));
+
+  ASSERT_EQ(deserialized->indexes().size(), 1);
+  const auto& decoded = deserialized->indexes()[0];
+  EXPECT_EQ(decoded.column_name, index.column_name);
+  EXPECT_EQ(decoded.index_name, index.index_name);
+  EXPECT_EQ(decoded.index_type, index.index_type);
+  EXPECT_EQ(decoded.path, base_path_ + "/_index/embedding_hnsw");
+  EXPECT_EQ(decoded.field_id, index.field_id);
+  EXPECT_EQ(decoded.index_id, index.index_id);
+  EXPECT_EQ(decoded.build_id, index.build_id);
+  EXPECT_EQ(decoded.index_version, index.index_version);
+  EXPECT_EQ(decoded.num_rows, index.num_rows);
+  EXPECT_EQ(decoded.serialized_size, index.serialized_size);
+  EXPECT_EQ(decoded.mem_size, index.mem_size);
+  EXPECT_EQ(decoded.current_index_version, index.current_index_version);
+  EXPECT_EQ(decoded.current_scalar_index_version, index.current_scalar_index_version);
+  EXPECT_EQ(decoded.index_store_path_version, index.index_store_path_version);
+  EXPECT_EQ(decoded.index_file_keys, index.index_file_keys);
+  EXPECT_EQ(decoded.properties, index.properties);
+  EXPECT_TRUE(deserialized->lobFiles().empty());
 }
 
 TEST_F(ColumnGroupsTest, IndexRoundTripPreservesData) {

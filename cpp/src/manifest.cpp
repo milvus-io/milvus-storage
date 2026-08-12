@@ -37,32 +37,30 @@
 // Specialize codec_traits for custom types in the avro namespace
 namespace avro {
 
-// Avro natively supports std::map but not std::unordered_map.
-// This codec_traits bridges unordered_map to Avro's map wire format.
-template <typename V>
-struct codec_traits<std::unordered_map<std::string, V>> {
-  static void encode(Encoder& e, const std::unordered_map<std::string, V>& m) {
+template <>
+struct codec_traits<std::unordered_map<std::string, std::string>> {
+  static void encode(Encoder& e, const std::unordered_map<std::string, std::string>& properties) {
     e.mapStart();
-    if (!m.empty()) {
-      e.setItemCount(m.size());
-      for (const auto& [k, v] : m) {
+    if (!properties.empty()) {
+      e.setItemCount(properties.size());
+      for (const auto& [key, value] : properties) {
         e.startItem();
-        avro::encode(e, k);
-        avro::encode(e, v);
+        avro::encode(e, key);
+        avro::encode(e, value);
       }
     }
     e.mapEnd();
   }
 
-  static void decode(Decoder& d, std::unordered_map<std::string, V>& m) {
-    m.clear();
+  static void decode(Decoder& d, std::unordered_map<std::string, std::string>& properties) {
+    properties.clear();
     for (size_t n = d.mapStart(); n != 0; n = d.mapNext()) {
       for (size_t i = 0; i < n; ++i) {
         std::string key;
+        std::string value;
         avro::decode(d, key);
-        V val;
-        avro::decode(d, val);
-        m[std::move(key)] = std::move(val);
+        avro::decode(d, value);
+        properties.emplace(std::move(key), std::move(value));
       }
     }
   }
@@ -498,26 +496,10 @@ void Manifest::deserializeLegacy(std::istream& input_stream) {
     }
   }
 
-  if (version >= MANIFEST_VERSION) {
-    // Raw MILV manifests at version 6 or newer use the current typed Index
-    // layout.  This branch is retained for forward compatibility; current
-    // writers use Avro OCF and therefore normally take the path above.
+  if (version >= 6) {
+    // Index metadata was added to the raw MILV format in version 6. Earlier
+    // versions did not publish or consume the index section.
     avro::decode(*decoder, indexes_);
-  } else if (version >= 2) {
-    // Raw MILV manifests from versions 2 through 5 predate the typed Index
-    // load metadata.  Their Index records contain only column_name,
-    // index_type, path, and properties, so decode that layout explicitly.
-    indexes_.clear();
-    for (size_t n = decoder->arrayStart(); n != 0; n = decoder->arrayNext()) {
-      for (size_t i = 0; i < n; ++i) {
-        Index index;
-        avro::decode(*decoder, index.column_name);
-        avro::decode(*decoder, index.index_type);
-        avro::decode(*decoder, index.path);
-        avro::decode(*decoder, index.properties);
-        indexes_.push_back(std::move(index));
-      }
-    }
   } else {
     indexes_.clear();
   }
