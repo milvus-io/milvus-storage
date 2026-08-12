@@ -407,7 +407,7 @@ arrow::Result<int64_t> Transaction::Commit() {
     // Try to commit the resolved manifest
     auto status = write_manifest(resolved_manifest, latest_version, committed_version);
 
-    // If commit succeeded, return the committed version
+    // If commit succeeded, return the committed revision.
     if (status.ok()) {
       LOG_STORAGE_DEBUG_ << fmt::format(
           "Manifest committed successfully: [committed_version={}][read_version={}][retries={}]", committed_version,
@@ -495,7 +495,7 @@ Transaction& Transaction::UpdateStat(const std::string& key, const Statistics& s
   return *this;
 }
 
-Transaction& Transaction::AddIndex(const Index& index) {
+Transaction& Transaction::AddIndexInfo(const Index& index) {
   updates_.AddIndex(index);
   return *this;
 }

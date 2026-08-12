@@ -326,7 +326,11 @@ static void encodeIndex(avro::Encoder& e, const Index& idx) {
   avro::encode(e, idx.column_name);
   avro::encode(e, idx.index_type);
   avro::encode(e, idx.path);
-  avro::encode(e, idx.properties);
+  // The legacy test fixture uses the original Avro map representation.  The
+  // public Index now uses unordered_map for lookup efficiency, while the
+  // compatibility encoder remains independent of the implementation type.
+  std::map<std::string, std::string> properties(idx.properties.begin(), idx.properties.end());
+  avro::encode(e, properties);
 }
 
 static void encodeStatistics(avro::Encoder& e, const Statistics& stat) {
@@ -498,6 +502,9 @@ TEST_F(ColumnGroupsTest, LegacyV2Deserialize) {
   EXPECT_TRUE(deserialized->stats().empty());
   EXPECT_EQ(deserialized->indexes().size(), 1);
   EXPECT_EQ(deserialized->indexes()[0].index_type, "ivf");
+  EXPECT_TRUE(deserialized->indexes()[0].index_name.empty());
+  EXPECT_EQ(deserialized->indexes()[0].field_id, 0);
+  EXPECT_TRUE(deserialized->indexes()[0].index_file_keys.empty());
 }
 
 TEST_F(ColumnGroupsTest, IndexRoundTripPreservesData) {

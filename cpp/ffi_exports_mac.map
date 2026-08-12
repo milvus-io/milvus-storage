@@ -149,6 +149,7 @@ _loon_transaction_add_column_group
 _loon_transaction_append_files
 _loon_transaction_add_delta_log
 _loon_transaction_update_stat
+_loon_transaction_add_index_info
 
 # External table interface
 _loon_exttable_explore

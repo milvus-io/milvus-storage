@@ -271,6 +271,59 @@ LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
   RETURN_UNREACHABLE();
 }
 
+LoonFFIResult loon_transaction_add_index_info(LoonTransactionHandle handle, const LoonIndexInfo* index_info) {
+  if (!handle || !index_info || !index_info->column_name || !index_info->index_type || !index_info->path) {
+    RETURN_ERROR(LOON_INVALID_ARGS,
+                 "Invalid arguments: handle, index_info, column_name, index_type, and path must not be null");
+  }
+  if (index_info->num_properties > 0 && (!index_info->property_keys || !index_info->property_values)) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: index properties must not be null");
+  }
+  try {
+    Index index;
+    index.column_name = index_info->column_name;
+    if (index_info->index_name) {
+      index.index_name = index_info->index_name;
+    }
+    index.index_type = index_info->index_type;
+    index.path = index_info->path;
+    index.field_id = index_info->field_id;
+    index.index_id = index_info->index_id;
+    index.build_id = index_info->build_id;
+    index.index_version = index_info->index_version;
+    index.num_rows = index_info->num_rows;
+    index.serialized_size = index_info->serialized_size;
+    index.mem_size = index_info->mem_size;
+    index.current_index_version = index_info->current_index_version;
+    index.current_scalar_index_version = index_info->current_scalar_index_version;
+    index.index_store_path_version = index_info->index_store_path_version;
+    if (index_info->num_index_file_keys > 0 && !index_info->index_file_keys) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: index file keys must not be null");
+    }
+    index.index_file_keys.reserve(index_info->num_index_file_keys);
+    for (uint32_t i = 0; i < index_info->num_index_file_keys; ++i) {
+      if (!index_info->index_file_keys[i]) {
+        RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: index file key must not be null");
+      }
+      index.index_file_keys.emplace_back(index_info->index_file_keys[i]);
+    }
+    for (uint32_t i = 0; i < index_info->num_properties; ++i) {
+      if (!index_info->property_keys[i] || !index_info->property_values[i]) {
+        RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: index property key and value must not be null");
+      }
+      index.properties[index_info->property_keys[i]] = index_info->property_values[i];
+    }
+
+    auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+    cpp_transaction->AddIndexInfo(index);
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
 LoonFFIResult loon_transaction_add_lob_file(LoonTransactionHandle handle, const LoonLobFileInfo* lob_file) {
   if (!handle || !lob_file) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and lob_file must not be null");
@@ -381,6 +434,38 @@ void loon_manifest_destroy(LoonManifest* cmanifest) {
     cmanifest->lob_files.files = nullptr;
   }
   cmanifest->lob_files.num_files = 0;
+
+  // Destroy indexes
+  if (cmanifest->indexes.indexes) {
+    for (uint32_t i = 0; i < cmanifest->indexes.num_indexes; ++i) {
+      auto& index = cmanifest->indexes.indexes[i];
+      delete[] const_cast<char*>(index.column_name);
+      delete[] const_cast<char*>(index.index_name);
+      delete[] const_cast<char*>(index.index_type);
+      delete[] const_cast<char*>(index.path);
+      if (index.index_file_keys) {
+        for (uint32_t j = 0; j < index.num_index_file_keys; ++j) {
+          delete[] const_cast<char*>(index.index_file_keys[j]);
+        }
+        delete[] index.index_file_keys;
+      }
+      if (index.property_keys) {
+        for (uint32_t j = 0; j < index.num_properties; ++j) {
+          delete[] const_cast<char*>(index.property_keys[j]);
+        }
+        delete[] index.property_keys;
+      }
+      if (index.property_values) {
+        for (uint32_t j = 0; j < index.num_properties; ++j) {
+          delete[] const_cast<char*>(index.property_values[j]);
+        }
+        delete[] index.property_values;
+      }
+    }
+    delete[] cmanifest->indexes.indexes;
+    cmanifest->indexes.indexes = nullptr;
+  }
+  cmanifest->indexes.num_indexes = 0;
 
   // Free the structure itself
   delete cmanifest;

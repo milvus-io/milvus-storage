@@ -142,15 +142,39 @@ template <>
 struct codec_traits<milvus_storage::api::Index> {
   static void encode(Encoder& e, const milvus_storage::api::Index& idx) {
     avro::encode(e, idx.column_name);
+    avro::encode(e, idx.index_name);
     avro::encode(e, idx.index_type);
     avro::encode(e, idx.path);
+    avro::encode(e, idx.field_id);
+    avro::encode(e, idx.index_id);
+    avro::encode(e, idx.build_id);
+    avro::encode(e, idx.index_version);
+    avro::encode(e, idx.num_rows);
+    avro::encode(e, idx.serialized_size);
+    avro::encode(e, idx.mem_size);
+    avro::encode(e, idx.current_index_version);
+    avro::encode(e, idx.current_scalar_index_version);
+    avro::encode(e, idx.index_store_path_version);
+    avro::encode(e, idx.index_file_keys);
     avro::encode(e, idx.properties);
   }
 
   static void decode(Decoder& d, milvus_storage::api::Index& idx) {
     avro::decode(d, idx.column_name);
+    avro::decode(d, idx.index_name);
     avro::decode(d, idx.index_type);
     avro::decode(d, idx.path);
+    avro::decode(d, idx.field_id);
+    avro::decode(d, idx.index_id);
+    avro::decode(d, idx.build_id);
+    avro::decode(d, idx.index_version);
+    avro::decode(d, idx.num_rows);
+    avro::decode(d, idx.serialized_size);
+    avro::decode(d, idx.mem_size);
+    avro::decode(d, idx.current_index_version);
+    avro::decode(d, idx.current_scalar_index_version);
+    avro::decode(d, idx.index_store_path_version);
+    avro::decode(d, idx.index_file_keys);
     avro::decode(d, idx.properties);
   }
 };
@@ -250,8 +274,20 @@ static const char* const MANIFEST_SCHEMA_JSON = R"({
     {"name": "indexes", "type": {"type": "array", "items": {
       "type": "record", "name": "Index", "fields": [
         {"name": "column_name", "type": "string"},
+        {"name": "index_name", "type": "string", "default": ""},
         {"name": "index_type", "type": "string"},
         {"name": "path", "type": "string"},
+        {"name": "field_id", "type": "long", "default": 0},
+        {"name": "index_id", "type": "long", "default": 0},
+        {"name": "build_id", "type": "long", "default": 0},
+        {"name": "index_version", "type": "long", "default": 0},
+        {"name": "num_rows", "type": "long", "default": 0},
+        {"name": "serialized_size", "type": "long", "default": 0},
+        {"name": "mem_size", "type": "long", "default": 0},
+        {"name": "current_index_version", "type": "int", "default": 0},
+        {"name": "current_scalar_index_version", "type": "int", "default": 0},
+        {"name": "index_store_path_version", "type": "int", "default": 0},
+        {"name": "index_file_keys", "type": {"type": "array", "items": "string"}, "default": []},
         {"name": "properties", "type": {"type": "map", "values": "string"}, "default": {}}
       ]
     }}, "default": []},
@@ -462,8 +498,26 @@ void Manifest::deserializeLegacy(std::istream& input_stream) {
     }
   }
 
-  if (version >= 2) {
+  if (version >= MANIFEST_VERSION) {
+    // Raw MILV manifests at version 6 or newer use the current typed Index
+    // layout.  This branch is retained for forward compatibility; current
+    // writers use Avro OCF and therefore normally take the path above.
     avro::decode(*decoder, indexes_);
+  } else if (version >= 2) {
+    // Raw MILV manifests from versions 2 through 5 predate the typed Index
+    // load metadata.  Their Index records contain only column_name,
+    // index_type, path, and properties, so decode that layout explicitly.
+    indexes_.clear();
+    for (size_t n = decoder->arrayStart(); n != 0; n = decoder->arrayNext()) {
+      for (size_t i = 0; i < n; ++i) {
+        Index index;
+        avro::decode(*decoder, index.column_name);
+        avro::decode(*decoder, index.index_type);
+        avro::decode(*decoder, index.path);
+        avro::decode(*decoder, index.properties);
+        indexes_.push_back(std::move(index));
+      }
+    }
   } else {
     indexes_.clear();
   }

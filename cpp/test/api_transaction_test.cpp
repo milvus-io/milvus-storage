@@ -239,6 +239,90 @@ TEST_F(TransactionTest, AddFieldTest) {
   }
 }
 
+TEST_F(TransactionTest, AddIndexInfoPersistsCompletedIndexMetadata) {
+  Index first_index{.column_name = "vector",
+                    .index_name = "vector_hnsw",
+                    .index_type = "hnsw",
+                    .path = base_path_ + "/_index/vector-v1.idx",
+                    .field_id = 100,
+                    .index_id = 200,
+                    .build_id = 300,
+                    .index_version = 4,
+                    .num_rows = 1000,
+                    .serialized_size = 1024,
+                    .mem_size = 2048,
+                    .current_index_version = 15,
+                    .current_scalar_index_version = 7,
+                    .index_store_path_version = 1,
+                    .index_file_keys = {"index.bin", "raw_data.bin"},
+                    .properties = {{"metric_type", "COSINE"}, {"M", "16"}}};
+
+  // Index bytes are already written by the caller. The transaction publishes
+  // only their metadata.
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    transaction->AddIndexInfo(first_index);
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    EXPECT_EQ(committed_version, 1);
+  }
+
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+    const auto* index = manifest->getIndex("vector", "hnsw");
+    ASSERT_NE(index, nullptr);
+    EXPECT_EQ(index->index_name, first_index.index_name);
+    EXPECT_EQ(index->path, first_index.path);
+    EXPECT_EQ(index->field_id, first_index.field_id);
+    EXPECT_EQ(index->index_id, first_index.index_id);
+    EXPECT_EQ(index->build_id, first_index.build_id);
+    EXPECT_EQ(index->index_version, first_index.index_version);
+    EXPECT_EQ(index->num_rows, first_index.num_rows);
+    EXPECT_EQ(index->serialized_size, first_index.serialized_size);
+    EXPECT_EQ(index->mem_size, first_index.mem_size);
+    EXPECT_EQ(index->current_index_version, first_index.current_index_version);
+    EXPECT_EQ(index->current_scalar_index_version, first_index.current_scalar_index_version);
+    EXPECT_EQ(index->index_store_path_version, first_index.index_store_path_version);
+    EXPECT_EQ(index->index_file_keys, first_index.index_file_keys);
+    EXPECT_EQ(index->properties, first_index.properties);
+  }
+
+  // Replacing the matching index metadata updates the recorded artifact.
+  Index replacement_index = first_index;
+  replacement_index.path = base_path_ + "/_index/vector-v2.idx";
+  replacement_index.build_id = 301;
+  replacement_index.index_file_keys = {"index-v2.bin"};
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    transaction->AddIndexInfo(replacement_index);
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    EXPECT_EQ(committed_version, 2);
+  }
+
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+    ASSERT_EQ(manifest->indexes().size(), 1);
+    const auto* index = manifest->getIndex("vector", "hnsw");
+    ASSERT_NE(index, nullptr);
+    EXPECT_EQ(index->path, replacement_index.path);
+    EXPECT_EQ(index->build_id, replacement_index.build_id);
+    EXPECT_EQ(index->index_file_keys, replacement_index.index_file_keys);
+  }
+
+  // Removing the final index removes all manifest-published index metadata.
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    transaction->DropIndex("vector", "hnsw");
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    EXPECT_EQ(committed_version, 3);
+  }
+
+  ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+  ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+  EXPECT_TRUE(manifest->indexes().empty());
+}
+
 TEST_F(TransactionTest, ConflictResolveOverwriteTest) {
   // initial 5 commit with one column group
   for (size_t i = 0; i < 5; ++i) {
@@ -520,7 +604,7 @@ TEST_F(TransactionTest, IndexBasicOperationsTest) {
     idx.path = base_path_ + "/_index/id_hnsw.idx";
     idx.properties = {{"ef_construction", "128"}, {"M", "16"}};
 
-    transaction->AddIndex(idx);
+    transaction->AddIndexInfo(idx);
     ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
     ASSERT_EQ(committed_version, 2);
 
@@ -578,8 +662,8 @@ TEST_F(TransactionTest, IndexUniqueConstraintTest) {
     idx2.path = base_path_ + "/_index/id_hnsw_v2.idx";
     idx2.properties = {{"version", "2"}};
 
-    transaction->AddIndex(idx1);
-    transaction->AddIndex(idx2);  // Same key, should replace
+    transaction->AddIndexInfo(idx1);
+    transaction->AddIndexInfo(idx2);  // Same key, should replace
     ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
     ASSERT_EQ(committed_version, 2);
 
@@ -603,7 +687,7 @@ TEST_F(TransactionTest, IndexUniqueConstraintTest) {
     idx.path = base_path_ + "/_index/id_inverted.idx";
     idx.properties = {};
 
-    transaction->AddIndex(idx);
+    transaction->AddIndexInfo(idx);
     ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
     ASSERT_EQ(committed_version, 3);
 
@@ -629,7 +713,7 @@ TEST_F(TransactionTest, IndexDeprecationOnAppendFilesTest) {
     idx.path = base_path_ + "/_index/id_hnsw.idx";
     idx.properties = {};
 
-    transaction->AddIndex(idx);
+    transaction->AddIndexInfo(idx);
     ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
     ASSERT_EQ(committed_version, 1);
 
@@ -668,7 +752,7 @@ TEST_F(TransactionTest, IndexNotDeprecatedByDeltaLogTest) {
     idx.path = base_path_ + "/_index/id_hnsw.idx";
     idx.properties = {};
 
-    transaction->AddIndex(idx);
+    transaction->AddIndexInfo(idx);
     ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
     ASSERT_EQ(committed_version, 1);
   }
@@ -727,8 +811,8 @@ TEST_F(TransactionTest, IndexMultipleColumnsDeprecationTest) {
     idx2.path = base_path_ + "/_index/vector_ivfpq.idx";
     idx2.properties = {};
 
-    transaction->AddIndex(idx1);
-    transaction->AddIndex(idx2);
+    transaction->AddIndexInfo(idx1);
+    transaction->AddIndexInfo(idx2);
     ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
     ASSERT_EQ(committed_version, 1);
 
@@ -1070,7 +1154,7 @@ TEST_F(TransactionTest, DropColumnAutoDropsIndex) {
     idx.column_name = "name";
     idx.index_type = "inverted";
     idx.path = base_path_ + "/_index/name_inverted.idx";
-    transaction->AddIndex(idx);
+    transaction->AddIndexInfo(idx);
     ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
     ASSERT_EQ(committed_version, 2);
   }

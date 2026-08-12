@@ -247,11 +247,12 @@ class Transaction {
   Transaction& UpdateStat(const std::string& key, const Statistics& stat);
 
   /**
-   * @brief Add or replace an index
-   * @param index Index to add (replaces if same column_name + index_type exists)
-   * @return Reference to this transaction for method chaining
+   * @brief Record or replace metadata for an already-written index file.
+   *
+   * This method only records Index metadata. It does not perform index-file
+   * I/O or return a file handle.
    */
-  Transaction& AddIndex(const Index& index);
+  Transaction& AddIndexInfo(const Index& index);
 
   /**
    * @brief Drop an index by column name and type

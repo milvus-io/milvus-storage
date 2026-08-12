@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <unordered_map>
 #include <optional>
 
 #include <arrow/status.h>
@@ -37,7 +38,8 @@ namespace milvus_storage::api {
 // - Version 3: Changed stats from map<string, vector<string>> to map<string, Statistics>
 // - Version 4: Changed ColumnGroupFile fields (metadata) to properties map
 // - Version 5: Added lob_files field for LOB (Large Object) file metadata
-constexpr int32_t MANIFEST_VERSION = 5;
+// - Version 6: Bumped to supplement Index metadata for transaction publication
+constexpr int32_t MANIFEST_VERSION = 6;
 
 /**
  * @brief Metadata for a single LOB (Large Object) file
@@ -84,15 +86,28 @@ struct DeltaLog {
 /**
  * @brief Index metadata for a column
  *
- * The properties map provides flexibility for index builders to store additional
- * metadata such as index_id, build_id, version, num_rows, index_size, metric_type,
- * and algorithm-specific parameters (M, efConstruction, etc.).
+ * Fields through index_file_keys are the completed artifact's typed load
+ * metadata.  Properties are reserved for index-type-specific parameters, such
+ * as metric_type, M, and efConstruction.
  */
 struct Index {
-  std::string column_name;  ///< Column this index is built on
+  std::string column_name;  ///< Column this index is built on; field_id is authoritative for loading
+  std::string index_name;   ///< User-visible index name carried in the QueryNode load request
   std::string index_type;   ///< Index type: "hnsw", "ivf-sq", "ivf-pq", "inverted", "bitmap", "ordered"
-  std::string path;         ///< Relative path to index file in _index/ directory
-  std::map<std::string, std::string> properties;  ///< Index-specific properties
+  std::string path;         ///< Artifact directory/prefix; combine with index_file_keys for full file paths
+  int64_t field_id = 0;
+  int64_t index_id = 0;
+  int64_t build_id = 0;
+  int64_t index_version = 0;
+  int64_t num_rows = 0;
+  int64_t serialized_size = 0;  ///< Total object-storage bytes
+  int64_t mem_size = 0;         ///< Estimated loaded memory bytes
+  int32_t current_index_version = 0;
+  int32_t current_scalar_index_version = 0;
+  int32_t index_store_path_version = 0;
+  std::vector<std::string> index_file_keys;  ///< File names relative to path
+  std::unordered_map<std::string, std::string>
+      properties;  ///< Index-specific properties; key lookup is the common operation
 };
 
 /**
