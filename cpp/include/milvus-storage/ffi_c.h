@@ -274,6 +274,9 @@ typedef struct LoonLobFiles {
  * parameters such as metric_type and Knowhere options.
  */
 typedef struct LoonIndexInfo {
+  // A dropped index is represented by removing its Index entry from the
+  // manifest. Build-task state is intentionally not persisted here: this
+  // structure describes only a completed artifact that QueryNode can load.
   const char* column_name;
   const char* index_name;
   const char* index_type;

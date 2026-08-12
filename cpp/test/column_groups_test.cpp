@@ -326,7 +326,11 @@ static void encodeIndex(avro::Encoder& e, const Index& idx) {
   avro::encode(e, idx.column_name);
   avro::encode(e, idx.index_type);
   avro::encode(e, idx.path);
-  avro::encode(e, idx.properties);
+  // The legacy test fixture uses the original Avro map representation.  The
+  // public Index now uses unordered_map for lookup efficiency, while the
+  // compatibility encoder remains independent of the implementation type.
+  std::map<std::string, std::string> properties(idx.properties.begin(), idx.properties.end());
+  avro::encode(e, properties);
 }
 
 static void encodeStatistics(avro::Encoder& e, const Statistics& stat) {

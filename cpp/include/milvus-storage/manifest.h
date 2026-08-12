@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <unordered_map>
 #include <optional>
 
 #include <arrow/status.h>
@@ -104,8 +105,9 @@ struct Index {
   int32_t current_index_version = 0;
   int32_t current_scalar_index_version = 0;
   int32_t index_store_path_version = 0;
-  std::vector<std::string> index_file_keys;       ///< File names relative to path
-  std::map<std::string, std::string> properties;  ///< Index-specific properties
+  std::vector<std::string> index_file_keys;  ///< File names relative to path
+  std::unordered_map<std::string, std::string>
+      properties;  ///< Index-specific properties; key lookup is the common operation
 };
 
 /**

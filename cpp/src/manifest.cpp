@@ -498,10 +498,15 @@ void Manifest::deserializeLegacy(std::istream& input_stream) {
     }
   }
 
-  if (version >= 2) {
-    // Raw MILV manifests predate the typed Index load metadata added in
-    // version 6. Decode their original four-field layout explicitly instead
-    // of using codec_traits<Index>, which expects the new fields.
+  if (version >= MANIFEST_VERSION) {
+    // Raw MILV manifests at version 6 or newer use the current typed Index
+    // layout.  This branch is retained for forward compatibility; current
+    // writers use Avro OCF and therefore normally take the path above.
+    avro::decode(*decoder, indexes_);
+  } else if (version >= 2) {
+    // Raw MILV manifests from versions 2 through 5 predate the typed Index
+    // load metadata.  Their Index records contain only column_name,
+    // index_type, path, and properties, so decode that layout explicitly.
     indexes_.clear();
     for (size_t n = decoder->arrayStart(); n != 0; n = decoder->arrayNext()) {
       for (size_t i = 0; i < n; ++i) {
