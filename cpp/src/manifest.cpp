@@ -37,30 +37,32 @@
 // Specialize codec_traits for custom types in the avro namespace
 namespace avro {
 
-template <>
-struct codec_traits<std::unordered_map<std::string, std::string>> {
-  static void encode(Encoder& e, const std::unordered_map<std::string, std::string>& properties) {
+// Avro natively supports std::map but not std::unordered_map.
+// This codec_traits bridges unordered_map to Avro's map wire format.
+template <typename V>
+struct codec_traits<std::unordered_map<std::string, V>> {
+  static void encode(Encoder& e, const std::unordered_map<std::string, V>& m) {
     e.mapStart();
-    if (!properties.empty()) {
-      e.setItemCount(properties.size());
-      for (const auto& [key, value] : properties) {
+    if (!m.empty()) {
+      e.setItemCount(m.size());
+      for (const auto& [k, v] : m) {
         e.startItem();
-        avro::encode(e, key);
-        avro::encode(e, value);
+        avro::encode(e, k);
+        avro::encode(e, v);
       }
     }
     e.mapEnd();
   }
 
-  static void decode(Decoder& d, std::unordered_map<std::string, std::string>& properties) {
-    properties.clear();
+  static void decode(Decoder& d, std::unordered_map<std::string, V>& m) {
+    m.clear();
     for (size_t n = d.mapStart(); n != 0; n = d.mapNext()) {
       for (size_t i = 0; i < n; ++i) {
         std::string key;
-        std::string value;
         avro::decode(d, key);
-        avro::decode(d, value);
-        properties.emplace(std::move(key), std::move(value));
+        V val;
+        avro::decode(d, val);
+        m[std::move(key)] = std::move(val);
       }
     }
   }
