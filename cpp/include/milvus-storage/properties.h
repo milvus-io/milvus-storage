@@ -97,6 +97,8 @@ struct PropertyInfo {
 #define PROPERTY_FS_USE_CRC32C_CHECKSUM "fs.use_crc32c_checksum"
 #define PROPERTY_FS_S3_CRT_ASYNC_READ "fs.s3.crt_async_read"
 #define PROPERTY_FS_LANCE_IO_PARALLELISM "fs.lance_io_parallelism"
+#define PROPERTY_FS_IOPS_INITIAL_RATE "fs.iops_initial_rate"
+#define PROPERTY_FS_IOPS_MAX_RATE "fs.iops_max_rate"
 
 // Cross-tenant access properties
 #define PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT "fs.gcp_target_service_account"

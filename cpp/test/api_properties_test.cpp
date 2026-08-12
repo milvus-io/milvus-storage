@@ -214,6 +214,42 @@ TEST_F(APIPropertiesTest, lance_io_parallelism_property) {
   EXPECT_STREQ(loon_properties_fs_lance_io_parallelism, PROPERTY_FS_LANCE_IO_PARALLELISM);
 }
 
+TEST_F(APIPropertiesTest, iops_rate_properties) {
+  milvus_storage::api::Properties pp{};
+
+  ArrowFileSystemConfig default_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(pp, default_config));
+  EXPECT_EQ(default_config.iops_initial_rate, 2000u);
+  EXPECT_EQ(default_config.iops_max_rate, 5000u);
+
+  EXPECT_EQ(SetValue(pp, PROPERTY_FS_IOPS_INITIAL_RATE, "4000"), std::nullopt);
+  EXPECT_EQ(SetValue(pp, PROPERTY_FS_IOPS_MAX_RATE, "5000"), std::nullopt);
+
+  ArrowFileSystemConfig configured;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(pp, configured));
+  EXPECT_EQ(configured.iops_initial_rate, 4000u);
+  EXPECT_EQ(configured.iops_max_rate, 5000u);
+
+  EXPECT_NE(SetValue(pp, PROPERTY_FS_IOPS_INITIAL_RATE, "0"), std::nullopt);
+  EXPECT_EQ(SetValue(pp, PROPERTY_FS_IOPS_MAX_RATE, "0"), std::nullopt);
+  ArrowFileSystemConfig unlimited;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(pp, unlimited));
+  EXPECT_EQ(unlimited.iops_initial_rate, 4000u);
+  EXPECT_EQ(unlimited.iops_max_rate, 0u);
+  EXPECT_NE(SetValue(pp, PROPERTY_FS_IOPS_INITIAL_RATE, "-1"), std::nullopt);
+  EXPECT_NE(SetValue(pp, PROPERTY_FS_IOPS_MAX_RATE, "-1"), std::nullopt);
+
+  EXPECT_EQ(SetValue(pp, PROPERTY_FS_IOPS_INITIAL_RATE, "6000"), std::nullopt);
+  EXPECT_EQ(SetValue(pp, PROPERTY_FS_IOPS_MAX_RATE, "5000"), std::nullopt);
+  ArrowFileSystemConfig capped;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(pp, capped));
+  EXPECT_EQ(capped.iops_initial_rate, 5000u);
+  EXPECT_EQ(capped.iops_max_rate, 5000u);
+
+  EXPECT_STREQ(loon_properties_fs_iops_initial_rate, PROPERTY_FS_IOPS_INITIAL_RATE);
+  EXPECT_STREQ(loon_properties_fs_iops_max_rate, PROPERTY_FS_IOPS_MAX_RATE);
+}
+
 TEST_F(APIPropertiesTest, async_task_split_strategy) {
   milvus_storage::api::Properties pp{};
 

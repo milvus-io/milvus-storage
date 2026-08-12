@@ -457,6 +457,18 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
         "operations. If LANCE_IO_THREADS is set, Lance uses that value instead.",
         uint32_t(64),
         ValidatePropertyType() + ValidatePropertyRange<uint32_t>(0, 256)),
+    REGISTER_PROPERTY(PROPERTY_FS_IOPS_INITIAL_RATE,
+                      PropertyType::UINT32,
+                      "Initial ObjectStore request rate in requests per second. Currently only supported by Lance. "
+                      "The default is 2000, matching Lance's default.",
+                      uint32_t(2000),
+                      ValidatePropertyType() + ValidatePropertyRange<uint32_t>(1, UINT32_MAX)),
+    REGISTER_PROPERTY(PROPERTY_FS_IOPS_MAX_RATE,
+                      PropertyType::UINT32,
+                      "Maximum ObjectStore request rate in requests per second. Currently only supported by Lance. "
+                      "The default is 5000, matching Lance's default. Set to 0 to disable the AIMD rate ceiling.",
+                      uint32_t(5000),
+                      ValidatePropertyType() + ValidatePropertyRange<uint32_t>(0, UINT32_MAX)),
     // --- Cross-tenant access properties define ---
     REGISTER_PROPERTY(PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT,
                       PropertyType::STRING,

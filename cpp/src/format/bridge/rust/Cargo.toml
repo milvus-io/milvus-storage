@@ -122,3 +122,11 @@ opendal-paimon = { package = "opendal-core", version = "=0.58.0" }
 
 [build-dependencies]
 cxx-build = "1.0.184"
+
+[patch.crates-io]
+# Backport lance-format/lance#7638 so cancelled reads release scheduler reservations.
+# Patch lance-io's workspace dependencies from the same revision to keep one crate identity.
+lance-arrow = { git = "https://github.com/zilliztech/lance", rev = "b13b89169b283e47ae9b2dd13e12a6a9863c3908" }
+lance-core = { git = "https://github.com/zilliztech/lance", rev = "b13b89169b283e47ae9b2dd13e12a6a9863c3908" }
+lance-io = { git = "https://github.com/zilliztech/lance", rev = "b13b89169b283e47ae9b2dd13e12a6a9863c3908" }
+lance-namespace = { git = "https://github.com/zilliztech/lance", rev = "b13b89169b283e47ae9b2dd13e12a6a9863c3908" }

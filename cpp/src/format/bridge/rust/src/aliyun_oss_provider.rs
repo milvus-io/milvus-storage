@@ -89,6 +89,8 @@ use lance::{Error as LanceError, Result as LanceResult};
 use lance_io::object_store::{
     DEFAULT_CLOUD_IO_PARALLELISM, ObjectStore, ObjectStoreParams, ObjectStoreProvider,
     ObjectStoreRegistry,
+    providers::oss::OssStoreProvider,
+    throttle::{AimdThrottleConfig, AimdThrottledStore},
 };
 
 use iceberg::io::{
@@ -778,6 +780,37 @@ impl OSObjectStore for RefreshableAliyunOssStore {
 // Lance: ObjectStoreProvider
 // ============================================================================
 
+/// Adds Lance's AIMD request throttling to the stock, stateless OSS provider
+/// used by the ordinary Aliyun AK/SK path.
+///
+/// When enabled, the configured initial/max rates still provide proactive
+/// token-bucket pacing. However, both Aliyun providers use OpenDAL, while
+/// Lance 7's throttle-error detector recognizes only native `object_store`
+/// retry-error messages. OSS 429/503 responses therefore do not currently
+/// trigger AIMD multiplicative decrease or the wrapper's throttle retry loop.
+/// This limitation also applies to [`AliyunOssStoreProvider`] below.
+#[derive(Debug)]
+pub(crate) struct AimdAliyunOssStoreProvider;
+
+#[async_trait::async_trait]
+impl ObjectStoreProvider for AimdAliyunOssStoreProvider {
+    async fn new_store(
+        &self,
+        base_path: Url,
+        params: &ObjectStoreParams,
+    ) -> LanceResult<ObjectStore> {
+        let mut store = OssStoreProvider.new_store(base_path, params).await?;
+        let throttle_config = AimdThrottleConfig::from_storage_options(params.storage_options())?;
+        if !throttle_config.is_disabled() {
+            store.inner = Arc::new(AimdThrottledStore::new(
+                store.inner.clone(),
+                throttle_config,
+            )?);
+        }
+        Ok(store)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AliyunOssStoreProvider {
     store: Arc<RefreshableAliyunOssStore>,
@@ -834,6 +867,12 @@ impl ObjectStoreProvider for AliyunOssStoreProvider {
 
         let block_size = params.block_size.unwrap_or(OSS_DEFAULT_BLOCK_SIZE);
         let inner = self.store.clone() as Arc<dyn OSObjectStore>;
+        let throttle_config = AimdThrottleConfig::from_storage_options(params.storage_options())?;
+        let inner = if throttle_config.is_disabled() {
+            inner
+        } else {
+            Arc::new(AimdThrottledStore::new(inner, throttle_config)?) as Arc<dyn OSObjectStore>
+        };
 
         let mut url = base_path;
         if !url.path().ends_with('/') {
@@ -855,16 +894,11 @@ impl ObjectStoreProvider for AliyunOssStoreProvider {
     }
 }
 
-/// Build a `Session` whose `ObjectStoreRegistry` overrides the `oss` scheme
-/// with [`AliyunOssStoreProvider`]. Used when `storage_options` carries a
-/// per-tenant `oss_role_arn`: stock lance-io's `OssStoreProvider` silently
-/// drops that key, so a per-tenant role can only reach opendal through this
-/// provider.
-///
-/// A fresh `Session` per call matches the GCP impersonation pattern and
-/// prevents concurrent opens with different roles from colliding on a
-/// shared registry. Cache sizes of zero match what the FFI entry points
-/// already pass to `BlockingDataset::open`.
+/// Build a `Session` whose `ObjectStoreRegistry` overrides the `oss` scheme.
+/// Each caller gets a fresh session so registry entries remain scoped to the
+/// returned dataset instead of retaining static storage options process-wide.
+/// Cache sizes of zero match what the FFI entry points already pass to
+/// `BlockingDataset::open`.
 pub fn build_aliyun_oss_session(
     provider: Arc<dyn ObjectStoreProvider>,
 ) -> Arc<Session> {
@@ -1512,6 +1546,52 @@ mod tests {
             opts(&[("bucket", "my-bucket")]),
             Duration::from_secs(900),
         ))
+    }
+
+    #[tokio::test]
+    async fn lance_static_aksk_store_uses_aimd_throttle() {
+        let params = ObjectStoreParams {
+            storage_options_accessor: Some(Arc::new(
+                lance_io::object_store::StorageOptionsAccessor::with_static_options(opts(&[
+                    ("oss_endpoint", "oss-cn-hangzhou.aliyuncs.com"),
+                    ("oss_access_key_id", "AKID"),
+                    ("oss_secret_access_key", "AKSK"),
+                    ("lance_aimd_initial_rate", "10"),
+                    ("lance_aimd_max_rate", "10"),
+                ])),
+            )),
+            ..Default::default()
+        };
+
+        let store = AimdAliyunOssStoreProvider
+            .new_store(Url::parse("oss://my-bucket/path").unwrap(), &params)
+            .await
+            .unwrap();
+
+        assert!(format!("{:?}", store.inner).contains("AimdThrottledStore"));
+    }
+
+    #[tokio::test]
+    async fn lance_role_store_uses_aimd_throttle() {
+        let params = ObjectStoreParams {
+            storage_options_accessor: Some(Arc::new(
+                lance_io::object_store::StorageOptionsAccessor::with_static_options(opts(&[
+                    ("lance_aimd_initial_rate", "10"),
+                    ("lance_aimd_max_rate", "10"),
+                ])),
+            )),
+            ..Default::default()
+        };
+        let provider = AliyunOssStoreProvider {
+            store: refreshable_store(),
+        };
+
+        let store = provider
+            .new_store(Url::parse("oss://my-bucket/path").unwrap(), &params)
+            .await
+            .unwrap();
+
+        assert!(format!("{:?}", store.inner).contains("AimdThrottledStore"));
     }
 
     #[test]
