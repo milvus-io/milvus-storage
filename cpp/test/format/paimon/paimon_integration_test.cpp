@@ -722,6 +722,54 @@ TEST_F(PaimonIntegrationTest, DataSplitTakeCompactsSparseBatches) {
   }
 }
 
+TEST_F(PaimonIntegrationTest, ProjectsReadSchemaParentForDirectFileAndDataSplit) {
+  struct TestCase {
+    std::string mode;
+    std::string format;
+    std::string read_path;
+  };
+  const std::vector<TestCase> cases = {
+      {"append", "parquet", "direct-file"},
+      {"append", "vortex", "direct-file"},
+      {"mor", "parquet", "data-split"},
+  };
+
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(fmt::format("mode={}, format={}", test_case.mode, test_case.format));
+    table_dir_ = fmt::format("/tmp/milvus-storage-paimon-projection-{}-{}", test_case.mode, test_case.format);
+    std::filesystem::remove_all(table_dir_);
+    FilesystemCache::getInstance().clean();
+    ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 17, test_case.mode, {}, test_case.format).status());
+    ASSERT_AND_ASSIGN(auto files, Explore("auto"));
+    ASSERT_FALSE(files.empty());
+    EXPECT_EQ(ReadPath(files.front()), test_case.read_path);
+
+    auto read_schema = arrow::schema({arrow::field("id", arrow::int64()), arrow::field("name", arrow::utf8()),
+                                      arrow::field("value", arrow::float64())});
+    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(read_schema, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                                        properties_, {"name", "id"}, nullptr));
+    ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+    EXPECT_EQ(batch->schema()->field_names(), (std::vector<std::string>{"name", "id"}));
+    ASSERT_GT(batch->num_rows(), 0);
+    auto names = std::dynamic_pointer_cast<arrow::StringArray>(batch->column(0));
+    auto ids = std::dynamic_pointer_cast<arrow::Int64Array>(batch->column(1));
+    ASSERT_NE(names, nullptr);
+    ASSERT_NE(ids, nullptr);
+    EXPECT_EQ(names->GetString(0), "row_0");
+    EXPECT_EQ(ids->Value(0), 0);
+
+    ASSERT_AND_ASSIGN(auto taken, reader->take({0}));
+    EXPECT_EQ(taken->schema()->field_names(), (std::vector<std::string>{"name", "id"}));
+    auto taken_names = std::dynamic_pointer_cast<arrow::StringArray>(taken->column(0)->chunk(0));
+    auto taken_ids = std::dynamic_pointer_cast<arrow::Int64Array>(taken->column(1)->chunk(0));
+    ASSERT_NE(taken_names, nullptr);
+    ASSERT_NE(taken_ids, nullptr);
+    EXPECT_EQ(taken_names->GetString(0), "row_0");
+    EXPECT_EQ(taken_ids->Value(0), 0);
+    std::filesystem::remove_all(table_dir_);
+  }
+}
+
 TEST_F(PaimonIntegrationTest, DataSplitHonorsReadSchemaForTakeAndRange) {
   ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 17, "mor").status());
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));

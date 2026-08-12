@@ -132,19 +132,17 @@ arrow::Result<std::vector<RowGroupInfo>> MakeDirectLogicalRowGroups(const std::v
 arrow::Result<std::shared_ptr<arrow::Schema>> ProjectSchema(const std::shared_ptr<arrow::Schema>& file_schema,
                                                             const std::shared_ptr<arrow::Schema>& read_schema,
                                                             const std::vector<std::string>& columns) {
-  if (read_schema) {
-    return read_schema;
-  }
-  if (!file_schema) {
+  auto source_schema = read_schema ? read_schema : file_schema;
+  if (!source_schema) {
     return arrow::Status::Invalid("Paimon file schema is unavailable");
   }
   if (columns.empty()) {
-    return file_schema;
+    return source_schema;
   }
   std::vector<std::shared_ptr<arrow::Field>> fields;
   fields.reserve(columns.size());
   for (const auto& column : columns) {
-    auto field = file_schema->GetFieldByName(column);
+    auto field = source_schema->GetFieldByName(column);
     if (!field) {
       return arrow::Status::Invalid("Paimon column not found: ", column);
     }
@@ -570,7 +568,7 @@ arrow::Result<std::shared_ptr<PaimonFormatReader>> PaimonFormatReader::MetaTrait
     }
     std::shared_ptr<parquet::ParquetFormatReader> parquet_reader;
     ARROW_ASSIGN_OR_RAISE(parquet_reader, parquet::ParquetFormatReader::MetaTrait::create_from_metadata(
-                                              *cached, file, read_schema, needed_columns, ""));
+                                              *cached, file, output_schema, needed_columns, ""));
     direct_file_reader = std::static_pointer_cast<FormatReader>(std::move(parquet_reader));
   } else if (metadata->payload.data_format == "vortex") {
     auto cached =
@@ -580,7 +578,7 @@ arrow::Result<std::shared_ptr<PaimonFormatReader>> PaimonFormatReader::MetaTrait
     }
     std::shared_ptr<vortex::VortexFormatReader> vortex_reader;
     ARROW_ASSIGN_OR_RAISE(vortex_reader, vortex::VortexFormatReader::MetaTrait::create_from_metadata(
-                                             *cached, file, read_schema, needed_columns, ""));
+                                             *cached, file, output_schema, needed_columns, ""));
     direct_file_reader = std::static_pointer_cast<FormatReader>(std::move(vortex_reader));
   } else {
     return arrow::Status::NotImplemented("Paimon direct-file does not support format: ", metadata->payload.data_format);
