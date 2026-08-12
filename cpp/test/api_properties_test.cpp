@@ -241,8 +241,10 @@ TEST_F(APIPropertiesTest, iops_rate_properties) {
 
   EXPECT_EQ(SetValue(pp, PROPERTY_FS_IOPS_INITIAL_RATE, "6000"), std::nullopt);
   EXPECT_EQ(SetValue(pp, PROPERTY_FS_IOPS_MAX_RATE, "5000"), std::nullopt);
-  ArrowFileSystemConfig invalid;
-  ASSERT_STATUS_NOT_OK(ArrowFileSystemConfig::create_file_system_config(pp, invalid));
+  ArrowFileSystemConfig capped;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(pp, capped));
+  EXPECT_EQ(capped.iops_initial_rate, 5000u);
+  EXPECT_EQ(capped.iops_max_rate, 5000u);
 
   EXPECT_STREQ(loon_properties_fs_iops_initial_rate, PROPERTY_FS_IOPS_INITIAL_RATE);
   EXPECT_STREQ(loon_properties_fs_iops_max_rate, PROPERTY_FS_IOPS_MAX_RATE);

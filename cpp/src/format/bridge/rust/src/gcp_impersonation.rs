@@ -452,6 +452,8 @@ impl ObjectStoreProvider for ImpersonatingGcsStoreProvider {
                 builder = builder.with_config(cfg_key, value.clone());
             }
         }
+        // Impersonation must always sign requests with its credential.
+        builder = builder.with_skip_signature(false);
 
         let credentials: Arc<dyn CredentialProvider<Credential = GcpCredential>> =
             self.credentials.clone();
@@ -733,6 +735,33 @@ mod tests {
             .unwrap();
 
         assert!(!format!("{:?}", store.inner).contains("AimdThrottledStore"));
+    }
+
+    #[tokio::test]
+    async fn impersonation_store_always_signs_requests() {
+        for key in ["google_skip_signature", "skip_signature"] {
+            let params = ObjectStoreParams {
+                storage_options_accessor: Some(Arc::new(
+                    lance_io::object_store::StorageOptionsAccessor::with_static_options(
+                        HashMap::from([
+                            ("client_max_retries".to_string(), "0".to_string()),
+                            (key.to_string(), "true".to_string()),
+                        ]),
+                    ),
+                )),
+                ..Default::default()
+            };
+            let provider = ImpersonatingGcsStoreProvider::new(Arc::new(credential_provider(
+                "target@example.iam.gserviceaccount.com",
+            )));
+
+            let store = provider
+                .new_store(Url::parse("gs://bucket/path").unwrap(), &params)
+                .await
+                .unwrap();
+
+            assert!(format!("{:?}", store.inner).contains("skip_signature: false"));
+        }
     }
 
     fn impersonation_config(target_sa: &str) -> GcpImpersonationConfig {
