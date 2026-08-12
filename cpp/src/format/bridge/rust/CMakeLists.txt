@@ -35,6 +35,10 @@ file(GLOB_RECURSE CPP_SOURCE_FILE CONFIGURE_DEPENDS
 
 add_library(prsbridge STATIC ${CPP_SOURCE_FILE})
 
+if (WITH_UT)
+    target_compile_definitions(prsbridge PRIVATE BUILD_GTEST)
+endif()
+
 target_include_directories(prsbridge PUBLIC ${Arrow_INCLUDE_DIRS}
     ${CMAKE_CURRENT_BINARY_DIR}/corrosion_generated/cxxbridge/rust-bridge/include
     ${CMAKE_CURRENT_SOURCE_DIR}/include

@@ -64,6 +64,7 @@ TEST_F(LanceStorageOptionsTest, AwsKeys) {
   EXPECT_EQ(opts["aws_region"], "us-west-2");
   EXPECT_EQ(opts["aws_endpoint"], "https://s3.us-west-2.amazonaws.com");
   EXPECT_EQ(opts.count("s3.access-key-id"), 0);
+  EXPECT_EQ(opts["milvus_lance_io_parallelism"], "64");
 }
 
 TEST_F(LanceStorageOptionsTest, AzureKeys) {
@@ -164,9 +165,10 @@ TEST_F(LanceStorageOptionsTest, GcpTargetServiceAccountRequiresIam) {
 
   auto opts = ToStorageOptions(config);
 
-  EXPECT_EQ(opts.size(), 1);
+  EXPECT_EQ(opts.size(), 2);
   EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
   EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
+  EXPECT_EQ(opts["milvus_lance_io_parallelism"], "64");
 }
 
 TEST_F(LanceStorageOptionsTest, GcpDefaultCredentials) {
@@ -178,15 +180,21 @@ TEST_F(LanceStorageOptionsTest, GcpDefaultCredentials) {
 
   // No gcp_target_service_account → no impersonation keys; lance-io falls back
   // to the default credential chain (VM metadata).
-  EXPECT_EQ(opts.size(), 1);
+  EXPECT_EQ(opts.size(), 2);
   EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
   EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
+  EXPECT_EQ(opts["milvus_lance_io_parallelism"], "64");
 }
 
-TEST_F(LanceStorageOptionsTest, LocalEmpty) {
+TEST_F(LanceStorageOptionsTest, LocalContainsOnlyLanceIoParallelism) {
   ArrowFileSystemConfig config;
   config.storage_type = "local";
-  EXPECT_TRUE(ToStorageOptions(config).empty());
+  config.lance_io_parallelism = 17;
+
+  auto opts = ToStorageOptions(config);
+
+  EXPECT_EQ(opts.size(), 1);
+  EXPECT_EQ(opts["milvus_lance_io_parallelism"], "17");
 }
 
 TEST_F(LanceStorageOptionsTest, BareEndpointUsesHttpWhenSslDisabled) {
