@@ -153,6 +153,7 @@ _loon_transaction_append_files
 _loon_transaction_add_delta_log
 _loon_transaction_update_stat
 _loon_transaction_add_index_info
+_loon_transaction_drop_index
 
 # External table interface
 _loon_exttable_explore

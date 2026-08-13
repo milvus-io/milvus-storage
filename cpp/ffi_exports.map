@@ -155,6 +155,7 @@
     loon_transaction_add_delta_log;
     loon_transaction_update_stat;
     loon_transaction_add_index_info;
+    loon_transaction_drop_index;
 
     # External table interface
     loon_exttable_explore;

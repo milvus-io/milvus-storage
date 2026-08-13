@@ -324,6 +324,23 @@ LoonFFIResult loon_transaction_add_index_info(LoonTransactionHandle handle, cons
   RETURN_UNREACHABLE();
 }
 
+LoonFFIResult loon_transaction_drop_index(LoonTransactionHandle handle,
+                                          const char* column_name,
+                                          const char* index_type) {
+  if (!handle || !column_name || !index_type) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, column_name, and index_type must not be null");
+  }
+  try {
+    auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+    cpp_transaction->DropIndex(column_name, index_type);
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
 LoonFFIResult loon_transaction_add_lob_file(LoonTransactionHandle handle, const LoonLobFileInfo* lob_file) {
   if (!handle || !lob_file) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and lob_file must not be null");

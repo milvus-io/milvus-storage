@@ -855,6 +855,21 @@ FFI_EXPORT LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle hand
 FFI_EXPORT LoonFFIResult loon_transaction_add_index_info(LoonTransactionHandle handle, const LoonIndexInfo* index_info);
 
 /**
+ * @brief Remove an index from the transaction updates.
+ *
+ * This only removes the matching index metadata from the manifest; it does
+ * not delete the index artifact files.
+ *
+ * @param handle Transaction handle
+ * @param column_name Name of the indexed column
+ * @param index_type Type of the index to remove
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_transaction_drop_index(LoonTransactionHandle handle,
+                                                     const char* column_name,
+                                                     const char* index_type);
+
+/**
  * @brief Add a LOB file info to the transaction updates
  * Used during compaction REUSE_ALL mode to merge LOB file references
  *
