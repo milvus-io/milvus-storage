@@ -24,8 +24,8 @@ use vortex::array::arrays::varbin::VarBinArrayExt;
 use vortex::array::stats::{as_stat_bitset_bytes, stats_from_bitset_bytes};
 use vortex::array::validity::Validity;
 use vortex::array::{
-    ArrayRef, ArrayView, DeserializeMetadata, ExecutionCtx, IntoArray, MaskFuture,
-    SerializeMetadata, ToCanonical, VortexSessionExecute,
+    ArrayRef, ArrayView, Canonical, DeserializeMetadata, ExecutionCtx, IntoArray, MaskFuture,
+    SerializeMetadata, VortexSessionExecute,
 };
 use vortex::buffer::{BitBufferMut, Buffer};
 use vortex::dtype::{
@@ -529,11 +529,11 @@ impl RowGroupZoneMapReader {
         )?;
 
         let rg_prune_mask = crate::VORTEX_RT.block_on(async move {
-            let zone_array = zone_eval.await?.to_struct();
+            let mut ctx = session.create_execution_ctx();
+            let zone_array = zone_eval.await?.execute::<StructArray>(&mut ctx)?;
             Self::validate_stats_table(&column_dtype, &zone_array, &present_stats)?;
             let stats_view =
                 Self::build_root_stats_view_for_column(&zone_array, &required_stats)?;
-            let mut ctx = session.create_execution_ctx();
             let rg_prune_mask = stats_view.apply(&predicate)?.execute::<Mask>(&mut ctx)?;
             Ok::<Mask, vortex::error::VortexError>(rg_prune_mask)
         })?;
@@ -653,13 +653,13 @@ impl LayoutReader for RowGroupZoneMapReader {
         let row_range = row_range.clone();
 
         Ok(MaskFuture::new(mask.len(), async move {
-            let zone_array = zone_eval.await?.to_struct();
+            let mut ctx = session.create_execution_ctx();
+            let zone_array = zone_eval.await?.execute::<StructArray>(&mut ctx)?;
             // Validate that the stored per-column stats table still matches Vortex ZoneMap
             // shape before evaluating the root-scope pruning predicate against it.
             Self::validate_stats_table(&column_dtype, &zone_array, &present_stats)?;
             let stats_view =
                 Self::build_root_stats_view_for_column(&zone_array, &required_stats)?;
-            let mut ctx = session.create_execution_ctx();
             let rg_prune_mask = stats_view.apply(&predicate)?.execute::<Mask>(&mut ctx)?;
             ROW_GROUP_ZONE_MAP_PRUNE_EVAL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             ROW_GROUP_ZONE_MAP_PRUNED_ROW_GROUP_COUNT.fetch_add(
@@ -667,15 +667,17 @@ impl LayoutReader for RowGroupZoneMapReader {
                 std::sync::atomic::Ordering::Relaxed,
             );
 
-            let boundaries = boundary_eval.await?.to_struct();
+            let boundaries = boundary_eval.await?.execute::<StructArray>(&mut ctx)?;
             let starts = boundaries
                 .unmasked_field_by_name(RG_START_FIELD)?
-                .to_primitive()
+                .clone()
+                .execute::<PrimitiveArray>(&mut ctx)?
                 .as_slice::<u64>()
                 .to_vec();
             let lens = boundaries
                 .unmasked_field_by_name(RG_LEN_FIELD)?
-                .to_primitive()
+                .clone()
+                .execute::<PrimitiveArray>(&mut ctx)?
                 .as_slice::<u64>()
                 .to_vec();
 
@@ -1335,7 +1337,11 @@ impl RowGroupBuffer {
         self.data.is_empty()
     }
 
-    fn drain_one_group(&mut self, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn drain_one_group(
+        &mut self,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         if self.data.is_empty() {
             return Ok(None);
         }
@@ -1383,13 +1389,20 @@ impl RowGroupBuffer {
         }
 
         let chunked = ChunkedArray::try_new(group, dtype.clone())?;
-        Ok(Some(chunked.to_canonical()?.into_array()))
+        let mut ctx = session.create_execution_ctx();
+        Ok(Some(
+            chunked
+                .into_array()
+                .execute::<Canonical>(&mut ctx)?
+                .into_array(),
+        ))
     }
 }
 
 fn split_stream_into_row_groups<F>(
     stream: SendableSequentialStream,
     options: RowGroupSplitOptions,
+    session: VortexSession,
     on_row_group_emitted: F,
 ) -> SendableSequentialStream
 where
@@ -1397,11 +1410,16 @@ where
 {
     let dtype = stream.dtype().clone();
     let stream = if options.canonicalize {
+        let canonicalize_session = session.clone();
         SequentialStreamAdapter::new(
             dtype.clone(),
-            stream.map(|chunk| {
+            stream.map(move |chunk| {
                 let (sequence_id, chunk) = chunk?;
-                VortexResult::Ok((sequence_id, chunk.to_canonical()?.into_array()))
+                let mut ctx = canonicalize_session.create_execution_ctx();
+                VortexResult::Ok((
+                    sequence_id,
+                    chunk.execute::<Canonical>(&mut ctx)?.into_array(),
+                ))
             }),
         )
         .sendable()
@@ -1426,7 +1444,7 @@ where
 
             let is_eof = stream.as_mut().peek().await.is_none();
             while buffer.have_enough() || (is_eof && !buffer.is_empty()) {
-                if let Some(row_group) = buffer.drain_one_group(&dtype_clone)? {
+                if let Some(row_group) = buffer.drain_one_group(&dtype_clone, &session)? {
                     on_row_group_emitted(&row_group)?;
                     yield (sp.advance(), row_group)
                 } else {
@@ -1472,8 +1490,12 @@ impl LayoutStrategy for RowGroupSplitStrategy {
         eof: SequencePointer,
         session: &VortexSession,
     ) -> VortexResult<LayoutRef> {
-        let row_group_stream =
-            split_stream_into_row_groups(stream, self.options.clone(), |_: &ArrayRef| Ok(()));
+        let row_group_stream = split_stream_into_row_groups(
+            stream,
+            self.options.clone(),
+            session.clone(),
+            |_: &ArrayRef| Ok(()),
+        );
 
         self.child
             .write_stream(ctx, segment_sink, row_group_stream, eof, session)
@@ -1621,13 +1643,13 @@ impl StatsBuildState {
         // "compute before child write" pattern. Downstream data layout
         // strategies also receive the same field ArrayRefs and can observe the
         // cached field-level stats if they consult array.statistics().
-        let struct_row_group = row_group.to_struct();
         let Self {
             accumulators,
             stats,
             ctx,
             ..
         } = self;
+        let struct_row_group = row_group.clone().execute::<StructArray>(ctx)?;
         for (field, accumulator) in struct_row_group
             .iter_unmasked_fields()
             .zip(accumulators.iter_mut())
@@ -1742,6 +1764,7 @@ impl LayoutStrategy for RowGroupZoneMapStrategy {
         let row_group_stream = split_stream_into_row_groups(
             stream,
             self.row_group_options.clone(),
+            session.clone(),
             move |row_group| push_stats_state(&stats_state_for_stream, row_group),
         );
 
@@ -2008,7 +2031,11 @@ mod tests {
         buffer.push(values);
 
         let wrong_dtype = DType::Primitive(PType::I64, Nullability::NonNullable);
-        assert!(buffer.drain_one_group(&wrong_dtype).is_err());
+        assert!(
+            buffer
+                .drain_one_group(&wrong_dtype, &crate::VORTEX_SESSION)
+                .is_err()
+        );
     }
 
     #[test]
@@ -2028,7 +2055,8 @@ mod tests {
 
         stats_state.push_row_group(&row_group)?;
 
-        let struct_row_group = row_group.to_struct();
+        let mut ctx = crate::VORTEX_SESSION.create_execution_ctx();
+        let struct_row_group = row_group.clone().execute::<StructArray>(&mut ctx)?;
         let vector = struct_row_group.unmasked_field_by_name("vector")?;
         assert!(
             vector
@@ -2094,11 +2122,12 @@ mod tests {
             .await?;
 
         assert_eq!(result.len(), 10);
+        let mut ctx = crate::VORTEX_SESSION.create_execution_ctx();
         let x = result
-            .to_struct()
+            .execute::<StructArray>(&mut ctx)?
             .unmasked_field_by_name("x")?
             .clone()
-            .to_primitive();
+            .execute::<PrimitiveArray>(&mut ctx)?;
         assert_eq!(x.as_slice::<i32>(), &(100..110).collect::<Vec<_>>());
 
         let (prune_evals, pruned_row_groups) = row_group_zone_map_pruning_stats();
@@ -2124,7 +2153,8 @@ mod tests {
             .write(&mut buffer, input.clone().to_array_stream())
             .await?;
 
-        let input_struct = input.to_struct();
+        let mut ctx = crate::VORTEX_SESSION.create_execution_ctx();
+        let input_struct = input.execute::<StructArray>(&mut ctx)?;
         let vector = input_struct.unmasked_field_by_name("vector")?;
         assert!(
             vector
@@ -2148,7 +2178,8 @@ mod tests {
             .write(&mut buffer, input.clone().to_array_stream())
             .await?;
 
-        let input_struct = input.to_struct();
+        let mut ctx = crate::VORTEX_SESSION.create_execution_ctx();
+        let input_struct = input.execute::<StructArray>(&mut ctx)?;
         let vector = input_struct.unmasked_field_by_name("vector")?;
         assert!(
             vector
