@@ -202,7 +202,7 @@ arrow::Status GcpFileSystemProducer::InitS3Compat(const ArrowFileSystemConfig& f
 
 arrow::Status GcpFileSystemProducer::RegisterIdentity(const ArrowFileSystemConfig& config) {
   ARROW_ASSIGN_OR_RAISE(auto provider, BuildGcpProviderFromConfig(config));
-  GcpBucketKey key{NormalizeGcpEndpointHost(config.address), config.bucket_name};
+  GcpBucketKey key{NormalizeGcpEndpoint(config.address, config.use_ssl), config.bucket_name};
   GcpCredentialRegistry::Instance().Register(std::move(key), std::move(provider));
   return arrow::Status::OK();
 }
