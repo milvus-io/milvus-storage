@@ -364,6 +364,53 @@ static void test_add_index_info_and_commit(void) {
   loon_properties_free(&pp);
 }
 
+static void test_drop_index_and_commit(void) {
+  LoonProperties pp;
+  LoonFFIResult rc;
+  LoonTransactionHandle transaction = 0;
+  LoonTransactionHandle read_transaction = 0;
+  LoonManifest* cmanifest = NULL;
+  int64_t committed_version = 0;
+  LoonIndexInfo index_info = {
+      .column_name = "vector",
+      .index_name = "vector_hnsw",
+      .index_type = "HNSW",
+      .path = "vector-hnsw",
+  };
+
+  create_test_pp(&pp);
+  FileSystemHandle fs = get_fs(&pp);
+  recreate_dir(fs, TEST_BASE_PATH);
+
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &transaction);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_transaction_add_index_info(transaction, &index_info);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_transaction_commit(transaction, &committed_version);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  loon_transaction_destroy(transaction);
+
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &transaction);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_transaction_drop_index(transaction, "vector", "HNSW");
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_transaction_commit(transaction, &committed_version);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  loon_transaction_destroy(transaction);
+
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &read_transaction);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_transaction_get_manifest(read_transaction, &cmanifest);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert_int_eq(cmanifest->indexes.num_indexes, 0);
+
+  loon_manifest_destroy(cmanifest);
+  loon_transaction_destroy(read_transaction);
+  clean_test_dir(fs, TEST_BASE_PATH);
+  loon_filesystem_destroy(fs);
+  loon_properties_free(&pp);
+}
+
 // Test loon_transaction_add_delta_log
 static void test_add_delta_log(void) {
   LoonTransactionHandle tranhandle;
@@ -839,6 +886,8 @@ void run_manifest_suite(void) {
   RUN_TEST(test_add_column_group);
   loon_reset_context();
   RUN_TEST(test_add_index_info_and_commit);
+  loon_reset_context();
+  RUN_TEST(test_drop_index_and_commit);
   loon_reset_context();
   RUN_TEST(test_add_delta_log);
   loon_reset_context();

@@ -358,6 +358,10 @@ _ffi.cdef(
     LoonFFIResult loon_transaction_drop_column(LoonTransactionHandle handle,
                                                const char* column_name);
 
+    LoonFFIResult loon_transaction_drop_index(LoonTransactionHandle handle,
+                                              const char* column_name,
+                                              const char* index_type);
+
     LoonFFIResult loon_transaction_add_column_group(LoonTransactionHandle handle,
                                                     const LoonColumnGroup* column_group);
 
