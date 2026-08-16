@@ -323,6 +323,54 @@ TEST_F(TransactionTest, AddIndexInfoPersistsCompletedIndexMetadata) {
   EXPECT_TRUE(manifest->indexes().empty());
 }
 
+TEST_F(TransactionTest, IndexesWithTheSameColumnAndTypeHaveIndependentIdentities) {
+  Index category_index{.column_name = "metadata",
+                       .index_name = "idx_category",
+                       .index_type = "inverted",
+                       .path = base_path_ + "/_index/category.idx",
+                       .field_id = 100,
+                       .index_id = 200,
+                       .build_id = 300};
+  Index price_index{.column_name = "metadata",
+                    .index_name = "idx_price",
+                    .index_type = "inverted",
+                    .path = base_path_ + "/_index/price.idx",
+                    .field_id = 100,
+                    .index_id = 201,
+                    .build_id = 301};
+
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    transaction->AddIndexInfo(category_index);
+    transaction->AddIndexInfo(price_index);
+    ASSERT_OK(transaction->Commit());
+  }
+
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+    ASSERT_EQ(manifest->indexes().size(), 2);
+    EXPECT_TRUE(std::any_of(manifest->indexes().begin(), manifest->indexes().end(), [&](const Index& index) {
+      return index.index_id == category_index.index_id && index.build_id == category_index.build_id;
+    }));
+    EXPECT_TRUE(std::any_of(manifest->indexes().begin(), manifest->indexes().end(), [&](const Index& index) {
+      return index.index_id == price_index.index_id && index.build_id == price_index.build_id;
+    }));
+  }
+
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    transaction->DropIndexByID(category_index.index_id, category_index.build_id);
+    ASSERT_OK(transaction->Commit());
+  }
+
+  ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+  ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+  ASSERT_EQ(manifest->indexes().size(), 1);
+  EXPECT_EQ(manifest->indexes().front().index_id, price_index.index_id);
+  EXPECT_EQ(manifest->indexes().front().build_id, price_index.build_id);
+}
+
 TEST_F(TransactionTest, ConflictResolveOverwriteTest) {
   // initial 5 commit with one column group
   for (size_t i = 0; i < 5; ++i) {

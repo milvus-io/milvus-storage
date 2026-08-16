@@ -376,6 +376,8 @@ static void test_drop_index_and_commit(void) {
       .index_name = "vector_hnsw",
       .index_type = "HNSW",
       .path = "vector-hnsw",
+      .index_id = 200,
+      .build_id = 300,
   };
 
   create_test_pp(&pp);
@@ -392,7 +394,7 @@ static void test_drop_index_and_commit(void) {
 
   rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &transaction);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
-  rc = loon_transaction_drop_index(transaction, "vector", "HNSW");
+  rc = loon_transaction_drop_index_by_id(transaction, 200, 300);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   rc = loon_transaction_commit(transaction, &committed_version);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));

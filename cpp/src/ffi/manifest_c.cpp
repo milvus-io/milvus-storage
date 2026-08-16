@@ -341,6 +341,21 @@ LoonFFIResult loon_transaction_drop_index(LoonTransactionHandle handle,
   RETURN_UNREACHABLE();
 }
 
+LoonFFIResult loon_transaction_drop_index_by_id(LoonTransactionHandle handle, int64_t index_id, int64_t build_id) {
+  if (!handle || index_id == 0 || build_id == 0) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, index_id, and build_id must be non-zero");
+  }
+  try {
+    auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+    cpp_transaction->DropIndexByID(index_id, build_id);
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
 LoonFFIResult loon_transaction_add_lob_file(LoonTransactionHandle handle, const LoonLobFileInfo* lob_file) {
   if (!handle || !lob_file) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and lob_file must not be null");

@@ -870,6 +870,16 @@ FFI_EXPORT LoonFFIResult loon_transaction_drop_index(LoonTransactionHandle handl
                                                      const char* index_type);
 
 /**
+ * @brief Remove one exact completed index artifact from the transaction updates.
+ *
+ * Index ID identifies the user index; build ID prevents a stale removal from
+ * deleting a newer build of the same index.
+ */
+FFI_EXPORT LoonFFIResult loon_transaction_drop_index_by_id(LoonTransactionHandle handle,
+                                                           int64_t index_id,
+                                                           int64_t build_id);
+
+/**
  * @brief Add a LOB file info to the transaction updates
  * Used during compaction REUSE_ALL mode to merge LOB file references
  *

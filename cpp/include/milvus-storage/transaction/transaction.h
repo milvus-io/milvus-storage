@@ -54,6 +54,7 @@ class Updates {
   void AddIndex(const Index& index);
   void DropColumn(const std::string& column_name);
   void DropIndex(const std::string& column_name, const std::string& index_type);
+  void DropIndexByID(int64_t index_id, int64_t build_id);
   void AddLobFile(const LobFileInfo& lob_file);
   [[nodiscard]] const std::vector<std::shared_ptr<ColumnGroup>>& GetAddedColumnGroups() const;
   [[nodiscard]] const std::vector<std::vector<std::shared_ptr<ColumnGroup>>>& GetAppendedFiles() const;
@@ -62,6 +63,7 @@ class Updates {
   [[nodiscard]] const std::vector<Index>& GetAddedIndexes() const;
   [[nodiscard]] const std::vector<std::string>& GetDroppedColumns() const;
   [[nodiscard]] const std::vector<std::pair<std::string, std::string>>& GetDroppedIndexes() const;
+  [[nodiscard]] const std::vector<std::pair<int64_t, int64_t>>& GetDroppedIndexIDs() const;
   [[nodiscard]] const std::vector<LobFileInfo>& GetAddedLobFiles() const;
 
   private:
@@ -81,6 +83,7 @@ class Updates {
   // Index changes
   std::vector<Index> added_indexes_;                                  // Indexes to add or replace
   std::vector<std::pair<std::string, std::string>> dropped_indexes_;  // (column_name, index_type) to drop
+  std::vector<std::pair<int64_t, int64_t>> dropped_index_ids_;        // (index_id, build_id) to drop
 
   // LOB file changes
   std::vector<LobFileInfo> added_lob_files_;  // New LOB files to add
@@ -255,12 +258,18 @@ class Transaction {
   Transaction& AddIndexInfo(const Index& index);
 
   /**
-   * @brief Drop an index by column name and type
+   * @brief Drop all indexes matching column name and type
    * @param column_name Column the index is on
    * @param index_type Type of the index
    * @return Reference to this transaction for method chaining
    */
   Transaction& DropIndex(const std::string& column_name, const std::string& index_type);
+
+  /**
+   * @brief Drop the exact completed index artifact identified by index and build IDs.
+   * @return Reference to this transaction for method chaining
+   */
+  Transaction& DropIndexByID(int64_t index_id, int64_t build_id);
 
   /**
    * @brief Add a LOB file to the transaction updates
