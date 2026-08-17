@@ -1,10 +1,8 @@
 filters:
   ".*":
     approvers:
-      - sunby
-      - tedxu
-      - shaoting-huang
+      - yuruiz
+      - jiaqizho
     reviewers:
-      - sunby
-      - tedxu
-      - shaoting-huang
+      - yuruiz
+      - jiaqizho
