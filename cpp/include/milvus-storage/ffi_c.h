@@ -855,29 +855,16 @@ FFI_EXPORT LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle hand
 FFI_EXPORT LoonFFIResult loon_transaction_add_index_info(LoonTransactionHandle handle, const LoonIndexInfo* index_info);
 
 /**
- * @brief Remove an index from the transaction updates.
+ * @brief Remove all completed artifacts for an index from the transaction updates.
  *
- * This only removes the matching index metadata from the manifest; it does
- * not delete the index artifact files.
+ * This only removes matching index metadata from the manifest; it does not
+ * delete the index artifact files.
  *
  * @param handle Transaction handle
- * @param column_name Name of the indexed column
- * @param index_type Type of the index to remove
+ * @param index_id Stable user index ID
  * @return result of FFI
  */
-FFI_EXPORT LoonFFIResult loon_transaction_drop_index(LoonTransactionHandle handle,
-                                                     const char* column_name,
-                                                     const char* index_type);
-
-/**
- * @brief Remove one exact completed index artifact from the transaction updates.
- *
- * Index ID identifies the user index; build ID prevents a stale removal from
- * deleting a newer build of the same index.
- */
-FFI_EXPORT LoonFFIResult loon_transaction_drop_index_by_id(LoonTransactionHandle handle,
-                                                           int64_t index_id,
-                                                           int64_t build_id);
+FFI_EXPORT LoonFFIResult loon_transaction_drop_index(LoonTransactionHandle handle, int64_t index_id);
 
 /**
  * @brief Add a LOB file info to the transaction updates

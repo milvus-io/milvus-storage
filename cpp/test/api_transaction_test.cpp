@@ -313,7 +313,7 @@ TEST_F(TransactionTest, AddIndexInfoPersistsCompletedIndexMetadata) {
   // Removing the final index removes all manifest-published index metadata.
   {
     ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
-    transaction->DropIndex("vector", "hnsw");
+    transaction->DropIndex(first_index.index_id);
     ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
     EXPECT_EQ(committed_version, 3);
   }
@@ -360,7 +360,7 @@ TEST_F(TransactionTest, IndexesWithTheSameColumnAndTypeHaveIndependentIdentities
 
   {
     ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
-    transaction->DropIndexByID(category_index.index_id, category_index.build_id);
+    transaction->DropIndex(category_index.index_id);
     ASSERT_OK(transaction->Commit());
   }
 
@@ -649,6 +649,7 @@ TEST_F(TransactionTest, IndexBasicOperationsTest) {
     Index idx;
     idx.column_name = "id";
     idx.index_type = "hnsw";
+    idx.index_id = 100;
     idx.path = base_path_ + "/_index/id_hnsw.idx";
     idx.properties = {{"ef_construction", "128"}, {"M", "16"}};
 
@@ -672,7 +673,7 @@ TEST_F(TransactionTest, IndexBasicOperationsTest) {
   // Drop the index
   {
     ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
-    transaction->DropIndex("id", "hnsw");
+    transaction->DropIndex(100);
     ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
     ASSERT_EQ(committed_version, 3);
 

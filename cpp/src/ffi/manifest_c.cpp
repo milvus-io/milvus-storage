@@ -324,30 +324,13 @@ LoonFFIResult loon_transaction_add_index_info(LoonTransactionHandle handle, cons
   RETURN_UNREACHABLE();
 }
 
-LoonFFIResult loon_transaction_drop_index(LoonTransactionHandle handle,
-                                          const char* column_name,
-                                          const char* index_type) {
-  if (!handle || !column_name || !index_type) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, column_name, and index_type must not be null");
+LoonFFIResult loon_transaction_drop_index(LoonTransactionHandle handle, int64_t index_id) {
+  if (!handle || index_id == 0) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and index_id must be non-zero");
   }
   try {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
-    cpp_transaction->DropIndex(column_name, index_type);
-    RETURN_SUCCESS();
-  } catch (std::exception& e) {
-    RETURN_EXCEPTION(e.what());
-  }
-
-  RETURN_UNREACHABLE();
-}
-
-LoonFFIResult loon_transaction_drop_index_by_id(LoonTransactionHandle handle, int64_t index_id, int64_t build_id) {
-  if (!handle || index_id == 0 || build_id == 0) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, index_id, and build_id must be non-zero");
-  }
-  try {
-    auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
-    cpp_transaction->DropIndexByID(index_id, build_id);
+    cpp_transaction->DropIndex(index_id);
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());

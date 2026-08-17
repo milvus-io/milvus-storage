@@ -41,7 +41,7 @@ Updates::~Updates() = default;
 bool Updates::hasChanges() const {
   return !dropped_columns_.empty() || !added_column_groups_.empty() || !appended_files_.empty() ||
          !added_delta_logs_.empty() || !added_stats_.empty() || !added_indexes_.empty() || !dropped_indexes_.empty() ||
-         !dropped_index_ids_.empty() || !added_lob_files_.empty();
+         !added_lob_files_.empty();
 }
 
 void Updates::DropColumn(const std::string& column_name) { dropped_columns_.push_back(column_name); }
@@ -68,17 +68,11 @@ const std::map<std::string, Statistics>& Updates::GetAddedStats() const { return
 
 void Updates::AddIndex(const Index& index) { added_indexes_.push_back(index); }
 
-void Updates::DropIndex(const std::string& column_name, const std::string& index_type) {
-  dropped_indexes_.emplace_back(column_name, index_type);
-}
-
-void Updates::DropIndexByID(int64_t index_id, int64_t build_id) { dropped_index_ids_.emplace_back(index_id, build_id); }
+void Updates::DropIndex(int64_t index_id) { dropped_indexes_.push_back(index_id); }
 
 const std::vector<Index>& Updates::GetAddedIndexes() const { return added_indexes_; }
 
-const std::vector<std::pair<std::string, std::string>>& Updates::GetDroppedIndexes() const { return dropped_indexes_; }
-
-const std::vector<std::pair<int64_t, int64_t>>& Updates::GetDroppedIndexIDs() const { return dropped_index_ids_; }
+const std::vector<int64_t>& Updates::GetDroppedIndexes() const { return dropped_indexes_; }
 
 const std::vector<LobFileInfo>& Updates::GetAddedLobFiles() const { return added_lob_files_; }
 
@@ -191,26 +185,16 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
     }
   }
 
-  // Resolve indexes: drop affected, apply DropIndex, apply AddIndex
+  // Resolve indexes: drop affected, apply DropIndex, apply AddIndex.
   indexes.erase(std::remove_if(
                     indexes.begin(), indexes.end(),
                     [&](const Index& idx) { return affected_columns.find(idx.column_name) != affected_columns.end(); }),
                 indexes.end());
 
   for (const auto& dropped : updates.GetDroppedIndexes()) {
-    const auto& col = dropped.first;
-    const auto& type = dropped.second;
     indexes.erase(std::remove_if(indexes.begin(), indexes.end(),
-                                 [&](const Index& idx) { return idx.column_name == col && idx.index_type == type; }),
+                                 [&](const Index& idx) { return idx.index_id == dropped; }),
                   indexes.end());
-  }
-
-  for (const auto& dropped : updates.GetDroppedIndexIDs()) {
-    const auto [index_id, build_id] = dropped;
-    indexes.erase(
-        std::remove_if(indexes.begin(), indexes.end(),
-                       [&](const Index& idx) { return idx.index_id == index_id && idx.build_id == build_id; }),
-        indexes.end());
   }
 
   for (const auto& new_idx : updates.GetAddedIndexes()) {
@@ -519,13 +503,8 @@ Transaction& Transaction::AddIndexInfo(const Index& index) {
   return *this;
 }
 
-Transaction& Transaction::DropIndex(const std::string& column_name, const std::string& index_type) {
-  updates_.DropIndex(column_name, index_type);
-  return *this;
-}
-
-Transaction& Transaction::DropIndexByID(int64_t index_id, int64_t build_id) {
-  updates_.DropIndexByID(index_id, build_id);
+Transaction& Transaction::DropIndex(int64_t index_id) {
+  updates_.DropIndex(index_id);
   return *this;
 }
 
