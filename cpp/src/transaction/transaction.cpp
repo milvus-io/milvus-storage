@@ -192,9 +192,9 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
                 indexes.end());
 
   for (const auto& dropped : updates.GetDroppedIndexes()) {
-    indexes.erase(std::remove_if(indexes.begin(), indexes.end(),
-                                 [&](const Index& idx) { return idx.index_id == dropped; }),
-                  indexes.end());
+    indexes.erase(
+        std::remove_if(indexes.begin(), indexes.end(), [&](const Index& idx) { return idx.index_id == dropped; }),
+        indexes.end());
   }
 
   for (const auto& new_idx : updates.GetAddedIndexes()) {
