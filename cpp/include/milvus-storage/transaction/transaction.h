@@ -79,8 +79,8 @@ class Updates {
   std::map<std::string, Statistics> added_stats_;  // New stats to add (key -> Statistics)
 
   // Index changes
-  std::vector<Index> added_indexes_;       // Indexes to add or replace
-  std::vector<int64_t> dropped_indexes_;   // index_id to drop
+  std::vector<Index> added_indexes_;      // Indexes to add or replace
+  std::vector<int64_t> dropped_indexes_;  // index_id to drop
 
   // LOB file changes
   std::vector<LobFileInfo> added_lob_files_;  // New LOB files to add
