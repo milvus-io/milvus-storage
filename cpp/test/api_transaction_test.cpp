@@ -313,7 +313,7 @@ TEST_F(TransactionTest, AddIndexInfoPersistsCompletedIndexMetadata) {
   // Removing the final index removes all manifest-published index metadata.
   {
     ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
-    transaction->DropIndex("vector", "hnsw");
+    transaction->DropIndex(first_index.index_id);
     ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
     EXPECT_EQ(committed_version, 3);
   }
@@ -321,6 +321,54 @@ TEST_F(TransactionTest, AddIndexInfoPersistsCompletedIndexMetadata) {
   ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
   ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
   EXPECT_TRUE(manifest->indexes().empty());
+}
+
+TEST_F(TransactionTest, IndexesWithTheSameColumnAndTypeHaveIndependentIdentities) {
+  Index category_index{.column_name = "metadata",
+                       .index_name = "idx_category",
+                       .index_type = "inverted",
+                       .path = base_path_ + "/_index/category.idx",
+                       .field_id = 100,
+                       .index_id = 200,
+                       .build_id = 300};
+  Index price_index{.column_name = "metadata",
+                    .index_name = "idx_price",
+                    .index_type = "inverted",
+                    .path = base_path_ + "/_index/price.idx",
+                    .field_id = 100,
+                    .index_id = 201,
+                    .build_id = 301};
+
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    transaction->AddIndexInfo(category_index);
+    transaction->AddIndexInfo(price_index);
+    ASSERT_OK(transaction->Commit());
+  }
+
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+    ASSERT_EQ(manifest->indexes().size(), 2);
+    EXPECT_TRUE(std::any_of(manifest->indexes().begin(), manifest->indexes().end(), [&](const Index& index) {
+      return index.index_id == category_index.index_id && index.build_id == category_index.build_id;
+    }));
+    EXPECT_TRUE(std::any_of(manifest->indexes().begin(), manifest->indexes().end(), [&](const Index& index) {
+      return index.index_id == price_index.index_id && index.build_id == price_index.build_id;
+    }));
+  }
+
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    transaction->DropIndex(category_index.index_id);
+    ASSERT_OK(transaction->Commit());
+  }
+
+  ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+  ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+  ASSERT_EQ(manifest->indexes().size(), 1);
+  EXPECT_EQ(manifest->indexes().front().index_id, price_index.index_id);
+  EXPECT_EQ(manifest->indexes().front().build_id, price_index.build_id);
 }
 
 TEST_F(TransactionTest, ConflictResolveOverwriteTest) {
@@ -601,6 +649,7 @@ TEST_F(TransactionTest, IndexBasicOperationsTest) {
     Index idx;
     idx.column_name = "id";
     idx.index_type = "hnsw";
+    idx.index_id = 100;
     idx.path = base_path_ + "/_index/id_hnsw.idx";
     idx.properties = {{"ef_construction", "128"}, {"M", "16"}};
 
@@ -624,7 +673,7 @@ TEST_F(TransactionTest, IndexBasicOperationsTest) {
   // Drop the index
   {
     ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
-    transaction->DropIndex("id", "hnsw");
+    transaction->DropIndex(100);
     ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
     ASSERT_EQ(committed_version, 3);
 

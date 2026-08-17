@@ -53,7 +53,7 @@ class Updates {
   void UpdateStat(const std::string& key, const Statistics& stat);
   void AddIndex(const Index& index);
   void DropColumn(const std::string& column_name);
-  void DropIndex(const std::string& column_name, const std::string& index_type);
+  void DropIndex(int64_t index_id);
   void AddLobFile(const LobFileInfo& lob_file);
   [[nodiscard]] const std::vector<std::shared_ptr<ColumnGroup>>& GetAddedColumnGroups() const;
   [[nodiscard]] const std::vector<std::vector<std::shared_ptr<ColumnGroup>>>& GetAppendedFiles() const;
@@ -61,7 +61,7 @@ class Updates {
   [[nodiscard]] const std::map<std::string, Statistics>& GetAddedStats() const;
   [[nodiscard]] const std::vector<Index>& GetAddedIndexes() const;
   [[nodiscard]] const std::vector<std::string>& GetDroppedColumns() const;
-  [[nodiscard]] const std::vector<std::pair<std::string, std::string>>& GetDroppedIndexes() const;
+  [[nodiscard]] const std::vector<int64_t>& GetDroppedIndexes() const;
   [[nodiscard]] const std::vector<LobFileInfo>& GetAddedLobFiles() const;
 
   private:
@@ -79,8 +79,8 @@ class Updates {
   std::map<std::string, Statistics> added_stats_;  // New stats to add (key -> Statistics)
 
   // Index changes
-  std::vector<Index> added_indexes_;                                  // Indexes to add or replace
-  std::vector<std::pair<std::string, std::string>> dropped_indexes_;  // (column_name, index_type) to drop
+  std::vector<Index> added_indexes_;      // Indexes to add or replace
+  std::vector<int64_t> dropped_indexes_;  // index_id to drop
 
   // LOB file changes
   std::vector<LobFileInfo> added_lob_files_;  // New LOB files to add
@@ -255,12 +255,10 @@ class Transaction {
   Transaction& AddIndexInfo(const Index& index);
 
   /**
-   * @brief Drop an index by column name and type
-   * @param column_name Column the index is on
-   * @param index_type Type of the index
+   * @brief Drop all completed artifacts for an index.
    * @return Reference to this transaction for method chaining
    */
-  Transaction& DropIndex(const std::string& column_name, const std::string& index_type);
+  Transaction& DropIndex(int64_t index_id);
 
   /**
    * @brief Add a LOB file to the transaction updates

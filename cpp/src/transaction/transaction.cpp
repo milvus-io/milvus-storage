@@ -68,13 +68,11 @@ const std::map<std::string, Statistics>& Updates::GetAddedStats() const { return
 
 void Updates::AddIndex(const Index& index) { added_indexes_.push_back(index); }
 
-void Updates::DropIndex(const std::string& column_name, const std::string& index_type) {
-  dropped_indexes_.emplace_back(column_name, index_type);
-}
+void Updates::DropIndex(int64_t index_id) { dropped_indexes_.push_back(index_id); }
 
 const std::vector<Index>& Updates::GetAddedIndexes() const { return added_indexes_; }
 
-const std::vector<std::pair<std::string, std::string>>& Updates::GetDroppedIndexes() const { return dropped_indexes_; }
+const std::vector<int64_t>& Updates::GetDroppedIndexes() const { return dropped_indexes_; }
 
 const std::vector<LobFileInfo>& Updates::GetAddedLobFiles() const { return added_lob_files_; }
 
@@ -187,24 +185,29 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
     }
   }
 
-  // Resolve indexes: drop affected, apply DropIndex, apply AddIndex
+  // Resolve indexes: drop affected, apply DropIndex, apply AddIndex.
   indexes.erase(std::remove_if(
                     indexes.begin(), indexes.end(),
                     [&](const Index& idx) { return affected_columns.find(idx.column_name) != affected_columns.end(); }),
                 indexes.end());
 
   for (const auto& dropped : updates.GetDroppedIndexes()) {
-    const auto& col = dropped.first;
-    const auto& type = dropped.second;
-    indexes.erase(std::remove_if(indexes.begin(), indexes.end(),
-                                 [&](const Index& idx) { return idx.column_name == col && idx.index_type == type; }),
-                  indexes.end());
+    indexes.erase(
+        std::remove_if(indexes.begin(), indexes.end(), [&](const Index& idx) { return idx.index_id == dropped; }),
+        indexes.end());
   }
 
   for (const auto& new_idx : updates.GetAddedIndexes()) {
     indexes.erase(std::remove_if(indexes.begin(), indexes.end(),
                                  [&](const Index& idx) {
-                                   return idx.column_name == new_idx.column_name &&
+                                   // index_id is the stable identity of a user index. It
+                                   // lets multiple JSON-path indexes with the same column
+                                   // and type coexist. Keep the legacy key for old entries
+                                   // that did not record an index ID.
+                                   if (new_idx.index_id != 0) {
+                                     return idx.index_id == new_idx.index_id;
+                                   }
+                                   return idx.index_id == 0 && idx.column_name == new_idx.column_name &&
                                           idx.index_type == new_idx.index_type;
                                  }),
                   indexes.end());
@@ -500,8 +503,8 @@ Transaction& Transaction::AddIndexInfo(const Index& index) {
   return *this;
 }
 
-Transaction& Transaction::DropIndex(const std::string& column_name, const std::string& index_type) {
-  updates_.DropIndex(column_name, index_type);
+Transaction& Transaction::DropIndex(int64_t index_id) {
+  updates_.DropIndex(index_id);
   return *this;
 }
 
