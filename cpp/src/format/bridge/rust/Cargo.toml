@@ -130,3 +130,6 @@ lance-arrow = { git = "https://github.com/zilliztech/lance", rev = "b13b89169b28
 lance-core = { git = "https://github.com/zilliztech/lance", rev = "b13b89169b283e47ae9b2dd13e12a6a9863c3908" }
 lance-io = { git = "https://github.com/zilliztech/lance", rev = "b13b89169b283e47ae9b2dd13e12a6a9863c3908" }
 lance-namespace = { git = "https://github.com/zilliztech/lance", rev = "b13b89169b283e47ae9b2dd13e12a6a9863c3908" }
+
+[lints.rust]
+deprecated = "deny"
