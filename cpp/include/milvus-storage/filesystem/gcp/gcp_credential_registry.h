@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -25,34 +27,43 @@
 
 namespace milvus_storage {
 
+// Canonical endpoint identity used for registry lookups. The port is always
+// the effective port, including 80/443 when it was omitted from the address.
+struct GcpEndpointKey {
+  Aws::Http::Scheme scheme;
+  uint16_t port;
+  std::string host;
+
+  bool operator==(const GcpEndpointKey& other) const noexcept {
+    return scheme == other.scheme && port == other.port && host == other.host;
+  }
+};
+
 // Key used to map an outgoing GCP request to a credential provider.
-//
-// endpoint_host is the bare host (scheme stripped, no trailing slash).
-// Examples after normalization:
-//   - "storage.googleapis.com"
-//   - "custom-gcs.internal:8443"
-//
-// bucket_name is the GCS bucket the request targets.
 struct GcpBucketKey {
-  std::string endpoint_host;
+  GcpEndpointKey endpoint;
   std::string bucket_name;
 
   bool operator==(const GcpBucketKey& other) const noexcept {
-    return endpoint_host == other.endpoint_host && bucket_name == other.bucket_name;
+    return endpoint == other.endpoint && bucket_name == other.bucket_name;
   }
 };
 
 struct GcpBucketKeyHash {
   size_t operator()(const GcpBucketKey& k) const noexcept {
-    return std::hash<std::string>{}(k.endpoint_host) ^ (std::hash<std::string>{}(k.bucket_name) << 1);
+    size_t hash = std::hash<int>{}(static_cast<int>(k.endpoint.scheme));
+    hash ^= std::hash<uint16_t>{}(k.endpoint.port) << 1;
+    hash ^= std::hash<std::string>{}(k.endpoint.host) << 2;
+    hash ^= std::hash<std::string>{}(k.bucket_name) << 3;
+    return hash;
   }
 };
 
-// Normalize a filesystem config's `address` field into an endpoint host for
-// use as a GcpBucketKey. Strips scheme (http://, https://) and trailing '/'.
-std::string NormalizeGcpEndpointHost(const std::string& address);
+// Normalize a filesystem config's address using an explicit scheme when
+// present, or use_ssl otherwise.
+GcpEndpointKey NormalizeGcpEndpoint(const std::string& address, bool use_ssl);
 
-// Process-wide registry mapping (endpoint_host, bucket) → credential provider.
+// Process-wide registry mapping (endpoint, bucket) → credential provider.
 //
 // The GCP HTTP client factory and delegator are installed once globally (AWS
 // SDK constraint via InitializeS3 + call_once). They are stateless and look
@@ -74,8 +85,9 @@ class GcpCredentialRegistry {
   void Register(GcpBucketKey key, std::shared_ptr<GcpCredentialProvider> provider);
 
   // Look up the provider for an outgoing request URI. Tries both path-style
-  // (host + first path segment) and virtual-host-style (first subdomain +
-  // remaining host) interpretations. Returns nullptr if no match.
+  // (request endpoint + first path segment) and virtual-host-style (first
+  // subdomain + remaining endpoint host) interpretations. Returns nullptr if
+  // no match.
   std::shared_ptr<GcpCredentialProvider> Lookup(const Aws::Http::URI& uri) const;
 
   private:

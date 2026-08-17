@@ -36,23 +36,18 @@ std::string ToLower(std::string s) {
   return s;
 }
 
+GcpEndpointKey EndpointFromUri(const Aws::Http::URI& uri) {
+  return {uri.GetScheme(), uri.GetPort(), ToLower(uri.GetAuthority().c_str())};
+}
+
 }  // namespace
 
-std::string NormalizeGcpEndpointHost(const std::string& address) {
-  std::string host = address;
-
-  // Strip scheme.
-  auto scheme_pos = host.find("://");
-  if (scheme_pos != std::string::npos) {
-    host.erase(0, scheme_pos + 3);
+GcpEndpointKey NormalizeGcpEndpoint(const std::string& address, bool use_ssl) {
+  std::string endpoint = address;
+  if (!endpoint.starts_with("http://") && !endpoint.starts_with("https://")) {
+    endpoint.insert(0, use_ssl ? "https://" : "http://");
   }
-
-  // Strip trailing slash(es).
-  while (!host.empty() && host.back() == '/') {
-    host.pop_back();
-  }
-
-  return ToLower(host);
+  return EndpointFromUri(Aws::Http::URI(endpoint.c_str()));
 }
 
 GcpCredentialRegistry& GcpCredentialRegistry::Instance() {
@@ -61,13 +56,13 @@ GcpCredentialRegistry& GcpCredentialRegistry::Instance() {
 }
 
 void GcpCredentialRegistry::Register(GcpBucketKey key, std::shared_ptr<GcpCredentialProvider> provider) {
-  key.endpoint_host = ToLower(std::move(key.endpoint_host));
+  key.endpoint.host = ToLower(std::move(key.endpoint.host));
   std::lock_guard<std::mutex> lock(mu_);
   providers_[std::move(key)] = std::move(provider);
 }
 
 std::shared_ptr<GcpCredentialProvider> GcpCredentialRegistry::Lookup(const Aws::Http::URI& uri) const {
-  std::string host = ToLower(uri.GetAuthority().c_str());
+  auto endpoint = EndpointFromUri(uri);
   std::string path = uri.GetPath().c_str();
 
   auto find = [this](const GcpBucketKey& key) -> std::shared_ptr<GcpCredentialProvider> {
@@ -76,20 +71,20 @@ std::shared_ptr<GcpCredentialProvider> GcpCredentialRegistry::Lookup(const Aws::
     return it == providers_.end() ? nullptr : it->second;
   };
 
-  // Path-style: endpoint = host, bucket = first path segment.
+  // Path-style: endpoint = request endpoint, bucket = first path segment.
   auto seg = FirstPathSegment(path);
   if (!seg.empty()) {
-    if (auto p = find({host, seg})) {
+    if (auto p = find({endpoint, seg})) {
       return p;
     }
   }
 
-  // Virtual-host-style: bucket = first subdomain, endpoint = rest of host.
-  auto dot = host.find('.');
+  // Virtual-host-style: bucket = first subdomain, endpoint host = rest of host.
+  auto dot = endpoint.host.find('.');
   if (dot != std::string::npos && dot > 0) {
-    auto subdomain = host.substr(0, dot);
-    auto rest = host.substr(dot + 1);
-    if (auto p = find({rest, subdomain})) {
+    auto subdomain = endpoint.host.substr(0, dot);
+    endpoint.host.erase(0, dot + 1);
+    if (auto p = find({endpoint, subdomain})) {
       return p;
     }
   }
