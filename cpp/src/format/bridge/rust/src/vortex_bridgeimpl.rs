@@ -20,7 +20,8 @@ use arrow58::ffi::FFI_ArrowArray;
 use arrow_schema58::{ArrowError, DataType, Field, Schema, SchemaRef};
 
 use vortex::array::ArrayRef;
-use vortex::array::arrow::{FromArrowArray, IntoArrowArray};
+use vortex::array::VortexSessionExecute;
+use vortex::array::arrow::{ArrowSessionExt, FromArrowArray};
 use vortex::buffer::Buffer;
 use vortex::dtype::arrow::FromArrowType;
 use vortex::dtype::{DType as RustDType, DecimalDType, FieldName, Nullability, PType as RustPType};
@@ -1236,7 +1237,7 @@ impl VortexFile {
 
     pub(crate) unsafe fn get_schema(&self, out_schema: *mut u8) -> Result<()> {
         let dtype = self.inner.dtype();
-        let arrow_schema = dtype.to_arrow_schema()?;
+        let arrow_schema = VORTEX_SESSION.arrow().to_arrow_schema(&dtype)?;
         let ffi_schema = FFI_ArrowSchema::try_from(&arrow_schema)?;
         unsafe { std::ptr::write(out_schema as *mut FFI_ArrowSchema, ffi_schema) };
         Ok(())
@@ -1901,7 +1902,13 @@ fn array_to_record_batch(
     original_schema: &Schema,
     plan: Option<&VortexSchemaConversion>,
 ) -> Result<RecordBatch> {
-    let arrow = array.into_arrow(data_type)?;
+    // This is a synthetic root field: Arrow arrays do not carry a top-level field name.
+    // The Struct child fields in `data_type` retain their original names and metadata.
+    let target = Field::new("", data_type.clone(), array.dtype().is_nullable());
+    let mut ctx = VORTEX_SESSION.create_execution_ctx();
+    let arrow = VORTEX_SESSION
+        .arrow()
+        .execute_arrow(array, Some(&target), &mut ctx)?;
     let batch = RecordBatch::from(arrow.as_struct().clone());
     match plan {
         Some(plan) => Ok(convert_record_batch_from_vortex(
@@ -1945,7 +1952,7 @@ pub(crate) unsafe fn scan_builder_into_stream(
             (Some(vs), None, _) => (vs.clone(), vs, None),
             (None, _, _) => {
                 let dtype = inner.dtype()?;
-                let arrow_schema = Arc::new(dtype.to_arrow_schema()?);
+                let arrow_schema = Arc::new(VORTEX_SESSION.arrow().to_arrow_schema(&dtype)?);
                 (arrow_schema.clone(), arrow_schema, None)
             }
         };
@@ -1959,7 +1966,13 @@ pub(crate) unsafe fn scan_builder_into_stream(
     // part of large takes onto the caller thread. ScanBuilder::map runs on the spawned split task,
     // preserving the scan's parallelism while producing the same Arrow batches.
     let inner = inner.map(move |chunk| {
-        let arrow = chunk.into_arrow(&data_type)?;
+        // This is a synthetic root field: Arrow arrays do not carry a top-level field name.
+        // The Struct child fields in `data_type` retain their original names and metadata.
+        let target = Field::new("", data_type.clone(), chunk.dtype().is_nullable());
+        let mut ctx = VORTEX_SESSION.create_execution_ctx();
+        let arrow = VORTEX_SESSION
+            .arrow()
+            .execute_arrow(chunk, Some(&target), &mut ctx)?;
         Ok(RecordBatch::from(arrow.as_struct().clone()))
     });
 
@@ -2066,7 +2079,7 @@ pub unsafe extern "C" fn vortex_scan_collect_async(
             (Some(vs), Some(os), plan) => (vs, os, plan),
             (Some(vs), None, _) => (vs.clone(), vs, None),
             (None, _, _) => match inner.dtype() {
-                Ok(dtype) => match dtype.to_arrow_schema() {
+                Ok(dtype) => match VORTEX_SESSION.arrow().to_arrow_schema(&dtype) {
                     Ok(schema) => {
                         let schema = Arc::new(schema);
                         (schema.clone(), schema, None)
