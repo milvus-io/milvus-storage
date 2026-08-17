@@ -164,12 +164,12 @@ TEST_F(APIPropertiesTest, paimon_scan_mode) {
 
   EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_PAIMON_SCAN_MODE), "auto");
 
-  for (const auto* mode : {"auto", "direct-file"}) {
+  for (const auto* mode : {"auto", "direct-file", "data-split"}) {
     EXPECT_EQ(SetValue(pp, PROPERTY_PAIMON_SCAN_MODE, mode), std::nullopt);
     EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_PAIMON_SCAN_MODE), mode);
   }
 
-  EXPECT_NE(SetValue(pp, PROPERTY_PAIMON_SCAN_MODE, "data-split"), std::nullopt);
+  EXPECT_NE(SetValue(pp, PROPERTY_PAIMON_SCAN_MODE, "invalid"), std::nullopt);
   EXPECT_STREQ(loon_properties_paimon_scan_mode, PROPERTY_PAIMON_SCAN_MODE);
 
   EXPECT_EQ(GetValueNoError<int64_t>(pp, PROPERTY_PAIMON_SNAPSHOT_ID), -1);

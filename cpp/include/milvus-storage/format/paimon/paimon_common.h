@@ -22,6 +22,11 @@
 
 namespace milvus_storage::paimon {
 
+inline constexpr char kReadPathKey[] = "read_path";
+inline constexpr char kRecordCountKey[] = "record_count";
+inline constexpr char kDirectFileReadPath[] = "direct-file";
+inline constexpr char kDataSplitReadPath[] = "data-split";
+
 arrow::Result<std::unordered_map<std::string, std::string>> ToStorageOptions(const ArrowFileSystemConfig& config);
 
 std::string ToStandardUri(const std::string& milvus_uri);

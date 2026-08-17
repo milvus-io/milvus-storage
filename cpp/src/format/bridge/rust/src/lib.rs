@@ -22,6 +22,7 @@ mod iceberg_testutil;
 mod lance_bridgeimpl;
 mod lance_memory_estimator;
 mod paimon_bridgeimpl;
+mod paimon_split_serde;
 mod paimon_testutil;
 mod predicate_parser;
 mod rust_runtime;
@@ -206,7 +207,7 @@ pub mod lance_ffi {
 
 #[cxx::bridge(namespace = "milvus_storage::paimon::ffi")]
 pub mod paimon_ffi {
-    /// A physical file that Paimon determined is safe to read directly.
+    /// A single physical file or atomic DataSplit returned by Paimon planning.
     struct PaimonFileInfo {
         path: String,
         file_size: u64,
@@ -214,6 +215,8 @@ pub mod paimon_ffi {
     }
 
     extern "Rust" {
+        type BlockingPaimonDataSplitReader;
+
         fn paimon_plan_files(
             table_location: &str,
             snapshot_id: i64,
@@ -230,11 +233,33 @@ pub mod paimon_ffi {
             storage_options_keys: Vec<String>,
             storage_options_values: Vec<String>,
         ) -> Result<Vec<u64>>;
+
+        fn paimon_open_data_split_reader(
+            metadata_json: &str,
+            expected_table_location: &str,
+            storage_options_keys: Vec<String>,
+            storage_options_values: Vec<String>,
+        ) -> Result<Box<BlockingPaimonDataSplitReader>>;
+
+        unsafe fn export_schema(
+            self: &BlockingPaimonDataSplitReader,
+            out_schema_ptr: *mut u8,
+        ) -> Result<()>;
+
+        unsafe fn open_stream(
+            self: &BlockingPaimonDataSplitReader,
+            projected_columns: Vec<String>,
+            out_stream_ptr: *mut u8,
+        ) -> Result<()>;
     }
 }
 
 #[cxx::bridge(namespace = "milvus_storage::paimon::ffi")]
 pub mod paimon_test_ffi {
+    struct PaimonTestTableInfo {
+        snapshot_ids: Vec<i64>,
+    }
+
     extern "Rust" {
         /// Create a repository-owned local Paimon fixture through the public
         /// paimon-rust writer/commit APIs.
@@ -243,9 +268,11 @@ pub mod paimon_test_ffi {
             num_rows: u64,
             mode: &str,
             deleted_positions: Vec<i64>,
+            storage_options_keys: Vec<String>,
+            storage_options_values: Vec<String>,
             file_format: &str,
             dimension: u32,
-        ) -> Result<i64>;
+        ) -> Result<PaimonTestTableInfo>;
     }
 }
 

@@ -10,16 +10,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Paimon direct-file planning and deletion-vector bridge.
+//! Paimon planning and streaming bridge.
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use arrow_schema58::SchemaRef;
+use arrow58::error::ArrowError;
+use arrow58::ffi::FFI_ArrowSchema;
+use arrow58::ffi_stream::FFI_ArrowArrayStream;
+use arrow58::record_batch::{RecordBatch, RecordBatchReader};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use futures::{StreamExt, stream::BoxStream};
 use paimon::catalog::Identifier;
 use paimon::io::{FileIO, FileRead};
 use paimon::spec::{CoreOptions, MergeEngine, SCAN_SNAPSHOT_ID_OPTION};
 use paimon::table::{SchemaManager, SnapshotManager};
 use paimon::{DataSplit, DeletionFile, Table};
 use roaring::RoaringBitmap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Cursor;
 
@@ -38,10 +46,12 @@ const DELETION_VECTOR_MAGIC: u32 = 1_581_511_376;
 /// Java writes this magic little-endian and records the complete serialized
 /// size in `DeletionFile.length`, unlike the bitmap32 envelope.
 const DELETION_VECTOR_BITMAP64_MAGIC: u32 = 1_681_511_377;
+const MAX_DATA_SPLIT_METADATA_BYTES: usize = 12 * 1024 * 1024;
 
 // CXX carries Rust errors as strings. These stable markers are consumed only
 // by the C++ bridge, which converts them into Arrow statuses before returning
-// to format callers.
+// to format callers. Keep their spelling in sync with paimon_bridge.cpp and
+// paimon_format_reader.cpp.
 fn invalid_message(message: impl std::fmt::Display) -> String {
     format!("{ERROR_INVALID_PREFIX} {message}")
 }
@@ -59,6 +69,21 @@ fn classify_bridge_error(error: anyhow::Error) -> anyhow::Error {
         return error;
     }
 
+    // Paimon's Parquet adapter stringifies FileRead errors before wrapping them.
+    if let Some((_, storage_error)) =
+        message.split_once("IO operation failed on underlying storage: ")
+    {
+        let marker = if storage_error.starts_with("NotFound (") {
+            Some(ERROR_NOT_FOUND_PREFIX)
+        } else if storage_error.starts_with("RateLimited (temporary)") {
+            Some(ERROR_TRANSIENT_THROTTLING_PREFIX)
+        } else if storage_error.contains("(temporary)") {
+            Some(ERROR_TRANSIENT_SERVICE_PREFIX)
+        } else {
+            None
+        };
+        return marker.map_or(error, |marker| anyhow!("{marker} {message}"));
+    }
     let marker = error.chain().find_map(|cause| {
         let error = cause.downcast_ref::<paimon::Error>()?;
         match error {
@@ -93,6 +118,7 @@ fn classify_bridge_error(error: anyhow::Error) -> anyhow::Error {
 enum ScanMode {
     Auto,
     DirectFile,
+    DataSplit,
 }
 
 impl ScanMode {
@@ -100,18 +126,25 @@ impl ScanMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "" | "auto" => Ok(Self::Auto),
             "direct-file" => Ok(Self::DirectFile),
-            "data-split" => bail!(not_implemented_message(
-                "Paimon data-split reads are not supported"
-            )),
+            "data-split" => Ok(Self::DataSplit),
             other => bail!(invalid_message(format_args!(
-                "invalid Paimon scan mode '{other}'; expected auto or direct-file"
+                "invalid Paimon scan mode '{other}'; expected auto, direct-file, or data-split"
             ))),
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadPath {
+    DirectFile,
+    DataSplit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RouteReason {
+    AutoDirectFile,
+    ForcedDirectFile,
+    ForcedDataSplit,
     MergeSemantics,
     RowRange,
     SchemaEvolution,
@@ -121,18 +154,10 @@ enum RouteReason {
     UnsupportedFormat,
 }
 
-impl RouteReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::MergeSemantics => "merge-semantics",
-            Self::RowRange => "row-range",
-            Self::SchemaEvolution => "schema-evolution",
-            Self::DataEvolution => "data-evolution",
-            Self::PartitionColumns => "partition-columns",
-            Self::DedicatedVectorFile => "dedicated-vector-file",
-            Self::UnsupportedFormat => "unsupported-format",
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RouteDecision {
+    read_path: ReadPath,
+    reason: RouteReason,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -161,17 +186,36 @@ impl TableReadSemantics {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+impl ReadPath {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectFile => "direct-file",
+            Self::DataSplit => "data-split",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PaimonMetadata {
     version: u32,
     read_path: String,
     data_format: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snapshot_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bucket: Option<i32>,
     record_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    table_location: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codec: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    payload: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     deletion_file: Option<DeletionFileDescriptor>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct DeletionFileDescriptor {
     path: String,
     offset: u64,
@@ -455,17 +499,27 @@ fn decide_route(
     split: &DataSplit,
     table_schema_id: i64,
     table: TableReadSemantics,
-) -> Result<()> {
+) -> Result<RouteDecision> {
     match mode {
+        ScanMode::DataSplit => Ok(RouteDecision {
+            read_path: ReadPath::DataSplit,
+            reason: RouteReason::ForcedDataSplit,
+        }),
         ScanMode::Auto => match direct_file_ineligibility(split, table_schema_id, table) {
-            None => Ok(()),
-            Some((reason, detail)) => bail!(not_implemented_message(format_args!(
-                "Paimon split requires data-split reading ({}): {detail}",
-                reason.as_str()
-            ))),
+            None => Ok(RouteDecision {
+                read_path: ReadPath::DirectFile,
+                reason: RouteReason::AutoDirectFile,
+            }),
+            Some((reason, _)) => Ok(RouteDecision {
+                read_path: ReadPath::DataSplit,
+                reason,
+            }),
         },
         ScanMode::DirectFile => match direct_file_ineligibility(split, table_schema_id, table) {
-            None => Ok(()),
+            None => Ok(RouteDecision {
+                read_path: ReadPath::DirectFile,
+                reason: RouteReason::ForcedDirectFile,
+            }),
             Some((_, detail)) => bail!(not_implemented_message(format_args!(
                 "Paimon split cannot use direct-file: {detail}"
             ))),
@@ -477,6 +531,138 @@ fn checked_non_negative(value: i64, name: &str) -> Result<u64> {
     u64::try_from(value).with_context(|| {
         invalid_message(format_args!("Paimon {name} is negative: {value}"))
     })
+}
+
+fn metadata_split_row_count(split: &DataSplit) -> Result<Option<u64>> {
+    if split.row_ranges().is_some() {
+        return Ok(None);
+    }
+    split
+        .merged_row_count()
+        .map(|count| checked_non_negative(count, "merged row count"))
+        .transpose()
+}
+
+async fn count_split_rows(table: &Table, split: &DataSplit) -> Result<u64> {
+    // `DataSplit::merged_row_count` describes the full file group and does
+    // not account for an attached row-range selection. Such splits must be
+    // counted through the actual Paimon reader.
+    if let Some(count) = metadata_split_row_count(split)? {
+        return Ok(count);
+    }
+
+    // Count through Paimon's merge reader, but request a zero-column Arrow
+    // projection so the fallback scans row cardinality rather than payload.
+    let mut builder = table.new_read_builder();
+    builder.with_projection(&[])?;
+    let read = builder.new_read()?;
+    let mut stream = read.to_arrow(std::slice::from_ref(split))?;
+    let mut rows = 0u64;
+    while let Some(batch) = stream.next().await {
+        let batch = batch?;
+        rows = rows
+            .checked_add(u64::try_from(batch.num_rows())?)
+            .ok_or_else(|| anyhow!(invalid_message("Paimon split row count overflow")))?;
+    }
+    Ok(rows)
+}
+
+fn encode_split_metadata(
+    table_location: &str,
+    split: &DataSplit,
+    record_count: u64,
+) -> Result<String> {
+    let encoded = crate::paimon_split_serde::serialize(split)
+        .map_err(|error| anyhow!(invalid_message(error)))?;
+    serde_json::to_string(&PaimonMetadata {
+        version: METADATA_VERSION,
+        read_path: ReadPath::DataSplit.as_str().to_string(),
+        data_format: "paimon".to_string(),
+        snapshot_id: Some(split.snapshot_id()),
+        bucket: Some(split.bucket()),
+        record_count,
+        table_location: Some(table_location.to_string()),
+        codec: Some(encoded.codec.to_string()),
+        payload: Some(BASE64_STANDARD.encode(encoded.payload)),
+        deletion_file: None,
+    })
+    .map_err(Into::into)
+}
+
+fn decode_split_metadata(metadata_json: &str) -> Result<(PaimonMetadata, DataSplit)> {
+    ensure!(
+        metadata_json.len() <= MAX_DATA_SPLIT_METADATA_BYTES,
+        invalid_message(format_args!(
+            "Paimon metadata descriptor is {} bytes, above the {} byte limit",
+            metadata_json.len(),
+            MAX_DATA_SPLIT_METADATA_BYTES
+        ))
+    );
+    let metadata: PaimonMetadata =
+        serde_json::from_str(metadata_json).context("cannot parse Paimon metadata descriptor")?;
+    ensure!(
+        metadata.version == METADATA_VERSION,
+        "unsupported Paimon metadata version {}; expected {}",
+        metadata.version,
+        METADATA_VERSION
+    );
+    ensure!(
+        metadata.read_path == ReadPath::DataSplit.as_str(),
+        "Paimon descriptor read_path is '{}', expected data-split",
+        metadata.read_path
+    );
+    let codec = metadata.codec.as_deref().unwrap_or_default();
+    let encoded = metadata
+        .payload
+        .as_deref()
+        .ok_or_else(|| anyhow!("Paimon data-split descriptor has no payload"))?;
+    let max_base64_bytes = crate::paimon_split_serde::MAX_DESCRIPTOR_BYTES
+        .div_ceil(3)
+        .checked_mul(4)
+        .ok_or_else(|| anyhow!("Paimon descriptor base64 limit overflow"))?;
+    ensure!(
+        encoded.len() <= max_base64_bytes,
+        "Paimon split payload is too large before base64 decoding"
+    );
+    let payload = BASE64_STANDARD
+        .decode(encoded)
+        .context("cannot decode Paimon split payload as base64")?;
+    let split = crate::paimon_split_serde::deserialize(codec, &payload)?;
+    Ok((metadata, split))
+}
+
+fn validate_data_split_binding(
+    metadata: &PaimonMetadata,
+    split: &DataSplit,
+    expected_table_location: &str,
+) -> Result<()> {
+    let table_location = metadata
+        .table_location
+        .as_deref()
+        .ok_or_else(|| anyhow!("Paimon data-split descriptor has no table_location"))?;
+    ensure!(
+        !expected_table_location.is_empty(),
+        "Paimon data-split reader requires an expected table location"
+    );
+    ensure!(
+        table_location == expected_table_location,
+        "Paimon descriptor table location '{}' disagrees with manifest table location '{}'",
+        table_location,
+        expected_table_location
+    );
+    ensure!(
+        metadata.snapshot_id == Some(split.snapshot_id()),
+        "Paimon descriptor snapshot {:?} disagrees with split snapshot {}",
+        metadata.snapshot_id,
+        split.snapshot_id()
+    );
+    ensure!(
+        metadata.bucket == Some(split.bucket()),
+        "Paimon descriptor bucket {:?} disagrees with split bucket {}",
+        metadata.bucket,
+        split.bucket()
+    );
+    Ok(())
 }
 
 fn deletion_descriptor(file: &DeletionFile) -> Result<DeletionFileDescriptor> {
@@ -506,9 +692,14 @@ fn encode_direct_metadata(
 ) -> Result<String> {
     serde_json::to_string(&PaimonMetadata {
         version: METADATA_VERSION,
-        read_path: "direct-file".to_string(),
+        read_path: ReadPath::DirectFile.as_str().to_string(),
         data_format: data_format.to_string(),
+        snapshot_id: None,
+        bucket: None,
         record_count,
+        table_location: None,
+        codec: None,
+        payload: None,
         deletion_file: deletion_file.map(deletion_descriptor).transpose()?,
     })
     .map_err(Into::into)
@@ -531,43 +722,66 @@ pub fn paimon_plan_files(
         let plan = table.new_read_builder().new_scan().plan().await?;
         let mut result = Vec::new();
         for split in plan.splits() {
-            decide_route(mode, split, table.schema().id(), table_read_semantics)?;
-            for (index, file) in split.data_files().iter().enumerate() {
-                let deletion = split.deletion_file_for_data_file_index(index);
-                let physical_rows = checked_non_negative(file.row_count, "data file row count")?;
-                let deleted_rows = match deletion {
-                    None => 0,
-                    Some(deletion) => match deletion.cardinality() {
-                        Some(cardinality) => {
-                            checked_non_negative(cardinality, "deletion vector cardinality")?
-                        }
-                        None => read_deletion_vector(&options, deletion).await?.len() as u64,
-                    },
-                };
-                ensure!(
-                    deleted_rows <= physical_rows,
-                    invalid_message(format_args!(
-                        "Paimon deletion cardinality {deleted_rows} exceeds physical row count \
-                         {physical_rows} for {}",
-                        file.file_name
-                    ))
-                );
-                let record_count = physical_rows - deleted_rows;
-                // Empty data files do not become zero-row column groups.
-                if record_count == 0 {
-                    continue;
+            let route = decide_route(
+                mode,
+                split,
+                table.schema().id(),
+                table_read_semantics,
+            )?;
+            match route.read_path {
+                ReadPath::DataSplit => {
+                    let record_count = count_split_rows(&table, split).await?;
+                    if record_count == 0 {
+                        continue;
+                    }
+                    result.push(PaimonFileInfo {
+                        path: table_location.to_string(),
+                        file_size: 0,
+                        metadata_json: encode_split_metadata(table_location, split, record_count)?,
+                    });
                 }
-                let path = split.data_file_path(file);
-                let data_format = file_format(&path);
-                result.push(PaimonFileInfo {
-                    path,
-                    file_size: checked_non_negative(file.file_size, "data file size")?,
-                    metadata_json: encode_direct_metadata(
-                        data_format,
-                        record_count,
-                        deletion,
-                    )?,
-                });
+                ReadPath::DirectFile => {
+                    for (index, file) in split.data_files().iter().enumerate() {
+                        let deletion = split.deletion_file_for_data_file_index(index);
+                        let physical_rows = checked_non_negative(file.row_count, "data file row count")?;
+                        let deleted_rows = match deletion {
+                            None => 0,
+                            Some(deletion) => match deletion.cardinality() {
+                                Some(cardinality) => checked_non_negative(
+                                    cardinality,
+                                    "deletion vector cardinality",
+                                )?,
+                                None => {
+                                    read_deletion_vector(&options, deletion).await?.len() as u64
+                                }
+                            },
+                        };
+                        ensure!(
+                            deleted_rows <= physical_rows,
+                            invalid_message(format_args!(
+                                "Paimon deletion cardinality {deleted_rows} exceeds physical row count \
+                                 {physical_rows} for {}",
+                                file.file_name
+                            ))
+                        );
+                        let record_count = physical_rows - deleted_rows;
+                        // Empty data files do not become zero-row column groups.
+                        if record_count == 0 {
+                            continue;
+                        }
+                        let path = split.data_file_path(file);
+                        let data_format = file_format(&path);
+                        result.push(PaimonFileInfo {
+                            path,
+                            file_size: checked_non_negative(file.file_size, "data file size")?,
+                            metadata_json: encode_direct_metadata(
+                                data_format,
+                                record_count,
+                                deletion,
+                            )?,
+                        });
+                    }
+                }
             }
         }
         Ok(result)
@@ -790,9 +1004,147 @@ pub fn paimon_read_deletion_vector(
     .map_err(classify_bridge_error)
 }
 
+type PaimonBatchStream = BoxStream<'static, paimon::Result<RecordBatch>>;
+
+struct PaimonStreamReader {
+    stream: PaimonBatchStream,
+    schema: SchemaRef,
+}
+
+fn classify_stream_error(error: paimon::Error) -> ArrowError {
+    let classified = classify_bridge_error(anyhow!(error));
+    let message = format!("{classified:#}");
+    if message.contains(ERROR_NOT_IMPLEMENTED_PREFIX) {
+        return ArrowError::NotYetImplemented(message);
+    }
+    if message.contains(ERROR_INVALID_PREFIX) {
+        return ArrowError::InvalidArgumentError(message);
+    }
+    ArrowError::IoError(message.clone(), std::io::Error::other(message))
+}
+
+impl Iterator for PaimonStreamReader {
+    type Item = std::result::Result<RecordBatch, ArrowError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        TOKIO_RT
+            .block_on(self.stream.next())
+            .map(|result| result.map_err(classify_stream_error))
+    }
+}
+
+impl RecordBatchReader for PaimonStreamReader {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+/// Projection-agnostic handle over one decoded DataSplit.
+///
+/// Opening this handle performs the expensive descriptor work exactly once:
+/// payload decode + identity binding, `SchemaManager` schema resolution, and
+/// the pinned-snapshot time travel. Streams are then opened per call with a
+/// caller-supplied projection, so one cached handle serves every reader
+/// instance created from the same metadata (see
+/// `PaimonFormatReader::MetaTrait`).
+pub struct BlockingPaimonDataSplitReader {
+    table: Table,
+    split: DataSplit,
+    schema: SchemaRef,
+}
+
+fn open_data_split_reader_impl(
+    metadata_json: &str,
+    expected_table_location: &str,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
+) -> Result<Box<BlockingPaimonDataSplitReader>> {
+    let options = options_from_vecs(storage_options_keys, storage_options_values)?;
+    let (metadata, split) = decode_split_metadata(metadata_json).map_err(|error| {
+        anyhow!("{ERROR_INVALID_PREFIX} invalid Paimon data-split descriptor: {error:#}")
+    })?;
+    validate_data_split_binding(&metadata, &split, expected_table_location).map_err(|error| {
+        anyhow!("{ERROR_INVALID_PREFIX} invalid Paimon data-split binding: {error:#}")
+    })?;
+    let table_location = metadata
+        .table_location
+        .as_deref()
+        .ok_or_else(|| anyhow!("Paimon data-split descriptor has no table_location"))?;
+    let table = TOKIO_RT.block_on(load_table(table_location, &options, metadata.snapshot_id))?;
+    let read = table.new_read_builder().new_read()?;
+    let schema = paimon::arrow::build_target_arrow_schema(read.read_type())?;
+    Ok(Box::new(BlockingPaimonDataSplitReader {
+        table,
+        split,
+        schema,
+    }))
+}
+
+pub fn paimon_open_data_split_reader(
+    metadata_json: &str,
+    expected_table_location: &str,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
+) -> Result<Box<BlockingPaimonDataSplitReader>> {
+    open_data_split_reader_impl(
+        metadata_json,
+        expected_table_location,
+        storage_options_keys,
+        storage_options_values,
+    )
+    .map_err(classify_bridge_error)
+}
+
+impl BlockingPaimonDataSplitReader {
+    /// Export the full (unprojected) read schema of the split.
+    pub unsafe fn export_schema(&self, out_schema_ptr: *mut u8) -> Result<()> {
+        let ffi_schema = FFI_ArrowSchema::try_from(self.schema.as_ref())
+            .with_context(|| invalid_message("cannot export Paimon data-split schema"))?;
+        unsafe { std::ptr::write(out_schema_ptr.cast::<FFI_ArrowSchema>(), ffi_schema) };
+        Ok(())
+    }
+
+    /// Open a new merge-read stream with the given projection (empty selects
+    /// every column). Only `&self` state is touched, so concurrent streams
+    /// from one shared handle are safe.
+    pub unsafe fn open_stream(
+        &self,
+        projected_columns: Vec<String>,
+        out_stream_ptr: *mut u8,
+    ) -> Result<()> {
+        unsafe { self.open_stream_impl(projected_columns, out_stream_ptr) }
+            .map_err(classify_bridge_error)
+    }
+
+    unsafe fn open_stream_impl(
+        &self,
+        projected_columns: Vec<String>,
+        out_stream_ptr: *mut u8,
+    ) -> Result<()> {
+        // FIXME(yanbinyang): Reuse file metadata across projected streams once
+        // paimon-rust exposes a scan-scoped read context, avoiding repeated footer reads.
+        let mut builder = self.table.new_read_builder();
+        if !projected_columns.is_empty() {
+            let projected_refs = projected_columns
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            builder.with_projection(&projected_refs)?;
+        }
+        let read = builder.new_read()?;
+        let schema = paimon::arrow::build_target_arrow_schema(read.read_type())?;
+        let stream = read.to_arrow(std::slice::from_ref(&self.split))?;
+        let reader = PaimonStreamReader { stream, schema };
+        let ffi_stream = FFI_ArrowArrayStream::new(Box::new(reader));
+        unsafe { std::ptr::write(out_stream_ptr.cast::<FFI_ArrowArrayStream>(), ffi_stream) };
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow58::ffi::FFI_ArrowArray;
     use paimon::spec::{BinaryRow, DataFileMeta};
     use paimon::{DeletionFile, RowRange};
 
@@ -835,6 +1187,123 @@ mod tests {
             .unwrap()
     }
 
+    fn stream_error(error: paimon::Error) -> (i32, String) {
+        let stream = futures::stream::iter([Err(error)]).boxed();
+        let reader = PaimonStreamReader {
+            stream,
+            schema: std::sync::Arc::new(arrow_schema58::Schema::empty()),
+        };
+        let mut ffi_stream = FFI_ArrowArrayStream::new(Box::new(reader));
+        let mut array = FFI_ArrowArray::empty();
+        let code = unsafe { ffi_stream.get_next.unwrap()(&mut ffi_stream, &mut array) };
+        let message = unsafe {
+            let error = ffi_stream.get_last_error.unwrap()(&mut ffi_stream);
+            if error.is_null() {
+                String::new()
+            } else {
+                std::ffi::CStr::from_ptr(error)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
+        (code, message)
+    }
+
+    #[test]
+    fn stringified_stream_errors_keep_storage_classification() {
+        let cases = [
+            (
+                "IO operation failed on underlying storage: NotFound (permanent)",
+                Some(ERROR_NOT_FOUND_PREFIX),
+            ),
+            (
+                "IO operation failed on underlying storage: RateLimited (temporary)",
+                Some(ERROR_TRANSIENT_THROTTLING_PREFIX),
+            ),
+            (
+                "IO operation failed on underlying storage: Unexpected (temporary)",
+                Some(ERROR_TRANSIENT_SERVICE_PREFIX),
+            ),
+            (
+                "IO operation failed on underlying storage: PermissionDenied (permanent)",
+                None,
+            ),
+        ];
+        for (message, marker) in cases {
+            let classified = format!("{:#}", classify_bridge_error(anyhow!(message)));
+            if let Some(marker) = marker {
+                assert!(classified.contains(marker), "{classified}");
+            } else {
+                assert!(!classified.contains("[paimon:error="), "{classified}");
+            }
+        }
+    }
+
+    #[test]
+    fn stream_errors_keep_classification_across_arrow_ffi() {
+        let temporary = opendal_paimon::Error::new(
+            opendal_paimon::ErrorKind::RateLimited,
+            "temporary object-store failure",
+        )
+        .set_temporary();
+        let temporary = paimon::Error::IoUnexpected {
+            message: "stream read failed".to_string(),
+            source: Box::new(temporary),
+        };
+        let (code, message) = stream_error(temporary);
+        assert_eq!(code, 5); // EIO
+        assert!(
+            message.contains(ERROR_TRANSIENT_THROTTLING_PREFIX),
+            "{message}"
+        );
+
+        let temporary = opendal_paimon::Error::new(
+            opendal_paimon::ErrorKind::Unexpected,
+            "temporary object-store failure",
+        )
+        .set_temporary();
+        let temporary = paimon::Error::IoUnexpected {
+            message: "stream read failed".to_string(),
+            source: Box::new(temporary),
+        };
+        let (code, message) = stream_error(temporary);
+        assert_eq!(code, 5); // EIO
+        assert!(
+            message.contains(ERROR_TRANSIENT_SERVICE_PREFIX),
+            "{message}"
+        );
+
+        let not_found = paimon::Error::IoUnexpected {
+            message: "stream read failed".to_string(),
+            source: Box::new(opendal_paimon::Error::new(
+                opendal_paimon::ErrorKind::NotFound,
+                "missing object",
+            )),
+        };
+        let (code, message) = stream_error(not_found);
+        assert_eq!(code, 5); // EIO
+        assert!(message.contains(ERROR_NOT_FOUND_PREFIX), "{message}");
+
+        let permanent = paimon::Error::IoUnexpected {
+            message: "stream read failed".to_string(),
+            source: Box::new(opendal_paimon::Error::new(
+                opendal_paimon::ErrorKind::PermissionDenied,
+                "permanent object-store failure",
+            )),
+        };
+        let (code, message) = stream_error(permanent);
+        assert_eq!(code, 5); // EIO
+        assert!(!message.contains(ERROR_INVALID_PREFIX), "{message}");
+
+        let invalid = paimon::Error::DataInvalid {
+            message: "corrupt record batch".to_string(),
+            source: None,
+        };
+        let (code, message) = stream_error(invalid);
+        assert_eq!(code, 22); // EINVAL
+        assert!(message.contains(ERROR_INVALID_PREFIX), "{message}");
+    }
+
     #[test]
     fn scan_mode_errors_are_classified() {
         let invalid = ScanMode::parse("invalid-mode").unwrap_err();
@@ -843,13 +1312,7 @@ mod tests {
             "{invalid}"
         );
 
-        let unsupported = ScanMode::parse("data-split").unwrap_err();
-        assert!(
-            unsupported
-                .to_string()
-                .contains(ERROR_NOT_IMPLEMENTED_PREFIX),
-            "{unsupported}"
-        );
+        assert_eq!(ScanMode::parse("data-split").unwrap(), ScanMode::DataSplit);
     }
 
     #[test]
@@ -888,6 +1351,8 @@ mod tests {
             .with_raw_convertible(true)
             .build()
             .unwrap();
+        assert_eq!(with_range.merged_row_count(), Some(10));
+        assert_eq!(metadata_split_row_count(&with_range).unwrap(), None);
         let mut evolved_file = test_file("data.parquet");
         evolved_file.write_cols = Some(vec!["id".to_string()]);
         let with_write_cols = DataSplit::builder()
@@ -976,64 +1441,118 @@ mod tests {
             .unwrap();
 
         let cases = vec![
-            ("raw append", ScanMode::Auto, parquet, true),
-            ("raw with deletion vector", ScanMode::Auto, with_dv, true),
-            ("merge-on-read", ScanMode::Auto, mor.clone(), false),
-            ("row range", ScanMode::Auto, with_range, false),
-            ("data evolution", ScanMode::Auto, with_write_cols, false),
-            ("sidecar file", ScanMode::Auto, with_sidecar, false),
-            ("vortex", ScanMode::Auto, vortex.clone(), true),
+            (
+                "raw append",
+                ScanMode::Auto,
+                parquet.clone(),
+                Some((ReadPath::DirectFile, RouteReason::AutoDirectFile)),
+            ),
+            (
+                "forced data-split",
+                ScanMode::DataSplit,
+                parquet,
+                Some((ReadPath::DataSplit, RouteReason::ForcedDataSplit)),
+            ),
+            (
+                "raw with deletion vector",
+                ScanMode::Auto,
+                with_dv,
+                Some((ReadPath::DirectFile, RouteReason::AutoDirectFile)),
+            ),
+            (
+                "merge-on-read",
+                ScanMode::Auto,
+                mor.clone(),
+                Some((ReadPath::DataSplit, RouteReason::MergeSemantics)),
+            ),
+            (
+                "row range",
+                ScanMode::Auto,
+                with_range,
+                Some((ReadPath::DataSplit, RouteReason::RowRange)),
+            ),
+            (
+                "data evolution",
+                ScanMode::Auto,
+                with_write_cols,
+                Some((ReadPath::DataSplit, RouteReason::DataEvolution)),
+            ),
+            (
+                "sidecar file",
+                ScanMode::Auto,
+                with_sidecar,
+                Some((ReadPath::DataSplit, RouteReason::DataEvolution)),
+            ),
+            (
+                "vortex",
+                ScanMode::Auto,
+                vortex.clone(),
+                Some((ReadPath::DirectFile, RouteReason::AutoDirectFile)),
+            ),
             (
                 "other non-Parquet",
                 ScanMode::Auto,
                 test_split(true, "data.orc"),
-                false,
+                Some((ReadPath::DataSplit, RouteReason::UnsupportedFormat)),
             ),
             (
                 "legacy compacted file without delete count",
                 ScanMode::Auto,
                 legacy_level,
-                true,
+                Some((ReadPath::DirectFile, RouteReason::AutoDirectFile)),
             ),
             (
                 "dedicated vector file",
                 ScanMode::Auto,
                 dedicated_vector,
-                false,
+                Some((ReadPath::DataSplit, RouteReason::DedicatedVectorFile)),
             ),
             (
                 "data file delete count",
                 ScanMode::Auto,
                 with_delete_count,
-                false,
+                Some((ReadPath::DataSplit, RouteReason::MergeSemantics)),
             ),
-            ("schema evolution", ScanMode::Auto, old_schema, false),
+            (
+                "schema evolution",
+                ScanMode::Auto,
+                old_schema,
+                Some((ReadPath::DataSplit, RouteReason::SchemaEvolution)),
+            ),
             (
                 "mixed row tracking",
                 ScanMode::Auto,
                 mixed_row_tracking,
-                false,
+                Some((ReadPath::DataSplit, RouteReason::DataEvolution)),
             ),
             (
                 "overlapping row ids",
                 ScanMode::Auto,
                 overlapping_row_ids,
-                false,
+                Some((ReadPath::DataSplit, RouteReason::DataEvolution)),
             ),
             (
                 "forced direct merge-on-read",
                 ScanMode::DirectFile,
                 mor,
-                false,
+                None,
             ),
-            ("forced direct vortex", ScanMode::DirectFile, vortex, true),
+            (
+                "forced direct vortex",
+                ScanMode::DirectFile,
+                vortex,
+                Some((ReadPath::DirectFile, RouteReason::ForcedDirectFile)),
+            ),
         ];
-        for (name, mode, split, supported) in cases {
-            assert_eq!(
-                decide_route(mode, &split, 0, TableReadSemantics::default()).is_ok(),
-                supported,
-                "{name}"
-            );
+        for (name, mode, split, expected) in cases {
+            let actual = decide_route(mode, &split, 0, TableReadSemantics::default());
+            match expected {
+                Some((path, reason)) => {
+                    let actual = actual.unwrap();
+                    assert_eq!((actual.read_path, actual.reason), (path, reason), "{name}");
+                }
+                None => assert!(actual.is_err(), "{name}"),
+            }
         }
     }
 
@@ -1044,7 +1563,11 @@ mod tests {
             merge_engine: Some(MergeEngine::PartialUpdate),
             ..Default::default()
         };
-        assert!(decide_route(ScanMode::Auto, &raw, 0, partial_update).is_err());
+        let route = decide_route(ScanMode::Auto, &raw, 0, partial_update).unwrap();
+        assert_eq!(
+            (route.read_path, route.reason),
+            (ReadPath::DataSplit, RouteReason::MergeSemantics)
+        );
 
         let aggregation_mor_dv = TableReadSemantics {
             merge_engine: Some(MergeEngine::Aggregation),
@@ -1053,7 +1576,11 @@ mod tests {
             has_blob_fields: false,
             has_partition_keys: false,
         };
-        assert!(decide_route(ScanMode::Auto, &raw, 0, aggregation_mor_dv).is_err());
+        let route = decide_route(ScanMode::Auto, &raw, 0, aggregation_mor_dv).unwrap();
+        assert_eq!(
+            (route.read_path, route.reason),
+            (ReadPath::DataSplit, RouteReason::MergeSemantics)
+        );
 
         let mut compacted_file = test_file("compacted.parquet");
         compacted_file.level = 1;
@@ -1075,7 +1602,11 @@ mod tests {
             has_blob_fields: false,
             has_partition_keys: false,
         };
-        assert!(decide_route(ScanMode::Auto, &compacted, 0, materialized_dv).is_ok());
+        let route = decide_route(ScanMode::Auto, &compacted, 0, materialized_dv).unwrap();
+        assert_eq!(
+            (route.read_path, route.reason),
+            (ReadPath::DirectFile, RouteReason::AutoDirectFile)
+        );
 
         let mut legacy_file = test_file("legacy.parquet");
         legacy_file.level = 1;
@@ -1093,10 +1624,10 @@ mod tests {
             merge_engine: Some(MergeEngine::Deduplicate),
             ..Default::default()
         };
-        let error = decide_route(ScanMode::Auto, &legacy, 0, deduplicate).unwrap_err();
-        assert!(
-            error.to_string().contains("has no delete row count"),
-            "{error}"
+        let route = decide_route(ScanMode::Auto, &legacy, 0, deduplicate).unwrap();
+        assert_eq!(
+            (route.read_path, route.reason),
+            (ReadPath::DataSplit, RouteReason::MergeSemantics)
         );
         // Append-only tables do not assign merge semantics to the missing
         // statistic and remain safe for direct-file reads.
@@ -1114,14 +1645,97 @@ mod tests {
             has_blob_fields: true,
             ..Default::default()
         };
-        assert!(decide_route(ScanMode::Auto, &raw, 0, blob_table).is_err());
+        let route = decide_route(ScanMode::Auto, &raw, 0, blob_table).unwrap();
+        assert_eq!(
+            (route.read_path, route.reason),
+            (ReadPath::DataSplit, RouteReason::DataEvolution)
+        );
 
         let partitioned_table = TableReadSemantics {
             has_partition_keys: true,
             ..Default::default()
         };
-        let error = decide_route(ScanMode::Auto, &raw, 0, partitioned_table).unwrap_err();
-        assert!(error.to_string().contains("partition columns"), "{error}");
+        let route = decide_route(ScanMode::Auto, &raw, 0, partitioned_table).unwrap();
+        assert_eq!(
+            (route.read_path, route.reason),
+            (ReadPath::DataSplit, RouteReason::PartitionColumns)
+        );
+    }
+
+    #[test]
+    fn descriptor_round_trip_and_corruption_detection() {
+        let split = test_split(false, "data.parquet");
+        let encoded = encode_split_metadata("file:///tmp/table", &split, 10).unwrap();
+        let (metadata, decoded) = decode_split_metadata(&encoded).unwrap();
+        assert_eq!(metadata.version, 1);
+        assert_eq!(decoded.snapshot_id(), 7);
+        validate_data_split_binding(&metadata, &decoded, "file:///tmp/table").unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(parsed["codec"], "paimon-split");
+        assert!(parsed.get("codec_version").is_none());
+        assert!(parsed.get("producer_revision").is_none());
+        assert!(parsed.get("descriptor_identity").is_none());
+        let mut unsupported: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        unsupported["codec"] = serde_json::Value::String("paimon-unknown".to_string());
+        let error = decode_split_metadata(&unsupported.to_string()).unwrap_err();
+        assert!(error.to_string().contains("unsupported Paimon"));
+
+        let mut malformed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        malformed["payload"] = serde_json::Value::String("not-base64".to_string());
+        assert!(decode_split_metadata(&malformed.to_string()).is_err());
+
+        let mut wrong_version: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        wrong_version["version"] = serde_json::Value::from(2);
+        assert!(decode_split_metadata(&wrong_version.to_string()).is_err());
+
+        let mut invalid_split = serde_json::to_value(split).unwrap();
+        invalid_split["data_files"][0]["_ROW_COUNT"] = serde_json::Value::from(-1);
+        let invalid_split: DataSplit = serde_json::from_value(invalid_split).unwrap();
+        let error = encode_split_metadata("file:///tmp/table", &invalid_split, 10).unwrap_err();
+        assert!(error.to_string().contains(ERROR_INVALID_PREFIX), "{error}");
+    }
+
+    #[test]
+    fn descriptor_binding_rejects_outer_payload_mismatches() {
+        let split = test_split(false, "data.parquet");
+        let encoded = encode_split_metadata("file:///tmp/table", &split, 10).unwrap();
+        let (metadata, decoded) = decode_split_metadata(&encoded).unwrap();
+
+        for (name, altered, expected) in [
+            (
+                "table",
+                PaimonMetadata {
+                    table_location: Some("file:///tmp/other".to_string()),
+                    ..metadata.clone()
+                },
+                "table location",
+            ),
+            (
+                "snapshot",
+                PaimonMetadata {
+                    snapshot_id: metadata.snapshot_id.map(|value| value + 1),
+                    ..metadata.clone()
+                },
+                "snapshot",
+            ),
+            (
+                "bucket",
+                PaimonMetadata {
+                    bucket: metadata.bucket.map(|value| value + 1),
+                    ..metadata.clone()
+                },
+                "bucket",
+            ),
+        ] {
+            let error = validate_data_split_binding(&altered, &decoded, "file:///tmp/table")
+                .expect_err(name);
+            assert!(error.to_string().contains(expected), "{name}: {error}");
+        }
+
+        let error = validate_data_split_binding(&metadata, &decoded, "file:///tmp/manifest-table")
+            .unwrap_err();
+        assert!(error.to_string().contains("manifest table location"));
     }
 
     #[test]
@@ -1129,15 +1743,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let table_location = directory.path().join("snap-table");
         let table_location = table_location.to_str().unwrap();
-        let snapshot_id = crate::paimon_testutil::paimon_create_test_table(
+        let table_info = crate::paimon_testutil::paimon_create_test_table(
             table_location,
             10,
             "append",
+            Vec::new(),
+            Vec::new(),
             Vec::new(),
             "parquet",
             0,
         )
         .unwrap();
+        let snapshot_id = *table_info.snapshot_ids.last().unwrap();
 
         let schema0_path = format!("{table_location}/schema/schema-0");
         let mut historical_schema: serde_json::Value =
@@ -1185,15 +1802,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let table_location = directory.path().join("snap-table");
         let table_location = table_location.to_str().unwrap();
-        let snapshot_id = crate::paimon_testutil::paimon_create_test_table(
+        let table_info = crate::paimon_testutil::paimon_create_test_table(
             table_location,
             10,
             "append",
+            Vec::new(),
+            Vec::new(),
             Vec::new(),
             "parquet",
             0,
         )
         .unwrap();
+        let snapshot_id = *table_info.snapshot_ids.last().unwrap();
 
         // A pinned snapshot that exists must load.
         let table = TOKIO_RT
@@ -1233,15 +1853,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let table_location = directory.path().join("snap-table");
         let table_location = table_location.to_str().unwrap();
-        let snapshot_id = crate::paimon_testutil::paimon_create_test_table(
+        let table_info = crate::paimon_testutil::paimon_create_test_table(
             table_location,
             10,
             "append",
+            Vec::new(),
+            Vec::new(),
             Vec::new(),
             "parquet",
             0,
         )
         .unwrap();
+        let snapshot_id = *table_info.snapshot_ids.last().unwrap();
         // Corrupt metadata is invalid data, not evidence that the snapshot
         // expired. It must not carry refresh advice.
         let snapshot_file = format!("{table_location}/snapshot/snapshot-{snapshot_id}");

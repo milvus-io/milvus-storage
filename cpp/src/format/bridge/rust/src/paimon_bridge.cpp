@@ -14,7 +14,11 @@
 
 #include <cerrno>
 #include <string_view>
+#include <utility>
 
+#include <arrow/array.h>
+#include <arrow/record_batch.h>
+#include <arrow/type.h>
 #include <arrow/util/io_util.h>
 
 #include "bridge_util.h"
@@ -25,11 +29,13 @@
 namespace milvus_storage::paimon {
 namespace {
 
+// Keep these markers in sync with ERROR_*_PREFIX in paimon_bridgeimpl.rs.
 constexpr std::string_view kInvalidMarker = "[paimon:error=invalid]";
 constexpr std::string_view kNotImplementedMarker = "[paimon:error=not-implemented]";
 constexpr std::string_view kNotFoundMarker = "[paimon:error=not-found]";
 constexpr std::string_view kTransientThrottlingMarker = "[paimon:error=transient-throttling]";
 constexpr std::string_view kTransientServiceMarker = "[paimon:error=transient-service]";
+constexpr std::string_view kPaimonErrorMarker = "[paimon:error=";
 
 std::string StripMarker(std::string_view message, std::string_view marker) {
   auto position = message.find(marker);
@@ -56,6 +62,51 @@ arrow::Result<T> CatchRustResult(Fn&& fn) {
   }
 }
 
+arrow::Status TranslatePaimonStreamStatus(arrow::Status status) {
+  if (status.ok() || status.message().find(kPaimonErrorMarker) == std::string_view::npos) {
+    return status;
+  }
+  return MakePaimonBridgeErrorStatus(status.message());
+}
+
+class PaimonStreamReader final : public arrow::RecordBatchReader {
+  public:
+  PaimonStreamReader(std::shared_ptr<arrow::RecordBatchReader> inner, std::shared_ptr<arrow::Schema> output_schema)
+      : inner_(std::move(inner)), output_schema_(std::move(output_schema)) {}
+
+  std::shared_ptr<arrow::Schema> schema() const override { return output_schema_; }
+
+  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override {
+    ARROW_RETURN_NOT_OK(TranslatePaimonStreamStatus(inner_->ReadNext(batch)));
+    if (!*batch) {
+      return arrow::Status::OK();
+    }
+    if ((*batch)->num_columns() != output_schema_->num_fields()) {
+      return arrow::Status::Invalid("Paimon data-split stream returned an unexpected column count");
+    }
+    for (int index = 0; index < output_schema_->num_fields(); ++index) {
+      const auto& actual = (*batch)->schema()->field(index);
+      const auto& expected = output_schema_->field(index);
+      if (actual->name() != expected->name() || !actual->type()->Equals(expected->type())) {
+        return arrow::Status::Invalid("Paimon data-split stream schema mismatch at column ", index, ": expected ",
+                                      expected->ToString(), ", got ", actual->ToString());
+      }
+      if (!expected->nullable() && (*batch)->column(index)->null_count() != 0) {
+        return arrow::Status::Invalid("Paimon data-split stream returned nulls for non-nullable column: ",
+                                      expected->name());
+      }
+    }
+    *batch = arrow::RecordBatch::Make(output_schema_, (*batch)->num_rows(), (*batch)->columns());
+    return arrow::Status::OK();
+  }
+
+  arrow::Status Close() override { return TranslatePaimonStreamStatus(inner_->Close()); }
+
+  private:
+  std::shared_ptr<arrow::RecordBatchReader> inner_;
+  std::shared_ptr<arrow::Schema> output_schema_;
+};
+
 }  // namespace
 
 arrow::Status MakePaimonBridgeErrorStatus(std::string_view message) {
@@ -79,6 +130,13 @@ arrow::Status MakePaimonBridgeErrorStatus(std::string_view message) {
   }
   return arrow::Status::IOError(message);
 }
+
+namespace internal {
+std::shared_ptr<arrow::RecordBatchReader> WrapPaimonRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner,
+                                                                      std::shared_ptr<arrow::Schema> output_schema) {
+  return std::make_shared<PaimonStreamReader>(std::move(inner), std::move(output_schema));
+}
+}  // namespace internal
 
 arrow::Result<std::vector<PaimonFileInfo>> PlanFiles(const std::string& table_location,
                                                      int64_t snapshot_id,
@@ -114,20 +172,79 @@ arrow::Result<std::vector<uint64_t>> ReadDeletionVector(const std::string& path,
   });
 }
 
+arrow::Result<PaimonTestTableInfo> CreateTestTableInfo(const std::string& table_location,
+                                                       uint64_t num_rows,
+                                                       const std::string& mode,
+                                                       const std::vector<int64_t>& deleted_positions,
+                                                       const StorageOptions& storage_options,
+                                                       const std::string& file_format,
+                                                       uint32_t dimension) {
+  return CatchRustResult<PaimonTestTableInfo>([&]() {
+    rust::Vec<int64_t> positions;
+    positions.reserve(deleted_positions.size());
+    for (auto position : deleted_positions) {
+      positions.push_back(position);
+    }
+    rust::Vec<rust::String> keys;
+    rust::Vec<rust::String> values;
+    ConvertStorageOptions(storage_options, keys, values);
+    auto info =
+        ffi::paimon_create_test_table(rust::Str(table_location), num_rows, rust::Str(mode), std::move(positions),
+                                      std::move(keys), std::move(values), rust::Str(file_format), dimension);
+    return PaimonTestTableInfo{{info.snapshot_ids.begin(), info.snapshot_ids.end()}};
+  });
+}
+
 arrow::Result<int64_t> CreateTestTable(const std::string& table_location,
                                        uint64_t num_rows,
                                        const std::string& mode,
                                        const std::vector<int64_t>& deleted_positions,
                                        const std::string& file_format,
                                        uint32_t dimension) {
-  return CatchRustResult<int64_t>([&]() {
-    rust::Vec<int64_t> positions;
-    positions.reserve(deleted_positions.size());
-    for (auto position : deleted_positions) {
-      positions.push_back(position);
+  ARROW_ASSIGN_OR_RAISE(
+      auto info, CreateTestTableInfo(table_location, num_rows, mode, deleted_positions, {}, file_format, dimension));
+  if (info.snapshot_ids.empty()) {
+    return arrow::Status::Invalid("Paimon test table has no committed snapshot");
+  }
+  return info.snapshot_ids.back();
+}
+
+arrow::Result<std::shared_ptr<BlockingPaimonDataSplitReader>> BlockingPaimonDataSplitReader::Open(
+    const std::string& metadata_json,
+    const std::string& expected_table_location,
+    const StorageOptions& storage_options) {
+  return CatchRustResult<std::shared_ptr<BlockingPaimonDataSplitReader>>([&]() {
+    rust::Vec<rust::String> keys;
+    rust::Vec<rust::String> values;
+    ConvertStorageOptions(storage_options, keys, values);
+    return std::make_shared<BlockingPaimonDataSplitReader>(ffi::paimon_open_data_split_reader(
+        rust::Str(metadata_json), rust::Str(expected_table_location), std::move(keys), std::move(values)));
+  });
+}
+
+arrow::Status BlockingPaimonDataSplitReader::ExportSchema(ArrowSchema* schema) const {
+  if (schema == nullptr) {
+    return arrow::Status::Invalid("cannot export Paimon schema into a null pointer");
+  }
+  try {
+    impl_->export_schema(reinterpret_cast<uint8_t*>(schema));
+    return arrow::Status::OK();
+  } catch (const rust::cxxbridge1::Error& error) {
+    return MakePaimonBridgeErrorStatus(error.what());
+  }
+}
+
+arrow::Result<ArrowArrayStream> BlockingPaimonDataSplitReader::OpenStream(
+    const std::vector<std::string>& projected_columns) const {
+  return CatchRustResult<ArrowArrayStream>([&]() {
+    rust::Vec<rust::String> columns;
+    columns.reserve(projected_columns.size());
+    for (const auto& column : projected_columns) {
+      columns.push_back(rust::String(column));
     }
-    return ffi::paimon_create_test_table(rust::Str(table_location), num_rows, rust::Str(mode), std::move(positions),
-                                         rust::Str(file_format), dimension);
+    ArrowArrayStream stream{};
+    impl_->open_stream(std::move(columns), reinterpret_cast<uint8_t*>(&stream));
+    return stream;
   });
 }
 
