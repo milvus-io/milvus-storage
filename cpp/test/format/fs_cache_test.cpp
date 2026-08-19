@@ -77,6 +77,30 @@ TEST_F(FileSystemCacheTest, LRUCacheInstantiation) {
   EXPECT_FALSE(s2.has_value());
 }
 
+TEST_F(FileSystemCacheTest, LRUCacheList) {
+  LRUCache<int, std::string> cache(2);
+  cache.put(1, "a");
+  cache.put(2, "b");
+
+  auto entries = cache.list();
+  ASSERT_EQ(entries.size(), 2u);
+
+  bool found_a = false;
+  bool found_b = false;
+  for (const auto& [key, value] : entries) {
+    found_a = found_a || (key == 1 && value == "a");
+    found_b = found_b || (key == 2 && value == "b");
+  }
+  EXPECT_TRUE(found_a);
+  EXPECT_TRUE(found_b);
+
+  // Listing must not update recency. Entry 1 remains the least recently used.
+  cache.put(3, "c");
+  EXPECT_FALSE(cache.get(1).has_value());
+  EXPECT_EQ(cache.get(2).value(), "b");
+  EXPECT_EQ(cache.get(3).value(), "c");
+}
+
 TEST_F(FileSystemCacheTest, Basic) {
   auto props1 = MakeProperties("A");
   auto props2 = MakeProperties("B");
@@ -103,6 +127,79 @@ TEST_F(FileSystemCacheTest, Basic) {
 
   cache.clean();
   EXPECT_EQ(cache.size(), 0);
+}
+
+TEST_F(FileSystemCacheTest, List) {
+  auto props1 = MakeProperties("LIST_A");
+  auto props2 = MakeProperties("LIST_B");
+  auto& cache = FilesystemCache::getInstance();
+
+  ASSERT_AND_ASSIGN(auto config1, cache.resolve_config(props1, "s3://localhost_LIST_A/bucket_LIST_A/file.parquet"));
+  ASSERT_AND_ASSIGN(auto config2, cache.resolve_config(props2, "s3://localhost_LIST_B/bucket_LIST_B/file.parquet"));
+
+  ASSERT_AND_ASSIGN(auto fs1, cache.get(props1, "s3://localhost_LIST_A/bucket_LIST_A/file.parquet"));
+  ASSERT_AND_ASSIGN(auto fs2, cache.get(props2, "s3://localhost_LIST_B/bucket_LIST_B/file.parquet"));
+
+  auto entries = cache.list();
+  ASSERT_EQ(entries.size(), 2u);
+
+  bool found_fs1 = false;
+  bool found_fs2 = false;
+  for (const auto& [display_key, fs] : entries) {
+    if (fs == fs1) {
+      EXPECT_EQ(display_key, "file:///tmp/fs_test_LIST_A#" + config1.GetCacheKey());
+      found_fs1 = true;
+    }
+    if (fs == fs2) {
+      EXPECT_EQ(display_key, "file:///tmp/fs_test_LIST_B#" + config2.GetCacheKey());
+      found_fs2 = true;
+    }
+  }
+  EXPECT_TRUE(found_fs1);
+  EXPECT_TRUE(found_fs2);
+
+  cache.remove(config1.GetCacheKey());
+  cache.remove(config2.GetCacheKey());
+  EXPECT_TRUE(cache.list().empty());
+}
+
+TEST_F(FileSystemCacheTest, ListReturnsRemoteDisplayKey) {
+  api::Properties props;
+  props[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+  props[PROPERTY_FS_CLOUD_PROVIDER] = std::string(kCloudProviderAWS);
+  props[PROPERTY_FS_ADDRESS] = std::string("minio.example.com:9000");
+  props[PROPERTY_FS_BUCKET_NAME] = std::string("display-bucket");
+  props[PROPERTY_FS_ACCESS_KEY_ID] = std::string("ak");
+  props[PROPERTY_FS_ACCESS_KEY_VALUE] = std::string("sk");
+
+  auto& cache = FilesystemCache::getInstance();
+  ASSERT_AND_ASSIGN(auto config, cache.resolve_config(props));
+  ASSERT_AND_ASSIGN(auto fs, cache.get(props));
+
+  auto entries = cache.list();
+  ASSERT_EQ(entries.size(), 1u);
+  EXPECT_EQ(entries[0].first, "minio.example.com:9000/display-bucket#" + config.GetCacheKey());
+  EXPECT_EQ(entries[0].second, fs);
+}
+
+TEST_F(FileSystemCacheTest, ListUsesNullForEmptyRemoteAddress) {
+  api::Properties props;
+  props[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+  props[PROPERTY_FS_CLOUD_PROVIDER] = std::string(kCloudProviderAWS);
+  props[PROPERTY_FS_ADDRESS] = std::string("");
+  props[PROPERTY_FS_BUCKET_NAME] = std::string("display-bucket");
+  props[PROPERTY_FS_ACCESS_KEY_ID] = std::string("ak");
+  props[PROPERTY_FS_ACCESS_KEY_VALUE] = std::string("sk");
+
+  auto& cache = FilesystemCache::getInstance();
+  ASSERT_AND_ASSIGN(auto config, cache.resolve_config(props));
+  ASSERT_TRUE(config.address.empty());
+  ASSERT_AND_ASSIGN(auto fs, cache.get(props));
+
+  auto entries = cache.list();
+  ASSERT_EQ(entries.size(), 1u);
+  EXPECT_EQ(entries[0].first, "<null>/display-bucket#" + config.GetCacheKey());
+  EXPECT_EQ(entries[0].second, fs);
 }
 
 TEST_F(FileSystemCacheTest, CacheKeyIncludesCredentialIdentity) {

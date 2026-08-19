@@ -191,11 +191,28 @@ FilesystemCache& FilesystemCache::getInstance() {
 
 size_t FilesystemCache::size() const { return cache_.size(); }
 
+std::vector<std::pair<std::string, ArrowFileSystemPtr>> FilesystemCache::list() const {
+  auto cached_entries = cache_.list();
+  std::vector<std::pair<std::string, ArrowFileSystemPtr>> entries;
+  entries.reserve(cached_entries.size());
+  for (const auto& cached_entry : cached_entries) {
+    entries.emplace_back(cached_entry.second->display_key, cached_entry.second->filesystem);
+  }
+  return entries;
+}
+
 void FilesystemCache::remove(const std::string& key) { cache_.remove(key); }
 
 void FilesystemCache::clean() { cache_.clean(); }
 
 void FilesystemCache::set_capacity(size_t capacity) { cache_.set_capacity(capacity); }
+
+std::string FilesystemCache::MakeDisplayKey(const ArrowFileSystemConfig& config, const std::string& cache_key) {
+  if (config.storage_type == "local") {
+    return "file://" + config.root_path + "#" + cache_key;
+  }
+  return (config.address.empty() ? "<null>" : config.address) + "/" + config.bucket_name + "#" + cache_key;
+}
 
 arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_storage::api::Properties& properties_map,
                                                                ArrowFileSystemConfig& result) {
@@ -350,14 +367,14 @@ arrow::Result<ArrowFileSystemPtr> FilesystemCache::get(const api::Properties& pr
   // protects each individual operation, but separate get() and put() calls would
   // still allow concurrent same-key misses to create multiple filesystems.
   std::lock_guard<std::mutex> lock(mutex_);
-  auto cached_fs = cache_.get(cache_key);
-  if (cached_fs.has_value()) {
-    return cached_fs.value();
+  auto cached_entry = cache_.get(cache_key);
+  if (cached_entry.has_value()) {
+    return cached_entry.value()->filesystem;
   }
 
   // Create and cache
   ARROW_ASSIGN_OR_RAISE(auto fs, CreateArrowFileSystem(config));
-  cache_.put(cache_key, fs);
+  cache_.put(cache_key, std::make_shared<CacheEntry>(CacheEntry{MakeDisplayKey(config, cache_key), fs}));
   return fs;
 }
 

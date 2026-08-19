@@ -22,6 +22,7 @@
 #include <shared_mutex>
 #include <unordered_map>
 #include <list>
+#include <vector>
 
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/util/uri.h>
@@ -331,6 +332,15 @@ class FilesystemCache {
   [[nodiscard]] size_t size() const;
 
   /**
+   * @brief List all cached filesystems without changing their recency
+   *
+   * Each returned pair is `{display_key, filesystem}`. See MakeDisplayKey()
+   * for the display key composition. The display key is not the internal cache
+   * key accepted by remove().
+   */
+  [[nodiscard]] std::vector<std::pair<std::string, ArrowFileSystemPtr>> list() const;
+
+  /**
    * @brief Remove a cached filesystem by key
    */
   void remove(const std::string& key);
@@ -350,12 +360,27 @@ class FilesystemCache {
   FilesystemCache& operator=(const FilesystemCache&) = delete;
 
   private:
+  struct CacheEntry {
+    std::string display_key;
+    ArrowFileSystemPtr filesystem;
+  };
+
+  /**
+   * @brief Build a display key from the filesystem location and its internal cache key
+   *
+   * Local format: `file://{root_path}#{cache_key}`.
+   * Remote format: `{address}/{bucket_name}#{cache_key}`. An empty remote
+   * address is rendered as `<null>`. `cache_key` is the existing internal LRU
+   * key returned by ArrowFileSystemConfig::GetCacheKey().
+   */
+  [[nodiscard]] static std::string MakeDisplayKey(const ArrowFileSystemConfig& config, const std::string& cache_key);
+
   explicit FilesystemCache(size_t capacity) : cache_(capacity) {}
   ~FilesystemCache() = default;
 
   // Filesystem instance cache (LRU)
   mutable std::mutex mutex_;
-  LRUCache<std::string, ArrowFileSystemPtr> cache_;
+  LRUCache<std::string, std::shared_ptr<CacheEntry>> cache_;
 };
 
 }  // namespace milvus_storage
