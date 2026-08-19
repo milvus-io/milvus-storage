@@ -1118,7 +1118,10 @@ impl IcebergStorage for AliyunOssStorage {
         } else {
             format!("{rel}/")
         };
-        op.remove_all(&prefixed).await.map_err(from_opendal_error)
+        op.delete_with(&prefixed)
+            .recursive(true)
+            .await
+            .map_err(from_opendal_error)
     }
 
     fn new_input(&self, path: &str) -> IcebergResult<InputFile> {

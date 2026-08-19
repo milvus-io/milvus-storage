@@ -397,6 +397,21 @@ impl LayoutChildren for MilvusLayoutChildren {
     }
 }
 
+// Vortex has no non-deprecated public API for reconstructing this schema. This custom layout must
+// know the zones child dtype before deserializing the child, so it cannot derive the dtype from the
+// child itself. Reimplementing the schema here would duplicate Vortex internals and risk silent
+// drift, so keep this compatibility call until Vortex exposes a stable public replacement.
+//
+// TODO: On the next Vortex upgrade, verify that `ZoneMap::dtype_for_stats_table` still matches
+// `StatsAccumulator::as_array()` and remains valid for reading `STATS_VERSION == 1` files.
+#[allow(
+    deprecated,
+    reason = "the zones child dtype is required before deserialization and Vortex has no public replacement"
+)]
+fn zone_map_stats_table_dtype(column_dtype: &DType, present_stats: &[Stat]) -> DType {
+    ZoneMap::dtype_for_stats_table(column_dtype, present_stats)
+}
+
 fn zones_dtype(dtype: &DType, metadata: &RowGroupZoneMapMetadata) -> VortexResult<DType> {
     let struct_fields = dtype
         .as_struct_fields_opt()
@@ -410,7 +425,7 @@ fn zones_dtype(dtype: &DType, metadata: &RowGroupZoneMapMetadata) -> VortexResul
             .field(&column.field_name)
             .ok_or_else(|| vortex_err!("Missing zonemap column {}", column.field_name))?;
         names.push(column.field_name.clone());
-        dtypes.push(ZoneMap::dtype_for_stats_table(
+        dtypes.push(zone_map_stats_table_dtype(
             &column_dtype,
             &column.present_stats,
         ));
@@ -799,13 +814,12 @@ impl RowGroupZoneMapReader {
         .into_array())
     }
 
-    #[allow(deprecated)]
     fn validate_stats_table(
         column_dtype: &DType,
         zone_array: &StructArray,
         present_stats: &[Stat],
     ) -> VortexResult<()> {
-        let expected_dtype = ZoneMap::dtype_for_stats_table(column_dtype, present_stats);
+        let expected_dtype = zone_map_stats_table_dtype(column_dtype, present_stats);
         vortex_ensure!(
             zone_array.dtype() == &expected_dtype,
             "Array dtype does not match expected zone map dtype: {expected_dtype}"
