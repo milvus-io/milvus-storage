@@ -205,8 +205,8 @@ BENCHMARK_DEFINE_F(PredicateBenchmark, ReadWithPredicate)(::benchmark::State& st
     }
 
     if (fs_metrics) {
-      total_io_bytes += fs_metrics->GetReadBytes();
-      total_io_count += fs_metrics->GetReadCount();
+      total_io_bytes += fs_metrics->TransferBytes(OpType::Read);
+      total_io_count += fs_metrics->OpCount(OpType::Read, OpStatus::Ok);
     }
   }
 

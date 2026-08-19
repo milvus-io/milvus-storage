@@ -71,10 +71,11 @@ TEST_F(CloudFsMetricsTest, TestMetricsAfterFileOperations) {
   ASSERT_NE(metrics, nullptr);
 
   metrics->Reset();
-  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 0);
-  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 0);
-  EXPECT_EQ(metrics->GetWriteCount(), 0);
-  EXPECT_EQ(metrics->GetReadCount(), 0);
+  EXPECT_EQ(metrics->MultipartCreated(), 0);
+  EXPECT_EQ(metrics->MultipartFinished(), 0);
+  EXPECT_EQ(
+      (metrics->OpCount(OpType::Write, OpStatus::Ok) + metrics->OpCount(OpType::MultipartUploadPart, OpStatus::Ok)), 0);
+  EXPECT_EQ(metrics->OpCount(OpType::Read, OpStatus::Ok), 0);
 
   // Generate a unique test file name
   std::string test_file_name = GenerateTestFileName();
@@ -98,8 +99,8 @@ TEST_F(CloudFsMetricsTest, TestMetricsAfterFileOperations) {
   // Get metrics after operations
   metrics = observable->GetMetrics();
   ASSERT_NE(metrics, nullptr);
-  EXPECT_EQ(1, metrics->GetMultiPartUploadCreated());
-  EXPECT_EQ(1, metrics->GetMultiPartUploadFinished());
+  EXPECT_EQ(1, metrics->MultipartCreated());
+  EXPECT_EQ(1, metrics->MultipartFinished());
   // S3 and Azure have different upload splitting behavior for data exceeding
   // the upload_size (10MB). S3's OutputStream splits data at part_upload_size
   // boundaries in its write loop (UploadPart with fixed part_upload_size),
@@ -109,8 +110,10 @@ TEST_F(CloudFsMetricsTest, TestMetricsAfterFileOperations) {
   // block/part counts.
   auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
   int expected_write_count = (provider.ok() && provider.ValueOrDie() == "azure") ? 1 : 2;
-  EXPECT_EQ(expected_write_count, metrics->GetWriteCount());
-  EXPECT_EQ(test_data.size(), metrics->GetWriteBytes());
+  EXPECT_EQ(expected_write_count, (metrics->OpCount(OpType::Write, OpStatus::Ok) +
+                                   metrics->OpCount(OpType::MultipartUploadPart, OpStatus::Ok)));
+  EXPECT_EQ(test_data.size(),
+            (metrics->TransferBytes(OpType::Write) + metrics->TransferBytes(OpType::MultipartUploadPart)));
 
   // Download the file
   auto download_result = arrowfs_->OpenInputStream(base_path_ + test_file_name);
@@ -125,8 +128,8 @@ TEST_F(CloudFsMetricsTest, TestMetricsAfterFileOperations) {
   metrics = observable->GetMetrics();
   ASSERT_NE(metrics, nullptr);
 
-  EXPECT_EQ(1, metrics->GetReadCount());
-  EXPECT_EQ(test_data.size(), metrics->GetReadBytes());
+  EXPECT_EQ(1, metrics->OpCount(OpType::Read, OpStatus::Ok));
+  EXPECT_EQ(test_data.size(), metrics->TransferBytes(OpType::Read));
 }
 
 // Test that multiple small writes below upload_size are batched into a single
@@ -163,11 +166,13 @@ TEST_F(CloudFsMetricsTest, TestBatchingBelowUploadSize) {
   // so Created/Finished = 1.
   auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
   bool is_azure = provider.ok() && provider.ValueOrDie() == "azure";
-  EXPECT_EQ(is_azure ? 1 : 0, metrics->GetMultiPartUploadCreated());
-  EXPECT_EQ(is_azure ? 1 : 0, metrics->GetMultiPartUploadFinished());
+  EXPECT_EQ(is_azure ? 1 : 0, metrics->MultipartCreated());
+  EXPECT_EQ(is_azure ? 1 : 0, metrics->MultipartFinished());
   // 9 x 1MB = 9MB < 10MB upload_size, all buffered and flushed as 1 upload
-  EXPECT_EQ(1, metrics->GetWriteCount());
-  EXPECT_EQ(static_cast<int64_t>(num_chunks) * chunk_size, metrics->GetWriteBytes());
+  EXPECT_EQ(
+      1, (metrics->OpCount(OpType::Write, OpStatus::Ok) + metrics->OpCount(OpType::MultipartUploadPart, OpStatus::Ok)));
+  EXPECT_EQ(static_cast<int64_t>(num_chunks) * chunk_size,
+            (metrics->TransferBytes(OpType::Write) + metrics->TransferBytes(OpType::MultipartUploadPart)));
 
   // Verify content
   const int64_t total_size = static_cast<int64_t>(num_chunks) * chunk_size;
@@ -192,8 +197,8 @@ TEST_F(CloudFsMetricsTest, TestReadMetrics) {
 
   // Reset metrics before read
   metrics->Reset();
-  EXPECT_EQ(0, metrics->GetReadCount());
-  EXPECT_EQ(0, metrics->GetReadBytes());
+  EXPECT_EQ(0, metrics->OpCount(OpType::Read, OpStatus::Ok));
+  EXPECT_EQ(0, metrics->TransferBytes(OpType::Read));
 
   // Read the file
   ASSERT_OK_AND_ASSIGN(auto input_stream, arrowfs_->OpenInputStream(base_path_ + test_file_name));
@@ -203,8 +208,8 @@ TEST_F(CloudFsMetricsTest, TestReadMetrics) {
 
   metrics = observable->GetMetrics();
   ASSERT_NE(metrics, nullptr);
-  EXPECT_EQ(1, metrics->GetReadCount());
-  EXPECT_EQ(static_cast<int64_t>(test_data.size()), metrics->GetReadBytes());
+  EXPECT_EQ(1, metrics->OpCount(OpType::Read, OpStatus::Ok));
+  EXPECT_EQ(static_cast<int64_t>(test_data.size()), metrics->TransferBytes(OpType::Read));
 }
 
 TEST_F(CloudFsMetricsTest, TestOpenInputDoesNotIncrementReadMetrics) {
@@ -221,13 +226,13 @@ TEST_F(CloudFsMetricsTest, TestOpenInputDoesNotIncrementReadMetrics) {
 
   metrics->Reset();
   ASSERT_OK_AND_ASSIGN(auto input_stream, arrowfs_->OpenInputStream(base_path_ + test_file_name));
-  EXPECT_EQ(0, metrics->GetReadCount());
-  EXPECT_EQ(0, metrics->GetReadBytes());
+  EXPECT_EQ(0, metrics->OpCount(OpType::Read, OpStatus::Ok));
+  EXPECT_EQ(0, metrics->TransferBytes(OpType::Read));
   ASSERT_STATUS_OK(input_stream->Close());
 
   ASSERT_OK_AND_ASSIGN(auto input_file, arrowfs_->OpenInputFile(base_path_ + test_file_name));
-  EXPECT_EQ(0, metrics->GetReadCount());
-  EXPECT_EQ(0, metrics->GetReadBytes());
+  EXPECT_EQ(0, metrics->OpCount(OpType::Read, OpStatus::Ok));
+  EXPECT_EQ(0, metrics->TransferBytes(OpType::Read));
   ASSERT_STATUS_OK(input_file->Close());
 }
 
@@ -247,34 +252,34 @@ TEST_F(CloudFsMetricsTest, TestReadMetricsCountSuccessfulReads) {
   ASSERT_OK_AND_ASSIGN(auto input_stream, arrowfs_->OpenInputStream(base_path_ + test_file_name));
   ASSERT_OK_AND_ASSIGN(auto first, input_stream->Read(5));
   EXPECT_EQ(first->ToString(), "01234");
-  EXPECT_EQ(1, metrics->GetReadCount());
-  EXPECT_EQ(5, metrics->GetReadBytes());
+  EXPECT_EQ(1, metrics->OpCount(OpType::Read, OpStatus::Ok));
+  EXPECT_EQ(5, metrics->TransferBytes(OpType::Read));
 
   ASSERT_OK_AND_ASSIGN(auto second, input_stream->Read(7));
   EXPECT_EQ(second->ToString(), "56789ab");
-  EXPECT_EQ(2, metrics->GetReadCount());
-  EXPECT_EQ(12, metrics->GetReadBytes());
+  EXPECT_EQ(2, metrics->OpCount(OpType::Read, OpStatus::Ok));
+  EXPECT_EQ(12, metrics->TransferBytes(OpType::Read));
   ASSERT_STATUS_OK(input_stream->Close());
 
   metrics->Reset();
   ASSERT_OK_AND_ASSIGN(auto input_file, arrowfs_->OpenInputFile(base_path_ + test_file_name));
-  EXPECT_EQ(0, metrics->GetReadCount());
-  EXPECT_EQ(0, metrics->GetReadBytes());
+  EXPECT_EQ(0, metrics->OpCount(OpType::Read, OpStatus::Ok));
+  EXPECT_EQ(0, metrics->TransferBytes(OpType::Read));
 
   ASSERT_OK_AND_ASSIGN(auto range_a, input_file->ReadAt(0, 4));
   EXPECT_EQ(range_a->ToString(), "0123");
-  EXPECT_EQ(1, metrics->GetReadCount());
-  EXPECT_EQ(4, metrics->GetReadBytes());
+  EXPECT_EQ(1, metrics->OpCount(OpType::Read, OpStatus::Ok));
+  EXPECT_EQ(4, metrics->TransferBytes(OpType::Read));
 
   ASSERT_OK_AND_ASSIGN(auto range_b, input_file->ReadAt(10, 6));
   EXPECT_EQ(range_b->ToString(), "abcdef");
-  EXPECT_EQ(2, metrics->GetReadCount());
-  EXPECT_EQ(10, metrics->GetReadBytes());
+  EXPECT_EQ(2, metrics->OpCount(OpType::Read, OpStatus::Ok));
+  EXPECT_EQ(10, metrics->TransferBytes(OpType::Read));
 
   ASSERT_OK_AND_ASSIGN(auto eof, input_file->ReadAt(test_data.size(), 1024));
   EXPECT_EQ(eof->size(), 0);
-  EXPECT_EQ(2, metrics->GetReadCount());
-  EXPECT_EQ(10, metrics->GetReadBytes());
+  EXPECT_EQ(2, metrics->OpCount(OpType::Read, OpStatus::Ok));
+  EXPECT_EQ(10, metrics->TransferBytes(OpType::Read));
   ASSERT_STATUS_OK(input_file->Close());
 }
 
@@ -297,19 +302,19 @@ TEST_F(CloudFsMetricsTest, TestReadMetricsCountSuccessfulAsyncReads) {
   auto read_result = input_file->ReadAsync({}, 5, 7).result();
   ASSERT_STATUS_OK(read_result.status());
   ASSERT_EQ(read_result.ValueOrDie()->size(), 7);
-  EXPECT_EQ(metrics->GetReadCount(), 1);
-  EXPECT_EQ(metrics->GetReadBytes(), 7);
+  EXPECT_EQ(metrics->OpCount(OpType::Read, OpStatus::Ok), 1);
+  EXPECT_EQ(metrics->TransferBytes(OpType::Read), 7);
 
   auto eof_result = input_file->ReadAsync({}, test_data_size, 1024).result();
   ASSERT_STATUS_OK(eof_result.status());
   ASSERT_EQ(eof_result.ValueOrDie()->size(), 0);
-  EXPECT_EQ(metrics->GetReadCount(), 1);
-  EXPECT_EQ(metrics->GetReadBytes(), 7);
+  EXPECT_EQ(metrics->OpCount(OpType::Read, OpStatus::Ok), 1);
+  EXPECT_EQ(metrics->TransferBytes(OpType::Read), 7);
 
   auto failed_result = input_file->ReadAsync({}, -1, 1).result();
   ASSERT_STATUS_NOT_OK(failed_result.status());
-  EXPECT_EQ(metrics->GetReadCount(), 1);
-  EXPECT_EQ(metrics->GetReadBytes(), 7);
+  EXPECT_EQ(metrics->OpCount(OpType::Read, OpStatus::Ok), 1);
+  EXPECT_EQ(metrics->TransferBytes(OpType::Read), 7);
 
   metrics->Reset();
   std::vector<arrow::io::ReadRange> ranges = {
@@ -337,8 +342,8 @@ TEST_F(CloudFsMetricsTest, TestReadMetricsCountSuccessfulAsyncReads) {
   ASSERT_STATUS_OK(range_3.status());
   EXPECT_EQ(range_3.ValueOrDie()->size(), 6);
 
-  EXPECT_EQ(metrics->GetReadCount(), 2);
-  EXPECT_EQ(metrics->GetReadBytes(), 10);
+  EXPECT_EQ(metrics->OpCount(OpType::Read, OpStatus::Ok), 2);
+  EXPECT_EQ(metrics->TransferBytes(OpType::Read), 10);
 
   metrics->Reset();
   std::vector<arrow::io::ReadRange> invalid_ranges = {{-1, 1}};
@@ -346,8 +351,8 @@ TEST_F(CloudFsMetricsTest, TestReadMetricsCountSuccessfulAsyncReads) {
   ASSERT_EQ(failed_futures.size(), 1);
   auto failed_range = failed_futures[0].result();
   ASSERT_STATUS_NOT_OK(failed_range.status());
-  EXPECT_EQ(metrics->GetReadCount(), 0);
-  EXPECT_EQ(metrics->GetReadBytes(), 0);
+  EXPECT_EQ(metrics->OpCount(OpType::Read, OpStatus::Ok), 0);
+  EXPECT_EQ(metrics->TransferBytes(OpType::Read), 0);
 
   ASSERT_STATUS_OK(input_file->Close());
 }

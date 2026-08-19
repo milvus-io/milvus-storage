@@ -30,6 +30,7 @@ void run_filesystem_suite(void);
 void run_fiu_suite(void);
 void run_segment_suite(void);
 void run_runtime_suite(void);
+void run_metrics_snapshot_suite(void);
 
 int main(void) {
   loon_thread_pool_singleton(4);
@@ -42,6 +43,7 @@ int main(void) {
   run_filesystem_suite();
   run_segment_suite();
   run_fiu_suite();
+  run_metrics_snapshot_suite();
 
   loon_reset_context();
   loon_thread_pool_singleton_release();

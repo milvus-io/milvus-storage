@@ -588,7 +588,7 @@ TEST_F(PackedIntegrationTest, ParquetPrebufferHoleSizeLimitReducesReadIOCountV2)
       return arrow::Status::Invalid("unexpected table shape: rows=", table->num_rows(),
                                     ", columns=", table->num_columns());
     }
-    return metrics->GetReadCount();
+    return metrics->OpCount(OpType::Read, OpStatus::Ok);
   };
 
   ASSERT_AND_ASSIGN(auto small_hole_read_count, read_count_with_hole_limit(kPrebufferSmallHoleLimit));
