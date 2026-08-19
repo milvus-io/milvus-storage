@@ -47,6 +47,22 @@ typedef struct LoonFilesystemMetricsSnapshot {  // NOLINT
 } LoonFilesystemMetricsSnapshot;  // NOLINT
 
 /**
+ * Metrics for one cached filesystem.
+ */
+typedef struct LoonFilesystemMetricsEntry {  // NOLINT
+  char* display_key;
+  LoonFilesystemMetricsSnapshot metrics;
+} LoonFilesystemMetricsEntry;  // NOLINT
+
+/**
+ * Metrics for all cached filesystems.
+ */
+typedef struct LoonFilesystemMetricsList {  // NOLINT
+  LoonFilesystemMetricsEntry* entries;
+  uint32_t count;
+} LoonFilesystemMetricsList;  // NOLINT
+
+/**
  * Get metrics from a filesystem handle.
  * Returns metrics if the filesystem is observable, otherwise returns error.
  *
@@ -56,6 +72,22 @@ typedef struct LoonFilesystemMetricsSnapshot {  // NOLINT
  */
 FFI_EXPORT LoonFFIResult loon_filesystem_get_metrics(FileSystemHandle handle,
                                                      LoonFilesystemMetricsSnapshot* out_metrics);
+
+/**
+ * List metrics for all cached filesystems.
+ *
+ * @param out_list The output metrics list. Must be released with
+ *                 loon_filesystem_free_metrics_list.
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_filesystem_list_metrics(LoonFilesystemMetricsList* out_list);
+
+/**
+ * Release a filesystem metrics list.
+ *
+ * @param list The list returned by loon_filesystem_list_metrics.
+ */
+FFI_EXPORT void loon_filesystem_free_metrics_list(LoonFilesystemMetricsList* list);
 
 /**
  * Reset all metrics for a filesystem.

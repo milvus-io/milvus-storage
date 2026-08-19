@@ -364,6 +364,67 @@ static void test_filesystem_metrics(void) {
   loon_filesystem_destroy(fs_handle);
 }
 
+static void test_filesystem_metrics_list(void) {
+  if (is_cloud_env()) {
+    return;
+  }
+
+  loon_close_filesystems();
+
+  LoonFilesystemMetricsList metrics_list = {0};
+  LoonFFIResult rc = loon_filesystem_list_metrics(&metrics_list);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert_int_eq(metrics_list.count, 0);
+  ck_assert(metrics_list.entries == NULL);
+
+  FileSystemHandle fs_a;
+  FileSystemHandle fs_b;
+  get_test_filesystem(&fs_a, "test_filesystem_metrics_list_a");
+  get_test_filesystem(&fs_b, "test_filesystem_metrics_list_b");
+  write_single_file(&fs_a);
+  write_single_file(&fs_b);
+
+  rc = loon_filesystem_list_metrics(&metrics_list);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert_int_eq(metrics_list.count, 2);
+  ck_assert(metrics_list.entries != NULL);
+  ck_assert(metrics_list.entries[0].display_key != NULL);
+  ck_assert(metrics_list.entries[1].display_key != NULL);
+  ck_assert(strcmp(metrics_list.entries[0].display_key, metrics_list.entries[1].display_key) != 0);
+
+  bool found_a = false;
+  bool found_b = false;
+  const char* prefix_a = "file://test_filesystem_metrics_list_a#fs:";
+  const char* prefix_b = "file://test_filesystem_metrics_list_b#fs:";
+  for (uint32_t i = 0; i < metrics_list.count; ++i) {
+    found_a = found_a || strncmp(metrics_list.entries[i].display_key, prefix_a, strlen(prefix_a)) == 0;
+    found_b = found_b || strncmp(metrics_list.entries[i].display_key, prefix_b, strlen(prefix_b)) == 0;
+  }
+  ck_assert(found_a);
+  ck_assert(found_b);
+
+  ck_assert_int_gt(metrics_list.entries[0].metrics.write_count, 0);
+  ck_assert_int_gt(metrics_list.entries[1].metrics.write_count, 0);
+
+  loon_filesystem_free_metrics_list(&metrics_list);
+  ck_assert_int_eq(metrics_list.count, 0);
+  ck_assert(metrics_list.entries == NULL);
+
+  rc = loon_filesystem_list_metrics(NULL);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_filesystem_delete_file(fs_a, TEST_FILE_NAME, strlen(TEST_FILE_NAME));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_filesystem_delete_file(fs_b, TEST_FILE_NAME, strlen(TEST_FILE_NAME));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  loon_filesystem_destroy(fs_a);
+  loon_filesystem_destroy(fs_b);
+  loon_close_filesystems();
+  ck_assert_int_eq(remove("test_filesystem_metrics_list_a"), 0);
+  ck_assert_int_eq(remove("test_filesystem_metrics_list_b"), 0);
+}
+
 // Test filesystem get_file_stats function
 static void test_filesystem_get_file_stats(void) {
   LoonFFIResult rc;
@@ -930,6 +991,7 @@ void run_filesystem_suite(void) {
   RUN_TEST(test_filesystem_delete_file);
   RUN_TEST(test_filesystem_dir_operator);
   RUN_TEST(test_filesystem_metrics);
+  RUN_TEST(test_filesystem_metrics_list);
   RUN_TEST(test_filesystem_get_file_stats);
   RUN_TEST(test_filesystem_file_not_found);
   RUN_TEST(test_filesystem_write_with_metadata);

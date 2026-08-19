@@ -21,6 +21,7 @@
 #include <functional>
 #include <list>
 #include <optional>
+#include <vector>
 
 #include <arrow/status.h>
 #include <arrow/result.h>
@@ -85,6 +86,17 @@ class LRUCache {
   [[nodiscard]] size_t size() const {
     std::shared_lock lock(mutex_);
     return cache_.size();
+  }
+
+  // List all cached entries without changing their recency.
+  [[nodiscard]] std::vector<std::pair<K, V>> list() const {
+    std::shared_lock lock(mutex_);
+    std::vector<std::pair<K, V>> entries;
+    entries.reserve(cache_.size());
+    for (const auto& [key, value_and_iterator] : cache_) {
+      entries.emplace_back(key, value_and_iterator.first);
+    }
+    return entries;
   }
 
   // Remove the cache entry by key
