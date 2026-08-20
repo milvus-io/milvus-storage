@@ -104,8 +104,54 @@ TEST_F(S3FsTest, TestExtendErrorInFs) {
   ASSERT_STATUS_NOT_OK(status);
   auto extend_status = ExtendStatusDetail::UnwrapStatus(status);
   ASSERT_NE(extend_status, nullptr);
-  ASSERT_EQ(extend_status->code(), ExtendStatusCode::NoSuchUpload);
+  ASSERT_EQ(extend_status->code(), ExtendStatusCode::AwsErrorNoSuchUpload);
   ASSERT_TRUE(status.ToString().find(extend_status->ToString()) != std::string::npos);
+}
+
+TEST(S3InternalTest, TestErrorToStatusPermanentVsTransient) {
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::NO_SUCH_KEY, Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchKey", "object gone");
+    auto status = fs::internal::ErrorToStatus("test", error);
+    ASSERT_STATUS_NOT_OK(status);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorNotFound);
+  }
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::ACCESS_DENIED, Aws::Client::RetryableType::NOT_RETRYABLE, "AccessDenied", "forbidden");
+    auto status = fs::internal::ErrorToStatus("test", error);
+    ASSERT_STATUS_NOT_OK(status);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorAccessDenied);
+  }
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::VALIDATION, Aws::Client::RetryableType::NOT_RETRYABLE, "ValidationError", "bad request");
+    auto status = fs::internal::ErrorToStatus("test", error);
+    ASSERT_STATUS_NOT_OK(status);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorNonRetryable);
+  }
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "SlowDown", "rate limited");
+    auto status = fs::internal::ErrorToStatus("test", error);
+    ASSERT_STATUS_NOT_OK(status);
+    EXPECT_TRUE(status.IsIOError());
+    EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
+  }
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::SLOW_DOWN, Aws::Client::RetryableType::RETRYABLE_THROTTLING, "SlowDown", "rate limited");
+    auto status = fs::internal::ErrorToStatus("test", error);
+    ASSERT_STATUS_NOT_OK(status);
+    EXPECT_TRUE(status.IsIOError());
+    EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
+  }
 }
 
 }  // namespace milvus_storage

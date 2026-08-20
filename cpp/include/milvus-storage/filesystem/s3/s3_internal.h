@@ -189,12 +189,58 @@ arrow::Status ErrorToStatus(const std::string& prefix,
     }
   }
 
-  if (error_type == Aws::S3::S3Errors::NO_SUCH_UPLOAD) {
-    std::string message = "AWS Error " + ss.str() + " during " + operation + " operation: " + error.GetMessage() +
-                          wrong_region_msg.value_or("");
-    return MakeExtendError(ExtendStatusCode::NoSuchUpload, message, message /* extra_info */);
+  std::string message = "AWS Error " + ss.str() + " during " + operation + " operation: " + error.GetMessage() +
+                        wrong_region_msg.value_or("");
+
+  switch (error_type) {
+    case Aws::S3::S3Errors::NO_SUCH_UPLOAD:
+      return MakeExtendError(ExtendStatusCode::AwsErrorNoSuchUpload, message, message /* extra_info */);
+    // Permanent errors: mark them so consumers do not classify them as
+    // transient/retriable (a retry or replica-reroute hits the same shared
+    // object store and fails identically).
+    case Aws::S3::S3Errors::NO_SUCH_BUCKET:
+    case Aws::S3::S3Errors::NO_SUCH_KEY:
+    case Aws::S3::S3Errors::RESOURCE_NOT_FOUND:
+      return MakeExtendError(ExtendStatusCode::AwsErrorNotFound, message, message /* extra_info */);
+    case Aws::S3::S3Errors::ACCESS_DENIED:
+    case Aws::S3::S3Errors::INVALID_ACCESS_KEY_ID:
+    case Aws::S3::S3Errors::SIGNATURE_DOES_NOT_MATCH:
+      return MakeExtendError(ExtendStatusCode::AwsErrorAccessDenied, message, message /* extra_info */);
+    case Aws::S3::S3Errors::UNKNOWN: {
+      switch (error.GetResponseCode()) {
+        case Aws::Http::HttpResponseCode::PRECONDITION_FAILED:
+          return MakeExtendError(ExtendStatusCode::AwsErrorPreConditionFailed, message, message /* extra_info */);
+        case Aws::Http::HttpResponseCode::CONFLICT:
+          return MakeExtendError(ExtendStatusCode::AwsErrorConflict, message, message /* extra_info */);
+        default:
+          break;
+      };
+      break;
+    }
+    default:
+      break;
   }
 
+  // The AWS SDK carries its own retryability verdict (the same one its internal
+  // retry loop used). An escaped error the SDK itself would not retry is
+  // permanent -- tag it so it does not fall into the plain-IOError bucket that
+  // consumers treat as transient.
+  //
+  // BUT only trust that verdict for error types the SDK actually recognized:
+  // S3-compatible backends (e.g. MinIO) return genuine transients as UNKNOWN
+  // with the non-retryable flag set -- "SlowDown" rate limiting arrives exactly
+  // this way (that is why IsConnectError() special-cases it by exception name).
+  // Tagging those permanent would invert a transient into a hard failure, so
+  // UNKNOWN and connect-style errors fall through to the plain-IOError bucket
+  // (fail-open to a bounded upper-layer retry, the safe direction).
+  if (error_type != Aws::S3::S3Errors::UNKNOWN && !IsConnectError(error) && !error.ShouldRetry()) {
+    return MakeExtendError(ExtendStatusCode::AwsErrorNonRetryable, message, message /* extra_info */);
+  }
+
+  // Transient escapee (throttle / 5xx / timeout / connection error): the SDK
+  // retry budget is spent, but a distinct upper-layer retry (e.g. querynode
+  // rerouting to another replica) can still succeed. Plain IOError -> consumers
+  // classify it as retriable.
   return arrow::Status::IOError(prefix, "AWS Error ", ss.str(), " during ", operation,
                                 " operation: ", error.GetMessage(), wrong_region_msg.value_or(""));
 }
