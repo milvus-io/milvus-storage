@@ -305,6 +305,8 @@ class APIWriterReaderTest : public ::testing::TestWithParam<std::tuple<std::stri
   milvus_storage::api::Properties properties_;
 };
 
+class VortexWriterBufferTest : public APIWriterReaderTest {};
+
 TEST_P(APIWriterReaderTest, SingleColumnGroupWriteRead) {
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
@@ -1623,6 +1625,38 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithMultipleRowGroups) {
   EXPECT_GT(batch_count, 1);
 }
 
+TEST_P(VortexWriterBufferTest, V2BoundsRetainedInputBuffers) {
+  ASSERT_EQ(SetValue(properties_, PROPERTY_WRITER_BUFFER_SIZE, "262144"), std::nullopt);
+  ASSERT_EQ(SetValue(properties_, PROPERTY_WRITER_VORTEX_FORMAT_VERSION, "2"), std::nullopt);
+  ASSERT_EQ(SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, "131072"), std::nullopt);
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy("id|name,value|vector", format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_NE(writer, nullptr);
+
+  std::vector<std::weak_ptr<arrow::Buffer>> input_buffers;
+  // Exceed one in-flight row group per column group plus the pending input.
+  constexpr int kBatchCount = 6;
+  constexpr int64_t kRowsPerBatch = 8192;
+  for (int batch_index = 0; batch_index < kBatchCount; ++batch_index) {
+    ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, batch_index * kRowsPerBatch, false, kRowsPerBatch));
+    input_buffers.emplace_back(batch->column(0)->data()->buffers[1]);
+    input_buffers.emplace_back(
+        std::static_pointer_cast<arrow::ListArray>(batch->column(3))->values()->data()->buffers[1]);
+    ASSERT_STATUS_OK(writer->write(batch));
+    batch.reset();
+  }
+
+  EXPECT_TRUE(input_buffers[0].expired()) << "old input buffers must not remain live until Close";
+  EXPECT_TRUE(input_buffers[1].expired()) << "old input buffers must not remain live until Close";
+
+  ASSERT_AND_ASSIGN(auto column_groups, writer->close());
+  ASSERT_EQ(column_groups->size(), 2);
+  for (const auto& buffer : input_buffers) {
+    EXPECT_TRUE(buffer.expired());
+  }
+}
+
 TEST_P(APIWriterReaderTest, TakeMethodTest) {
   std::string patterns = "id, name, value|vector";
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
@@ -2707,5 +2741,9 @@ INSTANTIATE_TEST_SUITE_P(APIWriterReaderTestP,
                          APIWriterReaderTest,
                          ::testing::Combine(::testing::Values(LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX),
                                             ::testing::Values(1, 4)));
+
+INSTANTIATE_TEST_SUITE_P(VortexV2,
+                         VortexWriterBufferTest,
+                         ::testing::Values(std::make_tuple(std::string(LOON_FORMAT_VORTEX), size_t{1})));
 
 }  // namespace milvus_storage::test
