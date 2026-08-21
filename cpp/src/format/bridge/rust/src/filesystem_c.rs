@@ -358,7 +358,6 @@ type AsyncReadResult = Result<ByteBuffer, VortexError>;
 #[cfg(feature = "s3-crt-async")]
 struct AsyncReadCallbackState {
     sender: Option<oneshot::Sender<AsyncReadResult>>,
-    reader: Arc<ReaderHandle>,
     buffer: ByteBufferMut,
     start: u64,
     expected_len: u64,
@@ -380,7 +379,6 @@ unsafe extern "C" fn async_read_callback(
 
     let AsyncReadCallbackState {
         mut sender,
-        reader: _reader,
         mut buffer,
         start,
         expected_len,
@@ -438,7 +436,6 @@ async fn read_async_via_ffi(
     let (sender, receiver) = oneshot::channel();
     let state = Box::new(AsyncReadCallbackState {
         sender: Some(sender),
-        reader: reader.clone(),
         buffer,
         start,
         expected_len: len,
@@ -464,11 +461,13 @@ async fn read_async_via_ffi(
             check_loon_ffi_result(&mut result, "Failed to submit async readat")?;
         }
     }
-    drop(reader);
 
     let read_result = receiver
         .await
         .map_err(|_| vortex_err!("Async readat completion channel closed"))?;
+    // Keep the reader in the async task, not in AsyncReadCallbackState, so its
+    // last reference is released on the task executor rather than in the callback.
+    drop(reader);
     read_result
 }
 
