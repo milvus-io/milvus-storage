@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::num::NonZeroUsize;
 use std::ops::{BitAnd, Range};
 use std::sync::{Arc, Mutex};
 
@@ -1471,18 +1472,118 @@ where
     SequentialStreamAdapter::new(dtype, row_group_stream).sendable()
 }
 
-/// Splits a stream of arrays into byte-size row groups without building zonemap side data.
-///
-/// This strategy is a writer-side stream adapter only: it does not serialize a custom layout
-/// node into the Vortex footer. The emitted row-group arrays are passed to `child`, which
-/// builds the normal V2 data layout tree:
-///
-/// ```text
-/// ChunkedLayout                         // one chunk per row group
-///   StructLayout                        // row group payload
-///     field layouts: Chunked -> Compressed -> Flat
-///     validity layouts: Collect -> Compressed -> Flat
-/// ```
+// V2 writer layout-strategy topology.
+//
+// Stream items are `(SequenceId, ArrayRef)`. Arrows below describe the stream passed to the next
+// `LayoutStrategy`; returned `LayoutRef`s flow in the opposite direction. `BtrBlocksCompressor`
+// is compressor configuration, not a `LayoutStrategy`.
+//
+// CORE STREAM TRANSFORMS
+//
+//   singleton stream:
+//     A `SendableSequentialStream` containing exactly one `(SequenceId, ArrayRef)` item.
+//
+//   [ChunkedLayoutStrategy]:
+//     in: stream<chunk>
+//     child input: one singleton stream<chunk> per existing input item
+//     return: ChunkedLayout<child LayoutRef>, or the only child LayoutRef for one input item
+//     role: partition the stream on its existing chunk/row-range axis; it does not slice or merge
+//           an ArrayRef and does not choose row-group boundaries
+//
+//   [TableStrategy]:
+//     in: stream<Struct chunk>
+//     child inputs: one stream per field, plus a validity stream for a nullable Struct
+//     return: StructLayout<field LayoutRef>
+//     role: transpose the Struct stream on its field/column axis; each field stream retains one
+//           item per input Struct chunk, and nested Struct fields recurse through TableStrategy
+//
+//   [ChunkedLayoutStrategy] -> [TableStrategy] means chunks/row ranges first, then columns.
+//   [TableStrategy] -> [ChunkedLayoutStrategy] means columns first, then chunks/row ranges.
+//
+// ROOT
+//
+//   stream<Struct batch>
+//   ├── zone maps disabled
+//   │   └── [RowGroupSplitStrategy]
+//   │       ├── in: stream<Struct batch>
+//   │       ├── child input: stream<canonical Struct row group>
+//   │       │   └── {DATA} -> data LayoutRef
+//   │       └── return: data LayoutRef (no layout node of its own)
+//   │
+//   └── zone maps enabled
+//       └── [RowGroupZoneMapStrategy]
+//           ├── in: stream<Struct batch>
+//           ├── data child input: stream<canonical Struct row group>
+//           │   └── {DATA} -> data LayoutRef
+//           ├── zones child input, after {DATA} completes:
+//           │   singleton stream<Struct {
+//           │     <column>: ZoneMap stats Struct,
+//           │     __rg_boundaries: Struct<__rg_start: u64, __rg_len: u64>
+//           │   }, rows = row-group count>
+//           │   └── {ZONES} -> zones LayoutRef
+//           └── return:
+//               ├── RowGroupZoneMapLayout<data LayoutRef, zones LayoutRef>
+//               └── data LayoutRef when no column has usable ZoneMap statistics
+//
+// DATA
+//
+//   stream<canonical Struct row group>
+//   └── [ChunkedLayoutStrategy] (outer, row-group level; max concurrent children = 1)
+//       ├── child input per row group: singleton stream<Struct row group>
+//       │   └── [TableStrategy]
+//       │       ├── nullable Struct validity: stream<Bool validity>
+//       │       │   └── [CollectStrategy] -> singleton stream<Chunked Bool validity>
+//       │       │       └── [CompressingStrategy] (BtrBlocks defaults minus ALP-RD)
+//       │       │           └── singleton stream<compressed Bool validity>
+//       │       │               └── [FlatLayoutStrategy] (inline array node) -> FlatLayout
+//       │       ├── nested Struct field: stream<Struct field>
+//       │       │   └── [TableStrategy] recursively -> StructLayout
+//       │       ├── non-Struct field: stream<field>
+//       │       │   └── [ChunkedLayoutStrategy] (inner, field-chunk level)
+//       │       │       ├── child input per chunk: singleton stream<field>
+//       │       │       │   └── [PredefinedFlatDataStrategy]
+//       │       │       │       ├── FixedSizeList
+//       │       │       │       │   └── [FlatLayoutStrategy] (inline array node) -> FlatLayout
+//       │       │       │       └── other dtype
+//       │       │       │           └── [CompressingStrategy] (BtrBlocks defaults minus ALP-RD)
+//       │       │       │               └── singleton stream<compressed field>
+//       │       │       │                   └── [FlatLayoutStrategy] (inline array node)
+//       │       │       │                       └── FlatLayout
+//       │       │       └── return: ChunkedLayout, or its only child LayoutRef for one chunk
+//       │       └── return: StructLayout for one row group
+//       └── return: ChunkedLayout<StructLayout per row group>, or the only StructLayout
+//
+// ZONES
+//
+//   singleton stream<zones Struct, rows = row-group count>
+//   └── [TableStrategy]
+//       ├── nested ZoneMap or __rg_boundaries Struct: stream<Struct field>
+//       │   └── [TableStrategy] recursively -> StructLayout
+//       ├── nullable Struct validity, when present: stream<Bool validity>
+//       │   └── [CollectStrategy] -> singleton stream<Chunked Bool validity>
+//       │       └── [CompressingStrategy] (BtrBlocks defaults)
+//       │           └── singleton stream<compressed Bool validity>
+//       │               └── [FlatLayoutStrategy] (array node not inlined) -> FlatLayout
+//       ├── ZoneMap-stat or boundary leaf: stream<leaf>
+//       │   └── [CompressingStrategy] (BtrBlocks defaults)
+//       │       └── singleton stream<compressed leaf>
+//       │           └── [FlatLayoutStrategy] (array node not inlined) -> FlatLayout
+//       └── return: zones StructLayout
+//
+// LAYOUT RESULTS
+//
+//   [RowGroupZoneMapStrategy] -> RowGroupZoneMapLayout
+//   [ChunkedLayoutStrategy]   -> ChunkedLayout, or its only child LayoutRef for one chunk
+//   [TableStrategy]           -> StructLayout
+//   [FlatLayoutStrategy]      -> FlatLayout backed by one segment
+//
+//   [RowGroupSplitStrategy], [CollectStrategy], [CompressingStrategy], and
+//   [PredefinedFlatDataStrategy] only transform or route streams and return their child LayoutRef.
+//   The stats-enabled root writes DATA to completion before ZONES, so all data segments precede
+//   all ZoneMap and row-group-boundary segments.
+
+/// Splits a stream of arrays into byte-size row groups without building ZoneMap side data.
+/// This is a stream adapter and returns its child's layout directly.
 struct RowGroupSplitStrategy {
     child: Arc<dyn LayoutStrategy>,
     options: RowGroupSplitOptions,
@@ -1521,24 +1622,9 @@ impl LayoutStrategy for RowGroupSplitStrategy {
     }
 }
 
-/// Builds the row-group data layout plus a sidecar zonemap layout used for pruning.
-///
-/// Unlike `RowGroupSplitStrategy`, this strategy does serialize a custom root layout. The
-/// root's data child is the same row-grouped V2 data tree produced by `RowGroupSplitStrategy`.
-/// The zones child is a struct with one row per row group: each real column with usable stats
-/// stores a Vortex `ZoneMap` stats table, and `__rg_boundaries` maps row-group pruning results
-/// back to row ranges.
-///
-/// ```text
-/// RowGroupZoneMapLayout                 // encoding: milvus.v2_zoned_row_group
-///   data: ChunkedLayout                 // one chunk per row group
-///     StructLayout
-///       field layouts: Chunked -> Compressed -> Flat
-///       validity layouts: Collect -> Compressed -> Flat
-///   zones: StructLayout                 // one row per row group
-///     <column>: Compressed -> Flat      // per-column ZoneMap stats table
-///     __rg_boundaries: Compressed -> Flat
-/// ```
+/// Builds the row-group data layout and its row-group ZoneMap side data. This strategy writes the
+/// data child first, writes the zones child second, and returns the custom root layout described
+/// in the topology above.
 pub struct RowGroupZoneMapStrategy {
     data_child: Arc<dyn LayoutStrategy>,
     zones_child: Arc<dyn LayoutStrategy>,
@@ -1906,7 +1992,10 @@ fn build_data_strategy() -> Arc<dyn LayoutStrategy> {
     let chunked_inner = ChunkedLayoutStrategy::new(data_child);
     let validity = CollectStrategy::new(compress_flat);
     let struct_inner = TableStrategy::new(Arc::new(validity), Arc::new(chunked_inner));
-    Arc::new(ChunkedLayoutStrategy::new(struct_inner))
+    Arc::new(
+        ChunkedLayoutStrategy::new(struct_inner)
+            .with_max_concurrent_children(NonZeroUsize::MIN),
+    )
 }
 
 fn build_zones_strategy() -> Arc<dyn LayoutStrategy> {
