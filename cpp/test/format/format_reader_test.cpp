@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <numeric>
 #include <random>
@@ -26,12 +27,14 @@
 #include <arrow/testing/gtest_util.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/executors/InlineExecutor.h>
+#include <folly/synchronization/Baton.h>
 #include <parquet/arrow/schema.h>
 #include <parquet/metadata.h>
 #include <parquet/type_fwd.h>
 #include <parquet/arrow/writer.h>
 
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/writer.h"
@@ -100,6 +103,16 @@ struct FileSystemReadStats {
   std::atomic<int> open_path_count{0};
   std::atomic<int> open_info_count{0};
   std::atomic<int> async_read_into_count{0};
+  std::atomic<int> async_get_size_count{0};
+  std::atomic<int64_t> first_async_read_position{-1};
+  std::atomic<int64_t> first_async_read_size{-1};
+
+  void record_async_read(int64_t position, int64_t nbytes) {
+    if (async_read_into_count.fetch_add(1, std::memory_order_relaxed) == 0) {
+      first_async_read_position.store(position, std::memory_order_relaxed);
+      first_async_read_size.store(nbytes, std::memory_order_relaxed);
+    }
+  }
 
   void record_open_thread() {
     std::lock_guard<std::mutex> lock(open_thread_mutex);
@@ -114,6 +127,46 @@ struct FileSystemReadStats {
   private:
   mutable std::mutex open_thread_mutex;
   std::thread::id open_thread;
+};
+
+struct PendingAsyncOpenState {
+  arrow::Future<int64_t> size_future = arrow::Future<int64_t>::Make();
+  arrow::Future<int64_t> read_future = arrow::Future<int64_t>::Make();
+  folly::Baton<> size_requested;
+  folly::Baton<> read_requested;
+  std::atomic<int64_t> cached_size{-1};
+  std::atomic<bool> sync_get_size_before_ready{false};
+
+  void complete_size(int64_t size) {
+    cached_size.store(size, std::memory_order_release);
+    size_future.MarkFinished(size);
+  }
+
+  void complete_read() {
+    std::shared_ptr<arrow::io::RandomAccessFile> file;
+    int64_t position = 0;
+    int64_t nbytes = 0;
+    uint8_t* out = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(read_mutex);
+      file = read_file;
+      position = read_position;
+      nbytes = read_size;
+      out = read_out;
+    }
+
+    if (!file || !out) {
+      read_future.MarkFinished(arrow::Status::Invalid("Async footer read was not requested"));
+      return;
+    }
+    read_future.MarkFinished(file->ReadAt(position, nbytes, out));
+  }
+
+  std::mutex read_mutex;
+  std::shared_ptr<arrow::io::RandomAccessFile> read_file;
+  int64_t read_position = 0;
+  int64_t read_size = 0;
+  uint8_t* read_out = nullptr;
 };
 
 class CountingExecutor final : public folly::Executor {
@@ -131,11 +184,12 @@ class CountingExecutor final : public folly::Executor {
 };
 
 class AsyncCountingRandomAccessFile final : public arrow::io::RandomAccessFile,
-                                            public milvus_storage::NonBlockingReadAtFile {
+                                            public milvus_storage::NonBlockingRandomAccessFile {
   public:
   AsyncCountingRandomAccessFile(std::shared_ptr<arrow::io::RandomAccessFile> file,
-                                std::shared_ptr<FileSystemReadStats> stats)
-      : file_(std::move(file)), stats_(std::move(stats)) {}
+                                std::shared_ptr<FileSystemReadStats> stats,
+                                std::shared_ptr<PendingAsyncOpenState> pending_open = nullptr)
+      : file_(std::move(file)), stats_(std::move(stats)), pending_open_(std::move(pending_open)) {}
 
   arrow::Status Close() override { return file_->Close(); }
   arrow::Status Abort() override { return file_->Abort(); }
@@ -154,7 +208,18 @@ class AsyncCountingRandomAccessFile final : public arrow::io::RandomAccessFile,
     return file_->ReadMetadataAsync(io_context);
   }
   arrow::Status Seek(int64_t position) override { return file_->Seek(position); }
-  arrow::Result<int64_t> GetSize() override { return file_->GetSize(); }
+  arrow::Result<int64_t> GetSize() override {
+    if (!pending_open_) {
+      return file_->GetSize();
+    }
+
+    const auto size = pending_open_->cached_size.load(std::memory_order_acquire);
+    if (size < 0) {
+      pending_open_->sync_get_size_before_ready.store(true, std::memory_order_relaxed);
+      return arrow::Status::Invalid("Synchronous size lookup before GetSizeAsync completed");
+    }
+    return size;
+  }
   arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
     return file_->ReadAt(position, nbytes, out);
   }
@@ -162,8 +227,27 @@ class AsyncCountingRandomAccessFile final : public arrow::io::RandomAccessFile,
     return file_->ReadAt(position, nbytes);
   }
   arrow::Future<int64_t> ReadAtAsyncInto(int64_t position, int64_t nbytes, uint8_t* out) override {
-    stats_->async_read_into_count.fetch_add(1, std::memory_order_relaxed);
+    stats_->record_async_read(position, nbytes);
+    if (pending_open_) {
+      {
+        std::lock_guard<std::mutex> lock(pending_open_->read_mutex);
+        pending_open_->read_file = file_;
+        pending_open_->read_position = position;
+        pending_open_->read_size = nbytes;
+        pending_open_->read_out = out;
+      }
+      pending_open_->read_requested.post();
+      return pending_open_->read_future;
+    }
     return arrow::Future<int64_t>::MakeFinished(file_->ReadAt(position, nbytes, out));
+  }
+  arrow::Future<int64_t> GetSizeAsync() override {
+    stats_->async_get_size_count.fetch_add(1, std::memory_order_relaxed);
+    if (pending_open_) {
+      pending_open_->size_requested.post();
+      return pending_open_->size_future;
+    }
+    return arrow::Future<int64_t>::MakeFinished(file_->GetSize());
   }
   arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const arrow::io::IOContext& io_context,
                                                           int64_t position,
@@ -175,30 +259,36 @@ class AsyncCountingRandomAccessFile final : public arrow::io::RandomAccessFile,
   private:
   std::shared_ptr<arrow::io::RandomAccessFile> file_;
   std::shared_ptr<FileSystemReadStats> stats_;
+  std::shared_ptr<PendingAsyncOpenState> pending_open_;
 };
 
 class AsyncCountingFileSystem final : public arrow::fs::SubTreeFileSystem {
   public:
   using arrow::fs::SubTreeFileSystem::OpenInputFile;
 
-  AsyncCountingFileSystem(std::shared_ptr<arrow::fs::FileSystem> fs, std::shared_ptr<FileSystemReadStats> stats)
-      : arrow::fs::SubTreeFileSystem("", std::move(fs)), stats_(std::move(stats)) {}
+  AsyncCountingFileSystem(std::shared_ptr<arrow::fs::FileSystem> fs,
+                          std::shared_ptr<FileSystemReadStats> stats,
+                          std::shared_ptr<PendingAsyncOpenState> pending_open = nullptr)
+      : arrow::fs::SubTreeFileSystem("", std::move(fs)),
+        stats_(std::move(stats)),
+        pending_open_(std::move(pending_open)) {}
 
   arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string& path) override {
     ARROW_ASSIGN_OR_RAISE(auto file, arrow::fs::SubTreeFileSystem::OpenInputFile(path));
     stats_->open_path_count.fetch_add(1, std::memory_order_relaxed);
     stats_->record_open_thread();
-    return std::make_shared<AsyncCountingRandomAccessFile>(std::move(file), stats_);
+    return std::make_shared<AsyncCountingRandomAccessFile>(std::move(file), stats_, pending_open_);
   }
   arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const arrow::fs::FileInfo& info) override {
     ARROW_ASSIGN_OR_RAISE(auto file, arrow::fs::SubTreeFileSystem::OpenInputFile(info));
     stats_->open_info_count.fetch_add(1, std::memory_order_relaxed);
     stats_->record_open_thread();
-    return std::make_shared<AsyncCountingRandomAccessFile>(std::move(file), stats_);
+    return std::make_shared<AsyncCountingRandomAccessFile>(std::move(file), stats_, pending_open_);
   }
 
   private:
   std::shared_ptr<FileSystemReadStats> stats_;
+  std::shared_ptr<PendingAsyncOpenState> pending_open_;
 };
 
 }  // namespace
@@ -578,6 +668,26 @@ TEST_P(FormatReaderTest, ReadParquetWithoutMeta) {
   ASSERT_EQ(total_size, test_batch_->num_rows() * 10);
 }
 
+TEST_P(FormatReaderTest, ParquetOpenRejectsOverflowingFooterLength) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  const auto file_path = base_path_ + "/overflowing_footer_length.parquet";
+  std::string malformed_file = "PAR1";
+  malformed_file.append(sizeof(uint32_t), static_cast<char>(0xFF));
+  malformed_file.append("PAR1");
+  ASSERT_AND_ASSIGN(auto sink, fs_->OpenOutputStream(file_path));
+  ASSERT_STATUS_OK(sink->Write(malformed_file.data(), malformed_file.size()));
+  ASSERT_STATUS_OK(sink->Close());
+
+  auto reader = std::make_shared<parquet::ParquetFormatReader>(
+      fs_, file_path, properties_, /*needed_columns=*/std::vector<std::string>{}, nullptr, malformed_file.size(),
+      /*footer_size=*/8);
+  EXPECT_FALSE(reader->open().ok());
+}
+
 TEST_P(FormatReaderTest, ParquetFooterFastPathUsesCrtReadAtAsyncInto) {
   std::string format = GetParam();
   if (format != LOON_FORMAT_PARQUET) {
@@ -694,6 +804,214 @@ TEST_P(FormatReaderTest, ParquetOpenAsyncUsesCallerExecutor) {
   EXPECT_EQ(
       stats->open_path_count.load(std::memory_order_relaxed) + stats->open_info_count.load(std::memory_order_relaxed),
       1);
+  EXPECT_EQ(stats->async_read_into_count.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(stats->async_get_size_count.load(std::memory_order_relaxed), 0);
+  const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
+  const auto footer_size = file.Get<uint64_t>(api::kPropertyFooterSize);
+  EXPECT_EQ(stats->first_async_read_position.load(std::memory_order_relaxed), file_size - footer_size);
+  EXPECT_EQ(stats->first_async_read_size.load(std::memory_order_relaxed), footer_size);
+}
+
+TEST_P(FormatReaderTest, ParquetOpenAsyncReadsMetadataAgainWhenFooterHintIsTooSmall) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  const auto file_path = base_path_ + "/async_open_small_footer.parquet";
+  StorageConfig config;
+  ASSERT_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(schema_, fs_, file_path, config));
+  ASSERT_STATUS_OK(writer->Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer->Close());
+
+  auto stats = std::make_shared<FileSystemReadStats>();
+  auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
+  auto reader = std::make_shared<parquet::ParquetFormatReader>(
+      counting_fs, file_path, properties_, /*needed_columns=*/std::vector<std::string>{}, nullptr,
+      file.Get<uint64_t>(api::kPropertyFileSize), /*footer_size=*/8);
+
+  CountingExecutor executor;
+  ASSERT_STATUS_OK(std::move(reader->open_async()).via(&executor).get());
+
+  EXPECT_EQ(stats->async_read_into_count.load(std::memory_order_relaxed), 2);
+  EXPECT_EQ(stats->first_async_read_position.load(std::memory_order_relaxed),
+            file.Get<uint64_t>(api::kPropertyFileSize) - 8);
+  EXPECT_EQ(stats->first_async_read_size.load(std::memory_order_relaxed), 8);
+  ASSERT_AND_ASSIGN(auto row_group_infos, reader->get_row_group_infos());
+  EXPECT_FALSE(row_group_infos.empty());
+}
+
+TEST_P(FormatReaderTest, ParquetOpenAsyncWithoutFooterHintUsesNativeAsyncOpen) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  const auto file_path = base_path_ + "/async_open_without_footer_hint.parquet";
+  StorageConfig config;
+  ASSERT_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(schema_, fs_, file_path, config));
+  ASSERT_STATUS_OK(writer->Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer->Close());
+
+  auto stats = std::make_shared<FileSystemReadStats>();
+  auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
+  auto reader = std::make_shared<parquet::ParquetFormatReader>(
+      counting_fs, file_path, properties_, /*needed_columns=*/std::vector<std::string>{}, nullptr,
+      file.Get<uint64_t>(api::kPropertyFileSize), /*footer_size=*/0);
+
+  CountingExecutor executor;
+  ASSERT_STATUS_OK(std::move(reader->open_async()).via(&executor).get());
+
+  EXPECT_GT(executor.add_count(), 1);
+  EXPECT_EQ(stats->async_read_into_count.load(std::memory_order_relaxed), 1);
+  const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
+  const auto native_footer_read_size = std::min<uint64_t>(file_size, 64 * 1024);
+  EXPECT_EQ(stats->first_async_read_position.load(std::memory_order_relaxed), file_size - native_footer_read_size);
+  EXPECT_EQ(stats->first_async_read_size.load(std::memory_order_relaxed), native_footer_read_size);
+  ASSERT_AND_ASSIGN(auto row_group_infos, reader->get_row_group_infos());
+  EXPECT_FALSE(row_group_infos.empty());
+}
+
+TEST_P(FormatReaderTest, ParquetOpenAsyncGetsMissingFileSizeAsynchronously) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  const auto file_path = base_path_ + "/async_open_missing_file_size.parquet";
+  StorageConfig config;
+  ASSERT_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(schema_, fs_, file_path, config));
+  ASSERT_STATUS_OK(writer->Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer->Close());
+
+  auto stats = std::make_shared<FileSystemReadStats>();
+  auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
+  auto reader = std::make_shared<parquet::ParquetFormatReader>(
+      counting_fs, file_path, properties_, /*needed_columns=*/std::vector<std::string>{}, nullptr,
+      /*file_size=*/0, file.Get<uint64_t>(api::kPropertyFooterSize));
+
+  CountingExecutor executor;
+  ASSERT_STATUS_OK(std::move(reader->open_async()).via(&executor).get());
+
+  EXPECT_EQ(stats->async_get_size_count.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(stats->async_read_into_count.load(std::memory_order_relaxed), 1);
+  ASSERT_AND_ASSIGN(auto row_group_infos, reader->get_row_group_infos());
+  EXPECT_FALSE(row_group_infos.empty());
+}
+
+TEST_P(FormatReaderTest, ParquetOpenAsyncReturnsMalformedRowGroupMetadataAsStatus) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  const auto file_path = base_path_ + "/async_open_malformed_row_group_metadata.parquet";
+  ASSERT_AND_ASSIGN(auto sink, fs_->OpenOutputStream(file_path));
+  ASSERT_AND_ASSIGN(auto parquet_writer,
+                    ::parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink));
+  ASSERT_STATUS_OK(parquet_writer->NewBufferedRowGroup());
+  ASSERT_STATUS_OK(parquet_writer->WriteRecordBatch(*test_batch_));
+  ASSERT_STATUS_OK(parquet_writer->AddKeyValueMetadata(
+      arrow::key_value_metadata({ROW_GROUP_META_KEY}, {"malformed-row-group-metadata"})));
+  ASSERT_STATUS_OK(parquet_writer->Close());
+  ASSERT_STATUS_OK(sink->Close());
+
+  ASSERT_AND_ASSIGN(auto file_info, fs_->GetFileInfo(file_path));
+  ASSERT_GT(file_info.size(), 0);
+  auto reader = std::make_shared<parquet::ParquetFormatReader>(
+      fs_, file_path, properties_, /*needed_columns=*/std::vector<std::string>{}, nullptr,
+      static_cast<uint64_t>(file_info.size()), /*footer_size=*/0);
+
+  CountingExecutor executor;
+  arrow::Status status;
+  EXPECT_NO_THROW(status = std::move(reader->open_async()).via(&executor).get());
+  EXPECT_FALSE(status.ok());
+  EXPECT_NE(status.ToString().find("Invalid row group metadata format"), std::string::npos);
+}
+
+TEST_P(FormatReaderTest, ParquetAsyncMetadataReusesResolvedFileSize) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  const auto file_path = base_path_ + "/async_metadata_resolved_file_size.parquet";
+  StorageConfig config;
+  ASSERT_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(schema_, fs_, file_path, config));
+  ASSERT_STATUS_OK(writer->Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer->Close());
+  const auto resolved_file_size = file.Get<uint64_t>(api::kPropertyFileSize);
+  ASSERT_GT(resolved_file_size, 0);
+
+  auto file_without_size = file;
+  file_without_size.Set(api::kPropertyFileSize, uint64_t{0});
+  CountingExecutor executor;
+  ASSERT_AND_ASSIGN(auto metadata, std::move(parquet::ParquetFormatReader::MetaTrait::load_metadata_async(
+                                                 file_without_size, properties_, nullptr))
+                                       .via(&executor)
+                                       .get());
+  EXPECT_EQ(metadata->payload.file_size, resolved_file_size);
+
+  auto stats = std::make_shared<FileSystemReadStats>();
+  auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
+  auto mutable_metadata = std::make_shared<parquet::ParquetFormatReader::MetaTrait::Metadata>(*metadata);
+  mutable_metadata->payload.fs = counting_fs;
+  parquet::ParquetFormatReader::MetaTrait::MetadataPtr cached_metadata = std::move(mutable_metadata);
+
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
+                                     cached_metadata, file_without_size, schema_, {}, ""));
+  EXPECT_EQ(stats->open_path_count.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(stats->open_info_count.load(std::memory_order_relaxed), 1);
+  ASSERT_AND_ASSIGN(auto row_group_infos, reader->get_row_group_infos());
+  EXPECT_FALSE(row_group_infos.empty());
+}
+
+TEST_P(FormatReaderTest, ParquetOpenAsyncKeepsCallerExecutorAvailableWhileIoIsPending) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  const auto file_path = base_path_ + "/async_open_pending_io.parquet";
+  StorageConfig config;
+  ASSERT_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(schema_, fs_, file_path, config));
+  ASSERT_STATUS_OK(writer->Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer->Close());
+
+  auto stats = std::make_shared<FileSystemReadStats>();
+  auto pending_open = std::make_shared<PendingAsyncOpenState>();
+  auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats, pending_open);
+  auto reader = std::make_shared<parquet::ParquetFormatReader>(
+      counting_fs, file_path, properties_, /*needed_columns=*/std::vector<std::string>{}, nullptr,
+      /*file_size=*/0, file.Get<uint64_t>(api::kPropertyFooterSize));
+
+  CountingExecutor executor;
+  auto open_future = reader->open_async().via(&executor);
+  constexpr auto kWaitTimeout = std::chrono::seconds(5);
+
+  const bool size_requested = pending_open->size_requested.try_wait_for(kWaitTimeout);
+  EXPECT_FALSE(open_future.isReady()) << "open_async completed without waiting for GetSizeAsync";
+  auto size_sentinel = std::make_shared<folly::Baton<>>();
+  executor.add([size_sentinel] { size_sentinel->post(); });
+  const bool executor_available_during_size = size_sentinel->try_wait_for(kWaitTimeout);
+  pending_open->complete_size(static_cast<int64_t>(file.Get<uint64_t>(api::kPropertyFileSize)));
+
+  const bool footer_requested = pending_open->read_requested.try_wait_for(kWaitTimeout);
+  EXPECT_FALSE(open_future.isReady()) << "open_async completed without waiting for ReadAtAsyncInto";
+  auto footer_sentinel = std::make_shared<folly::Baton<>>();
+  executor.add([footer_sentinel] { footer_sentinel->post(); });
+  const bool executor_available_during_footer = footer_sentinel->try_wait_for(kWaitTimeout);
+  pending_open->complete_read();
+
+  auto status = std::move(open_future).get();
+  EXPECT_TRUE(size_requested) << "GetSizeAsync was not used";
+  EXPECT_TRUE(executor_available_during_size) << "Caller executor blocked waiting for GetSizeAsync";
+  EXPECT_TRUE(footer_requested) << "ReadAtAsyncInto was not used for the footer";
+  EXPECT_TRUE(executor_available_during_footer) << "Caller executor blocked waiting for ReadAtAsyncInto";
+  EXPECT_FALSE(pending_open->sync_get_size_before_ready.load(std::memory_order_relaxed));
+  EXPECT_EQ(stats->async_get_size_count.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(stats->async_read_into_count.load(std::memory_order_relaxed), 1);
+  ASSERT_STATUS_OK(status);
 }
 
 TEST_P(FormatReaderTest, VortexOpenAsyncUsesTokioRuntime) {

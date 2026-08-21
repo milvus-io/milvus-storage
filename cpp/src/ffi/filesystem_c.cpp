@@ -372,7 +372,7 @@ LoonFFIResult loon_filesystem_reader_supports_async(FileSystemReaderHandle handl
     }
 
     auto input_file = reinterpret_cast<RandomAccessFileWrapper*>(handle)->get();
-    *out_supported = dynamic_cast<milvus_storage::NonBlockingReadAtFile*>(input_file.get()) != nullptr;
+    *out_supported = dynamic_cast<milvus_storage::NonBlockingRandomAccessFile*>(input_file.get()) != nullptr;
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
@@ -395,7 +395,7 @@ LoonFFIResult loon_filesystem_reader_readat_async(FileSystemReaderHandle handle,
     }
 
     auto input_file = reinterpret_cast<RandomAccessFileWrapper*>(handle)->get();
-    auto* async_file = dynamic_cast<milvus_storage::NonBlockingReadAtFile*>(input_file.get());
+    auto* async_file = dynamic_cast<milvus_storage::NonBlockingRandomAccessFile*>(input_file.get());
     if (!async_file) {
       RETURN_ERROR(LOON_NOT_SUPPORT, "Reader does not support async read-at");
     }
