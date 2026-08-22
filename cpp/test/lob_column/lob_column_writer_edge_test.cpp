@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "test_env.h"
+#include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/lob_column/lob_column_manager.h"
 #include "milvus-storage/lob_column/lob_column_writer.h"
 #include "milvus-storage/lob_column/lob_column_reader.h"
@@ -77,6 +78,47 @@ class LobColumnWriterEdgeTest : public ::testing::Test {
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   LobColumnConfig config_;
 };
+
+#ifdef BUILD_WITH_FIU
+TEST_F(LobColumnWriterEdgeTest, FlushFailureIsTerminalAndRetryReplacesWriter) {
+  ASSERT_EQ(0, InitFiuOnce());
+  config_.flush_threshold_bytes = 1;
+
+  ASSERT_AND_ASSIGN(auto manager, LobColumnManager::Create(fs_, config_));
+  ASSERT_AND_ASSIGN(auto writer, manager->CreateWriter());
+
+  arrow::Status first_failure;
+  {
+    ScopedFiuFault fault(FIUKEY_WRITER_FLUSH_FAIL, /*one_time=*/true);
+    ASSERT_EQ(0, fault.enable_result());
+    auto result = writer->WriteText(GenerateRandomString(64));
+    ASSERT_FALSE(result.ok());
+    first_failure = result.status();
+    EXPECT_NE(first_failure.ToString().find(FIUKEY_WRITER_FLUSH_FAIL), std::string::npos);
+  }
+
+  EXPECT_TRUE(writer->Flush().Equals(first_failure));
+
+  // Close on a failed direct writer returns the first cause and performs the
+  // same cleanup as Abort; callers do not have to remember a second verb after
+  // they already tried to close it.
+  auto close_result = writer->Close();
+  ASSERT_FALSE(close_result.ok());
+  EXPECT_TRUE(close_result.status().Equals(first_failure));
+  EXPECT_TRUE(writer->IsClosed());
+  auto lob_data_dir = config_.lob_base_path + "/_data";
+  if (boost::filesystem::exists(lob_data_dir)) {
+    EXPECT_TRUE(boost::filesystem::is_empty(lob_data_dir));
+  }
+
+  // Retrying creates a fresh Vortex writer and a fresh UUID-backed file.
+  ASSERT_AND_ASSIGN(auto replacement, manager->CreateWriter());
+  ASSERT_AND_ASSIGN(auto ref, replacement->WriteText(GenerateRandomString(64)));
+  EXPECT_TRUE(IsLOBReference(ref.data()));
+  ASSERT_AND_ASSIGN(auto files, replacement->Close());
+  ASSERT_EQ(files.size(), 1);
+}
+#endif
 
 // ==================== Boundary Threshold Tests ====================
 
@@ -348,7 +390,7 @@ TEST_F(LobColumnWriterEdgeTest, AbortAfterWrite) {
   }
 
   // abort
-  ASSERT_STATUS_OK(writer->Abort());
+  writer->Abort();
   ASSERT_TRUE(writer->IsClosed());
 
   // verify no files remain
@@ -369,7 +411,7 @@ TEST_F(LobColumnWriterEdgeTest, AbortWithoutWrite) {
   auto writer = std::move(writer_result).ValueOrDie();
 
   // abort immediately
-  ASSERT_STATUS_OK(writer->Abort());
+  writer->Abort();
   ASSERT_TRUE(writer->IsClosed());
 }
 
@@ -386,8 +428,8 @@ TEST_F(LobColumnWriterEdgeTest, DoubleAbort) {
   auto ref = writer->WriteText(GenerateRandomString(100));
   ASSERT_TRUE(ref.ok());
 
-  ASSERT_STATUS_OK(writer->Abort());
-  ASSERT_STATUS_OK(writer->Abort());  // should be idempotent
+  writer->Abort();
+  writer->Abort();  // should be idempotent
 }
 
 // ==================== Write After Close/Abort Tests ====================
@@ -420,7 +462,7 @@ TEST_F(LobColumnWriterEdgeTest, WriteAfterAbort) {
   ASSERT_TRUE(writer_result.ok());
   auto writer = std::move(writer_result).ValueOrDie();
 
-  ASSERT_STATUS_OK(writer->Abort());
+  writer->Abort();
 
   // try to write after abort
   auto ref = writer->WriteText("test");

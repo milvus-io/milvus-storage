@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <map>
+#include <new>
 #include <random>
 #include <sstream>
 #include <string>
@@ -75,7 +76,7 @@ std::vector<uint8_t> HmacSha1(const std::string& key, const std::string& data) {
 
 AliyunRAMSTSClient::AliyunRAMSTSClient(const Aws::Client::ClientConfiguration& clientConfiguration)
     : AWSHttpResourceClient(clientConfiguration, kLogTag) {
-  SetErrorMarshaller(Aws::MakeUnique<Aws::Client::XmlErrorMarshaller>(kLogTag));
+  m_rawHttpClient = Aws::Http::CreateHttpClient(clientConfiguration);
   // Aliyun STS is region-agnostic; this endpoint is valid from every region.
   m_endpoint = "https://sts.aliyuncs.com/";
   LOG_STORAGE_INFO_ << fmt::format("[{}] Creating RAM STS client with endpoint: {}", kLogTag, m_endpoint);
@@ -83,126 +84,165 @@ AliyunRAMSTSClient::AliyunRAMSTSClient(const Aws::Client::ClientConfiguration& c
 
 AliyunRAMSTSClient::AssumeRoleResult AliyunRAMSTSClient::GetAssumeRoleCredentials(const AssumeRoleRequest& request) {
   AssumeRoleResult result;
+  try {
+    // std::map sorts keys ASCII-ascending, which is what POP v1 canonical-query
+    // construction needs. Values will be URL-encoded when we emit the string.
+    std::map<std::string, std::string> params;
+    params["AccessKeyId"] = request.callerAccessKeyId;
+    params["Action"] = "AssumeRole";
+    params["Format"] = "XML";
+    params["RoleArn"] = request.roleArn;
+    params["RoleSessionName"] = request.roleSessionName;
+    // SecurityToken is mandatory when the caller credentials are themselves
+    // temporary (e.g. STS creds from ECS IMDS). Omitting it for long-term
+    // AK/SK is also required by Aliyun (they disagree on which set signed).
+    if (!request.callerSecurityToken.empty()) {
+      params["SecurityToken"] = request.callerSecurityToken;
+    }
+    // ExternalId is optional and only included when the caller sets it.
+    // The target role's trust policy decides whether ExternalId is required;
+    // sending an empty value would still flip the request to the
+    // "ExternalId-supplied" branch on Aliyun's side, which fails the policy
+    // check, so the explicit non-empty guard matters.
+    LOG_STORAGE_INFO_ << fmt::format("[{}] Preparing AssumeRole request; external_id_set={}", kLogTag,
+                                     !request.externalId.empty());
+    if (!request.externalId.empty()) {
+      params["ExternalId"] = request.externalId;
+    }
+    params["SignatureMethod"] = "HMAC-SHA1";
+    // 64-bit random nonce. UUID alone is enough but cheap insurance against
+    // correlated clocks on the same host.
+    std::random_device rd;
+    std::mt19937_64 gen(rd());
+    std::uniform_int_distribution<uint64_t> dist;
+    const Aws::String uuid = Aws::Utils::UUID::RandomUUID();
+    Aws::StringStream nonce;
+    nonce << dist(gen) << "-" << uuid;
+    params["SignatureNonce"] = nonce.str().c_str();
+    params["SignatureVersion"] = "1.0";
+    params["Timestamp"] = Aws::Utils::DateTime::Now().ToGmtString(Aws::Utils::DateFormat::ISO_8601).c_str();
+    params["Version"] = "2015-04-01";
 
-  // std::map sorts keys ASCII-ascending, which is what POP v1 canonical-query
-  // construction needs. Values will be URL-encoded when we emit the string.
-  std::map<std::string, std::string> params;
-  params["AccessKeyId"] = request.callerAccessKeyId;
-  params["Action"] = "AssumeRole";
-  params["Format"] = "XML";
-  params["RoleArn"] = request.roleArn;
-  params["RoleSessionName"] = request.roleSessionName;
-  // SecurityToken is mandatory when the caller credentials are themselves
-  // temporary (e.g. STS creds from ECS IMDS). Omitting it for long-term
-  // AK/SK is also required by Aliyun (they disagree on which set signed).
-  if (!request.callerSecurityToken.empty()) {
-    params["SecurityToken"] = request.callerSecurityToken;
-  }
-  // ExternalId is optional and only included when the caller sets it.
-  // The target role's trust policy decides whether ExternalId is required;
-  // sending an empty value would still flip the request to the
-  // "ExternalId-supplied" branch on Aliyun's side, which fails the policy
-  // check, so the explicit non-empty guard matters.
-  LOG_STORAGE_INFO_ << fmt::format("[{}] Preparing AssumeRole request; external_id_set={}", kLogTag,
-                                   !request.externalId.empty());
-  if (!request.externalId.empty()) {
-    params["ExternalId"] = request.externalId;
-  }
-  params["SignatureMethod"] = "HMAC-SHA1";
-  // 64-bit random nonce. UUID alone is enough but cheap insurance against
-  // correlated clocks on the same host.
-  std::random_device rd;
-  std::mt19937_64 gen(rd());
-  std::uniform_int_distribution<uint64_t> dist;
-  const Aws::String uuid = Aws::Utils::UUID::RandomUUID();
-  Aws::StringStream nonce;
-  nonce << dist(gen) << "-" << uuid;
-  params["SignatureNonce"] = nonce.str().c_str();
-  params["SignatureVersion"] = "1.0";
-  params["Timestamp"] = Aws::Utils::DateTime::Now().ToGmtString(Aws::Utils::DateFormat::ISO_8601).c_str();
-  params["Version"] = "2015-04-01";
+    // Canonical query: sorted "URLEncode(k)=URLEncode(v)" joined by '&'.
+    std::ostringstream canonical;
+    bool first = true;
+    for (const auto& kv : params) {
+      if (!first)
+        canonical << '&';
+      first = false;
+      canonical << PopUrlEncode(kv.first) << '=' << PopUrlEncode(kv.second);
+    }
+    const std::string canonical_query = canonical.str();
 
-  // Canonical query: sorted "URLEncode(k)=URLEncode(v)" joined by '&'.
-  std::ostringstream canonical;
-  bool first = true;
-  for (const auto& kv : params) {
-    if (!first)
-      canonical << '&';
-    first = false;
-    canonical << PopUrlEncode(kv.first) << '=' << PopUrlEncode(kv.second);
-  }
-  const std::string canonical_query = canonical.str();
+    // We sign as POST and send as POST — the whole canonical query lives in the
+    // request body (form-urlencoded), with Signature appended. A GET with the
+    // same signature would be valid too, but AWS SDK's URI normaliser can re-
+    // encode query params and silently break the signature, so POST is safer.
+    const std::string string_to_sign = std::string("POST&") + PopUrlEncode("/") + "&" + PopUrlEncode(canonical_query);
 
-  // We sign as POST and send as POST — the whole canonical query lives in the
-  // request body (form-urlencoded), with Signature appended. A GET with the
-  // same signature would be valid too, but AWS SDK's URI normaliser can re-
-  // encode query params and silently break the signature, so POST is safer.
-  const std::string string_to_sign = std::string("POST&") + PopUrlEncode("/") + "&" + PopUrlEncode(canonical_query);
+    const std::string signing_key = std::string(request.callerAccessKeySecret.c_str()) + "&";
+    const std::vector<uint8_t> digest = HmacSha1(signing_key, string_to_sign);
 
-  const std::string signing_key = std::string(request.callerAccessKeySecret.c_str()) + "&";
-  const std::vector<uint8_t> digest = HmacSha1(signing_key, string_to_sign);
+    Aws::Utils::ByteBuffer digest_buf(digest.data(), digest.size());
+    const Aws::String signature = Aws::Utils::HashingUtils::Base64Encode(digest_buf);
 
-  Aws::Utils::ByteBuffer digest_buf(digest.data(), digest.size());
-  const Aws::String signature = Aws::Utils::HashingUtils::Base64Encode(digest_buf);
+    const std::string body_str = canonical_query + "&Signature=" + PopUrlEncode(std::string(signature.c_str()));
 
-  const std::string body_str = canonical_query + "&Signature=" + PopUrlEncode(std::string(signature.c_str()));
+    std::shared_ptr<Aws::Http::HttpRequest> httpRequest(Aws::Http::CreateHttpRequest(
+        m_endpoint, Aws::Http::HttpMethod::HTTP_POST, Aws::Utils::Stream::DefaultResponseStreamFactoryMethod));
+    httpRequest->SetUserAgent(Aws::Client::ComputeUserAgentString());
 
-  std::shared_ptr<Aws::Http::HttpRequest> httpRequest(Aws::Http::CreateHttpRequest(
-      m_endpoint, Aws::Http::HttpMethod::HTTP_POST, Aws::Utils::Stream::DefaultResponseStreamFactoryMethod));
-  httpRequest->SetUserAgent(Aws::Client::ComputeUserAgentString());
+    auto body = Aws::MakeShared<Aws::StringStream>(kLogTag);
+    *body << body_str;
+    httpRequest->AddContentBody(body);
+    Aws::StringStream content_length;
+    content_length << body_str.size();
+    httpRequest->SetContentLength(content_length.str());
+    httpRequest->SetContentType("application/x-www-form-urlencoded");
 
-  auto body = Aws::MakeShared<Aws::StringStream>(kLogTag);
-  *body << body_str;
-  httpRequest->AddContentBody(body);
-  Aws::StringStream content_length;
-  content_length << body_str.size();
-  httpRequest->SetContentLength(content_length.str());
-  httpRequest->SetContentType("application/x-www-form-urlencoded");
+    if (m_rawHttpClient == nullptr) {
+      result.status = ClassifyCredentialHttpFailure(Aws::Http::HttpResponseCode::REQUEST_NOT_MADE,
+                                                    "Aliyun AssumeRole has no HTTP client");
+      return result;
+    }
+    const auto response = MakeRequestWithCredentialRetry(*m_rawHttpClient, httpRequest);
+    if (response == nullptr) {
+      result.status = ClassifyCredentialHttpFailure(Aws::Http::HttpResponseCode::NO_RESPONSE,
+                                                    "Aliyun AssumeRole received no HTTP response");
+      return result;
+    }
+    const auto response_code = response->GetResponseCode();
+    if (response_code != Aws::Http::HttpResponseCode::OK) {
+      result.status = ClassifyCredentialHttpFailure(
+          response_code, fmt::format("Aliyun AssumeRole failed against {} (http_status={})", m_endpoint,
+                                     static_cast<int>(response_code)));
+      LOG_STORAGE_WARNING_ << fmt::format("[{}] {}", kLogTag, result.status.message());
+      return result;
+    }
+    Aws::IStreamBufIterator eos;
+    const Aws::String payload(Aws::IStreamBufIterator(response->GetResponseBody()), eos);
+    if (payload.empty()) {
+      result.status = MakeCredentialResponseError("Aliyun AssumeRole returned an empty body");
+      LOG_STORAGE_WARNING_ << fmt::format("[{}] {}", kLogTag, result.status.message());
+      return result;
+    }
 
-  const Aws::String payload = GetResourceWithAWSWebServiceResult(httpRequest).GetPayload();
-  if (payload.empty()) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Empty AssumeRole response from {}", kLogTag, m_endpoint);
+    // Response shape:
+    // <AssumeRoleResponse>
+    //   <Credentials>
+    //     <AccessKeyId>...</AccessKeyId>
+    //     <AccessKeySecret>...</AccessKeySecret>
+    //     <SecurityToken>...</SecurityToken>
+    //     <Expiration>2023-01-01T12:00:00Z</Expiration>
+    //   </Credentials>
+    // </AssumeRoleResponse>
+    const auto doc = Aws::Utils::Xml::XmlDocument::CreateFromXmlString(payload);
+    auto root = doc.GetRootElement();
+    auto resultNode = root;
+    if (!root.IsNull() && root.GetName() != "AssumeRoleResponse") {
+      resultNode = root.FirstChild("AssumeRoleResponse");
+    }
+    if (resultNode.IsNull()) {
+      LOG_STORAGE_WARNING_ << fmt::format("[{}] Unexpected AssumeRole response root: {}", kLogTag, payload);
+      // A 200 whose body we cannot read does not establish either a transport
+      // failure or an access decision, so leave it conservatively unclassified.
+      result.status = MakeCredentialResponseError("Unexpected Aliyun AssumeRole response root");
+      return result;
+    }
+    auto credentials = resultNode.FirstChild("Credentials");
+    if (credentials.IsNull()) {
+      LOG_STORAGE_WARNING_ << fmt::format("[{}] Missing <Credentials> in AssumeRole response: {}", kLogTag, payload);
+      result.status = MakeCredentialResponseError("Aliyun AssumeRole response carried no <Credentials>");
+      return result;
+    }
+
+    auto ak_node = credentials.FirstChild("AccessKeyId");
+    if (!ak_node.IsNull())
+      result.creds.SetAWSAccessKeyId(ak_node.GetText());
+    auto sk_node = credentials.FirstChild("AccessKeySecret");
+    if (!sk_node.IsNull())
+      result.creds.SetAWSSecretKey(sk_node.GetText());
+    auto tok_node = credentials.FirstChild("SecurityToken");
+    if (!tok_node.IsNull())
+      result.creds.SetSessionToken(tok_node.GetText());
+    auto exp_node = credentials.FirstChild("Expiration");
+    if (!exp_node.IsNull()) {
+      result.creds.SetExpiration(Aws::Utils::DateTime(Aws::Utils::StringUtils::Trim(exp_node.GetText().c_str()).c_str(),
+                                                      Aws::Utils::DateFormat::ISO_8601));
+    }
+    result.status = ValidateTemporaryCredentials(result.creds, "Aliyun AssumeRole");
+    if (!result.status.ok()) {
+      result.creds = {};
+    }
     return result;
-  }
-
-  // Response shape:
-  // <AssumeRoleResponse>
-  //   <Credentials>
-  //     <AccessKeyId>...</AccessKeyId>
-  //     <AccessKeySecret>...</AccessKeySecret>
-  //     <SecurityToken>...</SecurityToken>
-  //     <Expiration>2023-01-01T12:00:00Z</Expiration>
-  //   </Credentials>
-  // </AssumeRoleResponse>
-  const auto doc = Aws::Utils::Xml::XmlDocument::CreateFromXmlString(payload);
-  auto root = doc.GetRootElement();
-  auto resultNode = root;
-  if (!root.IsNull() && root.GetName() != "AssumeRoleResponse") {
-    resultNode = root.FirstChild("AssumeRoleResponse");
-  }
-  if (resultNode.IsNull()) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Unexpected AssumeRole response root: {}", kLogTag, payload);
-    return result;
-  }
-  auto credentials = resultNode.FirstChild("Credentials");
-  if (credentials.IsNull()) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Missing <Credentials> in AssumeRole response: {}", kLogTag, payload);
-    return result;
-  }
-
-  auto ak_node = credentials.FirstChild("AccessKeyId");
-  if (!ak_node.IsNull())
-    result.creds.SetAWSAccessKeyId(ak_node.GetText());
-  auto sk_node = credentials.FirstChild("AccessKeySecret");
-  if (!sk_node.IsNull())
-    result.creds.SetAWSSecretKey(sk_node.GetText());
-  auto tok_node = credentials.FirstChild("SecurityToken");
-  if (!tok_node.IsNull())
-    result.creds.SetSessionToken(tok_node.GetText());
-  auto exp_node = credentials.FirstChild("Expiration");
-  if (!exp_node.IsNull()) {
-    result.creds.SetExpiration(Aws::Utils::DateTime(Aws::Utils::StringUtils::Trim(exp_node.GetText().c_str()).c_str(),
-                                                    Aws::Utils::DateFormat::ISO_8601));
+  } catch (const std::bad_alloc&) {
+    result.status = MakeCredentialOutOfMemoryError("Aliyun AssumeRole ran out of memory");
+  } catch (const std::exception& e) {
+    result.status = MakeCredentialExceptionError("Aliyun AssumeRole raised", e);
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] Exception during credential retrieval: {}", kLogTag, e.what());
+  } catch (...) {
+    result.status = MakeCredentialUnknownExceptionError("Aliyun AssumeRole raised");
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] Unknown exception during credential retrieval", kLogTag);
   }
   return result;
 }

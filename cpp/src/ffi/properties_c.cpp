@@ -24,6 +24,7 @@
 #include <charconv>
 #include <functional>
 #include <iostream>
+#include <limits>
 
 #include "milvus-storage/properties.h"
 #include "milvus-storage/ffi_internal/result.h"
@@ -121,52 +122,74 @@ LoonFFIResult loon_properties_create(const char* const* keys,
   properties->count = 0;
 
   try {
-    if (count == 0 || !keys || !values) {
+    // An empty property set is a valid value. Python constructs this shape
+    // directly and Java reaches this function with an empty Map; rejecting it
+    // as an ABI violation made the same value depend on which binding created
+    // it.
+    if (count == 0) {
+      RETURN_SUCCESS();
+    }
+    if (!keys || !values) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Invalid keys/values");
     }
 
-    properties->properties = static_cast<LoonProperty*>(malloc(sizeof(LoonProperty) * count));
+    if (count > std::numeric_limits<size_t>::max() / sizeof(LoonProperty)) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "Property count is too large: ", count);
+    }
+
+    // Zero-initialize every slot so cleanup remains safe if any later
+    // allocation or unordered_set insertion fails partway through.
+    properties->properties = static_cast<LoonProperty*>(calloc(count, sizeof(LoonProperty)));
     if (!properties->properties) {
-      RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to malloc [size=", sizeof(LoonProperty) * count, "]");
+      RETURN_ERROR(LOON_INTERNAL_INVARIANT, "Unexpected allocation failure [size=", sizeof(LoonProperty) * count, "]");
     }
     properties->count = count;
 
     for (size_t i = 0; i < count; ++i) {
-      properties->properties[i].key = nullptr;
-      properties->properties[i].value = nullptr;
-
       if (keys[i] && key_set.find(keys[i]) == key_set.end()) {
         size_t key_len = strlen(keys[i]) + 1;
         properties->properties[i].key = static_cast<char*>(malloc(key_len));
-        if (properties->properties[i].key) {
-          strcpy(properties->properties[i].key, keys[i]);
+        if (!properties->properties[i].key) {
+          loon_properties_free(properties);
+          RETURN_ERROR(LOON_INTERNAL_INVARIANT, "Unexpected allocation failure for property key at index ", i,
+                       " [size=", key_len, "]");
         }
+        strcpy(properties->properties[i].key, keys[i]);
 
         key_set.insert(keys[i]);
       } else {
         loon_properties_free(properties);
         if (keys[i]) {
-          RETURN_ERROR(LOON_INVALID_PROPERTIES, "Duplicate key: ", keys[i], " at index: ", i);
+          // The arrays are structurally valid; the caller supplied a property
+          // map that violates the public API's uniqueness contract.
+          RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Duplicate key: ", keys[i], " at index: ", i);
         } else {
-          RETURN_ERROR(LOON_INVALID_PROPERTIES, "The key index: ", i, " is invalid");
+          RETURN_ERROR(LOON_INVALID_ARGS, "The key index: ", i, " is invalid");
         }
       }
 
       if (values[i]) {
         size_t value_len = strlen(values[i]) + 1;
         properties->properties[i].value = static_cast<char*>(malloc(value_len));
-        if (properties->properties[i].value) {
-          strcpy(properties->properties[i].value, values[i]);
+        if (!properties->properties[i].value) {
+          loon_properties_free(properties);
+          RETURN_ERROR(LOON_INTERNAL_INVARIANT, "Unexpected allocation failure for property value at index ", i,
+                       " [size=", value_len, "]");
         }
+        strcpy(properties->properties[i].value, values[i]);
       } else {
         loon_properties_free(properties);
-        RETURN_ERROR(LOON_INVALID_PROPERTIES, "The value index: ", i, " is invalid, key: ", keys[i]);
+        RETURN_ERROR(LOON_INVALID_ARGS, "The value index: ", i, " is invalid, key: ", keys[i]);
       }
     }
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
+    loon_properties_free(properties);
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    loon_properties_free(properties);
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();

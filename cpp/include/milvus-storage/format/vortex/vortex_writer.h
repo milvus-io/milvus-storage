@@ -14,9 +14,12 @@
 
 #pragma once
 
+#include <optional>
+
 #include <memory>
 
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/writer_status.h"
 #include "milvus-storage/format/format_writer.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
@@ -47,7 +50,17 @@ class VortexFileWriter final : public FormatWriter {
 
   [[nodiscard]] arrow::Result<api::ColumnGroupFile> Close() override;
 
+  void Abort() noexcept override;
+
+#ifdef BUILD_GTEST
+  bool HasBridgeWriterForTest() const { return vx_writer_.has_value(); }
+#endif
+
   private:
+  arrow::Status WriteImpl(const std::shared_ptr<arrow::RecordBatch>& record);
+  arrow::Status FlushImpl();
+  arrow::Result<api::ColumnGroupFile> CloseImpl();
+
   VortexFileWriter(std::unique_ptr<FileSystemWrapper> fs_holder,
                    VortexWriter vx_writer,
                    std::shared_ptr<arrow::Schema> schema,
@@ -57,9 +70,15 @@ class VortexFileWriter final : public FormatWriter {
   bool closed_;
   std::string file_path_;
   std::unique_ptr<FileSystemWrapper> fs_holder_;
-  VortexWriter vx_writer_;
+  // optional so Abort() can release the bridge writer immediately. Dropping it
+  // drops the Rust ObjectStoreWriterInner, whose Drop calls
+  // loon_filesystem_writer_destroy -- which aborts the C++ output stream and
+  // therefore the multipart upload. Holding it until this object is destroyed
+  // would still release it, just later than the caller asked.
+  std::optional<VortexWriter> vx_writer_;
   std::shared_ptr<arrow::Schema> schema_;
   api::Properties properties_;
+  WriterStatus writer_status_;
 
   int64_t written_rows_ = 0;
 };

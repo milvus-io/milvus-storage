@@ -48,6 +48,7 @@
 #include "milvus-storage/format/column_group_lazy_reader.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/common/macro.h"
+#include "milvus-storage/common/extend_status.h"
 
 namespace milvus_storage::api {
 
@@ -743,17 +744,17 @@ folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>
   }
 
   // Associate results with task chunk ids, then rebuild the original request;
-  // asynchronous completion order is intentionally irrelevant.
-  return folly::collectAll(std::move(futures))
+  // asynchronous completion order is intentionally irrelevant. On failure the
+  // public future resolves immediately while accepted siblings finish under
+  // the fail-fast collector's retained callbacks.
+  return CollectAllResultsFailFast(std::move(futures), "chunk asynchronous read")
       .deferValue([chunk_indices, task_chunk_lists = std::move(task_chunk_lists)](
-                      auto&& all_results) -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
+                      arrow::Result<std::vector<std::vector<std::shared_ptr<arrow::RecordBatch>>>>&& all_result)
+                      -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
+        ARROW_ASSIGN_OR_RAISE(auto all_results, std::move(all_result));
         std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> all_rbs;
         for (size_t i = 0; i < all_results.size(); ++i) {
-          auto& tryResult = all_results[i];
-          if (tryResult.hasException()) {
-            return arrow::Status::IOError(tryResult.exception().what().toStdString());
-          }
-          ARROW_ASSIGN_OR_RAISE(auto rbs, std::move(tryResult.value()));
+          auto& rbs = all_results[i];
 
           auto& chunk_list = task_chunk_lists[i];
           if (rbs.size() != chunk_list.size()) {
@@ -1213,7 +1214,7 @@ class ReaderImpl : public Reader {
       }
       auto column_group = (*cgs_)[index];
       if (!column_group) {
-        return arrow::Status::Invalid(fmt::format("Column group at index {} is null", index));
+        return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, fmt::format("Column group at index {} is null", index));
       }
       column_groups.emplace_back(std::move(column_group));
     }
@@ -1345,24 +1346,27 @@ folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::Table>>>> Rea
   for (auto& task : all_tasks) {
     task_cg_indices.push_back(task.reader_index);
     task_positions.push_back(std::move(task.original_positions));
-    futures.push_back(readers[task.reader_index]->take_async(task));
+    futures.push_back(readers[task.reader_index]->take_async(task).deferEnsure([lazy_readers]() {
+      // Every accepted task keeps its owning reader set alive until that task's
+      // own callback chain settles, even if a sibling fails first.
+    }));
   }
 
   // Keep the readers alive for every in-flight task. The saved positions remove
-  // both task-splitting order and completion order from the final row order.
-  return folly::collectAll(std::move(futures))
+  // both task-splitting order and completion order from the final row order. A
+  // failure resolves the public future immediately; this continuation and the
+  // collector retain lazy_readers until accepted siblings finish.
+  return CollectAllResultsFailFast(std::move(futures), "take asynchronous read")
       .deferValue([row_indices, lazy_readers, task_cg_indices = std::move(task_cg_indices),
                    task_positions = std::move(task_positions)](
-                      auto&& all_results) -> arrow::Result<std::vector<std::shared_ptr<arrow::Table>>> {
+                      arrow::Result<std::vector<std::shared_ptr<arrow::Table>>>&& all_result)
+                      -> arrow::Result<std::vector<std::shared_ptr<arrow::Table>>> {
+        ARROW_ASSIGN_OR_RAISE(auto all_results, std::move(all_result));
         std::vector<std::vector<std::shared_ptr<arrow::Table>>> per_cg_tables(lazy_readers->size());
         std::vector<std::vector<size_t>> per_cg_positions(lazy_readers->size());
 
         for (size_t i = 0; i < all_results.size(); ++i) {
-          auto& tryResult = all_results[i];
-          if (tryResult.hasException()) {
-            return arrow::Status::IOError(tryResult.exception().what().toStdString());
-          }
-          ARROW_ASSIGN_OR_RAISE(auto table, std::move(tryResult.value()));
+          auto table = std::move(all_results[i]);
           size_t cg_idx = task_cg_indices[i];
           per_cg_tables[cg_idx].push_back(std::move(table));
           per_cg_positions[cg_idx].insert(per_cg_positions[cg_idx].end(), task_positions[i].begin(),

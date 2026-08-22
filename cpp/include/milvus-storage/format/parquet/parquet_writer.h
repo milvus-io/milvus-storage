@@ -24,11 +24,14 @@
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/metadata.h"
+#include "milvus-storage/common/writer_status.h"
 #include "milvus-storage/format/format_writer.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/column_groups.h"
 
 namespace milvus_storage::parquet {
+
+class FailClosedOutputStream;
 
 class ParquetFileWriter : public FormatWriter {
   public:
@@ -55,13 +58,15 @@ class ParquetFileWriter : public FormatWriter {
   arrow::Status init();
 
   public:
-  ~ParquetFileWriter() override = default;
+  ~ParquetFileWriter() override;
 
   arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) override;
 
   arrow::Status Flush() override;
 
   arrow::Result<api::ColumnGroupFile> Close() override;
+
+  void Abort() noexcept override;
 
   arrow::Result<size_t> Tell() const;
 
@@ -70,14 +75,21 @@ class ParquetFileWriter : public FormatWriter {
   arrow::Status AddUserMetadata(const std::vector<std::pair<std::string, std::string>>& metadata);
 
   private:
+  arrow::Status WriteImpl(const std::shared_ptr<arrow::RecordBatch>& record);
+  arrow::Status FlushImpl();
+  arrow::Result<api::ColumnGroupFile> CloseImpl();
+  arrow::Result<size_t> TellImpl() const;
+  arrow::Status AppendKVMetadataImpl(const std::string& key, const std::string& value);
+  arrow::Status AddUserMetadataImpl(const std::vector<std::pair<std::string, std::string>>& metadata);
   arrow::Status write_row_group(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch, size_t group_size);
+  arrow::Status Fail(arrow::Status status) const;
 
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;
   const std::string file_path_;
   milvus_storage::StorageConfig storage_config_;
 
-  std::shared_ptr<arrow::io::OutputStream> sink_;
+  std::shared_ptr<FailClosedOutputStream> sink_;
   std::unique_ptr<::parquet::arrow::FileWriter> writer_;
   std::shared_ptr<arrow::KeyValueMetadata> kv_metadata_;
 
@@ -90,6 +102,7 @@ class ParquetFileWriter : public FormatWriter {
   std::vector<size_t> cached_batch_sizes_;
   bool closed_ = false;
   size_t cached_tell_ = 0;
+  mutable WriterStatus writer_status_;
 
   int64_t written_rows_ = 0;
 };

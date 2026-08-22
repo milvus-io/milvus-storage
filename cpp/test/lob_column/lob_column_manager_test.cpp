@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "test_env.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/lob_column/lob_column_manager.h"
 #include "milvus-storage/lob_column/lob_column_writer.h"
 #include "milvus-storage/lob_column/lob_column_reader.h"
@@ -94,18 +95,48 @@ TEST_F(LobColumnManagerTest, CreateManagerInvalidConfig) {
   // null filesystem
   auto result1 = LobColumnManager::Create(nullptr, config_);
   ASSERT_FALSE(result1.ok());
+  EXPECT_TRUE(result1.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result1.status()), nullptr);
 
   // empty lob_base_path
   LobColumnConfig invalid_config = config_;
   invalid_config.lob_base_path = "";
   auto result2 = LobColumnManager::Create(fs_, invalid_config);
   ASSERT_FALSE(result2.ok());
+  EXPECT_TRUE(result2.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result2.status()), nullptr);
 
   // zero inline threshold
   invalid_config = config_;
   invalid_config.inline_threshold = 0;
   auto result3 = LobColumnManager::Create(fs_, invalid_config);
   ASSERT_FALSE(result3.ok());
+  EXPECT_TRUE(result3.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result3.status()), nullptr);
+
+  // zero maximum file size
+  invalid_config = config_;
+  invalid_config.max_lob_file_bytes = 0;
+  auto result4 = LobColumnManager::Create(fs_, invalid_config);
+  ASSERT_FALSE(result4.ok());
+  EXPECT_TRUE(result4.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result4.status()), nullptr);
+
+  // zero flush threshold
+  invalid_config = config_;
+  invalid_config.flush_threshold_bytes = 0;
+  auto result5 = LobColumnManager::Create(fs_, invalid_config);
+  ASSERT_FALSE(result5.ok());
+  EXPECT_TRUE(result5.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result5.status()), nullptr);
+
+  // flush threshold cannot exceed the maximum file size
+  invalid_config = config_;
+  invalid_config.flush_threshold_bytes = invalid_config.max_lob_file_bytes + 1;
+  auto result6 = LobColumnManager::Create(fs_, invalid_config);
+  ASSERT_FALSE(result6.ok());
+  EXPECT_TRUE(result6.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result6.status()), nullptr);
 }
 
 // test writing inline text
@@ -366,8 +397,7 @@ TEST_F(LobColumnManagerTest, WriterAbort) {
   ASSERT_TRUE(refs_result.ok());
 
   // abort instead of close
-  auto abort_result = writer->Abort();
-  ASSERT_TRUE(abort_result.ok());
+  writer->Abort();
   ASSERT_TRUE(writer->IsClosed());
 
   // verify no files remain

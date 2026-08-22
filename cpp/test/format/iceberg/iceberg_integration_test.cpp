@@ -18,6 +18,7 @@
 
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/extend_status.h"
 #include "iceberg_bridge.h"
 #include "test_env.h"
 
@@ -80,11 +81,11 @@ TEST_F(IcebergIntegrationTest, ExploreAndReadBasic) {
   const uint64_t num_rows = 50;
 
   // 1. Create a standard Iceberg table via Rust bridge
-  auto table_info = CreateTestTable(abs_table_dir_, num_rows, false, {});
+  auto table_info = CreateTestTable(abs_table_dir_, num_rows, false, {}).ValueOrDie();
 
   // 2. Explore: plan files from the Iceberg metadata
   std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options).ValueOrDie();
 
   ASSERT_EQ(file_infos.size(), 1);
   ASSERT_EQ(file_infos[0].record_count, num_rows);
@@ -133,17 +134,29 @@ TEST_F(IcebergIntegrationTest, ExploreAndReadBasic) {
   }
 }
 
+TEST_F(IcebergIntegrationTest, MissingSnapshotIsNotFoundRatherThanDataCorruption) {
+  auto table_info = CreateTestTable(abs_table_dir_, 10, false, {}).ValueOrDie();
+
+  std::unordered_map<std::string, std::string> storage_options;
+  auto result = PlanFiles(table_info.metadata_location, table_info.snapshot_id + 1, storage_options);
+  ASSERT_FALSE(result.ok());
+  auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+  ASSERT_NE(detail, nullptr) << result.status().ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageNotFound);
+  EXPECT_NE(CategoryForExtendStatusCode(detail->code()), ErrorCategory::DataFormat);
+}
+
 // End-to-end: create Iceberg table with positional deletes → explore → read with filtering
 TEST_F(IcebergIntegrationTest, ExploreAndReadWithPositionalDeletes) {
   const uint64_t num_rows = 20;
   std::vector<int64_t> deleted_positions = {3, 7, 15};
 
   // 1. Create Iceberg table with positional deletes
-  auto table_info = CreateTestTable(abs_table_dir_, num_rows, true, deleted_positions);
+  auto table_info = CreateTestTable(abs_table_dir_, num_rows, true, deleted_positions).ValueOrDie();
 
   // 2. Explore
   std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options).ValueOrDie();
 
   ASSERT_EQ(file_infos.size(), 1);
   ASSERT_EQ(file_infos[0].record_count, num_rows);
@@ -201,10 +214,10 @@ TEST_F(IcebergIntegrationTest, TakeWithPositionalDeletes) {
   const uint64_t num_rows = 30;
   std::vector<int64_t> deleted_positions = {5, 10, 20};
 
-  auto table_info = CreateTestTable(abs_table_dir_, num_rows, true, deleted_positions);
+  auto table_info = CreateTestTable(abs_table_dir_, num_rows, true, deleted_positions).ValueOrDie();
 
   std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options).ValueOrDie();
   ASSERT_EQ(file_infos.size(), 1);
 
   auto cg_file = MakeCgFile(file_infos[0]);
@@ -238,10 +251,10 @@ TEST_F(IcebergIntegrationTest, TakeWithPositionalDeletes) {
 TEST_F(IcebergIntegrationTest, ColumnProjection) {
   const uint64_t num_rows = 10;
 
-  auto table_info = CreateTestTable(abs_table_dir_, num_rows, false, {});
+  auto table_info = CreateTestTable(abs_table_dir_, num_rows, false, {}).ValueOrDie();
 
   std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options).ValueOrDie();
   ASSERT_EQ(file_infos.size(), 1);
 
   auto cg_file = MakeCgFile(file_infos[0]);
@@ -266,10 +279,10 @@ TEST_F(IcebergIntegrationTest, CloneReaderSharesDeletes) {
   const uint64_t num_rows = 10;
   std::vector<int64_t> deleted_positions = {2, 8};
 
-  auto table_info = CreateTestTable(abs_table_dir_, num_rows, true, deleted_positions);
+  auto table_info = CreateTestTable(abs_table_dir_, num_rows, true, deleted_positions).ValueOrDie();
 
   std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options).ValueOrDie();
 
   auto cg_file = MakeCgFile(file_infos[0]);
 

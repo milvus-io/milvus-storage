@@ -36,6 +36,8 @@ namespace milvus_storage {
 
 using ::milvus_storage::S3Options;
 
+class RequestCredentialsResolver;
+
 class S3Client : public Aws::S3::S3Client {
   public:
   using Aws::S3::S3Client::S3Client;
@@ -97,7 +99,9 @@ class S3ClientHolder {
   /// An error is returned if S3 is already finalized.
   arrow::Result<S3ClientLock> Lock();
 
-  S3ClientHolder(std::weak_ptr<S3ClientFinalizer> finalizer, std::shared_ptr<S3Client> client);
+  S3ClientHolder(std::weak_ptr<S3ClientFinalizer> finalizer,
+                 std::shared_ptr<S3Client> client,
+                 std::shared_ptr<RequestCredentialsResolver> credentials_resolver = nullptr);
 
   void Finalize();
 
@@ -105,13 +109,15 @@ class S3ClientHolder {
   std::mutex mutex_;
   std::weak_ptr<S3ClientFinalizer> finalizer_;
   std::shared_ptr<S3Client> client_;
+  std::shared_ptr<RequestCredentialsResolver> credentials_resolver_;
 };
 
 class S3ClientFinalizer : public std::enable_shared_from_this<S3ClientFinalizer> {
   using ClientHolderList = std::vector<std::weak_ptr<S3ClientHolder>>;
 
   public:
-  arrow::Result<std::shared_ptr<S3ClientHolder>> AddClient(std::shared_ptr<S3Client> client);
+  arrow::Result<std::shared_ptr<S3ClientHolder>> AddClient(
+      std::shared_ptr<S3Client> client, std::shared_ptr<RequestCredentialsResolver> credentials_resolver = nullptr);
 
   void Finalize();
   std::shared_lock<std::shared_mutex> LockShared();

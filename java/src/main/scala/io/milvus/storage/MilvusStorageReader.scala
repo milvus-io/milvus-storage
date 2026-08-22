@@ -19,6 +19,12 @@ class MilvusStorageReader {
    */
   def create(columnGroups: Long, schemaPtr: Long, neededColumns: Array[String], properties: MilvusStorageProperties): Unit = {
     if (isDestroyed) throw new IllegalStateException("Reader has been destroyed")
+    if (neededColumns != null && neededColumns.exists(_ == null)) {
+      throw new IllegalArgumentException("neededColumns must not contain null")
+    }
+    if (neededColumns != null && neededColumns.exists(_.isEmpty)) {
+      throw new IllegalArgumentException("neededColumns must not contain empty names")
+    }
     readerHandle = readerNew(columnGroups, schemaPtr, neededColumns, properties.getPtr)
   }
 
@@ -31,6 +37,12 @@ class MilvusStorageReader {
    */
   def create(columnGroups: Long, schemaPtr: Long, neededColumns: Array[String], propertiesPtr: Long): Unit = {
     if (isDestroyed) throw new IllegalStateException("Reader has been destroyed")
+    if (neededColumns != null && neededColumns.exists(_ == null)) {
+      throw new IllegalArgumentException("neededColumns must not contain null")
+    }
+    if (neededColumns != null && neededColumns.exists(_.isEmpty)) {
+      throw new IllegalArgumentException("neededColumns must not contain empty names")
+    }
     readerHandle = readerNew(columnGroups, schemaPtr, neededColumns, propertiesPtr)
   }
 
@@ -83,6 +95,12 @@ class MilvusStorageReader {
   def getChunkReaderScala(columnGroupId: Long, neededColumns: Array[String] = null): MilvusStorageChunkReader = {
     if (isDestroyed) throw new IllegalStateException("Reader has been destroyed")
     if (readerHandle == 0) throw new IllegalStateException("Reader not initialized")
+    if (neededColumns != null && neededColumns.exists(_ == null)) {
+      throw new IllegalArgumentException("neededColumns must not contain null")
+    }
+    if (neededColumns != null && neededColumns.exists(_.isEmpty)) {
+      throw new IllegalArgumentException("neededColumns must not contain empty names")
+    }
     val chunkReaderHandle = getChunkReader(readerHandle, columnGroupId, neededColumns)
     val chunkReader = new MilvusStorageChunkReader()
     chunkReader.setHandle(chunkReaderHandle)
@@ -99,6 +117,15 @@ class MilvusStorageReader {
   def takeRows(rowIndices: Array[Long], parallelism: Long, neededColumns: Array[String] = null): Array[Long] = {
     if (isDestroyed) throw new IllegalStateException("Reader has been destroyed")
     if (readerHandle == 0) throw new IllegalStateException("Reader not initialized")
+    if (rowIndices == null) throw new IllegalArgumentException("rowIndices must not be null")
+    if (rowIndices.isEmpty) throw new IllegalArgumentException("rowIndices must not be empty")
+    if (parallelism <= 0) throw new IllegalArgumentException("parallelism must be > 0")
+    if (neededColumns != null && neededColumns.exists(_ == null)) {
+      throw new IllegalArgumentException("neededColumns must not contain null")
+    }
+    if (neededColumns != null && neededColumns.exists(_.isEmpty)) {
+      throw new IllegalArgumentException("neededColumns must not contain empty names")
+    }
     take(readerHandle, rowIndices, parallelism, neededColumns)
   }
 

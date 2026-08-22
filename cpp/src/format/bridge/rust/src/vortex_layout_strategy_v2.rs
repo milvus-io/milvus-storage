@@ -7,10 +7,6 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::{StreamExt as _, pin_mut};
 use vortex::array::ArrayContext;
-use vortex::array::arrays::{
-    Chunked, ChunkedArray, Constant, Decimal, Dict, Extension, FixedSizeList, List, ListView,
-    Masked, Primitive, PrimitiveArray, Struct, StructArray, VarBin, VarBinView,
-};
 use vortex::array::arrays::chunked::ChunkedArrayExt;
 use vortex::array::arrays::decimal::DecimalArrayExt;
 use vortex::array::arrays::dict::DictArraySlotsExt;
@@ -22,6 +18,10 @@ use vortex::array::arrays::masked::MaskedArraySlotsExt;
 use vortex::array::arrays::primitive::PrimitiveArrayExt;
 use vortex::array::arrays::struct_::StructArrayExt;
 use vortex::array::arrays::varbin::VarBinArrayExt;
+use vortex::array::arrays::{
+    Chunked, ChunkedArray, Constant, Decimal, Dict, Extension, FixedSizeList, List, ListView,
+    Masked, Primitive, PrimitiveArray, Struct, StructArray, VarBin, VarBinView,
+};
 use vortex::array::stats::{as_stat_bitset_bytes, stats_from_bitset_bytes};
 use vortex::array::validity::Validity;
 use vortex::array::{
@@ -33,7 +33,9 @@ use vortex::dtype::{
     DType, DecimalType, Field, FieldName, FieldNames, FieldPath, FieldPathSet, Nullability, PType,
     StructFields,
 };
-use vortex::error::{VortexExpect, VortexResult, vortex_bail, vortex_ensure, vortex_err};
+use vortex::error::{
+    VortexError, VortexExpect, VortexResult, vortex_bail, vortex_ensure, vortex_err,
+};
 use vortex::expr::pruning::{checked_pruning_expr, field_path_stat_field_name};
 use vortex::expr::stats::Stat;
 use vortex::expr::{Expression, get_item, root};
@@ -83,6 +85,13 @@ pub(crate) fn row_group_zone_map_pruning_stats() -> (u64, u64) {
         ROW_GROUP_ZONE_MAP_PRUNE_EVAL_COUNT.load(std::sync::atomic::Ordering::Relaxed),
         ROW_GROUP_ZONE_MAP_PRUNED_ROW_GROUP_COUNT.load(std::sync::atomic::Ordering::Relaxed),
     )
+}
+
+fn metadata_err(message: String) -> VortexError {
+    // Serde, not Other: the bridge's `is_vortex_data_format_error` classifies
+    // Serde as DataFormat, which is what "persisted zone-map metadata does not
+    // decode" is. Other would surface as an unclassified System failure.
+    vortex_err!(Serde: "{}", message)
 }
 
 vtable!(RowGroupZoneMap);
@@ -137,6 +146,16 @@ impl DeserializeMetadata for RowGroupZoneMapMetadata {
         let stats_version = reader.read_u16()?;
         let rg_count = reader.read_u64()?;
         let column_count = reader.read_u32()? as usize;
+        // Every column needs at least two u16 lengths (field name and stats).
+        // Reject an impossible persisted count before using it as an allocation
+        // size; malformed metadata must produce a data-format error, not try to
+        // reserve attacker-controlled memory.
+        if column_count > reader.remaining() / 4 {
+            return Err(metadata_err(format!(
+                "Invalid {LAYOUT_ID} metadata column count {column_count} for {} remaining bytes",
+                reader.remaining()
+            )));
+        }
         let mut columns = Vec::with_capacity(column_count);
 
         for _ in 0..column_count {
@@ -149,11 +168,12 @@ impl DeserializeMetadata for RowGroupZoneMapMetadata {
             });
         }
 
-        vortex_ensure!(
-            reader.is_done(),
-            "Trailing bytes in {LAYOUT_ID} metadata: {}",
-            reader.remaining()
-        );
+        if !reader.is_done() {
+            return Err(metadata_err(format!(
+                "Trailing bytes in {LAYOUT_ID} metadata: {}",
+                reader.remaining()
+            )));
+        }
 
         Ok(Self {
             version,
@@ -211,7 +231,7 @@ impl<'a> MetadataReader<'a> {
     fn read_string(&mut self) -> VortexResult<String> {
         let bytes = self.read_bytes()?;
         String::from_utf8(bytes.to_vec())
-            .map_err(|e| vortex_err!("Invalid UTF-8 in {LAYOUT_ID} metadata: {e}"))
+            .map_err(|e| metadata_err(format!("Invalid UTF-8 in {LAYOUT_ID} metadata: {e}")))
     }
 
     fn read_bytes(&mut self) -> VortexResult<&'a [u8]> {
@@ -223,9 +243,9 @@ impl<'a> MetadataReader<'a> {
         let end = self
             .pos
             .checked_add(len)
-            .ok_or_else(|| vortex_err!("Invalid {LAYOUT_ID} metadata length"))?;
+            .ok_or_else(|| metadata_err(format!("Invalid {LAYOUT_ID} metadata length")))?;
         if end > self.bytes.len() {
-            vortex_bail!("Truncated {LAYOUT_ID} metadata");
+            return Err(metadata_err(format!("Truncated {LAYOUT_ID} metadata")));
         }
         let out = &self.bytes[self.pos..end];
         self.pos = end;
@@ -333,11 +353,18 @@ impl VTable for RowGroupZoneMap {
             "Unsupported {LAYOUT_ID} stats version: {}",
             metadata.stats_version
         );
-        vortex_ensure!(
-            children.nchildren() == 2,
-            "{LAYOUT_ID} expected 2 children, got {}",
-            children.nchildren()
-        );
+        if children.nchildren() != 2 {
+            return Err(metadata_err(format!(
+                "{LAYOUT_ID} expected 2 children, got {}",
+                children.nchildren()
+            )));
+        }
+        // `dtype` and `metadata` are both persisted in the file. A metadata
+        // column that the persisted dtype does not contain is therefore a
+        // contradiction in the bytes, not a caller-side projection mistake.
+        // Validate it while the layout is being built so the data-format
+        // classification is not lost in a later child()/reader call.
+        let _ = zones_dtype_from_persisted_metadata(dtype, metadata)?;
 
         Ok(RowGroupZoneMapLayout {
             dtype: dtype.clone(),
@@ -439,6 +466,17 @@ fn zones_dtype(dtype: &DType, metadata: &RowGroupZoneMapMetadata) -> VortexResul
         StructFields::new(FieldNames::from(names), dtypes),
         Nullability::NonNullable,
     ))
+}
+
+fn zones_dtype_from_persisted_metadata(
+    dtype: &DType,
+    metadata: &RowGroupZoneMapMetadata,
+) -> VortexResult<DType> {
+    zones_dtype(dtype, metadata).map_err(|err| {
+        metadata_err(format!(
+            "Invalid {LAYOUT_ID} metadata for data dtype: {err}"
+        ))
+    })
 }
 
 fn boundary_dtype() -> DType {
@@ -548,8 +586,7 @@ impl RowGroupZoneMapReader {
             let mut ctx = session.create_execution_ctx();
             let zone_array = zone_eval.await?.execute::<StructArray>(&mut ctx)?;
             Self::validate_stats_table(&column_dtype, &zone_array, &present_stats)?;
-            let stats_view =
-                Self::build_root_stats_view_for_column(&zone_array, &required_stats)?;
+            let stats_view = Self::build_root_stats_view_for_column(&zone_array, &required_stats)?;
             let rg_prune_mask = stats_view.apply(&predicate)?.execute::<Mask>(&mut ctx)?;
             Ok::<Mask, vortex::error::VortexError>(rg_prune_mask)
         })?;
@@ -674,8 +711,7 @@ impl LayoutReader for RowGroupZoneMapReader {
             // Validate that the stored per-column stats table still matches Vortex ZoneMap
             // shape before evaluating the root-scope pruning predicate against it.
             Self::validate_stats_table(&column_dtype, &zone_array, &present_stats)?;
-            let stats_view =
-                Self::build_root_stats_view_for_column(&zone_array, &required_stats)?;
+            let stats_view = Self::build_root_stats_view_for_column(&zone_array, &required_stats)?;
             let rg_prune_mask = stats_view.apply(&predicate)?.execute::<Mask>(&mut ctx)?;
             ROW_GROUP_ZONE_MAP_PRUNE_EVAL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             ROW_GROUP_ZONE_MAP_PRUNED_ROW_GROUP_COUNT.fetch_add(
@@ -1069,10 +1105,7 @@ fn estimated_listview_size_range(
                 saturating_sum([
                     primitive_range_width(offsets, len),
                     primitive_range_width(sizes, len),
-                    estimated_logical_uncompressed_size_range(
-                        listview.elements(),
-                        start..end,
-                    ),
+                    estimated_logical_uncompressed_size_range(listview.elements(), start..end),
                 ]),
                 array,
                 len,
@@ -1249,9 +1282,11 @@ fn estimated_logical_uncompressed_size_range(
     }
 
     if let Some(struct_array) = array.as_opt::<Struct>() {
-        let field_bytes = saturating_sum(struct_array.iter_unmasked_fields().map(|field| {
-            estimated_logical_uncompressed_size_range(field, range.clone())
-        }));
+        let field_bytes = saturating_sum(
+            struct_array
+                .iter_unmasked_fields()
+                .map(|field| estimated_logical_uncompressed_size_range(field, range.clone())),
+        );
         return add_estimated_validity_nbytes(field_bytes, array, len);
     }
 
@@ -1390,12 +1425,8 @@ impl RowGroupBuffer {
 
                 if rows_to_take < chunk_len {
                     let right = chunk.slice(rows_to_take..chunk_len)?;
-                    let right_est = estimated_split_remainder_size(
-                        &chunk,
-                        &right,
-                        est_bytes,
-                        chunk_len,
-                    );
+                    let right_est =
+                        estimated_split_remainder_size(&chunk, &right, est_bytes, chunk_len);
                     self.nbytes = self.nbytes.saturating_add(right_est);
                     self.data.push_front((right, right_est));
                 }
@@ -2017,8 +2048,8 @@ mod tests {
     use vortex::array::arrays::{ChunkedArray, ConstantArray, FixedSizeListArray};
     use vortex::array::stream::ArrayStreamExt;
     use vortex::buffer::{BitBufferMut, ByteBufferMut};
-    use vortex::expr::{and, gt_eq, lit, lt};
     use vortex::expr::stats::StatsProvider;
+    use vortex::expr::{and, gt_eq, lit, lt};
     use vortex::file::{OpenOptionsSessionExt, VortexWriteOptions};
 
     #[test]
@@ -2034,6 +2065,68 @@ mod tests {
         let roundtrip =
             RowGroupZoneMapMetadata::deserialize(&metadata.clone().serialize()).unwrap();
         assert_eq!(roundtrip, metadata);
+    }
+
+    #[test]
+    fn damaged_metadata_is_rejected() {
+        let good = RowGroupZoneMapMetadata::new(
+            3,
+            vec![ColumnZoneMetadata {
+                field_name: "a".into(),
+                present_stats: Arc::from([Stat::Max, Stat::Min]),
+            }],
+        )
+        .serialize();
+
+        // The file claims more than it holds.
+        let truncated = good[..good.len() - 1].to_vec();
+        // It holds more than it claims.
+        let mut trailing = good.clone();
+        trailing.push(0xAB);
+        // A field name that is not text. The single-byte name "a" sits right
+        // after the fixed header (version + stats_version + rg_count +
+        // column_count = 16 bytes) and its own u16 length, so overwriting it
+        // with a lone continuation byte hits from_utf8 and nothing else.
+        let mut bad_utf8 = good.clone();
+        bad_utf8[16 + 2] = 0x80;
+        // An impossible persisted count must be rejected before Vec allocation.
+        let mut impossible_count = good.clone();
+        impossible_count[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        for (what, bytes) in [
+            ("truncated", truncated),
+            ("trailing", trailing),
+            ("invalid utf-8", bad_utf8),
+            ("impossible column count", impossible_count),
+        ] {
+            assert!(
+                RowGroupZoneMapMetadata::deserialize(&bytes).is_err(),
+                "{what} metadata was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_column_missing_from_persisted_dtype_is_rejected() {
+        let dtype = DType::Struct(
+            StructFields::new(
+                FieldNames::from(["present"]),
+                vec![DType::Primitive(PType::I32, Nullability::NonNullable)],
+            ),
+            Nullability::NonNullable,
+        );
+        let metadata = RowGroupZoneMapMetadata::new(
+            1,
+            vec![ColumnZoneMetadata {
+                field_name: "missing".into(),
+                present_stats: Arc::from([Stat::Max, Stat::Min]),
+            }],
+        );
+
+        assert!(
+            zones_dtype_from_persisted_metadata(&dtype, &metadata).is_err(),
+            "metadata that references a missing dtype column was accepted"
+        );
     }
 
     #[test]
@@ -2119,10 +2212,7 @@ mod tests {
         )?
         .into_array();
 
-        assert_eq!(
-            estimated_logical_uncompressed_size(&array),
-            u64::MAX
-        );
+        assert_eq!(estimated_logical_uncompressed_size(&array), u64::MAX);
         Ok(())
     }
 

@@ -31,33 +31,49 @@ extern "C" {
 #include <stdint.h>
 #include "arrow/c/abi.h"
 
+#include "milvus-storage/ffi_internal/ffi_error_code.h"
+
 // ==================== Result C Interface ====================
 
 // --- Export error codes ---
+//
+// Generated from the same X-macro table that defines the constants in
+// result_c.cpp and that drives the linker export maps. These used to be written
+// out by hand, which is how six `loon_errcode_packed_*` symbols ended up
+// exported and consumed by the Python binding while having no declaration here
+// at all. A table that is transcribed by hand is a table that drifts.
 FFI_EXPORT extern const int loon_errcode_success;
-FFI_EXPORT extern const int loon_errcode_invalid_args;
-FFI_EXPORT extern const int loon_errcode_memory;
-FFI_EXPORT extern const int loon_errcode_arrow;
-FFI_EXPORT extern const int loon_errcode_logical;
-FFI_EXPORT extern const int loon_errcode_got_exception;
-FFI_EXPORT extern const int loon_errcode_unreachable;
-FFI_EXPORT extern const int loon_errcode_invalid_properties;
-FFI_EXPORT extern const int loon_errcode_fault_inject;
-FFI_EXPORT extern const int loon_errcode_not_support;
-FFI_EXPORT extern const int loon_errcode_file_not_found;
 
+#define MILVUS_STORAGE_ERRCODE_DECL(name, code, symbol, category, s3_code) \
+  FFI_EXPORT extern const int loon_errcode_##symbol;
+LOON_INTERNAL_ERROR_CODE_LIST(MILVUS_STORAGE_ERRCODE_DECL)
+LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_ERRCODE_DECL)
+#undef MILVUS_STORAGE_ERRCODE_DECL
+
+// Renamed aws_* -> storage_* (see ffi_error_code.h). The old symbols stay
+// exported as tombstones so an older binding paired with a newer library does
+// not fail to load. Deleted no earlier than the next deliberate ABI break.
 FFI_EXPORT extern const int loon_errcode_aws_no_such_upload;
 FFI_EXPORT extern const int loon_errcode_aws_conflict;
 FFI_EXPORT extern const int loon_errcode_aws_precondition_failed;
 FFI_EXPORT extern const int loon_errcode_aws_not_found;
 FFI_EXPORT extern const int loon_errcode_aws_access_denied;
+FFI_EXPORT extern const int loon_errcode_aws_bucket_not_found;
+
+// Retired code 106. DEPRECATED: nothing produces it any more, and no consumer
+// should compare against it. It stays exported because a retired NUMBER and a
+// retired SYMBOL are not the same promise: the shared library and the bindings
+// that dlopen it ship separately, so deleting the symbol turns an older binding
+// paired with a newer library into a load-time failure over a constant neither
+// of them uses. Deleted no earlier than the next deliberate ABI break.
 FFI_EXPORT extern const int loon_errcode_aws_non_retryable;
-FFI_EXPORT extern const int loon_errcode_transient_network;
-FFI_EXPORT extern const int loon_errcode_transient_timeout;
-FFI_EXPORT extern const int loon_errcode_transient_throttling;
-FFI_EXPORT extern const int loon_errcode_transient_service;
-FFI_EXPORT extern const int loon_errcode_txn_exhausted_retry;
-FFI_EXPORT extern const int loon_errcode_txn_resolution_failed;
+
+// Retired 54, 120, 121. Same promise as 106 above: exported tombstones only,
+// deliberately absent from the X-macro table (no name, no category, no
+// producer). Nothing produces them and no consumer should compare against them.
+FFI_EXPORT extern const int loon_errcode_packed_io_transient;
+FFI_EXPORT extern const int loon_errcode_storage_partial_failure_retryable;
+FFI_EXPORT extern const int loon_errcode_storage_partial_failure;
 
 // usage example(caller must free the message string):
 //
@@ -81,7 +97,33 @@ FFI_EXPORT const char* loon_ffi_get_errmsg(LoonFFIResult* result);
 // free the message string inside LoonFFIResult
 FFI_EXPORT void loon_ffi_free_result(LoonFFIResult* result);
 
+// --- Error classification ---
+// Category values are compile-time constants, so C consumers can use them in a
+// switch without loading extra data symbols from the shared library.
+typedef enum LoonErrorCategory {
+  loon_error_category_unknown = LOON_ERROR_CATEGORY_UNKNOWN,
+  loon_error_category_user = LOON_ERROR_CATEGORY_USER,
+  loon_error_category_retryable = LOON_ERROR_CATEGORY_RETRYABLE,
+  loon_error_category_conflict = LOON_ERROR_CATEGORY_CONFLICT,
+  loon_error_category_data_format = LOON_ERROR_CATEGORY_DATA_FORMAT,
+  loon_error_category_system = LOON_ERROR_CATEGORY_SYSTEM,
+} LoonErrorCategory;
+
+/**
+ * @brief Returns nonzero when the code carries a transient-cause hint.
+ *
+ * This is not an operation-level retry verdict. The caller owns the
+ * idempotency, reconciliation, and resource-lifetime decision; a failed
+ * stateful writer must be destroyed and recreated rather than reused.
+ *
+ * It is literally `loon_ffi_error_category(err_code) ==
+ * loon_error_category_retryable` -- the two are generated from the same table
+ * and cannot disagree, so prefer whichever reads better at the call site.
+ */
 FFI_EXPORT int loon_ffi_is_retryable_errcode(int err_code);
+
+// Category of an error code; see loon_error_category_* above.
+FFI_EXPORT int loon_ffi_error_category(int err_code);
 
 // ==================== End of Result C Interface ====================
 
@@ -455,10 +497,16 @@ FFI_EXPORT LoonFFIResult loon_writer_flush(LoonWriterHandle handle);
 /**
  * @brief Closes the writer and returns the column groups for a successfully written dataset.
  *
- * If a previous operation on this writer has already failed, close may still be called to
- * release/finalize resources owned by the writer. In that case, even if close succeeds,
- * the returned column groups are not a valid dataset manifest and must be discarded by
- * the caller.
+ * Close means "I am done with this writer", not "finish the file". A healthy writer is
+ * finalized and its column groups are the dataset. A writer whose earlier operation ALREADY
+ * FAILED is abandoned instead: closing releases what it holds in the store and returns that
+ * first failure unchanged. So close on a failed writer cannot succeed, and no column groups
+ * are produced -- there is nothing for the caller to discard.
+ *
+ * Call it anyway on the failure path. Abandoning is what releases an S3 multipart upload,
+ * whose parts are billed and which no bucket listing can name. `loon_writer_destroy` is the
+ * only mandatory verb, and it aborts a writer that was never closed, but a caller that
+ * reaches a failure and simply keeps the handle around leaks until it does.
  *
  * @param handle Writer handle
  * @param out_columngroups Output LoonColumnGroups structure (function allocates and returns pointer)
@@ -472,7 +520,22 @@ FFI_EXPORT LoonFFIResult loon_writer_close(LoonWriterHandle handle,
                                            LoonColumnGroups** out_columngroups);
 
 /**
- * @brief Destroys a Writer
+ * @brief Destroys a Writer, abandoning it first if it was never closed
+ *
+ * MANDATORY, AND THE ONLY MANDATORY VERB. Every `loon_writer_new` must be
+ * paired with a `loon_writer_destroy` in the same scope -- Go `defer`, Java
+ * try-with-resources, Python `with`. This entry point never fails and returns
+ * nothing precisely so it can be called unconditionally on every path.
+ *
+ * Destroying a writer that was never closed IS how a C caller says "I give up":
+ * this aborts it, releasing what it allocated in the store (an S3 multipart
+ * upload holds parts that no bucket listing can name, so nothing else will ever
+ * find them). There is deliberately no separate `abort` entry point -- an
+ * optional cleanup verb is one callers forget, while this one they must call
+ * anyway.
+ *
+ * Destroying after a successful `loon_writer_close` is a no-op beyond freeing
+ * the handle, so the pairing rule needs no exceptions.
  *
  * @param handle Writer handle to destroy
  */
@@ -621,6 +684,9 @@ FFI_EXPORT void loon_chunk_reader_destroy(LoonChunkReaderHandle reader);
 /// Opaque handle for Reader
 typedef uintptr_t LoonReaderHandle;
 
+/// Opaque handle for a pull-based Arrow RecordBatchReader.
+typedef uintptr_t LoonRecordBatchReaderHandle;
+
 /**
  * @brief Creates a new Reader for a milvus storage dataset
  *
@@ -664,6 +730,43 @@ FFI_EXPORT void loon_reader_set_keyretriever(LoonReaderHandle reader,
 FFI_EXPORT LoonFFIResult loon_get_record_batch_reader(LoonReaderHandle reader,
                                                       const char* predicate,
                                                       struct ArrowArrayStream* out_array_stream);
+
+/**
+ * @brief Opens a pull-based RecordBatchReader whose per-batch failures retain
+ *        the structured Loon error code.
+ *
+ * Unlike `loon_get_record_batch_reader`, this API does not route lazy
+ * `ReadNext()` failures through ArrowArrayStream's errno-only callback. Each
+ * call to `loon_record_batch_reader_read_next` returns a LoonFFIResult.
+ *
+ * @param reader Reader handle
+ * @param predicate Optional filter expression (NULL or empty disables filtering)
+ * @param out_handle Output handle; destroy with `loon_record_batch_reader_destroy`
+ * @param out_schema Output schema for all batches; caller releases it using
+ *        `out_schema->release` (may be NULL when the caller does not need it)
+ */
+FFI_EXPORT LoonFFIResult loon_record_batch_reader_new(LoonReaderHandle reader,
+                                                      const char* predicate,
+                                                      LoonRecordBatchReaderHandle* out_handle,
+                                                      struct ArrowSchema* out_schema);
+
+/**
+ * @brief Reads the next RecordBatch into a caller-owned ArrowArray.
+ *
+ * The schema is returned once by `loon_record_batch_reader_new`; every batch
+ * produced by this handle has that schema. On success with a batch,
+ * `out_array->release` is non-NULL. On EOF it is set to NULL, the underlying
+ * reader is released, and further calls keep reporting EOF (idempotent, per
+ * the Arrow C stream convention). On failure, the returned LoonFFIResult
+ * preserves any ExtendStatusDetail attached by the storage producer and the
+ * handle becomes terminal: retrying it returns LOON_INVALID_ARGS; destroy it
+ * and create a new reader.
+ */
+FFI_EXPORT LoonFFIResult loon_record_batch_reader_read_next(LoonRecordBatchReaderHandle handle,
+                                                            struct ArrowArray* out_array);
+
+/** @brief Destroys a pull-based RecordBatchReader handle. */
+FFI_EXPORT void loon_record_batch_reader_destroy(LoonRecordBatchReaderHandle handle);
 
 /**
  * @brief Get a chunk reader for a specific column group.

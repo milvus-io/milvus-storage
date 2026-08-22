@@ -21,6 +21,7 @@
 #include <arrow/util/compression.h>
 #include <parquet/properties.h>
 #include <parquet/metadata.h>
+#include <parquet/arrow/schema.h>
 #include <boost/variant.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
@@ -30,6 +31,7 @@
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/log.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/arrow_util.h"
@@ -37,6 +39,127 @@
 #include "milvus-storage/filesystem/upload_sizable.h"
 
 namespace milvus_storage::parquet {
+
+// Parquet closes itself from its destructor and may try to write a footer after
+// its caller has already observed a failure. This wrapper remembers the first
+// lower-layer status and blocks every later operation locally. It never closes
+// or aborts the delegate from its destructor.
+class FailClosedOutputStream final : public arrow::io::OutputStream {
+  public:
+  explicit FailClosedOutputStream(std::shared_ptr<arrow::io::OutputStream> delegate) : delegate_(std::move(delegate)) {}
+
+  ~FailClosedOutputStream() override = default;
+
+  void EnableClose() { close_enabled_ = true; }
+
+  void Discard(const arrow::Status& status = arrow::Status::OK()) const {
+    Record(status);
+    discarded_ = true;
+  }
+
+  arrow::Status Close() override {
+    if (closed_) {
+      return first_status_;
+    }
+    if (discarded_ || !close_enabled_) {
+      closed_ = true;
+      return TerminalStatus();
+    }
+    auto status = delegate_->Close();
+    Record(status);
+    if (status.ok()) {
+      closed_ = true;
+      delegate_finished_ = true;
+    }
+    return status;
+  }
+
+  arrow::Status Abort() override {
+    const bool should_abort_delegate = !delegate_finished_;
+    discarded_ = true;
+    closed_ = true;
+    // Forward it. Blocking the delegate is this wrapper's job for Write /
+    // Flush / Close -- parquet finalizes itself from its destructor and must
+    // not be allowed to write a footer over a failure. Abort is the opposite
+    // case: it is not parquet finishing its work, it is our caller giving up,
+    // and the delegate is the only object that can release what it allocated
+    // in the store (an S3 multipart upload). Swallowing it here meant an
+    // explicit abort stopped at this wrapper and never reached the filesystem.
+    //
+    // Best effort: the delegate's status is logged, never returned, so the
+    // caller still sees the original failure.
+    if (should_abort_delegate && delegate_ != nullptr) {
+      delegate_finished_ = true;
+      auto status = delegate_->Abort();
+      if (!status.ok()) {
+        LOG_STORAGE_WARNING_ << "Failed to abort the parquet output stream: " << status.ToString();
+      }
+    }
+    return TerminalStatus();
+  }
+
+  arrow::Result<int64_t> Tell() const override {
+    if (discarded_) {
+      return TerminalStatus();
+    }
+    auto result = delegate_->Tell();
+    if (!result.ok()) {
+      Record(result.status());
+    }
+    return result;
+  }
+
+  bool closed() const override { return closed_ || discarded_ || delegate_->closed(); }
+
+  arrow::Status Write(const void* data, int64_t nbytes) override {
+    if (discarded_) {
+      return TerminalStatus();
+    }
+    auto status = delegate_->Write(data, nbytes);
+    Record(status);
+    return status;
+  }
+
+  arrow::Status Write(const std::shared_ptr<arrow::Buffer>& data) override {
+    if (discarded_) {
+      return TerminalStatus();
+    }
+    auto status = delegate_->Write(data);
+    Record(status);
+    return status;
+  }
+
+  arrow::Status Flush() override {
+    if (discarded_) {
+      return TerminalStatus();
+    }
+    auto status = delegate_->Flush();
+    Record(status);
+    return status;
+  }
+
+  private:
+  void Record(const arrow::Status& status) const {
+    if (!status.ok() && first_status_.ok()) {
+      first_status_ = status;
+      discarded_ = true;
+    }
+  }
+
+  arrow::Status TerminalStatus() const {
+    if (!first_status_.ok()) {
+      return first_status_;
+    }
+    return arrow::Status::Cancelled("Parquet output stream was discarded");
+  }
+
+  std::shared_ptr<arrow::io::OutputStream> delegate_;
+  mutable arrow::Status first_status_ = arrow::Status::OK();
+  mutable bool discarded_ = false;
+  bool close_enabled_ = false;
+  bool closed_ = false;
+  bool delegate_finished_ = false;
+};
 
 static ::parquet::Compression::type convert_compression_type(const std::string& compression) {
   if (compression == "uncompressed") {
@@ -189,8 +312,25 @@ arrow::Result<std::unique_ptr<ParquetFileWriter>> ParquetFileWriter::Make(
     const std::shared_ptr<::parquet::WriterProperties>& writer_props) {
   auto writer = std::unique_ptr<ParquetFileWriter>(
       new ParquetFileWriter(std::move(schema), std::move(fs), file_path, storage_config, writer_props));
-  ARROW_RETURN_NOT_OK(writer->init());
+  auto status = writer->init();
+  if (!status.ok()) {
+    writer->Abort();
+    return status;
+  }
   return writer;
+}
+
+ParquetFileWriter::~ParquetFileWriter() {
+  if (sink_) {
+    AbandonQuietly("the parquet sink", [&] { sink_->Discard(writer_status_.Check()); });
+  }
+}
+
+arrow::Status ParquetFileWriter::Fail(arrow::Status status) const {
+  if (!status.ok() && sink_) {
+    sink_->Discard(status);
+  }
+  return writer_status_.Fail(std::move(status));
 }
 
 arrow::Status ParquetFileWriter::init() {
@@ -206,9 +346,7 @@ arrow::Status ParquetFileWriter::init() {
     auto parent_dir_path = dir_path.parent_path();
     auto create_dir_result = fs_->CreateDir(parent_dir_path.string());
     if (!create_dir_result.ok()) {
-      return arrow::Status::IOError(fmt::format("Failed to create directory [path={}, details: {}]",
-                                                parent_dir_path.string(),  // NOLINT
-                                                create_dir_result.ToString()));
+      return create_dir_result;
     }
   }
 
@@ -227,21 +365,42 @@ arrow::Status ParquetFileWriter::init() {
   }
 
   if (!sink_result.ok()) {
-    return arrow::Status::IOError(fmt::format("Failed to open output stream: {}", sink_result.status().ToString()));
+    return sink_result.status();
   }
-  sink_ = std::move(sink_result).ValueOrDie();
+  sink_ = std::make_shared<FailClosedOutputStream>(std::move(sink_result).ValueOrDie());
+
+  // Do all fallible schema conversion before handing the sink to Parquet.
+  // ParquetFileWriter's destructor calls Close(), so if a later Arrow wrapper
+  // initialization failed after the sink was adopted, it could write a footer
+  // while this factory was returning an error.
+  std::shared_ptr<::parquet::SchemaDescriptor> parquet_schema;
+  auto schema_status = ::parquet::arrow::ToParquetSchema(schema_.get(), *writer_props_, &parquet_schema);
+  if (!schema_status.ok()) {
+    return schema_status;
+  }
+  ::parquet::arrow::SchemaManifest schema_manifest;
+  schema_status = ::parquet::arrow::SchemaManifest::Make(
+      parquet_schema.get(), /*metadata=*/nullptr, ::parquet::default_arrow_reader_properties(), &schema_manifest);
+  if (!schema_status.ok()) {
+    return schema_status;
+  }
 
   auto writer_result = ::parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink_, writer_props_);
   if (!writer_result.ok()) {
-    return arrow::Status::IOError(
-        fmt::format("Failed to create parquet writer: {}", writer_result.status().ToString()));
+    return writer_result.status();
   }
   writer_ = std::move(writer_result).ValueOrDie();
+  sink_->EnableClose();
   kv_metadata_ = std::make_shared<arrow::KeyValueMetadata>();
   return arrow::Status::OK();
 }
 
 arrow::Status ParquetFileWriter::Write(const std::shared_ptr<arrow::RecordBatch> record) {
+  ARROW_RETURN_NOT_OK(writer_status_.Check());
+  return Fail(WriteImpl(record));
+}
+
+arrow::Status ParquetFileWriter::WriteImpl(const std::shared_ptr<arrow::RecordBatch>& record) {
   if (!record) {
     return arrow::Status::OK();
   }
@@ -253,6 +412,11 @@ arrow::Status ParquetFileWriter::Write(const std::shared_ptr<arrow::RecordBatch>
 }
 
 arrow::Status ParquetFileWriter::Flush() {
+  ARROW_RETURN_NOT_OK(writer_status_.Check());
+  return Fail(FlushImpl());
+}
+
+arrow::Status ParquetFileWriter::FlushImpl() {
   std::vector<std::shared_ptr<arrow::RecordBatch>> row_group_batches;
   std::vector<size_t> row_group_batch_sizes;
   size_t rg_size = 0;
@@ -315,6 +479,15 @@ arrow::Status ParquetFileWriter::write_row_group(const std::vector<std::shared_p
 }
 
 arrow::Result<size_t> ParquetFileWriter::Tell() const {
+  ARROW_RETURN_NOT_OK(writer_status_.Check());
+  auto result = TellImpl();
+  if (!result.ok()) {
+    return Fail(result.status());
+  }
+  return result;
+}
+
+arrow::Result<size_t> ParquetFileWriter::TellImpl() const {
   if (closed_) {
     return cached_tell_;
   }
@@ -323,24 +496,93 @@ arrow::Result<size_t> ParquetFileWriter::Tell() const {
 }
 
 arrow::Status ParquetFileWriter::AppendKVMetadata(const std::string& key, const std::string& value) {
+  ARROW_RETURN_NOT_OK(writer_status_.Check());
+  return Fail(AppendKVMetadataImpl(key, value));
+}
+
+arrow::Status ParquetFileWriter::AppendKVMetadataImpl(const std::string& key, const std::string& value) {
   kv_metadata_->Append(key, value);
   return arrow::Status::OK();
 }
 
 arrow::Status ParquetFileWriter::AddUserMetadata(const std::vector<std::pair<std::string, std::string>>& metadata) {
+  ARROW_RETURN_NOT_OK(writer_status_.Check());
+  return Fail(AddUserMetadataImpl(metadata));
+}
+
+arrow::Status ParquetFileWriter::AddUserMetadataImpl(const std::vector<std::pair<std::string, std::string>>& metadata) {
   for (const auto& [key, value] : metadata) {
-    ARROW_RETURN_NOT_OK(AppendKVMetadata(key, value));
+    ARROW_RETURN_NOT_OK(AppendKVMetadataImpl(key, value));
   }
   return arrow::Status::OK();
 }
 
 arrow::Result<api::ColumnGroupFile> ParquetFileWriter::Close() {
+  // Close() means "I am done with this writer", not "finish the file". A writer
+  // that has already failed cannot be finished -- the format may have written
+  // half a footer -- but it still holds an upload that only this object can
+  // name, and returning the failure without releasing it is what made every
+  // failure path leak. Abandoning publishes nothing, so it does not contradict
+  // "a failed writer must not be finalized"; it just stops the parts from
+  // outliving the caller. This matters most for callers that cannot express
+  // RAII -- every FFI binding -- because Close() is the only verb they reach
+  // for.
+  if (auto first_failure = writer_status_.Check(); !first_failure.ok()) {
+    Abort();
+    return first_failure;
+  }
+  auto result = CloseImpl();
+  if (!result.ok()) {
+    auto status = Fail(result.status());
+    Abort();
+    return status;
+  }
+  return result;
+}
+
+void ParquetFileWriter::Abort() noexcept {
+  // No writer_status_.Check(): abort has to work from the state the writer is
+  // usually in when someone gives up on it -- already failed.
+  if (closed_) {
+    // Already finalized, or already aborted. Abort after a successful Close is
+    // a no-op by design: it is what lets a caller destroy every writer
+    // unconditionally without first working out which of the two verbs it owes.
+    return;
+  }
+  writer_status_.BeginDiscard();
+  // Drop parquet's own writer FIRST. Its destructor finalizes the file, and a
+  // finalize that runs after the sink has been aborted would try to write a
+  // footer into a stream whose upload no longer exists. Discard() makes the
+  // sink refuse those writes, so the destructor is a no-op by the time it runs.
+  if (sink_) {
+    AbandonQuietly("the parquet sink", [&] { sink_->Discard(writer_status_.Check()); });
+  }
+  writer_.reset();
+  cached_batches_.clear();
+  cached_batch_sizes_.clear();
+  cached_size_ = 0;
+  // Now release what the stream holds in the store. Best effort: FailClosedOutputStream::Abort
+  // logs and swallows the delegate's failure, because the caller is already
+  // handling one of their own.
+  if (sink_) {
+    // The sink is arrow-layer, so it still answers with a Status. Dropping it
+    // here is the boundary between the two contracts: the sink's terminal
+    // status is the caller's own failure coming back, and reporting it would
+    // make an abandonment look like a new error. It can also throw -- the
+    // delegate below it is a filesystem implementation we do not own.
+    AbandonQuietly("the parquet output stream", [&] { (void)sink_->Abort(); });
+  }
+  sink_.reset();
+  closed_ = true;
+}
+
+arrow::Result<api::ColumnGroupFile> ParquetFileWriter::CloseImpl() {
   if (closed_ || !writer_) {
     return arrow::Status::Invalid(
         fmt::format("Current writer is closed or writer is not initialized. [file_path={}]", file_path_));
   }
   // Flush any pending batches first
-  ARROW_RETURN_NOT_OK(Flush());
+  ARROW_RETURN_NOT_OK(FlushImpl());
 
   // Write any remaining cached batches that are smaller than DEFAULT_MAX_ROW_GROUP_SIZE
   if (!cached_batches_.empty()) {
@@ -350,8 +592,8 @@ arrow::Result<api::ColumnGroupFile> ParquetFileWriter::Close() {
     cached_size_ = 0;
   }
 
-  ARROW_RETURN_NOT_OK(AppendKVMetadata(milvus_storage::ROW_GROUP_META_KEY, row_group_metadata_.Serialize()));
-  ARROW_RETURN_NOT_OK(AppendKVMetadata(milvus_storage::STORAGE_VERSION_KEY, "1.0.0"));
+  ARROW_RETURN_NOT_OK(AppendKVMetadataImpl(milvus_storage::ROW_GROUP_META_KEY, row_group_metadata_.Serialize()));
+  ARROW_RETURN_NOT_OK(AppendKVMetadataImpl(milvus_storage::STORAGE_VERSION_KEY, "1.0.0"));
   ARROW_RETURN_NOT_OK(writer_->AddKeyValueMetadata(kv_metadata_));
 
   ARROW_RETURN_NOT_OK(writer_->Close());

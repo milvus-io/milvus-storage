@@ -54,6 +54,7 @@ void field_schema_release(struct ArrowSchema* schema);
 void struct_schema_release(struct ArrowSchema* schema);
 struct ArrowSchema* create_test_field_schema(const char* format, const char* name, int nullable);
 struct ArrowSchema* create_test_struct_schema();
+char* create_arrow_schema_meta(int32_t count, ...);
 
 // Array creation functions from ffi_writer_test.c
 struct ArrowArray* create_int64_array(const int64_t* data,
@@ -135,6 +136,66 @@ static void test_basic(void) {
   }
   free(schema);
   loon_properties_free(&rp);
+}
+
+static void test_take_out_of_range_is_user_error(void) {
+  LoonColumnGroups* column_groups = NULL;
+  struct ArrowSchema* schema = NULL;
+  LoonProperties properties;
+  LoonReaderHandle reader = 0;
+  struct ArrowArray* arrays = NULL;
+  size_t num_arrays = 0;
+
+  create_writer_test_file(TEST_BASE_PATH, &column_groups, 1 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
+  schema = create_test_struct_schema();
+  LoonFFIResult rc = create_test_reader_pp(&properties);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_reader_new(column_groups, schema, NULL, 0, &properties, &reader);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  int64_t out_of_range[] = {1};
+  rc = loon_take(reader, out_of_range, 1, 1, NULL, 0, &arrays, &num_arrays, NULL);
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  ck_assert(!loon_ffi_is_retryable_errcode(rc.err_code));
+  loon_ffi_free_result(&rc);
+
+  loon_reader_destroy(reader);
+  loon_column_groups_destroy(column_groups);
+  if (schema->release) {
+    schema->release(schema);
+  }
+  free(schema);
+  loon_properties_free(&properties);
+}
+
+static void test_reader_invalid_field_id_is_user_error(void) {
+  LoonColumnGroups* column_groups = NULL;
+  struct ArrowSchema* schema = NULL;
+  LoonProperties properties;
+  LoonReaderHandle reader = 0;
+
+  create_writer_test_file(TEST_BASE_PATH, &column_groups, 1 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
+  schema = create_test_struct_schema();
+  free((void*)schema->children[0]->metadata);
+  schema->children[0]->metadata = create_arrow_schema_meta(1, "PARQUET:field_id", "1junk");
+  LoonFFIResult rc = create_test_reader_pp(&properties);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_reader_new(column_groups, schema, NULL, 0, &properties, &reader);
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  ck_assert(!loon_ffi_is_retryable_errcode(rc.err_code));
+  loon_ffi_free_result(&rc);
+
+  loon_column_groups_destroy(column_groups);
+  if (schema->release) {
+    schema->release(schema);
+  }
+  free(schema);
+  loon_properties_free(&properties);
 }
 
 static void test_empty_projection(void) {
@@ -648,6 +709,30 @@ static void test_reader_error_handling(void) {
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
+  // ABI shape errors take precedence over user-value errors. Only a structurally
+  // valid call may mint the User category.
+  rc = loon_take(0, row_indices, 0, 0, NULL, 0, &arrays, &num_arrays, NULL);
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  loon_ffi_free_result(&rc);
+
+  int64_t negative_indices[] = {-1, 1};
+  rc = loon_take((LoonReaderHandle)1, negative_indices, 2, 1, NULL, 0, &arrays, &num_arrays, NULL);
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  loon_ffi_free_result(&rc);
+
+  int64_t duplicate_indices[] = {1, 1};
+  rc = loon_take((LoonReaderHandle)1, duplicate_indices, 2, 1, NULL, 0, &arrays, &num_arrays, NULL);
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  loon_ffi_free_result(&rc);
+
+  int64_t unsorted_indices[] = {2, 1};
+  rc = loon_take((LoonReaderHandle)1, unsorted_indices, 2, 1, NULL, 0, &arrays, &num_arrays, NULL);
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  loon_ffi_free_result(&rc);
+
   // Test loon_get_chunk_indices with null arguments
   rc = loon_get_chunk_indices(0, row_indices, 3, &chunk_indices, &num_chunk_indices);
   ck_assert(!loon_ffi_is_success(&rc));
@@ -659,6 +744,10 @@ static void test_reader_error_handling(void) {
 
   rc = loon_get_chunk_indices((LoonChunkReaderHandle)1, row_indices, 0, &chunk_indices, &num_chunk_indices);
   ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_get_chunk_indices(0, row_indices, 0, &chunk_indices, &num_chunk_indices);
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
   loon_ffi_free_result(&rc);
 
   // Test loon_get_number_of_chunks with null arguments
@@ -709,6 +798,10 @@ static void test_reader_error_handling(void) {
 
   rc = loon_get_chunks((LoonChunkReaderHandle)1, indices, 2, 0, &arrays, &num_arrays, NULL);
   ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_get_chunks(0, indices, 0, 0, &arrays, &num_arrays, NULL);
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
   loon_ffi_free_result(&rc);
 
   // Test destroy functions with 0 (should not crash)
@@ -976,6 +1069,8 @@ static void test_out_schema(void) {
 
 void run_reader_suite(void) {
   RUN_TEST(test_basic);
+  RUN_TEST(test_take_out_of_range_is_user_error);
+  RUN_TEST(test_reader_invalid_field_id_is_user_error);
   RUN_TEST(test_empty_projection);
   // RUN_TEST(test_reader_with_invalid_manifest); // Incompatible with opaque handle
   RUN_TEST(test_record_batch_reader_verify_schema);

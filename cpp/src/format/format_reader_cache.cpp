@@ -15,6 +15,7 @@
 #include "milvus-storage/format/format_reader_cache.h"
 
 #include <exception>
+#include <new>
 #include <utility>
 
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
@@ -22,6 +23,7 @@
 #include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
+#include "milvus-storage/common/extend_status.h"
 
 namespace milvus_storage {
 
@@ -52,7 +54,7 @@ arrow::Status FormatReaderMetadataCache<ReaderT>::add(
 
 template <typename ReaderT>
 arrow::Result<typename FormatReaderMetadataCache<ReaderT>::MetadataPtr> FormatReaderMetadataCache<ReaderT>::get_or_open(
-    const std::string& key, const typename FormatReaderMetadataCache<ReaderT>::MetadataLoader& load_fn) {
+    const std::string& key, const typename FormatReaderMetadataCache<ReaderT>::MetadataLoader& load_fn) try {
   std::shared_ptr<InFlightLoad> in_flight_load;
   bool owns_in_flight_load = false;
   {
@@ -96,9 +98,11 @@ arrow::Result<typename FormatReaderMetadataCache<ReaderT>::MetadataPtr> FormatRe
     if (load_result.ok()) {
       metadata = load_result.ValueOrDie();
       if (!metadata) {
-        status = arrow::Status::Invalid("Format reader metadata loader returned null metadata");
+        status = MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Format reader metadata loader returned null metadata");
       }
     }
+  } catch (const std::bad_alloc&) {
+    std::terminate();
   } catch (const std::exception& e) {
     status = arrow::Status::UnknownError("Exception while loading format reader metadata: ", e.what());
   } catch (...) {
@@ -127,6 +131,11 @@ arrow::Result<typename FormatReaderMetadataCache<ReaderT>::MetadataPtr> FormatRe
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = entries_.try_emplace(key, Entry{std::move(metadata)}).first;
   return it->second.metadata;
+} catch (const std::bad_alloc&) {
+  // Arrow Status copies allocate. Once a singleflight marker is visible, an
+  // allocation exception escaping this function can strand every follower on
+  // that marker. OOM is therefore fail-stop for this stateful operation.
+  std::terminate();
 }
 
 template <typename ReaderT>
@@ -138,7 +147,7 @@ FormatReaderMetadataCache<ReaderT>::get_or_open_async(
   auto self = this->shared_from_this();
 
   return folly::makeSemiFuture().deferValue([self = std::move(self), key,
-                                             load_fn](folly::Unit) -> folly::SemiFuture<MetadataResult> {
+                                             load_fn](folly::Unit) noexcept -> folly::SemiFuture<MetadataResult> {
     std::shared_ptr<InFlightLoad> in_flight_load;
     {
       std::lock_guard<std::mutex> lock(self->mutex_);
@@ -162,8 +171,12 @@ FormatReaderMetadataCache<ReaderT>::get_or_open_async(
     // Start the async loader outside mutex_. Its continuation normalizes and
     // publishes the result through the same path used by the synchronous leader.
     try {
-      return load_fn().defer([self, key, in_flight_load](folly::Try<MetadataResult>&& load_try) -> MetadataResult {
+      return load_fn().defer([self, key,
+                              in_flight_load](folly::Try<MetadataResult>&& load_try) noexcept -> MetadataResult {
         if (load_try.hasException()) {
+          if (load_try.exception().template is_compatible_with<std::bad_alloc>()) {
+            std::terminate();
+          }
           auto message = load_try.exception().what();
           return self->complete_load(
               key, in_flight_load,
@@ -172,6 +185,8 @@ FormatReaderMetadataCache<ReaderT>::get_or_open_async(
         }
         return self->complete_load(key, in_flight_load, std::move(load_try).value());
       });
+    } catch (const std::bad_alloc&) {
+      std::terminate();
     } catch (const std::exception& e) {
       return folly::makeSemiFuture(self->complete_load(
           key, in_flight_load,
@@ -188,7 +203,7 @@ template <typename ReaderT>
 typename FormatReaderMetadataCache<ReaderT>::MetadataResult FormatReaderMetadataCache<ReaderT>::complete_load(
     const std::string& key,
     const std::shared_ptr<InFlightLoad>& in_flight_load,
-    typename FormatReaderMetadataCache<ReaderT>::MetadataResult load_result) {
+    typename FormatReaderMetadataCache<ReaderT>::MetadataResult load_result) noexcept {
   // Normalize a successful-but-null loader result into an error before exposing
   // it to the cache or any waiter.
   auto status = load_result.status();
@@ -196,25 +211,30 @@ typename FormatReaderMetadataCache<ReaderT>::MetadataResult FormatReaderMetadata
   if (load_result.ok()) {
     metadata = std::move(load_result).ValueOrDie();
     if (!metadata) {
-      status = arrow::Status::Invalid("Format reader metadata loader returned null metadata");
+      status = MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Format reader metadata loader returned null metadata");
     }
   }
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // Atomically publish successful metadata and mark this singleflight as done.
     // A successful leader adopts an entry populated first by another successful
-    // path. A failed leader still completes its own waiters with that failure.
+    // path. Lookup only -- no allocation -- so it is safe ahead of the settle.
     if (status.ok()) {
       auto cached = entries_.find(key);
       if (cached != entries_.end()) {
         metadata = cached->second.metadata;
-      } else {
-        entries_.emplace(key, Entry{metadata});
       }
     }
 
+    // SETTLE FIRST. This is the obligation, and everything after it is an
+    // optimisation. This flight has already claimed the key, so a leader that
+    // dies before settling strands every follower permanently -- the
+    // synchronous ones on the condition variable, the asynchronous ones on the
+    // SharedPromise -- and no later caller can rescue them, because they will
+    // find the claim and wait behind it too. Populating the shared cache, by
+    // contrast, only makes the NEXT caller fast, so it happens afterwards where
+    // its allocation cannot cost anyone their wakeup.
     in_flight_load->status = status;
     in_flight_load->metadata = metadata;
     in_flight_load->done = true;
@@ -224,6 +244,20 @@ typename FormatReaderMetadataCache<ReaderT>::MetadataResult FormatReaderMetadata
     auto in_flight_it = in_flight_loads_.find(key);
     if (in_flight_it != in_flight_loads_.end() && in_flight_it->second == in_flight_load) {
       in_flight_loads_.erase(in_flight_it);
+    }
+
+    // The settle above is only actually protected if nothing between it and the
+    // notify can skip them, and this insert allocates. Letting it propagate
+    // would strand exactly the waiters the ordering exists to protect: `done`
+    // is already true, but a follower parked inside cv.wait() needs the
+    // notify_all() below, and an asynchronous one needs the SharedPromise.
+    // Caching is the optimisation, so it is the part that gives way -- the next
+    // caller reloads, which is the same cost as never having cached it.
+    try {
+      if (status.ok() && entries_.find(key) == entries_.end()) {
+        entries_.emplace(key, Entry{metadata});
+      }
+    } catch (...) {
     }
   }
 

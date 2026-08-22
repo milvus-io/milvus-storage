@@ -14,6 +14,8 @@
 
 #include "milvus-storage/format/column_group_reader.h"
 
+#include "milvus-storage/common/extend_status.h"
+
 #include <algorithm>
 #include <future>
 #include <numeric>
@@ -43,6 +45,7 @@
 #include "milvus-storage/common/macro.h"  // for UNLIKELY
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/format/async_tasks.h"
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/paimon/paimon_format_reader.h"
@@ -229,7 +232,7 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::append_file_metadata(size_t file_i
 template <typename ReaderT>
 arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupReaderImpl<ReaderT>::open_reader_for_file(size_t file_index) {
   if (file_index >= column_group_->files.size()) {
-    return arrow::Status::Invalid("Column group file index out of range: ", file_index,
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Column group file index out of range: ", file_index,
                                   " >= ", column_group_->files.size());
   }
 
@@ -254,7 +257,8 @@ arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupReaderImpl<ReaderT>::open_rea
     return FormatReader::create_from_metadata<ReaderT>(metadata, file, schema_, needed_columns_, predicate_);
   }
 
-  return arrow::Status::Invalid("Unreachable code");
+  return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                            "ColumnGroupReader reached a branch documented as unreachable");
 }
 
 template <typename ReaderT>
@@ -371,34 +375,34 @@ folly::SemiFuture<arrow::Status> ColumnGroupReaderImpl<ReaderT>::open_async() {
   }
 
   // File results stay tagged with their manifest index so shared reader state is
-  // assembled deterministically after the fan-in.
-  return folly::collectAll(std::move(futures))
-      .deferValue([this, file_count = cg_files.size()](auto&& open_results) -> arrow::Status {
-        chunk_infos_.clear();
-        row_group_infos_.clear();
-        row_group_infos_.resize(file_count);
-        file_schema_.reset();
-        format_readers_.clear();
-        format_readers_.resize(file_count);
+  // assembled deterministically after the fan-in. A failed open returns
+  // immediately; accepted sibling opens keep their callback-owned lifetimes and
+  // may finish in the background.
+  return CollectAllResultsFailFast(std::move(futures), "column-group asynchronous open")
+      .deferValue(
+          [this, file_count = cg_files.size()](arrow::Result<std::vector<OpenedFile>>&& open_result) -> arrow::Status {
+            ARROW_ASSIGN_OR_RAISE(auto open_results, std::move(open_result));
+            chunk_infos_.clear();
+            row_group_infos_.clear();
+            row_group_infos_.resize(file_count);
+            file_schema_.reset();
+            format_readers_.clear();
+            format_readers_.resize(file_count);
 
-        size_t rows_in_all_files = 0;
-        for (auto& try_result : open_results) {
-          if (try_result.hasException()) {
-            return arrow::Status::IOError(try_result.exception().what().toStdString());
-          }
-          ARROW_ASSIGN_OR_RAISE(auto opened_file, std::move(try_result.value()));
-          if (!file_schema_ && opened_file.file_schema) {
-            file_schema_ = std::move(opened_file.file_schema);
-          }
-          format_readers_[opened_file.file_index] = std::move(opened_file.reader);
-          ARROW_RETURN_NOT_OK(append_file_metadata(opened_file.file_index, opened_file.file,
-                                                   opened_file.row_group_infos, rows_in_all_files));
-        }
+            size_t rows_in_all_files = 0;
+            for (auto& opened_file : open_results) {
+              if (!file_schema_ && opened_file.file_schema) {
+                file_schema_ = std::move(opened_file.file_schema);
+              }
+              format_readers_[opened_file.file_index] = std::move(opened_file.reader);
+              ARROW_RETURN_NOT_OK(append_file_metadata(opened_file.file_index, opened_file.file,
+                                                       opened_file.row_group_infos, rows_in_all_files));
+            }
 
-        total_rows_ = rows_in_all_files;
-        opened_ = true;
-        return arrow::Status::OK();
-      });
+            total_rows_ = rows_in_all_files;
+            opened_ = true;
+            return arrow::Status::OK();
+          });
 }
 
 template <typename ReaderT>
@@ -426,7 +430,7 @@ arrow::Result<std::vector<int64_t>> ColumnGroupReaderImpl<ReaderT>::get_chunk_in
                                [](int64_t a, const ChunkInfo& b) { return a < b.global_row_end; });
     auto chunk_index = std::distance(chunk_infos_.begin(), it);
     if (chunk_index >= chunk_infos_.size()) {
-      return arrow::Status::Invalid(fmt::format("Row index out of range: {}", row_index));
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, fmt::format("Row index out of range: {}", row_index));
     }
 
     if (unique_chunk_indices.find(chunk_index) == unique_chunk_indices.end()) {
@@ -802,7 +806,7 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
     const std::string& predicate,
     const milvus_storage::MetadataCache& cache) {
   if (!column_group) {
-    return arrow::Status::Invalid("Column group cannot be null");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Column group cannot be null");
   }
   const bool cache_enabled =
       cache.enabled() && GetValueNoError<bool>(properties, PROPERTY_READER_METADATA_CACHE_ENABLE);
@@ -834,7 +838,7 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
     return metadata_cache.dispatch(
         column_group->format, [&](auto typed_cache) -> arrow::Result<std::unique_ptr<ColumnGroupReader>> {
           if (!typed_cache) {
-            return arrow::Status::Invalid("Format reader metadata cache is null");
+            return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Format reader metadata cache is null");
           }
 
           using TypedCache = typename decltype(typed_cache)::element_type;
@@ -863,7 +867,7 @@ folly::SemiFuture<arrow::Result<std::unique_ptr<ColumnGroupReader>>> ColumnGroup
     const milvus_storage::MetadataCache& cache) {
   using ResultType = arrow::Result<std::unique_ptr<ColumnGroupReader>>;
   if (!column_group) {
-    return folly::makeSemiFuture(ResultType(arrow::Status::Invalid("Column group cannot be null")));
+    return folly::makeSemiFuture(ResultType(MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Column group cannot be null")));
   }
   const bool cache_enabled =
       cache.enabled() && GetValueNoError<bool>(properties, PROPERTY_READER_METADATA_CACHE_ENABLE);
@@ -896,7 +900,7 @@ folly::SemiFuture<arrow::Result<std::unique_ptr<ColumnGroupReader>>> ColumnGroup
         column_group->format,
         [&](auto typed_cache) -> folly::SemiFuture<arrow::Result<std::unique_ptr<ColumnGroupReader>>> {
           if (!typed_cache) {
-            return folly::makeSemiFuture(ResultType(arrow::Status::Invalid("Format reader metadata cache is null")));
+            return folly::makeSemiFuture(ResultType(MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Format reader metadata cache is null")));
           }
 
           using TypedCache = typename decltype(typed_cache)::element_type;

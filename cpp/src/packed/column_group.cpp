@@ -20,13 +20,10 @@
 
 namespace milvus_storage {
 
-ColumnGroup::ColumnGroup(GroupId group_id, const std::vector<int>& origin_column_indices)
-    : group_id_(group_id), memory_usage_(0), origin_column_indices_(origin_column_indices) {}
+ColumnGroup::ColumnGroup(GroupId group_id) : group_id_(group_id), memory_usage_(0) {}
 
-ColumnGroup::ColumnGroup(GroupId group_id,
-                         const std::vector<int>& origin_column_indices,
-                         const std::shared_ptr<arrow::RecordBatch>& batch)
-    : group_id_(group_id), origin_column_indices_(origin_column_indices), memory_usage_(0) {
+ColumnGroup::ColumnGroup(GroupId group_id, const std::shared_ptr<arrow::RecordBatch>& batch)
+    : group_id_(group_id), memory_usage_(0) {
   // A constructor has no status channel (AddRecordBatch rejects null with
   // PackedInvalidArgs); a null batch yields an empty group instead of the
   // previous null dereference below.
@@ -56,25 +53,18 @@ arrow::Status ColumnGroup::AddRecordBatch(const std::shared_ptr<arrow::RecordBat
   return arrow::Status::OK();
 }
 
-arrow::Status ColumnGroup::Merge(const ColumnGroup& other) {
-  for (auto& batch : other.batches_) {
-    auto status = AddRecordBatch(batch);
-    if (!status.ok()) {
-      return WrapExtendError(ExtendStatusCode::PackedUnexpected, "ColumnGroup::Merge: failed to merge record batch",
-                             status);
-    }
-  }
-  return arrow::Status::OK();
-}
-
 arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroup::Table() const {
   auto result = arrow::Table::FromRecordBatches(batches_);
   if (!result.ok()) {
-    // Keep the original StatusCode and detail (FromRecordBatches reports
-    // schema mismatch / empty group as Invalid, which classifies as
-    // DataFormatBroken downstream); only the message gains context. Wrapping
-    // into PackedUnexpected here would rewrite Invalid into IOError and
-    // degrade the classification to a generic StorageError.
+    // Keep the original StatusCode and detail; only the message gains context.
+    //
+    // The reason is no longer the one this comment used to give. An
+    // unclassified Invalid no longer becomes DataFormatBroken -- both this and
+    // an internal-invariant wrap reaches segcore as UnexpectedError, so there
+    // is no storage classification to preserve on that axis. What is still worth preserving
+    // is the arrow StatusCode itself: callers branch on IsIOError, and
+    // rewriting a pre-IO schema mismatch into an IO failure would be a lie
+    // about what happened.
     return result.status().WithMessage("ColumnGroup::Table: failed to merge record batches: ",
                                        result.status().message());
   }
@@ -89,21 +79,6 @@ std::shared_ptr<arrow::Schema> ColumnGroup::Schema() const {
 
 std::shared_ptr<arrow::RecordBatch> ColumnGroup::GetRecordBatch(size_t index) const { return batches_[index]; }
 
-std::vector<std::shared_ptr<arrow::RecordBatch>> ColumnGroup::GetRecordBatches() const { return batches_; }
-
-int ColumnGroup::GetRecordBatchNum() const { return batches_.size(); }
-
-std::vector<int> ColumnGroup::GetOriginColumnIndices() const { return origin_column_indices_; }
-
 size_t ColumnGroup::GetMemoryUsage() const { return memory_usage_; }
-
-std::vector<size_t> ColumnGroup::GetRecordMemoryUsages() const { return batch_memory_usage_; }
-
-void ColumnGroup::Clear() {
-  batches_.clear();
-  batch_memory_usage_.clear();
-  memory_usage_ = 0;
-  total_rows_ = 0;
-}
 
 }  // namespace milvus_storage

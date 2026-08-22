@@ -26,6 +26,7 @@
 
 #include "test_env.h"
 #include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/segment/segment_writer.h"
 #include "milvus-storage/segment/segment_reader.h"
 #include "milvus-storage/transaction/transaction.h"
@@ -715,6 +716,8 @@ TEST_F(SegmentReaderTextTest, CreateWithNullFs) {
 
   auto result = SegmentReader::Create(nullptr, column_groups, schema_, {}, reader_config_);
   ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result.status()), nullptr);
 }
 
 // test Create with null schema
@@ -731,12 +734,16 @@ TEST_F(SegmentReaderTextTest, CreateWithNullSchema) {
 
   auto result = SegmentReader::Create(fs_, column_groups, nullptr, {}, reader_config_);
   ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result.status()), nullptr);
 }
 
 // test Create with null column_groups
 TEST_F(SegmentReaderTextTest, CreateWithNullColumnGroups) {
   auto result = SegmentReader::Create(fs_, nullptr, schema_, {}, reader_config_);
   ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result.status()), nullptr);
 }
 
 // test Open with null filesystem
@@ -745,6 +752,8 @@ TEST_F(SegmentReaderTextTest, OpenWithNullFs) {
   auto manifest = OpenManifest(writer_config_.segment_path, version);
   auto result = SegmentReader::Open(nullptr, manifest, schema_, {}, reader_config_);
   ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result.status()), nullptr);
 }
 
 // test Open with null schema
@@ -753,12 +762,16 @@ TEST_F(SegmentReaderTextTest, OpenWithNullSchema) {
   auto manifest = OpenManifest(writer_config_.segment_path, version);
   auto result = SegmentReader::Open(fs_, manifest, nullptr, {}, reader_config_);
   ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result.status()), nullptr);
 }
 
 // test Open with null manifest
 TEST_F(SegmentReaderTextTest, OpenWithNullManifest) {
   auto result = SegmentReader::Open(fs_, nullptr, schema_, {}, reader_config_);
   ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result.status()), nullptr);
 }
 
 // test ReadNext on closed reader

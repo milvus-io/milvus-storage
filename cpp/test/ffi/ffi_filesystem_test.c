@@ -89,6 +89,16 @@ static void test_filesystem_direct_write_and_read(void) {
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   ck_assert_int_eq(memcmp(read_buffer, test_buffer, TEST_BUFFER_SIZE), 0);
 
+  // The FFI range API requires an exact read even though Arrow itself permits
+  // a short read at EOF. This layer cannot tell whether the range came from a
+  // public caller or an internal read plan, so it must remain the conservative
+  // Arrow/System fallback rather than claim a user or logical error.
+  rc = loon_filesystem_read_file(fs_handle, TEST_FILE_NAME, strlen(TEST_FILE_NAME), TEST_BUFFER_SIZE - 1, 2,
+                                 read_buffer);
+  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, loon_errcode_arrow);
+  loon_ffi_free_result(&rc);
+
   uint8_t* read_all_result = NULL;
   uint64_t read_all_result_len = 0;
 
@@ -174,6 +184,11 @@ static void test_filesystem_write_and_read(void) {
     rc = loon_filesystem_reader_readat(reader_handle, TEST_BUFFER_SIZE * 2, TEST_BUFFER_SIZE, read_buffer);
     ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     ck_assert_int_eq(memcmp(read_buffer, test_buffer, TEST_BUFFER_SIZE), 0);
+
+    rc = loon_filesystem_reader_readat(reader_handle, TEST_BUFFER_SIZE * 3 - 1, 2, read_buffer);
+    ck_assert(!loon_ffi_is_success(&rc));
+    ck_assert_int_eq(rc.err_code, loon_errcode_arrow);
+    loon_ffi_free_result(&rc);
 
     rc = loon_filesystem_reader_close(reader_handle);
     ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
@@ -680,10 +695,23 @@ static void test_filesystem_error_handling(void) {
   // Test loon_filesystem_open_reader with null arguments
   rc = loon_filesystem_open_reader(0, "path", 4, 0, &reader_handle);
   ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_system);
   loon_ffi_free_result(&rc);
 
   rc = loon_filesystem_open_reader(fs_handle, NULL, 0, 0, &reader_handle);
   ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  loon_ffi_free_result(&rc);
+
+  // A non-null but empty caller path is a user argument error, not an ABI
+  // integration failure. This distinction is what prevents code 1 from
+  // blaming every native null-pointer bug on the API user.
+  rc = loon_filesystem_open_reader(fs_handle, "", 0, 0, &reader_handle);
+  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  ck_assert(!loon_ffi_is_retryable_errcode(rc.err_code));
   loon_ffi_free_result(&rc);
 
   // Test loon_filesystem_reader_readat with null arguments
@@ -959,6 +987,9 @@ static void test_threadpool_invalid_args(void) {
   // Test with num_of_thread = 0 (should fail)
   rc = loon_thread_pool_singleton(0);
   ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  ck_assert(!loon_ffi_is_retryable_errcode(rc.err_code));
   loon_ffi_free_result(&rc);
 }
 
@@ -967,19 +998,27 @@ static void test_retryable_errcode_helper(void) {
   ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_transient_timeout));
   ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_transient_throttling));
   ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_transient_service));
-  ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_aws_no_such_upload));
+  // Conflict is a business signal, not permission for generic replay. A caller
+  // may re-read state and submit new work, but this helper must stay false.
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_storage_conflict));
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_storage_precondition_failed));
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_txn_exhausted_retry));
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_storage_conflict), loon_error_category_conflict);
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_transient_throttling), loon_error_category_retryable);
+  ck_assert_int_eq(loon_ffi_error_category(loon_errcode_invalid_properties), loon_error_category_system);
 
   ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_success));
   ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_arrow));
   ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_file_not_found));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_conflict));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_precondition_failed));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_not_found));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_access_denied));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_non_retryable));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_txn_exhausted_retry));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_txn_resolution_failed));
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_storage_not_found));
+  /* A dead upload id cannot be resent into life. */
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_storage_no_such_upload));
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_storage_access_denied));
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_storage_config_invalid));
+  // An unrecognized code degrades to the unknown category, which consumers must
+  // treat as carrying no generic retry hint; the operation owner decides.
   ck_assert(!loon_ffi_is_retryable_errcode(99999));
+  ck_assert_int_eq(loon_ffi_error_category(99999), loon_error_category_unknown);
 }
 
 void run_filesystem_suite(void) {

@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <chrono>
 #include "milvus-storage/filesystem/s3/provider/AliyunOIDCAssumeRoleChainProvider.h"
 
 #include "milvus-storage/common/log.h"
 
 #include <aws/core/client/ClientConfiguration.h>
 #include <aws/core/utils/DateTime.h>
+#include <aws/core/client/DefaultRetryStrategy.h>
 #include <aws/core/utils/UUID.h>
 
 namespace milvus_storage {
@@ -33,6 +35,9 @@ AliyunOIDCAssumeRoleChainProvider::AliyunOIDCAssumeRoleChainProvider(const Aws::
     : m_targetRoleArn(target_role_arn),
       m_targetSessionName(target_session_name),
       m_targetExternalId(target_external_id) {
+  if (m_targetRoleArn.empty()) {
+    m_lastResolution = MakeCredentialConfigError("Aliyun target role ARN is not configured");
+  }
   if (m_targetSessionName.empty()) {
     m_targetSessionName = Aws::Utils::UUID::RandomUUID();
   }
@@ -46,6 +51,10 @@ AliyunOIDCAssumeRoleChainProvider::AliyunOIDCAssumeRoleChainProvider(const Aws::
   m_innerOidc = Aws::MakeUnique<AliyunSTSAssumeRoleWebIdentityCredentialsProvider>(kLogTag);
 
   Aws::Client::ClientConfiguration cfg(Aws::Client::ClientConfigurationInitValues{/*shouldDisableIMDS=*/true});
+  // Shared credential retry budget; see credential_resolution.h.
+  cfg.connectTimeoutMs = kCredentialConnectTimeoutMs;
+  cfg.requestTimeoutMs = kCredentialRequestTimeoutMs;
+  cfg.retryStrategy = Aws::MakeShared<Aws::Client::DefaultRetryStrategy>(kLogTag, kCredentialRetryAttempts);
   cfg.scheme = Aws::Http::Scheme::HTTPS;
   m_stsClient = Aws::MakeUnique<AliyunRAMSTSClient>(kLogTag, cfg);
 
@@ -55,9 +64,27 @@ AliyunOIDCAssumeRoleChainProvider::AliyunOIDCAssumeRoleChainProvider(const Aws::
 }
 
 Aws::Auth::AWSCredentials AliyunOIDCAssumeRoleChainProvider::GetAWSCredentials() {
+  auto result = ResolveForRequest();
+  if (!result.ok()) {
+    return {};
+  }
+  return std::move(result).ValueOrDie();
+}
+
+arrow::Result<Aws::Auth::AWSCredentials> AliyunOIDCAssumeRoleChainProvider::ResolveForRequest() {
+  if (m_targetRoleArn.empty()) {
+    return m_lastResolution;
+  }
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
-  return m_credentials;
+  if (ExpiresSoon() && !m_lastResolution.ok()) {
+    return m_lastResolution;
+  }
+  auto validation = ValidateTemporaryCredentials(m_credentials, "Aliyun chained AssumeRole");
+  if (validation.ok()) {
+    return m_credentials;
+  }
+  return m_lastResolution.ok() ? validation : m_lastResolution;
 }
 
 bool AliyunOIDCAssumeRoleChainProvider::ExpiresSoon() const {
@@ -65,6 +92,11 @@ bool AliyunOIDCAssumeRoleChainProvider::ExpiresSoon() const {
 }
 
 void AliyunOIDCAssumeRoleChainProvider::RefreshIfExpired() {
+  // The cooldown shares a fast failed refresh with queued callers. The caller
+  // budget separately prevents a waiter that already spent too long behind a
+  // slow refresh from starting another attempt after the cooldown expires.
+  const auto started = std::chrono::steady_clock::now();
+
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
   if (!m_credentials.IsEmpty() && !ExpiresSoon()) {
     return;
@@ -72,6 +104,9 @@ void AliyunOIDCAssumeRoleChainProvider::RefreshIfExpired() {
 
   guard.UpgradeToWriterLock();
   if (!m_credentials.IsExpiredOrEmpty() && !ExpiresSoon()) {
+    return;
+  }
+  if (!CredentialAttemptStillWorthMaking(started)) {
     return;
   }
 
@@ -82,14 +117,16 @@ void AliyunOIDCAssumeRoleChainProvider::Reload() {
   LOG_STORAGE_INFO_ << fmt::format("[{}] Credentials missing or expiring; refreshing via OIDC -> AssumeRole.", kLogTag);
 
   // Step 1: inner provider self-refreshes on call.
-  Aws::Auth::AWSCredentials inner = m_innerOidc->GetAWSCredentials();
-  if (inner.IsEmpty()) {
+  auto inner_result = m_innerOidc->ResolveForRequest();
+  if (!inner_result.ok()) {
+    m_lastResolution = inner_result.status();
     LOG_STORAGE_ERROR_ << fmt::format(
         "[{}] Inner OIDC step returned empty credentials; cannot chain to "
         "target_role_arn={}",
         kLogTag, m_targetRoleArn);
     return;
   }
+  auto inner = std::move(inner_result).ValueOrDie();
 
   // Step 2: cross-account AssumeRole using inner creds as caller. SecurityToken
   // is mandatory because the caller is itself an STS-temporary identity.
@@ -107,13 +144,24 @@ void AliyunOIDCAssumeRoleChainProvider::Reload() {
                                    !req.externalId.empty());
 
   auto res = m_stsClient->GetAssumeRoleCredentials(req);
-  if (res.creds.IsEmpty()) {
+  if (!res.status.ok()) {
+    m_lastResolution = res.status;
     LOG_STORAGE_ERROR_ << fmt::format(
-        "[{}] Cross-account AssumeRole returned empty credentials; target_role_arn={} "
+        "[{}] Cross-account AssumeRole failed; target_role_arn={} — check the target role's trust policy lists the "
+        "OIDC step-1 role as Principal",
+        kLogTag, m_targetRoleArn);
+    return;
+  }
+  auto validation = ValidateTemporaryCredentials(res.creds, "Aliyun cross-account AssumeRole");
+  if (!validation.ok()) {
+    m_lastResolution = validation;
+    LOG_STORAGE_ERROR_ << fmt::format(
+        "[{}] Cross-account AssumeRole returned invalid credentials; target_role_arn={} "
         "— check the target role's trust policy lists the OIDC step-1 role as Principal",
         kLogTag, m_targetRoleArn);
     return;
   }
+  m_lastResolution = arrow::Status::OK();
   m_credentials = res.creds;
   LOG_STORAGE_INFO_ << fmt::format("[{}] OIDC chain succeeded; target_role_arn={} expires={}", kLogTag, m_targetRoleArn,
                                    m_credentials.GetExpiration().ToGmtString(Aws::Utils::DateFormat::ISO_8601));

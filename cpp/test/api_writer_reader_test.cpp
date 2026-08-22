@@ -413,7 +413,7 @@ TEST_P(APIWriterReaderTest, SizeBasedColumnGroupPolicy) {
 }
 
 #ifdef BUILD_WITH_FIU
-TEST_P(APIWriterReaderTest, WriterCloseAfterInitColumnGroupWritersFail) {
+TEST_P(APIWriterReaderTest, WriterInitFailureIsTerminal) {
   if (format != LOON_FORMAT_PARQUET) {
     GTEST_SKIP() << "This cleanup path is covered with parquet format only";
   }
@@ -428,11 +428,10 @@ TEST_P(APIWriterReaderTest, WriterCloseAfterInitColumnGroupWritersFail) {
   ASSERT_FALSE(status.ok());
   EXPECT_TRUE(status.ToString().find(FIUKEY_WRITER_INIT_COLUMN_GROUP_WRITERS_FAIL) != std::string::npos);
 
+  // close() returns the first failure without additional cleanup I/O.
   auto close_result = writer->close();
-  ASSERT_TRUE(close_result.ok()) << close_result.status().ToString();
-  auto cgs = std::move(close_result).ValueOrDie();
-  ASSERT_NE(cgs, nullptr);
-  EXPECT_TRUE(cgs->empty());
+  ASSERT_FALSE(close_result.ok());
+  EXPECT_TRUE(close_result.status().Equals(status));
 }
 #endif
 

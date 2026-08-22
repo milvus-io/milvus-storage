@@ -8,6 +8,7 @@
     loon_ffi_get_errmsg;
     loon_ffi_free_result;
     loon_ffi_is_retryable_errcode;
+    loon_ffi_error_category;
     loon_errcode_success;
     loon_errcode_invalid_args;
     loon_errcode_memory;
@@ -18,19 +19,43 @@
     loon_errcode_invalid_properties;
     loon_errcode_fault_inject;
     loon_errcode_not_support;
+    loon_errcode_user_invalid_argument;
     loon_errcode_file_not_found;
-    loon_errcode_aws_no_such_upload;
-    loon_errcode_aws_conflict;
-    loon_errcode_aws_precondition_failed;
-    loon_errcode_aws_not_found;
-    loon_errcode_aws_access_denied;
-    loon_errcode_aws_non_retryable;
+    loon_errcode_source_invalid;
+    loon_errcode_packed_invalid_args;
+    loon_errcode_packed_io;
+    loon_errcode_packed_metadata_corrupted;
+    loon_errcode_packed_file_corrupted;
+    loon_errcode_packed_io_transient;
+    loon_errcode_packed_unexpected;
+    loon_errcode_storage_no_such_upload;
+    loon_errcode_storage_conflict;
+    loon_errcode_storage_precondition_failed;
+    loon_errcode_storage_not_found;
+    loon_errcode_storage_access_denied;
     loon_errcode_transient_network;
     loon_errcode_transient_timeout;
     loon_errcode_transient_throttling;
     loon_errcode_transient_service;
     loon_errcode_txn_exhausted_retry;
     loon_errcode_txn_resolution_failed;
+    # Retired code 106 -- exported tombstone only, never produced. See ffi_c.h.
+    loon_errcode_aws_non_retryable;
+    loon_errcode_storage_config_invalid;
+    loon_errcode_data_corrupted;
+    loon_errcode_storage_bucket_not_found;
+    loon_errcode_vortex_data_format;
+    loon_errcode_storage_partial_failure_retryable;
+    loon_errcode_storage_partial_failure;
+    loon_errcode_internal_invariant;
+
+    # Renamed aws_* -> storage_*: tombstones kept so older bindings load. See ffi_c.h.
+    loon_errcode_aws_no_such_upload;
+    loon_errcode_aws_conflict;
+    loon_errcode_aws_precondition_failed;
+    loon_errcode_aws_not_found;
+    loon_errcode_aws_access_denied;
+    loon_errcode_aws_bucket_not_found;
 
     # Properties interface
     loon_properties_create;
@@ -117,6 +142,9 @@
     loon_reader_new;
     loon_reader_set_keyretriever;
     loon_get_record_batch_reader;
+    loon_record_batch_reader_new;
+    loon_record_batch_reader_read_next;
+    loon_record_batch_reader_destroy;
     loon_get_chunk_reader;
     loon_take;
     loon_reader_destroy;

@@ -18,9 +18,12 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/segment/segment_reader.h"
 #include "milvus-storage/transaction/transaction.h"
+#include "milvus-storage/common/arrow_util.h"
 
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
+
+#include <limits>
 
 using namespace milvus_storage;
 using namespace milvus_storage::api;
@@ -49,6 +52,26 @@ static arrow::Result<SegmentReaderConfig> ConvertReaderConfig(const LoonSegmentR
   return cpp_config;
 }
 
+static std::optional<LoonFFIResult> ValidateReaderConfig(const LoonSegmentReaderConfig* config) {
+  if (config->num_lob_columns > 0 && config->lob_columns == nullptr) {
+    return CreateFFIResult(LOON_INVALID_ARGS,
+                           "config.lob_columns must not be null when num_lob_columns is greater than 0");
+  }
+  if (config->read_buffer_size < 0) {
+    return CreateFFIResult(LOON_USER_INVALID_ARGUMENT, "config.read_buffer_size must be greater than or equal to 0");
+  }
+  for (size_t i = 0; i < config->num_lob_columns; ++i) {
+    if (config->lob_columns[i].lob_base_path == nullptr) {
+      return CreateFFIResult(LOON_INVALID_ARGS, "config.lob_columns contains a null lob_base_path [index=", i, "]");
+    }
+    if (config->lob_columns[i].lob_base_path[0] == '\0') {
+      return CreateFFIResult(LOON_USER_INVALID_ARGUMENT,
+                             "config.lob_columns contains an empty lob_base_path [index=", i, "]");
+    }
+  }
+  return std::nullopt;
+}
+
 LoonFFIResult loon_segment_reader_open(const char* segment_path,
                                        int64_t version,
                                        ArrowSchema* schema_raw,
@@ -60,6 +83,18 @@ LoonFFIResult loon_segment_reader_open(const char* segment_path,
   if (!segment_path || !schema_raw || !config || !properties || !out_handle) {
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: segment_path, schema_raw, config, properties, and out_handle must not be null");
+  }
+  if (segment_path[0] == '\0') {
+    RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Invalid arguments: segment_path must not be empty");
+  }
+  if (version < api::transaction::LATEST) {
+    RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Invalid arguments: version must be -1 or greater");
+  }
+  if (num_columns < 0) {
+    RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Invalid arguments: num_columns must be greater than or equal to 0");
+  }
+  if (auto invalid_config = ValidateReaderConfig(config); invalid_config.has_value()) {
+    return std::move(invalid_config).value();
   }
 
   try {
@@ -74,6 +109,8 @@ LoonFFIResult loon_segment_reader_open(const char* segment_path,
     auto schema_result = arrow::ImportSchema(schema_raw);
     RETURN_ARROW_ERROR_IF(schema_result.status(), LOON_ARROW_ERROR, schema_result.status().ToString());
     auto schema = schema_result.ValueOrDie();
+    auto field_id_status = ValidateFieldIds(schema);
+    RETURN_ARROW_ERROR_IF(field_id_status, LOON_USER_INVALID_ARGUMENT, field_id_status.ToString());
 
     // convert config
     auto config_result = ConvertReaderConfig(config, props_map);
@@ -111,7 +148,9 @@ LoonFFIResult loon_segment_reader_open(const char* segment_path,
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -133,7 +172,9 @@ LoonFFIResult loon_segment_reader_get_stream(LoonSegmentReaderHandle handle, Arr
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -144,19 +185,55 @@ LoonFFIResult loon_segment_reader_take(LoonSegmentReaderHandle handle,
                                        int64_t num_indices,
                                        int64_t parallelism,
                                        ArrowArrayStream* out_stream) {
-  if (!handle || !out_stream) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_stream must not be null");
-  }
-
-  if (!row_indices || num_indices <= 0) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: row_indices must not be null and num_indices must be > 0");
-  }
-
   try {
+    if (!handle || !out_stream) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_stream must not be null");
+    }
+
+    if (!row_indices) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: row_indices must not be null");
+    }
+    if (num_indices <= 0) {
+      RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Invalid arguments: num_indices must be > 0");
+    }
+    if (parallelism < 0) {
+      RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Invalid arguments: parallelism must be >= 0");
+    }
+    for (int64_t i = 0; i < num_indices; ++i) {
+      if (row_indices[i] < 0) {
+        RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Invalid row index at position ", i, ": ", row_indices[i],
+                     " (must be non-negative)");
+      }
+      if (i > 0 && row_indices[i] <= row_indices[i - 1]) {
+        RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "row_indices must be strictly increasing; position ", i, " has value ",
+                     row_indices[i], " after ", row_indices[i - 1]);
+      }
+    }
+
     auto* reader = reinterpret_cast<SegmentReader*>(handle);
+    auto column_groups = reader->GetColumnGroups();
+    if (column_groups && !column_groups->empty() && (*column_groups)[0]) {
+      int64_t total_rows = 0;
+      for (const auto& file : (*column_groups)[0]->files) {
+        if (file.start_index < 0 || file.end_index < file.start_index) {
+          total_rows = -1;
+          break;
+        }
+        const auto file_rows = file.end_index - file.start_index;
+        if (file_rows > std::numeric_limits<int64_t>::max() - total_rows) {
+          total_rows = -1;
+          break;
+        }
+        total_rows += file_rows;
+      }
+      if (total_rows >= 0 && row_indices[num_indices - 1] >= total_rows) {
+        RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Row index out of range: ", row_indices[num_indices - 1],
+                     " (row count: ", total_rows, ")");
+      }
+    }
 
     std::vector<int64_t> indices(row_indices, row_indices + num_indices);
-    size_t par = parallelism > 0 ? static_cast<size_t>(parallelism) : 1;
+    size_t par = parallelism == 0 ? 1 : static_cast<size_t>(parallelism);
 
     auto result = reader->Take(indices, par);
     RETURN_ARROW_ERROR_IF(result.status(), LOON_ARROW_ERROR, result.status().ToString());
@@ -169,7 +246,9 @@ LoonFFIResult loon_segment_reader_take(LoonSegmentReaderHandle handle,
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -195,7 +274,9 @@ LoonFFIResult loon_segment_reader_get_filtered_stream(LoonSegmentReaderHandle ha
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -209,9 +290,19 @@ LoonFFIResult loon_segment_reader_get_chunk_reader(LoonSegmentReaderHandle handl
   if (!handle || !out_handle) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_handle must not be null");
   }
+  if (column_group_index < 0) {
+    RETURN_ERROR(LOON_USER_INVALID_ARGUMENT,
+                 "Invalid arguments: column_group_index must be greater than or equal to 0");
+  }
 
   try {
     auto* reader = reinterpret_cast<SegmentReader*>(handle);
+    const auto& column_groups = reader->GetColumnGroups();
+    if (column_groups == nullptr || static_cast<size_t>(column_group_index) >= column_groups->size()) {
+      RETURN_ERROR(LOON_USER_INVALID_ARGUMENT,
+                   "Invalid arguments: column_group_index is out of range [index=", column_group_index,
+                   ", size=", column_groups == nullptr ? 0 : column_groups->size(), "]");
+    }
 
     std::shared_ptr<std::vector<std::string>> columns;
     if (needed_columns && num_columns > 0) {
@@ -229,7 +320,9 @@ LoonFFIResult loon_segment_reader_get_chunk_reader(LoonSegmentReaderHandle handl
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();

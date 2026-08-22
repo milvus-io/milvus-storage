@@ -30,9 +30,16 @@ LoonFFIResult loon_column_groups_create(const char** columns,
                                         int64_t* end_indices,
                                         size_t file_lens,
                                         LoonColumnGroups** out_column_groups) {
-  if (!columns || !col_lens || !paths || !format || !file_lens || !out_column_groups || !start_indices ||
-      !end_indices) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments");
+  if (!columns || !paths || !format || !out_column_groups || !start_indices || !end_indices) {
+    RETURN_ERROR(LOON_INVALID_ARGS,
+                 "Invalid arguments: columns, paths, format, out_column_groups, start_indices, and end_indices must "
+                 "not be null");
+  }
+  if (col_lens == 0) {
+    RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Invalid arguments: col_lens must be greater than 0");
+  }
+  if (file_lens == 0) {
+    RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Invalid arguments: file_lens must be greater than 0");
   }
 
   try {
@@ -61,11 +68,13 @@ LoonFFIResult loon_column_groups_create(const char** columns,
 
     // Export to LoonColumnGroups structure
     auto st = milvus_storage::column_groups_export(cgs, out_column_groups);
-    RETURN_ARROW_ERROR_IF(st, LOON_LOGICAL_ERROR, st.ToString());
+    RETURN_ARROW_ERROR_IF(st, LOON_ARROW_ERROR, st.ToString());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -86,14 +95,18 @@ static void destroy_column_group_file(LoonColumnGroupFile* ccgf) {
   if (ccgf->property_keys) {
     for (uint32_t i = 0; i < ccgf->num_properties; i++) {
       delete[] const_cast<char*>(ccgf->property_keys[i]);
-      delete[] const_cast<char*>(ccgf->property_values[i]);
     }
     delete[] ccgf->property_keys;
-    delete[] ccgf->property_values;
     ccgf->property_keys = nullptr;
-    ccgf->property_values = nullptr;
-    ccgf->num_properties = 0;
   }
+  if (ccgf->property_values) {
+    for (uint32_t i = 0; i < ccgf->num_properties; i++) {
+      delete[] const_cast<char*>(ccgf->property_values[i]);
+    }
+    delete[] ccgf->property_values;
+    ccgf->property_values = nullptr;
+  }
+  ccgf->num_properties = 0;
 }
 
 void destroy_column_group(LoonColumnGroup* ccg) {
@@ -160,6 +173,10 @@ void loon_column_groups_destroy(LoonColumnGroups* cgroups) {
 }
 
 char* loon_column_groups_debug_string(const LoonColumnGroups* cgroups) {
-  std::string result = milvus_storage::column_groups_debug_string(cgroups);
-  return strdup(result.c_str());
+  try {
+    std::string result = milvus_storage::column_groups_debug_string(cgroups);
+    return strdup(result.c_str());
+  } catch (...) {
+    return nullptr;
+  }
 }

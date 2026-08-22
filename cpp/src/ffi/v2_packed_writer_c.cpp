@@ -19,6 +19,7 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/packed/writer.h"
+#include "milvus-storage/common/arrow_util.h"
 
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
@@ -32,11 +33,25 @@
 using milvus_storage::FilesystemCache;
 using milvus_storage::PackedRecordBatchWriter;
 using milvus_storage::StorageConfig;
+using milvus_storage::ValidateFieldIds;
 using milvus_storage::api::ConvertFFIProperties;
 using milvus_storage::api::GetValue;
 using milvus_storage::api::Properties;
 
 namespace {
+
+void ReleaseArrowArrayOnce(ArrowArray* array) noexcept {
+  if (array == nullptr || array->release == nullptr) {
+    return;
+  }
+  auto release = array->release;
+  try {
+    release(array);
+  } catch (...) {
+    // A foreign release callback must not escape the C ABI or be retried.
+  }
+  array->release = nullptr;
+}
 
 // PackedRecordBatchWriter does not expose schema(), but ImportRecordBatch
 // needs one — cache it alongside the writer so the FFI handle is
@@ -63,10 +78,10 @@ LoonFFIResult loon_packed_writer_new(const char* const* paths,
                  "must not be null");
   }
   if (num_groups <= 0) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "num_groups must be > 0, got ", num_groups);
+    RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "num_groups must be > 0, got ", num_groups);
   }
   if (total_indices < 0) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "total_indices must be >= 0, got ", total_indices);
+    RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "total_indices must be >= 0, got ", total_indices);
   }
 
   try {
@@ -79,29 +94,31 @@ LoonFFIResult loon_packed_writer_new(const char* const* paths,
     auto schema_result = arrow::ImportSchema(schema_raw);
     RETURN_ARROW_ERROR_IF(schema_result.status(), LOON_ARROW_ERROR, schema_result.status().ToString());
     auto schema = schema_result.ValueOrDie();
+    auto field_id_status = ValidateFieldIds(schema);
+    RETURN_ARROW_ERROR_IF(field_id_status, LOON_USER_INVALID_ARGUMENT, field_id_status.ToString());
 
     // CSR → vector<vector<int>>; validate offsets monotonic + bounded.
     std::vector<std::vector<int>> column_groups(num_groups);
     if (group_offsets[0] != 0) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "group_offsets[0] must be 0, got ", group_offsets[0]);
+      RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "group_offsets[0] must be 0, got ", group_offsets[0]);
     }
     if (group_offsets[num_groups] != total_indices) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "group_offsets[num_groups] must equal total_indices, got ",
+      RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "group_offsets[num_groups] must equal total_indices, got ",
                    group_offsets[num_groups], " vs ", total_indices);
     }
     for (int32_t i = 0; i < num_groups; ++i) {
       int32_t lo = group_offsets[i];
       int32_t hi = group_offsets[i + 1];
       if (hi < lo || hi > total_indices) {
-        RETURN_ERROR(LOON_INVALID_ARGS, "invalid group_offsets at i=", i, " [lo=", lo, ", hi=", hi,
+        RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "invalid group_offsets at i=", i, " [lo=", lo, ", hi=", hi,
                      ", total_indices=", total_indices, "]");
       }
       column_groups[i].reserve(hi - lo);
       for (int32_t k = lo; k < hi; ++k) {
         int idx = group_indices[k];
         if (idx < 0 || idx >= schema->num_fields()) {
-          RETURN_ERROR(LOON_INVALID_ARGS, "column index out of range: ", idx, " (schema has ", schema->num_fields(),
-                       " fields)");
+          RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "column index out of range: ", idx, " (schema has ",
+                       schema->num_fields(), " fields)");
         }
         column_groups[i].push_back(idx);
       }
@@ -143,6 +160,8 @@ LoonFFIResult loon_packed_writer_new(const char* const* paths,
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -156,24 +175,21 @@ LoonFFIResult loon_packed_writer_write(LoonPackedWriterHandle handle, ArrowArray
     auto* holder = reinterpret_cast<PackedWriterHolder*>(handle);
     auto rb_result = arrow::ImportRecordBatch(array, holder->schema);
     if (!rb_result.ok()) {
-      if (array->release) {
-        array->release(array);
-      }
+      ReleaseArrowArrayOnce(array);
       RETURN_ARROW_ERROR(rb_result.status(), LOON_ARROW_ERROR, rb_result.status().ToString());
     }
     auto status = holder->writer->Write(rb_result.ValueOrDie());
     if (!status.ok()) {
-      if (array->release) {
-        array->release(array);
-      }
+      ReleaseArrowArrayOnce(array);
       RETURN_ARROW_ERROR(status, LOON_ARROW_ERROR, status.ToString());
     }
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    if (array && array->release) {
-      array->release(array);
-    }
+    ReleaseArrowArrayOnce(array);
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    ReleaseArrowArrayOnce(array);
+    RETURN_EXCEPTION("unknown exception");
   }
   RETURN_UNREACHABLE();
 }
@@ -189,13 +205,28 @@ LoonFFIResult loon_packed_writer_close(LoonPackedWriterHandle handle) {
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
   RETURN_UNREACHABLE();
 }
 
+// A handle destroyed without a successful close is the C caller saying it
+// gives up on this writer. That is an explicit abandonment, not a destructor
+// side effect, so it is where the abort belongs: R2.7 keeps storage I/O out of
+// destruction, and this is the last frame that still knows the writer existed.
+// Whatever the writer holds in the store -- above all an S3 multipart upload,
+// whose parts no bucket listing can even show -- is released here or never.
 void loon_packed_writer_destroy(LoonPackedWriterHandle handle) {
   if (handle) {
     auto* holder = reinterpret_cast<PackedWriterHolder*>(handle);
+    if (holder->writer != nullptr) {
+      try {
+        holder->writer->Abort();
+      } catch (...) {
+        // Destruction is best effort and must not throw across the C ABI.
+      }
+    }
     delete holder;
   }
 }

@@ -34,10 +34,12 @@
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/util_internal.h"
+#include "milvus-storage/common/extend_status.h"
 
 using ::arrow::Result;
 using ::arrow::Status;
@@ -109,7 +111,7 @@ arrow::Status ClientBuilderBase::PrepareClientConfig(Aws::Client::ClientConfigur
                        << "This indicates a race condition or missing initialization. "
                        << "Using AnonymousCredentialsProvider as fallback. "
                        << "Please report this error with stack trace.";
-    return arrow::Status::Invalid("credentials_provider is nullptr");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "credentials_provider is nullptr");
   }
 
   if (!options_.region.empty()) {
@@ -208,6 +210,7 @@ arrow::Result<std::shared_ptr<S3ClientHolder>> ClientBuilder<S3Client>::BuildCli
                                  Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never, use_virtual_addressing);
 #endif
   client->s3_retry_strategy_ = options_.retry_strategy;
-  return GetClientFinalizer()->AddClient(std::move(client));
+  auto credentials_resolver = std::dynamic_pointer_cast<RequestCredentialsResolver>(credentials_provider_);
+  return GetClientFinalizer()->AddClient(std::move(client), std::move(credentials_resolver));
 }
 }  // namespace milvus_storage

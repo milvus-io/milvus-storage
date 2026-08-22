@@ -79,7 +79,8 @@ class IcebergFormatReader final : public FormatReader {
 
   private:
   /// Parse delete metadata JSON and read positional delete files.
-  [[nodiscard]] arrow::Result<std::shared_ptr<const std::unordered_set<int64_t>>> load_positional_deletes() const;
+  [[nodiscard]] arrow::Result<std::shared_ptr<const std::unordered_set<int64_t>>> load_positional_deletes(
+      uint64_t physical_row_count) const;
 
   /// Filter a RecordBatch by removing rows at deleted positions.
   /// chunk_start is the global physical offset of the first row in the batch.

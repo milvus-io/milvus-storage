@@ -22,7 +22,6 @@ namespace milvus_storage {
 class ColumnGroup;
 
 using ColumnGroupVector = std::vector<std::shared_ptr<ColumnGroup>>;
-class RowGroupSizeVector;
 class FieldIDList;
 class GroupFieldIDList;
 

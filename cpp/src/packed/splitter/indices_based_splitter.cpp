@@ -25,7 +25,7 @@ arrow::Result<std::vector<ColumnGroup>> IndicesBasedSplitter::Split(const std::s
 
   for (GroupId group_id = 0; group_id < column_indices_.size(); group_id++) {
     ARROW_ASSIGN_OR_RAISE(auto batch, record->SelectColumns(column_indices_[group_id]));
-    column_groups.emplace_back(group_id, column_indices_[group_id], batch);
+    column_groups.emplace_back(group_id, batch);
   }
 
   return column_groups;

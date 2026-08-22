@@ -18,6 +18,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <parquet/arrow/writer.h>
@@ -28,7 +29,6 @@
 #include "milvus-storage/packed/writer.h"
 
 #include <parquet/arrow/reader.h>
-#include <parquet/arrow/writer.h>
 
 #include "milvus-storage/format/parquet/file_reader.h"
 #include "packed_test_base.h"
@@ -52,6 +52,61 @@ void ExpectExceptionMessageContainsCode(const std::function<void()>& fn, const s
     EXPECT_NE(std::string(e.what()).find(code_name), std::string::npos) << e.what();
   }
 }
+
+class FixedInputFileSystem final : public arrow::fs::SubTreeFileSystem {
+  public:
+  FixedInputFileSystem(std::shared_ptr<arrow::fs::FileSystem> base_fs,
+                       std::shared_ptr<arrow::io::RandomAccessFile> file)
+      : arrow::fs::SubTreeFileSystem("", std::move(base_fs)), file_(std::move(file)) {}
+
+  std::string type_name() const override { return "fixed-input"; }
+
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string&) override {
+    return file_;
+  }
+
+  private:
+  std::shared_ptr<arrow::io::RandomAccessFile> file_;
+};
+
+class FailingParquetReadFile final : public arrow::io::RandomAccessFile {
+  public:
+  explicit FailingParquetReadFile(arrow::Status failure) : failure_(std::move(failure)) {}
+
+  arrow::Status Close() override {
+    closed_ = true;
+    return arrow::Status::OK();
+  }
+  arrow::Status Abort() override { return Close(); }
+  arrow::Result<int64_t> Tell() const override { return position_; }
+  bool closed() const override { return closed_; }
+  arrow::Status Seek(int64_t position) override {
+    position_ = position;
+    return arrow::Status::OK();
+  }
+  arrow::Result<int64_t> GetSize() override { return 8; }
+  arrow::Result<int64_t> Read(int64_t nbytes, void* out) override {
+    auto result = ReadAt(position_, nbytes, out);
+    if (result.ok()) {
+      position_ += result.ValueOrDie();
+    }
+    return result;
+  }
+  arrow::Result<std::shared_ptr<arrow::Buffer>> Read(int64_t nbytes) override {
+    auto result = ReadAt(position_, nbytes);
+    if (result.ok()) {
+      position_ += result.ValueOrDie()->size();
+    }
+    return result;
+  }
+  arrow::Result<int64_t> ReadAt(int64_t, int64_t, void*) override { return failure_; }
+  arrow::Result<std::shared_ptr<arrow::Buffer>> ReadAt(int64_t, int64_t) override { return failure_; }
+
+  private:
+  arrow::Status failure_;
+  int64_t position_ = 0;
+  bool closed_ = false;
+};
 
 }  // namespace
 
@@ -89,7 +144,7 @@ TEST_F(PackedErrorStatusTest, WriterRecordBatchColumnMismatchIsInvalidArgs) {
 }
 
 TEST_F(PackedErrorStatusTest, ColumnGroupNullBatchIsInvalidArgs) {
-  ColumnGroup group(0, {0});
+  ColumnGroup group(0);
 
   auto status = group.AddRecordBatch(nullptr);
 
@@ -105,7 +160,7 @@ TEST_F(PackedErrorStatusTest, ReaderMissingFileKeepsFilesystemError) {
   } catch (const std::runtime_error& e) {
     auto message = std::string(e.what());
     EXPECT_NE(message.find("missing.parquet"), std::string::npos) << message;
-    EXPECT_EQ(message.find("PackedStorageIO"), std::string::npos) << message;
+    EXPECT_EQ(message.find("PackedIO"), std::string::npos) << message;
   }
 }
 
@@ -144,6 +199,53 @@ TEST_F(PackedErrorStatusTest, MakeReportsMissingFileAsStatusWithClassification) 
   EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::ObjectNotExist) << status.ToString();
 }
 
+TEST_F(PackedErrorStatusTest, MakeReportsShortParquetFooterAsFileCorrupted) {
+  auto corrupt_path = path_ + "/short-footer.parquet";
+  ASSERT_AND_ASSIGN(auto sink, fs_->OpenOutputStream(corrupt_path));
+  ASSERT_STATUS_OK(sink->Write("PAR1"));
+  ASSERT_STATUS_OK(sink->Close());
+  std::vector<std::string> paths = {corrupt_path};
+
+  auto result = PackedRecordBatchReader::Make(fs_, paths, schema_, reader_memory_);
+
+  ASSERT_FALSE(result.ok());
+  ExpectPackedCode(result.status(), ExtendStatusCode::PackedFileCorrupted);
+  EXPECT_EQ(ToSegcoreError(result.status()).get_error_code(), milvus::DataFormatBroken);
+  EXPECT_NE(result.status().ToString().find(corrupt_path), std::string::npos) << result.status().ToString();
+}
+
+TEST_F(PackedErrorStatusTest, MakeReportsBadParquetMagicAsFileCorrupted) {
+  auto corrupt_path = path_ + "/bad-magic.parquet";
+  ASSERT_AND_ASSIGN(auto sink, fs_->OpenOutputStream(corrupt_path));
+  ASSERT_STATUS_OK(sink->Write("12345678"));
+  ASSERT_STATUS_OK(sink->Close());
+  std::vector<std::string> paths = {corrupt_path};
+
+  auto result = PackedRecordBatchReader::Make(fs_, paths, schema_, reader_memory_);
+
+  ASSERT_FALSE(result.ok());
+  ExpectPackedCode(result.status(), ExtendStatusCode::PackedFileCorrupted);
+  EXPECT_EQ(ToSegcoreError(result.status()).get_error_code(), milvus::DataFormatBroken);
+}
+
+TEST_F(PackedErrorStatusTest, MakePreservesTypedFilesystemFailureWhileReadingFooter) {
+  auto typed_io = MakeExtendError(ExtendStatusCode::StorageTransientTimeout, "footer read timed out",
+                                  "operation=ReadAt path=typed-io.parquet");
+  auto failing_file = std::make_shared<FailingParquetReadFile>(typed_io);
+  auto failing_fs = std::make_shared<FixedInputFileSystem>(fs_, std::move(failing_file));
+  std::vector<std::string> paths = {"typed-io.parquet"};
+
+  auto result = PackedRecordBatchReader::Make(failing_fs, paths, schema_, reader_memory_);
+
+  ASSERT_FALSE(result.ok());
+  auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+  ASSERT_NE(detail, nullptr) << result.status().ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientTimeout);
+  EXPECT_EQ(detail->extra_info(), "operation=ReadAt path=typed-io.parquet");
+  EXPECT_EQ(ToSegcoreError(result.status()).get_error_code(), milvus::StorageTransientError);
+  EXPECT_EQ(result.status().ToString().find("PackedFileCorrupted"), std::string::npos) << result.status().ToString();
+}
+
 TEST_F(PackedErrorStatusTest, MakeReportsEmptyPathsAsInvalidArgs) {
   std::vector<std::string> paths;
 
@@ -163,11 +265,13 @@ TEST_F(PackedErrorStatusTest, MakeSucceedsOnValidFile) {
   ASSERT_STATUS_OK(reader->Close());
 }
 
-TEST_F(PackedErrorStatusTest, ColumnGroupTableSchemaMismatchIsDataFormatBroken) {
-  ColumnGroup group(0, {0});
+TEST_F(PackedErrorStatusTest, ColumnGroupTableSchemaMismatchIsNotCalledCorruption) {
+  ColumnGroup group(0);
   ASSERT_STATUS_OK(group.AddRecordBatch(record_batch_));
-  // Second batch with a different schema: Table() must surface arrow's
-  // Invalid (-> DataFormatBroken/2024), not a wrapped generic storage error.
+  // Second batch with a different schema. Table() must surface arrow's own
+  // Invalid rather than wrapping it, so the message survives -- but the segcore
+  // landing is StorageError, NOT DataFormatBroken: mismatched batches are the
+  // caller's contract violation, not corrupt bytes on disk.
   auto other_schema = arrow::schema({arrow::field("other", arrow::int8())});
   arrow::Int8Builder builder;
   ASSERT_STATUS_OK(builder.AppendValues({1, 2, 3}));
@@ -178,14 +282,21 @@ TEST_F(PackedErrorStatusTest, ColumnGroupTableSchemaMismatchIsDataFormatBroken) 
   auto table_result = group.Table();
   ASSERT_FALSE(table_result.ok());
   EXPECT_TRUE(table_result.status().IsInvalid()) << table_result.status().ToString();
-  EXPECT_EQ(ToSegcoreError(table_result.status()).get_error_code(), milvus::DataFormatBroken)
+  // Renamed from ...IsDataFormatBroken, because that was the wrong answer and
+  // this case is the clearest argument for changing it. "Schema at index 1 was
+  // different" is a caller handing us mismatched batches -- a contract
+  // violation, not corrupt bytes on disk. Reporting it as DataFormatBroken sent
+  // whoever read the alert to inspect a file that is perfectly fine.
+  EXPECT_EQ(ToSegcoreError(table_result.status()).get_error_code(), milvus::StorageError)
+      << table_result.status().ToString();
+  EXPECT_NE(ToSegcoreError(table_result.status()).get_error_code(), milvus::DataFormatBroken)
       << table_result.status().ToString();
 }
 
 TEST_F(PackedErrorStatusTest, ColumnGroupNullBatchConstructorYieldsEmptyGroup) {
   // The batch-taking constructor has no status channel; a null batch must not
   // crash (previous behavior dereferenced it) and yields an empty group.
-  ColumnGroup group(0, {0}, nullptr);
+  ColumnGroup group(0, nullptr);
   EXPECT_EQ(group.size(), 0);
   EXPECT_EQ(group.GetTotalRows(), 0);
   EXPECT_EQ(group.Schema(), nullptr);

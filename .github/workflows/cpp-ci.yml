@@ -30,7 +30,7 @@ jobs:
       # Conan 2.x CMakeDeps doesn't propagate system_libs through shared library targets,
       # so libaio (required by folly) must be explicitly installed and linked.
       - name: Install system libraries
-        run: sudo apt-get update && sudo apt-get install -y libaio-dev
+        run: sudo apt-get update && sudo apt-get install -y libaio-dev protobuf-compiler
 
       - name: Setup Rust
         id: rust-toolchain
@@ -40,8 +40,12 @@ jobs:
         id: rust-cache
         uses: actions/cache/restore@v4
         with:
+          # The second path is `cargo test`'s own target dir -- the CMake bridge
+          # build above does not share it, so without caching it the test step
+          # cold-builds the whole vortex dependency tree every run.
           path: |
             cpp/build/Release/cargo/build
+            cpp/src/format/bridge/rust/target
           key: storage-bridge-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
           restore-keys: |
             storage-bridge-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-
@@ -67,6 +71,17 @@ jobs:
         run: |
           make build USE_ASAN=True BUILD_TYPE=Release
 
+      # The bridge's own unit tests. Until this step existed, `cargo test` ran
+      # nowhere in CI, so anything asserted on the Rust side was a gate that
+      # never fired -- which is why the vortex classifier's guarantees were
+      # pinned only from C++, where the interesting inputs (a layout metadata
+      # buffer damaged in a specific way) are not reachable.
+      #
+      # --lib only: the integration tests reach for object storage.
+      - name: Rust bridge unit tests
+        working-directory: ./cpp/src/format/bridge/rust
+        run: cargo test --lib
+
       - name: Save rust build cache
         if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -74,6 +89,7 @@ jobs:
         with:
           path: |
             cpp/build/Release/cargo/build
+            cpp/src/format/bridge/rust/target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
       - name: Save conan package cache

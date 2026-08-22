@@ -16,6 +16,7 @@
 #include "milvus-storage/ffi_c.h"
 #include <arrow/c/abi.h>
 #include <cassert>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -26,22 +27,37 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_get
                                                                                              jlong chunk_reader_handle,
                                                                                              jlongArray row_indices) {
   try {
+    if (row_indices == nullptr) {
+      ThrowJavaException(env, "java/lang/IllegalArgumentException", "rowIndices must not be null");
+      return nullptr;
+    }
+
     LoonChunkReaderHandle handle = static_cast<LoonChunkReaderHandle>(chunk_reader_handle);
 
     jsize length = env->GetArrayLength(row_indices);
-    jlong* indices_array = env->GetLongArrayElements(row_indices, nullptr);
-
-    std::vector<int64_t> indices(length);
+    if (env->ExceptionCheck()) {
+      return nullptr;
+    }
+    if (length == 0) {
+      ThrowJavaException(env, "java/lang/IllegalArgumentException", "rowIndices must not be empty");
+      return nullptr;
+    }
+    std::vector<jlong> java_indices(static_cast<size_t>(length));
+    env->GetLongArrayRegion(row_indices, 0, length, java_indices.data());
+    if (env->ExceptionCheck()) {
+      return nullptr;
+    }
+    std::vector<int64_t> indices(static_cast<size_t>(length));
     for (jsize i = 0; i < length; ++i) {
-      indices[i] = static_cast<int64_t>(indices_array[i]);
+      indices[static_cast<size_t>(i)] = static_cast<int64_t>(java_indices[static_cast<size_t>(i)]);
     }
 
+    std::unique_ptr<int64_t, decltype(&loon_free_chunk_indices)> chunk_indices_guard(nullptr, &loon_free_chunk_indices);
     int64_t* chunk_indices = nullptr;
     size_t num_chunk_indices = 0;
     LoonFFIResult result =
         loon_get_chunk_indices(handle, indices.data(), static_cast<size_t>(length), &chunk_indices, &num_chunk_indices);
-
-    env->ReleaseLongArrayElements(row_indices, indices_array, JNI_ABORT);
+    chunk_indices_guard.reset(chunk_indices);
 
     if (!loon_ffi_is_success(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
@@ -50,20 +66,21 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_get
     }
 
     jlongArray java_chunk_indices = env->NewLongArray(static_cast<jsize>(num_chunk_indices));
-    jlong* java_indices_array = env->GetLongArrayElements(java_chunk_indices, nullptr);
-
+    if (java_chunk_indices == nullptr) {
+      return nullptr;
+    }
+    std::vector<jlong> java_chunk_values(static_cast<size_t>(num_chunk_indices));
     for (size_t i = 0; i < num_chunk_indices; ++i) {
-      java_indices_array[i] = static_cast<jlong>(chunk_indices[i]);
+      java_chunk_values[i] = static_cast<jlong>(chunk_indices_guard.get()[i]);
+    }
+    env->SetLongArrayRegion(java_chunk_indices, 0, static_cast<jsize>(num_chunk_indices), java_chunk_values.data());
+    if (env->ExceptionCheck()) {
+      return nullptr;
     }
 
-    env->ReleaseLongArrayElements(java_chunk_indices, java_indices_array, 0);
-    loon_free_chunk_indices(chunk_indices);
-
     return java_chunk_indices;
-  } catch (const std::exception& e) {
-    jclass exc_class = env->FindClass("java/lang/RuntimeException");
-    std::string error_msg = "Failed to get chunk indices: " + std::string(e.what());
-    env->ThrowNew(exc_class, error_msg.c_str());
+  } catch (...) {
+    ThrowJavaException(env, "java/lang/RuntimeException", "Native operation failed");
     return nullptr;
   }
 }
@@ -76,6 +93,10 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunk
     LoonChunkReaderHandle handle = static_cast<LoonChunkReaderHandle>(chunk_reader_handle);
 
     ArrowArray* array = static_cast<ArrowArray*>(calloc(1, sizeof(ArrowArray)));
+    if (array == nullptr) {
+      ThrowJavaException(env, "java/lang/RuntimeException", "Unexpected native allocation failure for ArrowArray");
+      return -1;
+    }
     LoonFFIResult result = loon_get_chunk(handle, static_cast<int64_t>(chunk_index), array, nullptr);
 
     if (!loon_ffi_is_success(&result)) {
@@ -89,10 +110,8 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunk
     }
 
     return reinterpret_cast<jlong>(array);
-  } catch (const std::exception& e) {
-    jclass exc_class = env->FindClass("java/lang/RuntimeException");
-    std::string error_msg = "Failed to get chunk: " + std::string(e.what());
-    env->ThrowNew(exc_class, error_msg.c_str());
+  } catch (...) {
+    ThrowJavaException(env, "java/lang/RuntimeException", "Native operation failed");
     return -1;
   }
 }
@@ -100,22 +119,41 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunk
 JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunks(
     JNIEnv* env, jobject obj, jlong chunk_reader_handle, jlongArray chunk_indices, jlong parallelism) {
   try {
+    if (chunk_indices == nullptr) {
+      ThrowJavaException(env, "java/lang/IllegalArgumentException", "chunkIndices must not be null");
+      return nullptr;
+    }
+    // The C ABI takes size_t, so a negative Java value would otherwise wrap
+    // to a huge positive number and bypass loon_get_chunks' zero check.
+    if (parallelism <= 0) {
+      ThrowJavaException(env, "java/lang/IllegalArgumentException", "parallelism must be > 0");
+      return nullptr;
+    }
+
     LoonChunkReaderHandle handle = static_cast<LoonChunkReaderHandle>(chunk_reader_handle);
 
     jsize length = env->GetArrayLength(chunk_indices);
-    jlong* indices_array = env->GetLongArrayElements(chunk_indices, nullptr);
-
-    std::vector<int64_t> indices(length);
+    if (env->ExceptionCheck()) {
+      return nullptr;
+    }
+    if (length == 0) {
+      ThrowJavaException(env, "java/lang/IllegalArgumentException", "chunkIndices must not be empty");
+      return nullptr;
+    }
+    std::vector<jlong> java_indices(static_cast<size_t>(length));
+    env->GetLongArrayRegion(chunk_indices, 0, length, java_indices.data());
+    if (env->ExceptionCheck()) {
+      return nullptr;
+    }
+    std::vector<int64_t> indices(static_cast<size_t>(length));
     for (jsize i = 0; i < length; ++i) {
-      indices[i] = static_cast<int64_t>(indices_array[i]);
+      indices[static_cast<size_t>(i)] = static_cast<int64_t>(java_indices[static_cast<size_t>(i)]);
     }
 
     ArrowArray* arrays = nullptr;
     size_t num_arrays = 0;
     LoonFFIResult result = loon_get_chunks(handle, indices.data(), static_cast<size_t>(length),
-                                           static_cast<int64_t>(parallelism), &arrays, &num_arrays, nullptr);
-
-    env->ReleaseLongArrayElements(chunk_indices, indices_array, JNI_ABORT);
+                                           static_cast<size_t>(parallelism), &arrays, &num_arrays, nullptr);
 
     if (!loon_ffi_is_success(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
@@ -124,19 +162,22 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_get
     }
 
     jlongArray java_arrays = env->NewLongArray(static_cast<jsize>(num_arrays));
-    jlong* java_arrays_ptr = env->GetLongArrayElements(java_arrays, nullptr);
-
+    if (java_arrays == nullptr) {
+      loon_free_chunk_arrays(arrays, num_arrays);
+      return nullptr;
+    }
     for (size_t i = 0; i < num_arrays; ++i) {
-      java_arrays_ptr[i] = reinterpret_cast<jlong>(&arrays[i]);
+      const jlong address = reinterpret_cast<jlong>(&arrays[i]);
+      env->SetLongArrayRegion(java_arrays, static_cast<jsize>(i), 1, &address);
+      if (env->ExceptionCheck()) {
+        loon_free_chunk_arrays(arrays, num_arrays);
+        return nullptr;
+      }
     }
 
-    env->ReleaseLongArrayElements(java_arrays, java_arrays_ptr, 0);
-
     return java_arrays;
-  } catch (const std::exception& e) {
-    jclass exc_class = env->FindClass("java/lang/RuntimeException");
-    std::string error_msg = "Failed to get chunks: " + std::string(e.what());
-    env->ThrowNew(exc_class, error_msg.c_str());
+  } catch (...) {
+    ThrowJavaException(env, "java/lang/RuntimeException", "Native operation failed");
     return nullptr;
   }
 }
@@ -147,10 +188,7 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_chunkRead
   try {
     LoonChunkReaderHandle handle = static_cast<LoonChunkReaderHandle>(chunk_reader_handle);
     loon_chunk_reader_destroy(handle);
-  } catch (const std::exception& e) {
-    jclass exc_class = env->FindClass("java/lang/RuntimeException");
-    std::string error_msg = "Failed to destroy chunk reader: " + std::string(e.what());
-    env->ThrowNew(exc_class, error_msg.c_str());
-    return;
+  } catch (...) {
+    ThrowJavaException(env, "java/lang/RuntimeException", "Native operation failed");
   }
 }

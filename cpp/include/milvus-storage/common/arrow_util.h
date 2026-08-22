@@ -13,8 +13,10 @@
 // limitations under the License.
 
 #pragma once
-#include <memory>
+#include <charconv>
 #include <cstdint>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -51,8 +53,47 @@ class FollyArrowErrorFuture {
 
 }  // namespace detail
 
+// Validation-safe field-id parsing. Authoritative PARQUET:field_id metadata is
+// parsed strictly and returned as a status instead of throwing. When metadata
+// is absent, keep the legacy field-name fallback unchanged for compatibility.
+inline arrow::Result<int64_t> TryGetFieldId(const std::shared_ptr<arrow::Field>& field) {
+  if (!field) {
+    return arrow::Status::Invalid("Arrow field must not be null");
+  }
+
+  auto metadata = field->metadata();
+  if (metadata && metadata->Contains(ARROW_FIELD_ID_KEY)) {
+    ARROW_ASSIGN_OR_RAISE(auto value, metadata->Get(ARROW_FIELD_ID_KEY));
+    int64_t field_id = 0;
+    const auto* begin = value.data();
+    const auto* end = begin + value.size();
+    const auto [ptr, ec] = std::from_chars(begin, end, field_id);
+    if (ec != std::errc{} || ptr != end || field_id < 0) {
+      return arrow::Status::Invalid("Invalid ", ARROW_FIELD_ID_KEY, " value '", value, "' for field '", field->name(),
+                                    "': expected a non-negative int64");
+    }
+    return field_id;
+  }
+
+  // A missing field-id is a valid schema shape for non-packed callers. Keep
+  // the historical sentinel, but do not accept numeric prefixes: only a
+  // complete, non-negative decimal name is an id.
+  const auto& name = field->name();
+  int64_t field_id = 0;
+  const auto* begin = name.data();
+  const auto* end = begin + name.size();
+  const auto [ptr, ec] = std::from_chars(begin, end, field_id);
+  if (ec != std::errc{} || ptr != end || field_id < 0) {
+    return -1;
+  }
+  return field_id;
+}
+
 // Extract field_id from Arrow field.
-// Tries PARQUET:field_id metadata first, falls back to parsing field name as integer.
+//
+// Keep the original return type and parsing behavior because this helper is in
+// an installed public header. New validation-sensitive code should use
+// TryGetFieldId instead.
 inline int64_t GetFieldId(const std::shared_ptr<arrow::Field>& field) {
   auto metadata = field->metadata();
   if (metadata && metadata->Contains(ARROW_FIELD_ID_KEY)) {
@@ -60,9 +101,22 @@ inline int64_t GetFieldId(const std::shared_ptr<arrow::Field>& field) {
   }
   try {
     return std::stoll(field->name());
-  } catch (...) {
+  } catch (const std::invalid_argument&) {
+    return -1;
+  } catch (const std::out_of_range&) {
     return -1;
   }
+}
+
+inline arrow::Status ValidateFieldIds(const std::shared_ptr<arrow::Schema>& schema) {
+  if (!schema) {
+    return arrow::Status::Invalid("Arrow schema must not be null");
+  }
+  for (const auto& field : schema->fields()) {
+    auto field_id = TryGetFieldId(field);
+    ARROW_RETURN_NOT_OK(field_id.status());
+  }
+  return arrow::Status::OK();
 }
 
 arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> MakeArrowFileReader(

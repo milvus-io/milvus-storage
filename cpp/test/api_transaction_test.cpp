@@ -28,6 +28,8 @@
 #include <arrow/util/key_value_metadata.h>
 #include <arrow/testing/gtest_util.h>
 
+#include "milvus-storage/common/extend_status.h"
+#include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/layout.h"
 #include "milvus-storage/transaction/transaction.h"
 #include "milvus-storage/writer.h"
@@ -188,6 +190,31 @@ TEST_F(TransactionTest, AppendFileTest) {
     ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
     ASSERT_EQ(committed_version, loop_times + 2);
   }
+}
+
+TEST_F(TransactionTest, CommitPreservesWriteManifestClassification) {
+#ifndef BUILD_WITH_FIU
+  GTEST_SKIP() << "requires BUILD_WITH_FIU";
+#else
+  ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+  ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_write_fail.parquet"));
+  transaction->AppendFiles(manifest->columnGroups());
+
+  ScopedFiuFault fault(FIUKEY_MANIFEST_WRITE_FAIL);
+  ASSERT_EQ(fault.enable_result(), 0);
+  auto result = transaction->Commit();
+  ASSERT_FALSE(result.ok());
+
+  // The injected write failure carries StorageTransientNetwork. Commit() used
+  // to rebuild the failure as a fresh IOError via ToString(), stripping the
+  // ExtendStatusDetail -- a classified transient write failure reached the
+  // boundary as an unclassified error with no transient hint.
+  auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+  ASSERT_NE(detail, nullptr) << result.status().ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork);
+  EXPECT_TRUE(detail->retryable());
+  EXPECT_NE(result.status().message().find("Commit failed: write manifest error"), std::string::npos);
+#endif
 }
 
 TEST_F(TransactionTest, AddFieldTest) {

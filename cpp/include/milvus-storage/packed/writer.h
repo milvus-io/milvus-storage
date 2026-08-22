@@ -19,6 +19,7 @@
 #include "milvus-storage/packed/column_group.h"
 #include "milvus-storage/packed/splitter/indices_based_splitter.h"
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/writer_status.h"
 
 namespace milvus_storage {
 
@@ -34,6 +35,8 @@ class PackedRecordBatchWriter {
       std::priority_queue<std::pair<GroupId, size_t>, std::vector<std::pair<GroupId, size_t>>, MemoryComparator>;
 
   public:
+  // Every non-OK operation is terminal. A retry must create a new packed
+  // writer with a new set of output paths.
   static arrow::Result<std::shared_ptr<PackedRecordBatchWriter>> Make(
       std::shared_ptr<arrow::fs::FileSystem> fs,
       std::vector<std::string>& paths,
@@ -78,12 +81,24 @@ class PackedRecordBatchWriter {
    */
   arrow::Status Close();
 
+  /**
+   * @brief Abandon the packed files instead of finalizing them.
+   *
+   * See FormatWriter::Abort(): safe on a failed writer, idempotent, best
+   * effort, and it never reports a cleanup failure of its own.
+   */
+  void Abort() noexcept;
+
   arrow::Result<std::vector<size_t>> Tell() const;
 
   arrow::Status AddUserMetadata(const std::string& key, const std::string& value);
 
   private:
   arrow::Status init();
+  arrow::Status WriteImpl(const std::shared_ptr<arrow::RecordBatch>& record);
+  arrow::Status CloseImpl();
+  arrow::Result<std::vector<size_t>> TellImpl() const;
+  arrow::Status AddUserMetadataImpl(const std::string& key, const std::string& value);
 
   // split first buffer into column groups based on column size
   // and init column group writer and put column groups into max heap
@@ -104,6 +119,7 @@ class PackedRecordBatchWriter {
   const std::vector<std::vector<int>> group_indices_;
   size_t current_memory_usage_;
   bool closed_ = false;
+  mutable WriterStatus writer_status_;
 
   std::vector<std::shared_ptr<arrow::RecordBatch>> buffered_batches_;
   std::vector<std::unique_ptr<milvus_storage::parquet::ParquetFileWriter>> group_writers_;

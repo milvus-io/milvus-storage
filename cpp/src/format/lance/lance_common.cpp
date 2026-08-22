@@ -16,6 +16,8 @@
 
 #include <cstdlib>
 #include <fmt/format.h>
+
+#include <charconv>
 #include "milvus-storage/common/log.h"
 
 namespace milvus_storage::lance {
@@ -172,9 +174,11 @@ arrow::Result<std::pair<std::string, uint64_t>> ParseLanceUri(const std::string&
   }
 
   uint64_t fragment_id = 0;
-  try {
-    fragment_id = std::stoull(uri.substr(pos + kLanceUriDelimiter.length()));
-  } catch (const std::exception& e) {
+  const auto fragment_text = std::string_view(uri).substr(pos + kLanceUriDelimiter.length());
+  const auto* begin = fragment_text.data();
+  const auto* end = begin + fragment_text.size();
+  const auto [ptr, ec] = std::from_chars(begin, end, fragment_id);
+  if (ec != std::errc{} || ptr != end) {
     return arrow::Status::Invalid(fmt::format("Invalid fragment_id in uri: {}", uri));
   }
 

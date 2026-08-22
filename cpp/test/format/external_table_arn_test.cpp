@@ -223,8 +223,9 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
     ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(write_props_, write_config));
     auto storage_options = iceberg::ToStorageOptions(write_config);
 
-    auto table_info = iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options);
-    auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+    ARROW_ASSIGN_OR_RAISE(auto table_info, iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options));
+    ARROW_ASSIGN_OR_RAISE(auto file_infos,
+                          iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options));
     if (file_infos.empty()) {
       return arrow::Status::Invalid("PlanFiles returned no files");
     }
@@ -563,7 +564,8 @@ class ExternalTableGcpImpersonationTest : public ::testing::TestWithParam<std::s
     ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(write_props_, write_config));
     auto storage_options = iceberg::ToStorageOptions(write_config);
 
-    auto table_info = iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options, "gs");
+    ARROW_ASSIGN_OR_RAISE(auto table_info,
+                          iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options, "gs"));
 
     auto explore_dir = iceberg::ToMilvusUri(table_info.metadata_location, address_);
     auto milvus_path = iceberg::ToMilvusUri(table_info.data_file_uri, address_);
@@ -956,8 +958,9 @@ class ExternalTableAzureArnTest : public ::testing::TestWithParam<std::string> {
     ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(write_props_, write_config));
     auto storage_options = iceberg::ToStorageOptions(write_config);
 
-    auto table_info = iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options);
-    auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+    ARROW_ASSIGN_OR_RAISE(auto table_info, iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options));
+    ARROW_ASSIGN_OR_RAISE(auto file_infos,
+                          iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options));
     if (file_infos.empty()) {
       return arrow::Status::Invalid("PlanFiles returned no files");
     }
@@ -1309,8 +1312,9 @@ class ExternalTableAliyunArnTest : public ::testing::Test {
     ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(write_props_, write_config));
     auto storage_options = iceberg::ToStorageOptions(write_config);
 
-    auto table_info = iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options);
-    auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+    ARROW_ASSIGN_OR_RAISE(auto table_info, iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options));
+    ARROW_ASSIGN_OR_RAISE(auto file_infos,
+                          iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options));
     if (file_infos.empty()) {
       return arrow::Status::Invalid("PlanFiles returned no files");
     }
@@ -1963,8 +1967,9 @@ class ExternalTableAliyunOIDCArnTest : public ::testing::Test {
     ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(write_props_, write_config));
     auto storage_options = iceberg::ToStorageOptions(write_config);
 
-    auto table_info = iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options);
-    auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+    ARROW_ASSIGN_OR_RAISE(auto table_info, iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options));
+    ARROW_ASSIGN_OR_RAISE(auto file_infos,
+                          iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options));
     if (file_infos.empty()) {
       return arrow::Status::Invalid("PlanFiles returned no files");
     }

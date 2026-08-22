@@ -12,9 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <charconv>
 #include <cstdint>
 #include <memory>
+#include <limits>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <sstream>
 #include <iostream>
 
@@ -24,8 +28,39 @@
 
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/extend_status.h"
 
 namespace milvus_storage {
+
+namespace {
+
+std::optional<FieldID> ParseFieldId(std::string_view text) {
+  FieldID field_id{};
+  const auto* begin = text.data();
+  const auto* end = begin + text.size();
+  const auto [ptr, ec] = std::from_chars(begin, end, field_id);
+  if (ec != std::errc{} || ptr != end || field_id < 0) {
+    return std::nullopt;
+  }
+  return field_id;
+}
+
+template <typename T>
+arrow::Result<T> ParseInteger(std::string_view text, std::string_view label) {
+  if (text.empty()) {
+    return arrow::Status::Invalid("Empty ", label);
+  }
+  T value{};
+  const auto* begin = text.data();
+  const auto* end = begin + text.size();
+  const auto [ptr, ec] = std::from_chars(begin, end, value);
+  if (ec != std::errc{} || ptr != end) {
+    return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "Invalid ", label, " value '", text, "'");
+  }
+  return value;
+}
+
+}  // namespace
 
 // Implementation of FieldIDList
 FieldIDList::FieldIDList(const std::vector<FieldID>& field_ids) : field_ids_(field_ids) {}
@@ -57,15 +92,15 @@ arrow::Result<FieldIDList> FieldIDList::Make(const std::shared_ptr<arrow::Schema
                       schema->field(i)->name()));
     }
     auto field = metadata->Get(ARROW_FIELD_ID_KEY).ValueOrDie();
-    try {
-      field_ids.Add(std::stoll(field));
-    } catch (const std::exception& e) {
-      return arrow::Status::Invalid(fmt::format("Invalid field id: '{}'. [field_index={}, field_name={}, error={}]",
-                                                field,                     // NOLINT
-                                                i,                         // NOLINT
-                                                schema->field(i)->name(),  // NOLINT
-                                                e.what()));
+    auto field_id = ParseFieldId(field);
+    if (!field_id.has_value()) {
+      return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted,
+                                fmt::format("Invalid field id: '{}'. [field_index={}, field_name={}]",
+                                                field,  // NOLINT
+                                                i,      // NOLINT
+                                                schema->field(i)->name()));
     }
+    field_ids.Add(*field_id);
   }
   return field_ids;
 }
@@ -166,6 +201,44 @@ GroupFieldIDList GroupFieldIDList::Deserialize(const std::string& input) {
   return GroupFieldIDList(group_field_id_list);
 }
 
+arrow::Result<GroupFieldIDList> GroupFieldIDList::TryDeserialize(const std::string& input) {
+  if (input.empty()) {
+    return GroupFieldIDList();
+  }
+
+  std::vector<FieldIDList> group_field_id_list;
+  size_t group_start = 0;
+  size_t group_end = input.find(GROUP_DELIMITER);
+  while (group_start != std::string::npos) {
+    std::string group = input.substr(group_start, group_end - group_start);
+    if (group.empty()) {
+      return arrow::Status::Invalid("Empty field-id group in persisted metadata");
+    }
+    FieldIDList field_id_list;
+    size_t column_start = 0;
+    size_t column_end = group.find(COLUMN_DELIMITER);
+    while (column_start != std::string::npos) {
+      std::string field_id = group.substr(column_start, column_end - column_start);
+      if (field_id.empty()) {
+        return arrow::Status::Invalid("Empty field id in persisted metadata group '", group, "'");
+      }
+      ARROW_ASSIGN_OR_RAISE(auto parsed, ParseInteger<FieldID>(field_id, "field id"));
+      if (parsed < 0) {
+        return arrow::Status::Invalid("Field id must be non-negative, got '", field_id, "'");
+      }
+      field_id_list.Add(parsed);
+      column_start = (column_end == std::string::npos) ? std::string::npos : column_end + COLUMN_DELIMITER.size();
+      column_end = group.find(COLUMN_DELIMITER, column_start);
+    }
+    if (!field_id_list.empty()) {
+      group_field_id_list.push_back(field_id_list);
+    }
+    group_start = (group_end == std::string::npos) ? std::string::npos : group_end + GROUP_DELIMITER.size();
+    group_end = input.find(GROUP_DELIMITER, group_start);
+  }
+  return GroupFieldIDList(group_field_id_list);
+}
+
 // RowGroupMetadata implementation
 RowGroupMetadata::RowGroupMetadata(size_t memory_size, int64_t row_num, int64_t row_offset)
     : memory_size_(memory_size), row_num_(row_num), row_offset_(row_offset) {}
@@ -202,6 +275,36 @@ RowGroupMetadata RowGroupMetadata::Deserialize(const std::string& input) {
   }
 
   return RowGroupMetadata(std::stoull(tokens[0]), std::stoll(tokens[1]), std::stoll(tokens[2]));
+}
+
+arrow::Result<RowGroupMetadata> RowGroupMetadata::TryDeserialize(const std::string& input) {
+  if (!input.empty() && input.back() == '|') {
+    return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "Invalid row group metadata format: trailing delimiter");
+  }
+  std::stringstream ss(input);
+  std::string token;
+  std::vector<std::string> tokens;
+
+  while (std::getline(ss, token, '|')) {
+    tokens.push_back(token);
+  }
+
+  if (tokens.size() != 3) {
+    return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted,
+                              "Invalid row group metadata format: expected 3 fields, got ", tokens.size());
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto memory_size, ParseInteger<uint64_t>(tokens[0], "row group memory size"));
+  if (memory_size > std::numeric_limits<size_t>::max()) {
+    return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "Row group memory size exceeds size_t: '", tokens[0], "'");
+  }
+  ARROW_ASSIGN_OR_RAISE(auto row_num, ParseInteger<int64_t>(tokens[1], "row group row count"));
+  ARROW_ASSIGN_OR_RAISE(auto row_offset, ParseInteger<int64_t>(tokens[2], "row group row offset"));
+  if (row_num < 0 || row_offset < 0) {
+    return arrow::Status::Invalid("Row group row count and offset must be non-negative, got '", tokens[1], "' and '",
+                                  tokens[2], "'");
+  }
+  return RowGroupMetadata(static_cast<size_t>(memory_size), row_num, row_offset);
 }
 
 // RowGroupMetadataVector implementation
@@ -272,52 +375,89 @@ RowGroupMetadataVector RowGroupMetadataVector::Deserialize(const std::string& in
   return RowGroupMetadataVector(metadata);
 }
 
+arrow::Result<RowGroupMetadataVector> RowGroupMetadataVector::TryDeserialize(const std::string& input) {
+  if (input.empty()) {
+    return RowGroupMetadataVector();
+  }
+
+  std::vector<RowGroupMetadata> metadata;
+  size_t token_start = 0;
+  while (token_start <= input.size()) {
+    auto token_end = input.find(GROUP_DELIMITER, token_start);
+    auto token = input.substr(token_start, token_end - token_start);
+    if (token.empty()) {
+      return arrow::Status::Invalid("Empty row-group entry in persisted metadata");
+    }
+    ARROW_ASSIGN_OR_RAISE(auto parsed, RowGroupMetadata::TryDeserialize(token));
+    metadata.push_back(std::move(parsed));
+    if (token_end == std::string::npos) {
+      break;
+    }
+    token_start = token_end + GROUP_DELIMITER.size();
+  }
+
+  return RowGroupMetadataVector(metadata);
+}
+
 // Implementation of PackedFileMetadata
 
 PackedFileMetadata::PackedFileMetadata(const std::shared_ptr<parquet::FileMetaData>& metadata,
                                        const RowGroupMetadataVector& row_group_metadata,
-                                       const std::map<FieldID, ColumnOffset>& field_id_mapping,
-                                       const GroupFieldIDList& group_field_id_list,
-                                       const std::string& storage_version)
+                                       const std::map<FieldID, ColumnOffset>& field_id_mapping)
     : parquet_metadata_(metadata),
       row_group_metadata_(row_group_metadata),
-      field_id_mapping_(field_id_mapping),
-      group_field_id_list_(group_field_id_list),
-      storage_version_(storage_version) {}
+      field_id_mapping_(field_id_mapping) {}
 
 arrow::Result<std::shared_ptr<PackedFileMetadata>> PackedFileMetadata::Make(
     const std::shared_ptr<parquet::FileMetaData>& metadata) {
+  if (!metadata) {
+    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted, "Packed parquet metadata is null");
+  }
+
   // deserialize row group metadata
   auto key_value_metadata = metadata->key_value_metadata();
   if (key_value_metadata == nullptr) {
     // A foreign parquet file without any key-value metadata used to crash
     // here on the null dereference below.
-    return arrow::Status::Invalid(fmt::format(
-        "Not a packed parquet file: no key-value metadata present. [num_row_groups={}]", metadata->num_row_groups()));
+    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                           fmt::format("Not a packed parquet file: no key-value metadata present. [num_row_groups={}]",
+                                       metadata->num_row_groups()));
   }
   auto row_group_meta = key_value_metadata->Get(ROW_GROUP_META_KEY);
   if (!row_group_meta.ok()) {
-    return arrow::Status::Invalid(
+    return MakeExtendError(
+        ExtendStatusCode::PackedMetadataCorrupted,
         fmt::format("Row group metadata not found: missing key {} in parquet file metadata. [num_row_groups={}]",
                     ROW_GROUP_META_KEY, metadata->num_row_groups()));
   }
-  auto row_group_metadata = RowGroupMetadataVector::Deserialize(row_group_meta.ValueOrDie());
+  auto row_group_metadata_result = RowGroupMetadataVector::TryDeserialize(row_group_meta.ValueOrDie());
+  if (!row_group_metadata_result.ok()) {
+    return WrapExtendError(ExtendStatusCode::PackedMetadataCorrupted, "Invalid persisted row group metadata",
+                           row_group_metadata_result.status());
+  }
+  auto row_group_metadata = std::move(row_group_metadata_result).ValueOrDie();
 
   // get storage version
   auto storage_version_meta = key_value_metadata->Get(STORAGE_VERSION_KEY);
   if (!storage_version_meta.ok()) {
-    return arrow::Status::Invalid(fmt::format(
-        "Storage version metadata not found: missing key {} in parquet file metadata", STORAGE_VERSION_KEY));
+    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                           fmt::format("Storage version metadata not found: missing key {} in parquet file metadata",
+                                       STORAGE_VERSION_KEY));
   }
-  auto storage_version = storage_version_meta.ValueOrDie();
 
   // deserialize field id mapping metadata
   auto group_field_id_list_meta = key_value_metadata->Get(GROUP_FIELD_ID_LIST_META_KEY);
   if (!group_field_id_list_meta.ok()) {
-    return arrow::Status::Invalid(fmt::format(
-        "Field id list metadata not found: missing key {} in parquet file metadata", GROUP_FIELD_ID_LIST_META_KEY));
+    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                           fmt::format("Field id list metadata not found: missing key {} in parquet file metadata",
+                                       GROUP_FIELD_ID_LIST_META_KEY));
   }
-  auto group_fields = GroupFieldIDList::Deserialize(group_field_id_list_meta.ValueOrDie());
+  auto group_fields_result = GroupFieldIDList::TryDeserialize(group_field_id_list_meta.ValueOrDie());
+  if (!group_fields_result.ok()) {
+    return WrapExtendError(ExtendStatusCode::PackedMetadataCorrupted, "Invalid persisted group field id metadata",
+                           group_fields_result.status());
+  }
+  auto group_fields = std::move(group_fields_result).ValueOrDie();
   std::map<FieldID, ColumnOffset> field_id_mapping;
   for (size_t path = 0; path < group_fields.num_groups(); path++) {
     auto field_ids = group_fields.GetFieldIDList(path);
@@ -326,8 +466,7 @@ arrow::Result<std::shared_ptr<PackedFileMetadata>> PackedFileMetadata::Make(
       field_id_mapping[field_id] = ColumnOffset(path, col);
     }
   }
-  return std::make_shared<PackedFileMetadata>(metadata, row_group_metadata, field_id_mapping, group_fields,
-                                              storage_version);
+  return std::make_shared<PackedFileMetadata>(metadata, row_group_metadata, field_id_mapping);
 }
 
 const RowGroupMetadataVector PackedFileMetadata::GetRowGroupMetadataVector() { return row_group_metadata_; }
@@ -338,14 +477,8 @@ const RowGroupMetadata& PackedFileMetadata::GetRowGroupMetadata(int index) const
 
 const std::map<FieldID, ColumnOffset>& PackedFileMetadata::GetFieldIDMapping() { return field_id_mapping_; }
 
-const GroupFieldIDList PackedFileMetadata::GetGroupFieldIDList() { return group_field_id_list_; }
-
 const std::shared_ptr<parquet::FileMetaData>& PackedFileMetadata::GetParquetMetadata() { return parquet_metadata_; }
 
 int PackedFileMetadata::num_row_groups() const { return row_group_metadata_.size(); }
-
-size_t PackedFileMetadata::total_memory_size() const { return row_group_metadata_.memory_size(); }
-
-const std::string& PackedFileMetadata::GetStorageVersion() const { return storage_version_; }
 
 }  // namespace milvus_storage

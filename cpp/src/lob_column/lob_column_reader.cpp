@@ -14,6 +14,8 @@
 
 #include "milvus-storage/lob_column/lob_column_reader.h"
 
+#include "milvus-storage/common/extend_status.h"
+
 #include <arrow/array/builder_binary.h>
 #include <arrow/table.h>
 
@@ -58,11 +60,11 @@ class LobColumnReaderImpl : public LobColumnReader {
 
   arrow::Result<std::vector<uint8_t>> ReadData(const uint8_t* encoded_ref, size_t ref_size) override {
     if (closed_) {
-      return arrow::Status::Invalid("reader is closed");
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "reader is closed");
     }
 
     if (ref_size == 0 || encoded_ref == nullptr) {
-      return arrow::Status::Invalid("invalid encoded reference");
+      return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "invalid encoded reference");
     }
 
     // check if inline or LOB reference
@@ -77,7 +79,8 @@ class LobColumnReaderImpl : public LobColumnReader {
     }
 
     if (ref_size != LOB_REFERENCE_SIZE) {
-      return arrow::Status::Invalid("invalid LOB reference size: ", ref_size, ", expected: ", LOB_REFERENCE_SIZE);
+      return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "invalid LOB reference size: ", ref_size,
+                                ", expected: ", LOB_REFERENCE_SIZE);
     }
 
     auto [file_id_str, row_offset] = DecodeLOBReference(encoded_ref);
@@ -104,7 +107,7 @@ class LobColumnReaderImpl : public LobColumnReader {
 
   arrow::Result<std::vector<std::vector<uint8_t>>> ReadBatchData(const std::vector<EncodedRef>& encoded_refs) override {
     if (closed_) {
-      return arrow::Status::Invalid("reader is closed");
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "reader is closed");
     }
 
     std::vector<std::vector<uint8_t>> results(encoded_refs.size());
@@ -130,7 +133,7 @@ class LobColumnReaderImpl : public LobColumnReader {
         }
       } else {
         if (ref.size != LOB_REFERENCE_SIZE) {
-          return arrow::Status::Invalid("invalid LOB reference size at index ", i);
+          return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "invalid LOB reference size at index ", i);
         }
 
         auto [file_id_str, row_offset] = DecodeLOBReference(ref.data);
@@ -183,7 +186,7 @@ class LobColumnReaderImpl : public LobColumnReader {
   arrow::Result<std::shared_ptr<arrow::BinaryArray>> ReadArrowArray(
       const std::shared_ptr<arrow::BinaryArray>& encoded_refs) override {
     if (closed_) {
-      return arrow::Status::Invalid("reader is closed");
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "reader is closed");
     }
 
     const int64_t n = encoded_refs->length();
@@ -212,7 +215,7 @@ class LobColumnReaderImpl : public LobColumnReader {
         total_bytes += payload_size;
       } else {
         if (static_cast<size_t>(length) != LOB_REFERENCE_SIZE) {
-          return arrow::Status::Invalid("invalid LOB reference size at index ", i);
+          return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "invalid LOB reference size at index ", i);
         }
         auto ref = DecodeLOBReference(raw);
         file_groups[ref.file_id].emplace_back(i, ref.row_offset);
@@ -278,7 +281,7 @@ class LobColumnReaderImpl : public LobColumnReader {
   arrow::Result<std::vector<std::vector<uint8_t>>> TakeData(const std::string& file_id_str,
                                                             const std::vector<int32_t>& row_offsets) override {
     if (closed_) {
-      return arrow::Status::Invalid("reader is closed");
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "reader is closed");
     }
 
     ARROW_ASSIGN_OR_RAISE(auto reader, GetOrOpenReader(file_id_str));

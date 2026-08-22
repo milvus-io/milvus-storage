@@ -14,6 +14,8 @@
 
 #include "milvus-storage/lob_column/lob_column_writer.h"
 
+#include "milvus-storage/common/extend_status.h"
+
 #include <arrow/array/builder_binary.h>
 #include <arrow/type.h>
 #include <arrow/util/key_value_metadata.h>
@@ -21,6 +23,8 @@
 #include <numeric>
 
 #include "milvus-storage/lob_column/lob_reference.h"
+#include "milvus-storage/common/fiu_local.h"
+#include "milvus-storage/common/writer_status.h"
 #include "milvus-storage/filesystem/fs.h"
 
 #include "milvus-storage/format/vortex/vortex_writer.h"
@@ -42,16 +46,96 @@ class LobColumnWriterImpl : public LobColumnWriter {
     GenerateUUIDBinary(current_file_id_);
   }
 
-  ~LobColumnWriterImpl() override {
-    if (!closed_) {
-      // best effort abort, ignore errors in destructor
-      (void)Abort();
-    }
-  }
+  ~LobColumnWriterImpl() override = default;
 
   arrow::Result<std::vector<uint8_t>> WriteData(const uint8_t* data, size_t data_size) override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
+    auto result = WriteDataImpl(data, data_size);
+    if (!result.ok()) {
+      return writer_status_.Fail(result.status());
+    }
+    return result;
+  }
+
+  arrow::Result<std::vector<std::vector<uint8_t>>> WriteBatchData(
+      const std::vector<std::pair<const uint8_t*, size_t>>& items) override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
+    auto result = WriteBatchDataImpl(items);
+    if (!result.ok()) {
+      return writer_status_.Fail(result.status());
+    }
+    return result;
+  }
+
+  arrow::Result<std::shared_ptr<arrow::BinaryArray>> WriteArrowArray(
+      const std::shared_ptr<arrow::BinaryArray>& data_array) override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
+    auto result = WriteArrowArrayImpl(data_array);
+    if (!result.ok()) {
+      return writer_status_.Fail(result.status());
+    }
+    return result;
+  }
+
+  arrow::Status Flush() override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
+    return writer_status_.Fail(FlushImpl());
+  }
+
+  arrow::Result<std::vector<LobFileResult>> Close() override {
+    if (auto first_failure = writer_status_.Check(); !first_failure.ok()) {
+      Abort();
+      return first_failure;
+    }
+    auto result = CloseImpl();
+    if (!result.ok()) {
+      auto status = writer_status_.Fail(result.status());
+      Abort();
+      return status;
+    }
+    return result;
+  }
+
+  void Abort() noexcept override {
+    // closed_ before BeginDiscard(): see SegmentWriter::Abort. Abort after a
+    // successful Close must not leave the writer reading as Cancelled.
     if (closed_) {
-      return arrow::Status::Invalid("writer is closed");
+      return;
+    }
+    writer_status_.BeginDiscard();
+
+    // discard pending data
+    pending_builder_.Reset();
+
+    // abandon the vortex writer without committing. Abort() rather than a bare
+    // reset(): dropping it releases local ownership, aborting is what asks the
+    // layer below to release what it allocated in the store. The in-progress
+    // file is already in created_files_ (EnsureVortexWriter records it when the
+    // writer opens), so the DeleteFile loop below covers the object itself.
+    if (vortex_writer_) {
+      vortex_writer_->Abort();
+      vortex_writer_.reset();
+    }
+
+    // delete created files (best effort, ignore errors)
+    for (const auto& file_result : created_files_) {
+      AbandonQuietly("a LOB file", [&] { (void)fs_->DeleteFile(file_result.path); });
+    }
+
+    created_files_.clear();
+    closed_ = true;
+  }
+
+  int64_t WrittenRows() const override { return written_rows_; }
+
+  LobColumnWriterStats GetStats() const override { return stats_; }
+
+  bool IsClosed() const override { return closed_; }
+
+  private:
+  arrow::Result<std::vector<uint8_t>> WriteDataImpl(const uint8_t* data, size_t data_size) {
+    if (closed_) {
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "writer is closed");
     }
 
     // check if data should be stored inline
@@ -90,10 +174,10 @@ class LobColumnWriterImpl : public LobColumnWriter {
     return ref;
   }
 
-  arrow::Result<std::vector<std::vector<uint8_t>>> WriteBatchData(
-      const std::vector<std::pair<const uint8_t*, size_t>>& items) override {
+  arrow::Result<std::vector<std::vector<uint8_t>>> WriteBatchDataImpl(
+      const std::vector<std::pair<const uint8_t*, size_t>>& items) {
     if (closed_) {
-      return arrow::Status::Invalid("writer is closed");
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "writer is closed");
     }
 
     std::vector<std::vector<uint8_t>> results;
@@ -128,10 +212,10 @@ class LobColumnWriterImpl : public LobColumnWriter {
     return results;
   }
 
-  arrow::Result<std::shared_ptr<arrow::BinaryArray>> WriteArrowArray(
-      const std::shared_ptr<arrow::BinaryArray>& data_array) override {
+  arrow::Result<std::shared_ptr<arrow::BinaryArray>> WriteArrowArrayImpl(
+      const std::shared_ptr<arrow::BinaryArray>& data_array) {
     if (closed_) {
-      return arrow::Status::Invalid("writer is closed");
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "writer is closed");
     }
 
     arrow::BinaryBuilder builder;
@@ -145,7 +229,7 @@ class LobColumnWriterImpl : public LobColumnWriter {
       } else {
         int32_t length;
         const uint8_t* value = data_array->GetValue(i, &length);
-        ARROW_ASSIGN_OR_RAISE(auto ref, WriteData(value, static_cast<size_t>(length)));
+        ARROW_ASSIGN_OR_RAISE(auto ref, WriteDataImpl(value, static_cast<size_t>(length)));
         ARROW_RETURN_NOT_OK(builder.Append(ref.data(), ref.size()));
       }
     }
@@ -155,9 +239,9 @@ class LobColumnWriterImpl : public LobColumnWriter {
     return result;
   }
 
-  arrow::Status Flush() override {
+  arrow::Status FlushImpl() {
     if (closed_) {
-      return arrow::Status::Invalid("writer is closed");
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "writer is closed");
     }
 
     ARROW_RETURN_NOT_OK(FlushPending());
@@ -165,9 +249,9 @@ class LobColumnWriterImpl : public LobColumnWriter {
     return arrow::Status::OK();
   }
 
-  arrow::Result<std::vector<LobFileResult>> Close() override {
+  arrow::Result<std::vector<LobFileResult>> CloseImpl() {
     if (closed_) {
-      return arrow::Status::Invalid("writer is already closed");
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "writer is already closed");
     }
 
     ARROW_RETURN_NOT_OK(FlushPending());
@@ -177,36 +261,6 @@ class LobColumnWriterImpl : public LobColumnWriter {
     return created_files_;
   }
 
-  arrow::Status Abort() override {
-    if (closed_) {
-      return arrow::Status::OK();
-    }
-
-    // discard pending data
-    pending_builder_.Reset();
-
-    // close vortex writer without committing
-    if (vortex_writer_) {
-      vortex_writer_.reset();
-    }
-
-    // delete created files (best effort, ignore errors)
-    for (const auto& file_result : created_files_) {
-      (void)fs_->DeleteFile(file_result.path);
-    }
-
-    created_files_.clear();
-    closed_ = true;
-    return arrow::Status::OK();
-  }
-
-  int64_t WrittenRows() const override { return written_rows_; }
-
-  LobColumnWriterStats GetStats() const override { return stats_; }
-
-  bool IsClosed() const override { return closed_; }
-
-  private:
   std::shared_ptr<arrow::DataType> ArrowType() const {
     return config_.data_type == LobDataType::kText ? arrow::utf8() : arrow::binary();
   }
@@ -251,6 +305,9 @@ class LobColumnWriterImpl : public LobColumnWriter {
 
     std::shared_ptr<arrow::Array> array;
     ARROW_RETURN_NOT_OK(pending_builder_.Finish(&array));
+
+    FIU_RETURN_ON(FIUKEY_WRITER_FLUSH_FAIL, arrow::Status::IOError("Injected fault after finalizing pending LOB data: ",
+                                                                   FIUKEY_WRITER_FLUSH_FAIL));
 
     auto schema = arrow::schema({
         arrow::field(FieldName(), ArrowType(), false),
@@ -317,6 +374,7 @@ class LobColumnWriterImpl : public LobColumnWriter {
   // BinaryBuilder works for both text (utf8 is binary-compatible) and binary data.
   arrow::BinaryBuilder pending_builder_;
   size_t pending_bytes_;
+  WriterStatus writer_status_;
 
   // created file results (for cleanup on abort and return on close)
   std::vector<LobFileResult> created_files_;

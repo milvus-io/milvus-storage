@@ -25,6 +25,8 @@
 #include <aws/core/AmazonWebServiceResult.h>
 #include <aws/core/utils/DateTime.h>
 #include <aws/core/internal/AWSHttpResourceClient.h>
+
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"
 #include <memory>
 #include <mutex>
 
@@ -59,6 +61,8 @@ class AWS_CORE_API TencentCloudSTSCredentialsClient : public Aws::Internal::AWSH
   };
 
   struct STSAssumeRoleWithWebIdentityResult {
+    // Why creds is empty; see AliyunSTSClient.h.
+    arrow::Status status;
     Aws::Auth::AWSCredentials creds;
   };
 
@@ -66,6 +70,7 @@ class AWS_CORE_API TencentCloudSTSCredentialsClient : public Aws::Internal::AWSH
       const STSAssumeRoleWithWebIdentityRequest& request);
 
   private:
+  std::shared_ptr<Aws::Http::HttpClient> m_rawHttpClient;
   Aws::String m_endpoint;
 };
 

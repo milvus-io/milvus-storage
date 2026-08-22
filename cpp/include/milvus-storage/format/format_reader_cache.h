@@ -122,7 +122,7 @@ class FormatReaderMetadataCache final : public std::enable_shared_from_this<Form
   // Both paths remove the in-flight load and complete that leader's waiters.
   MetadataResult complete_load(const std::string& key,
                                const std::shared_ptr<InFlightLoad>& in_flight_load,
-                               MetadataResult load_result);
+                               MetadataResult load_result) noexcept;
 
   mutable std::mutex mutex_;
   std::unordered_map<std::string, Entry> entries_;

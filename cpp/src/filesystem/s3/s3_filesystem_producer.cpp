@@ -13,17 +13,17 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/filesystem/fs.h"
 
+#include <chrono>
 #include <cstdlib>
 #include <mutex>
 #include <sstream>
 #include <utility>
 
 #include <aws/core/auth/AWSCredentials.h>
-#include <aws/core/auth/AWSCredentialsProviderChain.h>
-#include <aws/core/auth/STSCredentialsProvider.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/standard/StandardHttpRequest.h>
 #include <aws/core/platform/Environment.h>
@@ -48,6 +48,8 @@
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/AwsDefaultCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
@@ -97,6 +99,26 @@ class TlsHttpClientFactory : public Aws::Http::HttpClientFactory {
   private:
   std::string tls_min_version_;
 };
+
+arrow::Result<Aws::Auth::AWSCredentials> ResolveCredentialsForConstruction(
+    const std::shared_ptr<Aws::Auth::AWSCredentialsProvider>& provider,
+    bool require_temporary_credentials,
+    std::string_view source) {
+  if (provider == nullptr) {
+    return MakeCredentialConfigError(std::string(source) + " credential provider is null");
+  }
+  if (auto resolver = std::dynamic_pointer_cast<RequestCredentialsResolver>(provider); resolver != nullptr) {
+    return resolver->ResolveForRequest();
+  }
+
+  auto credentials = provider->GetAWSCredentials();
+  if (require_temporary_credentials) {
+    ARROW_RETURN_NOT_OK(ValidateTemporaryCredentials(credentials, source));
+  } else if (credentials.GetAWSAccessKeyId().empty() || credentials.GetAWSSecretKey().empty()) {
+    return MakeCredentialConfigError(std::string(source) + " did not return a complete access-key/secret-key pair");
+  }
+  return credentials;
+}
 
 }  // namespace
 
@@ -215,11 +237,11 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
         if (Aws::Environment::GetEnv("ALIBABA_CLOUD_OIDC_TOKEN_FILE").empty() ||
             Aws::Environment::GetEnv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN").empty() ||
             Aws::Environment::GetEnv("ALIBABA_CLOUD_ROLE_ARN").empty()) {
-          return arrow::Status::Invalid(
-              "Aliyun role_arn requires ALIBABA_CLOUD_OIDC_TOKEN_FILE, "
-              "ALIBABA_CLOUD_OIDC_PROVIDER_ARN and ALIBABA_CLOUD_ROLE_ARN "
-              "in process environment (or set ALIYUN_ROLE_ARN_AUTH_MODE=ram "
-              "for ECS IMDS-based AssumeRole)");
+          return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                    "Aliyun role_arn requires ALIBABA_CLOUD_OIDC_TOKEN_FILE, "
+                                    "ALIBABA_CLOUD_OIDC_PROVIDER_ARN and ALIBABA_CLOUD_ROLE_ARN "
+                                    "in process environment (or set ALIYUN_ROLE_ARN_AUTH_MODE=ram "
+                                    "for ECS IMDS-based AssumeRole)");
         }
         if (config_.load_frequency > 0) {
           LOG_STORAGE_WARNING_ << "Aliyun OIDC chain AssumeRole refresh grace is fixed; load_frequency ignored";
@@ -237,18 +259,36 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
         options.credentials_kind = S3CredentialsKind::WebIdentity;
       }
     } else {
-      return arrow::Status::Invalid("role_arn not supported for cloud provider: ", config_.cloud_provider);
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                "role_arn not supported for cloud provider: ", config_.cloud_provider);
+    }
+    auto preflight =
+        ResolveCredentialsForConstruction(options.credentials_provider,
+                                          /*require_temporary_credentials=*/true, config_.cloud_provider + " role_arn");
+    if (!preflight.ok()) {
+      return preflight.status();
     }
   } else if (config_.use_iam) {
     auto provider = CreateCredentialsProvider();
     if (!provider) {
-      return arrow::Status::Invalid("Unknown credentials provider, cloud provider: ", config_.cloud_provider);
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                "Unknown credentials provider, cloud provider: ", config_.cloud_provider);
     }
-    auto credentials = provider->GetAWSCredentials();
-    assert(!credentials.GetAWSAccessKeyId().empty() && "AWS Access Key ID is empty");
-    assert(!credentials.GetAWSSecretKey().empty() && "AWS Secret Key is empty");
-    assert(!credentials.GetSessionToken().empty() && "AWS Session Token is empty");
+    // Providers owned by this repository expose a request-local typed Result.
+    // AWS's default chain may legitimately return long-lived AK/SK, so only the
+    // signing pair is required on that path.
+    auto preflight = ResolveCredentialsForConstruction(provider,
+                                                       /*require_temporary_credentials=*/false,
+                                                       config_.cloud_provider + " IAM provider");
+    if (!preflight.ok()) {
+      return preflight.status();
+    }
     options.credentials_provider = provider;
+    if (config_.cloud_provider == kCloudProviderAWS) {
+      options.credentials_kind = S3CredentialsKind::Default;
+    } else {
+      options.credentials_kind = S3CredentialsKind::WebIdentity;
+    }
   } else {
     options.ConfigureAccessKey(config_.access_key_id, config_.access_key_value);
   }
@@ -274,7 +314,8 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateC
 
 // Factories below deliberately do not cache a `static` instance:
 // - FilesystemCache dedupes one level up (fs.cpp:223).
-// - Provider construction is cheap; STS I/O happens lazily in GetAWSCredentials().
+// - Provider construction is cheap; CreateS3Options performs one explicit
+//   request-local preflight before publishing the filesystem.
 // - Per-tenant role_arn requires multiple instances per process; `static` defeats that.
 // - `static` + AWS SDK has a shutdown-order hazard (Aws::ShutdownAPI runs before static dtors).
 
@@ -284,7 +325,7 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateH
 }
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateAwsCredentialsProvider() {
-  return std::make_shared<Aws::Auth::DefaultAWSCredentialsProviderChain>();
+  return std::make_shared<AwsDefaultCredentialsProvider>();
 }
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateAliyunCredentialsProvider() {

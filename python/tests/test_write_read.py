@@ -10,6 +10,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
+import milvus_storage.reader as reader_module
 from milvus_storage import Reader, Writer
 from milvus_storage.exceptions import InvalidArgumentError, ResourceError
 
@@ -126,6 +127,42 @@ def test_write_read_multiple_batches(fs_properties, sample_schema):
         assert all_ids == list(range(30))
         assert all_values == [float(i) * 1.1 for i in range(30)]
         assert all_texts == [f"text_{i}" for i in range(30)]
+
+
+def test_scan_schema_import_failure_destroys_native_handle(
+    fs_properties, sample_schema, monkeypatch
+):
+    """A PyArrow schema import failure must not leak the native reader."""
+    data = pa.record_batch([[1], [1.0], ["a"]], schema=sample_schema)
+    with Writer(BASE_DIR, sample_schema, properties=fs_properties) as writer:
+        writer.write(data)
+        column_groups = writer.close()
+
+    with Reader(column_groups, sample_schema, properties=fs_properties) as reader:
+        destroyed = []
+
+        class TrackingLibrary:
+            def __init__(self, native):
+                self._native = native
+
+            def __getattr__(self, name):
+                return getattr(self._native, name)
+
+            def loon_record_batch_reader_destroy(self, handle):
+                destroyed.append(int(reader._ffi.cast("uintptr_t", handle)))
+                self._native.loon_record_batch_reader_destroy(handle)
+
+        reader._lib = TrackingLibrary(reader._lib)
+        monkeypatch.setattr(
+            reader_module,
+            "_import_schema_from_c",
+            lambda *_args: (_ for _ in ()).throw(RuntimeError("import failed")),
+        )
+
+        with pytest.raises(RuntimeError, match="import failed"):
+            reader.scan()
+
+        assert len(destroyed) == 1
 
 
 def test_write_read_with_take(fs_properties, sample_schema):

@@ -59,6 +59,8 @@ struct LobFileResult {
 //   5. use the returned references to write reference binlog
 //
 // thread safety: not thread-safe, use one writer per thread
+// failure semantics: any failed operation is terminal; Abort/destroy it and
+// create a new writer, which generates a new UUID-backed file path.
 class LobColumnWriter {
   public:
   virtual ~LobColumnWriter() = default;
@@ -108,7 +110,7 @@ class LobColumnWriter {
 
   // abort the writer and discard all written data
   // this will delete any LOB files that were created
-  virtual arrow::Status Abort() = 0;
+  virtual void Abort() noexcept = 0;
 
   // get the number of rows written so far
   virtual int64_t WrittenRows() const = 0;

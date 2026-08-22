@@ -14,12 +14,15 @@
 
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 
+#include "milvus-storage/common/extend_status.h"
+
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/format/vortex/vortex_planner.h"
 #include "vortex_bridge.h"
 
 #include <functional>
 #include <memory>
+#include <new>
 #include <optional>
 #include <string>
 #include <utility>
@@ -94,7 +97,8 @@ static arrow::Result<std::optional<expr::Expr>> parse_predicate_for_schema(
     return std::nullopt;
   }
   if (!file_schema) {
-    return arrow::Status::Invalid("Vortex predicate requires an opened reader with file schema");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                              "Vortex predicate requires an opened reader with file schema");
   }
 
   std::vector<expr::PredicateColumn> schema;
@@ -113,7 +117,8 @@ static arrow::Result<std::optional<expr::Expr>> parse_predicate_for_schema(
 static arrow::Result<std::shared_ptr<arrow::Schema>> project_schema(const std::shared_ptr<arrow::Schema>& schema,
                                                                     const std::vector<std::string>& columns) {
   if (!schema) {
-    return arrow::Status::Invalid("Vortex output schema requires an opened reader");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                              "Vortex output schema requires an opened reader");
   }
   if (columns.empty()) {
     return schema;
@@ -258,7 +263,8 @@ static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos(
 
   for (auto row_range : row_ranges) {
     if (row_range > rows_in_file) {
-      return arrow::Status::Invalid("Vortex row range exceeds the file row count");
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                                "Vortex row range exceeds the file row count");
     }
     uint64_t memory_size = 0;
     if (memory_size_estimate) {
@@ -282,7 +288,8 @@ static arrow::Result<std::shared_ptr<arrow::Schema>> projected_file_schema(
     const std::vector<std::string>& projected_columns,
     const std::string& path) {
   if (!file_schema) {
-    return arrow::Status::Invalid(fmt::format("Vortex file schema is not initialized. [path={}]", path));
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                              "Vortex file schema is not initialized. [path=", path, "]");
   }
   if (projected_columns.empty()) {
     return file_schema;
@@ -363,37 +370,30 @@ static arrow::Result<uint64_t> compute_total_mem_usage(const std::vector<uint64_
   uint64_t total_size = 0;
   for (auto size : file_column_uncompressed_sizes) {
     if (size > std::numeric_limits<uint64_t>::max() - total_size) {
-      return arrow::Status::Invalid("Vortex column memory estimates exceed the uint64_t range");
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                                "Vortex column memory estimates exceed the uint64_t range");
     }
     total_size += size;
   }
   return total_size;
 }
 
-static std::optional<MemorySizeEstimate> estimate_memory_sizes(const VortexFile& vxfile,
-                                                               size_t column_count,
-                                                               const std::string& path) {
+static arrow::Result<std::optional<MemorySizeEstimate>> estimate_memory_sizes(const VortexFile& vxfile,
+                                                                              size_t column_count) {
   auto column_sizes_result = get_column_uncompressed_sizes(vxfile, column_count);
   if (!column_sizes_result.ok()) {
-    // Memory statistics are optional. Do not retain the underlying failure in
-    // row-group metadata: estimate APIs return a generic NotImplemented status
-    // instead. Keep the detailed reason in the debug log for diagnostics only.
-    LOG_STORAGE_DEBUG_ << "Vortex memory estimation is unavailable"
-                       << ", path=" << path << ", status=" << column_sizes_result.status().ToString();
-    return std::nullopt;
+    if (column_sizes_result.status().IsNotImplemented()) {
+      return std::optional<MemorySizeEstimate>{};
+    }
+    return column_sizes_result.status();
   }
 
   auto column_sizes = std::move(column_sizes_result).ValueOrDie();
-  auto total_size_result = compute_total_mem_usage(column_sizes);
-  if (!total_size_result.ok()) {
-    LOG_STORAGE_DEBUG_ << "Vortex memory estimation is unavailable"
-                       << ", path=" << path << ", status=" << total_size_result.status().ToString();
-    return std::nullopt;
-  }
-  return MemorySizeEstimate{
-      .total_size = total_size_result.ValueOrDie(),
+  ARROW_ASSIGN_OR_RAISE(auto total_size, compute_total_mem_usage(column_sizes));
+  return std::optional<MemorySizeEstimate>(MemorySizeEstimate{
+      .total_size = total_size,
       .column_sizes = std::move(column_sizes),
-  };
+  });
 }
 
 struct VortexOpenAsyncContext {
@@ -402,17 +402,25 @@ struct VortexOpenAsyncContext {
 };
 
 template <typename T>
-static void set_vortex_callback_exception(folly::Promise<T>& promise,
-                                          const char* operation,
-                                          const char* message) noexcept {
+static void set_vortex_callback_exception(folly::Promise<T>& promise) noexcept {
   try {
-    promise.setValue(T(arrow::Status::IOError(fmt::format("{}: {}", operation, message))));
+    promise.setValue(T(arrow::Status::UnknownError("Vortex async callback failed unexpectedly")));
   } catch (...) {
-    // No further error reporting is safe from a callback crossing the C ABI.
   }
 }
 
-static void vortex_open_async_callback(void* ctx_raw, uintptr_t handle, const char* error_msg) noexcept {
+template <typename T>
+static void set_vortex_callback_out_of_memory(folly::Promise<T>& promise) noexcept {
+  try {
+    promise.setValue(T(arrow::Status::OutOfMemory("Vortex async callback allocation failed")));
+  } catch (...) {
+  }
+}
+
+static void vortex_open_async_callback(void* ctx_raw,
+                                       uintptr_t handle,
+                                       int error_code,
+                                       const char* error_msg) noexcept {
   // The FFI contract invokes this callback exactly once; reclaim the context
   // ownership transferred before vortex_open_file_async().
   std::unique_ptr<VortexOpenAsyncContext> ctx(static_cast<VortexOpenAsyncContext*>(ctx_raw));
@@ -421,20 +429,19 @@ static void vortex_open_async_callback(void* ctx_raw, uintptr_t handle, const ch
 
   try {
     if (error) {
-      ctx->promise.setValue(MakeVortexErrorStatus("Failed to open vortex file", error.get()));
+      ctx->promise.setValue(MakeVortexErrorStatus("Failed to open vortex file", error_code, error.get()));
       return;
     }
 
     if (handle == 0) {
-      ctx->promise.setValue(arrow::Status::IOError("Vortex async open returned a null file handle"));
+      ctx->promise.setValue(MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                                               "Vortex async open returned a null file handle"));
       return;
     }
 
     ctx->promise.setValue(ctx->initialize(handle));
-  } catch (const std::exception& e) {
-    set_vortex_callback_exception(ctx->promise, "Failed to import opened vortex file", e.what());
   } catch (...) {
-    set_vortex_callback_exception(ctx->promise, "Failed to import opened vortex file", "unknown exception");
+    set_vortex_callback_exception(ctx->promise);
   }
 }
 
@@ -454,7 +461,8 @@ std::string VortexFormatReader::MetaTrait::cache_key(const api::ColumnGroupFile&
 arrow::Result<VortexFormatReader::MetaTrait::MetadataPtr> VortexFormatReader::MetaTrait::create_metadata_from_reader(
     const std::shared_ptr<VortexFormatReader>& reader, const api::ColumnGroupFile& file) {
   if (!reader || !reader->vxfile_ || !reader->fs_holder_ || !reader->file_schema_) {
-    return arrow::Status::Invalid("Cannot create vortex metadata from an unopened reader");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                              "Cannot create vortex metadata from an unopened reader");
   }
 
   auto metadata = std::make_shared<Metadata>(Metadata{
@@ -574,7 +582,7 @@ arrow::Result<std::optional<bool>> VortexFormatReader::parse_split_row_indices_o
   if (mode == "false") {
     return false;
   }
-  return arrow::Status::Invalid(fmt::format("Invalid Vortex split row indices mode: {}", mode));
+  return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid, "Invalid Vortex split row indices mode: ", mode);
 }
 
 VortexFormatReader::VortexFormatReader(MetaTrait::MetadataPtr metadata,
@@ -609,13 +617,18 @@ arrow::Status VortexFormatReader::open() {
   if (read_schema_ && read_schema_->num_fields() == 0) {
     read_schema_ = nullptr;
   }
-  ARROW_ASSIGN_OR_RAISE(vxfile_, open_shared_vortex_file(fs_holder_, path_, file_size_, footer_size_));
+  auto vxfile_res = open_shared_vortex_file(fs_holder_, path_, file_size_, footer_size_);
+  if (!vxfile_res.ok()) {
+    return std::move(vxfile_res).status();
+  }
+  vxfile_ = std::move(vxfile_res).ValueOrDie();
 
   // Always derive full file schema from file metadata
   ARROW_ASSIGN_OR_RAISE(file_schema_, import_vortex_file_schema(*vxfile_));
 
   ARROW_ASSIGN_OR_RAISE(auto row_ranges, get_vortex_splits(*vxfile_));
-  auto memory_size_estimate = estimate_memory_sizes(*vxfile_, static_cast<size_t>(file_schema_->num_fields()), path_);
+  ARROW_ASSIGN_OR_RAISE(auto memory_size_estimate,
+                        estimate_memory_sizes(*vxfile_, static_cast<size_t>(file_schema_->num_fields())));
   ARROW_ASSIGN_OR_RAISE(row_group_infos_,
                         create_row_group_infos(vxfile_->RowCount(), recalc_row_ranges(row_ranges, logical_chunk_rows_),
                                                memory_size_estimate));
@@ -665,8 +678,8 @@ folly::SemiFuture<arrow::Status> VortexFormatReader::open_async() {
     auto vxfile = std::shared_ptr<VortexFile>(std::move(vxfile_unique));
     ARROW_ASSIGN_OR_RAISE(auto file_schema, import_vortex_file_schema(*vxfile));
     ARROW_ASSIGN_OR_RAISE(auto row_ranges, get_vortex_splits(*vxfile));
-    auto memory_size_estimate =
-        estimate_memory_sizes(*vxfile, static_cast<size_t>(file_schema->num_fields()), self->path_);
+    ARROW_ASSIGN_OR_RAISE(auto memory_size_estimate,
+                          estimate_memory_sizes(*vxfile, static_cast<size_t>(file_schema->num_fields())));
     ARROW_ASSIGN_OR_RAISE(
         auto row_group_infos,
         create_row_group_infos(vxfile->RowCount(), recalc_row_ranges(row_ranges, self->logical_chunk_rows_),
@@ -697,7 +710,8 @@ arrow::Status VortexFormatReader::set_predicate(const std::string& predicate) {
     return arrow::Status::OK();
   }
   if (!file_schema_) {
-    return arrow::Status::Invalid("predicate set before file schema is available");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                              "predicate set before file schema is available");
   }
   ARROW_ASSIGN_OR_RAISE(auto maybe_expr, parse_predicate_for_schema(predicate, file_schema_));
   if (maybe_expr.has_value()) {
@@ -730,8 +744,8 @@ arrow::Result<std::vector<RowGroupInfo>> VortexFormatReader::get_row_group_infos
 
 arrow::Result<std::vector<uint64_t>> VortexFormatReader::get_rg_column_memsz(int64_t row_group_index) const {
   if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_.size()) {
-    return arrow::Status::Invalid(
-        fmt::format("Vortex row group index {} out of range {}", row_group_index, row_group_infos_.size()));
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Vortex row group index ", row_group_index, " out of range ",
+                                  row_group_infos_.size());
   }
   if (!row_group_infos_[row_group_index].memory_size_available || !column_memory_weights_) {
     return arrow::Status::NotImplemented("Vortex column memory size statistics are not available");
@@ -742,8 +756,8 @@ arrow::Result<std::vector<uint64_t>> VortexFormatReader::get_rg_column_memsz(int
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> VortexFormatReader::get_chunk(const int& row_group_index) {
   assert(vxfile_);
   if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_.size()) {
-    return arrow::Status::Invalid(
-        fmt::format("Vortex row group index {} out of range {}", row_group_index, row_group_infos_.size()));
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Vortex row group index ", row_group_index, " out of range ",
+                                  row_group_infos_.size());
   }
   ARROW_ASSIGN_OR_RAISE(auto chunkedarray,
                         blocking_read(row_group_infos_[row_group_index].start_offset,
@@ -779,8 +793,8 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> VortexFormatRead
   std::vector<std::pair<uint64_t, uint64_t>> rg_idx_ranges;
   for (const auto row_group_index : rg_indices_in_file) {
     if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_.size()) {
-      return arrow::Status::Invalid(
-          fmt::format("Vortex row group index {} out of range {}", row_group_index, row_group_infos_.size()));
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Vortex row group index ", row_group_index, " out of range ",
+                                    row_group_infos_.size());
     }
   }
 
@@ -822,7 +836,7 @@ arrow::Result<std::shared_ptr<FormatReader>> VortexFormatReader::clone_reader() 
 
 arrow::Result<ArrowArrayStream> VortexFormatReader::read_with_plan(const VortexReadPlan& plan) {
   if (!vxfile_) {
-    return arrow::Status::Invalid("VortexFormatReader is not opened");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "VortexFormatReader is not opened");
   }
 
   ARROW_ASSIGN_OR_RAISE(auto scan_builder, vxfile_->CreateScanBuilder(kSmallCoalescingWindow));
@@ -850,14 +864,16 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read_with_plan(const VortexR
 
   auto stream = std::move(scan_builder).IntoStream();
   if (!stream.ok()) {
-    return MakeVortexErrorStatus("Failed to read vortex file with plan", stream.status());
+    return TakeVortexErrorStatus("Failed to read vortex file with plan", stream.status());
   }
-  return std::move(stream).ValueOrDie();
+  // Keep the public ArrowArrayStream ABI while routing lazy ReadNext failures
+  // through the typed translator before exporting the stream again.
+  return internal::WrapVortexArrowArrayStream(std::move(stream).ValueOrDie());
 }
 
 arrow::Result<ArrowArrayStream> VortexFormatReader::read_row_ids_with_plan(const VortexReadPlan& plan) {
   if (!vxfile_) {
-    return arrow::Status::Invalid("VortexFormatReader is not opened");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "VortexFormatReader is not opened");
   }
 
   ARROW_ASSIGN_OR_RAISE(auto scan_builder, vxfile_->CreateScanBuilder(kSmallCoalescingWindow));
@@ -876,9 +892,9 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read_row_ids_with_plan(const
   ARROW_RETURN_NOT_OK(apply_read_plan_selection(&scan_builder, plan, vxfile_->RowCount(), path_));
   auto stream = std::move(scan_builder).IntoStream();
   if (!stream.ok()) {
-    return MakeVortexErrorStatus("Failed to read vortex row ids with plan", stream.status());
+    return TakeVortexErrorStatus("Failed to read vortex row ids with plan", stream.status());
   }
-  return std::move(stream).ValueOrDie();
+  return internal::WrapVortexArrowArrayStream(std::move(stream).ValueOrDie());
 }
 
 arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start,
@@ -902,9 +918,9 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start,
   scan_builder.WithRowRange(row_start, row_end);
   auto stream = std::move(scan_builder).IntoStream();
   if (!stream.ok()) {
-    return MakeVortexErrorStatus("Failed to read vortex file", stream.status());
+    return TakeVortexErrorStatus("Failed to read vortex file", stream.status());
   }
-  return std::move(stream).ValueOrDie();
+  return internal::WrapVortexArrowArrayStream(std::move(stream).ValueOrDie());
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> VortexFormatReader::streaming_read(
@@ -945,9 +961,9 @@ arrow::Result<std::shared_ptr<arrow::Table>> VortexFormatReader::take(const std:
 
   auto array_stream = std::move(scan_builder).IntoStream();
   if (!array_stream.ok()) {
-    return MakeVortexErrorStatus("Failed to take from vortex file", array_stream.status());
+    return TakeVortexErrorStatus("Failed to take from vortex file", array_stream.status());
   }
-  auto stream = std::move(array_stream).ValueOrDie();
+  ARROW_ASSIGN_OR_RAISE(auto stream, internal::WrapVortexArrowArrayStream(std::move(array_stream).ValueOrDie()));
   auto chunkedarray_result = arrow::ImportChunkedArray(&stream);
   if (!chunkedarray_result.ok()) {
     return MakeVortexErrorStatus("Failed to import vortex take result", chunkedarray_result.status());
@@ -997,6 +1013,7 @@ struct VortexAsyncContext {
 
 static void vortex_take_async_callback(void* ctx_raw,
                                        ArrowArrayStream* /*out_stream*/,
+                                       int error_code,
                                        const char* error_msg) noexcept {
   // Reclaim the callback context exactly once after Rust finishes the scan.
   std::unique_ptr<VortexAsyncContext<std::shared_ptr<arrow::Table>>> ctx(
@@ -1006,7 +1023,7 @@ static void vortex_take_async_callback(void* ctx_raw,
 
   try {
     if (error) {
-      ctx->promise.setValue(MakeVortexErrorStatus("Failed to take from vortex file", error.get()));
+      ctx->promise.setValue(MakeVortexErrorStatus("Failed to take from vortex file", error_code, error.get()));
       return;
     }
 
@@ -1020,7 +1037,8 @@ static void vortex_take_async_callback(void* ctx_raw,
 
     auto chunked_array = result.ValueUnsafe();
     if (chunked_array->num_chunks() == 0) {
-      ctx->promise.setValue(arrow::Status::Invalid("take_async: empty result"));
+      ctx->promise.setValue(
+          MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "take_async: empty result"));
       return;
     }
 
@@ -1038,15 +1056,14 @@ static void vortex_take_async_callback(void* ctx_raw,
     }
 
     ctx->promise.setValue(arrow::Table::FromRecordBatches(rbs));
-  } catch (const std::exception& e) {
-    set_vortex_callback_exception(ctx->promise, "Failed to process vortex take result", e.what());
   } catch (...) {
-    set_vortex_callback_exception(ctx->promise, "Failed to process vortex take result", "unknown exception");
+    set_vortex_callback_exception(ctx->promise);
   }
 }
 
 static void vortex_read_range_async_callback(void* ctx_raw,
                                              ArrowArrayStream* /*out_stream*/,
+                                             int error_code,
                                              const char* error_msg) noexcept {
   // Reclaim the callback context exactly once after Rust publishes the stream.
   std::unique_ptr<VortexAsyncContext<std::shared_ptr<arrow::RecordBatchReader>>> ctx(
@@ -1056,7 +1073,7 @@ static void vortex_read_range_async_callback(void* ctx_raw,
 
   try {
     if (error) {
-      ctx->promise.setValue(MakeVortexErrorStatus("Failed to read vortex file", error.get()));
+      ctx->promise.setValue(MakeVortexErrorStatus("Failed to read vortex file", error_code, error.get()));
       return;
     }
 
@@ -1069,10 +1086,8 @@ static void vortex_read_range_async_callback(void* ctx_raw,
       return;
     }
     ctx->promise.setValue(internal::WrapVortexRecordBatchReader(reader_result.ValueOrDie()));
-  } catch (const std::exception& e) {
-    set_vortex_callback_exception(ctx->promise, "Failed to process vortex range-read result", e.what());
   } catch (...) {
-    set_vortex_callback_exception(ctx->promise, "Failed to process vortex range-read result", "unknown exception");
+    set_vortex_callback_exception(ctx->promise);
   }
 }
 

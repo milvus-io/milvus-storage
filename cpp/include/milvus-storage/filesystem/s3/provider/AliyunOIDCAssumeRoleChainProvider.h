@@ -22,6 +22,8 @@
 #include "AliyunCredentialsProvider.h"
 #include "AliyunRAMSTSClient.h"
 
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"
+
 namespace milvus_storage {
 
 // Two-step OIDC chain for cross-account OSS access:
@@ -43,7 +45,8 @@ namespace milvus_storage {
 // Mirrors the structure of AliyunRAMCredentialsProvider (IMDS step 1, same
 // step 2). Selected for OIDC deployments at the dispatch layer; RAM mode
 // (ALIYUN_ROLE_ARN_AUTH_MODE=ram) keeps using AliyunRAMCredentialsProvider.
-class AWS_CORE_API AliyunOIDCAssumeRoleChainProvider : public ::Aws::Auth::AWSCredentialsProvider {
+class AWS_CORE_API AliyunOIDCAssumeRoleChainProvider : public ::Aws::Auth::AWSCredentialsProvider,
+                                                       public RequestCredentialsResolver {
   public:
   // `target_external_id` is forwarded to step 2 (sts:AssumeRole). Aliyun's
   // AssumeRoleWithOIDC API itself has no ExternalId concept, so step 1 never
@@ -54,6 +57,7 @@ class AWS_CORE_API AliyunOIDCAssumeRoleChainProvider : public ::Aws::Auth::AWSCr
                                     const ::Aws::String& target_external_id = "");
 
   ::Aws::Auth::AWSCredentials GetAWSCredentials() override;
+  [[nodiscard]] arrow::Result<::Aws::Auth::AWSCredentials> ResolveForRequest() override;
 
   protected:
   void Reload() override;
@@ -71,6 +75,9 @@ class AWS_CORE_API AliyunOIDCAssumeRoleChainProvider : public ::Aws::Auth::AWSCr
   ::Aws::UniquePtr<AliyunRAMSTSClient> m_stsClient;
 
   ::Aws::Auth::AWSCredentials m_credentials;
+  // Guarded by m_reloadLock, like m_credentials.
+  arrow::Status m_lastResolution;
+
   ::Aws::String m_targetRoleArn;
   ::Aws::String m_targetSessionName;
   ::Aws::String m_targetExternalId;

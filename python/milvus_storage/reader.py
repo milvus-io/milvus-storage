@@ -22,6 +22,70 @@ from .exceptions import InvalidArgumentError, ResourceError
 from .properties import Properties
 
 
+def _import_schema_from_c(pa, address):
+    """Small seam for testing cleanup when PyArrow rejects an exported schema."""
+    return pa.Schema._import_from_c(address)
+
+
+class _RecordBatchIterator:
+    """Lazy FFI iterator backing a PyArrow RecordBatchReader."""
+
+    def __init__(self, lib, ffi, handle, schema):
+        self._lib = lib
+        self._ffi = ffi
+        self._handle = handle
+        self._schema = schema
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._handle is None:
+            raise StopIteration
+
+        c_array = self._ffi.new("struct ArrowArray*")
+        result = self._lib.loon_record_batch_reader_read_next(self._handle, c_array)
+        try:
+            check_result(result)
+        except Exception:
+            self.close()
+            raise
+
+        if c_array.release == self._ffi.NULL:
+            self.close()
+            raise StopIteration
+
+        import pyarrow as pa  # type: ignore
+
+        c_schema = self._ffi.new("struct ArrowSchema*")
+        try:
+            self._schema._export_to_c(int(self._ffi.cast("uintptr_t", c_schema)))
+            return pa.RecordBatch._import_from_c(
+                int(self._ffi.cast("uintptr_t", c_array)),
+                int(self._ffi.cast("uintptr_t", c_schema)),
+            )
+        except Exception:
+            # Import normally consumes both release callbacks. If it fails
+            # before doing so, release the native Arrow resources here.
+            if c_array.release != self._ffi.NULL:
+                c_array.release(c_array)
+            if c_schema.release != self._ffi.NULL:
+                c_schema.release(c_schema)
+            self.close()
+            raise
+
+    def close(self):
+        if self._handle is not None:
+            self._lib.loon_record_batch_reader_destroy(self._handle)
+            self._handle = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
 class ChunkMetadataType:
     """
     Chunk metadata type flags.
@@ -468,6 +532,9 @@ class Reader:
         """
         Perform a full table scan with optional filtering.
 
+        Lazy read failures keep their native Loon error code instead of being
+        reduced to ArrowArrayStream's errno-only error surface.
+
         Args:
             predicate: Optional filter expression (e.g., "id > 100")
 
@@ -485,18 +552,35 @@ class Reader:
         if self._closed or self._handle is None:
             raise ResourceError("Reader is closed")
 
-        # Allocate Arrow C Data Interface structure using milvus-storage FFI
-        c_stream = self._ffi.new("struct ArrowArrayStream*")
-
         predicate_bytes = predicate.encode("utf-8") if predicate else self._ffi.NULL
-
-        result = self._lib.loon_get_record_batch_reader(self._handle, predicate_bytes, c_stream)
+        batch_reader_handle = self._ffi.new("LoonRecordBatchReaderHandle*")
+        c_output_schema = self._ffi.new("struct ArrowSchema*")
+        result = self._lib.loon_record_batch_reader_new(
+            self._handle, predicate_bytes, batch_reader_handle, c_output_schema
+        )
         check_result(result)
 
-        # Import to PyArrow
         import pyarrow as pa  # type: ignore
 
-        return pa.RecordBatchReader._import_from_c(int(self._ffi.cast("uintptr_t", c_stream)))
+        try:
+            output_schema = _import_schema_from_c(
+                pa, int(self._ffi.cast("uintptr_t", c_output_schema))
+            )
+        except Exception:
+            if c_output_schema.release != self._ffi.NULL:
+                c_output_schema.release(c_output_schema)
+            self._lib.loon_record_batch_reader_destroy(batch_reader_handle[0])
+            batch_reader_handle[0] = 0
+            raise
+        iterator = _RecordBatchIterator(self._lib, self._ffi, batch_reader_handle[0], output_schema)
+        try:
+            # from_batches is lazy for iterator inputs. Each pull crosses the
+            # Loon FFI boundary and therefore retains the structured error code
+            # instead of reducing it to ArrowArrayStream's EIO/EINVAL result.
+            return pa.RecordBatchReader.from_batches(output_schema, iterator)
+        except Exception:
+            iterator.close()
+            raise
 
     def take(
         self,

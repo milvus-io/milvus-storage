@@ -30,6 +30,7 @@
 #include "milvus-storage/reader.h"
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/format/column_group_reader.h"
+#include "milvus-storage/packed/writer.h"
 
 namespace milvus_storage::test {
 
@@ -94,9 +95,14 @@ TEST_F(FaultInjectionTest, WriterWriteFail) {
   ASSERT_FALSE(status.ok());
   EXPECT_TRUE(status.ToString().find("Injected fault") != std::string::npos);
 
-  // Second write should succeed (FIU_ONETIME exhausted)
-  ASSERT_STATUS_OK(writer->write(test_batch_));
-  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  // A failed writer is terminal and must never be retried in place.
+  EXPECT_TRUE(writer->write(test_batch_).Equals(status));
+
+  // Retry with a new writer, which also generates new file paths.
+  ASSERT_AND_ASSIGN(auto retry_policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
+  auto retry_writer = Writer::create(base_path_ + "/write-retry", schema_, std::move(retry_policy), properties_);
+  ASSERT_STATUS_OK(retry_writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, retry_writer->close());
   EXPECT_EQ(cgs->size(), 1);
 }
 
@@ -124,10 +130,39 @@ TEST_F(FaultInjectionTest, WriterFlushFail) {
   ASSERT_FALSE(status.ok());
   EXPECT_TRUE(status.ToString().find("Injected fault") != std::string::npos);
 
-  // Second flush should succeed
-  ASSERT_STATUS_OK(writer->flush());
-  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  // The failed instance returns its first failure without doing more work.
+  EXPECT_TRUE(writer->flush().Equals(status));
+
+  ASSERT_AND_ASSIGN(auto retry_policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
+  auto retry_writer = Writer::create(base_path_ + "/flush-retry", schema_, std::move(retry_policy), properties_);
+  ASSERT_STATUS_OK(retry_writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, retry_writer->close());
   EXPECT_EQ(cgs->size(), 1);
+}
+
+TEST_F(FaultInjectionTest, PackedWriterCloseFailureIsTerminal) {
+  std::vector<std::string> paths = {base_path_ + "/terminal-packed.parquet"};
+  std::vector<int> all_columns;
+  for (int column = 0; column < schema_->num_fields(); ++column) {
+    all_columns.push_back(column);
+  }
+  std::vector<std::vector<int>> column_groups = {std::move(all_columns)};
+  StorageConfig storage_config;
+  ASSERT_AND_ASSIGN(auto writer, PackedRecordBatchWriter::Make(fs_, paths, schema_, storage_config, column_groups));
+  ASSERT_STATUS_OK(writer->Write(test_batch_));
+
+  FIU_ENABLE_FAULT_ONETIME(FIUKEY_WRITER_FLUSH_FAIL);
+  auto first_close = writer->Close();
+  ASSERT_FALSE(first_close.ok());
+  EXPECT_NE(first_close.ToString().find(FIUKEY_WRITER_FLUSH_FAIL), std::string::npos);
+
+  EXPECT_TRUE(writer->Write(test_batch_).Equals(first_close));
+  EXPECT_TRUE(writer->AddUserMetadata("key", "value").Equals(first_close));
+  auto tell_result = writer->Tell();
+  ASSERT_FALSE(tell_result.ok());
+  EXPECT_TRUE(tell_result.status().Equals(first_close));
+  // Close() returns the stored failure without additional cleanup I/O.
+  EXPECT_TRUE(writer->Close().Equals(first_close));
 }
 
 TEST_F(FaultInjectionTest, WriterCloseFail) {
@@ -226,14 +261,18 @@ TEST_F(FaultInjectionTest, ColumnGroupWriteFail) {
   ASSERT_FALSE(status.ok());
   EXPECT_TRUE(status.ToString().find("Injected fault") != std::string::npos);
 
-  // Second write should succeed
-  ASSERT_STATUS_OK(writer->write(test_batch_));
-  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  // The failed instance cannot be reused.
+  EXPECT_TRUE(writer->write(test_batch_).Equals(status));
+
+  ASSERT_AND_ASSIGN(auto retry_policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
+  auto retry_writer = Writer::create(base_path_ + "/column-group-retry", schema_, std::move(retry_policy), properties_);
+  ASSERT_STATUS_OK(retry_writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, retry_writer->close());
   EXPECT_EQ(cgs->size(), 1);
 }
 
-TEST_F(FaultInjectionTest, RecoveryAfterWriterFault) {
-  // Test that system recovers properly after writer fault injection
+TEST_F(FaultInjectionTest, RecoveryAfterWriterFaultReplacesWriter) {
+  // Recovery creates a new writer and therefore a new set of file paths.
   FIU_ENABLE_FAULT_ONETIME(FIUKEY_WRITER_WRITE_FAIL);
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
@@ -242,9 +281,10 @@ TEST_F(FaultInjectionTest, RecoveryAfterWriterFault) {
   // First write fails
   ASSERT_FALSE(writer->write(test_batch_).ok());
 
-  // But we can continue using the writer
-  ASSERT_STATUS_OK(writer->write(test_batch_));
-  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  ASSERT_AND_ASSIGN(auto retry_policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
+  auto retry_writer = Writer::create(base_path_ + "/recovery2", schema_, std::move(retry_policy), properties_);
+  ASSERT_STATUS_OK(retry_writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, retry_writer->close());
 
   // And data is readable
   auto reader = Reader::create(cgs, schema_, nullptr, properties_);

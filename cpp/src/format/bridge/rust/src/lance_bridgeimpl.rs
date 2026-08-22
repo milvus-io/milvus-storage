@@ -21,8 +21,10 @@ use arrow58::datatypes::SchemaRef;
 use arrow58::error::ArrowError;
 use arrow58::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
 
-use lance::dataset::builder::DatasetBuilder;
+use crate::bridge_error::{BridgeError, BridgeResult as Result};
+use lance::Error as LanceError;
 use lance::dataset::AutoCleanupParams;
+use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::cleanup::{CleanupPolicy, RemovalStats};
 use lance::dataset::fragment::{FileFragment, FragReadConfig, FragmentReader};
 use lance::dataset::optimize::{CompactionOptions as RustCompactionOptions, compact_files};
@@ -31,7 +33,6 @@ use lance::dataset::scanner::Scanner;
 use lance::dataset::statistics::{DataStatistics, DatasetStatisticsExt};
 use lance::dataset::transaction::{Operation, Transaction};
 use lance::dataset::{CommitBuilder, Dataset, ReadParams, Version, WriteMode, WriteParams};
-use lance::{Error as LanceError, Result};
 use lance_encoding::version::LanceFileVersion;
 
 use crate::lance_ffi::{LanceColumnMemoryEstimate, LanceDataStorageFormat};
@@ -71,9 +72,8 @@ const MAX_LANCE_IO_PARALLELISM: usize = 256;
 
 static LANCE_PROVIDER_CACHE: LazyLock<GlobalLruCache<Arc<dyn ObjectStoreProvider>>> =
     LazyLock::new(|| GlobalLruCache::new(CACHE_CAPACITY));
-static LANCE_AZURE_PROVIDER_CACHE: LazyLock<
-    GlobalLruCache<Arc<AzureSasStorageOptionsProvider>>,
-> = LazyLock::new(|| GlobalLruCache::new(CACHE_CAPACITY));
+static LANCE_AZURE_PROVIDER_CACHE: LazyLock<GlobalLruCache<Arc<AzureSasStorageOptionsProvider>>> =
+    LazyLock::new(|| GlobalLruCache::new(CACHE_CAPACITY));
 
 // Keep only an opaque, process-local representation of storage options in the
 // scheduler registry. Two independent hashers make accidental collisions unlikely.
@@ -115,9 +115,9 @@ fn extract_lance_io_parallelism(
         ))
     })?;
     if parallelism > MAX_LANCE_IO_PARALLELISM {
-        return Err(LanceError::invalid_input(format!(
+        return Err(BridgeError::from(LanceError::invalid_input(format!(
             "{LANCE_IO_PARALLELISM_KEY} must be in [0, {MAX_LANCE_IO_PARALLELISM}], got {parallelism}"
-        )));
+        ))));
     }
     Ok((parallelism != 0).then_some(parallelism))
 }
@@ -268,15 +268,6 @@ impl BlockingDataset {
             })
             .clone();
         read_config.with_scan_scheduler(scan_scheduler)
-    }
-
-    pub fn write(
-        reader: impl RecordBatchReader + Send + 'static,
-        uri: &str,
-        params: Option<WriteParams>,
-    ) -> Result<Self> {
-        let inner = TOKIO_RT.block_on(Dataset::write(reader, uri, params))?;
-        Self::new(inner)
     }
 
     pub fn commit(
@@ -519,9 +510,9 @@ fn build_object_store_params(
     if let Some(cloud_provider) = cloud_provider.as_deref()
         && !matches!(cloud_provider, "aws" | "azure" | "gcp" | "aliyun")
     {
-        return Err(LanceError::invalid_input(format!(
+        return Err(BridgeError::from(LanceError::invalid_input(format!(
             "Unsupported Lance cloud provider: {cloud_provider}"
-        )));
+        ))));
     }
 
     // Configure each cloud provider's cross-tenant credential path in one
@@ -535,8 +526,13 @@ fn build_object_store_params(
             let session_name = storage_options
                 .remove("aws_session_name")
                 .unwrap_or_default();
-            let external_id = storage_options.remove("aws_external_id").unwrap_or_default();
-            let region = storage_options.get("aws_region").cloned().unwrap_or_default();
+            let external_id = storage_options
+                .remove("aws_external_id")
+                .unwrap_or_default();
+            let region = storage_options
+                .get("aws_region")
+                .cloned()
+                .unwrap_or_default();
             let refresh_secs_str = storage_options
                 .remove("aws_credential_refresh_secs")
                 .unwrap_or_default();
@@ -584,12 +580,11 @@ fn build_object_store_params(
                     ))?,
                     None => TOKIO_RT.block_on(build_azure_sas_provider(config))?,
                 };
-                store_params.storage_options_accessor = Some(Arc::new(
-                    StorageOptionsAccessor::with_initial_and_provider(
+                store_params.storage_options_accessor =
+                    Some(Arc::new(StorageOptionsAccessor::with_initial_and_provider(
                         storage_options.clone(),
                         provider,
-                    ),
-                ));
+                    )));
             }
         }
         Some("gcp") => {
@@ -764,8 +759,9 @@ impl Iterator for BatchFutStreamReader {
         self.runtime_handle
             .block_on(async { self.stream.next().await })
             .map(|res| {
-                // Convert Lance Error to Arrow Error
-                res.map_err(|e| ArrowError::from_external_error(Box::new(e)))
+                // Preserve typed classification across Arrow's string-only
+                // C stream boundary.
+                res.map_err(|e| ArrowError::from_external_error(Box::new(BridgeError::from(e))))
             })
     }
 }
@@ -808,13 +804,6 @@ impl ToFFIArray for RecordBatch {
     }
 }
 
-pub async fn collect_stream_to_batches(
-    stream: ReadBatchFutStream,
-    concurrency: usize,
-) -> Result<Vec<RecordBatch>> {
-    stream.buffered(concurrency).try_collect::<Vec<_>>().await
-}
-
 #[derive(Clone)]
 pub struct BlockingFragmentReader {
     pub inner: FragmentReader,
@@ -846,7 +835,8 @@ impl BlockingFragmentReader {
             let dv = TOKIO_RT.block_on(fragment.get_deletion_vector())?;
             match dv {
                 Some(dv) => {
-                    let mut dels: Vec<u32> = dv.as_ref().clone().into_iter().map(|i| i as u32).collect();
+                    let mut dels: Vec<u32> =
+                        dv.as_ref().clone().into_iter().map(|i| i as u32).collect();
                     dels.sort();
                     dels
                 }
@@ -855,11 +845,8 @@ impl BlockingFragmentReader {
         };
 
         let meta_schema = fragment.schema();
-        let meta_columns: std::collections::HashSet<_> = meta_schema
-            .fields
-            .iter()
-            .map(|f| f.name.clone())
-            .collect();
+        let meta_columns: std::collections::HashSet<_> =
+            meta_schema.fields.iter().map(|f| f.name.clone()).collect();
 
         let columns: Vec<_> = arrow_projection
             .fields()
@@ -869,7 +856,8 @@ impl BlockingFragmentReader {
             .map(|n| n.clone())
             .collect();
 
-        let fragment_reader = TOKIO_RT.block_on(fragment.open(&meta_schema.project(&columns)?, read_config))?;
+        let fragment_reader =
+            TOKIO_RT.block_on(fragment.open(&meta_schema.project(&columns)?, read_config))?;
 
         Ok(Self {
             inner: fragment_reader,
@@ -900,7 +888,10 @@ impl BlockingFragmentReader {
         if self.sorted_deletions.is_empty() {
             return logical_indices.to_vec();
         }
-        logical_indices.iter().map(|&i| self.logical_to_physical(i)).collect()
+        logical_indices
+            .iter()
+            .map(|&i| self.logical_to_physical(i))
+            .collect()
     }
 
     pub fn number_of_rows(&self) -> Result<u64> {
@@ -926,12 +917,11 @@ impl BlockingFragmentReader {
         out_stream: *mut u8,
     ) -> Result<()> {
         let physical_indices = self.map_logical_indices(indices);
-        let read_batch_fut_stream = TOKIO_RT.block_on(self.inner.take(&physical_indices, batch_size, None));
+        let read_batch_fut_stream =
+            TOKIO_RT.block_on(self.inner.take(&physical_indices, batch_size, None));
 
-        let ffi_stream = read_batch_fut_stream?.to_ffi_stream(
-            Arc::new(self.projection.clone()),
-            TOKIO_RT.handle().clone(),
-        );
+        let ffi_stream = read_batch_fut_stream?
+            .to_ffi_stream(Arc::new(self.projection.clone()), TOKIO_RT.handle().clone());
         let out_stream = out_stream as *mut FFI_ArrowArrayStream;
         // # Safety
         // Arrow C stream interface
@@ -942,10 +932,8 @@ impl BlockingFragmentReader {
     pub unsafe fn read_all_as_stream(&self, batch_size: u32, out_stream: *mut u8) -> Result<()> {
         let read_batch_fut_stream = TOKIO_RT.block_on(self.inner.read_all(batch_size))?;
 
-        let ffi_stream = read_batch_fut_stream.to_ffi_stream(
-            Arc::new(self.projection.clone()),
-            TOKIO_RT.handle().clone(),
-        );
+        let ffi_stream = read_batch_fut_stream
+            .to_ffi_stream(Arc::new(self.projection.clone()), TOKIO_RT.handle().clone());
         let out_stream = out_stream as *mut FFI_ArrowArrayStream;
         unsafe { std::ptr::write(out_stream, ffi_stream) };
         Ok(())
@@ -959,10 +947,8 @@ impl BlockingFragmentReader {
     ) -> Result<()> {
         let read_batch_fut_stream = TOKIO_RT.block_on(self.inner.read_range(range, batch_size))?;
 
-        let ffi_stream = read_batch_fut_stream.to_ffi_stream(
-            Arc::new(self.projection.clone()),
-            TOKIO_RT.handle().clone(),
-        );
+        let ffi_stream = read_batch_fut_stream
+            .to_ffi_stream(Arc::new(self.projection.clone()), TOKIO_RT.handle().clone());
         let out_stream = out_stream as *mut FFI_ArrowArrayStream;
         unsafe { std::ptr::write(out_stream, ffi_stream) };
         Ok(())
@@ -993,17 +979,15 @@ pub unsafe fn open_fragment_reader(
     fragment_id: u64,
     schema_rawptr: *mut u8,
 ) -> Result<Box<BlockingFragmentReader>> {
-    let fragment = dataset
-        .get_fragment(fragment_id)
-        .ok_or_else(|| LanceError::InvalidInput {
+    let fragment = dataset.get_fragment(fragment_id).ok_or_else(|| {
+        BridgeError::from(LanceError::InvalidInput {
             source: format!("Fragment {} not found", fragment_id).into(),
             location: snafu::location!(),
-        })?;
+        })
+    })?;
 
     let ffi_schema = unsafe {
-        arrow58::ffi::FFI_ArrowSchema::from_raw(
-            schema_rawptr as *mut arrow58::ffi::FFI_ArrowSchema,
-        )
+        arrow58::ffi::FFI_ArrowSchema::from_raw(schema_rawptr as *mut arrow58::ffi::FFI_ArrowSchema)
     };
     let arrow_schema =
         ArrowSchema::try_from(&ffi_schema).map_err(|e| LanceError::InvalidInput {
@@ -1025,18 +1009,23 @@ pub fn dataset_delete_rows(dataset: &mut BlockingDataset, predicate: &str) -> Re
 }
 
 /// Get sorted deletion positions for a fragment. Returns empty vec if no deletions.
-pub fn get_fragment_deletion_positions(dataset: &BlockingDataset, fragment_id: u64) -> Result<Vec<u64>> {
-    let fragment_meta = dataset
-        .get_fragment(fragment_id)
-        .ok_or_else(|| LanceError::InvalidInput {
-            source: format!("Fragment {} not found", fragment_id).into(),
-            location: snafu::location!(),
-        })?;
+pub fn get_fragment_deletion_positions(
+    dataset: &BlockingDataset,
+    fragment_id: u64,
+) -> Result<Vec<u64>> {
+    let fragment_meta =
+        dataset
+            .get_fragment(fragment_id)
+            .ok_or_else(|| LanceError::InvalidInput {
+                source: format!("Fragment {} not found", fragment_id).into(),
+                location: snafu::location!(),
+            })?;
     let fragment = FileFragment::new(Arc::new(dataset.inner.clone()), fragment_meta);
     let dv = TOKIO_RT.block_on(fragment.get_deletion_vector())?;
     match dv {
         Some(dv) => {
-            let mut positions: Vec<u64> = dv.as_ref().clone().into_iter().map(|i| i as u64).collect();
+            let mut positions: Vec<u64> =
+                dv.as_ref().clone().into_iter().map(|i| i as u64).collect();
             positions.sort();
             Ok(positions)
         }
@@ -1045,12 +1034,12 @@ pub fn get_fragment_deletion_positions(dataset: &BlockingDataset, fragment_id: u
 }
 
 pub fn get_fragment_physical_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64> {
-    let fragment = dataset
-        .get_fragment(fragment_id)
-        .ok_or_else(|| LanceError::InvalidInput {
+    let fragment = dataset.get_fragment(fragment_id).ok_or_else(|| {
+        BridgeError::from(LanceError::InvalidInput {
             source: format!("Fragment {} not found", fragment_id).into(),
             location: snafu::location!(),
-        })?;
+        })
+    })?;
     fragment
         .physical_rows
         .map(|n| n as u64)
@@ -1058,6 +1047,7 @@ pub fn get_fragment_physical_row_count(dataset: &BlockingDataset, fragment_id: u
             source: format!("Fragment {} has no physical_rows metadata", fragment_id).into(),
             location: snafu::location!(),
         })
+        .map_err(BridgeError::from)
 }
 
 pub fn get_fragment_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64> {
@@ -1074,6 +1064,7 @@ pub fn get_fragment_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Re
             source: format!("Fragment {} has no row count metadata", fragment_id).into(),
             location: snafu::location!(),
         })
+        .map_err(BridgeError::from)
 }
 
 fn estimate_fragment_columns(
@@ -1102,13 +1093,15 @@ fn estimate_fragment_columns(
         .fragment_read_config(FragReadConfig::default())
         .scan_scheduler
         .expect("fragment_read_config always installs a scheduler");
-    TOKIO_RT.block_on(
-        crate::lance_memory_estimator::estimate_fragment_column_memory(
-            &dataset.inner,
-            &fragment,
-            scheduler,
-        ),
-    )
+    TOKIO_RT
+        .block_on(
+            crate::lance_memory_estimator::estimate_fragment_column_memory(
+                &dataset.inner,
+                &fragment,
+                scheduler,
+            ),
+        )
+        .map_err(BridgeError::from)
 }
 
 /// Estimate each top-level column's decoded Arrow buffer size in schema order.
@@ -1125,8 +1118,7 @@ pub fn estimate_fragment_column_memory(
 /// Estimate the decoded Arrow buffer size of a fragment without reading data pages.
 ///
 /// This compatibility API is the saturating sum of the per-column estimates.
-/// Errors are returned through cxx so the C++ best-effort wrapper can fall back
-/// to zero.
+/// Errors are returned through cxx without a value fallback.
 pub fn estimate_fragment_memory(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64> {
     Ok(estimate_fragment_columns(dataset, fragment_id)?
         .into_iter()
@@ -1139,12 +1131,13 @@ pub unsafe fn get_fragment_schema(
     fragment_id: u64,
     out_schema_ptr: *mut u8,
 ) -> Result<()> {
-    let fragment_meta = dataset
-        .get_fragment(fragment_id)
-        .ok_or_else(|| LanceError::InvalidInput {
-            source: format!("Fragment {} not found", fragment_id).into(),
-            location: snafu::location!(),
-        })?;
+    let fragment_meta =
+        dataset
+            .get_fragment(fragment_id)
+            .ok_or_else(|| LanceError::InvalidInput {
+                source: format!("Fragment {} not found", fragment_id).into(),
+                location: snafu::location!(),
+            })?;
 
     // In Lance 7, FileFragment::schema() returns the current dataset schema. It
     // includes evolved nullable fields that may not be physically stored in this
@@ -1154,11 +1147,12 @@ pub unsafe fn get_fragment_schema(
     let lance_schema = file_fragment.schema();
     let arrow_schema: ArrowSchema = lance_schema.into();
 
-    let ffi_schema = arrow58::ffi::FFI_ArrowSchema::try_from(&arrow_schema)
-        .map_err(|e| LanceError::InvalidInput {
+    let ffi_schema = arrow58::ffi::FFI_ArrowSchema::try_from(&arrow_schema).map_err(|e| {
+        LanceError::InvalidInput {
             source: format!("Failed to export fragment schema: {}", e).into(),
             location: snafu::location!(),
-        })?;
+        }
+    })?;
 
     let out_ptr = out_schema_ptr as *mut arrow58::ffi::FFI_ArrowSchema;
     unsafe { std::ptr::write(out_ptr, ffi_schema) };
@@ -1220,9 +1214,7 @@ pub unsafe fn create_scanner(
     batch_size: u32,
 ) -> Result<Box<BlockingScanner>> {
     let ffi_schema = unsafe {
-        arrow58::ffi::FFI_ArrowSchema::from_raw(
-            schema_ptr as *mut arrow58::ffi::FFI_ArrowSchema,
-        )
+        arrow58::ffi::FFI_ArrowSchema::from_raw(schema_ptr as *mut arrow58::ffi::FFI_ArrowSchema)
     };
     let arrow_schema =
         ArrowSchema::try_from(&ffi_schema).map_err(|e| LanceError::InvalidInput {
@@ -1253,9 +1245,7 @@ pub unsafe fn dataset_take(
     out_stream: *mut u8,
 ) -> Result<()> {
     let ffi_schema = unsafe {
-        arrow58::ffi::FFI_ArrowSchema::from_raw(
-            schema_ptr as *mut arrow58::ffi::FFI_ArrowSchema,
-        )
+        arrow58::ffi::FFI_ArrowSchema::from_raw(schema_ptr as *mut arrow58::ffi::FFI_ArrowSchema)
     };
     let arrow_schema =
         ArrowSchema::try_from(&ffi_schema).map_err(|e| LanceError::InvalidInput {

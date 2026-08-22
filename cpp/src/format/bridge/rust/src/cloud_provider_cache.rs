@@ -15,7 +15,8 @@ impl<V: Clone> GlobalLruCache<V> {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
             entries: Mutex::new(LruCache::new(
-                NonZeroUsize::new(capacity).expect("cloud provider cache capacity must be non-zero"),
+                NonZeroUsize::new(capacity)
+                    .expect("cloud provider cache capacity must be non-zero"),
             )),
         }
     }

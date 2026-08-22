@@ -27,6 +27,10 @@
 #include <google/cloud/internal/unified_rest_credentials.h>
 #include <google/cloud/options.h>
 
+#include <arrow/util/string_builder.h>
+
+#include "milvus-storage/common/extend_status.h"
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/s3_auth_signer.h"
@@ -55,27 +59,64 @@ std::shared_ptr<google::cloud::oauth2_internal::Credentials> MakeInternalCredent
 // Shared base for both OAuth2-backed providers (VM IAM and Impersonation).
 // Wraps a google-cloud-cpp oauth2_internal::Credentials and delegates to its
 // built-in token caching + refresh logic.
+// google-cloud-cpp reports why a token could not be minted. Return that cause
+// directly to the delegator before it puts a request on the wire. Without
+// this, "the metadata server did not answer" and "this identity lacks
+// roles/iam.serviceAccountTokenCreator" both arrive as a GCS 403 with no hint
+// which it was.
+//
+// Classified, not collapsed. The point is not to make google-cloud-cpp retry
+// again -- it has its own internal behaviour and by the time we see a Status
+// that is spent -- but to let the layer above re-run the whole operation later.
+// A single non-retryable code would make a metadata server that was restarting
+// fail a query exactly as permanently as a missing IAM binding.
+arrow::Status ClassifyTokenFailure(const google::cloud::Status& status) {
+  using google::cloud::StatusCode;
+  const auto what = arrow::util::StringBuilder("GCP OAuth2 token fetch failed: ", status.message());
+  switch (status.code()) {
+    case StatusCode::kUnavailable:
+    case StatusCode::kAborted:
+    case StatusCode::kInternal:
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageTransientService, what);
+    case StatusCode::kDeadlineExceeded:
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageTransientTimeout, what);
+    case StatusCode::kResourceExhausted:
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageTransientThrottling, what);
+    case StatusCode::kUnauthenticated:
+    case StatusCode::kPermissionDenied:
+      // The identity exists and was refused. An operator changes a binding.
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageAccessDenied, what);
+    case StatusCode::kNotFound:
+    case StatusCode::kFailedPrecondition:
+      return MakeCredentialConfigError(what);
+    case StatusCode::kInvalidArgument:
+      // NOT precise, and deliberately not called an access decision.
+      // google-cloud-cpp's generic fallback maps the whole 4xx range to
+      // kInvalidArgument (rest_response.h), so a 429 or a 408 lands here
+      // alongside a genuinely malformed request whenever the response body is
+      // not standard Google error JSON. When it IS standard, 429 arrives as
+      // kResourceExhausted and 401/403 as kUnauthenticated/kPermissionDenied
+      // and never reach this arm. Left unclassified rather than guessed.
+      return MakeCredentialResponseError(what);
+    default:
+      return MakeCredentialResponseError(what);
+  }
+}
+
 class OAuth2BearerProvider : public GcpCredentialProvider {
   public:
-  std::optional<std::pair<std::string, std::string>> AuthorizationHeader() override {
+  arrow::Result<std::optional<std::pair<std::string, std::string>>> AuthorizationHeader() override {
     auto header = google::cloud::oauth2_internal::AuthorizationHeader(*credentials_);
     if (!header.ok()) {
-      // On token fetch failure, return nullopt. The factory will issue the
-      // request without Authorization and the server will return 401/403,
-      // surfacing the auth failure at the call site via the usual AWS SDK path.
-      // Log the root cause here so operators can correlate the GCS 401/403
-      // with the underlying OAuth2/IAM error (e.g. missing
-      // roles/iam.serviceAccountTokenCreator, metadata server unreachable).
-      LOG_STORAGE_WARNING_ << "GCP OAuth2 token fetch failed: " << header.status().message()
-                           << "; request will proceed without Authorization, server will reply 401/403";
-      return std::nullopt;
+      LOG_STORAGE_WARNING_ << "GCP OAuth2 token fetch failed: " << header.status().message();
+      return ClassifyTokenFailure(header.status());
     }
     // AuthorizationHeader is called for every GCS request. Confirm that the
     // provider can obtain a token once without logging every object operation.
     std::call_once(success_log_once_, [this] {
       LOG_STORAGE_DEBUG_ << "GCP OAuth2 token obtained successfully: credential_type=" << credential_type_;
     });
-    return *header;
+    return std::optional<std::pair<std::string, std::string>>(std::move(*header));
   }
 
   arrow::Status MaybeSignConditionalWrite(const std::shared_ptr<Aws::Http::HttpRequest>&) override {
@@ -131,7 +172,9 @@ class HmacProvider : public GcpCredentialProvider {
   HmacProvider(std::string access_key, std::string secret_key)
       : access_key_(std::move(access_key)), secret_key_(std::move(secret_key)) {}
 
-  std::optional<std::pair<std::string, std::string>> AuthorizationHeader() override { return std::nullopt; }
+  arrow::Result<std::optional<std::pair<std::string, std::string>>> AuthorizationHeader() override {
+    return std::optional<std::pair<std::string, std::string>>{};
+  }
 
   arrow::Status MaybeSignConditionalWrite(const std::shared_ptr<Aws::Http::HttpRequest>& request) override {
     // Only re-sign conditional writes; GCS rejects SigV4 Authorization for
@@ -177,6 +220,15 @@ class HmacProvider : public GcpCredentialProvider {
 };
 
 }  // namespace
+
+arrow::Status ApplyGcpAuthorizationHeader(const std::shared_ptr<GcpCredentialProvider>& provider,
+                                          const std::shared_ptr<Aws::Http::HttpRequest>& request) {
+  ARROW_ASSIGN_OR_RAISE(auto header, provider->AuthorizationHeader());
+  if (header.has_value()) {
+    request->SetHeaderValue(header->first.c_str(), header->second.c_str());
+  }
+  return arrow::Status::OK();
+}
 
 arrow::Result<std::shared_ptr<GcpCredentialProvider>> BuildGcpProviderFromConfig(const ArrowFileSystemConfig& config) {
   if (config.use_iam && !config.gcp_target_service_account.empty()) {

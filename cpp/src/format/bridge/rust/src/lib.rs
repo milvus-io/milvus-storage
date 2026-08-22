@@ -15,6 +15,8 @@
 mod aliyun_oss_provider;
 mod aws_arn_provider;
 mod azure_sas_provider;
+mod bridge_error;
+use bridge_error::{clear_last_bridge_error, record_bridge_error, take_last_bridge_error};
 mod cloud_provider_cache;
 mod gcp_impersonation;
 mod iceberg_bridgeimpl;
@@ -136,10 +138,8 @@ pub mod lance_ffi {
             dataset: &BlockingDataset,
             fragment_id: u64,
         ) -> Result<Vec<LanceColumnMemoryEstimate>>;
-        pub fn estimate_fragment_memory(
-            dataset: &BlockingDataset,
-            fragment_id: u64,
-        ) -> Result<u64>;
+        pub fn estimate_fragment_memory(dataset: &BlockingDataset, fragment_id: u64)
+        -> Result<u64>;
         pub unsafe fn get_fragment_schema(
             dataset: &BlockingDataset,
             fragment_id: u64,
@@ -273,6 +273,22 @@ pub mod paimon_test_ffi {
             file_format: &str,
             dimension: u32,
         ) -> Result<PaimonTestTableInfo>;
+    }
+}
+
+// The one classified-error channel shared by every bridge. See
+// bridge_error.rs for why a side channel replaces the message marker.
+#[cxx::bridge(namespace = "milvus_storage::bridge::ffi")]
+pub mod bridge_ffi {
+    struct BridgeErrorInfo {
+        code: i32,
+        message: String,
+    }
+
+    extern "Rust" {
+        fn clear_last_bridge_error();
+        fn take_last_bridge_error() -> BridgeErrorInfo;
+        fn record_bridge_error(code: i32, message: String);
     }
 }
 

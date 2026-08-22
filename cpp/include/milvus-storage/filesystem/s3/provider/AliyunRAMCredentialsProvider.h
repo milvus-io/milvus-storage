@@ -20,6 +20,7 @@
 #include <aws/core/utils/memory/stl/AWSString.h>
 
 #include "AliyunRAMSTSClient.h"
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"
 
 namespace milvus_storage {
 
@@ -33,13 +34,16 @@ namespace milvus_storage {
 // ALIYUN_ROLE_ARN_AUTH_MODE=ram at the dispatch layer; the
 // existing OIDC (AssumeRoleWithOIDC) provider is used otherwise so OIDC
 // deployments are unaffected.
-class AWS_CORE_API AliyunRAMCredentialsProvider : public ::Aws::Auth::AWSCredentialsProvider {
+class AWS_CORE_API AliyunRAMCredentialsProvider : public ::Aws::Auth::AWSCredentialsProvider,
+                                                  public RequestCredentialsResolver {
   public:
   AliyunRAMCredentialsProvider(const ::Aws::String& role_arn,
                                const ::Aws::String& role_session_name,
                                const ::Aws::String& external_id = "");
 
   ::Aws::Auth::AWSCredentials GetAWSCredentials() override;
+
+  [[nodiscard]] arrow::Result<::Aws::Auth::AWSCredentials> ResolveForRequest() override;
 
   protected:
   void Reload() override;
@@ -50,6 +54,8 @@ class AWS_CORE_API AliyunRAMCredentialsProvider : public ::Aws::Auth::AWSCredent
 
   ::Aws::UniquePtr<AliyunRAMSTSClient> m_stsClient;
   ::Aws::Auth::AWSCredentials m_credentials;
+  // Guarded by m_reloadLock, like m_credentials.
+  arrow::Status m_lastResolution;
   ::Aws::String m_roleArn;
   ::Aws::String m_roleSessionName;
   ::Aws::String m_externalId;

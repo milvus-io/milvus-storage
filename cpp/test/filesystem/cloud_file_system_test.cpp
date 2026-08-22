@@ -148,7 +148,7 @@ TEST_F(CloudFsTest, ConditionalWriteAzure) {
     ASSERT_FALSE(result.ok());
     auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
     ASSERT_NE(detail, nullptr);
-    ASSERT_EQ(detail->code(), ExtendStatusCode::AwsErrorPreConditionFailed);
+    ASSERT_EQ(detail->code(), ExtendStatusCode::StoragePreConditionFailed);
   }
 
   // Original content should be preserved

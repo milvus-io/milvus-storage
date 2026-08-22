@@ -14,14 +14,24 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <memory>
+#include <new>
+#include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include <arrow/result.h>
+#include <arrow/status.h>
+#include <folly/futures/Future.h>
+#include <folly/futures/Promise.h>
 
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/properties.h"
 
 namespace milvus_storage::api {
@@ -34,6 +44,116 @@ enum class AsyncTaskSplitStrategy : size_t {
   kSplitToParallelism = 1,
   kSplitAll = 2,
 };
+
+// Collect Arrow Result futures in input order. The returned future completes
+// as soon as any child reports an error; already-started children remain owned
+// by the drain branch and may finish in the background. Exceptional child
+// futures are classified explicitly at this library boundary.
+template <typename T>
+folly::SemiFuture<arrow::Result<std::vector<T>>> CollectAllResultsFailFast(
+    std::vector<folly::SemiFuture<arrow::Result<T>>> futures,
+    std::string_view operation = "asynchronous reader fan-in") {
+  using ItemResult = arrow::Result<T>;
+  using OutputResult = arrow::Result<std::vector<T>>;
+
+  if (futures.empty()) {
+    return folly::makeSemiFuture(OutputResult(std::vector<T>{}));
+  }
+
+  struct FirstFailure {
+    explicit FirstFailure(std::string operation) : operation(std::move(operation)) {}
+
+    std::atomic<bool> fulfilled{false};
+    folly::Promise<OutputResult> promise;
+    std::string operation;
+
+    // Once a child has failed, formatting and publishing that failure are part
+    // of the fail-fast contract. They must not throw back into Folly before the
+    // promise is fulfilled: Folly would store that exception on the observed
+    // child and a blocked sibling could then keep both fan-in branches pending
+    // forever. A real allocation failure in either operation is therefore
+    // fail-stop rather than recoverable.
+    arrow::Status from_exception(const folly::exception_wrapper& exception) const noexcept {
+      return arrow::Status::UnknownError(operation,
+                                         " child future raised a C++ exception: ", exception.what().toStdString());
+    }
+
+    void set(const arrow::Status& status) noexcept {
+      if (!fulfilled.exchange(true, std::memory_order_relaxed)) {
+        promise.setValue(OutputResult(status));
+      }
+    }
+  };
+
+  auto first_failure = std::make_shared<FirstFailure>(std::string(operation));
+  auto first_failure_future = first_failure->promise.getSemiFuture();
+
+  std::vector<folly::SemiFuture<ItemResult>> observed;
+  observed.reserve(futures.size());
+  for (auto& future : futures) {
+    observed.push_back(std::move(future).defer([first_failure](folly::Try<ItemResult>&& child_try) -> ItemResult {
+      if (child_try.hasException()) {
+        // Keep our own exception handle. Publishing first_failure may run the
+        // downstream collectAny continuation inline and release the observed
+        // child's future state re-entrantly.
+        auto exception = child_try.exception();
+        if (exception.template is_compatible_with<std::bad_alloc>()) {
+          // OOM cannot safely allocate either an Arrow status or the promise
+          // state needed to publish one. Fail-stop is preferable to returning
+          // into Folly with first_failure unresolved while another child can
+          // remain pending forever.
+          std::terminate();
+        }
+
+        ItemResult child_result(first_failure->from_exception(exception));
+        first_failure->set(child_result.status());
+        return child_result;
+      }
+
+      ItemResult child_result = std::move(child_try.value());
+      if (!child_result.ok()) {
+        first_failure->set(child_result.status());
+      }
+      return child_result;
+    }));
+  }
+
+  auto all_success =
+      folly::collectAll(std::move(observed))
+          .deferValue([first_failure](std::vector<folly::Try<ItemResult>>&& child_tries) -> OutputResult {
+            std::vector<T> values;
+            values.reserve(child_tries.size());
+            for (auto& child_try : child_tries) {
+              if (child_try.hasException()) {
+                if (child_try.exception().template is_compatible_with<std::bad_alloc>()) {
+                  std::terminate();
+                }
+                return first_failure->from_exception(child_try.exception());
+              }
+              auto child_result = std::move(child_try.value());
+              if (!child_result.ok()) {
+                return child_result.status();
+              }
+              values.push_back(std::move(child_result).ValueUnsafe());
+            }
+            return values;
+          });
+
+  std::vector<folly::SemiFuture<OutputResult>> completion_futures;
+  completion_futures.reserve(2);
+  completion_futures.push_back(std::move(first_failure_future));
+  completion_futures.push_back(std::move(all_success));
+  return folly::collectAny(std::move(completion_futures))
+      .deferValue([first_failure](std::pair<size_t, folly::Try<OutputResult>>&& first) -> OutputResult {
+        if (first.second.hasException()) {
+          if (first.second.exception().template is_compatible_with<std::bad_alloc>()) {
+            std::terminate();
+          }
+          return first_failure->from_exception(first.second.exception());
+        }
+        return std::move(first.second.value());
+      });
+}
 
 // Resolve reader.async.task_split_strategy; unknown values use the default
 // split-to-parallelism policy.

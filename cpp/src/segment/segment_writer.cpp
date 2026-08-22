@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "milvus-storage/format/format_writer.h"
 #include "milvus-storage/segment/segment_writer.h"
+
+#include "milvus-storage/common/extend_status.h"
 
 #include <arrow/array/builder_binary.h>
 #include <arrow/type.h>
@@ -25,6 +28,7 @@
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/layout.h"
+#include "milvus-storage/common/writer_status.h"
 #include "milvus-storage/lob_column/lob_column_reader.h"
 #include "milvus-storage/lob_column/lob_column_writer.h"
 #include "milvus-storage/lob_column/lob_reference.h"
@@ -48,25 +52,20 @@ class SegmentWriterImpl : public SegmentWriter {
         closed_(false),
         written_rows_(0) {}
 
-  ~SegmentWriterImpl() override {
-    if (!closed_) {
-      // best effort abort, ignore errors in destructor
-      (void)Abort();
-    }
-  }
+  ~SegmentWriterImpl() override = default;
 
   arrow::Status Init() {
     // create LobColumnWriters for each LOB column (TEXT or BINARY)
     for (int col_idx : lob_column_indices_) {
       auto field = original_schema_->field(col_idx);
-      auto field_id = GetFieldId(field);
+      ARROW_ASSIGN_OR_RAISE(auto field_id, TryGetFieldId(field));
       if (field_id < 0) {
         return arrow::Status::Invalid("LOB column must have a valid field_id in metadata");
       }
 
       auto it = config_.lob_columns.find(field_id);
       if (it == config_.lob_columns.end()) {
-        return arrow::Status::Invalid("LOB column config not found for field_id: " + std::to_string(field_id));
+        return arrow::Status::Invalid("LOB column config not found for field_id: ", field_id);
       }
 
       ARROW_ASSIGN_OR_RAISE(auto writer, lob_column::CreateLobColumnWriter(fs_, it->second));
@@ -90,8 +89,76 @@ class SegmentWriterImpl : public SegmentWriter {
   }
 
   arrow::Status Write(const std::shared_ptr<arrow::RecordBatch>& batch) override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
+    return writer_status_.Fail(WriteImpl(batch));
+  }
+
+  arrow::Status Flush() override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
+    return writer_status_.Fail(FlushImpl());
+  }
+
+  arrow::Result<SegmentWriteOutput> Close() override {
+    // Abandon on both failure paths; see FormatWriter::Close in format_writer.h.
+    if (auto first_failure = writer_status_.Check(); !first_failure.ok()) {
+      Abort();
+      return first_failure;
+    }
+    auto result = CloseImpl();
+    if (!result.ok()) {
+      auto status = writer_status_.Fail(result.status());
+      Abort();
+      return status;
+    }
+    return result;
+  }
+
+  void Abort() noexcept override {
+    // The closed_ check comes FIRST, before BeginDiscard(). Abort() after a
+    // successful Close() has to be a no-op in every respect -- that is what
+    // lets a caller (or a scope guard) abandon unconditionally without first
+    // working out which of the two verbs it owes. Discarding here would flip a
+    // writer that finished cleanly to Cancelled.
     if (closed_) {
-      return arrow::Status::Invalid("writer is closed");
+      return;
+    }
+    writer_status_.BeginDiscard();
+
+    // abort the column group writers first: they are the ones holding storage
+    // the store keeps charging for (an S3 multipart upload's parts do not even
+    // appear in a bucket listing). LOB files are ordinary objects, so they can
+    // wait a line.
+    if (writer_ != nullptr) {
+      writer_->abort();
+    }
+
+    // abort all TEXT column writers (they will delete their LOB files)
+    for (auto& [col_idx, writer] : lob_writers_) {
+      writer->Abort();
+    }
+
+    // close LOB readers (rewrite mode)
+    for (auto& [col_idx, reader] : lob_readers_) {
+      AbandonQuietly("a LOB reader", [&] { (void)reader->Close(); });
+    }
+
+    closed_ = true;
+  }
+
+  int64_t WrittenRows() const override { return written_rows_; }
+
+  SegmentWriterStats GetStats() const override { return stats_; }
+
+  std::shared_ptr<arrow::Schema> GetStorageSchema() const override { return storage_schema_; }
+
+  std::shared_ptr<arrow::Schema> GetOriginalSchema() const override { return original_schema_; }
+
+  bool IsClosed() const override { return closed_; }
+
+  private:
+  arrow::Status WriteImpl(const std::shared_ptr<arrow::RecordBatch>& batch) {
+    if (closed_) {
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "writer is closed");
     }
 
     if (!batch || batch->num_rows() == 0) {
@@ -153,9 +220,9 @@ class SegmentWriterImpl : public SegmentWriter {
     return arrow::Status::OK();
   }
 
-  arrow::Status Flush() override {
+  arrow::Status FlushImpl() {
     if (closed_) {
-      return arrow::Status::Invalid("writer is closed");
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "writer is closed");
     }
 
     // flush all TEXT column writers
@@ -169,13 +236,13 @@ class SegmentWriterImpl : public SegmentWriter {
     return arrow::Status::OK();
   }
 
-  arrow::Result<SegmentWriteOutput> Close() override {
+  arrow::Result<SegmentWriteOutput> CloseImpl() {
     if (closed_) {
-      return arrow::Status::Invalid("writer is already closed");
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "writer is already closed");
     }
 
     // flush pending data
-    ARROW_RETURN_NOT_OK(Flush());
+    ARROW_RETURN_NOT_OK(FlushImpl());
 
     // close all TEXT column writers and collect LOB file results
     for (auto& [col_idx, writer] : lob_writers_) {
@@ -199,7 +266,7 @@ class SegmentWriterImpl : public SegmentWriter {
     std::vector<api::LobFileInfo> lob_file_infos;
     for (const auto& [col_idx, lob_files] : lob_file_results_) {
       auto field = original_schema_->field(col_idx);
-      auto field_id = GetFieldId(field);
+      ARROW_ASSIGN_OR_RAISE(auto field_id, TryGetFieldId(field));
 
       for (const auto& lob_result : lob_files) {
         api::LobFileInfo lob_info;
@@ -222,37 +289,6 @@ class SegmentWriterImpl : public SegmentWriter {
     return output;
   }
 
-  arrow::Status Abort() override {
-    if (closed_) {
-      return arrow::Status::OK();
-    }
-
-    // abort all TEXT column writers (they will delete their LOB files)
-    for (auto& [col_idx, writer] : lob_writers_) {
-      // best effort abort, continue on error
-      (void)writer->Abort();
-    }
-
-    // close LOB readers (rewrite mode)
-    for (auto& [col_idx, reader] : lob_readers_) {
-      (void)reader->Close();
-    }
-
-    closed_ = true;
-    return arrow::Status::OK();
-  }
-
-  int64_t WrittenRows() const override { return written_rows_; }
-
-  SegmentWriterStats GetStats() const override { return stats_; }
-
-  std::shared_ptr<arrow::Schema> GetStorageSchema() const override { return storage_schema_; }
-
-  std::shared_ptr<arrow::Schema> GetOriginalSchema() const override { return original_schema_; }
-
-  bool IsClosed() const override { return closed_; }
-
-  private:
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> original_schema_;
   std::shared_ptr<arrow::Schema> storage_schema_;
@@ -261,6 +297,7 @@ class SegmentWriterImpl : public SegmentWriter {
 
   bool closed_;
   int64_t written_rows_;
+  WriterStatus writer_status_;
 
   // LOB column writers (TEXT or BINARY), keyed by column index
   std::unordered_map<int, std::unique_ptr<lob_column::LobColumnWriter>> lob_writers_;
@@ -286,11 +323,11 @@ arrow::Result<std::unique_ptr<SegmentWriter>> SegmentWriter::Create(std::shared_
                                                                     const std::shared_ptr<arrow::Schema>& schema,
                                                                     const SegmentWriterConfig& config) {
   if (!fs) {
-    return arrow::Status::Invalid("filesystem is null");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "filesystem is null");
   }
 
   if (!schema) {
-    return arrow::Status::Invalid("schema is null");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "schema is null");
   }
 
   if (config.segment_path.empty()) {
@@ -299,7 +336,11 @@ arrow::Result<std::unique_ptr<SegmentWriter>> SegmentWriter::Create(std::shared_
 
   // validate required properties for ColumnGroupPolicy
   if (config.properties.find(PROPERTY_WRITER_POLICY) == config.properties.end()) {
-    return arrow::Status::Invalid("properties must contain " + std::string(PROPERTY_WRITER_POLICY));
+    // A missing property is deployment configuration, not a broken invariant:
+    // StorageConfigInvalid is the code an ownership-aware entry point can
+    // re-tag to the user when the properties came from an external table.
+    return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid, "properties must contain ",
+                              PROPERTY_WRITER_POLICY);
   }
 
   // identify LOB columns (TEXT or BINARY) and build storage schema
@@ -308,11 +349,12 @@ arrow::Result<std::unique_ptr<SegmentWriter>> SegmentWriter::Create(std::shared_
 
   for (int i = 0; i < schema->num_fields(); i++) {
     auto field = schema->field(i);
+    ARROW_ASSIGN_OR_RAISE(auto field_id, TryGetFieldId(field));
 
-    if (config.lob_columns.count(GetFieldId(field)) > 0) {
+    if (config.lob_columns.count(field_id) > 0) {
       // LOB column: storage always uses binary for LOBReferences
       // (input may be utf8 for TEXT or binary for BINARY LOB)
-      auto storage_field = arrow::field(field->name(), arrow::binary(), field->nullable(), field->metadata()->Copy());
+      auto storage_field = arrow::field(field->name(), arrow::binary(), field->nullable(), field->metadata());
       storage_fields.push_back(storage_field);
       lob_column_indices.push_back(i);
     } else {

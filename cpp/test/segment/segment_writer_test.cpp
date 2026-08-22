@@ -26,6 +26,7 @@
 
 #include "test_env.h"
 #include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/segment/segment_writer.h"
 #include "milvus-storage/segment/segment_reader.h"
 #include "milvus-storage/transaction/transaction.h"
@@ -160,22 +161,46 @@ TEST_F(SegmentWriterTest, CreateWriterInvalidConfig) {
   // null filesystem
   auto result1 = SegmentWriter::Create(nullptr, schema_, config_);
   ASSERT_FALSE(result1.ok());
+  EXPECT_TRUE(result1.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result1.status()), nullptr);
 
   // null schema
   auto result2 = SegmentWriter::Create(fs_, nullptr, config_);
   ASSERT_FALSE(result2.ok());
+  EXPECT_TRUE(result2.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result2.status()), nullptr);
 
   // empty segment path
   SegmentWriterConfig invalid_config = config_;
   invalid_config.segment_path = "";
   auto result4 = SegmentWriter::Create(fs_, schema_, invalid_config);
   ASSERT_FALSE(result4.ok());
+  EXPECT_TRUE(result4.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result4.status()), nullptr);
 
   // missing writer policy
   invalid_config = config_;
   invalid_config.properties.erase(PROPERTY_WRITER_POLICY);
   auto result5 = SegmentWriter::Create(fs_, schema_, invalid_config);
   ASSERT_FALSE(result5.ok());
+}
+
+TEST_F(SegmentWriterTest, BatchSchemaMismatchIsCallerInvalidWithoutInternalDetail) {
+  ASSERT_AND_ASSIGN(auto writer, SegmentWriter::Create(fs_, schema_, config_));
+  ASSERT_AND_ASSIGN(auto batch, CreateTestBatch(1));
+
+  auto mismatched_schema = arrow::schema({
+      arrow::field("different_id", arrow::int64(), false,
+                   arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"})),
+      schema_->field(1),
+      schema_->field(2),
+  });
+  auto mismatched_batch = arrow::RecordBatch::Make(mismatched_schema, batch->num_rows(), batch->columns());
+
+  auto status = writer->Write(mismatched_batch);
+  EXPECT_TRUE(status.IsInvalid()) << status.ToString();
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
+  writer->Abort();
 }
 
 // test writing single batch
@@ -450,8 +475,7 @@ TEST_F(SegmentWriterTest, WriterAbort) {
   ASSERT_STATUS_OK(writer->Write(batch));
 
   // abort instead of close
-  auto abort_status = writer->Abort();
-  ASSERT_TRUE(abort_status.ok());
+  writer->Abort();
   ASSERT_TRUE(writer->IsClosed());
 
   // verify no manifest was created (transaction was not committed)

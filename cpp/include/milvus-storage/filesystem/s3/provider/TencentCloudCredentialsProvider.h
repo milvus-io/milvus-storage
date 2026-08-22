@@ -24,6 +24,8 @@
 #include <aws/core/auth/AWSCredentialsProvider.h>
 #include "TencentCloudSTSClient.h"
 
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"
+
 namespace milvus_storage {
 
 /**
@@ -31,7 +33,8 @@ namespace milvus_storage {
  * Note that STS accepts request with protocol of queryxml. Calling GetAWSCredentials() will trigger (if expired)
  * a query request using AWSHttpResourceClient under the hood.
  */
-class AWS_CORE_API TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider : public Aws::Auth::AWSCredentialsProvider {
+class AWS_CORE_API TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider : public Aws::Auth::AWSCredentialsProvider,
+                                                                             public RequestCredentialsResolver {
   public:
   TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider();
 
@@ -39,6 +42,7 @@ class AWS_CORE_API TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider : pub
    * Retrieves the credentials if found, otherwise returns empty credential set.
    */
   Aws::Auth::AWSCredentials GetAWSCredentials() override;
+  [[nodiscard]] arrow::Result<Aws::Auth::AWSCredentials> ResolveForRequest() override;
 
   protected:
   void Reload() override;
@@ -49,6 +53,9 @@ class AWS_CORE_API TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider : pub
 
   Aws::UniquePtr<TencentCloudSTSCredentialsClient> m_client;
   Aws::Auth::AWSCredentials m_credentials;
+  // Guarded by m_reloadLock, like m_credentials.
+  arrow::Status m_lastResolution;
+
   Aws::String m_region;
   Aws::String m_roleArn;
   Aws::String m_tokenFile;

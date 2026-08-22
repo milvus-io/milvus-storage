@@ -368,7 +368,7 @@ TEST_F(LobColumnCloudTest, AbortCleansUpFiles) {
     }
 
     // abort
-    ASSERT_STATUS_OK(writer->Abort());
+    writer->Abort();
   }
 
   // verify LOB data directory is empty or doesn't exist

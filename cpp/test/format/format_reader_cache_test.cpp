@@ -22,6 +22,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -32,6 +33,7 @@
 #include <vector>
 
 #include <arrow/api.h>
+#include <unistd.h>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -51,6 +53,11 @@
 
 namespace milvus_storage::test {
 namespace {
+
+void IsolateDeathTestCoverageFiles() {
+  const auto prefix = "/tmp/milvus-storage-death-test-gcov-" + std::to_string(getpid());
+  (void)setenv("GCOV_PREFIX", prefix.c_str(), 1);
+}
 
 using TestMetadataCaches = FormatReaderMetadataCaches<parquet::ParquetFormatReader,
                                                       vortex::VortexFormatReader,
@@ -572,6 +579,45 @@ arrow::Status RunAsyncFailuresDoNotPoisonCacheAndAllowRetry(const std::shared_pt
 
 }  // namespace
 
+TEST(FormatReaderMetadataCacheTest, AllocationFailureIsFailStopInsteadOfLeavingAFlightPending) {
+  using MetadataPtr = ParquetMetadataCache::MetadataPtr;
+
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  // Set this in the parent before GoogleTest re-execs the death-test child.
+  // libgcov reads GCOV_PREFIX during process startup, so setting it inside the
+  // child statement is too late and makes parent/child corrupt the same .gcda.
+  IsolateDeathTestCoverageFiles();
+  EXPECT_DEATH_IF_SUPPORTED(
+      {
+        auto cache = ParquetMetadataCache::Make();
+        (void)cache->get_or_open("sync-bad-alloc", []() -> arrow::Result<MetadataPtr> { throw std::bad_alloc(); });
+      },
+      "");
+
+  EXPECT_DEATH_IF_SUPPORTED(
+      {
+        auto cache = ParquetMetadataCache::Make();
+        (void)std::move(cache->get_or_open_async(
+                            "async-future-bad-alloc", []() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+                              return folly::makeSemiFuture<arrow::Result<MetadataPtr>>(
+                                  folly::make_exception_wrapper<std::bad_alloc>());
+                            }))
+            .get();
+      },
+      "");
+
+  EXPECT_DEATH_IF_SUPPORTED(
+      {
+        auto cache = ParquetMetadataCache::Make();
+        (void)std::move(cache->get_or_open_async(
+                            "async-call-bad-alloc", []() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+                              throw std::bad_alloc();
+                            }))
+            .get();
+      },
+      "");
+}
+
 class FormatReaderMetadataCacheParamTest : public ::testing::TestWithParam<std::string> {};
 
 class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std::string> {
@@ -675,8 +721,9 @@ class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std:
     std::vector<iceberg::IcebergFileInfo> file_infos;
     try {
       auto storage_options = iceberg::ToStorageOptions(fs_config_);
-      table_info = iceberg::CreateTestTable(table_uri, kExpectedRows, false, {}, storage_options);
-      file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+      table_info = iceberg::CreateTestTable(table_uri, kExpectedRows, false, {}, storage_options).ValueOrDie();
+      file_infos =
+          iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options).ValueOrDie();
     } catch (const std::exception& e) {
       return arrow::Status::IOError("Failed to create Iceberg stress table: ", e.what());
     }

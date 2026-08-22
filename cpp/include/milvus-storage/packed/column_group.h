@@ -27,23 +27,17 @@ typedef size_t GroupId;
 
 class ColumnGroup {
   public:
-  ColumnGroup(GroupId group_id, const std::vector<int>& origin_column_indices);
+  ColumnGroup(GroupId group_id);
 
-  ColumnGroup(GroupId group_id,
-              const std::vector<int>& origin_column_indices,
-              const std::shared_ptr<arrow::RecordBatch>& batch);
+  ColumnGroup(GroupId group_id, const std::shared_ptr<arrow::RecordBatch>& batch);
 
   ~ColumnGroup() = default;
 
   inline size_t size() const { return batches_.size(); }
 
-  inline bool Empty() const { return batches_.empty(); }
-
   inline GroupId GrpId() const { return group_id_; }
 
   arrow::Status AddRecordBatch(const std::shared_ptr<arrow::RecordBatch>& batch);
-
-  arrow::Status Merge(const ColumnGroup& other);
 
   /// Merge all batches into one table. Source-compat note: this returns
   /// arrow::Result since the abort/throw cleanup (the previous signature
@@ -62,17 +56,7 @@ class ColumnGroup {
 
   std::shared_ptr<arrow::RecordBatch> GetRecordBatch(size_t index) const;
 
-  std::vector<std::shared_ptr<arrow::RecordBatch>> GetRecordBatches() const;
-
-  int GetRecordBatchNum() const;
-
-  std::vector<int> GetOriginColumnIndices() const;
-
   size_t GetMemoryUsage() const;
-
-  std::vector<size_t> GetRecordMemoryUsages() const;
-
-  void Clear();
 
   int64_t GetTotalRows() const { return total_rows_; }
 
@@ -81,7 +65,6 @@ class ColumnGroup {
   std::vector<size_t> batch_memory_usage_;
   std::vector<std::shared_ptr<arrow::RecordBatch>> batches_;
   size_t memory_usage_;
-  std::vector<int> origin_column_indices_;
   int64_t total_rows_ = 0;
 };
 
