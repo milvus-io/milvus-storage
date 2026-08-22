@@ -88,6 +88,57 @@ Configuration properties for milvus-storage.
 | `storage.azure.account_name` | Azure account name | - |
 | `storage.azure.account_key` | Azure account key | - |
 
+### Error handling
+
+Every failure that crosses the native boundary carries its verdict as
+attributes, and the exception type is chosen from the category — so you branch
+on a type or a field, never on the message text.
+
+```python
+from milvus_storage.exceptions import (
+    MilvusStorageError,   # base: catches everything this library raises
+    FFIError,             # any native failure that is not your input
+    RetryableError,       # a transient cause was identified
+    ConflictError,        # concurrent modification; coordinate, do not replay
+    DataFormatError,      # persisted bytes do not decode
+    InvalidArgumentError, # your input was invalid
+)
+
+try:
+    writer.write(batch)
+except RetryableError as e:
+    ...            # e.retryable is True; see the writer caveat below
+except InvalidArgumentError:
+    raise          # the caller's problem — hand it back
+except FFIError as e:
+    log.error("storage failed: code=%s category=%s", e.err_code, e.category)
+```
+
+Attributes on every exception:
+
+| Attribute | Meaning |
+|---|---|
+| `err_code` | the fine-grained native code, or `None` if the failure never crossed the C ABI |
+| `category` | an `ErrorCategory` — `USER`, `RETRYABLE`, `CONFLICT`, `DATA_FORMAT`, `SYSTEM`, `UNKNOWN` |
+| `retryable` | `category == RETRYABLE` |
+
+`InvalidArgumentError` is a **sibling** of `FFIError`, not a subclass: the same
+exception is raised by this package's own argument checks and by the native
+`USER` category, and you should not have to care which side caught your mistake.
+To catch everything, catch `MilvusStorageError`.
+
+**`retryable` is about the cause, not about the object.** A failed `Writer` is
+terminal — every later call returns the same failure. Retrying means a new
+`Writer` on a new path. Call `close()` on the failed one anyway (it re-raises,
+that is expected): closing is what releases what it still holds in the store.
+Better, use it as a context manager and let `__exit__` do it.
+
+A code from a newer library that this binding has never seen degrades to
+`ErrorCategory.UNKNOWN` and `FFIError` rather than raising during error
+handling, so an older binding keeps working against a newer library.
+
+See [`docs/error-codes.md`](../docs/error-codes.md) for the full code table.
+
 ## Testing
 
 Run tests with pytest:

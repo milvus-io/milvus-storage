@@ -21,9 +21,20 @@
 #include <azure/storage/blobs.hpp>
 #include <azure/storage/files/datalake.hpp>
 
+#include <cstdint>
+#include <vector>
+
+#include "milvus-storage/common/extend_status.h"
+#include "milvus-storage/common/fiu_local.h"
+#include "milvus-storage/filesystem/azure/azure_fs_producer.h"
 #include "milvus-storage/filesystem/azure/azurefs.h"
 
 namespace milvus_storage::fs {
+
+namespace internal {
+std::vector<arrow::Status> RunHealthyCloseAbortCloseForTest();
+std::vector<arrow::Status> RunBackgroundUploadOutcomeFailureForTest(int64_t* blocks_in_progress, bool* future_finished);
+}  // namespace internal
 
 // ============================================================================
 // AzureFileSystem initialization tests (no network required)
@@ -101,6 +112,34 @@ TEST(AzureFileSystem, InitializeWithEnvironmentCredential) {
 TEST(AzureFileSystem, OptionsCompare) {
   AzureOptions options;
   EXPECT_TRUE(options.Equals(options));
+}
+
+TEST(AzureFileSystem, BackgroundUploadChildFailureSettlesBlockAndPublishesFuture) {
+  int64_t blocks_in_progress = -1;
+  bool future_finished = false;
+  std::vector<arrow::Status> statuses;
+  ASSERT_NO_THROW(statuses = internal::RunBackgroundUploadOutcomeFailureForTest(&blocks_in_progress, &future_finished));
+
+  EXPECT_EQ(blocks_in_progress, 0);
+  // The aggregate future must always be completed by the completion that claims
+  // the publish slot. Leaving it pending strands every FlushAsync/CloseAsync
+  // waiter, which no later completion can rescue once the slot is consumed.
+  EXPECT_TRUE(future_finished);
+  ASSERT_EQ(statuses.size(), 4);
+  EXPECT_TRUE(statuses[0].IsIOError()) << statuses[0].ToString();
+  EXPECT_NE(statuses[0].message().find("injected Azure child upload failure"), std::string::npos)
+      << statuses[0].ToString();
+  EXPECT_TRUE(statuses[1].Equals(statuses[0])) << statuses[1].ToString();
+  EXPECT_TRUE(statuses[2].Equals(statuses[0])) << statuses[2].ToString();
+  EXPECT_TRUE(statuses[3].ok()) << statuses[3].ToString();
+}
+
+TEST(AzureFileSystem, AbortAfterSuccessfulClosePreservesIdempotentClose) {
+  auto statuses = internal::RunHealthyCloseAbortCloseForTest();
+  ASSERT_EQ(statuses.size(), 3);
+  EXPECT_TRUE(statuses[0].ok()) << statuses[0].ToString();
+  EXPECT_TRUE(statuses[1].ok()) << statuses[1].ToString();
+  EXPECT_TRUE(statuses[2].ok()) << statuses[2].ToString();
 }
 
 // ============================================================================
@@ -284,3 +323,26 @@ TEST_F(TestAzureOptions, MakeDataLakeServiceClientInvalidDfsStorageScheme) {
 }
 
 }  // namespace milvus_storage::fs
+
+namespace milvus_storage {
+
+TEST(AzureFileSystemProducer, RejectsIamAuthenticationOverHttp) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderAzure;
+  config.access_key_id = "dummy-account-name";
+  config.bucket_name = "dummy-container";
+  config.use_iam = true;
+  config.use_ssl = false;
+
+  auto result = AzureFileSystemProducer(config).Make();
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid()) << result.status().ToString();
+
+  auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+  ASSERT_NE(detail, nullptr) << result.status().ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageConfigInvalid);
+  EXPECT_NE(result.status().message().find("fs.use_ssl=true"), std::string::npos);
+}
+
+}  // namespace milvus_storage

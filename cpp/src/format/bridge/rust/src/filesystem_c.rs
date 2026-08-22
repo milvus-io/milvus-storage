@@ -9,10 +9,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_compat::Compat;
+use futures::FutureExt;
 #[cfg(feature = "s3-crt-async")]
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
-use futures::FutureExt;
 
 use vortex::array::buffer::BufferHandle;
 #[cfg(feature = "s3-crt-async")]
@@ -289,22 +289,16 @@ unsafe extern "C" {
     ) -> LoonFFIResult;
 }
 
-const LOON_VORTEX_FFI_ERRCODE_MARKER: &str = "__LOON_VORTEX_FFI_ERRCODE__=";
-
 #[derive(Debug)]
-struct LoonFfiError {
-    err_code: i32,
-    context: String,
-    message: String,
+pub(crate) struct LoonFfiError {
+    pub(crate) err_code: i32,
+    pub(crate) context: String,
+    pub(crate) message: String,
 }
 
 impl std::fmt::Display for LoonFfiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{LOON_VORTEX_FFI_ERRCODE_MARKER}{}; {}: {}",
-            self.err_code, self.context, self.message
-        )
+        write!(f, "{}: {}", self.context, self.message)
     }
 }
 
@@ -316,6 +310,16 @@ fn ffi_err(err_code: i32, context: &str, message: String) -> VortexError {
         context: context.to_string(),
         message,
     })
+}
+
+/// Construct a classified Vortex error without encoding transport metadata in
+/// the human-readable message.
+pub(crate) fn classified_vortex_error(
+    err_code: i32,
+    context: &str,
+    message: String,
+) -> VortexError {
+    ffi_err(err_code, context, message)
 }
 
 // Helper to check LoonFFIResult and convert to VortexError if needed.
@@ -512,6 +516,7 @@ impl<T> Clone for ThreadSafePtr<T> {
 enum WriterSlot {
     Unopened,
     Open(ThreadSafePtr<c_void>),
+    Failed { error: Arc<VortexError> },
     Closed,
 }
 
@@ -552,14 +557,31 @@ impl ObjectStoreWriterInner {
         let mut writer = self.writer.lock().unwrap();
         let writer_ptr = match &mut *writer {
             WriterSlot::Unopened => {
-                let opened = self
-                    .open_writer()
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                let opened = match self.open_writer() {
+                    Ok(opened) => opened,
+                    Err(error) => {
+                        let error = Arc::new(error);
+                        *writer = WriterSlot::Failed {
+                            error: Arc::clone(&error),
+                        };
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            VortexError::from(error),
+                        ));
+                    }
+                };
                 let writer_ptr = opened.as_ptr();
                 *writer = WriterSlot::Open(opened);
                 writer_ptr
             }
             WriterSlot::Open(writer) => writer.as_ptr(),
+            WriterSlot::Failed { error } => {
+                debug_assert!(false, "stateful writer reused after a terminal failure");
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    VortexError::from(Arc::clone(error)),
+                ));
+            }
             WriterSlot::Closed => {
                 return Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
@@ -570,19 +592,53 @@ impl ObjectStoreWriterInner {
 
         let mut result =
             unsafe { loon_filesystem_writer_write(writer_ptr, buf.as_ptr(), buf.len() as u64) };
-        check_loon_ffi_result(&mut result, "Failed to write data to ObjectStoreWriterCpp")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        if let Err(error) =
+            check_loon_ffi_result(&mut result, "Failed to write data to ObjectStoreWriterCpp")
+        {
+            let error = Arc::new(error);
+            let failed_writer = match std::mem::replace(&mut *writer, WriterSlot::Closed) {
+                WriterSlot::Open(writer) => writer,
+                _ => unreachable!("writer must be open after a write attempt"),
+            };
+            unsafe { loon_filesystem_writer_destroy(failed_writer.as_raw_ptr()) };
+            *writer = WriterSlot::Failed {
+                error: Arc::clone(&error),
+            };
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                VortexError::from(error),
+            ));
+        }
 
         Ok(buf.len())
     }
 
     fn flush(&self) -> Result<(), VortexError> {
-        let writer = self.writer.lock().unwrap();
-        match &*writer {
+        let mut writer = self.writer.lock().unwrap();
+        match &mut *writer {
             WriterSlot::Unopened => Ok(()),
-            WriterSlot::Open(writer) => {
-                let mut result = unsafe { loon_filesystem_writer_flush(writer.as_ptr()) };
-                check_loon_ffi_result(&mut result, "Failed to flush data to ObjectStoreWriterCpp")
+            WriterSlot::Open(open_writer) => {
+                let mut result = unsafe { loon_filesystem_writer_flush(open_writer.as_ptr()) };
+                if let Err(error) = check_loon_ffi_result(
+                    &mut result,
+                    "Failed to flush data to ObjectStoreWriterCpp",
+                ) {
+                    let error = Arc::new(error);
+                    let failed_writer = match std::mem::replace(&mut *writer, WriterSlot::Closed) {
+                        WriterSlot::Open(writer) => writer,
+                        _ => unreachable!("writer must be open after a flush attempt"),
+                    };
+                    unsafe { loon_filesystem_writer_destroy(failed_writer.as_raw_ptr()) };
+                    *writer = WriterSlot::Failed {
+                        error: Arc::clone(&error),
+                    };
+                    return Err(VortexError::from(error));
+                }
+                Ok(())
+            }
+            WriterSlot::Failed { error } => {
+                debug_assert!(false, "stateful writer reused after a terminal failure");
+                Err(VortexError::from(Arc::clone(error)))
             }
             WriterSlot::Closed => Err(vortex_err!("cannot flush: ObjectStoreWriterCpp is closed")),
         }
@@ -592,13 +648,27 @@ impl ObjectStoreWriterInner {
         let mut writer = self.writer.lock().unwrap();
         match std::mem::replace(&mut *writer, WriterSlot::Closed) {
             WriterSlot::Unopened | WriterSlot::Closed => Ok(()),
-            WriterSlot::Open(writer) => {
-                let writer_raw = writer.as_raw_ptr();
+            WriterSlot::Open(open_writer) => {
+                let writer_raw = open_writer.as_raw_ptr();
                 let mut result = unsafe { loon_filesystem_writer_close(writer_raw) };
                 let close_result =
                     check_loon_ffi_result(&mut result, "Failed to close ObjectStoreWriterCpp");
                 unsafe { loon_filesystem_writer_destroy(writer_raw) };
-                close_result
+                if let Err(error) = close_result {
+                    let error = Arc::new(error);
+                    *writer = WriterSlot::Failed {
+                        error: Arc::clone(&error),
+                    };
+                    return Err(VortexError::from(error));
+                }
+                Ok(())
+            }
+            WriterSlot::Failed { error } => {
+                let returned_error = VortexError::from(&error);
+                *writer = WriterSlot::Failed { error };
+                drop(writer);
+                debug_assert!(false, "stateful writer reused after a terminal failure");
+                Err(returned_error)
             }
         }
     }
@@ -608,11 +678,14 @@ impl Drop for ObjectStoreWriterInner {
     fn drop(&mut self) {
         let mut writer = self.writer.lock().unwrap();
         let writer = std::mem::replace(&mut *writer, WriterSlot::Closed);
-        if let WriterSlot::Open(writer) = writer {
-            // Only explicit close may complete the object. Drop can run after writer
-            // errors, so calling close here would finalize partial data; release only
-            // the C++ wrapper.
-            unsafe { loon_filesystem_writer_destroy(writer.as_raw_ptr()) };
+        match writer {
+            WriterSlot::Open(writer) => {
+                // Only explicit close may complete the object. Drop can run after writer
+                // errors, so calling close here would finalize partial data; release only
+                // the C++ wrapper.
+                unsafe { loon_filesystem_writer_destroy(writer.as_raw_ptr()) };
+            }
+            WriterSlot::Unopened | WriterSlot::Failed { .. } | WriterSlot::Closed => {}
         }
     }
 }
@@ -699,7 +772,7 @@ impl Write for ObjectStoreWriterCpp {
         self.writer
             .inner
             .flush()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 }
 
@@ -738,7 +811,7 @@ impl VortexWrite for ObjectStoreWriterCpp {
         self.writer
             .flush()
             .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 
     async fn shutdown(&mut self) -> io::Result<()> {
@@ -787,9 +860,7 @@ impl Drop for ReaderHandle {
         unsafe {
             if !self.ptr.is_null() {
                 let mut result = loon_filesystem_reader_close(self.ptr);
-                if let Err(e) = check_loon_ffi_result(&mut result, "Failed to close ReaderHandle") {
-                    eprintln!("Warning: ReaderHandle close failed: {e}");
-                }
+                let _ = check_loon_ffi_result(&mut result, "Failed to close ReaderHandle");
                 loon_filesystem_reader_destroy(self.ptr);
             }
         }
@@ -831,12 +902,6 @@ impl ObjectStoreReadSourceCpp {
         let supports_async = match reader_supports_async(reader_raw) {
             Ok(supported) => supported,
             Err(e) => unsafe {
-                let mut result = loon_filesystem_reader_close(reader_raw);
-                if let Err(close_err) =
-                    check_loon_ffi_result(&mut result, "Failed to close ReaderHandle")
-                {
-                    eprintln!("Warning: ReaderHandle close failed: {close_err}");
-                }
                 loon_filesystem_reader_destroy(reader_raw);
                 return Err(e);
             },
@@ -879,7 +944,9 @@ impl VortexReadAt for ObjectStoreReadSourceCpp {
         Compat::new(async move {
             // Pass path as bytes to FFI (no allocation across FFI boundaries)
             let path_bytes = path.into_bytes();
-            // Return Result from blocking task to propagate errors cleanly
+            // Keep the structured filesystem error inside VortexError while it
+            // crosses the blocking-pool boundary. Stringifying it here loses the
+            // Loon code and makes the decoder layer mistake I/O for corrupt data.
             let task = handle.spawn_blocking(move || unsafe {
                 let mut out_size: u64 = 0;
                 let mut result = loon_filesystem_get_file_info(
@@ -891,12 +958,11 @@ impl VortexReadAt for ObjectStoreReadSourceCpp {
                 check_loon_ffi_result(
                     &mut result,
                     "Failed to get object size from ObjectStoreIoSourceCpp",
-                )
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                )?;
 
-                Ok::<u64, std::io::Error>(out_size)
+                Ok::<u64, VortexError>(out_size)
             });
-            let size: u64 = Compat::new(task).await.map_err(|e| vortex_err!("{}", e))?;
+            let size: u64 = Compat::new(task).await?;
             Ok(size)
         })
         .boxed()

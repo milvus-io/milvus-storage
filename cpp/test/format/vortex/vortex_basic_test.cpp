@@ -21,6 +21,7 @@
 #include <future>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -30,6 +31,7 @@
 #include <arrow/array/array_dict.h>
 #include <arrow/array/concatenate.h>
 #include <arrow/filesystem/filesystem.h>
+#include <arrow/io/memory.h>
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
 #include <arrow/type.h>
@@ -38,11 +40,13 @@
 #include <boost/filesystem/operations.hpp>
 
 #include "milvus-storage/common/extend_status.h"
+#include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/ffi_c.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_writer.h"
+#include "bridge_error.h"
 #include "test_env.h"
 #include "vortex_bridge.h"
 
@@ -139,12 +143,18 @@ constexpr int kDictionaryValueGroup = 3;
 
 class FailingRecordBatchReader : public arrow::RecordBatchReader {
   public:
-  explicit FailingRecordBatchReader(arrow::Status status) : status_(std::move(status)) {}
+  explicit FailingRecordBatchReader(arrow::Status status,
+                                    std::optional<int> typed_code = std::nullopt,
+                                    std::string typed_message = {})
+      : status_(std::move(status)), typed_code_(typed_code), typed_message_(std::move(typed_message)) {}
 
   std::shared_ptr<arrow::Schema> schema() const override { return arrow::schema({}); }
 
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override {
     *batch = nullptr;
+    if (typed_code_.has_value()) {
+      milvus_storage::bridge::internal::RecordBridgeErrorForTest(*typed_code_, typed_message_);
+    }
     return status_;
   }
 
@@ -152,15 +162,58 @@ class FailingRecordBatchReader : public arrow::RecordBatchReader {
 
   private:
   arrow::Status status_;
+  std::optional<int> typed_code_;
+  std::string typed_message_;
+};
+
+class AbortTrackingOutputStream final : public arrow::io::MockOutputStream {
+  public:
+  explicit AbortTrackingOutputStream(bool fail_close = false) : fail_close_(fail_close) {}
+
+  arrow::Status Close() override {
+    if (fail_close_) {
+      return arrow::Status::IOError("injected close failure");
+    }
+    return arrow::io::MockOutputStream::Close();
+  }
+
+  arrow::Status Abort() override {
+    ++abort_count_;
+    return arrow::io::MockOutputStream::Close();
+  }
+
+  int abort_count() const { return abort_count_; }
+
+  private:
+  bool fail_close_;
+  int abort_count_ = 0;
+};
+
+class SingleOutputStreamFileSystem final : public arrow::fs::SubTreeFileSystem {
+  public:
+  SingleOutputStreamFileSystem(std::shared_ptr<arrow::fs::FileSystem> base_fs,
+                               std::shared_ptr<arrow::io::OutputStream> stream)
+      : arrow::fs::SubTreeFileSystem("", std::move(base_fs)), stream_(std::move(stream)) {}
+
+  std::string type_name() const override { return "single-output-stream"; }
+
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
+      const std::string&, const std::shared_ptr<const arrow::KeyValueMetadata>&) override {
+    return stream_;
+  }
+
+  private:
+  std::shared_ptr<arrow::io::OutputStream> stream_;
 };
 
 struct AsyncScanTestContext {
   ArrowArrayStream stream{};
   std::promise<std::string> completion;
+  std::promise<int> error_code;
   std::shared_ptr<FileSystemWrapper> fs_holder;
 };
 
-void AsyncScanTestCallback(void* raw_ctx, ArrowArrayStream* out_stream, const char* error_msg) {
+void AsyncScanTestCallback(void* raw_ctx, ArrowArrayStream* out_stream, int error_code, const char* error_msg) {
   std::unique_ptr<AsyncScanTestContext> ctx(static_cast<AsyncScanTestContext*>(raw_ctx));
 
   std::string error;
@@ -172,11 +225,26 @@ void AsyncScanTestCallback(void* raw_ctx, ArrowArrayStream* out_stream, const ch
     out_stream->release(out_stream);
   }
   ctx->completion.set_value(std::move(error));
+  ctx->error_code.set_value(error_code);
 }
 
-TEST(VortexErrorTest, StreamingReaderTranslatesReadNextBridgeError) {
+TEST(VortexErrorTest, MarkerLikeMessageDoesNotChangeClassification) {
   auto inner = std::make_shared<FailingRecordBatchReader>(
-      arrow::Status::IOError(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; readat failed", LOON_TRANSIENT_NETWORK)));
+      arrow::Status::Invalid(fmt::format("field __LOON_RUST_BRIDGE_ERRCODE__={} is invalid", LOON_TRANSIENT_NETWORK)));
+  auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
+
+  std::shared_ptr<arrow::RecordBatch> batch;
+  auto status = reader->ReadNext(&batch);
+
+  EXPECT_TRUE(status.IsInvalid()) << status.ToString();
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
+  EXPECT_NE(status.ToString().find("__LOON_RUST_BRIDGE_ERRCODE__"), std::string::npos);
+}
+
+TEST(VortexErrorTest, StreamingReaderUsesTypedSideChannel) {
+  auto inner =
+      std::make_shared<FailingRecordBatchReader>(arrow::Status::Invalid("Arrow C stream flattened the error"),
+                                                 LOON_TRANSIENT_NETWORK, "Failed to read object: connection reset");
   auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
 
   std::shared_ptr<arrow::RecordBatch> batch;
@@ -185,84 +253,46 @@ TEST(VortexErrorTest, StreamingReaderTranslatesReadNextBridgeError) {
   auto detail = ExtendStatusDetail::UnwrapStatus(status);
   ASSERT_NE(detail, nullptr) << status.ToString();
   EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork);
-  EXPECT_TRUE(detail->retryable());
-  EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
-}
-
-TEST(VortexErrorTest, StreamingReaderTranslatesReadNextFileNotFound) {
-  auto inner = std::make_shared<FailingRecordBatchReader>(
-      arrow::Status::IOError(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; file not found", LOON_FILE_NOT_FOUND)));
-  auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
-
-  std::shared_ptr<arrow::RecordBatch> batch;
-  auto status = reader->ReadNext(&batch);
-
-  EXPECT_TRUE(status.IsIOError());
-  EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
-  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
-  EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
-}
-
-TEST(VortexErrorTest, StreamingReaderTranslatesCloseBridgeError) {
-  auto inner = std::make_shared<FailingRecordBatchReader>(
-      arrow::Status::IOError(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; close failed", LOON_TRANSIENT_TIMEOUT)));
-  auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
-
-  auto status = reader->Close();
-
-  auto detail = ExtendStatusDetail::UnwrapStatus(status);
-  ASSERT_NE(detail, nullptr) << status.ToString();
-  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientTimeout);
-  EXPECT_TRUE(detail->retryable());
-  EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
+  EXPECT_NE(status.ToString().find("connection reset"), std::string::npos);
 }
 
 TEST(VortexErrorTest, MapsBridgeErrorCodesToStatusDetails) {
-  auto file_not_found_status = MakeVortexErrorStatus(
-      "Failed to read vortex file", fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; file not found", LOON_FILE_NOT_FOUND));
+  auto file_not_found_status =
+      MakeVortexErrorStatus("Failed to read vortex file", LOON_FILE_NOT_FOUND, "file not found");
   EXPECT_TRUE(file_not_found_status.IsIOError());
   EXPECT_EQ(arrow::internal::ErrnoFromStatus(file_not_found_status), ENOENT);
   EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(file_not_found_status), nullptr);
-  EXPECT_EQ(file_not_found_status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
 
   auto aws_not_found_status =
-      MakeVortexErrorStatus("Failed to read vortex file",
-                            fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; object not found", LOON_AWS_ERROR_NOT_FOUND));
+      MakeVortexErrorStatus("Failed to read vortex file", LOON_STORAGE_NOT_FOUND, "object not found");
   auto aws_not_found_detail = ExtendStatusDetail::UnwrapStatus(aws_not_found_status);
   ASSERT_NE(aws_not_found_detail, nullptr);
-  EXPECT_EQ(aws_not_found_detail->code(), ExtendStatusCode::AwsErrorNotFound);
+  EXPECT_EQ(aws_not_found_detail->code(), ExtendStatusCode::StorageNotFound);
   EXPECT_FALSE(aws_not_found_detail->retryable());
 
-  auto timeout_status = MakeVortexErrorStatus(
-      "Failed to read vortex file", fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; read failed", LOON_TRANSIENT_TIMEOUT));
+  auto timeout_status = MakeVortexErrorStatus("Failed to read vortex file", LOON_TRANSIENT_TIMEOUT, "read failed");
   auto timeout_detail = ExtendStatusDetail::UnwrapStatus(timeout_status);
   ASSERT_NE(timeout_detail, nullptr);
   EXPECT_EQ(timeout_detail->code(), ExtendStatusCode::StorageTransientTimeout);
   EXPECT_TRUE(timeout_detail->retryable());
   EXPECT_NE(timeout_status.ToString().find("Failed to read vortex file: read failed"), std::string::npos);
 
-  auto upload_status =
-      MakeVortexErrorStatus("Failed to close Vortex file",
-                            fmt::format("outer __LOON_VORTEX_FFI_ERRCODE__={}; Failed to close ObjectStoreWriterCpp",
-                                        LOON_AWS_ERROR_NO_SUCH_UPLOAD));
+  auto upload_status = MakeVortexErrorStatus("Failed to close Vortex file", LOON_STORAGE_NO_SUCH_UPLOAD,
+                                             "Failed to close ObjectStoreWriterCpp");
   auto upload_detail = ExtendStatusDetail::UnwrapStatus(upload_status);
   ASSERT_NE(upload_detail, nullptr);
-  EXPECT_EQ(upload_detail->code(), ExtendStatusCode::AwsErrorNoSuchUpload);
-  EXPECT_TRUE(upload_detail->retryable());
-  EXPECT_EQ(upload_status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
-
-  auto network_status = MakeVortexErrorStatus(
-      "Failed to import vortex chunked array",
-      arrow::Status::IOError(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; readat failed", LOON_TRANSIENT_NETWORK)));
+  EXPECT_EQ(upload_detail->code(), ExtendStatusCode::StorageNoSuchUpload);
+  // Was EXPECT_TRUE. The bridge faithfully carries the code across FFI, which is
+  // what this test is for; whether the condition is retriable is the taxonomy's
+  // call, and it is not -- a dead upload id cannot be resent into life.
+  EXPECT_FALSE(upload_detail->retryable());
+  auto network_status =
+      MakeVortexErrorStatus("Failed to import vortex chunked array", LOON_TRANSIENT_NETWORK, "readat failed");
   auto network_detail = ExtendStatusDetail::UnwrapStatus(network_status);
   ASSERT_NE(network_detail, nullptr);
   EXPECT_EQ(network_detail->code(), ExtendStatusCode::StorageTransientNetwork);
   EXPECT_TRUE(network_detail->retryable());
-  EXPECT_EQ(network_status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
-
-  auto txn_status =
-      MakeVortexErrorStatus("Failed to write Vortex file",
-                            fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; commit failed", LOON_TXN_EXHAUSTED_RETRY));
+  auto txn_status = MakeVortexErrorStatus("Failed to write Vortex file", LOON_TXN_EXHAUSTED_RETRY, "commit failed");
   auto txn_detail = ExtendStatusDetail::UnwrapStatus(txn_status);
   ASSERT_NE(txn_detail, nullptr);
   EXPECT_EQ(txn_detail->code(), ExtendStatusCode::TxnExhaustedRetry);
@@ -646,6 +676,46 @@ TEST_P(VortexBasicTest, FlushAllowsSubsequentWrites) {
   ASSERT_EQ(cgfile.end_index, rb->num_rows());
 }
 
+TEST_P(VortexBasicTest, CloseFailureReleasesBridgeWriterWithoutAnExplicitAbort) {
+  auto stream = std::make_shared<AbortTrackingOutputStream>(true);
+  auto fs = std::make_shared<SingleOutputStreamFileSystem>(file_system_, stream);
+  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(fs, schema_, test_file_name_, properties_));
+  ASSERT_STATUS_OK(vx_writer->Write(record_batches_.front()));
+
+  auto close_result = vx_writer->Close();
+  ASSERT_FALSE(close_result.ok());
+  // A failed Close abandons: the bridge writer, and with it the upload it
+  // holds, is released without the caller having to know to ask for it. This
+  // is what makes Close() sufficient for callers that cannot express RAII --
+  // every FFI binding -- because Close() is the only verb they reach for.
+  EXPECT_FALSE(vx_writer->HasBridgeWriterForTest());
+  EXPECT_EQ(stream->abort_count(), 1);
+
+  // The explicit verb stays available and stays idempotent.
+  vx_writer->Abort();
+  EXPECT_FALSE(vx_writer->HasBridgeWriterForTest());
+  EXPECT_EQ(stream->abort_count(), 1);
+
+  vx_writer->Abort();
+  EXPECT_FALSE(vx_writer->HasBridgeWriterForTest());
+  EXPECT_EQ(stream->abort_count(), 1);
+}
+
+TEST_P(VortexBasicTest, AbortAfterSuccessfulCloseIsIdempotent) {
+  auto stream = std::make_shared<AbortTrackingOutputStream>();
+  auto fs = std::make_shared<SingleOutputStreamFileSystem>(file_system_, stream);
+  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(fs, schema_, test_file_name_, properties_));
+  ASSERT_STATUS_OK(vx_writer->Write(record_batches_.front()));
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
+  EXPECT_EQ(cgfile.end_index, record_batches_.front()->num_rows());
+  EXPECT_EQ(stream->abort_count(), 1);
+
+  vx_writer->Abort();
+  EXPECT_EQ(stream->abort_count(), 1);
+  vx_writer->Abort();
+  EXPECT_EQ(stream->abort_count(), 1);
+}
+
 #ifdef BUILD_WITH_FIU
 TEST_P(VortexBasicTest, S3FlushFailureCloseReturnsErrorAndLeavesNoObject) {
   ArrowFileSystemConfig fs_config;
@@ -675,19 +745,20 @@ TEST_P(VortexBasicTest, S3FlushFailureCloseReturnsErrorAndLeavesNoObject) {
     ScopedFiuFault fault(FIUKEY_S3FS_WRITER_FLUSH_FAIL, /*one_time=*/false);
     ASSERT_EQ(0, fault.enable_result());
 
-    for (int i = 10; i < 20; ++i) {
-      ASSERT_AND_ASSIGN(auto rb, MakeTestData(i * rows_per_batch, rows_per_batch));
-      write_status = vx_writer->Write(rb);
-      if (!write_status.ok()) {
-        EXPECT_NE(write_status.ToString().find(FIUKEY_S3FS_WRITER_FLUSH_FAIL), std::string::npos)
-            << write_status.ToString();
-        break;
-      }
-    }
-
+    // Exercise the operation named by the fault directly. Relying on a later
+    // Write() to happen to flush an internal Vortex buffer is data-size and
+    // build-mode dependent, so it can remain OK even though the fault is live.
+    write_status = vx_writer->Flush();
+    ASSERT_FALSE(write_status.ok());
+    EXPECT_NE(write_status.ToString().find(FIUKEY_S3FS_WRITER_FLUSH_FAIL), std::string::npos)
+        << write_status.ToString();
     auto close_result = vx_writer->Close();
     ASSERT_FALSE(close_result.ok());
+    EXPECT_TRUE(close_result.status().Equals(write_status));
   }
+
+  // Destroy releases the failed output stream without finalizing partial data.
+  vx_writer.reset();
 
   ASSERT_AND_ASSIGN(auto file_info, file_system_->GetFileInfo(test_path));
   EXPECT_EQ(arrow::fs::FileType::NotFound, file_info.type()) << file_info.ToString();
@@ -1086,7 +1157,7 @@ TEST_P(VortexBasicTest, TestDictionaryOfFixedSizeBinaryWriteFails) {
 
   auto close_result = vx_writer->Close();
   ASSERT_FALSE(close_result.ok());
-  EXPECT_TRUE(close_result.status().IsInvalid()) << close_result.status().ToString();
+  EXPECT_TRUE(close_result.status().Equals(status)) << close_result.status().ToString();
 }
 
 TEST_P(VortexBasicTest, TestFixedSizeListWidthMismatchReadFails) {
@@ -1375,8 +1446,11 @@ TEST_P(VortexBasicTest, AsyncScanFailureCompletesCallbackWithError) {
                                                   file_size, footer_size));
   ASSERT_AND_ASSIGN(auto scan_builder, vxfile.CreateScanBuilder(kSmallCoalescingWindow));
 
-  // Bypass VortexFormatReader::take_async validation to exercise async scan failure handling.
-  // Older Vortex versions panic for an out-of-range index, while newer versions return an error.
+  // Bypass VortexFormatReader::take_async validation to exercise async scan
+  // failure handling. An out-of-range index is caller-owned input, so a
+  // returned OutOfBounds error must not be classified as persisted data
+  // corruption. Older Vortex versions panic for this input; that path carries
+  // the explicit unexpected/internal code instead.
   const uint64_t out_of_range_index = vxfile.RowCount();
   scan_builder.WithSplitRowIndices(false);
   scan_builder.WithIncludeByIndex(&out_of_range_index, 1);
@@ -1384,6 +1458,7 @@ TEST_P(VortexBasicTest, AsyncScanFailureCompletesCallbackWithError) {
   auto ctx = std::make_unique<AsyncScanTestContext>();
   ctx->fs_holder = fs_holder;
   auto completion = ctx->completion.get_future();
+  auto error_code = ctx->error_code.get_future();
   auto* raw_ctx = ctx.release();
   const auto handle = std::move(scan_builder).IntoRawHandle();
   vortex_scan_collect_async(handle, &raw_ctx->stream, AsyncScanTestCallback, raw_ctx);
@@ -1393,10 +1468,26 @@ TEST_P(VortexBasicTest, AsyncScanFailureCompletesCallbackWithError) {
       << "Tokio scan task failure dropped the callback";
 
   const auto error = completion.get();
+  const auto code = error_code.get();
   ASSERT_FALSE(error.empty());
-  EXPECT_TRUE(error.find("vortex async scan panicked") != std::string::npos ||
-              error.find("OutOfBounds") != std::string::npos)
-      << error;
+  EXPECT_NE(code, LOON_VORTEX_DATA_FORMAT) << error;
+  EXPECT_TRUE(code == 0 || code == LOON_INTERNAL_INVARIANT)
+      << "unexpected structured async Vortex error code " << code << ": " << error;
+}
+
+TEST_P(VortexBasicTest, SegmentBytesOutOfRangeIsNotDataFormat) {
+  ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile(test_file_name_));
+
+  const auto file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
+  const auto footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
+  auto fs_holder = std::make_shared<FileSystemWrapper>(file_system_);
+  ASSERT_AND_ASSIGN(auto vxfile, VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_,
+                                                  file_size, footer_size));
+
+  auto result = vxfile.SegmentBytes(UINT64_MAX);
+  ASSERT_FALSE(result.ok());
+  auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+  EXPECT_TRUE(detail == nullptr || detail->code() != ExtendStatusCode::VortexDataFormat) << result.status().ToString();
 }
 
 TEST_P(VortexBasicTest, FooterSizeMatchesActualFile) {
@@ -1446,7 +1537,7 @@ TEST_P(VortexBasicTest, FooterSizeMatchesActualFile) {
       << "cached footer_size should match the actual Vortex footer body; normal open adds EOF_SIZE";
 }
 
-TEST_P(VortexBasicTest, FooterSizeNotMatch) {
+TEST_P(VortexBasicTest, DependencyAcceptsFooterSizeHint) {
   // Write a vortex file
   ASSERT_AND_ASSIGN(auto vx_writer,
                     vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
@@ -1480,6 +1571,9 @@ TEST_P(VortexBasicTest, FooterSizeNotMatch) {
     }
   };
 
+  // This path delegates the hint directly to Vortex. Vortex accepts an
+  // understated hint without reporting a failure, so there is no lower-layer
+  // error for this layer to reinterpret or recover from.
   verify_read(1);
 
   // Case 2: footer_size too large (= file_size, reads entire file as initial read).

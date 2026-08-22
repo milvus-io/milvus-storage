@@ -408,6 +408,7 @@ async fn call_assume_role_with_oidc(
         .await
         .map_err(|e| format!("AssumeRoleWithOIDC body read: {e}"))?;
     if !status.is_success() {
+        crate::bridge_error::record_credential_http_failure(status.as_u16(), "AssumeRoleWithOIDC");
         return Err(format!("AssumeRoleWithOIDC HTTP {status}: {text}"));
     }
 
@@ -828,22 +829,21 @@ impl AliyunOssStoreProvider {
             .host_str()
             .ok_or_else(|| LanceError::invalid_input("OSS URL must contain bucket name"))?
             .to_string();
-        let config_map = build_oss_config_from_lance_opts(
-            bucket,
-            &base_path,
-            storage_options,
-        )
-        .map_err(LanceError::invalid_input)?;
-        let credential_duration = parse_oss_credential_duration(storage_options)
+        let config_map = build_oss_config_from_lance_opts(bucket, &base_path, storage_options)
             .map_err(LanceError::invalid_input)?;
+        let credential_duration =
+            parse_oss_credential_duration(storage_options).map_err(LanceError::invalid_input)?;
         let store = Arc::new(RefreshableAliyunOssStore::new(
             config_map,
             credential_duration,
         ));
-        store.current_store().await.map_err(|error| LanceError::IO {
-            source: Box::new(error),
-            location: location!(),
-        })?;
+        store
+            .current_store()
+            .await
+            .map_err(|error| LanceError::IO {
+                source: Box::new(error),
+                location: location!(),
+            })?;
         Ok(Self { store })
     }
 }
@@ -899,9 +899,7 @@ impl ObjectStoreProvider for AliyunOssStoreProvider {
 /// returned dataset instead of retaining static storage options process-wide.
 /// Cache sizes of zero match what the FFI entry points already pass to
 /// `BlockingDataset::open`.
-pub fn build_aliyun_oss_session(
-    provider: Arc<dyn ObjectStoreProvider>,
-) -> Arc<Session> {
+pub fn build_aliyun_oss_session(provider: Arc<dyn ObjectStoreProvider>) -> Arc<Session> {
     let registry = ObjectStoreRegistry::default();
     registry.insert("oss", provider);
     Arc::new(Session::new(0, 0, Arc::new(registry)))
@@ -945,12 +943,8 @@ impl AliyunOssStorageFactory {
                 )
             })?
             .to_string();
-        let config_map = build_oss_config_from_iceberg_opts(
-            bucket,
-            &base_path,
-            storage_options,
-        )
-        .map_err(|error| IcebergError::new(IcebergErrorKind::DataInvalid, error))?;
+        let config_map = build_oss_config_from_iceberg_opts(bucket, &base_path, storage_options)
+            .map_err(|error| IcebergError::new(IcebergErrorKind::DataInvalid, error))?;
         let credential_duration = parse_oss_credential_duration(storage_options)
             .map_err(|error| IcebergError::new(IcebergErrorKind::DataInvalid, error))?;
         let store = Arc::new(RefreshableAliyunOssStore::new(
@@ -1101,7 +1095,7 @@ impl IcebergStorage for AliyunOssStorage {
 
     async fn writer(&self, path: &str) -> IcebergResult<Box<dyn FileWrite>> {
         let (op, rel) = self.create_operator(path).await?;
-        Ok(Box::new(OpenDalWriter(
+        Ok(Box::new(OpenDalWriter::new(
             op.writer(&rel).await.map_err(from_opendal_error)?,
         )))
     }
@@ -1151,20 +1145,76 @@ impl FileRead for OpenDalReader {
 
 /// `FileWrite` wrapper around an opendal `Writer`. Same rationale as
 /// [`OpenDalReader`] — upstream's wrapper is `pub(crate)`.
-struct OpenDalWriter(opendal::Writer);
+struct OpenDalWriter {
+    inner: Option<opendal::Writer>,
+    failure: Option<String>,
+    closed: bool,
+}
+
+impl OpenDalWriter {
+    fn new(inner: opendal::Writer) -> Self {
+        Self {
+            inner: Some(inner),
+            failure: None,
+            closed: false,
+        }
+    }
+
+    fn check_failure(&self) -> IcebergResult<()> {
+        if let Some(error) = &self.failure {
+            debug_assert!(false, "stateful writer reused after a terminal failure");
+            return Err(IcebergError::new(
+                IcebergErrorKind::Unexpected,
+                error.clone(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[async_trait::async_trait]
 impl FileWrite for OpenDalWriter {
     async fn write(&mut self, bs: bytes::Bytes) -> IcebergResult<()> {
-        Ok(opendal::Writer::write(&mut self.0, bs)
-            .await
-            .map_err(from_opendal_error)?)
+        self.check_failure()?;
+        if self.closed {
+            return Err(IcebergError::new(
+                IcebergErrorKind::Unexpected,
+                "cannot write: OpenDalWriter is closed",
+            ));
+        }
+
+        let result = opendal::Writer::write(
+            self.inner
+                .as_mut()
+                .expect("open OpenDalWriter must retain its inner writer"),
+            bs,
+        )
+        .await;
+        if let Err(error) = result {
+            let error = from_opendal_error(error);
+            self.failure = Some(error.to_string());
+            self.inner = None;
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn close(&mut self) -> IcebergResult<()> {
-        let _ = opendal::Writer::close(&mut self.0)
-            .await
-            .map_err(from_opendal_error)?;
+        self.check_failure()?;
+        if self.closed {
+            return Ok(());
+        }
+
+        let mut inner = self
+            .inner
+            .take()
+            .expect("open OpenDalWriter must retain its inner writer");
+        if let Err(error) = opendal::Writer::close(&mut inner).await {
+            let error = from_opendal_error(error);
+            self.failure = Some(error.to_string());
+            return Err(error);
+        }
+        self.closed = true;
         Ok(())
     }
 }
@@ -1435,6 +1485,7 @@ pub(crate) mod ram {
             .await
             .map_err(|e| format!("sts:AssumeRole body read: {e}"))?;
         if !status.is_success() {
+            crate::bridge_error::record_credential_http_failure(status.as_u16(), "sts:AssumeRole");
             return Err(format!("sts:AssumeRole HTTP {status}: {text}"));
         }
 
@@ -1778,8 +1829,7 @@ mod tests {
             .get("aliyun", || async {
                 Ok::<_, ()>(Arc::new(AliyunOssStoreProvider {
                     store: refreshable_store(),
-                })
-                    as Arc<dyn ObjectStoreProvider>)
+                }) as Arc<dyn ObjectStoreProvider>)
             })
             .await
             .unwrap();
@@ -1787,8 +1837,7 @@ mod tests {
             .get("aliyun", || async {
                 Ok::<_, ()>(Arc::new(AliyunOssStoreProvider {
                     store: refreshable_store(),
-                })
-                    as Arc<dyn ObjectStoreProvider>)
+                }) as Arc<dyn ObjectStoreProvider>)
             })
             .await
             .unwrap();
@@ -1853,10 +1902,7 @@ mod tests {
         let path = "oss://my-bucket/dir/a b/中文/%25/literal/../file+name.parquet";
         let (_, relative) = storage.create_operator(path).await.unwrap();
 
-        assert_eq!(
-            relative,
-            "dir/a b/中文/%25/literal/../file+name.parquet"
-        );
+        assert_eq!(relative, "dir/a b/中文/%25/literal/../file+name.parquet");
     }
 
     #[tokio::test]

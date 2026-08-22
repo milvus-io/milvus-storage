@@ -23,11 +23,13 @@
 #include <utility>
 
 #include <aws/core/Aws.h>
+#include <aws/core/client/CoreErrors.h>
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/curl/CurlHttpClient.h>
 #include <aws/core/http/standard/StandardHttpRequest.h>
 #include <aws/core/http/standard/StandardHttpResponse.h>
+#include <aws/core/utils/xml/XmlSerializer.h>
 
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/status.h>
@@ -36,11 +38,14 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/common/macro.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/gcp/gcp_credential_provider.h"
 #include "milvus-storage/filesystem/gcp/gcp_credential_registry.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/tls_http_client.h"
+
+#include "filesystem/gcp/gcp_filesystem_producer_internal.h"
 
 namespace milvus_storage {
 
@@ -51,6 +56,76 @@ constexpr const char* kGoogleClientFactoryAllocationTag = "GoogleHttpClientFacto
 const std::unordered_map<std::string, S3LogLevel> kLogLevelMap = {
     {"off", S3LogLevel::Off},   {"fatal", S3LogLevel::Fatal}, {"error", S3LogLevel::Error}, {"warn", S3LogLevel::Warn},
     {"info", S3LogLevel::Info}, {"debug", S3LogLevel::Debug}, {"trace", S3LogLevel::Trace}};
+
+void WriteS3XmlError(Aws::Http::HttpResponse& response, std::string_view code, std::string_view message) {
+  auto document = Aws::Utils::Xml::XmlDocument::CreateWithRootNode("Error");
+  auto root = document.GetRootElement();
+  root.CreateChildElement("Code").SetText(Aws::String(code.data(), code.size()));
+  root.CreateChildElement("Message").SetText(Aws::String(message.data(), message.size()));
+  response.GetResponseBody() << document.ConvertToString();
+}
+
+}  // namespace
+
+namespace gcp_internal {
+
+std::shared_ptr<Aws::Http::HttpResponse> MakeTokenErrorResponse(const std::shared_ptr<Aws::Http::HttpRequest>& request,
+                                                                const arrow::Status& token_status) {
+  auto detail = ExtendStatusDetail::UnwrapStatus(token_status);
+  auto response_code = Aws::Http::HttpResponseCode::BAD_REQUEST;
+  std::string error_code = "LoonGcpCredentialResponseInvalid";
+  bool network_client_error = false;
+  if (detail != nullptr) {
+    switch (detail->code()) {
+      case ExtendStatusCode::StorageTransientNetwork:
+        response_code = Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE;
+        error_code = "NetworkConnection";
+        network_client_error = true;
+        break;
+      case ExtendStatusCode::StorageTransientTimeout:
+        response_code = Aws::Http::HttpResponseCode::REQUEST_TIMEOUT;
+        error_code = "RequestTimeout";
+        break;
+      case ExtendStatusCode::StorageTransientThrottling:
+        response_code = Aws::Http::HttpResponseCode::TOO_MANY_REQUESTS;
+        error_code = "Throttling";
+        break;
+      case ExtendStatusCode::StorageTransientService:
+        response_code = Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE;
+        error_code = "ServiceUnavailable";
+        break;
+      case ExtendStatusCode::StorageAccessDenied:
+        response_code = Aws::Http::HttpResponseCode::FORBIDDEN;
+        error_code = "AccessDenied";
+        break;
+      case ExtendStatusCode::StorageConfigInvalid:
+        error_code = "LoonGcpCredentialConfigInvalid";
+        break;
+      default:
+        if (detail->retryable()) {
+          response_code = Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE;
+          error_code = "ServiceUnavailable";
+        }
+        break;
+    }
+  }
+  auto error_response =
+      Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>(kGoogleClientFactoryAllocationTag, request);
+  error_response->SetResponseCode(response_code);
+  if (network_client_error) {
+    // XML names are service-specific and the pinned S3 marshaller does not
+    // recognize IDPCommunicationError as a network failure. A client error is
+    // the SDK's typed transport channel and survives S3 marshalling unchanged.
+    error_response->SetClientErrorType(Aws::Client::CoreErrors::NETWORK_CONNECTION);
+    error_response->SetClientErrorMessage(token_status.message().c_str());
+  }
+  WriteS3XmlError(*error_response, error_code, token_status.message());
+  return error_response;
+}
+
+}  // namespace gcp_internal
+
+namespace {
 
 // Stateless HttpClient wrapper. Holds only a reference to the registry and an
 // optional TLS floor setting. Per-request credential work is dispatched by URI
@@ -80,6 +155,13 @@ class GoogleHttpClientDelegator : public Aws::Http::HttpClient {
       return MakeSignatureErrorResponse(request, fmt::format("No GcpCredentialProvider registered for URI: {}",
                                                              std::string(request->GetUri().GetURIString().c_str())));
     }
+    // Resolve the token in this send call and consume that exact Result before
+    // any other request can affect the decision. A failed lookup therefore
+    // cannot become an anonymous GCS request, nor can another request's success
+    // hide it.
+    if (auto token_status = ApplyGcpAuthorizationHeader(provider, request); !token_status.ok()) {
+      return gcp_internal::MakeTokenErrorResponse(request, token_status);
+    }
     auto status = provider->MaybeSignConditionalWrite(request);
     if (!status.ok()) {
       return MakeSignatureErrorResponse(request, status.message());
@@ -95,22 +177,16 @@ class GoogleHttpClientDelegator : public Aws::Http::HttpClient {
     auto error_response =
         Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>(kGoogleClientFactoryAllocationTag, request);
     error_response->SetResponseCode(Aws::Http::HttpResponseCode::FORBIDDEN);
-    error_response->GetResponseBody() << fmt::format(
-        R"(<?xml version="1.0" encoding="UTF-8"?>
-<Error>
-  <Code>SignatureFailed</Code>
-  <Message>{}</Message>
-</Error>)",
-        message);
+    WriteS3XmlError(*error_response, "SignatureFailed", message);
     return error_response;
   }
 
   std::shared_ptr<Aws::Http::HttpClient> underlying_client_;
 };
 
-// Stateless HttpClientFactory. Dispatches Authorization header injection by
-// URI lookup against GcpCredentialRegistry. Identity itself lives in the
-// registry, not in the factory — that's what allows N identities per process.
+// Stateless HttpClientFactory. Identity lives in GcpCredentialRegistry and is
+// resolved by GoogleHttpClientDelegator immediately before each send. Keeping
+// the factory free of credential state allows N identities per process.
 class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
   public:
   explicit GoogleHttpClientFactory(std::string tls_min_version) : tls_min_version_(std::move(tls_min_version)) {}
@@ -133,18 +209,6 @@ class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
         Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(kGoogleClientFactoryAllocationTag, uri, method);
     request->SetResponseStreamFactory(streamFactory);
 
-    auto provider = GcpCredentialRegistry::Instance().Lookup(uri);
-    if (!provider) {
-      // Same invariant as Delegator::MakeRequest: every GCP URI should have a
-      // registered provider. This interface can only return a request (no error
-      // channel), so log here and let MakeRequest fail the request with a 403.
-      LOG_STORAGE_ERROR_ << "GoogleHttpClientFactory: no GcpCredentialProvider registered for URI: "
-                         << std::string(uri.GetURIString().c_str());
-      return request;
-    }
-    if (auto header = provider->AuthorizationHeader(); header.has_value()) {
-      request->SetHeaderValue(header->first.c_str(), header->second.c_str());
-    }
     return request;
   }
 

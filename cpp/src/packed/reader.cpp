@@ -14,7 +14,7 @@
 
 #include <memory>
 #include <algorithm>
-#include <exception>
+#include <new>
 #include <stdexcept>
 #include <utility>
 
@@ -56,16 +56,11 @@ arrow::Result<std::shared_ptr<PackedFileMetadata>> MakePackedMetadata(
   try {
     auto result = PackedFileMetadata::Make(metadata);
     if (!result.ok()) {
-      return WrapExtendError(ExtendStatusCode::PackedMetadataCorrupted,
-                             fmt::format("Failed to parse packed file metadata. [path={}]", path), result.status());
+      return result.status();
     }
     return result;
-  } catch (const std::exception& e) {
-    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
-                           fmt::format("Failed to parse packed file metadata. [path={}, error={}]", path, e.what()));
   } catch (...) {
-    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
-                           fmt::format("Failed to parse packed file metadata with unknown exception. [path={}]", path));
+    return MakeExtendError(ExtendStatusCode::InternalInvariantViolated, "Packed metadata parsing failed unexpectedly");
   }
 }
 
@@ -99,7 +94,6 @@ PackedRecordBatchReader::PackedRecordBatchReader(const std::shared_ptr<arrow::fs
     : PackedRecordBatchReader(buffer_size) {
   auto status = init(fs, paths, schema, reader_props, arrow_reader_props);
   if (!status.ok()) {
-    LOG_STORAGE_ERROR_ << "Error initializing PackedRecordBatchReader: " << status.ToString();
     // Deprecated path (see reader.h): stringifies the status and destroys its
     // classification. Migrate to Make().
     throw std::runtime_error(status.ToString());
@@ -129,12 +123,15 @@ arrow::Status PackedRecordBatchReader::init(const std::shared_ptr<arrow::fs::Fil
   for (const auto& path : needed_paths_) {
     auto result = MakeArrowFileReader(*fs, path, reader_props, arrow_reader_props);
     if (!result.ok()) {
-      return WrapExtendError(ExtendStatusCode::PackedStorageIO,
-                             fmt::format("Error making file reader with path {}", path), result.status());
+      return result.status();
     }
     auto file_reader = std::move(result.ValueOrDie());
     auto metadata = file_reader->parquet_reader()->metadata();
-    ARROW_ASSIGN_OR_RAISE(auto file_metadata, MakePackedMetadata(metadata, path));
+    auto file_metadata_result = MakePackedMetadata(metadata, path);
+    if (!file_metadata_result.ok()) {
+      return file_metadata_result.status();
+    }
+    auto file_metadata = std::move(file_metadata_result).ValueOrDie();
     metadata_list_.emplace_back(std::move(file_metadata));
     file_readers_.emplace_back(std::move(file_reader));
 
@@ -145,7 +142,6 @@ arrow::Status PackedRecordBatchReader::init(const std::shared_ptr<arrow::fs::Fil
       }
     }
   }
-
   file_reader_to_path_index_ = std::move(file_reader_to_path_index);
 
   // Initialize table states and chunk manager
@@ -166,8 +162,8 @@ arrow::Status PackedRecordBatchReader::schemaMatching(const std::shared_ptr<arro
   // read first file metadata to get field id mapping
   auto result = MakeArrowFileReader(*fs, paths[0], reader_props, arrow_reader_props);
   if (!result.ok()) {
-    return WrapExtendError(ExtendStatusCode::PackedStorageIO,
-                           fmt::format("Error making file reader with path {}", paths[0]), result.status());
+    return WrapExtendError(ExtendStatusCode::PackedIO, fmt::format("Error making file reader with path {}", paths[0]),
+                           result.status());
   }
   auto parquet_metadata = result.ValueOrDie()->parquet_reader()->metadata();
   ARROW_ASSIGN_OR_RAISE(auto metadata, MakePackedMetadata(parquet_metadata, paths[0]));
@@ -310,10 +306,9 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     std::shared_ptr<arrow::Table> read_table = nullptr;
     auto read_status = file_readers_[i]->ReadRowGroups(rgs_to_read[i], &read_table);
     if (!read_status.ok()) {
-      return WrapExtendError(ExtendStatusCode::PackedStorageIO,
-                             fmt::format("Failed to read packed row groups. [path={}]",
-                                         needed_paths_.size() > i ? *std::next(needed_paths_.begin(), i) : "unknown"),
-                             read_status);
+      const auto path = needed_paths_.size() > i ? *std::next(needed_paths_.begin(), i) : "unknown";
+      return read_status.WithMessage(
+          fmt::format("Failed to read packed row groups. [path={}]: {}", path, read_status.message()));
     }
     int path_index = file_reader_to_path_index_[i];
     tables_[path_index].push(std::move(read_table));
@@ -345,12 +340,9 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
     std::vector<std::shared_ptr<arrow::ArrayData>> batch_data;
     try {
       batch_data = chunk_manager_->SliceChunksByMaxContiguousSlice(row_limit_ - absolute_row_position_, tables_);
-    } catch (const std::exception& e) {
-      return MakeExtendError(ExtendStatusCode::PackedFileCorrupted,
-                             fmt::format("Packed file chunk layout is corrupted: {}", e.what()));
     } catch (...) {
-      return MakeExtendError(ExtendStatusCode::PackedFileCorrupted,
-                             "Packed file chunk layout is corrupted with unknown exception");
+      return MakeExtendError(ExtendStatusCode::InternalInvariantViolated,
+                             "Packed file chunk slicing failed unexpectedly");
     }
     int64_t chunk_size = chunk_manager_->GetChunkSize();
     absolute_row_position_ += chunk_size;
@@ -367,7 +359,7 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
       } else {
         auto null_array_result = arrow::MakeArrayOfNull(schema_->field(i)->type(), chunk_size);
         if (!null_array_result.ok()) {
-          return WrapExtendError(ExtendStatusCode::PackedArrowError,
+          return WrapExtendError(ExtendStatusCode::InternalInvariantViolated,
                                  fmt::format("Failed to create null array. [field_index={}]", i),
                                  null_array_result.status());
         }
@@ -377,12 +369,8 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
     }
     *out = arrow::RecordBatch::Make(schema_, chunk_size, arrays);
     return arrow::Status::OK();
-  } catch (const std::exception& e) {
-    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
-                           fmt::format("Packed reader read next failed unexpectedly: {}", e.what()));
   } catch (...) {
-    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
-                           "Packed reader read next with unknown exception failed unexpectedly");
+    return MakeExtendError(ExtendStatusCode::InternalInvariantViolated, "Packed reader read failed unexpectedly");
   }
 }
 
@@ -408,12 +396,8 @@ arrow::Status PackedRecordBatchReader::Close() {
     metadata_list_.clear();
     memory_used_ = 0;
     return arrow::Status::OK();
-  } catch (const std::exception& e) {
-    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
-                           fmt::format("Packed reader close failed unexpectedly: {}", e.what()));
   } catch (...) {
-    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
-                           "Packed reader close with unknown exception failed unexpectedly");
+    return MakeExtendError(ExtendStatusCode::InternalInvariantViolated, "Packed reader close failed unexpectedly");
   }
 }
 

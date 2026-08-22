@@ -9,6 +9,8 @@
 #include <aws/core/http/HttpRequest.h>
 #include <aws/core/utils/DateTime.h>
 
+#include <new>
+
 namespace milvus_storage {
 using Aws::Http::HttpClient;
 using Aws::Http::HttpRequest;
@@ -29,45 +31,44 @@ HuaweiCloudSTSCredentialsClient::HuaweiCloudSTSCredentialsClient(
 HuaweiCloudSTSCredentialsClient::STSAssumeRoleWithWebIdentityResult
 HuaweiCloudSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
     const STSAssumeRoleWithWebIdentityRequest& request) {
-  Aws::StringStream ss;
-  ss << R"({
+  STSAssumeRoleWithWebIdentityResult result;
+  try {
+    Aws::StringStream ss;
+    ss << R"({
         "auth": {
           "id_token": {
             "id": ")"
-     << request.webIdentityToken << R"("
+       << request.webIdentityToken << R"("
           },
           "scope": {
             "project": {
               "id": ")"
-     << request.roleArn << R"("
+       << request.roleArn << R"("
             }
           }
         }
       })";
 
-  Aws::String endpoint = m_token_endpoint;
-  size_t pos = endpoint.find("{region}");
-  if (pos != Aws::String::npos) {
-    endpoint.replace(pos, 8, request.region);
-  }
-  std::shared_ptr<Aws::Http::HttpRequest> httpRequest(Aws::Http::CreateHttpRequest(
-      endpoint, Aws::Http::HttpMethod::HTTP_POST, Aws::Utils::Stream::DefaultResponseStreamFactoryMethod));
-  httpRequest->SetUserAgent(Aws::Client::ComputeUserAgentString());
-  httpRequest->SetHeaderValue("X-Idp-Id", request.providerId);
-  httpRequest->SetHeaderValue("Content-Type", "application/json");
+    Aws::String endpoint = m_token_endpoint;
+    size_t pos = endpoint.find("{region}");
+    if (pos != Aws::String::npos) {
+      endpoint.replace(pos, 8, request.region);
+    }
+    std::shared_ptr<Aws::Http::HttpRequest> httpRequest(Aws::Http::CreateHttpRequest(
+        endpoint, Aws::Http::HttpMethod::HTTP_POST, Aws::Utils::Stream::DefaultResponseStreamFactoryMethod));
+    httpRequest->SetUserAgent(Aws::Client::ComputeUserAgentString());
+    httpRequest->SetHeaderValue("X-Idp-Id", request.providerId);
+    httpRequest->SetHeaderValue("Content-Type", "application/json");
 
-  std::shared_ptr<Aws::IOStream> body = Aws::MakeShared<Aws::StringStream>("STS_RESOURCE_CLIENT_LOG_TAG");
-  *body << ss.str();
-  body->seekg(0, body->end);
-  auto streamSize = body->tellg();
-  body->seekg(0, body->beg);
-  httpRequest->SetContentLength(std::to_string(streamSize));
-  httpRequest->AddContentBody(body);
-  httpRequest->SetContentType("application/json; charset=utf-8");
+    std::shared_ptr<Aws::IOStream> body = Aws::MakeShared<Aws::StringStream>("STS_RESOURCE_CLIENT_LOG_TAG");
+    *body << ss.str();
+    body->seekg(0, body->end);
+    auto streamSize = body->tellg();
+    body->seekg(0, body->beg);
+    httpRequest->SetContentLength(std::to_string(streamSize));
+    httpRequest->AddContentBody(body);
+    httpRequest->SetContentType("application/json; charset=utf-8");
 
-  STSAssumeRoleWithWebIdentityResult result;
-
-  try {
     // Stage 1: Get IAM token via OIDC id-token endpoint
     // Note: GetResourceWithAWSWebServiceResult() only treats HTTP 200 as success,
     // so HuaweiCloud's 201 CREATED will produce spurious WARN/ERROR logs from the
@@ -79,10 +80,12 @@ HuaweiCloudSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
     auto awsResult = GetResourceWithAWSWebServiceResult(httpRequest);
     auto responseCode = awsResult.GetResponseCode();
     if (responseCode != Aws::Http::HttpResponseCode::OK && responseCode != Aws::Http::HttpResponseCode::CREATED) {
-      LOG_STORAGE_WARNING_ << fmt::format(
-          "[{}] Failed to get credentials token from Huawei Cloud STS, response "
-          "code: {}",
-          STS_RESOURCE_CLIENT_LOG_TAG, static_cast<int>(responseCode));
+      // The response code is what separates an unreachable IAM endpoint from
+      // one that refused this token; both used to arrive as "no credentials".
+      result.status = ClassifyCredentialHttpFailure(
+          responseCode,
+          fmt::format("Huawei Cloud IAM token request failed (http_status={})", static_cast<int>(responseCode)));
+      LOG_STORAGE_WARNING_ << fmt::format("[{}] {}", STS_RESOURCE_CLIENT_LOG_TAG, result.status.message());
       return result;
     }
 
@@ -91,6 +94,7 @@ HuaweiCloudSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
     if (subjectTokenIter == responseHeaders.end()) {
       LOG_STORAGE_WARNING_ << fmt::format("[{}] No x-subject-token in huawei cloud sts response headers",
                                           STS_RESOURCE_CLIENT_LOG_TAG);
+      result.status = MakeCredentialResponseError("Huawei Cloud IAM response carried no x-subject-token header");
       return result;
     }
 
@@ -102,6 +106,9 @@ HuaweiCloudSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
     const Aws::String subjectToken = subjectTokenIter->second;
     auto stsResult = callHuaweiCloudSTS(subjectToken, request);
     if (!stsResult.success) {
+      result.status = stsResult.status.ok()
+                          ? MakeCredentialResponseError("Huawei Cloud STS returned no temporary credentials")
+                          : stsResult.status;
       LOG_STORAGE_WARNING_ << fmt::format("[{}] Failed to get credentials from Huawei Cloud STS: {}",
                                           STS_RESOURCE_CLIENT_LOG_TAG, stsResult.errorMessage);
       return result;
@@ -111,12 +118,18 @@ HuaweiCloudSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
     result.success = true;
     LOG_STORAGE_INFO_ << fmt::format("[{}] Stage 2 succeeded. expires_in_ms={}", STS_RESOURCE_CLIENT_LOG_TAG,
                                      (result.creds.GetExpiration() - Aws::Utils::DateTime::Now()).count());
+  } catch (const std::bad_alloc&) {
+    result.success = false;
+    result.status = MakeCredentialOutOfMemoryError("Huawei Cloud STS credential retrieval ran out of memory");
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] Credential retrieval ran out of memory", STS_RESOURCE_CLIENT_LOG_TAG);
   } catch (const std::exception& e) {
     result.success = false;
+    result.status = MakeCredentialExceptionError("Huawei Cloud STS credential retrieval raised", e);
     LOG_STORAGE_ERROR_ << fmt::format("[{}] Exception during Huawei Cloud STS credential retrieval: {}",
                                       STS_RESOURCE_CLIENT_LOG_TAG, e.what());
   } catch (...) {
     result.success = false;
+    result.status = MakeCredentialUnknownExceptionError("Huawei Cloud STS credential retrieval raised");
     LOG_STORAGE_ERROR_ << fmt::format("[{}] Unknown exception during Huawei Cloud STS credential retrieval",
                                       STS_RESOURCE_CLIENT_LOG_TAG);
   }
@@ -151,11 +164,13 @@ HuaweiCloudSTSCredentialsClient::STSCallResult HuaweiCloudSTSCredentialsClient::
   req->SetContentLength(std::to_string(streamSize));
   req->AddContentBody(body);
 
-  auto resp = m_httpClient->MakeRequest(req);
+  auto resp = MakeRequestWithCredentialRetry(*m_httpClient, req);
   STSCallResult result;
   result.success = false;
   if (!resp) {
     result.errorMessage = "Null response from Huawei Cloud STS HTTP request";
+    result.status = ClassifyCredentialHttpFailure(Aws::Http::HttpResponseCode::NO_RESPONSE,
+                                                  "Huawei Cloud STS security token request returned no response");
     LOG_STORAGE_WARNING_ << fmt::format("[{}] Security token request returned null response",
                                         STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
@@ -164,6 +179,9 @@ HuaweiCloudSTSCredentialsClient::STSCallResult HuaweiCloudSTSCredentialsClient::
   if (httpResponseCode != Aws::Http::HttpResponseCode::OK && httpResponseCode != Aws::Http::HttpResponseCode::CREATED) {
     result.errorMessage = "Huawei Cloud STS security token request failed with HTTP code: " +
                           std::to_string(static_cast<int>(httpResponseCode));
+    result.status = ClassifyCredentialHttpFailure(
+        httpResponseCode, fmt::format("Huawei Cloud STS security token request failed (http_status={})",
+                                      static_cast<int>(httpResponseCode)));
     LOG_STORAGE_WARNING_ << fmt::format("[{}] Security token request failed, HTTP code={}", STS_RESOURCE_CLIENT_LOG_TAG,
                                         static_cast<int>(httpResponseCode));
     return result;
@@ -173,6 +191,7 @@ HuaweiCloudSTSCredentialsClient::STSCallResult HuaweiCloudSTSCredentialsClient::
   Aws::String credentialsStr = oss.str();
   if (credentialsStr.empty()) {
     result.errorMessage = "Get an empty credential from Huawei Cloud STS";
+    result.status = MakeCredentialResponseError("Huawei Cloud STS returned an empty credential body");
     return result;
   }
   Aws::Utils::Json::JsonValue jsonValue(credentialsStr);
@@ -180,6 +199,7 @@ HuaweiCloudSTSCredentialsClient::STSCallResult HuaweiCloudSTSCredentialsClient::
   auto rootNode = json.GetObject("credential");
   if (rootNode.IsNull()) {
     result.errorMessage = "Get credential from STS result failed";
+    result.status = MakeCredentialResponseError("Huawei Cloud STS response carried no credential object");
     return result;
   }
   result.credentials.SetAWSAccessKeyId(rootNode.GetString("access"));
@@ -189,15 +209,23 @@ HuaweiCloudSTSCredentialsClient::STSCallResult HuaweiCloudSTSCredentialsClient::
   auto expiresAt = rootNode.GetString("expires_at");
   if (expiresAt.empty()) {
     result.errorMessage = "STS response missing 'expires_at' field, rejecting credentials";
+    result.status = MakeCredentialResponseError("Huawei Cloud STS response is missing expires_at");
     return result;
   }
   auto parsedExpiration =
       Aws::Utils::DateTime(Aws::Utils::StringUtils::Trim(expiresAt.c_str()).c_str(), Aws::Utils::DateFormat::ISO_8601);
   if (!parsedExpiration.WasParseSuccessful()) {
     result.errorMessage = "STS response 'expires_at' field has invalid format: " + std::string(expiresAt.c_str());
+    result.status = MakeCredentialResponseError("Huawei Cloud STS response has an invalid expires_at");
     return result;
   }
   result.credentials.SetExpiration(parsedExpiration);
+  result.status = ValidateTemporaryCredentials(result.credentials, "Huawei Cloud STS");
+  if (!result.status.ok()) {
+    result.credentials = {};
+    result.errorMessage = result.status.message();
+    return result;
+  }
   result.success = true;
   return result;
 }

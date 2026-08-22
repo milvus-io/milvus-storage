@@ -24,7 +24,9 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/layout.h"
+#include "milvus-storage/common/log.h"
 #include "milvus-storage/common/path_util.h"  // for kSep
+#include "milvus-storage/common/writer_status.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/format.h"
 #include "milvus-storage/format/column_group_reader.h"
@@ -48,6 +50,58 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
         format_writer_(nullptr) {}
 
   [[nodiscard]] arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
+    return writer_status_.Fail(WriteImpl(record));
+  }
+
+  [[nodiscard]] arrow::Status Flush() override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
+    return writer_status_.Fail(FlushImpl());
+  }
+
+  [[nodiscard]] arrow::Result<std::vector<ColumnGroupFile>> Close() override {
+    // Abandon on both failure paths; see FormatWriter::Close in format_writer.h.
+    if (auto first_failure = writer_status_.Check(); !first_failure.ok()) {
+      Abort();
+      return first_failure;
+    }
+    auto result = CloseImpl();
+    if (!result.ok()) {
+      auto status = writer_status_.Fail(result.status());
+      Abort();
+      return status;
+    }
+    closed_ = true;
+    return result;
+  }
+
+  [[nodiscard]] arrow::Status Open() override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
+    return writer_status_.Fail(OpenImpl());
+  }
+
+  // Deliberately no writer_status_.Check(): abort is the one verb that must
+  // still work after the writer has failed, which is the only time anyone calls
+  // it.
+  void Abort() noexcept override {
+    // closed_ first, before BeginDiscard(): abort after a successful Close has
+    // to be a no-op in every respect, including the recorded status, so a
+    // caller can abandon unconditionally without working out which verb it
+    // owes. The format writer below has the same guard, but reaching it would
+    // already have flipped this writer to Cancelled.
+    if (closed_) {
+      return;
+    }
+    writer_status_.BeginDiscard();
+    if (format_writer_ == nullptr) {
+      return;
+    }
+    format_writer_->Abort();
+    format_writer_.reset();
+  }
+
+  private:
+  [[nodiscard]] arrow::Status WriteImpl(const std::shared_ptr<arrow::RecordBatch>& record) {
     // Fault injection point for testing
     FIU_RETURN_ON(FIUKEY_COLUMN_GROUP_WRITE_FAIL,
                   arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_COLUMN_GROUP_WRITE_FAIL)));
@@ -56,7 +110,7 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
     return format_writer_->Write(record);
   }
 
-  [[nodiscard]] arrow::Status Flush() override {
+  [[nodiscard]] arrow::Status FlushImpl() {
     ARROW_RETURN_NOT_OK(format_writer_->Flush());
 
     if (written_bytes_ == 0 || written_bytes_ < max_bytes_limit_) {
@@ -74,7 +128,7 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
     return arrow::Status::OK();
   }
 
-  [[nodiscard]] arrow::Result<std::vector<ColumnGroupFile>> Close() override {
+  [[nodiscard]] arrow::Result<std::vector<ColumnGroupFile>> CloseImpl() {
     assert(format_writer_);
     ARROW_ASSIGN_OR_RAISE(auto column_group_file, format_writer_->Close());
     // If current column_group_file without any data, do not add it to written_files_
@@ -84,7 +138,7 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
     return written_files_;
   }
 
-  [[nodiscard]] arrow::Status Open() override {
+  [[nodiscard]] arrow::Status OpenImpl() {
     assert(!format_writer_);
     ARROW_ASSIGN_OR_RAISE(format_writer_,
                           create_format_writer(base_path_, column_group_id_, column_group_, schema_, properties_));
@@ -92,7 +146,6 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
     return arrow::Status::OK();
   }
 
-  private:
   static arrow::Result<std::unique_ptr<FormatWriter>> create_format_writer(
       const std::string& base_path,
       const size_t& column_group_id,
@@ -140,6 +193,10 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
   uint64_t written_bytes_{0};
 
   std::vector<ColumnGroupFile> written_files_;
+  WriterStatus writer_status_;
+  // Set only by a Close() that finished cleanly, so it means exactly
+  // "already finalized" and never "gave up part way".
+  bool closed_{false};
 };
 
 arrow::Result<std::unique_ptr<ColumnGroupWriter>> ColumnGroupWriter::create(
@@ -151,7 +208,11 @@ arrow::Result<std::unique_ptr<ColumnGroupWriter>> ColumnGroupWriter::create(
   std::unique_ptr<ColumnGroupWriterImpl> writer;
   assert(column_group && schema);
   writer = std::make_unique<ColumnGroupWriterImpl>(base_path, column_group_id, column_group, schema, properties);
-  ARROW_RETURN_NOT_OK(writer->Open());
+  auto status = writer->Open();
+  if (!status.ok()) {
+    writer->Abort();
+    return status;
+  }
   return writer;
 }
 

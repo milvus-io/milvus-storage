@@ -34,6 +34,7 @@
 #include <aws/s3-crt/S3CrtClient.h>
 #include <aws/s3-crt/S3CrtClientConfiguration.h>
 
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 
 namespace milvus_storage {
@@ -176,10 +177,12 @@ void S3CrtClientLease::Release() {
 }
 
 S3CrtClientHolder::S3CrtClientHolder(std::shared_ptr<S3CrtClientFinalizer> finalizer,
-                                     std::shared_ptr<FilesystemMetrics> metrics)
+                                     std::shared_ptr<FilesystemMetrics> metrics,
+                                     std::shared_ptr<RequestCredentialsResolver> credentials_resolver)
     : finalizer_(std::move(finalizer)),
       operation_state_(std::make_shared<S3CrtClientOperationState>()),
-      metrics_(std::move(metrics)) {}
+      metrics_(std::move(metrics)),
+      credentials_resolver_(std::move(credentials_resolver)) {}
 
 S3CrtClientHolder::~S3CrtClientHolder() { Finalize(); }
 
@@ -192,6 +195,18 @@ S3CrtClientHolder::~S3CrtClientHolder() { Finalize(); }
 // finalized_ is also checked because global shutdown closes admission before
 // it has collected and finalized every individual holder.
 arrow::Result<S3CrtClientLease> S3CrtClientHolder::Acquire() {
+  // Resolve credentials before borrowing the client: a failed refresh must not
+  // hand out a client pointer that would 401/403 on its first request. Done
+  // before the operation gate so the resolution runs without holding
+  // operation_state_->mutex (network I/O must never serialize with the
+  // active-operation counter), and so a failed resolution cannot leak an
+  // incremented active_operations count.
+  if (credentials_resolver_ != nullptr) {
+    auto credentials = credentials_resolver_->ResolveForRequest();
+    if (!credentials.ok()) {
+      return credentials.status();
+    }
+  }
   S3CrtClientLease lease;
   {
     std::lock_guard operation_lock(operation_state_->mutex);
@@ -255,7 +270,9 @@ std::shared_ptr<FilesystemMetrics> S3CrtClientHolder::GetMetrics() const { retur
 // failure the construction guard performs only the final decrement, so a null
 // or multiply-owned client is never counted as live.
 arrow::Result<std::shared_ptr<S3CrtClientHolder>> S3CrtClientFinalizer::AddClient(
-    ClientFactory make_client, std::shared_ptr<FilesystemMetrics> metrics) {
+    ClientFactory make_client,
+    std::shared_ptr<FilesystemMetrics> metrics,
+    std::shared_ptr<RequestCredentialsResolver> credentials_resolver) {
   auto finalizer = shared_from_this();
   {
     std::lock_guard lock(mutex_);
@@ -279,7 +296,8 @@ arrow::Result<std::shared_ptr<S3CrtClientHolder>> S3CrtClientFinalizer::AddClien
   if (client.use_count() != 1) {
     return arrow::Status::Invalid("S3CrtClientHolder must be the sole shared owner");
   }
-  auto holder = std::shared_ptr<S3CrtClientHolder>(new S3CrtClientHolder(finalizer, std::move(metrics)));
+  auto holder = std::shared_ptr<S3CrtClientHolder>(
+      new S3CrtClientHolder(finalizer, std::move(metrics), std::move(credentials_resolver)));
 
   bool notify = false;
   {
@@ -396,7 +414,8 @@ arrow::Result<std::shared_ptr<S3CrtClientHolder>> ClientBuilder<Aws::S3Crt::S3Cr
                                                          client_config_.payloadSigningPolicy,
                                                          client_config_.useVirtualAddressing);
       },
-      std::move(metrics));
+      std::move(metrics),
+      std::dynamic_pointer_cast<RequestCredentialsResolver>(credentials_provider_));
 }
 
 }  // namespace milvus_storage

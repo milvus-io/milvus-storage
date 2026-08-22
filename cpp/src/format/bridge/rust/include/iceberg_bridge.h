@@ -18,14 +18,9 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include <stdexcept>
+#include <arrow/result.h>
 
 namespace milvus_storage::iceberg {
-
-class IcebergException : public std::runtime_error {
-  public:
-  explicit IcebergException(const std::string& message) : std::runtime_error(message) {}
-};
 
 /// Per-file info returned from PlanFiles
 struct IcebergFileInfo {
@@ -42,9 +37,10 @@ struct IcebergFileInfo {
 /// @param snapshot_id Which snapshot to scan
 /// @param storage_options S3/cloud config as key-value pairs
 /// @return Vector of file info, one per data file in the snapshot
-std::vector<IcebergFileInfo> PlanFiles(const std::string& metadata_location,
-                                       int64_t snapshot_id,
-                                       const std::unordered_map<std::string, std::string>& storage_options);
+arrow::Result<std::vector<IcebergFileInfo>> PlanFiles(
+    const std::string& metadata_location,
+    int64_t snapshot_id,
+    const std::unordered_map<std::string, std::string>& storage_options);
 
 /// Info returned after creating a test Iceberg table.
 struct IcebergTestTableInfo {
@@ -66,11 +62,12 @@ struct IcebergTestTableInfo {
 /// intending to read via native `gs://` with SA impersonation; the Rust side
 /// will byte-rewrite the embedded scheme across every level of the metadata
 /// tree so iceberg-rust's `plan_files` can traverse it under a `gs://` FileIO.
-IcebergTestTableInfo CreateTestTable(const std::string& table_dir,
-                                     uint64_t num_rows,
-                                     bool with_positional_deletes,
-                                     const std::vector<int64_t>& deleted_positions,
-                                     const std::unordered_map<std::string, std::string>& storage_options = {},
-                                     const std::string& record_scheme_override = "");
+arrow::Result<IcebergTestTableInfo> CreateTestTable(
+    const std::string& table_dir,
+    uint64_t num_rows,
+    bool with_positional_deletes,
+    const std::vector<int64_t>& deleted_positions,
+    const std::unordered_map<std::string, std::string>& storage_options = {},
+    const std::string& record_scheme_override = "");
 
 }  // namespace milvus_storage::iceberg

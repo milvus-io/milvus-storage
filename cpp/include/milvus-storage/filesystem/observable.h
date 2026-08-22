@@ -26,6 +26,8 @@
 #include <arrow/status.h>
 #include <arrow/util/future.h>
 
+#include "milvus-storage/common/writer_status.h"
+
 namespace milvus_storage {
 
 /// \brief Metrics collection for filesystem operations
@@ -311,34 +313,55 @@ class MetricsOutputStream : public arrow::io::OutputStream {
   MetricsOutputStream(std::shared_ptr<arrow::io::OutputStream> stream, std::shared_ptr<FilesystemMetrics> metrics)
       : stream_(std::move(stream)), metrics_(std::move(metrics)) {}
 
+  ~MetricsOutputStream() override = default;
+
   // FileInterface
-  arrow::Status Close() override { return stream_->Close(); }
-  arrow::Status Abort() override { return stream_->Abort(); }
-  arrow::Result<int64_t> Tell() const override { return stream_->Tell(); }
+  arrow::Status Close() override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
+    return writer_status_.Fail(stream_->Close());
+  }
+  arrow::Status Abort() override {
+    writer_status_.BeginDiscard();
+    return stream_->Abort();
+  }
+  arrow::Result<int64_t> Tell() const override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
+    auto result = stream_->Tell();
+    if (!result.ok()) {
+      return writer_status_.Fail(result.status());
+    }
+    return result;
+  }
   bool closed() const override { return stream_->closed(); }
 
   // Writable
   arrow::Status Write(const void* data, int64_t nbytes) override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
     auto status = stream_->Write(data, nbytes);
     if (status.ok() && nbytes > 0) {
       metrics_->IncrementWriteBytes(nbytes);
     }
-    return status;
+    return writer_status_.Fail(std::move(status));
   }
 
   arrow::Status Write(const std::shared_ptr<arrow::Buffer>& data) override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
     auto status = stream_->Write(data);
     if (status.ok() && data && data->size() > 0) {
       metrics_->IncrementWriteBytes(data->size());
     }
-    return status;
+    return writer_status_.Fail(std::move(status));
   }
 
-  arrow::Status Flush() override { return stream_->Flush(); }
+  arrow::Status Flush() override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
+    return writer_status_.Fail(stream_->Flush());
+  }
 
   private:
   std::shared_ptr<arrow::io::OutputStream> stream_;
   std::shared_ptr<FilesystemMetrics> metrics_;
+  mutable WriterStatus writer_status_;
 };
 
 }  // namespace milvus_storage

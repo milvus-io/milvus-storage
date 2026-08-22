@@ -22,6 +22,7 @@
 #include <memory>
 
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/writer_status.h"
 #include "milvus-storage/format/format_writer.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
@@ -47,7 +48,13 @@ class LanceTableWriter final : public FormatWriter {
 
   arrow::Result<api::ColumnGroupFile> Close() override;
 
+  void Abort() noexcept override;
+
   private:
+  arrow::Status WriteImpl(const std::shared_ptr<arrow::RecordBatch>& record);
+  arrow::Status FlushImpl();
+  arrow::Result<api::ColumnGroupFile> CloseImpl();
+
   bool closed_;
   std::string base_path_;
   std::shared_ptr<arrow::Schema> schema_;
@@ -57,6 +64,11 @@ class LanceTableWriter final : public FormatWriter {
   std::vector<std::shared_ptr<arrow::RecordBatch>> record_batches_;
   std::unique_ptr<BlockingDataset> dataset_;
   std::vector<uint64_t> origin_fids_;
+  /// Whether this writer created the dataset because the open reported it
+  /// missing. Only used to explain the failure if that verdict turns out to
+  /// have been wrong.
+  bool created_dataset_ = false;
+  WriterStatus writer_status_;
   int64_t written_rows_ = 0;
 };
 }  // namespace milvus_storage::lance

@@ -22,7 +22,6 @@
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/properties.h"
-#include "milvus-storage/common/config.h"
 
 namespace milvus_storage::api {
 /**
@@ -103,6 +102,9 @@ class ColumnGroupPolicy {
  * The writer coordinates multiple column group writers to achieve optimal
  * storage layout and query performance while maintaining data consistency
  * and integrity.
+ *
+ * Any failed writer operation is terminal for that instance. Callers must
+ * destroy it and create a new writer (and therefore new file paths) to retry.
  */
 class Writer {
   public:
@@ -148,8 +150,9 @@ class Writer {
   /**
    * @brief Virtual destructor
    *
-   * Ensures proper cleanup of column group writers and temporary resources.
-   * If close() hasn't been called, this will attempt to clean up gracefully.
+   * Releases in-memory ownership only. Callers must invoke close() or abort()
+   * first; destruction deliberately performs no storage I/O and therefore
+   * cannot release a remote multipart upload by itself.
    */
   virtual ~Writer() = default;
 
@@ -184,8 +187,8 @@ class Writer {
    *
    * @return Status indicating success or error condition
    *
-   * @note This does not close the writers; additional batches can still be written
-   *       after flushing.
+   * @note After a successful flush, additional batches can still be written.
+   *       A failed flush makes the writer terminal.
    */
   virtual arrow::Status flush() = 0;
 
@@ -204,6 +207,21 @@ class Writer {
   virtual arrow::Result<std::shared_ptr<ColumnGroups>> close(
       const std::vector<std::string_view>& config_keys = {},
       const std::vector<std::string_view>& config_values = {}) = 0;
+
+  /**
+   * @brief Abandons the dataset instead of finalizing it
+   *
+   * The counterpart of close(). A failed writer cannot be closed -- doing so
+   * would publish files that were never finished -- but the column group
+   * writers underneath it may already hold storage the store will keep billing
+   * for, most notably an S3 multipart upload whose parts a bucket listing
+   * cannot even see. abort() releases what it can, best effort.
+   *
+   * Safe after any failure, idempotent, and it never reports a cleanup failure
+   * of its own: the caller is already handling one. Nothing is committed, so
+   * whatever was written is unreferenced by design.
+   */
+  virtual void abort() noexcept = 0;
 };
 
 }  // namespace milvus_storage::api

@@ -16,6 +16,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
 #include <thread>
 #include <utility>
@@ -30,6 +31,7 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include "milvus-storage/filesystem/azure/azurefs_internal.h"
 #include "milvus-storage/filesystem/azure/azure_sas_token_policy.h"
 
 namespace milvus_storage::fs {
@@ -104,6 +106,14 @@ class MockTransport final : public Azure::Core::Http::HttpTransport {
   std::deque<std::pair<Azure::Core::Http::HttpStatusCode, std::string>> responses_;
   std::deque<std::vector<uint8_t>> streamed_response_bodies_;
   std::vector<RequestRecord> requests_;
+};
+
+class OutOfMemoryTransport final : public Azure::Core::Http::HttpTransport {
+  public:
+  std::unique_ptr<Azure::Core::Http::RawResponse> Send(Azure::Core::Http::Request&,
+                                                       const Azure::Core::Context&) override {
+    throw std::bad_alloc();
+  }
 };
 
 static AzureSasBrokerConfig MakeConfig() {
@@ -185,6 +195,27 @@ TEST(AzureSasTokenPolicyTest, SendsBrokerContractAndNormalizesToken) {
   EXPECT_EQ(body["azureAccountName"].get<std::string>(), "account");
 }
 
+// Azure / .NET brokers commonly emit expiredAt with 7 fractional digits
+// (100ns "ticks"). The parser must accept sub-millisecond precision; a
+// MILLI-precision parse rejects these outright and turns every token fetch
+// into a permanent failure.
+TEST(AzureSasTokenPolicyTest, AcceptsDotNetTicksExpirationTimestamp) {
+  const auto now = std::chrono::system_clock::from_time_t(1785146400);
+  auto transport = std::make_shared<MockTransport>();
+  const std::string response = R"({"success":true,"credentials":{"tempAk":"account",)"
+                               R"("sessionToken":"sv=2026-01-01&sig=x","expiredAt":"2026-07-27T11:00:00.1234567Z"}})";
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, response);
+  AzureSasTokenPolicy policy(MakeConfig(), transport, [now] { return now; });
+
+  bool called = false;
+  std::map<std::string, std::string> query;
+  auto policy_response = SendRequest(policy, &called, &query);
+  EXPECT_EQ(policy_response->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok)
+      << policy_response->GetReasonPhrase();
+  EXPECT_TRUE(called);
+  EXPECT_EQ(query.at("sig"), "x");
+}
+
 TEST(AzureSasTokenPolicyTest, PerOperationPolicyKeepsSasAcrossSdkRetries) {
   const auto now = std::chrono::system_clock::from_time_t(1785146400);
   auto broker_transport = std::make_shared<MockTransport>();
@@ -221,7 +252,7 @@ TEST(AzureSasTokenPolicyTest, PerOperationPolicyKeepsSasAcrossSdkRetries) {
   }
 }
 
-TEST(AzureSasTokenPolicyTest, RefreshFailureReturnsOldTokenAndRetriesEveryRequest) {
+TEST(AzureSasTokenPolicyTest, RefreshFailureDoesNotUseCachedToken) {
   auto now = std::make_shared<TimePoint>(std::chrono::system_clock::from_time_t(1785146400));
   auto transport = std::make_shared<MockTransport>();
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
@@ -237,26 +268,25 @@ TEST(AzureSasTokenPolicyTest, RefreshFailureReturnsOldTokenAndRetriesEveryReques
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::InternalServerError, "do not log this body");
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::InternalServerError, "do not log this body");
 
-  auto first_fallback = SendRequest(policy, &called, &query);
-  ASSERT_EQ(first_fallback->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
-  EXPECT_EQ(query.at("sig"), "old");
-  auto second_fallback = SendRequest(policy, &called, &query);
-  ASSERT_EQ(second_fallback->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
-  EXPECT_EQ(query.at("sig"), "old");
-  EXPECT_EQ(transport->Requests().size(), 3u);
+  called = false;
+  auto first_failure = SendRequest(policy, &called, &query);
+  ASSERT_EQ(first_failure->GetStatusCode(), Azure::Core::Http::HttpStatusCode::ServiceUnavailable);
+  EXPECT_FALSE(called) << "a failed refresh must not continue with the cached token";
 
-  *now += std::chrono::seconds(60);
-  transport->Enqueue(Azure::Core::Http::HttpStatusCode::InternalServerError, "expired fallback");
-  auto expired_fallback = SendRequest(policy, &called, &query);
-  ASSERT_EQ(expired_fallback->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
-  EXPECT_EQ(query.at("sig"), "old");
+  called = false;
+  auto second_failure = SendRequest(policy, &called, &query);
+  ASSERT_EQ(second_failure->GetStatusCode(), Azure::Core::Http::HttpStatusCode::ServiceUnavailable);
+  EXPECT_FALSE(called) << "each caller may retry the broker, but not the storage request";
+  EXPECT_EQ(transport->Requests().size(), 3u);
 
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
                      SuccessResponse("account", "sv=2&sig=new", *now + std::chrono::hours(1)));
+  called = false;
   auto refreshed = SendRequest(policy, &called, &query);
   ASSERT_EQ(refreshed->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+  EXPECT_TRUE(called);
   EXPECT_EQ(query.at("sig"), "new");
-  EXPECT_EQ(transport->Requests().size(), 5u);
+  EXPECT_EQ(transport->Requests().size(), 4u);
 }
 
 TEST(AzureSasTokenPolicyTest, DoesNotRefreshWithMoreThanSixtySecondsRemaining) {
@@ -301,9 +331,22 @@ TEST(AzureSasTokenPolicyTest, ClonesShareTokenCache) {
   EXPECT_EQ(transport->Requests().size(), 1u);
 }
 
+// None of these is a credential rejection, and none of them may be reported as
+// one. A broker that answers 200 with a body we cannot use -- success=false, a
+// token for the wrong account, an unparsable expiry, plain garbage -- is
+// misbehaving or misconfigured. Reporting them as 401/AuthenticationFailed made
+// ClassifyAzureError read them as StorageAccessDenied and segcore as
+// ConfigInvalid, which sent an operator to rotate a credential that was never
+// the problem. They stay UNCLASSIFIED (R1.2): not transient, not the caller's,
+// not a credential verdict.
 TEST(AzureSasTokenPolicyTest, RejectsInvalidBrokerResponsesWithoutCachedToken) {
   const auto now = std::chrono::system_clock::from_time_t(1785146400);
-  const std::vector<std::pair<std::string, std::string>> invalid_responses = {
+  struct Case {
+    std::string response;
+    std::string expected_error;
+    Azure::Core::Http::HttpStatusCode expected_status = Azure::Core::Http::HttpStatusCode::InternalServerError;
+  };
+  const std::vector<Case> invalid_responses = {
       {R"({"success":false})", "returned success=false"},
       {R"({"success":true})", "response schema is invalid"},
       {SuccessResponse("other-account", "sv=1&sig=x", now + std::chrono::hours(1)),
@@ -320,16 +363,79 @@ TEST(AzureSasTokenPolicyTest, RejectsInvalidBrokerResponsesWithoutCachedToken) {
       {R"({not-json})", "returned invalid JSON"},
   };
 
-  for (const auto& [response, expected_error] : invalid_responses) {
+  for (const auto& test_case : invalid_responses) {
     auto transport = std::make_shared<MockTransport>();
-    transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, response);
+    transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, test_case.response);
     AzureSasTokenPolicy policy(MakeConfig(), transport, [now] { return now; });
     bool called = false;
     std::map<std::string, std::string> query;
     auto policy_response = SendRequest(policy, &called, &query);
-    ASSERT_EQ(policy_response->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Unauthorized);
-    EXPECT_NE(policy_response->GetReasonPhrase().find(expected_error), std::string::npos)
+    ASSERT_EQ(policy_response->GetStatusCode(), test_case.expected_status);
+    EXPECT_NE(policy_response->GetReasonPhrase().find(test_case.expected_error), std::string::npos)
         << policy_response->GetReasonPhrase();
+    auto classified = internal::ClassifyAzureError(static_cast<int>(policy_response->GetStatusCode()),
+                                                   policy_response->GetHeaders().at("x-ms-error-code"),
+                                                   /*transport_failure=*/false);
+    if (test_case.expected_status == Azure::Core::Http::HttpStatusCode::ServiceUnavailable) {
+      ASSERT_TRUE(classified.has_value());
+      EXPECT_TRUE(RetryableForExtendStatusCode(*classified));
+    } else {
+      // The synthetic 500 must NOT be read as a service blip either: the
+      // marker short-circuits the status switch, so an unusable broker answer
+      // stays unclassified instead of trading one wrong verdict for another.
+      EXPECT_EQ(policy_response->GetHeaders().at("x-ms-error-code"), internal::kSyntheticBrokerUnexpectedErrorCode);
+      EXPECT_FALSE(classified.has_value());
+    }
+    EXPECT_EQ(transport->Requests().size(), 1u);
+    EXPECT_FALSE(called);
+  }
+}
+
+// The other side of the same rule: a broker that actually rejects us IS a
+// credential verdict, and it has to survive as one. This is the only path that
+// may produce 401/LoonBrokerAccessDenied, and it does so because GetSasToken()
+// classified it, not because nothing else matched.
+TEST(AzureSasTokenPolicyTest, BrokerRejectionIsReportedAsAuthenticationFailure) {
+  const auto now = std::chrono::system_clock::from_time_t(1785146400);
+  for (auto broker_status :
+       {Azure::Core::Http::HttpStatusCode::Unauthorized, Azure::Core::Http::HttpStatusCode::Forbidden}) {
+    auto transport = std::make_shared<MockTransport>();
+    transport->Enqueue(broker_status, "");
+    AzureSasTokenPolicy policy(MakeConfig(), transport, [now] { return now; });
+    bool called = false;
+    std::map<std::string, std::string> query;
+    auto policy_response = SendRequest(policy, &called, &query);
+
+    ASSERT_EQ(policy_response->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Unauthorized);
+    EXPECT_EQ(policy_response->GetHeaders().at("x-ms-error-code"), internal::kSyntheticBrokerAccessDeniedErrorCode);
+    auto classified = internal::ClassifyAzureError(static_cast<int>(policy_response->GetStatusCode()),
+                                                   policy_response->GetHeaders().at("x-ms-error-code"),
+                                                   /*transport_failure=*/false);
+    ASSERT_TRUE(classified.has_value());
+    EXPECT_EQ(*classified, ExtendStatusCode::StorageAccessDenied);
+    EXPECT_FALSE(RetryableForExtendStatusCode(*classified));
+    EXPECT_FALSE(called);
+  }
+}
+
+// A broker error that is neither a rejection nor transient -- a 400 or a 404 --
+// must not borrow either verdict.
+TEST(AzureSasTokenPolicyTest, NonAuthBrokerHttpErrorStaysUnclassified) {
+  const auto now = std::chrono::system_clock::from_time_t(1785146400);
+  for (auto broker_status :
+       {Azure::Core::Http::HttpStatusCode::BadRequest, Azure::Core::Http::HttpStatusCode::NotFound}) {
+    auto transport = std::make_shared<MockTransport>();
+    transport->Enqueue(broker_status, "");
+    AzureSasTokenPolicy policy(MakeConfig(), transport, [now] { return now; });
+    bool called = false;
+    std::map<std::string, std::string> query;
+    auto policy_response = SendRequest(policy, &called, &query);
+
+    EXPECT_EQ(policy_response->GetHeaders().at("x-ms-error-code"), internal::kSyntheticBrokerUnexpectedErrorCode);
+    auto classified = internal::ClassifyAzureError(static_cast<int>(policy_response->GetStatusCode()),
+                                                   policy_response->GetHeaders().at("x-ms-error-code"),
+                                                   /*transport_failure=*/false);
+    EXPECT_FALSE(classified.has_value());
     EXPECT_FALSE(called);
   }
 }
@@ -392,10 +498,59 @@ TEST(AzureSasTokenPolicyTest, InitialFetchFailureDoesNotSendAnonymousRequest) {
   bool called = false;
   std::map<std::string, std::string> query;
   auto response = SendRequest(policy, &called, &query);
-  EXPECT_EQ(response->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Unauthorized);
+  // 503, not 401. A broker that answered 500 is unwell; it did not reject our
+  // credentials. Synthesising 401 here made ClassifyAzureError read it as
+  // AccessDenied -- System with no transient hint -- so a broker blip looked
+  // exactly like a bad key and a generic adapter could not distinguish the
+  // recoverable broker outage. This assertion is the whole point of the split.
+  EXPECT_EQ(response->GetStatusCode(), Azure::Core::Http::HttpStatusCode::ServiceUnavailable);
+  auto classified = internal::ClassifyAzureError(static_cast<int>(response->GetStatusCode()),
+                                                 response->GetHeaders().at("x-ms-error-code"),
+                                                 /*transport_failure=*/false);
+  ASSERT_TRUE(classified.has_value());
+  EXPECT_TRUE(RetryableForExtendStatusCode(*classified));
   EXPECT_NE(response->GetReasonPhrase().find("status_code=500"), std::string::npos);
   EXPECT_EQ(response->GetReasonPhrase().find("secret response body"), std::string::npos);
   EXPECT_FALSE(called);
+}
+
+TEST(AzureSasTokenPolicyTest, AllocationFailureIsReportedAsAnUnexpectedBrokerFailure) {
+  const auto now = std::chrono::system_clock::from_time_t(1785146400);
+  auto transport = std::make_shared<OutOfMemoryTransport>();
+  AzureSasTokenPolicy policy(MakeConfig(), transport, [now] { return now; });
+
+  bool called = false;
+  std::map<std::string, std::string> query;
+  auto response = SendRequest(policy, &called, &query);
+
+  EXPECT_EQ(response->GetStatusCode(), Azure::Core::Http::HttpStatusCode::InternalServerError);
+  EXPECT_EQ(response->GetHeaders().at("x-ms-error-code"), internal::kSyntheticBrokerUnexpectedErrorCode);
+  EXPECT_FALSE(called);
+}
+
+TEST(AzureSasTokenPolicyTest, ExpiredCachedTokenIsNotUsedWhenTheBrokerFails) {
+  const auto now = std::chrono::system_clock::from_time_t(1785146400);
+  auto transport = std::make_shared<MockTransport>();
+  // First fetch succeeds with a token that expires almost immediately.
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                     SuccessResponse("account", "sv=1&sig=cached", now + std::chrono::seconds(1)));
+  // Second fetch, after it has expired, finds the broker down.
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::InternalServerError, "broker down");
+
+  auto clock_now = now;
+  AzureSasTokenPolicy policy(MakeConfig(), transport, [&clock_now] { return clock_now; });
+
+  bool called = false;
+  std::map<std::string, std::string> query;
+  auto first = SendRequest(policy, &called, &query);
+  ASSERT_TRUE(called) << "the first request should have been signed with the fresh token";
+
+  clock_now = now + std::chrono::hours(1);
+  called = false;
+  auto second = SendRequest(policy, &called, &query);
+  EXPECT_FALSE(called) << "an expired token must not be used to sign a request";
+  EXPECT_EQ(second->GetStatusCode(), Azure::Core::Http::HttpStatusCode::ServiceUnavailable)
+      << second->GetReasonPhrase();
 }
 
 }  // namespace milvus_storage::fs

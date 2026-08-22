@@ -19,11 +19,13 @@
 #include <vector>
 #include <cstring>
 #include <cassert>
+#include <new>
 #include <stdexcept>
 #include <fmt/format.h>
 
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/ffi_c.h"
+#include "milvus-storage/common/extend_status.h"
 
 namespace milvus_storage {
 using namespace milvus_storage::api;
@@ -138,23 +140,21 @@ static arrow::Status column_groups_export_internal(const ColumnGroups& cgs, Loon
 
 arrow::Status column_groups_export(const ColumnGroups& cgs, LoonColumnGroups** out_ccgs) {
   assert(out_ccgs != nullptr);
+  // The exception handlers destroy a partially built result. Clear the output
+  // before the first allocation so an allocation failure cannot expose an
+  // indeterminate pointer to the cleanup path.
+  *out_ccgs = nullptr;
 
   try {
     *out_ccgs = new LoonColumnGroups();
     ARROW_RETURN_NOT_OK(column_groups_export_internal(cgs, *out_ccgs));
     return arrow::Status::OK();
-  } catch (const std::exception& e) {
-    if (*out_ccgs) {
-      loon_column_groups_destroy(*out_ccgs);
-      *out_ccgs = nullptr;
-    }
-    return arrow::Status::UnknownError("Exception in column_groups_export: ", e.what());
   } catch (...) {
     if (*out_ccgs) {
       loon_column_groups_destroy(*out_ccgs);
       *out_ccgs = nullptr;
     }
-    return arrow::Status::UnknownError("Unknown exception in column_groups_export");
+    return arrow::Status::UnknownError("column_groups_export failed unexpectedly");
   }
 }
 
@@ -165,7 +165,7 @@ arrow::Status column_groups_import(const LoonColumnGroups* ccgs, ColumnGroups* o
     return arrow::Status::OK();
   }
   if (!ccgs->column_group_array) {
-    return arrow::Status::Invalid("column_group_array is null");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "column_group_array is null");
   }
   out_cgs->reserve(ccgs->num_of_column_groups);
   for (size_t i = 0; i < ccgs->num_of_column_groups; i++) {
@@ -179,6 +179,8 @@ arrow::Status column_groups_import(const LoonColumnGroups* ccgs, ColumnGroups* o
 arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifest>& manifest,
                               LoonManifest** out_cmanifest) {
   assert(manifest != nullptr && out_cmanifest != nullptr);
+  // Cleared before anything can throw -- same reason as column_groups_export.
+  *out_cmanifest = nullptr;
 
   try {
     const auto copy_string = [](const std::string& value) {
@@ -238,10 +240,10 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
       size_t num_stats = stats.size();
       (*out_cmanifest)->stats.stat_keys = new const char* [num_stats] {};
       (*out_cmanifest)->stats.stat_files = new const char** [num_stats] {};
-      (*out_cmanifest)->stats.stat_file_counts = new uint32_t[num_stats];
+      (*out_cmanifest)->stats.stat_file_counts = new uint32_t[num_stats]{};
       (*out_cmanifest)->stats.stat_metadata_keys = new const char** [num_stats] {};
       (*out_cmanifest)->stats.stat_metadata_values = new const char** [num_stats] {};
-      (*out_cmanifest)->stats.stat_metadata_counts = new uint32_t[num_stats];
+      (*out_cmanifest)->stats.stat_metadata_counts = new uint32_t[num_stats]{};
       (*out_cmanifest)->stats.num_stats = num_stats;
 
       size_t idx = 0;
@@ -253,8 +255,10 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
         (*out_cmanifest)->stats.stat_files[idx] = new const char* [num_files] {};
         for (size_t j = 0; j < num_files; j++) {
           (*out_cmanifest)->stats.stat_files[idx][j] = copy_string(stat.paths[j]);
+          // Publish progress as each child becomes owned by the output so the
+          // catch path can safely free a partially copied list.
+          (*out_cmanifest)->stats.stat_file_counts[idx] = static_cast<uint32_t>(j + 1);
         }
-        (*out_cmanifest)->stats.stat_file_counts[idx] = num_files;
 
         // Copy metadata
         size_t num_metadata = stat.metadata.size();
@@ -264,11 +268,13 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
           size_t m_idx = 0;
           for (const auto& [meta_key, meta_val] : stat.metadata) {
             (*out_cmanifest)->stats.stat_metadata_keys[idx][m_idx] = copy_string(meta_key);
+            // The value array is zero-initialized; publishing the slot now is
+            // safe even if allocating the value fails next.
+            (*out_cmanifest)->stats.stat_metadata_counts[idx] = static_cast<uint32_t>(m_idx + 1);
             (*out_cmanifest)->stats.stat_metadata_values[idx][m_idx] = copy_string(meta_val);
             m_idx++;
           }
         }
-        (*out_cmanifest)->stats.stat_metadata_counts[idx] = num_metadata;
         idx++;
       }
     }
@@ -342,18 +348,12 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
     }
 
     return arrow::Status::OK();
-  } catch (const std::exception& e) {
-    if (*out_cmanifest) {
-      loon_manifest_destroy(*out_cmanifest);
-      *out_cmanifest = nullptr;
-    }
-    return arrow::Status::UnknownError("Exception in manifest_export: ", e.what());
   } catch (...) {
     if (*out_cmanifest) {
       loon_manifest_destroy(*out_cmanifest);
       *out_cmanifest = nullptr;
     }
-    return arrow::Status::UnknownError("Unknown exception in manifest_export");
+    return arrow::Status::UnknownError("manifest_export failed unexpectedly");
   }
 }
 
@@ -433,13 +433,13 @@ arrow::Status manifest_import(const LoonManifest* cmanifest,
     index.index_file_keys.reserve(in_index.num_index_file_keys);
     for (uint32_t j = 0; j < in_index.num_index_file_keys; ++j) {
       if (!in_index.index_file_keys[j]) {
-        return arrow::Status::Invalid("Index metadata file key is null");
+        return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Index metadata file key is null");
       }
       index.index_file_keys.emplace_back(in_index.index_file_keys[j]);
     }
     for (uint32_t j = 0; j < in_index.num_properties; ++j) {
       if (!in_index.property_keys[j] || !in_index.property_values[j]) {
-        return arrow::Status::Invalid("Index metadata property key or value is null");
+        return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Index metadata property key or value is null");
       }
       index.properties[in_index.property_keys[j]] = in_index.property_values[j];
     }
@@ -452,7 +452,7 @@ arrow::Status manifest_import(const LoonManifest* cmanifest,
   for (uint32_t i = 0; i < cmanifest->lob_files.num_files; ++i) {
     const auto& in_lob = cmanifest->lob_files.files[i];
     if (!in_lob.path) {
-      return arrow::Status::Invalid("LOB file path is null");
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "LOB file path is null");
     }
     lob_files.emplace_back(in_lob.path, in_lob.field_id, in_lob.total_rows, in_lob.valid_rows, in_lob.file_size_bytes);
   }

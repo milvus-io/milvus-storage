@@ -28,7 +28,10 @@
 #include <arrow/util/key_value_metadata.h>
 #include <arrow/record_batch.h>
 #include <fmt/format.h>
+#include <parquet/exception.h>
+#include <parquet/file_reader.h>
 
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/macro.h"
 
 namespace milvus_storage {
@@ -39,7 +42,6 @@ arrow::Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(
     const parquet::ReaderProperties& read_properties,
     const parquet::ArrowReaderProperties& arrow_reader_properties) {
   ARROW_ASSIGN_OR_RAISE(auto file, fs.OpenInputFile(file_path));
-  parquet::arrow::FileReaderBuilder builder;
   std::unique_ptr<parquet::arrow::FileReader> reader;
 
   // Create a completely independent deep copy of read_properties to prevent any mutations
@@ -50,9 +52,30 @@ arrow::Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(
     read_properties_copy->file_decryption_properties(std::move(deep_copied_decryption));
   }
 
-  ARROW_RETURN_NOT_OK(builder.Open(std::move(file), *read_properties_copy));
-  ARROW_RETURN_NOT_OK(
-      builder.memory_pool(arrow::default_memory_pool())->properties(arrow_reader_properties)->Build(&reader));
+  // FileReaderBuilder::Open catches ParquetInvalidOrCorruptedFileException and
+  // flattens it to an untyped Status::Invalid.  At that point a caller cannot
+  // distinguish a footer that Parquet proved corrupt from any unrelated
+  // Invalid status.  Open the raw reader here so that only Parquet's dedicated
+  // corruption exception is promoted to DataFormat.  ParquetStatusException is
+  // how filesystem IO crosses the exception boundary; returning its original
+  // status preserves any ExtendStatusDetail attached by S3/Azure.
+  std::unique_ptr<parquet::ParquetFileReader> parquet_reader;
+  try {
+    parquet_reader = parquet::ParquetFileReader::Open(std::move(file), *read_properties_copy);
+  } catch (const parquet::ParquetInvalidOrCorruptedFileException& e) {
+    return MakeExtendError(ExtendStatusCode::PackedFileCorrupted,
+                           fmt::format("Parquet file is invalid or corrupted. [path={}]: {}", file_path, e.what()),
+                           e.what());
+  } catch (const parquet::ParquetStatusException& e) {
+    return e.status();
+  } catch (const parquet::ParquetException& e) {
+    // Generic ParquetException is also used for configuration, encryption and
+    // decoder failures.  It is not proof that persisted bytes are corrupt.
+    return arrow::Status::IOError(e.what());
+  }
+
+  ARROW_RETURN_NOT_OK(parquet::arrow::FileReader::Make(arrow::default_memory_pool(), std::move(parquet_reader),
+                                                       arrow_reader_properties, &reader));
   return std::move(reader);
 }
 

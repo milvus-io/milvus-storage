@@ -68,23 +68,9 @@ struct SegmentWriteOutput {
   int64_t rows_written = 0;
 };
 
-// legacy result (kept for backward compatibility with callers that manage Transaction externally)
-struct SegmentWriterResult {
-  // full path to the committed manifest file
-  // format: {segment_path}/_metadata/manifest-{version}.avro
-  std::string manifest_path;
-
-  // committed version number
-  int64_t committed_version = 0;
-
-  // total number of rows written
-  int64_t rows_written = 0;
-};
-
 // statistics for segment writer
 struct SegmentWriterStats {
   int64_t total_rows = 0;             // total number of rows written
-  int64_t total_bytes = 0;            // total bytes written (approximate)
   int64_t parquet_files_created = 0;  // number of parquet files created
   int64_t lob_files_created = 0;      // number of LOB files created
 };
@@ -119,6 +105,8 @@ struct SegmentWriterStats {
 //               └── {uuid}.vx                  <- LOB files for TEXT columns (partition level)
 //
 // Thread safety: not thread-safe, use one writer per thread
+// Failure semantics: any failed operation is terminal. Abort/destroy the
+// instance and create a new writer with a new segment/file path to retry.
 class SegmentWriter {
   public:
   virtual ~SegmentWriter() = default;
@@ -147,10 +135,12 @@ class SegmentWriter {
   // does NOT commit manifest — caller must use Transaction to commit
   virtual arrow::Result<SegmentWriteOutput> Close() = 0;
 
-  // abort the writer and clean up all created files
-  // this will delete any LOB files and Parquet files that were created
+  // abort the writer and best-effort release resources still owned by
+  // in-progress child writers. Storage objects already finalized by a child
+  // Close() are not rolled back; they may remain unreferenced for later
+  // external cleanup or garbage collection
   // does NOT commit the transaction
-  virtual arrow::Status Abort() = 0;
+  virtual void Abort() noexcept = 0;
 
   // get the number of rows written so far
   virtual int64_t WrittenRows() const = 0;

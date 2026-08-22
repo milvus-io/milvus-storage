@@ -26,6 +26,7 @@
 #include "milvus-storage/format/vortex/vortex_field_layout_internal.h"
 #include "milvus-storage/format/vortex/vortex_footer_reader.h"
 #include "milvus-storage/format/vortex/vortex_types.h"
+#include "milvus-storage/common/extend_status.h"
 
 namespace milvus_storage::vortex {
 
@@ -33,7 +34,7 @@ namespace {
 
 static arrow::Status CheckedAdd(uint64_t* total, uint64_t value, const std::string& key) {
   if (*total > std::numeric_limits<uint64_t>::max() - value) {
-    return arrow::Status::Invalid(fmt::format("Vortex field {} byte size overflows", key));
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, fmt::format("Vortex field {} byte size overflows", key));
   }
   *total += value;
   return arrow::Status::OK();
@@ -218,7 +219,7 @@ static arrow::Status ValidateSortedUniqueOffsets(const std::vector<int64_t>& off
 arrow::Result<VortexCellMetasPtr> BuildVortexCellMetas(const std::shared_ptr<VortexFooterReader>& footer_reader,
                                                        const std::string& field_name) {
   if (!footer_reader) {
-    return arrow::Status::Invalid("BuildVortexCellMetas requires a non-null footer reader");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "BuildVortexCellMetas requires a non-null footer reader");
   }
   const auto key = fmt::format("{}:{}", footer_reader->path(), field_name);
   ARROW_ASSIGN_OR_RAISE(auto layout, footer_reader->GetFieldLayout(field_name));
@@ -238,7 +239,7 @@ arrow::Result<VortexCellMetasPtr> BuildVortexCellMetas(const std::shared_ptr<Vor
 arrow::Result<VortexCellMetasPtr> BuildVortexGroupCellMetas(const std::shared_ptr<VortexFooterReader>& footer_reader,
                                                             const std::vector<std::string>& field_names) {
   if (!footer_reader) {
-    return arrow::Status::Invalid("BuildVortexGroupCellMetas requires a non-null footer reader");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "BuildVortexGroupCellMetas requires a non-null footer reader");
   }
   if (field_names.empty()) {
     return arrow::Status::Invalid("Vortex group cell meta builder requires at least one field");
@@ -258,7 +259,7 @@ arrow::Result<VortexCellMetasPtr> BuildVortexGroupCellMetas(const std::shared_pt
 arrow::Result<std::shared_ptr<VortexPlanner>> VortexPlanner::Make(
     const std::shared_ptr<VortexFooterReader>& footer_reader, std::string field_name, VortexCellMetasPtr cell_metas) {
   if (!footer_reader) {
-    return arrow::Status::Invalid("VortexPlanner requires a non-null footer reader");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "VortexPlanner requires a non-null footer reader");
   }
   const auto key = fmt::format("{}:{}", footer_reader->path(), field_name);
   ARROW_RETURN_NOT_OK(ValidateCellMetasReady(cell_metas, footer_reader->rows(), key));
@@ -270,7 +271,7 @@ arrow::Result<std::shared_ptr<VortexPlanner>> VortexPlanner::Make(
 arrow::Result<std::shared_ptr<VortexPlanner>> VortexPlanner::MakeGroup(
     const std::shared_ptr<VortexFooterReader>& footer_reader, VortexCellMetasPtr cell_metas) {
   if (!footer_reader) {
-    return arrow::Status::Invalid("VortexPlanner requires a non-null footer reader");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "VortexPlanner requires a non-null footer reader");
   }
   const auto key = fmt::format("{}:<column_group>", footer_reader->path());
   ARROW_RETURN_NOT_OK(ValidateCellMetasReady(cell_metas, footer_reader->rows(), key));
@@ -386,7 +387,7 @@ arrow::Result<std::vector<RowRange>> VortexPlanner::BuildReadRangesForCells(cons
   const auto& metas = cell_metas();
   for (auto cell_id : cell_ids) {
     if (cell_id >= metas.size()) {
-      return arrow::Status::Invalid(fmt::format("Vortex cell id {} out of range {}", cell_id, metas.size()));
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, fmt::format("Vortex cell id {} out of range {}", cell_id, metas.size()));
     }
     const auto& meta = metas[cell_id];
     const auto cell_start = meta.row_offset;
@@ -415,7 +416,7 @@ arrow::Result<std::vector<uint64_t>> VortexPlanner::PruneCellsByPredicate(const 
   const auto& metas = cell_metas();
   for (auto cell_id : cell_ids) {
     if (cell_id >= metas.size()) {
-      return arrow::Status::Invalid(fmt::format("Vortex cell id {} out of range {}", cell_id, metas.size()));
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, fmt::format("Vortex cell id {} out of range {}", cell_id, metas.size()));
     }
     const auto& meta = metas[cell_id];
     if (meta.granularity != VortexPhysicalGranularity::kRowGroup) {

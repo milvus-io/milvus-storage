@@ -16,6 +16,7 @@
 
 #include "milvus-storage/lob_column/lob_column_reader.h"
 #include "milvus-storage/lob_column/lob_column_writer.h"
+#include "milvus-storage/common/extend_status.h"
 
 namespace milvus_storage::lob_column {
 
@@ -46,7 +47,7 @@ class LobColumnManagerImpl : public LobColumnManager {
 arrow::Result<std::unique_ptr<LobColumnManager>> LobColumnManager::Create(std::shared_ptr<arrow::fs::FileSystem> fs,
                                                                           const LobColumnConfig& config) {
   if (!fs) {
-    return arrow::Status::Invalid("filesystem is null");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "filesystem is null");
   }
 
   if (config.lob_base_path.empty()) {

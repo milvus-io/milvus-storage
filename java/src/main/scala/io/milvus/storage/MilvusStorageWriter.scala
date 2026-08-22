@@ -10,6 +10,11 @@ class MilvusStorageWriter {
   private var writerHandle: Long = 0
   private var isDestroyed: Boolean = false
 
+  private def ensureUsable(): Unit = {
+    if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
+    if (writerHandle == 0) throw new IllegalStateException("Writer not initialized")
+  }
+
   /**
    * Create a new writer instance
    * @param basePath The base path for storage
@@ -18,6 +23,7 @@ class MilvusStorageWriter {
    */
   def create(basePath: String, schemaPtr: Long, properties: MilvusStorageProperties): Unit = {
     if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
+    if (writerHandle != 0) throw new IllegalStateException("Writer already initialized")
     writerHandle = writerNew(basePath, schemaPtr, properties.getPtr)
   }
 
@@ -29,6 +35,7 @@ class MilvusStorageWriter {
    */
   def create(basePath: String, schemaPtr: Long, propertiesPtr: Long): Unit = {
     if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
+    if (writerHandle != 0) throw new IllegalStateException("Writer already initialized")
     writerHandle = writerNew(basePath, schemaPtr, propertiesPtr)
   }
 
@@ -37,8 +44,7 @@ class MilvusStorageWriter {
    * @param arrayPtr Pointer to Arrow array
    */
   def write(arrayPtr: Long): Unit = {
-    if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
-    if (writerHandle == 0) throw new IllegalStateException("Writer not initialized")
+    ensureUsable()
     writerWrite(writerHandle, arrayPtr)
   }
 
@@ -46,8 +52,7 @@ class MilvusStorageWriter {
    * Flush any pending writes
    */
   def flush(): Unit = {
-    if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
-    if (writerHandle == 0) throw new IllegalStateException("Writer not initialized")
+    ensureUsable()
     writerFlush(writerHandle)
   }
 
@@ -56,16 +61,24 @@ class MilvusStorageWriter {
    * @return The column groups raw pointer
    */
   def close(): Long = {
-    if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
-    if (writerHandle == 0) throw new IllegalStateException("Writer not initialized")
-    writerClose(writerHandle)
+    ensureUsable()
+    // try/finally, not a bare sequence: if the native close throws, the handle
+    // must still be released. destroy() is what reaches loon_*_destroy, and
+    // that is where an abandoned writer's storage -- an S3 multipart upload
+    // whose parts no bucket listing shows -- gets released. Skipping it on the
+    // failure path leaked exactly the case the abort exists for.
+    try {
+      writerClose(writerHandle)
+    } finally {
+      destroy()
+    }
   }
 
   /**
    * Get the native handle (for internal use)
    */
   def getHandle: Long = {
-    if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
+    ensureUsable()
     writerHandle
   }
 

@@ -146,7 +146,7 @@ class Writer:
         This finalizes all writes and returns the column groups metadata.
 
         Returns:
-            ColumnGroups instance containing the dataset column groups
+            ColumnGroups instance containing the dataset column groups.
 
         Raises:
             ResourceError: If writer is already closed
@@ -182,21 +182,26 @@ class Writer:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit."""
         if not self._closed and self._handle is not None:
-            try:
+            if exc_type is not None:
+                # Do not finalize a partially written file when the operation
+                # using the writer has failed.
+                self._discard_writer()
+            else:
                 self.close()
-            except Exception:
-                # Don't hide the original exception
-                if exc_type is None:
-                    raise
 
     def __del__(self):
         """Cleanup on destruction."""
         try:
             if not self._closed and self._handle is not None:
-                self._lib.loon_writer_destroy(self._handle)
-                self._handle = None
+                self._discard_writer()
         except Exception:
             pass
+
+    def _discard_writer(self) -> None:
+        if self._handle is not None:
+            self._lib.loon_writer_destroy(self._handle)
+            self._handle = None
+        self._closed = True
 
     @property
     def is_closed(self) -> bool:

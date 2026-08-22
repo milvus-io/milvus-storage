@@ -358,6 +358,29 @@ TEST_F(BridgeTest, ExportEmptyColumnGroups) {
   loon_column_groups_destroy(ccgs);
 }
 
+TEST_F(BridgeTest, DestroyToleratesPartiallyInitializedFileProperties) {
+  auto* ccgs = new LoonColumnGroups{};
+  ccgs->num_of_column_groups = 1;
+  ccgs->column_group_array = new LoonColumnGroup[1]{};
+  auto& group = ccgs->column_group_array[0];
+  group.num_of_files = 2;
+  group.files = new LoonColumnGroupFile[2]{};
+
+  group.files[0].num_properties = 1;
+  group.files[0].property_keys = new const char*[1]{};
+  auto* key = new char[2]{'k', '\0'};
+  group.files[0].property_keys[0] = key;
+
+  group.files[1].num_properties = 1;
+  group.files[1].property_values = new const char*[1]{};
+  auto* value = new char[2]{'v', '\0'};
+  group.files[1].property_values[0] = value;
+
+  // Allocation failure may leave either pointer array absent. Destruction must
+  // independently free whichever side was published.
+  loon_column_groups_destroy(ccgs);
+}
+
 // Test column_groups_debug_string with null input
 TEST_F(BridgeTest, ColumnGroupsDebugStringNull) {
   std::string result = column_groups_debug_string(nullptr);

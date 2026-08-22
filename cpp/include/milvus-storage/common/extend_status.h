@@ -14,13 +14,16 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <arrow/status.h>
 #include <arrow/result.h>
+#include <arrow/util/string_builder.h>
 
 #include "milvus-storage/ffi_internal/ffi_error_code.h"
 
@@ -28,37 +31,54 @@
 #include "common/EasyAssert.h"
 
 namespace milvus_storage {
-enum class ExtendStatusCode : char {
-  // arrow::StatusCode biggest is 45.
-  // Packed-specific error codes.
-  PackedInvalidArgs = 50,
-  PackedStorageIO = 51,
-  PackedMetadataCorrupted = 52,
-  PackedFileCorrupted = 53,
-  PackedArrowError = 54,
-  PackedUnexpected = 55,
 
-  AwsErrorNoSuchUpload = LOON_AWS_ERROR_NO_SUCH_UPLOAD,
-  AwsErrorConflict = LOON_AWS_ERROR_CONFLICT,
-  AwsErrorPreConditionFailed = LOON_AWS_ERROR_PRECONDITION_FAILED,
-  // Permanently-failing object-storage errors that must NOT be classified as
-  // transient/retriable by consumers: the object/bucket is gone (retrying or
-  // rerouting to another replica hits the same shared object store and fails
-  // identically), the credentials/permissions are wrong, or the AWS SDK itself
-  // judged the error non-retryable (AWSError::ShouldRetry() == false).
-  AwsErrorNotFound = LOON_AWS_ERROR_NOT_FOUND,          // NoSuchKey / NoSuchBucket / ResourceNotFound
-  AwsErrorAccessDenied = LOON_AWS_ERROR_ACCESS_DENIED,  // AccessDenied / InvalidAccessKeyId / SignatureDoesNotMatch
-  AwsErrorNonRetryable = LOON_AWS_ERROR_NON_RETRYABLE,  // any other error with ShouldRetry() == false
-
-  StorageTransientNetwork = LOON_TRANSIENT_NETWORK,
-  StorageTransientTimeout = LOON_TRANSIENT_TIMEOUT,
-  StorageTransientThrottling = LOON_TRANSIENT_THROTTLING,
-  StorageTransientService = LOON_TRANSIENT_SERVICE,
-
-  // Transaction-specific error codes
-  TxnExhaustedRetry = LOON_TXN_EXHAUSTED_RETRY,
-  TxnResolutionFailed = LOON_TXN_RESOLUTION_FAILED,
+/// \brief Coarse error fact/hint available to a generic consumer.
+enum class ErrorCategory : char {
+  Unknown = LOON_ERROR_CATEGORY_UNKNOWN,
+  User = LOON_ERROR_CATEGORY_USER,
+  /// The observed cause is transient. The operation owner decides whether and
+  /// how to retry; a failed stateful writer must be recreated, never reused.
+  Retryable = LOON_ERROR_CATEGORY_RETRYABLE,
+  /// Business-level coordination is required. Generic retry helpers must not
+  /// replay it; a conflict-aware caller may re-read/rebase and submit new work.
+  Conflict = LOON_ERROR_CATEGORY_CONFLICT,
+  DataFormat = LOON_ERROR_CATEGORY_DATA_FORMAT,
+  /// Configuration, missing internal data, unsupported operations, bugs and
+  /// other failures that are neither caller-owned nor safely replayable.
+  System = LOON_ERROR_CATEGORY_SYSTEM,
 };
+
+/// \brief Error codes that can be attached to an arrow::Status and survive to
+/// the FFI / segcore boundary.
+///
+/// Generated from LOON_EXTEND_STATUS_CODE_LIST -- see ffi_error_code.h for the
+/// table, including each code's category and its AWS S3 / Aliyun OSS
+/// counterpart. Values are the C ABI contract and must never be renumbered.
+/// arrow::StatusCode's largest value is 45, so these all start at 50.
+///
+/// The underlying type is int16_t rather than char. It used to be char, whose
+/// range ends at 127 on every platform we build for while the table had already
+/// reached 122: five more codes and a new entry would have been narrowed by the
+/// enum itself, silently, in a table whose whole point is that a code means one
+/// thing everywhere. Nothing reads it as a single byte -- it travels as an int
+/// across the C ABI and as an ExtendStatusDetail member in process.
+enum class ExtendStatusCode : int16_t {
+#define MILVUS_STORAGE_EXTEND_STATUS_ENUM_ENTRY(name, code, symbol, category, s3_code) name = (code),
+  LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_EXTEND_STATUS_ENUM_ENTRY)
+#undef MILVUS_STORAGE_EXTEND_STATUS_ENUM_ENTRY
+};
+
+/// Every code must survive the round trip through its own underlying type. A
+/// value the enum cannot represent is not a compile error by itself -- it wraps
+/// -- so pin it here, where adding a code to the table is the only thing that
+/// can break it.
+#define MILVUS_STORAGE_EXTEND_STATUS_RANGE_ASSERT(name, code, symbol, category, s3_code) \
+  static_assert(static_cast<int>(ExtendStatusCode::name) == (code),                      \
+                "ExtendStatusCode::" #name                                               \
+                " does not round-trip through its underlying "                           \
+                "type -- widen the enum's underlying type in extend_status.h");
+LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_EXTEND_STATUS_RANGE_ASSERT)
+#undef MILVUS_STORAGE_EXTEND_STATUS_RANGE_ASSERT
 
 class ExtendStatusDetail : public arrow::StatusDetail {
   public:
@@ -76,6 +96,12 @@ class ExtendStatusDetail : public arrow::StatusDetail {
   /// \brief Get the extra error info
   [[nodiscard]] std::string extra_info() const;
 
+  /// \brief Whether this code carries the transient/retry hint.
+  ///
+  /// Derived from the code's category, never stored: `code -> category ->
+  /// retryable` is the single source of truth, so this can never disagree with
+  /// `loon_ffi_is_retryable_errcode`. It does not assert that replaying an
+  /// operation is idempotent or that a failed stateful writer can be reused.
   [[nodiscard]] bool retryable() const;
 
   /// \brief Get the human-readable name of the status code.
@@ -94,17 +120,51 @@ class ExtendStatusDetail : public arrow::StatusDetail {
   private:
   ExtendStatusCode code_;
   std::string extra_info_;
-  bool retryable_ = false;
 };
 
 std::optional<ExtendStatusCode> ExtendStatusCodeFromInt(int code);
-bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code);
+
+/// \brief The generic handling category of an ExtendStatusCode.
+ErrorCategory CategoryForExtendStatusCode(ExtendStatusCode code);
+
+/// \brief Whether this code carries the transient/retry hint.
+///
+/// Conflict is false and replay safety is deliberately out of scope: the
+/// operation-aware caller decides what new work, if any, to submit.
+bool RetryableForExtendStatusCode(ExtendStatusCode code);
+
+/// \brief The AWS S3 / Aliyun OSS error code this maps to, or "" when the
+/// condition has no object-storage counterpart (packed/transaction codes).
+std::string_view S3CodeForExtendStatusCode(ExtendStatusCode code);
 
 arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info = "");
+
+/// \brief Variadic form, mirroring `arrow::Status::Invalid(a, b, c)`.
+///
+/// Exists so that an already-correct site that builds its message out of pieces
+/// can be given a classification without rewriting how it builds that message.
+/// Every unclassified `Status::Invalid(...)` we convert is one fewer failure
+/// that reaches segcore as an untyped IOError, so the conversion needs to be
+/// cheap enough that nobody skips it.
+template <typename... Args>
+arrow::Status MakeExtendErrorMsg(ExtendStatusCode code, Args&&... args) {
+  return MakeExtendError(code, arrow::util::StringBuilder(std::forward<Args>(args)...));
+}
 
 arrow::Status WrapExtendError(ExtendStatusCode code, std::string message, const arrow::Status& cause);
 
 milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code);
+
+/// \brief The single int -> milvus::ErrorCode entry point, covering the whole
+/// taxonomy -- internal FFI codes (1-13) as well as ExtendStatusCode values.
+///
+/// milvus's segcore boundary receives only a bare `int` (`result.err_code`), so
+/// it must be able to classify every code through one function. ExtendStatusCodes
+/// delegate to ToSegcoreErrorCode(ExtendStatusCode); the internal codes that
+/// never carry an ExtendStatusDetail -- allocation failure, user input,
+/// deployment config, our own bugs -- get their own landing here. Anything not
+/// recognised degrades to the conservative non-retryable StorageError.
+milvus::ErrorCode ToSegcoreErrorCode(int ffi_err_code);
 
 milvus::SegcoreError ToSegcoreError(const arrow::Status& status);
 

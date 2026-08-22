@@ -36,3 +36,6 @@ python/env/
 .claude/
 .worktrees/
 AGENTS.md
+
+# Scratch output written by the FFI filesystem tests at the repo root.
+test_filesystem_ffi/

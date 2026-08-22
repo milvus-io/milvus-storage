@@ -177,20 +177,14 @@ class FilesystemWriter:
         if not self._closed and self._handle is not None:
             result = self._lib.loon_filesystem_writer_close(self._handle)
             check_result(result)
-            self._lib.loon_filesystem_writer_destroy(self._handle)
-            self._handle = None
-            self._closed = True
+            self._discard_writer()
 
     def __del__(self):
         """Cleanup on destruction."""
         if not self._closed and self._handle is not None:
             try:
-                # Try to close properly first (flush data)
-                self._lib.loon_filesystem_writer_close(self._handle)
-            except Exception:
-                pass
-            try:
-                self._lib.loon_filesystem_writer_destroy(self._handle)
+                # Destruction must not finalize partial data.
+                self._discard_writer()
             except Exception:
                 pass
 
@@ -200,7 +194,16 @@ class FilesystemWriter:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit."""
-        self.close()
+        if exc_type is not None:
+            self._discard_writer()
+        else:
+            self.close()
+
+    def _discard_writer(self) -> None:
+        if self._handle is not None:
+            self._lib.loon_filesystem_writer_destroy(self._handle)
+            self._handle = None
+        self._closed = True
 
 
 class FilesystemReader:
@@ -274,12 +277,7 @@ class FilesystemReader:
         """Cleanup on destruction."""
         if not self._closed and self._handle is not None:
             try:
-                # Try to close properly first
-                self._lib.loon_filesystem_reader_close(self._handle)
-            except Exception:
-                pass
-            try:
-                self._lib.loon_filesystem_reader_destroy(self._handle)
+                self._discard_reader()
             except Exception:
                 pass
 
@@ -289,7 +287,16 @@ class FilesystemReader:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit."""
-        self.close()
+        if exc_type is not None:
+            self._discard_reader()
+        else:
+            self.close()
+
+    def _discard_reader(self) -> None:
+        if self._handle is not None:
+            self._lib.loon_filesystem_reader_destroy(self._handle)
+            self._handle = None
+        self._closed = True
 
 
 class Filesystem:

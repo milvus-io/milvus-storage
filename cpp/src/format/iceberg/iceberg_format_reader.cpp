@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
+#include "milvus-storage/common/extend_status.h"
+#include "bridge_error.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -72,9 +74,10 @@ uint64_t EstimateDeleteChargeBytes(const std::vector<uint8_t>& delete_metadata,
 arrow::Status ReadPositionalDeleteFile(const std::string& delete_file_path,
                                        const std::string& data_file_uri,
                                        const api::Properties& properties,
+                                       uint64_t physical_row_count,
                                        std::unordered_set<int64_t>* deleted_positions) {
   if (!deleted_positions) {
-    return arrow::Status::Invalid("Deleted positions output cannot be null");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Deleted positions output cannot be null");
   }
 
   // Get filesystem for the delete file
@@ -97,8 +100,14 @@ arrow::Status ReadPositionalDeleteFile(const std::string& delete_file_path,
   int pos_idx = schema->GetFieldIndex("pos");
 
   if (file_path_idx < 0 || pos_idx < 0) {
-    return arrow::Status::Invalid(
-        fmt::format("Positional delete file missing required columns (file_path, pos): {}", delete_file_path));
+    return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted,
+                              "Positional delete file missing required columns (file_path, pos): ", delete_file_path);
+  }
+  if (schema->field(file_path_idx)->type()->id() != arrow::Type::STRING ||
+      schema->field(pos_idx)->type()->id() != arrow::Type::INT64) {
+    return MakeExtendErrorMsg(
+        ExtendStatusCode::DataCorrupted,
+        "Positional delete file has invalid column types (file_path=string, pos=int64): ", delete_file_path);
   }
 
   std::shared_ptr<arrow::Table> table;
@@ -116,20 +125,37 @@ arrow::Status ReadPositionalDeleteFile(const std::string& delete_file_path,
   auto pos_col = table->column(1);        // pos (second in our projection)
 
   for (int chunk_idx = 0; chunk_idx < file_path_col->num_chunks(); ++chunk_idx) {
-    auto file_path_array = std::static_pointer_cast<arrow::StringArray>(file_path_col->chunk(chunk_idx));
-    auto pos_array = std::static_pointer_cast<arrow::Int64Array>(pos_col->chunk(chunk_idx));
+    auto file_path_array = std::dynamic_pointer_cast<arrow::StringArray>(file_path_col->chunk(chunk_idx));
+    auto pos_array = std::dynamic_pointer_cast<arrow::Int64Array>(pos_col->chunk(chunk_idx));
+    if (!file_path_array || !pos_array) {
+      return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted,
+                                "Positional delete file column type changed while reading: ", delete_file_path);
+    }
 
     for (int64_t row = 0; row < file_path_array->length(); ++row) {
-      if (!file_path_array->IsNull(row)) {
+      if (file_path_array->IsNull(row) || pos_array->IsNull(row)) {
+        return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted,
+                                  "Positional delete file contains null file_path/pos: ", delete_file_path);
+      }
+      {
         std::string row_file_path(file_path_array->GetView(row));
         // Match by: 1) exact match with original URI,
         //           2) direct match after Milvus address stripping (S3/GCS),
         //           3) match after ABFSS @endpoint stripping (Azure).
         if (row_file_path == data_file_uri || row_file_path == normalized_data_uri ||
             StripAbfssEndpoint(row_file_path) == normalized_data_uri) {
-          if (!pos_array->IsNull(row)) {
-            deleted_positions->insert(pos_array->Value(row));
+          const auto position = pos_array->Value(row);
+          if (position < 0 || static_cast<uint64_t>(position) >= physical_row_count) {
+            return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "Positional delete position out of range in ",
+                                      delete_file_path, ": ", position, " (physical_rows=", physical_row_count, ")");
           }
+          // Deletes are a set, not a count: the Iceberg spec only orders rows
+          // within one delete file, and a snapshot may legally carry several
+          // delete files that name the same (file_path, pos). Other engines
+          // read those tables fine, so a repeat is deduplicated, never an
+          // error. Out-of-range above is different -- that one cannot be
+          // applied at all.
+          deleted_positions->insert(position);
         }
       }
     }
@@ -139,7 +165,10 @@ arrow::Status ReadPositionalDeleteFile(const std::string& delete_file_path,
 }
 
 arrow::Result<std::shared_ptr<const std::unordered_set<int64_t>>> LoadPositionalDeletes(
-    const std::vector<uint8_t>& delete_metadata, const std::string& data_file_uri, const api::Properties& properties) {
+    const std::vector<uint8_t>& delete_metadata,
+    const std::string& data_file_uri,
+    const api::Properties& properties,
+    uint64_t physical_row_count) {
   auto deleted_positions = std::make_shared<std::unordered_set<int64_t>>();
   if (delete_metadata.empty()) {
     return std::static_pointer_cast<const std::unordered_set<int64_t>>(deleted_positions);
@@ -149,29 +178,53 @@ arrow::Result<std::shared_ptr<const std::unordered_set<int64_t>>> LoadPositional
   folly::dynamic parsed;
   try {
     parsed = folly::parseJson(json_str);
-  } catch (const std::exception& e) {
-    return arrow::Status::Invalid(fmt::format("Failed to parse delete metadata JSON: {}", e.what()));
+  } catch (const folly::json::parse_error&) {
+    return bridge::MakeBridgeDataFormatStatus("Delete metadata JSON is invalid");
+  } catch (...) {
+    return arrow::Status::UnknownError("Delete metadata JSON parsing failed unexpectedly");
   }
 
   if (!parsed.isArray()) {
-    return arrow::Status::Invalid("Delete metadata JSON must be an array");
+    return bridge::MakeBridgeDataFormatStatus("Delete metadata JSON must be an array");
   }
 
+  size_t entry_index = 0;
   for (const auto& entry : parsed) {
-    auto file_type = entry.getDefault("file_type", "").asString();
-    auto path = entry.getDefault("path", "").asString();
+    if (!entry.isObject()) {
+      return bridge::MakeBridgeDataFormatStatus(fmt::format("Delete metadata entry {} must be an object", entry_index));
+    }
+
+    std::string file_type;
+    if (const auto* value = entry.get_ptr("file_type")) {
+      if (!value->isString()) {
+        return bridge::MakeBridgeDataFormatStatus(
+            fmt::format("Delete metadata entry {} field 'file_type' must be a string", entry_index));
+      }
+      file_type = value->getString();
+    }
+
+    std::string path;
+    if (const auto* value = entry.get_ptr("path")) {
+      if (!value->isString()) {
+        return bridge::MakeBridgeDataFormatStatus(
+            fmt::format("Delete metadata entry {} field 'path' must be a string", entry_index));
+      }
+      path = value->getString();
+    }
 
     if (file_type == "equality") {
-      return arrow::Status::Invalid(
+      return arrow::Status::NotImplemented(
           fmt::format("Equality deletes not supported at read time. Delete file: {}. "
                       "Equality deletes must be converted to positional deletes before explore.",
                       path));
     }
 
     if (file_type == "position") {
-      ARROW_RETURN_NOT_OK(ReadPositionalDeleteFile(path, data_file_uri, properties, deleted_positions.get()));
+      ARROW_RETURN_NOT_OK(
+          ReadPositionalDeleteFile(path, data_file_uri, properties, physical_row_count, deleted_positions.get()));
     }
     // Skip unknown types (forward compatibility for deletion vectors, etc.)
+    ++entry_index;
   }
 
   return std::static_pointer_cast<const std::unordered_set<int64_t>>(deleted_positions);
@@ -202,7 +255,10 @@ arrow::Result<IcebergFormatReader::MetaTrait::MetadataPtr> IcebergFormatReader::
   }
 
   auto delete_metadata = GetDeleteMetadataBytes(file);
-  ARROW_ASSIGN_OR_RAISE(auto deleted_positions, LoadPositionalDeletes(delete_metadata, file.path, properties));
+  const auto physical_row_count =
+      data_metadata->row_group_infos.empty() ? 0 : data_metadata->row_group_infos.back().end_offset;
+  ARROW_ASSIGN_OR_RAISE(auto deleted_positions,
+                        LoadPositionalDeletes(delete_metadata, file.path, properties, physical_row_count));
   auto sorted_deletions = MakeSortedDeletions(deleted_positions);
   ARROW_ASSIGN_OR_RAISE(auto logical_row_group_infos,
                         build_logical_row_group_infos(data_metadata->row_group_infos, *sorted_deletions));
@@ -233,7 +289,7 @@ arrow::Result<std::shared_ptr<IcebergFormatReader>> IcebergFormatReader::MetaTra
     const std::vector<std::string>& needed_columns,
     const std::string& predicate) {
   if (!metadata) {
-    return arrow::Status::Invalid("Cannot open Iceberg reader from null metadata");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Cannot open Iceberg reader from null metadata");
   }
   if (!metadata->payload.data_metadata) {
     return arrow::Status::Invalid(
@@ -294,17 +350,20 @@ IcebergFormatReader::IcebergFormatReader(std::shared_ptr<parquet::ParquetFormatR
 arrow::Status IcebergFormatReader::open() {
   ARROW_RETURN_NOT_OK(inner_reader_->open());
   ARROW_ASSIGN_OR_RAISE(projected_schema_, build_projected_schema(inner_reader_->get_schema(), needed_columns_));
-  ARROW_ASSIGN_OR_RAISE(deleted_positions_, load_positional_deletes());
-  sorted_deletions_ = MakeSortedDeletions(deleted_positions_);
-
   ARROW_ASSIGN_OR_RAISE(auto physical_row_group_infos, inner_reader_->get_row_group_infos());
+  ARROW_ASSIGN_OR_RAISE(
+      deleted_positions_,
+      LoadPositionalDeletes(delete_metadata_, data_file_uri_, properties_,
+                            physical_row_group_infos.empty() ? 0 : physical_row_group_infos.back().end_offset));
+  sorted_deletions_ = MakeSortedDeletions(deleted_positions_);
   ARROW_ASSIGN_OR_RAISE(logical_row_group_infos_,
                         build_logical_row_group_infos(physical_row_group_infos, *sorted_deletions_));
   return arrow::Status::OK();
 }
 
-arrow::Result<std::shared_ptr<const std::unordered_set<int64_t>>> IcebergFormatReader::load_positional_deletes() const {
-  return LoadPositionalDeletes(delete_metadata_, data_file_uri_, properties_);
+arrow::Result<std::shared_ptr<const std::unordered_set<int64_t>>> IcebergFormatReader::load_positional_deletes(
+    uint64_t physical_row_count) const {
+  return LoadPositionalDeletes(delete_metadata_, data_file_uri_, properties_, physical_row_count);
 }
 
 arrow::Result<std::shared_ptr<arrow::Schema>> IcebergFormatReader::build_projected_schema(
@@ -374,7 +433,8 @@ arrow::Result<std::vector<RowGroupInfo>> IcebergFormatReader::build_logical_row_
   uint64_t logical_offset = 0;
   for (const auto& prg : physical_row_group_infos) {
     if (prg.end_offset < prg.start_offset) {
-      return arrow::Status::Invalid(fmt::format("Invalid physical row group offsets: {}", prg.ToString()));
+      return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted,
+                                "Invalid physical row group offsets: ", prg.ToString());
     }
 
     // Count deletions within this physical row group range
@@ -384,8 +444,9 @@ arrow::Result<std::vector<RowGroupInfo>> IcebergFormatReader::build_logical_row_
     auto deletions_in_rg = static_cast<uint64_t>(std::distance(lo, hi));
     auto physical_rows = static_cast<uint64_t>(prg.end_offset - prg.start_offset);
     if (deletions_in_rg > physical_rows) {
-      return arrow::Status::Invalid(fmt::format("Invalid deletion count for physical row group: deletions={}, rows={}",
-                                                deletions_in_rg, physical_rows));
+      return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted,
+                                "Invalid deletion count for physical row group: deletions=", deletions_in_rg,
+                                ", rows=", physical_rows);
     }
     uint64_t logical_rows = physical_rows - deletions_in_rg;
 
@@ -432,7 +493,7 @@ arrow::Result<std::vector<RowGroupInfo>> IcebergFormatReader::get_row_group_info
 
 arrow::Result<std::vector<uint64_t>> IcebergFormatReader::get_rg_column_memsz(int64_t row_group_index) const {
   if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= logical_row_group_infos_.size()) {
-    return arrow::Status::Invalid(fmt::format("Iceberg row group index out of range: {}", row_group_index));
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, fmt::format("Iceberg row group index out of range: {}", row_group_index));
   }
   if (!logical_row_group_infos_[row_group_index].memory_size_available) {
     return arrow::Status::NotImplemented("Iceberg column memory size statistics are not available");
@@ -459,7 +520,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> IcebergFormatReader::get_chun
   // Determine the global physical offset for this row group
   ARROW_ASSIGN_OR_RAISE(auto rg_infos, inner_reader_->get_row_group_infos());
   if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= rg_infos.size()) {
-    return arrow::Status::Invalid(fmt::format("Row group index out of range: {}", row_group_index));
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, fmt::format("Row group index out of range: {}", row_group_index));
   }
 
   return filter_batch(batch, rg_infos[row_group_index].start_offset);

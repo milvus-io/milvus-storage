@@ -14,15 +14,28 @@
 
 #include <gtest/gtest.h>
 
+#include <condition_variable>
+#include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 
+#include <arrow/result.h>
 #include <arrow/status.h>
 #include <aws/core/http/URI.h>
+#include <aws/core/http/standard/StandardHttpRequest.h>
+#include <aws/s3/S3ErrorMarshaller.h>
 
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/gcp/gcp_credential_registry.h"
+#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/s3/s3_internal.h"
+#include "milvus-storage/filesystem/s3/s3_global.h"
+
+#include "filesystem/gcp/gcp_filesystem_producer_internal.h"
 
 namespace milvus_storage {
 
@@ -30,14 +43,157 @@ namespace {
 
 class TestGcpCredentialProvider final : public GcpCredentialProvider {
   public:
-  std::optional<std::pair<std::string, std::string>> AuthorizationHeader() override { return std::nullopt; }
+  arrow::Result<std::optional<std::pair<std::string, std::string>>> AuthorizationHeader() override {
+    return std::optional<std::pair<std::string, std::string>>{};
+  }
 
   arrow::Status MaybeSignConditionalWrite(const std::shared_ptr<Aws::Http::HttpRequest>&) override {
     return arrow::Status::OK();
   }
 };
 
+// Forces request A's token lookup to finish after request B's. This is the
+// interleaving that made provider-global last_token_status_ associate A's
+// failure with B's request (or B's success with A's request).
+class InterleavedGcpCredentialProvider final : public GcpCredentialProvider {
+  public:
+  arrow::Result<std::optional<std::pair<std::string, std::string>>> AuthorizationHeader() override {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (calls_++ == 0) {
+      first_call_started_ = true;
+      cv_.notify_all();
+      cv_.wait(lock, [this] { return release_first_call_; });
+      return arrow::Status::IOError("request A token lookup failed");
+    }
+    return std::optional<std::pair<std::string, std::string>>(std::in_place, "Authorization", "Bearer request-b-token");
+  }
+
+  arrow::Status MaybeSignConditionalWrite(const std::shared_ptr<Aws::Http::HttpRequest>&) override {
+    return arrow::Status::OK();
+  }
+
+  void WaitForFirstCall() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [this] { return first_call_started_; });
+  }
+
+  void ReleaseFirstCall() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      release_first_call_ = true;
+    }
+    cv_.notify_all();
+  }
+
+  private:
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  int calls_ = 0;
+  bool first_call_started_ = false;
+  bool release_first_call_ = false;
+};
+
 }  // namespace
+
+class GcpCredentialProviderTest : public ::testing::Test {
+  protected:
+  static void SetUpTestSuite() {
+    ASSERT_TRUE(EnsureS3Initialized().ok());
+    static std::once_flag finalize_once;
+    std::call_once(finalize_once, [] { std::atexit([] { EnsureS3Finalized().ok(); }); });
+  }
+};
+
+TEST_F(GcpCredentialProviderTest, AuthorizationResultBelongsToTheRequestThatResolvedIt) {
+  auto provider = std::make_shared<InterleavedGcpCredentialProvider>();
+  auto request_a = Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(
+      "gcp-request-local-test", Aws::Http::URI("https://storage.googleapis.com/bucket/a"),
+      Aws::Http::HttpMethod::HTTP_GET);
+  auto request_b = Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(
+      "gcp-request-local-test", Aws::Http::URI("https://storage.googleapis.com/bucket/b"),
+      Aws::Http::HttpMethod::HTTP_GET);
+
+  arrow::Status status_a;
+  arrow::Status status_b;
+  std::thread thread_a([&] { status_a = ApplyGcpAuthorizationHeader(provider, request_a); });
+  provider->WaitForFirstCall();
+  std::thread thread_b([&] { status_b = ApplyGcpAuthorizationHeader(provider, request_b); });
+  thread_b.join();
+  provider->ReleaseFirstCall();
+  thread_a.join();
+
+  EXPECT_FALSE(status_a.ok());
+  EXPECT_NE(status_a.message().find("request A token lookup failed"), std::string::npos);
+  EXPECT_FALSE(request_a->HasHeader("Authorization"));
+
+  EXPECT_TRUE(status_b.ok()) << status_b.ToString();
+  ASSERT_TRUE(request_b->HasHeader("Authorization"));
+  EXPECT_EQ(request_b->GetHeaderValue("Authorization"), "Bearer request-b-token");
+}
+
+TEST_F(GcpCredentialProviderTest, HmacConditionalWriteStillUsesGoogV4Signing) {
+  ArrowFileSystemConfig config;
+  config.access_key_id = "GOOGACCESSKEY";
+  config.access_key_value = "secret";
+  auto provider_result = BuildGcpProviderFromConfig(config);
+  ASSERT_TRUE(provider_result.ok()) << provider_result.status().ToString();
+  auto provider = std::move(provider_result).ValueOrDie();
+
+  auto request = Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(
+      "gcp-hmac-test", Aws::Http::URI("https://storage.googleapis.com/bucket/object"), Aws::Http::HttpMethod::HTTP_PUT);
+  request->SetHeaderValue("Authorization", "AWS4-HMAC-SHA256 old-signature");
+  request->SetHeaderValue("x-amz-date", "20260819T000000Z");
+  request->SetHeaderValue("x-amz-content-sha256", "UNSIGNED-PAYLOAD");
+  request->SetHeaderValue("x-goog-if-generation-match", "0");
+
+  auto authorization_status = ApplyGcpAuthorizationHeader(provider, request);
+  ASSERT_TRUE(authorization_status.ok()) << authorization_status.ToString();
+  EXPECT_EQ(request->GetHeaderValue("Authorization"), "AWS4-HMAC-SHA256 old-signature");
+
+  auto signing_status = provider->MaybeSignConditionalWrite(request);
+  ASSERT_TRUE(signing_status.ok()) << signing_status.ToString();
+  EXPECT_NE(std::string(request->GetHeaderValue("Authorization")).find("GOOG4-HMAC-SHA256"), std::string::npos);
+  EXPECT_FALSE(request->HasHeader("x-amz-date"));
+  EXPECT_TRUE(request->HasHeader("x-goog-date"));
+}
+
+TEST_F(GcpCredentialProviderTest, TokenFailureSubtypeSurvivesS3Marshalling) {
+  struct TestCase {
+    ExtendStatusCode input;
+    ExtendStatusCode expected;
+  };
+  const TestCase test_cases[] = {
+      {ExtendStatusCode::StorageTransientNetwork, ExtendStatusCode::StorageTransientNetwork},
+      {ExtendStatusCode::StorageTransientTimeout, ExtendStatusCode::StorageTransientTimeout},
+      {ExtendStatusCode::StorageTransientThrottling, ExtendStatusCode::StorageTransientThrottling},
+      {ExtendStatusCode::StorageTransientService, ExtendStatusCode::StorageTransientService},
+      {ExtendStatusCode::StorageAccessDenied, ExtendStatusCode::StorageAccessDenied},
+      {ExtendStatusCode::StorageConfigInvalid, ExtendStatusCode::StorageConfigInvalid},
+  };
+
+  auto request = Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(
+      "gcp-token-marshalling-test", Aws::Http::URI("https://storage.googleapis.com/bucket/object"),
+      Aws::Http::HttpMethod::HTTP_GET);
+  request->SetResponseStreamFactory(Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
+  Aws::Client::S3ErrorMarshaller marshaller;
+  for (const auto& test_case : test_cases) {
+    auto token_status = MakeExtendErrorMsg(test_case.input, "bad <token> & endpoint");
+    auto response = gcp_internal::MakeTokenErrorResponse(request, token_status);
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(marshaller.BuildAWSError(response));
+    EXPECT_EQ(error.ShouldRetry(), RetryableForExtendStatusCode(test_case.expected));
+    auto status = fs::internal::ErrorToStatus("gcp token: ", "GetObject", error, fs::internal::S3ErrorProvenance{});
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->code(), test_case.expected) << status.ToString();
+  }
+
+  auto response = gcp_internal::MakeTokenErrorResponse(request, arrow::Status::IOError("malformed token response"));
+  Aws::Client::AWSError<Aws::S3::S3Errors> error(marshaller.BuildAWSError(response));
+  EXPECT_FALSE(error.ShouldRetry());
+  auto status = fs::internal::ErrorToStatus("gcp token: ", "GetObject", error, fs::internal::S3ErrorProvenance{});
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr) << status.ToString();
+}
 
 TEST(GcpCredentialRegistryTest, CanonicalizesConfigEndpoints) {
   auto implicit_https = NormalizeGcpEndpoint("Storage.GoogleApis.com", true);

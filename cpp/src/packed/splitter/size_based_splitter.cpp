@@ -64,7 +64,7 @@ arrow::Result<std::vector<ColumnGroup>> SizeBasedSplitter::SplitRecordBatches(
     for (GroupId group_id = 0; group_id < group_indices.size(); ++group_id) {
       ARROW_ASSIGN_OR_RAISE(auto batch, record->SelectColumns(group_indices[group_id]));
       if (column_groups.size() < group_indices.size()) {
-        column_groups.emplace_back(group_id, group_indices[group_id], batch);
+        column_groups.emplace_back(group_id, batch);
       } else {
         ARROW_RETURN_NOT_OK(column_groups[group_id].AddRecordBatch(batch));
       }

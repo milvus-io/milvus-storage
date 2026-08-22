@@ -32,6 +32,7 @@
 #include <parquet/arrow/writer.h>
 
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/writer.h"
@@ -576,6 +577,30 @@ TEST_P(FormatReaderTest, ReadParquetWithoutMeta) {
     total_size += rb->num_rows();
   }
   ASSERT_EQ(total_size, test_batch_->num_rows() * 10);
+}
+
+TEST_P(FormatReaderTest, ParquetCorruptFooterIsDataFormat) {
+  if (GetParam() != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  const auto file_path = base_path_ + "/corrupt-footer.parquet";
+  ASSERT_AND_ASSIGN(auto sink, fs_->OpenOutputStream(file_path));
+  ASSERT_STATUS_OK(sink->Write("12345678"));
+  ASSERT_STATUS_OK(sink->Close());
+
+  parquet::ParquetFormatReader reader(fs_, file_path, properties_, /*needed_columns=*/{}, nullptr);
+  auto status = reader.open();
+
+  ASSERT_FALSE(status.ok());
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  // Neutral, for the same reason: a corrupt footer found by the shared parquet
+  // reader says nothing about whether milvus or an external writer produced the
+  // file. The segcore landing is unchanged -- only the diagnosis is honest now.
+  EXPECT_EQ(detail->code(), ExtendStatusCode::DataCorrupted);
+  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::DataFormatBroken);
+  EXPECT_NE(status.ToString().find(file_path), std::string::npos) << status.ToString();
 }
 
 TEST_P(FormatReaderTest, ParquetFooterFastPathUsesCrtReadAtAsyncInto) {

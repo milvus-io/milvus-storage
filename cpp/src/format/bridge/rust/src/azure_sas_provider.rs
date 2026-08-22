@@ -204,6 +204,10 @@ impl AzureBrokerClient {
             .map_err(|_| anyhow!("transport_error"))?;
         let status = response.status();
         if !status.is_success() {
+            crate::bridge_error::record_credential_http_failure(
+                status.as_u16(),
+                "sas broker token fetch",
+            );
             bail!("http_status={}", status.as_u16());
         }
         let response: BrokerResponse =
@@ -345,18 +349,7 @@ impl AzureSasStorageOptionsProvider {
                 *cached = Some(credential.clone());
                 Ok(credential)
             }
-            Err(error) => {
-                let has_cached_sas = cached.is_some();
-                let cached_expired = cached
-                    .as_ref()
-                    .map(|credential| credential.expires_at <= now)
-                    .unwrap_or(false);
-                eprintln!(
-                    "Warning: Azure SAS credential broker refresh failed: {}, has_cached_sas={}, cached_expired={}",
-                    error, has_cached_sas, cached_expired
-                );
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }
 }

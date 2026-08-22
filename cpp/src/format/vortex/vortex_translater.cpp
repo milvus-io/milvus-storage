@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/format/vortex/vortex_translater.h"
+#include "milvus-storage/common/extend_status.h"
 
 #include <algorithm>
 #include <limits>
@@ -94,17 +95,17 @@ arrow::Result<std::unique_ptr<VortexTranslater>> VortexTranslater::Make(
     std::string sparse_path,
     CacheWarmupPolicy cache_warmup_policy) {
   if (!source_fs) {
-    return arrow::Status::Invalid("VortexTranslater requires a non-null source filesystem");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "VortexTranslater requires a non-null source filesystem");
   }
   if (!sparse_fs) {
-    return arrow::Status::Invalid("VortexTranslater requires a non-null range filesystem");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "VortexTranslater requires a non-null range filesystem");
   }
   if (!cell_metas) {
     return arrow::Status::Invalid("VortexTranslater requires non-null cell metas");
   }
   ARROW_ASSIGN_OR_RAISE(auto range_file, GetVortexRangeFile(sparse_fs, sparse_path));
   if (!range_file) {
-    return arrow::Status::Invalid("VortexTranslater requires a non-null range file");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "VortexTranslater requires a non-null range file");
   }
 
   ARROW_ASSIGN_OR_RAISE(auto input_file, source_fs->OpenInputFile(source_path));

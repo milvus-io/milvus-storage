@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use std::collections::HashMap;
+use std::error::Error as StdError;
 use std::ffi::c_void;
 use std::fmt::{Display, Formatter};
 use std::ops::Range;
@@ -15,9 +16,9 @@ use arrow_array58::{
     Array, ArrayRef as ArrowArrayRef, FixedSizeBinaryArray, FixedSizeListArray, RecordBatch,
     RecordBatchReader, StructArray, UInt8Array, make_array,
 };
+use arrow_schema58::{ArrowError, DataType, Field, Schema, SchemaRef};
 use arrow58::array::ArrayData;
 use arrow58::ffi::FFI_ArrowArray;
-use arrow_schema58::{ArrowError, DataType, Field, Schema, SchemaRef};
 
 use vortex::array::ArrayRef;
 use vortex::array::VortexSessionExecute;
@@ -49,6 +50,18 @@ use crate::vortex_layout_strategy_v2::{LAYOUT_ID, build_row_group_strategy};
 const VORTEX_ZONED_LAYOUT_ID: &str = "vortex.stats";
 const VORTEX_HEADER_SIZE: u64 = 4;
 
+/// Build a typed error only at checks that have already established that the
+/// persisted Vortex footer/layout is inconsistent.  This keeps transport and
+/// caller-owned failures out of `VortexDataFormat` without relying on message
+/// matching at the FFI boundary.
+fn persisted_data_format_error(message: String) -> anyhow::Error {
+    anyhow::Error::new(crate::filesystem_c::classified_vortex_error(
+        LOON_VORTEX_DATA_FORMAT,
+        "vortex persisted data",
+        message,
+    ))
+}
+
 fn footer_start_from_segments(segments: &[SegmentSpec]) -> Result<u64, VortexError> {
     segments
         .iter()
@@ -67,6 +80,33 @@ fn footer_start_from_segments(segments: &[SegmentSpec]) -> Result<u64, VortexErr
         })
 }
 
+fn footer_size_from_bounds(file_size: u64, footer_start: u64) -> Result<u64, VortexError> {
+    if footer_start > file_size {
+        return Err(vortex::error::vortex_err!(
+            "Vortex footer start {} exceeds file size {}",
+            footer_start,
+            file_size
+        ));
+    }
+
+    let tail_size = file_size - footer_start;
+    let eof_size = vortex::file::EOF_SIZE as u64;
+    if tail_size < eof_size {
+        return Err(vortex::error::vortex_err!(
+            "Vortex footer tail size {} is smaller than EOF size {}",
+            tail_size,
+            eof_size
+        ));
+    }
+    Ok(tail_size - eof_size)
+}
+
+fn footer_start_from_persisted_segments(segments: &[SegmentSpec]) -> Result<u64> {
+    footer_start_from_segments(segments).map_err(|error| {
+        persisted_data_format_error(format!("Invalid persisted Vortex segment map: {error}"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,6 +121,126 @@ mod tests {
         }];
 
         assert!(footer_start_from_segments(&segments).is_err());
+    }
+
+    #[test]
+    fn invalid_write_summary_bounds_are_rejected() {
+        assert!(footer_size_from_bounds(10, 11).is_err());
+        assert!(footer_size_from_bounds(10, 10).is_err());
+
+        let eof_size = vortex::file::EOF_SIZE as u64;
+        assert_eq!(footer_size_from_bounds(20 + eof_size, 10).unwrap(), 10);
+    }
+
+    #[test]
+    fn persisted_segment_overflow_is_typed_data_format() {
+        clear_last_vortex_error();
+        let segments = [SegmentSpec {
+            offset: u64::MAX,
+            length: 1,
+            alignment: Alignment::none(),
+        }];
+
+        let error = footer_start_from_persisted_segments(&segments).unwrap_err();
+        assert_eq!(
+            classified_error_info_from_anyhow(&error).map(|info| info.code),
+            Some(LOON_VORTEX_DATA_FORMAT)
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("Invalid persisted Vortex segment map")
+        );
+    }
+
+    #[test]
+    fn caught_decoder_panic_is_internal_not_data_format() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new(String::from("decoder invariant"));
+        let err = panic_to_internal_error(&payload, "test decode");
+
+        // A panic is an unexpected decoder failure, not an ordinary
+        // data-format rejection. The guard must keep the process alive without
+        // assigning the healthy input a format verdict.
+        assert_eq!(
+            classified_error_info_from_vortex(&err).map(|info| info.code),
+            Some(LOON_INTERNAL_INVARIANT)
+        );
+        assert!(err.to_string().contains("decoder invariant"));
+    }
+
+    #[test]
+    fn ffi_result_publishes_classified_error_and_clears_it_after_success() {
+        clear_last_vortex_error();
+
+        let error = anyhow::Error::new(crate::filesystem_c::classified_vortex_error(
+            777,
+            "test filesystem",
+            "typed failure".to_string(),
+        ));
+        let result: Result<()> = Err(error);
+        assert!(finish_anyhow_ffi_result(result).is_err());
+
+        let info = take_last_vortex_error();
+        assert_eq!(info.code, 777);
+        assert!(info.message.contains("typed failure"));
+
+        record_classified_vortex_error(888, "stale".to_string());
+        assert!(finish_anyhow_ffi_result(Ok(())).is_ok());
+        assert_eq!(take_last_vortex_error().code, 0);
+    }
+
+    #[test]
+    fn writer_error_wrappers_preserve_the_classified_source() {
+        clear_last_vortex_error();
+
+        let classified = Arc::new(crate::filesystem_c::classified_vortex_error(
+            779,
+            "writer filesystem",
+            "write failed".to_string(),
+        ));
+        let io_error =
+            std::io::Error::new(std::io::ErrorKind::Other, VortexError::from(classified));
+        let boxed: Box<dyn StdError> = Box::new(VortexError::from(io_error));
+        let result: std::result::Result<(), Box<dyn StdError>> = Err(boxed);
+        assert!(finish_boxed_ffi_result(result).is_err());
+
+        let info = take_last_vortex_error();
+        assert_eq!(info.code, 779);
+        assert!(info.message.contains("write failed"));
+    }
+
+    #[test]
+    fn only_explicit_decoder_errors_get_data_format_classification() {
+        clear_last_vortex_error();
+
+        let io_error = VortexError::from(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "object read timed out",
+        ));
+        let io_result = classify_vortex_as_data_format(io_error);
+        assert!(matches!(io_result, VortexError::Io(..)));
+        assert_eq!(take_last_vortex_error().code, 0);
+
+        let decode_error = vortex::error::vortex_err!(Serde: "malformed serialized metadata");
+        let decode_result = classify_vortex_as_data_format(decode_error);
+        assert_eq!(
+            classified_error_info_from_vortex(&decode_result).map(|info| info.code),
+            Some(LOON_VORTEX_DATA_FORMAT)
+        );
+        assert_eq!(take_last_vortex_error().code, LOON_VORTEX_DATA_FORMAT);
+    }
+
+    #[test]
+    fn anyhow_wrapper_does_not_relabel_plain_io_as_data_format() {
+        clear_last_vortex_error();
+        let error = anyhow::Error::new(VortexError::from(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset",
+        )));
+
+        let result = classify_anyhow_as_data_format(error);
+        assert!(result.downcast_ref::<VortexError>().is_some());
+        assert_eq!(take_last_vortex_error().code, 0);
     }
 }
 
@@ -935,7 +1095,6 @@ pub const VORTEX_BASIC_STATS: &[Stat] = &[
 
 pub const VORTEX_NON_STATS: &[Stat] = &[Stat::UncompressedSizeInBytes];
 
-const VORTEX_FORMAT_V1: u32 = 1;
 const VORTEX_FORMAT_V2: u32 = 2;
 
 pub(crate) struct VortexWriter {
@@ -971,127 +1130,123 @@ pub(crate) unsafe fn open_writer(
 
 impl VortexWriter {
     pub(crate) unsafe fn write(&mut self, in_schema: *mut u8, in_array: *mut u8) -> Result<()> {
-        let ffi_array = unsafe { FFI_ArrowArray::from_raw(in_array as *mut FFI_ArrowArray) };
+        let result = (|| {
+            let ffi_array = unsafe { FFI_ArrowArray::from_raw(in_array as *mut FFI_ArrowArray) };
 
-        let ffi_schema = unsafe { FFI_ArrowSchema::from_raw(in_schema as *mut FFI_ArrowSchema) };
-        let arrow_schema = Schema::try_from(&ffi_schema)?;
+            let ffi_schema =
+                unsafe { FFI_ArrowSchema::from_raw(in_schema as *mut FFI_ArrowSchema) };
+            let arrow_schema = Schema::try_from(&ffi_schema)?;
 
-        let arrow_array_data = arrow_array58::array::StructArray::from(
-            unsafe { arrow_array58::ffi::from_ffi(ffi_array, &ffi_schema) }
-                .map_err(|e| VortexError::from(e))?,
-        );
+            let arrow_array_data = arrow_array58::array::StructArray::from(
+                unsafe { arrow_array58::ffi::from_ffi(ffi_array, &ffi_schema) }
+                    .map_err(VortexError::from)?,
+            );
 
-        let (converted_schema, converted_array) = if let Some(conversion) =
-            convert_schema_for_vortex(&arrow_schema)?
-        {
-            let converted_array = convert_struct_array_for_vortex(&arrow_array_data, &conversion)?;
-            (conversion.schema, converted_array)
-        } else {
-            (arrow_schema, arrow_array_data)
-        };
-        let vortex_schema = RustDType::from_arrow(&converted_schema);
+            let (converted_schema, converted_array) =
+                if let Some(conversion) = convert_schema_for_vortex(&arrow_schema)? {
+                    let converted_array =
+                        convert_struct_array_for_vortex(&arrow_array_data, &conversion)?;
+                    (conversion.schema, converted_array)
+                } else {
+                    (arrow_schema, arrow_array_data)
+                };
+            let vortex_schema = RustDType::from_arrow(&converted_schema);
 
-        // lazy init the inner_writer
-        if self.inner_writer.is_none() {
-            let (objw, writer_handle) = ObjectStoreWriterCpp::new(
-                self.fswrapper_ptr as *mut c_void,
-                &self.path,
-                VORTEX_RT.handle(),
-            )
-            .map_err(|e| VortexError::from(e))?;
-            self.writer_handle = Some(writer_handle);
-
-            // stats options
-            let stats_options = if self.enable_stats {
-                VORTEX_BASIC_STATS.to_vec()
-            } else {
-                VORTEX_NON_STATS.to_vec()
-            };
-            let strategy = if self.format_version == VORTEX_FORMAT_V2 {
-                build_row_group_strategy(
-                    self.row_group_max_size,
-                    self.enable_stats,
-                    Arc::<[Stat]>::from(stats_options.clone()),
+            // lazy init the inner_writer
+            if self.inner_writer.is_none() {
+                let (objw, writer_handle) = ObjectStoreWriterCpp::new(
+                    self.fswrapper_ptr as *mut c_void,
+                    &self.path,
+                    VORTEX_RT.handle(),
                 )
-            } else {
-                WriteStrategyBuilder::default()
-                    .with_inline_array_node(true)
-                    .build()
-            };
+                .map_err(VortexError::from)?;
+                self.writer_handle = Some(writer_handle);
 
-            let writer = VortexWriteOptions::new(VORTEX_SESSION.clone())
-                .with_file_statistics(stats_options)
-                .with_strategy(strategy)
-                .writer(objw, vortex_schema);
+                // stats options
+                let stats_options = if self.enable_stats {
+                    VORTEX_BASIC_STATS.to_vec()
+                } else {
+                    VORTEX_NON_STATS.to_vec()
+                };
+                let strategy = if self.format_version == VORTEX_FORMAT_V2 {
+                    build_row_group_strategy(
+                        self.row_group_max_size,
+                        self.enable_stats,
+                        Arc::<[Stat]>::from(stats_options.clone()),
+                    )
+                } else {
+                    WriteStrategyBuilder::default()
+                        .with_inline_array_node(true)
+                        .build()
+                };
 
-            self.inner_writer = Some(writer);
-        }
-        let mut inner_writer = self.inner_writer.take().unwrap();
+                let writer = VortexWriteOptions::new(VORTEX_SESSION.clone())
+                    .with_file_statistics(stats_options)
+                    .with_strategy(strategy)
+                    .writer(objw, vortex_schema);
 
-        let converted_array = ArrayRef::from_arrow(&converted_array, false)?;
-        VORTEX_RT
-            .block_on(inner_writer.push(converted_array))
-            .map_err(|e| Box::new(VortexError::from(e)))?;
+                self.inner_writer = Some(writer);
+            }
+            let mut inner_writer = self.inner_writer.take().unwrap();
 
-        self.inner_writer = Some(inner_writer);
-        Ok(())
+            let converted_array = ArrayRef::from_arrow(&converted_array, false)?;
+            VORTEX_RT
+                .block_on(inner_writer.push(converted_array))
+                .map_err(|e| Box::new(VortexError::from(e)))?;
+
+            self.inner_writer = Some(inner_writer);
+            Ok(())
+        })();
+        finish_anyhow_ffi_result(result)
     }
 
     pub(crate) unsafe fn flush(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(writer_handle) = self.writer_handle.as_ref() {
-            VORTEX_RT
-                .block_on(writer_handle.flush())
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        }
-        Ok(())
+        let result = (|| {
+            if let Some(writer_handle) = self.writer_handle.as_ref() {
+                VORTEX_RT
+                    .block_on(writer_handle.flush())
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            }
+            Ok(())
+        })();
+        finish_boxed_ffi_result(result)
     }
 
     pub(crate) unsafe fn close(
         &mut self,
     ) -> Result<crate::vortex_ffi::VortexWriteSummary, Box<dyn std::error::Error>> {
-        if let Some(w) = self.inner_writer.take() {
-            let summary = VORTEX_RT
-                .block_on(w.finish())
-                .map_err(|e| Box::new(VortexError::from(e)) as Box<dyn std::error::Error>)?;
-            if let Some(writer_handle) = self.writer_handle.take() {
-                VORTEX_RT
-                    .block_on(writer_handle.close())
+        let result = (|| {
+            if let Some(w) = self.inner_writer.take() {
+                let summary = VORTEX_RT
+                    .block_on(w.finish())
+                    .map_err(|e| Box::new(VortexError::from(e)) as Box<dyn std::error::Error>)?;
+                let file_size = summary.size();
+                let footer = summary.footer();
+                let footer_start = footer_start_from_segments(footer.segment_map())
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                let footer_size = footer_size_from_bounds(file_size, footer_start)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+                // Validate the summary while the output stream is still
+                // abortable. Once close succeeds the object is committed and a
+                // later C++ Abort cannot undo it.
+                if let Some(writer_handle) = self.writer_handle.take() {
+                    VORTEX_RT
+                        .block_on(writer_handle.close())
+                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                }
+
+                return Ok(crate::vortex_ffi::VortexWriteSummary {
+                    file_size,
+                    footer_size,
+                });
             }
-            let file_size = summary.size();
-
-            let footer = summary.footer();
-            let footer_start = footer_start_from_segments(footer.segment_map())
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-
-            if footer_start > file_size {
-                return Err(Box::new(vortex::error::vortex_err!(
-                    "Vortex footer start {} exceeds file size {}",
-                    footer_start,
-                    file_size
-                )));
-            }
-
-            let tail_size = file_size - footer_start;
-            let eof_size = vortex::file::EOF_SIZE as u64;
-            if tail_size < eof_size {
-                return Err(Box::new(vortex::error::vortex_err!(
-                    "Vortex footer tail size {} is smaller than EOF size {}",
-                    tail_size,
-                    eof_size
-                )));
-            }
-            let footer_size = tail_size - eof_size;
-
-            return Ok(crate::vortex_ffi::VortexWriteSummary {
-                file_size,
-                footer_size,
-            });
-        }
-        Ok(crate::vortex_ffi::VortexWriteSummary {
-            file_size: 0,
-            footer_size: 0,
-        })
+            Ok(crate::vortex_ffi::VortexWriteSummary {
+                file_size: 0,
+                footer_size: 0,
+            })
+        })();
+        finish_boxed_ffi_result(result)
     }
 }
 
@@ -1193,8 +1348,85 @@ impl VortexFile {
         &self,
         window: crate::vortex_ffi::CoalescingWindow,
     ) -> Result<Box<VortexScanBuilder>> {
+        guard_decoder_panic(&self.path, "scan_builder", || {
+            self.scan_builder_unguarded(window)
+        })
+    }
+
+    pub(crate) fn scan_builder_with_schema(
+        &self,
+        in_schema: *mut u8,
+    ) -> Result<Box<VortexScanBuilder>> {
+        guard_decoder_panic(&self.path, "scan_builder_with_schema", || {
+            self.scan_builder_with_schema_unguarded(in_schema)
+        })
+    }
+
+    pub(crate) unsafe fn get_schema(&self, out_schema: *mut u8) -> Result<()> {
+        guard_decoder_panic(&self.path, "get_schema", || unsafe {
+            self.get_schema_unguarded(out_schema)
+        })
+    }
+
+    pub(crate) fn splits(&self) -> Result<Vec<u64>> {
+        guard_decoder_panic(&self.path, "splits", || self.splits_unguarded())
+    }
+
+    pub(crate) fn row_group_zone_map_count(&self) -> Result<u64> {
+        guard_decoder_panic(&self.path, "row_group_zone_map_count", || {
+            self.row_group_zone_map_count_unguarded()
+        })
+    }
+
+    pub(crate) fn row_group_zone_map_data_before_zones(&self) -> Result<bool> {
+        guard_decoder_panic(&self.path, "row_group_zone_map_data_before_zones", || {
+            self.row_group_zone_map_data_before_zones_unguarded()
+        })
+    }
+
+    pub(crate) fn zone_map_segment_ids(&self) -> Result<Vec<u64>> {
+        guard_decoder_panic(&self.path, "zone_map_segment_ids", || {
+            self.zone_map_segment_ids_unguarded()
+        })
+    }
+
+    pub(crate) fn footer_byte_range(&self, file_size: u64) -> Result<Vec<u64>> {
+        guard_decoder_panic(&self.path, "footer_byte_range", || {
+            self.footer_byte_range_unguarded(file_size)
+        })
+    }
+
+    pub(crate) fn segment_bytes(&self, flat_segment_id: u64) -> Result<Vec<u64>> {
+        guard_decoder_panic(&self.path, "segment_bytes", || {
+            self.segment_bytes_unguarded(flat_segment_id)
+        })
+    }
+
+    pub(crate) fn field_layout_units(&self, field_name: &str) -> Result<Vec<u64>> {
+        guard_decoder_panic(&self.path, "field_layout_units", || {
+            self.field_layout_units_unguarded(field_name)
+        })
+    }
+
+    pub(crate) fn prune_row_groups(
+        &self,
+        predicate: &str,
+        candidate_row_group_ids: &[u64],
+    ) -> Result<Vec<u64>> {
+        guard_decoder_panic(&self.path, "prune_row_groups", || {
+            self.prune_row_groups_unguarded(predicate, candidate_row_group_ids)
+        })
+    }
+
+    fn scan_builder_unguarded(
+        &self,
+        window: crate::vortex_ffi::CoalescingWindow,
+    ) -> Result<Box<VortexScanBuilder>> {
         let file = self.open_with_coalescing_window(window)?;
-        let num_natural_splits = file.splits().map_err(VortexError::from)?.len();
+        let num_natural_splits = file
+            .splits()
+            .map_err(|e| classify_vortex_as_data_format(VortexError::from(e)))?
+            .len();
         Ok(Box::new(VortexScanBuilder {
             inner: file.scan()?,
             filter: None,
@@ -1208,7 +1440,7 @@ impl VortexFile {
         }))
     }
 
-    pub(crate) fn scan_builder_with_schema(
+    fn scan_builder_with_schema_unguarded(
         &self,
         in_schema: *mut u8,
     ) -> Result<Box<VortexScanBuilder>> {
@@ -1220,7 +1452,11 @@ impl VortexFile {
             .as_ref()
             .map(|conversion| Arc::new(conversion.schema.clone()))
             .unwrap_or_else(|| original_schema.clone());
-        let num_natural_splits = self.inner.splits().map_err(VortexError::from)?.len();
+        let num_natural_splits = self
+            .inner
+            .splits()
+            .map_err(|e| classify_vortex_as_data_format(VortexError::from(e)))?
+            .len();
 
         Ok(Box::new(VortexScanBuilder {
             inner: self.inner.scan()?,
@@ -1235,7 +1471,7 @@ impl VortexFile {
         }))
     }
 
-    pub(crate) unsafe fn get_schema(&self, out_schema: *mut u8) -> Result<()> {
+    unsafe fn get_schema_unguarded(&self, out_schema: *mut u8) -> Result<()> {
         let dtype = self.inner.dtype();
         let arrow_schema = VORTEX_SESSION.arrow().to_arrow_schema(&dtype)?;
         let ffi_schema = FFI_ArrowSchema::try_from(&arrow_schema)?;
@@ -1243,9 +1479,12 @@ impl VortexFile {
         Ok(())
     }
 
-    pub(crate) fn splits(&self) -> Result<Vec<u64>> {
+    fn splits_unguarded(&self) -> Result<Vec<u64>> {
         // get the Vec<Range<u64>> from the inner file
-        let ranges = self.inner.splits().map_err(|e| VortexError::from(e))?;
+        let ranges = self
+            .inner
+            .splits()
+            .map_err(|e| classify_vortex_as_data_format(VortexError::from(e)))?;
 
         // map each Range<u64> to its end (right-hand side)
         let ends = ranges
@@ -1287,22 +1526,24 @@ impl VortexFile {
             .to_string()
     }
 
-    pub(crate) fn row_group_zone_map_count(&self) -> Result<u64> {
+    fn row_group_zone_map_count_unguarded(&self) -> Result<u64> {
         let root = self.inner.footer().layout();
         if root.encoding_id().as_ref() != LAYOUT_ID {
             return Ok(0);
         }
-        Ok(root.child(1)?.row_count())
+        Ok(zone_map_child(root, LAYOUT_ID)?.row_count())
     }
 
-    pub(crate) fn row_group_zone_map_data_before_zones(&self) -> Result<bool> {
+    fn row_group_zone_map_data_before_zones_unguarded(&self) -> Result<bool> {
         let root = self.inner.footer().layout();
         if root.encoding_id().as_ref() != LAYOUT_ID {
             return Ok(false);
         }
 
-        let data_child = root.child(0)?;
-        let zones_child = root.child(1)?;
+        let zones_child = zone_map_child(root, LAYOUT_ID)?;
+        let data_child = root.child(0).map_err(|error| {
+            anyhow::Error::new(classify_vortex_as_data_format(VortexError::from(error)))
+        })?;
         let mut data_segment_ids = Vec::new();
         collect_layout_segment_ids(&data_child, &mut data_segment_ids)?;
         let mut zones_segment_ids = Vec::new();
@@ -1313,21 +1554,31 @@ impl VortexFile {
         }
 
         let segments = self.inner.footer().segment_map();
-        let max_data_offset = data_segment_ids
-            .iter()
-            .map(|idx| segments[*idx].offset)
-            .max()
-            .expect("checked non-empty data segments");
-        let min_zones_offset = zones_segment_ids
-            .iter()
-            .map(|idx| segments[*idx].offset)
-            .min()
-            .expect("checked non-empty zones segments");
+        let mut max_data_offset = 0;
+        for idx in data_segment_ids {
+            let segment = segments.get(idx).ok_or_else(|| {
+                persisted_data_format_error(format!(
+                    "Vortex data layout references segment {idx}, but the footer has {} segments",
+                    segments.len()
+                ))
+            })?;
+            max_data_offset = max_data_offset.max(segment.offset);
+        }
+        let mut min_zones_offset = u64::MAX;
+        for idx in zones_segment_ids {
+            let segment = segments.get(idx).ok_or_else(|| {
+                persisted_data_format_error(format!(
+                    "Vortex zonemap layout references segment {idx}, but the footer has {} segments",
+                    segments.len()
+                ))
+            })?;
+            min_zones_offset = min_zones_offset.min(segment.offset);
+        }
 
         Ok(max_data_offset < min_zones_offset)
     }
 
-    pub(crate) fn zone_map_segment_ids(&self) -> Result<Vec<u64>> {
+    fn zone_map_segment_ids_unguarded(&self) -> Result<Vec<u64>> {
         let root = self.inner.footer().layout();
         let mut segment_ids = Vec::new();
         collect_zone_map_segment_ids(root, &mut segment_ids)?;
@@ -1335,22 +1586,21 @@ impl VortexFile {
     }
 
     /// Returns [offset, length] for the full footer/tail region.
-    pub(crate) fn footer_byte_range(&self, file_size: u64) -> Result<Vec<u64>> {
+    fn footer_byte_range_unguarded(&self, file_size: u64) -> Result<Vec<u64>> {
         let footer = self.inner.footer();
-        let footer_start = footer_start_from_segments(footer.segment_map())?;
+        let footer_start = footer_start_from_persisted_segments(footer.segment_map())?;
         if footer_start > file_size {
-            anyhow::bail!(
+            return Err(persisted_data_format_error(format!(
                 "Vortex footer start {} exceeds file size {}",
-                footer_start,
-                file_size
-            );
+                footer_start, file_size
+            )));
         } else {
             Ok(vec![footer_start, file_size - footer_start])
         }
     }
 
     /// Returns [offset, length] for a given flat segment ID.
-    pub(crate) fn segment_bytes(&self, flat_segment_id: u64) -> Result<Vec<u64>> {
+    fn segment_bytes_unguarded(&self, flat_segment_id: u64) -> Result<Vec<u64>> {
         let footer = self.inner.footer();
         let segment_map = footer.segment_map();
         let idx = flat_segment_id as usize;
@@ -1373,7 +1623,7 @@ impl VortexFile {
     ///                 flat_segment_id0, flat_segment_id1, ...]
     ///
     /// V2 units use row-group granularity. V1 units use field/flat granularity.
-    pub(crate) fn field_layout_units(&self, field_name: &str) -> Result<Vec<u64>> {
+    fn field_layout_units_unguarded(&self, field_name: &str) -> Result<Vec<u64>> {
         let footer = self.inner.footer();
         let root = footer.layout();
 
@@ -1386,7 +1636,7 @@ impl VortexFile {
         Ok(units)
     }
 
-    pub(crate) fn prune_row_groups(
+    fn prune_row_groups_unguarded(
         &self,
         predicate: &str,
         candidate_row_group_ids: &[u64],
@@ -1406,7 +1656,10 @@ impl VortexFile {
             &expr,
             candidate_row_group_ids,
         )
-        .map_err(Into::into)
+        // Pruning decodes zone-map segments, so ordinary FlatBuffers/Serde
+        // failures here are data-format errors too. Into::into used to
+        // stringify them into a generic 2044.
+        .map_err(|e| anyhow::Error::new(classify_vortex_as_data_format(e)))
     }
 }
 
@@ -1415,7 +1668,11 @@ fn collect_layout_segment_ids(
     out: &mut Vec<usize>,
 ) -> Result<()> {
     for segment_id in layout.segment_ids() {
-        out.push(usize::try_from(*segment_id)?);
+        out.push(usize::try_from(*segment_id).map_err(|_| {
+            persisted_data_format_error(format!(
+                "Vortex layout segment id {segment_id} does not fit this platform"
+            ))
+        })?);
     }
     for child in layout.children()? {
         collect_layout_segment_ids(&child, out)?;
@@ -1430,7 +1687,9 @@ fn collect_zone_map_segment_ids(layout: &LayoutRef, out: &mut Vec<usize>) -> Res
         let zones_child = zone_map_child(layout, encoding_id)?;
         collect_layout_segment_ids(&zones_child, out)?;
 
-        let data_child = layout.child(0)?;
+        let data_child = layout.child(0).map_err(|error| {
+            anyhow::Error::new(classify_vortex_as_data_format(VortexError::from(error)))
+        })?;
         collect_zone_map_segment_ids(&data_child, out)?;
         return Ok(());
     }
@@ -1444,13 +1703,13 @@ fn collect_zone_map_segment_ids(layout: &LayoutRef, out: &mut Vec<usize>) -> Res
 fn zone_map_child(layout: &LayoutRef, encoding_id: &str) -> Result<LayoutRef> {
     let child_count = layout.nchildren();
     if child_count != 2 {
-        anyhow::bail!(
-            "Vortex zonemap layout {} expected 2 children, got {}",
-            encoding_id,
-            child_count
-        );
+        return Err(persisted_data_format_error(format!(
+            "Vortex zonemap layout {encoding_id} expected 2 children, got {child_count}"
+        )));
     }
-    Ok(layout.child(1)?)
+    layout.child(1).map_err(|error| {
+        anyhow::Error::new(classify_vortex_as_data_format(VortexError::from(error)))
+    })
 }
 
 fn sorted_u64_segment_ids(mut segment_ids: Vec<usize>) -> Result<Vec<u64>> {
@@ -1465,7 +1724,9 @@ fn sorted_u64_segment_ids(mut segment_ids: Vec<usize>) -> Result<Vec<u64>> {
 fn find_field_layout(layout: &LayoutRef, field_name: &str) -> Result<Option<LayoutRef>> {
     for i in 0..layout.nchildren() {
         let child_type = layout.child_type(i);
-        let child = layout.child(i).map_err(VortexError::from)?;
+        let child = layout
+            .child(i)
+            .map_err(|e| classify_vortex_as_data_format(VortexError::from(e)))?;
         if let LayoutChildType::Field(ref name) = child_type {
             if name.as_ref() == field_name {
                 return Ok(Some(child));
@@ -1509,7 +1770,9 @@ fn collect_v2_row_group_units(
 ) -> Result<()> {
     for i in 0..layout.nchildren() {
         let child_type = layout.child_type(i);
-        let child = layout.child(i).map_err(VortexError::from)?;
+        let child = layout
+            .child(i)
+            .map_err(|e| classify_vortex_as_data_format(VortexError::from(e)))?;
         match child_type {
             LayoutChildType::Chunk((row_group_idx, row_offset)) => {
                 if find_field_layout(&child, field_name)?.is_some() {
@@ -1533,7 +1796,13 @@ fn collect_v2_row_group_units(
 }
 
 fn build_v2_row_group_units(root: &LayoutRef, field_name: &str) -> Result<Vec<u64>> {
-    let data = root.child(0).map_err(VortexError::from)?;
+    // Validate the persisted wrapper shape even though this path only needs the
+    // data child. Otherwise a malformed child count can surface later as a
+    // generic decoder error instead of a data-format error.
+    let _ = zone_map_child(root, LAYOUT_ID)?;
+    let data = root
+        .child(0)
+        .map_err(|e| classify_vortex_as_data_format(VortexError::from(e)))?;
     let mut result = vec![2, 0];
     let mut total_units = 0u64;
 
@@ -1560,6 +1829,212 @@ fn build_v1_flat_units(root: &LayoutRef, field_name: &str) -> Result<Vec<u64>> {
         result[1] = 1;
     }
     Ok(result)
+}
+
+/// These constants mirror ffi_error_code.h. check_error_table.py verifies that
+/// the values do not drift across the Rust/C++ boundary.
+pub(crate) const LOON_INTERNAL_INVARIANT: i32 = 122;
+pub(crate) const LOON_VORTEX_DATA_FORMAT: i32 = 119;
+
+// Vortex had the only typed side channel in the repository; it now lives in
+// bridge_error.rs and every bridge shares it. These stay as the vortex-facing
+// names, but there is exactly one slot behind them, and they are internal-only:
+// the C++ side reads the same slot through the shared bridge_ffi channel.
+pub(crate) use crate::bridge_error::ClassifiedErrorInfo;
+
+fn set_last_vortex_error(info: ClassifiedErrorInfo) {
+    crate::bridge_error::set_last_bridge_error(info);
+}
+
+// Test-only now that C++ reads the shared channel: the vortex-side take/record
+// names exist only so the Rust unit tests can assert what was recorded.
+#[cfg(test)]
+pub(crate) fn record_classified_vortex_error(code: i32, message: String) {
+    crate::bridge_error::record_bridge_error(code, message);
+}
+
+pub(crate) fn clear_last_vortex_error() {
+    crate::bridge_error::clear_last_bridge_error();
+}
+
+#[cfg(test)]
+pub(crate) fn take_last_vortex_error() -> crate::bridge_ffi::BridgeErrorInfo {
+    crate::bridge_error::take_last_bridge_error()
+}
+
+fn classified_error_info_from_source(
+    error: &(dyn StdError + 'static),
+) -> Option<ClassifiedErrorInfo> {
+    let mut source = Some(error);
+    while let Some(current) = source {
+        if let Some(error) = current.downcast_ref::<crate::filesystem_c::LoonFfiError>() {
+            return Some(ClassifiedErrorInfo {
+                code: error.err_code,
+                message: error.to_string(),
+            });
+        }
+        source = current.source();
+    }
+    None
+}
+
+fn classified_error_info_from_vortex(error: &VortexError) -> Option<ClassifiedErrorInfo> {
+    match error {
+        VortexError::External(source, _) => classified_error_info_from_source(source.as_ref()),
+        VortexError::Context(_, inner) => classified_error_info_from_vortex(inner),
+        VortexError::Shared(inner) => classified_error_info_from_vortex(inner),
+        VortexError::Arrow(ArrowError::ExternalError(source), _) => {
+            classified_error_info_from_source(source.as_ref())
+        }
+        _ => error.source().and_then(classified_error_info_from_source),
+    }
+}
+
+fn classified_error_info_from_anyhow(error: &anyhow::Error) -> Option<ClassifiedErrorInfo> {
+    if let Some(vortex) = error.downcast_ref::<VortexError>() {
+        if let Some(info) = classified_error_info_from_vortex(vortex) {
+            return Some(info);
+        }
+    }
+    classified_error_info_from_source(error.as_ref())
+}
+
+/// Only decoder variants that explicitly report a serialized representation
+/// failure may become `VortexDataFormat`.  In particular, do not infer
+/// corruption from `Io`, Arrow conversion, caller arguments, or generic
+/// Vortex errors at a format-reader call site.
+fn is_vortex_data_format_error(error: &VortexError) -> bool {
+    match error {
+        VortexError::Serde(..) | VortexError::Prost(..) => true,
+        VortexError::FlatBuffers(..) => true,
+        VortexError::Context(_, inner) => is_vortex_data_format_error(inner),
+        VortexError::Shared(inner) => is_vortex_data_format_error(inner),
+        VortexError::Arrow(ArrowError::ExternalError(source), _) => source
+            .downcast_ref::<VortexError>()
+            .is_some_and(is_vortex_data_format_error),
+        _ => false,
+    }
+}
+
+fn is_anyhow_data_format_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<VortexError>())
+        .any(is_vortex_data_format_error)
+}
+
+fn publish_classified_error_source(error: &(dyn StdError + 'static)) {
+    if let Some(info) = classified_error_info_from_source(error) {
+        set_last_vortex_error(info);
+    } else {
+        clear_last_vortex_error();
+    }
+}
+
+fn finish_anyhow_ffi_result<T>(result: Result<T>) -> Result<T> {
+    match &result {
+        Ok(_) => clear_last_vortex_error(),
+        Err(error) => {
+            if let Some(info) = classified_error_info_from_anyhow(error) {
+                set_last_vortex_error(info);
+            } else {
+                clear_last_vortex_error();
+            }
+        }
+    }
+    result
+}
+
+fn finish_boxed_ffi_result<T>(
+    result: std::result::Result<T, Box<dyn StdError>>,
+) -> std::result::Result<T, Box<dyn StdError>> {
+    match &result {
+        Ok(_) => clear_last_vortex_error(),
+        Err(error) => publish_classified_error_source(error.as_ref()),
+    }
+    result
+}
+
+fn capture_result_error<T>(result: &Result<T>) {
+    match result {
+        Ok(_) => clear_last_vortex_error(),
+        Err(error) => {
+            if let Some(info) = classified_error_info_from_anyhow(error) {
+                set_last_vortex_error(info);
+            } else {
+                clear_last_vortex_error();
+            }
+        }
+    }
+}
+
+/// Turn a panic escaping the Vortex decoder into an unexpected/internal error.
+/// The catch prevents unwinding across CXX. The classified error stays typed
+/// until the bridge places it on the explicit side channel.
+fn panic_to_internal_error(payload: &Box<dyn std::any::Any + Send>, op: &str) -> VortexError {
+    let detail = payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "non-string panic payload".to_string());
+    crate::filesystem_c::classified_vortex_error(
+        LOON_INTERNAL_INVARIANT,
+        "vortex",
+        format!("vortex decoder panicked in {op}: {detail}"),
+    )
+}
+
+fn guard_decoder_panic<T>(path: &str, op: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        // The guarded operation may reject a caller-owned argument (schema,
+        // predicate, segment id, ...). Catch panics here, but let ordinary
+        // errors keep the verdict assigned at their actual producer.
+        Ok(result) => result,
+        Err(payload) => Err(anyhow::Error::new(panic_to_internal_error(
+            &payload,
+            &format!("{op} for {path}"),
+        ))),
+    };
+    capture_result_error(&result);
+    result
+}
+
+fn classify_anyhow_as_data_format(err: anyhow::Error) -> anyhow::Error {
+    if let Some(info) = classified_error_info_from_anyhow(&err) {
+        set_last_vortex_error(info);
+        err
+    } else if !is_anyhow_data_format_error(&err) {
+        clear_last_vortex_error();
+        err
+    } else {
+        let text = err.to_string();
+        let classified =
+            crate::filesystem_c::classified_vortex_error(LOON_VORTEX_DATA_FORMAT, "vortex", text);
+        let info = classified_error_info_from_vortex(&classified)
+            .expect("classified Vortex errors carry structured information");
+        set_last_vortex_error(info);
+        anyhow::Error::new(classified)
+    }
+}
+
+fn classify_vortex_as_data_format(err: VortexError) -> VortexError {
+    if let Some(info) = classified_error_info_from_vortex(&err) {
+        set_last_vortex_error(info);
+        err
+    } else if !is_vortex_data_format_error(&err) {
+        clear_last_vortex_error();
+        err
+    } else {
+        let classified = crate::filesystem_c::classified_vortex_error(
+            LOON_VORTEX_DATA_FORMAT,
+            "vortex",
+            err.to_string(),
+        );
+        let info = classified_error_info_from_vortex(&classified)
+            .expect("classified Vortex errors carry structured information");
+        set_last_vortex_error(info);
+        classified
+    }
 }
 
 async fn open_file_impl(
@@ -1591,7 +2066,7 @@ async fn open_file_impl(
     let file = open_options
         .open(Arc::new(read_source))
         .await
-        .map_err(VortexError::from)?;
+        .map_err(|e| classify_vortex_as_data_format(VortexError::from(e)))?;
 
     Ok(Box::new(VortexFile {
         inner: file,
@@ -1609,26 +2084,61 @@ pub(crate) unsafe fn open_file(
     file_size: u64,
     footer_size: u64,
 ) -> Result<Box<VortexFile>> {
-    VORTEX_RT.block_on(open_file_impl(
-        fswrapper_ptr as usize,
-        path.to_string(),
-        file_size,
-        footer_size,
-    ))
+    guard_decoder_panic(path, "open_file", || {
+        VORTEX_RT.block_on(open_file_impl(
+            fswrapper_ptr as usize,
+            path.to_string(),
+            file_size,
+            footer_size,
+        ))
+    })
 }
 
-type VortexOpenAsyncCallback =
-    unsafe extern "C" fn(ctx: *mut c_void, handle: usize, error_msg: *const std::ffi::c_char);
+type VortexOpenAsyncCallback = unsafe extern "C" fn(
+    ctx: *mut c_void,
+    handle: usize,
+    error_code: i32,
+    error_msg: *const std::ffi::c_char,
+);
 
 fn open_callback_error(
     callback: VortexOpenAsyncCallback,
     ctx: *mut c_void,
+    error_code: i32,
     message: impl ToString,
 ) {
     let message = message.to_string();
     let c_message = std::ffi::CString::new(message)
         .unwrap_or_else(|_| std::ffi::CString::new("vortex async open error").unwrap());
-    unsafe { callback(ctx, 0, c_message.into_raw()) };
+    unsafe { callback(ctx, 0, error_code, c_message.into_raw()) };
+}
+
+fn open_callback_error_from_anyhow(
+    callback: VortexOpenAsyncCallback,
+    ctx: *mut c_void,
+    error: anyhow::Error,
+) {
+    let info = classified_error_info_from_anyhow(&error);
+    open_callback_error(
+        callback,
+        ctx,
+        info.as_ref().map_or(0, |info| info.code),
+        info.map_or_else(|| error.to_string(), |info| info.message),
+    );
+}
+
+fn open_callback_error_from_vortex(
+    callback: VortexOpenAsyncCallback,
+    ctx: *mut c_void,
+    error: VortexError,
+) {
+    let info = classified_error_info_from_vortex(&error);
+    open_callback_error(
+        callback,
+        ctx,
+        info.as_ref().map_or(0, |info| info.code),
+        info.map_or_else(|| error.to_string(), |info| info.message),
+    );
 }
 
 /// Asynchronously open a Vortex file on the shared Tokio runtime and invoke
@@ -1649,7 +2159,7 @@ pub unsafe extern "C" fn vortex_open_file_async(
     ctx: *mut c_void,
 ) {
     if path.is_null() && path_len != 0 {
-        open_callback_error(callback, ctx, "vortex async open received a null path");
+        open_callback_error(callback, ctx, 0, "vortex async open received a null path");
         return;
     }
 
@@ -1660,7 +2170,7 @@ pub unsafe extern "C" fn vortex_open_file_async(
         match std::str::from_utf8(path_bytes) {
             Ok(path) => path.to_string(),
             Err(error) => {
-                open_callback_error(callback, ctx, format!("invalid UTF-8 path: {error}"));
+                open_callback_error(callback, ctx, 0, format!("invalid UTF-8 path: {error}"));
                 return;
             }
         }
@@ -1682,13 +2192,19 @@ pub unsafe extern "C" fn vortex_open_file_async(
         {
             Ok(Ok(file)) => {
                 let handle = Box::into_raw(file) as usize;
-                unsafe { callback(ctx_addr as *mut c_void, handle, std::ptr::null()) };
+                unsafe { callback(ctx_addr as *mut c_void, handle, 0, std::ptr::null()) };
             }
-            Ok(Err(error)) => open_callback_error(callback, ctx_addr as *mut c_void, error),
-            Err(_) => open_callback_error(
+            Ok(Err(error)) => {
+                open_callback_error_from_anyhow(callback, ctx_addr as *mut c_void, error)
+            }
+            // Same verdict the sync path reaches through guard_decoder_panic:
+            // the same three smashed bytes must not classify differently just
+            // because milvus opened the file asynchronously. Dropping the
+            // payload also threw away the only clue about where it died.
+            Err(payload) => open_callback_error_from_vortex(
                 callback,
                 ctx_addr as *mut c_void,
-                "vortex async open panicked",
+                panic_to_internal_error(&payload, "open_file_async"),
             ),
         }
     });
@@ -1831,8 +2347,31 @@ impl std::iter::Iterator for VortexRecordBatchReader {
     type Item = Result<RecordBatch, ArrowError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.iter.next() {
-            Some(result) => Some(result.map_err(|e| ArrowError::ExternalError(Box::new(e)))),
+        // The pull itself is guarded, not just its error. Decoding happens
+        // lazily inside iter.next(), so a panic there fires BEFORE any map_err
+        // and unwinds straight out of the Arrow C stream callback -- the
+        // entry-point guards never see this boundary, and a malformed file
+        // that opens cleanly could abort the process on its first batch.
+        let pulled =
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.iter.next())) {
+                Ok(item) => item,
+                Err(payload) => {
+                    let error = panic_to_internal_error(&payload, "record batch stream");
+                    if let Some(info) = classified_error_info_from_vortex(&error) {
+                        set_last_vortex_error(info);
+                    }
+                    return Some(Err(ArrowError::ExternalError(Box::new(error))));
+                }
+            };
+        match pulled {
+            Some(Ok(batch)) => Some(Ok(batch)),
+            Some(Err(error)) => {
+                let error = classify_vortex_as_data_format(error);
+                if let Some(info) = classified_error_info_from_vortex(&error) {
+                    set_last_vortex_error(info);
+                }
+                Some(Err(ArrowError::ExternalError(Box::new(error))))
+            }
             None => None,
         }
     }
@@ -1927,6 +2466,10 @@ pub(crate) fn scan_builder_into_raw_handle(builder: Box<VortexScanBuilder>) -> u
 /// # Safety
 ///
 /// out_stream should be properly aligned according to the Arrow C stream interface and valid for write.
+// Every decoder error before the reader exists goes through classify_vortex_as_data_format,
+// same as the batch iterator after it -- a Serde/FlatBuffers failure while
+// PREPARING the scan is the same data-format failure as one while streaming
+// it, and untagged it stringified into a generic 2044.
 pub(crate) unsafe fn scan_builder_into_stream(
     builder: Box<VortexScanBuilder>,
     out_stream: *mut u8,
@@ -1951,8 +2494,13 @@ pub(crate) unsafe fn scan_builder_into_stream(
             (Some(vs), Some(os), plan) => (vs, os, plan),
             (Some(vs), None, _) => (vs.clone(), vs, None),
             (None, _, _) => {
-                let dtype = inner.dtype()?;
-                let arrow_schema = Arc::new(VORTEX_SESSION.arrow().to_arrow_schema(&dtype)?);
+                let dtype = inner.dtype().map_err(classify_vortex_as_data_format)?;
+                let arrow_schema = Arc::new(
+                    VORTEX_SESSION
+                        .arrow()
+                        .to_arrow_schema(&dtype)
+                        .map_err(classify_vortex_as_data_format)?,
+                );
                 (arrow_schema.clone(), arrow_schema, None)
             }
         };
@@ -1966,33 +2514,53 @@ pub(crate) unsafe fn scan_builder_into_stream(
     // part of large takes onto the caller thread. ScanBuilder::map runs on the spawned split task,
     // preserving the scan's parallelism while producing the same Arrow batches.
     let inner = inner.map(move |chunk| {
-        // This is a synthetic root field: Arrow arrays do not carry a top-level field name.
-        // The Struct child fields in `data_type` retain their original names and metadata.
-        let target = Field::new("", data_type.clone(), chunk.dtype().is_nullable());
-        let mut ctx = VORTEX_SESSION.create_execution_ctx();
-        let arrow = VORTEX_SESSION
-            .arrow()
-            .execute_arrow(chunk, Some(&target), &mut ctx)?;
-        Ok(RecordBatch::from(arrow.as_struct().clone()))
+        // Caught HERE, inside the decode task, because the outer guard on the
+        // stream pull only ever sees the runtime's secondary panic ("Runtime
+        // dropped task without completing it") once this task has already died.
+        // The real cause -- "range end index N out of range", "output buffer
+        // sized too small" -- exists only on this side; without this it reached
+        // the caller as stderr noise while the returned error said nothing
+        // about what actually broke.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // This is a synthetic root field: Arrow arrays do not carry a top-level field name.
+            // The Struct child fields in `data_type` retain their original names and metadata.
+            let target = Field::new("", data_type.clone(), chunk.dtype().is_nullable());
+            let mut ctx = VORTEX_SESSION.create_execution_ctx();
+            let arrow = VORTEX_SESSION
+                .arrow()
+                .execute_arrow(chunk, Some(&target), &mut ctx)?;
+            Ok::<RecordBatch, VortexError>(RecordBatch::from(arrow.as_struct().clone()))
+        })) {
+            Ok(result) => result,
+            Err(payload) => Err(panic_to_internal_error(&payload, "record batch decode")),
+        }
     });
 
     let iter: Box<dyn Iterator<Item = vortex::error::VortexResult<RecordBatch>> + Send> =
         if empty_selection {
             Box::new(std::iter::empty())
         } else if let Some(row_ranges) = row_ranges {
-            let scan = inner.prepare()?;
+            let scan = inner.prepare().map_err(classify_vortex_as_data_format)?;
             let mut iters: Vec<
                 Box<dyn Iterator<Item = vortex::error::VortexResult<RecordBatch>> + Send>,
             > = Vec::with_capacity(row_ranges.len());
             for row_range in row_ranges {
                 iters.push(Box::new(
-                    VORTEX_RT.block_on_stream(scan.execute_stream(Some(row_range))?),
+                    VORTEX_RT.block_on_stream(
+                        scan.execute_stream(Some(row_range))
+                            .map_err(classify_vortex_as_data_format)?,
+                    ),
                 ));
             }
             Box::new(iters.into_iter().flatten())
         } else {
-            let scan = inner.prepare()?;
-            Box::new(VORTEX_RT.block_on_stream(scan.execute_stream(row_range)?))
+            let scan = inner.prepare().map_err(classify_vortex_as_data_format)?;
+            Box::new(
+                VORTEX_RT.block_on_stream(
+                    scan.execute_stream(row_range)
+                        .map_err(classify_vortex_as_data_format)?,
+                ),
+            )
         };
     let reader = VortexRecordBatchReader {
         iter,
@@ -2020,14 +2588,46 @@ pub(crate) unsafe fn scan_builder_into_stream(
 type VortexAsyncCallback = unsafe extern "C" fn(
     ctx: *mut c_void,
     out_stream: *mut FFI_ArrowArrayStream,
+    error_code: i32,
     error_msg: *const std::ffi::c_char,
 );
 
-fn callback_error(callback: VortexAsyncCallback, ctx: *mut c_void, message: impl ToString) {
+fn callback_error(
+    callback: VortexAsyncCallback,
+    ctx: *mut c_void,
+    error_code: i32,
+    message: impl ToString,
+) {
     let message = message.to_string();
     let c_message = std::ffi::CString::new(message)
         .unwrap_or_else(|_| std::ffi::CString::new("vortex async error").unwrap());
-    unsafe { callback(ctx, std::ptr::null_mut(), c_message.into_raw()) };
+    unsafe { callback(ctx, std::ptr::null_mut(), error_code, c_message.into_raw()) };
+}
+
+fn callback_error_from_anyhow(
+    callback: VortexAsyncCallback,
+    ctx: *mut c_void,
+    error: anyhow::Error,
+) {
+    let error = classify_anyhow_as_data_format(error);
+    let info = classified_error_info_from_anyhow(&error);
+    callback_error(
+        callback,
+        ctx,
+        info.as_ref().map_or(0, |info| info.code),
+        info.map_or_else(|| error.to_string(), |info| info.message),
+    );
+}
+
+fn callback_error_from_vortex(callback: VortexAsyncCallback, ctx: *mut c_void, error: VortexError) {
+    let error = classify_vortex_as_data_format(error);
+    let info = classified_error_info_from_vortex(&error);
+    callback_error(
+        callback,
+        ctx,
+        info.as_ref().map_or(0, |info| info.code),
+        info.map_or_else(|| error.to_string(), |info| info.message),
+    );
 }
 
 /// Free an error string previously allocated by vortex_scan_collect_async.
@@ -2085,12 +2685,12 @@ pub unsafe extern "C" fn vortex_scan_collect_async(
                         (schema.clone(), schema, None)
                     }
                     Err(e) => {
-                        callback_error(callback, ctx, format!("schema error: {e}"));
+                        callback_error_from_vortex(callback, ctx, e);
                         return;
                     }
                 },
                 Err(e) => {
-                    callback_error(callback, ctx, format!("dtype error: {e}"));
+                    callback_error_from_vortex(callback, ctx, e);
                     return;
                 }
             },
@@ -2154,13 +2754,15 @@ pub unsafe extern "C" fn vortex_scan_collect_async(
                 let out_stream = send_stream as *mut FFI_ArrowArrayStream;
                 let ctx = send_ctx as *mut c_void;
                 unsafe { std::ptr::write(out_stream, stream) };
-                unsafe { callback(ctx, out_stream, std::ptr::null()) };
+                unsafe { callback(ctx, out_stream, 0, std::ptr::null()) };
             }
-            Ok(Err(error)) => callback_error(callback, send_ctx as *mut c_void, error),
-            Err(_) => callback_error(
+            Ok(Err(error)) => callback_error_from_anyhow(callback, send_ctx as *mut c_void, error),
+            // Same verdict and same detail the sync stream produces. Keep the
+            // panic payload and carry its typed internal-error code separately.
+            Err(payload) => callback_error_from_vortex(
                 callback,
                 send_ctx as *mut c_void,
-                "vortex async scan panicked",
+                panic_to_internal_error(&payload, "async scan"),
             ),
         }
     });

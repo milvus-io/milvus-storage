@@ -31,10 +31,14 @@ from ._ffi import column_groups_debug_string, manifest_debug_string
 from .common import ThreadPool
 from .exceptions import (
     ArrowError,
+    ConflictError,
+    DataFormatError,
+    ErrorCategory,
     FFIError,
     InvalidArgumentError,
     MilvusStorageError,
     ResourceError,
+    RetryableError,
 )
 from .exttable import ExternalTable
 from .filesystem import (
@@ -99,6 +103,10 @@ __all__ = [
     "ArrowError",
     "InvalidArgumentError",
     "ResourceError",
+    "RetryableError",
+    "ConflictError",
+    "DataFormatError",
+    "ErrorCategory",
     # Fault Injection
     "FaultInjector",
     "is_fiu_enabled",

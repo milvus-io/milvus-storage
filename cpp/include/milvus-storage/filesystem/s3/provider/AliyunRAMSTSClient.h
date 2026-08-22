@@ -20,6 +20,8 @@
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/internal/AWSHttpResourceClient.h>
 
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"
+
 namespace milvus_storage {
 
 // STS client for Aliyun sts:AssumeRole using POP v1 (HMAC-SHA1) signing.
@@ -53,12 +55,17 @@ class AWS_CORE_API AliyunRAMSTSClient : public ::Aws::Internal::AWSHttpResourceC
 
   struct AssumeRoleResult {
     ::Aws::Auth::AWSCredentials creds;
+    // Why creds is empty. OK when credentials were produced. Carried out rather
+    // than logged and dropped, because "STS was unreachable" and "STS refused
+    // us" need opposite handling and the caller cannot tell them apart from an
+    // empty credential set.
+    arrow::Status status;
   };
 
-  // Returns empty credentials on failure; errors are logged.
   AssumeRoleResult GetAssumeRoleCredentials(const AssumeRoleRequest& request);
 
   private:
+  std::shared_ptr<::Aws::Http::HttpClient> m_rawHttpClient;
   ::Aws::String m_endpoint;
 };
 

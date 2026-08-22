@@ -74,8 +74,11 @@ static inline void ensure_fiu_init() {
 
 LoonFFIResult loon_fiu_enable(const char* name, uint32_t name_len, int one_time) {
   try {
-    if (name == nullptr || name_len == 0) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Fault point name cannot be empty");
+    if (name == nullptr) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "Fault point name must not be null");
+    }
+    if (name_len == 0) {
+      RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Fault point name cannot be empty");
     }
 
     ensure_fiu_init();
@@ -88,14 +91,21 @@ LoonFFIResult loon_fiu_enable(const char* name, uint32_t name_len, int one_time)
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    // Native exceptions, including allocation failures, share the unexpected
+    // catch-all. OOM is not a separate or retryable storage condition.
+    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 }
 
 LoonFFIResult loon_fiu_disable(const char* name, uint32_t name_len) {
   try {
-    if (name == nullptr || name_len == 0) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Fault point name cannot be empty");
+    if (name == nullptr) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "Fault point name must not be null");
+    }
+    if (name_len == 0) {
+      RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Fault point name cannot be empty");
     }
 
     ensure_fiu_init();
@@ -110,7 +120,11 @@ LoonFFIResult loon_fiu_disable(const char* name, uint32_t name_len) {
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    // Native exceptions, including allocation failures, share the unexpected
+    // catch-all. OOM is not a separate or retryable storage condition.
+    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 }
 
@@ -148,7 +162,11 @@ void loon_fiu_disable_all(void) {
   };
 
   for (const auto* fp : fault_points) {
-    FIU_DISABLE_FAULT(fp);
+    try {
+      FIU_DISABLE_FAULT(fp);
+    } catch (...) {
+      // Cleanup is best effort and must not throw across the C ABI.
+    }
   }
 }
 
@@ -156,11 +174,23 @@ int loon_fiu_is_enabled(void) { return 1; }
 
 #else  // !BUILD_WITH_FIU
 
-LoonFFIResult loon_fiu_enable(const char* /*name*/, uint32_t /*name_len*/, int /*one_time*/) {
+LoonFFIResult loon_fiu_enable(const char* name, uint32_t name_len, int /*one_time*/) {
+  if (name == nullptr) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Fault point name must not be null");
+  }
+  if (name_len == 0) {
+    RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Fault point name cannot be empty");
+  }
   RETURN_ERROR(LOON_LOGICAL_ERROR, "Fault injection is not enabled. Rebuild with -DWITH_FIU=ON");
 }
 
-LoonFFIResult loon_fiu_disable(const char* /*name*/, uint32_t /*name_len*/) {
+LoonFFIResult loon_fiu_disable(const char* name, uint32_t name_len) {
+  if (name == nullptr) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Fault point name must not be null");
+  }
+  if (name_len == 0) {
+    RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Fault point name cannot be empty");
+  }
   RETURN_ERROR(LOON_LOGICAL_ERROR, "Fault injection is not enabled. Rebuild with -DWITH_FIU=ON");
 }
 

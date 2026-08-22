@@ -14,10 +14,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/paimon/paimon_common.h"
 #include "milvus-storage/format/paimon/paimon_format_reader.h"
 #include "paimon_bridge.h"
+#include "bridge_error.h"
 
 namespace milvus_storage {
 
@@ -37,20 +39,32 @@ arrow::Result<std::vector<api::ColumnGroupFile>> PaimonFormat::explore(const std
     int64_t record_count = -1;
     std::string read_path;
     try {
+      // OUR invariant, not the user's data. info.metadata_json was produced by
+      // paimon::PlanFiles a few lines above and has never been persisted, so a
+      // malformed descriptor here means the bridge or the planner is broken.
+      // Reporting it as DataFormat told an operator their table was corrupt and
+      // sent them to re-ingest data that was fine; InternalInvariantViolated
+      // lands on segcore's UnexpectedError, which is what a defect of ours is
+      // (D2). Bytes read back from the table are classified as DataFormat by
+      // the readers that actually parse them.
       auto metadata = nlohmann::json::parse(info.metadata_json);
       if (!metadata.is_object()) {
-        return arrow::Status::Invalid("Paimon planning metadata must be a JSON object");
+        return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                                  "Paimon planning metadata must be a JSON object");
       }
       read_path = metadata.value(paimon::kReadPathKey, std::string{});
       record_count = metadata.value(paimon::kRecordCountKey, int64_t{-1});
     } catch (const nlohmann::json::exception& error) {
-      return arrow::Status::Invalid("Invalid Paimon planning metadata: ", error.what());
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                                "Invalid Paimon planning metadata: ", error.what());
     }
     if (read_path != paimon::kDirectFileReadPath && read_path != paimon::kDataSplitReadPath) {
-      return arrow::Status::Invalid("Paimon planning metadata has an invalid read_path: ", read_path);
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                                "Paimon planning metadata has an invalid read_path: ", read_path);
     }
     if (record_count < 0) {
-      return arrow::Status::Invalid("Paimon planning metadata has an invalid record_count");
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                                "Paimon planning metadata has an invalid record_count");
     }
     if (record_count == 0) {
       continue;

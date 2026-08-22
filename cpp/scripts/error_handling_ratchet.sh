@@ -81,14 +81,42 @@ BASELINE="cpp/scripts/error_handling_baseline.tsv"
 MODE="${1:-check}"
 BASE_BASELINE="${2:-}"
 
+# The comment stripper must be verified BEFORE it is trusted, because every
+# failure mode of this gate points the same way: a stripper that errors out
+# produces empty output, empty output counts zero throws, and zero throws reads
+# as "the burn-down is complete" -- the gate passes precisely when it stopped
+# working. That is not hypothetical: `gcc` is clang on macOS and rejects
+# -fpreprocessed, so a developer running this locally was told every throw was
+# gone while nine files still had them, and the suggested fix was to commit the
+# emptied baseline. Probe on a file we know has a throw and fail closed.
+CPP_STRIP="${CPP_STRIP:-gcc}"
+
+strip_comments() { "$CPP_STRIP" -fpreprocessed -dD -E -P "$1" 2>/dev/null; }
+
+verify_stripper() {
+  probe_file=$(git -c core.quotePath=false ls-files -- 'cpp/src/**.cpp' | head -n 1)
+  if [ -z "$probe_file" ]; then
+    echo "error-handling-ratchet: no C++ sources found to probe; refusing to report a count" >&2
+    exit 2
+  fi
+  if [ -z "$(strip_comments "$probe_file")" ]; then
+    echo "error-handling-ratchet: comment stripper '$CPP_STRIP -fpreprocessed' produced no output for" >&2
+    echo "  $probe_file -- it is unavailable or rejected the flags. Refusing to run, because an" >&2
+    echo "  empty scan would silently look like a completed burn-down." >&2
+    echo "  Install GNU cpp/gcc, or set CPP_STRIP to a compiler that accepts -fpreprocessed." >&2
+    exit 2
+  fi
+}
+
 collect() {
+  verify_stripper
   git -c core.quotePath=false ls-files -z -- 'cpp/src' 'cpp/include' \
     | while IFS= read -r -d '' f; do
         case "$f" in
           *.cpp | *.cc | *.h | *.hpp) ;;
           *) continue ;;
         esac
-        throw_n=$(gcc -fpreprocessed -dD -E -P "$f" 2>/dev/null | grep -cE '\bthrow\b' || true)
+        throw_n=$(strip_comments "$f" | grep -cE '\bthrow\b' || true)
         if [ "$throw_n" -gt 0 ]; then printf 'throw\t%s\t%s\n' "$f" "$throw_n"; fi
       done | LC_ALL=C sort
 }

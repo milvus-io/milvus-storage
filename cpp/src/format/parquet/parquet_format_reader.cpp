@@ -17,6 +17,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <new>
 #include <numeric>
 #include <optional>
 #include <unordered_map>
@@ -37,12 +38,15 @@
 #include <arrow/util/key_value_metadata.h>
 #include <folly/futures/Promise.h>
 #include <parquet/arrow/schema.h>
+#include <parquet/exception.h>
+#include <parquet/file_reader.h>
 #include <parquet/metadata.h>
 #include <parquet/type_fwd.h>
 
 #include "milvus-storage/format/parquet/folly_arrow_executor.h"
 #include "milvus-storage/format/parquet/key_retriever.h"
 #include "milvus-storage/common/metadata.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"  // for UNLIKELY
@@ -50,6 +54,28 @@
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage::parquet {
+
+// Corruption found here is reported with the NEUTRAL DataCorrupted code, not
+// with a Packed* one.
+//
+// This reader serves both worlds: column_group_reader hands it milvus's own
+// packed files, while iceberg_format_reader and paimon_format_reader hand it
+// files someone else wrote. It cannot tell which, and the Packed* codes exist
+// for exactly one reason -- D4 keeps them apart from DataCorrupted only so the
+// code answers "which subsystem said this" without parsing a message. A broken
+// iceberg footer reported as PackedFileCorrupted makes that answer wrong and
+// sends whoever is debugging into the packed layer to look for something that
+// was never there.
+//
+// Same shape as the StorageNotFound / SOURCE_INVALID split (R1.5): the layer
+// that observes the failure reports the neutral fact, and only a boundary that
+// knows the provenance narrows it. packed/reader.cpp is that boundary and still
+// produces PackedFileCorrupted.
+//
+// try_build_row_group_infos is the one exception below: it is reached only
+// after ROW_GROUP_META_KEY was found in the footer, which proves milvus-storage
+// wrote the file, so PackedMetadataCorrupted is a fact there rather than a
+// guess.
 
 static std::vector<int> get_leaf_column_offsets_by_field(const arrow::Schema& file_schema);
 
@@ -66,7 +92,12 @@ static arrow::Result<std::vector<RowGroupInfo>> try_build_row_group_infos(
     return row_group_infos;
   }
 
-  auto row_group_metadatas = RowGroupMetadataVector::Deserialize(row_group_meta_result.ValueOrDie());
+  auto parsed_metadata = RowGroupMetadataVector::TryDeserialize(row_group_meta_result.ValueOrDie());
+  if (!parsed_metadata.ok()) {
+    return WrapExtendError(ExtendStatusCode::PackedMetadataCorrupted, "Failed to parse persisted row group metadata",
+                           parsed_metadata.status());
+  }
+  auto row_group_metadatas = std::move(parsed_metadata).ValueOrDie();
   row_group_infos.reserve(row_group_metadatas.size());
   size_t offset = 0;
   for (size_t i = 0; i < row_group_metadatas.size(); ++i) {
@@ -157,10 +188,10 @@ static ::parquet::ReaderProperties make_reader_properties(
 
 // Parquet file trailer: [4B footer_length (LE)] [4B magic "PAR1"].
 // Pre-read the parquet footer in a single IO instead of Arrow's default 2-step approach.
-// Returns nullptr on any failure, letting the caller fall back to Arrow's normal path.
-static std::shared_ptr<arrow::Buffer> try_read_footer_buffer(const std::shared_ptr<arrow::io::RandomAccessFile>& file,
-                                                             uint64_t file_size,
-                                                             uint64_t footer_size) {
+// A supplied footer size is authoritative: a failed pre-read is returned rather
+// than retried through Arrow's normal footer path.
+static arrow::Result<std::shared_ptr<arrow::Buffer>> read_footer_buffer(
+    const std::shared_ptr<arrow::io::RandomAccessFile>& file, uint64_t file_size, uint64_t footer_size) {
 #define PARQUET_MAGIC "PAR1"
 #define PARQUET_MAGIC_SIZE 4
 #define PARQUET_FOOTER_TRAILER_SIZE 8  // footer_length(4B) + magic(4B)
@@ -170,31 +201,25 @@ static std::shared_ptr<arrow::Buffer> try_read_footer_buffer(const std::shared_p
   std::shared_ptr<arrow::Buffer> suffix;
 #ifdef WITH_CRT
   if (auto* async_file = dynamic_cast<milvus_storage::NonBlockingReadAtFile*>(file.get())) {
-    auto maybe_buf = arrow::AllocateResizableBuffer(size, file->io_context().pool());
-    if (!maybe_buf.ok()) {
-      return nullptr;
-    }
-    auto buf = std::move(maybe_buf).ValueOrDie();
-    auto read_result = async_file->ReadAtAsyncInto(offset, size, buf->mutable_data()).result();
-    if (!read_result.ok()) {
-      return nullptr;
-    }
-    const auto bytes_read = *read_result;
-    if (bytes_read < 0 || bytes_read > size || !buf->Resize(bytes_read).ok()) {
-      return nullptr;
+    ARROW_ASSIGN_OR_RAISE(auto buf, arrow::AllocateResizableBuffer(size, file->io_context().pool()));
+    ARROW_ASSIGN_OR_RAISE(const auto bytes_read,
+                          async_file->ReadAtAsyncInto(offset, size, buf->mutable_data()).result());
+    if (bytes_read != size) {
+      return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted,
+                                "Parquet footer read was shorter than the supplied footer size");
     }
     suffix = std::shared_ptr<arrow::Buffer>(std::move(buf));
   } else
 #endif
   {
-    auto suffix_result = file->ReadAt(offset, size);
-    if (!suffix_result.ok()) {
-      return nullptr;
+    ARROW_ASSIGN_OR_RAISE(suffix, file->ReadAt(offset, size));
+    if (!suffix || suffix->size() != size) {
+      return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted,
+                                "Parquet footer read was shorter than the supplied footer size");
     }
-    suffix = *suffix_result;
   }
-  if (!suffix || static_cast<uint64_t>(suffix->size()) < PARQUET_FOOTER_TRAILER_SIZE) {
-    return nullptr;
+  if (static_cast<uint64_t>(suffix->size()) < PARQUET_FOOTER_TRAILER_SIZE) {
+    return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "Parquet footer size is smaller than the file trailer");
   }
   const uint8_t* data = suffix->data();
 
@@ -205,7 +230,8 @@ static std::shared_ptr<arrow::Buffer> try_read_footer_buffer(const std::shared_p
   // Validate magic bytes and ensure the suffix covers the entire Thrift metadata.
   if (std::memcmp(data + suffix->size() - PARQUET_MAGIC_SIZE, PARQUET_MAGIC, PARQUET_MAGIC_SIZE) != 0 ||
       footer_length + PARQUET_FOOTER_TRAILER_SIZE > static_cast<uint64_t>(suffix->size())) {
-    return nullptr;
+    return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted,
+                              "Parquet footer does not match the supplied footer size");
   }
 
   return suffix;
@@ -215,29 +241,36 @@ static std::shared_ptr<arrow::Buffer> try_read_footer_buffer(const std::shared_p
 #undef PARQUET_MAGIC
 }
 
-static std::shared_ptr<::parquet::FileMetaData> try_parse_footer_metadata(
+static arrow::Result<std::shared_ptr<::parquet::FileMetaData>> parse_footer_metadata(
     const std::shared_ptr<arrow::Buffer>& suffix, const ::parquet::ReaderProperties& reader_props) {
   if (!suffix) {
-    return nullptr;
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Parquet footer buffer is null");
   }
 
 #define PARQUET_FOOTER_TRAILER_SIZE 8  // footer_length(4B) + magic(4B)
   if (static_cast<uint64_t>(suffix->size()) < PARQUET_FOOTER_TRAILER_SIZE) {
-    return nullptr;
+    return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "Parquet footer size is smaller than the file trailer");
   }
   const uint8_t* data = suffix->data();
   uint32_t footer_length = 0;
   std::memcpy(&footer_length, data + suffix->size() - PARQUET_FOOTER_TRAILER_SIZE, sizeof(footer_length));
   if (footer_length + PARQUET_FOOTER_TRAILER_SIZE > static_cast<uint64_t>(suffix->size())) {
-    return nullptr;
+    return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted,
+                              "Parquet footer metadata exceeds the supplied footer size");
   }
 
   // Deserialize the Thrift FileMetaData from the suffix buffer.
   const uint8_t* thrift_data = data + suffix->size() - PARQUET_FOOTER_TRAILER_SIZE - footer_length;
   try {
     return ::parquet::FileMetaData::Make(thrift_data, &footer_length, reader_props);
+  } catch (const ::parquet::ParquetInvalidOrCorruptedFileException& e) {
+    return MakeExtendError(ExtendStatusCode::DataCorrupted, e.what());
+  } catch (const ::parquet::ParquetStatusException& e) {
+    return e.status();
+  } catch (const ::parquet::ParquetException& e) {
+    return arrow::Status::IOError(e.what());
   } catch (...) {
-    return nullptr;
+    return arrow::Status::UnknownError("Parquet footer metadata parsing failed unexpectedly");
   }
 
 #undef PARQUET_FOOTER_TRAILER_SIZE
@@ -252,8 +285,6 @@ static arrow::Result<std::shared_ptr<::parquet::arrow::FileReader>> create_parqu
     uint64_t file_size = 0,
     uint64_t footer_size = 0) {
   std::unique_ptr<::parquet::arrow::FileReader> result;
-
-  ::parquet::arrow::FileReaderBuilder builder;
   auto reader_props = make_reader_properties(key_retriever);
   ::parquet::ArrowReaderProperties arrow_reader_props = ::parquet::default_arrow_reader_properties();
   if (key_retriever) {
@@ -294,14 +325,38 @@ static arrow::Result<std::shared_ptr<::parquet::arrow::FileReader>> create_parqu
     ARROW_ASSIGN_OR_RAISE(parquet_file, fs->OpenInputFile(file_path));
   }
 
-  if (!key_retriever && footer_size > 0 && !metadata && file_size > 0 && footer_size <= file_size) {
-    auto footer_buffer = try_read_footer_buffer(parquet_file, file_size, footer_size);
-    metadata = try_parse_footer_metadata(footer_buffer, reader_props);
+  if (!key_retriever && footer_size > 0 && !metadata && file_size > 0) {
+    if (footer_size > file_size) {
+      return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "Parquet footer size exceeds the supplied file size");
+    }
+    ARROW_ASSIGN_OR_RAISE(auto footer_buffer, read_footer_buffer(parquet_file, file_size, footer_size));
+    ARROW_ASSIGN_OR_RAISE(metadata, parse_footer_metadata(footer_buffer, reader_props));
   }
 
-  ARROW_RETURN_NOT_OK(builder.Open(std::move(parquet_file), reader_props, metadata));
-  ARROW_RETURN_NOT_OK(
-      builder.memory_pool(arrow::default_memory_pool())->properties(arrow_reader_props)->Build(&result));
+  // FileReaderBuilder::Open converts ParquetInvalidOrCorruptedFileException
+  // into a plain Invalid status. Open the raw Parquet reader here so the
+  // dedicated exception remains distinguishable from caller/configuration
+  // Invalid statuses, while ParquetStatusException still returns the original
+  // filesystem status and its ExtendStatusDetail unchanged.
+  std::unique_ptr<::parquet::ParquetFileReader> parquet_reader;
+  try {
+    parquet_reader = ::parquet::ParquetFileReader::Open(std::move(parquet_file), reader_props, std::move(metadata));
+  } catch (const ::parquet::ParquetInvalidOrCorruptedFileException& e) {
+    return MakeExtendError(ExtendStatusCode::DataCorrupted,
+                           fmt::format("Parquet file is invalid or corrupted. [path={}]: {}", file_path, e.what()),
+                           e.what());
+  } catch (const ::parquet::ParquetStatusException& e) {
+    return e.status();
+  } catch (const ::parquet::ParquetException& e) {
+    // Generic ParquetException is also used for encryption, configuration and
+    // decoder failures; it does not prove persisted bytes are corrupt.
+    return arrow::Status::IOError(e.what());
+  } catch (...) {
+    return arrow::Status::UnknownError("Parquet reader open failed unexpectedly");
+  }
+
+  ARROW_RETURN_NOT_OK(::parquet::arrow::FileReader::Make(arrow::default_memory_pool(), std::move(parquet_reader),
+                                                         arrow_reader_props, &result));
   return std::shared_ptr<::parquet::arrow::FileReader>(std::move(result));
 }
 
@@ -392,7 +447,7 @@ arrow::Result<std::shared_ptr<ParquetFormatReader>> ParquetFormatReader::MetaTra
     const std::vector<std::string>& needed_columns,
     const std::string& /*predicate*/) {
   if (!metadata) {
-    return arrow::Status::Invalid("Cannot open parquet reader from null metadata");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Cannot open parquet reader from null metadata");
   }
   if (!metadata->payload.fs) {
     return arrow::Status::Invalid(
@@ -469,10 +524,11 @@ arrow::Result<std::vector<RowGroupInfo>> ParquetFormatReader::get_row_group_info
 
 arrow::Result<std::vector<uint64_t>> ParquetFormatReader::get_rg_column_memsz(int64_t row_group_index) const {
   if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_.size()) {
-    return arrow::Status::Invalid(fmt::format("Parquet row group index out of range: {}", row_group_index));
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, fmt::format("Parquet row group index out of range: {}", row_group_index));
   }
   if (!schema_ || !file_reader_ || !file_reader_->parquet_reader()) {
-    return arrow::Status::Invalid(fmt::format("Parquet reader metadata is not initialized. [path={}]", path_));
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                              fmt::format("Parquet reader metadata is not initialized. [path={}]", path_));
   }
 
   auto metadata = file_reader_->parquet_reader()->metadata();
@@ -607,7 +663,8 @@ static arrow::Result<std::vector<int>> get_leaf_column_indices(const arrow::Sche
 
 arrow::Status ParquetFormatReader::set_needed_columns(const std::vector<std::string>& needed_columns) {
   if (!schema_) {
-    return arrow::Status::Invalid(fmt::format("Parquet file schema is not initialized. [path={}]", path_));
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                              fmt::format("Parquet file schema is not initialized. [path={}]", path_));
   }
 
   ARROW_ASSIGN_OR_RAISE(auto leaf_column_indices, get_leaf_column_indices(*schema_, needed_columns, path_));

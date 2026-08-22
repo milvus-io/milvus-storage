@@ -52,6 +52,7 @@
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"
 #include "milvus-storage/filesystem/util_internal.h"
 
 using ::arrow::Result;
@@ -153,8 +154,8 @@ arrow::Result<std::string> S3Client::GetBucketRegionFromError(const std::string&
   if (!region.empty()) {
     return region;
   } else if (error.GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
-    // Permanent: the bucket does not exist; a retry/reroute fails identically.
-    return MakeExtendError(ExtendStatusCode::AwsErrorNotFound, "Bucket '" + bucket + "' not found",
+    // The bucket does not exist; replaying or rerouting the same request fails identically.
+    return MakeExtendError(ExtendStatusCode::StorageBucketNotFound, "Bucket '" + bucket + "' not found",
                            "" /* extra_info */);
   } else {
     return arrow::Status::IOError("When resolving region for bucket: ", bucket);
@@ -175,8 +176,8 @@ arrow::Result<std::string> S3Client::GetBucketRegion(const std::string& bucket,
   if (!region.empty()) {
     return region;
   } else if (outcome.GetResult().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
-    // Permanent: the bucket does not exist; a retry/reroute fails identically.
-    return MakeExtendError(ExtendStatusCode::AwsErrorNotFound,
+    // The bucket does not exist; replaying or rerouting the same request fails identically.
+    return MakeExtendError(ExtendStatusCode::StorageBucketNotFound,
                            "Bucket '" + std::string(request.GetBucket().c_str()) + "' not found", "" /* extra_info */);
   } else {
     return arrow::Status::IOError("When resolving region for bucket '", request.GetBucket(),
@@ -347,16 +348,22 @@ S3ClientLock S3ClientLock::Move() { return std::move(*this); }
 // ------------ Implementation of S3ClientHolder End ------------
 
 // ------------ Implementation of S3ClientHolder ------------
-S3ClientHolder::S3ClientHolder(std::weak_ptr<S3ClientFinalizer> finalizer, std::shared_ptr<S3Client> client)
-    : finalizer_(std::move(finalizer)), client_(std::move(client)) {}
+S3ClientHolder::S3ClientHolder(std::weak_ptr<S3ClientFinalizer> finalizer,
+                               std::shared_ptr<S3Client> client,
+                               std::shared_ptr<RequestCredentialsResolver> credentials_resolver)
+    : finalizer_(std::move(finalizer)),
+      client_(std::move(client)),
+      credentials_resolver_(std::move(credentials_resolver)) {}
 
 arrow::Result<S3ClientLock> S3ClientHolder::Lock() {
   std::shared_ptr<S3ClientFinalizer> finalizer;
   std::shared_ptr<S3Client> client;
+  std::shared_ptr<RequestCredentialsResolver> credentials_resolver;
   {
     std::unique_lock lock(mutex_);
     finalizer = finalizer_.lock();
     client = client_;
+    credentials_resolver = credentials_resolver_;
   }
   // Do not hold mutex while taking finalizer lock below.
   //
@@ -379,6 +386,12 @@ arrow::Result<S3ClientLock> S3ClientHolder::Lock() {
   if (finalizer->finalized_) {
     return ErrorS3Finalized();
   }
+  if (credentials_resolver != nullptr) {
+    auto credentials = credentials_resolver->ResolveForRequest();
+    if (!credentials.ok()) {
+      return credentials.status();
+    }
+  }
   // (the client can be cleared only if finalizer->finalized_ is true)
   DCHECK(client) << "inconsistent S3ClientHolder";
   client_lock.client_ = std::move(client);
@@ -397,13 +410,15 @@ void S3ClientHolder::Finalize() {
 
 using ClientHolderList = std::vector<std::weak_ptr<S3ClientHolder>>;
 
-arrow::Result<std::shared_ptr<S3ClientHolder>> S3ClientFinalizer::AddClient(std::shared_ptr<S3Client> client) {
+arrow::Result<std::shared_ptr<S3ClientHolder>> S3ClientFinalizer::AddClient(
+    std::shared_ptr<S3Client> client, std::shared_ptr<RequestCredentialsResolver> credentials_resolver) {
   std::unique_lock lock(mutex_);
   if (finalized_) {
     return ErrorS3Finalized();
   }
 
-  auto holder = std::make_shared<S3ClientHolder>(shared_from_this(), std::move(client));
+  auto holder =
+      std::make_shared<S3ClientHolder>(shared_from_this(), std::move(client), std::move(credentials_resolver));
 
   // Remove expired entries before adding new one
   auto end = std::remove_if(holders_.begin(), holders_.end(),

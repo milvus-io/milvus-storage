@@ -13,23 +13,424 @@
 // limitations under the License.
 
 #include <arrow/testing/gtest_util.h>
+#include <arrow/testing/executor_util.h>
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <cstdlib>
+#include <future>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
+
+#include <unistd.h>
 
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
 
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/observable.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/upload_sizable.h"
+#include "milvus-storage/filesystem/util_internal.h"
 
 #include "test_env.h"
 
 namespace milvus_storage {
+namespace {
+
+void PrepareDeathTest() {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const auto prefix = "/tmp/milvus-storage-submit-io-death-test-gcov-" + std::to_string(getpid());
+  (void)setenv("GCOV_PREFIX", prefix.c_str(), 1);
+}
+
+class RejectingExecutor final : public arrow::internal::Executor {
+  public:
+  int GetCapacity() override { return 1; }
+
+  protected:
+  arrow::Status SpawnReal(arrow::internal::TaskHints,
+                          arrow::internal::FnOnce<void()>,
+                          arrow::StopToken,
+                          StopCallback&&) override {
+    return arrow::Status::IOError("executor rejected background task");
+  }
+};
+
+class ThrowingExecutor final : public arrow::internal::Executor {
+  public:
+  int GetCapacity() override { return 1; }
+
+  protected:
+  arrow::Status SpawnReal(arrow::internal::TaskHints,
+                          arrow::internal::FnOnce<void()>,
+                          arrow::StopToken,
+                          StopCallback&&) override {
+    throw std::runtime_error("executor submission exploded");
+  }
+};
+
+class BadAllocThrowingExecutor final : public arrow::internal::Executor {
+  public:
+  int GetCapacity() override { return 1; }
+
+  protected:
+  arrow::Status SpawnReal(arrow::internal::TaskHints,
+                          arrow::internal::FnOnce<void()>,
+                          arrow::StopToken,
+                          StopCallback&&) override {
+    throw std::bad_alloc();
+  }
+};
+
+class CancellingExecutor final : public arrow::internal::Executor {
+  public:
+  int GetCapacity() override { return 1; }
+
+  protected:
+  arrow::Status SpawnReal(arrow::internal::TaskHints,
+                          arrow::internal::FnOnce<void()>,
+                          arrow::StopToken,
+                          StopCallback&& stop_callback) override {
+    std::move(stop_callback)(arrow::Status::Cancelled("background I/O cancelled before execution"));
+    return arrow::Status::OK();
+  }
+};
+
+class BadAllocCopyCompletion {
+  public:
+  BadAllocCopyCompletion(int* completion_count, arrow::Status* completed_status)
+      : completion_count_(completion_count), completed_status_(completed_status) {}
+
+  BadAllocCopyCompletion(const BadAllocCopyCompletion&) { throw std::bad_alloc(); }
+  BadAllocCopyCompletion(BadAllocCopyCompletion&&) noexcept = default;
+
+  void operator()(const arrow::Status& status) {
+    ++*completion_count_;
+    *completed_status_ = status;
+  }
+
+  private:
+  int* completion_count_;
+  arrow::Status* completed_status_;
+};
+
+class BadAllocMoveTask {
+  public:
+  BadAllocMoveTask() = default;
+  BadAllocMoveTask(const BadAllocMoveTask&) = delete;
+  BadAllocMoveTask(BadAllocMoveTask&&) { throw std::bad_alloc(); }
+
+  arrow::Status operator()() { return arrow::Status::OK(); }
+};
+
+class FailOnceOutputStream final : public arrow::io::OutputStream {
+  public:
+  arrow::Status Close() override {
+    closed_ = true;
+    return arrow::Status::OK();
+  }
+
+  arrow::Status Abort() override {
+    closed_ = true;
+    return arrow::Status::OK();
+  }
+
+  arrow::Result<int64_t> Tell() const override { return position_; }
+
+  bool closed() const override { return closed_; }
+
+  arrow::Status Write(const void*, int64_t nbytes) override {
+    if (fail_next_) {
+      fail_next_ = false;
+      return arrow::Status::IOError("injected output failure");
+    }
+    position_ += nbytes;
+    return arrow::Status::OK();
+  }
+
+  arrow::Status Flush() override { return arrow::Status::OK(); }
+
+  private:
+  bool fail_next_ = true;
+  bool closed_ = false;
+  int64_t position_ = 0;
+};
+
+}  // namespace
+
+TEST(SubmitIOWithCompletionTest, ExecutorRejectionStillCompletesExactlyOnce) {
+  RejectingExecutor executor;
+  arrow::io::IOContext io_context(&executor);
+  int completion_count = 0;
+  arrow::Status completed_status;
+
+  auto status = arrow::io::internal::SubmitIOWithCompletion(
+      io_context, [] { return arrow::Status::OK(); },
+      [&](const arrow::Status& task_status) {
+        ++completion_count;
+        completed_status = task_status;
+      });
+
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(completion_count, 1);
+  EXPECT_TRUE(completed_status.Equals(status));
+}
+
+TEST(SubmitIOWithCompletionTest, ExecutorExceptionCompletesExactlyOnceWithInvariantDetail) {
+  ThrowingExecutor executor;
+  arrow::io::IOContext io_context(&executor);
+  int completion_count = 0;
+  arrow::Status completed_status;
+
+  auto status = arrow::io::internal::SubmitIOWithCompletion(
+      io_context, [] { return arrow::Status::OK(); },
+      [&](const arrow::Status& task_status) {
+        ++completion_count;
+        completed_status = task_status;
+      });
+
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(completion_count, 1);
+  EXPECT_TRUE(completed_status.Equals(status));
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::InternalInvariantViolated);
+  EXPECT_NE(status.message().find("executor submission exploded"), std::string::npos);
+}
+
+TEST(SubmitIOWithCompletionTest, ExecutorAllocationFailureIsFailStop) {
+  PrepareDeathTest();
+  EXPECT_DEATH_IF_SUPPORTED(
+      {
+        BadAllocThrowingExecutor executor;
+        arrow::io::IOContext io_context(&executor);
+        (void)arrow::io::internal::SubmitIOWithCompletion(
+            io_context, [] { return arrow::Status::OK(); }, [](const arrow::Status&) {});
+      },
+      "");
+}
+
+TEST(SubmitIOWithCompletionTest, CompletionConstructionAllocationFailureIsFailStop) {
+  PrepareDeathTest();
+  EXPECT_DEATH_IF_SUPPORTED(
+      {
+        RejectingExecutor executor;
+        arrow::io::IOContext io_context(&executor);
+        int completion_count = 0;
+        arrow::Status completed_status;
+        BadAllocCopyCompletion completion(&completion_count, &completed_status);
+        (void)arrow::io::internal::SubmitIOWithCompletion(io_context, [] { return arrow::Status::OK(); }, completion);
+      },
+      "");
+}
+
+TEST(SubmitIOWithCompletionTest, TaskConstructionAllocationFailureIsFailStop) {
+  PrepareDeathTest();
+  EXPECT_DEATH_IF_SUPPORTED(
+      {
+        RejectingExecutor executor;
+        arrow::io::IOContext io_context(&executor);
+        BadAllocMoveTask task;
+        (void)arrow::io::internal::SubmitIOWithCompletion(io_context, std::move(task), [](const arrow::Status&) {});
+      },
+      "");
+}
+
+TEST(SubmitIOWithCompletionTest, CancellationBeforeExecutionCompletesWithoutRunningTask) {
+  CancellingExecutor executor;
+  arrow::io::IOContext io_context(&executor);
+  bool task_ran = false;
+  int completion_count = 0;
+  arrow::Status completed_status;
+
+  ASSERT_STATUS_OK(arrow::io::internal::SubmitIOWithCompletion(
+      io_context,
+      [&] {
+        task_ran = true;
+        return arrow::Status::OK();
+      },
+      [&](const arrow::Status& task_status) {
+        ++completion_count;
+        completed_status = task_status;
+      }));
+
+  EXPECT_FALSE(task_ran);
+  EXPECT_EQ(completion_count, 1);
+  EXPECT_TRUE(completed_status.IsCancelled()) << completed_status.ToString();
+}
+
+TEST(SubmitIOWithCompletionTest, TaskFailureStillCompletesExactlyOnce) {
+  std::promise<arrow::Status> completion;
+  auto completed = completion.get_future();
+  auto expected = arrow::Status::IOError("client acquisition failed");
+
+  ASSERT_STATUS_OK(arrow::io::internal::SubmitIOWithCompletion(
+      arrow::io::default_io_context(), [expected] { return expected; },
+      [&completion](const arrow::Status& status) { completion.set_value(status); }));
+
+  ASSERT_EQ(completed.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  EXPECT_TRUE(completed.get().Equals(expected));
+}
+
+TEST(SubmitIOWithCompletionTest, StandardTaskExceptionCompletesExactlyOnceWithInvariantDetail) {
+  arrow::MockExecutor executor;
+  arrow::io::IOContext io_context(&executor);
+  int completion_count = 0;
+  arrow::Status completed_status;
+
+  ASSERT_STATUS_OK(arrow::io::internal::SubmitIOWithCompletion(
+      io_context, []() -> arrow::Status { throw std::runtime_error("background task exploded"); },
+      [&](const arrow::Status& task_status) {
+        ++completion_count;
+        completed_status = task_status;
+      }));
+
+  EXPECT_EQ(completion_count, 1);
+  auto detail = ExtendStatusDetail::UnwrapStatus(completed_status);
+  ASSERT_NE(detail, nullptr) << completed_status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::InternalInvariantViolated);
+  EXPECT_NE(completed_status.message().find("background task exploded"), std::string::npos);
+}
+
+TEST(SubmitIOWithCompletionTest, TaskAllocationFailureIsFailStop) {
+  PrepareDeathTest();
+  EXPECT_DEATH_IF_SUPPORTED(
+      {
+        arrow::MockExecutor executor;
+        arrow::io::IOContext io_context(&executor);
+        (void)arrow::io::internal::SubmitIOWithCompletion(
+            io_context, []() -> arrow::Status { throw std::bad_alloc(); }, [](const arrow::Status&) {});
+      },
+      "");
+}
+
+TEST(SubmitIOWithCompletionTest, CompletionExceptionIsFailStop) {
+  PrepareDeathTest();
+  EXPECT_DEATH_IF_SUPPORTED(
+      {
+        RejectingExecutor executor;
+        arrow::io::IOContext io_context(&executor);
+        (void)arrow::io::internal::SubmitIOWithCompletion(
+            io_context, [] { return arrow::Status::OK(); },
+            [](const arrow::Status&) { throw std::runtime_error("completion exploded"); });
+      },
+      "");
+}
+
+TEST(SubmitIOWithCompletionTest, NonStandardTaskExceptionCompletesExactlyOnceWithInvariantDetail) {
+  arrow::MockExecutor executor;
+  arrow::io::IOContext io_context(&executor);
+  int completion_count = 0;
+  arrow::Status completed_status;
+
+  ASSERT_STATUS_OK(arrow::io::internal::SubmitIOWithCompletion(
+      io_context, []() -> arrow::Status { throw 42; },
+      [&](const arrow::Status& task_status) {
+        ++completion_count;
+        completed_status = task_status;
+      }));
+
+  EXPECT_EQ(completion_count, 1);
+  auto detail = ExtendStatusDetail::UnwrapStatus(completed_status);
+  ASSERT_NE(detail, nullptr) << completed_status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::InternalInvariantViolated);
+  EXPECT_NE(completed_status.message().find("non-standard exception"), std::string::npos);
+}
+
+TEST(WriterStatusTest, ObservedAsyncFailureRemainsTheTerminalVerdict) {
+  WriterStatus writer_status;
+  auto first_child = MakeExtendError(ExtendStatusCode::StorageAccessDenied, "part 1 denied");
+  auto later = MakeExtendError(ExtendStatusCode::StorageTransientService, "later failure");
+
+  writer_status.ObserveFailure(first_child);
+
+  EXPECT_TRUE(writer_status.Check().Equals(first_child));
+  EXPECT_TRUE(writer_status.Fail(later).Equals(first_child));
+  EXPECT_TRUE(writer_status.Check().Equals(first_child));
+}
+
+TEST(WriterStatusTest, LocallySuccessfulOperationStillReturnsConcurrentFailure) {
+  WriterStatus writer_status;
+  auto child_failure = MakeExtendError(ExtendStatusCode::StorageTransientService, "background upload failed");
+
+  // Models a foreground operation that passed Check(), then lost the race to
+  // an asynchronous completion before publishing its local OK.
+  writer_status.ObserveFailure(child_failure);
+  EXPECT_TRUE(writer_status.Fail(arrow::Status::OK()).Equals(child_failure));
+  EXPECT_TRUE(writer_status.Fail(arrow::Status::OK()).Equals(child_failure));
+}
+
+TEST(WriterStatusTest, BackgroundCompletionPublishesTheObservedFirstFailure) {
+  WriterStatus writer_status;
+  auto first_child = MakeExtendError(ExtendStatusCode::StorageAccessDenied, "part 1 denied");
+  auto later = MakeExtendError(ExtendStatusCode::StorageTransientService, "later failure");
+
+  auto first_observed = arrow::io::internal::ObserveBackgroundIOStatus(&writer_status, first_child);
+  auto later_observed = arrow::io::internal::ObserveBackgroundIOStatus(&writer_status, later);
+  EXPECT_TRUE(first_observed.Equals(first_child));
+  EXPECT_TRUE(later_observed.Equals(first_child));
+
+  auto future = arrow::Future<>::Make();
+  future.MarkFinished(std::move(later_observed));
+  ASSERT_TRUE(future.Wait(1.0));
+  EXPECT_TRUE(future.status().Equals(first_child));
+}
+
+// The failure travels with the move, and what is left behind does not read as
+// a healthy writer: arrow::Status's own move would otherwise hand the source
+// back an OK status, so a writer that had already failed a part would answer
+// ok() and accept more data.
+TEST(WriterStatusTest, MovingCarriesTheFailureAndDoesNotLeaveAHealthySource) {
+  static_assert(std::is_nothrow_move_constructible_v<arrow::Status>);
+  static_assert(std::is_nothrow_move_assignable_v<arrow::Status>);
+  static_assert(std::is_nothrow_move_constructible_v<WriterStatus>);
+  static_assert(std::is_nothrow_move_assignable_v<WriterStatus>);
+
+  WriterStatus source;
+  auto failure = MakeExtendError(ExtendStatusCode::StorageAccessDenied, "part 1 denied");
+  source.ObserveFailure(failure);
+
+  WriterStatus moved(std::move(source));
+  EXPECT_TRUE(moved.Check().Equals(failure));
+  EXPECT_FALSE(source.ok());  // NOLINT(bugprone-use-after-move) -- that is the point
+
+  WriterStatus assigned;
+  assigned = std::move(moved);
+  EXPECT_TRUE(assigned.Check().Equals(failure));
+  EXPECT_FALSE(moved.ok());  // NOLINT(bugprone-use-after-move)
+}
+
+TEST(WriterStatusTest, MovedHealthyStatusStillDiscards) {
+  WriterStatus source;
+  WriterStatus moved(std::move(source));
+  moved.BeginDiscard();
+  EXPECT_TRUE(moved.Check().IsCancelled());
+
+  WriterStatus assigned_source;
+  WriterStatus assigned;
+  assigned = std::move(assigned_source);
+  assigned.BeginDiscard();
+  EXPECT_TRUE(assigned.Check().IsCancelled());
+}
+
+TEST(MetricsOutputStreamTest, FailureIsTerminal) {
+  auto underlying = std::make_shared<FailOnceOutputStream>();
+  auto metrics = std::make_shared<FilesystemMetrics>();
+  auto writer = std::make_shared<MetricsOutputStream>(underlying, metrics);
+  const uint8_t byte = 1;
+
+  auto first_failure = writer->Write(&byte, 1);
+  ASSERT_STATUS_NOT_OK(first_failure);
+
+  EXPECT_TRUE(writer->Flush().Equals(first_failure));
+
+  ASSERT_STATUS_OK(writer->Abort());
+}
 
 class LocalFsTest : public ::testing::Test {
   protected:

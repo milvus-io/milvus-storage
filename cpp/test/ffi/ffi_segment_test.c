@@ -32,6 +32,7 @@
 void field_schema_release(struct ArrowSchema* schema);
 void struct_schema_release(struct ArrowSchema* schema);
 struct ArrowSchema* create_test_struct_schema();
+char* create_arrow_schema_meta(int32_t count, ...);
 
 struct ArrowArray* create_test_struct_arrow_array(int64_t* int64_data,
                                                   int32_t* int32_data,
@@ -232,13 +233,83 @@ static void test_segment_error_handling(void) {
   int64_t row_indices[] = {0};
   LoonChunkReaderHandle chunk_reader = 0;
   LoonSegmentWriteOutput output;
+  LoonSegmentReaderConfig reader_config;
+  LoonSegmentWriterConfig writer_config;
+  LoonSegmentWriterHandle writer = 0;
+  struct ArrowSchema dummy_schema;
+  LoonProperties dummy_properties;
 
   memset(&stream, 0, sizeof(stream));
   memset(&output, 0, sizeof(output));
+  memset(&reader_config, 0, sizeof(reader_config));
+  memset(&writer_config, 0, sizeof(writer_config));
+  memset(&dummy_schema, 0, sizeof(dummy_schema));
+  memset(&dummy_properties, 0, sizeof(dummy_properties));
 
   rc = loon_segment_writer_new(NULL, NULL, NULL, NULL);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
+
+  rc = loon_segment_writer_new(&dummy_schema, &writer_config, &dummy_properties, &writer);
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  loon_ffi_free_result(&rc);
+
+  writer_config.segment_path = "";
+  rc = loon_segment_writer_new(&dummy_schema, &writer_config, &dummy_properties, &writer);
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  loon_ffi_free_result(&rc);
+
+  writer_config.segment_path = "segment";
+  writer_config.num_lob_columns = 1;
+  writer_config.lob_columns = NULL;
+  rc = loon_segment_writer_new(&dummy_schema, &writer_config, &dummy_properties, &writer);
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  loon_ffi_free_result(&rc);
+
+  LoonLobColumnConfig writer_lob_config;
+  memset(&writer_lob_config, 0, sizeof(writer_lob_config));
+  writer_config.lob_columns = &writer_lob_config;
+  rc = loon_segment_writer_new(&dummy_schema, &writer_config, &dummy_properties, &writer);
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  loon_ffi_free_result(&rc);
+
+  writer_lob_config.lob_base_path = "";
+  rc = loon_segment_writer_new(&dummy_schema, &writer_config, &dummy_properties, &writer);
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  loon_ffi_free_result(&rc);
+
+  LoonProperties pp;
+  rc = create_test_segment_pp(&pp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  loon_ffi_free_result(&rc);
+
+  struct ArrowSchema* invalid_field_id_schema = create_test_struct_schema();
+  free((void*)invalid_field_id_schema->children[0]->metadata);
+  invalid_field_id_schema->children[0]->metadata = create_arrow_schema_meta(1, "PARQUET:field_id", "1junk");
+  memset(&writer_config, 0, sizeof(writer_config));
+  writer_config.segment_path = "segment";
+  rc = loon_segment_writer_new(invalid_field_id_schema, &writer_config, &pp, &writer);
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  ck_assert(!loon_ffi_is_retryable_errcode(rc.err_code));
+  loon_ffi_free_result(&rc);
+  release_schema(invalid_field_id_schema);
+
+  invalid_field_id_schema = create_test_struct_schema();
+  free((void*)invalid_field_id_schema->children[0]->metadata);
+  invalid_field_id_schema->children[0]->metadata = create_arrow_schema_meta(1, "PARQUET:field_id", "1junk");
+  const char* packed_paths[] = {PACKED_TEST_PATH_0};
+  int32_t packed_offsets[] = {0, 1};
+  int32_t packed_indices[] = {0};
+  LoonPackedWriterHandle packed_writer = 0;
+  rc = loon_packed_writer_new(packed_paths, 1, packed_offsets, packed_indices, 1, invalid_field_id_schema, &pp, 0,
+                              &packed_writer);
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  ck_assert(!loon_ffi_is_retryable_errcode(rc.err_code));
+  loon_ffi_free_result(&rc);
+  release_schema(invalid_field_id_schema);
+  loon_properties_free(&pp);
 
   rc = loon_segment_writer_write(0, NULL);
   ck_assert(!loon_ffi_is_success(&rc));
@@ -259,6 +330,29 @@ static void test_segment_error_handling(void) {
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
+  LoonSegmentReaderHandle reader = 0;
+  rc = loon_segment_reader_open("segment", -2, &dummy_schema, NULL, 0, &reader_config, &dummy_properties, &reader);
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  loon_ffi_free_result(&rc);
+
+  reader_config.num_lob_columns = 1;
+  reader_config.lob_columns = NULL;
+  rc = loon_segment_reader_open("segment", -1, &dummy_schema, NULL, 0, &reader_config, &dummy_properties, &reader);
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  loon_ffi_free_result(&rc);
+
+  LoonLobColumnConfig lob_config;
+  memset(&lob_config, 0, sizeof(lob_config));
+  reader_config.lob_columns = &lob_config;
+  rc = loon_segment_reader_open("segment", -1, &dummy_schema, NULL, 0, &reader_config, &dummy_properties, &reader);
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  loon_ffi_free_result(&rc);
+
+  lob_config.lob_base_path = "";
+  rc = loon_segment_reader_open("segment", -1, &dummy_schema, NULL, 0, &reader_config, &dummy_properties, &reader);
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  loon_ffi_free_result(&rc);
+
   rc = loon_segment_reader_get_stream(0, &stream);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
@@ -271,12 +365,39 @@ static void test_segment_error_handling(void) {
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
+  rc = loon_segment_reader_take((LoonSegmentReaderHandle)1, row_indices, 1, -1, &stream);
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  loon_ffi_free_result(&rc);
+
+  int64_t negative_indices[] = {-1, 1};
+  rc = loon_segment_reader_take((LoonSegmentReaderHandle)1, negative_indices, 2, 1, &stream);
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  loon_ffi_free_result(&rc);
+
+  int64_t duplicate_indices[] = {1, 1};
+  rc = loon_segment_reader_take((LoonSegmentReaderHandle)1, duplicate_indices, 2, 1, &stream);
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  loon_ffi_free_result(&rc);
+
+  int64_t unsorted_indices[] = {2, 1};
+  rc = loon_segment_reader_take((LoonSegmentReaderHandle)1, unsorted_indices, 2, 1, &stream);
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  loon_ffi_free_result(&rc);
+
   rc = loon_segment_reader_get_filtered_stream(0, NULL, &stream);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
   rc = loon_segment_reader_get_chunk_reader(0, 0, NULL, 0, &chunk_reader);
   ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_segment_reader_get_chunk_reader(1, -1, NULL, 0, &chunk_reader);
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
   loon_ffi_free_result(&rc);
 
   loon_segment_reader_destroy(0);
@@ -330,17 +451,30 @@ static void test_packed_writer_error_handling(void) {
 
   rc = loon_packed_writer_new(NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL);
   ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
   loon_ffi_free_result(&rc);
 
   schema = create_test_struct_schema();
   rc = loon_packed_writer_new(paths, 1, bad_offsets_start, offsets, 1, schema, &pp, 0, &writer);
   ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
+  loon_ffi_free_result(&rc);
+  release_schema(schema);
+
+  schema = create_test_struct_schema();
+  rc = loon_packed_writer_new(paths, 1, offsets, bad_indices, -1, schema, &pp, 0, &writer);
+  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
   loon_ffi_free_result(&rc);
   release_schema(schema);
 
   schema = create_test_struct_schema();
   rc = loon_packed_writer_new(paths, 1, offsets, bad_indices, 1, schema, &pp, 0, &writer);
   ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
   loon_ffi_free_result(&rc);
   release_schema(schema);
 

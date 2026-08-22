@@ -82,6 +82,50 @@ class FailingAsyncRandomAccessFile final : public arrow::io::RandomAccessFile, p
   arrow::Status status_;
 };
 
+class ShortAsyncRandomAccessFile final : public arrow::io::RandomAccessFile, public NonBlockingReadAtFile {
+  public:
+  explicit ShortAsyncRandomAccessFile(int64_t bytes_read)
+      : file_(std::make_shared<arrow::io::BufferReader>("test payload")), bytes_read_(bytes_read) {}
+
+  arrow::Status Close() override { return file_->Close(); }
+  arrow::Status Abort() override { return file_->Abort(); }
+  arrow::Result<int64_t> Tell() const override { return file_->Tell(); }
+  bool closed() const override { return file_->closed(); }
+  arrow::Result<int64_t> Read(int64_t nbytes, void* out) override { return file_->Read(nbytes, out); }
+  arrow::Result<std::shared_ptr<arrow::Buffer>> Read(int64_t nbytes) override { return file_->Read(nbytes); }
+  const arrow::io::IOContext& io_context() const override { return file_->io_context(); }
+  arrow::Result<std::string_view> Peek(int64_t nbytes) override { return file_->Peek(nbytes); }
+  bool supports_zero_copy() const override { return file_->supports_zero_copy(); }
+  arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override {
+    return file_->ReadMetadata();
+  }
+  arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(
+      const arrow::io::IOContext& io_context) override {
+    return file_->ReadMetadataAsync(io_context);
+  }
+  arrow::Status Seek(int64_t position) override { return file_->Seek(position); }
+  arrow::Result<int64_t> GetSize() override { return file_->GetSize(); }
+  arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
+    return file_->ReadAt(position, nbytes, out);
+  }
+  arrow::Result<std::shared_ptr<arrow::Buffer>> ReadAt(int64_t position, int64_t nbytes) override {
+    return file_->ReadAt(position, nbytes);
+  }
+  arrow::Future<int64_t> ReadAtAsyncInto(int64_t, int64_t, uint8_t*) override {
+    return arrow::Future<int64_t>::MakeFinished(bytes_read_);
+  }
+  arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const arrow::io::IOContext& io_context,
+                                                          int64_t position,
+                                                          int64_t nbytes) override {
+    return file_->ReadAsync(io_context, position, nbytes);
+  }
+  arrow::Status WillNeed(const std::vector<arrow::io::ReadRange>& ranges) override { return file_->WillNeed(ranges); }
+
+  private:
+  std::shared_ptr<arrow::io::RandomAccessFile> file_;
+  int64_t bytes_read_;
+};
+
 struct AsyncReadCallbackCapture {
   int callback_count = 0;
   LoonFFIResult result{LOON_SUCCESS, nullptr};
@@ -103,36 +147,36 @@ TEST(FFIInternalResultTest, MapsStatusDetailsToFfiResults) {
   auto timeout_status = MakeExtendError(ExtendStatusCode::StorageTransientTimeout, "timeout", "timeout");
   EXPECT_EQ(FFIErrorCodeFromExtendStatus(timeout_status, LOON_ARROW_ERROR), LOON_TRANSIENT_TIMEOUT);
 
-  auto code = ExtendStatusCodeFromFFIErrorCode(LOON_AWS_ERROR_NO_SUCH_UPLOAD);
+  auto code = ExtendStatusCodeFromFFIErrorCode(LOON_STORAGE_NO_SUCH_UPLOAD);
   ASSERT_TRUE(code.has_value());
-  EXPECT_EQ(*code, ExtendStatusCode::AwsErrorNoSuchUpload);
+  EXPECT_EQ(*code, ExtendStatusCode::StorageNoSuchUpload);
 
   code = ExtendStatusCodeFromFFIErrorCode(LOON_TRANSIENT_TIMEOUT);
   ASSERT_TRUE(code.has_value());
   EXPECT_EQ(*code, ExtendStatusCode::StorageTransientTimeout);
   EXPECT_FALSE(ExtendStatusCodeFromFFIErrorCode(LOON_ARROW_ERROR).has_value());
 
-  auto conflict_status = MakeExtendError(ExtendStatusCode::AwsErrorConflict, "conflict", "conflict");
-  EXPECT_EQ(FFIErrorCodeFromExtendStatus(conflict_status, LOON_ARROW_ERROR), LOON_AWS_ERROR_CONFLICT);
-  code = ExtendStatusCodeFromFFIErrorCode(LOON_AWS_ERROR_CONFLICT);
+  auto conflict_status = MakeExtendError(ExtendStatusCode::StorageConflict, "conflict", "conflict");
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(conflict_status, LOON_ARROW_ERROR), LOON_STORAGE_CONFLICT);
+  code = ExtendStatusCodeFromFFIErrorCode(LOON_STORAGE_CONFLICT);
   ASSERT_TRUE(code.has_value());
-  EXPECT_EQ(*code, ExtendStatusCode::AwsErrorConflict);
+  EXPECT_EQ(*code, ExtendStatusCode::StorageConflict);
 
   auto precondition_status =
-      MakeExtendError(ExtendStatusCode::AwsErrorPreConditionFailed, "precondition", "precondition");
-  EXPECT_EQ(FFIErrorCodeFromExtendStatus(precondition_status, LOON_ARROW_ERROR), LOON_AWS_ERROR_PRECONDITION_FAILED);
-  code = ExtendStatusCodeFromFFIErrorCode(LOON_AWS_ERROR_PRECONDITION_FAILED);
+      MakeExtendError(ExtendStatusCode::StoragePreConditionFailed, "precondition", "precondition");
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(precondition_status, LOON_ARROW_ERROR), LOON_STORAGE_PRECONDITION_FAILED);
+  code = ExtendStatusCodeFromFFIErrorCode(LOON_STORAGE_PRECONDITION_FAILED);
   ASSERT_TRUE(code.has_value());
-  EXPECT_EQ(*code, ExtendStatusCode::AwsErrorPreConditionFailed);
+  EXPECT_EQ(*code, ExtendStatusCode::StoragePreConditionFailed);
 
-  auto not_found_status = MakeExtendError(ExtendStatusCode::AwsErrorNotFound, "missing", "missing");
-  EXPECT_EQ(FFIErrorCodeFromExtendStatus(not_found_status, LOON_ARROW_ERROR), LOON_AWS_ERROR_NOT_FOUND);
-  code = ExtendStatusCodeFromFFIErrorCode(LOON_AWS_ERROR_NOT_FOUND);
+  auto not_found_status = MakeExtendError(ExtendStatusCode::StorageNotFound, "missing", "missing");
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(not_found_status, LOON_ARROW_ERROR), LOON_STORAGE_NOT_FOUND);
+  code = ExtendStatusCodeFromFFIErrorCode(LOON_STORAGE_NOT_FOUND);
   ASSERT_TRUE(code.has_value());
-  EXPECT_EQ(*code, ExtendStatusCode::AwsErrorNotFound);
+  EXPECT_EQ(*code, ExtendStatusCode::StorageNotFound);
 
-  EXPECT_TRUE(loon_ffi_is_retryable_errcode(LOON_AWS_ERROR_NO_SUCH_UPLOAD));
-  EXPECT_FALSE(loon_ffi_is_retryable_errcode(LOON_AWS_ERROR_ACCESS_DENIED));
+  EXPECT_FALSE(loon_ffi_is_retryable_errcode(LOON_STORAGE_NO_SUCH_UPLOAD));
+  EXPECT_FALSE(loon_ffi_is_retryable_errcode(LOON_STORAGE_ACCESS_DENIED));
 
   auto throttling_status = MakeExtendError(ExtendStatusCode::StorageTransientThrottling, "throttled", "throttled");
   auto throttling_result = ReturnArrowErrorIf(throttling_status, LOON_ARROW_ERROR);
@@ -159,6 +203,21 @@ TEST(FFIInternalResultTest, MapsPlainPathNotFoundToFileNotFound) {
   EXPECT_EQ(FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR), LOON_FILE_NOT_FOUND);
 }
 
+TEST(FFIInternalResultTest, MapsOutOfMemoryToMemoryError) {
+  auto oom = arrow::Status::OutOfMemory("malloc of size 42 failed");
+
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(oom, LOON_ARROW_ERROR), LOON_MEMORY_ERROR);
+  // External-source entry points may use LOON_SOURCE_INVALID as their fallback.
+  // OOM must remain the allocation-failure code instead of becoming a
+  // source-availability error.
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(oom, LOON_SOURCE_INVALID), LOON_MEMORY_ERROR);
+  EXPECT_EQ(ExternalSourceErrorCodeFromStatus(oom, LOON_SOURCE_INVALID), LOON_MEMORY_ERROR);
+  // A status that carries an explicit classification still wins over the
+  // arrow-code inference.
+  auto classified = MakeExtendError(ExtendStatusCode::StorageTransientThrottling, "throttled", "throttled");
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(classified, LOON_ARROW_ERROR), LOON_TRANSIENT_THROTTLING);
+}
+
 TEST(FFIInternalResultTest, AsyncReadCallbackPreservesExtendStatusCode) {
   auto status = MakeExtendError(ExtendStatusCode::StorageTransientNetwork, "network", "network detail");
   auto file = std::make_shared<FailingAsyncRandomAccessFile>(status);
@@ -177,6 +236,26 @@ TEST(FFIInternalResultTest, AsyncReadCallbackPreservesExtendStatusCode) {
   EXPECT_EQ(capture.bytes_read, 0);
   ASSERT_NE(capture.result.message, nullptr);
   EXPECT_NE(std::string(capture.result.message).find("network"), std::string::npos);
+  loon_ffi_free_result(&capture.result);
+}
+
+TEST(FFIInternalResultTest, AsyncShortReadUsesUnclassifiedArrowFallback) {
+  auto file = std::make_shared<ShortAsyncRandomAccessFile>(2);
+  auto wrapper = std::make_unique<RandomAccessFileWrapper>(std::move(file));
+  auto handle = reinterpret_cast<FileSystemReaderHandle>(wrapper.get());
+  uint8_t buffer[4] = {};
+  AsyncReadCallbackCapture capture;
+
+  auto submit_result =
+      loon_filesystem_reader_readat_async(handle, 8, sizeof(buffer), buffer, CaptureAsyncReadResult, &capture);
+
+  EXPECT_EQ(submit_result.err_code, LOON_SUCCESS);
+  EXPECT_EQ(submit_result.message, nullptr);
+  EXPECT_EQ(capture.callback_count, 1);
+  EXPECT_EQ(capture.result.err_code, LOON_ARROW_ERROR);
+  EXPECT_EQ(capture.bytes_read, 0);
+  ASSERT_NE(capture.result.message, nullptr);
+  EXPECT_NE(std::string(capture.result.message).find("Short read"), std::string::npos);
   loon_ffi_free_result(&capture.result);
 }
 

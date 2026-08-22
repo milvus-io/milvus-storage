@@ -26,6 +26,7 @@
 #include <parquet/arrow/writer.h>
 
 #include "milvus-storage/common/config.h"
+#include "bridge_error.h"
 #include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/column_group_reader.h"
@@ -40,6 +41,24 @@
 
 namespace milvus_storage::test {
 namespace {
+
+// What matters about "these persisted bytes do not decode" is the
+// classification the caller branches on, not the arrow StatusCode that happens
+// to carry it -- the code is a second axis (what kind of operation failed) and
+// pinning it made these tests fail when the construction was unified.
+void ExpectDataFormat(const arrow::Status& status) {
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::DataCorrupted) << status.ToString();
+  EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::DataFormat);
+  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::DataFormatBroken) << status.ToString();
+}
+
+void ExpectConservativeIO(const arrow::Status& status) {
+  EXPECT_TRUE(status.IsIOError()) << status.ToString();
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr) << status.ToString();
+  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::StorageError) << status.ToString();
+}
 
 class PaimonIntegrationTest : public ::testing::Test {
   protected:
@@ -379,7 +398,7 @@ TEST_F(PaimonIntegrationTest, MalformedMetadataTypesFailClosed) {
   files.front().Set(api::kPropertyMetadata, folly::toJson(descriptor));
   auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
   ASSERT_FALSE(reader.ok());
-  EXPECT_TRUE(reader.status().IsInvalid());
+  ExpectDataFormat(reader.status());
   EXPECT_NE(reader.status().ToString().find("field types"), std::string::npos);
 }
 
@@ -393,7 +412,7 @@ TEST_F(PaimonIntegrationTest, MalformedDeletionMetadataTypesFailClosed) {
   files.front().Set(api::kPropertyMetadata, folly::toJson(descriptor));
   auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
   ASSERT_FALSE(reader.ok());
-  EXPECT_TRUE(reader.status().IsInvalid());
+  ExpectDataFormat(reader.status());
   EXPECT_NE(reader.status().ToString().find("deletion_file has invalid field types"), std::string::npos);
 }
 
@@ -477,7 +496,7 @@ TEST_F(PaimonIntegrationTest, AutoUsesDirectFileAndAppliesDeletionVector) {
   tampered.Set(api::kPropertyMetadata, folly::toJson(descriptor));
   auto invalid = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, tampered, properties_, {"id"}, nullptr);
   ASSERT_FALSE(invalid.ok());
-  EXPECT_TRUE(invalid.status().IsInvalid()) << invalid.status().ToString();
+  ExpectConservativeIO(invalid.status());
 }
 
 TEST_F(PaimonIntegrationTest, CorruptDeletionVectorCrcFailsAsInvalid) {
@@ -504,7 +523,7 @@ TEST_F(PaimonIntegrationTest, CorruptDeletionVectorCrcFailsAsInvalid) {
 
   auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
   ASSERT_FALSE(reader.ok());
-  EXPECT_TRUE(reader.status().IsInvalid()) << reader.status().ToString();
+  ExpectConservativeIO(reader.status());
   EXPECT_NE(reader.status().ToString().find("CRC mismatch"), std::string::npos);
 }
 
@@ -520,7 +539,12 @@ TEST_F(PaimonIntegrationTest, MissingDeletionVectorFileRemainsIOError) {
   auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
   ASSERT_FALSE(reader.ok());
   EXPECT_TRUE(reader.status().IsIOError()) << reader.status().ToString();
-  EXPECT_EQ(arrow::internal::ErrnoFromStatus(reader.status()), ENOENT);
+  // A bridge reports a missing object through the taxonomy channel, not errno.
+  // Same landing either way -- that equivalence is pinned in the taxonomy test.
+  auto detail = ExtendStatusDetail::UnwrapStatus(reader.status());
+  ASSERT_NE(detail, nullptr) << reader.status().ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageNotFound);
+  EXPECT_EQ(ToSegcoreError(reader.status()).get_error_code(), milvus::ObjectNotExist);
 }
 
 TEST_F(PaimonIntegrationTest, DirectFileFragmentRangeUsesPostDeletionLogicalRows) {
@@ -847,7 +871,9 @@ TEST_F(PaimonIntegrationTest, ZeroRowDataSplitDescriptorFailsAsInvalid) {
   files.front().Set(api::kPropertyMetadata, folly::toJson(descriptor));
   auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
   ASSERT_FALSE(reader.ok());
-  EXPECT_TRUE(reader.status().IsInvalid()) << reader.status().ToString();
+  // The descriptor is persisted metadata, so a contradiction in it is a
+  // data-format verdict -- same as the negative record_count check next to it.
+  ExpectDataFormat(reader.status());
   EXPECT_NE(reader.status().ToString().find("zero record_count"), std::string::npos);
 }
 
@@ -896,43 +922,54 @@ TEST_F(PaimonIntegrationTest, MissingTableFailsAndWriterIsReadOnly) {
 }
 
 TEST(PaimonBridgeErrorClassification, MarkersMapToArrowStatuses) {
-  EXPECT_TRUE(paimon::MakePaimonBridgeErrorStatus("[paimon:error=invalid] invalid metadata").IsInvalid());
-  EXPECT_TRUE(paimon::MakePaimonBridgeErrorStatus("[paimon:error=not-implemented] direct-file does not support orc")
+  auto config_invalid = milvus_storage::bridge::MakeBridgeErrorStatus("__LOON_RUST_BRIDGE_ERRCODE__=115; "invalid metadata");
+  EXPECT_TRUE(config_invalid.IsInvalid());
+  auto config_detail = ExtendStatusDetail::UnwrapStatus(config_invalid);
+  ASSERT_NE(config_detail, nullptr) << config_invalid.ToString();
+  EXPECT_EQ(config_detail->code(), ExtendStatusCode::StorageConfigInvalid);
+  EXPECT_TRUE(milvus_storage::bridge::MakeBridgeErrorStatus("__LOON_RUST_BRIDGE_ERRCODE__=1002; "direct-file does not support orc")
                   .IsNotImplemented());
 
-  auto not_found = paimon::MakePaimonBridgeErrorStatus("[paimon:error=not-found] missing object");
+  auto not_found = milvus_storage::bridge::MakeBridgeErrorStatus("__LOON_RUST_BRIDGE_ERRCODE__=104; "missing object");
   EXPECT_TRUE(not_found.IsIOError());
-  EXPECT_EQ(arrow::internal::ErrnoFromStatus(not_found), ENOENT);
+  auto not_found_detail = ExtendStatusDetail::UnwrapStatus(not_found);
+  ASSERT_NE(not_found_detail, nullptr) << not_found.ToString();
+  EXPECT_EQ(not_found_detail->code(), ExtendStatusCode::StorageNotFound);
+  EXPECT_EQ(ToSegcoreError(not_found).get_error_code(), milvus::ObjectNotExist);
 
-  auto transient = paimon::MakePaimonBridgeErrorStatus("[paimon:error=transient-throttling] object store rate limit");
+  auto transient = milvus_storage::bridge::MakeBridgeErrorStatus("__LOON_RUST_BRIDGE_ERRCODE__=109; "object store rate limit");
   auto detail = ExtendStatusDetail::UnwrapStatus(transient);
   ASSERT_NE(detail, nullptr);
   EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientThrottling);
 
-  transient = paimon::MakePaimonBridgeErrorStatus("[paimon:error=transient-service] object store unavailable");
+  transient = milvus_storage::bridge::MakeBridgeErrorStatus("__LOON_RUST_BRIDGE_ERRCODE__=110; "object store unavailable");
   detail = ExtendStatusDetail::UnwrapStatus(transient);
   ASSERT_NE(detail, nullptr);
   EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientService);
 
-  EXPECT_TRUE(paimon::MakePaimonBridgeErrorStatus("unclassified storage failure").IsIOError());
+  EXPECT_TRUE(milvus_storage::bridge::MakeBridgeErrorStatus("unclassified storage failure").IsIOError());
 }
 
 TEST(PaimonBridgeErrorClassification, StreamReaderTranslatesReadNextNotFound) {
   auto inner =
-      std::make_shared<FailingRecordBatchReader>(arrow::Status::IOError("[paimon:error=not-found] missing object"));
+      std::make_shared<FailingRecordBatchReader>(arrow::Status::IOError("__LOON_RUST_BRIDGE_ERRCODE__=104; "missing object"));
   auto reader = paimon::internal::WrapPaimonRecordBatchReader(std::move(inner), arrow::schema({}));
 
   std::shared_ptr<arrow::RecordBatch> batch;
   auto status = reader->ReadNext(&batch);
 
   EXPECT_TRUE(status.IsIOError()) << status.ToString();
-  EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
-  EXPECT_EQ(status.ToString().find("[paimon:error="), std::string::npos);
+  // A bridge reports a missing object through the taxonomy channel, not errno.
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageNotFound);
+  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::ObjectNotExist) << status.ToString();
+  EXPECT_EQ(status.ToString().find("__LOON_RUST_BRIDGE_ERRCODE__="), std::string::npos);
 }
 
 TEST(PaimonBridgeErrorClassification, StreamReaderTranslatesReadNextThrottling) {
   auto inner = std::make_shared<FailingRecordBatchReader>(
-      arrow::Status::IOError("[paimon:error=transient-throttling] object store rate limit"));
+      arrow::Status::IOError("__LOON_RUST_BRIDGE_ERRCODE__=109; "object store rate limit"));
   auto reader = paimon::internal::WrapPaimonRecordBatchReader(std::move(inner), arrow::schema({}));
 
   std::shared_ptr<arrow::RecordBatch> batch;
@@ -942,7 +979,7 @@ TEST(PaimonBridgeErrorClassification, StreamReaderTranslatesReadNextThrottling) 
   ASSERT_NE(detail, nullptr) << status.ToString();
   EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientThrottling);
   EXPECT_TRUE(detail->retryable());
-  EXPECT_EQ(status.ToString().find("[paimon:error="), std::string::npos);
+  EXPECT_EQ(status.ToString().find("__LOON_RUST_BRIDGE_ERRCODE__="), std::string::npos);
 }
 
 TEST_F(PaimonIntegrationTest, DataSplitMissingObjectPreservesErrno) {
@@ -979,18 +1016,27 @@ TEST_F(PaimonIntegrationTest, DataSplitMissingObjectPreservesErrno) {
 
   ASSERT_FALSE(status.ok());
   EXPECT_TRUE(status.IsIOError()) << status.ToString();
-  EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
-  EXPECT_EQ(status.ToString().find("[paimon:error="), std::string::npos);
+  // Same as the direct-file path: the missing object arrives through the
+  // taxonomy channel, and both landings agree on milvus::ObjectNotExist.
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageNotFound) << status.ToString();
+  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::ObjectNotExist) << status.ToString();
+  EXPECT_EQ(status.ToString().find("__LOON_RUST_BRIDGE_ERRCODE__="), std::string::npos);
 }
 
-TEST_F(PaimonIntegrationTest, MissingPinnedSnapshotFailsPlanAsInvalidWithRefresh) {
+TEST_F(PaimonIntegrationTest, MissingPinnedSnapshotFailsPlanAsNotFoundWithRefresh) {
   ASSERT_AND_ASSIGN(auto snapshot_id, paimon::CreateTestTable(table_dir_, 10, "append"));
   ASSERT_EQ(api::SetValue(properties_, PROPERTY_PAIMON_SNAPSHOT_ID, std::to_string(snapshot_id + 1000).c_str()),
             std::nullopt);
 
   auto files = Explore("auto");
   ASSERT_FALSE(files.ok());
-  EXPECT_TRUE(files.status().IsInvalid()) << files.status().ToString();
+  // Paimon itself reports the snapshot as NotFound; the bridge follows that
+  // classification instead of re-tagging it as an invalid configuration.
+  auto detail = ExtendStatusDetail::UnwrapStatus(files.status());
+  ASSERT_NE(detail, nullptr) << files.status().ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageNotFound) << files.status().ToString();
   const auto message = files.status().ToString();
   EXPECT_NE(message.find("required metadata"), std::string::npos) << message;
   EXPECT_NE(message.find("was not found"), std::string::npos) << message;

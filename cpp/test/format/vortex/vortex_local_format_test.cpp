@@ -18,6 +18,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -39,7 +40,10 @@
 #include <boost/filesystem/operations.hpp>
 
 #include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/format/vortex/vortex_footer_internal.h"
+#include "milvus-storage/format/vortex/vortex_field_layout_internal.h"
 #include "milvus-storage/format/vortex/vortex_footer_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_planner.h"
@@ -296,28 +300,26 @@ class VortexLocalFormatTest : public ::testing::Test {
   const int64_t batch_count_ = 4;
 };
 
-TEST_F(VortexLocalFormatTest, TestFooterReaderOpensZeroRowVortexFile) {
+TEST_F(VortexLocalFormatTest, TestFooterReaderOpensZeroRowVortexFileWithoutFooterFallback) {
   ASSERT_AND_ASSIGN(auto cgfile, WriteEmptyVortexFile());
   ASSERT_EQ(0, cgfile.end_index);
   ASSERT_GT(cgfile.Get<uint64_t>(api::kPropertyFileSize), 0);
-  ASSERT_GT(cgfile.Get<uint64_t>(api::kPropertyFooterSize), 0);
+  const auto actual_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
+  ASSERT_GT(actual_footer_size, 1);
 
-  auto too_small_footer_file = cgfile;
-  too_small_footer_file.Set(api::kPropertyFooterSize, cgfile.Get<uint64_t>(api::kPropertyFooterSize) - 1);
-  auto too_small_footer_reader =
-      MakeFooterReader(too_small_footer_file, std::make_shared<InMemoryVortexRangeFileSystem>());
-  ASSERT_STATUS_OK(too_small_footer_reader->Open(file_system_));
-  ASSERT_TRUE(too_small_footer_reader->opened());
-  ASSERT_EQ(too_small_footer_reader->rows(), 0);
-  ASSERT_EQ(too_small_footer_reader->footer_size(), cgfile.Get<uint64_t>(api::kPropertyFooterSize));
+  for (const uint64_t supplied_footer_size : {actual_footer_size - 1, uint64_t{1}}) {
+    auto understated_footer_file = cgfile;
+    understated_footer_file.Set(api::kPropertyFooterSize, supplied_footer_size);
+    auto sparse_fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+    auto reader = MakeFooterReader(understated_footer_file, sparse_fs);
 
-  auto tiny_footer_file = cgfile;
-  tiny_footer_file.Set(api::kPropertyFooterSize, static_cast<uint64_t>(1));
-  auto tiny_footer_reader = MakeFooterReader(tiny_footer_file, std::make_shared<InMemoryVortexRangeFileSystem>());
-  ASSERT_STATUS_OK(tiny_footer_reader->Open(file_system_));
-  ASSERT_TRUE(tiny_footer_reader->opened());
-  ASSERT_EQ(tiny_footer_reader->rows(), 0);
-  ASSERT_EQ(tiny_footer_reader->footer_size(), cgfile.Get<uint64_t>(api::kPropertyFooterSize));
+    const auto status = reader->Open(file_system_);
+    ASSERT_FALSE(status.ok()) << "understated footer size " << supplied_footer_size;
+    EXPECT_FALSE(reader->opened());
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::StorageError);
+    ASSERT_AND_ASSIGN(auto sparse_file, sparse_fs->GetInMemoryFile("test-file.vx.sparse"));
+    EXPECT_EQ(sparse_file->WriteRanges().size(), 1u) << "footer failure must not trigger another range read";
+  }
 
   auto footer_reader = MakeFooterReader(cgfile, std::make_shared<InMemoryVortexRangeFileSystem>());
   ASSERT_STATUS_OK(footer_reader->Open(file_system_));
@@ -365,6 +367,19 @@ TEST_F(VortexLocalFormatTest, TestFooterReaderMissingFilePreservesEnoent) {
   ASSERT_FALSE(status.ok());
   EXPECT_TRUE(status.IsIOError());
   EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
+}
+
+TEST_F(VortexLocalFormatTest, TestFooterReaderMissingFieldIsCallerErrorNotDataFormat) {
+  ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile());
+  auto footer_reader = MakeFooterReader(cgfile, std::make_shared<InMemoryVortexRangeFileSystem>());
+  ASSERT_STATUS_OK(footer_reader->Open(file_system_));
+
+  auto result = footer_reader->GetFieldLayout("missing-field");
+
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsKeyError()) << result.status().ToString();
+  auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+  EXPECT_TRUE(detail == nullptr || detail->code() != ExtendStatusCode::VortexDataFormat) << result.status().ToString();
 }
 
 TEST_F(VortexLocalFormatTest, TestFooterReaderDoesNotPrefetchHeaderRangeWhenFooterSizeKnown) {
@@ -554,6 +569,47 @@ TEST_F(VortexLocalFormatTest, TestReadByPlanEmptyRangeReturnsEmptyStream) {
   ASSERT_EQ(chunked_array->length(), 0);
 }
 
+TEST_F(VortexLocalFormatTest, PublicArgumentValidationReturnsPlainInvalid) {
+  ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile());
+
+  auto expect_plain_invalid = [](const arrow::Status& status) {
+    EXPECT_TRUE(status.IsInvalid()) << status.ToString();
+    EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr) << status.ToString();
+  };
+
+  auto incomplete_metadata =
+      vortex::VortexFormatReader::MetaTrait::create_from_metadata(nullptr, cgfile, schema_, data_columns(), "");
+  ASSERT_FALSE(incomplete_metadata.ok());
+  expect_plain_invalid(incomplete_metadata.status());
+
+  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
+                                              cgfile.Get<uint64_t>(api::kPropertyFileSize),
+                                              cgfile.Get<uint64_t>(api::kPropertyFooterSize));
+  ASSERT_STATUS_OK(vx_reader.open());
+
+  auto unsorted_ranges = vx_reader.read_with_plan(VortexReadPlan{
+      .op =
+          VortexReadPlan::RangeScan{
+              .ranges = {RowRange{.start = 100, .end = 200}, RowRange{.start = 50, .end = 75}},
+          },
+      .apply_predicate = false,
+  });
+  ASSERT_FALSE(unsorted_ranges.ok());
+  expect_plain_invalid(unsorted_ranges.status());
+
+  auto column_sizes = vx_reader.get_rg_column_memsz(-1);
+  ASSERT_FALSE(column_sizes.ok());
+  expect_plain_invalid(column_sizes.status());
+
+  auto chunk = vx_reader.get_chunk(-1);
+  ASSERT_FALSE(chunk.ok());
+  expect_plain_invalid(chunk.status());
+
+  auto chunks = vx_reader.get_chunks({0, -1});
+  ASSERT_FALSE(chunks.ok());
+  expect_plain_invalid(chunks.status());
+}
+
 TEST_F(VortexLocalFormatTest, TestTranslaterLoadsAndReleasesCellRanges) {
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "true");
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, std::to_string(128 * 1024).c_str());
@@ -627,6 +683,340 @@ TEST_F(VortexLocalFormatTest, TestTranslaterRejectsInvalidInputs) {
   auto local_fs = std::make_shared<arrow::fs::LocalFileSystem>();
   ASSERT_STATUS_NOT_OK(
       VortexTranslater::Make(cell_metas, file_system_, test_file_name_, local_fs, "test-file.vx.sparse").status());
+}
+
+// The footer descriptor claims a byte range; this checks it against the file it
+// came from. This is a data-format error, not a bad caller argument: the
+// persisted layout was parsed and found to contradict the file.
+//
+// Tests the rule, not the path to it. The guard sits behind
+// VortexFile::OpenUnique, which is handed the same file_size the check later
+// uses, so no amount of tampering with file_size reaches it -- inflate and the
+// tail read runs past EOF into sparse zeroes, deflate and it lands mid-file;
+// either way the EOF trailer fails to parse and OpenUnique rejects the file
+// first. An end-to-end case needs a hand-built vortex file whose trailer parses
+// but whose descriptor lies, and no such fixture exists in this tree. Saying so
+// here rather than leaving a green test to imply coverage it does not have.
+TEST(VortexFooterRangeTest, InvalidRangeIsDataFormat) {
+  constexpr uint64_t kFileSize = 1000;
+
+  struct Case {
+    std::vector<uint64_t> range;
+    const char* what;
+  };
+  const Case bad[] = {
+      {{}, "empty -- not a pair"},
+      {{100}, "one element -- not a pair"},
+      {{100, 200, 300}, "three elements -- not a pair"},
+      {{kFileSize + 1, 0}, "offset past the end"},
+      {{0, kFileSize + 1}, "length past the end from offset 0"},
+      {{900, 200}, "offset in range, but offset+length past the end"},
+      // The check is written as `length > file_size - offset` precisely so this
+      // does not wrap to a pass.
+      {{1, std::numeric_limits<uint64_t>::max()}, "length that would overflow offset+length"},
+  };
+
+  for (const auto& c : bad) {
+    auto status = vortex::internal::CheckVortexFooterRange(c.range, kFileSize, "some.vortex");
+    ASSERT_FALSE(status.ok()) << c.what;
+
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << c.what << ": " << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::VortexDataFormat) << c.what;
+    EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::DataFormat) << c.what;
+    EXPECT_FALSE(RetryableForExtendStatusCode(detail->code())) << c.what;
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::DataFormatBroken) << c.what;
+    EXPECT_NE(status.ToString().find("some.vortex"), std::string::npos) << c.what;
+  }
+
+  const Case good[] = {
+      {{0, 0}, "empty range at the start"},
+      {{0, kFileSize}, "the whole file"},
+      {{kFileSize, 0}, "empty range exactly at the end"},
+      {{900, 100}, "ends exactly at the end"},
+  };
+  for (const auto& c : good) {
+    EXPECT_TRUE(vortex::internal::CheckVortexFooterRange(c.range, kFileSize, "some.vortex").ok()) << c.what;
+  }
+}
+
+TEST(VortexFooterRangeTest, ZeroLengthFlatSegmentIsLegal) {
+  auto range = vortex::internal::FlatSegmentByteRangeFromBytes({4096, 0}, 7);
+  ASSERT_TRUE(range.ok()) << range.status().ToString();
+  EXPECT_EQ(range->offset, 4096u);
+  EXPECT_EQ(range->length, 0u);
+}
+
+TEST(VortexFooterRangeTest, WrongSizedBridgeResultIsInternal) {
+  for (const std::vector<uint64_t>& bytes :
+       {std::vector<uint64_t>{}, std::vector<uint64_t>{4096}, std::vector<uint64_t>{4096, 128, 9}}) {
+    auto range = vortex::internal::FlatSegmentByteRangeFromBytes(bytes, 7);
+    ASSERT_FALSE(range.ok()) << "size " << bytes.size();
+    EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(range.status()), nullptr)
+        << "size " << bytes.size() << ": " << range.status().ToString();
+    EXPECT_EQ(ToSegcoreError(range.status()).get_error_code(), milvus::StorageError)
+        << "size " << bytes.size() << ": " << range.status().ToString();
+  }
+}
+
+TEST(VortexFooterRangeTest, SegmentLookupPreservesCaughtPanicAsUnexpected) {
+  auto status =
+      vortex::internal::ClassifyVortexLayoutSegmentLookupFailure(arrow::Status::UnknownError("decoder panicked"), 7);
+
+  EXPECT_TRUE(status.IsUnknownError()) << status.ToString();
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
+  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::StorageError);
+}
+
+TEST(VortexFooterRangeTest, OrdinaryPersistedSegmentLookupFailureIsDataFormat) {
+  auto status = vortex::internal::ClassifyVortexLayoutSegmentLookupFailure(
+      arrow::Status::Invalid("segment index is out of bounds"), 7);
+
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::VortexDataFormat);
+  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::DataFormatBroken);
+}
+
+TEST(VortexFieldLayoutEncodingTest, InvalidEncodingIsDataFormat) {
+  struct Case {
+    std::vector<uint64_t> encoded;
+    uint64_t rows;
+    const char* what;
+  };
+  const Case bad[] = {
+      {{}, 1, "missing header"},
+      {{1}, 1, "missing unit count"},
+      {{99, 0}, 0, "unknown granularity"},
+      {{1, 0}, 3, "non-empty file without units"},
+      {{1, std::numeric_limits<uint64_t>::max()}, 3, "impossible unit count"},
+      {{1, 1, 0, 0, 3}, 3, "truncated unit"},
+      {{1, 1, 0, 0, 3, 2, 7}, 3, "truncated segment list"},
+      {{1, 1, 0, 0, 3, 0, 42}, 3, "trailing word"},
+      {{1, 1, 0, 4, 0, 0}, 3, "row offset past file rows"},
+      {{1, 1, 0, 2, 2, 0}, 3, "row range past file rows"},
+      {{1, 1, 0, std::numeric_limits<uint64_t>::max(), 2, 0},
+       std::numeric_limits<uint64_t>::max(),
+       "row range addition would overflow"},
+  };
+
+  for (const auto& c : bad) {
+    auto status = vortex::internal::ValidateVortexFieldLayoutEncoding(c.encoded, c.rows, "id");
+    ASSERT_FALSE(status.ok()) << c.what;
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << c.what << ": " << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::VortexDataFormat) << c.what;
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::DataFormatBroken) << c.what;
+    EXPECT_NE(status.message().find("id"), std::string::npos) << c.what;
+  }
+}
+
+TEST(VortexFieldLayoutEncodingTest, HealthyEncodingsAreAccepted) {
+  ASSERT_STATUS_OK(vortex::internal::ValidateVortexFieldLayoutEncoding({1, 0}, 0, "id"));
+  ASSERT_STATUS_OK(vortex::internal::ValidateVortexFieldLayoutEncoding({1, 1, 0, 0, 3, 2, 7, 8}, 3, "id"));
+  ASSERT_STATUS_OK(vortex::internal::ValidateVortexFieldLayoutEncoding({2, 1, 4, 0, 3, 0}, 3, "id"));
+}
+
+TEST_F(VortexLocalFormatTest, StaleFooterSizeFailsAfterOneTailRead) {
+  ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile());
+  const auto full_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
+  const auto real_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
+  ASSERT_GT(real_footer_size, 1u);
+
+  for (uint64_t understated : {uint64_t{1}, real_footer_size / 2}) {
+    auto sparse_fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+    auto reader =
+        std::make_shared<VortexFooterReader>(sparse_fs, "test-file.vx.sparse", test_file_name_, full_size, understated);
+
+    auto status = reader->Open(file_system_);
+    ASSERT_FALSE(status.ok()) << "understated footer size " << understated;
+    ASSERT_AND_ASSIGN(auto sparse_file, sparse_fs->GetInMemoryFile("test-file.vx.sparse"));
+    EXPECT_EQ(sparse_file->WriteRanges().size(), 1u) << "footer failure must not trigger another range read";
+  }
+
+  // The same file opens when its recorded footer size is correct.
+  auto sparse_fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+  auto reader = MakeFooterReader(cgfile, sparse_fs);
+  ASSERT_STATUS_OK(reader->Open(file_system_));
+}
+
+// An invalid trailer is a Vortex data-format failure. Classification is
+// attached only after the complete persisted object has been loaded and the
+// final decoder attempt still fails, without matching producer text.
+TEST_F(VortexLocalFormatTest, VortexInvalidTrailerFailsClosedWithoutClaimingCorruption) {
+  ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile());
+  const auto full_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
+  ASSERT_GT(full_size, 64u);
+
+  // Keep the length unchanged so the decoder, rather than a short-read guard,
+  // rejects the trailer.
+  ASSERT_AND_ASSIGN(auto input, file_system_->OpenInputFile(test_file_name_));
+  ASSERT_AND_ASSIGN(auto whole, input->ReadAt(0, static_cast<int64_t>(full_size)));
+  ASSERT_STATUS_OK(input->Close());
+  {
+    std::vector<uint8_t> smashed(whole->data(), whole->data() + full_size);
+    for (size_t i = smashed.size() - 32; i < smashed.size(); ++i) {
+      smashed[i] ^= 0xff;
+    }
+    ASSERT_AND_ASSIGN(auto out, file_system_->OpenOutputStream(test_file_name_));
+    ASSERT_STATUS_OK(out->Write(smashed.data(), static_cast<int64_t>(smashed.size())));
+    ASSERT_STATUS_OK(out->Close());
+  }
+
+  auto sparse_fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+  auto footer_reader = MakeFooterReader(cgfile, sparse_fs);
+  auto status = footer_reader->Open(file_system_);
+
+  ASSERT_FALSE(status.ok()) << "a vortex file with a smashed trailer opened successfully";
+  // Deliberately NOT DataFormatBroken. Vortex reports footer-deserialization
+  // failures through its catch-all `Other` variant, so nothing below us
+  // positively identifies corruption, and neither this layer nor the bridge
+  // infers it: an unclassified failure stays in the conservative non-retriable
+  // bucket rather than claiming a verdict nobody established. What is pinned
+  // here is that it fails closed, carries no invented classification, and does
+  // not leak the internal marker.
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr) << status.ToString();
+  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::StorageError) << status.ToString();
+  EXPECT_EQ(status.ToString().find("__LOON_RUST_BRIDGE_ERRCODE__"), std::string::npos) << status.ToString();
+}
+
+// A corrupt file must not be able to kill the process.
+//
+// These are extern "Rust" entry points: cxx turns a returned Err into a C++
+// exception, but a PANIC unwinding across that boundary aborts. Three altered
+// bytes inside a healthy file's footer were enough to reach one -- so a single
+// bad object could take the node down, and no error code helps after that.
+//
+// The assertion is deliberately weak on WHICH error comes back: different
+// mutations reach different failure modes, and pinning one would make this
+// test about vortex's internals. What must hold is that the process survives
+// and the caller is told something -- if the guard regresses, this test does
+// not fail, it aborts the whole binary with 134.
+TEST_F(VortexLocalFormatTest, CorruptFooterCannotAbortTheProcess) {
+  ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile());
+  const auto full_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
+  ASSERT_GT(full_size, 512u);
+
+  ASSERT_AND_ASSIGN(auto input, file_system_->OpenInputFile(test_file_name_));
+  ASSERT_AND_ASSIGN(auto whole, input->ReadAt(0, static_cast<int64_t>(full_size)));
+  ASSERT_STATUS_OK(input->Close());
+  const std::vector<uint8_t> pristine(whole->data(), whole->data() + full_size);
+
+  // Walk the footer region a few bytes at a time. Any one of these may or may
+  // not provoke a panic; the point is that none of them may end the process.
+  for (uint64_t back : {uint64_t{16}, uint64_t{24}, uint64_t{40}, uint64_t{64}, uint64_t{128}}) {
+    auto smashed = pristine;
+    for (uint64_t i = 0; i < 3; ++i) {
+      smashed[smashed.size() - back + i] ^= 0x5a;
+    }
+    {
+      ASSERT_AND_ASSIGN(auto out, file_system_->OpenOutputStream(test_file_name_));
+      ASSERT_STATUS_OK(out->Write(smashed.data(), static_cast<int64_t>(smashed.size())));
+      ASSERT_STATUS_OK(out->Close());
+    }
+
+    auto sparse_fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+    auto reader =
+        std::make_shared<VortexFooterReader>(sparse_fs, "test-file.vx.sparse", test_file_name_, full_size, uint64_t{0});
+    auto status = reader->Open(file_system_);
+    // Surviving the call IS the assertion. A verdict either way is fine.
+    SUCCEED() << "back=" << back << " -> " << (status.ok() ? std::string("opened") : status.ToString());
+  }
+
+  // Restore, so a later test in this fixture is not reading smashed bytes.
+  ASSERT_AND_ASSIGN(auto out, file_system_->OpenOutputStream(test_file_name_));
+  ASSERT_STATUS_OK(out->Write(pristine.data(), static_cast<int64_t>(pristine.size())));
+  ASSERT_STATUS_OK(out->Close());
+}
+
+// Corruption in the DATA region: opens cleanly, dies while streaming.
+//
+// A different boundary from CorruptFooterCannotAbortTheProcess. Decoding is
+// lazy, so the panic fires inside iter.next() -- called per batch from the
+// Arrow C stream callback -- long after every entry-point guard has returned.
+// Smashing bytes well before the footer leaves the file openable and defers the
+// failure to exactly there.
+//
+// As with the footer test, the assertion is survival, not a specific verdict:
+// where the decoder dies depends on which byte moved. If the guard regresses
+// this does not fail, it takes the whole binary down with 134.
+TEST_F(VortexLocalFormatTest, CorruptDataRegionCannotAbortTheStream) {
+  ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile());
+  const auto full_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
+  const auto footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
+  ASSERT_GT(full_size, footer_size + 4096);
+
+  ASSERT_AND_ASSIGN(auto input, file_system_->OpenInputFile(test_file_name_));
+  ASSERT_AND_ASSIGN(auto whole, input->ReadAt(0, static_cast<int64_t>(full_size)));
+  ASSERT_STATUS_OK(input->Close());
+  const std::vector<uint8_t> pristine(whole->data(), whole->data() + full_size);
+
+  // Swept rather than pinned to a few offsets. Which byte provokes a panic
+  // depends on how the writer laid the file out, and a first version that
+  // guessed three positions hit none of them -- it passed, and passed just as
+  // happily with the guard removed. Sweeping costs about a second and does not
+  // rot when the layout changes.
+  const uint64_t stride = (full_size / 64) + 1;
+  for (uint64_t offset = 64; offset + 64 < full_size - footer_size; offset += stride) {
+    auto smashed = pristine;
+    for (uint64_t i = 0; i < 8; ++i) {
+      smashed[offset + i] ^= 0xa5;
+    }
+    {
+      ASSERT_AND_ASSIGN(auto out, file_system_->OpenOutputStream(test_file_name_));
+      ASSERT_STATUS_OK(out->Write(smashed.data(), static_cast<int64_t>(smashed.size())));
+      ASSERT_STATUS_OK(out->Close());
+    }
+
+    auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
+                                                full_size, footer_size);
+    auto open_status = vx_reader.open();
+    if (!open_status.ok()) {
+      continue;  // died at open -- the other test's territory, still no abort
+    }
+
+    auto stream_result = vx_reader.read_with_plan(VortexReadPlan{
+        .op = VortexReadPlan::RangeScan{.ranges = {RowRange{.start = 0, .end = 4096}}},
+    });
+    if (!stream_result.ok()) {
+      continue;
+    }
+    auto array_stream = std::move(stream_result).ValueOrDie();
+    // Draining is where the lazy decode -- and the panic -- actually happens.
+    auto chunked = arrow::ImportChunkedArray(&array_stream);
+    SUCCEED() << "offset=" << offset << " -> " << (chunked.ok() ? std::string("read") : chunked.status().ToString());
+  }
+
+  ASSERT_AND_ASSIGN(auto out, file_system_->OpenOutputStream(test_file_name_));
+  ASSERT_STATUS_OK(out->Write(pristine.data(), static_cast<int64_t>(pristine.size())));
+  ASSERT_STATUS_OK(out->Close());
+}
+
+TEST_F(VortexLocalFormatTest, ShortFileIsDataFormatEvenWhenTheSizeWasHandedToUs) {
+  const std::string short_path = "truly-short.vx";
+  const std::vector<uint8_t> stub(VortexEofSize() - 1, 0x00);
+  {
+    ASSERT_AND_ASSIGN(auto out, file_system_->OpenOutputStream(short_path));
+    ASSERT_STATUS_OK(out->Write(stub.data(), static_cast<int64_t>(stub.size())));
+    ASSERT_STATUS_OK(out->Close());
+  }
+
+  // Supplied size (matching reality) and stat'd size (0 sentinel) must reach the
+  // same verdict.
+  for (uint64_t supplied : {static_cast<uint64_t>(stub.size()), uint64_t{0}}) {
+    auto sparse_fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+    auto reader = std::make_shared<VortexFooterReader>(sparse_fs, "short.vx.sparse", short_path, supplied, uint64_t{0});
+
+    auto status = reader->Open(file_system_);
+    ASSERT_FALSE(status.ok()) << "supplied " << supplied;
+
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << "supplied " << supplied << " arrived unclassified: " << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::VortexDataFormat) << supplied;
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::DataFormatBroken) << supplied;
+  }
+
+  ASSERT_STATUS_OK(file_system_->DeleteFile(short_path));
 }
 
 }  // namespace milvus_storage

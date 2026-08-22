@@ -14,6 +14,7 @@
  * SPDX-License-Identifier: Apache-2.0.
  */
 
+#include <chrono>
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
 
 #include "milvus-storage/common/log.h"
@@ -78,6 +79,7 @@ AliyunSTSAssumeRoleWebIdentityCredentialsProvider::AliyunSTSAssumeRoleWebIdentit
 
 void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::InitializeClient() {
   if (m_tokenFile.empty()) {
+    m_lastResolution = MakeCredentialConfigError("Aliyun OIDC token file is not configured");
     LOG_STORAGE_WARNING_ << fmt::format(
         "[{}] Token file must be specified to use STS AssumeRole web identity creds "
         "provider.",
@@ -89,6 +91,7 @@ void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::InitializeClient() {
   }
 
   if (m_roleArn.empty()) {
+    m_lastResolution = MakeCredentialConfigError("Aliyun OIDC role ARN is not configured");
     LOG_STORAGE_WARNING_ << fmt::format(
         "[{}] RoleArn must be specified to use STS AssumeRole web identity creds "
         "provider.",
@@ -97,6 +100,13 @@ void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::InitializeClient() {
   } else {
     LOG_STORAGE_DEBUG_ << fmt::format("[{}] Resolved role_arn from profile_config or environment variable to be {}",
                                       STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, m_roleArn);
+  }
+
+  if (Aws::Environment::GetEnv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN").empty()) {
+    m_lastResolution = MakeCredentialConfigError("Aliyun OIDC provider ARN is not configured");
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] OIDC provider ARN must be specified",
+                                        STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
+    return;
   }
 
   // not need in [aliyun]
@@ -126,8 +136,11 @@ void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::InitializeClient() {
   retryableErrors.emplace_back("IDPCommunicationError");
   retryableErrors.emplace_back("InvalidIdentityToken");
 
+  // Shared credential retry budget; see credential_resolution.h.
+  config.connectTimeoutMs = kCredentialConnectTimeoutMs;
+  config.requestTimeoutMs = kCredentialRequestTimeoutMs;
   config.retryStrategy = Aws::MakeShared<Aws::Client::SpecifiedRetryableErrorsRetryStrategy>(
-      STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, retryableErrors, 3 /*maxRetries*/);
+      STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, retryableErrors, kCredentialRetryAttempts);
 
   m_client = Aws::MakeUnique<AliyunSTSCredentialsClient>(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, config);
   m_initialized = true;
@@ -136,14 +149,28 @@ void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::InitializeClient() {
 }
 
 Aws::Auth::AWSCredentials AliyunSTSAssumeRoleWebIdentityCredentialsProvider::GetAWSCredentials() {
-  // A valid client means required information like role arn and token file were constructed correctly.
-  // We can use this provider to load creds, otherwise, we can just return empty creds.
-  if (!m_initialized) {
+  auto result = ResolveForRequest();
+  if (!result.ok()) {
     return {};
+  }
+  return std::move(result).ValueOrDie();
+}
+
+arrow::Result<Aws::Auth::AWSCredentials> AliyunSTSAssumeRoleWebIdentityCredentialsProvider::ResolveForRequest() {
+  if (!m_initialized) {
+    return m_lastResolution.ok() ? MakeCredentialConfigError("Aliyun OIDC credential provider is not initialized")
+                                 : m_lastResolution;
   }
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
-  return m_credentials;
+  if (ExpiresSoon() && !m_lastResolution.ok()) {
+    return m_lastResolution;
+  }
+  auto validation = ValidateTemporaryCredentials(m_credentials, "Aliyun STS");
+  if (validation.ok()) {
+    return m_credentials;
+  }
+  return m_lastResolution.ok() ? validation : m_lastResolution;
 }
 
 void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
@@ -153,8 +180,16 @@ void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
   Aws::IFStream tokenFile(m_tokenFile.c_str());
   if (tokenFile) {
     Aws::String token((std::istreambuf_iterator<char>(tokenFile)), std::istreambuf_iterator<char>());
+    if (token.empty()) {
+      m_lastResolution = MakeCredentialConfigError(fmt::format("The OIDC token file {} is empty", m_tokenFile));
+      return;
+    }
     m_token = token;
   } else {
+    // A token file that will not open is the deployment's to fix -- the
+    // projected volume is missing or unreadable -- not something a retry
+    // outlasts.
+    m_lastResolution = MakeCredentialConfigError(fmt::format("Cannot open the OIDC token file {}", m_tokenFile));
     LOG_STORAGE_ERROR_ << fmt::format("[{}] Can't open token file: {}", STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
                                       m_tokenFile);
     return;
@@ -162,6 +197,16 @@ void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
   AliyunSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{m_sessionName, m_roleArn, m_token};
 
   auto result = m_client->GetAssumeRoleWithWebIdentityCredentials(request);
+  if (!result.status.ok()) {
+    m_lastResolution = result.status;
+    return;
+  }
+  auto validation = ValidateTemporaryCredentials(result.creds, "Aliyun STS");
+  if (!validation.ok()) {
+    m_lastResolution = validation;
+    return;
+  }
+  m_lastResolution = arrow::Status::OK();
   LOG_STORAGE_TRACE_ << fmt::format("[{}] Successfully retrieved credentials", STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
   m_credentials = result.creds;
 }
@@ -172,6 +217,8 @@ bool AliyunSTSAssumeRoleWebIdentityCredentialsProvider::ExpiresSoon() const {
 }
 
 void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::RefreshIfExpired() {
+  const auto started = std::chrono::steady_clock::now();
+
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
   if (!m_credentials.IsEmpty() && !ExpiresSoon()) {
     return;
@@ -179,6 +226,9 @@ void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::RefreshIfExpired() {
 
   guard.UpgradeToWriterLock();
   if (!m_credentials.IsExpiredOrEmpty() && !ExpiresSoon()) {
+    return;
+  }
+  if (!CredentialAttemptStillWorthMaking(started)) {
     return;
   }
 

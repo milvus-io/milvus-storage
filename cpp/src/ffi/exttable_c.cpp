@@ -15,6 +15,7 @@
 #include "milvus-storage/ffi_c.h"
 #include "milvus-storage/ffi_exttable_c.h"
 
+#include <charconv>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -48,7 +49,7 @@ LoonFFIResult loon_exttable_explore(const char** columns,
   }
 
   if (col_lens == 0) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments, col_lens should GT 0");
+    RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Invalid arguments, col_lens should GT 0");
   }
 
   try {
@@ -61,10 +62,34 @@ LoonFFIResult loon_exttable_explore(const char** columns,
     }
 
     auto fmt_res = milvus_storage::Format::get(format_str);
-    RETURN_ARROW_ERROR_IF(fmt_res.status(), LOON_INVALID_ARGS, fmt_res.status().ToString());
+    RETURN_ARROW_ERROR_IF(fmt_res.status(), LOON_USER_INVALID_ARGUMENT, fmt_res.status().ToString());
 
+    if (format_str == LOON_FORMAT_ICEBERG_TABLE) {
+      auto snapshot_id = milvus_storage::api::GetValue<std::string>(properties_map, PROPERTY_ICEBERG_SNAPSHOT_ID);
+      RETURN_ARROW_ERROR_IF(snapshot_id.status(), LOON_USER_INVALID_ARGUMENT, snapshot_id.status().ToString());
+      const auto& value = snapshot_id.ValueOrDie();
+      int64_t parsed = 0;
+      const auto* begin = value.data();
+      const auto* end = begin + value.size();
+      const auto [ptr, ec] = std::from_chars(begin, end, parsed);
+      if (ec != std::errc{} || ptr != end) {
+        RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, PROPERTY_ICEBERG_SNAPSHOT_ID, " must be an int64, got '", value, "'");
+      }
+    }
+
+    // This is an external-source exploration. Missing, denied, or unusable
+    // sources share the stable System SourceInvalid outcome; retryable and
+    // format failures retain their producer classification.
     auto files_result = fmt_res.ValueOrDie()->explore(explore_dir, properties_map);
-    RETURN_ARROW_ERROR_IF(files_result.status(), LOON_ARROW_ERROR, files_result.status().ToString());
+    // The fallback preserves an UNCLASSIFIED failure. Reading the arrow
+    // StatusCode to pick a fallback was this call site re-deriving
+    // classification the producer owns: `Invalid` covers a user's bad
+    // property, our own broken invariant, and unparsable persisted bytes alike.
+    // Explore's producers classify their own failures (StorageConfigInvalid for
+    // an unusable URI/property set, DataCorrupted for bytes that do not
+    // decode), those details win inside ExternalSourceErrorCodeFromStatus(), and
+    // NotImplemented is mapped centrally in FFIErrorCodeFromExtendStatus().
+    RETURN_EXTERNAL_SOURCE_ERROR_IF(files_result.status(), LOON_ARROW_ERROR, files_result.status().ToString());
     auto files = files_result.ValueOrDie();
 
     std::vector<std::string> columns_cpp;
@@ -77,27 +102,36 @@ LoonFFIResult loon_exttable_explore(const char** columns,
     cgs.push_back(
         std::make_shared<ColumnGroup>(ColumnGroup{.columns = columns_cpp, .format = format_str, .files = files}));
 
-    // commit the column groups
+    // commit the column groups. This filesystem is the storage the manifest
+    // gets committed to (base_path), not the user's explore location -- keep
+    // the producer's classification rather than re-tagging a commit-side
+    // bucket/credential/missing failure as the user's error.
     auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map);
     RETURN_ARROW_ERROR_IF(fs_result.status(), LOON_ARROW_ERROR, fs_result.status().ToString());
     auto transaction_result = Transaction::Open(fs_result.ValueOrDie(), base_path);
-    RETURN_ARROW_ERROR_IF(transaction_result.status(), LOON_LOGICAL_ERROR, transaction_result.status().ToString());
+    RETURN_ARROW_ERROR_IF(transaction_result.status(), LOON_ARROW_ERROR, transaction_result.status().ToString());
     auto transaction = std::move(transaction_result.ValueOrDie());
 
     // Append column groups directly
     transaction->AppendFiles(cgs);
 
     auto commit_result = transaction->Commit();
-    RETURN_ARROW_ERROR_IF(commit_result.status(), LOON_LOGICAL_ERROR, commit_result.status().ToString());
+    RETURN_ARROW_ERROR_IF(commit_result.status(), LOON_ARROW_ERROR, commit_result.status().ToString());
 
     auto committed_version = commit_result.ValueOrDie();
 
     *out_num_of_files = files.size();
     *out_column_groups_file_path = strdup(milvus_storage::get_manifest_filepath(base_path, committed_version).c_str());
+    if (*out_column_groups_file_path == nullptr) {
+      *out_num_of_files = 0;
+      RETURN_ERROR(LOON_INTERNAL_INVARIANT, "Unexpected allocation failure while copying committed manifest path");
+    }
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -122,58 +156,47 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
     }
 
     auto fmt_res = milvus_storage::Format::get(format_str);
-    RETURN_ARROW_ERROR_IF(fmt_res.status(), LOON_INVALID_ARGS, fmt_res.status().ToString());
+    RETURN_ARROW_ERROR_IF(fmt_res.status(), LOON_USER_INVALID_ARGUMENT, fmt_res.status().ToString());
 
-    // Resolve filesystem and validate file existence before creating reader
+    // Resolve the filesystem and inspect the external source before creating a reader.
     auto fs_res = milvus_storage::FilesystemCache::getInstance().get(properties_map, file_path);
-    RETURN_ARROW_ERROR_IF(fs_res.status(), LOON_ARROW_ERROR, fs_res.status().ToString());
+    RETURN_EXTERNAL_SOURCE_ERROR_IF(fs_res.status(), LOON_ARROW_ERROR, fs_res.status().ToString());
     auto fs = fs_res.ValueOrDie();
 
     auto uri_res = milvus_storage::StorageUri::Parse(file_path);
-    RETURN_ARROW_ERROR_IF(uri_res.status(), LOON_ARROW_ERROR, "Failed to parse file_path URI '", file_path,
-                          "': ", uri_res.status().ToString());
+    RETURN_EXTERNAL_SOURCE_ERROR_IF(uri_res.status(), LOON_SOURCE_INVALID, "Failed to parse file_path URI '", file_path,
+                                    "': ", uri_res.status().ToString());
     std::string resolved_path = uri_res->scheme.empty() ? file_path : uri_res->key;
 
     auto file_info_res = fs->GetFileInfo(resolved_path);
-    RETURN_ARROW_ERROR_IF(file_info_res.status(), LOON_ARROW_ERROR, file_info_res.status().ToString());
+    RETURN_EXTERNAL_SOURCE_ERROR_IF(file_info_res.status(), LOON_ARROW_ERROR, file_info_res.status().ToString());
     auto file_info = file_info_res.ValueOrDie();
 
     if (file_info.type() == arrow::fs::FileType::NotFound) {
-      RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", file_path);
+      RETURN_ERROR(LOON_SOURCE_INVALID, "File not found: ", file_path);
     }
     if (file_info.type() != arrow::fs::FileType::File) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Path is not a file: ", file_path);
+      RETURN_ERROR(LOON_SOURCE_INVALID, "Path is not a file: ", file_path);
     }
 
     // Create a ColumnGroupFile to pass to the reader factory
     ColumnGroupFile cg_file{std::string(file_path), 0, 0, {}};
     auto reader_res = fmt_res.ValueOrDie()->create_reader(nullptr, cg_file, properties_map, {}, nullptr);
-    RETURN_ARROW_ERROR_IF(reader_res.status(), LOON_ARROW_ERROR, reader_res.status().ToString());
+    RETURN_EXTERNAL_SOURCE_ERROR_IF(reader_res.status(), LOON_ARROW_ERROR, reader_res.status().ToString());
 
     auto rg_infos_res = reader_res.ValueOrDie()->get_row_group_infos();
-    RETURN_ARROW_ERROR_IF(rg_infos_res.status(), LOON_ARROW_ERROR, rg_infos_res.status().ToString());
+    RETURN_EXTERNAL_SOURCE_ERROR_IF(rg_infos_res.status(), LOON_ARROW_ERROR, rg_infos_res.status().ToString());
     auto& rg_infos = rg_infos_res.ValueOrDie();
     *out_num_of_rows = rg_infos.empty() ? 0 : rg_infos.back().end_offset;
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
-}
-
-static arrow::Result<std::shared_ptr<milvus_storage::api::Manifest>> read_manifest(const char* path,
-                                                                                   const ::LoonProperties* properties) {
-  milvus_storage::api::Properties properties_map;
-
-  auto opt = milvus_storage::api::ConvertFFIProperties(properties_map, properties);
-  if (opt != std::nullopt) {
-    return arrow::Status::Invalid("Failed to parse properties [", opt->c_str(), "]");
-  }
-
-  ARROW_ASSIGN_OR_RAISE(auto fs, milvus_storage::FilesystemCache::getInstance().get(properties_map, path));
-  return milvus_storage::api::Manifest::ReadFrom(fs, path);
 }
 
 LoonFFIResult loon_exttable_read_manifest(const char* manifest_file_path,
@@ -185,17 +208,32 @@ LoonFFIResult loon_exttable_read_manifest(const char* manifest_file_path,
   }
 
   try {
-    auto manifest_res = read_manifest(manifest_file_path, properties);
+    // Unlike explore/get_file_info, this entry point consumes the manifest path
+    // loon_exttable_explore generated and milvus stored. Preserve the producer's
+    // specific System classification rather than coarsening it to the external
+    // source presentation code.
+    milvus_storage::api::Properties properties_map;
+    auto opt = milvus_storage::api::ConvertFFIProperties(properties_map, properties);
+    if (opt != std::nullopt) {
+      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
+    }
+
+    auto fs_res = milvus_storage::FilesystemCache::getInstance().get(properties_map, manifest_file_path);
+    RETURN_ARROW_ERROR_IF(fs_res.status(), LOON_ARROW_ERROR, fs_res.status().ToString());
+
+    auto manifest_res = milvus_storage::api::Manifest::ReadFrom(fs_res.ValueOrDie(), manifest_file_path);
     RETURN_ARROW_ERROR_IF(manifest_res.status(), LOON_ARROW_ERROR, manifest_res.status().ToString());
     auto manifest = manifest_res.ValueOrDie();
 
     // Export full manifest including column groups, delta logs, and stats
     auto st = milvus_storage::manifest_export(manifest, out_manifest);
-    RETURN_ARROW_ERROR_IF(st, LOON_LOGICAL_ERROR, st.ToString());
+    RETURN_ARROW_ERROR_IF(st, LOON_ARROW_ERROR, st.ToString());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();

@@ -57,6 +57,40 @@ std::unordered_set<const void*> VariadicBufferAddresses(const std::shared_ptr<ar
 
 }  // namespace
 
+TEST(ArrowUtilTest, GetFieldIdKeepsMetadataValidationStrict) {
+  auto valid_metadata = arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"42"});
+  ASSERT_AND_ASSIGN(auto metadata_id,
+                    TryGetFieldId(arrow::field("name", arrow::int64(), /*nullable=*/true, valid_metadata)));
+  EXPECT_EQ(metadata_id, 42);
+
+  auto invalid_metadata = arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"not-an-integer"});
+  auto invalid_metadata_id = TryGetFieldId(arrow::field("123", arrow::int64(), /*nullable=*/true, invalid_metadata));
+  EXPECT_TRUE(invalid_metadata_id.status().IsInvalid());
+
+  auto trailing_metadata = arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"42junk"});
+  EXPECT_TRUE(
+      TryGetFieldId(arrow::field("123", arrow::int64(), /*nullable=*/true, trailing_metadata)).status().IsInvalid());
+
+  // A non-numeric field name remains the documented fallback when no metadata
+  // is present. Only malformed authoritative metadata is rejected.
+  ASSERT_AND_ASSIGN(auto missing_id, TryGetFieldId(arrow::field("name", arrow::int64())));
+  EXPECT_EQ(missing_id, -1);
+
+  ASSERT_AND_ASSIGN(auto name_id, TryGetFieldId(arrow::field("123", arrow::int64())));
+  EXPECT_EQ(name_id, 123);
+  ASSERT_AND_ASSIGN(auto non_numeric_name_id, TryGetFieldId(arrow::field("123junk", arrow::int64())));
+  EXPECT_EQ(non_numeric_name_id, -1);
+  ASSERT_AND_ASSIGN(auto overflow_name_id, TryGetFieldId(arrow::field("9223372036854775808", arrow::int64())));
+  EXPECT_EQ(overflow_name_id, -1);
+
+  // The installed legacy helper keeps its source-compatible return type and
+  // historical prefix parsing; public callers are not forced to migrate.
+  EXPECT_EQ(GetFieldId(arrow::field("name", arrow::int64(), /*nullable=*/true, valid_metadata)), 42);
+  EXPECT_EQ(GetFieldId(arrow::field("123junk", arrow::int64())), 123);
+  EXPECT_THROW(GetFieldId(arrow::field("123", arrow::int64(), /*nullable=*/true, invalid_metadata)),
+               std::invalid_argument);
+}
+
 TEST(ArrowUtilTest, CopySelectedRowsMaterializesAcrossChunks) {
   ASSERT_AND_ASSIGN(auto ids0, BuildInt64Array({10, 20}));
   ASSERT_AND_ASSIGN(auto ids1, BuildInt64Array({30, 40}));

@@ -17,6 +17,7 @@
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/segment/segment_writer.h"
+#include "milvus-storage/common/arrow_util.h"
 
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
@@ -68,6 +69,26 @@ LoonFFIResult loon_segment_writer_new(ArrowSchema* schema_raw,
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: schema_raw, config, properties, and out_handle must not be null");
   }
+  if (!config->segment_path) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: config.segment_path must not be null");
+  }
+  if (config->segment_path[0] == '\0') {
+    RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Invalid arguments: config.segment_path must not be empty");
+  }
+  if (config->num_lob_columns > 0 && config->lob_columns == nullptr) {
+    RETURN_ERROR(LOON_INVALID_ARGS,
+                 "Invalid arguments: config.lob_columns must not be null when num_lob_columns is greater than 0");
+  }
+  for (size_t i = 0; i < config->num_lob_columns; ++i) {
+    if (config->lob_columns[i].lob_base_path == nullptr) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: config.lob_columns contains a null lob_base_path [index=", i,
+                   "]");
+    }
+    if (config->lob_columns[i].lob_base_path[0] == '\0') {
+      RETURN_ERROR(LOON_USER_INVALID_ARGUMENT,
+                   "Invalid arguments: config.lob_columns contains an empty lob_base_path [index=", i, "]");
+    }
+  }
 
   try {
     // convert properties
@@ -81,6 +102,8 @@ LoonFFIResult loon_segment_writer_new(ArrowSchema* schema_raw,
     auto schema_result = arrow::ImportSchema(schema_raw);
     RETURN_ARROW_ERROR_IF(schema_result.status(), LOON_ARROW_ERROR, schema_result.status().ToString());
     auto schema = schema_result.ValueOrDie();
+    auto field_id_status = ValidateFieldIds(schema);
+    RETURN_ARROW_ERROR_IF(field_id_status, LOON_USER_INVALID_ARGUMENT, field_id_status.ToString());
 
     // convert config
     auto config_result = ConvertWriterConfig(config, props_map);
@@ -101,7 +124,9 @@ LoonFFIResult loon_segment_writer_new(ArrowSchema* schema_raw,
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -127,7 +152,9 @@ LoonFFIResult loon_segment_writer_write(LoonSegmentWriterHandle handle, ArrowArr
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -145,7 +172,9 @@ LoonFFIResult loon_segment_writer_flush(LoonSegmentWriterHandle handle) {
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -156,6 +185,11 @@ LoonFFIResult loon_segment_writer_close(LoonSegmentWriterHandle handle, LoonSegm
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_output must not be null");
   }
 
+  out_output->column_groups = nullptr;
+  out_output->lob_files = nullptr;
+  out_output->num_lob_files = 0;
+  out_output->rows_written = 0;
+
   try {
     auto* writer = reinterpret_cast<SegmentWriter*>(handle);
     auto result = writer->Close();
@@ -165,26 +199,39 @@ LoonFFIResult loon_segment_writer_close(LoonSegmentWriterHandle handle, LoonSegm
 
     auto cgs = output.column_groups;
     auto export_st = milvus_storage::column_groups_export(*cgs, &out_output->column_groups);
-    RETURN_ARROW_ERROR_IF(export_st, LOON_LOGICAL_ERROR, export_st.ToString());
+    RETURN_ARROW_ERROR_IF(export_st, LOON_ARROW_ERROR, export_st.ToString());
     out_output->rows_written = output.rows_written;
 
-    out_output->num_lob_files = output.lob_files.size();
     if (!output.lob_files.empty()) {
-      out_output->lob_files = static_cast<LoonLobFileInfo*>(malloc(sizeof(LoonLobFileInfo) * output.lob_files.size()));
+      out_output->lob_files = static_cast<LoonLobFileInfo*>(calloc(output.lob_files.size(), sizeof(LoonLobFileInfo)));
+      if (out_output->lob_files == nullptr) {
+        loon_column_groups_destroy(out_output->column_groups);
+        out_output->column_groups = nullptr;
+        out_output->rows_written = 0;
+        RETURN_ERROR(LOON_INTERNAL_INVARIANT, "Unexpected allocation failure for LOB file metadata");
+      }
+      out_output->num_lob_files = output.lob_files.size();
       for (size_t i = 0; i < output.lob_files.size(); i++) {
         out_output->lob_files[i].path = strdup(output.lob_files[i].path.c_str());
+        if (out_output->lob_files[i].path == nullptr) {
+          loon_segment_write_output_free(out_output);
+          loon_column_groups_destroy(out_output->column_groups);
+          out_output->column_groups = nullptr;
+          out_output->rows_written = 0;
+          RETURN_ERROR(LOON_INTERNAL_INVARIANT, "Unexpected allocation failure while copying LOB file path");
+        }
         out_output->lob_files[i].field_id = output.lob_files[i].field_id;
         out_output->lob_files[i].total_rows = output.lob_files[i].total_rows;
         out_output->lob_files[i].valid_rows = output.lob_files[i].valid_rows;
         out_output->lob_files[i].file_size_bytes = output.lob_files[i].file_size_bytes;
       }
-    } else {
-      out_output->lob_files = nullptr;
     }
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -199,11 +246,24 @@ void loon_segment_write_output_free(LoonSegmentWriteOutput* output) {
       free(output->lob_files);
       output->lob_files = nullptr;
     }
+    output->num_lob_files = 0;
   }
 }
 
+// A handle destroyed without a successful close is the C caller saying it
+// gives up on this writer. That is an explicit abandonment, not a destructor
+// side effect, so it is where the abort belongs: R2.7 keeps storage I/O out of
+// destruction, and this is the last frame that still knows the writer existed.
+// Whatever the writer holds in the store -- above all an S3 multipart upload,
+// whose parts no bucket listing can even show -- is released here or never.
 void loon_segment_writer_destroy(LoonSegmentWriterHandle handle) {
   if (handle) {
-    delete reinterpret_cast<SegmentWriter*>(handle);
+    auto* writer = reinterpret_cast<SegmentWriter*>(handle);
+    try {
+      writer->Abort();
+    } catch (...) {
+      // Destruction is best effort and must not throw across the C ABI.
+    }
+    delete writer;
   }
 }

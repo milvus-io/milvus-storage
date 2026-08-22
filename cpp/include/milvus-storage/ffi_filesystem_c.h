@@ -142,7 +142,16 @@ FFI_EXPORT LoonFFIResult loon_filesystem_writer_flush(FileSystemWriterHandle han
 FFI_EXPORT LoonFFIResult loon_filesystem_writer_close(FileSystemWriterHandle handle);
 
 /**
- * Destroy the outputstream.
+ * Destroy the outputstream, aborting it first if it was never closed.
+ *
+ * MANDATORY, AND THE ONLY MANDATORY VERB. Every `loon_filesystem_open_writer`
+ * must be paired with a `loon_filesystem_writer_destroy` in the same scope --
+ * Go `defer`, Java try-with-resources, Python `with`. It never fails and
+ * returns nothing precisely so it can be called unconditionally on every path.
+ *
+ * Destroying a writer that was never closed IS how a C caller says "I give up":
+ * it aborts, releasing what the stream allocated in the store. Destroying after
+ * a successful close is a no-op beyond freeing the handle.
  *
  * @param handle The outputstream instance.
  */

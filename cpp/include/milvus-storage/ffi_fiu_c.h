@@ -31,12 +31,15 @@ extern "C" {
  * Example usage (Python):
  * @code
  * # Enable fault point to fail once (one_time=1)
- * loon_fiu_enable(loon_fiu_key_writer_flush_fail, len, 1)
+ * loon_fiu_enable(loon_fiukey_writer_flush_fail, len, 1)
  *
  * # The next flush will fail
  * writer.flush()  # raises IOError
  *
- * # Retry should succeed (one_time auto-disables)
+ * # The failed writer is terminal. Destroy it and retry with a new writer
+ * # opened on a new file path (one_time has auto-disabled the fault).
+ * writer.destroy()
+ * writer = open_writer(new_path)
  * writer.flush()  # succeeds
  *
  * # Disable all fault points

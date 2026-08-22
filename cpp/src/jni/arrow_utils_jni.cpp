@@ -32,8 +32,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_ArrowUtilsNative_readNextBatch(JN
     // Allocate ArrowArray for the next batch
     ArrowArray* array = static_cast<ArrowArray*>(calloc(1, sizeof(ArrowArray)));
     if (array == nullptr) {
-      jclass exc_class = env->FindClass("java/lang/OutOfMemoryError");
-      env->ThrowNew(exc_class, "Failed to allocate ArrowArray");
+      ThrowJavaException(env, "java/lang/RuntimeException", "Unexpected native allocation failure for ArrowArray");
       return -1;
     }
 

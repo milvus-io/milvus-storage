@@ -2,6 +2,8 @@
 
 #include <aws/core/internal/AWSHttpResourceClient.h>
 
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"
+
 namespace milvus_storage {
 
 class AWS_CORE_API HuaweiCloudSTSCredentialsClient : public ::Aws::Internal::AWSHttpResourceClient {
@@ -26,6 +28,8 @@ class AWS_CORE_API HuaweiCloudSTSCredentialsClient : public ::Aws::Internal::AWS
   struct STSAssumeRoleWithWebIdentityResult {
     bool success = false;
     Aws::Auth::AWSCredentials creds;
+    // Why success is false; see AliyunSTSClient.h.
+    arrow::Status status;
   };
 
   virtual STSAssumeRoleWithWebIdentityResult GetAssumeRoleWithWebIdentityCredentials(
@@ -39,6 +43,7 @@ class AWS_CORE_API HuaweiCloudSTSCredentialsClient : public ::Aws::Internal::AWS
     bool success = false;
     Aws::Auth::AWSCredentials credentials;
     Aws::String errorMessage;
+    arrow::Status status;
   };
 
   STSCallResult callHuaweiCloudSTS(const Aws::String& userToken, const STSAssumeRoleWithWebIdentityRequest& request);

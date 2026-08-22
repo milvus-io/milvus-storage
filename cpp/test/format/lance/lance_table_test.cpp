@@ -46,6 +46,7 @@
 #include <boost/filesystem/operations.hpp>
 
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/common/constants.h"
@@ -321,8 +322,8 @@ TEST_F(LanceBasicTest, TestBasic) {
   }
 
   auto verify_reader = [&]() {
-    auto read_dataset = BlockingDataset::Open(lance_uri, storage_options);
-    const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds();
+    auto read_dataset = BlockingDataset::Open(lance_uri, storage_options).ValueOrDie();
+    const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds().ValueOrDie();
 
     uint64_t total_rows = 0;
     for (const auto& fragment_id : fragment_ids) {
@@ -385,7 +386,7 @@ TEST_F(LanceBasicTest, TestReaderHandlesFragmentMissingNullableDatasetColumn) {
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(appended_file.path));
   ArrowFileSystemConfig fs_config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
-  auto dataset = BlockingDataset::Open(ToStandardLanceUri(parsed_uri.first), ToStorageOptions(fs_config));
+  auto dataset = BlockingDataset::Open(ToStandardLanceUri(parsed_uri.first), ToStorageOptions(fs_config)).ValueOrDie();
 
   LanceTableReader reader(dataset, parsed_uri.second, nullptr, properties_);
   ASSERT_STATUS_OK(reader.open());
@@ -422,9 +423,9 @@ TEST_F(LanceBasicTest, TestRead) {
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, large_batch->num_rows());
 
-  auto read_dataset = BlockingDataset::Open(lance_uri, storage_options);
+  auto read_dataset = BlockingDataset::Open(lance_uri, storage_options).ValueOrDie();
 
-  const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds();
+  const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds().ValueOrDie();
   // The splitting conditions(`WriteParams`) in lance are very strict.
   // So the default setting will only generate one fragment.
   ASSERT_EQ(fragment_ids.size(), 1);
@@ -438,7 +439,8 @@ TEST_F(LanceBasicTest, TestRead) {
   auto estimated_memory_size =
       std::accumulate(rgs.begin(), rgs.end(), uint64_t{0},
                       [](uint64_t total, const RowGroupInfo& rg) { return total + rg.memory_size; });
-  ASSERT_EQ(estimated_memory_size, read_dataset->EstimateFragmentMemory(fragment_ids[0]));
+  ASSERT_AND_ASSIGN(auto fragment_memory_size, read_dataset->EstimateFragmentMemory(fragment_ids[0]));
+  ASSERT_EQ(estimated_memory_size, fragment_memory_size);
   ASSERT_EQ(std::accumulate(fragment_column_memory_sizes.begin(), fragment_column_memory_sizes.end(), uint64_t{0}),
             estimated_memory_size);
   for (size_t row_group_index = 0; row_group_index < rgs.size(); ++row_group_index) {
@@ -528,10 +530,10 @@ TEST_F(LanceBasicTest, EstimatedMemoryAccountsForDeletions) {
   ASSERT_STATUS_OK(writer.Write(batch));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, kRows);
-  auto dataset = BlockingDataset::Open(lance_uri, storage_options);
-  dataset->DeleteRows("id < 2000");
+  auto dataset = BlockingDataset::Open(lance_uri, storage_options).ValueOrDie();
+  ASSERT_STATUS_OK(dataset->DeleteRows("id < 2000"));
 
-  auto fragment_ids = dataset->GetAllFragmentIds();
+  auto fragment_ids = dataset->GetAllFragmentIds().ValueOrDie();
   ASSERT_EQ(fragment_ids.size(), 1);
   LanceTableReader reader(dataset, fragment_ids[0], id_schema, properties_);
   ASSERT_STATUS_OK(reader.open());
@@ -625,7 +627,7 @@ TEST_F(LanceBasicTest, MemorySizeEstimationFailureDoesNotBlockOpen) {
 }
 #endif
 
-TEST_F(LanceBasicTest, LegacyFormatReadsWhenMemoryEstimateIsUnavailable) {
+TEST_F(LanceBasicTest, LegacyFormatMemoryEstimateFailureIsNotReclassified) {
   if (IsCloudEnv()) {
     GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
   }
@@ -644,26 +646,22 @@ TEST_F(LanceBasicTest, LegacyFormatReadsWhenMemoryEstimateIsUnavailable) {
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, kRows);
 
-  auto dataset = BlockingDataset::Open(lance_uri, storage_options);
-  auto fragment_ids = dataset->GetAllFragmentIds();
+  auto dataset = BlockingDataset::Open(lance_uri, storage_options).ValueOrDie();
+  auto fragment_ids = dataset->GetAllFragmentIds().ValueOrDie();
   ASSERT_EQ(fragment_ids.size(), 1);
 
   auto estimate_result = dataset->EstimateFragmentColumnMemory(fragment_ids[0]);
-  ASSERT_TRUE(estimate_result.status().IsNotImplemented()) << estimate_result.status().ToString();
+  ASSERT_FALSE(estimate_result.ok());
+  EXPECT_TRUE(estimate_result.status().IsIOError()) << estimate_result.status().ToString();
+  EXPECT_FALSE(estimate_result.status().IsNotImplemented());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(estimate_result.status()), nullptr);
 
   LanceTableReader reader(dataset, fragment_ids[0], vector_schema, properties_);
-  ASSERT_STATUS_OK(reader.open());
-  ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());
-  ASSERT_FALSE(row_group_infos.empty());
-  for (size_t row_group_index = 0; row_group_index < row_group_infos.size(); ++row_group_index) {
-    EXPECT_FALSE(row_group_infos[row_group_index].memory_size_available);
-    EXPECT_EQ(row_group_infos[row_group_index].memory_size, 0);
-    EXPECT_TRUE(reader.get_rg_column_memsz(row_group_index).status().IsNotImplemented());
-  }
-
-  ASSERT_AND_ASSIGN(auto rb_reader, reader.read_with_range(0, kRows));
-  ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatchReader(rb_reader.get()));
-  ASSERT_EQ(table->num_rows(), kRows);
+  auto open_status = reader.open();
+  ASSERT_FALSE(open_status.ok());
+  EXPECT_TRUE(open_status.IsIOError()) << open_status.ToString();
+  EXPECT_FALSE(open_status.IsNotImplemented());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(open_status), nullptr);
 
   auto column_group = std::make_shared<api::ColumnGroup>();
   column_group->columns = {"vector"};
@@ -674,15 +672,11 @@ TEST_F(LanceBasicTest, LegacyFormatReadsWhenMemoryEstimateIsUnavailable) {
 
   auto api_reader = api::Reader::create(column_groups, vector_schema, nullptr, properties_);
   ASSERT_NE(api_reader, nullptr);
-  ASSERT_AND_ASSIGN(auto chunk_reader, api_reader->get_chunk_reader(0));
-  EXPECT_TRUE(chunk_reader->get_chunk_estimated_size().status().IsNotImplemented());
-  EXPECT_TRUE(chunk_reader->get_chunk_column_estimated_size().status().IsNotImplemented());
-  ASSERT_AND_ASSIGN(auto chunk, chunk_reader->get_chunk(0));
-  ASSERT_GT(chunk->num_rows(), 0);
-
-  ASSERT_AND_ASSIGN(auto packed_reader, api_reader->get_record_batch_reader());
-  ASSERT_AND_ASSIGN(auto packed_table, packed_reader->ToTable());
-  ASSERT_EQ(packed_table->num_rows(), kRows);
+  auto chunk_reader_result = api_reader->get_chunk_reader(0);
+  ASSERT_FALSE(chunk_reader_result.ok());
+  EXPECT_TRUE(chunk_reader_result.status().IsIOError()) << chunk_reader_result.status().ToString();
+  EXPECT_FALSE(chunk_reader_result.status().IsNotImplemented());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(chunk_reader_result.status()), nullptr);
 }
 
 TEST_F(LanceBasicTest, TestCachedOpenRejectsMissingNeededColumnWithoutReadSchema) {
@@ -812,10 +806,10 @@ void LanceBasicTest::RunCloudWideTableDuplicatedFragmentTake(int64_t column_coun
   // The shared scheduler retains the ObjectStore from its first dataset, so keep
   // that owner alive while later Reader datasets generate the measured I/O.
   std::shared_ptr<BlockingDataset> io_stats_owner_dataset;
-  ASSERT_NO_THROW(io_stats_owner_dataset = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config)));
+  ASSERT_AND_ASSIGN(io_stats_owner_dataset, BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config)));
   ASSERT_NE(io_stats_owner_dataset, nullptr);
   std::shared_ptr<BlockingDataset> non_owner_dataset;
-  ASSERT_NO_THROW(non_owner_dataset = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config)));
+  ASSERT_AND_ASSIGN(non_owner_dataset, BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config)));
   ASSERT_NE(non_owner_dataset, nullptr);
   ASSERT_NE(io_stats_owner_dataset.get(), non_owner_dataset.get());
 

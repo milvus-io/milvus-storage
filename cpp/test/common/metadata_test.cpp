@@ -19,6 +19,8 @@
 
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/extend_status.h"
+#include "test_env.h"
 
 namespace milvus_storage::test {
 
@@ -28,7 +30,7 @@ TEST_F(MetadataTest, TestGroupFieldIDListSerde) {
   GroupFieldIDList list({{0, 1, 2}, {3, 4}, {5, 6, 7, 8}});
   std::string serialized = list.Serialize();
   EXPECT_EQ(serialized, "0,1,2;3,4;5,6,7,8");
-  GroupFieldIDList deserialized = GroupFieldIDList::Deserialize(serialized);
+  auto deserialized = GroupFieldIDList::Deserialize(serialized);
   EXPECT_EQ(deserialized, list);
 
   // Test case: Empty input
@@ -51,6 +53,21 @@ TEST_F(MetadataTest, TestGroupFieldIDListSerde) {
   EXPECT_EQ(serialized, "0;1;2");
   deserialized = GroupFieldIDList::Deserialize(serialized);
   EXPECT_EQ(deserialized, single_column_groups);
+
+  EXPECT_TRUE(GroupFieldIDList::TryDeserialize("1junk,2").status().IsInvalid());
+  EXPECT_TRUE(GroupFieldIDList::TryDeserialize("-1,2").status().IsInvalid());
+  EXPECT_TRUE(GroupFieldIDList::TryDeserialize("1,,2").status().IsInvalid());
+  EXPECT_TRUE(GroupFieldIDList::TryDeserialize("1;;2").status().IsInvalid());
+  EXPECT_TRUE(GroupFieldIDList::TryDeserialize("1,2,").status().IsInvalid());
+  EXPECT_TRUE(GroupFieldIDList::TryDeserialize("1;2;").status().IsInvalid());
+
+  auto persisted_error = GroupFieldIDList::TryDeserialize("1junk,2").status();
+  auto classified = WrapExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                                    "Invalid persisted group field id metadata", persisted_error);
+  auto detail = ExtendStatusDetail::UnwrapStatus(classified);
+  ASSERT_NE(detail, nullptr);
+  EXPECT_EQ(detail->code(), ExtendStatusCode::PackedMetadataCorrupted);
+  EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::DataFormat);
 }
 
 TEST_F(MetadataTest, TestFieldIDList) {
@@ -133,6 +150,16 @@ TEST_F(MetadataTest, TestFieldIDList) {
     auto result = FieldIDList::Make(arrow::schema({field0}));
     EXPECT_FALSE(result.ok());
   }
+
+  // Make from schema — trailing bytes and negative ids are rejected
+  {
+    auto trailing =
+        arrow::field("col0", arrow::int32(), arrow::KeyValueMetadata::Make({ARROW_FIELD_ID_KEY}, {"100junk"}));
+    EXPECT_TRUE(FieldIDList::Make(arrow::schema({trailing})).status().IsInvalid());
+
+    auto negative = arrow::field("col0", arrow::int32(), arrow::KeyValueMetadata::Make({ARROW_FIELD_ID_KEY}, {"-1"}));
+    EXPECT_TRUE(FieldIDList::Make(arrow::schema({negative})).status().IsInvalid());
+  }
 }
 
 TEST_F(MetadataTest, TestGroupFieldIDList) {
@@ -203,7 +230,15 @@ TEST_F(MetadataTest, TestRowGroupMetadata) {
   }
 
   // Invalid deserialization
-  { EXPECT_THROW(RowGroupMetadata::Deserialize("invalid"), std::runtime_error); }
+  {
+    EXPECT_THROW(RowGroupMetadata::Deserialize("invalid"), std::runtime_error);
+    EXPECT_TRUE(RowGroupMetadata::TryDeserialize("invalid").status().IsInvalid());
+    EXPECT_TRUE(RowGroupMetadata::TryDeserialize("2048junk|200|100").status().IsInvalid());
+    EXPECT_TRUE(RowGroupMetadata::TryDeserialize("-1|200|100").status().IsInvalid());
+    EXPECT_TRUE(RowGroupMetadata::TryDeserialize("2048|-1|100").status().IsInvalid());
+    EXPECT_TRUE(RowGroupMetadata::TryDeserialize("2048|200|-1").status().IsInvalid());
+    EXPECT_TRUE(RowGroupMetadata::TryDeserialize("2048|200|100|").status().IsInvalid());
+  }
 }
 
 TEST_F(MetadataTest, TestRowGroupMetadataVector) {
@@ -262,6 +297,11 @@ TEST_F(MetadataTest, TestRowGroupMetadataVector) {
 
     auto deserialized = RowGroupMetadataVector::Deserialize("");
     EXPECT_EQ(deserialized.size(), 0);
+
+    ASSERT_AND_ASSIGN(auto strict_empty, RowGroupMetadataVector::TryDeserialize(""));
+    EXPECT_EQ(strict_empty.size(), 0);
+    EXPECT_TRUE(RowGroupMetadataVector::TryDeserialize("1024|100|0;;2048|200|100").status().IsInvalid());
+    EXPECT_TRUE(RowGroupMetadataVector::TryDeserialize("1024|100|0;").status().IsInvalid());
   }
 }
 

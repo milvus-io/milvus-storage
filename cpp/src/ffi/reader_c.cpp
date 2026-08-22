@@ -15,6 +15,7 @@
 #include "milvus-storage/ffi_c.h"
 
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <vector>
 #include <string>
@@ -41,11 +42,156 @@
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/ffi_internal/bridge.h"
+#include "milvus-storage/ffi_internal/record_batch_reader.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/thread_pool.h"
 
 using namespace milvus_storage::api;
 using namespace milvus_storage;
+
+namespace milvus_storage::ffi_internal {
+
+static void ReleaseArrowArray(ArrowArray* array) noexcept {
+  if (array != nullptr && array->release != nullptr) {
+    try {
+      array->release(array);
+    } catch (...) {
+      // A foreign release callback must not terminate a C ABI cleanup path.
+    }
+    array->release = nullptr;
+  }
+}
+
+static void ReleaseArrowSchema(ArrowSchema* schema) noexcept {
+  if (schema != nullptr && schema->release != nullptr) {
+    try {
+      schema->release(schema);
+    } catch (...) {
+      // A foreign release callback must not terminate a C ABI cleanup path.
+    }
+    schema->release = nullptr;
+  }
+}
+
+LoonFFIResult RecordBatchReaderReadNext(LoonRecordBatchReaderHandle handle,
+                                        ArrowArray* out_array,
+                                        bool materialize_offsets) {
+  if (!handle || !out_array) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_array must not be null");
+  }
+
+  // A failed call must never leave a stale release callback supplied by the
+  // caller. The C Data Interface requires an uninitialised output struct; make
+  // the failure/EOF contract deterministic at this ABI boundary as well.
+  *out_array = ArrowArray{};
+
+  try {
+    auto* holder = reinterpret_cast<RecordBatchReaderHolder*>(handle);
+    if (holder->exhausted) {
+      // Normal end-of-stream is idempotent: keep answering EOF, per the Arrow
+      // C stream convention. The underlying reader was already released.
+      out_array->release = nullptr;
+      RETURN_SUCCESS();
+    }
+    if (!holder->reader) {
+      // Terminal after a FAILED read: reusing the handle is a caller contract
+      // violation, not a library bug.
+      RETURN_ERROR(LOON_INVALID_ARGS, "RecordBatchReader failed earlier; create a new reader");
+    }
+    std::shared_ptr<arrow::RecordBatch> batch;
+    auto status = holder->reader->ReadNext(&batch);
+    if (!status.ok()) {
+      // A RecordBatchReader is stateful: after ReadNext fails its internal
+      // cursor/buffers may already have advanced. Make the handle terminal so
+      // callers cannot accidentally retry the same reader instance.
+      holder->reader.reset();
+      auto ffi_code = FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR);
+      RETURN_ERROR(ffi_code, status.ToString());
+    }
+
+    if (batch == nullptr) {
+      // Release the reader's resources now, but remember this was a normal
+      // exhaustion so later calls keep reporting EOF instead of erroring.
+      holder->reader.reset();
+      holder->exhausted = true;
+      out_array->release = nullptr;
+      RETURN_SUCCESS();
+    }
+
+    // ArrowArray.offset is part of the C Data Interface contract. Standard C,
+    // Python and Rust importers honour it and therefore keep the zero-copy
+    // export below. Arrow Java currently does not; the JNI wrapper opts into
+    // materialization for that consumer only.
+    if (materialize_offsets) {
+      bool has_sliced_column = false;
+      for (int i = 0; i < batch->num_columns(); ++i) {
+        if (batch->column(i)->offset() != 0) {
+          has_sliced_column = true;
+          break;
+        }
+      }
+      if (has_sliced_column) {
+        std::vector<std::shared_ptr<arrow::Array>> fresh_cols;
+        fresh_cols.reserve(batch->num_columns());
+        for (int i = 0; i < batch->num_columns(); ++i) {
+          auto col = batch->column(i);
+          if (col->offset() == 0) {
+            fresh_cols.push_back(col);
+          } else {
+            auto concat_result = arrow::Concatenate({col}, arrow::default_memory_pool());
+            if (!concat_result.ok()) {
+              auto failure = concat_result.status();
+              holder->reader.reset();
+              RETURN_ARROW_ERROR(failure, LOON_ARROW_ERROR, failure.ToString());
+            }
+            fresh_cols.push_back(concat_result.ValueOrDie());
+          }
+        }
+        batch = arrow::RecordBatch::Make(batch->schema(), batch->num_rows(), fresh_cols);
+      }
+    }
+
+    auto export_status = arrow::ExportRecordBatch(*batch, out_array);
+    if (!export_status.ok()) {
+      ReleaseArrowArray(out_array);
+      holder->reader.reset();
+      RETURN_ARROW_ERROR(export_status, LOON_ARROW_ERROR, export_status.ToString());
+    }
+    RETURN_SUCCESS();
+  } catch (...) {
+    auto* holder = reinterpret_cast<RecordBatchReaderHolder*>(handle);
+    ReleaseArrowArray(out_array);
+    holder->reader.reset();
+    RETURN_EXCEPTION("Native reader operation failed");
+  }
+
+  RETURN_UNREACHABLE();
+}
+
+LoonFFIResult RecordBatchReaderReadNextForJava(LoonRecordBatchReaderHandle handle,
+                                               ArrowArray* out_array,
+                                               ArrowSchema* out_schema) {
+  if (out_schema == nullptr) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: out_schema must not be null");
+  }
+  *out_schema = ArrowSchema{};
+  auto result = RecordBatchReaderReadNext(handle, out_array, /*materialize_offsets=*/true);
+  if (!loon_ffi_is_success(&result) || out_array->release == nullptr) {
+    return result;
+  }
+
+  auto* holder = reinterpret_cast<RecordBatchReaderHolder*>(handle);
+  auto export_status = arrow::ExportSchema(*holder->reader->schema(), out_schema);
+  if (!export_status.ok()) {
+    ReleaseArrowArray(out_array);
+    ReleaseArrowSchema(out_schema);
+    holder->reader.reset();
+    return CreateFFIResult(FFIErrorCodeFromExtendStatus(export_status, LOON_ARROW_ERROR), export_status.ToString());
+  }
+  return result;
+}
+
+}  // namespace milvus_storage::ffi_internal
 
 // ==================== ChunkReader C Implementation ====================
 
@@ -54,10 +200,12 @@ LoonFFIResult loon_get_chunk_indices(LoonChunkReaderHandle reader,
                                      size_t num_indices,
                                      int64_t** chunk_indices,
                                      size_t* num_chunk_indices) {
-  if (!reader || !row_indices || num_indices == 0 || !chunk_indices || !num_chunk_indices) {
+  if (!reader || !row_indices || !chunk_indices || !num_chunk_indices) {
     RETURN_ERROR(LOON_INVALID_ARGS,
-                 "Invalid arguments: reader, row_indices, chunk_indices, and num_chunk_indices must not be null, and "
-                 "num_indices must be > 0");
+                 "Invalid arguments: reader, row_indices, chunk_indices, and num_chunk_indices must not be null");
+  }
+  if (num_indices == 0) {
+    RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Invalid arguments: num_indices must be > 0");
   }
 
   try {
@@ -79,12 +227,13 @@ LoonFFIResult loon_get_chunk_indices(LoonChunkReaderHandle reader,
     } else {
       *chunk_indices = nullptr;
       *num_chunk_indices = 0;
-      RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to alloc for chunk indices [size=", output_indices.size(), "]");
+      RETURN_ERROR(LOON_INTERNAL_INVARIANT,
+                   "Unexpected allocation failure for chunk indices [size=", output_indices.size(), "]");
     }
 
     RETURN_SUCCESS();
-  } catch (std::exception& e) {
-    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("Native reader operation failed");
   }
 
   RETURN_UNREACHABLE();
@@ -101,8 +250,8 @@ LoonFFIResult loon_get_number_of_chunks(LoonChunkReaderHandle chunk_reader, uint
     auto* cpp_reader = reinterpret_cast<ChunkReader*>(chunk_reader);
     *out_number_of_chunks = cpp_reader->total_number_of_chunks();
     RETURN_SUCCESS();
-  } catch (std::exception& e) {
-    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("Native reader operation failed");
   }
 
   RETURN_UNREACHABLE();
@@ -138,8 +287,8 @@ LoonFFIResult loon_get_chunk(LoonChunkReaderHandle reader,
     }
 
     RETURN_SUCCESS();
-  } catch (std::exception& e) {
-    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("Native reader operation failed");
   }
 
   RETURN_UNREACHABLE();
@@ -161,7 +310,7 @@ LoonFFIResult loon_get_chunk_metadatas(LoonChunkReaderHandle reader,
       masked_values >>= 1;
     }
     if (meta_count == 0) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: metadata_type has no valid metadata type bits set",
+      RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Invalid arguments: metadata_type has no valid metadata type bits set",
                    " [metadata_type=", metadata_type, "]");
     }
 
@@ -169,7 +318,7 @@ LoonFFIResult loon_get_chunk_metadatas(LoonChunkReaderHandle reader,
     if (!out_chunk_metadata->metadatas) {
       out_chunk_metadata->metadatas = nullptr;
       out_chunk_metadata->metadatas_size = 0;
-      RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to alloc for chunk metadata");
+      RETURN_ERROR(LOON_INTERNAL_INVARIANT, "Unexpected allocation failure for chunk metadata");
     }
 
     auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
@@ -194,7 +343,7 @@ LoonFFIResult loon_get_chunk_metadatas(LoonChunkReaderHandle reader,
       if (!chunk_meta->data) {
         assert(chunk_meta->number_of_chunks == 0);
         loon_free_chunk_metadatas(out_chunk_metadata);
-        RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to alloc for chunk metadata");
+        RETURN_ERROR(LOON_INTERNAL_INVARIANT, "Unexpected allocation failure for chunk metadata");
       }
       static_assert(sizeof(uint64_t) == sizeof(LoonChunkMetadata::result_u));
       std::memcpy(chunk_meta->data, estimated_memsz.data(),
@@ -221,7 +370,7 @@ LoonFFIResult loon_get_chunk_metadatas(LoonChunkReaderHandle reader,
       if (!chunk_meta->data) {
         assert(chunk_meta->number_of_chunks == 0);
         loon_free_chunk_metadatas(out_chunk_metadata);
-        RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to alloc for chunk metadata");
+        RETURN_ERROR(LOON_INTERNAL_INVARIANT, "Unexpected allocation failure for chunk metadata");
       }
 
       /* rows_per_chunk is a vector<uint64_t> and LoonChunkMetadata::result_u
@@ -234,8 +383,8 @@ LoonFFIResult loon_get_chunk_metadatas(LoonChunkReaderHandle reader,
     }
 
     RETURN_SUCCESS();
-  } catch (std::exception& e) {
-    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("Native reader operation failed");
   }
 
   RETURN_UNREACHABLE();
@@ -262,14 +411,15 @@ LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
                               ArrowArray** arrays,
                               size_t* num_arrays,
                               ArrowSchema* out_schema) {
-  if (!reader || !chunk_indices || num_indices == 0 || !arrays || !num_arrays) {
+  if (!reader || !chunk_indices || !arrays || !num_arrays) {
     RETURN_ERROR(LOON_INVALID_ARGS,
-                 "Invalid arguments: reader, chunk_indices, arrays, and num_arrays must not be null, and num_indices "
-                 "must be > 0");
+                 "Invalid arguments: reader, chunk_indices, arrays, and num_arrays must not be null");
   }
-
+  if (num_indices == 0) {
+    RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Invalid arguments: num_indices must be > 0");
+  }
   if (parallelism == 0) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: parallelism must be > 0");
+    RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Invalid arguments: parallelism must be > 0");
   }
 
   try {
@@ -301,7 +451,8 @@ LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
     } else {
       *num_arrays = 0;
       *arrays = nullptr;
-      RETURN_ERROR(LOON_MEMORY_ERROR, "Fail to alloc for chunk arrays [rb size=", record_batches.size(), "]");
+      RETURN_ERROR(LOON_INTERNAL_INVARIANT,
+                   "Unexpected allocation failure for chunk arrays [rb size=", record_batches.size(), "]");
     }
 
     if (out_schema && !record_batches.empty()) {
@@ -315,8 +466,8 @@ LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
     }
 
     RETURN_SUCCESS();
-  } catch (std::exception& e) {
-    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("Native reader operation failed");
   }
 
   RETURN_UNREACHABLE();
@@ -325,9 +476,7 @@ LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
 void loon_free_chunk_arrays(struct ArrowArray* arrays, size_t num_arrays) {
   if (arrays) {
     for (size_t i = 0; i < num_arrays; ++i) {
-      if (arrays[i].release) {
-        arrays[i].release(&arrays[i]);
-      }
+      milvus_storage::ffi_internal::ReleaseArrowArray(&arrays[i]);
     }
     free(arrays);
   }
@@ -342,28 +491,18 @@ void loon_chunk_reader_destroy(LoonChunkReaderHandle reader) {
 // ==================== Reader C Implementation ====================
 static inline std::shared_ptr<std::vector<std::string>> convert_needed_columns(const char* const* strings,
                                                                                size_t count) {
-  std::vector<std::string> result;
-
   // empty projections
-  if (count == 0 || strings == nullptr) {
+  if (count == 0) {
     return nullptr;
   }
 
-  if (strings && count > 0) {
-    result.reserve(count);
-    for (size_t i = 0; i < count; ++i) {
-      if (strings[i]) {
-        result.emplace_back(strings[i]);
-      }
-    }
+  std::vector<std::string> result;
+  result.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    result.emplace_back(strings[i]);
   }
 
-  // projections result is empty
-  if (result.empty()) {
-    return nullptr;
-  }
-
-  return std::make_shared<std::vector<std::string>>(result);
+  return std::make_shared<std::vector<std::string>>(std::move(result));
 }
 
 LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
@@ -376,7 +515,6 @@ LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: columngroups, schema, properties, and out_handle must not be null");
   }
-
   try {
     // Fault injection point for testing
     FIU_DO_ON(FIUKEY_READER_OPEN_FAIL,
@@ -391,6 +529,8 @@ LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
     RETURN_ARROW_ERROR_IF(result.status(), LOON_ARROW_ERROR, result.status().ToString());
 
     auto cpp_schema = result.ValueOrDie();
+    auto field_id_status = ValidateFieldIds(cpp_schema);
+    RETURN_ARROW_ERROR_IF(field_id_status, LOON_USER_INVALID_ARGUMENT, field_id_status.ToString());
     auto cpp_properties = std::move(properties_map);
     auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
 
@@ -407,8 +547,8 @@ LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
     *out_handle = raw_cpp_reader;
 
     RETURN_SUCCESS();
-  } catch (std::exception& e) {
-    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("Native reader operation failed");
   }
 
   RETURN_UNREACHABLE();
@@ -417,11 +557,15 @@ LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
 void loon_reader_set_keyretriever(LoonReaderHandle reader, const char* (*key_retriever)(const char* metadata)) {
   assert(reader && key_retriever);
 
-  auto* cpp_reader = reinterpret_cast<Reader*>(reader);
-  cpp_reader->set_keyretriever([key_retriever](const std::string& metadata) -> std::string {
-    const char* result = key_retriever(metadata.c_str());
-    return result ? std::string(result) : std::string();
-  });
+  try {
+    auto* cpp_reader = reinterpret_cast<Reader*>(reader);
+    cpp_reader->set_keyretriever([key_retriever](const std::string& metadata) -> std::string {
+      const char* result = key_retriever(metadata.c_str());
+      return result ? std::string(result) : std::string();
+    });
+  } catch (...) {
+    // This legacy void setter cannot report failure across the C ABI.
+  }
 }
 
 LoonFFIResult loon_get_record_batch_reader(LoonReaderHandle reader,
@@ -443,11 +587,66 @@ LoonFFIResult loon_get_record_batch_reader(LoonReaderHandle reader,
     RETURN_ARROW_ERROR_IF(status, LOON_ARROW_ERROR, status.ToString());
 
     RETURN_SUCCESS();
-  } catch (std::exception& e) {  // TODO: make sure which exception will be throw
-    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("Native reader operation failed");
   }
 
   RETURN_UNREACHABLE();
+}
+
+LoonFFIResult loon_record_batch_reader_new(LoonReaderHandle reader,
+                                           const char* predicate,
+                                           LoonRecordBatchReaderHandle* out_handle,
+                                           ArrowSchema* out_schema) {
+  if (!reader || !out_handle) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_handle must not be null");
+  }
+  *out_handle = 0;
+  if (out_schema != nullptr) {
+    *out_schema = ArrowSchema{};
+  }
+
+  try {
+    auto* cpp_reader = reinterpret_cast<Reader*>(reader);
+    std::string predicate_str = predicate ? predicate : "";
+
+    auto result = cpp_reader->get_record_batch_reader(predicate_str);
+    RETURN_ARROW_ERROR_IF(result.status(), LOON_ARROW_ERROR, result.status().ToString());
+
+    auto batch_reader = result.ValueOrDie();
+    auto holder = std::make_unique<milvus_storage::ffi_internal::RecordBatchReaderHolder>(
+        milvus_storage::ffi_internal::RecordBatchReaderHolder{std::move(batch_reader)});
+    if (out_schema != nullptr) {
+      auto export_status = arrow::ExportSchema(*holder->reader->schema(), out_schema);
+      if (!export_status.ok()) {
+        milvus_storage::ffi_internal::ReleaseArrowSchema(out_schema);
+        RETURN_ARROW_ERROR(export_status, LOON_ARROW_ERROR, export_status.ToString());
+      }
+    }
+
+    auto* raw_holder = holder.release();
+    *out_handle = reinterpret_cast<LoonRecordBatchReaderHandle>(raw_holder);
+    RETURN_SUCCESS();
+  } catch (...) {
+    milvus_storage::ffi_internal::ReleaseArrowSchema(out_schema);
+    RETURN_EXCEPTION("Native reader operation failed");
+  }
+
+  RETURN_UNREACHABLE();
+}
+
+LoonFFIResult loon_record_batch_reader_read_next(LoonRecordBatchReaderHandle handle, ArrowArray* out_array) {
+  try {
+    return milvus_storage::ffi_internal::RecordBatchReaderReadNext(handle, out_array, /*materialize_offsets=*/false);
+  } catch (...) {
+    RETURN_EXCEPTION("Native reader operation failed");
+  }
+}
+
+void loon_record_batch_reader_destroy(LoonRecordBatchReaderHandle handle) {
+  if (handle) {
+    delete reinterpret_cast<milvus_storage::ffi_internal::RecordBatchReaderHolder*>(handle);
+  }
 }
 
 LoonFFIResult loon_get_chunk_reader(LoonReaderHandle reader,
@@ -458,7 +657,6 @@ LoonFFIResult loon_get_chunk_reader(LoonReaderHandle reader,
   if (!reader || !out_handle) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_handle must not be null");
   }
-
   try {
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
     auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
@@ -470,8 +668,8 @@ LoonFFIResult loon_get_chunk_reader(LoonReaderHandle reader,
 
     *out_handle = reinterpret_cast<LoonChunkReaderHandle>(chunk_reader);
     RETURN_SUCCESS();
-  } catch (std::exception& e) {
-    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("Native reader operation failed");
   }
 
   RETURN_UNREACHABLE();
@@ -486,18 +684,49 @@ LoonFFIResult loon_take(LoonReaderHandle reader,
                         ArrowArray** arrays,
                         size_t* num_arrays,
                         ArrowSchema* out_schema) {
-  if (!reader || !row_indices || num_indices == 0 || !arrays || !num_arrays) {
-    RETURN_ERROR(
-        LOON_INVALID_ARGS,
-        "Invalid arguments: reader, row_indices, and out_arrays must not be null, and num_indices must be > 0");
-  }
-
-  if (parallelism == 0) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: parallelism must be > 0");
-  }
-
   try {
+    if (!reader || !row_indices || !arrays || !num_arrays) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader, row_indices, and out_arrays must not be null");
+    }
+    if (num_indices == 0) {
+      RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Invalid arguments: num_indices must be > 0");
+    }
+    if (parallelism == 0) {
+      RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Invalid arguments: parallelism must be > 0");
+    }
+    for (size_t i = 0; i < num_indices; ++i) {
+      if (row_indices[i] < 0) {
+        RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Invalid row index at position ", i, ": ", row_indices[i],
+                     " (must be non-negative)");
+      }
+      if (i > 0 && row_indices[i] <= row_indices[i - 1]) {
+        RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "row_indices must be strictly increasing; position ", i, " has value ",
+                     row_indices[i], " after ", row_indices[i - 1]);
+      }
+    }
+
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
+    auto column_groups = cpp_reader->get_column_groups();
+    if (column_groups && !column_groups->empty() && (*column_groups)[0]) {
+      int64_t total_rows = 0;
+      for (const auto& file : (*column_groups)[0]->files) {
+        if (file.start_index < 0 || file.end_index < file.start_index) {
+          total_rows = -1;
+          break;
+        }
+        const auto file_rows = file.end_index - file.start_index;
+        if (file_rows > std::numeric_limits<int64_t>::max() - total_rows) {
+          total_rows = -1;
+          break;
+        }
+        total_rows += file_rows;
+      }
+      if (total_rows >= 0 && row_indices[num_indices - 1] >= total_rows) {
+        RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "Row index out of range: ", row_indices[num_indices - 1],
+                     " (row count: ", total_rows, ")");
+      }
+    }
+
     std::vector<int64_t> indices(row_indices, row_indices + num_indices);
     auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
 
@@ -537,12 +766,13 @@ LoonFFIResult loon_take(LoonReaderHandle reader,
     } else {
       *num_arrays = 0;
       *arrays = nullptr;
-      RETURN_ERROR(LOON_MEMORY_ERROR, "Fail to alloc for chunk arrays [rb size=", record_batches.size(), "]");
+      RETURN_ERROR(LOON_INTERNAL_INVARIANT,
+                   "Unexpected allocation failure for chunk arrays [rb size=", record_batches.size(), "]");
     }
 
     RETURN_SUCCESS();
-  } catch (std::exception& e) {
-    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("Native reader operation failed");
   }
 
   RETURN_UNREACHABLE();

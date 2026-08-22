@@ -17,7 +17,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <exception>
+#include <new>
 #include <stdexcept>
 #include <utility>
 
@@ -66,7 +66,11 @@ arrow::Result<std::shared_ptr<PackedRecordBatchWriter>> PackedRecordBatchWriter:
     std::shared_ptr<::parquet::WriterProperties> writer_props) {
   auto writer = std::shared_ptr<PackedRecordBatchWriter>(new PackedRecordBatchWriter(
       std::move(fs), paths, std::move(schema), storage_config, column_groups, buffer_size, std::move(writer_props)));
-  ARROW_RETURN_NOT_OK(writer->init());
+  auto status = writer->init();
+  if (!status.ok()) {
+    writer->Abort();
+    return status;
+  }
   return writer;
 }
 
@@ -113,9 +117,7 @@ arrow::Status PackedRecordBatchWriter::init() {
     auto writer_result = milvus_storage::parquet::ParquetFileWriter::Make(column_group_schema, fs_, paths_[i],
                                                                           storage_config_, writer_props_);
     if (!writer_result.ok()) {
-      return WrapExtendError(ExtendStatusCode::PackedStorageIO,
-                             fmt::format("Failed to create packed column group writer. [path={}]", paths_[i]),
-                             writer_result.status());
+      return writer_result.status();
     }
     auto writer = std::move(writer_result).ValueOrDie();
     group_writers_.emplace_back(std::move(writer));
@@ -124,11 +126,20 @@ arrow::Status PackedRecordBatchWriter::init() {
 }
 
 arrow::Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
+  ARROW_RETURN_NOT_OK(writer_status_.Check());
+  return writer_status_.Fail(WriteImpl(record));
+}
+
+arrow::Status PackedRecordBatchWriter::WriteImpl(const std::shared_ptr<arrow::RecordBatch>& record) {
   try {
+    if (closed_) {
+      return arrow::Status::Invalid("Cannot write to closed packed writer");
+    }
+
     // Fault injection point for testing
-    FIU_RETURN_ON(FIUKEY_WRITER_WRITE_FAIL,
-                  MakeExtendError(ExtendStatusCode::PackedStorageIO,
-                                  fmt::format("Injected fault: {}", FIUKEY_WRITER_WRITE_FAIL)));
+    FIU_RETURN_ON(
+        FIUKEY_WRITER_WRITE_FAIL,
+        MakeExtendError(ExtendStatusCode::PackedIO, fmt::format("Injected fault: {}", FIUKEY_WRITER_WRITE_FAIL)));
 
     if (!record) {
       return arrow::Status::OK();
@@ -148,106 +159,160 @@ arrow::Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::Record
 
     ARROW_ASSIGN_OR_RAISE(std::vector<ColumnGroup> column_groups, splitter_.Split(record));
 
-    // Flush column groups until there's enough room for the new column groups
+    // Stateful file writers cannot continue after any child failure. Flush one
+    // group at a time and only advance heap/memory bookkeeping after success.
     // to ensure that memory usage stays strictly below the limit
     while (current_memory_usage_ + next_batch_size >= buffer_size_ && !max_heap_.empty()) {
       LOG_STORAGE_DEBUG_ << "Current memory usage: " << current_memory_usage_ / 1024 / 1024 << " MB, "
                          << ", flushing column group: " << max_heap_.top().first;
       auto max_group = max_heap_.top();
-      max_heap_.pop();
-
-      assert(current_memory_usage_ >= max_group.second);
-      current_memory_usage_ -= max_group.second;
 
       milvus_storage::parquet::ParquetFileWriter* writer = group_writers_[max_group.first].get();
       auto flush_status = writer->Flush();
       if (!flush_status.ok()) {
-        return WrapExtendError(ExtendStatusCode::PackedStorageIO, "Failed to flush packed column group writer",
-                               flush_status);
+        return flush_status;
       }
+
+      max_heap_.pop();
+      assert(current_memory_usage_ >= max_group.second);
+      current_memory_usage_ -= max_group.second;
     }
 
     // After flushing, add the new column groups if memory usage allows
     for (const ColumnGroup& group : column_groups) {
-      current_memory_usage_ += group.GetMemoryUsage();
-      max_heap_.emplace(group.GrpId(), group.GetMemoryUsage());
-
       assert(group.GrpId() < group_writers_.size());
       auto& grp_writer = group_writers_[group.GrpId()];
       auto write_status = grp_writer->Write(group.GetRecordBatch(0));
       if (!write_status.ok()) {
-        return WrapExtendError(ExtendStatusCode::PackedStorageIO, "Failed to write packed column group", write_status);
+        return write_status;
       }
+
+      current_memory_usage_ += group.GetMemoryUsage();
+      max_heap_.emplace(group.GrpId(), group.GetMemoryUsage());
     }
 
     ARROW_RETURN_NOT_OK(balanceMaxHeap());
     return arrow::Status::OK();
+  } catch (const std::bad_alloc&) {
+    return arrow::Status::OutOfMemory("Packed writer write ran out of memory");
   } catch (const std::exception& e) {
-    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
+    return MakeExtendError(ExtendStatusCode::InternalInvariantViolated,
                            fmt::format("Packed writer write failed unexpectedly: {}", e.what()));
   } catch (...) {
-    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
-                           "Packed writer write with unknown exception failed unexpectedly");
+    return MakeExtendError(ExtendStatusCode::InternalInvariantViolated, "Packed writer write failed unexpectedly");
   }
 }
 
-arrow::Status PackedRecordBatchWriter::Close() {
-  try {
-    // Fault injection point for testing
-    FIU_RETURN_ON(FIUKEY_WRITER_CLOSE_FAIL,
-                  MakeExtendError(ExtendStatusCode::PackedStorageIO,
-                                  fmt::format("Injected fault: {}", FIUKEY_WRITER_CLOSE_FAIL)));
+void PackedRecordBatchWriter::Abort() noexcept {
+  // No writer_status_.Check(): abort is for the state where the writer has
+  // already failed.
+  if (closed_) {
+    // Already finalized, or already aborted: abort after a successful close is
+    // a no-op, so a caller can destroy unconditionally.
+    return;
+  }
+  closed_ = true;
+  writer_status_.BeginDiscard();
+  buffered_batches_.clear();
+  // Each group writer owns its own output stream, so each one has to be asked
+  // separately; one refusing to release its upload is not a reason to skip the
+  // rest.
+  for (auto& writer : group_writers_) {
+    if (writer != nullptr) {
+      writer->Abort();
+    }
+  }
+  group_writers_.clear();
+}
 
+arrow::Status PackedRecordBatchWriter::Close() {
+  // Abandon on both failure paths; see FormatWriter::Close in format_writer.h.
+  if (auto first_failure = writer_status_.Check(); !first_failure.ok()) {
+    Abort();
+    return first_failure;
+  }
+  auto status = writer_status_.Fail(CloseImpl());
+  if (!status.ok()) {
+    Abort();
+  }
+  return status;
+}
+
+arrow::Status PackedRecordBatchWriter::CloseImpl() {
+  try {
     // Check if already closed
     if (closed_) {
       return arrow::Status::OK();
     }
 
+    // Fault injection point for testing
+    FIU_RETURN_ON(
+        FIUKEY_WRITER_CLOSE_FAIL,
+        MakeExtendError(ExtendStatusCode::PackedIO, fmt::format("Injected fault: {}", FIUKEY_WRITER_CLOSE_FAIL)));
+
     // flush all remaining column groups before closing
     auto status = flushRemainingBuffer();
-    if (status.ok()) {
-      closed_ = true;
+    if (!status.ok()) {
+      return status;
     }
-    return status;
+    closed_ = true;
+    return arrow::Status::OK();
+  } catch (const std::bad_alloc&) {
+    return arrow::Status::OutOfMemory("Packed writer close ran out of memory");
   } catch (const std::exception& e) {
-    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
+    return MakeExtendError(ExtendStatusCode::InternalInvariantViolated,
                            fmt::format("Packed writer close failed unexpectedly: {}", e.what()));
   } catch (...) {
-    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
-                           "Packed writer close with unknown exception failed unexpectedly");
+    return MakeExtendError(ExtendStatusCode::InternalInvariantViolated, "Packed writer close failed unexpectedly");
   }
 }
 
 arrow::Result<std::vector<size_t>> PackedRecordBatchWriter::Tell() const {
+  ARROW_RETURN_NOT_OK(writer_status_.Check());
+  auto result = TellImpl();
+  if (!result.ok()) {
+    return writer_status_.Fail(result.status());
+  }
+  return result;
+}
+
+arrow::Result<std::vector<size_t>> PackedRecordBatchWriter::TellImpl() const {
   try {
     std::vector<size_t> positions(group_writers_.size());
     for (size_t writer_idx = 0; writer_idx < group_writers_.size(); ++writer_idx) {
       auto tell_result = group_writers_[writer_idx]->Tell();
       if (!tell_result.ok()) {
-        return WrapExtendError(ExtendStatusCode::PackedStorageIO,
-                               fmt::format("Failed to tell packed column group writer. [writer_index={}]", writer_idx),
-                               tell_result.status());
+        return tell_result.status();
       }
       positions[writer_idx] = tell_result.ValueOrDie();
     }
     return positions;
+  } catch (const std::bad_alloc&) {
+    return arrow::Status::OutOfMemory("Packed writer tell ran out of memory");
   } catch (const std::exception& e) {
-    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
+    return MakeExtendError(ExtendStatusCode::InternalInvariantViolated,
                            fmt::format("Packed writer tell failed unexpectedly: {}", e.what()));
   } catch (...) {
-    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
-                           "Packed writer tell with unknown exception failed unexpectedly");
+    return MakeExtendError(ExtendStatusCode::InternalInvariantViolated, "Packed writer tell failed unexpectedly");
   }
 }
 
 arrow::Status PackedRecordBatchWriter::AddUserMetadata(const std::string& key, const std::string& value) {
+  ARROW_RETURN_NOT_OK(writer_status_.Check());
+  return writer_status_.Fail(AddUserMetadataImpl(key, value));
+}
+
+arrow::Status PackedRecordBatchWriter::AddUserMetadataImpl(const std::string& key, const std::string& value) {
+  if (closed_) {
+    return arrow::Status::Invalid("Cannot add metadata to closed packed writer");
+  }
   user_metadata_.emplace_back(key, value);
   return arrow::Status::OK();
 }
 
 arrow::Status PackedRecordBatchWriter::flushRemainingBuffer() {
   // Fault injection point for testing
-  FIU_RETURN_ON(FIUKEY_WRITER_FLUSH_FAIL, MakeExtendError(ExtendStatusCode::PackedStorageIO,
+  FIU_RETURN_ON(FIUKEY_WRITER_FLUSH_FAIL, MakeExtendError(ExtendStatusCode::PackedIO,
                                                           fmt::format("Injected fault: {}", FIUKEY_WRITER_FLUSH_FAIL)));
 
   if (closed_) {
@@ -256,34 +321,34 @@ arrow::Status PackedRecordBatchWriter::flushRemainingBuffer() {
 
   while (!max_heap_.empty()) {
     auto max_group = max_heap_.top();
-    max_heap_.pop();
     auto& grp_writer = group_writers_[max_group.first];
 
     LOG_STORAGE_DEBUG_ << "Flushing remaining column group: " << max_group.first;
-    current_memory_usage_ -= max_group.second;
     auto flush_status = grp_writer->Flush();
     if (!flush_status.ok()) {
-      return WrapExtendError(ExtendStatusCode::PackedStorageIO, "Failed to flush packed column group writer",
-                             flush_status);
+      return flush_status;
     }
+
+    max_heap_.pop();
+    assert(current_memory_usage_ >= max_group.second);
+    current_memory_usage_ -= max_group.second;
   }
 
-  for (auto& grp_writer : group_writers_) {
+  for (size_t writer_idx = 0; writer_idx < group_writers_.size(); ++writer_idx) {
+    auto& grp_writer = group_writers_[writer_idx];
     auto append_status = grp_writer->AppendKVMetadata(GROUP_FIELD_ID_LIST_META_KEY, group_field_id_list_.Serialize());
     if (!append_status.ok()) {
-      return WrapExtendError(ExtendStatusCode::PackedStorageIO, "Failed to append packed group field id metadata",
-                             append_status);
+      return append_status;
     }
 
     auto metadata_status = grp_writer->AddUserMetadata(user_metadata_);
     if (!metadata_status.ok()) {
-      return WrapExtendError(ExtendStatusCode::PackedStorageIO, "Failed to add packed user metadata", metadata_status);
+      return metadata_status;
     }
 
     auto close_result = grp_writer->Close();
     if (!close_result.ok()) {
-      return WrapExtendError(ExtendStatusCode::PackedStorageIO, "Failed to close packed column group writer",
-                             close_result.status());
+      return close_result.status();
     }
   }
 

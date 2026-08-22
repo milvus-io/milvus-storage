@@ -42,6 +42,7 @@
 #include "milvus-storage/format/paimon/paimon_format_reader.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
+#include "milvus-storage/common/extend_status.h"
 
 namespace milvus_storage::api {
 
@@ -149,7 +150,7 @@ arrow::Status ColumnGroupLazyReaderImpl<ReaderT>::validate_row_indices(const std
 template <typename ReaderT>
 arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file(size_t file_index) {
   if (file_index >= column_group_->files.size()) {
-    return arrow::Status::Invalid("Column group file index out of range: ", file_index,
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Column group file index out of range: ", file_index,
                                   " >= ", column_group_->files.size());
   }
 
@@ -349,7 +350,7 @@ arrow::Result<std::unique_ptr<ColumnGroupLazyReader>> ColumnGroupLazyReader::cre
     const std::function<std::string(const std::string&)>& key_retriever,
     const milvus_storage::MetadataCache& cache) {
   if (!column_group) {
-    return arrow::Status::Invalid("Column group cannot be null");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Column group cannot be null");
   }
   const bool cache_enabled =
       cache.enabled() && GetValueNoError<bool>(properties, PROPERTY_READER_METADATA_CACHE_ENABLE);
@@ -379,7 +380,7 @@ arrow::Result<std::unique_ptr<ColumnGroupLazyReader>> ColumnGroupLazyReader::cre
     return metadata_cache.dispatch(
         column_group->format, [&](auto typed_cache) -> arrow::Result<std::unique_ptr<ColumnGroupLazyReader>> {
           if (!typed_cache) {
-            return arrow::Status::Invalid("Format reader metadata cache is null");
+            return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Format reader metadata cache is null");
           }
 
           using TypedCache = typename decltype(typed_cache)::element_type;

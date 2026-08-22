@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include <functional>
+#include <new>
 #include <string>
 #include <thread>
 
@@ -30,6 +31,11 @@ namespace milvus_storage::parquet::test {
 namespace {
 
 size_t CurrentThreadId() { return std::hash<std::thread::id>{}(std::this_thread::get_id()); }
+
+class BadAllocExecutor final : public folly::Executor {
+  public:
+  void add(folly::Func) override { throw std::bad_alloc(); }
+};
 
 TEST(FollyArrowExecutorTest, RoutesSubmittedTaskToFollyExecutor) {
   folly::CPUThreadPoolExecutor folly_executor(1);
@@ -110,6 +116,16 @@ TEST(FollyArrowExecutorTest, RejectsInlineLikeExecutors) {
 
   expect_rejected(folly::InlineExecutor::instance());
   expect_rejected(folly::QueuedImmediateExecutor::instance());
+}
+
+TEST(FollyArrowExecutorTest, SubmissionAllocationFailureIsReported) {
+  BadAllocExecutor folly_executor;
+  auto arrow_executor = MakeFollyArrowExecutor(folly::getKeepAliveToken(folly_executor), 1);
+
+  auto maybe_future = arrow_executor->Submit([] { return 42; });
+
+  ASSERT_FALSE(maybe_future.ok());
+  EXPECT_TRUE(maybe_future.status().IsUnknownError()) << maybe_future.status().ToString();
 }
 
 }  // namespace

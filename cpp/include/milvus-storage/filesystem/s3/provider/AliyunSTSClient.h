@@ -24,7 +24,9 @@
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/AmazonWebServiceResult.h>
 #include <aws/core/utils/DateTime.h>
-#include <aws/core/internal/AWSHttpResourceClient.h>  // [aliyun] import original http client
+#include <aws/core/internal/AWSHttpResourceClient.h>
+
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"  // [aliyun] import original http client
 #include <memory>
 #include <mutex>
 
@@ -56,6 +58,10 @@ class AWS_CORE_API AliyunSTSCredentialsClient : public ::Aws::Internal::AWSHttpR
   };
 
   struct STSAssumeRoleWithWebIdentityResult {
+    // Why creds is empty. OK when credentials were produced. "STS was
+    // unreachable" and "STS refused us" need opposite handling upstream and
+    // both otherwise arrive as an empty credential set.
+    arrow::Status status;
     ::Aws::Auth::AWSCredentials creds;
   };
 
@@ -63,6 +69,7 @@ class AWS_CORE_API AliyunSTSCredentialsClient : public ::Aws::Internal::AWSHttpR
       const STSAssumeRoleWithWebIdentityRequest& request);
 
   private:
+  std::shared_ptr<::Aws::Http::HttpClient> m_rawHttpClient;
   ::Aws::String m_endpoint;
   ::Aws::String m_aliyunOidcProviderArn;  // [aliyun]
 };

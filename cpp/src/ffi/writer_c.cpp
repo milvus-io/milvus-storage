@@ -56,6 +56,8 @@ LoonFFIResult loon_writer_new(const char* base_path,
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -81,6 +83,8 @@ LoonFFIResult loon_writer_write(LoonWriterHandle handle, struct ArrowArray* arra
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -98,6 +102,8 @@ LoonFFIResult loon_writer_flush(LoonWriterHandle handle) {
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -111,6 +117,14 @@ LoonFFIResult loon_writer_close(LoonWriterHandle handle,
   if (!handle) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
   }
+
+  if (!out_column_groups) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: out_column_groups must not be null");
+  }
+  // Make the failure contract observable: ffi_c.h promises that a failed close
+  // produces no column groups, so the caller must be able to tell by reading
+  // null -- the same zero-on-entry the segment writer performs on its output.
+  *out_column_groups = nullptr;
 
   if (meta_len > 0 && (!meta_keys || !meta_vals)) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: meta_keys and meta_vals should not be null when meta_len > 0");
@@ -139,11 +153,13 @@ LoonFFIResult loon_writer_close(LoonWriterHandle handle,
 
     // Export to LoonColumnGroups structure
     auto st = milvus_storage::column_groups_export(*cgs, out_column_groups);
-    RETURN_ARROW_ERROR_IF(st, LOON_LOGICAL_ERROR, st.ToString());
+    RETURN_ARROW_ERROR_IF(st, LOON_ARROW_ERROR, st.ToString());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -155,8 +171,20 @@ void loon_free_cstr(char* cstr) {
   }
 }
 
+// A handle destroyed without a successful close is the C caller saying it
+// gives up on this writer. That is an explicit abandonment, not a destructor
+// side effect, so it is where the abort belongs: R2.7 keeps storage I/O out of
+// destruction, and this is the last frame that still knows the writer existed.
+// Whatever the writer holds in the store -- above all an S3 multipart upload,
+// whose parts no bucket listing can even show -- is released here or never.
 void loon_writer_destroy(LoonWriterHandle handle) {
   if (handle) {
-    delete reinterpret_cast<Writer*>(handle);
+    auto* writer = reinterpret_cast<Writer*>(handle);
+    try {
+      writer->abort();
+    } catch (...) {
+      // Destruction is best effort and must not throw across the C ABI.
+    }
+    delete writer;
   }
 }

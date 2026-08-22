@@ -75,7 +75,12 @@ class GroupFieldIDList {
 
   std::string Serialize() const;
 
+  // Legacy public parser. Keep its return type and behavior for source/ABI
+  // compatibility; persisted-data readers should use TryDeserialize.
   static GroupFieldIDList Deserialize(const std::string& input);
+
+  /// Strictly parse metadata persisted in the packed Parquet footer.
+  static arrow::Result<GroupFieldIDList> TryDeserialize(const std::string& input);
 
   private:
   std::vector<FieldIDList> list_;
@@ -94,6 +99,9 @@ class RowGroupMetadata {
   std::string ToString() const;
   std::string Serialize() const;
   static RowGroupMetadata Deserialize(const std::string& input);
+
+  /// Strictly parse persisted packed row-group metadata.
+  static arrow::Result<RowGroupMetadata> TryDeserialize(const std::string& input);
 
   private:
   size_t memory_size_;
@@ -125,6 +133,9 @@ class RowGroupMetadataVector {
 
   static RowGroupMetadataVector Deserialize(const std::string& input);
 
+  /// Strictly parse persisted packed row-group metadata.
+  static arrow::Result<RowGroupMetadataVector> TryDeserialize(const std::string& input);
+
   private:
   std::vector<RowGroupMetadata> vector_;
 };
@@ -135,9 +146,7 @@ class PackedFileMetadata {
 
   explicit PackedFileMetadata(const std::shared_ptr<::parquet::FileMetaData>& metadata,
                               const RowGroupMetadataVector& row_group_metadata,
-                              const std::map<FieldID, ColumnOffset>& field_id_mapping,
-                              const GroupFieldIDList& group_field_id_list,
-                              const std::string& storage_version);
+                              const std::map<FieldID, ColumnOffset>& field_id_mapping);
 
   static arrow::Result<std::shared_ptr<PackedFileMetadata>> Make(
       const std::shared_ptr<::parquet::FileMetaData>& metadata);
@@ -148,22 +157,14 @@ class PackedFileMetadata {
 
   const std::map<FieldID, ColumnOffset>& GetFieldIDMapping();
 
-  const GroupFieldIDList GetGroupFieldIDList();
-
   const std::shared_ptr<::parquet::FileMetaData>& GetParquetMetadata();
 
-  const std::string& GetStorageVersion() const;
-
   int num_row_groups() const;
-
-  size_t total_memory_size() const;
 
   private:
   std::shared_ptr<::parquet::FileMetaData> parquet_metadata_;
   RowGroupMetadataVector row_group_metadata_;
   std::map<FieldID, ColumnOffset> field_id_mapping_;
-  GroupFieldIDList group_field_id_list_;
-  std::string storage_version_;
 };
 
 }  // namespace milvus_storage

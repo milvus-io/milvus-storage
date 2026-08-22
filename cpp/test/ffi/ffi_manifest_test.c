@@ -717,6 +717,42 @@ static void test_transaction_error_handling(void) {
   loon_manifest_destroy(NULL);
 }
 
+static void test_transaction_plain_io_uses_arrow_fallback(void) {
+  LoonProperties pp;
+  create_test_pp(&pp);
+  FileSystemHandle fs = get_fs(&pp);
+  recreate_dir(fs, TEST_BASE_PATH);
+
+  LoonTransactionHandle transaction = 0;
+  const char* read_key = loon_fiukey_manifest_read_fail;
+  LoonFFIResult rc = loon_fiu_enable(read_key, (uint32_t)strlen(read_key), 1 /* one_time */);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, 1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &transaction);
+  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, LOON_ARROW_ERROR);
+  loon_ffi_free_result(&rc);
+
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &transaction);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  const char* commit_key = loon_fiukey_manifest_commit_fail;
+  rc = loon_fiu_enable(commit_key, (uint32_t)strlen(commit_key), 1 /* one_time */);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  int64_t committed_version = -1;
+  rc = loon_transaction_commit(transaction, &committed_version);
+  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, LOON_ARROW_ERROR);
+  loon_ffi_free_result(&rc);
+
+  loon_transaction_destroy(transaction);
+  loon_fiu_disable_all();
+  clean_test_dir(fs, TEST_BASE_PATH);
+  loon_filesystem_destroy(fs);
+  loon_properties_free(&pp);
+}
+
 // Helper payload for the A-committer thread in test_txn_exhausted_retry
 typedef struct {
   LoonTransactionHandle txn;
@@ -898,6 +934,8 @@ void run_manifest_suite(void) {
   RUN_TEST(test_update_stat_with_metadata);
   loon_reset_context();
   RUN_TEST(test_transaction_error_handling);
+  loon_reset_context();
+  RUN_TEST(test_transaction_plain_io_uses_arrow_fallback);
   loon_reset_context();
   RUN_TEST(test_txn_exhausted_retry);
   loon_reset_context();

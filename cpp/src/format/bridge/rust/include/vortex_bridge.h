@@ -14,6 +14,7 @@
 #include <arrow/result.h>
 #include <arrow/status.h>
 
+#include "milvus-storage/common/writer_status.h"
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"
 
@@ -24,10 +25,14 @@ class RecordBatchReader;
 namespace milvus_storage::vortex {
 
 arrow::Status MakeVortexBridgeErrorStatus(std::string_view message);
+arrow::Status MakeVortexBridgeErrorStatus(int ffi_err_code, std::string_view message);
 arrow::Status MakeVortexErrorStatus(std::string_view context, std::string_view message);
+arrow::Status MakeVortexErrorStatus(std::string_view context, int ffi_err_code, std::string_view message);
 arrow::Status MakeVortexErrorStatus(std::string_view context, const arrow::Status& status);
+arrow::Status TakeVortexErrorStatus(std::string_view context, const arrow::Status& fallback);
 namespace internal {
 std::shared_ptr<arrow::RecordBatchReader> WrapVortexRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner);
+arrow::Result<ArrowArrayStream> WrapVortexArrowArrayStream(ArrowArrayStream stream);
 }  // namespace internal
 
 enum class PType : uint8_t {
@@ -205,6 +210,7 @@ class VortexWriter {
   explicit VortexWriter(rust::Box<ffi::VortexWriter> impl) : impl_(std::move(impl)) {}
 
   rust::Box<ffi::VortexWriter> impl_;
+  milvus_storage::WriterStatus writer_status_;
 };
 
 class VortexFile {
@@ -352,9 +358,10 @@ class ScanBuilder {
   rust::Box<ffi::VortexScanBuilder> impl_;
 };
 
-// Success supplies a stream/handle with null error_msg; failure supplies only error_msg.
-using VortexAsyncCallback = void (*)(void* ctx, ArrowArrayStream* out_stream, const char* error_msg);
-using VortexOpenAsyncCallback = void (*)(void* ctx, uintptr_t handle, const char* error_msg);
+// Success supplies a stream/handle with code 0 and null error_msg. Failure
+// supplies an explicit code plus the human-readable message.
+using VortexAsyncCallback = void (*)(void* ctx, ArrowArrayStream* out_stream, int error_code, const char* error_msg);
+using VortexOpenAsyncCallback = void (*)(void* ctx, uintptr_t handle, int error_code, const char* error_msg);
 
 extern "C" {
 

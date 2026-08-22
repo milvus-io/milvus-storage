@@ -40,6 +40,11 @@ class ColumnGroupWriter {
   [[nodiscard]] virtual arrow::Status Flush() = 0;
   [[nodiscard]] virtual arrow::Result<std::vector<ColumnGroupFile>> Close() = 0;
 
+  /// Abandon this column group and release what its format writer allocated in
+  /// the store. See FormatWriter::Abort() for the contract: safe on a failed
+  /// writer, idempotent, and never reports its own cleanup failure.
+  virtual void Abort() noexcept = 0;
+
   /**
    * @brief Create a column group writer for a column group
    *

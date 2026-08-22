@@ -24,6 +24,7 @@
 #include "milvus-storage/format/format_reader_cache.h"
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/extend_status.h"
 #include "test_env.h"
 
 namespace milvus_storage::iceberg {
@@ -90,9 +91,16 @@ class IcebergFormatReaderTest : public ::testing::Test {
     ASSERT_STATUS_OK(path_builder.Finish(&path_array));
     ASSERT_STATUS_OK(pos_builder.Finish(&pos_array));
 
-    auto batch = arrow::RecordBatch::Make(schema, deleted_positions.size(), {path_array, pos_array});
+    WriteParquetFile(delete_file_path_, schema, {path_array, pos_array}, deleted_positions.size());
+  }
 
-    ASSERT_AND_ASSIGN(auto sink, fs_->OpenOutputStream(delete_file_path_));
+  void WriteParquetFile(const std::string& path,
+                        const std::shared_ptr<arrow::Schema>& schema,
+                        const std::vector<std::shared_ptr<arrow::Array>>& columns,
+                        int64_t num_rows) {
+    auto batch = arrow::RecordBatch::Make(schema, num_rows, columns);
+
+    ASSERT_AND_ASSIGN(auto sink, fs_->OpenOutputStream(path));
     ASSERT_AND_ASSIGN(auto writer, ::parquet::arrow::FileWriter::Open(*schema, arrow::default_memory_pool(), sink));
     ASSERT_STATUS_OK(writer->WriteRecordBatch(*batch));
     ASSERT_STATUS_OK(writer->Close());
@@ -426,6 +434,104 @@ TEST_F(IcebergFormatReaderTest, EqualityDeleteRejected) {
       << "Error should mention equality deletes: " << result.status().ToString();
 }
 
+TEST_F(IcebergFormatReaderTest, PositionalDeleteMissingRequiredColumnIsDataFormat) {
+  WriteDataFile(5);
+
+  auto schema = arrow::schema({arrow::field("pos", arrow::int64())});
+  arrow::Int64Builder pos_builder;
+  ASSERT_STATUS_OK(pos_builder.Append(1));
+  std::shared_ptr<arrow::Array> pos_array;
+  ASSERT_STATUS_OK(pos_builder.Finish(&pos_array));
+  WriteParquetFile(delete_file_path_, schema, {pos_array}, 1);
+
+  ColumnGroupFile file{data_file_path_, 0, data_num_rows_, MakeDeleteMetadataJson(delete_file_path_)};
+  auto result = FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file, properties_, {"id"}, nullptr);
+  ASSERT_FALSE(result.ok());
+  auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+  ASSERT_NE(detail, nullptr) << result.status().ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::DataCorrupted);
+}
+
+TEST_F(IcebergFormatReaderTest, PositionalDeleteWrongColumnTypesAreDataFormat) {
+  WriteDataFile(5);
+
+  auto schema = arrow::schema({arrow::field("file_path", arrow::int64()), arrow::field("pos", arrow::int32())});
+  arrow::Int64Builder path_builder;
+  arrow::Int32Builder pos_builder;
+  ASSERT_STATUS_OK(path_builder.Append(1));
+  ASSERT_STATUS_OK(pos_builder.Append(1));
+  std::shared_ptr<arrow::Array> path_array, pos_array;
+  ASSERT_STATUS_OK(path_builder.Finish(&path_array));
+  ASSERT_STATUS_OK(pos_builder.Finish(&pos_array));
+  WriteParquetFile(delete_file_path_, schema, {path_array, pos_array}, 1);
+
+  ColumnGroupFile file{data_file_path_, 0, data_num_rows_, MakeDeleteMetadataJson(delete_file_path_)};
+  auto result = FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file, properties_, {"id"}, nullptr);
+  ASSERT_FALSE(result.ok());
+  auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+  ASSERT_NE(detail, nullptr) << result.status().ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::DataCorrupted);
+}
+
+TEST_F(IcebergFormatReaderTest, PositionalDeleteNullValuesAreDataFormat) {
+  WriteDataFile(5);
+
+  auto schema = arrow::schema({arrow::field("file_path", arrow::utf8()), arrow::field("pos", arrow::int64())});
+  arrow::StringBuilder path_builder;
+  arrow::Int64Builder pos_builder;
+  ASSERT_STATUS_OK(path_builder.AppendNull());
+  ASSERT_STATUS_OK(pos_builder.Append(1));
+  std::shared_ptr<arrow::Array> path_array, pos_array;
+  ASSERT_STATUS_OK(path_builder.Finish(&path_array));
+  ASSERT_STATUS_OK(pos_builder.Finish(&pos_array));
+  WriteParquetFile(delete_file_path_, schema, {path_array, pos_array}, 1);
+
+  ColumnGroupFile file{data_file_path_, 0, data_num_rows_, MakeDeleteMetadataJson(delete_file_path_)};
+  auto result = FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file, properties_, {"id"}, nullptr);
+  ASSERT_FALSE(result.ok());
+  auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+  ASSERT_NE(detail, nullptr) << result.status().ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::DataCorrupted);
+}
+
+// A repeated (file_path, pos) is legal: the Iceberg spec only orders rows
+// within one delete file, and several delete files in a snapshot may name the
+// same position. Deletes are applied as a set, so the row is dropped once and
+// the table stays readable — engines like Spark/Trino read it fine too.
+TEST_F(IcebergFormatReaderTest, PositionalDeleteDuplicatePositionIsDeduplicated) {
+  WriteDataFile(5);
+  WritePositionalDeleteFile(data_file_path_, {1, 1});
+
+  ColumnGroupFile file{data_file_path_, 0, data_num_rows_, MakeDeleteMetadataJson(delete_file_path_)};
+  ASSERT_AND_ASSIGN(auto reader,
+                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file, properties_, {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto row_group_infos, reader->get_row_group_infos());
+  ASSERT_EQ(row_group_infos.size(), 1);
+  // 5 rows, one distinct deleted position -> 4 logical rows, not 3.
+  EXPECT_EQ(row_group_infos[0].end_offset, 4);
+
+  ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+  ASSERT_EQ(batch->num_rows(), 4);
+  auto id_array = std::dynamic_pointer_cast<arrow::Int64Array>(batch->column(0));
+  ASSERT_NE(id_array, nullptr);
+  std::vector<int64_t> expected_ids = {0, 2, 3, 4};
+  for (size_t i = 0; i < expected_ids.size(); ++i) {
+    EXPECT_EQ(id_array->Value(i), expected_ids[i]) << "Mismatch at index " << i;
+  }
+}
+
+TEST_F(IcebergFormatReaderTest, PositionalDeleteOutOfRangeIsDataFormat) {
+  WriteDataFile(5);
+  WritePositionalDeleteFile(data_file_path_, {-1});
+
+  ColumnGroupFile file{data_file_path_, 0, data_num_rows_, MakeDeleteMetadataJson(delete_file_path_)};
+  auto result = FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file, properties_, {"id"}, nullptr);
+  ASSERT_FALSE(result.ok());
+  auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+  ASSERT_NE(detail, nullptr) << result.status().ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::DataCorrupted);
+}
+
 // Invalid JSON metadata should cause an error
 TEST_F(IcebergFormatReaderTest, InvalidJsonMetadata) {
   WriteDataFile(5);
@@ -438,6 +544,27 @@ TEST_F(IcebergFormatReaderTest, InvalidJsonMetadata) {
                                      std::vector<std::string>{"id"}, nullptr);
 
   ASSERT_FALSE(result.ok());
+}
+
+TEST_F(IcebergFormatReaderTest, MalformedDeleteMetadataStructureIsDataCorrupted) {
+  WriteDataFile(5);
+
+  const std::vector<std::string> malformed_metadata = {
+      R"([1])",
+      R"([{"file_type":1}])",
+      R"([{"file_type":"unknown","path":1}])",
+  };
+
+  for (const auto& json : malformed_metadata) {
+    SCOPED_TRACE(json);
+    ColumnGroupFile file{data_file_path_, 0, data_num_rows_, {{kPropertyMetadata, json}}};
+    auto result = FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file, properties_, {"id"}, nullptr);
+
+    ASSERT_FALSE(result.ok());
+    auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+    ASSERT_NE(detail, nullptr) << result.status().ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::DataCorrupted);
+  }
 }
 
 }  // namespace

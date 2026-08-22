@@ -34,6 +34,30 @@ class MilvusSegmentReader {
            neededColumns: Array[String], lobColumns: Seq[LobColumnConfig],
            propertiesPtr: Long): Unit = {
     if (isDestroyed) throw new IllegalStateException("Reader has been destroyed")
+    if (segmentPath == null) throw new IllegalArgumentException("segmentPath must not be null")
+    if (segmentPath.isEmpty) throw new IllegalArgumentException("segmentPath must not be empty")
+    if (version < -1) throw new IllegalArgumentException("version must be -1 or greater")
+    if (schemaPtr == 0) throw new IllegalArgumentException("schemaPtr must not be 0")
+    if (propertiesPtr == 0) throw new IllegalArgumentException("propertiesPtr must not be 0")
+    if (neededColumns != null && neededColumns.exists(_ == null)) {
+      throw new IllegalArgumentException("neededColumns must not contain null")
+    }
+    if (neededColumns != null && neededColumns.exists(_.isEmpty)) {
+      throw new IllegalArgumentException("neededColumns must not contain empty names")
+    }
+    if (lobColumns == null) throw new IllegalArgumentException("lobColumns must not be null")
+    if (lobColumns.exists(_ == null)) throw new IllegalArgumentException("lobColumns must not contain null")
+    lobColumns.foreach { config =>
+      if (config.fieldId < 0) throw new IllegalArgumentException("LOB fieldId must be greater than or equal to 0")
+      if (config.lobBasePath == null) throw new IllegalArgumentException("LOB lobBasePath must not be null")
+      if (config.lobBasePath.isEmpty) throw new IllegalArgumentException("LOB lobBasePath must not be empty")
+      if (config.inlineThreshold <= 0) throw new IllegalArgumentException("LOB inlineThreshold must be > 0")
+      if (config.maxLobFileBytes <= 0) throw new IllegalArgumentException("LOB maxLobFileBytes must be > 0")
+      if (config.flushThresholdBytes <= 0) throw new IllegalArgumentException("LOB flushThresholdBytes must be > 0")
+      if (config.flushThresholdBytes > config.maxLobFileBytes) {
+        throw new IllegalArgumentException("LOB flushThresholdBytes must not exceed maxLobFileBytes")
+      }
+    }
 
     val fieldIds = lobColumns.map(_.fieldId).toArray
     val basePaths = lobColumns.map(_.lobBasePath).toArray

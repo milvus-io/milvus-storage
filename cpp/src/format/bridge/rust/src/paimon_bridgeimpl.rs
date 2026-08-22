@@ -35,11 +35,20 @@ use crate::TOKIO_RT;
 use crate::paimon_ffi::PaimonFileInfo;
 
 const METADATA_VERSION: u32 = 1;
-const ERROR_INVALID_PREFIX: &str = "[paimon:error=invalid]";
-const ERROR_NOT_IMPLEMENTED_PREFIX: &str = "[paimon:error=not-implemented]";
-const ERROR_NOT_FOUND_PREFIX: &str = "[paimon:error=not-found]";
-const ERROR_TRANSIENT_THROTTLING_PREFIX: &str = "[paimon:error=transient-throttling]";
-const ERROR_TRANSIENT_SERVICE_PREFIX: &str = "[paimon:error=transient-service]";
+
+/// Wrap a classified failure the way every bridge transports it: the verdict
+/// rides BOTH the shared side channel and the universal message marker, which
+/// the C++ decoder reads when no catch frame can reach the slot (Arrow C
+/// stream). Same transport as lance/iceberg -- no private markers anywhere.
+fn tagged(code: i32, message: impl std::fmt::Display) -> anyhow::Error {
+    crate::bridge_error::record_bridge_error(code, message.to_string());
+    anyhow!(
+        "{}{}; {}",
+        crate::bridge_error::BRIDGE_ERRCODE_MARKER,
+        code,
+        message
+    )
+}
 const DELETION_VECTOR_MAGIC: u32 = 1_581_511_376;
 /// Magic of Paimon's 64-bit deletion vectors, from Java
 /// `org.apache.paimon.deletionvectors.Bitmap64DeletionVector.MAGIC_NUMBER`.
@@ -48,70 +57,69 @@ const DELETION_VECTOR_MAGIC: u32 = 1_581_511_376;
 const DELETION_VECTOR_BITMAP64_MAGIC: u32 = 1_681_511_377;
 const MAX_DATA_SPLIT_METADATA_BYTES: usize = 12 * 1024 * 1024;
 
-// CXX carries Rust errors as strings. These stable markers are consumed only
-// by the C++ bridge, which converts them into Arrow statuses before returning
-// to format callers. Keep their spelling in sync with paimon_bridge.cpp and
-// paimon_format_reader.cpp.
+// Transport is the shared universal marker plus the side channel (see
+// `tagged`). These helpers keep their historical names so call sites read as
+// before; each publishes the typed verdict AND embeds the shared transport
+// tag, which the C++ decoder strips.
 fn invalid_message(message: impl std::fmt::Display) -> String {
-    format!("{ERROR_INVALID_PREFIX} {message}")
+    let code = crate::bridge_error::LOON_STORAGE_CONFIG_INVALID;
+    crate::bridge_error::record_bridge_error(code, message.to_string());
+    format!("{}{}; {message}", crate::bridge_error::BRIDGE_ERRCODE_MARKER, code)
+}
+
+fn data_invalid_message(message: impl std::fmt::Display) -> String {
+    message.to_string()
 }
 
 fn not_implemented_message(message: impl std::fmt::Display) -> String {
-    format!("{ERROR_NOT_IMPLEMENTED_PREFIX} {message}")
+    let code = crate::bridge_error::BRIDGE_ERRCODE_NOT_SUPPORTED;
+    crate::bridge_error::record_bridge_error(code, message.to_string());
+    format!("{}{}; {message}", crate::bridge_error::BRIDGE_ERRCODE_MARKER, code)
 }
 
 fn classify_bridge_error(error: anyhow::Error) -> anyhow::Error {
     let message = format!("{error:#}");
-    if [ERROR_INVALID_PREFIX, ERROR_NOT_IMPLEMENTED_PREFIX]
-        .iter()
-        .any(|marker| message.contains(marker))
-    {
-        return error;
-    }
 
     // Paimon's Parquet adapter stringifies FileRead errors before wrapping them.
     if let Some((_, storage_error)) =
         message.split_once("IO operation failed on underlying storage: ")
     {
-        let marker = if storage_error.starts_with("NotFound (") {
-            Some(ERROR_NOT_FOUND_PREFIX)
+        let code = if storage_error.starts_with("NotFound (") {
+            Some(crate::bridge_error::LOON_STORAGE_NOT_FOUND)
         } else if storage_error.starts_with("RateLimited (temporary)") {
-            Some(ERROR_TRANSIENT_THROTTLING_PREFIX)
+            Some(crate::bridge_error::LOON_TRANSIENT_THROTTLING)
         } else if storage_error.contains("(temporary)") {
-            Some(ERROR_TRANSIENT_SERVICE_PREFIX)
+            Some(crate::bridge_error::LOON_TRANSIENT_SERVICE)
         } else {
             None
         };
-        return marker.map_or(error, |marker| anyhow!("{marker} {message}"));
+        return code.map_or(error, |code| tagged(code, &message));
     }
-    let marker = error.chain().find_map(|cause| {
+    let code = error.chain().find_map(|cause| {
         let error = cause.downcast_ref::<paimon::Error>()?;
         match error {
             paimon::Error::IoUnexpected { source, .. } => {
                 let kind = source.kind().into_static();
                 if kind == "NotFound" {
-                    Some(ERROR_NOT_FOUND_PREFIX)
+                    Some(crate::bridge_error::LOON_STORAGE_NOT_FOUND)
                 } else if source.is_temporary() && kind == "RateLimited" {
-                    Some(ERROR_TRANSIENT_THROTTLING_PREFIX)
+                    Some(crate::bridge_error::LOON_TRANSIENT_THROTTLING)
                 } else if source.is_temporary() {
-                    Some(ERROR_TRANSIENT_SERVICE_PREFIX)
+                    Some(crate::bridge_error::LOON_TRANSIENT_SERVICE)
                 } else {
                     None
                 }
             }
             paimon::Error::Unsupported { .. } | paimon::Error::IoUnsupported { .. } => {
-                Some(ERROR_NOT_IMPLEMENTED_PREFIX)
+                Some(crate::bridge_error::BRIDGE_ERRCODE_NOT_SUPPORTED)
             }
-            paimon::Error::DataInvalid { .. }
-            | paimon::Error::DataTypeInvalid { .. }
-            | paimon::Error::ConfigInvalid { .. }
-            | paimon::Error::DataUnexpected { .. }
-            | paimon::Error::FileIndexFormatInvalid { .. }
-            | paimon::Error::ParquetDataUnexpected { .. } => Some(ERROR_INVALID_PREFIX),
+            paimon::Error::ConfigInvalid { .. } => {
+                Some(crate::bridge_error::LOON_STORAGE_CONFIG_INVALID)
+            }
             _ => None,
         }
     });
-    marker.map_or(error, |marker| anyhow!("{marker} {message}"))
+    code.map_or(error, |code| tagged(code, &message))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,19 +263,25 @@ fn pinned_metadata_result<T>(
 ) -> Result<T> {
     result.map_err(|error| {
         let not_found = match &error {
-            paimon::Error::IoUnexpected { source, .. } => {
-                source.kind().into_static() == "NotFound"
-            }
+            paimon::Error::IoUnexpected { source, .. } => source.kind().into_static() == "NotFound",
+            // A missing snapshot file is the one not-found paimon does not
+            // report through an IO error kind: SnapshotManager checks
+            // `exists()` itself and raises DataInvalid with this message. It is
+            // still a not-found, so it must not fall through to the
+            // unclassified branch.
             paimon::Error::DataInvalid { message, .. } => {
                 message.starts_with("snapshot file does not exist:")
             }
             _ => false,
         };
         if not_found {
-            anyhow!(invalid_message(format_args!(
+            // Paimon itself says NotFound; follow that classification instead
+            // of re-tagging it as an invalid configuration.
+            let message = format!(
                 "required metadata for Paimon snapshot {snapshot_id} was not found in table \
                  {table_location}; refresh the external collection"
-            )))
+            );
+            tagged(crate::bridge_error::LOON_STORAGE_NOT_FOUND, &message)
         } else {
             anyhow!(error).context(format!(
                 "cannot resolve Paimon snapshot {snapshot_id} for table {table_location}"
@@ -528,9 +542,8 @@ fn decide_route(
 }
 
 fn checked_non_negative(value: i64, name: &str) -> Result<u64> {
-    u64::try_from(value).with_context(|| {
-        invalid_message(format_args!("Paimon {name} is negative: {value}"))
-    })
+    u64::try_from(value)
+        .with_context(|| data_invalid_message(format_args!("Paimon {name} is negative: {value}")))
 }
 
 fn metadata_split_row_count(split: &DataSplit) -> Result<Option<u64>> {
@@ -668,7 +681,7 @@ fn validate_data_split_binding(
 fn deletion_descriptor(file: &DeletionFile) -> Result<DeletionFileDescriptor> {
     ensure!(
         !file.path().is_empty(),
-        invalid_message("Paimon deletion vector path is empty")
+        data_invalid_message("Paimon deletion vector path is empty")
     );
     Ok(DeletionFileDescriptor {
         path: file.path().to_string(),
@@ -677,7 +690,7 @@ fn deletion_descriptor(file: &DeletionFile) -> Result<DeletionFileDescriptor> {
             let length = checked_non_negative(file.length(), "deletion vector length")?;
             ensure!(
                 length > 0,
-                invalid_message("Paimon deletion vector length is zero")
+                data_invalid_message("Paimon deletion vector length is zero")
             );
             length
         },
@@ -758,7 +771,7 @@ pub fn paimon_plan_files(
                         };
                         ensure!(
                             deleted_rows <= physical_rows,
-                            invalid_message(format_args!(
+                            data_invalid_message(format_args!(
                                 "Paimon deletion cardinality {deleted_rows} exceeds physical row count \
                                  {physical_rows} for {}",
                                 file.file_name
@@ -814,13 +827,13 @@ async fn read_deletion_vector_at(
 ) -> Result<Vec<u64>> {
     ensure!(
         expected_cardinality >= -1,
-        invalid_message(format_args!(
+        data_invalid_message(format_args!(
             "Paimon deletion vector cardinality is invalid: {expected_cardinality}"
         ))
     );
     ensure!(
         length >= 4,
-        invalid_message(format_args!(
+        data_invalid_message(format_args!(
             "Paimon deletion vector length is too small: {length}"
         ))
     );
@@ -843,30 +856,24 @@ async fn read_deletion_vector_at(
         ))
     })?;
     let file_size = input.metadata().await?.size;
-    let total_length = length
-        .checked_add(8)
-        .ok_or_else(|| {
-            anyhow!(invalid_message(
-                "Paimon deletion vector range length overflow"
-            ))
-        })?;
-    let requested_end = offset
-        .checked_add(total_length)
-        .ok_or_else(|| {
-            anyhow!(invalid_message(
-                "Paimon deletion vector range end overflow"
-            ))
-        })?;
-    let header_end = offset
-        .checked_add(8)
-        .ok_or_else(|| {
-            anyhow!(invalid_message(
-                "Paimon deletion vector header range overflow"
-            ))
-        })?;
+    let total_length = length.checked_add(8).ok_or_else(|| {
+        anyhow!(data_invalid_message(
+            "Paimon deletion vector range length overflow"
+        ))
+    })?;
+    let requested_end = offset.checked_add(total_length).ok_or_else(|| {
+        anyhow!(data_invalid_message(
+            "Paimon deletion vector range end overflow"
+        ))
+    })?;
+    let header_end = offset.checked_add(8).ok_or_else(|| {
+        anyhow!(data_invalid_message(
+            "Paimon deletion vector header range overflow"
+        ))
+    })?;
     ensure!(
         header_end <= file_size,
-        invalid_message(format_args!(
+        data_invalid_message(format_args!(
             "Paimon deletion vector header range [{offset}, {header_end}) exceeds file size \
              {file_size}: {path}"
         ))
@@ -875,7 +882,7 @@ async fn read_deletion_vector_at(
     let bytes = reader.read(offset..requested_end.min(file_size)).await?;
     ensure!(
         bytes.len() >= 8,
-        invalid_message(format_args!(
+        data_invalid_message(format_args!(
             "Paimon deletion vector short header: expected 8 bytes, got {}",
             bytes.len()
         ))
@@ -891,24 +898,24 @@ async fn read_deletion_vector_at(
     {
         ensure!(
             declared_length.checked_add(8) == Some(length),
-            invalid_message(format_args!(
+            data_invalid_message(format_args!(
                 "Paimon bitmap64 deletion vector length mismatch: descriptor {length}, payload \
                  {declared_length} plus 8-byte envelope"
             ))
         );
-        let end = offset
-            .checked_add(length)
-            .ok_or_else(|| {
-                anyhow!(invalid_message(
-                    "Paimon bitmap64 deletion vector range end overflow"
-                ))
-            })?;
+        let end = offset.checked_add(length).ok_or_else(|| {
+            anyhow!(data_invalid_message(
+                "Paimon bitmap64 deletion vector range end overflow"
+            ))
+        })?;
         let bitmap64_length = usize::try_from(length).with_context(|| {
-            invalid_message("Paimon bitmap64 deletion vector length exceeds addressable memory")
+            data_invalid_message(
+                "Paimon bitmap64 deletion vector length exceeds addressable memory",
+            )
         })?;
         ensure!(
             end <= file_size && bytes.len() >= bitmap64_length,
-            invalid_message(format_args!(
+            data_invalid_message(format_args!(
                 "Paimon bitmap64 deletion vector range [{offset}, {end}) exceeds file size \
                  {file_size}: {path}"
             ))
@@ -921,14 +928,14 @@ async fn read_deletion_vector_at(
     }
     ensure!(
         big_endian_magic == DELETION_VECTOR_MAGIC,
-        invalid_message(format_args!(
+        data_invalid_message(format_args!(
             "invalid Paimon deletion vector magic: expected {DELETION_VECTOR_MAGIC}, got \
              {big_endian_magic}"
         ))
     );
     ensure!(
         declared_length == length,
-        invalid_message(format_args!(
+        data_invalid_message(format_args!(
             "Paimon deletion vector length mismatch: descriptor {length}, payload \
              {declared_length}"
         ))
@@ -936,24 +943,24 @@ async fn read_deletion_vector_at(
 
     ensure!(
         requested_end <= file_size,
-        invalid_message(format_args!(
+        data_invalid_message(format_args!(
             "Paimon deletion vector range [{offset}, {requested_end}) exceeds file size \
              {file_size}: {path}"
         ))
     );
     let expected_total_length = usize::try_from(total_length).with_context(|| {
-        invalid_message("Paimon deletion vector range length exceeds addressable memory")
+        data_invalid_message("Paimon deletion vector range length exceeds addressable memory")
     })?;
     ensure!(
         bytes.len() == expected_total_length,
-        invalid_message(format_args!(
+        data_invalid_message(format_args!(
             "Paimon deletion vector short read: expected {total_length} bytes, got {}",
             bytes.len()
         ))
     );
 
     let payload_end = usize::try_from(4 + length).with_context(|| {
-        invalid_message("Paimon deletion vector payload length exceeds addressable memory")
+        data_invalid_message("Paimon deletion vector payload length exceeds addressable memory")
     })?;
     let stored_crc = u32::from_be_bytes(bytes[payload_end..payload_end + 4].try_into()?);
     let mut crc = crc32fast::Hasher::new();
@@ -961,20 +968,21 @@ async fn read_deletion_vector_at(
     let actual_crc = crc.finalize();
     ensure!(
         stored_crc == actual_crc,
-        invalid_message(format_args!(
+        data_invalid_message(format_args!(
             "Paimon deletion vector CRC mismatch: expected {stored_crc}, got {actual_crc}"
         ))
     );
     let mut bitmap_input = Cursor::new(&bytes[8..payload_end]);
-    let bitmap = RoaringBitmap::deserialize_from(&mut bitmap_input)
-        .with_context(|| invalid_message("cannot deserialize Paimon roaring deletion vector"))?;
+    let bitmap = RoaringBitmap::deserialize_from(&mut bitmap_input).with_context(|| {
+        data_invalid_message("cannot deserialize Paimon roaring deletion vector")
+    })?;
     if expected_cardinality >= 0 {
         let expected_cardinality = u64::try_from(expected_cardinality).with_context(|| {
-            invalid_message("Paimon deletion vector cardinality exceeds the supported range")
+            data_invalid_message("Paimon deletion vector cardinality exceeds the supported range")
         })?;
         ensure!(
             bitmap.len() == expected_cardinality,
-            invalid_message(format_args!(
+            data_invalid_message(format_args!(
                 "Paimon deletion vector cardinality mismatch: expected {expected_cardinality}, \
                  got {}",
                 bitmap.len()
@@ -994,14 +1002,15 @@ pub fn paimon_read_deletion_vector(
 ) -> Result<Vec<u64>> {
     let options = options_from_vecs(storage_options_keys, storage_options_values)
         .map_err(classify_bridge_error)?;
-    TOKIO_RT.block_on(read_deletion_vector_at(
-        path,
-        offset,
-        length,
-        expected_cardinality,
-        &options,
-    ))
-    .map_err(classify_bridge_error)
+    TOKIO_RT
+        .block_on(read_deletion_vector_at(
+            path,
+            offset,
+            length,
+            expected_cardinality,
+            &options,
+        ))
+        .map_err(classify_bridge_error)
 }
 
 type PaimonBatchStream = BoxStream<'static, paimon::Result<RecordBatch>>;
@@ -1014,13 +1023,11 @@ struct PaimonStreamReader {
 fn classify_stream_error(error: paimon::Error) -> ArrowError {
     let classified = classify_bridge_error(anyhow!(error));
     let message = format!("{classified:#}");
-    if message.contains(ERROR_NOT_IMPLEMENTED_PREFIX) {
-        return ArrowError::NotYetImplemented(message);
+    match crate::bridge_error::take_last_bridge_error().code {
+        crate::bridge_error::BRIDGE_ERRCODE_NOT_SUPPORTED => ArrowError::NotYetImplemented(message),
+        crate::bridge_error::LOON_STORAGE_CONFIG_INVALID => ArrowError::InvalidArgumentError(message),
+        _ => ArrowError::IoError(message.clone(), std::io::Error::other(message)),
     }
-    if message.contains(ERROR_INVALID_PREFIX) {
-        return ArrowError::InvalidArgumentError(message);
-    }
-    ArrowError::IoError(message.clone(), std::io::Error::other(message))
 }
 
 impl Iterator for PaimonStreamReader {
@@ -1061,10 +1068,12 @@ fn open_data_split_reader_impl(
 ) -> Result<Box<BlockingPaimonDataSplitReader>> {
     let options = options_from_vecs(storage_options_keys, storage_options_values)?;
     let (metadata, split) = decode_split_metadata(metadata_json).map_err(|error| {
-        anyhow!("{ERROR_INVALID_PREFIX} invalid Paimon data-split descriptor: {error:#}")
+        let message = format!("invalid Paimon data-split descriptor: {error:#}");
+        tagged(crate::bridge_error::LOON_STORAGE_CONFIG_INVALID, &message)
     })?;
     validate_data_split_binding(&metadata, &split, expected_table_location).map_err(|error| {
-        anyhow!("{ERROR_INVALID_PREFIX} invalid Paimon data-split binding: {error:#}")
+        let message = format!("invalid Paimon data-split binding: {error:#}");
+        tagged(crate::bridge_error::LOON_STORAGE_CONFIG_INVALID, &message)
     })?;
     let table_location = metadata
         .table_location
@@ -1214,27 +1223,32 @@ mod tests {
         let cases = [
             (
                 "IO operation failed on underlying storage: NotFound (permanent)",
-                Some(ERROR_NOT_FOUND_PREFIX),
+                Some(104),
             ),
             (
                 "IO operation failed on underlying storage: RateLimited (temporary)",
-                Some(ERROR_TRANSIENT_THROTTLING_PREFIX),
+                Some(109),
             ),
             (
                 "IO operation failed on underlying storage: Unexpected (temporary)",
-                Some(ERROR_TRANSIENT_SERVICE_PREFIX),
+                Some(110),
             ),
             (
                 "IO operation failed on underlying storage: PermissionDenied (permanent)",
                 None,
             ),
         ];
-        for (message, marker) in cases {
+        for (message, code) in cases {
             let classified = format!("{:#}", classify_bridge_error(anyhow!(message)));
-            if let Some(marker) = marker {
-                assert!(classified.contains(marker), "{classified}");
+            if let Some(code) = code {
+                assert!(
+                    classified.contains(&format!("{M}{code}; ")),
+                    "{classified}"
+                );
             } else {
-                assert!(!classified.contains("[paimon:error="), "{classified}");
+                // Unclassified stays untagged -- no transport marker may attach
+                // itself to a failure nobody positively identified.
+                assert!(!classified.contains(M), "{classified}");
             }
         }
     }
@@ -1253,7 +1267,7 @@ mod tests {
         let (code, message) = stream_error(temporary);
         assert_eq!(code, 5); // EIO
         assert!(
-            message.contains(ERROR_TRANSIENT_THROTTLING_PREFIX),
+            message.contains("__LOON_RUST_BRIDGE_ERRCODE__="109",
             "{message}"
         );
 
@@ -1269,7 +1283,7 @@ mod tests {
         let (code, message) = stream_error(temporary);
         assert_eq!(code, 5); // EIO
         assert!(
-            message.contains(ERROR_TRANSIENT_SERVICE_PREFIX),
+            message.contains("__LOON_RUST_BRIDGE_ERRCODE__=110"),
             "{message}"
         );
 
@@ -1282,7 +1296,7 @@ mod tests {
         };
         let (code, message) = stream_error(not_found);
         assert_eq!(code, 5); // EIO
-        assert!(message.contains(ERROR_NOT_FOUND_PREFIX), "{message}");
+        assert!(message.contains("__LOON_RUST_BRIDGE_ERRCODE__=104"), "{message}");
 
         let permanent = paimon::Error::IoUnexpected {
             message: "stream read failed".to_string(),
@@ -1293,22 +1307,41 @@ mod tests {
         };
         let (code, message) = stream_error(permanent);
         assert_eq!(code, 5); // EIO
-        assert!(!message.contains(ERROR_INVALID_PREFIX), "{message}");
+        assert!(!message.contains("__LOON_RUST_BRIDGE_ERRCODE__=115"), "{message}");
 
+        // A DataInvalid raised mid-stream stays UNCLASSIFIED, and that is the
+        // point of this assertion rather than an omission.
+        //
+        // The only "invalid" marker we have maps to LOON_STORAGE_CONFIG_INVALID
+        // on the C++ side -- a verdict about the deployment's configuration. A
+        // record batch that will not decode says nothing about the deployment,
+        // so tagging it that way would send whoever is paged to go and fix
+        // storage settings that were fine. Paimon 0.3 also conflates "missing"
+        // and "corrupt" into this one variant, so we could not honestly claim
+        // DataCorrupted either. Unclassified lands in the conservative
+        // non-retryable bucket without asserting a cause nobody established.
+        //
+        // TODO: paimon has no data-format marker. Adding one would let a
+        // decode failure reach Milvus as DataFormat instead of as a bare IO
+        // error, which is what lets a caller quarantine a file rather than
+        // retry it forever.
         let invalid = paimon::Error::DataInvalid {
             message: "corrupt record batch".to_string(),
             source: None,
         };
         let (code, message) = stream_error(invalid);
-        assert_eq!(code, 22); // EINVAL
-        assert!(message.contains(ERROR_INVALID_PREFIX), "{message}");
+        assert_eq!(code, 5); // EIO -- unclassified, not EINVAL
+        assert!(
+            !message.contains("__LOON_RUST_BRIDGE_ERRCODE__=115"),
+            "a corrupt record batch must not be reported as a configuration fault: {message}"
+        );
     }
 
     #[test]
     fn scan_mode_errors_are_classified() {
         let invalid = ScanMode::parse("invalid-mode").unwrap_err();
         assert!(
-            invalid.to_string().contains(ERROR_INVALID_PREFIX),
+            invalid.to_string().contains("__LOON_RUST_BRIDGE_ERRCODE__=115"),
             "{invalid}"
         );
 
@@ -1693,7 +1726,7 @@ mod tests {
         invalid_split["data_files"][0]["_ROW_COUNT"] = serde_json::Value::from(-1);
         let invalid_split: DataSplit = serde_json::from_value(invalid_split).unwrap();
         let error = encode_split_metadata("file:///tmp/table", &invalid_split, 10).unwrap_err();
-        assert!(error.to_string().contains(ERROR_INVALID_PREFIX), "{error}");
+        assert!(error.to_string().contains("__LOON_RUST_BRIDGE_ERRCODE__=115"), "{error}");
     }
 
     #[test]
@@ -1798,7 +1831,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_pinned_snapshot_requests_external_collection_refresh() {
+    fn missing_pinned_snapshot_is_reported_as_not_found() {
         let directory = tempfile::tempdir().unwrap();
         let table_location = directory.path().join("snap-table");
         let table_location = table_location.to_str().unwrap();
@@ -1829,9 +1862,15 @@ mod tests {
             Some(&expected_snapshot_id)
         );
 
-        // A confirmed-missing snapshot is a terminal input-state error with
-        // refresh advice (the C++ boundary keys the Invalid classification
-        // off that marker).
+        // A pinned snapshot that does not exist is the caller's input, not a
+        // storage incident: it must reach Milvus as not-found with something
+        // actionable, not as an unclassified failure the caller can only log.
+        //
+        // Paimon 0.3 gives us no typed way to tell "missing" from "corrupt" --
+        // both arrive as `Error::DataInvalid` -- so the arm in `load_table`
+        // matches the message SnapshotManager itself formats. That coupling is
+        // the reason this test asserts on the classification rather than on the
+        // wording: if paimon ever changes that string, this is what fails.
         let error = TOKIO_RT
             .block_on(load_table(
                 table_location,
@@ -1839,12 +1878,14 @@ mod tests {
                 Some(snapshot_id + 1000),
             ))
             .unwrap_err();
-        let message = format!("{error:#}");
-        assert!(message.contains("required metadata"), "{message}");
-        assert!(message.contains("was not found"), "{message}");
+        let message = format!("{:#}", classify_bridge_error(error));
+        assert!(
+            message.starts_with("__LOON_RUST_BRIDGE_ERRCODE__=104; "),
+            "a missing pinned snapshot must be tagged not-found, got: {message}"
+        );
         assert!(
             message.contains("refresh the external collection"),
-            "{message}"
+            "the not-found message must tell the operator what to do, got: {message}"
         );
     }
 
@@ -1879,10 +1920,13 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("snapshot JSON invalid"), "{message}");
         assert!(!message.contains("was not found"), "{message}");
-        assert!(!message.contains("refresh the external collection"), "{message}");
+        assert!(
+            !message.contains("refresh the external collection"),
+            "{message}"
+        );
 
         let message = format!("{:#}", classify_bridge_error(error));
-        assert!(message.contains(ERROR_INVALID_PREFIX), "{message}");
+        assert!(message.contains("snapshot JSON invalid"), "{message}");
     }
 
     #[test]
@@ -1899,15 +1943,17 @@ mod tests {
             message: "cannot read snapshot".to_string(),
             source: Box::new(source),
         };
-        let error = pinned_metadata_result::<()>(Err(error), "s3://bucket/table", 7)
-            .unwrap_err();
+        let error = pinned_metadata_result::<()>(Err(error), "s3://bucket/table", 7).unwrap_err();
         let message = format!("{:#}", classify_bridge_error(error));
         assert!(
-            message.contains(ERROR_TRANSIENT_SERVICE_PREFIX),
+            message.contains("__LOON_RUST_BRIDGE_ERRCODE__=110"),
             "{message}"
         );
-        assert!(!message.contains(ERROR_INVALID_PREFIX), "{message}");
-        assert!(!message.contains("refresh the external collection"), "{message}");
+        assert!(!message.contains("__LOON_RUST_BRIDGE_ERRCODE__=115"), "{message}");
+        assert!(
+            !message.contains("refresh the external collection"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -1950,7 +1996,9 @@ mod tests {
             ))
             .unwrap_err();
         assert!(
-            cardinality_error.to_string().contains(ERROR_INVALID_PREFIX),
+            cardinality_error
+                .to_string()
+                .contains("cardinality mismatch"),
             "{cardinality_error}"
         );
 
@@ -1965,7 +2013,7 @@ mod tests {
             ))
             .unwrap_err();
         assert!(
-            short_read_error.to_string().contains(ERROR_INVALID_PREFIX),
+            short_read_error.to_string().contains("exceeds file size"),
             "{short_read_error}"
         );
 
@@ -1984,7 +2032,7 @@ mod tests {
             ))
             .unwrap_err();
         assert!(
-            crc_error.to_string().contains(ERROR_INVALID_PREFIX),
+            crc_error.to_string().contains("CRC mismatch"),
             "{crc_error}"
         );
     }

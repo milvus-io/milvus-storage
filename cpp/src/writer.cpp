@@ -38,7 +38,9 @@
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/layout.h"
 #include "milvus-storage/common/log.h"
+#include "milvus-storage/common/writer_status.h"
 #include "milvus-storage/format/column_group_writer.h"
+#include "milvus-storage/common/extend_status.h"
 
 namespace milvus_storage::api {
 
@@ -216,10 +218,10 @@ std::vector<std::shared_ptr<ColumnGroup>> SchemaBasedColumnGroupPolicy::get_colu
 
 arrow::Status SizeBasedColumnGroupPolicy::sample(const std::shared_ptr<arrow::RecordBatch>& batch) {
   if (!batch) {
-    return arrow::Status::Invalid("Sample batch cannot be null for SizeBasedColumnGroupPolicy");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Sample batch cannot be null for SizeBasedColumnGroupPolicy");
   }
   if (batch->num_rows() == 0) {
-    return arrow::Status::Invalid("Sample batch cannot be empty (0 rows) for SizeBasedColumnGroupPolicy");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "Sample batch cannot be empty (0 rows) for SizeBasedColumnGroupPolicy");
   }
 
   // Calculate average column sizes based on the sample
@@ -323,6 +325,11 @@ class WriterImpl : public Writer {
    *       All batches written to the same writer should have consistent schemas.
    */
   arrow::Status write(const std::shared_ptr<arrow::RecordBatch>& batch) override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
+    return writer_status_.Fail(write_impl(batch));
+  }
+
+  arrow::Status write_impl(const std::shared_ptr<arrow::RecordBatch>& batch) {
     FIU_RETURN_ON(FIUKEY_WRITER_WRITE_FAIL,
                   arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_WRITER_WRITE_FAIL)));
 
@@ -360,6 +367,11 @@ class WriterImpl : public Writer {
    *       after flushing.
    */
   arrow::Status flush() override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
+    return writer_status_.Fail(flush_impl());
+  }
+
+  arrow::Status flush_impl() {
     FIU_RETURN_ON(FIUKEY_WRITER_FLUSH_FAIL,
                   arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_WRITER_FLUSH_FAIL)));
 
@@ -397,6 +409,43 @@ class WriterImpl : public Writer {
    */
   arrow::Result<std::shared_ptr<ColumnGroups>> close(const std::vector<std::string_view>& config_keys = {},
                                                      const std::vector<std::string_view>& config_values = {}) override {
+    // Abandon on both failure paths; see FormatWriter::Close in format_writer.h.
+    if (auto first_failure = writer_status_.Check(); !first_failure.ok()) {
+      abort();
+      return first_failure;
+    }
+    auto result = close_impl(config_keys, config_values);
+    if (!result.ok()) {
+      auto status = writer_status_.Fail(result.status());
+      abort();
+      return status;
+    }
+    return result;
+  }
+
+  // No writer_status_.Check(): abort must work precisely when the writer is
+  // already terminal, which is the only state anyone calls it from.
+  void abort() noexcept override {
+    // closed_ before BeginDiscard(): abort after a successful close must be a
+    // no-op in every respect, including the recorded status.
+    if (closed_) {
+      return;
+    }
+    writer_status_.BeginDiscard();
+    closed_ = true;
+    // Every column group gets its chance. One failing to release its storage is
+    // no reason to leave the others holding theirs, and none of them reports
+    // its cleanup failure upward -- ColumnGroupWriter::Abort logs and returns OK.
+    for (const auto& writer : column_group_writers_) {
+      if (writer != nullptr) {
+        writer->Abort();
+      }
+    }
+    column_group_writers_.clear();
+  }
+
+  arrow::Result<std::shared_ptr<ColumnGroups>> close_impl(const std::vector<std::string_view>& config_keys = {},
+                                                          const std::vector<std::string_view>& config_values = {}) {
     FIU_RETURN_ON(FIUKEY_WRITER_CLOSE_FAIL,
                   arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_WRITER_CLOSE_FAIL)));
 
@@ -441,6 +490,7 @@ class WriterImpl : public Writer {
   // ==================== Internal Data Members ====================
   bool closed_{false};       ///< Whether the writer has been closed
   bool initialized_{false};  ///< Whether the writer has been initialized
+  WriterStatus writer_status_;
 
   std::string base_path_;                                   ///< Base directory for column group files
   std::shared_ptr<arrow::Schema> schema_;                   ///< Logical schema of the dataset

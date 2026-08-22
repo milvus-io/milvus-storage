@@ -44,7 +44,6 @@ struct PaimonTestTableInfo {
   std::vector<int64_t> snapshot_ids;
 };
 
-arrow::Status MakePaimonBridgeErrorStatus(std::string_view message);
 
 namespace internal {
 std::shared_ptr<arrow::RecordBatchReader> WrapPaimonRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner,

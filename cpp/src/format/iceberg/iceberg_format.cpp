@@ -18,6 +18,9 @@
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "iceberg_bridge.h"
+#include "milvus-storage/common/extend_status.h"
+
+#include <charconv>
 
 namespace milvus_storage {
 
@@ -27,7 +30,13 @@ arrow::Result<std::vector<api::ColumnGroupFile>> IcebergFormat::explore(const st
   auto storage_options = iceberg::ToStorageOptions(fs_config);
 
   ARROW_ASSIGN_OR_RAISE(auto snapshot_str, api::GetValue<std::string>(properties, PROPERTY_ICEBERG_SNAPSHOT_ID));
-  int64_t snapshot_id = std::stoll(snapshot_str);
+  int64_t snapshot_id = 0;
+  const auto* begin = snapshot_str.data();
+  const auto* end = begin + snapshot_str.size();
+  const auto [ptr, ec] = std::from_chars(begin, end, snapshot_id);
+  if (ec != std::errc{} || ptr != end) {
+    return arrow::Status::Invalid(PROPERTY_ICEBERG_SNAPSHOT_ID, " must be an int64, got '", snapshot_str, "'");
+  }
 
   // Convert Milvus URI (scheme://address/bucket/path) to scheme://bucket/path.
   // For S3 this is the final format; for Azure ABFSS, the Rust bridge further
@@ -35,7 +44,7 @@ arrow::Result<std::vector<api::ColumnGroupFile>> IcebergFormat::explore(const st
   ARROW_ASSIGN_OR_RAISE(auto parsed_uri, StorageUri::Parse(explore_dir));
   ARROW_ASSIGN_OR_RAISE(auto iceberg_uri, StorageUri::Make(parsed_uri, false));
 
-  auto file_infos = iceberg::PlanFiles(iceberg_uri, snapshot_id, storage_options);
+  ARROW_ASSIGN_OR_RAISE(auto file_infos, iceberg::PlanFiles(iceberg_uri, snapshot_id, storage_options));
 
   std::vector<api::ColumnGroupFile> files;
   files.reserve(file_infos.size());
@@ -43,6 +52,12 @@ arrow::Result<std::vector<api::ColumnGroupFile>> IcebergFormat::explore(const st
     // Convert data file path from standard format back to Milvus format
     auto milvus_path = iceberg::ToMilvusUri(info.data_file_path, fs_config.address);
 
+    if (info.num_deleted_rows > info.record_count) {
+      return MakeExtendErrorMsg(
+          ExtendStatusCode::DataCorrupted,
+          "Iceberg positional delete count exceeds record count for data file: ", info.data_file_path,
+          " (records=", info.record_count, ", deletes=", info.num_deleted_rows, ")");
+    }
     api::ColumnGroupFile cgf{
         std::move(milvus_path), 0, static_cast<int64_t>(info.record_count - info.num_deleted_rows), {}};
     if (!info.delete_metadata_json.empty()) {
