@@ -224,6 +224,55 @@ TEST_F(ParquetFileWriterTest, LargeRecordBatchSplitting) {
   }
 }
 
+TEST_F(ParquetFileWriterTest, SlicedRecordBatchUsesCompactRowGroupSize) {
+  const int64_t total_rows = 4096;
+  const int64_t slice_rows = 64;
+  const int32_t vector_bytes = 512;
+
+  auto vector_field = arrow::field("vector", arrow::fixed_size_binary(vector_bytes), false,
+                                   arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"101"}));
+  auto schema = arrow::schema({vector_field});
+
+  arrow::FixedSizeBinaryBuilder builder(arrow::fixed_size_binary(vector_bytes));
+  std::vector<uint8_t> vector(vector_bytes, 0);
+  for (int64_t i = 0; i < total_rows; ++i) {
+    vector[0] = static_cast<uint8_t>(i % 256);
+    ASSERT_TRUE(builder.Append(vector.data()).ok());
+  }
+  auto array = builder.Finish().ValueOrDie();
+
+  for (int64_t offset : {int64_t{0}, int64_t{1024}}) {
+    auto sliced = array->Slice(offset, slice_rows);
+    auto record = arrow::RecordBatch::Make(schema, slice_rows, {sliced});
+    ASSERT_GT(GetRecordBatchMemorySize(record), DEFAULT_MAX_ROW_GROUP_SIZE);
+
+    std::string temp_file = "/tmp/test_sliced_batch_" + std::to_string(offset) + ".parquet";
+    StorageConfig config;
+    std::vector<std::string> paths = {temp_file};
+    std::vector<std::vector<int>> column_groups = {{0}};
+    ASSERT_AND_ASSIGN(auto writer,
+                      PackedRecordBatchWriter::Make(fs_, paths, schema, config, column_groups, 2 * 1024 * 1024));
+    ASSERT_TRUE(writer->Write(record).ok());
+    ASSERT_TRUE(writer->Close().ok());
+
+    ASSERT_AND_ASSIGN(auto reader, FileRowGroupReader::Make(fs_, temp_file, schema));
+    auto metadata = reader->file_metadata()->GetRowGroupMetadataVector();
+    ASSERT_EQ(metadata.size(), 1);
+    EXPECT_EQ(metadata.Get(0).row_num(), slice_rows);
+    EXPECT_LT(metadata.Get(0).memory_size(), DEFAULT_MAX_ROW_GROUP_SIZE);
+
+    ASSERT_TRUE(reader->SetRowGroupOffsetAndCount(0, 1).ok());
+    std::shared_ptr<arrow::Table> table;
+    ASSERT_TRUE(reader->ReadNextRowGroup(&table).ok());
+    ASSERT_NE(table, nullptr);
+    ASSERT_AND_ASSIGN(auto actual, table->CombineChunksToBatch());
+    EXPECT_TRUE(actual->Equals(*record));
+    ASSERT_TRUE(reader->Close().ok());
+
+    std::remove(temp_file.c_str());
+  }
+}
+
 TEST_F(ParquetFileWriterTest, EmptyRecordBatch) {
   // Test writing empty record batch
   // Create empty arrays for each column in the schema

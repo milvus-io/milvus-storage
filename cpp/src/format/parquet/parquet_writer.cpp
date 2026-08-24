@@ -18,6 +18,7 @@
 
 #include <arrow/io/buffered.h>
 #include <arrow/io/memory.h>
+#include <arrow/util/byte_size.h>
 #include <arrow/util/compression.h>
 #include <parquet/properties.h>
 #include <parquet/metadata.h>
@@ -245,8 +246,9 @@ arrow::Status ParquetFileWriter::Write(const std::shared_ptr<arrow::RecordBatch>
   if (!record) {
     return arrow::Status::OK();
   }
+  ARROW_ASSIGN_OR_RAISE(auto referenced_size, arrow::util::ReferencedBufferSize(*record));
+  auto batch_size = static_cast<size_t>(referenced_size);
   cached_batches_.push_back(record);
-  auto batch_size = milvus_storage::GetRecordBatchMemorySize(record);
   cached_batch_sizes_.push_back(batch_size);
   cached_size_ += batch_size;
   return arrow::Status::OK();
