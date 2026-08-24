@@ -26,9 +26,21 @@
 #include <boost/filesystem/operations.hpp>
 #include <memory>
 
+#include <arrow/array/concatenate.h>
 #include <arrow/io/buffered.h>
 
 namespace milvus_storage::parquet {
+
+static arrow::Result<std::shared_ptr<arrow::RecordBatch>> materialize_batch(
+    const std::shared_ptr<arrow::RecordBatch>& record) {
+  std::vector<std::shared_ptr<arrow::Array>> columns;
+  columns.reserve(record->num_columns());
+  for (const auto& column : record->columns()) {
+    ARROW_ASSIGN_OR_RAISE(auto materialized, arrow::Concatenate({column}, arrow::default_memory_pool()));
+    columns.emplace_back(std::move(materialized));
+  }
+  return arrow::RecordBatch::Make(record->schema(), record->num_rows(), std::move(columns));
+}
 
 static ::parquet::Compression::type convert_compression_type(const std::string& compression) {
   if (compression == "uncompressed") {
@@ -230,8 +242,9 @@ arrow::Status ParquetFileWriter::Write(const std::shared_ptr<arrow::RecordBatch>
   if (!record) {
     return arrow::Status::OK();
   }
-  cached_batches_.push_back(record);
-  auto batch_size = milvus_storage::GetRecordBatchMemorySize(record);
+  ARROW_ASSIGN_OR_RAISE(auto batch, materialize_batch(record));
+  cached_batches_.push_back(batch);
+  auto batch_size = milvus_storage::GetRecordBatchMemorySize(batch);
   cached_batch_sizes_.push_back(batch_size);
   cached_size_ += batch_size;
   return arrow::Status::OK();
