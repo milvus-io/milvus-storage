@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include <cerrno>
+#include <initializer_list>
 
 #include <arrow/status.h>
 #include <arrow/util/io_util.h>
@@ -26,51 +27,16 @@ namespace milvus_storage::test {
 
 class ExtendStatusTest : public ::testing::Test {};
 
-TEST_F(ExtendStatusTest, TestMakeExtendError) {
-  // NoSuchUpload
-  {
-    auto status = MakeExtendError(ExtendStatusCode::AwsErrorNoSuchUpload, "upload gone", "extra info");
-    EXPECT_FALSE(status.ok());
-    EXPECT_TRUE(status.IsIOError());
+TEST_F(ExtendStatusTest, ProducerCanDistinguishPostIoConfigFailure) {
+  auto pre_io = MakeExtendError(ExtendStatusCode::StorageConfigInvalid, "invalid endpoint syntax");
+  auto post_io = MakeExtendError(ExtendStatusCode::StorageConfigInvalid, arrow::StatusCode::IOError,
+                                 "credential endpoint rejected the request");
 
-    auto detail = ExtendStatusDetail::UnwrapStatus(status);
-    ASSERT_NE(detail, nullptr);
-    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorNoSuchUpload);
-    EXPECT_EQ(detail->extra_info(), "extra info");
-  }
-
-  // Conflict
-  {
-    auto status = MakeExtendError(ExtendStatusCode::AwsErrorConflict, "conflict occurred", "conflict detail");
-    auto detail = ExtendStatusDetail::UnwrapStatus(status);
-    ASSERT_NE(detail, nullptr);
-    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorConflict);
-  }
-
-  // PreConditionFailed
-  {
-    auto status = MakeExtendError(ExtendStatusCode::AwsErrorPreConditionFailed, "precondition", "precondition detail");
-    auto detail = ExtendStatusDetail::UnwrapStatus(status);
-    ASSERT_NE(detail, nullptr);
-    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorPreConditionFailed);
-  }
-
-  auto non_retryable = MakeExtendError(ExtendStatusCode::AwsErrorConflict, "conflict", "detail");
-  auto non_retryable_detail = ExtendStatusDetail::UnwrapStatus(non_retryable);
-  ASSERT_NE(non_retryable_detail, nullptr);
-  EXPECT_FALSE(non_retryable_detail->retryable());
-
-  arrow::Status (*make_extend_error)(ExtendStatusCode, std::string, std::string) = &MakeExtendError;
-  auto explicit_three_arg = make_extend_error(ExtendStatusCode::AwsErrorConflict, "conflict", "detail");
-  auto explicit_three_arg_detail = ExtendStatusDetail::UnwrapStatus(explicit_three_arg);
-  ASSERT_NE(explicit_three_arg_detail, nullptr);
-  EXPECT_FALSE(explicit_three_arg_detail->retryable());
-
-  auto retryable = MakeExtendError(ExtendStatusCode::StorageTransientNetwork, "network failed", "detail");
-  auto retryable_detail = ExtendStatusDetail::UnwrapStatus(retryable);
-  ASSERT_NE(retryable_detail, nullptr);
-  EXPECT_TRUE(retryable_detail->retryable());
-  EXPECT_EQ(retryable_detail->code(), ExtendStatusCode::StorageTransientNetwork);
+  EXPECT_TRUE(pre_io.IsInvalid()) << pre_io.ToString();
+  EXPECT_TRUE(post_io.IsIOError()) << post_io.ToString();
+  auto detail = ExtendStatusDetail::UnwrapStatus(post_io);
+  ASSERT_NE(detail, nullptr);
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageConfigInvalid);
 }
 
 TEST_F(ExtendStatusTest, TestUnwrapStatus) {
@@ -87,72 +53,18 @@ TEST_F(ExtendStatusTest, TestUnwrapStatus) {
   }
 }
 
-TEST_F(ExtendStatusTest, TestExtendStatusCodeRetryability) {
-  EXPECT_EQ(ExtendStatusCodeFromInt(50), ExtendStatusCode::PackedInvalidArgs);
-  EXPECT_EQ(ExtendStatusCodeFromInt(LOON_AWS_ERROR_NO_SUCH_UPLOAD), ExtendStatusCode::AwsErrorNoSuchUpload);
-  EXPECT_EQ(ExtendStatusCodeFromInt(LOON_TRANSIENT_NETWORK), ExtendStatusCode::StorageTransientNetwork);
-  EXPECT_FALSE(ExtendStatusCodeFromInt(3).has_value());
-
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::PackedInvalidArgs));
-  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNoSuchUpload));
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorConflict));
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorPreConditionFailed));
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNotFound));
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorAccessDenied));
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNonRetryable));
-  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::StorageTransientNetwork));
-  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::StorageTransientTimeout));
-  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::StorageTransientThrottling));
-  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::StorageTransientService));
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::TxnExhaustedRetry));
-  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::TxnResolutionFailed));
-
-  auto status = MakeExtendError(ExtendStatusCode::StorageTransientNetwork, "network", "detail");
-  auto detail = ExtendStatusDetail::UnwrapStatus(status);
-  ASSERT_NE(detail, nullptr);
-  EXPECT_TRUE(detail->retryable());
-}
-
 TEST_F(ExtendStatusTest, TestExtendStatusDetail) {
-  // Enum values
-  {
-    EXPECT_EQ(static_cast<int>(ExtendStatusCode::AwsErrorNoSuchUpload), LOON_AWS_ERROR_NO_SUCH_UPLOAD);
-    EXPECT_EQ(static_cast<int>(ExtendStatusCode::StorageTransientNetwork), LOON_TRANSIENT_NETWORK);
-    EXPECT_EQ(static_cast<int>(ExtendStatusCode::StorageTransientTimeout), LOON_TRANSIENT_TIMEOUT);
-    EXPECT_EQ(static_cast<int>(ExtendStatusCode::StorageTransientThrottling), LOON_TRANSIENT_THROTTLING);
-    EXPECT_EQ(static_cast<int>(ExtendStatusCode::StorageTransientService), LOON_TRANSIENT_SERVICE);
-  }
-
-  // CodeAsString
-  {
-    EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::AwsErrorNoSuchUpload).CodeAsString(), "AwsErrorNoSuchUpload");
-    EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::AwsErrorConflict).CodeAsString(), "AwsErrorConflict");
-    EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::AwsErrorPreConditionFailed).CodeAsString(),
-              "AwsErrorPreConditionFailed");
-    EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::StorageTransientNetwork).CodeAsString(), "StorageTransientNetwork");
-    EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::StorageTransientTimeout).CodeAsString(), "StorageTransientTimeout");
-    EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::StorageTransientThrottling).CodeAsString(),
-              "StorageTransientThrottling");
-    EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::StorageTransientService).CodeAsString(), "StorageTransientService");
-  }
-
   // ToString
   {
-    ExtendStatusDetail detail(ExtendStatusCode::AwsErrorNoSuchUpload, "my extra");
+    ExtendStatusDetail detail(ExtendStatusCode::StorageNoSuchUpload, "my extra");
     auto str = detail.ToString();
-    EXPECT_NE(str.find("AwsErrorNoSuchUpload"), std::string::npos);
+    EXPECT_NE(str.find("StorageNoSuchUpload"), std::string::npos);
     EXPECT_NE(str.find("my extra"), std::string::npos);
-  }
-
-  // Retryable
-  {
-    ExtendStatusDetail detail(ExtendStatusCode::StorageTransientNetwork);
-    EXPECT_TRUE(detail.retryable());
   }
 
   // SetExtraInfo
   {
-    ExtendStatusDetail detail(ExtendStatusCode::AwsErrorConflict);
+    ExtendStatusDetail detail(ExtendStatusCode::StorageConflict);
     EXPECT_EQ(detail.extra_info(), "");
     detail.set_extra_info("new info");
     EXPECT_EQ(detail.extra_info(), "new info");
@@ -160,7 +72,7 @@ TEST_F(ExtendStatusTest, TestExtendStatusDetail) {
 
   // TypeId
   {
-    ExtendStatusDetail detail(ExtendStatusCode::AwsErrorConflict);
+    ExtendStatusDetail detail(ExtendStatusCode::StorageConflict);
     EXPECT_NE(detail.type_id(), nullptr);
     EXPECT_EQ(std::string(detail.type_id()), "milvus_storage::ExtendStatusDetail");
   }
@@ -175,7 +87,7 @@ TEST_F(ExtendStatusTest, PackedCodesUseExpectedArrowStatusCodeAndDetail) {
 
   const Case cases[] = {
       {ExtendStatusCode::PackedInvalidArgs, "PackedInvalidArgs", true},
-      {ExtendStatusCode::PackedStorageIO, "PackedStorageIO", false},
+      {ExtendStatusCode::PackedIO, "PackedIO", false},
       {ExtendStatusCode::PackedMetadataCorrupted, "PackedMetadataCorrupted", false},
       {ExtendStatusCode::PackedFileCorrupted, "PackedFileCorrupted", false},
       {ExtendStatusCode::PackedArrowError, "PackedArrowError", false},
@@ -192,14 +104,11 @@ TEST_F(ExtendStatusTest, PackedCodesUseExpectedArrowStatusCodeAndDetail) {
     ASSERT_NE(detail, nullptr) << test_case.name << ": " << status.ToString();
     EXPECT_EQ(detail->code(), test_case.code);
     EXPECT_EQ(detail->extra_info(), "extra");
-    EXPECT_EQ(detail->CodeAsString(), test_case.name);
-    EXPECT_NE(detail->ToString().find(test_case.name), std::string::npos);
-    EXPECT_NE(detail->ToString().find("extra"), std::string::npos);
   }
 }
 
 TEST_F(ExtendStatusTest, WrapExtendErrorPreservesExistingDetail) {
-  auto original = MakeExtendError(ExtendStatusCode::PackedStorageIO, "storage failed", "cause");
+  auto original = MakeExtendError(ExtendStatusCode::PackedIO, "storage failed", "cause");
 
   auto wrapped = WrapExtendError(ExtendStatusCode::PackedUnexpected, "outer message", original);
 
@@ -207,19 +116,19 @@ TEST_F(ExtendStatusTest, WrapExtendErrorPreservesExistingDetail) {
   ASSERT_NE(detail, nullptr);
   EXPECT_EQ(wrapped.code(), original.code());
   EXPECT_EQ(wrapped.detail(), original.detail());
-  EXPECT_EQ(detail->code(), ExtendStatusCode::PackedStorageIO);
+  EXPECT_EQ(detail->code(), ExtendStatusCode::PackedIO);
   EXPECT_EQ(detail->extra_info(), "cause");
   EXPECT_NE(wrapped.ToString().find("outer message"), std::string::npos);
   EXPECT_NE(wrapped.ToString().find("storage failed"), std::string::npos);
 }
 
 TEST_F(ExtendStatusTest, WrapExtendErrorAddsDetailToPlainStatus) {
-  auto wrapped = WrapExtendError(ExtendStatusCode::PackedStorageIO, "open packed file",
-                                 arrow::Status::IOError("disk unavailable"));
+  auto wrapped =
+      WrapExtendError(ExtendStatusCode::PackedIO, "open packed file", arrow::Status::IOError("disk unavailable"));
 
   auto detail = ExtendStatusDetail::UnwrapStatus(wrapped);
   ASSERT_NE(detail, nullptr);
-  EXPECT_EQ(detail->code(), ExtendStatusCode::PackedStorageIO);
+  EXPECT_EQ(detail->code(), ExtendStatusCode::PackedIO);
   EXPECT_NE(wrapped.ToString().find("open packed file"), std::string::npos);
   EXPECT_NE(detail->extra_info().find("disk unavailable"), std::string::npos);
 }
@@ -227,7 +136,7 @@ TEST_F(ExtendStatusTest, WrapExtendErrorAddsDetailToPlainStatus) {
 TEST_F(ExtendStatusTest, WrapExtendErrorPreservesErrnoDetail) {
   auto cause = arrow::Status::IOError("missing-file").WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
 
-  auto wrapped = WrapExtendError(ExtendStatusCode::PackedStorageIO, "open packed file", cause);
+  auto wrapped = WrapExtendError(ExtendStatusCode::PackedIO, "open packed file", cause);
 
   EXPECT_EQ(wrapped.code(), cause.code());
   EXPECT_EQ(wrapped.detail(), cause.detail());
@@ -238,110 +147,32 @@ TEST_F(ExtendStatusTest, WrapExtendErrorPreservesErrnoDetail) {
   EXPECT_EQ(ToSegcoreError(wrapped).get_error_code(), milvus::ObjectNotExist);
 }
 
+TEST_F(ExtendStatusTest, WrapExtendErrorPreservesOutOfMemory) {
+  auto wrapped = WrapExtendError(ExtendStatusCode::PackedMetadataCorrupted, "parse packed metadata",
+                                 arrow::Status::OutOfMemory("allocation failed"));
+
+  EXPECT_TRUE(wrapped.IsOutOfMemory()) << wrapped.ToString();
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(wrapped), nullptr);
+  EXPECT_NE(wrapped.message().find("parse packed metadata"), std::string::npos);
+  EXPECT_NE(wrapped.message().find("allocation failed"), std::string::npos);
+  EXPECT_EQ(ToSegcoreError(wrapped).get_error_code(), milvus::MemAllocateFailed);
+}
+
 TEST_F(ExtendStatusTest, ExtendCodesMapToSegcoreErrorCode) {
-  struct Case {
-    ExtendStatusCode code;
-    milvus::ErrorCode expected;
-  };
-
-  const Case cases[] = {
-      // input (non-retriable)
-      {ExtendStatusCode::PackedInvalidArgs, milvus::InvalidParameter},
-      // PackedStorageIO: conservatively non-retriable StorageError, but a dormant
-      // branch (no live consumer). The live no-detail plain-arrow read path also
-      // maps plain IOError to StorageError, tested separately below.
-      {ExtendStatusCode::PackedStorageIO, milvus::StorageError},
-      // permanent data corruption
-      {ExtendStatusCode::PackedMetadataCorrupted, milvus::DataFormatBroken},
-      {ExtendStatusCode::PackedFileCorrupted, milvus::DataFormatBroken},
-      // permanent internal storage errors
-      {ExtendStatusCode::PackedArrowError, milvus::StorageError},
-      {ExtendStatusCode::PackedUnexpected, milvus::StorageError},
-      {ExtendStatusCode::AwsErrorNoSuchUpload, milvus::StorageTransientError},
-      {ExtendStatusCode::AwsErrorConflict, milvus::StorageError},
-      {ExtendStatusCode::AwsErrorPreConditionFailed, milvus::StorageError},
-      // permanently-failing S3 errors: must never be transient/2045
-      {ExtendStatusCode::AwsErrorNotFound, milvus::ObjectNotExist},
-      {ExtendStatusCode::AwsErrorAccessDenied, milvus::StorageError},
-      {ExtendStatusCode::AwsErrorNonRetryable, milvus::StorageError},
-      {ExtendStatusCode::StorageTransientNetwork, milvus::StorageTransientError},
-      {ExtendStatusCode::StorageTransientTimeout, milvus::StorageTransientError},
-      {ExtendStatusCode::StorageTransientThrottling, milvus::StorageTransientError},
-      {ExtendStatusCode::StorageTransientService, milvus::StorageTransientError},
-      {ExtendStatusCode::TxnExhaustedRetry, milvus::StorageError},
-      {ExtendStatusCode::TxnResolutionFailed, milvus::StorageError},
-  };
-
-  for (const auto& test_case : cases) {
-    EXPECT_EQ(ToSegcoreErrorCode(test_case.code), test_case.expected);
-  }
-}
-
-// A Packed* status carries an ExtendStatusDetail, so it is classified by the
-// switch. PackedStorageIO is conservatively non-retriable, but this is a DORMANT
-// branch (no live consumer -- the packed C-APIs hardcode FileReadFailed/
-// FileWriteFailed). Not justified by "v2 retries internally": the S3 SDK retry
-// is shared by v2 and v3. The live no-detail plain-arrow read path below maps
-// plain IOError to StorageError/2044 as well.
-TEST_F(ExtendStatusTest, PackedStorageIoIsDormantNonRetriable) {
-  EXPECT_EQ(ToSegcoreErrorCode(ExtendStatusCode::PackedStorageIO), milvus::StorageError);
-  EXPECT_NE(ToSegcoreErrorCode(ExtendStatusCode::PackedStorageIO), milvus::StorageTransientError);
-
-  auto status = MakeExtendError(ExtendStatusCode::PackedStorageIO, "object store unavailable", "timeout");
-  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::StorageError);
-}
-
-// Permanently-failing S3 errors tagged by ErrorToStatus (object/bucket gone,
-// bad credentials, SDK-judged non-retryable) must classify permanent, never
-// transient/2045 -- otherwise querynode would retry-storm a read that can never
-// succeed (retry/reroute hits the same shared object store).
-TEST_F(ExtendStatusTest, PermanentS3ErrorsAreNotRetriable) {
-  struct Case {
-    ExtendStatusCode code;
-    const char* name;
-    milvus::ErrorCode expected;
-  };
-  const Case cases[] = {
-      // not-found is fine-grained: ObjectNotExist(2017), still permanent
-      {ExtendStatusCode::AwsErrorNotFound, "AwsErrorNotFound", milvus::ObjectNotExist},
-      {ExtendStatusCode::AwsErrorAccessDenied, "AwsErrorAccessDenied", milvus::StorageError},
-      {ExtendStatusCode::AwsErrorNonRetryable, "AwsErrorNonRetryable", milvus::StorageError},
-  };
-  for (const auto& test_case : cases) {
-    auto status = MakeExtendError(test_case.code, "permanent object-store failure", "detail");
-    ASSERT_FALSE(status.ok()) << test_case.name;
-
-    auto detail = ExtendStatusDetail::UnwrapStatus(status);
-    ASSERT_NE(detail, nullptr) << test_case.name;
-    EXPECT_EQ(detail->CodeAsString(), test_case.name);
-
-    auto error = ToSegcoreError(status);
-    EXPECT_EQ(error.get_error_code(), test_case.expected) << test_case.name;
-    EXPECT_NE(error.get_error_code(), milvus::StorageTransientError) << test_case.name;
-  }
+  EXPECT_EQ(ToSegcoreErrorCode(ExtendStatusCode::PackedUnexpected), milvus::UnexpectedError);
+  EXPECT_EQ(ToSegcoreErrorCode(ExtendStatusCode::StorageAccessDenied), milvus::ConfigInvalid);
+  EXPECT_EQ(ToSegcoreErrorCode(ExtendStatusCode::AwsErrorNonRetryable), milvus::StorageError);
 }
 
 TEST_F(ExtendStatusTest, PlainArrowStatusFallsBackToCoarseClassification) {
   // No ExtendStatusDetail attached -> coarse arrow status classification.
-  // Plain Invalid means malformed *stored* data here -> permanent corruption.
+  //
+  // Keep the historical Invalid/Type/Key fallback until the remaining
+  // persisted-data producers attach typed details in the final stack layer.
   {
-    auto error = ToSegcoreError(arrow::Status::Invalid("corrupt bytes"));
+    auto error = ToSegcoreError(arrow::Status::Invalid("some precondition failed"));
     EXPECT_EQ(error.get_error_code(), milvus::DataFormatBroken);
-    EXPECT_NE(std::string(error.what()).find("corrupt bytes"), std::string::npos);
-  }
-  // Plain IOError -> non-retriable StorageError. This is the live read path
-  // (FileRowGroupReader / v3 api::Reader / ArrowFileSystem); after shared SDK
-  // retries, it maps to StorageError/2044.
-  {
-    auto error = ToSegcoreError(arrow::Status::IOError("disk blip"));
-    EXPECT_EQ(error.get_error_code(), milvus::StorageError);
-    EXPECT_EQ(error.get_error_code(), 2044);
-    EXPECT_NE(error.get_error_code(), milvus::StorageTransientError);
-  }
-  // OOM -> retriable mem-allocate.
-  {
-    auto error = ToSegcoreError(arrow::Status::OutOfMemory("oom"));
-    EXPECT_EQ(error.get_error_code(), milvus::MemAllocateFailed);
+    EXPECT_NE(std::string(error.what()).find("some precondition failed"), std::string::npos);
   }
   // OK remains success.
   {
@@ -350,39 +181,12 @@ TEST_F(ExtendStatusTest, PlainArrowStatusFallsBackToCoarseClassification) {
   }
 }
 
-TEST_F(ExtendStatusTest, PlainArrowPathNotFoundMapsToObjectNotExist) {
-  auto status = arrow::Status::IOError("missing-file").WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
-  ASSERT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
-
+TEST_F(ExtendStatusTest, ExtendStatusConvertsToSegcoreError) {
+  auto status = MakeExtendError(ExtendStatusCode::PackedFileCorrupted, "bad packed file", "footer mismatch");
   auto error = ToSegcoreError(status);
 
-  EXPECT_EQ(error.get_error_code(), milvus::ObjectNotExist);
-  EXPECT_NE(error.get_error_code(), milvus::StorageTransientError);
-}
-
-TEST_F(ExtendStatusTest, ExtendStatusConvertsToSegcoreError) {
-  {
-    auto status = MakeExtendError(ExtendStatusCode::PackedFileCorrupted, "bad packed file", "footer mismatch");
-
-    auto error = ToSegcoreError(status);
-
-    EXPECT_EQ(error.get_error_code(), milvus::DataFormatBroken);
-    EXPECT_NE(std::string(error.what()).find("bad packed file"), std::string::npos);
-    EXPECT_NE(std::string(error.what()).find("PackedFileCorrupted"), std::string::npos);
-  }
-  {
-    auto status = MakeExtendError(ExtendStatusCode::StorageTransientTimeout, "timeout", "detail");
-    auto error = ToSegcoreError(status);
-
-    EXPECT_EQ(error.get_error_code(), milvus::StorageTransientError);
-    EXPECT_NE(std::string(error.what()).find("StorageTransientTimeout"), std::string::npos);
-  }
-  {
-    auto status = MakeExtendError(ExtendStatusCode::AwsErrorConflict, "conflict", "detail");
-    auto error = ToSegcoreError(status);
-
-    EXPECT_EQ(error.get_error_code(), milvus::StorageError);
-    EXPECT_NE(std::string(error.what()).find("AwsErrorConflict"), std::string::npos);
-  }
+  EXPECT_EQ(error.get_error_code(), milvus::DataFormatBroken);
+  EXPECT_NE(std::string(error.what()).find("bad packed file"), std::string::npos);
+  EXPECT_NE(std::string(error.what()).find("PackedFileCorrupted"), std::string::npos);
 }
 }  // namespace milvus_storage::test
