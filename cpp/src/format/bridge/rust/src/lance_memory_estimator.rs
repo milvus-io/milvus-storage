@@ -70,10 +70,9 @@ fn fixed_data_type_memory(data_type: &DataType, rows: u64) -> Option<u64> {
         DataType::Null => Some(0),
         DataType::Boolean => Some(bitmap_bytes(rows)),
         DataType::FixedSizeBinary(width) => Some((*width as u64).saturating_mul(rows)),
-        DataType::FixedSizeList(item, list_size) => fixed_data_type_memory(
-            item.data_type(),
-            rows.saturating_mul(*list_size as u64),
-        ),
+        DataType::FixedSizeList(item, list_size) => {
+            fixed_data_type_memory(item.data_type(), rows.saturating_mul(*list_size as u64))
+        }
         DataType::Dictionary(_, _) => None,
         data_type => data_type
             .primitive_width()
@@ -306,11 +305,7 @@ pub(crate) async fn estimate_fragment_column_memory(
 
             // Page metadata describes physical rows. Apply the fragment's live
             // row ratio once to obtain the estimate after deletions.
-            let bytes = mul_div_round(
-                estimate_page_column(column),
-                logical_rows,
-                physical_rows,
-            );
+            let bytes = mul_div_round(estimate_page_column(column), logical_rows, physical_rows);
             let estimate = estimates[top_level_index].get_or_insert(0_u64);
             *estimate = estimate.saturating_add(bytes);
         }

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use anyhow::Context;
 use aws_config::sts::AssumeRoleProvider;
 use aws_credential_types::provider::ProvideCredentials;
 use iceberg::io::StorageFactory;
@@ -82,14 +83,15 @@ impl CredentialProvider for SingleFlightAwsCredentialProvider {
             }
         }
 
-        let refreshed = self
-            .inner
-            .provide_credentials()
-            .await
-            .map_err(|source| object_store::Error::Generic {
+        let refreshed = self.inner.provide_credentials().await.map_err(|source| {
+            object_store::Error::Generic {
                 store: "AWS",
-                source: Box::new(source),
-            })?;
+                source: Box::new(crate::bridge_error::aws_credentials_error(
+                    source,
+                    "AWS AssumeRole",
+                )),
+            }
+        })?;
         let credential = Self::to_object_store_credential(&refreshed);
         *self.cached.write().await = Some(refreshed);
         Ok(credential)
@@ -116,12 +118,10 @@ impl AssumeRoleConfig {
             return Ok(None);
         }
         if credential_refresh_secs < 900 || credential_refresh_secs > 43200 {
-            return Err(LanceError::invalid_input(
-                format!(
-                    "credential_refresh_secs must be in [900, 43200], got {}",
-                    credential_refresh_secs
-                ),
-            ));
+            return Err(LanceError::invalid_input(format!(
+                "credential_refresh_secs must be in [900, 43200], got {}",
+                credential_refresh_secs
+            )));
         }
         Ok(Some(Self {
             role_arn: role_arn.to_string(),
@@ -206,7 +206,8 @@ impl AwsCredentialLoad for ObjectStoreAwsCredentialLoader {
             .provider
             .get_credential()
             .await
-            .map_err(|error| anyhow::anyhow!("AWS credential provider failed: {error}"))?;
+            .map_err(anyhow::Error::new)
+            .context("AWS credential provider failed")?;
         Ok(Some(AwsCredential {
             access_key_id: credential.key_id.clone(),
             secret_access_key: credential.secret_key.clone(),
@@ -335,7 +336,11 @@ mod tests {
         }))
         .await;
 
-        assert!(credentials.iter().all(|credential| credential.key_id == "key-0"));
+        assert!(
+            credentials
+                .iter()
+                .all(|credential| credential.key_id == "key-0")
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -344,17 +349,19 @@ mod tests {
         let cache: GlobalLruCache<Arc<dyn ObjectStoreProvider>> = GlobalLruCache::new(2);
         let first = cache
             .get("aws", || async {
-                Ok::<_, ()>(Arc::new(AwsArnStoreProvider::new(static_credentials(
-                    "first",
-                ))) as Arc<dyn ObjectStoreProvider>)
+                Ok::<_, ()>(
+                    Arc::new(AwsArnStoreProvider::new(static_credentials("first")))
+                        as Arc<dyn ObjectStoreProvider>,
+                )
             })
             .await
             .unwrap();
         let second = cache
             .get("aws", || async {
-                Ok::<_, ()>(Arc::new(AwsArnStoreProvider::new(static_credentials(
-                    "second",
-                ))) as Arc<dyn ObjectStoreProvider>)
+                Ok::<_, ()>(
+                    Arc::new(AwsArnStoreProvider::new(static_credentials("second")))
+                        as Arc<dyn ObjectStoreProvider>,
+                )
             })
             .await
             .unwrap();

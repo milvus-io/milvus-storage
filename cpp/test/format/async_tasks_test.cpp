@@ -20,7 +20,10 @@
 #include <string>
 #include <vector>
 
+#include <folly/futures/Promise.h>
+
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/format/async_tasks.h"
 #include "milvus-storage/format/column_group_reader.h"
 
@@ -68,6 +71,75 @@ TEST(AsyncTasksTest, FollyArrowAssignOrRaiseExposesAssignedValueOnSuccess) {
 
   ASSERT_TRUE(result.ok()) << result.status().ToString();
   EXPECT_EQ(result.ValueUnsafe(), 42);
+}
+
+TEST(AsyncTasksTest, FailFastCollectorAcceptsEmptyInput) {
+  std::vector<folly::SemiFuture<arrow::Result<int>>> futures;
+
+  auto result = std::move(CollectAllResultsFailFast(std::move(futures))).get();
+
+  ASSERT_TRUE(result.ok()) << result.status().ToString();
+  EXPECT_TRUE(result.ValueUnsafe().empty());
+}
+
+TEST(AsyncTasksTest, FailFastCollectorPreservesInputOrderOnSuccess) {
+  folly::Promise<arrow::Result<int>> first;
+  folly::Promise<arrow::Result<int>> second;
+  folly::Promise<arrow::Result<int>> third;
+  std::vector<folly::SemiFuture<arrow::Result<int>>> futures;
+  futures.push_back(first.getSemiFuture());
+  futures.push_back(second.getSemiFuture());
+  futures.push_back(third.getSemiFuture());
+  auto collected = std::move(CollectAllResultsFailFast(std::move(futures))).toUnsafeFuture();
+
+  third.setValue(30);
+  first.setValue(10);
+  EXPECT_FALSE(collected.isReady());
+  second.setValue(20);
+
+  ASSERT_TRUE(collected.isReady());
+  auto result = std::move(collected).get();
+  ASSERT_TRUE(result.ok()) << result.status().ToString();
+  EXPECT_EQ(result.ValueUnsafe(), (std::vector<int>{10, 20, 30}));
+}
+
+TEST(AsyncTasksTest, FailFastCollectorReturnsTypedErrorBeforeBlockedSibling) {
+  folly::Promise<arrow::Result<int>> blocked;
+  auto lifetime = std::make_shared<int>(42);
+  std::weak_ptr<int> weak_lifetime = lifetime;
+  auto blocked_future = blocked.getSemiFuture().deferEnsure([lifetime] {});
+  lifetime.reset();
+
+  auto expected = MakeExtendErrorMsg(ExtendStatusCode::StorageTransientTimeout, "first reader failed");
+  std::vector<folly::SemiFuture<arrow::Result<int>>> futures;
+  futures.push_back(std::move(blocked_future));
+  futures.push_back(folly::makeSemiFuture(arrow::Result<int>(expected)));
+  auto collected = std::move(CollectAllResultsFailFast(std::move(futures))).toUnsafeFuture();
+
+  ASSERT_TRUE(collected.isReady());
+  auto result = std::move(collected).get();
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().ToString(), expected.ToString());
+  auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+  ASSERT_NE(detail, nullptr);
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientTimeout);
+  EXPECT_FALSE(weak_lifetime.expired());
+
+  blocked.setValue(7);
+  EXPECT_TRUE(weak_lifetime.expired());
+}
+
+TEST(AsyncTasksTest, FailFastCollectorAllReadySuccessCannotLoseToBrokenFailurePromise) {
+  for (int iteration = 0; iteration < 100; ++iteration) {
+    std::vector<folly::SemiFuture<arrow::Result<int>>> futures;
+    futures.push_back(folly::makeSemiFuture(arrow::Result<int>(iteration)));
+    futures.push_back(folly::makeSemiFuture(arrow::Result<int>(iteration + 1)));
+
+    auto result = std::move(CollectAllResultsFailFast(std::move(futures))).get();
+
+    ASSERT_TRUE(result.ok()) << "iteration=" << iteration << ": " << result.status().ToString();
+    EXPECT_EQ(result.ValueUnsafe(), (std::vector<int>{iteration, iteration + 1}));
+  }
 }
 
 TEST(AsyncTasksTest, ChunkTaskBuildGroupsByFileAndMergesContiguousRanges) {

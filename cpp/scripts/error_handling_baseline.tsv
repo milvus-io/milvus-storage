@@ -1,8 +1,6 @@
 throw	cpp/src/common/metadata.cpp	4
 throw	cpp/src/ffi/ffi_fiu_c.cpp	1
 throw	cpp/src/ffi/v2_column_groups_builder.cpp	5
-throw	cpp/src/format/bridge/rust/src/iceberg_bridge.cpp	2
-throw	cpp/src/format/bridge/rust/src/lance_bridge.cpp	21
 throw	cpp/src/format/iceberg/iceberg_common.cpp	2
 throw	cpp/src/format/lance/lance_common.cpp	2
 throw	cpp/src/format/vortex/vortex_translater.cpp	6

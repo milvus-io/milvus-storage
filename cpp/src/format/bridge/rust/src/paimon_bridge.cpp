@@ -11,6 +11,7 @@
 // limitations under the License.
 
 #include "paimon_bridge.h"
+#include "bridge_error.h"
 
 #include <cerrno>
 #include <string_view>
@@ -29,44 +30,28 @@
 namespace milvus_storage::paimon {
 namespace {
 
-// Keep these markers in sync with ERROR_*_PREFIX in paimon_bridgeimpl.rs.
-constexpr std::string_view kInvalidMarker = "[paimon:error=invalid]";
-constexpr std::string_view kNotImplementedMarker = "[paimon:error=not-implemented]";
-constexpr std::string_view kNotFoundMarker = "[paimon:error=not-found]";
-constexpr std::string_view kTransientThrottlingMarker = "[paimon:error=transient-throttling]";
-constexpr std::string_view kTransientServiceMarker = "[paimon:error=transient-service]";
-constexpr std::string_view kPaimonErrorMarker = "[paimon:error=";
-
-std::string StripMarker(std::string_view message, std::string_view marker) {
-  auto position = message.find(marker);
-  if (position == std::string_view::npos) {
-    return std::string(message);
-  }
-  auto suffix = position + marker.size();
-  if (suffix < message.size() && message[suffix] == ' ') {
-    ++suffix;
-  }
-  std::string result;
-  result.reserve(message.size() - marker.size());
-  result.append(message.substr(0, position));
-  result.append(message.substr(suffix));
-  return result.empty() ? "Unknown Paimon error" : result;
-}
-
 template <typename T, typename Fn>
 arrow::Result<T> CatchRustResult(Fn&& fn) {
   try {
     return fn();
   } catch (const rust::cxxbridge1::Error& error) {
-    return MakePaimonBridgeErrorStatus(error.what());
+    // THE shared decoder reads the universal transport marker the Rust side
+    // embeds in the error message and otherwise degrades to the conservative
+    // non-retriable IOError.
+    return milvus_storage::bridge::MakeBridgeErrorStatus(error.what());
   }
 }
 
 arrow::Status TranslatePaimonStreamStatus(arrow::Status status) {
-  if (status.ok() || status.message().find(kPaimonErrorMarker) == std::string_view::npos) {
+  if (status.ok()) {
     return status;
   }
-  return MakePaimonBridgeErrorStatus(status.message());
+  // Stream errors surface as strings through the Arrow C ABI; the Rust side
+  // embeds the same universal transport tag every other bridge uses.
+  if (auto decoded = milvus_storage::bridge::DecodeBridgeErrorStatus(status.message())) {
+    return *decoded;
+  }
+  return status;
 }
 
 class PaimonStreamReader final : public arrow::RecordBatchReader {
@@ -82,7 +67,8 @@ class PaimonStreamReader final : public arrow::RecordBatchReader {
       return arrow::Status::OK();
     }
     if ((*batch)->num_columns() != output_schema_->num_fields()) {
-      return arrow::Status::Invalid("Paimon data-split stream returned an unexpected column count");
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                                "Paimon data-split stream returned an unexpected column count");
     }
     for (int index = 0; index < output_schema_->num_fields(); ++index) {
       const auto& actual = (*batch)->schema()->field(index);
@@ -108,28 +94,6 @@ class PaimonStreamReader final : public arrow::RecordBatchReader {
 };
 
 }  // namespace
-
-arrow::Status MakePaimonBridgeErrorStatus(std::string_view message) {
-  if (message.find(kInvalidMarker) != std::string_view::npos) {
-    return arrow::Status::Invalid(StripMarker(message, kInvalidMarker));
-  }
-  if (message.find(kNotImplementedMarker) != std::string_view::npos) {
-    return arrow::Status::NotImplemented(StripMarker(message, kNotImplementedMarker));
-  }
-  if (message.find(kNotFoundMarker) != std::string_view::npos) {
-    return arrow::Status::IOError(StripMarker(message, kNotFoundMarker))
-        .WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
-  }
-  if (message.find(kTransientThrottlingMarker) != std::string_view::npos) {
-    auto error = StripMarker(message, kTransientThrottlingMarker);
-    return MakeExtendError(ExtendStatusCode::StorageTransientThrottling, error, error);
-  }
-  if (message.find(kTransientServiceMarker) != std::string_view::npos) {
-    auto error = StripMarker(message, kTransientServiceMarker);
-    return MakeExtendError(ExtendStatusCode::StorageTransientService, error, error);
-  }
-  return arrow::Status::IOError(message);
-}
 
 namespace internal {
 std::shared_ptr<arrow::RecordBatchReader> WrapPaimonRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner,
@@ -224,13 +188,17 @@ arrow::Result<std::shared_ptr<BlockingPaimonDataSplitReader>> BlockingPaimonData
 
 arrow::Status BlockingPaimonDataSplitReader::ExportSchema(ArrowSchema* schema) const {
   if (schema == nullptr) {
-    return arrow::Status::Invalid("cannot export Paimon schema into a null pointer");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                              "cannot export Paimon schema into a null pointer");
   }
   try {
     impl_->export_schema(reinterpret_cast<uint8_t*>(schema));
     return arrow::Status::OK();
   } catch (const rust::cxxbridge1::Error& error) {
-    return MakePaimonBridgeErrorStatus(error.what());
+    // No slot code: fall through to THE shared decoder, which reads the
+    // universal transport tag the Rust side embeds and otherwise degrades to
+    // the conservative non-retriable IOError.
+    return milvus_storage::bridge::MakeBridgeErrorStatus(error.what());
   }
 }
 

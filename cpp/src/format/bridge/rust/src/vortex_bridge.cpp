@@ -3,117 +3,13 @@
 
 #include "vortex_bridge.h"
 
-#include <cerrno>
-#include <charconv>
-#include <optional>
+#include "bridge_error.h"
+
 #include <string>
 #include <string_view>
 
-#include <arrow/record_batch.h>
-#include <arrow/util/io_util.h>
-
-#include "milvus-storage/common/extend_status.h"
-#include "milvus-storage/ffi_c.h"
-
 namespace milvus_storage::vortex {
 namespace {
-
-constexpr std::string_view kVortexFfiErrCodeMarker = "__LOON_VORTEX_FFI_ERRCODE__=";
-
-std::string StripBridgeMarker(std::string_view error, size_t marker_pos, size_t code_end) {
-  auto message_start = code_end;
-  if (message_start < error.size() && error[message_start] == ';') {
-    ++message_start;
-  }
-  if (message_start < error.size() && error[message_start] == ' ') {
-    ++message_start;
-  }
-
-  std::string message;
-  message.reserve(error.size());
-  message.append(error.substr(0, marker_pos));
-  message.append(error.substr(message_start));
-  if (message.empty()) {
-    return "Unknown Vortex error";
-  }
-  return message;
-}
-
-struct ParsedVortexBridgeError {
-  std::string message;
-  std::optional<int> ffi_err_code;
-};
-
-class VortexErrorTranslatingReader final : public arrow::RecordBatchReader {
-  public:
-  explicit VortexErrorTranslatingReader(std::shared_ptr<arrow::RecordBatchReader> inner) : inner_(std::move(inner)) {}
-
-  std::shared_ptr<arrow::Schema> schema() const override { return inner_->schema(); }
-
-  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override {
-    return MakeVortexErrorStatus("Failed to read vortex record batch", inner_->ReadNext(batch));
-  }
-
-  arrow::Status Close() override {
-    return MakeVortexErrorStatus("Failed to close vortex record batch reader", inner_->Close());
-  }
-
-  private:
-  std::shared_ptr<arrow::RecordBatchReader> inner_;
-};
-
-ParsedVortexBridgeError ParseVortexBridgeError(std::string_view error) {
-  auto marker_pos = error.find(kVortexFfiErrCodeMarker);
-  if (marker_pos == std::string_view::npos) {
-    return {std::string(error), std::nullopt};
-  }
-
-  auto code_start = marker_pos + kVortexFfiErrCodeMarker.size();
-  auto code_end = code_start;
-  while (code_end < error.size() && error[code_end] >= '0' && error[code_end] <= '9') {
-    ++code_end;
-  }
-  if (code_end == code_start) {
-    return {std::string(error), std::nullopt};
-  }
-
-  int ffi_err_code = 0;
-  auto parse_result = std::from_chars(error.data() + code_start, error.data() + code_end, ffi_err_code);
-  if (parse_result.ec != std::errc()) {
-    return {std::string(error), std::nullopt};
-  }
-
-  return {StripBridgeMarker(error, marker_pos, code_end), ffi_err_code};
-}
-
-std::string JoinContextAndMessage(std::string_view context, std::string_view message) {
-  if (context.empty()) {
-    return std::string(message);
-  }
-  if (message.empty()) {
-    return std::string(context);
-  }
-  std::string result;
-  result.reserve(context.size() + 2 + message.size());
-  result.append(context);
-  result.append(": ");
-  result.append(message);
-  return result;
-}
-
-arrow::Status MakeExtendErrorWithContext(std::string_view context, const arrow::Status& status) {
-  auto detail = ExtendStatusDetail::UnwrapStatus(status);
-  auto full_message = JoinContextAndMessage(context, status.message());
-  return MakeExtendError(detail->code(), full_message, full_message);
-}
-
-arrow::Status MakeIOErrorWithContext(std::string_view context, const arrow::Status& status) {
-  auto result = arrow::Status::IOError(JoinContextAndMessage(context, status.message()));
-  if (arrow::internal::ErrnoFromStatus(status) == ENOENT) {
-    return result.WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
-  }
-  return result;
-}
 
 template <typename T, typename Fn>
 arrow::Result<T> CatchRustResult(Fn&& fn) {
@@ -136,44 +32,40 @@ arrow::Status CatchRustStatus(Fn&& fn) {
 
 }  // namespace
 
+// Both forms defer to the shared decoder in bridge_error.cpp. There used to be
+// a second copy of its table here; two copies of one table is two tables, and
+// they had already drifted (this one knew about caught panics, the other knew
+// about the bridge-private data-format code).
 arrow::Status MakeVortexBridgeErrorStatus(std::string_view message) {
-  auto parsed = ParseVortexBridgeError(message);
-  if (parsed.ffi_err_code.has_value()) {
-    if (*parsed.ffi_err_code == LOON_FILE_NOT_FOUND) {
-      return arrow::Status::IOError(parsed.message).WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
-    }
-    if (auto code = ExtendStatusCodeFromInt(*parsed.ffi_err_code); code.has_value()) {
-      return MakeExtendError(*code, parsed.message, parsed.message);
-    }
-  }
-  return arrow::Status::IOError(parsed.message);
+  // The classification rides the universal marker the Rust side embeds in the
+  // error text (vortex's LoonFfiError). A message without a marker is the
+  // conservative non-retriable fallback.
+  return milvus_storage::bridge::MakeBridgeErrorStatus(message);
+}
+
+arrow::Status MakeVortexBridgeErrorStatus(int ffi_err_code, std::string_view message) {
+  return milvus_storage::bridge::MakeBridgeErrorStatus(ffi_err_code, message);
 }
 
 arrow::Status MakeVortexErrorStatus(std::string_view context, std::string_view message) {
   return MakeVortexErrorStatus(context, MakeVortexBridgeErrorStatus(message));
 }
 
+arrow::Status MakeVortexErrorStatus(std::string_view context, int ffi_err_code, std::string_view message) {
+  return MakeVortexErrorStatus(context, MakeVortexBridgeErrorStatus(ffi_err_code, message));
+}
+
 arrow::Status MakeVortexErrorStatus(std::string_view context, const arrow::Status& status) {
-  if (status.ok()) {
-    return arrow::Status::OK();
-  }
-  if (ExtendStatusDetail::UnwrapStatus(status)) {
-    return MakeExtendErrorWithContext(context, status);
-  }
-  if (arrow::internal::ErrnoFromStatus(status) == ENOENT) {
-    return MakeIOErrorWithContext(context, status);
-  }
-  auto message = status.message();
-  auto parsed_status = MakeVortexBridgeErrorStatus(message);
-  if (ExtendStatusDetail::UnwrapStatus(parsed_status)) {
-    return MakeExtendErrorWithContext(context, parsed_status);
-  }
-  return MakeIOErrorWithContext(context, parsed_status);
+  return milvus_storage::bridge::TranslateBridgeStatus(context, status);
+}
+
+arrow::Status TakeVortexErrorStatus(std::string_view context, const arrow::Status& fallback) {
+  return MakeVortexErrorStatus(context, fallback);
 }
 
 namespace internal {
 std::shared_ptr<arrow::RecordBatchReader> WrapVortexRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner) {
-  return std::make_shared<VortexErrorTranslatingReader>(std::move(inner));
+  return milvus_storage::bridge::WrapBridgeRecordBatchReader(std::move(inner), "Vortex record batch reader");
 }
 }  // namespace internal
 
@@ -338,16 +230,31 @@ arrow::Result<VortexWriter> VortexWriter::Open(
 }
 
 arrow::Status VortexWriter::Write(ArrowSchema& in_schema, ArrowArray& in_array) {
-  return CatchRustStatus(
+  ARROW_RETURN_NOT_OK(status_);
+  auto status = CatchRustStatus(
       [&]() { impl_->write(reinterpret_cast<uint8_t*>(&in_schema), reinterpret_cast<uint8_t*>(&in_array)); });
+  if (!status.ok()) {
+    status = TakeVortexErrorStatus("", status);
+  }
+  return RecordFirstFailure(std::move(status));
 }
 
 arrow::Status VortexWriter::Flush() {
-  return CatchRustStatus([&]() { impl_->flush(); });
+  ARROW_RETURN_NOT_OK(status_);
+  auto status = CatchRustStatus([&]() { impl_->flush(); });
+  if (!status.ok()) {
+    status = TakeVortexErrorStatus("", status);
+  }
+  return RecordFirstFailure(std::move(status));
 }
 
 arrow::Result<ffi::VortexWriteSummary> VortexWriter::Close() {
-  return CatchRustResult<ffi::VortexWriteSummary>([&]() { return impl_->close(); });
+  ARROW_RETURN_NOT_OK(status_);
+  auto result = CatchRustResult<ffi::VortexWriteSummary>([&]() { return impl_->close(); });
+  if (!result.ok()) {
+    return RecordFirstFailure(TakeVortexErrorStatus("", result.status()));
+  }
+  return result;
 }
 
 arrow::Result<VortexFile> VortexFile::Open(uint8_t* fs_rawptr,

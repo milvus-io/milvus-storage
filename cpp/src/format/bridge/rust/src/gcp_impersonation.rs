@@ -64,16 +64,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use iceberg::io::{
-    FileMetadata, FileRead, FileWrite, GCS_DISABLE_CONFIG_LOAD, GCS_DISABLE_VM_METADATA,
-    GCS_TOKEN, InputFile, OutputFile, Storage as IcebergStorage, StorageConfig, StorageFactory,
+    FileMetadata, FileRead, FileWrite, GCS_DISABLE_CONFIG_LOAD, GCS_DISABLE_VM_METADATA, GCS_TOKEN,
+    InputFile, OutputFile, Storage as IcebergStorage, StorageConfig, StorageFactory,
 };
 use iceberg::{Error as IcebergError, ErrorKind as IcebergErrorKind, Result as IcebergResult};
 use iceberg_storage_opendal::OpenDalStorageFactory;
 use object_store::{
-    gcp::{GcpCredential, GoogleCloudStorageBuilder, GoogleConfigKey},
     CredentialProvider, ObjectStore as OSObjectStore, Result as ObjectStoreResult, RetryConfig,
+    gcp::{GcpCredential, GoogleCloudStorageBuilder, GoogleConfigKey},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use snafu::location;
 use std::str::FromStr;
 use tokio::sync::RwLock;
@@ -194,6 +194,21 @@ struct GenerateAccessTokenResponse {
 /// token-fetch helper used by both Lance and Iceberg.
 const IMPERSONATION_STORE_NAME: &str = "gcp_impersonation";
 
+async fn decode_credential_json<T: DeserializeOwned>(
+    response: reqwest::Response,
+    context: &str,
+) -> ObjectStoreResult<T> {
+    response
+        .json()
+        .await
+        .map_err(|error| object_store::Error::Generic {
+            store: IMPERSONATION_STORE_NAME,
+            source: Box::new(crate::bridge_error::credential_reqwest_error(
+                error, context,
+            )),
+        })
+}
+
 /// Run the VM-SA → IAM `generateAccessToken(target_sa)` exchange end-to-end
 /// and return the raw `accessToken` + `expireTime` for the shared refreshable
 /// provider.
@@ -213,16 +228,13 @@ async fn fetch_impersonated_access_token(
         .and_then(|r| r.error_for_status())
         .map_err(|e| object_store::Error::Generic {
             store: IMPERSONATION_STORE_NAME,
-            source: format!(
-                "metadata server token request failed (this code path requires running on a \
-                 GCE VM with a default service account attached): {e}"
-            )
-            .into(),
+            source: Box::new(crate::bridge_error::credential_reqwest_error(
+                e,
+                "GCP metadata server token request (requires a GCE VM default service account)",
+            )),
         })?;
-    let vm_token: MetadataTokenResponse = vm_resp.json().await.map_err(|e| object_store::Error::Generic {
-        store: IMPERSONATION_STORE_NAME,
-        source: format!("metadata token response was not valid JSON: {e}").into(),
-    })?;
+    let vm_token: MetadataTokenResponse =
+        decode_credential_json(vm_resp, "GCP metadata server token response body").await?;
 
     // 2. Use the VM token as the bearer to call IAM `generateAccessToken`
     //    on the target SA. The VM SA needs `roles/iam.serviceAccountTokenCreator`
@@ -240,16 +252,15 @@ async fn fetch_impersonated_access_token(
         .and_then(|r| r.error_for_status())
         .map_err(|e| object_store::Error::Generic {
             store: IMPERSONATION_STORE_NAME,
-            source: format!(
-                "IAM generateAccessToken({target_sa}) failed (the VM SA likely lacks \
-                 roles/iam.serviceAccountTokenCreator on the target SA): {e}"
-            )
-            .into(),
+            source: Box::new(crate::bridge_error::credential_reqwest_error(
+                e,
+                &format!(
+                    "GCP IAM generateAccessToken({target_sa}); the VM service account needs \
+                     roles/iam.serviceAccountTokenCreator"
+                ),
+            )),
         })?;
-    iam_resp.json().await.map_err(|e| object_store::Error::Generic {
-        store: IMPERSONATION_STORE_NAME,
-        source: format!("generateAccessToken response was not valid JSON: {e}").into(),
-    })
+    decode_credential_json(iam_resp, "GCP IAM generateAccessToken response body").await
 }
 
 #[derive(Clone)]
@@ -345,9 +356,12 @@ impl ImpersonatingGcsCredentialProvider {
     }
 
     async fn fetch_impersonated_token(&self) -> ObjectStoreResult<CachedToken> {
-        let iam_body =
-            fetch_impersonated_access_token(&self.http_client, &self.target_sa, self.token_lifetime)
-                .await?;
+        let iam_body = fetch_impersonated_access_token(
+            &self.http_client,
+            &self.target_sa,
+            self.token_lifetime,
+        )
+        .await?;
 
         // Compute the expiry from IAM's RFC3339 `expireTime`. We rely on IAM's
         // clock rather than `now + lifetime` so clock skew between us and
@@ -517,8 +531,9 @@ pub(crate) fn build_lance_session(provider: Arc<dyn ObjectStoreProvider>) -> Arc
 fn gcp_iceberg_credential_error(error: object_store::Error) -> IcebergError {
     IcebergError::new(
         IcebergErrorKind::Unexpected,
-        format!("GCP impersonation credential resolution failed: {error}"),
+        "GCP impersonation credential resolution failed",
     )
+    .with_source(error)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -684,20 +699,72 @@ mod tests {
 
     use futures::future::join_all;
     use iceberg::io::{StorageConfig, StorageFactory};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
     use tokio::sync::{Barrier, Notify};
 
     use super::*;
     use std::collections::HashMap;
 
     #[tokio::test]
+    async fn credential_body_timeout_keeps_typed_cause() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{",
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        let response = client
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+        let error = match decode_credential_json::<MetadataTokenResponse>(
+            response,
+            "GCP metadata server token response body",
+        )
+        .await
+        {
+            Ok(_) => panic!("expected credential body timeout"),
+            Err(error) => error,
+        };
+        let object_store::Error::Generic { source, .. } = error else {
+            panic!("expected generic credential error");
+        };
+        let bridge = source
+            .downcast_ref::<crate::bridge_error::BridgeError>()
+            .expect("typed bridge cause");
+        assert_eq!(
+            bridge.code,
+            Some(crate::bridge_error::LOON_TRANSIENT_TIMEOUT)
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn impersonation_store_uses_aimd_throttle_when_client_retries_enabled() {
         let params = ObjectStoreParams {
             storage_options_accessor: Some(Arc::new(
-                lance_io::object_store::StorageOptionsAccessor::with_static_options(HashMap::from([
-                    ("client_max_retries".to_string(), "1".to_string()),
-                    ("lance_aimd_initial_rate".to_string(), "10".to_string()),
-                    ("lance_aimd_max_rate".to_string(), "10".to_string()),
-                ])),
+                lance_io::object_store::StorageOptionsAccessor::with_static_options(HashMap::from(
+                    [
+                        ("client_max_retries".to_string(), "1".to_string()),
+                        ("lance_aimd_initial_rate".to_string(), "10".to_string()),
+                        ("lance_aimd_max_rate".to_string(), "10".to_string()),
+                    ],
+                )),
             )),
             ..Default::default()
         };
@@ -717,11 +784,13 @@ mod tests {
     async fn impersonation_store_skips_aimd_when_client_retries_disabled() {
         let params = ObjectStoreParams {
             storage_options_accessor: Some(Arc::new(
-                lance_io::object_store::StorageOptionsAccessor::with_static_options(HashMap::from([
-                    ("client_max_retries".to_string(), "0".to_string()),
-                    ("lance_aimd_initial_rate".to_string(), "10".to_string()),
-                    ("lance_aimd_max_rate".to_string(), "10".to_string()),
-                ])),
+                lance_io::object_store::StorageOptionsAccessor::with_static_options(HashMap::from(
+                    [
+                        ("client_max_retries".to_string(), "0".to_string()),
+                        ("lance_aimd_initial_rate".to_string(), "10".to_string()),
+                        ("lance_aimd_max_rate".to_string(), "10".to_string()),
+                    ],
+                )),
             )),
             ..Default::default()
         };

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use sqlparser::ast::{BinaryOperator, Expr as SqlExpr, UnaryOperator, Value};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -44,8 +44,14 @@ enum LitType {
 
 enum Out {
     Ok(Expression),
-    OkCol { expr: Expression, col_ty: ColumnType },
-    OkLit { expr: Expression, lit_ty: LitType },
+    OkCol {
+        expr: Expression,
+        col_ty: ColumnType,
+    },
+    OkLit {
+        expr: Expression,
+        lit_ty: LitType,
+    },
     Drop,
 }
 
@@ -74,8 +80,7 @@ pub fn parse_predicate_with_schema(
         bail!("unexpected trailing input after expression: {}", next.token);
     }
 
-    let cols: HashMap<&str, ColumnType> =
-        schema.iter().map(|(n, t)| (n.as_str(), *t)).collect();
+    let cols: HashMap<&str, ColumnType> = schema.iter().map(|(n, t)| (n.as_str(), *t)).collect();
     let schema_present = !schema.is_empty();
     let out = convert_expr(&sql_expr, &cols, schema_present)?;
     Ok(match out {
@@ -153,9 +158,11 @@ fn convert_expr(
             }
         }
         SqlExpr::Nested(inner) => convert_expr(inner, cols, schema_present),
-        SqlExpr::InList { expr: target, list, negated } => {
-            convert_in_list(target, list, *negated, cols, schema_present)
-        }
+        SqlExpr::InList {
+            expr: target,
+            list,
+            negated,
+        } => convert_in_list(target, list, *negated, cols, schema_present),
         SqlExpr::Function(f) => {
             warn(format!("unsupported function call: {}", f.name));
             Ok(Out::Drop)
@@ -213,7 +220,11 @@ fn convert_in_list(
         });
     }
     let combined = acc.expect("non-empty IN list checked above");
-    Ok(Out::Ok(if negated { expr::not(combined) } else { combined }))
+    Ok(Out::Ok(if negated {
+        expr::not(combined)
+    } else {
+        combined
+    }))
 }
 
 fn combine_and(lhs: Out, rhs: Out) -> Out {
@@ -301,7 +312,10 @@ fn convert_value(val: &Value) -> Out {
     match val {
         Value::Number(s, _) => {
             if let Ok(i) = s.parse::<i64>() {
-                return Out::OkLit { expr: expr::lit(i), lit_ty: LitType::Int };
+                return Out::OkLit {
+                    expr: expr::lit(i),
+                    lit_ty: LitType::Int,
+                };
             }
             if let Ok(f) = s.parse::<f64>() {
                 let lit_ty = if f.fract() == 0.0 {
@@ -309,7 +323,10 @@ fn convert_value(val: &Value) -> Out {
                 } else {
                     LitType::Float
                 };
-                return Out::OkLit { expr: expr::lit(f), lit_ty };
+                return Out::OkLit {
+                    expr: expr::lit(f),
+                    lit_ty,
+                };
             }
             Out::Drop
         }
@@ -592,10 +609,7 @@ mod tests {
 
     #[test]
     fn edge_column_eq_column_compatible() {
-        let schema = vec![
-            ("a".into(), ColumnType::Int),
-            ("b".into(), ColumnType::Int),
-        ];
+        let schema = vec![("a".into(), ColumnType::Int), ("b".into(), ColumnType::Int)];
         let expr = must_parse_with("a = b", &schema);
         assert_eq!(count_nodes(&expr), 5);
     }

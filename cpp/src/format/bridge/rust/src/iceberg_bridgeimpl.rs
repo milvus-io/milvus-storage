@@ -13,27 +13,26 @@
 // limitations under the License.
 
 use crate::TOKIO_RT;
+use crate::bridge_error::{BridgeError, BridgeResult};
 
 use arrow_array::Array;
 use futures::TryStreamExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
+use crate::aliyun_oss_provider::AliyunOssStorageFactory;
+use crate::aws_arn_provider::{AssumeRoleConfig, build_iceberg_factory};
+use crate::azure_sas_provider::{AzureBrokerConfig, AzureSasStorageFactory};
+use crate::cloud_provider_cache::{CACHE_CAPACITY, CACHE_KEY, GlobalLruCache};
+use crate::gcp_impersonation::{
+    GcpImpersonationConfig, GcpImpersonationStorageFactory, ICEBERG_TARGET_SERVICE_ACCOUNT,
+};
+use crate::iceberg_ffi::IcebergFileInfo;
 use iceberg::TableIdent;
 use iceberg::io::{FileIOBuilder, LocalFsStorageFactory, MemoryStorageFactory, StorageFactory};
 use iceberg::scan::FileScanTask;
 use iceberg::table::StaticTable;
 use iceberg_storage_opendal::OpenDalStorageFactory;
-use crate::aliyun_oss_provider::AliyunOssStorageFactory;
-use crate::aws_arn_provider::{AssumeRoleConfig, build_iceberg_factory};
-use crate::azure_sas_provider::{AzureBrokerConfig, AzureSasStorageFactory};
-use crate::cloud_provider_cache::{
-    CACHE_CAPACITY, CACHE_KEY, GlobalLruCache,
-};
-use crate::gcp_impersonation::{
-    GcpImpersonationConfig, GcpImpersonationStorageFactory, ICEBERG_TARGET_SERVICE_ACCOUNT,
-};
-use crate::iceberg_ffi::IcebergFileInfo;
 
 const CLOUD_PROVIDER_KEY: &str = "cloud_provider";
 
@@ -101,9 +100,7 @@ async fn upstream_opendal_factory(
         None
     };
     let assume_role = if cloud_provider.as_deref() == Some("aws") {
-        let role_arn = props
-            .remove("client.assume-role.arn")
-            .unwrap_or_default();
+        let role_arn = props.remove("client.assume-role.arn").unwrap_or_default();
         let session_name = props
             .remove("client.assume-role.session-name")
             .unwrap_or_default();
@@ -258,10 +255,7 @@ pub(crate) fn normalize_uri(uri: &str, props: &HashMap<String, String>) -> (Stri
                 let account = match props.get("adls.account-name") {
                     Some(a) if !a.is_empty() => a,
                     _ => {
-                        return (
-                            format!("{normalized_scheme}://{rest}"),
-                            "abfss".to_string(),
-                        );
+                        return (format!("{normalized_scheme}://{rest}"), "abfss".to_string());
                     }
                 };
                 let suffix = props
@@ -271,9 +265,7 @@ pub(crate) fn normalize_uri(uri: &str, props: &HashMap<String, String>) -> (Stri
                 if let Some(slash) = rest.find('/') {
                     let container = &rest[..slash];
                     let path = &rest[slash..];
-                    format!(
-                        "{normalized_scheme}://{container}@{account}.dfs.{suffix}{path}"
-                    )
+                    format!("{normalized_scheme}://{container}@{account}.dfs.{suffix}{path}")
                 } else {
                     format!("{normalized_scheme}://{rest}@{account}.dfs.{suffix}")
                 }
@@ -327,10 +319,11 @@ async fn count_positional_deletes(
     file_io: &iceberg::io::FileIO,
     data_file_path: &str,
     delete_refs: &[DeleteFileRef],
+    record_count: u64,
 ) -> Result<u64, anyhow::Error> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-    let mut total = 0u64;
+    let mut positions = HashSet::new();
     for del_ref in delete_refs {
         if del_ref.file_type != "position" {
             continue;
@@ -339,28 +332,106 @@ async fn count_positional_deletes(
         // Read the delete file via FileIO
         let input = file_io.new_input(&del_ref.path)?;
         let bytes = input.read().await?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)?.build()?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
+            .map_err(|error| {
+                iceberg::Error::new(
+                    iceberg::ErrorKind::DataInvalid,
+                    format!(
+                        "cannot read positional delete Parquet metadata {}: {error}",
+                        del_ref.path
+                    ),
+                )
+            })?
+            .build()
+            .map_err(|error| {
+                iceberg::Error::new(
+                    iceberg::ErrorKind::DataInvalid,
+                    format!(
+                        "cannot decode positional delete Parquet file {}: {error}",
+                        del_ref.path
+                    ),
+                )
+            })?;
 
         for batch in reader {
-            let batch = batch?;
+            let batch = batch.map_err(|error| {
+                iceberg::Error::new(
+                    iceberg::ErrorKind::DataInvalid,
+                    format!(
+                        "cannot decode positional delete batch {}: {error}",
+                        del_ref.path
+                    ),
+                )
+            })?;
             let schema = batch.schema();
-            let file_path_idx = schema.index_of("file_path").unwrap_or(0);
-
-            let file_path_col = batch
+            let file_path_idx = schema.index_of("file_path").map_err(|_| {
+                iceberg::Error::new(
+                    iceberg::ErrorKind::DataInvalid,
+                    format!(
+                        "positional delete file is missing file_path: {}",
+                        del_ref.path
+                    ),
+                )
+            })?;
+            let pos_idx = schema.index_of("pos").map_err(|_| {
+                iceberg::Error::new(
+                    iceberg::ErrorKind::DataInvalid,
+                    format!("positional delete file is missing pos: {}", del_ref.path),
+                )
+            })?;
+            let file_path_array = batch
                 .column(file_path_idx)
                 .as_any()
-                .downcast_ref::<arrow_array::StringArray>();
-
-            if let Some(file_path_array) = file_path_col {
-                for i in 0..file_path_array.len() {
-                    if !file_path_array.is_null(i) && file_path_array.value(i) == data_file_path {
-                        total += 1;
+                .downcast_ref::<arrow_array::StringArray>()
+                .ok_or_else(|| {
+                    iceberg::Error::new(
+                        iceberg::ErrorKind::DataInvalid,
+                        format!(
+                            "positional delete file_path must be string: {}",
+                            del_ref.path
+                        ),
+                    )
+                })?;
+            let pos_array = batch
+                .column(pos_idx)
+                .as_any()
+                .downcast_ref::<arrow_array::Int64Array>()
+                .ok_or_else(|| {
+                    iceberg::Error::new(
+                        iceberg::ErrorKind::DataInvalid,
+                        format!("positional delete pos must be int64: {}", del_ref.path),
+                    )
+                })?;
+            for i in 0..file_path_array.len() {
+                if file_path_array.is_null(i) || pos_array.is_null(i) {
+                    return Err(iceberg::Error::new(
+                        iceberg::ErrorKind::DataInvalid,
+                        format!(
+                            "positional delete contains null file_path/pos: {}",
+                            del_ref.path
+                        ),
+                    )
+                    .into());
+                }
+                if file_path_array.value(i) == data_file_path {
+                    let position = pos_array.value(i);
+                    if position < 0 || position as u64 >= record_count {
+                        return Err(iceberg::Error::new(
+                            iceberg::ErrorKind::DataInvalid,
+                            format!("positional delete position {position} is outside data file {data_file_path}"),
+                        ).into());
                     }
+                    // Deletes are a set: a snapshot may legally carry several
+                    // delete files naming the same (file_path, pos), so a
+                    // repeat is deduplicated rather than rejected. The
+                    // out-of-range case above stays an error -- it cannot be
+                    // applied to this data file at all.
+                    positions.insert(position);
                 }
             }
         }
     }
-    Ok(total)
+    Ok(positions.len() as u64)
 }
 
 fn build_delete_metadata(task: &FileScanTask) -> Vec<DeleteFileRef> {
@@ -388,12 +459,15 @@ pub fn iceberg_plan_files(
     snapshot_id: i64,
     storage_options_keys: Vec<String>,
     storage_options_values: Vec<String>,
-) -> Result<Vec<IcebergFileInfo>, anyhow::Error> {
+) -> BridgeResult<Vec<IcebergFileInfo>> {
     if metadata_location.is_empty() {
-        anyhow::bail!("metadata_location must not be empty");
+        return Err(BridgeError::new(
+            None,
+            "metadata_location must not be empty".to_string(),
+        ));
     }
 
-    TOKIO_RT.block_on(async {
+    let result: anyhow::Result<Vec<IcebergFileInfo>> = TOKIO_RT.block_on(async {
         let mut props = vec_to_hashmap(storage_options_keys, storage_options_values);
 
         // Normalize URI for opendal and detect FileIO scheme in one pass.
@@ -410,6 +484,13 @@ pub fn iceberg_plan_files(
         let table = table.into_table();
 
         // Build scan pinned to the specified snapshot
+        if table.metadata().snapshot_by_id(snapshot_id).is_none() {
+            return Err(BridgeError::new(
+                Some(crate::bridge_error::LOON_STORAGE_NOT_FOUND),
+                format!("Iceberg snapshot with id {snapshot_id} was not found"),
+            )
+            .into());
+        }
         let scan = table.scan().snapshot_id(snapshot_id).build()?;
 
         // Plan files — returns one FileScanTask per data file
@@ -424,22 +505,30 @@ pub fn iceberg_plan_files(
             // positional deletes before the manifest is committed.
             for del_ref in &delete_refs {
                 if del_ref.file_type == "equality" {
-                    anyhow::bail!(
-                        "Equality deletes are not supported. \
-                         Data file: {}, delete file: {}. \
-                         Equality deletes must be converted to positional deletes \
-                         before explore.",
-                        task.data_file_path,
-                        del_ref.path
-                    );
+                    return Err(iceberg::Error::new(
+                        iceberg::ErrorKind::FeatureUnsupported,
+                        format!(
+                            "Equality deletes are not supported. Data file: {}, delete file: {}. \
+                             Equality deletes must be converted to positional deletes before explore.",
+                            task.data_file_path, del_ref.path
+                        ),
+                    )
+                    .into());
                 }
             }
 
             // Count deleted rows by reading positional delete files
+            let record_count = task.record_count.ok_or_else(|| {
+                iceberg::Error::new(
+                    iceberg::ErrorKind::DataInvalid,
+                    format!("Iceberg data file has no record count: {}", task.data_file_path),
+                )
+            })?;
             let num_deleted_rows = if delete_refs.is_empty() {
                 0
             } else {
-                count_positional_deletes(&file_io, &task.data_file_path, &delete_refs).await?
+                count_positional_deletes(&file_io, &task.data_file_path, &delete_refs, record_count)
+                    .await?
             };
 
             // Denormalize delete file paths back to scheme://bucket/path for C++.
@@ -458,10 +547,6 @@ pub fn iceberg_plan_files(
                 serde_json::to_vec(&denorm_refs)?
             };
 
-            // record_count is required by Iceberg spec but Option in Rust.
-            // Fallback: 0 (caller should handle via Parquet metadata read).
-            let record_count = task.record_count.unwrap_or(0);
-
             // Denormalize data_file_path: strip Azure container@endpoint back to
             // scheme://container/path so C++ sees a uniform format across providers.
             result.push(IcebergFileInfo {
@@ -472,7 +557,8 @@ pub fn iceberg_plan_files(
             });
         }
         Ok(result)
-    })
+    });
+    result.map_err(BridgeError::from)
 }
 
 #[cfg(test)]

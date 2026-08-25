@@ -18,7 +18,6 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
-#include <stdexcept>
 #include <arrow/c/abi.h>
 #include <arrow/result.h>
 
@@ -38,11 +37,6 @@ namespace milvus_storage::lance {
 ///
 /// Violating any of the above leads to undefined behavior (use-after-free, data races).
 void ReplaceLanceRuntime(uint32_t num_threads);
-
-class LanceException : public std::runtime_error {
-  public:
-  explicit LanceException(const std::string& message) : std::runtime_error(message) {}
-};
 
 class BlockingFragmentReader;
 class BlockingScanner;
@@ -69,19 +63,21 @@ enum class LanceDataStorageFormat : uint8_t {
 
 class BlockingDataset {
   public:
-  static std::shared_ptr<BlockingDataset> Open(const std::string& uri, const StorageOptions& storage_options = {});
+  static arrow::Result<std::shared_ptr<BlockingDataset>> Open(const std::string& uri,
+                                                              const StorageOptions& storage_options = {});
 
-  static std::unique_ptr<BlockingDataset> OpenUnique(const std::string& uri,
-                                                     const StorageOptions& storage_options = {});
+  static arrow::Result<std::unique_ptr<BlockingDataset>> OpenUnique(const std::string& uri,
+                                                                    const StorageOptions& storage_options = {});
 
-  static std::unique_ptr<BlockingDataset> WriteDataset(const std::string& uri,
-                                                       struct ArrowArrayStream* stream,
-                                                       const StorageOptions& storage_options = {},
-                                                       LanceDataStorageFormat format = LanceDataStorageFormat::Stable);
+  static arrow::Result<std::unique_ptr<BlockingDataset>> WriteDataset(
+      const std::string& uri,
+      struct ArrowArrayStream* stream,
+      const StorageOptions& storage_options = {},
+      LanceDataStorageFormat format = LanceDataStorageFormat::Stable);
 
   explicit BlockingDataset(rust::Box<ffi::BlockingDataset> impl) : impl_(std::move(impl)) {}
 
-  void WriteArrowArrayStream(struct ArrowArrayStream* stream);
+  arrow::Status WriteArrowArrayStream(struct ArrowArrayStream* stream);
 
   BlockingDataset(BlockingDataset&&) noexcept = default;
   BlockingDataset& operator=(BlockingDataset&&) noexcept = default;
@@ -89,30 +85,30 @@ class BlockingDataset {
   BlockingDataset(const BlockingDataset&) = delete;
   BlockingDataset& operator=(const BlockingDataset&) = delete;
 
-  void DeleteRows(const std::string& predicate);
+  arrow::Status DeleteRows(const std::string& predicate);
 
-  std::vector<uint64_t> GetAllFragmentIds() const;
+  arrow::Result<std::vector<uint64_t>> GetAllFragmentIds() const;
 
-  std::vector<uint64_t> GetFragmentDeletionPositions(uint64_t fragment_id) const;
+  arrow::Result<std::vector<uint64_t>> GetFragmentDeletionPositions(uint64_t fragment_id) const;
 
-  uint64_t GetFragmentPhysicalRowCount(uint64_t fragment_id) const;
+  arrow::Result<uint64_t> GetFragmentPhysicalRowCount(uint64_t fragment_id) const;
 
-  uint64_t GetFragmentRowCount(uint64_t fragment_id) const;
+  arrow::Result<uint64_t> GetFragmentRowCount(uint64_t fragment_id) const;
 
   // Top-level dataset columns in schema order; returns NotImplemented when estimation is unavailable.
   arrow::Result<std::vector<uint64_t>> EstimateFragmentColumnMemory(uint64_t fragment_id) const;
 
-  uint64_t EstimateFragmentMemory(uint64_t fragment_id) const;
+  arrow::Result<uint64_t> EstimateFragmentMemory(uint64_t fragment_id) const;
 
   // Lance 7 exposes the current dataset schema through FileFragment::schema().
   // It can include evolved nullable columns that are not physically stored in this fragment.
-  void GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_schema) const;
+  arrow::Status GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_schema) const;
 
   // Dataset-level scan: create a scanner for projected columns
-  std::unique_ptr<BlockingScanner> Scan(ArrowSchema& schema, uint32_t batch_size);
+  arrow::Result<std::unique_ptr<BlockingScanner>> Scan(ArrowSchema& schema, uint32_t batch_size);
 
   // Dataset-level take: random access by global row indices
-  ArrowArrayStream Take(const std::vector<int64_t>& indices, ArrowSchema& schema);
+  arrow::Result<ArrowArrayStream> Take(const std::vector<int64_t>& indices, ArrowSchema& schema);
 
 #ifdef BUILD_GTEST
   /// Test-only instrumentation for Lance's ObjectStore counters.
@@ -130,9 +126,9 @@ class BlockingDataset {
 
 class BlockingFragmentReader {
   public:
-  static std::unique_ptr<BlockingFragmentReader> Open(const BlockingDataset& dataset,
-                                                      uint64_t fragment_id,
-                                                      ArrowSchema& schema);
+  static arrow::Result<std::unique_ptr<BlockingFragmentReader>> Open(const BlockingDataset& dataset,
+                                                                     uint64_t fragment_id,
+                                                                     ArrowSchema& schema);
 
   explicit BlockingFragmentReader(rust::Box<ffi::BlockingFragmentReader> impl) : impl_(std::move(impl)) {}
 
@@ -142,15 +138,17 @@ class BlockingFragmentReader {
   BlockingFragmentReader(const BlockingFragmentReader&) = delete;
   BlockingFragmentReader& operator=(const BlockingFragmentReader&) = delete;
 
-  uint64_t RowCount() const;
+  arrow::Result<uint64_t> RowCount() const;
 
-  void TakeAsSingleBatch(const std::vector<int64_t>& indices, ArrowArray& out_array);
+  arrow::Status TakeAsSingleBatch(const std::vector<int64_t>& indices, ArrowArray& out_array);
 
-  ArrowArrayStream TakeAsStream(const std::vector<int64_t>& indices, uint32_t batch_size);
+  arrow::Result<ArrowArrayStream> TakeAsStream(const std::vector<int64_t>& indices, uint32_t batch_size);
 
-  ArrowArrayStream ReadAllAsStream(uint32_t batch_size);
+  arrow::Result<ArrowArrayStream> ReadAllAsStream(uint32_t batch_size);
 
-  ArrowArrayStream ReadRangesAsStream(uint32_t row_range_start, uint32_t row_range_end, uint32_t batch_size);
+  arrow::Result<ArrowArrayStream> ReadRangesAsStream(uint32_t row_range_start,
+                                                     uint32_t row_range_end,
+                                                     uint32_t batch_size);
 
   private:
   rust::Box<ffi::BlockingFragmentReader> impl_;
@@ -166,9 +164,9 @@ class BlockingScanner {
   BlockingScanner(const BlockingScanner&) = delete;
   BlockingScanner& operator=(const BlockingScanner&) = delete;
 
-  uint64_t CountRows() const;
+  arrow::Result<uint64_t> CountRows() const;
 
-  ArrowArrayStream OpenStream();
+  arrow::Result<ArrowArrayStream> OpenStream();
 
   private:
   rust::Box<ffi::BlockingScanner> impl_;
