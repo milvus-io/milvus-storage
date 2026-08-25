@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+#include <utility>
 #include <arrow/api.h>
 #include "milvus-storage/packed/column_group.h"
 #include "milvus-storage/common/arrow_util.h"
@@ -28,7 +29,8 @@ class ColumnGroupTest : public ::testing::Test {
 
     for (int i = 0; i < num_columns; ++i) {
       std::vector<int32_t> values(num_rows, i);
-      auto array_data = arrow::ArrayData::Make(arrow::int32(), num_rows, {nullptr, arrow::Buffer::Wrap(values)});
+      auto array_data =
+          arrow::ArrayData::Make(arrow::int32(), num_rows, {nullptr, arrow::Buffer::FromVector(std::move(values))});
       arrays.push_back(arrow::MakeArray(array_data));
 
       std::string column_name = "column_" + std::to_string(i);

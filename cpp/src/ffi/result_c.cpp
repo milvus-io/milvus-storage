@@ -62,6 +62,7 @@ LOON_INTERNAL_ERROR_CODE_LIST(MILVUS_STORAGE_ERRCODE_CONSTANT)
 LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_ERRCODE_CONSTANT)
 #undef MILVUS_STORAGE_ERRCODE_CONSTANT
 
+extern FFI_EXPORT const int loon_errcode_packed_arrow_error = 54;
 extern FFI_EXPORT const int loon_errcode_aws_no_such_upload = LOON_AWS_ERROR_NO_SUCH_UPLOAD;
 extern FFI_EXPORT const int loon_errcode_aws_conflict = LOON_AWS_ERROR_CONFLICT;
 extern FFI_EXPORT const int loon_errcode_aws_precondition_failed = LOON_AWS_ERROR_PRECONDITION_FAILED;

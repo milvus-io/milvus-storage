@@ -120,6 +120,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   std::shared_ptr<arrow::Schema> needed_schema_;
   FieldIDList field_id_list_;
   std::map<FieldID, ColumnOffset> field_id_mapping_;
+  int64_t total_rows_ = 0;
 
   size_t memory_limit_;
   size_t memory_used_;

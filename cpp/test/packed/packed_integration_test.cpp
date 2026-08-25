@@ -177,6 +177,73 @@ TEST_F(PackedIntegrationTest, SchemaEvolutionMoreColumns) {
   ASSERT_EQ(total_size, batch_size * 3);
 }
 
+TEST_F(PackedIntegrationTest, SchemaEvolutionAllColumnsMissingPreservesRows) {
+  auto stored_schema = arrow::schema(
+      {arrow::field("stored", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
+  arrow::Int32Builder builder;
+  constexpr int64_t kRowsPerWrite = 4000;
+  for (int64_t row = 0; row < kRowsPerWrite; ++row) {
+    ASSERT_STATUS_OK(builder.Append(static_cast<int32_t>(row)));
+  }
+  ASSERT_AND_ASSIGN(auto values, builder.Finish());
+  auto stored_batch = arrow::RecordBatch::Make(stored_schema, kRowsPerWrite, {values});
+
+  auto paths = std::vector<std::string>{path_ + "/all-missing.parquet"};
+  auto column_groups = std::vector<std::vector<int>>{{0}};
+  ASSERT_AND_ASSIGN(auto writer,
+                    PackedRecordBatchWriter::Make(fs_, paths, stored_schema, storage_config_, column_groups,
+                                                  /*buffer_size=*/1024));
+  constexpr int64_t kWriteCount = 3;
+  for (int64_t i = 0; i < kWriteCount; ++i) {
+    ASSERT_STATUS_OK(writer->Write(stored_batch));
+  }
+  ASSERT_STATUS_OK(writer->Close());
+
+  auto projected_schema = arrow::schema(
+      {arrow::field("new_int", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"400"})),
+       arrow::field("new_string", arrow::utf8(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"500"}))});
+  ASSERT_AND_ASSIGN(auto reader, PackedRecordBatchReader::Make(fs_, paths, projected_schema, reader_memory_));
+
+  int64_t total_rows = 0;
+  int batch_count = 0;
+  while (true) {
+    std::shared_ptr<arrow::RecordBatch> batch;
+    ASSERT_STATUS_OK(reader->ReadNext(&batch));
+    if (!batch) {
+      break;
+    }
+    total_rows += batch->num_rows();
+    ++batch_count;
+    ASSERT_EQ(batch->num_columns(), 2);
+    EXPECT_EQ(batch->column(0)->null_count(), batch->num_rows());
+    EXPECT_EQ(batch->column(1)->null_count(), batch->num_rows());
+    EXPECT_TRUE(batch->schema()->field(0)->nullable());
+    EXPECT_TRUE(batch->schema()->field(1)->nullable());
+  }
+
+  EXPECT_EQ(total_rows, kRowsPerWrite * kWriteCount);
+  EXPECT_GT(batch_count, 1);
+  ASSERT_STATUS_OK(reader->Close());
+}
+
+TEST_F(PackedIntegrationTest, SchemaEvolutionAllColumnsMissingOnEmptyFileReturnsEof) {
+  auto stored_schema = arrow::schema(
+      {arrow::field("stored", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
+  auto paths = std::vector<std::string>{path_ + "/all-missing-empty.parquet"};
+  auto column_groups = std::vector<std::vector<int>>{{0}};
+  ASSERT_AND_ASSIGN(auto writer, PackedRecordBatchWriter::Make(fs_, paths, stored_schema, storage_config_,
+                                                               column_groups, writer_memory_));
+  ASSERT_STATUS_OK(writer->Close());
+
+  auto projected_schema = arrow::schema(
+      {arrow::field("new_int", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"400"}))});
+  ASSERT_AND_ASSIGN(auto reader, PackedRecordBatchReader::Make(fs_, paths, projected_schema, reader_memory_));
+  std::shared_ptr<arrow::RecordBatch> batch;
+  ASSERT_STATUS_OK(reader->ReadNext(&batch));
+  EXPECT_EQ(batch, nullptr);
+  ASSERT_STATUS_OK(reader->Close());
+}
+
 TEST_F(PackedIntegrationTest, TestMultipleRowGroups) {
   // Test multiple row group scenarios, forcing multiple row groups by setting a small buffer size
   int batch_size = 5000;              // Large amount of data

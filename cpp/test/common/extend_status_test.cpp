@@ -90,7 +90,6 @@ TEST_F(ExtendStatusTest, PackedCodesUseExpectedArrowStatusCodeAndDetail) {
       {ExtendStatusCode::PackedIO, "PackedIO", false},
       {ExtendStatusCode::PackedMetadataCorrupted, "PackedMetadataCorrupted", false},
       {ExtendStatusCode::PackedFileCorrupted, "PackedFileCorrupted", false},
-      {ExtendStatusCode::PackedArrowError, "PackedArrowError", false},
       {ExtendStatusCode::PackedUnexpected, "PackedUnexpected", false},
   };
 

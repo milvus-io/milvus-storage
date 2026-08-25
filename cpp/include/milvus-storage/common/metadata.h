@@ -75,7 +75,12 @@ class GroupFieldIDList {
 
   std::string Serialize() const;
 
+  // Legacy public parser. Keep its return type and behavior for source/ABI
+  // compatibility; persisted-data readers should use TryDeserialize.
   static GroupFieldIDList Deserialize(const std::string& input);
+
+  /// Strictly parse metadata persisted in the packed Parquet footer.
+  static arrow::Result<GroupFieldIDList> TryDeserialize(const std::string& input);
 
   private:
   std::vector<FieldIDList> list_;
@@ -94,6 +99,9 @@ class RowGroupMetadata {
   std::string ToString() const;
   std::string Serialize() const;
   static RowGroupMetadata Deserialize(const std::string& input);
+
+  /// Strictly parse persisted packed row-group metadata.
+  static arrow::Result<RowGroupMetadata> TryDeserialize(const std::string& input);
 
   private:
   size_t memory_size_;
@@ -124,6 +132,12 @@ class RowGroupMetadataVector {
   std::string Serialize() const;
 
   static RowGroupMetadataVector Deserialize(const std::string& input);
+
+  /// Strictly parse persisted packed row-group metadata.
+  static arrow::Result<RowGroupMetadataVector> TryDeserialize(const std::string& input);
+
+  /// Validate private row-group metadata against the authoritative Parquet footer.
+  arrow::Status ValidateAgainst(const ::parquet::FileMetaData& metadata) const;
 
   private:
   std::vector<RowGroupMetadata> vector_;

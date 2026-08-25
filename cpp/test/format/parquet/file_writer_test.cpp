@@ -1262,7 +1262,7 @@ TEST_F(ParquetFileWriterTest, FileLevelCompressionDoesNotPreventVectorUncompress
   EXPECT_EQ(metadata->RowGroup(0)->ColumnChunk(0)->compression(), ::parquet::Compression::UNCOMPRESSED);
 }
 
-TEST_F(ParquetFileWriterTest, FooterSizeNotMatch) {
+TEST_F(ParquetFileWriterTest, SuppliedFooterSizeIsAuthoritative) {
   ASSERT_AND_ASSIGN(auto test_schema, CreateTestSchema());
   ASSERT_AND_ASSIGN(auto record_batch, CreateTestData(test_schema));
 
@@ -1278,9 +1278,8 @@ TEST_F(ParquetFileWriterTest, FooterSizeNotMatch) {
   ASSERT_GT(cached_footer_size, 0u);
   ASSERT_GT(cached_file_size, cached_footer_size);
 
-  // Test reading with different footer_size values passed to ParquetFormatReader.
-  // The reader uses footer_size to pre-read the footer in a single IO;
-  // if the size is wrong, it falls back to Arrow's normal 2-step footer read.
+  // A supplied footer size drives one footer read. A stale value must fail
+  // without falling back to another read path.
   auto verify_read = [&](uint64_t footer_size) {
     auto reader =
         milvus_storage::parquet::ParquetFormatReader(fs_, temp_file, properties_, /*needed_columns=*/{},
@@ -1295,12 +1294,19 @@ TEST_F(ParquetFileWriterTest, FooterSizeNotMatch) {
     ASSERT_GT(rb->num_rows(), 0);
   };
 
-  // Case 1: footer_size too small (1 byte).
-  // Pre-read can't cover the Thrift metadata -> falls back to Arrow's normal 2-step footer read.
-  verify_read(1);
+  auto stale_reader = milvus_storage::parquet::ParquetFormatReader(fs_, temp_file, properties_, /*needed_columns=*/{},
+                                                                   /*key_retriever=*/nullptr, cached_file_size, 1);
+  auto stale_status = stale_reader.open();
+  ASSERT_STATUS_NOT_OK(stale_status);
+  auto stale_detail = ExtendStatusDetail::UnwrapStatus(stale_status);
+  ASSERT_NE(stale_detail, nullptr) << stale_status.ToString();
+  // The NEUTRAL data-format code, not a Packed* one: this reader also serves
+  // iceberg and paimon files, so it is not entitled to claim which subsystem
+  // wrote the bytes it failed to parse.
+  EXPECT_EQ(stale_detail->code(), ExtendStatusCode::DataCorrupted);
 
-  // Case 2: footer_size too large (= file_size).
-  // Pre-reads entire file as suffix. Correctly locates footer_length and magic at the end.
+  // Reading the whole file as a suffix remains valid because it contains the
+  // complete footer and trailer.
   verify_read(cached_file_size);
 }
 
