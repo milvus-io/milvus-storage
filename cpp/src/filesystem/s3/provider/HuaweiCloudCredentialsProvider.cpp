@@ -1,3 +1,4 @@
+#include <chrono>
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
 
 #include "milvus-storage/common/log.h"
@@ -33,6 +34,7 @@ HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::HuaweiCloudSTSAssumeRole
   }
 
   if (m_tokenFile.empty()) {
+    m_lastResolution = MakeCredentialConfigError("Huawei Cloud web identity token file is not configured");
     LOG_STORAGE_WARNING_ << fmt::format(
         "[{}] Token file must be specified to use STS AssumeRole web identity creds "
         "provider.",
@@ -44,6 +46,7 @@ HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::HuaweiCloudSTSAssumeRole
   }
 
   if (m_roleArn.empty()) {
+    m_lastResolution = MakeCredentialConfigError("Huawei Cloud project ID is not configured");
     LOG_STORAGE_WARNING_ << fmt::format(
         "[{}] RoleArn must be specified to use STS AssumeRole web identity creds "
         "provider.",
@@ -55,6 +58,7 @@ HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::HuaweiCloudSTSAssumeRole
   }
 
   if (m_region.empty()) {
+    m_lastResolution = MakeCredentialConfigError("Huawei Cloud region is not configured");
     LOG_STORAGE_WARNING_ << fmt::format(
         "[{}] Region must be specified to use STS AssumeRole web identity creds "
         "provider.",
@@ -63,6 +67,12 @@ HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::HuaweiCloudSTSAssumeRole
   } else {
     LOG_STORAGE_DEBUG_ << fmt::format("[{}] Resolved region from profile_config or environment variable to be {}",
                                       STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, m_region);
+  }
+
+  if (m_providerId.empty()) {
+    m_lastResolution = MakeCredentialConfigError("Huawei Cloud identity provider ID is not configured");
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] ProviderId must be specified", STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
+    return;
   }
 
   if (m_sessionName.empty()) {
@@ -80,17 +90,19 @@ HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::HuaweiCloudSTSAssumeRole
   retryableErrors.emplace_back("IDPCommunicationError");
   retryableErrors.emplace_back("InvalidIdentityToken");
 
+  // Shared credential retry budget; see credential_resolution.h.
+  config.connectTimeoutMs = kCredentialConnectTimeoutMs;
+  config.requestTimeoutMs = kCredentialRequestTimeoutMs;
   config.retryStrategy = Aws::MakeShared<Aws::Client::SpecifiedRetryableErrorsRetryStrategy>(
-      STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, retryableErrors, 3 /*maxRetries*/);
+      STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, retryableErrors, kCredentialRetryAttempts);
 
   m_client = Aws::MakeUnique<HuaweiCloudSTSCredentialsClient>(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, config);
   m_initialized = true;
   LOG_STORAGE_INFO_ << fmt::format(
       "[{}] Initialized STS AssumeRole with web identity creds provider. region={}, "
-      "tokenFile={}, providerId={}, gracePeriodMs={}, cooldownNormalSec={}, "
-      "cooldownUrgentSec={}",
+      "tokenFile={}, providerId={}, gracePeriodMs={}",
       STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, m_region, m_tokenFile, m_providerId,
-      STS_CREDENTIAL_PROVIDER_EXPIRATION_GRACE_PERIOD, RELOAD_COOLDOWN_SECONDS, RELOAD_COOLDOWN_SECONDS_URGENT);
+      STS_CREDENTIAL_PROVIDER_EXPIRATION_GRACE_PERIOD);
 }
 
 Aws::Auth::AWSCredentials HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::GetAWSCredentials() {
@@ -99,17 +111,27 @@ Aws::Auth::AWSCredentials HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider
   }
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
-  // Do not return fully expired credentials — the caller would get silent
-  // auth failures. Return empty credentials instead so the error surfaces
-  // immediately rather than after an HTTP round-trip.
-  if (!m_credentials.IsEmpty() && m_credentials.IsExpired()) {
-    LOG_STORAGE_WARNING_ << fmt::format(
-        "[{}] Cached credentials have fully expired; returning empty credentials to "
-        "avoid silent auth failures.",
-        STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
-    return {};
+  if (ValidateTemporaryCredentials(m_credentials, "Huawei Cloud STS").ok()) {
+    return m_credentials;
   }
-  return m_credentials;
+  return {};
+}
+
+arrow::Result<Aws::Auth::AWSCredentials> HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::ResolveForRequest() {
+  if (!m_initialized) {
+    return m_lastResolution.ok() ? MakeCredentialConfigError("Huawei Cloud credential provider is not initialized")
+                                 : m_lastResolution;
+  }
+  RefreshIfExpired();
+  Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
+  if (ExpiresSoon() && !m_lastResolution.ok()) {
+    return m_lastResolution;
+  }
+  auto validation = ValidateTemporaryCredentials(m_credentials, "Huawei Cloud STS");
+  if (validation.ok()) {
+    return m_credentials;
+  }
+  return m_lastResolution.ok() ? validation : m_lastResolution;
 }
 
 void HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
@@ -127,14 +149,21 @@ void HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
     if (!token.empty() && token.back() == '\n') {
       token.pop_back();
     }
+    if (token.empty()) {
+      ++m_stsFailureCount;
+      m_lastResolution = MakeCredentialConfigError(fmt::format("The OIDC token file {} is empty", m_tokenFile));
+      return;
+    }
     m_token = token;
   } else {
     ++m_stsFailureCount;
     LOG_STORAGE_ERROR_ << fmt::format("[{}] Can't open token file: {}, sts_success={}, sts_failure={}",
                                       STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, m_tokenFile, m_stsSuccessCount.load(),
                                       m_stsFailureCount.load());
-    m_lastReloadFailed = true;
-    m_lastFailedReloadTime = std::chrono::steady_clock::now();
+    // A token file that will not open is the deployment's to fix -- the
+    // projected volume is missing or unreadable -- not something a retry
+    // outlasts.
+    m_lastResolution = MakeCredentialConfigError(fmt::format("Cannot open the OIDC token file {}", m_tokenFile));
     return;
   }
   HuaweiCloudSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{m_region, m_providerId, m_token,
@@ -147,18 +176,19 @@ void HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
   const auto& creds = result.creds;
 
   if (!result.success) {
+    m_lastResolution = result.status.ok() ? MakeCredentialResponseError("Huawei Cloud STS call failed") : result.status;
     ++m_stsFailureCount;
     bool hasExisting = !m_credentials.IsEmpty() && !m_credentials.IsExpired();
     LOG_STORAGE_WARNING_ << fmt::format(
         "[{}] STS call failed. has_valid_cached={}, retaining existing credentials. "
         "sts_success={}, sts_failure={}",
         STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, hasExisting, m_stsSuccessCount.load(), m_stsFailureCount.load());
-    m_lastReloadFailed = true;
-    m_lastFailedReloadTime = std::chrono::steady_clock::now();
     return;
   }
 
-  if (creds.GetAWSAccessKeyId().empty() || creds.GetAWSSecretKey().empty() || creds.GetSessionToken().empty()) {
+  auto validation = ValidateTemporaryCredentials(creds, "Huawei Cloud STS");
+  if (!validation.ok()) {
+    m_lastResolution = validation;
     ++m_stsFailureCount;
     bool hasExisting = !m_credentials.IsEmpty() && !m_credentials.IsExpired();
     LOG_STORAGE_WARNING_ << fmt::format(
@@ -166,14 +196,12 @@ void HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
         "has_valid_cached={}, retaining existing credentials. sts_success={}, "
         "sts_failure={}",
         STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, hasExisting, m_stsSuccessCount.load(), m_stsFailureCount.load());
-    m_lastReloadFailed = true;
-    m_lastFailedReloadTime = std::chrono::steady_clock::now();
     return;
   }
 
+  m_lastResolution = arrow::Status::OK();
   ++m_stsSuccessCount;
   m_credentials = creds;
-  m_lastReloadFailed = false;
   auto expiresInMs = (creds.GetExpiration() - Aws::Utils::DateTime::Now()).count();
   LOG_STORAGE_INFO_ << fmt::format(
       "[{}] Successfully retrieved credentials, expires_in_ms={}, region={}, sts_success={}, sts_failure={}",
@@ -185,19 +213,13 @@ bool HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::ExpiresSoon() const
           STS_CREDENTIAL_PROVIDER_EXPIRATION_GRACE_PERIOD);
 }
 
-bool HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::IsInCooldown() const {
-  if (!m_lastReloadFailed) {
-    return false;
-  }
-  // Use shorter cooldown when credentials are empty or expired (urgent),
-  // longer cooldown when credentials are still valid (not urgent).
-  int cooldownSeconds =
-      (m_credentials.IsEmpty() || m_credentials.IsExpired()) ? RELOAD_COOLDOWN_SECONDS_URGENT : RELOAD_COOLDOWN_SECONDS;
-  auto elapsed = std::chrono::steady_clock::now() - m_lastFailedReloadTime;
-  return std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() < cooldownSeconds;
-}
-
 void HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::RefreshIfExpired() {
+  // The caller's own budget, started before any waiting. See
+  // CredentialAttemptStillWorthMaking: the double-check below handles a leader
+  // that succeeded; this handles one that failed, whose empty credentials would
+  // otherwise make every queued caller replay the same outage in series.
+  const auto started = std::chrono::steady_clock::now();
+
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
   if (!m_credentials.IsEmpty() && !ExpiresSoon()) {
     return;
@@ -208,12 +230,7 @@ void HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::RefreshIfExpired() 
     return;
   }
 
-  if (IsInCooldown()) {
-    bool hasExisting = !m_credentials.IsEmpty() && !m_credentials.IsExpired();
-    LOG_STORAGE_WARNING_ << fmt::format(
-        "[{}] Skipping credential reload — in cooldown after previous failure. "
-        "has_valid_cached={}",
-        STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, hasExisting);
+  if (!CredentialAttemptStillWorthMaking(started)) {
     return;
   }
 

@@ -235,7 +235,6 @@ TEST(ErrorTaxonomyTest, ExportedConstantsMatchMacros) {
   EXPECT_EQ(loon_errcode_storage_precondition_failed, LOON_STORAGE_PRECONDITION_FAILED);
   EXPECT_EQ(loon_errcode_storage_not_found, LOON_STORAGE_NOT_FOUND);
   EXPECT_EQ(loon_errcode_storage_access_denied, LOON_STORAGE_ACCESS_DENIED);
-  EXPECT_EQ(loon_errcode_aws_non_retryable, LOON_AWS_ERROR_NON_RETRYABLE);
   EXPECT_EQ(loon_errcode_transient_network, LOON_TRANSIENT_NETWORK);
   EXPECT_EQ(loon_errcode_transient_timeout, LOON_TRANSIENT_TIMEOUT);
   EXPECT_EQ(loon_errcode_transient_throttling, LOON_TRANSIENT_THROTTLING);

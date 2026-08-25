@@ -976,7 +976,6 @@ static void test_retryable_errcode_helper(void) {
   ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_precondition_failed));
   ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_not_found));
   ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_access_denied));
-  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_non_retryable));
   ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_txn_exhausted_retry));
   ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_txn_resolution_failed));
   ck_assert(!loon_ffi_is_retryable_errcode(99999));

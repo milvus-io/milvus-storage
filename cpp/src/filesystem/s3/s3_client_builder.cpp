@@ -34,10 +34,12 @@
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/util_internal.h"
+#include "milvus-storage/common/extend_status.h"
 
 using ::arrow::Result;
 using ::arrow::Status;
@@ -97,6 +99,14 @@ const std::shared_ptr<Aws::Auth::AWSCredentialsProvider>& ClientBuilderBase::cre
   return credentials_provider_;
 }
 
+const std::string& ClientBuilderBase::region() const { return region_; }
+
+void ClientBuilderBase::ReleaseAwsResources() {
+  credentials_provider_.reset();
+  options_.credentials_provider.reset();
+  options_.retry_strategy.reset();
+}
+
 arrow::Status ClientBuilderBase::PrepareClientConfig(Aws::Client::ClientConfiguration* client_config,
                                                      std::optional<arrow::io::IOContext> io_context) {
   credentials_provider_ = options_.credentials_provider;
@@ -109,7 +119,18 @@ arrow::Status ClientBuilderBase::PrepareClientConfig(Aws::Client::ClientConfigur
                        << "This indicates a race condition or missing initialization. "
                        << "Using AnonymousCredentialsProvider as fallback. "
                        << "Please report this error with stack trace.";
-    return arrow::Status::Invalid("credentials_provider is nullptr");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated, "credentials_provider is nullptr");
+  }
+
+  if (options_.credentials_kind == S3CredentialsKind::Explicit) {
+    const auto credentials = credentials_provider_->GetAWSCredentials();
+    ARROW_RETURN_NOT_OK(ValidateStaticCredentials(FromAwsString(credentials.GetAWSAccessKeyId()),
+                                                  FromAwsString(credentials.GetAWSSecretKey()),
+                                                  FromAwsString(credentials.GetSessionToken()), "explicit S3 options"));
+  } else if ((options_.credentials_kind == S3CredentialsKind::Default ||
+              options_.credentials_kind == S3CredentialsKind::Role) &&
+             (options_.cloud_provider.empty() || options_.cloud_provider == kCloudProviderAWS)) {
+    ARROW_RETURN_NOT_OK(ValidateAwsEnvironmentCredentials());
   }
 
   if (!options_.region.empty()) {
@@ -181,33 +202,42 @@ arrow::Status ClientBuilderBase::PrepareClientConfig(Aws::Client::ClientConfigur
     client_config->checksumConfig.responseChecksumValidation = Aws::Client::ResponseChecksumValidation::WHEN_REQUIRED;
   }
 
+  region_.assign(client_config->region.c_str(), client_config->region.size());
+
   return Status::OK();
 }
 
 template <>
 arrow::Result<std::shared_ptr<S3ClientHolder>> ClientBuilder<S3Client>::BuildClient(
-    std::optional<arrow::io::IOContext> io_context, std::shared_ptr<FilesystemMetrics> metrics) {
+    std::optional<arrow::io::IOContext> io_context,
+    std::shared_ptr<FilesystemMetrics> metrics,
+    std::function<void()> release_resources) {
   (void)metrics;
-  ARROW_RETURN_NOT_OK(PrepareClientConfig(io_context));
+  auto credentials_resolver = std::dynamic_pointer_cast<RequestCredentialsResolver>(options_.credentials_provider);
+  return GetClientFinalizer()->AddClient(
+      [this, io_context = std::move(io_context)]() mutable -> arrow::Result<std::shared_ptr<S3Client>> {
+        ARROW_RETURN_NOT_OK(PrepareClientConfig(std::move(io_context)));
 
-  if (options_.retry_strategy) {
-    client_config_.retryStrategy = fs::internal::MakeWrappedRetryStrategy(options_.retry_strategy);
-  } else {
-    client_config_.retryStrategy = std::make_shared<ConnectRetryStrategy>();
-  }
+        if (options_.retry_strategy) {
+          client_config_->retryStrategy = fs::internal::MakeWrappedRetryStrategy(options_.retry_strategy);
+        } else {
+          client_config_->retryStrategy = std::make_shared<ConnectRetryStrategy>();
+        }
 
-  const bool use_virtual_addressing = options_.endpoint_override.empty() || options_.force_virtual_addressing;
+        const bool use_virtual_addressing = options_.endpoint_override.empty() || options_.force_virtual_addressing;
 
 #ifdef ARROW_S3_HAS_S3CLIENT_CONFIGURATION
-  client_config_.useVirtualAddressing = use_virtual_addressing;
-  auto endpoint_provider = EndpointProviderCache::Instance()->Lookup(client_config_);
-  auto client = std::make_shared<S3Client>(credentials_provider_, endpoint_provider, client_config_);
+        client_config_->useVirtualAddressing = use_virtual_addressing;
+        auto endpoint_provider = EndpointProviderCache::Instance()->Lookup(*client_config_);
+        auto client = std::make_shared<S3Client>(credentials_provider_, endpoint_provider, *client_config_);
 #else
-  auto client =
-      std::make_shared<S3Client>(credentials_provider_, client_config_,
-                                 Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never, use_virtual_addressing);
+        auto client = std::make_shared<S3Client>(credentials_provider_, *client_config_,
+                                                 Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
+                                                 use_virtual_addressing);
 #endif
-  client->s3_retry_strategy_ = options_.retry_strategy;
-  return GetClientFinalizer()->AddClient(std::move(client));
+        client->s3_retry_strategy_ = options_.retry_strategy;
+        return client;
+      },
+      std::move(credentials_resolver), std::move(release_resources));
 }
 }  // namespace milvus_storage

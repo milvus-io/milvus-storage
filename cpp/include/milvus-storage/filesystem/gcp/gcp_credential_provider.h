@@ -30,10 +30,12 @@ struct ArrowFileSystemConfig;
 // GcpCredentialProvider abstracts the identity attached to GCP requests.
 //
 // A provider is looked up per-request by (endpoint, bucket) via
-// GcpCredentialRegistry. The GCP HTTP factory calls AuthorizationHeader() at
-// request creation to inject OAuth2 Bearer (IAM modes), and the HTTP delegator
-// calls MaybeSignConditionalWrite() to re-sign conditional writes with
-// GOOG4-HMAC-SHA256 (HMAC mode).
+// GcpCredentialRegistry. Immediately before sending, the GCP HTTP delegator
+// calls AuthorizationHeader() to inject OAuth2 Bearer (IAM modes), then calls
+// MaybeSignConditionalWrite() to re-sign conditional writes with
+// GOOG4-HMAC-SHA256 (HMAC mode). Keeping token resolution and its Result in the
+// same send call makes failures request-local: a failed token lookup can never
+// be mistaken for another request's successful lookup.
 //
 // Concrete implementations (VM IAM / Impersonation / HMAC) live entirely in
 // the .cpp — callers only ever see this interface and the factory below.
@@ -43,12 +45,20 @@ class GcpCredentialProvider {
 
   // Returns {header_name, header_value} for IAM/Impersonation modes, or
   // std::nullopt for HMAC (AWS SDK's SigV4 will sign the request itself).
-  virtual std::optional<std::pair<std::string, std::string>> AuthorizationHeader() = 0;
+  // A token-fetch failure is returned directly to the delegator; it must not
+  // be stored on the provider or converted into an anonymous request.
+  virtual arrow::Result<std::optional<std::pair<std::string, std::string>>> AuthorizationHeader() = 0;
 
   // Re-signs conditional writes using GOOG4-HMAC-SHA256 (HMAC mode only).
   // No-op for IAM/Impersonation modes.
   virtual arrow::Status MaybeSignConditionalWrite(const std::shared_ptr<Aws::Http::HttpRequest>& request) = 0;
 };
+
+// Resolve and attach the authorization header for exactly this request.
+// HMAC providers return OK without changing the request. OAuth2 failures are
+// returned to the caller before the underlying HTTP client is invoked.
+arrow::Status ApplyGcpAuthorizationHeader(const std::shared_ptr<GcpCredentialProvider>& provider,
+                                          const std::shared_ptr<Aws::Http::HttpRequest>& request);
 
 // Build the appropriate provider from a filesystem config. Returns
 // arrow::Status::Invalid when the config doesn't match any supported credential

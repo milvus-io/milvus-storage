@@ -161,7 +161,6 @@ TEST_F(ExtendStatusTest, WrapExtendErrorPreservesOutOfMemory) {
 TEST_F(ExtendStatusTest, ExtendCodesMapToSegcoreErrorCode) {
   EXPECT_EQ(ToSegcoreErrorCode(ExtendStatusCode::PackedUnexpected), milvus::UnexpectedError);
   EXPECT_EQ(ToSegcoreErrorCode(ExtendStatusCode::StorageAccessDenied), milvus::ConfigInvalid);
-  EXPECT_EQ(ToSegcoreErrorCode(ExtendStatusCode::AwsErrorNonRetryable), milvus::StorageError);
 }
 
 TEST_F(ExtendStatusTest, PlainArrowStatusFallsBackToCoarseClassification) {

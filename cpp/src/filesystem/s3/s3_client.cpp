@@ -52,6 +52,7 @@
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"
 #include "milvus-storage/filesystem/util_internal.h"
 
 using ::arrow::Result;
@@ -153,8 +154,8 @@ arrow::Result<std::string> S3Client::GetBucketRegionFromError(const std::string&
   if (!region.empty()) {
     return region;
   } else if (error.GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
-    // Permanent: the bucket does not exist; a retry/reroute fails identically.
-    return MakeExtendError(ExtendStatusCode::AwsErrorNotFound, "Bucket '" + bucket + "' not found",
+    // The bucket does not exist; replaying or rerouting the same request fails identically.
+    return MakeExtendError(ExtendStatusCode::StorageBucketNotFound, "Bucket '" + bucket + "' not found",
                            "" /* extra_info */);
   } else {
     return arrow::Status::IOError("When resolving region for bucket: ", bucket);
@@ -175,8 +176,8 @@ arrow::Result<std::string> S3Client::GetBucketRegion(const std::string& bucket,
   if (!region.empty()) {
     return region;
   } else if (outcome.GetResult().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
-    // Permanent: the bucket does not exist; a retry/reroute fails identically.
-    return MakeExtendError(ExtendStatusCode::AwsErrorNotFound,
+    // The bucket does not exist; replaying or rerouting the same request fails identically.
+    return MakeExtendError(ExtendStatusCode::StorageBucketNotFound,
                            "Bucket '" + std::string(request.GetBucket().c_str()) + "' not found", "" /* extra_info */);
   } else {
     return arrow::Status::IOError("When resolving region for bucket '", request.GetBucket(),
@@ -347,16 +348,20 @@ S3ClientLock S3ClientLock::Move() { return std::move(*this); }
 // ------------ Implementation of S3ClientHolder End ------------
 
 // ------------ Implementation of S3ClientHolder ------------
-S3ClientHolder::S3ClientHolder(std::weak_ptr<S3ClientFinalizer> finalizer, std::shared_ptr<S3Client> client)
-    : finalizer_(std::move(finalizer)), client_(std::move(client)) {}
+S3ClientHolder::S3ClientHolder(std::weak_ptr<S3ClientFinalizer> finalizer,
+                               std::shared_ptr<S3Client> client,
+                               std::shared_ptr<RequestCredentialsResolver> credentials_resolver,
+                               std::function<void()> release_resources)
+    : finalizer_(std::move(finalizer)),
+      client_(std::move(client)),
+      credentials_resolver_(std::move(credentials_resolver)),
+      release_resources_(std::move(release_resources)) {}
 
 arrow::Result<S3ClientLock> S3ClientHolder::Lock() {
   std::shared_ptr<S3ClientFinalizer> finalizer;
-  std::shared_ptr<S3Client> client;
   {
     std::unique_lock lock(mutex_);
     finalizer = finalizer_.lock();
-    client = client_;
   }
   // Do not hold mutex while taking finalizer lock below.
   //
@@ -379,6 +384,25 @@ arrow::Result<S3ClientLock> S3ClientHolder::Lock() {
   if (finalizer->finalized_) {
     return ErrorS3Finalized();
   }
+
+  // The declaration order is intentional: the resource snapshots must be
+  // released before client_lock drops the shared finalizer lease on every
+  // return path. More importantly, take that lease before copying either
+  // resource. If finalization won the race, no AWS object may be retained past
+  // the barrier and destruct after Aws::ShutdownAPI().
+  std::shared_ptr<S3Client> client;
+  std::shared_ptr<RequestCredentialsResolver> credentials_resolver;
+  {
+    std::unique_lock lock(mutex_);
+    client = client_;
+    credentials_resolver = credentials_resolver_;
+  }
+  if (credentials_resolver != nullptr) {
+    auto credentials = credentials_resolver->ResolveForRequest();
+    if (!credentials.ok()) {
+      return credentials.status();
+    }
+  }
   // (the client can be cleared only if finalizer->finalized_ is true)
   DCHECK(client) << "inconsistent S3ClientHolder";
   client_lock.client_ = std::move(client);
@@ -387,24 +411,79 @@ arrow::Result<S3ClientLock> S3ClientHolder::Lock() {
 
 void S3ClientHolder::Finalize() {
   std::shared_ptr<S3Client> client;
+  std::shared_ptr<RequestCredentialsResolver> credentials_resolver;
+  std::function<void()> release_resources;
   {
     std::unique_lock lock(mutex_);
     client = std::move(client_);
+    credentials_resolver = std::move(credentials_resolver_);
+    release_resources.swap(release_resources_);
   }
-  // Do not hold mutex while ~S3Client potentially runs
+  // Do not hold mutex while AWS-backed resources potentially destruct.
+  credentials_resolver.reset();
+  client.reset();
+  if (release_resources) {
+    release_resources();
+  }
 }
 // ------------ Implementation of S3ClientHolder End ------------
 
 using ClientHolderList = std::vector<std::weak_ptr<S3ClientHolder>>;
 
-arrow::Result<std::shared_ptr<S3ClientHolder>> S3ClientFinalizer::AddClient(std::shared_ptr<S3Client> client) {
+arrow::Result<std::shared_ptr<S3ClientHolder>> S3ClientFinalizer::AddClient(
+    ClientFactory make_client,
+    std::shared_ptr<RequestCredentialsResolver> credentials_resolver,
+    std::function<void()> release_resources) {
+  // Finalize() takes this same process-wide lock before closing admission.
+  // Holding it across the factory and publication removes the construction
+  // gap without taking the operation barrier exclusively for the whole build.
+  std::unique_lock construction_lock(construction_mutex_);
+  {
+    std::unique_lock lock(mutex_);
+    if (finalized_) {
+      lock.unlock();
+      make_client = nullptr;
+      credentials_resolver.reset();
+      if (release_resources) {
+        release_resources();
+      }
+      return ErrorS3Finalized();
+    }
+  }
+
+  auto client_result = make_client();
+  // Destroy factory captures while the construction barrier is still held. They
+  // may themselves retain AWS-backed configuration or credential resources.
+  make_client = nullptr;
+  if (!client_result.ok()) {
+    credentials_resolver.reset();
+    if (release_resources) {
+      release_resources();
+    }
+    return client_result.status();
+  }
+  auto client = std::move(client_result).ValueOrDie();
+  if (!client) {
+    credentials_resolver.reset();
+    if (release_resources) {
+      release_resources();
+    }
+    return arrow::Status::Invalid("S3 client factory returned a null client");
+  }
+
   std::unique_lock lock(mutex_);
   if (finalized_) {
+    lock.unlock();
+    credentials_resolver.reset();
+    client.reset();
+    if (release_resources) {
+      release_resources();
+    }
     return ErrorS3Finalized();
   }
 
-  auto holder = std::make_shared<S3ClientHolder>(shared_from_this(), std::move(client));
-
+  auto holder = std::make_shared<S3ClientHolder>(shared_from_this(), std::move(client), std::move(credentials_resolver),
+                                                 std::move(release_resources));
   // Remove expired entries before adding new one
   auto end = std::remove_if(holders_.begin(), holders_.end(),
                             [](const std::weak_ptr<S3ClientHolder>& holder) { return holder.expired(); });
@@ -414,14 +493,32 @@ arrow::Result<std::shared_ptr<S3ClientHolder>> S3ClientFinalizer::AddClient(std:
 }
 
 void S3ClientFinalizer::Finalize() {
-  std::unique_lock lock(mutex_);
-  finalized_ = true;
+  // Close admission without holding construction_mutex_. An S3 operation may
+  // be holding mutex_ in shared mode while indirectly finishing construction;
+  // taking the locks in the opposite order would let those two paths wait on
+  // each other.
+  {
+    std::unique_lock lock(mutex_);
+    finalized_ = true;
+  }
 
-  ClientHolderList finalizing = std::move(holders_);
-  lock.unlock();  // avoid lock ordering issue with S3ClientHolder::Finalize
+  // A factory admitted before finalized_ changed either published its holder
+  // already or will now discard its client at AddClient's second check. New
+  // factories are rejected at the first check. Taking this lock therefore
+  // waits for all client-construction cleanup to finish.
+  std::unique_lock construction_lock(construction_mutex_);
+  ClientHolderList finalizing;
+  {
+    std::unique_lock lock(mutex_);
+    finalizing = std::move(holders_);
+  }
+  construction_lock.unlock();
 
   // Finalize all client holders, such that no S3Client remains alive
   // after this.
+  // TODO: Track holder destruction completion as well as lockable weak holders.
+  // A weak_ptr may already be expired while the last holder is still destroying
+  // its AWS client, allowing Aws::ShutdownAPI() to race that destructor.
   for (auto&& weak_holder : finalizing) {
     auto holder = weak_holder.lock();
     if (holder) {

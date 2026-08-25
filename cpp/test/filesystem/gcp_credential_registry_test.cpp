@@ -14,15 +14,28 @@
 
 #include <gtest/gtest.h>
 
+#include <condition_variable>
+#include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 
+#include <arrow/result.h>
 #include <arrow/status.h>
 #include <aws/core/http/URI.h>
+#include <aws/core/http/standard/StandardHttpRequest.h>
+#include <aws/s3/S3ErrorMarshaller.h>
 
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/gcp/gcp_credential_registry.h"
+#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/s3/s3_internal.h"
+#include "milvus-storage/filesystem/s3/s3_global.h"
+
+#include "filesystem/gcp/gcp_filesystem_producer_internal.h"
 
 namespace milvus_storage {
 
@@ -30,14 +43,157 @@ namespace {
 
 class TestGcpCredentialProvider final : public GcpCredentialProvider {
   public:
-  std::optional<std::pair<std::string, std::string>> AuthorizationHeader() override { return std::nullopt; }
+  arrow::Result<std::optional<std::pair<std::string, std::string>>> AuthorizationHeader() override {
+    return std::optional<std::pair<std::string, std::string>>{};
+  }
 
   arrow::Status MaybeSignConditionalWrite(const std::shared_ptr<Aws::Http::HttpRequest>&) override {
     return arrow::Status::OK();
   }
 };
 
+// Forces request A's token lookup to finish after request B's. This is the
+// interleaving that made provider-global last_token_status_ associate A's
+// failure with B's request (or B's success with A's request).
+class InterleavedGcpCredentialProvider final : public GcpCredentialProvider {
+  public:
+  arrow::Result<std::optional<std::pair<std::string, std::string>>> AuthorizationHeader() override {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (calls_++ == 0) {
+      first_call_started_ = true;
+      cv_.notify_all();
+      cv_.wait(lock, [this] { return release_first_call_; });
+      return arrow::Status::IOError("request A token lookup failed");
+    }
+    return std::optional<std::pair<std::string, std::string>>(std::in_place, "Authorization", "Bearer request-b-token");
+  }
+
+  arrow::Status MaybeSignConditionalWrite(const std::shared_ptr<Aws::Http::HttpRequest>&) override {
+    return arrow::Status::OK();
+  }
+
+  void WaitForFirstCall() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [this] { return first_call_started_; });
+  }
+
+  void ReleaseFirstCall() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      release_first_call_ = true;
+    }
+    cv_.notify_all();
+  }
+
+  private:
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  int calls_ = 0;
+  bool first_call_started_ = false;
+  bool release_first_call_ = false;
+};
+
 }  // namespace
+
+class GcpCredentialProviderTest : public ::testing::Test {
+  protected:
+  static void SetUpTestSuite() {
+    ASSERT_TRUE(EnsureS3Initialized().ok());
+    static std::once_flag finalize_once;
+    std::call_once(finalize_once, [] { std::atexit([] { EnsureS3Finalized().ok(); }); });
+  }
+};
+
+TEST_F(GcpCredentialProviderTest, AuthorizationResultBelongsToTheRequestThatResolvedIt) {
+  auto provider = std::make_shared<InterleavedGcpCredentialProvider>();
+  auto request_a = Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(
+      "gcp-request-local-test", Aws::Http::URI("https://storage.googleapis.com/bucket/a"),
+      Aws::Http::HttpMethod::HTTP_GET);
+  auto request_b = Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(
+      "gcp-request-local-test", Aws::Http::URI("https://storage.googleapis.com/bucket/b"),
+      Aws::Http::HttpMethod::HTTP_GET);
+
+  arrow::Status status_a;
+  arrow::Status status_b;
+  std::thread thread_a([&] { status_a = ApplyGcpAuthorizationHeader(provider, request_a); });
+  provider->WaitForFirstCall();
+  std::thread thread_b([&] { status_b = ApplyGcpAuthorizationHeader(provider, request_b); });
+  thread_b.join();
+  provider->ReleaseFirstCall();
+  thread_a.join();
+
+  EXPECT_FALSE(status_a.ok());
+  EXPECT_NE(status_a.message().find("request A token lookup failed"), std::string::npos);
+  EXPECT_FALSE(request_a->HasHeader("Authorization"));
+
+  EXPECT_TRUE(status_b.ok()) << status_b.ToString();
+  ASSERT_TRUE(request_b->HasHeader("Authorization"));
+  EXPECT_EQ(request_b->GetHeaderValue("Authorization"), "Bearer request-b-token");
+}
+
+TEST_F(GcpCredentialProviderTest, HmacConditionalWriteStillUsesGoogV4Signing) {
+  ArrowFileSystemConfig config;
+  config.access_key_id = "GOOGACCESSKEY";
+  config.access_key_value = "secret";
+  auto provider_result = BuildGcpProviderFromConfig(config);
+  ASSERT_TRUE(provider_result.ok()) << provider_result.status().ToString();
+  auto provider = std::move(provider_result).ValueOrDie();
+
+  auto request = Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(
+      "gcp-hmac-test", Aws::Http::URI("https://storage.googleapis.com/bucket/object"), Aws::Http::HttpMethod::HTTP_PUT);
+  request->SetHeaderValue("Authorization", "AWS4-HMAC-SHA256 old-signature");
+  request->SetHeaderValue("x-amz-date", "20260819T000000Z");
+  request->SetHeaderValue("x-amz-content-sha256", "UNSIGNED-PAYLOAD");
+  request->SetHeaderValue("x-goog-if-generation-match", "0");
+
+  auto authorization_status = ApplyGcpAuthorizationHeader(provider, request);
+  ASSERT_TRUE(authorization_status.ok()) << authorization_status.ToString();
+  EXPECT_EQ(request->GetHeaderValue("Authorization"), "AWS4-HMAC-SHA256 old-signature");
+
+  auto signing_status = provider->MaybeSignConditionalWrite(request);
+  ASSERT_TRUE(signing_status.ok()) << signing_status.ToString();
+  EXPECT_NE(std::string(request->GetHeaderValue("Authorization")).find("GOOG4-HMAC-SHA256"), std::string::npos);
+  EXPECT_FALSE(request->HasHeader("x-amz-date"));
+  EXPECT_TRUE(request->HasHeader("x-goog-date"));
+}
+
+TEST_F(GcpCredentialProviderTest, TokenFailureSubtypeSurvivesS3Marshalling) {
+  struct TestCase {
+    ExtendStatusCode input;
+    ExtendStatusCode expected;
+  };
+  const TestCase test_cases[] = {
+      {ExtendStatusCode::StorageTransientNetwork, ExtendStatusCode::StorageTransientNetwork},
+      {ExtendStatusCode::StorageTransientTimeout, ExtendStatusCode::StorageTransientTimeout},
+      {ExtendStatusCode::StorageTransientThrottling, ExtendStatusCode::StorageTransientThrottling},
+      {ExtendStatusCode::StorageTransientService, ExtendStatusCode::StorageTransientService},
+      {ExtendStatusCode::StorageAccessDenied, ExtendStatusCode::StorageAccessDenied},
+      {ExtendStatusCode::StorageConfigInvalid, ExtendStatusCode::StorageConfigInvalid},
+  };
+
+  auto request = Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(
+      "gcp-token-marshalling-test", Aws::Http::URI("https://storage.googleapis.com/bucket/object"),
+      Aws::Http::HttpMethod::HTTP_GET);
+  request->SetResponseStreamFactory(Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
+  Aws::Client::S3ErrorMarshaller marshaller;
+  for (const auto& test_case : test_cases) {
+    auto token_status = MakeExtendErrorMsg(test_case.input, "bad <token> & endpoint");
+    auto response = gcp_internal::MakeTokenErrorResponse(request, token_status);
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(marshaller.BuildAWSError(response));
+    EXPECT_EQ(error.ShouldRetry(), RetryableForExtendStatusCode(test_case.expected));
+    auto status = fs::internal::ErrorToStatus("gcp token: ", "GetObject", error, fs::internal::S3ErrorProvenance{});
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->code(), test_case.expected) << status.ToString();
+  }
+
+  auto response = gcp_internal::MakeTokenErrorResponse(request, arrow::Status::IOError("malformed token response"));
+  Aws::Client::AWSError<Aws::S3::S3Errors> error(marshaller.BuildAWSError(response));
+  EXPECT_FALSE(error.ShouldRetry());
+  auto status = fs::internal::ErrorToStatus("gcp token: ", "GetObject", error, fs::internal::S3ErrorProvenance{});
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr) << status.ToString();
+}
 
 TEST(GcpCredentialRegistryTest, CanonicalizesConfigEndpoints) {
   auto implicit_https = NormalizeGcpEndpoint("Storage.GoogleApis.com", true);
@@ -68,7 +224,12 @@ TEST(GcpCredentialRegistryTest, LooksUpDefaultHttpsPort) {
   const std::string bucket = "gcp-registry-default-port-bucket";
   auto provider = std::make_shared<TestGcpCredentialProvider>();
   auto& registry = GcpCredentialRegistry::Instance();
-  registry.Register({NormalizeGcpEndpoint("storage.googleapis.com:443", true), bucket}, provider);
+  auto registration_result =
+      registry.Register({NormalizeGcpEndpoint("storage.googleapis.com:443", true), bucket},
+                        std::make_shared<GcpCredentialRegistration>("default-port-identity", provider));
+  ASSERT_TRUE(registration_result.ok()) << registration_result.status().ToString();
+  auto registration = std::move(registration_result).ValueOrDie();
+  ASSERT_NE(registration, nullptr);
 
   auto implicit_port_uri = Aws::Http::URI(("https://storage.googleapis.com/" + bucket + "/key").c_str());
   EXPECT_EQ(registry.Lookup(implicit_port_uri), provider);
@@ -82,7 +243,12 @@ TEST(GcpCredentialRegistryTest, PreservesNonDefaultPortAndScheme) {
   const std::string bucket = "gcp-registry-port-bucket";
   auto provider = std::make_shared<TestGcpCredentialProvider>();
   auto& registry = GcpCredentialRegistry::Instance();
-  registry.Register({NormalizeGcpEndpoint(host + ":8443", true), bucket}, provider);
+  auto registration_result =
+      registry.Register({NormalizeGcpEndpoint(host + ":8443", true), bucket},
+                        std::make_shared<GcpCredentialRegistration>("non-default-port-identity", provider));
+  ASSERT_TRUE(registration_result.ok()) << registration_result.status().ToString();
+  auto registration = std::move(registration_result).ValueOrDie();
+  ASSERT_NE(registration, nullptr);
 
   auto matching_uri = Aws::Http::URI(("https://" + host + ":8443/" + bucket + "/key").c_str());
   EXPECT_EQ(registry.Lookup(matching_uri), provider);
@@ -100,15 +266,91 @@ TEST(GcpCredentialRegistryTest, LooksUpVirtualHostAndIpv6Endpoints) {
   const std::string virtual_host = "gcp-registry-vhost.example";
   const std::string virtual_bucket = "gcp-registry-vhost-bucket";
   auto virtual_provider = std::make_shared<TestGcpCredentialProvider>();
-  registry.Register({NormalizeGcpEndpoint(virtual_host + ":8443", true), virtual_bucket}, virtual_provider);
+  auto virtual_registration_result =
+      registry.Register({NormalizeGcpEndpoint(virtual_host + ":8443", true), virtual_bucket},
+                        std::make_shared<GcpCredentialRegistration>("virtual-host-identity", virtual_provider));
+  ASSERT_TRUE(virtual_registration_result.ok()) << virtual_registration_result.status().ToString();
+  auto virtual_registration = std::move(virtual_registration_result).ValueOrDie();
+  ASSERT_NE(virtual_registration, nullptr);
   auto virtual_uri = Aws::Http::URI(("https://" + virtual_bucket + "." + virtual_host + ":8443/key").c_str());
   EXPECT_EQ(registry.Lookup(virtual_uri), virtual_provider);
 
   const std::string ipv6_bucket = "gcp-registry-ipv6-bucket";
   auto ipv6_provider = std::make_shared<TestGcpCredentialProvider>();
-  registry.Register({NormalizeGcpEndpoint("[2001:db8::7]:80", false), ipv6_bucket}, ipv6_provider);
+  auto ipv6_registration_result =
+      registry.Register({NormalizeGcpEndpoint("[2001:db8::7]:80", false), ipv6_bucket},
+                        std::make_shared<GcpCredentialRegistration>("ipv6-identity", ipv6_provider));
+  ASSERT_TRUE(ipv6_registration_result.ok()) << ipv6_registration_result.status().ToString();
+  auto ipv6_registration = std::move(ipv6_registration_result).ValueOrDie();
+  ASSERT_NE(ipv6_registration, nullptr);
   auto ipv6_uri = Aws::Http::URI(("http://[2001:db8::7]/" + ipv6_bucket + "/key").c_str());
   EXPECT_EQ(registry.Lookup(ipv6_uri), ipv6_provider);
+}
+
+TEST(GcpCredentialRegistryTest, RejectsDifferentLiveIdentityWithoutReplacingIt) {
+  const std::string bucket = "gcp-registry-identity-conflict-bucket";
+  const auto key = GcpBucketKey{NormalizeGcpEndpoint("identity-conflict.example", true), bucket};
+  auto provider_a = std::make_shared<TestGcpCredentialProvider>();
+  auto provider_b = std::make_shared<TestGcpCredentialProvider>();
+  auto& registry = GcpCredentialRegistry::Instance();
+
+  auto first_result = registry.Register(key, std::make_shared<GcpCredentialRegistration>("identity-a", provider_a));
+  ASSERT_TRUE(first_result.ok()) << first_result.status().ToString();
+  auto first = std::move(first_result).ValueOrDie();
+
+  auto conflicting = registry.Register(key, std::make_shared<GcpCredentialRegistration>("identity-b", provider_b));
+  ASSERT_FALSE(conflicting.ok());
+  EXPECT_TRUE(conflicting.status().IsInvalid()) << conflicting.status().ToString();
+  auto detail = ExtendStatusDetail::UnwrapStatus(conflicting.status());
+  ASSERT_NE(detail, nullptr) << conflicting.status().ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageConfigInvalid);
+
+  auto uri = Aws::Http::URI(("https://identity-conflict.example/" + bucket + "/key").c_str());
+  EXPECT_EQ(registry.Lookup(uri), provider_a);
+}
+
+TEST(GcpCredentialRegistryTest, ReusesEquivalentLiveIdentity) {
+  const std::string bucket = "gcp-registry-equivalent-identity-bucket";
+  const auto key = GcpBucketKey{NormalizeGcpEndpoint("equivalent-identity.example", true), bucket};
+  auto provider_a = std::make_shared<TestGcpCredentialProvider>();
+  auto provider_b = std::make_shared<TestGcpCredentialProvider>();
+  auto& registry = GcpCredentialRegistry::Instance();
+
+  auto first_result = registry.Register(key, std::make_shared<GcpCredentialRegistration>("same-identity", provider_a));
+  ASSERT_TRUE(first_result.ok()) << first_result.status().ToString();
+  auto first = std::move(first_result).ValueOrDie();
+
+  auto second_result = registry.Register(key, std::make_shared<GcpCredentialRegistration>("same-identity", provider_b));
+  ASSERT_TRUE(second_result.ok()) << second_result.status().ToString();
+  auto second = std::move(second_result).ValueOrDie();
+  EXPECT_EQ(second, first);
+
+  auto uri = Aws::Http::URI(("https://equivalent-identity.example/" + bucket + "/key").c_str());
+  EXPECT_EQ(registry.Lookup(uri), provider_a);
+}
+
+TEST(GcpCredentialRegistryTest, DoesNotRetainProviderAfterLastRegistrationOwner) {
+  const std::string bucket = "gcp-registry-release-bucket";
+  const auto key = GcpBucketKey{NormalizeGcpEndpoint("release.example", true), bucket};
+  auto provider = std::make_shared<TestGcpCredentialProvider>();
+  std::weak_ptr<GcpCredentialProvider> weak_provider = provider;
+  auto& registry = GcpCredentialRegistry::Instance();
+
+  auto registration_result =
+      registry.Register(key, std::make_shared<GcpCredentialRegistration>("released-identity", provider));
+  ASSERT_TRUE(registration_result.ok()) << registration_result.status().ToString();
+  auto registration = std::move(registration_result).ValueOrDie();
+  provider.reset();
+  EXPECT_FALSE(weak_provider.expired());
+
+  registration.reset();
+  EXPECT_TRUE(weak_provider.expired());
+  auto uri = Aws::Http::URI(("https://release.example/" + bucket + "/key").c_str());
+  EXPECT_EQ(registry.Lookup(uri), nullptr);
+
+  auto replacement = registry.Register(key, std::make_shared<GcpCredentialRegistration>(
+                                                "replacement-identity", std::make_shared<TestGcpCredentialProvider>()));
+  EXPECT_TRUE(replacement.ok()) << replacement.status().ToString();
 }
 
 }  // namespace milvus_storage

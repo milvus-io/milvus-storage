@@ -14,6 +14,9 @@
 
 #pragma once
 
+#include <string_view>
+#include <cctype>
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <mutex>
@@ -123,6 +126,43 @@ bool IsLocalFileSystem(const ArrowFileSystemPtr& fs);
  * - Absolute URIs: s3://[endpoint/]bucket/key
  * - Relative paths: path/to/file
  */
+/// \brief Does this string name a location, or is it a path relative to
+/// whatever filesystem the deployment is configured with?
+///
+/// Cheap and syntactic on purpose -- no parse, no allocation. It exists so a
+/// caller can answer "is this location the user's?" before deciding whose
+/// fault a configuration failure is: an absolute URI is the user's, a relative
+/// path is resolved by the deployment's own fs.* settings.
+///
+/// Same RFC 3986 test StorageUri::Parse uses to decide a malformed URI is a
+/// malformed URI rather than a filename; the two must agree or a string could
+/// be "user-supplied" to one and "relative" to the other.
+[[nodiscard]] inline bool HasUriScheme(std::string_view text) {
+  const auto colon = text.find(':');
+  if (colon == std::string_view::npos || colon <= 1 || std::isalpha(static_cast<unsigned char>(text.front())) == 0) {
+    return false;
+  }
+  return std::all_of(text.begin(), text.begin() + static_cast<std::ptrdiff_t>(colon),
+                     [](unsigned char c) { return std::isalnum(c) != 0 || c == '+' || c == '-' || c == '.'; });
+}
+
+/// \brief Does this string parse as a URI at all?
+///
+/// Purely syntactic (RFC 3986), and deliberately narrower than
+/// StorageUri::Parse: it answers "are these bytes a URI", not "is this a
+/// location this build can open". "s3://bucket/%ZZ" is false here -- a
+/// percent-escape that is not one is a mangled string, whoever wrote it.
+/// "s3://bucket/key" is TRUE here even though StorageUri::Parse rejects it,
+/// because that rejection is about an addressing convention this build does
+/// not support, not about the bytes being damaged.
+///
+/// The distinction exists because the two failures have different owners: a
+/// manifest that has stored an unparseable location holds bad content, while a
+/// manifest holding a well-formed URI in an unsupported form is a
+/// configuration/compatibility problem. Only the first may be called
+/// corruption.
+[[nodiscard]] bool IsParseableUri(const std::string& text);
+
 struct StorageUri {
   std::string scheme;       // URI scheme (e.g., "s3"), or "" for relative paths
   std::string address;      // Optional endpoint/host, or "" for relative paths

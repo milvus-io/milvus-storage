@@ -17,10 +17,17 @@
 #include <arrow/io/memory.h>
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+#include <future>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <sstream>
 #include <thread>
+#include <tuple>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
@@ -39,12 +46,71 @@
 #include "milvus-storage/filesystem/s3/s3_auth_signer.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"
 #include "milvus-storage/filesystem/util_internal.h"
 #include "milvus-storage/filesystem/fs.h"
 
 #include "test_env.h"
 
 namespace milvus_storage {
+
+namespace {
+
+class ScopedEnvironmentVariable {
+  public:
+  ScopedEnvironmentVariable(std::string name, std::string value) : name_(std::move(name)) {
+    if (const char* old = std::getenv(name_.c_str()); old != nullptr) {
+      old_value_ = old;
+    }
+    setenv(name_.c_str(), value.c_str(), 1);
+  }
+
+  ~ScopedEnvironmentVariable() {
+    if (old_value_.has_value()) {
+      setenv(name_.c_str(), old_value_->c_str(), 1);
+    } else {
+      unsetenv(name_.c_str());
+    }
+  }
+
+  ScopedEnvironmentVariable(const ScopedEnvironmentVariable&) = delete;
+  ScopedEnvironmentVariable& operator=(const ScopedEnvironmentVariable&) = delete;
+
+  private:
+  std::string name_;
+  std::optional<std::string> old_value_;
+};
+
+class FinalizerProbeResolver final : public RequestCredentialsResolver {
+  public:
+  arrow::Result<Aws::Auth::AWSCredentials> ResolveForRequest() override {
+    return Aws::Auth::AWSCredentials("ak", "sk");
+  }
+};
+
+class ControllableS3ClientFinalizer final : public S3ClientFinalizer {
+  public:
+  std::unique_lock<std::shared_mutex> MarkFinalizedAndHoldBarrier() {
+    std::unique_lock lock(mutex_);
+    finalized_ = true;
+    return lock;
+  }
+
+  bool IsFinalizedForTest() {
+    std::shared_lock lock(mutex_);
+    return finalized_;
+  }
+};
+
+std::shared_ptr<S3Client> MakeTestS3Client() {
+  // Lifecycle tests never dereference the client. An aliasing pointer gives
+  // them observable ownership without constructing another SDK client.
+  auto storage = std::make_shared<char>();
+  return {storage, reinterpret_cast<S3Client*>(storage.get())};
+}
+
+}  // namespace
+
 // ============================================================================
 // Non-cloud unit tests — S3 SDK initialized but no real cloud connection needed
 // ============================================================================
@@ -63,60 +129,214 @@ class S3UnitTest : public ::testing::Test {
       return;
     }
     ASSERT_TRUE(EnsureS3Initialized().ok());
+    // Keep filtered runs of this suite safe too. Finalize once at process exit,
+    // after every S3-using suite has finished and before AwsInstance's static
+    // destructor.
+    static std::once_flag flag;
+    std::call_once(flag, [] { std::atexit([] { EnsureS3Finalized().ok(); }); });
   }
 };
 
+constexpr fs::internal::S3ErrorProvenance kDefaultProvenance{};
+
 TEST_F(S3UnitTest, TestExtendErrorInFs) {
   Aws::Client::AWSError<Aws::S3::S3Errors> test_err(Aws::S3::S3Errors::NO_SUCH_UPLOAD,
-                                                    Aws::Client::RetryableType::NOT_RETRYABLE, "AwsErrorNoSuchUpload",
+                                                    Aws::Client::RetryableType::NOT_RETRYABLE, "StorageNoSuchUpload",
                                                     "Just for test");
 
-  auto status = fs::internal::ErrorToStatus("test", test_err);
+  auto status = fs::internal::ErrorToStatus("test", test_err, kDefaultProvenance);
   ASSERT_STATUS_NOT_OK(status);
   auto extend_status = ExtendStatusDetail::UnwrapStatus(status);
   ASSERT_NE(extend_status, nullptr);
-  ASSERT_EQ(extend_status->code(), ExtendStatusCode::AwsErrorNoSuchUpload);
+  ASSERT_EQ(extend_status->code(), ExtendStatusCode::StorageNoSuchUpload);
   ASSERT_TRUE(status.ToString().find(extend_status->ToString()) != std::string::npos);
 }
 
-TEST_F(S3UnitTest, TestErrorToStatusPermanentVsTransient) {
-  // NoSuchKey: permanent, tagged AwsErrorNotFound.
+TEST_F(S3UnitTest, ExpiredTokenIsAuthenticationFailure) {
+  auto expired_token = [](Aws::S3::S3Errors error_type) {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(error_type, Aws::Client::RetryableType::NOT_RETRYABLE,
+                                                   "ExpiredToken", "token has expired");
+    error.SetResponseCode(Aws::Http::HttpResponseCode::FORBIDDEN);
+    return error;
+  };
+
+  // Both shapes occur in practice: some SDK/parser combinations keep the
+  // service error UNKNOWN, while others normalize the same named condition to
+  // ACCESS_DENIED. Neither shape proves that the configured provider will
+  // return a different credential on an immediate replay.
+  for (auto error_type : {Aws::S3::S3Errors::UNKNOWN, Aws::S3::S3Errors::ACCESS_DENIED}) {
+    auto error = expired_token(error_type);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error, fs::internal::S3ErrorProvenance{});
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageAccessDenied);
+    EXPECT_FALSE(detail->retryable());
+  }
+
+  // Some SDK versions expose the same named service condition through a core
+  // credential enum. The exception name still carries the authoritative
+  // ExpiredToken spelling and must still map to the authentication verdict.
+  const Aws::Client::CoreErrors core_shapes[] = {
+      Aws::Client::CoreErrors::INVALID_CLIENT_TOKEN_ID,
+      Aws::Client::CoreErrors::MISSING_AUTHENTICATION_TOKEN,
+  };
+  for (auto core : core_shapes) {
+    auto error = expired_token(static_cast<Aws::S3::S3Errors>(core));
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error, fs::internal::S3ErrorProvenance{});
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageAccessDenied);
+    EXPECT_FALSE(detail->retryable());
+  }
+}
+
+TEST_F(S3UnitTest, WrongBucketRegionIsConfigurationFailure) {
+  Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE,
+                                                 "AuthorizationHeaderMalformed",
+                                                 "the authorization header is malformed");
+  error.SetResponseCode(Aws::Http::HttpResponseCode::BAD_REQUEST);
+  Aws::Http::HeaderValueCollection headers;
+  headers["x-amz-bucket-region"] = "us-west-2";
+  error.SetResponseHeaders(headers);
+
+  auto status = fs::internal::ErrorToStatus("When reading bucket 'b': ", "HeadBucket", error,
+                                            fs::internal::S3ErrorProvenance{fs::internal::S3ResourceKind::Bucket},
+                                            std::string("us-east-1"));
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageConfigInvalid);
+  EXPECT_FALSE(detail->retryable());
+  EXPECT_NE(status.message().find("configured region is 'us-east-1'"), std::string::npos) << status.ToString();
+  EXPECT_NE(status.message().find("bucket is located in 'us-west-2'"), std::string::npos) << status.ToString();
+  EXPECT_NE(detail->extra_info().find("configured_region=us-east-1"), std::string::npos);
+  EXPECT_NE(detail->extra_info().find("actual_region=us-west-2"), std::string::npos);
+}
+
+// A store may echo x-amz-bucket-region on any response, including one that
+// identifies a different, sharper condition. The region mismatch is judged last
+// so it cannot erase that condition: a request that was throttled while pointed
+// at the wrong region was still throttled, and reporting it as a configuration
+// failure would strip the transient hint from a failure that has one.
+TEST_F(S3UnitTest, WrongBucketRegionDoesNotMaskAnIdentifiedCondition) {
+  Aws::Http::HeaderValueCollection headers;
+  headers["x-amz-bucket-region"] = "us-west-2";
+
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::SLOW_DOWN, Aws::Client::RetryableType::RETRYABLE,
+                                                   "SlowDown", "please reduce your request rate");
+    error.SetResponseCode(Aws::Http::HttpResponseCode::TOO_MANY_REQUESTS);
+    error.SetResponseHeaders(headers);
+
+    auto status = fs::internal::ErrorToStatus("When reading key 'k' in bucket 'b': ", "GetObject", error,
+                                              fs::internal::S3ErrorProvenance{fs::internal::S3ResourceKind::Object},
+                                              std::string("us-east-1"));
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientThrottling);
+    EXPECT_TRUE(detail->retryable());
+    // The mismatch is not lost, it is just not the verdict.
+    EXPECT_NE(status.message().find("bucket is located in 'us-west-2'"), std::string::npos) << status.ToString();
+    EXPECT_NE(detail->extra_info().find("actual_region=us-west-2"), std::string::npos);
+  }
+
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::ACCESS_DENIED, Aws::Client::RetryableType::NOT_RETRYABLE, "AccessDenied", "access denied");
+    error.SetResponseCode(Aws::Http::HttpResponseCode::FORBIDDEN);
+    error.SetResponseHeaders(headers);
+
+    auto status = fs::internal::ErrorToStatus("When reading key 'k' in bucket 'b': ", "GetObject", error,
+                                              fs::internal::S3ErrorProvenance{fs::internal::S3ResourceKind::Object},
+                                              std::string("us-east-1"));
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageAccessDenied);
+    EXPECT_FALSE(detail->retryable());
+  }
+}
+
+// A classified status names what it was operating on, and extra_info carries
+// something the message does not.
+//
+// Both used to be missing: the prefix -- which is where the bucket and key are
+// -- was glued onto the fallback IOError only, so every status that DID carry a
+// verdict said "AccessDenied during HeadObject" and nothing about which object,
+// while extra_info was the message a second time.
+TEST_F(S3UnitTest, ClassifiedErrorsKeepPrefixAndExceptionName) {
+  Aws::Client::AWSError<Aws::S3::S3Errors> error(
+      Aws::S3::S3Errors::ACCESS_DENIED, Aws::Client::RetryableType::NOT_RETRYABLE, "AccessDenied", "forbidden");
+  auto status = fs::internal::ErrorToStatus("When reading information for key 'k' in bucket 'b': ", "HeadObject", error,
+                                            kDefaultProvenance);
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+
+  EXPECT_NE(status.message().find("key 'k'"), std::string::npos) << status.message();
+  EXPECT_NE(status.message().find("bucket 'b'"), std::string::npos) << status.message();
+
+  EXPECT_NE(detail->extra_info().find("AccessDenied"), std::string::npos) << detail->extra_info();
+  EXPECT_NE(detail->extra_info().find("HeadObject"), std::string::npos) << detail->extra_info();
+  EXPECT_NE(detail->extra_info(), status.message());
+
+  // An endpoint that answers with a whole page does not get to put it all in a
+  // Status that is then logged, wrapped and carried across the FFI boundary.
+  const std::string huge(4096, 'x');
+  Aws::Client::AWSError<Aws::S3::S3Errors> chatty(
+      Aws::S3::S3Errors::ACCESS_DENIED, Aws::Client::RetryableType::NOT_RETRYABLE,
+      Aws::String(huge.begin(), huge.end()), Aws::String(huge.begin(), huge.end()));
+  auto bounded = fs::internal::ErrorToStatus("prefix: ", "HeadObject", chatty, kDefaultProvenance);
+  EXPECT_LT(bounded.message().size(), huge.size());
+  auto bounded_detail = ExtendStatusDetail::UnwrapStatus(bounded);
+  ASSERT_NE(bounded_detail, nullptr) << bounded.ToString();
+  EXPECT_LT(bounded_detail->extra_info().size(), huge.size());
+
+  // The caller-supplied prefix carries bucket/key context, but it is not
+  // trusted input either. Bounding only the AWS response still allowed a huge
+  // key or endpoint diagnostic to cross the FFI boundary and flood logs.
+  auto bounded_prefix = fs::internal::ErrorToStatus(huge, "HeadObject", error, kDefaultProvenance);
+  EXPECT_LT(bounded_prefix.message().size(), huge.size());
+  EXPECT_NE(bounded_prefix.message().find("HeadObject"), std::string::npos) << bounded_prefix.message();
+}
+
+TEST_F(S3UnitTest, TestErrorToStatusNonRetryableVsRetryable) {
+  // NoSuchKey: non-retryable, tagged StorageNotFound.
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::NO_SUCH_KEY, Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchKey", "object gone");
-    auto status = fs::internal::ErrorToStatus("test", error);
+    auto status = fs::internal::ErrorToStatus("test", error, kDefaultProvenance);
     ASSERT_STATUS_NOT_OK(status);
     auto detail = ExtendStatusDetail::UnwrapStatus(status);
     ASSERT_NE(detail, nullptr);
-    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorNotFound);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageNotFound);
   }
-  // AccessDenied: permanent, tagged AwsErrorAccessDenied.
+  // AccessDenied: System/non-retryable, tagged StorageAccessDenied. Operator
+  // credentials still land on segcore's 2006 ConfigInvalid rather than 2044.
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::ACCESS_DENIED, Aws::Client::RetryableType::NOT_RETRYABLE, "AccessDenied", "forbidden");
-    auto status = fs::internal::ErrorToStatus("test", error);
+    auto status = fs::internal::ErrorToStatus("test", error, kDefaultProvenance);
     ASSERT_STATUS_NOT_OK(status);
     auto detail = ExtendStatusDetail::UnwrapStatus(status);
     ASSERT_NE(detail, nullptr);
-    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorAccessDenied);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageAccessDenied);
   }
-  // A recognized error type the SDK judged non-retryable: tagged permanent.
-  {
-    Aws::Client::AWSError<Aws::S3::S3Errors> error(
-        Aws::S3::S3Errors::VALIDATION, Aws::Client::RetryableType::NOT_RETRYABLE, "ValidationError", "bad request");
-    auto status = fs::internal::ErrorToStatus("test", error);
+  // An otherwise unclassified error remains a bare IOError regardless of the
+  // AWS SDK retry-policy flag. ShouldRetry is not an observed error cause.
+  for (auto retry_policy : {Aws::Client::RetryableType::NOT_RETRYABLE, Aws::Client::RetryableType::RETRYABLE}) {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::VALIDATION, retry_policy, "ValidationError",
+                                                   "bad request");
+    auto status = fs::internal::ErrorToStatus("test", error, kDefaultProvenance);
     ASSERT_STATUS_NOT_OK(status);
+    EXPECT_TRUE(status.IsIOError()) << status.ToString();
     auto detail = ExtendStatusDetail::UnwrapStatus(status);
-    ASSERT_NE(detail, nullptr);
-    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorNonRetryable);
+    EXPECT_EQ(detail, nullptr) << status.ToString();
   }
   // MinIO-style SlowDown: arrives as UNKNOWN + non-retryable, but it is a
   // genuine transient (rate limiting), so it must carry retryable throttling
-  // detail instead of being tagged permanent.
+  // detail instead of being treated as a System failure.
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "SlowDown", "rate limited");
-    auto status = fs::internal::ErrorToStatus("test", error);
+    auto status = fs::internal::ErrorToStatus("test", error, kDefaultProvenance);
     ASSERT_STATUS_NOT_OK(status);
     auto detail = ExtendStatusDetail::UnwrapStatus(status);
     ASSERT_NE(detail, nullptr);
@@ -127,12 +347,107 @@ TEST_F(S3UnitTest, TestErrorToStatusPermanentVsTransient) {
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::SLOW_DOWN, Aws::Client::RetryableType::RETRYABLE_THROTTLING, "SlowDown", "rate limited");
-    auto status = fs::internal::ErrorToStatus("test", error);
+    auto status = fs::internal::ErrorToStatus("test", error, kDefaultProvenance);
     ASSERT_STATUS_NOT_OK(status);
     auto detail = ExtendStatusDetail::UnwrapStatus(status);
     ASSERT_NE(detail, nullptr);
     EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientThrottling);
     EXPECT_TRUE(detail->retryable());
+  }
+}
+
+// The SDK's own core errors, which are not S3 errors at all.
+//
+// CoreErrors and S3Errors share a numeric space only because the S3 enum
+// continues where the core one stops, so casting a core code into it names
+// whichever S3 error happens to sit at that number. These three then missed
+// every arm and fell through to the unclassified IOError path -- a local
+// allocation failure reported as generic storage I/O, and rejected credentials
+// reported as a generic storage failure instead of something an operator can
+// fix.
+//
+// This test exists because the first attempt at the fix gated on
+// CoreErrors::VALIDATION (14) while the codes it handles are 17, 21 and 26 --
+// the branch could not execute, and nothing said so.
+TEST_F(S3UnitTest, CoreErrorsAreClassifiedBeforeTheS3Cast) {
+  {
+    Aws::Client::AWSError<Aws::Client::CoreErrors> error(
+        Aws::Client::CoreErrors::MEMORY_ALLOCATION, Aws::Client::RetryableType::NOT_RETRYABLE, "OOM", "alloc failed");
+    auto status = fs::internal::ErrorToStatus("test", error, kDefaultProvenance);
+    ASSERT_STATUS_NOT_OK(status);
+    EXPECT_TRUE(status.IsOutOfMemory()) << status.ToString();
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::MemAllocateFailed);
+  }
+
+  for (auto core : {Aws::Client::CoreErrors::UNRECOGNIZED_CLIENT, Aws::Client::CoreErrors::INVALID_SIGNATURE}) {
+    Aws::Client::AWSError<Aws::Client::CoreErrors> error(core, Aws::Client::RetryableType::NOT_RETRYABLE, "Auth",
+                                                         "bad credentials");
+    error.SetResponseCode(Aws::Http::HttpResponseCode::FORBIDDEN);
+    auto status =
+        fs::internal::ErrorToStatus("When reading key 'k' in bucket 'b': ", "HeadObject", error, kDefaultProvenance);
+    ASSERT_STATUS_NOT_OK(status);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageAccessDenied);
+    EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::System);
+    EXPECT_FALSE(detail->retryable());
+    EXPECT_NE(status.message().find("key 'k'"), std::string::npos) << status.message();
+    EXPECT_NE(status.message().find("bucket 'b'"), std::string::npos) << status.message();
+    EXPECT_NE(detail->extra_info().find("operation=HeadObject"), std::string::npos) << detail->extra_info();
+    EXPECT_NE(detail->extra_info().find("exception=Auth"), std::string::npos) << detail->extra_info();
+    EXPECT_NE(detail->extra_info().find("http_status=403"), std::string::npos) << detail->extra_info();
+    EXPECT_NE(detail->extra_info(), status.message());
+  }
+
+  {
+    Aws::Client::AWSError<Aws::Client::CoreErrors> error(Aws::Client::CoreErrors::CLIENT_SIGNING_FAILURE,
+                                                         Aws::Client::RetryableType::NOT_RETRYABLE, "Signing",
+                                                         "credential provider returned empty credentials");
+    auto status = fs::internal::ErrorToStatus("test", "GetObject", error, kDefaultProvenance);
+    ASSERT_STATUS_NOT_OK(status);
+    EXPECT_TRUE(status.IsIOError()) << status.ToString();
+    EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr) << status.ToString();
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::StorageError);
+  }
+}
+
+TEST_F(S3UnitTest, Conflict409IsNotForNonConflictBucketStates) {
+  // A 409 with no recognized non-conflict name is a race. It remains Conflict so
+  // a business-aware caller can coordinate, but generic retry stays disabled.
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::UNKNOWN,
+                                                   Aws::Client::RetryableType::NOT_RETRYABLE, "OperationAborted",
+                                                   "conditional request conflict");
+    error.SetResponseCode(Aws::Http::HttpResponseCode::CONFLICT);
+    auto status = fs::internal::ErrorToStatus("test", error, kDefaultProvenance);
+    ASSERT_STATUS_NOT_OK(status);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageConflict);
+    EXPECT_FALSE(detail->retryable());
+  }
+
+  // But not every 409 is a race. BucketNotEmpty and InvalidBucketState are
+  // answers about the bucket -- replaying the same request cannot change
+  // either, so classifying them Conflict would send a non-conflict condition to
+  // business coordination.
+  for (const char* name : {"BucketNotEmpty", "InvalidBucketState"}) {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::UNKNOWN,
+                                                   Aws::Client::RetryableType::NOT_RETRYABLE, name, "non-conflict 409");
+    error.SetResponseCode(Aws::Http::HttpResponseCode::CONFLICT);
+    auto status = fs::internal::ErrorToStatus("test", error, kDefaultProvenance);
+    SCOPED_TRACE(name);
+    ASSERT_STATUS_NOT_OK(status);
+    // Today these land unclassified (plain IOError): the blocklist returns
+    // nullopt and the SDK-verdict fallback is gated on a recognized error
+    // type. Pinned so a future reclassification is a conscious choice -- the
+    // one outcome that must never come back is retryable Conflict.
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    EXPECT_EQ(detail, nullptr);
+    if (detail != nullptr) {
+      EXPECT_NE(detail->code(), ExtendStatusCode::StorageConflict);
+      EXPECT_FALSE(detail->retryable());
+    }
   }
 }
 
@@ -352,6 +667,75 @@ TEST_F(S3UnitTest, TestS3Options) {
 
     auto opt3 = S3Options::FromAccessKey("ak", "sk2");
     EXPECT_FALSE(opt1.Equals(opt3));
+
+    auto different_behavior = opt1;
+    different_behavior.force_virtual_addressing = !opt1.force_virtual_addressing;
+    EXPECT_FALSE(opt1.Equals(different_behavior));
+
+    class CountingCredentialsProvider final : public Aws::Auth::AWSCredentialsProvider {
+   public:
+      Aws::Auth::AWSCredentials GetAWSCredentials() override {
+        ++calls;
+        return Aws::Auth::AWSCredentials("dynamic-ak", "dynamic-sk", "dynamic-token");
+      }
+
+      int calls = 0;
+    };
+
+    auto dynamic_provider = std::make_shared<CountingCredentialsProvider>();
+    auto dynamic1 = S3Options::Defaults();
+    dynamic1.credentials_provider = dynamic_provider;
+    auto dynamic2 = dynamic1;
+    EXPECT_TRUE(dynamic1.Equals(dynamic2));
+    EXPECT_EQ(dynamic_provider->calls, 0) << "Equals must not refresh dynamic credentials";
+
+    auto other_dynamic_provider = std::make_shared<CountingCredentialsProvider>();
+    dynamic2.credentials_provider = other_dynamic_provider;
+    EXPECT_FALSE(dynamic1.Equals(dynamic2));
+    EXPECT_EQ(dynamic_provider->calls, 0);
+    EXPECT_EQ(other_dynamic_provider->calls, 0);
+
+    class DerivedSimpleCredentialsProvider final : public Aws::Auth::SimpleAWSCredentialsProvider {
+   public:
+      DerivedSimpleCredentialsProvider() : Aws::Auth::SimpleAWSCredentialsProvider("ak", "sk") {}
+
+      Aws::Auth::AWSCredentials GetAWSCredentials() override {
+        ++calls;
+        return Aws::Auth::SimpleAWSCredentialsProvider::GetAWSCredentials();
+      }
+
+      int calls = 0;
+    };
+
+    auto derived_explicit1 = opt1;
+    auto derived_explicit2 = opt1;
+    auto explicit_provider1 = std::make_shared<DerivedSimpleCredentialsProvider>();
+    auto explicit_provider2 = std::make_shared<DerivedSimpleCredentialsProvider>();
+    derived_explicit1.credentials_provider = explicit_provider1;
+    derived_explicit2.credentials_provider = explicit_provider2;
+    EXPECT_FALSE(derived_explicit1.Equals(derived_explicit2));
+    EXPECT_EQ(explicit_provider1->calls, 0);
+    EXPECT_EQ(explicit_provider2->calls, 0);
+
+    class DerivedAnonymousCredentialsProvider final : public Aws::Auth::AnonymousAWSCredentialsProvider {
+   public:
+      Aws::Auth::AWSCredentials GetAWSCredentials() override {
+        ++calls;
+        return {};
+      }
+
+      int calls = 0;
+    };
+
+    auto derived_anonymous1 = S3Options::Anonymous();
+    auto derived_anonymous2 = S3Options::Anonymous();
+    auto anonymous_provider1 = std::make_shared<DerivedAnonymousCredentialsProvider>();
+    auto anonymous_provider2 = std::make_shared<DerivedAnonymousCredentialsProvider>();
+    derived_anonymous1.credentials_provider = anonymous_provider1;
+    derived_anonymous2.credentials_provider = anonymous_provider2;
+    EXPECT_FALSE(derived_anonymous1.Equals(derived_anonymous2));
+    EXPECT_EQ(anonymous_provider1->calls, 0);
+    EXPECT_EQ(anonymous_provider2->calls, 0);
   }
 
   // S3ProxyOptions::Equals
@@ -426,58 +810,39 @@ TEST_F(S3UnitTest, TestDetectS3Backend) {
   }
 }
 
-TEST_F(S3UnitTest, TestIsConnectError) {
-  // Retryable network error
-  {
-    Aws::Client::AWSError<Aws::Client::CoreErrors> error(Aws::Client::CoreErrors::NETWORK_CONNECTION, true);
-    EXPECT_TRUE(fs::internal::IsConnectError(error));
-  }
-  // SlowDown
-  {
-    Aws::Client::AWSError<Aws::Client::CoreErrors> error(
-        Aws::Client::CoreErrors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "SlowDown", "rate limited");
-    EXPECT_TRUE(fs::internal::IsConnectError(error));
-  }
-  // SlowDownWrite
-  {
-    Aws::Client::AWSError<Aws::Client::CoreErrors> error(
-        Aws::Client::CoreErrors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "SlowDownWrite", "rate limited");
-    EXPECT_TRUE(fs::internal::IsConnectError(error));
-  }
-  // XMinioServerNotInitialized
-  {
-    Aws::Client::AWSError<Aws::Client::CoreErrors> error(Aws::Client::CoreErrors::UNKNOWN,
-                                                         Aws::Client::RetryableType::NOT_RETRYABLE,
-                                                         "XMinioServerNotInitialized", "Server not initialized");
-    EXPECT_TRUE(fs::internal::IsConnectError(error));
-  }
-  // Non-retryable access denied
-  {
-    Aws::Client::AWSError<Aws::Client::CoreErrors> error(
-        Aws::Client::CoreErrors::ACCESS_DENIED, Aws::Client::RetryableType::NOT_RETRYABLE, "AccessDenied", "forbidden");
-    EXPECT_FALSE(fs::internal::IsConnectError(error));
-  }
-}
-
 TEST_F(S3UnitTest, TestS3ErrorClassification) {
-  // IsNotFound — bucket
+  // Bucket and object absence are separate control-flow predicates. A missing
+  // bucket must never be swallowed by an object-level allow_not_found gate.
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::NO_SUCH_BUCKET, Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchBucket", "not found");
-    EXPECT_TRUE(fs::internal::IsNotFound(error));
+    EXPECT_TRUE(fs::internal::IsBucketNotFound(error));
+    EXPECT_TRUE(fs::internal::IsExplicitBucketNotFound(error));
+    EXPECT_FALSE(fs::internal::IsObjectNotFound(error));
   }
-  // IsNotFound — resource
+  // Generic RESOURCE_NOT_FOUND is ambiguous until the operation supplies the
+  // resource kind.
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::RESOURCE_NOT_FOUND,
                                                    Aws::Client::RetryableType::NOT_RETRYABLE, "ResourceNotFound",
                                                    "not found");
-    EXPECT_TRUE(fs::internal::IsNotFound(error));
+    EXPECT_TRUE(fs::internal::IsBucketNotFound(error));
+    EXPECT_TRUE(fs::internal::IsObjectNotFound(error));
+    EXPECT_FALSE(fs::internal::IsExplicitBucketNotFound(error));
   }
-  // IsNotFound — false
+  // NO_SUCH_KEY was previously omitted from the existence predicate.
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::NO_SUCH_KEY,
+                                                   Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchKey", "not found");
+    EXPECT_TRUE(fs::internal::IsObjectNotFound(error));
+    EXPECT_FALSE(fs::internal::IsBucketNotFound(error));
+  }
+  // Neither kind of not-found.
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::ACCESS_DENIED, Aws::Client::RetryableType::NOT_RETRYABLE, "AccessDenied", "forbidden");
-    EXPECT_FALSE(fs::internal::IsNotFound(error));
+    EXPECT_FALSE(fs::internal::IsBucketNotFound(error));
+    EXPECT_FALSE(fs::internal::IsObjectNotFound(error));
   }
   // IsAlreadyExists — BUCKET_ALREADY_EXISTS
   {
@@ -526,21 +891,92 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     }
   };
 
-  // NO_SUCH_UPLOAD
+  // The same generic 404 means opposite actions depending on the operation:
+  // HeadObject -> object-not-found handling, HeadBucket/ListObjects -> fix the
+  // deployment bucket (BucketNotFound).
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::RESOURCE_NOT_FOUND,
+                                                   Aws::Client::RetryableType::NOT_RETRYABLE, "ResourceNotFound",
+                                                   "not found");
+    auto object_status = fs::internal::ErrorToStatus(
+        "object: ", "HeadObject", error, fs::internal::S3ErrorProvenance{fs::internal::S3ResourceKind::Object});
+    auto object_detail = ExtendStatusDetail::UnwrapStatus(object_status);
+    ASSERT_NE(object_detail, nullptr);
+    EXPECT_EQ(object_detail->code(), ExtendStatusCode::StorageNotFound);
+
+    auto bucket_status = fs::internal::ErrorToStatus(
+        "bucket: ", "HeadBucket", error, fs::internal::S3ErrorProvenance{fs::internal::S3ResourceKind::Bucket});
+    auto bucket_detail = ExtendStatusDetail::UnwrapStatus(bucket_status);
+    ASSERT_NE(bucket_detail, nullptr);
+    EXPECT_EQ(bucket_detail->code(), ExtendStatusCode::StorageBucketNotFound);
+
+    auto upload_status =
+        fs::internal::ErrorToStatus("upload: ", "UploadPart", error,
+                                    fs::internal::S3ErrorProvenance{fs::internal::S3ResourceKind::MultipartUpload});
+    auto upload_detail = ExtendStatusDetail::UnwrapStatus(upload_status);
+    ASSERT_NE(upload_detail, nullptr);
+    EXPECT_EQ(upload_detail->code(), ExtendStatusCode::StorageNoSuchUpload);
+  }
+
+  // NO_SUCH_UPLOAD is retryable only at the operation boundary: the failed
+  // writer is discarded and a new upload is started. The stale id is never
+  // reused.
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::NO_SUCH_UPLOAD,
                                                    Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchUpload",
                                                    "Upload not found");
-    auto status = fs::internal::ErrorToStatus("test_prefix", "CompleteMultipart", error);
-    AssertRetryableCode(status, ExtendStatusCode::AwsErrorNoSuchUpload);
+    auto status = fs::internal::ErrorToStatus("test_prefix", "CompleteMultipart", error, kDefaultProvenance);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageNoSuchUpload);
+    EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::Retryable);
+    EXPECT_TRUE(detail->retryable());
+  }
+
+  // NO_SUCH_BUCKET is deliberately NOT the same code as a missing key: nothing
+  // was lost, and re-reading metadata cannot conjure a bucket. It is a
+  // deployment pointing somewhere that does not exist.
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::NO_SUCH_BUCKET, Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchBucket", "bucket gone");
+    auto status = fs::internal::ErrorToStatus("test_prefix", "GetObject", error, kDefaultProvenance);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageBucketNotFound);
+    EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::System);
+    EXPECT_FALSE(detail->retryable());
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::BucketInvalid);  // 2016, not 2017
+  }
+
+  // A missing KEY keeps ObjectNotExist -- the two must not collapse back.
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::NO_SUCH_KEY,
+                                                   Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchKey", "key gone");
+    auto status = fs::internal::ErrorToStatus("test_prefix", "GetObject", error, kDefaultProvenance);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageNotFound);
+    EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::System);
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::ObjectNotExist);  // 2017
   }
 
   // AWS SDK retryable error
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::INTERNAL_FAILURE, Aws::Client::RetryableType::RETRYABLE, "InternalFailure", "retryable");
-    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
-    AssertRetryableCode(status, ExtendStatusCode::StorageTransientNetwork);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error, kDefaultProvenance);
+    AssertRetryableCode(status, ExtendStatusCode::StorageTransientService);
+  }
+
+  // ShouldRetry alone is policy, not evidence that the underlying condition
+  // is a network or otherwise transient failure.
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::RETRYABLE,
+                                                   "UnclassifiedRetryable", "SDK policy allows retry");
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error, kDefaultProvenance);
+    ASSERT_STATUS_NOT_OK(status);
+    EXPECT_TRUE(status.IsIOError());
+    EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr) << status.ToString();
   }
 
   // NETWORK_CONNECTION
@@ -548,7 +984,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::NETWORK_CONNECTION,
                                                    Aws::Client::RetryableType::NOT_RETRYABLE, "NetworkConnection",
                                                    "network");
-    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error, kDefaultProvenance);
     AssertRetryableCode(status, ExtendStatusCode::StorageTransientNetwork);
   }
 
@@ -556,7 +992,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::REQUEST_TIMEOUT, Aws::Client::RetryableType::NOT_RETRYABLE, "RequestTimeout", "timeout");
-    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error, kDefaultProvenance);
     AssertRetryableCode(status, ExtendStatusCode::StorageTransientTimeout);
   }
 
@@ -565,7 +1001,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "RequestTimeout", "timeout");
     error.SetResponseCode(Aws::Http::HttpResponseCode::REQUEST_TIMEOUT);
-    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error, kDefaultProvenance);
     AssertRetryableCode(status, ExtendStatusCode::StorageTransientTimeout);
   }
 
@@ -574,7 +1010,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "TooManyRequests", "rate limited");
     error.SetResponseCode(Aws::Http::HttpResponseCode::TOO_MANY_REQUESTS);
-    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error, kDefaultProvenance);
     AssertRetryableCode(status, ExtendStatusCode::StorageTransientThrottling);
   }
 
@@ -582,7 +1018,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::SLOW_DOWN,
                                                    Aws::Client::RetryableType::NOT_RETRYABLE, "SlowDown", "slow");
-    auto status = fs::internal::ErrorToStatus("prefix", "PutObject", error);
+    auto status = fs::internal::ErrorToStatus("prefix", "PutObject", error, kDefaultProvenance);
     AssertRetryableCode(status, ExtendStatusCode::StorageTransientThrottling);
   }
 
@@ -590,7 +1026,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::THROTTLING, Aws::Client::RetryableType::NOT_RETRYABLE, "Throttling", "throttled");
-    auto status = fs::internal::ErrorToStatus("prefix", "PutObject", error);
+    auto status = fs::internal::ErrorToStatus("prefix", "PutObject", error, kDefaultProvenance);
     AssertRetryableCode(status, ExtendStatusCode::StorageTransientThrottling);
   }
 
@@ -598,7 +1034,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::UNKNOWN,
                                                    Aws::Client::RetryableType::NOT_RETRYABLE, "SlowDown", "slow");
-    auto status = fs::internal::ErrorToStatus("prefix", "PutObject", error);
+    auto status = fs::internal::ErrorToStatus("prefix", "PutObject", error, kDefaultProvenance);
     AssertRetryableCode(status, ExtendStatusCode::StorageTransientThrottling);
   }
 
@@ -606,7 +1042,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::UNKNOWN,
                                                    Aws::Client::RetryableType::NOT_RETRYABLE, "SlowDownWrite", "slow");
-    auto status = fs::internal::ErrorToStatus("prefix", "PutObject", error);
+    auto status = fs::internal::ErrorToStatus("prefix", "PutObject", error, kDefaultProvenance);
     AssertRetryableCode(status, ExtendStatusCode::StorageTransientThrottling);
   }
 
@@ -615,7 +1051,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::SERVICE_UNAVAILABLE,
                                                    Aws::Client::RetryableType::NOT_RETRYABLE, "ServiceUnavailable",
                                                    "unavailable");
-    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error, kDefaultProvenance);
     AssertRetryableCode(status, ExtendStatusCode::StorageTransientService);
   }
 
@@ -624,7 +1060,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "InternalError", "internal");
     error.SetResponseCode(Aws::Http::HttpResponseCode::INTERNAL_SERVER_ERROR);
-    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error, kDefaultProvenance);
     AssertRetryableCode(status, ExtendStatusCode::StorageTransientService);
   }
 
@@ -633,7 +1069,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "BadGateway", "bad gateway");
     error.SetResponseCode(Aws::Http::HttpResponseCode::BAD_GATEWAY);
-    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error, kDefaultProvenance);
     AssertRetryableCode(status, ExtendStatusCode::StorageTransientService);
   }
 
@@ -642,7 +1078,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "ServiceUnavailable", "unavailable");
     error.SetResponseCode(Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE);
-    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error, kDefaultProvenance);
     AssertRetryableCode(status, ExtendStatusCode::StorageTransientService);
   }
 
@@ -651,7 +1087,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "GatewayTimeout", "gateway timeout");
     error.SetResponseCode(Aws::Http::HttpResponseCode::GATEWAY_TIMEOUT);
-    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error, kDefaultProvenance);
     AssertRetryableCode(status, ExtendStatusCode::StorageTransientService);
   }
 
@@ -660,7 +1096,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::UNKNOWN,
                                                    Aws::Client::RetryableType::NOT_RETRYABLE,
                                                    "XMinioServerNotInitialized", "server not initialized");
-    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error, kDefaultProvenance);
     AssertRetryableCode(status, ExtendStatusCode::StorageTransientService);
   }
 
@@ -670,11 +1106,11 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
                                                    Aws::Client::RetryableType::NOT_RETRYABLE, "PreconditionFailed",
                                                    "condition failed");
     error.SetResponseCode(Aws::Http::HttpResponseCode::PRECONDITION_FAILED);
-    auto status = fs::internal::ErrorToStatus("prefix", "PutObject", error);
+    auto status = fs::internal::ErrorToStatus("prefix", "PutObject", error, kDefaultProvenance);
     ASSERT_FALSE(status.ok());
     auto detail = ExtendStatusDetail::UnwrapStatus(status);
     ASSERT_NE(detail, nullptr);
-    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorPreConditionFailed);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StoragePreConditionFailed);
     EXPECT_FALSE(detail->retryable());
   }
 
@@ -683,11 +1119,11 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::UNKNOWN,
                                                    Aws::Client::RetryableType::NOT_RETRYABLE, "Conflict", "conflict");
     error.SetResponseCode(Aws::Http::HttpResponseCode::CONFLICT);
-    auto status = fs::internal::ErrorToStatus("prefix", "PutObject", error);
+    auto status = fs::internal::ErrorToStatus("prefix", "PutObject", error, kDefaultProvenance);
     ASSERT_FALSE(status.ok());
     auto detail = ExtendStatusDetail::UnwrapStatus(status);
     ASSERT_NE(detail, nullptr);
-    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorConflict);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageConflict);
     EXPECT_FALSE(detail->retryable());
   }
 
@@ -696,7 +1132,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "SomeBackendSpecificError", "opaque");
-    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error, kDefaultProvenance);
     AssertNonRetryable(status);
     EXPECT_TRUE(status.IsIOError());
     EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
@@ -709,7 +1145,7 @@ TEST_F(S3UnitTest, TestOutcomeToStatus) {
     Aws::S3::Model::PutObjectResult put_result;
     Aws::Utils::Outcome<Aws::S3::Model::PutObjectResult, Aws::Client::AWSError<Aws::S3::S3Errors>> outcome(
         std::move(put_result));
-    EXPECT_TRUE(fs::internal::OutcomeToStatus("prefix", "PutObject", outcome).ok());
+    EXPECT_TRUE(fs::internal::OutcomeToStatus("prefix", "PutObject", outcome, kDefaultProvenance).ok());
   }
 
   // Failure
@@ -718,7 +1154,7 @@ TEST_F(S3UnitTest, TestOutcomeToStatus) {
         Aws::S3::S3Errors::ACCESS_DENIED, Aws::Client::RetryableType::NOT_RETRYABLE, "AccessDenied", "forbidden");
     Aws::Utils::Outcome<Aws::S3::Model::PutObjectResult, Aws::Client::AWSError<Aws::S3::S3Errors>> outcome(
         std::move(error));
-    EXPECT_FALSE(fs::internal::OutcomeToStatus("prefix", "PutObject", outcome).ok());
+    EXPECT_FALSE(fs::internal::OutcomeToStatus("prefix", "PutObject", outcome, kDefaultProvenance).ok());
   }
 }
 
@@ -883,6 +1319,15 @@ TEST_F(S3UnitTest, TestCopyStream) {
 }
 
 TEST_F(S3UnitTest, TestCreateS3Options) {
+  auto assert_config_error = [](const arrow::Status& status) {
+    ASSERT_FALSE(status.ok()) << status.ToString();
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageConfigInvalid) << status.ToString();
+    EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::System);
+    EXPECT_FALSE(detail->retryable());
+  };
+
   // No SSL → scheme=http
   {
     ArrowFileSystemConfig config;
@@ -976,6 +1421,149 @@ TEST_F(S3UnitTest, TestCreateS3Options) {
     EXPECT_EQ(result->GetAccessKey(), "mykey");
     EXPECT_EQ(result->GetSecretKey(), "mysecret");
   }
+
+  // An absent static identity is explicitly anonymous. A partially supplied
+  // identity is a configuration error instead of an unsigned request.
+  {
+    ArrowFileSystemConfig config;
+    config.cloud_provider = kCloudProviderAWS;
+    config.use_iam = false;
+
+    S3FileSystemProducer producer(config);
+    auto result = producer.CreateS3Options();
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
+    EXPECT_EQ(result->credentials_kind, S3CredentialsKind::Anonymous);
+  }
+  for (const auto& [access_key, secret_key] :
+       std::vector<std::pair<std::string, std::string>>{{"ak-only", ""}, {"", "sk-only"}}) {
+    ArrowFileSystemConfig config;
+    config.cloud_provider = kCloudProviderAWS;
+    config.access_key_id = access_key;
+    config.access_key_value = secret_key;
+    config.use_iam = false;
+
+    S3FileSystemProducer producer(config);
+    assert_config_error(producer.CreateS3Options().status());
+  }
+
+  // Producer-side deployment mistakes must not fall through as an untyped
+  // Invalid/System error.
+  {
+    ScopedEnvironmentVariable auth_mode("ALIYUN_ROLE_ARN_AUTH_MODE", "");
+    ScopedEnvironmentVariable token_file("ALIBABA_CLOUD_OIDC_TOKEN_FILE", "");
+    ScopedEnvironmentVariable provider_arn("ALIBABA_CLOUD_OIDC_PROVIDER_ARN", "");
+    ScopedEnvironmentVariable machine_role("ALIBABA_CLOUD_ROLE_ARN", "");
+
+    ArrowFileSystemConfig config;
+    config.cloud_provider = kCloudProviderAliyun;
+    config.role_arn = "acs:ram::123456:role/target";
+    S3FileSystemProducer producer(config);
+    assert_config_error(producer.CreateS3Options().status());
+  }
+  {
+    ArrowFileSystemConfig config;
+    config.cloud_provider = "unsupported-cloud";
+    config.role_arn = "role";
+    S3FileSystemProducer producer(config);
+    assert_config_error(producer.CreateS3Options().status());
+  }
+  {
+    ArrowFileSystemConfig config;
+    config.cloud_provider = "unsupported-cloud";
+    config.use_iam = true;
+    S3FileSystemProducer producer(config);
+    assert_config_error(producer.CreateS3Options().status());
+  }
+
+  // AWS use_iam still selects the environment provider first when static
+  // credentials are present.
+  {
+    ScopedEnvironmentVariable access_key("AWS_ACCESS_KEY_ID", "environment-ak");
+    ScopedEnvironmentVariable secret_key("AWS_SECRET_ACCESS_KEY", "environment-sk");
+    ScopedEnvironmentVariable session_token("AWS_SESSION_TOKEN", "expired-static-token");
+
+    ArrowFileSystemConfig config;
+    config.use_ssl = false;
+    config.cloud_provider = kCloudProviderAWS;
+    config.use_iam = true;
+
+    S3FileSystemProducer producer(config);
+    auto result = producer.CreateS3Options();
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
+    EXPECT_EQ(result->credentials_kind, S3CredentialsKind::Default);
+  }
+
+  // Once any environment static-credential field is present, the environment
+  // source is authoritative and must be complete. Do not fall through to a
+  // profile, container identity, or IMDS under a different principal.
+  for (const auto& [access_key, secret_key, session_token] :
+       std::vector<std::tuple<std::string, std::string, std::string>>{
+           {"environment-ak", "", ""}, {"", "environment-sk", ""}, {"", "", "environment-token"}}) {
+    ScopedEnvironmentVariable scoped_access_key("AWS_ACCESS_KEY_ID", access_key);
+    ScopedEnvironmentVariable scoped_secret_key("AWS_SECRET_ACCESS_KEY", secret_key);
+    ScopedEnvironmentVariable scoped_session_token("AWS_SESSION_TOKEN", session_token);
+
+    ArrowFileSystemConfig config;
+    config.cloud_provider = kCloudProviderAWS;
+    config.use_iam = true;
+
+    S3FileSystemProducer producer(config);
+    assert_config_error(producer.CreateS3Options().status());
+
+    config.use_iam = false;
+    config.role_arn = "arn:aws:iam::123456789012:role/target";
+    S3FileSystemProducer role_producer(config);
+    assert_config_error(role_producer.CreateS3Options().status());
+  }
+
+  // Long-lived static credentials are a complete AWS credential without a
+  // session token. The producer must accept this ordinary default-chain result.
+  {
+    ScopedEnvironmentVariable access_key("AWS_ACCESS_KEY_ID", "environment-long-lived-ak");
+    ScopedEnvironmentVariable secret_key("AWS_SECRET_ACCESS_KEY", "environment-long-lived-sk");
+    ScopedEnvironmentVariable session_token("AWS_SESSION_TOKEN", "");
+
+    ArrowFileSystemConfig config;
+    config.use_ssl = false;
+    config.cloud_provider = kCloudProviderAWS;
+    config.use_iam = true;
+
+    S3FileSystemProducer producer(config);
+    auto result = producer.CreateS3Options();
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
+    EXPECT_EQ(result->GetAccessKey(), "environment-long-lived-ak");
+    EXPECT_EQ(result->GetSecretKey(), "environment-long-lived-sk");
+    EXPECT_TRUE(result->GetSessionToken().empty());
+  }
+}
+
+TEST_F(S3UnitTest, ExplicitS3OptionsRejectPartialStaticCredentialsBeforeClientConstruction) {
+  for (auto options : {S3Options::FromAccessKey("ak-only", ""), S3Options::FromAccessKey("", "sk-only"),
+                       S3Options::FromAccessKey("", "", "token-only")}) {
+    ClientBuilder<S3Client> builder(std::move(options));
+    auto status = builder.PrepareClientConfig(std::nullopt);
+    ASSERT_FALSE(status.ok()) << status.ToString();
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageConfigInvalid) << status.ToString();
+  }
+}
+
+TEST_F(S3UnitTest, DefaultS3OptionsRejectPartialEnvironmentCredentialsBeforeClientConstruction) {
+  for (const auto& [access_key, secret_key, session_token] :
+       std::vector<std::tuple<std::string, std::string, std::string>>{
+           {"environment-ak", "", ""}, {"", "environment-sk", ""}, {"", "", "environment-token"}}) {
+    ScopedEnvironmentVariable scoped_access_key("AWS_ACCESS_KEY_ID", access_key);
+    ScopedEnvironmentVariable scoped_secret_key("AWS_SECRET_ACCESS_KEY", secret_key);
+    ScopedEnvironmentVariable scoped_session_token("AWS_SESSION_TOKEN", session_token);
+
+    ClientBuilder<S3Client> builder(S3Options::Defaults());
+    auto status = builder.PrepareClientConfig(std::nullopt);
+    ASSERT_FALSE(status.ok()) << status.ToString();
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageConfigInvalid) << status.ToString();
+  }
 }
 
 TEST_F(S3UnitTest, TestS3GlobalOptions) {
@@ -1058,6 +1646,12 @@ TEST_F(S3UnitTest, TestClientBuilder) {
 
     ClientBuilder<S3Client> builder(options);
     EXPECT_FALSE(builder.BuildClient().ok());
+
+    auto fs_result = S3FileSystem::Make(options);
+    ASSERT_FALSE(fs_result.ok());
+    EXPECT_TRUE(fs_result.status().IsInvalid()) << fs_result.status().ToString();
+    EXPECT_NE(fs_result.status().message().find("Failed to build S3 client"), std::string::npos)
+        << fs_result.status().ToString();
   }
 
   // Build with proxy
@@ -1131,6 +1725,168 @@ TEST_F(S3UnitTest, TestS3ClientHolder) {
     auto moved = lock.Move();
     EXPECT_EQ(moved.get(), ptr_before);
   }
+}
+
+TEST_F(S3UnitTest, FinalizedLockDoesNotRetainAwsResourcesPastTheBarrier) {
+  auto finalizer = std::make_shared<ControllableS3ClientFinalizer>();
+
+  // An aliasing shared_ptr gives the holder an observable control block without
+  // constructing a real SDK client. Lock() must return on finalized_ before it
+  // ever dereferences this non-owning sentinel pointer.
+  auto client_owner = std::make_shared<int>(1);
+  std::weak_ptr<int> weak_client = client_owner;
+  auto* client_sentinel = reinterpret_cast<S3Client*>(client_owner.get());
+  auto resolver = std::make_shared<FinalizerProbeResolver>();
+  std::weak_ptr<FinalizerProbeResolver> weak_resolver = resolver;
+  std::shared_ptr<S3Client> client(client_owner, client_sentinel);
+  client_owner.reset();
+  ASSERT_AND_ASSIGN(auto holder, finalizer->AddClient(
+                                     [client = std::move(client)]() mutable { return std::move(client); }, resolver));
+  resolver.reset();
+
+  auto barrier = finalizer->MarkFinalizedAndHoldBarrier();
+  auto lock_future = std::async(std::launch::async, [holder] { return holder->Lock(); });
+
+  // Once the Lock thread owns a strong finalizer reference, it has completed
+  // the only holder-mutex section allowed before the barrier and is blocked on
+  // this test's exclusive lease.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (finalizer.use_count() == 1 && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  if (finalizer.use_count() == 1) {
+    barrier.unlock();
+    (void)lock_future.get();
+    FAIL() << "Lock did not reach the finalizer barrier";
+  }
+
+  // Lock() has not copied either AWS-backed resource before entering the
+  // finalizer barrier, so finalization can release both while it is blocked.
+  holder->Finalize();
+  EXPECT_TRUE(weak_client.expired());
+  EXPECT_TRUE(weak_resolver.expired());
+
+  barrier.unlock();
+
+  auto lock_result = lock_future.get();
+  EXPECT_FALSE(lock_result.ok());
+  EXPECT_TRUE(lock_result.status().IsInvalid()) << lock_result.status().ToString();
+}
+
+TEST_F(S3UnitTest, FinalizeReleasesClientBuilderAwsResources) {
+  auto finalizer = std::make_shared<S3ClientFinalizer>();
+  auto builder = [] {
+    auto options = S3Options::FromAccessKey("ak", "sk");
+    options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(1);
+    return std::make_shared<ClientBuilder<S3Client>>(std::move(options));
+  }();
+  std::weak_ptr<Aws::Auth::AWSCredentialsProvider> weak_provider = builder->options().credentials_provider;
+  std::weak_ptr<S3RetryStrategy> weak_retry_strategy = builder->options().retry_strategy;
+  int cleanup_count = 0;
+  ASSERT_AND_ASSIGN(auto holder, finalizer->AddClient([] { return MakeTestS3Client(); }, nullptr,
+                                                      [&, builder] {
+                                                        ++cleanup_count;
+                                                        builder->ReleaseAwsResources();
+                                                      }));
+
+  ASSERT_EQ(cleanup_count, 0);
+  finalizer->Finalize();
+  EXPECT_EQ(cleanup_count, 1);
+  EXPECT_EQ(builder->options().credentials_provider, nullptr);
+  EXPECT_EQ(builder->options().retry_strategy, nullptr);
+  EXPECT_TRUE(weak_provider.expired());
+  EXPECT_TRUE(weak_retry_strategy.expired());
+
+  // Holder finalization is idempotent and must not retain or rerun cleanup.
+  holder->Finalize();
+  EXPECT_EQ(cleanup_count, 1);
+}
+
+TEST_F(S3UnitTest, FinalizeWaitsForClientConstructionCleanup) {
+  auto finalizer = std::make_shared<ControllableS3ClientFinalizer>();
+  ASSERT_AND_ASSIGN(auto existing_holder, finalizer->AddClient([] { return MakeTestS3Client(); }));
+  std::promise<void> construction_entered_promise;
+  auto construction_entered = construction_entered_promise.get_future();
+  std::promise<void> release_construction_promise;
+  auto release_construction = release_construction_promise.get_future().share();
+  std::promise<std::weak_ptr<S3Client>> client_created_promise;
+  auto client_created = client_created_promise.get_future();
+
+  auto constructing = std::async(
+      std::launch::async, [finalizer, &construction_entered_promise, release_construction, &client_created_promise] {
+        return finalizer->AddClient([&construction_entered_promise, release_construction, &client_created_promise] {
+          construction_entered_promise.set_value();
+          release_construction.wait();
+          auto client = MakeTestS3Client();
+          client_created_promise.set_value(std::weak_ptr<S3Client>(client));
+          return client;
+        });
+      });
+
+  if (construction_entered.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+    release_construction_promise.set_value();
+    constructing.wait();
+    FAIL() << "S3 client construction did not start";
+  }
+
+  // Construction is serialized only with shutdown. It must not take the
+  // shared operation barrier and pause requests on existing filesystems.
+  auto existing_operation = std::async(std::launch::async, [existing_holder] { return existing_holder->Lock(); });
+  if (existing_operation.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+    release_construction_promise.set_value();
+    constructing.wait();
+    FAIL() << "S3 client construction blocked an existing client operation";
+  }
+  ASSERT_TRUE(existing_operation.get().ok());
+
+  std::promise<void> finalize_started_promise;
+  auto finalize_started = finalize_started_promise.get_future();
+  auto finalized = std::async(std::launch::async, [finalizer, &finalize_started_promise] {
+    finalize_started_promise.set_value();
+    finalizer->Finalize();
+  });
+  if (finalize_started.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+    release_construction_promise.set_value();
+    constructing.wait();
+    finalized.wait();
+    FAIL() << "S3 finalization did not start";
+  }
+  const auto finalize_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!finalizer->IsFinalizedForTest() && std::chrono::steady_clock::now() < finalize_deadline) {
+    std::this_thread::yield();
+  }
+  if (!finalizer->IsFinalizedForTest()) {
+    release_construction_promise.set_value();
+    constructing.wait();
+    finalized.wait();
+    FAIL() << "S3 finalization did not close client-construction admission";
+  }
+  EXPECT_EQ(finalized.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+
+  release_construction_promise.set_value();
+  ASSERT_EQ(constructing.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  auto construction_result = constructing.get();
+  EXPECT_FALSE(construction_result.ok());
+  auto weak_client = client_created.get();
+  ASSERT_EQ(finalized.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  finalized.get();
+
+  EXPECT_TRUE(weak_client.expired());
+  EXPECT_FALSE(existing_holder->Lock().ok());
+}
+
+TEST_F(S3UnitTest, FinalizedClientFactoryIsNotInvoked) {
+  auto finalizer = std::make_shared<S3ClientFinalizer>();
+  finalizer->Finalize();
+
+  bool factory_called = false;
+  auto result = finalizer->AddClient([&factory_called] {
+    factory_called = true;
+    return MakeTestS3Client();
+  });
+
+  EXPECT_FALSE(result.ok());
+  EXPECT_FALSE(factory_called);
 }
 
 }  // namespace milvus_storage
