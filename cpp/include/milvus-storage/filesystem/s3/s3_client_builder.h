@@ -14,8 +14,10 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 
 #include <arrow/result.h>
@@ -58,12 +60,17 @@ class ClientBuilderBase {
 
   const std::shared_ptr<Aws::Auth::AWSCredentialsProvider>& credentials_provider() const;
 
+  const std::string& region() const;
+
+  void ReleaseAwsResources();
+
   protected:
   arrow::Status PrepareClientConfig(Aws::Client::ClientConfiguration* client_config,
                                     std::optional<arrow::io::IOContext> io_context);
 
   S3Options options_;
   std::shared_ptr<Aws::Auth::AWSCredentialsProvider> credentials_provider_;
+  std::string region_;
 };
 
 template <typename ClientT>
@@ -74,21 +81,30 @@ class ClientBuilder : public ClientBuilderBase {
 
   explicit ClientBuilder(S3Options options)
       : ClientBuilderBase(std::move(options)),
-        client_config_(client_builder_internal::MakeClientConfigurationInitValues(options_)) {}
+        client_config_(std::in_place, client_builder_internal::MakeClientConfigurationInitValues(options_)) {}
 
-  const ConfigType& config() const { return client_config_; }
+  const ConfigType& config() const { return *client_config_; }
 
-  ConfigType* mutable_config() { return &client_config_; }
+  ConfigType* mutable_config() { return &*client_config_; }
 
   arrow::Status PrepareClientConfig(std::optional<arrow::io::IOContext> io_context) {
-    return ClientBuilderBase::PrepareClientConfig(&client_config_, io_context);
+    if (!client_config_) {
+      return arrow::Status::Invalid("S3 client builder has released its AWS resources");
+    }
+    return ClientBuilderBase::PrepareClientConfig(&*client_config_, io_context);
   }
 
   arrow::Result<std::shared_ptr<HolderType>> BuildClient(std::optional<arrow::io::IOContext> io_context = std::nullopt,
-                                                         std::shared_ptr<FilesystemMetrics> metrics = nullptr);
+                                                         std::shared_ptr<FilesystemMetrics> metrics = nullptr,
+                                                         std::function<void()> release_resources = nullptr);
+
+  void ReleaseAwsResources() {
+    client_config_.reset();
+    ClientBuilderBase::ReleaseAwsResources();
+  }
 
   private:
-  ConfigType client_config_;
+  std::optional<ConfigType> client_config_;
 };
 
 ClientBuilder(S3Options) -> ClientBuilder<S3Client>;
@@ -105,6 +121,8 @@ struct ClientBuilderTraits<S3Client> {
 
 template <>
 arrow::Result<std::shared_ptr<S3ClientHolder>> ClientBuilder<S3Client>::BuildClient(
-    std::optional<arrow::io::IOContext> io_context, std::shared_ptr<FilesystemMetrics> metrics);
+    std::optional<arrow::io::IOContext> io_context,
+    std::shared_ptr<FilesystemMetrics> metrics,
+    std::function<void()> release_resources);
 
 }  // namespace milvus_storage

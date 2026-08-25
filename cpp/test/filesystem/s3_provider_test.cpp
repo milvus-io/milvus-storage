@@ -14,18 +14,29 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <exception>
+#include <functional>
+#include <future>
 #include <mutex>
 #include <fstream>
 #include <map>
 #include <memory>
+#include <new>
+#include <optional>
 #include <queue>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include <unistd.h>
+
+#include <aws/core/platform/Environment.h>
+#include <aws/core/auth/AWSCredentials.h>
+#include <aws/core/client/DefaultRetryStrategy.h>
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/HttpRequest.h>
@@ -34,15 +45,31 @@
 #include <aws/core/http/standard/StandardHttpResponse.h>
 #include <aws/core/http/HttpTypes.h>
 #include <aws/core/utils/stream/ResponseStream.h>
+#include <arrow/testing/executor_util.h>
+#include <arrow/util/thread_pool.h>
 
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMSTSClient.h"
+#include "milvus-storage/filesystem/s3/provider/AliyunSTSClient.h"
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/TencentCloudSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/s3_client_builder.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
+#ifdef WITH_CRT
+#include "milvus-storage/filesystem/s3/s3_crt_client.h"
+#endif
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/fiu_local.h"
+#include "milvus-storage/ffi_c.h"
+#include "milvus-storage/ffi_filesystem_c.h"
+#include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 #include "test_env.h"
 
 namespace milvus_storage {
@@ -133,14 +160,26 @@ class TempFile {
   std::string path_;
 };
 
+void PrepareS3DeathTest() {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  // Set this before GoogleTest re-execs the child: gcov reads the prefix at
+  // process startup, and parent/child must not write the same coverage file.
+  const auto prefix = "/tmp/milvus-storage-s3-death-test-gcov-" + std::to_string(getpid());
+  (void)setenv("GCOV_PREFIX", prefix.c_str(), 1);
+}
+
 // ============================================================================
 // Mock HTTP infrastructure
 // ============================================================================
+
+enum class MockExceptionKind { None, RuntimeError, BadAlloc };
 
 struct MockResponseSpec {
   Aws::Http::HttpResponseCode code;
   std::string body;
   Aws::Http::HeaderValueCollection headers;
+  std::function<void()> on_request;
+  MockExceptionKind exception_kind = MockExceptionKind::None;
 };
 
 class MockHttpClient : public Aws::Http::HttpClient {
@@ -151,18 +190,35 @@ class MockHttpClient : public Aws::Http::HttpClient {
       const std::shared_ptr<Aws::Http::HttpRequest>& request,
       Aws::Utils::RateLimits::RateLimiterInterface* readLimiter = nullptr,
       Aws::Utils::RateLimits::RateLimiterInterface* writeLimiter = nullptr) const override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    recorded_requests_.push_back(request);
+    std::optional<MockResponseSpec> matched;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      recorded_requests_.push_back(request);
 
-    auto uri = request->GetURIString();
-
-    // Find a matching response queue by URL substring
-    for (auto& [url_key, q] : response_map_) {
-      if (!q.empty() && uri.find(url_key) != Aws::String::npos) {
-        auto spec = q.front();
-        q.pop();
-        return BuildResponse(request, spec);
+      auto uri = request->GetURIString();
+      // Find a matching response queue by URL substring.
+      for (auto& [url_key, q] : response_map_) {
+        if (!q.empty() && uri.find(url_key) != Aws::String::npos) {
+          matched = std::move(q.front());
+          q.pop();
+          break;
+        }
       }
+    }
+
+    if (matched.has_value()) {
+      switch (matched->exception_kind) {
+        case MockExceptionKind::None:
+          break;
+        case MockExceptionKind::RuntimeError:
+          throw std::runtime_error("synthetic credential dependency failure");
+        case MockExceptionKind::BadAlloc:
+          throw std::bad_alloc();
+      }
+      if (matched->on_request) {
+        matched->on_request();
+      }
+      return BuildResponse(request, *matched);
     }
 
     // Default: return 404 for unmatched requests (e.g., background SDK requests)
@@ -174,8 +230,15 @@ class MockHttpClient : public Aws::Http::HttpClient {
   void EnqueueResponse(const std::string& url_match,
                        Aws::Http::HttpResponseCode code,
                        const std::string& body,
-                       const Aws::Http::HeaderValueCollection& headers = {}) {
-    response_map_[url_match].push({code, body, headers});
+                       const Aws::Http::HeaderValueCollection& headers = {},
+                       std::function<void()> on_request = {}) {
+    response_map_[url_match].push({code, body, headers, std::move(on_request)});
+  }
+
+  void EnqueueException(const std::string& url_match, MockExceptionKind exception_kind) {
+    MockResponseSpec spec;
+    spec.exception_kind = exception_kind;
+    response_map_[url_match].push(std::move(spec));
   }
 
   std::vector<std::shared_ptr<Aws::Http::HttpRequest>> GetRecordedRequests() const {
@@ -231,6 +294,92 @@ class MockHttpClientFactory : public Aws::Http::HttpClientFactory {
   std::shared_ptr<MockHttpClient> mock_client_;
 };
 
+class RejectingS3Executor final : public arrow::internal::Executor {
+  public:
+  int GetCapacity() override { return 1; }
+
+  protected:
+  arrow::Status SpawnReal(arrow::internal::TaskHints,
+                          arrow::internal::FnOnce<void()>,
+                          arrow::StopToken,
+                          StopCallback&&) override {
+    return arrow::Status::IOError("executor rejected S3 upload task");
+  }
+};
+
+class RejectAfterOneS3Executor final : public arrow::internal::Executor {
+  public:
+  explicit RejectAfterOneS3Executor(std::shared_ptr<arrow::internal::ThreadPool> pool)
+      : pool_(std::move(pool)), rejection_observed_(rejection_promise_.get_future().share()) {}
+
+  int GetCapacity() override { return pool_->GetCapacity(); }
+
+  void Arm() { accepted_before_rejection_.store(1, std::memory_order_release); }
+
+  const std::shared_future<void>& rejection_observed() const { return rejection_observed_; }
+
+  protected:
+  arrow::Status SpawnReal(arrow::internal::TaskHints hints,
+                          arrow::internal::FnOnce<void()> task,
+                          arrow::StopToken stop_token,
+                          StopCallback&& stop_callback) override {
+    int remaining = accepted_before_rejection_.load(std::memory_order_acquire);
+    while (remaining >= 0) {
+      if (remaining == 0) {
+        if (!rejection_signaled_.exchange(true, std::memory_order_acq_rel)) {
+          rejection_promise_.set_value();
+        }
+        return arrow::Status::IOError("executor rejected S3 delete task");
+      }
+      if (accepted_before_rejection_.compare_exchange_weak(remaining, remaining - 1, std::memory_order_acq_rel)) {
+        break;
+      }
+    }
+    return pool_->Spawn(hints, std::move(task), std::move(stop_token), std::move(stop_callback));
+  }
+
+  private:
+  std::shared_ptr<arrow::internal::ThreadPool> pool_;
+  std::atomic<int> accepted_before_rejection_{-1};
+  std::atomic<bool> rejection_signaled_{false};
+  std::promise<void> rejection_promise_;
+  std::shared_future<void> rejection_observed_;
+};
+
+enum class S3SubmissionExceptionKind { kUnexpected, kBadAlloc };
+
+class UnexpectedS3SubmissionException final : public std::exception {
+  public:
+  const char* what() const noexcept override { return "executor submission exploded unexpectedly"; }
+};
+
+class ThrowAfterOneS3Executor final : public arrow::internal::Executor {
+  public:
+  ThrowAfterOneS3Executor(std::shared_ptr<arrow::internal::ThreadPool> pool, S3SubmissionExceptionKind exception_kind)
+      : pool_(std::move(pool)), exception_kind_(exception_kind) {}
+
+  int GetCapacity() override { return pool_->GetCapacity(); }
+
+  protected:
+  arrow::Status SpawnReal(arrow::internal::TaskHints hints,
+                          arrow::internal::FnOnce<void()> task,
+                          arrow::StopToken stop_token,
+                          StopCallback&& stop_callback) override {
+    if (submissions_.fetch_add(1, std::memory_order_acq_rel) == 0) {
+      return pool_->Spawn(hints, std::move(task), std::move(stop_token), std::move(stop_callback));
+    }
+    if (exception_kind_ == S3SubmissionExceptionKind::kBadAlloc) {
+      throw std::bad_alloc();
+    }
+    throw UnexpectedS3SubmissionException();
+  }
+
+  private:
+  std::shared_ptr<arrow::internal::ThreadPool> pool_;
+  S3SubmissionExceptionKind exception_kind_;
+  std::atomic<int> submissions_{0};
+};
+
 // ============================================================================
 // Test Fixture
 // ============================================================================
@@ -268,8 +417,158 @@ class S3ProviderTest : public ::testing::Test {
     Aws::Http::InitHttp();
   }
 
+  void AssertBackgroundUploadSubmissionExceptionDrains(S3SubmissionExceptionKind exception_kind) {
+    const std::string create_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>bucket</Bucket><Key>key</Key><UploadId>upload-id</UploadId>
+</InitiateMultipartUploadResult>)xml";
+    Aws::Http::HeaderValueCollection create_headers;
+    create_headers["content-type"] = "application/xml";
+    create_headers["content-length"] = std::to_string(create_result.size());
+
+    std::promise<void> upload_started_promise;
+    auto upload_started = upload_started_promise.get_future();
+    std::promise<void> release_upload_promise;
+    auto release_upload = release_upload_promise.get_future().share();
+    std::atomic<bool> upload_release_timed_out{false};
+
+    Aws::Http::HeaderValueCollection upload_headers;
+    upload_headers["etag"] = "\"etag-1\"";
+    upload_headers["content-length"] = "0";
+    mock_client_->EnqueueResponse("?uploads", Aws::Http::HttpResponseCode::OK, create_result, create_headers);
+    mock_client_->EnqueueResponse("?partNumber=1", Aws::Http::HttpResponseCode::OK, "", upload_headers,
+                                  [&upload_started_promise, release_upload, &upload_release_timed_out] {
+                                    upload_started_promise.set_value();
+                                    if (release_upload.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+                                      upload_release_timed_out.store(true, std::memory_order_release);
+                                    }
+                                  });
+    mock_client_->EnqueueResponse("uploadId=upload-id", Aws::Http::HttpResponseCode::OK, "");
+
+    S3Options options;
+    options.ConfigureAnonymousCredentials();
+    options.region = "us-east-1";
+    options.scheme = "http";
+    options.endpoint_override = "mock-s3.local";
+    options.cloud_provider = kCloudProviderAWS;
+    options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+    options.use_crt_async_reads = false;
+    options.background_writes = true;
+
+    ASSERT_AND_ASSIGN(auto pool, arrow::internal::ThreadPool::Make(1));
+    ThrowAfterOneS3Executor executor(pool, exception_kind);
+    arrow::io::IOContext io_context(&executor);
+    ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options, io_context));
+    ASSERT_AND_ASSIGN(auto stream, fs->OpenOutputStreamWithUploadSize("bucket/key", nullptr, 1));
+
+    const uint8_t bytes[] = {7, 8};
+    arrow::Status write_status;
+    try {
+      write_status = stream->Write(bytes, 2);
+    } catch (const std::exception& e) {
+      // Keep the regression failure deterministic: do not leave the accepted
+      // sibling blocked while GoogleTest reports the escaped exception.
+      release_upload_promise.set_value();
+      pool->WaitForIdle();
+      FAIL() << "executor submission exception escaped the Status API: " << e.what();
+      return;
+    } catch (...) {
+      release_upload_promise.set_value();
+      pool->WaitForIdle();
+      FAIL() << "non-standard executor submission exception escaped the Status API";
+      return;
+    }
+    const auto upload_started_state = upload_started.wait_for(std::chrono::seconds(5));
+    if (upload_started_state != std::future_status::ready) {
+      release_upload_promise.set_value();
+      pool->WaitForIdle();
+      FAIL() << "the accepted first upload did not start";
+      return;
+    }
+
+    ASSERT_STATUS_NOT_OK(write_status);
+    // Both exception kinds report the same verdict now: an allocation failure
+    // in submission is not distinguished from any other submission exception.
+    auto detail = ExtendStatusDetail::UnwrapStatus(write_status);
+    ASSERT_NE(detail, nullptr) << write_status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::InternalInvariantViolated) << write_status.ToString();
+
+    // The synchronous failure is already the writer's terminal status. Close
+    // must return it without waiting for the accepted sibling upload.
+    auto close_status = stream->Close();
+    EXPECT_TRUE(close_status.Equals(write_status)) << close_status.ToString();
+
+    // Abort is deferred while that sibling remains in flight. The failed
+    // submission must already have decremented its own counter slot, otherwise
+    // the sibling's eventual completion can never take the counter to zero.
+    ASSERT_STATUS_OK(stream->Abort());
+    stream.reset();
+    auto count_remote_aborts = [this] {
+      size_t count = 0;
+      for (const auto& request : mock_client_->GetRecordedRequests()) {
+        if (request->GetMethod() == Aws::Http::HttpMethod::HTTP_DELETE &&
+            request->GetURIString().find("uploadId=upload-id") != Aws::String::npos) {
+          ++count;
+        }
+      }
+      return count;
+    };
+    EXPECT_EQ(count_remote_aborts(), 0);
+
+    release_upload_promise.set_value();
+    pool->WaitForIdle();
+
+    EXPECT_FALSE(upload_release_timed_out.load(std::memory_order_acquire));
+    EXPECT_EQ(count_remote_aborts(), 1);
+  }
+
   std::shared_ptr<MockHttpClient> mock_client_;
 };
+
+namespace {
+
+void ExpectExtendStatusCode(const arrow::Status& status, ExtendStatusCode expected) {
+  ASSERT_FALSE(status.ok()) << status.ToString();
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_EQ(detail->code(), expected) << status.ToString();
+}
+
+void ExpectCredentialDependencyException(const arrow::Status& status) {
+  ASSERT_FALSE(status.ok()) << status.ToString();
+  EXPECT_TRUE(status.IsIOError()) << status.ToString();
+  EXPECT_FALSE(status.IsOutOfMemory()) << status.ToString();
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr) << status.ToString();
+  EXPECT_NE(status.message().find("synthetic credential dependency failure"), std::string::npos) << status.ToString();
+}
+
+void ExpectCredentialOutOfMemory(const arrow::Status& status) {
+  ASSERT_FALSE(status.ok()) << status.ToString();
+  EXPECT_TRUE(status.IsOutOfMemory()) << status.ToString();
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr) << status.ToString();
+  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::MemAllocateFailed) << status.ToString();
+}
+
+class FailingRequestCredentialsProvider final : public Aws::Auth::AWSCredentialsProvider,
+                                                public RequestCredentialsResolver {
+  public:
+  explicit FailingRequestCredentialsProvider(arrow::Status failure) : failure_(std::move(failure)) {}
+
+  Aws::Auth::AWSCredentials GetAWSCredentials() override { return {}; }
+
+  arrow::Result<Aws::Auth::AWSCredentials> ResolveForRequest() override {
+    ++resolve_calls_;
+    return failure_;
+  }
+
+  int resolve_calls() const { return resolve_calls_.load(); }
+
+  private:
+  arrow::Status failure_;
+  std::atomic<int> resolve_calls_{0};
+};
+
+}  // namespace
 
 // ============================================================================
 // Diagnostic: Verify mock infrastructure
@@ -304,6 +603,1756 @@ TEST_F(S3ProviderTest, TestMockInfrastructure) {
                                    Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
   auto response2 = client->MakeRequest(request2);
   EXPECT_EQ(response2->GetResponseCode(), Aws::Http::HttpResponseCode::NOT_FOUND);
+}
+
+TEST_F(S3ProviderTest, DeleteDirReturnsOneConcreteFailureWithoutAggregation) {
+  constexpr const char* kBucket = "aggregation-test-bucket";
+
+  const std::string first_list_page = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>aggregation-test-bucket</Name>
+  <Prefix></Prefix>
+  <KeyCount>1</KeyCount>
+  <MaxKeys>1000</MaxKeys>
+  <IsTruncated>true</IsTruncated>
+  <Contents>
+    <Key>dir/file</Key>
+    <LastModified>2026-08-03T00:00:00.000Z</LastModified>
+    <ETag>&quot;etag&quot;</ETag>
+    <Size>1</Size>
+    <StorageClass>STANDARD</StorageClass>
+  </Contents>
+  <NextContinuationToken>next-page</NextContinuationToken>
+</ListBucketResult>)xml";
+  const std::string delete_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Error>
+    <Key>dir/file</Key>
+    <Code>AccessDenied</Code>
+    <Message>delete denied by policy</Message>
+  </Error>
+</DeleteResult>)xml";
+  const std::string listing_error = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<Error>
+  <Code>SlowDown</Code>
+  <Message>listing throttled</Message>
+  <RequestId>request-id</RequestId>
+</Error>)xml";
+
+  auto xml_headers = [](const std::string& body) {
+    Aws::Http::HeaderValueCollection headers;
+    headers["content-type"] = "application/xml";
+    headers["content-length"] = std::to_string(body.size());
+    return headers;
+  };
+  // Pagination and page deletes run concurrently. Either concrete failure may
+  // win, but the result must never synthesize a combined status.
+  std::promise<void> delete_started_promise;
+  auto delete_started = delete_started_promise.get_future().share();
+
+  mock_client_->EnqueueResponse("list-type=2", Aws::Http::HttpResponseCode::OK, first_list_page,
+                                xml_headers(first_list_page));
+  mock_client_->EnqueueResponse("list-type=2", Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE, listing_error,
+                                xml_headers(listing_error), [delete_started] {
+                                  EXPECT_EQ(delete_started.wait_for(std::chrono::seconds(5)), std::future_status::ready)
+                                      << "second listing failure arrived before the first page's delete started";
+                                });
+  mock_client_->EnqueueResponse("?delete", Aws::Http::HttpResponseCode::OK, delete_result, xml_headers(delete_result),
+                                [&delete_started_promise] { delete_started_promise.set_value(); });
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  auto status = fs->DeleteDirContents(kBucket, /*missing_dir_ok=*/false);
+
+  ASSERT_STATUS_NOT_OK(status);
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_TRUE(detail->code() == ExtendStatusCode::StorageAccessDenied ||
+              detail->code() == ExtendStatusCode::StorageTransientService ||
+              detail->code() == ExtendStatusCode::StorageTransientThrottling)
+      << status.ToString();
+  const bool has_delete_failure = status.message().find("AccessDenied") != std::string::npos;
+  const bool has_listing_failure = status.message().find("listing throttled") != std::string::npos;
+  EXPECT_NE(has_delete_failure, has_listing_failure) << status.ToString();
+}
+
+TEST_F(S3ProviderTest, DeleteObjectsSubmissionFailureDoesNotWaitForAcceptedChunks) {
+  constexpr const char* kBucket = "delete-submission-failure-bucket";
+
+  std::string list_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>delete-submission-failure-bucket</Name>
+  <Prefix></Prefix>
+  <KeyCount>1001</KeyCount>
+  <MaxKeys>1001</MaxKeys>
+  <IsTruncated>false</IsTruncated>
+)xml";
+  for (int i = 0; i < 1001; ++i) {
+    list_result += "<Contents><Key>dir/file-" + std::to_string(i) +
+                   "</Key><LastModified>2026-08-11T00:00:00.000Z</LastModified>"
+                   "<ETag>&quot;etag&quot;</ETag><Size>1</Size><StorageClass>STANDARD</StorageClass></Contents>";
+  }
+  list_result += "</ListBucketResult>";
+
+  const std::string delete_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Error>
+    <Key>dir/file-0</Key>
+    <Code>AccessDenied</Code>
+    <Message>first accepted chunk was denied</Message>
+  </Error>
+</DeleteResult>)xml";
+
+  auto xml_headers = [](const std::string& body) {
+    Aws::Http::HeaderValueCollection headers;
+    headers["content-type"] = "application/xml";
+    headers["content-length"] = std::to_string(body.size());
+    return headers;
+  };
+
+  ASSERT_AND_ASSIGN(auto pool, arrow::internal::ThreadPool::Make(2));
+  RejectAfterOneS3Executor executor(pool);
+  std::promise<void> first_delete_started_promise;
+  auto first_delete_started = first_delete_started_promise.get_future();
+  std::promise<void> release_first_delete_promise;
+  auto release_first_delete = release_first_delete_promise.get_future().share();
+
+  mock_client_->EnqueueResponse("list-type=2", Aws::Http::HttpResponseCode::OK, list_result, xml_headers(list_result),
+                                [&executor] { executor.Arm(); });
+  mock_client_->EnqueueResponse("?delete", Aws::Http::HttpResponseCode::OK, delete_result, xml_headers(delete_result),
+                                [&first_delete_started_promise, release_first_delete] {
+                                  first_delete_started_promise.set_value();
+                                  EXPECT_EQ(release_first_delete.wait_for(std::chrono::seconds(5)),
+                                            std::future_status::ready);
+                                });
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+
+  arrow::io::IOContext io_context(&executor);
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options, io_context));
+  auto delete_future = fs->DeleteDirContentsAsync(kBucket, /*missing_dir_ok=*/false);
+
+  ASSERT_EQ(executor.rejection_observed().wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  ASSERT_EQ(first_delete_started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  const bool finished_before_accepted_chunk = delete_future.is_finished();
+  release_first_delete_promise.set_value();
+  ASSERT_TRUE(finished_before_accepted_chunk) << "submission failure waited for an already accepted chunk";
+  auto status = delete_future.status();
+  ASSERT_STATUS_NOT_OK(status);
+  EXPECT_NE(status.message().find("executor rejected S3 delete task"), std::string::npos) << status.ToString();
+  EXPECT_EQ(status.message().find("first accepted chunk was denied"), std::string::npos) << status.ToString();
+}
+
+TEST_F(S3ProviderTest, DeleteObjectsResultFailureDoesNotWaitForSibling) {
+  constexpr const char* kBucket = "delete-result-failure-bucket";
+
+  std::string list_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>delete-result-failure-bucket</Name>
+  <Prefix></Prefix>
+  <KeyCount>1001</KeyCount>
+  <MaxKeys>1001</MaxKeys>
+  <IsTruncated>false</IsTruncated>
+)xml";
+  for (int i = 0; i < 1001; ++i) {
+    list_result += "<Contents><Key>dir/file-" + std::to_string(i) +
+                   "</Key><LastModified>2026-08-18T00:00:00.000Z</LastModified>"
+                   "<ETag>&quot;etag&quot;</ETag><Size>1</Size><StorageClass>STANDARD</StorageClass></Contents>";
+  }
+  list_result += "</ListBucketResult>";
+
+  const std::string failed_delete_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Error>
+    <Key>dir/file-0</Key>
+    <Code>AccessDenied</Code>
+    <Message>first completed chunk was denied</Message>
+  </Error>
+</DeleteResult>)xml";
+  const std::string successful_delete_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/" />)xml";
+
+  auto xml_headers = [](const std::string& body) {
+    Aws::Http::HeaderValueCollection headers;
+    headers["content-type"] = "application/xml";
+    headers["content-length"] = std::to_string(body.size());
+    return headers;
+  };
+
+  ASSERT_AND_ASSIGN(auto pool, arrow::internal::ThreadPool::Make(2));
+  std::promise<void> sibling_started_promise;
+  auto sibling_started = sibling_started_promise.get_future();
+  std::promise<void> release_sibling_promise;
+  auto release_sibling = release_sibling_promise.get_future().share();
+
+  mock_client_->EnqueueResponse("list-type=2", Aws::Http::HttpResponseCode::OK, list_result, xml_headers(list_result));
+  mock_client_->EnqueueResponse(
+      "?delete", Aws::Http::HttpResponseCode::OK, failed_delete_result, xml_headers(failed_delete_result),
+      [&sibling_started] { EXPECT_EQ(sibling_started.wait_for(std::chrono::seconds(5)), std::future_status::ready); });
+  mock_client_->EnqueueResponse("?delete", Aws::Http::HttpResponseCode::OK, successful_delete_result,
+                                xml_headers(successful_delete_result), [&sibling_started_promise, release_sibling] {
+                                  sibling_started_promise.set_value();
+                                  EXPECT_EQ(release_sibling.wait_for(std::chrono::seconds(10)),
+                                            std::future_status::ready);
+                                });
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+
+  arrow::io::IOContext io_context(pool.get());
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options, io_context));
+  auto delete_future = fs->DeleteDirContentsAsync(kBucket, /*missing_dir_ok=*/false);
+
+  const auto sibling_state = sibling_started.wait_for(std::chrono::seconds(5));
+  const bool finished_before_sibling_release = sibling_state == std::future_status::ready && delete_future.Wait(5.0);
+  std::optional<arrow::Status> observed_status;
+  if (finished_before_sibling_release) {
+    observed_status = delete_future.status();
+  }
+  release_sibling_promise.set_value();
+  delete_future.Wait(5.0);
+
+  ASSERT_EQ(sibling_state, std::future_status::ready);
+  ASSERT_TRUE(finished_before_sibling_release) << "delete failure waited for a sibling request";
+  ASSERT_TRUE(observed_status.has_value());
+  ASSERT_STATUS_NOT_OK(*observed_status);
+  auto detail = ExtendStatusDetail::UnwrapStatus(*observed_status);
+  ASSERT_NE(detail, nullptr) << observed_status->ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageAccessDenied) << observed_status->ToString();
+  EXPECT_NE(observed_status->message().find("first completed chunk was denied"), std::string::npos)
+      << observed_status->ToString();
+}
+
+TEST_F(S3ProviderTest, DeleteObjectsPerKeyCredentialErrorsAreAuthenticationFailures) {
+  constexpr const char* kBucket = "expired-token-delete-bucket";
+
+  std::string list_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>expired-token-delete-bucket</Name>
+  <Prefix></Prefix>
+  <KeyCount>5</KeyCount>
+  <MaxKeys>1000</MaxKeys>
+  <IsTruncated>false</IsTruncated>
+)xml";
+  const std::vector<std::string> credential_errors = {"ExpiredToken", "InvalidToken", "InvalidAccessKeyId",
+                                                      "SignatureDoesNotMatch", "InvalidSecurity"};
+  for (size_t i = 0; i < credential_errors.size(); ++i) {
+    list_result += "<Contents><Key>dir/file-" + std::to_string(i) +
+                   "</Key><LastModified>2026-08-03T00:00:00.000Z</LastModified>"
+                   "<ETag>&quot;etag&quot;</ETag><Size>1</Size><StorageClass>STANDARD</StorageClass></Contents>";
+  }
+  list_result += "</ListBucketResult>";
+
+  std::string delete_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+)xml";
+  for (size_t i = 0; i < credential_errors.size(); ++i) {
+    delete_result += "<Error><Key>dir/file-" + std::to_string(i) + "</Key><Code>" + credential_errors[i] +
+                     "</Code><Message>credentials rejected</Message></Error>";
+  }
+  delete_result += "</DeleteResult>";
+
+  auto xml_headers = [](const std::string& body) {
+    Aws::Http::HeaderValueCollection headers;
+    headers["content-type"] = "application/xml";
+    headers["content-length"] = std::to_string(body.size());
+    return headers;
+  };
+  mock_client_->EnqueueResponse("list-type=2", Aws::Http::HttpResponseCode::OK, list_result, xml_headers(list_result));
+  mock_client_->EnqueueResponse("?delete", Aws::Http::HttpResponseCode::OK, delete_result, xml_headers(delete_result));
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  auto status = fs->DeleteDirContents(kBucket, /*missing_dir_ok=*/false);
+
+  ASSERT_STATUS_NOT_OK(status);
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageAccessDenied) << status.ToString();
+  EXPECT_FALSE(detail->retryable());
+  EXPECT_NE(status.message().find(credential_errors.front()), std::string::npos) << status.ToString();
+  EXPECT_EQ(status.message().find(credential_errors.back()), std::string::npos) << status.ToString();
+}
+
+TEST_F(S3ProviderTest, KnownSizeGetObjectNotFoundIsMissingKeyWithoutProbe) {
+  auto make_fs = [this]() -> arrow::Result<std::shared_ptr<S3FileSystem>> {
+    S3Options options;
+    options.ConfigureAnonymousCredentials();
+    options.region = "us-east-1";
+    options.scheme = "http";
+    options.endpoint_override = "mock-s3.local";
+    options.cloud_provider = kCloudProviderAWS;
+    options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+    options.use_crt_async_reads = false;
+    return S3FileSystem::Make(options);
+  };
+
+  auto read_known_size = [](const std::shared_ptr<S3FileSystem>& fs) -> arrow::Status {
+    arrow::fs::FileInfo info("bucket/key", arrow::fs::FileType::File);
+    info.set_size(1);
+    ARROW_ASSIGN_OR_RAISE(auto file, fs->OpenInputFile(info));
+    uint8_t byte = 0;
+    return file->ReadAt(0, 1, &byte).status();
+  };
+
+  // OpenInputFile(FileInfo) skips HeadObject by design. A bodyless GetObject
+  // 404 is reduced to a missing key directly -- exactly ONE request. No
+  // disambiguation probe follows: extra IO on the miss path is deliberately
+  // not spent, so a vanished bucket also reports as the missing object.
+  mock_client_->EnqueueResponse("mock-s3.local", Aws::Http::HttpResponseCode::NOT_FOUND, "");
+  ASSERT_AND_ASSIGN(auto missing_key_fs, make_fs());
+  auto missing_key = read_known_size(missing_key_fs);
+  ASSERT_STATUS_NOT_OK(missing_key);
+  auto key_detail = ExtendStatusDetail::UnwrapStatus(missing_key);
+  ASSERT_NE(key_detail, nullptr) << missing_key.ToString();
+  EXPECT_EQ(key_detail->code(), ExtendStatusCode::StorageNotFound) << missing_key.ToString();
+  EXPECT_EQ(CategoryForExtendStatusCode(key_detail->code()), ErrorCategory::System);
+  // Only the failing GetObject (plus SDK retries of it) -- a HeadBucket probe
+  // would show up as a HEAD request.
+  for (const auto& request : mock_client_->GetRecordedRequests()) {
+    EXPECT_NE(request->GetMethod(), Aws::Http::HttpMethod::HTTP_HEAD) << "unexpected disambiguation probe";
+  }
+}
+
+TEST_F(S3ProviderTest, DeleteFileNotFoundDoesNotProbeBucket) {
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+
+  mock_client_->EnqueueResponse("mock-s3.local", Aws::Http::HttpResponseCode::NOT_FOUND, "");
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  auto status = fs->DeleteFile("bucket/key");
+
+  ASSERT_STATUS_NOT_OK(status);
+  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::ObjectNotExist) << status.ToString();
+  const auto requests = mock_client_->GetRecordedRequests();
+  ASSERT_EQ(requests.size(), 1u) << "a failed HeadObject must not trigger a HeadBucket diagnostic request";
+  EXPECT_EQ(requests.front()->GetMethod(), Aws::Http::HttpMethod::HTTP_HEAD);
+}
+
+TEST_F(S3ProviderTest, DeleteObjectsRequestNotFoundNamesTheBucket) {
+  const std::string list_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>bucket</Name>
+  <Prefix></Prefix>
+  <KeyCount>1</KeyCount>
+  <MaxKeys>1000</MaxKeys>
+  <IsTruncated>false</IsTruncated>
+  <Contents>
+    <Key>key</Key>
+    <LastModified>2026-08-06T00:00:00.000Z</LastModified>
+    <ETag>&quot;etag&quot;</ETag>
+    <Size>1</Size>
+    <StorageClass>STANDARD</StorageClass>
+  </Contents>
+</ListBucketResult>)xml";
+  Aws::Http::HeaderValueCollection list_headers;
+  list_headers["content-type"] = "application/xml";
+  list_headers["content-length"] = std::to_string(list_result.size());
+  mock_client_->EnqueueResponse("list-type=2", Aws::Http::HttpResponseCode::OK, list_result, list_headers);
+  mock_client_->EnqueueResponse("?delete", Aws::Http::HttpResponseCode::NOT_FOUND, "");
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  auto status = fs->DeleteDirContents("bucket", /*missing_dir_ok=*/false);
+
+  ASSERT_STATUS_NOT_OK(status);
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageBucketNotFound) << status.ToString();
+  EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::System);
+}
+
+TEST_F(S3ProviderTest, MultipartNotFoundReportsNoSuchUploadWithoutProbe) {
+  auto make_fs = []() -> arrow::Result<std::shared_ptr<S3FileSystem>> {
+    S3Options options;
+    options.ConfigureAnonymousCredentials();
+    options.region = "us-east-1";
+    options.scheme = "http";
+    options.endpoint_override = "mock-s3.local";
+    options.cloud_provider = kCloudProviderAWS;
+    options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+    options.use_crt_async_reads = false;
+    options.background_writes = false;
+    return S3FileSystem::Make(options);
+  };
+
+  const std::string create_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>bucket</Bucket><Key>key</Key><UploadId>upload-id</UploadId>
+</InitiateMultipartUploadResult>)xml";
+  Aws::Http::HeaderValueCollection xml_headers;
+  xml_headers["content-type"] = "application/xml";
+  xml_headers["content-length"] = std::to_string(create_result.size());
+
+  auto write_one_part = [](const std::shared_ptr<S3FileSystem>& fs) -> arrow::Status {
+    ARROW_ASSIGN_OR_RAISE(auto stream, fs->OpenOutputStreamWithUploadSize("bucket/key", nullptr, 1));
+    const uint8_t byte = 7;
+    return stream->Write(&byte, 1);
+  };
+
+  // A generic 404 on UploadPart is reported as NoSuchUpload directly -- no
+  // HeadBucket probe follows (extra IO on failure paths is deliberately not
+  // spent), so a vanished bucket reports the same way.
+  mock_client_->EnqueueResponse("?uploads", Aws::Http::HttpResponseCode::OK, create_result, xml_headers);
+  mock_client_->EnqueueResponse("?partNumber=1", Aws::Http::HttpResponseCode::NOT_FOUND, "");
+  ASSERT_AND_ASSIGN(auto dead_upload_fs, make_fs());
+  auto dead_upload = write_one_part(dead_upload_fs);
+  ASSERT_STATUS_NOT_OK(dead_upload);
+  auto upload_detail = ExtendStatusDetail::UnwrapStatus(dead_upload);
+  ASSERT_NE(upload_detail, nullptr) << dead_upload.ToString();
+  EXPECT_EQ(upload_detail->code(), ExtendStatusCode::StorageNoSuchUpload) << dead_upload.ToString();
+  EXPECT_EQ(CategoryForExtendStatusCode(upload_detail->code()), ErrorCategory::Retryable);
+  EXPECT_TRUE(upload_detail->retryable());
+  // CreateMultipartUpload + the failing UploadPart (plus SDK retries) -- a
+  // HeadBucket probe would show up as a HEAD request.
+  for (const auto& request : mock_client_->GetRecordedRequests()) {
+    EXPECT_NE(request->GetMethod(), Aws::Http::HttpMethod::HTTP_HEAD) << "unexpected disambiguation probe";
+  }
+}
+
+TEST_F(S3ProviderTest, BackgroundUploadSubmissionFailureSettlesFlush) {
+  const std::string create_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>bucket</Bucket><Key>key</Key><UploadId>upload-id</UploadId>
+</InitiateMultipartUploadResult>)xml";
+  Aws::Http::HeaderValueCollection xml_headers;
+  xml_headers["content-type"] = "application/xml";
+  xml_headers["content-length"] = std::to_string(create_result.size());
+  mock_client_->EnqueueResponse("?uploads", Aws::Http::HttpResponseCode::OK, create_result, xml_headers);
+  mock_client_->EnqueueResponse("uploadId=upload-id", Aws::Http::HttpResponseCode::OK, "");
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+  options.background_writes = true;
+
+  RejectingS3Executor executor;
+  arrow::io::IOContext io_context(&executor);
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options, io_context));
+  ASSERT_AND_ASSIGN(auto stream, fs->OpenOutputStreamWithUploadSize("bucket/key", nullptr, 1));
+
+  const uint8_t byte = 7;
+  auto write_status = stream->Write(&byte, 1);
+  ASSERT_STATUS_NOT_OK(write_status);
+  EXPECT_NE(write_status.message().find("executor rejected S3 upload task"), std::string::npos);
+
+  auto flush_status = stream->Flush();
+  ASSERT_STATUS_NOT_OK(flush_status);
+  EXPECT_TRUE(flush_status.Equals(write_status));
+  ASSERT_STATUS_OK(stream->Abort());
+}
+
+TEST_F(S3ProviderTest, UnexpectedBackgroundUploadSubmissionExceptionDrainsBeforeDeferredAbort) {
+  AssertBackgroundUploadSubmissionExceptionDrains(S3SubmissionExceptionKind::kUnexpected);
+}
+
+TEST_F(S3ProviderTest, BackgroundUploadSubmissionBadAllocIsFailStop) {
+  PrepareS3DeathTest();
+  EXPECT_DEATH_IF_SUPPORTED(
+      { AssertBackgroundUploadSubmissionExceptionDrains(S3SubmissionExceptionKind::kBadAlloc); }, "");
+}
+
+// A credential failure that could NOT be reached and one that was REFUSED must
+// not land the same way. The distinction is not there to make the SDK retry
+// again -- the credential client's own budget is already spent by then -- it is
+// there so the layer above can re-run the whole operation later. Collapsing
+// both into StorageAccessDenied made a restarting metadata service fail a
+// query exactly as permanently as a role ARN that does not exist.
+TEST(StsCredentialResolutionTest, SeparatesUnreachableFromRefused) {
+  using Aws::Http::HttpResponseCode;
+
+  auto code_of = [](const arrow::Status& status) {
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    EXPECT_NE(detail, nullptr) << status.ToString();
+    return detail != nullptr ? detail->code() : ExtendStatusCode::StorageAccessDenied;
+  };
+
+  // Never left the process, or the http client returned nothing at all. These
+  // sit inside ordinary numeric ranges (444, 598, 599), so a classifier keyed
+  // on the range first would call a dead network a bad configuration.
+  EXPECT_EQ(code_of(ClassifyCredentialHttpFailure(HttpResponseCode::REQUEST_NOT_MADE, "x")),
+            ExtendStatusCode::StorageTransientNetwork);
+  EXPECT_EQ(code_of(ClassifyCredentialHttpFailure(HttpResponseCode::NO_RESPONSE, "x")),
+            ExtendStatusCode::StorageTransientNetwork);
+  EXPECT_EQ(code_of(ClassifyCredentialHttpFailure(HttpResponseCode::NETWORK_CONNECT_TIMEOUT, "x")),
+            ExtendStatusCode::StorageTransientTimeout);
+  EXPECT_EQ(code_of(ClassifyCredentialHttpFailure(HttpResponseCode::TOO_MANY_REQUESTS, "x")),
+            ExtendStatusCode::StorageTransientThrottling);
+  EXPECT_EQ(code_of(ClassifyCredentialHttpFailure(HttpResponseCode::SERVICE_UNAVAILABLE, "x")),
+            ExtendStatusCode::StorageTransientService);
+
+  // The service identified us and said no. That one really is an access
+  // decision, and it must stay non-retryable.
+  EXPECT_EQ(code_of(ClassifyCredentialHttpFailure(HttpResponseCode::FORBIDDEN, "x")),
+            ExtendStatusCode::StorageAccessDenied);
+  EXPECT_EQ(code_of(ClassifyCredentialHttpFailure(HttpResponseCode::UNAUTHORIZED, "x")),
+            ExtendStatusCode::StorageAccessDenied);
+
+  // Refused, but not as an access decision.
+  EXPECT_EQ(code_of(ClassifyCredentialHttpFailure(HttpResponseCode::BAD_REQUEST, "x")),
+            ExtendStatusCode::StorageConfigInvalid);
+}
+
+TEST(StsCredentialResolutionTest, TransientCredentialFailuresStayRetryableAtTheBoundary) {
+  using Aws::Http::HttpResponseCode;
+
+  for (auto code :
+       {HttpResponseCode::REQUEST_NOT_MADE, HttpResponseCode::NO_RESPONSE, HttpResponseCode::SERVICE_UNAVAILABLE,
+        HttpResponseCode::TOO_MANY_REQUESTS, HttpResponseCode::NETWORK_CONNECT_TIMEOUT}) {
+    auto status = ClassifyCredentialHttpFailure(code, "transient");
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << "http_status=" << static_cast<int>(code);
+    EXPECT_TRUE(detail->retryable()) << "http_status=" << static_cast<int>(code);
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::StorageTransientError)
+        << "http_status=" << static_cast<int>(code);
+  }
+
+  auto refused = ClassifyCredentialHttpFailure(HttpResponseCode::FORBIDDEN, "refused");
+  auto refused_detail = ExtendStatusDetail::UnwrapStatus(refused);
+  ASSERT_NE(refused_detail, nullptr);
+  EXPECT_FALSE(refused_detail->retryable());
+  EXPECT_EQ(ToSegcoreError(refused).get_error_code(), milvus::ConfigInvalid);
+}
+
+// Missing local configuration is the deployment's to fix, and must not read as
+// something a retry outlasts.
+TEST(StsCredentialResolutionTest, MissingLocalConfigurationIsNotRetryable) {
+  auto status = MakeCredentialConfigError("Cannot open the OIDC token file /var/run/secrets/token");
+  EXPECT_TRUE(status.IsInvalid()) << status.ToString();
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageConfigInvalid);
+  EXPECT_FALSE(detail->retryable());
+}
+
+// The budget is asked AFTER the writer lock is acquired, so what it actually
+// answers is "did I spend my whole budget waiting for somebody else's failed
+// reload". A caller that just arrived still gets to try; one that waited longer
+// than the budget does not, which is what stops a queue of threads replaying
+// the same outage one after another.
+TEST(StsCredentialResolutionTest, AttemptIsAbandonedOnceTheBudgetIsSpentWaiting) {
+  EXPECT_TRUE(CredentialAttemptStillWorthMaking(std::chrono::steady_clock::now()));
+  EXPECT_FALSE(CredentialAttemptStillWorthMaking(std::chrono::steady_clock::now() - kCredentialResolutionBudget -
+                                                 std::chrono::milliseconds(1)));
+}
+
+// A body we could not use is neither a transport fault to wait out nor a
+// refusal. Left unclassified on purpose: the conservative landing is
+// non-retryable without claiming to know which it was.
+TEST(StsCredentialResolutionTest, AnUnusableResponseIsNotDressedAsAccessDenied) {
+  auto status = MakeCredentialResponseError("STS answered 200 with no <Credentials>");
+  EXPECT_TRUE(status.IsIOError()) << status.ToString();
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr) << status.ToString();
+  EXPECT_NE(status.message().find("no <Credentials>"), std::string::npos);
+}
+
+TEST(StsCredentialResolutionTest, TemporaryCredentialsAreValidatedAtomically) {
+  const auto future = Aws::Utils::DateTime(std::chrono::system_clock::now() + std::chrono::hours(1));
+  const auto expired = Aws::Utils::DateTime(std::chrono::system_clock::now() - std::chrono::seconds(1));
+  const auto invalid = Aws::Utils::DateTime("not-an-expiration", Aws::Utils::DateFormat::ISO_8601);
+
+  EXPECT_TRUE(ValidateTemporaryCredentials(Aws::Auth::AWSCredentials("ak", "sk", "token", future), "test STS").ok());
+  EXPECT_FALSE(ValidateTemporaryCredentials(Aws::Auth::AWSCredentials("", "sk", "token", future), "test STS").ok());
+  EXPECT_FALSE(ValidateTemporaryCredentials(Aws::Auth::AWSCredentials("ak", "", "token", future), "test STS").ok());
+  EXPECT_FALSE(ValidateTemporaryCredentials(Aws::Auth::AWSCredentials("ak", "sk", "", future), "test STS").ok());
+  EXPECT_FALSE(ValidateTemporaryCredentials(Aws::Auth::AWSCredentials("ak", "sk", "token"), "test STS").ok());
+  EXPECT_FALSE(ValidateTemporaryCredentials(Aws::Auth::AWSCredentials("ak", "sk", "token", invalid), "test STS").ok());
+  EXPECT_FALSE(ValidateTemporaryCredentials(Aws::Auth::AWSCredentials("ak", "sk", "token", expired), "test STS").ok());
+}
+
+TEST_F(S3ProviderTest, VendorStsClassifiesHttpFailureBeforeParsingNonEmptyBody) {
+  auto config = MakeNoImdsClientConfiguration();
+  config.retryStrategy = Aws::MakeShared<Aws::Client::DefaultRetryStrategy>("sts-status-test", 0);
+
+  {
+    ScopedEnvVar provider_arn("ALIBABA_CLOUD_OIDC_PROVIDER_ARN", "acs:ram::123456:oidc-provider/test");
+    for (long attempt = 0; attempt <= kCredentialRetryAttempts; ++attempt) {
+      mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::TOO_MANY_REQUESTS,
+                                    R"(<Error><Code>Throttling</Code><Message>busy but non-empty</Message></Error>)");
+    }
+    AliyunSTSCredentialsClient client(config);
+    AliyunSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{"session", "acs:ram::123456:role/test",
+                                                                            "identity-token"};
+
+    auto result = client.GetAssumeRoleWithWebIdentityCredentials(request);
+    EXPECT_TRUE(result.creds.IsEmpty());
+    ExpectExtendStatusCode(result.status, ExtendStatusCode::StorageTransientThrottling);
+  }
+
+  {
+    for (long attempt = 0; attempt <= kCredentialRetryAttempts; ++attempt) {
+      mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE,
+                                    R"({"Response":{"Error":{"Code":"InternalError","Message":"non-empty outage"}}})");
+    }
+    TencentCloudSTSCredentialsClient client(config);
+    TencentCloudSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{
+        "ap-guangzhou", "provider", "identity-token", "qcs::cam::uin/1:roleName/test", "session"};
+
+    auto result = client.GetAssumeRoleWithWebIdentityCredentials(request);
+    EXPECT_TRUE(result.creds.IsEmpty());
+    ExpectExtendStatusCode(result.status, ExtendStatusCode::StorageTransientService);
+  }
+
+  {
+    mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::FORBIDDEN,
+                                  R"(<Error><Code>AccessDenied</Code><Message>non-empty refusal</Message></Error>)");
+    AliyunRAMSTSClient client(config);
+    AliyunRAMSTSClient::AssumeRoleRequest request;
+    request.callerAccessKeyId = "caller-ak";
+    request.callerAccessKeySecret = "caller-sk";
+    request.callerSecurityToken = "caller-token";
+    request.roleArn = "acs:ram::123456:role/test";
+    request.roleSessionName = "session";
+
+    auto result = client.GetAssumeRoleCredentials(request);
+    EXPECT_TRUE(result.creds.IsEmpty());
+    ExpectExtendStatusCode(result.status, ExtendStatusCode::StorageAccessDenied);
+  }
+}
+
+TEST_F(S3ProviderTest, AliyunStsClassifiesOnlyXmlThrottlingOnHttp302) {
+  auto config = MakeNoImdsClientConfiguration();
+  config.retryStrategy = Aws::MakeShared<Aws::Client::DefaultRetryStrategy>("aliyun-302-test", 0);
+  constexpr auto redirected = static_cast<Aws::Http::HttpResponseCode>(302);
+
+  auto invoke = [&](bool oidc, std::string_view code) -> std::pair<Aws::Auth::AWSCredentials, arrow::Status> {
+    mock_client_->EnqueueResponse(
+        "sts.aliyuncs.com", redirected,
+        fmt::format("<Error><Code>{}</Code><Message>synthetic 302 response</Message></Error>", code));
+    if (oidc) {
+      ScopedEnvVar provider_arn("ALIBABA_CLOUD_OIDC_PROVIDER_ARN", "acs:ram::123456:oidc-provider/test");
+      AliyunSTSCredentialsClient client(config);
+      auto result =
+          client.GetAssumeRoleWithWebIdentityCredentials({"session", "acs:ram::123456:role/test", "identity-token"});
+      return {std::move(result.creds), std::move(result.status)};
+    }
+    AliyunRAMSTSClient client(config);
+    AliyunRAMSTSClient::AssumeRoleRequest request;
+    request.callerAccessKeyId = "caller-ak";
+    request.callerAccessKeySecret = "caller-sk";
+    request.roleArn = "acs:ram::123456:role/test";
+    request.roleSessionName = "session";
+    auto result = client.GetAssumeRoleCredentials(request);
+    return {std::move(result.creds), std::move(result.status)};
+  };
+
+  for (bool oidc : {true, false}) {
+    auto [throttled_creds, throttled_status] = invoke(oidc, "Throttling.User");
+    EXPECT_TRUE(throttled_creds.IsEmpty());
+    ExpectExtendStatusCode(throttled_status, ExtendStatusCode::StorageTransientThrottling);
+
+    auto [redirect_creds, redirect_status] = invoke(oidc, "EntityNotExist.Role");
+    EXPECT_TRUE(redirect_creds.IsEmpty());
+    EXPECT_TRUE(redirect_status.IsIOError()) << redirect_status.ToString();
+    EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(redirect_status), nullptr) << redirect_status.ToString();
+  }
+}
+
+TEST_F(S3ProviderTest, TencentHttp200ErrorBodyKeepsTypedCause) {
+  auto config = MakeNoImdsClientConfiguration();
+  config.retryStrategy = Aws::MakeShared<Aws::Client::DefaultRetryStrategy>("tencent-200-error-test", 0);
+  struct Case {
+    const char* code;
+    ExtendStatusCode expected;
+  };
+  const std::vector<Case> cases = {
+      {"AuthFailure", ExtendStatusCode::StorageAccessDenied},
+      {"AuthFailure.SignatureFailure", ExtendStatusCode::StorageAccessDenied},
+      {"AccessDenied.ResourceUnauthorized", ExtendStatusCode::StorageAccessDenied},
+      {"UnauthorizedOperation.AssumeRoleWithWebIdentity", ExtendStatusCode::StorageAccessDenied},
+      {"RequestLimitExceeded", ExtendStatusCode::StorageTransientThrottling},
+      {"RequestLimitExceeded.UinLimitExceeded", ExtendStatusCode::StorageTransientThrottling},
+      {"InvalidParameter.OverLimit", ExtendStatusCode::StorageTransientThrottling},
+      {"InternalError", ExtendStatusCode::StorageTransientService},
+      {"InternalError.StsInternalError", ExtendStatusCode::StorageTransientService},
+      {"ServiceUnavailable.StsService", ExtendStatusCode::StorageTransientService},
+      {"ResourceUnavailable", ExtendStatusCode::StorageTransientService},
+      {"ResourceUnavailable.RoleState", ExtendStatusCode::StorageConfigInvalid},
+      {"InvalidParameter.RoleArn", ExtendStatusCode::StorageConfigInvalid},
+  };
+
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.code);
+    const auto body = fmt::format(
+        R"({{"Response":{{"Error":{{"Code":"{}","Message":"synthetic typed error"}},"RequestId":"request"}}}})",
+        test_case.code);
+    mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK, body);
+    TencentCloudSTSCredentialsClient client(config);
+    TencentCloudSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{
+        "ap-guangzhou", "provider", "identity-token", "qcs::cam::uin/1:roleName/test", "session"};
+    auto result = client.GetAssumeRoleWithWebIdentityCredentials(request);
+    EXPECT_TRUE(result.creds.IsEmpty());
+    ExpectExtendStatusCode(result.status, test_case.expected);
+    EXPECT_TRUE(result.status.IsIOError()) << result.status.ToString();
+  }
+}
+
+TEST_F(S3ProviderTest, VendorStsRejectsEveryIncompleteTemporaryCredentialShape) {
+  auto config = MakeNoImdsClientConfiguration();
+  config.retryStrategy = Aws::MakeShared<Aws::Client::DefaultRetryStrategy>("sts-partial-test", 0);
+
+  {
+    ScopedEnvVar provider_arn("ALIBABA_CLOUD_OIDC_PROVIDER_ARN", "acs:ram::123456:oidc-provider/test");
+    mock_client_->EnqueueResponse(
+        "sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK,
+        R"(<AssumeRoleWithOIDCResponse><Credentials><AccessKeyId>ak</AccessKeyId><AccessKeySecret>sk</AccessKeySecret><Expiration>2099-12-31T23:59:59Z</Expiration></Credentials></AssumeRoleWithOIDCResponse>)");
+    AliyunSTSCredentialsClient client(config);
+    AliyunSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{"session", "acs:ram::123456:role/test",
+                                                                            "identity-token"};
+
+    auto result = client.GetAssumeRoleWithWebIdentityCredentials(request);
+    EXPECT_TRUE(result.creds.IsEmpty());
+    EXPECT_FALSE(result.status.ok());
+  }
+
+  {
+    mock_client_->EnqueueResponse(
+        "sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+        R"({"Response":{"Credentials":{"TmpSecretId":"ak","TmpSecretKey":"sk","Token":"token"},"Expiration":""}})");
+    TencentCloudSTSCredentialsClient client(config);
+    TencentCloudSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{
+        "ap-guangzhou", "provider", "identity-token", "qcs::cam::uin/1:roleName/test", "session"};
+
+    auto result = client.GetAssumeRoleWithWebIdentityCredentials(request);
+    EXPECT_TRUE(result.creds.IsEmpty());
+    EXPECT_FALSE(result.status.ok());
+  }
+
+  {
+    mock_client_->EnqueueResponse(
+        "sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK,
+        R"(<AssumeRoleResponse><Credentials><AccessKeyId>ak</AccessKeyId><AccessKeySecret>sk</AccessKeySecret><SecurityToken>token</SecurityToken></Credentials></AssumeRoleResponse>)");
+    AliyunRAMSTSClient client(config);
+    AliyunRAMSTSClient::AssumeRoleRequest request;
+    request.callerAccessKeyId = "caller-ak";
+    request.callerAccessKeySecret = "caller-sk";
+    request.callerSecurityToken = "caller-token";
+    request.roleArn = "acs:ram::123456:role/test";
+    request.roleSessionName = "session";
+
+    auto result = client.GetAssumeRoleCredentials(request);
+    EXPECT_TRUE(result.creds.IsEmpty());
+    EXPECT_FALSE(result.status.ok());
+  }
+}
+
+TEST_F(S3ProviderTest, StandardClientHolderStopsObjectRequestWhenCredentialResolutionFails) {
+  auto provider = std::make_shared<FailingRequestCredentialsProvider>(
+      MakeExtendErrorMsg(ExtendStatusCode::StorageTransientService, "runtime credential refresh failed"));
+  S3Options options;
+  options.credentials_provider = provider;
+  options.credentials_kind = S3CredentialsKind::Role;
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  auto file_info = fs->GetFileInfo("bucket/key");
+  ASSERT_FALSE(file_info.ok());
+  ExpectExtendStatusCode(file_info.status(), ExtendStatusCode::StorageTransientService);
+  EXPECT_EQ(provider->resolve_calls(), 1);
+  size_t s3_requests = 0;
+  for (const auto& request : mock_client_->GetRecordedRequests()) {
+    if (request->GetURIString().find("mock-s3.local") != Aws::String::npos) {
+      ++s3_requests;
+    }
+  }
+  EXPECT_EQ(s3_requests, 0u) << "an object request must not be sent after credential refresh fails";
+}
+
+#ifdef WITH_CRT
+TEST_F(S3ProviderTest, CrtClientHolderStopsBeforeExposingClientWhenCredentialResolutionFails) {
+  auto provider = std::make_shared<FailingRequestCredentialsProvider>(
+      MakeExtendErrorMsg(ExtendStatusCode::StorageTransientNetwork, "runtime credential network failure"));
+  S3Options options;
+  options.credentials_provider = provider;
+  options.credentials_kind = S3CredentialsKind::Role;
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+
+  ClientBuilder<Aws::S3Crt::S3CrtClient> builder(options);
+  ASSERT_AND_ASSIGN(auto holder, builder.BuildClient());
+  auto acquired = holder->Acquire();
+  ASSERT_FALSE(acquired.ok());
+  ExpectExtendStatusCode(acquired.status(), ExtendStatusCode::StorageTransientNetwork);
+  EXPECT_EQ(provider->resolve_calls(), 1);
+  size_t s3_requests = 0;
+  for (const auto& request : mock_client_->GetRecordedRequests()) {
+    if (request->GetURIString().find("mock-s3.local") != Aws::String::npos) {
+      ++s3_requests;
+    }
+  }
+  EXPECT_EQ(s3_requests, 0u) << "the CRT holder must not expose its S3 client after credential refresh fails";
+}
+#endif
+
+TEST_F(S3ProviderTest, UseIamConstructionPreflightReturnsTypedTencentFailure) {
+  TempFile token_file("tencent-identity-token");
+  ScopedEnvVar region("TKE_REGION", "ap-guangzhou");
+  ScopedEnvVar role("TKE_ROLE_ARN", "qcs::cam::uin/100000000001:roleName/test-role");
+  ScopedEnvVar token("TKE_WEB_IDENTITY_TOKEN_FILE", token_file.path());
+  ScopedEnvVar provider_id("TKE_PROVIDER_ID", "test-provider");
+
+  const std::string error_body = R"({"Response":{"Error":{"Code":"InternalError","Message":"non-empty STS outage"}}})";
+  for (long attempt = 0; attempt <= kCredentialRetryAttempts; ++attempt) {
+    mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE,
+                                  error_body);
+  }
+
+  ArrowFileSystemConfig config;
+  config.cloud_provider = kCloudProviderTencent;
+  config.use_iam = true;
+  config.region = "ap-guangzhou";
+  config.use_ssl = false;
+  S3FileSystemProducer producer(config);
+
+  auto options = producer.CreateS3Options();
+  ASSERT_FALSE(options.ok());
+  ExpectExtendStatusCode(options.status(), ExtendStatusCode::StorageTransientService);
+  EXPECT_FALSE(mock_client_->GetRecordedRequests().empty())
+      << "use_iam must preflight its provider during construction";
+}
+
+namespace {
+
+class CountingHttpClient final : public Aws::Http::HttpClient {
+  public:
+  explicit CountingHttpClient(Aws::Http::HttpResponseCode code) : code_(code) {}
+
+  std::shared_ptr<Aws::Http::HttpResponse> MakeRequest(
+      const std::shared_ptr<Aws::Http::HttpRequest>& request,
+      Aws::Utils::RateLimits::RateLimiterInterface* = nullptr,
+      Aws::Utils::RateLimits::RateLimiterInterface* = nullptr) const override {
+    ++attempts_;
+    auto response = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("CountingHttpClient", request);
+    response->SetResponseCode(code_);
+    return response;
+  }
+
+  int attempts() const { return attempts_; }
+
+  private:
+  Aws::Http::HttpResponseCode code_;
+  mutable int attempts_ = 0;
+};
+
+std::shared_ptr<Aws::Http::HttpRequest> MakeProbeRequest(
+    Aws::Http::HttpMethod method = Aws::Http::HttpMethod::HTTP_GET) {
+  auto request = Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(
+      "StsCredentialResolutionTest", Aws::Http::URI("http://credential-probe.local/"), method);
+  request->SetResponseStreamFactory(Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
+  return request;
+}
+
+}  // namespace
+
+TEST(StsCredentialResolutionTest, RetriesAServiceFailureUpToTheSharedBudget) {
+  CountingHttpClient client(Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE);
+  auto response = MakeRequestWithCredentialRetry(client, MakeProbeRequest());
+
+  ASSERT_NE(response, nullptr);
+  EXPECT_EQ(response->GetResponseCode(), Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE);
+  // One initial attempt plus the budget.
+  EXPECT_EQ(client.attempts(), kCredentialRetryAttempts + 1);
+}
+
+// A retried POST must resend its body. Resending the same HttpRequest resends a
+// stream the previous attempt already drained, so without a rewind the retry
+// goes out empty and STS rejects it on its contents -- turning a retryable
+// outage into a bogus "malformed request". Huawei's second stage is a POST, so
+// this is not hypothetical.
+TEST(StsCredentialResolutionTest, ResendsTheRequestBodyOnEveryAttempt) {
+  class BodyRecordingHttpClient final : public Aws::Http::HttpClient {
+ public:
+    std::shared_ptr<Aws::Http::HttpResponse> MakeRequest(
+        const std::shared_ptr<Aws::Http::HttpRequest>& request,
+        Aws::Utils::RateLimits::RateLimiterInterface* = nullptr,
+        Aws::Utils::RateLimits::RateLimiterInterface* = nullptr) const override {
+      // Drain the body exactly as a transport would.
+      std::ostringstream drained;
+      drained << request->GetContentBody()->rdbuf();
+      bodies_.push_back(drained.str());
+      auto response = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("BodyRecordingHttpClient", request);
+      response->SetResponseCode(Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE);
+      return response;
+    }
+
+    const std::vector<std::string>& bodies() const { return bodies_; }
+
+ private:
+    mutable std::vector<std::string> bodies_;
+  };
+
+  BodyRecordingHttpClient client;
+  auto request = MakeProbeRequest(Aws::Http::HttpMethod::HTTP_POST);
+  auto body = Aws::MakeShared<Aws::StringStream>("test");
+  *body << R"({"auth":"payload"})";
+  request->AddContentBody(body);
+
+  (void)MakeRequestWithCredentialRetry(client, request);
+
+  ASSERT_EQ(client.bodies().size(), static_cast<size_t>(kCredentialRetryAttempts + 1));
+  for (size_t attempt = 0; attempt < client.bodies().size(); ++attempt) {
+    EXPECT_EQ(client.bodies()[attempt], R"({"auth":"payload"})") << "attempt " << attempt;
+  }
+}
+
+TEST(StsCredentialResolutionTest, DoesNotRetryARefusal) {
+  // A 4xx is the service answering on the merits. Repeating it changes nothing
+  // and only delays the operator learning the role is wrong.
+  CountingHttpClient client(Aws::Http::HttpResponseCode::FORBIDDEN);
+  auto response = MakeRequestWithCredentialRetry(client, MakeProbeRequest());
+
+  ASSERT_NE(response, nullptr);
+  EXPECT_EQ(client.attempts(), 1);
+}
+
+TEST(StsCredentialResolutionTest, StopsRetryingOnceItSucceeds) {
+  CountingHttpClient client(Aws::Http::HttpResponseCode::OK);
+  auto response = MakeRequestWithCredentialRetry(client, MakeProbeRequest());
+
+  ASSERT_NE(response, nullptr);
+  EXPECT_EQ(client.attempts(), 1);
+}
+
+TEST_F(S3ProviderTest, VendorCredentialClientsContainDependencyExceptions) {
+  auto config = MakeNoImdsClientConfiguration();
+  config.retryStrategy = Aws::MakeShared<Aws::Client::DefaultRetryStrategy>("credential-exception-test", 0);
+
+  {
+    ScopedEnvVar provider_arn("ALIBABA_CLOUD_OIDC_PROVIDER_ARN", "acs:ram::123456:oidc-provider/test");
+    mock_client_->EnqueueException("sts.aliyuncs.com", MockExceptionKind::RuntimeError);
+    AliyunSTSCredentialsClient client(config);
+    AliyunSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{"session", "acs:ram::123456:role/test",
+                                                                            "identity-token"};
+
+    auto result = client.GetAssumeRoleWithWebIdentityCredentials(request);
+    EXPECT_TRUE(result.creds.IsEmpty());
+    ExpectCredentialDependencyException(result.status);
+  }
+
+  {
+    mock_client_->EnqueueException("sts.tencentcloudapi.com", MockExceptionKind::RuntimeError);
+    TencentCloudSTSCredentialsClient client(config);
+    TencentCloudSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{
+        "ap-guangzhou", "provider", "identity-token", "qcs::cam::uin/1:roleName/test", "session"};
+
+    auto result = client.GetAssumeRoleWithWebIdentityCredentials(request);
+    EXPECT_TRUE(result.creds.IsEmpty());
+    ExpectCredentialDependencyException(result.status);
+  }
+
+  {
+    mock_client_->EnqueueException("sts.aliyuncs.com", MockExceptionKind::RuntimeError);
+    AliyunRAMSTSClient client(config);
+    AliyunRAMSTSClient::AssumeRoleRequest request;
+    request.callerAccessKeyId = "caller-ak";
+    request.callerAccessKeySecret = "caller-sk";
+    request.callerSecurityToken = "caller-token";
+    request.roleArn = "acs:ram::123456:role/test";
+    request.roleSessionName = "session";
+
+    auto result = client.GetAssumeRoleCredentials(request);
+    EXPECT_TRUE(result.creds.IsEmpty());
+    ExpectCredentialDependencyException(result.status);
+  }
+
+  {
+    Aws::Http::HeaderValueCollection headers;
+    headers["x-subject-token"] = "subject-token";
+    mock_client_->EnqueueResponse("OS-AUTH/id-token/tokens", Aws::Http::HttpResponseCode::CREATED, "", headers);
+    mock_client_->EnqueueException("OS-CREDENTIAL/securitytokens", MockExceptionKind::RuntimeError);
+    HuaweiCloudSTSCredentialsClient client(config);
+    HuaweiCloudSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{
+        "cn-north-4", "provider", "identity-token", "project-id", "session"};
+
+    auto result = client.GetAssumeRoleWithWebIdentityCredentials(request);
+    EXPECT_FALSE(result.success);
+    ExpectCredentialDependencyException(result.status);
+  }
+
+  {
+    ScopedEnvUnset metadata_disabled("ALIBABA_CLOUD_ECS_METADATA_DISABLED");
+    mock_client_->EnqueueException("latest/api/token", MockExceptionKind::RuntimeError);
+    AliyunRAMCredentialsProvider provider("acs:ram::123456:role/test", "session");
+
+    auto result = provider.ResolveForRequest();
+    ASSERT_FALSE(result.ok());
+    ExpectCredentialDependencyException(result.status());
+  }
+}
+
+TEST_F(S3ProviderTest, VendorCredentialClientsPreserveOutOfMemory) {
+  auto config = MakeNoImdsClientConfiguration();
+  config.retryStrategy = Aws::MakeShared<Aws::Client::DefaultRetryStrategy>("credential-oom-test", 0);
+
+  {
+    ScopedEnvVar provider_arn("ALIBABA_CLOUD_OIDC_PROVIDER_ARN", "acs:ram::123456:oidc-provider/test");
+    mock_client_->EnqueueException("sts.aliyuncs.com", MockExceptionKind::BadAlloc);
+    AliyunSTSCredentialsClient client(config);
+    auto result =
+        client.GetAssumeRoleWithWebIdentityCredentials({"session", "acs:ram::123456:role/test", "identity-token"});
+    ExpectCredentialOutOfMemory(result.status);
+  }
+
+  {
+    mock_client_->EnqueueException("sts.tencentcloudapi.com", MockExceptionKind::BadAlloc);
+    TencentCloudSTSCredentialsClient client(config);
+    auto result = client.GetAssumeRoleWithWebIdentityCredentials(
+        {"ap-guangzhou", "provider", "identity-token", "qcs::cam::uin/1:roleName/test", "session"});
+    ExpectCredentialOutOfMemory(result.status);
+  }
+
+  {
+    mock_client_->EnqueueException("sts.aliyuncs.com", MockExceptionKind::BadAlloc);
+    AliyunRAMSTSClient client(config);
+    AliyunRAMSTSClient::AssumeRoleRequest request;
+    request.callerAccessKeyId = "caller-ak";
+    request.callerAccessKeySecret = "caller-sk";
+    request.callerSecurityToken = "caller-token";
+    request.roleArn = "acs:ram::123456:role/test";
+    request.roleSessionName = "session";
+    auto result = client.GetAssumeRoleCredentials(request);
+    ExpectCredentialOutOfMemory(result.status);
+  }
+
+  {
+    Aws::Http::HeaderValueCollection headers;
+    headers["x-subject-token"] = "subject-token";
+    mock_client_->EnqueueResponse("OS-AUTH/id-token/tokens", Aws::Http::HttpResponseCode::CREATED, "", headers);
+    mock_client_->EnqueueException("OS-CREDENTIAL/securitytokens", MockExceptionKind::BadAlloc);
+    HuaweiCloudSTSCredentialsClient client(config);
+    auto result = client.GetAssumeRoleWithWebIdentityCredentials(
+        {"cn-north-4", "provider", "identity-token", "project-id", "session"});
+    EXPECT_FALSE(result.success);
+    ExpectCredentialOutOfMemory(result.status);
+  }
+
+  {
+    ScopedEnvUnset metadata_disabled("ALIBABA_CLOUD_ECS_METADATA_DISABLED");
+    mock_client_->EnqueueException("latest/api/token", MockExceptionKind::BadAlloc);
+    AliyunRAMCredentialsProvider provider("acs:ram::123456:role/test", "session");
+    auto result = provider.ResolveForRequest();
+    ASSERT_FALSE(result.ok());
+    ExpectCredentialOutOfMemory(result.status());
+  }
+}
+
+TEST_F(S3ProviderTest, OneShotWriteFileAbortsTheUploadItCreated) {
+  const std::string create_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>bucket</Bucket><Key>key</Key><UploadId>upload-id</UploadId>
+</InitiateMultipartUploadResult>)xml";
+  const std::string failed_upload_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<Error>
+  <Code>AccessDenied</Code>
+  <Message>part was denied</Message>
+  <RequestId>request-id</RequestId>
+</Error>)xml";
+  auto xml_headers = [](const std::string& body) {
+    Aws::Http::HeaderValueCollection headers;
+    headers["content-type"] = "application/xml";
+    headers["content-length"] = std::to_string(body.size());
+    return headers;
+  };
+
+  mock_client_->EnqueueResponse("?uploads", Aws::Http::HttpResponseCode::OK, create_result, xml_headers(create_result));
+  mock_client_->EnqueueResponse("?partNumber=1", Aws::Http::HttpResponseCode::FORBIDDEN, failed_upload_result,
+                                xml_headers(failed_upload_result));
+  mock_client_->EnqueueResponse("uploadId=upload-id", Aws::Http::HttpResponseCode::OK, "");
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+  options.background_writes = false;
+  // Every byte becomes its own part, so the very first write creates the
+  // multipart upload this test is about.
+  options.multi_part_upload_size = 1;
+
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+
+  // The one-shot C API never returns a writer handle, so nothing the caller
+  // holds can release the upload afterwards. If this call does not abort it
+  // itself, the parts stay in the bucket where no listing can name them.
+  FileSystemWrapper fs_wrapper(fs);
+  const std::string path = "bucket/key";
+  const uint8_t bytes[] = {7, 8, 9};
+  auto result = loon_filesystem_write_file(reinterpret_cast<FileSystemHandle>(&fs_wrapper), path.data(),
+                                           static_cast<uint32_t>(path.size()), bytes, sizeof(bytes), nullptr, 0);
+  EXPECT_FALSE(loon_ffi_is_success(&result));
+  loon_ffi_free_result(&result);
+
+  size_t aborts = 0;
+  for (const auto& request : mock_client_->GetRecordedRequests()) {
+    if (request->GetMethod() == Aws::Http::HttpMethod::HTTP_DELETE &&
+        request->GetURIString().find("uploadId=upload-id") != Aws::String::npos) {
+      ++aborts;
+    }
+  }
+  EXPECT_EQ(aborts, 1);
+}
+
+TEST_F(S3ProviderTest, BackgroundWriteStopsSubmittingAfterObservedPartFailure) {
+  const std::string create_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>bucket</Bucket><Key>key</Key><UploadId>upload-id</UploadId>
+</InitiateMultipartUploadResult>)xml";
+  const std::string failed_upload_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<Error>
+  <Code>AccessDenied</Code>
+  <Message>first part was denied</Message>
+  <RequestId>request-id</RequestId>
+</Error>)xml";
+  auto xml_headers = [](const std::string& body) {
+    Aws::Http::HeaderValueCollection headers;
+    headers["content-type"] = "application/xml";
+    headers["content-length"] = std::to_string(body.size());
+    return headers;
+  };
+
+  mock_client_->EnqueueResponse("?uploads", Aws::Http::HttpResponseCode::OK, create_result, xml_headers(create_result));
+  mock_client_->EnqueueResponse("?partNumber=1", Aws::Http::HttpResponseCode::FORBIDDEN, failed_upload_result,
+                                xml_headers(failed_upload_result));
+  mock_client_->EnqueueResponse("uploadId=upload-id", Aws::Http::HttpResponseCode::OK, "");
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+  options.background_writes = true;
+
+  // Run each accepted background task inline. The first part's failure is
+  // therefore recorded before the same Write() attempts its second part.
+  arrow::MockExecutor executor;
+  arrow::io::IOContext io_context(&executor);
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options, io_context));
+  ASSERT_AND_ASSIGN(auto stream, fs->OpenOutputStreamWithUploadSize("bucket/key", nullptr, 1));
+
+  const uint8_t bytes[] = {7, 8, 9};
+  auto write_status = stream->Write(bytes, 3);
+
+  ASSERT_STATUS_NOT_OK(write_status);
+  auto detail = ExtendStatusDetail::UnwrapStatus(write_status);
+  ASSERT_NE(detail, nullptr) << write_status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageAccessDenied) << write_status.ToString();
+  EXPECT_NE(write_status.message().find("first part was denied"), std::string::npos) << write_status.ToString();
+
+  size_t upload_part_requests = 0;
+  for (const auto& request : mock_client_->GetRecordedRequests()) {
+    if (request->GetURIString().find("partNumber=") != Aws::String::npos) {
+      ++upload_part_requests;
+    }
+  }
+  EXPECT_EQ(upload_part_requests, 1);
+  ASSERT_STATUS_OK(stream->Abort());
+}
+
+TEST_F(S3ProviderTest, BackgroundCloseFailureDoesNotWaitForSiblingPart) {
+  const std::string create_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>bucket</Bucket><Key>key</Key><UploadId>upload-id</UploadId>
+</InitiateMultipartUploadResult>)xml";
+  const std::string failed_upload_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<Error>
+  <Code>AccessDenied</Code>
+  <Message>first completed part was denied</Message>
+  <RequestId>request-id</RequestId>
+</Error>)xml";
+  auto xml_headers = [](const std::string& body) {
+    Aws::Http::HeaderValueCollection headers;
+    headers["content-type"] = "application/xml";
+    headers["content-length"] = std::to_string(body.size());
+    return headers;
+  };
+
+  std::promise<void> sibling_started_promise;
+  auto sibling_started = sibling_started_promise.get_future();
+  std::promise<void> release_sibling_promise;
+  auto release_sibling = release_sibling_promise.get_future().share();
+  std::atomic<bool> sibling_release_timed_out{false};
+
+  Aws::Http::HeaderValueCollection successful_upload_headers;
+  successful_upload_headers["etag"] = "\"etag-2\"";
+  successful_upload_headers["content-length"] = "0";
+  mock_client_->EnqueueResponse("?uploads", Aws::Http::HttpResponseCode::OK, create_result, xml_headers(create_result));
+  mock_client_->EnqueueResponse(
+      "?partNumber=1", Aws::Http::HttpResponseCode::FORBIDDEN, failed_upload_result, xml_headers(failed_upload_result),
+      [&sibling_started] { EXPECT_EQ(sibling_started.wait_for(std::chrono::seconds(5)), std::future_status::ready); });
+  mock_client_->EnqueueResponse("?partNumber=2", Aws::Http::HttpResponseCode::OK, "", successful_upload_headers,
+                                [&sibling_started_promise, release_sibling, &sibling_release_timed_out] {
+                                  sibling_started_promise.set_value();
+                                  if (release_sibling.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+                                    sibling_release_timed_out.store(true, std::memory_order_release);
+                                  }
+                                });
+  mock_client_->EnqueueResponse("uploadId=upload-id", Aws::Http::HttpResponseCode::OK, "");
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+  options.background_writes = true;
+
+  ASSERT_AND_ASSIGN(auto pool, arrow::internal::ThreadPool::Make(2));
+  arrow::io::IOContext io_context(pool.get());
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options, io_context));
+  ASSERT_AND_ASSIGN(auto stream, fs->OpenOutputStreamWithUploadSize("bucket/key", nullptr, 1));
+
+  const uint8_t bytes[] = {7, 8};
+  ASSERT_STATUS_OK(stream->Write(bytes, 2));
+  auto close_future = stream->CloseAsync();
+
+  const auto sibling_state = sibling_started.wait_for(std::chrono::seconds(5));
+  const bool finished_before_sibling_release = sibling_state == std::future_status::ready && close_future.Wait(5.0);
+  std::optional<arrow::Status> observed_status;
+  if (finished_before_sibling_release) {
+    observed_status = close_future.status();
+  }
+  release_sibling_promise.set_value();
+  pool->WaitForIdle();
+
+  ASSERT_EQ(sibling_state, std::future_status::ready);
+  ASSERT_TRUE(finished_before_sibling_release) << "upload failure waited for a sibling part";
+  ASSERT_TRUE(observed_status.has_value());
+  ASSERT_STATUS_NOT_OK(*observed_status);
+  auto detail = ExtendStatusDetail::UnwrapStatus(*observed_status);
+  ASSERT_NE(detail, nullptr) << observed_status->ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageAccessDenied) << observed_status->ToString();
+  EXPECT_NE(observed_status->message().find("first completed part was denied"), std::string::npos)
+      << observed_status->ToString();
+  EXPECT_FALSE(sibling_release_timed_out.load(std::memory_order_acquire));
+  size_t remote_aborts = 0;
+  for (const auto& request : mock_client_->GetRecordedRequests()) {
+    if (request->GetMethod() == Aws::Http::HttpMethod::HTTP_DELETE &&
+        request->GetURIString().find("uploadId=upload-id") != Aws::String::npos) {
+      ++remote_aborts;
+    }
+  }
+  EXPECT_EQ(remote_aborts, 1) << "failed CloseAsync must release its multipart upload without a second Abort call";
+}
+
+TEST_F(S3ProviderTest, BackgroundAbortRunsAfterInFlightPartSettles) {
+  const std::string create_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>bucket</Bucket><Key>key</Key><UploadId>upload-id</UploadId>
+</InitiateMultipartUploadResult>)xml";
+  Aws::Http::HeaderValueCollection create_headers;
+  create_headers["content-type"] = "application/xml";
+  create_headers["content-length"] = std::to_string(create_result.size());
+
+  std::promise<void> upload_started_promise;
+  auto upload_started = upload_started_promise.get_future();
+  std::promise<void> release_upload_promise;
+  auto release_upload = release_upload_promise.get_future().share();
+  std::promise<void> abort_seen_promise;
+  auto abort_seen = abort_seen_promise.get_future();
+  std::atomic<bool> upload_release_timed_out{false};
+
+  Aws::Http::HeaderValueCollection upload_headers;
+  upload_headers["etag"] = "\"etag-1\"";
+  upload_headers["content-length"] = "0";
+  mock_client_->EnqueueResponse("?uploads", Aws::Http::HttpResponseCode::OK, create_result, create_headers);
+  mock_client_->EnqueueResponse("?partNumber=1", Aws::Http::HttpResponseCode::OK, "", upload_headers,
+                                [&upload_started_promise, release_upload, &upload_release_timed_out] {
+                                  upload_started_promise.set_value();
+                                  if (release_upload.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+                                    upload_release_timed_out.store(true, std::memory_order_release);
+                                  }
+                                });
+  mock_client_->EnqueueResponse("uploadId=upload-id", Aws::Http::HttpResponseCode::OK, "", {},
+                                [&abort_seen_promise] { abort_seen_promise.set_value(); });
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+  options.background_writes = true;
+
+  ASSERT_AND_ASSIGN(auto pool, arrow::internal::ThreadPool::Make(1));
+  arrow::io::IOContext io_context(pool.get());
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options, io_context));
+  ASSERT_AND_ASSIGN(auto stream, fs->OpenOutputStreamWithUploadSize("bucket/key", nullptr, 1));
+
+  const uint8_t byte = 7;
+  ASSERT_STATUS_OK(stream->Write(&byte, 1));
+  ASSERT_EQ(upload_started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+
+  ASSERT_STATUS_OK(stream->Abort());
+  stream.reset();
+
+  auto count_remote_aborts = [this] {
+    size_t count = 0;
+    for (const auto& request : mock_client_->GetRecordedRequests()) {
+      if (request->GetMethod() == Aws::Http::HttpMethod::HTTP_DELETE &&
+          request->GetURIString().find("uploadId=upload-id") != Aws::String::npos) {
+        ++count;
+      }
+    }
+    return count;
+  };
+  EXPECT_EQ(count_remote_aborts(), 0);
+
+  release_upload_promise.set_value();
+  ASSERT_EQ(abort_seen.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  pool->WaitForIdle();
+
+  EXPECT_FALSE(upload_release_timed_out.load(std::memory_order_acquire));
+  EXPECT_EQ(count_remote_aborts(), 1);
+}
+
+TEST_F(S3ProviderTest, RepeatedAbortCannotStealDeferredUploadIdentity) {
+  const std::string create_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>bucket</Bucket><Key>key</Key><UploadId>upload-id</UploadId>
+</InitiateMultipartUploadResult>)xml";
+  Aws::Http::HeaderValueCollection create_headers;
+  create_headers["content-type"] = "application/xml";
+  create_headers["content-length"] = std::to_string(create_result.size());
+
+  std::promise<void> upload_started_promise;
+  auto upload_started = upload_started_promise.get_future();
+  std::promise<void> release_upload_promise;
+  auto release_upload = release_upload_promise.get_future().share();
+  std::promise<void> completion_published_promise;
+  auto completion_published = completion_published_promise.get_future();
+  std::promise<void> release_completion_promise;
+  auto release_completion = release_completion_promise.get_future().share();
+  std::atomic<bool> upload_release_timed_out{false};
+  std::atomic<bool> completion_release_timed_out{false};
+
+  mock_client_->EnqueueResponse("?uploads", Aws::Http::HttpResponseCode::OK, create_result, create_headers);
+  mock_client_->EnqueueResponse("?partNumber=1", Aws::Http::HttpResponseCode::INTERNAL_SERVER_ERROR, "", {},
+                                [&upload_started_promise, release_upload, &upload_release_timed_out] {
+                                  upload_started_promise.set_value();
+                                  if (release_upload.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+                                    upload_release_timed_out.store(true, std::memory_order_release);
+                                  }
+                                });
+  mock_client_->EnqueueResponse("uploadId=upload-id", Aws::Http::HttpResponseCode::OK, "");
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+  options.background_writes = true;
+
+  ASSERT_AND_ASSIGN(auto pool, arrow::internal::ThreadPool::Make(1));
+  arrow::io::IOContext io_context(pool.get());
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options, io_context));
+  ASSERT_AND_ASSIGN(auto stream, fs->OpenOutputStreamWithUploadSize("bucket/key", nullptr, 1));
+
+  const uint8_t byte = 7;
+  ASSERT_STATUS_OK(stream->Write(&byte, 1));
+  ASSERT_EQ(upload_started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+
+  // The failed UploadPart makes CloseAsync take only its error continuation,
+  // so it cannot complete the multipart upload. Its continuation is published
+  // synchronously by HandleUploadOutcome after uploads_in_progress reaches
+  // zero, but before that function calls AbortRecordedUpload. Block there to
+  // make the race with a repeated Abort deterministic.
+  auto close_future = stream->CloseAsync();
+  close_future.AddCallback(
+      [&completion_published_promise, release_completion, &completion_release_timed_out](const arrow::Status&) {
+        completion_published_promise.set_value();
+        if (release_completion.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+          completion_release_timed_out.store(true, std::memory_order_release);
+        }
+      });
+
+  ASSERT_STATUS_OK(stream->Abort());
+  release_upload_promise.set_value();
+  ASSERT_EQ(completion_published.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+
+  // The second Abort races the last upload completion after its counter is
+  // zero. It must consume the recorded identity itself, not erase it before
+  // the completion can issue the remote abort.
+  ASSERT_STATUS_OK(stream->Abort());
+  release_completion_promise.set_value();
+  pool->WaitForIdle();
+
+  size_t remote_aborts = 0;
+  for (const auto& request : mock_client_->GetRecordedRequests()) {
+    if (request->GetMethod() == Aws::Http::HttpMethod::HTTP_DELETE &&
+        request->GetURIString().find("uploadId=upload-id") != Aws::String::npos) {
+      ++remote_aborts;
+    }
+  }
+  EXPECT_FALSE(upload_release_timed_out.load(std::memory_order_acquire));
+  EXPECT_FALSE(completion_release_timed_out.load(std::memory_order_acquire));
+  EXPECT_EQ(remote_aborts, 1);
+}
+
+TEST_F(S3ProviderTest, AbortAfterSuccessfulMultipartCloseDoesNotDeleteCompletedUpload) {
+  const std::string create_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>bucket</Bucket><Key>key</Key><UploadId>upload-id</UploadId>
+</InitiateMultipartUploadResult>)xml";
+  const std::string complete_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>bucket</Bucket><Key>key</Key><ETag>"etag-1"</ETag>
+</CompleteMultipartUploadResult>)xml";
+  auto xml_headers = [](const std::string& body) {
+    Aws::Http::HeaderValueCollection headers;
+    headers["content-type"] = "application/xml";
+    headers["content-length"] = std::to_string(body.size());
+    return headers;
+  };
+  Aws::Http::HeaderValueCollection upload_headers;
+  upload_headers["etag"] = "\"etag-1\"";
+  upload_headers["content-length"] = "0";
+
+  mock_client_->EnqueueResponse("?uploads", Aws::Http::HttpResponseCode::OK, create_result, xml_headers(create_result));
+  mock_client_->EnqueueResponse("?partNumber=1", Aws::Http::HttpResponseCode::OK, "", upload_headers);
+  mock_client_->EnqueueResponse("uploadId=upload-id", Aws::Http::HttpResponseCode::OK, complete_result,
+                                xml_headers(complete_result));
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+  options.background_writes = false;
+
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  ASSERT_AND_ASSIGN(auto stream, fs->OpenOutputStreamWithUploadSize("bucket/key", nullptr, 1));
+  const uint8_t byte = 7;
+  ASSERT_STATUS_OK(stream->Write(&byte, 1));
+  ASSERT_STATUS_OK(stream->Close());
+  ASSERT_STATUS_OK(stream->Abort());
+  // Abort after a successful Close is a no-op in every respect: it must not
+  // poison the terminal result seen by a later idempotent Close.
+  ASSERT_STATUS_OK(stream->Close());
+
+  size_t remote_aborts = 0;
+  for (const auto& request : mock_client_->GetRecordedRequests()) {
+    if (request->GetMethod() == Aws::Http::HttpMethod::HTTP_DELETE &&
+        request->GetURIString().find("uploadId=upload-id") != Aws::String::npos) {
+      ++remote_aborts;
+    }
+  }
+  EXPECT_EQ(remote_aborts, 0);
+}
+
+TEST_F(S3ProviderTest, FailedCloseAutomaticallyAbortsMultipartAndPreservesPrimaryFailure) {
+  const std::string create_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>bucket</Bucket><Key>key</Key><UploadId>upload-id</UploadId>
+</InitiateMultipartUploadResult>)xml";
+  const std::string complete_failure = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<Error><Code>AccessDenied</Code><Message>complete was denied</Message><RequestId>request-id</RequestId></Error>)xml";
+  auto xml_headers = [](const std::string& body) {
+    Aws::Http::HeaderValueCollection headers;
+    headers["content-type"] = "application/xml";
+    headers["content-length"] = std::to_string(body.size());
+    return headers;
+  };
+  Aws::Http::HeaderValueCollection upload_headers;
+  upload_headers["etag"] = "\"etag-1\"";
+  upload_headers["content-length"] = "0";
+
+  mock_client_->EnqueueResponse("?uploads", Aws::Http::HttpResponseCode::OK, create_result, xml_headers(create_result));
+  mock_client_->EnqueueResponse("?partNumber=1", Aws::Http::HttpResponseCode::OK, "", upload_headers);
+  mock_client_->EnqueueResponse("uploadId=upload-id", Aws::Http::HttpResponseCode::FORBIDDEN, complete_failure,
+                                xml_headers(complete_failure));
+  mock_client_->EnqueueResponse("uploadId=upload-id", Aws::Http::HttpResponseCode::OK, "");
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+  options.background_writes = false;
+
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  ASSERT_AND_ASSIGN(auto stream, fs->OpenOutputStreamWithUploadSize("bucket/key", nullptr, 1));
+  const uint8_t byte = 7;
+  ASSERT_STATUS_OK(stream->Write(&byte, 1));
+
+  auto close_status = stream->Close();
+  ASSERT_STATUS_NOT_OK(close_status);
+  ExpectExtendStatusCode(close_status, ExtendStatusCode::StorageAccessDenied);
+  EXPECT_NE(close_status.message().find("complete was denied"), std::string::npos) << close_status.ToString();
+
+  size_t remote_aborts = 0;
+  for (const auto& request : mock_client_->GetRecordedRequests()) {
+    if (request->GetMethod() == Aws::Http::HttpMethod::HTTP_DELETE &&
+        request->GetURIString().find("uploadId=upload-id") != Aws::String::npos) {
+      ++remote_aborts;
+    }
+  }
+  EXPECT_EQ(remote_aborts, 1);
+}
+
+TEST_F(S3ProviderTest, ExplicitAbortReturnsRemoteFailureAndKeepsUploadIdentityForRetry) {
+  const std::string create_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>bucket</Bucket><Key>key</Key><UploadId>upload-id</UploadId>
+</InitiateMultipartUploadResult>)xml";
+  auto xml_headers = [](const std::string& body) {
+    Aws::Http::HeaderValueCollection headers;
+    headers["content-type"] = "application/xml";
+    headers["content-length"] = std::to_string(body.size());
+    return headers;
+  };
+  Aws::Http::HeaderValueCollection upload_headers;
+  upload_headers["etag"] = "\"etag-1\"";
+  upload_headers["content-length"] = "0";
+
+  mock_client_->EnqueueResponse("?uploads", Aws::Http::HttpResponseCode::OK, create_result, xml_headers(create_result));
+  mock_client_->EnqueueResponse("?partNumber=1", Aws::Http::HttpResponseCode::OK, "", upload_headers);
+  mock_client_->EnqueueResponse("uploadId=upload-id", Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE, "");
+  mock_client_->EnqueueResponse("uploadId=upload-id", Aws::Http::HttpResponseCode::OK, "");
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+  options.background_writes = false;
+
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  ASSERT_AND_ASSIGN(auto stream, fs->OpenOutputStreamWithUploadSize("bucket/key", nullptr, 1));
+  const uint8_t byte = 7;
+  ASSERT_STATUS_OK(stream->Write(&byte, 1));
+
+  auto abort_status = stream->Abort();
+  ASSERT_STATUS_NOT_OK(abort_status);
+  ExpectExtendStatusCode(abort_status, ExtendStatusCode::StorageTransientService);
+  ASSERT_STATUS_OK(stream->Abort());
+
+  size_t remote_aborts = 0;
+  for (const auto& request : mock_client_->GetRecordedRequests()) {
+    if (request->GetMethod() == Aws::Http::HttpMethod::HTTP_DELETE &&
+        request->GetURIString().find("uploadId=upload-id") != Aws::String::npos) {
+      ++remote_aborts;
+    }
+  }
+  EXPECT_EQ(remote_aborts, 2);
+}
+
+TEST_F(S3ProviderTest, FailedCloseAsyncAutomaticallyAbortsMultipartAndPreservesPrimaryFailure) {
+  const std::string create_result = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>bucket</Bucket><Key>key</Key><UploadId>upload-id</UploadId>
+</InitiateMultipartUploadResult>)xml";
+  const std::string complete_failure = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<Error><Code>AccessDenied</Code><Message>async complete was denied</Message><RequestId>request-id</RequestId></Error>)xml";
+  auto xml_headers = [](const std::string& body) {
+    Aws::Http::HeaderValueCollection headers;
+    headers["content-type"] = "application/xml";
+    headers["content-length"] = std::to_string(body.size());
+    return headers;
+  };
+  Aws::Http::HeaderValueCollection upload_headers;
+  upload_headers["etag"] = "\"etag-1\"";
+  upload_headers["content-length"] = "0";
+
+  mock_client_->EnqueueResponse("?uploads", Aws::Http::HttpResponseCode::OK, create_result, xml_headers(create_result));
+  mock_client_->EnqueueResponse("?partNumber=1", Aws::Http::HttpResponseCode::OK, "", upload_headers);
+  mock_client_->EnqueueResponse("uploadId=upload-id", Aws::Http::HttpResponseCode::FORBIDDEN, complete_failure,
+                                xml_headers(complete_failure));
+  mock_client_->EnqueueResponse("uploadId=upload-id", Aws::Http::HttpResponseCode::OK, "");
+
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+  options.background_writes = true;
+
+  arrow::MockExecutor executor;
+  arrow::io::IOContext io_context(&executor);
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options, io_context));
+  ASSERT_AND_ASSIGN(auto stream, fs->OpenOutputStreamWithUploadSize("bucket/key", nullptr, 1));
+  const uint8_t byte = 7;
+  ASSERT_STATUS_OK(stream->Write(&byte, 1));
+
+  auto close_status = stream->CloseAsync().status();
+  ASSERT_STATUS_NOT_OK(close_status);
+  ExpectExtendStatusCode(close_status, ExtendStatusCode::StorageAccessDenied);
+  EXPECT_NE(close_status.message().find("async complete was denied"), std::string::npos) << close_status.ToString();
+
+  size_t remote_aborts = 0;
+  for (const auto& request : mock_client_->GetRecordedRequests()) {
+    if (request->GetMethod() == Aws::Http::HttpMethod::HTTP_DELETE &&
+        request->GetURIString().find("uploadId=upload-id") != Aws::String::npos) {
+      ++remote_aborts;
+    }
+  }
+  EXPECT_EQ(remote_aborts, 1);
+}
+
+TEST_F(S3ProviderTest, BackgroundCloseAsyncPreservesSubmissionFailure) {
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+  options.background_writes = true;
+
+  RejectingS3Executor executor;
+  arrow::io::IOContext io_context(&executor);
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options, io_context));
+  // Keep the byte buffered so the first background submission happens inside
+  // CloseAsync(), exercising its synchronous submission-error path.
+  ASSERT_AND_ASSIGN(auto stream, fs->OpenOutputStreamWithUploadSize("bucket/key", nullptr, 2));
+  const uint8_t byte = 7;
+  ASSERT_STATUS_OK(stream->Write(&byte, 1));
+
+  auto close_status = stream->CloseAsync().status();
+  ASSERT_STATUS_NOT_OK(close_status);
+  EXPECT_NE(close_status.message().find("executor rejected S3 upload task"), std::string::npos)
+      << close_status.ToString();
+  EXPECT_TRUE(stream->closed());
+}
+
+TEST_F(S3ProviderTest, BackgroundCloseAsyncPreservesSynchronousPrimaryFailure) {
+  S3Options options;
+  options.ConfigureAnonymousCredentials();
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "mock-s3.local";
+  options.cloud_provider = kCloudProviderAWS;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+  options.use_crt_async_reads = false;
+  options.background_writes = true;
+
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  ASSERT_AND_ASSIGN(auto stream, fs->OpenOutputStreamWithUploadSize("bucket/key", nullptr, 2));
+  const uint8_t byte = 7;
+  ASSERT_STATUS_OK(stream->Write(&byte, 1));
+
+  ScopedFiuFault fault(FIUKEY_S3FS_WRITER_CLOSE_FAIL);
+  ASSERT_EQ(0, fault.enable_result());
+  auto close_status = stream->CloseAsync().status();
+
+  ASSERT_STATUS_NOT_OK(close_status);
+  EXPECT_NE(close_status.message().find(FIUKEY_S3FS_WRITER_CLOSE_FAIL), std::string::npos) << close_status.ToString();
+  auto detail = ExtendStatusDetail::UnwrapStatus(close_status);
+  ASSERT_NE(detail, nullptr) << close_status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork) << close_status.ToString();
+  EXPECT_TRUE(stream->closed());
+}
+
+TEST_F(S3ProviderTest, CopyObjectNotFoundReportsMissingObjectWithoutProbe) {
+  auto make_fs = []() -> arrow::Result<std::shared_ptr<S3FileSystem>> {
+    S3Options options;
+    options.ConfigureAnonymousCredentials();
+    options.region = "us-east-1";
+    options.scheme = "http";
+    options.endpoint_override = "mock-s3.local";
+    options.cloud_provider = kCloudProviderAWS;
+    options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(/*max_attempts=*/0);
+    options.use_crt_async_reads = false;
+    return S3FileSystem::Make(options);
+  };
+
+  // CopyObject's generic 404 (missing source key, source bucket, or
+  // destination bucket) is reported as a missing object in ONE request; the
+  // per-bucket HeadBucket probes are deliberately not issued.
+  mock_client_->EnqueueResponse("mock-s3.local", Aws::Http::HttpResponseCode::NOT_FOUND, "");
+  ASSERT_AND_ASSIGN(auto missing_source_object_fs, make_fs());
+  auto missing_source_object =
+      missing_source_object_fs->CopyFile("source-bucket/source-key", "destination-bucket/destination-key");
+  ASSERT_STATUS_NOT_OK(missing_source_object);
+  auto object_detail = ExtendStatusDetail::UnwrapStatus(missing_source_object);
+  ASSERT_NE(object_detail, nullptr) << missing_source_object.ToString();
+  EXPECT_EQ(object_detail->code(), ExtendStatusCode::StorageNotFound) << missing_source_object.ToString();
+  EXPECT_EQ(CategoryForExtendStatusCode(object_detail->code()), ErrorCategory::System);
+  // Only the failing CopyObject (plus SDK retries) -- the per-bucket
+  // HeadBucket probes would show up as HEAD requests.
+  for (const auto& request : mock_client_->GetRecordedRequests()) {
+    EXPECT_NE(request->GetMethod(), Aws::Http::HttpMethod::HTTP_HEAD) << "unexpected disambiguation probe";
+  }
 }
 
 // ============================================================================
@@ -678,26 +2727,17 @@ class HuaweiCloudCredentialsProviderTestHelper {
   public:
   using Provider = HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider;
 
-  static void setLastReloadFailed(Provider& p,
-                                  bool failed,
-                                  std::chrono::steady_clock::time_point time = std::chrono::steady_clock::now()) {
-    p.m_lastReloadFailed = failed;
-    p.m_lastFailedReloadTime = time;
-  }
-
   static void setCredentials(Provider& p, const Aws::Auth::AWSCredentials& creds) { p.m_credentials = creds; }
 
   static void setTokenFile(Provider& p, const Aws::String& path) { p.m_tokenFile = path; }
 
   static void setInitialized(Provider& p, bool val) { p.m_initialized = val; }
-
-  static bool isInCooldown(const Provider& p) { return p.IsInCooldown(); }
 };
 
 using Helper = HuaweiCloudCredentialsProviderTestHelper;
 
 // ============================================================================
-// Huawei Cloud Provider — Cooldown & Resilience Tests
+// Huawei Cloud Provider — Resilience Tests
 // ============================================================================
 
 // Helper: count requests whose URL contains a given substring
@@ -710,88 +2750,6 @@ static size_t CountRequestsByUrl(const std::vector<std::shared_ptr<Aws::Http::Ht
     }
   }
   return count;
-}
-
-TEST_F(S3ProviderTest, TestHuaweiProviderCooldownBlocksRetry) {
-  // After STS failure, immediate retry should be blocked by cooldown.
-  TempFile token_file("mock_huawei_id_token");
-
-  ScopedEnvVar set_region("HUAWEICLOUD_SDK_REGION", "cn-north-4");
-  ScopedEnvVar set_project("HUAWEICLOUD_SDK_PROJECT_ID", "test-project-id");
-  ScopedEnvVar set_token("HUAWEICLOUD_SDK_ID_TOKEN_FILE", token_file.path());
-  ScopedEnvVar set_idp("HUAWEICLOUD_SDK_IDP_ID", "test-idp");
-
-  // Enqueue failure for step 1
-  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::FORBIDDEN, "Access denied");
-
-  HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
-
-  // First call: attempts STS and fails
-  auto creds1 = provider.GetAWSCredentials();
-  EXPECT_TRUE(creds1.GetAWSAccessKeyId().empty());
-
-  size_t requests_after_first = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
-  EXPECT_GT(requests_after_first, 0u) << "First call should attempt STS";
-
-  // Second call immediately: cooldown should block new STS attempt
-  auto creds2 = provider.GetAWSCredentials();
-  EXPECT_TRUE(creds2.GetAWSAccessKeyId().empty());
-
-  size_t requests_after_second = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
-  EXPECT_EQ(requests_after_first, requests_after_second) << "Cooldown should prevent new STS requests";
-
-  // Third call also blocked
-  auto creds3 = provider.GetAWSCredentials();
-  EXPECT_TRUE(creds3.GetAWSAccessKeyId().empty());
-
-  size_t requests_after_third = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
-  EXPECT_EQ(requests_after_first, requests_after_third) << "Cooldown should still prevent STS requests";
-}
-
-TEST_F(S3ProviderTest, TestHuaweiProviderCooldownExpiresAndRetries) {
-  // Simulate cooldown expiry via helper (no sleep needed).
-  TempFile token_file("mock_huawei_id_token");
-
-  ScopedEnvVar set_region("HUAWEICLOUD_SDK_REGION", "cn-north-4");
-  ScopedEnvVar set_project("HUAWEICLOUD_SDK_PROJECT_ID", "test-project-id");
-  ScopedEnvVar set_token("HUAWEICLOUD_SDK_ID_TOKEN_FILE", token_file.path());
-  ScopedEnvVar set_idp("HUAWEICLOUD_SDK_IDP_ID", "test-idp");
-
-  // First call fails
-  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::FORBIDDEN, "Access denied");
-
-  HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
-  auto creds1 = provider.GetAWSCredentials();
-  EXPECT_TRUE(creds1.GetAWSAccessKeyId().empty());
-
-  size_t requests_after_first = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
-
-  // Manipulate the failure timestamp to simulate cooldown expiry (6s ago > 5s urgent cooldown)
-  Helper::setLastReloadFailed(provider, true, std::chrono::steady_clock::now() - std::chrono::seconds(6));
-
-  // Enqueue success responses for retry
-  Aws::Http::HeaderValueCollection step1_headers;
-  step1_headers["x-subject-token"] = "MOCK_SUBJECT_TOKEN";
-  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::CREATED, "", step1_headers);
-
-  std::string step2_json = R"({
-    "credential": {
-      "access": "RECOVERED_AK",
-      "secret": "RECOVERED_SK",
-      "securitytoken": "RECOVERED_TOKEN",
-      "expires_at": "2099-12-31T23:59:59Z"
-    }
-  })";
-  mock_client_->EnqueueResponse("securitytokens", Aws::Http::HttpResponseCode::OK, step2_json);
-
-  // After cooldown expires, should retry and succeed
-  auto creds2 = provider.GetAWSCredentials();
-  EXPECT_EQ(creds2.GetAWSAccessKeyId(), "RECOVERED_AK");
-  EXPECT_EQ(creds2.GetAWSSecretKey(), "RECOVERED_SK");
-  EXPECT_EQ(creds2.GetSessionToken(), "RECOVERED_TOKEN");
-
-  size_t requests_after_retry = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
-  EXPECT_GT(requests_after_retry, requests_after_first) << "Should have made new STS request after cooldown expired";
 }
 
 TEST_F(S3ProviderTest, TestHuaweiProviderCachesValidCredentials) {
@@ -862,63 +2820,13 @@ TEST_F(S3ProviderTest, TestHuaweiProviderReturnsEmptyWhenCredsFullyExpired) {
 
   HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
 
-  // First call loads expired credentials, then RefreshIfExpired tries to reload but no more
-  // mock responses available. The credentials are stored but expired.
-  // Put provider in cooldown so RefreshIfExpired skips reload on subsequent calls.
+  // First call loads expired credentials. RefreshIfExpired will then try to
+  // reload, but no more mock responses are available.
   provider.GetAWSCredentials();
-  Helper::setLastReloadFailed(provider, true, std::chrono::steady_clock::now());
 
   // Now GetAWSCredentials should return empty, not the expired credentials
   auto creds = provider.GetAWSCredentials();
   EXPECT_TRUE(creds.IsEmpty()) << "Should return empty credentials instead of expired ones";
-}
-
-TEST_F(S3ProviderTest, TestHuaweiProviderCooldownRetainsCredsOnRefreshFailure) {
-  // When credentials expire soon and refresh fails, cooldown activates and existing creds are retained.
-  TempFile token_file("mock_huawei_id_token");
-
-  ScopedEnvVar set_region("HUAWEICLOUD_SDK_REGION", "cn-north-4");
-  ScopedEnvVar set_project("HUAWEICLOUD_SDK_PROJECT_ID", "test-project-id");
-  ScopedEnvVar set_token("HUAWEICLOUD_SDK_ID_TOKEN_FILE", token_file.path());
-  ScopedEnvVar set_idp("HUAWEICLOUD_SDK_IDP_ID", "test-idp");
-
-  // First call: success with short-lived expiration (expires in 60s, within 180s grace period)
-  Aws::Http::HeaderValueCollection step1_headers;
-  step1_headers["x-subject-token"] = "MOCK_SUBJECT_TOKEN";
-  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::CREATED, "", step1_headers);
-
-  auto now = std::chrono::system_clock::now();
-  auto expires = now + std::chrono::seconds(60);
-  auto expire_time_t = std::chrono::system_clock::to_time_t(expires);
-  char expire_buf[64];
-  std::strftime(expire_buf, sizeof(expire_buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&expire_time_t));
-
-  std::string step2_json =
-      std::string(R"({"credential":{"access":"AK1","secret":"SK1","securitytoken":"TK1","expires_at":")") + expire_buf +
-      R"("}})";
-  mock_client_->EnqueueResponse("securitytokens", Aws::Http::HttpResponseCode::OK, step2_json);
-
-  HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
-  auto creds1 = provider.GetAWSCredentials();
-  EXPECT_EQ(creds1.GetAWSAccessKeyId(), "AK1");
-
-  // Second call: credentials expire soon (within grace period), refresh fails
-  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::FORBIDDEN, "fail");
-
-  auto creds2 = provider.GetAWSCredentials();
-  // Should retain existing AK1 since it's not fully expired yet
-  EXPECT_EQ(creds2.GetAWSAccessKeyId(), "AK1");
-
-  // Third call immediately: should be in cooldown, still return AK1
-  auto creds3 = provider.GetAWSCredentials();
-  EXPECT_EQ(creds3.GetAWSAccessKeyId(), "AK1");
-
-  // Verify cooldown is blocking requests
-  size_t requests_before = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
-  auto creds4 = provider.GetAWSCredentials();
-  EXPECT_EQ(creds4.GetAWSAccessKeyId(), "AK1");
-  size_t requests_after = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
-  EXPECT_EQ(requests_before, requests_after) << "Cooldown should still block retry";
 }
 
 TEST_F(S3ProviderTest, TestHuaweiProviderStep2HttpFailure) {
@@ -941,17 +2849,10 @@ TEST_F(S3ProviderTest, TestHuaweiProviderStep2HttpFailure) {
   HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
   auto creds = provider.GetAWSCredentials();
   EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
-
-  // Subsequent call should be in cooldown
-  size_t requests_before = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
-  auto creds2 = provider.GetAWSCredentials();
-  EXPECT_TRUE(creds2.GetAWSAccessKeyId().empty());
-  size_t requests_after = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
-  EXPECT_EQ(requests_before, requests_after) << "Cooldown should block retry after Step 2 failure";
 }
 
 TEST_F(S3ProviderTest, TestHuaweiProviderStep2MissingCredentialField) {
-  // Step 2 returns JSON without "credential" field → empty credentials + cooldown.
+  // Step 2 returns JSON without "credential" field → empty credentials.
   TempFile token_file("mock_huawei_id_token");
 
   ScopedEnvVar set_region("HUAWEICLOUD_SDK_REGION", "cn-north-4");
@@ -969,12 +2870,6 @@ TEST_F(S3ProviderTest, TestHuaweiProviderStep2MissingCredentialField) {
   HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
   auto creds = provider.GetAWSCredentials();
   EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
-
-  // Verify cooldown is active
-  size_t requests_before = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
-  provider.GetAWSCredentials();
-  size_t requests_after = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
-  EXPECT_EQ(requests_before, requests_after) << "Cooldown should be active after missing credential field";
 }
 
 TEST_F(S3ProviderTest, TestHuaweiProviderDurationSeconds7200) {
@@ -1079,7 +2974,7 @@ TEST_F(S3ProviderTest, TestHuaweiProviderConcurrentAccessNoStorm) {
 }
 
 TEST_F(S3ProviderTest, TestHuaweiProviderStep2EmptySessionToken) {
-  // Step 2 returns valid ak/sk but empty securitytoken → should fail and activate cooldown.
+  // Step 2 returns valid ak/sk but empty securitytoken → should fail.
   TempFile token_file("mock_huawei_id_token");
 
   ScopedEnvVar set_region("HUAWEICLOUD_SDK_REGION", "cn-north-4");
@@ -1105,12 +3000,6 @@ TEST_F(S3ProviderTest, TestHuaweiProviderStep2EmptySessionToken) {
   HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
   auto creds = provider.GetAWSCredentials();
   EXPECT_TRUE(creds.GetAWSAccessKeyId().empty()) << "Empty session token should cause credential rejection";
-
-  // Verify cooldown is active
-  size_t requests_before = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
-  provider.GetAWSCredentials();
-  size_t requests_after = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
-  EXPECT_EQ(requests_before, requests_after) << "Cooldown should be active after empty session token";
 }
 
 TEST_F(S3ProviderTest, TestHuaweiProviderStep2MissingExpiresAt) {
@@ -1378,6 +3267,8 @@ TEST_F(S3ProviderTest, TestAliyunRAMProviderEndToEnd) {
 }
 
 TEST_F(S3ProviderTest, TestAliyunRAMProviderImdsV1Fallback) {
+  ScopedEnvUnset v1_disabled("ALIBABA_CLOUD_IMDSV1_DISABLED");
+  ScopedEnvUnset v1_disable("ALIBABA_CLOUD_IMDSV1_DISABLE");
   // V2 token PUT returns 403 (IMDSv2 disabled on this instance) → empty token
   // body; provider falls back to V1-style bare GETs. The rest of the chain
   // still succeeds.
@@ -1405,13 +3296,79 @@ TEST_F(S3ProviderTest, TestAliyunRAMProviderImdsV1Fallback) {
   }
 }
 
+TEST_F(S3ProviderTest, AliyunRamTransientImdsV2TokenFailureDoesNotDowngradeToV1) {
+  for (long attempt = 0; attempt <= kCredentialRetryAttempts; ++attempt) {
+    mock_client_->EnqueueResponse("latest/api/token", Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE, "");
+  }
+
+  AliyunRAMCredentialsProvider provider("acs:ram::123456:role/target-role", "sess");
+  auto resolved = provider.ResolveForRequest();
+  ASSERT_FALSE(resolved.ok());
+  ExpectExtendStatusCode(resolved.status(), ExtendStatusCode::StorageTransientService);
+
+  const auto requests = mock_client_->GetRecordedRequests();
+  ASSERT_EQ(requests.size(), static_cast<size_t>(kCredentialRetryAttempts + 1));
+  for (const auto& request : requests) {
+    EXPECT_EQ(request->GetMethod(), Aws::Http::HttpMethod::HTTP_PUT)
+        << "a transient token failure must not be followed by an unauthenticated metadata GET";
+  }
+}
+
+TEST_F(S3ProviderTest, AliyunRamImdsV1DisabledRejectsTokenFallback) {
+  ScopedEnvUnset metadata_disabled("ALIBABA_CLOUD_ECS_METADATA_DISABLED");
+  ScopedEnvUnset v1_disable("ALIBABA_CLOUD_IMDSV1_DISABLE");
+  ScopedEnvVar v1_disabled("ALIBABA_CLOUD_IMDSV1_DISABLED", "TrUe");
+  mock_client_->EnqueueResponse("latest/api/token", Aws::Http::HttpResponseCode::FORBIDDEN, "");
+
+  AliyunRAMCredentialsProvider provider("acs:ram::123456:role/target-role", "sess");
+  auto resolved = provider.ResolveForRequest();
+  ASSERT_FALSE(resolved.ok());
+  ExpectExtendStatusCode(resolved.status(), ExtendStatusCode::StorageAccessDenied);
+
+  const auto requests = mock_client_->GetRecordedRequests();
+  ASSERT_EQ(requests.size(), 1u);
+  EXPECT_EQ(requests.front()->GetMethod(), Aws::Http::HttpMethod::HTTP_PUT)
+      << "ALIBABA_CLOUD_IMDSV1_DISABLED must prevent a bare metadata GET";
+}
+
+TEST_F(S3ProviderTest, AliyunRamSingularImdsV1DisableRejectsTokenFallback) {
+  ScopedEnvUnset metadata_disabled("ALIBABA_CLOUD_ECS_METADATA_DISABLED");
+  ScopedEnvUnset v1_disabled("ALIBABA_CLOUD_IMDSV1_DISABLED");
+  ScopedEnvVar v1_disable("ALIBABA_CLOUD_IMDSV1_DISABLE", "TRUE");
+  mock_client_->EnqueueResponse("latest/api/token", Aws::Http::HttpResponseCode::FORBIDDEN, "");
+
+  AliyunRAMCredentialsProvider provider("acs:ram::123456:role/target-role", "sess");
+  auto resolved = provider.ResolveForRequest();
+  ASSERT_FALSE(resolved.ok());
+  ExpectExtendStatusCode(resolved.status(), ExtendStatusCode::StorageAccessDenied);
+
+  const auto requests = mock_client_->GetRecordedRequests();
+  ASSERT_EQ(requests.size(), 1u);
+  EXPECT_EQ(requests.front()->GetMethod(), Aws::Http::HttpMethod::HTTP_PUT)
+      << "ALIBABA_CLOUD_IMDSV1_DISABLE must prevent a bare metadata GET";
+}
+
+TEST_F(S3ProviderTest, AliyunRamMetadataDisabledStopsBeforeHttp) {
+  ScopedEnvVar metadata_disabled("ALIBABA_CLOUD_ECS_METADATA_DISABLED", "TRUE");
+  ScopedEnvUnset v1_disabled("ALIBABA_CLOUD_IMDSV1_DISABLED");
+  ScopedEnvUnset v1_disable("ALIBABA_CLOUD_IMDSV1_DISABLE");
+
+  AliyunRAMCredentialsProvider provider("acs:ram::123456:role/target-role", "sess");
+  auto resolved = provider.ResolveForRequest();
+  ASSERT_FALSE(resolved.ok());
+  ExpectExtendStatusCode(resolved.status(), ExtendStatusCode::StorageConfigInvalid);
+  EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
+}
+
 TEST_F(S3ProviderTest, TestAliyunRAMProviderImdsRoleListFails) {
   mock_client_->EnqueueResponse("latest/api/token", Aws::Http::HttpResponseCode::OK, "v2-token");
   mock_client_->EnqueueResponse("security-credentials/", Aws::Http::HttpResponseCode::NOT_FOUND, "");
 
   AliyunRAMCredentialsProvider provider("acs:ram::123456:role/target-role", "sess");
-  auto creds = provider.GetAWSCredentials();
-  EXPECT_TRUE(creds.IsEmpty());
+  auto resolved = provider.ResolveForRequest();
+  ASSERT_FALSE(resolved.ok());
+  EXPECT_TRUE(resolved.status().IsIOError()) << resolved.status().ToString();
+  ExpectExtendStatusCode(resolved.status(), ExtendStatusCode::StorageConfigInvalid);
 }
 
 TEST_F(S3ProviderTest, TestAliyunRAMProviderImdsRoleListEmpty) {

@@ -21,6 +21,8 @@
 
 namespace milvus_storage {
 
+class GcpCredentialRegistration;
+
 // GCS access through the S3-compatible XML API, using the AWS SDK S3Client.
 // Authentication is layered via a custom HttpClientFactory:
 //   - IAM mode: OAuth2 Bearer token from ComputeEngineCredentials (GCE metadata).
@@ -43,10 +45,11 @@ class GcpFileSystemProducer : public FileSystemProducer {
   static arrow::Status InitS3Compat(const ArrowFileSystemConfig& first_config);
 
   // Per-Make: build a credential provider from the given config and register
-  // it in GcpCredentialRegistry under (endpoint, bucket). Must be called
-  // after InitS3Compat. Returns Status::Invalid when the config doesn't
-  // match any supported credential mode.
-  static arrow::Status RegisterIdentity(const ArrowFileSystemConfig& config);
+  // it in GcpCredentialRegistry under (endpoint, bucket). Must be called after
+  // InitS3Compat. An equivalent live identity is reused; a conflicting live
+  // identity is rejected.
+  static arrow::Result<std::shared_ptr<GcpCredentialRegistration>> RegisterIdentity(
+      const ArrowFileSystemConfig& config);
 
   arrow::Result<S3Options> CreateS3Options();
 

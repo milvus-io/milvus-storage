@@ -287,8 +287,6 @@ milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
       // Non-retriable either way, but it must page whoever owns the config
       // rather than be filed as a generic storage failure.
       return milvus::ConfigInvalid;  // 2006
-    case ExtendStatusCode::AwsErrorNonRetryable:
-      return milvus::StorageError;
   }
   return milvus::StorageError;  // out-of-range value: safe non-retriable fallback
 }

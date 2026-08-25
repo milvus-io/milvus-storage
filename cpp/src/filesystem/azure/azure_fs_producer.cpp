@@ -17,6 +17,7 @@
 
 #include "milvus-storage/filesystem/azure/azurefs.h"
 #include "milvus-storage/filesystem/azure/azure_sas_token_policy.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/log.h"
 
 #include "milvus-storage/common/macro.h"
@@ -32,7 +33,10 @@ arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
   }
 
   milvus_storage::fs::AzureOptions options;
-  assert(!config_.access_key_id.empty());
+  if (config_.access_key_id.empty()) {
+    return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                              "Azure filesystem requires fs.access_key_id (the storage account name)");
+  }
   options.account_name = config_.access_key_id;
 
   if (!config_.address.empty()) {
@@ -66,27 +70,38 @@ arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
     ARROW_RETURN_NOT_OK(
         options.ConfigureSASTokenPolicy(std::make_shared<fs::AzureSasTokenPolicy>(std::move(broker_config))));
   } else if (config_.use_iam) {
+    if (!config_.use_ssl) {
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                "Azure IAM authentication requires fs.use_ssl=true because bearer tokens "
+                                "cannot be sent over HTTP");
+    }
     const char* federated_token = getenv("AZURE_FEDERATED_TOKEN_FILE");
     if (federated_token != nullptr && strlen(federated_token) > 0) {
       // Workload Identity
       if (std::getenv("AZURE_CLIENT_ID") == nullptr) {
-        return arrow::Status::Invalid("AZURE_CLIENT_ID environment variable is not set");
+        return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                  "AZURE_CLIENT_ID environment variable is not set");
       }
       if (std::getenv("AZURE_TENANT_ID") == nullptr) {
-        return arrow::Status::Invalid("AZURE_TENANT_ID environment variable is not set");
+        return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                  "AZURE_TENANT_ID environment variable is not set");
       }
       ARROW_RETURN_NOT_OK(options.ConfigureWorkloadIdentityCredential());
     } else {
       // Managed Identity
       const char* client_id = std::getenv("AZURE_CLIENT_ID");
       if (client_id == nullptr) {
-        return arrow::Status::Invalid("AZURE_CLIENT_ID environment variable is not set");
+        return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                  "AZURE_CLIENT_ID environment variable is not set");
       }
       ARROW_RETURN_NOT_OK(options.ConfigureManagedIdentityCredential(std::string(client_id)));
     }
   } else {
     // need azure secret key without iam
-    assert(!config_.access_key_value.empty());
+    if (config_.access_key_value.empty()) {
+      return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                "Azure account-key authentication requires fs.access_key_value");
+    }
     ARROW_RETURN_NOT_OK(options.ConfigureAccountKeyCredential(config_.access_key_value));
   }
 

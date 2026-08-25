@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <utility>
 
+#include "milvus-storage/common/extend_status.h"
+
 namespace milvus_storage {
 
 namespace {
@@ -55,10 +57,39 @@ GcpCredentialRegistry& GcpCredentialRegistry::Instance() {
   return instance;
 }
 
-void GcpCredentialRegistry::Register(GcpBucketKey key, std::shared_ptr<GcpCredentialProvider> provider) {
+arrow::Result<std::shared_ptr<GcpCredentialRegistration>> GcpCredentialRegistry::Register(
+    GcpBucketKey key, std::shared_ptr<GcpCredentialRegistration> registration) {
+  if (registration == nullptr || registration->provider_ == nullptr) {
+    return arrow::Status::Invalid("GCP credential registration and provider must not be null");
+  }
+
   key.endpoint.host = ToLower(std::move(key.endpoint.host));
   std::lock_guard<std::mutex> lock(mu_);
-  providers_[std::move(key)] = std::move(provider);
+
+  // Weak entries do not retain credentials. Opportunistically remove expired
+  // keys so repeated creation/destruction of filesystems cannot grow the map.
+  for (auto it = registrations_.begin(); it != registrations_.end();) {
+    if (it->second.expired()) {
+      it = registrations_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+
+  if (auto it = registrations_.find(key); it != registrations_.end()) {
+    auto existing = it->second.lock();
+    if (existing != nullptr) {
+      if (existing->identity_ != registration->identity_) {
+        return MakeExtendErrorMsg(ExtendStatusCode::StorageConfigInvalid,
+                                  "GCP credential identity conflict for endpoint=", key.endpoint.host,
+                                  ", port=", std::to_string(key.endpoint.port), ", bucket=", key.bucket_name);
+      }
+      return existing;
+    }
+  }
+
+  registrations_[std::move(key)] = registration;
+  return registration;
 }
 
 std::shared_ptr<GcpCredentialProvider> GcpCredentialRegistry::Lookup(const Aws::Http::URI& uri) const {
@@ -67,8 +98,12 @@ std::shared_ptr<GcpCredentialProvider> GcpCredentialRegistry::Lookup(const Aws::
 
   auto find = [this](const GcpBucketKey& key) -> std::shared_ptr<GcpCredentialProvider> {
     std::lock_guard<std::mutex> lock(mu_);
-    auto it = providers_.find(key);
-    return it == providers_.end() ? nullptr : it->second;
+    auto it = registrations_.find(key);
+    if (it == registrations_.end()) {
+      return nullptr;
+    }
+    auto registration = it->second.lock();
+    return registration == nullptr ? nullptr : registration->provider_;
   };
 
   // Path-style: endpoint = request endpoint, bucket = first path segment.

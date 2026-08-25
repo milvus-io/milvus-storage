@@ -49,7 +49,6 @@
     loon_errcode_aws_precondition_failed;
     loon_errcode_aws_not_found;
     loon_errcode_aws_access_denied;
-    loon_errcode_aws_non_retryable;
 
     # Properties interface
     loon_properties_create;

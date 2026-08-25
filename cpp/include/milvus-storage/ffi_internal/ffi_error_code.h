@@ -73,7 +73,7 @@
 #define LOON_AWS_ERROR_PRECONDITION_FAILED LOON_STORAGE_PRECONDITION_FAILED
 #define LOON_AWS_ERROR_NOT_FOUND LOON_STORAGE_NOT_FOUND
 #define LOON_AWS_ERROR_ACCESS_DENIED LOON_STORAGE_ACCESS_DENIED
-#define LOON_AWS_ERROR_NON_RETRYABLE 106
+// 106 retired (was LOON_AWS_ERROR_NON_RETRYABLE). Never reuse.
 #define LOON_TRANSIENT_NETWORK 107
 #define LOON_TRANSIENT_TIMEOUT 108
 #define LOON_TRANSIENT_THROTTLING 109
@@ -201,7 +201,6 @@
     LOON_ERROR_CATEGORY_CONFLICT)                                                                               \
   X(StorageNotFound, LOON_STORAGE_NOT_FOUND, storage_not_found, LOON_ERROR_CATEGORY_SYSTEM)                     \
   X(StorageAccessDenied, LOON_STORAGE_ACCESS_DENIED, storage_access_denied, LOON_ERROR_CATEGORY_SYSTEM)         \
-  X(AwsErrorNonRetryable, LOON_AWS_ERROR_NON_RETRYABLE, aws_non_retryable, LOON_ERROR_CATEGORY_SYSTEM)          \
   X(StorageTransientNetwork, LOON_TRANSIENT_NETWORK, transient_network, LOON_ERROR_CATEGORY_RETRYABLE)          \
   X(StorageTransientTimeout, LOON_TRANSIENT_TIMEOUT, transient_timeout, LOON_ERROR_CATEGORY_RETRYABLE)          \
   X(StorageTransientThrottling, LOON_TRANSIENT_THROTTLING, transient_throttling, LOON_ERROR_CATEGORY_RETRYABLE) \

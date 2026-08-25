@@ -130,7 +130,8 @@ class LocalFileSystemWrapper : public arrow::fs::LocalFileSystem, public UploadC
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenAppendStream(
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override {
-    TRACK_METRICS(IncrementWriteCount, arrow::fs::LocalFileSystem::OpenAppendStream(path, metadata));
+    TRACK_METRICS_AND_WRAP(IncrementWriteCount, arrow::fs::LocalFileSystem::OpenAppendStream(path, metadata),
+                           MetricsOutputStream);
   }
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(
@@ -147,7 +148,7 @@ class LocalFileSystemWrapper : public arrow::fs::LocalFileSystem, public UploadC
     auto file_info = file_info_result.ValueOrDie();
     if (file_info.type() == arrow::fs::FileType::File) {
       metrics_->IncrementFailedCount();
-      return MakeExtendError(ExtendStatusCode::AwsErrorConflict, "File already exists: " + path, "");
+      return MakeExtendError(ExtendStatusCode::StorageConflict, "File already exists: " + path, "");
     }
     return OpenOutputStream(path, metadata);
   }

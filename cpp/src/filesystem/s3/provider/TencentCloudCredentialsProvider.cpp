@@ -14,6 +14,7 @@
  * SPDX-License-Identifier: Apache-2.0.
  */
 
+#include <chrono>
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
 
 #include "milvus-storage/common/log.h"
@@ -48,6 +49,7 @@ TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::TencentCloudSTSAssumeRo
   }
 
   if (m_tokenFile.empty()) {
+    m_lastResolution = MakeCredentialConfigError("Tencent Cloud web identity token file is not configured");
     LOG_STORAGE_WARNING_ << fmt::format(
         "[{}] Token file must be specified to use STS AssumeRole web identity creds "
         "provider.",
@@ -59,6 +61,7 @@ TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::TencentCloudSTSAssumeRo
   }
 
   if (m_roleArn.empty()) {
+    m_lastResolution = MakeCredentialConfigError("Tencent Cloud role ARN is not configured");
     LOG_STORAGE_WARNING_ << fmt::format(
         "[{}] RoleArn must be specified to use STS AssumeRole web identity creds "
         "provider.",
@@ -70,6 +73,7 @@ TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::TencentCloudSTSAssumeRo
   }
 
   if (m_region.empty()) {
+    m_lastResolution = MakeCredentialConfigError("Tencent Cloud region is not configured");
     LOG_STORAGE_WARNING_ << fmt::format(
         "[{}] Region must be specified to use STS AssumeRole web identity creds "
         "provider.",
@@ -78,6 +82,12 @@ TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::TencentCloudSTSAssumeRo
   } else {
     LOG_STORAGE_DEBUG_ << fmt::format("[{}] Resolved region from profile_config or environment variable to be {}",
                                       STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, m_region);
+  }
+
+  if (m_providerId.empty()) {
+    m_lastResolution = MakeCredentialConfigError("Tencent Cloud identity provider ID is not configured");
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] ProviderId must be specified", STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
+    return;
   }
 
   if (m_sessionName.empty()) {
@@ -95,8 +105,11 @@ TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::TencentCloudSTSAssumeRo
   retryableErrors.emplace_back("IDPCommunicationError");
   retryableErrors.emplace_back("InvalidIdentityToken");
 
+  // Shared credential retry budget; see credential_resolution.h.
+  config.connectTimeoutMs = kCredentialConnectTimeoutMs;
+  config.requestTimeoutMs = kCredentialRequestTimeoutMs;
   config.retryStrategy = Aws::MakeShared<Aws::Client::SpecifiedRetryableErrorsRetryStrategy>(
-      STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, retryableErrors, 3 /*maxRetries*/);
+      STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, retryableErrors, kCredentialRetryAttempts);
 
   m_client = Aws::MakeUnique<TencentCloudSTSCredentialsClient>(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, config);
   m_initialized = true;
@@ -105,14 +118,28 @@ TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::TencentCloudSTSAssumeRo
 }
 
 Aws::Auth::AWSCredentials TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::GetAWSCredentials() {
-  // A valid client means required information like role arn and token file were constructed correctly.
-  // We can use this provider to load creds, otherwise, we can just return empty creds.
-  if (!m_initialized) {
+  auto result = ResolveForRequest();
+  if (!result.ok()) {
     return {};
+  }
+  return std::move(result).ValueOrDie();
+}
+
+arrow::Result<Aws::Auth::AWSCredentials> TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::ResolveForRequest() {
+  if (!m_initialized) {
+    return m_lastResolution.ok() ? MakeCredentialConfigError("Tencent Cloud credential provider is not initialized")
+                                 : m_lastResolution;
   }
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
-  return m_credentials;
+  if (ExpiresSoon() && !m_lastResolution.ok()) {
+    return m_lastResolution;
+  }
+  auto validation = ValidateTemporaryCredentials(m_credentials, "Tencent Cloud STS");
+  if (validation.ok()) {
+    return m_credentials;
+  }
+  return m_lastResolution.ok() ? validation : m_lastResolution;
 }
 
 void TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
@@ -125,8 +152,16 @@ void TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
     if (!token.empty() && token.back() == '\n') {
       token.pop_back();
     }
+    if (token.empty()) {
+      m_lastResolution = MakeCredentialConfigError(fmt::format("The OIDC token file {} is empty", m_tokenFile));
+      return;
+    }
     m_token = token;
   } else {
+    // A token file that will not open is the deployment's to fix -- the
+    // projected volume is missing or unreadable -- not something a retry
+    // outlasts.
+    m_lastResolution = MakeCredentialConfigError(fmt::format("Cannot open the OIDC token file {}", m_tokenFile));
     LOG_STORAGE_ERROR_ << fmt::format("[{}] Can't open token file: {}", STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
                                       m_tokenFile);
     return;
@@ -135,6 +170,16 @@ void TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
                                                                                 m_roleArn, m_sessionName};
 
   auto result = m_client->GetAssumeRoleWithWebIdentityCredentials(request);
+  if (!result.status.ok()) {
+    m_lastResolution = result.status;
+    return;
+  }
+  auto validation = ValidateTemporaryCredentials(result.creds, "Tencent Cloud STS");
+  if (!validation.ok()) {
+    m_lastResolution = validation;
+    return;
+  }
+  m_lastResolution = arrow::Status::OK();
   LOG_STORAGE_DEBUG_ << fmt::format("[{}] Successfully retrieved credentials, expiration_count_diff_ms: {}",
                                     STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
                                     (result.creds.GetExpiration() - Aws::Utils::DateTime::Now()).count());
@@ -147,6 +192,11 @@ bool TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::ExpiresSoon() cons
 }
 
 void TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::RefreshIfExpired() {
+  // The cooldown shares a fast failed refresh with queued callers. The caller
+  // budget separately prevents a waiter that already spent too long behind a
+  // slow refresh from starting another attempt after the cooldown expires.
+  const auto started = std::chrono::steady_clock::now();
+
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
   if (!m_credentials.IsEmpty() && !ExpiresSoon()) {
     return;
@@ -154,6 +204,9 @@ void TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::RefreshIfExpired()
 
   guard.UpgradeToWriterLock();
   if (!m_credentials.IsExpiredOrEmpty() && !ExpiresSoon()) {
+    return;
+  }
+  if (!CredentialAttemptStillWorthMaking(started)) {
     return;
   }
 

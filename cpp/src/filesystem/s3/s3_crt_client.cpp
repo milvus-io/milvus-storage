@@ -34,6 +34,7 @@
 #include <aws/s3-crt/S3CrtClient.h>
 #include <aws/s3-crt/S3CrtClientConfiguration.h>
 
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 
 namespace milvus_storage {
@@ -176,10 +177,14 @@ void S3CrtClientLease::Release() {
 }
 
 S3CrtClientHolder::S3CrtClientHolder(std::shared_ptr<S3CrtClientFinalizer> finalizer,
-                                     std::shared_ptr<FilesystemMetrics> metrics)
+                                     std::shared_ptr<FilesystemMetrics> metrics,
+                                     std::shared_ptr<RequestCredentialsResolver> credentials_resolver,
+                                     std::function<void()> release_resources)
     : finalizer_(std::move(finalizer)),
       operation_state_(std::make_shared<S3CrtClientOperationState>()),
-      metrics_(std::move(metrics)) {}
+      metrics_(std::move(metrics)),
+      credentials_resolver_(std::move(credentials_resolver)),
+      release_resources_(std::move(release_resources)) {}
 
 S3CrtClientHolder::~S3CrtClientHolder() { Finalize(); }
 
@@ -203,6 +208,18 @@ arrow::Result<S3CrtClientLease> S3CrtClientHolder::Acquire() {
     lease.client_ = client_.get();
     lease.operation_state_ = operation_state_;
   }
+
+  // Credential refresh may enter STS, a container endpoint, or IMDS through
+  // AWS HTTP code. It therefore belongs to the same shutdown barrier as the
+  // object request. The operation mutex is released before network I/O, while
+  // the lease keeps active_operations non-zero. A failed refresh returns
+  // through the local lease destructor and decrements the count exactly once.
+  if (credentials_resolver_ != nullptr) {
+    auto credentials = credentials_resolver_->ResolveForRequest();
+    if (!credentials.ok()) {
+      return credentials.status();
+    }
+  }
   return lease;
 }
 
@@ -213,32 +230,47 @@ arrow::Result<S3CrtClientLease> S3CrtClientHolder::Acquire() {
 //   ----------------------------             ------------------------------
 //   closing = true
 //   wait(active_operations == 0)   <-------  lease Release(): active--, notify
-//   move client_ out
+//   move client_ + credentials_resolver_ out
 //   unlock operation mutex
+//   credentials_resolver.reset()
 //   client.reset()
 //   ClientDestroyed()
 //
 // No new lease can start after closing is set. Existing leases keep only the
-// operation state alive and eventually wake this waiter. client.reset() is
-// outside the operation mutex because the SDK destructor may block while CRT
-// completes its own shutdown callbacks.
+// operation state alive and eventually wake this waiter. Both AWS-owning
+// objects are destroyed outside the operation mutex because their SDK
+// destructors may block while HTTP/CRT shutdown callbacks complete.
 void S3CrtClientHolder::Finalize() {
   std::shared_ptr<Aws::S3Crt::S3CrtClient> client;
+  std::shared_ptr<RequestCredentialsResolver> credentials_resolver;
+  std::function<void()> release_resources;
   {
     std::unique_lock lock(operation_state_->mutex);
     operation_state_->closing = true;
     operation_state_->cv.wait(lock, [this] { return operation_state_->active_operations == 0; });
     client = std::move(client_);
+    credentials_resolver = std::move(credentials_resolver_);
+    release_resources.swap(release_resources_);
   }
-  if (!client) {
+  if (!client && !release_resources) {
     return;
   }
+  const bool had_client = client != nullptr;
 
+  // A resolver may own STS/IMDS AWS clients. Release it inside the same global
+  // shutdown barrier as the CRT client, after all credential refreshes have
+  // left their operation leases and before Aws::ShutdownAPI() can run.
+  credentials_resolver.reset();
   // S3CrtClient::~S3CrtClient waits for the native CRT client shutdown
   // callback. This runs only after every operation lease has left its callback
   // and always on the thread finalizing/destroying the holder.
   client.reset();
-  finalizer_->ClientDestroyed();
+  if (release_resources) {
+    release_resources();
+  }
+  if (had_client) {
+    finalizer_->ClientDestroyed();
+  }
 }
 
 std::shared_ptr<FilesystemMetrics> S3CrtClientHolder::GetMetrics() const { return metrics_; }
@@ -255,31 +287,66 @@ std::shared_ptr<FilesystemMetrics> S3CrtClientHolder::GetMetrics() const { retur
 // failure the construction guard performs only the final decrement, so a null
 // or multiply-owned client is never counted as live.
 arrow::Result<std::shared_ptr<S3CrtClientHolder>> S3CrtClientFinalizer::AddClient(
-    ClientFactory make_client, std::shared_ptr<FilesystemMetrics> metrics) {
+    ClientFactory make_client,
+    std::shared_ptr<FilesystemMetrics> metrics,
+    std::shared_ptr<RequestCredentialsResolver> credentials_resolver,
+    std::function<void()> release_resources) {
   auto finalizer = shared_from_this();
+  bool finalized = false;
   {
     std::lock_guard lock(mutex_);
     if (finalized_.load(std::memory_order_acquire)) {
-      return ErrorS3Finalized();
+      finalized = true;
+    } else {
+      ++constructing_clients_;
     }
-    ++constructing_clients_;
+  }
+  if (finalized) {
+    make_client = nullptr;
+    credentials_resolver.reset();
+    if (release_resources) {
+      release_resources();
+    }
+    return ErrorS3Finalized();
   }
   S3CrtClientConstructionLease construction(finalizer);
+  // Function parameters are destroyed after local variables. Move the resolver
+  // into a local declared after the lease so every failure-path destructor runs
+  // before the construction reservation is released.
+  auto resolver = std::move(credentials_resolver);
 
   // Destroy the std::function and all of its captures outside mutex_. Captures
   // may perform arbitrary cleanup; that cleanup remains inside the construction
   // reservation but never blocks other finalizer state transitions.
   ClientFactory factory = std::move(make_client);
   make_client = nullptr;
-  ARROW_ASSIGN_OR_RAISE(auto client, factory());
+  auto client_result = factory();
   factory = nullptr;
+  if (!client_result.ok()) {
+    resolver.reset();
+    if (release_resources) {
+      release_resources();
+    }
+    return client_result.status();
+  }
+  auto client = std::move(client_result).ValueOrDie();
   if (!client) {
+    resolver.reset();
+    if (release_resources) {
+      release_resources();
+    }
     return arrow::Status::Invalid("S3 CRT client factory returned a null client");
   }
   if (client.use_count() != 1) {
+    client.reset();
+    resolver.reset();
+    if (release_resources) {
+      release_resources();
+    }
     return arrow::Status::Invalid("S3CrtClientHolder must be the sole shared owner");
   }
-  auto holder = std::shared_ptr<S3CrtClientHolder>(new S3CrtClientHolder(finalizer, std::move(metrics)));
+  auto holder = std::shared_ptr<S3CrtClientHolder>(
+      new S3CrtClientHolder(finalizer, std::move(metrics), std::move(resolver), std::move(release_resources)));
 
   bool notify = false;
   {
@@ -368,7 +435,9 @@ std::shared_ptr<S3CrtClientFinalizer> GetCrtClientFinalizer() {
 
 template <>
 arrow::Result<std::shared_ptr<S3CrtClientHolder>> ClientBuilder<Aws::S3Crt::S3CrtClient>::BuildClient(
-    std::optional<arrow::io::IOContext> io_context, std::shared_ptr<FilesystemMetrics> metrics) {
+    std::optional<arrow::io::IOContext> io_context,
+    std::shared_ptr<FilesystemMetrics> metrics,
+    std::function<void()> release_resources) {
   if (!metrics) {
     metrics = std::make_shared<FilesystemMetrics>();
   }
@@ -380,23 +449,24 @@ arrow::Result<std::shared_ptr<S3CrtClientHolder>> ClientBuilder<Aws::S3Crt::S3Cr
         ARROW_RETURN_NOT_OK(PrepareClientConfig(std::move(io_context)));
 
         if (options_.retry_strategy) {
-          client_config_.retryStrategy = fs::internal::MakeWrappedRetryStrategy(options_.retry_strategy);
+          client_config_->retryStrategy = fs::internal::MakeWrappedRetryStrategy(options_.retry_strategy);
         } else {
-          client_config_.retryStrategy = std::make_shared<fs::internal::ConnectRetryStrategy>();
+          client_config_->retryStrategy = std::make_shared<fs::internal::ConnectRetryStrategy>();
         }
 
         const bool use_virtual_addressing = options_.endpoint_override.empty() || options_.force_virtual_addressing;
-        client_config_.useVirtualAddressing = use_virtual_addressing;
+        client_config_->useVirtualAddressing = use_virtual_addressing;
         // Raise the CRT target from its SDK default so small concurrent range reads
         // get enough connection budget for the Vortex reader workload.
         // TODO: make this configurable instead of using a fixed workload-specific default.
-        client_config_.throughputTargetGbps = 50.0;
+        client_config_->throughputTargetGbps = 50.0;
 
-        return std::make_shared<Aws::S3Crt::S3CrtClient>(credentials_provider_, client_config_,
-                                                         client_config_.payloadSigningPolicy,
-                                                         client_config_.useVirtualAddressing);
+        return std::make_shared<Aws::S3Crt::S3CrtClient>(credentials_provider_, *client_config_,
+                                                         client_config_->payloadSigningPolicy,
+                                                         client_config_->useVirtualAddressing);
       },
-      std::move(metrics));
+      std::move(metrics), std::dynamic_pointer_cast<RequestCredentialsResolver>(options_.credentials_provider),
+      std::move(release_resources));
 }
 
 }  // namespace milvus_storage

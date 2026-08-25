@@ -35,6 +35,7 @@
 namespace milvus_storage {
 
 class S3CrtClientHolder;
+class RequestCredentialsResolver;
 
 template <>
 struct ClientBuilderTraits<Aws::S3Crt::S3CrtClient> {
@@ -44,7 +45,9 @@ struct ClientBuilderTraits<Aws::S3Crt::S3CrtClient> {
 
 template <>
 arrow::Result<std::shared_ptr<S3CrtClientHolder>> ClientBuilder<Aws::S3Crt::S3CrtClient>::BuildClient(
-    std::optional<arrow::io::IOContext> io_context, std::shared_ptr<FilesystemMetrics> metrics);
+    std::optional<arrow::io::IOContext> io_context,
+    std::shared_ptr<FilesystemMetrics> metrics,
+    std::function<void()> release_resources);
 
 class S3CrtClientOperationState;
 class S3CrtClientFinalizer;
@@ -192,7 +195,10 @@ class S3CrtClientHolder {
 
   protected:
   friend class S3CrtClientFinalizer;
-  S3CrtClientHolder(std::shared_ptr<S3CrtClientFinalizer> finalizer, std::shared_ptr<FilesystemMetrics> metrics);
+  S3CrtClientHolder(std::shared_ptr<S3CrtClientFinalizer> finalizer,
+                    std::shared_ptr<FilesystemMetrics> metrics,
+                    std::shared_ptr<RequestCredentialsResolver> credentials_resolver = nullptr,
+                    std::function<void()> release_resources = nullptr);
   void Finalize();
 
   std::shared_ptr<S3CrtClientFinalizer> finalizer_;
@@ -204,6 +210,8 @@ class S3CrtClientHolder {
   // never copy this shared_ptr.
   std::shared_ptr<Aws::S3Crt::S3CrtClient> client_;
   std::shared_ptr<FilesystemMetrics> metrics_;
+  std::shared_ptr<RequestCredentialsResolver> credentials_resolver_;
+  std::function<void()> release_resources_;
 };
 
 /// Coordinates construction and destruction of every CRT client in the process.
@@ -234,8 +242,11 @@ class S3CrtClientFinalizer : public std::enable_shared_from_this<S3CrtClientFina
 
   /// Reserve construction before invoking the factory, then register its
   /// client. The factory is not invoked after finalization starts.
-  arrow::Result<std::shared_ptr<S3CrtClientHolder>> AddClient(ClientFactory make_client,
-                                                              std::shared_ptr<FilesystemMetrics> metrics);
+  arrow::Result<std::shared_ptr<S3CrtClientHolder>> AddClient(
+      ClientFactory make_client,
+      std::shared_ptr<FilesystemMetrics> metrics,
+      std::shared_ptr<RequestCredentialsResolver> credentials_resolver = nullptr,
+      std::function<void()> release_resources = nullptr);
   /// Wait for client construction, then close all holders and wait until every
   /// CRT client destructor has returned.
   /// This is an S3 lifecycle operation and must not be called from a CRT

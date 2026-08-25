@@ -15,6 +15,9 @@
 #include <gtest/gtest.h>
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/properties.h"
+#include <optional>
+
+#include "milvus-storage/common/extend_status.h"
 
 namespace milvus_storage::test {
 
@@ -341,23 +344,34 @@ TEST_F(ExternalFilesystemTest, AzureCredentialBrokerConfigValidation) {
   non_azure_config.cloud_provider = kCloudProviderAWS;
   EXPECT_FALSE(non_azure_config.IsAzureCredentialBrokerEnabled());
 
+  // The three rejection paths below were already executed by this test, but it
+  // only ever asserted IsInvalid() -- so replacing the classified status with a
+  // plain arrow::Status::Invalid at either producer would have left it green.
+  // The path was covered; the classification was not. AssertBrokerConfigError
+  // pins the part that actually reaches an operator.
+  auto AssertBrokerConfigError = [](const arrow::Status& status, const char* what) {
+    ASSERT_FALSE(status.ok()) << what;
+    EXPECT_TRUE(status.IsInvalid()) << what;  // detected before any IO
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << what << ": arrived unclassified, so a broken deployment reaches segcore"
+                               << " as a generic storage failure: " << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageConfigInvalid) << what;
+    EXPECT_EQ(CategoryForExtendStatusCode(detail->code()), ErrorCategory::System) << what;
+    EXPECT_FALSE(RetryableForExtendStatusCode(detail->code())) << what;
+    EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::ConfigInvalid) << what;
+  };
+
   auto partial = props;
   partial.erase(PROPERTY_FS_AZURE_TENANT_ID);
-  auto partial_result = FilesystemCache::resolve_config(partial);
-  ASSERT_FALSE(partial_result.ok());
-  EXPECT_TRUE(partial_result.status().IsInvalid());
+  AssertBrokerConfigError(FilesystemCache::resolve_config(partial).status(), "missing azure_tenant_id");
 
   auto invalid_endpoint = props;
   invalid_endpoint[PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT] = std::string("file:///tmp/credentials");
-  auto invalid_endpoint_result = FilesystemCache::resolve_config(invalid_endpoint);
-  ASSERT_FALSE(invalid_endpoint_result.ok());
-  EXPECT_TRUE(invalid_endpoint_result.status().IsInvalid());
+  AssertBrokerConfigError(FilesystemCache::resolve_config(invalid_endpoint).status(), "non-HTTP endpoint scheme");
 
   auto missing_host = props;
   missing_host[PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT] = std::string("http:///credentials");
-  auto missing_host_result = FilesystemCache::resolve_config(missing_host);
-  ASSERT_FALSE(missing_host_result.ok());
-  EXPECT_TRUE(missing_host_result.status().IsInvalid());
+  AssertBrokerConfigError(FilesystemCache::resolve_config(missing_host).status(), "endpoint with no host");
 }
 
 TEST_F(ExternalFilesystemTest, ExtractExternalFsRejectsUndefinedProperty) {
@@ -534,6 +548,139 @@ TEST_F(ExternalFilesystemTest, ResolveConfigWithQueryComponent) {
   ASSERT_TRUE(rel.ok()) << rel.status().ToString();
   EXPECT_EQ(rel.ValueOrDie().bucket_name, "default-bucket");
   EXPECT_EQ(rel.ValueOrDie().access_key_id, "default_key");
+}
+
+// ==================== Classification of config / URI failures ====================
+//
+// These are the tests the rest of the taxonomy suite cannot substitute for.
+// Every other test compares the tables to each other -- category table against
+// segcore switch against FFI constants -- and those all pass whether or not any
+// layer ever emits the code. StorageConfigInvalid shipped
+// for a while with no producer at all and every self-consistency test stayed
+// green. So: call the real entry points with real bad input and read the code
+// back off the Status.
+
+namespace {
+
+std::optional<ExtendStatusCode> CodeOf(const arrow::Status& status) {
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  return detail ? std::optional{detail->code()} : std::nullopt;
+}
+
+}  // namespace
+
+// This test used to assert User, and was renamed rather than relaxed when 116
+// merged into 115. The reason is the point of the merge: StorageUri::Parse is
+// called for BOTH a location the user typed into an external-source definition
+// and a path milvus generated itself, and it cannot tell them apart. Guessing
+// User here would tell an operator's broken deployment "your query is wrong";
+// guessing at this layer at all is the mistake. System is the honest category,
+// and the external-table entry points may present the unified System code
+// LOON_SOURCE_INVALID.
+TEST_F(ExternalFilesystemTest, UnparseableUriIsSystemNotGuessedAsUser) {
+  struct Case {
+    const char* uri;
+    const char* what;
+  };
+  const Case cases[] = {
+      {"s3://", "no bucket and no key"},
+      {"s3:///", "empty after scheme"},
+      {"s3://my-bucket", "host only, no path to take the bucket from"},
+      // These parse-FAIL rather than parsing into something incomplete, which
+      // is a different path through StorageUri::Parse and used to be silently
+      // swallowed: the whole string became a relative key against whatever
+      // fs.* the deployment defaults to, and the eventual complaint pointed at
+      // a missing object instead of at the malformed location.
+      {"s3://bucket/%ZZ", "invalid percent-escape"},
+      {"s3://bucket/a b", "unescaped space"},
+      {"http://[::1", "unterminated IPv6 literal"},
+      // Single slash: RFC 3986's authority component is optional, so this is
+      // still a scheme'd URI. Keying the check on the literal "://" let it
+      // through as a local relative path.
+      {"s3:/bucket/%ZZ", "scheme with no authority, still malformed"},
+  };
+
+  for (const auto& c : cases) {
+    auto result = StorageUri::Parse(c.uri);
+    ASSERT_FALSE(result.ok()) << c.what;
+    auto code = CodeOf(result.status());
+    ASSERT_TRUE(code.has_value()) << c.what << ": arrived unclassified, so segcore sees a generic"
+                                  << " failure instead of 'your location is wrong': " << result.status().ToString();
+    EXPECT_EQ(*code, ExtendStatusCode::StorageConfigInvalid) << c.what;
+    EXPECT_EQ(CategoryForExtendStatusCode(*code), ErrorCategory::System) << c.what;
+    EXPECT_FALSE(RetryableForExtendStatusCode(*code)) << c.what;
+    EXPECT_EQ(ToSegcoreError(result.status()).get_error_code(), milvus::ConfigInvalid) << c.what;
+    // Never 2042: this producer does not know whose string it is, and blaming
+    // the caller is the more expensive of the two possible mistakes.
+    EXPECT_NE(ToSegcoreError(result.status()).get_error_code(), milvus::InvalidParameter) << c.what;
+    // Detected before any IO was attempted, so it must not masquerade as one.
+    EXPECT_TRUE(result.status().IsInvalid()) << c.what;
+  }
+}
+
+// ...but a string with no scheme is a relative path, which is legitimate and
+// extremely common. The malformed-URI check above keys on RFC 3986 shape, not
+// on a list of known schemes, so this pins that it did not become a trap for
+// ordinary filenames.
+//
+// Only strings arrow FAILS to parse reach that check at all, which is why
+// "C:/data/x.parquet" is absent here: arrow parses it successfully with
+// scheme "c", so it never had a chance to be mistaken for a bad URI. That is
+// pre-existing behaviour of the parser, not of this classification.
+TEST_F(ExternalFilesystemTest, RelativePathsAreStillAcceptedAfterTheMalformedUriCheck) {
+  const char* relative[] = {
+      "some/dir/file.parquet", "file.parquet", "a b/c d.parquet", "100%-done/x.parquet", "./x", "../y/z",
+  };
+  for (const auto* path : relative) {
+    auto result = StorageUri::Parse(path);
+    ASSERT_TRUE(result.ok()) << path << " -> " << result.status().ToString();
+    EXPECT_TRUE(result->scheme.empty()) << path;
+    EXPECT_EQ(result->key, path);
+  }
+}
+
+TEST_F(ExternalFilesystemTest, UnusableExtfsConfigIsClassifiedAsConfigError) {
+  struct Case {
+    const char* key;
+    const char* what;
+  };
+  const Case cases[] = {
+      {"extfs.prod", "missing property name after fs name"},
+      {"extfs..address", "empty filesystem name"},
+      {"extfs.prod.", "empty property name"},
+  };
+
+  for (const auto& c : cases) {
+    api::Properties props;
+    props[c.key] = std::string("value");
+
+    auto fs_result = FilesystemCache::getInstance().get(props, "s3://test.com/bucket/key");
+    ASSERT_FALSE(fs_result.ok()) << c.what;
+    auto code = CodeOf(fs_result.status());
+    ASSERT_TRUE(code.has_value()) << c.what << ": arrived unclassified: " << fs_result.status().ToString();
+    EXPECT_EQ(*code, ExtendStatusCode::StorageConfigInvalid) << c.what;
+    EXPECT_EQ(CategoryForExtendStatusCode(*code), ErrorCategory::System) << c.what;
+    EXPECT_FALSE(RetryableForExtendStatusCode(*code)) << c.what;
+    // 2006 ConfigInvalid, not 2044 StorageError: nobody retries out of a
+    // malformed extfs.* key, and it has to page whoever wrote it.
+    EXPECT_EQ(ToSegcoreError(fs_result.status()).get_error_code(), milvus::ConfigInvalid) << c.what;
+    EXPECT_TRUE(fs_result.status().IsInvalid()) << c.what;
+  }
+}
+
+TEST_F(ExternalFilesystemTest, UnknownCloudProviderIsClassifiedAsConfigError) {
+  api::Properties props;
+  props["extfs.myfs.address"] = std::string("s3.amazonaws.com");
+  props["extfs.myfs.bucket_name"] = std::string("my-bucket");
+  props["extfs.myfs.storage_type"] = std::string("remote");
+  props["extfs.myfs.cloud_provider"] = std::string("not-a-real-cloud");
+
+  auto fs_result = FilesystemCache::getInstance().get(props, "s3://s3.amazonaws.com/my-bucket/data/f.parquet");
+  ASSERT_FALSE(fs_result.ok());
+  auto code = CodeOf(fs_result.status());
+  ASSERT_TRUE(code.has_value()) << "arrived unclassified: " << fs_result.status().ToString();
+  EXPECT_EQ(*code, ExtendStatusCode::StorageConfigInvalid);
+  EXPECT_EQ(ToSegcoreError(fs_result.status()).get_error_code(), milvus::ConfigInvalid);
 }
 
 }  // namespace milvus_storage::test

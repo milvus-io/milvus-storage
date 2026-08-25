@@ -47,7 +47,6 @@ _loon_errcode_aws_conflict
 _loon_errcode_aws_precondition_failed
 _loon_errcode_aws_not_found
 _loon_errcode_aws_access_denied
-_loon_errcode_aws_non_retryable
 
 # Properties interface
 _loon_properties_create

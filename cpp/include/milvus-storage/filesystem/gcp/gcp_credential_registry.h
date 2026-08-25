@@ -20,7 +20,9 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
+#include <arrow/result.h>
 #include <aws/core/http/URI.h>
 
 #include "milvus-storage/filesystem/gcp/gcp_credential_provider.h"
@@ -63,7 +65,24 @@ struct GcpBucketKeyHash {
 // present, or use_ssl otherwise.
 GcpEndpointKey NormalizeGcpEndpoint(const std::string& address, bool use_ssl);
 
-// Process-wide registry mapping (endpoint, bucket) → credential provider.
+// One live registration for a GCP identity. The identity string is an opaque,
+// exact comparison key and is never logged. A registration is retained by the
+// S3 credentials provider owned by the filesystem/client; the process-wide
+// registry below keeps only a weak reference.
+class GcpCredentialRegistration {
+  public:
+  GcpCredentialRegistration(std::string identity, std::shared_ptr<GcpCredentialProvider> provider)
+      : identity_(std::move(identity)), provider_(std::move(provider)) {}
+
+  private:
+  friend class GcpCredentialRegistry;
+
+  std::string identity_;
+  std::shared_ptr<GcpCredentialProvider> provider_;
+};
+
+// Process-wide registry mapping (endpoint, bucket) → live credential
+// registration.
 //
 // The GCP HTTP client factory and delegator are installed once globally (AWS
 // SDK constraint via InitializeS3 + call_once). They are stateless and look
@@ -75,14 +94,11 @@ class GcpCredentialRegistry {
   public:
   static GcpCredentialRegistry& Instance();
 
-  // Register or replace the provider for a (endpoint, bucket) pair.
-  //
-  // Registration is idempotent: a second Register with the same key silently
-  // replaces the prior provider. In practice this only happens when the same
-  // bucket is configured via both `fs.*` and an `extfs.<ns>.*` slot, or when
-  // the same config Make()s twice — in both cases the identity is identical.
-  // Same bucket + different identity is not a supported configuration.
-  void Register(GcpBucketKey key, std::shared_ptr<GcpCredentialProvider> provider);
+  // Register an identity for a (endpoint, bucket) pair. An equivalent live
+  // registration is reused. A different live identity is rejected instead of
+  // changing the credentials used by an already-created filesystem.
+  arrow::Result<std::shared_ptr<GcpCredentialRegistration>> Register(
+      GcpBucketKey key, std::shared_ptr<GcpCredentialRegistration> registration);
 
   // Look up the provider for an outgoing request URI. Tries both path-style
   // (request endpoint + first path segment) and virtual-host-style (first
@@ -94,7 +110,7 @@ class GcpCredentialRegistry {
   GcpCredentialRegistry() = default;
 
   mutable std::mutex mu_;
-  std::unordered_map<GcpBucketKey, std::shared_ptr<GcpCredentialProvider>, GcpBucketKeyHash> providers_;
+  std::unordered_map<GcpBucketKey, std::weak_ptr<GcpCredentialRegistration>, GcpBucketKeyHash> registrations_;
 };
 
 }  // namespace milvus_storage

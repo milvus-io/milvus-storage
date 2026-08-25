@@ -14,10 +14,12 @@
 
 #include "milvus-storage/filesystem/s3/s3_options.h"
 
+#include <typeinfo>
+
 #include <aws/core/auth/AWSCredentials.h>
-#include <aws/core/auth/STSCredentialsProvider.h>
-#include <aws/core/auth/AWSCredentialsProviderChain.h>
 #include <aws/core/auth/AWSCredentialsProvider.h>
+#include <aws/core/auth/AWSCredentialsProviderChain.h>
+#include <aws/core/auth/STSCredentialsProvider.h>
 #include <aws/core/client/DefaultRetryStrategy.h>
 #include <aws/identity-management/auth/STSAssumeRoleCredentialsProvider.h>
 
@@ -256,6 +258,50 @@ arrow::Result<S3Options> S3Options::FromUri(const std::string& uri_string, std::
   return FromUri(uri, out_path);
 }
 
+namespace {
+
+bool CredentialsEqualWithoutRefresh(const S3Options& left, const S3Options& right) {
+  if (left.credentials_provider == right.credentials_provider) {
+    return true;
+  }
+  if (left.credentials_provider == nullptr || right.credentials_provider == nullptr) {
+    return false;
+  }
+  auto* left_provider = left.credentials_provider.get();
+  auto* right_provider = right.credentials_provider.get();
+
+  if (left.credentials_kind == S3CredentialsKind::Anonymous) {
+    return typeid(*left_provider) == typeid(Aws::Auth::AnonymousAWSCredentialsProvider) &&
+           typeid(*right_provider) == typeid(Aws::Auth::AnonymousAWSCredentialsProvider);
+  }
+  if (left.credentials_kind != S3CredentialsKind::Explicit) {
+    // Resolving a dynamic provider here can enter STS, a container endpoint, or
+    // IMDS without a filesystem operation lease. Provider identity is a safe,
+    // conservative equality rule when no stable credential identity is stored
+    // in S3Options: a false negative is preferable to treating two tenants as
+    // the same filesystem.
+    return false;
+  }
+
+  // SimpleAWSCredentialsProvider::GetAWSCredentials is virtual. Only call it
+  // for the exact SDK value-holder type; a caller-supplied subclass may refresh
+  // credentials and has no stable identity that Equals can safely infer.
+  if (typeid(*left_provider) != typeid(Aws::Auth::SimpleAWSCredentialsProvider) ||
+      typeid(*right_provider) != typeid(Aws::Auth::SimpleAWSCredentialsProvider)) {
+    return false;
+  }
+
+  const auto left_credentials =
+      static_cast<Aws::Auth::SimpleAWSCredentialsProvider*>(left_provider)->GetAWSCredentials();
+  const auto right_credentials =
+      static_cast<Aws::Auth::SimpleAWSCredentialsProvider*>(right_provider)->GetAWSCredentials();
+  return left_credentials.GetAWSAccessKeyId() == right_credentials.GetAWSAccessKeyId() &&
+         left_credentials.GetAWSSecretKey() == right_credentials.GetAWSSecretKey() &&
+         left_credentials.GetSessionToken() == right_credentials.GetSessionToken();
+}
+
+}  // namespace
+
 bool S3Options::Equals(const S3Options& other) const {
   const int64_t default_metadata_size = default_metadata ? default_metadata->size() : 0;
   const bool default_metadata_equals =
@@ -266,11 +312,14 @@ bool S3Options::Equals(const S3Options& other) const {
           scheme == other.scheme && role_arn == other.role_arn && session_name == other.session_name &&
           external_id == other.external_id && load_frequency == other.load_frequency &&
           proxy_options.Equals(other.proxy_options) && credentials_kind == other.credentials_kind &&
-          background_writes == other.background_writes && use_crc32c_checksum == other.use_crc32c_checksum &&
-          use_crt_async_reads == other.use_crt_async_reads && allow_bucket_creation == other.allow_bucket_creation &&
-          allow_bucket_deletion == other.allow_bucket_deletion && default_metadata_equals &&
-          GetAccessKey() == other.GetAccessKey() && GetSecretKey() == other.GetSecretKey() &&
-          GetSessionToken() == other.GetSessionToken());
+          force_virtual_addressing == other.force_virtual_addressing && background_writes == other.background_writes &&
+          use_crc32c_checksum == other.use_crc32c_checksum && use_crt_async_reads == other.use_crt_async_reads &&
+          allow_bucket_creation == other.allow_bucket_creation &&
+          allow_bucket_deletion == other.allow_bucket_deletion &&
+          check_directory_existence_before_creation == other.check_directory_existence_before_creation &&
+          default_metadata_equals && retry_strategy == other.retry_strategy &&
+          max_connections == other.max_connections && multi_part_upload_size == other.multi_part_upload_size &&
+          cloud_provider == other.cloud_provider && CredentialsEqualWithoutRefresh(*this, other));
 }
 
 bool S3ProxyOptions::Equals(const S3ProxyOptions& other) const {

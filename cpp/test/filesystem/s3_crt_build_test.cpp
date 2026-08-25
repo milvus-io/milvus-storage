@@ -44,6 +44,7 @@
 #include "milvus-storage/filesystem/s3/s3_crt_client.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
+#include "milvus-storage/filesystem/s3/provider/credential_resolution.h"
 #include "milvus-storage/format/parquet/folly_arrow_executor.h"
 #include "test_env.h"
 
@@ -99,6 +100,218 @@ bool WaitUntilConstructionRejected(const std::shared_ptr<S3CrtClientFinalizer>& 
 
 constexpr std::size_t kConcurrentOperations = 100;
 
+class BlockingRangeGetServer final {
+  using Tcp = boost::asio::ip::tcp;
+
+  public:
+  BlockingRangeGetServer(std::string expected_range = "bytes=2-5",
+                         boost::beast::http::status response_status = boost::beast::http::status::partial_content,
+                         std::string response_body = "cdef",
+                         std::string content_range = "bytes 2-5/9")
+      : expected_range_(std::move(expected_range)),
+        response_status_(response_status),
+        response_body_(std::move(response_body)),
+        content_range_(std::move(content_range)) {}
+
+  ~BlockingRangeGetServer() { Stop(); }
+
+  bool Start() {
+    boost::system::error_code error;
+    acceptor_.open(Tcp::v4(), error);
+    if (RecordError(error)) {
+      return false;
+    }
+    acceptor_.set_option(Tcp::acceptor::reuse_address(true), error);
+    if (RecordError(error)) {
+      return false;
+    }
+    acceptor_.bind(Tcp::endpoint(boost::asio::ip::address_v4::loopback(), 0), error);
+    if (RecordError(error)) {
+      return false;
+    }
+    acceptor_.listen(1, error);
+    if (RecordError(error)) {
+      return false;
+    }
+    port_ = acceptor_.local_endpoint(error).port();
+    if (RecordError(error)) {
+      return false;
+    }
+    worker_ = std::thread([this] { Serve(); });
+    return true;
+  }
+
+  uint16_t port() const { return port_; }
+
+  bool WaitForRequest(std::chrono::milliseconds timeout) {
+    std::unique_lock lock(mutex_);
+    cv_.wait_for(lock, timeout, [this] { return request_received_ || stopped_ || !error_.empty(); });
+    return request_received_;
+  }
+
+  void ReleaseResponse() {
+    {
+      std::lock_guard lock(mutex_);
+      response_released_ = true;
+    }
+    cv_.notify_all();
+  }
+
+  std::string error() const {
+    std::lock_guard lock(mutex_);
+    return error_;
+  }
+
+  void Stop() {
+    std::shared_ptr<Tcp::socket> socket;
+    {
+      std::lock_guard lock(mutex_);
+      stopped_ = true;
+      response_released_ = true;
+      socket = socket_;
+    }
+    cv_.notify_all();
+
+    boost::system::error_code error;
+    acceptor_.close(error);
+    if (socket) {
+      socket->cancel(error);
+      socket->shutdown(Tcp::socket::shutdown_both, error);
+      socket->close(error);
+    }
+    if (worker_.joinable()) {
+      worker_.join();
+    }
+  }
+
+  private:
+  bool RecordError(const boost::system::error_code& error) {
+    if (!error) {
+      return false;
+    }
+    SetError(error.message());
+    return true;
+  }
+
+  void SetError(std::string error) {
+    {
+      std::lock_guard lock(mutex_);
+      if (error_.empty()) {
+        error_ = std::move(error);
+      }
+    }
+    cv_.notify_all();
+  }
+
+  void Serve() {
+    auto socket = std::make_shared<Tcp::socket>(io_context_);
+    {
+      std::lock_guard lock(mutex_);
+      socket_ = socket;
+    }
+    boost::system::error_code error;
+    acceptor_.accept(*socket, error);
+    if (error) {
+      std::lock_guard lock(mutex_);
+      if (!stopped_) {
+        error_ = error.message();
+        cv_.notify_all();
+      }
+      return;
+    }
+
+    boost::beast::flat_buffer buffer;
+    boost::beast::http::request<boost::beast::http::empty_body> request;
+    boost::beast::http::read(*socket, buffer, request, error);
+    if (RecordError(error)) {
+      return;
+    }
+    if (request.method() != boost::beast::http::verb::get ||
+        request[boost::beast::http::field::range] != expected_range_) {
+      SetError("Unexpected CRT range GET");
+      return;
+    }
+
+    {
+      std::lock_guard lock(mutex_);
+      request_received_ = true;
+    }
+    cv_.notify_all();
+
+    {
+      std::unique_lock lock(mutex_);
+      cv_.wait(lock, [this] { return response_released_ || stopped_; });
+      if (stopped_) {
+        return;
+      }
+    }
+
+    boost::beast::http::response<boost::beast::http::string_body> response{response_status_, request.version()};
+    if (!content_range_.empty()) {
+      response.set(boost::beast::http::field::content_range, content_range_);
+      response.set(boost::beast::http::field::accept_ranges, "bytes");
+      response.set(boost::beast::http::field::etag, "\"0123456789abcdef0123456789abcdef\"");
+    }
+    response.keep_alive(false);
+    response.body() = response_body_;
+    response.prepare_payload();
+    boost::beast::http::write(*socket, response, error);
+    if (RecordError(error)) {
+      return;
+    }
+    socket->shutdown(Tcp::socket::shutdown_both, error);
+    if (error && error != boost::asio::error::not_connected) {
+      RecordError(error);
+    }
+    socket->close(error);
+    RecordError(error);
+  }
+
+  const std::string expected_range_;
+  const boost::beast::http::status response_status_;
+  const std::string response_body_;
+  const std::string content_range_;
+  boost::asio::io_context io_context_;
+  Tcp::acceptor acceptor_{io_context_};
+  std::shared_ptr<Tcp::socket> socket_;
+  uint16_t port_ = 0;
+  std::thread worker_;
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  std::string error_;
+  bool request_received_ = false;
+  bool response_released_ = false;
+  bool stopped_ = false;
+};
+
+class BlockingCredentialsResolver final : public RequestCredentialsResolver {
+  public:
+  arrow::Result<Aws::Auth::AWSCredentials> ResolveForRequest() override {
+    std::unique_lock lock(mutex_);
+    entered_ = true;
+    cv_.notify_all();
+    cv_.wait(lock, [this] { return released_; });
+    return MakeExtendErrorMsg(ExtendStatusCode::StorageTransientNetwork, "credential refresh failed");
+  }
+
+  bool WaitUntilEntered() {
+    std::unique_lock lock(mutex_);
+    return cv_.wait_for(lock, std::chrono::seconds(5), [this] { return entered_; });
+  }
+
+  void Release() {
+    std::lock_guard lock(mutex_);
+    released_ = true;
+    cv_.notify_all();
+  }
+
+  private:
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool entered_ = false;
+  bool released_ = false;
+};
+
 }  // namespace
 
 TEST(S3CrtBuildSupportTest, HeadersAndStaticClientSymbolsAreAvailable) {
@@ -131,6 +344,20 @@ TEST(S3CrtClientFinalizerTest, RejectsClientWithAnotherSharedOwner) {
 
   ASSERT_FALSE(result.ok());
   EXPECT_TRUE(result.status().IsInvalid()) << result.status().ToString();
+}
+
+TEST(S3CrtClientFinalizerTest, FinalizeReleasesRegisteredBuilderResources) {
+  auto finalizer = std::make_shared<S3CrtClientFinalizer>();
+  int cleanup_count = 0;
+  ASSERT_AND_ASSIGN(auto holder, finalizer->AddClient([] { return MakeTestS3CrtClient(); }, nullptr, nullptr,
+                                                      [&cleanup_count] { ++cleanup_count; }));
+
+  ASSERT_EQ(cleanup_count, 0);
+  finalizer->Finalize();
+  EXPECT_EQ(cleanup_count, 1);
+
+  holder.reset();
+  EXPECT_EQ(cleanup_count, 1);
 }
 
 TEST(S3CrtClientFinalizerTest, FinalizationWaitsForClientConstructionToRegister) {
@@ -418,6 +645,38 @@ TEST(S3CrtClientFinalizerTest, FinalizationWaitsForEveryActiveOperation) {
   EXPECT_FALSE(factory_called);
 }
 
+TEST(S3CrtClientFinalizerTest, CredentialRefreshIsInsideShutdownBarrier) {
+  auto finalizer = std::make_shared<S3CrtClientFinalizer>();
+  auto resolver = std::make_shared<BlockingCredentialsResolver>();
+  std::weak_ptr<RequestCredentialsResolver> weak_resolver = resolver;
+  auto client = MakeTestS3CrtClient();
+  std::weak_ptr<Aws::S3Crt::S3CrtClient> weak_client = client;
+  ASSERT_AND_ASSIGN(
+      auto holder,
+      finalizer->AddClient([client = std::move(client)]() mutable { return std::move(client); }, nullptr, resolver));
+
+  auto acquired = std::async(std::launch::async, [holder] { return holder->Acquire(); });
+  ASSERT_TRUE(resolver->WaitUntilEntered());
+
+  auto finalized = std::async(std::launch::async, [finalizer] { finalizer->Finalize(); });
+  EXPECT_EQ(finalized.wait_for(std::chrono::milliseconds(250)), std::future_status::timeout);
+  EXPECT_FALSE(weak_client.expired());
+
+  resolver->Release();
+  resolver.reset();
+  ASSERT_EQ(acquired.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  auto acquire_result = acquired.get();
+  ASSERT_FALSE(acquire_result.ok());
+  auto detail = ExtendStatusDetail::UnwrapStatus(acquire_result.status());
+  ASSERT_NE(detail, nullptr);
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork);
+
+  ASSERT_EQ(finalized.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  finalized.get();
+  EXPECT_TRUE(weak_client.expired());
+  EXPECT_TRUE(weak_resolver.expired());
+}
+
 TEST(S3CrtClientFinalizerTest, InlineContinuationDoesNotDeadlockWithConcurrentFinalization) {
   auto finalizer = std::make_shared<S3CrtClientFinalizer>();
   ASSERT_AND_ASSIGN(auto holder, finalizer->AddClient([] { return MakeTestS3CrtClient(); }, nullptr));
@@ -574,168 +833,6 @@ TEST(S3CrtBuildSupportTest, InFlightNativeReadCompletesDuringFinalizeS3) {
   const auto original_death_test_style = GTEST_FLAG_GET(death_test_style);
   GTEST_FLAG_SET(death_test_style, "threadsafe");
   const auto run_child = []() -> int {
-    class BlockingRangeGetServer final {
-      using Tcp = boost::asio::ip::tcp;
-
-   public:
-      ~BlockingRangeGetServer() { Stop(); }
-
-      bool Start() {
-        boost::system::error_code error;
-        acceptor_.open(Tcp::v4(), error);
-        if (RecordError(error)) {
-          return false;
-        }
-        acceptor_.set_option(Tcp::acceptor::reuse_address(true), error);
-        if (RecordError(error)) {
-          return false;
-        }
-        acceptor_.bind(Tcp::endpoint(boost::asio::ip::address_v4::loopback(), 0), error);
-        if (RecordError(error)) {
-          return false;
-        }
-        acceptor_.listen(1, error);
-        if (RecordError(error)) {
-          return false;
-        }
-        port_ = acceptor_.local_endpoint(error).port();
-        if (RecordError(error)) {
-          return false;
-        }
-        worker_ = std::thread([this] { Serve(); });
-        return true;
-      }
-
-      uint16_t port() const { return port_; }
-
-      bool WaitForRequest(std::chrono::milliseconds timeout) {
-        std::unique_lock lock(mutex_);
-        cv_.wait_for(lock, timeout, [this] { return request_received_ || stopped_ || !error_.empty(); });
-        return request_received_;
-      }
-
-      void ReleaseResponse() {
-        {
-          std::lock_guard lock(mutex_);
-          response_released_ = true;
-        }
-        cv_.notify_all();
-      }
-
-      std::string error() const {
-        std::lock_guard lock(mutex_);
-        return error_;
-      }
-
-      void Stop() {
-        std::shared_ptr<Tcp::socket> socket;
-        {
-          std::lock_guard lock(mutex_);
-          stopped_ = true;
-          response_released_ = true;
-          socket = socket_;
-        }
-        cv_.notify_all();
-
-        boost::system::error_code error;
-        acceptor_.close(error);
-        if (socket) {
-          socket->cancel(error);
-          socket->shutdown(Tcp::socket::shutdown_both, error);
-          socket->close(error);
-        }
-        if (worker_.joinable()) {
-          worker_.join();
-        }
-      }
-
-   private:
-      bool RecordError(const boost::system::error_code& error) {
-        if (!error) {
-          return false;
-        }
-        SetError(error.message());
-        return true;
-      }
-
-      void SetError(std::string error) {
-        {
-          std::lock_guard lock(mutex_);
-          if (error_.empty()) {
-            error_ = std::move(error);
-          }
-        }
-        cv_.notify_all();
-      }
-
-      void Serve() {
-        auto socket = std::make_shared<Tcp::socket>(io_context_);
-        {
-          std::lock_guard lock(mutex_);
-          socket_ = socket;
-        }
-        boost::system::error_code error;
-        acceptor_.accept(*socket, error);
-        if (error) {
-          std::lock_guard lock(mutex_);
-          if (!stopped_) {
-            error_ = error.message();
-            cv_.notify_all();
-          }
-          return;
-        }
-
-        boost::beast::flat_buffer buffer;
-        boost::beast::http::request<boost::beast::http::empty_body> request;
-        boost::beast::http::read(*socket, buffer, request, error);
-        if (RecordError(error)) {
-          return;
-        }
-        if (request.method() != boost::beast::http::verb::get ||
-            request[boost::beast::http::field::range] != "bytes=2-5") {
-          SetError("Unexpected CRT range GET");
-          return;
-        }
-
-        {
-          std::lock_guard lock(mutex_);
-          request_received_ = true;
-        }
-        cv_.notify_all();
-
-        {
-          std::unique_lock lock(mutex_);
-          cv_.wait(lock, [this] { return response_released_ || stopped_; });
-          if (stopped_) {
-            return;
-          }
-        }
-
-        boost::beast::http::response<boost::beast::http::string_body> response{
-            boost::beast::http::status::partial_content, request.version()};
-        response.set(boost::beast::http::field::content_range, "bytes 2-5/9");
-        response.set(boost::beast::http::field::accept_ranges, "bytes");
-        response.set(boost::beast::http::field::etag, "\"s3-crt-finalize-test\"");
-        response.keep_alive(false);
-        response.body() = "cdef";
-        response.prepare_payload();
-        boost::beast::http::write(*socket, response, error);
-        RecordError(error);
-      }
-
-      boost::asio::io_context io_context_;
-      Tcp::acceptor acceptor_{io_context_};
-      std::shared_ptr<Tcp::socket> socket_;
-      uint16_t port_ = 0;
-      std::thread worker_;
-      mutable std::mutex mutex_;
-      std::condition_variable cv_;
-      std::string error_;
-      bool request_received_ = false;
-      bool response_released_ = false;
-      bool stopped_ = false;
-    };
-
     auto fail = [](const std::string& message) {
       std::cerr << message << std::endl;
       return 1;
@@ -808,6 +905,105 @@ TEST(S3CrtBuildSupportTest, InFlightNativeReadCompletesDuringFinalizeS3) {
       return fail(finalize_status.ToString());
     }
     server.Stop();
+    return 0;
+  };
+  EXPECT_EXIT((::alarm(20), ::_exit(run_child())), ::testing::ExitedWithCode(0), "");
+  GTEST_FLAG_SET(death_test_style, original_death_test_style);
+#endif
+}
+
+TEST(S3CrtBuildSupportTest, AsyncReadCallbackCanReleaseLastFilesystemOwner) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "Test requires POSIX process and socket APIs.";
+#else
+  const auto original_death_test_style = GTEST_FLAG_GET(death_test_style);
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const auto run_child = []() -> int {
+    auto fail = [](const std::string& message) {
+      std::cerr << message << std::endl;
+      return 1;
+    };
+
+    BlockingRangeGetServer server("bytes=0-0", boost::beast::http::status::forbidden,
+                                  "<Error><Code>AccessDenied</Code><Message>test failure</Message></Error>", "");
+    if (!server.Start()) {
+      return fail("Failed to start the blocking S3 server: " + server.error());
+    }
+
+    auto initialize_status = EnsureS3Initialized();
+    if (!initialize_status.ok()) {
+      return fail(initialize_status.ToString());
+    }
+
+    auto options = S3Options::FromAccessKey("ak", "sk");
+    options.cloud_provider = kCloudProviderAWS;
+    options.region = "us-east-1";
+    options.scheme = "http";
+    options.endpoint_override = "127.0.0.1:" + std::to_string(server.port());
+    options.connect_timeout = 5;
+    options.request_timeout = 5;
+    options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
+    options.use_crt_async_reads = true;
+
+    auto fs_result = S3FileSystem::Make(options);
+    if (!fs_result.ok()) {
+      return fail(fs_result.status().ToString());
+    }
+    auto fs = std::move(fs_result).ValueOrDie();
+    arrow::fs::FileInfo file_info("test-bucket/path/object.txt", arrow::fs::FileType::File);
+    file_info.set_size(1);
+    auto input_result = fs->OpenInputFile(file_info);
+    if (!input_result.ok()) {
+      return fail(input_result.status().ToString());
+    }
+    auto input = std::move(input_result).ValueOrDie();
+    auto* async_file = dynamic_cast<NonBlockingReadAtFile*>(input.get());
+    if (async_file == nullptr) {
+      return fail("OpenInputFile did not select the CRT async read path");
+    }
+
+    uint8_t out = 0;
+    auto read = async_file->ReadAtAsyncInto(0, 1, &out);
+    if (!server.WaitForRequest(std::chrono::seconds(5))) {
+      return fail("Timed out waiting for a real CRT range GET: " + server.error());
+    }
+
+    struct ReadOwners {
+      std::shared_ptr<milvus_storage::S3FileSystem> filesystem;
+      std::shared_ptr<arrow::io::RandomAccessFile> input;
+    };
+    auto owners = std::make_shared<ReadOwners>(ReadOwners{fs, input});
+    fs.reset();
+    input.reset();
+
+    auto callback_entered_promise = std::make_shared<std::promise<void>>();
+    auto callback_entered = callback_entered_promise->get_future();
+    auto callback_done_promise = std::make_shared<std::promise<void>>();
+    auto callback_done = callback_done_promise->get_future();
+    read.AddCallback([owners, callback_entered_promise, callback_done_promise](const arrow::Result<int64_t>&) {
+      callback_entered_promise->set_value();
+      owners->input.reset();
+      owners->filesystem.reset();
+      callback_done_promise->set_value();
+    });
+
+    server.ReleaseResponse();
+    if (callback_entered.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+      return fail("Async read callback did not run on the completion executor");
+    }
+    callback_entered.get();
+    if (callback_done.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+      return fail("Async read callback deadlocked while releasing the final filesystem owner");
+    }
+    callback_done.get();
+    server.Stop();
+    if (!read.result().status().IsIOError()) {
+      return fail("Closing the test connection did not fail the CRT range read");
+    }
+    auto finalize_status = FinalizeS3();
+    if (!finalize_status.ok()) {
+      return fail(finalize_status.ToString());
+    }
     return 0;
   };
   EXPECT_EXIT((::alarm(20), ::_exit(run_child())), ::testing::ExitedWithCode(0), "");
