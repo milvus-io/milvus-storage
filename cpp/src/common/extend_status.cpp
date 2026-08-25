@@ -371,17 +371,9 @@ milvus::SegcoreError ToSegcoreError(const arrow::Status& status) {
     return {milvus::MemAllocateFailed, status.ToString()};
   }
 
-  // Keep the historical persisted-data fallback while legacy producers still
-  // return bare Arrow Invalid/Type/Key errors. The public-API safety layer
-  // converts the remaining manifest and LOB producers to typed DataCorrupted
-  // details before removing this compatibility fallback.
-  if (status.IsInvalid() || status.IsTypeError() || status.IsKeyError()) {
-    return {milvus::DataFormatBroken, status.ToString()};
-  }
-
-  // No structured ExtendStatusDetail attached: plain filesystem IO already
-  // spent its lower-layer retry budget, so keep the conservative non-retryable
-  // storage verdict.
+  // No structured ExtendStatusDetail attached. Format-aware producers attach
+  // DataCorrupted explicitly; guessing from Invalid/Type/Key would mislabel
+  // caller preconditions and internal contract failures as broken data.
   return {milvus::StorageError, status.ToString()};
 }
 

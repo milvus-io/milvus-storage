@@ -66,13 +66,6 @@ enum class ExtendStatusCode : int16_t {
 #define MILVUS_STORAGE_EXTEND_STATUS_ENUM_ENTRY(name, code, symbol, category) name = (code),
   LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_EXTEND_STATUS_ENUM_ENTRY)
 #undef MILVUS_STORAGE_EXTEND_STATUS_ENUM_ENTRY
-
-      PackedStorageIO = PackedIO,
-  AwsErrorNoSuchUpload = StorageNoSuchUpload,
-  AwsErrorConflict = StorageConflict,
-  AwsErrorPreConditionFailed = StoragePreConditionFailed,
-  AwsErrorNotFound = StorageNotFound,
-  AwsErrorAccessDenied = StorageAccessDenied,
 };
 
 /// Every code must survive the round trip through its own underlying type. A
@@ -139,8 +132,6 @@ ErrorCategory CategoryForExtendStatusCode(ExtendStatusCode code);
 /// Conflict is false and replay safety is deliberately out of scope: the
 /// operation-aware caller decides what new work, if any, to submit.
 bool RetryableForExtendStatusCode(ExtendStatusCode code);
-
-inline bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code) { return RetryableForExtendStatusCode(code); }
 
 arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info = "");
 

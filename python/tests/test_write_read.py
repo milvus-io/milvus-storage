@@ -3,13 +3,16 @@ Integration tests for Writer and Reader classes.
 Tests the complete write/read cycle to verify data round-trips correctly.
 """
 
+import gc
 import shutil
 import tempfile
+import weakref
 
 import numpy as np
 import pyarrow as pa
 import pytest
 
+import milvus_storage.reader as reader_module
 from milvus_storage import Reader, Writer
 from milvus_storage.exceptions import InvalidArgumentError, ResourceError
 
@@ -126,6 +129,87 @@ def test_write_read_multiple_batches(fs_properties, sample_schema):
         assert all_ids == list(range(30))
         assert all_values == [float(i) * 1.1 for i in range(30)]
         assert all_texts == [f"text_{i}" for i in range(30)]
+
+
+def test_scan_schema_import_failure_destroys_native_handle(
+    fs_properties, sample_schema, monkeypatch
+):
+    """A PyArrow schema import failure must not leak the native reader."""
+    data = pa.record_batch([[1], [1.0], ["a"]], schema=sample_schema)
+    with Writer(BASE_DIR, sample_schema, properties=fs_properties) as writer:
+        writer.write(data)
+        column_groups = writer.close()
+
+    with Reader(column_groups, sample_schema, properties=fs_properties) as reader:
+        destroyed = []
+
+        class TrackingLibrary:
+            def __init__(self, native):
+                self._native = native
+
+            def __getattr__(self, name):
+                return getattr(self._native, name)
+
+            def loon_record_batch_reader_destroy(self, handle):
+                destroyed.append(int(reader._ffi.cast("uintptr_t", handle)))
+                self._native.loon_record_batch_reader_destroy(handle)
+
+        reader._lib = TrackingLibrary(reader._lib)
+        monkeypatch.setattr(
+            reader_module,
+            "_import_schema_from_c",
+            lambda *_args: (_ for _ in ()).throw(RuntimeError("import failed")),
+        )
+
+        with pytest.raises(RuntimeError, match="import failed"):
+            reader.scan()
+
+        assert len(destroyed) == 1
+
+
+def test_scan_retains_key_retriever_callback(fs_properties, sample_schema):
+    data = pa.record_batch([[1], [1.0], ["a"]], schema=sample_schema)
+    with Writer(BASE_DIR, sample_schema, properties=fs_properties) as writer:
+        writer.write(data)
+        column_groups = writer.close()
+
+    reader = Reader(column_groups, sample_schema, properties=fs_properties)
+    reader.set_key_retriever(lambda _metadata: "test-key")
+    callback_ref = weakref.ref(reader._key_retriever_callback)
+    batch_reader = reader.scan()
+
+    reader.close()
+    del reader
+    gc.collect()
+    assert callback_ref() is not None
+    assert sum(batch.num_rows for batch in batch_reader) == 1
+
+    del batch_reader
+    gc.collect()
+    assert callback_ref() is None
+
+
+def test_chunk_reader_retains_key_retriever_callback(fs_properties, sample_schema):
+    data = pa.record_batch([[1], [1.0], ["a"]], schema=sample_schema)
+    with Writer(BASE_DIR, sample_schema, properties=fs_properties) as writer:
+        writer.write(data)
+        column_groups = writer.close()
+
+    reader = Reader(column_groups, sample_schema, properties=fs_properties)
+    reader.set_key_retriever(lambda _metadata: "test-key")
+    callback_ref = weakref.ref(reader._key_retriever_callback)
+    chunk_reader = reader.get_chunk_reader(0)
+
+    reader.close()
+    del reader
+    gc.collect()
+    assert callback_ref() is not None
+    assert chunk_reader.get_number_of_chunks() > 0
+
+    chunk_reader.close()
+    del chunk_reader
+    gc.collect()
+    assert callback_ref() is None
 
 
 def test_write_read_with_take(fs_properties, sample_schema):

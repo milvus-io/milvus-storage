@@ -22,7 +22,9 @@ Example usage:
         except IOError:
             pass
 
-        # Retry should succeed (failnum exhausted)
+        # The failed writer is terminal. Retry with a new writer and a new path.
+        writer = Writer(retry_path, schema, properties)
+        writer.write(batch)
         writer.flush()
 
         # Cleanup

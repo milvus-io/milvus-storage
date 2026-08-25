@@ -18,7 +18,9 @@
 static void test_configure_storage_runtime_rejects_zero_threads(void) {
   LoonFFIResult rc = loon_configure_storage_runtime(0, 1);
   ck_assert_msg(!loon_ffi_is_success(&rc), "expected zero CPU thread count to fail");
-  ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
+  ck_assert_int_eq(rc.err_code, LOON_USER_INVALID_ARGUMENT);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), LOON_ERROR_CATEGORY_USER);
+  ck_assert(!loon_ffi_is_retryable_errcode(rc.err_code));
   loon_ffi_free_result(&rc);
 }
 

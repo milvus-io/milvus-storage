@@ -18,39 +18,23 @@
 
 namespace milvus_storage {
 
-#ifndef NDEBUG
-// use to measure execution time for debug builds
-//
-#define DEBUG_TIMER_START(name) auto name##_start = std::chrono::high_resolution_clock::now();
-#define DEBUG_TIMER_END(name)                                                                                \
-  auto name##_end = std::chrono::high_resolution_clock::now();                                               \
-  auto name##_duration = std::chrono::duration_cast<std::chrono::microseconds>(name##_end - name##_start);   \
-  std::cout << "Case-" << #name << " Execute time: (" << name##_duration.count() << " us), ("                \
-            << name##_duration.count() / 1000.0 << " ms), (" << name##_duration.count() / 1000000.0 << " s)" \
-            << std::endl;
-#endif
-
 #define CONCAT_IMPL(x, y) x##y
 
 #define CONCAT(x, y) CONCAT_IMPL(x, y)
 
-#if !defined(LIKELY) && !defined(UNLIKELY)
+#if !defined(UNLIKELY)
 #if defined(__has_builtin)
 #if __has_builtin(__builtin_expect)
-#define LIKELY(x) __builtin_expect(!!(x), 1)
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
-#define LIKELY(x)
 #define UNLIKELY(x)
 #endif
 #elif defined(__GNUC__) || defined(__clang__)
-#define LIKELY(x) __builtin_expect(!!(x), 1)
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
-#define LIKELY(x)
 #define UNLIKELY(x)
 #endif
-#endif  // LIKELY && UNLIKELY
+#endif  // UNLIKELY
 
 #ifndef NDEBUG
 

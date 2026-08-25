@@ -362,6 +362,26 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
   }
 }
 
+TEST_F(APIPropertiesTest, ffi_convert_rejects_malformed_arrays) {
+  milvus_storage::api::Properties converted{};
+
+  ::LoonProperties missing_array{nullptr, 1};
+  auto err = ConvertFFIProperties(converted, &missing_array);
+  ASSERT_NE(err, std::nullopt);
+  EXPECT_NE(err->find("properties must not be null"), std::string::npos);
+
+  ::LoonProperty entries[] = {
+      {nullptr, const_cast<char*>("value")},
+      {const_cast<char*>("key"), nullptr},
+  };
+  for (size_t i = 0; i < 2; ++i) {
+    ::LoonProperties malformed{entries + i, 1};
+    err = ConvertFFIProperties(converted, &malformed);
+    ASSERT_NE(err, std::nullopt);
+    EXPECT_NE(err->find("key and value must not be null"), std::string::npos);
+  }
+}
+
 TEST_F(APIPropertiesTest, invalid_cloud_provider_error) {
   const char* invalid_provider = "unknown-cloud-provider";
   milvus_storage::api::Properties pp{};

@@ -64,9 +64,15 @@ class MilvusSegmentWriter {
   private var handle: Long = 0
   private var isDestroyed: Boolean = false
 
+  private def ensureUsable(): Unit = {
+    if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
+    if (handle == 0) throw new IllegalStateException("Writer not initialized")
+  }
+
   def create(schemaPtr: Long, segmentPath: String,
              lobColumns: Seq[LobColumnConfig], propertiesPtr: Long): Unit = {
     if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
+    if (handle != 0) throw new IllegalStateException("Writer already initialized")
 
     val fieldIds = lobColumns.map(_.fieldId).toArray
     val basePaths = lobColumns.map(_.lobBasePath).toArray
@@ -84,14 +90,12 @@ class MilvusSegmentWriter {
   }
 
   def write(arrayPtr: Long): Unit = {
-    if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
-    if (handle == 0) throw new IllegalStateException("Writer not initialized")
+    ensureUsable()
     segmentWriterWrite(handle, arrayPtr)
   }
 
   def flush(): Unit = {
-    if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
-    if (handle == 0) throw new IllegalStateException("Writer not initialized")
+    ensureUsable()
     segmentWriterFlush(handle)
   }
 
@@ -101,8 +105,7 @@ class MilvusSegmentWriter {
    * Caller must commit via MilvusStorageTransaction.
    */
   def close(): SegmentWriteResult = {
-    if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
-    if (handle == 0) throw new IllegalStateException("Writer not initialized")
+    ensureUsable()
 
     // Pre-allocate output arrays for LOB files (max reasonable size)
     val maxLobFiles = 64
@@ -112,8 +115,17 @@ class MilvusSegmentWriter {
     val lobValidRows = new Array[Long](maxLobFiles)
     val lobFileSizes = new Array[Long](maxLobFiles)
 
-    val columnGroupsPtr = segmentWriterClose(handle, lobFieldIds, lobPaths,
-      lobTotalRows, lobValidRows, lobFileSizes)
+    // try/finally, not a bare sequence: if the native close throws, the handle
+    // must still be released. destroy() is what reaches loon_segment_writer_destroy,
+    // and that is where an abandoned writer's storage -- an S3 multipart upload
+    // whose parts no bucket listing shows -- gets released. Skipping it on the
+    // failure path leaked exactly the case the abort exists for.
+    val columnGroupsPtr = try {
+      segmentWriterClose(handle, lobFieldIds, lobPaths,
+        lobTotalRows, lobValidRows, lobFileSizes)
+    } finally {
+      destroy()
+    }
 
     // collect non-null LOB file results
     val lobFiles = lobPaths.zipWithIndex.takeWhile(_._1 != null).map { case (path, i) =>
@@ -124,9 +136,7 @@ class MilvusSegmentWriter {
   }
 
   def abort(): Unit = {
-    if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
-    if (handle == 0) throw new IllegalStateException("Writer not initialized")
-    segmentWriterAbort(handle)
+    destroy()
   }
 
   def destroy(): Unit = {
@@ -150,6 +160,5 @@ class MilvusSegmentWriter {
   @native private def segmentWriterClose(handle: Long,
       outLobFieldIds: Array[Long], outLobPaths: Array[String],
       outLobTotalRows: Array[Long], outLobValidRows: Array[Long], outLobFileSizes: Array[Long]): Long
-  @native private def segmentWriterAbort(handle: Long): Unit
   @native private def segmentWriterDestroy(handle: Long): Unit
 }

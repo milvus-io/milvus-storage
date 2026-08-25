@@ -744,13 +744,20 @@ std::optional<std::string> SetValue(Properties& properties,
 }
 
 std::optional<std::string> ConvertFFIProperties(Properties& result, const ::LoonProperties* properties) {
-  if (properties && properties->properties && properties->count > 0) {
-    for (size_t i = 0; i < properties->count; ++i) {
-      const auto& prop = properties->properties[i];
-      assert(prop.key && prop.value);
-      if (auto rc = SetValue(result, prop.key, prop.value, true); rc != std::nullopt) {
-        return rc;
-      }
+  if (properties == nullptr || properties->count == 0) {
+    return std::nullopt;
+  }
+  if (properties->properties == nullptr) {
+    return "properties must not be null when count is greater than zero";
+  }
+
+  for (size_t i = 0; i < properties->count; ++i) {
+    const auto& prop = properties->properties[i];
+    if (prop.key == nullptr || prop.value == nullptr) {
+      return "property key and value must not be null at index " + std::to_string(i);
+    }
+    if (auto rc = SetValue(result, prop.key, prop.value, true); rc != std::nullopt) {
+      return rc;
     }
   }
 

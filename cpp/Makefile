@@ -1,7 +1,6 @@
 .PHONY: build clean test test-all test-cloud-storage \
 	python-lib java-lib package \
 	fix-format check-format fix-tidy check-tidy \
-	check-error-ratchet update-error-ratchet \
 	aws gcp azure aliyun tencent huawei
 
 TEST_THREADS ?= 4
@@ -118,26 +117,32 @@ test-cloud-storage: build
 # Individual cloud provider targets
 aws gcp azure aliyun tencent huawei: test-cloud-storage
 
-# Source directories for formatting
+# Source directories for formatting.
+#
+# `.cc` is in the list because leaving it out is not hypothetical: azurefs.cc is
+# the repository's only .cc file, it is also one of the most-edited, and it sat
+# outside the gate long enough to drift 600 lines from the repo style while CI
+# stayed green. Keep FORMAT_PATTERN and FORMAT_DIRS as the single definition --
+# the two recipes below expand them rather than repeating the find, because
+# three hand-synchronised copies is how the hole appeared in the first place.
+# The prune is load-bearing, not tidiness: ./src contains the Rust bridge, and
+# cargo drops vendored third-party C headers under its target/ directory. Those
+# matched the pattern already, so `make check-format` failed on zstd's headers
+# on any tree where the bridge had been built. CI only stayed green because its
+# format job runs before anything populates target/.
 FORMAT_DIRS := ./src ./include ./test ./benchmark
-FORMAT_FIND = $(foreach dir,$(FORMAT_DIRS),\
-	find $(dir) -type f \( ! -name "*.pb.h" \) \( -iname "*.c" -o -iname "*.h" -o -iname "*.cpp" \))
+FORMAT_PRUNE := \( -name target -o -name build -o -name .git \) -prune -o
+FORMAT_PATTERN := \( ! -name "*.pb.h" \) \( -iname "*.c" -o -iname "*.cc" -o -iname "*.h" -o -iname "*.cpp" \)
 
 fix-format:
 	@set -e; for dir in $(FORMAT_DIRS); do \
-		find $$dir -type f \( ! -name "*.pb.h" \) \( -iname "*.c" -o -iname "*.h" -o -iname "*.cpp" \) -exec clang-format -i {} +; \
+		find $$dir $(FORMAT_PRUNE) -type f $(FORMAT_PATTERN) -exec clang-format -i {} +; \
 	done
 
 check-format:
 	@set -e; for dir in $(FORMAT_DIRS); do \
-		find $$dir -type f \( ! -name "*.pb.h" \) \( -iname "*.c" -o -iname "*.h" -o -iname "*.cpp" \) -exec clang-format --dry-run --Werror {} +; \
+		find $$dir $(FORMAT_PRUNE) -type f $(FORMAT_PATTERN) -exec clang-format --dry-run --Werror {} +; \
 	done
-
-check-error-ratchet:
-	@bash scripts/error_handling_ratchet.sh check
-
-update-error-ratchet:
-	@bash scripts/error_handling_ratchet.sh update
 
 check-tidy:
 	python3 ./scripts/run-clang-tidy.py -p build/${build_type}

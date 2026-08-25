@@ -31,6 +31,7 @@ from ._ffi import column_groups_debug_string, manifest_debug_string
 from .common import ThreadPool
 from .exceptions import (
     ArrowError,
+    ErrorCategory,
     FFIError,
     InvalidArgumentError,
     MilvusStorageError,
@@ -99,6 +100,7 @@ __all__ = [
     "ArrowError",
     "InvalidArgumentError",
     "ResourceError",
+    "ErrorCategory",
     # Fault Injection
     "FaultInjector",
     "is_fiu_enabled",

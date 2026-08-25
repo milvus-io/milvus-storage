@@ -90,10 +90,6 @@ lazy val root = (project in file("."))
       "--add-opens=java.base/java.nio=ALL-UNNAMED"
     ),
 
-    Test / envVars := Map(
-      "LD_PRELOAD" -> s"${baseDirectory.value}/../cpp/build/Release/libmilvus-storage.so"
-    ),
-
     // Include native libraries in resources for fat jar
     Compile / unmanagedResourceDirectories += baseDirectory.value / "native",
 

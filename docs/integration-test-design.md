@@ -85,8 +85,8 @@ cd cpp && conan install . -o "&:with_fiu=True" && make python-lib
 
 // Usage in C++ code:
 arrow::Status PackedRecordBatchWriter::Close() {
-    FIU_RETURN_ON(loon_fiu_key_writer_close_fail,
-                  arrow::Status::IOError(fmt::format("Injected fault: {}", loon_fiu_key_writer_close_fail)));
+    FIU_RETURN_ON(loon_fiukey_writer_close_fail,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", loon_fiukey_writer_close_fail)));
     // ... normal close logic
 }
 ```
@@ -95,24 +95,32 @@ arrow::Status PackedRecordBatchWriter::Close() {
 
 | Constant | Value | Location | Description |
 |----------|-------|----------|-------------|
-| `loon_fiu_key_writer_flush_fail` | `writer.flush.fail` | PackedRecordBatchWriter::flushRemainingBuffer | Fail during flush |
-| `loon_fiu_key_writer_close_fail` | `writer.close.fail` | PackedRecordBatchWriter::Close | Fail during close |
-| `loon_fiu_key_manifest_commit_fail` | `manifest.commit.fail` | Transaction::Commit | Fail during commit |
-| `loon_fiu_key_manifest_read_fail` | `manifest.read.fail` | Transaction::Open | Fail during manifest read |
-| `loon_fiu_key_fs_write_fail` | `fs.write.fail` | FilesystemWriter::Write | Fail during file write |
+| `loon_fiukey_writer_flush_fail` | `writer.flush.fail` | PackedRecordBatchWriter::flushRemainingBuffer | Fail during flush |
+| `loon_fiukey_writer_close_fail` | `writer.close.fail` | PackedRecordBatchWriter::Close | Fail during close |
+| `loon_fiukey_manifest_commit_fail` | `manifest.commit.fail` | Transaction::Commit | Fail during commit |
+| `loon_fiukey_manifest_read_fail` | `manifest.read.fail` | Transaction::Open | Fail during manifest read |
+| `loon_fiukey_fs_open_output_fail` | `fs.open_output.fail` | Filesystem open-for-write | Fail opening an output stream |
+| `loon_fiukey_fs_open_input_fail` | `fs.open_input.fail` | Filesystem open-for-read | Fail opening an input stream |
+| `loon_fiukey_s3fs_writer_write_fail` | `s3fs.writer.write.fail` | S3 output stream `Write` | Fail during an S3 part write |
+
+This is a selection, not the whole set. `cpp/include/milvus-storage/common/fiu_local.h`
+is the authoritative list — it also carries the multipart-upload points
+(`s3fs.create_upload.fail`, `s3fs.part_upload.fail`, `s3fs.complete_upload.fail`),
+the reader points and `sleep.before.commit.manifest`.
 
 **FFI Interface (cpp/include/milvus-storage/ffi_fiu_c.h):**
 
 ```c
 // Fault point name constants (extern const char*)
-extern const char* loon_fiu_key_writer_flush_fail;   // "writer.flush.fail"
-extern const char* loon_fiu_key_writer_close_fail;   // "writer.close.fail"
-extern const char* loon_fiu_key_manifest_commit_fail; // "manifest.commit.fail"
-extern const char* loon_fiu_key_manifest_read_fail;  // "manifest.read.fail"
-extern const char* loon_fiu_key_fs_write_fail;       // "fs.write.fail"
+extern const char* loon_fiukey_writer_flush_fail;    // "writer.flush.fail"
+extern const char* loon_fiukey_writer_close_fail;    // "writer.close.fail"
+extern const char* loon_fiukey_manifest_commit_fail; // "manifest.commit.fail"
+extern const char* loon_fiukey_manifest_read_fail;   // "manifest.read.fail"
+extern const char* loon_fiukey_fs_open_output_fail;  // "fs.open_output.fail"
 
-// FFI functions
-FFI_EXPORT LoonFFIResult loon_fiu_enable(const char* name, uint32_t name_len, int failnum);
+// FFI functions. `one_time` non-zero fires the point once and then disarms it;
+// zero leaves it armed until disabled.
+FFI_EXPORT LoonFFIResult loon_fiu_enable(const char* name, uint32_t name_len, int one_time);
 FFI_EXPORT LoonFFIResult loon_fiu_disable(const char* name, uint32_t name_len);
 FFI_EXPORT void loon_fiu_disable_all(void);
 FFI_EXPORT int loon_fiu_is_enabled(void);
@@ -120,19 +128,27 @@ FFI_EXPORT int loon_fiu_is_enabled(void);
 
 **Python API (python/milvus_storage/fiu.py):**
 
+The constants are **not** hardcoded strings — they are read from the loaded
+library at class-initialisation time, so a key renamed in C cannot silently
+diverge here.
+
 ```python
 from milvus_storage.fiu import FaultInjector, is_fiu_enabled
 
 class FaultInjector:
-    # Fault point constants
-    WRITER_FLUSH_FAIL = "writer.flush.fail"
-    WRITER_CLOSE_FAIL = "writer.close.fail"
-    MANIFEST_COMMIT_FAIL = "manifest.commit.fail"
-    MANIFEST_READ_FAIL = "manifest.read.fail"
-    FS_WRITE_FAIL = "fs.write.fail"
+    # Populated from the FFI library; empty until the class initialises.
+    WRITER_WRITE_FAIL: str
+    WRITER_FLUSH_FAIL: str
+    WRITER_CLOSE_FAIL: str
+    MANIFEST_COMMIT_FAIL: str
+    MANIFEST_READ_FAIL: str
+    FS_OPEN_OUTPUT_FAIL: str
+    FS_OPEN_INPUT_FAIL: str
+    S3FS_CREATE_UPLOAD_FAIL: str
+    # ... see fiu.py for the rest
 
     def is_enabled(self) -> bool: ...
-    def enable(self, name: str, failnum: int = 1) -> None: ...
+    def enable(self, name: str, one_time: bool = True) -> None: ...
     def disable(self, name: str) -> None: ...
     def disable_all(self) -> None: ...
 ```
@@ -158,19 +174,30 @@ def require_fiu(fiu: FaultInjector) -> FaultInjector:
 **Usage Example:**
 
 ```python
-def test_recovery_after_flush_fail(require_fiu):
-    # Enable fault point (fail once)
-    require_fiu.enable(FaultInjector.WRITER_FLUSH_FAIL, failnum=1)
+def test_recovery_after_flush_fail(require_fiu, tmp_path):
+    # Arm the fault point for a single firing, so the retry below can succeed.
+    require_fiu.enable(FaultInjector.WRITER_FLUSH_FAIL, one_time=True)
 
+    path = str(tmp_path / "attempt-1")
     writer = Writer(path, schema, properties)
     writer.write(batch)
 
-    with pytest.raises(IOError):
+    with pytest.raises(MilvusStorageError):
         writer.flush()  # Fails here
 
-    # Retry should succeed (failnum exhausted)
-    writer.flush()
-    writer.close()
+    # The failed writer is terminal: every later call returns this same failure.
+    # Close it anyway -- that is what releases what it holds in the store (an S3
+    # multipart upload no bucket listing can name). Close on a failed writer
+    # abandons rather than finalizes, so it re-raises the original failure.
+    with pytest.raises(MilvusStorageError):
+        writer.close()
+
+    # Retry means a NEW writer on a NEW path, never a reused handle.
+    retry_path = str(tmp_path / "attempt-2")
+    retry_writer = Writer(retry_path, schema, properties)
+    retry_writer.write(batch)
+    retry_writer.flush()
+    retry_writer.close()
 ```
 
 ### Test Data Dependencies

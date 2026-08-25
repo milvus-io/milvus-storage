@@ -254,6 +254,26 @@ TEST(ErrorTaxonomyTest, ExportedConstantsMatchMacros) {
   EXPECT_EQ(loon_error_category_system, LOON_ERROR_CATEGORY_SYSTEM);
 }
 
+TEST(ErrorTaxonomyTest, ExternalSourceMapsTerminalAccessFailures) {
+  auto not_found = MakeExtendError(ExtendStatusCode::StorageNotFound, "missing");
+  EXPECT_EQ(ExternalSourceErrorCodeFromStatus(not_found), LOON_SOURCE_INVALID);
+
+  auto denied = MakeExtendError(ExtendStatusCode::StorageAccessDenied, "denied");
+  EXPECT_EQ(ExternalSourceErrorCodeFromStatus(denied), LOON_SOURCE_INVALID);
+
+  auto config = MakeExtendError(ExtendStatusCode::StorageConfigInvalid, "bad location");
+  EXPECT_EQ(ExternalSourceErrorCodeFromStatus(config), LOON_SOURCE_INVALID);
+
+  auto bucket = MakeExtendError(ExtendStatusCode::StorageBucketNotFound, "missing bucket");
+  EXPECT_EQ(ExternalSourceErrorCodeFromStatus(bucket), LOON_SOURCE_INVALID);
+
+  auto throttled = MakeExtendError(ExtendStatusCode::StorageTransientThrottling, "slow down");
+  EXPECT_EQ(ExternalSourceErrorCodeFromStatus(throttled), LOON_TRANSIENT_THROTTLING);
+  EXPECT_TRUE(loon_ffi_is_retryable_errcode(ExternalSourceErrorCodeFromStatus(throttled)));
+
+  EXPECT_EQ(ExternalSourceErrorCodeFromStatus(arrow::Status::Invalid("plain"), LOON_LOGICAL_ERROR), LOON_LOGICAL_ERROR);
+}
+
 // Documented divergences from AWS's own client/server split. Pinned so that
 // changing one is a deliberate edit to both the table and docs/error-codes.md.
 TEST(ErrorTaxonomyTest, DocumentedDivergencesFromAws) {
@@ -428,13 +448,24 @@ TEST(ErrorTaxonomyTest, ArrowCodeIsMappedOnlyWhereItIsUnambiguous) {
   EXPECT_EQ(FFIErrorCodeFromExtendStatus(corrupt, LOON_ARROW_ERROR), LOON_DATA_CORRUPTED);
 }
 
-TEST(ErrorTaxonomyTest, LegacyPlainArrowFallbackRemainsUntilProducersAreTyped) {
-  EXPECT_EQ(ToSegcoreError(arrow::Status::Invalid("bad manifest")).get_error_code(), milvus::DataFormatBroken);
-  EXPECT_EQ(ToSegcoreError(arrow::Status::TypeError("bad encoded type")).get_error_code(), milvus::DataFormatBroken);
-  EXPECT_EQ(ToSegcoreError(arrow::Status::KeyError("missing encoded field")).get_error_code(),
-            milvus::DataFormatBroken);
-  EXPECT_EQ(ToSegcoreError(arrow::Status::IOError("connection reset")).get_error_code(), milvus::StorageError);
-  EXPECT_EQ(ToSegcoreError(arrow::Status::UnknownError("something")).get_error_code(), milvus::StorageError);
+TEST(ErrorTaxonomyTest, CoarseFallbackNeverClaimsDataFormat) {
+  const arrow::Status unclassified[] = {
+      arrow::Status::Invalid("Cannot add null column group"),
+      arrow::Status::Invalid("batch schema does not match writer schema"),
+      arrow::Status::TypeError("unexpected arrow type"),
+      arrow::Status::KeyError("missing key"),
+      arrow::Status::IOError("connection reset"),
+      arrow::Status::UnknownError("something"),
+  };
+  for (const auto& status : unclassified) {
+    ASSERT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr) << status.ToString();
+    EXPECT_NE(ToSegcoreError(status).get_error_code(), milvus::DataFormatBroken) << status.ToString();
+  }
+
+  for (auto format_error : {ExtendStatusCode::PackedMetadataCorrupted, ExtendStatusCode::PackedFileCorrupted,
+                            ExtendStatusCode::DataCorrupted, ExtendStatusCode::VortexDataFormat}) {
+    EXPECT_EQ(ToSegcoreError(MakeExtendError(format_error, "bad bytes")).get_error_code(), milvus::DataFormatBroken);
+  }
 }
 
 }  // namespace milvus_storage::test

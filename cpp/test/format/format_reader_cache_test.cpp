@@ -22,6 +22,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -32,8 +33,10 @@
 #include <vector>
 
 #include <arrow/api.h>
+#include <unistd.h>
 
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/format_reader_cache.h"
 #include "milvus-storage/format/iceberg/iceberg_common.h"
@@ -51,6 +54,16 @@
 
 namespace milvus_storage::test {
 namespace {
+
+void IsolateDeathTestCoverageFiles() {
+  const auto prefix = "/tmp/milvus-storage-death-test-gcov-" + std::to_string(getpid());
+  (void)setenv("GCOV_PREFIX", prefix.c_str(), 1);
+}
+
+bool HasExtendStatusCode(const arrow::Status& status, ExtendStatusCode code) {
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  return detail && detail->code() == code;
+}
 
 using TestMetadataCaches = FormatReaderMetadataCaches<parquet::ParquetFormatReader,
                                                       vortex::VortexFormatReader,
@@ -546,8 +559,19 @@ arrow::Status RunAsyncFailuresDoNotPoisonCacheAndAllowRetry(const std::shared_pt
       std::move(cache->get_or_open_async("async-null", []() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
         return folly::makeSemiFuture(arrow::Result<MetadataPtr>(MetadataPtr{}));
       })).get();
-  if (!null_result.status().IsInvalid() || cache->get("async-null").has_value()) {
-    return arrow::Status::Invalid("async null metadata poisoned cache");
+  if (!null_result.status().IsIOError() ||
+      !HasExtendStatusCode(null_result.status(), ExtendStatusCode::InternalInvariantViolated) ||
+      cache->get("async-null").has_value()) {
+    return arrow::Status::Invalid("async null metadata did not report an invariant or poisoned cache");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(
+      auto retried_null,
+      std::move(cache->get_or_open_async("async-null", [&]() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+        return folly::makeSemiFuture(arrow::Result<MetadataPtr>(metadata));
+      })).get());
+  if (retried_null.get() != metadata.get()) {
+    return arrow::Status::Invalid("async null metadata retry returned unexpected pointer");
   }
 
   auto exception_result =
@@ -571,6 +595,44 @@ arrow::Status RunAsyncFailuresDoNotPoisonCacheAndAllowRetry(const std::shared_pt
 }
 
 }  // namespace
+
+TEST(FormatReaderMetadataCacheTest, AllocationFailureIsFailStopInsteadOfLeavingAFlightPending) {
+  using MetadataPtr = ParquetMetadataCache::MetadataPtr;
+
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  // Set this in the parent before GoogleTest re-execs the death-test child.
+  // libgcov reads GCOV_PREFIX during process startup, so setting it inside the
+  // child statement is too late and makes parent/child corrupt the same .gcda.
+  IsolateDeathTestCoverageFiles();
+  EXPECT_DEATH_IF_SUPPORTED(
+      {
+        auto cache = ParquetMetadataCache::Make();
+        (void)cache->get_or_open("sync-bad-alloc", []() -> arrow::Result<MetadataPtr> { throw std::bad_alloc(); });
+      },
+      "");
+
+  EXPECT_DEATH_IF_SUPPORTED(
+      {
+        auto cache = ParquetMetadataCache::Make();
+        (void)std::move(cache->get_or_open_async("async-future-bad-alloc",
+                                                 []() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+                                                   return folly::makeSemiFuture<arrow::Result<MetadataPtr>>(
+                                                       folly::make_exception_wrapper<std::bad_alloc>());
+                                                 }))
+            .get();
+      },
+      "");
+
+  EXPECT_DEATH_IF_SUPPORTED(
+      {
+        auto cache = ParquetMetadataCache::Make();
+        (void)std::move(
+            cache->get_or_open_async("async-call-bad-alloc",
+                                     []() -> folly::SemiFuture<arrow::Result<MetadataPtr>> { throw std::bad_alloc(); }))
+            .get();
+      },
+      "");
+}
 
 class FormatReaderMetadataCacheParamTest : public ::testing::TestWithParam<std::string> {};
 
@@ -972,7 +1034,9 @@ TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenNullMetadataDoesNotPoisonCac
       ++loader_calls;
       return typename CacheT::MetadataPtr{};
     });
-    EXPECT_TRUE(failed.status().IsInvalid()) << failed.status().ToString();
+    EXPECT_TRUE(failed.status().IsIOError()) << failed.status().ToString();
+    EXPECT_TRUE(HasExtendStatusCode(failed.status(), ExtendStatusCode::InternalInvariantViolated))
+        << failed.status().ToString();
     EXPECT_FALSE(cache->get(key).has_value());
 
     ARROW_ASSIGN_OR_RAISE(auto retried_metadata,

@@ -14,6 +14,8 @@
 
 #include "milvus-storage/segment/segment_reader.h"
 
+#include "milvus-storage/common/extend_status.h"
+
 #include <arrow/array/builder_binary.h>
 #include <arrow/array/builder_primitive.h>
 #include <arrow/table.h>
@@ -30,18 +32,29 @@
 
 namespace milvus_storage::segment {
 
-// wrapper that auto-resolves LOB references (TEXT or BINARY) in each batch
+using LobReaderMap = std::unordered_map<int, std::unique_ptr<lob_column::LobColumnReader>>;
+
+struct SegmentReaderState {
+  LobReaderMap lob_readers;
+  bool closed = false;
+};
+
+// wrapper that follows the parent SegmentReader lifetime and auto-resolves LOB
+// references (TEXT or BINARY) in each batch
 class LobResolvingRecordBatchReader : public arrow::RecordBatchReader {
   public:
-  LobResolvingRecordBatchReader(
-      std::shared_ptr<arrow::RecordBatchReader> inner,
-      std::shared_ptr<arrow::Schema> resolved_schema,
-      const std::unordered_map<int, std::unique_ptr<lob_column::LobColumnReader>>& lob_readers)
-      : inner_(std::move(inner)), resolved_schema_(std::move(resolved_schema)), lob_readers_(lob_readers) {}
+  LobResolvingRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner,
+                                std::shared_ptr<arrow::Schema> resolved_schema,
+                                std::shared_ptr<SegmentReaderState> state)
+      : inner_(std::move(inner)), resolved_schema_(std::move(resolved_schema)), state_(std::move(state)) {}
 
   std::shared_ptr<arrow::Schema> schema() const override { return resolved_schema_; }
 
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override {
+    if (state_->closed) {
+      return arrow::Status::Invalid("SegmentReader stream was used after parent close");
+    }
+
     std::shared_ptr<arrow::RecordBatch> storage_batch;
     ARROW_RETURN_NOT_OK(inner_->ReadNext(&storage_batch));
 
@@ -54,11 +67,11 @@ class LobResolvingRecordBatchReader : public arrow::RecordBatchReader {
     columns.reserve(storage_batch->num_columns());
 
     for (int i = 0; i < storage_batch->num_columns(); i++) {
-      auto it = lob_readers_.find(i);
-      if (it != lob_readers_.end()) {
+      auto it = state_->lob_readers.find(i);
+      if (it != state_->lob_readers.end()) {
         auto ref_array = std::dynamic_pointer_cast<arrow::BinaryArray>(storage_batch->column(i));
         if (!ref_array) {
-          return arrow::Status::Invalid("expected BinaryArray for LOB column reference");
+          return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "expected BinaryArray for LOB column reference");
         }
         ARROW_ASSIGN_OR_RAISE(auto resolved_array, it->second->ReadArrowArray(ref_array));
         columns.push_back(std::static_pointer_cast<arrow::Array>(resolved_array));
@@ -74,7 +87,7 @@ class LobResolvingRecordBatchReader : public arrow::RecordBatchReader {
   private:
   std::shared_ptr<arrow::RecordBatchReader> inner_;
   std::shared_ptr<arrow::Schema> resolved_schema_;
-  const std::unordered_map<int, std::unique_ptr<lob_column::LobColumnReader>>& lob_readers_;
+  std::shared_ptr<SegmentReaderState> state_;
 };
 
 // implementation of SegmentReader
@@ -94,6 +107,7 @@ class SegmentReaderImpl : public SegmentReader {
         extracted_columns_(std::move(extracted_columns)),
         config_(config),
         lob_column_indices_(std::move(lob_column_indices)),
+        state_(std::make_shared<SegmentReaderState>()),
         closed_(false),
         total_rows_(0) {}
 
@@ -118,18 +132,18 @@ class SegmentReaderImpl : public SegmentReader {
     // create LobColumnReaders for each TEXT column in extracted columns
     for (int extracted_idx : lob_column_indices_) {
       auto field = extracted_schema_->field(extracted_idx);
-      auto field_id = GetFieldId(field);
+      ARROW_ASSIGN_OR_RAISE(auto field_id, TryGetFieldId(field));
       if (field_id < 0) {
         return arrow::Status::Invalid("TEXT column must have a valid field_id in metadata");
       }
 
       auto it = config_.lob_columns.find(field_id);
       if (it == config_.lob_columns.end()) {
-        return arrow::Status::Invalid("TEXT column config not found for field_id: " + std::to_string(field_id));
+        return arrow::Status::Invalid("TEXT column config not found for field_id: ", field_id);
       }
 
       ARROW_ASSIGN_OR_RAISE(auto text_reader, lob_column::CreateLobColumnReader(fs_, it->second));
-      lob_readers_[extracted_idx] = std::move(text_reader);
+      state_->lob_readers[extracted_idx] = std::move(text_reader);
     }
 
     // get record batch reader for sequential access
@@ -140,7 +154,7 @@ class SegmentReaderImpl : public SegmentReader {
 
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override {
     if (closed_) {
-      return arrow::Status::Invalid("reader is closed");
+      return arrow::Status::Invalid("SegmentReader was used after close");
     }
 
     // read from underlying reader
@@ -163,7 +177,7 @@ class SegmentReaderImpl : public SegmentReader {
   arrow::Result<std::shared_ptr<arrow::Table>> Take(const std::vector<int64_t>& row_indices,
                                                     size_t parallelism) override {
     if (closed_) {
-      return arrow::Status::Invalid("reader is closed");
+      return arrow::Status::Invalid("SegmentReader was used after close");
     }
 
     if (row_indices.empty()) {
@@ -208,8 +222,9 @@ class SegmentReaderImpl : public SegmentReader {
       return arrow::Status::OK();
     }
 
-    // close LobColumnReaders
-    for (auto& [idx, reader] : lob_readers_) {
+    // Invalidate already returned streams before closing their shared LOB readers.
+    state_->closed = true;
+    for (auto& [idx, reader] : state_->lob_readers) {
       ARROW_RETURN_NOT_OK(reader->Close());
     }
 
@@ -221,24 +236,17 @@ class SegmentReaderImpl : public SegmentReader {
 
   arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> GetStream(const std::string& predicate) override {
     if (closed_) {
-      return arrow::Status::Invalid("reader is closed");
+      return arrow::Status::Invalid("SegmentReader was used after close");
     }
 
     ARROW_ASSIGN_OR_RAISE(auto inner, reader_->get_record_batch_reader(predicate));
-
-    if (lob_readers_.empty()) {
-      // no TEXT columns, return inner reader directly
-      return inner;
-    }
-
-    // wrap with LOB-resolving reader
-    return std::make_shared<LobResolvingRecordBatchReader>(std::move(inner), extracted_schema_, lob_readers_);
+    return std::make_shared<LobResolvingRecordBatchReader>(std::move(inner), extracted_schema_, state_);
   }
 
   arrow::Result<std::unique_ptr<api::ChunkReader>> GetChunkReader(
       int64_t column_group_index, const std::shared_ptr<std::vector<std::string>>& needed_columns) override {
     if (closed_) {
-      return arrow::Status::Invalid("reader is closed");
+      return arrow::Status::Invalid("SegmentReader was used after close");
     }
     return reader_->get_chunk_reader(column_group_index, needed_columns);
   }
@@ -249,7 +257,7 @@ class SegmentReaderImpl : public SegmentReader {
   // resolve LOB columns (TEXT or BINARY) from LOBReferences to actual data
   arrow::Result<std::shared_ptr<arrow::RecordBatch>> ResolveLobColumns(
       const std::shared_ptr<arrow::RecordBatch>& storage_batch) {
-    if (lob_readers_.empty()) {
+    if (state_->lob_readers.empty()) {
       // no LOB columns, return as-is but with extracted schema
       return arrow::RecordBatch::Make(extracted_schema_, storage_batch->num_rows(), storage_batch->columns());
     }
@@ -258,12 +266,12 @@ class SegmentReaderImpl : public SegmentReader {
     columns.reserve(storage_batch->num_columns());
 
     for (int i = 0; i < storage_batch->num_columns(); i++) {
-      auto it = lob_readers_.find(i);
-      if (it != lob_readers_.end()) {
+      auto it = state_->lob_readers.find(i);
+      if (it != state_->lob_readers.end()) {
         // LOB column: resolve LOBReference to actual data (utf8 text or binary)
         auto ref_array = std::dynamic_pointer_cast<arrow::BinaryArray>(storage_batch->column(i));
         if (!ref_array) {
-          return arrow::Status::Invalid("expected BinaryArray for LOB column reference");
+          return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "expected BinaryArray for LOB column reference");
         }
         ARROW_ASSIGN_OR_RAISE(auto resolved_array, it->second->ReadArrowArray(ref_array));
         columns.push_back(std::static_pointer_cast<arrow::Array>(resolved_array));
@@ -283,6 +291,7 @@ class SegmentReaderImpl : public SegmentReader {
   std::vector<std::string> extracted_columns_;
   SegmentReaderConfig config_;
   std::vector<int> lob_column_indices_;
+  std::shared_ptr<SegmentReaderState> state_;
 
   bool closed_;
   int64_t total_rows_;
@@ -290,9 +299,6 @@ class SegmentReaderImpl : public SegmentReader {
   std::shared_ptr<api::ColumnGroups> column_groups_;
   std::unique_ptr<api::Reader> reader_;
   std::shared_ptr<arrow::RecordBatchReader> batch_reader_;
-
-  // LOB column readers (TEXT or BINARY), keyed by index in extracted schema
-  std::unordered_map<int, std::unique_ptr<lob_column::LobColumnReader>> lob_readers_;
 };
 
 // helper function to build schemas and identify LOB columns for extraction
@@ -320,11 +326,12 @@ BuildSchemasForExtraction(const std::shared_ptr<arrow::Schema>& original_schema,
       continue;
     }
 
-    if (lob_columns.count(GetFieldId(field)) > 0) {
+    ARROW_ASSIGN_OR_RAISE(auto field_id, TryGetFieldId(field));
+    if (lob_columns.count(field_id) > 0) {
       // LOB column: extracted schema keeps original type (utf8 for TEXT, binary for BINARY LOB),
       // storage schema always uses binary for LOBReferences
       extracted_fields.push_back(field);  // keep original type
-      auto storage_field = arrow::field(field->name(), arrow::binary(), field->nullable(), field->metadata()->Copy());
+      auto storage_field = arrow::field(field->name(), arrow::binary(), field->nullable(), field->metadata());
       storage_fields.push_back(storage_field);
       lob_column_indices.push_back(extracted_idx);
     } else {

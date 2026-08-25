@@ -44,12 +44,6 @@
     loon_errcode_storage_bucket_not_found;
     loon_errcode_vortex_data_format;
     loon_errcode_internal_invariant;
-    loon_errcode_aws_no_such_upload;
-    loon_errcode_aws_conflict;
-    loon_errcode_aws_precondition_failed;
-    loon_errcode_aws_not_found;
-    loon_errcode_aws_access_denied;
-
     # Properties interface
     loon_properties_create;
     loon_properties_get;
@@ -135,6 +129,9 @@
     loon_reader_new;
     loon_reader_set_keyretriever;
     loon_get_record_batch_reader;
+    loon_record_batch_reader_new;
+    loon_record_batch_reader_read_next;
+    loon_record_batch_reader_destroy;
     loon_get_chunk_reader;
     loon_take;
     loon_reader_destroy;

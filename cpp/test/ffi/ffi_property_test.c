@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <stdint.h>
 #include <unistd.h>
 
 enum { PROPERTIES_TEST_COUNT = 10, PROPERTIES_TEST_KVSIZE = 10 };
@@ -117,6 +118,32 @@ static void test_properties_create_null_kvs(void) {
   free_properties_test_kvs(test_key, test_val);
 }
 
+static void test_properties_create_empty(void) {
+  LoonProperties rp;
+  LoonFFIResult rc = loon_properties_create(NULL, NULL, 0, &rp);
+
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert(rp.properties == NULL);
+  ck_assert(rp.count == 0);
+  loon_ffi_free_result(&rc);
+  loon_properties_free(&rp);
+}
+
+static void test_properties_create_rejects_count_overflow(void) {
+  const char* key = "key";
+  const char* value = "value";
+  LoonProperties properties = {0};
+  const size_t overflowing_count = SIZE_MAX / sizeof(LoonProperty) + 1;
+
+  LoonFFIResult rc = loon_properties_create(&key, &value, overflowing_count, &properties);
+
+  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  ck_assert(properties.properties == NULL);
+  ck_assert(properties.count == 0);
+  loon_ffi_free_result(&rc);
+}
+
 static void test_properties_create_null_kv(void) {
   LoonFFIResult rc;
   LoonProperties rp;
@@ -132,6 +159,8 @@ static void test_properties_create_null_kv(void) {
 
   rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
   ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_system);
   loon_ffi_free_result(&rc);
   loon_properties_free(&rp);
 
@@ -144,6 +173,8 @@ static void test_properties_create_null_kv(void) {
 
   rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
   ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_system);
   loon_ffi_free_result(&rc);
   loon_properties_free(&rp);
 
@@ -196,6 +227,8 @@ static void test_properties_create_dup_kv(void) {
 
   rc = loon_properties_create(test_key, test_val, 2, &rp);
   ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, loon_errcode_user_invalid_argument);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
   // printf("rc message: %s\n", loon_ffi_get_errmsg(&rc));
   loon_ffi_free_result(&rc);
   loon_properties_free(&rp);
@@ -207,6 +240,8 @@ static void test_properties_create_dup_kv(void) {
 void run_properties_suite(void) {
   RUN_TEST(test_basic);
   RUN_TEST(test_properties_create_multi_kvs);
+  RUN_TEST(test_properties_create_empty);
+  RUN_TEST(test_properties_create_rejects_count_overflow);
   RUN_TEST(test_properties_create_null_kvs);
   RUN_TEST(test_properties_create_null_kv);
   RUN_TEST(test_properties_create_dup_kv);

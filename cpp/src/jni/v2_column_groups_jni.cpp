@@ -130,7 +130,14 @@ Java_io_milvus_storage_MilvusStorageColumnGroupsNative_createFromGroups(JNIEnv* 
 
       const jsize num_rcs = env->GetArrayLength(jrcs);
       row_counts[g].resize(num_rcs);
-      env->GetLongArrayRegion(jrcs, 0, num_rcs, reinterpret_cast<jlong*>(row_counts[g].data()));
+      std::vector<jlong> java_row_counts(static_cast<size_t>(num_rcs));
+      env->GetLongArrayRegion(jrcs, 0, num_rcs, java_row_counts.data());
+      if (env->ExceptionCheck()) {
+        return 0;
+      }
+      for (jsize i = 0; i < num_rcs; ++i) {
+        row_counts[g][static_cast<size_t>(i)] = static_cast<int64_t>(java_row_counts[static_cast<size_t>(i)]);
+      }
 
       env->DeleteLocalRef(jcols);
       env->DeleteLocalRef(jfiles);

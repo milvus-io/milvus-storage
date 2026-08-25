@@ -23,8 +23,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageProperties_allocateP
   try {
     LoonProperties* properties = static_cast<LoonProperties*>(malloc(sizeof(LoonProperties)));
     if (properties == nullptr) {
-      jclass exc_class = env->FindClass("java/lang/OutOfMemoryError");
-      env->ThrowNew(exc_class, "Failed to allocate memory for Properties");
+      ThrowJavaException(env, "java/lang/RuntimeException", "Unexpected native allocation failure for Properties");
       return -1;
     }
 

@@ -50,13 +50,6 @@ LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_ERRCODE_DECL)
 // Retired producer code retained as a C ABI tombstone.
 FFI_EXPORT extern const int loon_errcode_packed_arrow_error;
 
-// Compatibility names for the original AWS-specific object-store codes.
-FFI_EXPORT extern const int loon_errcode_aws_no_such_upload;
-FFI_EXPORT extern const int loon_errcode_aws_conflict;
-FFI_EXPORT extern const int loon_errcode_aws_precondition_failed;
-FFI_EXPORT extern const int loon_errcode_aws_not_found;
-FFI_EXPORT extern const int loon_errcode_aws_access_denied;
-
 // usage example(caller must free the message string):
 //
 // LoonFFIResult result = SomeFFIFunction(...);
@@ -479,10 +472,14 @@ FFI_EXPORT LoonFFIResult loon_writer_flush(LoonWriterHandle handle);
 /**
  * @brief Closes the writer and returns the column groups for a successfully written dataset.
  *
- * If an earlier write or flush reached the writer and failed, close abandons
- * pending outputs, releases writer-owned resources, and returns the first
- * recorded failure instead of publishing column groups. Call close after a
- * writer operation fails so resources such as multipart uploads are released.
+ * A healthy writer is finalized and publishes its column groups. If an earlier
+ * write or flush failed, close abandons pending outputs, releases writer-owned
+ * resources, and returns the first failure unchanged. No column groups are
+ * produced on that failure path.
+ *
+ * Call close after a writer operation fails so resources such as multipart
+ * uploads are released promptly. `loon_writer_destroy` is still mandatory and
+ * aborts a writer that was never closed.
  *
  * @param handle Writer handle
  * @param out_columngroups Output LoonColumnGroups structure (function allocates and returns pointer)
@@ -496,7 +493,12 @@ FFI_EXPORT LoonFFIResult loon_writer_close(LoonWriterHandle handle,
                                            LoonColumnGroups** out_columngroups);
 
 /**
- * @brief Destroys a Writer
+ * @brief Destroys a Writer, aborting it first if it was never closed
+ *
+ * Every successful `loon_writer_new` must be paired with this call. Destroying
+ * after a successful close only frees the handle; destroying an unclosed or
+ * failed writer abandons its pending outputs. The function is intentionally
+ * infallible so callers can invoke it unconditionally on every path.
  *
  * @param handle Writer handle to destroy
  */
@@ -645,12 +647,16 @@ FFI_EXPORT void loon_chunk_reader_destroy(LoonChunkReaderHandle reader);
 /// Opaque handle for Reader
 typedef uintptr_t LoonReaderHandle;
 
+/// Opaque handle for a pull-based Arrow RecordBatchReader.
+typedef uintptr_t LoonRecordBatchReaderHandle;
+
 /**
  * @brief Creates a new Reader for a milvus storage dataset
  *
  * @param column_groups Dataset column groups handle
  * @param schema Arrow schema handle
- * @param needed_columns Array of column names to read (NULL for all columns)
+ * @param needed_columns Array of non-NULL column names to read (NULL for all
+ *        columns; requires num_columns == 0)
  * @param num_columns Number of columns in needed_columns array
  * @param properties Read configuration properties
  * @param out_handle Output (caller must call `reader_destroy` to destory the handle)
@@ -690,13 +696,45 @@ FFI_EXPORT LoonFFIResult loon_get_record_batch_reader(LoonReaderHandle reader,
                                                       struct ArrowArrayStream* out_array_stream);
 
 /**
+ * @brief Opens a pull-based RecordBatchReader whose per-batch failures retain
+ *        their structured Loon error code.
+ *
+ * Unlike `loon_get_record_batch_reader`, lazy `ReadNext()` failures are
+ * returned as LoonFFIResult instead of passing through ArrowArrayStream's
+ * errno-only callback.
+ *
+ * @param reader Reader handle
+ * @param predicate Optional filter expression (NULL or empty disables filtering)
+ * @param out_handle Output handle; destroy with `loon_record_batch_reader_destroy`
+ * @param out_schema Optional output schema; release it with `out_schema->release`
+ */
+FFI_EXPORT LoonFFIResult loon_record_batch_reader_new(LoonReaderHandle reader,
+                                                      const char* predicate,
+                                                      LoonRecordBatchReaderHandle* out_handle,
+                                                      struct ArrowSchema* out_schema);
+
+/**
+ * @brief Reads the next RecordBatch into a caller-owned ArrowArray.
+ *
+ * On success with a batch, `out_array->release` is non-NULL. At EOF it is NULL
+ * and further calls remain EOF. On failure the handle becomes terminal;
+ * destroy it and create a new reader.
+ */
+FFI_EXPORT LoonFFIResult loon_record_batch_reader_read_next(LoonRecordBatchReaderHandle handle,
+                                                            struct ArrowArray* out_array);
+
+/** @brief Destroys a pull-based RecordBatchReader handle. */
+FFI_EXPORT void loon_record_batch_reader_destroy(LoonRecordBatchReaderHandle handle);
+
+/**
  * @brief Get a chunk reader for a specific column group.
  *        The chunk reader is opened after call this function,
  *        means the file FOOTER HAS BEEN READ!
  *
  * @param reader Reader handle
  * @param column_group_id ID of the column group to read from
- * @param needed_columns Optional per-call column projection (NULL uses default from reader_new)
+ * @param needed_columns Optional array of non-NULL column names (NULL uses the
+ *        reader default; requires num_columns == 0)
  * @param num_columns Number of columns in needed_columns array
  * @param out_handle Output (caller must call `loon_chunk_reader_destroy` to destory the handle)
  * @return 0 on success, others is error code
@@ -718,7 +756,8 @@ FFI_EXPORT LoonFFIResult loon_get_chunk_reader(LoonReaderHandle reader,
  * @param row_indices Array of global row indices to extract, MUST be uniqued and sorted
  * @param num_indices Number of indices in the array
  * @param parallelism Number of parallel threads to use for I/O
- * @param needed_columns Optional per-call column projection (NULL uses default from reader_new)
+ * @param needed_columns Optional array of non-NULL column names (NULL uses the
+ *        reader default; requires num_columns == 0)
  * @param num_columns Number of columns in needed_columns array
  * @param out_arrays Output array of RecordBatch handles (caller must call `free_chunk_arrays` to free)
  * @param num_arrays Number of record batches in the output array
@@ -1023,7 +1062,8 @@ typedef struct LoonSegmentReaderConfig {
  * @param segment_path Base path where manifest and data files are stored
  * @param version Manifest version to read (-1 = latest)
  * @param schema Arrow schema with TEXT columns as utf8() type
- * @param needed_columns Column names to read (NULL = all columns)
+ * @param needed_columns Array of non-NULL column names (NULL means all columns
+ *        and requires num_columns == 0)
  * @param num_columns Number of needed columns
  * @param config Reader configuration with TEXT column LOB paths
  * @param properties Storage properties
@@ -1092,7 +1132,8 @@ FFI_EXPORT LoonFFIResult loon_segment_reader_get_filtered_stream(LoonSegmentRead
  *
  * @param handle SegmentReader handle
  * @param column_group_index Index of the column group
- * @param needed_columns Optional column names to read (NULL = all)
+ * @param needed_columns Optional array of non-NULL column names (NULL means all
+ *        columns and requires num_columns == 0)
  * @param num_columns Number of column names
  * @param out_handle Output ChunkReader handle
  * @return result of FFI

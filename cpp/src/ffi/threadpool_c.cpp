@@ -20,7 +20,7 @@
 using namespace milvus_storage;
 LoonFFIResult loon_thread_pool_singleton(size_t num_of_thread) {
   if (num_of_thread == 0) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "num_of_thread must be greater than 0");
+    RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "num_of_thread must be greater than 0");
   }
 
   try {
@@ -28,6 +28,8 @@ LoonFFIResult loon_thread_pool_singleton(size_t num_of_thread) {
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -35,7 +37,7 @@ LoonFFIResult loon_thread_pool_singleton(size_t num_of_thread) {
 
 LoonFFIResult loon_configure_storage_runtime(uint32_t num_of_cpu_threads, uint32_t num_of_io_threads) {
   if (num_of_cpu_threads == 0 || num_of_io_threads == 0) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "num_of_cpu_threads and num_of_io_threads must be greater than 0");
+    RETURN_ERROR(LOON_USER_INVALID_ARGUMENT, "num_of_cpu_threads and num_of_io_threads must be greater than 0");
   }
 
   try {
@@ -52,4 +54,10 @@ LoonFFIResult loon_configure_storage_runtime(uint32_t num_of_cpu_threads, uint32
   RETURN_UNREACHABLE();
 }
 
-void loon_thread_pool_singleton_release() { ThreadPoolHolder::Release(); }
+void loon_thread_pool_singleton_release() {
+  try {
+    ThreadPoolHolder::Release();
+  } catch (...) {
+    // Cleanup is best effort and must not throw across the C ABI.
+  }
+}

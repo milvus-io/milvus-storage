@@ -339,11 +339,11 @@ TEST_F(PackedErrorStatusTest, MakeSucceedsOnValidFile) {
   ASSERT_STATUS_OK(reader->Close());
 }
 
-TEST_F(PackedErrorStatusTest, ColumnGroupTableSchemaMismatchIsDataFormatBroken) {
+TEST_F(PackedErrorStatusTest, ColumnGroupTableSchemaMismatchIsNotCalledCorruption) {
   ColumnGroup group(0, {0});
   ASSERT_STATUS_OK(group.AddRecordBatch(record_batch_));
-  // Second batch with a different schema: Table() must surface arrow's
-  // Invalid (-> DataFormatBroken/2024), not a wrapped generic storage error.
+  // Second batch with a different schema. Table() must surface Arrow's own
+  // Invalid rather than claim that persisted bytes are corrupt.
   auto other_schema = arrow::schema({arrow::field("other", arrow::int8())});
   arrow::Int8Builder builder;
   ASSERT_STATUS_OK(builder.AppendValues({1, 2, 3}));
@@ -354,7 +354,7 @@ TEST_F(PackedErrorStatusTest, ColumnGroupTableSchemaMismatchIsDataFormatBroken) 
   auto table_result = group.Table();
   ASSERT_FALSE(table_result.ok());
   EXPECT_TRUE(table_result.status().IsInvalid()) << table_result.status().ToString();
-  EXPECT_EQ(ToSegcoreError(table_result.status()).get_error_code(), milvus::DataFormatBroken)
+  EXPECT_EQ(ToSegcoreError(table_result.status()).get_error_code(), milvus::StorageError)
       << table_result.status().ToString();
 }
 

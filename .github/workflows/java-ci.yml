@@ -118,7 +118,11 @@ jobs:
           java/verify_native_dependencies.sh \
             java/native/linux-x86_64/libmilvus-storage-jni.so
 
-      - name: Compile Scala code
+      - name: Test Scala/JNI integration
         working-directory: ./java
         run: |
-          sbt compile
+          # The fallback loader uses java/libmilvus-storage-jni.so during forked
+          # tests. Make the patched bundled directory visible to the ELF loader
+          # so its transitive Conan dependencies resolve without LD_PRELOAD.
+          export LD_LIBRARY_PATH="$(pwd)/native/linux-x86_64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          sbt test

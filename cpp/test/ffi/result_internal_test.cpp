@@ -16,9 +16,11 @@
 
 #include <cerrno>
 
+#include <arrow/filesystem/localfs.h>
 #include <arrow/io/memory.h>
 #include <arrow/status.h>
 #include <arrow/util/io_util.h>
+#include <arrow/util/key_value_metadata.h>
 
 #include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/ffi_filesystem_c.h"
@@ -27,6 +29,12 @@
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 
 namespace milvus_storage::test {
+
+TEST(FFIResultTest, NullHelpersAreSafe) {
+  EXPECT_FALSE(loon_ffi_is_success(nullptr));
+  EXPECT_STREQ(loon_ffi_get_errmsg(nullptr), "(invalid null result)");
+  loon_ffi_free_result(nullptr);
+}
 namespace {
 
 LoonFFIResult ReturnArrowErrorIf(const arrow::Status& status, int fallback) {
@@ -40,10 +48,15 @@ LoonFFIResult ReturnArrowError(const arrow::Status& status, int fallback) {
 
 class FailingAsyncRandomAccessFile final : public arrow::io::RandomAccessFile, public NonBlockingReadAtFile {
   public:
-  explicit FailingAsyncRandomAccessFile(arrow::Status status)
-      : file_(std::make_shared<arrow::io::BufferReader>("test payload")), status_(std::move(status)) {}
+  explicit FailingAsyncRandomAccessFile(arrow::Status status,
+                                        arrow::Status close_status = arrow::Status::OK(),
+                                        std::shared_ptr<const arrow::KeyValueMetadata> metadata = nullptr)
+      : file_(std::make_shared<arrow::io::BufferReader>("test payload")),
+        status_(std::move(status)),
+        close_status_(std::move(close_status)),
+        metadata_(std::move(metadata)) {}
 
-  arrow::Status Close() override { return file_->Close(); }
+  arrow::Status Close() override { return close_status_.ok() ? file_->Close() : close_status_; }
   arrow::Status Abort() override { return file_->Abort(); }
   arrow::Result<int64_t> Tell() const override { return file_->Tell(); }
   bool closed() const override { return file_->closed(); }
@@ -53,7 +66,7 @@ class FailingAsyncRandomAccessFile final : public arrow::io::RandomAccessFile, p
   arrow::Result<std::string_view> Peek(int64_t nbytes) override { return file_->Peek(nbytes); }
   bool supports_zero_copy() const override { return file_->supports_zero_copy(); }
   arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override {
-    return file_->ReadMetadata();
+    return metadata_ == nullptr ? file_->ReadMetadata() : metadata_;
   }
   arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(
       const arrow::io::IOContext& io_context) override {
@@ -80,6 +93,64 @@ class FailingAsyncRandomAccessFile final : public arrow::io::RandomAccessFile, p
   private:
   std::shared_ptr<arrow::io::RandomAccessFile> file_;
   arrow::Status status_;
+  arrow::Status close_status_;
+  std::shared_ptr<const arrow::KeyValueMetadata> metadata_;
+};
+
+class FixedInputFileSystem final : public arrow::fs::LocalFileSystem {
+  public:
+  explicit FixedInputFileSystem(std::shared_ptr<arrow::io::RandomAccessFile> file) : file_(std::move(file)) {}
+
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string&) override {
+    return file_;
+  }
+
+  private:
+  std::shared_ptr<arrow::io::RandomAccessFile> file_;
+};
+
+class ShortAsyncRandomAccessFile final : public arrow::io::RandomAccessFile, public NonBlockingReadAtFile {
+  public:
+  explicit ShortAsyncRandomAccessFile(int64_t bytes_read)
+      : file_(std::make_shared<arrow::io::BufferReader>("test payload")), bytes_read_(bytes_read) {}
+
+  arrow::Status Close() override { return file_->Close(); }
+  arrow::Status Abort() override { return file_->Abort(); }
+  arrow::Result<int64_t> Tell() const override { return file_->Tell(); }
+  bool closed() const override { return file_->closed(); }
+  arrow::Result<int64_t> Read(int64_t nbytes, void* out) override { return file_->Read(nbytes, out); }
+  arrow::Result<std::shared_ptr<arrow::Buffer>> Read(int64_t nbytes) override { return file_->Read(nbytes); }
+  const arrow::io::IOContext& io_context() const override { return file_->io_context(); }
+  arrow::Result<std::string_view> Peek(int64_t nbytes) override { return file_->Peek(nbytes); }
+  bool supports_zero_copy() const override { return file_->supports_zero_copy(); }
+  arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override {
+    return file_->ReadMetadata();
+  }
+  arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(
+      const arrow::io::IOContext& io_context) override {
+    return file_->ReadMetadataAsync(io_context);
+  }
+  arrow::Status Seek(int64_t position) override { return file_->Seek(position); }
+  arrow::Result<int64_t> GetSize() override { return file_->GetSize(); }
+  arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
+    return file_->ReadAt(position, nbytes, out);
+  }
+  arrow::Result<std::shared_ptr<arrow::Buffer>> ReadAt(int64_t position, int64_t nbytes) override {
+    return file_->ReadAt(position, nbytes);
+  }
+  arrow::Future<int64_t> ReadAtAsyncInto(int64_t, int64_t, uint8_t*) override {
+    return arrow::Future<int64_t>::MakeFinished(bytes_read_);
+  }
+  arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const arrow::io::IOContext& io_context,
+                                                          int64_t position,
+                                                          int64_t nbytes) override {
+    return file_->ReadAsync(io_context, position, nbytes);
+  }
+  arrow::Status WillNeed(const std::vector<arrow::io::ReadRange>& ranges) override { return file_->WillNeed(ranges); }
+
+  private:
+  std::shared_ptr<arrow::io::RandomAccessFile> file_;
+  int64_t bytes_read_;
 };
 
 struct AsyncReadCallbackCapture {
@@ -192,6 +263,50 @@ TEST(FFIInternalResultTest, AsyncReadCallbackPreservesExtendStatusCode) {
   ASSERT_NE(capture.result.message, nullptr);
   EXPECT_NE(std::string(capture.result.message).find("network"), std::string::npos);
   loon_ffi_free_result(&capture.result);
+}
+
+TEST(FFIInternalResultTest, AsyncShortReadUsesUnclassifiedArrowFallback) {
+  auto file = std::make_shared<ShortAsyncRandomAccessFile>(2);
+  auto wrapper = std::make_unique<RandomAccessFileWrapper>(std::move(file));
+  auto handle = reinterpret_cast<FileSystemReaderHandle>(wrapper.get());
+  uint8_t buffer[4] = {};
+  AsyncReadCallbackCapture capture;
+
+  auto submit_result =
+      loon_filesystem_reader_readat_async(handle, 8, sizeof(buffer), buffer, CaptureAsyncReadResult, &capture);
+
+  EXPECT_EQ(submit_result.err_code, LOON_SUCCESS);
+  EXPECT_EQ(submit_result.message, nullptr);
+  EXPECT_EQ(capture.callback_count, 1);
+  EXPECT_EQ(capture.result.err_code, LOON_ARROW_ERROR);
+  EXPECT_EQ(capture.bytes_read, 0);
+  ASSERT_NE(capture.result.message, nullptr);
+  EXPECT_NE(std::string(capture.result.message).find("Short read"), std::string::npos);
+  loon_ffi_free_result(&capture.result);
+}
+
+TEST(FFIInternalResultTest, GetFileStatsCleansPublishedMetadataWhenCloseFails) {
+  auto metadata = arrow::key_value_metadata({"key"}, {"value"});
+  auto file = std::make_shared<FailingAsyncRandomAccessFile>(
+      arrow::Status::OK(), arrow::Status::IOError("injected close failure"), std::move(metadata));
+  auto fs = std::make_shared<FixedInputFileSystem>(std::move(file));
+  FileSystemWrapper wrapper(fs);
+  uint64_t size = 123;
+  LoonFileSystemMeta* metadata_array = nullptr;
+  uint32_t metadata_count = 0;
+  const std::string path = "ignored";
+
+  auto result =
+      loon_filesystem_get_file_stats(reinterpret_cast<FileSystemHandle>(&wrapper), path.data(),
+                                     static_cast<uint32_t>(path.size()), &size, &metadata_array, &metadata_count);
+
+  EXPECT_EQ(result.err_code, LOON_ARROW_ERROR);
+  ASSERT_NE(result.message, nullptr);
+  EXPECT_NE(std::string(result.message).find("injected close failure"), std::string::npos);
+  EXPECT_EQ(size, 0);
+  EXPECT_EQ(metadata_array, nullptr);
+  EXPECT_EQ(metadata_count, 0);
+  loon_ffi_free_result(&result);
 }
 
 }  // namespace milvus_storage::test

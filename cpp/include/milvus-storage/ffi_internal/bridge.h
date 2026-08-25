@@ -14,7 +14,12 @@
 
 #pragma once
 
-#include <arrow/status.h>
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <arrow/result.h>
 
 #include "milvus-storage/ffi_c.h"
 #include "milvus-storage/column_groups.h"
@@ -26,6 +31,11 @@ namespace api {
 class Manifest;
 struct ColumnGroup;
 }  // namespace api
+
+// Convert a nullable C projection into the optional C++ representation used by
+// readers. A null array is valid only for an empty projection.
+arrow::Result<std::shared_ptr<std::vector<std::string>>> convert_needed_columns(const char* const* strings,
+                                                                                size_t count);
 
 // Main functions for exporting/importing Manifest (includes column groups, delta logs, and stats)
 // Export function allocates and returns the structure - caller must call loon_manifest_destroy to free

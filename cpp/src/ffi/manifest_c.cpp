@@ -38,8 +38,8 @@ LoonFFIResult loon_transaction_begin(const char* base_path,
                                      int32_t resolve_id,
                                      uint32_t retry_limit,
                                      LoonTransactionHandle* out_handle) {
-  if (!base_path || !properties) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: base_path, properties must not be null");
+  if (!base_path || !properties || !out_handle) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: base_path, properties, out_handle must not be null");
   }
   try {
     milvus_storage::api::Properties properties_map;
@@ -75,6 +75,8 @@ LoonFFIResult loon_transaction_begin(const char* base_path,
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -88,12 +90,14 @@ LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
     // Commit
     auto commit_result = cpp_transaction->Commit();
-    RETURN_ARROW_ERROR_IF(commit_result.status(), LOON_LOGICAL_ERROR, commit_result.status().ToString());
+    RETURN_ARROW_ERROR_IF(commit_result.status(), LOON_ARROW_ERROR, commit_result.status().ToString());
 
     *out_committed_version = commit_result.ValueOrDie();
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -117,11 +121,13 @@ LoonFFIResult loon_transaction_get_manifest(LoonTransactionHandle handle, LoonMa
     auto manifest = manifest_result.ValueOrDie();
     // Export manifest to LoonManifest structure
     auto st = milvus_storage::manifest_export(manifest, out_manifest);
-    RETURN_ARROW_ERROR_IF(st, LOON_LOGICAL_ERROR, st.ToString());
+    RETURN_ARROW_ERROR_IF(st, LOON_ARROW_ERROR, st.ToString());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -141,6 +147,8 @@ LoonFFIResult loon_transaction_get_read_version(LoonTransactionHandle handle, in
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -156,6 +164,8 @@ LoonFFIResult loon_transaction_drop_column(LoonTransactionHandle handle, const c
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -176,7 +186,7 @@ LoonFFIResult loon_transaction_add_column_group(LoonTransactionHandle handle, co
 
     ColumnGroups cgs;
     auto import_st = milvus_storage::column_groups_import(&temp_ccgs, &cgs);
-    RETURN_ARROW_ERROR_IF(import_st, LOON_LOGICAL_ERROR, import_st.ToString());
+    RETURN_ARROW_ERROR_IF(import_st, LOON_INVALID_ARGS, import_st.ToString());
 
     if (cgs.empty()) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Failed to import column group");
@@ -186,14 +196,16 @@ LoonFFIResult loon_transaction_add_column_group(LoonTransactionHandle handle, co
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
 }
 
 LoonFFIResult loon_transaction_append_files(LoonTransactionHandle handle, const LoonColumnGroups* column_groups) {
-  if (!handle) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
+  if (!handle || !column_groups) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and column_groups must not be null");
   }
   try {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
@@ -201,12 +213,14 @@ LoonFFIResult loon_transaction_append_files(LoonTransactionHandle handle, const 
     // Import LoonColumnGroups to ColumnGroups
     ColumnGroups cgs;
     auto import_st = milvus_storage::column_groups_import(column_groups, &cgs);
-    RETURN_ARROW_ERROR_IF(import_st, LOON_LOGICAL_ERROR, import_st.ToString());
+    RETURN_ARROW_ERROR_IF(import_st, LOON_INVALID_ARGS, import_st.ToString());
 
     cpp_transaction->AppendFiles(cgs);
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -229,6 +243,8 @@ LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle, const
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -266,6 +282,8 @@ LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -319,6 +337,8 @@ LoonFFIResult loon_transaction_add_index_info(LoonTransactionHandle handle, cons
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -334,6 +354,8 @@ LoonFFIResult loon_transaction_drop_index(LoonTransactionHandle handle, int64_t 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -358,6 +380,8 @@ LoonFFIResult loon_transaction_add_lob_file(LoonTransactionHandle handle, const 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -487,13 +511,21 @@ void loon_manifest_destroy(LoonManifest* cmanifest) {
 }
 
 char* loon_manifest_debug_string(const LoonManifest* manifest) {
-  std::string result = milvus_storage::manifest_debug_string(manifest);
-  return strdup(result.c_str());
+  try {
+    std::string result = milvus_storage::manifest_debug_string(manifest);
+    return strdup(result.c_str());
+  } catch (...) {
+    return nullptr;
+  }
 }
 
 #ifdef BUILD_GTEST
 void loon_reset_context(void) {
-  milvus_storage::api::Manifest::CleanCache();
-  milvus_storage::FilesystemCache::getInstance().clean();
+  try {
+    milvus_storage::api::Manifest::CleanCache();
+    milvus_storage::FilesystemCache::getInstance().clean();
+  } catch (...) {
+    // Test cleanup is best effort and must not throw across the C ABI.
+  }
 }
 #endif
