@@ -30,7 +30,6 @@
 #include <parquet/file_reader.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/writer.h>
-#include <parquet/file_reader.h>
 #include <parquet/metadata.h>
 #include <parquet/properties.h>
 
@@ -41,7 +40,9 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/layout.h"
+#include "milvus-storage/filesystem/observable.h"
 #include "milvus-storage/packed/writer.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 
@@ -113,6 +114,245 @@ class TrackingMemoryPool final : public arrow::MemoryPool {
   std::vector<ResizeEvent> events_;
 };
 
+class FailingOpenOutputFileSystem final : public arrow::fs::SubTreeFileSystem {
+  public:
+  FailingOpenOutputFileSystem(std::shared_ptr<arrow::fs::FileSystem> base_fs, arrow::Status failure)
+      : arrow::fs::SubTreeFileSystem("", std::move(base_fs)), failure_(std::move(failure)) {}
+
+  std::string type_name() const override { return "failing-open-output"; }
+
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
+      const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override {
+    opened_path_ = path;
+    return failure_;
+  }
+
+  const std::string& opened_path() const { return opened_path_; }
+
+  private:
+  arrow::Status failure_;
+  std::string opened_path_;
+};
+
+class AbortTrackingOutputStream final : public arrow::io::OutputStream {
+  public:
+  explicit AbortTrackingOutputStream(bool close_on_abort = true) : close_on_abort_(close_on_abort) {}
+
+  void ArmWriteFailure(arrow::Status failure) { write_failure_ = std::move(failure); }
+  void ArmCloseFailure(arrow::Status failure) { close_failure_ = std::move(failure); }
+
+  arrow::Status Close() override {
+    ++close_count_;
+    if (!close_failure_.ok()) {
+      return close_failure_;
+    }
+    closed_ = true;
+    return arrow::Status::OK();
+  }
+
+  arrow::Status Abort() override {
+    ++abort_count_;
+    closed_ = close_on_abort_;
+    return arrow::Status::OK();
+  }
+
+  arrow::Result<int64_t> Tell() const override {
+    if (closed_) {
+      return arrow::Status::Invalid("stream is closed");
+    }
+    return position_;
+  }
+
+  bool closed() const override { return closed_; }
+
+  arrow::Status Write(const void*, int64_t nbytes) override {
+    if (closed_) {
+      return arrow::Status::Invalid("stream is closed");
+    }
+    ++write_count_;
+    if (!write_failure_.ok()) {
+      return write_failure_;
+    }
+    position_ += nbytes;
+    return arrow::Status::OK();
+  }
+
+  arrow::Status Flush() override {
+    if (closed_) {
+      return arrow::Status::Invalid("stream is closed");
+    }
+    return arrow::Status::OK();
+  }
+
+  int abort_count() const { return abort_count_; }
+  int close_count() const { return close_count_; }
+  int write_count() const { return write_count_; }
+
+  private:
+  bool closed_ = false;
+  bool close_on_abort_;
+  int64_t position_ = 0;
+  int abort_count_ = 0;
+  int close_count_ = 0;
+  int write_count_ = 0;
+  arrow::Status write_failure_ = arrow::Status::OK();
+  arrow::Status close_failure_ = arrow::Status::OK();
+};
+
+class FailingWriteOutputStream final : public arrow::io::OutputStream {
+  public:
+  explicit FailingWriteOutputStream(arrow::Status failure) : failure_(std::move(failure)) {}
+
+  arrow::Status Close() override {
+    ++close_count_;
+    closed_ = true;
+    return arrow::Status::OK();
+  }
+
+  arrow::Status Abort() override {
+    ++abort_count_;
+    closed_ = true;
+    return arrow::Status::OK();
+  }
+
+  arrow::Result<int64_t> Tell() const override {
+    if (closed_) {
+      return arrow::Status::Invalid("stream is closed");
+    }
+    return 0;
+  }
+
+  bool closed() const override { return closed_; }
+
+  arrow::Status Write(const void*, int64_t) override {
+    ++write_count_;
+    return failure_;
+  }
+
+  int abort_count() const { return abort_count_; }
+  int close_count() const { return close_count_; }
+  int write_count() const { return write_count_; }
+
+  private:
+  arrow::Status failure_;
+  bool closed_ = false;
+  int abort_count_ = 0;
+  int close_count_ = 0;
+  int write_count_ = 0;
+};
+
+// A stream whose Abort() throws something that is not std::exception.
+//
+// arrow::io::OutputStream::Abort() is allowed to throw -- it is a filesystem
+// implementation we do not own -- and this repository already contains one that
+// does (see c_abi_exception_boundary_test). Writers, by contrast, abandon
+// through a void noexcept Abort(), so an escaping exception would call
+// std::terminate and take the process down before the FFI boundary could report
+// the caller's own failure.
+class ThrowingAbortOutputStream final : public arrow::io::OutputStream {
+  public:
+  arrow::Status Close() override {
+    closed_ = true;
+    return arrow::Status::OK();
+  }
+
+  arrow::Status Abort() override {
+    ++abort_count_;
+    throw 42;
+  }
+
+  arrow::Result<int64_t> Tell() const override { return position_; }
+  bool closed() const override { return closed_; }
+
+  arrow::Status Write(const void*, int64_t nbytes) override {
+    position_ += nbytes;
+    return arrow::Status::OK();
+  }
+
+  arrow::Status Flush() override { return arrow::Status::OK(); }
+
+  int abort_count() const { return abort_count_; }
+
+  private:
+  bool closed_ = false;
+  int64_t position_ = 0;
+  int abort_count_ = 0;
+};
+
+class TrackingOutputFileSystem final : public arrow::fs::SubTreeFileSystem {
+  public:
+  TrackingOutputFileSystem(std::shared_ptr<arrow::fs::FileSystem> base_fs,
+                           std::shared_ptr<arrow::io::OutputStream> stream)
+      : arrow::fs::SubTreeFileSystem("", std::move(base_fs)), stream_(std::move(stream)) {}
+
+  std::string type_name() const override { return "tracking-output"; }
+
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
+      const std::string&, const std::shared_ptr<const arrow::KeyValueMetadata>&) override {
+    return stream_;
+  }
+
+  private:
+  std::shared_ptr<arrow::io::OutputStream> stream_;
+};
+
+class FailSecondOpenOutputFileSystem final : public arrow::fs::SubTreeFileSystem {
+  public:
+  FailSecondOpenOutputFileSystem(std::shared_ptr<arrow::fs::FileSystem> base_fs,
+                                 std::shared_ptr<arrow::io::OutputStream> first_stream,
+                                 arrow::Status second_failure)
+      : arrow::fs::SubTreeFileSystem("", std::move(base_fs)),
+        first_stream_(std::move(first_stream)),
+        second_failure_(std::move(second_failure)) {}
+
+  std::string type_name() const override { return "fail-second-open-output"; }
+
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
+      const std::string&, const std::shared_ptr<const arrow::KeyValueMetadata>&) override {
+    ++open_count_;
+    if (open_count_ == 2) {
+      return second_failure_;
+    }
+    return first_stream_;
+  }
+
+  int open_count() const { return open_count_; }
+
+  private:
+  std::shared_ptr<arrow::io::OutputStream> first_stream_;
+  arrow::Status second_failure_;
+  int open_count_ = 0;
+};
+
+class SequencedOutputFileSystem final : public arrow::fs::SubTreeFileSystem {
+  public:
+  SequencedOutputFileSystem(std::shared_ptr<arrow::fs::FileSystem> base_fs,
+                            std::vector<std::shared_ptr<arrow::io::OutputStream>> streams)
+      : arrow::fs::SubTreeFileSystem("", std::move(base_fs)), streams_(std::move(streams)) {}
+
+  std::string type_name() const override { return "sequenced-output"; }
+
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
+      const std::string&, const std::shared_ptr<const arrow::KeyValueMetadata>&) override {
+    if (next_stream_ >= streams_.size()) {
+      return arrow::Status::Invalid("no test output stream available");
+    }
+    return streams_[next_stream_++];
+  }
+
+  arrow::Status DeleteFile(const std::string& path) override {
+    deleted_paths_.push_back(path);
+    return arrow::Status::OK();
+  }
+
+  const std::vector<std::string>& deleted_paths() const { return deleted_paths_; }
+
+  private:
+  std::vector<std::shared_ptr<arrow::io::OutputStream>> streams_;
+  size_t next_stream_ = 0;
+  std::vector<std::string> deleted_paths_;
+};
+
 }  // namespace
 
 class ParquetFileWriterTest : public ::testing::Test {
@@ -145,6 +385,205 @@ class ParquetFileWriterTest : public ::testing::Test {
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::string base_path_;
 };
+
+TEST_F(ParquetFileWriterTest, OpenOutputStreamFailurePreservesExtendStatusDetail) {
+  auto original = MakeExtendError(ExtendStatusCode::StorageTransientTimeout, "Azure request timed out",
+                                  "operation=OpenOutputStream http_status=408");
+  auto failing_fs = std::make_shared<FailingOpenOutputFileSystem>(fs_, original);
+  const std::string file_path = "container/path/data.parquet";
+  StorageConfig config;
+
+  auto result = parquet::ParquetFileWriter::Make(schema_, failing_fs, file_path, config);
+
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(failing_fs->opened_path(), file_path);
+  EXPECT_EQ(result.status().code(), original.code());
+  EXPECT_EQ(result.status().detail(), original.detail());
+  auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+  ASSERT_NE(detail, nullptr) << result.status().ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientTimeout);
+  EXPECT_EQ(detail->extra_info(), "operation=OpenOutputStream http_status=408");
+  EXPECT_TRUE(result.status().Equals(original));
+}
+
+TEST_F(ParquetFileWriterTest, HeaderWriteFailureAbortsWithoutFinalizingAndPreservesDetail) {
+  auto original = MakeExtendError(ExtendStatusCode::StorageTransientTimeout, "Parquet header write timed out",
+                                  "operation=WriteHeader http_status=408");
+  auto stream = std::make_shared<FailingWriteOutputStream>(original);
+  auto tracking_fs = std::make_shared<TrackingOutputFileSystem>(fs_, stream);
+  const std::string file_path = base_path_ + "/header-write-failure.parquet";
+  StorageConfig config;
+
+  auto result = parquet::ParquetFileWriter::Make(schema_, tracking_fs, file_path, config);
+
+  ASSERT_FALSE(result.ok());
+  EXPECT_GT(stream->write_count(), 0);
+  EXPECT_EQ(stream->abort_count(), 1);
+  EXPECT_EQ(stream->close_count(), 0);
+  EXPECT_TRUE(stream->closed());
+  EXPECT_EQ(result.status().code(), original.code());
+  auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+  ASSERT_NE(detail, nullptr) << result.status().ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientTimeout);
+  EXPECT_EQ(detail->extra_info(), "operation=WriteHeader http_status=408");
+  EXPECT_NE(result.status().message().find("Parquet header write timed out"), std::string::npos);
+}
+
+TEST_F(ParquetFileWriterTest, FlushFailureAbortStillReachesDelegateWithoutFinalizing) {
+  auto original = MakeExtendError(ExtendStatusCode::StorageTransientTimeout, "Parquet data write timed out",
+                                  "operation=WriteRowGroup http_status=408");
+  auto stream = std::make_shared<AbortTrackingOutputStream>();
+  auto tracking_fs = std::make_shared<TrackingOutputFileSystem>(fs_, stream);
+  ASSERT_AND_ASSIGN(auto test_schema, CreateTestSchema());
+  ASSERT_AND_ASSIGN(auto record_batch, CreateTestData(test_schema, 0, false, 512, 1024));
+  StorageConfig config;
+  ASSERT_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(test_schema, tracking_fs,
+                                                                  base_path_ + "/flush-failure.parquet", config));
+  const int writes_after_init = stream->write_count();
+  stream->ArmWriteFailure(original);
+
+  ASSERT_STATUS_OK(writer->Write(record_batch));
+  auto flush_status = writer->Flush();
+
+  ASSERT_FALSE(flush_status.ok());
+  EXPECT_GT(stream->write_count(), writes_after_init);
+  auto detail = ExtendStatusDetail::UnwrapStatus(flush_status);
+  ASSERT_NE(detail, nullptr) << flush_status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientTimeout);
+  EXPECT_EQ(detail->extra_info(), "operation=WriteRowGroup http_status=408");
+
+  writer->Abort();
+  EXPECT_EQ(stream->abort_count(), 1);
+  EXPECT_EQ(stream->close_count(), 0);
+  EXPECT_TRUE(writer->Flush().Equals(flush_status));
+}
+
+TEST_F(ParquetFileWriterTest, PackedMakeAbortsOpenedGroupsWhenLaterOpenFails) {
+  auto original = MakeExtendError(ExtendStatusCode::StorageTransientTimeout, "Second output open timed out",
+                                  "operation=OpenOutputStream group=1 http_status=408");
+  auto first_stream = std::make_shared<AbortTrackingOutputStream>();
+  auto failing_fs = std::make_shared<FailSecondOpenOutputFileSystem>(fs_, first_stream, original);
+  StorageConfig config;
+  std::vector<std::string> paths = {base_path_ + "/first.parquet", base_path_ + "/second.parquet"};
+  std::vector<std::vector<int>> column_groups = {{0}, {1}};
+
+  auto result = PackedRecordBatchWriter::Make(failing_fs, paths, schema_, config, column_groups, 1024 * 1024);
+
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(failing_fs->open_count(), 2);
+  EXPECT_EQ(first_stream->abort_count(), 1);
+  EXPECT_EQ(first_stream->close_count(), 0);
+  EXPECT_TRUE(first_stream->closed());
+  EXPECT_TRUE(result.status().Equals(original)) << result.status().ToString();
+}
+
+TEST_F(ParquetFileWriterTest, PackedCloseDeletesEarlierChildOutputWhenLaterChildFails) {
+  auto original = MakeExtendError(ExtendStatusCode::StorageTransientTimeout, "Second output close timed out",
+                                  "operation=Close group=1 http_status=408");
+  auto first_stream = std::make_shared<AbortTrackingOutputStream>();
+  auto second_stream = std::make_shared<AbortTrackingOutputStream>();
+  second_stream->ArmCloseFailure(original);
+  auto tracking_fs = std::make_shared<SequencedOutputFileSystem>(
+      fs_, std::vector<std::shared_ptr<arrow::io::OutputStream>>{first_stream, second_stream});
+  StorageConfig config;
+  std::vector<std::string> paths = {base_path_ + "/first.parquet", base_path_ + "/second.parquet"};
+  std::vector<std::vector<int>> column_groups = {{0}, {1}};
+  ASSERT_AND_ASSIGN(auto record_batch, CreateTestData(schema_, 0, false, 8, 8));
+  ASSERT_AND_ASSIGN(auto writer,
+                    PackedRecordBatchWriter::Make(tracking_fs, paths, schema_, config, column_groups, 1024 * 1024));
+  ASSERT_STATUS_OK(writer->Write(record_batch));
+
+  auto close_status = writer->Close();
+
+  EXPECT_TRUE(close_status.Equals(original)) << close_status.ToString();
+  ASSERT_EQ(tracking_fs->deleted_paths().size(), 2u);
+  EXPECT_NE(std::find(tracking_fs->deleted_paths().begin(), tracking_fs->deleted_paths().end(), paths.front()),
+            tracking_fs->deleted_paths().end());
+  EXPECT_NE(std::find(tracking_fs->deleted_paths().begin(), tracking_fs->deleted_paths().end(), paths.back()),
+            tracking_fs->deleted_paths().end());
+  EXPECT_EQ(first_stream->close_count(), 1);
+  EXPECT_EQ(first_stream->abort_count(), 0) << "a successfully closed child no longer owns its file";
+  EXPECT_EQ(second_stream->close_count(), 1);
+  EXPECT_EQ(second_stream->abort_count(), 1);
+}
+
+TEST_F(ParquetFileWriterTest, DestroyDoesNotFinalizeOrAbort) {
+  ASSERT_AND_ASSIGN(auto test_schema, CreateTestSchema());
+  ASSERT_AND_ASSIGN(auto record_batch, CreateTestData(test_schema));
+  auto stream = std::make_shared<AbortTrackingOutputStream>(/*close_on_abort=*/false);
+  auto metrics_stream = std::make_shared<MetricsOutputStream>(stream, std::make_shared<FilesystemMetrics>());
+  auto tracking_fs = std::make_shared<TrackingOutputFileSystem>(fs_, metrics_stream);
+
+  int writes_before_destroy = 0;
+  {
+    StorageConfig config;
+    ASSERT_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(test_schema, tracking_fs,
+                                                                    base_path_ + "/discarded.parquet", config));
+    ASSERT_STATUS_OK(writer->Write(record_batch));
+    writes_before_destroy = stream->write_count();
+  }
+
+  EXPECT_EQ(stream->write_count(), writes_before_destroy);
+  EXPECT_EQ(stream->abort_count(), 0);
+  EXPECT_EQ(stream->close_count(), 0);
+}
+
+// The assertion here is that the test finishes at all. Abandoning reaches a
+// stream that throws, and ParquetFileWriter::Abort() is noexcept, so without
+// AbandonQuietly absorbing it this would std::terminate and take the whole test
+// binary with it -- there would be no failure to report, just a dead process.
+// Everything after the Abort() call is therefore the real check.
+TEST_F(ParquetFileWriterTest, AbandonSurvivesAStreamThatThrows) {
+  ASSERT_AND_ASSIGN(auto test_schema, CreateTestSchema());
+  ASSERT_AND_ASSIGN(auto record_batch, CreateTestData(test_schema));
+  auto stream = std::make_shared<ThrowingAbortOutputStream>();
+  auto metrics_stream = std::make_shared<MetricsOutputStream>(stream, std::make_shared<FilesystemMetrics>());
+  auto tracking_fs = std::make_shared<TrackingOutputFileSystem>(fs_, metrics_stream);
+
+  StorageConfig config;
+  ASSERT_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(test_schema, tracking_fs,
+                                                                  base_path_ + "/throwing_abort.parquet", config));
+  ASSERT_STATUS_OK(writer->Write(record_batch));
+
+  writer->Abort();
+
+  EXPECT_EQ(stream->abort_count(), 1) << "the abandonment must still reach the stream";
+  // And the writer is spent, exactly as it would be after a clean abandonment.
+  EXPECT_FALSE(writer->Close().ok());
+  // Still idempotent: a second abandonment is a no-op and also must not throw.
+  writer->Abort();
+  EXPECT_EQ(stream->abort_count(), 1);
+}
+
+// Abort is the giving-up path, and it has to reach the stream: the stream is
+// the only object that can release what the write allocated in the store (an S3
+// multipart upload's parts, which no bucket listing can show). It must not
+// close -- closing finalizes a file that was abandoned on purpose -- and it has
+// to survive being called twice, because the caller is already handling a
+// failure and should not have to track whether it aborted yet.
+TEST_F(ParquetFileWriterTest, AbortReachesTheStreamWithoutFinalizing) {
+  ASSERT_AND_ASSIGN(auto test_schema, CreateTestSchema());
+  ASSERT_AND_ASSIGN(auto record_batch, CreateTestData(test_schema));
+  auto stream = std::make_shared<AbortTrackingOutputStream>(/*close_on_abort=*/true);
+  auto metrics_stream = std::make_shared<MetricsOutputStream>(stream, std::make_shared<FilesystemMetrics>());
+  auto tracking_fs = std::make_shared<TrackingOutputFileSystem>(fs_, metrics_stream);
+
+  StorageConfig config;
+  ASSERT_AND_ASSIGN(
+      auto writer, parquet::ParquetFileWriter::Make(test_schema, tracking_fs, base_path_ + "/aborted.parquet", config));
+  ASSERT_STATUS_OK(writer->Write(record_batch));
+
+  writer->Abort();
+  EXPECT_EQ(stream->abort_count(), 1);
+  EXPECT_EQ(stream->close_count(), 0);
+
+  writer->Abort();
+  EXPECT_EQ(stream->abort_count(), 1) << "abort must be idempotent";
+
+  // The file was abandoned, so finishing it is not on offer any more.
+  EXPECT_FALSE(writer->Close().ok());
+  EXPECT_EQ(stream->close_count(), 0);
+}
 
 TEST_F(ParquetFileWriterTest, LargeRecordBatchSplitting) {
   // Create a large record batch with mixed data sizes
@@ -857,7 +1296,7 @@ TEST_F(ParquetFileWriterTest, FooterSizeNotMatch) {
   };
 
   // Case 1: footer_size too small (1 byte).
-  // Pre-read can't cover the Thrift metadata → falls back to Arrow's normal 2-step footer read.
+  // Pre-read can't cover the Thrift metadata -> falls back to Arrow's normal 2-step footer read.
   verify_read(1);
 
   // Case 2: footer_size too large (= file_size).

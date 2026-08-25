@@ -16,6 +16,7 @@
 
 #include "milvus-storage/format/lance/lance_table_writer.h"
 
+#include <new>
 #include <string>
 #include <iostream>
 #include <unordered_set>
@@ -74,6 +75,11 @@ class BatchIterator : public arrow::RecordBatchReader {
 };
 
 arrow::Status LanceTableWriter::Write(const std::shared_ptr<arrow::RecordBatch> batch) {
+  ARROW_RETURN_NOT_OK(writer_status_.Check());
+  return writer_status_.RecordFirstFailure(WriteImpl(batch));
+}
+
+arrow::Status LanceTableWriter::WriteImpl(const std::shared_ptr<arrow::RecordBatch>& batch) {
   assert(!closed_);
   assert(batch->schema()->Equals(*schema_, false));
   written_rows_ += batch->num_rows();
@@ -82,7 +88,12 @@ arrow::Status LanceTableWriter::Write(const std::shared_ptr<arrow::RecordBatch> 
   return arrow::Status::OK();
 }
 
-arrow::Status LanceTableWriter::Flush() { return arrow::Status::OK(); }
+arrow::Status LanceTableWriter::Flush() {
+  ARROW_RETURN_NOT_OK(writer_status_.Check());
+  return writer_status_.RecordFirstFailure(FlushImpl());
+}
+
+arrow::Status LanceTableWriter::FlushImpl() { return arrow::Status::OK(); }
 
 bool fids_contains(const std::vector<uint64_t>& origin, const std::vector<uint64_t>& current) {
   assert(current.size() > origin.size());
@@ -104,7 +115,7 @@ bool fids_contains(const std::vector<uint64_t>& origin, const std::vector<uint64
 /// tolerance was not a worse error message: taking this branch against a
 /// dataset that DOES exist makes the writer believe it started from zero
 /// fragments, and everything downstream is computed from that belief (see the
-/// guard in Close). A transient open failure would have been laundered
+/// guard in CloseImpl). A transient open failure would have been laundered
 /// into a manifest entry pointing at somebody else's fragment. Failing the
 /// first write is recoverable; that is not.
 bool IsMissingDatasetStatus(const arrow::Status& status) {
@@ -130,7 +141,45 @@ std::vector<uint64_t> fids_diff(const std::vector<uint64_t>& origin, const std::
   return diff;
 }
 
+void LanceTableWriter::Abort() noexcept {
+  // closed_ before recording the discard: abort after a successful Close must not
+  // leave a writer that finished cleanly reading as Cancelled.
+  if (closed_) {
+    return;
+  }
+  (void)writer_status_.RecordFirstFailure(arrow::Status::Cancelled("Stateful writer was discarded"));
+  closed_ = true;
+  // Buffered batches never reached the store, so dropping them is the whole of
+  // the local cleanup. Fragments already written through the Rust dataset are
+  // left behind: lance publishes them by committing a manifest version, so an
+  // abandoned write leaves fragments no version references, and removing those
+  // needs a lance-side API this bridge does not expose.
+  //
+  // Accepted, because this writer does not exist outside test builds -- the
+  // whole class is behind #ifdef BUILD_GTEST and LanceFormat::create_writer
+  // returns NotImplemented("Lance writer is only available in test builds")
+  // otherwise. Production reads lance, it never writes it, so there is no
+  // deployment in which these fragments accumulate.
+  record_batches_.clear();
+  dataset_.reset();
+}
+
 arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
+  // Abandon on both failure paths; see FormatWriter::Close in format_writer.h.
+  if (auto first_failure = writer_status_.Check(); !first_failure.ok()) {
+    Abort();
+    return first_failure;
+  }
+  auto result = CloseImpl();
+  if (!result.ok()) {
+    auto status = writer_status_.RecordFirstFailure(result.status());
+    Abort();
+    return status;
+  }
+  return result;
+}
+
+arrow::Result<api::ColumnGroupFile> LanceTableWriter::CloseImpl() {
   assert(!closed_);
   struct ArrowArrayStream array_stream;
 

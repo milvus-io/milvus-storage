@@ -334,6 +334,31 @@ TEST_F(VortexLocalFormatTest, TestFooterReaderOpensZeroRowVortexFileWithoutFoote
   AssertLoadableEmptyCellMetas(group_cell_metas);
 }
 
+TEST_F(VortexLocalFormatTest, TestFooterReaderOpenAfterWriterCloseWithoutWriteIfFileExists) {
+  ASSERT_AND_ASSIGN(auto old_file, WriteVortexFile());
+  ASSERT_GT(old_file.end_index, 0);
+
+  ASSERT_AND_ASSIGN(auto vx_writer,
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
+  ASSERT_EQ(0, cgfile.end_index);
+
+  ASSERT_AND_ASSIGN(auto file_info, file_system_->GetFileInfo(test_file_name_));
+  ASSERT_TRUE(file_info.IsFile());
+  ASSERT_GT(file_info.size(), 0);
+
+  auto footer_reader = MakeFooterReader(cgfile, std::make_shared<InMemoryVortexRangeFileSystem>());
+  ASSERT_STATUS_OK(footer_reader->Open(file_system_));
+  ASSERT_TRUE(footer_reader->opened());
+  ASSERT_EQ(footer_reader->rows(), 0);
+  ASSERT_NE(footer_reader->file_schema(), nullptr);
+
+  ASSERT_AND_ASSIGN(auto cell_metas, BuildVortexCellMetas(footer_reader, "id"));
+  AssertLoadableEmptyCellMetas(cell_metas);
+  ASSERT_AND_ASSIGN(auto group_cell_metas, BuildVortexGroupCellMetas(footer_reader, data_columns()));
+  AssertLoadableEmptyCellMetas(group_cell_metas);
+}
+
 TEST_F(VortexLocalFormatTest, TestFooterReaderMissingFilePreservesEnoent) {
   constexpr const char* kMissingPath = "missing-vortex-file-for-enoent-test.vx";
   boost::filesystem::remove(kMissingPath);

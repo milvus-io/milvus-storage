@@ -153,7 +153,7 @@ LoonFFIResult loon_filesystem_writer_write(FileSystemWriterHandle handle, const 
       RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, data, and size must not be null");
     }
 
-    auto output_stream = reinterpret_cast<OutputStreamWrapper*>(handle)->get();
+    auto* output_stream = reinterpret_cast<OutputStreamWrapper*>(handle);
     auto write_status = output_stream->Write(data, size);
     RETURN_ARROW_ERROR_IF(write_status, LOON_ARROW_ERROR, write_status.ToString());
     RETURN_SUCCESS();
@@ -170,7 +170,7 @@ LoonFFIResult loon_filesystem_writer_flush(FileSystemWriterHandle handle) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
     }
 
-    auto output_stream = reinterpret_cast<OutputStreamWrapper*>(handle)->get();
+    auto* output_stream = reinterpret_cast<OutputStreamWrapper*>(handle);
     auto flush_result = output_stream->Flush();
     RETURN_ARROW_ERROR_IF(flush_result, LOON_ARROW_ERROR, flush_result.ToString());
 
@@ -187,7 +187,7 @@ LoonFFIResult loon_filesystem_writer_close(FileSystemWriterHandle handle) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
     }
 
-    auto output_stream = reinterpret_cast<OutputStreamWrapper*>(handle)->get();
+    auto* output_stream = reinterpret_cast<OutputStreamWrapper*>(handle);
     auto close_result = output_stream->Close();
     RETURN_ARROW_ERROR_IF(close_result, LOON_ARROW_ERROR, close_result.ToString());
 
@@ -201,6 +201,11 @@ LoonFFIResult loon_filesystem_writer_close(FileSystemWriterHandle handle) {
 void loon_filesystem_writer_destroy(FileSystemWriterHandle handle) {
   if (handle) {
     auto* wrapper = reinterpret_cast<OutputStreamWrapper*>(handle);
+    try {
+      (void)wrapper->Abort();
+    } catch (...) {
+      // Destruction is best effort and must not throw across the C ABI.
+    }
     delete wrapper;
   }
 }

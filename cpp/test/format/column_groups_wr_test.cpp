@@ -24,6 +24,7 @@
 #include <arrow/testing/gtest_util.h>
 
 #include "milvus-storage/common/fiu_local.h"
+#include "milvus-storage/common/layout.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/async_tasks.h"
 #include "milvus-storage/format/column_group_reader.h"
@@ -607,6 +608,99 @@ TEST_P(ColumnGroupsWRTest, GetChunksFailWithParallelism) {
   FIU_DISABLE_FAULT(FIUKEY_COLUMN_GROUP_READ_FAIL);
 }
 #endif  // BUILD_WITH_FIU
+
+// Rolling hands files to Abort(), not to the caller: only Close() transfers
+// them, so a writer abandoned mid-rolling must delete what it rolled -- no
+// manifest will ever reference those objects, and nothing else can name them.
+TEST_P(ColumnGroupsWRTest, AbortDeletesRolledFiles) {
+  // Roll on every flush so several finalized objects exist before the abort.
+  ASSERT_EQ(api::SetValue(properties_, PROPERTY_WRITER_FILE_ROLLING_SIZE, "1"), std::nullopt);
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  for (int i = 0; i < 3; ++i) {
+    ASSERT_STATUS_OK(writer->write(test_batch_));
+    ASSERT_STATUS_OK(writer->flush());
+  }
+
+  arrow::fs::FileSelector selector;
+  selector.base_dir = get_data_path(base_path_);
+  ASSERT_AND_ASSIGN(const auto before_abort, fs_->GetFileInfo(selector));
+  ASSERT_GT(before_abort.size(), 1) << "rolling should have produced several files";
+
+  writer->abort();
+
+  ASSERT_AND_ASSIGN(const auto after_abort, fs_->GetFileInfo(selector));
+  EXPECT_TRUE(after_abort.empty()) << [&] {
+    std::string names;
+    for (const auto& info : after_abort) {
+      names += " " + info.path();
+    }
+    return "files survived abort:" + names;
+  }();
+}
+
+TEST_P(ColumnGroupsWRTest, CloseWithoutWritesPublishesNoFile) {
+  auto column_group = std::make_shared<ColumnGroup>();
+  column_group->columns = schema_->field_names();
+  column_group->format = format;
+  ASSERT_AND_ASSIGN(auto writer, ColumnGroupWriter::create(base_path_, 0, column_group, schema_, properties_));
+
+  ASSERT_AND_ASSIGN(auto files, writer->Close());
+  EXPECT_TRUE(files.empty());
+
+  arrow::fs::FileSelector selector;
+  selector.base_dir = get_data_path(base_path_);
+  ASSERT_AND_ASSIGN(const auto physical_files, fs_->GetFileInfo(selector));
+  EXPECT_TRUE(physical_files.empty());
+}
+
+TEST_P(ColumnGroupsWRTest, NonEmptyZeroByteBatchIsNotDiscardedAsEmpty) {
+  auto null_schema = arrow::schema({arrow::field("only_null", arrow::null())});
+  auto null_batch = arrow::RecordBatch::Make(
+      null_schema, 7, {std::static_pointer_cast<arrow::Array>(std::make_shared<arrow::NullArray>(7))});
+  ASSERT_EQ(GetRecordBatchMemorySize(null_batch), 0u);
+
+  auto column_group = std::make_shared<ColumnGroup>();
+  column_group->columns = null_schema->field_names();
+  column_group->format = format;
+  ASSERT_AND_ASSIGN(auto writer, ColumnGroupWriter::create(base_path_, 0, column_group, null_schema, properties_));
+
+  ASSERT_STATUS_OK(writer->Write(null_batch));
+  ASSERT_AND_ASSIGN(auto files, writer->Close());
+
+  ASSERT_EQ(files.size(), 1u);
+  EXPECT_EQ(files.front().start_index, 0);
+  EXPECT_EQ(files.front().end_index, null_batch->num_rows());
+
+  arrow::fs::FileSelector selector;
+  selector.base_dir = get_data_path(base_path_);
+  ASSERT_AND_ASSIGN(const auto physical_files, fs_->GetFileInfo(selector));
+  EXPECT_EQ(physical_files.size(), 1u);
+}
+
+TEST_P(ColumnGroupsWRTest, CloseAfterRollDoesNotPublishEmptySuccessor) {
+  ASSERT_EQ(api::SetValue(properties_, PROPERTY_WRITER_FILE_ROLLING_SIZE, "1"), std::nullopt);
+  auto column_group = std::make_shared<ColumnGroup>();
+  column_group->columns = schema_->field_names();
+  column_group->format = format;
+  ASSERT_AND_ASSIGN(auto writer, ColumnGroupWriter::create(base_path_, 0, column_group, schema_, properties_));
+
+  ASSERT_STATUS_OK(writer->Write(test_batch_));
+  ASSERT_STATUS_OK(writer->Flush());
+  ASSERT_AND_ASSIGN(auto files, writer->Close());
+
+  ASSERT_EQ(files.size(), 1u);
+  EXPECT_EQ(files.front().start_index, 0);
+  EXPECT_EQ(files.front().end_index, test_batch_->num_rows());
+  EXPECT_GT(files.front().Get<uint64_t>(api::kPropertyFileSize), 0u);
+  EXPECT_GT(files.front().Get<uint64_t>(api::kPropertyFooterSize), 0u);
+
+  arrow::fs::FileSelector selector;
+  selector.base_dir = get_data_path(base_path_);
+  ASSERT_AND_ASSIGN(const auto physical_files, fs_->GetFileInfo(selector));
+  ASSERT_EQ(physical_files.size(), 1u);
+  EXPECT_EQ(physical_files.front().path(), files.front().path);
+}
 
 INSTANTIATE_TEST_SUITE_P(ColumnGroupsWRTestP,
                          ColumnGroupsWRTest,
