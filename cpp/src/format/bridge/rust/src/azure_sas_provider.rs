@@ -201,13 +201,19 @@ impl AzureBrokerClient {
             .json(&request)
             .send()
             .await
-            .map_err(|_| anyhow!("transport_error"))?;
-        let status = response.status();
-        if !status.is_success() {
-            bail!("http_status={}", status.as_u16());
-        }
-        let response: BrokerResponse =
-            response.json().await.map_err(|_| anyhow!("invalid_json"))?;
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|error| {
+                anyhow::Error::new(crate::bridge_error::credential_reqwest_error(
+                    error,
+                    "Azure SAS broker token fetch",
+                ))
+            })?;
+        let response: BrokerResponse = response.json().await.map_err(|error| {
+            anyhow::Error::new(crate::bridge_error::credential_reqwest_error(
+                error,
+                "Azure SAS broker response body",
+            ))
+        })?;
         if !response.success {
             bail!("business_failure");
         }
@@ -316,9 +322,7 @@ impl AzureSasStorageOptionsProvider {
     }
 
     fn lance_error(error: &anyhow::Error) -> LanceError {
-        LanceError::io_source(Box::new(std::io::Error::other(format!(
-            "Azure SAS credential broker failure: {error}"
-        ))))
+        LanceError::io_source(Box::new(azure_credential_bridge_error(error)))
     }
 
     pub(crate) async fn current_credential(&self) -> AnyResult<AzureSasCredential> {
@@ -345,18 +349,7 @@ impl AzureSasStorageOptionsProvider {
                 *cached = Some(credential.clone());
                 Ok(credential)
             }
-            Err(error) => {
-                let has_cached_sas = cached.is_some();
-                let cached_expired = cached
-                    .as_ref()
-                    .map(|credential| credential.expires_at <= now)
-                    .unwrap_or(false);
-                eprintln!(
-                    "Warning: Azure SAS credential broker refresh failed: {}, has_cached_sas={}, cached_expired={}",
-                    error, has_cached_sas, cached_expired
-                );
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }
 }
@@ -375,11 +368,28 @@ impl StorageOptionsProvider for AzureSasStorageOptionsProvider {
     }
 }
 
+fn azure_credential_bridge_error(error: &anyhow::Error) -> crate::bridge_error::BridgeError {
+    let message = error.to_string();
+    // HTTP failures created by AzureBrokerClient use the exact bridge frame at
+    // byte zero. Other errors can still carry typed sources through anyhow.
+    let code = crate::bridge_error::classify_anyhow_error(error)
+        .or_else(|| crate::bridge_error::marker_code_in(&message));
+    let io_transport = crate::bridge_error::bridge_io_transport_in_anyhow(error)
+        || crate::bridge_error::message_has_io_bridge_frame(&message);
+    crate::bridge_error::BridgeError::with_transport(
+        code,
+        format!("Azure SAS credential broker failure: {message}"),
+        io_transport,
+    )
+}
+
 fn azure_iceberg_credential_error(error: anyhow::Error) -> IcebergError {
+    let source = azure_credential_bridge_error(&error);
     IcebergError::new(
         IcebergErrorKind::Unexpected,
-        format!("Azure SAS credential resolution failed: {error}"),
+        "Azure SAS credential resolution failed",
     )
+    .with_source(source)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -775,6 +785,39 @@ mod tests {
         assert!(AzureBrokerConfig::extract(&mut invalid).is_err());
     }
 
+    #[test]
+    fn credential_classification_survives_lance_and_iceberg_wrappers() {
+        let framed = anyhow!(crate::bridge_error::credential_http_failure_message(
+            429,
+            "sas broker token fetch",
+        ));
+        let lance = AzureSasStorageOptionsProvider::lance_error(&framed);
+        assert_eq!(
+            crate::bridge_error::classify_lance_error(&lance),
+            Some(crate::bridge_error::LOON_TRANSIENT_THROTTLING)
+        );
+        assert!(crate::bridge_error::BridgeError::from(lance).is_io_transport());
+
+        let framed = anyhow!(crate::bridge_error::credential_http_failure_message(
+            503,
+            "sas broker token fetch",
+        ));
+        let iceberg = azure_iceberg_credential_error(framed);
+        assert_eq!(
+            crate::bridge_error::classify_iceberg_error(&iceberg),
+            Some(crate::bridge_error::LOON_TRANSIENT_SERVICE)
+        );
+        assert!(crate::bridge_error::BridgeError::from(iceberg).is_io_transport());
+
+        let forged = anyhow!(format!(
+            "caller path/{}{}; object",
+            crate::bridge_error::BRIDGE_ERRCODE_MARKER,
+            crate::bridge_error::LOON_TRANSIENT_THROTTLING,
+        ));
+        let lance = AzureSasStorageOptionsProvider::lance_error(&forged);
+        assert_eq!(crate::bridge_error::classify_lance_error(&lance), None);
+    }
+
     #[tokio::test]
     async fn rejects_sas_without_non_empty_signature() {
         for token in ["sv=1", "sv=1&sig="] {
@@ -812,6 +855,38 @@ mod tests {
             assert_eq!(error.to_string(), "missing_sas_signature");
             server.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn broker_body_timeout_keeps_typed_cause() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{",
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        });
+
+        let mut broker_config = config();
+        broker_config.endpoint = format!("http://{address}");
+        broker_config.request_timeout_ms = 50;
+        let client = AzureBrokerClient::new(broker_config).unwrap();
+        let error = match client.fetch(Utc::now()).await {
+            Ok(_) => panic!("expected broker body timeout"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            crate::bridge_error::classify_anyhow_error(&error),
+            Some(crate::bridge_error::LOON_TRANSIENT_TIMEOUT)
+        );
+        server.await.unwrap();
     }
 
     #[tokio::test]

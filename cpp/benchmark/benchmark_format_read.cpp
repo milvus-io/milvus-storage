@@ -335,16 +335,12 @@ class FormatReadBenchmark : public FormatBenchFixtureBase<> {
   arrow::Result<PreparedReaderFile> PrepareIcebergReaderFile() const {
     ARROW_ASSIGN_OR_RAISE(auto table_uri, MakeIcebergTableUri(GetUniquePath("iceberg_read_test")));
 
-    iceberg::IcebergTestTableInfo table_info;
-    std::vector<iceberg::IcebergFileInfo> file_infos;
-    try {
-      auto storage_options = iceberg::ToStorageOptions(fs_config_);
-      table_info =
-          iceberg::CreateTestTable(table_uri, static_cast<uint64_t>(GetLoaderNumRows()), false, {}, storage_options);
-      file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
-    } catch (const std::exception& e) {
-      return arrow::Status::IOError("Failed to create Iceberg benchmark table: ", e.what());
-    }
+    auto storage_options = iceberg::ToStorageOptions(fs_config_);
+    ARROW_ASSIGN_OR_RAISE(
+        auto table_info,
+        iceberg::CreateTestTable(table_uri, static_cast<uint64_t>(GetLoaderNumRows()), false, {}, storage_options));
+    ARROW_ASSIGN_OR_RAISE(auto file_infos,
+                          iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options));
 
     if (file_infos.empty()) {
       return arrow::Status::Invalid("Iceberg PlanFiles returned no files");

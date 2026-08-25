@@ -34,9 +34,7 @@ use iceberg::spec::{
 };
 
 use crate::TOKIO_RT;
-use crate::iceberg_bridgeimpl::{
-    build_file_io, denormalize_uri, normalize_uri, vec_to_hashmap,
-};
+use crate::iceberg_bridgeimpl::{build_file_io, denormalize_uri, normalize_uri, vec_to_hashmap};
 use crate::iceberg_test_ffi::IcebergTestTableInfo;
 
 /// Write a Parquet record batch to bytes in memory.

@@ -83,6 +83,7 @@ uuid = { version = "1", features = ["v7"] }
 # AWS SDK (for Lance AssumeRole credential provider)
 aws-config = "1"
 aws-credential-types = "1"
+aws-sdk-sts = { version = "1", default-features = false }
 object_store = { version = "0.13", features = ["aws", "gcp"] }
 
 # HTTP client for the GCP Service Account Impersonation flow in

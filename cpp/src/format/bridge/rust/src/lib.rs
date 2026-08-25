@@ -15,6 +15,7 @@
 mod aliyun_oss_provider;
 mod aws_arn_provider;
 mod azure_sas_provider;
+mod bridge_error;
 mod cloud_provider_cache;
 mod gcp_impersonation;
 mod iceberg_bridgeimpl;
@@ -136,10 +137,8 @@ pub mod lance_ffi {
             dataset: &BlockingDataset,
             fragment_id: u64,
         ) -> Result<Vec<LanceColumnMemoryEstimate>>;
-        pub fn estimate_fragment_memory(
-            dataset: &BlockingDataset,
-            fragment_id: u64,
-        ) -> Result<u64>;
+        pub fn estimate_fragment_memory(dataset: &BlockingDataset, fragment_id: u64)
+        -> Result<u64>;
         pub unsafe fn get_fragment_schema(
             dataset: &BlockingDataset,
             fragment_id: u64,
@@ -275,6 +274,11 @@ pub mod paimon_test_ffi {
         ) -> Result<PaimonTestTableInfo>;
     }
 }
+
+// Classified errors cross the cxx boundary inside the error message: the Rust
+// side embeds the code with the universal marker prefix, and the C++ decoder
+// (bridge_error.h) parses and strips it. One channel, no side state -- see
+// bridge_error.rs for why a thread-local side channel was retired.
 
 #[cxx::bridge(namespace = "milvus_storage::vortex::ffi")]
 pub mod vortex_ffi {

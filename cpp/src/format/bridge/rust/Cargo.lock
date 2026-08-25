@@ -7197,6 +7197,7 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-credential-types",
+ "aws-sdk-sts",
  "base64",
  "bytes",
  "chrono",

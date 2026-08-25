@@ -22,35 +22,31 @@ namespace milvus_storage::iceberg {
 
 class IcebergBridgeTest : public ::testing::Test {};
 
-// PlanFiles should throw IcebergException for a nonexistent local metadata file
+// PlanFiles should return an error status for a nonexistent local metadata file
 TEST_F(IcebergBridgeTest, PlanFilesNonexistentLocalMetadata) {
   std::unordered_map<std::string, std::string> opts;
-  EXPECT_THROW(PlanFiles("/nonexistent/path/v1.metadata.json", 1, opts), IcebergException);
+  EXPECT_FALSE(PlanFiles("/nonexistent/path/v1.metadata.json", 1, opts).ok());
 }
 
-// PlanFiles should throw IcebergException for an empty metadata location
+// PlanFiles should return an error status for an empty metadata location
 TEST_F(IcebergBridgeTest, PlanFilesEmptyMetadataLocation) {
   std::unordered_map<std::string, std::string> opts;
-  EXPECT_THROW(PlanFiles("", 1, opts), IcebergException);
+  EXPECT_FALSE(PlanFiles("", 1, opts).ok());
 }
 
-// PlanFiles should throw IcebergException with an invalid snapshot id
+// PlanFiles should return an error status with an invalid snapshot id
 // even if the metadata file does not exist
 TEST_F(IcebergBridgeTest, PlanFilesInvalidSnapshotId) {
   std::unordered_map<std::string, std::string> opts;
-  EXPECT_THROW(PlanFiles("file:///nonexistent/metadata.json", -999, opts), IcebergException);
+  EXPECT_FALSE(PlanFiles("file:///nonexistent/metadata.json", -999, opts).ok());
 }
 
-// Verify IcebergException carries a descriptive message
-TEST_F(IcebergBridgeTest, ExceptionMessageIsDescriptive) {
+// Verify the returned error status carries a descriptive message
+TEST_F(IcebergBridgeTest, ErrorStatusMessageIsDescriptive) {
   std::unordered_map<std::string, std::string> opts;
-  try {
-    PlanFiles("/nonexistent/v1.metadata.json", 1, opts);
-    FAIL() << "Expected IcebergException";
-  } catch (const IcebergException& e) {
-    std::string msg = e.what();
-    EXPECT_FALSE(msg.empty()) << "Exception message should not be empty";
-  }
+  auto result = PlanFiles("/nonexistent/v1.metadata.json", 1, opts);
+  ASSERT_FALSE(result.ok());
+  EXPECT_FALSE(result.status().message().empty()) << "Error message should not be empty";
 }
 
 // IcebergFileInfo default construction

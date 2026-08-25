@@ -33,12 +33,12 @@ arrow::Result<std::vector<api::ColumnGroupFile>> LanceFormat::explore(const std:
   ARROW_ASSIGN_OR_RAISE(auto lance_base_uri, lance::BuildLanceBaseUri(fs_config, explore_uri.key));
   auto storage_options = lance::ToStorageOptions(fs_config);
 
-  auto dataset = lance::BlockingDataset::Open(lance_base_uri, storage_options);
-  auto fragment_ids = dataset->GetAllFragmentIds();
+  ARROW_ASSIGN_OR_RAISE(auto dataset, lance::BlockingDataset::Open(lance_base_uri, storage_options));
+  ARROW_ASSIGN_OR_RAISE(auto fragment_ids, dataset->GetAllFragmentIds());
 
   std::vector<api::ColumnGroupFile> files;
   for (auto frag_id : fragment_ids) {
-    auto row_count = dataset->GetFragmentRowCount(frag_id);
+    ARROW_ASSIGN_OR_RAISE(auto row_count, dataset->GetFragmentRowCount(frag_id));
     // Store Milvus-format URI (scheme://address/bucket/key) so the reader
     // can resolve the right extfs.<alias>.* by address+bucket. The reader
     // strips address back to standard form before handing to Lance.

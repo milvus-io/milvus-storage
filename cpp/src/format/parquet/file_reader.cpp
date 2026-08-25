@@ -33,6 +33,7 @@
 #include <fmt/format.h>
 
 #include "milvus-storage/format/parquet/file_reader.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/arrow_util.h"
@@ -101,7 +102,13 @@ arrow::Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs
     schema_ = file_schema;
     // FieldIDList::Make fails when a field lacks PARQUET:field_id metadata;
     // ValueOrDie here aborted the whole process on such (data-dependent) files.
-    ARROW_ASSIGN_OR_RAISE(field_id_list_, FieldIDList::Make(schema_));
+    auto field_ids = FieldIDList::Make(schema_);
+    if (!field_ids.ok()) {
+      return WrapExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                             fmt::format("Invalid packed parquet field metadata. [path={}]", path_),
+                             field_ids.status());
+    }
+    field_id_list_ = std::move(*field_ids);
     for (size_t i = 0; i < field_id_list_.size(); ++i) {
       needed_columns_.emplace_back(i);
     }

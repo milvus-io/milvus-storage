@@ -160,11 +160,11 @@ TEST_F(LoonTest, CreateAndReadIceberg) {
   const uint64_t num_rows = 30;
 
   // 1. Create Iceberg test table
-  auto table_info = CreateTestTable(table_dir_, num_rows, false, {});
+  auto table_info = CreateTestTable(table_dir_, num_rows, false, {}).ValueOrDie();
 
   // 2. Explore via PlanFiles
   std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options).ValueOrDie();
   ASSERT_EQ(file_infos.size(), 1);
 
   // 3. Build ColumnGroup and commit manifest via Transaction
@@ -226,10 +226,10 @@ TEST_F(LoonTest, CreateAndTakeWithDeletes) {
   const uint64_t num_rows = 20;
   std::vector<int64_t> deleted_positions = {3, 7, 15};
 
-  auto table_info = CreateTestTable(table_dir_, num_rows, true, deleted_positions);
+  auto table_info = CreateTestTable(table_dir_, num_rows, true, deleted_positions).ValueOrDie();
 
   std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options).ValueOrDie();
   ASSERT_EQ(file_infos.size(), 1);
   ASSERT_FALSE(file_infos[0].delete_metadata_json.empty());
 
@@ -280,10 +280,10 @@ TEST_F(LoonTest, SequentialReadFiltersDeletes) {
   const uint64_t num_rows = 15;
   std::vector<int64_t> deleted_positions = {0, 5, 14};
 
-  auto table_info = CreateTestTable(table_dir_, num_rows, true, deleted_positions);
+  auto table_info = CreateTestTable(table_dir_, num_rows, true, deleted_positions).ValueOrDie();
 
   std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options).ValueOrDie();
 
   std::vector<ColumnGroupFile> files;
   {
@@ -342,10 +342,10 @@ TEST_F(LoonTest, ManifestPreservesDeleteMetadata) {
   const uint64_t num_rows = 10;
   std::vector<int64_t> deleted_positions = {2, 8};
 
-  auto table_info = CreateTestTable(table_dir_, num_rows, true, deleted_positions);
+  auto table_info = CreateTestTable(table_dir_, num_rows, true, deleted_positions).ValueOrDie();
 
   std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options).ValueOrDie();
 
   // Commit manifest with delete metadata
   std::vector<ColumnGroupFile> files;

@@ -12,6 +12,8 @@
 
 #include "milvus-storage/format/paimon/paimon_format_reader.h"
 
+#include "milvus-storage/common/extend_status.h"
+
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -54,7 +56,7 @@ arrow::Result<ParsedMetadata> ParseMetadata(const std::string& json) {
   try {
     auto value = nlohmann::json::parse(json);
     if (!value.is_object()) {
-      return arrow::Status::Invalid("Paimon metadata must be a JSON object");
+      return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "Paimon metadata must be a JSON object");
     }
     version = value.value("version", int64_t{0});
     read_path = value.value(kReadPathKey, std::string{});
@@ -62,17 +64,18 @@ arrow::Result<ParsedMetadata> ParseMetadata(const std::string& json) {
     data_format = value.value("data_format", std::string{});
     deletion_file = value.value("deletion_file", nlohmann::json(nullptr));
   } catch (const nlohmann::json::exception& error) {
-    return arrow::Status::Invalid("Paimon metadata has invalid JSON or field types: ", error.what());
+    return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted,
+                              "Paimon metadata has invalid JSON or field types: ", error.what());
   }
   LOG_STORAGE_DEBUG_ << "Paimon metadata version=" << version;
   if (read_path != kDirectFileReadPath && read_path != kDataSplitReadPath) {
-    return arrow::Status::Invalid("Invalid Paimon metadata read_path: ", read_path);
+    return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "Invalid Paimon metadata read_path: ", read_path);
   }
   if (record_count < 0) {
-    return arrow::Status::Invalid("Paimon metadata has negative record_count");
+    return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "Paimon metadata has negative record_count");
   }
   if (read_path == kDataSplitReadPath && record_count == 0) {
-    return arrow::Status::Invalid("Paimon data-split metadata has zero record_count");
+    return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "Paimon data-split metadata has zero record_count");
   }
   return ParsedMetadata{
       .read_path = std::move(read_path),
@@ -105,14 +108,16 @@ arrow::Result<std::vector<RowGroupInfo>> MakeDirectLogicalRowGroups(const std::v
   uint64_t logical_start = 0;
   for (const auto& group : physical) {
     if (group.end_offset < group.start_offset) {
-      return arrow::Status::Invalid("Invalid physical Paimon row group: ", group.ToString());
+      return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted,
+                                "Invalid physical Paimon row group: ", group.ToString());
     }
     auto first = std::lower_bound(deletions.begin(), deletions.end(), group.start_offset);
     auto last = std::lower_bound(deletions.begin(), deletions.end(), group.end_offset);
     auto deleted = static_cast<uint64_t>(std::distance(first, last));
     auto physical_rows = static_cast<uint64_t>(group.end_offset - group.start_offset);
     if (deleted > physical_rows) {
-      return arrow::Status::Invalid("Paimon deletion count exceeds physical row group size");
+      return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted,
+                                "Paimon deletion count exceeds physical row group size");
     }
     auto logical_rows = physical_rows - deleted;
     uint64_t logical_memory_size = 0;
@@ -428,11 +433,11 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
     const api::ColumnGroupFile& file, const api::Properties& properties, const KeyRetriever& key_retriever) {
   const auto metadata_json = file.Get<std::string>(api::kPropertyMetadata);
   if (metadata_json.empty()) {
-    return arrow::Status::Invalid("Paimon column group is missing metadata");
+    return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "Paimon column group is missing metadata");
   }
   if (metadata_json.size() > kMaxPaimonMetadataBytes) {
-    return arrow::Status::Invalid("Paimon metadata is too large: ", metadata_json.size(), " bytes exceeds ",
-                                  kMaxPaimonMetadataBytes);
+    return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "Paimon metadata is too large: ", metadata_json.size(),
+                              " bytes exceeds ", kMaxPaimonMetadataBytes);
   }
   ARROW_ASSIGN_OR_RAISE(auto parsed, ParseMetadata(metadata_json));
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, file.path));
@@ -471,7 +476,7 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
     auto deletions = std::make_shared<std::vector<uint64_t>>();
     if (!parsed.deletion_file.is_null()) {
       if (!parsed.deletion_file.is_object()) {
-        return arrow::Status::Invalid("Paimon deletion_file must be an object");
+        return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "Paimon deletion_file must be an object");
       }
       std::string path;
       int64_t offset = -1;
@@ -483,10 +488,11 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
         length = parsed.deletion_file.value("length", int64_t{-1});
         cardinality = parsed.deletion_file.value("cardinality", int64_t{-1});
       } catch (const nlohmann::json::exception& error) {
-        return arrow::Status::Invalid("Paimon deletion_file has invalid field types: ", error.what());
+        return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted,
+                                  "Paimon deletion_file has invalid field types: ", error.what());
       }
       if (path.empty() || offset < 0 || length < 0) {
-        return arrow::Status::Invalid("Paimon deletion_file has invalid path or range");
+        return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "Paimon deletion_file has invalid path or range");
       }
       ARROW_ASSIGN_OR_RAISE(auto positions,
                             ReadDeletionVector(path, static_cast<uint64_t>(offset), static_cast<uint64_t>(length),
@@ -494,21 +500,23 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
       deletions->reserve(positions.size());
       for (auto position : positions) {
         if (position >= physical_rows) {
-          return arrow::Status::Invalid("Paimon deletion position exceeds physical row count");
+          return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted,
+                                    "Paimon deletion position exceeds physical row count");
         }
         deletions->push_back(position);
       }
     }
     std::sort(deletions->begin(), deletions->end());
     if (std::adjacent_find(deletions->begin(), deletions->end()) != deletions->end()) {
-      return arrow::Status::Invalid("Paimon deletion vector contains duplicate positions");
+      return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted, "Paimon deletion vector contains duplicate positions");
     }
     metadata->payload.sorted_deletions = deletions;
     ARROW_ASSIGN_OR_RAISE(metadata->row_group_infos, MakeDirectLogicalRowGroups(physical_groups, *deletions));
     auto logical_rows = metadata->row_group_infos.empty() ? 0 : metadata->row_group_infos.back().end_offset;
     if (logical_rows != parsed.record_count) {
-      return arrow::Status::Invalid("Paimon direct-file row count mismatch: descriptor=", parsed.record_count,
-                                    ", reader=", logical_rows);
+      return MakeExtendErrorMsg(ExtendStatusCode::DataCorrupted,
+                                "Paimon direct-file row count mismatch: descriptor=", parsed.record_count,
+                                ", reader=", logical_rows);
     }
     metadata->cache_size = direct_cache_size + deletions->size() * sizeof(uint64_t) + metadata_json.size() +
                            physical_groups.size() * sizeof(RowGroupInfo);
@@ -540,7 +548,8 @@ arrow::Result<std::shared_ptr<PaimonFormatReader>> PaimonFormatReader::MetaTrait
     const std::vector<std::string>& needed_columns,
     const std::string& /*predicate*/) {
   if (!metadata) {
-    return arrow::Status::Invalid("Cannot create Paimon reader from null metadata");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                              "Cannot create Paimon reader from null metadata");
   }
   ARROW_ASSIGN_OR_RAISE(auto output_schema, ProjectSchema(metadata->file_schema, read_schema, needed_columns));
   if (metadata->payload.read_path == kDataSplitReadPath) {
@@ -670,6 +679,10 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> PaimonFormatReader::get_chunk
   if (group.start_offset == group.end_offset) {
     return arrow::RecordBatch::MakeEmpty(output_schema_);
   }
+  if (static_cast<size_t>(row_group_index) >= metadata_->payload.direct_physical_row_groups.size()) {
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                              "Paimon logical row group has no direct-file physical row group: ", row_group_index);
+  }
   const auto& physical = metadata_->payload.direct_physical_row_groups[row_group_index];
   ARROW_ASSIGN_OR_RAISE(auto batch, direct_file_reader_->get_chunk(row_group_index));
   return filter_direct_batch(batch, physical.start_offset);
@@ -700,13 +713,18 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> PaimonFormatRead
     return output;
   }
   for (auto index : indices) {
-    if (index < 0 || static_cast<size_t>(index) >= metadata_->payload.direct_physical_row_groups.size()) {
-      return arrow::Status::Invalid("Paimon direct-file row group index out of range");
+    if (index < 0 || static_cast<size_t>(index) >= metadata_->row_group_infos.size()) {
+      return arrow::Status::Invalid("Paimon row group index out of range: ", index);
+    }
+    if (static_cast<size_t>(index) >= metadata_->payload.direct_physical_row_groups.size()) {
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                                "Paimon logical row group has no direct-file physical row group: ", index);
     }
   }
   ARROW_ASSIGN_OR_RAISE(auto batches, direct_file_reader_->get_chunks(indices));
   if (batches.size() != indices.size()) {
-    return arrow::Status::Invalid("Direct-file reader returned an unexpected Paimon chunk count");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                              "Direct-file reader returned an unexpected Paimon chunk count");
   }
   for (size_t i = 0; i < batches.size(); ++i) {
     const auto& physical = metadata_->payload.direct_physical_row_groups[indices[i]];
@@ -727,7 +745,9 @@ arrow::Result<std::vector<int64_t>> PaimonFormatReader::logical_to_physical(
   physical_offsets.reserve(logical_offsets.size());
   for (auto logical_offset : logical_offsets) {
     if (logical_offset < 0 || static_cast<uint64_t>(logical_offset) >= metadata_->payload.record_count) {
-      return arrow::Status::Invalid("Paimon direct-file take index is out of range");
+      // Caller-owned indices: a bad index is the caller's error, not an
+      // invariant of ours and not corruption of the persisted bytes.
+      return arrow::Status::Invalid("Paimon direct-file take index is out of range: ", logical_offset);
     }
     auto physical = static_cast<uint64_t>(logical_offset) + static_cast<uint64_t>(deletion_index);
     while (deletion_index < deletions.size() && deletions[deletion_index] <= physical) {
@@ -736,7 +756,8 @@ arrow::Result<std::vector<int64_t>> PaimonFormatReader::logical_to_physical(
     }
     if (physical >= metadata_->payload.physical_row_count ||
         physical > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-      return arrow::Status::Invalid("Paimon direct-file physical index is out of range");
+      return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                                "Paimon direct-file physical index is out of range");
     }
     physical_offsets.push_back(static_cast<int64_t>(physical));
   }

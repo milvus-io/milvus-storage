@@ -15,6 +15,7 @@
 #include "milvus-storage/format/parquet/folly_arrow_executor.h"
 
 #include <exception>
+#include <new>
 #include <utility>
 
 #include <arrow/status.h>

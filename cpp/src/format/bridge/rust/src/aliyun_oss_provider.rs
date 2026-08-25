@@ -367,6 +367,31 @@ async fn apply_oidc_chain_if_requested_with_expiration(
     Ok(expires_at_ms)
 }
 
+fn aliyun_sts_is_throttling_response(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    let Some(code) = value.get("Code").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    code == "Throttling" || code.starts_with("Throttling.")
+}
+
+fn aliyun_sts_http_failure_message(status: u16, context: &str, body: &str) -> String {
+    if status == 302 && aliyun_sts_is_throttling_response(body) {
+        return crate::bridge_error::BridgeError::new_io(
+            Some(crate::bridge_error::LOON_TRANSIENT_THROTTLING),
+            format!("credential resolution {context} failed: HTTP {status}: {body}"),
+        )
+        .to_string();
+    }
+
+    format!(
+        "{}: {body}",
+        crate::bridge_error::credential_http_failure_message(status, context)
+    )
+}
+
 /// Step 1 of the OIDC chain: `AssumeRoleWithOIDC` against same-account
 /// `role_arn` + `provider_arn` using a freshly-read OIDC `token`. Parses
 /// the JSON response (Format=JSON) into the same `AssumeRoleCreds` shape
@@ -401,14 +426,22 @@ async fn call_assume_role_with_oidc(
         .form(&form)
         .send()
         .await
-        .map_err(|e| format!("AssumeRoleWithOIDC POST: {e}"))?;
+        .map_err(|e| {
+            crate::bridge_error::credential_reqwest_error(e, "AssumeRoleWithOIDC POST").to_string()
+        })?;
     let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| format!("AssumeRoleWithOIDC body read: {e}"))?;
+    let text = resp.text().await.map_err(|e| {
+        crate::bridge_error::credential_reqwest_error(e, "AssumeRoleWithOIDC body read").to_string()
+    })?;
     if !status.is_success() {
-        return Err(format!("AssumeRoleWithOIDC HTTP {status}: {text}"));
+        // The classification rides the marker in the message: this runs on a
+        // tokio worker, so no ambient state can carry the verdict back to the
+        // calling thread.
+        return Err(aliyun_sts_http_failure_message(
+            status.as_u16(),
+            "AssumeRoleWithOIDC",
+            &text,
+        ));
     }
 
     #[derive(serde::Deserialize)]
@@ -517,6 +550,28 @@ fn aliyun_object_store_error(message: impl Into<String>) -> object_store::Error 
     }
 }
 
+fn aliyun_credential_bridge_error(
+    context: &str,
+    error: String,
+) -> crate::bridge_error::BridgeError {
+    // The String-returning Aliyun credential helpers emit a complete frame at
+    // byte zero only for producer-classified HTTP failures. Preserve that
+    // verdict as a typed source before adding any outer diagnostic context.
+    let code = crate::bridge_error::marker_code_in(&error);
+    crate::bridge_error::BridgeError::with_transport(
+        code,
+        format!("{context}: {error}"),
+        crate::bridge_error::message_has_io_bridge_frame(&error),
+    )
+}
+
+fn aliyun_credential_object_store_error(context: &str, error: String) -> object_store::Error {
+    object_store::Error::Generic {
+        store: ALIYUN_OSS_STORE_NAME,
+        source: Box::new(aliyun_credential_bridge_error(context, error)),
+    }
+}
+
 #[derive(Clone)]
 struct CachedAliyunOssStore {
     config_map: HashMap<String, String>,
@@ -614,17 +669,19 @@ impl RefreshableAliyunOssStore {
             apply_ram_mode_if_requested_with_expiration(&mut config_map, duration_seconds)
                 .await
                 .map_err(|e| {
-                    aliyun_object_store_error(format!(
-                        "Aliyun RAM-mode credential refresh failed: {e}"
-                    ))
+                    aliyun_credential_object_store_error(
+                        "Aliyun RAM-mode credential refresh failed",
+                        e,
+                    )
                 })?;
         let oidc_expires_at_ms =
             apply_oidc_chain_if_requested_with_expiration(&mut config_map, duration_seconds)
                 .await
                 .map_err(|e| {
-                    aliyun_object_store_error(format!(
-                        "Aliyun OIDC chain credential refresh failed: {e}"
-                    ))
+                    aliyun_credential_object_store_error(
+                        "Aliyun OIDC chain credential refresh failed",
+                        e,
+                    )
                 })?;
         let expires_at_ms = ram_expires_at_ms.or(oidc_expires_at_ms).ok_or_else(|| {
             aliyun_object_store_error(
@@ -828,22 +885,21 @@ impl AliyunOssStoreProvider {
             .host_str()
             .ok_or_else(|| LanceError::invalid_input("OSS URL must contain bucket name"))?
             .to_string();
-        let config_map = build_oss_config_from_lance_opts(
-            bucket,
-            &base_path,
-            storage_options,
-        )
-        .map_err(LanceError::invalid_input)?;
-        let credential_duration = parse_oss_credential_duration(storage_options)
+        let config_map = build_oss_config_from_lance_opts(bucket, &base_path, storage_options)
             .map_err(LanceError::invalid_input)?;
+        let credential_duration =
+            parse_oss_credential_duration(storage_options).map_err(LanceError::invalid_input)?;
         let store = Arc::new(RefreshableAliyunOssStore::new(
             config_map,
             credential_duration,
         ));
-        store.current_store().await.map_err(|error| LanceError::IO {
-            source: Box::new(error),
-            location: location!(),
-        })?;
+        store
+            .current_store()
+            .await
+            .map_err(|error| LanceError::IO {
+                source: Box::new(error),
+                location: location!(),
+            })?;
         Ok(Self { store })
     }
 }
@@ -899,9 +955,7 @@ impl ObjectStoreProvider for AliyunOssStoreProvider {
 /// returned dataset instead of retaining static storage options process-wide.
 /// Cache sizes of zero match what the FFI entry points already pass to
 /// `BlockingDataset::open`.
-pub fn build_aliyun_oss_session(
-    provider: Arc<dyn ObjectStoreProvider>,
-) -> Arc<Session> {
+pub fn build_aliyun_oss_session(provider: Arc<dyn ObjectStoreProvider>) -> Arc<Session> {
     let registry = ObjectStoreRegistry::default();
     registry.insert("oss", provider);
     Arc::new(Session::new(0, 0, Arc::new(registry)))
@@ -945,12 +999,8 @@ impl AliyunOssStorageFactory {
                 )
             })?
             .to_string();
-        let config_map = build_oss_config_from_iceberg_opts(
-            bucket,
-            &base_path,
-            storage_options,
-        )
-        .map_err(|error| IcebergError::new(IcebergErrorKind::DataInvalid, error))?;
+        let config_map = build_oss_config_from_iceberg_opts(bucket, &base_path, storage_options)
+            .map_err(|error| IcebergError::new(IcebergErrorKind::DataInvalid, error))?;
         let credential_duration = parse_oss_credential_duration(storage_options)
             .map_err(|error| IcebergError::new(IcebergErrorKind::DataInvalid, error))?;
         let store = Arc::new(RefreshableAliyunOssStore::new(
@@ -1027,16 +1077,24 @@ impl AliyunOssStorage {
                 .map_err(|e| {
                     IcebergError::new(
                         IcebergErrorKind::Unexpected,
-                        format!("Aliyun RAM-mode credential resolution failed: {e}"),
+                        "Aliyun RAM-mode credential resolution failed",
                     )
+                    .with_source(aliyun_credential_bridge_error(
+                        "Aliyun RAM-mode credential resolution failed",
+                        e,
+                    ))
                 })?;
             apply_oidc_chain_if_requested(&mut config_map)
                 .await
                 .map_err(|e| {
                     IcebergError::new(
                         IcebergErrorKind::Unexpected,
-                        format!("Aliyun OIDC chain credential resolution failed: {e}"),
+                        "Aliyun OIDC chain credential resolution failed",
                     )
+                    .with_source(aliyun_credential_bridge_error(
+                        "Aliyun OIDC chain credential resolution failed",
+                        e,
+                    ))
                 })?;
             config_map
         };
@@ -1101,7 +1159,7 @@ impl IcebergStorage for AliyunOssStorage {
 
     async fn writer(&self, path: &str) -> IcebergResult<Box<dyn FileWrite>> {
         let (op, rel) = self.create_operator(path).await?;
-        Ok(Box::new(OpenDalWriter(
+        Ok(Box::new(OpenDalWriter::new(
             op.writer(&rel).await.map_err(from_opendal_error)?,
         )))
     }
@@ -1151,20 +1209,76 @@ impl FileRead for OpenDalReader {
 
 /// `FileWrite` wrapper around an opendal `Writer`. Same rationale as
 /// [`OpenDalReader`] — upstream's wrapper is `pub(crate)`.
-struct OpenDalWriter(opendal::Writer);
+struct OpenDalWriter {
+    inner: Option<opendal::Writer>,
+    failure: Option<String>,
+    closed: bool,
+}
+
+impl OpenDalWriter {
+    fn new(inner: opendal::Writer) -> Self {
+        Self {
+            inner: Some(inner),
+            failure: None,
+            closed: false,
+        }
+    }
+
+    fn check_failure(&self) -> IcebergResult<()> {
+        if let Some(error) = &self.failure {
+            debug_assert!(false, "stateful writer reused after a terminal failure");
+            return Err(IcebergError::new(
+                IcebergErrorKind::Unexpected,
+                error.clone(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[async_trait::async_trait]
 impl FileWrite for OpenDalWriter {
     async fn write(&mut self, bs: bytes::Bytes) -> IcebergResult<()> {
-        Ok(opendal::Writer::write(&mut self.0, bs)
-            .await
-            .map_err(from_opendal_error)?)
+        self.check_failure()?;
+        if self.closed {
+            return Err(IcebergError::new(
+                IcebergErrorKind::Unexpected,
+                "cannot write: OpenDalWriter is closed",
+            ));
+        }
+
+        let result = opendal::Writer::write(
+            self.inner
+                .as_mut()
+                .expect("open OpenDalWriter must retain its inner writer"),
+            bs,
+        )
+        .await;
+        if let Err(error) = result {
+            let error = from_opendal_error(error);
+            self.failure = Some(error.to_string());
+            self.inner = None;
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn close(&mut self) -> IcebergResult<()> {
-        let _ = opendal::Writer::close(&mut self.0)
-            .await
-            .map_err(from_opendal_error)?;
+        self.check_failure()?;
+        if self.closed {
+            return Ok(());
+        }
+
+        let mut inner = self
+            .inner
+            .take()
+            .expect("open OpenDalWriter must retain its inner writer");
+        if let Err(error) = opendal::Writer::close(&mut inner).await {
+            let error = from_opendal_error(error);
+            self.failure = Some(error.to_string());
+            return Err(error);
+        }
+        self.closed = true;
         Ok(())
     }
 }
@@ -1267,49 +1381,87 @@ pub(crate) mod ram {
             .map_err(|e| format!("build reqwest client: {e}"))
     }
 
-    /// IMDSv2: PUT returns a session token in the response body. Anything other
-    /// than 200 (404 on V1-only instances, 403 on some hardened variants) falls
-    /// back to V1 with an empty token. Callers treat that as "no V2, use plain
-    /// GETs".
-    async fn fetch_imds_v2_token(client: &reqwest::Client) -> String {
-        let resp = client
-            .put(format!("{IMDS_BASE}{IMDS_V2_TOKEN_PATH}"))
+    /// IMDSv2: PUT returns a session token in the response body. Only an
+    /// explicit unsupported endpoint response falls back to V1. A transport
+    /// outage, throttling response, or service error must not silently switch
+    /// the request to the weaker identity transport.
+    async fn fetch_imds_v2_token(
+        client: &reqwest::Client,
+        imds_base: &str,
+    ) -> Result<Option<String>, String> {
+        let response = client
+            .put(format!("{imds_base}{IMDS_V2_TOKEN_PATH}"))
             .header(
                 "X-aliyun-ecs-metadata-token-ttl-seconds",
                 IMDS_V2_TTL_SECS.to_string(),
             )
             .body("")
             .send()
-            .await;
-        match resp {
-            Ok(r) if r.status().is_success() => {
-                r.text().await.unwrap_or_default().trim().to_string()
-            }
-            _ => String::new(),
+            .await
+            .map_err(|error| {
+                crate::bridge_error::credential_reqwest_error(error, "Aliyun IMDSv2 token request")
+                    .to_string()
+            })?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND
+            || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+        {
+            return Ok(None);
         }
+        if !status.is_success() {
+            return Err(crate::bridge_error::credential_http_failure_message(
+                status.as_u16(),
+                "Aliyun IMDSv2 token request",
+            ));
+        }
+
+        let token = response
+            .text()
+            .await
+            .map_err(|error| {
+                crate::bridge_error::credential_reqwest_error(
+                    error,
+                    "Aliyun IMDSv2 token response body",
+                )
+                .to_string()
+            })?
+            .trim()
+            .to_string();
+        if token.is_empty() {
+            return Err("Aliyun IMDSv2 token response was empty".to_string());
+        }
+        Ok(Some(token))
     }
 
     async fn fetch_imds_credentials(client: &reqwest::Client) -> Result<AssumeRoleCreds, String> {
-        let v2 = fetch_imds_v2_token(client).await;
+        let v2 = fetch_imds_v2_token(client, IMDS_BASE).await?;
 
         // Step 1: role name listing. Aliyun returns a single line ("ecs-xxx");
         // multiple attached roles aren't a supported ECS concept.
         let list_url = format!("{IMDS_BASE}{IMDS_ROLE_LIST_PATH}");
         let mut req = client.get(&list_url);
-        if !v2.is_empty() {
-            req = req.header("X-aliyun-ecs-metadata-token", &v2);
+        if let Some(token) = &v2 {
+            req = req.header("X-aliyun-ecs-metadata-token", token);
         }
         let role_name = req
             .send()
             .await
-            .map_err(|e| format!("IMDS role-list request: {e}"))?
+            .map_err(|e| {
+                crate::bridge_error::credential_reqwest_error(e, "Aliyun IMDS role-list request")
+                    .to_string()
+            })?
             .error_for_status()
             .map_err(|e| {
-                format!("IMDS role-list HTTP error (no RAM role attached to this ECS?): {e}")
+                crate::bridge_error::credential_reqwest_error(e, "Aliyun IMDS role-list response")
+                    .to_string()
             })?
             .text()
             .await
-            .map_err(|e| format!("IMDS role-list body: {e}"))?
+            .map_err(|e| {
+                crate::bridge_error::credential_reqwest_error(e, "Aliyun IMDS role-list body")
+                    .to_string()
+            })?
             .trim()
             .to_string();
         if role_name.is_empty() {
@@ -1319,8 +1471,8 @@ pub(crate) mod ram {
         // Step 2: STS creds for that role.
         let creds_url = format!("{IMDS_BASE}{IMDS_ROLE_LIST_PATH}{role_name}");
         let mut req = client.get(&creds_url);
-        if !v2.is_empty() {
-            req = req.header("X-aliyun-ecs-metadata-token", &v2);
+        if let Some(token) = &v2 {
+            req = req.header("X-aliyun-ecs-metadata-token", token);
         }
         #[derive(Deserialize)]
         #[serde(rename_all = "PascalCase")]
@@ -1332,12 +1484,21 @@ pub(crate) mod ram {
         let parsed: ImdsCredsJson = req
             .send()
             .await
-            .map_err(|e| format!("IMDS creds request: {e}"))?
+            .map_err(|e| {
+                crate::bridge_error::credential_reqwest_error(e, "Aliyun IMDS credential request")
+                    .to_string()
+            })?
             .error_for_status()
-            .map_err(|e| format!("IMDS creds HTTP error: {e}"))?
+            .map_err(|e| {
+                crate::bridge_error::credential_reqwest_error(e, "Aliyun IMDS credential response")
+                    .to_string()
+            })?
             .json()
             .await
-            .map_err(|e| format!("IMDS creds JSON parse: {e}"))?;
+            .map_err(|e| {
+                crate::bridge_error::credential_reqwest_error(e, "Aliyun IMDS credential JSON")
+                    .to_string()
+            })?;
         Ok(AssumeRoleCreds {
             access_key_id: parsed.access_key_id,
             access_key_secret: parsed.access_key_secret,
@@ -1417,25 +1578,28 @@ pub(crate) mod ram {
         let signature = pop_sign(&caller.access_key_secret, &canonical_query);
         let body = format!("{canonical_query}&Signature={}", pop_encode(&signature));
 
-        // HTTP 4xx responses from STS carry the error message as raw body
-        // text; we surface it verbatim in the `Err` rather than parsing into
-        // a dedicated error struct, since nothing downstream branches on the
-        // STS error code. Success responses get parsed into typed structs
-        // below.
+        // Keep the raw error body for diagnostics. The shared Aliyun helper
+        // only inspects Code to recognize the documented HTTP 302 throttling
+        // response; all other statuses retain the common HTTP classification.
         let resp = client
             .post(STS_ENDPOINT)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(body)
             .send()
             .await
-            .map_err(|e| format!("sts:AssumeRole POST: {e}"))?;
+            .map_err(|e| {
+                crate::bridge_error::credential_reqwest_error(e, "sts:AssumeRole POST").to_string()
+            })?;
         let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| format!("sts:AssumeRole body read: {e}"))?;
+        let text = resp.text().await.map_err(|e| {
+            crate::bridge_error::credential_reqwest_error(e, "sts:AssumeRole body read").to_string()
+        })?;
         if !status.is_success() {
-            return Err(format!("sts:AssumeRole HTTP {status}: {text}"));
+            return Err(super::aliyun_sts_http_failure_message(
+                status.as_u16(),
+                "sts:AssumeRole",
+                &text,
+            ));
         }
 
         #[derive(Deserialize)]
@@ -1466,6 +1630,54 @@ pub(crate) mod ram {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        async fn serve_token_response(
+            status: &str,
+            body: &str,
+        ) -> (String, tokio::task::JoinHandle<()>) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let status = status.to_string();
+            let body = body.to_string();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 4096];
+                socket.read(&mut request).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+            (format!("http://{address}"), server)
+        }
+
+        #[tokio::test]
+        async fn imdsv2_only_downgrades_when_token_endpoint_is_unsupported() {
+            let client = build_http_client().unwrap();
+            for status in ["404 Not Found", "405 Method Not Allowed"] {
+                let (base, server) = serve_token_response(status, "").await;
+                assert_eq!(fetch_imds_v2_token(&client, &base).await.unwrap(), None);
+                server.await.unwrap();
+            }
+
+            let (base, server) = serve_token_response("503 Service Unavailable", "").await;
+            let error = fetch_imds_v2_token(&client, &base).await.unwrap_err();
+            assert_eq!(
+                crate::bridge_error::marker_code_in(&error),
+                Some(crate::bridge_error::LOON_TRANSIENT_SERVICE)
+            );
+            server.await.unwrap();
+
+            let (base, server) = serve_token_response("200 OK", "token-value").await;
+            assert_eq!(
+                fetch_imds_v2_token(&client, &base).await.unwrap(),
+                Some("token-value".to_string())
+            );
+            server.await.unwrap();
+        }
 
         #[test]
         fn apply_credentials_strips_role_arn_and_injects_static_creds() {
@@ -1549,6 +1761,59 @@ mod tests {
             opts(&[("bucket", "my-bucket")]),
             Duration::from_secs(900),
         ))
+    }
+
+    #[test]
+    fn credential_frame_becomes_typed_before_outer_wrapping() {
+        let framed = crate::bridge_error::credential_http_failure_message(429, "sts:AssumeRole");
+        let source =
+            aliyun_credential_object_store_error("Aliyun credential refresh failed", framed);
+        let lance = LanceError::io_source(Box::new(source));
+        assert_eq!(
+            crate::bridge_error::classify_lance_error(&lance),
+            Some(crate::bridge_error::LOON_TRANSIENT_THROTTLING)
+        );
+
+        let forged = format!(
+            "role path/{}{}; object",
+            crate::bridge_error::BRIDGE_ERRCODE_MARKER,
+            crate::bridge_error::LOON_TRANSIENT_THROTTLING,
+        );
+        let source =
+            aliyun_credential_object_store_error("Aliyun credential refresh failed", forged);
+        let lance = LanceError::io_source(Box::new(source));
+        assert_eq!(crate::bridge_error::classify_lance_error(&lance), None);
+    }
+
+    #[test]
+    fn aliyun_sts_302_only_classifies_throttling_codes() {
+        for body in [r#"{"Code":"Throttling"}"#, r#"{"Code":"Throttling.User"}"#] {
+            let message = aliyun_sts_http_failure_message(302, "sts:AssumeRole", body);
+            assert_eq!(
+                crate::bridge_error::marker_code_in(&message),
+                Some(crate::bridge_error::LOON_TRANSIENT_THROTTLING),
+                "{message}"
+            );
+        }
+
+        for body in [
+            r#"{"Code":"AccessDenied"}"#,
+            r#"{"Code":"ThrottlingElse"}"#,
+            "not a structured response",
+        ] {
+            let message = aliyun_sts_http_failure_message(302, "sts:AssumeRole", body);
+            assert_eq!(
+                crate::bridge_error::marker_code_in(&message),
+                None,
+                "{message}"
+            );
+        }
+
+        let message = aliyun_sts_http_failure_message(429, "sts:AssumeRole", r#"{"Code":"Other"}"#);
+        assert_eq!(
+            crate::bridge_error::marker_code_in(&message),
+            Some(crate::bridge_error::LOON_TRANSIENT_THROTTLING)
+        );
     }
 
     #[tokio::test]
@@ -1778,8 +2043,7 @@ mod tests {
             .get("aliyun", || async {
                 Ok::<_, ()>(Arc::new(AliyunOssStoreProvider {
                     store: refreshable_store(),
-                })
-                    as Arc<dyn ObjectStoreProvider>)
+                }) as Arc<dyn ObjectStoreProvider>)
             })
             .await
             .unwrap();
@@ -1787,8 +2051,7 @@ mod tests {
             .get("aliyun", || async {
                 Ok::<_, ()>(Arc::new(AliyunOssStoreProvider {
                     store: refreshable_store(),
-                })
-                    as Arc<dyn ObjectStoreProvider>)
+                }) as Arc<dyn ObjectStoreProvider>)
             })
             .await
             .unwrap();
@@ -1853,10 +2116,7 @@ mod tests {
         let path = "oss://my-bucket/dir/a b/中文/%25/literal/../file+name.parquet";
         let (_, relative) = storage.create_operator(path).await.unwrap();
 
-        assert_eq!(
-            relative,
-            "dir/a b/中文/%25/literal/../file+name.parquet"
-        );
+        assert_eq!(relative, "dir/a b/中文/%25/literal/../file+name.parquet");
     }
 
     #[tokio::test]
