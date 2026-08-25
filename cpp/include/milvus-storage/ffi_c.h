@@ -47,6 +47,9 @@ LOON_INTERNAL_ERROR_CODE_LIST(MILVUS_STORAGE_ERRCODE_DECL)
 LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_ERRCODE_DECL)
 #undef MILVUS_STORAGE_ERRCODE_DECL
 
+// Retired producer code retained as a C ABI tombstone.
+FFI_EXPORT extern const int loon_errcode_packed_arrow_error;
+
 // Compatibility names for the original AWS-specific object-store codes.
 FFI_EXPORT extern const int loon_errcode_aws_no_such_upload;
 FFI_EXPORT extern const int loon_errcode_aws_conflict;

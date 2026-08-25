@@ -57,7 +57,7 @@ arrow::Status ColumnGroup::AddRecordBatch(const std::shared_ptr<arrow::RecordBat
 }
 
 arrow::Status ColumnGroup::Merge(const ColumnGroup& other) {
-  for (auto& batch : other.batches_) {
+  for (const auto& batch : other.batches_) {
     auto status = AddRecordBatch(batch);
     if (!status.ok()) {
       return WrapExtendError(ExtendStatusCode::PackedUnexpected, "ColumnGroup::Merge: failed to merge record batch",
@@ -70,11 +70,7 @@ arrow::Status ColumnGroup::Merge(const ColumnGroup& other) {
 arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroup::Table() const {
   auto result = arrow::Table::FromRecordBatches(batches_);
   if (!result.ok()) {
-    // Keep the original StatusCode and detail (FromRecordBatches reports
-    // schema mismatch / empty group as Invalid, which classifies as
-    // DataFormatBroken downstream); only the message gains context. Wrapping
-    // into PackedUnexpected here would rewrite Invalid into IOError and
-    // degrade the classification to a generic StorageError.
+    // Keep the original StatusCode and detail; only the message gains context.
     return result.status().WithMessage("ColumnGroup::Table: failed to merge record batches: ",
                                        result.status().message());
   }

@@ -228,7 +228,9 @@ TEST(ErrorTaxonomyTest, ExportedConstantsMatchMacros) {
   EXPECT_EQ(loon_errcode_packed_io, static_cast<int>(ExtendStatusCode::PackedIO));
   EXPECT_EQ(loon_errcode_packed_metadata_corrupted, static_cast<int>(ExtendStatusCode::PackedMetadataCorrupted));
   EXPECT_EQ(loon_errcode_packed_file_corrupted, static_cast<int>(ExtendStatusCode::PackedFileCorrupted));
-  EXPECT_EQ(loon_errcode_packed_arrow_error, static_cast<int>(ExtendStatusCode::PackedArrowError));
+  EXPECT_EQ(loon_errcode_packed_arrow_error, 54);
+  EXPECT_EQ(loon_ffi_error_category(loon_errcode_packed_arrow_error), LOON_ERROR_CATEGORY_UNKNOWN);
+  EXPECT_FALSE(ExtendStatusCodeFromInt(loon_errcode_packed_arrow_error).has_value());
   EXPECT_EQ(loon_errcode_packed_unexpected, static_cast<int>(ExtendStatusCode::PackedUnexpected));
   EXPECT_EQ(loon_errcode_storage_no_such_upload, LOON_STORAGE_NO_SUCH_UPLOAD);
   EXPECT_EQ(loon_errcode_storage_conflict, LOON_STORAGE_CONFLICT);

@@ -238,8 +238,6 @@ milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
     case ExtendStatusCode::PackedMetadataCorrupted:
     case ExtendStatusCode::PackedFileCorrupted:
       return milvus::DataFormatBroken;  // 2024, non-retryable data-format failure
-    case ExtendStatusCode::PackedArrowError:
-      return milvus::StorageError;
     case ExtendStatusCode::PackedUnexpected:
       // Same reasoning: "unexpected" is a defect report, not a storage verdict.
       return milvus::UnexpectedError;  // 2001

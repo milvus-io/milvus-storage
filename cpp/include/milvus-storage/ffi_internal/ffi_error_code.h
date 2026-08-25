@@ -192,7 +192,6 @@
   X(PackedIO, 51, packed_io, LOON_ERROR_CATEGORY_SYSTEM)                                                        \
   X(PackedMetadataCorrupted, 52, packed_metadata_corrupted, LOON_ERROR_CATEGORY_DATA_FORMAT)                    \
   X(PackedFileCorrupted, 53, packed_file_corrupted, LOON_ERROR_CATEGORY_DATA_FORMAT)                            \
-  X(PackedArrowError, 54, packed_arrow_error, LOON_ERROR_CATEGORY_SYSTEM)                                       \
   X(PackedUnexpected, 55, packed_unexpected, LOON_ERROR_CATEGORY_SYSTEM)                                        \
   /* --- object storage (101-110) --- */                                                                        \
   X(StorageNoSuchUpload, LOON_STORAGE_NO_SUCH_UPLOAD, storage_no_such_upload, LOON_ERROR_CATEGORY_RETRYABLE)    \

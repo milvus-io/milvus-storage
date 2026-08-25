@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <new>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -86,6 +87,10 @@ arrow::Status PackedRecordBatchWriter::init() {
                                        paths_.size(), group_indices_.size()));
   }
 
+  if (std::set<std::string>(paths_.begin(), paths_.end()).size() != paths_.size()) {
+    return MakeExtendError(ExtendStatusCode::PackedInvalidArgs, "Packed writer output paths must be unique");
+  }
+
   if (!fs_) {
     return MakeExtendError(ExtendStatusCode::PackedInvalidArgs, "Packed writer null file system provided");
   }
@@ -97,20 +102,39 @@ arrow::Status PackedRecordBatchWriter::init() {
                                        field_id_list.status().ToString(), schema_->ToString(true)),
                            field_id_list.status().ToString());
   }
+  auto field_ids = std::move(field_id_list).ValueOrDie();
+  std::set<FieldID> unique_field_ids;
+  for (size_t i = 0; i < field_ids.size(); ++i) {
+    const auto field_id = field_ids.Get(i);
+    if (!unique_field_ids.emplace(field_id).second) {
+      return MakeExtendError(ExtendStatusCode::PackedInvalidArgs,
+                             fmt::format("Packed writer schema contains duplicate field id. [field_id={}]", field_id));
+    }
+  }
 
-  // Validate column group indices are within bounds
-  int num_fields = schema_->num_fields();
+  // Every persisted physical column must have exactly one field mapping.
+  const int num_fields = schema_->num_fields();
+  std::vector<bool> assigned(static_cast<size_t>(num_fields), false);
   for (const auto& group_indice : group_indices_) {
+    if (group_indice.empty()) {
+      return MakeExtendError(ExtendStatusCode::PackedInvalidArgs, "Packed writer column groups must not be empty");
+    }
     for (int col_index : group_indice) {
       if (col_index < 0 || col_index >= num_fields) {
         return MakeExtendError(ExtendStatusCode::PackedInvalidArgs,
                                fmt::format("Column index out of range: {} (schema has {} fields), [schema={}]",
                                            col_index, num_fields, schema_->ToString(true)));
       }
+      if (assigned[static_cast<size_t>(col_index)]) {
+        return MakeExtendError(
+            ExtendStatusCode::PackedInvalidArgs,
+            fmt::format("Packed writer column index appears in multiple positions. [column_index={}]", col_index));
+      }
+      assigned[static_cast<size_t>(col_index)] = true;
     }
   }
 
-  group_field_id_list_ = GroupFieldIDList::Make(group_indices_, field_id_list.ValueOrDie());
+  group_field_id_list_ = GroupFieldIDList::Make(group_indices_, field_ids);
 
   splitter_ = IndicesBasedSplitter(group_indices_);
   // Allocate every ownership slot before opening the first child. Once a

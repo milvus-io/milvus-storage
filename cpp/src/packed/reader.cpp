@@ -14,7 +14,7 @@
 
 #include <memory>
 #include <algorithm>
-#include <exception>
+#include <new>
 #include <stdexcept>
 #include <utility>
 
@@ -56,17 +56,154 @@ arrow::Result<std::shared_ptr<PackedFileMetadata>> MakePackedMetadata(
   try {
     auto result = PackedFileMetadata::Make(metadata);
     if (!result.ok()) {
-      return WrapExtendError(ExtendStatusCode::PackedMetadataCorrupted,
-                             fmt::format("Failed to parse packed file metadata. [path={}]", path), result.status());
+      return result.status();
     }
     return result;
-  } catch (const std::exception& e) {
-    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
-                           fmt::format("Failed to parse packed file metadata. [path={}, error={}]", path, e.what()));
   } catch (...) {
-    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
-                           fmt::format("Failed to parse packed file metadata with unknown exception. [path={}]", path));
+    return MakeExtendError(ExtendStatusCode::InternalInvariantViolated, "Packed metadata parsing failed unexpectedly");
   }
+}
+
+bool SameFieldMapping(const std::map<FieldID, ColumnOffset>& left, const std::map<FieldID, ColumnOffset>& right) {
+  if (left.size() != right.size()) {
+    return false;
+  }
+  auto left_it = left.begin();
+  auto right_it = right.begin();
+  for (; left_it != left.end(); ++left_it, ++right_it) {
+    if (left_it->first != right_it->first || left_it->second.path_index != right_it->second.path_index ||
+        left_it->second.col_index != right_it->second.col_index) {
+      return false;
+    }
+  }
+  return true;
+}
+
+arrow::Result<std::vector<FieldID>> FieldIdsForPath(const std::map<FieldID, ColumnOffset>& mapping,
+                                                    size_t path_index,
+                                                    size_t num_paths) {
+  if (path_index >= num_paths) {
+    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                           fmt::format("Packed field mapping path index is out of range. "
+                                       "[path_index={}, num_paths={}]",
+                                       path_index, num_paths));
+  }
+
+  int max_column = -1;
+  size_t field_count = 0;
+  for (const auto& [field_id, offset] : mapping) {
+    (void)field_id;
+    if (offset.path_index < 0 || static_cast<size_t>(offset.path_index) >= num_paths || offset.col_index < 0) {
+      return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                             fmt::format("Packed field mapping contains an invalid physical offset. "
+                                         "[field_id={}, path_index={}, column_index={}, num_paths={}]",
+                                         field_id, offset.path_index, offset.col_index, num_paths));
+    }
+    if (static_cast<size_t>(offset.path_index) == path_index) {
+      max_column = std::max(max_column, offset.col_index);
+      ++field_count;
+    }
+  }
+  if (field_count == 0) {
+    return MakeExtendError(
+        ExtendStatusCode::PackedMetadataCorrupted,
+        fmt::format("Packed field mapping contains an empty column group. [path_index={}]", path_index));
+  }
+  if (max_column < 0 || static_cast<size_t>(max_column) >= field_count) {
+    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                           fmt::format("Packed field mapping column offsets are not contiguous. "
+                                       "[path_index={}, field_count={}, max_column={}]",
+                                       path_index, field_count, max_column));
+  }
+
+  std::vector<FieldID> field_ids(field_count, -1);
+  for (const auto& [field_id, offset] : mapping) {
+    if (static_cast<size_t>(offset.path_index) != path_index) {
+      continue;
+    }
+    auto& slot = field_ids[static_cast<size_t>(offset.col_index)];
+    if (slot >= 0) {
+      return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                             fmt::format("Packed field mapping assigns multiple fields to one physical column. "
+                                         "[path_index={}, column_index={}]",
+                                         path_index, offset.col_index));
+    }
+    slot = field_id;
+  }
+  if (std::find(field_ids.begin(), field_ids.end(), FieldID{-1}) != field_ids.end()) {
+    return MakeExtendError(
+        ExtendStatusCode::PackedMetadataCorrupted,
+        fmt::format("Packed field mapping column offsets contain a gap. [path_index={}]", path_index));
+  }
+  return field_ids;
+}
+
+arrow::Result<std::shared_ptr<arrow::Schema>> ReadPhysicalSchema(::parquet::arrow::FileReader& file_reader,
+                                                                 const std::string& path) {
+  std::shared_ptr<arrow::Schema> physical_schema;
+  auto schema_status = file_reader.GetSchema(&physical_schema);
+  if (!schema_status.ok()) {
+    return WrapExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                           fmt::format("Cannot read packed physical schema. [path={}]", path), schema_status);
+  }
+  if (!physical_schema) {
+    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                           fmt::format("Packed physical schema is null. [path={}]", path));
+  }
+  return physical_schema;
+}
+
+arrow::Status ValidatePhysicalSchema(const std::shared_ptr<arrow::Schema>& physical_schema,
+                                     const std::string& path,
+                                     size_t path_index,
+                                     size_t num_paths,
+                                     const std::map<FieldID, ColumnOffset>& mapping,
+                                     const FieldIDList& requested_field_ids,
+                                     const std::shared_ptr<arrow::Schema>& requested_schema) {
+  ARROW_ASSIGN_OR_RAISE(auto expected_field_ids, FieldIdsForPath(mapping, path_index, num_paths));
+  auto physical_field_ids_result = FieldIDList::Make(physical_schema);
+  if (!physical_field_ids_result.ok()) {
+    return WrapExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                           fmt::format("Packed physical schema has invalid field ids. [path={}]", path),
+                           physical_field_ids_result.status());
+  }
+  auto physical_field_ids = std::move(physical_field_ids_result).ValueOrDie();
+  if (physical_field_ids.size() != expected_field_ids.size()) {
+    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                           fmt::format("Packed field mapping width does not match the physical schema. "
+                                       "[path={}, path_index={}, mapping_columns={}, physical_columns={}]",
+                                       path, path_index, expected_field_ids.size(), physical_field_ids.size()));
+  }
+
+  for (size_t column = 0; column < expected_field_ids.size(); ++column) {
+    const auto expected_id = expected_field_ids[column];
+    const auto physical_id = physical_field_ids.Get(column);
+    if (physical_id != expected_id) {
+      return MakeExtendError(
+          ExtendStatusCode::PackedMetadataCorrupted,
+          fmt::format("Packed field mapping does not match physical field order. "
+                      "[path={}, path_index={}, column_index={}, mapping_field_id={}, physical_field_id={}]",
+                      path, path_index, column, expected_id, physical_id));
+    }
+
+    for (size_t requested = 0; requested < requested_field_ids.size(); ++requested) {
+      if (requested_field_ids.Get(requested) != expected_id) {
+        continue;
+      }
+      if (!physical_schema->field(static_cast<int>(column))
+               ->type()
+               ->Equals(requested_schema->field(static_cast<int>(requested))->type())) {
+        return MakeExtendError(
+            ExtendStatusCode::PackedMetadataCorrupted,
+            fmt::format("Packed physical field type does not match the requested schema. "
+                        "[path={}, field_id={}, physical_type={}, requested_type={}]",
+                        path, expected_id, physical_schema->field(static_cast<int>(column))->type()->ToString(),
+                        requested_schema->field(static_cast<int>(requested))->type()->ToString()));
+      }
+      break;
+    }
+  }
+  return arrow::Status::OK();
 }
 
 }  // namespace
@@ -99,7 +236,6 @@ PackedRecordBatchReader::PackedRecordBatchReader(const std::shared_ptr<arrow::fs
     : PackedRecordBatchReader(buffer_size) {
   auto status = init(fs, paths, schema, reader_props, arrow_reader_props);
   if (!status.ok()) {
-    LOG_STORAGE_ERROR_ << "Error initializing PackedRecordBatchReader: " << status.ToString();
     // Deprecated path (see reader.h): stringifies the status and destroys its
     // classification. Migrate to Make().
     throw std::runtime_error(status.ToString());
@@ -120,6 +256,9 @@ arrow::Status PackedRecordBatchReader::init(const std::shared_ptr<arrow::fs::Fil
   if (!schema) {
     return MakeExtendError(ExtendStatusCode::PackedInvalidArgs, "Packed reader null schema provided");
   }
+  if (std::set<std::string>(paths.begin(), paths.end()).size() != paths.size()) {
+    return MakeExtendError(ExtendStatusCode::PackedInvalidArgs, "Packed reader paths must be unique");
+  }
 
   // read first file metadata to get field id mapping and do schema matching
   ARROW_RETURN_NOT_OK(schemaMatching(fs, schema, paths, reader_props, arrow_reader_props));
@@ -129,23 +268,41 @@ arrow::Status PackedRecordBatchReader::init(const std::shared_ptr<arrow::fs::Fil
   for (const auto& path : needed_paths_) {
     auto result = MakeArrowFileReader(*fs, path, reader_props, arrow_reader_props);
     if (!result.ok()) {
-      return WrapExtendError(ExtendStatusCode::PackedStorageIO,
-                             fmt::format("Error making file reader with path {}", path), result.status());
+      return result.status();
     }
     auto file_reader = std::move(result.ValueOrDie());
     auto metadata = file_reader->parquet_reader()->metadata();
-    ARROW_ASSIGN_OR_RAISE(auto file_metadata, MakePackedMetadata(metadata, path));
+    auto file_metadata_result = MakePackedMetadata(metadata, path);
+    if (!file_metadata_result.ok()) {
+      return file_metadata_result.status();
+    }
+    auto file_metadata = std::move(file_metadata_result).ValueOrDie();
+    auto path_it = std::find(paths.begin(), paths.end(), path);
+    if (path_it == paths.end()) {
+      return MakeExtendError(ExtendStatusCode::InternalInvariantViolated,
+                             fmt::format("Selected packed path is absent from the input. [path={}]", path));
+    }
+    const auto path_index = static_cast<size_t>(std::distance(paths.begin(), path_it));
+    if (!SameFieldMapping(file_metadata->GetFieldIDMapping(), field_id_mapping_)) {
+      return MakeExtendError(
+          ExtendStatusCode::PackedMetadataCorrupted,
+          fmt::format("Packed files contain inconsistent field mappings. [path={}, path_index={}]", path, path_index));
+    }
+    if (file_metadata->GetParquetMetadata()->num_rows() != total_rows_) {
+      return MakeExtendError(
+          ExtendStatusCode::PackedMetadataCorrupted,
+          fmt::format("Packed files contain inconsistent row counts. "
+                      "[path={}, path_index={}, expected_rows={}, actual_rows={}]",
+                      path, path_index, total_rows_, file_metadata->GetParquetMetadata()->num_rows()));
+    }
+    ARROW_ASSIGN_OR_RAISE(auto physical_schema, ReadPhysicalSchema(*file_reader, path));
+    ARROW_RETURN_NOT_OK(ValidatePhysicalSchema(physical_schema, path, path_index, paths.size(), field_id_mapping_,
+                                               field_id_list_, schema));
+
     metadata_list_.emplace_back(std::move(file_metadata));
     file_readers_.emplace_back(std::move(file_reader));
-
-    for (size_t i = 0; i < paths.size(); ++i) {
-      if (paths[i] == path) {
-        file_reader_to_path_index.emplace_back(i);
-        break;
-      }
-    }
+    file_reader_to_path_index.emplace_back(static_cast<int>(path_index));
   }
-
   file_reader_to_path_index_ = std::move(file_reader_to_path_index);
 
   // Initialize table states and chunk manager
@@ -166,10 +323,11 @@ arrow::Status PackedRecordBatchReader::schemaMatching(const std::shared_ptr<arro
   // read first file metadata to get field id mapping
   auto result = MakeArrowFileReader(*fs, paths[0], reader_props, arrow_reader_props);
   if (!result.ok()) {
-    return WrapExtendError(ExtendStatusCode::PackedStorageIO,
-                           fmt::format("Error making file reader with path {}", paths[0]), result.status());
+    return WrapExtendError(ExtendStatusCode::PackedIO, fmt::format("Error making file reader with path {}", paths[0]),
+                           result.status());
   }
-  auto parquet_metadata = result.ValueOrDie()->parquet_reader()->metadata();
+  auto first_file_reader = std::move(result).ValueOrDie();
+  auto parquet_metadata = first_file_reader->parquet_reader()->metadata();
   ARROW_ASSIGN_OR_RAISE(auto metadata, MakePackedMetadata(parquet_metadata, paths[0]));
 
   // parse field id list from schema
@@ -183,9 +341,37 @@ arrow::Status PackedRecordBatchReader::schemaMatching(const std::shared_ptr<arro
                            field_id_list.status().ToString());
   }
   field_id_list_ = field_id_list.ValueOrDie();
+  std::set<FieldID> requested_ids;
+  for (size_t i = 0; i < field_id_list_.size(); ++i) {
+    if (!requested_ids.emplace(field_id_list_.Get(i)).second) {
+      return MakeExtendError(
+          ExtendStatusCode::PackedInvalidArgs,
+          fmt::format("Packed reader schema contains duplicate field id. [field_id={}]", field_id_list_.Get(i)));
+    }
+  }
 
   // schema matching
   field_id_mapping_ = metadata->GetFieldIDMapping();
+  size_t num_column_groups = 0;
+  for (const auto& [field_id, offset] : field_id_mapping_) {
+    (void)field_id;
+    if (offset.path_index >= 0) {
+      num_column_groups = std::max(num_column_groups, static_cast<size_t>(offset.path_index) + 1);
+    }
+  }
+  total_rows_ = metadata->GetParquetMetadata()->num_rows();
+  if (num_column_groups != paths.size()) {
+    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                           fmt::format("Packed field mapping group count does not match the supplied paths. "
+                                       "[mapping_groups={}, num_paths={}]",
+                                       num_column_groups, paths.size()));
+  }
+  for (size_t path_index = 0; path_index < paths.size(); ++path_index) {
+    ARROW_RETURN_NOT_OK(FieldIdsForPath(field_id_mapping_, path_index, paths.size()).status());
+  }
+  ARROW_ASSIGN_OR_RAISE(auto first_physical_schema, ReadPhysicalSchema(*first_file_reader, paths[0]));
+  ARROW_RETURN_NOT_OK(ValidatePhysicalSchema(first_physical_schema, paths[0], 0, paths.size(), field_id_mapping_,
+                                             field_id_list_, schema));
   for (size_t i = 0; i < field_id_list_.size(); ++i) {
     FieldID field_id = field_id_list_.Get(i);
     if (field_id_mapping_.find(field_id) != field_id_mapping_.end()) {
@@ -205,6 +391,21 @@ arrow::Status PackedRecordBatchReader::schemaMatching(const std::shared_ptr<arro
       // mark nullable if the field can not be found in the file, in case the reader schema is not marked
       fields.emplace_back(schema->field(i)->WithNullable(true));
     }
+  }
+
+  // When every projected field is new, read one physical column solely to
+  // advance row groups and preserve the persisted row count. The anchor is not
+  // exposed in the returned schema.
+  if (needed_column_offsets_.empty()) {
+    ARROW_ASSIGN_OR_RAISE(auto first_path_field_ids, FieldIdsForPath(field_id_mapping_, 0, paths.size()));
+    const auto anchor = field_id_mapping_.find(first_path_field_ids.front());
+    if (anchor == field_id_mapping_.end() || anchor->second.path_index != 0 || anchor->second.col_index != 0) {
+      return MakeExtendError(ExtendStatusCode::InternalInvariantViolated,
+                             "Validated packed mapping has no first physical column");
+    }
+    needed_column_offsets_.emplace_back(anchor->second);
+    needed_paths_.emplace(paths[0]);
+    needed_fields.emplace_back(first_physical_schema->field(0));
   }
 
   needed_schema_ = std::make_shared<arrow::Schema>(needed_fields);
@@ -310,10 +511,9 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     std::shared_ptr<arrow::Table> read_table = nullptr;
     auto read_status = file_readers_[i]->ReadRowGroups(rgs_to_read[i], &read_table);
     if (!read_status.ok()) {
-      return WrapExtendError(ExtendStatusCode::PackedStorageIO,
-                             fmt::format("Failed to read packed row groups. [path={}]",
-                                         needed_paths_.size() > i ? *std::next(needed_paths_.begin(), i) : "unknown"),
-                             read_status);
+      const auto path = needed_paths_.size() > i ? *std::next(needed_paths_.begin(), i) : "unknown";
+      return read_status.WithMessage(
+          fmt::format("Failed to read packed row groups. [path={}]: {}", path, read_status.message()));
     }
     int path_index = file_reader_to_path_index_[i];
     tables_[path_index].push(std::move(read_table));
@@ -345,17 +545,13 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
     std::vector<std::shared_ptr<arrow::ArrayData>> batch_data;
     try {
       batch_data = chunk_manager_->SliceChunksByMaxContiguousSlice(row_limit_ - absolute_row_position_, tables_);
-    } catch (const std::exception& e) {
-      return MakeExtendError(ExtendStatusCode::PackedFileCorrupted,
-                             fmt::format("Packed file chunk layout is corrupted: {}", e.what()));
     } catch (...) {
-      return MakeExtendError(ExtendStatusCode::PackedFileCorrupted,
-                             "Packed file chunk layout is corrupted with unknown exception");
+      return MakeExtendError(ExtendStatusCode::InternalInvariantViolated,
+                             "Packed file chunk slicing failed unexpectedly");
     }
-    int64_t chunk_size = chunk_manager_->GetChunkSize();
+    const int64_t chunk_size = chunk_manager_->GetChunkSize();
+    auto batch = arrow::RecordBatch::Make(needed_schema_, chunk_size, std::move(batch_data));
     absolute_row_position_ += chunk_size;
-    std::shared_ptr<arrow::RecordBatch> batch =
-        arrow::RecordBatch::Make(needed_schema_, chunk_size, std::move(batch_data));
 
     int batch_index = 0;
     std::vector<std::shared_ptr<arrow::Array>> arrays;
@@ -367,7 +563,7 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
       } else {
         auto null_array_result = arrow::MakeArrayOfNull(schema_->field(i)->type(), chunk_size);
         if (!null_array_result.ok()) {
-          return WrapExtendError(ExtendStatusCode::PackedArrowError,
+          return WrapExtendError(ExtendStatusCode::InternalInvariantViolated,
                                  fmt::format("Failed to create null array. [field_index={}]", i),
                                  null_array_result.status());
         }
@@ -377,12 +573,8 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
     }
     *out = arrow::RecordBatch::Make(schema_, chunk_size, arrays);
     return arrow::Status::OK();
-  } catch (const std::exception& e) {
-    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
-                           fmt::format("Packed reader read next failed unexpectedly: {}", e.what()));
   } catch (...) {
-    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
-                           "Packed reader read next with unknown exception failed unexpectedly");
+    return MakeExtendError(ExtendStatusCode::InternalInvariantViolated, "Packed reader read failed unexpectedly");
   }
 }
 
@@ -408,12 +600,8 @@ arrow::Status PackedRecordBatchReader::Close() {
     metadata_list_.clear();
     memory_used_ = 0;
     return arrow::Status::OK();
-  } catch (const std::exception& e) {
-    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
-                           fmt::format("Packed reader close failed unexpectedly: {}", e.what()));
   } catch (...) {
-    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
-                           "Packed reader close with unknown exception failed unexpectedly");
+    return MakeExtendError(ExtendStatusCode::InternalInvariantViolated, "Packed reader close failed unexpectedly");
   }
 }
 
