@@ -122,7 +122,7 @@ ChunkReaderImpl::get_chunks_async()
   ColumnGroupReader::get_chunks_async(task) for every task
       |
       v
-  collectAll -> map by chunk index -> restore request order and duplicates
+  fail-fast fan-in -> map by chunk index -> restore request order and duplicates
 ```
 
 ```text
@@ -153,7 +153,7 @@ ReaderImpl::take_async()
       +-- Vortex: Tokio scan/collection; filesystem-owned physical I/O
       `-- Lance/Iceberg: inline synchronous fallback
       |
-  folly::collectAll()
+  fail-fast fan-in (background drain retains accepted callbacks)
       |
   group by CG -> reorder by original_positions
       |
@@ -169,7 +169,7 @@ the task runs.
 ### Why It Works
 
 - **Cross-column-group fan-out:** take tasks from all required column groups are
-  represented in the same future set before `collectAll()`. On metadata-cache
+  represented in the same future set before fail-fast fan-in. On metadata-cache
   hits, a stateful reader is reconstructed synchronously from cached metadata.
   On cold or cache-disabled paths, Parquet defers blocking open work to the
   consumed Folly chain, Vortex wraps a native Tokio open, and Lance/Iceberg may
@@ -188,7 +188,8 @@ the task runs.
   executor used by Parquet generator work. Vortex scan orchestration and
   collection use Tokio, while its physical reads use the filesystem backend.
 - **Stable result semantics:** chunk indices and take rows are reconstructed in the
-  caller-requested order after asynchronous fan-in.
+  caller-requested order after asynchronous fan-in. The first observed child
+  failure completes the public future immediately, without returning partial data.
 
 ## Public API Behavior
 
@@ -266,7 +267,7 @@ ChunkReaderImpl::get_chunks_async(chunk_indices, parallelism)
   -> ChunkTask::Build(...)
   -> SplitAsyncTasks(...)
   -> ColumnGroupReader::get_chunks_async(task) for every task
-  -> folly::collectAll(...)
+  -> fail-fast fan-in
   -> map results by chunk index
   -> restore the caller's original order and duplicates
 ```
@@ -283,7 +284,7 @@ ReaderImpl::take_async(row_indices, parallelism, needed_columns)
   -> TakeTask::Build(column_groups, row_indices)
   -> SplitAsyncTasks(...)
   -> ColumnGroupLazyReader::take_async(task) for every task
-  -> folly::collectAll(...)
+  -> fail-fast fan-in
   -> concatenate results per column group
   -> reorder each column group by original_positions
   -> align projected columns and build the final table
@@ -392,8 +393,8 @@ Important semantics:
   than `parallelism`.
 - The default policy can stop below `parallelism` when no task can be split.
 - `all` ignores the requested target count.
-- All resulting task futures are created before `collectAll()` waits for them.
-  There is no scheduler-side concurrency cap or backpressure queue here.
+- All resulting task futures are created before fail-fast fan-in starts. There
+  is no scheduler-side concurrency cap or backpressure queue here.
 - `SplitAsyncTasks()` mutates its input vector in place. Current callers pass a
   newly built local vector, so the mutation is contained within planning.
 
@@ -544,8 +545,9 @@ ParquetFormatReader::{read_with_range_async,take_async}
 Storage never chooses the Folly executor:
 
 - If the consumer attaches `.via(pool)` before consuming the returned future,
-  Parquet decode/materialization tasks use that executor. Folly preserves the
-  nested deferred executors through `collectAll()`.
+  Parquet decode/materialization tasks use that executor. The fail-fast fan-in
+  preserves every child's nested deferred executor, including the background
+  drain of accepted siblings after one task fails.
 - If the consumer calls `.get()` directly, Folly's wait executor drives the
   deferred work on the waiting thread.
 
@@ -693,8 +695,8 @@ the original request.
 
 Take planning groups rows by column group and file, and splitting appends new tasks
 to the task list. Completion order therefore cannot be used as output order.
-`original_positions` is carried with every task and split. After `collectAll()`,
-each column group's tables are concatenated and reordered with
+`original_positions` is carried with every task and split. After successful
+fan-in, each column group's tables are concatenated and reordered with
 `CopySelectedRows()` before columns are combined into the final table.
 
 ## Error Handling and Lifetime
@@ -704,13 +706,16 @@ each column group's tables are concatenated and reordered with
 `folly::SemiFuture<arrow::Result<T>>`. `FollyArrowErrorFuture` performs the
 result-type conversion without repeating the concrete `T` at every return site.
 
-High-level fan-in uses `folly::collectAll()`:
+High-level fan-in is fail-fast:
 
-- It waits for every task, even when one task has already failed.
-- Folly exceptions are converted to Arrow `IOError`.
-- Arrow `Status` errors propagate through `arrow::Result`.
-- Reader and format-reader lifetimes are extended by captures in the relevant
-  continuations or callback contexts.
+- The first observed failed `arrow::Result` completes the public future
+  immediately and its typed `arrow::Status` is returned unchanged.
+- No partial table or record-batch vector is returned.
+- An exceptional child future is classified as
+  `InternalInvariantViolated` at the library boundary.
+- Already-accepted siblings are not synchronously cancelled. A private drain
+  keeps their callbacks, nested executors, readers, and format readers alive
+  until those operations settle; later results cannot replace the first error.
 
 There is no end-to-end cancellation bridge from the public Folly future:
 

@@ -20,6 +20,11 @@ class MilvusPackedWriter {
   private var writerHandle: Long = 0
   private var isDestroyed: Boolean = false
 
+  private def ensureUsable(): Unit = {
+    if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
+    if (writerHandle == 0) throw new IllegalStateException("Writer not initialized")
+  }
+
   /**
    * Open a writer.
    *
@@ -81,8 +86,7 @@ class MilvusPackedWriter {
    * split per column group and buffered.
    */
   def write(arrayPtr: Long): Unit = {
-    if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
-    if (writerHandle == 0) throw new IllegalStateException("Writer not initialized")
+    ensureUsable()
     writerWrite(writerHandle, arrayPtr)
   }
 
@@ -91,9 +95,17 @@ class MilvusPackedWriter {
    * parquet file (including milvus-storage's KV metadata).
    */
   def close(): Unit = {
-    if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
-    if (writerHandle == 0) throw new IllegalStateException("Writer not initialized")
-    writerClose(writerHandle)
+    ensureUsable()
+    // try/finally, not a bare sequence: if the native close throws, the handle
+    // must still be released. destroy() is what reaches loon_*_destroy, and
+    // that is where an abandoned writer's storage -- an S3 multipart upload
+    // whose parts no bucket listing shows -- gets released. Skipping it on the
+    // failure path leaked exactly the case the abort exists for.
+    try {
+      writerClose(writerHandle)
+    } finally {
+      destroy()
+    }
   }
 
   /**

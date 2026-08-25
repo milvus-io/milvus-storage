@@ -23,30 +23,10 @@
 extern "C" {
 #endif
 
-// ==================== JNI-only per-batch RecordBatchReader helpers ====================
-//
-// These C helpers exist solely to service the JVM consumer path. They are
-// intentionally NOT part of the cross-language FFI surface (`ffi_c.h`)
-// because Arrow Java's C Data importer ignores `ArrowArray.offset`, forcing
-// this layer to materialize sliced columns to offset=0 before export —
-// a memory copy that non-JVM callers do not need. V3 and other non-JVM
-// consumers should use `loon_get_record_batch_reader` (ArrowArrayStream)
-// instead. The implementations live in `src/jni/reader_jni.cpp` and are
-// compiled into `libmilvus-storage-jni.so` only.
-
-typedef uintptr_t LoonRecordBatchReaderHandle;
-
-LoonFFIResult loon_record_batch_reader_new(LoonReaderHandle reader,
-                                           const char* predicate,
-                                           LoonRecordBatchReaderHandle* out_handle);
-
-LoonFFIResult loon_record_batch_reader_read_next(LoonRecordBatchReaderHandle handle,
-                                                 struct ArrowArray* out_array,
-                                                 struct ArrowSchema* out_schema);
-
-void loon_record_batch_reader_destroy(LoonRecordBatchReaderHandle handle);
-
 // ==================== JNI Result Utilities ====================
+
+/** Throw a Java exception without asserting if class lookup itself fails. */
+void ThrowJavaException(JNIEnv* env, const char* exception_class, const char* message);
 
 /**
  * @brief Throws a Java exception based on LoonFFIResult
@@ -72,7 +52,8 @@ jobjectArray ConvertToJavaStringArray(JNIEnv* env, const char* const* strings, s
  * @param env JNI environment
  * @param java_array Java string array
  * @param out_count Output count of strings
- * @return C string array (caller must free)
+ * @return C string array (caller must free), or nullptr for a null/empty input
+ *         or when a Java exception is pending
  */
 const char** ConvertFromJavaStringArray(JNIEnv* env, jobjectArray java_array, size_t* out_count);
 

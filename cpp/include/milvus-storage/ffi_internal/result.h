@@ -117,6 +117,33 @@ inline std::optional<milvus_storage::ExtendStatusCode> ExtendStatusCodeFromFFIEr
   return milvus_storage::ffi_internal::ExtendStatusCodeFromFFIErrorCode(err_code);
 }
 
+/// Classify failures while resolving or reading a caller-supplied external
+/// source. Missing, denied, or unusable locations have one stable presentation
+/// code; transient and data-format failures retain their producer code.
+inline int ExternalSourceErrorCodeFromStatus(const arrow::Status& status, int fallback = LOON_ARROW_ERROR) {
+  auto code = FFIErrorCodeFromExtendStatus(status, fallback);
+  switch (code) {
+    case LOON_STORAGE_NOT_FOUND:
+    case LOON_FILE_NOT_FOUND:
+    case LOON_STORAGE_ACCESS_DENIED:
+    case LOON_STORAGE_CONFIG_INVALID:
+    case LOON_STORAGE_BUCKET_NOT_FOUND:
+      return LOON_SOURCE_INVALID;
+
+    default:
+      return code;
+  }
+}
+
+#define RETURN_EXTERNAL_SOURCE_ERROR_IF(status, fallback, ...)                         \
+  do {                                                                                 \
+    auto ffi_status__ = (status);                                                      \
+    if (!ffi_status__.ok()) {                                                          \
+      auto ffi_err_code__ = ExternalSourceErrorCodeFromStatus(ffi_status__, fallback); \
+      RETURN_ERROR(ffi_err_code__, ##__VA_ARGS__);                                     \
+    }                                                                                  \
+  } while (0)
+
 // The place every ERROR result is materialized, so the place that must
 // not throw: every caller is either about to cross the C ABI or already inside
 // a catch block doing so, and an exception here is undefined behaviour.

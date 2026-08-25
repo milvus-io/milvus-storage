@@ -16,11 +16,15 @@
 
 #include <arrow/status.h>
 
+#include <cstdlib>
 #include <memory>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include <folly/futures/Promise.h>
+#include <unistd.h>
 
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/extend_status.h"
@@ -32,6 +36,11 @@ namespace milvus_storage::test {
 using namespace milvus_storage::api;
 
 namespace {
+
+void IsolateDeathTestCoverageFiles() {
+  const auto prefix = "/tmp/milvus-storage-death-test-gcov-" + std::to_string(getpid());
+  (void)setenv("GCOV_PREFIX", prefix.c_str(), 1);
+}
 
 arrow::Result<int> maybe_int(bool ok) {
   if (!ok) {
@@ -127,6 +136,43 @@ TEST(AsyncTasksTest, FailFastCollectorReturnsTypedErrorBeforeBlockedSibling) {
 
   blocked.setValue(7);
   EXPECT_TRUE(weak_lifetime.expired());
+}
+
+TEST(AsyncTasksTest, FailFastCollectorReturnsPlainUnknownForExceptionalChildBeforeBlockedSibling) {
+  folly::Promise<arrow::Result<int>> blocked;
+  folly::Promise<arrow::Result<int>> exceptional;
+  std::vector<folly::SemiFuture<arrow::Result<int>>> futures;
+  futures.push_back(blocked.getSemiFuture());
+  futures.push_back(exceptional.getSemiFuture());
+  auto collected = std::move(CollectAllResultsFailFast(std::move(futures), "test reader fan-in")).toUnsafeFuture();
+
+  exceptional.setException(std::runtime_error("reader task escaped"));
+
+  ASSERT_TRUE(collected.isReady());
+  auto result = std::move(collected).get();
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsUnknownError()) << result.status().ToString();
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result.status()), nullptr);
+  EXPECT_NE(result.status().ToString().find("reader task escaped"), std::string::npos);
+
+  blocked.setValue(7);
+}
+
+TEST(AsyncTasksTest, AllocationFailureIsFailStopBeforeWaitingForBlockedSibling) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  // Set this in the parent before GoogleTest re-execs the death-test child.
+  // libgcov reads GCOV_PREFIX during process startup, so setting it inside the
+  // child statement is too late and makes parent/child corrupt the same .gcda.
+  IsolateDeathTestCoverageFiles();
+  EXPECT_DEATH_IF_SUPPORTED(
+      {
+        folly::Promise<arrow::Result<int>> blocked;
+        std::vector<folly::SemiFuture<arrow::Result<int>>> futures;
+        futures.push_back(blocked.getSemiFuture());
+        futures.push_back(folly::makeSemiFuture<arrow::Result<int>>(folly::make_exception_wrapper<std::bad_alloc>()));
+        (void)std::move(CollectAllResultsFailFast(std::move(futures), "test reader fan-in")).get();
+      },
+      "");
 }
 
 TEST(AsyncTasksTest, FailFastCollectorAllReadySuccessCannotLoseToBrokenFailurePromise) {

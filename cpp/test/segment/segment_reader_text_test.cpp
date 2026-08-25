@@ -26,6 +26,7 @@
 
 #include "test_env.h"
 #include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/segment/segment_writer.h"
 #include "milvus-storage/segment/segment_reader.h"
 #include "milvus-storage/transaction/transaction.h"
@@ -715,6 +716,8 @@ TEST_F(SegmentReaderTextTest, CreateWithNullFs) {
 
   auto result = SegmentReader::Create(nullptr, column_groups, schema_, {}, reader_config_);
   ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result.status()), nullptr);
 }
 
 // test Create with null schema
@@ -731,12 +734,16 @@ TEST_F(SegmentReaderTextTest, CreateWithNullSchema) {
 
   auto result = SegmentReader::Create(fs_, column_groups, nullptr, {}, reader_config_);
   ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result.status()), nullptr);
 }
 
 // test Create with null column_groups
 TEST_F(SegmentReaderTextTest, CreateWithNullColumnGroups) {
   auto result = SegmentReader::Create(fs_, nullptr, schema_, {}, reader_config_);
   ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result.status()), nullptr);
 }
 
 // test Open with null filesystem
@@ -745,6 +752,8 @@ TEST_F(SegmentReaderTextTest, OpenWithNullFs) {
   auto manifest = OpenManifest(writer_config_.segment_path, version);
   auto result = SegmentReader::Open(nullptr, manifest, schema_, {}, reader_config_);
   ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result.status()), nullptr);
 }
 
 // test Open with null schema
@@ -753,12 +762,16 @@ TEST_F(SegmentReaderTextTest, OpenWithNullSchema) {
   auto manifest = OpenManifest(writer_config_.segment_path, version);
   auto result = SegmentReader::Open(fs_, manifest, nullptr, {}, reader_config_);
   ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result.status()), nullptr);
 }
 
 // test Open with null manifest
 TEST_F(SegmentReaderTextTest, OpenWithNullManifest) {
   auto result = SegmentReader::Open(fs_, nullptr, schema_, {}, reader_config_);
   ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(result.status()), nullptr);
 }
 
 // test ReadNext on closed reader
@@ -776,6 +789,7 @@ TEST_F(SegmentReaderTextTest, ReadNextAfterClose) {
   std::shared_ptr<arrow::RecordBatch> batch;
   auto status = reader->ReadNext(&batch);
   ASSERT_FALSE(status.ok());
+  EXPECT_TRUE(status.IsInvalid());
 }
 
 // test Take on closed reader
@@ -792,6 +806,7 @@ TEST_F(SegmentReaderTextTest, TakeAfterClose) {
   std::vector<int64_t> indices = {0, 1};
   auto result = reader->Take(indices);
   ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid());
 }
 
 // test double Close is safe
@@ -915,6 +930,35 @@ TEST_F(SegmentReaderTextTest, GetStreamNoPredicate) {
   ASSERT_STATUS_OK(reader->Close());
 }
 
+TEST_F(SegmentReaderTextTest, GetStreamInvalidatedByParentClose) {
+  int64_t num_rows = 30;
+  int64_t version = WriteTestData(num_rows);
+
+  auto manifest = OpenManifest(writer_config_.segment_path, version);
+  auto reader_result = SegmentReader::Open(fs_, manifest, schema_, {}, reader_config_);
+  ASSERT_TRUE(reader_result.ok()) << reader_result.status().message();
+  auto reader = std::move(reader_result).ValueOrDie();
+
+  auto stream_result = reader->GetStream();
+  ASSERT_TRUE(stream_result.ok()) << stream_result.status().message();
+  auto stream = std::move(stream_result).ValueOrDie();
+
+  ASSERT_STATUS_OK(reader->Close());
+
+  std::shared_ptr<arrow::RecordBatch> batch;
+  auto status = stream->ReadNext(&batch);
+  ASSERT_FALSE(status.ok());
+  EXPECT_TRUE(status.IsInvalid());
+  ASSERT_NE(status.message().find("after parent close"), std::string::npos);
+
+  // Destroying the parent must not leave the stream with a dangling reference.
+  reader.reset();
+  status = stream->ReadNext(&batch);
+  ASSERT_FALSE(status.ok());
+  EXPECT_TRUE(status.IsInvalid());
+  ASSERT_NE(status.message().find("after parent close"), std::string::npos);
+}
+
 // test GetStream on closed reader
 TEST_F(SegmentReaderTextTest, GetStreamAfterClose) {
   int64_t version = WriteTestData(10);
@@ -928,6 +972,7 @@ TEST_F(SegmentReaderTextTest, GetStreamAfterClose) {
 
   auto stream_result = reader->GetStream();
   ASSERT_FALSE(stream_result.ok());
+  EXPECT_TRUE(stream_result.status().IsInvalid());
 }
 
 // test GetStream without LOB columns (no wrapping)
@@ -1006,6 +1051,7 @@ TEST_F(SegmentReaderTextTest, GetChunkReaderAfterClose) {
 
   auto chunk_reader_result = reader->GetChunkReader(0);
   ASSERT_FALSE(chunk_reader_result.ok());
+  EXPECT_TRUE(chunk_reader_result.status().IsInvalid());
 }
 
 // ==================== GetColumnGroups Test ====================

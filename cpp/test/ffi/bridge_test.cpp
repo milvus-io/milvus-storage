@@ -140,6 +140,12 @@ TEST_F(BridgeTest, ImportEmptyColumnGroups) {
   ASSERT_TRUE(out_cgs.empty());
 }
 
+TEST_F(BridgeTest, ImportNullColumnGroups) {
+  ColumnGroups out_cgs;
+  auto status = column_groups_import(nullptr, &out_cgs);
+  ASSERT_TRUE(status.IsInvalid()) << status.ToString();
+}
+
 // Test import with null column_group_array but num > 0 (error case)
 TEST_F(BridgeTest, ImportInvalidColumnGroups) {
   LoonColumnGroups ccgs;
@@ -148,7 +154,59 @@ TEST_F(BridgeTest, ImportInvalidColumnGroups) {
 
   ColumnGroups out_cgs;
   auto status = column_groups_import(&ccgs, &out_cgs);
-  ASSERT_FALSE(status.ok());
+  ASSERT_TRUE(status.IsInvalid()) << status.ToString();
+}
+
+TEST_F(BridgeTest, ImportRejectsInvalidNestedPointers) {
+  const char* columns[] = {"col"};
+  const char* property_keys[] = {"key"};
+  const char* property_values[] = {"value"};
+  LoonColumnGroupFile file{.path = "file",
+                           .start_index = 0,
+                           .end_index = 1,
+                           .property_keys = property_keys,
+                           .property_values = property_values,
+                           .num_properties = 1};
+  LoonColumnGroup group{
+      .columns = columns, .num_of_columns = 1, .format = "parquet", .files = &file, .num_of_files = 1};
+  LoonColumnGroups ccgs{.column_group_array = &group, .num_of_column_groups = 1};
+
+  const auto expect_invalid = [&] {
+    ColumnGroups out_cgs;
+    auto status = column_groups_import(&ccgs, &out_cgs);
+    EXPECT_TRUE(status.IsInvalid()) << status.ToString();
+  };
+
+  group.columns = nullptr;
+  expect_invalid();
+  group.columns = columns;
+
+  columns[0] = nullptr;
+  expect_invalid();
+  columns[0] = "col";
+
+  group.format = nullptr;
+  expect_invalid();
+  group.format = "parquet";
+
+  group.files = nullptr;
+  expect_invalid();
+  group.files = &file;
+
+  file.path = nullptr;
+  expect_invalid();
+  file.path = "file";
+
+  file.property_keys = nullptr;
+  expect_invalid();
+  file.property_keys = property_keys;
+
+  property_keys[0] = nullptr;
+  expect_invalid();
+  property_keys[0] = "key";
+
+  property_values[0] = nullptr;
+  expect_invalid();
 }
 
 // Test export and import manifest with delta logs and stats
@@ -355,6 +413,29 @@ TEST_F(BridgeTest, ExportEmptyColumnGroups) {
   ASSERT_NE(ccgs, nullptr);
   ASSERT_EQ(ccgs->num_of_column_groups, 0);
 
+  loon_column_groups_destroy(ccgs);
+}
+
+TEST_F(BridgeTest, DestroyToleratesPartiallyInitializedFileProperties) {
+  auto* ccgs = new LoonColumnGroups{};
+  ccgs->num_of_column_groups = 1;
+  ccgs->column_group_array = new LoonColumnGroup[1]{};
+  auto& group = ccgs->column_group_array[0];
+  group.num_of_files = 2;
+  group.files = new LoonColumnGroupFile[2]{};
+
+  group.files[0].num_properties = 1;
+  group.files[0].property_keys = new const char*[1]{};
+  auto* key = new char[2]{'k', '\0'};
+  group.files[0].property_keys[0] = key;
+
+  group.files[1].num_properties = 1;
+  group.files[1].property_values = new const char*[1]{};
+  auto* value = new char[2]{'v', '\0'};
+  group.files[1].property_values[0] = value;
+
+  // Allocation failure may leave either pointer array absent. Destruction must
+  // independently free whichever side was published.
   loon_column_groups_destroy(ccgs);
 }
 

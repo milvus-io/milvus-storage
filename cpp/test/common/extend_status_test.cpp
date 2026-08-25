@@ -164,12 +164,12 @@ TEST_F(ExtendStatusTest, ExtendCodesMapToSegcoreErrorCode) {
 
 TEST_F(ExtendStatusTest, PlainArrowStatusFallsBackToCoarseClassification) {
   // No ExtendStatusDetail attached -> coarse arrow status classification.
-  //
-  // Keep the historical Invalid/Type/Key fallback until the remaining
-  // persisted-data producers attach typed details in the final stack layer.
+  // A bare Invalid is ambiguous (caller input, persisted bytes, or a library
+  // bug), so it must not claim DataFormat without producer-owned detail.
   {
     auto error = ToSegcoreError(arrow::Status::Invalid("some precondition failed"));
-    EXPECT_EQ(error.get_error_code(), milvus::DataFormatBroken);
+    EXPECT_EQ(error.get_error_code(), milvus::StorageError);
+    EXPECT_NE(error.get_error_code(), milvus::DataFormatBroken);
     EXPECT_NE(std::string(error.what()).find("some precondition failed"), std::string::npos);
   }
   // OK remains success.

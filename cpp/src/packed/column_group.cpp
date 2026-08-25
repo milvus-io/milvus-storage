@@ -60,8 +60,8 @@ arrow::Status ColumnGroup::Merge(const ColumnGroup& other) {
   for (const auto& batch : other.batches_) {
     auto status = AddRecordBatch(batch);
     if (!status.ok()) {
-      return WrapExtendError(ExtendStatusCode::PackedUnexpected, "ColumnGroup::Merge: failed to merge record batch",
-                             status);
+      return WrapExtendError(ExtendStatusCode::InternalInvariantViolated,
+                             "ColumnGroup::Merge: stored record batch is null", status);
     }
   }
   return arrow::Status::OK();

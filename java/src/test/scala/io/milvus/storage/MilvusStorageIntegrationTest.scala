@@ -14,23 +14,15 @@ import java.io.File
 class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with BeforeAndAfterAll {
 
   private val TEST_BASE_PATH = "/tmp/milvus_storage_scala_test"
-  private var libraryLoaded = false
 
   override def beforeAll(): Unit = {
-    try {
-      NativeLibraryLoader.loadLibrary()
-      libraryLoaded = true
+    // A missing or unloadable JNI library is a failed integration build, not a
+    // reason to cancel the only suite that exercises it.
+    NativeLibraryLoader.loadLibrary()
 
-      // Clean up any existing test directory
-      val testDir = new File(TEST_BASE_PATH)
-      if (testDir.exists()) {
-        deleteRecursively(testDir)
-      }
-    } catch {
-      case e: Exception =>
-        libraryLoaded = false
-        println(s"Failed to load milvus_storage_jni library: ${e.getMessage}")
-        e.printStackTrace()
+    val testDir = new File(TEST_BASE_PATH)
+    if (testDir.exists()) {
+      deleteRecursively(testDir)
     }
   }
 
@@ -50,8 +42,6 @@ class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with Before
   }
 
   "Milvus Storage" should "perform basic write and read operations" in {
-    assume(libraryLoaded, "Native library must be loaded")
-
     println("\n=== Milvus Storage Write and Read Test ===\n")
 
     // Test data
@@ -95,6 +85,72 @@ class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with Before
     val neededColumns = Array("int64_field", "int32_field", "string_field")
     val readerSchema = ArrowTestUtils.createTestStructSchema()
     reader.create(columnGroups, readerSchema, neededColumns, readerProperties)
+
+    val zeroParallelism = intercept[IllegalArgumentException] {
+      reader.takeRows(Array(0L), 0L)
+    }
+    zeroParallelism.getMessage should include("parallelism must be > 0")
+    val negativeParallelism = intercept[IllegalArgumentException] {
+      reader.takeRows(Array(0L), -1L)
+    }
+    negativeParallelism.getMessage should include("parallelism must be > 0")
+    intercept[IllegalArgumentException] {
+      reader.takeRows(null, 1L)
+    }
+    intercept[IllegalArgumentException] {
+      reader.takeRows(Array.empty[Long], 1L)
+    }
+    intercept[IllegalArgumentException] {
+      reader.takeRows(Array(0L), 1L, Array("int64_field", null))
+    }
+    intercept[IllegalArgumentException] {
+      reader.takeRows(Array(0L), 1L, Array(""))
+    }
+
+    val segmentReader = new MilvusSegmentReader()
+    intercept[IllegalArgumentException] {
+      segmentReader.open(null, -1, 1L, null, Seq.empty, 1L)
+    }
+    intercept[IllegalArgumentException] {
+      segmentReader.open("", -1, 1L, null, Seq.empty, 1L)
+    }
+    intercept[IllegalArgumentException] {
+      segmentReader.open("segment", -1, 1L, Array("field", null), Seq.empty, 1L)
+    }
+    intercept[IllegalArgumentException] {
+      segmentReader.open("segment", -1, 1L, null, null, 1L)
+    }
+    intercept[IllegalArgumentException] {
+      segmentReader.open("segment", -1, 1L, null, Seq(LobColumnConfig(1L, null)), 1L)
+    }
+    intercept[IllegalArgumentException] {
+      segmentReader.open("segment", -1, 1L, null, Seq(LobColumnConfig(1L, "lob", flushThresholdBytes = 1024,
+        maxLobFileBytes = 512)), 1L)
+    }
+
+    val chunkReader = new MilvusStorageChunkReader()
+    // A non-zero sentinel is sufficient: validation must run before JNI and
+    // therefore must never dereference this handle.
+    chunkReader.setHandle(1L)
+    intercept[IllegalArgumentException] {
+      chunkReader.getChunksScala(Array(0L), 0L)
+    }
+    intercept[IllegalArgumentException] {
+      chunkReader.getChunksScala(Array(0L), -1L)
+    }
+    intercept[IllegalArgumentException] {
+      chunkReader.getChunksScala(null, 1L)
+    }
+    intercept[IllegalArgumentException] {
+      chunkReader.getChunksScala(Array.empty[Long], 1L)
+    }
+    intercept[IllegalArgumentException] {
+      chunkReader.getChunkIndicesScala(null)
+    }
+    intercept[IllegalArgumentException] {
+      chunkReader.getChunkIndicesScala(Array.empty[Long])
+    }
+
     val rbrHandle = reader.openRecordBatchReaderScala(null)
     val batchArray = ArrowArray.allocateNew(ArrowUtils.getAllocator)
     val batchSchema = ArrowSchema.allocateNew(ArrowUtils.getAllocator)

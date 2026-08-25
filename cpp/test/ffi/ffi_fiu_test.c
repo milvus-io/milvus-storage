@@ -104,32 +104,32 @@ static void test_fiu_key_constants(void) {
 // Test loon_fiu_enable with null name
 static void test_fiu_enable_null_name(void) {
   LoonFFIResult rc = loon_fiu_enable(NULL, 0, 0);
-  // Should fail with invalid args
-  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_system);
   loon_ffi_free_result(&rc);
 }
 
 // Test loon_fiu_enable with empty name
 static void test_fiu_enable_empty_name(void) {
   LoonFFIResult rc = loon_fiu_enable("", 0, 0);
-  // Should fail with invalid args
-  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, LOON_USER_INVALID_ARGUMENT);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
   loon_ffi_free_result(&rc);
 }
 
 // Test loon_fiu_disable with null name
 static void test_fiu_disable_null_name(void) {
   LoonFFIResult rc = loon_fiu_disable(NULL, 0);
-  // Should fail with invalid args
-  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_system);
   loon_ffi_free_result(&rc);
 }
 
 // Test loon_fiu_disable with empty name
 static void test_fiu_disable_empty_name(void) {
   LoonFFIResult rc = loon_fiu_disable("", 0);
-  // Should fail with invalid args
-  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, LOON_USER_INVALID_ARGUMENT);
+  ck_assert_int_eq(loon_ffi_error_category(rc.err_code), loon_error_category_user);
   loon_ffi_free_result(&rc);
 }
 

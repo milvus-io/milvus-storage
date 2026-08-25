@@ -27,6 +27,8 @@ class MilvusStorageChunkReader {
   def getChunkIndicesScala(rowIndices: Array[Long]): Array[Long] = {
     if (isDestroyed) throw new IllegalStateException("ChunkReader has been destroyed")
     if (chunkReaderHandle == 0) throw new IllegalStateException("ChunkReader not initialized")
+    if (rowIndices == null) throw new IllegalArgumentException("rowIndices must not be null")
+    if (rowIndices.isEmpty) throw new IllegalArgumentException("rowIndices must not be empty")
     getChunkIndices(chunkReaderHandle, rowIndices)
   }
 
@@ -50,6 +52,9 @@ class MilvusStorageChunkReader {
   def getChunksScala(chunkIndices: Array[Long], parallelism: Long): Array[Long] = {
     if (isDestroyed) throw new IllegalStateException("ChunkReader has been destroyed")
     if (chunkReaderHandle == 0) throw new IllegalStateException("ChunkReader not initialized")
+    if (chunkIndices == null) throw new IllegalArgumentException("chunkIndices must not be null")
+    if (chunkIndices.isEmpty) throw new IllegalArgumentException("chunkIndices must not be empty")
+    if (parallelism <= 0) throw new IllegalArgumentException("parallelism must be > 0")
     getChunks(chunkReaderHandle, chunkIndices, parallelism)
   }
 

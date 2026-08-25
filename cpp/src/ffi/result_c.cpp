@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #include <string>
-#include <cassert>
 #include <unordered_map>
 
 #include "milvus-storage/ffi_c.h"
@@ -63,11 +62,6 @@ LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_ERRCODE_CONSTANT)
 #undef MILVUS_STORAGE_ERRCODE_CONSTANT
 
 extern FFI_EXPORT const int loon_errcode_packed_arrow_error = 54;
-extern FFI_EXPORT const int loon_errcode_aws_no_such_upload = LOON_AWS_ERROR_NO_SUCH_UPLOAD;
-extern FFI_EXPORT const int loon_errcode_aws_conflict = LOON_AWS_ERROR_CONFLICT;
-extern FFI_EXPORT const int loon_errcode_aws_precondition_failed = LOON_AWS_ERROR_PRECONDITION_FAILED;
-extern FFI_EXPORT const int loon_errcode_aws_not_found = LOON_AWS_ERROR_NOT_FOUND;
-extern FFI_EXPORT const int loon_errcode_aws_access_denied = LOON_AWS_ERROR_ACCESS_DENIED;
 }  // extern "C"
 
 std::string error_to_string(int code) {
@@ -80,13 +74,12 @@ std::string error_to_string(int code) {
   return kUnknownErrorName;
 }
 
-int loon_ffi_is_success(LoonFFIResult* result) {
-  assert(result);
-  return result->err_code == LOON_SUCCESS;
-}
+int loon_ffi_is_success(LoonFFIResult* result) { return result != nullptr && result->err_code == LOON_SUCCESS; }
 
 const char* loon_ffi_get_errmsg(LoonFFIResult* result) {
-  assert(result);
+  if (result == nullptr) {
+    return "(invalid null result)";
+  }
   if (loon_ffi_is_success(result)) {
     return nullptr;
   }
@@ -100,7 +93,9 @@ const char* loon_ffi_get_errmsg(LoonFFIResult* result) {
 }
 
 void loon_ffi_free_result(LoonFFIResult* result) {
-  assert(result);
+  if (result == nullptr) {
+    return;
+  }
   free(result->message);
   // Freeing must be idempotent. The documented consumer pattern is "free on
   // every path", and every retry/classification loop that follows it has at

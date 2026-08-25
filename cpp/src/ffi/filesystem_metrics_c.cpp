@@ -54,12 +54,12 @@ LoonFFIResult loon_filesystem_get_metrics(FileSystemHandle handle, LoonFilesyste
 
     auto observable = std::dynamic_pointer_cast<Observable>(fs);
     if (!observable) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Filesystem does not implement Observable interface");
+      RETURN_ERROR(LOON_NOT_SUPPORT, "Filesystem does not implement Observable interface");
     }
 
     auto metrics = observable->GetMetrics();
     if (!metrics) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Filesystem metrics are not enabled");
+      RETURN_ERROR(LOON_NOT_SUPPORT, "Filesystem metrics are not enabled");
     }
 
     FillMetricsSnapshot(metrics->GetSnapshot(), out_metrics);
@@ -67,6 +67,8 @@ LoonFFIResult loon_filesystem_get_metrics(FileSystemHandle handle, LoonFilesyste
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();
@@ -151,12 +153,12 @@ LoonFFIResult loon_filesystem_reset_metrics(FileSystemHandle handle) {
 
     auto observable = std::dynamic_pointer_cast<Observable>(fs);
     if (!observable) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Filesystem does not implement Observable interface");
+      RETURN_ERROR(LOON_NOT_SUPPORT, "Filesystem does not implement Observable interface");
     }
 
     auto metrics = observable->GetMetrics();
     if (!metrics) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Filesystem metrics are not enabled");
+      RETURN_ERROR(LOON_NOT_SUPPORT, "Filesystem metrics are not enabled");
     }
 
     metrics->Reset();
@@ -164,6 +166,8 @@ LoonFFIResult loon_filesystem_reset_metrics(FileSystemHandle handle) {
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
     RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
   }
 
   RETURN_UNREACHABLE();

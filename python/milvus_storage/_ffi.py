@@ -21,19 +21,31 @@ _ERROR_CODE_SYMBOLS = (
     "loon_errcode_invalid_properties",
     "loon_errcode_fault_inject",
     "loon_errcode_not_support",
+    "loon_errcode_user_invalid_argument",
     "loon_errcode_file_not_found",
-    "loon_errcode_aws_no_such_upload",
-    "loon_errcode_aws_conflict",
-    "loon_errcode_aws_precondition_failed",
-    "loon_errcode_aws_not_found",
-    "loon_errcode_aws_access_denied",
-    "loon_errcode_aws_non_retryable",
+    "loon_errcode_source_invalid",
+    "loon_errcode_packed_invalid_args",
+    "loon_errcode_packed_io",
+    "loon_errcode_packed_metadata_corrupted",
+    "loon_errcode_packed_file_corrupted",
+    "loon_errcode_packed_arrow_error",
+    "loon_errcode_packed_unexpected",
+    "loon_errcode_storage_no_such_upload",
+    "loon_errcode_storage_conflict",
+    "loon_errcode_storage_precondition_failed",
+    "loon_errcode_storage_not_found",
+    "loon_errcode_storage_access_denied",
     "loon_errcode_transient_network",
     "loon_errcode_transient_timeout",
     "loon_errcode_transient_throttling",
     "loon_errcode_transient_service",
     "loon_errcode_txn_exhausted_retry",
     "loon_errcode_txn_resolution_failed",
+    "loon_errcode_storage_config_invalid",
+    "loon_errcode_data_corrupted",
+    "loon_errcode_storage_bucket_not_found",
+    "loon_errcode_vortex_data_format",
+    "loon_errcode_internal_invariant",
 )
 
 # Chunk metadata type flags from ffi_c.h
@@ -102,24 +114,46 @@ _ffi.cdef(
     extern int loon_errcode_invalid_properties;
     extern int loon_errcode_fault_inject;
     extern int loon_errcode_not_support;
+    extern int loon_errcode_user_invalid_argument;
     extern int loon_errcode_file_not_found;
-    extern int loon_errcode_aws_no_such_upload;
-    extern int loon_errcode_aws_conflict;
-    extern int loon_errcode_aws_precondition_failed;
-    extern int loon_errcode_aws_not_found;
-    extern int loon_errcode_aws_access_denied;
-    extern int loon_errcode_aws_non_retryable;
+    extern int loon_errcode_source_invalid;
+    extern int loon_errcode_packed_invalid_args;
+    extern int loon_errcode_packed_io;
+    extern int loon_errcode_packed_metadata_corrupted;
+    extern int loon_errcode_packed_file_corrupted;
+    extern int loon_errcode_packed_arrow_error;
+    extern int loon_errcode_packed_unexpected;
+    extern int loon_errcode_storage_no_such_upload;
+    extern int loon_errcode_storage_conflict;
+    extern int loon_errcode_storage_precondition_failed;
+    extern int loon_errcode_storage_not_found;
+    extern int loon_errcode_storage_access_denied;
     extern int loon_errcode_transient_network;
     extern int loon_errcode_transient_timeout;
     extern int loon_errcode_transient_throttling;
     extern int loon_errcode_transient_service;
     extern int loon_errcode_txn_exhausted_retry;
     extern int loon_errcode_txn_resolution_failed;
+    extern int loon_errcode_storage_config_invalid;
+    extern int loon_errcode_data_corrupted;
+    extern int loon_errcode_storage_bucket_not_found;
+    extern int loon_errcode_vortex_data_format;
+    extern int loon_errcode_internal_invariant;
+
+    typedef enum LoonErrorCategory {
+        loon_error_category_unknown = 0,
+        loon_error_category_user = 1,
+        loon_error_category_retryable = 2,
+        loon_error_category_conflict = 3,
+        loon_error_category_data_format = 4,
+        loon_error_category_system = 5
+    } LoonErrorCategory;
 
     int loon_ffi_is_success(LoonFFIResult* result);
     const char* loon_ffi_get_errmsg(LoonFFIResult* result);
     void loon_ffi_free_result(LoonFFIResult* result);
     int loon_ffi_is_retryable_errcode(int err_code);
+    int loon_ffi_error_category(int err_code);
 
     // ==================== Properties C Interface ====================
     typedef struct LoonProperty {
@@ -305,6 +339,7 @@ _ffi.cdef(
 
     // ==================== Reader C Interface ====================
     typedef uintptr_t LoonReaderHandle;
+    typedef uintptr_t LoonRecordBatchReaderHandle;
 
     LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
                                   struct ArrowSchema* schema,
@@ -318,6 +353,16 @@ _ffi.cdef(
     LoonFFIResult loon_get_record_batch_reader(LoonReaderHandle reader,
                                                const char* predicate,
                                                struct ArrowArrayStream* out_array_stream);
+
+    LoonFFIResult loon_record_batch_reader_new(LoonReaderHandle reader,
+                                               const char* predicate,
+                                               LoonRecordBatchReaderHandle* out_handle,
+                                               struct ArrowSchema* out_schema);
+
+    LoonFFIResult loon_record_batch_reader_read_next(LoonRecordBatchReaderHandle handle,
+                                                     struct ArrowArray* out_array);
+
+    void loon_record_batch_reader_destroy(LoonRecordBatchReaderHandle handle);
 
     LoonFFIResult loon_get_chunk_reader(LoonReaderHandle reader,
                                         int64_t column_group_id,
@@ -617,11 +662,7 @@ class MilvusStorageLib:
         """Load the library using cffi."""
         lib_path = _find_library()
 
-        try:
-            self._lib = _ffi.dlopen(lib_path, os.RTLD_LOCAL)
-        except Exception as e:
-            print(f"Failed to load library: {e}")
-            raise
+        self._lib = _ffi.dlopen(lib_path, os.RTLD_LOCAL)
         _load_error_code_constants(self._lib)
 
     @property
@@ -648,7 +689,7 @@ def get_library() -> MilvusStorageLib:
 
 
 def _load_error_code_constants(lib) -> None:
-    """Load FFI error code constants from exported native symbols."""
+    """Load exported native error-code constants."""
     for name in _ERROR_CODE_SYMBOLS:
         globals()[name] = int(getattr(lib, name))
 
@@ -671,7 +712,11 @@ def check_result(result) -> None:
     Args:
         result: LoonFFIResult struct (passed by value from C function)
     """
-    from .exceptions import FFIError
+    from .exceptions import (
+        ErrorCategory,
+        FFIError,
+        InvalidArgumentError,
+    )
 
     lib = get_library().lib
     ffi = get_ffi()
@@ -687,8 +732,25 @@ def check_result(result) -> None:
             msg = ffi.string(error_msg).decode("utf-8")
         else:
             msg = "Unknown error"
+        err_code = int(result.err_code)
+        category = int(lib.loon_ffi_error_category(err_code))
         lib.loon_ffi_free_result(result_ptr)
-        raise FFIError(f"FFI call failed (code {result.err_code}): {msg}")
+        error = f"FFI call failed (code {err_code}): {msg}"
+        # Native code 7 remains System because the C ABI is also Milvus's
+        # deployment boundary. At the Python boundary the property dictionary
+        # is unambiguously supplied by this API's caller, so expose the normal
+        # Python invalid-argument exception without changing the native code or
+        # its ownership for other consumers. The reported category stays the
+        # native one: the exception type is this binding's ergonomics, the
+        # category is the library's verdict, and they must not be conflated.
+        if err_code == lib.loon_errcode_invalid_properties or category == ErrorCategory.USER:
+            exception_type = InvalidArgumentError
+        else:
+            exception_type = FFIError
+        # err_code and category are attributes, never only text: a consumer that
+        # parses this message to decide what to do is doing the thing the rules
+        # forbid (R4.3).
+        raise exception_type(error, err_code=err_code, category=category)
 
 
 def manifest_debug_string(manifest) -> str:
