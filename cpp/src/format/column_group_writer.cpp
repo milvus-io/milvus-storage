@@ -24,7 +24,9 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/layout.h"
+#include "milvus-storage/common/log.h"
 #include "milvus-storage/common/path_util.h"  // for kSep
+#include "milvus-storage/common/writer_status.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/format.h"
 #include "milvus-storage/format/column_group_reader.h"
@@ -48,15 +50,82 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
         format_writer_(nullptr) {}
 
   [[nodiscard]] arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
+    return writer_status_.RecordFirstFailure(WriteImpl(record));
+  }
+
+  [[nodiscard]] arrow::Status Flush() override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
+    return writer_status_.RecordFirstFailure(FlushImpl());
+  }
+
+  [[nodiscard]] arrow::Result<std::vector<ColumnGroupFile>> Close() override {
+    // Abandon on both failure paths; see FormatWriter::Close in format_writer.h.
+    if (auto first_failure = writer_status_.Check(); !first_failure.ok()) {
+      Abort();
+      return first_failure;
+    }
+    auto result = CloseImpl();
+    if (!result.ok()) {
+      auto status = writer_status_.RecordFirstFailure(result.status());
+      Abort();
+      return status;
+    }
+    closed_ = true;
+    return result;
+  }
+
+  [[nodiscard]] arrow::Status Open() override {
+    ARROW_RETURN_NOT_OK(writer_status_.Check());
+    return writer_status_.RecordFirstFailure(OpenImpl());
+  }
+
+  // Deliberately no writer_status_.Check(): abort is the one verb that must
+  // still work after the writer has failed, which is the only time anyone calls
+  // it.
+  void Abort() noexcept override {
+    // closed_ first, before recording the discard: abort after a successful Close has
+    // to be a no-op in every respect, including the recorded status, so a
+    // caller can abandon unconditionally without working out which verb it
+    // owes. The format writer below has the same guard, but reaching it would
+    // already have flipped this writer to Cancelled.
+    if (closed_) {
+      return;
+    }
+    (void)writer_status_.RecordFirstFailure(arrow::Status::Cancelled("Stateful writer was discarded"));
+    if (format_writer_ != nullptr) {
+      format_writer_->Abort();
+      format_writer_.reset();
+    }
+    // Rolled files were finalized into the store but never handed to the
+    // caller: only Close() transfers them, and it did not run. No manifest
+    // will ever reference them, so this abort is their only release point.
+    // Best effort like every abandonment step (R2.7a); the LOB writer's
+    // Abort() does the same for the files it created.
+    RollbackClosedFiles();
+  }
+
+  void RollbackClosedFiles() noexcept override {
+    for (const auto& file : written_files_) {
+      AbandonQuietly("a column group file", [&] { return fs_->DeleteFile(file.path); });
+    }
+    written_files_.clear();
+  }
+
+  private:
+  [[nodiscard]] arrow::Status WriteImpl(const std::shared_ptr<arrow::RecordBatch>& record) {
     // Fault injection point for testing
     FIU_RETURN_ON(FIUKEY_COLUMN_GROUP_WRITE_FAIL,
                   arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_COLUMN_GROUP_WRITE_FAIL)));
 
-    written_bytes_ += GetRecordBatchMemorySize(record);
-    return format_writer_->Write(record);
+    const auto record_bytes = GetRecordBatchMemorySize(record);
+    ARROW_RETURN_NOT_OK(format_writer_->Write(record));
+    written_bytes_ += record_bytes;
+    written_rows_ += record->num_rows();
+    return arrow::Status::OK();
   }
 
-  [[nodiscard]] arrow::Status Flush() override {
+  [[nodiscard]] arrow::Status FlushImpl() {
     ARROW_RETURN_NOT_OK(format_writer_->Flush());
 
     if (written_bytes_ == 0 || written_bytes_ < max_bytes_limit_) {
@@ -67,39 +136,49 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
     ARROW_ASSIGN_OR_RAISE(auto column_group_file, format_writer_->Close());
     written_files_.emplace_back(std::move(column_group_file));
     written_bytes_ = 0;
+    written_rows_ = 0;
 
     ARROW_ASSIGN_OR_RAISE(format_writer_,
-                          create_format_writer(base_path_, column_group_id_, column_group_, schema_, properties_));
+                          create_format_writer(base_path_, column_group_id_, column_group_, schema_, properties_, fs_));
 
     return arrow::Status::OK();
   }
 
-  [[nodiscard]] arrow::Result<std::vector<ColumnGroupFile>> Close() override {
+  [[nodiscard]] arrow::Result<std::vector<ColumnGroupFile>> CloseImpl() {
     assert(format_writer_);
-    ARROW_ASSIGN_OR_RAISE(auto column_group_file, format_writer_->Close());
-    // If current column_group_file without any data, do not add it to written_files_
-    if (written_bytes_ != 0) {
-      written_files_.emplace_back(std::move(column_group_file));
+    // A fresh writer, including the successor opened after a roll, has no file
+    // to publish. Closing the format writer would finalize an empty object that
+    // is deliberately omitted from metadata and can therefore never be found
+    // by manifest-based cleanup.
+    if (written_rows_ == 0) {
+      format_writer_->Abort();
+      format_writer_.reset();
+      return written_files_;
     }
+    ARROW_ASSIGN_OR_RAISE(auto column_group_file, format_writer_->Close());
+    written_files_.emplace_back(std::move(column_group_file));
     return written_files_;
   }
 
-  [[nodiscard]] arrow::Status Open() override {
+  [[nodiscard]] arrow::Status OpenImpl() {
     assert(!format_writer_);
+    // Held for Abort(): the rolled files it deletes were written through this
+    // filesystem, fetched from the same cache the format writers use.
+    ARROW_ASSIGN_OR_RAISE(fs_, milvus_storage::FilesystemCache::getInstance().get(properties_, base_path_));
     ARROW_ASSIGN_OR_RAISE(format_writer_,
-                          create_format_writer(base_path_, column_group_id_, column_group_, schema_, properties_));
+                          create_format_writer(base_path_, column_group_id_, column_group_, schema_, properties_, fs_));
     ARROW_ASSIGN_OR_RAISE(max_bytes_limit_, api::GetValue<uint64_t>(properties_, PROPERTY_WRITER_FILE_ROLLING_SIZE));
     return arrow::Status::OK();
   }
 
-  private:
   static arrow::Result<std::unique_ptr<FormatWriter>> create_format_writer(
       const std::string& base_path,
       const size_t& column_group_id,
       const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
       const std::shared_ptr<arrow::Schema>& schema,
-      const milvus_storage::api::Properties& properties) {
-    assert(column_group && schema);
+      const milvus_storage::api::Properties& properties,
+      const std::shared_ptr<arrow::fs::FileSystem>& file_system) {
+    assert(column_group && schema && file_system);
     auto format = column_group->format;
 
     // Create schema with only the columns for this column group
@@ -113,8 +192,6 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
       fields.emplace_back(field);
     }
     auto column_group_schema = arrow::schema(fields);
-    ARROW_ASSIGN_OR_RAISE(auto file_system, milvus_storage::FilesystemCache::getInstance().get(properties, base_path));
-
     // If current file system is local, create the parent directory if not exist
     // If current file system is remote, putobject will auto
     // create the parent directory if not exist
@@ -135,11 +212,20 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
   Properties properties_;
 
   std::unique_ptr<FormatWriter> format_writer_;
+  // Filesystem the format writers write through; kept so Abort() can delete
+  // the files FlushImpl() rolled into the store. Null exactly until Open()
+  // succeeds, which is also the only way written_files_ can grow.
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
 
   uint64_t max_bytes_limit_{0};
   uint64_t written_bytes_{0};
+  int64_t written_rows_{0};
 
   std::vector<ColumnGroupFile> written_files_;
+  WriterStatus writer_status_;
+  // Set only by a Close() that finished cleanly, so it means exactly
+  // "already finalized" and never "gave up part way".
+  bool closed_{false};
 };
 
 arrow::Result<std::unique_ptr<ColumnGroupWriter>> ColumnGroupWriter::create(
@@ -151,7 +237,11 @@ arrow::Result<std::unique_ptr<ColumnGroupWriter>> ColumnGroupWriter::create(
   std::unique_ptr<ColumnGroupWriterImpl> writer;
   assert(column_group && schema);
   writer = std::make_unique<ColumnGroupWriterImpl>(base_path, column_group_id, column_group, schema, properties);
-  ARROW_RETURN_NOT_OK(writer->Open());
+  auto status = writer->Open();
+  if (!status.ok()) {
+    writer->Abort();
+    return status;
+  }
   return writer;
 }
 

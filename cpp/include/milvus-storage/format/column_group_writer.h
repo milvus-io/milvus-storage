@@ -40,6 +40,19 @@ class ColumnGroupWriter {
   [[nodiscard]] virtual arrow::Status Flush() = 0;
   [[nodiscard]] virtual arrow::Result<std::vector<ColumnGroupFile>> Close() = 0;
 
+  /// Abandon this column group and release what it allocated in the store:
+  /// the format writer's in-progress file AND the files Flush() already
+  /// rolled -- those were finalized but never handed over (only Close()
+  /// transfers them), so this abort is their only release point. See
+  /// FormatWriter::Abort() for the contract: safe on a failed writer,
+  /// idempotent, and never reports its own cleanup failure.
+  virtual void Abort() noexcept = 0;
+
+  /// Delete files returned by a successful Close when an owning parent later
+  /// fails. Uses the same filesystem instance that created the files and is
+  /// idempotent. A successful outer close never calls this method.
+  virtual void RollbackClosedFiles() noexcept = 0;
+
   /**
    * @brief Create a column group writer for a column group
    *

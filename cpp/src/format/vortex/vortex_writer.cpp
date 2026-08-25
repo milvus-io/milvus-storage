@@ -19,6 +19,7 @@
 #include <string>
 #include <utility>
 
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -57,8 +58,14 @@ VortexFileWriter::VortexFileWriter(std::unique_ptr<FileSystemWrapper> fs_holder,
       properties_(std::move(properties)) {}
 
 arrow::Status VortexFileWriter::Write(const std::shared_ptr<arrow::RecordBatch> batch) {
+  ARROW_RETURN_NOT_OK(status_);
+  return RecordFirstFailure(WriteImpl(batch));
+}
+
+arrow::Status VortexFileWriter::WriteImpl(const std::shared_ptr<arrow::RecordBatch>& batch) {
   if (closed_) {
-    return arrow::Status::Invalid("Vortex writer is closed. [file_path=", file_path_, "]");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                              "Vortex writer is closed. [file_path=", file_path_, "]");
   }
 
   assert(!closed_);
@@ -69,22 +76,29 @@ arrow::Status VortexFileWriter::Write(const std::shared_ptr<arrow::RecordBatch> 
   ArrowArray exported_array;
   ArrowSchema exported_schema;
   ARROW_RETURN_NOT_OK(arrow::ExportArray(*arrow_struct_array, &exported_array, &exported_schema));
-  auto status = vx_writer_.Write(exported_schema, exported_array);
+  auto status = vx_writer_->Write(exported_schema, exported_array);
   if (!status.ok()) {
     closed_ = true;
     return MakeVortexErrorStatus("Failed to write Vortex file", status);
   }
+  wrote_batch_ = true;
   written_rows_ += batch->num_rows();
   return arrow::Status::OK();
 }
 
 arrow::Status VortexFileWriter::Flush() {
+  ARROW_RETURN_NOT_OK(status_);
+  return RecordFirstFailure(FlushImpl());
+}
+
+arrow::Status VortexFileWriter::FlushImpl() {
   if (closed_) {
-    return arrow::Status::Invalid("Vortex writer is closed. [file_path=", file_path_, "]");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                              "Vortex writer is closed. [file_path=", file_path_, "]");
   }
 
   assert(!closed_);
-  auto status = vx_writer_.Flush();
+  auto status = vx_writer_->Flush();
   if (!status.ok()) {
     closed_ = true;
     return MakeVortexErrorStatus("Failed to flush Vortex file", status);
@@ -92,15 +106,67 @@ arrow::Status VortexFileWriter::Flush() {
   return arrow::Status::OK();
 }
 
+void VortexFileWriter::Abort() noexcept {
+  // NOT `if (closed_)`. Unlike the other writers, closed_ here means "no longer
+  // usable" -- WriteImpl, FlushImpl and CloseImpl all set it on their failure
+  // paths -- so it is true exactly when a failed Close has left the bridge
+  // writer still holding the upload, which is the case an abort exists for.
+  //
+  // What must not happen is the status flip on a writer that finished cleanly.
+  // A close that succeeded is the only way to be closed with nothing having
+  // failed, so that pair is the real "already finalized" test.
+  if (closed_ && status_.ok()) {
+    return;
+  }
+  (void)RecordFirstFailure(arrow::Status::Cancelled("Stateful writer was discarded"));
+  closed_ = true;
+  // Release the bridge writer here rather than at destruction. There IS a path
+  // from here to the stream's Abort(), it just does not look like one: dropping
+  // the Rust VortexWriter drops ObjectStoreWriterInner, whose Drop calls
+  // loon_filesystem_writer_destroy (filesystem_c.rs), and that entry point
+  // aborts the OutputStreamWrapper before releasing it. So the multipart upload
+  // is cancelled -- via the C ABI the bridge already uses for every other verb,
+  // not via a cxx method we would have had to add.
+  //
+  // Deliberately NOT vx_writer_->Close(): close would finalize a file that was
+  // abandoned on purpose.
+  AbandonQuietly("the vortex bridge writer", [&] { vx_writer_.reset(); });
+}
+
 arrow::Result<api::ColumnGroupFile> VortexFileWriter::Close() {
+  // Abandon on both failure paths; see FormatWriter::Close in format_writer.h.
+  if (auto first_failure = status_; !first_failure.ok()) {
+    Abort();
+    return first_failure;
+  }
+  auto result = CloseImpl();
+  if (!result.ok()) {
+    auto status = RecordFirstFailure(result.status());
+    Abort();
+    return status;
+  }
+  return result;
+}
+
+arrow::Result<api::ColumnGroupFile> VortexFileWriter::CloseImpl() {
   if (closed_) {
-    return arrow::Status::Invalid("Vortex writer is closed. [file_path=", file_path_, "]");
+    return MakeExtendErrorMsg(ExtendStatusCode::InternalInvariantViolated,
+                              "Vortex writer is closed. [file_path=", file_path_, "]");
   }
 
   assert(!closed_);
 
+  // The Rust bridge opens its output lazily on the first batch. Close must
+  // still publish a real zero-row Vortex file: otherwise a pre-existing object
+  // at the same path survives while the returned metadata describes an empty
+  // file, and readers silently consume the old rows.
+  if (!wrote_batch_) {
+    ARROW_ASSIGN_OR_RAISE(auto empty_batch, arrow::RecordBatch::MakeEmpty(schema_));
+    ARROW_RETURN_NOT_OK(WriteImpl(empty_batch));
+  }
+
   // Close returns the total file size and footer size from WriteSummary
-  auto summary_result = vx_writer_.Close();
+  auto summary_result = vx_writer_->Close();
   if (!summary_result.ok()) {
     closed_ = true;
     return MakeVortexErrorStatus("Failed to close Vortex file", summary_result.status());

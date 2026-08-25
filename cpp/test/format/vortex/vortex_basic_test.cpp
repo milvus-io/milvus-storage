@@ -32,6 +32,7 @@
 #include <arrow/array/concatenate.h>
 #include <arrow/c/bridge.h>
 #include <arrow/filesystem/filesystem.h>
+#include <arrow/io/memory.h>
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
 #include <arrow/type.h>
@@ -203,6 +204,46 @@ ArrowArrayStream MakeFailingRustArrowStream(int code, std::string message) {
       new FailingArrowArrayStreamState{fmt::format("Io error: {}{}; {}", kMarker, code, std::move(message))};
   return stream;
 }
+
+class AbortTrackingOutputStream final : public arrow::io::MockOutputStream {
+  public:
+  explicit AbortTrackingOutputStream(bool fail_close = false) : fail_close_(fail_close) {}
+
+  arrow::Status Close() override {
+    if (fail_close_) {
+      return arrow::Status::IOError("injected close failure");
+    }
+    return arrow::io::MockOutputStream::Close();
+  }
+
+  arrow::Status Abort() override {
+    ++abort_count_;
+    return arrow::io::MockOutputStream::Close();
+  }
+
+  int abort_count() const { return abort_count_; }
+
+  private:
+  bool fail_close_;
+  int abort_count_ = 0;
+};
+
+class SingleOutputStreamFileSystem final : public arrow::fs::SubTreeFileSystem {
+  public:
+  SingleOutputStreamFileSystem(std::shared_ptr<arrow::fs::FileSystem> base_fs,
+                               std::shared_ptr<arrow::io::OutputStream> stream)
+      : arrow::fs::SubTreeFileSystem("", std::move(base_fs)), stream_(std::move(stream)) {}
+
+  std::string type_name() const override { return "single-output-stream"; }
+
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
+      const std::string&, const std::shared_ptr<const arrow::KeyValueMetadata>&) override {
+    return stream_;
+  }
+
+  private:
+  std::shared_ptr<arrow::io::OutputStream> stream_;
+};
 
 struct AsyncScanTestContext {
   ArrowArrayStream stream{};
@@ -722,6 +763,46 @@ TEST_P(VortexBasicTest, FlushAllowsSubsequentWrites) {
   ASSERT_EQ(cgfile.end_index, rb->num_rows());
 }
 
+TEST_P(VortexBasicTest, CloseFailureReleasesBridgeWriterWithoutAnExplicitAbort) {
+  auto stream = std::make_shared<AbortTrackingOutputStream>(true);
+  auto fs = std::make_shared<SingleOutputStreamFileSystem>(file_system_, stream);
+  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(fs, schema_, test_file_name_, properties_));
+  ASSERT_STATUS_OK(vx_writer->Write(record_batches_.front()));
+
+  auto close_result = vx_writer->Close();
+  ASSERT_FALSE(close_result.ok());
+  // A failed Close abandons: the bridge writer, and with it the upload it
+  // holds, is released without the caller having to know to ask for it. This
+  // is what makes Close() sufficient for callers that cannot express RAII --
+  // every FFI binding -- because Close() is the only verb they reach for.
+  EXPECT_FALSE(vx_writer->HasBridgeWriterForTest());
+  EXPECT_EQ(stream->abort_count(), 1);
+
+  // The explicit verb stays available and stays idempotent.
+  vx_writer->Abort();
+  EXPECT_FALSE(vx_writer->HasBridgeWriterForTest());
+  EXPECT_EQ(stream->abort_count(), 1);
+
+  vx_writer->Abort();
+  EXPECT_FALSE(vx_writer->HasBridgeWriterForTest());
+  EXPECT_EQ(stream->abort_count(), 1);
+}
+
+TEST_P(VortexBasicTest, AbortAfterSuccessfulCloseIsIdempotent) {
+  auto stream = std::make_shared<AbortTrackingOutputStream>();
+  auto fs = std::make_shared<SingleOutputStreamFileSystem>(file_system_, stream);
+  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(fs, schema_, test_file_name_, properties_));
+  ASSERT_STATUS_OK(vx_writer->Write(record_batches_.front()));
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
+  EXPECT_EQ(cgfile.end_index, record_batches_.front()->num_rows());
+  EXPECT_EQ(stream->abort_count(), 1);
+
+  vx_writer->Abort();
+  EXPECT_EQ(stream->abort_count(), 1);
+  vx_writer->Abort();
+  EXPECT_EQ(stream->abort_count(), 1);
+}
+
 #ifdef BUILD_WITH_FIU
 TEST_P(VortexBasicTest, S3FlushFailureCloseReturnsErrorAndLeavesNoObject) {
   ArrowFileSystemConfig fs_config;
@@ -1163,7 +1244,7 @@ TEST_P(VortexBasicTest, TestDictionaryOfFixedSizeBinaryWriteFails) {
 
   auto close_result = vx_writer->Close();
   ASSERT_FALSE(close_result.ok());
-  EXPECT_TRUE(close_result.status().IsInvalid()) << close_result.status().ToString();
+  EXPECT_TRUE(close_result.status().Equals(status)) << close_result.status().ToString();
 }
 
 TEST_P(VortexBasicTest, TestFixedSizeListWidthMismatchReadFails) {

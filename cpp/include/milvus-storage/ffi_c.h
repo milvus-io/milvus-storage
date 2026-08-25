@@ -476,10 +476,10 @@ FFI_EXPORT LoonFFIResult loon_writer_flush(LoonWriterHandle handle);
 /**
  * @brief Closes the writer and returns the column groups for a successfully written dataset.
  *
- * If a previous operation on this writer has already failed, close may still be called to
- * release/finalize resources owned by the writer. In that case, even if close succeeds,
- * the returned column groups are not a valid dataset manifest and must be discarded by
- * the caller.
+ * If an earlier write or flush reached the writer and failed, close abandons
+ * pending outputs, releases writer-owned resources, and returns the first
+ * recorded failure instead of publishing column groups. Call close after a
+ * writer operation fails so resources such as multipart uploads are released.
  *
  * @param handle Writer handle
  * @param out_columngroups Output LoonColumnGroups structure (function allocates and returns pointer)
