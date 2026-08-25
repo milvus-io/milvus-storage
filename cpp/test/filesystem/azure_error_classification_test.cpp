@@ -107,8 +107,8 @@ TEST(AzureErrorClassification, PermanentStatusesAreNotRetriable) {
       // Not-found is fine-grained: a consumer can tell "data missing" from a
       // generic storage failure, matching what the S3 path already reports.
       {404, "BlobNotFound", ExtendStatusCode::AwsErrorNotFound, milvus::ObjectNotExist},
-      {401, "", ExtendStatusCode::AwsErrorAccessDenied, milvus::StorageError},
-      {403, "AuthenticationFailed", ExtendStatusCode::AwsErrorAccessDenied, milvus::StorageError},
+      {401, "", ExtendStatusCode::AwsErrorAccessDenied, milvus::ConfigInvalid},
+      {403, "AuthenticationFailed", ExtendStatusCode::AwsErrorAccessDenied, milvus::ConfigInvalid},
       {412, "ConditionNotMet", ExtendStatusCode::AwsErrorPreConditionFailed, milvus::StorageError},
       {409, "BlobAlreadyExists", ExtendStatusCode::AwsErrorPreConditionFailed, milvus::StorageError},
   };

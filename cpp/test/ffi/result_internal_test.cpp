@@ -103,36 +103,36 @@ TEST(FFIInternalResultTest, MapsStatusDetailsToFfiResults) {
   auto timeout_status = MakeExtendError(ExtendStatusCode::StorageTransientTimeout, "timeout", "timeout");
   EXPECT_EQ(FFIErrorCodeFromExtendStatus(timeout_status, LOON_ARROW_ERROR), LOON_TRANSIENT_TIMEOUT);
 
-  auto code = ExtendStatusCodeFromFFIErrorCode(LOON_AWS_ERROR_NO_SUCH_UPLOAD);
+  auto code = ExtendStatusCodeFromFFIErrorCode(LOON_STORAGE_NO_SUCH_UPLOAD);
   ASSERT_TRUE(code.has_value());
-  EXPECT_EQ(*code, ExtendStatusCode::AwsErrorNoSuchUpload);
+  EXPECT_EQ(*code, ExtendStatusCode::StorageNoSuchUpload);
 
   code = ExtendStatusCodeFromFFIErrorCode(LOON_TRANSIENT_TIMEOUT);
   ASSERT_TRUE(code.has_value());
   EXPECT_EQ(*code, ExtendStatusCode::StorageTransientTimeout);
   EXPECT_FALSE(ExtendStatusCodeFromFFIErrorCode(LOON_ARROW_ERROR).has_value());
 
-  auto conflict_status = MakeExtendError(ExtendStatusCode::AwsErrorConflict, "conflict", "conflict");
-  EXPECT_EQ(FFIErrorCodeFromExtendStatus(conflict_status, LOON_ARROW_ERROR), LOON_AWS_ERROR_CONFLICT);
-  code = ExtendStatusCodeFromFFIErrorCode(LOON_AWS_ERROR_CONFLICT);
+  auto conflict_status = MakeExtendError(ExtendStatusCode::StorageConflict, "conflict", "conflict");
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(conflict_status, LOON_ARROW_ERROR), LOON_STORAGE_CONFLICT);
+  code = ExtendStatusCodeFromFFIErrorCode(LOON_STORAGE_CONFLICT);
   ASSERT_TRUE(code.has_value());
-  EXPECT_EQ(*code, ExtendStatusCode::AwsErrorConflict);
+  EXPECT_EQ(*code, ExtendStatusCode::StorageConflict);
 
   auto precondition_status =
-      MakeExtendError(ExtendStatusCode::AwsErrorPreConditionFailed, "precondition", "precondition");
-  EXPECT_EQ(FFIErrorCodeFromExtendStatus(precondition_status, LOON_ARROW_ERROR), LOON_AWS_ERROR_PRECONDITION_FAILED);
-  code = ExtendStatusCodeFromFFIErrorCode(LOON_AWS_ERROR_PRECONDITION_FAILED);
+      MakeExtendError(ExtendStatusCode::StoragePreConditionFailed, "precondition", "precondition");
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(precondition_status, LOON_ARROW_ERROR), LOON_STORAGE_PRECONDITION_FAILED);
+  code = ExtendStatusCodeFromFFIErrorCode(LOON_STORAGE_PRECONDITION_FAILED);
   ASSERT_TRUE(code.has_value());
-  EXPECT_EQ(*code, ExtendStatusCode::AwsErrorPreConditionFailed);
+  EXPECT_EQ(*code, ExtendStatusCode::StoragePreConditionFailed);
 
-  auto not_found_status = MakeExtendError(ExtendStatusCode::AwsErrorNotFound, "missing", "missing");
-  EXPECT_EQ(FFIErrorCodeFromExtendStatus(not_found_status, LOON_ARROW_ERROR), LOON_AWS_ERROR_NOT_FOUND);
-  code = ExtendStatusCodeFromFFIErrorCode(LOON_AWS_ERROR_NOT_FOUND);
+  auto not_found_status = MakeExtendError(ExtendStatusCode::StorageNotFound, "missing", "missing");
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(not_found_status, LOON_ARROW_ERROR), LOON_STORAGE_NOT_FOUND);
+  code = ExtendStatusCodeFromFFIErrorCode(LOON_STORAGE_NOT_FOUND);
   ASSERT_TRUE(code.has_value());
-  EXPECT_EQ(*code, ExtendStatusCode::AwsErrorNotFound);
+  EXPECT_EQ(*code, ExtendStatusCode::StorageNotFound);
 
-  EXPECT_TRUE(loon_ffi_is_retryable_errcode(LOON_AWS_ERROR_NO_SUCH_UPLOAD));
-  EXPECT_FALSE(loon_ffi_is_retryable_errcode(LOON_AWS_ERROR_ACCESS_DENIED));
+  EXPECT_TRUE(loon_ffi_is_retryable_errcode(LOON_STORAGE_NO_SUCH_UPLOAD));
+  EXPECT_FALSE(loon_ffi_is_retryable_errcode(LOON_STORAGE_ACCESS_DENIED));
 
   auto throttling_status = MakeExtendError(ExtendStatusCode::StorageTransientThrottling, "throttled", "throttled");
   auto throttling_result = ReturnArrowErrorIf(throttling_status, LOON_ARROW_ERROR);
@@ -157,6 +157,20 @@ TEST(FFIInternalResultTest, MapsPlainPathNotFoundToFileNotFound) {
   auto status = arrow::Status::IOError("missing-file").WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
 
   EXPECT_EQ(FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR), LOON_FILE_NOT_FOUND);
+}
+
+TEST(FFIInternalResultTest, MapsOutOfMemoryToMemoryError) {
+  auto oom = arrow::Status::OutOfMemory("malloc of size 42 failed");
+
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(oom, LOON_ARROW_ERROR), LOON_MEMORY_ERROR);
+  // External-source entry points may use LOON_SOURCE_INVALID as their fallback.
+  // OOM must remain the allocation-failure code instead of becoming a
+  // source-availability error.
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(oom, LOON_SOURCE_INVALID), LOON_MEMORY_ERROR);
+  // A status that carries an explicit classification still wins over the
+  // arrow-code inference.
+  auto classified = MakeExtendError(ExtendStatusCode::StorageTransientThrottling, "throttled", "throttled");
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(classified, LOON_ARROW_ERROR), LOON_TRANSIENT_THROTTLING);
 }
 
 TEST(FFIInternalResultTest, AsyncReadCallbackPreservesExtendStatusCode) {

@@ -30,10 +30,12 @@ void run_filesystem_suite(void);
 void run_fiu_suite(void);
 void run_segment_suite(void);
 void run_runtime_suite(void);
+void run_doc_example_suite(void);
 
 int main(void) {
   loon_thread_pool_singleton(4);
   run_runtime_suite();
+  run_doc_example_suite();
   run_manifest_suite();
   run_properties_suite();
   run_writer_suite();

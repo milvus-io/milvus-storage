@@ -31,33 +31,28 @@ extern "C" {
 #include <stdint.h>
 #include "arrow/c/abi.h"
 
+#include "milvus-storage/ffi_internal/ffi_error_code.h"
+
 // ==================== Result C Interface ====================
 
 // --- Export error codes ---
+//
+// Generated from the same X-macro table that defines the constants in
+// result_c.cpp. Keeping the declarations and definitions in one table prevents
+// the public header from drifting away from the exported constants.
 FFI_EXPORT extern const int loon_errcode_success;
-FFI_EXPORT extern const int loon_errcode_invalid_args;
-FFI_EXPORT extern const int loon_errcode_memory;
-FFI_EXPORT extern const int loon_errcode_arrow;
-FFI_EXPORT extern const int loon_errcode_logical;
-FFI_EXPORT extern const int loon_errcode_got_exception;
-FFI_EXPORT extern const int loon_errcode_unreachable;
-FFI_EXPORT extern const int loon_errcode_invalid_properties;
-FFI_EXPORT extern const int loon_errcode_fault_inject;
-FFI_EXPORT extern const int loon_errcode_not_support;
-FFI_EXPORT extern const int loon_errcode_file_not_found;
 
+#define MILVUS_STORAGE_ERRCODE_DECL(name, code, symbol, category) FFI_EXPORT extern const int loon_errcode_##symbol;
+LOON_INTERNAL_ERROR_CODE_LIST(MILVUS_STORAGE_ERRCODE_DECL)
+LOON_EXTEND_STATUS_CODE_LIST(MILVUS_STORAGE_ERRCODE_DECL)
+#undef MILVUS_STORAGE_ERRCODE_DECL
+
+// Compatibility names for the original AWS-specific object-store codes.
 FFI_EXPORT extern const int loon_errcode_aws_no_such_upload;
 FFI_EXPORT extern const int loon_errcode_aws_conflict;
 FFI_EXPORT extern const int loon_errcode_aws_precondition_failed;
 FFI_EXPORT extern const int loon_errcode_aws_not_found;
 FFI_EXPORT extern const int loon_errcode_aws_access_denied;
-FFI_EXPORT extern const int loon_errcode_aws_non_retryable;
-FFI_EXPORT extern const int loon_errcode_transient_network;
-FFI_EXPORT extern const int loon_errcode_transient_timeout;
-FFI_EXPORT extern const int loon_errcode_transient_throttling;
-FFI_EXPORT extern const int loon_errcode_transient_service;
-FFI_EXPORT extern const int loon_errcode_txn_exhausted_retry;
-FFI_EXPORT extern const int loon_errcode_txn_resolution_failed;
 
 // usage example(caller must free the message string):
 //
@@ -81,7 +76,33 @@ FFI_EXPORT const char* loon_ffi_get_errmsg(LoonFFIResult* result);
 // free the message string inside LoonFFIResult
 FFI_EXPORT void loon_ffi_free_result(LoonFFIResult* result);
 
+// --- Error classification ---
+// Category values are compile-time constants, so C consumers can use them in a
+// switch without loading extra data symbols from the shared library.
+typedef enum LoonErrorCategory {
+  loon_error_category_unknown = LOON_ERROR_CATEGORY_UNKNOWN,
+  loon_error_category_user = LOON_ERROR_CATEGORY_USER,
+  loon_error_category_retryable = LOON_ERROR_CATEGORY_RETRYABLE,
+  loon_error_category_conflict = LOON_ERROR_CATEGORY_CONFLICT,
+  loon_error_category_data_format = LOON_ERROR_CATEGORY_DATA_FORMAT,
+  loon_error_category_system = LOON_ERROR_CATEGORY_SYSTEM,
+} LoonErrorCategory;
+
+/**
+ * @brief Returns nonzero when the code carries a transient-cause hint.
+ *
+ * This is not an operation-level retry verdict. The caller owns the
+ * idempotency, reconciliation, and resource-lifetime decision; a failed
+ * stateful writer must be destroyed and recreated rather than reused.
+ *
+ * It is literally `loon_ffi_error_category(err_code) ==
+ * loon_error_category_retryable` -- the two are generated from the same table
+ * and cannot disagree, so prefer whichever reads better at the call site.
+ */
 FFI_EXPORT int loon_ffi_is_retryable_errcode(int err_code);
+
+// Category of an error code; see loon_error_category_* above.
+FFI_EXPORT int loon_ffi_error_category(int err_code);
 
 // ==================== End of Result C Interface ====================
 
