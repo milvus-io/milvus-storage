@@ -24,10 +24,10 @@ namespace milvus_storage {
 
 SizeBasedSplitter::SizeBasedSplitter(size_t max_group_size) : max_group_size_(max_group_size) {}
 
-std::vector<ColumnGroup> SizeBasedSplitter::SplitRecordBatches(
+arrow::Result<std::vector<ColumnGroup>> SizeBasedSplitter::SplitRecordBatches(
     const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) {
   if (batches.empty()) {
-    return {};
+    return std::vector<ColumnGroup>{};
   }
   // calculate column sizes and rows
   std::vector<size_t> column_sizes(batches[0]->num_columns(), 0);
@@ -62,18 +62,18 @@ std::vector<ColumnGroup> SizeBasedSplitter::SplitRecordBatches(
   std::vector<ColumnGroup> column_groups;
   for (auto& record : batches) {
     for (GroupId group_id = 0; group_id < group_indices.size(); ++group_id) {
-      auto batch = record->SelectColumns(group_indices[group_id]).ValueOrDie();
+      ARROW_ASSIGN_OR_RAISE(auto batch, record->SelectColumns(group_indices[group_id]));
       if (column_groups.size() < group_indices.size()) {
         column_groups.emplace_back(group_id, group_indices[group_id], batch);
       } else {
-        column_groups[group_id].AddRecordBatch(batch);
+        ARROW_RETURN_NOT_OK(column_groups[group_id].AddRecordBatch(batch));
       }
     }
   }
   return column_groups;
 }
 
-std::vector<ColumnGroup> SizeBasedSplitter::Split(const std::shared_ptr<arrow::RecordBatch>& record) {
+arrow::Result<std::vector<ColumnGroup>> SizeBasedSplitter::Split(const std::shared_ptr<arrow::RecordBatch>& record) {
   return SplitRecordBatches({record});
 }
 

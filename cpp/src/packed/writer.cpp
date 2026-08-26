@@ -17,7 +17,9 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <stdexcept>
+#include <utility>
 
 #include <arrow/type.h>
 #include <arrow/util/logging.h>
@@ -26,6 +28,7 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/packed/column_group.h"
 #include "milvus-storage/format/parquet/parquet_writer.h"
 #include "milvus-storage/packed/splitter/indices_based_splitter.h"
@@ -67,21 +70,25 @@ arrow::Result<std::shared_ptr<PackedRecordBatchWriter>> PackedRecordBatchWriter:
 
 arrow::Status PackedRecordBatchWriter::init() {
   if (!schema_) {
-    return arrow::Status::Invalid("Packed writer null schema provided");
+    return MakeExtendError(ExtendStatusCode::PackedInvalidArgs, "Packed writer null schema provided");
   }
 
   if (paths_.size() != group_indices_.size()) {
-    return arrow::Status::Invalid("Mismatch between paths number and column groups number: " +
-                                  std::to_string(paths_.size()) + " vs " + std::to_string(group_indices_.size()));
+    return MakeExtendError(ExtendStatusCode::PackedInvalidArgs,
+                           "Mismatch between paths number and column groups number: " + std::to_string(paths_.size()) +
+                               " vs " + std::to_string(group_indices_.size()));
   }
 
   if (!fs_) {
-    return arrow::Status::Invalid("Packed writer null file system provided");
+    return MakeExtendError(ExtendStatusCode::PackedInvalidArgs, "Packed writer null file system provided");
   }
 
   auto field_id_list = FieldIDList::Make(schema_);
   if (!field_id_list.ok()) {
-    return arrow::Status::Invalid("Failed to get field id from schema");
+    return MakeExtendError(ExtendStatusCode::PackedInvalidArgs,
+                           "Failed to get field id from schema: " + field_id_list.status().ToString() +
+                               ". [schema=" + schema_->ToString(true) + "]",
+                           field_id_list.status().ToString());
   }
 
   // Validate column group indices are within bounds
@@ -89,8 +96,9 @@ arrow::Status PackedRecordBatchWriter::init() {
   for (size_t i = 0; i < group_indices_.size(); ++i) {
     for (int col_index : group_indices_[i]) {
       if (col_index < 0 || col_index >= num_fields) {
-        return arrow::Status::Invalid("Column index out of range: " + std::to_string(col_index) + " (schema has " +
-                                      std::to_string(num_fields) + " fields)");
+        return MakeExtendError(ExtendStatusCode::PackedInvalidArgs,
+                               "Column index out of range: " + std::to_string(col_index) + " (schema has " +
+                                   std::to_string(num_fields) + " fields), [schema=" + schema_->ToString(true) + "]");
       }
     }
   }
@@ -100,63 +108,102 @@ arrow::Status PackedRecordBatchWriter::init() {
   splitter_ = IndicesBasedSplitter(group_indices_);
   for (size_t i = 0; i < paths_.size(); ++i) {
     auto column_group_schema = getColumnGroupSchema(schema_, group_indices_[i]);
-    ARROW_ASSIGN_OR_RAISE(auto writer, milvus_storage::parquet::ParquetFileWriter::Make(
-                                           column_group_schema, fs_, paths_[i], storage_config_, writer_props_));
+    auto writer_result = milvus_storage::parquet::ParquetFileWriter::Make(column_group_schema, fs_, paths_[i],
+                                                                          storage_config_, writer_props_);
+    if (!writer_result.ok()) {
+      return WrapExtendError(ExtendStatusCode::PackedStorageIO,
+                             "Failed to create packed column group writer. [path=" + paths_[i] + "]",
+                             writer_result.status());
+    }
+    auto writer = std::move(writer_result).ValueOrDie();
     group_writers_.emplace_back(std::move(writer));
   }
   return arrow::Status::OK();
 }
 
 arrow::Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
-  if (!record) {
+  try {
+    if (!record) {
+      return arrow::Status::OK();
+    }
+
+    for (const auto& group_indice : group_indices_) {
+      for (int col_index : group_indice) {
+        if (col_index < 0 || col_index >= record->num_columns()) {
+          return MakeExtendError(ExtendStatusCode::PackedInvalidArgs,
+                                 "Record batch column index out of range: " + std::to_string(col_index) +
+                                     " (record batch has " + std::to_string(record->num_columns()) + " columns)");
+        }
+      }
+    }
+
+    size_t next_batch_size = GetRecordBatchMemorySize(record);
+
+    ARROW_ASSIGN_OR_RAISE(std::vector<ColumnGroup> column_groups, splitter_.Split(record));
+
+    // Flush column groups until there's enough room for the new column groups
+    // to ensure that memory usage stays strictly below the limit
+    while (current_memory_usage_ + next_batch_size >= buffer_size_ && !max_heap_.empty()) {
+      ARROW_LOG(DEBUG) << "Current memory usage: " << current_memory_usage_ / 1024 / 1024 << " MB, "
+                       << ", flushing column group: " << max_heap_.top().first;
+      auto max_group = max_heap_.top();
+      max_heap_.pop();
+
+      assert(current_memory_usage_ >= max_group.second);
+      current_memory_usage_ -= max_group.second;
+
+      milvus_storage::parquet::ParquetFileWriter* writer = group_writers_[max_group.first].get();
+      auto flush_status = writer->Flush();
+      if (!flush_status.ok()) {
+        return WrapExtendError(ExtendStatusCode::PackedStorageIO, "Failed to flush packed column group writer",
+                               flush_status);
+      }
+    }
+
+    // After flushing, add the new column groups if memory usage allows
+    for (const ColumnGroup& group : column_groups) {
+      current_memory_usage_ += group.GetMemoryUsage();
+      max_heap_.emplace(group.GrpId(), group.GetMemoryUsage());
+
+      assert(group.GrpId() < group_writers_.size());
+      auto& grp_writer = group_writers_[group.GrpId()];
+      auto write_status = grp_writer->Write(group.GetRecordBatch(0));
+      if (!write_status.ok()) {
+        return WrapExtendError(ExtendStatusCode::PackedStorageIO, "Failed to write packed column group", write_status);
+      }
+    }
+
+    ARROW_RETURN_NOT_OK(balanceMaxHeap());
     return arrow::Status::OK();
+  } catch (const std::exception& e) {
+    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
+                           "Packed writer write failed unexpectedly: " + std::string(e.what()));
+  } catch (...) {
+    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
+                           "Packed writer write with unknown exception failed unexpectedly");
   }
-
-  size_t next_batch_size = GetRecordBatchMemorySize(record);
-
-  std::vector<ColumnGroup> column_groups = splitter_.Split(record);
-
-  // Flush column groups until there's enough room for the new column groups
-  // to ensure that memory usage stays strictly below the limit
-  while (current_memory_usage_ + next_batch_size >= buffer_size_ && !max_heap_.empty()) {
-    ARROW_LOG(DEBUG) << "Current memory usage: " << current_memory_usage_ / 1024 / 1024 << " MB, "
-                     << ", flushing column group: " << max_heap_.top().first;
-    auto max_group = max_heap_.top();
-    max_heap_.pop();
-
-    assert(current_memory_usage_ >= max_group.second);
-    current_memory_usage_ -= max_group.second;
-
-    milvus_storage::parquet::ParquetFileWriter* writer = group_writers_[max_group.first].get();
-    ARROW_RETURN_NOT_OK(writer->Flush());
-  }
-
-  // After flushing, add the new column groups if memory usage allows
-  for (const ColumnGroup& group : column_groups) {
-    current_memory_usage_ += group.GetMemoryUsage();
-    max_heap_.emplace(group.GrpId(), group.GetMemoryUsage());
-
-    assert(group.GrpId() < group_writers_.size());
-    auto& grp_writer = group_writers_[group.GrpId()];
-    ARROW_RETURN_NOT_OK(grp_writer->Write(group.GetRecordBatch(0)));
-  }
-
-  ARROW_RETURN_NOT_OK(balanceMaxHeap());
-  return arrow::Status::OK();
 }
 
 arrow::Status PackedRecordBatchWriter::Close() {
-  // Check if already closed
-  if (closed_) {
-    return arrow::Status::OK();
-  }
+  try {
+    // Check if already closed
+    if (closed_) {
+      return arrow::Status::OK();
+    }
 
-  // flush all remaining column groups before closing
-  auto status = flushRemainingBuffer();
-  if (status.ok()) {
-    closed_ = true;
+    // flush all remaining column groups before closing
+    auto status = flushRemainingBuffer();
+    if (status.ok()) {
+      closed_ = true;
+    }
+    return status;
+  } catch (const std::exception& e) {
+    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
+                           "Packed writer close failed unexpectedly: " + std::string(e.what()));
+  } catch (...) {
+    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
+                           "Packed writer close with unknown exception failed unexpectedly");
   }
-  return status;
 }
 
 arrow::Status PackedRecordBatchWriter::AddUserMetadata(const std::string& key, const std::string& value) {
@@ -176,13 +223,30 @@ arrow::Status PackedRecordBatchWriter::flushRemainingBuffer() {
 
     ARROW_LOG(DEBUG) << "Flushing remaining column group: " << max_group.first;
     current_memory_usage_ -= max_group.second;
-    ARROW_RETURN_NOT_OK(grp_writer->Flush());
+    auto flush_status = grp_writer->Flush();
+    if (!flush_status.ok()) {
+      return WrapExtendError(ExtendStatusCode::PackedStorageIO, "Failed to flush packed column group writer",
+                             flush_status);
+    }
   }
 
   for (auto& grp_writer : group_writers_) {
-    ARROW_RETURN_NOT_OK(grp_writer->AppendKVMetadata(GROUP_FIELD_ID_LIST_META_KEY, group_field_id_list_.Serialize()));
-    ARROW_RETURN_NOT_OK(grp_writer->AddUserMetadata(user_metadata_));
-    ARROW_RETURN_NOT_OK(grp_writer->Close());
+    auto append_status = grp_writer->AppendKVMetadata(GROUP_FIELD_ID_LIST_META_KEY, group_field_id_list_.Serialize());
+    if (!append_status.ok()) {
+      return WrapExtendError(ExtendStatusCode::PackedStorageIO, "Failed to append packed group field id metadata",
+                             append_status);
+    }
+
+    auto metadata_status = grp_writer->AddUserMetadata(user_metadata_);
+    if (!metadata_status.ok()) {
+      return WrapExtendError(ExtendStatusCode::PackedStorageIO, "Failed to add packed user metadata", metadata_status);
+    }
+
+    auto close_result = grp_writer->Close();
+    if (!close_result.ok()) {
+      return WrapExtendError(ExtendStatusCode::PackedStorageIO, "Failed to close packed column group writer",
+                             close_result);
+    }
   }
 
   return arrow::Status::OK();

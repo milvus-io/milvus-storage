@@ -23,7 +23,7 @@ class IndicesBasedSplitter : public SplitterPlugin {
   public:
   explicit IndicesBasedSplitter(const std::vector<std::vector<int>>& column_indices);
 
-  std::vector<ColumnGroup> Split(const std::shared_ptr<arrow::RecordBatch>& record) override;
+  arrow::Result<std::vector<ColumnGroup>> Split(const std::shared_ptr<arrow::RecordBatch>& record) override;
 
   private:
   std::vector<std::vector<int>> column_indices_;
