@@ -275,9 +275,7 @@ class ExternalTableTest : public ::testing::TestWithParam<std::string> {
 
     ArrowFileSystemConfig fs_config;
     ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
-    auto storage_options = lance::ToStorageOptions(fs_config);
-
-    auto dataset = lance::BlockingDataset::Open(lance_uri, storage_options);
+    ARROW_ASSIGN_OR_RAISE(auto storage_options, lance::ToWriterOptions(fs_config));
 
     // Build predicate like "id in (3, 10, 25)"
     std::string predicate = "id in (";
@@ -287,7 +285,7 @@ class ExternalTableTest : public ::testing::TestWithParam<std::string> {
       predicate += std::to_string(deleted_ids[i]);
     }
     predicate += ")";
-    dataset->DeleteRows(predicate);
+    ARROW_RETURN_NOT_OK(lance::BlockingDataset::DeleteRows(lance_uri, predicate, storage_options));
 
     return WriteResult{std::move(result.cgfile), result.schema, num_rows};
   }

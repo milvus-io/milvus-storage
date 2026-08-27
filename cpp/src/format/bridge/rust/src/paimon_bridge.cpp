@@ -53,15 +53,6 @@ std::string StripMarker(std::string_view message, std::string_view marker) {
   return result.empty() ? "Unknown Paimon error" : result;
 }
 
-template <typename T, typename Fn>
-arrow::Result<T> CatchRustResult(Fn&& fn) {
-  try {
-    return fn();
-  } catch (const rust::cxxbridge1::Error& error) {
-    return MakePaimonBridgeErrorStatus(error.what());
-  }
-}
-
 arrow::Status TranslatePaimonStreamStatus(arrow::Status status) {
   if (status.ok() || status.message().find(kPaimonErrorMarker) == std::string_view::npos) {
     return status;
@@ -142,7 +133,7 @@ arrow::Result<std::vector<PaimonFileInfo>> PlanFiles(const std::string& table_lo
                                                      int64_t snapshot_id,
                                                      const std::string& scan_mode,
                                                      const StorageOptions& storage_options) {
-  return CatchRustResult<std::vector<PaimonFileInfo>>([&]() {
+  return CatchRustResult<std::vector<PaimonFileInfo>>(MakePaimonBridgeErrorStatus, [&]() {
     rust::Vec<rust::String> keys;
     rust::Vec<rust::String> values;
     ConvertStorageOptions(storage_options, keys, values);
@@ -162,7 +153,7 @@ arrow::Result<std::vector<uint64_t>> ReadDeletionVector(const std::string& path,
                                                         uint64_t length,
                                                         int64_t expected_cardinality,
                                                         const StorageOptions& storage_options) {
-  return CatchRustResult<std::vector<uint64_t>>([&]() {
+  return CatchRustResult<std::vector<uint64_t>>(MakePaimonBridgeErrorStatus, [&]() {
     rust::Vec<rust::String> keys;
     rust::Vec<rust::String> values;
     ConvertStorageOptions(storage_options, keys, values);
@@ -179,7 +170,7 @@ arrow::Result<PaimonTestTableInfo> CreateTestTableInfo(const std::string& table_
                                                        const StorageOptions& storage_options,
                                                        const std::string& file_format,
                                                        uint32_t dimension) {
-  return CatchRustResult<PaimonTestTableInfo>([&]() {
+  return CatchRustResult<PaimonTestTableInfo>(MakePaimonBridgeErrorStatus, [&]() {
     rust::Vec<int64_t> positions;
     positions.reserve(deleted_positions.size());
     for (auto position : deleted_positions) {
@@ -213,7 +204,7 @@ arrow::Result<std::shared_ptr<BlockingPaimonDataSplitReader>> BlockingPaimonData
     const std::string& metadata_json,
     const std::string& expected_table_location,
     const StorageOptions& storage_options) {
-  return CatchRustResult<std::shared_ptr<BlockingPaimonDataSplitReader>>([&]() {
+  return CatchRustResult<std::shared_ptr<BlockingPaimonDataSplitReader>>(MakePaimonBridgeErrorStatus, [&]() {
     rust::Vec<rust::String> keys;
     rust::Vec<rust::String> values;
     ConvertStorageOptions(storage_options, keys, values);
@@ -226,17 +217,13 @@ arrow::Status BlockingPaimonDataSplitReader::ExportSchema(ArrowSchema* schema) c
   if (schema == nullptr) {
     return arrow::Status::Invalid("cannot export Paimon schema into a null pointer");
   }
-  try {
-    impl_->export_schema(reinterpret_cast<uint8_t*>(schema));
-    return arrow::Status::OK();
-  } catch (const rust::cxxbridge1::Error& error) {
-    return MakePaimonBridgeErrorStatus(error.what());
-  }
+  return CatchRustStatus(MakePaimonBridgeErrorStatus,
+                         [&]() { impl_->export_schema(reinterpret_cast<uint8_t*>(schema)); });
 }
 
 arrow::Result<ArrowArrayStream> BlockingPaimonDataSplitReader::OpenStream(
     const std::vector<std::string>& projected_columns) const {
-  return CatchRustResult<ArrowArrayStream>([&]() {
+  return CatchRustResult<ArrowArrayStream>(MakePaimonBridgeErrorStatus, [&]() {
     rust::Vec<rust::String> columns;
     columns.reserve(projected_columns.size());
     for (const auto& column : projected_columns) {

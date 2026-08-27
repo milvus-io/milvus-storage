@@ -1,30 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright Zilliz
 
-//! GCP Service Account Impersonation for Lance and Iceberg.
+//! GCP Service Account Impersonation for Iceberg.
 //!
 //! Neither `object_store` (lance-io's default GCS backend) nor `opendal`
 //! natively supports the "VM default SA → IAM `generateAccessToken` →
 //! impersonated target SA" flow. The closest config keys both expect a JSON
 //! file path or already-issued credential, not a target-SA email.
 //!
-//! This module plugs the missing piece into both storage stacks:
+//! This module plugs the missing piece into the Iceberg storage stack:
 //!
 //! * [`ImpersonatingGcsCredentialProvider`] — `object_store::CredentialProvider`
 //!   that, on each `get_credential()` call, returns a cached impersonated
 //!   token and refreshes it ahead of expiry.
-//! * [`ImpersonatingGcsStoreProvider`] — `lance_io::object_store::ObjectStoreProvider`
-//!   that builds a `GoogleCloudStorageBuilder` wired to the credential
-//!   provider above, and is registered against the `gs` scheme to override
-//!   lance-io's default GCS provider for opens that opt in.
 //! * [`GcpImpersonationStorageFactory`] / [`GcpImpersonationStorage`] —
 //!   thin Iceberg wrappers that inject the current token and delegate storage
 //!   behavior to `iceberg-storage-opendal`.
-//!
-//! Lance wiring lives in `lance_bridgeimpl.rs`, which extracts the bridge-private
-//! `gcp_target_service_account` and `gcp_credential_refresh_secs` keys from
-//! `storage_options` and installs this provider into a per-call `Session`'s
-//! `ObjectStoreRegistry`.
 //!
 //! # Why the two Google endpoint URLs are inlined here
 //!
@@ -49,8 +40,7 @@
 //!   `ImpersonatedServiceAccount` variant is the `authorized_user`
 //!   (refresh-token) flow, not VM-SA source.
 //!
-//! Interface types (`CredentialProvider`, `GcpCredential`,
-//! `GoogleCloudStorageBuilder`, `ObjectStoreProvider`) are reused as-is;
+//! Interface types (`CredentialProvider`, `GcpCredential`) are reused as-is;
 //! only the auth business logic — which no upstream exposes — is local.
 //! Pulling in `google-cloud-iam-credentials-v1` would remove the URLs
 //! but drag in the full gRPC stack (`tonic`/`prost`) for two JSON POSTs,
@@ -64,43 +54,20 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use iceberg::io::{
-    FileMetadata, FileRead, FileWrite, GCS_DISABLE_CONFIG_LOAD, GCS_DISABLE_VM_METADATA,
-    GCS_TOKEN, InputFile, OutputFile, Storage as IcebergStorage, StorageConfig, StorageFactory,
+    FileMetadata, FileRead, FileWrite, GCS_DISABLE_CONFIG_LOAD, GCS_DISABLE_VM_METADATA, GCS_TOKEN,
+    InputFile, OutputFile, Storage as IcebergStorage, StorageConfig, StorageFactory,
 };
 use iceberg::{Error as IcebergError, ErrorKind as IcebergErrorKind, Result as IcebergResult};
 use iceberg_storage_opendal::OpenDalStorageFactory;
-use object_store::{
-    gcp::{GcpCredential, GoogleCloudStorageBuilder, GoogleConfigKey},
-    CredentialProvider, ObjectStore as OSObjectStore, Result as ObjectStoreResult, RetryConfig,
-};
+use object_store::{CredentialProvider, Result as ObjectStoreResult, gcp::GcpCredential};
 use serde::{Deserialize, Serialize};
-use snafu::location;
-use std::str::FromStr;
 use tokio::sync::RwLock;
-use url::Url;
-
-// lance-core's error types aren't a direct dep of the bridge; re-use lance's
-// re-export (`lance::{Error, Result}` forwards to `lance_core`).
-use lance::session::Session;
-use lance::{Error as LanceError, Result as LanceResult};
-use lance_io::object_store::{
-    DEFAULT_CLOUD_IO_PARALLELISM, ObjectStore, ObjectStoreParams, ObjectStoreProvider,
-    ObjectStoreRegistry, StorageOptions,
-    throttle::{AimdThrottleConfig, AimdThrottledStore},
-};
-
-/// lance-io's `DEFAULT_CLOUD_BLOCK_SIZE` is crate-private; mirror its 64 KiB
-/// value so opens through this provider behave the same as the stock GCS one.
-const GCS_DEFAULT_BLOCK_SIZE: usize = 64 * 1024;
-/// Mirrors lance-io's hard-coded download retry count (also crate-private).
-const GCS_DEFAULT_DOWNLOAD_RETRIES: usize = 3;
 
 /// How long before the cached token's expiry we trigger a refresh. Mirrors
 /// the AWS path's `REFRESH_OFFSET_SECS = 300` so callers see consistent
 /// refresh behavior across providers.
 pub const REFRESH_OFFSET_SECS: u64 = 300;
 
-pub(crate) const LANCE_TARGET_SERVICE_ACCOUNT: &str = "gcp_target_service_account";
 pub(crate) const ICEBERG_TARGET_SERVICE_ACCOUNT: &str = "gcs.service-account";
 pub(crate) const TOKEN_LIFETIME_SECONDS: &str = "gcp_credential_refresh_secs";
 
@@ -191,7 +158,7 @@ struct GenerateAccessTokenResponse {
 }
 
 /// Neutral store name used in `object_store::Error::Generic` from the shared
-/// token-fetch helper used by both Lance and Iceberg.
+/// Token-fetch helper used by Iceberg.
 const IMPERSONATION_STORE_NAME: &str = "gcp_impersonation";
 
 /// Run the VM-SA → IAM `generateAccessToken(target_sa)` exchange end-to-end
@@ -219,10 +186,14 @@ async fn fetch_impersonated_access_token(
             )
             .into(),
         })?;
-    let vm_token: MetadataTokenResponse = vm_resp.json().await.map_err(|e| object_store::Error::Generic {
-        store: IMPERSONATION_STORE_NAME,
-        source: format!("metadata token response was not valid JSON: {e}").into(),
-    })?;
+    let vm_token: MetadataTokenResponse =
+        vm_resp
+            .json()
+            .await
+            .map_err(|e| object_store::Error::Generic {
+                store: IMPERSONATION_STORE_NAME,
+                source: format!("metadata token response was not valid JSON: {e}").into(),
+            })?;
 
     // 2. Use the VM token as the bearer to call IAM `generateAccessToken`
     //    on the target SA. The VM SA needs `roles/iam.serviceAccountTokenCreator`
@@ -246,10 +217,13 @@ async fn fetch_impersonated_access_token(
             )
             .into(),
         })?;
-    iam_resp.json().await.map_err(|e| object_store::Error::Generic {
-        store: IMPERSONATION_STORE_NAME,
-        source: format!("generateAccessToken response was not valid JSON: {e}").into(),
-    })
+    iam_resp
+        .json()
+        .await
+        .map_err(|e| object_store::Error::Generic {
+            store: IMPERSONATION_STORE_NAME,
+            source: format!("generateAccessToken response was not valid JSON: {e}").into(),
+        })
 }
 
 #[derive(Clone)]
@@ -345,9 +319,12 @@ impl ImpersonatingGcsCredentialProvider {
     }
 
     async fn fetch_impersonated_token(&self) -> ObjectStoreResult<CachedToken> {
-        let iam_body =
-            fetch_impersonated_access_token(&self.http_client, &self.target_sa, self.token_lifetime)
-                .await?;
+        let iam_body = fetch_impersonated_access_token(
+            &self.http_client,
+            &self.target_sa,
+            self.token_lifetime,
+        )
+        .await?;
 
         // Compute the expiry from IAM's RFC3339 `expireTime`. We rely on IAM's
         // clock rather than `now + lifetime` so clock skew between us and
@@ -386,132 +363,6 @@ fn parse_rfc3339_to_ms(s: &str) -> Result<u64, String> {
     // far in the future that `needs_refresh` never trips and the cached
     // bearer is silently used past its real expiry.
     u64::try_from(dt.timestamp_millis()).map_err(|_| format!("pre-epoch expireTime: {}", s))
-}
-
-/// `lance_io::ObjectStoreProvider` for the `gs` scheme that wires the
-/// custom credential provider into a `GoogleCloudStorageBuilder`.
-///
-/// Registering this against `gs` in an `ObjectStoreRegistry` (see
-/// `lance_bridgeimpl::open_dataset`) replaces lance-io's stock GCS provider
-/// for that registry only — other schemes and other registries are unaffected.
-#[derive(Debug)]
-pub struct ImpersonatingGcsStoreProvider {
-    credentials: Arc<ImpersonatingGcsCredentialProvider>,
-}
-
-impl ImpersonatingGcsStoreProvider {
-    fn new(credentials: Arc<ImpersonatingGcsCredentialProvider>) -> Self {
-        Self { credentials }
-    }
-}
-
-#[async_trait]
-impl ObjectStoreProvider for ImpersonatingGcsStoreProvider {
-    async fn new_store(
-        &self,
-        base_path: Url,
-        params: &ObjectStoreParams,
-    ) -> LanceResult<ObjectStore> {
-        let block_size = params.block_size.unwrap_or(GCS_DEFAULT_BLOCK_SIZE);
-        let mut storage_options =
-            StorageOptions::new(params.storage_options().cloned().unwrap_or_default());
-        storage_options.with_env_gcs();
-        let client_max_retries = storage_options.client_max_retries();
-        let retry_config = RetryConfig {
-            backoff: Default::default(),
-            max_retries: client_max_retries,
-            retry_timeout: Duration::from_secs(storage_options.client_retry_timeout()),
-        };
-
-        // Forward any GCS-recognized config keys the caller passed (endpoint
-        // overrides, retry knobs, etc.) — but never forward credential keys
-        // like `google_storage_token`/`google_service_account`, which would
-        // race with our impersonated provider. Filter explicitly rather than
-        // relying on `as_gcs_options` so we keep the rule visible here.
-        let credential_keys = [
-            "google_service_account",
-            "google_service_account_path",
-            "service_account_path",
-            "google_service_account_key",
-            "service_account_key",
-            "google_application_credentials",
-            "google_storage_token",
-        ];
-
-        let mut builder = GoogleCloudStorageBuilder::new()
-            .with_url(base_path.as_ref())
-            .with_retry(retry_config)
-            .with_client_options(storage_options.client_options()?);
-
-        for (key, value) in &storage_options.0 {
-            let lower = key.to_ascii_lowercase();
-            if credential_keys.contains(&lower.as_str()) {
-                continue;
-            }
-            if let Ok(cfg_key) = GoogleConfigKey::from_str(&lower) {
-                builder = builder.with_config(cfg_key, value.clone());
-            }
-        }
-        // Impersonation must always sign requests with its credential.
-        builder = builder.with_skip_signature(false);
-
-        let credentials: Arc<dyn CredentialProvider<Credential = GcpCredential>> =
-            self.credentials.clone();
-        builder = builder.with_credentials(credentials);
-
-        let built = builder.build().map_err(|e| LanceError::IO {
-            source: Box::new(e),
-            location: location!(),
-        })?;
-        let inner = Arc::new(built) as Arc<dyn OSObjectStore>;
-        let throttle_config = AimdThrottleConfig::from_storage_options(params.storage_options())?;
-        let inner = if throttle_config.is_disabled() {
-            inner
-        } else if client_max_retries == 0 {
-            eprintln!(
-                "Warning: AIMD throttle disabled: the current implementation relies on the object store \
-                 client surfacing retry errors, which requires client_max_retries > 0. \
-                 No throttle or retry layer will be applied."
-            );
-            inner
-        } else {
-            Arc::new(AimdThrottledStore::new(inner, throttle_config)?) as Arc<dyn OSObjectStore>
-        };
-
-        Ok(ObjectStore::new(
-            inner,
-            base_path,
-            Some(block_size),
-            params.object_store_wrapper.clone(),
-            params.use_constant_size_upload_parts,
-            // GCS list is lexically ordered (matches stock GcsStoreProvider).
-            true,
-            DEFAULT_CLOUD_IO_PARALLELISM,
-            GCS_DEFAULT_DOWNLOAD_RETRIES,
-            params.storage_options(),
-        ))
-    }
-}
-
-pub(crate) async fn build_lance_provider(
-    config: &GcpImpersonationConfig,
-) -> LanceResult<Arc<dyn ObjectStoreProvider>> {
-    let credentials = Arc::new(ImpersonatingGcsCredentialProvider::new(
-        config.target_sa.clone(),
-        Duration::from_secs(config.token_lifetime_secs),
-        Duration::from_secs(REFRESH_OFFSET_SECS),
-    ));
-    credentials
-        .get_credential()
-        .await
-        .map_err(|error| LanceError::io_source(Box::new(error)))?;
-    Ok(Arc::new(ImpersonatingGcsStoreProvider::new(credentials)))
-}
-
-pub(crate) fn build_lance_session(provider: Arc<dyn ObjectStoreProvider>) -> Arc<Session> {
-    let registry = ObjectStoreRegistry::default();
-    registry.insert("gs", provider);
-    Arc::new(Session::new(0, 0, Arc::new(registry)))
 }
 
 fn gcp_iceberg_credential_error(error: object_store::Error) -> IcebergError {
@@ -689,81 +540,6 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    #[tokio::test]
-    async fn impersonation_store_uses_aimd_throttle_when_client_retries_enabled() {
-        let params = ObjectStoreParams {
-            storage_options_accessor: Some(Arc::new(
-                lance_io::object_store::StorageOptionsAccessor::with_static_options(HashMap::from([
-                    ("client_max_retries".to_string(), "1".to_string()),
-                    ("lance_aimd_initial_rate".to_string(), "10".to_string()),
-                    ("lance_aimd_max_rate".to_string(), "10".to_string()),
-                ])),
-            )),
-            ..Default::default()
-        };
-        let provider = ImpersonatingGcsStoreProvider::new(Arc::new(credential_provider(
-            "target@example.iam.gserviceaccount.com",
-        )));
-
-        let store = provider
-            .new_store(Url::parse("gs://bucket/path").unwrap(), &params)
-            .await
-            .unwrap();
-
-        assert!(format!("{:?}", store.inner).contains("AimdThrottledStore"));
-    }
-
-    #[tokio::test]
-    async fn impersonation_store_skips_aimd_when_client_retries_disabled() {
-        let params = ObjectStoreParams {
-            storage_options_accessor: Some(Arc::new(
-                lance_io::object_store::StorageOptionsAccessor::with_static_options(HashMap::from([
-                    ("client_max_retries".to_string(), "0".to_string()),
-                    ("lance_aimd_initial_rate".to_string(), "10".to_string()),
-                    ("lance_aimd_max_rate".to_string(), "10".to_string()),
-                ])),
-            )),
-            ..Default::default()
-        };
-        let provider = ImpersonatingGcsStoreProvider::new(Arc::new(credential_provider(
-            "target@example.iam.gserviceaccount.com",
-        )));
-
-        let store = provider
-            .new_store(Url::parse("gs://bucket/path").unwrap(), &params)
-            .await
-            .unwrap();
-
-        assert!(!format!("{:?}", store.inner).contains("AimdThrottledStore"));
-    }
-
-    #[tokio::test]
-    async fn impersonation_store_always_signs_requests() {
-        for key in ["google_skip_signature", "skip_signature"] {
-            let params = ObjectStoreParams {
-                storage_options_accessor: Some(Arc::new(
-                    lance_io::object_store::StorageOptionsAccessor::with_static_options(
-                        HashMap::from([
-                            ("client_max_retries".to_string(), "0".to_string()),
-                            (key.to_string(), "true".to_string()),
-                        ]),
-                    ),
-                )),
-                ..Default::default()
-            };
-            let provider = ImpersonatingGcsStoreProvider::new(Arc::new(credential_provider(
-                "target@example.iam.gserviceaccount.com",
-            )));
-
-            let store = provider
-                .new_store(Url::parse("gs://bucket/path").unwrap(), &params)
-                .await
-                .unwrap();
-
-            assert!(format!("{:?}", store.inner).contains("skip_signature: false"));
-        }
-    }
-
     fn impersonation_config(target_sa: &str) -> GcpImpersonationConfig {
         GcpImpersonationConfig {
             target_sa: target_sa.to_string(),
@@ -836,29 +612,30 @@ mod tests {
 
     #[test]
     fn extracts_and_removes_private_options() {
-        for target_key in [LANCE_TARGET_SERVICE_ACCOUNT, ICEBERG_TARGET_SERVICE_ACCOUNT] {
-            let mut options = HashMap::from([
-                (target_key.to_string(), "target@example.com".to_string()),
-                (TOKEN_LIFETIME_SECONDS.to_string(), "3600".to_string()),
-                ("public_option".to_string(), "value".to_string()),
-            ]);
+        let mut options = HashMap::from([
+            (
+                ICEBERG_TARGET_SERVICE_ACCOUNT.to_string(),
+                "target@example.com".to_string(),
+            ),
+            (TOKEN_LIFETIME_SECONDS.to_string(), "3600".to_string()),
+            ("public_option".to_string(), "value".to_string()),
+        ]);
 
-            let config = GcpImpersonationConfig::extract(&mut options, target_key)
-                .unwrap()
-                .unwrap();
+        let config = GcpImpersonationConfig::extract(&mut options, ICEBERG_TARGET_SERVICE_ACCOUNT)
+            .unwrap()
+            .unwrap();
 
-            assert_eq!(config, impersonation_config("target@example.com"));
-            assert!(!options.contains_key(target_key));
-            assert!(!options.contains_key(TOKEN_LIFETIME_SECONDS));
-            assert_eq!(options["public_option"], "value");
-        }
+        assert_eq!(config, impersonation_config("target@example.com"));
+        assert!(!options.contains_key(ICEBERG_TARGET_SERVICE_ACCOUNT));
+        assert!(!options.contains_key(TOKEN_LIFETIME_SECONDS));
+        assert_eq!(options["public_option"], "value");
     }
 
     #[test]
     fn rejects_missing_or_out_of_range_token_lifetime() {
         for lifetime in [None, Some("invalid"), Some("899"), Some("3601")] {
             let mut options = HashMap::from([(
-                LANCE_TARGET_SERVICE_ACCOUNT.to_string(),
+                ICEBERG_TARGET_SERVICE_ACCOUNT.to_string(),
                 "target@example.com".to_string(),
             )]);
             if let Some(lifetime) = lifetime {
@@ -866,7 +643,7 @@ mod tests {
             }
 
             assert!(
-                GcpImpersonationConfig::extract(&mut options, LANCE_TARGET_SERVICE_ACCOUNT)
+                GcpImpersonationConfig::extract(&mut options, ICEBERG_TARGET_SERVICE_ACCOUNT)
                     .is_err()
             );
         }
@@ -874,13 +651,13 @@ mod tests {
         for lifetime in ["900", "3600"] {
             let mut options = HashMap::from([
                 (
-                    LANCE_TARGET_SERVICE_ACCOUNT.to_string(),
+                    ICEBERG_TARGET_SERVICE_ACCOUNT.to_string(),
                     "target@example.com".to_string(),
                 ),
                 (TOKEN_LIFETIME_SECONDS.to_string(), lifetime.to_string()),
             ]);
             assert!(
-                GcpImpersonationConfig::extract(&mut options, LANCE_TARGET_SERVICE_ACCOUNT)
+                GcpImpersonationConfig::extract(&mut options, ICEBERG_TARGET_SERVICE_ACCOUNT)
                     .unwrap()
                     .is_some()
             );

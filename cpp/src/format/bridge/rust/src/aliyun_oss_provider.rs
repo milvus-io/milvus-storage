@@ -1,27 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright Zilliz
 
-//! Aliyun OSS with per-tenant `role_arn` support.
+//! Iceberg Aliyun OSS storage with per-tenant `role_arn` support.
 //!
-//! This file plugs the same per-tenant OSS credential flow into two separate
-//! consumers:
-//!   * [`AliyunOssStoreProvider`] — lance-io's [`ObjectStoreProvider`], used
-//!     by the Lance reader/writer path.
-//!   * [`AliyunOssStorageFactory`] / [`AliyunOssStorage`] — iceberg 0.9's
+//! This file plugs the per-tenant OSS credential flow into
+//! [`AliyunOssStorageFactory`] / [`AliyunOssStorage`] — iceberg 0.9's
 //!     [`StorageFactory`] / [`Storage`], used by the iceberg
 //!     `plan_files` / metadata reader path.
 //!
 //! Both consumers share:
 //!   * A common env-sweep + bucket/root helper (`init_oss_env_config`) plus
-//!     two caller-shaped public entry points that each read their own
-//!     storage-options naming convention:
-//!       - [`build_oss_config_from_lance_opts`] — lance-style underscored
-//!         keys (`oss_endpoint`, `oss_role_arn`, …)
-//!       - [`build_oss_config_from_iceberg_opts`] — iceberg-style dotted
+//!     an Iceberg-shaped entry point using dotted
 //!         keys (`oss.endpoint`, `oss.role-arn`, …)
-//!     Both emit the extra keys (`role_arn`, `role_session_name`,
+//!     It emits the extra keys (`role_arn`, `role_session_name`,
 //!     `external_id`) that
-//!     stock lance-io `OssStoreProvider` and stock
 //!     `iceberg-storage-opendal::OssConfig` both drop — those missing keys
 //!     is the entire reason this module exists.
 //!   * [`apply_ram_mode_if_requested`] — resolves `role_arn` to concrete STS
@@ -51,20 +43,17 @@
 //! reqsign loads credentials in this order
 //! (`reqsign::aliyun::credential.rs` — `load_via_static` before
 //! `load_via_assume_role_with_oidc`): if static creds are set alongside
-//! `role_arn`, the OIDC path is silently skipped. `lance_common.cpp` and
-//! `iceberg_common.cpp` must not emit AK/SK when `role_arn` is set. In RAM
+//! `role_arn`, the OIDC path is silently skipped. `iceberg_common.cpp` must
+//! not emit AK/SK when `role_arn` is set. In RAM
 //! mode this is turned on its head — we *do* want reqsign to use the static
 //! creds we just derived, and we strip `role_arn` ourselves to keep that
 //! route unambiguous.
 //!
 //! # Iceberg property naming
 //!
-//! iceberg uses dotted+hyphenated keys (`oss.endpoint`,
-//! `oss.access-key-id`) whereas lance-io uses underscored keys
-//! (`oss_endpoint`, `oss_access_key_id`). Each consumer has its own
-//! `build_oss_config_from_*_opts` entry point; neither translates into
-//! the other's shape. The shared machinery sits below the storage-option
-//! read, not above it.
+//! Iceberg uses dotted+hyphenated keys such as `oss.endpoint` and
+//! `oss.access-key-id`. The custom storage factory translates that shape
+//! directly into OpenDAL configuration.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -80,31 +69,14 @@ use object_store::{
 use object_store_opendal::OpendalStore;
 use opendal::{Operator, services::Oss};
 use serde::{Deserialize, Serialize};
-use snafu::location;
 use tokio::sync::RwLock;
 use url::Url;
-
-use lance::session::Session;
-use lance::{Error as LanceError, Result as LanceResult};
-use lance_io::object_store::{
-    DEFAULT_CLOUD_IO_PARALLELISM, ObjectStore, ObjectStoreParams, ObjectStoreProvider,
-    ObjectStoreRegistry,
-    providers::oss::OssStoreProvider,
-    throttle::{AimdThrottleConfig, AimdThrottledStore},
-};
 
 use iceberg::io::{
     FileMetadata, FileRead, FileWrite, InputFile, OutputFile, Storage as IcebergStorage,
     StorageConfig, StorageFactory,
 };
 use iceberg::{Error as IcebergError, ErrorKind as IcebergErrorKind, Result as IcebergResult};
-
-/// lance-io's `DEFAULT_CLOUD_BLOCK_SIZE` is crate-private; mirror the 64 KiB
-/// value used by stock `OssStoreProvider`.
-const OSS_DEFAULT_BLOCK_SIZE: usize = 64 * 1024;
-
-/// Mirrors stock `OssStoreProvider::download_retry_count()` fallback.
-const OSS_DEFAULT_DOWNLOAD_RETRIES: usize = 3;
 
 const ALIYUN_OSS_STORE_NAME: &str = "aliyun_oss";
 const OSS_CREDENTIAL_REFRESH_SECS_KEY: &str = "oss_credential_refresh_secs";
@@ -125,10 +97,8 @@ fn remove_implicit_role_fields(config_map: &mut HashMap<String, String>) {
     config_map.remove("external_id");
 }
 
-/// Build the env-and-URL part of the opendal OSS config map. Caller-specific
-/// key overlays (`oss.endpoint` for iceberg, `oss_endpoint` for lance) are
-/// applied on top of this by the caller-specific `build_oss_config_from_*`
-/// functions below.
+/// Build the env-and-URL part of the OpenDAL OSS config map. Explicit Iceberg
+/// storage options are applied on top by `build_oss_config_from_iceberg_opts`.
 ///
 /// The error type is a plain `String` so that each caller can wrap it into
 /// its own error type without this module pulling both error hierarchies
@@ -167,13 +137,9 @@ fn init_oss_env_config(bucket: String, base_path: &Url) -> HashMap<String, Strin
 
     config_map.insert("bucket".to_string(), bucket);
 
-    // Mirrors stock lance-io `OssStoreProvider`: when the URL has a
-    // non-empty path, write `root="/"`. This is a no-op at the opendal
-    // layer (opendal's default `root` is already `/`) — the actual URL
-    // prefix is applied by lance at the `ObjectStore` level, not through
-    // the operator. The `prefix` local is used only as the empty-path
-    // guard; it is deliberately not forwarded. Kept in this shape so the
-    // block stays recognisable against stock for future diffs.
+    // Keep OpenDAL rooted at the bucket. Iceberg supplies full object keys to
+    // the custom storage wrapper, so the table URL prefix is not forwarded as
+    // an operator root.
     let prefix = base_path.path().trim_start_matches('/').to_string();
     if !prefix.is_empty() {
         config_map.insert("root".to_string(), "/".to_string());
@@ -191,49 +157,6 @@ fn require_endpoint(config_map: &HashMap<String, String>) -> Result<(), String> 
         );
     }
     Ok(())
-}
-
-/// Lance-style (underscored) storage_options → opendal OSS config. Keys
-/// consumed: `oss_endpoint`, `oss_access_key_id`, `oss_secret_access_key`,
-/// `oss_region`, `oss_role_arn`, `oss_role_session_name`, `oss_external_id`.
-pub(crate) fn build_oss_config_from_lance_opts(
-    bucket: String,
-    base_path: &Url,
-    storage_options: &HashMap<String, String>,
-) -> Result<HashMap<String, String>, String> {
-    let mut config_map = init_oss_env_config(bucket, base_path);
-
-    // storage_options overrides (later wins over env). Stock four keys:
-    if let Some(endpoint) = storage_options.get("oss_endpoint") {
-        config_map.insert("endpoint".to_string(), endpoint.clone());
-    }
-    if let Some(access_key_id) = storage_options.get("oss_access_key_id") {
-        config_map.insert("access_key_id".to_string(), access_key_id.clone());
-    }
-    if let Some(secret_access_key) = storage_options.get("oss_secret_access_key") {
-        config_map.insert("access_key_secret".to_string(), secret_access_key.clone());
-    }
-    if let Some(region) = storage_options.get("oss_region") {
-        config_map.insert("region".to_string(), region.clone());
-    }
-
-    // The three keys stock lance-io `OssStoreProvider` does NOT forward.
-    // This is the reason this provider exists — per-tenant role_arn /
-    // session_name / external_id can only reach opendal via `storage_options`.
-    // `external_id` is consumed by the OIDC chain / RAM mode helpers below
-    // (step-2 sts:AssumeRole), not by opendal/reqsign directly.
-    if let Some(role_arn) = storage_options.get("oss_role_arn") {
-        config_map.insert("role_arn".to_string(), role_arn.clone());
-    }
-    if let Some(role_session_name) = storage_options.get("oss_role_session_name") {
-        config_map.insert("role_session_name".to_string(), role_session_name.clone());
-    }
-    if let Some(external_id) = storage_options.get("oss_external_id") {
-        config_map.insert("external_id".to_string(), external_id.clone());
-    }
-
-    require_endpoint(&config_map)?;
-    Ok(config_map)
 }
 
 /// Iceberg-style (dotted+hyphenated) storage_options → opendal OSS config.
@@ -438,10 +361,9 @@ async fn call_assume_role_with_oidc(
 /// creds via the ECS IMDS → `sts:AssumeRole` flow and mutate `config_map`
 /// so opendal sees static creds instead. No-op in every other case — OIDC
 /// callers, plain AK/SK callers, and any caller without the env var flipped
-/// fall straight through. Lance `role_arn` stores wrap this one-shot swap in
-/// [`RefreshableAliyunOssStore`] so long-lived scans rebuild the opendal store
-/// shortly before the server-provided expiration. Iceberg role factories own
-/// the same refreshable store shape for their configured bucket.
+/// fall straight through. Iceberg role factories retain a
+/// [`RefreshableAliyunOssStore`] so long-lived scans rebuild the OpenDAL store
+/// shortly before the server-provided expiration.
 pub(crate) async fn apply_ram_mode_if_requested(
     config_map: &mut HashMap<String, String>,
 ) -> Result<(), String> {
@@ -777,137 +699,6 @@ impl OSObjectStore for RefreshableAliyunOssStore {
 }
 
 // ============================================================================
-// Lance: ObjectStoreProvider
-// ============================================================================
-
-/// Adds Lance's AIMD request throttling to the stock, stateless OSS provider
-/// used by the ordinary Aliyun AK/SK path.
-///
-/// When enabled, the configured initial/max rates still provide proactive
-/// token-bucket pacing. However, both Aliyun providers use OpenDAL, while
-/// Lance 7's throttle-error detector recognizes only native `object_store`
-/// retry-error messages. OSS 429/503 responses therefore do not currently
-/// trigger AIMD multiplicative decrease or the wrapper's throttle retry loop.
-/// This limitation also applies to [`AliyunOssStoreProvider`] below.
-#[derive(Debug)]
-pub(crate) struct AimdAliyunOssStoreProvider;
-
-#[async_trait::async_trait]
-impl ObjectStoreProvider for AimdAliyunOssStoreProvider {
-    async fn new_store(
-        &self,
-        base_path: Url,
-        params: &ObjectStoreParams,
-    ) -> LanceResult<ObjectStore> {
-        let mut store = OssStoreProvider.new_store(base_path, params).await?;
-        let throttle_config = AimdThrottleConfig::from_storage_options(params.storage_options())?;
-        if !throttle_config.is_disabled() {
-            store.inner = Arc::new(AimdThrottledStore::new(
-                store.inner.clone(),
-                throttle_config,
-            )?);
-        }
-        Ok(store)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct AliyunOssStoreProvider {
-    store: Arc<RefreshableAliyunOssStore>,
-}
-
-impl AliyunOssStoreProvider {
-    pub(crate) async fn from_uri(
-        uri: &str,
-        storage_options: &HashMap<String, String>,
-    ) -> LanceResult<Self> {
-        let base_path = Url::parse(uri).map_err(|error| {
-            LanceError::invalid_input(format!("Invalid OSS URL {uri}: {error}"))
-        })?;
-        let bucket = base_path
-            .host_str()
-            .ok_or_else(|| LanceError::invalid_input("OSS URL must contain bucket name"))?
-            .to_string();
-        let config_map = build_oss_config_from_lance_opts(
-            bucket,
-            &base_path,
-            storage_options,
-        )
-        .map_err(LanceError::invalid_input)?;
-        let credential_duration = parse_oss_credential_duration(storage_options)
-            .map_err(LanceError::invalid_input)?;
-        let store = Arc::new(RefreshableAliyunOssStore::new(
-            config_map,
-            credential_duration,
-        ));
-        store.current_store().await.map_err(|error| LanceError::IO {
-            source: Box::new(error),
-            location: location!(),
-        })?;
-        Ok(Self { store })
-    }
-}
-
-#[async_trait::async_trait]
-impl ObjectStoreProvider for AliyunOssStoreProvider {
-    async fn new_store(
-        &self,
-        base_path: Url,
-        params: &ObjectStoreParams,
-    ) -> LanceResult<ObjectStore> {
-        let requested_bucket = base_path
-            .host_str()
-            .ok_or_else(|| LanceError::invalid_input("OSS URL must contain bucket name"))?;
-        // The refreshable store owns an OpenDAL operator bound to its configured
-        // bucket. Reject cross-bucket reuse instead of routing the object key to
-        // that bucket silently.
-        self.store
-            .validate_bucket(requested_bucket)
-            .map_err(LanceError::invalid_input)?;
-
-        let block_size = params.block_size.unwrap_or(OSS_DEFAULT_BLOCK_SIZE);
-        let inner = self.store.clone() as Arc<dyn OSObjectStore>;
-        let throttle_config = AimdThrottleConfig::from_storage_options(params.storage_options())?;
-        let inner = if throttle_config.is_disabled() {
-            inner
-        } else {
-            Arc::new(AimdThrottledStore::new(inner, throttle_config)?) as Arc<dyn OSObjectStore>
-        };
-
-        let mut url = base_path;
-        if !url.path().ends_with('/') {
-            url.set_path(&format!("{}/", url.path()));
-        }
-
-        Ok(ObjectStore::new(
-            inner,
-            url,
-            Some(block_size),
-            params.object_store_wrapper.clone(),
-            params.use_constant_size_upload_parts,
-            // OSS object listings are lexically ordered (matches stock provider).
-            params.list_is_lexically_ordered.unwrap_or(true),
-            DEFAULT_CLOUD_IO_PARALLELISM,
-            OSS_DEFAULT_DOWNLOAD_RETRIES,
-            params.storage_options(),
-        ))
-    }
-}
-
-/// Build a `Session` whose `ObjectStoreRegistry` overrides the `oss` scheme.
-/// Each caller gets a fresh session so registry entries remain scoped to the
-/// returned dataset instead of retaining static storage options process-wide.
-/// Cache sizes of zero match what the FFI entry points already pass to
-/// `BlockingDataset::open`.
-pub fn build_aliyun_oss_session(
-    provider: Arc<dyn ObjectStoreProvider>,
-) -> Arc<Session> {
-    let registry = ObjectStoreRegistry::default();
-    registry.insert("oss", provider);
-    Arc::new(Session::new(0, 0, Arc::new(registry)))
-}
-
-// ============================================================================
 // Iceberg: StorageFactory / Storage
 // ============================================================================
 
@@ -945,12 +736,8 @@ impl AliyunOssStorageFactory {
                 )
             })?
             .to_string();
-        let config_map = build_oss_config_from_iceberg_opts(
-            bucket,
-            &base_path,
-            storage_options,
-        )
-        .map_err(|error| IcebergError::new(IcebergErrorKind::DataInvalid, error))?;
+        let config_map = build_oss_config_from_iceberg_opts(bucket, &base_path, storage_options)
+            .map_err(|error| IcebergError::new(IcebergErrorKind::DataInvalid, error))?;
         let credential_duration = parse_oss_credential_duration(storage_options)
             .map_err(|error| IcebergError::new(IcebergErrorKind::DataInvalid, error))?;
         let store = Arc::new(RefreshableAliyunOssStore::new(
@@ -1551,52 +1338,6 @@ mod tests {
         ))
     }
 
-    #[tokio::test]
-    async fn lance_static_aksk_store_uses_aimd_throttle() {
-        let params = ObjectStoreParams {
-            storage_options_accessor: Some(Arc::new(
-                lance_io::object_store::StorageOptionsAccessor::with_static_options(opts(&[
-                    ("oss_endpoint", "oss-cn-hangzhou.aliyuncs.com"),
-                    ("oss_access_key_id", "AKID"),
-                    ("oss_secret_access_key", "AKSK"),
-                    ("lance_aimd_initial_rate", "10"),
-                    ("lance_aimd_max_rate", "10"),
-                ])),
-            )),
-            ..Default::default()
-        };
-
-        let store = AimdAliyunOssStoreProvider
-            .new_store(Url::parse("oss://my-bucket/path").unwrap(), &params)
-            .await
-            .unwrap();
-
-        assert!(format!("{:?}", store.inner).contains("AimdThrottledStore"));
-    }
-
-    #[tokio::test]
-    async fn lance_role_store_uses_aimd_throttle() {
-        let params = ObjectStoreParams {
-            storage_options_accessor: Some(Arc::new(
-                lance_io::object_store::StorageOptionsAccessor::with_static_options(opts(&[
-                    ("lance_aimd_initial_rate", "10"),
-                    ("lance_aimd_max_rate", "10"),
-                ])),
-            )),
-            ..Default::default()
-        };
-        let provider = AliyunOssStoreProvider {
-            store: refreshable_store(),
-        };
-
-        let store = provider
-            .new_store(Url::parse("oss://my-bucket/path").unwrap(), &params)
-            .await
-            .unwrap();
-
-        assert!(format!("{:?}", store.inner).contains("AimdThrottledStore"));
-    }
-
     #[test]
     fn load_frequency_is_aliyun_sts_duration() {
         assert_eq!(
@@ -1642,45 +1383,9 @@ mod tests {
     }
 
     #[test]
-    fn lance_opts_forward_role_arn_session_name_and_external_id() {
-        let url = Url::parse("oss://my-bucket/prefix").unwrap();
-        let storage_options = opts(&[
-            ("oss_endpoint", "oss-cn-hangzhou.aliyuncs.com"),
-            ("oss_role_arn", "acs:ram::111:role/tenant-A"),
-            ("oss_role_session_name", "tenant-A-session"),
-            ("oss_external_id", "tenant-A-ext"),
-        ]);
-        let cfg = build_oss_config_from_lance_opts("my-bucket".to_string(), &url, &storage_options)
-            .unwrap();
-        assert_eq!(
-            cfg.get("role_arn").map(String::as_str),
-            Some("acs:ram::111:role/tenant-A")
-        );
-        assert_eq!(
-            cfg.get("role_session_name").map(String::as_str),
-            Some("tenant-A-session")
-        );
-        assert_eq!(
-            cfg.get("external_id").map(String::as_str),
-            Some("tenant-A-ext")
-        );
-        assert_eq!(
-            cfg.get("endpoint").map(String::as_str),
-            Some("oss-cn-hangzhou.aliyuncs.com")
-        );
-        assert_eq!(cfg.get("bucket").map(String::as_str), Some("my-bucket"));
-        // AK/SK not set by caller — must not appear in config (would trigger
-        // reqsign's static-creds path ahead of AssumeRoleWithOIDC).
-        assert!(!cfg.contains_key("access_key_id"));
-        assert!(!cfg.contains_key("access_key_secret"));
-    }
-
-    #[test]
     fn iceberg_opts_forward_role_arn_session_name_and_external_id() {
-        // Iceberg-shaped (dotted+hyphenated) keys must produce the identical
-        // opendal config as the lance path — same output contract, different
-        // input naming convention. If these two shapes ever diverge on the
-        // role_arn path, iceberg + Aliyun ARN silently breaks.
+        // Iceberg-shaped keys must preserve the complete role credential
+        // configuration expected by the custom OpenDAL storage factory.
         let url = Url::parse("oss://my-bucket/prefix").unwrap();
         let storage_options = opts(&[
             ("oss.endpoint", "oss-cn-hangzhou.aliyuncs.com"),
@@ -1743,24 +1448,14 @@ mod tests {
     }
 
     #[test]
-    fn missing_endpoint_is_rejected_on_both_sides() {
-        // No endpoint in storage_options and no OSS_ENDPOINT in env — expect
-        // the same error string regardless of which caller-side entry point
-        // we go through.
+    fn missing_iceberg_endpoint_is_rejected() {
+        // No endpoint in storage_options and no OSS_ENDPOINT in env.
         let url = Url::parse("oss://my-bucket/").unwrap();
         // If the test host happens to have OSS_ENDPOINT set, skip — the
         // assertions below would be meaningless.
         if std::env::var("OSS_ENDPOINT").is_ok() {
             return;
         }
-
-        let lance_err = build_oss_config_from_lance_opts(
-            "my-bucket".to_string(),
-            &url,
-            &opts(&[("oss_role_arn", "acs:ram::111:role/tenant-A")]),
-        )
-        .unwrap_err();
-        assert!(lance_err.contains("OSS endpoint is required"));
 
         let iceberg_err = build_oss_config_from_iceberg_opts(
             "my-bucket".to_string(),
@@ -1769,52 +1464,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(iceberg_err.contains("OSS endpoint is required"));
-    }
-
-    #[tokio::test]
-    async fn lance_provider_is_reused() {
-        let cache: GlobalLruCache<Arc<dyn ObjectStoreProvider>> = GlobalLruCache::new(2);
-        let first = cache
-            .get("aliyun", || async {
-                Ok::<_, ()>(Arc::new(AliyunOssStoreProvider {
-                    store: refreshable_store(),
-                })
-                    as Arc<dyn ObjectStoreProvider>)
-            })
-            .await
-            .unwrap();
-        let second = cache
-            .get("aliyun", || async {
-                Ok::<_, ()>(Arc::new(AliyunOssStoreProvider {
-                    store: refreshable_store(),
-                })
-                    as Arc<dyn ObjectStoreProvider>)
-            })
-            .await
-            .unwrap();
-
-        assert!(Arc::ptr_eq(&first, &second));
-    }
-
-    #[tokio::test]
-    async fn lance_provider_rejects_cross_bucket() {
-        let provider = AliyunOssStoreProvider {
-            store: refreshable_store(),
-        };
-        let error = provider
-            .new_store(
-                Url::parse("oss://other-bucket/path").unwrap(),
-                &ObjectStoreParams::default(),
-            )
-            .await
-            .err()
-            .expect("cross-bucket Lance store should be rejected");
-
-        assert!(
-            error
-                .to_string()
-                .contains("configured bucket 'my-bucket', requested bucket 'other-bucket'")
-        );
     }
 
     #[tokio::test]
@@ -1853,10 +1502,7 @@ mod tests {
         let path = "oss://my-bucket/dir/a b/中文/%25/literal/../file+name.parquet";
         let (_, relative) = storage.create_operator(path).await.unwrap();
 
-        assert_eq!(
-            relative,
-            "dir/a b/中文/%25/literal/../file+name.parquet"
-        );
+        assert_eq!(relative, "dir/a b/中文/%25/literal/../file+name.parquet");
     }
 
     #[tokio::test]

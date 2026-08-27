@@ -24,7 +24,9 @@
 #define LOON_INVALID_PROPERTIES 7
 #define LOON_FAULT_INJECT_ERROR 8
 #define LOON_NOT_SUPPORT 9
+// 10-11 were legacy transaction error codes. Do not reuse them.
 #define LOON_FILE_NOT_FOUND 12
+#define LOON_PERMISSION_DENIED 13
 
 // Shared with ExtendStatusCode. Keep values greater than arrow::StatusCode's current max value 45.
 // 50-55 are reserved by Packed* ExtendStatusCode values.

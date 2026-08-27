@@ -27,10 +27,14 @@ namespace milvus_storage::lance {
 // Lance-private ColumnGroupFile property written by LanceFormat::explore().
 inline constexpr const char* kDatasetVersionProperty = "dataset_version";
 
-/// Convert ArrowFileSystemConfig to Lance storage options.
-/// Key format: aws_access_key_id, aws_secret_access_key, aws_region, aws_endpoint, etc.
-/// @throws std::runtime_error for unsupported providers (Tencent, Huawei)
-StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config);
+/// Convert ArrowFileSystemConfig to credential-free Lance read options.
+/// Authentication and credential refresh remain owned by the bound C++ filesystem.
+StorageOptions ToReaderOptions(const ArrowFileSystemConfig& config);
+
+/// Test and benchmark only; production reads use ToReaderOptions with the bound C++ filesystem.
+/// Convert ArrowFileSystemConfig to native Lance writer options used by tests and benchmarks.
+/// Supports AK/SK and IAM credentials; GCP supports IAM only.
+arrow::Result<StorageOptions> ToWriterOptions(const ArrowFileSystemConfig& config);
 
 /// Parse a Lance URI to extract the base path and fragment ID.
 /// URI format: {base_path}?fragment_id={fragment_id}

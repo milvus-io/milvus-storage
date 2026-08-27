@@ -45,6 +45,7 @@ FFI_EXPORT extern const int loon_errcode_invalid_properties;
 FFI_EXPORT extern const int loon_errcode_fault_inject;
 FFI_EXPORT extern const int loon_errcode_not_support;
 FFI_EXPORT extern const int loon_errcode_file_not_found;
+FFI_EXPORT extern const int loon_errcode_permission_denied;
 
 FFI_EXPORT extern const int loon_errcode_aws_no_such_upload;
 FFI_EXPORT extern const int loon_errcode_aws_conflict;

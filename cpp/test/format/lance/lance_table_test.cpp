@@ -14,12 +14,16 @@
 
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <atomic>
 #include <barrier>
+#include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <future>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <random>
 #include <string>
@@ -30,8 +34,9 @@
 
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/filesystem/localfs.h>
-#include <arrow/api.h>
+#include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
+#include <arrow/api.h>
 #include <arrow/array/builder_binary.h>
 #include <arrow/array/builder_primitive.h>
 #include <arrow/type_fwd.h>
@@ -40,6 +45,7 @@
 #include <arrow/builder.h>
 #include <arrow/type.h>
 #include <arrow/util/key_value_metadata.h>
+#include <arrow/util/io_util.h>
 #include <arrow/table.h>
 #include <arrow/array/concatenate.h>
 
@@ -47,9 +53,11 @@
 #include <boost/filesystem/operations.hpp>
 
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/common/constants.h"
+#include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/format_reader_cache.h"
 #include "milvus-storage/format/lance/lance_format.h"
@@ -63,6 +71,395 @@
 namespace milvus_storage {
 
 using namespace lance;
+
+namespace {
+
+class FailingLanceRecordBatchReader final : public arrow::RecordBatchReader {
+  public:
+  explicit FailingLanceRecordBatchReader(arrow::Status status) : status_(std::move(status)) {}
+
+  std::shared_ptr<arrow::Schema> schema() const override { return arrow::schema({}); }
+
+  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override {
+    *batch = nullptr;
+    return status_;
+  }
+
+  arrow::Status Close() override { return status_; }
+
+  private:
+  arrow::Status status_;
+};
+
+class InjectedFailureRandomAccessFile final : public arrow::io::RandomAccessFile {
+  public:
+  InjectedFailureRandomAccessFile(std::shared_ptr<arrow::io::RandomAccessFile> file,
+                                  std::shared_ptr<std::atomic<int>> remaining_failures,
+                                  arrow::Status failure_status,
+                                  int64_t minimum_failure_size)
+      : file_(std::move(file)),
+        remaining_failures_(std::move(remaining_failures)),
+        failure_status_(std::move(failure_status)),
+        minimum_failure_size_(minimum_failure_size) {}
+
+  arrow::Status Close() override { return file_->Close(); }
+  arrow::Status Abort() override { return file_->Abort(); }
+  arrow::Result<int64_t> Tell() const override { return file_->Tell(); }
+  bool closed() const override { return file_->closed(); }
+  arrow::Result<int64_t> Read(int64_t nbytes, void* out) override { return file_->Read(nbytes, out); }
+  arrow::Result<std::shared_ptr<arrow::Buffer>> Read(int64_t nbytes) override { return file_->Read(nbytes); }
+  const arrow::io::IOContext& io_context() const override { return file_->io_context(); }
+  arrow::Result<std::string_view> Peek(int64_t nbytes) override { return file_->Peek(nbytes); }
+  bool supports_zero_copy() const override { return file_->supports_zero_copy(); }
+  arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override {
+    return file_->ReadMetadata();
+  }
+  arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(
+      const arrow::io::IOContext& io_context) override {
+    return file_->ReadMetadataAsync(io_context);
+  }
+  arrow::Status Seek(int64_t position) override { return file_->Seek(position); }
+  arrow::Result<int64_t> GetSize() override { return file_->GetSize(); }
+  arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
+    if (ShouldFail(nbytes)) {
+      return failure_status_;
+    }
+    return file_->ReadAt(position, nbytes, out);
+  }
+  arrow::Result<std::shared_ptr<arrow::Buffer>> ReadAt(int64_t position, int64_t nbytes) override {
+    if (ShouldFail(nbytes)) {
+      return failure_status_;
+    }
+    return file_->ReadAt(position, nbytes);
+  }
+  arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const arrow::io::IOContext& io_context,
+                                                          int64_t position,
+                                                          int64_t nbytes) override {
+    return file_->ReadAsync(io_context, position, nbytes);
+  }
+  arrow::Status WillNeed(const std::vector<arrow::io::ReadRange>& ranges) override { return file_->WillNeed(ranges); }
+
+  private:
+  bool ShouldFail(int64_t nbytes) {
+    if (nbytes < minimum_failure_size_) {
+      return false;
+    }
+    auto remaining = remaining_failures_->load(std::memory_order_relaxed);
+    while (remaining > 0) {
+      if (remaining_failures_->compare_exchange_weak(remaining, remaining - 1, std::memory_order_relaxed,
+                                                     std::memory_order_relaxed)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  std::shared_ptr<arrow::io::RandomAccessFile> file_;
+  std::shared_ptr<std::atomic<int>> remaining_failures_;
+  arrow::Status failure_status_;
+  int64_t minimum_failure_size_;
+};
+
+class InjectedFailureFileSystem final : public arrow::fs::SubTreeFileSystem {
+  public:
+  using arrow::fs::SubTreeFileSystem::OpenInputFile;
+
+  InjectedFailureFileSystem(std::shared_ptr<arrow::fs::FileSystem> filesystem,
+                            std::shared_ptr<std::atomic<int>> remaining_failures,
+                            arrow::Status failure_status,
+                            int64_t minimum_failure_size = 0)
+      : arrow::fs::SubTreeFileSystem("", std::move(filesystem)),
+        remaining_failures_(std::move(remaining_failures)),
+        failure_status_(std::move(failure_status)),
+        minimum_failure_size_(minimum_failure_size) {}
+
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string& path) override {
+    ARROW_ASSIGN_OR_RAISE(auto file, arrow::fs::SubTreeFileSystem::OpenInputFile(path));
+    return std::make_shared<InjectedFailureRandomAccessFile>(std::move(file), remaining_failures_, failure_status_,
+                                                             minimum_failure_size_);
+  }
+
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const arrow::fs::FileInfo& info) override {
+    ARROW_ASSIGN_OR_RAISE(auto file, arrow::fs::SubTreeFileSystem::OpenInputFile(info));
+    return std::make_shared<InjectedFailureRandomAccessFile>(std::move(file), remaining_failures_, failure_status_,
+                                                             minimum_failure_size_);
+  }
+
+  private:
+  std::shared_ptr<std::atomic<int>> remaining_failures_;
+  arrow::Status failure_status_;
+  int64_t minimum_failure_size_;
+};
+
+#ifdef WITH_CRT
+
+thread_local bool async_completion_active = false;
+
+class AsyncReaderLifecycleState {
+  public:
+  void ReaderOpened() {
+    std::lock_guard lock(mutex_);
+    ++opened_readers_;
+    cv_.notify_all();
+  }
+
+  void ReadSubmitted() {
+    std::lock_guard lock(mutex_);
+    ++submitted_reads_;
+    cv_.notify_all();
+  }
+
+  void ReadCompleted() {
+    std::lock_guard lock(mutex_);
+    ++completed_reads_;
+    cv_.notify_all();
+  }
+
+  void ReaderClosed(bool in_completion) {
+    std::lock_guard lock(mutex_);
+    ++closed_readers_;
+    close_in_completion_ |= in_completion;
+    cv_.notify_all();
+  }
+
+  void ReaderDestroyed(bool in_completion) {
+    std::lock_guard lock(mutex_);
+    ++destroyed_readers_;
+    destroy_in_completion_ |= in_completion;
+    cv_.notify_all();
+  }
+
+  void AllowCompletions() {
+    std::lock_guard lock(mutex_);
+    allow_completions_ = true;
+    cv_.notify_all();
+  }
+
+  void WaitForCompletionPermission() {
+    std::unique_lock lock(mutex_);
+    cv_.wait(lock, [this] { return allow_completions_; });
+  }
+
+  bool WaitForSubmitted(std::chrono::seconds timeout) {
+    std::unique_lock lock(mutex_);
+    return cv_.wait_for(lock, timeout, [this] { return submitted_reads_ != 0; });
+  }
+
+  bool WaitForAllCompletedAndDestroyed(std::chrono::seconds timeout) {
+    std::unique_lock lock(mutex_);
+    return cv_.wait_for(lock, timeout, [this] {
+      return submitted_reads_ != 0 && completed_reads_ == submitted_reads_ && opened_readers_ != 0 &&
+             closed_readers_ == opened_readers_ && destroyed_readers_ == opened_readers_;
+    });
+  }
+
+  bool close_in_completion() const {
+    std::lock_guard lock(mutex_);
+    return close_in_completion_;
+  }
+
+  bool destroy_in_completion() const {
+    std::lock_guard lock(mutex_);
+    return destroy_in_completion_;
+  }
+
+  void AddWorker(std::thread worker) {
+    std::lock_guard lock(mutex_);
+    workers_.emplace_back(std::move(worker));
+  }
+
+  void JoinWorkers() {
+    std::vector<std::thread> workers;
+    {
+      std::lock_guard lock(mutex_);
+      workers.swap(workers_);
+    }
+    for (auto& worker : workers) {
+      if (worker.joinable()) {
+        worker.join();
+      }
+    }
+  }
+
+  private:
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  std::vector<std::thread> workers_;
+  size_t opened_readers_ = 0;
+  size_t submitted_reads_ = 0;
+  size_t completed_reads_ = 0;
+  size_t closed_readers_ = 0;
+  size_t destroyed_readers_ = 0;
+  bool allow_completions_ = false;
+  bool close_in_completion_ = false;
+  bool destroy_in_completion_ = false;
+};
+
+class CallbackThreadRandomAccessFile final : public arrow::io::RandomAccessFile,
+                                             public milvus_storage::NonBlockingReadAtFile {
+  public:
+  CallbackThreadRandomAccessFile(std::shared_ptr<arrow::io::RandomAccessFile> file,
+                                 std::shared_ptr<AsyncReaderLifecycleState> state)
+      : file_(std::move(file)), state_(std::move(state)) {
+    state_->ReaderOpened();
+  }
+
+  ~CallbackThreadRandomAccessFile() override { state_->ReaderDestroyed(async_completion_active); }
+
+  arrow::Status Close() override {
+    auto status = file_->Close();
+    state_->ReaderClosed(async_completion_active);
+    return status;
+  }
+  arrow::Status Abort() override { return file_->Abort(); }
+  arrow::Result<int64_t> Tell() const override { return file_->Tell(); }
+  bool closed() const override { return file_->closed(); }
+  arrow::Result<int64_t> Read(int64_t nbytes, void* out) override { return file_->Read(nbytes, out); }
+  arrow::Result<std::shared_ptr<arrow::Buffer>> Read(int64_t nbytes) override { return file_->Read(nbytes); }
+  const arrow::io::IOContext& io_context() const override { return file_->io_context(); }
+  arrow::Result<std::string_view> Peek(int64_t nbytes) override { return file_->Peek(nbytes); }
+  bool supports_zero_copy() const override { return file_->supports_zero_copy(); }
+  arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override {
+    return file_->ReadMetadata();
+  }
+  arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(
+      const arrow::io::IOContext& io_context) override {
+    return file_->ReadMetadataAsync(io_context);
+  }
+  arrow::Status Seek(int64_t position) override { return file_->Seek(position); }
+  arrow::Result<int64_t> GetSize() override { return file_->GetSize(); }
+  arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
+    return file_->ReadAt(position, nbytes, out);
+  }
+  arrow::Result<std::shared_ptr<arrow::Buffer>> ReadAt(int64_t position, int64_t nbytes) override {
+    return file_->ReadAt(position, nbytes);
+  }
+  arrow::Future<int64_t> ReadAtAsyncInto(int64_t position, int64_t nbytes, uint8_t* out) override {
+    auto future = arrow::Future<int64_t>::Make();
+    auto file = file_;
+    auto state = state_;
+    auto worker =
+        std::thread([file = std::move(file), state = std::move(state), future, position, nbytes, out]() mutable {
+          state->ReadSubmitted();
+          state->WaitForCompletionPermission();
+          auto result = file->ReadAt(position, nbytes, out);
+          async_completion_active = true;
+          future.MarkFinished(std::move(result));
+          async_completion_active = false;
+          state->ReadCompleted();
+        });
+    state_->AddWorker(std::move(worker));
+    return future;
+  }
+  arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const arrow::io::IOContext& io_context,
+                                                          int64_t position,
+                                                          int64_t nbytes) override {
+    return file_->ReadAsync(io_context, position, nbytes);
+  }
+  arrow::Status WillNeed(const std::vector<arrow::io::ReadRange>& ranges) override { return file_->WillNeed(ranges); }
+
+  private:
+  std::shared_ptr<arrow::io::RandomAccessFile> file_;
+  std::shared_ptr<AsyncReaderLifecycleState> state_;
+};
+
+class CallbackThreadFileSystem final : public arrow::fs::SubTreeFileSystem {
+  public:
+  using arrow::fs::SubTreeFileSystem::OpenInputFile;
+
+  CallbackThreadFileSystem(std::shared_ptr<arrow::fs::FileSystem> filesystem,
+                           std::shared_ptr<AsyncReaderLifecycleState> state)
+      : arrow::fs::SubTreeFileSystem("", std::move(filesystem)), state_(std::move(state)) {}
+
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string& path) override {
+    ARROW_ASSIGN_OR_RAISE(auto file, arrow::fs::SubTreeFileSystem::OpenInputFile(path));
+    return std::make_shared<CallbackThreadRandomAccessFile>(std::move(file), state_);
+  }
+
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const arrow::fs::FileInfo& info) override {
+    ARROW_ASSIGN_OR_RAISE(auto file, arrow::fs::SubTreeFileSystem::OpenInputFile(info));
+    return std::make_shared<CallbackThreadRandomAccessFile>(std::move(file), state_);
+  }
+
+  private:
+  std::shared_ptr<AsyncReaderLifecycleState> state_;
+};
+
+#endif  // WITH_CRT
+
+}  // namespace
+
+TEST(LanceBridgeErrorTest, OpenReturnsInvalidStatusForNullFilesystem) {
+  auto result = BlockingDataset::Open("file:///does-not-matter", nullptr, {});
+
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid());
+}
+
+TEST(LanceBridgeErrorTest, TranslatesDeferredRecordBatchReaderReadNextError) {
+  auto inner = std::make_shared<FailingLanceRecordBatchReader>(
+      arrow::Status::IOError("__LOON_FFI_ERRCODE__=108; Injected fault"));
+  auto reader = internal::WrapLanceRecordBatchReader(std::move(inner));
+
+  std::shared_ptr<arrow::RecordBatch> batch;
+  auto status = reader->ReadNext(&batch);
+
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientTimeout);
+  EXPECT_EQ(status.message().find("__LOON_FFI_ERRCODE__="), std::string::npos);
+  EXPECT_NE(status.message().find("Injected fault"), std::string::npos);
+}
+
+TEST(LanceBridgeErrorTest, TranslatesDeferredRecordBatchReaderNotSupportedError) {
+  auto inner = std::make_shared<FailingLanceRecordBatchReader>(
+      arrow::Status::Invalid("__LOON_FFI_ERRCODE__=9; unsupported operation"));
+  auto reader = internal::WrapLanceRecordBatchReader(std::move(inner));
+
+  std::shared_ptr<arrow::RecordBatch> batch;
+  auto status = reader->ReadNext(&batch);
+
+  EXPECT_TRUE(status.IsNotImplemented()) << status.ToString();
+  EXPECT_EQ(status.message().find("__LOON_FFI_ERRCODE__="), std::string::npos);
+  EXPECT_NE(status.message().find("unsupported operation"), std::string::npos);
+}
+
+TEST(LanceBridgeErrorTest, TranslatesDeferredRecordBatchReaderCloseError) {
+  auto inner = std::make_shared<FailingLanceRecordBatchReader>(
+      arrow::Status::IOError("__LOON_FFI_ERRCODE__=108; Injected fault"));
+  auto reader = internal::WrapLanceRecordBatchReader(std::move(inner));
+
+  auto status = reader->Close();
+
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientTimeout);
+  EXPECT_EQ(status.message().find("__LOON_FFI_ERRCODE__="), std::string::npos);
+  EXPECT_NE(status.message().find("Injected fault"), std::string::npos);
+}
+
+TEST(LanceWriterOwnershipTest, RejectedWriterOptionsReleaseBufferedBatches) {
+  ASSERT_AND_ASSIGN(auto schema, CreateTestSchema());
+  ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema, 0, false, 1));
+  std::weak_ptr<arrow::RecordBatch> batch_weak = batch;
+
+  {
+    api::Properties properties = {
+        {PROPERTY_FS_STORAGE_TYPE, std::string("remote")},
+        {PROPERTY_FS_CLOUD_PROVIDER, std::string(kCloudProviderAWS)},
+        {PROPERTY_FS_ROLE_ARN, std::string("arn:aws:iam::123456789012:role/test-role")},
+    };
+    LanceTableWriter writer("unused", schema, properties);
+    ASSERT_STATUS_OK(writer.Write(batch));
+    batch.reset();
+
+    auto result = writer.Close();
+    ASSERT_FALSE(result.ok());
+    EXPECT_TRUE(result.status().IsNotImplemented()) << result.status().ToString();
+  }
+
+  EXPECT_TRUE(batch_weak.expired());
+}
 
 class LanceBasicTest : public ::testing::Test {
   protected:
@@ -154,6 +551,155 @@ class LanceBasicTest : public ::testing::Test {
 class LanceRleStorageVersionTest : public LanceBasicTest,
                                    public ::testing::WithParamInterface<LanceDataStorageFormat> {};
 
+TEST_F(LanceBasicTest, AimdRetriesFfiThrottlingDuringRangeRead) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "This regression test uses an injected local filesystem.";
+  }
+
+  api::SetValue(properties_, PROPERTY_FS_LANCE_IO_PARALLELISM, "1");
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto column_group_file, writer.Close());
+  ASSERT_EQ(column_group_file.end_index, test_batch_->num_rows());
+  ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(column_group_file.path));
+
+  auto remaining_failures = std::make_shared<std::atomic<int>>(0);
+  auto throttling_fs = std::make_shared<InjectedFailureFileSystem>(
+      fs_, remaining_failures,
+      MakeExtendError(ExtendStatusCode::StorageTransientThrottling, "Injected throttling", "Injected throttling"));
+
+  LanceTableReader reader(throttling_fs, parsed_uri.first, parsed_uri.second, schema_, properties_);
+  ASSERT_STATUS_OK(reader.open());
+  ASSERT_AND_ASSIGN(auto row_groups, reader.get_row_group_infos());
+  ASSERT_FALSE(row_groups.empty());
+
+  remaining_failures->store(4, std::memory_order_relaxed);
+  auto chunk = reader.get_chunk(0);
+
+  ASSERT_TRUE(chunk.ok()) << chunk.status().ToString();
+  EXPECT_EQ(chunk.ValueOrDie()->num_rows(), test_batch_->num_rows());
+  EXPECT_EQ(remaining_failures->load(std::memory_order_relaxed), 0);
+}
+
+TEST_F(LanceBasicTest, MaterializedReadsTranslateDeferredErrors) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "This regression test uses an injected local filesystem.";
+  }
+
+  constexpr int64_t kRows = 32'768;
+  api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "32768");
+  ASSERT_AND_ASSIGN(auto large_batch, CreateTestData(schema_, 0, false, kRows));
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(large_batch));
+  ASSERT_AND_ASSIGN(auto column_group_file, writer.Close());
+  ASSERT_EQ(column_group_file.end_index, large_batch->num_rows());
+  ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(column_group_file.path));
+
+  auto remaining_failures = std::make_shared<std::atomic<int>>(0);
+  auto failing_fs = std::make_shared<InjectedFailureFileSystem>(
+      fs_, remaining_failures,
+      MakeExtendError(ExtendStatusCode::StorageTransientTimeout, "Injected read failure", "Injected read failure"),
+      4 * 1024);
+
+  auto open_reader = [&]() -> arrow::Result<std::shared_ptr<LanceTableReader>> {
+    remaining_failures->store(0, std::memory_order_relaxed);
+    auto reader =
+        std::make_shared<LanceTableReader>(failing_fs, parsed_uri.first, parsed_uri.second, schema_, properties_);
+    ARROW_RETURN_NOT_OK(reader->open());
+    return reader;
+  };
+  auto expect_timeout = [](const arrow::Status& status) {
+    ASSERT_FALSE(status.ok());
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << status.ToString();
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientTimeout);
+    EXPECT_EQ(status.message().find("__LOON_FFI_ERRCODE__="), std::string::npos);
+  };
+  std::vector<int64_t> take_indices(kRows);
+  std::iota(take_indices.begin(), take_indices.end(), 0);
+
+  {
+    SCOPED_TRACE("get_chunk");
+    ASSERT_AND_ASSIGN(auto reader, open_reader());
+    remaining_failures->store(1'000, std::memory_order_relaxed);
+    expect_timeout(reader->get_chunk(0).status());
+  }
+  {
+    SCOPED_TRACE("get_chunks");
+    ASSERT_AND_ASSIGN(auto reader, open_reader());
+    remaining_failures->store(1'000, std::memory_order_relaxed);
+    expect_timeout(reader->get_chunks({0}).status());
+  }
+  {
+    SCOPED_TRACE("take");
+    ASSERT_AND_ASSIGN(auto reader, open_reader());
+    remaining_failures->store(1'000, std::memory_order_relaxed);
+    expect_timeout(reader->take(take_indices).status());
+  }
+
+  failing_fs.reset();
+
+  auto permission_failures = std::make_shared<std::atomic<int>>(0);
+  auto permission_status =
+      arrow::Status::IOError("Injected permission failure").WithDetail(arrow::internal::StatusDetailFromErrno(EACCES));
+  auto permission_fs =
+      std::make_shared<InjectedFailureFileSystem>(fs_, permission_failures, std::move(permission_status), 4 * 1024);
+  LanceTableReader permission_reader(permission_fs, parsed_uri.first, parsed_uri.second, schema_, properties_);
+  ASSERT_STATUS_OK(permission_reader.open());
+
+  permission_failures->store(1'000, std::memory_order_relaxed);
+  auto permission_result = permission_reader.get_chunk(0);
+  ASSERT_FALSE(permission_result.ok());
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(permission_result.status()), EACCES);
+  EXPECT_EQ(permission_result.status().message().find("__LOON_FFI_ERRCODE__="), std::string::npos);
+  EXPECT_EQ(permission_result.status().message().find("Generic filesystem_c error"), std::string::npos)
+      << permission_result.status().ToString();
+}
+
+#ifdef WITH_CRT
+
+TEST_F(LanceBasicTest, AsyncReaderIsReleasedOutsideCrtCompletionCallback) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "This regression uses an injected local filesystem.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto column_group_file, writer.Close());
+  ASSERT_EQ(column_group_file.end_index, test_batch_->num_rows());
+
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
+
+  auto lifecycle = std::make_shared<AsyncReaderLifecycleState>();
+  auto callback_filesystem = std::make_shared<CallbackThreadFileSystem>(fs_, lifecycle);
+  auto open_future = std::async(std::launch::async, [&]() {
+    return BlockingDataset::Open(lance_uri, callback_filesystem, ToReaderOptions(fs_config));
+  });
+
+  if (!lifecycle->WaitForSubmitted(std::chrono::seconds(5))) {
+    lifecycle->AllowCompletions();
+    open_future.wait();
+    lifecycle->JoinWorkers();
+    FAIL() << "The asynchronous reader was not submitted";
+  }
+  lifecycle->AllowCompletions();
+  auto dataset_result = open_future.get();
+  lifecycle->JoinWorkers();
+  ASSERT_TRUE(dataset_result.ok()) << dataset_result.status().ToString();
+  ASSERT_TRUE(lifecycle->WaitForAllCompletedAndDestroyed(std::chrono::seconds(5)))
+      << "The asynchronous readers were not all completed and destroyed";
+  EXPECT_FALSE(lifecycle->close_in_completion())
+      << "The CRT completion thread closed ReaderHandle inside the CRT callback; CRT resources must be released "
+         "outside the callback to avoid destruction deadlock";
+  EXPECT_FALSE(lifecycle->destroy_in_completion())
+      << "The CRT completion thread destroyed RandomAccessFile inside the CRT callback; CRT resources must be "
+         "released outside the callback to avoid destruction deadlock";
+}
+
+#endif  // WITH_CRT
+
 TEST_P(LanceRleStorageVersionTest, WritesAndReadsCustomerShapedRleData) {
   if (IsCloudEnv()) {
     GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
@@ -229,7 +775,7 @@ TEST_P(LanceRleStorageVersionTest, WritesAndReadsCustomerShapedRleData) {
       {"embedding", "uuid", "curr_time"},
   };
   for (const auto& projection : projections) {
-    LanceTableReader reader(parsed_uri.first, parsed_uri.second, nullptr, properties_, projection);
+    LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, nullptr, properties_, projection);
     ASSERT_STATUS_OK(reader.open());
     ASSERT_AND_ASSIGN(auto table, reader.take(row_indices));
     ASSERT_STATUS_OK(table->ValidateFull());
@@ -300,6 +846,41 @@ TEST_F(LanceBasicTest, DefaultStorageVersionIsV2_1) {
   ASSERT_AND_ASSIGN(auto storage_version, ReadLanceDataFileVersion());
   ASSERT_EQ(storage_version.major, 2);
   ASSERT_EQ(storage_version.minor, 1);
+}
+
+TEST_F(LanceBasicTest, WriteDatasetReturnsOnlyFragmentsCreatedByEachWrite) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
+  ASSERT_AND_ASSIGN(auto storage_options, ToWriterOptions(fs_config));
+
+  auto write_once = [&]() -> arrow::Result<std::vector<uint64_t>> {
+    ARROW_ASSIGN_OR_RAISE(
+        auto batch_reader,
+        arrow::RecordBatchReader::Make(std::vector<std::shared_ptr<arrow::RecordBatch>>{test_batch_}, schema_));
+    ArrowArrayStream stream{};
+    ARROW_RETURN_NOT_OK(arrow::ExportRecordBatchReader(batch_reader, &stream));
+    return BlockingDataset::WriteDataset(lance_uri, &stream, storage_options);
+  };
+
+  ASSERT_AND_ASSIGN(auto first_write_fragment_ids, write_once());
+  ASSERT_EQ(first_write_fragment_ids.size(), 1);
+
+  ASSERT_AND_ASSIGN(auto second_write_fragment_ids, write_once());
+  ASSERT_EQ(second_write_fragment_ids.size(), 1);
+  EXPECT_NE(first_write_fragment_ids[0], second_write_fragment_ids[0]);
+
+  ASSERT_AND_ASSIGN(auto read_fs, FilesystemCache::getInstance().get(properties_, lance_uri));
+  ASSERT_AND_ASSIGN(auto dataset, BlockingDataset::Open(lance_uri, read_fs, ToReaderOptions(fs_config)));
+  ASSERT_AND_ASSIGN(auto all_fragment_ids, dataset->GetAllFragmentIds());
+  std::sort(all_fragment_ids.begin(), all_fragment_ids.end());
+  std::vector<uint64_t> expected_fragment_ids = {first_write_fragment_ids[0], second_write_fragment_ids[0]};
+  std::sort(expected_fragment_ids.begin(), expected_fragment_ids.end());
+  EXPECT_EQ(all_fragment_ids, expected_fragment_ids);
 }
 
 TEST_F(LanceBasicTest, InvalidUriCacheKeyDoesNotCollideWithBaseUri) {
@@ -452,7 +1033,7 @@ TEST_F(LanceBasicTest, MissingDatasetSnapshotVersionResolvesLatestAndSharesIt) {
   EXPECT_EQ(first_metadata->payload.dataset.get(), second_metadata->payload.dataset.get());
 }
 
-TEST_F(LanceBasicTest, LatestVersionResolverReturnsCurrentSnapshot) {
+TEST_F(LanceBasicTest, LatestVersionFallbackDoesNotReadDatasetManifest) {
   if (IsCloudEnv()) {
     GTEST_SKIP() << "Focused latest-version test uses the local Lance fixture.";
   }
@@ -463,10 +1044,22 @@ TEST_F(LanceBasicTest, LatestVersionResolverReturnsCurrentSnapshot) {
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(file.path));
   ASSERT_AND_ASSIGN(auto fs_config, FilesystemCache::resolve_config(properties_, parsed_uri.first));
 
-  uint64_t version = 0;
-  ASSERT_NO_THROW(version = BlockingDataset::ResolveLatestVersion(ToStandardLanceUri(parsed_uri.first),
-                                                                  ToStorageOptions(fs_config)));
+  auto observable = std::dynamic_pointer_cast<Observable>(fs_);
+  ASSERT_NE(observable, nullptr);
+  auto metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+  metrics->Reset();
+
+  ASSERT_AND_ASSIGN(auto version, BlockingDataset::ResolveLatestVersion(ToStandardLanceUri(parsed_uri.first), fs_,
+                                                                        ToReaderOptions(fs_config)));
   EXPECT_EQ(version, 1);
+  EXPECT_EQ(metrics->GetReadCount(), 0);
+  EXPECT_EQ(metrics->GetReadBytes(), 0);
+
+  ASSERT_AND_ASSIGN(auto dataset, BlockingDataset::Open(ToStandardLanceUri(parsed_uri.first), fs_,
+                                                        ToReaderOptions(fs_config), version));
+  ASSERT_NE(dataset, nullptr);
+  EXPECT_GT(metrics->GetReadBytes(), 0);
 }
 
 TEST_F(LanceBasicTest, VersionedFileOpensExploredSnapshot) {
@@ -485,8 +1078,8 @@ TEST_F(LanceBasicTest, VersionedFileOpensExploredSnapshot) {
   ArrowFileSystemConfig fs_config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
-  auto latest_dataset = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config));
-  latest_dataset->DeleteRows("id < 10");
+  ASSERT_AND_ASSIGN(auto storage_options, ToWriterOptions(fs_config));
+  ASSERT_STATUS_OK(BlockingDataset::DeleteRows(lance_uri, "id < 10", storage_options));
 
   ASSERT_AND_ASSIGN(auto metadata, LanceTableReader::MetaTrait::load_metadata(first_snapshot_files[0], properties_,
                                                                               nullptr /* key_retriever */));
@@ -560,32 +1153,6 @@ TEST_F(LanceBasicTest, CachedMetadataValidatesDatasetSnapshotVersion) {
   auto mismatch_result = LanceTableReader::MetaTrait::create_from_metadata(metadata, file, schema_, {}, "");
   ASSERT_FALSE(mismatch_result.ok());
   EXPECT_TRUE(mismatch_result.status().IsInvalid()) << mismatch_result.status().ToString();
-}
-
-TEST_F(LanceBasicTest, DifferentFilesystemCacheKeysDoNotShareDataset) {
-  if (IsCloudEnv()) {
-    GTEST_SKIP() << "Focused filesystem-identity test uses the local Lance fixture.";
-  }
-
-  LanceTableWriter writer(base_path_, schema_, properties_);
-  ASSERT_STATUS_OK(writer.Write(test_batch_));
-  ASSERT_AND_ASSIGN(auto written_file, writer.Close());
-
-  LanceFormat format;
-  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, properties_));
-  ASSERT_EQ(files.size(), 1);
-
-  auto alternate_properties = properties_;
-  api::SetValue(alternate_properties, PROPERTY_FS_ROOT_PATH, "/tmp/milvus-storage-test/.");
-  ASSERT_AND_ASSIGN(auto first_config, FilesystemCache::resolve_config(properties_, files[0].path));
-  ASSERT_AND_ASSIGN(auto alternate_config, FilesystemCache::resolve_config(alternate_properties, files[0].path));
-  ASSERT_NE(first_config.GetCacheKey(), alternate_config.GetCacheKey());
-
-  ASSERT_AND_ASSIGN(auto first_metadata,
-                    LanceTableReader::MetaTrait::load_metadata(files[0], properties_, nullptr /* key_retriever */));
-  ASSERT_AND_ASSIGN(auto alternate_metadata, LanceTableReader::MetaTrait::load_metadata(files[0], alternate_properties,
-                                                                                        nullptr /* key_retriever */));
-  EXPECT_NE(first_metadata->payload.dataset.get(), alternate_metadata->payload.dataset.get());
 }
 
 TEST_F(LanceBasicTest, DifferentFragmentsShareDatasetMetadata) {
@@ -670,6 +1237,32 @@ TEST_F(LanceBasicTest, DifferentBaseUrisDoNotShareDataset) {
   EXPECT_NE(first_metadata->payload.dataset.get(), second_metadata->payload.dataset.get());
 }
 
+TEST_F(LanceBasicTest, DifferentFilesystemCacheKeysDoNotShareDataset) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Focused filesystem-identity test uses the local Lance fixture.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto written_file, writer.Close());
+
+  LanceFormat format;
+  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, properties_));
+  ASSERT_EQ(files.size(), 1);
+
+  auto alternate_properties = properties_;
+  api::SetValue(alternate_properties, PROPERTY_FS_ROOT_PATH, "/tmp/milvus-storage-test/.");
+  ASSERT_AND_ASSIGN(auto first_config, FilesystemCache::resolve_config(properties_, files[0].path));
+  ASSERT_AND_ASSIGN(auto alternate_config, FilesystemCache::resolve_config(alternate_properties, files[0].path));
+  ASSERT_NE(first_config.GetCacheKey(), alternate_config.GetCacheKey());
+
+  ASSERT_AND_ASSIGN(auto first_metadata,
+                    LanceTableReader::MetaTrait::load_metadata(files[0], properties_, nullptr /* key_retriever */));
+  ASSERT_AND_ASSIGN(auto alternate_metadata, LanceTableReader::MetaTrait::load_metadata(files[0], alternate_properties,
+                                                                                        nullptr /* key_retriever */));
+  EXPECT_NE(first_metadata->payload.dataset.get(), alternate_metadata->payload.dataset.get());
+}
+
 TEST_F(LanceBasicTest, SeparateTopLevelReaderCachesDoNotShareDataset) {
   if (IsCloudEnv()) {
     GTEST_SKIP() << "Focused dataset-cache test uses the local Lance fixture.";
@@ -741,15 +1334,18 @@ TEST_F(LanceBasicTest, SameFragmentMetadataIsReusedWithinReaderCache) {
   ASSERT_EQ(fault.enable_result(), 0);
 #endif
 
-  first_metadata->payload.dataset->IOStatsIncremental();
+  const auto observable = std::dynamic_pointer_cast<Observable>(fs_);
+  ASSERT_NE(observable, nullptr);
+  const auto metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+  metrics->Reset();
   ASSERT_AND_ASSIGN(auto first_reader, LanceTableReader::MetaTrait::create_from_metadata(
                                            first_metadata, file, schema_, std::vector<std::string>{}, ""));
   ASSERT_AND_ASSIGN(auto second_reader, LanceTableReader::MetaTrait::create_from_metadata(
                                             second_metadata, file, schema_, std::vector<std::string>{}, ""));
   EXPECT_NE(first_reader.get(), second_reader.get());
-  const auto projection_io = first_metadata->payload.dataset->IOStatsIncremental();
-  EXPECT_EQ(projection_io.read_iops, 0);
-  EXPECT_EQ(projection_io.read_bytes, 0);
+  EXPECT_EQ(metrics->GetReadCount(), 0);
+  EXPECT_EQ(metrics->GetReadBytes(), 0);
 
   ASSERT_AND_ASSIGN(auto first_memory_sizes, first_reader->get_rg_column_memsz(0));
   ASSERT_AND_ASSIGN(auto second_memory_sizes, second_reader->get_rg_column_memsz(0));
@@ -767,7 +1363,7 @@ TEST_F(LanceBasicTest, TestBasic) {
   ArrowFileSystemConfig fs_config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
-  auto storage_options = milvus_storage::lance::ToStorageOptions(fs_config);
+  ASSERT_AND_ASSIGN(auto storage_options, milvus_storage::lance::ToWriterOptions(fs_config));
   const auto reader_uri = ToMilvusLanceUri(lance_uri, fs_config.address);
 
   // write without flush, single fragment
@@ -781,12 +1377,12 @@ TEST_F(LanceBasicTest, TestBasic) {
   }
 
   auto verify_reader = [&]() {
-    auto read_dataset = BlockingDataset::Open(lance_uri, storage_options);
-    const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds();
+    ASSERT_AND_ASSIGN(auto read_dataset, BlockingDataset::Open(lance_uri, fs_, ToReaderOptions(fs_config)));
+    ASSERT_AND_ASSIGN(auto fragment_ids, read_dataset->GetAllFragmentIds());
 
     uint64_t total_rows = 0;
     for (const auto& fragment_id : fragment_ids) {
-      LanceTableReader reader(reader_uri, fragment_id, schema_, properties_);
+      LanceTableReader reader(fs_, reader_uri, fragment_id, schema_, properties_);
       ASSERT_STATUS_OK(reader.open());
       ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
       ASSERT_FALSE(rgs.empty());
@@ -844,7 +1440,7 @@ TEST_F(LanceBasicTest, TestReaderHandlesFragmentMissingNullableDatasetColumn) {
 
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(appended_file.path));
 
-  LanceTableReader reader(parsed_uri.first, parsed_uri.second, nullptr, properties_);
+  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, nullptr, properties_);
   ASSERT_STATUS_OK(reader.open());
   ASSERT_EQ(reader.get_schema()->num_fields(), evolved_schema->num_fields());
 
@@ -872,7 +1468,7 @@ TEST_F(LanceBasicTest, TestRead) {
   ArrowFileSystemConfig fs_config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
-  auto storage_options = milvus_storage::lance::ToStorageOptions(fs_config);
+  ASSERT_AND_ASSIGN(auto storage_options, milvus_storage::lance::ToWriterOptions(fs_config));
   const auto reader_uri = ToMilvusLanceUri(lance_uri, fs_config.address);
 
   LanceTableWriter writer(base_path_, schema_, properties_);
@@ -880,20 +1476,21 @@ TEST_F(LanceBasicTest, TestRead) {
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, large_batch->num_rows());
 
-  auto read_dataset = BlockingDataset::Open(lance_uri, storage_options);
+  ASSERT_AND_ASSIGN(auto read_dataset, BlockingDataset::Open(lance_uri, fs_, ToReaderOptions(fs_config)));
 
-  const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds();
+  ASSERT_AND_ASSIGN(auto fragment_ids, read_dataset->GetAllFragmentIds());
   // The splitting conditions(`WriteParams`) in lance are very strict.
   // So the default setting will only generate one fragment.
   ASSERT_EQ(fragment_ids.size(), 1);
-  LanceTableReader reader(reader_uri, fragment_ids[0], schema_, properties_);
+  LanceTableReader reader(fs_, reader_uri, fragment_ids[0], schema_, properties_);
   ASSERT_STATUS_OK(reader.open());
   ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
   ASSERT_FALSE(rgs.empty());
   ASSERT_EQ(rgs.back().end_offset, large_batch->num_rows());
   ArrowSchema fragment_schema{};
   ASSERT_STATUS_OK(arrow::ExportSchema(*schema_, &fragment_schema));
-  auto fragment_reader = BlockingFragmentReader::Open(*read_dataset, fragment_ids[0], fragment_schema);
+  ASSERT_AND_ASSIGN(auto fragment_reader,
+                    BlockingFragmentReader::Open(*read_dataset, fragment_ids[0], fragment_schema));
   ASSERT_AND_ASSIGN(auto fragment_column_memory_sizes, fragment_reader->EstimateFragmentColumnMemory());
   ASSERT_EQ(fragment_column_memory_sizes.size(), schema_->num_fields());
   auto estimated_memory_size =
@@ -945,7 +1542,7 @@ TEST_F(LanceBasicTest, TestRead) {
   {
     ASSERT_AND_ASSIGN(auto projection_schema, CreateTestSchema({true, true, false, false}));
 
-    LanceTableReader projection_reader(reader_uri, fragment_ids[0], projection_schema, properties_);
+    LanceTableReader projection_reader(fs_, reader_uri, fragment_ids[0], projection_schema, properties_);
     ASSERT_STATUS_OK(projection_reader.open());
     ASSERT_AND_ASSIGN(auto projection_rgs, projection_reader.get_row_group_infos());
     ASSERT_EQ(projection_rgs.size(), rgs.size());
@@ -971,12 +1568,110 @@ TEST_F(LanceBasicTest, TestRead) {
   }
 }
 
+TEST_F(LanceBasicTest, ReadsThroughBoundFilesystemMetrics) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Focused filesystem metrics assertion uses the local Lance fixture.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+  ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(cgfile.path));
+
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_AND_ASSIGN(auto dataset,
+                    BlockingDataset::Open(ToStandardLanceUri(parsed_uri.first), fs_, ToReaderOptions(fs_config)));
+  ASSERT_AND_ASSIGN(auto initial_io_stats, dataset->IOStatsIncremental());
+  (void)initial_io_stats;
+
+  auto observable = std::dynamic_pointer_cast<Observable>(fs_);
+  ASSERT_NE(observable, nullptr);
+  auto metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+  metrics->Reset();
+
+  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, schema_, properties_);
+  ASSERT_STATUS_OK(reader.open());
+  EXPECT_GT(metrics->GetGetFileInfoCount(), 0);
+  ASSERT_AND_ASSIGN(auto open_io_stats, dataset->IOStatsIncremental());
+  (void)open_io_stats;
+  metrics->Reset();
+
+  ASSERT_AND_ASSIGN(auto chunk, reader.get_chunk(0));
+  ASSERT_GT(chunk->num_rows(), 0);
+  EXPECT_GT(metrics->GetReadCount(), 0);
+  EXPECT_GT(metrics->GetReadBytes(), 0);
+  ASSERT_AND_ASSIGN(auto lance_io_stats, dataset->IOStatsIncremental());
+  EXPECT_EQ(lance_io_stats.read_bytes, metrics->GetReadBytes());
+}
+
+TEST_F(LanceBasicTest, CachedReaderReadsAfterMetadataRelease) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Focused filesystem lifetime assertion uses the local Lance fixture.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+
+  ASSERT_AND_ASSIGN(auto metadata,
+                    LanceTableReader::MetaTrait::load_metadata(cgfile, properties_, nullptr /* key_retriever */));
+  ASSERT_AND_ASSIGN(auto reader, LanceTableReader::MetaTrait::create_from_metadata(metadata, cgfile, schema_,
+                                                                                   std::vector<std::string>{}, ""));
+  metadata.reset();
+  FilesystemCache::getInstance().clean();
+
+  ASSERT_AND_ASSIGN(auto chunk, reader->get_chunk(0));
+  EXPECT_EQ(chunk->num_rows(), test_batch_->num_rows());
+}
+
+TEST_F(LanceBasicTest, SharedSchedulerReadsAfterOwnerDatasetDrop) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "This regression uses the local Lance fixture.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+  ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(cgfile.path));
+
+  api::SetValue(properties_, PROPERTY_FS_LANCE_IO_PARALLELISM, "0");
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_EQ(fs_config.lance_io_parallelism, 0);
+  auto read_options = ToReaderOptions(fs_config);
+  ASSERT_AND_ASSIGN(auto owner_dataset, BlockingDataset::Open(parsed_uri.first, fs_, read_options));
+  ASSERT_AND_ASSIGN(auto owner_initial_stats, owner_dataset->IOStatsIncremental());
+  (void)owner_initial_stats;
+
+  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, schema_, properties_);
+  ASSERT_STATUS_OK(reader.open());
+  ASSERT_AND_ASSIGN(auto chunk, reader.get_chunk(0));
+  EXPECT_EQ(chunk->num_rows(), test_batch_->num_rows());
+  ASSERT_AND_ASSIGN(auto owner_read_stats, owner_dataset->IOStatsIncremental());
+  EXPECT_GT(owner_read_stats.read_bytes, 0);
+
+  auto observable = std::dynamic_pointer_cast<Observable>(fs_);
+  ASSERT_NE(observable, nullptr);
+  auto metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+  metrics->Reset();
+  owner_dataset.reset();
+  LanceTableReader reader_after_owner_drop(fs_, parsed_uri.first, parsed_uri.second, schema_, properties_);
+  ASSERT_STATUS_OK(reader_after_owner_drop.open());
+  ASSERT_AND_ASSIGN(auto chunk_after_owner_drop, reader_after_owner_drop.get_chunk(0));
+  EXPECT_EQ(chunk_after_owner_drop->num_rows(), test_batch_->num_rows());
+  EXPECT_GT(metrics->GetReadCount(), 0);
+  EXPECT_GT(metrics->GetReadBytes(), 0);
+}
+
 TEST_F(LanceBasicTest, EstimatesAndProjectedReadersShareFileMetadata) {
-  ThreadPoolHolder::WithSingleton(4);
   if (IsCloudEnv()) {
     GTEST_SKIP() << "Focused metadata I/O assertions use the local Lance fixture.";
   }
 
+  ThreadPoolHolder::WithSingleton(4);
   constexpr int kColumns = 19;
   arrow::FieldVector fields;
   arrow::ArrayVector arrays;
@@ -997,20 +1692,20 @@ TEST_F(LanceBasicTest, EstimatesAndProjectedReadersShareFileMetadata) {
   column_groups->push_back(std::move(column_group));
   auto reader = api::Reader::create(column_groups, schema, nullptr, properties_);
   ASSERT_NE(reader, nullptr);
-  // 3.0's Rust object store is independent of the C++ filesystem. Observe the
-  // globally shared dataset's counters while exercising the top-level cache.
-  ASSERT_AND_ASSIGN(auto observed_metadata, LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr));
-  const auto observed_dataset = observed_metadata->payload.dataset;
-  observed_dataset->IOStatsIncremental();
+  auto observable = std::dynamic_pointer_cast<Observable>(fs_);
+  ASSERT_NE(observable, nullptr);
+  const auto metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+  metrics->Reset();
   const auto first_projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{fields[0]->name()});
   ASSERT_AND_ASSIGN(auto first_reader, reader->get_chunk_reader(0, first_projection));
-  ASSERT_GT(observed_dataset->IOStatsIncremental().read_bytes, 0);
+  ASSERT_GT(metrics->GetReadBytes(), 0);
   // The top-level Reader, rather than this first ChunkReader, owns the footers.
   first_reader.reset();
 
   for (const bool concurrent : {false, true}) {
     SCOPED_TRACE(concurrent ? "concurrent mixed projections" : "sequential mixed projections");
-    observed_dataset->IOStatsIncremental();
+    metrics->Reset();
     std::vector<std::future<arrow::Result<std::unique_ptr<api::ChunkReader>>>> readers;
     for (int column = 0; column < kColumns; ++column) {
       readers.push_back(std::async(concurrent ? std::launch::async : std::launch::deferred, [&, column]() {
@@ -1027,48 +1722,50 @@ TEST_F(LanceBasicTest, EstimatesAndProjectedReadersShareFileMetadata) {
       ASSERT_AND_ASSIGN(auto projection, future.get());
       opened.push_back(std::move(projection));
     }
-    const auto projection_io = observed_dataset->IOStatsIncremental();
-    EXPECT_EQ(projection_io.read_iops, 0);
-    EXPECT_EQ(projection_io.read_bytes, 0);
+    EXPECT_EQ(metrics->GetReadCount(), 0);
+    EXPECT_EQ(metrics->GetReadBytes(), 0);
+    EXPECT_EQ(metrics->GetGetFileInfoCount(), 0);
     ASSERT_AND_ASSIGN(auto chunk, opened.back()->get_chunk(0));
     ASSERT_EQ(chunk->num_columns(), 1);
     EXPECT_TRUE(chunk->column(0)->Equals(batch->column(kColumns - 1)->Slice(0, chunk->num_rows())));
-    EXPECT_GT(observed_dataset->IOStatsIncremental().read_bytes, 0);
+    EXPECT_GT(metrics->GetReadBytes(), 0);
   }
 
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(file.path));
   ArrowFileSystemConfig fs_config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
-  auto dataset = BlockingDataset::Open(ToStandardLanceUri(parsed_uri.first), ToStorageOptions(fs_config));
+  ASSERT_AND_ASSIGN(auto dataset,
+                    BlockingDataset::Open(ToStandardLanceUri(parsed_uri.first), fs_, ToReaderOptions(fs_config)));
   ArrowSchema first_schema{};
   ASSERT_STATUS_OK(arrow::ExportSchema(*arrow::schema({fields.front()}), &first_schema));
-  auto bridge_reader = BlockingFragmentReader::Open(*dataset, parsed_uri.second, first_schema);
+  ASSERT_AND_ASSIGN(auto bridge_reader, BlockingFragmentReader::Open(*dataset, parsed_uri.second, first_schema));
   auto metadata = bridge_reader->GetFilesMetadata();
   ASSERT_NE(metadata, nullptr);
-  dataset->IOStatsIncremental();
+  metrics->Reset();
   ASSERT_AND_ASSIGN(auto sizes, bridge_reader->EstimateFragmentColumnMemory());
   ASSERT_EQ(sizes.size(), kColumns);
   for (const auto size : sizes) {
     EXPECT_GT(size, 0);
   }
-  const auto estimate_io = dataset->IOStatsIncremental();
-  EXPECT_EQ(estimate_io.read_iops, 0);
-  EXPECT_EQ(estimate_io.read_bytes, 0);
   bridge_reader.reset();
-  auto reopened_dataset =
-      BlockingDataset::Open(ToStandardLanceUri(parsed_uri.first), ToStorageOptions(fs_config), dataset->Version());
+  EXPECT_EQ(metrics->GetReadCount(), 0);
+  EXPECT_EQ(metrics->GetReadBytes(), 0);
+
+  ASSERT_AND_ASSIGN(auto reopened_dataset, BlockingDataset::Open(ToStandardLanceUri(parsed_uri.first), fs_,
+                                                                 ToReaderOptions(fs_config), dataset->Version()));
   dataset.reset();
-  reopened_dataset->IOStatsIncremental();
+  metrics->Reset();
 
   ArrowSchema last_schema{};
   ASSERT_STATUS_OK(arrow::ExportSchema(*arrow::schema({fields.back()}), &last_schema));
-  auto reopened = BlockingFragmentReader::Open(*reopened_dataset, parsed_uri.second, last_schema, metadata.get());
+  ASSERT_AND_ASSIGN(auto reopened,
+                    BlockingFragmentReader::Open(*reopened_dataset, parsed_uri.second, last_schema, metadata.get()));
   metadata.reset();
-  const auto reopen_io = reopened_dataset->IOStatsIncremental();
-  EXPECT_EQ(reopen_io.read_iops, 0);
-  EXPECT_EQ(reopen_io.read_bytes, 0);
+  EXPECT_EQ(metrics->GetReadCount(), 0);
+  EXPECT_EQ(metrics->GetReadBytes(), 0);
+  EXPECT_EQ(metrics->GetGetFileInfoCount(), 0);
   ArrowArray c_batch{};
-  reopened->TakeAsSingleBatch({0}, c_batch);
+  ASSERT_STATUS_OK(reopened->TakeAsSingleBatch({0}, c_batch));
   ASSERT_AND_ASSIGN(auto projected_batch, arrow::ImportRecordBatch(&c_batch, arrow::schema({fields.back()})));
   EXPECT_TRUE(projected_batch->column(0)->Equals(batch->column(kColumns - 1)->Slice(0, 1)));
 }
@@ -1084,18 +1781,18 @@ TEST_F(LanceBasicTest, ProjectedReadersReuseExternalRowIdsAcrossFragments) {
   ArrowFileSystemConfig fs_config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
   ASSERT_AND_ASSIGN(auto uri, BuildLanceBaseUri(fs_config, base_path_));
-  const auto options = ToStorageOptions(fs_config);
+  ASSERT_AND_ASSIGN(auto options, ToWriterOptions(fs_config));
   for (int fragment = 0; fragment < kFragments; ++fragment) {
     ASSERT_AND_ASSIGN(auto batch,
                       CreateTestData(schema, fragment * kRows, false, kRows, 4, 50, {true, true, true, false}));
     ASSERT_AND_ASSIGN(auto batch_reader, arrow::RecordBatchReader::Make({batch}, schema));
     ArrowArrayStream stream{};
     ASSERT_STATUS_OK(arrow::ExportRecordBatchReader(batch_reader, &stream));
-    auto dataset = BlockingDataset::WriteDataset(uri, &stream, options, LanceDataStorageFormat::V2_1,
-                                                 /*enable_stable_row_ids=*/true);
-    ASSERT_EQ(dataset->GetAllFragmentIds().size(), fragment + 1);
+    ASSERT_AND_ASSIGN(auto ids, BlockingDataset::WriteDataset(uri, &stream, options, LanceDataStorageFormat::V2_1,
+                                                              /*enable_stable_row_ids=*/true));
+    ASSERT_EQ(ids.size(), 1);
   }
-  BlockingDataset::Open(uri, options)->DeleteRows("id % 16 = 0");
+  ASSERT_STATUS_OK(BlockingDataset::DeleteRows(uri, "id % 16 = 0", options));
   ASSERT_STATUS_OK(ExternalizeRowIdsForTesting(uri));
   LanceFormat format;
   ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, properties_));
@@ -1113,15 +1810,15 @@ TEST_F(LanceBasicTest, ProjectedReadersReuseExternalRowIdsAcrossFragments) {
   auto reader = api::Reader::create(column_groups, schema, nullptr, properties_);
   const auto ids = std::make_shared<std::vector<std::string>>(std::initializer_list<std::string>{"id"});
   const auto values = std::make_shared<std::vector<std::string>>(std::initializer_list<std::string>{"value"});
-  dataset->IOStatsIncremental();
+  ASSERT_STATUS_OK(dataset->IOStatsIncremental().status());
   ASSERT_AND_ASSIGN(auto first, reader->get_chunk_reader(0, ids));
-  const auto cold_io = dataset->IOStatsIncremental();
+  ASSERT_AND_ASSIGN(auto cold_io, dataset->IOStatsIncremental());
   // One footer, deletion vector, and external row-ID sequence per fragment.
   EXPECT_EQ(cold_io.read_iops, 3 * kFragments);
   first.reset();
   ASSERT_AND_ASSIGN(auto same, reader->get_chunk_reader(0, ids));
   ASSERT_AND_ASSIGN(auto projected, reader->get_chunk_reader_async(0, values).get());
-  const auto warm_io = dataset->IOStatsIncremental();
+  ASSERT_AND_ASSIGN(auto warm_io, dataset->IOStatsIncremental());
   EXPECT_EQ(warm_io.read_iops, 0);
   EXPECT_EQ(warm_io.read_bytes, 0);
   ASSERT_AND_ASSIGN(auto rows, projected->get_chunk_rows());
@@ -1155,17 +1852,16 @@ TEST_F(LanceBasicTest, EstimatedMemoryAccountsForDeletions) {
   ArrowFileSystemConfig fs_config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
-  auto storage_options = milvus_storage::lance::ToStorageOptions(fs_config);
+  ASSERT_AND_ASSIGN(auto storage_options, ToWriterOptions(fs_config));
 
   LanceTableWriter writer(base_path_, schema, properties_);
   ASSERT_STATUS_OK(writer.Write(batch));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, kRows);
-  auto dataset = BlockingDataset::Open(lance_uri, storage_options);
-  dataset->DeleteRows("id < 2000");
+  ASSERT_STATUS_OK(BlockingDataset::DeleteRows(lance_uri, "id < 2000", storage_options));
 
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(cgfile.path));
-  LanceTableReader reader(parsed_uri.first, parsed_uri.second, schema, properties_);
+  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, schema, properties_);
   ASSERT_STATUS_OK(reader.open());
   ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
   ASSERT_EQ(rgs.size(), 1);
@@ -1177,14 +1873,16 @@ TEST_F(LanceBasicTest, EstimatedMemoryAccountsForDeletions) {
   auto column_group = std::make_shared<api::ColumnGroup>();
   column_group->columns = {"id", "value"};
   column_group->format = LOON_FORMAT_LANCE_TABLE;
-  const auto version = BlockingDataset::ResolveLatestVersion(lance_uri, storage_options);
+  ASSERT_AND_ASSIGN(auto version, BlockingDataset::ResolveLatestVersion(lance_uri, fs_, ToReaderOptions(fs_config)));
   cgfile.properties[kDatasetVersionProperty] = std::to_string(version);
   cgfile.end_index = kRows - kDeletedRows;
   column_group->files = {cgfile};
   auto column_groups = std::make_shared<api::ColumnGroups>();
   column_groups->push_back(std::move(column_group));
-  ASSERT_AND_ASSIGN(auto observed_metadata, LanceTableReader::MetaTrait::load_metadata(cgfile, properties_, nullptr));
-  const auto observed_dataset = observed_metadata->payload.dataset;
+  const auto observable = std::dynamic_pointer_cast<Observable>(fs_);
+  ASSERT_NE(observable, nullptr);
+  const auto metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
   const auto ids = std::make_shared<std::vector<std::string>>(std::initializer_list<std::string>{"id"});
   const auto values = std::make_shared<std::vector<std::string>>(std::initializer_list<std::string>{"value"});
   for (const bool async_first : {false, true}) {
@@ -1193,12 +1891,11 @@ TEST_F(LanceBasicTest, EstimatedMemoryAccountsForDeletions) {
     ASSERT_AND_ASSIGN(auto first, async_first ? cached_reader->get_chunk_reader_async(0, ids).get()
                                               : cached_reader->get_chunk_reader(0, ids));
     first.reset();
-    observed_dataset->IOStatsIncremental();
+    metrics->Reset();
     ASSERT_AND_ASSIGN(auto same, cached_reader->get_chunk_reader(0, ids));
     ASSERT_AND_ASSIGN(auto other, cached_reader->get_chunk_reader_async(0, values).get());
-    const auto projection_io = observed_dataset->IOStatsIncremental();
-    EXPECT_EQ(projection_io.read_iops, 0);
-    EXPECT_EQ(projection_io.read_bytes, 0);
+    EXPECT_EQ(metrics->GetReadCount(), 0);
+    EXPECT_EQ(metrics->GetReadBytes(), 0);
     ASSERT_AND_ASSIGN(auto value_chunk, other->get_chunk(0));
     EXPECT_TRUE(value_chunk->column(0)->Equals(batch->column(1)->Slice(kDeletedRows, value_chunk->num_rows())));
     ASSERT_AND_ASSIGN(auto id_chunk, same->get_chunk(0));
@@ -1231,7 +1928,7 @@ TEST_F(LanceBasicTest, FixedSizeListUsesExactMemoryEstimate) {
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(cgfile.path));
 
-  LanceTableReader reader(parsed_uri.first, parsed_uri.second, vector_schema, properties_);
+  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, vector_schema, properties_);
   ASSERT_STATUS_OK(reader.open());
   ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
   auto estimated_memory_size =
@@ -1263,7 +1960,7 @@ TEST_F(LanceBasicTest, MemorySizeEstimationFailureDoesNotBlockOpen) {
     ScopedFiuFault fault(FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL);
     ASSERT_EQ(fault.enable_result(), 0);
 
-    LanceTableReader reader(parsed_uri.first, parsed_uri.second, schema_, properties_);
+    LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, schema_, properties_);
     ASSERT_STATUS_OK(reader.open());
     ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());
     assert_memory_size_unavailable(row_group_infos);
@@ -1302,25 +1999,25 @@ TEST_F(LanceBasicTest, LegacyFormatReadsWhenMemoryEstimateIsUnavailable) {
   ArrowFileSystemConfig fs_config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
-  auto storage_options = milvus_storage::lance::ToStorageOptions(fs_config);
+  ASSERT_AND_ASSIGN(auto storage_options, milvus_storage::lance::ToWriterOptions(fs_config));
 
   LanceTableWriter writer(base_path_, vector_schema, properties_, LanceDataStorageFormat::Legacy);
   ASSERT_STATUS_OK(writer.Write(batch));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, kRows);
 
-  auto dataset = BlockingDataset::Open(lance_uri, storage_options);
-  auto fragment_ids = dataset->GetAllFragmentIds();
+  ASSERT_AND_ASSIGN(auto dataset, BlockingDataset::Open(lance_uri, fs_, ToReaderOptions(fs_config)));
+  ASSERT_AND_ASSIGN(auto fragment_ids, dataset->GetAllFragmentIds());
   ASSERT_EQ(fragment_ids.size(), 1);
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(cgfile.path));
 
   ArrowSchema fragment_schema{};
   ASSERT_STATUS_OK(arrow::ExportSchema(*vector_schema, &fragment_schema));
-  auto fragment_reader = BlockingFragmentReader::Open(*dataset, fragment_ids[0], fragment_schema);
+  ASSERT_AND_ASSIGN(auto fragment_reader, BlockingFragmentReader::Open(*dataset, fragment_ids[0], fragment_schema));
   auto estimate_result = fragment_reader->EstimateFragmentColumnMemory();
   ASSERT_TRUE(estimate_result.status().IsNotImplemented()) << estimate_result.status().ToString();
 
-  LanceTableReader reader(parsed_uri.first, parsed_uri.second, vector_schema, properties_);
+  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, vector_schema, properties_);
   ASSERT_STATUS_OK(reader.open());
   ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());
   ASSERT_FALSE(row_group_infos.empty());
@@ -1476,11 +2173,9 @@ void LanceBasicTest::RunCloudWideTableDuplicatedFragmentTake(int64_t column_coun
   // IOStatsIncremental is test-only and reads a dataset-local ObjectStore tracker.
   // The shared scheduler retains the ObjectStore from its first dataset, so keep
   // that owner alive while later Reader datasets generate the measured I/O.
-  std::shared_ptr<BlockingDataset> io_stats_owner_dataset;
-  ASSERT_NO_THROW(io_stats_owner_dataset = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config)));
+  ASSERT_AND_ASSIGN(auto io_stats_owner_dataset, BlockingDataset::Open(lance_uri, fs_, ToReaderOptions(fs_config)));
   ASSERT_NE(io_stats_owner_dataset, nullptr);
-  std::shared_ptr<BlockingDataset> non_owner_dataset;
-  ASSERT_NO_THROW(non_owner_dataset = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config)));
+  ASSERT_AND_ASSIGN(auto non_owner_dataset, BlockingDataset::Open(lance_uri, fs_, ToReaderOptions(fs_config)));
   ASSERT_NE(non_owner_dataset, nullptr);
   ASSERT_NE(io_stats_owner_dataset.get(), non_owner_dataset.get());
 
@@ -1528,21 +2223,24 @@ void LanceBasicTest::RunCloudWideTableDuplicatedFragmentTake(int64_t column_coun
     std::chrono::steady_clock::time_point timestamp;
     uint64_t iops;
   };
-  io_stats_owner_dataset->IOStatsIncremental();
-  non_owner_dataset->IOStatsIncremental();
+  ASSERT_AND_ASSIGN(auto initial_owner_stats, io_stats_owner_dataset->IOStatsIncremental());
+  ASSERT_AND_ASSIGN(auto initial_non_owner_stats, non_owner_dataset->IOStatsIncremental());
+  (void)initial_owner_stats;
+  (void)initial_non_owner_stats;
   uint64_t total_iops = 0;
   uint64_t total_bytes_read = 0;
-  auto collect_io_stats = [&]() {
-    const auto stats = io_stats_owner_dataset->IOStatsIncremental();
+  auto collect_io_stats = [&]() -> arrow::Status {
+    ARROW_ASSIGN_OR_RAISE(auto stats, io_stats_owner_dataset->IOStatsIncremental());
     total_iops += stats.read_iops;
     total_bytes_read += stats.read_bytes;
+    return arrow::Status::OK();
   };
   const auto take_started_at = std::chrono::steady_clock::now();
   start_barrier.arrive_and_wait();
 
   std::vector<IopsSample> iops_samples;
   while (true) {
-    collect_io_stats();
+    ASSERT_STATUS_OK(collect_io_stats());
     iops_samples.emplace_back(IopsSample{
         .timestamp = std::chrono::steady_clock::now(),
         .iops = total_iops,
@@ -1556,7 +2254,7 @@ void LanceBasicTest::RunCloudWideTableDuplicatedFragmentTake(int64_t column_coun
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   const auto take_finished_at = std::chrono::steady_clock::now();
-  collect_io_stats();
+  ASSERT_STATUS_OK(collect_io_stats());
   iops_samples.emplace_back(IopsSample{.timestamp = take_finished_at, .iops = total_iops});
 
   uint64_t peak_one_second_iops = 0;
@@ -1583,7 +2281,7 @@ void LanceBasicTest::RunCloudWideTableDuplicatedFragmentTake(int64_t column_coun
 
   // Although both handles share the scheduler, IOStatsIncremental is not a
   // scheduler/domain metric. Only the first owner's tracker receives these reads.
-  const auto non_owner_stats = non_owner_dataset->IOStatsIncremental();
+  ASSERT_AND_ASSIGN(auto non_owner_stats, non_owner_dataset->IOStatsIncremental());
   ASSERT_EQ(non_owner_stats.read_iops, 0);
   ASSERT_EQ(non_owner_stats.read_bytes, 0);
 
@@ -1686,21 +2384,14 @@ TEST_F(LanceBasicTest, TestStorageOptionsIntegration) {
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, test_batch_->num_rows());
 
-  // Parse lance_uri and fragment_id from cgfile.path (format: {lance_uri}?fragment_id=X)
-  ASSERT_AND_ASSIGN(auto parsed, ParseLanceUri(cgfile.path));
-  auto lance_uri = parsed.first;
-  auto fragment_id = parsed.second;
-
-  // Reader opens dataset using full Lance URI and storage options from properties
-  // Use the URI-based constructor to test the storage options path in open()
-  LanceTableReader reader(lance_uri, fragment_id, schema_, properties_);
-  ASSERT_STATUS_OK(reader.open());
-  ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
+  LanceFormat format;
+  ASSERT_AND_ASSIGN(auto reader, format.create_reader(schema_, cgfile, properties_, {}, nullptr));
+  ASSERT_AND_ASSIGN(auto rgs, reader->get_row_group_infos());
   ASSERT_FALSE(rgs.empty());
   ASSERT_EQ(rgs.back().end_offset, test_batch_->num_rows());
 
   // Actually read the data and verify
-  ASSERT_AND_ASSIGN(auto chunk, reader.get_chunk(0));
+  ASSERT_AND_ASSIGN(auto chunk, reader->get_chunk(0));
   ASSERT_EQ(chunk->num_rows(), test_batch_->num_rows());
 
   // Verify the data content

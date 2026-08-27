@@ -18,7 +18,6 @@
 #include <compare>
 #include <condition_variable>
 #include <exception>
-#include <iostream>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -41,6 +40,7 @@
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/lance/lance_common.h"
+#include "bridge_util.h"
 
 namespace milvus_storage::lance {
 
@@ -129,10 +129,14 @@ class LanceDatasetCache final {
     auto status = arrow::Status::OK();
     DatasetPtr dataset;
     try {
-      dataset = load_fn();
-      if (!dataset) {
-        status = arrow::Status::Invalid("Lance dataset loader returned null for base URI: ", key.base_uri,
-                                        ", version: ", key.version);
+      auto load_result = load_fn();
+      status = load_result.status();
+      if (load_result.ok()) {
+        dataset = std::move(load_result).ValueOrDie();
+        if (!dataset) {
+          status = arrow::Status::Invalid("Lance dataset loader returned null for base URI: ", key.base_uri,
+                                          ", version: ", key.version);
+        }
       }
     } catch (const std::exception& e) {
       status = arrow::Status::UnknownError("Exception while opening Lance dataset for base URI ", key.base_uri,
@@ -298,7 +302,8 @@ LanceTableReader::LanceTableReader(MetaTrait::MetadataPtr metadata,
                                    uint64_t fragment_id,
                                    const std::shared_ptr<arrow::Schema>& schema,
                                    const std::vector<std::string>& needed_columns)
-    : dataset_(metadata->payload.dataset),
+    : filesystem_(metadata->payload.filesystem),
+      dataset_(metadata->payload.dataset),
       uri_(metadata->payload.base_uri),
       fragment_id_(fragment_id),
       read_schema_(schema),
@@ -306,13 +311,15 @@ LanceTableReader::LanceTableReader(MetaTrait::MetadataPtr metadata,
       needed_columns_(needed_columns),
       fragment_reader_(nullptr) {}
 
-LanceTableReader::LanceTableReader(const std::string& uri,
+LanceTableReader::LanceTableReader(const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+                                   const std::string& uri,
                                    uint64_t fragment_id,
                                    const std::shared_ptr<arrow::Schema>& schema,
                                    const milvus_storage::api::Properties& properties,
                                    const std::vector<std::string>& needed_columns,
                                    uint64_t dataset_version)
-    : uri_(uri),
+    : filesystem_(filesystem),
+      uri_(uri),
       fragment_id_(fragment_id),
       dataset_version_(dataset_version),
       read_schema_(schema),
@@ -428,12 +435,8 @@ static arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::Fragment
     const std::shared_ptr<BlockingDataset>& dataset) {
   std::shared_ptr<arrow::Schema> file_schema;
   {
-    ArrowSchema c_fragment_schema;
-    try {
-      dataset->GetFragmentSchema(fragment_id, c_fragment_schema);
-    } catch (const LanceException& e) {
-      return arrow::Status::IOError(fmt::format("Failed to get fragment schema: {}", e.what()));
-    }
+    ArrowSchema c_fragment_schema{};
+    ARROW_RETURN_NOT_OK(dataset->GetFragmentSchema(fragment_id, c_fragment_schema));
     ARROW_ASSIGN_OR_RAISE(file_schema, arrow::ImportSchema(&c_fragment_schema));
   }
 
@@ -441,19 +444,9 @@ static arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::Fragment
   // immutable footers, deletion vectors, and stable row IDs.
   ArrowSchema c_read_schema{};
   ARROW_RETURN_NOT_OK(arrow::ExportSchema(*file_schema, &c_read_schema));
-  std::unique_ptr<BlockingFragmentReader> fragment_reader;
-  uint64_t logical_rows = 0;
-  uint64_t physical_rows = 0;
-  try {
-    fragment_reader = BlockingFragmentReader::Open(*dataset, fragment_id, c_read_schema);
-    logical_rows = fragment_reader->RowCount();
-    physical_rows = dataset->GetFragmentPhysicalRowCount(fragment_id);
-  } catch (const LanceException& e) {
-    if (c_read_schema.release) {
-      c_read_schema.release(&c_read_schema);
-    }
-    return arrow::Status::IOError("Failed to load Lance fragment metadata for ", fragment_id, ": ", e.what());
-  }
+  ARROW_ASSIGN_OR_RAISE(auto fragment_reader, BlockingFragmentReader::Open(*dataset, fragment_id, c_read_schema));
+  ARROW_ASSIGN_OR_RAISE(auto logical_rows, fragment_reader->RowCount());
+  ARROW_ASSIGN_OR_RAISE(auto physical_rows, dataset->GetFragmentPhysicalRowCount(fragment_id));
   if (physical_rows < logical_rows) {
     return arrow::Status::Invalid("Fragment ", fragment_id, " has inconsistent metadata: physical_rows (",
                                   physical_rows, ") < logical_rows (", logical_rows, ")");
@@ -504,9 +497,10 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
   auto base_uri = std::move(parsed_uri.first);
   const auto fragment_id = parsed_uri.second;
 
+  ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, base_uri));
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, base_uri));
   const auto lance_uri = ToStandardLanceUri(base_uri);
-  const auto storage_options = ToStorageOptions(fs_config);
+  const auto reader_options = ToReaderOptions(fs_config);
 
   // New manifests persist the Dataset snapshot selected by explore(), letting
   // this path identify the global cache entry before any heavyweight open.
@@ -522,11 +516,7 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
     dataset_version = version;
   }
   if (dataset_version == 0) {
-    try {
-      dataset_version = BlockingDataset::ResolveLatestVersion(lance_uri, storage_options);
-    } catch (const LanceException& e) {
-      return arrow::Status::IOError("Failed to resolve latest Lance dataset version: ", e.what());
-    }
+    ARROW_ASSIGN_OR_RAISE(dataset_version, BlockingDataset::ResolveLatestVersion(lance_uri, fs, reader_options));
   }
 
   // URI alone is insufficient: the same table can have multiple live snapshots,
@@ -539,7 +529,7 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
       .filesystem_cache_key = fs_config.GetCacheKey(),
   };
   ARROW_ASSIGN_OR_RAISE(auto dataset, LanceDatasetCache::Instance().GetOrOpen(dataset_cache_key, [&]() {
-    return BlockingDataset::Open(lance_uri, storage_options, dataset_version);
+    return BlockingDataset::Open(lance_uri, fs, reader_options, dataset_version);
   }));
 
   auto fragment_metadata_cache = std::make_shared<FragmentMetadataCache>();
@@ -557,6 +547,7 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
   metadata->cache_size = sizeof(Metadata);
   metadata->payload = Payload{
       .base_uri = std::move(base_uri),
+      .filesystem = std::move(fs),
       .dataset = std::move(dataset),
       .fragment_metadata_cache = std::move(fragment_metadata_cache),
       .properties = properties,
@@ -576,7 +567,7 @@ arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::cr
   if (!metadata) {
     return arrow::Status::Invalid("Cannot open Lance reader from null metadata");
   }
-  if (!metadata->payload.dataset || !metadata->payload.fragment_metadata_cache) {
+  if (!metadata->payload.filesystem || !metadata->payload.dataset || !metadata->payload.fragment_metadata_cache) {
     return arrow::Status::Invalid("Cannot open Lance reader from incomplete metadata");
   }
 
@@ -615,18 +606,11 @@ arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::cr
   reader->row_group_infos_ = fragment_metadata->row_group_infos;
 
   ARROW_ASSIGN_OR_RAISE(auto requested_schema, build_read_schema(reader->file_schema_, read_schema, needed_columns));
-  ArrowSchema c_arrow_schema;
+  ArrowSchema c_arrow_schema{};
   ARROW_RETURN_NOT_OK(arrow::ExportSchema(*requested_schema, &c_arrow_schema));
-
-  try {
-    reader->fragment_reader_ = BlockingFragmentReader::Open(*metadata->payload.dataset, fragment_id, c_arrow_schema,
-                                                            fragment_metadata->files_metadata.get());
-  } catch (const LanceException& e) {
-    if (c_arrow_schema.release) {
-      c_arrow_schema.release(&c_arrow_schema);
-    }
-    return arrow::Status::IOError("Failed to open Lance fragment reader for fragment ", fragment_id, ": ", e.what());
-  }
+  ARROW_ASSIGN_OR_RAISE(reader->fragment_reader_,
+                        BlockingFragmentReader::Open(*metadata->payload.dataset, fragment_id, c_arrow_schema,
+                                                     fragment_metadata->files_metadata.get()));
 
   return reader;
 }
@@ -641,20 +625,13 @@ arrow::Status LanceTableReader::open() {
     // the host as the bucket.
     ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties_, uri_));
     const auto lance_uri = ToStandardLanceUri(uri_);
-    const auto storage_options = ToStorageOptions(fs_config);
-    LOG_STORAGE_DEBUG_ << "uri=" << uri_ << ", lance_uri=" << lance_uri << ", alias=" << fs_config.alias
-                       << ", role_arn=" << (fs_config.role_arn.empty() ? "(empty)" : fs_config.role_arn)
-                       << ", external_id_set=" << (fs_config.external_id.empty() ? "false" : "true")
-                       << ", use_iam=" << fs_config.use_iam;
+    const auto reader_options = ToReaderOptions(fs_config);
 
     // Version zero means latest, but it cannot identify a stable global cache
     // entry. Resolve only the latest manifest location before the cache lookup.
     if (dataset_version_ == 0) {
-      try {
-        dataset_version_ = BlockingDataset::ResolveLatestVersion(lance_uri, storage_options);
-      } catch (const LanceException& e) {
-        return arrow::Status::IOError("Failed to resolve latest Lance dataset version: ", e.what());
-      }
+      ARROW_ASSIGN_OR_RAISE(dataset_version_,
+                            BlockingDataset::ResolveLatestVersion(lance_uri, filesystem_, reader_options));
     }
 
     const LanceDatasetCache::Key dataset_cache_key{
@@ -663,18 +640,14 @@ arrow::Status LanceTableReader::open() {
         .filesystem_cache_key = fs_config.GetCacheKey(),
     };
     ARROW_ASSIGN_OR_RAISE(dataset_, LanceDatasetCache::Instance().GetOrOpen(dataset_cache_key, [&]() {
-      return BlockingDataset::Open(lance_uri, storage_options, dataset_version_);
+      return BlockingDataset::Open(lance_uri, filesystem_, reader_options, dataset_version_);
     }));
   }
 
   // Lance 7 exposes the current dataset schema through FileFragment::schema().
   {
-    ArrowSchema c_fragment_schema;
-    try {
-      dataset_->GetFragmentSchema(fragment_id_, c_fragment_schema);
-    } catch (const LanceException& e) {
-      return arrow::Status::IOError(fmt::format("Failed to get fragment schema: {}", e.what()));
-    }
+    ArrowSchema c_fragment_schema{};
+    ARROW_RETURN_NOT_OK(dataset_->GetFragmentSchema(fragment_id_, c_fragment_schema));
     ARROW_ASSIGN_OR_RAISE(file_schema_, arrow::ImportSchema(&c_fragment_schema));
   }
 
@@ -684,27 +657,22 @@ arrow::Status LanceTableReader::open() {
 
   ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
 
-  ArrowSchema c_arrow_schema;
+  ArrowSchema c_arrow_schema{};
   ARROW_RETURN_NOT_OK(arrow::ExportSchema(*read_schema, &c_arrow_schema));
-
-  fragment_reader_ = BlockingFragmentReader::Open(*dataset_, fragment_id_, c_arrow_schema);
+  ARROW_ASSIGN_OR_RAISE(fragment_reader_, BlockingFragmentReader::Open(*dataset_, fragment_id_, c_arrow_schema));
 
   // Lance's read_range accepts logical indices (post-deletion) and internally
   // patches the range to skip deleted rows. So row_group_infos uses logical row count.
   // However, read_range's batch_size is applied to the *physical* range after
   // patch_range_for_deletions, so we add num_deletions_ to batch_size to ensure
   // each read produces a single output batch.
-  auto logical_rows = fragment_reader_->RowCount();
-  try {
-    auto physical_rows = dataset_->GetFragmentPhysicalRowCount(fragment_id_);
-    if (physical_rows < logical_rows) {
-      return arrow::Status::Invalid("Fragment ", fragment_id_, " has inconsistent metadata: physical_rows (",
-                                    physical_rows, ") < logical_rows (", logical_rows, ")");
-    }
-    num_deletions_ = physical_rows - logical_rows;
-  } catch (const lance::LanceException& e) {
-    return arrow::Status::IOError("Failed to get physical row count for fragment ", fragment_id_, ": ", e.what());
+  ARROW_ASSIGN_OR_RAISE(auto logical_rows, fragment_reader_->RowCount());
+  ARROW_ASSIGN_OR_RAISE(auto physical_rows, dataset_->GetFragmentPhysicalRowCount(fragment_id_));
+  if (physical_rows < logical_rows) {
+    return arrow::Status::Invalid("Fragment ", fragment_id_, " has inconsistent metadata: physical_rows (",
+                                  physical_rows, ") < logical_rows (", logical_rows, ")");
   }
+  num_deletions_ = physical_rows - logical_rows;
 
   auto column_memory_sizes_result =
       estimate_fragment_column_memory_sizes(*fragment_reader_, static_cast<size_t>(file_schema_->num_fields()));
@@ -757,9 +725,13 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> LanceTableReader::get_chunk(c
   // We add num_deletions_ to mitigate (1), but (2) is not addressed — if Lance
   // splits at page boundaries, chunk(0) will silently lose trailing rows in Release
   // builds (assert is a no-op). A robust fix would combine all chunks here.
-  ArrowArrayStream array_stream =
-      fragment_reader_->ReadRangesAsStream(start_idx, end_idx, end_idx - start_idx + num_deletions_);
-  ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));
+  ARROW_ASSIGN_OR_RAISE(auto array_stream,
+                        fragment_reader_->ReadRangesAsStream(start_idx, end_idx, end_idx - start_idx + num_deletions_));
+  auto chunkedarray_result = arrow::ImportChunkedArray(&array_stream);
+  if (!chunkedarray_result.ok()) {
+    return MakeBridgeErrorStatus("Failed to import Lance chunked array", chunkedarray_result.status());
+  }
+  auto chunkedarray = chunkedarray_result.ValueOrDie();
   assert(chunkedarray != nullptr && chunkedarray->num_chunks() == 1);
   return arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0));
 }
@@ -798,10 +770,14 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> LanceTableReader
     const auto& end_rg_info = row_group_infos_[rg_range.second];
 
     // batch_size adds num_deletions_ for the same reason as get_chunk — see comment there.
-    ArrowArrayStream array_stream =
-        fragment_reader_->ReadRangesAsStream(start_rg_info.start_offset, end_rg_info.end_offset,
-                                             end_rg_info.end_offset - start_rg_info.start_offset + num_deletions_);
-    ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));
+    ARROW_ASSIGN_OR_RAISE(auto array_stream, fragment_reader_->ReadRangesAsStream(
+                                                 start_rg_info.start_offset, end_rg_info.end_offset,
+                                                 end_rg_info.end_offset - start_rg_info.start_offset + num_deletions_));
+    auto chunkedarray_result = arrow::ImportChunkedArray(&array_stream);
+    if (!chunkedarray_result.ok()) {
+      return MakeBridgeErrorStatus("Failed to import Lance chunked array", chunkedarray_result.status());
+    }
+    auto chunkedarray = chunkedarray_result.ValueOrDie();
     assert(chunkedarray != nullptr);
 
     // assign to rbs
@@ -816,12 +792,17 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> LanceTableReader
 
 arrow::Result<std::shared_ptr<arrow::Table>> LanceTableReader::take(const std::vector<int64_t>& row_indices) {
   assert(fragment_reader_);
-  ArrowArrayStream array_stream = fragment_reader_->TakeAsStream(row_indices, row_indices.size());
-  ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));
+  ARROW_ASSIGN_OR_RAISE(auto array_stream, fragment_reader_->TakeAsStream(row_indices, row_indices.size()));
+  auto chunkedarray_result = arrow::ImportChunkedArray(&array_stream);
+  if (!chunkedarray_result.ok()) {
+    return MakeBridgeErrorStatus("Failed to import Lance take result", chunkedarray_result.status());
+  }
+  auto chunkedarray = chunkedarray_result.ValueOrDie();
 
   // out of range
   if (chunkedarray->num_chunks() == 0) {
-    return arrow::Status::Invalid(fmt::format("out of row range [0, {}]", fragment_reader_->RowCount()));
+    ARROW_ASSIGN_OR_RAISE(auto row_count, fragment_reader_->RowCount());
+    return arrow::Status::Invalid(fmt::format("out of row range [0, {}]", row_count));
   }
 
   std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
@@ -838,9 +819,10 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> LanceTableReader::read_
   assert(fragment_reader_);
   // Lance's read_range accepts logical indices directly.
   // batch_size adds num_deletions_ for the same reason as get_chunk — see comment there.
-  ArrowArrayStream array_stream =
-      fragment_reader_->ReadRangesAsStream(start_offset, end_offset, end_offset - start_offset + num_deletions_);
-  return arrow::ImportRecordBatchReader(&array_stream);
+  ARROW_ASSIGN_OR_RAISE(auto array_stream, fragment_reader_->ReadRangesAsStream(
+                                               start_offset, end_offset, end_offset - start_offset + num_deletions_));
+  ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&array_stream));
+  return internal::WrapLanceRecordBatchReader(std::move(reader));
 }
 
 arrow::Result<std::shared_ptr<FormatReader>> LanceTableReader::clone_reader() {

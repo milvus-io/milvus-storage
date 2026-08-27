@@ -15,8 +15,7 @@
 #include "milvus-storage/format/lance/lance_common.h"
 
 #include <cstdlib>
-#include <fmt/format.h>
-#include "milvus-storage/common/log.h"
+#include <filesystem>
 
 namespace milvus_storage::lance {
 
@@ -24,9 +23,25 @@ namespace milvus_storage::lance {
 // Storage Options
 //------------------------------------------------------------------------------
 
-StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
+StorageOptions ToReaderOptions(const ArrowFileSystemConfig& config) {
   StorageOptions options;
-  options["milvus_lance_io_parallelism"] = std::to_string(config.lance_io_parallelism);
+  options["milvus_fs_cache_key"] = config.GetCacheKey();
+  options["milvus_fs_is_local"] = config.storage_type == "local" ? "true" : "false";
+  if (config.storage_type == "local") {
+    auto root_path = std::filesystem::path(config.root_path);
+    if (root_path.is_relative()) {
+      root_path = std::filesystem::absolute(root_path);
+    }
+    options["milvus_fs_root_path"] = root_path.lexically_normal().string();
+  }
+  options["lance_io_parallelism"] = std::to_string(config.lance_io_parallelism);
+  options["lance_aimd_initial_rate"] = std::to_string(config.iops_initial_rate);
+  options["lance_aimd_max_rate"] = std::to_string(config.iops_max_rate);
+  return options;
+}
+
+arrow::Result<StorageOptions> ToWriterOptions(const ArrowFileSystemConfig& config) {
+  StorageOptions options;
   if (config.storage_type == "local") {
     return options;
   }
@@ -45,117 +60,56 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
     if (endpoint.find("http://") == 0)
       options["allow_http"] = "true";
   };
-  auto set_credential_cache_key = [&]() { options["milvus_fs_cache_key"] = config.GetCacheKey(); };
 
+  const bool use_ak_sk = !config.use_iam && !config.access_key_id.empty() && !config.access_key_value.empty();
+  const bool use_supported_credentials = config.use_iam || use_ak_sk;
   const auto& provider = config.cloud_provider;
-  LOG_STORAGE_DEBUG_ << fmt::format(
-      "provider={}, endpoint={}, use_ssl={}, use_iam={}, has_aksk={}, role_arn={}, external_id_set={}, "
-      "gcp_target_sa={}, azure_broker_enabled={}, azure_client_id_set={}, azure_tenant_id_set={}, "
-      "azure_credential_endpoint_set={}",
-      provider, config.address, config.use_ssl, config.use_iam,
-      !config.access_key_id.empty() && !config.access_key_value.empty(),
-      config.role_arn.empty() ? "(empty)" : config.role_arn, !config.external_id.empty(),
-      config.gcp_target_service_account.empty() ? "(empty)" : config.gcp_target_service_account,
-      config.IsAzureCredentialBrokerEnabled(), !config.azure_client_id.empty(), !config.azure_tenant_id.empty(),
-      !config.azure_credential_endpoint.empty());
-  // Bridge-private selector consumed and removed by the Rust Lance bridge.
-  set("cloud_provider", provider);
   if (provider == kCloudProviderAWS) {
-    if (!config.role_arn.empty()) {
-      set_credential_cache_key();
-      // AssumeRole: set region/endpoint + ARN fields; do NOT set AKSK so the
-      // Rust layer uses the default credential chain (EC2 metadata / env vars)
-      // as base credential for the STS AssumeRole call.
-      set("aws_region", config.region);
-      set_endpoint("aws_endpoint", config.address);
-      set("aws_role_arn", config.role_arn);
-      set("aws_session_name", config.session_name);
-      set("aws_external_id", config.external_id);
-      if (config.load_frequency > 0) {
-        options["aws_credential_refresh_secs"] = std::to_string(config.load_frequency);
-      }
-    } else {
-      // Explicit AKSK or IAM
-      if (!config.use_iam) {
+    if (use_supported_credentials && config.role_arn.empty()) {
+      if (use_ak_sk) {
         set("aws_access_key_id", config.access_key_id);
         set("aws_secret_access_key", config.access_key_value);
       }
       set("aws_region", config.region);
       set_endpoint("aws_endpoint", config.address);
+      return options;
     }
-  } else if (provider == kCloudProviderAzure) {
-    set("azure_storage_account_name", config.access_key_id);
-    if (config.IsAzureCredentialBrokerEnabled()) {
-      set_credential_cache_key();
-      set("azure_broker_endpoint", config.azure_credential_endpoint);
-      set("azure_broker_client_id", config.azure_client_id);
-      set("azure_broker_tenant_id", config.azure_tenant_id);
-      set("azure_broker_account_name", config.access_key_id);
-      set("azure_broker_region", config.region);
-      set("azure_broker_bucket", config.bucket_name);
-      options["azure_broker_duration_seconds"] = std::to_string(config.load_frequency);
-      options["azure_broker_request_timeout_ms"] = std::to_string(config.request_timeout_ms);
-    } else if (!config.use_iam) {
-      set("azure_storage_account_key", config.access_key_value);
-    }
-    if (!config.address.empty()) {
-      const char* azurite_env = std::getenv("USE_AZURITE");
-      std::string blob_authority =
-          (azurite_env && std::string(azurite_env) == "true") ? config.address : ".blob." + config.address;
-      options["azure_endpoint"] =
-          StorageUri::BuildAzureEndpointAddress(blob_authority, config.access_key_id, config.use_ssl);
-      if (!config.use_ssl)
-        options["allow_http"] = "true";
-    }
-  } else if (provider == kCloudProviderGCP) {
-    if (config.use_iam && !config.gcp_target_service_account.empty()) {
-      set_credential_cache_key();
-      // Bridge-private keys consumed by Rust `open_dataset`/`write_dataset`/
-      // `drop` (see lance_bridgeimpl.rs). The bridge strips them out of
-      // storage_options and installs an ImpersonatingGcsStoreProvider that
-      // hands lance-io a CredentialProvider doing
-      //   VM default SA token (metadata.google.internal)
-      //     → IAM Credentials generateAccessToken(target_sa)
-      //     → GcpCredential { bearer: <impersonated token> }
-      // with token caching and refresh ahead of expiry. Neither object_store
-      // (lance default) nor opendal natively supports VM-SA→target-SA
-      // impersonation via a config key, hence the custom provider.
-      set("gcp_target_service_account", config.gcp_target_service_account);
-      if (config.load_frequency > 0) {
-        // TTL requested from generateAccessToken; the credential provider
-        // refreshes well before this elapses. Mirrors aws_credential_refresh_secs.
-        options["gcp_credential_refresh_secs"] = std::to_string(config.load_frequency);
-      }
-    }
-    // Otherwise uses default credentials (VM metadata)
-  } else if (provider == kCloudProviderAliyun) {
-    if (!config.role_arn.empty()) {
-      set_credential_cache_key();
-      // Per-tenant Aliyun role_arn. Machine identity
-      // (ALIBABA_CLOUD_OIDC_TOKEN_FILE / OIDC_PROVIDER_ARN / ROLE_ARN) stays
-      // in process env for the Rust AliyunOssStoreProvider to resolve the
-      // two-step OIDC chain. Do NOT emit access_key_id / access_key_secret on
-      // this branch: static creds would bypass the role_arn path.
-      set_endpoint("oss_endpoint", config.address);
-      set("oss_region", config.region);
-      set("oss_role_arn", config.role_arn);
-      set("oss_role_session_name", config.session_name);
-      set("oss_external_id", config.external_id);
-      if (config.load_frequency > 0) {
-        options["oss_credential_refresh_secs"] = std::to_string(config.load_frequency);
-      }
-    } else {
-      set("oss_access_key_id", config.access_key_id);
-      set("oss_secret_access_key", config.access_key_value);
-      set("oss_region", config.region);
-      set_endpoint("oss_endpoint", config.address);
-    }
-  } else if (provider == kCloudProviderTencent || provider == kCloudProviderHuawei) {
-    throw std::runtime_error("Unsupported cloud provider: " + provider);
-  } else {
-    throw std::runtime_error("Unknown cloud provider: " + provider);
   }
-  return options;
+  if (provider == kCloudProviderAzure) {
+    if (use_supported_credentials && !config.IsAzureCredentialBrokerEnabled()) {
+      set("azure_storage_account_name", config.access_key_id);
+      if (use_ak_sk) {
+        set("azure_storage_account_key", config.access_key_value);
+      }
+      if (!config.address.empty()) {
+        const char* azurite_env = std::getenv("USE_AZURITE");
+        std::string blob_authority =
+            (azurite_env && std::string(azurite_env) == "true") ? config.address : ".blob." + config.address;
+        options["azure_endpoint"] =
+            StorageUri::BuildAzureEndpointAddress(blob_authority, config.access_key_id, config.use_ssl);
+        if (!config.use_ssl)
+          options["allow_http"] = "true";
+      }
+      return options;
+    }
+  }
+  if (provider == kCloudProviderGCP) {
+    if (config.use_iam && config.gcp_target_service_account.empty()) {
+      return options;
+    }
+  }
+  if (provider == kCloudProviderAliyun) {
+    if (use_supported_credentials && config.role_arn.empty()) {
+      if (use_ak_sk) {
+        set("oss_access_key_id", config.access_key_id);
+        set("oss_secret_access_key", config.access_key_value);
+      }
+      set("oss_region", config.region);
+      set_endpoint("oss_endpoint", config.address);
+      return options;
+    }
+  }
+  return arrow::Status::NotImplemented("Unsupported Lance native writer configuration for cloud provider: ", provider);
 }
 
 //------------------------------------------------------------------------------

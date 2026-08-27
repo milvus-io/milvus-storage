@@ -20,6 +20,7 @@
 #include <arrow/status.h>
 #include <arrow/util/io_util.h>
 
+#include "bridge_util.h"
 #include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/ffi_filesystem_c.h"
 #include "milvus-storage/ffi_internal/result.h"
@@ -157,6 +158,65 @@ TEST(FFIInternalResultTest, MapsPlainPathNotFoundToFileNotFound) {
   auto status = arrow::Status::IOError("missing-file").WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
 
   EXPECT_EQ(FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR), LOON_FILE_NOT_FOUND);
+}
+
+TEST(FFIInternalResultTest, RoundTripsGenericPermissionStatus) {
+  int permission_code = LOON_ARROW_ERROR;
+  for (int error_number : {EACCES, EPERM}) {
+    auto status =
+        arrow::Status::IOError("permission denied").WithDetail(arrow::internal::StatusDetailFromErrno(error_number));
+    auto ffi_code = FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR);
+
+    EXPECT_NE(ffi_code, LOON_ARROW_ERROR);
+    EXPECT_NE(ffi_code, LOON_AWS_ERROR_ACCESS_DENIED);
+    if (permission_code == LOON_ARROW_ERROR) {
+      permission_code = ffi_code;
+    } else {
+      EXPECT_EQ(ffi_code, permission_code);
+    }
+  }
+
+  auto message = std::string(kFFIErrorCodeMarker) + std::to_string(permission_code) + "; permission denied";
+  auto restored = MakeBridgeErrorStatus("read object", message);
+  EXPECT_TRUE(restored.IsIOError());
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(restored), EACCES);
+  EXPECT_EQ(restored.message().find(kFFIErrorCodeMarker), std::string::npos);
+}
+
+TEST(FFIInternalResultTest, RoundTripsNotSupportedStatus) {
+  auto ffi_code =
+      FFIErrorCodeFromExtendStatus(arrow::Status::NotImplemented("unsupported operation"), LOON_ARROW_ERROR);
+  EXPECT_EQ(ffi_code, LOON_NOT_SUPPORT);
+
+  auto message = std::string(kFFIErrorCodeMarker) + std::to_string(ffi_code) + "; unsupported operation";
+  auto restored = MakeBridgeErrorStatus("read object", message);
+  EXPECT_TRUE(restored.IsNotImplemented()) << restored.ToString();
+  EXPECT_EQ(restored.message().find(kFFIErrorCodeMarker), std::string::npos);
+}
+
+TEST(FFIInternalResultTest, RestoresStatusFromFFIErrorMessage) {
+  auto timeout = MakeBridgeErrorStatus("outer: __LOON_FFI_ERRCODE__=108; read: timeout");
+  auto timeout_detail = ExtendStatusDetail::UnwrapStatus(timeout);
+  ASSERT_NE(timeout_detail, nullptr);
+  EXPECT_EQ(timeout_detail->code(), ExtendStatusCode::StorageTransientTimeout);
+  EXPECT_TRUE(timeout_detail->retryable());
+  EXPECT_EQ(timeout.message().find("__LOON_FFI_ERRCODE__="), std::string::npos);
+
+  auto not_found = MakeBridgeErrorStatus("__LOON_FFI_ERRCODE__=12; object missing");
+  EXPECT_TRUE(not_found.IsIOError());
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(not_found), ENOENT);
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(not_found), nullptr);
+
+  auto aws_not_found = MakeBridgeErrorStatus("__LOON_FFI_ERRCODE__=104; object missing");
+  auto aws_not_found_detail = ExtendStatusDetail::UnwrapStatus(aws_not_found);
+  ASSERT_NE(aws_not_found_detail, nullptr);
+  EXPECT_EQ(aws_not_found_detail->code(), ExtendStatusCode::AwsErrorNotFound);
+  EXPECT_FALSE(aws_not_found_detail->retryable());
+
+  auto ordinary = MakeBridgeErrorStatus("ordinary FFI failure");
+  EXPECT_TRUE(ordinary.IsIOError());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(ordinary), nullptr);
+  EXPECT_EQ(ordinary.message(), "ordinary FFI failure");
 }
 
 TEST(FFIInternalResultTest, AsyncReadCallbackPreservesExtendStatusCode) {

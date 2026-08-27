@@ -365,6 +365,7 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreParquetOrVortex(const 
 
 static arrow::Result<std::vector<ColumnGroupFile>> ExploreLance(const std::string& source,
                                                                 const Properties& properties) {
+  ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, source));
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, source));
 
   std::string resolved_dir = source;
@@ -374,14 +375,13 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreLance(const std::strin
   }
 
   ARROW_ASSIGN_OR_RAISE(auto lance_base_uri, milvus_storage::lance::BuildLanceBaseUri(fs_config, resolved_dir));
-  auto storage_options = milvus_storage::lance::ToStorageOptions(fs_config);
-
-  auto dataset = milvus_storage::lance::BlockingDataset::Open(lance_base_uri, storage_options);
-  auto fragment_ids = dataset->GetAllFragmentIds();
+  ARROW_ASSIGN_OR_RAISE(auto dataset, milvus_storage::lance::BlockingDataset::Open(
+                                          lance_base_uri, fs, milvus_storage::lance::ToReaderOptions(fs_config)));
+  ARROW_ASSIGN_OR_RAISE(auto fragment_ids, dataset->GetAllFragmentIds());
 
   std::vector<ColumnGroupFile> files;
   for (auto frag_id : fragment_ids) {
-    auto row_count = dataset->GetFragmentRowCount(frag_id);
+    ARROW_ASSIGN_OR_RAISE(auto row_count, dataset->GetFragmentRowCount(frag_id));
     files.emplace_back(
         ColumnGroupFile{milvus_storage::lance::MakeLanceUri(
                             milvus_storage::lance::ToMilvusLanceUri(lance_base_uri, fs_config.address), frag_id),

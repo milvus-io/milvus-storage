@@ -257,8 +257,8 @@ struct ArrowFileSystemConfig {
   // WITH_CRT is enabled. Ignored by non-S3 filesystems and non-CRT builds.
   bool s3_crt_async_read = true;
 
-  // Shared Lance scheduler capacity for remote reader fragment I/O.
-  // Zero preserves Lance's existing per-Dataset scheduler behavior.
+  // Shared Lance scheduler capacity for local and remote reader fragment I/O.
+  // Zero selects Lance's default of 64; it does not disable scheduler sharing.
   uint32_t lance_io_parallelism = 64;
 
   // ObjectStore request-rate settings. Currently only Lance supports them.

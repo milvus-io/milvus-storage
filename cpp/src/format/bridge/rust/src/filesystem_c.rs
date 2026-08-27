@@ -9,10 +9,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_compat::Compat;
+use futures::FutureExt;
 #[cfg(feature = "s3-crt-async")]
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
-use futures::FutureExt;
 
 use vortex::array::buffer::BufferHandle;
 #[cfg(feature = "s3-crt-async")]
@@ -64,7 +64,7 @@ struct IoTraceStart {
 type IoTraceStart = ();
 
 #[cfg(feature = "io-trace")]
-pub(crate) fn reset_io_trace() {
+pub fn reset_io_trace() {
     let mut state = IO_TRACE.lock().unwrap();
     state.enabled = true;
     state.epoch = Instant::now();
@@ -73,17 +73,17 @@ pub(crate) fn reset_io_trace() {
 }
 
 #[cfg(not(feature = "io-trace"))]
-pub(crate) fn reset_io_trace() {}
+pub fn reset_io_trace() {}
 
 #[cfg(feature = "io-trace")]
-pub(crate) fn disable_io_trace() {
+pub fn disable_io_trace() {
     let mut state = IO_TRACE.lock().unwrap();
     state.enabled = false;
     state.entries.clear();
 }
 
 #[cfg(not(feature = "io-trace"))]
-pub(crate) fn disable_io_trace() {}
+pub fn disable_io_trace() {}
 
 #[cfg(feature = "io-trace")]
 fn record_io_start() -> IoTraceStart {
@@ -121,7 +121,7 @@ fn record_io_end(trace_start: IoTraceStart, offset: u64, size: u64) {
 fn record_io_end(_trace_start: IoTraceStart, _offset: u64, _size: u64) {}
 
 #[cfg(feature = "io-trace")]
-pub(crate) fn print_io_trace() {
+pub fn print_io_trace() {
     let state = IO_TRACE.lock().unwrap();
     if state.entries.is_empty() {
         eprintln!("[IO Trace] No entries recorded");
@@ -201,7 +201,7 @@ pub(crate) fn print_io_trace() {
 }
 
 #[cfg(not(feature = "io-trace"))]
-pub(crate) fn print_io_trace() {
+pub fn print_io_trace() {
     eprintln!("[IO Trace] not compiled in");
 }
 
@@ -217,12 +217,36 @@ pub struct LoonFileSystemMeta {
     pub value: *mut std::ffi::c_char,
 }
 
+#[repr(C)]
+pub struct LoonFileInfo {
+    pub path: *mut std::ffi::c_char,
+    pub path_len: u32,
+    pub is_dir: bool,
+    pub size: u64,
+    pub mtime_ns: i64,
+}
+
+#[repr(C)]
+pub struct LoonFileInfoList {
+    pub entries: *mut LoonFileInfo,
+    pub count: u32,
+}
+
 #[cfg(feature = "s3-crt-async")]
-type LoonFileSystemReadAsyncCallback =
+pub type LoonFileSystemReadAsyncCallback =
     unsafe extern "C" fn(*mut std::ffi::c_void, LoonFFIResult, u64);
 
 unsafe extern "C" {
     unsafe fn loon_ffi_free_result(result: *mut LoonFFIResult);
+
+    pub static loon_errcode_arrow: i32;
+    pub static loon_errcode_file_not_found: i32;
+    pub static loon_errcode_permission_denied: i32;
+    pub static loon_errcode_aws_not_found: i32;
+    pub static loon_errcode_aws_access_denied: i32;
+    pub static loon_errcode_aws_precondition_failed: i32;
+    pub static loon_errcode_transient_throttling: i32;
+    pub static loon_errcode_not_support: i32;
 
     // C-ABI: write data from pointer + size, return number of bytes written or negative error code
     unsafe fn loon_filesystem_open_writer(
@@ -252,8 +276,27 @@ unsafe extern "C" {
         out_size: *mut u64,
     ) -> LoonFFIResult;
 
+    pub unsafe fn loon_filesystem_get_object_info(
+        ptr: *mut c_void,
+        path_ptr: *const u8,
+        path_len: u32,
+        out_size: *mut u64,
+        out_mtime_ns: *mut i64,
+        out_is_dir: *mut bool,
+    ) -> LoonFFIResult;
+
+    pub unsafe fn loon_filesystem_list_dir(
+        ptr: *mut c_void,
+        path_ptr: *const u8,
+        path_len: u32,
+        recursive: bool,
+        out_list: *mut LoonFileInfoList,
+    ) -> LoonFFIResult;
+
+    pub unsafe fn loon_filesystem_free_file_info_list(list: *mut LoonFileInfoList);
+
     // C-ABI: open a RandomAccessFile reader handle (one OpenInputFile, reuse for multiple ReadAt)
-    unsafe fn loon_filesystem_open_reader(
+    pub unsafe fn loon_filesystem_open_reader(
         fs: *mut std::ffi::c_void,
         path_ptr: *const u8,
         path_len: u32,
@@ -261,15 +304,15 @@ unsafe extern "C" {
         out_reader_ptr: *mut *mut std::ffi::c_void,
     ) -> LoonFFIResult;
 
-    unsafe fn loon_filesystem_reader_readat(
+    pub unsafe fn loon_filesystem_reader_readat(
         reader: *mut std::ffi::c_void,
         offset: u64,
         nbytes: u64,
         out_data: *mut u8,
     ) -> LoonFFIResult;
 
-    unsafe fn loon_filesystem_reader_close(reader: *mut std::ffi::c_void) -> LoonFFIResult;
-    unsafe fn loon_filesystem_reader_destroy(reader: *mut std::ffi::c_void);
+    pub unsafe fn loon_filesystem_reader_close(reader: *mut std::ffi::c_void) -> LoonFFIResult;
+    pub unsafe fn loon_filesystem_reader_destroy(reader: *mut std::ffi::c_void);
 }
 
 #[cfg(feature = "s3-crt-async")]
@@ -279,7 +322,7 @@ unsafe extern "C" {
         out_supported: *mut bool,
     ) -> LoonFFIResult;
 
-    unsafe fn loon_filesystem_reader_readat_async(
+    pub unsafe fn loon_filesystem_reader_readat_async(
         reader: *mut std::ffi::c_void,
         offset: u64,
         nbytes: u64,
@@ -289,37 +332,35 @@ unsafe extern "C" {
     ) -> LoonFFIResult;
 }
 
-const LOON_VORTEX_FFI_ERRCODE_MARKER: &str = "__LOON_VORTEX_FFI_ERRCODE__=";
+const LOON_FFI_ERRCODE_MARKER: &str = "__LOON_FFI_ERRCODE__=";
 
 #[derive(Debug)]
-struct LoonFfiError {
-    err_code: i32,
+pub struct LoonFFIError {
+    pub err_code: i32,
     context: String,
     message: String,
 }
 
-impl std::fmt::Display for LoonFfiError {
+impl std::fmt::Display for LoonFFIError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{LOON_VORTEX_FFI_ERRCODE_MARKER}{}; {}: {}",
+            "{LOON_FFI_ERRCODE_MARKER}{}; {}: {}",
             self.err_code, self.context, self.message
         )
     }
 }
 
-impl std::error::Error for LoonFfiError {}
+impl std::error::Error for LoonFFIError {}
 
-fn ffi_err(err_code: i32, context: &str, message: String) -> VortexError {
-    vortex_err!(External: LoonFfiError {
-        err_code,
-        context: context.to_string(),
-        message,
-    })
+fn into_vortex_error(error: LoonFFIError) -> VortexError {
+    vortex_err!(External: error)
 }
 
-// Helper to check LoonFFIResult and convert to VortexError if needed.
-fn check_loon_ffi_result(result: &mut LoonFFIResult, context: &str) -> Result<(), VortexError> {
+pub fn check_loon_ffi_result(
+    result: &mut LoonFFIResult,
+    context: &str,
+) -> Result<(), LoonFFIError> {
     if result.err_code != 0 {
         let err_code = result.err_code;
         // Safely copy C string into owned Rust String, handle null and invalid UTF-8.
@@ -333,13 +374,17 @@ fn check_loon_ffi_result(result: &mut LoonFFIResult, context: &str) -> Result<()
             }
         };
         unsafe { loon_ffi_free_result(result as *mut LoonFFIResult) };
-        return Err(ffi_err(err_code, context, message));
+        return Err(LoonFFIError {
+            err_code,
+            context: context.to_string(),
+            message,
+        });
     }
     Ok(())
 }
 
 #[cfg(feature = "s3-crt-async")]
-fn reader_supports_async(reader: *mut c_void) -> Result<bool, VortexError> {
+pub fn reader_supports_async(reader: *mut c_void) -> Result<bool, LoonFFIError> {
     let mut supported = false;
     let mut result =
         unsafe { loon_filesystem_reader_supports_async(reader, &mut supported as *mut bool) };
@@ -348,7 +393,7 @@ fn reader_supports_async(reader: *mut c_void) -> Result<bool, VortexError> {
 }
 
 #[cfg(not(feature = "s3-crt-async"))]
-fn reader_supports_async(_reader: *mut c_void) -> Result<bool, VortexError> {
+pub fn reader_supports_async(_reader: *mut c_void) -> Result<bool, LoonFFIError> {
     Ok(false)
 }
 
@@ -371,9 +416,7 @@ unsafe extern "C" fn async_read_callback(
     bytes_read: u64,
 ) {
     if user_data.is_null() {
-        if result.err_code != 0 {
-            unsafe { loon_ffi_free_result(&mut result as *mut LoonFFIResult) };
-        }
+        let _ = check_loon_ffi_result(&mut result, "Async readat failed");
         return;
     }
 
@@ -385,32 +428,23 @@ unsafe extern "C" fn async_read_callback(
         trace_start,
     } = *unsafe { Box::from_raw(user_data.cast::<AsyncReadCallbackState>()) };
 
-    let read_result = if result.err_code != 0 {
-        let message = unsafe {
-            if result.message.is_null() {
-                "Unknown error".to_string()
-            } else {
-                std::ffi::CStr::from_ptr(result.message)
-                    .to_string_lossy()
-                    .into_owned()
-            }
-        };
-        unsafe { loon_ffi_free_result(&mut result as *mut LoonFFIResult) };
-        Err(ffi_err(result.err_code, "Async readat failed", message))
-    } else {
-        record_io_end(trace_start, start, bytes_read);
+    let read_result = match check_loon_ffi_result(&mut result, "Async readat failed") {
+        Err(error) => Err(into_vortex_error(error)),
+        Ok(()) => {
+            record_io_end(trace_start, start, bytes_read);
 
-        if bytes_read != expected_len {
-            Err(vortex_err!(
-                "Async readat returned {} bytes for range {}..{}, expected {}",
-                bytes_read,
-                start,
-                start + expected_len,
-                expected_len
-            ))
-        } else {
-            unsafe { buffer.set_len(bytes_read as usize) };
-            Ok(buffer.freeze())
+            if bytes_read != expected_len {
+                Err(vortex_err!(
+                    "Async readat returned {} bytes for range {}..{}, expected {}",
+                    bytes_read,
+                    start,
+                    start + expected_len,
+                    expected_len
+                ))
+            } else {
+                unsafe { buffer.set_len(bytes_read as usize) };
+                Ok(buffer.freeze())
+            }
         }
     };
 
@@ -458,7 +492,8 @@ async fn read_async_via_ffi(
             unsafe {
                 drop(Box::from_raw(state_ptr));
             }
-            check_loon_ffi_result(&mut result, "Failed to submit async readat")?;
+            check_loon_ffi_result(&mut result, "Failed to submit async readat")
+                .map_err(into_vortex_error)?;
         }
     }
 
@@ -471,7 +506,7 @@ async fn read_async_via_ffi(
     read_result
 }
 
-pub(crate) struct ThreadSafePtr<T> {
+pub struct ThreadSafePtr<T> {
     ptr: *mut c_void,
     _marker: PhantomData<T>,
 }
@@ -480,7 +515,7 @@ unsafe impl<T> Send for ThreadSafePtr<T> {}
 unsafe impl<T> Sync for ThreadSafePtr<T> {}
 
 impl<T> ThreadSafePtr<T> {
-    pub(crate) fn new(ptr: *mut c_void) -> Self {
+    pub fn new(ptr: *mut c_void) -> Self {
         Self {
             ptr,
             _marker: PhantomData,
@@ -490,7 +525,7 @@ impl<T> ThreadSafePtr<T> {
     // Add methods to safely access the pointer
     // every time we call as_ptr, we clone it ensure
     // the pointer is not moved
-    pub(crate) fn as_ptr(&self) -> *mut c_void {
+    pub fn as_ptr(&self) -> *mut c_void {
         self.ptr
     }
 
@@ -544,7 +579,8 @@ impl ObjectStoreWriterInner {
                 &mut writer_raw,
             )
         };
-        check_loon_ffi_result(&mut result, "Failed to open ObjectStoreWriterCpp")?;
+        check_loon_ffi_result(&mut result, "Failed to open ObjectStoreWriterCpp")
+            .map_err(into_vortex_error)?;
         Ok(ThreadSafePtr::new(writer_raw))
     }
 
@@ -583,6 +619,7 @@ impl ObjectStoreWriterInner {
             WriterSlot::Open(writer) => {
                 let mut result = unsafe { loon_filesystem_writer_flush(writer.as_ptr()) };
                 check_loon_ffi_result(&mut result, "Failed to flush data to ObjectStoreWriterCpp")
+                    .map_err(into_vortex_error)
             }
             WriterSlot::Closed => Err(vortex_err!("cannot flush: ObjectStoreWriterCpp is closed")),
         }
@@ -596,7 +633,8 @@ impl ObjectStoreWriterInner {
                 let writer_raw = writer.as_raw_ptr();
                 let mut result = unsafe { loon_filesystem_writer_close(writer_raw) };
                 let close_result =
-                    check_loon_ffi_result(&mut result, "Failed to close ObjectStoreWriterCpp");
+                    check_loon_ffi_result(&mut result, "Failed to close ObjectStoreWriterCpp")
+                        .map_err(into_vortex_error);
                 unsafe { loon_filesystem_writer_destroy(writer_raw) };
                 close_result
             }
@@ -749,7 +787,7 @@ impl VortexWrite for ObjectStoreWriterCpp {
     }
 }
 
-pub(crate) const DEFAULT_COALESCING_WINDOW: CoalesceConfig = CoalesceConfig {
+pub const DEFAULT_COALESCING_WINDOW: CoalesceConfig = CoalesceConfig {
     distance: 1024 * 1024,     // 1 MB
     max_size: 1 * 1024 * 1024, // 1 MB
 };
@@ -767,17 +805,17 @@ fn vortex_read_source_uri(path: &str) -> Arc<str> {
 
 /// Arc-wrapped reader handle that ensures the underlying C++ RandomAccessFile
 /// is only closed/destroyed after all concurrent read tasks are done.
-struct ReaderHandle {
-    ptr: *mut c_void,
+pub struct ReaderHandle {
+    pub ptr: *mut c_void,
     #[cfg_attr(not(feature = "s3-crt-async"), allow(dead_code))]
-    supports_async: bool,
+    pub supports_async: bool,
 }
 
 unsafe impl Send for ReaderHandle {}
 unsafe impl Sync for ReaderHandle {}
 
 impl ReaderHandle {
-    fn as_ptr(&self) -> *mut c_void {
+    pub fn as_ptr(&self) -> *mut c_void {
         self.ptr
     }
 }
@@ -826,7 +864,8 @@ impl ObjectStoreReadSourceCpp {
             check_loon_ffi_result(
                 &mut result,
                 "Failed to open reader in ObjectStoreReadSourceCpp",
-            )?;
+            )
+            .map_err(into_vortex_error)?;
         }
         let supports_async = match reader_supports_async(reader_raw) {
             Ok(supported) => supported,
@@ -838,7 +877,7 @@ impl ObjectStoreReadSourceCpp {
                     eprintln!("Warning: ReaderHandle close failed: {close_err}");
                 }
                 loon_filesystem_reader_destroy(reader_raw);
-                return Err(e);
+                return Err(into_vortex_error(e));
             },
         };
 
@@ -934,7 +973,8 @@ impl VortexReadAt for ObjectStoreReadSourceCpp {
                 check_loon_ffi_result(
                     &mut result,
                     "Failed to readat from ObjectStoreReadSourceCpp",
-                )?;
+                )
+                .map_err(into_vortex_error)?;
                 record_io_end(trace_start, offset, len);
 
                 unsafe { buffer.set_len(length) };
@@ -953,6 +993,33 @@ mod tests {
     use super::*;
 
     fn assert_vortex_write<T: vortex::io::VortexWrite + Unpin>() {}
+
+    #[test]
+    fn loon_ffi_error_uses_format_neutral_marker() {
+        let error = LoonFFIError {
+            err_code: 109,
+            context: "read range".into(),
+            message: "throttled".into(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "__LOON_FFI_ERRCODE__=109; read range: throttled"
+        );
+    }
+
+    #[test]
+    fn vortex_error_preserves_loon_ffi_error_source() {
+        let error = LoonFFIError {
+            err_code: 109,
+            context: "read range".into(),
+            message: "throttled".into(),
+        };
+        let source = error.to_string();
+
+        let vortex_error = into_vortex_error(error);
+
+        assert!(vortex_error.to_string().contains(&source));
+    }
 
     #[test]
     fn byte_buffer_write_input_round_trips_without_copy() {

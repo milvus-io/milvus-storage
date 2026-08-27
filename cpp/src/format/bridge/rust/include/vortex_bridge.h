@@ -14,6 +14,7 @@
 #include <arrow/result.h>
 #include <arrow/status.h>
 
+#include "bridge_util.h"
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"
 
@@ -23,9 +24,6 @@ class RecordBatchReader;
 
 namespace milvus_storage::vortex {
 
-arrow::Status MakeVortexBridgeErrorStatus(std::string_view message);
-arrow::Status MakeVortexErrorStatus(std::string_view context, std::string_view message);
-arrow::Status MakeVortexErrorStatus(std::string_view context, const arrow::Status& status);
 namespace internal {
 std::shared_ptr<arrow::RecordBatchReader> WrapVortexRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner);
 }  // namespace internal

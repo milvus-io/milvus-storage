@@ -7,15 +7,9 @@ use iceberg::io::StorageFactory;
 use iceberg_storage_opendal::{
     AwsCredential, AwsCredentialLoad, CustomAwsCredentialLoader, OpenDalStorageFactory,
 };
-use lance::session::Session;
 use lance::{Error as LanceError, Result as LanceResult};
-use lance_io::object_store::providers::aws::AwsStoreProvider;
-use lance_io::object_store::{
-    ObjectStore, ObjectStoreParams, ObjectStoreProvider, ObjectStoreRegistry,
-};
 use object_store::CredentialProvider;
 use tokio::sync::{Mutex, RwLock};
-use url::Url;
 
 #[derive(Debug)]
 struct SingleFlightAwsCredentialProvider {
@@ -82,14 +76,12 @@ impl CredentialProvider for SingleFlightAwsCredentialProvider {
             }
         }
 
-        let refreshed = self
-            .inner
-            .provide_credentials()
-            .await
-            .map_err(|source| object_store::Error::Generic {
+        let refreshed = self.inner.provide_credentials().await.map_err(|source| {
+            object_store::Error::Generic {
                 store: "AWS",
                 source: Box::new(source),
-            })?;
+            }
+        })?;
         let credential = Self::to_object_store_credential(&refreshed);
         *self.cached.write().await = Some(refreshed);
         Ok(credential)
@@ -116,12 +108,10 @@ impl AssumeRoleConfig {
             return Ok(None);
         }
         if credential_refresh_secs < 900 || credential_refresh_secs > 43200 {
-            return Err(LanceError::invalid_input(
-                format!(
-                    "credential_refresh_secs must be in [900, 43200], got {}",
-                    credential_refresh_secs
-                ),
-            ));
+            return Err(LanceError::invalid_input(format!(
+                "credential_refresh_secs must be in [900, 43200], got {}",
+                credential_refresh_secs
+            )));
         }
         Ok(Some(Self {
             role_arn: role_arn.to_string(),
@@ -165,32 +155,6 @@ impl AssumeRoleConfig {
     }
 }
 
-#[derive(Debug)]
-struct AwsArnStoreProvider {
-    credentials: object_store::aws::AwsCredentialProvider,
-}
-
-impl AwsArnStoreProvider {
-    fn new(credentials: object_store::aws::AwsCredentialProvider) -> Self {
-        Self { credentials }
-    }
-}
-
-#[async_trait::async_trait]
-impl ObjectStoreProvider for AwsArnStoreProvider {
-    async fn new_store(
-        &self,
-        base_path: Url,
-        params: &ObjectStoreParams,
-    ) -> LanceResult<ObjectStore> {
-        let mut params = params.clone();
-        params.aws_credentials = Some(self.credentials.clone());
-        AwsStoreProvider::default()
-            .new_store(base_path, &params)
-            .await
-    }
-}
-
 #[derive(Clone)]
 struct ObjectStoreAwsCredentialLoader {
     provider: object_store::aws::AwsCredentialProvider,
@@ -214,20 +178,6 @@ impl AwsCredentialLoad for ObjectStoreAwsCredentialLoader {
             expires_in: None,
         }))
     }
-}
-
-pub(crate) async fn build_lance_provider(
-    config: &AssumeRoleConfig,
-) -> LanceResult<Arc<dyn ObjectStoreProvider>> {
-    let credentials = config.build_credentials().await?;
-    Ok(Arc::new(AwsArnStoreProvider::new(credentials)))
-}
-
-pub(crate) fn build_lance_session(provider: Arc<dyn ObjectStoreProvider>) -> Arc<Session> {
-    let registry = ObjectStoreRegistry::default();
-    registry.insert("s3", provider.clone());
-    registry.insert("s3+ddb", provider);
-    Arc::new(Session::new(0, 0, Arc::new(registry)))
 }
 
 fn iceberg_factory(
@@ -335,31 +285,12 @@ mod tests {
         }))
         .await;
 
-        assert!(credentials.iter().all(|credential| credential.key_id == "key-0"));
+        assert!(
+            credentials
+                .iter()
+                .all(|credential| credential.key_id == "key-0")
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn lance_provider_is_reused() {
-        let cache: GlobalLruCache<Arc<dyn ObjectStoreProvider>> = GlobalLruCache::new(2);
-        let first = cache
-            .get("aws", || async {
-                Ok::<_, ()>(Arc::new(AwsArnStoreProvider::new(static_credentials(
-                    "first",
-                ))) as Arc<dyn ObjectStoreProvider>)
-            })
-            .await
-            .unwrap();
-        let second = cache
-            .get("aws", || async {
-                Ok::<_, ()>(Arc::new(AwsArnStoreProvider::new(static_credentials(
-                    "second",
-                ))) as Arc<dyn ObjectStoreProvider>)
-            })
-            .await
-            .unwrap();
-
-        assert!(Arc::ptr_eq(&first, &second));
     }
 
     #[tokio::test]

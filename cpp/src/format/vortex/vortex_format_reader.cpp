@@ -225,21 +225,21 @@ static arrow::Result<std::shared_ptr<VortexFile>> open_shared_vortex_file(
     uint64_t footer_size) {
   auto vxfile = VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder.get()), path, file_size, footer_size);
   if (!vxfile.ok()) {
-    return MakeVortexErrorStatus("Failed to open vortex file", vxfile.status());
+    return MakeBridgeErrorStatus("Failed to open vortex file", vxfile.status());
   }
   return std::shared_ptr<VortexFile>(std::move(vxfile).ValueOrDie());
 }
 
 static arrow::Result<std::shared_ptr<arrow::Schema>> import_vortex_file_schema(const VortexFile& vxfile) {
   ArrowSchema c_schema;
-  ARROW_RETURN_NOT_OK(MakeVortexErrorStatus("Failed to get vortex file schema", vxfile.GetFileSchema(c_schema)));
+  ARROW_RETURN_NOT_OK(MakeBridgeErrorStatus("Failed to get vortex file schema", vxfile.GetFileSchema(c_schema)));
   return arrow::ImportSchema(&c_schema);
 }
 
 static arrow::Result<std::vector<uint64_t>> get_vortex_splits(const VortexFile& vxfile) {
   auto splits = vxfile.Splits();
   if (!splits.ok()) {
-    return MakeVortexErrorStatus("Failed to get vortex splits", splits.status());
+    return MakeBridgeErrorStatus("Failed to get vortex splits", splits.status());
   }
   return std::move(splits).ValueOrDie();
 }
@@ -421,7 +421,7 @@ static void vortex_open_async_callback(void* ctx_raw, uintptr_t handle, const ch
 
   try {
     if (error) {
-      ctx->promise.setValue(MakeVortexErrorStatus("Failed to open vortex file", error.get()));
+      ctx->promise.setValue(MakeBridgeErrorStatus("Failed to open vortex file", error.get()));
       return;
     }
 
@@ -836,7 +836,7 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read_with_plan(const VortexR
   if (read_schema_) {
     ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
     ARROW_RETURN_NOT_OK(
-        MakeVortexErrorStatus("Failed to read vortex file with plan", scan_builder.WithOutputSchema(c_arrow_schema)));
+        MakeBridgeErrorStatus("Failed to read vortex file with plan", scan_builder.WithOutputSchema(c_arrow_schema)));
   }
 
   if (plan.apply_predicate) {
@@ -850,7 +850,7 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read_with_plan(const VortexR
 
   auto stream = std::move(scan_builder).IntoStream();
   if (!stream.ok()) {
-    return MakeVortexErrorStatus("Failed to read vortex file with plan", stream.status());
+    return MakeBridgeErrorStatus("Failed to read vortex file with plan", stream.status());
   }
   return std::move(stream).ValueOrDie();
 }
@@ -876,7 +876,7 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read_row_ids_with_plan(const
   ARROW_RETURN_NOT_OK(apply_read_plan_selection(&scan_builder, plan, vxfile_->RowCount(), path_));
   auto stream = std::move(scan_builder).IntoStream();
   if (!stream.ok()) {
-    return MakeVortexErrorStatus("Failed to read vortex row ids with plan", stream.status());
+    return MakeBridgeErrorStatus("Failed to read vortex row ids with plan", stream.status());
   }
   return std::move(stream).ValueOrDie();
 }
@@ -892,7 +892,7 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start,
   if (read_schema_) {
     ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
     ARROW_RETURN_NOT_OK(
-        MakeVortexErrorStatus("Failed to read vortex file", scan_builder.WithOutputSchema(c_arrow_schema)));
+        MakeBridgeErrorStatus("Failed to read vortex file", scan_builder.WithOutputSchema(c_arrow_schema)));
   }
 
   if (parsed_predicate_) {
@@ -902,7 +902,7 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start,
   scan_builder.WithRowRange(row_start, row_end);
   auto stream = std::move(scan_builder).IntoStream();
   if (!stream.ok()) {
-    return MakeVortexErrorStatus("Failed to read vortex file", stream.status());
+    return MakeBridgeErrorStatus("Failed to read vortex file", stream.status());
   }
   return std::move(stream).ValueOrDie();
 }
@@ -912,7 +912,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> VortexFormatReader::str
   ARROW_ASSIGN_OR_RAISE(auto array_stream, read(row_start, row_end, coalescing_window));
   auto reader_result = arrow::ImportRecordBatchReader(&array_stream);
   if (!reader_result.ok()) {
-    return MakeVortexErrorStatus("Failed to import vortex record batch reader", reader_result.status());
+    return MakeBridgeErrorStatus("Failed to import vortex record batch reader", reader_result.status());
   }
   return internal::WrapVortexRecordBatchReader(reader_result.ValueOrDie());
 }
@@ -922,7 +922,7 @@ arrow::Result<std::shared_ptr<arrow::ChunkedArray>> VortexFormatReader::blocking
   ARROW_ASSIGN_OR_RAISE(auto array_stream, read(row_start, row_end, coalescing_window));
   auto chunked_array_result = arrow::ImportChunkedArray(&array_stream);
   if (!chunked_array_result.ok()) {
-    return MakeVortexErrorStatus("Failed to import vortex chunked array", chunked_array_result.status());
+    return MakeBridgeErrorStatus("Failed to import vortex chunked array", chunked_array_result.status());
   }
   return chunked_array_result.ValueOrDie();
 }
@@ -937,7 +937,7 @@ arrow::Result<std::shared_ptr<arrow::Table>> VortexFormatReader::take(const std:
   if (read_schema_) {
     ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
     ARROW_RETURN_NOT_OK(
-        MakeVortexErrorStatus("Failed to take from vortex file", scan_builder.WithOutputSchema(c_arrow_schema)));
+        MakeBridgeErrorStatus("Failed to take from vortex file", scan_builder.WithOutputSchema(c_arrow_schema)));
   }
 
   ARROW_ASSIGN_OR_RAISE(auto include_indices, validate_and_cast_row_indices(row_indices, vxfile_->RowCount(), path_));
@@ -945,12 +945,12 @@ arrow::Result<std::shared_ptr<arrow::Table>> VortexFormatReader::take(const std:
 
   auto array_stream = std::move(scan_builder).IntoStream();
   if (!array_stream.ok()) {
-    return MakeVortexErrorStatus("Failed to take from vortex file", array_stream.status());
+    return MakeBridgeErrorStatus("Failed to take from vortex file", array_stream.status());
   }
   auto stream = std::move(array_stream).ValueOrDie();
   auto chunkedarray_result = arrow::ImportChunkedArray(&stream);
   if (!chunkedarray_result.ok()) {
-    return MakeVortexErrorStatus("Failed to import vortex take result", chunkedarray_result.status());
+    return MakeBridgeErrorStatus("Failed to import vortex take result", chunkedarray_result.status());
   }
   auto chunkedarray = chunkedarray_result.ValueOrDie();
 
@@ -1006,7 +1006,7 @@ static void vortex_take_async_callback(void* ctx_raw,
 
   try {
     if (error) {
-      ctx->promise.setValue(MakeVortexErrorStatus("Failed to take from vortex file", error.get()));
+      ctx->promise.setValue(MakeBridgeErrorStatus("Failed to take from vortex file", error.get()));
       return;
     }
 
@@ -1014,7 +1014,7 @@ static void vortex_take_async_callback(void* ctx_raw,
     // context. Importing it transfers the stream into Arrow-owned objects.
     auto result = arrow::ImportChunkedArray(&ctx->stream);
     if (!result.ok()) {
-      ctx->promise.setValue(MakeVortexErrorStatus("Failed to import vortex take result", result.status()));
+      ctx->promise.setValue(MakeBridgeErrorStatus("Failed to import vortex take result", result.status()));
       return;
     }
 
@@ -1056,7 +1056,7 @@ static void vortex_read_range_async_callback(void* ctx_raw,
 
   try {
     if (error) {
-      ctx->promise.setValue(MakeVortexErrorStatus("Failed to read vortex file", error.get()));
+      ctx->promise.setValue(MakeBridgeErrorStatus("Failed to read vortex file", error.get()));
       return;
     }
 
@@ -1065,7 +1065,7 @@ static void vortex_read_range_async_callback(void* ctx_raw,
     auto reader_result = arrow::ImportRecordBatchReader(&ctx->stream);
     if (!reader_result.ok()) {
       ctx->promise.setValue(
-          MakeVortexErrorStatus("Failed to import vortex record batch reader", reader_result.status()));
+          MakeBridgeErrorStatus("Failed to import vortex record batch reader", reader_result.status()));
       return;
     }
     ctx->promise.setValue(internal::WrapVortexRecordBatchReader(reader_result.ValueOrDie()));
@@ -1093,7 +1093,7 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> VortexFormatRead
   if (read_schema_) {
     FOLLY_ARROW_ASSIGN_OR_RAISE(auto c_schema, export_c_arrow_schema(read_schema_));
     FOLLY_ARROW_RETURN_NOT_OK(
-        MakeVortexErrorStatus("Failed to take from vortex file", scan_builder.WithOutputSchema(c_schema)));
+        MakeBridgeErrorStatus("Failed to take from vortex file", scan_builder.WithOutputSchema(c_schema)));
   }
 
   // The bridge accepts unsigned file-local indices. Validate before the FFI
@@ -1131,7 +1131,7 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>> Vort
   if (read_schema_) {
     FOLLY_ARROW_ASSIGN_OR_RAISE(auto c_schema, export_c_arrow_schema(read_schema_));
     FOLLY_ARROW_RETURN_NOT_OK(
-        MakeVortexErrorStatus("Failed to read vortex file", scan_builder.WithOutputSchema(c_schema)));
+        MakeBridgeErrorStatus("Failed to read vortex file", scan_builder.WithOutputSchema(c_schema)));
   }
 
   if (parsed_predicate_) {

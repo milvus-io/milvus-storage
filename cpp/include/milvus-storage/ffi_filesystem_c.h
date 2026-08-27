@@ -163,6 +163,24 @@ FFI_EXPORT LoonFFIResult loon_filesystem_get_file_info(FileSystemHandle handle,
                                                        uint64_t* out_size);
 
 /**
+ * Get object metadata with one filesystem lookup.
+ *
+ * @param handle The filesystem instance.
+ * @param path_ptr The path of the object.
+ * @param path_len The length of the path.
+ * @param out_size The object size, or zero for a directory.
+ * @param out_mtime_ns The modification time in nanoseconds since the Unix epoch.
+ * @param out_is_dir Whether the path is a directory.
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_filesystem_get_object_info(FileSystemHandle handle,
+                                                         const char* path_ptr,
+                                                         uint32_t path_len,
+                                                         uint64_t* out_size,
+                                                         int64_t* out_mtime_ns,
+                                                         bool* out_is_dir);
+
+/**
  * Get the content of the file.
  *
  * @param handle The filesystem instance.
@@ -366,7 +384,7 @@ FFI_EXPORT LoonFFIResult loon_filesystem_create_dir(FileSystemHandle handle,
  *
  * @param handle The filesystem instance.
  * @param path_ptr The path of the directory to list.
- * @param path_len The length of the path.
+ * @param path_len The length of the path (zero lists the filesystem root).
  * @param recursive If true, list recursively.
  * @param out_list Output file info list (caller must free using loon_filesystem_free_file_info_list).
  * @return result of FFI

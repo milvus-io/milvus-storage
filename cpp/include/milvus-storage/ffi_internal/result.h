@@ -86,8 +86,15 @@ inline int FFIErrorCodeFromExtendStatus(const arrow::Status& status, int fallbac
     return milvus_storage::ffi_internal::FFIErrorCodeFromExtendStatusCode(detail->code(), fallback);
   }
 
-  if (arrow::internal::ErrnoFromStatus(status) == ENOENT) {
+  const auto error_number = arrow::internal::ErrnoFromStatus(status);
+  if (error_number == ENOENT) {
     return LOON_FILE_NOT_FOUND;
+  }
+  if (error_number == EACCES || error_number == EPERM) {
+    return LOON_PERMISSION_DENIED;
+  }
+  if (status.IsNotImplemented()) {
+    return LOON_NOT_SUPPORT;
   }
   return fallback;
 }

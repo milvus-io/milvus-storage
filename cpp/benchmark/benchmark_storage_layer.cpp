@@ -293,13 +293,19 @@ class StorageLayerFixture : public FormatBenchFixtureBase<> {
     return lance::BuildLanceBaseUri(fs_config, relative_path);
   }
 
-  lance::StorageOptions GetStorageOptions() {
+  arrow::Result<lance::StorageOptions> GetStorageOptions() {
+    ArrowFileSystemConfig fs_config;
+    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+    return lance::ToWriterOptions(fs_config);
+  }
+
+  lance::StorageOptions GetReadStorageOptions() {
     ArrowFileSystemConfig fs_config;
     auto status = ArrowFileSystemConfig::create_file_system_config(properties_, fs_config);
     if (!status.ok()) {
       return {};
     }
-    return lance::ToStorageOptions(fs_config);
+    return lance::ToReaderOptions(fs_config);
   }
 
   // Write test data to a lance dataset using pre-loaded batches
@@ -310,11 +316,8 @@ class StorageLayerFixture : public FormatBenchFixtureBase<> {
     ArrowArrayStream stream;
     ARROW_RETURN_NOT_OK(arrow::ExportRecordBatchReader(batch_reader, &stream));
 
-    try {
-      auto dataset = lance::BlockingDataset::WriteDataset(lance_uri, &stream, storage_options);
-    } catch (const lance::LanceException& e) {
-      return arrow::Status::IOError("Lance write failed: ", e.what());
-    }
+    ARROW_ASSIGN_OR_RAISE(auto fragment_ids, lance::BlockingDataset::WriteDataset(lance_uri, &stream, storage_options));
+    (void)fragment_ids;
     return arrow::Status::OK();
   }
 
@@ -504,7 +507,7 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_WriteCommit)(::benchmark::St
 
   // Build Lance URI and get storage options for cloud storage support
   BENCH_ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceUri(path), st);
-  auto storage_options = GetStorageOptions();
+  BENCH_ASSERT_AND_ASSIGN(auto storage_options, GetStorageOptions(), st);
 
   for (auto _ : st) {
     BENCH_ASSERT_STATUS_OK(WriteLanceDataset(lance_uri, storage_options), st);
@@ -533,21 +536,23 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_OpenRead)(::benchmark::State
 
   // Build Lance URI and get storage options for cloud storage support
   BENCH_ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceUri(path), st);
-  auto storage_options = GetStorageOptions();
+  BENCH_ASSERT_AND_ASSIGN(auto storage_options, GetStorageOptions(), st);
+  auto read_options = GetReadStorageOptions();
 
   BENCH_ASSERT_STATUS_OK(WriteLanceDataset(lance_uri, storage_options), st);
 
   // Lambda to read lance dataset
   auto read_lance = [&](bool collect_stats, int64_t& out_rows, int64_t& out_bytes) -> arrow::Status {
-    auto dataset = lance::BlockingDataset::Open(lance_uri, storage_options);
+    ARROW_ASSIGN_OR_RAISE(auto dataset, lance::BlockingDataset::Open(lance_uri, fs_, read_options));
 
-    ArrowSchema c_schema;
+    ArrowSchema c_schema{};
     ARROW_RETURN_NOT_OK(arrow::ExportSchema(*schema_, &c_schema));
 
-    auto scanner = dataset->Scan(c_schema, 8192);
-    auto stream = scanner->OpenStream();
+    ARROW_ASSIGN_OR_RAISE(auto scanner, dataset->Scan(c_schema, 8192));
+    ARROW_ASSIGN_OR_RAISE(auto stream, scanner->OpenStream());
 
-    ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&stream));
+    ARROW_ASSIGN_OR_RAISE(auto imported_reader, arrow::ImportRecordBatchReader(&stream));
+    auto reader = lance::internal::WrapLanceRecordBatchReader(std::move(imported_reader));
 
     std::shared_ptr<arrow::RecordBatch> rb;
     while (true) {
@@ -604,7 +609,8 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_Take)(::benchmark::State& st
 
   // Build Lance URI and get storage options for cloud storage support
   BENCH_ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceUri(path), st);
-  auto storage_options = GetStorageOptions();
+  BENCH_ASSERT_AND_ASSIGN(auto storage_options, GetStorageOptions(), st);
+  auto read_options = GetReadStorageOptions();
 
   BENCH_ASSERT_STATUS_OK(WriteLanceDataset(lance_uri, storage_options), st);
 
@@ -612,14 +618,15 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_Take)(::benchmark::State& st
 
   // Lambda to take from lance dataset
   auto take_lance = [&](bool collect_stats, int64_t& out_rows, int64_t& out_bytes) -> arrow::Status {
-    auto dataset = lance::BlockingDataset::Open(lance_uri, storage_options);
+    ARROW_ASSIGN_OR_RAISE(auto dataset, lance::BlockingDataset::Open(lance_uri, fs_, read_options));
 
-    ArrowSchema c_schema;
+    ArrowSchema c_schema{};
     ARROW_RETURN_NOT_OK(arrow::ExportSchema(*schema_, &c_schema));
 
-    auto stream = dataset->Take(indices, c_schema);
+    ARROW_ASSIGN_OR_RAISE(auto stream, dataset->Take(indices, c_schema));
 
-    ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&stream));
+    ARROW_ASSIGN_OR_RAISE(auto imported_reader, arrow::ImportRecordBatchReader(&stream));
+    auto reader = lance::internal::WrapLanceRecordBatchReader(std::move(imported_reader));
 
     std::shared_ptr<arrow::RecordBatch> rb;
     while (true) {
@@ -696,7 +703,8 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_MultiReader)(::benchmark::St
 
   // Build Lance URI and get storage options for cloud storage support
   BENCH_ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceUri(path), st);
-  auto storage_options = GetStorageOptions();
+  BENCH_ASSERT_AND_ASSIGN(auto storage_options, GetStorageOptions(), st);
+  auto read_options = GetReadStorageOptions();
 
   BENCH_ASSERT_STATUS_OK(WriteLanceDataset(lance_uri, storage_options), st);
 
@@ -718,15 +726,16 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_MultiReader)(::benchmark::St
     for (int i = 0; i < num_readers; ++i) {
       reader_threads.emplace_back([&, i]() {
         auto read_all = [&]() -> arrow::Status {
-          auto dataset = lance::BlockingDataset::Open(lance_uri, storage_options);
+          ARROW_ASSIGN_OR_RAISE(auto dataset, lance::BlockingDataset::Open(lance_uri, fs_, read_options));
 
-          ArrowSchema c_schema;
+          ArrowSchema c_schema{};
           ARROW_RETURN_NOT_OK(arrow::ExportSchema(*schema_, &c_schema));
 
-          auto scanner = dataset->Scan(c_schema, 8192);
-          auto stream = scanner->OpenStream();
+          ARROW_ASSIGN_OR_RAISE(auto scanner, dataset->Scan(c_schema, 8192));
+          ARROW_ASSIGN_OR_RAISE(auto stream, scanner->OpenStream());
 
-          ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&stream));
+          ARROW_ASSIGN_OR_RAISE(auto imported_reader, arrow::ImportRecordBatchReader(&stream));
+          auto reader = lance::internal::WrapLanceRecordBatchReader(std::move(imported_reader));
 
           std::shared_ptr<arrow::RecordBatch> rb;
           while (true) {

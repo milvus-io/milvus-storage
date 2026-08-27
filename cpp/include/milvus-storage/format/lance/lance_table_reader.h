@@ -21,14 +21,14 @@
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/format/format_reader.h"
-#include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 #include "lance_bridge.h"  // from cpp/src/format/lance/lance-bridge/src/include
 
 namespace milvus_storage::lance {
 
 class LanceTableReader final : public FormatReader, public std::enable_shared_from_this<LanceTableReader> {
   public:
-  LanceTableReader(const std::string& uri,
+  LanceTableReader(const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+                   const std::string& uri,
                    uint64_t fragment_id,
                    const std::shared_ptr<arrow::Schema>& schema,
                    const milvus_storage::api::Properties& properties,
@@ -45,6 +45,7 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
 
     struct Payload {
       std::string base_uri;
+      std::shared_ptr<arrow::fs::FileSystem> filesystem;
       std::shared_ptr<BlockingDataset> dataset;
       // BlockingFragmentReader is intentionally not cached here because it is
       // projection-specific and stateful.
@@ -100,6 +101,8 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
                    const std::shared_ptr<arrow::Schema>& schema,
                    const std::vector<std::string>& needed_columns = {});
 
+  // Keep the filesystem alive until all Rust-backed reader members are destroyed.
+  std::shared_ptr<arrow::fs::FileSystem> filesystem_;
   std::shared_ptr<BlockingDataset> dataset_;
   std::string uri_;
   uint64_t fragment_id_;
