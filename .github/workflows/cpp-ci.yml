@@ -248,3 +248,78 @@ jobs:
           fail_ci_if_error: true
           disable_safe_directory: true
           verbose: true
+
+  # Talon read-through cache end-to-end. Self-contained (does not touch the
+  # build/unittest artifact): builds with WITH_TALON=True so the Talon link path
+  # is compiled, then stands up a containerized single-node Talon stack
+  # (coordinator + worker + MinIO) via scripts/setup_talon.sh and runs the Talon
+  # integration test against it. The coordinator/worker images are built locally
+  # from the same pinned talon source the C SDK is fetched from, so nothing is
+  # pulled from a registry for the servers. The test client runs on the stack
+  # network in the milvus builder image (mandatory — see setup_talon.sh header),
+  # executing the runner-built binary as-is. That first image build is the
+  # dominant cost of this job.
+  talon:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        uses: aminya/setup-cpp@v1
+        with:
+          conan: 2.25.1
+          cmake: true
+
+      # Conan 2.x CMakeDeps doesn't propagate system_libs through shared library targets,
+      # so libaio (required by folly) must be explicitly installed and linked.
+      - name: Install system libraries
+        run: sudo apt-get update && sudo apt-get install -y libaio-dev
+
+      - name: Setup Rust
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore rust build cache
+        id: rust-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            cpp/build/Release/cargo/build
+          key: storage-bridge-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
+          restore-keys: |
+            storage-bridge-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-
+
+      - name: Restore conan package cache
+        id: conan-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.conan2
+          key: conan-cpp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: |
+            conan-cpp-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: setup conan
+        run: |
+          conan profile detect --force
+          # || true: Conan 2.x errors if the remote already exists (e.g. restored from cache)
+          conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 || true
+          conan remote list
+
+      - name: Build with Talon
+        working-directory: ./cpp
+        run: |
+          make build WITH_TALON=True
+
+      - name: Bring up the Talon stack
+        working-directory: ./cpp
+        run: ./scripts/setup_talon.sh up
+
+      - name: Run the Talon integration test
+        working-directory: ./cpp
+        run: ./scripts/setup_talon.sh test
+
+      - name: Tear down the Talon stack
+        if: always()
+        working-directory: ./cpp
+        run: ./scripts/setup_talon.sh down

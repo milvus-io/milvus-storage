@@ -1,4 +1,4 @@
-.PHONY: build clean test test-all test-cloud-storage \
+.PHONY: build clean test test-all test-cloud-storage test-talon benchmark-talon \
 	python-lib java-lib package \
 	fix-format check-format fix-tidy check-tidy \
 	check-error-ratchet update-error-ratchet \
@@ -14,6 +14,7 @@ use_asan := $(or $(USE_ASAN),True)
 with_ut := $(or $(WITH_UT),True)
 with_fiu := $(or $(WITH_FIU),True)
 with_crt := $(or $(WITH_CRT),False)
+with_talon := $(or $(WITH_TALON),False)
 with_benchmark := $(or $(WITH_BENCHMARK),True)
 build_type := $(or $(BUILD_TYPE),Release)
 use_jni := $(or $(USE_JNI),False)
@@ -43,16 +44,17 @@ build:
 	@echo "use_python_binding: ${use_python_binding}"
 	@echo "with_fiu: ${with_fiu}"
 	@echo "with_crt: ${with_crt}"
+	@echo "with_talon: ${with_talon}"
 
 	mkdir -p build && cd build && \
 	${CONAN_BASE} \
 	-o "&:with_ut=${with_ut}" -o "&:with_benchmark=${with_benchmark}" -o "&:with_asan=${use_asan}" \
 	-o "&:with_jni=${use_jni}" -o "&:with_python_binding=${use_python_binding}" -o "&:with_fiu=${with_fiu}" \
-	-o "&:with_crt=${with_crt}" && \
+	-o "&:with_crt=${with_crt}" -o "&:with_talon=${with_talon}" && \
 	conan build .. ${CONAN_SETTINGS} \
 	-o "&:with_ut=${with_ut}" -o "&:with_benchmark=${with_benchmark}" -o "&:with_asan=${use_asan}" \
 	-o "&:with_jni=${use_jni}" -o "&:with_python_binding=${use_python_binding}" -o "&:with_fiu=${with_fiu}" \
-	-o "&:with_crt=${with_crt}"
+	-o "&:with_crt=${with_crt}" -o "&:with_talon=${with_talon}"
 
 package: build
 	mkdir -p build && cd build && \
@@ -117,6 +119,47 @@ test-cloud-storage: build
 
 # Individual cloud provider targets
 aws gcp azure aliyun tencent huawei: test-cloud-storage
+
+# Talon read-through cache. These targets are "bare": they build with the Talon C
+# SDK and run the test / benchmark against a stack that is ALREADY up. The stack
+# (a containerized coordinator + worker backed by MinIO) is owned by
+# scripts/setup_talon.sh, which builds the server images from the same pinned
+# talon source the C SDK was fetched from. The canonical path is the orchestrator,
+# which runs the already-built binary on the stack network (the only place the
+# worker is reachable — see the setup_talon.sh header):
+#
+#   ./scripts/setup_talon.sh up      # bring the stack up (leave running)
+#   ./scripts/setup_talon.sh test    # run the Talon gtest against it
+#   ./scripts/setup_talon.sh down    # tear it down
+#
+# or in one self-cleaning shot:  ./scripts/setup_talon.sh e2e
+#
+# The targets below are the manual build+run equivalent, for a dev shell that is
+# itself joined to the stack network; set TALON_COORDINATOR_ADDR to the
+# coordinator's on-network address there (talon_env.sh's 127.0.0.1 default only
+# fits a host-published stack, which the containerized stack is not).
+test-talon:
+	$(MAKE) build WITH_TALON=True
+	export LD_LIBRARY_PATH="$$LD_LIBRARY_PATH:$(CURDIR)/build/${build_type}:$(CURDIR)/build/${build_type}/libs"; \
+	. ./scripts/talon_env.sh; \
+	./build/${build_type}/test/milvus_test --gtest_filter='Talon*'
+
+# Built for measurement, not debugging: USE_ASAN=False (ASan perturbs timing and
+# the default build turns it on) and WITH_UT=False (the unit-test build injects
+# -fprofile-arcs coverage flags that the benchmark would inherit, and drags in
+# Test_FFI, whose folly/libaio link is broken in non-ASan builds).
+#
+# The clean build is required, not just tidy: toggling these options on an existing
+# build dir does not reliably reconfigure (conan/CMake keep the previously cached
+# WITH_ASAN/WITH_UT, so a build left over from `test-talon` would still be ASan +
+# would still build the broken Test_FFI). A fresh configure applies the options from
+# scratch and also yields clean, reproducible throughput numbers.
+benchmark-talon:
+	$(MAKE) clean
+	$(MAKE) build WITH_TALON=True USE_ASAN=False WITH_UT=False
+	export LD_LIBRARY_PATH="$$LD_LIBRARY_PATH:$(CURDIR)/build/${build_type}:$(CURDIR)/build/${build_type}/libs"; \
+	. ./scripts/talon_env.sh; \
+	./build/${build_type}/benchmark/benchmark --benchmark_filter='TalonReaderBenchmark'
 
 # Source directories for formatting
 FORMAT_DIRS := ./src ./include ./test ./benchmark

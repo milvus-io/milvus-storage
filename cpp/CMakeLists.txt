@@ -13,10 +13,15 @@ option(WITH_JNI "Build with JNI library." OFF)
 option(WITH_PYTHON_BINDING "Build for Python bindings with hidden symbols." OFF)
 option(WITH_FIU "Build with fault injection support (libfiu)." OFF)
 option(WITH_CRT "Build with AWS S3 CRT support." OFF)
+option(WITH_TALON "Build with Talon C SDK input-file support." OFF)
 option(ARROW_WITH_JEMALLOC "Build with jemalloc." OFF)
 
 if (WITH_CRT)
   add_compile_definitions(WITH_CRT)
+endif()
+
+if (WITH_TALON)
+  add_compile_definitions(WITH_TALON)
 endif()
 
 include(GNUInstallDirs)
@@ -57,6 +62,20 @@ else()
   set(AVRO_TARGET avro-cpp::avrocpp_s)
 endif()
 
+# When Talon is enabled, establish Corrosion at this top-level scope up front so
+# both the Rust bridge subdirectory (added below) and the Talon crate import
+# further down share a single Corrosion instance. Without Talon the bridge keeps
+# owning its own Corrosion, exactly as before.
+if (WITH_TALON)
+  include(FetchContent)
+  FetchContent_Declare(
+    Corrosion
+    GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
+    GIT_TAG v0.5
+  )
+  FetchContent_MakeAvailable(Corrosion)
+endif()
+
 # Rust bridge for Vortex and Lance formats (always built)
 set(RUST_BRIDGE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/format/bridge/rust)
 set(CORROSION_FEATURES "")
@@ -67,6 +86,38 @@ add_subdirectory(${RUST_BRIDGE_PATH})
 
 list(APPEND LINK_LIBS prsbridge)
 list(APPEND INCLUDE_PATHS ${RUST_BRIDGE_PATH}/include/)
+
+# Talon distributed object-cache client (optional upstream dependency).
+# Fetches the Talon repository at a pinned commit and builds its C SDK crate
+# (workspace member `talon-c` -> libtalon_c) from source with Corrosion, the
+# same mechanism used for the Rust bridge above. The C ABI header (talon.h) and
+# the static library both come from the fetched Talon source tree; milvus-storage
+# only owns the C++ wrapper in src/filesystem/talon that binds against them.
+if (WITH_TALON)
+  FetchContent_Declare(
+    talon
+    GIT_REPOSITORY https://github.com/milvus-io/talon.git
+    # PR #564 merge commit: C SDK optional version/size fast-path + concurrent block reads.
+    GIT_TAG dcfa3b833bd02c6b69dc98f8777f9eda4e4d631b
+  )
+  FetchContent_GetProperties(talon)
+  if(NOT talon_POPULATED)
+    FetchContent_Populate(talon)
+  endif()
+
+  # CRATES selects the Cargo package `talon-c`; Corrosion creates the imported
+  # library target from its lib name (`talon_c`), normalizing hyphens to
+  # underscores, so the link target below is `talon_c` (compare the Rust bridge,
+  # which links `rust_bridge`).
+  corrosion_import_crate(
+    MANIFEST_PATH ${talon_SOURCE_DIR}/Cargo.toml
+    CRATES talon-c
+  )
+
+  list(APPEND LINK_LIBS talon_c)
+  list(APPEND INCLUDE_PATHS ${talon_SOURCE_DIR}/clients/c/include)
+  message(STATUS "Talon C SDK enabled (source: ${talon_SOURCE_DIR})")
+endif()
 
 list(APPEND LINK_LIBS milvus-common::milvus-common)
 message(STATUS "milvus-common found; enabling Vortex cache translator")
@@ -85,6 +136,12 @@ file(GLOB_RECURSE ALL_SRC_FILES
 )
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/bridge/.*\\.(cpp|cc)$")
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
+
+# The Talon wrapper binds against the Talon C SDK, which is only fetched/linked
+# when WITH_TALON is set; keep it out of the default build.
+if (NOT WITH_TALON)
+  list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/filesystem/talon/.*\\.(cpp|cc)$")
+endif()
 
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
