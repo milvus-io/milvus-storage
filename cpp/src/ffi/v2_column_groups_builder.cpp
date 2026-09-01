@@ -77,14 +77,16 @@ LoonColumnGroups* BuildLoonColumnGroups(const std::vector<std::vector<std::strin
         out.columns[c] = dup_cstr(cols[c]);
       }
 
-      // Cumulative row offsets within the group: file i covers
-      // [start_i, end_i) where start_i = sum(rowCounts[0..i)).
-      int64_t cumulative = 0;
+      // start_index / end_index are PER-FILE row ranges, zero-based within
+      // each file, matching the contract the packed reader intersects against
+      // (column_group_reader.cpp) and what the parquet writer records per file
+      // (parquet_writer.cpp). Cumulative group-level offsets would make every
+      // file after the first produce an empty intersection with its own
+      // zero-based row groups, silently dropping rows for multi-file groups.
       for (size_t f = 0; f < files.size(); ++f) {
         out.files[f].path = dup_cstr(files[f]);
-        out.files[f].start_index = cumulative;
-        out.files[f].end_index = cumulative + rcs[f];
-        cumulative += rcs[f];
+        out.files[f].start_index = 0;
+        out.files[f].end_index = rcs[f];
         out.files[f].property_keys = nullptr;
         out.files[f].property_values = nullptr;
         out.files[f].num_properties = 0;

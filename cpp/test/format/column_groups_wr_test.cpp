@@ -25,6 +25,8 @@
 
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/ffi_internal/bridge.h"
+#include "milvus-storage/ffi_internal/v2_column_groups_builder.h"
 #include "milvus-storage/format/async_tasks.h"
 #include "milvus-storage/format/column_group_reader.h"
 #include "milvus-storage/format/column_group_lazy_reader.h"
@@ -436,6 +438,69 @@ TEST_P(ColumnGroupsWRTest, TestProjection) {
     ASSERT_AND_ASSIGN(auto chunk, reader->get_chunk(0));
     ASSERT_GT(chunk->num_columns(), 0);
   }
+}
+
+TEST_P(ColumnGroupsWRTest, TestMultiFileGroupBuildLoonReadsAllRows) {
+  // BuildLoonColumnGroups records LOON_FORMAT_PARQUET on every group, so this
+  // path only applies to parquet files (matches the connector's V2 packed read
+  // of binlog/parquet segments).
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "BuildLoonColumnGroups is parquet-only";
+  }
+
+  std::array<bool, 4> projection = {true, false, false, true};
+  ASSERT_AND_ASSIGN(auto two_cols_schema, CreateTestSchema(projection));
+  ASSERT_AND_ASSIGN(auto cgsvec, generate_25600_rows_data(format, two_cols_schema, projection));
+
+  // Two files, one column group each, 25600 rows per file.
+  ASSERT_EQ(cgsvec.size(), 2u);
+  auto origin_cg0 = (*cgsvec[0])[0];
+  auto origin_cg1 = (*cgsvec[1])[0];
+  ASSERT_EQ(origin_cg0->files.size(), 1u);
+  ASSERT_EQ(origin_cg1->files.size(), 1u);
+  const int64_t rows0 = origin_cg0->files[0].end_index;
+  const int64_t rows1 = origin_cg1->files[0].end_index;
+  ASSERT_GT(rows0, 0);
+  ASSERT_GT(rows1, 0);
+
+  // Rebuild one column group spanning BOTH files exactly as the connector's
+  // MilvusStorageColumnGroups.createFromGroups path does.
+  std::vector<std::vector<std::string>> cols = {{"id", "vector"}};
+  std::vector<std::vector<std::string>> files = {{origin_cg0->files[0].path, origin_cg1->files[0].path}};
+  std::vector<std::vector<int64_t>> rcs = {{rows0, rows1}};
+  LoonColumnGroups* loon_cgs = BuildLoonColumnGroups(cols, files, rcs);
+  ASSERT_NE(loon_cgs, nullptr);
+
+  // The built file ranges must be per-file ([0, rows_i)), not group-cumulative;
+  // otherwise the packed reader intersects them against each file's own
+  // zero-based row groups and silently drops all rows after the first file.
+  ASSERT_EQ(loon_cgs->column_group_array[0].files[0].start_index, 0);
+  ASSERT_EQ(loon_cgs->column_group_array[0].files[0].end_index, rows0);
+  ASSERT_EQ(loon_cgs->column_group_array[0].files[1].start_index, 0);
+  ASSERT_EQ(loon_cgs->column_group_array[0].files[1].end_index, rows1);
+
+  ColumnGroups imported;
+  ASSERT_STATUS_OK(column_groups_import(loon_cgs, &imported));
+  loon_column_groups_destroy(loon_cgs);
+  ASSERT_EQ(imported.size(), 1u);
+  ASSERT_EQ(imported[0]->files.size(), 2u);
+
+  // Read back through the native packed reader and pin total rows == sum of
+  // per-file row counts (regression: file 2+ used to disappear silently).
+  ASSERT_AND_ASSIGN(auto chunk_reader, ColumnGroupReader::create(two_cols_schema, imported[0], {"id"}, properties_,
+                                                                 nullptr /* key_retriever */));
+  const int64_t expected_total = rows0 + rows1;
+  EXPECT_EQ(chunk_reader->total_rows(), static_cast<size_t>(expected_total));
+
+  int64_t got_rows = 0;
+  const size_t num_chunks = chunk_reader->total_number_of_chunks();
+  ASSERT_GT(num_chunks, 0);
+  for (size_t i = 0; i < num_chunks; ++i) {
+    ASSERT_AND_ASSIGN(auto chunk, chunk_reader->get_chunk(i));
+    ASSERT_NE(chunk, nullptr);
+    got_rows += chunk->num_rows();
+  }
+  EXPECT_EQ(got_rows, expected_total);
 }
 
 TEST_P(ColumnGroupsWRTest, TestTakeAsync) {

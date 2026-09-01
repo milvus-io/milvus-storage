@@ -60,8 +60,8 @@ TEST(V2ColumnGroupsBuilder, BuildsExpectedLayout) {
   EXPECT_EQ(g0.files[0].start_index, 0);
   EXPECT_EQ(g0.files[0].end_index, 10);
   EXPECT_STREQ(g0.files[1].path, "g0/f1.parquet");
-  EXPECT_EQ(g0.files[1].start_index, 10);
-  EXPECT_EQ(g0.files[1].end_index, 35);
+  EXPECT_EQ(g0.files[1].start_index, 0);
+  EXPECT_EQ(g0.files[1].end_index, 25);
   EXPECT_EQ(g0.files[0].num_properties, 0u);
   EXPECT_EQ(g0.files[0].property_keys, nullptr);
   EXPECT_EQ(g0.files[0].property_values, nullptr);

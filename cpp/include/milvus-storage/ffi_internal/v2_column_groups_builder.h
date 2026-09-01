@@ -32,9 +32,10 @@ namespace milvus_storage {
 // `loon_column_groups_destroy` (matches the allocation scheme used here:
 // `new[]` + per-string heap copy).
 //
-// start_index / end_index per file are computed as cumulative row offsets
-// within each column group; the packed reader rejects negative end_index,
-// so row counts must be supplied explicitly.
+// start_index / end_index are per-file row ranges, zero-based within each
+// file: file f covers [0, rowCounts[f]). This matches the per-file contract
+// the packed reader intersects against (column_group_reader.cpp) and what the
+// parquet writer records per file (parquet_writer.cpp).
 //
 // Throws std::invalid_argument on:
 //   - mismatched outer lengths between the three vectors
