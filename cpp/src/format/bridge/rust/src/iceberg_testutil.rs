@@ -26,18 +26,121 @@ use bytes::Bytes;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 
-use iceberg::io::FileIO;
+use iceberg::io::{
+    FileIO, FileIOBuilder, LocalFsStorageFactory, MemoryStorageFactory, StorageFactory,
+};
 use iceberg::spec::{
     DataContentType, DataFileBuilder, DataFileFormat, FormatVersion, ManifestListWriter,
     ManifestWriterBuilder, NestedField, Operation, PartitionSpec, PrimitiveType, Schema, Snapshot,
     SortOrder, Summary, TableMetadataBuilder, Type, UnboundPartitionSpec,
 };
+use iceberg_storage_opendal::OpenDalStorageFactory;
 
 use crate::TOKIO_RT;
-use crate::iceberg_bridgeimpl::{
-    build_file_io, denormalize_uri, normalize_uri, vec_to_hashmap,
-};
+use crate::iceberg_bridgeimpl::{denormalize_uri, vec_to_hashmap};
 use crate::iceberg_test_ffi::IcebergTestTableInfo;
+
+fn azdls_factory(scheme: &str) -> anyhow::Result<OpenDalStorageFactory> {
+    // `OpenDalStorageFactory::Azdls { configured_scheme }` is public, but
+    // `AzureStorageScheme` is not re-exported by iceberg-storage-opendal.
+    let variant = match scheme {
+        "abfs" => "Abfs",
+        "abfss" => "Abfss",
+        "wasb" => "Wasb",
+        "wasbs" => "Wasbs",
+        _ => anyhow::bail!("Unsupported Azure storage scheme: {scheme}"),
+    };
+    let json = format!(r#"{{"Azdls":{{"configured_scheme":"{variant}"}}}}"#);
+    serde_json::from_str(&json).map_err(|error| anyhow::anyhow!("construct Azdls factory: {error}"))
+}
+
+/// Scheme → `iceberg-storage-opendal` variant. Hand-written because 0.9
+/// ships no `from_scheme` helper; collapse when upstream adds one.
+fn upstream_opendal_factory(scheme: &str) -> anyhow::Result<Arc<dyn StorageFactory>> {
+    match scheme {
+        "s3" | "s3a" => Ok(Arc::new(OpenDalStorageFactory::S3 {
+            configured_scheme: scheme.to_string(),
+            customized_credential_load: None,
+        })),
+        "gs" => Ok(Arc::new(OpenDalStorageFactory::Gcs)),
+        "oss" => Ok(Arc::new(OpenDalStorageFactory::Oss)),
+        "abfs" | "abfss" | "wasb" | "wasbs" => Ok(Arc::new(azdls_factory(scheme)?)),
+        "file" => Ok(Arc::new(LocalFsStorageFactory)),
+        "memory" => Ok(Arc::new(MemoryStorageFactory)),
+        other => anyhow::bail!("Unsupported scheme for iceberg FileIO: {other}"),
+    }
+}
+
+fn build_file_io(
+    scheme: &str,
+    props: &HashMap<String, String>,
+) -> anyhow::Result<iceberg::io::FileIO> {
+    let factory = upstream_opendal_factory(scheme)?;
+    let mut builder = FileIOBuilder::new(factory);
+    for (k, v) in props.iter() {
+        builder = builder.with_prop(k, v);
+    }
+    // `FileIOBuilder::build` became infallible in iceberg 0.9 (was
+    // `Result<FileIO>` in 0.8); storage construction is deferred to first
+    // use inside `FileIO::get_storage`.
+    Ok(builder.build())
+}
+
+/// Normalize a test-writer URI and detect the native FileIO scheme.
+///
+/// Returns `(normalized_uri, io_scheme)`:
+/// - S3/GCS/local: URI unchanged, scheme mapped (e.g. "s3a" → "s3")
+/// - Azure: Milvus `azure://container/path` is canonicalized to ABFSS, then
+///   expanded to `abfss://container@{account}.dfs.{suffix}/path`
+fn normalize_uri(uri: &str, props: &HashMap<String, String>) -> (String, String) {
+    let scheme_end = match uri.find("://") {
+        Some(pos) => pos,
+        None => return (uri.to_string(), "file".to_string()),
+    };
+    let authority_start = scheme_end + 3;
+    let rest = &uri[authority_start..];
+    let scheme = &uri[..scheme_end];
+    match scheme {
+        "azure" | "abfss" | "abfs" => {
+            // `azure` is the Milvus external-source scheme. Iceberg/OpenDAL
+            // requires a standard Azure Data Lake Storage scheme.
+            let normalized_scheme = if scheme == "azure" { "abfss" } else { scheme };
+            // Only check for '@' in the authority (before the first '/').
+            // Paths can legitimately contain '@' (e.g. abfss://container/user@org/file).
+            let authority = rest.split('/').next().unwrap_or(rest);
+            let normalized = if authority.contains('@') {
+                format!("{normalized_scheme}://{rest}")
+            } else {
+                let account = match props.get("adls.account-name") {
+                    Some(a) if !a.is_empty() => a,
+                    _ => {
+                        return (
+                            format!("{normalized_scheme}://{rest}"),
+                            "abfss".to_string(),
+                        );
+                    }
+                };
+                let suffix = props
+                    .get("adls.endpoint-suffix")
+                    .map(|s| s.as_str())
+                    .unwrap_or("core.windows.net");
+                if let Some(slash) = rest.find('/') {
+                    let container = &rest[..slash];
+                    let path = &rest[slash..];
+                    format!(
+                        "{normalized_scheme}://{container}@{account}.dfs.{suffix}{path}"
+                    )
+                } else {
+                    format!("{normalized_scheme}://{rest}@{account}.dfs.{suffix}")
+                }
+            };
+            (normalized, "abfss".to_string())
+        }
+        "s3" | "s3a" => (uri.to_string(), "s3".to_string()),
+        "gs" | "gcs" => (uri.to_string(), "gs".to_string()),
+        scheme => (uri.to_string(), scheme.to_string()),
+    }
+}
 
 /// Write a Parquet record batch to bytes in memory.
 fn write_parquet_to_bytes(
@@ -83,7 +186,7 @@ pub fn iceberg_create_test_table(
         (!record_scheme_override.is_empty()).then_some(record_scheme_override);
 
     TOKIO_RT.block_on(async {
-        let mut props = vec_to_hashmap(storage_options_keys, storage_options_values);
+        let props = vec_to_hashmap(storage_options_keys, storage_options_values);
 
         // Normalize URI for opendal and detect FileIO scheme in one pass.
         let (resolved_dir, scheme) = normalize_uri(table_dir, &props);
@@ -94,7 +197,7 @@ pub fn iceberg_create_test_table(
 
         // Build FileIO with storage options via the shared scheme-dispatch
         // helper; iceberg 0.9 no longer accepts a bare scheme string.
-        let file_io = build_file_io(&resolved_dir, &scheme, &mut props).await?;
+        let file_io = build_file_io(&scheme, &props)?;
 
         // Create directories for local filesystem only (S3 has no directories)
         if is_local {
@@ -370,9 +473,9 @@ pub fn iceberg_create_test_table(
 /// This is purely a test-side affordance for cross-tenant GCP: the test has
 /// to write via S3-compatibility (`s3://` endpoint at `storage.googleapis.com`
 /// with HMAC AK/SK — the only way, because opendal's native GCS backend
-/// rejects HMAC) but must then read via native `gs://` with SA impersonation,
-/// which is the feature under test. Production writers pick one scheme up
-/// front and stick with it, so they never need this path.
+/// rejects HMAC) but must then read via `gs://` through the C++ filesystem with
+/// SA impersonation, which is the feature under test. Production writers pick
+/// one scheme up front and stick with it, so they never need this path.
 ///
 /// ## Why byte-level replace is safe
 ///
@@ -439,6 +542,80 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_normalize_uri_scheme_detection() {
+        let empty: HashMap<String, String> = HashMap::new();
+        // S3
+        assert_eq!(normalize_uri("s3://bucket/path", &empty).1, "s3");
+        assert_eq!(normalize_uri("s3a://bucket/path", &empty).1, "s3");
+        // GCS
+        assert_eq!(normalize_uri("gs://bucket/path", &empty).1, "gs");
+        assert_eq!(normalize_uri("gcs://bucket/path", &empty).1, "gs");
+        // Azure
+        assert_eq!(normalize_uri("abfss://c/path", &empty).1, "abfss");
+        assert_eq!(normalize_uri("abfs://c/path", &empty).1, "abfss");
+        // Local
+        assert_eq!(normalize_uri("/tmp/path", &empty).1, "file");
+        assert_eq!(normalize_uri("file:///tmp/path", &empty).1, "file");
+    }
+
+    #[test]
+    fn test_normalize_uri() {
+        let props: HashMap<String, String> = [
+            ("adls.account-name".into(), "myaccount".into()),
+            ("adls.endpoint-suffix".into(), "core.windows.net".into()),
+        ]
+        .into();
+        // Simple format → container@endpoint format
+        assert_eq!(
+            normalize_uri("abfss://mycontainer/some/path", &props).0,
+            "abfss://mycontainer@myaccount.dfs.core.windows.net/some/path"
+        );
+        // Milvus Azure URI → standard ABFSS URI for Iceberg/OpenDAL.
+        assert_eq!(
+            normalize_uri("azure://mycontainer/some/path", &props),
+            (
+                "abfss://mycontainer@myaccount.dfs.core.windows.net/some/path".to_string(),
+                "abfss".to_string()
+            )
+        );
+        // Already has @ → unchanged
+        assert_eq!(
+            normalize_uri("abfss://c@acc.dfs.core.windows.net/p", &props).0,
+            "abfss://c@acc.dfs.core.windows.net/p"
+        );
+        // S3 → unchanged
+        assert_eq!(
+            normalize_uri("s3://bucket/key", &props).0,
+            "s3://bucket/key"
+        );
+        // Default suffix when not provided
+        let props_no_suffix: HashMap<String, String> =
+            [("adls.account-name".into(), "acc".into())].into();
+        assert_eq!(
+            normalize_uri("abfss://cont/path", &props_no_suffix).0,
+            "abfss://cont@acc.dfs.core.windows.net/path"
+        );
+    }
+
+    #[test]
+    fn test_normalize_denormalize_roundtrip() {
+        let props: HashMap<String, String> = [
+            ("adls.account-name".into(), "hnsbucket".into()),
+            ("adls.endpoint-suffix".into(), "core.windows.net".into()),
+        ]
+        .into();
+        let simple = "abfss://hnsbucket/test-dir/iceberg/data/file.parquet";
+        let (normalized, scheme) = normalize_uri(simple, &props);
+        assert_eq!(scheme, "abfss");
+        assert_eq!(
+            normalized,
+            "abfss://hnsbucket@hnsbucket.dfs.core.windows.net/test-dir/iceberg/data/file.parquet"
+        );
+        let denormalized = denormalize_uri(&normalized);
+        assert_eq!(denormalized, simple);
+    }
+
+    #[test]
     fn test_create_basic_table() {
         let dir = tempfile::tempdir().unwrap();
         let table_dir = dir.path().to_str().unwrap();
@@ -448,18 +625,7 @@ mod tests {
         assert_eq!(info.snapshot_id, 1);
         assert!(!info.metadata_location.is_empty());
         assert!(!info.data_file_uri.is_empty());
-
-        // Verify we can plan files from this table
-        let result = crate::iceberg_bridgeimpl::iceberg_plan_files(
-            &info.metadata_location,
-            info.snapshot_id,
-            vec![],
-            vec![],
-        )
-        .unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].record_count, 10);
-        assert_eq!(result[0].data_file_path, info.data_file_uri);
+        assert!(dir.path().join("metadata/v1.metadata.json").is_file());
     }
 
     #[test]
@@ -471,17 +637,9 @@ mod tests {
             iceberg_create_test_table(table_dir, 20, true, vec![2, 5, 10], vec![], vec![], "")
                 .unwrap();
         assert_eq!(info.snapshot_id, 1);
-
-        let result = crate::iceberg_bridgeimpl::iceberg_plan_files(
-            &info.metadata_location,
-            info.snapshot_id,
-            vec![],
-            vec![],
-        )
-        .unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].record_count, 20);
-        // Should have delete metadata
-        assert!(!result[0].delete_metadata_json.is_empty());
+        assert!(!info.metadata_location.is_empty());
+        assert!(!info.data_file_uri.is_empty());
+        assert!(dir.path().join("data/00000-0-pos-delete.parquet").is_file());
+        assert!(dir.path().join("metadata/manifest-deletes-0.avro").is_file());
     }
 }

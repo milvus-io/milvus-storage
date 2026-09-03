@@ -297,10 +297,11 @@ class ExternalTableTest : public ::testing::TestWithParam<std::string> {
     }
     auto path = test_base_ + "/iceberg";
     auto table_uri = MakeTableUri(bucket, path);
-    auto storage_options = iceberg::ToStorageOptions(fs_config_);
+    ARROW_ASSIGN_OR_RAISE(auto storage_options, iceberg::ToWriterOptions(fs_config_));
 
-    auto table_info = iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options);
-    auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+    ARROW_ASSIGN_OR_RAISE(auto table_info, iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options));
+    ARROW_ASSIGN_OR_RAISE(auto file_infos, iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, fs_,
+                                                              iceberg::ToReaderOptions(fs_config_)));
     if (file_infos.empty()) {
       return arrow::Status::Invalid("PlanFiles returned no files");
     }
@@ -317,10 +318,12 @@ class ExternalTableTest : public ::testing::TestWithParam<std::string> {
     }
     auto path = test_base_ + "/iceberg-deletes";
     auto table_uri = MakeTableUri(bucket, path);
-    auto storage_options = iceberg::ToStorageOptions(fs_config_);
+    ARROW_ASSIGN_OR_RAISE(auto storage_options, iceberg::ToWriterOptions(fs_config_));
 
-    auto table_info = iceberg::CreateTestTable(table_uri, num_rows, true, deleted_ids, storage_options);
-    auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+    ARROW_ASSIGN_OR_RAISE(auto table_info,
+                          iceberg::CreateTestTable(table_uri, num_rows, true, deleted_ids, storage_options));
+    ARROW_ASSIGN_OR_RAISE(auto file_infos, iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, fs_,
+                                                              iceberg::ToReaderOptions(fs_config_)));
     if (file_infos.empty()) {
       return arrow::Status::Invalid("PlanFiles returned no files");
     }
@@ -515,10 +518,12 @@ class ExternalSplitColumnGroupTest : public ::testing::TestWithParam<std::string
 
   arrow::Result<api::ColumnGroupFile> WriteIcebergFile() {
     ARROW_ASSIGN_OR_RAISE(auto table_uri, MakeIcebergTableUri(test_base_ + "/iceberg"));
-    auto storage_options = iceberg::ToStorageOptions(fs_config_);
+    ARROW_ASSIGN_OR_RAISE(auto storage_options, iceberg::ToWriterOptions(fs_config_));
 
-    auto table_info = iceberg::CreateTestTable(table_uri, kSplitExternalTotalRows, false, {}, storage_options);
-    auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+    ARROW_ASSIGN_OR_RAISE(auto table_info,
+                          iceberg::CreateTestTable(table_uri, kSplitExternalTotalRows, false, {}, storage_options));
+    ARROW_ASSIGN_OR_RAISE(auto file_infos, iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, fs_,
+                                                              iceberg::ToReaderOptions(fs_config_)));
     if (file_infos.size() != 1) {
       return arrow::Status::Invalid("Expected exactly one Iceberg data file, got ", file_infos.size());
     }
@@ -1375,10 +1380,10 @@ TEST_F(GcpS3CompatWriteTest, LanceWriteAndRead) {
   std::cout << "[GCP S3-compat] lance-table read OK: " << total << " rows" << std::endl;
 }
 
-// Iceberg: only the opendal-backed write + PlanFiles path is exercised here.
-// The FormatReader read path goes through the C++ AWS SDK S3 filesystem, which
-// under cloud_provider=aws doesn't apply the GCS response-checksum workaround
-// (that's keyed on cloud_provider=gcp), so we skip it intentionally.
+// Iceberg writes through its native OpenDAL test writer, then PlanFiles reads
+// through the supplied C++ AWS SDK S3 filesystem. The data-file FormatReader
+// path is skipped because cloud_provider=aws doesn't apply the GCS
+// response-checksum workaround (that's keyed on cloud_provider=gcp).
 TEST_F(GcpS3CompatWriteTest, IcebergWriteAndPlanFiles) {
   const uint64_t num_rows = 50;
   auto path = test_base_ + "/iceberg";
@@ -1386,11 +1391,12 @@ TEST_F(GcpS3CompatWriteTest, IcebergWriteAndPlanFiles) {
 
   ArrowFileSystemConfig config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(props_, config));
-  auto storage_options = iceberg::ToStorageOptions(config);
+  ASSERT_AND_ASSIGN(auto storage_options, iceberg::ToWriterOptions(config));
 
-  auto table_info = iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options);
+  ASSERT_AND_ASSIGN(auto table_info, iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options));
 
-  auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  ASSERT_AND_ASSIGN(auto file_infos, iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, fs_,
+                                                        iceberg::ToReaderOptions(config)));
   ASSERT_FALSE(file_infos.empty()) << "PlanFiles returned no files";
   ASSERT_EQ(file_infos[0].record_count, num_rows);
   std::cout << "[GCP S3-compat] iceberg-table write+PlanFiles OK: " << file_infos[0].data_file_path << " ("

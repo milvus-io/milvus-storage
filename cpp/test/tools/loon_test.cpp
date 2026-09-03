@@ -23,6 +23,7 @@
 #include "milvus-storage/properties.h"
 #include "milvus-storage/format/format.h"
 #include "milvus-storage/format/format_reader.h"
+#include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "milvus-storage/transaction/transaction.h"
 #include "iceberg_bridge.h"
 #include "paimon_bridge.h"
@@ -67,6 +68,12 @@ class LoonTest : public ::testing::Test {
     (void)status;
     (void)fs_->DeleteDir(base_dir_);
     FilesystemCache::getInstance().clean();
+  }
+
+  arrow::Result<std::vector<iceberg::IcebergFileInfo>> PlanIcebergTable(
+      const iceberg::IcebergTestTableInfo& table_info) {
+    ARROW_ASSIGN_OR_RAISE(auto config, FilesystemCache::resolve_config(properties_, table_info.metadata_location));
+    return PlanFiles(table_info.metadata_location, table_info.snapshot_id, fs_, iceberg::ToReaderOptions(config));
   }
 
   Properties properties_;
@@ -160,11 +167,10 @@ TEST_F(LoonTest, CreateAndReadIceberg) {
   const uint64_t num_rows = 30;
 
   // 1. Create Iceberg test table
-  auto table_info = CreateTestTable(table_dir_, num_rows, false, {});
+  ASSERT_AND_ASSIGN(auto table_info, CreateTestTable(table_dir_, num_rows, false, {}));
 
   // 2. Explore via PlanFiles
-  std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  ASSERT_AND_ASSIGN(auto file_infos, PlanIcebergTable(table_info));
   ASSERT_EQ(file_infos.size(), 1);
 
   // 3. Build ColumnGroup and commit manifest via Transaction
@@ -226,10 +232,9 @@ TEST_F(LoonTest, CreateAndTakeWithDeletes) {
   const uint64_t num_rows = 20;
   std::vector<int64_t> deleted_positions = {3, 7, 15};
 
-  auto table_info = CreateTestTable(table_dir_, num_rows, true, deleted_positions);
+  ASSERT_AND_ASSIGN(auto table_info, CreateTestTable(table_dir_, num_rows, true, deleted_positions));
 
-  std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  ASSERT_AND_ASSIGN(auto file_infos, PlanIcebergTable(table_info));
   ASSERT_EQ(file_infos.size(), 1);
   ASSERT_FALSE(file_infos[0].delete_metadata_json.empty());
 
@@ -280,10 +285,9 @@ TEST_F(LoonTest, SequentialReadFiltersDeletes) {
   const uint64_t num_rows = 15;
   std::vector<int64_t> deleted_positions = {0, 5, 14};
 
-  auto table_info = CreateTestTable(table_dir_, num_rows, true, deleted_positions);
+  ASSERT_AND_ASSIGN(auto table_info, CreateTestTable(table_dir_, num_rows, true, deleted_positions));
 
-  std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  ASSERT_AND_ASSIGN(auto file_infos, PlanIcebergTable(table_info));
 
   std::vector<ColumnGroupFile> files;
   {
@@ -342,10 +346,9 @@ TEST_F(LoonTest, ManifestPreservesDeleteMetadata) {
   const uint64_t num_rows = 10;
   std::vector<int64_t> deleted_positions = {2, 8};
 
-  auto table_info = CreateTestTable(table_dir_, num_rows, true, deleted_positions);
+  ASSERT_AND_ASSIGN(auto table_info, CreateTestTable(table_dir_, num_rows, true, deleted_positions));
 
-  std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  ASSERT_AND_ASSIGN(auto file_infos, PlanIcebergTable(table_info));
 
   // Commit manifest with delete metadata
   std::vector<ColumnGroupFile> files;

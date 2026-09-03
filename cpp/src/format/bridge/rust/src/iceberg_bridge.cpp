@@ -14,6 +14,7 @@
 
 #include "iceberg_bridge.h"
 #include "bridge_util.h"
+#include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"
@@ -22,39 +23,44 @@ namespace milvus_storage::iceberg {
 
 using milvus_storage::ConvertStorageOptions;
 
-std::vector<IcebergFileInfo> PlanFiles(const std::string& metadata_location,
-                                       int64_t snapshot_id,
-                                       const std::unordered_map<std::string, std::string>& storage_options) {
-  try {
+arrow::Result<std::vector<IcebergFileInfo>> PlanFiles(
+    const std::string& metadata_location,
+    int64_t snapshot_id,
+    const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+    const std::unordered_map<std::string, std::string>& read_options) {
+  if (!filesystem) {
+    return arrow::Status::Invalid("PlanFiles requires a non-null filesystem");
+  }
+  return CatchRustResult<std::vector<IcebergFileInfo>>("Failed to plan Iceberg files", [&]() {
     rust::Vec<rust::String> keys, values;
-    ConvertStorageOptions(storage_options, keys, values);
+    ConvertStorageOptions(read_options, keys, values);
 
-    auto rust_results = ffi::iceberg_plan_files(rust::Str(metadata_location.data(), metadata_location.length()),
-                                                snapshot_id, std::move(keys), std::move(values));
+    auto lease = std::make_shared<FileSystemWrapper>(filesystem);
+    auto rust_results =
+        ffi::iceberg_plan_files(std::move(lease), rust::Str(metadata_location.data(), metadata_location.length()),
+                                snapshot_id, std::move(keys), std::move(values));
 
     std::vector<IcebergFileInfo> result;
     result.reserve(rust_results.size());
-    for (const auto& r : rust_results) {
+    for (const auto& item : rust_results) {
       result.push_back(IcebergFileInfo{
-          std::string(r.data_file_path.data(), r.data_file_path.size()),
-          r.record_count,
-          r.num_deleted_rows,
-          std::vector<uint8_t>(r.delete_metadata_json.begin(), r.delete_metadata_json.end()),
+          std::string(item.data_file_path.data(), item.data_file_path.size()),
+          item.record_count,
+          item.num_deleted_rows,
+          std::vector<uint8_t>(item.delete_metadata_json.begin(), item.delete_metadata_json.end()),
       });
     }
     return result;
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw IcebergException(e.what());
-  }
+  });
 }
 
-IcebergTestTableInfo CreateTestTable(const std::string& table_dir,
-                                     uint64_t num_rows,
-                                     bool with_positional_deletes,
-                                     const std::vector<int64_t>& deleted_positions,
-                                     const std::unordered_map<std::string, std::string>& storage_options,
-                                     const std::string& record_scheme_override) {
-  try {
+arrow::Result<IcebergTestTableInfo> CreateTestTable(const std::string& table_dir,
+                                                    uint64_t num_rows,
+                                                    bool with_positional_deletes,
+                                                    const std::vector<int64_t>& deleted_positions,
+                                                    const std::unordered_map<std::string, std::string>& storage_options,
+                                                    const std::string& record_scheme_override) {
+  return CatchRustResult<IcebergTestTableInfo>("Failed to create Iceberg test table", [&]() {
     rust::Vec<int64_t> rust_positions;
     for (auto pos : deleted_positions) {
       rust_positions.push_back(pos);
@@ -72,9 +78,7 @@ IcebergTestTableInfo CreateTestTable(const std::string& table_dir,
         result.snapshot_id,
         std::string(result.data_file_uri.data(), result.data_file_uri.size()),
     };
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw IcebergException(e.what());
-  }
+  });
 }
 
 }  // namespace milvus_storage::iceberg

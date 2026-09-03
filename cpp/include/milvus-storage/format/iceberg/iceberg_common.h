@@ -19,13 +19,19 @@
 #include <unordered_map>
 #include <vector>
 
+#include <arrow/result.h>
+
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage::iceberg {
 
-/// Convert ArrowFileSystemConfig to Iceberg storage options.
-/// @throws std::runtime_error for unsupported providers (Tencent, Huawei)
-std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSystemConfig& config);
+/// Convert ArrowFileSystemConfig to credential-free Iceberg reader options.
+/// Authentication and credential refresh remain owned by the bound C++ filesystem.
+std::unordered_map<std::string, std::string> ToReaderOptions(const ArrowFileSystemConfig& config);
+
+/// Convert ArrowFileSystemConfig to native Iceberg writer options used by tests and benchmarks.
+/// Supports AK/SK and IAM credentials; GCP supports IAM only.
+arrow::Result<std::unordered_map<std::string, std::string>> ToWriterOptions(const ArrowFileSystemConfig& config);
 
 /// Convert a standard-format URI (s3://bucket/key) to Milvus format (s3://endpoint/bucket/key).
 /// Returns the original URI unchanged if address is empty or URI is a local path.
@@ -35,14 +41,15 @@ std::string ToMilvusUri(const std::string& standard_uri, const std::string& addr
 /// Returns the JSON string unchanged if address is empty.
 std::string ConvertDeleteMetadataPaths(const std::vector<uint8_t>& json_bytes, const std::string& address);
 
-/// Strip the @endpoint portion from an ABFSS URI.
-/// "abfss://container@account.dfs.endpoint/path" → "abfss://container/path"
-/// Non-ABFSS URIs or URIs without '@' are returned unchanged.
+/// Strip the @endpoint portion from an Azure Iceberg URI alias.
+/// Supports azure, abfs, abfss, wasb, and wasbs while retaining the legacy
+/// function name for ABI compatibility. Other schemes and URIs without '@'
+/// in their authority are returned unchanged.
 std::string StripAbfssEndpoint(const std::string& uri);
 
 /// Normalize any URI to scheme://bucket/path (the Iceberg simple format).
 /// Handles both Milvus format (scheme://address/bucket/path → strips address)
-/// and ABFSS opendal format (abfss://container@endpoint/path → strips @endpoint).
+/// and Azure recorded format (scheme://container@endpoint/path → strips @endpoint).
 std::string MilvusURIToIcebergURI(const std::string& uri);
 
 }  // namespace milvus_storage::iceberg

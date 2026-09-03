@@ -13,7 +13,10 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+#include <filesystem>
+
 #include "milvus-storage/format/iceberg/iceberg_common.h"
+#include "test_env.h"
 
 namespace milvus_storage::iceberg::test {
 
@@ -31,15 +34,54 @@ static ArrowFileSystemConfig MakeAwsConfig() {
   return config;
 }
 
-TEST_F(IcebergStorageOptionsTest, AwsKeys) {
-  auto opts = ToStorageOptions(MakeAwsConfig());
+TEST_F(IcebergStorageOptionsTest, ReaderOptionsRemoteContainOnlyFilesystemIdentity) {
+  auto config = MakeAwsConfig();
+  config.bucket_name = "tenant-bucket";
 
-  EXPECT_EQ(opts["cloud_provider"], kCloudProviderAWS);
+  auto options = ToReaderOptions(config);
+
+  EXPECT_EQ(options, (std::unordered_map<std::string, std::string>{{"milvus_fs_is_local", "false"},
+                                                                   {"milvus_fs_bucket", "tenant-bucket"}}));
+  EXPECT_EQ(options.count("cloud_provider"), 0);
+  EXPECT_EQ(options.count("s3.access-key-id"), 0);
+  EXPECT_EQ(options.count("s3.secret-access-key"), 0);
+  EXPECT_EQ(options.count("s3.endpoint"), 0);
+}
+
+TEST_F(IcebergStorageOptionsTest, ReaderOptionsLocalNormalizeRoot) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "local";
+  config.root_path = "relative-iceberg-root";
+
+  auto options = ToReaderOptions(config);
+  auto expected = (std::filesystem::current_path() / config.root_path).lexically_normal().string();
+
+  EXPECT_EQ(options.at("milvus_fs_is_local"), "true");
+  EXPECT_EQ(options.at("milvus_fs_root_path"), expected);
+  EXPECT_EQ(options.count("milvus_fs_bucket"), 0);
+}
+
+TEST_F(IcebergStorageOptionsTest, AwsKeys) {
+  ASSERT_AND_ASSIGN(auto opts, ToWriterOptions(MakeAwsConfig()));
+
+  EXPECT_EQ(opts.count("cloud_provider"), 0);
   EXPECT_EQ(opts["s3.access-key-id"], "AKIAIOSFODNN7EXAMPLE");
   EXPECT_EQ(opts["s3.secret-access-key"], "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
   EXPECT_EQ(opts["s3.region"], "us-west-2");
   EXPECT_EQ(opts["s3.endpoint"], "https://s3.us-west-2.amazonaws.com");
   EXPECT_EQ(opts.count("aws_access_key_id"), 0);
+}
+
+TEST_F(IcebergStorageOptionsTest, AwsIamDoesNotForwardStaticCredentials) {
+  auto config = MakeAwsConfig();
+  config.use_iam = true;
+
+  ASSERT_AND_ASSIGN(auto opts, ToWriterOptions(config));
+
+  EXPECT_EQ(opts.count("s3.access-key-id"), 0);
+  EXPECT_EQ(opts.count("s3.secret-access-key"), 0);
+  EXPECT_EQ(opts["s3.region"], "us-west-2");
+  EXPECT_EQ(opts["s3.endpoint"], "https://s3.us-west-2.amazonaws.com");
 }
 
 TEST_F(IcebergStorageOptionsTest, AzureKeys) {
@@ -49,16 +91,16 @@ TEST_F(IcebergStorageOptionsTest, AzureKeys) {
   config.access_key_id = "myaccount";
   config.access_key_value = "myaccountkey";
 
-  auto opts = ToStorageOptions(config);
+  ASSERT_AND_ASSIGN(auto opts, ToWriterOptions(config));
 
-  EXPECT_EQ(opts["cloud_provider"], kCloudProviderAzure);
+  EXPECT_EQ(opts.count("cloud_provider"), 0);
   EXPECT_EQ(opts["adls.account-name"], "myaccount");
   EXPECT_EQ(opts["adls.account-key"], "myaccountkey");
   EXPECT_EQ(opts.count("azure_storage_account_name"), 0);
   EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
 }
 
-TEST_F(IcebergStorageOptionsTest, AzureCredentialBrokerKeysExcludeFallbackCredentials) {
+TEST_F(IcebergStorageOptionsTest, WriterRejectsAzureCredentialBroker) {
   ArrowFileSystemConfig config;
   config.storage_type = "remote";
   config.cloud_provider = kCloudProviderAzure;
@@ -74,23 +116,9 @@ TEST_F(IcebergStorageOptionsTest, AzureCredentialBrokerKeysExcludeFallbackCreden
   config.load_frequency = 3600;
   config.request_timeout_ms = 5000;
 
-  auto opts = ToStorageOptions(config);
-
-  EXPECT_EQ(opts["adls.account-name"], "myaccount");
-  EXPECT_EQ(opts["adls.endpoint-suffix"], "core.windows.net");
-  EXPECT_EQ(opts["azure_broker_endpoint"], "http://credential-broker/v1/credentials/assume-role");
-  EXPECT_EQ(opts["azure_broker_client_id"], "client-id");
-  EXPECT_EQ(opts["azure_broker_tenant_id"], "tenant-id");
-  EXPECT_EQ(opts["azure_broker_account_name"], "myaccount");
-  EXPECT_EQ(opts["azure_broker_region"], "westus3");
-  EXPECT_EQ(opts["azure_broker_bucket"], "mycontainer");
-  EXPECT_EQ(opts["azure_broker_duration_seconds"], "3600");
-  EXPECT_EQ(opts["azure_broker_request_timeout_ms"], "5000");
-  EXPECT_EQ(opts.count("adls.account-key"), 0);
-  EXPECT_EQ(opts.count("adls.client-id"), 0);
-  EXPECT_EQ(opts.count("adls.tenant-id"), 0);
-  EXPECT_EQ(opts.count("adls.sas-token"), 0);
-  EXPECT_EQ(opts["milvus_fs_cache_key"], config.GetCacheKey());
+  auto result = ToWriterOptions(config);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsNotImplemented()) << result.status().ToString();
 }
 
 TEST_F(IcebergStorageOptionsTest, AliyunKeys) {
@@ -102,55 +130,35 @@ TEST_F(IcebergStorageOptionsTest, AliyunKeys) {
   config.address = "oss-cn-hangzhou.aliyuncs.com";
   config.use_ssl = true;
 
-  auto opts = ToStorageOptions(config);
+  ASSERT_AND_ASSIGN(auto opts, ToWriterOptions(config));
 
-  EXPECT_EQ(opts["cloud_provider"], kCloudProviderAliyun);
+  EXPECT_EQ(opts.count("cloud_provider"), 0);
   EXPECT_EQ(opts["oss.access-key-id"], "LTAI5tExample");
   EXPECT_EQ(opts["oss.access-key-secret"], "OSSSecretExample");
   EXPECT_EQ(opts["oss.endpoint"], "https://oss-cn-hangzhou.aliyuncs.com");
-  // Static-AKSK branch must NOT emit role_arn keys — otherwise the Rust side
-  // would incorrectly route through AliyunOssStorage's AssumeRole path.
   EXPECT_EQ(opts.count("oss.role-arn"), 0);
   EXPECT_EQ(opts.count("oss.role-session-name"), 0);
 }
 
-TEST_F(IcebergStorageOptionsTest, AliyunArnRole) {
-  // Per-tenant AssumeRoleWithOIDC. Must emit endpoint/region + role_arn +
-  // session_name, and must NOT emit AK/SK (reqsign's static-creds loader
-  // would otherwise take precedence over the OIDC path; see the module-level
-  // comment in aliyun_oss_provider.rs).
+TEST_F(IcebergStorageOptionsTest, AliyunIamDoesNotForwardStaticCredentials) {
   ArrowFileSystemConfig config;
   config.storage_type = "remote";
   config.cloud_provider = kCloudProviderAliyun;
-  config.role_arn = "acs:ram::111111111111:role/tenant-A";
-  config.session_name = "tenant-A-session";
-  config.external_id = "tenant-A-ext";
+  config.use_iam = true;
+  config.access_key_id = "must-not-be-forwarded";
+  config.access_key_value = "must-not-be-forwarded";
   config.region = "cn-hangzhou";
   config.address = "oss-cn-hangzhou.aliyuncs.com";
-  config.use_ssl = true;
-  // Even if the caller populates AK/SK alongside role_arn, the iceberg
-  // branch must drop them — a caller mistake here should not bypass OIDC.
-  config.access_key_id = "LTAI-should-be-ignored";
-  config.access_key_value = "aksk-should-be-ignored";
 
-  auto opts = ToStorageOptions(config);
+  ASSERT_AND_ASSIGN(auto opts, ToWriterOptions(config));
 
-  EXPECT_EQ(opts["oss.endpoint"], "https://oss-cn-hangzhou.aliyuncs.com");
-  EXPECT_EQ(opts["oss.region"], "cn-hangzhou");
-  EXPECT_EQ(opts["oss.role-arn"], "acs:ram::111111111111:role/tenant-A");
-  EXPECT_EQ(opts["oss.role-session-name"], "tenant-A-session");
-  EXPECT_EQ(opts["oss.external-id"], "tenant-A-ext");
   EXPECT_EQ(opts.count("oss.access-key-id"), 0);
   EXPECT_EQ(opts.count("oss.access-key-secret"), 0);
+  EXPECT_EQ(opts["oss.region"], "cn-hangzhou");
+  EXPECT_EQ(opts["oss.endpoint"], "http://oss-cn-hangzhou.aliyuncs.com");
 }
 
-TEST_F(IcebergStorageOptionsTest, LocalEmpty) {
-  ArrowFileSystemConfig config;
-  config.storage_type = "local";
-  EXPECT_TRUE(ToStorageOptions(config).empty());
-}
-
-TEST_F(IcebergStorageOptionsTest, GcpImpersonation) {
+TEST_F(IcebergStorageOptionsTest, WriterRejectsGcpImpersonation) {
   ArrowFileSystemConfig config;
   config.storage_type = "remote";
   config.cloud_provider = kCloudProviderGCP;
@@ -158,34 +166,95 @@ TEST_F(IcebergStorageOptionsTest, GcpImpersonation) {
   config.gcp_target_service_account = "target-sa@customer-project.iam.gserviceaccount.com";
   config.load_frequency = 1800;
 
-  auto opts = ToStorageOptions(config);
-
-  EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
-  EXPECT_EQ(opts["gcs.service-account"], "target-sa@customer-project.iam.gserviceaccount.com");
-  EXPECT_EQ(opts["gcp_credential_refresh_secs"], "1800");
-  EXPECT_EQ(opts["milvus_fs_cache_key"], config.GetCacheKey());
+  auto result = ToWriterOptions(config);
+  EXPECT_TRUE(result.status().IsNotImplemented()) << result.status().ToString();
 }
 
-TEST_F(IcebergStorageOptionsTest, GcpTargetServiceAccountRequiresIam) {
+TEST_F(IcebergStorageOptionsTest, WriterRejectsGcpImpersonationWithoutIam) {
   ArrowFileSystemConfig config;
   config.storage_type = "remote";
   config.cloud_provider = kCloudProviderGCP;
+  config.use_iam = false;
   config.gcp_target_service_account = "target-sa@customer-project.iam.gserviceaccount.com";
 
-  auto opts = ToStorageOptions(config);
-
-  EXPECT_EQ(opts.size(), 1);
-  EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
-  EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
+  auto result = ToWriterOptions(config);
+  EXPECT_TRUE(result.status().IsNotImplemented()) << result.status().ToString();
 }
 
-TEST_F(IcebergStorageOptionsTest, GcpDefaultCredentials) {
+TEST_F(IcebergStorageOptionsTest, WriterRejectsGcpHmacCredentials) {
   ArrowFileSystemConfig config;
   config.storage_type = "remote";
   config.cloud_provider = kCloudProviderGCP;
-  auto opts = ToStorageOptions(config);
-  EXPECT_EQ(opts.size(), 1);
-  EXPECT_EQ(opts["cloud_provider"], kCloudProviderGCP);
+  config.access_key_id = "GOOGACCESSKEY";
+  config.access_key_value = "secret";
+
+  auto result = ToWriterOptions(config);
+  EXPECT_TRUE(result.status().IsNotImplemented()) << result.status().ToString();
+}
+
+TEST_F(IcebergStorageOptionsTest, GcpIamUsesDefaultCredentials) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderGCP;
+  config.use_iam = true;
+
+  ASSERT_AND_ASSIGN(auto opts, ToWriterOptions(config));
+
+  EXPECT_TRUE(opts.empty());
+}
+
+TEST_F(IcebergStorageOptionsTest, WriterRejectsAwsAssumeRole) {
+  auto config = MakeAwsConfig();
+  config.role_arn = "arn:aws:iam::123456789012:role/test-role";
+
+  auto result = ToWriterOptions(config);
+  EXPECT_TRUE(result.status().IsNotImplemented()) << result.status().ToString();
+}
+
+TEST_F(IcebergStorageOptionsTest, WriterRejectsAliyunRole) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderAliyun;
+  config.role_arn = "acs:ram::123456789012:role/test-role";
+
+  auto result = ToWriterOptions(config);
+  EXPECT_TRUE(result.status().IsNotImplemented()) << result.status().ToString();
+}
+
+TEST_F(IcebergStorageOptionsTest, WriterRejectsUnsupportedProvider) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderTencent;
+
+  auto result = ToWriterOptions(config);
+  EXPECT_TRUE(result.status().IsNotImplemented()) << result.status().ToString();
+}
+
+TEST_F(IcebergStorageOptionsTest, WriterRejectsUnknownProvider) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = "unknown";
+
+  auto result = ToWriterOptions(config);
+  EXPECT_TRUE(result.status().IsNotImplemented()) << result.status().ToString();
+}
+
+TEST_F(IcebergStorageOptionsTest, WriterRejectsMissingCredentials) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderAWS;
+
+  auto result = ToWriterOptions(config);
+  EXPECT_TRUE(result.status().IsNotImplemented()) << result.status().ToString();
+}
+
+TEST_F(IcebergStorageOptionsTest, LocalWriterOptionsAreEmpty) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "local";
+
+  ASSERT_AND_ASSIGN(auto opts, ToWriterOptions(config));
+
+  EXPECT_TRUE(opts.empty());
   EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
 }
 
@@ -194,7 +263,7 @@ TEST_F(IcebergStorageOptionsTest, BareEndpointUsesHttpWhenSslDisabled) {
   config.address = "localhost:9000";
   config.use_ssl = false;
 
-  auto opts = ToStorageOptions(config);
+  ASSERT_AND_ASSIGN(auto opts, ToWriterOptions(config));
 
   EXPECT_EQ(opts["s3.endpoint"], "http://localhost:9000");
   EXPECT_EQ(opts["allow_http"], "true");
@@ -205,7 +274,7 @@ TEST_F(IcebergStorageOptionsTest, BareEndpointUsesHttpsWhenSslEnabled) {
   config.address = "s3.us-west-2.amazonaws.com";
   config.use_ssl = true;
 
-  auto opts = ToStorageOptions(config);
+  ASSERT_AND_ASSIGN(auto opts, ToWriterOptions(config));
 
   EXPECT_EQ(opts["s3.endpoint"], "https://s3.us-west-2.amazonaws.com");
   EXPECT_EQ(opts.count("allow_http"), 0);
@@ -216,7 +285,7 @@ TEST_F(IcebergStorageOptionsTest, ExplicitHttpEndpointIsPreserved) {
   config.address = "http://localhost:9000";
   config.use_ssl = true;
 
-  auto opts = ToStorageOptions(config);
+  ASSERT_AND_ASSIGN(auto opts, ToWriterOptions(config));
 
   EXPECT_EQ(opts["s3.endpoint"], "http://localhost:9000");
   EXPECT_EQ(opts["allow_http"], "true");
@@ -227,7 +296,7 @@ TEST_F(IcebergStorageOptionsTest, ExplicitHttpsEndpointIsPreservedWhenSslDisable
   config.address = "https://s3.us-west-2.amazonaws.com";
   config.use_ssl = false;
 
-  auto opts = ToStorageOptions(config);
+  ASSERT_AND_ASSIGN(auto opts, ToWriterOptions(config));
 
   EXPECT_EQ(opts["s3.endpoint"], "https://s3.us-west-2.amazonaws.com");
   EXPECT_EQ(opts.count("allow_http"), 0);

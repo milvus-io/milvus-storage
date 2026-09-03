@@ -16,8 +16,11 @@
 
 #include <arrow/api.h>
 
+#include "milvus-storage/format/format.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/filesystem/observable.h"
+#include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "iceberg_bridge.h"
 #include "test_env.h"
 
@@ -70,6 +73,11 @@ class IcebergIntegrationTest : public ::testing::Test {
     FilesystemCache::getInstance().clean();
   }
 
+  arrow::Result<std::vector<IcebergFileInfo>> PlanTableFiles(const IcebergTestTableInfo& table_info) {
+    ARROW_ASSIGN_OR_RAISE(auto config, FilesystemCache::resolve_config(properties_, table_info.metadata_location));
+    return PlanFiles(table_info.metadata_location, table_info.snapshot_id, fs_, ToReaderOptions(config));
+  }
+
   Properties properties_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::string abs_table_dir_;
@@ -80,11 +88,10 @@ TEST_F(IcebergIntegrationTest, ExploreAndReadBasic) {
   const uint64_t num_rows = 50;
 
   // 1. Create a standard Iceberg table via Rust bridge
-  auto table_info = CreateTestTable(abs_table_dir_, num_rows, false, {});
+  ASSERT_AND_ASSIGN(auto table_info, CreateTestTable(abs_table_dir_, num_rows, false, {}));
 
   // 2. Explore: plan files from the Iceberg metadata
-  std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  ASSERT_AND_ASSIGN(auto file_infos, PlanTableFiles(table_info));
 
   ASSERT_EQ(file_infos.size(), 1);
   ASSERT_EQ(file_infos[0].record_count, num_rows);
@@ -133,17 +140,46 @@ TEST_F(IcebergIntegrationTest, ExploreAndReadBasic) {
   }
 }
 
+TEST_F(IcebergIntegrationTest, ExploreThroughFormatUsesFilesystemPlanner) {
+  const uint64_t num_rows = 12;
+  ASSERT_AND_ASSIGN(auto table_info, CreateTestTable(abs_table_dir_, num_rows, false, {}));
+  api::SetValue(properties_, PROPERTY_ICEBERG_SNAPSHOT_ID, std::to_string(table_info.snapshot_id).c_str());
+
+  ASSERT_AND_ASSIGN(auto* format, Format::get(LOON_FORMAT_ICEBERG_TABLE));
+  ASSERT_AND_ASSIGN(auto files, format->explore(table_info.metadata_location, properties_));
+
+  ASSERT_EQ(files.size(), 1);
+  EXPECT_EQ(files.front().end_index, static_cast<int64_t>(num_rows));
+}
+
+TEST_F(IcebergIntegrationTest, PlanningUpdatesBoundFilesystemMetrics) {
+  ASSERT_AND_ASSIGN(auto table_info, CreateTestTable(abs_table_dir_, 50, false, {}));
+  ASSERT_AND_ASSIGN(auto config, FilesystemCache::resolve_config(properties_, table_info.metadata_location));
+  auto observable = std::dynamic_pointer_cast<Observable>(fs_);
+  ASSERT_NE(observable, nullptr);
+  auto metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+  metrics->Reset();
+
+  ASSERT_AND_ASSIGN(auto files,
+                    PlanFiles(table_info.metadata_location, table_info.snapshot_id, fs_, ToReaderOptions(config)));
+
+  ASSERT_FALSE(files.empty());
+  EXPECT_GT(metrics->GetGetFileInfoCount(), 0);
+  EXPECT_GT(metrics->GetReadCount(), 0);
+  EXPECT_GT(metrics->GetReadBytes(), 0);
+}
+
 // End-to-end: create Iceberg table with positional deletes → explore → read with filtering
 TEST_F(IcebergIntegrationTest, ExploreAndReadWithPositionalDeletes) {
   const uint64_t num_rows = 20;
   std::vector<int64_t> deleted_positions = {3, 7, 15};
 
   // 1. Create Iceberg table with positional deletes
-  auto table_info = CreateTestTable(abs_table_dir_, num_rows, true, deleted_positions);
+  ASSERT_AND_ASSIGN(auto table_info, CreateTestTable(abs_table_dir_, num_rows, true, deleted_positions));
 
   // 2. Explore
-  std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  ASSERT_AND_ASSIGN(auto file_infos, PlanTableFiles(table_info));
 
   ASSERT_EQ(file_infos.size(), 1);
   ASSERT_EQ(file_infos[0].record_count, num_rows);
@@ -201,10 +237,9 @@ TEST_F(IcebergIntegrationTest, TakeWithPositionalDeletes) {
   const uint64_t num_rows = 30;
   std::vector<int64_t> deleted_positions = {5, 10, 20};
 
-  auto table_info = CreateTestTable(abs_table_dir_, num_rows, true, deleted_positions);
+  ASSERT_AND_ASSIGN(auto table_info, CreateTestTable(abs_table_dir_, num_rows, true, deleted_positions));
 
-  std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  ASSERT_AND_ASSIGN(auto file_infos, PlanTableFiles(table_info));
   ASSERT_EQ(file_infos.size(), 1);
 
   auto cg_file = MakeCgFile(file_infos[0]);
@@ -238,10 +273,9 @@ TEST_F(IcebergIntegrationTest, TakeWithPositionalDeletes) {
 TEST_F(IcebergIntegrationTest, ColumnProjection) {
   const uint64_t num_rows = 10;
 
-  auto table_info = CreateTestTable(abs_table_dir_, num_rows, false, {});
+  ASSERT_AND_ASSIGN(auto table_info, CreateTestTable(abs_table_dir_, num_rows, false, {}));
 
-  std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  ASSERT_AND_ASSIGN(auto file_infos, PlanTableFiles(table_info));
   ASSERT_EQ(file_infos.size(), 1);
 
   auto cg_file = MakeCgFile(file_infos[0]);
@@ -266,10 +300,9 @@ TEST_F(IcebergIntegrationTest, CloneReaderSharesDeletes) {
   const uint64_t num_rows = 10;
   std::vector<int64_t> deleted_positions = {2, 8};
 
-  auto table_info = CreateTestTable(abs_table_dir_, num_rows, true, deleted_positions);
+  ASSERT_AND_ASSIGN(auto table_info, CreateTestTable(abs_table_dir_, num_rows, true, deleted_positions));
 
-  std::unordered_map<std::string, std::string> storage_options;
-  auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  ASSERT_AND_ASSIGN(auto file_infos, PlanTableFiles(table_info));
 
   auto cg_file = MakeCgFile(file_infos[0]);
 

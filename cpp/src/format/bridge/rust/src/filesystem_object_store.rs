@@ -681,12 +681,21 @@ impl FilesystemObjectStore {
                 store: "filesystem_c",
                 source: Box::new(source),
             })?;
+
+        enum ReadOutcome {
+            #[cfg(feature = "s3-crt-async")]
+            Async(Arc<ReaderHandle>),
+            Complete(Bytes),
+        }
+
         let filesystem = self.filesystem.clone();
         let ffi_path = self.mapper.to_ffi_path(location);
         let object_path = location.clone();
-        // Passing the metadata size avoids a second HEAD request. ReaderHandle
-        // then closes and destroys the native reader exactly once after all work.
-        let reader = TOKIO_RT
+        let offset = range.start;
+        // Passing the metadata size avoids a second HEAD request. Open and
+        // complete blocking reads in one task; CRT readers return their handle
+        // to the existing callback path instead.
+        let outcome = TOKIO_RT
             .spawn_blocking(move || {
                 let path_len = u32::try_from(ffi_path.len()).map_err(|source| {
                     object_store::Error::Generic {
@@ -720,10 +729,27 @@ impl FilesystemObjectStore {
                         return Err(into_object_store_error(error, &object_path));
                     },
                 };
-                Ok::<_, object_store::Error>(Arc::new(ReaderHandle {
+                let reader = ReaderHandle {
                     ptr: reader_raw,
                     supports_async,
-                }))
+                };
+
+                #[cfg(feature = "s3-crt-async")]
+                if reader.supports_async {
+                    return Ok(ReadOutcome::Async(Arc::new(reader)));
+                }
+
+                let mut buffer = BytesMut::with_capacity(length_usize);
+                let out_data = buffer.spare_capacity_mut().as_mut_ptr().cast::<u8>();
+                let mut result = unsafe {
+                    loon_filesystem_reader_readat(reader.as_ptr(), offset, length, out_data)
+                };
+                check_loon_ffi_result(&mut result, "read object range")
+                    .map_err(|error| into_object_store_error(error, &object_path))?;
+                // SAFETY: the FFI contract returns success only after filling the
+                // entire requested range; the allocation stays inside this task.
+                unsafe { buffer.set_len(length_usize) };
+                Ok(ReadOutcome::Complete(buffer.freeze()))
             })
             .await
             .map_err(|source| object_store::Error::Generic {
@@ -731,31 +757,13 @@ impl FilesystemObjectStore {
                 source: Box::new(source),
             })??;
 
-        #[cfg(feature = "s3-crt-async")]
-        if reader.supports_async {
-            return read_object_store_async_via_ffi(reader, location.clone(), range).await;
+        match outcome {
+            #[cfg(feature = "s3-crt-async")]
+            ReadOutcome::Async(reader) => {
+                read_object_store_async_via_ffi(reader, location.clone(), range).await
+            }
+            ReadOutcome::Complete(bytes) => Ok(bytes),
         }
-
-        let object_path = location.clone();
-        TOKIO_RT
-            .spawn_blocking(move || {
-                let mut buffer = BytesMut::with_capacity(length_usize);
-                let out_data = buffer.spare_capacity_mut().as_mut_ptr().cast::<u8>();
-                let mut result = unsafe {
-                    loon_filesystem_reader_readat(reader.as_ptr(), range.start, length, out_data)
-                };
-                check_loon_ffi_result(&mut result, "read object range")
-                    .map_err(|error| into_object_store_error(error, &object_path))?;
-                // SAFETY: the FFI contract returns success only after filling the
-                // entire requested range; the allocation stays inside this task.
-                unsafe { buffer.set_len(length_usize) };
-                Ok(buffer.freeze())
-            })
-            .await
-            .map_err(|source| object_store::Error::Generic {
-                store: "filesystem_c",
-                source: Box::new(source),
-            })?
     }
 }
 

@@ -12,11 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod aliyun_oss_provider;
-mod aws_arn_provider;
-mod azure_sas_provider;
-mod cloud_provider_cache;
-mod gcp_impersonation;
+mod filesystem_opendal;
+mod iceberg_opendal;
 mod iceberg_bridgeimpl;
 mod iceberg_testutil;
 mod lance_bridgeimpl;
@@ -493,6 +490,12 @@ pub mod vortex_ffi {
 
 #[cxx::bridge(namespace = "milvus_storage::iceberg::ffi")]
 pub mod iceberg_ffi {
+    unsafe extern "C++" {
+        #[namespace = ""]
+        #[cxx_name = "FileSystemWrapper"]
+        type IcebergFileSystemWrapper = crate::lance_ffi::FileSystemWrapper;
+    }
+
     /// Per-file info returned from plan_files.
     struct IcebergFileInfo {
         /// Absolute data file URI from Iceberg metadata
@@ -514,10 +517,11 @@ pub mod iceberg_ffi {
         /// which handles snapshot resolution, delete file association,
         /// sequence number filtering, and partition matching.
         fn iceberg_plan_files(
+            filesystem: SharedPtr<IcebergFileSystemWrapper>,
             metadata_location: &str,
             snapshot_id: i64,
-            storage_options_keys: Vec<String>,
-            storage_options_values: Vec<String>,
+            read_option_keys: Vec<String>,
+            read_option_values: Vec<String>,
         ) -> Result<Vec<IcebergFileInfo>>;
     }
 }

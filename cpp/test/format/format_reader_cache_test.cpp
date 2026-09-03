@@ -671,15 +671,11 @@ class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std:
   arrow::Result<std::shared_ptr<api::ColumnGroups>> WriteIcebergStressData() const {
     ARROW_ASSIGN_OR_RAISE(auto table_uri, MakeIcebergTableUri(base_path_ + "/iceberg"));
 
-    iceberg::IcebergTestTableInfo table_info;
-    std::vector<iceberg::IcebergFileInfo> file_infos;
-    try {
-      auto storage_options = iceberg::ToStorageOptions(fs_config_);
-      table_info = iceberg::CreateTestTable(table_uri, kExpectedRows, false, {}, storage_options);
-      file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
-    } catch (const std::exception& e) {
-      return arrow::Status::IOError("Failed to create Iceberg stress table: ", e.what());
-    }
+    ARROW_ASSIGN_OR_RAISE(auto storage_options, iceberg::ToWriterOptions(fs_config_));
+    ARROW_ASSIGN_OR_RAISE(auto table_info,
+                          iceberg::CreateTestTable(table_uri, kExpectedRows, false, {}, storage_options));
+    ARROW_ASSIGN_OR_RAISE(auto file_infos, iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, fs_,
+                                                              iceberg::ToReaderOptions(fs_config_)));
 
     if (file_infos.empty()) {
       return arrow::Status::Invalid("Iceberg PlanFiles returned no files");
