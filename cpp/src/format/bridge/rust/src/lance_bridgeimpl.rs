@@ -129,8 +129,8 @@ impl BlockingDataset {
         Ok(versions)
     }
 
-    pub fn version(&self) -> Result<Version> {
-        Ok(self.inner.version())
+    pub fn version(&self) -> u64 {
+        self.inner.version().version
     }
 
     pub fn checkout_version(&mut self, version: u64) -> Result<Self> {
@@ -310,12 +310,12 @@ impl BlockingDataset {
 
 use crate::iceberg_bridgeimpl::vec_to_hashmap;
 
-pub fn open_dataset(
+fn filesystem_dataset_builder(
     filesystem: cxx::SharedPtr<crate::lance_ffi::FileSystemWrapper>,
     uri: &str,
     storage_options_keys: Vec<String>,
     storage_options_values: Vec<String>,
-) -> Result<Box<BlockingDataset>> {
+) -> Result<(DatasetBuilder, FFIReadOptions)> {
     if filesystem.is_null() {
         return Err(LanceError::invalid_input(
             "open_dataset requires a non-null filesystem",
@@ -340,6 +340,25 @@ pub fn open_dataset(
     let builder = DatasetBuilder::from_uri(uri)
         .with_read_params(read_params)
         .with_session(session);
+    Ok((builder, read_options))
+}
+
+pub fn open_dataset(
+    filesystem: cxx::SharedPtr<crate::lance_ffi::FileSystemWrapper>,
+    uri: &str,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
+    version: u64,
+) -> Result<Box<BlockingDataset>> {
+    let (mut builder, read_options) = filesystem_dataset_builder(
+        filesystem,
+        uri,
+        storage_options_keys,
+        storage_options_values,
+    )?;
+    if version != 0 {
+        builder = builder.with_version(version);
+    }
     let inner = TOKIO_RT.block_on(builder.load())?;
     let dataset = BlockingDataset::new(inner)?;
 
@@ -352,6 +371,25 @@ pub fn open_dataset(
         .set(scheduler)
         .expect("a newly opened BlockingDataset has no scan scheduler");
     Ok(Box::new(dataset))
+}
+
+pub fn resolve_latest_dataset_version(
+    filesystem: cxx::SharedPtr<crate::lance_ffi::FileSystemWrapper>,
+    uri: &str,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
+) -> Result<u64> {
+    let (builder, _) = filesystem_dataset_builder(
+        filesystem,
+        uri,
+        storage_options_keys,
+        storage_options_values,
+    )?;
+    let (object_store, base_path, commit_handler) =
+        TOKIO_RT.block_on(builder.build_object_store())?;
+    let location = TOKIO_RT
+        .block_on(commit_handler.resolve_latest_location(&base_path, object_store.as_ref()))?;
+    Ok(location.version)
 }
 
 pub unsafe fn write_dataset(

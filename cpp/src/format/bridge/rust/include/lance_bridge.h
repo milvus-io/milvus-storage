@@ -71,7 +71,12 @@ class BlockingDataset {
   public:
   static arrow::Result<std::shared_ptr<BlockingDataset>> Open(const std::string& uri,
                                                               const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
-                                                              const StorageOptions& read_options);
+                                                              const StorageOptions& read_options,
+                                                              uint64_t version = 0 /* 0 means latest snapshot */);
+
+  static arrow::Result<uint64_t> ResolveLatestVersion(const std::string& uri,
+                                                      const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+                                                      const StorageOptions& read_options);
 
   static arrow::Result<std::vector<uint64_t>> WriteDataset(
       const std::string& uri,
@@ -90,6 +95,8 @@ class BlockingDataset {
 
   BlockingDataset(const BlockingDataset&) = delete;
   BlockingDataset& operator=(const BlockingDataset&) = delete;
+
+  [[nodiscard]] uint64_t Version() const;
 
   arrow::Result<std::vector<uint64_t>> GetAllFragmentIds() const;
 

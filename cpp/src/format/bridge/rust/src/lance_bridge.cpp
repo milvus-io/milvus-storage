@@ -66,7 +66,8 @@ using milvus_storage::ConvertStorageOptions;
 arrow::Result<std::shared_ptr<BlockingDataset>> BlockingDataset::Open(
     const std::string& uri,
     const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
-    const StorageOptions& read_options) {
+    const StorageOptions& read_options,
+    uint64_t version) {
   if (!filesystem) {
     return arrow::Status::Invalid("BlockingDataset::Open requires a non-null filesystem");
   }
@@ -75,10 +76,27 @@ arrow::Result<std::shared_ptr<BlockingDataset>> BlockingDataset::Open(
     ConvertStorageOptions(read_options, keys, values);
     auto filesystem_lease = std::make_shared<FileSystemWrapper>(filesystem);
     auto impl = ffi::open_dataset(std::move(filesystem_lease), rust::Str(uri.data(), uri.length()), std::move(keys),
-                                  std::move(values));
+                                  std::move(values), version);
     return std::make_shared<BlockingDataset>(std::move(impl));
   });
 }
+
+arrow::Result<uint64_t> BlockingDataset::ResolveLatestVersion(const std::string& uri,
+                                                              const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+                                                              const StorageOptions& read_options) {
+  if (!filesystem) {
+    return arrow::Status::Invalid("BlockingDataset::ResolveLatestVersion requires a non-null filesystem");
+  }
+  return CatchRustResult<uint64_t>("Failed to resolve latest Lance dataset version", [&]() {
+    rust::Vec<rust::String> keys, values;
+    ConvertStorageOptions(read_options, keys, values);
+    auto filesystem_lease = std::make_shared<FileSystemWrapper>(filesystem);
+    return ffi::resolve_latest_dataset_version(std::move(filesystem_lease), rust::Str(uri.data(), uri.length()),
+                                               std::move(keys), std::move(values));
+  });
+}
+
+uint64_t BlockingDataset::Version() const { return impl_->version(); }
 
 arrow::Result<std::vector<uint64_t>> BlockingDataset::WriteDataset(const std::string& uri,
                                                                    struct ArrowArrayStream* stream,

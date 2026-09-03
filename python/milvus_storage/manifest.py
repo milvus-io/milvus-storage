@@ -2,7 +2,7 @@
 Manifest and column group structures for milvus-storage.
 """
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from ._ffi import column_groups_debug_string, get_ffi, get_library
 
@@ -16,6 +16,7 @@ class ColumnGroupFile:
         start_index: Start row index (inclusive)
         end_index: End row index (exclusive)
         metadata: Optional metadata bytes
+        properties: Additional file properties
     """
 
     def __init__(
@@ -24,11 +25,20 @@ class ColumnGroupFile:
         start_index: int,
         end_index: int,
         metadata: Optional[bytes] = None,
+        properties: Optional[Dict[str, str]] = None,
     ):
         self.path = path
         self.start_index = start_index
         self.end_index = end_index
-        self.metadata = metadata
+        self.properties = dict(properties) if properties else {}
+        if metadata is not None:
+            self.metadata = metadata
+            self.properties["metadata"] = (
+                metadata.decode("utf-8") if isinstance(metadata, bytes) else metadata
+            )
+        else:
+            metadata_value = self.properties.get("metadata")
+            self.metadata = metadata_value.encode("utf-8") if metadata_value is not None else None
 
     def __repr__(self) -> str:
         return (
@@ -200,13 +210,14 @@ class ColumnGroups:
                         c_file.start_index = f.start_index
                         c_file.end_index = f.end_index
 
-                        # Properties (convert metadata bytes to property if present)
-                        props = {}
-                        if f.metadata:
+                        props = dict(f.properties)
+                        if f.metadata is not None:
                             meta = f.metadata
                             if isinstance(meta, bytes):
                                 meta = meta.decode("utf-8")
                             props["metadata"] = meta
+                        else:
+                            props.pop("metadata", None)
 
                         if props:
                             keys = list(props.keys())
@@ -268,15 +279,15 @@ class ColumnGroups:
                 f = cg.files[k]
                 path = self._ffi.string(f.path).decode("utf-8") if f.path else ""
 
-                # Extract metadata from properties if present
-                metadata = None
+                properties = {}
                 for pi in range(f.num_properties):
                     key = self._ffi.string(f.property_keys[pi]).decode("utf-8")
-                    if key == "metadata":
-                        val = self._ffi.string(f.property_values[pi]).decode("utf-8")
-                        metadata = val.encode("utf-8")
+                    value = self._ffi.string(f.property_values[pi]).decode("utf-8")
+                    properties[key] = value
 
-                files.append(ColumnGroupFile(path, f.start_index, f.end_index, metadata))
+                files.append(
+                    ColumnGroupFile(path, f.start_index, f.end_index, properties=properties)
+                )
 
             result.append(ColumnGroup(columns, format_str, files))
 
@@ -453,15 +464,15 @@ class Manifest:
                 f = cg.files[k]
                 path = ffi.string(f.path).decode("utf-8") if f.path else ""
 
-                # Extract metadata from properties if present
-                metadata = None
+                properties = {}
                 for pi in range(f.num_properties):
                     key = ffi.string(f.property_keys[pi]).decode("utf-8")
-                    if key == "metadata":
-                        val = ffi.string(f.property_values[pi]).decode("utf-8")
-                        metadata = val.encode("utf-8")
+                    value = ffi.string(f.property_values[pi]).decode("utf-8")
+                    properties[key] = value
 
-                files.append(ColumnGroupFile(path, f.start_index, f.end_index, metadata))
+                files.append(
+                    ColumnGroupFile(path, f.start_index, f.end_index, properties=properties)
+                )
 
             column_groups.append(ColumnGroup(columns, format_str, files))
 

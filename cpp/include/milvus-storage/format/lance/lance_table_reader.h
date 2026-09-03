@@ -27,23 +27,19 @@ namespace milvus_storage::lance {
 
 class LanceTableReader final : public FormatReader, public std::enable_shared_from_this<LanceTableReader> {
   public:
-  LanceTableReader(const std::shared_ptr<BlockingDataset>& dataset,
-                   const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
-                   uint64_t fragment_id,
-                   const std::shared_ptr<arrow::Schema>& schema,
-                   const milvus_storage::api::Properties& properties,
-                   const std::vector<std::string>& needed_columns = {});
-
   LanceTableReader(const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
                    const std::string& uri,
                    uint64_t fragment_id,
                    const std::shared_ptr<arrow::Schema>& schema,
                    const milvus_storage::api::Properties& properties,
-                   const std::vector<std::string>& needed_columns = {});
+                   const std::vector<std::string>& needed_columns = {},
+                   uint64_t dataset_version = 0);
 
   struct MetaTrait {
     // One outer Metadata entry represents a Lance Dataset and is keyed by its
-    // base URI. Fragment-specific immutable metadata is cached inside Payload.
+    // base URI. Files for that URI in one top-level reader must reference the
+    // same Dataset version; create_from_metadata() enforces this invariant.
+    // Fragment-specific immutable metadata is cached inside Payload.
     struct FragmentMetadata;
     class FragmentMetadataCache;
 
@@ -100,11 +96,17 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
   [[nodiscard]] std::shared_ptr<arrow::Schema> get_schema() const override;
 
   private:
+  LanceTableReader(MetaTrait::MetadataPtr metadata,
+                   uint64_t fragment_id,
+                   const std::shared_ptr<arrow::Schema>& schema,
+                   const std::vector<std::string>& needed_columns = {});
+
   // Keep the filesystem alive until all Rust-backed reader members are destroyed.
   std::shared_ptr<arrow::fs::FileSystem> filesystem_;
   std::shared_ptr<BlockingDataset> dataset_;
   std::string uri_;
   uint64_t fragment_id_;
+  uint64_t dataset_version_ = 0;
   std::shared_ptr<arrow::Schema> read_schema_;
   milvus_storage::api::Properties properties_;
   std::vector<std::string> needed_columns_;

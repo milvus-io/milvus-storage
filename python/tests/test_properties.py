@@ -117,4 +117,7 @@ class TestPropertyKeys:
     def test_paimon_scan_mode(self):
         """Test the Paimon scan mode property key is accessible."""
         assert PropertyKeys.PAIMON_SCAN_MODE == "paimon.scan_mode"
-        assert PropertyKeys.PAIMON_SNAPSHOT_ID == "paimon.snapshot_id"
+
+    def test_reader_exttable_snapshot_id(self):
+        """Test the shared external-table snapshot property key is accessible."""
+        assert PropertyKeys.READER_EXTTABLE_SNAPSHOT_ID == "reader.exttable.snapshot_id"
