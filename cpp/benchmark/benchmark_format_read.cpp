@@ -15,21 +15,35 @@
 #include "benchmark_format_common.h"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cerrno>
+#include <charconv>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <limits>
+#include <numeric>
+#include <string_view>
+#include <system_error>
 #include <thread>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #if defined(__linux__)
 #include <unistd.h>
 #endif
 
+#include <arrow/c/abi.h>
+#include <arrow/c/bridge.h>
 #include <arrow/table.h>
+#include <folly/executors/CPUThreadPoolExecutor.h>
 #include "iceberg_bridge.h"
+#include "milvus-storage/format/lance/lance_common.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
@@ -44,6 +58,519 @@ namespace milvus_storage::benchmark {
 using namespace milvus_storage::api;
 
 namespace {
+
+enum class ReaderBenchmarkMode { kSync, kAsync };
+enum class ReaderBenchmarkOperation { kRecordBatchRead, kChunkRead, kTake };
+enum class ReaderBenchmarkFormat { kParquet, kVortex, kLance };
+
+struct ReaderBenchmarkConfig {
+  ReaderBenchmarkMode mode;
+  ReaderBenchmarkOperation operation;
+  ReaderBenchmarkFormat format;
+  ReaderBenchmarkDataset dataset;
+};
+
+static arrow::Result<std::string> ReaderBenchmarkSuffix(const ReaderBenchmarkConfig& config) {
+  std::string_view mode_name;
+  switch (config.mode) {
+    case ReaderBenchmarkMode::kSync:
+      mode_name = "Sync";
+      break;
+    case ReaderBenchmarkMode::kAsync:
+      mode_name = "Async";
+      break;
+    default:
+      return arrow::Status::Invalid("Unknown Reader benchmark mode");
+  }
+
+  std::string_view operation_name;
+  switch (config.operation) {
+    case ReaderBenchmarkOperation::kRecordBatchRead:
+      operation_name = "RecordBatchRead";
+      break;
+    case ReaderBenchmarkOperation::kChunkRead:
+      operation_name = "ChunkRead";
+      break;
+    case ReaderBenchmarkOperation::kTake:
+      operation_name = "Take";
+      break;
+    default:
+      return arrow::Status::Invalid("Unknown Reader benchmark operation");
+  }
+
+  std::string_view format_name;
+  switch (config.format) {
+    case ReaderBenchmarkFormat::kParquet:
+      format_name = "Parquet";
+      break;
+    case ReaderBenchmarkFormat::kVortex:
+      format_name = "Vortex";
+      break;
+    case ReaderBenchmarkFormat::kLance:
+      format_name = "Lance";
+      break;
+    default:
+      return arrow::Status::Invalid("Unknown Reader benchmark format");
+  }
+
+  return std::string(mode_name) + "/" + std::string(operation_name) + "/" + std::string(format_name) + "/" +
+         std::string(ReaderBenchmarkDatasetName(config.dataset));
+}
+
+static arrow::Result<size_t> GetReaderBenchmarkExecutorThreads() {
+  const auto* value = std::getenv("NIGHTLY_CI_EXECUTOR_THREADS");
+  if (value == nullptr) {
+    return size_t{1};
+  }
+
+  size_t threads = 0;
+  const auto* end = value + std::strlen(value);
+  const auto parse_result = std::from_chars(value, end, threads);
+  if (value == end || parse_result.ec != std::errc{} || parse_result.ptr != end || threads == 0) {
+    return arrow::Status::Invalid("NIGHTLY_CI_EXECUTOR_THREADS must be a positive integer");
+  }
+  return threads;
+}
+
+std::atomic<uint64_t> g_reader_benchmark_prefix_sequence{0};
+
+struct ReaderBenchmarkMetrics {
+  int64_t rows = 0;
+  int64_t bytes = 0;
+};
+
+static arrow::Result<ReaderBenchmarkMetrics> RunRecordBatchReadOnce(
+    Reader& reader, std::shared_ptr<arrow::RecordBatchReader>* batch_reader_out) {
+  ARROW_ASSIGN_OR_RAISE(auto batch_reader, reader.get_record_batch_reader());
+  *batch_reader_out = std::move(batch_reader);
+
+  ReaderBenchmarkMetrics metrics;
+  std::shared_ptr<arrow::RecordBatch> batch;
+  while (true) {
+    ARROW_RETURN_NOT_OK((*batch_reader_out)->ReadNext(&batch));
+    if (!batch) {
+      break;
+    }
+    metrics.rows += batch->num_rows();
+    metrics.bytes += FormatBenchFixtureBase<>::CalculateRawDataSize(batch);
+  }
+  return metrics;
+}
+
+static arrow::Result<ReaderBenchmarkMetrics> RunTakeOnce(Reader& reader,
+                                                         const std::vector<int64_t>& indices,
+                                                         std::shared_ptr<arrow::Table>* table_out) {
+  ARROW_ASSIGN_OR_RAISE(auto table, reader.take(indices));
+  *table_out = std::move(table);
+
+  ReaderBenchmarkMetrics metrics;
+  metrics.rows = (*table_out)->num_rows();
+  arrow::TableBatchReader batch_reader(**table_out);
+  std::shared_ptr<arrow::RecordBatch> batch;
+  while (true) {
+    ARROW_RETURN_NOT_OK(batch_reader.ReadNext(&batch));
+    if (!batch) {
+      break;
+    }
+    metrics.bytes += FormatBenchFixtureBase<>::CalculateRawDataSize(batch);
+  }
+  return metrics;
+}
+
+class ReaderBenchmarkCase {
+  public:
+  static arrow::Result<std::unique_ptr<ReaderBenchmarkCase>> Make(const ReaderBenchmarkConfig& config) {
+    auto benchmark_case = std::unique_ptr<ReaderBenchmarkCase>(new ReaderBenchmarkCase(config));
+    ARROW_RETURN_NOT_OK(benchmark_case->Prepare());
+    return benchmark_case;
+  }
+
+  arrow::Status Run(::benchmark::State& state) {
+    int64_t total_rows_read = 0;
+    int64_t total_bytes_read = 0;
+
+    for (auto _ : state) {
+      table_.reset();
+      batches_.clear();
+      chunk_reader_.reset();
+      batch_reader_.reset();
+      reader_.reset();
+
+      reader_ = Reader::create(column_groups_, schema_, nullptr, properties_);
+      if (!reader_) {
+        return arrow::Status::Invalid("Failed to create Reader benchmark reader");
+      }
+
+      switch (config_.operation) {
+        case ReaderBenchmarkOperation::kRecordBatchRead: {
+          ARROW_ASSIGN_OR_RAISE(auto metrics, RunRecordBatchReadOnce(*reader_, &batch_reader_));
+          total_rows_read += metrics.rows;
+          total_bytes_read += metrics.bytes;
+          break;
+        }
+        case ReaderBenchmarkOperation::kChunkRead: {
+          if (config_.mode == ReaderBenchmarkMode::kAsync) {
+            auto open_try = std::move(reader_->get_chunk_reader_async(0)).via(executor_.get()).getTry();
+            if (open_try.hasException()) {
+              return arrow::Status::IOError("Exception in Reader benchmark async ChunkRead open: ",
+                                            open_try.exception().what().toStdString());
+            }
+            ARROW_ASSIGN_OR_RAISE(chunk_reader_, std::move(open_try).value());
+          } else {
+            ARROW_ASSIGN_OR_RAISE(chunk_reader_, reader_->get_chunk_reader(0));
+          }
+          std::vector<int64_t> indices(chunk_reader_->total_number_of_chunks());
+          std::iota(indices.begin(), indices.end(), 0);
+          if (config_.mode == ReaderBenchmarkMode::kAsync) {
+            auto chunks_try = std::move(chunk_reader_->get_chunks_async(indices)).via(executor_.get()).getTry();
+            if (chunks_try.hasException()) {
+              return arrow::Status::IOError("Exception in Reader benchmark async ChunkRead chunks: ",
+                                            chunks_try.exception().what().toStdString());
+            }
+            ARROW_ASSIGN_OR_RAISE(batches_, std::move(chunks_try).value());
+          } else {
+            ARROW_ASSIGN_OR_RAISE(batches_, chunk_reader_->get_chunks(indices));
+          }
+          for (const auto& batch : batches_) {
+            if (!batch) {
+              return arrow::Status::Invalid("Reader benchmark chunk reader returned a null batch");
+            }
+            total_rows_read += batch->num_rows();
+            total_bytes_read += FormatBenchFixtureBase<>::CalculateRawDataSize(batch);
+          }
+          break;
+        }
+        case ReaderBenchmarkOperation::kTake: {
+          if (config_.mode == ReaderBenchmarkMode::kAsync) {
+            auto table_try = std::move(reader_->take_async(take_indices_)).via(executor_.get()).getTry();
+            if (table_try.hasException()) {
+              return arrow::Status::IOError("Exception in Reader benchmark async Take: ",
+                                            table_try.exception().what().toStdString());
+            }
+            ARROW_ASSIGN_OR_RAISE(table_, std::move(table_try).value());
+            total_rows_read += table_->num_rows();
+            arrow::TableBatchReader table_batch_reader(*table_);
+            std::shared_ptr<arrow::RecordBatch> batch;
+            while (true) {
+              ARROW_RETURN_NOT_OK(table_batch_reader.ReadNext(&batch));
+              if (!batch) {
+                break;
+              }
+              total_bytes_read += FormatBenchFixtureBase<>::CalculateRawDataSize(batch);
+            }
+          } else {
+            ARROW_ASSIGN_OR_RAISE(auto metrics, RunTakeOnce(*reader_, take_indices_, &table_));
+            total_rows_read += metrics.rows;
+            total_bytes_read += metrics.bytes;
+          }
+          break;
+        }
+        default:
+          return arrow::Status::Invalid("Unknown Reader benchmark operation");
+      }
+    }
+
+    ReportThroughput(state, total_bytes_read, total_rows_read);
+    if (config_.operation == ReaderBenchmarkOperation::kTake) {
+      state.counters["rows_taken"] =
+          ::benchmark::Counter(static_cast<double>(take_indices_.size()), ::benchmark::Counter::kDefaults);
+    }
+    if (config_.mode == ReaderBenchmarkMode::kAsync) {
+      state.counters["executor_threads"] =
+          ::benchmark::Counter(static_cast<double>(executor_threads_), ::benchmark::Counter::kDefaults);
+    }
+    ARROW_ASSIGN_OR_RAISE(auto suffix, ReaderBenchmarkSuffix(config_));
+    state.SetLabel(suffix);
+    return arrow::Status::OK();
+  }
+
+  arrow::Status Cleanup() {
+    table_.reset();
+    batches_.clear();
+    chunk_reader_.reset();
+    batch_reader_.reset();
+    reader_.reset();
+    column_groups_.reset();
+    schema_.reset();
+    executor_.reset();
+    loader_.reset();
+
+    if (cleaned_ || !fs_ || prefix_.empty()) {
+      cleaned_ = true;
+      return arrow::Status::OK();
+    }
+    auto status = DeleteTestDir(fs_, prefix_);
+    if (status.ok()) {
+      cleaned_ = true;
+    }
+    return status;
+  }
+
+  ~ReaderBenchmarkCase() {
+    if (!cleaned_) {
+      const auto status = Cleanup();
+      if (!status.ok()) {
+        std::cerr << "Reader benchmark cleanup failed: " << status.ToString() << '\n';
+      }
+    }
+  }
+
+  private:
+  explicit ReaderBenchmarkCase(ReaderBenchmarkConfig config) : config_(config) {}
+
+  arrow::Status Prepare() {
+    ARROW_ASSIGN_OR_RAISE(auto suffix, ReaderBenchmarkSuffix(config_));
+    std::string_view storage_format;
+    switch (config_.format) {
+      case ReaderBenchmarkFormat::kParquet:
+        storage_format = LOON_FORMAT_PARQUET;
+        break;
+      case ReaderBenchmarkFormat::kVortex:
+        storage_format = LOON_FORMAT_VORTEX;
+        break;
+      case ReaderBenchmarkFormat::kLance:
+        storage_format = LOON_FORMAT_LANCE_TABLE;
+        break;
+      default:
+        return arrow::Status::Invalid("Unknown Reader benchmark storage format");
+    }
+    if (config_.mode == ReaderBenchmarkMode::kAsync) {
+      if (config_.operation == ReaderBenchmarkOperation::kRecordBatchRead ||
+          config_.format == ReaderBenchmarkFormat::kLance) {
+        return arrow::Status::Invalid("Unsupported async Reader benchmark case");
+      }
+      ARROW_ASSIGN_OR_RAISE(executor_threads_, GetReaderBenchmarkExecutorThreads());
+      executor_ = std::make_unique<folly::CPUThreadPoolExecutor>(executor_threads_);
+    }
+
+    ARROW_RETURN_NOT_OK(InitTestProperties(properties_));
+    api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "32768");
+    ARROW_ASSIGN_OR_RAISE(fs_, GetFileSystem(properties_));
+    prefix_ = "format_benchmark/reader/" + suffix + "/" +
+              std::to_string(g_reader_benchmark_prefix_sequence.fetch_add(1, std::memory_order_relaxed));
+
+    ARROW_ASSIGN_OR_RAISE(loader_, CreateReaderBenchmarkDataLoader(config_.dataset));
+    ARROW_RETURN_NOT_OK(loader_->Load());
+    schema_ = loader_->GetSchema();
+    if (!schema_) {
+      return arrow::Status::Invalid("Reader benchmark data loader returned a null schema");
+    }
+    constexpr size_t kTakeRows = 1000;
+    if (loader_->NumRows() < static_cast<int64_t>(kTakeRows)) {
+      return arrow::Status::Invalid("Reader benchmark Take requires at least 1000 source rows");
+    }
+    take_indices_ = GenerateRandomIndices(1000, loader_->NumRows(), 42);
+    const bool sorted = std::is_sorted(take_indices_.begin(), take_indices_.end());
+    const bool unique = std::adjacent_find(take_indices_.begin(), take_indices_.end()) == take_indices_.end();
+    const bool in_bounds = std::all_of(take_indices_.begin(), take_indices_.end(),
+                                       [&](int64_t index) { return index >= 0 && index < loader_->NumRows(); });
+    bool non_sequential = false;
+    for (size_t i = 0; i < take_indices_.size(); ++i) {
+      if (take_indices_[i] != static_cast<int64_t>(i)) {
+        non_sequential = true;
+        break;
+      }
+    }
+    if (take_indices_.size() != kTakeRows || !sorted || !unique || !in_bounds || !non_sequential) {
+      return arrow::Status::Invalid("Reader benchmark Take indices violated the fixed-seed random selection contract");
+    }
+
+    if (config_.format == ReaderBenchmarkFormat::kLance) {
+      return PrepareLance();
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto policy, CreateSinglePolicy(std::string(storage_format), schema_));
+    auto writer = Writer::create(prefix_, schema_, std::move(policy), properties_);
+    if (!writer) {
+      return arrow::Status::Invalid("Failed to create Reader benchmark writer");
+    }
+    ARROW_ASSIGN_OR_RAISE(auto batch_reader, loader_->GetRecordBatchReader());
+    std::shared_ptr<arrow::RecordBatch> batch;
+    while (true) {
+      ARROW_RETURN_NOT_OK(batch_reader->ReadNext(&batch));
+      if (!batch) {
+        break;
+      }
+      ARROW_RETURN_NOT_OK(writer->write(batch));
+    }
+    ARROW_ASSIGN_OR_RAISE(column_groups_, writer->close());
+    if (!column_groups_ || column_groups_->empty()) {
+      return arrow::Status::Invalid("Reader benchmark writer returned no column groups");
+    }
+    return arrow::Status::OK();
+  }
+
+  arrow::Status PrepareLance() {
+    ArrowFileSystemConfig fs_config;
+    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+    if (fs_config.storage_type == "remote") {
+      api::SetValue(properties_, "extfs.reader_benchmark.storage_type", "remote");
+      api::SetValue(properties_, "extfs.reader_benchmark.cloud_provider", fs_config.cloud_provider.c_str());
+      api::SetValue(properties_, "extfs.reader_benchmark.address", fs_config.address.c_str());
+      api::SetValue(properties_, "extfs.reader_benchmark.bucket_name", fs_config.bucket_name.c_str());
+      api::SetValue(properties_, "extfs.reader_benchmark.region", fs_config.region.c_str());
+      api::SetValue(properties_, "extfs.reader_benchmark.access_key_id", fs_config.access_key_id.c_str());
+      api::SetValue(properties_, "extfs.reader_benchmark.access_key_value", fs_config.access_key_value.c_str());
+      if (fs_config.use_ssl) {
+        api::SetValue(properties_, "extfs.reader_benchmark.use_ssl", "true");
+      }
+      if (fs_config.use_iam) {
+        api::SetValue(properties_, "extfs.reader_benchmark.use_iam", "true");
+      }
+    }
+    ARROW_ASSIGN_OR_RAISE(auto lance_uri, lance::BuildLanceBaseUri(fs_config, prefix_));
+    ARROW_ASSIGN_OR_RAISE(auto storage_options, lance::ToWriterOptions(fs_config));
+    ARROW_ASSIGN_OR_RAISE(auto batch_reader, loader_->GetRecordBatchReader());
+    ArrowArrayStream stream{};
+    ARROW_RETURN_NOT_OK(arrow::ExportRecordBatchReader(batch_reader, &stream));
+    ARROW_ASSIGN_OR_RAISE(auto fragment_ids, lance::BlockingDataset::WriteDataset(lance_uri, &stream, storage_options));
+    ARROW_ASSIGN_OR_RAISE(auto dataset,
+                          lance::BlockingDataset::Open(lance_uri, fs_, lance::ToReaderOptions(fs_config)));
+    if (fragment_ids.empty()) {
+      return arrow::Status::Invalid("Lance Reader benchmark preparation returned no fragments");
+    }
+
+    auto column_group = std::make_shared<api::ColumnGroup>();
+    column_group->format = LOON_FORMAT_LANCE_TABLE;
+    column_group->columns.reserve(schema_->num_fields());
+    for (const auto& field : schema_->fields()) {
+      column_group->columns.emplace_back(field->name());
+    }
+
+    int64_t total_rows = 0;
+    const auto milvus_lance_uri = lance::ToMilvusLanceUri(lance_uri, fs_config.address);
+    for (const auto fragment_id : fragment_ids) {
+      ARROW_ASSIGN_OR_RAISE(auto row_count, dataset->GetFragmentRowCount(fragment_id));
+      if (row_count > static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - total_rows)) {
+        return arrow::Status::Invalid("Lance fragment row range exceeds int64_t");
+      }
+      // ColumnGroupFile ranges are physical offsets within each fragment;
+      // Reader handles logical concatenation across the files.
+      column_group->files.emplace_back(ColumnGroupFile{
+          .path = lance::MakeLanceUri(milvus_lance_uri, fragment_id),
+          .start_index = 0,
+          .end_index = static_cast<int64_t>(row_count),
+      });
+      total_rows += static_cast<int64_t>(row_count);
+    }
+    if (total_rows != loader_->NumRows()) {
+      return arrow::Status::Invalid("Lance fragment row count does not match Reader benchmark dataset");
+    }
+    column_groups_ = std::make_shared<ColumnGroups>();
+    column_groups_->emplace_back(std::move(column_group));
+    return arrow::Status::OK();
+  }
+
+  const ReaderBenchmarkConfig config_;
+  Properties properties_;
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
+  std::unique_ptr<BenchmarkDataLoader> loader_;
+  std::shared_ptr<arrow::Schema> schema_;
+  std::shared_ptr<ColumnGroups> column_groups_;
+  std::string prefix_;
+  std::unique_ptr<folly::CPUThreadPoolExecutor> executor_;
+  size_t executor_threads_ = 0;
+  bool cleaned_ = false;
+
+  std::unique_ptr<Reader> reader_;
+  std::shared_ptr<arrow::RecordBatchReader> batch_reader_;
+  std::unique_ptr<ChunkReader> chunk_reader_;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> batches_;
+  std::shared_ptr<arrow::Table> table_;
+  std::vector<int64_t> take_indices_;
+};
+
+static void RunReaderBenchmarkCase(::benchmark::State& state, ReaderBenchmarkConfig config) {
+  auto case_result = ReaderBenchmarkCase::Make(config);
+  if (!case_result.ok()) {
+    const auto message = case_result.status().ToString();
+    state.SkipWithError(message.c_str());
+    return;
+  }
+
+  auto benchmark_case = std::move(case_result).ValueOrDie();
+  const auto run_status = benchmark_case->Run(state);
+  const auto cleanup_status = benchmark_case->Cleanup();
+  if (!run_status.ok()) {
+    const auto message = run_status.ToString();
+    state.SkipWithError(message.c_str());
+  } else if (!cleanup_status.ok()) {
+    const auto message = cleanup_status.ToString();
+    state.SkipWithError(message.c_str());
+  }
+}
+
+[[maybe_unused]] const bool kReaderBenchmarksRegistered = [] {
+  constexpr std::array<std::string_view, 2> prefixes = {
+      "ReaderBenchmark/",
+      "NIGHTLY_CI_TARGET/",
+  };
+  constexpr std::array<ReaderBenchmarkDataset, 7> datasets = {
+      ReaderBenchmarkDataset::kSyntheticSmall,    ReaderBenchmarkDataset::kSyntheticMedium,
+      ReaderBenchmarkDataset::kSyntheticLarge,    ReaderBenchmarkDataset::kScalarMedium,
+      ReaderBenchmarkDataset::kRandomVector64MiB, ReaderBenchmarkDataset::kLowEntropyVector256MiB,
+      ReaderBenchmarkDataset::kRandomVector2GiB,
+  };
+  constexpr std::array<ReaderBenchmarkFormat, 3> formats = {
+      ReaderBenchmarkFormat::kParquet,
+      ReaderBenchmarkFormat::kVortex,
+      ReaderBenchmarkFormat::kLance,
+  };
+  constexpr std::array<ReaderBenchmarkOperation, 3> operations = {
+      ReaderBenchmarkOperation::kRecordBatchRead,
+      ReaderBenchmarkOperation::kChunkRead,
+      ReaderBenchmarkOperation::kTake,
+  };
+
+  for (const auto dataset : datasets) {
+    for (const auto format : formats) {
+      for (const auto operation : operations) {
+        const ReaderBenchmarkConfig config{
+            .mode = ReaderBenchmarkMode::kSync,
+            .operation = operation,
+            .format = format,
+            .dataset = dataset,
+        };
+        const auto suffix = ReaderBenchmarkSuffix(config).ValueOrDie();
+        for (const auto prefix : prefixes) {
+          ::benchmark::RegisterBenchmark(std::string(prefix) + suffix,
+                                         [config](::benchmark::State& state) { RunReaderBenchmarkCase(state, config); })
+              ->Unit(::benchmark::kMillisecond)
+              ->UseRealTime();
+        }
+      }
+    }
+  }
+
+  constexpr std::array<ReaderBenchmarkFormat, 2> async_formats = {
+      ReaderBenchmarkFormat::kParquet,
+      ReaderBenchmarkFormat::kVortex,
+  };
+  constexpr std::array<ReaderBenchmarkOperation, 2> async_operations = {
+      ReaderBenchmarkOperation::kChunkRead,
+      ReaderBenchmarkOperation::kTake,
+  };
+  for (const auto dataset : datasets) {
+    for (const auto format : async_formats) {
+      for (const auto operation : async_operations) {
+        const ReaderBenchmarkConfig config{
+            .mode = ReaderBenchmarkMode::kAsync,
+            .operation = operation,
+            .format = format,
+            .dataset = dataset,
+        };
+        const auto suffix = ReaderBenchmarkSuffix(config).ValueOrDie();
+        for (const auto prefix : prefixes) {
+          ::benchmark::RegisterBenchmark(std::string(prefix) + suffix,
+                                         [config](::benchmark::State& state) { RunReaderBenchmarkCase(state, config); })
+              ->Unit(::benchmark::kMillisecond)
+              ->UseRealTime();
+        }
+      }
+    }
+  }
+  return true;
+}();
 
 struct PreparedReaderFile {
   ColumnGroupFile file;
@@ -430,7 +957,7 @@ class FormatReadBenchmark : public FormatBenchFixtureBase<> {
 // Full Scan Benchmark
 //=============================================================================
 
-// Full scan benchmark - read all rows and all columns
+// Measures public Reader record-batch full scans; data preparation stays outside the timed loop.
 // Args: [format_idx, num_threads, memory_config_idx]
 BENCHMARK_DEFINE_F(FormatReadBenchmark, ReadFullScan)(::benchmark::State& st) {
   auto format_idx = static_cast<size_t>(st.range(0));
@@ -460,17 +987,10 @@ BENCHMARK_DEFINE_F(FormatReadBenchmark, ReadFullScan)(::benchmark::State& st) {
     auto reader = Reader::create(cgs, schema_, nullptr, properties_);
     BENCH_ASSERT_NOT_NULL(reader, st);
 
-    BENCH_ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader(), st);
-
-    std::shared_ptr<arrow::RecordBatch> batch;
-    while (true) {
-      BENCH_ASSERT_STATUS_OK(batch_reader->ReadNext(&batch), st);
-      if (batch == nullptr) {
-        break;
-      }
-      total_rows_read += batch->num_rows();
-      total_bytes_read += CalculateRawDataSize(batch);
-    }
+    std::shared_ptr<arrow::RecordBatchReader> batch_reader;
+    BENCH_ASSERT_AND_ASSIGN(auto metrics, RunRecordBatchReadOnce(*reader, &batch_reader), st);
+    total_rows_read += metrics.rows;
+    total_bytes_read += metrics.bytes;
   }
 
   ReportThroughput(st, total_bytes_read, total_rows_read);
@@ -491,7 +1011,7 @@ BENCHMARK_REGISTER_F(FormatReadBenchmark, ReadFullScan)
 // Column Projection Benchmark
 //=============================================================================
 
-// Column projection benchmark - read subset of columns
+// Measures public Reader record-batch scans projected to a selected number of columns.
 // Args: [format_idx, num_columns, num_threads, memory_config_idx]
 BENCHMARK_DEFINE_F(FormatReadBenchmark, ReadProjection)(::benchmark::State& st) {
   auto format_idx = static_cast<size_t>(st.range(0));
@@ -567,7 +1087,7 @@ BENCHMARK_REGISTER_F(FormatReadBenchmark, ReadProjection)
 // Random Access (Take) Benchmark
 //=============================================================================
 
-// Random access benchmark - read specific rows by indices
+// Measures public Reader::take for sequential, random, or clustered row-index distributions.
 // Args: [format_idx, take_count, distribution, num_threads, memory_config_idx]
 BENCHMARK_DEFINE_F(FormatReadBenchmark, ReadTake)(::benchmark::State& st) {
   auto format_idx = static_cast<size_t>(st.range(0));
@@ -602,19 +1122,10 @@ BENCHMARK_DEFINE_F(FormatReadBenchmark, ReadTake)(::benchmark::State& st) {
     auto reader = Reader::create(cgs, schema_, nullptr, properties_);
     BENCH_ASSERT_NOT_NULL(reader, st);
 
-    BENCH_ASSERT_AND_ASSIGN(auto table, reader->take(indices), st);
-
-    total_rows_read += table->num_rows();
-    // Estimate bytes read
-    arrow::TableBatchReader batch_reader(*table);
-    std::shared_ptr<arrow::RecordBatch> batch;
-    while (true) {
-      BENCH_ASSERT_STATUS_OK(batch_reader.ReadNext(&batch), st);
-      if (batch == nullptr) {
-        break;
-      }
-      total_bytes_read += CalculateRawDataSize(batch);
-    }
+    std::shared_ptr<arrow::Table> table;
+    BENCH_ASSERT_AND_ASSIGN(auto metrics, RunTakeOnce(*reader, indices, &table), st);
+    total_rows_read += metrics.rows;
+    total_bytes_read += metrics.bytes;
   }
 
   ReportThroughput(st, total_bytes_read, total_rows_read);
@@ -642,6 +1153,7 @@ BENCHMARK_REGISTER_F(FormatReadBenchmark, ReadTake)
 
 // Open many live FormatReaders from one shared metadata payload and report RSS.
 // Args: [format_idx, reader_count]
+// Measures metadata and resident-memory cost while opening many readers for one prepared file.
 BENCHMARK_DEFINE_F(FormatReadBenchmark, OpenManyFormatReadersRSS)(::benchmark::State& st) {
   auto format_idx = static_cast<size_t>(st.range(0));
   auto reader_count = static_cast<size_t>(st.range(1));
@@ -702,47 +1214,6 @@ BENCHMARK_REGISTER_F(FormatReadBenchmark, OpenManyFormatReadersRSS)
         {100, 10000},  // live FormatReader count
     })
     ->Iterations(1)
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-//=============================================================================
-// Typical Benchmarks
-// Run with: --benchmark_filter="Typical/"
-//=============================================================================
-
-BENCHMARK_REGISTER_F(FormatReadBenchmark, ReadFullScan)
-    ->Name("Typical/ReadFullScan_Parquet")
-    ->Args({0, 8, 1})  // Parquet + 8 threads + Default
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(FormatReadBenchmark, ReadFullScan)
-    ->Name("Typical/ReadFullScan_Vortex")
-    ->Args({1, 8, 1})  // Vortex + 8 threads + Default
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(FormatReadBenchmark, ReadProjection)
-    ->Name("Typical/ReadProjection_Parquet")
-    ->Args({0, 1, 8, 1})  // Parquet + 1 col + 8 threads + Default
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(FormatReadBenchmark, ReadProjection)
-    ->Name("Typical/ReadProjection_Vortex")
-    ->Args({1, 1, 8, 1})  // Vortex + 1 col + 8 threads + Default
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(FormatReadBenchmark, ReadTake)
-    ->Name("Typical/ReadTake_Parquet")
-    ->Args({0, 1000, 1, 8, 1})  // Parquet + 1000 rows + Random + 8 threads + Default
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(FormatReadBenchmark, ReadTake)
-    ->Name("Typical/ReadTake_Vortex")
-    ->Args({1, 1000, 1, 8, 1})  // Vortex + 1000 rows + Random + 8 threads + Default
     ->Unit(::benchmark::kMillisecond)
     ->UseRealTime();
 

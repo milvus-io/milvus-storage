@@ -153,6 +153,7 @@ class PredicateBenchmark : public FormatBenchFixtureBase<> {
 };
 
 // Args: [sorted, selectivity_pct, predicate_col]
+// Measures Vortex predicate pushdown for sorted or unsorted data and reports result and filesystem I/O selectivity.
 BENCHMARK_DEFINE_F(PredicateBenchmark, ReadWithPredicate)(::benchmark::State& st) {
   bool sorted = st.range(0) != 0;
   int selectivity_pct = static_cast<int>(st.range(1));

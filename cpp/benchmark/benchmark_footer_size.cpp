@@ -173,15 +173,14 @@ class FooterSizeFixture : public ::benchmark::Fixture {
     GBENCH_ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_), state);
   }
 
-  void TearDown(::benchmark::State& state) override {
-    // Cleanup if needed
-  }
+  void TearDown(::benchmark::State& state) override { GBENCH_ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_), state); }
 
   api::Properties properties_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::string base_path_;
 };
 
+// Measures Parquet footer size and footer-to-file ratio across row, vector, and string shapes.
 BENCHMARK_DEFINE_F(FooterSizeFixture, MeasureFooterSize)(::benchmark::State& st) {
   auto num_rows = static_cast<size_t>(st.range(0));
   auto vector_dim = static_cast<size_t>(st.range(1));

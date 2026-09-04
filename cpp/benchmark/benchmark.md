@@ -18,13 +18,13 @@ The benchmark executable is located at `build/Release/benchmark/benchmark`.
 ./build/Release/benchmark/benchmark
 
 # Filter by regex
-./build/Release/benchmark/benchmark --benchmark_filter="Typical/"
+./build/Release/benchmark/benchmark --benchmark_filter="FormatReadBenchmark/ReadFullScan"
 
 # Multiple patterns (use | separator)
 ./build/Release/benchmark/benchmark --benchmark_filter="MilvusStorage_Read|MilvusStorage_Take"
 
-# Exclude patterns (use - prefix)
-./build/Release/benchmark/benchmark --benchmark_filter="-Typical/"
+# List matching benchmarks without running them
+./build/Release/benchmark/benchmark --benchmark_filter="FormatReadBenchmark" --benchmark_list_tests=true
 ```
 
 ## Benchmark Files
@@ -112,10 +112,60 @@ Simple read/write performance tests for quick validation:
 | `ReadFullScanSingleColumnConfig` | Single column full scan | loop_times, column_idx |
 | `WriteRead768dimVector` | 768-dim vector large file test | target_size, target_dim |
 
-## Typical Benchmarks
+## Nightly CI Reader Benchmarks
 
-Benchmarks with `Typical/` prefix are representative tests with common parameter configurations, suitable for quick validation:
+`ReaderBenchmark/` is the canonical public-Reader benchmark family.
+`NIGHTLY_CI_TARGET/` contains name-only aliases of the same configurations and
+execution bodies. Each family contains 91 registrations with identical
+semantic suffixes.
+
+Run either family locally after configuring storage, or validate their exact
+one-to-one registration contract:
 
 ```bash
-./build/Release/benchmark/benchmark --benchmark_filter="Typical/"
+./build/Release/benchmark/benchmark --benchmark_filter='^ReaderBenchmark/'
+./build/Release/benchmark/benchmark --benchmark_filter='^NIGHTLY_CI_TARGET/'
+NIGHTLY_CI_EXECUTOR_THREADS=3 ./build/Release/benchmark/benchmark \
+  --benchmark_filter='^NIGHTLY_CI_TARGET/Async/'
+bash benchmark/nightly/test_reader_alias.sh \
+  ./build/Release/benchmark/benchmark registration
 ```
+
+An unfiltered invocation executes both name families. Use an explicit prefix
+filter unless that duplication is intentional.
+
+Each family has 63 synchronous cases and 28 asynchronous cases (91 total).
+Each applicable operation/format combination runs these seven deterministic
+dataset scenarios:
+
+| Dataset | Contents |
+|---------|----------|
+| `SyntheticSmall` | 4,096 rows with scalar columns and a random 128-dimensional vector |
+| `SyntheticMedium` | 40,960 rows with scalar columns and a random 128-dimensional vector |
+| `SyntheticLarge` | 409,600 rows with scalar columns and a random 128-dimensional vector |
+| `ScalarMedium` | 40,960 scalar-only rows |
+| `RandomVector64MiB` | Random 256-dimensional vector data with a 64 MiB raw payload |
+| `LowEntropyVector256MiB` | Deterministic low-entropy 256-dimensional vector data with a 256 MiB raw payload |
+| `RandomVector2GiB` | Random 256-dimensional vector data with a 2 GiB raw payload |
+
+Synchronous cases cover record-batch reads, chunk reads, and `take` for
+Parquet, Vortex, and Lance. The asynchronous cases are genuine public async
+calls only: chunk reads and `take` for Parquet and Vortex. There is no public
+async record-batch API, and Lance has no native async override, so neither is
+reported as an async case. The `parallelism` API argument is intentionally
+omitted, retaining its default value of `1`.
+
+Async continuations run on a caller-owned `folly::CPUThreadPoolExecutor`.
+Set `NIGHTLY_CI_EXECUTOR_THREADS` to a positive integer to size that executor;
+when it is absent, the local default is `1`. This setting sizes the executor,
+not process affinity. In hosted CI, MinIO is pinned to logical CPU `0` and the
+complete benchmark process is pinned to logical CPUs `1,2,3`; the executor
+thread count is derived from the benchmark CPU set. This is logical-CPU
+separation, not physical-core isolation, and local smoke runs do not validate
+the hosted affinity configuration.
+
+The workflow writes raw Google Benchmark JSON and text output as diagnostic
+artifacts. It also renders a human-readable Markdown summary with median
+real-time, variation, throughput, and sync/async comparisons; this summary is
+printed in the job log, added to the GitHub Step Summary, and stored alongside
+the raw artifacts.

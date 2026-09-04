@@ -14,8 +14,11 @@
 
 #pragma once
 
+#include <array>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <map>
 
@@ -92,6 +95,29 @@ struct SyntheticDataConfig {
   static SyntheticDataConfig Small() { return {4096, 128, 128, true}; }
   static SyntheticDataConfig Medium() { return {40960, 128, 128, true}; }
   static SyntheticDataConfig Large() { return {409600, 128, 128, true}; }
+};
+
+enum class VectorLayout { kFloatList, kFixedSizeBinary };
+
+struct StreamingSyntheticDataConfig {
+  size_t num_rows;
+  size_t vector_dim;
+  size_t string_length;
+  size_t batch_rows;
+  bool random_data;
+  std::array<bool, 4> columns;
+  VectorLayout vector_layout;
+  std::string label;
+};
+
+enum class ReaderBenchmarkDataset : int64_t {
+  kSyntheticSmall = 0,
+  kSyntheticMedium,
+  kSyntheticLarge,
+  kScalarMedium,
+  kRandomVector64MiB,
+  kLowEntropyVector256MiB,
+  kRandomVector2GiB,
 };
 
 class SyntheticDataLoader : public BenchmarkDataLoader {
@@ -193,6 +219,10 @@ std::unique_ptr<BenchmarkDataLoader> CreateDataLoader(
 // Otherwise, use SyntheticDataLoader with specified config
 std::unique_ptr<BenchmarkDataLoader> CreateDataLoaderFromEnv(
     const SyntheticDataConfig& fallback_config = SyntheticDataConfig::Medium());
+
+std::string_view ReaderBenchmarkDatasetName(ReaderBenchmarkDataset dataset);
+std::unique_ptr<BenchmarkDataLoader> CreateStreamingSyntheticDataLoader(StreamingSyntheticDataConfig config);
+arrow::Result<std::unique_ptr<BenchmarkDataLoader>> CreateReaderBenchmarkDataLoader(ReaderBenchmarkDataset dataset);
 
 }  // namespace benchmark
 }  // namespace milvus_storage

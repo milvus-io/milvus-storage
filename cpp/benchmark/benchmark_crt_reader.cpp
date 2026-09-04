@@ -20,11 +20,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
-#include <cstring>
-#include <limits>
 #include <memory>
 #include <mutex>
-#include <random>
 #include <string>
 #include <thread>
 #include <utility>
@@ -187,162 +184,6 @@ int64_t CalculateTableRawDataSize(const std::shared_ptr<arrow::Table>& table) {
   return bytes;
 }
 
-arrow::Result<int32_t> ResolveVectorByteWidth(size_t vector_dim) {
-  constexpr auto kFloatBytes = sizeof(float);
-  if (vector_dim > static_cast<size_t>(std::numeric_limits<int32_t>::max()) / kFloatBytes) {
-    return arrow::Status::Invalid("vector byte width exceeds fixed-size binary limit: " + std::to_string(vector_dim) +
-                                  " float32 values");
-  }
-  return static_cast<int32_t>(vector_dim * kFloatBytes);
-}
-
-arrow::Result<std::shared_ptr<arrow::Schema>> CreateCrtBenchmarkSchema(std::array<bool, 4> needed_columns,
-                                                                       size_t vector_dim) {
-  std::vector<std::shared_ptr<arrow::Field>> fields;
-  if (needed_columns[0]) {
-    fields.emplace_back(
-        arrow::field("id", arrow::int64(), false, arrow::key_value_metadata({"PARQUET:field_id"}, {"100"})));
-  }
-  if (needed_columns[1]) {
-    fields.emplace_back(
-        arrow::field("name", arrow::utf8(), false, arrow::key_value_metadata({"PARQUET:field_id"}, {"101"})));
-  }
-  if (needed_columns[2]) {
-    fields.emplace_back(
-        arrow::field("value", arrow::float64(), false, arrow::key_value_metadata({"PARQUET:field_id"}, {"102"})));
-  }
-  if (needed_columns[3]) {
-    ARROW_ASSIGN_OR_RAISE(auto vector_byte_width, ResolveVectorByteWidth(vector_dim));
-    fields.emplace_back(arrow::field("vector", arrow::fixed_size_binary(vector_byte_width), false,
-                                     arrow::key_value_metadata({"PARQUET:field_id"}, {"103"})));
-  }
-  if (fields.empty()) {
-    return arrow::Status::Invalid("At least one column must be needed");
-  }
-
-  return arrow::schema(std::move(fields));
-}
-
-std::string MakeBenchmarkString(size_t row, size_t string_length, bool random_data) {
-  if (!random_data) {
-    return "name_" + std::to_string(row);
-  }
-  std::string value(std::max<size_t>(1, string_length), 'a');
-  for (size_t i = 0; i < value.size(); ++i) {
-    value[i] = static_cast<char>('a' + ((row + i) % 26));
-  }
-  return value;
-}
-
-arrow::Result<std::shared_ptr<arrow::RecordBatch>> CreateCrtBenchmarkData(const std::shared_ptr<arrow::Schema>& schema,
-                                                                          int64_t start_offset,
-                                                                          const CrtDataConfig& config,
-                                                                          size_t num_rows) {
-  arrow::Int64Builder id_builder;
-  arrow::StringBuilder name_builder;
-  arrow::DoubleBuilder value_builder;
-  std::unique_ptr<arrow::FixedSizeBinaryBuilder> vector_builder;
-  std::vector<uint8_t> vector_data;
-  if (config.columns[3]) {
-    ARROW_ASSIGN_OR_RAISE(auto vector_byte_width, ResolveVectorByteWidth(config.vector_dim));
-    vector_builder = std::make_unique<arrow::FixedSizeBinaryBuilder>(arrow::fixed_size_binary(vector_byte_width));
-    vector_data.resize(static_cast<size_t>(vector_byte_width));
-  }
-  std::vector<std::shared_ptr<arrow::Array>> arrays;
-  std::mt19937 gen(static_cast<uint32_t>(start_offset));
-  std::uniform_real_distribution<float> float_dist(0.0f, 1000.0f);
-  std::uniform_real_distribution<double> double_dist(0.0, 1000.0);
-
-  for (size_t row = 0; row < num_rows; ++row) {
-    const auto source_row = start_offset + static_cast<int64_t>(row);
-    if (config.columns[0]) {
-      ARROW_RETURN_NOT_OK(id_builder.Append(source_row));
-    }
-    if (config.columns[1]) {
-      ARROW_RETURN_NOT_OK(name_builder.Append(
-          MakeBenchmarkString(static_cast<size_t>(source_row), config.string_length, config.random_data)));
-    }
-    if (config.columns[2]) {
-      ARROW_RETURN_NOT_OK(value_builder.Append(config.random_data ? double_dist(gen) : source_row * 1.5));
-    }
-    if (config.columns[3]) {
-      for (size_t dim = 0; dim < config.vector_dim; ++dim) {
-        const auto value = config.random_data ? float_dist(gen) : static_cast<float>(source_row * 0.1f + dim);
-        std::memcpy(vector_data.data() + dim * sizeof(float), &value, sizeof(value));
-      }
-      ARROW_RETURN_NOT_OK(vector_builder->Append(vector_data.data()));
-    }
-  }
-
-  std::shared_ptr<arrow::Array> array;
-  if (config.columns[0]) {
-    ARROW_RETURN_NOT_OK(id_builder.Finish(&array));
-    arrays.emplace_back(std::move(array));
-  }
-  if (config.columns[1]) {
-    ARROW_RETURN_NOT_OK(name_builder.Finish(&array));
-    arrays.emplace_back(std::move(array));
-  }
-  if (config.columns[2]) {
-    ARROW_RETURN_NOT_OK(value_builder.Finish(&array));
-    arrays.emplace_back(std::move(array));
-  }
-  if (config.columns[3]) {
-    ARROW_RETURN_NOT_OK(vector_builder->Finish(&array));
-    arrays.emplace_back(std::move(array));
-  }
-
-  return arrow::RecordBatch::Make(schema, static_cast<int64_t>(num_rows), std::move(arrays));
-}
-
-class CrtSyntheticBatchReader final : public arrow::RecordBatchReader {
-  public:
-  CrtSyntheticBatchReader(std::shared_ptr<arrow::Schema> schema, CrtDataConfig config)
-      : schema_(std::move(schema)), config_(std::move(config)) {}
-
-  std::shared_ptr<arrow::Schema> schema() const override { return schema_; }
-
-  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* out) override {
-    if (rows_read_ >= config_.num_rows) {
-      *out = nullptr;
-      return arrow::Status::OK();
-    }
-    const auto rows = std::min(config_.batch_rows, config_.num_rows - rows_read_);
-    ARROW_ASSIGN_OR_RAISE(*out, CreateCrtBenchmarkData(schema_, static_cast<int64_t>(rows_read_), config_, rows));
-    rows_read_ += rows;
-    return arrow::Status::OK();
-  }
-
-  private:
-  std::shared_ptr<arrow::Schema> schema_;
-  CrtDataConfig config_;
-  size_t rows_read_ = 0;
-};
-
-class CrtDataLoader {
-  public:
-  explicit CrtDataLoader(CrtDataConfig config) : config_(std::move(config)) {}
-
-  arrow::Status Load() {
-    ARROW_ASSIGN_OR_RAISE(schema_, CreateCrtBenchmarkSchema(config_.columns, config_.vector_dim));
-    return arrow::Status::OK();
-  }
-
-  std::shared_ptr<arrow::Schema> schema() const { return schema_; }
-  const CrtDataConfig& config() const { return config_; }
-
-  arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> GetRecordBatchReader() const {
-    if (!schema_) {
-      return arrow::Status::Invalid("CRT benchmark data loader is not loaded");
-    }
-    return std::make_shared<CrtSyntheticBatchReader>(schema_, config_);
-  }
-
-  private:
-  CrtDataConfig config_;
-  std::shared_ptr<arrow::Schema> schema_;
-};
-
 }  // namespace
 
 class CrtReaderBenchmark : public FormatBenchFixtureBase<false, false> {
@@ -383,17 +224,19 @@ class CrtReaderBenchmark : public FormatBenchFixtureBase<false, false> {
                             const CrtDataConfig& config,
                             const std::shared_ptr<std::vector<std::string>>& projection,
                             PreparedData* out) {
-    CrtDataLoader loader(config);
-    ARROW_RETURN_NOT_OK(loader.Load());
+    auto loader = CreateStreamingSyntheticDataLoader({config.num_rows, config.vector_dim, config.string_length,
+                                                      config.batch_rows, config.random_data, config.columns,
+                                                      VectorLayout::kFixedSizeBinary, config.label});
+    ARROW_RETURN_NOT_OK(loader->Load());
 
     auto base_path = GetUniquePath(config.path_suffix);
-    ARROW_ASSIGN_OR_RAISE(auto policy, CreateSinglePolicy(format, loader.schema()));
-    auto writer = Writer::create(base_path, loader.schema(), std::move(policy), properties);
+    ARROW_ASSIGN_OR_RAISE(auto policy, CreateSinglePolicy(format, loader->GetSchema()));
+    auto writer = Writer::create(base_path, loader->GetSchema(), std::move(policy), properties);
     if (!writer) {
       return arrow::Status::Invalid("Failed to create CRT reader benchmark writer");
     }
 
-    ARROW_ASSIGN_OR_RAISE(auto batch_reader, loader.GetRecordBatchReader());
+    ARROW_ASSIGN_OR_RAISE(auto batch_reader, loader->GetRecordBatchReader());
     std::shared_ptr<arrow::RecordBatch> batch;
     while (true) {
       ARROW_RETURN_NOT_OK(batch_reader->ReadNext(&batch));
@@ -407,7 +250,7 @@ class CrtReaderBenchmark : public FormatBenchFixtureBase<false, false> {
       return arrow::Status::Invalid("Prepared CRT reader benchmark data has no column-group files");
     }
 
-    auto reader = Reader::create(cgs, loader.schema(), projection, properties);
+    auto reader = Reader::create(cgs, loader->GetSchema(), projection, properties);
     if (!reader) {
       return arrow::Status::Invalid("Failed to create CRT reader benchmark reader");
     }
@@ -418,7 +261,7 @@ class CrtReaderBenchmark : public FormatBenchFixtureBase<false, false> {
     }
 
     const auto& file = (*cgs)[0]->files[0];
-    out->schema = loader.schema();
+    out->schema = loader->GetSchema();
     out->column_groups = std::move(cgs);
     out->projection = projection;
     out->file_size = file.Get<uint64_t>(api::kPropertyFileSize);
@@ -997,6 +840,7 @@ class CrtReaderBenchmark : public FormatBenchFixtureBase<false, false> {
   }
 };
 
+// Measures concurrent public ChunkReader open and one-chunk reads under blocking versus async CRT S3 I/O.
 BENCHMARK_DEFINE_F(CrtReaderBenchmark, ConcurrentOpenRead)(::benchmark::State& st) {
   const auto format = GetFormatByIndex(static_cast<size_t>(st.range(0)));
   const auto mode = static_cast<CrtIoMode>(st.range(1));
@@ -1052,6 +896,7 @@ BENCHMARK_REGISTER_F(CrtReaderBenchmark, ConcurrentOpenRead)
     ->Unit(::benchmark::kMillisecond)
     ->UseManualTime();
 
+// Measures concurrent public Reader::take calls for fixed strided rows under blocking versus async CRT S3 I/O.
 BENCHMARK_DEFINE_F(CrtReaderBenchmark, ConcurrentOpenTake)(::benchmark::State& st) {
   const auto format = GetFormatByIndex(static_cast<size_t>(st.range(0)));
   const auto mode = static_cast<CrtIoMode>(st.range(1));
@@ -1113,6 +958,7 @@ BENCHMARK_REGISTER_F(CrtReaderBenchmark, ConcurrentOpenTake)
     ->Unit(::benchmark::kMillisecond)
     ->UseManualTime();
 
+// Measures concurrent reads of every chunk in a 64 MiB random-vector file under both S3 I/O modes.
 BENCHMARK_DEFINE_F(CrtReaderBenchmark, ConcurrentOpenGetAllChunks)(::benchmark::State& st) {
   const auto format = GetFormatByIndex(static_cast<size_t>(st.range(0)));
   const auto mode = static_cast<CrtIoMode>(st.range(1));
@@ -1134,6 +980,7 @@ BENCHMARK_REGISTER_F(CrtReaderBenchmark, ConcurrentOpenGetAllChunks)
     ->Unit(::benchmark::kMillisecond)
     ->UseManualTime();
 
+// Measures concurrent reads of every chunk in the streamed 2 GiB random-vector case without materializing it.
 BENCHMARK_DEFINE_F(CrtReaderBenchmark, ConcurrentOpenGetAllChunks2GiB)(::benchmark::State& st) {
   const auto format = GetFormatByIndex(static_cast<size_t>(st.range(0)));
   const auto mode = static_cast<CrtIoMode>(st.range(1));
@@ -1154,6 +1001,7 @@ BENCHMARK_REGISTER_F(CrtReaderBenchmark, ConcurrentOpenGetAllChunks2GiB)
     ->Unit(::benchmark::kMillisecond)
     ->UseManualTime();
 
+// Measures concurrent reads of every chunk in a 256 MiB low-entropy vector file to expose compression effects.
 BENCHMARK_DEFINE_F(CrtReaderBenchmark, ConcurrentOpenGetAllChunksCompressed)(::benchmark::State& st) {
   const auto format = GetFormatByIndex(static_cast<size_t>(st.range(0)));
   const auto mode = static_cast<CrtIoMode>(st.range(1));

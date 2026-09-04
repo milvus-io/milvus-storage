@@ -75,9 +75,7 @@ class StorageFixture : public benchmark::Fixture {
     GBENCH_ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_), state);
   }
 
-  void TearDown(::benchmark::State& state) override {
-    // GBENCH_ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_), state);
-  }
+  void TearDown(::benchmark::State& state) override { GBENCH_ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_), state); }
 
   api::Properties properties_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
@@ -208,6 +206,7 @@ static void APIWriteLargeBenchmark(benchmark::State& st,
   }
 }
 
+// Measures public Writer throughput for a 4K-row dataset containing all scalar and vector columns.
 BENCHMARK_DEFINE_F(StorageFixture, WriteDefaultConfig)(benchmark::State& st) {
   size_t loop_times = st.range(0);
   APIWriteBenchmark(st, fs_, base_path_, properties_, loop_times,
@@ -218,6 +217,7 @@ BENCHMARK_DEFINE_F(StorageFixture, WriteDefaultConfig)(benchmark::State& st) {
                                     .needed_columns = {true, true, true, true}});
 }
 
+// Measures public Writer throughput when the input schema contains only one selected column.
 BENCHMARK_DEFINE_F(StorageFixture, WriteSingleColumnConfig)(benchmark::State& st) {
   size_t loop_times = st.range(0);
   int column_idx = st.range(1);
@@ -232,6 +232,7 @@ BENCHMARK_DEFINE_F(StorageFixture, WriteSingleColumnConfig)(benchmark::State& st
                                     .needed_columns = needed_columns});
 }
 
+// Measures a public Reader full scan of all columns after preparing the default 4K-row dataset.
 BENCHMARK_DEFINE_F(StorageFixture, ReadFullScanDefaultConfig)(benchmark::State& st) {
   size_t loop_times = st.range(0);
 
@@ -246,6 +247,7 @@ BENCHMARK_DEFINE_F(StorageFixture, ReadFullScanDefaultConfig)(benchmark::State& 
                        });
 }
 
+// Measures a public Reader full scan projected to one selected column of the prepared dataset.
 BENCHMARK_DEFINE_F(StorageFixture, ReadFullScanSingleColumnConfig)(benchmark::State& st) {
   size_t loop_times = st.range(0);
   int column_idx = st.range(1);
@@ -265,6 +267,7 @@ BENCHMARK_DEFINE_F(StorageFixture, ReadFullScanSingleColumnConfig)(benchmark::St
                        });
 }
 
+// Measures vector-only public Writer/Reader processing for a target-sized 768-dimensional dataset.
 BENCHMARK_DEFINE_F(StorageFixture, WriteRead768dimVector)(benchmark::State& st) {
   uint64_t target_size = st.range(0);
   uint32_t target_dim = st.range(1);

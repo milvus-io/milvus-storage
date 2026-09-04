@@ -1,0 +1,85 @@
+name: Setup local MinIO
+description: Start a verified local MinIO server for CI
+
+inputs:
+  cpu:
+    description: Optional CPU index reserved for the MinIO process
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Install MinIO dependencies
+      shell: bash
+      run: |
+        if ! command -v s3cmd >/dev/null 2>&1; then
+          sudo apt-get update
+          sudo apt-get install -y s3cmd
+        fi
+
+    - name: Install MinIO server
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        minio_release=RELEASE.2025-09-07T16-13-09Z
+        minio_sha256=7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f
+        minio_url="https://dl.min.io/server/minio/release/linux-amd64/archive/minio.${minio_release}"
+
+        curl --fail --location --retry 5 --output "$RUNNER_TEMP/minio" "$minio_url"
+        printf '%s  %s\n' "$minio_sha256" "$RUNNER_TEMP/minio" | sha256sum --check --strict
+        chmod +x "$RUNNER_TEMP/minio"
+        "$RUNNER_TEMP/minio" --version
+
+        echo "MINIO_RELEASE=$minio_release" >> "$GITHUB_ENV"
+
+    - name: Start MinIO server
+      shell: bash
+      env:
+        MINIO_CPU: ${{ inputs.cpu }}
+      run: |
+        set -euo pipefail
+
+        minio_data_dir="$RUNNER_TEMP/minio-data"
+        minio_log="$RUNNER_TEMP/minio.log"
+        mkdir -p "$minio_data_dir"
+
+        minio_command=(
+          "$RUNNER_TEMP/minio" server "$minio_data_dir"
+          --address 127.0.0.1:9000
+          --console-address 127.0.0.1:9001
+        )
+        if [[ -n "$MINIO_CPU" ]]; then
+          minio_command=(taskset --cpu-list "$MINIO_CPU" "${minio_command[@]}")
+          export GOMAXPROCS=1
+        fi
+
+        MINIO_BROWSER=off \
+          MINIO_ROOT_USER=minioadmin \
+          MINIO_ROOT_PASSWORD=minioadmin \
+          "${minio_command[@]}" >"$minio_log" 2>&1 &
+        minio_pid=$!
+        printf '%s\n' "$minio_pid" > "$RUNNER_TEMP/minio.pid"
+
+        for _ in $(seq 1 30); do
+          if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+            break
+          fi
+          if ! kill -0 "$minio_pid" 2>/dev/null; then
+            cat "$minio_log"
+            exit 1
+          fi
+          sleep 1
+        done
+        curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null
+
+        s3cmd_options=(
+          --access_key=minioadmin
+          --secret_key=minioadmin
+          --host=127.0.0.1:9000
+          --host-bucket=127.0.0.1:9000
+          --region=us-east-1
+          --no-ssl
+        )
+        s3cmd "${s3cmd_options[@]}" mb s3://test-bucket

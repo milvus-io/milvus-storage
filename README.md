@@ -125,7 +125,7 @@ make test
 make test-all
 
 # Run benchmarks
-./build/Release/benchmark/benchmark --benchmark_filter="Typical/"
+./build/Release/benchmark/benchmark --benchmark_filter="FormatReadBenchmark/ReadFullScan"
 ```
 
 ### Integration Tests (Python)

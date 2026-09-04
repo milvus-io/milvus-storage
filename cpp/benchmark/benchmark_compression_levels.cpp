@@ -139,7 +139,12 @@ class CompressionBench : public ::benchmark::Fixture {
     (void)_;
   }
 
-  void TearDown(::benchmark::State&) override {}
+  void TearDown(::benchmark::State& st) override {
+    const auto status = fs_->DeleteDir(base_path_);
+    if (!status.ok()) {
+      st.SkipWithError(status.ToString().c_str());
+    }
+  }
 
   protected:
   std::shared_ptr<arrow::Schema> schema_;
@@ -152,6 +157,7 @@ std::vector<std::shared_ptr<arrow::RecordBatch>> CompressionBench::batches_;
 
 }  // namespace
 
+// Measures Parquet write cost and resulting file size for each configured ZSTD compression level.
 BENCHMARK_DEFINE_F(CompressionBench, Write)(::benchmark::State& st) {
   const auto& cfg = Configs()[static_cast<size_t>(st.range(0))];
   st.SetLabel(cfg.label);
@@ -186,12 +192,20 @@ BENCHMARK_DEFINE_F(CompressionBench, Write)(::benchmark::State& st) {
       return;
     }
 
-    auto info = fs_->GetFileInfo(file_path);
+    st.PauseTiming();
+    const auto info = fs_->GetFileInfo(file_path);
+    const auto delete_status = fs_->DeleteFile(file_path);
+    st.ResumeTiming();
     if (info.ok()) {
       last_file_size = info.ValueOrDie().size();
+    } else {
+      st.SkipWithError(info.status().ToString().c_str());
+      return;
     }
-    auto del = fs_->DeleteFile(file_path);
-    (void)del;
+    if (!delete_status.ok()) {
+      st.SkipWithError(delete_status.ToString().c_str());
+      return;
+    }
   }
 
   int64_t total_rows = static_cast<int64_t>(kBatches) * kRowsPerBatch;

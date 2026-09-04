@@ -14,8 +14,12 @@
 
 #include "benchmark_data_loader.h"
 
-#include <filesystem>
+#include <algorithm>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <limits>
+#include <random>
 
 #include <arrow/io/file.h>
 #include <arrow/table.h>
@@ -24,6 +28,237 @@
 #include "test_env.h"
 
 namespace milvus_storage::benchmark {
+
+namespace {
+
+arrow::Result<std::shared_ptr<arrow::Schema>> CreateStreamingSyntheticSchema(
+    const StreamingSyntheticDataConfig& config) {
+  std::vector<std::shared_ptr<arrow::Field>> fields;
+  if (config.columns[0]) {
+    fields.emplace_back(
+        arrow::field("id", arrow::int64(), false, arrow::key_value_metadata({"PARQUET:field_id"}, {"100"})));
+  }
+  if (config.columns[1]) {
+    fields.emplace_back(
+        arrow::field("name", arrow::utf8(), false, arrow::key_value_metadata({"PARQUET:field_id"}, {"101"})));
+  }
+  if (config.columns[2]) {
+    fields.emplace_back(
+        arrow::field("value", arrow::float64(), false, arrow::key_value_metadata({"PARQUET:field_id"}, {"102"})));
+  }
+  if (config.columns[3]) {
+    if (config.vector_layout == VectorLayout::kFloatList) {
+      fields.emplace_back(arrow::field("vector", arrow::list(arrow::float32()), false,
+                                       arrow::key_value_metadata({"PARQUET:field_id"}, {"103"})));
+    } else {
+      if (config.vector_dim > static_cast<size_t>(std::numeric_limits<int32_t>::max()) / sizeof(float)) {
+        return arrow::Status::Invalid("vector byte width exceeds fixed-size binary limit");
+      }
+      fields.emplace_back(arrow::field("vector", arrow::fixed_size_binary(config.vector_dim * sizeof(float)), false,
+                                       arrow::key_value_metadata({"PARQUET:field_id"}, {"103"})));
+    }
+  }
+  if (fields.empty()) {
+    return arrow::Status::Invalid("At least one streaming data column must be selected");
+  }
+  return arrow::schema(std::move(fields));
+}
+
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> CreateStreamingSyntheticBatch(
+    const std::shared_ptr<arrow::Schema>& schema,
+    const StreamingSyntheticDataConfig& config,
+    int64_t start_offset,
+    size_t num_rows) {
+  arrow::Int64Builder id_builder;
+  arrow::StringBuilder name_builder;
+  arrow::DoubleBuilder value_builder;
+  arrow::ListBuilder list_vector_builder(arrow::default_memory_pool(), std::make_shared<arrow::FloatBuilder>());
+  std::unique_ptr<arrow::FixedSizeBinaryBuilder> binary_vector_builder;
+  std::vector<uint8_t> binary_vector_data;
+  if (config.columns[3] && config.vector_layout == VectorLayout::kFixedSizeBinary) {
+    const auto vector_byte_width = config.vector_dim * sizeof(float);
+    binary_vector_builder =
+        std::make_unique<arrow::FixedSizeBinaryBuilder>(arrow::fixed_size_binary(vector_byte_width));
+    binary_vector_data.resize(vector_byte_width);
+  }
+
+  std::mt19937 generator(static_cast<uint32_t>(start_offset));
+  std::uniform_real_distribution<float> float_distribution(0.0f, 1000.0f);
+  std::uniform_real_distribution<double> double_distribution(0.0, 1000.0);
+  auto* list_value_builder = static_cast<arrow::FloatBuilder*>(list_vector_builder.value_builder());
+
+  for (size_t row = 0; row < num_rows; ++row) {
+    const auto source_row = start_offset + static_cast<int64_t>(row);
+    if (config.columns[0]) {
+      ARROW_RETURN_NOT_OK(id_builder.Append(source_row));
+    }
+    if (config.columns[1]) {
+      std::string name;
+      if (config.random_data) {
+        name.resize(std::max<size_t>(1, config.string_length));
+        for (size_t i = 0; i < name.size(); ++i) {
+          name[i] = static_cast<char>('a' + ((source_row + static_cast<int64_t>(i)) % 26));
+        }
+      } else {
+        name = "name_" + std::to_string(source_row);
+      }
+      ARROW_RETURN_NOT_OK(name_builder.Append(name));
+    }
+    if (config.columns[2]) {
+      ARROW_RETURN_NOT_OK(value_builder.Append(config.random_data ? double_distribution(generator) : source_row * 1.5));
+    }
+    if (config.columns[3]) {
+      if (config.vector_layout == VectorLayout::kFloatList) {
+        ARROW_RETURN_NOT_OK(list_vector_builder.Append());
+      }
+      for (size_t dimension = 0; dimension < config.vector_dim; ++dimension) {
+        const auto value =
+            config.random_data ? float_distribution(generator) : static_cast<float>(source_row * 0.1f + dimension);
+        if (config.vector_layout == VectorLayout::kFloatList) {
+          ARROW_RETURN_NOT_OK(list_value_builder->Append(value));
+        } else {
+          std::memcpy(binary_vector_data.data() + dimension * sizeof(float), &value, sizeof(value));
+        }
+      }
+      if (config.vector_layout == VectorLayout::kFixedSizeBinary) {
+        ARROW_RETURN_NOT_OK(binary_vector_builder->Append(binary_vector_data.data()));
+      }
+    }
+  }
+
+  std::vector<std::shared_ptr<arrow::Array>> arrays;
+  std::shared_ptr<arrow::Array> array;
+  if (config.columns[0]) {
+    ARROW_RETURN_NOT_OK(id_builder.Finish(&array));
+    arrays.emplace_back(std::move(array));
+  }
+  if (config.columns[1]) {
+    ARROW_RETURN_NOT_OK(name_builder.Finish(&array));
+    arrays.emplace_back(std::move(array));
+  }
+  if (config.columns[2]) {
+    ARROW_RETURN_NOT_OK(value_builder.Finish(&array));
+    arrays.emplace_back(std::move(array));
+  }
+  if (config.columns[3]) {
+    if (config.vector_layout == VectorLayout::kFloatList) {
+      ARROW_RETURN_NOT_OK(list_vector_builder.Finish(&array));
+    } else {
+      ARROW_RETURN_NOT_OK(binary_vector_builder->Finish(&array));
+    }
+    arrays.emplace_back(std::move(array));
+  }
+  return arrow::RecordBatch::Make(schema, static_cast<int64_t>(num_rows), std::move(arrays));
+}
+
+class StreamingSyntheticBatchReader final : public arrow::RecordBatchReader {
+  public:
+  StreamingSyntheticBatchReader(std::shared_ptr<arrow::Schema> schema, StreamingSyntheticDataConfig config)
+      : schema_(std::move(schema)), config_(std::move(config)) {}
+
+  std::shared_ptr<arrow::Schema> schema() const override { return schema_; }
+
+  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* out) override {
+    if (rows_read_ >= config_.num_rows) {
+      *out = nullptr;
+      return arrow::Status::OK();
+    }
+    const auto rows = std::min(config_.batch_rows, config_.num_rows - rows_read_);
+    ARROW_ASSIGN_OR_RAISE(*out,
+                          CreateStreamingSyntheticBatch(schema_, config_, static_cast<int64_t>(rows_read_), rows));
+    rows_read_ += rows;
+    return arrow::Status::OK();
+  }
+
+  private:
+  std::shared_ptr<arrow::Schema> schema_;
+  StreamingSyntheticDataConfig config_;
+  size_t rows_read_ = 0;
+};
+
+class StreamingSyntheticDataLoader final : public BenchmarkDataLoader {
+  public:
+  explicit StreamingSyntheticDataLoader(StreamingSyntheticDataConfig config) : config_(std::move(config)) {}
+
+  arrow::Status Load() override {
+    if (config_.batch_rows == 0) {
+      return arrow::Status::Invalid("Streaming batch_rows must be positive");
+    }
+    ARROW_ASSIGN_OR_RAISE(schema_, CreateStreamingSyntheticSchema(config_));
+    return arrow::Status::OK();
+  }
+
+  std::shared_ptr<arrow::Schema> GetSchema() const override { return schema_; }
+
+  arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> GetRecordBatchReader() const override {
+    if (!schema_) {
+      return arrow::Status::Invalid("Data not loaded");
+    }
+    return std::make_shared<StreamingSyntheticBatchReader>(schema_, config_);
+  }
+
+  std::shared_ptr<arrow::Table> GetTable() const override { return nullptr; }
+
+  arrow::Result<std::shared_ptr<arrow::RecordBatch>> GetRecordBatch() const override {
+    return arrow::Status::NotImplemented("Streaming benchmark data is available through GetRecordBatchReader only");
+  }
+
+  std::string GetSchemaBasePatterns() const override {
+    if (config_.columns[0] || config_.columns[1] || config_.columns[2]) {
+      return config_.columns[3] ? "id,name,value;vector" : "id,name,value";
+    }
+    return "vector";
+  }
+
+  int64_t NumRows() const override { return static_cast<int64_t>(config_.num_rows); }
+
+  int64_t GetDataSize() const override {
+    size_t bytes_per_row = 0;
+    if (config_.columns[0]) {
+      bytes_per_row += sizeof(int64_t);
+    }
+    if (config_.columns[1]) {
+      bytes_per_row += config_.string_length;
+    }
+    if (config_.columns[2]) {
+      bytes_per_row += sizeof(double);
+    }
+    if (config_.columns[3]) {
+      bytes_per_row += config_.vector_dim * sizeof(float);
+    }
+    return static_cast<int64_t>(config_.num_rows * bytes_per_row);
+  }
+
+  std::shared_ptr<std::vector<std::string>> GetScalarProjection() const override {
+    auto projection = std::make_shared<std::vector<std::string>>();
+    if (config_.columns[0]) {
+      projection->emplace_back("id");
+    }
+    if (config_.columns[1]) {
+      projection->emplace_back("name");
+    }
+    if (config_.columns[2]) {
+      projection->emplace_back("value");
+    }
+    return projection;
+  }
+
+  std::shared_ptr<std::vector<std::string>> GetVectorProjection() const override {
+    auto projection = std::make_shared<std::vector<std::string>>();
+    if (config_.columns[3]) {
+      projection->emplace_back("vector");
+    }
+    return projection;
+  }
+
+  std::string GetDescription() const override { return config_.label; }
+
+  private:
+  StreamingSyntheticDataConfig config_;
+  std::shared_ptr<arrow::Schema> schema_;
+};
+
+}  // namespace
 
 //=============================================================================
 // SyntheticDataLoader Implementation
@@ -297,6 +532,101 @@ std::unique_ptr<BenchmarkDataLoader> CreateDataLoaderFromEnv(const SyntheticData
     return std::make_unique<MilvusSegmentLoader>(segment_path);
   }
   return std::make_unique<SyntheticDataLoader>(fallback_config);
+}
+
+std::string_view ReaderBenchmarkDatasetName(ReaderBenchmarkDataset dataset) {
+  switch (dataset) {
+    case ReaderBenchmarkDataset::kSyntheticSmall:
+      return "SyntheticSmall";
+    case ReaderBenchmarkDataset::kSyntheticMedium:
+      return "SyntheticMedium";
+    case ReaderBenchmarkDataset::kSyntheticLarge:
+      return "SyntheticLarge";
+    case ReaderBenchmarkDataset::kScalarMedium:
+      return "ScalarMedium";
+    case ReaderBenchmarkDataset::kRandomVector64MiB:
+      return "RandomVector64MiB";
+    case ReaderBenchmarkDataset::kLowEntropyVector256MiB:
+      return "LowEntropyVector256MiB";
+    case ReaderBenchmarkDataset::kRandomVector2GiB:
+      return "RandomVector2GiB";
+  }
+  return "unknown";
+}
+
+std::unique_ptr<BenchmarkDataLoader> CreateStreamingSyntheticDataLoader(StreamingSyntheticDataConfig config) {
+  return std::make_unique<StreamingSyntheticDataLoader>(std::move(config));
+}
+
+arrow::Result<std::unique_ptr<BenchmarkDataLoader>> CreateReaderBenchmarkDataLoader(ReaderBenchmarkDataset dataset) {
+  constexpr size_t kVectorDimension = 256;
+  constexpr size_t kVectorBatchRows = 65536;
+  switch (dataset) {
+    case ReaderBenchmarkDataset::kSyntheticSmall:
+      return CreateStreamingSyntheticDataLoader({4096,
+                                                 128,
+                                                 128,
+                                                 4096,
+                                                 true,
+                                                 {true, true, true, true},
+                                                 VectorLayout::kFloatList,
+                                                 std::string(ReaderBenchmarkDatasetName(dataset))});
+    case ReaderBenchmarkDataset::kSyntheticMedium:
+      return CreateStreamingSyntheticDataLoader({40960,
+                                                 128,
+                                                 128,
+                                                 40960,
+                                                 true,
+                                                 {true, true, true, true},
+                                                 VectorLayout::kFloatList,
+                                                 std::string(ReaderBenchmarkDatasetName(dataset))});
+    case ReaderBenchmarkDataset::kSyntheticLarge:
+      return CreateStreamingSyntheticDataLoader({409600,
+                                                 128,
+                                                 128,
+                                                 65536,
+                                                 true,
+                                                 {true, true, true, true},
+                                                 VectorLayout::kFloatList,
+                                                 std::string(ReaderBenchmarkDatasetName(dataset))});
+    case ReaderBenchmarkDataset::kScalarMedium:
+      return CreateStreamingSyntheticDataLoader({40960,
+                                                 0,
+                                                 128,
+                                                 40960,
+                                                 true,
+                                                 {true, true, true, false},
+                                                 VectorLayout::kFloatList,
+                                                 std::string(ReaderBenchmarkDatasetName(dataset))});
+    case ReaderBenchmarkDataset::kRandomVector64MiB:
+      return CreateStreamingSyntheticDataLoader({65536,
+                                                 kVectorDimension,
+                                                 0,
+                                                 kVectorBatchRows,
+                                                 true,
+                                                 {false, false, false, true},
+                                                 VectorLayout::kFixedSizeBinary,
+                                                 std::string(ReaderBenchmarkDatasetName(dataset))});
+    case ReaderBenchmarkDataset::kLowEntropyVector256MiB:
+      return CreateStreamingSyntheticDataLoader({262144,
+                                                 kVectorDimension,
+                                                 0,
+                                                 kVectorBatchRows,
+                                                 false,
+                                                 {false, false, false, true},
+                                                 VectorLayout::kFixedSizeBinary,
+                                                 std::string(ReaderBenchmarkDatasetName(dataset))});
+    case ReaderBenchmarkDataset::kRandomVector2GiB:
+      return CreateStreamingSyntheticDataLoader({2097152,
+                                                 kVectorDimension,
+                                                 0,
+                                                 kVectorBatchRows,
+                                                 true,
+                                                 {false, false, false, true},
+                                                 VectorLayout::kFixedSizeBinary,
+                                                 std::string(ReaderBenchmarkDatasetName(dataset))});
+  }
+  return arrow::Status::Invalid("Unknown Reader benchmark dataset");
 }
 
 }  // namespace milvus_storage::benchmark

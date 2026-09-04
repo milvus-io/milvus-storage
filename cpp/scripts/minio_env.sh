@@ -1,6 +1,6 @@
 export TEST_ENV_STORAGE_TYPE="remote"
 export TEST_ENV_CLOUD_PROVIDER="aws"
-export TEST_ENV_ADDRESS="http://localhost:9000"
+export TEST_ENV_ADDRESS="http://127.0.0.1:9000"
 export TEST_ENV_BUCKET_NAME="test-bucket"
 export TEST_ENV_ACCESS_KEY="minioadmin"
 export TEST_ENV_SECRET_KEY="minioadmin"

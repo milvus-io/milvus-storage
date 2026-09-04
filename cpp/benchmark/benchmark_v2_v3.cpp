@@ -146,6 +146,7 @@ class V2V3BenchFixture : public FormatBenchFixtureBase<> {
 // V2: PackedRecordBatchReader Benchmark (Low-level)
 //=============================================================================
 
+// Measures low-level V2 PackedRecordBatchReader full-scan throughput over a prepared packed file.
 BENCHMARK_DEFINE_F(V2V3BenchFixture, V2_PackedRecordBatchReader)(::benchmark::State& st) {
   // Write data using packed writer
   std::string path;
@@ -181,6 +182,7 @@ BENCHMARK_REGISTER_F(V2V3BenchFixture, V2_PackedRecordBatchReader)->Unit(::bench
 // V3: Reader::get_record_batch_reader Benchmark (Top-level)
 //=============================================================================
 
+// Measures top-level V3 public Reader record-batch full-scan throughput over Writer-produced data.
 BENCHMARK_DEFINE_F(V2V3BenchFixture, V3_RecordBatchReader)(::benchmark::State& st) {
   // Write data using Writer API
   std::shared_ptr<ColumnGroups> cgs;
@@ -217,6 +219,7 @@ BENCHMARK_REGISTER_F(V2V3BenchFixture, V3_RecordBatchReader)->Unit(::benchmark::
 //=============================================================================
 
 // Args: [config_idx]
+// Measures top-level V3 public ChunkReader by opening and reading every logical chunk individually.
 BENCHMARK_DEFINE_F(V2V3BenchFixture, V3_ChunkReader)(::benchmark::State& st) {
   // Write data using Writer API
   std::shared_ptr<ColumnGroups> cgs;
@@ -249,6 +252,7 @@ BENCHMARK_REGISTER_F(V2V3BenchFixture, V3_ChunkReader)->Unit(::benchmark::kMilli
 // V2: PackedRecordBatchWriter Benchmark (Low-level)
 //=============================================================================
 
+// Measures low-level V2 PackedRecordBatchWriter throughput while writing all preloaded batches.
 BENCHMARK_DEFINE_F(V2V3BenchFixture, V2_PackedRecordBatchWriter)(::benchmark::State& st) {
   std::string base_path = GetUniquePath("v2_write_bench");
 
@@ -277,9 +281,13 @@ BENCHMARK_DEFINE_F(V2V3BenchFixture, V2_PackedRecordBatchWriter)(::benchmark::St
     }
     auto result = writer->Close();
 
-    // Cleanup for next iteration
-    BENCH_ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path), st);
-    BENCH_ASSERT_STATUS_OK(CreateTestDir(fs_, base_path), st);
+    // Keep the per-iteration path reset out of the measured write time.
+    st.PauseTiming();
+    const auto delete_status = DeleteTestDir(fs_, base_path);
+    const auto create_status = CreateTestDir(fs_, base_path);
+    st.ResumeTiming();
+    BENCH_ASSERT_STATUS_OK(delete_status, st);
+    BENCH_ASSERT_STATUS_OK(create_status, st);
   }
 
   int64_t total_bytes = total_bytes_ * static_cast<int64_t>(st.iterations());
@@ -294,6 +302,7 @@ BENCHMARK_REGISTER_F(V2V3BenchFixture, V2_PackedRecordBatchWriter)->Unit(::bench
 // V3: Writer API Benchmark (Top-level)
 //=============================================================================
 
+// Measures top-level V3 public Writer write-and-close throughput over the same preloaded batches.
 BENCHMARK_DEFINE_F(V2V3BenchFixture, V3_Writer)(::benchmark::State& st) {
   std::string base_path = GetUniquePath("v3_write_bench");
 
@@ -310,9 +319,13 @@ BENCHMARK_DEFINE_F(V2V3BenchFixture, V3_Writer)(::benchmark::State& st) {
     }
     BENCH_ASSERT_AND_ASSIGN(auto cgs, writer->close(), st);
 
-    // Cleanup for next iteration
-    BENCH_ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path), st);
-    BENCH_ASSERT_STATUS_OK(CreateTestDir(fs_, base_path), st);
+    // Keep the per-iteration path reset out of the measured write time.
+    st.PauseTiming();
+    const auto delete_status = DeleteTestDir(fs_, base_path);
+    const auto create_status = CreateTestDir(fs_, base_path);
+    st.ResumeTiming();
+    BENCH_ASSERT_STATUS_OK(delete_status, st);
+    BENCH_ASSERT_STATUS_OK(create_status, st);
   }
 
   int64_t total_bytes = total_bytes_ * static_cast<int64_t>(st.iterations());
@@ -322,30 +335,5 @@ BENCHMARK_DEFINE_F(V2V3BenchFixture, V3_Writer)(::benchmark::State& st) {
 }
 
 BENCHMARK_REGISTER_F(V2V3BenchFixture, V3_Writer)->Unit(::benchmark::kMillisecond)->UseRealTime();
-
-//=============================================================================
-// Typical Benchmarks
-// Run with: --benchmark_filter="Typical/"
-//=============================================================================
-
-BENCHMARK_REGISTER_F(V2V3BenchFixture, V2_PackedRecordBatchReader)
-    ->Name("Typical/V2_Reader")
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(V2V3BenchFixture, V3_RecordBatchReader)
-    ->Name("Typical/V3_Reader")
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(V2V3BenchFixture, V2_PackedRecordBatchWriter)
-    ->Name("Typical/V2_Writer")
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(V2V3BenchFixture, V3_Writer)
-    ->Name("Typical/V3_Writer")
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
 
 }  // namespace milvus_storage::benchmark

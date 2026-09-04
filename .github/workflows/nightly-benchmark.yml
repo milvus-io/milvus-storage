@@ -1,0 +1,193 @@
+name: C++ Nightly Benchmark
+
+on:
+  schedule:
+    - cron: '0 5 * * *'
+      timezone: Asia/Shanghai
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/actions/setup-cpp-test/**'
+      - '.github/actions/setup-minio/**'
+      - '.github/workflows/nightly-benchmark.yml'
+      - 'cpp/benchmark/**'
+      - 'cpp/scripts/minio_env.sh'
+      - 'cpp/test/include/test_env.h'
+      - 'cpp/test/test_env.cpp'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      MINIO_CPU_LIST: '0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup C++ test environment
+        uses: ./.github/actions/setup-cpp-test
+        env:
+          WITH_BENCHMARK: 'True'
+          WITH_UT: 'False'
+          WITH_FIU: 'False'
+          USE_ASAN: 'False'
+          BUILD_TYPE: Release
+
+      - name: Install benchmark dependencies
+        run: sudo apt-get install -y jq s3cmd
+
+      - name: Test nightly summary renderer
+        run: bash cpp/benchmark/nightly/test_summary.sh
+
+      - name: Setup local MinIO
+        uses: ./.github/actions/setup-minio
+        with:
+          cpu: ${{ env.MINIO_CPU_LIST }}
+
+      - name: Configure benchmark CPU affinity
+        run: |
+          set -euo pipefail
+          cpu_count=$(nproc)
+          if (( cpu_count < 2 )); then
+            echo "Nightly benchmark requires at least two CPUs"
+            exit 1
+          fi
+          benchmark_cpu_list=$(seq -s, 1 "$((cpu_count - 1))")
+          benchmark_cpu_count=$(tr ',' '\n' <<< "$benchmark_cpu_list" | wc -l)
+          NIGHTLY_CI_EXECUTOR_THREADS=$benchmark_cpu_count
+
+          if comm -12 \
+            <(tr ',' '\n' <<< "$MINIO_CPU_LIST" | sort -n) \
+            <(tr ',' '\n' <<< "$benchmark_cpu_list" | sort -n) \
+            | grep -q .; then
+            echo "MinIO and benchmark CPU lists overlap"
+            exit 1
+          fi
+          if (( NIGHTLY_CI_EXECUTOR_THREADS != benchmark_cpu_count )); then
+            echo "Nightly CI executor thread count does not match benchmark CPU count"
+            exit 1
+          fi
+
+          echo "BENCHMARK_CPU_LIST=$benchmark_cpu_list" >> "$GITHUB_ENV"
+          echo "NIGHTLY_CI_EXECUTOR_THREADS=$NIGHTLY_CI_EXECUTOR_THREADS" >> "$GITHUB_ENV"
+          echo "MINIO_CPU_LIST=$MINIO_CPU_LIST" >> "$GITHUB_ENV"
+
+      - name: Record runner information
+        run: |
+          uname -a | tee "$RUNNER_TEMP/benchmark-system-info.txt"
+          lscpu | tee -a "$RUNNER_TEMP/benchmark-system-info.txt"
+          "$RUNNER_TEMP/minio" --version | tee -a "$RUNNER_TEMP/benchmark-system-info.txt"
+          echo "minio_cpu_list=$MINIO_CPU_LIST" | tee -a "$RUNNER_TEMP/benchmark-system-info.txt"
+          echo "benchmark_cpu_list=$BENCHMARK_CPU_LIST" | tee -a "$RUNNER_TEMP/benchmark-system-info.txt"
+          echo "nightly_ci_executor_threads=$NIGHTLY_CI_EXECUTOR_THREADS" | tee -a "$RUNNER_TEMP/benchmark-system-info.txt"
+          echo "SMT physical core sharing is accepted; affinity separates logical CPUs, not physical-core isolation." \
+            | tee -a "$RUNNER_TEMP/benchmark-system-info.txt"
+
+      - name: Run nightly reader benchmarks with MinIO
+        working-directory: ./cpp
+        run: |
+          set -euo pipefail
+          source ./scripts/minio_env.sh
+          export LD_LIBRARY_PATH="$(pwd)/build/Release/libs:$(pwd)/build/Release${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export NIGHTLY_CI_EXECUTOR_THREADS
+
+          bash benchmark/nightly/test_reader_alias.sh \
+            ./build/Release/benchmark/benchmark registration
+
+          target_tests=$(taskset --cpu-list "$BENCHMARK_CPU_LIST" \
+            ./build/Release/benchmark/benchmark \
+              --benchmark_filter='^NIGHTLY_CI_TARGET/' \
+              --benchmark_list_tests)
+          printf '%s\n' "$target_tests"
+          target_count=$(printf '%s\n' "$target_tests" | sed '/^[[:space:]]*$/d' | wc -l)
+          if (( target_count != 91 )); then
+            echo "Expected 91 nightly CI benchmark targets, found $target_count"
+            exit 1
+          fi
+
+          taskset --cpu-list "$BENCHMARK_CPU_LIST" \
+            ./build/Release/benchmark/benchmark \
+              --benchmark_filter='^NIGHTLY_CI_TARGET/' \
+              --benchmark_repetitions=3 \
+              --benchmark_display_aggregates_only=true \
+              --benchmark_out="$GITHUB_WORKSPACE/benchmark-results.json" \
+              --benchmark_out_format=json \
+            2>&1 | tee "$GITHUB_WORKSPACE/benchmark-results.txt"
+
+      - name: Publish benchmark summary
+        if: always()
+        run: |
+          set -euo pipefail
+
+          results_file="$GITHUB_WORKSPACE/benchmark-results.json"
+          summary_file="$GITHUB_WORKSPACE/benchmark-summary.md"
+
+          if [[ ! -s "$results_file" ]]; then
+            printf '## C++ Nightly Benchmark\n\nNo benchmark JSON was produced. Check the job logs and MinIO log artifact.\n' \
+              | tee "$summary_file" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          if ! jq -e '(.benchmarks // []) | type == "array"' "$results_file" >/dev/null; then
+            printf '## C++ Nightly Benchmark\n\nThe benchmark JSON is invalid. Check the job logs and uploaded artifacts.\n' \
+              | tee "$summary_file" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          jq -r \
+            --arg command render \
+            --arg expected_count 91 \
+            --arg commit "$GITHUB_SHA" \
+            --arg trigger "$GITHUB_EVENT_NAME" \
+            --arg minio_release "$MINIO_RELEASE" \
+            --arg minio_cpu_list "$MINIO_CPU_LIST" \
+            --arg benchmark_cpu_list "$BENCHMARK_CPU_LIST" \
+            --arg executor_threads "$NIGHTLY_CI_EXECUTOR_THREADS" \
+            -f cpp/benchmark/nightly/summary.jq \
+            "$results_file" \
+            | tee "$summary_file" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+          jq -r \
+            --arg command validate \
+            --arg expected_count 91 \
+            --arg commit "$GITHUB_SHA" \
+            --arg trigger "$GITHUB_EVENT_NAME" \
+            --arg minio_release "$MINIO_RELEASE" \
+            --arg minio_cpu_list "$MINIO_CPU_LIST" \
+            --arg benchmark_cpu_list "$BENCHMARK_CPU_LIST" \
+            --arg executor_threads "$NIGHTLY_CI_EXECUTOR_THREADS" \
+            -f cpp/benchmark/nightly/summary.jq \
+            "$results_file"
+
+      - name: Stop local MinIO server
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/minio.pid" ]]; then
+            minio_pid=$(<"$RUNNER_TEMP/minio.pid")
+            kill "$minio_pid" 2>/dev/null || true
+            wait "$minio_pid" 2>/dev/null || true
+          fi
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-benchmark-${{ github.sha }}
+          path: |
+            benchmark-results.json
+            benchmark-results.txt
+            benchmark-summary.md
+            ${{ runner.temp }}/benchmark-system-info.txt
+            ${{ runner.temp }}/minio.log
+          if-no-files-found: warn
+          retention-days: 30

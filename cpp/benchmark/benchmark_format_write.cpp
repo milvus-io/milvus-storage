@@ -71,7 +71,7 @@ class FormatWriteBenchmark : public FormatBenchFixtureBase<> {
   int64_t total_rows_ = 0;
 };
 
-// Write comparison benchmark across formats
+// Measures end-to-end public Writer write-and-close throughput for the selected format and loaded dataset.
 // Args: [format_idx, data_config_idx, memory_config_idx]
 BENCHMARK_DEFINE_F(FormatWriteBenchmark, WriteComparison)(::benchmark::State& st) {
   auto format_idx = static_cast<size_t>(st.range(0));
@@ -182,6 +182,7 @@ static double BytesToMiB(int64_t bytes) { return static_cast<double>(bytes) / 10
 // Split the same loaded data into many record batches and time writer->write()
 // separately from writer->close(). This mirrors Milvus sort compaction's
 // storage.Sort(...)->rw.Write(record) phase and the later srw.Close() phase.
+// Measures the write and close stages separately, including their throughput and output file counts.
 BENCHMARK_DEFINE_F(FormatWriteBenchmark, StageBreakdown)(::benchmark::State& st) {
   auto format_idx = static_cast<size_t>(st.range(0));
   auto writer_buffer_mib = static_cast<int64_t>(st.range(1));
@@ -311,8 +312,7 @@ static arrow::Result<int64_t> CalculateFileSize(const std::shared_ptr<arrow::fs:
   return total_size;
 }
 
-// This benchmark measures file size and compression ratio
-// The compression ratio is calculated by comparing file size against raw data size from loader
+// Measures encoded file size and compression ratio against the loader's raw logical data size.
 // Args: [format_idx, data_config_idx]
 BENCHMARK_DEFINE_F(FormatWriteBenchmark, CompressionAnalysis)(::benchmark::State& st) {
   auto format_idx = static_cast<size_t>(st.range(0));
@@ -378,36 +378,5 @@ BENCHMARK_REGISTER_F(FormatWriteBenchmark, CompressionAnalysis)
     ->Unit(::benchmark::kMillisecond)
     ->UseRealTime()
     ->Iterations(3);  // Few iterations since we're measuring file size
-
-//=============================================================================
-// Typical Benchmarks
-// Run with: --benchmark_filter="Typical/"
-//=============================================================================
-
-BENCHMARK_REGISTER_F(FormatWriteBenchmark, WriteComparison)
-    ->Name("Typical/FormatWrite_Parquet")
-    ->Args({0, 1, 1})  // Parquet + Medium + Default
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(FormatWriteBenchmark, WriteComparison)
-    ->Name("Typical/FormatWrite_Vortex")
-    ->Args({1, 1, 1})  // Vortex + Medium + Default
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(FormatWriteBenchmark, CompressionAnalysis)
-    ->Name("Typical/Compression_Parquet")
-    ->Args({0, 1})  // Parquet + Medium
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime()
-    ->Iterations(3);
-
-BENCHMARK_REGISTER_F(FormatWriteBenchmark, CompressionAnalysis)
-    ->Name("Typical/Compression_Vortex")
-    ->Args({1, 1})  // Vortex + Medium
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime()
-    ->Iterations(3);
 
 }  // namespace milvus_storage::benchmark

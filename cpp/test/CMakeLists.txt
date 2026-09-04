@@ -16,7 +16,14 @@ file(GLOB_RECURSE BUSTUB_TEST_SOURCES "${PROJECT_SOURCE_DIR}/test/*.cpp")
 
 add_executable(milvus_test ${BUSTUB_TEST_SOURCES})
 
-target_include_directories(milvus_test PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_sources(milvus_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/benchmark/benchmark_data_loader.cpp
+)
+
+target_include_directories(milvus_test PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/benchmark
+)
 
 set_target_properties(milvus_test PROPERTIES
   CXX_STANDARD 20

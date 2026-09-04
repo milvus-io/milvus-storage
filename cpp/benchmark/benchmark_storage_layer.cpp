@@ -332,6 +332,7 @@ class StorageLayerFixture : public FormatBenchFixtureBase<> {
 //=============================================================================
 
 // Args: [format_type]
+// Measures public Milvus Storage Writer throughput including the transaction commit path.
 BENCHMARK_DEFINE_F(StorageLayerFixture, MilvusStorage_WriteCommit)(::benchmark::State& st) {
   auto format_type = static_cast<StorageFormatType>(st.range(0));
 
@@ -367,6 +368,7 @@ BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_WriteCommit)
 //=============================================================================
 
 // Args: [format_type]
+// Measures public Milvus Storage Writer throughput without the transaction commit layer.
 BENCHMARK_DEFINE_F(StorageLayerFixture, MilvusStorage_WriteOnly)(::benchmark::State& st) {
   auto format_type = static_cast<StorageFormatType>(st.range(0));
 
@@ -403,6 +405,7 @@ BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_WriteOnly)
 //=============================================================================
 
 // Args: [format_type, num_threads]
+// Measures committed Milvus Storage data opening and full public Reader scans at each thread-pool size.
 BENCHMARK_DEFINE_F(StorageLayerFixture, MilvusStorage_OpenRead)(::benchmark::State& st) {
   auto format_type = static_cast<StorageFormatType>(st.range(0));
   int num_threads = static_cast<int>(st.range(1));
@@ -448,6 +451,7 @@ BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_OpenRead)
 //=============================================================================
 
 // Args: [format_type, take_count, num_threads]
+// Measures public Reader random-row take performance over committed Milvus Storage data.
 BENCHMARK_DEFINE_F(StorageLayerFixture, MilvusStorage_Take)(::benchmark::State& st) {
   auto format_type = static_cast<StorageFormatType>(st.range(0));
   auto take_count = static_cast<size_t>(st.range(1));
@@ -498,6 +502,7 @@ BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_Take)
 // Lance Native Benchmarks
 //=============================================================================
 
+// Measures native Lance WriteDataset throughput without routing the measured operation through Milvus Reader APIs.
 BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_WriteCommit)(::benchmark::State& st) {
   ConfigureThreadPool(1);
 
@@ -526,6 +531,7 @@ BENCHMARK_REGISTER_F(StorageLayerFixture, LanceNative_WriteCommit)->Unit(::bench
 //=============================================================================
 
 // Args: [num_threads]
+// Measures native Lance dataset open, scan, and stream-drain performance at each runtime thread count.
 BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_OpenRead)(::benchmark::State& st) {
   int num_threads = static_cast<int>(st.range(0));
 
@@ -598,6 +604,7 @@ BENCHMARK_REGISTER_F(StorageLayerFixture, LanceNative_OpenRead)
 //=============================================================================
 
 // Args: [take_count, num_threads]
+// Measures native Lance random-row Take performance at each requested row count and runtime size.
 BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_Take)(::benchmark::State& st) {
   auto take_count = static_cast<size_t>(st.range(0));
   int num_threads = static_cast<int>(st.range(1));
@@ -669,29 +676,12 @@ BENCHMARK_REGISTER_F(StorageLayerFixture, LanceNative_Take)
     ->Unit(::benchmark::kMillisecond)
     ->UseRealTime();
 
-// Typical: Lance benchmarks
-BENCHMARK_REGISTER_F(StorageLayerFixture, LanceNative_WriteCommit)
-    ->Name("Typical/Lance_Write")
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(StorageLayerFixture, LanceNative_OpenRead)
-    ->Name("Typical/Lance_Read")
-    ->Args({8})  // 8 threads
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(StorageLayerFixture, LanceNative_Take)
-    ->Name("Typical/Lance_Take")
-    ->Args({1000, 8})  // 1000 rows + 8 threads
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
 //=============================================================================
 // Lance Multi-Reader Concurrency Benchmark
 //=============================================================================
 
 // Args: [num_readers, thread_pool_size]
+// Measures many concurrent native Lance opens and full scans while reporting throughput and peak threads.
 BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_MultiReader)(::benchmark::State& st) {
   int num_readers = static_cast<int>(st.range(0));
   int thread_pool_size = static_cast<int>(st.range(1));
@@ -793,6 +783,7 @@ BENCHMARK_REGISTER_F(StorageLayerFixture, LanceNative_MultiReader)
 //=============================================================================
 
 // Args: [format_type, num_readers, thread_pool_size]
+// Measures concurrent transaction opens and public Reader full scans while reporting throughput and peak threads.
 BENCHMARK_DEFINE_F(StorageLayerFixture, MilvusStorage_MultiReader)(::benchmark::State& st) {
   auto format_type = static_cast<StorageFormatType>(st.range(0));
   int num_readers = static_cast<int>(st.range(1));
@@ -886,73 +877,6 @@ BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_MultiReader)
         {1, 16, 64, 256},  // NumReaders: 1, 16, 64, 256
         {1, 8, 16, 32}     // ThreadPoolSize: 1, 8, 16, 32
     })
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-//=============================================================================
-// Typical Benchmarks (Quick validation with representative parameters)
-// Run with: --benchmark_filter="Typical/"
-//=============================================================================
-
-// Typical: MilvusStorage Parquet
-BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_WriteCommit)
-    ->Name("Typical/MilvusStorage_Write_Parquet")
-    ->Args({0})  // Parquet
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_OpenRead)
-    ->Name("Typical/MilvusStorage_Read_Parquet_1T")
-    ->Args({0, 1})  // Parquet + 1 thread
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_OpenRead)
-    ->Name("Typical/MilvusStorage_Read_Parquet_8T")
-    ->Args({0, 8})  // Parquet + 8 threads
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_Take)
-    ->Name("Typical/MilvusStorage_Take_Parquet_1T")
-    ->Args({0, 1000, 1})  // Parquet + 1000 rows + 1 thread
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_Take)
-    ->Name("Typical/MilvusStorage_Take_Parquet")
-    ->Args({0, 1000, 8})  // Parquet + 1000 rows + 8 threads
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-// Typical: MilvusStorage Vortex
-BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_WriteCommit)
-    ->Name("Typical/MilvusStorage_Write_Vortex")
-    ->Args({1})  // Vortex
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_OpenRead)
-    ->Name("Typical/MilvusStorage_Read_Vortex_1T")
-    ->Args({1, 1})  // Vortex + 1 thread
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_OpenRead)
-    ->Name("Typical/MilvusStorage_Read_Vortex_8T")
-    ->Args({1, 8})  // Vortex + 8 threads
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_Take)
-    ->Name("Typical/MilvusStorage_Take_Vortex_1T")
-    ->Args({1, 1000, 1})  // Vortex + 1000 rows + 1 thread
-    ->Unit(::benchmark::kMillisecond)
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_Take)
-    ->Name("Typical/MilvusStorage_Take_Vortex_8T")
-    ->Args({1, 1000, 8})  // Vortex + 1000 rows + 8 threads
     ->Unit(::benchmark::kMillisecond)
     ->UseRealTime();
 

@@ -1,0 +1,71 @@
+name: Setup C++ test environment
+description: Build the C++ library and test targets for CI
+
+runs:
+  using: composite
+  steps:
+    - name: Install dependencies
+      uses: aminya/setup-cpp@v1
+      with:
+        conan: 2.25.1
+        cmake: true
+
+    # Conan 2.x CMakeDeps doesn't propagate system_libs through shared library targets,
+    # so libaio (required by folly) must be explicitly installed and linked.
+    - name: Install system libraries
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y libaio-dev
+
+    - name: Setup Rust
+      id: rust-toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Restore rust build cache
+      id: rust-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          cpp/build/Release/cargo/build
+        key: storage-bridge-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
+        restore-keys: |
+          storage-bridge-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-
+
+    - name: Restore conan package cache
+      id: conan-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.conan2
+        key: conan-cpp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('./cpp/conanfile.py') }}
+        restore-keys: |
+          conan-cpp-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: setup conan
+      shell: bash
+      run: |
+        conan profile detect --force
+        # || true: Conan 2.x errors if the remote already exists (e.g. restored from cache)
+        conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 || true
+        conan remote list
+
+    - name: Build
+      shell: bash
+      working-directory: ./cpp
+      run: |
+        WITH_CRT=True make build
+
+    - name: Save rust build cache
+      if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      continue-on-error: true
+      with:
+        path: |
+          cpp/build/Release/cargo/build
+        key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
+    - name: Save conan package cache
+      if: github.ref == 'refs/heads/main' && steps.conan-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      continue-on-error: true
+      with:
+        path: ~/.conan2
+        key: ${{ steps.conan-cache.outputs.cache-primary-key }}

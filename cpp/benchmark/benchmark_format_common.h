@@ -440,9 +440,9 @@ class FormatBenchFixtureBase : public ::benchmark::Fixture {
     data_loader_.reset();
 
     // Clean up test directory
-    auto status = DeleteTestDir(fs_, base_path_);
+    const auto status = DeleteTestDir(fs_, base_path_);
     if (!status.ok()) {
-      // Log but don't fail on cleanup errors
+      st.SkipWithError(status.ToString().c_str());
     }
   }
 
@@ -534,9 +534,10 @@ class FormatBenchFixtureBase : public ::benchmark::Fixture {
     return true;
   }
 
+  public:
   // Calculate logical data size for a batch.
   // Computes size from type layout and num_rows, consistent regardless of slicing.
-  static int64_t CalculateRawDataSize(const std::shared_ptr<arrow::RecordBatch>& batch) {
+  inline static int64_t CalculateRawDataSize(const std::shared_ptr<arrow::RecordBatch>& batch) {
     int64_t size = 0;
     int64_t num_rows = batch->num_rows();
     for (int i = 0; i < batch->num_columns(); ++i) {
