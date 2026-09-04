@@ -2629,8 +2629,9 @@ bool S3FileSystem::Equals(const FileSystem& other) const {
   if (other.type_name() != type_name()) {
     return false;
   }
-  const auto& s3fs = ::arrow::fs::internal::checked_cast<const S3FileSystem&>(other);
-  return options().Equals(s3fs.options());
+  // Decorators such as Talon can preserve the provider name without sharing its type.
+  const auto* s3fs = dynamic_cast<const S3FileSystem*>(&other);
+  return s3fs != nullptr && options().Equals(s3fs->options());
 }
 
 arrow::Result<std::string> S3FileSystem::PathFromUri(const std::string& uri_string) const {

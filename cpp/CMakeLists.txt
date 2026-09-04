@@ -13,10 +13,15 @@ option(WITH_JNI "Build with JNI library." OFF)
 option(WITH_PYTHON_BINDING "Build for Python bindings with hidden symbols." OFF)
 option(WITH_FIU "Build with fault injection support (libfiu)." OFF)
 option(WITH_CRT "Build with AWS S3 CRT support." OFF)
+option(WITH_TALON "Build with Talon filesystem support." OFF)
 option(ARROW_WITH_JEMALLOC "Build with jemalloc." OFF)
 
 if (WITH_CRT)
   add_compile_definitions(WITH_CRT)
+endif()
+
+if (WITH_TALON)
+  add_compile_definitions(WITH_TALON)
 endif()
 
 include(GNUInstallDirs)
@@ -63,6 +68,9 @@ set(CORROSION_FEATURES "")
 if (WITH_CRT)
   list(APPEND CORROSION_FEATURES s3-crt-async)
 endif()
+if (WITH_TALON)
+  list(APPEND CORROSION_FEATURES talon)
+endif()
 add_subdirectory(${RUST_BRIDGE_PATH})
 
 list(APPEND LINK_LIBS prsbridge)
@@ -85,6 +93,9 @@ file(GLOB_RECURSE ALL_SRC_FILES
 )
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/bridge/.*\\.(cpp|cc)$")
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
+if (NOT WITH_TALON)
+  list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/filesystem/talon/.*\\.cpp$")
+endif()
 
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
@@ -275,7 +286,7 @@ if (WITH_JNI)
   endif()
 endif()
 
-if (WITH_ASAN STREQUAL "True")
+if (WITH_ASAN)
   set(CMAKE_CXX_FLAGS
     "-fno-stack-protector -fno-omit-frame-pointer -fno-var-tracking -g -fsanitize=address ${CMAKE_CXX_FLAGS}"
   )

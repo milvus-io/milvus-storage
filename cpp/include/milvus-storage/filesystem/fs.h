@@ -251,6 +251,11 @@ struct ArrowFileSystemConfig {
   uint32_t iops_initial_rate = 2000;
   uint32_t iops_max_rate = 5000;
 
+  // Whether remote filesystem reads should use Talon block routing.
+  bool talon_enabled = false;
+  std::string talon_coordinator = "";
+  uint32_t talon_block_size = 256U * 1024U * 1024U;
+
   // Alias for external filesystem identification (e.g., "prod", "backup")
   // Empty for default filesystem
   std::string alias = "";
@@ -370,8 +375,10 @@ class FilesystemCache {
    *
    * Local format: `file://{root_path}#{cache_key}`.
    * Remote format: `{address}/{bucket_name}#{cache_key}`. An empty remote
-   * address is rendered as `<null>`. `cache_key` is the existing internal LRU
-   * key returned by ArrowFileSystemConfig::GetCacheKey().
+   * address is rendered as `<null>`.
+   * Talon format: `{address}/{bucket_name}?talon={coordinator}#{cache_key}`.
+   * `cache_key` is the existing internal LRU key returned by
+   * ArrowFileSystemConfig::GetCacheKey().
    */
   [[nodiscard]] static std::string MakeDisplayKey(const ArrowFileSystemConfig& config, const std::string& cache_key);
 

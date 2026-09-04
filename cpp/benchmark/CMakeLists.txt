@@ -30,6 +30,12 @@ list(APPEND BENCHMARK_SOURCES
 # Include test helper implementation used by benchmarks
 list(APPEND BENCHMARK_SOURCES "${PROJECT_SOURCE_DIR}/test/test_env.cpp")
 
+if (WITH_TALON)
+  list(APPEND BENCHMARK_SOURCES
+    ${PROJECT_SOURCE_DIR}/benchmark/benchmark_talon_reader.cpp
+  )
+endif()
+
 add_executable(
   benchmark
   ${BENCHMARK_SOURCES}

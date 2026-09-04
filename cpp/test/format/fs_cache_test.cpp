@@ -182,6 +182,30 @@ TEST_F(FileSystemCacheTest, ListReturnsRemoteDisplayKey) {
   EXPECT_EQ(entries[0].second, fs);
 }
 
+#ifdef WITH_TALON
+TEST_F(FileSystemCacheTest, ListReturnsTalonDisplayKey) {
+  api::Properties props;
+  props[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+  props[PROPERTY_FS_CLOUD_PROVIDER] = std::string(kCloudProviderAWS);
+  props[PROPERTY_FS_ADDRESS] = std::string("minio.example.com:9000");
+  props[PROPERTY_FS_BUCKET_NAME] = std::string("display-bucket");
+  props[PROPERTY_FS_ACCESS_KEY_ID] = std::string("ak");
+  props[PROPERTY_FS_ACCESS_KEY_VALUE] = std::string("sk");
+  props[PROPERTY_FS_TALON_ENABLED] = true;
+  props[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:7000");
+  props[PROPERTY_FS_TALON_BLOCK_SIZE] = uint32_t{8U * 1024U * 1024U};
+
+  auto& cache = FilesystemCache::getInstance();
+  ASSERT_AND_ASSIGN(auto config, cache.resolve_config(props));
+  ASSERT_AND_ASSIGN(auto fs, cache.get(props));
+
+  auto entries = cache.list();
+  ASSERT_EQ(entries.size(), 1u);
+  EXPECT_EQ(entries[0].first, "minio.example.com:9000/display-bucket?talon=127.0.0.1:7000#" + config.GetCacheKey());
+  EXPECT_EQ(entries[0].second, fs);
+}
+#endif
+
 TEST_F(FileSystemCacheTest, ListUsesNullForEmptyRemoteAddress) {
   api::Properties props;
   props[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");

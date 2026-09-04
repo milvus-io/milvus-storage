@@ -28,6 +28,9 @@
 #include "milvus-storage/common/lrucache.h"
 
 #include "milvus-storage/filesystem/azure/azure_fs_producer.h"
+#ifdef WITH_TALON
+#include "milvus-storage/filesystem/talon/talon_file_system_producer.h"
+#endif
 
 namespace milvus_storage {
 
@@ -93,6 +96,9 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
   hash_combine(use_crc32c_checksum);
   hash_combine(s3_crt_async_read);
   hash_combine(load_frequency);
+  hash_combine(talon_enabled);
+  hash_combine(talon_coordinator);
+  hash_combine(talon_block_size);
 
   if (IsAzureCredentialBrokerEnabled()) {
     hash_combine(access_key_id);
@@ -134,7 +140,8 @@ std::string ArrowFileSystemConfig::ToString() const {
      << ", request_timeout_ms=" << request_timeout_ms << ", max_connections=" << max_connections
      << ", tls_min_version=" << (tls_min_version.empty() ? "(default)" : tls_min_version)
      << ", use_crc32c_checksum=" << std::boolalpha << use_crc32c_checksum << ", s3_crt_async_read=" << std::boolalpha
-     << s3_crt_async_read;
+     << s3_crt_async_read << ", talon_enabled=" << std::boolalpha << talon_enabled
+     << ", talon_coordinator=" << talon_coordinator << ", talon_block_size=" << talon_block_size;
   if (!alias.empty()) {
     ss << ", alias=" << alias;
   }
@@ -144,30 +151,55 @@ std::string ArrowFileSystemConfig::ToString() const {
 }
 
 arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config) {
+  if (config.talon_enabled) {
+    if (config.storage_type != "remote") {
+      return arrow::Status::Invalid("Talon requires remote storage");
+    }
+#ifndef WITH_TALON
+    return arrow::Status::Invalid("Talon support is not enabled in this build");
+#endif
+  }
+
   auto storage_type = StorageType_Map[config.storage_type];
   switch (storage_type) {
     case StorageType::Local: {
       return LocalFileSystemProducer(config).Make();
     }
     case StorageType::Remote: {
+      // Create the raw provider filesystem first. Remote producers must not
+      // apply bucket path rooting so decorators can be inserted below it.
+      ArrowFileSystemPtr raw_fs;
       auto cloud_provider = CloudProviderType_Map[config.cloud_provider];
       switch (cloud_provider) {
         case CloudProviderType::AZURE: {
-          return AzureFileSystemProducer(config).Make();
+          ARROW_ASSIGN_OR_RAISE(raw_fs, AzureFileSystemProducer(config).Make());
+          break;
         }
         case CloudProviderType::GCP: {
-          return GcpFileSystemProducer(config).Make();
+          ARROW_ASSIGN_OR_RAISE(raw_fs, GcpFileSystemProducer(config).Make());
+          break;
         }
         case CloudProviderType::AWS:
         case CloudProviderType::ALIYUN:
         case CloudProviderType::TENCENTCLOUD:
         case CloudProviderType::HUAWEICLOUD: {
-          return S3FileSystemProducer(config).Make();
+          ARROW_ASSIGN_OR_RAISE(raw_fs, S3FileSystemProducer(config).Make());
+          break;
         }
         default: {
           return arrow::Status::Invalid("Unsupported cloud provider: " + config.cloud_provider);
         }
       }
+
+#ifdef WITH_TALON
+      // Talon decorates reads without depending on the concrete provider type
+      // or taking ownership of bucket path rooting.
+      if (config.talon_enabled) {
+        ARROW_ASSIGN_OR_RAISE(raw_fs, TalonFileSystemProducer(config, std::move(raw_fs)).Make());
+      }
+#endif
+      // Apply the bucket subtree exactly once, after all optional decorators.
+      return std::make_shared<FileSystemProxy>(config.bucket_name, std::move(raw_fs));
     }
     default: {
       return arrow::Status::Invalid("Unsupported storage type: " + config.storage_type);
@@ -211,7 +243,11 @@ std::string FilesystemCache::MakeDisplayKey(const ArrowFileSystemConfig& config,
   if (config.storage_type == "local") {
     return "file://" + config.root_path + "#" + cache_key;
   }
-  return (config.address.empty() ? "<null>" : config.address) + "/" + config.bucket_name + "#" + cache_key;
+  const std::string remote_path = (config.address.empty() ? "<null>" : config.address) + "/" + config.bucket_name;
+  if (config.talon_enabled) {
+    return remote_path + "?talon=" + config.talon_coordinator + "#" + cache_key;
+  }
+  return remote_path + "#" + cache_key;
 }
 
 arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_storage::api::Properties& properties_map,
@@ -252,6 +288,10 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
   ARROW_ASSIGN_OR_RAISE(result.use_crc32c_checksum,
                         api::GetValue<bool>(properties_map, PROPERTY_FS_USE_CRC32C_CHECKSUM));
   ARROW_ASSIGN_OR_RAISE(result.s3_crt_async_read, api::GetValue<bool>(properties_map, PROPERTY_FS_S3_CRT_ASYNC_READ));
+  ARROW_ASSIGN_OR_RAISE(result.talon_enabled, api::GetValue<bool>(properties_map, PROPERTY_FS_TALON_ENABLED));
+  ARROW_ASSIGN_OR_RAISE(result.talon_coordinator,
+                        api::GetValue<std::string>(properties_map, PROPERTY_FS_TALON_COORDINATOR));
+  ARROW_ASSIGN_OR_RAISE(result.talon_block_size, api::GetValue<uint32_t>(properties_map, PROPERTY_FS_TALON_BLOCK_SIZE));
   ARROW_ASSIGN_OR_RAISE(result.lance_io_parallelism,
                         api::GetValue<uint32_t>(properties_map, PROPERTY_FS_LANCE_IO_PARALLELISM));
   ARROW_ASSIGN_OR_RAISE(result.iops_initial_rate,
@@ -268,6 +308,18 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
                         api::GetValue<std::string>(properties_map, PROPERTY_FS_AZURE_TENANT_ID));
   ARROW_ASSIGN_OR_RAISE(result.azure_credential_endpoint,
                         api::GetValue<std::string>(properties_map, PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT));
+
+  if (result.talon_enabled) {
+    if (result.storage_type != "remote") {
+      return arrow::Status::Invalid("Talon requires fs.storage_type=remote");
+    }
+    if (result.talon_coordinator.empty()) {
+      return arrow::Status::Invalid("fs.talon.enabled=true requires fs.talon.coordinator");
+    }
+    if (result.talon_block_size == 0) {
+      return arrow::Status::Invalid("fs.talon.block_size must be greater than zero");
+    }
+  }
 
   if (result.cloud_provider == kCloudProviderAzure && result.IsAzureCredentialBrokerEnabled()) {
     if (result.azure_client_id.empty() || result.azure_tenant_id.empty() || result.azure_credential_endpoint.empty() ||
