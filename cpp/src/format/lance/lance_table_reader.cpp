@@ -296,13 +296,12 @@ static arrow::Result<std::shared_ptr<arrow::Schema>> build_read_schema(
 std::string LanceTableReader::MetaTrait::cache_key(const milvus_storage::api::ColumnGroupFile& file) {
   auto parsed_uri = ParseLanceUri(file.path);
   if (!parsed_uri.ok()) {
-    // load_metadata() will return the detailed URI error. Keep malformed URIs
-    // distinct here so cache lookup itself remains infallible.
     LOG_STORAGE_WARNING_ << "Failed to parse Lance URI while building metadata cache key"
                          << ", path=" << file.path << ", status=" << parsed_uri.status().ToString();
     return fmt::format("lance-table|invalid-uri:{}", file.path);
   }
-  return fmt::format("lance-table|base-uri:{}", parsed_uri->first);
+  auto version = file.Get<uint64_t>(kLanceVersionProperty);
+  return fmt::format("lance-table|base-uri:{}|version:{}", parsed_uri->first, version);
 }
 
 static arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>> load_fragment_metadata(
@@ -370,7 +369,12 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
   ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, base_uri));
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, base_uri));
   const auto lance_uri = ToStandardLanceUri(base_uri);
-  ARROW_ASSIGN_OR_RAISE(auto dataset, BlockingDataset::Open(lance_uri, fs, ToReaderOptions(fs_config)));
+  auto reader_options = ToReaderOptions(fs_config);
+  auto version = file.Get<uint64_t>(kLanceVersionProperty);
+  if (version > 0) {
+    reader_options["lance_version"] = std::to_string(version);
+  }
+  ARROW_ASSIGN_OR_RAISE(auto dataset, BlockingDataset::Open(lance_uri, fs, reader_options));
 
   auto fragment_metadata_cache = std::make_shared<FragmentMetadataCache>();
   ARROW_ASSIGN_OR_RAISE(auto fragment_metadata, fragment_metadata_cache->get_or_load(fragment_id, [&]() {
@@ -446,13 +450,14 @@ arrow::Status LanceTableReader::open() {
   assert(!fragment_reader_);
 
   if (!dataset_) {
-    // uri_ is in Milvus format (scheme://address/bucket/key) so extfs.<alias>.*
-    // can be resolved by address+bucket. Strip the address back to standard form
-    // (scheme://bucket/key) before handing to Lance, whose object_store treats
-    // the host as the bucket.
     ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties_, uri_));
     auto lance_uri = ToStandardLanceUri(uri_);
-    ARROW_ASSIGN_OR_RAISE(dataset_, BlockingDataset::Open(lance_uri, filesystem_, ToReaderOptions(fs_config)));
+    auto reader_options = ToReaderOptions(fs_config);
+    auto version = api::GetValue<uint64_t>(properties_, kLanceVersionProperty);
+    if (version.ok() && *version > 0) {
+      reader_options["lance_version"] = std::to_string(*version);
+    }
+    ARROW_ASSIGN_OR_RAISE(dataset_, BlockingDataset::Open(lance_uri, filesystem_, reader_options));
   }
 
   // Lance 7 exposes the current dataset schema through FileFragment::schema().

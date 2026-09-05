@@ -140,6 +140,7 @@ pub mod lance_ffi {
             storage_options_values: Vec<String>,
         ) -> Result<()>;
 
+        pub fn version_id(self: &BlockingDataset) -> u64;
         pub fn get_all_fragment_ids(self: &BlockingDataset) -> Vec<u64>;
         pub fn get_fragment_deletion_positions(
             dataset: &BlockingDataset,

@@ -36,17 +36,18 @@ arrow::Result<std::vector<api::ColumnGroupFile>> LanceFormat::explore(const std:
                         lance::BlockingDataset::Open(lance_base_uri, fs, lance::ToReaderOptions(fs_config)));
   ARROW_ASSIGN_OR_RAISE(auto fragment_ids, dataset->GetAllFragmentIds());
 
+  auto version = dataset->GetVersion();
+
   std::vector<api::ColumnGroupFile> files;
   for (auto frag_id : fragment_ids) {
     ARROW_ASSIGN_OR_RAISE(auto row_count, dataset->GetFragmentRowCount(frag_id));
-    // Store Milvus-format URI (scheme://address/bucket/key) so the reader
-    // can resolve the right extfs.<alias>.* by address+bucket. The reader
-    // strips address back to standard form before handing to Lance.
+    std::unordered_map<std::string, std::string> props;
+    props[lance::kLanceVersionProperty] = std::to_string(version);
     files.emplace_back(api::ColumnGroupFile{
         lance::MakeLanceUri(lance::ToMilvusLanceUri(lance_base_uri, fs_config.address), frag_id),
         0,
         static_cast<int64_t>(row_count),
-        {},
+        std::move(props),
     });
   }
 
@@ -63,8 +64,13 @@ arrow::Result<std::shared_ptr<FormatReader>> LanceFormat::create_reader(
   uint64_t fragment_id;
   ARROW_ASSIGN_OR_RAISE(std::tie(base_path, fragment_id), lance::ParseLanceUri(file.path));
   ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, base_path));
-  auto reader =
-      std::make_shared<lance::LanceTableReader>(fs, base_path, fragment_id, read_schema, properties, needed_columns);
+  auto reader_properties = properties;
+  auto version = file.Get<uint64_t>(lance::kLanceVersionProperty);
+  if (version > 0) {
+    reader_properties[lance::kLanceVersionProperty] = version;
+  }
+  auto reader = std::make_shared<lance::LanceTableReader>(fs, base_path, fragment_id, read_schema, reader_properties,
+                                                          needed_columns);
   ARROW_RETURN_NOT_OK(reader->open());
   return reader;
 }

@@ -8,7 +8,8 @@ use futures::stream::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::result::Result as RustResult;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::num::NonZeroUsize;
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use tokio::runtime::Handle;
 
 use arrow_array58::Array;
@@ -47,6 +48,13 @@ use crate::lance_object_store::{
     shared_scan_scheduler,
 };
 
+static DATASET_CACHE: LazyLock<Mutex<lru::LruCache<String, Dataset>>> =
+    LazyLock::new(|| {
+        Mutex::new(lru::LruCache::new(
+            NonZeroUsize::new(5).unwrap(),
+        ))
+    });
+
 #[derive(Clone)]
 pub struct BlockingDataset {
     pub(crate) inner: Dataset,
@@ -66,6 +74,10 @@ impl BlockingDataset {
             scan_scheduler: Arc::new(OnceLock::new()),
             fragment_open_mutex: Arc::new(Mutex::new(())),
         })
+    }
+
+    pub fn version_id(&self) -> u64 {
+        self.inner.version_id()
     }
 
     fn fragment_read_config(&self, read_config: FragReadConfig) -> FragReadConfig {
@@ -323,6 +335,67 @@ pub fn open_dataset(
     }
 
     let storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
+    let version: Option<u64> = storage_options
+        .get("lance_version")
+        .and_then(|v| v.parse().ok());
+
+    // Cache path: if a pinned version is requested, check the cache first.
+    if let Some(ver) = version {
+        let cache_key = format!("{}|version:{}", uri, ver);
+
+        {
+            let mut cache = DATASET_CACHE.lock().unwrap();
+            if let Some(inner) = cache.get(&cache_key) {
+                let inner = inner.clone();
+                let dataset = BlockingDataset::new(inner)?;
+                let read_options = FFIReadOptions::parse(storage_options)?;
+                let scheduler = shared_scan_scheduler(
+                    read_options.object_store_prefix().to_string(),
+                    &dataset.object_store,
+                )?;
+                dataset
+                    .scan_scheduler
+                    .set(scheduler)
+                    .expect("a newly opened BlockingDataset has no scan scheduler");
+                return Ok(Box::new(dataset));
+            }
+        }
+
+        let read_options = FFIReadOptions::parse(storage_options)?;
+        let dataset_url = lance_io::object_store::uri_to_url(uri)?;
+        let provider = Arc::new(FFIObjectStoreProvider::new(
+            filesystem,
+            &dataset_url,
+            &read_options,
+        )?) as Arc<dyn ObjectStoreProvider>;
+        let session = build_filesystem_session(dataset_url.scheme(), provider);
+        let read_params = ReadParams {
+            index_cache_size_bytes: 0,
+            metadata_cache_size_bytes: 0,
+            store_options: Some(ObjectStoreParams::default()),
+            ..Default::default()
+        };
+        let builder = DatasetBuilder::from_uri(uri)
+            .with_version(ver)
+            .with_read_params(read_params)
+            .with_session(session);
+        let inner = TOKIO_RT.block_on(builder.load())?;
+
+        DATASET_CACHE.lock().unwrap().put(cache_key, inner.clone());
+
+        let dataset = BlockingDataset::new(inner)?;
+        let scheduler = shared_scan_scheduler(
+            read_options.object_store_prefix().to_string(),
+            &dataset.object_store,
+        )?;
+        dataset
+            .scan_scheduler
+            .set(scheduler)
+            .expect("a newly opened BlockingDataset has no scan scheduler");
+        return Ok(Box::new(dataset));
+    }
+
+    // Non-versioned path: no cache, resolve "latest"
     let read_options = FFIReadOptions::parse(storage_options)?;
     let dataset_url = lance_io::object_store::uri_to_url(uri)?;
     let provider = Arc::new(FFIObjectStoreProvider::new(

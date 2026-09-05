@@ -91,6 +91,8 @@ class BlockingDataset {
   BlockingDataset(const BlockingDataset&) = delete;
   BlockingDataset& operator=(const BlockingDataset&) = delete;
 
+  uint64_t GetVersion() const;
+
   arrow::Result<std::vector<uint64_t>> GetAllFragmentIds() const;
 
   arrow::Result<std::vector<uint64_t>> GetFragmentDeletionPositions(uint64_t fragment_id) const;
