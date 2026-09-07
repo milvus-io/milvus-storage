@@ -243,6 +243,14 @@ struct ArrowFileSystemConfig {
   // WITH_CRT is enabled. Ignored by non-S3 filesystems and non-CRT builds.
   bool s3_crt_async_read = true;
 
+  // Talon read-through cache. When enabled, OpenInputFile/OpenInputStream on a
+  // remote (S3-compatible) filesystem are served from the Talon distributed
+  // object cache instead of the origin; all other operations still go to the
+  // origin backend. Only effective in a WITH_TALON build; a true value in a
+  // non-Talon build is a configuration error, not a silent no-op.
+  bool talon_enabled = false;
+  std::string talon_coordinator = "";
+
   // Shared Lance scheduler capacity for local and remote reader fragment I/O.
   // Zero selects Lance's default of 64; it does not disable scheduler sharing.
   uint32_t lance_io_parallelism = 64;

@@ -445,6 +445,17 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "Whether S3 OpenInputFile should use AWS CRT-backed async random reads when built with CRT.",
                       true,
                       ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_ENABLED,
+                      PropertyType::BOOL,
+                      "Route OpenInputFile/OpenInputStream through the Talon distributed object cache. "
+                      "Requires a build with WITH_TALON and a reachable fs.talon.coordinator.",
+                      false,
+                      ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_COORDINATOR,
+                      PropertyType::STRING,
+                      "Control address of the Talon coordinator (used when fs.talon.enabled is true).",
+                      "",
+                      ValidatePropertyType()),
     REGISTER_PROPERTY(
         PROPERTY_FS_LANCE_IO_PARALLELISM,
         PropertyType::UINT32,

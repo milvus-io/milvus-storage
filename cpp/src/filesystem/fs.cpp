@@ -29,6 +29,10 @@
 
 #include "milvus-storage/filesystem/azure/azure_fs_producer.h"
 
+#ifdef WITH_TALON
+#include "milvus-storage/filesystem/talon/talon_file_system.h"
+#endif
+
 namespace milvus_storage {
 
 enum class StorageType : int8_t {
@@ -94,6 +98,13 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
   hash_combine(s3_crt_async_read);
   hash_combine(load_frequency);
 
+  // Talon routing changes which filesystem instance a config maps to, so two
+  // configs differing only in Talon settings must not share one cached instance.
+  hash_combine(talon_enabled);
+  if (talon_enabled) {
+    hash_combine(talon_coordinator);
+  }
+
   if (IsAzureCredentialBrokerEnabled()) {
     hash_combine(access_key_id);
     hash_combine(azure_client_id);
@@ -143,7 +154,7 @@ std::string ArrowFileSystemConfig::ToString() const {
   return ss.str();
 }
 
-arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config) {
+static arrow::Result<ArrowFileSystemPtr> CreateBackendFileSystem(const ArrowFileSystemConfig& config) {
   auto storage_type = StorageType_Map[config.storage_type];
   switch (storage_type) {
     case StorageType::Local: {
@@ -173,6 +184,27 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
       return arrow::Status::Invalid("Unsupported storage type: " + config.storage_type);
     }
   }
+}
+
+arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config) {
+#ifndef WITH_TALON
+  // Fail fast on a misconfiguration before building any backend.
+  if (config.talon_enabled) {
+    return arrow::Status::Invalid(
+        "fs.talon.enabled=true but milvus-storage was built without Talon support (rebuild with -DWITH_TALON=ON)");
+  }
+#endif
+
+  ARROW_ASSIGN_OR_RAISE(auto fs, CreateBackendFileSystem(config));
+
+#ifdef WITH_TALON
+  if (config.talon_enabled) {
+    // Serve reads for this filesystem from the Talon cache; writes and metadata
+    // still flow to the backend built above.
+    return talon::WrapWithTalon(config, std::move(fs));
+  }
+#endif
+  return fs;
 }
 
 bool IsLocalFileSystem(const ArrowFileSystemPtr& fs) {
@@ -252,6 +284,9 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
   ARROW_ASSIGN_OR_RAISE(result.use_crc32c_checksum,
                         api::GetValue<bool>(properties_map, PROPERTY_FS_USE_CRC32C_CHECKSUM));
   ARROW_ASSIGN_OR_RAISE(result.s3_crt_async_read, api::GetValue<bool>(properties_map, PROPERTY_FS_S3_CRT_ASYNC_READ));
+  ARROW_ASSIGN_OR_RAISE(result.talon_enabled, api::GetValue<bool>(properties_map, PROPERTY_FS_TALON_ENABLED));
+  ARROW_ASSIGN_OR_RAISE(result.talon_coordinator,
+                        api::GetValue<std::string>(properties_map, PROPERTY_FS_TALON_COORDINATOR));
   ARROW_ASSIGN_OR_RAISE(result.lance_io_parallelism,
                         api::GetValue<uint32_t>(properties_map, PROPERTY_FS_LANCE_IO_PARALLELISM));
   ARROW_ASSIGN_OR_RAISE(result.iops_initial_rate,
