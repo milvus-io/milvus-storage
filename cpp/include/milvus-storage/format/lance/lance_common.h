@@ -24,6 +24,8 @@
 
 namespace milvus_storage::lance {
 
+constexpr const char* kLanceVersionProperty = "lance_version";
+
 /// Convert ArrowFileSystemConfig to credential-free Lance read options.
 /// Authentication and credential refresh remain owned by the bound C++ filesystem.
 StorageOptions ToReaderOptions(const ArrowFileSystemConfig& config);

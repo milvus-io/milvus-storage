@@ -61,6 +61,7 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/format_reader_cache.h"
 #include "milvus-storage/format/lance/lance_table_writer.h"
+#include "milvus-storage/format/lance/lance_format.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/lance/lance_common.h"
 #include "milvus-storage/reader.h"
@@ -1895,6 +1896,69 @@ TEST_F(LanceBasicTest, TestStorageOptionsIntegration) {
   auto actual_id_column = std::static_pointer_cast<arrow::Int64Array>(chunk->column(0));
   for (int i = 0; i < chunk->num_rows(); i++) {
     ASSERT_EQ(actual_id_column->Value(i), expected_id_column->Value(i));
+  }
+}
+
+TEST_F(LanceBasicTest, ExploreRecordsVersionInProperties) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+
+  LanceFormat format;
+  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, properties_));
+  ASSERT_FALSE(files.empty());
+
+  for (const auto& file : files) {
+    auto version = file.Get<uint64_t>(lance::kLanceVersionProperty);
+    EXPECT_GT(version, 0u) << "explore() must record a non-zero lance_version";
+  }
+
+  auto first_version = files[0].Get<uint64_t>(lance::kLanceVersionProperty);
+  for (size_t i = 1; i < files.size(); ++i) {
+    EXPECT_EQ(files[i].Get<uint64_t>(lance::kLanceVersionProperty), first_version)
+        << "All files from one explore() call must share the same version";
+  }
+}
+
+TEST_F(LanceBasicTest, VersionPinnedReaderSurvivesNewWrite) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  {
+    LanceTableWriter writer(base_path_, schema_, properties_);
+    ASSERT_STATUS_OK(writer.Write(test_batch_));
+    ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+  }
+
+  LanceFormat format;
+  ASSERT_AND_ASSIGN(auto files_v1, format.explore(base_path_, properties_));
+  ASSERT_FALSE(files_v1.empty());
+  auto v1 = files_v1[0].Get<uint64_t>(lance::kLanceVersionProperty);
+  ASSERT_GT(v1, 0u);
+
+  {
+    LanceTableWriter writer2(base_path_, schema_, properties_);
+    ASSERT_STATUS_OK(writer2.Write(test_batch_));
+    ASSERT_AND_ASSIGN(auto cgfile2, writer2.Close());
+  }
+
+  ASSERT_AND_ASSIGN(auto files_v2, format.explore(base_path_, properties_));
+  ASSERT_GT(files_v2.size(), files_v1.size());
+  auto v2 = files_v2[0].Get<uint64_t>(lance::kLanceVersionProperty);
+  EXPECT_GT(v2, v1);
+
+  std::vector<std::string> needed_columns;
+  for (int i = 0; i < schema_->num_fields(); ++i) {
+    needed_columns.push_back(schema_->field(i)->name());
+  }
+  for (const auto& file : files_v1) {
+    ASSERT_AND_ASSIGN(auto reader, format.create_reader(schema_, file, properties_, needed_columns, nullptr));
+    ASSERT_NE(reader, nullptr);
   }
 }
 

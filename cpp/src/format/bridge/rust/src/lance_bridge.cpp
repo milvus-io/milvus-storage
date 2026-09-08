@@ -107,6 +107,8 @@ arrow::Status BlockingDataset::DeleteRows(const std::string& uri,
   });
 }
 
+uint64_t BlockingDataset::GetVersion() const { return impl_->version_id(); }
+
 arrow::Result<std::vector<uint64_t>> BlockingDataset::GetAllFragmentIds() const {
   return CatchRustResult<std::vector<uint64_t>>("Failed to get Lance fragment IDs", [&]() {
     auto fragment_ids = impl_->get_all_fragment_ids();
