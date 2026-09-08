@@ -308,8 +308,7 @@ arrow::Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
   ARROW_RETURN_NOT_OK(InitS3());
 
   ARROW_ASSIGN_OR_RAISE(auto s3_options, CreateS3Options());
-  ARROW_ASSIGN_OR_RAISE(auto fs, S3FileSystem::Make(s3_options));
-  return std::make_shared<FileSystemProxy>(config_.bucket_name, fs);
+  return S3FileSystem::Make(s3_options);
 }
 
 }  // namespace milvus_storage

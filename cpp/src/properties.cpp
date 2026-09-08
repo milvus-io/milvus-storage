@@ -469,6 +469,23 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "The default is 5000, matching Lance's default. Set to 0 to disable the AIMD rate ceiling.",
                       uint32_t(5000),
                       ValidatePropertyType() + ValidatePropertyRange<uint32_t>(0, UINT32_MAX)),
+
+    // --- talon properties ---
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_ENABLED,
+                      PropertyType::BOOL,
+                      "Whether remote filesystem reads should use Talon block routing.",
+                      false,
+                      ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_COORDINATOR,
+                      PropertyType::STRING,
+                      "The Talon coordinator address used for block routing.",
+                      "",
+                      ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_BLOCK_SIZE,
+                      PropertyType::UINT32,
+                      "The Talon block size in bytes.",
+                      256U * 1024U * 1024U,
+                      ValidatePropertyType()),
     // --- Cross-tenant access properties define ---
     REGISTER_PROPERTY(PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT,
                       PropertyType::STRING,

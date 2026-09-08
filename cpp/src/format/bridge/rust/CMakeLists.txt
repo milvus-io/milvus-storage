@@ -20,9 +20,13 @@ corrosion_set_env_vars(rust_bridge
 
 # corrosion_add_cxxbridge can only import a single static library; 
 # otherwise, `rlib` will conflict.
+set(CXX_BRIDGE_FILES lib.rs)
+if (WITH_TALON)
+    list(APPEND CXX_BRIDGE_FILES talon_bridge.rs)
+endif()
 corrosion_add_cxxbridge(rust-bridge
     CRATE rust_bridge
-    FILES lib.rs)
+    FILES ${CXX_BRIDGE_FILES})
 
 target_include_directories(rust-bridge PUBLIC ${Arrow_INCLUDE_DIRS}
     ${CMAKE_CURRENT_BINARY_DIR}/corrosion_generated/cxxbridge/rust-bridge/include
@@ -33,6 +37,9 @@ target_include_directories(rust-bridge PUBLIC ${Arrow_INCLUDE_DIRS}
 file(GLOB_RECURSE CPP_SOURCE_FILE CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
+if (NOT WITH_TALON)
+    list(FILTER CPP_SOURCE_FILE EXCLUDE REGEX ".*/talon_bridge\\.cpp$")
+endif()
 
 add_library(prsbridge STATIC ${CPP_SOURCE_FILE})
 

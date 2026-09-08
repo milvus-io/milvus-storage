@@ -100,6 +100,11 @@ struct PropertyInfo {
 #define PROPERTY_FS_IOPS_INITIAL_RATE "fs.iops_initial_rate"
 #define PROPERTY_FS_IOPS_MAX_RATE "fs.iops_max_rate"
 
+// talon properties
+#define PROPERTY_FS_TALON_ENABLED "fs.talon.enabled"
+#define PROPERTY_FS_TALON_COORDINATOR "fs.talon.coordinator"
+#define PROPERTY_FS_TALON_BLOCK_SIZE "fs.talon.block_size"
+
 // Cross-tenant access properties
 #define PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT "fs.gcp_target_service_account"
 #define PROPERTY_FS_AZURE_CLIENT_ID "fs.azure_client_id"

@@ -14,6 +14,7 @@ use_asan := $(or $(USE_ASAN),True)
 with_ut := $(or $(WITH_UT),True)
 with_fiu := $(or $(WITH_FIU),True)
 with_crt := $(or $(WITH_CRT),False)
+with_talon := $(or $(WITH_TALON),False)
 with_benchmark := $(or $(WITH_BENCHMARK),True)
 build_type := $(or $(BUILD_TYPE),Release)
 use_jni := $(or $(USE_JNI),False)
@@ -43,16 +44,17 @@ build:
 	@echo "use_python_binding: ${use_python_binding}"
 	@echo "with_fiu: ${with_fiu}"
 	@echo "with_crt: ${with_crt}"
+	@echo "with_talon: ${with_talon}"
 
 	mkdir -p build && cd build && \
 	${CONAN_BASE} \
 	-o "&:with_ut=${with_ut}" -o "&:with_benchmark=${with_benchmark}" -o "&:with_asan=${use_asan}" \
 	-o "&:with_jni=${use_jni}" -o "&:with_python_binding=${use_python_binding}" -o "&:with_fiu=${with_fiu}" \
-	-o "&:with_crt=${with_crt}" && \
+	-o "&:with_crt=${with_crt}" -o "&:with_talon=${with_talon}" && \
 	conan build .. ${CONAN_SETTINGS} \
 	-o "&:with_ut=${with_ut}" -o "&:with_benchmark=${with_benchmark}" -o "&:with_asan=${use_asan}" \
 	-o "&:with_jni=${use_jni}" -o "&:with_python_binding=${use_python_binding}" -o "&:with_fiu=${with_fiu}" \
-	-o "&:with_crt=${with_crt}"
+	-o "&:with_crt=${with_crt}" -o "&:with_talon=${with_talon}"
 
 package: build
 	mkdir -p build && cd build && \
@@ -99,7 +101,7 @@ test-all: build
 	./scripts/setup_azurite.sh
 	(source ./scripts/azurite_env.sh && ./build/${build_type}/test/milvus_test)
 	(source ./scripts/azurite_env.sh && ./build/${build_type}/test/Test_FFI)
-	
+
 # Test cloud storage with all providers or a specific one
 # Usage: make test-cloud-storage     # Test all cloud providers
 #        make test-cloud-storage aws  # Test AWS only

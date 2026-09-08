@@ -1,7 +1,7 @@
 
 find_package(GTest REQUIRED)
 
-if (WITH_ASAN STREQUAL "True")
+if (WITH_ASAN)
   set(CMAKE_CXX_FLAGS
     "-fno-stack-protector -fno-omit-frame-pointer -fno-var-tracking -g -fsanitize=address ${CMAKE_CXX_FLAGS}"
   )

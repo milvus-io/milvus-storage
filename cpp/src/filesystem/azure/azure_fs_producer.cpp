@@ -90,8 +90,7 @@ arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
     ARROW_RETURN_NOT_OK(options.ConfigureAccountKeyCredential(config_.access_key_value));
   }
 
-  ARROW_ASSIGN_OR_RAISE(auto fs, milvus_storage::fs::AzureFileSystem::Make(options));
-  return std::make_shared<FileSystemProxy>(config_.bucket_name, fs);
+  return milvus_storage::fs::AzureFileSystem::Make(options);
 }
 
 }  // namespace milvus_storage

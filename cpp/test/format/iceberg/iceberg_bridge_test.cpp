@@ -196,7 +196,7 @@ class AsyncReaderLifecycleState {
 };
 
 class CallbackThreadRandomAccessFile final : public arrow::io::RandomAccessFile,
-                                             public milvus_storage::NonBlockingReadAtFile {
+                                             public milvus_storage::NonBlockingRandomAccessFile {
   public:
   CallbackThreadRandomAccessFile(std::shared_ptr<arrow::io::RandomAccessFile> file,
                                  std::shared_ptr<AsyncReaderLifecycleState> state)
@@ -228,6 +228,7 @@ class CallbackThreadRandomAccessFile final : public arrow::io::RandomAccessFile,
   }
   arrow::Status Seek(int64_t position) override { return file_->Seek(position); }
   arrow::Result<int64_t> GetSize() override { return file_->GetSize(); }
+  arrow::Future<int64_t> GetSizeAsync() override { return arrow::Future<int64_t>::MakeFinished(file_->GetSize()); }
   arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
     return file_->ReadAt(position, nbytes, out);
   }

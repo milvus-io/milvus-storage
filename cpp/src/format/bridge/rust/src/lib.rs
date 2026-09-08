@@ -24,6 +24,8 @@ mod paimon_split_serde;
 mod paimon_testutil;
 mod predicate_parser;
 mod rust_runtime;
+#[cfg(feature = "talon")]
+mod talon_bridge;
 mod vortex_bridgeimpl;
 mod vortex_layout_strategy_v2;
 

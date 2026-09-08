@@ -41,8 +41,18 @@ bool IsCloudEnv() {
   return storage_type == "remote";
 }
 
+bool IsTalonEnv() {
+  const auto enabled = GetEnvVar(ENV_VAR_TALON_ENABLED).ValueOr("");
+  return enabled == "true" || enabled == "1";
+}
+
 arrow::Status InitTestProperties(api::Properties& properties) {
-  auto storage_type = GetEnvVar(ENV_VAR_STORAGE_TYPE).ValueOr("");
+  const auto storage_type = GetEnvVar(ENV_VAR_STORAGE_TYPE).ValueOr("");
+  const bool talon_enabled = IsTalonEnv();
+
+  if (talon_enabled && storage_type != "remote") {
+    return arrow::Status::Invalid("Talon test environment requires TEST_ENV_STORAGE_TYPE=remote");
+  }
 
   if (storage_type == "local" || storage_type.empty()) {
     api::SetValue(properties, PROPERTY_FS_ROOT_PATH, "/tmp/milvus-storage-test");
@@ -68,6 +78,25 @@ arrow::Status InitTestProperties(api::Properties& properties) {
                     GetEnvVar(ENV_VAR_ACCESS_KEY_ID).ValueOr("minioadmin").c_str());
       api::SetValue(properties, PROPERTY_FS_ACCESS_KEY_VALUE,
                     GetEnvVar(ENV_VAR_ACCESS_KEY_VALUE).ValueOr("minioadmin").c_str());
+    }
+
+    if (talon_enabled) {
+      const auto coordinator = GetEnvVar(ENV_VAR_TALON_COORDINATOR).ValueOr("");
+      if (coordinator.empty()) {
+        return arrow::Status::Invalid("Talon test environment requires TEST_ENV_TALON_COORDINATOR");
+      }
+      const auto block_size = GetEnvVar(ENV_VAR_TALON_BLOCK_SIZE).ValueOr("268435456");
+      if (const auto error = api::SetValue(properties, PROPERTY_FS_TALON_ENABLED, "true"); error.has_value()) {
+        return arrow::Status::Invalid(*error);
+      }
+      if (const auto error = api::SetValue(properties, PROPERTY_FS_TALON_COORDINATOR, coordinator.c_str());
+          error.has_value()) {
+        return arrow::Status::Invalid(*error);
+      }
+      if (const auto error = api::SetValue(properties, PROPERTY_FS_TALON_BLOCK_SIZE, block_size.c_str());
+          error.has_value()) {
+        return arrow::Status::Invalid(*error);
+      }
     }
   } else {
     return arrow::Status::Invalid("Unknown STORAGE_TYPE: " + storage_type);
