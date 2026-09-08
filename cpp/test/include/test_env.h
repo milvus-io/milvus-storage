@@ -39,6 +39,9 @@
 #define ENV_VAR_REGION "TEST_ENV_REGION"
 #define ENV_VAR_USE_IAM "TEST_ENV_USE_IAM"
 #define ENV_VAR_USE_SSL "TEST_ENV_USE_SSL"
+#define ENV_VAR_TALON_ENABLED "TEST_ENV_TALON_ENABLED"
+#define ENV_VAR_TALON_COORDINATOR "TEST_ENV_TALON_COORDINATOR"
+#define ENV_VAR_TALON_BLOCK_SIZE "TEST_ENV_TALON_BLOCK_SIZE"
 
 // only used in local storage
 #define ENV_VAR_ROOT_PATH "ROOT_PATH"
@@ -61,7 +64,22 @@
 #define ASSERT_AND_ASSIGN(lhs, rexpr) ASSERT_AND_ASSIGN_IMPL(CONCAT(_tmp_value, __COUNTER__), lhs, rexpr);
 
 namespace milvus_storage {
+/// Returns whether integration tests are configured to use remote storage.
+///
+/// Only TEST_ENV_STORAGE_TYPE="remote" is treated as a cloud environment.
 bool IsCloudEnv();
+
+/// Returns whether Talon integration tests are explicitly enabled.
+///
+/// Only TEST_ENV_TALON_ENABLED values "true" and "1" enable Talon. This
+/// function does not validate the remaining environment; InitTestProperties()
+/// performs that validation while building the filesystem properties.
+bool IsTalonEnv();
+
+/// Populates filesystem properties from the TEST_ENV_* environment variables.
+///
+/// When Talon is enabled, remote storage and TEST_ENV_TALON_COORDINATOR are
+/// required. TEST_ENV_TALON_BLOCK_SIZE is optional and defaults to 256 MiB.
 arrow::Status InitTestProperties(api::Properties& properties);
 std::string GetTestBasePath(const std::string& dir);
 arrow::Status MoveTestBasePath(const milvus_storage::ArrowFileSystemPtr& fs,

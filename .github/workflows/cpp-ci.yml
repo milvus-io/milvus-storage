@@ -65,7 +65,7 @@ jobs:
       - name: Build
         working-directory: ./cpp
         run: |
-          make build USE_ASAN=True BUILD_TYPE=Release
+          make build USE_ASAN=True BUILD_TYPE=Release WITH_TALON=True
 
       - name: Save rust build cache
         if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true'
@@ -145,7 +145,7 @@ jobs:
       - name: Build
         working-directory: ./cpp
         run: |
-          make build BUILD_TYPE=Release
+          make build BUILD_TYPE=Release WITH_TALON=True
 
       - name: Save rust build cache
         if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true'
@@ -248,3 +248,147 @@ jobs:
           fail_ci_if_error: true
           disable_safe_directory: true
           verbose: true
+
+  talon-integration:
+    runs-on: ubuntu-22.04
+    needs: build
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve Talon revision
+        id: talon_revision
+        run: |
+          # Keep the Talon services on the same revision as the Rust client dependency.
+          revision="$(sed -nE '/^talon = /s/.*rev = "([0-9a-f]{40})".*/\1/p' cpp/src/format/bridge/rust/Cargo.toml)"
+          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Failed to resolve the pinned Talon revision from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Talon
+        uses: actions/checkout@v4
+        with:
+          repository: milvus-io/talon
+          ref: ${{ steps.talon_revision.outputs.revision }}
+          path: talon
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Talon build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: talon -> target
+
+      - name: Install Talon build dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Build Talon services
+        working-directory: ./talon
+        run: |
+          cargo build --release --locked \
+            -p talon-coordinator --bin talon-coordinator \
+            -p talon-worker --bin talon-worker
+
+      - name: Download test binary
+        uses: actions/download-artifact@v4
+        with:
+          name: gtest-binary
+          path: ./cpp/build/Release
+
+      - name: Setup Minio
+        run: |
+          chmod +x ./cpp/scripts/setup_minio.sh
+          ./cpp/scripts/setup_minio.sh
+
+      - name: Start Talon services
+        env:
+          TALON_WORKER_BACKEND: s3
+          TALON_WORKER_BLOCK_SIZE: "8388608"
+          TALON_WORKER_CACHE_DIRS: ${{ runner.temp }}/talon-cache
+          TALON_WORKER_CAPACITY_BYTES: "1073741824"
+          TALON_WORKER_S3_REGION: us-east-1
+          TALON_WORKER_S3_ENDPOINT: http://127.0.0.1:9000
+          TALON_WORKER_S3_ACCESS_KEY_ID: minioadmin
+          TALON_WORKER_S3_SECRET_ACCESS_KEY: minioadmin
+          TALON_WORKER_S3_PATH_STYLE: "true"
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/talon-cache" "$RUNNER_TEMP/talon-logs"
+
+          ./talon/target/release/talon-coordinator \
+            --listen 127.0.0.1:7000 \
+            --admin-listen 127.0.0.1:8000 \
+            >"$RUNNER_TEMP/talon-logs/coordinator.log" 2>&1 &
+          echo "TALON_COORDINATOR_PID=$!" >> "$GITHUB_ENV"
+
+          coordinator_ready=false
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/readyz >/dev/null; then
+              coordinator_ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$coordinator_ready" != "true" ]; then
+            cat "$RUNNER_TEMP/talon-logs/coordinator.log"
+            echo "Talon coordinator did not become ready" >&2
+            exit 1
+          fi
+
+          ./talon/target/release/talon-worker \
+            --listen 127.0.0.1:7001 \
+            --advertise-addr 127.0.0.1:7001 \
+            --admin-listen 127.0.0.1:8001 \
+            --coordinator 127.0.0.1:7000 \
+            --block-size 8388608 \
+            >"$RUNNER_TEMP/talon-logs/worker.log" 2>&1 &
+          echo "TALON_WORKER_PID=$!" >> "$GITHUB_ENV"
+
+          worker_ready=false
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8001/readyz >/dev/null; then
+              worker_ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$worker_ready" != "true" ]; then
+            cat "$RUNNER_TEMP/talon-logs/worker.log"
+            echo "Talon worker did not become ready" >&2
+            exit 1
+          fi
+
+      - name: Run Talon integration tests
+        working-directory: ./cpp
+        env:
+          AWS_EC2_METADATA_DISABLED: "true"
+          TEST_ENV_TALON_ENABLED: "true"
+          TEST_ENV_TALON_COORDINATOR: 127.0.0.1:7000
+          TEST_ENV_TALON_BLOCK_SIZE: "8388608"
+        run: |
+          set -euo pipefail
+          chmod +x ./build/Release/test/milvus_test
+          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:$(pwd)/build/Release:$(pwd)/build/Release/libs"
+          source ./scripts/minio_env.sh
+          ./build/Release/test/milvus_test --gtest_filter='TalonIntegrationTest.*'
+
+      - name: Stop Talon services
+        if: always()
+        run: |
+          for pid in "${TALON_WORKER_PID:-}" "${TALON_COORDINATOR_PID:-}"; do
+            if [ -n "$pid" ]; then
+              kill "$pid" 2>/dev/null || true
+            fi
+          done
+          docker logs minio >"$RUNNER_TEMP/talon-logs/minio.log" 2>&1 || true
+
+      - name: Upload Talon logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: talon-integration-logs
+          path: ${{ runner.temp }}/talon-logs
+          if-no-files-found: warn
