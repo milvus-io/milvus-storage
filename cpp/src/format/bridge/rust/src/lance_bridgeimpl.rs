@@ -8,7 +8,7 @@ use futures::stream::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::result::Result as RustResult;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use tokio::runtime::Handle;
 
 use arrow_array58::Array;
@@ -52,9 +52,8 @@ pub struct BlockingDataset {
     pub(crate) inner: Dataset,
     object_store: Arc<lance::io::ObjectStore>,
     // The scheduler is dataset-local by default and domain-shared when explicitly
-    // configured. Serialize fragment open, which touches Lance's async metadata/read caches.
+    // configured.
     scan_scheduler: Arc<OnceLock<Arc<ScanScheduler>>>,
-    fragment_open_mutex: Arc<Mutex<()>>,
 }
 
 impl BlockingDataset {
@@ -64,7 +63,6 @@ impl BlockingDataset {
             inner,
             object_store,
             scan_scheduler: Arc::new(OnceLock::new()),
-            fragment_open_mutex: Arc::new(Mutex::new(())),
         })
     }
 
@@ -568,14 +566,6 @@ impl BlockingFragmentReader {
         arrow_projection: &ArrowSchema,
         read_config: FragReadConfig,
     ) -> Result<Self> {
-        let _open_guard = dataset
-            .fragment_open_mutex
-            .lock()
-            .map_err(|_| LanceError::Internal {
-                message: "Lance fragment open mutex poisoned".into(),
-                location: snafu::location!(),
-            })?;
-
         let projection = arrow_projection.clone();
         let fragment = FileFragment::new(Arc::new(dataset.inner.clone()), fragment);
 
@@ -814,15 +804,6 @@ fn estimate_fragment_columns(
     dataset: &BlockingDataset,
     fragment_id: u64,
 ) -> Result<Vec<LanceColumnMemoryEstimate>> {
-    // Match fragment reader construction: both paths reuse the dataset-scoped
-    // scheduler and touch Lance's async metadata/read caches during open.
-    let _open_guard = dataset
-        .fragment_open_mutex
-        .lock()
-        .map_err(|_| LanceError::Internal {
-            message: "Lance fragment open mutex poisoned".into(),
-            location: snafu::location!(),
-        })?;
     let fragment = dataset
         .get_fragment(fragment_id)
         .ok_or_else(|| LanceError::InvalidInput {

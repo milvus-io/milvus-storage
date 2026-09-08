@@ -4374,7 +4374,7 @@ dependencies = [
 [[package]]
 name = "lance-arrow"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=b13b89169b283e47ae9b2dd13e12a6a9863c3908#b13b89169b283e47ae9b2dd13e12a6a9863c3908"
+source = "git+https://github.com/zilliztech/lance?rev=d512a02e636057fc9e3bdd2304548e19bbd1a369#d512a02e636057fc9e3bdd2304548e19bbd1a369"
 dependencies = [
  "arrow-array 58.3.0",
  "arrow-buffer 58.3.0",
@@ -4406,7 +4406,7 @@ dependencies = [
 [[package]]
 name = "lance-core"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=b13b89169b283e47ae9b2dd13e12a6a9863c3908#b13b89169b283e47ae9b2dd13e12a6a9863c3908"
+source = "git+https://github.com/zilliztech/lance?rev=d512a02e636057fc9e3bdd2304548e19bbd1a369#d512a02e636057fc9e3bdd2304548e19bbd1a369"
 dependencies = [
  "arrow-array 58.3.0",
  "arrow-buffer 58.3.0",
@@ -4629,7 +4629,7 @@ dependencies = [
 [[package]]
 name = "lance-io"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=b13b89169b283e47ae9b2dd13e12a6a9863c3908#b13b89169b283e47ae9b2dd13e12a6a9863c3908"
+source = "git+https://github.com/zilliztech/lance?rev=d512a02e636057fc9e3bdd2304548e19bbd1a369#d512a02e636057fc9e3bdd2304548e19bbd1a369"
 dependencies = [
  "arrow 58.3.0",
  "arrow-arith 58.3.0",
@@ -4690,7 +4690,7 @@ dependencies = [
 [[package]]
 name = "lance-namespace"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=b13b89169b283e47ae9b2dd13e12a6a9863c3908#b13b89169b283e47ae9b2dd13e12a6a9863c3908"
+source = "git+https://github.com/zilliztech/lance?rev=d512a02e636057fc9e3bdd2304548e19bbd1a369#d512a02e636057fc9e3bdd2304548e19bbd1a369"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
