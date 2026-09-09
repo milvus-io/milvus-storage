@@ -24,6 +24,9 @@
 
 namespace milvus_storage::lance {
 
+// Lance-private ColumnGroupFile property written by LanceFormat::explore().
+inline constexpr const char* kDatasetVersionProperty = "dataset_version";
+
 /// Convert ArrowFileSystemConfig to credential-free Lance read options.
 /// Authentication and credential refresh remain owned by the bound C++ filesystem.
 StorageOptions ToReaderOptions(const ArrowFileSystemConfig& config);

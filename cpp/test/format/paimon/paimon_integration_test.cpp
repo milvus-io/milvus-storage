@@ -273,7 +273,8 @@ TEST_F(PaimonIntegrationTest, VortexDeletionVectorUsesDirectFile) {
 TEST_F(PaimonIntegrationTest, ReadsSpecifiedSnapshot) {
   constexpr uint64_t kRows = 9;
   ASSERT_AND_ASSIGN(auto snapshot_id, paimon::CreateTestTable(table_dir_, kRows, "append"));
-  ASSERT_EQ(api::SetValue(properties_, PROPERTY_PAIMON_SNAPSHOT_ID, std::to_string(snapshot_id).c_str()), std::nullopt);
+  ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, std::to_string(snapshot_id).c_str()),
+            std::nullopt);
 
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_FALSE(files.empty());
@@ -300,7 +301,8 @@ TEST_F(PaimonIntegrationTest, ScanOptionsAreValidatedForLatestAndPinnedSnapshots
   EXPECT_TRUE(files.status().IsNotImplemented()) << files.status().ToString();
   EXPECT_NE(files.status().ToString().find("scan.watermark"), std::string::npos);
 
-  ASSERT_EQ(api::SetValue(properties_, PROPERTY_PAIMON_SNAPSHOT_ID, std::to_string(snapshot_id).c_str()), std::nullopt);
+  ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, std::to_string(snapshot_id).c_str()),
+            std::nullopt);
   files = Explore("auto");
   ASSERT_FALSE(files.ok());
   EXPECT_TRUE(files.status().IsNotImplemented()) << files.status().ToString();
@@ -985,8 +987,9 @@ TEST_F(PaimonIntegrationTest, DataSplitMissingObjectPreservesErrno) {
 
 TEST_F(PaimonIntegrationTest, MissingPinnedSnapshotFailsPlanAsInvalidWithRefresh) {
   ASSERT_AND_ASSIGN(auto snapshot_id, paimon::CreateTestTable(table_dir_, 10, "append"));
-  ASSERT_EQ(api::SetValue(properties_, PROPERTY_PAIMON_SNAPSHOT_ID, std::to_string(snapshot_id + 1000).c_str()),
-            std::nullopt);
+  ASSERT_EQ(
+      api::SetValue(properties_, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, std::to_string(snapshot_id + 1000).c_str()),
+      std::nullopt);
 
   auto files = Explore("auto");
   ASSERT_FALSE(files.ok());

@@ -77,3 +77,9 @@ Scope 复用、跳过所有未采样子 span，以及修改 executor/重复装�
 六项均未检出统计显著回退，但三项仍无法排除超过 2% 的回退，因此不能给出全面“无回退”结论。2% 是测量灵敏度边界，不是用户允许的回退额度。相对 Telemetry 引入前版本的零回退验收仍未完成；剩余问题需要固定频率、可 profiling 的环境，不能用多次噪声测量挑选有利结果。
 
 复现入口仍为 `cpp/benchmark/run_telemetry_comparison.py`。本轮输入与所有原始记录见 `end-to-end/inputs.json`、`end-to-end/pairs.json`、`end-to-end/summary.json`。
+
+## PR 合并基线验证
+
+发布 PR 时合入上游 `e7f4477`，保留 Lance 按版本共享 dataset 的逻辑，并在现有 tracing wrapper 内解决 `open()` 冲突。容器内重编后，包含 Lance 的筛选回归共 473 项：397 通过、76 项条件跳过，其中 26 项 tracing 全部通过；C FFI 83 项通过。原有 Folly ABI 用例仍排除。构建期间容器曾以 137 退出，恢复后完成增量构建及上述测试。
+
+日志位于同一证据目录的 `merge-build.log`、`merge-tests.log`、`merge-ffi.log`。以上性能数据仍对应合并前的优化版本，未重新测量上游合并后的版本，不能作为新 head 的性能验收结论。

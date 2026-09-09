@@ -409,8 +409,7 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreIceberg(const std::str
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, source));
   auto read_options = milvus_storage::iceberg::ToReaderOptions(fs_config);
 
-  ARROW_ASSIGN_OR_RAISE(auto snapshot_str, GetValue<std::string>(properties, PROPERTY_ICEBERG_SNAPSHOT_ID));
-  int64_t snapshot_id = std::stoll(snapshot_str);
+  ARROW_ASSIGN_OR_RAISE(auto snapshot_id, GetValue<int64_t>(properties, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID));
 
   auto iceberg_uri = source;
   if (fs_config.storage_type != "local") {
@@ -470,7 +469,7 @@ static int DoCreate(int argc, char** argv) {
     std::cerr << std::endl;
     std::cerr << "Formats: parquet, vortex, lance-table, iceberg-table" << std::endl;
     std::cerr << std::endl;
-    std::cerr << "For iceberg-table, --prop iceberg.snapshot_id=N is required." << std::endl;
+    std::cerr << "Use --prop reader.exttable.snapshot_id=N to select an external-table snapshot." << std::endl;
     std::cerr << "The --source is the metadata.json path for iceberg-table," << std::endl;
     std::cerr << "or the data directory for parquet/vortex/lance-table." << std::endl;
     return 1;
@@ -875,7 +874,7 @@ static void PrintUsage() {
             << std::endl
             << "  For iceberg-table:" << std::endl
             << "    --source is the metadata.json path" << std::endl
-            << "    --prop iceberg.snapshot_id=N is required" << std::endl
+            << "    --prop reader.exttable.snapshot_id=N optionally selects a snapshot" << std::endl
             << std::endl
             << "  For parquet/vortex:" << std::endl
             << "    --source is the directory containing data files" << std::endl
@@ -897,7 +896,7 @@ static void PrintUsage() {
             << "    --source /data/iceberg/metadata/v1.metadata.json \\" << std::endl
             << "    --target /tmp/my_manifest \\" << std::endl
             << "    --columns id,name,value \\" << std::endl
-            << "    --prop iceberg.snapshot_id=1" << std::endl
+            << "    --prop reader.exttable.snapshot_id=1" << std::endl
             << std::endl
             << "  # Explore a parquet directory and create a manifest" << std::endl
             << "  loon create --format parquet \\" << std::endl
