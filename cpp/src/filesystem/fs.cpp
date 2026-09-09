@@ -48,6 +48,7 @@ enum class CloudProviderType : int8_t {
   AZURE,
   TENCENTCLOUD,
   HUAWEICLOUD,
+  VOLCENGINE,
 };
 
 static std::map<std::string, StorageType> StorageType_Map = {{"local", StorageType::Local},
@@ -59,7 +60,8 @@ static std::map<std::string, CloudProviderType> CloudProviderType_Map = {
     {kCloudProviderAliyun, CloudProviderType::ALIYUN},
     {kCloudProviderAzure, CloudProviderType::AZURE},
     {kCloudProviderTencent, CloudProviderType::TENCENTCLOUD},
-    {kCloudProviderHuawei, CloudProviderType::HUAWEICLOUD}};
+    {kCloudProviderHuawei, CloudProviderType::HUAWEICLOUD},
+    {kCloudProviderVolcengine, CloudProviderType::VOLCENGINE}};
 
 bool ArrowFileSystemConfig::IsAzureCredentialBrokerEnabled() const {
   return cloud_provider == kCloudProviderAzure &&
@@ -182,7 +184,8 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
         case CloudProviderType::AWS:
         case CloudProviderType::ALIYUN:
         case CloudProviderType::TENCENTCLOUD:
-        case CloudProviderType::HUAWEICLOUD: {
+        case CloudProviderType::HUAWEICLOUD:
+        case CloudProviderType::VOLCENGINE: {
           ARROW_ASSIGN_OR_RAISE(raw_fs, S3FileSystemProducer(config).Make());
           break;
         }

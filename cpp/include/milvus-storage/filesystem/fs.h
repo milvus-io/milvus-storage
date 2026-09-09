@@ -45,6 +45,7 @@ inline constexpr const char* kCloudProviderAliyun = "aliyun";
 inline constexpr const char* kCloudProviderTencent = "tencent";
 inline constexpr const char* kCloudProviderHuawei = "huawei";
 inline constexpr const char* kCloudProviderAzure = "azure";
+inline constexpr const char* kCloudProviderVolcengine = "volcengine";
 
 inline constexpr const char* kAzureFileSystemName = "abfs";
 
