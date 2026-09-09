@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "tracing/runtime.h"
+
 #include "milvus-storage/format/format_reader_cache.h"
 
 #include <exception>
@@ -57,6 +59,7 @@ arrow::Status FormatReaderMetadataCache<ReaderT>::add(
 template <typename ReaderT>
 arrow::Result<typename FormatReaderMetadataCache<ReaderT>::MetadataPtr> FormatReaderMetadataCache<ReaderT>::get_or_open(
     const std::string& key, const typename FormatReaderMetadataCache<ReaderT>::MetadataLoader& load_fn) {
+  tracing::OperationTrace lookup("storage.metadata.lookup");
   std::shared_ptr<InFlightLoad> in_flight_load;
   bool owns_in_flight_load = false;
   {
@@ -65,6 +68,8 @@ arrow::Result<typename FormatReaderMetadataCache<ReaderT>::MetadataPtr> FormatRe
     // Return cached immutable metadata without entering the singleflight path.
     auto cached = entries_.find(key);
     if (cached != entries_.end()) {
+      lookup.Attribute("storage.cache", "hit");
+      lookup.Finish(arrow::Status::OK());
       return cached->second.metadata;
     }
 
@@ -75,10 +80,16 @@ arrow::Result<typename FormatReaderMetadataCache<ReaderT>::MetadataPtr> FormatRe
     auto [it, inserted] = in_flight_loads_.try_emplace(key, std::make_shared<InFlightLoad>(InFlightLoad::kSync));
     in_flight_load = it->second;
     owns_in_flight_load = inserted;
+    lookup.Attribute("storage.cache", inserted ? "miss" : "in_flight");
+    lookup.Finish(arrow::Status::OK());
+    if (inserted)
+      in_flight_load->trace = std::make_shared<tracing::OperationTrace>("storage.metadata.load", true);
     if (!inserted && in_flight_load->leader_type == InFlightLoad::kSync) {
       // condition_variable::wait releases mutex_ while sleeping, so other keys
       // and the leader can still update the cache. The current thread remains blocked.
+      tracing::OperationTrace wait("storage.metadata.wait", false, false, in_flight_load->trace->span_context());
       in_flight_load->cv.wait(lock, [&in_flight_load]() { return in_flight_load->done; });
+      wait.Finish(in_flight_load->status);
       if (!in_flight_load->status.ok()) {
         return in_flight_load->status;
       }
@@ -92,6 +103,10 @@ arrow::Result<typename FormatReaderMetadataCache<ReaderT>::MetadataPtr> FormatRe
 
   // Run the loader outside mutex_ so unrelated cache operations are not serialized
   // behind metadata I/O. The leader publishes both success and failure below.
+  auto load_trace = owns_in_flight_load ? in_flight_load->trace
+                                        : std::make_shared<tracing::OperationTrace>("storage.metadata.load", true);
+  load_trace->Start();
+  tracing::ContextScope load_scope(load_trace->context());
   auto status = arrow::Status::OK();
   MetadataPtr metadata;
   try {
@@ -108,6 +123,8 @@ arrow::Result<typename FormatReaderMetadataCache<ReaderT>::MetadataPtr> FormatRe
   } catch (...) {
     status = arrow::Status::UnknownError("Unknown exception while loading format reader metadata");
   }
+
+  load_trace->Finish(status);
 
   // The sync leader owns the InFlightLoad and must publish its result to all
   // followers. An independent sync load must leave the async leader's marker
@@ -141,8 +158,11 @@ FormatReaderMetadataCache<ReaderT>::get_or_open_async(
   // not start until the returned SemiFuture is consumed.
   auto self = this->shared_from_this();
 
-  return folly::makeSemiFuture().deferValue([self = std::move(self), key,
+  return folly::makeSemiFuture().deferValue([storage_context = tracing::Capture(), self = std::move(self), key,
                                              load_fn](folly::Unit) -> folly::SemiFuture<MetadataResult> {
+    tracing::ContextScope storage_scope(storage_context);
+    tracing::StartCurrent();
+    tracing::OperationTrace lookup("storage.metadata.lookup");
     std::shared_ptr<InFlightLoad> in_flight_load;
     {
       std::lock_guard<std::mutex> lock(self->mutex_);
@@ -151,6 +171,8 @@ FormatReaderMetadataCache<ReaderT>::get_or_open_async(
       // populated it after get_or_open_async() returned its deferred future.
       auto cached = self->entries_.find(key);
       if (cached != self->entries_.end()) {
+        lookup.Attribute("storage.cache", "hit");
+        lookup.Finish(arrow::Status::OK());
         return folly::makeSemiFuture(MetadataResult(cached->second.metadata));
       }
 
@@ -158,11 +180,20 @@ FormatReaderMetadataCache<ReaderT>::get_or_open_async(
       // blocking a thread. Only the caller that inserts the marker runs load_fn.
       auto [it, inserted] = self->in_flight_loads_.try_emplace(key, std::make_shared<InFlightLoad>());
       in_flight_load = it->second;
+      lookup.Attribute("storage.cache", inserted ? "miss" : "in_flight");
+      lookup.Finish(arrow::Status::OK());
       if (!inserted) {
-        return in_flight_load->async_result.getSemiFuture();
+        tracing::OperationTrace wait("storage.metadata.wait", false, false, in_flight_load->trace->span_context());
+        return in_flight_load->async_result.getSemiFuture().deferValue([wait](MetadataResult result) {
+          wait.Finish(result.status());
+          return result;
+        });
       }
+      in_flight_load->trace = std::make_shared<tracing::OperationTrace>("storage.metadata.load", true);
     }
 
+    in_flight_load->trace->Start();
+    tracing::ContextScope load_scope(in_flight_load->trace->context());
     // Start the async loader outside mutex_. Its continuation normalizes and
     // publishes the result through the same path used by the synchronous leader.
     try {
@@ -184,8 +215,10 @@ FormatReaderMetadataCache<ReaderT>::get_or_open_async(
         }
       });
       auto pending = std::move(load_future)
-                         .defer([self, key, in_flight_load, cleanup = std::move(cleanup)](
+                         .defer([storage_context = tracing::Capture(), self, key, in_flight_load, cleanup = std::move(cleanup)](
                                     folly::Try<MetadataResult>&& load_try) mutable -> MetadataResult {
+                           tracing::ContextScope storage_scope(storage_context);
+                           tracing::StartCurrent();
                            MetadataResult result = [&]() -> MetadataResult {
                              if (load_try.hasException()) {
                                auto message = load_try.exception().what();
@@ -273,6 +306,8 @@ typename FormatReaderMetadataCache<ReaderT>::MetadataResult FormatReaderMetadata
       in_flight_loads_.erase(in_flight_it);
     }
   }
+
+  in_flight_load->trace->Finish(status);
 
   // Notify blocking synchronous waiters only after releasing mutex_.
   in_flight_load->cv.notify_all();

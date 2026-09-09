@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "tracing/runtime.h"
+
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/fs.h"
 
@@ -1028,15 +1030,20 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     ctx->request.SetResponseStreamFactory(AwsWriteableStreamFactory(out, nbytes));
 
     ctx->metrics->IncrementReadCount();
-    ctx->client_lease->GetObjectAsync(
-        ctx->request,
-        [ctx](const Aws::S3Crt::S3CrtClient*, const S3CrtModel::GetObjectRequest&, S3CrtModel::GetObjectOutcome outcome,
-              const std::shared_ptr<const Aws::Client::AsyncCallerContext>&) mutable {
-          if (!outcome.IsSuccess()) {
-            ctx->metrics->IncrementFailedCount();
-            ctx->future.MarkFinished(arrow::Result<int64_t>(ErrorToStatus("GetObject", outcome.GetError())));
-            return;
-          }
+    ctx->trace.Attribute("storage.backend", "s3-crt");
+    ctx->trace.Attribute("storage.operation", "get");
+    (void)tracing::Observe(ctx->future, ctx->trace);
+    try {
+      ctx->client_lease->GetObjectAsync(
+          ctx->request, [ctx](const Aws::S3Crt::S3CrtClient*, const S3CrtModel::GetObjectRequest&,
+                              S3CrtModel::GetObjectOutcome outcome,
+                              const std::shared_ptr<const Aws::Client::AsyncCallerContext>&) mutable {
+            tracing::ContextScope trace_scope(ctx->trace.context());
+            if (!outcome.IsSuccess()) {
+              ctx->metrics->IncrementFailedCount();
+              ctx->future.MarkFinished(arrow::Result<int64_t>(ErrorToStatus("GetObject", outcome.GetError())));
+              return;
+            }
 
           const auto& result = outcome.GetResult();
           const auto response_content_length = result.GetContentLength();
@@ -1050,19 +1057,23 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
             return;
           }
 
-          const int64_t bytes_read = response_content_length;
-          auto content_length = GetObjectSizeFromReadResult(result, ctx->position);
-          if (content_length) {
-            DCHECK_LE(ctx->position + bytes_read, *content_length);
-            int64_t expected = kNoSize;
-            ctx->read_state->content_length.compare_exchange_strong(
-                expected, *content_length, std::memory_order_acq_rel, std::memory_order_acquire);
-          }
-          if (bytes_read > 0) {
-            ctx->metrics->IncrementReadBytes(bytes_read);
-          }
-          ctx->future.MarkFinished(bytes_read);
-        });
+            const int64_t bytes_read = response_content_length;
+            auto content_length = GetObjectSizeFromReadResult(result, ctx->position);
+            if (content_length) {
+              DCHECK_LE(ctx->position + bytes_read, *content_length);
+              int64_t expected = kNoSize;
+              ctx->read_state->content_length.compare_exchange_strong(
+                  expected, *content_length, std::memory_order_acq_rel, std::memory_order_acquire);
+            }
+            if (bytes_read > 0) {
+              ctx->metrics->IncrementReadBytes(bytes_read);
+            }
+            ctx->future.MarkFinished(bytes_read);
+          });
+    } catch (...) {
+      ctx->trace.Finish(arrow::Status::UnknownError("submission exception"));
+      throw;
+    }
     // Keep executor selection at the caller-owned continuation boundary.
     return ctx->future;
   }
@@ -1227,6 +1238,7 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
   std::shared_ptr<NativeS3Operations> native_;
 
   struct AsyncReadContext {
+    tracing::OperationTrace trace{"storage.backend.request", false, true};
     // AWS CRT retains this context through the callback. Never add owning
     // references to S3CrtClient, S3CrtClientHolder, or ObjectCrtInputFile here.
     // The lease owns only operation state and a non-owning client pointer.
@@ -1240,6 +1252,7 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
   };
 
   struct AsyncHeadContext {
+    tracing::OperationTrace trace{"storage.backend.request", false, true};
     // Keep the same non-owning CRT client lifetime model as AsyncReadContext.
     // The path and read state remain valid without owning the file or holder.
     Future<std::shared_ptr<const arrow::KeyValueMetadata>> future;

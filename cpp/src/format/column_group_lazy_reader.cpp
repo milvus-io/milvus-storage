@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "tracing/runtime.h"
+
 #include "milvus-storage/format/column_group_lazy_reader.h"
 
 #include <algorithm>
@@ -187,8 +189,11 @@ ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file_async(size_t file_index
     // No cache: create a fresh reader and let the format decide whether open is native async.
     return FormatReader::create_async(schema_, column_group_->format, file, properties_, needed_columns_,
                                       key_retriever_)
-        .deferValue([format = column_group_->format](arrow::Result<std::shared_ptr<FormatReader>>&& reader_result)
+        .deferValue([storage_context = tracing::Capture(),
+                     format = column_group_->format](arrow::Result<std::shared_ptr<FormatReader>>&& reader_result)
                         -> arrow::Result<std::shared_ptr<ReaderT>> {
+          tracing::ContextScope storage_scope(storage_context);
+          tracing::StartCurrent();
           ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
           auto typed_reader = std::dynamic_pointer_cast<ReaderT>(reader);
           if (!typed_reader) {
@@ -209,9 +214,12 @@ ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file_async(size_t file_index
                             [file, properties = properties_, key_retriever = key_retriever_]() {
                               return ReaderT::MetaTrait::load_metadata_async(file, properties, key_retriever);
                             })
-        .deferValue([file, read_schema = schema_, needed_columns = needed_columns_](
-                        arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>&& metadata_result)
+        .deferValue([storage_context = tracing::Capture(), file, read_schema = schema_,
+                     needed_columns =
+                         needed_columns_](arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>&& metadata_result)
                         -> folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> {
+          tracing::ContextScope storage_scope(storage_context);
+          tracing::StartCurrent();
           FOLLY_ARROW_ASSIGN_OR_RAISE(auto metadata, std::move(metadata_result));
           return ReaderT::MetaTrait::create_from_metadata_async(std::move(metadata), file, read_schema, needed_columns,
                                                                 "");
@@ -226,104 +234,129 @@ ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file_async(size_t file_index
 template <typename ReaderT>
 arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl<ReaderT>::take_rows_from_files(
     const std::vector<int64_t>& row_indices) {
-  const auto& cg_files = column_group_->files;
-  std::vector<std::vector<int64_t>> indices_in_files(cg_files.size());
-  for (const auto& row_index : row_indices) {
-    uint32_t file_index;
-    int64_t row_index_in_file;
-    ARROW_ASSIGN_OR_RAISE(std::tie(file_index, row_index_in_file), get_index_and_offset_of_file(cg_files, row_index));
-    indices_in_files[file_index].emplace_back(row_index_in_file);
-  }
+  return tracing::Run(
+      "storage.read_task",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::Table>> {
+        const auto& cg_files = column_group_->files;
+        std::vector<std::vector<int64_t>> indices_in_files(cg_files.size());
+        for (const auto& row_index : row_indices) {
+          uint32_t file_index;
+          int64_t row_index_in_file;
+          ARROW_ASSIGN_OR_RAISE(std::tie(file_index, row_index_in_file),
+                                get_index_and_offset_of_file(cg_files, row_index));
+          indices_in_files[file_index].emplace_back(row_index_in_file);
+        }
 
-  std::vector<std::shared_ptr<arrow::Table>> tables;
-  for (size_t file_index = 0; file_index < indices_in_files.size(); file_index++) {
-    if (indices_in_files[file_index].empty()) {
-      continue;
-    }
+        std::vector<std::shared_ptr<arrow::Table>> tables;
+        for (size_t file_index = 0; file_index < indices_in_files.size(); file_index++) {
+          if (indices_in_files[file_index].empty()) {
+            continue;
+          }
 
-    ARROW_ASSIGN_OR_RAISE(auto reader, open_reader_for_file(file_index));
-    ARROW_ASSIGN_OR_RAISE(auto table, reader->take(indices_in_files[file_index]));
-    tables.emplace_back(table);
-  }
+          ARROW_ASSIGN_OR_RAISE(auto reader, open_reader_for_file(file_index));
+          ARROW_ASSIGN_OR_RAISE(auto table, reader->take(indices_in_files[file_index]));
+          tables.emplace_back(table);
+        }
 
-  // won't copy table with same schema
-  return arrow::ConcatenateTables(tables);
+        // won't copy table with same schema
+        return arrow::ConcatenateTables(tables);
+      },
+      false, "take_rows_from_files", nullptr);
 }
 
 template <typename ReaderT>
 arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl<ReaderT>::take(
     const std::vector<int64_t>& row_indices, size_t parallelism) {
-  FIU_RETURN_ON(FIUKEY_TAKE_ROWS_FAIL,
-                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_TAKE_ROWS_FAIL)));
+  return tracing::Run(
+      "storage.read",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::Table>> {
+        FIU_RETURN_ON(FIUKEY_TAKE_ROWS_FAIL,
+                      arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_TAKE_ROWS_FAIL)));
 
-  ARROW_RETURN_NOT_OK(validate_sorted_unique_row_indices(row_indices));
-  ARROW_RETURN_NOT_OK(validate_row_indices(row_indices));
+        ARROW_RETURN_NOT_OK(validate_sorted_unique_row_indices(row_indices));
+        ARROW_RETURN_NOT_OK(validate_row_indices(row_indices));
 
-  if (parallelism <= 1) {
-    return take_rows_from_files(row_indices);
-  }
+        if (parallelism <= 1) {
+          return take_rows_from_files(row_indices);
+        }
 
-  auto folly_thread_pool = ThreadPoolHolder::GetThreadPool(parallelism /* parallelism_hint */);
-  auto splitted_row_indices = split_row_indices(row_indices, folly_thread_pool->numThreads());
-  std::vector<std::future<arrow::Result<std::shared_ptr<arrow::Table>>>> futures;
+        auto folly_thread_pool = ThreadPoolHolder::GetThreadPool(parallelism /* parallelism_hint */);
+        auto splitted_row_indices = split_row_indices(row_indices, folly_thread_pool->numThreads());
+        std::vector<std::future<arrow::Result<std::shared_ptr<arrow::Table>>>> futures;
 
-  for (const auto& task_row_indices : splitted_row_indices) {
-    std::packaged_task<arrow::Result<std::shared_ptr<arrow::Table>>()> task(
-        [this, task_row_indices]() { return take_rows_from_files(task_row_indices); });
-    futures.emplace_back(task.get_future());
-    folly_thread_pool->add(std::move(task));
-  }
+        for (const auto& task_row_indices : splitted_row_indices) {
+          std::packaged_task<arrow::Result<std::shared_ptr<arrow::Table>>()> task(
+              [storage_context = tracing::Capture(), this, task_row_indices]() {
+                tracing::ContextScope storage_scope(storage_context);
+                tracing::StartCurrent();
+                return take_rows_from_files(task_row_indices);
+              });
+          futures.emplace_back(task.get_future());
+          folly_thread_pool->add(std::move(task));
+        }
 
-  std::vector<std::shared_ptr<arrow::Table>> result_tables;
-  result_tables.reserve(futures.size());
-  std::vector<arrow::Result<std::shared_ptr<arrow::Table>>> all_results;
-  all_results.reserve(futures.size());
-  for (auto& future : futures) {
-    all_results.emplace_back(future.get());
-  }
-  for (auto& result : all_results) {
-    ARROW_ASSIGN_OR_RAISE(auto table, std::move(result));
-    result_tables.emplace_back(std::move(table));
-  }
+        std::vector<std::shared_ptr<arrow::Table>> result_tables;
+        result_tables.reserve(futures.size());
+        std::vector<arrow::Result<std::shared_ptr<arrow::Table>>> all_results;
+        all_results.reserve(futures.size());
+        for (auto& future : futures) {
+          all_results.emplace_back(future.get());
+        }
+        for (auto& result : all_results) {
+          ARROW_ASSIGN_OR_RAISE(auto table, std::move(result));
+          result_tables.emplace_back(std::move(table));
+        }
 
-  return arrow::ConcatenateTables(result_tables);
+        return arrow::ConcatenateTables(result_tables);
+      },
+      false, "take", nullptr);
 }
 
 template <typename ReaderT>
 folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> ColumnGroupLazyReaderImpl<ReaderT>::take_async(
     const TakeTask& task) {
-  FIU_RETURN_ON(FIUKEY_TAKE_ROWS_FAIL,
-                folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::Table>>(
-                    arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_TAKE_ROWS_FAIL)))));
+  return tracing::RunAsync(
+      "storage.read_task",
+      [&]() -> folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> {
+        FIU_RETURN_ON(FIUKEY_TAKE_ROWS_FAIL,
+                      folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::Table>>(
+                          arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_TAKE_ROWS_FAIL)))));
 
-  const auto& cg_files = column_group_->files;
-  std::vector<int64_t> rows_in_file;
-  rows_in_file.reserve(task.row_indices.size());
-  // Planning keeps global row indices; the format reader consumes file-local offsets.
-  for (auto global_row : task.row_indices) {
-    FOLLY_ARROW_ASSIGN_OR_RAISE(auto file_and_offset, get_index_and_offset_of_file(cg_files, global_row));
-    if (file_and_offset.first != task.file_index) {
-      return folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::Table>>(arrow::Status::Invalid(
-          fmt::format("TakeTask row does not belong to task file. [row={}, expected_file={}, actual_file={}]",
-                      global_row, task.file_index, file_and_offset.first))));
-    }
-    rows_in_file.push_back(file_and_offset.second);
-  }
+        const auto& cg_files = column_group_->files;
+        std::vector<int64_t> rows_in_file;
+        rows_in_file.reserve(task.row_indices.size());
+        // Planning keeps global row indices; the format reader consumes file-local offsets.
+        for (auto global_row : task.row_indices) {
+          FOLLY_ARROW_ASSIGN_OR_RAISE(auto file_and_offset, get_index_and_offset_of_file(cg_files, global_row));
+          if (file_and_offset.first != task.file_index) {
+            return folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::Table>>(arrow::Status::Invalid(
+                fmt::format("TakeTask row does not belong to task file. [row={}, expected_file={}, actual_file={}]",
+                            global_row, task.file_index, file_and_offset.first))));
+          }
+          rows_in_file.push_back(file_and_offset.second);
+        }
 
-  // Open one independent reader for this file-scoped task; no mutable format
-  // reader is shared with another in-flight take.
-  return open_reader_for_file_async(task.file_index)
-      .deferValue([rows_in_file = std::move(rows_in_file)](arrow::Result<std::shared_ptr<ReaderT>>&& reader_result)
-                      -> folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> {
-        FOLLY_ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
-        return reader->take_async(rows_in_file)
-            .deferValue(
-                [reader = std::move(reader)](auto&& table_result) -> arrow::Result<std::shared_ptr<arrow::Table>> {
-                  // Lifetime-only capture: backend state must outlive the async take.
-                  (void)reader;
-                  return std::move(table_result);
-                });
-      });
+        // Open one independent reader for this file-scoped task; no mutable format
+        // reader is shared with another in-flight take.
+        return open_reader_for_file_async(task.file_index)
+            .deferValue([storage_context = tracing::Capture(), rows_in_file = std::move(rows_in_file)](
+                            arrow::Result<std::shared_ptr<ReaderT>>&& reader_result)
+                            -> folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> {
+              tracing::ContextScope storage_scope(storage_context);
+              tracing::StartCurrent();
+              FOLLY_ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
+              return reader->take_async(rows_in_file)
+                  .deferValue([storage_context = tracing::Capture(), reader = std::move(reader)](
+                                  auto&& table_result) -> arrow::Result<std::shared_ptr<arrow::Table>> {
+                    tracing::ContextScope storage_scope(storage_context);
+                    tracing::StartCurrent();
+                    // Lifetime-only capture: backend state must outlive the async take.
+                    (void)reader;
+                    return std::move(table_result);
+                  });
+            });
+      },
+      "take_async", nullptr);
 }
 
 template <typename ReaderT>
