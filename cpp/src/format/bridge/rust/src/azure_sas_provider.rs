@@ -201,7 +201,7 @@ impl AzureBrokerClient {
             .json(&request)
             .send()
             .await
-            .map_err(|_| anyhow!("transport_error"))?;
+            .map_err(|error| anyhow!("transport_error: {error}"))?;
         let status = response.status();
         if !status.is_success() {
             bail!("http_status={}", status.as_u16());

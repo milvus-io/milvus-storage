@@ -147,13 +147,10 @@ FFI_EXPORT extern const char* loon_properties_reader_parquet_prebuffer_hole_size
 FFI_EXPORT extern const char* loon_properties_reader_parquet_prebuffer_range_size_limit;
 FFI_EXPORT extern const char* loon_properties_reader_vortex_split_row_indices;
 FFI_EXPORT extern const char* loon_properties_reader_async_task_split_strategy;
-
-// --- Export Iceberg property keys ---
-FFI_EXPORT extern const char* loon_properties_iceberg_snapshot_id;
+FFI_EXPORT extern const char* loon_properties_reader_exttable_snapshot_id;
 
 // --- Export Paimon property keys ---
 FFI_EXPORT extern const char* loon_properties_paimon_scan_mode;
-FFI_EXPORT extern const char* loon_properties_paimon_snapshot_id;
 
 // --- Export Transaction property keys ---
 FFI_EXPORT extern const char* loon_properties_transaction_commit_num_retries;

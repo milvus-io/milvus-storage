@@ -51,6 +51,7 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/format_reader_cache.h"
+#include "milvus-storage/format/lance/lance_format.h"
 #include "milvus-storage/format/lance/lance_table_writer.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/lance/lance_common.h"
@@ -307,6 +308,284 @@ TEST_F(LanceBasicTest, InvalidUriCacheKeyDoesNotCollideWithBaseUri) {
   EXPECT_NE(LanceTableReader::MetaTrait::cache_key(invalid_file), LanceTableReader::MetaTrait::cache_key(valid_file));
 }
 
+TEST_F(LanceBasicTest, ExploreCarriesDatasetSnapshotVersion) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Focused snapshot-version test uses the local Lance fixture.";
+  }
+
+  LanceTableWriter first_writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(first_writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto first_file, first_writer.Close());
+
+  LanceFormat format;
+  ASSERT_AND_ASSIGN(auto first_snapshot_files, format.explore(base_path_, properties_));
+  ASSERT_EQ(first_snapshot_files.size(), 1);
+  auto first_version = first_snapshot_files[0].properties.find(kDatasetVersionProperty);
+  ASSERT_NE(first_version, first_snapshot_files[0].properties.end());
+  EXPECT_EQ(first_version->second, "1");
+
+  LanceTableWriter second_writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(second_writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto second_file, second_writer.Close());
+
+  ASSERT_AND_ASSIGN(auto second_snapshot_files, format.explore(base_path_, properties_));
+  ASSERT_EQ(second_snapshot_files.size(), 2);
+  for (const auto& file : second_snapshot_files) {
+    auto version = file.properties.find(kDatasetVersionProperty);
+    ASSERT_NE(version, file.properties.end());
+    EXPECT_EQ(version->second, "2");
+  }
+
+  auto pinned_properties = properties_;
+  ASSERT_EQ(api::SetValue(pinned_properties, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, "1"), std::nullopt);
+  ASSERT_AND_ASSIGN(auto pinned_snapshot_files, format.explore(base_path_, pinned_properties));
+  ASSERT_EQ(pinned_snapshot_files.size(), 1);
+  auto pinned_version = pinned_snapshot_files[0].properties.find(kDatasetVersionProperty);
+  ASSERT_NE(pinned_version, pinned_snapshot_files[0].properties.end());
+  EXPECT_EQ(pinned_version->second, "1");
+}
+
+TEST_F(LanceBasicTest, SeparateTopLevelReaderCachesShareSameDatasetSnapshot) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Focused dataset-cache test uses the local Lance fixture.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto written_file, writer.Close());
+
+  LanceFormat format;
+  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, properties_));
+  ASSERT_EQ(files.size(), 1);
+
+  MetadataCache first_reader_cache;
+  MetadataCache second_reader_cache;
+  const auto key = LanceTableReader::MetaTrait::cache_key(files[0]);
+  ASSERT_AND_ASSIGN(auto first_metadata, first_reader_cache.get<LanceTableReader>()->get_or_open(key, [&]() {
+    return LanceTableReader::MetaTrait::load_metadata(files[0], properties_, nullptr /* key_retriever */);
+  }));
+  ASSERT_AND_ASSIGN(auto second_metadata, second_reader_cache.get<LanceTableReader>()->get_or_open(key, [&]() {
+    return LanceTableReader::MetaTrait::load_metadata(files[0], properties_, nullptr /* key_retriever */);
+  }));
+
+  EXPECT_EQ(first_metadata->payload.dataset.get(), second_metadata->payload.dataset.get());
+}
+
+TEST_F(LanceBasicTest, ConcurrentMetadataLoadsShareSameDatasetSnapshot) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Focused dataset-cache test uses the local Lance fixture.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto written_file, writer.Close());
+
+  LanceFormat format;
+  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, properties_));
+  ASSERT_EQ(files.size(), 1);
+
+  constexpr size_t kReaderCount = 8;
+  std::barrier start(kReaderCount);
+  std::vector<std::future<arrow::Result<LanceTableReader::MetaTrait::MetadataPtr>>> futures;
+  futures.reserve(kReaderCount);
+  for (size_t i = 0; i < kReaderCount; ++i) {
+    futures.emplace_back(std::async(std::launch::async, [&]() {
+      start.arrive_and_wait();
+      return LanceTableReader::MetaTrait::load_metadata(files[0], properties_, nullptr /* key_retriever */);
+    }));
+  }
+
+  std::vector<LanceTableReader::MetaTrait::MetadataPtr> metadata;
+  metadata.reserve(kReaderCount);
+  for (auto& future : futures) {
+    ASSERT_AND_ASSIGN(auto loaded, future.get());
+    metadata.emplace_back(std::move(loaded));
+  }
+  for (size_t i = 1; i < metadata.size(); ++i) {
+    EXPECT_EQ(metadata[0]->payload.dataset.get(), metadata[i]->payload.dataset.get());
+  }
+}
+
+TEST_F(LanceBasicTest, FailedDatasetOpenDoesNotPoisonGlobalCache) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Focused dataset-cache test uses the local Lance fixture.";
+  }
+
+  ASSERT_AND_ASSIGN(auto fs_config, FilesystemCache::resolve_config(properties_, base_path_));
+  ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
+  api::ColumnGroupFile file{
+      .path = MakeLanceUri(ToMilvusLanceUri(lance_uri, fs_config.address), 0),
+      .start_index = 0,
+      .end_index = test_batch_->num_rows(),
+      .properties = {{kDatasetVersionProperty, "1"}},
+  };
+
+  auto missing_result = LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr /* key_retriever */);
+  ASSERT_FALSE(missing_result.ok());
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto written_file, writer.Close());
+
+  ASSERT_AND_ASSIGN(auto metadata,
+                    LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr /* key_retriever */));
+  EXPECT_NE(metadata->payload.dataset, nullptr);
+}
+
+TEST_F(LanceBasicTest, MissingDatasetSnapshotVersionResolvesLatestAndSharesIt) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Focused dataset-cache test uses the local Lance fixture.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer.Close());
+  ASSERT_EQ(file.properties.find(kDatasetVersionProperty), file.properties.end());
+
+  ASSERT_AND_ASSIGN(auto first_metadata,
+                    LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr /* key_retriever */));
+  ASSERT_AND_ASSIGN(auto second_metadata,
+                    LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr /* key_retriever */));
+
+  EXPECT_EQ(first_metadata->payload.dataset.get(), second_metadata->payload.dataset.get());
+}
+
+TEST_F(LanceBasicTest, LatestVersionResolverReturnsCurrentSnapshot) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Focused latest-version test uses the local Lance fixture.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer.Close());
+  ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(file.path));
+  ASSERT_AND_ASSIGN(auto fs_config, FilesystemCache::resolve_config(properties_, parsed_uri.first));
+
+  uint64_t version = 0;
+  ASSERT_NO_THROW(version = BlockingDataset::ResolveLatestVersion(ToStandardLanceUri(parsed_uri.first),
+                                                                  ToStorageOptions(fs_config)));
+  EXPECT_EQ(version, 1);
+}
+
+TEST_F(LanceBasicTest, VersionedFileOpensExploredSnapshot) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Focused snapshot-version test uses the local Lance fixture.";
+  }
+
+  LanceTableWriter first_writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(first_writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto first_file, first_writer.Close());
+
+  LanceFormat format;
+  ASSERT_AND_ASSIGN(auto first_snapshot_files, format.explore(base_path_, properties_));
+  ASSERT_EQ(first_snapshot_files.size(), 1);
+
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
+  auto latest_dataset = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config));
+  latest_dataset->DeleteRows("id < 10");
+
+  ASSERT_AND_ASSIGN(auto metadata, LanceTableReader::MetaTrait::load_metadata(first_snapshot_files[0], properties_,
+                                                                              nullptr /* key_retriever */));
+  EXPECT_EQ(metadata->payload.dataset->Version(), 1);
+
+  ASSERT_AND_ASSIGN(auto reader, format.create_reader(schema_, first_snapshot_files[0], properties_, {}, nullptr));
+  ASSERT_AND_ASSIGN(auto row_groups, reader->get_row_group_infos());
+  ASSERT_FALSE(row_groups.empty());
+  EXPECT_EQ(row_groups.back().end_offset, test_batch_->num_rows());
+}
+
+TEST_F(LanceBasicTest, InvalidDatasetSnapshotVersionIsRejected) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Focused snapshot-version test uses the local Lance fixture.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer.Close());
+  file.properties[kDatasetVersionProperty] = "invalid";
+
+  LanceFormat format;
+  auto direct_result = format.create_reader(schema_, file, properties_, {}, nullptr);
+  ASSERT_FALSE(direct_result.ok());
+  EXPECT_TRUE(direct_result.status().IsInvalid()) << direct_result.status().ToString();
+
+  auto invalid_result = LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr /* key_retriever */);
+  ASSERT_FALSE(invalid_result.ok());
+  EXPECT_TRUE(invalid_result.status().IsInvalid()) << invalid_result.status().ToString();
+
+  file.properties[kDatasetVersionProperty] = "0";
+  ASSERT_AND_ASSIGN(auto latest_metadata,
+                    LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr /* key_retriever */));
+  EXPECT_EQ(latest_metadata->payload.dataset->Version(), 1);
+}
+
+TEST_F(LanceBasicTest, CachedMetadataValidatesDatasetSnapshotVersion) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Focused snapshot-version test uses the local Lance fixture.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer.Close());
+  ASSERT_EQ(file.properties.find(kDatasetVersionProperty), file.properties.end());
+
+  ASSERT_AND_ASSIGN(auto metadata,
+                    LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr /* key_retriever */));
+  EXPECT_EQ(metadata->payload.dataset->Version(), 1);
+
+  ASSERT_AND_ASSIGN(auto legacy_reader,
+                    LanceTableReader::MetaTrait::create_from_metadata(metadata, file, schema_, {}, ""));
+  ASSERT_NE(legacy_reader, nullptr);
+
+  file.properties[kDatasetVersionProperty] = "0";
+  ASSERT_AND_ASSIGN(auto latest_reader,
+                    LanceTableReader::MetaTrait::create_from_metadata(metadata, file, schema_, {}, ""));
+  ASSERT_NE(latest_reader, nullptr);
+
+  file.properties[kDatasetVersionProperty] = "1";
+  ASSERT_AND_ASSIGN(auto matching_reader,
+                    LanceTableReader::MetaTrait::create_from_metadata(metadata, file, schema_, {}, ""));
+  ASSERT_NE(matching_reader, nullptr);
+
+  file.properties[kDatasetVersionProperty] = "invalid";
+  auto invalid_result = LanceTableReader::MetaTrait::create_from_metadata(metadata, file, schema_, {}, "");
+  ASSERT_FALSE(invalid_result.ok());
+  EXPECT_TRUE(invalid_result.status().IsInvalid()) << invalid_result.status().ToString();
+
+  file.properties[kDatasetVersionProperty] = "2";
+  auto mismatch_result = LanceTableReader::MetaTrait::create_from_metadata(metadata, file, schema_, {}, "");
+  ASSERT_FALSE(mismatch_result.ok());
+  EXPECT_TRUE(mismatch_result.status().IsInvalid()) << mismatch_result.status().ToString();
+}
+
+TEST_F(LanceBasicTest, DifferentFilesystemCacheKeysDoNotShareDataset) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Focused filesystem-identity test uses the local Lance fixture.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto written_file, writer.Close());
+
+  LanceFormat format;
+  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, properties_));
+  ASSERT_EQ(files.size(), 1);
+
+  auto alternate_properties = properties_;
+  api::SetValue(alternate_properties, PROPERTY_FS_ROOT_PATH, "/tmp/milvus-storage-test/.");
+  ASSERT_AND_ASSIGN(auto first_config, FilesystemCache::resolve_config(properties_, files[0].path));
+  ASSERT_AND_ASSIGN(auto alternate_config, FilesystemCache::resolve_config(alternate_properties, files[0].path));
+  ASSERT_NE(first_config.GetCacheKey(), alternate_config.GetCacheKey());
+
+  ASSERT_AND_ASSIGN(auto first_metadata,
+                    LanceTableReader::MetaTrait::load_metadata(files[0], properties_, nullptr /* key_retriever */));
+  ASSERT_AND_ASSIGN(auto alternate_metadata, LanceTableReader::MetaTrait::load_metadata(files[0], alternate_properties,
+                                                                                        nullptr /* key_retriever */));
+  EXPECT_NE(first_metadata->payload.dataset.get(), alternate_metadata->payload.dataset.get());
+}
+
 TEST_F(LanceBasicTest, DifferentFragmentsShareDatasetMetadata) {
   if (IsCloudEnv()) {
     GTEST_SKIP() << "Focused metadata-cache reproduction uses the local Lance fixture.";
@@ -483,6 +762,7 @@ TEST_F(LanceBasicTest, TestBasic) {
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
   auto storage_options = milvus_storage::lance::ToStorageOptions(fs_config);
+  const auto reader_uri = ToMilvusLanceUri(lance_uri, fs_config.address);
 
   // write without flush, single fragment
   {
@@ -500,7 +780,7 @@ TEST_F(LanceBasicTest, TestBasic) {
 
     uint64_t total_rows = 0;
     for (const auto& fragment_id : fragment_ids) {
-      LanceTableReader reader(read_dataset, fragment_id, schema_, properties_);
+      LanceTableReader reader(reader_uri, fragment_id, schema_, properties_);
       ASSERT_STATUS_OK(reader.open());
       ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
       ASSERT_FALSE(rgs.empty());
@@ -557,11 +837,8 @@ TEST_F(LanceBasicTest, TestReaderHandlesFragmentMissingNullableDatasetColumn) {
   ASSERT_AND_ASSIGN(auto appended_file, append_writer.Close());
 
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(appended_file.path));
-  ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
-  auto dataset = BlockingDataset::Open(ToStandardLanceUri(parsed_uri.first), ToStorageOptions(fs_config));
 
-  LanceTableReader reader(dataset, parsed_uri.second, nullptr, properties_);
+  LanceTableReader reader(parsed_uri.first, parsed_uri.second, nullptr, properties_);
   ASSERT_STATUS_OK(reader.open());
   ASSERT_EQ(reader.get_schema()->num_fields(), evolved_schema->num_fields());
 
@@ -590,6 +867,7 @@ TEST_F(LanceBasicTest, TestRead) {
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
   auto storage_options = milvus_storage::lance::ToStorageOptions(fs_config);
+  const auto reader_uri = ToMilvusLanceUri(lance_uri, fs_config.address);
 
   LanceTableWriter writer(base_path_, schema_, properties_);
   ASSERT_STATUS_OK(writer.Write(large_batch));
@@ -602,7 +880,7 @@ TEST_F(LanceBasicTest, TestRead) {
   // The splitting conditions(`WriteParams`) in lance are very strict.
   // So the default setting will only generate one fragment.
   ASSERT_EQ(fragment_ids.size(), 1);
-  LanceTableReader reader(read_dataset, fragment_ids[0], schema_, properties_);
+  LanceTableReader reader(reader_uri, fragment_ids[0], schema_, properties_);
   ASSERT_STATUS_OK(reader.open());
   ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
   ASSERT_FALSE(rgs.empty());
@@ -657,7 +935,7 @@ TEST_F(LanceBasicTest, TestRead) {
   {
     ASSERT_AND_ASSIGN(auto projection_schema, CreateTestSchema({true, true, false, false}));
 
-    LanceTableReader projection_reader(read_dataset, fragment_ids[0], projection_schema, properties_);
+    LanceTableReader projection_reader(reader_uri, fragment_ids[0], projection_schema, properties_);
     ASSERT_STATUS_OK(projection_reader.open());
     ASSERT_AND_ASSIGN(auto projection_rgs, projection_reader.get_row_group_infos());
     ASSERT_EQ(projection_rgs.size(), rgs.size());
@@ -705,9 +983,8 @@ TEST_F(LanceBasicTest, EstimatedMemoryAccountsForDeletions) {
   auto dataset = BlockingDataset::Open(lance_uri, storage_options);
   dataset->DeleteRows("id < 2000");
 
-  auto fragment_ids = dataset->GetAllFragmentIds();
-  ASSERT_EQ(fragment_ids.size(), 1);
-  LanceTableReader reader(dataset, fragment_ids[0], id_schema, properties_);
+  ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(cgfile.path));
+  LanceTableReader reader(parsed_uri.first, parsed_uri.second, id_schema, properties_);
   ASSERT_STATUS_OK(reader.open());
   ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
   ASSERT_EQ(rgs.size(), 1);
@@ -822,11 +1099,12 @@ TEST_F(LanceBasicTest, LegacyFormatReadsWhenMemoryEstimateIsUnavailable) {
   auto dataset = BlockingDataset::Open(lance_uri, storage_options);
   auto fragment_ids = dataset->GetAllFragmentIds();
   ASSERT_EQ(fragment_ids.size(), 1);
+  ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(cgfile.path));
 
   auto estimate_result = dataset->EstimateFragmentColumnMemory(fragment_ids[0]);
   ASSERT_TRUE(estimate_result.status().IsNotImplemented()) << estimate_result.status().ToString();
 
-  LanceTableReader reader(dataset, fragment_ids[0], vector_schema, properties_);
+  LanceTableReader reader(parsed_uri.first, parsed_uri.second, vector_schema, properties_);
   ASSERT_STATUS_OK(reader.open());
   ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());
   ASSERT_FALSE(row_group_infos.empty());

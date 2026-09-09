@@ -645,16 +645,19 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "parallelism",
                       ValidatePropertyType() + ValidatePropertyEnum<std::string>("parallelism", "none", "all")),
 
+    // --- Define external table common property keys ---
+    REGISTER_PROPERTY(PROPERTY_READER_EXTTABLE_SNAPSHOT_ID,
+                      PropertyType::INT64,
+                      "External table snapshot ID. -1 reads the latest snapshot.",
+                      int64_t(-1),
+                      ValidatePropertyType() + ValidatePropertyRange<int64_t>(-1, INT64_MAX)),
+
+    // --- Define Paimon property keys ---
     REGISTER_PROPERTY(PROPERTY_PAIMON_SCAN_MODE,
                       PropertyType::STRING,
                       "Paimon split routing mode: auto, direct-file, or data-split.",
                       "auto",
                       ValidatePropertyType() + ValidatePropertyEnum<std::string>("auto", "direct-file", "data-split")),
-    REGISTER_PROPERTY(PROPERTY_PAIMON_SNAPSHOT_ID,
-                      PropertyType::INT64,
-                      "Paimon snapshot ID. -1 reads the latest snapshot.",
-                      int64_t(-1),
-                      ValidatePropertyType() + ValidatePropertyRange<int64_t>(-1, INT64_MAX)),
 
     // --- transaction properties define ---
     REGISTER_PROPERTY(PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES,

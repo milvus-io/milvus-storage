@@ -15,10 +15,12 @@
 #include "milvus-storage/format/lance/lance_table_reader.h"
 
 #include <algorithm>
+#include <compare>
 #include <condition_variable>
 #include <exception>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -36,37 +38,154 @@
 
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/log.h"
+#include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/lance/lance_common.h"
 
 namespace milvus_storage::lance {
 
-// Lance metadata follows the Dataset/fragment hierarchy:
+// Lance metadata follows the Dataset/fragment hierarchy and uses three cache
+// levels with distinct identities and ownership:
 //
-//   FormatReaderMetadataCache (key: base URI)
-//     base URI -> Metadata -> Payload -> BlockingDataset
+//   LanceDatasetCache (process-wide)
+//     key: {dataset version, base URI, filesystem cache key}
+//     value: weak_ptr<BlockingDataset>
 //
-//   Payload::FragmentMetadataCache (key: fragment ID)
-//     fragment_id=0 -> FragmentMetadata[0]
-//     fragment_id=1 -> FragmentMetadata[1]
+//   FormatReaderMetadataCache (owned by one top-level Reader)
+//     key: base URI
+//     value: Metadata -> Payload -> shared_ptr<BlockingDataset>
 //
-// Their ownership relationship is:
+//   Payload::FragmentMetadataCache
+//     key: fragment ID
+//     value: immutable fragment schema, row groups, deletion state, and
+//            memory estimates
 //
-//   ReaderImpl
-//     `-- MetadataCache
-//           `-- FormatReaderMetadataCache<LanceTableReader>
-//                 `-- base URI -> Metadata -> Payload
-//                                      +-- BlockingDataset
-//                                      `-- FragmentMetadataCache
-//                                            +-- fragment ID 0 -> FragmentMetadata[0]
-//                                            `-- fragment ID 1 -> FragmentMetadata[1]
+// LanceFormat::explore() records the already-open Dataset's version in each
+// ColumnGroupFile. A reader can therefore query LanceDatasetCache before the
+// expensive Dataset open. Legacy files without that property resolve only the
+// latest manifest location first. Exact-version singleflight ensures concurrent
+// misses decode and retain one Dataset snapshot. The process cache owns only
+// weak pointers, so top-level reader metadata determines Dataset lifetime.
 //
-// The outer metadata entry therefore follows the top-level reader lifetime, so
-// different fragments share one Dataset without process-global state.
-// FragmentMetadata contains only immutable fragment-specific schema, row-group,
-// deletion, and memory-estimation data. BlockingFragmentReader remains
-// projection-specific and is created independently for every LanceTableReader.
+//   LanceDatasetCache
+//     `-- weak_ptr<BlockingDataset> -------------------------+
+//                                                            |
+//   ReaderImpl                                               |
+//     `-- MetadataCache                                      |
+//           `-- FormatReaderMetadataCache<LanceTableReader>  |
+//                 `-- Metadata -> Payload                    |
+//                       +-- shared_ptr<BlockingDataset> ------+
+//                       `-- FragmentMetadataCache
+//                             +-- fragment 0 -> metadata[0]
+//                             `-- fragment 1 -> metadata[1]
 //
+// BlockingFragmentReader is projection-specific and stateful, so every
+// LanceTableReader creates its own instance rather than caching it.
+class LanceDatasetCache final {
+  public:
+  using DatasetPtr = std::shared_ptr<BlockingDataset>;
+
+  struct Key {
+    uint64_t version;
+    std::string base_uri;
+    std::string filesystem_cache_key;
+
+    bool operator==(const Key&) const = default;
+    auto operator<=>(const Key&) const = default;
+  };
+
+  static LanceDatasetCache& Instance() {
+    static LanceDatasetCache cache;
+    return cache;
+  }
+
+  template <typename DatasetLoader>
+  arrow::Result<DatasetPtr> GetOrOpen(const Key& key, DatasetLoader&& load_fn) {
+    std::shared_ptr<InFlightOpen> in_flight_open;
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      auto cached = datasets_.get(key);
+      if (cached.has_value()) {
+        if (auto dataset = cached->lock()) {
+          return dataset;
+        }
+        datasets_.remove(key);
+      }
+
+      const auto existing_open = in_flight_opens_.find(key);
+      if (existing_open != in_flight_opens_.end()) {
+        in_flight_open = existing_open->second;
+        in_flight_open->cv.wait(lock, [&in_flight_open]() { return in_flight_open->done; });
+        if (!in_flight_open->status.ok()) {
+          return in_flight_open->status;
+        }
+        return in_flight_open->dataset;
+      }
+
+      in_flight_open = std::make_shared<InFlightOpen>();
+      in_flight_opens_.emplace(key, in_flight_open);
+    }
+
+    auto status = arrow::Status::OK();
+    DatasetPtr dataset;
+    try {
+      dataset = load_fn();
+      if (!dataset) {
+        status = arrow::Status::Invalid("Lance dataset loader returned null for base URI: ", key.base_uri,
+                                        ", version: ", key.version);
+      }
+    } catch (const std::exception& e) {
+      status = arrow::Status::UnknownError("Exception while opening Lance dataset for base URI ", key.base_uri,
+                                           ", version ", key.version, ": ", e.what());
+    } catch (...) {
+      status = arrow::Status::UnknownError("Unknown exception while opening Lance dataset for base URI: ", key.base_uri,
+                                           ", version: ", key.version);
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (status.ok()) {
+        try {
+          datasets_.put(key, std::weak_ptr<BlockingDataset>(dataset));
+        } catch (...) {
+          // Publication is best effort. The opened dataset must still reach all
+          // waiters so an allocation failure cannot strand the in-flight open.
+        }
+      }
+      in_flight_open->status = status;
+      in_flight_open->dataset = dataset;
+      in_flight_open->done = true;
+
+      auto in_flight_it = in_flight_opens_.find(key);
+      if (in_flight_it != in_flight_opens_.end() && in_flight_it->second == in_flight_open) {
+        in_flight_opens_.erase(in_flight_it);
+      }
+    }
+    in_flight_open->cv.notify_all();
+
+    if (!status.ok()) {
+      return status;
+    }
+    return dataset;
+  }
+
+  private:
+  struct InFlightOpen {
+    bool done = false;
+    arrow::Status status = arrow::Status::OK();
+    DatasetPtr dataset;
+    std::condition_variable cv;
+  };
+
+  // Weak entries are cheap, while this larger bound absorbs normal snapshot
+  // churn without allowing versioned keys to grow for the process lifetime.
+  static constexpr size_t kDatasetCacheCapacity = 4096;
+
+  std::mutex mutex_;
+  LRUCache<Key, std::weak_ptr<BlockingDataset>> datasets_{kDatasetCacheCapacity};
+  std::map<Key, std::shared_ptr<InFlightOpen>> in_flight_opens_;
+};
+
 // Opening a fragment creates a shallow Rust Dataset clone:
 //
 //   C++ BlockingDataset::inner (Rust Dataset)
@@ -174,15 +293,15 @@ class LanceTableReader::MetaTrait::FragmentMetadataCache final {
   std::unordered_map<uint64_t, std::shared_ptr<InFlightLoad>> in_flight_loads_;
 };
 
-LanceTableReader::LanceTableReader(const std::shared_ptr<BlockingDataset>& dataset,
+LanceTableReader::LanceTableReader(MetaTrait::MetadataPtr metadata,
                                    uint64_t fragment_id,
                                    const std::shared_ptr<arrow::Schema>& schema,
-                                   const milvus_storage::api::Properties& properties,
                                    const std::vector<std::string>& needed_columns)
-    : dataset_(dataset),
+    : dataset_(metadata->payload.dataset),
+      uri_(metadata->payload.base_uri),
       fragment_id_(fragment_id),
       read_schema_(schema),
-      properties_(properties),
+      properties_(metadata->payload.properties),
       needed_columns_(needed_columns),
       fragment_reader_(nullptr) {}
 
@@ -190,9 +309,11 @@ LanceTableReader::LanceTableReader(const std::string& uri,
                                    uint64_t fragment_id,
                                    const std::shared_ptr<arrow::Schema>& schema,
                                    const milvus_storage::api::Properties& properties,
-                                   const std::vector<std::string>& needed_columns)
+                                   const std::vector<std::string>& needed_columns,
+                                   uint64_t dataset_version)
     : uri_(uri),
       fragment_id_(fragment_id),
+      dataset_version_(dataset_version),
       read_schema_(schema),
       properties_(properties),
       needed_columns_(needed_columns),
@@ -375,13 +496,41 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
 
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, base_uri));
   const auto lance_uri = ToStandardLanceUri(base_uri);
+  const auto storage_options = ToStorageOptions(fs_config);
 
-  std::shared_ptr<BlockingDataset> dataset;
-  try {
-    dataset = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config));
-  } catch (const std::exception& e) {
-    return arrow::Status::IOError("Failed to open Lance dataset for metadata: ", e.what());
+  // New manifests persist the Dataset snapshot selected by explore(), letting
+  // this path identify the global cache entry before any heavyweight open.
+  // Legacy manifests have no version property, so resolve only Lance's latest
+  // manifest location; this fallback does not load or decode the manifest.
+  uint64_t dataset_version = 0;
+  const auto version_it = file.properties.find(kDatasetVersionProperty);
+  if (version_it != file.properties.end()) {
+    const auto [valid, version] = api::convert::convertFunc<uint64_t>(version_it->second);
+    if (!valid) {
+      return arrow::Status::Invalid("Invalid Lance dataset version for file ", file.path, ": ", version_it->second);
+    }
+    dataset_version = version;
   }
+  if (dataset_version == 0) {
+    try {
+      dataset_version = BlockingDataset::ResolveLatestVersion(lance_uri, storage_options);
+    } catch (const LanceException& e) {
+      return arrow::Status::IOError("Failed to resolve latest Lance dataset version: ", e.what());
+    }
+  }
+
+  // URI alone is insufficient: the same table can have multiple live snapshots,
+  // and one URI may resolve through filesystems with different credential
+  // identities. A cache miss opens the exact resolved version so a concurrent
+  // commit cannot change which snapshot is published under this key.
+  const LanceDatasetCache::Key dataset_cache_key{
+      .version = dataset_version,
+      .base_uri = base_uri,
+      .filesystem_cache_key = fs_config.GetCacheKey(),
+  };
+  ARROW_ASSIGN_OR_RAISE(auto dataset, LanceDatasetCache::Instance().GetOrOpen(dataset_cache_key, [&]() {
+    return BlockingDataset::Open(lance_uri, storage_options, dataset_version);
+  }));
 
   auto fragment_metadata_cache = std::make_shared<FragmentMetadataCache>();
   ARROW_ASSIGN_OR_RAISE(auto fragment_metadata, fragment_metadata_cache->get_or_load(fragment_id, [&]() {
@@ -429,14 +578,26 @@ arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::cr
                                   " != ", base_uri);
   }
 
+  // Verify that the file's Dataset version matches the cached metadata.
+  const auto version_it = file.properties.find(kDatasetVersionProperty);
+  if (version_it != file.properties.end()) {
+    const auto [valid, version] = api::convert::convertFunc<uint64_t>(version_it->second);
+    if (!valid) {
+      return arrow::Status::Invalid("Invalid Lance dataset version for file ", file.path, ": ", version_it->second);
+    }
+    if (version != 0 && version != metadata->payload.dataset->Version()) {
+      return arrow::Status::Invalid("Lance dataset version does not match cached metadata for file ", file.path, ": ",
+                                    version, " != ", metadata->payload.dataset->Version());
+    }
+  }
+
   ARROW_ASSIGN_OR_RAISE(
       auto fragment_metadata, metadata->payload.fragment_metadata_cache->get_or_load(fragment_id, [&]() {
         return load_fragment_metadata(fragment_id, metadata->payload.properties, metadata->payload.dataset);
       }));
 
-  auto reader = std::make_shared<LanceTableReader>(metadata->payload.dataset, fragment_id, read_schema,
-                                                   metadata->payload.properties, needed_columns);
-  reader->uri_ = metadata->payload.base_uri;
+  auto reader =
+      std::shared_ptr<LanceTableReader>(new LanceTableReader(metadata, fragment_id, read_schema, needed_columns));
   reader->file_schema_ = fragment_metadata->file_schema;
   reader->logical_chunk_rows_ = fragment_metadata->logical_chunk_rows;
   reader->num_deletions_ = fragment_metadata->num_deletions;
@@ -468,12 +629,31 @@ arrow::Status LanceTableReader::open() {
     // (scheme://bucket/key) before handing to Lance, whose object_store treats
     // the host as the bucket.
     ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties_, uri_));
-    auto lance_uri = ToStandardLanceUri(uri_);
+    const auto lance_uri = ToStandardLanceUri(uri_);
+    const auto storage_options = ToStorageOptions(fs_config);
     LOG_STORAGE_DEBUG_ << "uri=" << uri_ << ", lance_uri=" << lance_uri << ", alias=" << fs_config.alias
                        << ", role_arn=" << (fs_config.role_arn.empty() ? "(empty)" : fs_config.role_arn)
                        << ", external_id_set=" << (fs_config.external_id.empty() ? "false" : "true")
                        << ", use_iam=" << fs_config.use_iam;
-    dataset_ = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config));
+
+    // Version zero means latest, but it cannot identify a stable global cache
+    // entry. Resolve only the latest manifest location before the cache lookup.
+    if (dataset_version_ == 0) {
+      try {
+        dataset_version_ = BlockingDataset::ResolveLatestVersion(lance_uri, storage_options);
+      } catch (const LanceException& e) {
+        return arrow::Status::IOError("Failed to resolve latest Lance dataset version: ", e.what());
+      }
+    }
+
+    const LanceDatasetCache::Key dataset_cache_key{
+        .version = dataset_version_,
+        .base_uri = uri_,
+        .filesystem_cache_key = fs_config.GetCacheKey(),
+    };
+    ARROW_ASSIGN_OR_RAISE(dataset_, LanceDatasetCache::Instance().GetOrOpen(dataset_cache_key, [&]() {
+      return BlockingDataset::Open(lance_uri, storage_options, dataset_version_);
+    }));
   }
 
   // Lance 7 exposes the current dataset schema through FileFragment::schema().

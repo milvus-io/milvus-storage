@@ -164,12 +164,11 @@ struct PropertyInfo {
 #define PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES "reader.vortex.split_row_indices"
 #define PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY "reader.async.task_split_strategy"
 
-// --- Define Iceberg property keys ---
-#define PROPERTY_ICEBERG_SNAPSHOT_ID "iceberg.snapshot_id"
+// --- Define external table common property keys ---
+#define PROPERTY_READER_EXTTABLE_SNAPSHOT_ID "reader.exttable.snapshot_id"
 
 // --- Define Paimon property keys ---
 #define PROPERTY_PAIMON_SCAN_MODE "paimon.scan_mode"
-#define PROPERTY_PAIMON_SNAPSHOT_ID "paimon.snapshot_id"
 
 // --- Define Transaction property keys ---
 #define PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES "transaction.commit.num-retries"

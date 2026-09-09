@@ -24,6 +24,9 @@
 
 namespace milvus_storage::lance {
 
+// Lance-private ColumnGroupFile property written by LanceFormat::explore().
+inline constexpr const char* kDatasetVersionProperty = "dataset_version";
+
 /// Convert ArrowFileSystemConfig to Lance storage options.
 /// Key format: aws_access_key_id, aws_secret_access_key, aws_region, aws_endpoint, etc.
 /// @throws std::runtime_error for unsupported providers (Tencent, Huawei)

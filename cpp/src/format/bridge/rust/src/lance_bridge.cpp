@@ -23,16 +23,30 @@ void ReplaceLanceRuntime(uint32_t num_threads) {}
 
 using milvus_storage::ConvertStorageOptions;
 
-std::shared_ptr<BlockingDataset> BlockingDataset::Open(const std::string& uri, const StorageOptions& storage_options) {
+std::shared_ptr<BlockingDataset> BlockingDataset::Open(const std::string& uri,
+                                                       const StorageOptions& storage_options,
+                                                       uint64_t version) {
   try {
     rust::Vec<rust::String> keys, values;
     ConvertStorageOptions(storage_options, keys, values);
     return std::make_shared<BlockingDataset>(
-        ffi::open_dataset(rust::Str(uri.data(), uri.length()), std::move(keys), std::move(values)));
+        ffi::open_dataset(rust::Str(uri.data(), uri.length()), std::move(keys), std::move(values), version));
   } catch (const rust::cxxbridge1::Error& e) {
     throw LanceException(e.what());
   }
 }
+
+uint64_t BlockingDataset::ResolveLatestVersion(const std::string& uri, const StorageOptions& storage_options) {
+  try {
+    rust::Vec<rust::String> keys, values;
+    ConvertStorageOptions(storage_options, keys, values);
+    return ffi::resolve_latest_dataset_version(rust::Str(uri.data(), uri.length()), std::move(keys), std::move(values));
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw LanceException(e.what());
+  }
+}
+
+uint64_t BlockingDataset::Version() const { return impl_->version(); }
 
 std::unique_ptr<BlockingDataset> BlockingDataset::OpenUnique(const std::string& uri,
                                                              const StorageOptions& storage_options) {
@@ -40,7 +54,7 @@ std::unique_ptr<BlockingDataset> BlockingDataset::OpenUnique(const std::string& 
     rust::Vec<rust::String> keys, values;
     ConvertStorageOptions(storage_options, keys, values);
     return std::make_unique<BlockingDataset>(
-        ffi::open_dataset(rust::Str(uri.data(), uri.length()), std::move(keys), std::move(values)));
+        ffi::open_dataset(rust::Str(uri.data(), uri.length()), std::move(keys), std::move(values), 0));
   } catch (const rust::cxxbridge1::Error& e) {
     throw LanceException(e.what());
   }

@@ -26,8 +26,7 @@ arrow::Result<std::vector<api::ColumnGroupFile>> IcebergFormat::explore(const st
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, explore_dir.c_str()));
   auto storage_options = iceberg::ToStorageOptions(fs_config);
 
-  ARROW_ASSIGN_OR_RAISE(auto snapshot_str, api::GetValue<std::string>(properties, PROPERTY_ICEBERG_SNAPSHOT_ID));
-  int64_t snapshot_id = std::stoll(snapshot_str);
+  ARROW_ASSIGN_OR_RAISE(auto snapshot_id, api::GetValue<int64_t>(properties, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID));
 
   // Convert Milvus URI (scheme://address/bucket/path) to scheme://bucket/path.
   // For S3 this is the final format; for Azure ABFSS, the Rust bridge further

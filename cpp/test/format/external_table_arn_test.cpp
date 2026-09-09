@@ -274,7 +274,7 @@ TEST_P(ExternalTableArnTest, ReadWithArnRole) {
       {"extfs.arn.role_arn", role_arn_},
   };
   if (format == LOON_FORMAT_ICEBERG_TABLE) {
-    props.emplace_back(PROPERTY_ICEBERG_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id));
+    props.emplace_back(PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id));
   }
 
   std::vector<const char*> c_keys, c_values;
@@ -634,7 +634,7 @@ TEST_P(ExternalTableGcpImpersonationTest, ReadWithImpersonation) {
       {"extfs.gcpsa.gcp_target_service_account", target_sa_},
   };
   if (format == LOON_FORMAT_ICEBERG_TABLE) {
-    props.emplace_back(PROPERTY_ICEBERG_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id));
+    props.emplace_back(PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id));
   }
 
   std::vector<const char*> c_keys, c_values;
@@ -1007,7 +1007,7 @@ TEST_P(ExternalTableAzureArnTest, ReadWithBrokeredSas) {
       {"extfs.azsas.use_ssl", "true"},
   };
   if (format == LOON_FORMAT_ICEBERG_TABLE) {
-    props.emplace_back(PROPERTY_ICEBERG_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id));
+    props.emplace_back(PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id));
   }
 
   std::vector<const char*> c_keys, c_values;
@@ -1115,7 +1115,7 @@ TEST_P(ExternalTableAzureArnTest, ProviderCacheFetchesBrokeredSasOnce) {
     ASSERT_EQ(total_rows, static_cast<int64_t>(num_rows));
   } else {
     auto snapshot_id = std::to_string(result.iceberg_snapshot_id);
-    api::SetValue(cache_read_props, PROPERTY_ICEBERG_SNAPSHOT_ID, snapshot_id.c_str());
+    api::SetValue(cache_read_props, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, snapshot_id.c_str());
 
     auto storage_options = iceberg::ToStorageOptions(fs_config);
     auto cache_key = storage_options.find("milvus_fs_cache_key");
@@ -1279,6 +1279,21 @@ class ExternalTableAliyunArnTest : public ::testing::Test {
     FilesystemCache::getInstance().clean();
   }
 
+  // FFI properties payload shared by all four formats. Iceberg additionally
+  // needs PROPERTY_READER_EXTTABLE_SNAPSHOT_ID; its test appends it.
+  std::vector<std::pair<std::string, std::string>> BaseProps() const {
+    std::vector<std::pair<std::string, std::string>> props = {
+        {PROPERTY_FS_STORAGE_TYPE, "remote"},    {PROPERTY_FS_CLOUD_PROVIDER, our_cloud_provider_},
+        {PROPERTY_FS_ADDRESS, our_address_},     {PROPERTY_FS_BUCKET_NAME, our_bucket_},
+        {PROPERTY_FS_REGION, our_region_},       {PROPERTY_FS_ACCESS_KEY_ID, our_ak_},
+        {PROPERTY_FS_ACCESS_KEY_VALUE, our_sk_}, {PROPERTY_FS_USE_SSL, "true"},
+        {"extfs.arn.storage_type", "remote"},    {"extfs.arn.cloud_provider", kCloudProviderAliyun},
+        {"extfs.arn.address", address_},         {"extfs.arn.bucket_name", arn_bucket_},
+        {"extfs.arn.region", region_},           {"extfs.arn.use_ssl", "true"},
+        {"extfs.arn.role_arn", role_arn_},
+    };
+    return props;
+  }
   arrow::Result<ArnWriteResult> CreateLanceTable(uint64_t num_rows) {
     ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
     ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
@@ -1488,7 +1503,7 @@ TEST_F(ExternalTableAliyunArnTest, ReadLanceWithArnRole) {
 //   read   — FormatReader drives `AliyunOssStorage` for each data file.
 //
 // Parallels ReadLanceWithArnRole step-for-step; the only format-specific bit
-// is passing PROPERTY_ICEBERG_SNAPSHOT_ID so loon_exttable_explore pins the
+// is passing PROPERTY_READER_EXTTABLE_SNAPSHOT_ID so loon_exttable_explore pins the
 // scan to the snapshot we just wrote.
 TEST_F(ExternalTableAliyunArnTest, ReadIcebergWithArnRole) {
   const uint64_t num_rows = 100;
@@ -1500,28 +1515,12 @@ TEST_F(ExternalTableAliyunArnTest, ReadIcebergWithArnRole) {
   std::cout << "[Aliyun ARN Test] Role ARN: " << role_arn_ << std::endl;
 
   // Step 2: Build properties — our-side AKSK for manifest storage, customer-side
-  // role_arn for reading. Iceberg also needs PROPERTY_ICEBERG_SNAPSHOT_ID so the
+  // role_arn for reading. Iceberg also needs PROPERTY_READER_EXTTABLE_SNAPSHOT_ID so the
   // Rust bridge pins the scan to our freshly-written snapshot.
   auto manifest_base = test_base_ + "/manifest";
 
-  std::vector<std::pair<std::string, std::string>> props = {
-      {PROPERTY_FS_STORAGE_TYPE, "remote"},
-      {PROPERTY_FS_CLOUD_PROVIDER, our_cloud_provider_},
-      {PROPERTY_FS_ADDRESS, our_address_},
-      {PROPERTY_FS_BUCKET_NAME, our_bucket_},
-      {PROPERTY_FS_REGION, our_region_},
-      {PROPERTY_FS_ACCESS_KEY_ID, our_ak_},
-      {PROPERTY_FS_ACCESS_KEY_VALUE, our_sk_},
-      {PROPERTY_FS_USE_SSL, "true"},
-      {"extfs.arn.storage_type", "remote"},
-      {"extfs.arn.cloud_provider", kCloudProviderAliyun},
-      {"extfs.arn.address", address_},
-      {"extfs.arn.bucket_name", arn_bucket_},
-      {"extfs.arn.region", region_},
-      {"extfs.arn.use_ssl", "true"},
-      {"extfs.arn.role_arn", role_arn_},
-      {PROPERTY_ICEBERG_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id)},
-  };
+  auto props = BaseProps();
+  props.emplace_back(PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id));
 
   std::vector<const char*> c_keys, c_values;
   c_keys.reserve(props.size());
@@ -1927,7 +1926,7 @@ class ExternalTableAliyunOIDCArnTest : public ::testing::Test {
   };
 
   // FFI properties payload shared by all four formats. Iceberg additionally
-  // needs PROPERTY_ICEBERG_SNAPSHOT_ID; callers append.
+  // needs PROPERTY_READER_EXTTABLE_SNAPSHOT_ID; callers append.
   std::vector<std::pair<std::string, std::string>> BaseProps() const {
     std::vector<std::pair<std::string, std::string>> props = {
         {PROPERTY_FS_STORAGE_TYPE, "remote"},    {PROPERTY_FS_CLOUD_PROVIDER, our_cloud_provider_},
@@ -2181,7 +2180,7 @@ TEST_F(ExternalTableAliyunOIDCArnTest, ReadIcebergWithOIDCChain) {
 
   auto manifest_base = test_base_ + "/manifest";
   auto props = BaseProps();
-  props.emplace_back(PROPERTY_ICEBERG_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id));
+  props.emplace_back(PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id));
 
   std::vector<const char*> c_keys, c_values;
   c_keys.reserve(props.size());
@@ -2246,7 +2245,8 @@ TEST_F(ExternalTableAliyunOIDCArnTest, IcebergFactoryCacheHitDoesNotReloadOidcTo
   auto session_name = "iceberg-cache-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
   auto cache_read_props = read_props_;
   api::SetValue(cache_read_props, "extfs.arn.session_name", session_name.c_str());
-  api::SetValue(cache_read_props, PROPERTY_ICEBERG_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id).c_str());
+  api::SetValue(cache_read_props, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID,
+                std::to_string(result.iceberg_snapshot_id).c_str());
 
   ASSERT_AND_ASSIGN(auto fs_config, FilesystemCache::resolve_config(cache_read_props, result.explore_dir.c_str()));
   auto storage_options = iceberg::ToStorageOptions(fs_config);
@@ -2256,7 +2256,7 @@ TEST_F(ExternalTableAliyunOIDCArnTest, IcebergFactoryCacheHitDoesNotReloadOidcTo
 
   auto props = BaseProps();
   props.emplace_back("extfs.arn.session_name", session_name);
-  props.emplace_back(PROPERTY_ICEBERG_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id));
+  props.emplace_back(PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id));
   std::vector<const char*> c_keys, c_values;
   c_keys.reserve(props.size());
   c_values.reserve(props.size());

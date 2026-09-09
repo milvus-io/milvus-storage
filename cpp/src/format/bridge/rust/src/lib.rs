@@ -106,11 +106,22 @@ pub mod lance_ffi {
         /// ObjectStore captured from the dataset that created that scheduler. This
         /// method therefore must not be interpreted as per-dataset accounting.
         pub fn io_stats_incremental(self: &BlockingDataset) -> LanceIOStats;
+        /// Open the latest Dataset when version is zero, or the exact snapshot
+        /// identified by a non-zero version.
         pub fn open_dataset(
             uri: &str,
             storage_options_keys: Vec<String>,
             storage_options_values: Vec<String>,
+            version: u64,
         ) -> Result<Box<BlockingDataset>>;
+        /// Resolve only the latest manifest location and return its version.
+        /// This does not load or decode the manifest, construct a Dataset, or
+        /// initialize a ScanScheduler.
+        pub fn resolve_latest_dataset_version(
+            uri: &str,
+            storage_options_keys: Vec<String>,
+            storage_options_values: Vec<String>,
+        ) -> Result<u64>;
         pub unsafe fn write_dataset(
             uri: &str,
             stream_ptr: *mut u8,
@@ -120,6 +131,7 @@ pub mod lance_ffi {
         ) -> Result<Box<BlockingDataset>>;
 
         pub unsafe fn write_stream(self: &mut BlockingDataset, stream_ptr: *mut u8) -> Result<()>;
+        pub fn version(self: &BlockingDataset) -> u64;
         pub fn get_all_fragment_ids(self: &BlockingDataset) -> Vec<u64>;
         pub fn dataset_delete_rows(dataset: &mut BlockingDataset, predicate: &str) -> Result<()>;
         pub fn get_fragment_deletion_positions(

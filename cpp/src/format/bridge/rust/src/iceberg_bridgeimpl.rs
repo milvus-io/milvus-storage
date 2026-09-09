@@ -409,8 +409,14 @@ pub fn iceberg_plan_files(
                 .await?;
         let table = table.into_table();
 
-        // Build scan pinned to the specified snapshot
-        let scan = table.scan().snapshot_id(snapshot_id).build()?;
+        // A negative snapshot ID selects the current snapshot.
+        let scan_builder = table.scan();
+        let scan_builder = if snapshot_id < 0 {
+            scan_builder
+        } else {
+            scan_builder.snapshot_id(snapshot_id)
+        };
+        let scan = scan_builder.build()?;
 
         // Plan files — returns one FileScanTask per data file
         let tasks: Vec<FileScanTask> = scan.plan_files().await?.try_collect().await?;

@@ -69,7 +69,11 @@ enum class LanceDataStorageFormat : uint8_t {
 
 class BlockingDataset {
   public:
-  static std::shared_ptr<BlockingDataset> Open(const std::string& uri, const StorageOptions& storage_options = {});
+  static std::shared_ptr<BlockingDataset> Open(const std::string& uri,
+                                               const StorageOptions& storage_options = {},
+                                               uint64_t version = 0 /* 0 means latest snapshot */);
+
+  static uint64_t ResolveLatestVersion(const std::string& uri, const StorageOptions& storage_options = {});
 
   static std::unique_ptr<BlockingDataset> OpenUnique(const std::string& uri,
                                                      const StorageOptions& storage_options = {});
@@ -90,6 +94,8 @@ class BlockingDataset {
   BlockingDataset& operator=(const BlockingDataset&) = delete;
 
   void DeleteRows(const std::string& predicate);
+
+  [[nodiscard]] uint64_t Version() const;
 
   std::vector<uint64_t> GetAllFragmentIds() const;
 
