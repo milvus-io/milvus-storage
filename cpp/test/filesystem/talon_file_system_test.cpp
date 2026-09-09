@@ -437,6 +437,46 @@ INSTANTIATE_TEST_SUITE_P(CloudProviders,
                          TalonProviderEqualityTest,
                          ::testing::Values(kCloudProviderAWS, kCloudProviderAzure));
 
+TEST(TalonBridgeErrorTest, PreservesClassificationAndDiagnostics) {
+  const std::string message =
+      "all replicas failed after refresh; last worker 10.0.0.8:9000: worker error: Timeout: backend deadline exceeded";
+  for (const auto& [talon_code, storage_code] : {
+           std::pair{talon::ffi::TalonErrorCode::Timeout, ExtendStatusCode::StorageTransientTimeout},
+           std::pair{talon::ffi::TalonErrorCode::Unavailable, ExtendStatusCode::StorageTransientService},
+           std::pair{talon::ffi::TalonErrorCode::RateLimited, ExtendStatusCode::StorageTransientThrottling},
+           std::pair{talon::ffi::TalonErrorCode::VersionMismatch, ExtendStatusCode::AwsErrorPreConditionFailed},
+           std::pair{talon::ffi::TalonErrorCode::NonRetryable, ExtendStatusCode::AwsErrorNonRetryable},
+       }) {
+    const auto status =
+        talon::internal::ToArrowIoResult("read", static_cast<int32_t>(talon_code), 0, message.c_str()).status();
+    const auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), storage_code);
+    EXPECT_EQ(detail->retryable(), talon_code == talon::ffi::TalonErrorCode::Timeout ||
+                                       talon_code == talon::ffi::TalonErrorCode::Unavailable ||
+                                       talon_code == talon::ffi::TalonErrorCode::RateLimited);
+    EXPECT_NE(status.message().find(message), std::string::npos);
+  }
+}
+
+TEST(TalonBridgeErrorTest, HandlesInvalidMissingAndUnknownErrors) {
+  EXPECT_TRUE(talon::internal::ToArrowIoResult(
+                  "read", static_cast<int32_t>(talon::ffi::TalonErrorCode::InvalidArgument), 0, "bad range")
+                  .status()
+                  .IsInvalid());
+  const auto missing = talon::internal::ToArrowIoResult(
+                           "stat", static_cast<int32_t>(talon::ffi::TalonErrorCode::NotFound), 0, "missing object")
+                           .status();
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(missing), ENOENT);
+  const auto unknown = talon::internal::ToArrowIoResult("read", 99, 0, nullptr).status();
+  EXPECT_TRUE(unknown.IsIOError());
+  EXPECT_EQ(unknown.detail(), nullptr);
+  EXPECT_NE(unknown.message().find("unknown Talon error"), std::string::npos);
+  EXPECT_EQ(talon::internal::ToArrowIoResult("read", 0, 42, nullptr).ValueOrDie(), 42);
+  EXPECT_TRUE(
+      talon::internal::ToArrowIoResult("stat", 0, std::numeric_limits<uint64_t>::max(), nullptr).status().IsIOError());
+}
+
 TEST(TalonBridgeTest, MapsClientCreationErrorAndPreservesTalonMessage) {
   const auto result = talon::TalonClient::Make("127.0.0.1:7000", 0);
 
@@ -464,7 +504,7 @@ TEST(TalonBridgeTest, MapsAsyncErrorAndPreservesTalonMessage) {
   const auto result = reader.ReadAtAsync(0, std::numeric_limits<uint64_t>::max(), nullptr).result();
 
   ASSERT_FALSE(result.ok());
-  EXPECT_TRUE(result.status().IsIOError()) << result.status().ToString();
+  EXPECT_TRUE(result.status().IsInvalid()) << result.status().ToString();
   EXPECT_NE(result.status().message().find("Failed to read Talon object"), std::string::npos);
   EXPECT_NE(result.status().message().find("Talon read length exceeds isize::MAX"), std::string::npos);
 }

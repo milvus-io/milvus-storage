@@ -15,14 +15,17 @@
 #include "talon_bridge.h"
 
 #include <exception>
+#include <cerrno>
 #include <limits>
 #include <memory>
 #include <string>
 #include <utility>
 
 #include <arrow/status.h>
+#include <arrow/util/io_util.h>
 
 #include "bridge_util.h"
+#include "milvus-storage/common/extend_status.h"
 
 namespace milvus_storage::talon {
 namespace {
@@ -48,6 +51,10 @@ struct TalonIoCompletion {
   const char* const operation;
 };
 
+}  // namespace
+
+namespace internal {
+
 arrow::Result<int64_t> ToArrowIoResult(const char* operation,
                                        int32_t error_code,
                                        uint64_t value,
@@ -60,11 +67,30 @@ arrow::Result<int64_t> ToArrowIoResult(const char* operation,
   }
 
   const std::string message = error_msg == nullptr ? "unknown Talon error" : error_msg;
-  // FIXME: Map Talon's structured error kinds to Arrow errno details and
-  // ExtendStatus after Talon preserves them through the complete stat/read
-  // path. Until then, do not infer retryability from incomplete error codes.
-  return arrow::Status::IOError(operation, " (Talon error code ", error_code, "): ", message);
+  auto status = arrow::Status::IOError(operation, " (Talon error code ", error_code, "): ", message);
+  switch (static_cast<ffi::TalonErrorCode>(error_code)) {
+    case ffi::TalonErrorCode::InvalidArgument:
+      return arrow::Status::Invalid(status.message());
+    case ffi::TalonErrorCode::NotFound:
+      return status.WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
+    case ffi::TalonErrorCode::Timeout:
+      return MakeExtendError(ExtendStatusCode::StorageTransientTimeout, status.message(), message);
+    case ffi::TalonErrorCode::Unavailable:
+      return MakeExtendError(ExtendStatusCode::StorageTransientService, status.message(), message);
+    case ffi::TalonErrorCode::RateLimited:
+      return MakeExtendError(ExtendStatusCode::StorageTransientThrottling, status.message(), message);
+    case ffi::TalonErrorCode::VersionMismatch:
+      return MakeExtendError(ExtendStatusCode::AwsErrorPreConditionFailed, status.message(), message);
+    case ffi::TalonErrorCode::NonRetryable:
+      return MakeExtendError(ExtendStatusCode::AwsErrorNonRetryable, status.message(), message);
+    default:
+      return status;
+  }
 }
+
+}  // namespace internal
+
+namespace {
 
 void MarkTalonCallbackError(arrow::Future<int64_t>& future, const char* operation, const char* message) noexcept {
   try {
@@ -82,7 +108,7 @@ void TalonIoCallbackImpl(void* context, int32_t error_code, uint64_t value, cons
   std::unique_ptr<char, decltype(&talon_free_error_string)> error(const_cast<char*>(error_msg),
                                                                   &talon_free_error_string);
   try {
-    completion->future.MarkFinished(ToArrowIoResult(completion->operation, error_code, value, error.get()));
+    completion->future.MarkFinished(internal::ToArrowIoResult(completion->operation, error_code, value, error.get()));
   } catch (const std::exception& exception) {
     MarkTalonCallbackError(completion->future, completion->operation, exception.what());
   } catch (...) {
