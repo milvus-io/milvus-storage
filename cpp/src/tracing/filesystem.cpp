@@ -61,7 +61,7 @@ class TracedFile : public arrow::io::RandomAccessFile {
   }
   std::vector<arrow::Future<std::shared_ptr<arrow::Buffer>>> ReadManyAsync(
       const arrow::io::IOContext& context, const std::vector<arrow::io::ReadRange>& ranges) override {
-    if (!Capture())
+    if (!HasContext())
       return file_->ReadManyAsync(context, ranges);
     OperationTrace trace("storage.fs.read", false, true);
     ContextScope scope(trace.context());
@@ -110,8 +110,13 @@ class TracedFile : public arrow::io::RandomAccessFile {
   protected:
   template <typename F>
   auto ReadSync(int64_t position, int64_t nbytes, F&& fn) -> decltype(fn()) {
-    if (!Capture())
+    if (!HasContext())
       return fn();
+    return ReadSyncTraced(position, nbytes, std::forward<F>(fn));
+  }
+  // Keep the recording path out of the common forwarding path's stack frame.
+  template <typename F>
+  FOLLY_NOINLINE auto ReadSyncTraced(int64_t position, int64_t nbytes, F&& fn) -> decltype(fn()) {
     OperationTrace trace("storage.fs.read", false, true);
     ContextScope scope(trace.context());
     Attributes(trace, position, nbytes);
@@ -129,8 +134,12 @@ class TracedFile : public arrow::io::RandomAccessFile {
   }
   template <typename F>
   auto ReadFuture(int64_t position, int64_t nbytes, F&& fn) -> decltype(fn()) {
-    if (!Capture())
+    if (!HasContext())
       return fn();
+    return ReadFutureTraced(position, nbytes, std::forward<F>(fn));
+  }
+  template <typename F>
+  FOLLY_NOINLINE auto ReadFutureTraced(int64_t position, int64_t nbytes, F&& fn) -> decltype(fn()) {
     OperationTrace trace("storage.fs.read", false, true);
     ContextScope scope(trace.context());
     Attributes(trace, position, nbytes);

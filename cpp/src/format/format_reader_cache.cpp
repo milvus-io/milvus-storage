@@ -78,12 +78,14 @@ arrow::Result<typename FormatReaderMetadataCache<ReaderT>::MetadataPtr> FormatRe
     owns_in_flight_load = inserted;
     lookup.Attribute("storage.cache", inserted ? "miss" : "in_flight");
     lookup.Finish(arrow::Status::OK());
-    if (inserted)
+    if (inserted && tracing::HasContext())
       in_flight_load->trace = std::make_shared<tracing::OperationTrace>("storage.metadata.load", true);
     if (!inserted && in_flight_load->leader_type == InFlightLoad::kSync) {
       // condition_variable::wait releases mutex_ while sleeping, so other keys
       // and the leader can still update the cache. The current thread remains blocked.
-      tracing::OperationTrace wait("storage.metadata.wait", false, false, in_flight_load->trace->span_context());
+      tracing::OperationTrace wait("storage.metadata.wait", false, false,
+                                   in_flight_load->trace ? in_flight_load->trace->span_context()
+                                                         : opentelemetry::trace::SpanContext::GetInvalid());
       in_flight_load->cv.wait(lock, [&in_flight_load]() { return in_flight_load->done; });
       wait.Finish(in_flight_load->status);
       if (!in_flight_load->status.ok()) {
@@ -99,10 +101,14 @@ arrow::Result<typename FormatReaderMetadataCache<ReaderT>::MetadataPtr> FormatRe
 
   // Run the loader outside mutex_ so unrelated cache operations are not serialized
   // behind metadata I/O. The leader publishes both success and failure below.
-  auto load_trace = owns_in_flight_load ? in_flight_load->trace
-                                        : std::make_shared<tracing::OperationTrace>("storage.metadata.load", true);
-  load_trace->Start();
-  tracing::ContextScope load_scope(load_trace->context());
+  auto load_trace = in_flight_load->trace;
+  if (!owns_in_flight_load) {
+    load_trace =
+        tracing::HasContext() ? std::make_shared<tracing::OperationTrace>("storage.metadata.load", true) : nullptr;
+  }
+  if (load_trace)
+    load_trace->Start();
+  tracing::ContextScope load_scope(load_trace ? load_trace->context() : nullptr);
   auto status = arrow::Status::OK();
   MetadataPtr metadata;
   try {
@@ -120,7 +126,8 @@ arrow::Result<typename FormatReaderMetadataCache<ReaderT>::MetadataPtr> FormatRe
     status = arrow::Status::UnknownError("Unknown exception while loading format reader metadata");
   }
 
-  load_trace->Finish(status);
+  if (load_trace)
+    load_trace->Finish(status);
 
   // The sync leader owns the InFlightLoad and must publish its result to all
   // followers. An independent sync load must leave the async leader's marker
@@ -179,17 +186,23 @@ FormatReaderMetadataCache<ReaderT>::get_or_open_async(
       lookup.Attribute("storage.cache", inserted ? "miss" : "in_flight");
       lookup.Finish(arrow::Status::OK());
       if (!inserted) {
-        tracing::OperationTrace wait("storage.metadata.wait", false, false, in_flight_load->trace->span_context());
+        if (!tracing::HasContext())
+          return in_flight_load->async_result.getSemiFuture();
+        tracing::OperationTrace wait("storage.metadata.wait", false, false,
+                                     in_flight_load->trace ? in_flight_load->trace->span_context()
+                                                           : opentelemetry::trace::SpanContext::GetInvalid());
         return in_flight_load->async_result.getSemiFuture().deferValue([wait](MetadataResult result) {
           wait.Finish(result.status());
           return result;
         });
       }
-      in_flight_load->trace = std::make_shared<tracing::OperationTrace>("storage.metadata.load", true);
+      if (tracing::HasContext())
+        in_flight_load->trace = std::make_shared<tracing::OperationTrace>("storage.metadata.load", true);
     }
 
-    in_flight_load->trace->Start();
-    tracing::ContextScope load_scope(in_flight_load->trace->context());
+    if (in_flight_load->trace)
+      in_flight_load->trace->Start();
+    tracing::ContextScope load_scope(in_flight_load->trace ? in_flight_load->trace->context() : nullptr);
     // Start the async loader outside mutex_. Its continuation normalizes and
     // publishes the result through the same path used by the synchronous leader.
     try {
@@ -261,7 +274,8 @@ typename FormatReaderMetadataCache<ReaderT>::MetadataResult FormatReaderMetadata
     }
   }
 
-  in_flight_load->trace->Finish(status);
+  if (in_flight_load->trace)
+    in_flight_load->trace->Finish(status);
 
   // Notify blocking synchronous waiters only after releasing mutex_.
   in_flight_load->cv.notify_all();

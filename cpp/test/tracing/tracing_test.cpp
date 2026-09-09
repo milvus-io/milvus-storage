@@ -14,6 +14,7 @@
 #include <opentelemetry/sdk/trace/samplers/parent.h>
 #include <opentelemetry/sdk/trace/samplers/always_on.h>
 #include "tracing/runtime.h"
+#include "tracing_bridge.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/writer.h"
 #include "test_env.h"
@@ -111,6 +112,70 @@ TEST_F(StorageTracingTest, UnsampledParentIsNotPromotedToRoot) {
   EXPECT_FALSE(operation.span_context().IsSampled());
   operation.Finish(arrow::Status::OK());
   EXPECT_TRUE(data->GetSpans().empty());
+}
+TEST_F(StorageTracingTest, UnsampledFlagStillRespectsHostAlwaysOnSampler) {
+  auto parent = Parent(1);
+  parent.trace_flags = 0;
+  auto scope = AttachParent(parent);
+  EXPECT_TRUE(Work().ok());
+  auto spans = data->GetSpans();
+  ASSERT_EQ(spans.size(), 1);
+  EXPECT_TRUE(spans[0]->GetSpanContext().IsSampled());
+  EXPECT_EQ(spans[0]->GetParentSpanId(), ExpectedSpan(1));
+}
+TEST_F(StorageTracingTest, ContextPresenceMasksAndRestoresWithoutChangingOtherKeys) {
+  struct OtherData : folly::RequestData {
+    bool hasCallback() override { return false; }
+  };
+  folly::RequestContextScopeGuard request_scope;
+  const folly::RequestToken key("storage-test.other-key");
+  auto* original = new OtherData;
+  folly::RequestContext::get()->setContextData(key, std::unique_ptr<OtherData>(original));
+  EXPECT_FALSE(HasContext());
+  {
+    auto parent = AttachParent(Parent(1));
+    EXPECT_TRUE(HasContext());
+    {
+      ContextScope same(Capture());
+      EXPECT_TRUE(HasContext());
+      EXPECT_EQ(folly::RequestContext::get()->getContextData(key), original);
+      folly::RequestContext::get()->clearContextData(key);
+      folly::RequestContext::get()->setContextData(key, std::make_unique<OtherData>());
+    }
+    EXPECT_EQ(folly::RequestContext::get()->getContextData(key), original);
+    {
+      ContextScope masked(nullptr);
+      EXPECT_FALSE(HasContext());
+    }
+    EXPECT_TRUE(HasContext());
+  }
+  EXPECT_FALSE(HasContext());
+  EXPECT_EQ(folly::RequestContext::get()->getContextData(key), original);
+}
+TEST_F(StorageTracingTest, OpaqueRustAttachmentOwnsSnapshotAndRestoresForeignParent) {
+  namespace ffi = milvus_storage::rust_bridge::ffi;
+  auto context = [&] {
+    auto parent = AttachParent(Parent(1));
+    return ffi::capture_trace_context();
+  }();
+  std::thread worker([&] {
+    auto parent = AttachParent(Parent(2));
+    {
+      auto attachment = ffi::attach_trace_context(context);
+      EXPECT_TRUE(Work("captured").ok());
+    }
+    {
+      auto attachment = ffi::attach_trace_context(nullptr);
+      EXPECT_FALSE(HasContext());
+      EXPECT_TRUE(Work("masked").ok());
+    }
+    EXPECT_TRUE(Work("restored").ok());
+  });
+  worker.join();
+  auto spans = data->GetSpans();
+  ASSERT_EQ(spans.size(), 2);
+  EXPECT_EQ(spans[0]->GetTraceId(), ExpectedTrace(1));
+  EXPECT_EQ(spans[1]->GetTraceId(), ExpectedTrace(2));
 }
 TEST_F(StorageTracingTest, LazyFutureCapturesParentAndProviderBeforeConsumption) {
   auto future = [&] {
@@ -234,6 +299,30 @@ TEST_F(StorageTracingTest, FinishRacesExportExactlyOnce) {
   auto spans = data->GetSpans();
   ASSERT_EQ(spans.size(), 1);
   EXPECT_EQ(spans[0]->GetStatus(), ot::StatusCode::kError);
+}
+TEST_F(StorageTracingTest, ConcurrentLazyStartPublishesOneCompleteSpan) {
+  auto scope = AttachParent(Parent(1));
+  OperationTrace operation("storage.read", true);
+  std::promise<void> start;
+  auto ready = start.get_future().share();
+  std::vector<std::thread> threads;
+  for (int i = 0; i < 8; ++i) {
+    threads.emplace_back([operation, ready] {
+      ready.wait();
+      for (int j = 0; j < 50; ++j) {
+        operation.Start();
+        EXPECT_EQ(operation.span_context().trace_id(), ExpectedTrace(1));
+        operation.Attribute("published", int64_t{1});
+      }
+    });
+  }
+  start.set_value();
+  for (auto& thread : threads) thread.join();
+  operation.Finish(arrow::Status::OK());
+  auto spans = data->GetSpans();
+  ASSERT_EQ(spans.size(), 1);
+  EXPECT_EQ(spans[0]->GetParentSpanId(), ExpectedSpan(1));
+  EXPECT_EQ(opentelemetry::nostd::get<int64_t>(spans[0]->GetAttributes().at("published")), 1);
 }
 class ControlledFile final : public arrow::io::BufferReader, public NonBlockingRandomAccessFile {
   public:
@@ -363,6 +452,59 @@ TEST_F(StorageTracingTest, MetadataFollowerLinksLeaderAndCacheDoesNotRetainParen
   EXPECT_EQ(wait->GetTraceId(), ExpectedTrace(2));
   ASSERT_EQ(wait->GetLinks().size(), 1);
   EXPECT_EQ(wait->GetLinks()[0].GetSpanContext().span_id(), load->GetSpanId());
+}
+TEST_F(StorageTracingTest, MetadataFlightSupportsMixedTracedAndUntracedCallers) {
+  using Cache = FormatReaderMetadataCache<parquet::ParquetFormatReader>;
+  for (bool trace_leader : {false, true}) {
+    SCOPED_TRACE(trace_leader);
+    auto cache = Cache::Make();
+    folly::ManualExecutor executor;
+    folly::Promise<Cache::MetadataResult> promise;
+    auto load = [&] { return cache->get_or_open_async("key", [&] { return promise.getSemiFuture(); }); };
+    auto leader =
+        [&] {
+          if (trace_leader) {
+            auto parent = AttachParent(Parent(1));
+            return load();
+          }
+          return load();
+        }()
+            .via(&executor);
+    executor.run();
+    auto follow = [&] {
+      return cache->get_or_open_async("key", []() -> folly::SemiFuture<Cache::MetadataResult> {
+        ADD_FAILURE() << "follower must share the load";
+        return folly::makeSemiFuture(Cache::MetadataResult(arrow::Status::Invalid("unexpected loader")));
+      });
+    };
+    auto follower =
+        [&] {
+          if (!trace_leader) {
+            auto parent = AttachParent(Parent(2));
+            return follow();
+          }
+          return follow();
+        }()
+            .via(&executor);
+    executor.run();
+    auto metadata = std::make_shared<Cache::Trait::Metadata>();
+    promise.setValue(Cache::MetadataResult(metadata));
+    executor.drain();
+    EXPECT_EQ(std::move(leader).get().ValueOrDie(), metadata);
+    EXPECT_EQ(std::move(follower).get().ValueOrDie(), metadata);
+    auto spans = data->GetSpans();
+    int loads = 0, waits = 0;
+    for (const auto& span : spans) {
+      loads += span->GetName() == "storage.metadata.load";
+      if (span->GetName() == "storage.metadata.wait") {
+        ++waits;
+        EXPECT_TRUE(span->GetLinks().empty());
+        EXPECT_EQ(span->GetTraceId(), ExpectedTrace(2));
+      }
+    }
+    EXPECT_EQ(loads, trace_leader ? 1 : 0);
+    EXPECT_EQ(waits, trace_leader ? 0 : 1);
+  }
 }
 TEST_F(StorageTracingTest, SharedReaderConcurrentParquetAndVortexReadsKeepTheirOwnTrace) {
   using namespace milvus_storage::api;
