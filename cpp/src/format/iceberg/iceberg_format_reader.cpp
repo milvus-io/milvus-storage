@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "tracing/runtime.h"
+
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 
 #include <algorithm>
@@ -292,15 +294,20 @@ IcebergFormatReader::IcebergFormatReader(std::shared_ptr<parquet::ParquetFormatR
       logical_row_group_infos_(std::move(logical_row_group_infos)) {}
 
 arrow::Status IcebergFormatReader::open() {
-  ARROW_RETURN_NOT_OK(inner_reader_->open());
-  ARROW_ASSIGN_OR_RAISE(projected_schema_, build_projected_schema(inner_reader_->get_schema(), needed_columns_));
-  ARROW_ASSIGN_OR_RAISE(deleted_positions_, load_positional_deletes());
-  sorted_deletions_ = MakeSortedDeletions(deleted_positions_);
+  return tracing::Run(
+      "storage.metadata.load",
+      [&]() -> arrow::Status {
+        ARROW_RETURN_NOT_OK(inner_reader_->open());
+        ARROW_ASSIGN_OR_RAISE(projected_schema_, build_projected_schema(inner_reader_->get_schema(), needed_columns_));
+        ARROW_ASSIGN_OR_RAISE(deleted_positions_, load_positional_deletes());
+        sorted_deletions_ = MakeSortedDeletions(deleted_positions_);
 
-  ARROW_ASSIGN_OR_RAISE(auto physical_row_group_infos, inner_reader_->get_row_group_infos());
-  ARROW_ASSIGN_OR_RAISE(logical_row_group_infos_,
-                        build_logical_row_group_infos(physical_row_group_infos, *sorted_deletions_));
-  return arrow::Status::OK();
+        ARROW_ASSIGN_OR_RAISE(auto physical_row_group_infos, inner_reader_->get_row_group_infos());
+        ARROW_ASSIGN_OR_RAISE(logical_row_group_infos_,
+                              build_logical_row_group_infos(physical_row_group_infos, *sorted_deletions_));
+        return arrow::Status::OK();
+      },
+      false, "open", "iceberg");
 }
 
 arrow::Result<std::shared_ptr<const std::unordered_set<int64_t>>> IcebergFormatReader::load_positional_deletes() const {
@@ -442,95 +449,115 @@ arrow::Result<std::vector<uint64_t>> IcebergFormatReader::get_rg_column_memsz(in
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> IcebergFormatReader::get_chunk(const int& row_group_index) {
-  // Check if this logical row group has zero rows (e.g. all rows deleted)
-  if (row_group_index >= 0 && static_cast<size_t>(row_group_index) < logical_row_group_infos_.size()) {
-    const auto& lrg = logical_row_group_infos_[row_group_index];
-    if (lrg.start_offset == lrg.end_offset) {
-      return arrow::RecordBatch::MakeEmpty(output_schema());
-    }
-  }
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
+        // Check if this logical row group has zero rows (e.g. all rows deleted)
+        if (row_group_index >= 0 && static_cast<size_t>(row_group_index) < logical_row_group_infos_.size()) {
+          const auto& lrg = logical_row_group_infos_[row_group_index];
+          if (lrg.start_offset == lrg.end_offset) {
+            return arrow::RecordBatch::MakeEmpty(output_schema());
+          }
+        }
 
-  ARROW_ASSIGN_OR_RAISE(auto batch, inner_reader_->get_chunk(row_group_index));
+        ARROW_ASSIGN_OR_RAISE(auto batch, inner_reader_->get_chunk(row_group_index));
 
-  if (!deleted_positions_ || deleted_positions_->empty()) {
-    return batch;
-  }
+        if (!deleted_positions_ || deleted_positions_->empty()) {
+          return batch;
+        }
 
-  // Determine the global physical offset for this row group
-  ARROW_ASSIGN_OR_RAISE(auto rg_infos, inner_reader_->get_row_group_infos());
-  if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= rg_infos.size()) {
-    return arrow::Status::Invalid(fmt::format("Row group index out of range: {}", row_group_index));
-  }
+        // Determine the global physical offset for this row group
+        ARROW_ASSIGN_OR_RAISE(auto rg_infos, inner_reader_->get_row_group_infos());
+        if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= rg_infos.size()) {
+          return arrow::Status::Invalid(fmt::format("Row group index out of range: {}", row_group_index));
+        }
 
-  return filter_batch(batch, rg_infos[row_group_index].start_offset);
+        return filter_batch(batch, rg_infos[row_group_index].start_offset);
+      },
+      false, "get_chunk", "iceberg");
 }
 
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> IcebergFormatReader::get_chunks(
     const std::vector<int>& rg_indices_in_file) {
-  ARROW_ASSIGN_OR_RAISE(auto batches, inner_reader_->get_chunks(rg_indices_in_file));
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
+        ARROW_ASSIGN_OR_RAISE(auto batches, inner_reader_->get_chunks(rg_indices_in_file));
 
-  if (!deleted_positions_ || deleted_positions_->empty()) {
-    return batches;
-  }
+        if (!deleted_positions_ || deleted_positions_->empty()) {
+          return batches;
+        }
 
-  ARROW_ASSIGN_OR_RAISE(auto rg_infos, inner_reader_->get_row_group_infos());
+        ARROW_ASSIGN_OR_RAISE(auto rg_infos, inner_reader_->get_row_group_infos());
 
-  std::vector<std::shared_ptr<arrow::RecordBatch>> filtered;
-  filtered.reserve(batches.size());
-  for (size_t i = 0; i < batches.size(); ++i) {
-    int rg_idx = rg_indices_in_file[i];
-    ARROW_ASSIGN_OR_RAISE(auto fb, filter_batch(batches[i], rg_infos[rg_idx].start_offset));
-    filtered.push_back(std::move(fb));
-  }
+        std::vector<std::shared_ptr<arrow::RecordBatch>> filtered;
+        filtered.reserve(batches.size());
+        for (size_t i = 0; i < batches.size(); ++i) {
+          int rg_idx = rg_indices_in_file[i];
+          ARROW_ASSIGN_OR_RAISE(auto fb, filter_batch(batches[i], rg_infos[rg_idx].start_offset));
+          filtered.push_back(std::move(fb));
+        }
 
-  return filtered;
+        return filtered;
+      },
+      false, "get_chunks", "iceberg");
 }
 
 arrow::Result<std::shared_ptr<arrow::Table>> IcebergFormatReader::take(const std::vector<int64_t>& row_indices) {
-  if (row_indices.empty()) {
-    return arrow::Table::MakeEmpty(output_schema());
-  }
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::Table>> {
+        if (row_indices.empty()) {
+          return arrow::Table::MakeEmpty(output_schema());
+        }
 
-  if (!deleted_positions_ || deleted_positions_->empty()) {
-    return inner_reader_->take(row_indices);
-  }
+        if (!deleted_positions_ || deleted_positions_->empty()) {
+          return inner_reader_->take(row_indices);
+        }
 
-  // Map logical indices (post-delete) to physical indices (pre-delete)
-  // using the pre-sorted sorted_deletions_ member.
-  std::vector<int64_t> physical;
-  physical.reserve(row_indices.size());
-  for (auto logical_idx : row_indices) {
-    physical.push_back(logical_to_physical(logical_idx));
-  }
+        // Map logical indices (post-delete) to physical indices (pre-delete)
+        // using the pre-sorted sorted_deletions_ member.
+        std::vector<int64_t> physical;
+        physical.reserve(row_indices.size());
+        for (auto logical_idx : row_indices) {
+          physical.push_back(logical_to_physical(logical_idx));
+        }
 
-  return inner_reader_->take(physical);
+        return inner_reader_->take(physical);
+      },
+      false, "take", "iceberg");
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> IcebergFormatReader::read_with_range(
     const uint64_t& start_offset, const uint64_t& end_offset) {
-  // Empty range — return immediately (e.g. all rows deleted)
-  if (start_offset >= end_offset) {
-    ARROW_ASSIGN_OR_RAISE(auto empty_batch, arrow::RecordBatch::MakeEmpty(output_schema()));
-    return arrow::RecordBatchReader::Make({empty_batch});
-  }
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> {
+        // Empty range — return immediately (e.g. all rows deleted)
+        if (start_offset >= end_offset) {
+          ARROW_ASSIGN_OR_RAISE(auto empty_batch, arrow::RecordBatch::MakeEmpty(output_schema()));
+          return arrow::RecordBatchReader::Make({empty_batch});
+        }
 
-  if (!deleted_positions_ || deleted_positions_->empty()) {
-    return inner_reader_->read_with_range(start_offset, end_offset);
-  }
+        if (!deleted_positions_ || deleted_positions_->empty()) {
+          return inner_reader_->read_with_range(start_offset, end_offset);
+        }
 
-  // Map logical range to physical range
-  auto physical_start = static_cast<uint64_t>(logical_to_physical(static_cast<int64_t>(start_offset)));
-  auto physical_end = (end_offset > start_offset)
-                          ? static_cast<uint64_t>(logical_to_physical(static_cast<int64_t>(end_offset) - 1) + 1)
-                          : physical_start;
+        // Map logical range to physical range
+        auto physical_start = static_cast<uint64_t>(logical_to_physical(static_cast<int64_t>(start_offset)));
+        auto physical_end = (end_offset > start_offset)
+                                ? static_cast<uint64_t>(logical_to_physical(static_cast<int64_t>(end_offset) - 1) + 1)
+                                : physical_start;
 
-  // Read physical range, then filter deleted rows
-  ARROW_ASSIGN_OR_RAISE(auto inner_rbreader, inner_reader_->read_with_range(physical_start, physical_end));
-  ARROW_ASSIGN_OR_RAISE(auto table, arrow::Table::FromRecordBatchReader(inner_rbreader.get()));
-  ARROW_ASSIGN_OR_RAISE(auto batch, table->CombineChunksToBatch());
+        // Read physical range, then filter deleted rows
+        ARROW_ASSIGN_OR_RAISE(auto inner_rbreader, inner_reader_->read_with_range(physical_start, physical_end));
+        ARROW_ASSIGN_OR_RAISE(auto table, arrow::Table::FromRecordBatchReader(inner_rbreader.get()));
+        ARROW_ASSIGN_OR_RAISE(auto batch, table->CombineChunksToBatch());
 
-  ARROW_ASSIGN_OR_RAISE(auto filtered, filter_batch(batch, physical_start));
-  return arrow::RecordBatchReader::Make({filtered});
+        ARROW_ASSIGN_OR_RAISE(auto filtered, filter_batch(batch, physical_start));
+        return arrow::RecordBatchReader::Make({filtered});
+      },
+      false, "read_with_range", "iceberg");
 }
 
 std::shared_ptr<arrow::Schema> IcebergFormatReader::get_schema() const { return inner_reader_->get_schema(); }

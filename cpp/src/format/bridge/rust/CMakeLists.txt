@@ -56,4 +56,8 @@ target_include_directories(prsbridge PRIVATE
     $<TARGET_PROPERTY:milvus-common::milvus-common,INTERFACE_INCLUDE_DIRECTORIES>
 )
 
-target_link_libraries(prsbridge PUBLIC rust-bridge)
+target_include_directories(prsbridge PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(prsbridge PUBLIC rust-bridge PRIVATE Folly::folly opentelemetry-cpp::opentelemetry_common)
+
+# Keep private tracing types ABI-compatible with the Storage shared library.
+target_compile_definitions(prsbridge PRIVATE OPENTELEMETRY_STL_VERSION=2017)

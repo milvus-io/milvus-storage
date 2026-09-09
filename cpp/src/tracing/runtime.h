@@ -1,0 +1,139 @@
+// Copyright 2026 Zilliz
+// SPDX-License-Identifier: Apache-2.0
+#pragma once
+
+#include "milvus-storage/tracing.h"
+#include <atomic>
+#include <mutex>
+#include <optional>
+#include <utility>
+#include <folly/io/async/Request.h>
+#include <folly/futures/Future.h>
+#include <arrow/status.h>
+#include <arrow/util/future.h>
+#include <opentelemetry/trace/tracer.h>
+
+namespace milvus_storage::tracing {
+struct Context;
+using ContextPtr = std::shared_ptr<const Context>;
+ContextPtr Capture();
+void StartCurrent();
+
+class ContextScope {
+  public:
+  explicit ContextScope(ContextPtr context);
+
+  private:
+  std::optional<folly::ShallowCopyRequestContextScopeGuard> scope_;
+};
+
+class OperationTrace {
+  public:
+  OperationTrace() = default;
+  // Lazy spans start on first actual work, not on construction of a SemiFuture.
+  OperationTrace(const char* name,
+                 bool lazy = false,
+                 bool io = false,
+                 opentelemetry::trace::SpanContext link = opentelemetry::trace::SpanContext::GetInvalid(),
+                 const char* operation = nullptr,
+                 const char* format = nullptr);
+  ContextPtr context() const { return context_; }
+  void Start() const;
+  void AccountRead(int64_t requested, int64_t returned) const;
+  void Finish(const arrow::Status& status) const;
+  void Attribute(const char* key, int64_t value) const;
+  void Attribute(const char* key, const char* value) const;
+  opentelemetry::trace::SpanContext span_context() const;
+
+  private:
+  ContextPtr context_;
+  bool owns_state_ = false;
+};
+
+inline const arrow::Status& StatusOf(const arrow::Status& status) { return status; }
+template <typename T>
+const arrow::Status& StatusOf(const arrow::Result<T>& result) {
+  return result.status();
+}
+
+// Restores only Storage-owned data, preserving other RequestContext keys.
+template <typename F>
+auto Bind(F&& fn) {
+  return [context = Capture(), fn = std::forward<F>(fn)](auto&&... args) mutable -> decltype(auto) {
+    ContextScope scope(context);
+    StartCurrent();
+    return fn(std::forward<decltype(args)>(args)...);
+  };
+}
+
+template <typename F>
+auto Run(const char* name, F&& fn, bool io = false, const char* operation = nullptr, const char* format = nullptr)
+    -> decltype(fn()) {
+  if (!Capture())
+    return fn();
+  OperationTrace trace(name, false, io, opentelemetry::trace::SpanContext::GetInvalid(), operation, format);
+  ContextScope scope(trace.context());
+  try {
+    auto result = fn();
+    trace.Finish(StatusOf(result));
+    return result;
+  } catch (...) {
+    trace.Finish(arrow::Status::UnknownError("exception"));
+    throw;
+  }
+}
+
+template <typename F>
+auto RunAsync(const char* name, F&& fn, const char* operation = nullptr, const char* format = nullptr)
+    -> decltype(fn()) {
+  if (!Capture())
+    return fn();
+  OperationTrace trace(name, true, false, opentelemetry::trace::SpanContext::GetInvalid(), operation, format);
+  ContextScope scope(trace.context());
+  try {
+    return fn().defer([trace](auto&& result) {
+      if (result.hasException()) {
+        trace.Finish(arrow::Status::UnknownError("exception"));
+        result.throwUnlessValue();
+      }
+      trace.Finish(StatusOf(result.value()));
+      return std::move(result).value();
+    });
+  } catch (...) {
+    trace.Finish(arrow::Status::UnknownError("exception"));
+    throw;
+  }
+}
+
+// Native callbacks own completion. Return the original future so tracing does
+// not introduce consumer-executor work or change eager native scheduling.
+template <typename F>
+auto RunNativeAsync(const char* name, F&& fn, const char* operation = nullptr, const char* format = nullptr)
+    -> decltype(fn(std::declval<OperationTrace>())) {
+  if (!Capture())
+    return fn(OperationTrace{});
+  OperationTrace trace(name, false, false, opentelemetry::trace::SpanContext::GetInvalid(), operation, format);
+  ContextScope scope(trace.context());
+  try {
+    auto future = fn(trace);
+    if (future.isReady()) {
+      const auto& result = future.result();
+      trace.Finish(result.hasException() ? arrow::Status::UnknownError("exception") : StatusOf(result.value()));
+    }
+    return future;
+  } catch (...) {
+    trace.Finish(arrow::Status::UnknownError("exception"));
+    throw;
+  }
+}
+
+// Observe the source Arrow future itself: completion does not depend on a
+// consumer running a continuation and remains observed after a future is dropped.
+template <typename T>
+arrow::Future<T> Observe(arrow::Future<T> future, OperationTrace trace) {
+  if (!trace.context())
+    return future;
+  future.AddCallback([trace](const arrow::Result<T>& result) { trace.Finish(result.status()); });
+  return future;
+}
+}  // namespace milvus_storage::tracing

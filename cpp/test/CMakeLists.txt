@@ -35,7 +35,7 @@ endif()
 
 
 target_link_libraries(
-  milvus_test PRIVATE milvus-storage GTest::gtest_main
+  milvus_test PRIVATE milvus-storage GTest::gtest opentelemetry-cpp::opentelemetry_trace
 )
 
 #CTest for the FFI
