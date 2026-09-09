@@ -143,7 +143,7 @@ TEST_F(IcebergIntegrationTest, ExploreAndReadBasic) {
 TEST_F(IcebergIntegrationTest, ExploreThroughFormatUsesFilesystemPlanner) {
   const uint64_t num_rows = 12;
   ASSERT_AND_ASSIGN(auto table_info, CreateTestTable(abs_table_dir_, num_rows, false, {}));
-  api::SetValue(properties_, PROPERTY_ICEBERG_SNAPSHOT_ID, std::to_string(table_info.snapshot_id).c_str());
+  api::SetValue(properties_, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, std::to_string(table_info.snapshot_id).c_str());
 
   ASSERT_AND_ASSIGN(auto* format, Format::get(LOON_FORMAT_ICEBERG_TABLE));
   ASSERT_AND_ASSIGN(auto files, format->explore(table_info.metadata_location, properties_));

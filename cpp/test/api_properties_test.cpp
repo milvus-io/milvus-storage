@@ -171,12 +171,16 @@ TEST_F(APIPropertiesTest, paimon_scan_mode) {
 
   EXPECT_NE(SetValue(pp, PROPERTY_PAIMON_SCAN_MODE, "invalid"), std::nullopt);
   EXPECT_STREQ(loon_properties_paimon_scan_mode, PROPERTY_PAIMON_SCAN_MODE);
+}
 
-  EXPECT_EQ(GetValueNoError<int64_t>(pp, PROPERTY_PAIMON_SNAPSHOT_ID), -1);
-  EXPECT_EQ(SetValue(pp, PROPERTY_PAIMON_SNAPSHOT_ID, "42"), std::nullopt);
-  EXPECT_EQ(GetValueNoError<int64_t>(pp, PROPERTY_PAIMON_SNAPSHOT_ID), 42);
-  EXPECT_NE(SetValue(pp, PROPERTY_PAIMON_SNAPSHOT_ID, "-2"), std::nullopt);
-  EXPECT_STREQ(loon_properties_paimon_snapshot_id, PROPERTY_PAIMON_SNAPSHOT_ID);
+TEST_F(APIPropertiesTest, reader_exttable_snapshot_id) {
+  milvus_storage::api::Properties pp{};
+
+  EXPECT_EQ(GetValueNoError<int64_t>(pp, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID), -1);
+  EXPECT_EQ(SetValue(pp, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, "42"), std::nullopt);
+  EXPECT_EQ(GetValueNoError<int64_t>(pp, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID), 42);
+  EXPECT_NE(SetValue(pp, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, "-2"), std::nullopt);
+  EXPECT_STREQ(loon_properties_reader_exttable_snapshot_id, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID);
 }
 
 TEST_F(APIPropertiesTest, reader_metadata_cache_enable_property) {
