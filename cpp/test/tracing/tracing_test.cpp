@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <gtest/gtest.h>
 #include <future>
+#include <stdexcept>
 #include <folly/executors/ManualExecutor.h>
 #include <arrow/io/memory.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
@@ -670,7 +671,7 @@ TEST_F(StorageTracingTest, PreservesStorageErrorClassificationWithoutExportingMe
   EXPECT_TRUE(opentelemetry::nostd::get<bool>(attrs.at("error.retryable")));
   EXPECT_TRUE(spans[0]->GetDescription().empty());
 }
-TEST_F(StorageTracingTest, InlineIOCompletionAndSubmissionFailureAreObserved) {
+TEST_F(StorageTracingTest, InlineIOFailureIsObserved) {
   auto raw = std::make_shared<ControlledFile>();
   raw->pending = arrow::Future<int64_t>::MakeFinished(arrow::Status::IOError("private"));
   auto file = WrapFile(raw, "test");
@@ -681,6 +682,101 @@ TEST_F(StorageTracingTest, InlineIOCompletionAndSubmissionFailureAreObserved) {
   auto spans = data->GetSpans();
   ASSERT_EQ(spans.size(), 1);
   EXPECT_EQ(spans[0]->GetStatus(), ot::StatusCode::kError);
+}
+TEST_F(StorageTracingTest, SynchronousExceptionsBecomeStatusAndEndSpans) {
+  auto scope = AttachParent(Parent(1));
+  EXPECT_TRUE(
+      tracing::Run("status", []() -> arrow::Status { throw std::runtime_error("private path"); }).IsUnknownError());
+  auto result = tracing::Run("result", []() -> arrow::Result<int64_t> { throw 42; });
+  EXPECT_TRUE(result.status().IsUnknownError());
+  auto spans = data->GetSpans();
+  ASSERT_EQ(spans.size(), 2);
+  for (const auto& span : spans) {
+    EXPECT_EQ(span->GetStatus(), ot::StatusCode::kError);
+    EXPECT_TRUE(span->GetDescription().empty());
+    EXPECT_EQ(span->GetAttributes().count("storage.completion.unobserved"), 0);
+  }
+}
+
+TEST_F(StorageTracingTest, AsyncSubmissionAndDeferredExceptionsBecomeResults) {
+  using Result = arrow::Result<int64_t>;
+  auto scope = AttachParent(Parent(1));
+  auto submission = RunAsync("submission", []() -> folly::SemiFuture<Result> { throw std::runtime_error("private"); });
+  EXPECT_TRUE(std::move(submission).get().status().IsUnknownError());
+  auto submission_spans = data->GetSpans();
+  ASSERT_EQ(submission_spans.size(), 1);
+  EXPECT_EQ(submission_spans[0]->GetStatus(), ot::StatusCode::kError);
+  auto deferred =
+      RunAsync("deferred", [] { return folly::makeSemiFuture().deferValue([](folly::Unit) -> Result { throw 42; }); });
+  EXPECT_TRUE(data->GetSpans().empty());
+  EXPECT_TRUE(std::move(deferred).get().status().IsUnknownError());
+  auto native = RunNativeAsync(
+      "native", [](OperationTrace) -> folly::SemiFuture<arrow::Status> { throw std::runtime_error("private"); });
+  EXPECT_TRUE(native.isReady());
+  EXPECT_TRUE(std::move(native).get().IsUnknownError());
+  auto ready = RunNativeAsync("ready", [](OperationTrace) {
+    return folly::makeSemiFuture<Result>(folly::make_exception_wrapper<std::runtime_error>("private"));
+  });
+  EXPECT_TRUE(ready.isReady());
+  EXPECT_TRUE(std::move(ready).get().status().IsUnknownError());
+  auto spans = data->GetSpans();
+  ASSERT_EQ(spans.size(), 3);
+  for (const auto& span : spans) {
+    EXPECT_EQ(span->GetStatus(), ot::StatusCode::kError);
+    EXPECT_EQ(span->GetAttributes().count("storage.completion.unobserved"), 0);
+  }
+}
+
+class ThrowingFile final : public arrow::io::RandomAccessFile, public NonBlockingRandomAccessFile {
+  public:
+  arrow::Status Close() override { return arrow::Status::OK(); }
+  bool closed() const override { return false; }
+  arrow::Result<int64_t> Tell() const override { return 0; }
+  arrow::Status Seek(int64_t) override { return arrow::Status::OK(); }
+  arrow::Result<int64_t> GetSize() override { return 4; }
+  arrow::Result<int64_t> Read(int64_t, void*) override { return arrow::Status::NotImplemented("test"); }
+  arrow::Result<std::shared_ptr<arrow::Buffer>> Read(int64_t) override { return arrow::Status::NotImplemented("test"); }
+  arrow::Result<int64_t> ReadAt(int64_t, int64_t, void*) override { throw std::runtime_error("private"); }
+  arrow::Future<int64_t> ReadAtAsyncInto(int64_t, int64_t, uint8_t*) override { throw 42; }
+  arrow::Future<int64_t> GetSizeAsync() override { throw std::runtime_error("private"); }
+  arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(
+      const arrow::io::IOContext&) override {
+    throw std::runtime_error("private");
+  }
+  std::vector<arrow::Future<std::shared_ptr<arrow::Buffer>>> ReadManyAsync(
+      const arrow::io::IOContext&, const std::vector<arrow::io::ReadRange>&) override {
+    throw 42;
+  }
+};
+
+TEST_F(StorageTracingTest, FileSubmissionExceptionsCompleteEveryReturnedFuture) {
+  auto file = WrapFile(std::make_shared<ThrowingFile>(), "test");
+  auto scope = AttachParent(Parent(1));
+  uint8_t out[4];
+  EXPECT_TRUE(file->ReadAt(0, 4, out).status().IsUnknownError());
+  auto* async = dynamic_cast<NonBlockingRandomAccessFile*>(file.get());
+  ASSERT_NE(async, nullptr);
+  auto read = async->ReadAtAsyncInto(0, 4, out);
+  ASSERT_TRUE(read.is_finished());
+  EXPECT_TRUE(read.status().IsUnknownError());
+  auto size = async->GetSizeAsync();
+  ASSERT_TRUE(size.is_finished());
+  EXPECT_TRUE(size.status().IsUnknownError());
+  auto metadata = file->ReadMetadataAsync(file->io_context());
+  ASSERT_TRUE(metadata.is_finished());
+  EXPECT_TRUE(metadata.status().IsUnknownError());
+  auto reads = file->ReadManyAsync(file->io_context(), {{0, 1}, {1, 2}});
+  ASSERT_EQ(reads.size(), 2);
+  for (const auto& future : reads) {
+    ASSERT_TRUE(future.is_finished());
+    EXPECT_TRUE(future.status().IsUnknownError());
+  }
+  auto spans = data->GetSpans();
+  ASSERT_EQ(spans.size(), 5);
+  for (const auto& span : spans) {
+    EXPECT_EQ(span->GetStatus(), ot::StatusCode::kError);
+    EXPECT_EQ(span->GetAttributes().count("storage.completion.unobserved"), 0);
+  }
 }
 }  // namespace
 }  // namespace milvus_storage::tracing

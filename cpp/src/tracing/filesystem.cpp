@@ -35,8 +35,9 @@ class TracedFile : public arrow::io::RandomAccessFile {
     try {
       return Observe(file_->ReadMetadataAsync(context), trace);
     } catch (...) {
-      trace.Finish(arrow::Status::UnknownError("exception"));
-      throw;
+      auto status = arrow::Status::UnknownError("exception");
+      trace.Finish(status);
+      return arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>>::MakeFinished(status);
     }
   }
   arrow::Result<int64_t> GetSize() override {
@@ -102,8 +103,10 @@ class TracedFile : public arrow::io::RandomAccessFile {
       }
       return futures;
     } catch (...) {
-      trace.Finish(arrow::Status::UnknownError("exception"));
-      throw;
+      auto status = arrow::Status::UnknownError("exception");
+      trace.Finish(status);
+      return std::vector<arrow::Future<std::shared_ptr<arrow::Buffer>>>(
+          ranges.size(), arrow::Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(status));
     }
   }
 
@@ -128,8 +131,9 @@ class TracedFile : public arrow::io::RandomAccessFile {
       trace.Finish(result.status());
       return result;
     } catch (...) {
-      trace.Finish(arrow::Status::UnknownError("exception"));
-      throw;
+      auto status = arrow::Status::UnknownError("exception");
+      trace.Finish(status);
+      return status;
     }
   }
   template <typename F>
@@ -155,8 +159,9 @@ class TracedFile : public arrow::io::RandomAccessFile {
       });
       return future;
     } catch (...) {
-      trace.Finish(arrow::Status::UnknownError("exception"));
-      throw;
+      auto status = arrow::Status::UnknownError("exception");
+      trace.Finish(status);
+      return decltype(fn())::MakeFinished(status);
     }
   }
   void Attributes(const OperationTrace& trace, int64_t position, int64_t nbytes) {
@@ -184,8 +189,9 @@ class TracedAsyncFile final : public TracedFile, public NonBlockingRandomAccessF
     try {
       return Observe(async_->GetSizeAsync(), trace);
     } catch (...) {
-      trace.Finish(arrow::Status::UnknownError("exception"));
-      throw;
+      auto status = arrow::Status::UnknownError("exception");
+      trace.Finish(status);
+      return arrow::Future<int64_t>::MakeFinished(status);
     }
   }
 
