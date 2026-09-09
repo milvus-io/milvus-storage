@@ -38,11 +38,13 @@ Storage 使用专属 Folly RequestContext key，激活时浅复制并覆盖自�
 | 格式 | Parquet、Vortex、Lance、Iceberg、Paimon 的 `storage.format.read`；含 I/O 等待，不能当作 codec CPU 时间 |
 | 逻辑文件读取 | FileSystemProxy 打开的文件覆盖两个 Read/ReadAt 重载、ReadAsync、ReadManyAsync、ReadAtAsyncInto；metadata/head 单列 |
 | Arrow | 操作专属 FollyArrowExecutor 保存操作快照，即使后续 Spawn 来自 CRT 完成线程也恢复相同 parent |
-| CRT | GetObjectAsync/HeadObjectAsync 提交至 source future 完成的 `storage.backend.request`；callback 恢复上下文；提交抛异常记录错误并继续传播原异常 |
+| CRT | GetObjectAsync/HeadObjectAsync 提交至 source future 完成的 `storage.backend.request`；callback 恢复上下文；提交异常转换为 UnknownError 并完成 source future，由 observer 结束 span |
 | Rust | CXX 私有 owning handle；共享 Tokio runtime 的 block_on/spawn/spawn_blocking；future 每 poll attach/detach；Vortex Executor 的 async、CPU、blocking I/O 子任务委托原执行器，保留其调度和 profiling labels |
 | 反向 FFI | Rust 在 poll/闭包内调用 C++ 文件系统；异步完成 callback 重新激活提交时上下文 |
 
 惰性 Future 在实际工作开始时创建 span。未消费且未开始工作的 Future 不导出虚假工作 span。Arrow source future 完成观测独立于消费者，丢弃返回的 Future 不会提前结束后台 I/O span。Vortex 原生操作直接在完成 callback 中结束 span，返回原始 Future，不增加 consumer executor 调度。其他 Folly 操作通过完成 continuation 观测最终结果；若消费者丢弃已开始的操作，最后一个工作上下文释放时结束尚未完成的 span，并设置 `storage.completion.unobserved=true`，不把它当作真实取消。
+
+tracing wrapper 已捕获的同步/提交异常，以及 Folly 完成 continuation 收到的异常，转为不包含异常原文的 `UnknownError`，通过 Status/Result 或已完成的失败 Future 返回。批量提交异常为每个输入 range 返回一个失败 Future。原有 Status/Result 的扩展分类保持不变；无上下文快速转发路径保持原实现。
 
 CXX 将异常转换为 Result；Rust guard 在 Pending、Ready 和 panic unwind 时析构。attach token 不跨 poll/线程保留。桥接没有引入 Rust OTel SDK 或 exporter，也未新增公开 C 业务 ABI，FFI 导出表保持现有范围。
 

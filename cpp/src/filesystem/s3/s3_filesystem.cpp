@@ -856,8 +856,7 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
             ctx->future.MarkFinished(content_length);
           });
     } catch (...) {
-      ctx->trace.Finish(arrow::Status::UnknownError("submission exception"));
-      throw;
+      ctx->future.MarkFinished(arrow::Status::UnknownError("HeadObject submission exception"));
     }
     return ctx->future;
   }
@@ -946,8 +945,8 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
             ctx->future.MarkFinished(bytes_read);
           });
     } catch (...) {
-      ctx->trace.Finish(arrow::Status::UnknownError("submission exception"));
-      throw;
+      ctx->metrics->IncrementFailedCount();
+      ctx->future.MarkFinished(arrow::Status::UnknownError("GetObject submission exception"));
     }
     // Keep executor selection at the caller-owned continuation boundary.
     return ctx->future;

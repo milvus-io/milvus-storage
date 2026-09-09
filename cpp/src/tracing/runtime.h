@@ -80,8 +80,9 @@ auto Run(const char* name, F&& fn, bool io = false, const char* operation = null
     trace.Finish(StatusOf(result));
     return result;
   } catch (...) {
-    trace.Finish(arrow::Status::UnknownError("exception"));
-    throw;
+    auto status = arrow::Status::UnknownError("exception");
+    trace.Finish(status);
+    return status;
   }
 }
 
@@ -92,18 +93,21 @@ auto RunAsync(const char* name, F&& fn, const char* operation = nullptr, const c
     return fn();
   OperationTrace trace(name, true, false, opentelemetry::trace::SpanContext::GetInvalid(), operation, format);
   ContextScope scope(trace.context());
+  using Result = typename decltype(fn())::value_type;
   try {
-    return fn().defer([trace](auto&& result) {
+    return fn().defer([trace](auto&& result) -> Result {
       if (result.hasException()) {
-        trace.Finish(arrow::Status::UnknownError("exception"));
-        result.throwUnlessValue();
+        auto status = arrow::Status::UnknownError("exception");
+        trace.Finish(status);
+        return status;
       }
       trace.Finish(StatusOf(result.value()));
       return std::move(result).value();
     });
   } catch (...) {
-    trace.Finish(arrow::Status::UnknownError("exception"));
-    throw;
+    auto status = arrow::Status::UnknownError("exception");
+    trace.Finish(status);
+    return folly::makeSemiFuture(Result(status));
   }
 }
 
@@ -116,16 +120,23 @@ auto RunNativeAsync(const char* name, F&& fn, const char* operation = nullptr, c
     return fn(OperationTrace{});
   OperationTrace trace(name, false, false, opentelemetry::trace::SpanContext::GetInvalid(), operation, format);
   ContextScope scope(trace.context());
+  using Result = typename decltype(fn(trace))::value_type;
   try {
     auto future = fn(trace);
     if (future.isReady()) {
       const auto& result = future.result();
-      trace.Finish(result.hasException() ? arrow::Status::UnknownError("exception") : StatusOf(result.value()));
+      if (result.hasException()) {
+        auto status = arrow::Status::UnknownError("exception");
+        trace.Finish(status);
+        return folly::makeSemiFuture(Result(status));
+      }
+      trace.Finish(StatusOf(result.value()));
     }
     return future;
   } catch (...) {
-    trace.Finish(arrow::Status::UnknownError("exception"));
-    throw;
+    auto status = arrow::Status::UnknownError("exception");
+    trace.Finish(status);
+    return folly::makeSemiFuture(Result(status));
   }
 }
 
