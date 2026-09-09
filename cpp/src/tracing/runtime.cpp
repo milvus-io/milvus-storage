@@ -37,6 +37,9 @@ struct SpanState {
   ot::SpanContext link = ot::SpanContext::GetInvalid();
   bool finished = false;
   bool root = false;
+  // Publishes the immutable span pointer (or a disabled decision) once Start
+  // completes. Keep this beside the other flags to reuse their padding.
+  std::atomic<bool> started{false};
   void Start();
   ~SpanState() {
     if (span && !finished) {
@@ -61,12 +64,18 @@ ot::SpanContext Parent(const ContextPtr& context) {
   return op->span ? op->span->GetContext() : Parent(op->parent);
 }
 void SpanState::Start() {
+  if (started.load(std::memory_order_acquire))
+    return;
   std::lock_guard<std::mutex> lock(mutex);
-  if (span || finished)
+  if (span || finished) {
+    started.store(true, std::memory_order_release);
     return;
+  }
   auto parent_context = Parent(parent);
-  if (!parent_context.IsValid() || !config->tracer)
+  if (!parent_context.IsValid() || !config->tracer) {
+    started.store(true, std::memory_order_release);
     return;
+  }
   ot::StartSpanOptions options;
   options.parent = parent_context;
   if (link.IsValid()) {
@@ -80,6 +89,8 @@ void SpanState::Start() {
     if (format)
       span->SetAttribute("storage.format", format);
   }
+  if (span)
+    started.store(true, std::memory_order_release);
 }
 struct Data final : folly::RequestData {
   explicit Data(ContextPtr value) : context(std::move(value)) {}
@@ -93,6 +104,12 @@ ContextPtr Capture() {
   auto* data = static_cast<Data*>(folly::RequestContext::get()->getContextData(storage_key));
   return data ? data->context : nullptr;
 }
+bool HasContext() {
+  if (!contexts_seen.load(std::memory_order_relaxed))
+    return false;
+  auto* data = static_cast<Data*>(folly::RequestContext::get()->getContextData(storage_key));
+  return data && data->context;
+}
 void StartCurrent() {
   auto context = Capture();
   if (context && context->operation)
@@ -101,7 +118,7 @@ void StartCurrent() {
 ContextScope::ContextScope(ContextPtr context) {
   // Common disabled path does not allocate a RequestContext. A captured empty
   // context must still mask unrelated context on a foreign completion thread.
-  if (context || Capture())
+  if (context || HasContext())
     scope_.emplace(storage_key, std::make_unique<Data>(std::move(context)));
 }
 
@@ -145,38 +162,45 @@ OperationTrace::OperationTrace(
   if (context_->operation && std::string_view(name) == "storage.metadata.load" &&
       std::string_view(context_->operation->name) == "storage.metadata.load")
     return;
+  const bool root = !context_->operation;
+  std::shared_ptr<const Configuration> config;
+  std::shared_ptr<Budget> budget;
+  if (!root) {
+    config = context_->operation->config;
+    // Children retain their parent's fixed configuration even if the host
+    // injects a provider later. No child state is needed for suppressed spans.
+    if (!config->tracer || (io && !config->options.io_spans))
+      return;
+    budget = context_->operation->budget;
+    if (budget->used.fetch_add(1, std::memory_order_relaxed) >=
+        std::max<uint32_t>(1, config->options.max_spans_per_operation)) {
+      budget->dropped.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+  } else {
+    if (!context_->parent.IsValid())
+      return;
+    {
+      std::lock_guard<std::mutex> lock(configuration_mutex);
+      config = configuration;
+    }
+    budget = std::make_shared<Budget>();
+  }
   auto state = std::make_shared<SpanState>();
   state->parent = context_;
   state->name = name;
   state->operation = operation;
   state->format = format;
   state->link = std::move(link);
-  if (context_->operation) {
-    state->config = context_->operation->config;
-    state->budget = context_->operation->budget;
-  } else {
-    if (!context_->parent.IsValid())
-      return;
-    std::lock_guard<std::mutex> lock(configuration_mutex);
-    state->config = configuration;
-    state->budget = std::make_shared<Budget>();
-    state->root = true;
-  }
+  state->config = std::move(config);
+  state->budget = std::move(budget);
+  state->root = root;
   // Even a null provider is a fixed configuration snapshot for this operation.
   // Children must not begin exporting halfway through a previously disabled read.
-  if (!state->root && !state->config->tracer)
-    return;
   if (io && !state->config->options.io_spans) {
-    if (!state->root)
-      return;
     auto disabled = std::make_shared<Configuration>(*state->config);
     disabled->tracer = nullptr;
     state->config = std::move(disabled);
-  }
-  if (!state->root && state->budget->used.fetch_add(1, std::memory_order_relaxed) >=
-                          std::max<uint32_t>(1, state->config->options.max_spans_per_operation)) {
-    state->budget->dropped.fetch_add(1, std::memory_order_relaxed);
-    return;
   }
   if (state->root)
     state->budget->used.store(1, std::memory_order_relaxed);
