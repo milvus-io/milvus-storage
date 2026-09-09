@@ -17,6 +17,8 @@ namespace milvus_storage::tracing {
 struct Context;
 using ContextPtr = std::shared_ptr<const Context>;
 ContextPtr Capture();
+// Check the active flow without copying an owning context snapshot.
+bool HasContext();
 void StartCurrent();
 
 class ContextScope {
@@ -69,7 +71,7 @@ auto Bind(F&& fn) {
 template <typename F>
 auto Run(const char* name, F&& fn, bool io = false, const char* operation = nullptr, const char* format = nullptr)
     -> decltype(fn()) {
-  if (!Capture())
+  if (!HasContext())
     return fn();
   OperationTrace trace(name, false, io, opentelemetry::trace::SpanContext::GetInvalid(), operation, format);
   ContextScope scope(trace.context());
@@ -86,7 +88,7 @@ auto Run(const char* name, F&& fn, bool io = false, const char* operation = null
 template <typename F>
 auto RunAsync(const char* name, F&& fn, const char* operation = nullptr, const char* format = nullptr)
     -> decltype(fn()) {
-  if (!Capture())
+  if (!HasContext())
     return fn();
   OperationTrace trace(name, true, false, opentelemetry::trace::SpanContext::GetInvalid(), operation, format);
   ContextScope scope(trace.context());
@@ -110,7 +112,7 @@ auto RunAsync(const char* name, F&& fn, const char* operation = nullptr, const c
 template <typename F>
 auto RunNativeAsync(const char* name, F&& fn, const char* operation = nullptr, const char* format = nullptr)
     -> decltype(fn(std::declval<OperationTrace>())) {
-  if (!Capture())
+  if (!HasContext())
     return fn(OperationTrace{});
   OperationTrace trace(name, false, false, opentelemetry::trace::SpanContext::GetInvalid(), operation, format);
   ContextScope scope(trace.context());

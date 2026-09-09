@@ -1,5 +1,7 @@
 # Telemetry 完整读取性能验证
 
+提交 `6966d49` 后的局部优化、jemalloc 实际占用和前后对照结果见 [优化验证](opentelemetry-storage-optimization.md)。
+
 ## 验收口径
 
 比较引入 Telemetry 之前的 Storage 与当前工作树，主要验收场景是未注入 parent/provider 的默认路径。另行测量有 parent 但无 provider、未采样、已采样三种模式，不能把它们混入默认关闭模式的结果。
