@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "tracing/runtime.h"
+
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 
 #include "milvus-storage/common/arrow_util.h"
@@ -397,16 +399,25 @@ static std::optional<MemorySizeEstimate> estimate_memory_sizes(const VortexFile&
 }
 
 struct VortexOpenAsyncContext {
+  explicit VortexOpenAsyncContext(tracing::OperationTrace trace) : trace(std::move(trace)) {}
+  tracing::OperationTrace trace;
+  void Complete(arrow::Status result) {
+    trace.Finish(result);
+    promise.setValue(std::move(result));
+  }
   folly::Promise<arrow::Status> promise;
   std::function<arrow::Status(uintptr_t)> initialize;
 };
 
 template <typename T>
 static void set_vortex_callback_exception(folly::Promise<T>& promise,
+                                          const tracing::OperationTrace& trace,
                                           const char* operation,
                                           const char* message) noexcept {
   try {
-    promise.setValue(T(arrow::Status::IOError(fmt::format("{}: {}", operation, message))));
+    auto result = T(arrow::Status::IOError(fmt::format("{}: {}", operation, message)));
+    trace.Finish(tracing::StatusOf(result));
+    promise.setValue(std::move(result));
   } catch (...) {
     // No further error reporting is safe from a callback crossing the C ABI.
   }
@@ -420,21 +431,22 @@ static void vortex_open_async_callback(void* ctx_raw, uintptr_t handle, const ch
                                                                    &vortex_free_error_string);
 
   try {
+    tracing::ContextScope scope(ctx->trace.context());
     if (error) {
-      ctx->promise.setValue(MakeBridgeErrorStatus("Failed to open vortex file", error.get()));
+      ctx->Complete(MakeBridgeErrorStatus("Failed to open vortex file", error.get()));
       return;
     }
 
     if (handle == 0) {
-      ctx->promise.setValue(arrow::Status::IOError("Vortex async open returned a null file handle"));
+      ctx->Complete(arrow::Status::IOError("Vortex async open returned a null file handle"));
       return;
     }
 
-    ctx->promise.setValue(ctx->initialize(handle));
+    ctx->Complete(ctx->initialize(handle));
   } catch (const std::exception& e) {
-    set_vortex_callback_exception(ctx->promise, "Failed to import opened vortex file", e.what());
+    set_vortex_callback_exception(ctx->promise, ctx->trace, "Failed to import opened vortex file", e.what());
   } catch (...) {
-    set_vortex_callback_exception(ctx->promise, "Failed to import opened vortex file", "unknown exception");
+    set_vortex_callback_exception(ctx->promise, ctx->trace, "Failed to import opened vortex file", "unknown exception");
   }
 }
 
@@ -496,18 +508,23 @@ VortexFormatReader::MetaTrait::load_metadata_async(const api::ColumnGroupFile& f
   // Defer reader construction so cache followers can join the same-key
   // singleflight before the Tokio open is submitted.
   return folly::makeSemiFuture().deferValue(
-      [file, properties](folly::Unit) -> folly::SemiFuture<arrow::Result<VortexFormatReader::MetaTrait::MetadataPtr>> {
+      [storage_context = tracing::Capture(), file,
+       properties](folly::Unit) -> folly::SemiFuture<arrow::Result<VortexFormatReader::MetaTrait::MetadataPtr>> {
+        tracing::ContextScope storage_scope(storage_context);
+        tracing::StartCurrent();
         FOLLY_ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, file.path));
         FOLLY_ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
         auto reader = std::make_shared<VortexFormatReader>(
             std::move(fs), nullptr, uri.key, properties, std::vector<std::string>{},
             file.Get<uint64_t>(api::kPropertyFileSize), file.Get<uint64_t>(api::kPropertyFooterSize));
         // Snapshot immutable schema/split metadata only after async open succeeds.
-        return reader->open_async().deferValue(
-            [reader = std::move(reader), file](arrow::Status status) -> arrow::Result<MetadataPtr> {
-              ARROW_RETURN_NOT_OK(status);
-              return create_metadata_from_reader(reader, file);
-            });
+        return reader->open_async().deferValue([storage_context = tracing::Capture(), reader = std::move(reader),
+                                                file](arrow::Status status) -> arrow::Result<MetadataPtr> {
+          tracing::ContextScope storage_scope(storage_context);
+          tracing::StartCurrent();
+          ARROW_RETURN_NOT_OK(status);
+          return create_metadata_from_reader(reader, file);
+        });
       });
 }
 
@@ -540,8 +557,10 @@ VortexFormatReader::MetaTrait::create_from_metadata_async(MetadataPtr metadata,
                                                           const std::vector<std::string>& needed_columns,
                                                           const std::string& predicate) {
   return folly::makeSemiFuture().deferValue(
-      [metadata = std::move(metadata), file, read_schema, needed_columns,
+      [storage_context = tracing::Capture(), metadata = std::move(metadata), file, read_schema, needed_columns,
        predicate](folly::Unit) -> arrow::Result<std::shared_ptr<VortexFormatReader>> {
+        tracing::ContextScope storage_scope(storage_context);
+        tracing::StartCurrent();
         return create_from_metadata(std::move(metadata), file, read_schema, needed_columns, predicate);
       });
 }
@@ -600,94 +619,110 @@ VortexFormatReader::VortexFormatReader(MetaTrait::MetadataPtr metadata,
 }
 
 arrow::Status VortexFormatReader::open() {
-  assert(!vxfile_);
+  return tracing::Run(
+      "storage.metadata.load",
+      [&]() -> arrow::Status {
+        assert(!vxfile_);
 
-  ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
-  ARROW_ASSIGN_OR_RAISE(auto split_row_indices_mode,
-                        api::GetValue<std::string>(properties_, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES));
-  ARROW_ASSIGN_OR_RAISE(split_row_indices_, parse_split_row_indices_override(split_row_indices_mode));
-  if (read_schema_ && read_schema_->num_fields() == 0) {
-    read_schema_ = nullptr;
-  }
-  ARROW_ASSIGN_OR_RAISE(vxfile_, open_shared_vortex_file(fs_holder_, path_, file_size_, footer_size_));
+        ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_,
+                              api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
+        ARROW_ASSIGN_OR_RAISE(auto split_row_indices_mode,
+                              api::GetValue<std::string>(properties_, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES));
+        ARROW_ASSIGN_OR_RAISE(split_row_indices_, parse_split_row_indices_override(split_row_indices_mode));
+        if (read_schema_ && read_schema_->num_fields() == 0) {
+          read_schema_ = nullptr;
+        }
+        ARROW_ASSIGN_OR_RAISE(vxfile_, open_shared_vortex_file(fs_holder_, path_, file_size_, footer_size_));
 
-  // Always derive full file schema from file metadata
-  ARROW_ASSIGN_OR_RAISE(file_schema_, import_vortex_file_schema(*vxfile_));
+        // Always derive full file schema from file metadata
+        ARROW_ASSIGN_OR_RAISE(file_schema_, import_vortex_file_schema(*vxfile_));
 
-  ARROW_ASSIGN_OR_RAISE(auto row_ranges, get_vortex_splits(*vxfile_));
-  auto memory_size_estimate = estimate_memory_sizes(*vxfile_, static_cast<size_t>(file_schema_->num_fields()), path_);
-  ARROW_ASSIGN_OR_RAISE(row_group_infos_,
-                        create_row_group_infos(vxfile_->RowCount(), recalc_row_ranges(row_ranges, logical_chunk_rows_),
-                                               memory_size_estimate));
-  column_memory_weights_ =
-      memory_size_estimate
-          ? std::make_shared<const std::vector<uint64_t>>(std::move(memory_size_estimate->column_sizes))
-          : nullptr;
+        ARROW_ASSIGN_OR_RAISE(auto row_ranges, get_vortex_splits(*vxfile_));
+        auto memory_size_estimate =
+            estimate_memory_sizes(*vxfile_, static_cast<size_t>(file_schema_->num_fields()), path_);
+        ARROW_ASSIGN_OR_RAISE(
+            row_group_infos_,
+            create_row_group_infos(vxfile_->RowCount(), recalc_row_ranges(row_ranges, logical_chunk_rows_),
+                                   memory_size_estimate));
+        column_memory_weights_ =
+            memory_size_estimate
+                ? std::make_shared<const std::vector<uint64_t>>(std::move(memory_size_estimate->column_sizes))
+                : nullptr;
 
-  return arrow::Status::OK();
+        return arrow::Status::OK();
+      },
+      false, "open", "vortex");
 }
 
 folly::SemiFuture<arrow::Status> VortexFormatReader::open_async() {
-  assert(!vxfile_);
+  return tracing::RunNativeAsync(
+      "storage.metadata.load",
+      [&](tracing::OperationTrace trace) -> folly::SemiFuture<arrow::Status> {
+        assert(!vxfile_);
 
-  // Keep the reader alive until the asynchronous open finishes.
-  auto self = shared_from_this();
+        // Keep the reader alive until the asynchronous open finishes.
+        auto self = shared_from_this();
 
-  // Validate configuration synchronously so no Rust task is spawned for an
-  // invalid reader setup.
-  auto logical_chunk_rows_result = api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS);
-  if (!logical_chunk_rows_result.ok()) {
-    return folly::makeSemiFuture(logical_chunk_rows_result.status());
-  }
-  logical_chunk_rows_ = std::move(logical_chunk_rows_result).ValueUnsafe();
+        // Validate configuration synchronously so no Rust task is spawned for an
+        // invalid reader setup.
+        auto logical_chunk_rows_result = api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS);
+        if (!logical_chunk_rows_result.ok()) {
+          return folly::makeSemiFuture(logical_chunk_rows_result.status());
+        }
+        logical_chunk_rows_ = std::move(logical_chunk_rows_result).ValueUnsafe();
 
-  auto split_row_indices_mode_result =
-      api::GetValue<std::string>(properties_, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES);
-  if (!split_row_indices_mode_result.ok()) {
-    return folly::makeSemiFuture(split_row_indices_mode_result.status());
-  }
-  auto split_row_indices_result =
-      parse_split_row_indices_override(std::move(split_row_indices_mode_result).ValueUnsafe());
-  if (!split_row_indices_result.ok()) {
-    return folly::makeSemiFuture(split_row_indices_result.status());
-  }
-  split_row_indices_ = std::move(split_row_indices_result).ValueUnsafe();
-  if (read_schema_ && read_schema_->num_fields() == 0) {
-    read_schema_ = nullptr;
-  }
+        auto split_row_indices_mode_result =
+            api::GetValue<std::string>(properties_, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES);
+        if (!split_row_indices_mode_result.ok()) {
+          return folly::makeSemiFuture(split_row_indices_mode_result.status());
+        }
+        auto split_row_indices_result =
+            parse_split_row_indices_override(std::move(split_row_indices_mode_result).ValueUnsafe());
+        if (!split_row_indices_result.ok()) {
+          return folly::makeSemiFuture(split_row_indices_result.status());
+        }
+        split_row_indices_ = std::move(split_row_indices_result).ValueUnsafe();
+        if (read_schema_ && read_schema_->num_fields() == 0) {
+          read_schema_ = nullptr;
+        }
 
-  auto ctx = std::make_unique<VortexOpenAsyncContext>();
-  auto semi_future = ctx->promise.getSemiFuture();
-  // The callback imports the owned Rust handle and publishes reader state only
-  // after schema and logical chunk metadata have both been derived successfully.
-  ctx->initialize = [self = std::move(self)](uintptr_t handle) -> arrow::Status {
-    ARROW_ASSIGN_OR_RAISE(auto vxfile_unique, VortexFile::FromRawHandle(handle));
-    auto vxfile = std::shared_ptr<VortexFile>(std::move(vxfile_unique));
-    ARROW_ASSIGN_OR_RAISE(auto file_schema, import_vortex_file_schema(*vxfile));
-    ARROW_ASSIGN_OR_RAISE(auto row_ranges, get_vortex_splits(*vxfile));
-    auto memory_size_estimate =
-        estimate_memory_sizes(*vxfile, static_cast<size_t>(file_schema->num_fields()), self->path_);
-    ARROW_ASSIGN_OR_RAISE(
-        auto row_group_infos,
-        create_row_group_infos(vxfile->RowCount(), recalc_row_ranges(row_ranges, self->logical_chunk_rows_),
-                               memory_size_estimate));
-    auto column_memory_weights =
-        memory_size_estimate
-            ? std::make_shared<const std::vector<uint64_t>>(std::move(memory_size_estimate->column_sizes))
-            : nullptr;
-    self->vxfile_ = std::move(vxfile);
-    self->file_schema_ = std::move(file_schema);
-    self->column_memory_weights_ = std::move(column_memory_weights);
-    self->row_group_infos_ = std::move(row_group_infos);
-    return arrow::Status::OK();
-  };
-  // Validation failures may call back synchronously, so transfer ownership
-  // before crossing the FFI boundary.
-  auto* raw_ctx = ctx.release();
+        auto ctx = std::make_unique<VortexOpenAsyncContext>(trace);
+        auto semi_future = ctx->promise.getSemiFuture();
+        // The callback imports the owned Rust handle and publishes reader state only
+        // after schema and logical chunk metadata have both been derived successfully.
+        ctx->initialize = [storage_context = tracing::Capture(),
+                           self = std::move(self)](uintptr_t handle) -> arrow::Status {
+          tracing::ContextScope storage_scope(storage_context);
+          tracing::StartCurrent();
+          ARROW_ASSIGN_OR_RAISE(auto vxfile_unique, VortexFile::FromRawHandle(handle));
+          auto vxfile = std::shared_ptr<VortexFile>(std::move(vxfile_unique));
+          ARROW_ASSIGN_OR_RAISE(auto file_schema, import_vortex_file_schema(*vxfile));
+          ARROW_ASSIGN_OR_RAISE(auto row_ranges, get_vortex_splits(*vxfile));
+          auto memory_size_estimate =
+              estimate_memory_sizes(*vxfile, static_cast<size_t>(file_schema->num_fields()), self->path_);
+          ARROW_ASSIGN_OR_RAISE(
+              auto row_group_infos,
+              create_row_group_infos(vxfile->RowCount(), recalc_row_ranges(row_ranges, self->logical_chunk_rows_),
+                                     memory_size_estimate));
+          auto column_memory_weights =
+              memory_size_estimate
+                  ? std::make_shared<const std::vector<uint64_t>>(std::move(memory_size_estimate->column_sizes))
+                  : nullptr;
+          self->vxfile_ = std::move(vxfile);
+          self->file_schema_ = std::move(file_schema);
+          self->column_memory_weights_ = std::move(column_memory_weights);
+          self->row_group_infos_ = std::move(row_group_infos);
+          return arrow::Status::OK();
+        };
+        // Validation failures may call back synchronously, so transfer ownership
+        // before crossing the FFI boundary.
+        auto* raw_ctx = ctx.release();
 
-  vortex_open_file_async(reinterpret_cast<uint8_t*>(fs_holder_.get()), path_.data(), path_.size(), file_size_,
-                         footer_size_, vortex_open_async_callback, static_cast<void*>(raw_ctx));
-  return semi_future;
+        vortex_open_file_async(reinterpret_cast<uint8_t*>(fs_holder_.get()), path_.data(), path_.size(), file_size_,
+                               footer_size_, vortex_open_async_callback, static_cast<void*>(raw_ctx));
+        return semi_future;
+      },
+      "open_async", "vortex");
 }
 
 std::shared_ptr<arrow::Schema> VortexFormatReader::get_schema() const { return file_schema_; }
@@ -740,79 +775,89 @@ arrow::Result<std::vector<uint64_t>> VortexFormatReader::get_rg_column_memsz(int
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> VortexFormatReader::get_chunk(const int& row_group_index) {
-  assert(vxfile_);
-  if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_.size()) {
-    return arrow::Status::Invalid(
-        fmt::format("Vortex row group index {} out of range {}", row_group_index, row_group_infos_.size()));
-  }
-  ARROW_ASSIGN_OR_RAISE(auto chunkedarray,
-                        blocking_read(row_group_infos_[row_group_index].start_offset,
-                                      row_group_infos_[row_group_index].end_offset, kLargeCoalescingWindow));
-  assert(chunkedarray != nullptr);
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
+        assert(vxfile_);
+        if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_.size()) {
+          return arrow::Status::Invalid(
+              fmt::format("Vortex row group index {} out of range {}", row_group_index, row_group_infos_.size()));
+        }
+        ARROW_ASSIGN_OR_RAISE(auto chunkedarray,
+                              blocking_read(row_group_infos_[row_group_index].start_offset,
+                                            row_group_infos_[row_group_index].end_offset, kLargeCoalescingWindow));
+        assert(chunkedarray != nullptr);
 
-  if (chunkedarray->num_chunks() == 0) {
-    ARROW_ASSIGN_OR_RAISE(auto output_schema,
-                          output_schema_for_empty_batch(file_schema_, read_schema_, proj_cols_, path_));
-    return arrow::RecordBatch::MakeEmpty(output_schema);
-  }
+        if (chunkedarray->num_chunks() == 0) {
+          ARROW_ASSIGN_OR_RAISE(auto output_schema,
+                                output_schema_for_empty_batch(file_schema_, read_schema_, proj_cols_, path_));
+          return arrow::RecordBatch::MakeEmpty(output_schema);
+        }
 
-  assert(chunkedarray->num_chunks() == 1);
-  ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0)));
-  return rb;
+        assert(chunkedarray->num_chunks() == 1);
+        ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0)));
+        return rb;
+      },
+      false, "get_chunk", "vortex");
 }
 
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> VortexFormatReader::get_chunks(
     const std::vector<int>& rg_indices_in_file) {
-  assert(vxfile_);
-  std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
-  if (rg_indices_in_file.empty()) {
-    return rbs;
-  }
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
+        assert(vxfile_);
+        std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
+        if (rg_indices_in_file.empty()) {
+          return rbs;
+        }
 
 #ifndef NDEBUG
-  // verify rg_indices_in_file have been sorted
-  for (size_t i = 1; i < rg_indices_in_file.size(); ++i) {
-    assert(rg_indices_in_file[i] >= rg_indices_in_file[i - 1]);
-  }
+        // verify rg_indices_in_file have been sorted
+        for (size_t i = 1; i < rg_indices_in_file.size(); ++i) {
+          assert(rg_indices_in_file[i] >= rg_indices_in_file[i - 1]);
+        }
 #endif
 
-  std::vector<std::pair<uint64_t, uint64_t>> rg_idx_ranges;
-  for (const auto row_group_index : rg_indices_in_file) {
-    if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_.size()) {
-      return arrow::Status::Invalid(
-          fmt::format("Vortex row group index {} out of range {}", row_group_index, row_group_infos_.size()));
-    }
-  }
+        std::vector<std::pair<uint64_t, uint64_t>> rg_idx_ranges;
+        for (const auto row_group_index : rg_indices_in_file) {
+          if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_.size()) {
+            return arrow::Status::Invalid(
+                fmt::format("Vortex row group index {} out of range {}", row_group_index, row_group_infos_.size()));
+          }
+        }
 
-  // calc continuous ranges
-  // ex. [1, 2, 3, 5] -> [(1, 3), (5, 5)]
-  size_t start_idx = 0;
-  for (size_t i = 1; i < rg_indices_in_file.size(); ++i) {
-    if (rg_indices_in_file[i] != rg_indices_in_file[i - 1] + 1) {
-      rg_idx_ranges.emplace_back(rg_indices_in_file[start_idx], rg_indices_in_file[i - 1]);
-      start_idx = i;
-    }
-  }
+        // calc continuous ranges
+        // ex. [1, 2, 3, 5] -> [(1, 3), (5, 5)]
+        size_t start_idx = 0;
+        for (size_t i = 1; i < rg_indices_in_file.size(); ++i) {
+          if (rg_indices_in_file[i] != rg_indices_in_file[i - 1] + 1) {
+            rg_idx_ranges.emplace_back(rg_indices_in_file[start_idx], rg_indices_in_file[i - 1]);
+            start_idx = i;
+          }
+        }
 
-  if (start_idx < rg_indices_in_file.size()) {
-    rg_idx_ranges.emplace_back(rg_indices_in_file[start_idx], rg_indices_in_file.back());
-  }
+        if (start_idx < rg_indices_in_file.size()) {
+          rg_idx_ranges.emplace_back(rg_indices_in_file[start_idx], rg_indices_in_file.back());
+        }
 
-  for (const auto& rg_range : rg_idx_ranges) {
-    // load continuous chunks in one read
-    const auto& start_rg_info = row_group_infos_[rg_range.first];
-    const auto& end_rg_info = row_group_infos_[rg_range.second];
+        for (const auto& rg_range : rg_idx_ranges) {
+          // load continuous chunks in one read
+          const auto& start_rg_info = row_group_infos_[rg_range.first];
+          const auto& end_rg_info = row_group_infos_[rg_range.second];
 
-    ARROW_ASSIGN_OR_RAISE(auto chunked_array,
-                          blocking_read(start_rg_info.start_offset, end_rg_info.end_offset, kLargeCoalescingWindow));
-    // assign to rbs
-    for (size_t j = 0; j < chunked_array->num_chunks(); ++j) {
-      ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunked_array->chunk(j)));
-      rbs.emplace_back(rb);
-    }
-  }
+          ARROW_ASSIGN_OR_RAISE(auto chunked_array, blocking_read(start_rg_info.start_offset, end_rg_info.end_offset,
+                                                                  kLargeCoalescingWindow));
+          // assign to rbs
+          for (size_t j = 0; j < chunked_array->num_chunks(); ++j) {
+            ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunked_array->chunk(j)));
+            rbs.emplace_back(rb);
+          }
+        }
 
-  return rbs;
+        return rbs;
+      },
+      false, "get_chunks", "vortex");
 }
 
 arrow::Result<std::shared_ptr<FormatReader>> VortexFormatReader::clone_reader() {
@@ -928,50 +973,61 @@ arrow::Result<std::shared_ptr<arrow::ChunkedArray>> VortexFormatReader::blocking
 }
 
 arrow::Result<std::shared_ptr<arrow::Table>> VortexFormatReader::take(const std::vector<int64_t>& row_indices) {
-  assert(vxfile_);
-  ARROW_ASSIGN_OR_RAISE(auto scan_builder, vxfile_->CreateScanBuilder(kSmallCoalescingWindow));
-  if (!proj_cols_.empty()) {
-    scan_builder.WithProjection(build_projection(proj_cols_));
-  }
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::Table>> {
+        assert(vxfile_);
+        ARROW_ASSIGN_OR_RAISE(auto scan_builder, vxfile_->CreateScanBuilder(kSmallCoalescingWindow));
+        if (!proj_cols_.empty()) {
+          scan_builder.WithProjection(build_projection(proj_cols_));
+        }
 
-  if (read_schema_) {
-    ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
-    ARROW_RETURN_NOT_OK(
-        MakeBridgeErrorStatus("Failed to take from vortex file", scan_builder.WithOutputSchema(c_arrow_schema)));
-  }
+        if (read_schema_) {
+          ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
+          ARROW_RETURN_NOT_OK(
+              MakeBridgeErrorStatus("Failed to take from vortex file", scan_builder.WithOutputSchema(c_arrow_schema)));
+        }
 
-  ARROW_ASSIGN_OR_RAISE(auto include_indices, validate_and_cast_row_indices(row_indices, vxfile_->RowCount(), path_));
-  scan_builder.WithIncludeByIndex(include_indices.data(), include_indices.size());
+        ARROW_ASSIGN_OR_RAISE(auto include_indices,
+                              validate_and_cast_row_indices(row_indices, vxfile_->RowCount(), path_));
+        scan_builder.WithIncludeByIndex(include_indices.data(), include_indices.size());
 
-  auto array_stream = std::move(scan_builder).IntoStream();
-  if (!array_stream.ok()) {
-    return MakeBridgeErrorStatus("Failed to take from vortex file", array_stream.status());
-  }
-  auto stream = std::move(array_stream).ValueOrDie();
-  auto chunkedarray_result = arrow::ImportChunkedArray(&stream);
-  if (!chunkedarray_result.ok()) {
-    return MakeBridgeErrorStatus("Failed to import vortex take result", chunkedarray_result.status());
-  }
-  auto chunkedarray = chunkedarray_result.ValueOrDie();
+        auto array_stream = std::move(scan_builder).IntoStream();
+        if (!array_stream.ok()) {
+          return MakeBridgeErrorStatus("Failed to take from vortex file", array_stream.status());
+        }
+        auto stream = std::move(array_stream).ValueOrDie();
+        auto chunkedarray_result = arrow::ImportChunkedArray(&stream);
+        if (!chunkedarray_result.ok()) {
+          return MakeBridgeErrorStatus("Failed to import vortex take result", chunkedarray_result.status());
+        }
+        auto chunkedarray = chunkedarray_result.ValueOrDie();
 
-  // out of range
-  if (chunkedarray->num_chunks() == 0) {
-    return arrow::Status::Invalid(fmt::format("out of row range[0, {}].", vxfile_->RowCount()));
-  }
+        // out of range
+        if (chunkedarray->num_chunks() == 0) {
+          return arrow::Status::Invalid(fmt::format("out of row range[0, {}].", vxfile_->RowCount()));
+        }
 
-  std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
-  for (size_t i = 0; i < chunkedarray->num_chunks(); ++i) {
-    ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(i)));
-    rbs.emplace_back(rb);
-  }
+        std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
+        for (size_t i = 0; i < chunkedarray->num_chunks(); ++i) {
+          ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(i)));
+          rbs.emplace_back(rb);
+        }
 
-  return arrow::Table::FromRecordBatches(rbs);
+        return arrow::Table::FromRecordBatches(rbs);
+      },
+      false, "take", "vortex");
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> VortexFormatReader::read_with_range(
     const uint64_t& start_offset, const uint64_t& end_offset) {
-  assert(vxfile_);
-  return streaming_read(start_offset, end_offset, kLargeCoalescingWindow);
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> {
+        assert(vxfile_);
+        return streaming_read(start_offset, end_offset, kLargeCoalescingWindow);
+      },
+      false, "read_with_range", "vortex");
 }
 
 arrow::Result<uint64_t> VortexFormatReader::total_mem_usage() {
@@ -982,6 +1038,12 @@ arrow::Result<uint64_t> VortexFormatReader::total_mem_usage() {
 
 template <typename T>
 struct VortexAsyncContext {
+  explicit VortexAsyncContext(tracing::OperationTrace trace) : trace(std::move(trace)) {}
+  tracing::OperationTrace trace;
+  void Complete(arrow::Result<T> result) {
+    trace.Finish(result.status());
+    promise.setValue(std::move(result));
+  }
   folly::Promise<arrow::Result<T>> promise;
   // Rust writes the owned C stream here before invoking a success callback.
   ArrowArrayStream stream{};
@@ -1005,8 +1067,9 @@ static void vortex_take_async_callback(void* ctx_raw,
                                                                    &vortex_free_error_string);
 
   try {
+    tracing::ContextScope scope(ctx->trace.context());
     if (error) {
-      ctx->promise.setValue(MakeBridgeErrorStatus("Failed to take from vortex file", error.get()));
+      ctx->Complete(MakeBridgeErrorStatus("Failed to take from vortex file", error.get()));
       return;
     }
 
@@ -1014,13 +1077,13 @@ static void vortex_take_async_callback(void* ctx_raw,
     // context. Importing it transfers the stream into Arrow-owned objects.
     auto result = arrow::ImportChunkedArray(&ctx->stream);
     if (!result.ok()) {
-      ctx->promise.setValue(MakeBridgeErrorStatus("Failed to import vortex take result", result.status()));
+      ctx->Complete(MakeBridgeErrorStatus("Failed to import vortex take result", result.status()));
       return;
     }
 
     auto chunked_array = result.ValueUnsafe();
     if (chunked_array->num_chunks() == 0) {
-      ctx->promise.setValue(arrow::Status::Invalid("take_async: empty result"));
+      ctx->Complete(arrow::Status::Invalid("take_async: empty result"));
       return;
     }
 
@@ -1031,17 +1094,18 @@ static void vortex_take_async_callback(void* ctx_raw,
     for (int i = 0; i < chunked_array->num_chunks(); ++i) {
       auto rb = arrow::RecordBatch::FromStructArray(chunked_array->chunk(i));
       if (!rb.ok()) {
-        ctx->promise.setValue(rb.status());
+        ctx->Complete(rb.status());
         return;
       }
       rbs.emplace_back(rb.ValueUnsafe());
     }
 
-    ctx->promise.setValue(arrow::Table::FromRecordBatches(rbs));
+    ctx->Complete(arrow::Table::FromRecordBatches(rbs));
   } catch (const std::exception& e) {
-    set_vortex_callback_exception(ctx->promise, "Failed to process vortex take result", e.what());
+    set_vortex_callback_exception(ctx->promise, ctx->trace, "Failed to process vortex take result", e.what());
   } catch (...) {
-    set_vortex_callback_exception(ctx->promise, "Failed to process vortex take result", "unknown exception");
+    set_vortex_callback_exception(ctx->promise, ctx->trace, "Failed to process vortex take result",
+                                  "unknown exception");
   }
 }
 
@@ -1055,8 +1119,9 @@ static void vortex_read_range_async_callback(void* ctx_raw,
                                                                    &vortex_free_error_string);
 
   try {
+    tracing::ContextScope scope(ctx->trace.context());
     if (error) {
-      ctx->promise.setValue(MakeBridgeErrorStatus("Failed to read vortex file", error.get()));
+      ctx->Complete(MakeBridgeErrorStatus("Failed to read vortex file", error.get()));
       return;
     }
 
@@ -1064,94 +1129,106 @@ static void vortex_read_range_async_callback(void* ctx_raw,
     // therefore exposes materialized batches rather than a live Tokio stream.
     auto reader_result = arrow::ImportRecordBatchReader(&ctx->stream);
     if (!reader_result.ok()) {
-      ctx->promise.setValue(
-          MakeBridgeErrorStatus("Failed to import vortex record batch reader", reader_result.status()));
+      ctx->Complete(MakeBridgeErrorStatus("Failed to import vortex record batch reader", reader_result.status()));
       return;
     }
-    ctx->promise.setValue(internal::WrapVortexRecordBatchReader(reader_result.ValueOrDie()));
+    ctx->Complete(internal::WrapVortexRecordBatchReader(reader_result.ValueOrDie()));
   } catch (const std::exception& e) {
-    set_vortex_callback_exception(ctx->promise, "Failed to process vortex range-read result", e.what());
+    set_vortex_callback_exception(ctx->promise, ctx->trace, "Failed to process vortex range-read result", e.what());
   } catch (...) {
-    set_vortex_callback_exception(ctx->promise, "Failed to process vortex range-read result", "unknown exception");
+    set_vortex_callback_exception(ctx->promise, ctx->trace, "Failed to process vortex range-read result",
+                                  "unknown exception");
   }
 }
 
 folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> VortexFormatReader::take_async(
     const std::vector<int64_t>& row_indices) {
-  assert(vxfile_);
+  return tracing::RunNativeAsync(
+      "storage.format.read",
+      [&](tracing::OperationTrace trace) -> folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> {
+        assert(vxfile_);
 
-  // Configure one native scan from the already-open Vortex file. Actual scan
-  // execution is handed to the shared Rust Tokio runtime below.
-  FOLLY_ARROW_ASSIGN_OR_RAISE(auto scan_builder, vxfile_->CreateScanBuilder(kSmallCoalescingWindow));
-  // Projection is pushed into Vortex so unneeded columns are not materialized.
-  if (!proj_cols_.empty()) {
-    scan_builder.WithProjection(build_projection(proj_cols_));
-  }
+        // Configure one native scan from the already-open Vortex file. Actual scan
+        // execution is handed to the shared Rust Tokio runtime below.
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto scan_builder, vxfile_->CreateScanBuilder(kSmallCoalescingWindow));
+        // Projection is pushed into Vortex so unneeded columns are not materialized.
+        if (!proj_cols_.empty()) {
+          scan_builder.WithProjection(build_projection(proj_cols_));
+        }
 
-  // read_schema_ carries logical Arrow types that may require conversion on the
-  // Rust side; it is independent of the physical column projection above.
-  if (read_schema_) {
-    FOLLY_ARROW_ASSIGN_OR_RAISE(auto c_schema, export_c_arrow_schema(read_schema_));
-    FOLLY_ARROW_RETURN_NOT_OK(
-        MakeBridgeErrorStatus("Failed to take from vortex file", scan_builder.WithOutputSchema(c_schema)));
-  }
+        // read_schema_ carries logical Arrow types that may require conversion on the
+        // Rust side; it is independent of the physical column projection above.
+        if (read_schema_) {
+          FOLLY_ARROW_ASSIGN_OR_RAISE(auto c_schema, export_c_arrow_schema(read_schema_));
+          FOLLY_ARROW_RETURN_NOT_OK(
+              MakeBridgeErrorStatus("Failed to take from vortex file", scan_builder.WithOutputSchema(c_schema)));
+        }
 
-  // The bridge accepts unsigned file-local indices. Validate before the FFI
-  // handoff and attach the exact sparse-row selection to the scan.
-  FOLLY_ARROW_ASSIGN_OR_RAISE(auto include_indices,
-                              validate_and_cast_row_indices(row_indices, vxfile_->RowCount(), path_));
-  scan_builder.WithIncludeByIndex(include_indices.data(), include_indices.size());
+        // The bridge accepts unsigned file-local indices. Validate before the FFI
+        // handoff and attach the exact sparse-row selection to the scan.
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto include_indices,
+                                    validate_and_cast_row_indices(row_indices, vxfile_->RowCount(), path_));
+        scan_builder.WithIncludeByIndex(include_indices.data(), include_indices.size());
 
-  auto ctx = std::make_unique<VortexAsyncContext<std::shared_ptr<arrow::Table>>>();
-  auto semi_future = ctx->promise.getSemiFuture();
-  // Rust consumes the scan handle and may invoke the callback synchronously on
-  // setup failure, so hand off the callback context before the FFI call.
-  uintptr_t handle = std::move(scan_builder).IntoRawHandle();
-  auto* raw_ctx = ctx.release();
+        auto ctx = std::make_unique<VortexAsyncContext<std::shared_ptr<arrow::Table>>>(trace);
+        auto semi_future = ctx->promise.getSemiFuture();
+        // Rust consumes the scan handle and may invoke the callback synchronously on
+        // setup failure, so hand off the callback context before the FFI call.
+        uintptr_t handle = std::move(scan_builder).IntoRawHandle();
+        auto* raw_ctx = ctx.release();
 
-  // This call schedules collection on Tokio. The Folly promise is only the C++
-  // completion bridge; a caller-supplied Folly executor does not run the scan.
-  vortex_scan_collect_async(handle, &raw_ctx->stream, vortex_take_async_callback, static_cast<void*>(raw_ctx));
-  return semi_future;
+        // This call schedules collection on Tokio. The Folly promise is only the C++
+        // completion bridge; a caller-supplied Folly executor does not run the scan.
+        vortex_scan_collect_async(handle, &raw_ctx->stream, vortex_take_async_callback, static_cast<void*>(raw_ctx));
+        return semi_future;
+      },
+      "take_async", "vortex");
 }
 
 folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>> VortexFormatReader::read_with_range_async(
     uint64_t start_offset, uint64_t end_offset) {
-  assert(vxfile_);
+  return tracing::RunNativeAsync(
+      "storage.format.read",
+      [&](tracing::OperationTrace trace)
+          -> folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>> {
+        assert(vxfile_);
 
-  // Match the synchronous range path's I/O coalescing. The first call may
-  // synchronously create a cached view, but it reuses the already-loaded footer.
-  FOLLY_ARROW_ASSIGN_OR_RAISE(auto scan_builder, vxfile_->CreateScanBuilder(kLargeCoalescingWindow));
-  // Push projection, logical output conversion, predicate, and the half-open
-  // file-local row range into a single native scan before handing it to Rust.
-  if (!proj_cols_.empty()) {
-    scan_builder.WithProjection(build_projection(proj_cols_));
-  }
+        // Match the synchronous range path's I/O coalescing. The first call may
+        // synchronously create a cached view, but it reuses the already-loaded footer.
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto scan_builder, vxfile_->CreateScanBuilder(kLargeCoalescingWindow));
+        // Push projection, logical output conversion, predicate, and the half-open
+        // file-local row range into a single native scan before handing it to Rust.
+        if (!proj_cols_.empty()) {
+          scan_builder.WithProjection(build_projection(proj_cols_));
+        }
 
-  if (read_schema_) {
-    FOLLY_ARROW_ASSIGN_OR_RAISE(auto c_schema, export_c_arrow_schema(read_schema_));
-    FOLLY_ARROW_RETURN_NOT_OK(
-        MakeBridgeErrorStatus("Failed to read vortex file", scan_builder.WithOutputSchema(c_schema)));
-  }
+        if (read_schema_) {
+          FOLLY_ARROW_ASSIGN_OR_RAISE(auto c_schema, export_c_arrow_schema(read_schema_));
+          FOLLY_ARROW_RETURN_NOT_OK(
+              MakeBridgeErrorStatus("Failed to read vortex file", scan_builder.WithOutputSchema(c_schema)));
+        }
 
-  if (parsed_predicate_) {
-    scan_builder.WithFilter(*parsed_predicate_);
-  }
+        if (parsed_predicate_) {
+          scan_builder.WithFilter(*parsed_predicate_);
+        }
 
-  // Vortex interprets this as the file-local interval [start_offset, end_offset).
-  scan_builder.WithRowRange(start_offset, end_offset);
+        // Vortex interprets this as the file-local interval [start_offset, end_offset).
+        scan_builder.WithRowRange(start_offset, end_offset);
 
-  auto ctx = std::make_unique<VortexAsyncContext<std::shared_ptr<arrow::RecordBatchReader>>>();
-  auto semi_future = ctx->promise.getSemiFuture();
-  // Rust consumes the scan handle and may invoke the callback synchronously on
-  // setup failure, so hand off the callback context before the FFI call.
-  uintptr_t handle = std::move(scan_builder).IntoRawHandle();
-  auto* raw_ctx = ctx.release();
+        auto ctx = std::make_unique<VortexAsyncContext<std::shared_ptr<arrow::RecordBatchReader>>>(trace);
+        auto semi_future = ctx->promise.getSemiFuture();
+        // Rust consumes the scan handle and may invoke the callback synchronously on
+        // setup failure, so hand off the callback context before the FFI call.
+        uintptr_t handle = std::move(scan_builder).IntoRawHandle();
+        auto* raw_ctx = ctx.release();
 
-  // Rust collects the selected batches on Tokio, writes the Arrow C stream into
-  // raw_ctx, and invokes the callback that fulfills this Folly future.
-  vortex_scan_collect_async(handle, &raw_ctx->stream, vortex_read_range_async_callback, static_cast<void*>(raw_ctx));
-  return semi_future;
+        // Rust collects the selected batches on Tokio, writes the Arrow C stream into
+        // raw_ctx, and invokes the callback that fulfills this Folly future.
+        vortex_scan_collect_async(handle, &raw_ctx->stream, vortex_read_range_async_callback,
+                                  static_cast<void*>(raw_ctx));
+        return semi_future;
+      },
+      "read_with_range_async", "vortex");
 }
 
 }  // namespace milvus_storage::vortex

@@ -6,4 +6,4 @@ Description: Milvus Storage
 Version: @PROJECT_VERSION@
 
 Libs: -L${libdir} -lmilvus-storage -Wl,-rpath,"${libdir}"
-Cflags: -I${includedir}
+Cflags: -DOPENTELEMETRY_STL_VERSION=2017 -I${includedir}

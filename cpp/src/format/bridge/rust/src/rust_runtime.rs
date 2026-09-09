@@ -71,7 +71,32 @@ fn default_runtime_thread_count() -> usize {
 ///
 /// Lance, Iceberg, and Vortex all run through this runtime so the bridge does
 /// not create separate Tokio worker and blocking thread pools per format.
-pub(crate) static TOKIO_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+pub(crate) struct StorageTokioRuntime(tokio::runtime::Runtime);
+
+impl StorageTokioRuntime {
+    pub(crate) fn handle(&self) -> &tokio::runtime::Handle {
+        self.0.handle()
+    }
+    pub(crate) fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
+        self.0.block_on(crate::storage_tracing::instrument(future))
+    }
+    pub(crate) fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.0.spawn(crate::storage_tracing::instrument(future))
+    }
+    pub(crate) fn spawn_blocking<F, R>(&self, task: F) -> tokio::task::JoinHandle<R>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        self.0.spawn_blocking(crate::storage_tracing::bind(task))
+    }
+}
+
+pub(crate) static TOKIO_RT: LazyLock<StorageTokioRuntime> = LazyLock::new(|| {
     let config = {
         let mut state = RUST_RUNTIME.state.lock().unwrap();
         state.initialized = true;
@@ -88,7 +113,7 @@ pub(crate) static TOKIO_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(||
         builder.worker_threads(thread_count);
         builder.max_blocking_threads(thread_count);
     }
-    builder.build().expect("Failed to create tokio runtime")
+    StorageTokioRuntime(builder.build().expect("Failed to create tokio runtime"))
 });
 
 #[cfg(test)]
