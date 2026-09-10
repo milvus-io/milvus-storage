@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "iceberg_bridge.h"
-#include "bridge_util.h"
+#include "iceberg/iceberg_bridge.h"
+#include "runtime/bridge_util.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 
 #include "rust/cxx.h"

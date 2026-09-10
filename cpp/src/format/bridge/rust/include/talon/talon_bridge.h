@@ -24,7 +24,7 @@
 #include <arrow/util/future.h>
 
 #include "rust/cxx.h"
-#include "rust-bridge/talon_bridge.h"
+#include "rust-bridge/talon/talon_bridge.h"
 
 namespace milvus_storage::talon {
 

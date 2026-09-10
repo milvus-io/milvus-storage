@@ -34,7 +34,7 @@
 #include "milvus-storage/filesystem/util_internal.h"
 #include "milvus-storage/format/vortex/vortex_field_layout_internal.h"
 #include "milvus-storage/format/vortex/vortex_types.h"
-#include "vortex_bridge.h"
+#include "vortex/vortex_bridge.h"
 
 namespace milvus_storage::vortex {
 

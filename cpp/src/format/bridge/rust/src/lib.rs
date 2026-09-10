@@ -12,24 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[path = "filesystem/filesystem_opendal.rs"]
 mod filesystem_opendal;
+#[path = "iceberg/iceberg_opendal.rs"]
 mod iceberg_opendal;
+#[path = "iceberg/iceberg_bridgeimpl.rs"]
 mod iceberg_bridgeimpl;
+#[path = "iceberg/iceberg_testutil.rs"]
 mod iceberg_testutil;
+#[path = "lance/lance_bridgeimpl.rs"]
 mod lance_bridgeimpl;
+#[path = "lance/lance_memory_estimator.rs"]
 mod lance_memory_estimator;
+#[path = "lance/lance_object_store.rs"]
 mod lance_object_store;
+#[path = "paimon/paimon_bridgeimpl.rs"]
 mod paimon_bridgeimpl;
+#[path = "paimon/paimon_split_serde.rs"]
 mod paimon_split_serde;
+#[path = "paimon/paimon_testutil.rs"]
 mod paimon_testutil;
+#[path = "vortex/predicate_parser.rs"]
 mod predicate_parser;
+#[path = "runtime/rust_runtime.rs"]
 mod rust_runtime;
 #[cfg(feature = "talon")]
+#[path = "talon/talon_bridge.rs"]
 mod talon_bridge;
+#[path = "vortex/vortex_bridgeimpl.rs"]
 mod vortex_bridgeimpl;
+#[path = "vortex/vortex_layout_strategy_v2.rs"]
 mod vortex_layout_strategy_v2;
 
+#[path = "filesystem/filesystem_c.rs"]
 mod filesystem_c;
+#[path = "filesystem/filesystem_object_store.rs"]
 mod filesystem_object_store;
 use iceberg_bridgeimpl::*;
 use iceberg_testutil::*;

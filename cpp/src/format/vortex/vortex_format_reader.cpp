@@ -16,7 +16,7 @@
 
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/format/vortex/vortex_planner.h"
-#include "vortex_bridge.h"
+#include "vortex/vortex_bridge.h"
 
 #include <functional>
 #include <memory>

@@ -40,7 +40,7 @@
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/lance/lance_common.h"
-#include "bridge_util.h"
+#include "runtime/bridge_util.h"
 
 namespace milvus_storage::lance {
 
