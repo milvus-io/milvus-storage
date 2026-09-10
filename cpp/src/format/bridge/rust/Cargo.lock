@@ -7347,6 +7347,7 @@ dependencies = [
  "bytes",
  "chrono",
  "crc32fast",
+ "custom-labels",
  "cxx",
  "cxx-build",
  "futures",
