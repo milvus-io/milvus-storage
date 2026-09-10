@@ -66,23 +66,25 @@ class TracedFile : public arrow::io::RandomAccessFile {
       return file_->ReadManyAsync(context, ranges);
     OperationTrace trace("storage.fs.read", false, true);
     ContextScope scope(trace.context());
-    trace.Attribute("storage.backend", backend_.c_str());
-    trace.Attribute("storage.range_count", static_cast<int64_t>(ranges.size()));
-    int64_t requested = 0;
-    for (const auto& range : ranges) {
-      auto length = std::max<int64_t>(0, range.length);
-      requested += std::min(length, std::numeric_limits<int64_t>::max() - requested);
-    }
-    trace.Attribute("storage.requested_bytes", requested);
-    struct Completion {
-      explicit Completion(size_t count, OperationTrace trace) : remaining(count), trace(std::move(trace)) {}
-      std::mutex mutex;
-      size_t remaining;
-      int64_t bytes = 0;
-      arrow::Status status;
-      OperationTrace trace;
-    };
     try {
+      if (!trace.IsEnabled())
+        return file_->ReadManyAsync(context, ranges);
+      trace.Attribute("storage.backend", backend_.c_str());
+      trace.Attribute("storage.range_count", static_cast<int64_t>(ranges.size()));
+      int64_t requested = 0;
+      for (const auto& range : ranges) {
+        auto length = std::max<int64_t>(0, range.length);
+        requested += std::min(length, std::numeric_limits<int64_t>::max() - requested);
+      }
+      trace.Attribute("storage.requested_bytes", requested);
+      struct Completion {
+        explicit Completion(size_t count, OperationTrace trace) : remaining(count), trace(std::move(trace)) {}
+        std::mutex mutex;
+        size_t remaining;
+        int64_t bytes = 0;
+        arrow::Status status;
+        OperationTrace trace;
+      };
       auto futures = file_->ReadManyAsync(context, ranges);
       if (futures.empty())
         trace.Finish(arrow::Status::OK());
@@ -149,6 +151,8 @@ class TracedFile : public arrow::io::RandomAccessFile {
     Attributes(trace, position, nbytes);
     try {
       auto future = fn();
+      if (!trace.IsEnabled())
+        return future;
       future.AddCallback([trace, nbytes](const arrow::Result<typename decltype(future)::ValueType>& result) {
         trace.AccountRead(nbytes, result.ok() ? Bytes(*result) : 0);
         if (result.ok()) {

@@ -52,6 +52,8 @@ struct SpanState {
 struct Context {
   ot::SpanContext parent = ot::SpanContext::GetInvalid();
   std::shared_ptr<SpanState> operation;
+  // Freeze a disabled operation without allocating SpanState, Budget or a mutex.
+  bool disabled = false;
 };
 namespace {
 ot::SpanContext Parent(const ContextPtr& context) {
@@ -155,7 +157,7 @@ void SetTraceOptions(const TraceOptions& options) {
 OperationTrace::OperationTrace(
     const char* name, bool lazy, bool io, ot::SpanContext link, const char* operation, const char* format) {
   context_ = Capture();
-  if (!context_)
+  if (!context_ || context_->disabled)
     return;
   // The cache leader already owns the physical metadata load. A format open
   // below that leader must not create another span for the same work.
@@ -184,6 +186,10 @@ OperationTrace::OperationTrace(
       std::lock_guard<std::mutex> lock(configuration_mutex);
       config = configuration;
     }
+    if (!config->tracer || (io && !config->options.io_spans)) {
+      context_ = std::make_shared<Context>(Context{context_->parent, nullptr, true});
+      return;
+    }
     budget = std::make_shared<Budget>();
   }
   auto state = std::make_shared<SpanState>();
@@ -195,13 +201,6 @@ OperationTrace::OperationTrace(
   state->config = std::move(config);
   state->budget = std::move(budget);
   state->root = root;
-  // Even a null provider is a fixed configuration snapshot for this operation.
-  // Children must not begin exporting halfway through a previously disabled read.
-  if (io && !state->config->options.io_spans) {
-    auto disabled = std::make_shared<Configuration>(*state->config);
-    disabled->tracer = nullptr;
-    state->config = std::move(disabled);
-  }
   if (state->root)
     state->budget->used.store(1, std::memory_order_relaxed);
   context_ = std::make_shared<Context>(Context{ot::SpanContext::GetInvalid(), std::move(state)});
@@ -209,6 +208,7 @@ OperationTrace::OperationTrace(
   if (!lazy)
     Start();
 }
+bool OperationTrace::IsEnabled() const { return context_ && context_->operation; }
 void OperationTrace::AccountRead(int64_t requested, int64_t returned) const {
   if (!context_ || !context_->operation)
     return;
