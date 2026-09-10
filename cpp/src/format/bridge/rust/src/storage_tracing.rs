@@ -39,18 +39,38 @@ where
     }
 }
 
-// This delegates to the existing Tokio scheduling policy. In particular CPU
-// tasks still run on worker threads and blocking I/O on the blocking pool.
+// Match Vortex's Tokio scheduling and profiling labels, submitting the tracing
+// wrapper directly to Tokio so an already boxed Vortex task is not boxed again.
+// Empty snapshots still attach on every poll/task to mask foreign parents.
 struct TracedExecutor(tokio::runtime::Handle);
 impl Executor for TracedExecutor {
     fn spawn(&self, future: BoxFuture<'static, ()>) -> AbortHandleRef {
-        Executor::spawn(&self.0, Box::pin(instrument(future)))
+        let future = instrument(future);
+        #[cfg(unix)]
+        let future = {
+            use custom_labels::asynchronous::Label;
+            future.with_current_labels()
+        };
+        Box::new(self.0.spawn(future).abort_handle())
     }
     fn spawn_cpu(&self, task: Box<dyn FnOnce() + Send + 'static>) -> AbortHandleRef {
-        Executor::spawn_cpu(&self.0, Box::new(bind(task)))
+        let task = bind(task);
+        let future = async move { task() };
+        #[cfg(unix)]
+        let future = {
+            use custom_labels::asynchronous::Label;
+            future.with_current_labels()
+        };
+        Box::new(self.0.spawn(future).abort_handle())
     }
     fn spawn_blocking_io(&self, task: Box<dyn FnOnce() + Send + 'static>) -> AbortHandleRef {
-        Executor::spawn_blocking_io(&self.0, Box::new(bind(task)))
+        let task = bind(task);
+        #[cfg(unix)]
+        let task = {
+            let mut labels = custom_labels::Labelset::clone_from_current();
+            move || labels.enter(task)
+        };
+        Box::new(self.0.spawn_blocking(task).abort_handle())
     }
 }
 pub(crate) struct TracedRuntime {

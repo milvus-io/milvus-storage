@@ -682,25 +682,21 @@ impl ObjectStoreWriter {
     async fn write_byte_buffer(&self, buffer: ByteBuffer) -> io::Result<ByteBuffer> {
         let inner = self.inner.clone();
         self.handle
-            .spawn_blocking(crate::storage_tracing::bind(move || {
+            .spawn_blocking(move || {
                 inner.write(buffer.as_slice())?;
                 Ok::<ByteBuffer, io::Error>(buffer)
-            }))
+            })
             .await
     }
 
     async fn flush(&self) -> Result<(), VortexError> {
         let inner = self.inner.clone();
-        self.handle
-            .spawn_blocking(crate::storage_tracing::bind(move || inner.flush()))
-            .await
+        self.handle.spawn_blocking(move || inner.flush()).await
     }
 
     async fn close(&self) -> Result<(), VortexError> {
         let inner = self.inner.clone();
-        self.handle
-            .spawn_blocking(crate::storage_tracing::bind(move || inner.close()))
-            .await
+        self.handle.spawn_blocking(move || inner.close()).await
     }
 }
 
@@ -923,7 +919,7 @@ impl VortexReadAt for ObjectStoreReadSourceCpp {
             // Pass path as bytes to FFI (no allocation across FFI boundaries)
             let path_bytes = path.into_bytes();
             // Return Result from blocking task to propagate errors cleanly
-            let task = handle.spawn_blocking(crate::storage_tracing::bind(move || unsafe {
+            let task = handle.spawn_blocking(move || unsafe {
                 let mut out_size: u64 = 0;
                 let mut result = loon_filesystem_get_file_info(
                     inner.as_ptr(),
@@ -938,7 +934,7 @@ impl VortexReadAt for ObjectStoreReadSourceCpp {
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
                 Ok::<u64, std::io::Error>(out_size)
-            }));
+            });
             let size: u64 = Compat::new(task).await.map_err(|e| vortex_err!("{}", e))?;
             Ok(size)
         })
@@ -965,27 +961,25 @@ impl VortexReadAt for ObjectStoreReadSourceCpp {
             }
 
             // Offload sync FFI to the blocking pool and reuse the pre-opened reader handle.
-            let blocking = handle.spawn_blocking(crate::storage_tracing::bind(
-                move || -> VortexResult<ByteBuffer> {
-                    let trace_start = record_io_start();
-                    let mut buffer = ByteBufferMut::with_capacity_aligned(length, alignment);
-                    let out_data = buffer.spare_capacity_mut().as_mut_ptr().cast::<u8>();
+            let blocking = handle.spawn_blocking(move || -> VortexResult<ByteBuffer> {
+                let trace_start = record_io_start();
+                let mut buffer = ByteBufferMut::with_capacity_aligned(length, alignment);
+                let out_data = buffer.spare_capacity_mut().as_mut_ptr().cast::<u8>();
 
-                    let mut result = unsafe {
-                        loon_filesystem_reader_readat(reader.as_ptr(), offset, len, out_data)
-                    };
+                let mut result = unsafe {
+                    loon_filesystem_reader_readat(reader.as_ptr(), offset, len, out_data)
+                };
 
-                    check_loon_ffi_result(
-                        &mut result,
-                        "Failed to readat from ObjectStoreReadSourceCpp",
-                    )
-                    .map_err(into_vortex_error)?;
-                    record_io_end(trace_start, offset, len);
+                check_loon_ffi_result(
+                    &mut result,
+                    "Failed to readat from ObjectStoreReadSourceCpp",
+                )
+                .map_err(into_vortex_error)?;
+                record_io_end(trace_start, offset, len);
 
-                    unsafe { buffer.set_len(length) };
-                    Ok(buffer.freeze())
-                },
-            ));
+                unsafe { buffer.set_len(length) };
+                Ok(buffer.freeze())
+            });
 
             let buffer: ByteBuffer = Compat::new(blocking).await?;
             Ok(BufferHandle::new_host(buffer))

@@ -103,6 +103,32 @@ TEST_F(StorageTracingTest, NullProviderDoesNotUseGlobalProvider) {
   EXPECT_TRUE(Work().ok());
   EXPECT_TRUE(data->GetSpans().empty());
 }
+TEST_F(StorageTracingTest, NullProviderKeepsReadyFutureReady) {
+  SetTracerProvider(nullptr);
+  auto scope = AttachParent(Parent(1));
+  auto future = RunAsync("storage.read", [] {
+    return RunAsync("child", [] { return folly::makeSemiFuture(arrow::Status::Invalid("original")); });
+  });
+  EXPECT_TRUE(future.isReady());
+  EXPECT_EQ(std::move(future).get(), arrow::Status::Invalid("original"));
+  EXPECT_TRUE(data->GetSpans().empty());
+}
+TEST_F(StorageTracingTest, NullProviderAsyncExceptionsBecomeResults) {
+  using Result = arrow::Result<int64_t>;
+  SetTracerProvider(nullptr);
+  auto scope = AttachParent(Parent(1));
+  auto submission = RunAsync("submission", []() -> folly::SemiFuture<Result> { throw 42; });
+  EXPECT_TRUE(std::move(submission).get().status().IsUnknownError());
+  auto ready = RunAsync("ready", [] {
+    return folly::makeSemiFuture<Result>(folly::make_exception_wrapper<std::runtime_error>("private"));
+  });
+  EXPECT_TRUE(ready.isReady());
+  EXPECT_TRUE(std::move(ready).get().status().IsUnknownError());
+  auto deferred =
+      RunAsync("deferred", [] { return folly::makeSemiFuture().deferValue([](folly::Unit) -> Result { throw 42; }); });
+  EXPECT_TRUE(std::move(deferred).get().status().IsUnknownError());
+  EXPECT_TRUE(data->GetSpans().empty());
+}
 TEST_F(StorageTracingTest, UnsampledParentIsNotPromotedToRoot) {
   SetTracerProvider(Provider(data, true));
   auto parent = Parent(1);
@@ -332,6 +358,66 @@ class ControlledFile final : public arrow::io::BufferReader, public NonBlockingR
   arrow::Future<int64_t> ReadAtAsyncInto(int64_t, int64_t, uint8_t*) override { return pending; }
   arrow::Future<int64_t> GetSizeAsync() override { return arrow::Future<int64_t>::MakeFinished(4); }
 };
+TEST_F(StorageTracingTest, DisabledIOFuturesDoNotRetainTracingContexts) {
+  class PendingFile final : public arrow::io::BufferReader {
+ public:
+    PendingFile() : arrow::io::BufferReader(arrow::Buffer::FromString("abcd")) {}
+    arrow::Future<std::shared_ptr<arrow::Buffer>> pending = arrow::Future<std::shared_ptr<arrow::Buffer>>::Make();
+    arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const arrow::io::IOContext&, int64_t, int64_t) override {
+      return pending;
+    }
+    std::vector<arrow::Future<std::shared_ptr<arrow::Buffer>>> ReadManyAsync(
+        const arrow::io::IOContext&, const std::vector<arrow::io::ReadRange>& ranges) override {
+      return std::vector<arrow::Future<std::shared_ptr<arrow::Buffer>>>(ranges.size(), pending);
+    }
+  };
+  SetTracerProvider(nullptr);
+  auto raw = std::make_shared<PendingFile>();
+  auto file = WrapFile(raw, "test");
+  std::weak_ptr<const Context> captured;
+  std::vector<arrow::Future<std::shared_ptr<arrow::Buffer>>> futures;
+  {
+    auto parent = AttachParent(Parent(1));
+    OperationTrace operation("storage.read");
+    ContextScope scope(operation.context());
+    captured = operation.context();
+    futures = file->ReadManyAsync(file->io_context(), {{0, 1}, {1, 1}});
+    futures.push_back(file->ReadAsync(file->io_context(), 0, 2));
+    futures.push_back(Observe(raw->pending, operation));
+  }
+  // Only tracing callbacks could retain this context: the source future has no
+  // context of its own. Disabled reads return it without completion observers.
+  EXPECT_TRUE(captured.expired());
+  SetTracerProvider(Provider(data));
+  auto foreign = AttachParent(Parent(2));
+  raw->pending.MarkFinished(arrow::Buffer::FromString("ab"));
+  for (const auto& future : futures) {
+    ASSERT_TRUE(future.result().ok());
+    EXPECT_EQ((*future.result())->size(), 2);
+  }
+  EXPECT_TRUE(data->GetSpans().empty());
+}
+TEST_F(StorageTracingTest, SuppressedIOSpansStillAggregateReads) {
+  auto file = WrapFile(std::make_shared<arrow::io::BufferReader>(arrow::Buffer::FromString("abcd")), "test");
+  auto parent = AttachParent(Parent(1));
+  for (const auto options : {TraceOptions{false, 256}, TraceOptions{true, 1}}) {
+    SetTraceOptions(options);
+    EXPECT_TRUE(tracing::Run("storage.read", [&] {
+                  ARROW_RETURN_NOT_OK(file->ReadAt(0, 2));
+                  ARROW_RETURN_NOT_OK(file->ReadAsync(file->io_context(), 0, 2).status());
+                  for (const auto& future : file->ReadManyAsync(file->io_context(), {{0, 1}, {1, 1}})) {
+                    ARROW_RETURN_NOT_OK(future.status());
+                  }
+                  return arrow::Status::OK();
+                }).ok());
+    auto spans = data->GetSpans();
+    ASSERT_EQ(spans.size(), 1);
+    const auto& attrs = spans[0]->GetAttributes();
+    EXPECT_EQ(opentelemetry::nostd::get<int64_t>(attrs.at("storage.io.reads")), 3);
+    EXPECT_EQ(opentelemetry::nostd::get<int64_t>(attrs.at("storage.io.requested_bytes")), 6);
+    EXPECT_EQ(opentelemetry::nostd::get<int64_t>(attrs.at("storage.io.returned_bytes")), 6);
+  }
+}
 TEST_F(StorageTracingTest, NativeIOFinishesAfterDroppedFutureAndPreservesCapability) {
   auto raw = std::make_shared<ControlledFile>();
   auto file = WrapFile(raw, "test");

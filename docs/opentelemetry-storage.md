@@ -172,7 +172,30 @@ metadata singleflight 中 leader 记录一次实际 load/I/O；每个 follower �
 - metadata 无上下文时不分配 leader OperationTrace；无上下文 follower 直接等待已有结果。带 tracing 的 follower 可等待未带 tracing 的 leader，此时不创建无效 link。
 - Rust capture 的 opaque handle 直接持有 immutable Context；attachment 的私有派生对象直接持有 ContextScope，删除两处独立 Impl 分配。CXX 函数签名及 Rust 侧调度行为保持原有约定。
 
-Scope 复用、跳过所有未采样子 span，以及修改 executor/重复装箱路径，局部优化中均未实施。其他 RequestContext key 的隔离、空上下文遮蔽和宿主 sampler 的决策继续由现有路径保障。
+上述历史优化未实施 scope 复用、跳过所有未采样子 span，以及 executor 重复装箱修复。其他 RequestContext key 的隔离、空上下文遮蔽和宿主 sampler 的决策继续由现有路径保障。
+
+### 关闭路径后续修复
+
+- null provider 的操作只保存带 parent 的不可变 disabled Context，不分配 SpanState、Budget 或 span mutex；后续注入 provider 不会改变该操作的关闭状态。
+- disabled 文件读取不再安装完成 observer、批量 Completion 或更新 I/O 原子计数。启用请求仅关闭 I/O spans 或耗尽 span 预算时，仍保留根操作的 I/O 汇总。
+- disabled `RunAsync` 的 ready Future 直接返回；未完成 Future 保留不额外捕获 OperationTrace、不执行 Finish 的异常转换，维持失败 Result/Status 的既有行为。该处理仍有 continuation 成本，Folly 自身仍传播 RequestContext。
+- Vortex Executor 直接向 Tokio 提交泛型 tracing wrapper，移除对已装箱 future/task 的第二次装箱；profiling labels、CPU/阻塞池选择和 AbortHandle 行为与锁定 Vortex 版本一致。使用现有依赖图中的 custom-labels，没有升级第三方版本。
+- Vortex 文件读写调用端删除重复 `bind`，由 Executor 统一 capture/attach。空 snapshot 的遮蔽与恢复仍在每次 poll/task 内执行。
+
+2026-09-10 容器验证：筛选 C++ 测试 341 通过、69 条件跳过，其中 tracing 33 通过；C FFI 83 通过；error-handling ratchet 通过，throw 计数保持 21。新增回归检查 disabled ready Future、同步/ready/deferred 异常、未完成 I/O 不持有 tracing callback context，以及被抑制 I/O span 的根汇总。
+
+独立 Rust 探针直接编译当前 `storage_tracing.rs`，链接实际 C++/Folly tracing 桥接库，验证空/有效 parent 在 Pending、Ready 和 Rust unwind 后的遮蔽与恢复，CPU 与 blocking pool 的线程归属、profiling labels 继承、任务取消及后续任务正常执行。该探针通过；它复用 ASAN 功能构建，不作为计时结果。
+
+另用相同 Release 工具链和依赖，独立编译 `80cccd0` 与修复后 runtime 源码进行 C++ new 计数。每操作包含一个根操作和四个同步子操作；带 parent 模式包括一次 `AttachParent`，tracestate 为空。异步根返回 ready SemiFuture。预热 100 次后计数 1,000 次：
+
+| 模式 | C++ new 次数：修复前 → 后 | 请求字节：修复前 → 后 |
+| --- | ---: | ---: |
+| 无 parent/provider，同步根 | 0 → 0 | 0 → 0 |
+| 无 parent/provider，异步根 | 1 → 1 | 160 → 160 |
+| 有 parent、null provider，同步根 | 33 → 31 | 2,232 → 1,992 |
+| 有 parent、null provider，异步根 | 48 → 32 | 5,408 → 2,152 |
+
+该探针只衡量 C++ runtime 的分配，包含业务 Future 自身分配；不代表完整 Reader、Rust 分配、RSS 或延迟改善，也不是相对 tracing 引入前的性能验收。源码、构建脚本和原始结果保存在 `/tmp/storage-otel-fix-20260910/`；功能验证日志位于同一目录。
 
 ## 覆盖边界与待验收项
 

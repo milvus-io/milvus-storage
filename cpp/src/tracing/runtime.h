@@ -40,6 +40,9 @@ class OperationTrace {
                  const char* operation = nullptr,
                  const char* format = nullptr);
   ContextPtr context() const { return context_; }
+  // A disabled snapshot still propagates, but needs no span completion or I/O accounting.
+  bool IsEnabled() const;
+  bool NeedsCompletion() const { return owns_state_; }
   void Start() const;
   void AccountRead(int64_t requested, int64_t returned) const;
   void Finish(const arrow::Status& status) const;
@@ -95,6 +98,21 @@ auto RunAsync(const char* name, F&& fn, const char* operation = nullptr, const c
   ContextScope scope(trace.context());
   using Result = typename decltype(fn())::value_type;
   try {
+    if (!trace.IsEnabled()) {
+      auto future = fn();
+      if (future.isReady()) {
+        if (future.result().hasException())
+          return folly::makeSemiFuture(Result(arrow::Status::UnknownError("exception")));
+        return future;
+      }
+      // Keep exception-to-result conversion without capturing OperationTrace or
+      // observing span completion. Folly still propagates its RequestContext.
+      return std::move(future).defer([](folly::Try<Result>&& result) -> Result {
+        if (result.hasException())
+          return arrow::Status::UnknownError("exception");
+        return std::move(result).value();
+      });
+    }
     return fn().defer([trace](auto&& result) -> Result {
       if (result.hasException()) {
         auto status = arrow::Status::UnknownError("exception");
@@ -144,7 +162,7 @@ auto RunNativeAsync(const char* name, F&& fn, const char* operation = nullptr, c
 // consumer running a continuation and remains observed after a future is dropped.
 template <typename T>
 arrow::Future<T> Observe(arrow::Future<T> future, OperationTrace trace) {
-  if (!trace.context())
+  if (!trace.NeedsCompletion())
     return future;
   future.AddCallback([trace](const arrow::Result<T>& result) { trace.Finish(result.status()); });
   return future;
