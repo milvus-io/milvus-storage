@@ -22,6 +22,7 @@
 #include <arrow/util/io_util.h>
 #include <parquet/column_reader.h>
 #include <parquet/encryption/encryption.h>
+#include <parquet/exception.h>
 #include <parquet/file_reader.h>
 #include <parquet/metadata.h>
 
@@ -56,7 +57,11 @@ void AssertSuccess(LoonFFIResult result) {
 
 TEST(FFIWriterEncryption, Base64KeyWritesParquetReadableWithOriginalBinaryKey) {
   for (size_t key_size : {16, 24, 32}) {
-    for (size_t offset : {size_t(0), key_size / 2, key_size - 1}) {
+    std::vector<size_t> nul_offsets{0, key_size / 2, key_size - 1};
+    if (key_size == 32) {
+      nul_offsets.push_back(24);
+    }
+    for (size_t offset : nul_offsets) {
       SCOPED_TRACE(key_size);
       SCOPED_TRACE(offset);
       std::string key(key_size, '\xff');
@@ -101,6 +106,16 @@ TEST(FFIWriterEncryption, Base64KeyWritesParquetReadableWithOriginalBinaryKey) {
       ASSERT_EQ(column->ReadBatch(3, nullptr, nullptr, actual, &count), 3);
       ASSERT_EQ(count, 3);
       EXPECT_EQ(std::vector<int64_t>(actual, actual + 3), (std::vector<int64_t>{0, 17, 511}));
+
+      // These prefixes are valid AES lengths, which let the old C-string
+      // truncation bug silently write data with the wrong key.
+      if (key_size == 32 && (offset == 16 || offset == 24)) {
+        parquet::ReaderProperties truncated_key_props;
+        truncated_key_props.file_decryption_properties(
+            parquet::FileDecryptionProperties::Builder().footer_key(key.substr(0, offset))->build());
+        EXPECT_THROW(parquet::ParquetFileReader::OpenFile(root + group.files[0].path, false, truncated_key_props),
+                     parquet::ParquetException);
+      }
     }
   }
 }
