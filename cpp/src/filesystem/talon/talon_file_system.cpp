@@ -232,19 +232,11 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
                               public UploadSizable,
                               public Observable {
   public:
-  TalonFileSystem(ArrowFileSystemPtr origin_fs,
-                  std::shared_ptr<TalonClient> client,
-                  std::string bucket,
-                  std::string cloud_provider,
-                  std::string coordinator,
-                  uint32_t block_size)
+  TalonFileSystem(ArrowFileSystemConfig config, ArrowFileSystemPtr origin_fs, std::shared_ptr<TalonClient> client)
       : arrow::fs::FileSystem(origin_fs->io_context()),
         origin_fs_(std::move(origin_fs)),
         client_(std::move(client)),
-        bucket_(std::move(bucket)),
-        cloud_provider_(std::move(cloud_provider)),
-        coordinator_(std::move(coordinator)),
-        block_size_(block_size) {}
+        config_(std::move(config)) {}
 
   std::string type_name() const override { return origin_fs_->type_name(); }
 
@@ -261,8 +253,11 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
       return true;
     }
     const auto* talon = dynamic_cast<const TalonFileSystem*>(&other);
-    return talon != nullptr && bucket_ == talon->bucket_ && cloud_provider_ == talon->cloud_provider_ &&
-           coordinator_ == talon->coordinator_ && block_size_ == talon->block_size_ &&
+    return talon != nullptr && config_.bucket_name == talon->config_.bucket_name &&
+           config_.cloud_provider == talon->config_.cloud_provider &&
+           config_.talon_coordinator == talon->config_.talon_coordinator &&
+           config_.talon_block_size == talon->config_.talon_block_size &&
+           config_.talon_max_idle_per_addr == talon->config_.talon_max_idle_per_addr &&
            origin_fs_->Equals(*talon->origin_fs_);
   }
 
@@ -366,9 +361,10 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
 
   private:
   arrow::Result<std::string> ObjectKey(const std::string& path) const {
-    const std::string prefix = bucket_ + "/";
+    const std::string prefix = config_.bucket_name + "/";
     if (!path.starts_with(prefix)) {
-      return arrow::Status::Invalid("Talon path does not belong to configured bucket ", bucket_, ": ", path);
+      return arrow::Status::Invalid("Talon path does not belong to configured bucket ", config_.bucket_name, ": ",
+                                    path);
     }
     const std::string key = path.substr(prefix.size());
     if (key.empty()) {
@@ -387,16 +383,14 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
         known_size == arrow::fs::kNoSize
             ? std::nullopt
             : std::optional<TalonObjectStat>{TalonObjectStat{static_cast<uint64_t>(known_size), ""}};
-    ARROW_ASSIGN_OR_RAISE(auto reader, client_->OpenObject(cloud_provider_, bucket_, key, initial_stat));
+    ARROW_ASSIGN_OR_RAISE(auto reader,
+                          client_->OpenObject(config_.cloud_provider, config_.bucket_name, key, initial_stat));
     return std::make_shared<TalonInputFile>(std::move(reader), origin_fs_, path, io_context().pool());
   }
 
   const ArrowFileSystemPtr origin_fs_;
   const std::shared_ptr<TalonClient> client_;
-  const std::string bucket_;
-  const std::string cloud_provider_;
-  const std::string coordinator_;
-  const uint32_t block_size_;
+  const ArrowFileSystemConfig config_;
 };
 
 }  // namespace
@@ -406,9 +400,12 @@ namespace internal {
 arrow::Result<ArrowFileSystemPtr> MakeTalonFileSystem(const ArrowFileSystemConfig& config,
                                                       ArrowFileSystemPtr origin_fs,
                                                       std::string bucket) {
-  ARROW_ASSIGN_OR_RAISE(auto client, TalonClient::Make(config.talon_coordinator, config.talon_block_size));
-  return std::make_shared<TalonFileSystem>(std::move(origin_fs), std::move(client), std::move(bucket),
-                                           config.cloud_provider, config.talon_coordinator, config.talon_block_size);
+  ARROW_ASSIGN_OR_RAISE(auto client, TalonClient::Make(config.talon_coordinator, config.talon_block_size,
+                                                       config.talon_max_idle_per_addr));
+  auto talon_config = config;
+  // Readers use the producer's normalized bucket rather than the original spelling.
+  talon_config.bucket_name = std::move(bucket);
+  return std::make_shared<TalonFileSystem>(std::move(talon_config), std::move(origin_fs), std::move(client));
 }
 
 }  // namespace internal

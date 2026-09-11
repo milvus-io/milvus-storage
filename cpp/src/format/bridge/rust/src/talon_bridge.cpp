@@ -92,9 +92,11 @@ void TalonIoCallbackImpl(void* context, int32_t error_code, uint64_t value, cons
 
 }  // namespace
 
-arrow::Result<std::shared_ptr<TalonClient>> TalonClient::Make(const std::string& coordinator, uint32_t block_size) {
+arrow::Result<std::shared_ptr<TalonClient>> TalonClient::Make(const std::string& coordinator,
+                                                              uint32_t block_size,
+                                                              uint32_t max_idle_per_addr) {
   return CatchRustResult<std::shared_ptr<TalonClient>>("Failed to create Talon client", [&]() {
-    auto impl = ffi::new_talon_client(coordinator, block_size);
+    auto impl = ffi::new_talon_client(coordinator, block_size, max_idle_per_addr);
     return std::shared_ptr<TalonClient>(new TalonClient(std::move(impl)));
   });
 }
