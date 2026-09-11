@@ -104,6 +104,7 @@ struct PropertyInfo {
 #define PROPERTY_FS_TALON_ENABLED "fs.talon.enabled"
 #define PROPERTY_FS_TALON_COORDINATOR "fs.talon.coordinator"
 #define PROPERTY_FS_TALON_BLOCK_SIZE "fs.talon.block_size"
+#define PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR "fs.talon.max_idle_per_addr"
 
 // Cross-tenant access properties
 #define PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT "fs.gcp_target_service_account"

@@ -255,6 +255,8 @@ struct ArrowFileSystemConfig {
   bool talon_enabled = false;
   std::string talon_coordinator = "";
   uint32_t talon_block_size = 256U * 1024U * 1024U;
+  // Maximum idle TCP connections per peer in each Talon pool; does not cap active connections.
+  uint32_t talon_max_idle_per_addr = 256;
 
   // Alias for external filesystem identification (e.g., "prod", "backup")
   // Empty for default filesystem

@@ -248,6 +248,34 @@ TEST(TalonConfigTest, DefaultsAreDisabled) {
   EXPECT_FALSE(config.talon_enabled);
   EXPECT_TRUE(config.talon_coordinator.empty());
   EXPECT_EQ(config.talon_block_size, 256U * 1024U * 1024U);
+  EXPECT_EQ(config.talon_max_idle_per_addr, 256U);
+}
+
+TEST(TalonConfigTest, MaxIdlePerAddressProperty) {
+  constexpr auto key = PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR;
+  api::Properties properties;
+  ASSERT_AND_ASSIGN(const auto default_limit, api::GetValue<uint32_t>(properties, key));
+  EXPECT_EQ(default_limit, 256U);
+  ASSERT_EQ(api::SetValue(properties, key, "32"), std::nullopt);
+  ASSERT_AND_ASSIGN(const auto explicit_limit, api::GetValue<uint32_t>(properties, key));
+  EXPECT_EQ(explicit_limit, 32U);
+  for (const char* invalid : {"0", "-1", "4294967296", "invalid"}) {
+    EXPECT_NE(api::SetValue(properties, key, invalid), std::nullopt);
+  }
+}
+
+TEST(TalonConfigTest, ChecksTypedPoolLimitOnlyWhenEnabled) {
+  api::Properties properties;
+  properties[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+  properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:7000");
+  properties[PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR] = uint32_t{0};
+  ArrowFileSystemConfig config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties, config));
+
+  properties[PROPERTY_FS_TALON_ENABLED] = true;
+  const auto status = ArrowFileSystemConfig::create_file_system_config(properties, config);
+  EXPECT_TRUE(status.IsInvalid()) << status;
+  EXPECT_NE(status.message().find(PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR), std::string::npos);
 }
 
 TEST(TalonConfigTest, ParsesExplicitProperties) {
@@ -256,12 +284,14 @@ TEST(TalonConfigTest, ParsesExplicitProperties) {
   ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_ENABLED, "true"), std::nullopt);
   ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_COORDINATOR, "127.0.0.1:7000"), std::nullopt);
   ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_BLOCK_SIZE, "8388608"), std::nullopt);
+  ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR, "32"), std::nullopt);
 
   ArrowFileSystemConfig config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties, config));
   EXPECT_TRUE(config.talon_enabled);
   EXPECT_EQ(config.talon_coordinator, "127.0.0.1:7000");
   EXPECT_EQ(config.talon_block_size, 8388608U);
+  EXPECT_EQ(config.talon_max_idle_per_addr, 32U);
 }
 
 TEST(TalonConfigTest, EnabledRequiresRemoteCoordinatorAndBlockSize) {
@@ -276,6 +306,26 @@ TEST(TalonConfigTest, EnabledRequiresRemoteCoordinatorAndBlockSize) {
     ArrowFileSystemConfig config;
     EXPECT_FALSE(ArrowFileSystemConfig::create_file_system_config(properties, config).ok());
   }
+}
+
+TEST(TalonConfigTest, CacheKeyIgnoresTalonSettingsWhenDisabled) {
+  ArrowFileSystemConfig base;
+  base.storage_type = "remote";
+  base.cloud_provider = kCloudProviderAWS;
+  base.address = "127.0.0.1:9000";
+  base.bucket_name = "test-bucket";
+
+  auto other_coordinator = base;
+  other_coordinator.talon_coordinator = "127.0.0.1:7000";
+  EXPECT_EQ(base.GetCacheKey(), other_coordinator.GetCacheKey());
+
+  auto other_block_size = base;
+  other_block_size.talon_block_size = 16777216;
+  EXPECT_EQ(base.GetCacheKey(), other_block_size.GetCacheKey());
+
+  auto other_pool_size = base;
+  other_pool_size.talon_max_idle_per_addr = 32;
+  EXPECT_EQ(base.GetCacheKey(), other_pool_size.GetCacheKey());
 }
 
 TEST(TalonConfigTest, CacheKeyIncludesTalonRouting) {
@@ -298,6 +348,10 @@ TEST(TalonConfigTest, CacheKeyIncludesTalonRouting) {
   auto other_block_size = enabled;
   other_block_size.talon_block_size = 16777216;
   EXPECT_NE(enabled.GetCacheKey(), other_block_size.GetCacheKey());
+
+  auto other_pool_size = enabled;
+  other_pool_size.talon_max_idle_per_addr = 32;
+  EXPECT_NE(enabled.GetCacheKey(), other_pool_size.GetCacheKey());
 }
 
 TEST(TalonTestEnvTest, AddsTalonPropertiesWhenEnabled) {
@@ -438,7 +492,7 @@ INSTANTIATE_TEST_SUITE_P(CloudProviders,
                          ::testing::Values(kCloudProviderAWS, kCloudProviderAzure));
 
 TEST(TalonBridgeTest, MapsClientCreationErrorAndPreservesTalonMessage) {
-  const auto result = talon::TalonClient::Make("127.0.0.1:7000", 0);
+  const auto result = talon::TalonClient::Make("127.0.0.1:7000", 0, 8);
 
   ASSERT_FALSE(result.ok());
   EXPECT_TRUE(result.status().IsIOError()) << result.status().ToString();
@@ -447,7 +501,7 @@ TEST(TalonBridgeTest, MapsClientCreationErrorAndPreservesTalonMessage) {
 }
 
 TEST(TalonBridgeTest, MapsOpenErrorAndPreservesTalonMessage) {
-  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make("127.0.0.1:7000", 8U * 1024U * 1024U));
+  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make("127.0.0.1:7000", 8U * 1024U * 1024U, 8));
 
   const auto result = client->OpenObject("aws", "test-bucket", "", std::nullopt);
 
@@ -458,7 +512,7 @@ TEST(TalonBridgeTest, MapsOpenErrorAndPreservesTalonMessage) {
 }
 
 TEST(TalonBridgeTest, MapsAsyncErrorAndPreservesTalonMessage) {
-  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make("127.0.0.1:7000", 8U * 1024U * 1024U));
+  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make("127.0.0.1:7000", 8U * 1024U * 1024U, 8));
   ASSERT_AND_ASSIGN(auto reader, client->OpenObject("aws", "test-bucket", "path/a", talon::TalonObjectStat{0, ""}));
 
   const auto result = reader.ReadAtAsync(0, std::numeric_limits<uint64_t>::max(), nullptr).result();
@@ -511,6 +565,32 @@ TEST_F(TalonFileSystemServiceFreeTest, ProducerAcceptsRawProviderFilesystem) {
   ASSERT_AND_ASSIGN(auto talon_fs, TalonFileSystemProducer(config, origin).Make());
   EXPECT_EQ(talon_fs->type_name(), "recording");
   EXPECT_EQ(std::dynamic_pointer_cast<FileSystemProxy>(talon_fs), nullptr);
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, OwnsConfigWithNormalizedBucket) {
+  auto config = Config();
+  config.bucket_name = "test-bucket///";
+  auto origin = std::make_shared<RecordingFileSystem>("origin");
+  ASSERT_AND_ASSIGN(auto fs, TalonFileSystemProducer(config, origin).Make());
+
+  config.bucket_name = "different-bucket";
+  config.cloud_provider = "unsupported";
+  arrow::fs::FileInfo info("test-bucket/prefix/object", arrow::fs::FileType::File);
+  info.set_size(0);
+  ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile(info));
+  ASSERT_AND_ASSIGN(const auto size, file->GetSize());
+  EXPECT_EQ(size, 0);
+  EXPECT_EQ(origin->input_open_calls, 0);
+  ASSERT_STATUS_OK(file->Close());
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, ForwardsPoolLimitAndPreservesTalonValidationError) {
+  auto config = Config();
+  config.talon_max_idle_per_addr = 0;
+  const auto result = Wrap(config, std::make_shared<RecordingFileSystem>("origin"));
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsIOError()) << result.status();
+  EXPECT_NE(result.status().message().find("max_idle_per_addr must be non-zero"), std::string::npos);
 }
 
 TEST_F(TalonFileSystemServiceFreeTest, OpenWithFileInfoRejectsNonFiles) {
@@ -613,6 +693,15 @@ TEST_F(TalonFileSystemServiceFreeTest, EqualityIncludesTalonRouting) {
   const auto block_size_talon = block_size_proxy->base_fs();
   EXPECT_FALSE(base_talon->Equals(*block_size_talon));
   EXPECT_FALSE(block_size_talon->Equals(*base_talon));
+
+  auto other_pool_size = config;
+  other_pool_size.talon_max_idle_per_addr = 32;
+  ASSERT_AND_ASSIGN(auto pool_size_fs, Wrap(other_pool_size, std::make_shared<RecordingFileSystem>("origin")));
+  const auto pool_size_proxy = std::dynamic_pointer_cast<FileSystemProxy>(pool_size_fs);
+  ASSERT_NE(pool_size_proxy, nullptr);
+  const auto pool_size_talon = pool_size_proxy->base_fs();
+  EXPECT_FALSE(base_talon->Equals(*pool_size_talon));
+  EXPECT_FALSE(pool_size_talon->Equals(*base_talon));
 }
 
 TEST_F(TalonFileSystemServiceFreeTest, ForwardsStreamingFileInfoGeneratorWithFullSelector) {
