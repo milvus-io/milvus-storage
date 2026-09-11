@@ -20,6 +20,7 @@
 
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
+#include <arrow/util/base64.h>
 
 using namespace milvus_storage::api;
 using namespace milvus_storage;
@@ -37,6 +38,24 @@ LoonFFIResult loon_writer_new(const char* base_path,
     auto opt = ConvertFFIProperties(properties_map, properties);
     if (opt != std::nullopt) {
       RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
+    }
+
+    if (GetValueNoError<bool>(properties_map, PROPERTY_WRITER_ENC_ENABLE)) {
+      // The C properties API carries NUL-terminated text. Decode only after
+      // conversion so the native writer receives the complete binary DEK.
+      const auto encoded_key = GetValueNoError<std::string>(properties_map, PROPERTY_WRITER_ENC_KEY);
+      if (encoded_key.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=") !=
+          std::string::npos) {
+        RETURN_ERROR(LOON_INVALID_PROPERTIES, "writer.enc.key must be standard padded Base64");
+      }
+      auto key = arrow::util::base64_decode(encoded_key);
+      // Arrow's decoder accepts prefixes and ignores trailing input. Require a
+      // canonical round trip as well as an AES key length; never echo key data.
+      if (arrow::util::base64_encode(key) != encoded_key ||
+          (key.size() != 16 && key.size() != 24 && key.size() != 32)) {
+        RETURN_ERROR(LOON_INVALID_PROPERTIES, "writer.enc.key must be Base64 of a 16, 24 or 32 byte AES key");
+      }
+      properties_map[PROPERTY_WRITER_ENC_KEY] = std::move(key);
     }
 
     auto schema_result = arrow::ImportSchema(schema_raw);
