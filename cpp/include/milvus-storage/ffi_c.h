@@ -353,13 +353,15 @@ FFI_EXPORT char* loon_manifest_debug_string(const LoonManifest* manifest);
  * @param paths Array of file paths
  * @param start_indices Array of start indices
  * @param end_indices Array of end indices
+ * @param file_properties Optional array of file_lens entries. Null, or count == 0, means no properties.
  * @param file_lens Number of files
  * @param out_column_groups Output parameter for generated LoonColumnGroups (function allocates and returns pointer)
  *                          Caller must call `loon_column_groups_destroy` to free allocated memory
  * @return 0 on success, others is error code
  *
- * Notice that: The current method may no longer be used.
- * Please construct LoonColumnGroups directly using the C Struct.
+ * All inputs are borrowed only for this call; the result owns a deep copy.
+ * File properties are opaque strings, not reader/filesystem configuration.
+ * On failure, out_column_groups is set to null when supplied.
  */
 FFI_EXPORT LoonFFIResult loon_column_groups_create(const char** columns,
                                                    size_t col_lens,
@@ -367,6 +369,7 @@ FFI_EXPORT LoonFFIResult loon_column_groups_create(const char** columns,
                                                    char** paths,
                                                    int64_t* start_indices,
                                                    int64_t* end_indices,
+                                                   const LoonProperties* file_properties,
                                                    size_t file_lens,
                                                    LoonColumnGroups** out_column_groups);
 
