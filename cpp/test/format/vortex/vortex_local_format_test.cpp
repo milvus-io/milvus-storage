@@ -33,8 +33,12 @@
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/filesystem/localfs.h>
 #include <arrow/io/interfaces.h>
+#include <arrow/io/memory.h>
 #include <arrow/record_batch.h>
 #include <arrow/util/io_util.h>
+
+#include "common/EasyAssert.h"
+#include "milvus-storage/common/extend_status.h"
 
 #include <boost/filesystem/operations.hpp>
 
@@ -611,6 +615,141 @@ TEST_F(VortexLocalFormatTest, TestTranslaterLoadsAndReleasesCellRanges) {
       (void)translater->cells_storage_bytes({static_cast<milvus::cachinglayer::cid_t>(translater->num_cells())}),
       std::out_of_range);
   EXPECT_THROW((void)translater->get_cells(nullptr, {-1}), std::out_of_range);
+}
+
+namespace {
+
+// A source file whose reads fail with a fully classified status, mimicking what
+// S3FileSystem's ErrorToStatus attaches on a throttle.
+//
+// Implements RandomAccessFile directly and delegates the parts we don't care
+// about, rather than deriving from BufferReader: BufferReader inherits
+// RandomAccessFileConcurrencyWrapper<BufferReader>, which declares both ReadAt
+// overloads `final` and dispatches them through CRTP to BufferReader's
+// non-virtual DoReadAt. A subclass there cannot intercept a read at all -- it
+// does not compile, and a DoReadAt override would silently never be called.
+class ThrottledReader : public arrow::io::RandomAccessFile {
+  public:
+  explicit ThrottledReader(std::shared_ptr<arrow::Buffer> contents) : contents_(std::move(contents)) {}
+
+  // The one method under test: the load path reaches the source file through
+  // ReadAt (vortex_footer_reader.cpp).
+  arrow::Result<std::shared_ptr<arrow::Buffer>> ReadAt(int64_t, int64_t) override { return ThrottleError(); }
+  arrow::Result<int64_t> ReadAt(int64_t, int64_t, void*) override { return ThrottleError(); }
+  arrow::Result<std::shared_ptr<arrow::Buffer>> Read(int64_t) override { return ThrottleError(); }
+  arrow::Result<int64_t> Read(int64_t, void*) override { return ThrottleError(); }
+
+  // Open and size must succeed, or the test would be exercising the wrong
+  // failure.
+  arrow::Result<int64_t> GetSize() override { return contents_->size(); }
+  arrow::Result<int64_t> Tell() const override { return position_; }
+  arrow::Status Seek(int64_t position) override {
+    position_ = position;
+    return arrow::Status::OK();
+  }
+  arrow::Status Close() override {
+    closed_ = true;
+    return arrow::Status::OK();
+  }
+  bool closed() const override { return closed_; }
+
+  private:
+  static arrow::Status ThrottleError() {
+    return milvus_storage::MakeExtendError(milvus_storage::ExtendStatusCode::StorageTransientThrottling,
+                                           "SlowDown: reduce your request rate", "SlowDown");
+  }
+
+  std::shared_ptr<arrow::Buffer> contents_;
+  int64_t position_ = 0;
+  bool closed_ = false;
+};
+
+// Delegates everything to the fixture's filesystem and swaps only the opened
+// file. It has to wrap rather than subclass LocalFileSystem: the fixture's
+// filesystem is rooted at PROPERTY_FS_ROOT_PATH, so a bare LocalFileSystem
+// resolves the same relative path against the process CWD and fails with ENOENT
+// before the read under test is ever reached.
+class ThrottledFileSystem : public arrow::fs::FileSystem {
+  public:
+  explicit ThrottledFileSystem(std::shared_ptr<arrow::fs::FileSystem> inner) : inner_(std::move(inner)) {}
+
+  std::string type_name() const override { return "throttled"; }
+  bool Equals(const arrow::fs::FileSystem& other) const override { return this == &other; }
+
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string& path) override {
+    // Open for real so the failure under test is the read, not the open.
+    ARROW_ASSIGN_OR_RAISE(auto real, inner_->OpenInputFile(path));
+    ARROW_ASSIGN_OR_RAISE(auto size, real->GetSize());
+    ARROW_ASSIGN_OR_RAISE(auto contents, real->ReadAt(0, size));
+    return std::make_shared<ThrottledReader>(contents);
+  }
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const arrow::fs::FileInfo& info) override {
+    return OpenInputFile(info.path());
+  }
+
+  arrow::Result<arrow::fs::FileInfo> GetFileInfo(const std::string& path) override { return inner_->GetFileInfo(path); }
+  arrow::Result<arrow::fs::FileInfoVector> GetFileInfo(const arrow::fs::FileSelector& select) override {
+    return inner_->GetFileInfo(select);
+  }
+  arrow::Status CreateDir(const std::string& path, bool recursive) override {
+    return inner_->CreateDir(path, recursive);
+  }
+  arrow::Status DeleteDir(const std::string& path) override { return inner_->DeleteDir(path); }
+  arrow::Status DeleteDirContents(const std::string& path, bool missing_dir_ok) override {
+    return inner_->DeleteDirContents(path, missing_dir_ok);
+  }
+  arrow::Status DeleteRootDirContents() override { return inner_->DeleteRootDirContents(); }
+  arrow::Status DeleteFile(const std::string& path) override { return inner_->DeleteFile(path); }
+  arrow::Status Move(const std::string& src, const std::string& dest) override { return inner_->Move(src, dest); }
+  arrow::Status CopyFile(const std::string& src, const std::string& dest) override {
+    return inner_->CopyFile(src, dest);
+  }
+  arrow::Result<std::shared_ptr<arrow::io::InputStream>> OpenInputStream(const std::string& path) override {
+    return inner_->OpenInputStream(path);
+  }
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
+      const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override {
+    return inner_->OpenOutputStream(path, metadata);
+  }
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenAppendStream(
+      const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override {
+    return inner_->OpenAppendStream(path, metadata);
+  }
+
+  private:
+  std::shared_ptr<arrow::fs::FileSystem> inner_;
+};
+
+}  // namespace
+
+// Translator::get_cells has no error channel -- milvus-common's caching layer
+// reports load failures through exceptions. That much is the interface's
+// contract. What we throw is ours, and throwing the stringified status used to
+// discard the classification the object-store layer had already attached, so a
+// throttle during a vortex cache miss was reported as a permanent failure and
+// never retried.
+TEST_F(VortexLocalFormatTest, TranslaterLoadFailureKeepsItsClassification) {
+  ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile());
+
+  auto sparse_fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+  auto footer_reader = MakeFooterReader(cgfile, sparse_fs);
+  ASSERT_STATUS_OK(footer_reader->Open(file_system_));
+  ASSERT_AND_ASSIGN(auto cell_metas, BuildVortexCellMetas(footer_reader, "id"));
+
+  auto throttled_fs = std::make_shared<ThrottledFileSystem>(file_system_);
+  ASSERT_AND_ASSIGN(auto translater, VortexTranslater::Make(cell_metas, throttled_fs, test_file_name_, sparse_fs,
+                                                            "throttled.vx.sparse"));
+
+  try {
+    translater->get_cells(nullptr, {0});
+    FAIL() << "expected the classified load failure to surface";
+  } catch (const milvus::SegcoreError& e) {
+    // The point of the fix: the retriable classification survives the throw.
+    EXPECT_EQ(e.get_error_code(), milvus::StorageTransientError);
+    EXPECT_NE(std::string(e.what()).find("SlowDown"), std::string::npos) << e.what();
+  } catch (const std::exception& e) {
+    FAIL() << "load failure lost its type, got: " << e.what();
+  }
 }
 
 TEST_F(VortexLocalFormatTest, TestTranslaterRejectsInvalidInputs) {
