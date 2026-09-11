@@ -8241,11 +8241,12 @@ checksum = "f764005d11ee5f36500a149ace24e00e3da98b0158b3e2d53a7495660d3f4d60"
 [[package]]
 name = "talon-cache-client"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=9ecf024062ecdf4cbba7cc898ed500e74cc77f7d#9ecf024062ecdf4cbba7cc898ed500e74cc77f7d"
+source = "git+https://github.com/milvus-io/talon.git?rev=e7f40ea629b522cffa5549a437be0660d2bf9eeb#e7f40ea629b522cffa5549a437be0660d2bf9eeb"
 dependencies = [
  "bytes",
  "futures",
  "talon-core",
+ "talon-telemetry",
  "talon-transport",
  "thiserror 2.0.17",
  "tokio",
@@ -8255,7 +8256,7 @@ dependencies = [
 [[package]]
 name = "talon-core"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=9ecf024062ecdf4cbba7cc898ed500e74cc77f7d#9ecf024062ecdf4cbba7cc898ed500e74cc77f7d"
+source = "git+https://github.com/milvus-io/talon.git?rev=e7f40ea629b522cffa5549a437be0660d2bf9eeb#e7f40ea629b522cffa5549a437be0660d2bf9eeb"
 dependencies = [
  "async-trait",
  "bytes",
@@ -8273,19 +8274,31 @@ dependencies = [
 [[package]]
 name = "talon-rust-client"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=9ecf024062ecdf4cbba7cc898ed500e74cc77f7d#9ecf024062ecdf4cbba7cc898ed500e74cc77f7d"
+source = "git+https://github.com/milvus-io/talon.git?rev=e7f40ea629b522cffa5549a437be0660d2bf9eeb#e7f40ea629b522cffa5549a437be0660d2bf9eeb"
 dependencies = [
  "futures",
  "talon-cache-client",
  "talon-core",
+ "talon-telemetry",
  "talon-transport",
  "thiserror 2.0.17",
 ]
 
 [[package]]
+name = "talon-telemetry"
+version = "0.1.0"
+source = "git+https://github.com/milvus-io/talon.git?rev=e7f40ea629b522cffa5549a437be0660d2bf9eeb#e7f40ea629b522cffa5549a437be0660d2bf9eeb"
+dependencies = [
+ "pin-project-lite",
+ "scoped-tls",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "talon-transport"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=9ecf024062ecdf4cbba7cc898ed500e74cc77f7d#9ecf024062ecdf4cbba7cc898ed500e74cc77f7d"
+source = "git+https://github.com/milvus-io/talon.git?rev=e7f40ea629b522cffa5549a437be0660d2bf9eeb#e7f40ea629b522cffa5549a437be0660d2bf9eeb"
 dependencies = [
  "anyhow",
  "bincode",
@@ -8294,6 +8307,7 @@ dependencies = [
  "rustls-webpki",
  "serde",
  "talon-core",
+ "talon-telemetry",
  "thiserror 2.0.17",
  "tokio",
  "tokio-rustls",

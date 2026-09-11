@@ -14,7 +14,7 @@
 #include <arrow/result.h>
 #include <arrow/status.h>
 
-#include "bridge_util.h"
+#include "runtime/bridge_util.h"
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"
 

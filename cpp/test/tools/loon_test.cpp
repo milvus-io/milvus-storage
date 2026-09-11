@@ -25,8 +25,8 @@
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "milvus-storage/transaction/transaction.h"
-#include "iceberg_bridge.h"
-#include "paimon_bridge.h"
+#include "iceberg/iceberg_bridge.h"
+#include "paimon/paimon_bridge.h"
 #include "test_env.h"
 
 namespace milvus_storage {

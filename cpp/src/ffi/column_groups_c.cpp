@@ -28,8 +28,12 @@ LoonFFIResult loon_column_groups_create(const char** columns,
                                         char** paths,
                                         int64_t* start_indices,
                                         int64_t* end_indices,
+                                        const LoonProperties* file_properties,
                                         size_t file_lens,
                                         LoonColumnGroups** out_column_groups) {
+  if (out_column_groups) {
+    *out_column_groups = nullptr;
+  }
   if (!columns || !col_lens || !paths || !format || !file_lens || !out_column_groups || !start_indices ||
       !end_indices) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments");
@@ -55,6 +59,21 @@ LoonFFIResult loon_column_groups_create(const char** columns,
           .start_index = start_indices[file_idx],
           .end_index = end_indices[file_idx],
       });
+      if (file_properties) {
+        const auto& properties = file_properties[file_idx];
+        if (properties.count > 0 && !properties.properties) {
+          RETURN_ERROR(LOON_INVALID_ARGS, "File properties are null [index=", file_idx, "]");
+        }
+        for (size_t property_idx = 0; property_idx < properties.count; ++property_idx) {
+          const auto& property = properties.properties[property_idx];
+          if (!property.key || !property.value) {
+            RETURN_ERROR(LOON_INVALID_ARGS, "File property key/value is null [file=", file_idx,
+                         ", property=", property_idx, "]");
+          }
+          // File properties are opaque metadata; do not parse them as reader configuration.
+          cg->files.back().properties[property.key] = property.value;
+        }
+      }
     }
     cg->format = format;
     cgs.push_back(cg);

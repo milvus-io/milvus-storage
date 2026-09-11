@@ -486,6 +486,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "The Talon block size in bytes.",
                       256U * 1024U * 1024U,
                       ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR,
+                      PropertyType::UINT32,
+                      "Maximum idle TCP connections per peer address in each Talon coordinator/worker pool. "
+                      "Does not limit active connections.",
+                      uint32_t(256),
+                      ValidatePropertyType() + ValidatePropertyRange<uint32_t>(1, UINT32_MAX)),
     // --- Cross-tenant access properties define ---
     REGISTER_PROPERTY(PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT,
                       PropertyType::STRING,

@@ -24,7 +24,7 @@
 #include <arrow/util/future.h>
 
 #include "rust/cxx.h"
-#include "rust-bridge/talon_bridge.h"
+#include "rust-bridge/talon/talon_bridge.h"
 
 namespace milvus_storage::talon {
 
@@ -65,7 +65,9 @@ class TalonObjectReader final {
 /// Owns a Rust Talon client and converts every fallible FFI operation to Arrow errors.
 class TalonClient final {
   public:
-  static arrow::Result<std::shared_ptr<TalonClient>> Make(const std::string& coordinator, uint32_t block_size);
+  static arrow::Result<std::shared_ptr<TalonClient>> Make(const std::string& coordinator,
+                                                          uint32_t block_size,
+                                                          uint32_t max_idle_per_addr);
 
   arrow::Result<TalonObjectReader> OpenObject(const std::string& cloud_provider,
                                               const std::string& bucket,

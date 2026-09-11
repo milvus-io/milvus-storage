@@ -20,7 +20,7 @@
 #include <arrow/status.h>
 #include <arrow/util/io_util.h>
 
-#include "bridge_util.h"
+#include "runtime/bridge_util.h"
 #include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/ffi_filesystem_c.h"
 #include "milvus-storage/ffi_internal/result.h"
