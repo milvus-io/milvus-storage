@@ -22,7 +22,7 @@
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/column_groups.h"
-#include "vortex_bridge.h"  // from cpp/src/format/vortex/vx-bridge/src/include
+#include "vortex/vortex_bridge.h"  // from cpp/src/format/bridge/rust/include/vortex
 
 namespace milvus_storage::vortex {
 

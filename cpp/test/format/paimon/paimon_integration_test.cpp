@@ -35,7 +35,7 @@
 #include "milvus-storage/format/paimon/paimon_format_reader.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/reader.h"
-#include "paimon_bridge.h"
+#include "paimon/paimon_bridge.h"
 #include "test_env.h"
 
 namespace milvus_storage::test {

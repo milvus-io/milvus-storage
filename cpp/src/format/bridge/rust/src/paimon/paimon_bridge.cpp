@@ -10,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "paimon_bridge.h"
+#include "paimon/paimon_bridge.h"
 
 #include <cerrno>
 #include <string_view>
@@ -21,7 +21,7 @@
 #include <arrow/type.h>
 #include <arrow/util/io_util.h>
 
-#include "bridge_util.h"
+#include "runtime/bridge_util.h"
 #include "milvus-storage/common/extend_status.h"
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"

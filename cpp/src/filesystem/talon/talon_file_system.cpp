@@ -31,7 +31,7 @@
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/util_internal.h"
-#include "talon_bridge.h"
+#include "talon/talon_bridge.h"
 
 namespace milvus_storage::talon {
 namespace {
