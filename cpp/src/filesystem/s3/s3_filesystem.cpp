@@ -2868,6 +2868,87 @@ arrow::Status S3FileSystem::DeleteFile(const std::string& s) {
   return impl_->EnsureParentExists(path);
 }
 
+arrow::Result<std::vector<FileInfo>> S3FileSystem::ListObjectsByPrefix(const std::string& s) {
+  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
+  if (path.bucket.empty()) {
+    return arrow::Status::Invalid("Cannot list objects with an empty bucket: '", s, "'");
+  }
+
+  // S3Path::FromString strips a trailing '/', but a raw object-key prefix must
+  // reach ListObjectsV2 verbatim: a boundary prefix ("dir/") must match only
+  // keys under dir/, not a sibling ("dir.txt"). Recover the exact key prefix
+  // (including any trailing '/') from the original input rather than path.key.
+  const std::string key_prefix = path.key.empty() ? std::string() : s.substr(path.bucket.size() + 1);
+
+  // Raw object-key prefix listing: set Prefix to the exact key (which may end
+  // mid-segment) and no delimiter, so S3 returns every matching object flat.
+  // This deliberately avoids GetFileInfo(selector), which lists the parent
+  // directory subtree.
+  std::vector<FileInfo> result;
+  S3Model::ListObjectsV2Request req;
+  req.SetBucket(ToAwsString(path.bucket));
+  if (!key_prefix.empty()) {
+    req.SetPrefix(ToAwsString(key_prefix));
+  }
+  req.SetMaxKeys(Impl::kListObjectsMaxKeys);
+
+  while (true) {
+    ARROW_ASSIGN_OR_RAISE(auto client_lock, impl_->holder_->Lock());
+    auto outcome = client_lock.Move()->ListObjectsV2(req);
+    if (!outcome.IsSuccess()) {
+      return ErrorToStatus(
+          std::forward_as_tuple("When listing objects under prefix '", path.key, "' in bucket '", path.bucket, "': "),
+          "ListObjectsV2", outcome.GetError());
+    }
+    const auto& list_result = outcome.GetResult();
+    for (const auto& obj : list_result.GetContents()) {
+      FileInfo info;
+      info.set_path(path.bucket + kSep + std::string(FromAwsString(obj.GetKey())));
+      FileObjectToInfo(obj, &info);
+      result.push_back(std::move(info));
+    }
+    if (!list_result.GetIsTruncated()) {
+      break;
+    }
+    req.SetContinuationToken(list_result.GetNextContinuationToken());
+  }
+  return result;
+}
+
+arrow::Status S3FileSystem::DeleteObject(const std::string& s) {
+  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
+  ARROW_RETURN_NOT_OK(ValidateFilePath(path));
+  // S3 DeleteObject is idempotent (a missing key returns success). Unlike
+  // DeleteFile, issue it directly with no preceding HeadObject and no parent
+  // directory-marker recreation.
+  return impl_->DeleteObject(path.bucket, path.key);
+}
+
+arrow::Result<bool> S3FileSystem::ObjectExists(const std::string& s) {
+  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
+  if (path.bucket.empty() || path.key.empty()) {
+    // The root and buckets are not objects.
+    return false;
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto client_lock, impl_->holder_->Lock());
+  S3Model::HeadObjectRequest req;
+  req.SetBucket(ToAwsString(path.bucket));
+  req.SetKey(ToAwsString(path.key));
+
+  auto outcome = client_lock.Move()->HeadObject(req);
+  if (outcome.IsSuccess()) {
+    return true;
+  }
+  if (IsNotFound(outcome.GetError())) {
+    // Exact-object semantics: a key with only descendants or a "key/" marker
+    // is not the object itself, so HeadObject on the exact key is a miss.
+    return false;
+  }
+  const auto msg = "When getting information for key '" + path.key + "' in bucket '" + path.bucket + "': ";
+  return ErrorToStatus(msg, "HeadObject", outcome.GetError(), impl_->options().region);
+}
+
 arrow::Status S3FileSystem::Move(const std::string& src, const std::string& dest) {
   // XXX We don't implement moving directories as it would be too expensive:
   // one must copy all directory contents one by one (including object data),

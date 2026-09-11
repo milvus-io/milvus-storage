@@ -30,6 +30,7 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/filesystem/s3/s3_options.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
+#include "milvus-storage/filesystem/flat_object_storage.h"
 #include "milvus-storage/filesystem/observable.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/upload_sizable.h"
@@ -39,7 +40,11 @@ using ::arrow::fs::FileInfoGenerator;
 
 namespace milvus_storage {
 
-class S3FileSystem : public arrow::fs::FileSystem, public UploadConditional, public Observable, public UploadSizable {
+class S3FileSystem : public arrow::fs::FileSystem,
+                     public UploadConditional,
+                     public Observable,
+                     public UploadSizable,
+                     public FlatObjectStorage {
   public:
   ~S3FileSystem() override;
 
@@ -96,6 +101,15 @@ class S3FileSystem : public arrow::fs::FileSystem, public UploadConditional, pub
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(
       const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t part_size) override;
+
+  /// \brief FlatObjectStorage: raw object-key prefix listing (ListObjectsV2).
+  arrow::Result<std::vector<arrow::fs::FileInfo>> ListObjectsByPrefix(const std::string& prefix) override;
+
+  /// \brief FlatObjectStorage: single idempotent object delete (DeleteObject).
+  arrow::Status DeleteObject(const std::string& path) override;
+
+  /// \brief FlatObjectStorage: exact-object existence (HeadObject).
+  arrow::Result<bool> ObjectExists(const std::string& path) override;
 
   protected:
   explicit S3FileSystem(const S3Options& options, const arrow::io::IOContext& io_context);
