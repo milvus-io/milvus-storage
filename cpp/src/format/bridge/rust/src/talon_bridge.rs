@@ -7,10 +7,23 @@ use std::{
 use anyhow::{Result, bail};
 use futures::FutureExt;
 use talon::{Client, ObjectId, ObjectStat, parse_uri};
+use talon_cache_client::{BlockReadError, CacheReadError};
 use tokio::sync::OnceCell;
 
 #[cxx::bridge(namespace = "milvus_storage::talon::ffi")]
 pub mod ffi {
+    #[repr(i32)]
+    enum TalonErrorCode {
+        InvalidArgument = 1,
+        Io = 2,
+        NotFound = 3,
+        Timeout = 4,
+        Unavailable = 5,
+        RateLimited = 6,
+        VersionMismatch = 7,
+        NonRetryable = 8,
+    }
+
     extern "Rust" {
         type TalonClient;
         type TalonObjectReader;
@@ -129,14 +142,45 @@ impl ReadBuffer {
 }
 
 fn talon_error_result(error: talon::Error) -> TalonIoResult {
-    let code = match &error {
-        talon::Error::InvalidUri(_) | talon::Error::InvalidArgument(_) => 1,
-        talon::Error::Coordinator(_) | talon::Error::Block(_) => 2,
+    // Capture the complete diagnostic before unwrapping the typed source so
+    // exhausted replicas retain both the last worker address and its failure.
+    let message = error.to_string();
+    let code = match error {
+        talon::Error::InvalidUri(_) | talon::Error::InvalidArgument(_) => {
+            ffi::TalonErrorCode::InvalidArgument
+        }
+        talon::Error::Coordinator(error) => cache_error_code(error.into()),
+        talon::Error::Block(error) => match error {
+            BlockReadError::Coordinator(error) => cache_error_code(error.into()),
+            BlockReadError::Worker(error)
+            | BlockReadError::AllReplicasFailed { source: error, .. } => {
+                cache_error_code(error.into())
+            }
+            BlockReadError::NoOwners | BlockReadError::UnresolvedOwner => {
+                ffi::TalonErrorCode::Unavailable
+            }
+        },
     };
     TalonIoResult {
-        code,
+        code: code.repr,
         value: 0,
-        message: error.to_string(),
+        message,
+    }
+}
+
+fn cache_error_code(error: CacheReadError) -> ffi::TalonErrorCode {
+    match error {
+        CacheReadError::InvalidRequest(_) => ffi::TalonErrorCode::InvalidArgument,
+        CacheReadError::NotFound(_) => ffi::TalonErrorCode::NotFound,
+        CacheReadError::Timeout(_) => ffi::TalonErrorCode::Timeout,
+        CacheReadError::Unavailable(_) => ffi::TalonErrorCode::Unavailable,
+        CacheReadError::RateLimited(_) => ffi::TalonErrorCode::RateLimited,
+        CacheReadError::VersionMismatch(_) => ffi::TalonErrorCode::VersionMismatch,
+        CacheReadError::Origin(_)
+        | CacheReadError::Protocol(_)
+        | CacheReadError::Internal(_)
+        | CacheReadError::Unknown(_)
+        | CacheReadError::CacheMiss(_) => ffi::TalonErrorCode::NonRetryable,
     }
 }
 
@@ -275,6 +319,100 @@ pub unsafe extern "C" fn talon_object_read_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use talon_cache_client::{CoordinatorError, WorkerError};
+    use talon_transport::{DataErrorCode, DataPlaneError};
+
+    #[test]
+    fn worker_errors_preserve_codes_and_replica_diagnostics() {
+        for (remote_code, expected) in [
+            (
+                DataErrorCode::InvalidRequest,
+                ffi::TalonErrorCode::InvalidArgument,
+            ),
+            (DataErrorCode::NotFound, ffi::TalonErrorCode::NotFound),
+            (DataErrorCode::Timeout, ffi::TalonErrorCode::Timeout),
+            (DataErrorCode::Unavailable, ffi::TalonErrorCode::Unavailable),
+            (DataErrorCode::RateLimited, ffi::TalonErrorCode::RateLimited),
+            (
+                DataErrorCode::VersionMismatch,
+                ffi::TalonErrorCode::VersionMismatch,
+            ),
+            (DataErrorCode::Origin, ffi::TalonErrorCode::NonRetryable),
+            (DataErrorCode::Internal, ffi::TalonErrorCode::NonRetryable),
+            (DataErrorCode::Unknown, ffi::TalonErrorCode::NonRetryable),
+            (DataErrorCode::CacheMiss, ffi::TalonErrorCode::NonRetryable),
+        ] {
+            for exhausted in [false, true] {
+                let source = WorkerError::Remote(DataPlaneError {
+                    code: remote_code,
+                    // Classification must use the code, never diagnostic text.
+                    message: "NotFound Timeout: original worker diagnostic".into(),
+                });
+                let error = if exhausted {
+                    BlockReadError::AllReplicasFailed {
+                        worker: "10.0.0.8:9000".into(),
+                        source,
+                    }
+                } else {
+                    BlockReadError::Worker(source)
+                };
+                let message = error.to_string();
+                let result = talon_error_result(error.into());
+                assert_eq!(result.code, expected.repr, "{message}");
+                assert_eq!(result.message, message);
+                assert_eq!(result.value, 0);
+                assert_eq!(result.message.contains("10.0.0.8:9000"), exhausted);
+                assert_eq!(result.message.contains("after refresh"), exhausted);
+            }
+        }
+    }
+
+    #[test]
+    fn transport_and_placement_errors_keep_their_classification() {
+        for (kind, expected) in [
+            (std::io::ErrorKind::TimedOut, ffi::TalonErrorCode::Timeout),
+            (
+                std::io::ErrorKind::ConnectionReset,
+                ffi::TalonErrorCode::Unavailable,
+            ),
+        ] {
+            let errors = [
+                talon::Error::Coordinator(CoordinatorError::Io(kind.into())),
+                BlockReadError::Coordinator(CoordinatorError::Io(kind.into())).into(),
+                BlockReadError::Worker(WorkerError::Io(kind.into())).into(),
+                BlockReadError::AllReplicasFailed {
+                    worker: "10.0.0.8:9000".into(),
+                    source: WorkerError::Io(kind.into()),
+                }
+                .into(),
+            ];
+            for error in errors {
+                assert_eq!(talon_error_result(error).code, expected.repr);
+            }
+        }
+        for error in [BlockReadError::NoOwners, BlockReadError::UnresolvedOwner] {
+            assert_eq!(
+                talon_error_result(error.into()).code,
+                ffi::TalonErrorCode::Unavailable.repr
+            );
+        }
+        assert_eq!(
+            talon_error_result(talon::Error::InvalidArgument("bad range".into())).code,
+            ffi::TalonErrorCode::InvalidArgument.repr
+        );
+        assert_eq!(
+            talon_error_result(parse_uri("invalid").unwrap_err()).code,
+            ffi::TalonErrorCode::InvalidArgument.repr
+        );
+        let protocol = BlockReadError::Worker(WorkerError::RangeLengthMismatch {
+            expected: 10,
+            actual: 1,
+        });
+        assert_eq!(
+            talon_error_result(protocol.into()).code,
+            ffi::TalonErrorCode::NonRetryable.repr
+        );
+    }
 
     #[test]
     fn maps_storage_providers_to_canonical_talon_uris() {

@@ -7372,7 +7372,9 @@ dependencies = [
  "snafu 0.9.1",
  "sqlparser 0.55.0",
  "take_mut",
+ "talon-cache-client",
  "talon-rust-client",
+ "talon-transport",
  "tempfile",
  "tokio",
  "typetag",
@@ -8241,7 +8243,7 @@ checksum = "f764005d11ee5f36500a149ace24e00e3da98b0158b3e2d53a7495660d3f4d60"
 [[package]]
 name = "talon-cache-client"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=9ecf024062ecdf4cbba7cc898ed500e74cc77f7d#9ecf024062ecdf4cbba7cc898ed500e74cc77f7d"
+source = "git+https://github.com/milvus-io/talon.git?rev=1e2482ac7a85d9a9954ffd81d89f9662f45a7803#1e2482ac7a85d9a9954ffd81d89f9662f45a7803"
 dependencies = [
  "bytes",
  "futures",
@@ -8255,7 +8257,7 @@ dependencies = [
 [[package]]
 name = "talon-core"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=9ecf024062ecdf4cbba7cc898ed500e74cc77f7d#9ecf024062ecdf4cbba7cc898ed500e74cc77f7d"
+source = "git+https://github.com/milvus-io/talon.git?rev=1e2482ac7a85d9a9954ffd81d89f9662f45a7803#1e2482ac7a85d9a9954ffd81d89f9662f45a7803"
 dependencies = [
  "async-trait",
  "bytes",
@@ -8273,7 +8275,7 @@ dependencies = [
 [[package]]
 name = "talon-rust-client"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=9ecf024062ecdf4cbba7cc898ed500e74cc77f7d#9ecf024062ecdf4cbba7cc898ed500e74cc77f7d"
+source = "git+https://github.com/milvus-io/talon.git?rev=1e2482ac7a85d9a9954ffd81d89f9662f45a7803#1e2482ac7a85d9a9954ffd81d89f9662f45a7803"
 dependencies = [
  "futures",
  "talon-cache-client",
@@ -8285,7 +8287,7 @@ dependencies = [
 [[package]]
 name = "talon-transport"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=9ecf024062ecdf4cbba7cc898ed500e74cc77f7d#9ecf024062ecdf4cbba7cc898ed500e74cc77f7d"
+source = "git+https://github.com/milvus-io/talon.git?rev=1e2482ac7a85d9a9954ffd81d89f9662f45a7803#1e2482ac7a85d9a9954ffd81d89f9662f45a7803"
 dependencies = [
  "anyhow",
  "bincode",
