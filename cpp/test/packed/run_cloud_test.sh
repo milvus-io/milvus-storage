@@ -81,8 +81,20 @@ huawei() {
     export TEST_ENV_USE_SSL=true
 }
 
+volcengine() {
+    export VOLCENGINE_OIDC_STS_ENDPOINT=sts.cn-beijing.volcengine-api.com
+    export VOLCENGINE_OIDC_TOKEN_FILE=/var/run/secrets/vke.volcengine.com/irsa-tokens/token
+    export VOLCENGINE_OIDC_ROLE_TRN=trn:iam::ACCOUNT_ID:role/RoleName
+    export TEST_ENV_ADDRESS=tos-s3-cn-beijing.ivolces.com
+    export TEST_ENV_BUCKET_NAME=bucket-name
+    export TEST_ENV_CLOUD_PROVIDER=volcengine
+    export TEST_ENV_REGION=cn-beijing
+    export TEST_ENV_USE_IAM=true
+    export TEST_ENV_USE_SSL=true
+}
+
 # List of all cloud providers
-CLOUD_PROVIDERS=("aws" "gcp" "azure" "aliyun" "tencent" "huawei")
+CLOUD_PROVIDERS=("aws" "gcp" "azure" "aliyun" "tencent" "huawei" "volcengine")
 
 # Function to run tests for a specific cloud provider
 run_cloud_test() {

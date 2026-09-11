@@ -2357,11 +2357,12 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
         req.SetChecksumAlgorithm(S3Model::ChecksumAlgorithm::CRC32);
       } else if (options().cloud_provider == kCloudProviderAliyun ||
                  options().cloud_provider == kCloudProviderTencent ||
-                 options().cloud_provider == kCloudProviderHuawei) {
-        // Aliyun OSS / Tencent COS / Huawei OBS only honor Content-MD5 on
-        // DeleteObjects and silently ignore x-amz-checksum-*. AWS SDK >= 1.11.x
-        // no longer auto-computes Content-MD5, so compute it from the
-        // serialized payload and inject it as a custom header.
+                 options().cloud_provider == kCloudProviderHuawei ||
+                 options().cloud_provider == kCloudProviderVolcengine) {
+        // Aliyun OSS / Tencent COS / Huawei OBS / Volcengine TOS only honor
+        // Content-MD5 on DeleteObjects and silently ignore x-amz-checksum-*.
+        // AWS SDK >= 1.11.x no longer auto-computes Content-MD5, so compute it
+        // from the serialized payload and inject it as a custom header.
         req.SetAdditionalCustomHeaderValue(
             "Content-MD5",
             Aws::Utils::HashingUtils::Base64Encode(Aws::Utils::HashingUtils::CalculateMD5(req.SerializePayload())));
