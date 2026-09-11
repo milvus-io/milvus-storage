@@ -97,6 +97,10 @@ sqlparser = "0.55"
 # CXX bridge
 cxx = "1.0.184"
 
+[target.'cfg(unix)'.dependencies]
+# Preserve the Vortex Tokio executor's profiling labels when submitting directly.
+custom-labels = "0.4.4"
+
 [dev-dependencies]
 tempfile = "3"
 # Match Paimon's OpenDAL type in snapshot error-classification tests.

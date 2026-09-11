@@ -10,6 +10,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "tracing/runtime.h"
+
 #include "milvus-storage/format/paimon/paimon_format_reader.h"
 
 #include <algorithm>
@@ -608,14 +610,19 @@ PaimonFormatReader::PaimonFormatReader(MetaTrait::MetadataPtr metadata,
 bool PaimonFormatReader::is_data_split() const { return metadata_->payload.read_path == kDataSplitReadPath; }
 
 arrow::Status PaimonFormatReader::open() {
-  if (is_data_split()) {
-    if (!split_reader_) {
-      return arrow::Status::Invalid("Paimon data-split reader is unavailable");
-    }
-  } else if (!direct_file_reader_) {
-    return arrow::Status::Invalid("Paimon direct-file reader is unavailable");
-  }
-  return arrow::Status::OK();
+  return tracing::Run(
+      "storage.metadata.load",
+      [&]() -> arrow::Status {
+        if (is_data_split()) {
+          if (!split_reader_) {
+            return arrow::Status::Invalid("Paimon data-split reader is unavailable");
+          }
+        } else if (!direct_file_reader_) {
+          return arrow::Status::Invalid("Paimon direct-file reader is unavailable");
+        }
+        return arrow::Status::OK();
+      },
+      false, "open", "paimon");
 }
 
 arrow::Result<std::unique_ptr<DataSplitStreamCursor>> PaimonFormatReader::make_data_split_cursor() const {
@@ -647,73 +654,83 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> PaimonFormatReader::filter_di
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> PaimonFormatReader::get_chunk(const int& row_group_index) {
-  if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= metadata_->row_group_infos.size()) {
-    return arrow::Status::Invalid("Paimon row group index out of range: ", row_group_index);
-  }
-  if (is_data_split()) {
-    const auto& group = metadata_->row_group_infos[row_group_index];
-    if (!data_split_cursor_ || group.start_offset < data_split_cursor_->position()) {
-      ARROW_ASSIGN_OR_RAISE(data_split_cursor_, make_data_split_cursor());
-    }
-    auto batches = data_split_cursor_->ReadRange(group.start_offset, group.end_offset);
-    if (!batches.ok()) {
-      data_split_cursor_.reset();
-      return batches.status();
-    }
-    auto batch = CombineBatches(*batches, output_schema_);
-    if (!batch.ok()) {
-      data_split_cursor_.reset();
-    }
-    return batch;
-  }
-  const auto& group = metadata_->row_group_infos[row_group_index];
-  if (group.start_offset == group.end_offset) {
-    return arrow::RecordBatch::MakeEmpty(output_schema_);
-  }
-  const auto& physical = metadata_->payload.direct_physical_row_groups[row_group_index];
-  ARROW_ASSIGN_OR_RAISE(auto batch, direct_file_reader_->get_chunk(row_group_index));
-  return filter_direct_batch(batch, physical.start_offset);
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
+        if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= metadata_->row_group_infos.size()) {
+          return arrow::Status::Invalid("Paimon row group index out of range: ", row_group_index);
+        }
+        if (is_data_split()) {
+          const auto& group = metadata_->row_group_infos[row_group_index];
+          if (!data_split_cursor_ || group.start_offset < data_split_cursor_->position()) {
+            ARROW_ASSIGN_OR_RAISE(data_split_cursor_, make_data_split_cursor());
+          }
+          auto batches = data_split_cursor_->ReadRange(group.start_offset, group.end_offset);
+          if (!batches.ok()) {
+            data_split_cursor_.reset();
+            return batches.status();
+          }
+          auto batch = CombineBatches(*batches, output_schema_);
+          if (!batch.ok()) {
+            data_split_cursor_.reset();
+          }
+          return batch;
+        }
+        const auto& group = metadata_->row_group_infos[row_group_index];
+        if (group.start_offset == group.end_offset) {
+          return arrow::RecordBatch::MakeEmpty(output_schema_);
+        }
+        const auto& physical = metadata_->payload.direct_physical_row_groups[row_group_index];
+        ARROW_ASSIGN_OR_RAISE(auto batch, direct_file_reader_->get_chunk(row_group_index));
+        return filter_direct_batch(batch, physical.start_offset);
+      },
+      false, "get_chunk", "paimon");
 }
 
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> PaimonFormatReader::get_chunks(
     const std::vector<int>& indices) {
-  std::vector<std::shared_ptr<arrow::RecordBatch>> output;
-  output.reserve(indices.size());
-  if (indices.empty()) {
-    return output;
-  }
-  if (is_data_split()) {
-    int previous = -1;
-    for (auto index : indices) {
-      if (index <= previous || index < 0 || static_cast<size_t>(index) >= metadata_->row_group_infos.size()) {
-        return arrow::Status::Invalid("Paimon get_chunks requires sorted unique row group indices");
-      }
-      previous = index;
-    }
-    ARROW_ASSIGN_OR_RAISE(auto cursor, make_data_split_cursor());
-    for (auto index : indices) {
-      const auto& group = metadata_->row_group_infos[index];
-      ARROW_ASSIGN_OR_RAISE(auto batches, cursor->ReadRange(group.start_offset, group.end_offset));
-      ARROW_ASSIGN_OR_RAISE(auto batch, CombineBatches(batches, output_schema_));
-      output.push_back(std::move(batch));
-    }
-    return output;
-  }
-  for (auto index : indices) {
-    if (index < 0 || static_cast<size_t>(index) >= metadata_->payload.direct_physical_row_groups.size()) {
-      return arrow::Status::Invalid("Paimon direct-file row group index out of range");
-    }
-  }
-  ARROW_ASSIGN_OR_RAISE(auto batches, direct_file_reader_->get_chunks(indices));
-  if (batches.size() != indices.size()) {
-    return arrow::Status::Invalid("Direct-file reader returned an unexpected Paimon chunk count");
-  }
-  for (size_t i = 0; i < batches.size(); ++i) {
-    const auto& physical = metadata_->payload.direct_physical_row_groups[indices[i]];
-    ARROW_ASSIGN_OR_RAISE(auto filtered, filter_direct_batch(batches[i], physical.start_offset));
-    output.push_back(std::move(filtered));
-  }
-  return output;
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
+        std::vector<std::shared_ptr<arrow::RecordBatch>> output;
+        output.reserve(indices.size());
+        if (indices.empty()) {
+          return output;
+        }
+        if (is_data_split()) {
+          int previous = -1;
+          for (auto index : indices) {
+            if (index <= previous || index < 0 || static_cast<size_t>(index) >= metadata_->row_group_infos.size()) {
+              return arrow::Status::Invalid("Paimon get_chunks requires sorted unique row group indices");
+            }
+            previous = index;
+          }
+          ARROW_ASSIGN_OR_RAISE(auto cursor, make_data_split_cursor());
+          for (auto index : indices) {
+            const auto& group = metadata_->row_group_infos[index];
+            ARROW_ASSIGN_OR_RAISE(auto batches, cursor->ReadRange(group.start_offset, group.end_offset));
+            ARROW_ASSIGN_OR_RAISE(auto batch, CombineBatches(batches, output_schema_));
+            output.push_back(std::move(batch));
+          }
+          return output;
+        }
+        for (auto index : indices) {
+          if (index < 0 || static_cast<size_t>(index) >= metadata_->payload.direct_physical_row_groups.size()) {
+            return arrow::Status::Invalid("Paimon direct-file row group index out of range");
+          }
+        }
+        ARROW_ASSIGN_OR_RAISE(auto batches, direct_file_reader_->get_chunks(indices));
+        if (batches.size() != indices.size()) {
+          return arrow::Status::Invalid("Direct-file reader returned an unexpected Paimon chunk count");
+        }
+        for (size_t i = 0; i < batches.size(); ++i) {
+          const auto& physical = metadata_->payload.direct_physical_row_groups[indices[i]];
+          ARROW_ASSIGN_OR_RAISE(auto filtered, filter_direct_batch(batches[i], physical.start_offset));
+          output.push_back(std::move(filtered));
+        }
+        return output;
+      },
+      false, "get_chunks", "paimon");
 }
 
 arrow::Result<std::vector<int64_t>> PaimonFormatReader::logical_to_physical(
@@ -744,52 +761,63 @@ arrow::Result<std::vector<int64_t>> PaimonFormatReader::logical_to_physical(
 }
 
 arrow::Result<std::shared_ptr<arrow::Table>> PaimonFormatReader::take(const std::vector<int64_t>& indices) {
-  if (indices.empty()) {
-    return arrow::Table::MakeEmpty(output_schema_);
-  }
-  if (is_data_split()) {
-    ARROW_ASSIGN_OR_RAISE(auto cursor, make_data_split_cursor());
-    ARROW_ASSIGN_OR_RAISE(auto selected_batches, cursor->TakeRows(indices));
-    return arrow::Table::FromRecordBatches(output_schema_, selected_batches);
-  }
-  ARROW_ASSIGN_OR_RAISE(auto physical, logical_to_physical(indices));
-  return direct_file_reader_->take(physical);
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::Table>> {
+        if (indices.empty()) {
+          return arrow::Table::MakeEmpty(output_schema_);
+        }
+        if (is_data_split()) {
+          ARROW_ASSIGN_OR_RAISE(auto cursor, make_data_split_cursor());
+          ARROW_ASSIGN_OR_RAISE(auto selected_batches, cursor->TakeRows(indices));
+          return arrow::Table::FromRecordBatches(output_schema_, selected_batches);
+        }
+        ARROW_ASSIGN_OR_RAISE(auto physical, logical_to_physical(indices));
+        return direct_file_reader_->take(physical);
+      },
+      false, "take", "paimon");
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> PaimonFormatReader::read_with_range(const uint64_t& start,
                                                                                              const uint64_t& end) {
-  if (end < start || end > metadata_->payload.record_count) {
-    return arrow::Status::Invalid("Invalid Paimon logical range");
-  }
-  if (start == end) {
-    ARROW_ASSIGN_OR_RAISE(auto empty, arrow::RecordBatch::MakeEmpty(output_schema_));
-    return arrow::RecordBatchReader::Make({empty});
-  }
-  if (is_data_split()) {
-    std::vector<std::pair<uint64_t, uint64_t>> ranges;
-    for (const auto& group : metadata_->row_group_infos) {
-      const auto group_start = static_cast<uint64_t>(group.start_offset);
-      const auto group_end = static_cast<uint64_t>(group.end_offset);
-      if (group_end <= start) {
-        continue;
-      }
-      if (group_start >= end) {
-        break;
-      }
-      ranges.emplace_back(std::max(start, group_start), std::min(end, group_end));
-    }
-    if (ranges.empty()) {
-      return arrow::Status::Invalid("Paimon data-split range does not intersect a logical chunk");
-    }
-    ARROW_ASSIGN_OR_RAISE(auto cursor, make_data_split_cursor());
-    return std::make_shared<DataSplitRangeReader>(std::move(cursor), std::move(ranges), output_schema_);
-  }
-  ARROW_ASSIGN_OR_RAISE(auto physical,
-                        logical_to_physical({static_cast<int64_t>(start), static_cast<int64_t>(end - 1)}));
-  auto physical_start = static_cast<uint64_t>(physical.front());
-  auto physical_end = static_cast<uint64_t>(physical.back()) + 1;
-  ARROW_ASSIGN_OR_RAISE(auto source, direct_file_reader_->read_with_range(physical_start, physical_end));
-  return std::make_shared<DirectDeletionReader>(std::move(source), physical_start, metadata_->payload.sorted_deletions);
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> {
+        if (end < start || end > metadata_->payload.record_count) {
+          return arrow::Status::Invalid("Invalid Paimon logical range");
+        }
+        if (start == end) {
+          ARROW_ASSIGN_OR_RAISE(auto empty, arrow::RecordBatch::MakeEmpty(output_schema_));
+          return arrow::RecordBatchReader::Make({empty});
+        }
+        if (is_data_split()) {
+          std::vector<std::pair<uint64_t, uint64_t>> ranges;
+          for (const auto& group : metadata_->row_group_infos) {
+            const auto group_start = static_cast<uint64_t>(group.start_offset);
+            const auto group_end = static_cast<uint64_t>(group.end_offset);
+            if (group_end <= start) {
+              continue;
+            }
+            if (group_start >= end) {
+              break;
+            }
+            ranges.emplace_back(std::max(start, group_start), std::min(end, group_end));
+          }
+          if (ranges.empty()) {
+            return arrow::Status::Invalid("Paimon data-split range does not intersect a logical chunk");
+          }
+          ARROW_ASSIGN_OR_RAISE(auto cursor, make_data_split_cursor());
+          return std::make_shared<DataSplitRangeReader>(std::move(cursor), std::move(ranges), output_schema_);
+        }
+        ARROW_ASSIGN_OR_RAISE(auto physical,
+                              logical_to_physical({static_cast<int64_t>(start), static_cast<int64_t>(end - 1)}));
+        auto physical_start = static_cast<uint64_t>(physical.front());
+        auto physical_end = static_cast<uint64_t>(physical.back()) + 1;
+        ARROW_ASSIGN_OR_RAISE(auto source, direct_file_reader_->read_with_range(physical_start, physical_end));
+        return std::make_shared<DirectDeletionReader>(std::move(source), physical_start,
+                                                      metadata_->payload.sorted_deletions);
+      },
+      false, "read_with_range", "paimon");
 }
 
 arrow::Result<std::shared_ptr<FormatReader>> PaimonFormatReader::clone_reader() {

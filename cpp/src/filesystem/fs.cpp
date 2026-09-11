@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/fs.h"
+#include "tracing/filesystem.h"
 
 #include <functional>
 #include <memory>
@@ -148,6 +149,21 @@ std::string ArrowFileSystemConfig::ToString() const {
   ss << "]";
 
   return ss.str();
+}
+
+arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> FileSystemProxy::OpenInputFile(const std::string& path) {
+  FIU_RETURN_ON(FIUKEY_FS_OPEN_INPUT_FAIL,
+                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_FS_OPEN_INPUT_FAIL)));
+  ARROW_ASSIGN_OR_RAISE(auto file, SubTreeFileSystem::OpenInputFile(path));
+  return tracing::WrapFile(std::move(file), type_name());
+}
+
+arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> FileSystemProxy::OpenInputFile(
+    const arrow::fs::FileInfo& info) {
+  FIU_RETURN_ON(FIUKEY_FS_OPEN_INPUT_FAIL,
+                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_FS_OPEN_INPUT_FAIL)));
+  ARROW_ASSIGN_OR_RAISE(auto file, SubTreeFileSystem::OpenInputFile(info));
+  return tracing::WrapFile(std::move(file), type_name());
 }
 
 arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config) {

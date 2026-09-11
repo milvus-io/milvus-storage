@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 #include "vortex_bridge.h"
+#include "tracing/runtime.h"
 
 #include <optional>
 #include <string>
@@ -21,7 +22,9 @@ class VortexErrorTranslatingReader final : public arrow::RecordBatchReader {
   std::shared_ptr<arrow::Schema> schema() const override { return inner_->schema(); }
 
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override {
-    return MakeBridgeErrorStatus("Failed to read vortex record batch", inner_->ReadNext(batch));
+    return tracing::Run("storage.format.read", [&] {
+      return MakeBridgeErrorStatus("Failed to read vortex record batch", inner_->ReadNext(batch));
+    });
   }
 
   arrow::Status Close() override {

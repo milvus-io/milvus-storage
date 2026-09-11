@@ -13,8 +13,8 @@
 // limitations under the License.
 
 mod filesystem_opendal;
-mod iceberg_opendal;
 mod iceberg_bridgeimpl;
+mod iceberg_opendal;
 mod iceberg_testutil;
 mod lance_bridgeimpl;
 mod lance_memory_estimator;
@@ -24,6 +24,7 @@ mod paimon_split_serde;
 mod paimon_testutil;
 mod predicate_parser;
 mod rust_runtime;
+mod storage_tracing;
 #[cfg(feature = "talon")]
 mod talon_bridge;
 mod vortex_bridgeimpl;
@@ -41,9 +42,9 @@ use vortex_bridgeimpl::*;
 
 use std::sync::LazyLock;
 
+use storage_tracing::TracedRuntime;
 use vortex::VortexSessionDefault;
 use vortex::io::runtime::BlockingRuntime;
-use vortex::io::runtime::tokio::TokioRuntime;
 use vortex::io::session::RuntimeSessionExt;
 use vortex::layout::LayoutEncodingRef;
 use vortex::layout::session::LayoutSessionExt;
@@ -57,8 +58,8 @@ pub(crate) use rust_runtime::TOKIO_RT;
 ///
 /// This is not a second Tokio runtime; it only gives Vortex APIs a
 /// `BlockingRuntime` view over `TOKIO_RT`.
-static VORTEX_RT: LazyLock<TokioRuntime> =
-    LazyLock::new(|| TokioRuntime::new(TOKIO_RT.handle().clone()));
+static VORTEX_RT: LazyLock<TracedRuntime> =
+    LazyLock::new(|| TracedRuntime::new(TOKIO_RT.handle().clone()));
 
 static VORTEX_SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
     let session = VortexSession::default().with_handle(VORTEX_RT.handle());
@@ -70,6 +71,15 @@ static VORTEX_SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
 
 #[cxx::bridge(namespace = "milvus_storage::rust_bridge::ffi")]
 pub mod rust_runtime_ffi {
+    unsafe extern "C++" {
+        include!("tracing_bridge.h");
+        type TraceContext;
+        type TraceAttachment;
+        fn capture_trace_context() -> Result<SharedPtr<TraceContext>>;
+        fn attach_trace_context(
+            context: &SharedPtr<TraceContext>,
+        ) -> Result<UniquePtr<TraceAttachment>>;
+    }
     extern "Rust" {
         fn configure_rust_runtime(worker_threads: u32, max_blocking_threads: u32) -> Result<()>;
     }
@@ -170,10 +180,8 @@ pub mod lance_ffi {
             dataset: &BlockingDataset,
             fragment_id: u64,
         ) -> Result<Vec<LanceColumnMemoryEstimate>>;
-        pub fn estimate_fragment_memory(
-            dataset: &BlockingDataset,
-            fragment_id: u64,
-        ) -> Result<u64>;
+        pub fn estimate_fragment_memory(dataset: &BlockingDataset, fragment_id: u64)
+        -> Result<u64>;
         pub unsafe fn get_fragment_schema(
             dataset: &BlockingDataset,
             fragment_id: u64,
