@@ -424,6 +424,11 @@ typedef uintptr_t LoonWriterHandle;
 /**
  * @brief Creates a new Writer for a milvus storage dataset
  *
+ * When writer.enc.enable is true, writer.enc.key must contain the standard
+ * padded Base64 encoding of the binary AES key (16, 24 or 32 bytes). The FFI
+ * decodes it before passing properties to the native C++ writer. Other
+ * properties, including writer.enc.meta, are passed through unchanged.
+ *
  * @param base_path Base path in the filesystem to write data
  * @param schema Arrow schema handle
  * @param properties configuration properties
