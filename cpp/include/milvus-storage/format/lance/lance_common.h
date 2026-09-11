@@ -20,7 +20,7 @@
 #include <arrow/result.h>
 
 #include "milvus-storage/filesystem/fs.h"
-#include "lance_bridge.h"
+#include "lance/lance_bridge.h"
 
 namespace milvus_storage::lance {
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-#include "vortex_bridge.h"
+#include "vortex/vortex_bridge.h"
 
 #include <optional>
 #include <string>
@@ -9,7 +9,7 @@
 
 #include <arrow/record_batch.h>
 
-#include "bridge_util.h"
+#include "runtime/bridge_util.h"
 
 namespace milvus_storage::vortex {
 namespace {

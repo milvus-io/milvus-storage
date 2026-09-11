@@ -21,7 +21,7 @@
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/filesystem/observable.h"
 #include "milvus-storage/format/iceberg/iceberg_common.h"
-#include "iceberg_bridge.h"
+#include "iceberg/iceberg_bridge.h"
 #include "test_env.h"
 
 namespace milvus_storage::iceberg {
