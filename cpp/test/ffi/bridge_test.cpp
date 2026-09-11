@@ -15,7 +15,9 @@
 
 #include <gtest/gtest.h>
 
+#include <memory>
 #include <sstream>
+#include <unordered_map>
 #include <random>
 
 #include "milvus-storage/column_groups.h"
@@ -29,6 +31,85 @@ namespace milvus_storage::test {
 using namespace milvus_storage::api;
 
 class BridgeTest : public ::testing::Test {};
+
+TEST_F(BridgeTest, CreateColumnGroupsCopiesFileProperties) {
+  const char* columns[] = {"id", "value"};
+  char path[] = "table/data.parquet";
+  char* paths[] = {path, path, path};
+  int64_t starts[] = {0, 10, 20};
+  int64_t ends[] = {10, 20, 25};
+  char version[] = "42";
+  char metadata[] = R"({"delete_files":["deletes.parquet"]})";
+  LoonProperty first[] = {{const_cast<char*>("dataset_version"), version}};
+  LoonProperty second[] = {{const_cast<char*>("metadata"), metadata},
+                           {const_cast<char*>("empty"), const_cast<char*>("")}};
+  LoonProperties properties[] = {{first, 1}, {second, 2}, {nullptr, 0}};
+  LoonColumnGroups* groups = nullptr;
+  auto result = loon_column_groups_create(columns, 2, const_cast<char*>("iceberg-table"), paths, starts, ends,
+                                          properties, 3, &groups);
+  ASSERT_EQ(result.err_code, loon_errcode_success) << result.message;
+  std::unique_ptr<LoonColumnGroups, decltype(&loon_column_groups_destroy)> owned(groups, loon_column_groups_destroy);
+  // The result must survive reuse of every caller-owned input buffer.
+  path[0] = 'X';
+  version[0] = '9';
+  metadata[0] = 'X';
+  ColumnGroups imported;
+  ASSERT_STATUS_OK(column_groups_import(groups, &imported));
+  ASSERT_EQ(imported.size(), 1);
+  const auto& group = *imported[0];
+  EXPECT_EQ(group.columns, (std::vector<std::string>{"id", "value"}));
+  EXPECT_EQ(group.format, "iceberg-table");
+  ASSERT_EQ(group.files.size(), 3);
+  for (size_t i = 0; i < group.files.size(); ++i) {
+    EXPECT_EQ(group.files[i].path, "table/data.parquet");
+    EXPECT_EQ(group.files[i].start_index, starts[i]);
+    EXPECT_EQ(group.files[i].end_index, ends[i]);
+  }
+  EXPECT_EQ(group.files[0].properties, (std::unordered_map<std::string, std::string>{{"dataset_version", "42"}}));
+  EXPECT_EQ(group.files[1].properties, (std::unordered_map<std::string, std::string>{
+                                           {"metadata", R"({"delete_files":["deletes.parquet"]})"}, {"empty", ""}}));
+  EXPECT_TRUE(group.files[2].properties.empty());
+}
+
+TEST_F(BridgeTest, CreateColumnGroupsWithoutFileProperties) {
+  const char* columns[] = {"id"};
+  char* paths[] = {const_cast<char*>("file.parquet")};
+  int64_t starts[] = {3};
+  int64_t ends[] = {9};
+  const LoonProperties empty_properties{nullptr, 0};
+  for (const auto* properties : {static_cast<const LoonProperties*>(nullptr), &empty_properties}) {
+    LoonColumnGroups* groups = nullptr;
+    auto result = loon_column_groups_create(columns, 1, const_cast<char*>("parquet"), paths, starts, ends, properties,
+                                            1, &groups);
+    ASSERT_EQ(result.err_code, loon_errcode_success) << result.message;
+    std::unique_ptr<LoonColumnGroups, decltype(&loon_column_groups_destroy)> owned(groups, loon_column_groups_destroy);
+    ColumnGroups imported;
+    ASSERT_STATUS_OK(column_groups_import(groups, &imported));
+    ASSERT_EQ(imported.size(), 1);
+    ASSERT_EQ(imported[0]->files.size(), 1);
+    EXPECT_EQ(imported[0]->files[0].start_index, 3);
+    EXPECT_EQ(imported[0]->files[0].end_index, 9);
+    EXPECT_TRUE(imported[0]->files[0].properties.empty());
+  }
+}
+
+TEST_F(BridgeTest, CreateColumnGroupsRejectsInvalidFileProperties) {
+  const char* columns[] = {"id"};
+  char* paths[] = {const_cast<char*>("file.parquet")};
+  int64_t starts[] = {0};
+  int64_t ends[] = {10};
+  LoonProperty no_key{nullptr, const_cast<char*>("value")};
+  LoonProperty no_value{const_cast<char*>("key"), nullptr};
+  for (const auto properties : {LoonProperties{nullptr, 1}, LoonProperties{&no_key, 1}, LoonProperties{&no_value, 1}}) {
+    LoonColumnGroups* groups = nullptr;
+    auto result = loon_column_groups_create(columns, 1, const_cast<char*>("parquet"), paths, starts, ends, &properties,
+                                            1, &groups);
+    EXPECT_EQ(result.err_code, loon_errcode_invalid_args);
+    EXPECT_EQ(groups, nullptr);
+    loon_ffi_free_result(&result);
+    loon_column_groups_destroy(groups);
+  }
+}
 
 TEST_F(BridgeTest, ExportImportColumnGroups) {
   // create column groups
