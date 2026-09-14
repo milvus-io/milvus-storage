@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/ffi_c.h"
+#include "milvus-storage/common/encryption_util.h"
 
 #include <cstring>
 #include <memory>
@@ -420,7 +421,16 @@ void loon_reader_set_keyretriever(LoonReaderHandle reader, const char* (*key_ret
   auto* cpp_reader = reinterpret_cast<Reader*>(reader);
   cpp_reader->set_keyretriever([key_retriever](const std::string& metadata) -> std::string {
     const char* result = key_retriever(metadata.c_str());
-    return result ? std::string(result) : std::string();
+    if (!result) {
+      return std::string();
+    }
+    auto key = DecodeBase64EncryptionKey(result);
+    // The callback interface represents an unavailable key with an empty
+    // string. Invalid encoding must fail decryption through that same path.
+    if (!key.ok()) {
+      return std::string();
+    }
+    return std::move(key).ValueOrDie();
   });
 }
 
