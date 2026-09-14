@@ -734,8 +734,8 @@ static const char* test_key_retriever_callback(const char* metadata) {
     strncpy(g_keyretriever_metadata, metadata, sizeof(g_keyretriever_metadata) - 1);
     g_keyretriever_metadata[sizeof(g_keyretriever_metadata) - 1] = '\0';
   }
-  // Return the same key that was used for encryption
-  return "footer_key_16B__";
+  // Return the Base64 encoding of the key used for encryption.
+  return "Zm9vdGVyX2tleV8xNkJfXw==";
 }
 
 // Helper function to create encrypted test file
@@ -757,8 +757,8 @@ static void create_encrypted_writer_test_file(char* write_path, LoonColumnGroups
   const char* test_val[500] = {
       "single",
       "true",
-      "footer_key_16B__",      // 16-byte key for AES-128
-      "encryption_meta_data",  // metadata passed to key retriever
+      "Zm9vdGVyX2tleV8xNkJfXw==",  // Base64 of the 16-byte key "footer_key_16B__"
+      "encryption_meta_data",      // metadata passed to key retriever
       "AES_GCM_V1",
   };
   size_t test_count = init_test_props(test_key, test_val, 5, 500, FFI_TEST_ROOT_PATH);

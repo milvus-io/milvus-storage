@@ -26,6 +26,7 @@
 #include <vector>
 
 #include <arrow/api.h>
+#include <arrow/util/base64.h>
 #include <arrow/filesystem/localfs.h>
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
@@ -2107,7 +2108,11 @@ TEST_P(APIWriterReaderTest, EnrypytionWriterReaderTest) {
   ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties));
 
   SetValue(properties, PROPERTY_WRITER_ENC_ENABLE, "true");
-  SetValue(properties, PROPERTY_WRITER_ENC_KEY, "footer_key_16B__");  // must be 16/24/32 bytes
+  std::string key(32, '\xff');
+  key[16] = '\0';
+  key[24] = '\0';
+  const auto encoded_key = arrow::util::base64_encode(key);
+  ASSERT_EQ(SetValue(properties, PROPERTY_WRITER_ENC_KEY, encoded_key.c_str()), std::nullopt);
   SetValue(properties, PROPERTY_WRITER_ENC_META, "encryption_meta_data");
   SetValue(properties, PROPERTY_WRITER_ENC_ALGORITHM, ENCRYPTION_ALGORITHM_AES_GCM_V1);
 
@@ -2127,10 +2132,10 @@ TEST_P(APIWriterReaderTest, EnrypytionWriterReaderTest) {
   ASSERT_NE(reader, nullptr);
   int called_keyretriever = 0;
   std::string key_id_used;
-  reader->set_keyretriever([&called_keyretriever, &key_id_used](const std::string& key_id) -> std::string {
+  reader->set_keyretriever([&called_keyretriever, &key_id_used, &key](const std::string& key_id) -> std::string {
     called_keyretriever++;
     key_id_used = key_id;
-    return "footer_key_16B__";
+    return key;
   });
 
   auto batch_reader_result = reader->get_record_batch_reader();
@@ -2150,7 +2155,9 @@ TEST_P(APIWriterReaderTest, EnrypytionWriterReaderTest) {
   auto chunk_result = chunk_reader->get_chunk(0);
   ASSERT_TRUE(chunk_result.ok()) << chunk_result.status().ToString();
   ASSERT_NE(chunk_result.ValueOrDie(), nullptr);
+  ASSERT_TRUE(chunk_result.ValueOrDie()->Equals(*test_batch_));
   ASSERT_GE(called_keyretriever, 1);
+  EXPECT_EQ(GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_KEY), encoded_key);
 }
 
 TEST_P(APIWriterReaderTest, DisabledMetadataCacheReopensEncryptedParquetMetadata) {
@@ -2163,7 +2170,7 @@ TEST_P(APIWriterReaderTest, DisabledMetadataCacheReopensEncryptedParquetMetadata
   ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties));
 
   ASSERT_EQ(SetValue(properties, PROPERTY_WRITER_ENC_ENABLE, "true"), std::nullopt);
-  ASSERT_EQ(SetValue(properties, PROPERTY_WRITER_ENC_KEY, "footer_key_16B__"), std::nullopt);
+  ASSERT_EQ(SetValue(properties, PROPERTY_WRITER_ENC_KEY, "Zm9vdGVyX2tleV8xNkJfXw=="), std::nullopt);
   ASSERT_EQ(SetValue(properties, PROPERTY_WRITER_ENC_META, "encryption_meta_data"), std::nullopt);
   ASSERT_EQ(SetValue(properties, PROPERTY_WRITER_ENC_ALGORITHM, ENCRYPTION_ALGORITHM_AES_GCM_V1), std::nullopt);
   ASSERT_EQ(SetValue(properties, PROPERTY_READER_METADATA_CACHE_ENABLE, "false"), std::nullopt);
