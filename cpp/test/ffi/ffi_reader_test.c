@@ -734,8 +734,8 @@ static const char* test_key_retriever_callback(const char* metadata) {
     strncpy(g_keyretriever_metadata, metadata, sizeof(g_keyretriever_metadata) - 1);
     g_keyretriever_metadata[sizeof(g_keyretriever_metadata) - 1] = '\0';
   }
-  // Return the same key that was used for encryption
-  return "footer_key_16B__";
+  // Return the Base64 encoding of the key used for encryption.
+  return "Zm9vdGVyX2tleV8xNkJfXw==";
 }
 
 // Helper function to create encrypted test file

@@ -48,7 +48,7 @@ _PROPERTY_KEY_MAPPING = {
     "WRITER_COMPRESSION_LEVEL": "loon_properties_writer_compression_level",
     "WRITER_ENABLE_DICTIONARY": "loon_properties_writer_enable_dictionary",
     "WRITER_ENC_ENABLE": "loon_properties_writer_enc_enable",
-    "WRITER_ENC_KEY": "loon_properties_writer_enc_key",
+    "WRITER_ENC_KEY": "loon_properties_writer_enc_key",  # Standard padded Base64 of raw AES key bytes.
     "WRITER_ENC_META": "loon_properties_writer_enc_meta",
     "WRITER_ENC_ALGORITHM": "loon_properties_writer_enc_algorithm",
     "WRITER_VORTEX_ENABLE_STATISTICS": "loon_properties_writer_vortex_enable_statistics",

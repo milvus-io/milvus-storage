@@ -13,6 +13,9 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+#include <atomic>
+#include <filesystem>
+#include <optional>
 #include <vector>
 #include <arrow/c/bridge.h>
 #include <arrow/type.h>
@@ -47,6 +50,28 @@ struct WriterResources {
   }
 };
 
+struct ReaderResources {
+  ArrowSchema schema{};
+  ArrowArrayStream stream{};
+  LoonReaderHandle reader = 0;
+  ~ReaderResources() {
+    if (stream.release)
+      stream.release(&stream);
+    loon_reader_destroy(reader);
+    if (schema.release)
+      schema.release(&schema);
+  }
+};
+
+std::optional<std::string> callback_key;
+std::atomic<int> callback_calls{0};
+
+const char* RetrieveEncodedKey(const char* metadata) {
+  EXPECT_STREQ(metadata, "key-id");
+  ++callback_calls;
+  return callback_key ? callback_key->c_str() : nullptr;
+}
+
 void AssertSuccess(LoonFFIResult result) {
   const bool success = loon_ffi_is_success(&result);
   const std::string message = result.message ? result.message : "";
@@ -72,10 +97,10 @@ TEST(FFIWriterEncryption, Base64KeyWritesParquetReadableWithOriginalBinaryKey) {
       auto dir = std::move(dir_result).ValueOrDie();
       const auto root = dir->path().ToString();
       WriterResources r;
-      const char* names[] = {"fs.storage_type",   "fs.root_path",   "writer.policy",  "writer.format",
-                             "writer.enc.enable", "writer.enc.key", "writer.enc.meta"};
-      const char* values[] = {"local", root.c_str(), "single", "parquet", "true", encoded.c_str(), "key-id"};
-      ASSERT_NO_FATAL_FAILURE(AssertSuccess(loon_properties_create(names, values, 7, &r.props)));
+      const char* names[] = {"fs.storage_type",   "fs.root_path",   "writer.policy",   "writer.format",
+                             "writer.enc.enable", "writer.enc.key", "writer.enc.meta", "reader.metadata_cache.enable"};
+      const char* values[] = {"local", root.c_str(), "single", "parquet", "true", encoded.c_str(), "key-id", "false"};
+      ASSERT_NO_FATAL_FAILURE(AssertSuccess(loon_properties_create(names, values, 8, &r.props)));
 
       const auto schema = arrow::schema({arrow::field("id", arrow::int64(), false)});
       arrow::Int64Builder builder;
@@ -107,6 +132,48 @@ TEST(FFIWriterEncryption, Base64KeyWritesParquetReadableWithOriginalBinaryKey) {
       ASSERT_EQ(count, 3);
       EXPECT_EQ(std::vector<int64_t>(actual, actual + 3), (std::vector<int64_t>{0, 17, 511}));
 
+      // Exercise the public C reader too: its callback returns Base64 text,
+      // while the independent Parquet reader above receives raw key bytes.
+      ReaderResources rr;
+      ASSERT_TRUE(arrow::ExportSchema(*schema, &rr.schema).ok());
+      ASSERT_NO_FATAL_FAILURE(AssertSuccess(loon_reader_new(r.groups, &rr.schema, nullptr, 0, &r.props, &rr.reader)));
+      callback_key = encoded;
+      callback_calls = 0;
+      loon_reader_set_keyretriever(rr.reader, RetrieveEncodedKey);
+      ASSERT_NO_FATAL_FAILURE(AssertSuccess(loon_get_record_batch_reader(rr.reader, nullptr, &rr.stream)));
+      auto stream_result = arrow::ImportRecordBatchReader(&rr.stream);
+      ASSERT_TRUE(stream_result.ok()) << stream_result.status();
+      auto batch_reader = std::move(stream_result).ValueOrDie();
+      std::shared_ptr<arrow::RecordBatch> actual_batch;
+      ASSERT_TRUE(batch_reader->ReadNext(&actual_batch).ok());
+      ASSERT_NE(actual_batch, nullptr);
+      EXPECT_TRUE(actual_batch->Equals(*batch));
+      EXPECT_GT(callback_calls.load(), 0);
+      ASSERT_TRUE(batch_reader->ReadNext(&actual_batch).ok());
+      EXPECT_EQ(actual_batch, nullptr);
+
+      if (key_size == 32 && offset == 24) {
+        const std::vector<std::optional<std::string>> invalid_keys{
+            std::nullopt, "", "not-base64!", "YQ==", encoded + "trailing", encoded.substr(0, encoded.size() - 1)};
+        for (size_t i = 0; i < invalid_keys.size(); ++i) {
+          SCOPED_TRACE(i);
+          ReaderResources invalid_reader;
+          ASSERT_TRUE(arrow::ExportSchema(*schema, &invalid_reader.schema).ok());
+          ASSERT_NO_FATAL_FAILURE(AssertSuccess(
+              loon_reader_new(r.groups, &invalid_reader.schema, nullptr, 0, &r.props, &invalid_reader.reader)));
+          callback_key = invalid_keys[i];
+          callback_calls = 0;
+          loon_reader_set_keyretriever(invalid_reader.reader, RetrieveEncodedKey);
+          auto result = loon_get_record_batch_reader(invalid_reader.reader, nullptr, &invalid_reader.stream);
+          EXPECT_FALSE(loon_ffi_is_success(&result));
+          EXPECT_GT(callback_calls.load(), 0);
+          if (!loon_ffi_is_success(&result) && callback_key && !callback_key->empty()) {
+            EXPECT_EQ(std::string(loon_ffi_get_errmsg(&result)).find(*callback_key), std::string::npos);
+          }
+          loon_ffi_free_result(&result);
+        }
+      }
+
       // These prefixes are valid AES lengths, which let the old C-string
       // truncation bug silently write data with the wrong key.
       if (key_size == 32 && (offset == 16 || offset == 24)) {
@@ -131,20 +198,34 @@ TEST(FFIWriterEncryption, RejectsMalformedOrInvalidLengthBase64Key) {
                                 "Zm9vdGVyX2tleV8xNkJfXx=="};
   for (size_t i = 0; i < sizeof(invalid_keys) / sizeof(invalid_keys[0]); ++i) {
     SCOPED_TRACE(i);
+    auto dir_result = arrow::internal::TemporaryDir::Make("loon-invalid-key-");
+    ASSERT_TRUE(dir_result.ok()) << dir_result.status();
+    auto dir = std::move(dir_result).ValueOrDie();
+    const auto root = dir->path().ToString();
+    WriterResources r;
     const char* keys[] = {"fs.storage_type", "fs.root_path",      "writer.policy",
                           "writer.format",   "writer.enc.enable", "writer.enc.key"};
-    const char* values[] = {"local", "/tmp", "single", "parquet", "true", invalid_keys[i]};
-    LoonProperties props{};
-    auto result = loon_properties_create(keys, values, 6, &props);
-    ASSERT_TRUE(loon_ffi_is_success(&result));
-    loon_ffi_free_result(&result);
+    const char* values[] = {"local", root.c_str(), "single", "parquet", "true", invalid_keys[i]};
+    ASSERT_NO_FATAL_FAILURE(AssertSuccess(loon_properties_create(keys, values, 6, &r.props)));
 
-    ArrowSchema schema{};
-    ASSERT_TRUE(arrow::ExportSchema(*arrow::schema({arrow::field("id", arrow::int64())}), &schema).ok());
-    LoonWriterHandle writer = 0;
-    result = loon_writer_new("invalid-base64-key", &schema, &props, &writer);
-    EXPECT_EQ(result.err_code, LOON_INVALID_PROPERTIES);
-    EXPECT_EQ(writer, 0);
+    const auto schema = arrow::schema({arrow::field("id", arrow::int64(), false)});
+    arrow::Int64Builder builder;
+    ASSERT_TRUE(builder.Append(7).ok());
+    auto array_result = builder.Finish();
+    ASSERT_TRUE(array_result.ok());
+    auto batch = arrow::RecordBatch::Make(schema, 1, {array_result.ValueOrDie()});
+    ASSERT_TRUE(arrow::ExportSchema(*schema, &r.schema).ok());
+    ASSERT_TRUE(arrow::ExportRecordBatch(*batch, &r.array).ok());
+    ASSERT_NO_FATAL_FAILURE(AssertSuccess(loon_writer_new("data", &r.schema, &r.props, &r.writer)));
+
+    // Keys are checked where the Parquet writer consumes them, which may be
+    // deferred until close by the writer's buffering policy.
+    auto result = loon_writer_write(r.writer, &r.array);
+    if (loon_ffi_is_success(&result)) {
+      loon_ffi_free_result(&result);
+      result = loon_writer_close(r.writer, nullptr, nullptr, 0, &r.groups);
+    }
+    EXPECT_EQ(result.err_code, LOON_ARROW_ERROR);
     if (!loon_ffi_is_success(&result)) {
       EXPECT_NE(std::string(loon_ffi_get_errmsg(&result)).find("writer.enc.key"), std::string::npos);
       if (invalid_keys[i][0] != '\0') {
@@ -152,10 +233,8 @@ TEST(FFIWriterEncryption, RejectsMalformedOrInvalidLengthBase64Key) {
       }
     }
     loon_ffi_free_result(&result);
-    loon_writer_destroy(writer);
-    if (schema.release) {
-      schema.release(&schema);
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+      EXPECT_NE(entry.path().extension(), ".parquet");
     }
-    loon_properties_free(&props);
   }
 }
