@@ -8,16 +8,16 @@ use std::fmt::{Display, Formatter};
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
-use arrow_array58::cast::AsArray;
-use arrow_array58::ffi::FFI_ArrowSchema;
-use arrow_array58::ffi_stream::FFI_ArrowArrayStream;
-use arrow_array58::{
+use arrow_array::cast::AsArray;
+use arrow_array::ffi::FFI_ArrowSchema;
+use arrow_array::ffi_stream::FFI_ArrowArrayStream;
+use arrow_array::{
     Array, ArrayRef as ArrowArrayRef, FixedSizeBinaryArray, FixedSizeListArray, RecordBatch,
     RecordBatchReader, StructArray, UInt8Array, make_array,
 };
-use arrow58::array::ArrayData;
-use arrow58::ffi::FFI_ArrowArray;
-use arrow_schema58::{ArrowError, DataType, Field, Schema, SchemaRef};
+use arrow::array::ArrayData;
+use arrow::ffi::FFI_ArrowArray;
+use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 
 use vortex::array::ArrayRef;
 use vortex::array::VortexSessionExecute;
@@ -160,7 +160,7 @@ pub(crate) fn nullability_from_bool(nullable: bool) -> Nullability {
 
 pub(crate) unsafe fn from_arrow(ffi_schema: *mut u8, non_nullable: bool) -> Result<Box<DType>> {
     let arrow_schema = unsafe { FFI_ArrowSchema::from_raw(ffi_schema as *mut FFI_ArrowSchema) };
-    let arrow_dtype = arrow_schema58::DataType::try_from(&arrow_schema)?;
+    let arrow_dtype = arrow_schema::DataType::try_from(&arrow_schema)?;
     Ok(Box::new(DType {
         inner: RustDType::from_arrow(&Field::new("_", arrow_dtype, !non_nullable)),
     }))
@@ -976,8 +976,8 @@ impl VortexWriter {
         let ffi_schema = unsafe { FFI_ArrowSchema::from_raw(in_schema as *mut FFI_ArrowSchema) };
         let arrow_schema = Schema::try_from(&ffi_schema)?;
 
-        let arrow_array_data = arrow_array58::array::StructArray::from(
-            unsafe { arrow_array58::ffi::from_ffi(ffi_array, &ffi_schema) }
+        let arrow_array_data = arrow_array::array::StructArray::from(
+            unsafe { arrow_array::ffi::from_ffi(ffi_array, &ffi_schema) }
                 .map_err(|e| VortexError::from(e))?,
         );
 

@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow_schema58::DataType;
+use arrow_schema::DataType;
 use lance::dataset::Dataset;
 use lance::{Error, Result};
 use lance_core::datatypes::{Field, Schema};
