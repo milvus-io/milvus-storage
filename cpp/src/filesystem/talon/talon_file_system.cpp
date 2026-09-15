@@ -15,9 +15,9 @@
 #include "milvus-storage/filesystem/talon/talon_file_system.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -27,8 +27,12 @@
 #include <arrow/memory_pool.h>
 #include <arrow/status.h>
 #include <arrow/util/future.h>
+#include <arrow/util/key_value_metadata.h>
+#include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/trim.hpp>
 
 #include "milvus-storage/common/log.h"
+#include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/util_internal.h"
@@ -37,26 +41,29 @@
 namespace milvus_storage::talon {
 namespace {
 
+constexpr std::size_t kObjectStatCacheCapacity = 4096;
+
 class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlockingRandomAccessFile {
   public:
   TalonInputFile(TalonObjectReader reader,
-                 ArrowFileSystemPtr origin_fs,
-                 std::string path,
+                 std::shared_ptr<arrow::io::RandomAccessFile> origin_file,
                  arrow::MemoryPool* const pool)
-      : reader_(std::move(reader)), origin_fs_(std::move(origin_fs)), path_(std::move(path)), pool_(pool) {}
+      : reader_(std::move(reader)), origin_file_(std::move(origin_file)), pool_(pool) {}
 
   arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override {
-    ARROW_ASSIGN_OR_RAISE(auto file, GetOrOpenOriginFile());
-    return file->ReadMetadata();
+    if (closed_) {
+      return arrow::Status::Invalid("Operation on closed Talon input file");
+    }
+    return origin_file_->ReadMetadata();
   }
 
   arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(
       const arrow::io::IOContext& io_context) override {
-    auto file = GetOrOpenOriginFile();
-    if (!file.ok()) {
-      return arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>>::MakeFinished(file.status());
+    if (closed_) {
+      return arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>>::MakeFinished(
+          arrow::Status::Invalid("Operation on closed Talon input file"));
     }
-    return file.ValueOrDie()->ReadMetadataAsync(io_context);
+    return origin_file_->ReadMetadataAsync(io_context);
   }
 
   arrow::Result<int64_t> GetSize() override { return GetSizeAsync().result(); }
@@ -182,7 +189,6 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
       ARROW_RETURN_NOT_OK(origin_file_->Close());
       origin_file_.reset();
     }
-    origin_fs_.reset();
     reader_.reset();
     closed_ = true;
     return arrow::Status::OK();
@@ -207,18 +213,14 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
          read_origin = std::move(read_origin)](const arrow::Status& talon_error) -> arrow::Future<int64_t> {
 #if 0
           // TODO(jiaqizho): Replace fallback logging with metrics.
-          LOG_STORAGE_WARNING_ << "Talon failed for '" << path_
-                               << "', falling back to origin filesystem: " << talon_error;
+          LOG_STORAGE_WARNING_ << "Talon failed, falling back to origin filesystem: " << talon_error;
 #endif
-          auto file = GetOrOpenOriginFile();
           arrow::Future<int64_t> origin_future;
-          if (!file.ok()) {
-            origin_future = arrow::Future<int64_t>::MakeFinished(file.status());
-          } else if (auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(file.ValueOrDie().get())) {
+          if (auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(origin_file_.get())) {
             origin_future = read_origin_async(*async_file);
           } else {
             // Origins without native async support still work through their blocking API.
-            origin_future = arrow::Future<int64_t>::MakeFinished(read_origin(*file.ValueOrDie()));
+            origin_future = arrow::Future<int64_t>::MakeFinished(read_origin(*origin_file_));
           }
           // Native CRT requests own their I/O state. Keep origin owners out of
           // their completion callbacks to avoid destroying a CRT client there.
@@ -254,23 +256,7 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
     return nbytes;
   }
 
-  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> GetOrOpenOriginFile() {
-    if (closed_) {
-      return arrow::Status::Invalid("Operation on closed Talon input file");
-    }
-    // Metadata and fallback reuse the same file and provider metadata cache.
-    // Successful Talon reads never open the origin file or issue origin HEADs.
-    const std::lock_guard<std::mutex> lock(origin_file_mutex_);
-    if (origin_file_ == nullptr) {
-      ARROW_ASSIGN_OR_RAISE(origin_file_, origin_fs_->OpenInputFile(path_));
-    }
-    return origin_file_;
-  }
-
   std::optional<TalonObjectReader> reader_;
-  ArrowFileSystemPtr origin_fs_;
-  const std::string path_;
-  std::mutex origin_file_mutex_;
   std::shared_ptr<arrow::io::RandomAccessFile> origin_file_;
   arrow::MemoryPool* const pool_;
   int64_t pos_ = 0;
@@ -344,7 +330,7 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
   }
 
   arrow::Result<std::shared_ptr<arrow::io::InputStream>> OpenInputStream(const std::string& path) override {
-    ARROW_ASSIGN_OR_RAISE(auto file, OpenTalon(path, arrow::fs::kNoSize));
+    ARROW_ASSIGN_OR_RAISE(auto file, OpenTalon(path));
     return std::static_pointer_cast<arrow::io::InputStream>(std::move(file));
   }
 
@@ -354,18 +340,18 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
   }
 
   arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string& path) override {
-    return OpenTalon(path, arrow::fs::kNoSize);
+    return OpenTalon(path);
   }
 
   arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const arrow::fs::FileInfo& info) override {
-    // Honor the caller's known type without issuing another metadata request.
+    // Reject a known non-file before resolving its object metadata.
     if (info.type() == arrow::fs::FileType::NotFound) {
       return arrow::fs::internal::PathNotFound(info.path());
     }
     if (info.type() != arrow::fs::FileType::File && info.type() != arrow::fs::FileType::Unknown) {
       return arrow::fs::internal::NotAFile(info.path());
     }
-    return OpenTalon(info.path(), info.size());
+    return OpenTalon(info.path());
   }
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
@@ -423,24 +409,43 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
     return key;
   }
 
-  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenTalon(const std::string& path,
-                                                                        int64_t known_size) const {
-    ARROW_ASSIGN_OR_RAISE(auto key, ObjectKey(path));
-    if (known_size < arrow::fs::kNoSize) {
-      return arrow::Status::Invalid("Invalid known Talon object size: ", known_size);
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenTalon(const std::string& path) {
+    ARROW_ASSIGN_OR_RAISE(const auto key, ObjectKey(path));
+    ARROW_ASSIGN_OR_RAISE(auto origin_file, origin_fs_->OpenInputFile(path));
+    auto initial_stat = object_stat_cache_.get(key);
+    if (!initial_stat.has_value()) {
+      ARROW_ASSIGN_OR_RAISE(const auto metadata, origin_file->ReadMetadata());
+      if (metadata == nullptr || !metadata->Contains("ETag")) {
+        return arrow::Status::IOError("Missing ETag metadata for Talon object: ", path);
+      }
+      ARROW_ASSIGN_OR_RAISE(auto version, metadata->Get("ETag"));
+      // Talon strips ETag quotes when resolving backend versions and adds them
+      // back for If-Match. Use the same token for its versioned cache identity.
+      boost::trim_if(version, boost::is_any_of("\""));
+      if (boost::all(version, boost::is_any_of(" \t\r\n"))) {
+        return arrow::Status::IOError("Empty ETag metadata for Talon object: ", path);
+      }
+      // ReadMetadata populates the provider file's size in the same HEAD.
+      // Keep that size with its ETag instead of mixing in FileInfo metadata.
+      ARROW_ASSIGN_OR_RAISE(const auto size, origin_file->GetSize());
+      if (size < 0) {
+        return arrow::Status::IOError("Invalid size for Talon object: ", path, ": ", size);
+      }
+      initial_stat = TalonObjectStat{static_cast<uint64_t>(size), std::move(version)};
+      object_stat_cache_.put(key, *initial_stat);
     }
-    const auto initial_stat =
-        known_size == arrow::fs::kNoSize
-            ? std::nullopt
-            : std::optional<TalonObjectStat>{TalonObjectStat{static_cast<uint64_t>(known_size), ""}};
     ARROW_ASSIGN_OR_RAISE(auto reader,
                           client_->OpenObject(config_.cloud_provider, config_.bucket_name, key, initial_stat));
-    return std::make_shared<TalonInputFile>(std::move(reader), origin_fs_, path, io_context().pool());
+    return std::make_shared<TalonInputFile>(std::move(reader), std::move(origin_file), io_context().pool());
   }
 
   const ArrowFileSystemPtr origin_fs_;
   const std::shared_ptr<TalonClient> client_;
   const ArrowFileSystemConfig config_;
+  // Storage objects are immutable. Bound memory without periodically refreshing
+  // metadata; the cache lives exactly as long as this filesystem instance.
+  // Provider, bucket and coordinator are fixed here, so the object key suffices.
+  LRUCache<std::string, TalonObjectStat> object_stat_cache_{kObjectStatCacheCapacity};
 };
 
 }  // namespace

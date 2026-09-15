@@ -447,10 +447,10 @@ mod tests {
     fn open_object_with_stat_initializes_metadata_without_resolving() {
         let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024, 8).unwrap();
         let reader =
-            open_talon_object(&client, "aws", "test-bucket", "path/a", true, 123, "").unwrap();
+            open_talon_object(&client, "aws", "test-bucket", "path/a", true, 123, "etag-v1").unwrap();
         assert_eq!(talon_object_known_size(&reader), 123);
         assert_eq!(reader.stat.get().unwrap().size, 123);
-        assert!(reader.stat.get().unwrap().version.is_empty());
+        assert_eq!(reader.stat.get().unwrap().version, "etag-v1");
     }
 
     #[test]

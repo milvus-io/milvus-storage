@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
@@ -88,9 +89,15 @@ namespace {
 
 class MetadataInputFile final : public arrow::io::BufferReader {
   public:
-  MetadataInputFile() : arrow::io::BufferReader(arrow::Buffer::FromString("payload")) {}
+  explicit MetadataInputFile(int64_t size = 7)
+      : arrow::io::BufferReader(arrow::Buffer::FromString(std::string(size, 'x'))),
+        metadata_result(std::shared_ptr<const arrow::KeyValueMetadata>(arrow::key_value_metadata(
+            {"ETag", "Content-Length", "owner"}, {"\"origin-etag\"", std::to_string(size), "test-owner"}))) {}
 
-  arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override { return metadata_result; }
+  arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override {
+    ++metadata_read_calls;
+    return metadata_result;
+  }
 
   arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(
       const arrow::io::IOContext& io_context) override {
@@ -100,9 +107,8 @@ class MetadataInputFile final : public arrow::io::BufferReader {
                : arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>>::MakeFinished(metadata_result);
   }
 
-  arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> metadata_result{
-      std::shared_ptr<const arrow::KeyValueMetadata>(
-          arrow::key_value_metadata({"ETag", "Content-Length", "owner"}, {"\"origin-etag\"", "7", "test-owner"}))};
+  arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> metadata_result;
+  int metadata_read_calls = 0;
   arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> async_result;
   arrow::MemoryPool* async_pool = nullptr;
 };
@@ -285,6 +291,39 @@ class TalonIntegrationTest : public ::testing::Test {
   std::string path_;
   std::string parquet_path_;
   std::vector<uint8_t> expected_;
+};
+
+class TalonCloudMetadataTest : public ::testing::TestWithParam<bool> {
+  protected:
+  void SetUp() override {
+    if (!IsCloudEnv()) {
+      GTEST_SKIP() << "Cloud metadata validation requires a cloud environment";
+    }
+    api::Properties properties;
+    ASSERT_STATUS_OK(InitTestProperties(properties));
+    ASSERT_AND_ASSIGN(config_, GetFileSystemConfig(properties));
+    if (GetParam() && (config_.cloud_provider == kCloudProviderAzure || config_.cloud_provider == kCloudProviderGCP)) {
+      GTEST_SKIP() << "This provider does not use the S3 CRT reader";
+    }
+    config_.talon_enabled = false;
+    config_.s3_crt_async_read = GetParam();
+    ASSERT_AND_ASSIGN(origin_fs_, CreateArrowFileSystem(config_));
+    path_ = "talon-etag-validation-" + std::to_string(getpid()) + "-" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    RecordProperty("provider", config_.cloud_provider);
+    RecordProperty("reader", GetParam() ? "crt" : "default");
+    RecordProperty("object_path", path_);
+  }
+
+  void TearDown() override {
+    if (origin_fs_ != nullptr && !path_.empty()) {
+      (void)origin_fs_->DeleteFile(path_);
+    }
+  }
+
+  ArrowFileSystemConfig config_;
+  ArrowFileSystemPtr origin_fs_;
+  std::string path_;
 };
 
 }  // namespace
@@ -612,7 +651,7 @@ TEST(TalonBridgeTest, MapsAsyncErrorAndPreservesTalonMessage) {
   EXPECT_NE(result.status().message().find("Talon read length exceeds isize::MAX"), std::string::npos);
 }
 
-TEST(TalonFileSystemTest, PreservesOuterSubtreeAndKnownSize) {
+TEST(TalonFileSystemTest, PreservesOuterSubtreeAndExtensionInterfaces) {
   ArrowFileSystemConfig config;
   config.storage_type = "remote";
   config.cloud_provider = kCloudProviderAWS;
@@ -634,17 +673,6 @@ TEST(TalonFileSystemTest, PreservesOuterSubtreeAndKnownSize) {
   EXPECT_NE(std::dynamic_pointer_cast<UploadConditional>(fs), nullptr);
   EXPECT_NE(std::dynamic_pointer_cast<UploadSizable>(fs), nullptr);
   EXPECT_NE(std::dynamic_pointer_cast<Observable>(fs), nullptr);
-
-  arrow::fs::FileInfo info("known-empty", arrow::fs::FileType::File);
-  info.set_size(0);
-  ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile(info));
-  ASSERT_AND_ASSIGN(auto size, file->GetSize());
-  EXPECT_EQ(size, 0);
-  auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(file.get());
-  ASSERT_NE(async_file, nullptr);
-  ASSERT_AND_ASSIGN(const auto async_size, async_file->GetSizeAsync().result());
-  EXPECT_EQ(async_size, 0);
-  ASSERT_STATUS_OK(file->Close());
 }
 
 TEST_F(TalonFileSystemServiceFreeTest, ProducerAcceptsRawProviderFilesystem) {
@@ -656,10 +684,111 @@ TEST_F(TalonFileSystemServiceFreeTest, ProducerAcceptsRawProviderFilesystem) {
   EXPECT_EQ(std::dynamic_pointer_cast<FileSystemProxy>(talon_fs), nullptr);
 }
 
+TEST_F(TalonFileSystemServiceFreeTest, CachesObjectMetadataAcrossOpens) {
+  auto origin = std::make_shared<RecordingFileSystem>("origin");
+  ASSERT_AND_ASSIGN(auto fs, Wrap(Config(), origin));
+  ASSERT_AND_ASSIGN(auto first, fs->OpenInputFile("prefix/object"));
+  ASSERT_EQ(origin->input_open_calls, 1);
+  EXPECT_EQ(origin->input_file->metadata_read_calls, 1);
+  ASSERT_AND_ASSIGN(const auto size, first->GetSize());
+  EXPECT_EQ(size, 7);
+  auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(first.get());
+  ASSERT_NE(async_file, nullptr);
+  ASSERT_AND_ASSIGN(const auto async_size, async_file->GetSizeAsync().result());
+  EXPECT_EQ(async_size, 7);
+  ASSERT_STATUS_OK(first->Close());
+
+  // Each reader owns an origin file, but cached metadata needs no new HEAD.
+  const auto metadata_error = arrow::Status::IOError("origin metadata unavailable");
+  const auto second_origin = std::make_shared<MetadataInputFile>(99);
+  second_origin->metadata_result = metadata_error;
+  origin->input_file = second_origin;
+  arrow::fs::FileInfo info("prefix/object", arrow::fs::FileType::File);
+  info.set_size(99);
+  ASSERT_AND_ASSIGN(auto second, fs->OpenInputFile(info));
+  ASSERT_AND_ASSIGN(const auto cached_size, second->GetSize());
+  EXPECT_EQ(cached_size, 7);
+  EXPECT_EQ(origin->input_open_calls, 2);
+  EXPECT_EQ(second_origin->metadata_read_calls, 0);
+  origin->input_file = std::make_shared<MetadataInputFile>();
+  ASSERT_AND_ASSIGN(auto stream, fs->OpenInputStream("prefix/object"));
+  EXPECT_EQ(origin->input_open_calls, 3);
+  EXPECT_EQ(origin->input_file->metadata_read_calls, 0);
+  ASSERT_STATUS_OK(second->Close());
+  EXPECT_TRUE(second_origin->closed());
+  EXPECT_FALSE(origin->input_file->closed());
+  ASSERT_STATUS_OK(stream->Close());
+  EXPECT_TRUE(origin->input_file->closed());
+
+  origin->input_file = std::make_shared<MetadataInputFile>();
+  origin->input_file->metadata_result = metadata_error;
+  EXPECT_EQ(fs->OpenInputFile("prefix/other").status(), metadata_error);
+  auto other_origin = std::make_shared<RecordingFileSystem>("other-origin");
+  other_origin->input_file->metadata_result = metadata_error;
+  ASSERT_AND_ASSIGN(auto other_fs, Wrap(Config(), other_origin));
+  EXPECT_EQ(other_fs->OpenInputFile("prefix/object").status(), metadata_error);
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, FailedMetadataLookupCanBeRetried) {
+  auto origin = std::make_shared<RecordingFileSystem>("origin");
+  ASSERT_AND_ASSIGN(auto fs, Wrap(Config(), origin));
+  const auto error =
+      MakeExtendError(ExtendStatusCode::AwsErrorAccessDenied, "origin metadata denied", "provider detail");
+  origin->input_file->metadata_result = error;
+  EXPECT_EQ(fs->OpenInputFile("prefix/object").status(), error);
+
+  origin->input_file = std::make_shared<MetadataInputFile>();
+  ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile("prefix/object"));
+  EXPECT_EQ(origin->input_open_calls, 2);
+  ASSERT_STATUS_OK(file->Close());
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, RejectsMissingOrEmptyETag) {
+  auto origin = std::make_shared<RecordingFileSystem>("origin");
+  ASSERT_AND_ASSIGN(auto fs, Wrap(Config(), origin));
+  for (const auto& metadata : std::vector<std::shared_ptr<const arrow::KeyValueMetadata>>{
+           nullptr, arrow::key_value_metadata({"owner"}, {"test-owner"}), arrow::key_value_metadata({"ETag"}, {""}),
+           arrow::key_value_metadata({"ETag"}, {"\"\""})}) {
+    origin->input_file = std::make_shared<MetadataInputFile>();
+    origin->input_file->metadata_result = metadata;
+    const auto result = fs->OpenInputFile("prefix/object");
+    ASSERT_FALSE(result.ok());
+    EXPECT_TRUE(result.status().IsIOError()) << result.status();
+    EXPECT_NE(result.status().message().find("ETag"), std::string::npos);
+  }
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, EvictsLeastRecentlyUsedObjectMetadata) {
+  auto origin = std::make_shared<RecordingFileSystem>("origin");
+  ASSERT_AND_ASSIGN(auto fs, Wrap(Config(), origin));
+  for (int i = 0; i < 4096; ++i) {
+    origin->input_file = std::make_shared<MetadataInputFile>();
+    ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile("prefix/" + std::to_string(i)));
+    ASSERT_STATUS_OK(file->Close());
+  }
+  ASSERT_EQ(origin->input_open_calls, 4096);
+  origin->input_file = std::make_shared<MetadataInputFile>();
+  ASSERT_AND_ASSIGN(auto recent, fs->OpenInputFile("prefix/0"));
+  ASSERT_STATUS_OK(recent->Close());
+  origin->input_file = std::make_shared<MetadataInputFile>();
+  ASSERT_AND_ASSIGN(auto extra, fs->OpenInputFile("prefix/extra"));
+  ASSERT_STATUS_OK(extra->Close());
+
+  const auto metadata_error = arrow::Status::IOError("origin metadata unavailable");
+  origin->input_file = std::make_shared<MetadataInputFile>();
+  origin->input_file->metadata_result = metadata_error;
+  ASSERT_AND_ASSIGN(auto retained, fs->OpenInputFile("prefix/0"));
+  ASSERT_STATUS_OK(retained->Close());
+  origin->input_file = std::make_shared<MetadataInputFile>();
+  origin->input_file->metadata_result = metadata_error;
+  EXPECT_EQ(fs->OpenInputFile("prefix/1").status(), metadata_error);
+}
+
 TEST_F(TalonFileSystemServiceFreeTest, OwnsConfigWithNormalizedBucket) {
   auto config = Config();
   config.bucket_name = "test-bucket///";
   auto origin = std::make_shared<RecordingFileSystem>("origin");
+  origin->input_file = std::make_shared<MetadataInputFile>(0);
   ASSERT_AND_ASSIGN(auto fs, TalonFileSystemProducer(config, origin).Make());
 
   config.bucket_name = "different-bucket";
@@ -669,7 +798,7 @@ TEST_F(TalonFileSystemServiceFreeTest, OwnsConfigWithNormalizedBucket) {
   ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile(info));
   ASSERT_AND_ASSIGN(const auto size, file->GetSize());
   EXPECT_EQ(size, 0);
-  EXPECT_EQ(origin->input_open_calls, 0);
+  EXPECT_EQ(origin->input_open_calls, 1);
   ASSERT_STATUS_OK(file->Close());
 }
 
@@ -711,17 +840,17 @@ TEST_F(TalonFileSystemServiceFreeTest, OpenWithFileInfoAcceptsFileAndUnknown) {
       SCOPED_TRACE(::testing::Message() << "type=" << static_cast<int>(type) << ", size=" << size);
       arrow::fs::FileInfo info("prefix/object", type);
       info.set_size(size);
+      origin->input_file = std::make_shared<MetadataInputFile>();
       ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile(info));
+      origin->input_file = std::make_shared<MetadataInputFile>();
       ASSERT_AND_ASSIGN(auto stream, fs->OpenInputStream(info));
-      if (size >= 0) {
-        ASSERT_AND_ASSIGN(const auto known_size, file->GetSize());
-        EXPECT_EQ(known_size, size);
-      }
+      ASSERT_AND_ASSIGN(const auto known_size, file->GetSize());
+      EXPECT_EQ(known_size, 7);
       ASSERT_STATUS_OK(file->Close());
       ASSERT_STATUS_OK(stream->Close());
     }
   }
-  EXPECT_EQ(origin->input_open_calls, 0);
+  EXPECT_EQ(origin->input_open_calls, 12);
 }
 
 TEST_F(TalonFileSystemServiceFreeTest, EquivalentTalonFilesystemsCompareEqualSymmetrically) {
@@ -824,7 +953,7 @@ TEST_F(TalonFileSystemServiceFreeTest, ForwardsStreamingFileInfoGeneratorWithFul
   EXPECT_TRUE(end.empty());
 }
 
-TEST_F(TalonFileSystemServiceFreeTest, ReadMetadataLazilyPreservesOriginMetadata) {
+TEST_F(TalonFileSystemServiceFreeTest, ReadMetadataReusesOriginFileFromCacheMiss) {
   auto origin = std::make_shared<RecordingFileSystem>("origin");
   ASSERT_AND_ASSIGN(auto fs, Wrap(Config(), origin));
   arrow::fs::FileInfo info("prefix/object", arrow::fs::FileType::File);
@@ -832,7 +961,7 @@ TEST_F(TalonFileSystemServiceFreeTest, ReadMetadataLazilyPreservesOriginMetadata
   ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile(info));
   ASSERT_AND_ASSIGN(const auto size, file->GetSize());
   EXPECT_EQ(size, 7);
-  EXPECT_EQ(origin->input_open_calls, 0);
+  EXPECT_EQ(origin->input_open_calls, 1);
 
   ASSERT_AND_ASSIGN(auto metadata, file->ReadMetadata());
   ASSERT_NE(metadata, nullptr);
@@ -878,14 +1007,16 @@ TEST_F(TalonFileSystemServiceFreeTest, ReadMetadataAsyncForwardsProviderFutureAn
 TEST_F(TalonFileSystemServiceFreeTest, ReadMetadataPreservesOriginErrorsAndNullMetadata) {
   auto origin = std::make_shared<RecordingFileSystem>("origin");
   ASSERT_AND_ASSIGN(auto fs, Wrap(Config(), origin));
-  ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile("prefix/object"));
+  ASSERT_AND_ASSIGN(auto first, fs->OpenInputFile("prefix/object"));
+  ASSERT_STATUS_OK(first->Close());
+  origin->input_file = std::make_shared<MetadataInputFile>();
   const auto error =
       MakeExtendError(ExtendStatusCode::AwsErrorAccessDenied, "origin metadata denied", "provider detail");
   origin->input_open_status = error;
-  EXPECT_EQ(file->ReadMetadata().status(), error);
-  EXPECT_EQ(file->ReadMetadataAsync().result().status(), error);
+  EXPECT_EQ(fs->OpenInputFile("prefix/object").status(), error);
 
   origin->input_open_status = arrow::Status::OK();
+  ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile("prefix/object"));
   origin->input_file->metadata_result = error;
   EXPECT_EQ(file->ReadMetadata().status(), error);
   EXPECT_EQ(file->ReadMetadataAsync().result().status(), error);
@@ -904,6 +1035,7 @@ TEST_F(TalonFileSystemServiceFreeTest, AllocatingReadsClampKnownSizeBeforeAlloca
     RejectingMemoryPool pool;
     const arrow::io::IOContext io_context(&pool);
     auto origin = std::make_shared<RecordingFileSystem>("origin", io_context);
+    origin->input_file = std::make_shared<MetadataInputFile>(8192);
     ASSERT_AND_ASSIGN(auto fs, Wrap(Config(), origin));
     arrow::fs::FileInfo info("prefix/object", arrow::fs::FileType::File);
     info.set_size(8192);
@@ -924,6 +1056,7 @@ TEST_F(TalonFileSystemServiceFreeTest, AllocatingReadsAtKnownEofDoNotAllocatePay
       arrow::ProxyMemoryPool pool(arrow::default_memory_pool());
       const arrow::io::IOContext io_context(&pool);
       auto origin = std::make_shared<RecordingFileSystem>("origin", io_context);
+      origin->input_file = std::make_shared<MetadataInputFile>(size);
       ASSERT_AND_ASSIGN(auto fs, Wrap(Config(), origin));
       arrow::fs::FileInfo info("prefix/object", arrow::fs::FileType::File);
       info.set_size(size);
@@ -944,6 +1077,7 @@ TEST_F(TalonFileSystemServiceFreeTest, AllocatingReadsValidateBeforeAllocation) 
     RejectingMemoryPool pool;
     const arrow::io::IOContext io_context(&pool);
     auto origin = std::make_shared<RecordingFileSystem>("origin", io_context);
+    origin->input_file = std::make_shared<MetadataInputFile>(8192);
     ASSERT_AND_ASSIGN(auto fs, Wrap(Config(), origin));
     arrow::fs::FileInfo info("prefix/object", arrow::fs::FileType::File);
     info.set_size(8192);
@@ -966,19 +1100,21 @@ TEST_F(TalonFileSystemServiceFreeTest, AllocatingReadsValidateBeforeAllocation) 
   }
 }
 
-TEST_F(TalonFileSystemServiceFreeTest, AllocatingReadsWithUnknownSizeDoNotPreflightStat) {
+TEST_F(TalonFileSystemServiceFreeTest, OpenWithoutKnownSizeResolvesBeforeAllocatingReads) {
   for (const bool async : {false, true}) {
     SCOPED_TRACE(async);
     RejectingMemoryPool pool;
     const arrow::io::IOContext io_context(&pool);
     auto origin = std::make_shared<RecordingFileSystem>("origin", io_context);
+    origin->input_file = std::make_shared<MetadataInputFile>(8192);
     ASSERT_AND_ASSIGN(auto fs, Wrap(Config(), origin));
     ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile("prefix/object"));
 
     const auto result =
         async ? file->ReadAsync(io_context, 4096, 64 * 1024 * 1024).result() : file->ReadAt(4096, 64 * 1024 * 1024);
     EXPECT_TRUE(result.status().IsOutOfMemory()) << result.status();
-    EXPECT_EQ(pool.last_requested_size, 64 * 1024 * 1024);
+    EXPECT_EQ(pool.last_requested_size, 4096);
+    EXPECT_EQ(origin->input_open_calls, 1);
     ASSERT_STATUS_OK(file->Close());
   }
 }
@@ -1235,6 +1371,61 @@ TEST_F(TalonIntegrationTest, FallsBackToConfiguredOriginWhenTalonUnavailable) {
     ASSERT_STATUS_OK(file->Close());
   }
 }
+
+TEST_P(TalonCloudMetadataTest, ReadsETagAndReusesMetadataWithoutOriginRequests) {
+  const std::string content = "Talon ETag and size cache validation";
+  ASSERT_AND_ASSIGN(auto output, origin_fs_->OpenOutputStream(path_));
+  const auto write_status = output->Write(content);
+  ASSERT_STATUS_OK(write_status);
+  const auto close_status = output->Close();
+  ASSERT_STATUS_OK(close_status);
+
+  ASSERT_AND_ASSIGN(auto origin_file, origin_fs_->OpenInputFile(path_));
+  ASSERT_AND_ASSIGN(const auto metadata, origin_file->ReadMetadata());
+  ASSERT_NE(metadata, nullptr);
+  ASSERT_AND_ASSIGN(const auto etag, metadata->Get("ETag"));
+  ASSERT_FALSE(etag.empty());
+  RecordProperty("etag", etag);
+  ASSERT_AND_ASSIGN(const auto size, origin_file->GetSize());
+  ASSERT_EQ(size, content.size());
+  ASSERT_AND_ASSIGN(const auto data, origin_file->ReadAt(0, size));
+  ASSERT_EQ(data->ToString(), content);
+
+  auto talon_config = config_;
+  talon_config.talon_enabled = true;
+  // Opening a versioned reader must not require a coordinator RPC.
+  talon_config.talon_coordinator = "127.0.0.1:1";
+  ASSERT_AND_ASSIGN(auto talon_fs, CreateArrowFileSystem(talon_config));
+  arrow::fs::FileInfo info(path_, arrow::fs::FileType::File);
+  info.set_size(9999);
+  ASSERT_AND_ASSIGN(auto talon_file, talon_fs->OpenInputFile(info));
+  ASSERT_AND_ASSIGN(const auto talon_size, talon_file->GetSize());
+  EXPECT_EQ(talon_size, size);
+  ASSERT_AND_ASSIGN(const auto talon_metadata, talon_file->ReadMetadata());
+  ASSERT_AND_ASSIGN(const auto talon_etag, talon_metadata->Get("ETag"));
+  EXPECT_EQ(talon_etag, etag);
+
+  // Once the test object is gone, another HEAD would fail. Success below
+  // therefore proves both the provider file cache and the filesystem cache.
+  ASSERT_STATUS_OK(origin_fs_->DeleteFile(path_));
+  ASSERT_AND_ASSIGN(auto uncached_file, origin_fs_->OpenInputFile(path_));
+  ASSERT_FALSE(uncached_file->ReadMetadata().ok());
+  ASSERT_STATUS_OK(uncached_file->Close());
+  ASSERT_AND_ASSIGN(const auto cached_size, origin_file->GetSize());
+  EXPECT_EQ(cached_size, size);
+  ASSERT_AND_ASSIGN(const auto cached_metadata, origin_file->ReadMetadata());
+  EXPECT_EQ(cached_metadata, metadata);
+  ASSERT_STATUS_OK(origin_file->Close());
+  ASSERT_STATUS_OK(talon_file->Close());
+
+  ASSERT_AND_ASSIGN(auto reopened, talon_fs->OpenInputFile(path_));
+  ASSERT_AND_ASSIGN(const auto reopened_size, reopened->GetSize());
+  EXPECT_EQ(reopened_size, size);
+  ASSERT_STATUS_OK(reopened->Close());
+  RecordProperty("deleted_object_cache_checks", "passed");
+}
+
+INSTANTIATE_TEST_SUITE_P(CloudReaders, TalonCloudMetadataTest, ::testing::Bool());
 
 TEST_F(TalonIntegrationTest, OpenWithKnownSize) {
   ASSERT_AND_ASSIGN(const auto info, fs_->GetFileInfo(path_));
