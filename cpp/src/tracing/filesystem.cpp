@@ -32,13 +32,8 @@ class TracedFile : public arrow::io::RandomAccessFile {
       const arrow::io::IOContext& context) override {
     OperationTrace trace("storage.fs.metadata", false, true);
     ContextScope scope(trace.context());
-    try {
-      return Observe(file_->ReadMetadataAsync(context), trace);
-    } catch (...) {
-      auto status = arrow::Status::UnknownError("exception");
-      trace.Finish(status);
-      return arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>>::MakeFinished(status);
-    }
+    ExceptionObserver observer(trace);
+    return Observe(file_->ReadMetadataAsync(context), trace);
   }
   arrow::Result<int64_t> GetSize() override {
     return Run("storage.fs.head", [&] { return file_->GetSize(); }, true);
@@ -66,50 +61,44 @@ class TracedFile : public arrow::io::RandomAccessFile {
       return file_->ReadManyAsync(context, ranges);
     OperationTrace trace("storage.fs.read", false, true);
     ContextScope scope(trace.context());
-    try {
-      if (!trace.IsEnabled())
-        return file_->ReadManyAsync(context, ranges);
-      trace.Attribute("storage.backend", backend_.c_str());
-      trace.Attribute("storage.range_count", static_cast<int64_t>(ranges.size()));
-      int64_t requested = 0;
-      for (const auto& range : ranges) {
-        auto length = std::max<int64_t>(0, range.length);
-        requested += std::min(length, std::numeric_limits<int64_t>::max() - requested);
-      }
-      trace.Attribute("storage.requested_bytes", requested);
-      struct Completion {
-        explicit Completion(size_t count, OperationTrace trace) : remaining(count), trace(std::move(trace)) {}
-        std::mutex mutex;
-        size_t remaining;
-        int64_t bytes = 0;
-        arrow::Status status;
-        OperationTrace trace;
-      };
-      auto futures = file_->ReadManyAsync(context, ranges);
-      if (futures.empty())
-        trace.Finish(arrow::Status::OK());
-      auto completion = std::make_shared<Completion>(futures.size(), trace);
-      for (auto& future : futures) {
-        future.AddCallback([completion, requested](const arrow::Result<std::shared_ptr<arrow::Buffer>>& result) {
-          std::lock_guard<std::mutex> lock(completion->mutex);
-          if (!result.ok())
-            completion->status = result.status();
-          else
-            completion->bytes += std::min(Bytes(*result), std::numeric_limits<int64_t>::max() - completion->bytes);
-          if (--completion->remaining == 0) {
-            completion->trace.AccountRead(requested, completion->bytes);
-            completion->trace.Attribute("storage.returned_bytes", completion->bytes);
-            completion->trace.Finish(completion->status);
-          }
-        });
-      }
-      return futures;
-    } catch (...) {
-      auto status = arrow::Status::UnknownError("exception");
-      trace.Finish(status);
-      return std::vector<arrow::Future<std::shared_ptr<arrow::Buffer>>>(
-          ranges.size(), arrow::Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(status));
+    ExceptionObserver observer(trace);
+    if (!trace.IsEnabled())
+      return file_->ReadManyAsync(context, ranges);
+    trace.Attribute("storage.backend", backend_.c_str());
+    trace.Attribute("storage.range_count", static_cast<int64_t>(ranges.size()));
+    int64_t requested = 0;
+    for (const auto& range : ranges) {
+      auto length = std::max<int64_t>(0, range.length);
+      requested += std::min(length, std::numeric_limits<int64_t>::max() - requested);
     }
+    trace.Attribute("storage.requested_bytes", requested);
+    struct Completion {
+      explicit Completion(size_t count, OperationTrace trace) : remaining(count), trace(std::move(trace)) {}
+      std::mutex mutex;
+      size_t remaining;
+      int64_t bytes = 0;
+      arrow::Status status;
+      OperationTrace trace;
+    };
+    auto futures = file_->ReadManyAsync(context, ranges);
+    if (futures.empty())
+      trace.Finish(arrow::Status::OK());
+    auto completion = std::make_shared<Completion>(futures.size(), trace);
+    for (auto& future : futures) {
+      future.AddCallback([completion, requested](const arrow::Result<std::shared_ptr<arrow::Buffer>>& result) {
+        std::lock_guard<std::mutex> lock(completion->mutex);
+        if (!result.ok())
+          completion->status = result.status();
+        else
+          completion->bytes += std::min(Bytes(*result), std::numeric_limits<int64_t>::max() - completion->bytes);
+        if (--completion->remaining == 0) {
+          completion->trace.AccountRead(requested, completion->bytes);
+          completion->trace.Attribute("storage.returned_bytes", completion->bytes);
+          completion->trace.Finish(completion->status);
+        }
+      });
+    }
+    return futures;
   }
 
   protected:
@@ -125,18 +114,13 @@ class TracedFile : public arrow::io::RandomAccessFile {
     OperationTrace trace("storage.fs.read", false, true);
     ContextScope scope(trace.context());
     Attributes(trace, position, nbytes);
-    try {
-      auto result = fn();
-      trace.AccountRead(nbytes, result.ok() ? Bytes(*result) : 0);
-      if (result.ok())
-        trace.Attribute("storage.returned_bytes", Bytes(*result));
-      trace.Finish(result.status());
-      return result;
-    } catch (...) {
-      auto status = arrow::Status::UnknownError("exception");
-      trace.Finish(status);
-      return status;
-    }
+    ExceptionObserver observer(trace);
+    auto result = fn();
+    trace.AccountRead(nbytes, result.ok() ? Bytes(*result) : 0);
+    if (result.ok())
+      trace.Attribute("storage.returned_bytes", Bytes(*result));
+    trace.Finish(result.status());
+    return result;
   }
   template <typename F>
   auto ReadFuture(int64_t position, int64_t nbytes, F&& fn) -> decltype(fn()) {
@@ -149,24 +133,19 @@ class TracedFile : public arrow::io::RandomAccessFile {
     OperationTrace trace("storage.fs.read", false, true);
     ContextScope scope(trace.context());
     Attributes(trace, position, nbytes);
-    try {
-      auto future = fn();
-      if (!trace.IsEnabled())
-        return future;
-      future.AddCallback([trace, nbytes](const arrow::Result<typename decltype(future)::ValueType>& result) {
-        trace.AccountRead(nbytes, result.ok() ? Bytes(*result) : 0);
-        if (result.ok()) {
-          trace.Attribute("storage.returned_bytes", Bytes(*result));
-          trace.Attribute("storage.short_read", static_cast<int64_t>(Bytes(*result) < nbytes));
-        }
-        trace.Finish(result.status());
-      });
+    ExceptionObserver observer(trace);
+    auto future = fn();
+    if (!trace.IsEnabled())
       return future;
-    } catch (...) {
-      auto status = arrow::Status::UnknownError("exception");
-      trace.Finish(status);
-      return decltype(fn())::MakeFinished(status);
-    }
+    future.AddCallback([trace, nbytes](const arrow::Result<typename decltype(future)::ValueType>& result) {
+      trace.AccountRead(nbytes, result.ok() ? Bytes(*result) : 0);
+      if (result.ok()) {
+        trace.Attribute("storage.returned_bytes", Bytes(*result));
+        trace.Attribute("storage.short_read", static_cast<int64_t>(Bytes(*result) < nbytes));
+      }
+      trace.Finish(result.status());
+    });
+    return future;
   }
   void Attributes(const OperationTrace& trace, int64_t position, int64_t nbytes) {
     trace.Attribute("storage.backend", backend_.c_str());
@@ -190,13 +169,8 @@ class TracedAsyncFile final : public TracedFile, public NonBlockingRandomAccessF
   arrow::Future<int64_t> GetSizeAsync() override {
     OperationTrace trace("storage.fs.head", false, true);
     ContextScope scope(trace.context());
-    try {
-      return Observe(async_->GetSizeAsync(), trace);
-    } catch (...) {
-      auto status = arrow::Status::UnknownError("exception");
-      trace.Finish(status);
-      return arrow::Future<int64_t>::MakeFinished(status);
-    }
+    ExceptionObserver observer(trace);
+    return Observe(async_->GetSizeAsync(), trace);
   }
 
   private:

@@ -261,8 +261,8 @@ int main(int argc, char** argv) {
     auto exporter = std::make_unique<opentelemetry::exporter::memory::InMemorySpanExporter>(1);
     auto processor = std::make_unique<sdk::SimpleSpanProcessor>(std::move(exporter));
     auto sampler = std::make_unique<sdk::ParentBasedSampler>(std::make_unique<sdk::AlwaysOnSampler>());
-    tracing::SetTracerProvider(tracing::ProviderPtr(new sdk::TracerProvider(
-        std::move(processor), opentelemetry::sdk::resource::Resource::Create({}), std::move(sampler))));
+    Check(tracing::SetTracerProvider(tracing::ProviderPtr(new sdk::TracerProvider(
+        std::move(processor), opentelemetry::sdk::resource::Resource::Create({}), std::move(sampler)))));
   }
 #endif
   for (const std::string format : {"parquet", "vortex"})
@@ -292,7 +292,7 @@ int main(int argc, char** argv) {
   benchmark::RunSpecifiedBenchmarks();
   benchmark::Shutdown();
 #ifdef STORAGE_TELEMETRY_BENCHMARK
-  tracing::SetTracerProvider(nullptr);
+  Check(tracing::SetTracerProvider(nullptr));
 #endif
   ThreadPoolHolder::Release();
 }

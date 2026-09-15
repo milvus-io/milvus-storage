@@ -7,6 +7,7 @@
 #include <mutex>
 #include <optional>
 #include <utility>
+#include <exception>
 #include <folly/io/async/Request.h>
 #include <folly/futures/Future.h>
 #include <arrow/status.h>
@@ -16,17 +17,19 @@
 namespace milvus_storage::tracing {
 struct Context;
 using ContextPtr = std::shared_ptr<const Context>;
-ContextPtr Capture();
+ContextPtr Capture() noexcept;
 // Check the active flow without copying an owning context snapshot.
-bool HasContext();
-void StartCurrent();
+bool HasContext() noexcept;
+void StartCurrent() noexcept;
 
 class ContextScope {
   public:
-  explicit ContextScope(ContextPtr context);
+  explicit ContextScope(ContextPtr context) noexcept;
+  ~ContextScope();
 
   private:
   std::optional<folly::ShallowCopyRequestContextScopeGuard> scope_;
+  bool failed_ = false;
 };
 
 class OperationTrace {
@@ -38,21 +41,45 @@ class OperationTrace {
                  bool io = false,
                  opentelemetry::trace::SpanContext link = opentelemetry::trace::SpanContext::GetInvalid(),
                  const char* operation = nullptr,
-                 const char* format = nullptr);
+                 const char* format = nullptr) noexcept;
+  static OperationTrace WithAttributes(opentelemetry::nostd::string_view name,
+                                       TraceScope::Attributes attributes,
+                                       TraceScope::Links links = {},
+                                       opentelemetry::trace::SpanKind kind = opentelemetry::trace::SpanKind::kInternal,
+                                       bool lazy = false) noexcept;
   ContextPtr context() const { return context_; }
   // A disabled snapshot still propagates, but needs no span completion or I/O accounting.
   bool IsEnabled() const;
   bool NeedsCompletion() const { return owns_state_; }
-  void Start() const;
-  void AccountRead(int64_t requested, int64_t returned) const;
-  void Finish(const arrow::Status& status) const;
-  void Attribute(const char* key, int64_t value) const;
-  void Attribute(const char* key, const char* value) const;
-  opentelemetry::trace::SpanContext span_context() const;
+  void Start() const noexcept;
+  void AccountRead(int64_t requested, int64_t returned) const noexcept;
+  void Finish(const arrow::Status& status) const noexcept;
+  void FinishScope() const noexcept;
+  void FinishException() const noexcept;
+  void Attribute(const char* key, int64_t value) const noexcept;
+  void Attribute(const char* key, const char* value) const noexcept;
+  void Attribute(opentelemetry::nostd::string_view key,
+                 const opentelemetry::common::AttributeValue& value) const noexcept;
+  opentelemetry::trace::SpanContext span_context() const noexcept;
 
   private:
   ContextPtr context_;
   bool owns_state_ = false;
+  void FinishImpl(const arrow::Status* status, bool exception = false) const noexcept;
+};
+
+// Observe unwinding without intercepting or replacing the business exception.
+class ExceptionObserver {
+  public:
+  explicit ExceptionObserver(const OperationTrace& trace) : trace_(trace), exceptions_(std::uncaught_exceptions()) {}
+  ~ExceptionObserver() {
+    if (std::uncaught_exceptions() > exceptions_)
+      trace_.FinishException();
+  }
+
+  private:
+  const OperationTrace& trace_;
+  int exceptions_;
 };
 
 inline const arrow::Status& StatusOf(const arrow::Status& status) { return status; }
@@ -78,15 +105,10 @@ auto Run(const char* name, F&& fn, bool io = false, const char* operation = null
     return fn();
   OperationTrace trace(name, false, io, opentelemetry::trace::SpanContext::GetInvalid(), operation, format);
   ContextScope scope(trace.context());
-  try {
-    auto result = fn();
-    trace.Finish(StatusOf(result));
-    return result;
-  } catch (...) {
-    auto status = arrow::Status::UnknownError("exception");
-    trace.Finish(status);
-    return status;
-  }
+  ExceptionObserver observer(trace);
+  auto result = fn();
+  trace.Finish(StatusOf(result));
+  return result;
 }
 
 template <typename F>
@@ -96,37 +118,18 @@ auto RunAsync(const char* name, F&& fn, const char* operation = nullptr, const c
     return fn();
   OperationTrace trace(name, true, false, opentelemetry::trace::SpanContext::GetInvalid(), operation, format);
   ContextScope scope(trace.context());
-  using Result = typename decltype(fn())::value_type;
-  try {
-    if (!trace.IsEnabled()) {
-      auto future = fn();
-      if (future.isReady()) {
-        if (future.result().hasException())
-          return folly::makeSemiFuture(Result(arrow::Status::UnknownError("exception")));
-        return future;
-      }
-      // Keep exception-to-result conversion without capturing OperationTrace or
-      // observing span completion. Folly still propagates its RequestContext.
-      return std::move(future).defer([](folly::Try<Result>&& result) -> Result {
-        if (result.hasException())
-          return arrow::Status::UnknownError("exception");
-        return std::move(result).value();
-      });
-    }
-    return fn().defer([trace](auto&& result) -> Result {
-      if (result.hasException()) {
-        auto status = arrow::Status::UnknownError("exception");
-        trace.Finish(status);
-        return status;
-      }
+  ExceptionObserver observer(trace);
+  auto future = fn();
+  if (!trace.NeedsCompletion())
+    return future;
+  return std::move(future).defer([trace](auto&& result) {
+    if (result.hasException()) {
+      trace.FinishException();
+    } else {
       trace.Finish(StatusOf(result.value()));
-      return std::move(result).value();
-    });
-  } catch (...) {
-    auto status = arrow::Status::UnknownError("exception");
-    trace.Finish(status);
-    return folly::makeSemiFuture(Result(status));
-  }
+    }
+    return std::move(result);
+  });
 }
 
 // Native callbacks own completion. Return the original future so tracing does
@@ -138,24 +141,17 @@ auto RunNativeAsync(const char* name, F&& fn, const char* operation = nullptr, c
     return fn(OperationTrace{});
   OperationTrace trace(name, false, false, opentelemetry::trace::SpanContext::GetInvalid(), operation, format);
   ContextScope scope(trace.context());
-  using Result = typename decltype(fn(trace))::value_type;
-  try {
-    auto future = fn(trace);
-    if (future.isReady()) {
-      const auto& result = future.result();
-      if (result.hasException()) {
-        auto status = arrow::Status::UnknownError("exception");
-        trace.Finish(status);
-        return folly::makeSemiFuture(Result(status));
-      }
+  ExceptionObserver observer(trace);
+  auto future = fn(trace);
+  if (future.isReady()) {
+    const auto& result = future.result();
+    if (result.hasException()) {
+      trace.FinishException();
+    } else {
       trace.Finish(StatusOf(result.value()));
     }
-    return future;
-  } catch (...) {
-    auto status = arrow::Status::UnknownError("exception");
-    trace.Finish(status);
-    return folly::makeSemiFuture(Result(status));
   }
+  return future;
 }
 
 // Observe the source Arrow future itself: completion does not depend on a

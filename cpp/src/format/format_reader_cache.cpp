@@ -26,6 +26,15 @@
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 
 namespace milvus_storage {
+namespace {
+std::shared_ptr<tracing::OperationTrace> MetadataLoadTrace() noexcept {
+  try {
+    return std::make_shared<tracing::OperationTrace>("storage.metadata.load", true);
+  } catch (...) {
+    return nullptr;
+  }
+}
+}  // namespace
 
 MetadataCache::MetadataCache(bool enabled) : enabled_(enabled) {}
 
@@ -79,7 +88,7 @@ arrow::Result<typename FormatReaderMetadataCache<ReaderT>::MetadataPtr> FormatRe
     lookup.Attribute("storage.cache", inserted ? "miss" : "in_flight");
     lookup.Finish(arrow::Status::OK());
     if (inserted && tracing::HasContext())
-      in_flight_load->trace = std::make_shared<tracing::OperationTrace>("storage.metadata.load", true);
+      in_flight_load->trace = MetadataLoadTrace();
     if (!inserted && in_flight_load->leader_type == InFlightLoad::kSync) {
       // condition_variable::wait releases mutex_ while sleeping, so other keys
       // and the leader can still update the cache. The current thread remains blocked.
@@ -103,8 +112,7 @@ arrow::Result<typename FormatReaderMetadataCache<ReaderT>::MetadataPtr> FormatRe
   // behind metadata I/O. The leader publishes both success and failure below.
   auto load_trace = in_flight_load->trace;
   if (!owns_in_flight_load) {
-    load_trace =
-        tracing::HasContext() ? std::make_shared<tracing::OperationTrace>("storage.metadata.load", true) : nullptr;
+    load_trace = tracing::HasContext() ? MetadataLoadTrace() : nullptr;
   }
   if (load_trace)
     load_trace->Start();
@@ -197,7 +205,7 @@ FormatReaderMetadataCache<ReaderT>::get_or_open_async(
         });
       }
       if (tracing::HasContext())
-        in_flight_load->trace = std::make_shared<tracing::OperationTrace>("storage.metadata.load", true);
+        in_flight_load->trace = MetadataLoadTrace();
     }
 
     if (in_flight_load->trace)
