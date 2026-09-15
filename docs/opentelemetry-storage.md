@@ -7,7 +7,8 @@
 - 引入前基线：`43b7793406136208928ad20dc1596b510c7b629a`。
 - 接入与初期修复：`6966d49`；局部优化：`fb59cbf`。
 - 合入上游 Lance dataset 复用：`8ecbf49`（上游 `e7f4477`）。
-- 异常处理修复及最近一次筛选回归：`14dc509`。
+- 历史异常处理修复与筛选回归：`14dc509`。
+- 当前补充：基于 `4b45ee7` 完成结果观测与异常解耦、通用 OTel 属性/links/parent 接口；不修改 Arrow 或 Conan recipe。
 
 ## 接入与公共契约
 
@@ -17,9 +18,9 @@
 #include "milvus-storage/tracing.h"
 
 // provider 由宿主 SDK 创建，必须与 Storage 的 OTel C++ ABI、版本和编译选项一致。
-milvus_storage::tracing::SetTracerProvider(provider);
-milvus_storage::tracing::SetTraceOptions({.io_spans = true,
-                                         .max_spans_per_operation = 256});
+ARROW_RETURN_NOT_OK(milvus_storage::tracing::SetTracerProvider(provider));
+ARROW_RETURN_NOT_OK(milvus_storage::tracing::SetTraceOptions({.io_spans = true,
+                                                           .max_spans_per_operation = 256}));
 {
     auto scope = milvus_storage::tracing::AttachParent(parent);
     auto table = reader->take(rows);
@@ -31,7 +32,31 @@ auto future = [&] {
 // 此处可在宿主选择的 executor 上消费，parent 和 provider 已固定。
 ```
 
-`TraceParent` 拥有 trace ID、span ID、flags、tracestate 和 remote 标志。`TraceOptions` 提供 I/O spans 开关及每操作 span 预算，默认分别为 `true` 和 `256`。
+`TraceParent` 拥有 trace ID、span ID、flags、tracestate 和 remote 标志，也可用 `TraceParent(upstream_span_context)` 从原生 OTel SpanContext 完整复制。该值构造会复制字符串，不承诺分配失败时不抛异常。`TraceOptions` 提供 I/O spans 开关及每操作 span 预算，默认分别为 `true` 和 `256`。
+
+### 通用应用 scope
+
+```cpp
+namespace tracing = milvus_storage::tracing;
+auto parent_scope = tracing::AttachParent(tracing::TraceParent(upstream));
+tracing::TraceScope operation("application.read", {{"requested_rows", int64_t{3}}});
+auto result = reader->take({0, 3, 7});
+if (result.ok()) operation.SetAttribute("returned_rows", (*result)->num_rows());
+operation.Finish(result.status());
+return result;
+```
+
+`TraceScope(name, attributes, links, kind)` 支持原生 OTel 数值、布尔、字符串和数组属性，以及带属性的 links 与 SpanKind。初始属性在 StartSpan 时传给宿主 sampler；后续 `SetAttribute` 不会重新采样。名称、属性和 links 由操作状态持有，内部延迟执行也不借用调用栈数据。无 parent 的默认路径不复制属性。
+
+正常析构结束 span，状态保持 Unset；异常展开时只记录异常分类；`Finish(status)` 显式记录结果并恢复上下文。所有内层 guard 必须先结束，不能将 scope 转交其他线程。应用 scope 只覆盖当前 C++ 作用域；围绕 Future 的构造创建 scope，不会自动覆盖 Future 的完整执行时间。Storage 原有异步 API 仍由内部完成回调记录完整操作。
+
+公共接口不暴露 SpanPtr、EndSpan 或 ReleaseSpan；业务代码无需配对底层 span/context。内部 OperationTrace 继续直接持有 OTel Span，没有更换 Arrow recipe、开启 Arrow 内部 tracing 或修改第三方源码。
+
+### 故障隔离和兼容性
+
+配置函数返回 Arrow Status，失败时保留原配置；宿主必须检查返回值。Scope 初始化、Context attachment 和注释操作的内部错误被隔离；若 attachment 无法建立，进程内暂时抑制上下文捕获，直到失败 guard 全部退出，以免工作被挂到错误的 parent。该保守处理可能丢失其他并发请求的 spans。不可恢复的依赖内部 noexcept 分配失败不在该保证内。
+
+配置函数从 void 改为返回 Status，公共 TraceScope 布局也有变化。C++ 宿主与 Storage 必须一起重编译，并保持相同 OTel ABI；不能只替换动态库。C/Rust FFI 的既有接口没有改变。
 
 ### Provider
 
@@ -132,7 +157,9 @@ Rust `tracing-opentelemetry` 不是第一版依赖。后续若需要现有引擎
 
 惰性 Future 在实际工作开始时创建 span。未消费且未开始工作的 Future 不导出虚假工作 span。Arrow source future 完成观测独立于消费者，丢弃返回的 Future 不会提前结束后台 I/O span。Vortex 原生操作直接在完成 callback 中结束 span，返回原始 Future，不增加 consumer executor 调度。其他 Folly 操作通过完成 continuation 观测最终结果；若消费者丢弃已开始的操作，最后一个工作上下文释放时结束尚未完成的 span，并设置 `storage.completion.unobserved=true`，不把它当作真实取消。
 
-tracing wrapper 已捕获的同步/提交异常，以及 Folly 完成 continuation 收到的异常，转为不包含异常原文的 `UnknownError`，通过 Status/Result 或已完成的失败 Future 返回。批量提交异常为每个输入 range 返回一个失败 Future。原有 Status/Result 的扩展分类保持不变；无上下文快速转发路径保持原实现。
+tracing 的 `Run`、`RunAsync`、`RunNativeAsync` 与文件装饰器只观测业务结果，不转换业务异常。同步调用或提交抛出的异常原样传播，Folly continuation 保留原始 Try/异常；已存在的业务边界（例如 CRT 提交、CXX/FFI）继续负责自己的错误转换。是否有 parent、是否配置 provider、是否采样都不改变该契约。异常 span 仅记录 `UnknownError` 分类，不导出异常原文。
+
+同步结果（包括宏早返回）统一传给 `Finish(status)`；Folly 返回的失败 ready future 在消费时也会记录结果。已经开始的操作在异常展开时由只读异常观测 guard 结束 span；它不捕获业务异常。不要为了埋点在各个 Reader 返回分支复制完成逻辑，也不要让通用 scope 析构猜测 Status。
 
 CXX 将异常转换为 Result；Rust guard 在 Pending、Ready 和 panic unwind 时析构。attach token 不跨 poll/线程保留。桥接没有引入 Rust OTel SDK 或 exporter，也未新增公开 C 业务 ABI，FFI 导出表保持现有范围。
 
@@ -239,6 +266,19 @@ build/Release/test/Test_FFI
 初次接入时另有编译覆盖：Rust bridge 的 `s3-crt-async` feature 编译，以及 C++ CRT 源文件在 AWS SDK 1.11.842 头文件下的条件路径语法编译。后者不是完整 CRT 链接或真实 S3 请求测试。
 
 当前环境的 `ParquetOpenAsyncIsLazyAndSupportsThreadedExecutor` 参数化用例被排除：组合运行会崩溃，不含任何 Storage tracing 代码的独立探针确认，头文件给出的 `sizeof(folly::ThreadedExecutor)` 为 256，而预编译构造函数写到对象起始位置之后的第 415 字节。预编译依赖使用 GCC 14，容器编译器是 GCC 12；已确认对象布局不一致，尚未确定造成布局差异的全部编译选项。需在依赖与编译环境一致后复验，不能将本次筛选回归等同于全量通过。
+
+### 2026-09-15 结果观测与通用接口验证
+
+基于 `4b45ee7` 的本地改动，在 `storage-tracing-dev` 容器内验证，继续使用既有 Conan 缓存和 Arrow/OTel 依赖。`milvus_test`、`Test_FFI`、`tracing_benchmark`、`telemetry_read_benchmark` 均完成编译。
+
+- `StorageTracingTest.*`：40/40 通过。覆盖真实 Reader 同步/异步校验失败、异常原样传播、属性采样、延迟属性/links 所有权、parent 信息保留、scope 恢复、故障注入和 metadata flight 重试进展。
+- 读取与缓存筛选回归：308 通过、69 条件跳过，377 项运行；filter 为 `FollyArrowExecutorTest.*:*APIWriterReaderTest*:*FormatReaderMetadataCacheParamTest*:*FormatReaderTest*:*LocalFileSystem*:*CloudFSMetrics*-*ParquetOpenAsyncIsLazyAndSupportsThreadedExecutor*`。仍排除前述已有 Folly ThreadedExecutor ABI 不一致用例，这不是全量测试通过。
+- C FFI：83/83 通过。
+- 改动 C++ 文件经 clang-format 18 检查；error-handling ratchet 通过，库中 throw 数量仍为 21；未提高 baseline。
+
+运行测试前使用 `source cpp/build/Release/generators/conanrun.sh`，测试设置 `ASAN_OPTIONS=detect_leaks=0`，coverage 写入独立 `/tmp/storage-tracing-parts12-*-gcov` 路径。运行入口为 `cpp/build/Release/test/milvus_test --gtest_filter=...` 和 `cpp/build/Release/test/Test_FFI`。
+
+原始日志：`/tmp/storage-tracing-parts12-build5.log`（四个 targets）、`/tmp/storage-tracing-parts12-build-final.log`（修正持续 FIU 测试后的测试重编译）、`/tmp/storage-tracing-parts12-tests-final.log`、`/tmp/storage-tracing-parts12-regression.log`、`/tmp/storage-tracing-parts12-ffi.log`。本轮没有重测性能矩阵，benchmark 编译通过不构成性能无回退结论。
 
 ### 功能验证证据
 

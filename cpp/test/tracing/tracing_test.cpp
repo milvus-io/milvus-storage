@@ -15,6 +15,8 @@
 #include <opentelemetry/sdk/trace/samplers/parent.h>
 #include <opentelemetry/sdk/trace/samplers/always_on.h>
 #include "tracing/runtime.h"
+#include "milvus-storage/common/fiu_local.h"
+#include <opentelemetry/trace/trace_state.h>
 #include "tracing_bridge.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/writer.h"
@@ -60,16 +62,234 @@ ProviderPtr Provider(std::shared_ptr<Memory>& data, bool parent_based = false) {
 }
 class StorageTracingTest : public testing::Test {
   protected:
-  void SetUp() override { SetTracerProvider(Provider(data)); }
+  void SetUp() override { ASSERT_STATUS_OK(SetTracerProvider(Provider(data))); }
   void TearDown() override {
-    SetTracerProvider(nullptr);
-    SetTraceOptions({});
+    ASSERT_STATUS_OK(SetTracerProvider(nullptr));
+    ASSERT_STATUS_OK(SetTraceOptions({}));
   }
   std::shared_ptr<Memory> data;
 };
 arrow::Status Work(const char* name = "storage.read") {
   return tracing::Run(name, [] { return arrow::Status::OK(); });
 }
+TEST_F(StorageTracingTest, NativeAttributesReachSamplerAndPreserveTypes) {
+  class AttributeSampler final : public sdk::Sampler {
+ public:
+    sdk::SamplingResult ShouldSample(const ot::SpanContext& parent,
+                                     ot::TraceId,
+                                     opentelemetry::nostd::string_view,
+                                     ot::SpanKind,
+                                     const opentelemetry::common::KeyValueIterable& attributes,
+                                     const ot::SpanContextKeyValueIterable&) noexcept override {
+      bool sample = false;
+      attributes.ForEachKeyValue(
+          [&](opentelemetry::nostd::string_view key, opentelemetry::common::AttributeValue value) noexcept {
+            if (key == "test.sample")
+              sample = opentelemetry::nostd::get<bool>(value);
+            return true;
+          });
+      return {sample ? sdk::Decision::RECORD_AND_SAMPLE : sdk::Decision::DROP, nullptr, parent.trace_state()};
+    }
+    opentelemetry::nostd::string_view GetDescription() const noexcept override { return "attribute sampler"; }
+  };
+  auto exporter = std::make_unique<opentelemetry::exporter::memory::InMemorySpanExporter>(128);
+  data = exporter->GetData();
+  auto processor = std::make_unique<sdk::SimpleSpanProcessor>(std::move(exporter));
+  ASSERT_STATUS_OK(SetTracerProvider(
+      ProviderPtr(new sdk::TracerProvider(std::move(processor), opentelemetry::sdk::resource::Resource::Create({}),
+                                          std::make_unique<AttributeSampler>()))));
+  ASSERT_STATUS_OK(SetTraceOptions({false, 256}));
+  auto parent = AttachParent(Parent(1));
+  const int column_index = 3;
+  const std::string column_name = "column-name";
+  const int64_t records_to_read = 4096;
+  {
+    TraceScope scope("parquet::arrow::read_column",
+                     {{"test.sample", true},
+                      {"parquet.arrow.columnindex", column_index},
+                      {"parquet.arrow.columnname", column_name},
+                      {"parquet.arrow.physicaltype", "INT64"},
+                      {"parquet.arrow.records_to_read", records_to_read},
+                      {"test.ratio", 0.5}},
+                     {}, ot::SpanKind::kClient);
+  }
+  auto spans = data->GetSpans();
+  ASSERT_EQ(spans.size(), 1);
+  EXPECT_EQ(spans[0]->GetSpanKind(), ot::SpanKind::kClient);
+  const auto& attributes = spans[0]->GetAttributes();
+  EXPECT_EQ(opentelemetry::nostd::get<int32_t>(attributes.at("parquet.arrow.columnindex")), 3);
+  EXPECT_EQ(opentelemetry::nostd::get<std::string>(attributes.at("parquet.arrow.columnname")), column_name);
+  EXPECT_EQ(opentelemetry::nostd::get<int64_t>(attributes.at("parquet.arrow.records_to_read")), records_to_read);
+  EXPECT_EQ(opentelemetry::nostd::get<double>(attributes.at("test.ratio")), 0.5);
+}
+
+TEST_F(StorageTracingTest, DeferredOperationOwnsNativeAttributesAndLinksUntilExecution) {
+  auto parent = AttachParent(Parent(1));
+  OperationTrace operation;
+  const ot::SpanContext link(ExpectedTrace(2), ExpectedSpan(2), ot::TraceFlags(1), false);
+  {
+    std::string name = "deferred-owned-span-name";
+    std::string column = "deferred-owned-column-name";
+    std::string text = "deferred-owned-array-element";
+    std::string link_label = "deferred-owned-link-label";
+    int64_t indices[] = {1, 7};
+    bool flags[] = {true, false};
+    opentelemetry::nostd::string_view texts[] = {text};
+    auto trace = OperationTrace::WithAttributes(
+        name,
+        {{"column", column},
+         {"indices", opentelemetry::nostd::span<const int64_t>(indices)},
+         {"flags", opentelemetry::nostd::span<const bool>(flags)},
+         {"texts", opentelemetry::nostd::span<const opentelemetry::nostd::string_view>(texts)}},
+        {{link, {{"label", link_label}}}}, ot::SpanKind::kClient, true);
+    operation = trace;
+    name.assign("changed");
+    column.assign("changed");
+    text.assign("changed");
+    link_label.assign("changed");
+    indices[0] = 99;
+    flags[0] = false;
+  }
+  EXPECT_TRUE(data->GetSpans().empty());
+  {
+    ContextScope scope(operation.context());
+    StartCurrent();
+    operation.Finish(arrow::Status::OK());
+  }
+  auto spans = data->GetSpans();
+  ASSERT_EQ(spans.size(), 1);
+  EXPECT_EQ(spans[0]->GetName(), "deferred-owned-span-name");
+  EXPECT_EQ(spans[0]->GetSpanKind(), ot::SpanKind::kClient);
+  const auto& attributes = spans[0]->GetAttributes();
+  EXPECT_EQ(opentelemetry::nostd::get<std::string>(attributes.at("column")), "deferred-owned-column-name");
+  EXPECT_EQ(opentelemetry::nostd::get<std::vector<int64_t>>(attributes.at("indices")), (std::vector<int64_t>{1, 7}));
+  EXPECT_EQ(opentelemetry::nostd::get<std::vector<bool>>(attributes.at("flags")), (std::vector<bool>{true, false}));
+  EXPECT_EQ(opentelemetry::nostd::get<std::vector<std::string>>(attributes.at("texts")),
+            (std::vector<std::string>{"deferred-owned-array-element"}));
+  ASSERT_EQ(spans[0]->GetLinks().size(), 1);
+  EXPECT_EQ(spans[0]->GetLinks()[0].GetSpanContext().span_id(), ExpectedSpan(2));
+  EXPECT_EQ(opentelemetry::nostd::get<std::string>(spans[0]->GetLinks()[0].GetAttributes().at("label")),
+            "deferred-owned-link-label");
+}
+
+TEST_F(StorageTracingTest, NativeParentPreservesIdentityAndPropagationFlags) {
+  const ot::SpanContext upstream(ExpectedTrace(2), ExpectedSpan(2), ot::TraceFlags(0), true,
+                                 ot::TraceState::FromHeader("vendor=upstream"));
+  const TraceParent parent(upstream);
+  EXPECT_EQ(ot::TraceId(parent.trace_id), upstream.trace_id());
+  EXPECT_EQ(ot::SpanId(parent.span_id), upstream.span_id());
+  EXPECT_EQ(parent.trace_flags, 0);
+  EXPECT_TRUE(parent.is_remote);
+  EXPECT_EQ(parent.tracestate, "vendor=upstream");
+  auto attached = AttachParent(parent);
+  ASSERT_TRUE(Work().ok());
+  auto spans = data->GetSpans();
+  ASSERT_EQ(spans.size(), 1);
+  EXPECT_EQ(spans[0]->GetParentSpanId(), ExpectedSpan(2));
+  EXPECT_EQ(spans[0]->GetTraceId(), ExpectedTrace(2));
+}
+TEST_F(StorageTracingTest, GenericScopesRestoreContextAndRecordExplicitResult) {
+  auto parent = AttachParent(Parent(1));
+  auto before = Capture();
+  {
+    TraceScope outer("application.read", {{"rows", int64_t{7}}});
+    {
+      TraceScope child("application.plan");
+      child.SetAttribute("estimated", true);
+      child.Finish(arrow::Status::Invalid("private"));
+    }
+    EXPECT_TRUE(Work("storage.child").ok());
+  }
+  EXPECT_EQ(Capture(), before);
+  auto spans = data->GetSpans();
+  ASSERT_EQ(spans.size(), 3);
+  EXPECT_EQ(spans[0]->GetStatus(), ot::StatusCode::kError);
+  EXPECT_EQ(spans[0]->GetParentSpanId(), spans[2]->GetSpanId());
+  EXPECT_EQ(spans[1]->GetParentSpanId(), spans[2]->GetSpanId());
+  EXPECT_EQ(spans[2]->GetStatus(), ot::StatusCode::kUnset);
+  EXPECT_TRUE(spans[0]->GetDescription().empty());
+  EXPECT_THROW(([&] {
+                 TraceScope operation("application.throw");
+                 throw 42;
+               }()),
+               int);
+  auto thrown = data->GetSpans();
+  ASSERT_EQ(thrown.size(), 1);
+  EXPECT_EQ(thrown[0]->GetStatus(), ot::StatusCode::kError);
+  EXPECT_TRUE(thrown[0]->GetDescription().empty());
+  EXPECT_EQ(Capture(), before);
+}
+TEST_F(StorageTracingTest, ReaderEarlyFailuresRetainSyncAndAsyncErrorSpans) {
+  using namespace milvus_storage::api;
+  Properties properties;
+  ASSERT_STATUS_OK(InitTestProperties(properties));
+  auto reader = Reader::create(std::make_shared<ColumnGroups>(), nullptr, nullptr, properties);
+  auto parent = AttachParent(Parent(1));
+  for (const auto& rows : {std::vector<int64_t>{}, std::vector<int64_t>{0}}) {
+    auto sync = reader->take(rows);
+    EXPECT_TRUE(sync.status().IsInvalid());
+    auto future = reader->take_async(rows);
+    EXPECT_TRUE(std::move(future).get().status().IsInvalid());
+  }
+  auto spans = data->GetSpans();
+  ASSERT_EQ(spans.size(), 4);
+  for (const auto& span : spans) {
+    EXPECT_EQ(span->GetStatus(), ot::StatusCode::kError);
+    EXPECT_EQ(opentelemetry::nostd::get<std::string>(span->GetAttributes().at("error.type")), "Invalid");
+  }
+}
+#ifdef BUILD_WITH_FIU
+TEST_F(StorageTracingTest, TracingFailuresPreserveResultsAndMetadataFlightProgress) {
+  auto parent = AttachParent(Parent(1));
+  auto before = Capture();
+  const auto original = arrow::Status::Invalid("original");
+  for (const auto* key : {FIUKEY_TRACING_SCOPE_FAIL, FIUKEY_TRACING_CONTEXT_ATTACH_FAIL}) {
+    {
+      ScopedFiuFault fault(key, false);
+      ASSERT_EQ(fault.enable_result(), 0);
+      EXPECT_EQ(tracing::Run("failed", [&] { return original; }), original);
+      EXPECT_EQ(std::move(RunAsync("failed.async", [&] { return folly::makeSemiFuture(original); })).get(), original);
+      using Cache = FormatReaderMetadataCache<parquet::ParquetFormatReader>;
+      auto cache = Cache::Make();
+      int calls = 0;
+      auto loader = [&]() -> Cache::MetadataResult {
+        ++calls;
+        return original;
+      };
+      EXPECT_EQ(cache->get_or_open("same", loader).status(), original);
+      EXPECT_EQ(cache->get_or_open("same", loader).status(), original);
+      auto async_loader = [&]() { return folly::makeSemiFuture(loader()); };
+      EXPECT_EQ(std::move(cache->get_or_open_async("same", async_loader)).get().status(), original);
+      EXPECT_EQ(std::move(cache->get_or_open_async("same", async_loader)).get().status(), original);
+      EXPECT_EQ(calls, 4);
+    }
+    EXPECT_EQ(Capture(), before);
+    auto spans = data->GetSpans();
+    if (std::string_view(key) == FIUKEY_TRACING_SCOPE_FAIL)
+      EXPECT_TRUE(spans.empty());
+    for (const auto& span : spans) EXPECT_EQ(span->GetTraceId(), ExpectedTrace(1));
+  }
+  EXPECT_TRUE(Work("restored").ok());
+  EXPECT_EQ(data->GetSpans().size(), 1);
+}
+TEST_F(StorageTracingTest, FailedConfigurationPreservesProviderAndBudget) {
+  ASSERT_STATUS_OK(SetTraceOptions({true, 1}));
+  {
+    ScopedFiuFault fault(FIUKEY_TRACING_CONFIGURATION_FAIL, false);
+    ASSERT_EQ(fault.enable_result(), 0);
+    EXPECT_FALSE(SetTracerProvider(nullptr).ok());
+    EXPECT_FALSE(SetTraceOptions({true, 256}).ok());
+  }
+  auto parent = AttachParent(Parent(1));
+  {
+    TraceScope root("root");
+    EXPECT_TRUE(Work("suppressed").ok());
+  }
+  auto spans = data->GetSpans();
+  ASSERT_EQ(spans.size(), 1);
+  EXPECT_EQ(spans[0]->GetName(), "root");
+}
+#endif
 TEST_F(StorageTracingTest, ParentScopeNestedMaskAndRestore) {
   static_assert(!std::is_move_constructible_v<TraceScope>);
   static_assert(!std::is_copy_constructible_v<TraceScope>);
@@ -98,13 +318,13 @@ TEST_F(StorageTracingTest, ParentScopeNestedMaskAndRestore) {
   EXPECT_EQ(spans[0]->GetSpanContext().trace_state()->ToHeader(), "vendor=value");
 }
 TEST_F(StorageTracingTest, NullProviderDoesNotUseGlobalProvider) {
-  SetTracerProvider(nullptr);
+  ASSERT_STATUS_OK(SetTracerProvider(nullptr));
   auto scope = AttachParent(Parent(1));
   EXPECT_TRUE(Work().ok());
   EXPECT_TRUE(data->GetSpans().empty());
 }
 TEST_F(StorageTracingTest, NullProviderKeepsReadyFutureReady) {
-  SetTracerProvider(nullptr);
+  ASSERT_STATUS_OK(SetTracerProvider(nullptr));
   auto scope = AttachParent(Parent(1));
   auto future = RunAsync("storage.read", [] {
     return RunAsync("child", [] { return folly::makeSemiFuture(arrow::Status::Invalid("original")); });
@@ -113,24 +333,35 @@ TEST_F(StorageTracingTest, NullProviderKeepsReadyFutureReady) {
   EXPECT_EQ(std::move(future).get(), arrow::Status::Invalid("original"));
   EXPECT_TRUE(data->GetSpans().empty());
 }
-TEST_F(StorageTracingTest, NullProviderAsyncExceptionsBecomeResults) {
+TEST_F(StorageTracingTest, ExceptionsAreIndependentOfTracingConfiguration) {
   using Result = arrow::Result<int64_t>;
-  SetTracerProvider(nullptr);
-  auto scope = AttachParent(Parent(1));
-  auto submission = RunAsync("submission", []() -> folly::SemiFuture<Result> { throw 42; });
-  EXPECT_TRUE(std::move(submission).get().status().IsUnknownError());
-  auto ready = RunAsync("ready", [] {
-    return folly::makeSemiFuture<Result>(folly::make_exception_wrapper<std::runtime_error>("private"));
-  });
-  EXPECT_TRUE(ready.isReady());
-  EXPECT_TRUE(std::move(ready).get().status().IsUnknownError());
-  auto deferred =
-      RunAsync("deferred", [] { return folly::makeSemiFuture().deferValue([](folly::Unit) -> Result { throw 42; }); });
-  EXPECT_TRUE(std::move(deferred).get().status().IsUnknownError());
-  EXPECT_TRUE(data->GetSpans().empty());
+  for (int mode : {0, 1, 2, 3}) {
+    ASSERT_STATUS_OK(SetTracerProvider(mode < 2 ? nullptr : Provider(data, true)));
+    auto parent = Parent(1);
+    if (mode == 0)
+      parent.trace_id = {};
+    if (mode == 2)
+      parent.trace_flags = 0;
+    auto scope = AttachParent(parent);
+    EXPECT_THROW((void)tracing::Run("sync", []() -> Result { throw 42; }), int);
+    EXPECT_THROW((void)RunAsync("submit", []() -> folly::SemiFuture<Result> { throw 42; }), int);
+    auto ready = RunAsync("ready", [] {
+      return folly::makeSemiFuture<Result>(folly::make_exception_wrapper<std::runtime_error>("private"));
+    });
+    EXPECT_THROW((void)std::move(ready).get(), std::runtime_error);
+    auto deferred = RunAsync(
+        "deferred", [] { return folly::makeSemiFuture().deferValue([](folly::Unit) -> Result { throw 42; }); });
+    EXPECT_THROW((void)std::move(deferred).get(), int);
+    auto spans = data->GetSpans();
+    EXPECT_EQ(spans.size(), mode == 3 ? 4 : 0);
+    for (const auto& span : spans) {
+      EXPECT_EQ(span->GetStatus(), ot::StatusCode::kError);
+      EXPECT_TRUE(span->GetDescription().empty());
+    }
+  }
 }
 TEST_F(StorageTracingTest, UnsampledParentIsNotPromotedToRoot) {
-  SetTracerProvider(Provider(data, true));
+  ASSERT_STATUS_OK(SetTracerProvider(Provider(data, true)));
   auto parent = Parent(1);
   parent.trace_flags = 0;
   auto scope = AttachParent(parent);
@@ -212,7 +443,7 @@ TEST_F(StorageTracingTest, LazyFutureCapturesParentAndProviderBeforeConsumption)
   }();
   EXPECT_TRUE(data->GetSpans().empty());
   std::shared_ptr<Memory> replacement;
-  SetTracerProvider(Provider(replacement));
+  ASSERT_STATUS_OK(SetTracerProvider(Provider(replacement)));
   folly::CPUThreadPoolExecutor executor(1);
   {
     auto scope = AttachParent(Parent(2));
@@ -303,7 +534,7 @@ TEST_F(StorageTracingTest, SameThreadFibersRestoreIndependentNestedContexts) {
   EXPECT_TRUE(data->GetSpans().empty());
 }
 TEST_F(StorageTracingTest, BudgetSuppressesChildrenWithoutEndingParent) {
-  SetTraceOptions({true, 2});
+  ASSERT_STATUS_OK(SetTraceOptions({true, 2}));
   auto scope = AttachParent(Parent(1));
   EXPECT_TRUE(tracing::Run("storage.read", [] {
                 for (int i = 0; i < 10; ++i) EXPECT_TRUE(Work("child").ok());
@@ -371,7 +602,7 @@ TEST_F(StorageTracingTest, DisabledIOFuturesDoNotRetainTracingContexts) {
       return std::vector<arrow::Future<std::shared_ptr<arrow::Buffer>>>(ranges.size(), pending);
     }
   };
-  SetTracerProvider(nullptr);
+  ASSERT_STATUS_OK(SetTracerProvider(nullptr));
   auto raw = std::make_shared<PendingFile>();
   auto file = WrapFile(raw, "test");
   std::weak_ptr<const Context> captured;
@@ -388,7 +619,7 @@ TEST_F(StorageTracingTest, DisabledIOFuturesDoNotRetainTracingContexts) {
   // Only tracing callbacks could retain this context: the source future has no
   // context of its own. Disabled reads return it without completion observers.
   EXPECT_TRUE(captured.expired());
-  SetTracerProvider(Provider(data));
+  ASSERT_STATUS_OK(SetTracerProvider(Provider(data)));
   auto foreign = AttachParent(Parent(2));
   raw->pending.MarkFinished(arrow::Buffer::FromString("ab"));
   for (const auto& future : futures) {
@@ -401,7 +632,7 @@ TEST_F(StorageTracingTest, SuppressedIOSpansStillAggregateReads) {
   auto file = WrapFile(std::make_shared<arrow::io::BufferReader>(arrow::Buffer::FromString("abcd")), "test");
   auto parent = AttachParent(Parent(1));
   for (const auto options : {TraceOptions{false, 256}, TraceOptions{true, 1}}) {
-    SetTraceOptions(options);
+    ASSERT_STATUS_OK(SetTraceOptions(options));
     EXPECT_TRUE(tracing::Run("storage.read", [&] {
                   ARROW_RETURN_NOT_OK(file->ReadAt(0, 2));
                   ARROW_RETURN_NOT_OK(file->ReadAsync(file->io_context(), 0, 2).status());
@@ -454,7 +685,7 @@ TEST_F(StorageTracingTest, IOOverloadsErrorAndDisabledSwitch) {
   auto spans = data->GetSpans();
   ASSERT_EQ(spans.size(), 5);
   EXPECT_EQ(spans.back()->GetStatus(), ot::StatusCode::kError);
-  SetTraceOptions({false, 256});
+  ASSERT_STATUS_OK(SetTraceOptions({false, 256}));
   EXPECT_TRUE(tracing::Run("storage.read", [&] { return file->ReadAt(0, 2); }).ok());
   spans = data->GetSpans();
   ASSERT_EQ(spans.size(), 1);
@@ -734,13 +965,13 @@ TEST_F(StorageTracingTest, UnconsumedReaderFuturesDoNotCreateWorkSpans) {
   ASSERT_STATUS_OK(DeleteTestDir(fs, path));
 }
 TEST_F(StorageTracingTest, DisabledProviderSnapshotRemainsDisabledAfterInjection) {
-  SetTracerProvider(nullptr);
+  ASSERT_STATUS_OK(SetTracerProvider(nullptr));
   auto future = [&] {
     auto scope = AttachParent(Parent(1));
     return RunAsync("storage.read",
                     [] { return folly::makeSemiFuture().deferValue(Bind([](folly::Unit) { return Work("child"); })); });
   }();
-  SetTracerProvider(Provider(data));
+  ASSERT_STATUS_OK(SetTracerProvider(Provider(data)));
   EXPECT_TRUE(std::move(future).get().ok());
   EXPECT_TRUE(data->GetSpans().empty());
 }
@@ -769,12 +1000,11 @@ TEST_F(StorageTracingTest, InlineIOFailureIsObserved) {
   ASSERT_EQ(spans.size(), 1);
   EXPECT_EQ(spans[0]->GetStatus(), ot::StatusCode::kError);
 }
-TEST_F(StorageTracingTest, SynchronousExceptionsBecomeStatusAndEndSpans) {
+TEST_F(StorageTracingTest, SynchronousExceptionsPropagateAndEndSpans) {
   auto scope = AttachParent(Parent(1));
-  EXPECT_TRUE(
-      tracing::Run("status", []() -> arrow::Status { throw std::runtime_error("private path"); }).IsUnknownError());
-  auto result = tracing::Run("result", []() -> arrow::Result<int64_t> { throw 42; });
-  EXPECT_TRUE(result.status().IsUnknownError());
+  EXPECT_THROW((void)tracing::Run("status", []() -> arrow::Status { throw std::runtime_error("private path"); }),
+               std::runtime_error);
+  EXPECT_THROW((void)tracing::Run("result", []() -> arrow::Result<int64_t> { throw 42; }), int);
   auto spans = data->GetSpans();
   ASSERT_EQ(spans.size(), 2);
   for (const auto& span : spans) {
@@ -784,27 +1014,27 @@ TEST_F(StorageTracingTest, SynchronousExceptionsBecomeStatusAndEndSpans) {
   }
 }
 
-TEST_F(StorageTracingTest, AsyncSubmissionAndDeferredExceptionsBecomeResults) {
+TEST_F(StorageTracingTest, AsyncSubmissionAndDeferredExceptionsPropagate) {
   using Result = arrow::Result<int64_t>;
   auto scope = AttachParent(Parent(1));
-  auto submission = RunAsync("submission", []() -> folly::SemiFuture<Result> { throw std::runtime_error("private"); });
-  EXPECT_TRUE(std::move(submission).get().status().IsUnknownError());
+  EXPECT_THROW((void)RunAsync("submission", []() -> folly::SemiFuture<Result> { throw std::runtime_error("private"); }),
+               std::runtime_error);
   auto submission_spans = data->GetSpans();
   ASSERT_EQ(submission_spans.size(), 1);
   EXPECT_EQ(submission_spans[0]->GetStatus(), ot::StatusCode::kError);
   auto deferred =
       RunAsync("deferred", [] { return folly::makeSemiFuture().deferValue([](folly::Unit) -> Result { throw 42; }); });
   EXPECT_TRUE(data->GetSpans().empty());
-  EXPECT_TRUE(std::move(deferred).get().status().IsUnknownError());
-  auto native = RunNativeAsync(
-      "native", [](OperationTrace) -> folly::SemiFuture<arrow::Status> { throw std::runtime_error("private"); });
-  EXPECT_TRUE(native.isReady());
-  EXPECT_TRUE(std::move(native).get().IsUnknownError());
+  EXPECT_THROW((void)std::move(deferred).get(), int);
+  EXPECT_THROW(
+      (void)RunNativeAsync(
+          "native", [](OperationTrace) -> folly::SemiFuture<arrow::Status> { throw std::runtime_error("private"); }),
+      std::runtime_error);
   auto ready = RunNativeAsync("ready", [](OperationTrace) {
     return folly::makeSemiFuture<Result>(folly::make_exception_wrapper<std::runtime_error>("private"));
   });
   EXPECT_TRUE(ready.isReady());
-  EXPECT_TRUE(std::move(ready).get().status().IsUnknownError());
+  EXPECT_THROW((void)std::move(ready).get(), std::runtime_error);
   auto spans = data->GetSpans();
   ASSERT_EQ(spans.size(), 3);
   for (const auto& span : spans) {
@@ -835,28 +1065,17 @@ class ThrowingFile final : public arrow::io::RandomAccessFile, public NonBlockin
   }
 };
 
-TEST_F(StorageTracingTest, FileSubmissionExceptionsCompleteEveryReturnedFuture) {
+TEST_F(StorageTracingTest, FileSubmissionExceptionsPropagateAndEndSpans) {
   auto file = WrapFile(std::make_shared<ThrowingFile>(), "test");
   auto scope = AttachParent(Parent(1));
   uint8_t out[4];
-  EXPECT_TRUE(file->ReadAt(0, 4, out).status().IsUnknownError());
+  EXPECT_THROW((void)file->ReadAt(0, 4, out), std::runtime_error);
   auto* async = dynamic_cast<NonBlockingRandomAccessFile*>(file.get());
   ASSERT_NE(async, nullptr);
-  auto read = async->ReadAtAsyncInto(0, 4, out);
-  ASSERT_TRUE(read.is_finished());
-  EXPECT_TRUE(read.status().IsUnknownError());
-  auto size = async->GetSizeAsync();
-  ASSERT_TRUE(size.is_finished());
-  EXPECT_TRUE(size.status().IsUnknownError());
-  auto metadata = file->ReadMetadataAsync(file->io_context());
-  ASSERT_TRUE(metadata.is_finished());
-  EXPECT_TRUE(metadata.status().IsUnknownError());
-  auto reads = file->ReadManyAsync(file->io_context(), {{0, 1}, {1, 2}});
-  ASSERT_EQ(reads.size(), 2);
-  for (const auto& future : reads) {
-    ASSERT_TRUE(future.is_finished());
-    EXPECT_TRUE(future.status().IsUnknownError());
-  }
+  EXPECT_THROW((void)async->ReadAtAsyncInto(0, 4, out), int);
+  EXPECT_THROW((void)async->GetSizeAsync(), std::runtime_error);
+  EXPECT_THROW((void)file->ReadMetadataAsync(file->io_context()), std::runtime_error);
+  EXPECT_THROW((void)file->ReadManyAsync(file->io_context(), {{0, 1}, {1, 2}}), int);
   auto spans = data->GetSpans();
   ASSERT_EQ(spans.size(), 5);
   for (const auto& span : spans) {
