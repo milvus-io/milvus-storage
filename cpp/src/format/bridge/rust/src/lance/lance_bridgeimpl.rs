@@ -11,13 +11,13 @@ use std::result::Result as RustResult;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Handle;
 
-use arrow_array58::Array;
-use arrow_array58::ffi::FFI_ArrowArray;
-use arrow_array58::{RecordBatch, RecordBatchReader, StructArray};
-use arrow_schema58::Schema as ArrowSchema;
-use arrow58::datatypes::SchemaRef;
-use arrow58::error::ArrowError;
-use arrow58::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
+use arrow_array::Array;
+use arrow_array::ffi::FFI_ArrowArray;
+use arrow_array::{RecordBatch, RecordBatchReader, StructArray};
+use arrow_schema::Schema as ArrowSchema;
+use arrow::datatypes::SchemaRef;
+use arrow::error::ArrowError;
+use arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
 
 use lance::dataset::AutoCleanupParams;
 use lance::dataset::builder::DatasetBuilder;
@@ -726,7 +726,7 @@ pub unsafe fn open_fragment_reader(
         })?;
 
     let ffi_schema = unsafe {
-        arrow58::ffi::FFI_ArrowSchema::from_raw(schema_rawptr as *mut arrow58::ffi::FFI_ArrowSchema)
+        arrow::ffi::FFI_ArrowSchema::from_raw(schema_rawptr as *mut arrow::ffi::FFI_ArrowSchema)
     };
     let arrow_schema =
         ArrowSchema::try_from(&ffi_schema).map_err(|e| LanceError::InvalidInput {
@@ -870,14 +870,14 @@ pub unsafe fn get_fragment_schema(
     let lance_schema = file_fragment.schema();
     let arrow_schema: ArrowSchema = lance_schema.into();
 
-    let ffi_schema = arrow58::ffi::FFI_ArrowSchema::try_from(&arrow_schema).map_err(|e| {
+    let ffi_schema = arrow::ffi::FFI_ArrowSchema::try_from(&arrow_schema).map_err(|e| {
         LanceError::InvalidInput {
             source: format!("Failed to export fragment schema: {}", e).into(),
             location: snafu::location!(),
         }
     })?;
 
-    let out_ptr = out_schema_ptr as *mut arrow58::ffi::FFI_ArrowSchema;
+    let out_ptr = out_schema_ptr as *mut arrow::ffi::FFI_ArrowSchema;
     unsafe { std::ptr::write(out_ptr, ffi_schema) };
     Ok(())
 }
@@ -937,7 +937,7 @@ pub unsafe fn create_scanner(
     batch_size: u32,
 ) -> Result<Box<BlockingScanner>> {
     let ffi_schema = unsafe {
-        arrow58::ffi::FFI_ArrowSchema::from_raw(schema_ptr as *mut arrow58::ffi::FFI_ArrowSchema)
+        arrow::ffi::FFI_ArrowSchema::from_raw(schema_ptr as *mut arrow::ffi::FFI_ArrowSchema)
     };
     let arrow_schema =
         ArrowSchema::try_from(&ffi_schema).map_err(|e| LanceError::InvalidInput {
@@ -968,7 +968,7 @@ pub unsafe fn dataset_take(
     out_stream: *mut u8,
 ) -> Result<()> {
     let ffi_schema = unsafe {
-        arrow58::ffi::FFI_ArrowSchema::from_raw(schema_ptr as *mut arrow58::ffi::FFI_ArrowSchema)
+        arrow::ffi::FFI_ArrowSchema::from_raw(schema_ptr as *mut arrow::ffi::FFI_ArrowSchema)
     };
     let arrow_schema =
         ArrowSchema::try_from(&ffi_schema).map_err(|e| LanceError::InvalidInput {
