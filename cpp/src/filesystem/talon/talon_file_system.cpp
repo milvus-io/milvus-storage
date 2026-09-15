@@ -28,6 +28,7 @@
 #include <arrow/status.h>
 #include <arrow/util/future.h>
 
+#include "milvus-storage/common/log.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/util_internal.h"
@@ -70,7 +71,9 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
       return arrow::Future<int64_t>::MakeFinished(known_size);
     }
 
-    return reader_->StatAsync();
+    return WithOriginFallback(
+        reader_->StatAsync(), [](NonBlockingRandomAccessFile& file) { return file.GetSizeAsync(); },
+        [](arrow::io::RandomAccessFile& file) { return file.GetSize(); });
   }
 
   arrow::Future<int64_t> ReadAtAsyncInto(int64_t position, int64_t nbytes, uint8_t* out) override {
@@ -88,7 +91,14 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
       return arrow::Future<int64_t>::MakeFinished(0);
     }
 
-    return reader_->ReadAtAsync(static_cast<uint64_t>(position), static_cast<uint64_t>(nbytes), out);
+    // Talon may have partially filled out before failing. Reread the whole
+    // requested range from origin, never combine bytes from both attempts.
+    return WithOriginFallback(
+        reader_->ReadAtAsync(static_cast<uint64_t>(position), static_cast<uint64_t>(nbytes), out),
+        [position, nbytes, out](NonBlockingRandomAccessFile& file) {
+          return file.ReadAtAsyncInto(position, nbytes, out);
+        },
+        [position, nbytes, out](arrow::io::RandomAccessFile& file) { return file.ReadAt(position, nbytes, out); });
   }
 
   arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
@@ -163,10 +173,10 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
     return pos_;
   }
 
-  // Matches the lifecycle contract used by Arrow's S3 and Azure input files:
-  // Close() is not safe to call concurrently with another operation on this
-  // file. Reads whose submission completed before Close() was called own a
-  // Rust reader clone and may complete after the C++ handle is released here.
+  // As with Arrow filesystem input streams (including S3), Close() must not
+  // race with reads: closing before ReadAsync()/ReadAtAsyncInto() returns can
+  // invalidate members still in use. Callers must keep the file open and alive
+  // until async read/size futures finish; returning a Future is not completion.
   arrow::Status Close() override {
     if (origin_file_ != nullptr) {
       ARROW_RETURN_NOT_OK(origin_file_->Close());
@@ -181,6 +191,47 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
   bool closed() const override { return closed_; }
 
   private:
+  /// Retry a failed Talon operation once through the cached origin file.
+  /// @ReadOriginAsync takes NonBlockingRandomAccessFile& and returns Future<int64_t>.
+  /// @ReadOrigin takes arrow::io::RandomAccessFile& and returns Result<int64_t>.
+  /// Use the async callback when supported, otherwise invoke the blocking callback.
+  /// Both callbacks repeat the same operation; reads must retry the full range.
+  /// Keep the file open and destination buffer valid until the returned future completes.
+  template <typename ReadOriginAsync, typename ReadOrigin>
+  arrow::Future<int64_t> WithOriginFallback(arrow::Future<int64_t> future,
+                                            ReadOriginAsync read_origin_async,
+                                            ReadOrigin read_origin) {
+    return future.Then(
+        [](const int64_t value) { return value; },
+        [this, read_origin_async = std::move(read_origin_async),
+         read_origin = std::move(read_origin)](const arrow::Status& talon_error) -> arrow::Future<int64_t> {
+#if 0
+          // TODO(jiaqizho): Replace fallback logging with metrics.
+          LOG_STORAGE_WARNING_ << "Talon failed for '" << path_
+                               << "', falling back to origin filesystem: " << talon_error;
+#endif
+          auto file = GetOrOpenOriginFile();
+          arrow::Future<int64_t> origin_future;
+          if (!file.ok()) {
+            origin_future = arrow::Future<int64_t>::MakeFinished(file.status());
+          } else if (auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(file.ValueOrDie().get())) {
+            origin_future = read_origin_async(*async_file);
+          } else {
+            // Origins without native async support still work through their blocking API.
+            origin_future = arrow::Future<int64_t>::MakeFinished(read_origin(*file.ValueOrDie()));
+          }
+          // Native CRT requests own their I/O state. Keep origin owners out of
+          // their completion callbacks to avoid destroying a CRT client there.
+          return origin_future.Then([](const int64_t value) { return value; },
+                                    [talon_error](const arrow::Status& origin_error) -> arrow::Result<int64_t> {
+                                      // Preserve the provider's status code and detail for caller classification.
+                                      return origin_error.WithMessage(
+                                          "Talon failed: ", talon_error.ToString(),
+                                          "; origin filesystem fallback failed: ", origin_error.message());
+                                    });
+        });
+  }
+
   arrow::Result<int64_t> GetReadSize(const int64_t position, const int64_t nbytes) const {
     if (closed_) {
       return arrow::Status::Invalid("Operation on closed Talon input file");
@@ -207,9 +258,8 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
     if (closed_) {
       return arrow::Status::Invalid("Operation on closed Talon input file");
     }
-    // Share the provider client and open a file only when metadata is requested.
-    // Keep the successfully opened file until Close(), preserving the provider's
-    // metadata cache without adding origin opens or HEADs to ordinary Talon reads.
+    // Metadata and fallback reuse the same file and provider metadata cache.
+    // Successful Talon reads never open the origin file or issue origin HEADs.
     const std::lock_guard<std::mutex> lock(origin_file_mutex_);
     if (origin_file_ == nullptr) {
       ARROW_ASSIGN_OR_RAISE(origin_file_, origin_fs_->OpenInputFile(path_));
