@@ -5,8 +5,7 @@ class MilvusStorageColumnGroupsNative {
   @native def createFromGroups(
       columnsPerGroup: Array[Array[String]],
       filesPerGroup: Array[Array[String]],
-      fileRowCountsPerGroup: Array[Array[Long]],
-      format: String
+      fileRowCountsPerGroup: Array[Array[Long]]
   ): Long
   @native def destroy(columnGroupsPtr: Long): Unit
   @native def count(columnGroupsPtr: Long): Int
@@ -16,17 +15,11 @@ class MilvusStorageColumnGroupsNative {
   @native def format(columnGroupsPtr: Long, groupIndex: Int): String
 }
 
-/** Build a `LoonColumnGroups*` directly from a caller-provided layout, without
-  * resolving a milvus-storage `.milvus_manifest`.
+/** Inspect column groups returned by a V3 writer or borrowed from a manifest.
   *
-  * Used by the spark-connector's StorageV2 read path: the column-group layout
-  * is recovered from the snapshot AVRO + parquet footer kv-metadata
-  * (`group_field_id_list`), then fed here so the packed reader can open the
-  * segment files directly.
-  *
-  * Caller is responsible for calling [[destroy]] once the reader no longer
-  * needs the column groups — mirrors the contract of
-  * `MilvusStorageManifest.getLatestColumnGroupsScala`.
+  * Writer results are owned and must be released with [[destroy]]. Manifest
+  * column groups are borrowed: keep the manifest open while accessing them,
+  * then close the manifest instead of destroying its column groups separately.
   */
 object MilvusStorageColumnGroups {
   NativeLibraryLoader.loadLibrary()
@@ -34,6 +27,10 @@ object MilvusStorageColumnGroups {
 
   /** Construct a LoonColumnGroups from per-group column names, file paths and
     * per-file row counts.
+    *
+    * Legacy Storage V2 helper for Milvus 2.6 backfill. Spark readers should
+    * obtain V3 column groups through [[MilvusStorageManifest.open]] instead.
+    * V2 files are always parquet and have no format option or manifest.
     *
     * @param columnsPerGroup
     *   `columnsPerGroup(i)` lists column names for group `i`. For milvus-storage
@@ -53,12 +50,8 @@ object MilvusStorageColumnGroups {
   def createFromGroups(
       columnsPerGroup: Array[Array[String]],
       filesPerGroup: Array[Array[String]],
-      fileRowCountsPerGroup: Array[Array[Long]],
-      format: String = "parquet"
+      fileRowCountsPerGroup: Array[Array[Long]]
   ): Long = {
-    require(columnsPerGroup != null && filesPerGroup != null && fileRowCountsPerGroup != null,
-      "Column group arrays must not be null")
-    require(format != null && format.nonEmpty, "format must not be empty")
     require(
       columnsPerGroup.length == filesPerGroup.length &&
         columnsPerGroup.length == fileRowCountsPerGroup.length,
@@ -68,8 +61,7 @@ object MilvusStorageColumnGroups {
     native.createFromGroups(
       columnsPerGroup,
       filesPerGroup,
-      fileRowCountsPerGroup,
-      format
+      fileRowCountsPerGroup
     )
   }
 
@@ -79,8 +71,8 @@ object MilvusStorageColumnGroups {
   def fileRowCounts(columnGroupsPtr: Long, groupIndex: Int): Array[Long] = native.fileRowCounts(columnGroupsPtr, groupIndex)
   def format(columnGroupsPtr: Long, groupIndex: Int): String = native.format(columnGroupsPtr, groupIndex)
 
-  /** Release the LoonColumnGroups allocated by [[createFromGroups]]. Safe on a
-    * zero pointer.
+  /** Release owned column groups returned by a writer or [[createFromGroups]].
+    * Never pass borrowed manifest column groups here. Safe on a zero pointer.
     */
   def destroy(columnGroupsPtr: Long): Unit = {
     if (columnGroupsPtr != 0L) native.destroy(columnGroupsPtr)

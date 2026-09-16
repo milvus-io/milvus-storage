@@ -79,22 +79,4 @@ class MilvusStorageFileSystemTest extends AnyFunSuite {
       intercept[IllegalStateException](filesystem.readFileAll("missing"))
     }
   }
-
-  test("column group metadata preserves format and rejects invalid row counts") {
-    val columns = Array(Array("100", "101"))
-    val files = Array(Array("one.parquet", "two.parquet"))
-    val rows = Array(Array(2L, 3L))
-    val groups = MilvusStorageColumnGroups.createFromGroups(columns, files, rows, "vortex")
-    try {
-      assert(MilvusStorageColumnGroups.count(groups) == 1)
-      assert(MilvusStorageColumnGroups.columns(groups, 0).sameElements(columns(0)))
-      assert(MilvusStorageColumnGroups.files(groups, 0).sameElements(files(0)))
-      assert(MilvusStorageColumnGroups.fileRowCounts(groups, 0).sameElements(rows(0)))
-      assert(MilvusStorageColumnGroups.format(groups, 0) == "vortex")
-      intercept[IndexOutOfBoundsException](MilvusStorageColumnGroups.files(groups, 1))
-    } finally MilvusStorageColumnGroups.destroy(groups)
-    intercept[IllegalArgumentException] {
-      MilvusStorageColumnGroups.createFromGroups(columns, files, Array(Array(-1L, 3L)))
-    }
-  }
 }

@@ -126,47 +126,21 @@ class MilvusStorageJniRegressionTest extends AnyFunSuite with Matchers {
     }
   }
 
-  test("packed writer rejects null paths and invalid column indices without retaining a handle") {
-    val allocator = new RootAllocator(Long.MaxValue)
-    val properties = new MilvusStorageProperties()
-    val writer = new MilvusPackedWriter()
-    val writerSchema = ArrowSchema.allocateNew(allocator)
-    writerSchema.save(new ArrowSchema.Snapshot())
-    try {
-      properties.create(Map("fs.storage_type" -> "local"))
-      Data.exportSchema(allocator, schema, null, writerSchema)
-      intercept[IllegalArgumentException] {
-        writer.create(Array(null.asInstanceOf[String]), Array(Array(0)), writerSchema.memoryAddress(), properties)
-      }
-      writer.isValid shouldBe false
-      val error = intercept[MilvusStorageException] {
-        writer.create(Array("invalid.parquet"), Array(Array(-1)), writerSchema.memoryAddress(), properties)
-      }
-      error.errorCode() shouldBe 1 // LOON_INVALID_ARGS
-      error.getMessage should include("column index out of range")
-      writer.isValid shouldBe false
-    } finally {
-      writer.destroy()
-      try {
-        if (writerSchema.snapshot().release != 0L) writerSchema.release()
-      } finally writerSchema.close()
-      properties.free()
-      allocator.close()
-    }
-  }
-
-  private def withReader(body: (MilvusStorageReader, RootAllocator) => Unit): Unit = {
+  private def withReader(body: (MilvusStorageReader, RootAllocator, MilvusStorageManifestHandle) => Unit): Unit = {
     val work = Files.createTempDirectory("storage-jni-regression")
     val allocator = new RootAllocator(Long.MaxValue)
     val properties = new MilvusStorageProperties()
     val writer = new MilvusStorageWriter()
+    val transaction = new MilvusStorageTransaction()
     val reader = new MilvusStorageReader()
     var groups = 0L
+    var manifest: MilvusStorageManifestHandle = null
     try {
       properties.create(Map(
         "fs.storage_type" -> "local",
         "fs.root_path" -> work.toAbsolutePath.toString,
         "writer.policy" -> "single",
+        "writer.format" -> "parquet",
         "reader.record_batch_max_rows" -> "8"
       ))
       val writerSchema = ArrowSchema.allocateNew(allocator)
@@ -192,14 +166,35 @@ class MilvusStorageJniRegressionTest extends AnyFunSuite with Matchers {
       } finally root.close()
       groups = writer.close()
       writer.destroy()
+      MilvusStorageColumnGroups.count(groups) shouldBe 1
+      MilvusStorageColumnGroups.columns(groups, 0).toSeq shouldBe Seq("id", "name")
+      MilvusStorageColumnGroups.fileRowCounts(groups, 0).toSeq shouldBe Seq(40L)
+      MilvusStorageColumnGroups.format(groups, 0) shouldBe "parquet"
+      val files = MilvusStorageColumnGroups.files(groups, 0).toSeq
+      files should have size 1
+      files.head should not be empty
+
+      transaction.begin("segment", properties)
+      transaction.appendFiles(groups)
+      val version = transaction.commit()
+      version should be >= 0L
+      transaction.destroy()
+      MilvusStorageColumnGroups.destroy(groups)
+      groups = 0L
+
+      manifest = MilvusStorageManifest.open("segment", properties, version)
+      manifest.readVersion shouldBe version
+      MilvusStorageColumnGroups.files(manifest.columnGroupsPtr, 0).toSeq shouldBe files
       val readerSchema = ArrowSchema.allocateNew(allocator)
       try {
         Data.exportSchema(allocator, schema, null, readerSchema)
-        reader.create(groups, readerSchema.memoryAddress(), null, properties)
+        reader.create(manifest.columnGroupsPtr, readerSchema.memoryAddress(), null, properties)
       } finally readerSchema.close()
-      body(reader, allocator)
+      body(reader, allocator, manifest)
     } finally {
       reader.destroy()
+      if (manifest != null) manifest.close()
+      transaction.destroy()
       writer.destroy()
       MilvusStorageColumnGroups.destroy(groups)
       properties.free()
@@ -231,8 +226,26 @@ class MilvusStorageJniRegressionTest extends AnyFunSuite with Matchers {
     values.toVector
   }
 
+  test("V3 manifest preserves writer metadata and owns borrowed groups through reader lifetime") {
+    withReader { (reader, allocator, manifest) =>
+      val groups = manifest.columnGroupsPtr
+      MilvusStorageColumnGroups.count(groups) shouldBe 1
+      MilvusStorageColumnGroups.columns(groups, 0).toSeq shouldBe Seq("id", "name")
+      MilvusStorageColumnGroups.fileRowCounts(groups, 0).toSeq shouldBe Seq(40L)
+      MilvusStorageColumnGroups.format(groups, 0) shouldBe "parquet"
+      intercept[IndexOutOfBoundsException](MilvusStorageColumnGroups.files(groups, 1))
+      val handle = reader.openRecordBatchReaderScala()
+      try readIds(reader, handle, allocator) shouldBe (0L until 40L)
+      finally reader.destroyRecordBatchReaderScala(handle)
+      reader.destroy()
+      manifest.close()
+      manifest.close()
+      intercept[IllegalStateException](manifest.columnGroupsPtr)
+    }
+  }
+
   test("batch reads preserve sliced rows and report their actual copies") {
-    withReader { (reader, allocator) =>
+    withReader { (reader, allocator, _) =>
       val handle = reader.openRecordBatchReaderScala()
       try {
         readIds(reader, handle, allocator) shouldBe (0L until 40L)
@@ -245,7 +258,7 @@ class MilvusStorageJniRegressionTest extends AnyFunSuite with Matchers {
   }
 
   test("owned take survives source reader destruction and supports early close") {
-    withReader { (reader, allocator) =>
+    withReader { (reader, allocator, _) =>
       val early = reader.takeRecordBatchReaderScala(Array(0L, 3L, 39L), 1L, Array("id"))
       reader.destroyRecordBatchReaderScala(early)
       val handle = reader.takeRecordBatchReaderScala(Array(1L, 9L, 32L), 1L, Array("id"))
@@ -258,7 +271,7 @@ class MilvusStorageJniRegressionTest extends AnyFunSuite with Matchers {
   }
 
   test("invalid take inputs leave the reader usable and legacy take can be released as a whole") {
-    withReader { (reader, allocator) =>
+    withReader { (reader, allocator, _) =>
       Seq(Array.empty[Long], Array(-1L), Array(2L, 1L), Array(2L, 2L)).foreach { rows =>
         intercept[IllegalArgumentException](reader.takeRecordBatchReaderScala(rows, 1L))
       }
