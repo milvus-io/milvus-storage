@@ -167,14 +167,6 @@ target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
 target_include_directories(milvus-storage PUBLIC ${INCLUDE_PATHS})
 target_compile_options(milvus-storage PRIVATE -fPIC)
 
-# psm 0.1.28's x86_64 assembly omits .note.GNU-stack. Its stack-switch
-# routines call existing code and do not execute instructions on the stack.
-# Declare the shared library's stack requirement during normal Linux linking.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  target_link_options(milvus-storage PRIVATE -Wl,-z,noexecstack)
-endif()
-
-
 # On macOS, folly's static archive dead-strips IOThreadPoolExecutor.cpp,
 # losing the FLAGS_folly_iothreadpoolexecutor_max_read_at_once definition.
 # Force-load the archive to prevent this. Only needed for static libraries;
