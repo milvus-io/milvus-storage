@@ -42,7 +42,7 @@ add_executable(
 )
 
 target_link_libraries(
-  benchmark milvus-storage benchmark::benchmark
+  benchmark milvus-storage ${LINK_LIBS} benchmark::benchmark
 )
 
 # Include directories for benchmark headers and test helpers

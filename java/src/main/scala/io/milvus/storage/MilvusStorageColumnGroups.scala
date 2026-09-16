@@ -5,9 +5,15 @@ class MilvusStorageColumnGroupsNative {
   @native def createFromGroups(
       columnsPerGroup: Array[Array[String]],
       filesPerGroup: Array[Array[String]],
-      fileRowCountsPerGroup: Array[Array[Long]]
+      fileRowCountsPerGroup: Array[Array[Long]],
+      format: String
   ): Long
   @native def destroy(columnGroupsPtr: Long): Unit
+  @native def count(columnGroupsPtr: Long): Int
+  @native def columns(columnGroupsPtr: Long, groupIndex: Int): Array[String]
+  @native def files(columnGroupsPtr: Long, groupIndex: Int): Array[String]
+  @native def fileRowCounts(columnGroupsPtr: Long, groupIndex: Int): Array[Long]
+  @native def format(columnGroupsPtr: Long, groupIndex: Int): String
 }
 
 /** Build a `LoonColumnGroups*` directly from a caller-provided layout, without
@@ -47,8 +53,12 @@ object MilvusStorageColumnGroups {
   def createFromGroups(
       columnsPerGroup: Array[Array[String]],
       filesPerGroup: Array[Array[String]],
-      fileRowCountsPerGroup: Array[Array[Long]]
+      fileRowCountsPerGroup: Array[Array[Long]],
+      format: String = "parquet"
   ): Long = {
+    require(columnsPerGroup != null && filesPerGroup != null && fileRowCountsPerGroup != null,
+      "Column group arrays must not be null")
+    require(format != null && format.nonEmpty, "format must not be empty")
     require(
       columnsPerGroup.length == filesPerGroup.length &&
         columnsPerGroup.length == fileRowCountsPerGroup.length,
@@ -58,9 +68,16 @@ object MilvusStorageColumnGroups {
     native.createFromGroups(
       columnsPerGroup,
       filesPerGroup,
-      fileRowCountsPerGroup
+      fileRowCountsPerGroup,
+      format
     )
   }
+
+  def count(columnGroupsPtr: Long): Int = native.count(columnGroupsPtr)
+  def columns(columnGroupsPtr: Long, groupIndex: Int): Array[String] = native.columns(columnGroupsPtr, groupIndex)
+  def files(columnGroupsPtr: Long, groupIndex: Int): Array[String] = native.files(columnGroupsPtr, groupIndex)
+  def fileRowCounts(columnGroupsPtr: Long, groupIndex: Int): Array[Long] = native.fileRowCounts(columnGroupsPtr, groupIndex)
+  def format(columnGroupsPtr: Long, groupIndex: Int): String = native.format(columnGroupsPtr, groupIndex)
 
   /** Release the LoonColumnGroups allocated by [[createFromGroups]]. Safe on a
     * zero pointer.

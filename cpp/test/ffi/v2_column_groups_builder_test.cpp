@@ -113,4 +113,25 @@ TEST(V2ColumnGroupsBuilder, RejectsRowCountLengthMismatch) {
   EXPECT_THROW(BuildLoonColumnGroups(cols, files, rcs), std::invalid_argument);
 }
 
+TEST(V2ColumnGroupsBuilder, RejectsEmptyFormat) {
+  EXPECT_THROW(BuildLoonColumnGroups({{"a"}}, {{"f.parquet"}}, {{1}}, ""), std::invalid_argument);
+}
+
+TEST(V2ColumnGroupsBuilder, RejectsNegativeRowCounts) {
+  std::vector<std::vector<std::string>> cols = {{"a"}, {"b"}};
+  std::vector<std::vector<std::string>> files = {{"g0.parquet"}, {"g1_0.parquet", "g1_1.parquet"}};
+  std::vector<std::vector<int64_t>> rcs = {{1}, {2, -1}};
+  EXPECT_THROW(BuildLoonColumnGroups(cols, files, rcs), std::invalid_argument);
+}
+
+TEST(V2ColumnGroupsBuilder, PreservesFormatAndZeroRowCounts) {
+  LoonColumnGroups* cgs = BuildLoonColumnGroups({{"a"}}, {{"empty.data"}}, {{0}}, "custom");
+  ASSERT_NE(cgs, nullptr);
+  ASSERT_EQ(cgs->num_of_column_groups, 1u);
+  EXPECT_STREQ(cgs->column_group_array[0].format, "custom");
+  EXPECT_EQ(cgs->column_group_array[0].files[0].start_index, 0);
+  EXPECT_EQ(cgs->column_group_array[0].files[0].end_index, 0);
+  loon_column_groups_destroy(cgs);
+}
+
 }  // namespace milvus_storage::test

@@ -37,13 +37,17 @@ namespace milvus_storage {
 // the packed reader intersects against (column_group_reader.cpp) and what the
 // parquet writer records per file (parquet_writer.cpp).
 //
+// Inputs are validated before allocating the returned column groups.
 // Throws std::invalid_argument on:
+//   - an empty format
 //   - mismatched outer lengths between the three vectors
 //   - zero column groups
 //   - a group with empty columns or empty files
 //   - a group where rowCounts.size() != files.size()
+//   - a negative per-file row count
 LoonColumnGroups* BuildLoonColumnGroups(const std::vector<std::vector<std::string>>& columns_per_group,
                                         const std::vector<std::vector<std::string>>& files_per_group,
-                                        const std::vector<std::vector<int64_t>>& row_counts_per_group);
+                                        const std::vector<std::vector<int64_t>>& row_counts_per_group,
+                                        const std::string& format = "parquet");
 
 }  // namespace milvus_storage

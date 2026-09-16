@@ -163,9 +163,28 @@ if (WITH_FIU)
 endif()
 
 
-target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
+# Keep implementation dependencies out of consumers such as JNI. In particular,
+# linking the static gRPC closure again registers its process-wide flags twice.
+# Arrow, Folly and fmt are part of the public C++ header/API requirements.
+target_link_libraries(milvus-storage
+  PRIVATE ${LINK_LIBS}
+  PUBLIC arrow::arrow Folly::folly fmt::fmt
+)
 target_include_directories(milvus-storage PUBLIC ${INCLUDE_PATHS})
+# ExtendStatus exposes milvus-common's error types in the public headers without
+# requiring consumers to relink milvus-common's implementation dependencies.
+target_include_directories(milvus-storage SYSTEM PUBLIC
+  $<TARGET_PROPERTY:milvus-common::milvus-common,INTERFACE_INCLUDE_DIRECTORIES>
+)
 target_compile_options(milvus-storage PRIVATE -fPIC)
+
+# psm 0.1.28's x86_64 assembly omits .note.GNU-stack. Its stack-switch
+# routines call existing code and do not execute instructions on the stack.
+# Declare the shared library's stack requirement during normal Linux linking.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_options(milvus-storage PRIVATE -Wl,-z,noexecstack)
+endif()
+
 
 # On macOS, folly's static archive dead-strips IOThreadPoolExecutor.cpp,
 # losing the FLAGS_folly_iothreadpoolexecutor_max_read_at_once definition.
@@ -252,7 +271,6 @@ if (WITH_JNI)
 
   target_link_libraries(milvus-storage-jni PRIVATE
     milvus-storage
-    ${LINK_LIBS}
   )
 
   add_dependencies(milvus-storage-jni milvus-storage)
@@ -268,7 +286,6 @@ if (WITH_JNI)
   # link options and copy libraries
   if(NOT APPLE)
     target_link_options(milvus-storage-jni PRIVATE
-      -Wl,--no-as-needed
       -Wl,-z,lazy
     )
 

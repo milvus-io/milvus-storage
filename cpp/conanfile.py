@@ -68,6 +68,10 @@ class StorageConan(ConanFile):
         # aws_mem_acquire because s3's private allocator is still NULL. See
         # docs/aws-sdk-cpp-multi-copy-bug.md for the full root-cause analysis.
         "aws-c-*/*:shared": True,
+        "aws-crt-cpp/*:shared": True,
+        # Arrow embeds jemalloc and is loaded into an already running JVM.
+        "jemalloc/*:enable_cxx": False,
+        "jemalloc/*:enable_initial_exec_tls": False,
         "arrow/*:with_s3": True,
         "arrow/*:filesystem_layer": True,
         "arrow/*:dataset_modules": True,
