@@ -22,6 +22,17 @@ ContextPtr Capture() noexcept;
 bool HasContext() noexcept;
 void StartCurrent() noexcept;
 
+// Immutable request configuration for SDK spans that execute in another runtime.
+// The snapshot retains the provider and shares the Storage operation's budget.
+struct ExternalTrace;
+std::shared_ptr<ExternalTrace> CaptureExternalTrace() noexcept;
+opentelemetry::trace::SpanContext ExternalParent(const ExternalTrace& trace) noexcept;
+opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> StartExternalSpan(
+    const ExternalTrace& trace,
+    opentelemetry::nostd::string_view name,
+    const opentelemetry::common::KeyValueIterable& attributes,
+    const opentelemetry::trace::StartSpanOptions& options) noexcept;
+
 class ContextScope {
   public:
   explicit ContextScope(ContextPtr context) noexcept;
