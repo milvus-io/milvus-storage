@@ -113,6 +113,7 @@ list(APPEND LINK_LIBS
   glog::glog
   CURL::libcurl
   prometheus-cpp::core
+  opentelemetry-cpp::opentelemetry_common
   opentelemetry-cpp::opentelemetry_proto
 )
 
@@ -166,6 +167,10 @@ endif()
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
 target_include_directories(milvus-storage PUBLIC ${INCLUDE_PATHS})
 target_compile_options(milvus-storage PRIVATE -fPIC)
+target_compile_definitions(milvus-storage PRIVATE MILVUS_STORAGE_VERSION="${PROJECT_VERSION}")
+# Conan pins opentelemetry-cpp:with_stl=True. Its common component omits
+# this API ABI definition; propagate it explicitly to Storage's C++ hosts.
+target_compile_definitions(milvus-storage PUBLIC OPENTELEMETRY_STL_VERSION=2017)
 
 # On macOS, folly's static archive dead-strips IOThreadPoolExecutor.cpp,
 # losing the FLAGS_folly_iothreadpoolexecutor_max_read_at_once definition.
