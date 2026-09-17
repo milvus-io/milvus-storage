@@ -31,6 +31,8 @@ using ProviderPtr = opentelemetry::nostd::shared_ptr<opentelemetry::trace::Trace
 
 // Storage never installs a global provider, creates an exporter, or shuts down
 // an injected provider. The host must use a matching OTel C++ ABI.
+// WITH_TALON builds also route Talon SDK spans through this provider; no
+// separate Talon initialization or exporter configuration is required.
 arrow::Status SetTracerProvider(ProviderPtr provider) noexcept;
 
 struct TraceOptions {

@@ -5942,6 +5942,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "236e667b670a5cdf90c258f5a55794ec5ac5027e960c224bff8367a59e1e6426"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "js-sys",
+ "pin-project-lite",
+ "thiserror 2.0.17",
+ "tracing",
+]
+
+[[package]]
+name = "opentelemetry_sdk"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84dfad6042089c7fc1f6118b7040dc2eb4ab520abbf410b79dc481032af39570"
+dependencies = [
+ "futures-channel",
+ "futures-executor",
+ "futures-util",
+ "opentelemetry",
+ "percent-encoding",
+ "rand 0.8.5",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7289,6 +7318,7 @@ dependencies = [
  "object_store",
  "opendal 0.56.0",
  "opendal-core 0.58.0",
+ "opentelemetry",
  "paimon",
  "parquet 58.3.0",
  "paste",
@@ -7299,8 +7329,12 @@ dependencies = [
  "sqlparser 0.55.0",
  "take_mut",
  "talon-rust-client",
+ "talon-telemetry",
  "tempfile",
  "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
  "typetag",
  "url",
  "uuid",
@@ -8167,7 +8201,7 @@ checksum = "f764005d11ee5f36500a149ace24e00e3da98b0158b3e2d53a7495660d3f4d60"
 [[package]]
 name = "talon-cache-client"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=e7f40ea629b522cffa5549a437be0660d2bf9eeb#e7f40ea629b522cffa5549a437be0660d2bf9eeb"
+source = "git+https://github.com/milvus-io/talon.git?rev=89caf4a69a3292981c50dc4b26dbbd65a3432778#89caf4a69a3292981c50dc4b26dbbd65a3432778"
 dependencies = [
  "bytes",
  "futures",
@@ -8182,7 +8216,7 @@ dependencies = [
 [[package]]
 name = "talon-core"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=e7f40ea629b522cffa5549a437be0660d2bf9eeb#e7f40ea629b522cffa5549a437be0660d2bf9eeb"
+source = "git+https://github.com/milvus-io/talon.git?rev=89caf4a69a3292981c50dc4b26dbbd65a3432778#89caf4a69a3292981c50dc4b26dbbd65a3432778"
 dependencies = [
  "async-trait",
  "bytes",
@@ -8200,7 +8234,7 @@ dependencies = [
 [[package]]
 name = "talon-rust-client"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=e7f40ea629b522cffa5549a437be0660d2bf9eeb#e7f40ea629b522cffa5549a437be0660d2bf9eeb"
+source = "git+https://github.com/milvus-io/talon.git?rev=89caf4a69a3292981c50dc4b26dbbd65a3432778#89caf4a69a3292981c50dc4b26dbbd65a3432778"
 dependencies = [
  "futures",
  "talon-cache-client",
@@ -8213,18 +8247,21 @@ dependencies = [
 [[package]]
 name = "talon-telemetry"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=e7f40ea629b522cffa5549a437be0660d2bf9eeb#e7f40ea629b522cffa5549a437be0660d2bf9eeb"
+source = "git+https://github.com/milvus-io/talon.git?rev=89caf4a69a3292981c50dc4b26dbbd65a3432778#89caf4a69a3292981c50dc4b26dbbd65a3432778"
 dependencies = [
+ "opentelemetry",
+ "opentelemetry_sdk",
  "pin-project-lite",
  "scoped-tls",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "talon-transport"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=e7f40ea629b522cffa5549a437be0660d2bf9eeb#e7f40ea629b522cffa5549a437be0660d2bf9eeb"
+source = "git+https://github.com/milvus-io/talon.git?rev=89caf4a69a3292981c50dc4b26dbbd65a3432778#89caf4a69a3292981c50dc4b26dbbd65a3432778"
 dependencies = [
  "anyhow",
  "bincode",
@@ -8683,6 +8720,22 @@ dependencies = [
  "log",
  "once_cell",
  "tracing-core",
+]
+
+[[package]]
+name = "tracing-opentelemetry"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "721f2d2569dce9f3dfbbddee5906941e953bfcdf736a62da3377f5751650cc36"
+dependencies = [
+ "js-sys",
+ "once_cell",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
+ "web-time",
 ]
 
 [[package]]
