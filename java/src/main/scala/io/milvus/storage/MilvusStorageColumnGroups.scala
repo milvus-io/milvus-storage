@@ -8,19 +8,18 @@ class MilvusStorageColumnGroupsNative {
       fileRowCountsPerGroup: Array[Array[Long]]
   ): Long
   @native def destroy(columnGroupsPtr: Long): Unit
+  @native def count(columnGroupsPtr: Long): Int
+  @native def columns(columnGroupsPtr: Long, groupIndex: Int): Array[String]
+  @native def files(columnGroupsPtr: Long, groupIndex: Int): Array[String]
+  @native def fileRowCounts(columnGroupsPtr: Long, groupIndex: Int): Array[Long]
+  @native def format(columnGroupsPtr: Long, groupIndex: Int): String
 }
 
-/** Build a `LoonColumnGroups*` directly from a caller-provided layout, without
-  * resolving a milvus-storage `.milvus_manifest`.
+/** Inspect column groups returned by a V3 writer or borrowed from a manifest.
   *
-  * Used by the spark-connector's StorageV2 read path: the column-group layout
-  * is recovered from the snapshot AVRO + parquet footer kv-metadata
-  * (`group_field_id_list`), then fed here so the packed reader can open the
-  * segment files directly.
-  *
-  * Caller is responsible for calling [[destroy]] once the reader no longer
-  * needs the column groups — mirrors the contract of
-  * `MilvusStorageManifest.getLatestColumnGroupsScala`.
+  * Writer results are owned and must be released with [[destroy]]. Manifest
+  * column groups are borrowed: keep the manifest open while accessing them,
+  * then close the manifest instead of destroying its column groups separately.
   */
 object MilvusStorageColumnGroups {
   NativeLibraryLoader.loadLibrary()
@@ -28,6 +27,10 @@ object MilvusStorageColumnGroups {
 
   /** Construct a LoonColumnGroups from per-group column names, file paths and
     * per-file row counts.
+    *
+    * Legacy Storage V2 helper for Milvus 2.6 backfill. Spark readers should
+    * obtain V3 column groups through [[MilvusStorageManifest.open]] instead.
+    * V2 files are always parquet and have no format option or manifest.
     *
     * @param columnsPerGroup
     *   `columnsPerGroup(i)` lists column names for group `i`. For milvus-storage
@@ -62,8 +65,14 @@ object MilvusStorageColumnGroups {
     )
   }
 
-  /** Release the LoonColumnGroups allocated by [[createFromGroups]]. Safe on a
-    * zero pointer.
+  def count(columnGroupsPtr: Long): Int = native.count(columnGroupsPtr)
+  def columns(columnGroupsPtr: Long, groupIndex: Int): Array[String] = native.columns(columnGroupsPtr, groupIndex)
+  def files(columnGroupsPtr: Long, groupIndex: Int): Array[String] = native.files(columnGroupsPtr, groupIndex)
+  def fileRowCounts(columnGroupsPtr: Long, groupIndex: Int): Array[Long] = native.fileRowCounts(columnGroupsPtr, groupIndex)
+  def format(columnGroupsPtr: Long, groupIndex: Int): String = native.format(columnGroupsPtr, groupIndex)
+
+  /** Release owned column groups returned by a writer or [[createFromGroups]].
+    * Never pass borrowed manifest column groups here. Safe on a zero pointer.
     */
   def destroy(columnGroupsPtr: Long): Unit = {
     if (columnGroupsPtr != 0L) native.destroy(columnGroupsPtr)

@@ -25,7 +25,7 @@ object MilvusStorageTransaction {
 /**
  * Transaction instance for manifest operations
  */
-class MilvusStorageTransaction {
+class MilvusStorageTransaction extends AutoCloseable {
   // Ensure native library is loaded
   NativeLibraryLoader.loadLibrary()
 
@@ -33,6 +33,7 @@ class MilvusStorageTransaction {
 
   private var transactionHandle: Long = 0
   private var isDestroyed: Boolean = false
+  private var ownedManifests = List.empty[Long]
 
   /**
    * Begin a transaction.
@@ -66,6 +67,7 @@ class MilvusStorageTransaction {
             resolveId: Int,
             retryLimit: Int): Unit = {
     if (isDestroyed) throw new IllegalStateException("Transaction has been destroyed")
+    if (transactionHandle != 0L) throw new IllegalStateException("Transaction already initialized")
     transactionHandle = transactionBegin(basePath, propertiesPtr, readVersion, resolveId, retryLimit)
   }
 
@@ -121,12 +123,21 @@ class MilvusStorageTransaction {
 
   /**
    * Get column groups from current transaction
-   * @return Column groups as raw pointer
+   * @return Borrowed column groups, valid until this transaction is destroyed
    */
   def getColumnGroups(): Long = {
     if (isDestroyed) throw new IllegalStateException("Transaction has been destroyed")
     if (transactionHandle == 0) throw new IllegalStateException("Transaction not initialized")
-    transactionGetColumnGroups(transactionHandle)
+    val manifestPtr = transactionGetColumnGroups(transactionHandle)
+    try {
+      val groups = MilvusStorageManifest.borrowedColumnGroups(manifestPtr)
+      ownedManifests = manifestPtr :: ownedManifests
+      groups
+    } catch {
+      case error: Throwable =>
+        MilvusStorageManifest.destroyManifest(manifestPtr)
+        throw error
+    }
   }
 
   /**
@@ -150,7 +161,12 @@ class MilvusStorageTransaction {
   def abort(): Unit = {
     if (isDestroyed) throw new IllegalStateException("Transaction has been destroyed")
     if (transactionHandle == 0) throw new IllegalStateException("Transaction not initialized")
-    transactionAbort(transactionHandle)
+    try transactionAbort(transactionHandle)
+    finally {
+      transactionHandle = 0L
+      isDestroyed = true
+      releaseManifests()
+    }
   }
 
   /**
@@ -164,12 +180,44 @@ class MilvusStorageTransaction {
   /**
    * Destroy the transaction and free resources
    */
-  def destroy(): Unit = {
-    if (transactionHandle != 0 && !isDestroyed) {
-      transactionDestroy(transactionHandle)
-      transactionHandle = 0
+  def destroy(): Unit = synchronized {
+    if (!isDestroyed) {
+      val handle = transactionHandle
+      transactionHandle = 0L
       isDestroyed = true
+      try { if (handle != 0L) transactionDestroy(handle) }
+      finally releaseManifests()
     }
+  }
+
+  override def close(): Unit = destroy()
+
+  private def releaseManifests(): Unit = {
+    val manifests = ownedManifests
+    ownedManifests = Nil
+    manifests.foreach(MilvusStorageManifest.destroyManifest)
+  }
+
+  /** Register stat files and their metadata in this transaction. */
+  def updateStat(name: String, paths: Array[String], metadata: Map[String, String]): Unit = {
+    requireActive()
+    require(name != null && name.nonEmpty, "Stat name must not be empty")
+    require(paths != null && metadata != null, "Stat paths and metadata must not be null")
+    val entries = metadata.toArray
+    transactionUpdateStat(transactionHandle, name, paths, entries.map(_._1), entries.map(_._2))
+  }
+
+  /** Register a primary-key delta log. */
+  def addDeltaLog(path: String, entries: Long): Unit = {
+    requireActive()
+    require(path != null && path.nonEmpty, "Delta log path must not be empty")
+    require(entries >= 0L, "Delta entry count must be nonnegative")
+    transactionAddDeltaLog(transactionHandle, path, entries)
+  }
+
+  private def requireActive(): Unit = {
+    if (isDestroyed) throw new IllegalStateException("Transaction has been destroyed")
+    if (transactionHandle == 0L) throw new IllegalStateException("Transaction not initialized")
   }
 
   /**
@@ -178,6 +226,9 @@ class MilvusStorageTransaction {
   def isValid: Boolean = !isDestroyed && transactionHandle != 0
 
   // Native method declarations
+  @native private def transactionUpdateStat(handle: Long, name: String, paths: Array[String],
+                                            metadataKeys: Array[String], metadataValues: Array[String]): Unit
+  @native private def transactionAddDeltaLog(handle: Long, path: String, entries: Long): Unit
   @native private def transactionBegin(basePath: String, propertiesPtr: Long,
                                        readVersion: Long, resolveId: Int, retryLimit: Int): Long
   @native private def transactionGetColumnGroups(transactionHandle: Long): Long

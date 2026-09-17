@@ -1,241 +1,147 @@
 package io.milvus.storage;
 
-import java.io.*;
-import java.net.*;
-import java.nio.file.*;
-import java.util.*;
-import java.util.jar.*;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.JarURLConnection;
 import java.net.URISyntaxException;
+import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Enumeration;
+import java.util.Locale;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
+import java.util.stream.Stream;
 
-/**
- * Native library loader that extracts and loads native libraries from JAR resources.
- * Supports multiple platforms and automatic cleanup.
- */
+/** Loads the current platform's JNI library and dependencies from one resource directory. */
 public class NativeLibraryLoader {
-    private static boolean loaded = false;
     private static final String JNI_LIBRARY_NAME = "milvus-storage-jni";
+    private static volatile boolean loaded;
+
+    public NativeLibraryLoader() {}
 
     /**
-     * Load the native library. This method is thread-safe and will only load once.
+     * Uses the packaged library when present. Extraction and linking failures
+     * remain visible; the system path is used only when no packaged JNI exists.
      */
     public static synchronized void loadLibrary() {
         if (loaded) {
             return;
         }
-
-        try {
-            // Try loading from resources first (for fat jar)
-            loadFromResources();
-            loaded = true;
-            System.out.println("Native libraries loaded from resources");
-            return;
-        } catch (Exception e) {
-            System.out.println("Could not load from resources: " + e.getMessage());
-        }
-
-        try {
-            // Fall back to system library path
+        String platform = currentPlatform();
+        String prefix = "native/" + platform + "/";
+        String libraryName = System.mapLibraryName(JNI_LIBRARY_NAME);
+        URL resource = NativeLibraryLoader.class.getResource("/" + prefix + libraryName);
+        if (resource == null) {
             System.loadLibrary(JNI_LIBRARY_NAME);
-            loaded = true;
-            System.out.println("Native library loaded from system path");
-            return;
-        } catch (UnsatisfiedLinkError e) {
-            throw new RuntimeException(
-                "Failed to load native library '" + JNI_LIBRARY_NAME + "'. " +
-                "Please ensure the library is in java.library.path or packaged in the JAR.", e);
+        } else {
+            try {
+                Path directory = extractLibraries(resource, prefix);
+                Path storage = directory.resolve(System.mapLibraryName("milvus-storage"));
+                if (Files.isRegularFile(storage)) {
+                    System.load(storage.toAbsolutePath().toString());
+                }
+                System.load(directory.resolve(libraryName).toAbsolutePath().toString());
+            } catch (IOException error) {
+                UnsatisfiedLinkError failure = new UnsatisfiedLinkError(
+                        "Cannot extract storage JNI for " + platform + ": " + error.getMessage());
+                failure.initCause(error);
+                throw failure;
+            }
         }
+        loaded = true;
     }
 
-    /**
-     * Load libraries from JAR resources.
-     * Extracts ALL native .so files to a temp directory, then loads the JNI library.
-     * The JNI .so has RUNPATH=$ORIGIN so it finds dependencies in the same directory.
-     */
-    private static void loadFromResources() throws IOException {
-        String os = System.getProperty("os.name").toLowerCase();
-        String arch = System.getProperty("os.arch").toLowerCase();
-        String libExtension;
+    static String currentPlatform() {
+        String os = System.getProperty("os.name").toLowerCase(Locale.ROOT);
+        String arch = System.getProperty("os.arch").toLowerCase(Locale.ROOT);
         String platform;
-
-        if (os.contains("windows")) {
-            libExtension = "dll";
-            platform = "windows-" + (arch.contains("64") ? "x86_64" : "x86");
-        } else if (os.contains("mac")) {
-            libExtension = "dylib";
-            platform = "darwin-" + (arch.contains("aarch64") || arch.contains("arm64") ? "aarch64" : "x86_64");
+        if (os.contains("linux")) {
+            platform = "linux";
+        } else if (os.contains("mac") || os.contains("darwin")) {
+            platform = "darwin";
+        } else if (os.contains("windows")) {
+            platform = "windows";
         } else {
-            libExtension = "so";
-            platform = "linux-" + (arch.contains("aarch64") || arch.contains("arm64") ? "aarch64" : "x86_64");
+            throw new UnsatisfiedLinkError("Unsupported operating system: " + os);
         }
-
-        String jniLibName = "lib" + JNI_LIBRARY_NAME + "." + libExtension;
-
-        // Create temp directory for all native libraries
-        File tempDir = new File(System.getProperty("java.io.tmpdir"), "milvus-storage-native");
-        tempDir.mkdirs();
-
-        // Extract all native libraries from JAR resources
-        extractAllNativeLibs(tempDir);
-
-        // Load the JNI library (RUNPATH=$ORIGIN will find deps in same dir)
-        File jniLib = new File(tempDir, jniLibName);
-        if (!jniLib.exists()) {
-            throw new IOException("JNI library not found after extraction: " + jniLibName);
-        }
-        System.load(jniLib.getAbsolutePath());
-    }
-
-    /**
-     * Extract all native library files from the JAR's /native/ directory to tempDir.
-     * Scans JAR entries for paths starting with "native/" and ending with
-     * .so, .dylib, or .dll.
-     */
-    private static void extractAllNativeLibs(File tempDir) throws IOException {
-        String nativePrefix = "native/";
-        URL url = NativeLibraryLoader.class.getResource("/" + nativePrefix);
-        if (url == null) {
-            throw new IOException("Native resource directory not found in JAR");
-        }
-
-        String protocol = url.getProtocol();
-        if ("jar".equals(protocol)) {
-            extractFromJar(tempDir, nativePrefix);
-        } else if ("file".equals(protocol)) {
-            // Running from filesystem (e.g. during development/testing)
-            extractFromFileSystem(tempDir, nativePrefix, url);
+        if (arch.equals("amd64") || arch.equals("x86_64")) {
+            arch = "x86_64";
+        } else if (arch.equals("aarch64") || arch.equals("arm64")) {
+            arch = "aarch64";
+        } else if (arch.equals("x86") || arch.matches("i[3-6]86")) {
+            arch = "x86";
         } else {
-            throw new IOException("Unsupported resource protocol: " + protocol);
+            throw new UnsatisfiedLinkError("Unsupported architecture: " + arch);
         }
+        return platform + "-" + arch;
     }
 
-    /**
-     * Extract native libraries from a JAR file.
-     */
-    private static void extractFromJar(File tempDir, String nativePrefix) throws IOException {
-        URL jarUrl = NativeLibraryLoader.class.getProtectionDomain().getCodeSource().getLocation();
-        String jarPath;
-        try {
-            jarPath = jarUrl.toURI().getPath();
-        } catch (URISyntaxException e) {
-            throw new IOException("Invalid JAR path: " + jarUrl, e);
-        }
-
-        int extracted = 0;
-        try (JarFile jar = new JarFile(jarPath)) {
-            Enumeration<JarEntry> entries = jar.entries();
-            while (entries.hasMoreElements()) {
-                JarEntry entry = entries.nextElement();
-                String name = entry.getName();
-
-                if (!name.startsWith(nativePrefix) || entry.isDirectory()) {
-                    continue;
+    // The resource URL identifies the artifact containing the native libraries,
+    // which may differ from the artifact containing this Java API class.
+    static Path extractLibraries(URL jniResource, String prefix) throws IOException {
+        Path directory = Files.createTempDirectory("milvus-storage-native-");
+        directory.toFile().deleteOnExit();
+        if ("jar".equals(jniResource.getProtocol())) {
+            JarURLConnection connection = (JarURLConnection) jniResource.openConnection();
+            connection.setUseCaches(false);
+            try (JarFile jar = connection.getJarFile()) {
+                Enumeration<JarEntry> entries = jar.entries();
+                while (entries.hasMoreElements()) {
+                    JarEntry entry = entries.nextElement();
+                    String name = entry.getName();
+                    if (entry.isDirectory() || !name.startsWith(prefix) || !isNativeLibrary(name)) {
+                        continue;
+                    }
+                    Path destination = destination(directory, name.substring(prefix.length()));
+                    try (InputStream input = jar.getInputStream(entry)) {
+                        Files.copy(input, destination);
+                    }
+                    destination.toFile().deleteOnExit();
                 }
-                if (!isNativeLibrary(name)) {
-                    continue;
-                }
-
-                // Flatten: strip the native/<platform>/ prefix, keep subdirs like ossl-modules/
-                String relativePath = stripPlatformPrefix(name, nativePrefix);
-                if (relativePath == null) {
-                    continue;
-                }
-
-                File outFile = new File(tempDir, relativePath);
-                outFile.getParentFile().mkdirs();
-
-                try (InputStream is = jar.getInputStream(entry)) {
-                    Files.copy(is, outFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-                }
-                outFile.deleteOnExit();
-                extracted++;
             }
-        }
-        System.out.println("Extracted " + extracted + " native libraries from JAR");
-    }
-
-    /**
-     * Extract native libraries from the filesystem (development mode).
-     */
-    private static void extractFromFileSystem(File tempDir, String nativePrefix, URL baseUrl) throws IOException {
-        File nativeDir;
-        try {
-            nativeDir = new File(baseUrl.toURI());
-        } catch (URISyntaxException e) {
-            throw new IOException("Invalid native dir path: " + baseUrl, e);
-        }
-
-        if (!nativeDir.isDirectory()) {
-            throw new IOException("Native resource path is not a directory: " + nativeDir);
-        }
-
-        int extracted = 0;
-        // Walk all platform subdirectories
-        File[] platformDirs = nativeDir.listFiles(File::isDirectory);
-        if (platformDirs == null) {
-            return;
-        }
-
-        for (File platformDir : platformDirs) {
-            extracted += extractFromDirectory(platformDir, tempDir, "");
-        }
-        System.out.println("Extracted " + extracted + " native libraries from filesystem");
-    }
-
-    /**
-     * Recursively extract native libraries from a directory.
-     */
-    private static int extractFromDirectory(File dir, File tempDir, String relativePath) throws IOException {
-        int extracted = 0;
-        File[] files = dir.listFiles();
-        if (files == null) {
-            return 0;
-        }
-
-        for (File file : files) {
-            String childPath = relativePath.isEmpty() ? file.getName() : relativePath + "/" + file.getName();
-            if (file.isDirectory()) {
-                extracted += extractFromDirectory(file, tempDir, childPath);
-            } else if (isNativeLibrary(file.getName())) {
-                File outFile = new File(tempDir, childPath);
-                outFile.getParentFile().mkdirs();
-                Files.copy(file.toPath(), outFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-                outFile.deleteOnExit();
-                extracted++;
+        } else if ("file".equals(jniResource.getProtocol())) {
+            final Path source;
+            try {
+                source = Paths.get(jniResource.toURI()).getParent();
+            } catch (URISyntaxException error) {
+                throw new IOException("Invalid storage resource URL", error);
             }
+            try (Stream<Path> paths = Files.walk(source)) {
+                Path[] files = paths.filter(Files::isRegularFile)
+                        .filter(path -> isNativeLibrary(path.getFileName().toString()))
+                        .toArray(Path[]::new);
+                for (Path file : files) {
+                    Path destination = destination(directory, source.relativize(file).toString());
+                    Files.copy(file, destination);
+                    destination.toFile().deleteOnExit();
+                }
+            }
+        } else {
+            throw new IOException("Unsupported native resource protocol: " + jniResource.getProtocol());
         }
-        return extracted;
+        return directory;
     }
 
-    /**
-     * Strip the native/<platform>/ prefix from a JAR entry name, returning the
-     * relative path under the platform directory (e.g. "libfoo.so" or "ossl-modules/bar.so").
-     * Returns null if the entry doesn't match expected structure.
-     */
-    private static String stripPlatformPrefix(String entryName, String nativePrefix) {
-        // entryName looks like: native/linux-x86_64/libfoo.so
-        //                    or: native/linux-x86_64/ossl-modules/bar.so
-        String afterNative = entryName.substring(nativePrefix.length());
-        int slashIdx = afterNative.indexOf('/');
-        if (slashIdx < 0) {
-            return null;
+    private static Path destination(Path directory, String relative) throws IOException {
+        Path result = directory.resolve(relative).normalize();
+        if (!result.startsWith(directory) || result.equals(directory)) {
+            throw new IOException("Native resource escapes its extraction directory: " + relative);
         }
-        String relativePath = afterNative.substring(slashIdx + 1);
-        return relativePath.isEmpty() ? null : relativePath;
+        Path parent = result.getParent();
+        if (!Files.exists(parent)) {
+            Files.createDirectories(parent);
+            parent.toFile().deleteOnExit();
+        }
+        return result;
     }
 
-    /**
-     * Check if a filename looks like a native library.
-     */
     private static boolean isNativeLibrary(String name) {
-        // Accept .so, .dylib, .dll, plus any versioned/suffixed variant like
-        // libfoo.so.1, libfoo.so.0.58.0-dev, libstdc++.so.6
         return name.endsWith(".dylib") || name.endsWith(".dll")
-            || name.endsWith(".so") || name.contains(".so.");
+                || name.endsWith(".so") || name.contains(".so.");
     }
 
-    /**
-     * Check if the native library is loaded.
-     */
     public static boolean isLoaded() {
         return loaded;
     }
