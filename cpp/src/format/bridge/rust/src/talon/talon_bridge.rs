@@ -229,6 +229,19 @@ fn complete_talon_error(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn talon_dispatch(
+    callback: unsafe extern "C" fn(*mut c_void),
+    context: *mut c_void,
+) {
+    let context_addr = context as usize;
+    // Metadata submission can fall back to a synchronous provider, and final
+    // origin SDK destruction can wait for callbacks. Reuse the shared blocking
+    // pool for these short bridge tasks. Native CRT HEAD returns its future
+    // immediately, so no thread is held while that request is pending.
+    crate::TOKIO_RT.spawn_blocking(move || unsafe { callback(context_addr as *mut c_void) });
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn talon_free_error_string(ptr: *mut c_char) {
     if !ptr.is_null() {
         unsafe {
@@ -447,10 +460,10 @@ mod tests {
     fn open_object_with_stat_initializes_metadata_without_resolving() {
         let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024, 8).unwrap();
         let reader =
-            open_talon_object(&client, "aws", "test-bucket", "path/a", true, 123, "").unwrap();
+            open_talon_object(&client, "aws", "test-bucket", "path/a", true, 123, "etag-v1").unwrap();
         assert_eq!(talon_object_known_size(&reader), 123);
         assert_eq!(reader.stat.get().unwrap().size, 123);
-        assert!(reader.stat.get().unwrap().version.is_empty());
+        assert_eq!(reader.stat.get().unwrap().version, "etag-v1");
     }
 
     #[test]
