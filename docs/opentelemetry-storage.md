@@ -139,7 +139,19 @@ Fiber A：恢复 RequestContext A → Storage 读取 A
 - context 随 open/scan 状态显式传递，覆盖 Vortex runtime adapter 创建的实际子任务。若引擎存在不可适配边界，该路径标记未覆盖，不能声称全部 I/O 已串联。
 - C++ 反向 FFI 不能抛异常穿过边界；使用现有 `LoonFFIResult` 约定。内部桥接和公共符号导出范围要区分；需要公开的新符号按 binding 构建更新 exports map。
 
-Rust `tracing-opentelemetry` 不是第一版依赖。后续若需要现有引擎内部 tracing spans，可独立评估；引入时仍须设置 parent 并使用按 poll 激活的 instrument wrapper。
+启用 `WITH_TALON` 的构建使用 `tracing-opentelemetry` 连接 Talon SDK 的 spans；其他 Rust 引擎仍只传播 Storage 上下文。
+
+### Talon SDK：与 Storage 共用 provider
+
+宿主只需调用既有的 `SetTracerProvider(provider)` 和 `AttachParent`。非空 provider 自动初始化 Talon SDK 的 recording 支持；不增加 Talon 初始化接口，不读取 `TALON_TELEMETRY_MODE` 来决定开关，也不创建 Rust exporter 或安装全局 subscriber。SDK 的 `talon.stat`、`talon.read`、`talon.rpc` 等 spans 通过内部桥接交给同一个 C++ provider，使用 `milvus-storage` instrumentation scope。
+
+每次 stat/read 在提交到 Tokio 前捕获当前 Storage parent、provider 和 span 预算。SDK 通过显式 `RequestOptions` 获取 parent；局部 subscriber 按 future poll 激活和恢复。span 创建时由 C++ provider 决定采样并产生实际 span ID，该 ID 用于后续 RPC 的父上下文。完成时转交 Talon 的标量属性、状态与起止时间，沿用宿主的 exporter 和 flush/shutdown 生命周期。SDK 不会单独重采样未采样 parent。
+
+共享 Talon client/reader 不保存请求 parent。无有效 parent、未配置 provider、或新请求遇到 `SetTracerProvider(nullptr)` 时，SDK 在请求级 disabled scope 中执行，不创建根 trace，也不注入 v2 trace metadata。已提交请求持有旧 provider 快照直到完成；更换或关闭 provider 不改变它们的归属。SDK spans 与 Storage spans 共用 `max_spans_per_operation` 预算，超额 spans 被抑制，RPC 继续传播可用的上层 parent。
+
+远端传播仍受协议兼容性约束：部署确认 Coordinator/Worker 支持 Talon v2 后，设置 `TALON_TELEMETRY_V2_ENDPOINTS` 为允许的端点列表，或在全部端点已升级时设为 `*`。默认未声明能力的端点继续使用 v1，本地 SDK spans 仍可记录；不会通过失败重试探测 v2，也不会因开启 Storage telemetry 自动改变远端服务的 tracing 策略。
+
+适配依赖 Talon [#594](https://github.com/milvus-io/talon/pull/594) 的 `Operation::disabled()` 请求级开关。其余初始化由 Storage 内部完成。配置初始化失败时 `SetTracerProvider` 返回错误并保留此前的 Storage 配置；宿主应检查已有 API 的返回值。
 
 ## 埋点、完成与错误
 
@@ -161,7 +173,7 @@ tracing 的 `Run`、`RunAsync`、`RunNativeAsync` 与文件装饰器只观测业
 
 同步结果（包括宏早返回）统一传给 `Finish(status)`；Folly 返回的失败 ready future 在消费时也会记录结果。已经开始的操作在异常展开时由只读异常观测 guard 结束 span；它不捕获业务异常。不要为了埋点在各个 Reader 返回分支复制完成逻辑，也不要让通用 scope 析构猜测 Status。
 
-CXX 将异常转换为 Result；Rust guard 在 Pending、Ready 和 panic unwind 时析构。attach token 不跨 poll/线程保留。桥接没有引入 Rust OTel SDK 或 exporter，也未新增公开 C 业务 ABI，FFI 导出表保持现有范围。
+CXX 将异常转换为 Result；Rust guard 在 Pending、Ready 和 panic unwind 时析构。attach token 不跨 poll/线程保留。Talon 的可选 recording 依赖包含 Rust OTel 类型，但 provider 和 exporter 仍由 C++ 宿主统一持有。没有新增公开 C 业务 ABI，FFI 导出表保持现有范围。
 
 格式层使用 `storage.format.read` 表示包含 I/O 等待的操作 wall time。只有能隔离真实解码/物化边界时才适合命名 `decode_materialize`；当前未提供精确 codec CPU 时间。并行 spans 会重叠，不能将 duration 相加作为端到端延迟，也不能用总耗时减 I/O 时长推导解码 CPU。
 

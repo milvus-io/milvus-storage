@@ -86,10 +86,12 @@ clean:
 
 test: build
 	cd build/${build_type}/test && ./milvus_test && ./Test_FFI
+	@if [ -x build/${build_type}/test/TalonTracingTest ]; then build/${build_type}/test/TalonTracingTest; fi
 
 test-all: build
 	# running milvus_test and Test_FFI without minio
 	./build/${build_type}/test/milvus_test && ./build/${build_type}/test/Test_FFI
+	@if [ -x build/${build_type}/test/TalonTracingTest ]; then build/${build_type}/test/TalonTracingTest; fi
 
 	# use the sub-shell to split the diffent cloud env
 	# running milvus_test with minio

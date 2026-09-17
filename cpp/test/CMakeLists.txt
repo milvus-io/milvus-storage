@@ -13,6 +13,7 @@ endif()
 set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall")
 
 file(GLOB_RECURSE BUSTUB_TEST_SOURCES "${PROJECT_SOURCE_DIR}/test/*.cpp")
+list(FILTER BUSTUB_TEST_SOURCES EXCLUDE REGEX "/talon_tracing_test\\.cpp$")
 
 add_executable(milvus_test ${BUSTUB_TEST_SOURCES})
 
@@ -37,6 +38,16 @@ endif()
 target_link_libraries(
   milvus_test PRIVATE milvus-storage GTest::gtest opentelemetry-cpp::opentelemetry_trace
 )
+
+if (WITH_TALON)
+  # Separate process: Talon's protocol capability policy is initialized once.
+  add_executable(TalonTracingTest tracing/talon_tracing_test.cpp)
+  target_link_libraries(TalonTracingTest PRIVATE milvus-storage GTest::gtest_main opentelemetry-cpp::opentelemetry_trace)
+  if (NOT APPLE)
+    target_link_options(TalonTracingTest PRIVATE "LINKER:--disable-new-dtags")
+  endif()
+  add_test(NAME TalonTracingTest COMMAND TalonTracingTest)
+endif()
 
 #CTest for the FFI
 enable_testing()
