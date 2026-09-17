@@ -78,7 +78,7 @@ A high-performance columnar storage engine built on Apache Arrow, designed for v
 
 | Provider | Status |
 |----------|--------|
-| AWS S3 | Supported (including S3-compatible: MinIO, Cloudflare R2) |
+| AWS S3 | Supported (including S3-compatible: MinIO, Cloudflare R2, [RustFS](https://github.com/rustfs/rustfs)) |
 | Google Cloud Storage | Supported |
 | Azure Blob Storage | Supported |
 | Aliyun OSS | Supported |
