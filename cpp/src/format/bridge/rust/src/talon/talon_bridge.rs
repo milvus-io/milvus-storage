@@ -229,6 +229,19 @@ fn complete_talon_error(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn talon_dispatch(
+    callback: unsafe extern "C" fn(*mut c_void),
+    context: *mut c_void,
+) {
+    let context_addr = context as usize;
+    // Metadata submission can fall back to a synchronous provider, and final
+    // origin SDK destruction can wait for callbacks. Reuse the shared blocking
+    // pool for these short bridge tasks. Native CRT HEAD returns its future
+    // immediately, so no thread is held while that request is pending.
+    crate::TOKIO_RT.spawn_blocking(move || unsafe { callback(context_addr as *mut c_void) });
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn talon_free_error_string(ptr: *mut c_char) {
     if !ptr.is_null() {
         unsafe {
