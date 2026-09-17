@@ -169,8 +169,13 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
     options.region = config_.region;
   }
 
+  // request_timeout is in fractional seconds (double). Divide by 1000.0, not
+  // 1000: integer division truncates sub-second timeouts (1500ms -> 1s) and
+  // zeroes any value below 1s, which the client builder then treats as "no
+  // timeout". s3_client_builder applies ceil(request_timeout * 1000) to recover
+  // the exact millisecond value.
   options.request_timeout = config_.request_timeout_ms <= 0 ? DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC
-                                                            : config_.request_timeout_ms / 1000;
+                                                            : config_.request_timeout_ms / 1000.0;
   options.max_connections = config_.max_connections;
   options.multi_part_upload_size = config_.multi_part_upload_size;
   options.cloud_provider = config_.cloud_provider;

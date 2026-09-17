@@ -32,6 +32,7 @@
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/lrucache.h"
+#include "milvus-storage/filesystem/flat_object_storage.h"
 #include "milvus-storage/filesystem/observable.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/upload_sizable.h"
@@ -53,7 +54,8 @@ using ArrowFileSystemPtr = std::shared_ptr<arrow::fs::FileSystem>;
 class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
                         public UploadConditional,
                         public Observable,
-                        public UploadSizable {
+                        public UploadSizable,
+                        public FlatObjectStorage {
   public:
   FileSystemProxy(const std::string& base_path, std::shared_ptr<arrow::fs::FileSystem> base_fs)
       : arrow::fs::SubTreeFileSystem(base_path, std::move(base_fs)) {}
@@ -107,6 +109,39 @@ class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
 
     ARROW_ASSIGN_OR_RAISE(auto full_path, PrependBase(path));
     return sizable->OpenOutputStreamWithUploadSize(full_path, metadata, part_size);
+  }
+
+  arrow::Result<std::vector<arrow::fs::FileInfo>> ListObjectsByPrefix(const std::string& prefix) override {
+    auto flat = std::dynamic_pointer_cast<FlatObjectStorage>(base_fs());
+    if (!flat) {
+      return arrow::Status::NotImplemented("Filesystem does not implement FlatObjectStorage");
+    }
+    ARROW_ASSIGN_OR_RAISE(auto full_prefix, PrependBase(prefix));
+    ARROW_ASSIGN_OR_RAISE(auto infos, flat->ListObjectsByPrefix(full_prefix));
+    // Strip the subtree base from each listed path so results come back in the
+    // caller's namespace, matching GetFileInfo on this proxy.
+    for (auto& info : infos) {
+      ARROW_RETURN_NOT_OK(FixInfo(&info));
+    }
+    return infos;
+  }
+
+  arrow::Status DeleteObject(const std::string& path) override {
+    auto flat = std::dynamic_pointer_cast<FlatObjectStorage>(base_fs());
+    if (!flat) {
+      return arrow::Status::NotImplemented("Filesystem does not implement FlatObjectStorage");
+    }
+    ARROW_ASSIGN_OR_RAISE(auto full_path, PrependBase(path));
+    return flat->DeleteObject(full_path);
+  }
+
+  arrow::Result<bool> ObjectExists(const std::string& path) override {
+    auto flat = std::dynamic_pointer_cast<FlatObjectStorage>(base_fs());
+    if (!flat) {
+      return arrow::Status::NotImplemented("Filesystem does not implement FlatObjectStorage");
+    }
+    ARROW_ASSIGN_OR_RAISE(auto full_path, PrependBase(path));
+    return flat->ObjectExists(full_path);
   }
 };
 
