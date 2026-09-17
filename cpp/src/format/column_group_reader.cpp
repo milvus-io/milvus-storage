@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "tracing/runtime.h"
+
 #include "milvus-storage/format/column_group_reader.h"
 
 #include <algorithm>
@@ -270,9 +272,11 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> ColumnGroupReaderImpl
     // Without metadata caching, create and open a fresh stateful format reader.
     return FormatReader::create_async(schema_, column_group_->format, file, properties_, needed_columns_,
                                       key_retriever_)
-        .deferValue([predicate = predicate_,
+        .deferValue([storage_context = tracing::Capture(), predicate = predicate_,
                      format = column_group_->format](arrow::Result<std::shared_ptr<FormatReader>>&& reader_result)
                         -> arrow::Result<std::shared_ptr<ReaderT>> {
+          tracing::ContextScope storage_scope(storage_context);
+          tracing::StartCurrent();
           ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
           if (!predicate.empty()) {
             ARROW_RETURN_NOT_OK(reader->set_predicate(predicate));
@@ -296,9 +300,12 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> ColumnGroupReaderImpl
                             [file, properties = properties_, key_retriever = key_retriever_]() {
                               return ReaderT::MetaTrait::load_metadata_async(file, properties, key_retriever);
                             })
-        .deferValue([file, read_schema = schema_, needed_columns = needed_columns_,
+        .deferValue([storage_context = tracing::Capture(), file, read_schema = schema_,
+                     needed_columns = needed_columns_,
                      predicate = predicate_](arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>&& metadata_result)
                         -> folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> {
+          tracing::ContextScope storage_scope(storage_context);
+          tracing::StartCurrent();
           FOLLY_ARROW_ASSIGN_OR_RAISE(auto metadata, std::move(metadata_result));
           return ReaderT::MetaTrait::create_from_metadata_async(std::move(metadata), file, read_schema, needed_columns,
                                                                 predicate);
@@ -361,7 +368,10 @@ folly::SemiFuture<arrow::Status> ColumnGroupReaderImpl<ReaderT>::open_async() {
   for (size_t file_idx = 0; file_idx < cg_files.size(); ++file_idx) {
     auto cg_file = cg_files[file_idx];
     auto future = open_reader_for_file_async(file_idx).deferValue(
-        [file_idx, cg_file](arrow::Result<std::shared_ptr<ReaderT>>&& reader_result) -> arrow::Result<OpenedFile> {
+        [storage_context = tracing::Capture(), file_idx,
+         cg_file](arrow::Result<std::shared_ptr<ReaderT>>&& reader_result) -> arrow::Result<OpenedFile> {
+          tracing::ContextScope storage_scope(storage_context);
+          tracing::StartCurrent();
           ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
           ARROW_ASSIGN_OR_RAISE(auto row_group_infos, reader->get_row_group_infos());
           auto file_schema = reader->get_schema();
@@ -373,7 +383,10 @@ folly::SemiFuture<arrow::Status> ColumnGroupReaderImpl<ReaderT>::open_async() {
   // File results stay tagged with their manifest index so shared reader state is
   // assembled deterministically after the fan-in.
   return folly::collectAll(std::move(futures))
-      .deferValue([this, file_count = cg_files.size()](auto&& open_results) -> arrow::Status {
+      .deferValue([storage_context = tracing::Capture(), this,
+                   file_count = cg_files.size()](auto&& open_results) -> arrow::Status {
+        tracing::ContextScope storage_scope(storage_context);
+        tracing::StartCurrent();
         chunk_infos_.clear();
         row_group_infos_.clear();
         row_group_infos_.resize(file_count);
@@ -440,29 +453,36 @@ arrow::Result<std::vector<int64_t>> ColumnGroupReaderImpl<ReaderT>::get_chunk_in
 
 template <typename ReaderT>
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> ColumnGroupReaderImpl<ReaderT>::get_chunk(int64_t chunk_index) {
-  assert(opened_);
-  FIU_RETURN_ON(FIUKEY_COLUMN_GROUP_READ_FAIL,
-                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_COLUMN_GROUP_READ_FAIL)));
-  if (chunk_index < 0 || chunk_index >= chunk_infos_.size()) {
-    return arrow::Status::Invalid(
-        fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
-  }
-  auto chunk_info = chunk_infos_[chunk_index];
+  return tracing::Run(
+      "storage.read",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
+        assert(opened_);
+        FIU_RETURN_ON(FIUKEY_COLUMN_GROUP_READ_FAIL,
+                      arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_COLUMN_GROUP_READ_FAIL)));
+        if (chunk_index < 0 || chunk_index >= chunk_infos_.size()) {
+          return arrow::Status::Invalid(
+              fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
+        }
+        auto chunk_info = chunk_infos_[chunk_index];
 
-  if (!format_readers_[chunk_info.file_index]) {
-    ARROW_ASSIGN_OR_RAISE(format_readers_[chunk_info.file_index], open_reader_for_file(chunk_info.file_index));
-  }
-  ARROW_ASSIGN_OR_RAISE(auto rb, format_readers_[chunk_info.file_index]->get_chunk(chunk_info.row_group_index_in_file));
+        if (!format_readers_[chunk_info.file_index]) {
+          ARROW_ASSIGN_OR_RAISE(format_readers_[chunk_info.file_index], open_reader_for_file(chunk_info.file_index));
+        }
+        ARROW_ASSIGN_OR_RAISE(auto rb,
+                              format_readers_[chunk_info.file_index]->get_chunk(chunk_info.row_group_index_in_file));
 
-  // Vortex applies the predicate before returning this row group, so its row
-  // count no longer matches the pre-filter chunk metadata. Other formats use
-  // the default no-op predicate hook and still need fragment slicing here.
-  const bool predicate_applied = !predicate_.empty() && column_group_->format == LOON_FORMAT_VORTEX;
-  if (!predicate_applied && (chunk_info.row_offset_in_row_group != 0 || chunk_info.number_of_rows != rb->num_rows())) {
-    rb = rb->Slice(chunk_info.row_offset_in_row_group, chunk_info.number_of_rows);
-  }
+        // Vortex applies the predicate before returning this row group, so its row
+        // count no longer matches the pre-filter chunk metadata. Other formats use
+        // the default no-op predicate hook and still need fragment slicing here.
+        const bool predicate_applied = !predicate_.empty() && column_group_->format == LOON_FORMAT_VORTEX;
+        if (!predicate_applied &&
+            (chunk_info.row_offset_in_row_group != 0 || chunk_info.number_of_rows != rb->num_rows())) {
+          rb = rb->Slice(chunk_info.row_offset_in_row_group, chunk_info.number_of_rows);
+        }
 
-  return rb;
+        return rb;
+      },
+      false, "get_chunk", nullptr);
 }
 
 static std::vector<std::vector<int64_t>> split_chunks(const std::vector<int64_t>& sorted_chunk_indices,
@@ -519,135 +539,148 @@ static std::vector<std::vector<int64_t>> split_chunks(const std::vector<int64_t>
 
 template <typename ReaderT>
 ChunkRBMapResult ColumnGroupReaderImpl<ReaderT>::read_chunks_from_files(const std::vector<int64_t>& task_indices) {
-  std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> chunk_rb_map;
-  std::vector<std::vector<int64_t>> chunk_idxs_in_files(column_group_->files.size());
+  return tracing::Run(
+      "storage.read_task",
+      [&]() -> ChunkRBMapResult {
+        std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> chunk_rb_map;
+        std::vector<std::vector<int64_t>> chunk_idxs_in_files(column_group_->files.size());
 
-  // Grouping row groups by file
-  for (int64_t chunk_index : task_indices) {
-    if (UNLIKELY(chunk_index < 0 || chunk_index >= chunk_infos_.size())) {
-      return arrow::Status::Invalid(
-          fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
-    }
+        // Grouping row groups by file
+        for (int64_t chunk_index : task_indices) {
+          if (UNLIKELY(chunk_index < 0 || chunk_index >= chunk_infos_.size())) {
+            return arrow::Status::Invalid(
+                fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
+          }
 
-    const auto& chunk_info = chunk_infos_[chunk_index];
-    chunk_idxs_in_files[chunk_info.file_index].emplace_back(chunk_index);
-  }
-
-  // Read with range and fill chunk_rb_map
-  for (size_t file_idx = 0; file_idx < chunk_idxs_in_files.size(); ++file_idx) {
-    const auto& chunk_idxs = chunk_idxs_in_files[file_idx];
-    if (chunk_idxs.empty()) {
-      continue;
-    }
-
-    std::vector<std::pair<uint64_t, uint64_t>> ranges_in_file;
-
-    // generate ranges_in_file and combine the range
-    for (int64_t chunk_index : chunk_idxs) {
-      const auto& chunk_info = chunk_infos_[chunk_index];
-      if (ranges_in_file.empty()) {
-        ranges_in_file.emplace_back(chunk_info.row_offset_in_file,
-                                    chunk_info.row_offset_in_file + chunk_info.number_of_rows);
-      } else {
-        auto& last_range = ranges_in_file.back();
-
-        // won't be overlay in same file
-        assert(chunk_info.row_offset_in_file >= last_range.second);
-        if (chunk_info.row_offset_in_file == last_range.second) {
-          last_range.second = chunk_info.row_offset_in_file + chunk_info.number_of_rows;
-        } else {
-          ranges_in_file.emplace_back(chunk_info.row_offset_in_file,
-                                      chunk_info.row_offset_in_file + chunk_info.number_of_rows);
+          const auto& chunk_info = chunk_infos_[chunk_index];
+          chunk_idxs_in_files[chunk_info.file_index].emplace_back(chunk_index);
         }
-      }
-    }
 
-    ARROW_ASSIGN_OR_RAISE(auto reader, open_reader_for_file(file_idx));
-    std::vector<std::shared_ptr<arrow::RecordBatch>> rbs_in_file;
-    for (auto& range : ranges_in_file) {
-      ARROW_ASSIGN_OR_RAISE(auto rbreader, reader->read_with_range(range.first, range.second));
-      ARROW_ASSIGN_OR_RAISE(auto rbs, rbreader->ToRecordBatches());
-      std::move(rbs.begin(), rbs.end(), std::back_inserter(rbs_in_file));
-    }
+        // Read with range and fill chunk_rb_map
+        for (size_t file_idx = 0; file_idx < chunk_idxs_in_files.size(); ++file_idx) {
+          const auto& chunk_idxs = chunk_idxs_in_files[file_idx];
+          if (chunk_idxs.empty()) {
+            continue;
+          }
 
-    // generate chunk_rb_map
-    size_t rbs_idx = 0;
-    size_t rbs_offset = 0;
-    for (long long chunk_idx : chunk_idxs) {
-      const auto& chunk_info = chunk_infos_[chunk_idx];
-      if (UNLIKELY(((rbs_in_file[rbs_idx]->num_rows() - rbs_offset) < chunk_info.number_of_rows))) {
-        return arrow::Status::Invalid(
-            fmt::format("Invalid slice of record batchs: {} out of {}, [chunk info={}]", chunk_info.number_of_rows,
-                        rbs_in_file[rbs_idx]->num_rows() - rbs_offset, chunk_info.ToString()));
-      }
+          std::vector<std::pair<uint64_t, uint64_t>> ranges_in_file;
 
-      auto rb = rbs_in_file[rbs_idx]->Slice(rbs_offset, chunk_info.number_of_rows);
-      chunk_rb_map[chunk_idx] = rb;
-      rbs_offset += chunk_info.number_of_rows;
+          // generate ranges_in_file and combine the range
+          for (int64_t chunk_index : chunk_idxs) {
+            const auto& chunk_info = chunk_infos_[chunk_index];
+            if (ranges_in_file.empty()) {
+              ranges_in_file.emplace_back(chunk_info.row_offset_in_file,
+                                          chunk_info.row_offset_in_file + chunk_info.number_of_rows);
+            } else {
+              auto& last_range = ranges_in_file.back();
 
-      assert(rbs_offset <= rbs_in_file[rbs_idx]->num_rows());
-      if (rbs_offset == rbs_in_file[rbs_idx]->num_rows()) {
-        rbs_idx++;
-        rbs_offset = 0;
-      }
-    }
-  }
-  return chunk_rb_map;
+              // won't be overlay in same file
+              assert(chunk_info.row_offset_in_file >= last_range.second);
+              if (chunk_info.row_offset_in_file == last_range.second) {
+                last_range.second = chunk_info.row_offset_in_file + chunk_info.number_of_rows;
+              } else {
+                ranges_in_file.emplace_back(chunk_info.row_offset_in_file,
+                                            chunk_info.row_offset_in_file + chunk_info.number_of_rows);
+              }
+            }
+          }
+
+          ARROW_ASSIGN_OR_RAISE(auto reader, open_reader_for_file(file_idx));
+          std::vector<std::shared_ptr<arrow::RecordBatch>> rbs_in_file;
+          for (auto& range : ranges_in_file) {
+            ARROW_ASSIGN_OR_RAISE(auto rbreader, reader->read_with_range(range.first, range.second));
+            ARROW_ASSIGN_OR_RAISE(auto rbs, rbreader->ToRecordBatches());
+            std::move(rbs.begin(), rbs.end(), std::back_inserter(rbs_in_file));
+          }
+
+          // generate chunk_rb_map
+          size_t rbs_idx = 0;
+          size_t rbs_offset = 0;
+          for (long long chunk_idx : chunk_idxs) {
+            const auto& chunk_info = chunk_infos_[chunk_idx];
+            if (UNLIKELY(((rbs_in_file[rbs_idx]->num_rows() - rbs_offset) < chunk_info.number_of_rows))) {
+              return arrow::Status::Invalid(fmt::format(
+                  "Invalid slice of record batchs: {} out of {}, [chunk info={}]", chunk_info.number_of_rows,
+                  rbs_in_file[rbs_idx]->num_rows() - rbs_offset, chunk_info.ToString()));
+            }
+
+            auto rb = rbs_in_file[rbs_idx]->Slice(rbs_offset, chunk_info.number_of_rows);
+            chunk_rb_map[chunk_idx] = rb;
+            rbs_offset += chunk_info.number_of_rows;
+
+            assert(rbs_offset <= rbs_in_file[rbs_idx]->num_rows());
+            if (rbs_offset == rbs_in_file[rbs_idx]->num_rows()) {
+              rbs_idx++;
+              rbs_offset = 0;
+            }
+          }
+        }
+        return chunk_rb_map;
+      },
+      false, "read_chunks_from_files", nullptr);
 }
 
 template <typename ReaderT>
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReaderImpl<ReaderT>::get_chunks(
     const std::vector<int64_t>& chunk_indices, size_t parallelism) {
-  assert(opened_);
+  return tracing::Run(
+      "storage.read",
+      [&]() -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
+        assert(opened_);
 
-  FIU_RETURN_ON(FIUKEY_COLUMN_GROUP_READ_FAIL,
-                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_COLUMN_GROUP_READ_FAIL)));
+        FIU_RETURN_ON(FIUKEY_COLUMN_GROUP_READ_FAIL,
+                      arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_COLUMN_GROUP_READ_FAIL)));
 
-  std::vector<int64_t> unique_chunk_indices(chunk_indices.begin(), chunk_indices.end());
-  std::sort(unique_chunk_indices.begin(), unique_chunk_indices.end());
-  unique_chunk_indices.erase(std::unique(unique_chunk_indices.begin(), unique_chunk_indices.end()),
-                             unique_chunk_indices.end());
+        std::vector<int64_t> unique_chunk_indices(chunk_indices.begin(), chunk_indices.end());
+        std::sort(unique_chunk_indices.begin(), unique_chunk_indices.end());
+        unique_chunk_indices.erase(std::unique(unique_chunk_indices.begin(), unique_chunk_indices.end()),
+                                   unique_chunk_indices.end());
 
-  if (unique_chunk_indices.empty()) {
-    return std::vector<std::shared_ptr<arrow::RecordBatch>>{};
-  }
+        if (unique_chunk_indices.empty()) {
+          return std::vector<std::shared_ptr<arrow::RecordBatch>>{};
+        }
 
-  std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> chunk_rb_map;
-  if (parallelism <= 1) {
-    ARROW_ASSIGN_OR_RAISE(chunk_rb_map, read_chunks_from_files(unique_chunk_indices));
-  } else {
-    auto folly_thread_pool = ThreadPoolHolder::GetThreadPool(parallelism /* parallelism_hint */);
-    auto splitted_chunks = split_chunks(unique_chunk_indices, folly_thread_pool->numThreads());
-    std::vector<std::future<ChunkRBMapResult>> futures;
+        std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> chunk_rb_map;
+        if (parallelism <= 1) {
+          ARROW_ASSIGN_OR_RAISE(chunk_rb_map, read_chunks_from_files(unique_chunk_indices));
+        } else {
+          auto folly_thread_pool = ThreadPoolHolder::GetThreadPool(parallelism /* parallelism_hint */);
+          auto splitted_chunks = split_chunks(unique_chunk_indices, folly_thread_pool->numThreads());
+          std::vector<std::future<ChunkRBMapResult>> futures;
 
-    for (const auto& task_indices : splitted_chunks) {
-      std::packaged_task<ChunkRBMapResult()> task(
-          [this, task_indices]() { return read_chunks_from_files(task_indices); });
-      futures.emplace_back(task.get_future());
-      folly_thread_pool->add(std::move(task));
-    }
+          for (const auto& task_indices : splitted_chunks) {
+            std::packaged_task<ChunkRBMapResult()> task([storage_context = tracing::Capture(), this, task_indices]() {
+              tracing::ContextScope storage_scope(storage_context);
+              tracing::StartCurrent();
+              return read_chunks_from_files(task_indices);
+            });
+            futures.emplace_back(task.get_future());
+            folly_thread_pool->add(std::move(task));
+          }
 
-    std::vector<ChunkRBMapResult> all_results;
-    all_results.reserve(futures.size());
-    for (auto& future : futures) {
-      all_results.emplace_back(future.get());
-    }
-    for (auto& result : all_results) {
-      ARROW_ASSIGN_OR_RAISE(auto res, std::move(result));
-      for (const auto& [chunk_index, rb] : res) {
-        chunk_rb_map.emplace(chunk_index, rb);
-      }
-    }
-  }
+          std::vector<ChunkRBMapResult> all_results;
+          all_results.reserve(futures.size());
+          for (auto& future : futures) {
+            all_results.emplace_back(future.get());
+          }
+          for (auto& result : all_results) {
+            ARROW_ASSIGN_OR_RAISE(auto res, std::move(result));
+            for (const auto& [chunk_index, rb] : res) {
+              chunk_rb_map.emplace(chunk_index, rb);
+            }
+          }
+        }
 
-  std::vector<std::shared_ptr<arrow::RecordBatch>> result;
-  result.reserve(chunk_indices.size());
-  for (const auto& chunk_idx : chunk_indices) {
-    assert(chunk_rb_map.find(chunk_idx) != chunk_rb_map.end());
-    result.emplace_back(chunk_rb_map[chunk_idx]);
-  }
+        std::vector<std::shared_ptr<arrow::RecordBatch>> result;
+        result.reserve(chunk_indices.size());
+        for (const auto& chunk_idx : chunk_indices) {
+          assert(chunk_rb_map.find(chunk_idx) != chunk_rb_map.end());
+          result.emplace_back(chunk_rb_map[chunk_idx]);
+        }
 
-  return result;
+        return result;
+      },
+      false, "get_chunks", nullptr);
 }
 
 template <typename ReaderT>
@@ -724,68 +757,79 @@ const ChunkInfo& ColumnGroupReaderImpl<ReaderT>::get_chunk_info(int64_t chunk_in
 template <typename ReaderT>
 folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>>
 ColumnGroupReaderImpl<ReaderT>::get_chunks_async(const ChunkTask& task) {
-  FIU_RETURN_ON(FIUKEY_COLUMN_GROUP_READ_FAIL,
-                folly::makeSemiFuture(arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>(
-                    arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_COLUMN_GROUP_READ_FAIL)))));
+  return tracing::RunAsync(
+      "storage.read_task",
+      [&]() -> folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>> {
+        FIU_RETURN_ON(FIUKEY_COLUMN_GROUP_READ_FAIL,
+                      folly::makeSemiFuture(arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>(
+                          arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_COLUMN_GROUP_READ_FAIL)))));
 
-  std::vector<ChunkInfo> chunk_infos;
-  chunk_infos.reserve(task.chunk_indices.size());
-  // Validate the planner contract before opening a backend reader, and copy the
-  // metadata needed by continuations so they do not depend on mutable state.
-  for (auto chunk_index : task.chunk_indices) {
-    if (UNLIKELY(chunk_index < 0 || static_cast<size_t>(chunk_index) >= chunk_infos_.size())) {
-      return folly::makeSemiFuture(
-          arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>(arrow::Status::Invalid(
-              fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()))));
-    }
-    const auto& chunk_info = chunk_infos_[chunk_index];
-    if (UNLIKELY(chunk_info.file_index != task.file_index)) {
-      return folly::makeSemiFuture(
-          arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>(arrow::Status::Invalid(fmt::format(
-              "Chunk {} belongs to file {}, not task file {}", chunk_index, chunk_info.file_index, task.file_index))));
-    }
-    chunk_infos.emplace_back(chunk_info);
-  }
+        std::vector<ChunkInfo> chunk_infos;
+        chunk_infos.reserve(task.chunk_indices.size());
+        // Validate the planner contract before opening a backend reader, and copy the
+        // metadata needed by continuations so they do not depend on mutable state.
+        for (auto chunk_index : task.chunk_indices) {
+          if (UNLIKELY(chunk_index < 0 || static_cast<size_t>(chunk_index) >= chunk_infos_.size())) {
+            return folly::makeSemiFuture(
+                arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>(arrow::Status::Invalid(
+                    fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()))));
+          }
+          const auto& chunk_info = chunk_infos_[chunk_index];
+          if (UNLIKELY(chunk_info.file_index != task.file_index)) {
+            return folly::makeSemiFuture(arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>(
+                arrow::Status::Invalid(fmt::format("Chunk {} belongs to file {}, not task file {}", chunk_index,
+                                                   chunk_info.file_index, task.file_index))));
+          }
+          chunk_infos.emplace_back(chunk_info);
+        }
 
-  // Each task opens independent mutable format-reader state; immutable cached
-  // metadata may still be shared across those readers.
-  return open_reader_for_file_async(task.file_index)
-      .deferValue([range_start = task.range_start, range_end = task.range_end, chunk_infos = std::move(chunk_infos)](
-                      arrow::Result<std::shared_ptr<ReaderT>>&& reader_result) mutable
-                  -> folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>> {
-        FOLLY_ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
-        return reader->read_with_range_async(range_start, range_end)
-            .deferValue([reader = std::move(reader), chunk_infos = std::move(chunk_infos)](auto&& rb_reader_result)
-                            -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
-              // Lifetime-only capture: drain the Arrow reader before releasing
-              // the independent FormatReader that produced it.
-              (void)reader;
-              ARROW_ASSIGN_OR_RAISE(auto rb_reader, std::move(rb_reader_result));
-              ARROW_ASSIGN_OR_RAISE(auto rbs, rb_reader->ToRecordBatches());
+        // Each task opens independent mutable format-reader state; immutable cached
+        // metadata may still be shared across those readers.
+        return open_reader_for_file_async(task.file_index)
+            .deferValue([storage_context = tracing::Capture(), range_start = task.range_start,
+                         range_end = task.range_end, chunk_infos = std::move(chunk_infos)](
+                            arrow::Result<std::shared_ptr<ReaderT>>&& reader_result) mutable
+                        -> folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>> {
+              tracing::ContextScope storage_scope(storage_context);
+              tracing::StartCurrent();
+              FOLLY_ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
+              return reader->read_with_range_async(range_start, range_end)
+                  .deferValue([storage_context = tracing::Capture(), reader = std::move(reader),
+                               chunk_infos = std::move(chunk_infos)](auto&& rb_reader_result)
+                                  -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
+                    tracing::ContextScope storage_scope(storage_context);
+                    tracing::StartCurrent();
+                    // Lifetime-only capture: drain the Arrow reader before releasing
+                    // the independent FormatReader that produced it.
+                    (void)reader;
+                    ARROW_ASSIGN_OR_RAISE(auto rb_reader, std::move(rb_reader_result));
+                    ARROW_ASSIGN_OR_RAISE(auto rbs, rb_reader->ToRecordBatches());
 
-              // A format may coalesce the range into different batch boundaries;
-              // slice it back into one result per logical chunk.
-              std::vector<std::shared_ptr<arrow::RecordBatch>> result;
-              result.reserve(chunk_infos.size());
-              size_t rbs_idx = 0;
-              size_t rbs_offset = 0;
-              for (const auto& chunk_info : chunk_infos) {
-                if (UNLIKELY(rbs_idx >= rbs.size() ||
-                             (rbs[rbs_idx]->num_rows() - rbs_offset) < chunk_info.number_of_rows)) {
-                  return arrow::Status::Invalid(fmt::format(
-                      "Invalid slice of record batches in async read: [chunk_info={}]", chunk_info.ToString()));
-                }
-                auto rb = rbs[rbs_idx]->Slice(rbs_offset, chunk_info.number_of_rows);
-                result.push_back(std::move(rb));
-                rbs_offset += chunk_info.number_of_rows;
-                if (rbs_offset == rbs[rbs_idx]->num_rows()) {
-                  rbs_idx++;
-                  rbs_offset = 0;
-                }
-              }
-              return result;
+                    // A format may coalesce the range into different batch boundaries;
+                    // slice it back into one result per logical chunk.
+                    std::vector<std::shared_ptr<arrow::RecordBatch>> result;
+                    result.reserve(chunk_infos.size());
+                    size_t rbs_idx = 0;
+                    size_t rbs_offset = 0;
+                    for (const auto& chunk_info : chunk_infos) {
+                      if (UNLIKELY(rbs_idx >= rbs.size() ||
+                                   (rbs[rbs_idx]->num_rows() - rbs_offset) < chunk_info.number_of_rows)) {
+                        return arrow::Status::Invalid(fmt::format(
+                            "Invalid slice of record batches in async read: [chunk_info={}]", chunk_info.ToString()));
+                      }
+                      auto rb = rbs[rbs_idx]->Slice(rbs_offset, chunk_info.number_of_rows);
+                      result.push_back(std::move(rb));
+                      rbs_offset += chunk_info.number_of_rows;
+                      if (rbs_offset == rbs[rbs_idx]->num_rows()) {
+                        rbs_idx++;
+                        rbs_offset = 0;
+                      }
+                    }
+                    return result;
+                  });
             });
-      });
+      },
+      "get_chunks_async", nullptr);
 }
 
 template <typename ReaderT>
@@ -905,11 +949,14 @@ folly::SemiFuture<arrow::Result<std::unique_ptr<ColumnGroupReader>>> ColumnGroup
               out_schema, column_group, properties, filtered_columns, key_retriever, metadata_cache, predicate);
           auto* reader_ptr = reader.get();
           // The continuation owns the unique_ptr while open_async() uses reader_ptr.
-          return reader_ptr->open_async().deferValue([reader = std::move(reader)](arrow::Status status) mutable
-                                                     -> arrow::Result<std::unique_ptr<ColumnGroupReader>> {
-            ARROW_RETURN_NOT_OK(status);
-            return std::move(reader);
-          });
+          return reader_ptr->open_async().deferValue(
+              [storage_context = tracing::Capture(), reader = std::move(reader)](
+                  arrow::Status status) mutable -> arrow::Result<std::unique_ptr<ColumnGroupReader>> {
+                tracing::ContextScope storage_scope(storage_context);
+                tracing::StartCurrent();
+                ARROW_RETURN_NOT_OK(status);
+                return std::move(reader);
+              });
         });
   };
 

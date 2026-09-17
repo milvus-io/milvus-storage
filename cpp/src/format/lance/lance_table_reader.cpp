@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "tracing/runtime.h"
+
 #include "milvus-storage/format/lance/lance_table_reader.h"
 
 #include <algorithm>
@@ -609,85 +611,93 @@ arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::cr
 }
 
 arrow::Status LanceTableReader::open() {
-  assert(!fragment_reader_);
+  return tracing::Run(
+      "storage.metadata.load",
+      [&]() -> arrow::Status {
+        assert(!fragment_reader_);
 
-  if (!dataset_) {
-    // uri_ is in Milvus format (scheme://address/bucket/key) so extfs.<alias>.*
-    // can be resolved by address+bucket. Strip the address back to standard form
-    // (scheme://bucket/key) before handing to Lance, whose object_store treats
-    // the host as the bucket.
-    ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties_, uri_));
-    const auto lance_uri = ToStandardLanceUri(uri_);
-    const auto reader_options = ToReaderOptions(fs_config);
+        if (!dataset_) {
+          // uri_ is in Milvus format (scheme://address/bucket/key) so extfs.<alias>.*
+          // can be resolved by address+bucket. Strip the address back to standard form
+          // (scheme://bucket/key) before handing to Lance, whose object_store treats
+          // the host as the bucket.
+          ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties_, uri_));
+          const auto lance_uri = ToStandardLanceUri(uri_);
+          const auto reader_options = ToReaderOptions(fs_config);
 
-    // Version zero means latest, but it cannot identify a stable global cache
-    // entry. Resolve only the latest manifest location before the cache lookup.
-    if (dataset_version_ == 0) {
-      ARROW_ASSIGN_OR_RAISE(dataset_version_,
-                            BlockingDataset::ResolveLatestVersion(lance_uri, filesystem_, reader_options));
-    }
+          // Version zero means latest, but it cannot identify a stable global cache
+          // entry. Resolve only the latest manifest location before the cache lookup.
+          if (dataset_version_ == 0) {
+            ARROW_ASSIGN_OR_RAISE(dataset_version_,
+                                  BlockingDataset::ResolveLatestVersion(lance_uri, filesystem_, reader_options));
+          }
 
-    const LanceDatasetCache::Key dataset_cache_key{
-        .version = dataset_version_,
-        .base_uri = uri_,
-        .filesystem_cache_key = fs_config.GetCacheKey(),
-    };
-    ARROW_ASSIGN_OR_RAISE(dataset_, LanceDatasetCache::Instance().GetOrOpen(dataset_cache_key, [&]() {
-      return BlockingDataset::Open(lance_uri, filesystem_, reader_options, dataset_version_);
-    }));
-  }
+          const LanceDatasetCache::Key dataset_cache_key{
+              .version = dataset_version_,
+              .base_uri = uri_,
+              .filesystem_cache_key = fs_config.GetCacheKey(),
+          };
+          ARROW_ASSIGN_OR_RAISE(dataset_, LanceDatasetCache::Instance().GetOrOpen(dataset_cache_key, [&]() {
+            return BlockingDataset::Open(lance_uri, filesystem_, reader_options, dataset_version_);
+          }));
+        }
 
-  // Lance 7 exposes the current dataset schema through FileFragment::schema().
-  {
-    ArrowSchema c_fragment_schema{};
-    ARROW_RETURN_NOT_OK(dataset_->GetFragmentSchema(fragment_id_, c_fragment_schema));
-    ARROW_ASSIGN_OR_RAISE(file_schema_, arrow::ImportSchema(&c_fragment_schema));
-  }
+        // Lance 7 exposes the current dataset schema through FileFragment::schema().
+        {
+          ArrowSchema c_fragment_schema{};
+          ARROW_RETURN_NOT_OK(dataset_->GetFragmentSchema(fragment_id_, c_fragment_schema));
+          ARROW_ASSIGN_OR_RAISE(file_schema_, arrow::ImportSchema(&c_fragment_schema));
+        }
 
-  // Build the read schema for fragment reader:
-  // use user-provided schema if available, otherwise project file schema by needed_columns
-  ARROW_ASSIGN_OR_RAISE(auto read_schema, build_read_schema(file_schema_, read_schema_, needed_columns_));
+        // Build the read schema for fragment reader:
+        // use user-provided schema if available, otherwise project file schema by needed_columns
+        ARROW_ASSIGN_OR_RAISE(auto read_schema, build_read_schema(file_schema_, read_schema_, needed_columns_));
 
-  ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
+        ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_,
+                              api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
 
-  ArrowSchema c_arrow_schema{};
-  ARROW_RETURN_NOT_OK(arrow::ExportSchema(*read_schema, &c_arrow_schema));
-  ARROW_ASSIGN_OR_RAISE(fragment_reader_, BlockingFragmentReader::Open(*dataset_, fragment_id_, c_arrow_schema));
+        ArrowSchema c_arrow_schema{};
+        ARROW_RETURN_NOT_OK(arrow::ExportSchema(*read_schema, &c_arrow_schema));
+        ARROW_ASSIGN_OR_RAISE(fragment_reader_, BlockingFragmentReader::Open(*dataset_, fragment_id_, c_arrow_schema));
 
-  // Lance's read_range accepts logical indices (post-deletion) and internally
-  // patches the range to skip deleted rows. So row_group_infos uses logical row count.
-  // However, read_range's batch_size is applied to the *physical* range after
-  // patch_range_for_deletions, so we add num_deletions_ to batch_size to ensure
-  // each read produces a single output batch.
-  ARROW_ASSIGN_OR_RAISE(auto logical_rows, fragment_reader_->RowCount());
-  ARROW_ASSIGN_OR_RAISE(auto physical_rows, dataset_->GetFragmentPhysicalRowCount(fragment_id_));
-  if (physical_rows < logical_rows) {
-    return arrow::Status::Invalid("Fragment ", fragment_id_, " has inconsistent metadata: physical_rows (",
-                                  physical_rows, ") < logical_rows (", logical_rows, ")");
-  }
-  num_deletions_ = physical_rows - logical_rows;
+        // Lance's read_range accepts logical indices (post-deletion) and internally
+        // patches the range to skip deleted rows. So row_group_infos uses logical row count.
+        // However, read_range's batch_size is applied to the *physical* range after
+        // patch_range_for_deletions, so we add num_deletions_ to batch_size to ensure
+        // each read produces a single output batch.
+        ARROW_ASSIGN_OR_RAISE(auto logical_rows, fragment_reader_->RowCount());
+        ARROW_ASSIGN_OR_RAISE(auto physical_rows, dataset_->GetFragmentPhysicalRowCount(fragment_id_));
+        if (physical_rows < logical_rows) {
+          return arrow::Status::Invalid("Fragment ", fragment_id_, " has inconsistent metadata: physical_rows (",
+                                        physical_rows, ") < logical_rows (", logical_rows, ")");
+        }
+        num_deletions_ = physical_rows - logical_rows;
 
-  auto column_memory_sizes_result =
-      estimate_fragment_column_memory_sizes(*dataset_, fragment_id_, static_cast<size_t>(file_schema_->num_fields()));
-  const bool memory_size_available = column_memory_sizes_result.ok();
-  std::vector<uint64_t> fragment_column_memory_sizes;
-  if (memory_size_available) {
-    fragment_column_memory_sizes = std::move(column_memory_sizes_result).ValueOrDie();
-  } else {
-    // Memory statistics are optional. Do not retain the underlying failure in
-    // row-group metadata: estimate APIs return a generic NotImplemented status
-    // instead. Keep the detailed reason in the debug log for diagnostics only.
-    LOG_STORAGE_DEBUG_ << "Lance column memory estimation is unavailable while opening the reader"
-                       << ", fragment_id=" << fragment_id_
-                       << ", status=" << column_memory_sizes_result.status().ToString();
-  }
-  ARROW_ASSIGN_OR_RAISE(row_group_infos_, create_row_group_infos(logical_rows, logical_chunk_rows_,
-                                                                 fragment_column_memory_sizes, memory_size_available));
-  column_memory_weights_ = memory_size_available
-                               ? std::make_shared<const std::vector<uint64_t>>(std::move(fragment_column_memory_sizes))
-                               : nullptr;
+        auto column_memory_sizes_result = estimate_fragment_column_memory_sizes(
+            *dataset_, fragment_id_, static_cast<size_t>(file_schema_->num_fields()));
+        const bool memory_size_available = column_memory_sizes_result.ok();
+        std::vector<uint64_t> fragment_column_memory_sizes;
+        if (memory_size_available) {
+          fragment_column_memory_sizes = std::move(column_memory_sizes_result).ValueOrDie();
+        } else {
+          // Memory statistics are optional. Do not retain the underlying failure in
+          // row-group metadata: estimate APIs return a generic NotImplemented status
+          // instead. Keep the detailed reason in the debug log for diagnostics only.
+          LOG_STORAGE_DEBUG_ << "Lance column memory estimation is unavailable while opening the reader"
+                             << ", fragment_id=" << fragment_id_
+                             << ", status=" << column_memory_sizes_result.status().ToString();
+        }
+        ARROW_ASSIGN_OR_RAISE(row_group_infos_,
+                              create_row_group_infos(logical_rows, logical_chunk_rows_, fragment_column_memory_sizes,
+                                                     memory_size_available));
+        column_memory_weights_ =
+            memory_size_available
+                ? std::make_shared<const std::vector<uint64_t>>(std::move(fragment_column_memory_sizes))
+                : nullptr;
 
-  return arrow::Status::OK();
+        return arrow::Status::OK();
+      },
+      false, "open", "lance");
 }
 
 std::shared_ptr<arrow::Schema> LanceTableReader::get_schema() const { return file_schema_; }
@@ -708,114 +718,136 @@ arrow::Result<std::vector<uint64_t>> LanceTableReader::get_rg_column_memsz(int64
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> LanceTableReader::get_chunk(const int& row_group_index) {
-  assert(fragment_reader_);
-  auto start_idx = row_group_infos_[row_group_index].start_offset;
-  auto end_idx = row_group_infos_[row_group_index].end_offset;
-  // FIXME: Lance's read_range may produce multiple output batches for two reasons:
-  // 1. batch_size is applied to the *physical* range (after patch_range_for_deletions),
-  //    so deletions cause the physical range to exceed batch_size.
-  // 2. Lance may split at internal page boundaries regardless of batch_size.
-  // We add num_deletions_ to mitigate (1), but (2) is not addressed — if Lance
-  // splits at page boundaries, chunk(0) will silently lose trailing rows in Release
-  // builds (assert is a no-op). A robust fix would combine all chunks here.
-  ARROW_ASSIGN_OR_RAISE(auto array_stream,
-                        fragment_reader_->ReadRangesAsStream(start_idx, end_idx, end_idx - start_idx + num_deletions_));
-  auto chunkedarray_result = arrow::ImportChunkedArray(&array_stream);
-  if (!chunkedarray_result.ok()) {
-    return MakeBridgeErrorStatus("Failed to import Lance chunked array", chunkedarray_result.status());
-  }
-  auto chunkedarray = chunkedarray_result.ValueOrDie();
-  assert(chunkedarray != nullptr && chunkedarray->num_chunks() == 1);
-  return arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0));
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
+        assert(fragment_reader_);
+        auto start_idx = row_group_infos_[row_group_index].start_offset;
+        auto end_idx = row_group_infos_[row_group_index].end_offset;
+        // FIXME: Lance's read_range may produce multiple output batches for two reasons:
+        // 1. batch_size is applied to the *physical* range (after patch_range_for_deletions),
+        //    so deletions cause the physical range to exceed batch_size.
+        // 2. Lance may split at internal page boundaries regardless of batch_size.
+        // We add num_deletions_ to mitigate (1), but (2) is not addressed — if Lance
+        // splits at page boundaries, chunk(0) will silently lose trailing rows in Release
+        // builds (assert is a no-op). A robust fix would combine all chunks here.
+        ARROW_ASSIGN_OR_RAISE(auto array_stream, fragment_reader_->ReadRangesAsStream(
+                                                     start_idx, end_idx, end_idx - start_idx + num_deletions_));
+        auto chunkedarray_result = arrow::ImportChunkedArray(&array_stream);
+        if (!chunkedarray_result.ok()) {
+          return MakeBridgeErrorStatus("Failed to import Lance chunked array", chunkedarray_result.status());
+        }
+        auto chunkedarray = chunkedarray_result.ValueOrDie();
+        assert(chunkedarray != nullptr && chunkedarray->num_chunks() == 1);
+        return arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0));
+      },
+      false, "get_chunk", "lance");
 }
 
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> LanceTableReader::get_chunks(
     const std::vector<int>& rg_indices_in_file) {
-  assert(fragment_reader_);
-  std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
+        assert(fragment_reader_);
+        std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
 
 #ifndef NDEBUG
-  // verify rg_indices_in_file have been sorted
-  for (size_t i = 1; i < rg_indices_in_file.size(); ++i) {
-    assert(rg_indices_in_file[i] >= rg_indices_in_file[i - 1]);
-  }
+        // verify rg_indices_in_file have been sorted
+        for (size_t i = 1; i < rg_indices_in_file.size(); ++i) {
+          assert(rg_indices_in_file[i] >= rg_indices_in_file[i - 1]);
+        }
 #endif
 
-  std::vector<std::pair<uint64_t, uint64_t>> rg_idx_ranges;
+        std::vector<std::pair<uint64_t, uint64_t>> rg_idx_ranges;
 
-  // calc continuous ranges
-  // ex. [1, 2, 3, 5] -> [(1, 3), (5, 5)]
-  size_t start_idx = 0;
-  for (size_t i = 1; i < rg_indices_in_file.size(); ++i) {
-    if (rg_indices_in_file[i] != rg_indices_in_file[i - 1] + 1) {
-      rg_idx_ranges.emplace_back(rg_indices_in_file[start_idx], rg_indices_in_file[i - 1]);
-      start_idx = i;
-    }
-  }
+        // calc continuous ranges
+        // ex. [1, 2, 3, 5] -> [(1, 3), (5, 5)]
+        size_t start_idx = 0;
+        for (size_t i = 1; i < rg_indices_in_file.size(); ++i) {
+          if (rg_indices_in_file[i] != rg_indices_in_file[i - 1] + 1) {
+            rg_idx_ranges.emplace_back(rg_indices_in_file[start_idx], rg_indices_in_file[i - 1]);
+            start_idx = i;
+          }
+        }
 
-  if (start_idx < rg_indices_in_file.size()) {
-    rg_idx_ranges.emplace_back(rg_indices_in_file[start_idx], rg_indices_in_file.back());
-  }
+        if (start_idx < rg_indices_in_file.size()) {
+          rg_idx_ranges.emplace_back(rg_indices_in_file[start_idx], rg_indices_in_file.back());
+        }
 
-  for (const auto& rg_range : rg_idx_ranges) {
-    // load continuous chunks in one read
-    const auto& start_rg_info = row_group_infos_[rg_range.first];
-    const auto& end_rg_info = row_group_infos_[rg_range.second];
+        for (const auto& rg_range : rg_idx_ranges) {
+          // load continuous chunks in one read
+          const auto& start_rg_info = row_group_infos_[rg_range.first];
+          const auto& end_rg_info = row_group_infos_[rg_range.second];
 
-    // batch_size adds num_deletions_ for the same reason as get_chunk — see comment there.
-    ARROW_ASSIGN_OR_RAISE(auto array_stream, fragment_reader_->ReadRangesAsStream(
-                                                 start_rg_info.start_offset, end_rg_info.end_offset,
-                                                 end_rg_info.end_offset - start_rg_info.start_offset + num_deletions_));
-    auto chunkedarray_result = arrow::ImportChunkedArray(&array_stream);
-    if (!chunkedarray_result.ok()) {
-      return MakeBridgeErrorStatus("Failed to import Lance chunked array", chunkedarray_result.status());
-    }
-    auto chunkedarray = chunkedarray_result.ValueOrDie();
-    assert(chunkedarray != nullptr);
+          // batch_size adds num_deletions_ for the same reason as get_chunk — see comment there.
+          ARROW_ASSIGN_OR_RAISE(auto array_stream,
+                                fragment_reader_->ReadRangesAsStream(
+                                    start_rg_info.start_offset, end_rg_info.end_offset,
+                                    end_rg_info.end_offset - start_rg_info.start_offset + num_deletions_));
+          auto chunkedarray_result = arrow::ImportChunkedArray(&array_stream);
+          if (!chunkedarray_result.ok()) {
+            return MakeBridgeErrorStatus("Failed to import Lance chunked array", chunkedarray_result.status());
+          }
+          auto chunkedarray = chunkedarray_result.ValueOrDie();
+          assert(chunkedarray != nullptr);
 
-    // assign to rbs
-    for (size_t j = 0; j < chunkedarray->num_chunks(); ++j) {
-      ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(j)));
-      rbs.emplace_back(rb);
-    }
-  }
+          // assign to rbs
+          for (size_t j = 0; j < chunkedarray->num_chunks(); ++j) {
+            ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(j)));
+            rbs.emplace_back(rb);
+          }
+        }
 
-  return rbs;
+        return rbs;
+      },
+      false, "get_chunks", "lance");
 }
 
 arrow::Result<std::shared_ptr<arrow::Table>> LanceTableReader::take(const std::vector<int64_t>& row_indices) {
-  assert(fragment_reader_);
-  ARROW_ASSIGN_OR_RAISE(auto array_stream, fragment_reader_->TakeAsStream(row_indices, row_indices.size()));
-  auto chunkedarray_result = arrow::ImportChunkedArray(&array_stream);
-  if (!chunkedarray_result.ok()) {
-    return MakeBridgeErrorStatus("Failed to import Lance take result", chunkedarray_result.status());
-  }
-  auto chunkedarray = chunkedarray_result.ValueOrDie();
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::Table>> {
+        assert(fragment_reader_);
+        ARROW_ASSIGN_OR_RAISE(auto array_stream, fragment_reader_->TakeAsStream(row_indices, row_indices.size()));
+        auto chunkedarray_result = arrow::ImportChunkedArray(&array_stream);
+        if (!chunkedarray_result.ok()) {
+          return MakeBridgeErrorStatus("Failed to import Lance take result", chunkedarray_result.status());
+        }
+        auto chunkedarray = chunkedarray_result.ValueOrDie();
 
-  // out of range
-  if (chunkedarray->num_chunks() == 0) {
-    ARROW_ASSIGN_OR_RAISE(auto row_count, fragment_reader_->RowCount());
-    return arrow::Status::Invalid(fmt::format("out of row range [0, {}]", row_count));
-  }
+        // out of range
+        if (chunkedarray->num_chunks() == 0) {
+          ARROW_ASSIGN_OR_RAISE(auto row_count, fragment_reader_->RowCount());
+          return arrow::Status::Invalid(fmt::format("out of row range [0, {}]", row_count));
+        }
 
-  std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
-  for (size_t i = 0; i < chunkedarray->num_chunks(); ++i) {
-    ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(i)));
-    rbs.emplace_back(rb);
-  }
+        std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
+        for (size_t i = 0; i < chunkedarray->num_chunks(); ++i) {
+          ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(i)));
+          rbs.emplace_back(rb);
+        }
 
-  return arrow::Table::FromRecordBatches(rbs);
+        return arrow::Table::FromRecordBatches(rbs);
+      },
+      false, "take", "lance");
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> LanceTableReader::read_with_range(const uint64_t& start_offset,
                                                                                            const uint64_t& end_offset) {
-  assert(fragment_reader_);
-  // Lance's read_range accepts logical indices directly.
-  // batch_size adds num_deletions_ for the same reason as get_chunk — see comment there.
-  ARROW_ASSIGN_OR_RAISE(auto array_stream, fragment_reader_->ReadRangesAsStream(
-                                               start_offset, end_offset, end_offset - start_offset + num_deletions_));
-  ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&array_stream));
-  return internal::WrapLanceRecordBatchReader(std::move(reader));
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> {
+        assert(fragment_reader_);
+        // Lance's read_range accepts logical indices directly.
+        // batch_size adds num_deletions_ for the same reason as get_chunk — see comment there.
+        ARROW_ASSIGN_OR_RAISE(
+            auto array_stream,
+            fragment_reader_->ReadRangesAsStream(start_offset, end_offset, end_offset - start_offset + num_deletions_));
+        ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&array_stream));
+        return internal::WrapLanceRecordBatchReader(std::move(reader));
+      },
+      false, "read_with_range", "lance");
 }
 
 arrow::Result<std::shared_ptr<FormatReader>> LanceTableReader::clone_reader() {

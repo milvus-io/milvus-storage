@@ -69,11 +69,8 @@ class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
   }
 
   // Override OpenInputFile to add fault injection point
-  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string& path) override {
-    FIU_RETURN_ON(FIUKEY_FS_OPEN_INPUT_FAIL,
-                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_FS_OPEN_INPUT_FAIL)));
-    return SubTreeFileSystem::OpenInputFile(path);
-  }
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string& path) override;
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const arrow::fs::FileInfo& info) override;
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(
       const std::string& path, std::shared_ptr<arrow::KeyValueMetadata> metadata) override {

@@ -92,6 +92,10 @@ sqlparser = "0.55"
 # CXX bridge
 cxx = "1.0.184"
 
+[target.'cfg(unix)'.dependencies]
+# Preserve the Vortex Tokio executor's profiling labels when submitting directly.
+custom-labels = "0.4.4"
+
 [dev-dependencies]
 talon-transport = { git = "https://github.com/milvus-io/talon.git", rev = "e7f40ea629b522cffa5549a437be0660d2bf9eeb" }
 tempfile = "3"

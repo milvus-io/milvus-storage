@@ -34,6 +34,9 @@
 #include "milvus-storage/format/format_reader.h"
 
 namespace milvus_storage {
+namespace tracing {
+class OperationTrace;
+}
 
 namespace iceberg {
 class IcebergFormatReader;
@@ -113,6 +116,7 @@ class FormatReaderMetadataCache final : public std::enable_shared_from_this<Form
     std::condition_variable cv;
     MetadataPtr metadata;
     folly::SharedPromise<MetadataResult> async_result;
+    std::shared_ptr<tracing::OperationTrace> trace;
   };
 
   // Publish the leader's load result to the cache and every same-key waiter.

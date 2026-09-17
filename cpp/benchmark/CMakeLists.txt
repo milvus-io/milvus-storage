@@ -50,3 +50,29 @@ target_include_directories(benchmark PUBLIC
   ${PROJECT_SOURCE_DIR}/benchmark
   ${PROJECT_SOURCE_DIR}/test/include
 )
+
+# Small independent target so tracing overhead can be measured without building
+# unrelated format benchmarks. The SDK/exporter is linked by the host only.
+add_executable(tracing_benchmark benchmark_main.cpp benchmark_tracing.cpp)
+target_link_libraries(tracing_benchmark PRIVATE milvus-storage benchmark::benchmark
+  opentelemetry-cpp::opentelemetry_trace)
+if (WITH_ASAN)
+  target_compile_options(tracing_benchmark PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+  target_link_options(tracing_benchmark PRIVATE -fsanitize=address)
+endif()
+if (NOT APPLE)
+  target_link_options(tracing_benchmark PRIVATE "LINKER:--disable-new-dtags")
+endif()
+
+# Run the same end-to-end harness against pre-tracing and current libraries.
+add_executable(telemetry_read_benchmark benchmark_telemetry_read.cpp)
+target_link_libraries(telemetry_read_benchmark PRIVATE milvus-storage benchmark::benchmark
+  opentelemetry-cpp::opentelemetry_trace)
+target_compile_definitions(telemetry_read_benchmark PRIVATE STORAGE_TELEMETRY_BENCHMARK)
+if (WITH_ASAN)
+  target_compile_options(telemetry_read_benchmark PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+  target_link_options(telemetry_read_benchmark PRIVATE -fsanitize=address)
+endif()
+if (NOT APPLE)
+  target_link_options(telemetry_read_benchmark PRIVATE "LINKER:--disable-new-dtags")
+endif()
