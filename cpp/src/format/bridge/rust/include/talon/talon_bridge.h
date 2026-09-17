@@ -28,6 +28,14 @@
 
 namespace milvus_storage::talon {
 
+namespace internal {
+// Convert the typed Rust callback result without parsing its diagnostic text.
+arrow::Result<int64_t> ToArrowIoResult(const char* operation,
+                                       int32_t error_code,
+                                       uint64_t value,
+                                       const char* error_msg);
+}  // namespace internal
+
 /// Optional object metadata supplied by storage when opening a Talon reader.
 /// An empty version is valid for the version-independent GetRange path.
 struct TalonObjectStat {
