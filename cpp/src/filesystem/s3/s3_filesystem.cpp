@@ -729,6 +729,8 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     explicit ReadState(int64_t size) : content_length(size) {}
 
     std::atomic<int64_t> content_length;
+    std::mutex metadata_mutex;
+    std::shared_ptr<const arrow::KeyValueMetadata> metadata;
   };
 
   public:
@@ -770,13 +772,71 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
   arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override {
     ARROW_RETURN_NOT_OK(CheckClosed());
     ARROW_RETURN_NOT_OK(EnsureHeadObject(/*need_metadata=*/true));
-    std::lock_guard<std::mutex> lock(metadata_mutex_);
-    return metadata_;
+    std::lock_guard<std::mutex> lock(read_state_->metadata_mutex);
+    return read_state_->metadata;
   }
 
   Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(
       const arrow::io::IOContext& io_context) override {
-    return Future<std::shared_ptr<const arrow::KeyValueMetadata>>::MakeFinished(ReadMetadata());
+    const auto status = CheckClosed();
+    if (!status.ok()) {
+      return Future<std::shared_ptr<const arrow::KeyValueMetadata>>::MakeFinished(status);
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(read_state_->metadata_mutex);
+      if (read_state_->metadata != nullptr) {
+        return Future<std::shared_ptr<const arrow::KeyValueMetadata>>::MakeFinished(read_state_->metadata);
+      }
+    }
+
+    auto maybe_client_lease = holder_->Acquire();
+    if (!maybe_client_lease.ok()) {
+      return Future<std::shared_ptr<const arrow::KeyValueMetadata>>::MakeFinished(maybe_client_lease.status());
+    }
+
+    auto ctx = std::make_shared<AsyncHeadContext>();
+    ctx->future = Future<std::shared_ptr<const arrow::KeyValueMetadata>>::Make();
+    ctx->client_lease = std::move(maybe_client_lease).ValueOrDie();
+    ctx->read_state = read_state_;
+    ctx->path = path_;
+    ctx->request.SetBucket(ToAwsString(path_.bucket));
+    ctx->request.SetKey(ToAwsString(path_.key));
+
+    ctx->client_lease->HeadObjectAsync(
+        ctx->request, [ctx](const Aws::S3Crt::S3CrtClient*, const S3CrtModel::HeadObjectRequest&,
+                            const S3CrtModel::HeadObjectOutcome& outcome,
+                            const std::shared_ptr<const Aws::Client::AsyncCallerContext>&) mutable {
+          if (!outcome.IsSuccess()) {
+            if (outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
+              ctx->future.MarkFinished(PathNotFound(ctx->path));
+              return;
+            }
+            ctx->future.MarkFinished(
+                ErrorToStatus(std::forward_as_tuple("When reading information for key '", ctx->path.key,
+                                                    "' in bucket '", ctx->path.bucket, "': "),
+                              "HeadObject", outcome.GetError()));
+            return;
+          }
+
+          const auto content_length = outcome.GetResult().GetContentLength();
+          if (content_length < 0) {
+            ctx->future.MarkFinished(arrow::Status::IOError("HeadObject returned a negative Content-Length"));
+            return;
+          }
+
+          auto metadata = GetObjectMetadata(outcome.GetResult());
+          {
+            std::lock_guard<std::mutex> lock(ctx->read_state->metadata_mutex);
+            // Publish both values from this HEAD before making metadata visible.
+            ctx->read_state->content_length.store(content_length, std::memory_order_release);
+            ctx->read_state->metadata = metadata;
+          }
+          // Complete outside the metadata lock: a caller continuation can read
+          // the cache immediately. Executor selection remains with the caller.
+          ctx->future.MarkFinished(std::move(metadata));
+        });
+    return ctx->future;
   }
 
   arrow::Status Close() override {
@@ -799,56 +859,18 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
   }
 
   Future<int64_t> GetSizeAsync() override {
-    auto status = CheckClosed();
+    const auto status = CheckClosed();
     if (!status.ok()) {
       return FailedReadFuture(status);
     }
-
     const auto content_length = GetCachedContentLength();
     if (content_length != kNoSize) {
       return Future<int64_t>::MakeFinished(content_length);
     }
-
-    auto maybe_client_lease = holder_->Acquire();
-    if (!maybe_client_lease.ok()) {
-      return FailedReadFuture(maybe_client_lease.status());
-    }
-
-    auto ctx = std::make_shared<AsyncHeadContext>();
-    ctx->future = Future<int64_t>::Make();
-    ctx->client_lease = std::move(maybe_client_lease).ValueOrDie();
-    ctx->read_state = read_state_;
-    ctx->path = path_;
-    ctx->request.SetBucket(ToAwsString(path_.bucket));
-    ctx->request.SetKey(ToAwsString(path_.key));
-
-    ctx->client_lease->HeadObjectAsync(
-        ctx->request, [ctx](const Aws::S3Crt::S3CrtClient*, const S3CrtModel::HeadObjectRequest&,
-                            const S3CrtModel::HeadObjectOutcome& outcome,
-                            const std::shared_ptr<const Aws::Client::AsyncCallerContext>&) mutable {
-          if (!outcome.IsSuccess()) {
-            if (outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
-              ctx->future.MarkFinished(arrow::Result<int64_t>(PathNotFound(ctx->path)));
-              return;
-            }
-            ctx->future.MarkFinished(arrow::Result<int64_t>(
-                ErrorToStatus(std::forward_as_tuple("When reading information for key '", ctx->path.key,
-                                                    "' in bucket '", ctx->path.bucket, "': "),
-                              "HeadObject", outcome.GetError())));
-            return;
-          }
-
-          const auto content_length = outcome.GetResult().GetContentLength();
-          if (content_length < 0) {
-            ctx->future.MarkFinished(
-                arrow::Result<int64_t>(arrow::Status::IOError("HeadObject returned a negative Content-Length")));
-            return;
-          }
-
-          ctx->read_state->content_length.store(content_length, std::memory_order_release);
-          ctx->future.MarkFinished(content_length);
+    return ReadMetadataAsync(io_context_)
+        .Then([read_state = read_state_](const std::shared_ptr<const arrow::KeyValueMetadata>&) {
+          return read_state->content_length.load(std::memory_order_acquire);
         });
-    return ctx->future;
   }
 
   arrow::Status Seek(int64_t position) override {
@@ -1063,10 +1085,10 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     DCHECK_GE(content_length, 0);
     auto metadata = GetObjectMetadata(outcome.GetResult());
     {
-      std::lock_guard<std::mutex> lock(metadata_mutex_);
-      metadata_ = std::move(metadata);
+      std::lock_guard<std::mutex> lock(read_state_->metadata_mutex);
+      SetCachedContentLength(content_length);
+      read_state_->metadata = std::move(metadata);
     }
-    SetCachedContentLength(content_length);
     return arrow::Status::OK();
   }
 
@@ -1077,8 +1099,8 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
   }
 
   bool HasCachedMetadata() const {
-    std::lock_guard<std::mutex> lock(metadata_mutex_);
-    return metadata_ != nullptr;
+    std::lock_guard<std::mutex> lock(read_state_->metadata_mutex);
+    return read_state_->metadata != nullptr;
   }
 
   protected:
@@ -1106,7 +1128,7 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
   struct AsyncHeadContext {
     // Keep the same non-owning CRT client lifetime model as AsyncReadContext.
     // The path and read state remain valid without owning the file or holder.
-    Future<int64_t> future;
+    Future<std::shared_ptr<const arrow::KeyValueMetadata>> future;
     S3CrtClientLease client_lease;
     S3CrtModel::HeadObjectRequest request;
     std::shared_ptr<ReadState> read_state;
@@ -1119,9 +1141,7 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
 
   bool closed_ = false;
   int64_t pos_ = 0;
-  mutable std::mutex metadata_mutex_;
   std::shared_ptr<ReadState> read_state_;
-  std::shared_ptr<const arrow::KeyValueMetadata> metadata_;
 };
 #endif  // WITH_CRT
 

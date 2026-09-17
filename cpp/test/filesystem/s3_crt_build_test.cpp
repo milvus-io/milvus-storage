@@ -29,7 +29,10 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <utility>
 #include <vector>
+
+#include <arrow/util/key_value_metadata.h>
 
 #if !defined(_WIN32)
 #include <unistd.h>
@@ -39,11 +42,15 @@
 #include <aws/s3-crt/S3CrtClientConfiguration.h>
 #include <folly/executors/ManualExecutor.h>
 
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/s3_crt_client.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
+#ifdef WITH_TALON
+#include "milvus-storage/filesystem/talon/talon_file_system_producer.h"
+#endif
 #include "milvus-storage/format/parquet/folly_arrow_executor.h"
 #include "test_env.h"
 
@@ -843,6 +850,195 @@ TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileForNonGcpProvider
     EXPECT_NE(dynamic_cast<milvus_storage::NonBlockingRandomAccessFile*>(input_file.get()), nullptr);
   }
 }
+
+struct S3CrtMetadataTestParam {
+  boost::beast::http::status response_status;
+  bool close_before_completion = false;
+  bool size_first = false;
+  bool use_talon = false;
+};
+
+class S3CrtMetadataTest : public ::testing::TestWithParam<S3CrtMetadataTestParam> {};
+
+TEST_P(S3CrtMetadataTest, AsyncHeadReturnsBeforeResponse) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "Test requires POSIX process APIs.";
+#else
+  const auto original_death_test_style = GTEST_FLAG_GET(death_test_style);
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const auto run_child = [param = GetParam()]() -> int {
+    namespace http = boost::beast::http;
+    using Tcp = boost::asio::ip::tcp;
+    auto fail = [](const std::string& message) {
+      std::cerr << message << std::endl;
+      return 1;
+    };
+
+    const auto initialized = EnsureS3InitializedForTest();
+    if (!initialized.ok()) {
+      return fail(initialized.ToString());
+    }
+    boost::asio::io_context server_context;
+    Tcp::acceptor acceptor(server_context, {boost::asio::ip::address_v4::loopback(), 0});
+    auto options = S3Options::FromAccessKey("ak", "sk");
+    options.cloud_provider = kCloudProviderAWS;
+    options.region = "us-east-1";
+    options.scheme = "http";
+    options.endpoint_override = "127.0.0.1:" + std::to_string(acceptor.local_endpoint().port());
+    options.connect_timeout = 2;
+    options.request_timeout = 5;
+    options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
+    options.use_crt_async_reads = true;
+
+    auto fs_result = S3FileSystem::Make(options);
+    if (!fs_result.ok()) {
+      return fail(fs_result.status().ToString());
+    }
+    ArrowFileSystemPtr fs = std::move(fs_result).ValueOrDie();
+#ifdef WITH_TALON
+    if (param.use_talon) {
+      ArrowFileSystemConfig config;
+      config.storage_type = "remote";
+      config.cloud_provider = kCloudProviderAWS;
+      config.bucket_name = "test-bucket";
+      config.talon_enabled = true;
+      config.talon_coordinator = "127.0.0.1:1";
+      auto talon_fs = TalonFileSystemProducer(config, fs).Make();
+      if (!talon_fs.ok()) {
+        return fail(talon_fs.status().ToString());
+      }
+      fs = std::move(talon_fs).ValueOrDie();
+    }
+#endif
+    auto input_result = fs->OpenInputFile("test-bucket/path/object.txt");
+    if (!input_result.ok()) {
+      return fail(input_result.status().ToString());
+    }
+    auto input = std::move(input_result).ValueOrDie();
+
+    // Hold a real HEAD response until the async method has returned. Running
+    // submission separately lets this test release the response on a regression.
+    arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> metadata_future;
+    arrow::Future<int64_t> size_future;
+    auto submitted = std::async(std::launch::async, [input, &metadata_future, &size_future, param] {
+      if (param.size_first) {
+        size_future = dynamic_cast<NonBlockingRandomAccessFile*>(input.get())->GetSizeAsync();
+      } else {
+        metadata_future = input->ReadMetadataAsync({});
+      }
+    });
+    Tcp::socket socket(server_context);
+    acceptor.accept(socket);
+    boost::beast::flat_buffer buffer;
+    http::request<http::empty_body> request;
+    http::read(socket, buffer, request);
+    const bool returned_early = submitted.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+    if (returned_early) {
+      submitted.get();
+      if (param.size_first ? size_future.is_finished() : metadata_future.is_finished()) {
+        return fail("HEAD future completed before receiving the response");
+      }
+      if (param.close_before_completion) {
+        if (!input->Close().ok()) {
+          return fail("Failed to close input with a pending metadata request");
+        }
+        input.reset();
+      }
+    }
+
+    http::response<http::empty_body> response{param.response_status, request.version()};
+    response.content_length(param.response_status == http::status::ok ? 9 : 0);
+    response.set(http::field::etag, "\"etag-v1\"");
+    response.set(http::field::content_type, "application/octet-stream");
+    response.set("x-amz-meta-source", "metadata-test");
+    response.keep_alive(false);
+    http::write(socket, response);
+    socket.close();
+    // Any unexpected second HEAD now fails instead of silently hiding a cache miss.
+    acceptor.close();
+    if (!returned_early) {
+      (void)submitted.get();
+      return fail("Async HEAD blocked until the response was released");
+    }
+    if (request.method() != http::verb::head || request.target() != "/test-bucket/path/object.txt") {
+      return fail("Unexpected HEAD request");
+    }
+    if (param.size_first) {
+      if (!size_future.Wait(5) || !size_future.result().ok() || size_future.result().ValueOrDie() != 9) {
+        return fail("Async size did not resolve the HEAD response");
+      }
+      metadata_future = input->ReadMetadataAsync({});
+      if (!metadata_future.is_finished()) {
+        return fail("Async size did not cache HEAD metadata");
+      }
+    }
+    if (!metadata_future.Wait(5)) {
+      return fail("Metadata future did not complete");
+    }
+    const auto& result = metadata_future.result();
+    if (param.response_status == http::status::ok) {
+      if (!result.ok()) {
+        return fail(result.status().ToString());
+      }
+      const auto metadata = result.ValueOrDie();
+      if (metadata == nullptr || metadata->Get("ETag").ValueOrDie() != "\"etag-v1\"" ||
+          metadata->Get("Content-Length").ValueOrDie() != "9" ||
+          metadata->Get("Content-Type").ValueOrDie() != "application/octet-stream" ||
+          metadata->Get("source").ValueOrDie() != "metadata-test") {
+        return fail("HEAD metadata was not preserved");
+      }
+      if (param.close_before_completion) {
+        return 0;
+      }
+      auto cached = input->ReadMetadataAsync({});
+      if (!cached.is_finished() || !cached.result().ok() || cached.result().ValueOrDie() != metadata ||
+          !input->ReadMetadata().ok() || input->GetSize().ValueOrDie() != 9) {
+        return fail("HEAD metadata and size were not cached");
+      }
+      auto* async_input = dynamic_cast<NonBlockingRandomAccessFile*>(input.get());
+      if (async_input == nullptr || async_input->GetSizeAsync().result().ValueOrDie() != 9) {
+        return fail("Async size did not reuse the HEAD response");
+      }
+    } else {
+      const auto message = result.status().ToString();
+      if (!result.status().IsIOError()) {
+        return fail("HEAD failure did not return an I/O error: " + message);
+      }
+      if (param.response_status == http::status::not_found) {
+        if (message.find("test-bucket/path/object.txt") == std::string::npos) {
+          return fail("Missing-object error lost its path: " + message);
+        }
+      } else {
+        const auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+        if (detail == nullptr || detail->code() != ExtendStatusCode::AwsErrorAccessDenied ||
+            message.find("HeadObject") == std::string::npos || message.find("ACCESS_DENIED") == std::string::npos) {
+          return fail("HEAD error lost its AWS details: " + message);
+        }
+      }
+    }
+    if (!input->Close().ok() || !input->ReadMetadataAsync({}).result().status().IsInvalid()) {
+      return fail("Metadata read on a closed file did not fail");
+    }
+    return 0;
+  };
+  EXPECT_EXIT((::alarm(20), ::_exit(run_child())), ::testing::ExitedWithCode(0), "");
+  GTEST_FLAG_SET(death_test_style, original_death_test_style);
+#endif
+}
+
+INSTANTIATE_TEST_SUITE_P(S3Crt,
+                         S3CrtMetadataTest,
+                         ::testing::Values(S3CrtMetadataTestParam{boost::beast::http::status::ok},
+                                           S3CrtMetadataTestParam{boost::beast::http::status::ok, true},
+                                           S3CrtMetadataTestParam{boost::beast::http::status::ok, false, true},
+                                           S3CrtMetadataTestParam{boost::beast::http::status::not_found},
+                                           S3CrtMetadataTestParam{boost::beast::http::status::forbidden}));
+
+#ifdef WITH_TALON
+INSTANTIATE_TEST_SUITE_P(TalonCrt,
+                         S3CrtMetadataTest,
+                         ::testing::Values(S3CrtMetadataTestParam{boost::beast::http::status::ok, false, true, true}));
+#endif
 
 TEST(S3CrtBuildSupportTest, ZeroLengthAsyncReadsDoNotScheduleIoExecutor) {
   ASSERT_STATUS_OK(EnsureS3InitializedForTest());
