@@ -47,7 +47,10 @@ class OwnedAttributes final : public opentelemetry::common::KeyValueIterable {
       opentelemetry::nostd::function_ref<bool(opentelemetry::nostd::string_view, opentelemetry::common::AttributeValue)>
           callback) const noexcept override {
     try {
-      for (const auto& [key, attribute] : attributes_) {
+      // Clang 14 cannot capture structured bindings in the visitor below.
+      for (const auto& entry : attributes_) {
+        const auto& key = entry.first;
+        const auto& attribute = entry.second;
         const bool keep_going = opentelemetry::nostd::visit(
             [&](const auto& value) {
               using Value = std::decay_t<decltype(value)>;
