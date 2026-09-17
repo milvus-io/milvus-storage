@@ -55,11 +55,18 @@ namespace {
 
 struct RecordBatchReaderHolder {
   std::shared_ptr<arrow::RecordBatchReader> reader;
+  // Temporary diagnostics for the concat workaround below. copies counts
+  // materialized columns; copied_bytes is only a rough estimate, not an exact
+  // count of bytes copied or allocated. Remove these stats and their JNI API
+  // when JVM consumers support offsets and the concat workaround is removed.
   int64_t batches = 0;
   int64_t copies = 0;
   int64_t copied_bytes = 0;
 };
 
+// Count only top-level buffers for a cheap diagnostic estimate. This omits
+// child arrays (e.g. FixedSizeList embeddings) and dictionaries, so it can
+// undercount substantially; do not use it for precise memory accounting.
 int64_t BufferBytes(const arrow::Array& array) {
   int64_t bytes = 0;
   for (const auto& buffer : array.data()->buffers) {
@@ -176,11 +183,13 @@ extern "C" LoonFFIResult loon_record_batch_reader_read_next(LoonRecordBatchReade
     // PackedRecordBatchReader::ReadNext can hand back a RecordBatch whose
     // column arrays carry a non-zero `offset` — this happens whenever the
     // underlying chunk is larger than min_rows and the remainder is kept
-    // in the queue via `rb->Slice(min_rows)` (see reader.cpp). ArrowArray's
-    // C Data Interface specifies consumers must honour `offset`, but Arrow
-    // Java's `Data.importVectorSchemaRoot` ignores it. Materialize sliced
-    // columns into fresh offset=0 arrays via arrow::Concatenate (copies
-    // only the slice range). Non-sliced columns pass through unchanged.
+    // in the queue via `rb->Slice(min_rows)` (see reader.cpp). The Arrow Java
+    // C Data importer used by JVM consumers ignores this offset, so exporting
+    // a slice directly would read from the buffer start and repeat earlier rows.
+    // Concatenate({col}) materializes the slice into an offset=0 array for
+    // correct Java imports. Non-sliced columns pass through unchanged. Once
+    // JVM consumers handle offsets correctly, remove this workaround together
+    // with its temporary copy statistics.
     if (batch != nullptr) {
       bool has_sliced_column = false;
       for (int i = 0; i < batch->num_columns(); ++i) {

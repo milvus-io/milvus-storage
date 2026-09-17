@@ -69,8 +69,11 @@ class MilvusStorageReader {
     recordBatchReaderReadNext(rbrHandle, arrayAddr, schemaAddr)
   }
 
-  /** Returns the batches exported, columns materialized for nonzero offsets,
-   * and bytes allocated for those column copies, in that order.
+  /** Returns the batches exported, columns materialized by concat, and a rough
+   * estimate of copied bytes, in that order. The byte estimate counts only
+   * top-level output buffers; it omits nested children and dictionaries and
+   * is not an exact count of bytes copied or allocated. These diagnostics
+   * should be removed with concat once JVM consumers correctly handle offsets.
    */
   def recordBatchReaderStatsScala(rbrHandle: Long): Array[Long] = {
     recordBatchReaderStats(rbrHandle)
