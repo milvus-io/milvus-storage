@@ -14,19 +14,28 @@ import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.stream.Stream;
 
-/** Loads the current platform's JNI library and dependencies from one resource directory. */
+/** Loads JNI from an explicit path, the current platform's resources, or the system path. */
 public class NativeLibraryLoader {
     private static final String JNI_LIBRARY_NAME = "milvus-storage-jni";
+    private static final String NATIVE_PATH = "milvus.storage.native.path";
     private static volatile boolean loaded;
 
     public NativeLibraryLoader() {}
 
     /**
-     * Uses the packaged library when present. Extraction and linking failures
-     * remain visible; the system path is used only when no packaged JNI exists.
+     * Uses {@code milvus.storage.native.path}, when set, before packaged resources.
+     * The property must name an existing absolute JNI library path. Explicit path,
+     * extraction and linking failures remain visible; the system path is used only
+     * when neither an explicit path nor packaged JNI exists.
      */
     public static synchronized void loadLibrary() {
         if (loaded) {
+            return;
+        }
+        Path explicit = explicitLibrary();
+        if (explicit != null) {
+            System.load(explicit.toString());
+            loaded = true;
             return;
         }
         String platform = currentPlatform();
@@ -51,6 +60,19 @@ public class NativeLibraryLoader {
             }
         }
         loaded = true;
+    }
+
+    static Path explicitLibrary() {
+        String configured = System.getProperty(NATIVE_PATH);
+        if (configured == null) {
+            return null;
+        }
+        Path path = Paths.get(configured);
+        if (!path.isAbsolute() || !Files.isRegularFile(path)) {
+            throw new UnsatisfiedLinkError(
+                    NATIVE_PATH + " must name an existing absolute library path");
+        }
+        return path;
     }
 
     static String currentPlatform() {

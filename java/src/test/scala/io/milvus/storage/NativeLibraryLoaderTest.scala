@@ -73,4 +73,37 @@ class NativeLibraryLoaderTest extends AnyFunSuite with Matchers {
       removeTree(work)
     }
   }
+
+  test("an existing absolute native path is selected") {
+    val key = "milvus.storage.native.path"
+    val original = System.getProperty(key)
+    val entry = Files.createTempFile("storage-explicit-entry", ".so")
+    try {
+      System.setProperty(key, entry.toString)
+      NativeLibraryLoader.explicitLibrary() shouldBe entry
+    } finally {
+      if (original == null) System.clearProperty(key)
+      else System.setProperty(key, original)
+      Files.delete(entry)
+    }
+  }
+
+  test("an invalid explicit path is rejected instead of falling back") {
+    val key = "milvus.storage.native.path"
+    val original = System.getProperty(key)
+    val missing = Files.createTempFile("missing-storage-entry", ".so")
+    Files.delete(missing)
+    try {
+      Seq("relative.so", missing.toString).foreach { configured =>
+        System.setProperty(key, configured)
+        val failure = intercept[UnsatisfiedLinkError] {
+          NativeLibraryLoader.explicitLibrary()
+        }
+        failure.getMessage should include("must name an existing absolute library path")
+      }
+    } finally {
+      if (original == null) System.clearProperty(key)
+      else System.setProperty(key, original)
+    }
+  }
 }
