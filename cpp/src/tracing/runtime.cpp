@@ -9,6 +9,8 @@
 #include <vector>
 #include <opentelemetry/sdk/common/attribute_utils.h>
 #include "milvus-storage/common/fiu_local.h"
+#include "rust-bridge/talon/talon_bridge.h"
+#include "runtime/bridge_util.h"
 
 namespace milvus_storage::tracing {
 namespace ot = opentelemetry::trace;
@@ -213,6 +215,11 @@ struct Context {
   bool disabled = false;
   std::shared_ptr<TraceCompletionQueue> completions;
 };
+struct ExternalTrace {
+  std::shared_ptr<const Configuration> config;
+  std::shared_ptr<Budget> budget;
+  ot::SpanContext parent;
+};
 namespace {
 ot::SpanContext Parent(const ContextPtr& context) noexcept {
   if (!context)
@@ -311,6 +318,48 @@ void StartCurrent() noexcept {
   auto context = Capture();
   if (context && context->operation)
     context->operation->Start();
+}
+std::shared_ptr<ExternalTrace> CaptureExternalTrace() noexcept {
+  try {
+    auto context = Capture();
+    if (!context || context->disabled)
+      return nullptr;
+    auto parent = Parent(context);
+    if (!parent.IsValid())
+      return nullptr;
+    std::shared_ptr<const Configuration> config;
+    std::shared_ptr<Budget> budget;
+    if (context->operation) {
+      config = context->operation->config;
+      budget = context->operation->budget;
+    } else {
+      std::lock_guard<std::mutex> lock(configuration_mutex);
+      config = configuration;
+    }
+    if (!config->tracer)
+      return nullptr;
+    if (!budget)
+      budget = std::make_shared<Budget>();
+    return std::make_shared<ExternalTrace>(ExternalTrace{std::move(config), std::move(budget), std::move(parent)});
+  } catch (...) {
+    return nullptr;
+  }
+}
+ot::SpanContext ExternalParent(const ExternalTrace& trace) noexcept { return trace.parent; }
+opentelemetry::nostd::shared_ptr<ot::Span> StartExternalSpan(const ExternalTrace& trace,
+                                                             opentelemetry::nostd::string_view name,
+                                                             const opentelemetry::common::KeyValueIterable& attributes,
+                                                             const ot::StartSpanOptions& options) noexcept {
+  try {
+    if (trace.budget->used.fetch_add(1, std::memory_order_relaxed) >=
+        std::max<uint32_t>(1, trace.config->options.max_spans_per_operation)) {
+      trace.budget->dropped.fetch_add(1, std::memory_order_relaxed);
+      return nullptr;
+    }
+    return trace.config->tracer->StartSpan(name, attributes, options);
+  } catch (...) {
+    return nullptr;
+  }
 }
 ContextScope::ContextScope(ContextPtr context) noexcept {
   if (!context && !contexts_seen.load(std::memory_order_relaxed))
@@ -430,6 +479,10 @@ arrow::Status SetTracerProvider(ProviderPtr provider) noexcept {
     auto next = std::make_shared<Configuration>(*configuration);
     next->provider = std::move(provider);
     next->tracer = std::move(tracer);
+    if (next->tracer) {
+      ARROW_RETURN_NOT_OK(CatchRustStatus("Failed to initialize Talon tracing",
+                                          [] { talon::ffi::initialize_storage_talon_tracing(); }));
+    }
     configuration = std::move(next);
     return arrow::Status::OK();
   } catch (const std::exception& e) {

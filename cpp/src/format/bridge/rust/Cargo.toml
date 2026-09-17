@@ -13,10 +13,15 @@ crate-type = ["staticlib"]
 [features]
 io-trace = []
 s3-crt-async = []
-talon = ["dep:talon", "s3-crt-async"]
+talon = ["dep:talon", "dep:talon-telemetry", "dep:opentelemetry", "dep:tracing", "dep:tracing-opentelemetry", "dep:tracing-subscriber", "s3-crt-async"]
 
 [dependencies]
 talon = { package = "talon-rust-client", git = "https://github.com/milvus-io/talon.git", rev = "c6ba5c97d09c2cec2d58eebec3c7d661521bb99b", optional = true }
+talon-telemetry = { git = "https://github.com/milvus-io/talon.git", rev = "c6ba5c97d09c2cec2d58eebec3c7d661521bb99b", features = ["recording"], optional = true }
+opentelemetry = { version = "=0.28.0", default-features = false, features = ["trace"], optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-opentelemetry = { version = "=0.29.0", default-features = false, optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"], optional = true }
 
 # common dependencies
 anyhow = "1.0.99"
