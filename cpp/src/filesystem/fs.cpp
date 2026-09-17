@@ -97,8 +97,12 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
   hash_combine(s3_crt_async_read);
   hash_combine(load_frequency);
   hash_combine(talon_enabled);
-  hash_combine(talon_coordinator);
-  hash_combine(talon_block_size);
+  // Disabled Talon settings do not affect the origin filesystem's identity.
+  if (talon_enabled) {
+    hash_combine(talon_coordinator);
+    hash_combine(talon_block_size);
+    hash_combine(talon_max_idle_per_addr);
+  }
 
   if (IsAzureCredentialBrokerEnabled()) {
     hash_combine(access_key_id);
@@ -141,7 +145,8 @@ std::string ArrowFileSystemConfig::ToString() const {
      << ", tls_min_version=" << (tls_min_version.empty() ? "(default)" : tls_min_version)
      << ", use_crc32c_checksum=" << std::boolalpha << use_crc32c_checksum << ", s3_crt_async_read=" << std::boolalpha
      << s3_crt_async_read << ", talon_enabled=" << std::boolalpha << talon_enabled
-     << ", talon_coordinator=" << talon_coordinator << ", talon_block_size=" << talon_block_size;
+     << ", talon_coordinator=" << talon_coordinator << ", talon_block_size=" << talon_block_size
+     << ", talon_max_idle_per_addr=" << talon_max_idle_per_addr;
   if (!alias.empty()) {
     ss << ", alias=" << alias;
   }
@@ -292,6 +297,8 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
   ARROW_ASSIGN_OR_RAISE(result.talon_coordinator,
                         api::GetValue<std::string>(properties_map, PROPERTY_FS_TALON_COORDINATOR));
   ARROW_ASSIGN_OR_RAISE(result.talon_block_size, api::GetValue<uint32_t>(properties_map, PROPERTY_FS_TALON_BLOCK_SIZE));
+  ARROW_ASSIGN_OR_RAISE(result.talon_max_idle_per_addr,
+                        api::GetValue<uint32_t>(properties_map, PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR));
   ARROW_ASSIGN_OR_RAISE(result.lance_io_parallelism,
                         api::GetValue<uint32_t>(properties_map, PROPERTY_FS_LANCE_IO_PARALLELISM));
   ARROW_ASSIGN_OR_RAISE(result.iops_initial_rate,
@@ -318,6 +325,9 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
     }
     if (result.talon_block_size == 0) {
       return arrow::Status::Invalid("fs.talon.block_size must be greater than zero");
+    }
+    if (result.talon_max_idle_per_addr == 0) {
+      return arrow::Status::Invalid("fs.talon.max_idle_per_addr must be greater than zero");
     }
   }
 

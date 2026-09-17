@@ -25,7 +25,7 @@
 #include "milvus-storage/thread_pool.h"
 
 #include <arrow/c/bridge.h>
-#include "format/bridge/rust/include/lance_bridge.h"
+#include "format/bridge/rust/include/lance/lance_bridge.h"
 #include "milvus-storage/format/lance/lance_common.h"
 
 namespace milvus_storage::benchmark {

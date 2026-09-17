@@ -13,11 +13,11 @@
 //! Paimon planning and streaming bridge.
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use arrow_schema58::SchemaRef;
-use arrow58::error::ArrowError;
-use arrow58::ffi::FFI_ArrowSchema;
-use arrow58::ffi_stream::FFI_ArrowArrayStream;
-use arrow58::record_batch::{RecordBatch, RecordBatchReader};
+use arrow_schema::SchemaRef;
+use arrow::error::ArrowError;
+use arrow::ffi::FFI_ArrowSchema;
+use arrow::ffi_stream::FFI_ArrowArrayStream;
+use arrow::record_batch::{RecordBatch, RecordBatchReader};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use futures::{StreamExt, stream::BoxStream};
@@ -1144,7 +1144,7 @@ impl BlockingPaimonDataSplitReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow58::ffi::FFI_ArrowArray;
+    use arrow::ffi::FFI_ArrowArray;
     use paimon::spec::{BinaryRow, DataFileMeta};
     use paimon::{DeletionFile, RowRange};
 
@@ -1191,7 +1191,7 @@ mod tests {
         let stream = futures::stream::iter([Err(error)]).boxed();
         let reader = PaimonStreamReader {
             stream,
-            schema: std::sync::Arc::new(arrow_schema58::Schema::empty()),
+            schema: std::sync::Arc::new(arrow_schema::Schema::empty()),
         };
         let mut ffi_stream = FFI_ArrowArrayStream::new(Box::new(reader));
         let mut array = FFI_ArrowArray::empty();

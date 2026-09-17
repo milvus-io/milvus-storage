@@ -19,9 +19,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, bail, ensure};
-use arrow_array58::builder::{Float32Builder, ListBuilder};
-use arrow_array58::{ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray};
-use arrow_schema58::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
+use arrow_array::builder::{Float32Builder, ListBuilder};
+use arrow_array::{ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray};
+use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
 use bytes::Bytes;
 use paimon::Table;
 use paimon::catalog::Identifier;

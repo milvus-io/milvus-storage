@@ -351,7 +351,6 @@ class CallbackThreadRandomAccessFile final : public arrow::io::RandomAccessFile,
     state_->AddWorker(std::move(worker));
     return future;
   }
-  arrow::Future<int64_t> GetSizeAsync() override { return arrow::Future<int64_t>::MakeFinished(file_->GetSize()); }
   arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const arrow::io::IOContext& io_context,
                                                           int64_t position,
                                                           int64_t nbytes) override {

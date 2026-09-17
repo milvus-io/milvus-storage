@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Result, bail};
 use futures::FutureExt;
-use talon::{Client, ObjectId, ObjectStat, parse_uri};
+use talon::{Client, ClientBuilder, ObjectId, ObjectStat, parse_uri};
 use talon_cache_client::{BlockReadError, CacheReadError};
 use tokio::sync::OnceCell;
 
@@ -28,7 +28,11 @@ pub mod ffi {
         type TalonClient;
         type TalonObjectReader;
 
-        fn new_talon_client(coordinator: &str, block_size: u32) -> Result<Box<TalonClient>>;
+        fn new_talon_client(
+            coordinator: &str,
+            block_size: u32,
+            max_idle_per_addr: u32,
+        ) -> Result<Box<TalonClient>>;
         fn open_talon_object(
             client: &TalonClient,
             cloud_provider: &str,
@@ -82,9 +86,19 @@ fn talon_uri(provider: &str, bucket: &str, key: &str) -> Result<String> {
     Ok(format!("{scheme}://{bucket}/{key}"))
 }
 
-pub fn new_talon_client(coordinator: &str, block_size: u32) -> Result<Box<TalonClient>> {
+pub fn new_talon_client(
+    coordinator: &str,
+    block_size: u32,
+    max_idle_per_addr: u32,
+) -> Result<Box<TalonClient>> {
     Ok(Box::new(TalonClient {
-        inner: Arc::new(Client::new(coordinator, block_size)?),
+        inner: Arc::new(
+            ClientBuilder::default()
+                .with_coordinator(coordinator)
+                .with_block_size(block_size)
+                .with_max_idle_per_addr(max_idle_per_addr as usize)
+                .build()?,
+        ),
     }))
 }
 
@@ -431,7 +445,7 @@ mod tests {
 
     #[test]
     fn open_object_with_stat_initializes_metadata_without_resolving() {
-        let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024).unwrap();
+        let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024, 8).unwrap();
         let reader =
             open_talon_object(&client, "aws", "test-bucket", "path/a", true, 123, "").unwrap();
         assert_eq!(talon_object_known_size(&reader), 123);
@@ -441,7 +455,7 @@ mod tests {
 
     #[test]
     fn open_object_without_stat_leaves_metadata_unresolved() {
-        let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024).unwrap();
+        let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024, 8).unwrap();
         let reader =
             open_talon_object(&client, "aws", "test-bucket", "path/a", false, 0, "").unwrap();
         assert_eq!(talon_object_known_size(&reader), -1);
@@ -450,7 +464,7 @@ mod tests {
 
     #[test]
     fn resolved_stat_is_shared_by_reader_clones() {
-        let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024).unwrap();
+        let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024, 8).unwrap();
         let reader =
             open_talon_object(&client, "aws", "test-bucket", "path/a", false, 0, "").unwrap();
         reader

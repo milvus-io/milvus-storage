@@ -17,7 +17,7 @@
 #include <arrow/io/type_fwd.h>
 #include <arrow/util/thread_pool.h>
 
-#include "rust_runtime.h"
+#include "runtime/rust_runtime.h"
 
 namespace milvus_storage {
 

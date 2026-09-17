@@ -13,8 +13,8 @@ s3-crt-async = []
 talon = ["dep:talon", "dep:talon-cache-client", "s3-crt-async"]
 
 [dependencies]
-talon = { package = "talon-rust-client", git = "https://github.com/milvus-io/talon.git", rev = "1e2482ac7a85d9a9954ffd81d89f9662f45a7803", optional = true }
-talon-cache-client = { git = "https://github.com/milvus-io/talon.git", rev = "1e2482ac7a85d9a9954ffd81d89f9662f45a7803", optional = true }
+talon = { package = "talon-rust-client", git = "https://github.com/milvus-io/talon.git", rev = "e7f40ea629b522cffa5549a437be0660d2bf9eeb", optional = true }
+talon-cache-client = { git = "https://github.com/milvus-io/talon.git", rev = "e7f40ea629b522cffa5549a437be0660d2bf9eeb", optional = true }
 
 # common dependencies
 anyhow = "1.0.99"
@@ -28,16 +28,10 @@ tokio = { version = "1.23", features = ["full"] }
 snafu = "0.9"
 
 # Arrow Ecosystem
-arrow = "56.2.0"
-arrow-array = {version = "56.2.0", features = ["ffi"]}
-arrow-data = {version = "56.2.0", features = ["ffi"]}
-arrow-schema = "56.2.0"
-
-# Lance 7 uses Arrow 58 while Vortex and Iceberg still use Arrow 56. Keep both
-# versions explicit and bridge them independently through Arrow's C Data API.
-arrow58 = { package = "arrow", version = "58.0.0" }
-arrow-array58 = { package = "arrow-array", version = "58.0.0", features = ["ffi"] }
-arrow-schema58 = { package = "arrow-schema", version = "58.0.0" }
+# Lance, Vortex and Paimon use Arrow 58; Iceberg 0.9 retains Arrow 57 internally.
+arrow = "58.0.0"
+arrow-array = { version = "58.0.0", features = ["ffi"] }
+arrow-schema = "58.0.0"
 
 # Vortex Ecosystem
 vortex = { git = "https://github.com/zilliztech/vortex", branch = "v0.75.0-patched", features = ["tokio"] }
@@ -68,7 +62,7 @@ iceberg = "0.9"
 iceberg-storage-opendal = { version = "0.9", features = ["opendal-s3", "opendal-gcs", "opendal-azdls", "opendal-oss"] }
 # Required for #[typetag::serde] on the filesystem-backed Iceberg adapter.
 typetag = "0.2"
-parquet = { version = "56.2.0", features = ["arrow"] }
+parquet = { version = "58.0.0", features = ["arrow"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = "0.4"
@@ -99,7 +93,7 @@ sqlparser = "0.55"
 cxx = "1.0.184"
 
 [dev-dependencies]
-talon-transport = { git = "https://github.com/milvus-io/talon.git", rev = "1e2482ac7a85d9a9954ffd81d89f9662f45a7803" }
+talon-transport = { git = "https://github.com/milvus-io/talon.git", rev = "e7f40ea629b522cffa5549a437be0660d2bf9eeb" }
 tempfile = "3"
 # Match Paimon's OpenDAL type in snapshot error-classification tests.
 opendal-paimon = { package = "opendal-core", version = "=0.58.0" }

@@ -63,8 +63,8 @@
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "milvus-storage/ffi_exttable_c.h"
 #include "milvus-storage/manifest.h"
-#include "lance_bridge.h"
-#include "iceberg_bridge.h"
+#include "lance/lance_bridge.h"
+#include "iceberg/iceberg_bridge.h"
 #include "test_env.h"
 
 namespace milvus_storage {

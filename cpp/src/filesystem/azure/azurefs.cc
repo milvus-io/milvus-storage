@@ -1024,7 +1024,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
       }
       RETURN_NOT_OK(CacheContentLengthFromRead(result.Value));
       return bytes_read;
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Azure::Core::RequestFailedException& exception) {
       return ExceptionToStatus(
           exception, "DownloadTo from '", blob_client_->GetUrl(), "' at position ",
           position, " for ", nbytes,
@@ -1094,7 +1094,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
       }
       SetCachedContentLength(content_length);
       return Status::OK();
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Azure::Core::RequestFailedException& exception) {
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
         return PathNotFound(location_);
       }

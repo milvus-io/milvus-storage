@@ -25,7 +25,7 @@
 #include "milvus-storage/format/format_writer.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
-#include "lance_bridge.h"  // from cpp/src/format/lance/lance-bridge/src/include
+#include "lance/lance_bridge.h"  // from cpp/src/format/bridge/rust/include/lance
 
 namespace milvus_storage::lance {
 

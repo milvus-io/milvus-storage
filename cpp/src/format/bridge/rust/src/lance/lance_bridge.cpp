@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "lance_bridge.h"
+#include "lance/lance_bridge.h"
 
 #include <memory>
 #include <string_view>
@@ -20,7 +20,7 @@
 
 #include <arrow/record_batch.h>
 
-#include "bridge_util.h"
+#include "runtime/bridge_util.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 
 namespace milvus_storage::lance {

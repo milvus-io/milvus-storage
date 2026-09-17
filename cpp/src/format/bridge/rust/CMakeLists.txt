@@ -22,7 +22,7 @@ corrosion_set_env_vars(rust_bridge
 # otherwise, `rlib` will conflict.
 set(CXX_BRIDGE_FILES lib.rs)
 if (WITH_TALON)
-    list(APPEND CXX_BRIDGE_FILES talon_bridge.rs)
+    list(APPEND CXX_BRIDGE_FILES talon/talon_bridge.rs)
 endif()
 corrosion_add_cxxbridge(rust-bridge
     CRATE rust_bridge

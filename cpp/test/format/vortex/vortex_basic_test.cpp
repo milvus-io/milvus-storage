@@ -44,7 +44,7 @@
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_writer.h"
 #include "test_env.h"
-#include "vortex_bridge.h"
+#include "vortex/vortex_bridge.h"
 
 namespace milvus_storage {
 

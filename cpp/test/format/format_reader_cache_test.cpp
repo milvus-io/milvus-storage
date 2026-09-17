@@ -46,7 +46,7 @@
 #include "milvus-storage/reader.h"
 #include "milvus-storage/thread_pool.h"
 #include "milvus-storage/writer.h"
-#include "iceberg_bridge.h"
+#include "iceberg/iceberg_bridge.h"
 #include "test_env.h"
 
 namespace milvus_storage::test {

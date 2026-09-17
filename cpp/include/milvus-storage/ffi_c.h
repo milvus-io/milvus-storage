@@ -353,13 +353,15 @@ FFI_EXPORT char* loon_manifest_debug_string(const LoonManifest* manifest);
  * @param paths Array of file paths
  * @param start_indices Array of start indices
  * @param end_indices Array of end indices
+ * @param file_properties Optional array of file_lens entries. Null, or count == 0, means no properties.
  * @param file_lens Number of files
  * @param out_column_groups Output parameter for generated LoonColumnGroups (function allocates and returns pointer)
  *                          Caller must call `loon_column_groups_destroy` to free allocated memory
  * @return 0 on success, others is error code
  *
- * Notice that: The current method may no longer be used.
- * Please construct LoonColumnGroups directly using the C Struct.
+ * All inputs are borrowed only for this call; the result owns a deep copy.
+ * File properties are opaque strings, not reader/filesystem configuration.
+ * On failure, out_column_groups is set to null when supplied.
  */
 FFI_EXPORT LoonFFIResult loon_column_groups_create(const char** columns,
                                                    size_t col_lens,
@@ -367,6 +369,7 @@ FFI_EXPORT LoonFFIResult loon_column_groups_create(const char** columns,
                                                    char** paths,
                                                    int64_t* start_indices,
                                                    int64_t* end_indices,
+                                                   const LoonProperties* file_properties,
                                                    size_t file_lens,
                                                    LoonColumnGroups** out_column_groups);
 
@@ -423,6 +426,13 @@ typedef uintptr_t LoonWriterHandle;
 
 /**
  * @brief Creates a new Writer for a milvus storage dataset
+ *
+ * When writer.enc.enable is true, writer.enc.key must contain the standard
+ * padded Base64 encoding of the binary AES key (16, 24 or 32 bytes), for both
+ * C and native C++ writers. Properties retain this text; the Parquet writer
+ * decodes the key when creating encryption properties. Invalid keys fail the
+ * write/close operation that creates the Parquet writer. writer.enc.meta is
+ * passed through unchanged.
  *
  * @param base_path Base path in the filesystem to write data
  * @param schema Arrow schema handle
@@ -640,6 +650,13 @@ FFI_EXPORT LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
 /**
  * @brief Sets a key retriever callback for dynamic key retrieval
  * use to the KMS(key management system) integration.
+ *
+ * The callback receives key metadata and returns the standard padded Base64
+ * encoding of the raw AES key (16, 24 or 32 bytes). Its returned string is
+ * borrowed and must remain valid until this adapter has copied it; storage
+ * does not free it. Null or invalid encoding means no usable key and fails
+ * encrypted reads. The adapter decodes before passing the key to the native
+ * C++ reader, whose callback continues to return raw binary key bytes.
  *
  * This is a setup-only API and is not thread-safe with read operations. Call it
  * before creating record batch readers, chunk readers, or calling take.
