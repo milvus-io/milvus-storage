@@ -1803,10 +1803,10 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
     }
     auto native_options = options();
     native_options.region = region();
-    auto native = NativeS3Transport::Make(native_options, holder_);
+    auto native = NativeS3Transport::Make(native_options, holder_, crt_holder_);
     if (native.ok()) {
       native_ = *native;
-      native_operations_ = MakeNativeS3Operations(native_options, holder_, io_context_, native_);
+      native_operations_ = MakeNativeS3Operations(native_options, io_context_, native_);
       ARROW_RETURN_NOT_OK(native_operations_.status());
     } else {
       native_operations_ = native.status();
