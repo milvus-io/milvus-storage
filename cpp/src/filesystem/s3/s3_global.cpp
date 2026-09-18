@@ -36,7 +36,6 @@
 #include "milvus-storage/filesystem/s3/s3_client.h"
 #ifdef WITH_CRT
 #include "milvus-storage/filesystem/s3/s3_crt_client.h"
-#include "filesystem/s3/native_s3_transport.h"
 #endif
 namespace milvus_storage {
 
@@ -135,9 +134,8 @@ struct AwsInstance {
         return;
       }
 #ifdef WITH_CRT
-      // This waits until every holder-owned CRT client has finished its
-      // synchronous destructor. No CRT client may outlive ShutdownAPI().
-      FinalizeNativeS3Transports();
+      // Drain SDK client destructors and native transport shutdown callbacks
+      // through the same holder registry before destroying the AWS runtime.
       crt_client_finalizer->Finalize();
 #endif
       client_finalizer->Finalize();

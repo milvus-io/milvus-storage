@@ -6,7 +6,6 @@
 #ifdef WITH_CRT
 #include <algorithm>
 #include <cctype>
-#include <condition_variable>
 #include <mutex>
 #include <utility>
 #include <arrow/filesystem/path_util.h>
@@ -67,47 +66,25 @@ aws_retry_strategy* SingleAttempt() {
   return s;
 }
 
-struct Registry {
-  std::mutex mutex;
-  bool finalized = false;
-  std::vector<std::weak_ptr<NativeS3Transport::State>> states;
-};
-Registry& Transports() {
-  static Registry registry;
-  return registry;
-}
 }  // namespace
 
 struct NativeS3Transport::State {
   std::mutex mutex;
-  std::condition_variable drained;
-  aws_s3_client* client = nullptr;
-  bool shutdown = false;
-  size_t active = 0;
   size_t inflight = 0;
   size_t limit = 0;
   std::shared_ptr<S3ClientHolder> holder;
   std::shared_ptr<Aws::Crt::Auth::ICredentialsProvider> credentials;
 
-  void Release() {
-    aws_s3_client* owned;
-    {
-      std::lock_guard lock(mutex);
-      owned = std::exchange(client, nullptr);
-    }
-    aws_s3_client_release(owned);
-  }
   void Retire(bool network_pending) {
     std::lock_guard lock(mutex);
     if (network_pending)
       --inflight;
-    --active;
-    drained.notify_all();
   }
 };
 
 namespace {
 struct Request {
+  S3CrtClientLease client_lease;
   std::shared_ptr<NativeS3Transport::State> state;
   arrow::io::IOContext io;
   size_t limit;
@@ -248,14 +225,8 @@ arrow::Status NativeS3Response::ToStatus() const {
   return MakeExtendError(code, "Native S3 request failed: HTTP " + std::to_string(http_status));
 }
 
-NativeS3Transport::~NativeS3Transport() { state_->Release(); }
-
 arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(const S3Options& options,
                                                                           std::shared_ptr<S3ClientHolder> holder) {
-  auto& registry = Transports();
-  std::lock_guard construction(registry.mutex);
-  if (registry.finalized)
-    return arrow::Status::Invalid("Native S3 transport finalized");
   ARROW_RETURN_NOT_OK(CheckS3Initialized());
   if ((!options.cloud_provider.empty() && options.cloud_provider != "aws") || options.retry_strategy ||
       !options.proxy_options.host.empty() || options.credentials_kind == S3CredentialsKind::Role ||
@@ -280,88 +251,95 @@ arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(const 
   auto state = std::make_shared<State>();
   state->holder = std::move(holder);
   state->limit = options.max_connections;
-  using namespace Aws::Crt::Auth;
-  if (options.credentials_kind == S3CredentialsKind::Explicit) {
-    if (!options.credentials_provider)
-      return arrow::Status::Invalid("Missing S3 credentials provider");
-    const auto keys = options.credentials_provider->GetAWSCredentials();
-    CredentialsProviderStaticConfig config;
-    config.AccessKeyId = aws_byte_cursor_from_c_str(keys.GetAWSAccessKeyId().c_str());
-    config.SecretAccessKey = aws_byte_cursor_from_c_str(keys.GetAWSSecretKey().c_str());
-    config.SessionToken = aws_byte_cursor_from_c_str(keys.GetSessionToken().c_str());
-    state->credentials = CredentialsProvider::CreateCredentialsProviderStatic(config);
-  } else if (options.credentials_kind == S3CredentialsKind::Anonymous) {
-    state->credentials = CredentialsProvider::CreateCredentialsProviderAnonymous();
-  } else {
-    CredentialsProviderChainDefaultConfig config;
-    config.Bootstrap = Aws::GetDefaultClientBootstrap();
-    state->credentials = CredentialsProvider::CreateCredentialsProviderChainDefault(config);
-  }
-  if (!state->credentials)
-    return arrow::Status::IOError("Cannot create native S3 credentials provider");
-  auto* bootstrap = Aws::GetDefaultClientBootstrap()->GetUnderlyingHandle();
-  // Use the same SDK-resolved region as the existing filesystem.
-  const auto region = options.region.empty() ? std::string("us-east-1") : options.region;
-  aws_signing_config_aws signing{};
-  aws_s3_init_default_signing_config(&signing, aws_byte_cursor_from_c_str(region.c_str()),
-                                     state->credentials->GetUnderlyingHandle());
-  aws_s3_client_config config{};
-  config.region = aws_byte_cursor_from_c_str(region.c_str());
-  config.client_bootstrap = bootstrap;
-  config.signing_config = &signing;
-  config.tls_mode = options.scheme == "http" ? AWS_MR_TLS_DISABLED : AWS_MR_TLS_ENABLED;
-  Aws::Crt::Io::TlsContext tls;
-  Aws::Crt::Io::TlsConnectionOptions connection;
-  const auto& global = arrow::fs::internal::global_options;
-  if (options.scheme == "https" && (!global.tls_ca_file_path.empty() || !global.tls_ca_dir_path.empty())) {
-    auto tls_options = Aws::Crt::Io::TlsContextOptions::InitDefaultClient();
-    if (!tls_options.OverrideDefaultTrustStore(
-            global.tls_ca_dir_path.empty() ? nullptr : global.tls_ca_dir_path.c_str(),
-            global.tls_ca_file_path.empty() ? nullptr : global.tls_ca_file_path.c_str())) {
-      return arrow::Status::Invalid("Cannot configure native S3 TLS trust store");
-    }
-    tls = Aws::Crt::Io::TlsContext(tls_options, Aws::Crt::Io::TlsMode::CLIENT);
-    if (!tls)
-      return arrow::Status::IOError("Cannot create native S3 TLS context");
-    connection = tls.NewConnectionOptions();
-    config.tls_connection_options = connection.GetUnderlyingHandle();
-  }
-  config.max_active_connections_override = options.max_connections;
-  config.throughput_target_gbps = std::max(1.0, static_cast<double>(options.max_connections));
-  config.memory_limit_in_bytes = 1024ULL * 1024 * 1024;
-  if (options.connect_timeout > 0)
-    config.connect_timeout_ms = static_cast<uint32_t>(options.connect_timeout * 1000);
-  // Match the existing explicit proxy configuration; never implicitly pick up a
-  // process proxy that the synchronous filesystem did not use.
-  proxy_env_var_settings proxy{};
-  proxy.env_var_type = AWS_HPEV_DISABLE;
-  config.proxy_ev_settings = &proxy;
-  auto retry = std::unique_ptr<aws_retry_strategy, decltype(&aws_retry_strategy_release)>(SingleAttempt(),
-                                                                                          aws_retry_strategy_release);
-  if (!retry)
-    return arrow::Status::OutOfMemory("Cannot create native S3 retry policy");
-  config.retry_strategy = retry.get();
-  auto retained = std::make_unique<std::shared_ptr<State>>(state);
-  config.shutdown_callback_user_data = retained.get();
-  config.shutdown_callback = [](void* user) {
-    std::unique_ptr<std::shared_ptr<State>> owned(static_cast<std::shared_ptr<State>*>(user));
-    auto& s = **owned;
-    // Credentials must be released before publishing shutdown to the global barrier.
-    s.credentials.reset();
-    std::lock_guard lock(s.mutex);
-    s.shutdown = true;
-    s.drained.notify_all();
-  };
-  auto transport = std::shared_ptr<NativeS3Transport>(new NativeS3Transport(state));
-  registry.states.erase(
-      std::remove_if(registry.states.begin(), registry.states.end(), [](const auto& entry) { return entry.expired(); }),
-      registry.states.end());
-  registry.states.push_back(state);
-  state->client = aws_s3_client_new(aws_default_allocator(), &config);
-  if (!state->client)
-    return arrow::Status::IOError("Cannot create native S3 client: ", aws_error_str(aws_last_error()));
-  retained.release();
-  return transport;
+  ARROW_ASSIGN_OR_RAISE(
+      auto crt_holder,
+      GetCrtClientFinalizer()->AddNativeClient(
+          [state, options](std::function<void()> on_shutdown) -> arrow::Result<aws_s3_client*> {
+            auto cleanup = [](State* s) {
+              s->credentials.reset();
+              s->holder.reset();
+            };
+            std::unique_ptr<State, decltype(cleanup)> pending_resources(state.get(), cleanup);
+            using namespace Aws::Crt::Auth;
+            if (options.credentials_kind == S3CredentialsKind::Explicit) {
+              if (!options.credentials_provider)
+                return arrow::Status::Invalid("Missing S3 credentials provider");
+              const auto keys = options.credentials_provider->GetAWSCredentials();
+              CredentialsProviderStaticConfig config;
+              config.AccessKeyId = aws_byte_cursor_from_c_str(keys.GetAWSAccessKeyId().c_str());
+              config.SecretAccessKey = aws_byte_cursor_from_c_str(keys.GetAWSSecretKey().c_str());
+              config.SessionToken = aws_byte_cursor_from_c_str(keys.GetSessionToken().c_str());
+              state->credentials = CredentialsProvider::CreateCredentialsProviderStatic(config);
+            } else if (options.credentials_kind == S3CredentialsKind::Anonymous) {
+              state->credentials = CredentialsProvider::CreateCredentialsProviderAnonymous();
+            } else {
+              CredentialsProviderChainDefaultConfig config;
+              config.Bootstrap = Aws::GetDefaultClientBootstrap();
+              state->credentials = CredentialsProvider::CreateCredentialsProviderChainDefault(config);
+            }
+            if (!state->credentials)
+              return arrow::Status::IOError("Cannot create native S3 credentials provider");
+            auto* bootstrap = Aws::GetDefaultClientBootstrap()->GetUnderlyingHandle();
+            // Use the same SDK-resolved region as the existing filesystem.
+            const auto region = options.region.empty() ? std::string("us-east-1") : options.region;
+            aws_signing_config_aws signing{};
+            aws_s3_init_default_signing_config(&signing, aws_byte_cursor_from_c_str(region.c_str()),
+                                               state->credentials->GetUnderlyingHandle());
+            aws_s3_client_config config{};
+            config.region = aws_byte_cursor_from_c_str(region.c_str());
+            config.client_bootstrap = bootstrap;
+            config.signing_config = &signing;
+            config.tls_mode = options.scheme == "http" ? AWS_MR_TLS_DISABLED : AWS_MR_TLS_ENABLED;
+            Aws::Crt::Io::TlsContext tls;
+            Aws::Crt::Io::TlsConnectionOptions connection;
+            const auto& global = arrow::fs::internal::global_options;
+            if (options.scheme == "https" && (!global.tls_ca_file_path.empty() || !global.tls_ca_dir_path.empty())) {
+              auto tls_options = Aws::Crt::Io::TlsContextOptions::InitDefaultClient();
+              if (!tls_options.OverrideDefaultTrustStore(
+                      global.tls_ca_dir_path.empty() ? nullptr : global.tls_ca_dir_path.c_str(),
+                      global.tls_ca_file_path.empty() ? nullptr : global.tls_ca_file_path.c_str())) {
+                return arrow::Status::Invalid("Cannot configure native S3 TLS trust store");
+              }
+              tls = Aws::Crt::Io::TlsContext(tls_options, Aws::Crt::Io::TlsMode::CLIENT);
+              if (!tls)
+                return arrow::Status::IOError("Cannot create native S3 TLS context");
+              connection = tls.NewConnectionOptions();
+              config.tls_connection_options = connection.GetUnderlyingHandle();
+            }
+            config.max_active_connections_override = options.max_connections;
+            config.throughput_target_gbps = std::max(1.0, static_cast<double>(options.max_connections));
+            config.memory_limit_in_bytes = 1024ULL * 1024 * 1024;
+            if (options.connect_timeout > 0)
+              config.connect_timeout_ms = static_cast<uint32_t>(options.connect_timeout * 1000);
+            // Match the existing explicit proxy configuration; never implicitly pick up a
+            // process proxy that the synchronous filesystem did not use.
+            proxy_env_var_settings proxy{};
+            proxy.env_var_type = AWS_HPEV_DISABLE;
+            config.proxy_ev_settings = &proxy;
+            auto retry = std::unique_ptr<aws_retry_strategy, decltype(&aws_retry_strategy_release)>(
+                SingleAttempt(), aws_retry_strategy_release);
+            if (!retry)
+              return arrow::Status::OutOfMemory("Cannot create native S3 retry policy");
+            config.retry_strategy = retry.get();
+            auto retained = std::make_unique<std::function<void()>>([state, on_shutdown = std::move(on_shutdown)] {
+              // Publish completion only after credentials and SDK endpoint resources are gone.
+              state->credentials.reset();
+              state->holder.reset();
+              on_shutdown();
+            });
+            config.shutdown_callback_user_data = retained.get();
+            config.shutdown_callback = [](void* user) {
+              std::unique_ptr<std::function<void()>> done(static_cast<std::function<void()>*>(user));
+              (*done)();
+            };
+            auto* client = aws_s3_client_new(aws_default_allocator(), &config);
+            if (!client)
+              return arrow::Status::IOError("Cannot create native S3 client: ", aws_error_str(aws_last_error()));
+            retained.release();
+            pending_resources.release();
+            return client;
+          }));
+  return std::shared_ptr<NativeS3Transport>(new NativeS3Transport(std::move(state), std::move(crt_holder)));
 }
 
 arrow::Future<NativeS3Response> NativeS3Transport::Send(const Aws::S3::S3Request& model,
@@ -379,17 +357,13 @@ arrow::Future<NativeS3Response> NativeS3Transport::Send(const Aws::S3::S3Request
     r->state = state_;
     r->io = io;
     r->limit = limit;
-    std::unique_ptr<aws_s3_client, decltype(&aws_s3_client_release)> client(nullptr, aws_s3_client_release);
+    ARROW_ASSIGN_OR_RAISE(r->client_lease, holder_->Acquire());
     {
       std::lock_guard lock(state_->mutex);
-      if (!state_->client)
-        return arrow::Status::Invalid("Native S3 transport is closed");
       if (state_->inflight >= state_->limit)
         return arrow::Status::CapacityError("Native S3 request limit reached");
-      ++state_->active;
       ++state_->inflight;
       r->charged = true;
-      client.reset(aws_s3_client_acquire(state_->client));
     }
     ARROW_ASSIGN_OR_RAISE(auto lease, state_->holder->Lock());
     auto endpoint = lease->accessEndpointProvider()->ResolveEndpoint(model.GetEndpointContextParams());
@@ -436,7 +410,7 @@ arrow::Future<NativeS3Response> NativeS3Transport::Send(const Aws::S3::S3Request
     options.shutdown_callback = Request::Shutdown;
     auto future = r->future;
     auto* pending = r.release();
-    auto* meta = aws_s3_client_make_meta_request(client.get(), &options);
+    auto* meta = aws_s3_client_make_meta_request(pending->client_lease.native_client(), &options);
     if (!meta) {
       r.reset(pending);
       return arrow::Status::IOError("CRT rejected S3 request: ", aws_error_str(aws_last_error()));
@@ -455,22 +429,5 @@ arrow::Future<NativeS3Response> NativeS3Transport::Send(const Aws::S3::S3Request
   }
 }
 
-void FinalizeNativeS3Transports() {
-  auto& registry = Transports();
-  std::vector<std::shared_ptr<NativeS3Transport::State>> states;
-  {
-    std::lock_guard lock(registry.mutex);
-    registry.finalized = true;
-    for (const auto& weak : registry.states)
-      if (auto state = weak.lock())
-        states.push_back(std::move(state));
-  }
-  for (const auto& state : states) state->Release();
-  for (const auto& state : states) {
-    std::unique_lock lock(state->mutex);
-    state->drained.wait(lock, [&] { return state->shutdown && state->active == 0; });
-    state->holder.reset();
-  }
-}
 }  // namespace milvus_storage
 #endif
