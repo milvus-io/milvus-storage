@@ -3043,7 +3043,8 @@ arrow::Status S3FileSystem::DeleteDirContents(const std::string& s, bool missing
 
 arrow::Future<> S3FileSystem::DeleteDirContentsAsync(const std::string& s, bool missing_dir_ok) {
 #ifdef WITH_CRT
-  if (impl_->native_operations_.ok()) return (*impl_->native_operations_)->DeleteDirContentsAsync(s, missing_dir_ok);
+  if (impl_->native_operations_.ok())
+    return (*impl_->native_operations_)->DeleteDirContentsAsync(s, missing_dir_ok);
 #endif
   ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
 
