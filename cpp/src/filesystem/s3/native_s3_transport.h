@@ -32,7 +32,7 @@ class NativeS3Transport {
                                                                 std::shared_ptr<S3CrtClientHolder> crt_holder);
   // DEFAULT meta requests never transform PUT into multipart. All bodies are
   // owned memory; no CRT callback reads a blocking file/iostream data source.
-  arrow::Future<NativeS3Response> Send(const Aws::S3::S3Request& request,
+  arrow::Future<NativeS3Response> Send(const Aws::AmazonWebServiceRequest& request,
                                        const std::string& key,
                                        Aws::Http::HttpMethod method,
                                        const std::string& query,

@@ -5,6 +5,9 @@ Run only inside wt-build. Delayed responses expose synchronous request waits;
 this fixture does not establish real-service authentication/TLS compatibility.
 """
 import http.server
+import hashlib
+import uuid
+import xml.etree.ElementTree as ET
 import os
 import resource
 import subprocess
@@ -20,6 +23,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     objects = {"root/hello #?+% 中文": b"abcdef", "root/slow": b"abcdef",
                "root/slow-list/file": b"data", **{"root/pages/" + str(i): b"data" for i in range(5)}}
 
+    metadata = {}
+    uploads = {}
+
     def log_message(self, *_):
         pass
 
@@ -29,7 +35,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(len(body) if length is None else length))
-        self.send_header("Content-Type", "application/octet-stream" if code == 206 else "application/xml")
+        if "Content-Type" not in (headers or {}):
+            self.send_header("Content-Type", "application/octet-stream" if code == 206 else "application/xml")
         self.send_header("Last-Modified", "Wed, 01 Jan 2025 00:00:00 GMT")
         self.send_header("ETag", '"8aa99b1f439ff71293e95357bac6fd94"')
         for key, value in (headers or {}).items():
@@ -45,7 +52,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = urllib.parse.unquote(uri.path).lstrip("/")
         bucket, _, key = path.partition("/")
         query = urllib.parse.parse_qs(uri.query, keep_blank_values=True)
-        if key == "root/slow" or query.get("prefix") == ["root/slow-list/"]:
+        if key in ("root/slow", "root/slow-write") or query.get("prefix") == ["root/slow-list/"]:
             time.sleep(0.3)
         if not bucket and self.command == "GET":
             if "continuation-token" not in query:
@@ -55,12 +62,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply(404)
         if key == "root/denied":
             return self.reply(403, b"<Error><Code>AccessDenied</Code></Error>")
+        if self.command in ("PUT", "POST", "DELETE"):
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            if self.command == "DELETE" and "uploadId" in query:
+                self.uploads.pop(query["uploadId"][0], None)
+                return self.reply(204)
+            if self.command == "POST" and "uploads" in query:
+                upload_id = str(uuid.uuid4())
+                self.uploads[upload_id] = {"parts": {}, "key": key}
+                return self.reply(200, ("<InitiateMultipartUploadResult><UploadId>" + upload_id +
+                                       "</UploadId></InitiateMultipartUploadResult>").encode())
+            if "uploadId" in query:
+                upload = self.uploads.get(query["uploadId"][0])
+                if not upload or upload["key"] != key:
+                    return self.reply(404)
+                if self.command == "PUT":
+                    upload["parts"][int(query["partNumber"][0])] = body
+                    return self.reply(200)
+                if key == "root/error-complete":
+                    return self.reply(200, b"<Error><Code>InternalError</Code></Error>")
+                xml = ET.fromstring(body)
+                numbers = [int(item.text) for item in xml.iter() if item.tag.endswith("PartNumber")]
+                body = b"".join(upload["parts"][n] for n in numbers)
+            if self.headers.get("If-None-Match") == "*" and key in self.objects:
+                return self.reply(412)
+            if "If-Match" in self.headers and self.headers["If-Match"] != '"8aa99b1f439ff71293e95357bac6fd94"':
+                return self.reply(412)
+            self.objects[key] = body
+            self.metadata[key] = {k: v for k, v in self.headers.items()
+                                  if k.lower().startswith("x-amz-meta-") or k.lower() == "content-type"}
+            if self.command == "POST":
+                self.uploads.pop(query["uploadId"][0], None)
+                return self.reply(200, b'<CompleteMultipartUploadResult><ETag>"8aa99b1f439ff71293e95357bac6fd94"</ETag></CompleteMultipartUploadResult>')
+            return self.reply(200)
         if self.command == "HEAD":
             if not key:
                 return self.reply(200)
             if key not in self.objects:
                 return self.reply(404)
-            return self.reply(200, length=len(self.objects[key]))
+            return self.reply(200, headers=self.metadata.get(key), length=len(self.objects[key]))
         if query.get("list-type") == ["2"]:
             prefix = query.get("prefix", [""])[0]
             delimiter = query.get("delimiter", [""])[0]
@@ -101,6 +141,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     do_HEAD = handle_request
     do_GET = handle_request
+    do_PUT = handle_request
+    do_POST = handle_request
+    do_DELETE = handle_request
 
 
 def main():

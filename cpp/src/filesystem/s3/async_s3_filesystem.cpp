@@ -5,10 +5,21 @@
 #include "filesystem/s3/async_s3_filesystem.h"
 #ifdef WITH_CRT
 #include <charconv>
+#include <cctype>
 #include <limits>
 #include <set>
 #include <arrow/filesystem/path_util.h>
 #include <aws/core/utils/xml/XmlSerializer.h>
+#include <aws/core/utils/HashingUtils.h>
+#include <aws/core/utils/stream/PreallocatedStreamBuf.h>
+#include <aws/s3/model/PutObjectRequest.h>
+#include <aws/s3/model/CreateMultipartUploadRequest.h>
+#include <aws/s3/model/CreateMultipartUploadResult.h>
+#include <aws/s3/model/UploadPartRequest.h>
+#include <aws/s3/model/CompleteMultipartUploadRequest.h>
+#include <aws/s3/model/CompleteMultipartUploadResult.h>
+#include <aws/s3/model/AbortMultipartUploadRequest.h>
+#include <aws/s3/model/GetObjectRequest.h>
 #include <aws/s3/model/HeadBucketRequest.h>
 #include <aws/s3/model/HeadObjectRequest.h>
 #include <aws/s3/model/HeadObjectResult.h>
@@ -79,6 +90,74 @@ Result<int64_t> ContentLength(const NativeS3Response& response) {
 FileInfo Info(const std::string& path, FileType type) {
   FileInfo info(path, type);
   return info;
+}
+
+Result<Path> ObjectPath(const std::string& path) {
+  ARROW_ASSIGN_OR_RAISE(auto parsed, Path::Parse(path));
+  if (parsed.key.empty())
+    return Status::Invalid("Expected S3 object path");
+  return parsed;
+}
+Status Conditions(const AsyncWriteOptions& options) {
+  if (options.if_absent && !options.if_match.empty())
+    return Status::Invalid("if_absent and if_match are mutually exclusive");
+  return Status::OK();
+}
+template <class Request>
+Status SetMetadata(Request& request, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) {
+  request.SetContentType("application/octet-stream");
+  if (!metadata)
+    return Status::OK();
+  for (int64_t i = 0; i < metadata->size(); ++i) {
+    auto key = metadata->key(i);
+    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return std::tolower(c); });
+    const auto& value = metadata->value(i);
+    if (value.find_first_of("\r\n") != std::string::npos)
+      return Status::Invalid("Invalid S3 metadata value");
+    if (key == "content-type")
+      request.SetContentType(value.c_str());
+    else if (key == "content-encoding")
+      request.SetContentEncoding(value.c_str());
+    else if (key == "content-language")
+      request.SetContentLanguage(value.c_str());
+    else if (key == "content-disposition")
+      request.SetContentDisposition(value.c_str());
+    else if (key == "cache-control")
+      request.SetCacheControl(value.c_str());
+    else if (key == "expires") {
+      Aws::Utils::DateTime date(value.c_str(), Aws::Utils::DateFormat::ISO_8601);
+      if (!date.WasParseSuccessful())
+        return Status::Invalid("Expires must be ISO 8601");
+      request.SetExpires(date);
+    } else if (key == "acl") {
+      auto acl = S3::ObjectCannedACLMapper::GetObjectCannedACLForName(value.c_str());
+      if (acl == S3::ObjectCannedACL::NOT_SET)
+        return Status::Invalid("Invalid S3 ACL");
+      request.SetACL(acl);
+    } else if (key.compare(0, 11, "x-amz-meta-") == 0 && key.size() > 11 &&
+               key.find_first_of("\r\n :") == std::string::npos)
+      request.AddMetadata(key.substr(11).c_str(), value.c_str());
+    else
+      return Status::Invalid("Unsupported S3 write metadata: ", key);
+  }
+  return Status::OK();
+}
+Aws::String Checksum(const arrow::Buffer& data) {
+  Aws::Utils::Stream::PreallocatedStreamBuf buffer(reinterpret_cast<unsigned char*>(const_cast<uint8_t*>(data.data())),
+                                                   data.size());
+  Aws::IOStream stream(&buffer);
+  return Aws::Utils::HashingUtils::Base64Encode(Aws::Utils::HashingUtils::CalculateCRC32C(stream));
+}
+Result<AsyncObjectVersion> Version(const NativeS3Response& response) {
+  ARROW_RETURN_NOT_OK(response.ToStatus());
+  AsyncObjectVersion version;
+  auto etag = response.headers.find("etag");
+  if (etag != response.headers.end())
+    version.etag = etag->second.c_str();
+  auto id = response.headers.find("x-amz-version-id");
+  if (id != response.headers.end())
+    version.version_id = id->second.c_str();
+  return version;
 }
 
 class AsyncS3FileSystem final : public NativeS3Operations, public std::enable_shared_from_this<AsyncS3FileSystem> {
@@ -343,6 +422,143 @@ class AsyncS3FileSystem final : public NativeS3Operations, public std::enable_sh
           });
     };
     return [next] { return (*next)(); };
+  }
+
+
+  Future<AsyncObjectVersion> WriteAsync(const std::string& path,
+                                        std::shared_ptr<arrow::Buffer> data,
+                                        const AsyncWriteOptions& options) override {
+    auto parsed = ObjectPath(path);
+    if (!parsed.ok())
+      return Failed<AsyncObjectVersion>(parsed.status());
+    if (!data || data->size() < 0 || data->size() > 5LL * 1024 * 1024 * 1024)
+      return Failed<AsyncObjectVersion>(Status::Invalid("Single PUT needs a buffer of at most 5 GiB"));
+    auto status = Conditions(options);
+    if (!status.ok())
+      return Failed<AsyncObjectVersion>(status);
+    S3::PutObjectRequest request;
+    request.SetBucket(parsed->bucket.c_str());
+    request.SetKey(parsed->key.c_str());
+    if (options.if_absent)
+      request.SetIfNoneMatch("*");
+    if (!options.if_match.empty())
+      request.SetIfMatch(options.if_match.c_str());
+    status = SetMetadata(request, options.metadata ? options.metadata : options_.default_metadata);
+    if (!status.ok())
+      return Failed<AsyncObjectVersion>(status);
+    if (options_.use_crc32c_checksum)
+      request.SetChecksumCRC32C(Checksum(*data));
+    return transport_->Send(request, parsed->key, HttpMethod::HTTP_PUT, "", io_, 16 * 1024 * 1024, std::move(data))
+        .Then([](const NativeS3Response& response) { return Version(response); });
+  }
+  Future<std::string> CreateMultipartUploadAsync(const std::string& path, const AsyncWriteOptions& options) override {
+    auto parsed = ObjectPath(path);
+    if (!parsed.ok())
+      return Failed<std::string>(parsed.status());
+    if (options.if_absent || !options.if_match.empty())
+      return Failed<std::string>(Status::Invalid("Multipart conditions belong on CompleteMultipartUploadAsync"));
+    S3::CreateMultipartUploadRequest request;
+    request.SetBucket(parsed->bucket.c_str());
+    request.SetKey(parsed->key.c_str());
+    auto status = SetMetadata(request, options.metadata ? options.metadata : options_.default_metadata);
+    if (!status.ok())
+      return Failed<std::string>(status);
+    if (options_.use_crc32c_checksum)
+      request.SetChecksumAlgorithm(S3::ChecksumAlgorithm::CRC32C);
+    return transport_->Send(request, parsed->key, HttpMethod::HTTP_POST, "?uploads", io_)
+        .Then([](const NativeS3Response& response) -> Result<std::string> {
+          ARROW_ASSIGN_OR_RAISE(auto result, XmlResult<S3::CreateMultipartUploadResult>(response));
+          if (result.GetUploadId().empty())
+            return Status::IOError("S3 returned no multipart upload ID");
+          return std::string(result.GetUploadId().c_str());
+        });
+  }
+  Future<AsyncUploadedPart> UploadPartAsync(const std::string& path,
+                                            const std::string& id,
+                                            int number,
+                                            std::shared_ptr<arrow::Buffer> data) override {
+    auto parsed = ObjectPath(path);
+    if (!parsed.ok())
+      return Failed<AsyncUploadedPart>(parsed.status());
+    if (id.empty() || number < 1 || number > 10000 || !data || data->size() < 0 ||
+        data->size() > 5LL * 1024 * 1024 * 1024)
+      return Failed<AsyncUploadedPart>(Status::Invalid("Invalid S3 upload part"));
+    S3::UploadPartRequest request;
+    request.SetBucket(parsed->bucket.c_str());
+    request.SetKey(parsed->key.c_str());
+    request.SetUploadId(id.c_str());
+    request.SetPartNumber(number);
+    std::string checksum;
+    if (options_.use_crc32c_checksum) {
+      checksum = Checksum(*data).c_str();
+      request.SetChecksumCRC32C(checksum.c_str());
+    }
+    return transport_->Send(request, parsed->key, HttpMethod::HTTP_PUT, "", io_, 16 * 1024 * 1024, std::move(data))
+        .Then([number, checksum](const NativeS3Response& response) -> Result<AsyncUploadedPart> {
+          ARROW_ASSIGN_OR_RAISE(auto result, Version(response));
+          if (result.etag.empty())
+            return Status::IOError("S3 returned no part ETag");
+          return AsyncUploadedPart{number, std::move(result.etag), checksum};
+        });
+  }
+  Future<AsyncObjectVersion> CompleteMultipartUploadAsync(const std::string& path,
+                                                          const std::string& id,
+                                                          const std::vector<AsyncUploadedPart>& parts,
+                                                          const AsyncWriteOptions& options) override {
+    auto parsed = ObjectPath(path);
+    if (!parsed.ok())
+      return Failed<AsyncObjectVersion>(parsed.status());
+    auto status = Conditions(options);
+    if (!status.ok())
+      return Failed<AsyncObjectVersion>(status);
+    if (options.metadata)
+      return Failed<AsyncObjectVersion>(Status::Invalid("Set metadata when creating multipart upload"));
+    if (id.empty() || parts.empty() || parts.size() > 10000)
+      return Failed<AsyncObjectVersion>(Status::Invalid("Invalid S3 multipart completion"));
+    S3::CompletedMultipartUpload upload;
+    int previous = 0;
+    for (const auto& part : parts) {
+      if (part.number <= previous || part.number > 10000 || part.etag.empty())
+        return Failed<AsyncObjectVersion>(Status::Invalid("Multipart parts must be ordered, unique and have ETags"));
+      S3::CompletedPart item;
+      item.SetPartNumber(part.number);
+      item.SetETag(part.etag.c_str());
+      if (!part.checksum_crc32c.empty())
+        item.SetChecksumCRC32C(part.checksum_crc32c.c_str());
+      upload.AddParts(std::move(item));
+      previous = part.number;
+    }
+    S3::CompleteMultipartUploadRequest request;
+    request.SetBucket(parsed->bucket.c_str());
+    request.SetKey(parsed->key.c_str());
+    request.SetUploadId(id.c_str());
+    request.SetMultipartUpload(std::move(upload));
+    if (options.if_absent)
+      request.SetIfNoneMatch("*");
+    if (!options.if_match.empty())
+      request.SetIfMatch(options.if_match.c_str());
+    return transport_->Send(request, parsed->key, HttpMethod::HTTP_POST, "", io_)
+        .Then([](const NativeS3Response& response) -> Result<AsyncObjectVersion> {
+          ARROW_ASSIGN_OR_RAISE(auto result, XmlResult<S3::CompleteMultipartUploadResult>(response));
+          // S3 can return HTTP 200 with an Error XML body; a missing ETag is
+          // never durable success (and must not cause an automatic replay).
+          if (result.GetETag().empty())
+            return Status::IOError("S3 multipart completion has no ETag; outcome may be unknown");
+          return AsyncObjectVersion{result.GetETag().c_str(), result.GetVersionId().c_str()};
+        });
+  }
+  Future<> AbortMultipartUploadAsync(const std::string& path, const std::string& id) override {
+    auto parsed = ObjectPath(path);
+    if (!parsed.ok())
+      return Future<>::MakeFinished(parsed.status());
+    if (id.empty())
+      return Future<>::MakeFinished(Status::Invalid("Missing multipart upload ID"));
+    S3::AbortMultipartUploadRequest request;
+    request.SetBucket(parsed->bucket.c_str());
+    request.SetKey(parsed->key.c_str());
+    request.SetUploadId(id.c_str());
+    return transport_->Send(request, parsed->key, HttpMethod::HTTP_DELETE, "", io_)
+        .Then([](const NativeS3Response& response) { return response.ToStatus(); });
   }
 
   private:
