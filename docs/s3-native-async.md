@@ -25,7 +25,8 @@ stat overrides Arrow's virtual API too, and listing reuses GetFileInfoGenerator.
 Existing CRT reads, metadata caches and file objects are reused. CRT input files
 require native transport at initialization; unsupported configurations fail to open
 with NotImplemented, rather than falling back to executor-backed metadata reads.
-Other unsupported new async operations also return NotImplemented. The existing
+In CRT builds, unsupported async metadata, listing, opening and directory-delete
+operations return NotImplemented instead of scheduling synchronous SDK calls. The existing
 SDK input path remains available when CRT reads are disabled. The executor must
 outlive operations; request completions retain their state and preserve the actual result if completion dispatch is rejected.
 
