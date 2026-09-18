@@ -60,7 +60,7 @@ namespace {
 
 static_assert(FormatReaderWithAsyncMetadata<parquet::ParquetFormatReader>);
 static_assert(FormatReaderWithAsyncMetadata<vortex::VortexFormatReader>);
-static_assert(!FormatReaderWithAsyncMetadata<lance::LanceTableReader>);
+static_assert(FormatReaderWithAsyncMetadata<lance::LanceTableReader>);
 static_assert(!FormatReaderWithAsyncMetadata<iceberg::IcebergFormatReader>);
 
 class NestedStructExtensionType : public arrow::ExtensionType {

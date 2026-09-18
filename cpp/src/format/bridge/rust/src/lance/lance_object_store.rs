@@ -30,7 +30,6 @@ use lance_io::object_store::{
 use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
 use url::Url;
 
-use crate::TOKIO_RT;
 use crate::filesystem_object_store::{FFIPathMapper, FilesystemObjectStore};
 use crate::lance_ffi::FileSystemWrapper;
 
@@ -393,6 +392,8 @@ static LANCE_IO_SCHEDULERS: LazyLock<Mutex<HashMap<String, Weak<ScanScheduler>>>
 
 /// Returns the single active ScanScheduler for a filesystem.
 ///
+/// The caller must run inside TOKIO_RT; scheduler tasks use the current runtime.
+///
 /// The registry lock covers lookup, construction, and insertion so concurrent opens
 /// cannot create competing schedulers for the same filesystem. Only weak references are
 /// retained, allowing a later open to create a fresh scheduler after the domain is idle.
@@ -421,12 +422,10 @@ pub(crate) fn shared_scan_scheduler(
     schedulers.retain(|_, scheduler| scheduler.strong_count() != 0);
     // Construct while holding the registry lock so concurrent first opens
     // cannot select different stores for the same filesystem identity.
-    let scheduler = TOKIO_RT.block_on(async {
-        ScanScheduler::new(
-            object_store.clone(),
-            SchedulerConfig::max_bandwidth(object_store),
-        )
-    });
+    let scheduler = ScanScheduler::new(
+        object_store.clone(),
+        SchedulerConfig::max_bandwidth(object_store),
+    );
     schedulers.insert(fs_cache_key, Arc::downgrade(&scheduler));
     Ok(scheduler)
 }
@@ -434,6 +433,7 @@ pub(crate) fn shared_scan_scheduler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TOKIO_RT;
     use object_store::memory::InMemory;
 
     #[test]
@@ -620,8 +620,12 @@ mod tests {
         ));
         let key = "fs:scheduler-reuse".to_string();
 
-        let first = shared_scan_scheduler(key.clone(), &object_store).unwrap();
-        let second = shared_scan_scheduler(key.clone(), &object_store).unwrap();
+        let first = TOKIO_RT
+            .block_on(async { shared_scan_scheduler(key.clone(), &object_store) })
+            .unwrap();
+        let second = TOKIO_RT
+            .block_on(async { shared_scan_scheduler(key.clone(), &object_store) })
+            .unwrap();
         assert!(Arc::ptr_eq(&first, &second));
 
         let later_object_store = Arc::new(ObjectStore::new(
@@ -635,7 +639,9 @@ mod tests {
             3,
             None,
         ));
-        let later_value = shared_scan_scheduler(key.clone(), &later_object_store).unwrap();
+        let later_value = TOKIO_RT
+            .block_on(async { shared_scan_scheduler(key.clone(), &later_object_store) })
+            .unwrap();
         assert!(Arc::ptr_eq(&first, &later_value));
 
         let scheduler = Arc::downgrade(&first);
@@ -644,7 +650,9 @@ mod tests {
         drop(later_value);
         assert!(scheduler.upgrade().is_none());
 
-        let replacement = shared_scan_scheduler(key, &object_store).unwrap();
+        let replacement = TOKIO_RT
+            .block_on(async { shared_scan_scheduler(key, &object_store) })
+            .unwrap();
         assert!(!Weak::ptr_eq(&scheduler, &Arc::downgrade(&replacement)));
     }
 
@@ -670,7 +678,9 @@ mod tests {
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    shared_scan_scheduler(key, &object_store).unwrap()
+                    TOKIO_RT
+                        .block_on(async { shared_scan_scheduler(key, &object_store) })
+                        .unwrap()
                 })
             })
             .collect::<Vec<_>>();
