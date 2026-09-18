@@ -35,7 +35,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(len(body) if length is None else length))
-        if "Content-Type" not in (headers or {}):
+        if not any(k.lower() == "content-type" for k in (headers or {})):
             self.send_header("Content-Type", "application/octet-stream" if code == 206 else "application/xml")
         self.send_header("Last-Modified", "Wed, 01 Jan 2025 00:00:00 GMT")
         self.send_header("ETag", '"8aa99b1f439ff71293e95357bac6fd94"')
