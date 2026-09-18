@@ -33,6 +33,7 @@
 #include "milvus-storage/filesystem/observable.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/upload_sizable.h"
+#include "milvus-storage/filesystem/async_filesystem.h"
 
 using ::arrow::fs::FileInfo;
 using ::arrow::fs::FileInfoGenerator;
@@ -42,6 +43,8 @@ namespace milvus_storage {
 class S3FileSystem : public arrow::fs::FileSystem, public UploadConditional, public Observable, public UploadSizable {
   public:
   ~S3FileSystem() override;
+
+  arrow::Result<std::shared_ptr<AsyncFileSystem>> MakeAsync(const arrow::io::IOContext& io_context);
 
   std::string type_name() const override;
 
