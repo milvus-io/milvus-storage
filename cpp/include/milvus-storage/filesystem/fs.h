@@ -66,6 +66,8 @@ class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
   // Unsupported providers return NotImplemented for the added async methods.
   arrow::Future<arrow::fs::FileInfo> GetFileInfoAsync(const std::string& path);
   arrow::Future<arrow::fs::FileInfoVector> GetFileInfoAsync(const std::vector<std::string>& paths) override;
+  arrow::Future<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamAsync(
+      const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata = nullptr);
 
   // Override OpenOutputStream to add fault injection point
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(

@@ -48,11 +48,16 @@ struct Request {
   aws_uri endpoint{};
   NativeS3Response response;
   std::atomic<int> http_status{0};
+  std::shared_ptr<FilesystemMetrics> write_metrics;
+  int64_t write_bytes = 0;
+  bool write_finished = false;
   bool charged = false;
   bool network_pending = true;
   arrow::Future<NativeS3Response> future = arrow::Future<NativeS3Response>::Make();
 
   ~Request() {
+    if (write_metrics && !write_finished)
+      write_metrics->IncrementFailedCount();
     message.reset();
     http.reset();
     streambuf.reset();
@@ -111,6 +116,14 @@ struct Request {
     S3CrtCallbackScope callback_scope;
     auto* request = static_cast<Request*>(user);
     request->response.http_status = request->http_status.load();
+    if (request->write_metrics) {
+      const auto& result = request->response;
+      if (result.status.ok() && result.transport_error == 0 && result.http_status >= 200 && result.http_status < 300)
+        request->write_metrics->IncrementWriteBytes(request->write_bytes);
+      else
+        request->write_metrics->IncrementFailedCount();
+      request->write_finished = true;
+    }
     auto future = request->future;
     auto response = std::move(request->response);
     std::shared_ptr<Request> owned;
@@ -281,6 +294,12 @@ arrow::Future<NativeS3Response> NativeS3Transport::Send(const Aws::AmazonWebServ
     options.telemetry_callback = Request::Telemetry;
     options.finish_callback = Request::Finish;
     options.shutdown_callback = Request::Shutdown;
+    const std::string operation = model.GetServiceRequestName();
+    if (operation == "PutObject" || operation == "UploadPart") {
+      r->write_metrics = lease->GetMetrics();
+      r->write_bytes = r->data ? r->data->size() : 0;
+      r->write_metrics->IncrementWriteCount();
+    }
     auto future = r->future;
     auto* pending = r.release();
     auto* meta = aws_s3_client_make_meta_request(pending->client_lease.native_client(), &options);

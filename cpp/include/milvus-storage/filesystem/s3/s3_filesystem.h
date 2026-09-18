@@ -46,6 +46,8 @@ class S3FileSystem : public arrow::fs::FileSystem, public UploadConditional, pub
   // Sync and async operations share this filesystem's clients and IOContext.
   arrow::Future<FileInfo> GetFileInfoAsync(const std::string& path);
   arrow::Future<arrow::fs::FileInfoVector> GetFileInfoAsync(const std::vector<std::string>& paths) override;
+  arrow::Future<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamAsync(
+      const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata = nullptr);
 
   std::string type_name() const override;
 

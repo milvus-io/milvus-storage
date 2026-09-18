@@ -47,3 +47,45 @@ request-level retry extension.
 Local stack: metadata and same-instance API, output-stream native submission,
 then directory/delete/copy/move. Validation uses the storage development container
 through wt-build, with all outputs and fixtures on /data/yuruiz.
+
+## Existing output streams and transport
+
+`OpenOutputStreamAsync` returns the existing Arrow `OutputStream`. Its underlying
+`CustomOutputStream` retains the existing buffers, part numbering, metadata,
+conditional-write headers and completed-part state. The native path replaces
+network submission for PUT, multipart create/upload/complete/abort. `Write` copies
+or retains memory and submits work; `CloseAsync` waits through continuations and
+publishes the object. The existing synchronous `Close`/`Abort` remain explicit
+blocking wrappers. An `AsyncOutputStream` extension adds only `FlushAsync` and
+`AbortAsync`, which Arrow does not expose. It does not redefine Write or Close.
+
+Callers serialize calls on a stream. Shared input buffers must remain immutable
+until FlushAsync or CloseAsync completes. The pending part count is bounded by
+max_connections; an oversized Write returns CapacityError before consuming bytes.
+Await FlushAsync and submit smaller chunks. Closing drains pending parts before
+submitting the last buffer. Failed close attempts abort known multipart uploads;
+cleanup failure is reported with the original error. No destructor starts I/O.
+
+## Transport and lifetime
+
+The pinned C++ SDK's generated HEAD/LIST/multipart Async methods can run synchronous
+HTTP on an executor. These operations use aws-c-s3 DEFAULT meta requests instead;
+the SDK supplies request/response models and endpoint resolution. Existing native
+CRT GET is reused. All native request bodies are memory-backed.
+
+Setup and global SDK shutdown are synchronous lifecycle boundaries. The supplied
+executor must outlive all pending operations. Completion normally dispatches there;
+if dispatch is rejected it completes inline with the original I/O result. Inline
+continuations must not block. Global shutdown drains native clients and completion
+callbacks before releasing the AWS SDK.
+
+The transport supports AWS/MinIO with explicit, anonymous or native default-chain
+credentials. Explicit AssumeRole/WebIdentity settings, custom C++ credential/retry
+providers and explicit proxies need adapters and are rejected. Credentials may
+read configuration during setup. Metadata responses are capped at 16 MiB.
+
+Requests make one attempt. A lost mutation response can follow a successful write;
+it is reported as an error with an unknown possible outcome, never automatically
+replayed. HTTP 200 with an embedded completion Error is not success. Cancellation
+is checked before dispatch; an already dispatched request is not cancelled.
+
