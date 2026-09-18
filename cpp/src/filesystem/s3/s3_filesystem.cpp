@@ -738,14 +738,18 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
   ObjectCrtInputFile(std::shared_ptr<S3CrtClientHolder> holder,
                      const arrow::io::IOContext& io_context,
                      const S3Path& path,
-                     int64_t size = kNoSize,
-                     std::shared_ptr<NativeS3Transport> native = nullptr)
-      : native_(std::move(native)), holder_(std::move(holder)),
+                     int64_t size,
+                     std::shared_ptr<NativeS3Transport> native)
+      : native_(std::move(native)),
+        holder_(std::move(holder)),
         io_context_(io_context),
         path_(path),
         read_state_(std::make_shared<ReadState>(size)) {}
 
   arrow::Status Init() {
+    if (!native_) {
+      return arrow::Status::NotImplemented("CRT input files require native S3 transport for metadata reads");
+    }
     const auto content_length = GetCachedContentLength();
     if (content_length != kNoSize) {
       DCHECK_GE(content_length, 0);
@@ -792,77 +796,32 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
       }
     }
 
-    if (native_) {
-      S3Model::HeadObjectRequest request;
-      request.SetBucket(ToAwsString(path_.bucket));
-      request.SetKey(ToAwsString(path_.key));
-      return native_->Send(request, path_.key, Aws::Http::HttpMethod::HTTP_HEAD, "", io_context)
-          .Then([state = read_state_](const NativeS3Response& response)
-              -> Result<std::shared_ptr<const arrow::KeyValueMetadata>> {
-            ARROW_RETURN_NOT_OK(response.ToStatus());
-            if (response.headers.find("content-length") == response.headers.end())
-              return Status::IOError("HEAD has no Content-Length");
-            Aws::Utils::Xml::XmlDocument xml;
-            Aws::AmazonWebServiceResult<Aws::Utils::Xml::XmlDocument> result(std::move(xml), response.headers);
-            S3Model::HeadObjectResult head(result);
-            if (head.GetContentLength() < 0) return Status::IOError("Invalid HEAD Content-Length");
-            auto metadata = GetObjectMetadata(head);
-            {
-              std::lock_guard lock(state->metadata_mutex);
-              state->content_length.store(head.GetContentLength(), std::memory_order_release);
-              state->metadata = metadata;
-            }
-            return metadata;
-          });
-    }
-
-    auto maybe_client_lease = holder_->Acquire();
-    if (!maybe_client_lease.ok()) {
-      return Future<std::shared_ptr<const arrow::KeyValueMetadata>>::MakeFinished(maybe_client_lease.status());
-    }
-
-    auto ctx = std::make_shared<AsyncHeadContext>();
-    ctx->future = Future<std::shared_ptr<const arrow::KeyValueMetadata>>::Make();
-    ctx->client_lease = std::move(maybe_client_lease).ValueOrDie();
-    ctx->read_state = read_state_;
-    ctx->path = path_;
-    ctx->request.SetBucket(ToAwsString(path_.bucket));
-    ctx->request.SetKey(ToAwsString(path_.key));
-
-    ctx->client_lease->HeadObjectAsync(
-        ctx->request, [ctx](const Aws::S3Crt::S3CrtClient*, const S3CrtModel::HeadObjectRequest&,
-                            const S3CrtModel::HeadObjectOutcome& outcome,
-                            const std::shared_ptr<const Aws::Client::AsyncCallerContext>&) mutable {
-          if (!outcome.IsSuccess()) {
-            if (outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
-              ctx->future.MarkFinished(PathNotFound(ctx->path));
-              return;
-            }
-            ctx->future.MarkFinished(
-                ErrorToStatus(std::forward_as_tuple("When reading information for key '", ctx->path.key,
-                                                    "' in bucket '", ctx->path.bucket, "': "),
-                              "HeadObject", outcome.GetError()));
-            return;
-          }
-
-          const auto content_length = outcome.GetResult().GetContentLength();
-          if (content_length < 0) {
-            ctx->future.MarkFinished(arrow::Status::IOError("HeadObject returned a negative Content-Length"));
-            return;
-          }
-
-          auto metadata = GetObjectMetadata(outcome.GetResult());
+    S3Model::HeadObjectRequest request;
+    request.SetBucket(ToAwsString(path_.bucket));
+    request.SetKey(ToAwsString(path_.key));
+    return native_->Send(request, path_.key, Aws::Http::HttpMethod::HTTP_HEAD, "", io_context)
+        .Then([state = read_state_, path = path_](
+                  const NativeS3Response& response) -> Result<std::shared_ptr<const arrow::KeyValueMetadata>> {
+          if (response.HasHttpStatus(404))
+            return PathNotFound(path);
+          auto status = response.ToStatus();
+          if (!status.ok())
+            return status.WithMessage("HeadObject for '", path.full_path, "': ", status.message());
+          if (response.headers.find("content-length") == response.headers.end())
+            return Status::IOError("HEAD has no Content-Length");
+          Aws::Utils::Xml::XmlDocument xml;
+          Aws::AmazonWebServiceResult<Aws::Utils::Xml::XmlDocument> result(std::move(xml), response.headers);
+          S3Model::HeadObjectResult head(result);
+          if (head.GetContentLength() < 0)
+            return Status::IOError("Invalid HEAD Content-Length");
+          auto metadata = GetObjectMetadata(head);
           {
-            std::lock_guard<std::mutex> lock(ctx->read_state->metadata_mutex);
-            // Publish both values from this HEAD before making metadata visible.
-            ctx->read_state->content_length.store(content_length, std::memory_order_release);
-            ctx->read_state->metadata = metadata;
+            std::lock_guard lock(state->metadata_mutex);
+            state->content_length.store(head.GetContentLength(), std::memory_order_release);
+            state->metadata = metadata;
           }
-          // Complete outside the metadata lock: a caller continuation can read
-          // the cache immediately. Executor selection remains with the caller.
-          ctx->future.MarkFinished(std::move(metadata));
+          return metadata;
         });
-    return ctx->future;
   }
 
   arrow::Status Close() override {
@@ -1153,15 +1112,6 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     int64_t nbytes = 0;
   };
 
-  struct AsyncHeadContext {
-    // Keep the same non-owning CRT client lifetime model as AsyncReadContext.
-    // The path and read state remain valid without owning the file or holder.
-    Future<std::shared_ptr<const arrow::KeyValueMetadata>> future;
-    S3CrtClientLease client_lease;
-    S3CrtModel::HeadObjectRequest request;
-    std::shared_ptr<ReadState> read_state;
-    S3Path path;
-  };
 
   std::shared_ptr<S3CrtClientHolder> holder_;
   const arrow::io::IOContext io_context_;

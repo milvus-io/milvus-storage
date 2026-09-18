@@ -777,7 +777,6 @@ TEST(S3CrtBuildSupportTest, InFlightNativeReadCompletesDuringFinalizeS3) {
     options.endpoint_override = "127.0.0.1:" + std::to_string(server.port());
     options.connect_timeout = 5;
     options.request_timeout = 5;
-    options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
     options.use_crt_async_reads = true;
 
     auto fs_result = S3FileSystem::Make(options);
@@ -851,6 +850,33 @@ TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileForNonGcpProvider
   }
 }
 
+TEST(S3CrtBuildSupportTest, OpenInputFileRejectsUnsupportedNativeTransport) {
+  ASSERT_STATUS_OK(EnsureS3InitializedForTest());
+  auto options = S3Options::FromAccessKey("ak", "sk");
+  options.cloud_provider = kCloudProviderAWS;
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "127.0.0.1:1";
+  options.use_crt_async_reads = true;
+  // Custom retry providers have no native adapter. Opening must reject the
+  // unsupported configuration even when a caller supplies the file size.
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  const std::string path = "bucket/path/object.txt";
+  arrow::fs::FileInfo info(path, arrow::fs::FileType::File);
+  info.set_size(9);
+  EXPECT_TRUE(fs->OpenInputFile(path).status().IsNotImplemented());
+  EXPECT_TRUE(fs->OpenInputFile(info).status().IsNotImplemented());
+  EXPECT_TRUE(fs->OpenInputFileAsync(path).status().IsNotImplemented());
+  EXPECT_TRUE(fs->OpenInputFileAsync(info).status().IsNotImplemented());
+
+  options.use_crt_async_reads = false;
+  ASSERT_AND_ASSIGN(auto sdk_fs, S3FileSystem::Make(options));
+  ASSERT_AND_ASSIGN(auto input, sdk_fs->OpenInputFile(info));
+  EXPECT_EQ(dynamic_cast<NonBlockingRandomAccessFile*>(input.get()), nullptr);
+  ASSERT_STATUS_OK(input->Close());
+}
+
 struct S3CrtMetadataTestParam {
   boost::beast::http::status response_status;
   bool close_before_completion = false;
@@ -887,7 +913,6 @@ TEST_P(S3CrtMetadataTest, AsyncHeadReturnsBeforeResponse) {
     options.endpoint_override = "127.0.0.1:" + std::to_string(acceptor.local_endpoint().port());
     options.connect_timeout = 2;
     options.request_timeout = 5;
-    options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
     options.use_crt_async_reads = true;
 
     auto fs_result = S3FileSystem::Make(options);
@@ -1011,7 +1036,7 @@ TEST_P(S3CrtMetadataTest, AsyncHeadReturnsBeforeResponse) {
       } else {
         const auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
         if (detail == nullptr || detail->code() != ExtendStatusCode::AwsErrorAccessDenied ||
-            message.find("HeadObject") == std::string::npos || message.find("ACCESS_DENIED") == std::string::npos) {
+            message.find("HeadObject") == std::string::npos || message.find("HTTP 403") == std::string::npos) {
           return fail("HEAD error lost its AWS details: " + message);
         }
       }
@@ -1055,7 +1080,6 @@ TEST(S3CrtBuildSupportTest, ZeroLengthAsyncReadsDoNotScheduleIoExecutor) {
   options.endpoint_override = "127.0.0.1:1";
   options.connect_timeout = 0.1;
   options.request_timeout = 0.1;
-  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
 
   ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options, io_context));
   ASSERT_EQ(fs->io_context().executor(), arrow_executor.get());
