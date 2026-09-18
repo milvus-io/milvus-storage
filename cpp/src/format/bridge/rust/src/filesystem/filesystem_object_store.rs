@@ -436,6 +436,9 @@ pub(crate) struct FilesystemObjectStore {
     filesystem: SharedPtr<FileSystemWrapper>,
     mapper: FFIPathMapper,
     metadata: MetadataCache,
+    // Diagnostic only: immutable benchmark objects; bounded shared native handles.
+    #[cfg(feature = "s3-crt-async")]
+    read_handles: Arc<Mutex<LruCache<ObjectPath, Arc<ReaderHandle>>>>,
 }
 
 impl FilesystemObjectStore {
@@ -444,6 +447,8 @@ impl FilesystemObjectStore {
             filesystem,
             mapper,
             metadata: MetadataCache::new(),
+            #[cfg(feature = "s3-crt-async")]
+            read_handles: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(128).unwrap()))),
         }
     }
 
@@ -682,6 +687,14 @@ impl FilesystemObjectStore {
                 source: Box::new(source),
             })?;
 
+        #[cfg(feature = "s3-crt-async")]
+        {
+            let cached = { self.read_handles.lock().unwrap().get(location).cloned() };
+            if let Some(reader) = cached {
+                return read_object_store_async_via_ffi(reader, location.clone(), range).await;
+            }
+        }
+
         enum ReadOutcome {
             #[cfg(feature = "s3-crt-async")]
             Async(Arc<ReaderHandle>),
@@ -760,6 +773,13 @@ impl FilesystemObjectStore {
         match outcome {
             #[cfg(feature = "s3-crt-async")]
             ReadOutcome::Async(reader) => {
+                // Drop replaced/evicted handles outside the cache lock and outside callbacks.
+                let evicted = self
+                    .read_handles
+                    .lock()
+                    .unwrap()
+                    .push(location.clone(), reader.clone());
+                drop(evicted);
                 read_object_store_async_via_ffi(reader, location.clone(), range).await
             }
             ReadOutcome::Complete(bytes) => Ok(bytes),

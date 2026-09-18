@@ -17,6 +17,10 @@
 #include <exception>
 #include <utility>
 
+#include <folly/ScopeGuard.h>
+#include <folly/Try.h>
+#include <glog/raw_logging.h>
+
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/format/paimon/paimon_format_reader.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
@@ -162,16 +166,42 @@ FormatReaderMetadataCache<ReaderT>::get_or_open_async(
     // Start the async loader outside mutex_. Its continuation normalizes and
     // publishes the result through the same path used by the synchronous leader.
     try {
-      return load_fn().defer([self, key, in_flight_load](folly::Try<MetadataResult>&& load_try) -> MetadataResult {
-        if (load_try.hasException()) {
-          auto message = load_try.exception().what();
-          return self->complete_load(
-              key, in_flight_load,
-              arrow::Status::UnknownError("Exception while asynchronously loading format reader metadata: ",
-                                          std::string(message.data(), message.size())));
+      auto load_future = load_fn();
+      // Timed SemiFuture waits can discard their deferred continuation. Release
+      // its flight and notify followers even when that continuation never runs.
+      auto cleanup = folly::makeGuard([self, key, in_flight_load]() noexcept {
+        if (!in_flight_load->continuation_attached.load(std::memory_order_acquire)) {
+          return;
         }
-        return self->complete_load(key, in_flight_load, std::move(load_try).value());
+        auto cleaned = folly::makeTryWith([&] {
+          return self->complete_load(key, in_flight_load,
+                                     arrow::Status::Cancelled("Async format reader metadata load was abandoned"));
+        });
+        if (cleaned.hasException()) {
+          const auto* error = cleaned.exception().get_exception();
+          RAW_LOG(ERROR, "Failed to abandon format reader metadata load: %s",
+                  error ? error->what() : "unknown exception");
+        }
       });
+      auto pending = std::move(load_future)
+                         .defer([self, key, in_flight_load, cleanup = std::move(cleanup)](
+                                    folly::Try<MetadataResult>&& load_try) mutable -> MetadataResult {
+                           MetadataResult result = [&]() -> MetadataResult {
+                             if (load_try.hasException()) {
+                               auto message = load_try.exception().what();
+                               return arrow::Status::UnknownError(
+                                   "Exception while asynchronously loading format reader metadata: ",
+                                   std::string(message.data(), message.size()));
+                             }
+                             return std::move(load_try).value();
+                           }();
+                           auto completed = self->complete_load(key, in_flight_load, std::move(result));
+                           cleanup.dismiss();
+                           return completed;
+                         });
+      // Attachment failures belong to the catch below, not to cancellation.
+      in_flight_load->continuation_attached.store(true, std::memory_order_release);
+      return pending;
     } catch (const std::exception& e) {
       return folly::makeSemiFuture(self->complete_load(
           key, in_flight_load,
@@ -203,6 +233,15 @@ typename FormatReaderMetadataCache<ReaderT>::MetadataResult FormatReaderMetadata
   {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    // A discarded continuation and a submission failure can both attempt to
+    // clean up the same flight. Only its first completion may fulfill waiters.
+    if (in_flight_load->done) {
+      if (!in_flight_load->status.ok()) {
+        return in_flight_load->status;
+      }
+      return in_flight_load->metadata;
+    }
+
     // Atomically publish successful metadata and mark this singleflight as done.
     // A successful leader adopts an entry populated first by another successful
     // path. A failed leader still completes its own waiters with that failure.
@@ -211,7 +250,15 @@ typename FormatReaderMetadataCache<ReaderT>::MetadataResult FormatReaderMetadata
       if (cached != entries_.end()) {
         metadata = cached->second.metadata;
       } else {
-        entries_.emplace(key, Entry{metadata});
+        try {
+          entries_.emplace(key, Entry{metadata});
+        } catch (const std::exception& e) {
+          status = arrow::Status::UnknownError("Failed to cache format reader metadata: ", e.what());
+          metadata.reset();
+        } catch (...) {
+          status = arrow::Status::UnknownError("Unknown exception while caching format reader metadata");
+          metadata.reset();
+        }
       }
     }
 

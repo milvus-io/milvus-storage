@@ -3,7 +3,7 @@
 
 use crate::TOKIO_RT;
 
-use futures::TryStreamExt;
+use futures::{FutureExt, TryStreamExt};
 use futures::stream::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -66,6 +66,7 @@ impl BlockingDataset {
         })
     }
 
+    // Called inside TOKIO_RT by the fragment-open and metadata-estimation futures.
     fn fragment_read_config(&self, read_config: FragReadConfig) -> FragReadConfig {
         if read_config.scan_scheduler.is_some() {
             return read_config;
@@ -74,12 +75,10 @@ impl BlockingDataset {
         let scan_scheduler = self
             .scan_scheduler
             .get_or_init(|| {
-                TOKIO_RT.block_on(async {
-                    ScanScheduler::new(
-                        self.object_store.clone(),
-                        SchedulerConfig::max_bandwidth(&self.object_store),
-                    )
-                })
+                ScanScheduler::new(
+                    self.object_store.clone(),
+                    SchedulerConfig::max_bandwidth(&self.object_store),
+                )
             })
             .clone();
         read_config.with_scan_scheduler(scan_scheduler)
@@ -341,7 +340,7 @@ fn filesystem_dataset_builder(
     Ok((builder, read_options))
 }
 
-pub fn open_dataset(
+async fn open_dataset_impl(
     filesystem: cxx::SharedPtr<crate::lance_ffi::FileSystemWrapper>,
     uri: &str,
     storage_options_keys: Vec<String>,
@@ -357,8 +356,13 @@ pub fn open_dataset(
     if version != 0 {
         builder = builder.with_version(version);
     }
-    let inner = TOKIO_RT.block_on(builder.load())?;
-    let dataset = BlockingDataset::new(inner)?;
+    let inner = builder.load().await?;
+    let object_store = inner.object_store(None).await?;
+    let dataset = BlockingDataset {
+        inner,
+        object_store,
+        scan_scheduler: Arc::new(OnceLock::new()),
+    };
 
     let scheduler = shared_scan_scheduler(
         read_options.object_store_prefix().to_string(),
@@ -371,7 +375,96 @@ pub fn open_dataset(
     Ok(Box::new(dataset))
 }
 
-pub fn resolve_latest_dataset_version(
+pub fn open_dataset(
+    filesystem: cxx::SharedPtr<crate::lance_ffi::FileSystemWrapper>,
+    uri: &str,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
+    version: u64,
+) -> Result<Box<BlockingDataset>> {
+    TOKIO_RT.block_on(open_dataset_impl(
+        filesystem,
+        uri,
+        storage_options_keys,
+        storage_options_values,
+        version,
+    ))
+}
+
+fn lance_async_panic_error(payload: Box<dyn std::any::Any + Send>) -> LanceError {
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("unknown panic payload");
+    LanceError::Internal {
+        message: format!("Lance async operation panicked: {message}"),
+        location: snafu::location!(),
+    }
+}
+
+// transfer owned results through the completion callback. The callback reclaims 
+// every handle, even if the future was dropped. Submission errors never invoke 
+// the callback; successful submissions invoke it once.
+unsafe fn spawn_lance_async(
+    future: impl std::future::Future<Output = Result<u64>> + Send + 'static,
+    callback: usize,
+    context: usize,
+) -> Result<()> {
+    let callback: unsafe extern "C" fn(*mut std::ffi::c_void, u64, *const std::ffi::c_char) =
+        unsafe { std::mem::transmute(callback) };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        TOKIO_RT.spawn(async move {
+            let error = match std::panic::AssertUnwindSafe(future).catch_unwind().await {
+                Ok(Ok(value)) => {
+                    unsafe { callback(context as *mut std::ffi::c_void, value, std::ptr::null()) };
+                    return;
+                }
+                Ok(Err(error)) => error.to_string(),
+                Err(payload) => lance_async_panic_error(payload).to_string(),
+            };
+            let error = std::ffi::CString::new(error.replace('\0', "\\0"))
+                .expect("interior NULs were escaped");
+            unsafe { callback(context as *mut std::ffi::c_void, 0, error.as_ptr()) };
+        });
+    }))
+    .map_err(lance_async_panic_error)
+}
+
+pub unsafe fn open_dataset_async(
+    filesystem: cxx::SharedPtr<crate::lance_ffi::FileSystemWrapper>,
+    uri: &str,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
+    version: u64,
+    callback: usize,
+    context: usize,
+) -> Result<()> {
+    let uri = uri.to_owned();
+    unsafe {
+        spawn_lance_async(
+            async move {
+                let dataset = open_dataset_impl(
+                    filesystem,
+                    &uri,
+                    storage_options_keys,
+                    storage_options_values,
+                    version,
+                )
+                .await?;
+                Ok(Box::into_raw(dataset) as u64)
+            },
+            callback,
+            context,
+        )
+    }
+}
+
+pub unsafe fn take_dataset_handle(handle: u64) -> Box<BlockingDataset> {
+    unsafe { Box::from_raw(handle as *mut BlockingDataset) }
+}
+
+async fn resolve_latest_dataset_version_impl(
     filesystem: cxx::SharedPtr<crate::lance_ffi::FileSystemWrapper>,
     uri: &str,
     storage_options_keys: Vec<String>,
@@ -383,11 +476,51 @@ pub fn resolve_latest_dataset_version(
         storage_options_keys,
         storage_options_values,
     )?;
-    let (object_store, base_path, commit_handler) =
-        TOKIO_RT.block_on(builder.build_object_store())?;
-    let location = TOKIO_RT
-        .block_on(commit_handler.resolve_latest_location(&base_path, object_store.as_ref()))?;
+    let (object_store, base_path, commit_handler) = builder.build_object_store().await?;
+    let location = commit_handler
+        .resolve_latest_location(&base_path, object_store.as_ref())
+        .await?;
     Ok(location.version)
+}
+
+pub fn resolve_latest_dataset_version(
+    filesystem: cxx::SharedPtr<crate::lance_ffi::FileSystemWrapper>,
+    uri: &str,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
+) -> Result<u64> {
+    TOKIO_RT.block_on(resolve_latest_dataset_version_impl(
+        filesystem,
+        uri,
+        storage_options_keys,
+        storage_options_values,
+    ))
+}
+
+pub unsafe fn resolve_latest_dataset_version_async(
+    filesystem: cxx::SharedPtr<crate::lance_ffi::FileSystemWrapper>,
+    uri: &str,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
+    callback: usize,
+    context: usize,
+) -> Result<()> {
+    let uri = uri.to_owned();
+    unsafe {
+        spawn_lance_async(
+            async move {
+                resolve_latest_dataset_version_impl(
+                    filesystem,
+                    &uri,
+                    storage_options_keys,
+                    storage_options_values,
+                )
+                .await
+            },
+            callback,
+            context,
+        )
+    }
 }
 
 pub unsafe fn write_dataset(
@@ -553,14 +686,14 @@ pub async fn collect_stream_to_batches(
 
 #[derive(Clone)]
 pub struct BlockingFragmentReader {
-    pub inner: FragmentReader,
+    pub inner: Arc<FragmentReader>,
     pub fragment: FileFragment,
     pub projection: ArrowSchema,
     sorted_deletions: Vec<u32>,
 }
 
 impl BlockingFragmentReader {
-    pub fn open(
+    pub async fn open(
         dataset: &BlockingDataset,
         fragment: Fragment,
         arrow_projection: &ArrowSchema,
@@ -571,7 +704,7 @@ impl BlockingFragmentReader {
 
         // Load deletion vector for logical→physical index mapping in take()
         let sorted_deletions = {
-            let dv = TOKIO_RT.block_on(fragment.get_deletion_vector())?;
+            let dv = fragment.get_deletion_vector().await?;
             match dv {
                 Some(dv) => {
                     let mut dels: Vec<u32> =
@@ -595,11 +728,10 @@ impl BlockingFragmentReader {
             .map(|n| n.clone())
             .collect();
 
-        let fragment_reader =
-            TOKIO_RT.block_on(fragment.open(&meta_schema.project(&columns)?, read_config))?;
+        let fragment_reader = fragment.open(&meta_schema.project(&columns)?, read_config).await?;
 
         Ok(Self {
-            inner: fragment_reader,
+            inner: Arc::new(fragment_reader),
             fragment,
             projection,
             sorted_deletions,
@@ -647,6 +779,42 @@ impl BlockingFragmentReader {
         // Arrow C array interface
         unsafe { std::ptr::write(out_array, ffi_array) };
         Ok(())
+    }
+
+    /// Schedule a take without blocking the C++ caller. The task owns its reader
+    /// and indices, and writes the result into C++ context-owned output storage.
+    ///
+    /// # Safety
+    /// Output storage, callback and context must remain valid until completion.
+    /// The callback value is unused; the materialized stream is written before completion.
+    pub unsafe fn take_async(
+        &self,
+        indices: &[u32],
+        out_stream: *mut u8,
+        callback: usize,
+        context: usize,
+    ) -> Result<()> {
+        let reader = self.inner.clone();
+        let indices = self.map_logical_indices(indices);
+        let schema = Arc::new(self.projection.clone());
+        let out_stream = out_stream as usize;
+        unsafe {
+            spawn_lance_async(
+                async move {
+                    let stream = reader.take(&indices, indices.len() as u32, None).await?;
+                    let batches: Vec<RecordBatch> = stream.buffered(1).try_collect().await?;
+                    // Export materialized batches so C stream get_next never re-enters Tokio.
+                    let batches = arrow_array::RecordBatchIterator::new(
+                        batches.into_iter().map(Ok::<_, ArrowError>), schema,
+                    );
+                    let stream = FFI_ArrowArrayStream::new(Box::new(batches));
+                    std::ptr::write(out_stream as *mut FFI_ArrowArrayStream, stream);
+                    Ok(0)
+                },
+                callback,
+                context,
+            )
+        }
     }
 
     pub unsafe fn take_as_stream(
@@ -711,12 +879,58 @@ impl BlockingFragmentReader {
             )
         }
     }
+
+    pub unsafe fn read_ranges_async(
+        &self,
+        row_range_start: u32,
+        row_range_end: u32,
+        batch_size: u32,
+        callback: usize,
+        context: usize,
+    ) -> Result<()> {
+        let reader = self.inner.clone();
+        let schema = Arc::new(self.projection.clone());
+        unsafe {
+            spawn_lance_async(
+                async move {
+                    if row_range_start > row_range_end || batch_size == 0 {
+                        return Err(LanceError::invalid_input(
+                            "invalid Lance range or zero batch size",
+                        ));
+                    }
+                    let batches: Vec<RecordBatch> = if row_range_start == row_range_end {
+                        Vec::new()
+                    } else {
+                        let stream = reader
+                            .read_range(row_range_start..row_range_end, batch_size)
+                            .await?;
+                        stream.buffered(1).try_collect().await?
+                    };
+                    // As in Vortex, the returned C stream owns materialized batches and
+                    // never drives Tokio or performs I/O from the C++ ReadNext call.
+                    let batches = arrow_array::RecordBatchIterator::new(
+                        batches.into_iter().map(Ok::<_, ArrowError>),
+                        schema,
+                    );
+                    let stream = FFI_ArrowArrayStream::new(Box::new(batches));
+                    Ok(Box::into_raw(Box::new(stream)) as u64)
+                },
+                callback,
+                context,
+            )
+        }
+    }
 }
 
-pub unsafe fn open_fragment_reader(
+pub unsafe fn take_record_batch_stream(handle: u64, out_stream: *mut u8) {
+    let stream = unsafe { Box::from_raw(handle as *mut FFI_ArrowArrayStream) };
+    unsafe { std::ptr::write(out_stream as *mut FFI_ArrowArrayStream, *stream) };
+}
+
+async fn open_fragment_reader_impl(
     dataset: &BlockingDataset,
     fragment_id: u64,
-    schema_rawptr: *mut u8,
+    ffi_schema: arrow::ffi::FFI_ArrowSchema,
 ) -> Result<Box<BlockingFragmentReader>> {
     let fragment = dataset
         .get_fragment(fragment_id)
@@ -725,9 +939,6 @@ pub unsafe fn open_fragment_reader(
             location: snafu::location!(),
         })?;
 
-    let ffi_schema = unsafe {
-        arrow::ffi::FFI_ArrowSchema::from_raw(schema_rawptr as *mut arrow::ffi::FFI_ArrowSchema)
-    };
     let arrow_schema =
         ArrowSchema::try_from(&ffi_schema).map_err(|e| LanceError::InvalidInput {
             source: format!("Failed to convert schema: {}", e.to_string()).into(),
@@ -739,8 +950,49 @@ pub unsafe fn open_fragment_reader(
         fragment,
         &arrow_schema,
         dataset.fragment_read_config(FragReadConfig::default()),
-    )?;
+    )
+    .await?;
     Ok(Box::new(reader))
+}
+
+pub unsafe fn open_fragment_reader(
+    dataset: &BlockingDataset,
+    fragment_id: u64,
+    schema_rawptr: *mut u8,
+) -> Result<Box<BlockingFragmentReader>> {
+    let schema = unsafe {
+        arrow::ffi::FFI_ArrowSchema::from_raw(schema_rawptr as *mut arrow::ffi::FFI_ArrowSchema)
+    };
+    TOKIO_RT.block_on(open_fragment_reader_impl(dataset, fragment_id, schema))
+}
+
+pub unsafe fn open_fragment_reader_async(
+    dataset: &BlockingDataset,
+    fragment_id: u64,
+    schema_rawptr: *mut u8,
+    callback: usize,
+    context: usize,
+) -> Result<()> {
+    // Consume the C schema and clone the dataset before the borrowed C++ inputs
+    // expire. Both remain owned by the task until opening the fragment finishes.
+    let schema = unsafe {
+        arrow::ffi::FFI_ArrowSchema::from_raw(schema_rawptr as *mut arrow::ffi::FFI_ArrowSchema)
+    };
+    let dataset = dataset.clone();
+    unsafe {
+        spawn_lance_async(
+            async move {
+                let reader = open_fragment_reader_impl(&dataset, fragment_id, schema).await?;
+                Ok(Box::into_raw(reader) as u64)
+            },
+            callback,
+            context,
+        )
+    }
+}
+
+pub unsafe fn take_fragment_reader_handle(handle: u64) -> Box<BlockingFragmentReader> {
+    unsafe { Box::from_raw(handle as *mut BlockingFragmentReader) }
 }
 
 /// Get sorted deletion positions for a fragment. Returns empty vec if no deletions.
@@ -800,7 +1052,7 @@ pub fn get_fragment_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Re
         })
 }
 
-fn estimate_fragment_columns(
+async fn estimate_fragment_columns(
     dataset: &BlockingDataset,
     fragment_id: u64,
 ) -> Result<Vec<LanceColumnMemoryEstimate>> {
@@ -817,13 +1069,12 @@ fn estimate_fragment_columns(
         .fragment_read_config(FragReadConfig::default())
         .scan_scheduler
         .expect("fragment_read_config always installs a scheduler");
-    TOKIO_RT.block_on(
-        crate::lance_memory_estimator::estimate_fragment_column_memory(
-            &dataset.inner,
-            &fragment,
-            scheduler,
-        ),
+    crate::lance_memory_estimator::estimate_fragment_column_memory(
+        &dataset.inner,
+        &fragment,
+        scheduler,
     )
+    .await
 }
 
 /// Estimate each top-level column's decoded Arrow buffer size in schema order.
@@ -834,7 +1085,30 @@ pub fn estimate_fragment_column_memory(
     dataset: &BlockingDataset,
     fragment_id: u64,
 ) -> Result<Vec<LanceColumnMemoryEstimate>> {
-    estimate_fragment_columns(dataset, fragment_id)
+    TOKIO_RT.block_on(estimate_fragment_columns(dataset, fragment_id))
+}
+
+pub unsafe fn estimate_fragment_column_memory_async(
+    dataset: &BlockingDataset,
+    fragment_id: u64,
+    callback: usize,
+    context: usize,
+) -> Result<()> {
+    let dataset = dataset.clone();
+    unsafe {
+        spawn_lance_async(
+            async move {
+                let estimates = estimate_fragment_columns(&dataset, fragment_id).await?;
+                Ok(Box::into_raw(Box::new(estimates)) as u64)
+            },
+            callback,
+            context,
+        )
+    }
+}
+
+pub unsafe fn take_column_memory_handle(handle: u64) -> Vec<LanceColumnMemoryEstimate> {
+    unsafe { *Box::from_raw(handle as *mut Vec<LanceColumnMemoryEstimate>) }
 }
 
 /// Estimate the decoded Arrow buffer size of a fragment without reading data pages.
@@ -843,7 +1117,8 @@ pub fn estimate_fragment_column_memory(
 /// Errors are returned through cxx so the C++ best-effort wrapper can fall back
 /// to zero.
 pub fn estimate_fragment_memory(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64> {
-    Ok(estimate_fragment_columns(dataset, fragment_id)?
+    Ok(TOKIO_RT
+        .block_on(estimate_fragment_columns(dataset, fragment_id))?
         .into_iter()
         .map(|estimate| estimate.memory_size)
         .fold(0_u64, u64::saturating_add))
