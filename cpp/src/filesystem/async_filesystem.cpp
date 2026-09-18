@@ -33,14 +33,6 @@ class AsyncSubTree final : public AsyncFileSystem {
       });
     };
   }
-  arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(const std::string& path) override {
-    return underlying_->ReadMetadataAsync(Full(path));
-  }
-  arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const std::string& path,
-                                                          int64_t offset,
-                                                          int64_t nbytes) override {
-    return underlying_->ReadAsync(Full(path), offset, nbytes);
-  }
 
   private:
   std::string Full(const std::string& path) const { return base_ + path; }

@@ -738,8 +738,9 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
   ObjectCrtInputFile(std::shared_ptr<S3CrtClientHolder> holder,
                      const arrow::io::IOContext& io_context,
                      const S3Path& path,
-                     int64_t size = kNoSize)
-      : holder_(std::move(holder)),
+                     int64_t size = kNoSize,
+                     std::shared_ptr<NativeS3Transport> native = nullptr)
+      : native_(std::move(native)), holder_(std::move(holder)),
         io_context_(io_context),
         path_(path),
         read_state_(std::make_shared<ReadState>(size)) {}
@@ -789,6 +790,30 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
       if (read_state_->metadata != nullptr) {
         return Future<std::shared_ptr<const arrow::KeyValueMetadata>>::MakeFinished(read_state_->metadata);
       }
+    }
+
+    if (native_) {
+      S3Model::HeadObjectRequest request;
+      request.SetBucket(ToAwsString(path_.bucket));
+      request.SetKey(ToAwsString(path_.key));
+      return native_->Send(request, path_.key, Aws::Http::HttpMethod::HTTP_HEAD, "", io_context)
+          .Then([state = read_state_](const NativeS3Response& response)
+              -> Result<std::shared_ptr<const arrow::KeyValueMetadata>> {
+            ARROW_RETURN_NOT_OK(response.ToStatus());
+            if (response.headers.find("content-length") == response.headers.end())
+              return Status::IOError("HEAD has no Content-Length");
+            Aws::Utils::Xml::XmlDocument xml;
+            Aws::AmazonWebServiceResult<Aws::Utils::Xml::XmlDocument> result(std::move(xml), response.headers);
+            S3Model::HeadObjectResult head(result);
+            if (head.GetContentLength() < 0) return Status::IOError("Invalid HEAD Content-Length");
+            auto metadata = GetObjectMetadata(head);
+            {
+              std::lock_guard lock(state->metadata_mutex);
+              state->content_length.store(head.GetContentLength(), std::memory_order_release);
+              state->metadata = metadata;
+            }
+            return metadata;
+          });
     }
 
     auto maybe_client_lease = holder_->Acquire();
@@ -1112,6 +1137,8 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
   static Future<std::shared_ptr<Buffer>> FailedBufferFuture(const arrow::Status& status) {
     return Future<std::shared_ptr<Buffer>>::MakeFinished(arrow::Result<std::shared_ptr<Buffer>>(status));
   }
+
+  std::shared_ptr<NativeS3Transport> native_;
 
   struct AsyncReadContext {
     // AWS CRT retains this context through the callback. Never add owning
@@ -1784,6 +1811,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
   bool use_crt_async_reads_ = false;
   ClientBuilder<Aws::S3Crt::S3CrtClient> crt_builder_;
   std::shared_ptr<S3CrtClientHolder> crt_holder_;
+  std::shared_ptr<NativeS3Transport> native_;
 #endif
   std::optional<S3Backend> backend_;
 
@@ -1820,6 +1848,11 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
         return arrow::Status::IOError("Failed to build S3 CRT client: ", crt_result.status().ToString());
       }
       ARROW_RETURN_NOT_OK(std::move(crt_result).Value(&crt_holder_));
+      auto native_options = options();
+      native_options.region = region();
+      auto native = NativeS3Transport::Make(native_options, holder_);
+      if (native.ok()) native_ = *native;
+      else if (!native.status().IsNotImplemented()) return native.status();
     }
 #endif
     return arrow::Status::OK();
@@ -2583,7 +2616,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
 
 #ifdef WITH_CRT
     if (UseCrtReadPath()) {
-      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path);
+      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, kNoSize, native_);
       ARROW_RETURN_NOT_OK(ptr->Init());
       return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
     }
@@ -2609,7 +2642,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
 
 #ifdef WITH_CRT
     if (UseCrtReadPath()) {
-      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, info.size());
+      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, info.size(), native_);
       ARROW_RETURN_NOT_OK(ptr->Init());
       return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
     }
@@ -2938,7 +2971,7 @@ arrow::Result<std::shared_ptr<AsyncFileSystem>> S3FileSystem::MakeAsync(const ar
 #ifdef WITH_CRT
   auto async_options = impl_->options();
   async_options.region = impl_->region();
-  return MakeAsyncS3FileSystem(async_options, impl_->holder_, io_context);
+  return MakeAsyncS3FileSystem(async_options, impl_->holder_, io_context, impl_->native_);
 #else
   return arrow::Status::NotImplemented("Native asynchronous S3 requires WITH_CRT");
 #endif
@@ -2967,6 +3000,29 @@ arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> S3FileSystem::OpenIn
 
 arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> S3FileSystem::OpenInputFile(const FileInfo& info) {
   return impl_->OpenInputFile(info, this);
+}
+
+Future<std::shared_ptr<arrow::io::RandomAccessFile>> S3FileSystem::OpenInputFileAsync(const std::string& path) {
+#ifdef WITH_CRT
+  if (impl_->UseCrtReadPath()) return Future<std::shared_ptr<arrow::io::RandomAccessFile>>::MakeFinished(OpenInputFile(path));
+#endif
+  return FileSystem::OpenInputFileAsync(path);
+}
+Future<std::shared_ptr<arrow::io::RandomAccessFile>> S3FileSystem::OpenInputFileAsync(const FileInfo& info) {
+#ifdef WITH_CRT
+  if (impl_->UseCrtReadPath()) return Future<std::shared_ptr<arrow::io::RandomAccessFile>>::MakeFinished(OpenInputFile(info));
+#endif
+  return FileSystem::OpenInputFileAsync(info);
+}
+Future<std::shared_ptr<arrow::io::InputStream>> S3FileSystem::OpenInputStreamAsync(const std::string& path) {
+  return OpenInputFileAsync(path).Then([](std::shared_ptr<arrow::io::RandomAccessFile> file) {
+    return std::static_pointer_cast<arrow::io::InputStream>(file);
+  });
+}
+Future<std::shared_ptr<arrow::io::InputStream>> S3FileSystem::OpenInputStreamAsync(const FileInfo& info) {
+  return OpenInputFileAsync(info).Then([](std::shared_ptr<arrow::io::RandomAccessFile> file) {
+    return std::static_pointer_cast<arrow::io::InputStream>(file);
+  });
 }
 
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenOutputStream(

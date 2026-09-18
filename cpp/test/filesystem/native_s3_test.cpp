@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <future>
 #include "milvus-storage/filesystem/async_filesystem.h"
+#include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
@@ -40,10 +41,23 @@ class NativeS3Test : public ::testing::Test {
     options_.region = "us-east-1";
     options_.endpoint_override = endpoint;
     options_.cloud_provider = "aws";
-    options_.use_crt_async_reads = false;
+    options_.use_crt_async_reads = true;
     ASSERT_OK_AND_ASSIGN(sync_, S3FileSystem::Make(options_, arrow::io::IOContext(executor_.get())));
     auto subtree = std::make_shared<FileSystemProxy>("bucket/root", sync_);
     ASSERT_OK_AND_ASSIGN(fs_, MakeAsyncFileSystem(subtree, arrow::io::IOContext(executor_.get())));
+  }
+  arrow::Future<std::shared_ptr<arrow::Buffer>> Read(const std::string& path, int64_t offset, int64_t size) {
+    return sync_->OpenInputFileAsync("bucket/root/" + path).Then([this, offset, size](std::shared_ptr<arrow::io::RandomAccessFile> file) {
+      auto native = std::dynamic_pointer_cast<NonBlockingRandomAccessFile>(file);
+      return native->GetSizeAsync().Then([this, file, offset, size](int64_t) {
+        return file->ReadAsync(arrow::io::IOContext(executor_.get()), offset, size);
+      });
+    });
+  }
+  arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> Metadata(const std::string& path) {
+    return sync_->OpenInputFileAsync("bucket/root/" + path).Then([this](std::shared_ptr<arrow::io::RandomAccessFile> file) {
+      return file->ReadMetadataAsync(arrow::io::IOContext(executor_.get()));
+    });
   }
   void TearDown() override {
     fs_.reset();
@@ -73,22 +87,22 @@ class NativeS3Test : public ::testing::Test {
 
 TEST_F(NativeS3Test, HeadAndReadUseCallerExecutorWithoutNetworkWait) {
   CompletesWithoutBlockingWorker<arrow::fs::FileInfo>([this] { return fs_->GetFileInfoAsync("slow"); });
-  CompletesWithoutBlockingWorker<std::shared_ptr<arrow::Buffer>>([this] { return fs_->ReadAsync("slow", 0, 3); });
+  CompletesWithoutBlockingWorker<std::shared_ptr<arrow::Buffer>>([this] { return Read("slow", 0, 3); });
 }
 
 TEST_F(NativeS3Test, MetadataRangesAndSubtreePaths) {
   ASSERT_OK_AND_ASSIGN(auto info, Await(fs_->GetFileInfoAsync("hello #?+% 中文")));
   EXPECT_EQ(info.path(), "hello #?+% 中文");
   EXPECT_EQ(info.size(), 6);
-  ASSERT_OK_AND_ASSIGN(auto data, Await(fs_->ReadAsync("hello #?+% 中文", 2, 20)));
+  ASSERT_OK_AND_ASSIGN(auto data, Await(Read("hello #?+% 中文", 2, 20)));
   EXPECT_EQ(data->ToString(), "cdef");
-  ASSERT_OK_AND_ASSIGN(auto metadata, Await(fs_->ReadMetadataAsync("hello #?+% 中文")));
-  ASSERT_OK_AND_ASSIGN(auto size, metadata->Get("content-length"));
+  ASSERT_OK_AND_ASSIGN(auto metadata, Await(Metadata("hello #?+% 中文")));
+  ASSERT_OK_AND_ASSIGN(auto size, metadata->Get("Content-Length"));
   EXPECT_EQ(size, "6");
-  EXPECT_TRUE(fs_->ReadAsync("slow", -1, 1).status().IsInvalid());
-  ASSERT_OK_AND_ASSIGN(auto empty, Await(fs_->ReadAsync("hello #?+% 中文", 6, 1)));
+  EXPECT_TRUE(Read("slow", -1, 1).status().IsInvalid());
+  ASSERT_OK_AND_ASSIGN(auto empty, Await(Read("hello #?+% 中文", 6, 1)));
   EXPECT_EQ(empty->size(), 0);
-  EXPECT_FALSE(fs_->ReadAsync("hello #?+% 中文", 7, 1).status().ok());
+  EXPECT_FALSE(Read("hello #?+% 中文", 7, 1).status().ok());
 }
 
 TEST_F(NativeS3Test, ListPaginatesAndDetectsMissingDirectory) {
@@ -119,7 +133,7 @@ TEST_F(NativeS3Test, ListSubmissionDoesNotBlockWorker) {
 
 TEST_F(NativeS3Test, HttpErrorsAndMalformedPagination) {
   EXPECT_FALSE(fs_->GetFileInfoAsync("denied").status().ok());
-  EXPECT_FALSE(fs_->ReadAsync("denied", 0, 1).status().ok());
+  EXPECT_FALSE(Read("denied", 0, 1).status().ok());
   arrow::fs::FileSelector select;
   select.base_dir = "bad-token";
   auto generator = fs_->GetFileInfoGenerator(select);
@@ -127,7 +141,7 @@ TEST_F(NativeS3Test, HttpErrorsAndMalformedPagination) {
 }
 
 TEST_F(NativeS3Test, RetainsRequestAfterFilesystemIsReleased) {
-  auto future = fs_->ReadAsync("slow", 0, 6);
+  auto future = Read("slow", 0, 6);
   fs_.reset();
   sync_.reset();
   ASSERT_TRUE(future.Wait(5));
@@ -151,7 +165,7 @@ TEST_F(NativeS3Test, RootListingSkipsEmptyContinuationPage) {
   EXPECT_EQ(page.front().path(), "bucket");
   ASSERT_OK_AND_ASSIGN(page, Await(generator()));
   EXPECT_TRUE(page.empty());
-  EXPECT_TRUE(root->ReadAsync("bucket/../file", 0, 1).status().IsInvalid());
+  EXPECT_TRUE(root->GetFileInfoAsync("bucket/../file").status().IsInvalid());
   EXPECT_TRUE(fs_->GetFileInfoAsync("../file").status().IsInvalid());
 }
 #endif

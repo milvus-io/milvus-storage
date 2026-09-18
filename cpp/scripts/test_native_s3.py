@@ -35,6 +35,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def handle_request(self):
+        if os.environ.get("STORAGE_NATIVE_S3_DEBUG"):
+            print(self.command, self.path, self.headers.get("Range"), flush=True)
         uri = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(uri.path).lstrip("/")
         bucket, _, key = path.partition("/")
@@ -103,7 +105,7 @@ def main():
     server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    env = dict(os.environ, STORAGE_NATIVE_S3_ENDPOINT=f"127.0.0.1:{server.server_port}")
+    env = dict(os.environ, NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost", AWS_EC2_METADATA_DISABLED="true", STORAGE_NATIVE_S3_ENDPOINT=f"127.0.0.1:{server.server_port}")
     try:
         result = subprocess.run(sys.argv[1:] or ["cpp/build/Release/test/milvus_test", "--gtest_filter=NativeS3*"],
                                 env=env, timeout=180)

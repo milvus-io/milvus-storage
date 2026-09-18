@@ -8,7 +8,8 @@ running synchronous network requests in a worker pool.
 ## Planned local stack
 
 1. `s3-async/metadata`: native CRT request transport and lifetime barrier, subtree
-   routing, HEAD/stat, paginated LIST, range GET, and focused transport tests.
+   routing, HEAD/stat, paginated LIST, and focused transport tests. Existing CRT range
+   GET is reused; file metadata/size reuse the existing RandomAccessFile API.
 2. `s3-async/write`: ordinary and conditional PUT, multipart creation, upload,
    completion and abort, with owned buffers and failure/lifecycle tests.
 3. `s3-async/mutations`: delete/copy/move and directory lifecycle operations,
@@ -46,8 +47,9 @@ does not currently cancel an already dispatched request. Keep the transport and
 executor lifecycle separate from per-request cancellation.
 
 The synchronous `S3CrtClient::HeadObjectAsync` wrapper in the pinned C++ SDK is
-not used by this capability. Existing random-access file wrappers are unchanged;
-native HEAD requires the new capability's `ReadMetadataAsync`/`GetFileInfoAsync`.
+not used by this capability. The existing CRT RandomAccessFile uses native HEAD for ReadMetadataAsync and
+GetSizeAsync. Its range GET and ReadAsync implementations are reused.
+AsyncFileSystem adds no second read API.
 
 Validation uses `wt-build`, data-backed temporary/cache paths and an isolated
 S3 fixture. It must test delayed metadata requests with one caller worker,
