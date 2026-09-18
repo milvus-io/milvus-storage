@@ -59,19 +59,17 @@ class NativeS3Test : public ::testing::Test {
     fs_ = std::make_shared<FileSystemProxy>(prefix_, sync_);
   }
   arrow::Future<std::shared_ptr<arrow::Buffer>> Read(const std::string& path, int64_t offset, int64_t size) {
-    return fs_->OpenInputFileAsync(path)
-        .Then([this, offset, size](std::shared_ptr<arrow::io::RandomAccessFile> file) {
-          auto native = std::dynamic_pointer_cast<NonBlockingRandomAccessFile>(file);
-          return native->GetSizeAsync().Then([this, file, offset, size](int64_t) {
-            return file->ReadAsync(arrow::io::IOContext(executor_.get()), offset, size);
-          });
-        });
+    return fs_->OpenInputFileAsync(path).Then([this, offset, size](std::shared_ptr<arrow::io::RandomAccessFile> file) {
+      auto native = std::dynamic_pointer_cast<NonBlockingRandomAccessFile>(file);
+      return native->GetSizeAsync().Then([this, file, offset, size](int64_t) {
+        return file->ReadAsync(arrow::io::IOContext(executor_.get()), offset, size);
+      });
+    });
   }
   arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> Metadata(const std::string& path) {
-    return fs_->OpenInputFileAsync(path)
-        .Then([this](std::shared_ptr<arrow::io::RandomAccessFile> file) {
-          return file->ReadMetadataAsync(arrow::io::IOContext(executor_.get()));
-        });
+    return fs_->OpenInputFileAsync(path).Then([this](std::shared_ptr<arrow::io::RandomAccessFile> file) {
+      return file->ReadMetadataAsync(arrow::io::IOContext(executor_.get()));
+    });
   }
   void TearDown() override {
     fs_.reset();
