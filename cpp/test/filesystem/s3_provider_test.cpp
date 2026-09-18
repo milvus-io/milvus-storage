@@ -27,6 +27,8 @@
 #include <thread>
 #include <vector>
 
+#include <aws/core/auth/AWSCredentialsProviderChain.h>
+#include <aws/core/auth/STSCredentialsProvider.h>
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/HttpRequest.h>
@@ -1217,6 +1219,88 @@ constexpr const char* kAwsStsSuccessXml = R"(<?xml version="1.0" encoding="UTF-8
 
 }  // namespace
 
+TEST_F(S3ProviderTest, AwsIamCredentialsOnlyUseEnvironmentAndWebIdentity) {
+  ScopedEnvVar set_access_key("AWS_ACCESS_KEY_ID", "ENV_AK");
+  ScopedEnvVar set_secret_key("AWS_SECRET_ACCESS_KEY", "ENV_SK");
+  ScopedEnvUnset unset_session_token("AWS_SESSION_TOKEN");
+  ScopedEnvVar set_region("AWS_DEFAULT_REGION", "us-east-1");
+  ScopedEnvVar enable_imds("AWS_EC2_METADATA_DISABLED", "false");
+  ScopedEnvUnset unset_container_uri("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI");
+  ScopedEnvUnset unset_container_full_uri("AWS_CONTAINER_CREDENTIALS_FULL_URI");
+
+  ArrowFileSystemConfig config;
+  config.cloud_provider = kCloudProviderAWS;
+  config.use_iam = true;
+
+  S3FileSystemProducer producer(config);
+  ASSERT_AND_ASSIGN(auto options, producer.CreateS3Options());
+  const auto credentials = options.credentials_provider->GetAWSCredentials();
+  EXPECT_EQ(credentials.GetAWSAccessKeyId(), "ENV_AK");
+  EXPECT_EQ(credentials.GetAWSSecretKey(), "ENV_SK");
+  EXPECT_TRUE(credentials.GetSessionToken().empty());
+
+  // Enforce the credential-source boundary even when node metadata is enabled.
+  const auto chain = std::dynamic_pointer_cast<Aws::Auth::AWSCredentialsProviderChain>(options.credentials_provider);
+  ASSERT_NE(chain, nullptr);
+  const auto& providers = chain->GetProviders();
+  ASSERT_EQ(providers.size(), 2u);
+  EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::EnvironmentAWSCredentialsProvider>(providers[0]), nullptr);
+  EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>(providers[1]), nullptr);
+}
+
+TEST_F(S3ProviderTest, AwsIamCredentialsDoNotFallBackToProfileAfterEnvironmentCredentialsDisappear) {
+  TempFile credentials_file(
+      "[milvus-storage-credential-chain-test]\n"
+      "aws_access_key_id = PROFILE_AK\n"
+      "aws_secret_access_key = PROFILE_SK\n");
+  TempFile config_file("");
+  ScopedEnvVar set_credentials_file("AWS_SHARED_CREDENTIALS_FILE", credentials_file.path());
+  ScopedEnvVar set_config_file("AWS_CONFIG_FILE", config_file.path());
+  ScopedEnvVar set_profile("AWS_PROFILE", "milvus-storage-credential-chain-test");
+  ScopedEnvVar set_default_profile("AWS_DEFAULT_PROFILE", "milvus-storage-credential-chain-test");
+  ScopedEnvVar set_access_key("AWS_ACCESS_KEY_ID", "ENV_AK");
+  ScopedEnvVar set_secret_key("AWS_SECRET_ACCESS_KEY", "ENV_SK");
+  ScopedEnvVar set_session_token("AWS_SESSION_TOKEN", "ENV_TOKEN");
+  ScopedEnvVar set_region("AWS_DEFAULT_REGION", "us-east-1");
+  ScopedEnvUnset unset_role("AWS_ROLE_ARN");
+  ScopedEnvUnset unset_token_file("AWS_WEB_IDENTITY_TOKEN_FILE");
+  ScopedEnvVar disable_imds("AWS_EC2_METADATA_DISABLED", "true");
+  ScopedEnvUnset unset_container_uri("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI");
+  ScopedEnvUnset unset_container_full_uri("AWS_CONTAINER_CREDENTIALS_FULL_URI");
+
+  ArrowFileSystemConfig config;
+  config.cloud_provider = kCloudProviderAWS;
+  config.use_iam = true;
+
+  S3FileSystemProducer producer(config);
+  ASSERT_AND_ASSIGN(auto options, producer.CreateS3Options());
+  {
+    ScopedEnvUnset unset_access_key("AWS_ACCESS_KEY_ID");
+    ScopedEnvUnset unset_secret_key("AWS_SECRET_ACCESS_KEY");
+    ScopedEnvUnset unset_session_token("AWS_SESSION_TOKEN");
+    EXPECT_TRUE(options.credentials_provider->GetAWSCredentials().IsEmpty());
+  }
+  // A failed lookup must not pin the chain to another identity after recovery.
+  EXPECT_EQ(options.credentials_provider->GetAWSCredentials().GetAWSAccessKeyId(), "ENV_AK");
+}
+
+TEST_F(S3ProviderTest, AwsExplicitCredentialsTakePrecedenceOverEnvironment) {
+  ScopedEnvVar set_access_key("AWS_ACCESS_KEY_ID", "ENV_AK");
+  ScopedEnvVar set_secret_key("AWS_SECRET_ACCESS_KEY", "ENV_SK");
+
+  ArrowFileSystemConfig config;
+  config.cloud_provider = kCloudProviderAWS;
+  config.use_iam = false;
+  config.access_key_id = "CONFIG_AK";
+  config.access_key_value = "CONFIG_SK";
+
+  S3FileSystemProducer producer(config);
+  ASSERT_AND_ASSIGN(auto options, producer.CreateS3Options());
+  const auto credentials = options.credentials_provider->GetAWSCredentials();
+  EXPECT_EQ(credentials.GetAWSAccessKeyId(), "CONFIG_AK");
+  EXPECT_EQ(credentials.GetAWSSecretKey(), "CONFIG_SK");
+}
+
 TEST_F(S3ProviderTest, AwsAssumeRoleForwardsFilesystemConfigurationToSts) {
   ScopedEnvVar set_access_key("AWS_ACCESS_KEY_ID", "BASE_AK");
   ScopedEnvVar set_secret_key("AWS_SECRET_ACCESS_KEY", "BASE_SK");
@@ -1234,6 +1318,7 @@ TEST_F(S3ProviderTest, AwsAssumeRoleForwardsFilesystemConfigurationToSts) {
   config.session_name = "reader-session";
   config.external_id = "tenant-external-id";
   config.load_frequency = 1800;
+  config.use_iam = true;
 
   S3FileSystemProducer producer(config);
   ASSERT_AND_ASSIGN(auto options, producer.CreateS3Options());
@@ -1287,6 +1372,44 @@ TEST_F(S3ProviderTest, AwsAssumeRoleFallsBackToAwsRegionWhenFilesystemRegionIsEm
   ASSERT_TRUE((*sts_request)->HasHeader("Authorization"));
   const std::string authorization = (*sts_request)->GetHeaderValue("Authorization").c_str();
   EXPECT_NE(authorization.find("/us-east-1/sts/aws4_request"), std::string::npos) << authorization;
+}
+
+TEST_F(S3ProviderTest, AwsAssumeRolePreservesProfileSourceCredentials) {
+  TempFile credentials_file(
+      "[milvus-storage-arn-test]\n"
+      "aws_access_key_id = PROFILE_AK\n"
+      "aws_secret_access_key = PROFILE_SK\n");
+  TempFile config_file("");
+  ScopedEnvVar set_credentials_file("AWS_SHARED_CREDENTIALS_FILE", credentials_file.path());
+  ScopedEnvVar set_config_file("AWS_CONFIG_FILE", config_file.path());
+  ScopedEnvVar set_profile("AWS_PROFILE", "milvus-storage-arn-test");
+  ScopedEnvVar set_default_profile("AWS_DEFAULT_PROFILE", "milvus-storage-arn-test");
+  ScopedEnvUnset unset_access_key("AWS_ACCESS_KEY_ID");
+  ScopedEnvUnset unset_secret_key("AWS_SECRET_ACCESS_KEY");
+  ScopedEnvUnset unset_session_token("AWS_SESSION_TOKEN");
+  ScopedEnvVar set_region("AWS_DEFAULT_REGION", "us-east-1");
+  ScopedEnvVar disable_imds("AWS_EC2_METADATA_DISABLED", "true");
+
+  mock_client_->EnqueueResponse("sts.", Aws::Http::HttpResponseCode::OK, kAwsStsSuccessXml);
+
+  ArrowFileSystemConfig config;
+  config.cloud_provider = kCloudProviderAWS;
+  config.region = "us-west-2";
+  config.role_arn = "arn:aws:iam::123456789012:role/reader-role";
+  config.session_name = "reader-session";
+  config.use_iam = true;
+
+  S3FileSystemProducer producer(config);
+  ASSERT_AND_ASSIGN(auto options, producer.CreateS3Options());
+  EXPECT_EQ(options.credentials_provider->GetAWSCredentials().GetAWSAccessKeyId(), "ASSUMED_AK");
+
+  const auto recorded = mock_client_->GetRecordedRequests();
+  const auto sts_request = std::find_if(recorded.begin(), recorded.end(), [](const auto& request) {
+    return request->GetURIString().find("sts") != Aws::String::npos;
+  });
+  ASSERT_NE(sts_request, recorded.end());
+  const std::string authorization = (*sts_request)->GetHeaderValue("Authorization").c_str();
+  EXPECT_NE(authorization.find("Credential=PROFILE_AK/"), std::string::npos) << authorization;
 }
 
 TEST_F(S3ProviderTest, TestAliyunRAMSTSClientSuccess) {
