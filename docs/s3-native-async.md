@@ -119,4 +119,3 @@ not atomic, and a failed delete leaves the destination copy. S3-compatible serve
 must honor conditional DELETE for protection against concurrent source overwrites.
 Clearing every bucket at the filesystem root remains unsupported, as in the
 synchronous filesystem. Append remains unsupported by S3.
-
