@@ -2,7 +2,7 @@
 	python-lib java-lib package \
 	fix-format check-format fix-tidy check-tidy \
 	check-error-ratchet update-error-ratchet \
-	aws gcp azure aliyun tencent huawei
+	aws gcp azure aliyun tencent huawei volcengine
 
 TEST_THREADS ?= 4
 ifneq ($(TIDY_THREADS),)
@@ -118,7 +118,7 @@ test-cloud-storage: build
 	fi
 
 # Individual cloud provider targets
-aws gcp azure aliyun tencent huawei: test-cloud-storage
+aws gcp azure aliyun tencent huawei volcengine: test-cloud-storage
 
 # Source directories for formatting
 FORMAT_DIRS := ./src ./include ./test ./benchmark
