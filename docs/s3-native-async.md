@@ -5,12 +5,18 @@ cache return `FileSystemPtr` (`shared_ptr<FileSystemProxy>`), retaining the conc
 methods instead of erasing them to Arrow's smaller interface. The handle remains
 implicitly convertible to `shared_ptr<arrow::fs::FileSystem>` for existing consumers.
 No separate async factory, cast, capability object or lifecycle is needed.
+Use `auto` or `FileSystemPtr` to retain the added methods. Explicitly storing the
+handle as `ArrowFileSystemPtr` exposes only Arrow's base-class methods, while
+referencing the same object. `S3FileSystem::Make` also returns an instance with
+both synchronous and asynchronous methods.
 
 ```cpp
 ARROW_ASSIGN_OR_RAISE(auto fs, CreateArrowFileSystem(config));
 auto info = fs->GetFileInfo("key");
 auto pending = fs->GetFileInfoAsync("key");
 auto reader = fs->OpenInputFileAsync("key");
+auto output = fs->OpenOutputStreamAsync("key");
+auto removal = fs->DeleteFileAsync("old-key");
 ```
 
 S3FileSystem owns native request execution internally and shares its transport and
@@ -119,3 +125,20 @@ not atomic, and a failed delete leaves the destination copy. S3-compatible serve
 must honor conditional DELETE for protection against concurrent source overwrites.
 Clearing every bucket at the filesystem root remains unsupported, as in the
 synchronous filesystem. Append remains unsupported by S3.
+
+## Verified locally (2026-09-18)
+
+The CRT-enabled Release library and complete C++ test executable compile in the
+storage development container (`WITH_UT=ON`, `WITH_ASAN=OFF`). Results:
+
+- Native HTTP fixture: 23 passed, one MinIO-only bucket test skipped. Includes
+  native batch stat through nested Arrow subtrees on a single caller worker.
+- Isolated MinIO: all 10 selected tests passed, including the bucket test, same
+  instance async-write/sync-read visibility, multipart conditional conflicts,
+  copy/move, directory lifecycle and shutdown.
+- Existing filesystem-cache and CRT shutdown/read regressions: all 21 passed.
+- Six affected C++ translation units pass syntax compilation with WITH_CRT
+  undefined. This is compile coverage, not a full no-CRT link or runtime test.
+- Error-handling ratchet passes with the unchanged throw baseline of 21.
+
+No ASan runtime or production AWS/TLS/load validation is claimed by these runs.
