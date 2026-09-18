@@ -8,10 +8,10 @@
 #include <gtest/gtest.h>
 #include <cstdlib>
 #include <future>
+#include "milvus-storage/filesystem/async_filesystem.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
-#include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 
 namespace milvus_storage {
@@ -22,18 +22,14 @@ arrow::Result<T> Await(arrow::Future<T> future) {
 TEST(NativeS3Capability, UnsupportedProviderDoesNotFallback) {
   ASSERT_OK_AND_ASSIGN(auto executor, arrow::internal::ThreadPool::Make(1));
   auto local = std::make_shared<arrow::fs::LocalFileSystem>();
-  auto fs = std::make_shared<FileSystemProxy>("", local);
-  auto result = fs->GetFileInfoAsync("missing");
+  auto result = MakeAsyncFileSystem(local, arrow::io::IOContext(executor.get()));
   EXPECT_TRUE(result.status().IsNotImplemented());
 }
 
 #ifdef WITH_CRT
 class NativeS3Test : public ::testing::Test {
   protected:
-  static void SetUpTestSuite() {
-    ArrowFileSystemConfig config;
-    ASSERT_OK(S3FileSystemProducer(config).InitS3());
-  }
+  static void SetUpTestSuite() { ASSERT_OK(EnsureS3Initialized()); }
   void SetUp() override {
     const char* endpoint = std::getenv("STORAGE_NATIVE_S3_ENDPOINT");
     if (!endpoint)
@@ -46,11 +42,18 @@ class NativeS3Test : public ::testing::Test {
     options_.endpoint_override = endpoint;
     options_.cloud_provider = "aws";
     options_.use_crt_async_reads = true;
+    options_.max_connections = 1;
+    options_.allow_bucket_creation = true;
+    options_.use_crc32c_checksum = true;
     ASSERT_OK_AND_ASSIGN(sync_, S3FileSystem::Make(options_, arrow::io::IOContext(executor_.get())));
-    fs_ = std::make_shared<FileSystemProxy>("bucket/root", sync_);
+    if (std::getenv("STORAGE_NATIVE_S3_REAL"))
+      ASSERT_OK(sync_->CreateDir("bucket", true));
+    const auto* prefix = std::getenv("STORAGE_NATIVE_S3_PREFIX");
+    auto subtree = std::make_shared<FileSystemProxy>(prefix ? prefix : "bucket/root", sync_);
+    ASSERT_OK_AND_ASSIGN(fs_, MakeAsyncFileSystem(subtree, arrow::io::IOContext(executor_.get())));
   }
   arrow::Future<std::shared_ptr<arrow::Buffer>> Read(const std::string& path, int64_t offset, int64_t size) {
-    return fs_->OpenInputFileAsync(path).Then([this, offset, size](std::shared_ptr<arrow::io::RandomAccessFile> file) {
+    return sync_->OpenInputFileAsync("bucket/root/" + path).Then([this, offset, size](std::shared_ptr<arrow::io::RandomAccessFile> file) {
       auto native = std::dynamic_pointer_cast<NonBlockingRandomAccessFile>(file);
       return native->GetSizeAsync().Then([this, file, offset, size](int64_t) {
         return file->ReadAsync(arrow::io::IOContext(executor_.get()), offset, size);
@@ -58,7 +61,7 @@ class NativeS3Test : public ::testing::Test {
     });
   }
   arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> Metadata(const std::string& path) {
-    return fs_->OpenInputFileAsync(path).Then([this](std::shared_ptr<arrow::io::RandomAccessFile> file) {
+    return sync_->OpenInputFileAsync("bucket/root/" + path).Then([this](std::shared_ptr<arrow::io::RandomAccessFile> file) {
       return file->ReadMetadataAsync(arrow::io::IOContext(executor_.get()));
     });
   }
@@ -84,55 +87,9 @@ class NativeS3Test : public ::testing::Test {
   S3Options options_;
   std::shared_ptr<arrow::internal::ThreadPool> executor_;
   std::shared_ptr<S3FileSystem> sync_;
-  std::shared_ptr<FileSystemProxy> fs_;
+  std::shared_ptr<AsyncFileSystem> fs_;
   bool executor_stopped_ = false;
 };
-
-TEST_F(NativeS3Test, SameInstanceSupportsSyncAndArrowAsyncCalls) {
-  ASSERT_OK_AND_ASSIGN(auto before, fs_->GetFileInfo("hello #?+% 中文"));
-  ASSERT_OK_AND_ASSIGN(auto after, Await(fs_->GetFileInfoAsync("hello #?+% 中文")));
-  EXPECT_EQ(before, after);
-  std::shared_ptr<arrow::fs::FileSystem> arrow_fs = fs_;
-  ASSERT_OK_AND_ASSIGN(auto batch,
-                       Await(arrow_fs->GetFileInfoAsync(std::vector<std::string>{"hello #?+% 中文", "missing"})));
-  ASSERT_EQ(batch.size(), 2);
-  EXPECT_EQ(batch[0], after);
-  EXPECT_EQ(batch[1].type(), arrow::fs::FileType::NotFound);
-  auto nested = std::make_shared<FileSystemProxy>("pages", fs_);
-  ASSERT_OK_AND_ASSIGN(auto nested_info, Await(nested->GetFileInfoAsync("a")));
-  EXPECT_EQ(nested_info.path(), "a");
-}
-
-TEST_F(NativeS3Test, FactoryAndCacheReturnTheSameSyncAsyncHandle) {
-  ArrowFileSystemConfig config;
-  config.storage_type = "remote";
-  config.cloud_provider = "aws";
-  config.bucket_name = "bucket";
-  config.address = options_.endpoint_override;
-  config.access_key_id = "fixture";
-  config.access_key_value = "fixture-secret";
-  config.region = "us-east-1";
-  ASSERT_OK_AND_ASSIGN(auto fs, CreateArrowFileSystem(config));
-  ASSERT_OK_AND_ASSIGN(auto info, Await(fs->GetFileInfoAsync("root/hello #?+% 中文")));
-  EXPECT_EQ(info.type(), arrow::fs::FileType::File);
-  ASSERT_OK_AND_ASSIGN(auto sync_info, fs->GetFileInfo(info.path()));
-  EXPECT_EQ(info, sync_info);
-  api::Properties properties;
-  properties[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
-  properties[PROPERTY_FS_ADDRESS] = options_.endpoint_override;
-  properties[PROPERTY_FS_BUCKET_NAME] = std::string("bucket");
-  properties[PROPERTY_FS_ACCESS_KEY_ID] = std::string("fixture");
-  properties[PROPERTY_FS_ACCESS_KEY_VALUE] = std::string("fixture-secret");
-  properties[PROPERTY_FS_REGION] = std::string("us-east-1");
-  properties[PROPERTY_FS_USE_SSL] = false;
-  auto& cache = FilesystemCache::getInstance();
-  ASSERT_OK_AND_ASSIGN(auto cached, cache.get(properties));
-  ASSERT_OK_AND_ASSIGN(auto cached_again, cache.get(properties));
-  EXPECT_EQ(cached.get(), cached_again.get());
-  ASSERT_OK_AND_ASSIGN(auto cached_info, Await(cached->GetFileInfoAsync(info.path())));
-  EXPECT_EQ(cached_info, info);
-  cache.clean();
-}
 
 TEST_F(NativeS3Test, HeadAndReadUseCallerExecutorWithoutNetworkWait) {
   CompletesWithoutBlockingWorker<arrow::fs::FileInfo>([this] { return fs_->GetFileInfoAsync("slow"); });
@@ -234,7 +191,7 @@ TEST_F(NativeS3Test, RejectedBatchCompletionDoesNotRetainTheSdkCrtHolder) {
   EXPECT_EQ(infos[1].size(), 6);
 }
 TEST_F(NativeS3Test, RootListingSkipsEmptyContinuationPage) {
-  auto root = sync_;
+  ASSERT_OK_AND_ASSIGN(auto root, MakeAsyncFileSystem(sync_, arrow::io::IOContext(executor_.get())));
   arrow::fs::FileSelector selector;
   auto generator = root->GetFileInfoGenerator(selector);
   ASSERT_OK_AND_ASSIGN(auto page, Await(generator()));
@@ -244,6 +201,61 @@ TEST_F(NativeS3Test, RootListingSkipsEmptyContinuationPage) {
   EXPECT_TRUE(page.empty());
   EXPECT_TRUE(root->GetFileInfoAsync("bucket/../file").status().IsInvalid());
   EXPECT_TRUE(fs_->GetFileInfoAsync("../file").status().IsInvalid());
+}
+
+TEST_F(NativeS3Test, WritesConditionalMetadataAndOwnedBuffer) {
+  AsyncWriteOptions options;
+  options.if_absent = true;
+  options.metadata = arrow::key_value_metadata({"content-type", "x-amz-meta-test"}, {"text/plain", "kept"});
+  auto pending = fs_->WriteAsync("write #?+% 中文", arrow::Buffer::FromString("hello"), options);
+  ASSERT_OK_AND_ASSIGN(auto version, Await(pending));
+  EXPECT_FALSE(version.etag.empty());
+  ASSERT_OK_AND_ASSIGN(auto metadata, Await(fs_->ReadMetadataAsync("write #?+% 中文")));
+  ASSERT_OK_AND_ASSIGN(auto value, metadata->Get("x-amz-meta-test"));
+  EXPECT_EQ(value, "kept");
+  EXPECT_FALSE(fs_->WriteAsync("write #?+% 中文", arrow::Buffer::FromString("bad"), options).status().ok());
+  options.if_absent = false;
+  options.if_match = version.etag;
+  ASSERT_OK(fs_->WriteAsync("write #?+% 中文", arrow::Buffer::FromString("updated"), options).status());
+  options.if_match = "\"wrong-etag\"";
+  EXPECT_FALSE(fs_->WriteAsync("write #?+% 中文", arrow::Buffer::FromString("bad"), options).status().ok());
+  ASSERT_OK_AND_ASSIGN(auto data, Await(fs_->ReadAsync("write #?+% 中文", 0, 20)));
+  EXPECT_EQ(data->ToString(), "updated");
+  ASSERT_OK(fs_->WriteAsync("empty-write", arrow::Buffer::FromString("")).status());
+}
+TEST_F(NativeS3Test, WritesAndMultipartUseNativeRequests) {
+  CompletesWithoutBlockingWorker<AsyncObjectVersion>(
+      [this] { return fs_->WriteAsync("slow-write", arrow::Buffer::FromString("owned")); });
+}
+TEST_F(NativeS3Test, MultipartCompleteAndAbort) {
+  ASSERT_OK_AND_ASSIGN(auto id, Await(fs_->CreateMultipartUploadAsync("multipart")));
+  ASSERT_OK_AND_ASSIGN(
+      auto first,
+      Await(fs_->UploadPartAsync("multipart", id, 1, arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a')))));
+  ASSERT_OK_AND_ASSIGN(auto last, Await(fs_->UploadPartAsync("multipart", id, 2, arrow::Buffer::FromString("tail"))));
+  EXPECT_FALSE(fs_->CompleteMultipartUploadAsync("multipart", id, {last, first}).status().ok());
+  ASSERT_OK_AND_ASSIGN(auto version, Await(fs_->CompleteMultipartUploadAsync("multipart", id, {first, last})));
+  EXPECT_FALSE(version.etag.empty());
+  ASSERT_OK_AND_ASSIGN(auto data, Await(fs_->ReadAsync("multipart", 5 * 1024 * 1024 - 2, 10)));
+  EXPECT_EQ(data->ToString(), "aatail");
+  ASSERT_OK_AND_ASSIGN(auto abort_id, Await(fs_->CreateMultipartUploadAsync("aborted")));
+  ASSERT_OK(fs_->AbortMultipartUploadAsync("aborted", abort_id).status());
+  EXPECT_FALSE(fs_->UploadPartAsync("aborted", abort_id, 1, arrow::Buffer::FromString("bad")).status().ok());
+}
+TEST_F(NativeS3Test, MultipartEmbeddedErrorIsNotSuccess) {
+  ASSERT_OK_AND_ASSIGN(auto id, Await(fs_->CreateMultipartUploadAsync("error-complete")));
+  ASSERT_OK_AND_ASSIGN(auto part,
+                       Await(fs_->UploadPartAsync("error-complete", id, 1, arrow::Buffer::FromString("data"))));
+  EXPECT_FALSE(fs_->CompleteMultipartUploadAsync("error-complete", id, {part}).status().ok());
+  ASSERT_OK(fs_->AbortMultipartUploadAsync("error-complete", id).status());
+}
+TEST_F(NativeS3Test, RejectedCompletionPreservesSuccessfulWrite) {
+  ASSERT_OK(executor_->Shutdown());
+  executor_stopped_ = true;
+  ASSERT_OK_AND_ASSIGN(auto version, Await(fs_->WriteAsync("rejected-dispatch", arrow::Buffer::FromString("durable"))));
+  EXPECT_FALSE(version.etag.empty());
+  ASSERT_OK_AND_ASSIGN(auto data, Await(fs_->ReadAsync("rejected-dispatch", 0, 7)));
+  EXPECT_EQ(data->ToString(), "durable");
 }
 #endif
 }  // namespace milvus_storage

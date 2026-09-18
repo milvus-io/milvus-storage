@@ -10,6 +10,7 @@
 #include <utility>
 #include <arrow/filesystem/path_util.h>
 #include <arrow/util/thread_pool.h>
+#include <aws/core/AmazonSerializableWebServiceRequest.h>
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/utils/stream/PreallocatedStreamBuf.h>
@@ -212,7 +213,7 @@ arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(
   return std::shared_ptr<NativeS3Transport>(new NativeS3Transport(std::move(state), std::move(crt_holder)));
 }
 
-arrow::Future<NativeS3Response> NativeS3Transport::Send(const Aws::S3::S3Request& model,
+arrow::Future<NativeS3Response> NativeS3Transport::Send(const Aws::AmazonWebServiceRequest& model,
                                                         const std::string& key,
                                                         Aws::Http::HttpMethod method,
                                                         const std::string& query,
@@ -250,9 +251,11 @@ arrow::Future<NativeS3Response> NativeS3Transport::Send(const Aws::S3::S3Request
     for (const auto& h : model.GetHeaders()) r->http->SetHeaderValue(h.first, h.second);
     for (const auto& h : model.GetAdditionalCustomHeaders()) r->http->SetHeaderValue(h.first, h.second);
     if (!data) {
-      const auto payload = model.SerializePayload();
-      if (!payload.empty())
-        data = arrow::Buffer::FromString(std::string(payload.data(), payload.size()));
+      if (auto serializable = dynamic_cast<const Aws::AmazonSerializableWebServiceRequest*>(&model)) {
+        const auto payload = serializable->SerializePayload();
+        if (!payload.empty())
+          data = arrow::Buffer::FromString(std::string(payload.data(), payload.size()));
+      }
     }
     if (data) {
       r->data = std::move(data);
