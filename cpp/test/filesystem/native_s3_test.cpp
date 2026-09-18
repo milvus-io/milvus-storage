@@ -8,10 +8,10 @@
 #include <gtest/gtest.h>
 #include <cstdlib>
 #include <future>
-#include "milvus-storage/filesystem/async_filesystem.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 
 namespace milvus_storage {
@@ -22,14 +22,18 @@ arrow::Result<T> Await(arrow::Future<T> future) {
 TEST(NativeS3Capability, UnsupportedProviderDoesNotFallback) {
   ASSERT_OK_AND_ASSIGN(auto executor, arrow::internal::ThreadPool::Make(1));
   auto local = std::make_shared<arrow::fs::LocalFileSystem>();
-  auto result = MakeAsyncFileSystem(local, arrow::io::IOContext(executor.get()));
+  auto fs = std::make_shared<FileSystemProxy>("", local);
+  auto result = fs->GetFileInfoAsync("missing");
   EXPECT_TRUE(result.status().IsNotImplemented());
 }
 
 #ifdef WITH_CRT
 class NativeS3Test : public ::testing::Test {
   protected:
-  static void SetUpTestSuite() { ASSERT_OK(EnsureS3Initialized()); }
+  static void SetUpTestSuite() {
+    ArrowFileSystemConfig config;
+    ASSERT_OK(S3FileSystemProducer(config).InitS3());
+  }
   void SetUp() override {
     const char* endpoint = std::getenv("STORAGE_NATIVE_S3_ENDPOINT");
     if (!endpoint)
@@ -43,11 +47,10 @@ class NativeS3Test : public ::testing::Test {
     options_.cloud_provider = "aws";
     options_.use_crt_async_reads = true;
     ASSERT_OK_AND_ASSIGN(sync_, S3FileSystem::Make(options_, arrow::io::IOContext(executor_.get())));
-    auto subtree = std::make_shared<FileSystemProxy>("bucket/root", sync_);
-    ASSERT_OK_AND_ASSIGN(fs_, MakeAsyncFileSystem(subtree, arrow::io::IOContext(executor_.get())));
+    fs_ = std::make_shared<FileSystemProxy>("bucket/root", sync_);
   }
   arrow::Future<std::shared_ptr<arrow::Buffer>> Read(const std::string& path, int64_t offset, int64_t size) {
-    return sync_->OpenInputFileAsync("bucket/root/" + path).Then([this, offset, size](std::shared_ptr<arrow::io::RandomAccessFile> file) {
+    return fs_->OpenInputFileAsync(path).Then([this, offset, size](std::shared_ptr<arrow::io::RandomAccessFile> file) {
       auto native = std::dynamic_pointer_cast<NonBlockingRandomAccessFile>(file);
       return native->GetSizeAsync().Then([this, file, offset, size](int64_t) {
         return file->ReadAsync(arrow::io::IOContext(executor_.get()), offset, size);
@@ -55,7 +58,7 @@ class NativeS3Test : public ::testing::Test {
     });
   }
   arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> Metadata(const std::string& path) {
-    return sync_->OpenInputFileAsync("bucket/root/" + path).Then([this](std::shared_ptr<arrow::io::RandomAccessFile> file) {
+    return fs_->OpenInputFileAsync(path).Then([this](std::shared_ptr<arrow::io::RandomAccessFile> file) {
       return file->ReadMetadataAsync(arrow::io::IOContext(executor_.get()));
     });
   }
@@ -81,9 +84,55 @@ class NativeS3Test : public ::testing::Test {
   S3Options options_;
   std::shared_ptr<arrow::internal::ThreadPool> executor_;
   std::shared_ptr<S3FileSystem> sync_;
-  std::shared_ptr<AsyncFileSystem> fs_;
+  std::shared_ptr<FileSystemProxy> fs_;
   bool executor_stopped_ = false;
 };
+
+TEST_F(NativeS3Test, SameInstanceSupportsSyncAndArrowAsyncCalls) {
+  ASSERT_OK_AND_ASSIGN(auto before, fs_->GetFileInfo("hello #?+% 中文"));
+  ASSERT_OK_AND_ASSIGN(auto after, Await(fs_->GetFileInfoAsync("hello #?+% 中文")));
+  EXPECT_EQ(before, after);
+  std::shared_ptr<arrow::fs::FileSystem> arrow_fs = fs_;
+  ASSERT_OK_AND_ASSIGN(auto batch,
+                       Await(arrow_fs->GetFileInfoAsync(std::vector<std::string>{"hello #?+% 中文", "missing"})));
+  ASSERT_EQ(batch.size(), 2);
+  EXPECT_EQ(batch[0], after);
+  EXPECT_EQ(batch[1].type(), arrow::fs::FileType::NotFound);
+  auto nested = std::make_shared<FileSystemProxy>("pages", fs_);
+  ASSERT_OK_AND_ASSIGN(auto nested_info, Await(nested->GetFileInfoAsync("a")));
+  EXPECT_EQ(nested_info.path(), "a");
+}
+
+TEST_F(NativeS3Test, FactoryAndCacheReturnTheSameSyncAsyncHandle) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = "aws";
+  config.bucket_name = "bucket";
+  config.address = options_.endpoint_override;
+  config.access_key_id = "fixture";
+  config.access_key_value = "fixture-secret";
+  config.region = "us-east-1";
+  ASSERT_OK_AND_ASSIGN(auto fs, CreateArrowFileSystem(config));
+  ASSERT_OK_AND_ASSIGN(auto info, Await(fs->GetFileInfoAsync("root/hello #?+% 中文")));
+  EXPECT_EQ(info.type(), arrow::fs::FileType::File);
+  ASSERT_OK_AND_ASSIGN(auto sync_info, fs->GetFileInfo(info.path()));
+  EXPECT_EQ(info, sync_info);
+  api::Properties properties;
+  properties[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+  properties[PROPERTY_FS_ADDRESS] = options_.endpoint_override;
+  properties[PROPERTY_FS_BUCKET_NAME] = std::string("bucket");
+  properties[PROPERTY_FS_ACCESS_KEY_ID] = std::string("fixture");
+  properties[PROPERTY_FS_ACCESS_KEY_VALUE] = std::string("fixture-secret");
+  properties[PROPERTY_FS_REGION] = std::string("us-east-1");
+  properties[PROPERTY_FS_USE_SSL] = false;
+  auto& cache = FilesystemCache::getInstance();
+  ASSERT_OK_AND_ASSIGN(auto cached, cache.get(properties));
+  ASSERT_OK_AND_ASSIGN(auto cached_again, cache.get(properties));
+  EXPECT_EQ(cached.get(), cached_again.get());
+  ASSERT_OK_AND_ASSIGN(auto cached_info, Await(cached->GetFileInfoAsync(info.path())));
+  EXPECT_EQ(cached_info, info);
+  cache.clean();
+}
 
 TEST_F(NativeS3Test, HeadAndReadUseCallerExecutorWithoutNetworkWait) {
   CompletesWithoutBlockingWorker<arrow::fs::FileInfo>([this] { return fs_->GetFileInfoAsync("slow"); });
@@ -157,7 +206,7 @@ TEST_F(NativeS3Test, RejectedCompletionExecutorPreservesResult) {
   EXPECT_EQ(info.size(), 6);
 }
 TEST_F(NativeS3Test, RootListingSkipsEmptyContinuationPage) {
-  ASSERT_OK_AND_ASSIGN(auto root, MakeAsyncFileSystem(sync_, arrow::io::IOContext(executor_.get())));
+  auto root = sync_;
   arrow::fs::FileSelector selector;
   auto generator = root->GetFileInfoGenerator(selector);
   ASSERT_OK_AND_ASSIGN(auto page, Await(generator()));
