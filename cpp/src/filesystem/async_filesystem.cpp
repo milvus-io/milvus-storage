@@ -24,14 +24,18 @@ auto WithNativeS3(const std::shared_ptr<arrow::fs::FileSystem>& fs, std::string 
   return arrow::Status::NotImplemented("Filesystem has no native asynchronous S3 transport");
 }
 template <typename Call>
-auto WithNativeS3(std::shared_ptr<arrow::fs::FileSystem> fs, std::string source, std::string destination, Call call)
+auto WithNativeS3(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                  std::string source,
+                  std::string destination,
+                  Call call)
     -> decltype(call(std::declval<S3FileSystem&>(), source, destination)) {
-  while (auto subtree = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs)) {
+  auto* current = fs.get();
+  while (auto* subtree = dynamic_cast<arrow::fs::SubTreeFileSystem*>(current)) {
     source = subtree->base_path() + source;
     destination = subtree->base_path() + destination;
-    fs = subtree->base_fs();
+    current = subtree->base_fs().get();
   }
-  if (auto s3 = std::dynamic_pointer_cast<S3FileSystem>(fs))
+  if (auto* s3 = dynamic_cast<S3FileSystem*>(current))
     return call(*s3, source, destination);
   return arrow::Status::NotImplemented("Filesystem has no native asynchronous S3 transport");
 }
@@ -102,10 +106,10 @@ arrow::Future<> FileSystemProxy::MoveAsync(const std::string& source, const std:
 }
 arrow::Future<> FileSystemProxy::DeleteDirContentsAsync(const std::string& path, bool missing_dir_ok) {
   ARROW_ASSIGN_OR_RAISE(auto full, PrependBaseNonEmpty(path));
-  auto fs = base_fs();
-  while (auto subtree = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs)) {
+  auto* fs = base_fs().get();
+  while (auto* subtree = dynamic_cast<arrow::fs::SubTreeFileSystem*>(fs)) {
     full = subtree->base_path() + full;
-    fs = subtree->base_fs();
+    fs = subtree->base_fs().get();
   }
   return fs->DeleteDirContentsAsync(full, missing_dir_ok);
 }
