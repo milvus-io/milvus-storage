@@ -41,6 +41,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(uri.query, keep_blank_values=True)
         if key == "root/slow" or query.get("prefix") == ["root/slow-list/"]:
             time.sleep(0.3)
+        if not bucket and self.command == "GET":
+            if "continuation-token" not in query:
+                return self.reply(200, b"<ListAllMyBucketsResult><ContinuationToken>next</ContinuationToken></ListAllMyBucketsResult>")
+            return self.reply(200, b"<ListAllMyBucketsResult><Buckets><Bucket><Name>bucket</Name></Bucket></Buckets></ListAllMyBucketsResult>")
         if bucket != "bucket":
             return self.reply(404)
         if key == "root/denied":

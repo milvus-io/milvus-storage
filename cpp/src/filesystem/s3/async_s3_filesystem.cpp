@@ -36,7 +36,13 @@ struct Path {
     if (arrow::fs::internal::IsLikelyUri(path) || (!path.empty() && path.front() == '/')) {
       return Status::Invalid("Expected bucket/key path: ", path);
     }
+    if (path.find('\0') != std::string::npos)
+      return Status::Invalid("NUL in S3 path");
     auto clean = std::string(arrow::fs::internal::RemoveTrailingSlash(path));
+    for (const auto& component : arrow::fs::internal::SplitAbstractPath(clean)) {
+      if (component == "." || component == "..")
+        return Status::Invalid("Dot components in S3 path");
+    }
     ARROW_RETURN_NOT_OK(arrow::fs::internal::ValidateAbstractPath(clean));
     auto slash = clean.find('/');
     return Path{clean.substr(0, slash), slash == std::string::npos ? "" : clean.substr(slash + 1)};
@@ -109,7 +115,7 @@ class AsyncS3FileSystem final : public AsyncFileSystem, public std::enable_share
       return Future<FileInfo>::MakeFinished(Info(path, FileType::Directory));
     auto p = *parsed;
     return Head(p).Then([self = shared_from_this(), p, path](const NativeS3Response& response) -> Future<FileInfo> {
-      if (response.http_status != 404 || !response.status.ok()) {
+      if (!response.HasHttpStatus(404)) {
         auto status = response.ToStatus();
         if (!status.ok())
           return Failed<FileInfo>(status);
@@ -137,7 +143,7 @@ class AsyncS3FileSystem final : public AsyncFileSystem, public std::enable_share
       // A directory marker is an object whose key ends in '/'. Prefix listing
       // also discovers implicit directories and avoids an extra marker HEAD.
       return self->List(p, "", false, 1).Then([path](const NativeS3Response& listed) -> Result<FileInfo> {
-        if (listed.http_status == 404)
+        if (listed.HasHttpStatus(404))
           return Info(path, FileType::NotFound);
         ARROW_ASSIGN_OR_RAISE(auto result, XmlResult<S3::ListObjectsV2Result>(listed));
         return Info(path, result.GetContents().empty() && result.GetCommonPrefixes().empty() ? FileType::NotFound
@@ -196,6 +202,14 @@ class AsyncS3FileSystem final : public AsyncFileSystem, public std::enable_share
                 if (!root->state->selector.recursive)
                   root->next = root->buckets.size();
                 return root->buckets;
+              })
+              .Then([root, weak](FileInfoVector page) -> Future<FileInfoVector> {
+                if (page.empty() && !root->token.empty()) {
+                  if (auto next = weak.lock())
+                    return (*next)();
+                  return Failed<FileInfoVector>(Status::Cancelled("S3 listing abandoned"));
+                }
+                return Future<FileInfoVector>::MakeFinished(std::move(page));
               });
         }
         if (!root->state->selector.recursive)
@@ -228,7 +242,7 @@ class AsyncS3FileSystem final : public AsyncFileSystem, public std::enable_share
         return Future<FileInfoVector>::MakeFinished(FileInfoVector{});
       return state->fs->List(state->path, state->token, state->selector.recursive)
           .Then([state, weak](const NativeS3Response& response) -> Future<FileInfoVector> {
-            if (response.http_status == 404 && state->selector.allow_not_found) {
+            if (response.HasHttpStatus(404) && state->selector.allow_not_found) {
               state->done = true;
               return Future<FileInfoVector>::MakeFinished(FileInfoVector{});
             }
@@ -285,6 +299,8 @@ class AsyncS3FileSystem final : public AsyncFileSystem, public std::enable_share
             }
             for (const auto& common : result.GetCommonPrefixes()) {
               auto key = std::string(common.GetPrefix().c_str());
+              if (key.compare(0, prefix.size(), prefix) != 0 || key.size() <= prefix.size() || key.back() != '/')
+                return Failed<FileInfoVector>(Status::IOError("S3 common prefix escaped listing"));
               if (!key.empty() && key.back() == '/')
                 key.pop_back();
               page.push_back(Info(state->path.bucket + "/" + key, FileType::Directory));
@@ -331,7 +347,7 @@ class AsyncS3FileSystem final : public AsyncFileSystem, public std::enable_share
     return transport_->Send(request, parsed->key, HttpMethod::HTTP_GET, "", io_, static_cast<size_t>(nbytes))
         .Then([self = shared_from_this(), path, offset,
                nbytes](const NativeS3Response& response) -> Future<std::shared_ptr<arrow::Buffer>> {
-          if (response.http_status == 416) {
+          if (response.HasHttpStatus(416)) {
             return self->GetFileInfoAsync(path).Then(
                 [offset](const FileInfo& info) -> Result<std::shared_ptr<arrow::Buffer>> {
                   if (info.type() != FileType::File || offset != info.size())

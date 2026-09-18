@@ -20,6 +20,7 @@ struct NativeS3Response {
   std::string body;
   Aws::Http::HeaderValueCollection headers;
   arrow::Status ToStatus() const;
+  bool HasHttpStatus(int code) const;
 };
 
 class NativeS3Transport {
