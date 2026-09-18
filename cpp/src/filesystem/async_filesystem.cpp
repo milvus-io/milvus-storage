@@ -39,8 +39,12 @@ arrow::Future<arrow::fs::FileInfoVector> FileSystemProxy::GetFileInfoAsync(const
     ARROW_ASSIGN_OR_RAISE(auto full, PrependBase(path));
     full_paths.push_back(std::move(full));
   }
-  return base_fs()
-      ->GetFileInfoAsync(full_paths)
+  auto fs = base_fs();
+  while (auto subtree = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs)) {
+    for (auto& path : full_paths) path = subtree->base_path() + path;
+    fs = subtree->base_fs();
+  }
+  return fs->GetFileInfoAsync(full_paths)
       .Then([paths](arrow::fs::FileInfoVector infos) -> arrow::Result<arrow::fs::FileInfoVector> {
         if (infos.size() != paths.size())
           return arrow::Status::IOError("Invalid batch stat result size");
