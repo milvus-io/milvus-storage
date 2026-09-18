@@ -405,6 +405,15 @@ TEST_F(NativeS3Test, BucketLifecycleHonorsPolicy) {
   EXPECT_EQ(missing.type(), arrow::fs::FileType::NotFound);
 }
 
+TEST_F(NativeS3Test, UnsupportedDeleteDoesNotFallbackToBlockingSdkRequests) {
+  auto options = options_;
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
+  ASSERT_OK_AND_ASSIGN(auto fs, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
+  EXPECT_TRUE(fs->DeleteDirContentsAsync("bucket/absent", true).status().IsNotImplemented());
+  // The synchronous operation remains usable with the same configuration.
+  ASSERT_OK(fs->DeleteDirContents("bucket/absent", true));
+}
+
 class NativeS3ShutdownTest : public NativeS3Test {};
 TEST_F(NativeS3ShutdownTest, DrainsPendingWriteBeforeAwsShutdown) {
   auto pending = Write("slow-write", arrow::Buffer::FromString("shutdown"));
