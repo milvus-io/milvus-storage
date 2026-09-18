@@ -209,6 +209,30 @@ TEST_F(NativeS3Test, RejectedCompletionExecutorPreservesResult) {
   ASSERT_OK_AND_ASSIGN(auto info, Await(fs_->GetFileInfoAsync("hello #?+% 中文")));
   EXPECT_EQ(info.size(), 6);
 }
+
+TEST_F(NativeS3Test, RejectedCompletionCanReleaseTheLastNativeTransportOwner) {
+  ASSERT_OK(executor_->Shutdown());
+  executor_stopped_ = true;
+  auto pending = fs_->GetFileInfoAsync("slow");
+  fs_.reset();
+  sync_.reset();
+  ASSERT_TRUE(pending.Wait(5));
+  ASSERT_OK_AND_ASSIGN(auto info, pending.result());
+  EXPECT_EQ(info.size(), 6);
+}
+
+TEST_F(NativeS3Test, RejectedBatchCompletionDoesNotRetainTheSdkCrtHolder) {
+  ASSERT_OK(executor_->Shutdown());
+  executor_stopped_ = true;
+  auto pending = fs_->GetFileInfoAsync(std::vector<std::string>{"slow", "hello #?+% 中文"});
+  fs_.reset();
+  sync_.reset();
+  ASSERT_TRUE(pending.Wait(5));
+  ASSERT_OK_AND_ASSIGN(auto infos, pending.result());
+  ASSERT_EQ(infos.size(), 2);
+  EXPECT_EQ(infos[0].size(), 6);
+  EXPECT_EQ(infos[1].size(), 6);
+}
 TEST_F(NativeS3Test, RootListingSkipsEmptyContinuationPage) {
   auto root = sync_;
   arrow::fs::FileSelector selector;

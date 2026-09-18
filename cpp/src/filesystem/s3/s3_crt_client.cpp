@@ -33,6 +33,7 @@
 #include <aws/core/client/RetryStrategy.h>
 #include <aws/s3-crt/S3CrtClient.h>
 #include <aws/s3-crt/S3CrtClientConfiguration.h>
+#include <aws/s3/s3_client.h>
 
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 
@@ -83,6 +84,13 @@ class S3CrtClientOperationState {
   std::size_t active_operations = 0;
   // One-way admission gate: false -> true when holder finalization starts.
   bool closing = false;
+  // Native-only holders release asynchronously, including when their last
+  // owner disappears from a response continuation. The finalizer still waits
+  // for the native shutdown callback before allowing Aws::ShutdownAPI().
+  bool native = false;
+  aws_s3_client* native_client = nullptr;
+  bool native_shutdown = false;
+  bool registered = false;
 };
 
 // ------------ Implementation of S3CrtClientConstructionLease ------------
@@ -139,12 +147,15 @@ S3CrtClientConstructionLease::~S3CrtClientConstructionLease() {
 
 // ------------ Implementation of S3CrtClientHolder ------------
 S3CrtClientLease::S3CrtClientLease(S3CrtClientLease&& other) noexcept
-    : client_(std::exchange(other.client_, nullptr)), operation_state_(std::move(other.operation_state_)) {}
+    : client_(std::exchange(other.client_, nullptr)),
+      native_client_(std::exchange(other.native_client_, nullptr)),
+      operation_state_(std::move(other.operation_state_)) {}
 
 S3CrtClientLease& S3CrtClientLease::operator=(S3CrtClientLease&& other) noexcept {
   if (this != &other) {
     Release();
     client_ = std::exchange(other.client_, nullptr);
+    native_client_ = std::exchange(other.native_client_, nullptr);
     operation_state_ = std::move(other.operation_state_);
   }
   return *this;
@@ -159,17 +170,25 @@ void S3CrtClientLease::Release() {
   // Moving operation_state_ out also makes repeated Release() calls harmless,
   // which is required by move assignment and moved-from destruction.
   client_ = nullptr;
+  native_client_ = nullptr;
   auto operation_state = std::move(operation_state_);
   if (!operation_state) {
     return;
   }
 
   bool notify = false;
+  aws_s3_client* native = nullptr;
   {
     std::lock_guard lock(operation_state->mutex);
     DCHECK_GT(operation_state->active_operations, 0);
     notify = --operation_state->active_operations == 0;
+    if (notify && operation_state->closing) {
+      native = std::exchange(operation_state->native_client, nullptr);
+    }
   }
+  // Unlike the SDK destructor, release never waits for a CRT callback.
+  if (native)
+    aws_s3_client_release(native);
   if (notify) {
     operation_state->cv.notify_all();
   }
@@ -198,9 +217,10 @@ arrow::Result<S3CrtClientLease> S3CrtClientHolder::Acquire() {
     if (operation_state_->closing || finalizer_->finalized_.load(std::memory_order_acquire)) {
       return ErrorS3Finalized();
     }
-    DCHECK(client_) << "inconsistent S3CrtClientHolder";
+    DCHECK(client_ || operation_state_->native_client) << "inconsistent S3CrtClientHolder";
     ++operation_state_->active_operations;
     lease.client_ = client_.get();
+    lease.native_client_ = operation_state_->native_client;
     lease.operation_state_ = operation_state_;
   }
   return lease;
@@ -227,6 +247,16 @@ void S3CrtClientHolder::Finalize() {
   {
     std::unique_lock lock(operation_state_->mutex);
     operation_state_->closing = true;
+    if (operation_state_->native) {
+      // The last operation releases the client when leases are still active.
+      // Never block a native callback that drops the last transport owner.
+      auto* native =
+          operation_state_->active_operations == 0 ? std::exchange(operation_state_->native_client, nullptr) : nullptr;
+      lock.unlock();
+      if (native)
+        aws_s3_client_release(native);
+      return;
+    }
     operation_state_->cv.wait(lock, [this] { return operation_state_->active_operations == 0; });
     client = std::move(client_);
   }
@@ -256,6 +286,16 @@ std::shared_ptr<FilesystemMetrics> S3CrtClientHolder::GetMetrics() const { retur
 // or multiply-owned client is never counted as live.
 arrow::Result<std::shared_ptr<S3CrtClientHolder>> S3CrtClientFinalizer::AddClient(
     ClientFactory make_client, std::shared_ptr<FilesystemMetrics> metrics) {
+  return AddClientImpl(std::move(make_client), {}, std::move(metrics));
+}
+
+arrow::Result<std::shared_ptr<S3CrtClientHolder>> S3CrtClientFinalizer::AddNativeClient(
+    NativeClientFactory make_client) {
+  return AddClientImpl({}, std::move(make_client), nullptr);
+}
+
+arrow::Result<std::shared_ptr<S3CrtClientHolder>> S3CrtClientFinalizer::AddClientImpl(
+    ClientFactory make_client, NativeClientFactory make_native_client, std::shared_ptr<FilesystemMetrics> metrics) {
   auto finalizer = shared_from_this();
   {
     std::lock_guard lock(mutex_);
@@ -271,15 +311,45 @@ arrow::Result<std::shared_ptr<S3CrtClientHolder>> S3CrtClientFinalizer::AddClien
   // reservation but never blocks other finalizer state transitions.
   ClientFactory factory = std::move(make_client);
   make_client = nullptr;
-  ARROW_ASSIGN_OR_RAISE(auto client, factory());
-  factory = nullptr;
-  if (!client) {
-    return arrow::Status::Invalid("S3 CRT client factory returned a null client");
-  }
-  if (client.use_count() != 1) {
-    return arrow::Status::Invalid("S3CrtClientHolder must be the sole shared owner");
-  }
+  NativeClientFactory native_factory = std::move(make_native_client);
+  make_native_client = nullptr;
   auto holder = std::shared_ptr<S3CrtClientHolder>(new S3CrtClientHolder(finalizer, std::move(metrics)));
+  auto state = holder->operation_state_;
+  // Failed registration must finish native shutdown inside the construction
+  // reservation too. On success ownership transfers to the operation state.
+  auto cleanup = [state](aws_s3_client* client) {
+    aws_s3_client_release(client);
+    std::unique_lock lock(state->mutex);
+    state->cv.wait(lock, [&] { return state->native_shutdown; });
+  };
+  std::unique_ptr<aws_s3_client, decltype(cleanup)> native(nullptr, cleanup);
+  std::shared_ptr<Aws::S3Crt::S3CrtClient> client;
+  if (native_factory) {
+    ARROW_ASSIGN_OR_RAISE(auto raw, native_factory([state, finalizer] {
+                            bool registered;
+                            {
+                              std::lock_guard lock(state->mutex);
+                              state->native_shutdown = true;
+                              registered = state->registered;
+                            }
+                            state->cv.notify_all();
+                            if (registered)
+                              finalizer->ClientDestroyed();
+                          }));
+    native.reset(raw);
+    native_factory = nullptr;
+    if (!native)
+      return arrow::Status::Invalid("Native S3 client factory returned a null client");
+  } else {
+    if (!factory)
+      return arrow::Status::Invalid("Missing S3 CRT client factory");
+    ARROW_ASSIGN_OR_RAISE(client, factory());
+    factory = nullptr;
+    if (!client)
+      return arrow::Status::Invalid("S3 CRT client factory returned a null client");
+    if (client.use_count() != 1)
+      return arrow::Status::Invalid("S3CrtClientHolder must be the sole shared owner");
+  }
 
   bool notify = false;
   {
@@ -290,6 +360,12 @@ arrow::Result<std::shared_ptr<S3CrtClientHolder>> S3CrtClientFinalizer::AddClien
     holders_.emplace_back(holder);
 
     holder->client_ = std::move(client);
+    {
+      std::lock_guard operation_lock(state->mutex);
+      state->native = native != nullptr;
+      state->native_client = native.release();
+      state->registered = true;
+    }
     ++live_clients_;
     construction.finalizer_.reset();
     notify = --constructing_clients_ == 0;
@@ -347,9 +423,9 @@ void S3CrtClientFinalizer::Finalize() {
 }
 
 void S3CrtClientFinalizer::ClientDestroyed() {
-  // This callback runs after S3CrtClient::~S3CrtClient has returned, so zero
-  // means every registered native client is fully gone and Aws::ShutdownAPI()
-  // may proceed.
+  // SDK holders call this after their destructor returns; native holders call
+  // it from the native shutdown callback after releasing auxiliary resources.
+  // Zero means Aws::ShutdownAPI() can proceed for both kinds of client.
   bool notify = false;
   {
     std::lock_guard lock(mutex_);

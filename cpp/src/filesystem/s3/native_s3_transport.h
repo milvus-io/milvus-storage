@@ -10,6 +10,7 @@
 #include <aws/core/http/HttpTypes.h>
 #include <aws/s3/S3Request.h>
 #include "milvus-storage/filesystem/s3/s3_client.h"
+#include "milvus-storage/filesystem/s3/s3_crt_client.h"
 
 namespace milvus_storage {
 
@@ -26,7 +27,6 @@ struct NativeS3Response {
 class NativeS3Transport {
   public:
   struct State;
-  ~NativeS3Transport();
   static arrow::Result<std::shared_ptr<NativeS3Transport>> Make(const S3Options& options,
                                                                 std::shared_ptr<S3ClientHolder> holder);
   // DEFAULT meta requests never transform PUT into multipart. All bodies are
@@ -40,12 +40,10 @@ class NativeS3Transport {
                                        std::shared_ptr<arrow::Buffer> body = nullptr);
 
   private:
-  explicit NativeS3Transport(std::shared_ptr<State> state) : state_(std::move(state)) {}
-  std::shared_ptr<State> state_;
+     NativeS3Transport(std::shared_ptr<State> state, std::shared_ptr<S3CrtClientHolder> holder)
+         : state_(std::move(state)), holder_(std::move(holder)) {}
+     std::shared_ptr<State> state_;
+     std::shared_ptr<S3CrtClientHolder> holder_;
 };
-
-// Called before Aws::ShutdownAPI; ordinary transport destruction only initiates
-// nonblocking release. This barrier drains requests, completions and native clients.
-void FinalizeNativeS3Transports();
 }  // namespace milvus_storage
 #endif

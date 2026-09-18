@@ -2726,10 +2726,12 @@ arrow::Result<FileInfoVector> S3FileSystem::GetFileInfo(const FileSelector& sele
 
 FileInfoGenerator S3FileSystem::GetFileInfoGenerator(const FileSelector& select) {
 #ifdef WITH_CRT
-  if (impl_->native_operations_.ok())
-    return (*impl_->native_operations_)->GetFileInfoGenerator(select);
-#endif
+  if (!impl_->native_operations_.ok())
+    return arrow::MakeFailingGenerator<FileInfoVector>(impl_->native_operations_.status());
+  return (*impl_->native_operations_)->GetFileInfoGenerator(select);
+#else
   return impl_->GetFileInfoGenerator(select);
+#endif
 }
 
 arrow::Status S3FileSystem::CreateDir(const std::string& s, bool recursive) {
@@ -2941,21 +2943,20 @@ arrow::Future<FileInfo> S3FileSystem::GetFileInfoAsync(const std::string& path) 
 
 arrow::Future<arrow::fs::FileInfoVector> S3FileSystem::GetFileInfoAsync(const std::vector<std::string>& paths) {
 #ifdef WITH_CRT
-  if (!impl_->native_operations_.ok())
-    return arrow::fs::FileSystem::GetFileInfoAsync(paths);
-#else
-  return arrow::fs::FileSystem::GetFileInfoAsync(paths);
-#endif
+  ARROW_RETURN_NOT_OK(impl_->native_operations_.status());
   auto infos = std::make_shared<arrow::fs::FileInfoVector>();
   infos->reserve(paths.size());
   auto result = arrow::Future<>::MakeFinished();
   // Sequential admission keeps arbitrarily large batches within the transport limit.
   for (const auto& path : paths) {
-    result = result.Then([self = std::static_pointer_cast<S3FileSystem>(shared_from_this()), path, infos] {
-      return self->GetFileInfoAsync(path).Then([infos](FileInfo info) { infos->push_back(std::move(info)); });
+    result = result.Then([operations = *impl_->native_operations_, path, infos] {
+      return operations->GetFileInfoAsync(path).Then([infos](FileInfo info) { infos->push_back(std::move(info)); });
     });
   }
   return result.Then([infos] { return std::move(*infos); });
+#else
+  return arrow::fs::FileSystem::GetFileInfoAsync(paths);
+#endif
 }
 
 S3FileSystem::S3FileSystem(const S3Options& options, const arrow::io::IOContext& io_context)
@@ -2986,14 +2987,18 @@ arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> S3FileSystem::OpenIn
 Future<std::shared_ptr<arrow::io::RandomAccessFile>> S3FileSystem::OpenInputFileAsync(const std::string& path) {
 #ifdef WITH_CRT
   if (impl_->UseCrtReadPath()) return Future<std::shared_ptr<arrow::io::RandomAccessFile>>::MakeFinished(OpenInputFile(path));
-#endif
+  return Status::NotImplemented("Nonblocking S3 input requires CRT reads");
+#else
   return FileSystem::OpenInputFileAsync(path);
+#endif
 }
 Future<std::shared_ptr<arrow::io::RandomAccessFile>> S3FileSystem::OpenInputFileAsync(const FileInfo& info) {
 #ifdef WITH_CRT
   if (impl_->UseCrtReadPath()) return Future<std::shared_ptr<arrow::io::RandomAccessFile>>::MakeFinished(OpenInputFile(info));
-#endif
+  return Status::NotImplemented("Nonblocking S3 input requires CRT reads");
+#else
   return FileSystem::OpenInputFileAsync(info);
+#endif
 }
 Future<std::shared_ptr<arrow::io::InputStream>> S3FileSystem::OpenInputStreamAsync(const std::string& path) {
   return OpenInputFileAsync(path).Then([](std::shared_ptr<arrow::io::RandomAccessFile> file) {

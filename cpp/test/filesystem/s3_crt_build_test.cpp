@@ -40,6 +40,10 @@
 
 #include <aws/s3-crt/S3CrtClient.h>
 #include <aws/s3-crt/S3CrtClientConfiguration.h>
+#include <aws/core/Globals.h>
+#include <aws/crt/io/Bootstrap.h>
+#include <aws/crt/auth/Credentials.h>
+#include <aws/s3/s3_client.h>
 #include <folly/executors/ManualExecutor.h>
 
 #include "milvus-storage/common/extend_status.h"
@@ -73,6 +77,28 @@ std::shared_ptr<Aws::S3Crt::S3CrtClient> MakeTestS3CrtClient() {
   // holder/finalizer behavior without constructing a native CRT client.
   auto storage = std::make_shared<char>();
   return {storage, reinterpret_cast<Aws::S3Crt::S3CrtClient*>(storage.get())};
+}
+
+arrow::Result<aws_s3_client*> MakeTestNativeClient(std::function<void()> on_shutdown) {
+  aws_s3_client_config config{};
+  config.region = aws_byte_cursor_from_c_str("us-east-1");
+  config.client_bootstrap = Aws::GetDefaultClientBootstrap()->GetUnderlyingHandle();
+  config.tls_mode = AWS_MR_TLS_DISABLED;
+  auto credentials = Aws::Crt::Auth::CredentialsProvider::CreateCredentialsProviderAnonymous();
+  aws_signing_config_aws signing{};
+  aws_s3_init_default_signing_config(&signing, config.region, credentials->GetUnderlyingHandle());
+  config.signing_config = &signing;
+  auto done = std::make_unique<std::function<void()>>(std::move(on_shutdown));
+  config.shutdown_callback_user_data = done.get();
+  config.shutdown_callback = [](void* user) {
+    std::unique_ptr<std::function<void()>> callback(static_cast<std::function<void()>*>(user));
+    (*callback)();
+  };
+  auto* client = aws_s3_client_new(aws_default_allocator(), &config);
+  if (!client)
+    return arrow::Status::IOError("Cannot construct native test client: ", aws_error_str(aws_last_error()));
+  done.release();
+  return client;
 }
 
 bool WaitUntilAcquireRejected(const std::shared_ptr<S3CrtClientHolder>& holder) {
@@ -537,6 +563,89 @@ TEST(S3CrtClientFinalizerTest, FinalizeWaitsForClientDestructorAlreadyInProgress
   finalized.get();
 }
 
+TEST(S3CrtClientFinalizerTest, NativeHolderDestructionDoesNotWaitForItsOwnLease) {
+  ASSERT_STATUS_OK(EnsureS3InitializedForTest());
+  auto finalizer = std::make_shared<S3CrtClientFinalizer>();
+  std::promise<void> shutdown_entered_promise;
+  auto shutdown_entered = shutdown_entered_promise.get_future();
+  std::promise<void> allow_shutdown_promise;
+  auto allow_shutdown = allow_shutdown_promise.get_future().share();
+  ASSERT_AND_ASSIGN(auto holder, finalizer->AddNativeClient([&](std::function<void()> done) {
+    return MakeTestNativeClient([&, done = std::move(done)] {
+      shutdown_entered_promise.set_value();
+      allow_shutdown.wait();
+      done();
+    });
+  }));
+  ASSERT_AND_ASSIGN(auto lease, holder->Acquire());
+  ASSERT_NE(lease.native_client(), nullptr);
+  EXPECT_EQ(lease.operator->(), nullptr);
+  // This is what an inline native completion does when dropping the last
+  // transport owner. Its request lease must not make holder destruction wait.
+  std::weak_ptr<S3CrtClientHolder> weak_holder = holder;
+  auto dropped = std::async(std::launch::async, [holder = std::move(holder)]() mutable { holder.reset(); });
+  EXPECT_EQ(dropped.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  EXPECT_TRUE(weak_holder.expired());
+  auto finalized = std::async(std::launch::async, [finalizer] { finalizer->Finalize(); });
+  EXPECT_EQ(shutdown_entered.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+  EXPECT_EQ(finalized.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+  // Move assignment must retire the operation once, even after its holder dies.
+  auto moved = std::move(lease);
+  lease = S3CrtClientLease{};
+  moved = S3CrtClientLease{};
+  EXPECT_EQ(shutdown_entered.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  EXPECT_EQ(finalized.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+  allow_shutdown_promise.set_value();
+  EXPECT_EQ(finalized.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  finalized.get();
+  dropped.get();
+}
+
+TEST(S3CrtClientFinalizerTest, NativeConstructionAndShutdownUseTheSharedBarrier) {
+  ASSERT_STATUS_OK(EnsureS3InitializedForTest());
+  auto finalizer = std::make_shared<S3CrtClientFinalizer>();
+  std::promise<void> factory_entered_promise;
+  auto factory_entered = factory_entered_promise.get_future();
+  std::promise<void> release_factory_promise;
+  auto release_factory = release_factory_promise.get_future().share();
+  std::atomic<bool> native_destroyed{false};
+  auto constructed = std::async(std::launch::async, [&] {
+    return finalizer->AddNativeClient([&](std::function<void()> done) {
+      factory_entered_promise.set_value();
+      release_factory.wait();
+      return MakeTestNativeClient([&, done = std::move(done)] {
+        native_destroyed.store(true);
+        done();
+      });
+    });
+  });
+  factory_entered.wait();
+  auto finalized = std::async(std::launch::async, [finalizer] { finalizer->Finalize(); });
+  EXPECT_TRUE(WaitUntilConstructionRejected(finalizer));
+  EXPECT_EQ(finalized.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+  release_factory_promise.set_value();
+  ASSERT_AND_ASSIGN(auto holder, constructed.get());
+  EXPECT_FALSE(holder->Acquire().ok());
+  EXPECT_EQ(finalized.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  finalized.get();
+  EXPECT_TRUE(native_destroyed.load());
+  bool called = false;
+  auto rejected = finalizer->AddNativeClient([&](std::function<void()> done) {
+    called = true;
+    return MakeTestNativeClient(std::move(done));
+  });
+  EXPECT_FALSE(rejected.ok());
+  EXPECT_FALSE(called);
+}
+
+TEST(S3CrtClientFinalizerTest, RejectsSuccessfulNullNativeConstruction) {
+  auto finalizer = std::make_shared<S3CrtClientFinalizer>();
+  auto result = finalizer->AddNativeClient(
+      [](std::function<void()>) -> arrow::Result<aws_s3_client*> { return static_cast<aws_s3_client*>(nullptr); });
+  EXPECT_FALSE(result.ok());
+  finalizer->Finalize();
+}
+
 TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileWhenCrtEnabled) {
   if (!IsCloudEnv()) {
     GTEST_SKIP() << "CRT OpenInputFile smoke test skipped in non-cloud environment";
@@ -869,12 +978,18 @@ TEST(S3CrtBuildSupportTest, OpenInputFileRejectsUnsupportedNativeTransport) {
   EXPECT_TRUE(fs->OpenInputFile(info).status().IsNotImplemented());
   EXPECT_TRUE(fs->OpenInputFileAsync(path).status().IsNotImplemented());
   EXPECT_TRUE(fs->OpenInputFileAsync(info).status().IsNotImplemented());
+  EXPECT_TRUE(fs->GetFileInfoAsync(std::vector<std::string>{path}).status().IsNotImplemented());
+  arrow::fs::FileSelector selector;
+  selector.base_dir = "bucket";
+  EXPECT_TRUE(fs->GetFileInfoGenerator(selector)().status().IsNotImplemented());
 
   options.use_crt_async_reads = false;
   ASSERT_AND_ASSIGN(auto sdk_fs, S3FileSystem::Make(options));
   ASSERT_AND_ASSIGN(auto input, sdk_fs->OpenInputFile(info));
   EXPECT_EQ(dynamic_cast<NonBlockingRandomAccessFile*>(input.get()), nullptr);
   ASSERT_STATUS_OK(input->Close());
+  EXPECT_TRUE(sdk_fs->OpenInputFileAsync(path).status().IsNotImplemented());
+  EXPECT_TRUE(sdk_fs->OpenInputFileAsync(info).status().IsNotImplemented());
 }
 
 struct S3CrtMetadataTestParam {
