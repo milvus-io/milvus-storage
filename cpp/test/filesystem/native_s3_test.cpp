@@ -390,14 +390,16 @@ TEST_F(NativeS3Test, CopyEmbeddedErrorDoesNotDeleteSource) {
 TEST_F(NativeS3Test, BucketLifecycleHonorsPolicy) {
   if (!std::getenv("STORAGE_NATIVE_S3_REAL"))
     GTEST_SKIP() << "Requires isolated MinIO";
-  ASSERT_OK_AND_ASSIGN(auto root, MakeAsyncFileSystem(sync_, arrow::io::IOContext(executor_.get())));
+  auto root = sync_;
   EXPECT_FALSE(root->DeleteDirAsync("bucket").status().ok());
   auto options = options_;
   options.allow_bucket_deletion = true;
   ASSERT_OK_AND_ASSIGN(auto sync, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
-  ASSERT_OK_AND_ASSIGN(root, MakeAsyncFileSystem(sync, arrow::io::IOContext(executor_.get())));
+  root = sync;
   ASSERT_OK(root->CreateDirAsync("native-s3-bucket-test/child").status());
-  ASSERT_OK(root->WriteAsync("native-s3-bucket-test/child/file", arrow::Buffer::FromString("data")).status());
+  ASSERT_OK_AND_ASSIGN(auto stream, Await(root->OpenOutputStreamAsync("native-s3-bucket-test/child/file")));
+  ASSERT_OK(stream->Write(arrow::Buffer::FromString("data")));
+  ASSERT_OK(stream->CloseAsync().status());
   ASSERT_OK(root->DeleteDirAsync("native-s3-bucket-test").status());
   ASSERT_OK_AND_ASSIGN(auto missing, Await(root->GetFileInfoAsync("native-s3-bucket-test")));
   EXPECT_EQ(missing.type(), arrow::fs::FileType::NotFound);
