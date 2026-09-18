@@ -78,7 +78,7 @@ FileInfo Info(const std::string& path, FileType type) {
   return info;
 }
 
-class AsyncS3FileSystem final : public AsyncFileSystem, public std::enable_shared_from_this<AsyncS3FileSystem> {
+class AsyncS3FileSystem final : public NativeS3Operations, public std::enable_shared_from_this<AsyncS3FileSystem> {
   public:
   AsyncS3FileSystem(std::shared_ptr<NativeS3Transport> transport, S3Options options, arrow::io::IOContext io)
       : transport_(std::move(transport)), options_(std::move(options)), io_(std::move(io)) {}
@@ -315,7 +315,6 @@ class AsyncS3FileSystem final : public AsyncFileSystem, public std::enable_share
     return [next] { return (*next)(); };
   }
 
-
   private:
   std::shared_ptr<NativeS3Transport> transport_;
   S3Options options_;
@@ -323,10 +322,10 @@ class AsyncS3FileSystem final : public AsyncFileSystem, public std::enable_share
 };
 }  // namespace
 
-Result<std::shared_ptr<AsyncFileSystem>> MakeAsyncS3FileSystem(const S3Options& options,
-                                                               std::shared_ptr<S3ClientHolder> holder,
-                                                               const arrow::io::IOContext& io_context,
-                                                               std::shared_ptr<NativeS3Transport> transport) {
+Result<std::shared_ptr<NativeS3Operations>> MakeNativeS3Operations(const S3Options& options,
+                                                                   std::shared_ptr<S3ClientHolder> holder,
+                                                                   const arrow::io::IOContext& io_context,
+                                                                   std::shared_ptr<NativeS3Transport> transport) {
   if (!io_context.executor())
     return Status::Invalid("Native S3 requires a caller executor");
   if (!transport) {

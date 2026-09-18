@@ -1812,6 +1812,8 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
   ClientBuilder<Aws::S3Crt::S3CrtClient> crt_builder_;
   std::shared_ptr<S3CrtClientHolder> crt_holder_;
   std::shared_ptr<NativeS3Transport> native_;
+  arrow::Result<std::shared_ptr<NativeS3Operations>> native_operations_{
+      arrow::Status::NotImplemented("Native asynchronous S3 transport unavailable")};
 #endif
   std::optional<S3Backend> backend_;
 
@@ -1848,11 +1850,18 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
         return arrow::Status::IOError("Failed to build S3 CRT client: ", crt_result.status().ToString());
       }
       ARROW_RETURN_NOT_OK(std::move(crt_result).Value(&crt_holder_));
-      auto native_options = options();
-      native_options.region = region();
-      auto native = NativeS3Transport::Make(native_options, holder_);
-      if (native.ok()) native_ = *native;
-      else if (!native.status().IsNotImplemented()) return native.status();
+    }
+    auto native_options = options();
+    native_options.region = region();
+    auto native = NativeS3Transport::Make(native_options, holder_);
+    if (native.ok()) {
+      native_ = *native;
+      native_operations_ = MakeNativeS3Operations(native_options, holder_, io_context_, native_);
+      ARROW_RETURN_NOT_OK(native_operations_.status());
+    } else {
+      native_operations_ = native.status();
+      if (!native.status().IsNotImplemented())
+        return native.status();
     }
 #endif
     return arrow::Status::OK();
@@ -2756,7 +2765,7 @@ arrow::Result<FileInfo> S3FileSystem::GetFileInfo(const std::string& s) {
 }
 
 arrow::Result<FileInfoVector> S3FileSystem::GetFileInfo(const FileSelector& select) {
-  Future<std::vector<FileInfoVector>> file_infos_fut = CollectAsyncGenerator(GetFileInfoGenerator(select));
+  Future<std::vector<FileInfoVector>> file_infos_fut = CollectAsyncGenerator(impl_->GetFileInfoGenerator(select));
   ARROW_ASSIGN_OR_RAISE(std::vector<FileInfoVector> file_infos, file_infos_fut.result());
   FileInfoVector combined_file_infos;
   for (const auto& file_info_vec : file_infos) {
@@ -2766,6 +2775,10 @@ arrow::Result<FileInfoVector> S3FileSystem::GetFileInfo(const FileSelector& sele
 }
 
 FileInfoGenerator S3FileSystem::GetFileInfoGenerator(const FileSelector& select) {
+#ifdef WITH_CRT
+  if (impl_->native_operations_.ok())
+    return (*impl_->native_operations_)->GetFileInfoGenerator(select);
+#endif
   return impl_->GetFileInfoGenerator(select);
 }
 
@@ -2967,14 +2980,32 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenOutput
   return ptr;
 };
 
-arrow::Result<std::shared_ptr<AsyncFileSystem>> S3FileSystem::MakeAsync(const arrow::io::IOContext& io_context) {
+arrow::Future<FileInfo> S3FileSystem::GetFileInfoAsync(const std::string& path) {
 #ifdef WITH_CRT
-  auto async_options = impl_->options();
-  async_options.region = impl_->region();
-  return MakeAsyncS3FileSystem(async_options, impl_->holder_, io_context, impl_->native_);
+  ARROW_RETURN_NOT_OK(impl_->native_operations_.status());
+  return (*impl_->native_operations_)->GetFileInfoAsync(path);
 #else
   return arrow::Status::NotImplemented("Native asynchronous S3 requires WITH_CRT");
 #endif
+}
+
+arrow::Future<arrow::fs::FileInfoVector> S3FileSystem::GetFileInfoAsync(const std::vector<std::string>& paths) {
+#ifdef WITH_CRT
+  if (!impl_->native_operations_.ok())
+    return arrow::fs::FileSystem::GetFileInfoAsync(paths);
+#else
+  return arrow::fs::FileSystem::GetFileInfoAsync(paths);
+#endif
+  auto infos = std::make_shared<arrow::fs::FileInfoVector>();
+  infos->reserve(paths.size());
+  auto result = arrow::Future<>::MakeFinished();
+  // Sequential admission keeps arbitrarily large batches within the transport limit.
+  for (const auto& path : paths) {
+    result = result.Then([self = std::static_pointer_cast<S3FileSystem>(shared_from_this()), path, infos] {
+      return self->GetFileInfoAsync(path).Then([infos](FileInfo info) { infos->push_back(std::move(info)); });
+    });
+  }
+  return result.Then([infos] { return std::move(*infos); });
 }
 
 S3FileSystem::S3FileSystem(const S3Options& options, const arrow::io::IOContext& io_context)

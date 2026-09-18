@@ -2,55 +2,50 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
-#include "milvus-storage/filesystem/async_filesystem.h"
+#include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
-#include <arrow/filesystem/path_util.h>
 
 namespace milvus_storage {
 namespace {
-class AsyncSubTree final : public AsyncFileSystem {
-  public:
-  AsyncSubTree(std::string base, std::shared_ptr<AsyncFileSystem> underlying)
-      : base_(std::move(base)), underlying_(std::move(underlying)) {}
-  arrow::Future<arrow::fs::FileInfo> GetFileInfoAsync(const std::string& path) override {
-    return underlying_->GetFileInfoAsync(Full(path)).Then([path](arrow::fs::FileInfo info) {
-      info.set_path(path);
-      return info;
-    });
+// Resolve existing subtree instances without constructing an async facade.
+template <typename Call>
+auto WithNativeS3(std::shared_ptr<arrow::fs::FileSystem> fs, std::string path, Call call)
+    -> decltype(call(std::declval<S3FileSystem&>(), path)) {
+  while (auto subtree = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs)) {
+    if (!path.empty() && path.front() == '/')
+      return arrow::Status::Invalid("Expected a relative subtree path");
+    path = subtree->base_path() + path;
+    fs = subtree->base_fs();
   }
-  arrow::fs::FileInfoGenerator GetFileInfoGenerator(const arrow::fs::FileSelector& selector) override {
-    auto full = selector;
-    full.base_dir = Full(selector.base_dir);
-    auto generator = underlying_->GetFileInfoGenerator(full);
-    return [base = base_, generator = std::move(generator)]() mutable {
-      return generator().Then([base](arrow::fs::FileInfoVector infos) -> arrow::Result<arrow::fs::FileInfoVector> {
-        for (auto& info : infos) {
-          if (info.path().compare(0, base.size(), base) != 0)
-            return arrow::Status::IOError("S3 listing escaped subtree");
-          info.set_path(info.path().substr(base.size()));
-        }
-        return infos;
-      });
-    };
-  }
-
-  private:
-  std::string Full(const std::string& path) const { return base_ + path; }
-  std::string base_;
-  std::shared_ptr<AsyncFileSystem> underlying_;
-};
+  if (auto s3 = std::dynamic_pointer_cast<S3FileSystem>(fs))
+    return call(*s3, path);
+  return arrow::Status::NotImplemented("Filesystem has no native asynchronous S3 transport");
+}
 }  // namespace
 
-arrow::Result<std::shared_ptr<AsyncFileSystem>> MakeAsyncFileSystem(std::shared_ptr<arrow::fs::FileSystem> filesystem,
-                                                                    const arrow::io::IOContext& io_context) {
-  if (!filesystem || !io_context.executor())
-    return arrow::Status::Invalid("Filesystem and executor are required");
-  if (auto subtree = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(filesystem)) {
-    ARROW_ASSIGN_OR_RAISE(auto underlying, MakeAsyncFileSystem(subtree->base_fs(), io_context));
-    return std::make_shared<AsyncSubTree>(subtree->base_path(), std::move(underlying));
+arrow::Future<arrow::fs::FileInfo> FileSystemProxy::GetFileInfoAsync(const std::string& path) {
+  ARROW_ASSIGN_OR_RAISE(auto full, PrependBase(path));
+  return WithNativeS3(base_fs(), full, [](S3FileSystem& fs, const std::string& p) { return fs.GetFileInfoAsync(p); })
+      .Then([path](arrow::fs::FileInfo info) {
+        info.set_path(path);
+        return info;
+      });
+}
+
+arrow::Future<arrow::fs::FileInfoVector> FileSystemProxy::GetFileInfoAsync(const std::vector<std::string>& paths) {
+  std::vector<std::string> full_paths;
+  full_paths.reserve(paths.size());
+  for (const auto& path : paths) {
+    ARROW_ASSIGN_OR_RAISE(auto full, PrependBase(path));
+    full_paths.push_back(std::move(full));
   }
-  if (auto s3 = std::dynamic_pointer_cast<S3FileSystem>(filesystem))
-    return s3->MakeAsync(io_context);
-  return arrow::Status::NotImplemented("Filesystem has no native asynchronous object transport");
+  return base_fs()
+      ->GetFileInfoAsync(full_paths)
+      .Then([paths](arrow::fs::FileInfoVector infos) -> arrow::Result<arrow::fs::FileInfoVector> {
+        if (infos.size() != paths.size())
+          return arrow::Status::IOError("Invalid batch stat result size");
+        for (size_t i = 0; i < paths.size(); ++i) infos[i].set_path(paths[i]);
+        return infos;
+      });
 }
 }  // namespace milvus_storage

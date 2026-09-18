@@ -155,7 +155,7 @@ std::string ArrowFileSystemConfig::ToString() const {
   return ss.str();
 }
 
-arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config) {
+arrow::Result<FileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config) {
   if (config.talon_enabled) {
     if (config.storage_type != "remote") {
       return arrow::Status::Invalid("Talon requires remote storage");
@@ -168,7 +168,11 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
   auto storage_type = StorageType_Map[config.storage_type];
   switch (storage_type) {
     case StorageType::Local: {
-      return LocalFileSystemProducer(config).Make();
+      ARROW_ASSIGN_OR_RAISE(auto filesystem, LocalFileSystemProducer(config).Make());
+      auto proxy = std::dynamic_pointer_cast<FileSystemProxy>(filesystem);
+      if (!proxy)
+        return arrow::Status::Invalid("Local producer must return FileSystemProxy");
+      return proxy;
     }
     case StorageType::Remote: {
       // Create the raw provider filesystem first. Remote producers must not
@@ -420,7 +424,7 @@ arrow::Status CreateExternalFsConfig(const std::string& alias,
 
 }  // namespace
 
-arrow::Result<ArrowFileSystemPtr> FilesystemCache::get(const api::Properties& properties, const std::string& path) {
+arrow::Result<FileSystemPtr> FilesystemCache::get(const api::Properties& properties, const std::string& path) {
   ARROW_ASSIGN_OR_RAISE(auto config, resolve_config(properties, path));
 
   std::string cache_key = config.GetCacheKey();
