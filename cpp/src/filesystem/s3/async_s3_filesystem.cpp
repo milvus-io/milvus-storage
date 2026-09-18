@@ -10,6 +10,12 @@
 #include <set>
 #include <arrow/filesystem/path_util.h>
 #include <aws/core/utils/xml/XmlSerializer.h>
+#include <aws/s3/model/CreateBucketRequest.h>
+#include <aws/s3/model/DeleteBucketRequest.h>
+#include <aws/s3/model/DeleteObjectRequest.h>
+#include <aws/s3/model/CopyObjectRequest.h>
+#include <aws/s3/model/CopyObjectResult.h>
+#include <aws/s3/model/PutObjectRequest.h>
 #include <aws/s3/model/HeadBucketRequest.h>
 #include <aws/s3/model/HeadObjectRequest.h>
 #include <aws/s3/model/HeadObjectResult.h>
@@ -362,7 +368,189 @@ class AsyncS3FileSystem final : public NativeS3Operations, public std::enable_sh
         OpenNativeS3OutputStream(options_, transport_, io_, path, metadata));
   }
 
+  Future<> CreateDirAsync(const std::string& path, bool recursive) override {
+    auto parsed = Path::Parse(path);
+    if (!parsed.ok())
+      return Future<>::MakeFinished(parsed.status());
+    if (parsed->bucket.empty())
+      return Future<>::MakeFinished();
+    return GetFileInfoAsync(path).Then([self = shared_from_this(), p = *parsed,
+                                        recursive](const FileInfo& info) -> Future<> {
+      if (info.type() == FileType::Directory)
+        return Future<>::MakeFinished();
+      if (info.type() != FileType::NotFound)
+        return Future<>::MakeFinished(Status::IOError("Cannot create directory over a file"));
+      if (p.key.empty()) {
+        if (!self->options_.allow_bucket_creation)
+          return Future<>::MakeFinished(Status::IOError("Bucket creation is disabled"));
+        S3::CreateBucketRequest request;
+        request.SetBucket(p.bucket.c_str());
+        if (!self->options_.region.empty() && self->options_.region != "us-east-1") {
+          S3::CreateBucketConfiguration config;
+          config.SetLocationConstraint(
+              S3::BucketLocationConstraintMapper::GetBucketLocationConstraintForName(self->options_.region.c_str()));
+          request.SetCreateBucketConfiguration(config);
+        }
+        return self->transport_->Send(request, "", HttpMethod::HTTP_PUT, "", self->io_)
+            .Then([](const NativeS3Response& response) { return response.ToStatus(); });
+      }
+      const auto slash = p.key.rfind('/');
+      const auto parent = p.bucket + (slash == std::string::npos ? "" : "/" + p.key.substr(0, slash));
+      auto ready = recursive ? self->CreateDirAsync(parent, true)
+                             : self->GetFileInfoAsync(parent).Then([](const FileInfo& info) {
+                                 return info.type() == FileType::Directory
+                                            ? Status::OK()
+                                            : Status::IOError("Parent directory does not exist");
+                               });
+      return ready.Then([self, p] { return self->PutMarker(p); });
+    });
+  }
+  Future<> DeleteFileAsync(const std::string& path) override {
+    auto parsed = ObjectPath(path);
+    if (!parsed.ok())
+      return Future<>::MakeFinished(parsed.status());
+    return GetFileInfoAsync(path).Then([self = shared_from_this(), p = *parsed](const FileInfo& info) {
+      if (info.type() != FileType::File)
+        return Future<>::MakeFinished(Status::IOError("DeleteFile requires an existing file"));
+      return self->DeleteObject(p).Then([self, p] { return self->EnsureParent(p); });
+    });
+  }
+  Future<> DeleteDirContentsAsync(const std::string& path, bool missing_dir_ok) override {
+    auto parsed = Path::Parse(path);
+    if (!parsed.ok())
+      return Future<>::MakeFinished(parsed.status());
+    if (parsed->bucket.empty())
+      return Future<>::MakeFinished(Status::NotImplemented("Cannot delete all S3 buckets"));
+    return GetFileInfoAsync(path).Then([self = shared_from_this(), p = *parsed, missing_dir_ok](const FileInfo& info) {
+      if (info.type() == FileType::NotFound && missing_dir_ok)
+        return Future<>::MakeFinished();
+      if (info.type() != FileType::Directory)
+        return Future<>::MakeFinished(Status::IOError("DeleteDirContents requires a directory"));
+      return self->DrainDirectory(p).Then(
+          [self, p] { return p.key.empty() ? Future<>::MakeFinished() : self->PutMarker(p); });
+    });
+  }
+  Future<> DeleteDirAsync(const std::string& path) override {
+    auto parsed = Path::Parse(path);
+    if (!parsed.ok())
+      return Future<>::MakeFinished(parsed.status());
+    if (parsed->bucket.empty())
+      return Future<>::MakeFinished(Status::NotImplemented("Cannot delete all S3 buckets"));
+    if (parsed->key.empty() && !options_.allow_bucket_deletion)
+      return Future<>::MakeFinished(Status::IOError("Bucket deletion is disabled"));
+    return GetFileInfoAsync(path).Then([self = shared_from_this(), p = *parsed](const FileInfo& info) -> Future<> {
+      if (info.type() != FileType::Directory)
+        return Future<>::MakeFinished(Status::IOError("DeleteDir requires a directory"));
+      return self->DrainDirectory(p).Then([self, p]() -> Future<> {
+        if (!p.key.empty())
+          return self->EnsureParent(p);
+        S3::DeleteBucketRequest request;
+        request.SetBucket(p.bucket.c_str());
+        return self->transport_->Send(request, "", HttpMethod::HTTP_DELETE, "", self->io_)
+            .Then([](const NativeS3Response& response) { return response.ToStatus(); });
+      });
+    });
+  }
+  Future<> CopyFileAsync(const std::string& source, const std::string& destination) override {
+    return CopyOrMove(source, destination, false);
+  }
+  Future<> MoveAsync(const std::string& source, const std::string& destination) override {
+    return CopyOrMove(source, destination, true);
+  }
+
   private:
+  Future<> EnsureParent(const Path& p) {
+    const auto slash = p.key.rfind('/');
+    return slash == std::string::npos ? Future<>::MakeFinished() : PutMarker(Path{p.bucket, p.key.substr(0, slash)});
+  }
+  Future<> PutMarker(const Path& p) {
+    S3::PutObjectRequest request;
+    request.SetBucket(p.bucket.c_str());
+    const auto key = p.key + "/";
+    request.SetKey(key.c_str());
+    request.SetContentType("application/x-directory");
+    return transport_
+        ->Send(request, key, HttpMethod::HTTP_PUT, "", io_, 16 * 1024 * 1024, arrow::Buffer::FromString(""))
+        .Then([](const NativeS3Response& response) { return response.ToStatus(); });
+  }
+  Future<> DeleteObject(const Path& p, const std::string& etag = "") {
+    S3::DeleteObjectRequest request;
+    request.SetBucket(p.bucket.c_str());
+    request.SetKey(p.key.c_str());
+    if (!etag.empty())
+      request.SetIfMatch(etag.c_str());
+    return transport_->Send(request, p.key, HttpMethod::HTTP_DELETE, "", io_)
+        .Then([](const NativeS3Response& response) { return response.ToStatus(); });
+  }
+  Future<> DrainDirectory(const Path& p) {
+    // Fetch the first page again after deleting it. This avoids carrying a
+    // continuation token across mutations, includes marker objects, and bounds
+    // memory to one page. Concurrent writers can prevent the operation finishing.
+    return List(p, "", true).Then([self = shared_from_this(), p](const NativeS3Response& response) -> Future<> {
+      auto decoded = XmlResult<S3::ListObjectsV2Result>(response);
+      if (!decoded.ok())
+        return Future<>::MakeFinished(decoded.status());
+      const auto& objects = decoded->GetContents();
+      if (objects.empty()) {
+        if (decoded->GetIsTruncated())
+          return Future<>::MakeFinished(Status::IOError("Empty truncated delete listing"));
+        return Future<>::MakeFinished();
+      }
+      auto removed = Future<>::MakeFinished();
+      const auto prefix = p.key.empty() ? "" : p.key + "/";
+      for (const auto& object : objects) {
+        const std::string key = object.GetKey().c_str();
+        if (key.compare(0, prefix.size(), prefix) != 0)
+          return Future<>::MakeFinished(Status::IOError("S3 delete listing escaped prefix"));
+        removed = removed.Then([self, bucket = p.bucket, key] { return self->DeleteObject(Path{bucket, key}); });
+      }
+      return removed.Then([self, p] { return self->DrainDirectory(p); });
+    });
+  }
+  Future<> CopyOrMove(const std::string& source, const std::string& destination, bool move) {
+    auto src = ObjectPath(source);
+    auto dst = ObjectPath(destination);
+    if (!src.ok())
+      return Future<>::MakeFinished(src.status());
+    if (!dst.ok())
+      return Future<>::MakeFinished(dst.status());
+    // HEAD pins the copy to one source ETag. Conditional delete prevents a
+    // concurrent overwrite of the source from being removed after the copy.
+    return Head(*src).Then(
+        [self = shared_from_this(), src = *src, dst = *dst, move](const NativeS3Response& head) -> Future<> {
+          auto size = ContentLength(head);
+          auto status = head.ToStatus();
+          if (!status.ok())
+            return Future<>::MakeFinished(status);
+          if (!size.ok())
+            return Future<>::MakeFinished(size.status());
+          if (*size > 5LL * 1024 * 1024 * 1024)
+            return Future<>::MakeFinished(
+                Status::NotImplemented("CopyObject is limited to 5 GiB; use multipart for larger objects"));
+          const auto etag = head.headers.find("etag");
+          if (etag == head.headers.end())
+            return Future<>::MakeFinished(Status::IOError("S3 copy source has no ETag"));
+          if (src.bucket == dst.bucket && src.key == dst.key)
+            return Future<>::MakeFinished();
+          S3::CopyObjectRequest request;
+          request.SetBucket(dst.bucket.c_str());
+          request.SetKey(dst.key.c_str());
+          const auto copy_source = src.bucket + "/" + src.key;
+          request.SetCopySource(copy_source.c_str());
+          request.SetCopySourceIfMatch(etag->second);
+          return self->transport_->Send(request, dst.key, HttpMethod::HTTP_PUT, "", self->io_)
+              .Then([self, src, move,
+                     etag = std::string(etag->second.c_str())](const NativeS3Response& response) -> Future<> {
+                auto result = XmlResult<S3::CopyObjectResult>(response);
+                if (!result.ok())
+                  return Future<>::MakeFinished(result.status());
+                if (result->GetCopyObjectResultDetails().GetETag().empty())
+                  return Future<>::MakeFinished(Status::IOError("S3 copy has no ETag; outcome may be unknown"));
+                return move ? self->DeleteObject(src, etag).Then([self, src] { return self->EnsureParent(src); })
+                            : Future<>::MakeFinished();
+              });
+        });
+  }
   std::shared_ptr<NativeS3Transport> transport_;
   S3Options options_;
   arrow::io::IOContext io_;

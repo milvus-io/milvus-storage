@@ -66,6 +66,12 @@ class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
   // Unsupported providers return NotImplemented for the added async methods.
   arrow::Future<arrow::fs::FileInfo> GetFileInfoAsync(const std::string& path);
   arrow::Future<arrow::fs::FileInfoVector> GetFileInfoAsync(const std::vector<std::string>& paths) override;
+  arrow::Future<> CreateDirAsync(const std::string& path, bool recursive = true);
+  arrow::Future<> DeleteDirAsync(const std::string& path);
+  arrow::Future<> DeleteFileAsync(const std::string& path);
+  arrow::Future<> CopyFileAsync(const std::string& source, const std::string& destination);
+  arrow::Future<> MoveAsync(const std::string& source, const std::string& destination);
+  arrow::Future<> DeleteDirContentsAsync(const std::string& path, bool missing_dir_ok = false) override;
   arrow::Future<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamAsync(
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata = nullptr);
 

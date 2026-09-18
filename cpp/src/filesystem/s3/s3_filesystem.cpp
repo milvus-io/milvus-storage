@@ -3042,6 +3042,9 @@ arrow::Status S3FileSystem::DeleteDirContents(const std::string& s, bool missing
 }
 
 arrow::Future<> S3FileSystem::DeleteDirContentsAsync(const std::string& s, bool missing_dir_ok) {
+#ifdef WITH_CRT
+  if (impl_->native_operations_.ok()) return (*impl_->native_operations_)->DeleteDirContentsAsync(s, missing_dir_ok);
+#endif
   ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
 
   if (path.empty()) {
@@ -3137,6 +3140,51 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenOutput
   ARROW_RETURN_NOT_OK(ptr->Init());
   return ptr;
 };
+
+arrow::Future<> S3FileSystem::CreateDirAsync(const std::string& path, bool recursive) {
+#ifdef WITH_CRT
+  ARROW_RETURN_NOT_OK(impl_->native_operations_.status());
+  return (*impl_->native_operations_)->CreateDirAsync(path, recursive);
+#else
+  return arrow::Status::NotImplemented("Native asynchronous S3 requires WITH_CRT");
+#endif
+}
+
+arrow::Future<> S3FileSystem::DeleteDirAsync(const std::string& path) {
+#ifdef WITH_CRT
+  ARROW_RETURN_NOT_OK(impl_->native_operations_.status());
+  return (*impl_->native_operations_)->DeleteDirAsync(path);
+#else
+  return arrow::Status::NotImplemented("Native asynchronous S3 requires WITH_CRT");
+#endif
+}
+
+arrow::Future<> S3FileSystem::DeleteFileAsync(const std::string& path) {
+#ifdef WITH_CRT
+  ARROW_RETURN_NOT_OK(impl_->native_operations_.status());
+  return (*impl_->native_operations_)->DeleteFileAsync(path);
+#else
+  return arrow::Status::NotImplemented("Native asynchronous S3 requires WITH_CRT");
+#endif
+}
+
+arrow::Future<> S3FileSystem::CopyFileAsync(const std::string& source, const std::string& destination) {
+#ifdef WITH_CRT
+  ARROW_RETURN_NOT_OK(impl_->native_operations_.status());
+  return (*impl_->native_operations_)->CopyFileAsync(source, destination);
+#else
+  return arrow::Status::NotImplemented("Native asynchronous S3 requires WITH_CRT");
+#endif
+}
+
+arrow::Future<> S3FileSystem::MoveAsync(const std::string& source, const std::string& destination) {
+#ifdef WITH_CRT
+  ARROW_RETURN_NOT_OK(impl_->native_operations_.status());
+  return (*impl_->native_operations_)->MoveAsync(source, destination);
+#else
+  return arrow::Status::NotImplemented("Native asynchronous S3 requires WITH_CRT");
+#endif
+}
 
 arrow::Future<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenOutputStreamAsync(
     const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) {

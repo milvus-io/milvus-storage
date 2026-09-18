@@ -5,7 +5,6 @@ Run only inside wt-build. Delayed responses expose synchronous request waits;
 this fixture does not establish real-service authentication/TLS compatibility.
 """
 import http.server
-import hashlib
 import uuid
 import xml.etree.ElementTree as ET
 import os
@@ -67,6 +66,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.command == "DELETE" and "uploadId" in query:
                 self.uploads.pop(query["uploadId"][0], None)
                 return self.reply(204)
+            if self.command == "DELETE":
+                if "If-Match" in self.headers and self.headers["If-Match"] != '"8aa99b1f439ff71293e95357bac6fd94"':
+                    return self.reply(412)
+                self.objects.pop(key, None)
+                self.metadata.pop(key, None)
+                return self.reply(204)
+            if "x-amz-copy-source" in self.headers:
+                src = urllib.parse.unquote(self.headers["x-amz-copy-source"]).lstrip("/").partition("/")[2]
+                if src not in self.objects:
+                    return self.reply(404)
+                if key == "root/copy-error":
+                    return self.reply(200, b"<Error><Code>InternalError</Code></Error>")
+                self.objects[key] = self.objects[src]
+                self.metadata[key] = dict(self.metadata.get(src, {}))
+                return self.reply(200, b'<CopyObjectResult><ETag>"8aa99b1f439ff71293e95357bac6fd94"</ETag></CopyObjectResult>')
             if self.command == "POST" and "uploads" in query:
                 upload_id = str(uuid.uuid4())
                 self.uploads[upload_id] = {"parts": {}, "key": key}
