@@ -117,6 +117,8 @@ list(APPEND LINK_LIBS
 )
 
 if (WITH_CRT)
+  find_package(aws-c-s3 REQUIRED CONFIG)
+  list(APPEND LINK_LIBS AWS::aws-c-s3)
   list(APPEND LINK_LIBS AWS::aws-sdk-cpp-s3-crt)
 endif()
 

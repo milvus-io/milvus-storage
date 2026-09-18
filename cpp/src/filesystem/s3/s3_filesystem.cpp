@@ -89,6 +89,7 @@
 #include "milvus-storage/filesystem/s3/s3_client_builder.h"
 #ifdef WITH_CRT
 #include "milvus-storage/filesystem/s3/s3_crt_client.h"
+#include "filesystem/s3/async_s3_filesystem.h"
 #endif
 
 using ::arrow::Buffer;
@@ -2932,6 +2933,16 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenOutput
   ARROW_RETURN_NOT_OK(ptr->Init());
   return ptr;
 };
+
+arrow::Result<std::shared_ptr<AsyncFileSystem>> S3FileSystem::MakeAsync(const arrow::io::IOContext& io_context) {
+#ifdef WITH_CRT
+  auto async_options = impl_->options();
+  async_options.region = impl_->region();
+  return MakeAsyncS3FileSystem(async_options, impl_->holder_, io_context);
+#else
+  return arrow::Status::NotImplemented("Native asynchronous S3 requires WITH_CRT");
+#endif
+}
 
 S3FileSystem::S3FileSystem(const S3Options& options, const arrow::io::IOContext& io_context)
     : FileSystem(io_context), impl_(std::make_shared<Impl>(options, io_context)) {
