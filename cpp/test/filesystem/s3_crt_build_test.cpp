@@ -985,8 +985,11 @@ TEST_P(S3CrtMetadataTest, AsyncHeadReturnsBeforeResponse) {
       (void)submitted.get();
       return fail("Async HEAD blocked until the response was released");
     }
-    if (request.method() != http::verb::head || request.target() != "/test-bucket/path/object.txt") {
-      return fail("Unexpected HEAD request");
+    // The native HTTP adapter uses an absolute-form request target.
+    const std::string expected_target = "http://" + options.endpoint_override + "/test-bucket/path/object.txt";
+    if (request.method() != http::verb::head || request.target() != expected_target) {
+      return fail("Unexpected HEAD request: " + std::string(request.method_string()) + " " +
+                  std::string(request.target()));
     }
     if (param.size_first) {
       if (!size_future.Wait(5) || !size_future.result().ok() || size_future.result().ValueOrDie() != 9) {
