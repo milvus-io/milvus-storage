@@ -342,5 +342,60 @@ TEST_F(NativeS3Test, StreamBackpressureDoesNotConsumeRejectedWrite) {
   ASSERT_OK(stream->CloseAsync().status());
 }
 
+TEST_F(NativeS3Test, DirectoryLifecycleAndBoundedDeletion) {
+  ASSERT_OK(fs_->CreateDirAsync("dir/sub").status());
+  ASSERT_OK_AND_ASSIGN(auto info, Await(fs_->GetFileInfoAsync("dir/sub")));
+  EXPECT_EQ(info.type(), arrow::fs::FileType::Directory);
+  EXPECT_FALSE(fs_->CreateDirAsync("no-parent/child", false).status().ok());
+  for (int i = 0; i < 5; ++i)
+    ASSERT_OK(Write("dir/sub/file" + std::to_string(i), arrow::Buffer::FromString("data")).status());
+  EXPECT_FALSE(fs_->DeleteFileAsync("dir").status().ok());
+  std::shared_ptr<arrow::fs::FileSystem> arrow_fs = fs_;
+  ASSERT_OK(arrow_fs->DeleteDirContentsAsync("dir/sub").status());
+  ASSERT_OK_AND_ASSIGN(info, Await(fs_->GetFileInfoAsync("dir/sub")));
+  EXPECT_EQ(info.type(), arrow::fs::FileType::Directory);
+  arrow::fs::FileSelector selector;
+  selector.base_dir = "dir/sub";
+  auto listing = fs_->GetFileInfoGenerator(selector);
+  ASSERT_OK_AND_ASSIGN(auto page, Await(listing()));
+  EXPECT_TRUE(page.empty());
+  ASSERT_OK(fs_->DeleteDirAsync("dir").status());
+  ASSERT_OK_AND_ASSIGN(info, Await(fs_->GetFileInfoAsync("dir")));
+  EXPECT_EQ(info.type(), arrow::fs::FileType::NotFound);
+  ASSERT_OK(fs_->DeleteDirContentsAsync("absent-dir", true).status());
+  EXPECT_FALSE(fs_->DeleteDirContentsAsync("absent-dir", false).status().ok());
+}
+TEST_F(NativeS3Test, CopyMoveAndDeleteSpecialKeys) {
+  auto options = arrow::key_value_metadata({"test"}, {"copied"});
+  ASSERT_OK(Write("source #?+% 中文", arrow::Buffer::FromString("payload"), options).status());
+  ASSERT_OK(fs_->CopyFileAsync("source #?+% 中文", "copy").status());
+  ASSERT_OK_AND_ASSIGN(auto metadata, Await(Metadata("copy")));
+  ASSERT_OK_AND_ASSIGN(auto value, metadata->Get("test"));
+  EXPECT_EQ(value, "copied");
+  ASSERT_OK(fs_->MoveAsync("copy", "moved").status());
+  ASSERT_OK_AND_ASSIGN(auto info, Await(fs_->GetFileInfoAsync("copy")));
+  EXPECT_EQ(info.type(), arrow::fs::FileType::NotFound);
+  ASSERT_OK_AND_ASSIGN(auto data, Await(Read("moved", 0, 10)));
+  EXPECT_EQ(data->ToString(), "payload");
+  ASSERT_OK(fs_->DeleteFileAsync("moved").status());
+  EXPECT_FALSE(fs_->DeleteFileAsync("moved").status().ok());
+  ASSERT_OK(fs_->DeleteFileAsync("source #?+% 中文").status());
+}
+TEST_F(NativeS3Test, CopyEmbeddedErrorDoesNotDeleteSource) {
+  ASSERT_OK(Write("copy-source", arrow::Buffer::FromString("data")).status());
+  EXPECT_FALSE(fs_->MoveAsync("copy-source", "copy-error").status().ok());
+  ASSERT_OK_AND_ASSIGN(auto data, Await(Read("copy-source", 0, 4)));
+  EXPECT_EQ(data->ToString(), "data");
+}
+class NativeS3ShutdownTest : public NativeS3Test {};
+TEST_F(NativeS3ShutdownTest, DrainsPendingWriteBeforeAwsShutdown) {
+  auto pending = Write("slow-write", arrow::Buffer::FromString("shutdown"));
+  auto shutdown = std::async(std::launch::async, [] { return FinalizeS3(); });
+  ASSERT_TRUE(pending.Wait(5));
+  ASSERT_OK(pending.status());
+  ASSERT_EQ(shutdown.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  ASSERT_OK(shutdown.get());
+  EXPECT_FALSE(Read("slow-write", 0, 1).status().ok());
+}
 #endif
 }  // namespace milvus_storage

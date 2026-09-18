@@ -23,6 +23,17 @@ auto WithNativeS3(const std::shared_ptr<arrow::fs::FileSystem>& fs, std::string 
     return call(*s3, path);
   return arrow::Status::NotImplemented("Filesystem has no native asynchronous S3 transport");
 }
+template <typename Call>
+auto WithNativeS3(std::shared_ptr<arrow::fs::FileSystem> fs, std::string source, std::string destination, Call call)
+    -> decltype(call(std::declval<S3FileSystem&>(), source, destination)) {
+  while (auto subtree = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs)) {
+    source = subtree->base_path() + source;
+    destination = subtree->base_path() + destination;
+    fs = subtree->base_fs();
+  }
+  if (auto s3 = std::dynamic_pointer_cast<S3FileSystem>(fs)) return call(*s3, source, destination);
+  return arrow::Status::NotImplemented("Filesystem has no native asynchronous S3 transport");
+}
 }  // namespace
 
 arrow::Future<arrow::fs::FileInfo> FileSystemProxy::GetFileInfoAsync(const std::string& path) {
@@ -61,5 +72,46 @@ arrow::Future<std::shared_ptr<arrow::io::OutputStream>> FileSystemProxy::OpenOut
   return WithNativeS3(base_fs(), full, [&metadata](S3FileSystem& fs, const std::string& p) {
     return fs.OpenOutputStreamAsync(p, metadata);
   });
+}
+arrow::Future<> FileSystemProxy::CreateDirAsync(const std::string& path, bool recursive) {
+  ARROW_ASSIGN_OR_RAISE(auto full, PrependBaseNonEmpty(path));
+  return WithNativeS3(base_fs(), full, [recursive](S3FileSystem& fs, const std::string& p) {
+    return fs.CreateDirAsync(p, recursive);
+  });
+}
+arrow::Future<> FileSystemProxy::DeleteDirAsync(const std::string& path) {
+  ARROW_ASSIGN_OR_RAISE(auto full, PrependBaseNonEmpty(path));
+  return WithNativeS3(base_fs(), full, [](S3FileSystem& fs, const std::string& p) {
+    return fs.DeleteDirAsync(p);
+  });
+}
+arrow::Future<> FileSystemProxy::DeleteFileAsync(const std::string& path) {
+  ARROW_ASSIGN_OR_RAISE(auto full, PrependBaseNonEmpty(path));
+  return WithNativeS3(base_fs(), full, [](S3FileSystem& fs, const std::string& p) {
+    return fs.DeleteFileAsync(p);
+  });
+}
+arrow::Future<> FileSystemProxy::CopyFileAsync(const std::string& source, const std::string& destination) {
+  ARROW_ASSIGN_OR_RAISE(auto src, PrependBaseNonEmpty(source));
+  ARROW_ASSIGN_OR_RAISE(auto dst, PrependBaseNonEmpty(destination));
+  return WithNativeS3(base_fs(), src, dst, [](S3FileSystem& fs, const std::string& s, const std::string& d) {
+    return fs.CopyFileAsync(s, d);
+  });
+}
+arrow::Future<> FileSystemProxy::MoveAsync(const std::string& source, const std::string& destination) {
+  ARROW_ASSIGN_OR_RAISE(auto src, PrependBaseNonEmpty(source));
+  ARROW_ASSIGN_OR_RAISE(auto dst, PrependBaseNonEmpty(destination));
+  return WithNativeS3(base_fs(), src, dst, [](S3FileSystem& fs, const std::string& s, const std::string& d) {
+    return fs.MoveAsync(s, d);
+  });
+}
+arrow::Future<> FileSystemProxy::DeleteDirContentsAsync(const std::string& path, bool missing_dir_ok) {
+  ARROW_ASSIGN_OR_RAISE(auto full, PrependBaseNonEmpty(path));
+  auto fs = base_fs();
+  while (auto subtree = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs)) {
+    full = subtree->base_path() + full;
+    fs = subtree->base_fs();
+  }
+  return fs->DeleteDirContentsAsync(full, missing_dir_ok);
 }
 }  // namespace milvus_storage

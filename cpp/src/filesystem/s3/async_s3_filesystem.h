@@ -21,6 +21,12 @@ class NativeS3Operations {
                                                                   const arrow::io::IOContext& io_context) = 0;
   virtual arrow::Future<arrow::fs::FileInfo> GetFileInfoAsync(const std::string& path) = 0;
   virtual arrow::fs::FileInfoGenerator GetFileInfoGenerator(const arrow::fs::FileSelector& selector) = 0;
+  virtual arrow::Future<> CreateDirAsync(const std::string& path, bool recursive) = 0;
+  virtual arrow::Future<> DeleteDirAsync(const std::string& path) = 0;
+  virtual arrow::Future<> DeleteFileAsync(const std::string& path) = 0;
+  virtual arrow::Future<> CopyFileAsync(const std::string& source, const std::string& destination) = 0;
+  virtual arrow::Future<> MoveAsync(const std::string& source, const std::string& destination) = 0;
+  virtual arrow::Future<> DeleteDirContentsAsync(const std::string& path, bool missing_dir_ok) = 0;
   virtual arrow::Future<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamAsync(
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) = 0;
 };
