@@ -10,7 +10,7 @@
 
 namespace milvus_storage {
 
-/// Object I/O capability with native asynchronous network requests. There is no
+/// Missing filesystem-level asynchronous operations with native network requests. There is no
 /// thread-pool fallback to synchronous FileSystem methods. Paths have the same
 /// meaning as on the FileSystem passed to MakeAsyncFileSystem (including subtrees).
 ///
@@ -24,12 +24,7 @@ class AsyncFileSystem {
   virtual arrow::Future<arrow::fs::FileInfo> GetFileInfoAsync(const std::string& path) = 0;
   /// Pages are fetched on demand; only one outstanding invocation per generator.
   virtual arrow::fs::FileInfoGenerator GetFileInfoGenerator(const arrow::fs::FileSelector& selector) = 0;
-  virtual arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(const std::string& path) = 0;
-  /// The returned buffer owns its memory. Read requests are bounded by nbytes;
-  /// EOF short reads are allowed. Negative ranges and overflow are rejected.
-  virtual arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const std::string& path,
-                                                                  int64_t offset,
-                                                                  int64_t nbytes) = 0;
+
 };
 
 /// Returns NotImplemented for providers/configurations without a native async

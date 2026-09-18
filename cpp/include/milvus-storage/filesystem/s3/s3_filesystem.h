@@ -85,6 +85,11 @@ class S3FileSystem : public arrow::fs::FileSystem, public UploadConditional, pub
 
   arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const FileInfo& info) override;
 
+  arrow::Future<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFileAsync(const std::string& path) override;
+  arrow::Future<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFileAsync(const FileInfo& info) override;
+  arrow::Future<std::shared_ptr<arrow::io::InputStream>> OpenInputStreamAsync(const std::string& path) override;
+  arrow::Future<std::shared_ptr<arrow::io::InputStream>> OpenInputStreamAsync(const FileInfo& info) override;
+
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override;
 

@@ -9,7 +9,6 @@
 #include <set>
 #include <arrow/filesystem/path_util.h>
 #include <aws/core/utils/xml/XmlSerializer.h>
-#include <aws/s3/model/GetObjectRequest.h>
 #include <aws/s3/model/HeadBucketRequest.h>
 #include <aws/s3/model/HeadObjectRequest.h>
 #include <aws/s3/model/ListBucketsRequest.h>
@@ -316,73 +315,6 @@ class AsyncS3FileSystem final : public AsyncFileSystem, public std::enable_share
     return [next] { return (*next)(); };
   }
 
-  Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(const std::string& path) override {
-    auto parsed = Path::Parse(path);
-    if (!parsed.ok())
-      return Failed<std::shared_ptr<const arrow::KeyValueMetadata>>(parsed.status());
-    if (parsed->key.empty())
-      return Failed<std::shared_ptr<const arrow::KeyValueMetadata>>(Status::Invalid("Expected object path"));
-    return Head(*parsed).Then(
-        [](const NativeS3Response& response) -> Result<std::shared_ptr<const arrow::KeyValueMetadata>> {
-          ARROW_RETURN_NOT_OK(response.ToStatus());
-          auto metadata = std::make_shared<arrow::KeyValueMetadata>();
-          for (const auto& header : response.headers) metadata->Append(header.first.c_str(), header.second.c_str());
-          return metadata;
-        });
-  }
-
-  Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const std::string& path, int64_t offset, int64_t nbytes) override {
-    auto parsed = Path::Parse(path);
-    if (!parsed.ok())
-      return Failed<std::shared_ptr<arrow::Buffer>>(parsed.status());
-    if (parsed->key.empty() || offset < 0 || nbytes < 0 || nbytes > std::numeric_limits<int64_t>::max() - offset) {
-      return Failed<std::shared_ptr<arrow::Buffer>>(Status::Invalid("Invalid S3 read range"));
-    }
-    if (!nbytes)
-      return Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(arrow::Buffer::FromString(""));
-    S3::GetObjectRequest request;
-    request.SetBucket(parsed->bucket.c_str());
-    request.SetKey(parsed->key.c_str());
-    request.SetRange(("bytes=" + std::to_string(offset) + "-" + std::to_string(offset + nbytes - 1)).c_str());
-    return transport_->Send(request, parsed->key, HttpMethod::HTTP_GET, "", io_, static_cast<size_t>(nbytes))
-        .Then([self = shared_from_this(), path, offset,
-               nbytes](const NativeS3Response& response) -> Future<std::shared_ptr<arrow::Buffer>> {
-          if (response.HasHttpStatus(416)) {
-            return self->GetFileInfoAsync(path).Then(
-                [offset](const FileInfo& info) -> Result<std::shared_ptr<arrow::Buffer>> {
-                  if (info.type() != FileType::File || offset != info.size())
-                    return Status::IOError("S3 read starts past EOF");
-                  return arrow::Buffer::FromString("");
-                });
-          }
-          auto status = response.ToStatus();
-          if (!status.ok())
-            return Failed<std::shared_ptr<arrow::Buffer>>(status);
-          if (response.http_status != 206 && offset != 0)
-            return Failed<std::shared_ptr<arrow::Buffer>>(Status::IOError("S3 ignored Range"));
-          if (response.body.size() > static_cast<uint64_t>(nbytes))
-            return Failed<std::shared_ptr<arrow::Buffer>>(Status::IOError("S3 range response too large"));
-          if (response.http_status == 206) {
-            auto header = response.headers.find("content-range");
-            if (header == response.headers.end())
-              return Failed<std::shared_ptr<arrow::Buffer>>(Status::IOError("S3 range has no Content-Range"));
-            const std::string range = header->second.c_str();
-            const auto start = "bytes " + std::to_string(offset) + "-";
-            const auto slash = range.find('/');
-            int64_t last = -1;
-            if (range.compare(0, start.size(), start) != 0 || slash == std::string::npos || slash <= start.size()) {
-              return Failed<std::shared_ptr<arrow::Buffer>>(Status::IOError("S3 returned the wrong range"));
-            }
-            auto [end, error] = std::from_chars(range.data() + start.size(), range.data() + slash, last);
-            if (error != std::errc() || end != range.data() + slash || last < offset || last - offset >= nbytes ||
-                static_cast<uint64_t>(last - offset + 1) != response.body.size()) {
-              return Failed<std::shared_ptr<arrow::Buffer>>(
-                  Status::IOError("S3 range body does not match Content-Range"));
-            }
-          }
-          return Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(arrow::Buffer::FromString(response.body));
-        });
-  }
 
   private:
   std::shared_ptr<NativeS3Transport> transport_;
@@ -393,10 +325,13 @@ class AsyncS3FileSystem final : public AsyncFileSystem, public std::enable_share
 
 Result<std::shared_ptr<AsyncFileSystem>> MakeAsyncS3FileSystem(const S3Options& options,
                                                                std::shared_ptr<S3ClientHolder> holder,
-                                                               const arrow::io::IOContext& io_context) {
+                                                               const arrow::io::IOContext& io_context,
+                                                               std::shared_ptr<NativeS3Transport> transport) {
   if (!io_context.executor())
     return Status::Invalid("Native S3 requires a caller executor");
-  ARROW_ASSIGN_OR_RAISE(auto transport, NativeS3Transport::Make(options, std::move(holder)));
+  if (!transport) {
+    ARROW_ASSIGN_OR_RAISE(transport, NativeS3Transport::Make(options, std::move(holder)));
+  }
   return std::make_shared<AsyncS3FileSystem>(std::move(transport), options, io_context);
 }
 }  // namespace milvus_storage

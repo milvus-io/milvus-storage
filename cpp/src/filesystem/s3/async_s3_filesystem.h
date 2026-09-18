@@ -10,6 +10,7 @@
 namespace milvus_storage {
 arrow::Result<std::shared_ptr<AsyncFileSystem>> MakeAsyncS3FileSystem(const S3Options& options,
                                                                       std::shared_ptr<S3ClientHolder> holder,
-                                                                      const arrow::io::IOContext& io_context);
+                                                                      const arrow::io::IOContext& io_context,
+                                                                      std::shared_ptr<NativeS3Transport> transport = nullptr);
 }  // namespace milvus_storage
 #endif
