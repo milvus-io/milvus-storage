@@ -142,5 +142,17 @@ TEST_F(NativeS3Test, RejectedCompletionExecutorPreservesResult) {
   ASSERT_OK_AND_ASSIGN(auto info, Await(fs_->GetFileInfoAsync("hello #?+% 中文")));
   EXPECT_EQ(info.size(), 6);
 }
+TEST_F(NativeS3Test, RootListingSkipsEmptyContinuationPage) {
+  ASSERT_OK_AND_ASSIGN(auto root, MakeAsyncFileSystem(sync_, arrow::io::IOContext(executor_.get())));
+  arrow::fs::FileSelector selector;
+  auto generator = root->GetFileInfoGenerator(selector);
+  ASSERT_OK_AND_ASSIGN(auto page, Await(generator()));
+  ASSERT_EQ(page.size(), 1);
+  EXPECT_EQ(page.front().path(), "bucket");
+  ASSERT_OK_AND_ASSIGN(page, Await(generator()));
+  EXPECT_TRUE(page.empty());
+  EXPECT_TRUE(root->ReadAsync("bucket/../file", 0, 1).status().IsInvalid());
+  EXPECT_TRUE(fs_->GetFileInfoAsync("../file").status().IsInvalid());
+}
 #endif
 }  // namespace milvus_storage

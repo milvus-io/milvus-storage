@@ -213,6 +213,12 @@ struct Request {
 };
 }  // namespace
 
+bool NativeS3Response::HasHttpStatus(int code) const {
+  return status.ok() && http_status == code &&
+         (transport_error == 0 || transport_error == AWS_ERROR_S3_INVALID_RESPONSE_STATUS ||
+          transport_error == AWS_ERROR_S3_INTERNAL_ERROR || transport_error == AWS_ERROR_S3_SLOW_DOWN);
+}
+
 arrow::Status NativeS3Response::ToStatus() const {
   if (!status.ok())
     return status;
