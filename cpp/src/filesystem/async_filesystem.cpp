@@ -7,17 +7,19 @@
 
 namespace milvus_storage {
 namespace {
-// Resolve existing subtree instances without constructing an async facade.
+// Borrow the subtree chain only during synchronous dispatch. Async operations
+// retain their own state; the traversal does not need shared ownership.
 template <typename Call>
-auto WithNativeS3(std::shared_ptr<arrow::fs::FileSystem> fs, std::string path, Call call)
+auto WithNativeS3(const std::shared_ptr<arrow::fs::FileSystem>& fs, std::string path, Call call)
     -> decltype(call(std::declval<S3FileSystem&>(), path)) {
-  while (auto subtree = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs)) {
+  auto* current = fs.get();
+  while (auto* subtree = dynamic_cast<arrow::fs::SubTreeFileSystem*>(current)) {
     if (!path.empty() && path.front() == '/')
       return arrow::Status::Invalid("Expected a relative subtree path");
     path = subtree->base_path() + path;
-    fs = subtree->base_fs();
+    current = subtree->base_fs().get();
   }
-  if (auto s3 = std::dynamic_pointer_cast<S3FileSystem>(fs))
+  if (auto* s3 = dynamic_cast<S3FileSystem*>(current))
     return call(*s3, path);
   return arrow::Status::NotImplemented("Filesystem has no native asynchronous S3 transport");
 }
@@ -39,10 +41,10 @@ arrow::Future<arrow::fs::FileInfoVector> FileSystemProxy::GetFileInfoAsync(const
     ARROW_ASSIGN_OR_RAISE(auto full, PrependBase(path));
     full_paths.push_back(std::move(full));
   }
-  auto fs = base_fs();
-  while (auto subtree = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs)) {
+  auto* fs = base_fs().get();
+  while (auto* subtree = dynamic_cast<arrow::fs::SubTreeFileSystem*>(fs)) {
     for (auto& path : full_paths) path = subtree->base_path() + path;
-    fs = subtree->base_fs();
+    fs = subtree->base_fs().get();
   }
   return fs->GetFileInfoAsync(full_paths)
       .Then([paths](arrow::fs::FileInfoVector infos) -> arrow::Result<arrow::fs::FileInfoVector> {
