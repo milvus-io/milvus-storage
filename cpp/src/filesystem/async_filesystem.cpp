@@ -56,8 +56,7 @@ arrow::Future<arrow::fs::FileInfoVector> FileSystemProxy::GetFileInfoAsync(const
 }
 arrow::Future<std::shared_ptr<arrow::io::OutputStream>> FileSystemProxy::OpenOutputStreamAsync(
     const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) {
-  FIU_RETURN_ON(FIUKEY_FS_OPEN_OUTPUT_FAIL,
-                arrow::Status::IOError("Injected output-stream open failure"));
+  FIU_RETURN_ON(FIUKEY_FS_OPEN_OUTPUT_FAIL, arrow::Status::IOError("Injected output-stream open failure"));
   ARROW_ASSIGN_OR_RAISE(auto full, PrependBaseNonEmpty(path));
   return WithNativeS3(base_fs(), full, [&metadata](S3FileSystem& fs, const std::string& p) {
     return fs.OpenOutputStreamAsync(p, metadata);

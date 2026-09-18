@@ -23,7 +23,6 @@ class NativeS3Operations {
   virtual arrow::fs::FileInfoGenerator GetFileInfoGenerator(const arrow::fs::FileSelector& selector) = 0;
   virtual arrow::Future<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamAsync(
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) = 0;
-
 };
 arrow::Result<std::shared_ptr<NativeS3Operations>> MakeNativeS3Operations(const S3Options& options,
                                                                           const arrow::io::IOContext& io_context,
