@@ -24,10 +24,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def reply(self, code, body=b"", headers=None, length=None):
+        self.close_connection = True
         self.send_response(code)
+        self.send_header("Connection", "close")
+        self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(len(body) if length is None else length))
-        self.send_header("Content-Type", "application/xml")
-        self.send_header("ETag", '"fixture-etag"')
+        self.send_header("Content-Type", "application/octet-stream" if code == 206 else "application/xml")
+        self.send_header("ETag", '"8aa99b1f439ff71293e95357bac6fd94"')
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
