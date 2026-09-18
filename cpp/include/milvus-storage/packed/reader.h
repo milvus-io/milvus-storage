@@ -57,9 +57,9 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
       ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties(),
       ::parquet::ArrowReaderProperties arrow_reader_props = ::parquet::default_arrow_reader_properties());
 
-  /// Deprecated in favor of Make(): a failed open THROWS std::runtime_error
-  /// with the stringified status, destroying its classification. Kept only
-  /// until direct-link consumers migrate; do not add new call sites.
+  /// Deprecated in favor of Make(): a failed open throws the typed error
+  /// converted from the initialization status. Kept only until direct-link
+  /// consumers migrate; do not add new call sites.
   PackedRecordBatchReader(
       const std::shared_ptr<arrow::fs::FileSystem>& fs,
       std::vector<std::string>& paths,
