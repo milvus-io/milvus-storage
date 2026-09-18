@@ -46,6 +46,15 @@ template <>
 arrow::Result<std::shared_ptr<S3CrtClientHolder>> ClientBuilder<Aws::S3Crt::S3CrtClient>::BuildClient(
     std::optional<arrow::io::IOContext> io_context, std::shared_ptr<FilesystemMetrics> metrics);
 
+// Marks a native callback where running the SDK's blocking destructor is unsafe.
+class S3CrtCallbackScope {
+  public:
+  S3CrtCallbackScope();
+  ~S3CrtCallbackScope();
+  S3CrtCallbackScope(const S3CrtCallbackScope&) = delete;
+  S3CrtCallbackScope& operator=(const S3CrtCallbackScope&) = delete;
+};
+
 class S3CrtClientOperationState;
 class S3CrtClientFinalizer;
 
@@ -130,17 +139,10 @@ class S3CrtClientFinalizer;
 ///
 /// S3CrtClientHolder::Finalize() may be entered by global S3 shutdown or by
 /// holder destruction.
-/// The last holder reference must therefore be released on a thread from which
-/// waiting for outstanding native callbacks is safe, never from one of those
-/// callbacks itself.
-///
-/// NativeS3Transport uses a native-only holder in this same registry. It owns
-/// an aws_s3_client instead of an SDK S3CrtClient. Both kinds share Acquire(),
-/// operation leases, construction reservations and the live-client barrier.
-/// Native-only holder destruction closes admission without waiting: the last
-/// lease initiates aws_s3_client_release(), and its shutdown callback reports
-/// ClientDestroyed(). This permits transport destruction from a continuation,
-/// including inline completion when the caller executor rejects the task.
+/// Native callbacks mark their scope with S3CrtCallbackScope. If a callback
+/// releases the last holder, or the holder dies with outstanding leases,
+/// destruction is deferred to a cleanup worker. The live-client barrier still
+/// waits for the SDK destructor before ShutdownAPI.
 
 /// Per-holder synchronization block shared by the holder and all outstanding
 /// leases. Keeping this state separate from the holder lets a lease decrement
@@ -167,26 +169,26 @@ class S3CrtClientLease {
   ~S3CrtClientLease();
 
   Aws::S3Crt::S3CrtClient* operator->() const;
-  // Native transports borrow their C client through the same operation gate.
-  aws_s3_client* native_client() const { return native_client_; }
+  // Borrow the SDK-owned native client; valid only while this lease is held.
+  aws_s3_client* native_client() const;
 
   protected:
   friend class S3CrtClientHolder;
   void Release();
 
   Aws::S3Crt::S3CrtClient* client_ = nullptr;
-  aws_s3_client* native_client_ = nullptr;
   // Acquire() copies this shared_ptr from the owning holder. The two
   // shared_ptr instances refer to the same per-holder operation-state object,
   // allowing this lease to decrement and notify the state observed by Holder.
   std::shared_ptr<S3CrtClientOperationState> operation_state_;
 };
 
-/// Owns one SDK or native CRT client and gates its release on outstanding leases.
+/// Owns one CRT client and gates its destruction on outstanding leases.
 ///
 /// The holder never lends shared ownership of client_. A raw client pointer is
-/// valid through a lease because Finalize() cannot move or destroy client_
-/// before that lease has decremented active_operations.
+/// valid through a lease because finalization cannot destroy the client before
+/// that lease has decremented active_operations. A cleanup task may take over
+/// ownership while the holder itself is being destroyed.
 class S3CrtClientHolder {
   public:
   S3CrtClientHolder(const S3CrtClientHolder&) = delete;
@@ -197,15 +199,14 @@ class S3CrtClientHolder {
   /// Acquire a non-owning client pointer protected by an operation lease.
   /// No lock is held while the caller uses the client.
   arrow::Result<S3CrtClientLease> Acquire();
-  /// SDK holders must not lose their last reference on a native CRT callback.
-  /// Native-only holders initiate nonblocking release and are safe there.
+  /// Defer SDK destruction when leases remain or a native callback is active.
   ~S3CrtClientHolder();
   std::shared_ptr<FilesystemMetrics> GetMetrics() const;
 
   protected:
   friend class S3CrtClientFinalizer;
   S3CrtClientHolder(std::shared_ptr<S3CrtClientFinalizer> finalizer, std::shared_ptr<FilesystemMetrics> metrics);
-  void Finalize();
+  void Finalize(bool from_destructor = false);
 
   std::shared_ptr<S3CrtClientFinalizer> finalizer_;
   // Created once for this holder and copied into every successful lease.
@@ -242,29 +243,22 @@ class S3CrtClientFinalizer : public std::enable_shared_from_this<S3CrtClientFina
   using ClientHolderList = std::vector<std::weak_ptr<S3CrtClientHolder>>;
 
   public:
-  using ClientFactory = std::function<arrow::Result<std::shared_ptr<Aws::S3Crt::S3CrtClient>>()>;
-  // The factory must install the supplied callback on its native client and
-  // release its auxiliary CRT resources before invoking it on shutdown.
-  using NativeClientFactory = std::function<arrow::Result<aws_s3_client*>(std::function<void()>)>;
+     using ClientFactory = std::function<arrow::Result<std::shared_ptr<Aws::S3Crt::S3CrtClient>>()>;
 
-  /// Reserve construction before invoking the factory, then register its
-  /// client. The factory is not invoked after finalization starts.
-  arrow::Result<std::shared_ptr<S3CrtClientHolder>> AddClient(ClientFactory make_client,
-                                                              std::shared_ptr<FilesystemMetrics> metrics);
-  arrow::Result<std::shared_ptr<S3CrtClientHolder>> AddNativeClient(NativeClientFactory make_client);
-  /// Wait for construction, then close all holders and wait until every SDK
-  /// destructor and native-client shutdown callback has completed.
-  /// This is an S3 lifecycle operation and must not be called from a CRT
-  /// callback.
-  void Finalize();
+     /// Reserve construction before invoking the factory, then register its
+     /// client. The factory is not invoked after finalization starts.
+     arrow::Result<std::shared_ptr<S3CrtClientHolder>> AddClient(ClientFactory make_client,
+                                                                 std::shared_ptr<FilesystemMetrics> metrics);
+     /// Wait for client construction, then close all holders and wait until every
+     /// CRT client destructor has returned.
+     /// This is an S3 lifecycle operation and must not be called from a CRT
+     /// callback.
+     void Finalize();
 
   protected:
   friend class S3CrtClientConstructionLease;
   friend class S3CrtClientHolder;
   void ClientDestroyed();
-  arrow::Result<std::shared_ptr<S3CrtClientHolder>> AddClientImpl(ClientFactory make_client,
-                                                                  NativeClientFactory make_native_client,
-                                                                  std::shared_ptr<FilesystemMetrics> metrics);
 
   // Protects holders_ and both counters. It is never held while invoking a
   // client factory, waiting on a holder, or running an S3CrtClient destructor.

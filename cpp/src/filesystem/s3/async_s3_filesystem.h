@@ -15,10 +15,8 @@ class NativeS3Operations {
   virtual arrow::Future<arrow::fs::FileInfo> GetFileInfoAsync(const std::string& path) = 0;
   virtual arrow::fs::FileInfoGenerator GetFileInfoGenerator(const arrow::fs::FileSelector& selector) = 0;
 };
-arrow::Result<std::shared_ptr<NativeS3Operations>> MakeNativeS3Operations(
-    const S3Options& options,
-    std::shared_ptr<S3ClientHolder> holder,
-    const arrow::io::IOContext& io_context,
-    std::shared_ptr<NativeS3Transport> transport = nullptr);
+arrow::Result<std::shared_ptr<NativeS3Operations>> MakeNativeS3Operations(const S3Options& options,
+                                                                          const arrow::io::IOContext& io_context,
+                                                                          std::shared_ptr<NativeS3Transport> transport);
 }  // namespace milvus_storage
 #endif

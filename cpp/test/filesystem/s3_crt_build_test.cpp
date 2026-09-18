@@ -79,28 +79,6 @@ std::shared_ptr<Aws::S3Crt::S3CrtClient> MakeTestS3CrtClient() {
   return {storage, reinterpret_cast<Aws::S3Crt::S3CrtClient*>(storage.get())};
 }
 
-arrow::Result<aws_s3_client*> MakeTestNativeClient(std::function<void()> on_shutdown) {
-  aws_s3_client_config config{};
-  config.region = aws_byte_cursor_from_c_str("us-east-1");
-  config.client_bootstrap = Aws::GetDefaultClientBootstrap()->GetUnderlyingHandle();
-  config.tls_mode = AWS_MR_TLS_DISABLED;
-  auto credentials = Aws::Crt::Auth::CredentialsProvider::CreateCredentialsProviderAnonymous();
-  aws_signing_config_aws signing{};
-  aws_s3_init_default_signing_config(&signing, config.region, credentials->GetUnderlyingHandle());
-  config.signing_config = &signing;
-  auto done = std::make_unique<std::function<void()>>(std::move(on_shutdown));
-  config.shutdown_callback_user_data = done.get();
-  config.shutdown_callback = [](void* user) {
-    std::unique_ptr<std::function<void()>> callback(static_cast<std::function<void()>*>(user));
-    (*callback)();
-  };
-  auto* client = aws_s3_client_new(aws_default_allocator(), &config);
-  if (!client)
-    return arrow::Status::IOError("Cannot construct native test client: ", aws_error_str(aws_last_error()));
-  done.release();
-  return client;
-}
-
 bool WaitUntilAcquireRejected(const std::shared_ptr<S3CrtClientHolder>& holder) {
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
   while (std::chrono::steady_clock::now() < deadline) {
@@ -323,7 +301,7 @@ TEST(S3CrtClientFinalizerTest, FinalizationWaitsForClientFactoryCleanup) {
   EXPECT_FALSE(holder->Acquire().ok());
 }
 
-TEST(S3CrtClientFinalizerTest, LeaseIsReentrantAndClientDestructionStaysOnHolderThread) {
+TEST(S3CrtClientFinalizerTest, LeaseIsReentrantAndPendingDestructionUsesCleanupThread) {
   auto finalizer = std::make_shared<S3CrtClientFinalizer>();
 
   std::promise<std::thread::id> client_destroyed_promise;
@@ -353,7 +331,8 @@ TEST(S3CrtClientFinalizerTest, LeaseIsReentrantAndClientDestructionStaysOnHolder
                  });
 
   holder_destruction_started.wait();
-  EXPECT_EQ(holder_destroyed.wait_for(std::chrono::milliseconds(250)), std::future_status::timeout);
+  EXPECT_EQ(holder_destroyed.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  EXPECT_EQ(client_destroyed.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
 
   auto leases_released = std::async(
       std::launch::async,
@@ -367,7 +346,7 @@ TEST(S3CrtClientFinalizerTest, LeaseIsReentrantAndClientDestructionStaysOnHolder
   ASSERT_EQ(client_destroyed.wait_for(std::chrono::seconds(5)), std::future_status::ready);
   const auto client_destruction_thread = client_destroyed.get();
 
-  EXPECT_EQ(client_destruction_thread, holder_destruction_thread);
+  EXPECT_NE(client_destruction_thread, holder_destruction_thread);
   EXPECT_NE(client_destruction_thread, lease_release_thread);
 }
 
@@ -563,87 +542,48 @@ TEST(S3CrtClientFinalizerTest, FinalizeWaitsForClientDestructorAlreadyInProgress
   finalized.get();
 }
 
-TEST(S3CrtClientFinalizerTest, NativeHolderDestructionDoesNotWaitForItsOwnLease) {
+TEST(S3CrtClientFinalizerTest, NativeLeaseBorrowsTheSdkClient) {
   ASSERT_STATUS_OK(EnsureS3InitializedForTest());
   auto finalizer = std::make_shared<S3CrtClientFinalizer>();
-  std::promise<void> shutdown_entered_promise;
-  auto shutdown_entered = shutdown_entered_promise.get_future();
-  std::promise<void> allow_shutdown_promise;
-  auto allow_shutdown = allow_shutdown_promise.get_future().share();
-  ASSERT_AND_ASSIGN(auto holder, finalizer->AddNativeClient([&](std::function<void()> done) {
-    return MakeTestNativeClient([&, done = std::move(done)] {
-      shutdown_entered_promise.set_value();
-      allow_shutdown.wait();
-      done();
-    });
-  }));
+  std::atomic<int> shutdowns{0};
+  ASSERT_AND_ASSIGN(auto holder, finalizer->AddClient(
+                                     [&] {
+                                       Aws::S3Crt::S3CrtClientConfiguration config;
+                                       config.region = "us-east-1";
+                                       config.scheme = Aws::Http::Scheme::HTTP;
+                                       config.clientShutdownCallback = [&](void*) { ++shutdowns; };
+                                       return std::make_shared<Aws::S3Crt::S3CrtClient>(
+                                           std::make_shared<Aws::Auth::AnonymousAWSCredentialsProvider>(), config);
+                                     },
+                                     nullptr));
   ASSERT_AND_ASSIGN(auto lease, holder->Acquire());
   ASSERT_NE(lease.native_client(), nullptr);
-  EXPECT_EQ(lease.operator->(), nullptr);
-  // This is what an inline native completion does when dropping the last
-  // transport owner. Its request lease must not make holder destruction wait.
-  std::weak_ptr<S3CrtClientHolder> weak_holder = holder;
-  auto dropped = std::async(std::launch::async, [holder = std::move(holder)]() mutable { holder.reset(); });
-  EXPECT_EQ(dropped.wait_for(std::chrono::seconds(1)), std::future_status::ready);
-  EXPECT_TRUE(weak_holder.expired());
-  auto finalized = std::async(std::launch::async, [finalizer] { finalizer->Finalize(); });
-  EXPECT_EQ(shutdown_entered.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
-  EXPECT_EQ(finalized.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
-  // Move assignment must retire the operation once, even after its holder dies.
+  EXPECT_EQ(lease.native_client(), lease->GetUnderlyingS3Client());
+  auto* native = lease.native_client();
   auto moved = std::move(lease);
-  lease = S3CrtClientLease{};
+  EXPECT_EQ(lease.native_client(), nullptr);
+  EXPECT_EQ(moved.native_client(), native);
   moved = S3CrtClientLease{};
-  EXPECT_EQ(shutdown_entered.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-  EXPECT_EQ(finalized.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
-  allow_shutdown_promise.set_value();
-  EXPECT_EQ(finalized.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-  finalized.get();
-  dropped.get();
-}
-
-TEST(S3CrtClientFinalizerTest, NativeConstructionAndShutdownUseTheSharedBarrier) {
-  ASSERT_STATUS_OK(EnsureS3InitializedForTest());
-  auto finalizer = std::make_shared<S3CrtClientFinalizer>();
-  std::promise<void> factory_entered_promise;
-  auto factory_entered = factory_entered_promise.get_future();
-  std::promise<void> release_factory_promise;
-  auto release_factory = release_factory_promise.get_future().share();
-  std::atomic<bool> native_destroyed{false};
-  auto constructed = std::async(std::launch::async, [&] {
-    return finalizer->AddNativeClient([&](std::function<void()> done) {
-      factory_entered_promise.set_value();
-      release_factory.wait();
-      return MakeTestNativeClient([&, done = std::move(done)] {
-        native_destroyed.store(true);
-        done();
-      });
-    });
-  });
-  factory_entered.wait();
-  auto finalized = std::async(std::launch::async, [finalizer] { finalizer->Finalize(); });
-  EXPECT_TRUE(WaitUntilConstructionRejected(finalizer));
-  EXPECT_EQ(finalized.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
-  release_factory_promise.set_value();
-  ASSERT_AND_ASSIGN(auto holder, constructed.get());
-  EXPECT_FALSE(holder->Acquire().ok());
-  EXPECT_EQ(finalized.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-  finalized.get();
-  EXPECT_TRUE(native_destroyed.load());
-  bool called = false;
-  auto rejected = finalizer->AddNativeClient([&](std::function<void()> done) {
-    called = true;
-    return MakeTestNativeClient(std::move(done));
-  });
-  EXPECT_FALSE(rejected.ok());
-  EXPECT_FALSE(called);
-}
-
-TEST(S3CrtClientFinalizerTest, RejectsSuccessfulNullNativeConstruction) {
-  auto finalizer = std::make_shared<S3CrtClientFinalizer>();
-  auto result = finalizer->AddNativeClient(
-      [](std::function<void()>) -> arrow::Result<aws_s3_client*> { return static_cast<aws_s3_client*>(nullptr); });
-  EXPECT_FALSE(result.ok());
+  holder.reset();
   finalizer->Finalize();
+  EXPECT_EQ(shutdowns.load(), 1);
+}
+
+TEST(S3CrtClientFinalizerTest, CallbackDestructionDefersSdkShutdownUntilLeaseRelease) {
+  auto finalizer = std::make_shared<S3CrtClientFinalizer>();
+  ASSERT_AND_ASSIGN(auto holder, finalizer->AddClient(MakeTestS3CrtClient, nullptr));
+  ASSERT_AND_ASSIGN(auto lease, holder->Acquire());
+  std::weak_ptr<S3CrtClientHolder> weak = holder;
+  {
+    S3CrtCallbackScope callback_scope;
+    holder.reset();
+  }
+  EXPECT_TRUE(weak.expired());
+  auto finalized = std::async(std::launch::async, [finalizer] { finalizer->Finalize(); });
+  EXPECT_EQ(finalized.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  lease = S3CrtClientLease{};
+  ASSERT_EQ(finalized.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  finalized.get();
 }
 
 TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileWhenCrtEnabled) {

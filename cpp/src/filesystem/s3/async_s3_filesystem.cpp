@@ -323,14 +323,12 @@ class AsyncS3FileSystem final : public NativeS3Operations, public std::enable_sh
 }  // namespace
 
 Result<std::shared_ptr<NativeS3Operations>> MakeNativeS3Operations(const S3Options& options,
-                                                                   std::shared_ptr<S3ClientHolder> holder,
                                                                    const arrow::io::IOContext& io_context,
                                                                    std::shared_ptr<NativeS3Transport> transport) {
   if (!io_context.executor())
     return Status::Invalid("Native S3 requires a caller executor");
-  if (!transport) {
-    ARROW_ASSIGN_OR_RAISE(transport, NativeS3Transport::Make(options, std::move(holder)));
-  }
+  if (!transport)
+    return Status::Invalid("Native S3 requires the filesystem transport");
   return std::make_shared<AsyncS3FileSystem>(std::move(transport), options, io_context);
 }
 }  // namespace milvus_storage

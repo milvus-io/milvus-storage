@@ -28,7 +28,8 @@ class NativeS3Transport {
   public:
   struct State;
   static arrow::Result<std::shared_ptr<NativeS3Transport>> Make(const S3Options& options,
-                                                                std::shared_ptr<S3ClientHolder> holder);
+                                                                std::shared_ptr<S3ClientHolder> holder,
+                                                                std::shared_ptr<S3CrtClientHolder> crt_holder);
   // DEFAULT meta requests never transform PUT into multipart. All bodies are
   // owned memory; no CRT callback reads a blocking file/iostream data source.
   arrow::Future<NativeS3Response> Send(const Aws::S3::S3Request& request,

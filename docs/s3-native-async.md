@@ -23,13 +23,26 @@ Other unsupported new async operations also return NotImplemented. The existing
 SDK input path remains available when CRT reads are disabled. The executor must
 outlive operations; request completions retain their state and preserve the actual result if completion dispatch is rejected.
 
-SDK CRT clients and native transports use the same `S3CrtClientHolder`, operation
-leases and `S3CrtClientFinalizer` registry. Each holder owns either an SDK client or
-a native C client. Native holders close admission and release their client after
-the last lease; the finalizer waits for the native shutdown callback as well as
-SDK destructors before `Aws::ShutdownAPI()`. There is no separate transport
-registry or global shutdown barrier. This preserves callback-safe transport
-destruction without moving the SDK's blocking destructor onto a CRT thread.
+The transport borrows the **same** `aws_s3_client` owned by the filesystem's
+`Aws::S3Crt::S3CrtClient`, using its existing `S3CrtClientHolder` and operation
+leases. It creates no client, credentials provider, TLS context or connection
+pool of its own. `ExtendS3CrtClient.cmake` adds a header-only borrowed-handle
+accessor to a build-local copy of the pinned SDK header; it does not modify the
+shared dependency cache or the SDK class layout. The accessor can be removed
+when an equivalent SDK API is available.
+
+Request leases live through native request shutdown and completion dispatch.
+If an inline completion drops the last holder on a CRT callback, the SDK's
+blocking destructor runs on a dedicated cleanup worker. This worker performs
+only client teardown, not S3 operations. The existing finalizer's live-client
+barrier waits for that destructor before `Aws::ShutdownAPI()`.
+
+CRT 0.12.6 configures retries per client, not per request. The shared CRT client
+uses the transport's single-attempt policy to prevent replaying mutations after
+an ambiguous response. This also disables automatic retries for SDK CRT reads;
+the ordinary synchronous SDK client keeps its existing retry policy. Supporting
+different read/write retry policies on the same native client requires a CRT
+request-level retry extension.
 
 Local stack: metadata and same-instance API, output-stream native submission,
 then directory/delete/copy/move. Validation uses the storage development container
