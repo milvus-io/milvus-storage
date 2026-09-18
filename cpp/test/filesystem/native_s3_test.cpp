@@ -136,6 +136,10 @@ TEST_F(NativeS3Test, FactoryAndCacheReturnTheSameSyncAsyncHandle) {
 
 TEST_F(NativeS3Test, HeadAndReadUseCallerExecutorWithoutNetworkWait) {
   CompletesWithoutBlockingWorker<arrow::fs::FileInfo>([this] { return fs_->GetFileInfoAsync("slow"); });
+  auto subtree = std::make_shared<arrow::fs::SubTreeFileSystem>("", fs_);
+  auto view = std::make_shared<FileSystemProxy>("", subtree);
+  CompletesWithoutBlockingWorker<arrow::fs::FileInfoVector>(
+      [view] { return view->GetFileInfoAsync(std::vector<std::string>{"slow"}); });
   CompletesWithoutBlockingWorker<std::shared_ptr<arrow::Buffer>>([this] { return Read("slow", 0, 3); });
 }
 
