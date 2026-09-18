@@ -232,9 +232,9 @@ FilesystemCache& FilesystemCache::getInstance() {
 
 size_t FilesystemCache::size() const { return cache_.size(); }
 
-std::vector<std::pair<std::string, ArrowFileSystemPtr>> FilesystemCache::list() const {
+std::vector<std::pair<std::string, FileSystemPtr>> FilesystemCache::list() const {
   auto cached_entries = cache_.list();
-  std::vector<std::pair<std::string, ArrowFileSystemPtr>> entries;
+  std::vector<std::pair<std::string, FileSystemPtr>> entries;
   entries.reserve(cached_entries.size());
   for (const auto& cached_entry : cached_entries) {
     entries.emplace_back(cached_entry.second->display_key, cached_entry.second->filesystem);

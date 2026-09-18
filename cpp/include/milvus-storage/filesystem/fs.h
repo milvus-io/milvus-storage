@@ -354,7 +354,7 @@ class FilesystemCache {
    * for the display key composition. The display key is not the internal cache
    * key accepted by remove().
    */
-  [[nodiscard]] std::vector<std::pair<std::string, ArrowFileSystemPtr>> list() const;
+  [[nodiscard]] std::vector<std::pair<std::string, FileSystemPtr>> list() const;
 
   /**
    * @brief Remove a cached filesystem by key
