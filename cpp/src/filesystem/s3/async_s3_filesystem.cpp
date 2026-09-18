@@ -93,12 +93,15 @@ FileInfo Info(const std::string& path, FileType type) {
 }
 
 Result<Path> ObjectPath(const std::string& path) {
+  ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(path));
   ARROW_ASSIGN_OR_RAISE(auto parsed, Path::Parse(path));
   if (parsed.key.empty())
     return Status::Invalid("Expected S3 object path");
   return parsed;
 }
 Status Conditions(const AsyncWriteOptions& options) {
+  if (options.if_match.find_first_of("\r\n") != std::string::npos)
+    return Status::Invalid("Invalid If-Match");
   if (options.if_absent && !options.if_match.empty())
     return Status::Invalid("if_absent and if_match are mutually exclusive");
   return Status::OK();

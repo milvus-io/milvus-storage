@@ -204,6 +204,7 @@ TEST_F(NativeS3Test, RootListingSkipsEmptyContinuationPage) {
 }
 
 TEST_F(NativeS3Test, WritesConditionalMetadataAndOwnedBuffer) {
+  EXPECT_TRUE(fs_->WriteAsync("file/", arrow::Buffer::FromString("bad")).status().IsInvalid());
   AsyncWriteOptions options;
   options.if_absent = true;
   options.metadata = arrow::key_value_metadata({"content-type", "x-amz-meta-test"}, {"text/plain", "kept"});
