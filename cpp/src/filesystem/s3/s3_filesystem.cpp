@@ -2700,6 +2700,28 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
     });
   }
 
+  // Shared legacy path for synchronous callers and builds without native CRT.
+  Future<> DeleteDirContentsAsync(const std::string& s, bool missing_dir_ok) {
+    ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
+
+    if (path.empty()) {
+      return arrow::Status::NotImplemented("Cannot delete all S3 buckets");
+    }
+    auto self = shared_from_this();
+    return DeleteDirContentsAsync(path.bucket, path.key)
+        .Then(
+            [path, self]() {
+              // Directory may be implicitly deleted, recreate it
+              return self->EnsureDirectoryExists(path);
+            },
+            [missing_dir_ok](const Status& err) {
+              if (missing_dir_ok && ::arrow::internal::ErrnoFromStatus(err) == ENOENT) {
+                return arrow::Status::OK();
+              }
+              return err;
+            });
+  }
+
   FileInfoGenerator GetFileInfoGenerator(const FileSelector& select) {
     auto maybe_base_path = S3Path::FromString(select.base_dir);
     if (!maybe_base_path.ok()) {
@@ -3038,16 +3060,7 @@ arrow::Status S3FileSystem::DeleteDir(const std::string& s) {
 }
 
 arrow::Status S3FileSystem::DeleteDirContents(const std::string& s, bool missing_dir_ok) {
-  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
-  if (path.empty())
-    return arrow::Status::NotImplemented("Cannot delete all S3 buckets");
-  auto status = impl_->DeleteDirContentsAsync(path.bucket, path.key).status();
-  if (!status.ok()) {
-    if (missing_dir_ok && ::arrow::internal::ErrnoFromStatus(status) == ENOENT)
-      return arrow::Status::OK();
-    return status;
-  }
-  return impl_->EnsureDirectoryExists(path);
+  return impl_->DeleteDirContentsAsync(s, missing_dir_ok).status();
 }
 
 arrow::Future<> S3FileSystem::DeleteDirContentsAsync(const std::string& s, bool missing_dir_ok) {
@@ -3055,24 +3068,7 @@ arrow::Future<> S3FileSystem::DeleteDirContentsAsync(const std::string& s, bool 
   ARROW_RETURN_NOT_OK(impl_->native_operations_.status());
   return (*impl_->native_operations_)->DeleteDirContentsAsync(s, missing_dir_ok);
 #else
-  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
-
-  if (path.empty()) {
-    return arrow::Status::NotImplemented("Cannot delete all S3 buckets");
-  }
-  auto self = impl_;
-  return impl_->DeleteDirContentsAsync(path.bucket, path.key)
-      .Then(
-          [path, self]() {
-            // Directory may be implicitly deleted, recreate it
-            return self->EnsureDirectoryExists(path);
-          },
-          [missing_dir_ok](const Status& err) {
-            if (missing_dir_ok && ::arrow::internal::ErrnoFromStatus(err) == ENOENT) {
-              return arrow::Status::OK();
-            }
-            return err;
-          });
+  return impl_->DeleteDirContentsAsync(s, missing_dir_ok);
 #endif
 }
 
