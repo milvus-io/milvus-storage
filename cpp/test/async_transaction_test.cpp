@@ -3,7 +3,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 
-#include "milvus-storage/transaction/async_transaction.h"
+#include "milvus-storage/transaction/transaction.h"
 #include "milvus-storage/common/async_limits.h"
 #include "milvus-storage/common/layout.h"
 #include <gtest/gtest.h>
@@ -48,7 +48,7 @@ BeginResult Begin(const std::shared_ptr<MemoryFileSystem>& fs,
                   const Resolver& resolver = FailResolver,
                   uint32_t retries = 0) {
   std::shared_ptr<AsyncOperation> operation;
-  auto future = BeginAsync(fs->path, {}, version, resolver, retries, 3000, operation, fs);
+  auto future = Transaction::BeginAsync(fs->path, {}, version, resolver, retries, 3000, operation, fs);
   operation.reset();
   return std::move(future).via(&CallerExecutors::Get().work).get();
 }
@@ -63,7 +63,7 @@ TEST(AsyncManifestLimitsTest, InvalidConfigurationReturnsStatus) {
 TEST(AsyncTransactionTest, UnconsumedFutureStartsNoIO) {
   auto fs = std::make_shared<MemoryFileSystem>();
   std::shared_ptr<AsyncOperation> operation;
-  { auto future = BeginAsync(fs->path, {}, -1, FailResolver, 0, 3000, operation, fs); }
+  { auto future = Transaction::BeginAsync(fs->path, {}, -1, FailResolver, 0, 3000, operation, fs); }
   EXPECT_EQ(fs->info_calls, 0);
 }
 TEST(AsyncTransactionTest, SynchronousIOUsesCallerExecutor) {
@@ -71,7 +71,7 @@ TEST(AsyncTransactionTest, SynchronousIOUsesCallerExecutor) {
   folly::CPUThreadPoolExecutor executor(1);
   auto worker = folly::via(&executor, [] { return std::this_thread::get_id(); }).get();
   std::shared_ptr<AsyncOperation> operation;
-  auto result = BeginAsync(fs->path, {}, -1, FailResolver, 0, 3000, operation, fs).via(&executor).get();
+  auto result = Transaction::BeginAsync(fs->path, {}, -1, FailResolver, 0, 3000, operation, fs).via(&executor).get();
   ASSERT_TRUE(result.status.ok());
   EXPECT_EQ(fs->io_thread, worker);
   EXPECT_EQ(result.transaction->GetReadVersion(), 0);
@@ -82,7 +82,7 @@ TEST(AsyncTransactionTest, ContinuationCanUseAnotherExecutor) {
   auto& executors = CallerExecutors::Get();
   auto completion = folly::via(&executors.completion, [] { return std::this_thread::get_id(); }).get();
   std::shared_ptr<AsyncOperation> operation;
-  auto result = BeginAsync(fs->path, {}, 0, FailResolver, 0, 3000, operation, fs)
+  auto result = Transaction::BeginAsync(fs->path, {}, 0, FailResolver, 0, 3000, operation, fs)
                     .via(&executors.work)
                     .via(&executors.completion)
                     .thenValue([completion](BeginResult result) {
@@ -95,7 +95,7 @@ TEST(AsyncTransactionTest, ContinuationCanUseAnotherExecutor) {
 TEST(AsyncTransactionTest, CancelledQueuedBeginStartsNoIO) {
   auto fs = std::make_shared<MemoryFileSystem>();
   std::shared_ptr<AsyncOperation> operation;
-  auto future = BeginAsync(fs->path, {}, -1, FailResolver, 0, 3000, operation, fs);
+  auto future = Transaction::BeginAsync(fs->path, {}, -1, FailResolver, 0, 3000, operation, fs);
   operation->Cancel();
   EXPECT_EQ(std::move(future).via(&CallerExecutors::Get().work).get().status.code, AsyncStatus::Cancelled);
   EXPECT_EQ(fs->info_calls, 0);
@@ -104,7 +104,7 @@ TEST(AsyncTransactionTest, DeadlineIncludesQueueTime) {
   auto fs = std::make_shared<MemoryFileSystem>();
   folly::ManualExecutor executor;
   std::shared_ptr<AsyncOperation> operation;
-  auto future = BeginAsync(fs->path, {}, -1, FailResolver, 0, 1, operation, fs).via(&executor);
+  auto future = Transaction::BeginAsync(fs->path, {}, -1, FailResolver, 0, 1, operation, fs).via(&executor);
   std::this_thread::sleep_for(std::chrono::milliseconds(10));
   executor.drain();
   EXPECT_EQ(std::move(future).get().status.code, AsyncStatus::Deadline);
@@ -113,8 +113,9 @@ TEST(AsyncTransactionTest, DeadlineIncludesQueueTime) {
 TEST(AsyncTransactionTest, InlineExecutorIsRejected) {
   auto fs = std::make_shared<MemoryFileSystem>();
   std::shared_ptr<AsyncOperation> operation;
-  auto result =
-      BeginAsync(fs->path, {}, 0, FailResolver, 0, 3000, operation, fs).via(&folly::InlineExecutor::instance()).get();
+  auto result = Transaction::BeginAsync(fs->path, {}, 0, FailResolver, 0, 3000, operation, fs)
+                    .via(&folly::InlineExecutor::instance())
+                    .get();
   EXPECT_FALSE(result.status.ok());
   EXPECT_EQ(fs->info_calls, 0);
 }
@@ -128,7 +129,8 @@ TEST(AsyncTransactionTest, BlockingIOLeavesSubmissionFreeAndCancellationWaits) {
     gate.wait();
   };
   std::shared_ptr<AsyncOperation> operation;
-  auto future = BeginAsync(fs->path, {}, -1, FailResolver, 0, 3000, operation, fs).via(&CallerExecutors::Get().work);
+  auto future =
+      Transaction::BeginAsync(fs->path, {}, -1, FailResolver, 0, 3000, operation, fs).via(&CallerExecutors::Get().work);
   EXPECT_EQ(entered_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
   operation->Cancel();
   EXPECT_FALSE(future.isReady());  // In-flight synchronous calls retain ownership.
@@ -153,7 +155,7 @@ TEST(AsyncTransactionTest, ReturnedTransactionUsesExistingSyncCommitAndRead) {
 }
 CommitResult Commit(Transaction* txn) {
   std::shared_ptr<AsyncOperation> operation;
-  auto future = CommitAsync(txn, 3000, operation);
+  auto future = txn->CommitAsync(3000, operation);
   operation.reset();
   return std::move(future).via(&CallerExecutors::Get().work).get();
 }
@@ -164,9 +166,9 @@ TEST(AsyncTransactionTest, DiscardedCommitReleasesReservation) {
   begun.transaction->AddDeltaLog({get_delta_filepath(fs->path, "own"), DeltaLogType::PRIMARY_KEY, 1});
   std::shared_ptr<AsyncOperation> retained;
   {
-    auto future = CommitAsync(begun.transaction.get(), 3000, retained);
+    auto future = begun.transaction->CommitAsync(3000, retained);
     std::shared_ptr<AsyncOperation> other;
-    auto busy = CommitAsync(begun.transaction.get(), 3000, other);
+    auto busy = begun.transaction->CommitAsync(3000, other);
     EXPECT_TRUE(busy.isReady());
     EXPECT_EQ(std::move(busy).get().status.code, AsyncStatus::Busy);
     EXPECT_EQ(fs->info_calls, 0);
@@ -182,7 +184,7 @@ TEST(AsyncTransactionTest, QueuedCommitCancellationStartsNoIO) {
   ASSERT_TRUE(begun.status.ok());
   begun.transaction->AddDeltaLog({get_delta_filepath(fs->path, "own"), DeltaLogType::PRIMARY_KEY, 1});
   std::shared_ptr<AsyncOperation> operation;
-  auto future = CommitAsync(begun.transaction.get(), 3000, operation);
+  auto future = begun.transaction->CommitAsync(3000, operation);
   operation->Cancel();
   auto result = std::move(future).via(&CallerExecutors::Get().work).get();
   EXPECT_EQ(result.status.code, AsyncStatus::Cancelled);
@@ -197,7 +199,7 @@ TEST(AsyncTransactionTest, CommitUsesAnotherExecutorAndPreservesSuccessAfterCanc
   folly::CPUThreadPoolExecutor executor(1);
   auto thread = folly::via(&executor, [] { return std::this_thread::get_id(); }).get();
   std::shared_ptr<AsyncOperation> operation;
-  auto future = CommitAsync(begun.transaction.get(), 3000, operation);
+  auto future = begun.transaction->CommitAsync(3000, operation);
   fs->before_info = [&] { operation->Cancel(); };
   auto result = std::move(future).via(&executor).get();
   EXPECT_TRUE(result.status.ok());

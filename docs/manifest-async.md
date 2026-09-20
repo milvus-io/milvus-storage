@@ -22,7 +22,16 @@ dependency, credential provider, retry policy or SDK shutdown mechanism.
 
 ## C++ API
 
-`BeginAsync` returns a lazy `folly::SemiFuture<BeginResult>`. Consuming it with
+Include `milvus-storage/transaction/transaction.h` for both synchronous and
+asynchronous transaction APIs. For example:
+
+```cpp
+auto begin = Transaction::BeginAsync(path, properties, version, resolver, retries,
+                                     timeout_ms, operation);
+auto commit = transaction->CommitAsync(timeout_ms, operation);
+```
+
+`Transaction::BeginAsync` is a static factory that returns a lazy `folly::SemiFuture<BeginResult>`. Consuming it with
 `.via(&executor)` runs filesystem initialization and `Transaction::Open` on that
 executor. Supply a pool suitable for blocking work, not an event-loop thread.
 Inline executors are rejected. A continuation may select a different executor.
@@ -95,7 +104,7 @@ development-container launcher with all outputs and caches on the data disk.
 
 ## Commit API
 
-`CommitAsync` schedules the existing `Transaction::Commit`, including resolver
+`Transaction::CommitAsync` is an instance method that schedules the existing `Transaction::Commit`, including resolver
 processing and conflict retries. Its lazy future reserves the transaction;
 discarding the future releases that reservation. Once execution starts, repeated
 submission returns Busy. Keep the transaction alive and unmodified until the

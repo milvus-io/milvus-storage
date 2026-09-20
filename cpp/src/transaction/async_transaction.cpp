@@ -3,7 +3,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 
-#include "milvus-storage/transaction/async_transaction.h"
+#include "milvus-storage/transaction/transaction.h"
 #include <atomic>
 #include <chrono>
 #include <folly/executors/InlineExecutor.h>
@@ -26,14 +26,14 @@ struct AsyncManifestOperation final : AsyncOperation {
   }
 };
 
-folly::SemiFuture<BeginResult> BeginAsync(const std::string& path,
-                                          Properties properties,
-                                          int64_t version,
-                                          const Resolver& resolver,
-                                          uint32_t retries,
-                                          uint64_t timeout_ms,
-                                          std::shared_ptr<AsyncOperation>& operation,
-                                          ArrowFileSystemPtr filesystem) {
+folly::SemiFuture<BeginResult> Transaction::BeginAsync(const std::string& path,
+                                                       Properties properties,
+                                                       int64_t version,
+                                                       const Resolver& resolver,
+                                                       uint32_t retries,
+                                                       uint64_t timeout_ms,
+                                                       std::shared_ptr<AsyncOperation>& operation,
+                                                       ArrowFileSystemPtr filesystem) {
   operation.reset();
   if (version < -1 || !timeout_ms || timeout_ms > 24 * 60 * 60 * 1000)
     return folly::makeSemiFuture(BeginResult{arrow::Status::Invalid("Invalid async transaction arguments"), nullptr});
@@ -67,11 +67,11 @@ folly::SemiFuture<BeginResult> BeginAsync(const std::string& path,
         }
       });
 }
-folly::SemiFuture<CommitResult> CommitAsync(Transaction* transaction,
-                                            uint64_t timeout_ms,
-                                            std::shared_ptr<AsyncOperation>& operation) {
+folly::SemiFuture<CommitResult> Transaction::CommitAsync(uint64_t timeout_ms,
+                                                         std::shared_ptr<AsyncOperation>& operation) {
   operation.reset();
-  if (!transaction || !timeout_ms || timeout_ms > 24 * 60 * 60 * 1000)
+  auto* transaction = this;
+  if (!timeout_ms || timeout_ms > 24 * 60 * 60 * 1000)
     return folly::makeSemiFuture(CommitResult{arrow::Status::Invalid("Invalid async transaction arguments")});
   auto state = std::make_shared<AsyncManifestOperation>();
   state->deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
