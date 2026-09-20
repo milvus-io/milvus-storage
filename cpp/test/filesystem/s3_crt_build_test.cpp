@@ -590,6 +590,11 @@ TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileWhenCrtEnabled) {
   if (!IsCloudEnv()) {
     GTEST_SKIP() << "CRT OpenInputFile smoke test skipped in non-cloud environment";
   }
+  const auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER).ValueOr(kCloudProviderAWS);
+  if (provider != kCloudProviderAWS) {
+    GTEST_SKIP() << "CRT OpenInputFile smoke test requires an AWS-compatible provider";
+  }
+
   api::Properties properties;
   ASSERT_STATUS_OK(InitTestProperties(properties));
   ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
