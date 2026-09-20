@@ -208,6 +208,20 @@ jobs:
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)/build/Release:$(pwd)/build/Release/libs
           source ./scripts/minio_env.sh && ./build/Release/test/milvus_test
 
+      - name: Setup RustFS
+        run: bash ./cpp/scripts/setup_rustfs.sh
+
+      - name: Run unittest with RustFS
+        working-directory: ./cpp
+        run: |
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)/build/Release:$(pwd)/build/Release/libs
+          source ./scripts/rustfs_env.sh
+          ./build/Release/test/milvus_test && ./build/Release/test/Test_FFI
+
+      - name: Show RustFS logs on failure
+        if: failure()
+        run: docker logs rustfs || true
+
       - name: Setup Azurite
         run: |
           chmod +x ./cpp/scripts/setup_azurite.sh

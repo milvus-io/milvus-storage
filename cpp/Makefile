@@ -97,6 +97,11 @@ test-all: build
 	(source ./scripts/minio_env.sh && ./build/${build_type}/test/milvus_test)
 	(source ./scripts/minio_env.sh && ./build/${build_type}/test/Test_FFI)
 
+	# running milvus_test and Test_FFI with RustFS
+	bash ./scripts/setup_rustfs.sh
+	(source ./scripts/rustfs_env.sh && ./build/${build_type}/test/milvus_test)
+	(source ./scripts/rustfs_env.sh && ./build/${build_type}/test/Test_FFI)
+
 	# running milvus_test with azurite
 	./scripts/setup_azurite.sh
 	(source ./scripts/azurite_env.sh && ./build/${build_type}/test/milvus_test)
