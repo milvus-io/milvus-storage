@@ -243,17 +243,17 @@ class S3CrtClientFinalizer : public std::enable_shared_from_this<S3CrtClientFina
   using ClientHolderList = std::vector<std::weak_ptr<S3CrtClientHolder>>;
 
   public:
-     using ClientFactory = std::function<arrow::Result<std::shared_ptr<Aws::S3Crt::S3CrtClient>>()>;
+  using ClientFactory = std::function<arrow::Result<std::shared_ptr<Aws::S3Crt::S3CrtClient>>()>;
 
-     /// Reserve construction before invoking the factory, then register its
-     /// client. The factory is not invoked after finalization starts.
-     arrow::Result<std::shared_ptr<S3CrtClientHolder>> AddClient(ClientFactory make_client,
-                                                                 std::shared_ptr<FilesystemMetrics> metrics);
-     /// Wait for client construction, then close all holders and wait until every
-     /// CRT client destructor has returned.
-     /// This is an S3 lifecycle operation and must not be called from a CRT
-     /// callback.
-     void Finalize();
+  /// Reserve construction before invoking the factory, then register its
+  /// client. The factory is not invoked after finalization starts.
+  arrow::Result<std::shared_ptr<S3CrtClientHolder>> AddClient(ClientFactory make_client,
+                                                              std::shared_ptr<FilesystemMetrics> metrics);
+  /// Wait for client construction, then close all holders and wait until every
+  /// CRT client destructor has returned.
+  /// This is an S3 lifecycle operation and must not be called from a CRT
+  /// callback.
+  void Finalize();
 
   protected:
   friend class S3CrtClientConstructionLease;

@@ -10,8 +10,9 @@ namespace {
 // Borrow the subtree chain only during synchronous dispatch. Async operations
 // retain their own state; the traversal does not need shared ownership.
 template <typename Call>
-auto WithNativeS3(const std::shared_ptr<arrow::fs::FileSystem>& fs, std::string path, Call call)
-    -> decltype(call(std::declval<S3FileSystem&>(), path)) {
+auto WithNativeS3(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                  std::string path,
+                  Call call) -> decltype(call(std::declval<S3FileSystem&>(), path)) {
   auto* current = fs.get();
   while (auto* subtree = dynamic_cast<arrow::fs::SubTreeFileSystem*>(current)) {
     if (!path.empty() && path.front() == '/')
@@ -27,8 +28,7 @@ template <typename Call>
 auto WithNativeS3(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                   std::string source,
                   std::string destination,
-                  Call call)
-    -> decltype(call(std::declval<S3FileSystem&>(), source, destination)) {
+                  Call call) -> decltype(call(std::declval<S3FileSystem&>(), source, destination)) {
   auto* current = fs.get();
   while (auto* subtree = dynamic_cast<arrow::fs::SubTreeFileSystem*>(current)) {
     source = subtree->base_path() + source;
