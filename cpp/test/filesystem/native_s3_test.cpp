@@ -81,7 +81,7 @@ class NativeS3Test : public ::testing::Test {
   void CompletesWithoutBlockingWorker(std::function<arrow::Future<T>()> start) {
     auto result = arrow::Future<T>::Make();
     std::promise<void> heartbeat;
-    ASSERT_OK(executor_->Spawn([start, result] {
+    ASSERT_OK(executor_->Spawn([start, result]() mutable {
       start().AddCallback([result](const arrow::Result<T>& value) mutable { result.MarkFinished(value); });
     }));
     ASSERT_OK(executor_->Spawn([&heartbeat] { heartbeat.set_value(); }));
