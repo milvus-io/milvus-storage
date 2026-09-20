@@ -63,6 +63,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply(403, b"<Error><Code>AccessDenied</Code></Error>")
         if self.command in ("PUT", "POST", "DELETE"):
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            if self.command == "POST" and "delete" in query:
+                xml = ET.fromstring(body)
+                keys = [item.text for item in xml.iter() if item.tag.rsplit("}", 1)[-1] == "Key"]
+                for object_key in keys:
+                    self.objects.pop(object_key, None)
+                    self.metadata.pop(object_key, None)
+                deleted = "".join("<Deleted><Key>" + escape(k) + "</Key></Deleted>" for k in keys)
+                return self.reply(200, ("<DeleteResult>" + deleted + "</DeleteResult>").encode())
             if self.command == "DELETE" and "uploadId" in query:
                 self.uploads.pop(query["uploadId"][0], None)
                 return self.reply(204)
@@ -132,7 +140,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             count = min(2, int(query.get("max-keys", ["1000"])[0]))
             batch = entries[start:start + count]
             more = start + count < len(entries)
-            xml = "<ListBucketResult><IsTruncated>" + str(more).lower() + "</IsTruncated>"
+            xml = ("<ListBucketResult><KeyCount>" + str(len(batch)) + "</KeyCount><IsTruncated>" +
+                   str(more).lower() + "</IsTruncated>")
             if more:
                 xml += "<NextContinuationToken>" + str(start + count) + "</NextContinuationToken>"
             for k, directory in batch:

@@ -412,6 +412,15 @@ TEST_F(NativeS3Test, UnsupportedDeleteDoesNotFallbackToBlockingSdkRequests) {
   EXPECT_TRUE(fs->DeleteDirContentsAsync("bucket/absent", true).status().IsNotImplemented());
   // The synchronous operation remains usable with the same configuration.
   ASSERT_OK(fs->DeleteDirContents("bucket/absent", true));
+  EXPECT_FALSE(fs->DeleteDirContents("bucket/absent", false).ok());
+  EXPECT_TRUE(fs->DeleteDirContents("", true).IsNotImplemented());
+  ASSERT_OK(fs->CreateDir("bucket/root/sync-delete", true));
+  ASSERT_OK(Write("sync-delete/file", arrow::Buffer::FromString("data")).status());
+  ASSERT_OK(fs->DeleteDirContents("bucket/root/sync-delete", false));
+  ASSERT_OK_AND_ASSIGN(auto directory, fs->GetFileInfo("bucket/root/sync-delete"));
+  EXPECT_EQ(directory.type(), arrow::fs::FileType::Directory);
+  ASSERT_OK_AND_ASSIGN(auto removed, fs->GetFileInfo("bucket/root/sync-delete/file"));
+  EXPECT_EQ(removed.type(), arrow::fs::FileType::NotFound);
 }
 
 class NativeS3ShutdownTest : public NativeS3Test {};
