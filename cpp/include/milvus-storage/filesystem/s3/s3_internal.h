@@ -34,6 +34,7 @@
 #include <arrow/status.h>
 #include "milvus-storage/common/log.h"
 #include <arrow/util/print.h>
+#include <arrow/util/key_value_metadata.h>
 #include <arrow/util/string.h>
 
 #include "milvus-storage/common/extend_status.h"
@@ -360,6 +361,43 @@ inline Aws::String ToURLEncodedAwsString(const std::string& s) { return Aws::Uti
 
 inline arrow::fs::TimePoint FromAwsDatetime(const Aws::Utils::DateTime& dt) {
   return std::chrono::time_point_cast<std::chrono::nanoseconds>(dt.UnderlyingTimestamp());
+}
+
+template <typename ObjectResult>
+std::shared_ptr<const arrow::KeyValueMetadata> GetObjectMetadata(const ObjectResult& result) {
+  auto md = std::make_shared<arrow::KeyValueMetadata>();
+
+  auto push = [&](std::string k, const Aws::String& v) {
+    if (!v.empty()) {
+      md->Append(std::move(k), std::string(FromAwsString(v)));
+    }
+  };
+  auto push_datetime = [&](std::string k, const Aws::Utils::DateTime& v) {
+    if (v != Aws::Utils::DateTime(0.0)) {
+      push(std::move(k), v.ToGmtString(Aws::Utils::DateFormat::ISO_8601));
+    }
+  };
+
+  md->Append("Content-Length", ::arrow::internal::ToChars(result.GetContentLength()));
+  push("Cache-Control", result.GetCacheControl());
+  push("Content-Type", result.GetContentType());
+  push("Content-Language", result.GetContentLanguage());
+  push("ETag", result.GetETag());
+  push("VersionId", result.GetVersionId());
+  push_datetime("Last-Modified", result.GetLastModified());
+  push_datetime("Expires", result.GetExpires());
+
+  // Get custom metadata
+  const auto& metadata_map = result.GetMetadata();
+  for (const auto& [key, val] : metadata_map) {
+    if (!val.empty()) {
+      push(std::string(FromAwsString(key)), val);
+    }
+  }
+
+  // NOTE the "canned ACL" isn't available for reading (one can get an expanded
+  // ACL using a separate GetObjectAcl request)
+  return md;
 }
 
 // A connect retry strategy with a controlled max duration.
