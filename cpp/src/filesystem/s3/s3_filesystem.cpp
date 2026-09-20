@@ -1059,7 +1059,6 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     int64_t nbytes = 0;
   };
 
-
   std::shared_ptr<S3CrtClientHolder> holder_;
   const arrow::io::IOContext io_context_;
   S3Path path_;
@@ -2802,7 +2801,8 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
 #ifdef WITH_CRT
     if (UseCrtReadPath()) {
       ARROW_RETURN_NOT_OK(native_operations_.status());
-      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, kNoSize, *native_operations_);
+      auto ptr =
+          std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, kNoSize, *native_operations_);
       ARROW_RETURN_NOT_OK(ptr->Init());
       return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
     }
@@ -2829,7 +2829,8 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
 #ifdef WITH_CRT
     if (UseCrtReadPath()) {
       ARROW_RETURN_NOT_OK(native_operations_.status());
-      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, info.size(), *native_operations_);
+      auto ptr =
+          std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, info.size(), *native_operations_);
       ARROW_RETURN_NOT_OK(ptr->Init());
       return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
     }
@@ -3277,7 +3278,8 @@ arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> S3FileSystem::OpenIn
 
 Future<std::shared_ptr<arrow::io::RandomAccessFile>> S3FileSystem::OpenInputFileAsync(const std::string& path) {
 #ifdef WITH_CRT
-  if (impl_->UseCrtReadPath()) return Future<std::shared_ptr<arrow::io::RandomAccessFile>>::MakeFinished(OpenInputFile(path));
+  if (impl_->UseCrtReadPath())
+    return Future<std::shared_ptr<arrow::io::RandomAccessFile>>::MakeFinished(OpenInputFile(path));
   return Status::NotImplemented("Nonblocking S3 input requires CRT reads");
 #else
   return FileSystem::OpenInputFileAsync(path);
@@ -3285,7 +3287,8 @@ Future<std::shared_ptr<arrow::io::RandomAccessFile>> S3FileSystem::OpenInputFile
 }
 Future<std::shared_ptr<arrow::io::RandomAccessFile>> S3FileSystem::OpenInputFileAsync(const FileInfo& info) {
 #ifdef WITH_CRT
-  if (impl_->UseCrtReadPath()) return Future<std::shared_ptr<arrow::io::RandomAccessFile>>::MakeFinished(OpenInputFile(info));
+  if (impl_->UseCrtReadPath())
+    return Future<std::shared_ptr<arrow::io::RandomAccessFile>>::MakeFinished(OpenInputFile(info));
   return Status::NotImplemented("Nonblocking S3 input requires CRT reads");
 #else
   return FileSystem::OpenInputFileAsync(info);

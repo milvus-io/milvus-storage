@@ -41,10 +41,10 @@ class NativeS3Transport {
                                        std::shared_ptr<arrow::Buffer> body = nullptr);
 
   private:
-     NativeS3Transport(std::shared_ptr<State> state, std::shared_ptr<S3CrtClientHolder> holder)
-         : state_(std::move(state)), holder_(std::move(holder)) {}
-     std::shared_ptr<State> state_;
-     std::shared_ptr<S3CrtClientHolder> holder_;
+  NativeS3Transport(std::shared_ptr<State> state, std::shared_ptr<S3CrtClientHolder> holder)
+      : state_(std::move(state)), holder_(std::move(holder)) {}
+  std::shared_ptr<State> state_;
+  std::shared_ptr<S3CrtClientHolder> holder_;
 };
 }  // namespace milvus_storage
 #endif
