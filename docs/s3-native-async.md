@@ -51,10 +51,6 @@ the ordinary synchronous SDK client keeps its existing retry policy. Supporting
 different read/write retry policies on the same native client requires a CRT
 request-level retry extension.
 
-Local stack: metadata and same-instance API, output-stream native submission,
-then directory/delete/copy/move. Validation uses the storage development container
-through wt-build, with all outputs and fixtures on /data/yuruiz.
-
 ## Existing output streams and transport
 
 `OpenOutputStreamAsync` returns the existing Arrow `OutputStream`. Its underlying
@@ -96,20 +92,14 @@ it is reported as an error with an unknown possible outcome, never automatically
 replayed. HTTP 200 with an embedded completion Error is not success. Cancellation
 is checked before dispatch; an already dispatched request is not cancelled.
 
-## Local stack and validation
-
-1. s3-async/metadata: native transport/lifetime, stat/list, and existing input-file
-   HEAD integration; range GET remains in the original CRT reader.
-2. s3-async/write: existing output-stream native submission and asynchronous
-   completion/abort, with buffer, conditional-write and backpressure tests.
-3. s3-async/mutations: directory/delete/copy/move operations and integration tests.
+## Validation
 
 Validation runs through wt-build in the storage development container, with all
 outputs, caches and test-service data on /data/yuruiz. The HTTP fixture tests delayed
 requests with one caller worker, pagination, encoded paths, HTTP failures, owned
 buffers, completion rejection and shutdown. Isolated MinIO validates signing,
-metadata, checksums and service semantics. No remote publication is part of this
-work; no throughput or AWS/TLS production certification is claimed.
+metadata, checksums and service semantics. No throughput or AWS/TLS production
+certification is claimed.
 
 ## Directory and file operations
 
