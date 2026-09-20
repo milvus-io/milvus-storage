@@ -16,8 +16,13 @@ concurrency:
 
 jobs:
   build:
+    name: ${{ matrix.with_crt == 'True' && 'build-crt' || 'build' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        with_crt: ['False', 'True']
     steps:
       - uses: actions/checkout@v4
 
@@ -51,7 +56,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.conan2
-          key: conan-cpp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('./cpp/conanfile.py') }}
+          key: conan-cpp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('./cpp/conanfile.py') }}-crt-${{ matrix.with_crt }}
           restore-keys: |
             conan-cpp-${{ runner.os }}-${{ runner.arch }}-
 
@@ -65,10 +70,10 @@ jobs:
       - name: Build
         working-directory: ./cpp
         run: |
-          make build USE_ASAN=True BUILD_TYPE=Release WITH_TALON=True
+          make build USE_ASAN=True BUILD_TYPE=Release WITH_TALON=True WITH_CRT=${{ matrix.with_crt }}
 
       - name: Save rust build cache
-        if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true'
+        if: github.ref == 'refs/heads/main' && matrix.with_crt == 'False' && steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         continue-on-error: true
         with:
@@ -87,7 +92,7 @@ jobs:
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gtest-binary
+          name: ${{ matrix.with_crt == 'True' && 'gtest-binary-crt' || 'gtest-binary' }}
           path: |
             cpp/build/Release/test/milvus_test
             cpp/build/Release/test/Test_FFI
@@ -170,15 +175,20 @@ jobs:
           make check-tidy
 
   unittest:
+    name: ${{ matrix.with_crt == 'True' && 'unittest-crt' || 'unittest' }}
     runs-on: ubuntu-22.04
     needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        with_crt: ['False', 'True']
     steps:
       - uses: actions/checkout@v4
 
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: gtest-binary
+          name: ${{ matrix.with_crt == 'True' && 'gtest-binary-crt' || 'gtest-binary' }}
           path: ./cpp/build/Release
 
       - name: Install coverage tools
@@ -219,6 +229,12 @@ jobs:
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)/build/Release:$(pwd)/build/Release/libs
           source ./scripts/azurite_env.sh && ./build/Release/test/milvus_test
 
+      - name: Run native S3 HTTP fixture tests
+        if: matrix.with_crt == 'True'
+        run: |
+          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:$(pwd)/cpp/build/Release:$(pwd)/cpp/build/Release/libs"
+          python3 cpp/scripts/test_native_s3.py
+
       - name: coverage-report
         working-directory: ./cpp
         run: |
@@ -232,7 +248,7 @@ jobs:
           files: cpp/coverage/coverage_filtered.info
           token: ${{ secrets.MILVUS_STORAGE_CODECOV_TOKEN }}
           flags: cpp
-          name: storage-ubuntu-22.04-unittests
+          name: storage-ubuntu-22.04-unittests-crt-${{ matrix.with_crt }}
           fail_ci_if_error: true
           disable_safe_directory: true
           verbose: true
@@ -244,7 +260,7 @@ jobs:
           token: ${{ secrets.MILVUS_STORAGE_CODECOV_TOKEN }}
           files: cpp/coverage/coverage_filtered.info
           flags: cpp
-          name: storage-ubuntu-22.04-unittests
+          name: storage-ubuntu-22.04-unittests-crt-${{ matrix.with_crt }}
           fail_ci_if_error: true
           disable_safe_directory: true
           verbose: true
