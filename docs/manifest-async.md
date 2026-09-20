@@ -83,7 +83,7 @@ It depends directly on [PR #693](https://github.com/milvus-io/milvus-storage/pul
 (`s3-async/metadata`). The filesystem cache's concrete `FileSystemPtr` is retained
 through the transaction's Arrow pointer. This layer still schedules synchronous
 transaction operations; it does not switch them to the base PR's native async
-metadata methods or depend on its subsequent write/mutation layers.
+filesystem methods.
 
 C++ tests cover lazy execution, caller executor selection, queued cancellation,
 queue deadlines, blocking I/O ownership and synchronous interoperability. C FFI
