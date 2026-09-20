@@ -111,6 +111,7 @@ using ::milvus_storage::fs::internal::DetectS3Backend;
 using ::milvus_storage::fs::internal::ErrorToStatus;
 using ::milvus_storage::fs::internal::FromAwsDatetime;
 using ::milvus_storage::fs::internal::FromAwsString;
+using ::milvus_storage::fs::internal::GetObjectMetadata;
 using ::milvus_storage::fs::internal::IsAlreadyExists;
 using ::milvus_storage::fs::internal::IsNotFound;
 using ::milvus_storage::fs::internal::OutcomeToResult;
@@ -453,43 +454,6 @@ arrow::Result<S3Model::GetObjectResult> GetObjectRange(
   return OutcomeToResult("GetObject", client->GetObject(req));
 }
 
-template <typename ObjectResult>
-std::shared_ptr<const arrow::KeyValueMetadata> GetObjectMetadata(const ObjectResult& result) {
-  auto md = std::make_shared<arrow::KeyValueMetadata>();
-
-  auto push = [&](std::string k, const Aws::String& v) {
-    if (!v.empty()) {
-      md->Append(std::move(k), std::string(FromAwsString(v)));
-    }
-  };
-  auto push_datetime = [&](std::string k, const Aws::Utils::DateTime& v) {
-    if (v != Aws::Utils::DateTime(0.0)) {
-      push(std::move(k), v.ToGmtString(Aws::Utils::DateFormat::ISO_8601));
-    }
-  };
-
-  md->Append("Content-Length", ToChars(result.GetContentLength()));
-  push("Cache-Control", result.GetCacheControl());
-  push("Content-Type", result.GetContentType());
-  push("Content-Language", result.GetContentLanguage());
-  push("ETag", result.GetETag());
-  push("VersionId", result.GetVersionId());
-  push_datetime("Last-Modified", result.GetLastModified());
-  push_datetime("Expires", result.GetExpires());
-
-  // Get custom metadata
-  const auto& metadata_map = result.GetMetadata();
-  for (const auto& [key, val] : metadata_map) {
-    if (!val.empty()) {
-      push(std::string(FromAwsString(key)), val);
-    }
-  }
-
-  // NOTE the "canned ACL" isn't available for reading (one can get an expanded
-  // ACL using a separate GetObjectAcl request)
-  return md;
-}
-
 class ObjectInputFile final : public arrow::io::RandomAccessFile {
   public:
   ObjectInputFile(std::shared_ptr<S3ClientHolder> holder,
@@ -739,7 +703,7 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
                      const arrow::io::IOContext& io_context,
                      const S3Path& path,
                      int64_t size,
-                     std::shared_ptr<NativeS3Transport> native)
+                     std::shared_ptr<NativeS3Operations> native)
       : native_(std::move(native)),
         holder_(std::move(holder)),
         io_context_(io_context),
@@ -748,7 +712,7 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
 
   arrow::Status Init() {
     if (!native_) {
-      return arrow::Status::NotImplemented("CRT input files require native S3 transport for metadata reads");
+      return arrow::Status::NotImplemented("CRT input files require native S3 operations for metadata reads");
     }
     const auto content_length = GetCachedContentLength();
     if (content_length != kNoSize) {
@@ -796,31 +760,12 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
       }
     }
 
-    S3Model::HeadObjectRequest request;
-    request.SetBucket(ToAwsString(path_.bucket));
-    request.SetKey(ToAwsString(path_.key));
-    return native_->Send(request, path_.key, Aws::Http::HttpMethod::HTTP_HEAD, "", io_context)
-        .Then([state = read_state_, path = path_](
-                  const NativeS3Response& response) -> Result<std::shared_ptr<const arrow::KeyValueMetadata>> {
-          if (response.HasHttpStatus(404))
-            return PathNotFound(path);
-          auto status = response.ToStatus();
-          if (!status.ok())
-            return status.WithMessage("HeadObject for '", path.full_path, "': ", status.message());
-          if (response.headers.find("content-length") == response.headers.end())
-            return Status::IOError("HEAD has no Content-Length");
-          Aws::Utils::Xml::XmlDocument xml;
-          Aws::AmazonWebServiceResult<Aws::Utils::Xml::XmlDocument> result(std::move(xml), response.headers);
-          S3Model::HeadObjectResult head(result);
-          if (head.GetContentLength() < 0)
-            return Status::IOError("Invalid HEAD Content-Length");
-          auto metadata = GetObjectMetadata(head);
-          {
-            std::lock_guard lock(state->metadata_mutex);
-            state->content_length.store(head.GetContentLength(), std::memory_order_release);
-            state->metadata = metadata;
-          }
-          return metadata;
+    return native_->ReadMetadataAsync(path_.full_path, io_context)
+        .Then([state = read_state_](const NativeS3ObjectMetadata& result) {
+          std::lock_guard lock(state->metadata_mutex);
+          state->content_length.store(result.content_length, std::memory_order_release);
+          state->metadata = result.metadata;
+          return result.metadata;
         });
   }
 
@@ -1097,7 +1042,7 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     return Future<std::shared_ptr<Buffer>>::MakeFinished(arrow::Result<std::shared_ptr<Buffer>>(status));
   }
 
-  std::shared_ptr<NativeS3Transport> native_;
+  std::shared_ptr<NativeS3Operations> native_;
 
   struct AsyncReadContext {
     // AWS CRT retains this context through the callback. Never add owning
@@ -2575,7 +2520,8 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
 
 #ifdef WITH_CRT
     if (UseCrtReadPath()) {
-      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, kNoSize, native_);
+      ARROW_RETURN_NOT_OK(native_operations_.status());
+      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, kNoSize, *native_operations_);
       ARROW_RETURN_NOT_OK(ptr->Init());
       return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
     }
@@ -2601,7 +2547,8 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
 
 #ifdef WITH_CRT
     if (UseCrtReadPath()) {
-      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, info.size(), native_);
+      ARROW_RETURN_NOT_OK(native_operations_.status());
+      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, info.size(), *native_operations_);
       ARROW_RETURN_NOT_OK(ptr->Init());
       return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
     }

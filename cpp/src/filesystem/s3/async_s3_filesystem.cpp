@@ -11,6 +11,9 @@
 #include <aws/core/utils/xml/XmlSerializer.h>
 #include <aws/s3/model/HeadBucketRequest.h>
 #include <aws/s3/model/HeadObjectRequest.h>
+#include <aws/s3/model/HeadObjectResult.h>
+#include "milvus-storage/filesystem/s3/s3_internal.h"
+#include "milvus-storage/filesystem/util_internal.h"
 #include <aws/s3/model/ListBucketsRequest.h>
 #include <aws/s3/model/ListBucketsResult.h>
 #include <aws/s3/model/ListObjectsV2Request.h>
@@ -82,6 +85,33 @@ class AsyncS3FileSystem final : public NativeS3Operations, public std::enable_sh
   public:
   AsyncS3FileSystem(std::shared_ptr<NativeS3Transport> transport, S3Options options, arrow::io::IOContext io)
       : transport_(std::move(transport)), options_(std::move(options)), io_(std::move(io)) {}
+
+  Future<NativeS3ObjectMetadata> ReadMetadataAsync(const std::string& path,
+                                                   const arrow::io::IOContext& io_context) override {
+    ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(path));
+    ARROW_ASSIGN_OR_RAISE(auto parsed, Path::Parse(path));
+    if (parsed.key.empty())
+      return Status::Invalid("Expected S3 object path");
+    S3::HeadObjectRequest request;
+    request.SetBucket(parsed.bucket.c_str());
+    request.SetKey(parsed.key.c_str());
+    return transport_->Send(request, parsed.key, HttpMethod::HTTP_HEAD, "", io_context)
+        .Then([path](const NativeS3Response& response) -> Result<NativeS3ObjectMetadata> {
+          if (response.HasHttpStatus(404))
+            return arrow::fs::internal::PathNotFound(path);
+          auto status = response.ToStatus();
+          if (!status.ok())
+            return status.WithMessage("HeadObject for '", path, "': ", status.message());
+          if (response.headers.find("content-length") == response.headers.end())
+            return Status::IOError("HEAD has no Content-Length");
+          Aws::Utils::Xml::XmlDocument xml;
+          Aws::AmazonWebServiceResult<Aws::Utils::Xml::XmlDocument> result(std::move(xml), response.headers);
+          S3::HeadObjectResult head(result);
+          if (head.GetContentLength() < 0)
+            return Status::IOError("Invalid HEAD Content-Length");
+          return NativeS3ObjectMetadata{head.GetContentLength(), fs::internal::GetObjectMetadata(head)};
+        });
+  }
 
   Future<NativeS3Response> Head(const Path& path, bool marker = false) {
     if (path.key.empty()) {
