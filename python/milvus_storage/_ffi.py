@@ -34,6 +34,10 @@ _ERROR_CODE_SYMBOLS = (
     "loon_errcode_transient_service",
     "loon_errcode_txn_exhausted_retry",
     "loon_errcode_txn_resolution_failed",
+    "loon_errcode_async_cancelled",
+    "loon_errcode_async_deadline",
+    "loon_errcode_async_overloaded",
+    "loon_errcode_async_busy",
 )
 
 # Chunk metadata type flags from ffi_c.h
@@ -44,6 +48,9 @@ LOON_CHUNK_METADATA_ALL = LOON_CHUNK_METADATA_ESTIMATED_MEMORY | LOON_CHUNK_META
 # Transaction resolve strategies from ffi_c.h
 LOON_TRANSACTION_RESOLVE_FAIL = 0
 LOON_TRANSACTION_RESOLVE_OVERWRITE = 2
+LOON_COMMIT_NOT_COMMITTED = 0
+LOON_COMMIT_COMMITTED = 1
+LOON_COMMIT_UNKNOWN = 2
 
 
 # Create FFI instance and define C API
@@ -115,6 +122,10 @@ _ffi.cdef(
     extern int loon_errcode_transient_service;
     extern int loon_errcode_txn_exhausted_retry;
     extern int loon_errcode_txn_resolution_failed;
+    extern int loon_errcode_async_cancelled;
+    extern int loon_errcode_async_deadline;
+    extern int loon_errcode_async_overloaded;
+    extern int loon_errcode_async_busy;
 
     int loon_ffi_is_success(LoonFFIResult* result);
     const char* loon_ffi_get_errmsg(LoonFFIResult* result);
@@ -339,6 +350,22 @@ _ffi.cdef(
 
     // ==================== Transaction C Interface ====================
     typedef uintptr_t LoonTransactionHandle;
+
+    typedef void (*LoonAsyncTask)(void*);
+    typedef int32_t (*LoonAsyncSubmit)(void*, LoonAsyncTask, void*);
+    typedef struct { uint32_t struct_size; uint32_t reserved; void* context; LoonAsyncSubmit submit; } LoonAsyncExecutor;
+    LoonFFIResult loon_async_configure_executor(const LoonAsyncExecutor*);
+    typedef struct LoonAsyncOperation* LoonAsyncHandle;
+    typedef struct { uint32_t struct_size; uint32_t flags; uint64_t timeout_ms; } LoonAsyncOptions;
+    typedef void (*LoonTransactionBeginCallback)(uintptr_t, LoonFFIResult, LoonTransactionHandle);
+    LoonFFIResult loon_transaction_begin_async(const char*, const LoonProperties*, int64_t, int32_t,
+        uint32_t, const LoonAsyncOptions*, LoonTransactionBeginCallback, uintptr_t, LoonAsyncHandle*);
+    typedef void (*LoonTransactionCommitCallback)(uintptr_t, LoonFFIResult, int32_t, int64_t);
+    LoonFFIResult loon_transaction_commit_async(LoonTransactionHandle, const LoonAsyncOptions*,
+        LoonTransactionCommitCallback, uintptr_t, LoonAsyncHandle*);
+    void loon_async_cancel(LoonAsyncHandle);
+    void loon_async_release(LoonAsyncHandle);
+    void loon_async_shutdown(void);
 
     LoonFFIResult loon_transaction_begin(const char* base_path,
                                          const LoonProperties* properties,

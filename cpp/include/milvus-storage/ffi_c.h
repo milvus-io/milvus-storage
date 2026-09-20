@@ -60,6 +60,11 @@ FFI_EXPORT extern const int loon_errcode_transient_service;
 FFI_EXPORT extern const int loon_errcode_txn_exhausted_retry;
 FFI_EXPORT extern const int loon_errcode_txn_resolution_failed;
 
+FFI_EXPORT extern const int loon_errcode_async_cancelled;
+FFI_EXPORT extern const int loon_errcode_async_deadline;
+FFI_EXPORT extern const int loon_errcode_async_overloaded;
+FFI_EXPORT extern const int loon_errcode_async_busy;
+
 // usage example(caller must free the message string):
 //
 // LoonFFIResult result = SomeFFIFunction(...);
@@ -737,6 +742,77 @@ FFI_EXPORT void loon_reader_destroy(LoonReaderHandle reader);
 
 // ==================== Manifest C Interface ====================
 typedef uintptr_t LoonTransactionHandle;
+
+/** Asynchronous scheduling of existing synchronous manifest operations. Submission errors never invoke the callback.
+ * Accepted operations invoke it exactly once, normally on the supplied executor,
+ * possibly before submission returns. Exceptional enqueue failure runs accepted
+ * work on the completing thread. Inputs are copied. The receiver owns the callback result and
+ * successful transaction. release(NULL)/cancel(NULL) are no-ops; release does not cancel.
+ * See docs/manifest-async.md for supported configurations and lifetime requirements.
+ */
+/** Caller-owned executor bridge. submit must be thread-safe and nonblocking.
+ * Return 0 after accepting task(task_data) exactly once on your executor, never
+ * inline; nonzero rejects it and MUST NOT invoke or retain task/task_data.
+ * Keep submit and context alive and accepting work until loon_async_shutdown
+ * returns, then drain/join your executor before freeing context. Storage never
+ * creates or stops your pool. This executor runs both manifest work and callbacks.
+ */
+typedef void (*LoonAsyncTask)(void* task_data);
+typedef int32_t (*LoonAsyncSubmit)(void* context, LoonAsyncTask task, void* task_data);
+typedef struct LoonAsyncExecutor {
+  uint32_t struct_size;
+  uint32_t reserved;
+  void* context;
+  LoonAsyncSubmit submit;
+} LoonAsyncExecutor;
+/** Required once before async submission. Copies descriptors, not their context.
+ * Missing configuration, duplicate configuration and changes after shutdown fail.
+ */
+FFI_EXPORT LoonFFIResult loon_async_configure_executor(const LoonAsyncExecutor* executor);
+typedef struct LoonAsyncOperation* LoonAsyncHandle;
+typedef struct LoonAsyncOptions {
+  uint32_t struct_size;
+  uint32_t flags;
+  uint64_t timeout_ms;  // Checked before execution; cannot interrupt in-flight synchronous I/O.
+} LoonAsyncOptions;
+typedef void (*LoonTransactionBeginCallback)(uintptr_t user_data,
+                                             LoonFFIResult result,
+                                             LoonTransactionHandle transaction);
+FFI_EXPORT LoonFFIResult loon_transaction_begin_async(const char* base_path,
+                                                      const LoonProperties* properties,
+                                                      int64_t read_version,
+                                                      int32_t resolve_id,
+                                                      uint32_t retry_limit,
+                                                      const LoonAsyncOptions* options,
+                                                      LoonTransactionBeginCallback callback,
+                                                      uintptr_t user_data,
+                                                      LoonAsyncHandle* out_operation);
+/* Fixed int32_t values; outcome and retryability are independent dimensions. */
+#define LOON_COMMIT_NOT_COMMITTED 0
+#define LOON_COMMIT_COMMITTED 1
+#define LOON_COMMIT_UNKNOWN 2
+typedef void (*LoonTransactionCommitCallback)(uintptr_t user_data,
+                                              LoonFFIResult result,
+                                              int32_t commit_outcome,
+                                              int64_t committed_version);
+/** Runs the existing synchronous commit on the caller executor. Errors after
+ * execution begins conservatively report UNKNOWN; backend retries are unchanged.
+ * Cancellation/deadline only prevent execution before it starts.
+ * Accepted commits consume the transaction: only destroy it after the callback.
+ * It must remain alive and unmodified until then. Another submission returns busy.
+ * UNKNOWN must never be automatically replayed based on the error's retryability.
+ * The callback may destroy the transaction immediately. Version is -1 unless COMMITTED.
+ */
+FFI_EXPORT LoonFFIResult loon_transaction_commit_async(LoonTransactionHandle transaction,
+                                                       const LoonAsyncOptions* options,
+                                                       LoonTransactionCommitCallback callback,
+                                                       uintptr_t user_data,
+                                                       LoonAsyncHandle* out_operation);
+FFI_EXPORT void loon_async_cancel(LoonAsyncHandle operation);
+FFI_EXPORT void loon_async_release(LoonAsyncHandle operation);
+/** Stop admission and drain accepted callbacks. Call from an application shutdown
+ * thread, never from a callback. The runtime cannot be restarted. */
+FFI_EXPORT void loon_async_shutdown(void);
 
 #define LOON_TRANSACTION_RESOLVE_FAIL 0
 #define LOON_TRANSACTION_RESOLVE_OVERWRITE 2

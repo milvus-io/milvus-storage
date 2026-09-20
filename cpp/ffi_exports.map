@@ -228,6 +228,17 @@
     # ColumnGroup
     loon_fiukey_column_group_write_fail;
 
+    loon_transaction_commit_async;
+    loon_transaction_begin_async;
+    loon_async_cancel;
+    loon_async_release;
+    loon_async_configure_executor;
+    loon_async_shutdown;
+    loon_errcode_async_cancelled;
+    loon_errcode_async_deadline;
+    loon_errcode_async_overloaded;
+    loon_errcode_async_busy;
+
   local:
     # Hide all other symbols
     *;

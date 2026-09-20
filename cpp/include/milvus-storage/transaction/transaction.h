@@ -15,6 +15,7 @@
 #pragma once
 
 #include <cstdint>
+#include <atomic>
 #include <string>
 #include <memory>
 #include <vector>
@@ -268,6 +269,8 @@ class Transaction {
   Transaction& AddLobFile(const LobFileInfo& lob_file);
 
   private:
+  friend struct AsyncManifestOperation;
+  std::atomic<bool> async_consumed_{false};
   // Private constructor - use Open() factory method instead
   Transaction(const milvus_storage::ArrowFileSystemPtr& fs,
               const std::string& base_path,
