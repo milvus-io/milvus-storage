@@ -6,7 +6,7 @@
 #include "milvus-storage/ffi_c.h"
 #include "milvus-storage/ffi_internal/bridge.h"
 #include "milvus-storage/ffi_internal/result.h"
-#include "milvus-storage/transaction/async_transaction.h"
+#include "milvus-storage/transaction/transaction.h"
 #include "milvus-storage/common/async_limits.h"
 #include <folly/Executor.h>
 #include <folly/executors/InlineExecutor.h>
@@ -236,8 +236,8 @@ LoonFFIResult loon_transaction_begin_async(const char* base_path,
     auto uri = StorageUri::Parse(base_path);
     if (!uri.ok())
       return StatusResult(uri.status());
-    auto future = transaction::BeginAsync(base_path, std::move(native_properties), read_version, resolver, retry_limit,
-                                          timeout, handle->state);
+    auto future = transaction::Transaction::BeginAsync(base_path, std::move(native_properties), read_version, resolver,
+                                                       retry_limit, timeout, handle->state);
     auto accepted = Runtime::Instance().Submit(
         std::move(future), [callback, user_data](folly::Try<transaction::BeginResult>&& value) {
           if (value.hasException()) {
@@ -277,7 +277,7 @@ LoonFFIResult loon_transaction_commit_async(LoonTransactionHandle transaction,
       return status;
     auto* txn = reinterpret_cast<transaction::Transaction*>(transaction);
     auto handle = std::make_unique<LoonAsyncOperation>();
-    auto future = transaction::CommitAsync(txn, timeout, handle->state);
+    auto future = txn->CommitAsync(timeout, handle->state);
     // Ready futures here only carry preflight failures (busy/invalid).
     // Successful commits remain deferred until the caller executor consumes them.
     if (future.isReady())
