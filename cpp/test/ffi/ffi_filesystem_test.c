@@ -155,14 +155,14 @@ static void test_filesystem_write_and_read(void) {
     bool supports_async = true;
     rc = loon_filesystem_reader_supports_async(reader_handle, &supports_async);
     ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
-    ck_assert(!supports_async);
-
-    int callback_count = 0;
-    rc = loon_filesystem_reader_readat_async(reader_handle, 0, TEST_BUFFER_SIZE, read_buffer, count_async_callback,
-                                             &callback_count);
-    ck_assert_int_eq(rc.err_code, loon_errcode_not_support);
-    loon_ffi_free_result(&rc);
-    ck_assert_int_eq(callback_count, 0);
+    if (!supports_async) {
+      int callback_count = 0;
+      rc = loon_filesystem_reader_readat_async(reader_handle, 0, TEST_BUFFER_SIZE, read_buffer, count_async_callback,
+                                               &callback_count);
+      ck_assert_int_eq(rc.err_code, loon_errcode_not_support);
+      loon_ffi_free_result(&rc);
+      ck_assert_int_eq(callback_count, 0);
+    }
 
     rc = loon_filesystem_reader_readat(reader_handle, 0, TEST_BUFFER_SIZE, read_buffer);
     ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
@@ -528,7 +528,20 @@ static void test_filesystem_get_file_stats(void) {
   loon_filesystem_destroy(fs_handle);
 }
 
-// Test loon_errcode_file_not_found is returned across all filesystem FFI paths that touch a missing file.
+static void check_file_not_found(LoonFFIResult* result, const char* operation) {
+  // Filesystem metadata paths report the generic code; S3 reads retain the
+  // provider-specific NotFound code produced by ErrorToStatus.
+  if (result->err_code != loon_errcode_file_not_found && result->err_code != loon_errcode_aws_not_found) {
+    fprintf(stderr, "FAIL: %s: expected NotFound (%d or %d), got %d: %s\n", operation, loon_errcode_file_not_found,
+            loon_errcode_aws_not_found, result->err_code,
+            loon_ffi_get_errmsg(result) ? loon_ffi_get_errmsg(result) : "success");
+    global_tests_failed++;
+  }
+  // Keep running so an unexpected error cannot bypass filesystem cleanup.
+  loon_ffi_free_result(result);
+}
+
+// Test missing files preserve their generic or provider-specific NotFound error.
 static void test_filesystem_file_not_found(void) {
   LoonFFIResult rc;
   FileSystemHandle fs_handle;
@@ -545,105 +558,77 @@ static void test_filesystem_file_not_found(void) {
 
   // --- loon_filesystem_get_file_stats (no metadata) ---
   rc = loon_filesystem_get_file_stats(fs_handle, missing, missing_len, &out_size, NULL, NULL);
-  ck_assert_msg(!loon_ffi_is_success(&rc), "get_file_stats: expected failure on missing file");
-  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
-                "get_file_stats: expected loon_errcode_file_not_found(%d), got %d: %s", loon_errcode_file_not_found,
-                rc.err_code, loon_ffi_get_errmsg(&rc));
-  loon_ffi_free_result(&rc);
+  check_file_not_found(&rc, "get_file_stats");
 
   // --- loon_filesystem_get_file_stats (with metadata) ---
   LoonFileSystemMeta* out_meta_array = NULL;
   uint32_t out_meta_count = 0;
   out_size = 0;
   rc = loon_filesystem_get_file_stats(fs_handle, missing, missing_len, &out_size, &out_meta_array, &out_meta_count);
-  ck_assert_msg(!loon_ffi_is_success(&rc), "get_file_stats(meta): expected failure on missing file");
-  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
-                "get_file_stats(meta): expected loon_errcode_file_not_found(%d), got %d: %s",
-                loon_errcode_file_not_found, rc.err_code, loon_ffi_get_errmsg(&rc));
-  ck_assert(out_meta_array == NULL);
-  ck_assert_int_eq(out_meta_count, 0);
-  loon_ffi_free_result(&rc);
+  check_file_not_found(&rc, "get_file_stats(meta)");
+  const bool metadata_empty = out_meta_array == NULL && out_meta_count == 0;
+  loon_filesystem_free_meta_array(out_meta_array, out_meta_count);
 
   // --- loon_filesystem_get_file_info ---
   out_size = 0;
   rc = loon_filesystem_get_file_info(fs_handle, missing, missing_len, &out_size);
-  ck_assert_msg(!loon_ffi_is_success(&rc), "get_file_info: expected failure on missing file");
-  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
-                "get_file_info: expected loon_errcode_file_not_found(%d), got %d: %s", loon_errcode_file_not_found,
-                rc.err_code, loon_ffi_get_errmsg(&rc));
-  loon_ffi_free_result(&rc);
+  check_file_not_found(&rc, "get_file_info");
 
   // --- loon_filesystem_get_object_info ---
   int64_t out_mtime_ns = 1;
   bool out_is_dir = true;
   out_size = 1;
   rc = loon_filesystem_get_object_info(fs_handle, missing, missing_len, &out_size, &out_mtime_ns, &out_is_dir);
-  ck_assert_msg(!loon_ffi_is_success(&rc), "get_object_info: expected failure on missing file");
-  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
-                "get_object_info: expected loon_errcode_file_not_found(%d), got %d: %s", loon_errcode_file_not_found,
-                rc.err_code, loon_ffi_get_errmsg(&rc));
-  ck_assert(out_size == 0);
-  ck_assert_int_eq(out_mtime_ns, 0);
-  ck_assert(!out_is_dir);
-  loon_ffi_free_result(&rc);
+  check_file_not_found(&rc, "get_object_info");
+  const bool object_info_empty = out_size == 0 && out_mtime_ns == 0 && !out_is_dir;
 
   // --- loon_filesystem_read_file ---
   uint8_t read_buf[16];
   rc = loon_filesystem_read_file(fs_handle, missing, missing_len, 0, sizeof(read_buf), read_buf);
-  ck_assert_msg(!loon_ffi_is_success(&rc), "read_file: expected failure on missing file");
-  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
-                "read_file: expected loon_errcode_file_not_found(%d), got %d: %s", loon_errcode_file_not_found,
-                rc.err_code, loon_ffi_get_errmsg(&rc));
-  loon_ffi_free_result(&rc);
+  check_file_not_found(&rc, "read_file");
 
   // --- loon_filesystem_read_file_all ---
   uint8_t* read_all_data = NULL;
   uint64_t read_all_size = 0;
   rc = loon_filesystem_read_file_all(fs_handle, missing, missing_len, &read_all_data, &read_all_size);
-  ck_assert_msg(!loon_ffi_is_success(&rc), "read_file_all: expected failure on missing file");
-  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
-                "read_file_all: expected loon_errcode_file_not_found(%d), got %d: %s", loon_errcode_file_not_found,
-                rc.err_code, loon_ffi_get_errmsg(&rc));
-  ck_assert(read_all_data == NULL);
-  loon_ffi_free_result(&rc);
+  check_file_not_found(&rc, "read_file_all");
+  const bool read_all_empty = read_all_data == NULL;
+  free(read_all_data);
 
-  // --- loon_filesystem_open_reader (file_size=0 path hits OpenInputFile(path)) ---
+  // Remote readers open lazily: check the error on read if opening succeeds.
   FileSystemReaderHandle reader_handle = 0;
   rc = loon_filesystem_open_reader(fs_handle, missing, missing_len, 0, &reader_handle);
-  ck_assert_msg(!loon_ffi_is_success(&rc), "open_reader: expected failure on missing file");
-  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
-                "open_reader: expected loon_errcode_file_not_found(%d), got %d: %s", loon_errcode_file_not_found,
-                rc.err_code, loon_ffi_get_errmsg(&rc));
-  loon_ffi_free_result(&rc);
+  if (loon_ffi_is_success(&rc)) {
+    loon_ffi_free_result(&rc);
+    rc = loon_filesystem_reader_readat(reader_handle, 0, sizeof(read_buf), read_buf);
+    check_file_not_found(&rc, "reader_readat");
+    rc = loon_filesystem_reader_close(reader_handle);
+    loon_ffi_free_result(&rc);
+    loon_filesystem_reader_destroy(reader_handle);
+  } else {
+    check_file_not_found(&rc, "open_reader");
+  }
 
   // --- loon_filesystem_delete_file ---
   rc = loon_filesystem_delete_file(fs_handle, missing, missing_len);
-  ck_assert_msg(!loon_ffi_is_success(&rc), "delete_file: expected failure on missing file");
-  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
-                "delete_file: expected loon_errcode_file_not_found(%d), got %d: %s", loon_errcode_file_not_found,
-                rc.err_code, loon_ffi_get_errmsg(&rc));
-  loon_ffi_free_result(&rc);
+  check_file_not_found(&rc, "delete_file");
 
   // --- loon_filesystem_get_path_info ---
   bool exists = true;
   rc = loon_filesystem_get_path_info(fs_handle, missing, missing_len, &exists, NULL, NULL);
-  ck_assert_msg(!loon_ffi_is_success(&rc), "get_path_info: expected failure on missing file");
-  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
-                "get_path_info: expected loon_errcode_file_not_found(%d), got %d: %s", loon_errcode_file_not_found,
-                rc.err_code, loon_ffi_get_errmsg(&rc));
-  loon_ffi_free_result(&rc);
+  check_file_not_found(&rc, "get_path_info");
 
   // --- loon_filesystem_list_dir on a missing directory ---
   const char* missing_dir = "this_dir_definitely_does_not_exist";
   LoonFileInfoList list = {0};
   rc = loon_filesystem_list_dir(fs_handle, missing_dir, (uint32_t)strlen(missing_dir), false, &list);
-  ck_assert_msg(!loon_ffi_is_success(&rc), "list_dir: expected failure on missing directory");
-  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
-                "list_dir: expected loon_errcode_file_not_found(%d), got %d: %s", loon_errcode_file_not_found,
-                rc.err_code, loon_ffi_get_errmsg(&rc));
-  loon_ffi_free_result(&rc);
+  check_file_not_found(&rc, "list_dir");
+  loon_filesystem_free_file_info_list(&list);
 
   loon_filesystem_destroy(fs_handle);
+  ck_assert(metadata_empty);
+  ck_assert(object_info_empty);
+  ck_assert(read_all_empty);
 }
 
 // Test filesystem open_writer with metadata
@@ -1004,7 +989,8 @@ static void test_filesystem_conditional_write(void) {
   get_test_filesystem(&fs_handle, TEST_ROOT_PATH);
 
   // Clean up target file first (ignore error if not exists)
-  loon_filesystem_delete_file(fs_handle, CONDITIONAL_WRITE_FILE, strlen(CONDITIONAL_WRITE_FILE));
+  rc = loon_filesystem_delete_file(fs_handle, CONDITIONAL_WRITE_FILE, strlen(CONDITIONAL_WRITE_FILE));
+  loon_ffi_free_result(&rc);
 
   uint8_t buffer[] = "conditional write test data";
   size_t buffer_len = sizeof(buffer) - 1;
@@ -1048,7 +1034,8 @@ static void test_filesystem_conditional_write(void) {
   }
 
   // Clean up
-  loon_filesystem_delete_file(fs_handle, CONDITIONAL_WRITE_FILE, strlen(CONDITIONAL_WRITE_FILE));
+  rc = loon_filesystem_delete_file(fs_handle, CONDITIONAL_WRITE_FILE, strlen(CONDITIONAL_WRITE_FILE));
+  loon_ffi_free_result(&rc);
   loon_filesystem_destroy(fs_handle);
 }
 

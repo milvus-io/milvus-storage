@@ -204,7 +204,8 @@ FFI_EXPORT LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
  * @param handle The filesystem instance.
  * @param path_ptr The path of the file.
  * @param path_len The length of the path.
- * @param file_size Known file size in bytes (0 = unknown, will issue a HEAD request to determine size).
+ * @param file_size Known file size in bytes (0 = unknown). Remote filesystems may defer existence and size
+ * checks until the first read or size query.
  * @return result of FFI
  */
 FFI_EXPORT LoonFFIResult loon_filesystem_open_reader(FileSystemHandle handle,
