@@ -25,11 +25,15 @@ ARROW_RETURN_NOT_OK(milvus_storage::tracing::SetTraceOptions({.io_spans = true,
     auto scope = milvus_storage::tracing::AttachParent(parent);
     auto table = reader->take(rows);
 }
+// 由宿主持有，定期在宿主选择的线程/executor 上 drain。
+auto completions = std::make_shared<milvus_storage::tracing::TraceCompletionQueue>();
 auto future = [&] {
-    auto scope = milvus_storage::tracing::AttachParent(parent);
+    auto scope = milvus_storage::tracing::AttachParent(parent, completions);
     return reader->take_async(rows);
 }();
-// 此处可在宿主选择的 executor 上消费，parent 和 provider 已固定。
+// parent、provider 和完成队列已固定；不依赖 future 是否被消费。
+auto result = std::move(future).via(executor).get();
+completions->Drain(); // 在当前宿主线程执行 Span::End / 同步 exporter。
 ```
 
 `TraceParent` 拥有 trace ID、span ID、flags、tracestate 和 remote 标志，也可用 `TraceParent(upstream_span_context)` 从原生 OTel SpanContext 完整复制。该值构造会复制字符串，不承诺分配失败时不抛异常。`TraceOptions` 提供 I/O spans 开关及每操作 span 预算，默认分别为 `true` 和 `256`。
@@ -50,7 +54,7 @@ return result;
 
 正常析构结束 span，状态保持 Unset；异常展开时只记录异常分类；`Finish(status)` 显式记录结果并恢复上下文。所有内层 guard 必须先结束，不能将 scope 转交其他线程。应用 scope 只覆盖当前 C++ 作用域；围绕 Future 的构造创建 scope，不会自动覆盖 Future 的完整执行时间。Storage 原有异步 API 仍由内部完成回调记录完整操作。
 
-公共接口不暴露 SpanPtr、EndSpan 或 ReleaseSpan；业务代码无需配对底层 span/context。内部 OperationTrace 继续直接持有 OTel Span，没有更换 Arrow recipe、开启 Arrow 内部 tracing 或修改第三方源码。
+公共接口不暴露 SpanPtr、EndSpan 或 ReleaseSpan；业务代码无需配对底层 span/context。内部 OperationTrace 继续直接持有 OTel Span，没有更换 Arrow recipe、开启 Arrow 内部 tracing。Lance scheduler 的请求级 context hook 见 `cpp/src/format/bridge/rust/vendor/lance-io/README.md`。
 
 ### 故障隔离和兼容性
 
@@ -95,9 +99,23 @@ Storage 复用已有 OTel C++ 构建依赖；详细异步执行语义见 [async-
 | CRT I/O | NonBlockingRandomAccessFile、ReadAtAsyncInto、回调完成 | 提交到完成的请求状态 |
 | 其他格式 | 可能使用同步 ready-future fallback | 不能将返回 Future 等同于非阻塞 |
 
-Storage 当前不选择调用方 Folly executor；tracing 也不增加调度 executor。Vortex 内部新建任务、Arrow I/O pool 等不会因为外层存在一个 context 就自动继承。
+Storage 当前不选择调用方 Folly executor；tracing 不创建调度 executor，native 完成由宿主队列的 drain 执行。Vortex 内部新建任务、Arrow I/O pool 等不会因为外层存在一个 context 就自动继承。
 
-内部 `OperationTrace` 保存不可变的上下文和配置快照、span 与完成状态。并行任务派生各自上下文，不共享可变的 current-span 槽位；`Finish(status)` 至多完成一次，不以业务阻塞等待 span 结束，也不通过持有整个 Reader 或数据缓冲区形成引用环。
+内部 `OperationTrace` 保存不可变的上下文和配置快照、span 与完成状态。并行任务派生各自上下文，不共享可变的 current-span 槽位；`Finish(status)` 至多完成一次，不以业务阻塞等待 span 结束，也不持有整个 Reader 或数据缓冲区。native 完成节点在 drain 前保留自己的状态，drain 后释放。
+
+### 埋点 helper 与完成责任
+
+- `Run`：同步返回 Status/Result；调用线程负责完成，异常原样传播。
+- `RunAsync`：Folly SemiFuture；消费方 executor 上的 continuation 负责完成，未消费的惰性任务不创建工作 span。
+- `RunNativeAsync`：原生 eager callback；回调调用 `Finish`，只把预分配的完成节点放入宿主队列。ready result 和提交异常也使用同一队列。
+- `Observe`：观察源 Arrow Future，Future 被丢弃也会观察完成；传入的 trace 必须按 native completion 创建，回调只负责入队。
+- `Bind`：在任务/continuation 提交点捕获 context，执行时恢复并启动惰性 span；用于跨线程、Folly continuation 和 Arrow callback，统一替代手写 Capture/ContextScope/StartCurrent。
+
+`AttachParent(parent, completions)` 的队列由宿主拥有；调用 `Drain()` 的线程负责注释和 `Span::End()`，所以同步 exporter 也只阻塞该线程。队列不创建后台线程；native callback 的入队操作不调用 exporter，也不分配完成节点；完成时间在回调时记录，不包含 drain 延迟。正常完成、提交异常和 abandoned native span 都只入队一次。宿主必须定期 drain，并在所有生产者退出后做最终 drain，再关闭 provider。丢弃 Future 不等于取消已提交的 I/O；最终 drain 必须等待这些回调结束。积压节点会保留其 context/provider/queue，宿主不能把“不再 drain”当作关闭流程。
+
+没有传入队列时，native async span 被抑制并累计 `MissingCompletionQueue`；业务结果和同步/Folly instrumentation 保持原语义。即使当前业务入口是同步调用，它内部也可能使用 native I/O；需要完整 I/O tracing 时同样应传入队列。
+
+`GetTraceFailures()` 返回按阶段区分的单调累计计数：Create、Attach、Attributes、Complete、Metadata、RustCapture、RustAttach、MissingCompletionQueue。每个阶段同时保留 allocation_failures 和 standard_exceptions 分类计数，避免把内存不足与普通异常混为一谈。计数更新只使用原子加法，不写日志、不调用宿主代码；宿主可采集差值。Rust 中正常的空 parent 不计为失败。Attach 计数覆盖 ContextScope 和两个 TraceScope 构造入口；全局保守抑制期间的缺失可由该计数定位。配置和业务边界仍返回原异常诊断，`bad_alloc` 映射为 OutOfMemory；span 内仍只记录脱敏分类。
 
 ### RequestContext 与 fiber
 
@@ -140,6 +158,10 @@ Fiber A：恢复 RequestContext A → Storage 读取 A
 - C++ 反向 FFI 不能抛异常穿过边界；使用现有 `LoonFFIResult` 约定。内部桥接和公共符号导出范围要区分；需要公开的新符号按 binding 构建更新 exports map。
 
 Rust `tracing-opentelemetry` 不是第一版依赖。后续若需要现有引擎内部 tracing spans，可独立评估；引入时仍须设置 parent 并使用按 poll 激活的 instrument wrapper。
+
+### Lance 默认 scheduler
+
+锁定版本的标准 scheduler 在内部 `tokio::spawn(task.run())`；外层 future 的上下文包装无法跨越这个队列。局部 `lance-io` facade 复用原版本的其他模块和类型，仅为原 scheduler 增加 `new_with_reader_wrapper`。每次 `submit_request` 在入队前包装独立的 Reader 并捕获上下文；实际 `get_range` future 的每次 poll 都恢复该快照。共享 scheduler/FileScheduler/ObjectStore 不持有某个请求的 parent，标准与 lite 队列都使用同一请求入口。这里没有切换默认 scheduler 或改变并发、优先级、背压和 AIMD 策略。
 
 ## 埋点、完成与错误
 
@@ -279,6 +301,17 @@ build/Release/test/Test_FFI
 运行测试前使用 `source cpp/build/Release/generators/conanrun.sh`，测试设置 `ASAN_OPTIONS=detect_leaks=0`，coverage 写入独立 `/tmp/storage-tracing-parts12-*-gcov` 路径。运行入口为 `cpp/build/Release/test/milvus_test --gtest_filter=...` 和 `cpp/build/Release/test/Test_FFI`。
 
 原始日志：`/tmp/storage-tracing-parts12-build5.log`（四个 targets）、`/tmp/storage-tracing-parts12-build-final.log`（修正持续 FIU 测试后的测试重编译）、`/tmp/storage-tracing-parts12-tests-final.log`、`/tmp/storage-tracing-parts12-regression.log`、`/tmp/storage-tracing-parts12-ffi.log`。本轮没有重测性能矩阵，benchmark 编译通过不构成性能无回退结论。
+
+### 2026-09-21 审阅修复验证
+
+使用 `wt-build` 的 milvus-storage 开发镜像，在独立验证 worktree 中保留 `WITH_TALON=ON`、`USE_ASAN=False` 构建配置。源码、临时文件、缓存和输出均位于 `/data/yuruiz`。
+
+- `StorageTracingTest.*`：47/47 通过，新增 native 完成与丢弃的线程归属、完成竞争、缺少完成队列、未知大小 Parquet HEAD、Lance 请求隔离及诊断分类回归。
+- Lance 并发读取回归连续运行 20 次通过；使用独立可变 reader 共享 Dataset/scheduler，读取随机数据并分别检查两个 parent 的 I/O span 与计数。
+- 局部 Lance scheduler 保留的上游测试：15/15 通过，覆盖 standard/lite 的取消、背压、优先级和顺序读取。
+- C FFI：83 项、0 失败，其中云端条件写用例在本地环境跳过；改动 C++ 源文件的 clang-tidy 14、clang-format 18、相关 Rust 文件的 rustfmt、error-handling ratchet 和 diff 检查通过。
+
+这些结果是本地文件系统与受控回调验证，不包含真实 S3/CRT 请求、远端 CI 或性能回归验收。复现入口为 `milvus_test --gtest_filter=StorageTracingTest.*`、`Test_FFI`，以及 `cargo test --release --locked --manifest-path cpp/src/format/bridge/rust/vendor/lance-io/Cargo.toml --features aws,azure,gcp,oss`。
 
 ### 功能验证证据
 

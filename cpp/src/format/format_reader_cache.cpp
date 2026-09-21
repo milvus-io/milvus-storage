@@ -30,7 +30,11 @@ namespace {
 std::shared_ptr<tracing::OperationTrace> MetadataLoadTrace() noexcept {
   try {
     return std::make_shared<tracing::OperationTrace>("storage.metadata.load", true);
+  } catch (const std::exception& error) {
+    tracing::RecordFailure(tracing::TraceFailure::Metadata, &error);
+    return nullptr;
   } catch (...) {
+    tracing::RecordFailure(tracing::TraceFailure::Metadata);
     return nullptr;
   }
 }
@@ -169,10 +173,8 @@ FormatReaderMetadataCache<ReaderT>::get_or_open_async(
   // not start until the returned SemiFuture is consumed.
   auto self = this->shared_from_this();
 
-  return folly::makeSemiFuture().deferValue([storage_context = tracing::Capture(), self = std::move(self), key,
-                                             load_fn](folly::Unit) -> folly::SemiFuture<MetadataResult> {
-    tracing::ContextScope storage_scope(storage_context);
-    tracing::StartCurrent();
+  return folly::makeSemiFuture().deferValue(tracing::Bind([self = std::move(self), key,
+                                                           load_fn](folly::Unit) -> folly::SemiFuture<MetadataResult> {
     tracing::OperationTrace lookup("storage.metadata.lookup");
     std::shared_ptr<InFlightLoad> in_flight_load;
     {
@@ -214,19 +216,17 @@ FormatReaderMetadataCache<ReaderT>::get_or_open_async(
     // Start the async loader outside mutex_. Its continuation normalizes and
     // publishes the result through the same path used by the synchronous leader.
     try {
-      return load_fn().defer([storage_context = tracing::Capture(), self, key,
-                              in_flight_load](folly::Try<MetadataResult>&& load_try) -> MetadataResult {
-        tracing::ContextScope storage_scope(storage_context);
-        tracing::StartCurrent();
-        if (load_try.hasException()) {
-          auto message = load_try.exception().what();
-          return self->complete_load(
-              key, in_flight_load,
-              arrow::Status::UnknownError("Exception while asynchronously loading format reader metadata: ",
-                                          std::string(message.data(), message.size())));
-        }
-        return self->complete_load(key, in_flight_load, std::move(load_try).value());
-      });
+      return load_fn().defer(
+          tracing::Bind([self, key, in_flight_load](folly::Try<MetadataResult>&& load_try) -> MetadataResult {
+            if (load_try.hasException()) {
+              auto message = load_try.exception().what();
+              return self->complete_load(
+                  key, in_flight_load,
+                  arrow::Status::UnknownError("Exception while asynchronously loading format reader metadata: ",
+                                              std::string(message.data(), message.size())));
+            }
+            return self->complete_load(key, in_flight_load, std::move(load_try).value());
+          }));
     } catch (const std::exception& e) {
       return folly::makeSemiFuture(self->complete_load(
           key, in_flight_load,
@@ -236,7 +236,7 @@ FormatReaderMetadataCache<ReaderT>::get_or_open_async(
           key, in_flight_load,
           arrow::Status::UnknownError("Unknown exception while asynchronously loading format reader metadata")));
     }
-  });
+  }));
 }
 
 template <typename ReaderT>

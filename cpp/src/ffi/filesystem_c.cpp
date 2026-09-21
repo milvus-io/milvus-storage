@@ -446,33 +446,42 @@ LoonFFIResult loon_filesystem_reader_readat_async(FileSystemReaderHandle handle,
     }
 
     auto future = async_file->ReadAtAsyncInto(offset, nbytes, out_data);
-    future.AddCallback([trace_context = tracing::Capture(), input_file, callback, user_data, nbytes,
-                        offset](const arrow::Result<int64_t>& read_result) mutable noexcept {
-      try {
-        tracing::ContextScope scope(trace_context);
-        (void)input_file;
-        if (read_result.ok()) {
-          auto bytes_read = read_result.ValueOrDie();
-          if (bytes_read != nbytes) {
-            auto result = CreateFFIResult(LOON_LOGICAL_ERROR, "Read size mismatch, expected size=", nbytes,
-                                          ", actual size=", bytes_read, ", [offset=", offset, "]");
+    future.AddCallback(tracing::Bind(
+        [input_file, callback, user_data, nbytes, offset](const arrow::Result<int64_t>& read_result) mutable noexcept {
+          try {
+            (void)input_file;
+            if (read_result.ok()) {
+              auto bytes_read = read_result.ValueOrDie();
+              if (bytes_read != nbytes) {
+                auto result = CreateFFIResult(LOON_LOGICAL_ERROR, "Read size mismatch, expected size=", nbytes,
+                                              ", actual size=", bytes_read, ", [offset=", offset, "]");
+                callback(user_data, result, 0);
+                return;
+              }
+
+              callback(user_data, LoonFFIResult{LOON_SUCCESS, nullptr}, static_cast<uint64_t>(bytes_read));
+              return;
+            }
+
+            auto status = read_result.status();
+            auto result = CreateFFIResult(FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR),
+                                          "Fail to read object data asynchronously, details: ", status.ToString());
             callback(user_data, result, 0);
             return;
+          } catch (const std::bad_alloc&) {
+            callback(user_data, LoonFFIResult{LOON_GOT_EXCEPTION, nullptr}, 0);
+          } catch (const std::exception& e) {
+            LoonFFIResult failure{LOON_GOT_EXCEPTION, nullptr};
+            try {
+              failure = CreateFFIResult(LOON_GOT_EXCEPTION, e.what());
+            } catch (...) {
+              // Allocation-free fallback if constructing the diagnostic also fails.
+            }
+            callback(user_data, failure, 0);
+          } catch (...) {
+            callback(user_data, LoonFFIResult{LOON_GOT_EXCEPTION, nullptr}, 0);
           }
-
-          callback(user_data, LoonFFIResult{LOON_SUCCESS, nullptr}, static_cast<uint64_t>(bytes_read));
-          return;
-        }
-
-        auto status = read_result.status();
-        auto result = CreateFFIResult(FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR),
-                                      "Fail to read object data asynchronously, details: ", status.ToString());
-        callback(user_data, result, 0);
-        return;
-      } catch (...) {
-        callback(user_data, LoonFFIResult{LOON_GOT_EXCEPTION, nullptr}, 0);
-      }
-    });
+        }));
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {

@@ -13,8 +13,29 @@ use vortex::io::runtime::{AbortHandleRef, BlockingRuntime, Executor, Handle};
 unsafe impl Send for TraceContext {}
 unsafe impl Sync for TraceContext {}
 
+pub(crate) fn capture() -> cxx::SharedPtr<TraceContext> {
+    ffi::capture_trace_context().unwrap_or_else(|_| {
+        ffi::record_trace_bridge_failure(false);
+        cxx::SharedPtr::null()
+    })
+}
+fn attach(context: &cxx::SharedPtr<TraceContext>) -> Option<cxx::UniquePtr<ffi::TraceAttachment>> {
+    match ffi::attach_trace_context(context) {
+        Ok(scope) => Some(scope),
+        Err(_) => {
+            ffi::record_trace_bridge_failure(true);
+            None
+        }
+    }
+}
+
 pub(crate) fn instrument<F: Future>(future: F) -> impl Future<Output = F::Output> {
-    let context = ffi::capture_trace_context().unwrap_or_else(|_| cxx::SharedPtr::null());
+    instrument_with_context(future, capture())
+}
+fn instrument_with_context<F: Future>(
+    future: F,
+    context: cxx::SharedPtr<TraceContext>,
+) -> impl Future<Output = F::Output> {
     async move {
         // Pin inside the wrapper's state rather than adding a heap allocation
         // for every future, including futures with tracing disabled.
@@ -22,7 +43,7 @@ pub(crate) fn instrument<F: Future>(future: F) -> impl Future<Output = F::Output
         futures::future::poll_fn(move |cx| {
             // The guard is local to each poll, including Pending/unwinding.
             // Empty snapshots still mask an unrelated worker-thread parent.
-            let _scope = ffi::attach_trace_context(&context).ok();
+            let _scope = attach(&context);
             future.as_mut().poll(cx)
         })
         .await
@@ -32,9 +53,9 @@ pub(crate) fn bind<F, R>(task: F) -> impl FnOnce() -> R + Send
 where
     F: FnOnce() -> R + Send,
 {
-    let context = ffi::capture_trace_context().unwrap_or_else(|_| cxx::SharedPtr::null());
+    let context = capture();
     move || {
-        let _scope = ffi::attach_trace_context(&context).ok();
+        let _scope = attach(&context);
         task()
     }
 }
@@ -105,4 +126,62 @@ impl BlockingRuntime for TracedRuntime {
         // Storage's ReadNext scope is active. Child spawns capture at that poll.
         self.inner.block_on_stream(stream)
     }
+}
+
+// Captured for each submitted request, never for a shared file/scheduler.
+struct RequestReader {
+    reader: Arc<dyn lance_io::traits::Reader>,
+    context: cxx::SharedPtr<TraceContext>,
+}
+impl std::fmt::Debug for RequestReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("RequestReader").field(&self.reader).finish()
+    }
+}
+impl deepsize::DeepSizeOf for RequestReader {
+    fn deep_size_of_children(&self, context: &mut deepsize::Context) -> usize {
+        self.reader.deep_size_of_children(context)
+    }
+}
+impl lance_io::traits::Reader for RequestReader {
+    fn path(&self) -> &object_store::path::Path {
+        self.reader.path()
+    }
+    fn block_size(&self) -> usize {
+        self.reader.block_size()
+    }
+    fn io_parallelism(&self) -> usize {
+        self.reader.io_parallelism()
+    }
+    fn size(&self) -> BoxFuture<'_, object_store::Result<usize>> {
+        Box::pin(instrument_with_context(
+            async { self.reader.size().await },
+            self.context.clone(),
+        ))
+    }
+    fn get_range(
+        &self,
+        range: std::ops::Range<usize>,
+    ) -> BoxFuture<'static, object_store::Result<bytes::Bytes>> {
+        let reader = self.reader.clone();
+        Box::pin(instrument_with_context(
+            async move { reader.get_range(range).await },
+            self.context.clone(),
+        ))
+    }
+    fn get_all(&self) -> BoxFuture<'_, object_store::Result<bytes::Bytes>> {
+        Box::pin(instrument_with_context(
+            async { self.reader.get_all().await },
+            self.context.clone(),
+        ))
+    }
+}
+pub(crate) fn wrap_lance_request(
+    reader: Arc<dyn lance_io::traits::Reader>,
+) -> Arc<dyn lance_io::traits::Reader> {
+    // Preserve empty snapshots as well: a foreign worker parent must be masked.
+    Arc::new(RequestReader {
+        reader,
+        context: capture(),
+    })
 }

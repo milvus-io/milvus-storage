@@ -30,7 +30,7 @@ class TracedFile : public arrow::io::RandomAccessFile {
   }
   arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(
       const arrow::io::IOContext& context) override {
-    OperationTrace trace("storage.fs.metadata", false, true);
+    auto trace = OperationTrace::Native("storage.fs.metadata", true);
     ContextScope scope(trace.context());
     ExceptionObserver observer(trace);
     return Observe(file_->ReadMetadataAsync(context), trace);
@@ -59,7 +59,7 @@ class TracedFile : public arrow::io::RandomAccessFile {
       const arrow::io::IOContext& context, const std::vector<arrow::io::ReadRange>& ranges) override {
     if (!HasContext())
       return file_->ReadManyAsync(context, ranges);
-    OperationTrace trace("storage.fs.read", false, true);
+    auto trace = OperationTrace::Native("storage.fs.read", true);
     ContextScope scope(trace.context());
     ExceptionObserver observer(trace);
     if (!trace.IsEnabled())
@@ -77,7 +77,8 @@ class TracedFile : public arrow::io::RandomAccessFile {
       std::mutex mutex;
       size_t remaining;
       int64_t bytes = 0;
-      arrow::Status status;
+      arrow::StatusCode code = arrow::StatusCode::OK;
+      std::shared_ptr<arrow::StatusDetail> detail;
       OperationTrace trace;
     };
     auto futures = file_->ReadManyAsync(context, ranges);
@@ -87,14 +88,15 @@ class TracedFile : public arrow::io::RandomAccessFile {
     for (auto& future : futures) {
       future.AddCallback([completion, requested](const arrow::Result<std::shared_ptr<arrow::Buffer>>& result) {
         std::lock_guard<std::mutex> lock(completion->mutex);
-        if (!result.ok())
-          completion->status = result.status();
-        else
+        if (!result.ok()) {
+          completion->code = result.status().code();
+          completion->detail = result.status().detail();
+        } else
           completion->bytes += std::min(Bytes(*result), std::numeric_limits<int64_t>::max() - completion->bytes);
         if (--completion->remaining == 0) {
           completion->trace.AccountRead(requested, completion->bytes);
           completion->trace.Attribute("storage.returned_bytes", completion->bytes);
-          completion->trace.Finish(completion->status);
+          completion->trace.FinishCode(completion->code, completion->detail);
         }
       });
     }
@@ -130,7 +132,7 @@ class TracedFile : public arrow::io::RandomAccessFile {
   }
   template <typename F>
   FOLLY_NOINLINE auto ReadFutureTraced(int64_t position, int64_t nbytes, F&& fn) -> decltype(fn()) {
-    OperationTrace trace("storage.fs.read", false, true);
+    auto trace = OperationTrace::Native("storage.fs.read", true);
     ContextScope scope(trace.context());
     Attributes(trace, position, nbytes);
     ExceptionObserver observer(trace);
@@ -167,7 +169,7 @@ class TracedAsyncFile final : public TracedFile, public NonBlockingRandomAccessF
     return ReadFuture(position, nbytes, [&] { return async_->ReadAtAsyncInto(position, nbytes, out); });
   }
   arrow::Future<int64_t> GetSizeAsync() override {
-    OperationTrace trace("storage.fs.head", false, true);
+    auto trace = OperationTrace::Native("storage.fs.head", true);
     ContextScope scope(trace.context());
     ExceptionObserver observer(trace);
     return Observe(async_->GetSizeAsync(), trace);

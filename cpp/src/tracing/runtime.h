@@ -7,6 +7,7 @@
 #include <mutex>
 #include <optional>
 #include <utility>
+#include <type_traits>
 #include <exception>
 #include <folly/io/async/Request.h>
 #include <folly/futures/Future.h>
@@ -15,6 +16,8 @@
 #include <opentelemetry/trace/tracer.h>
 
 namespace milvus_storage::tracing {
+// Classify the caught exception without copying text or rethrowing it.
+void RecordFailure(TraceFailure failure, const std::exception* error = nullptr) noexcept;
 struct Context;
 using ContextPtr = std::shared_ptr<const Context>;
 ContextPtr Capture() noexcept;
@@ -41,7 +44,15 @@ class OperationTrace {
                  bool io = false,
                  opentelemetry::trace::SpanContext link = opentelemetry::trace::SpanContext::GetInvalid(),
                  const char* operation = nullptr,
-                 const char* format = nullptr) noexcept;
+                 const char* format = nullptr,
+                 bool native_completion = false) noexcept;
+  // Native completion only enqueues; the caller's TraceCompletionQueue owns End.
+  static OperationTrace Native(const char* name,
+                               bool io = false,
+                               const char* operation = nullptr,
+                               const char* format = nullptr) noexcept {
+    return OperationTrace(name, false, io, opentelemetry::trace::SpanContext::GetInvalid(), operation, format, true);
+  }
   static OperationTrace WithAttributes(opentelemetry::nostd::string_view name,
                                        TraceScope::Attributes attributes,
                                        TraceScope::Links links = {},
@@ -54,6 +65,7 @@ class OperationTrace {
   void Start() const noexcept;
   void AccountRead(int64_t requested, int64_t returned) const noexcept;
   void Finish(const arrow::Status& status) const noexcept;
+  void FinishCode(arrow::StatusCode code, std::shared_ptr<arrow::StatusDetail> detail = nullptr) const noexcept;
   void FinishScope() const noexcept;
   void FinishException() const noexcept;
   void Attribute(const char* key, int64_t value) const noexcept;
@@ -65,7 +77,9 @@ class OperationTrace {
   private:
   ContextPtr context_;
   bool owns_state_ = false;
-  void FinishImpl(const arrow::Status* status, bool exception = false) const noexcept;
+  void FinishImpl(arrow::StatusCode code,
+                  std::shared_ptr<arrow::StatusDetail> detail,
+                  bool exception = false) const noexcept;
 };
 
 // Observe unwinding without intercepting or replacing the business exception.
@@ -88,14 +102,31 @@ const arrow::Status& StatusOf(const arrow::Result<T>& result) {
   return result.status();
 }
 
+// Arrow 17 inspects operator()'s concrete argument types. Preserve them for
+// ordinary lambdas; only genuinely generic callables need the variadic wrapper.
+template <typename F, size_t... I>
+auto BindTyped(F&& fn, std::index_sequence<I...>) {
+  return [context = Capture(), fn = std::forward<F>(fn)](
+             arrow::internal::call_traits::argument_type<I, F>... args) mutable -> decltype(auto) {
+    ContextScope scope(context);
+    StartCurrent();
+    return fn(std::forward<arrow::internal::call_traits::argument_type<I, F>>(args)...);
+  };
+}
 // Restores only Storage-owned data, preserving other RequestContext keys.
 template <typename F>
 auto Bind(F&& fn) {
-  return [context = Capture(), fn = std::forward<F>(fn)](auto&&... args) mutable -> decltype(auto) {
-    ContextScope scope(context);
-    StartCurrent();
-    return fn(std::forward<decltype(args)>(args)...);
-  };
+  if constexpr (requires { &std::decay_t<F>::operator(); }) {
+    return BindTyped(std::forward<F>(fn),
+                     std::make_index_sequence<arrow::internal::call_traits::argument_count<F>::value>{});
+  } else {
+    return [context = Capture(), fn = std::forward<F>(fn)](
+               auto&&... args) mutable -> std::invoke_result_t<std::decay_t<F>&, decltype(args)...> {
+      ContextScope scope(context);
+      StartCurrent();
+      return fn(std::forward<decltype(args)>(args)...);
+    };
+  }
 }
 
 template <typename F>
@@ -132,14 +163,14 @@ auto RunAsync(const char* name, F&& fn, const char* operation = nullptr, const c
   });
 }
 
-// Native callbacks own completion. Return the original future so tracing does
-// not introduce consumer-executor work or change eager native scheduling.
+// Native callbacks enqueue completion on the captured host queue. Drain owns
+// span End/export. Returning the original future preserves eager scheduling.
 template <typename F>
 auto RunNativeAsync(const char* name, F&& fn, const char* operation = nullptr, const char* format = nullptr)
     -> decltype(fn(std::declval<OperationTrace>())) {
   if (!HasContext())
     return fn(OperationTrace{});
-  OperationTrace trace(name, false, false, opentelemetry::trace::SpanContext::GetInvalid(), operation, format);
+  auto trace = OperationTrace::Native(name, false, operation, format);
   ContextScope scope(trace.context());
   ExceptionObserver observer(trace);
   auto future = fn(trace);
@@ -156,6 +187,7 @@ auto RunNativeAsync(const char* name, F&& fn, const char* operation = nullptr, c
 
 // Observe the source Arrow future itself: completion does not depend on a
 // consumer running a continuation and remains observed after a future is dropped.
+// trace must be created with Native(); its host queue performs End/export.
 template <typename T>
 arrow::Future<T> Observe(arrow::Future<T> future, OperationTrace trace) {
   if (!trace.NeedsCompletion())

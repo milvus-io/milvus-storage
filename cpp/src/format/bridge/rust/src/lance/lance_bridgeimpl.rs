@@ -11,13 +11,13 @@ use std::result::Result as RustResult;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Handle;
 
+use arrow::datatypes::SchemaRef;
+use arrow::error::ArrowError;
+use arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
 use arrow_array::Array;
 use arrow_array::ffi::FFI_ArrowArray;
 use arrow_array::{RecordBatch, RecordBatchReader, StructArray};
 use arrow_schema::Schema as ArrowSchema;
-use arrow::datatypes::SchemaRef;
-use arrow::error::ArrowError;
-use arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
 
 use lance::dataset::AutoCleanupParams;
 use lance::dataset::builder::DatasetBuilder;
@@ -75,9 +75,10 @@ impl BlockingDataset {
             .scan_scheduler
             .get_or_init(|| {
                 TOKIO_RT.block_on(async {
-                    ScanScheduler::new(
+                    ScanScheduler::new_with_reader_wrapper(
                         self.object_store.clone(),
                         SchedulerConfig::max_bandwidth(&self.object_store),
+                        Some(crate::storage_tracing::wrap_lance_request),
                     )
                 })
             })

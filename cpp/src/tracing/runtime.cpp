@@ -1,6 +1,7 @@
 // Copyright 2026 Zilliz
 // SPDX-License-Identifier: Apache-2.0
 #include "tracing/runtime.h"
+#include "common/exception.h"
 #include "milvus-storage/common/extend_status.h"
 #include <opentelemetry/trace/trace_state.h>
 #include <string_view>
@@ -11,7 +12,35 @@
 
 namespace milvus_storage::tracing {
 namespace ot = opentelemetry::trace;
+struct TraceCompletionNode {
+  TraceCompletionNode* next = nullptr;
+  virtual void CompletePending() noexcept = 0;
+  virtual ~TraceCompletionNode() = default;
+};
+void TraceCompletionQueue::Enqueue(TraceCompletionNode* node) noexcept {
+  node->next = pending_.load(std::memory_order_relaxed);
+  while (!pending_.compare_exchange_weak(node->next, node, std::memory_order_release, std::memory_order_relaxed)) {
+  }
+}
+void TraceCompletionQueue::Drain() noexcept {
+  // Releasing a completed child can abandon its last native parent. Drain
+  // those newly queued nodes too, so a final drain after producer shutdown is
+  // sufficient to release the entire retained chain.
+  for (;;) {
+    auto* pending = pending_.exchange(nullptr, std::memory_order_acquire);
+    if (!pending)
+      return;
+    while (pending) {
+      auto* next = pending->next;
+      pending->CompletePending();
+      pending = next;
+    }
+  }
+}
 namespace {
+std::array<std::atomic<uint64_t>, static_cast<size_t>(TraceFailure::Count)> failures{};
+std::array<std::atomic<uint64_t>, static_cast<size_t>(TraceFailure::Count)> allocation_failures{};
+std::array<std::atomic<uint64_t>, static_cast<size_t>(TraceFailure::Count)> standard_exceptions{};
 struct Configuration {
   ProviderPtr provider;
   opentelemetry::nostd::shared_ptr<ot::Tracer> tracer;
@@ -75,7 +104,13 @@ class OwnedAttributes final : public opentelemetry::common::KeyValueIterable {
           return false;
       }
       return true;
+    } catch (const std::exception& error) {
+      RecordFailure(TraceFailure::Attributes, &error);
+      // SDK iteration callbacks are noexcept; our temporary array views must
+      // not let allocation failures escape through that contract.
+      return false;
     } catch (...) {
+      RecordFailure(TraceFailure::Attributes);
       // SDK iteration callbacks are noexcept; our temporary array views must
       // not let allocation failures escape through that contract.
       return false;
@@ -105,7 +140,11 @@ struct DeferredSpan final : ot::SpanContextKeyValueIterable {
           return false;
       }
       return true;
+    } catch (const std::exception& error) {
+      RecordFailure(TraceFailure::Attributes, &error);
+      return false;
     } catch (...) {
+      RecordFailure(TraceFailure::Attributes);
       return false;
     }
   }
@@ -116,7 +155,32 @@ struct DeferredSpan final : ot::SpanContextKeyValueIterable {
   const OwnedAttributes attributes;
   std::vector<std::pair<ot::SpanContext, OwnedAttributes>> links;
 };
-struct SpanState {
+struct SpanState : TraceCompletionNode {
+  std::shared_ptr<TraceCompletionQueue> completions;
+  std::shared_ptr<SpanState> pending_owner;
+  arrow::StatusCode pending_code = arrow::StatusCode::OK;
+  std::shared_ptr<ExtendStatusDetail> pending_detail;
+  bool pending_exception = false;
+  ot::EndSpanOptions end_options;
+  void Complete() noexcept;
+  void CompletePending() noexcept override {
+    auto owner = std::move(pending_owner);
+    Complete();
+    if (!owner)
+      delete this;
+  }
+  bool unobserved = false;
+  // Even an abandoned native span must be ended only by the host's drain.
+  void Release() noexcept {
+    if (completions && span && !finished) {
+      finished = true;
+      unobserved = true;
+      end_options.end_steady_time = std::chrono::steady_clock::now();
+      completions->Enqueue(this);
+    } else {
+      delete this;
+    }
+  }
   mutable std::mutex mutex;
   opentelemetry::nostd::shared_ptr<ot::Span> span;
   ContextPtr parent;
@@ -134,7 +198,7 @@ struct SpanState {
   // completes. Keep this beside the other flags to reuse their padding.
   std::atomic<bool> started{false};
   void Start() noexcept;
-  ~SpanState() {
+  ~SpanState() override {
     if (span && !finished) {
       span->SetAttribute("storage.completion.unobserved", true);
       span->End();
@@ -147,6 +211,7 @@ struct Context {
   std::shared_ptr<SpanState> operation;
   // Freeze a disabled operation without allocating SpanState, Budget or a mutex.
   bool disabled = false;
+  std::shared_ptr<TraceCompletionQueue> completions;
 };
 namespace {
 ot::SpanContext Parent(const ContextPtr& context) noexcept {
@@ -194,7 +259,11 @@ void SpanState::Start() noexcept {
       }
     }
     started.store(true, std::memory_order_release);
+  } catch (const std::exception& error) {
+    RecordFailure(TraceFailure::Create, &error);
+    // No partially initialized span is published by this path.
   } catch (...) {
+    RecordFailure(TraceFailure::Create);
     // No partially initialized span is published by this path.
   }
 }
@@ -205,6 +274,25 @@ struct Data final : folly::RequestData {
   const ContextPtr context;
 };
 }  // namespace
+void RecordFailure(TraceFailure failure, const std::exception* error) noexcept {
+  const auto index = static_cast<size_t>(failure);
+  failures[index].fetch_add(1, std::memory_order_relaxed);
+  if (error) {
+    if (dynamic_cast<const std::bad_alloc*>(error))
+      allocation_failures[index].fetch_add(1, std::memory_order_relaxed);
+    else
+      standard_exceptions[index].fetch_add(1, std::memory_order_relaxed);
+  }
+}
+TraceFailures GetTraceFailures() noexcept {
+  TraceFailures result;
+  for (size_t i = 0; i < result.counts.size(); ++i) {
+    result.counts[i] = failures[i].load(std::memory_order_relaxed);
+    result.allocation_failures[i] = allocation_failures[i].load(std::memory_order_relaxed);
+    result.standard_exceptions[i] = standard_exceptions[i].load(std::memory_order_relaxed);
+  }
+  return result;
+}
 ContextPtr Capture() noexcept {
   if (!contexts_seen.load(std::memory_order_relaxed) || failed_scopes.load(std::memory_order_acquire))
     return nullptr;
@@ -229,6 +317,7 @@ ContextScope::ContextScope(ContextPtr context) noexcept {
     return;
   try {
     FIU_DO_ON(FIUKEY_TRACING_CONTEXT_ATTACH_FAIL, {
+      RecordFailure(TraceFailure::Attach);
       failed_scopes.fetch_add(1, std::memory_order_acq_rel);
       failed_ = true;
       return;
@@ -237,7 +326,12 @@ ContextScope::ContextScope(ContextPtr context) noexcept {
     const auto* data = request ? static_cast<const Data*>(request->getContextData(storage_key)) : nullptr;
     if (context || (data && data->context))
       scope_.emplace(storage_key, std::make_unique<Data>(std::move(context)));
+  } catch (const std::exception& error) {
+    RecordFailure(TraceFailure::Attach, &error);
+    failed_scopes.fetch_add(1, std::memory_order_acq_rel);
+    failed_ = true;
   } catch (...) {
+    RecordFailure(TraceFailure::Attach);
     failed_scopes.fetch_add(1, std::memory_order_acq_rel);
     failed_ = true;
   }
@@ -265,14 +359,19 @@ TraceParent::TraceParent(const ot::SpanContext& upstream)
   std::copy(trace.Id().begin(), trace.Id().end(), trace_id.begin());
   std::copy(span.Id().begin(), span.Id().end(), span_id.begin());
 }
-TraceScope::TraceScope(const TraceParent& parent) noexcept {
+TraceScope::TraceScope(const TraceParent& parent, std::shared_ptr<TraceCompletionQueue> completions) noexcept {
   contexts_seen.store(true, std::memory_order_relaxed);
   try {
     impl_ = std::make_unique<Impl>(std::make_shared<Context>(Context{
         ot::SpanContext(ot::TraceId(parent.trace_id), ot::SpanId(parent.span_id), ot::TraceFlags(parent.trace_flags),
                         parent.is_remote, ot::TraceState::FromHeader(parent.tracestate)),
-        nullptr}));
+        nullptr, false, std::move(completions)}));
+  } catch (const std::exception& error) {
+    RecordFailure(TraceFailure::Attach, &error);
+    failed_scopes.fetch_add(1, std::memory_order_acq_rel);
+    failed_ = true;
   } catch (...) {
+    RecordFailure(TraceFailure::Attach);
     failed_scopes.fetch_add(1, std::memory_order_acq_rel);
     failed_ = true;
   }
@@ -285,7 +384,12 @@ TraceScope::TraceScope(opentelemetry::nostd::string_view name,
     return;
   try {
     impl_ = std::make_unique<Impl>(name, attributes, links, kind);
+  } catch (const std::exception& error) {
+    RecordFailure(TraceFailure::Attach, &error);
+    failed_scopes.fetch_add(1, std::memory_order_acq_rel);
+    failed_ = true;
   } catch (...) {
+    RecordFailure(TraceFailure::Attach);
     failed_scopes.fetch_add(1, std::memory_order_acq_rel);
     failed_ = true;
   }
@@ -315,7 +419,9 @@ void TraceScope::SetAttribute(opentelemetry::nostd::string_view key,
   if (impl_)
     impl_->trace.Attribute(key, value);
 }
-TraceScope AttachParent(const TraceParent& parent) noexcept { return TraceScope(parent); }
+TraceScope AttachParent(const TraceParent& parent, std::shared_ptr<TraceCompletionQueue> completions) noexcept {
+  return TraceScope(parent, std::move(completions));
+}
 arrow::Status SetTracerProvider(ProviderPtr provider) noexcept {
   try {
     FIU_RETURN_ON(FIUKEY_TRACING_CONFIGURATION_FAIL, arrow::Status::UnknownError("tracing configuration failure"));
@@ -326,8 +432,10 @@ arrow::Status SetTracerProvider(ProviderPtr provider) noexcept {
     next->tracer = std::move(tracer);
     configuration = std::move(next);
     return arrow::Status::OK();
+  } catch (const std::exception& e) {
+    return detail::ExceptionStatus("Failed to configure Storage tracer provider", &e);
   } catch (...) {
-    return arrow::Status::UnknownError("Failed to configure Storage tracer provider");
+    return detail::ExceptionStatus("Failed to configure Storage tracer provider");
   }
 }
 arrow::Status SetTraceOptions(const TraceOptions& options) noexcept {
@@ -338,14 +446,24 @@ arrow::Status SetTraceOptions(const TraceOptions& options) noexcept {
     next->options = options;
     configuration = std::move(next);
     return arrow::Status::OK();
+  } catch (const std::exception& e) {
+    return detail::ExceptionStatus("Failed to configure Storage trace options", &e);
   } catch (...) {
-    return arrow::Status::UnknownError("Failed to configure Storage trace options");
+    return detail::ExceptionStatus("Failed to configure Storage trace options");
   }
 }
-OperationTrace::OperationTrace(
-    const char* name, bool lazy, bool io, ot::SpanContext link, const char* operation, const char* format) noexcept {
+OperationTrace::OperationTrace(const char* name,
+                               bool lazy,
+                               bool io,
+                               ot::SpanContext link,
+                               const char* operation,
+                               const char* format,
+                               bool native_completion) noexcept {
   try {
-    FIU_DO_ON(FIUKEY_TRACING_SCOPE_FAIL, { return; });
+    FIU_DO_ON(FIUKEY_TRACING_SCOPE_FAIL, {
+      RecordFailure(TraceFailure::Create);
+      return;
+    });
     context_ = Capture();
     if (!context_ || context_->disabled)
       return;
@@ -363,6 +481,10 @@ OperationTrace::OperationTrace(
       // injects a provider later. No child state is needed for suppressed spans.
       if (!config->tracer || (io && !config->options.io_spans))
         return;
+      if (native_completion && !context_->completions) {
+        RecordFailure(TraceFailure::MissingCompletionQueue);
+        return;
+      }
       budget = context_->operation->budget;
       if (budget->used.fetch_add(1, std::memory_order_relaxed) >=
           std::max<uint32_t>(1, config->options.max_spans_per_operation)) {
@@ -380,9 +502,15 @@ OperationTrace::OperationTrace(
         context_ = std::make_shared<Context>(Context{context_->parent, nullptr, true});
         return;
       }
+      if (native_completion && !context_->completions) {
+        RecordFailure(TraceFailure::MissingCompletionQueue);
+        return;
+      }
       budget = std::make_shared<Budget>();
     }
-    auto state = std::make_shared<SpanState>();
+    auto state = std::shared_ptr<SpanState>(new SpanState, [](SpanState* state) { state->Release(); });
+    if (native_completion)
+      state->completions = context_->completions;
     state->parent = context_;
     state->name = name;
     state->operation = operation;
@@ -393,11 +521,17 @@ OperationTrace::OperationTrace(
     state->root = root;
     if (state->root)
       state->budget->used.store(1, std::memory_order_relaxed);
-    context_ = std::make_shared<Context>(Context{ot::SpanContext::GetInvalid(), std::move(state)});
+    context_ = std::make_shared<Context>(
+        Context{ot::SpanContext::GetInvalid(), std::move(state), false, context_->completions});
     owns_state_ = true;
     if (!lazy)
       Start();
+  } catch (const std::exception& error) {
+    RecordFailure(TraceFailure::Create, &error);
+    context_.reset();
+    owns_state_ = false;
   } catch (...) {
+    RecordFailure(TraceFailure::Create);
     context_.reset();
     owns_state_ = false;
   }
@@ -418,7 +552,11 @@ OperationTrace OperationTrace::WithAttributes(opentelemetry::nostd::string_view 
     if (!lazy)
       trace.Start();
     return trace;
+  } catch (const std::exception& error) {
+    RecordFailure(TraceFailure::Attributes, &error);
+    return OperationTrace{};
   } catch (...) {
+    RecordFailure(TraceFailure::Attributes);
     return OperationTrace{};
   }
 }
@@ -435,13 +573,18 @@ void OperationTrace::Start() const noexcept {
   if (owns_state_)
     context_->operation->Start();
 }
-void OperationTrace::Finish(const arrow::Status& status) const noexcept { FinishImpl(&status); }
-void OperationTrace::FinishException() const noexcept { FinishImpl(nullptr, true); }
+void OperationTrace::Finish(const arrow::Status& status) const noexcept { FinishCode(status.code(), status.detail()); }
+void OperationTrace::FinishCode(arrow::StatusCode code, std::shared_ptr<arrow::StatusDetail> detail) const noexcept {
+  FinishImpl(code, std::move(detail));
+}
+void OperationTrace::FinishException() const noexcept { FinishImpl(arrow::StatusCode::UnknownError, nullptr, true); }
 void OperationTrace::FinishScope() const noexcept {
   if (owns_state_ && context_->operation->started.load(std::memory_order_acquire))
-    FinishImpl(nullptr);
+    FinishImpl(arrow::StatusCode::OK, nullptr);
 }
-void OperationTrace::FinishImpl(const arrow::Status* status, bool exception) const noexcept {
+void OperationTrace::FinishImpl(arrow::StatusCode code,
+                                std::shared_ptr<arrow::StatusDetail> detail,
+                                bool exception) const noexcept {
   try {
     if (!owns_state_)
       return;
@@ -457,33 +600,63 @@ void OperationTrace::FinishImpl(const arrow::Status* status, bool exception) con
     }
     if (!op->span)
       return;
+    op->end_options.end_steady_time = std::chrono::steady_clock::now();
+    // Arrow Status copies allocate. Snapshot only the code and shared detail;
+    // classification strings are built later on the host's drain thread.
+    op->pending_code = code;
+    op->pending_detail = std::dynamic_pointer_cast<ExtendStatusDetail>(std::move(detail));
+    op->pending_exception = exception;
+    if (op->completions) {
+      op->pending_owner = op;
+      op->completions->Enqueue(op.get());
+    } else {
+      op->Complete();
+    }
+  } catch (const std::exception& error) {
+    RecordFailure(TraceFailure::Complete, &error);
+  } catch (...) {
+    RecordFailure(TraceFailure::Complete);
+  }
+}
+void SpanState::Complete() noexcept {
+  try {
     try {
-      if (exception || (status && !status->ok())) {
-        op->span->SetStatus(ot::StatusCode::kError);
-        if (op->span->IsRecording()) {
-          if (!status) {
-            op->span->SetAttribute("error.type", "UnknownError");
-          } else if (auto detail = ExtendStatusDetail::UnwrapStatus(*status)) {
-            op->span->SetAttribute("error.type", detail->CodeAsString());
-            op->span->SetAttribute("error.retryable", detail->retryable());
+      if (unobserved)
+        span->SetAttribute("storage.completion.unobserved", true);
+      if (pending_exception || pending_code != arrow::StatusCode::OK) {
+        span->SetStatus(ot::StatusCode::kError);
+        if (span->IsRecording()) {
+          if (pending_exception) {
+            span->SetAttribute("error.type", "UnknownError");
+          } else if (pending_detail) {
+            span->SetAttribute("error.type", pending_detail->CodeAsString());
+            span->SetAttribute("error.retryable", pending_detail->retryable());
           } else {
-            op->span->SetAttribute("error.type", status->CodeAsString());
+            span->SetAttribute("error.type", arrow::Status::CodeAsString(pending_code));
           }
         }
       }
-      if (op->root) {
-        op->span->SetAttribute("storage.spans.dropped", op->budget->dropped.load());
-        op->span->SetAttribute("storage.io.reads", op->budget->reads.load());
-        op->span->SetAttribute("storage.io.requested_bytes", op->budget->requested_bytes.load());
-        op->span->SetAttribute("storage.io.returned_bytes", op->budget->returned_bytes.load());
+      if (root) {
+        span->SetAttribute("storage.spans.dropped", budget->dropped.load());
+        span->SetAttribute("storage.io.reads", budget->reads.load());
+        span->SetAttribute("storage.io.requested_bytes", budget->requested_bytes.load());
+        span->SetAttribute("storage.io.returned_bytes", budget->returned_bytes.load());
       }
+    } catch (const std::exception& error) {
+      RecordFailure(TraceFailure::Attributes, &error);
+      // Annotation failure must not prevent span completion.
     } catch (...) {
+      RecordFailure(TraceFailure::Attributes);
       // Annotation failure must not prevent span completion.
     }
-    op->span->End();
+    span->End(end_options);
+  } catch (const std::exception& error) {
+    RecordFailure(TraceFailure::Complete, &error);
   } catch (...) {
+    RecordFailure(TraceFailure::Complete);
   }
 }
+
 void OperationTrace::Attribute(const char* key, int64_t value) const noexcept {
   Attribute(opentelemetry::nostd::string_view(key), opentelemetry::common::AttributeValue(value));
 }

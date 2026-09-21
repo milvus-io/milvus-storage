@@ -9,6 +9,9 @@ struct ScopedAttachment final : TraceAttachment {
   tracing::ContextScope scope;
 };
 }  // namespace
+void record_trace_bridge_failure(bool attachment) noexcept {
+  tracing::RecordFailure(attachment ? tracing::TraceFailure::RustAttach : tracing::TraceFailure::RustCapture);
+}
 TraceAttachment::~TraceAttachment() = default;
 std::shared_ptr<TraceContext> capture_trace_context() {
   auto snapshot = tracing::Capture();
