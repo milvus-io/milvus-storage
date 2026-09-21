@@ -6,6 +6,7 @@ namespace milvus_storage::tracing {
 struct Context;
 }
 namespace milvus_storage::rust_bridge::ffi {
+void record_trace_bridge_failure(bool attachment) noexcept;
 struct TraceContext;
 struct TraceAttachment;
 std::shared_ptr<TraceContext> capture_trace_context();

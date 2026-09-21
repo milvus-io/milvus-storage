@@ -3,6 +3,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -40,6 +41,45 @@ struct TraceOptions {
 // Changes apply to subsequent operations; active operations retain their snapshot.
 arrow::Status SetTraceOptions(const TraceOptions& options) noexcept;
 
+// Monotonic, allocation-free diagnostics. Snapshot fields independently; callers
+// may export deltas through their own metrics system. No logging/export callbacks
+// run on the failing thread, and business results are never replaced.
+enum class TraceFailure : uint8_t {
+  Create,
+  Attach,
+  Attributes,
+  Complete,
+  Metadata,
+  RustCapture,
+  RustAttach,
+  MissingCompletionQueue,
+  Count
+};
+struct TraceFailures {
+  std::array<uint64_t, static_cast<size_t>(TraceFailure::Count)> counts{};
+  std::array<uint64_t, static_cast<size_t>(TraceFailure::Count)> allocation_failures{};
+  std::array<uint64_t, static_cast<size_t>(TraceFailure::Count)> standard_exceptions{};
+};
+TraceFailures GetTraceFailures() noexcept;
+
+struct TraceCompletionNode;
+// Native callbacks only enqueue preallocated completion nodes. The host must
+// drain on its execution thread, periodically and after all outstanding work
+// has finished, before shutting down the provider. Drain never waits for I/O.
+// Pending nodes retain this queue until drained, including dropped futures.
+class TraceCompletionQueue {
+  public:
+  TraceCompletionQueue() = default;
+  TraceCompletionQueue(const TraceCompletionQueue&) = delete;
+  TraceCompletionQueue& operator=(const TraceCompletionQueue&) = delete;
+  void Drain() noexcept;
+  // Internal producer entry point; nodes are owned by the tracing runtime.
+  void Enqueue(TraceCompletionNode* node) noexcept;
+
+  private:
+  std::atomic<TraceCompletionNode*> pending_{nullptr};
+};
+
 class TraceScope {
   public:
   using Attributes =
@@ -61,15 +101,19 @@ class TraceScope {
 
   private:
   struct Impl;
-  explicit TraceScope(const TraceParent& parent) noexcept;
+  explicit TraceScope(const TraceParent& parent, std::shared_ptr<TraceCompletionQueue> completions) noexcept;
   std::unique_ptr<Impl> impl_;
   bool failed_ = false;
-  friend TraceScope AttachParent(const TraceParent& parent) noexcept;
+  friend TraceScope AttachParent(const TraceParent& parent, std::shared_ptr<TraceCompletionQueue> completions) noexcept;
 };
 
 // Only changes the Storage RequestContext. Does not create/end a parent span
 // or modify OTel TLS. Invalid parents mask enclosing scopes. Destroy on the
 // same execution flow in stack order; Folly fibers may suspend with this guard.
-[[nodiscard]] TraceScope AttachParent(const TraceParent& parent) noexcept;
+// Native async spans require a completion queue. Without one those spans are
+// suppressed and MissingCompletionQueue is incremented; synchronous/Folly spans
+// and the business operation remain available.
+[[nodiscard]] TraceScope AttachParent(const TraceParent& parent,
+                                      std::shared_ptr<TraceCompletionQueue> completions = nullptr) noexcept;
 
 }  // namespace milvus_storage::tracing

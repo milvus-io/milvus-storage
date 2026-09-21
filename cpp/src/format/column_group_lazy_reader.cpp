@@ -189,19 +189,17 @@ ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file_async(size_t file_index
     // No cache: create a fresh reader and let the format decide whether open is native async.
     return FormatReader::create_async(schema_, column_group_->format, file, properties_, needed_columns_,
                                       key_retriever_)
-        .deferValue([storage_context = tracing::Capture(),
-                     format = column_group_->format](arrow::Result<std::shared_ptr<FormatReader>>&& reader_result)
-                        -> arrow::Result<std::shared_ptr<ReaderT>> {
-          tracing::ContextScope storage_scope(storage_context);
-          tracing::StartCurrent();
-          ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
-          auto typed_reader = std::dynamic_pointer_cast<ReaderT>(reader);
-          if (!typed_reader) {
-            return arrow::Status::Invalid("FormatReader::create_async returned incompatible reader for format: ",
-                                          format);
-          }
-          return typed_reader;
-        });
+        .deferValue(
+            tracing::Bind([format = column_group_->format](arrow::Result<std::shared_ptr<FormatReader>>&& reader_result)
+                              -> arrow::Result<std::shared_ptr<ReaderT>> {
+              ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
+              auto typed_reader = std::dynamic_pointer_cast<ReaderT>(reader);
+              if (!typed_reader) {
+                return arrow::Status::Invalid("FormatReader::create_async returned incompatible reader for format: ",
+                                              format);
+              }
+              return typed_reader;
+            }));
   }
 
   if constexpr (FormatReaderWithAsyncMetadata<ReaderT>) {
@@ -214,16 +212,13 @@ ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file_async(size_t file_index
                             [file, properties = properties_, key_retriever = key_retriever_]() {
                               return ReaderT::MetaTrait::load_metadata_async(file, properties, key_retriever);
                             })
-        .deferValue([storage_context = tracing::Capture(), file, read_schema = schema_,
-                     needed_columns =
-                         needed_columns_](arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>&& metadata_result)
-                        -> folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> {
-          tracing::ContextScope storage_scope(storage_context);
-          tracing::StartCurrent();
+        .deferValue(tracing::Bind([file, read_schema = schema_, needed_columns = needed_columns_](
+                                      arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>&& metadata_result)
+                                      -> folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> {
           FOLLY_ARROW_ASSIGN_OR_RAISE(auto metadata, std::move(metadata_result));
           return ReaderT::MetaTrait::create_from_metadata_async(std::move(metadata), file, read_schema, needed_columns,
                                                                 "");
-        });
+        }));
   }
 
   // Formats without a complete async metadata path may block here before
@@ -286,11 +281,7 @@ arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl<ReaderT>:
 
         for (const auto& task_row_indices : splitted_row_indices) {
           std::packaged_task<arrow::Result<std::shared_ptr<arrow::Table>>()> task(
-              [storage_context = tracing::Capture(), this, task_row_indices]() {
-                tracing::ContextScope storage_scope(storage_context);
-                tracing::StartCurrent();
-                return take_rows_from_files(task_row_indices);
-              });
+              tracing::Bind([this, task_row_indices]() { return take_rows_from_files(task_row_indices); }));
           futures.emplace_back(task.get_future());
           folly_thread_pool->add(std::move(task));
         }
@@ -339,22 +330,18 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> ColumnGroupLazyR
         // Open one independent reader for this file-scoped task; no mutable format
         // reader is shared with another in-flight take.
         return open_reader_for_file_async(task.file_index)
-            .deferValue([storage_context = tracing::Capture(), rows_in_file = std::move(rows_in_file)](
-                            arrow::Result<std::shared_ptr<ReaderT>>&& reader_result)
-                            -> folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> {
-              tracing::ContextScope storage_scope(storage_context);
-              tracing::StartCurrent();
+            .deferValue(tracing::Bind([rows_in_file = std::move(rows_in_file)](
+                                          arrow::Result<std::shared_ptr<ReaderT>>&& reader_result)
+                                          -> folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> {
               FOLLY_ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
               return reader->take_async(rows_in_file)
-                  .deferValue([storage_context = tracing::Capture(), reader = std::move(reader)](
-                                  auto&& table_result) -> arrow::Result<std::shared_ptr<arrow::Table>> {
-                    tracing::ContextScope storage_scope(storage_context);
-                    tracing::StartCurrent();
+                  .deferValue(tracing::Bind([reader = std::move(reader)](
+                                                auto&& table_result) -> arrow::Result<std::shared_ptr<arrow::Table>> {
                     // Lifetime-only capture: backend state must outlive the async take.
                     (void)reader;
                     return std::move(table_result);
-                  });
-            });
+                  }));
+            }));
       },
       "take_async", nullptr);
 }

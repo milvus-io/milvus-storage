@@ -507,25 +507,20 @@ VortexFormatReader::MetaTrait::load_metadata_async(const api::ColumnGroupFile& f
 
   // Defer reader construction so cache followers can join the same-key
   // singleflight before the Tokio open is submitted.
-  return folly::makeSemiFuture().deferValue(
-      [storage_context = tracing::Capture(), file,
-       properties](folly::Unit) -> folly::SemiFuture<arrow::Result<VortexFormatReader::MetaTrait::MetadataPtr>> {
-        tracing::ContextScope storage_scope(storage_context);
-        tracing::StartCurrent();
+  return folly::makeSemiFuture().deferValue(tracing::Bind(
+      [file, properties](folly::Unit) -> folly::SemiFuture<arrow::Result<VortexFormatReader::MetaTrait::MetadataPtr>> {
         FOLLY_ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, file.path));
         FOLLY_ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
         auto reader = std::make_shared<VortexFormatReader>(
             std::move(fs), nullptr, uri.key, properties, std::vector<std::string>{},
             file.Get<uint64_t>(api::kPropertyFileSize), file.Get<uint64_t>(api::kPropertyFooterSize));
         // Snapshot immutable schema/split metadata only after async open succeeds.
-        return reader->open_async().deferValue([storage_context = tracing::Capture(), reader = std::move(reader),
-                                                file](arrow::Status status) -> arrow::Result<MetadataPtr> {
-          tracing::ContextScope storage_scope(storage_context);
-          tracing::StartCurrent();
-          ARROW_RETURN_NOT_OK(status);
-          return create_metadata_from_reader(reader, file);
-        });
-      });
+        return reader->open_async().deferValue(
+            tracing::Bind([reader = std::move(reader), file](arrow::Status status) -> arrow::Result<MetadataPtr> {
+              ARROW_RETURN_NOT_OK(status);
+              return create_metadata_from_reader(reader, file);
+            }));
+      }));
 }
 
 arrow::Result<std::shared_ptr<VortexFormatReader>> VortexFormatReader::MetaTrait::create_from_metadata(
@@ -557,12 +552,10 @@ VortexFormatReader::MetaTrait::create_from_metadata_async(MetadataPtr metadata,
                                                           const std::vector<std::string>& needed_columns,
                                                           const std::string& predicate) {
   return folly::makeSemiFuture().deferValue(
-      [storage_context = tracing::Capture(), metadata = std::move(metadata), file, read_schema, needed_columns,
-       predicate](folly::Unit) -> arrow::Result<std::shared_ptr<VortexFormatReader>> {
-        tracing::ContextScope storage_scope(storage_context);
-        tracing::StartCurrent();
+      tracing::Bind([metadata = std::move(metadata), file, read_schema, needed_columns,
+                     predicate](folly::Unit) -> arrow::Result<std::shared_ptr<VortexFormatReader>> {
         return create_from_metadata(std::move(metadata), file, read_schema, needed_columns, predicate);
-      });
+      }));
 }
 
 VortexFormatReader::VortexFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
@@ -690,10 +683,7 @@ folly::SemiFuture<arrow::Status> VortexFormatReader::open_async() {
         auto semi_future = ctx->promise.getSemiFuture();
         // The callback imports the owned Rust handle and publishes reader state only
         // after schema and logical chunk metadata have both been derived successfully.
-        ctx->initialize = [storage_context = tracing::Capture(),
-                           self = std::move(self)](uintptr_t handle) -> arrow::Status {
-          tracing::ContextScope storage_scope(storage_context);
-          tracing::StartCurrent();
+        ctx->initialize = tracing::Bind([self = std::move(self)](uintptr_t handle) -> arrow::Status {
           ARROW_ASSIGN_OR_RAISE(auto vxfile_unique, VortexFile::FromRawHandle(handle));
           auto vxfile = std::shared_ptr<VortexFile>(std::move(vxfile_unique));
           ARROW_ASSIGN_OR_RAISE(auto file_schema, import_vortex_file_schema(*vxfile));
@@ -713,7 +703,7 @@ folly::SemiFuture<arrow::Status> VortexFormatReader::open_async() {
           self->column_memory_weights_ = std::move(column_memory_weights);
           self->row_group_infos_ = std::move(row_group_infos);
           return arrow::Status::OK();
-        };
+        });
         // Validation failures may call back synchronously, so transfer ownership
         // before crossing the FFI boundary.
         auto* raw_ctx = ctx.release();

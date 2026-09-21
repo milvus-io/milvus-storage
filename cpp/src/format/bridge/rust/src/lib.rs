@@ -14,10 +14,10 @@
 
 #[path = "filesystem/filesystem_opendal.rs"]
 mod filesystem_opendal;
-#[path = "iceberg/iceberg_opendal.rs"]
-mod iceberg_opendal;
 #[path = "iceberg/iceberg_bridgeimpl.rs"]
 mod iceberg_bridgeimpl;
+#[path = "iceberg/iceberg_opendal.rs"]
+mod iceberg_opendal;
 #[path = "iceberg/iceberg_testutil.rs"]
 mod iceberg_testutil;
 #[path = "lance/lance_bridgeimpl.rs"]
@@ -36,6 +36,7 @@ mod paimon_testutil;
 mod predicate_parser;
 #[path = "runtime/rust_runtime.rs"]
 mod rust_runtime;
+#[path = "runtime/storage_tracing.rs"]
 mod storage_tracing;
 #[cfg(feature = "talon")]
 #[path = "talon/talon_bridge.rs"]
@@ -92,6 +93,7 @@ pub mod rust_runtime_ffi {
         include!("tracing_bridge.h");
         type TraceContext;
         type TraceAttachment;
+        fn record_trace_bridge_failure(attachment: bool);
         fn capture_trace_context() -> Result<SharedPtr<TraceContext>>;
         fn attach_trace_context(
             context: &SharedPtr<TraceContext>,
@@ -222,10 +224,8 @@ pub mod lance_ffi {
             context: usize,
         ) -> Result<()>;
         pub unsafe fn take_column_memory_handle(handle: u64) -> Vec<LanceColumnMemoryEstimate>;
-        pub fn estimate_fragment_memory(
-            dataset: &BlockingDataset,
-            fragment_id: u64,
-        ) -> Result<u64>;
+        pub fn estimate_fragment_memory(dataset: &BlockingDataset, fragment_id: u64)
+        -> Result<u64>;
         pub unsafe fn get_fragment_schema(
             dataset: &BlockingDataset,
             fragment_id: u64,

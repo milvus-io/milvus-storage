@@ -627,13 +627,11 @@ folly::SemiFuture<arrow::Status> ChunkReaderImpl::open_async() {
   // file metadata initialization.
   return ColumnGroupReader::create_async(schema_, column_group_, needed_columns_, properties_, key_retriever_callback_,
                                          "", metadata_cache_)
-      .deferValue([storage_context = tracing::Capture(),
-                   this](arrow::Result<std::unique_ptr<ColumnGroupReader>>&& reader_result) -> arrow::Status {
-        tracing::ContextScope storage_scope(storage_context);
-        tracing::StartCurrent();
-        ARROW_ASSIGN_OR_RAISE(chunk_reader_, std::move(reader_result));
-        return arrow::Status::OK();
-      });
+      .deferValue(
+          tracing::Bind([this](arrow::Result<std::unique_ptr<ColumnGroupReader>>&& reader_result) -> arrow::Status {
+            ARROW_ASSIGN_OR_RAISE(chunk_reader_, std::move(reader_result));
+            return arrow::Status::OK();
+          }));
 }
 
 size_t ChunkReaderImpl::total_number_of_chunks() const { return chunk_reader_->total_number_of_chunks(); }
@@ -768,11 +766,9 @@ folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>
         // Associate results with task chunk ids, then rebuild the original request;
         // asynchronous completion order is intentionally irrelevant.
         return folly::collectAll(std::move(futures))
-            .deferValue(
-                [storage_context = tracing::Capture(), chunk_indices, task_chunk_lists = std::move(task_chunk_lists)](
+            .deferValue(tracing::Bind(
+                [chunk_indices, task_chunk_lists = std::move(task_chunk_lists)](
                     auto&& all_results) -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
-                  tracing::ContextScope storage_scope(storage_context);
-                  tracing::StartCurrent();
                   std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> all_rbs;
                   for (size_t i = 0; i < all_results.size(); ++i) {
                     auto& tryResult = all_results[i];
@@ -801,7 +797,7 @@ folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>
                     result.push_back(it->second);
                   }
                   return result;
-                });
+                }));
       },
       "get_chunks_async", nullptr);
 }
@@ -993,13 +989,11 @@ class ReaderImpl : public Reader {
           // The continuation owns the ChunkReaderImpl while open_async() initializes
           // it through the temporary raw pointer.
           return chunk_reader_ptr->open_async().deferValue(
-              [storage_context = tracing::Capture(), chunk_reader = std::move(chunk_reader)](
-                  arrow::Status status) mutable -> arrow::Result<std::unique_ptr<ChunkReader>> {
-                tracing::ContextScope storage_scope(storage_context);
-                tracing::StartCurrent();
+              tracing::Bind([chunk_reader = std::move(chunk_reader)](
+                                arrow::Status status) mutable -> arrow::Result<std::unique_ptr<ChunkReader>> {
                 ARROW_RETURN_NOT_OK(status);
                 return std::move(chunk_reader);
-              });
+              }));
         },
         "get_chunk_reader_async", nullptr);
   }
@@ -1077,14 +1071,12 @@ class ReaderImpl : public Reader {
           // Fan out file-aware tasks across all required column groups, then combine
           // the reordered per-group tables into the requested logical column order.
           return take_tables_async(row_indices, needed_column_groups, lazy_readers, parallelism)
-              .deferValue([storage_context = tracing::Capture(), row_indices,
-                           resolved_columns = std::move(resolved_columns), schema = schema_,
-                           lazy_readers](auto&& tables_result) -> arrow::Result<std::shared_ptr<arrow::Table>> {
-                tracing::ContextScope storage_scope(storage_context);
-                tracing::StartCurrent();
-                ARROW_ASSIGN_OR_RAISE(auto tables, std::move(tables_result));
-                return build_take_table(tables, row_indices, resolved_columns, schema);
-              });
+              .deferValue(
+                  tracing::Bind([row_indices, resolved_columns = std::move(resolved_columns), schema = schema_,
+                                 lazy_readers](auto&& tables_result) -> arrow::Result<std::shared_ptr<arrow::Table>> {
+                    ARROW_ASSIGN_OR_RAISE(auto tables, std::move(tables_result));
+                    return build_take_table(tables, row_indices, resolved_columns, schema);
+                  }));
         },
         "take_async", nullptr);
   }
@@ -1416,11 +1408,9 @@ folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::Table>>>> Rea
   // Keep the readers alive for every in-flight task. The saved positions remove
   // both task-splitting order and completion order from the final row order.
   return folly::collectAll(std::move(futures))
-      .deferValue([storage_context = tracing::Capture(), row_indices, lazy_readers,
-                   task_cg_indices = std::move(task_cg_indices), task_positions = std::move(task_positions)](
-                      auto&& all_results) -> arrow::Result<std::vector<std::shared_ptr<arrow::Table>>> {
-        tracing::ContextScope storage_scope(storage_context);
-        tracing::StartCurrent();
+      .deferValue(tracing::Bind([row_indices, lazy_readers, task_cg_indices = std::move(task_cg_indices),
+                                 task_positions = std::move(task_positions)](
+                                    auto&& all_results) -> arrow::Result<std::vector<std::shared_ptr<arrow::Table>>> {
         std::vector<std::vector<std::shared_ptr<arrow::Table>>> per_cg_tables(lazy_readers->size());
         std::vector<std::vector<size_t>> per_cg_positions(lazy_readers->size());
 
@@ -1457,7 +1447,7 @@ folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::Table>>>> Rea
           tables.push_back(std::move(reordered));
         }
         return tables;
-      });
+      }));
 }
 
 // ==================== Factory Function Implementation ====================
