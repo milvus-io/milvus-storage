@@ -45,8 +45,13 @@ filesystem and can use existing synchronous methods.
 
 ## C ABI and ownership
 
-Configure `loon_async_configure_executor` once with a `LoonAsyncExecutor`.
-Its `submit` function must enqueue without waiting or running inline, return zero
+Create a caller-owned `LoonIOContextHandle` with
+`loon_io_context_create(&executor, &io_context)`, then pass it explicitly as the
+first argument to `loon_transaction_begin_async` and
+`loon_transaction_commit_async`. Each context owns its admission/shutdown state;
+there is no process-wide executor configuration. Contexts may use different
+executors or share one, and begin and commit may use different contexts.
+The executor's `submit` function must enqueue without waiting or running inline, return zero
 only when it will run the task exactly once, and neither retain nor run a rejected
 task. It must be thread-safe and must not throw. Storage copies the descriptor;
 the caller owns its context and workers.
@@ -55,8 +60,9 @@ Submission copies inputs. An initial enqueue rejection returns an error and
 invokes no callback. Accepted operations invoke exactly one callback, normally
 on the supplied executor and possibly before submission returns. Exceptional
 completion-enqueue failure delivers the result on the completing worker.
-Callbacks must not throw, block, or call shutdown. The callback owns its result
-and successful transaction and must free them using the existing APIs.
+Callbacks must not throw, block, or shut down/destroy their own IO context.
+The callback owns its result and successful transaction and must free them using
+the existing APIs.
 
 Cancel and release are separate: cancel requests skipping work that has not
 started; release only drops the handle. Neither waits. Releasing a handle early
@@ -72,16 +78,25 @@ cancelled or its deadline expires. There is no interruption of in-flight network
 I/O and no end-to-end deadline guarantee. Input and callback ownership lasts
 until completion. Options default to 30 seconds; the maximum is one day.
 
-`LOON_ASYNC_MAX_OPERATIONS` defaults to 256 and limits C operations through
-callback return. The caller executor controls native C++ concurrency. Existing
-filesystem memory policies apply; this patch introduces no response-byte limit
+`LOON_ASYNC_MAX_OPERATIONS` defaults to 256 and limits C operations per IO context
+through callback return. The caller executor controls native C++ concurrency.
+Existing filesystem memory policies apply; this patch introduces no response-byte limit
 or buffer-budget setting. Invalid admission configuration returns an error.
 
-`loon_async_shutdown` rejects new admission and waits for accepted callbacks.
-Call it on an application thread, then drain/join the caller pool before freeing
-its context. It does not stop that pool and cannot interrupt synchronous I/O;
-shutdown may wait for the underlying backend's timeout. C++ callers must drain
-their own futures before destroying executors or shutting down storage.
+`loon_io_context_shutdown(io_context)` rejects new admission on that context and
+waits for its accepted callbacks to return. It is idempotent and may run alongside
+submissions. Other contexts continue accepting work. A stopped context cannot be
+restarted, but new contexts may be created at any time.
+
+`loon_io_context_destroy(io_context)` also drains callbacks, then frees the
+context. Exclude concurrent API calls using the context before destruction.
+Cancel/release of operation handles remains valid after context destruction.
+Call shutdown/destroy on an application thread, never from that context's
+callback. Keep the executor accepting work until every context using it has
+finished shutdown; then drain/join the pool before freeing the executor's context.
+Storage does not stop the pool or interrupt synchronous I/O, so shutdown may wait
+for the underlying backend's timeout. C++ callers must drain their own futures
+before destroying executors or shutting down storage.
 
 ## Scope and verification
 
@@ -96,7 +111,8 @@ filesystem methods.
 
 C++ tests cover lazy execution, caller executor selection, queued cancellation,
 queue deadlines, blocking I/O ownership and synchronous interoperability. C FFI
-tests exercise one caller worker, admission, callback ownership and local storage.
+tests exercise caller workers, context isolation, executor selection, context
+destruction, admission, callback ownership and local storage.
 Set `LOON_ASYNC_TEST_ENDPOINT` to opt into the existing MinIO round trips; the
 bucket is `manifest-async-test`, with test credentials `manifesttest` and
 `manifesttestsecret`. Run builds/tests through the repository's `wt-build`

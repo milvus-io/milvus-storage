@@ -230,8 +230,9 @@ _loon_transaction_commit_async
 _loon_transaction_begin_async
 _loon_async_cancel
 _loon_async_release
-_loon_async_configure_executor
-_loon_async_shutdown
+_loon_io_context_create
+_loon_io_context_shutdown
+_loon_io_context_destroy
 _loon_errcode_async_cancelled
 _loon_errcode_async_deadline
 _loon_errcode_async_overloaded
