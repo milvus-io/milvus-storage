@@ -1147,12 +1147,12 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
   }
 
   arrow::Status CreateMultipartUpload() {
+    FIU_RETURN_ON(FIUKEY_S3FS_CREATE_UPLOAD_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_CREATE_UPLOAD_FAIL)));
 #ifdef WITH_CRT
     if (native_)
       return StartNativeMultipart();
 #endif
-    FIU_RETURN_ON(FIUKEY_S3FS_CREATE_UPLOAD_FAIL,
-                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_CREATE_UPLOAD_FAIL)));
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
     // Initiate the multi-part upload
@@ -1326,10 +1326,6 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
   }
 
   Future<> CloseAsync() override {
-#ifdef WITH_CRT
-    if (native_)
-      return CloseNativeAsync();
-#endif
     if (closed_) {
       return arrow::Status::OK();
     }
@@ -1338,6 +1334,11 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
                   MakeExtendError(ExtendStatusCode::StorageTransientNetwork,
                                   fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_CLOSE_FAIL),
                                   fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_CLOSE_FAIL)));
+
+#ifdef WITH_CRT
+    if (native_)
+      return CloseNativeAsync();
+#endif
 
     ARROW_RETURN_NOT_OK(CleanupIfFailed(EnsureReadyToFlushFromClose()));
 
@@ -2009,7 +2010,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
     auto native = NativeS3Transport::Make(native_options, holder_, crt_holder_);
     if (native.ok()) {
       native_ = *native;
-      native_operations_ = MakeNativeS3Operations(native_options, io_context_, native_);
+      native_operations_ = MakeNativeS3Operations(io_context_, native_);
       ARROW_RETURN_NOT_OK(native_operations_.status());
     } else {
       native_operations_ = native.status();
@@ -2700,27 +2701,6 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
   }
 
   // Shared legacy path for synchronous callers and builds without native CRT.
-  Future<> DeleteDirContentsAsync(const std::string& s, bool missing_dir_ok) {
-    ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
-
-    if (path.empty()) {
-      return arrow::Status::NotImplemented("Cannot delete all S3 buckets");
-    }
-    auto self = shared_from_this();
-    return DeleteDirContentsAsync(path.bucket, path.key)
-        .Then(
-            [path, self]() {
-              // Directory may be implicitly deleted, recreate it
-              return self->EnsureDirectoryExists(path);
-            },
-            [missing_dir_ok](const Status& err) {
-              if (missing_dir_ok && ::arrow::internal::ErrnoFromStatus(err) == ENOENT) {
-                return arrow::Status::OK();
-              }
-              return err;
-            });
-  }
-
   FileInfoGenerator GetFileInfoGenerator(const FileSelector& select) {
     auto maybe_base_path = S3Path::FromString(select.base_dir);
     if (!maybe_base_path.ok()) {
@@ -3061,16 +3041,28 @@ arrow::Status S3FileSystem::DeleteDir(const std::string& s) {
 }
 
 arrow::Status S3FileSystem::DeleteDirContents(const std::string& s, bool missing_dir_ok) {
-  return impl_->DeleteDirContentsAsync(s, missing_dir_ok).status();
+  return DeleteDirContentsAsync(s, missing_dir_ok).status();
 }
 
 arrow::Future<> S3FileSystem::DeleteDirContentsAsync(const std::string& s, bool missing_dir_ok) {
-#ifdef WITH_CRT
-  ARROW_RETURN_NOT_OK(impl_->native_operations_.status());
-  return (*impl_->native_operations_)->DeleteDirContentsAsync(s, missing_dir_ok);
-#else
-  return impl_->DeleteDirContentsAsync(s, missing_dir_ok);
-#endif
+  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
+
+  if (path.empty()) {
+    return arrow::Status::NotImplemented("Cannot delete all S3 buckets");
+  }
+  auto self = impl_;
+  return impl_->DeleteDirContentsAsync(path.bucket, path.key)
+      .Then(
+          [path, self]() {
+            // Directory may be implicitly deleted, recreate it
+            return self->EnsureDirectoryExists(path);
+          },
+          [missing_dir_ok](const Status& err) {
+            if (missing_dir_ok && ::arrow::internal::ErrnoFromStatus(err) == ENOENT) {
+              return arrow::Status::OK();
+            }
+            return err;
+          });
 }
 
 arrow::Status S3FileSystem::DeleteRootDirContents() {
@@ -3143,75 +3135,20 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenOutput
 
   ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
+#ifdef WITH_CRT
+  if (impl_->native_ && (upload_size < 5LL * 1024 * 1024 || upload_size > 5LL * 1024 * 1024 * 1024))
+    return Status::Invalid("S3 part size must be between 5 MiB and 5 GiB");
+#endif
   auto ptr =
       std::make_shared<CustomOutputStream>(impl_->holder_, io_context(), path, impl_->options(), metadata, upload_size);
+#ifdef WITH_CRT
+  // Opening only initializes local state. Network I/O starts on Write/CloseAsync.
+  if (impl_->native_)
+    ptr->SetNativeTransport(impl_->native_, impl_->options().max_connections);
+#endif
   ARROW_RETURN_NOT_OK(ptr->Init());
   return ptr;
 };
-
-arrow::Future<> S3FileSystem::CreateDirAsync(const std::string& path, bool recursive) {
-#ifdef WITH_CRT
-  ARROW_RETURN_NOT_OK(impl_->native_operations_.status());
-  return (*impl_->native_operations_)->CreateDirAsync(path, recursive);
-#else
-  return arrow::Status::NotImplemented("Native asynchronous S3 requires WITH_CRT");
-#endif
-}
-
-arrow::Future<> S3FileSystem::DeleteDirAsync(const std::string& path) {
-#ifdef WITH_CRT
-  ARROW_RETURN_NOT_OK(impl_->native_operations_.status());
-  return (*impl_->native_operations_)->DeleteDirAsync(path);
-#else
-  return arrow::Status::NotImplemented("Native asynchronous S3 requires WITH_CRT");
-#endif
-}
-
-arrow::Future<> S3FileSystem::DeleteFileAsync(const std::string& path) {
-#ifdef WITH_CRT
-  ARROW_RETURN_NOT_OK(impl_->native_operations_.status());
-  return (*impl_->native_operations_)->DeleteFileAsync(path);
-#else
-  return arrow::Status::NotImplemented("Native asynchronous S3 requires WITH_CRT");
-#endif
-}
-
-arrow::Future<> S3FileSystem::CopyFileAsync(const std::string& source, const std::string& destination) {
-#ifdef WITH_CRT
-  ARROW_RETURN_NOT_OK(impl_->native_operations_.status());
-  return (*impl_->native_operations_)->CopyFileAsync(source, destination);
-#else
-  return arrow::Status::NotImplemented("Native asynchronous S3 requires WITH_CRT");
-#endif
-}
-
-arrow::Future<> S3FileSystem::MoveAsync(const std::string& source, const std::string& destination) {
-#ifdef WITH_CRT
-  ARROW_RETURN_NOT_OK(impl_->native_operations_.status());
-  return (*impl_->native_operations_)->MoveAsync(source, destination);
-#else
-  return arrow::Status::NotImplemented("Native asynchronous S3 requires WITH_CRT");
-#endif
-}
-
-arrow::Future<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenOutputStreamAsync(
-    const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) {
-#ifdef WITH_CRT
-  ARROW_RETURN_NOT_OK(impl_->native_operations_.status());
-  return (*impl_->native_operations_)->OpenOutputStreamAsync(path, metadata);
-#else
-  return arrow::Status::NotImplemented("Native asynchronous S3 requires WITH_CRT");
-#endif
-}
-
-arrow::Future<FileInfo> S3FileSystem::GetFileInfoAsync(const std::string& path) {
-#ifdef WITH_CRT
-  ARROW_RETURN_NOT_OK(impl_->native_operations_.status());
-  return (*impl_->native_operations_)->GetFileInfoAsync(path);
-#else
-  return arrow::Status::NotImplemented("Native asynchronous S3 requires WITH_CRT");
-#endif
-}
 
 arrow::Future<arrow::fs::FileInfoVector> S3FileSystem::GetFileInfoAsync(const std::vector<std::string>& paths) {
 #ifdef WITH_CRT
@@ -3230,26 +3167,6 @@ arrow::Future<arrow::fs::FileInfoVector> S3FileSystem::GetFileInfoAsync(const st
   return arrow::fs::FileSystem::GetFileInfoAsync(paths);
 #endif
 }
-
-#ifdef WITH_CRT
-Result<std::shared_ptr<arrow::io::OutputStream>> OpenNativeS3OutputStream(
-    const S3Options& options,
-    std::shared_ptr<NativeS3Transport> transport,
-    const arrow::io::IOContext& io_context,
-    const std::string& path,
-    const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) {
-  ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(path));
-  ARROW_ASSIGN_OR_RAISE(auto parsed, S3Path::FromString(path));
-  ARROW_RETURN_NOT_OK(ValidateFilePath(parsed));
-  if (options.multi_part_upload_size < 5ULL * 1024 * 1024 || options.multi_part_upload_size > 5ULL * 1024 * 1024 * 1024)
-    return Status::Invalid("S3 part size must be between 5 MiB and 5 GiB");
-  auto stream = std::make_shared<CustomOutputStream>(nullptr, io_context, parsed, options, metadata,
-                                                     options.multi_part_upload_size);
-  stream->SetNativeTransport(std::move(transport), options.max_connections);
-  ARROW_RETURN_NOT_OK(stream->Init());
-  return stream;
-}
-#endif
 
 S3FileSystem::S3FileSystem(const S3Options& options, const arrow::io::IOContext& io_context)
     : FileSystem(io_context), impl_(std::make_shared<Impl>(options, io_context)) {

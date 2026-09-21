@@ -1,31 +1,28 @@
 # Native asynchronous S3 filesystem operations
 
-Sync and async operations use the same filesystem instance. Storage's factory and
-cache return `FileSystemPtr` (`shared_ptr<FileSystemProxy>`), retaining the concrete
-methods instead of erasing them to Arrow's smaller interface. The handle remains
-implicitly convertible to `shared_ptr<arrow::fs::FileSystem>` for existing consumers.
-No separate async factory, cast, capability object or lifecycle is needed.
-Use `auto` or `FileSystemPtr` to retain the added methods. Explicitly storing the
-handle as `ArrowFileSystemPtr` exposes only Arrow's base-class methods, while
-referencing the same object. `S3FileSystem::Make` also returns an instance with
-both synchronous and asynchronous methods.
+Sync and async operations use the same filesystem instance returned by Storage's
+factory and cache. Arrow's existing virtual methods remain available through a
+`shared_ptr<arrow::fs::FileSystem>`. Opening an output stream initializes local
+state and returns synchronously; network operations use the stream's async methods.
 
 ```cpp
 ARROW_ASSIGN_OR_RAISE(auto fs, CreateArrowFileSystem(config));
 auto info = fs->GetFileInfo("key");
-auto pending = fs->GetFileInfoAsync("key");
+auto pending = fs->GetFileInfoAsync(std::vector<std::string>{"key"});
 auto reader = fs->OpenInputFileAsync("key");
-auto output = fs->OpenOutputStreamAsync("key");
-auto removal = fs->DeleteFileAsync("old-key");
+ARROW_ASSIGN_OR_RAISE(auto output, fs->OpenOutputStream("key"));
+ARROW_RETURN_NOT_OK(output->Write(arrow::Buffer::FromString("payload")));
+auto closed = output->CloseAsync();
 ```
 
 S3FileSystem owns native request execution internally and shares its transport and
 IOContext across calls. FileSystemProxy applies its existing subtree prefix. Batch
-stat overrides Arrow's virtual API too, and listing reuses GetFileInfoGenerator.
+stat overrides Arrow's existing virtual API; single-path queries pass a one-element
+vector. Listing reuses GetFileInfoGenerator.
 Existing CRT reads, metadata caches and file objects are reused. CRT input files
 require native transport at initialization; unsupported configurations fail to open
 with NotImplemented, rather than falling back to executor-backed metadata reads.
-In CRT builds, unsupported async metadata, listing, opening and directory-delete
+In CRT builds, unsupported async metadata, listing and input-opening
 operations return NotImplemented instead of scheduling synchronous SDK calls. The existing
 SDK input path remains available when CRT reads are disabled. The executor must
 outlive operations; request completions retain their state and preserve the actual result if completion dispatch is rejected.
@@ -53,8 +50,15 @@ request-level retry extension.
 
 ## Existing output streams and transport
 
-`OpenOutputStreamAsync` returns the existing Arrow `OutputStream`. Its underlying
-`CustomOutputStream` retains the existing buffers, part numbering, metadata,
+The existing `OpenOutputStream` returns an Arrow `OutputStream` whose
+`CustomOutputStream` also implements `AsyncOutputStream`. When the filesystem has
+a native CRT transport, this factory attaches it to the stream before local
+initialization. `OpenConditionalOutputStream` and `OpenOutputStreamWithUploadSize`
+use the same creation path. Opening performs no network I/O and needs no Future.
+Without a supported native transport, output streams retain the existing SDK path;
+that path does not guarantee nonblocking I/O.
+
+The stream retains the existing buffers, part numbering, metadata,
 conditional-write headers and completed-part state. The native path replaces
 network submission for PUT, multipart create/upload/complete/abort. `Write` copies
 or retains memory and submits work; `CloseAsync` waits through continuations and
@@ -101,35 +105,31 @@ buffers, completion rejection and shutdown. Isolated MinIO validates signing,
 metadata, checksums and service semantics. No throughput or AWS/TLS production
 certification is claimed.
 
-## Directory and file operations
+## Scope
 
-CreateDir, DeleteDir/Contents, DeleteFile, CopyFile and Move have explicit async
-counterparts. Directory creation honors bucket-creation policy; bucket deletion
-is checked before deleting any children. Recursive deletion retains at most one
-LIST page and uses native DELETE requests. It is not transactional: failures may
-leave partial progress, concurrent writers may prevent termination, and versioned
-bucket deletion retains S3 delete-marker/version semantics.
+Native operations cover metadata/stat, listing, input reads and output writes.
+Stat uses Arrow's existing vector interface for both single-path and batch calls;
+there is no added public single-path overload.
 
-CopyFile uses CopyObject, with its existing 5-GiB limit; object data does not pass
-through the client. Move is copy followed by source deletion with If-Match. It is
-not atomic, and a failed delete leaves the destination copy. S3-compatible servers
-must honor conditional DELETE for protection against concurrent source overwrites.
-Clearing every bucket at the filesystem root remains unsupported, as in the
-synchronous filesystem. Append remains unsupported by S3.
+Directory cleanup keeps its pre-existing SDK implementation, including
+`DeleteDirContentsAsync`; this PR makes no nonblocking guarantee for it. CreateDir,
+DeleteDir, DeleteFile, CopyFile and Move keep their existing interfaces. Append
+remains unsupported by S3. Changes are confined to FileSystem/S3 and do not modify
+Manifest, Transaction or FFI.
 
-## Verified locally (2026-09-18)
+## Verified locally (2026-09-21)
 
-The CRT-enabled Release library and complete C++ test executable compile in the
-storage development container (`WITH_UT=ON`, `WITH_ASAN=OFF`). Results:
+The CRT-enabled Release library and C++ tests build in the storage development
+container (`WITH_UT=ON`, `WITH_ASAN=OFF`). The output factory now uses the
+existing `OpenOutputStream` entry point:
 
-- Native HTTP fixture: 23 passed, one MinIO-only bucket test skipped. Includes
-  native batch stat through nested Arrow subtrees on a single caller worker.
-- Isolated MinIO: all 10 selected tests passed, including the bucket test, same
-  instance async-write/sync-read visibility, multipart conditional conflicts,
-  copy/move, directory lifecycle and shutdown.
-- Existing filesystem-cache and CRT shutdown/read regressions: all 21 passed.
-- Six affected C++ translation units pass syntax compilation with WITH_CRT
-  undefined. This is compile coverage, not a full no-CRT link or runtime test.
-- Error-handling ratchet passes with the unchanged throw baseline of 21.
+- Native HTTP fixture: 24 passed. Coverage
+  includes opening without network access, ordinary and conditional native writes,
+  multipart completion/abort, stat/list/read and original directory cleanup.
+- CRT read, metadata and lifetime regressions: 23 passed, one cloud-only test skipped.
+- Filesystem cache regressions: 20 passed in a separate process.
+- Four affected translation units pass syntax compilation with `WITH_CRT`
+  undefined; this is not a full no-CRT build or runtime test.
+- Clang-format 18 and the error-handling ratchet pass (throw baseline: 21).
 
-No ASan runtime or production AWS/TLS/load validation is claimed by these runs.
+This run does not claim ASan, MinIO, production AWS/TLS or load validation.

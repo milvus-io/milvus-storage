@@ -4,7 +4,6 @@
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 #include <arrow/testing/gtest_util.h>
 #include <arrow/util/thread_pool.h>
-#include <arrow/filesystem/localfs.h>
 #include <gtest/gtest.h>
 #include <cstdlib>
 #include <future>
@@ -20,15 +19,17 @@ template <class T>
 arrow::Result<T> Await(arrow::Future<T> future) {
   return future.result();
 }
-TEST(NativeS3Capability, UnsupportedProviderDoesNotFallback) {
-  ASSERT_OK_AND_ASSIGN(auto executor, arrow::internal::ThreadPool::Make(1));
-  auto local = std::make_shared<arrow::fs::LocalFileSystem>();
-  auto fs = std::make_shared<FileSystemProxy>("", local);
-  auto result = fs->GetFileInfoAsync("missing");
-  EXPECT_TRUE(result.status().IsNotImplemented());
+#ifdef WITH_CRT
+// Single-object assertions use the existing Arrow stat API with one path.
+arrow::Future<arrow::fs::FileInfo> Stat(const std::shared_ptr<arrow::fs::FileSystem>& fs, const std::string& path) {
+  return fs->GetFileInfoAsync(std::vector<std::string>{path})
+      .Then([](arrow::fs::FileInfoVector infos) -> arrow::Result<arrow::fs::FileInfo> {
+        if (infos.size() != 1)
+          return arrow::Status::Invalid("Expected one stat result");
+        return std::move(infos.front());
+      });
 }
 
-#ifdef WITH_CRT
 class NativeS3Test : public ::testing::Test {
   protected:
   static void SetUpTestSuite() {
@@ -93,12 +94,9 @@ class NativeS3Test : public ::testing::Test {
   arrow::Future<> Write(const std::string& path,
                         std::shared_ptr<arrow::Buffer> data,
                         std::shared_ptr<const arrow::KeyValueMetadata> metadata = nullptr) {
-    return fs_->OpenOutputStreamAsync(path, metadata).Then([data](std::shared_ptr<arrow::io::OutputStream> stream) {
-      auto status = stream->Write(data);
-      if (!status.ok())
-        return arrow::Future<>::MakeFinished(status);
-      return stream->CloseAsync();
-    });
+    ARROW_ASSIGN_OR_RAISE(auto stream, fs_->OpenOutputStream(path, metadata));
+    ARROW_RETURN_NOT_OK(stream->Write(data));
+    return stream->CloseAsync();
   }
   std::string prefix_ = "bucket/root";
   S3Options options_;
@@ -110,7 +108,7 @@ class NativeS3Test : public ::testing::Test {
 
 TEST_F(NativeS3Test, SameInstanceSupportsSyncAndArrowAsyncCalls) {
   ASSERT_OK_AND_ASSIGN(auto before, fs_->GetFileInfo("hello #?+% 中文"));
-  ASSERT_OK_AND_ASSIGN(auto after, Await(fs_->GetFileInfoAsync("hello #?+% 中文")));
+  ASSERT_OK_AND_ASSIGN(auto after, Await(Stat(fs_, "hello #?+% 中文")));
   EXPECT_EQ(before, after);
   std::shared_ptr<arrow::fs::FileSystem> arrow_fs = fs_;
   ASSERT_OK_AND_ASSIGN(auto batch,
@@ -119,7 +117,7 @@ TEST_F(NativeS3Test, SameInstanceSupportsSyncAndArrowAsyncCalls) {
   EXPECT_EQ(batch[0], after);
   EXPECT_EQ(batch[1].type(), arrow::fs::FileType::NotFound);
   auto nested = std::make_shared<FileSystemProxy>("pages", fs_);
-  ASSERT_OK_AND_ASSIGN(auto nested_info, Await(nested->GetFileInfoAsync("a")));
+  ASSERT_OK_AND_ASSIGN(auto nested_info, Await(Stat(nested, "a")));
   EXPECT_EQ(nested_info.path(), "a");
 }
 
@@ -133,7 +131,7 @@ TEST_F(NativeS3Test, FactoryAndCacheReturnTheSameSyncAsyncHandle) {
   config.access_key_value = "fixture-secret";
   config.region = "us-east-1";
   ASSERT_OK_AND_ASSIGN(auto fs, CreateArrowFileSystem(config));
-  ASSERT_OK_AND_ASSIGN(auto info, Await(fs->GetFileInfoAsync("root/hello #?+% 中文")));
+  ASSERT_OK_AND_ASSIGN(auto info, Await(Stat(fs, "root/hello #?+% 中文")));
   EXPECT_EQ(info.type(), arrow::fs::FileType::File);
   ASSERT_OK_AND_ASSIGN(auto sync_info, fs->GetFileInfo(info.path()));
   EXPECT_EQ(info, sync_info);
@@ -149,13 +147,13 @@ TEST_F(NativeS3Test, FactoryAndCacheReturnTheSameSyncAsyncHandle) {
   ASSERT_OK_AND_ASSIGN(auto cached, cache.get(properties));
   ASSERT_OK_AND_ASSIGN(auto cached_again, cache.get(properties));
   EXPECT_EQ(cached.get(), cached_again.get());
-  ASSERT_OK_AND_ASSIGN(auto cached_info, Await(cached->GetFileInfoAsync(info.path())));
+  ASSERT_OK_AND_ASSIGN(auto cached_info, Await(Stat(cached, info.path())));
   EXPECT_EQ(cached_info, info);
   cache.clean();
 }
 
 TEST_F(NativeS3Test, HeadAndReadUseCallerExecutorWithoutNetworkWait) {
-  CompletesWithoutBlockingWorker<arrow::fs::FileInfo>([this] { return fs_->GetFileInfoAsync("slow"); });
+  CompletesWithoutBlockingWorker<arrow::fs::FileInfo>([this] { return Stat(fs_, "slow"); });
   auto subtree = std::make_shared<arrow::fs::SubTreeFileSystem>("", fs_);
   auto view = std::make_shared<FileSystemProxy>("", subtree);
   CompletesWithoutBlockingWorker<arrow::fs::FileInfoVector>(
@@ -164,7 +162,7 @@ TEST_F(NativeS3Test, HeadAndReadUseCallerExecutorWithoutNetworkWait) {
 }
 
 TEST_F(NativeS3Test, MetadataRangesAndSubtreePaths) {
-  ASSERT_OK_AND_ASSIGN(auto info, Await(fs_->GetFileInfoAsync("hello #?+% 中文")));
+  ASSERT_OK_AND_ASSIGN(auto info, Await(Stat(fs_, "hello #?+% 中文")));
   EXPECT_EQ(info.path(), "hello #?+% 中文");
   EXPECT_EQ(info.size(), 6);
   ASSERT_OK_AND_ASSIGN(auto data, Await(Read("hello #?+% 中文", 2, 20)));
@@ -191,9 +189,9 @@ TEST_F(NativeS3Test, ListPaginatesAndDetectsMissingDirectory) {
     for (auto& info : page) paths.push_back(info.path());
   }
   EXPECT_EQ(paths, (std::vector<std::string>{"pages/0", "pages/1", "pages/2", "pages/3", "pages/4"}));
-  ASSERT_OK_AND_ASSIGN(auto dir, Await(fs_->GetFileInfoAsync("pages")));
+  ASSERT_OK_AND_ASSIGN(auto dir, Await(Stat(fs_, "pages")));
   EXPECT_EQ(dir.type(), arrow::fs::FileType::Directory);
-  ASSERT_OK_AND_ASSIGN(auto missing, Await(fs_->GetFileInfoAsync("missing")));
+  ASSERT_OK_AND_ASSIGN(auto missing, Await(Stat(fs_, "missing")));
   EXPECT_EQ(missing.type(), arrow::fs::FileType::NotFound);
 }
 
@@ -205,7 +203,7 @@ TEST_F(NativeS3Test, ListSubmissionDoesNotBlockWorker) {
 }
 
 TEST_F(NativeS3Test, HttpErrorsAndMalformedPagination) {
-  EXPECT_FALSE(fs_->GetFileInfoAsync("denied").status().ok());
+  EXPECT_FALSE(Stat(fs_, "denied").status().ok());
   EXPECT_FALSE(Read("denied", 0, 1).status().ok());
   arrow::fs::FileSelector select;
   select.base_dir = "bad-token";
@@ -226,14 +224,14 @@ TEST_F(NativeS3Test, RejectedCompletionExecutorPreservesResult) {
   // Shutdown before submission forces the completion-dispatch fallback.
   ASSERT_OK(executor_->Shutdown());
   executor_stopped_ = true;
-  ASSERT_OK_AND_ASSIGN(auto info, Await(fs_->GetFileInfoAsync("hello #?+% 中文")));
+  ASSERT_OK_AND_ASSIGN(auto info, Await(Stat(fs_, "hello #?+% 中文")));
   EXPECT_EQ(info.size(), 6);
 }
 
 TEST_F(NativeS3Test, RejectedCompletionCanReleaseTheLastNativeTransportOwner) {
   ASSERT_OK(executor_->Shutdown());
   executor_stopped_ = true;
-  auto pending = fs_->GetFileInfoAsync("slow");
+  auto pending = Stat(fs_, "slow");
   fs_.reset();
   sync_.reset();
   ASSERT_TRUE(pending.Wait(5));
@@ -262,8 +260,44 @@ TEST_F(NativeS3Test, RootListingSkipsEmptyContinuationPage) {
   EXPECT_EQ(page.front().path(), "bucket");
   ASSERT_OK_AND_ASSIGN(page, Await(generator()));
   EXPECT_TRUE(page.empty());
-  EXPECT_TRUE(root->GetFileInfoAsync("bucket/../file").status().IsInvalid());
-  EXPECT_TRUE(fs_->GetFileInfoAsync("../file").status().IsInvalid());
+  EXPECT_TRUE(Stat(root, "bucket/../file").status().IsInvalid());
+  EXPECT_TRUE(Stat(fs_, "../file").status().IsInvalid());
+}
+
+TEST_F(NativeS3Test, ExistingOutputFactoriesOpenWithoutIo) {
+  auto options = options_;
+  options.endpoint_override = "127.0.0.1:1";
+  ASSERT_OK_AND_ASSIGN(auto s3, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
+  auto proxy = std::make_shared<FileSystemProxy>("bucket/root", s3);
+  std::shared_ptr<arrow::fs::FileSystem> fs = proxy;
+  ASSERT_OK_AND_ASSIGN(auto stream, fs->OpenOutputStream("no-network"));
+  auto async = std::dynamic_pointer_cast<AsyncOutputStream>(stream);
+  ASSERT_NE(async, nullptr);
+  ASSERT_OK(async->FlushAsync().status());
+  ASSERT_OK(async->AbortAsync().status());
+  ASSERT_OK_AND_ASSIGN(auto conditional, proxy->OpenConditionalOutputStream("no-network", nullptr));
+  auto conditional_async = std::dynamic_pointer_cast<AsyncOutputStream>(conditional);
+  ASSERT_NE(conditional_async, nullptr);
+  ASSERT_OK(conditional_async->AbortAsync().status());
+  // The sized factory uses its argument, not the default part size in options.
+  EXPECT_TRUE(s3->OpenOutputStreamWithUploadSize("bucket/key", nullptr, 1).status().IsInvalid());
+  ASSERT_OK_AND_ASSIGN(auto sized, s3->OpenOutputStreamWithUploadSize("bucket/key", nullptr, 6 * 1024 * 1024));
+  auto sized_async = std::dynamic_pointer_cast<AsyncOutputStream>(sized);
+  ASSERT_NE(sized_async, nullptr);
+  ASSERT_OK(sized_async->AbortAsync().status());
+}
+
+TEST_F(NativeS3Test, ExistingConditionalOutputStreamUsesNativeWrites) {
+  CompletesWithoutBlockingWorker<arrow::internal::Empty>([this]() -> arrow::Future<> {
+    ARROW_ASSIGN_OR_RAISE(auto stream, fs_->OpenConditionalOutputStream("slow-conditional", nullptr));
+    ARROW_RETURN_NOT_OK(stream->Write(arrow::Buffer::FromString("original")));
+    return stream->CloseAsync();
+  });
+  ASSERT_OK_AND_ASSIGN(auto conflicting, fs_->OpenConditionalOutputStream("slow-conditional", nullptr));
+  ASSERT_OK(conflicting->Write(arrow::Buffer::FromString("replacement")));
+  EXPECT_FALSE(conflicting->CloseAsync().status().ok());
+  ASSERT_OK_AND_ASSIGN(auto data, Await(Read("slow-conditional", 0, 20)));
+  EXPECT_EQ(data->ToString(), "original");
 }
 
 TEST_F(NativeS3Test, AsyncWriteAndSyncReadShareOneHandle) {
@@ -272,12 +306,12 @@ TEST_F(NativeS3Test, AsyncWriteAndSyncReadShareOneHandle) {
   ASSERT_OK_AND_ASSIGN(auto data, reader->Read(4));
   EXPECT_EQ(data->ToString(), "data");
   ASSERT_OK_AND_ASSIGN(auto info, fs_->GetFileInfo("same-handle"));
-  ASSERT_OK_AND_ASSIGN(auto async_info, Await(fs_->GetFileInfoAsync("same-handle")));
+  ASSERT_OK_AND_ASSIGN(auto async_info, Await(Stat(fs_, "same-handle")));
   EXPECT_EQ(info, async_info);
 }
 
 TEST_F(NativeS3Test, WritesConditionalMetadataAndOwnedBuffer) {
-  EXPECT_FALSE(fs_->OpenOutputStreamAsync("file/").status().ok());
+  EXPECT_FALSE(fs_->OpenOutputStream("file/").status().ok());
   auto metadata = arrow::key_value_metadata({"Content-Type", "test", "If-None-Match"}, {"text/plain", "kept", "*"});
   ASSERT_OK(Write("write #?+% 中文", arrow::Buffer::FromString("hello"), metadata).status());
   ASSERT_OK_AND_ASSIGN(auto read_metadata, Await(Metadata("write #?+% 中文")));
@@ -301,12 +335,12 @@ TEST_F(NativeS3Test, MultipartCompleteAndAbort) {
   ASSERT_OK(Write("multipart", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a') + "tail")).status());
   ASSERT_OK_AND_ASSIGN(auto data, Await(Read("multipart", 5 * 1024 * 1024 - 2, 10)));
   EXPECT_EQ(data->ToString(), "aatail");
-  ASSERT_OK_AND_ASSIGN(auto stream, Await(fs_->OpenOutputStreamAsync("aborted")));
+  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream("aborted"));
   ASSERT_OK(stream->Write(arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))));
   auto async = std::dynamic_pointer_cast<AsyncOutputStream>(stream);
   ASSERT_NE(async, nullptr);
   ASSERT_OK(async->AbortAsync().status());
-  ASSERT_OK_AND_ASSIGN(auto missing, Await(fs_->GetFileInfoAsync("aborted")));
+  ASSERT_OK_AND_ASSIGN(auto missing, Await(Stat(fs_, "aborted")));
   EXPECT_EQ(missing.type(), arrow::fs::FileType::NotFound);
 }
 TEST_F(NativeS3Test, MultipartConditionalConflictPreservesObject) {
@@ -320,7 +354,7 @@ TEST_F(NativeS3Test, MultipartConditionalConflictPreservesObject) {
 }
 TEST_F(NativeS3Test, MultipartEmbeddedErrorIsNotSuccess) {
   EXPECT_FALSE(Write("error-complete", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))).status().ok());
-  ASSERT_OK_AND_ASSIGN(auto missing, Await(fs_->GetFileInfoAsync("error-complete")));
+  ASSERT_OK_AND_ASSIGN(auto missing, Await(Stat(fs_, "error-complete")));
   EXPECT_EQ(missing.type(), arrow::fs::FileType::NotFound);
 }
 TEST_F(NativeS3Test, RejectedCompletionPreservesSuccessfulWrite) {
@@ -331,7 +365,7 @@ TEST_F(NativeS3Test, RejectedCompletionPreservesSuccessfulWrite) {
   EXPECT_EQ(data->ToString(), "durable");
 }
 TEST_F(NativeS3Test, StreamBackpressureDoesNotConsumeRejectedWrite) {
-  ASSERT_OK_AND_ASSIGN(auto stream, Await(fs_->OpenOutputStreamAsync("backpressure")));
+  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream("backpressure"));
   auto async = std::dynamic_pointer_cast<AsyncOutputStream>(stream);
   EXPECT_TRUE(stream->Write(arrow::Buffer::FromString(std::string(10 * 1024 * 1024, 'x'))).IsCapacityError());
   ASSERT_OK_AND_ASSIGN(auto offset, stream->Tell());
@@ -342,81 +376,21 @@ TEST_F(NativeS3Test, StreamBackpressureDoesNotConsumeRejectedWrite) {
   ASSERT_OK(stream->CloseAsync().status());
 }
 
-TEST_F(NativeS3Test, DirectoryLifecycleAndBoundedDeletion) {
-  ASSERT_OK(fs_->CreateDirAsync("dir/sub").status());
-  ASSERT_OK_AND_ASSIGN(auto info, Await(fs_->GetFileInfoAsync("dir/sub")));
-  EXPECT_EQ(info.type(), arrow::fs::FileType::Directory);
-  EXPECT_FALSE(fs_->CreateDirAsync("no-parent/child", false).status().ok());
-  for (int i = 0; i < 5; ++i)
-    ASSERT_OK(Write("dir/sub/file" + std::to_string(i), arrow::Buffer::FromString("data")).status());
-  EXPECT_FALSE(fs_->DeleteFileAsync("dir").status().ok());
-  std::shared_ptr<arrow::fs::FileSystem> arrow_fs = fs_;
-  ASSERT_OK(arrow_fs->DeleteDirContentsAsync("dir/sub").status());
-  ASSERT_OK_AND_ASSIGN(info, Await(fs_->GetFileInfoAsync("dir/sub")));
-  EXPECT_EQ(info.type(), arrow::fs::FileType::Directory);
-  arrow::fs::FileSelector selector;
-  selector.base_dir = "dir/sub";
-  auto listing = fs_->GetFileInfoGenerator(selector);
-  ASSERT_OK_AND_ASSIGN(auto page, Await(listing()));
-  EXPECT_TRUE(page.empty());
-  ASSERT_OK(fs_->DeleteDirAsync("dir").status());
-  ASSERT_OK_AND_ASSIGN(info, Await(fs_->GetFileInfoAsync("dir")));
-  EXPECT_EQ(info.type(), arrow::fs::FileType::NotFound);
-  ASSERT_OK(fs_->DeleteDirContentsAsync("absent-dir", true).status());
-  EXPECT_FALSE(fs_->DeleteDirContentsAsync("absent-dir", false).status().ok());
-}
-TEST_F(NativeS3Test, CopyMoveAndDeleteSpecialKeys) {
-  auto options = arrow::key_value_metadata({"test"}, {"copied"});
-  ASSERT_OK(Write("source #?+% 中文", arrow::Buffer::FromString("payload"), options).status());
-  ASSERT_OK(fs_->CopyFileAsync("source #?+% 中文", "copy").status());
-  ASSERT_OK_AND_ASSIGN(auto metadata, Await(Metadata("copy")));
-  ASSERT_OK_AND_ASSIGN(auto value, metadata->Get("test"));
-  EXPECT_EQ(value, "copied");
-  ASSERT_OK(fs_->MoveAsync("copy", "moved").status());
-  ASSERT_OK_AND_ASSIGN(auto info, Await(fs_->GetFileInfoAsync("copy")));
-  EXPECT_EQ(info.type(), arrow::fs::FileType::NotFound);
-  ASSERT_OK_AND_ASSIGN(auto data, Await(Read("moved", 0, 10)));
-  EXPECT_EQ(data->ToString(), "payload");
-  ASSERT_OK(fs_->DeleteFileAsync("moved").status());
-  EXPECT_FALSE(fs_->DeleteFileAsync("moved").status().ok());
-  ASSERT_OK(fs_->DeleteFileAsync("source #?+% 中文").status());
-}
-TEST_F(NativeS3Test, CopyEmbeddedErrorDoesNotDeleteSource) {
-  ASSERT_OK(Write("copy-source", arrow::Buffer::FromString("data")).status());
-  EXPECT_FALSE(fs_->MoveAsync("copy-source", "copy-error").status().ok());
-  ASSERT_OK_AND_ASSIGN(auto data, Await(Read("copy-source", 0, 4)));
-  EXPECT_EQ(data->ToString(), "data");
-}
-TEST_F(NativeS3Test, BucketLifecycleHonorsPolicy) {
-  if (!std::getenv("STORAGE_NATIVE_S3_REAL"))
-    GTEST_SKIP() << "Requires isolated MinIO";
-  auto root = sync_;
-  EXPECT_FALSE(root->DeleteDirAsync("bucket").status().ok());
-  auto options = options_;
-  options.allow_bucket_deletion = true;
-  ASSERT_OK_AND_ASSIGN(auto sync, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
-  root = sync;
-  ASSERT_OK(root->CreateDirAsync("native-s3-bucket-test/child").status());
-  ASSERT_OK_AND_ASSIGN(auto stream, Await(root->OpenOutputStreamAsync("native-s3-bucket-test/child/file")));
-  ASSERT_OK(stream->Write(arrow::Buffer::FromString("data")));
-  ASSERT_OK(stream->CloseAsync().status());
-  ASSERT_OK(root->DeleteDirAsync("native-s3-bucket-test").status());
-  ASSERT_OK_AND_ASSIGN(auto missing, Await(root->GetFileInfoAsync("native-s3-bucket-test")));
-  EXPECT_EQ(missing.type(), arrow::fs::FileType::NotFound);
-}
-
-TEST_F(NativeS3Test, UnsupportedDeleteDoesNotFallbackToBlockingSdkRequests) {
+TEST_F(NativeS3Test, DirectoryContentsRetainsExistingSdkBehavior) {
   auto options = options_;
   options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
   ASSERT_OK_AND_ASSIGN(auto fs, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
-  EXPECT_TRUE(fs->DeleteDirContentsAsync("bucket/absent", true).status().IsNotImplemented());
-  // The synchronous operation remains usable with the same configuration.
+  // Directory cleanup retains the existing SDK implementation even when
+  // native read/write transport does not support this configuration.
+  ASSERT_OK(fs->DeleteDirContentsAsync("bucket/absent", true).status());
+  EXPECT_FALSE(fs->DeleteDirContentsAsync("bucket/absent", false).status().ok());
+  EXPECT_TRUE(fs->DeleteDirContentsAsync("", true).status().IsNotImplemented());
   ASSERT_OK(fs->DeleteDirContents("bucket/absent", true));
   EXPECT_FALSE(fs->DeleteDirContents("bucket/absent", false).ok());
   EXPECT_TRUE(fs->DeleteDirContents("", true).IsNotImplemented());
   ASSERT_OK(fs->CreateDir("bucket/root/sync-delete", true));
   ASSERT_OK(Write("sync-delete/file", arrow::Buffer::FromString("data")).status());
-  ASSERT_OK(fs->DeleteDirContents("bucket/root/sync-delete", false));
+  ASSERT_OK(fs->DeleteDirContentsAsync("bucket/root/sync-delete", false).status());
   ASSERT_OK_AND_ASSIGN(auto directory, fs->GetFileInfo("bucket/root/sync-delete"));
   EXPECT_EQ(directory.type(), arrow::fs::FileType::Directory);
   ASSERT_OK_AND_ASSIGN(auto removed, fs->GetFileInfo("bucket/root/sync-delete/file"));
