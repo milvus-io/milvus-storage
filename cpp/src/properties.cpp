@@ -471,11 +471,19 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       ValidatePropertyType() + ValidatePropertyRange<uint32_t>(0, UINT32_MAX)),
 
     // --- talon properties ---
-    REGISTER_PROPERTY(PROPERTY_FS_TALON_ENABLED,
-                      PropertyType::BOOL,
-                      "Whether remote filesystem reads should use Talon block routing.",
-                      false,
-                      ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_MODE,
+                      PropertyType::UINT32,
+                      "Talon read routing: 0 (disabled) reads from origin, 1 (full) routes all reads through Talon, "
+                      "and 2 (small_reads) routes requests up to fs.talon.small_read_threshold through Talon.",
+                      static_cast<uint32_t>(TalonMode::Disabled),
+                      ValidatePropertyType() +
+                          ValidatePropertyEnum<uint32_t>(TalonMode::Disabled, TalonMode::Full, TalonMode::SmallReads)),
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_SMALL_READ_THRESHOLD,
+                      PropertyType::UINT32,
+                      "Inclusive request size threshold in bytes for small_reads mode, before EOF clamping. "
+                      "Must be between 1 byte and 1 MiB. Ignored in other modes.",
+                      uint32_t(512U * 1024U),
+                      ValidatePropertyType() + ValidatePropertyRange<uint32_t>(1, 1024U * 1024U)),
     REGISTER_PROPERTY(PROPERTY_FS_TALON_COORDINATOR,
                       PropertyType::STRING,
                       "The Talon coordinator address used for block routing.",
