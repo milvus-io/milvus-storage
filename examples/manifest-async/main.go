@@ -103,17 +103,17 @@ func manifestBeginComplete(token C.uintptr_t, result C.LoonFFIResult, transactio
 	done <- value // Buffered before submission; early completion cannot lose notification.
 }
 
-func begin(ctx context.Context, path string, properties *C.LoonProperties) (C.LoonTransactionHandle, error) {
-	return beginVersion(ctx, path, properties, -1)
+func begin(ctx context.Context, ioContext C.LoonIOContextHandle, path string, properties *C.LoonProperties) (C.LoonTransactionHandle, error) {
+	return beginVersion(ctx, ioContext, path, properties, -1)
 }
 
-func beginVersion(ctx context.Context, path string, properties *C.LoonProperties, version int64) (C.LoonTransactionHandle, error) {
+func beginVersion(ctx context.Context, ioContext C.LoonIOContextHandle, path string, properties *C.LoonProperties, version int64) (C.LoonTransactionHandle, error) {
 	done := make(chan completion, 1)
 	token := cgo.NewHandle(done)
 	nativePath := C.CString(path)
 	defer C.free(unsafe.Pointer(nativePath))
 	var operation C.LoonAsyncHandle
-	result := C.loon_transaction_begin_async(nativePath, properties, C.int64_t(version), 0, 1, nil,
+	result := C.loon_transaction_begin_async(ioContext, nativePath, properties, C.int64_t(version), 0, 1, nil,
 		(C.LoonTransactionBeginCallback)(C.manifestBeginComplete), C.uintptr_t(token), &operation)
 	if err := consume(result); err != nil {
 		token.Delete()
@@ -145,11 +145,11 @@ func manifestCommitComplete(token C.uintptr_t, result C.LoonFFIResult, outcome C
 	done <- value
 }
 
-func commit(ctx context.Context, transaction C.LoonTransactionHandle) commitCompletion {
+func commit(ctx context.Context, ioContext C.LoonIOContextHandle, transaction C.LoonTransactionHandle) commitCompletion {
 	done := make(chan commitCompletion, 1)
 	token := cgo.NewHandle(done)
 	var operation C.LoonAsyncHandle
-	result := C.loon_transaction_commit_async(transaction, nil,
+	result := C.loon_transaction_commit_async(ioContext, transaction, nil,
 		(C.LoonTransactionCommitCallback)(C.manifestCommitComplete), C.uintptr_t(token), &operation)
 	if err := consume(result); err != nil {
 		token.Delete()
@@ -170,10 +170,11 @@ func main() {
 	pool := newExecutor(1)
 	defer pool.close()
 	descriptor := pool.descriptor()
-	if err := consume(C.loon_async_configure_executor(&descriptor)); err != nil {
+	var ioContext C.LoonIOContextHandle
+	if err := consume(C.loon_io_context_create(&descriptor, &ioContext)); err != nil {
 		panic(err)
 	}
-	defer C.loon_async_shutdown()
+	defer C.loon_io_context_destroy(ioContext)
 	pairs := [][2]string{
 		{"fs.storage_type", "remote"}, {"fs.address", os.Getenv("S3_ENDPOINT")},
 		{"fs.bucket_name", os.Getenv("S3_BUCKET")}, {"fs.access_key_id", os.Getenv("S3_ACCESS_KEY")},
@@ -201,7 +202,7 @@ func main() {
 		for i := 0; i < rounds; i++ {
 			ctx, cancel := context.WithCancel(context.Background())
 			go func() { runtime.Gosched(); cancel() }()
-			transaction, err := beginVersion(ctx, "cancel-example", &properties, 0)
+			transaction, err := beginVersion(ctx, ioContext, "cancel-example", &properties, 0)
 			cancel()
 			if transaction != 0 {
 				C.loon_transaction_destroy(transaction)
@@ -230,7 +231,7 @@ func main() {
 		fmt.Printf("concurrent goroutine ran; waiting stacks:\n%s\n", stack[:n])
 		close(observed)
 	}()
-	transaction, err := begin(ctx, os.Getenv("MANIFEST_PATH"), &properties)
+	transaction, err := begin(ctx, ioContext, os.Getenv("MANIFEST_PATH"), &properties)
 	if transaction != 0 {
 		defer C.loon_transaction_destroy(transaction)
 		if os.Getenv("MANIFEST_COMMIT") == "1" {
@@ -240,7 +241,7 @@ func main() {
 			if mutationErr != nil {
 				panic(mutationErr)
 			}
-			value := commit(ctx, transaction)
+			value := commit(ctx, ioContext, transaction)
 			fmt.Printf("commit outcome=%d version=%d error=%v\n", value.Outcome, value.Version, value.Err)
 			// UNKNOWN (2) is preserved even for a transient error. Do not blindly retry.
 			if value.Err != nil {

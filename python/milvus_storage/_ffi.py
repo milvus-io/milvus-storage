@@ -354,18 +354,20 @@ _ffi.cdef(
     typedef void (*LoonAsyncTask)(void*);
     typedef int32_t (*LoonAsyncSubmit)(void*, LoonAsyncTask, void*);
     typedef struct { uint32_t struct_size; uint32_t reserved; void* context; LoonAsyncSubmit submit; } LoonAsyncExecutor;
-    LoonFFIResult loon_async_configure_executor(const LoonAsyncExecutor*);
+    typedef struct LoonIOContext* LoonIOContextHandle;
+    LoonFFIResult loon_io_context_create(const LoonAsyncExecutor*, LoonIOContextHandle*);
+    void loon_io_context_shutdown(LoonIOContextHandle);
+    void loon_io_context_destroy(LoonIOContextHandle);
     typedef struct LoonAsyncOperation* LoonAsyncHandle;
     typedef struct { uint32_t struct_size; uint32_t flags; uint64_t timeout_ms; } LoonAsyncOptions;
     typedef void (*LoonTransactionBeginCallback)(uintptr_t, LoonFFIResult, LoonTransactionHandle);
-    LoonFFIResult loon_transaction_begin_async(const char*, const LoonProperties*, int64_t, int32_t,
+    LoonFFIResult loon_transaction_begin_async(LoonIOContextHandle, const char*, const LoonProperties*, int64_t, int32_t,
         uint32_t, const LoonAsyncOptions*, LoonTransactionBeginCallback, uintptr_t, LoonAsyncHandle*);
     typedef void (*LoonTransactionCommitCallback)(uintptr_t, LoonFFIResult, int32_t, int64_t);
-    LoonFFIResult loon_transaction_commit_async(LoonTransactionHandle, const LoonAsyncOptions*,
+    LoonFFIResult loon_transaction_commit_async(LoonIOContextHandle, LoonTransactionHandle, const LoonAsyncOptions*,
         LoonTransactionCommitCallback, uintptr_t, LoonAsyncHandle*);
     void loon_async_cancel(LoonAsyncHandle);
     void loon_async_release(LoonAsyncHandle);
-    void loon_async_shutdown(void);
 
     LoonFFIResult loon_transaction_begin(const char* base_path,
                                          const LoonProperties* properties,

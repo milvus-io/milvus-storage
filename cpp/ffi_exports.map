@@ -232,8 +232,9 @@
     loon_transaction_begin_async;
     loon_async_cancel;
     loon_async_release;
-    loon_async_configure_executor;
-    loon_async_shutdown;
+    loon_io_context_create;
+    loon_io_context_shutdown;
+    loon_io_context_destroy;
     loon_errcode_async_cancelled;
     loon_errcode_async_deadline;
     loon_errcode_async_overloaded;

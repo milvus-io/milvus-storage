@@ -53,28 +53,19 @@ class ExternalExecutor final : public folly::Executor {
   LoonAsyncExecutor descriptor_;
 };
 
-// C callback admission/lifecycle only. Native C++ operations inherit executors
-// from their consuming SemiFuture and do not use this process-wide C bridge.
-class Runtime {
-  public:
-  static Runtime& Instance() {
-    static Runtime runtime;
-    return runtime;
-  }
-  arrow::Status Configure(const LoonAsyncExecutor& executor) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (stopping_ || executor_)
-      return arrow::Status::Invalid("Async executor already configured or runtime stopped");
-    executor_ = std::make_shared<ExternalExecutor>(executor);
-    return arrow::Status::OK();
-  }
+}  // namespace
+
+// C callback admission/lifecycle belongs to the context passed by the caller.
+// Native C++ operations inherit executors from their consuming SemiFuture.
+struct LoonIOContext {
+  explicit LoonIOContext(const LoonAsyncExecutor& executor) : executor_(std::make_shared<ExternalExecutor>(executor)) {}
   struct Admission {
-    Runtime* runtime = nullptr;
+    LoonIOContext* context = nullptr;
     ~Admission() {
-      if (runtime) {
-        std::lock_guard<std::mutex> lock(runtime->mutex_);
-        --runtime->active_;
-        runtime->drained_.notify_all();
+      if (context) {
+        std::lock_guard<std::mutex> lock(context->mutex_);
+        --context->active_;
+        context->drained_.notify_all();
       }
     }
   };
@@ -84,8 +75,6 @@ class Runtime {
     std::shared_ptr<ExternalExecutor> executor;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!executor_)
-        return arrow::Status::Invalid("Caller must configure C async executor before submission");
       const auto& limits = AsyncManifestLimits::Get();
       if (!limits.ok())
         return limits.status();
@@ -93,7 +82,7 @@ class Runtime {
         return AsyncStatus::Overloaded;
       executor = executor_;
       ++active_;
-      admission->runtime = this;
+      admission->context = this;
     }
     struct Delivery {
       Callback callback;
@@ -137,7 +126,7 @@ class Runtime {
     stopping_ = true;
     drained_.wait(lock, [this] { return active_ == 0; });
   }
-  ~Runtime() { Shutdown(); }
+  ~LoonIOContext() { Shutdown(); }
 
   private:
   std::mutex mutex_;
@@ -146,6 +135,7 @@ class Runtime {
   size_t active_ = 0;
   bool stopping_ = false;
 };
+namespace {
 LoonFFIResult StatusResult(const AsyncStatus& status) noexcept {
   int code = LOON_SUCCESS;
   switch (status.code) {
@@ -187,11 +177,15 @@ LoonFFIResult ValidateOptions(const LoonAsyncOptions* options, uint64_t& timeout
 }
 }  // namespace
 
-LoonFFIResult loon_async_configure_executor(const LoonAsyncExecutor* executor) {
-  if (!executor || executor->struct_size < sizeof(LoonAsyncExecutor) || executor->reserved || !executor->submit)
+LoonFFIResult loon_io_context_create(const LoonAsyncExecutor* executor, LoonIOContextHandle* out_context) {
+  if (out_context)
+    *out_context = nullptr;
+  if (!out_context || !executor || executor->struct_size < sizeof(LoonAsyncExecutor) || executor->reserved ||
+      !executor->submit)
     return {LOON_INVALID_ARGS, nullptr};
   try {
-    return StatusResult(Runtime::Instance().Configure(*executor));
+    *out_context = new LoonIOContext(*executor);
+    return {LOON_SUCCESS, nullptr};
   } catch (const std::bad_alloc&) {
     return {LOON_MEMORY_ERROR, nullptr};
   } catch (...) {
@@ -199,7 +193,8 @@ LoonFFIResult loon_async_configure_executor(const LoonAsyncExecutor* executor) {
   }
 }
 
-LoonFFIResult loon_transaction_begin_async(const char* base_path,
+LoonFFIResult loon_transaction_begin_async(LoonIOContextHandle io_context,
+                                           const char* base_path,
                                            const LoonProperties* properties,
                                            int64_t read_version,
                                            int32_t resolve_id,
@@ -211,7 +206,7 @@ LoonFFIResult loon_transaction_begin_async(const char* base_path,
   using namespace milvus_storage::api;
   if (out_operation)
     *out_operation = nullptr;
-  if (!out_operation || !callback || !base_path || !properties || read_version < -1 ||
+  if (!io_context || !out_operation || !callback || !base_path || !properties || read_version < -1 ||
       (resolve_id != LOON_TRANSACTION_RESOLVE_FAIL && resolve_id != LOON_TRANSACTION_RESOLVE_OVERWRITE))
     return {LOON_INVALID_ARGS, nullptr};
   try {
@@ -238,8 +233,8 @@ LoonFFIResult loon_transaction_begin_async(const char* base_path,
       return StatusResult(uri.status());
     auto future = transaction::Transaction::BeginAsync(base_path, std::move(native_properties), read_version, resolver,
                                                        retry_limit, timeout, handle->state);
-    auto accepted = Runtime::Instance().Submit(
-        std::move(future), [callback, user_data](folly::Try<transaction::BeginResult>&& value) {
+    auto accepted =
+        io_context->Submit(std::move(future), [callback, user_data](folly::Try<transaction::BeginResult>&& value) {
           if (value.hasException()) {
             callback(user_data, StatusResult(AsyncStatus::Exception), 0);
             return;
@@ -260,7 +255,8 @@ LoonFFIResult loon_transaction_begin_async(const char* base_path,
     return {LOON_GOT_EXCEPTION, nullptr};
   }
 }
-LoonFFIResult loon_transaction_commit_async(LoonTransactionHandle transaction,
+LoonFFIResult loon_transaction_commit_async(LoonIOContextHandle io_context,
+                                            LoonTransactionHandle transaction,
                                             const LoonAsyncOptions* options,
                                             LoonTransactionCommitCallback callback,
                                             uintptr_t user_data,
@@ -268,7 +264,7 @@ LoonFFIResult loon_transaction_commit_async(LoonTransactionHandle transaction,
   using namespace milvus_storage::api;
   if (out_operation)
     *out_operation = nullptr;
-  if (!transaction || !callback || !out_operation)
+  if (!io_context || !transaction || !callback || !out_operation)
     return {LOON_INVALID_ARGS, nullptr};
   try {
     uint64_t timeout;
@@ -282,8 +278,8 @@ LoonFFIResult loon_transaction_commit_async(LoonTransactionHandle transaction,
     // Successful commits remain deferred until the caller executor consumes them.
     if (future.isReady())
       return StatusResult(std::move(future).get().status);
-    auto accepted = Runtime::Instance().Submit(
-        std::move(future), [callback, user_data](folly::Try<transaction::CommitResult>&& value) {
+    auto accepted =
+        io_context->Submit(std::move(future), [callback, user_data](folly::Try<transaction::CommitResult>&& value) {
           if (value.hasException()) {
             callback(user_data, StatusResult(AsyncStatus::Exception), LOON_COMMIT_UNKNOWN, -1);
             return;
@@ -311,9 +307,8 @@ void loon_async_cancel(LoonAsyncHandle operation) {
     operation->state->Cancel();
 }
 void loon_async_release(LoonAsyncHandle operation) { delete operation; }
-void loon_async_shutdown(void) {
-  try {
-    Runtime::Instance().Shutdown();
-  } catch (...) { /* Initialization failure has no accepted operations to drain. */
-  }
+void loon_io_context_shutdown(LoonIOContextHandle io_context) {
+  if (io_context)
+    io_context->Shutdown();
 }
+void loon_io_context_destroy(LoonIOContextHandle io_context) { delete io_context; }
