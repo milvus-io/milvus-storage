@@ -51,7 +51,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = urllib.parse.unquote(uri.path).lstrip("/")
         bucket, _, key = path.partition("/")
         query = urllib.parse.parse_qs(uri.query, keep_blank_values=True)
-        if key in ("root/slow", "root/slow-write") or query.get("prefix") == ["root/slow-list/"]:
+        if key in ("root/slow", "root/slow-write", "root/slow-conditional") or query.get("prefix") == ["root/slow-list/"]:
             time.sleep(0.3)
         if not bucket and self.command == "GET":
             if "continuation-token" not in query:
@@ -74,21 +74,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.command == "DELETE" and "uploadId" in query:
                 self.uploads.pop(query["uploadId"][0], None)
                 return self.reply(204)
-            if self.command == "DELETE":
-                if "If-Match" in self.headers and self.headers["If-Match"] != '"8aa99b1f439ff71293e95357bac6fd94"':
-                    return self.reply(412)
-                self.objects.pop(key, None)
-                self.metadata.pop(key, None)
-                return self.reply(204)
-            if "x-amz-copy-source" in self.headers:
-                src = urllib.parse.unquote(self.headers["x-amz-copy-source"]).lstrip("/").partition("/")[2]
-                if src not in self.objects:
-                    return self.reply(404)
-                if key == "root/copy-error":
-                    return self.reply(200, b"<Error><Code>InternalError</Code></Error>")
-                self.objects[key] = self.objects[src]
-                self.metadata[key] = dict(self.metadata.get(src, {}))
-                return self.reply(200, b'<CopyObjectResult><ETag>"8aa99b1f439ff71293e95357bac6fd94"</ETag></CopyObjectResult>')
             if self.command == "POST" and "uploads" in query:
                 upload_id = str(uuid.uuid4())
                 self.uploads[upload_id] = {"parts": {}, "key": key}
