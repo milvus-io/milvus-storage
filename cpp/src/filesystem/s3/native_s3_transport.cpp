@@ -9,7 +9,6 @@
 #include <mutex>
 #include <utility>
 #include <arrow/filesystem/path_util.h>
-#include <arrow/util/thread_pool.h>
 #include <aws/core/AmazonSerializableWebServiceRequest.h>
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
 #include <aws/core/http/HttpClientFactory.h>
@@ -39,7 +38,6 @@ namespace {
 struct Request {
   S3CrtClientLease client_lease;
   std::shared_ptr<NativeS3Transport::State> state;
-  arrow::io::IOContext io;
   size_t limit;
   std::shared_ptr<arrow::Buffer> data;
   std::unique_ptr<Aws::Utils::Stream::PreallocatedStreamBuf> streambuf;
@@ -124,35 +122,16 @@ struct Request {
         request->write_metrics->IncrementFailedCount();
       request->write_finished = true;
     }
-    auto future = request->future;
-    auto response = std::move(request->response);
-    std::shared_ptr<Request> owned;
-    try {
-      owned.reset(request);
-    } catch (...) {
-      // shared_ptr deletes request if control-block allocation fails.
-      future.MarkFinished(std::move(response));
-      return;
+    std::unique_ptr<Request> owned(request);
+    // Release admission before continuations submit another page or request.
+    {
+      std::lock_guard lock(owned->state->mutex);
+      --owned->state->inflight;
+      owned->network_pending = false;
     }
-    owned->response = std::move(response);
-    auto complete = [owned] {
-      // Bound queued responses too. Release admission immediately before user
-      // continuations, so a one-slot client can submit the next page/request.
-      {
-        std::lock_guard lock(owned->state->mutex);
-        --owned->state->inflight;
-        owned->network_pending = false;
-      }
-      owned->future.MarkFinished(std::move(owned->response));
-    };
-    try {
-      auto status = owned->io.executor()->Spawn(complete);
-      if (status.ok())
-        return;
-    } catch (...) {
-      // Preserve the known HTTP/write result on dispatch failure.
-    }
-    complete();
+    // As with native range reads, let callers select their continuation executor.
+    // The request lease remains alive until all inline continuations return.
+    owned->future.MarkFinished(std::move(owned->response));
   }
 };
 }  // namespace
@@ -218,7 +197,7 @@ arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(
   if (!crt_holder)
     return arrow::Status::NotImplemented("Native S3 requires the existing SDK CRT client");
   ARROW_ASSIGN_OR_RAISE(auto lease, crt_holder->Acquire());
-  if (!lease.native_client())
+  if (!lease->GetUnderlyingS3Client())
     return arrow::Status::Invalid("SDK CRT client has no underlying native client");
   auto state = std::make_shared<State>();
   state->holder = std::move(holder);
@@ -234,12 +213,9 @@ arrow::Future<NativeS3Response> NativeS3Transport::Send(const Aws::AmazonWebServ
                                                         size_t limit,
                                                         std::shared_ptr<arrow::Buffer> data) {
   auto send = [&]() -> arrow::Result<arrow::Future<NativeS3Response>> {
-    if (!io.executor())
-      return arrow::Status::Invalid("Native S3 needs a caller executor");
     ARROW_RETURN_NOT_OK(io.stop_token().Poll());
     auto r = std::make_unique<Request>();
     r->state = state_;
-    r->io = io;
     r->limit = limit;
     ARROW_ASSIGN_OR_RAISE(r->client_lease, holder_->Acquire());
     {
@@ -309,7 +285,7 @@ arrow::Future<NativeS3Response> NativeS3Transport::Send(const Aws::AmazonWebServ
     }
     auto future = r->future;
     auto* pending = r.release();
-    auto* meta = aws_s3_client_make_meta_request(pending->client_lease.native_client(), &options);
+    auto* meta = aws_s3_client_make_meta_request(pending->client_lease->GetUnderlyingS3Client(), &options);
     if (!meta) {
       r.reset(pending);
       return arrow::Status::IOError("CRT rejected S3 request: ", aws_error_str(aws_last_error()));

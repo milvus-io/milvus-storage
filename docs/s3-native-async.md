@@ -9,23 +9,30 @@ state and returns synchronously; network operations use the stream's async metho
 ARROW_ASSIGN_OR_RAISE(auto fs, CreateArrowFileSystem(config));
 auto info = fs->GetFileInfo("key");
 auto pending = fs->GetFileInfoAsync(std::vector<std::string>{"key"});
-auto reader = fs->OpenInputFileAsync("key");
+ARROW_ASSIGN_OR_RAISE(auto reader, fs->OpenInputFile("key"));
 ARROW_ASSIGN_OR_RAISE(auto output, fs->OpenOutputStream("key"));
 ARROW_RETURN_NOT_OK(output->Write(arrow::Buffer::FromString("payload")));
 auto closed = output->CloseAsync();
 ```
 
-S3FileSystem owns native request execution internally and shares its transport and
-IOContext across calls. FileSystemProxy applies its existing subtree prefix. Batch
+S3FileSystem owns native request execution internally. Its concrete
+NativeS3Operations helper implements metadata and listing over NativeS3Transport.
+FileSystemProxy applies its existing subtree prefix. Batch
 stat overrides Arrow's existing virtual API; single-path queries pass a one-element
 vector. Listing reuses GetFileInfoGenerator.
 Existing CRT reads, metadata caches and file objects are reused. CRT input files
 require native transport at initialization; unsupported configurations fail to open
 with NotImplemented, rather than falling back to executor-backed metadata reads.
-In CRT builds, unsupported async metadata, listing and input-opening
-operations return NotImplemented instead of scheduling synchronous SDK calls. The existing
-SDK input path remains available when CRT reads are disabled. The executor must
-outlive operations; request completions retain their state and preserve the actual result if completion dispatch is rejected.
+Unsupported native metadata and listing operations return NotImplemented. The
+existing SDK input path remains available when CRT reads are disabled. Both CRT
+and SDK input factories initialize local handles without network I/O. Arrow's
+async open overrides return an already-completed Future without scheduling work.
+
+Native request completion marks the Arrow Future directly on the CRT callback
+thread, as range reads already do. Callers select the executor for their consuming
+continuations; the transport does not enqueue completion on the filesystem's
+IOContext executor. Requests retain their buffers and client leases through
+completion, including when the filesystem has already been released.
 
 The transport borrows the **same** `aws_s3_client` owned by the filesystem's
 `Aws::S3Crt::S3CrtClient`, using its existing `S3CrtClientHolder` and operation
@@ -35,7 +42,7 @@ accessor to a build-local copy of the pinned SDK header; it does not modify the
 shared dependency cache or the SDK class layout. The accessor can be removed
 when an equivalent SDK API is available.
 
-Request leases live through native request shutdown and completion dispatch.
+Request leases live through native request shutdown and inline completion.
 If an inline completion drops the last holder on a CRT callback, the SDK's
 blocking destructor runs on a dedicated cleanup worker. This worker performs
 only client teardown, not S3 operations. The existing finalizer's live-client
@@ -101,7 +108,7 @@ is checked before dispatch; an already dispatched request is not cancelled.
 Validation runs through wt-build in the storage development container, with all
 outputs, caches and test-service data on /data/yuruiz. The HTTP fixture tests delayed
 requests with one caller worker, pagination, encoded paths, HTTP failures, owned
-buffers, completion rejection and shutdown. Isolated MinIO validates signing,
+buffers, completion with a stopped executor and shutdown. Isolated MinIO validates signing,
 metadata, checksums and service semantics. No throughput or AWS/TLS production
 certification is claimed.
 

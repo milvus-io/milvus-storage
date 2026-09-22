@@ -62,7 +62,8 @@ class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
 
   using arrow::fs::SubTreeFileSystem::OpenInputFile;
   using arrow::fs::SubTreeFileSystem::OpenOutputStream;
-  // Preserve native batch stat through the subtree proxy.
+  // Arrow 17 SubTreeFileSystem does not forward async batch stat to base_fs().
+  // Forward it here to preserve native I/O and translate subtree paths.
   arrow::Future<arrow::fs::FileInfoVector> GetFileInfoAsync(const std::vector<std::string>& paths) override;
 
   // Override OpenOutputStream to add fault injection point

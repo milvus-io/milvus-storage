@@ -557,12 +557,10 @@ TEST(S3CrtClientFinalizerTest, NativeLeaseBorrowsTheSdkClient) {
                                      },
                                      nullptr));
   ASSERT_AND_ASSIGN(auto lease, holder->Acquire());
-  ASSERT_NE(lease.native_client(), nullptr);
-  EXPECT_EQ(lease.native_client(), lease->GetUnderlyingS3Client());
-  auto* native = lease.native_client();
+  auto* native = lease->GetUnderlyingS3Client();
+  ASSERT_NE(native, nullptr);
   auto moved = std::move(lease);
-  EXPECT_EQ(lease.native_client(), nullptr);
-  EXPECT_EQ(moved.native_client(), native);
+  EXPECT_EQ(moved->GetUnderlyingS3Client(), native);
   moved = S3CrtClientLease{};
   holder.reset();
   finalizer->Finalize();
@@ -928,8 +926,14 @@ TEST(S3CrtBuildSupportTest, OpenInputFileRejectsUnsupportedNativeTransport) {
   ASSERT_AND_ASSIGN(auto input, sdk_fs->OpenInputFile(info));
   EXPECT_EQ(dynamic_cast<NonBlockingRandomAccessFile*>(input.get()), nullptr);
   ASSERT_STATUS_OK(input->Close());
-  EXPECT_TRUE(sdk_fs->OpenInputFileAsync(path).status().IsNotImplemented());
-  EXPECT_TRUE(sdk_fs->OpenInputFileAsync(info).status().IsNotImplemented());
+  auto by_path = sdk_fs->OpenInputFileAsync(path);
+  auto by_info = sdk_fs->OpenInputFileAsync(info);
+  EXPECT_TRUE(by_path.is_finished());
+  EXPECT_TRUE(by_info.is_finished());
+  ASSERT_STATUS_OK(by_path.status());
+  ASSERT_STATUS_OK(by_info.status());
+  ASSERT_STATUS_OK(by_path.result().ValueOrDie()->Close());
+  ASSERT_STATUS_OK(by_info.result().ValueOrDie()->Close());
 }
 
 struct S3CrtMetadataTestParam {

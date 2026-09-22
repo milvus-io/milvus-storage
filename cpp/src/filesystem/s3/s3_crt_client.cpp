@@ -107,8 +107,6 @@ inline arrow::Status ErrorS3Finalized() { return arrow::Status::Invalid("S3 subs
 S3CrtCallbackScope::S3CrtCallbackScope() { ++crt_callback_depth; }
 S3CrtCallbackScope::~S3CrtCallbackScope() { --crt_callback_depth; }
 
-aws_s3_client* S3CrtClientLease::native_client() const { return client_ ? client_->GetUnderlyingS3Client() : nullptr; }
-
 // Per-holder operation gate shared with every outstanding lease.
 //
 // Separating this block from S3CrtClientHolder is the core ownership rule:

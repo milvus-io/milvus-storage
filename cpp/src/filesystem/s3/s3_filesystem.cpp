@@ -94,7 +94,7 @@
 #include "milvus-storage/filesystem/s3/s3_client_builder.h"
 #ifdef WITH_CRT
 #include "milvus-storage/filesystem/s3/s3_crt_client.h"
-#include "filesystem/s3/async_s3_filesystem.h"
+#include "filesystem/s3/native_s3_operations.h"
 #include <aws/core/utils/HashingUtils.h>
 #endif
 
@@ -3324,33 +3324,22 @@ arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> S3FileSystem::OpenIn
   return impl_->OpenInputFile(info, this);
 }
 
+// Opening an input handle is local for both CRT and SDK files. Override Arrow's
+// default wrappers so opening never schedules work on an I/O executor.
 Future<std::shared_ptr<arrow::io::RandomAccessFile>> S3FileSystem::OpenInputFileAsync(const std::string& path) {
-#ifdef WITH_CRT
-  if (impl_->UseCrtReadPath())
-    return Future<std::shared_ptr<arrow::io::RandomAccessFile>>::MakeFinished(OpenInputFile(path));
-  return Status::NotImplemented("Nonblocking S3 input requires CRT reads");
-#else
-  return FileSystem::OpenInputFileAsync(path);
-#endif
+  return Future<std::shared_ptr<arrow::io::RandomAccessFile>>::MakeFinished(OpenInputFile(path));
 }
+
 Future<std::shared_ptr<arrow::io::RandomAccessFile>> S3FileSystem::OpenInputFileAsync(const FileInfo& info) {
-#ifdef WITH_CRT
-  if (impl_->UseCrtReadPath())
-    return Future<std::shared_ptr<arrow::io::RandomAccessFile>>::MakeFinished(OpenInputFile(info));
-  return Status::NotImplemented("Nonblocking S3 input requires CRT reads");
-#else
-  return FileSystem::OpenInputFileAsync(info);
-#endif
+  return Future<std::shared_ptr<arrow::io::RandomAccessFile>>::MakeFinished(OpenInputFile(info));
 }
+
 Future<std::shared_ptr<arrow::io::InputStream>> S3FileSystem::OpenInputStreamAsync(const std::string& path) {
-  return OpenInputFileAsync(path).Then([](std::shared_ptr<arrow::io::RandomAccessFile> file) {
-    return std::static_pointer_cast<arrow::io::InputStream>(file);
-  });
+  return Future<std::shared_ptr<arrow::io::InputStream>>::MakeFinished(OpenInputStream(path));
 }
+
 Future<std::shared_ptr<arrow::io::InputStream>> S3FileSystem::OpenInputStreamAsync(const FileInfo& info) {
-  return OpenInputFileAsync(info).Then([](std::shared_ptr<arrow::io::RandomAccessFile> file) {
-    return std::static_pointer_cast<arrow::io::InputStream>(file);
-  });
+  return Future<std::shared_ptr<arrow::io::InputStream>>::MakeFinished(OpenInputStream(info));
 }
 
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenOutputStream(

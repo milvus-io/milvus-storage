@@ -14,13 +14,21 @@ struct NativeS3ObjectMetadata {
 };
 
 // Private implementation owned by S3FileSystem, never handed to callers.
-class NativeS3Operations {
+class NativeS3Operations : public std::enable_shared_from_this<NativeS3Operations> {
   public:
-  virtual ~NativeS3Operations() = default;
-  virtual arrow::Future<NativeS3ObjectMetadata> ReadMetadataAsync(const std::string& path,
-                                                                  const arrow::io::IOContext& io_context) = 0;
-  virtual arrow::Future<arrow::fs::FileInfo> GetFileInfoAsync(const std::string& path) = 0;
-  virtual arrow::fs::FileInfoGenerator GetFileInfoGenerator(const arrow::fs::FileSelector& selector) = 0;
+  NativeS3Operations(std::shared_ptr<NativeS3Transport> transport, arrow::io::IOContext io);
+  arrow::Future<NativeS3ObjectMetadata> ReadMetadataAsync(const std::string& path,
+                                                          const arrow::io::IOContext& io_context);
+  arrow::Future<arrow::fs::FileInfo> GetFileInfoAsync(const std::string& path);
+  arrow::fs::FileInfoGenerator GetFileInfoGenerator(const arrow::fs::FileSelector& selector);
+
+  private:
+  struct Path;
+  arrow::Future<NativeS3Response> Head(const Path& path, bool marker = false);
+  arrow::Future<NativeS3Response> List(const Path& path, const std::string& token, bool recursive, int max_keys = 1000);
+
+  std::shared_ptr<NativeS3Transport> transport_;
+  arrow::io::IOContext io_;
 };
 arrow::Result<std::shared_ptr<NativeS3Operations>> MakeNativeS3Operations(const arrow::io::IOContext& io_context,
                                                                           std::shared_ptr<NativeS3Transport> transport);
