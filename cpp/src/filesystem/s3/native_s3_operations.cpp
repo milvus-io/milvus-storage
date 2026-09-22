@@ -115,7 +115,10 @@ Future<NativeS3ObjectMetadata> NativeS3Operations::ReadMetadataAsync(const std::
       });
 }
 
-Future<NativeS3Response> NativeS3Operations::Head(const Path& path, bool marker) {
+Future<NativeS3Response> NativeS3Operations::HeadAsync(const std::string& value, bool marker) {
+  ARROW_ASSIGN_OR_RAISE(auto path, Path::Parse(value));
+  if (path.bucket.empty())
+    return Status::Invalid("S3 HEAD requires a bucket");
   if (path.key.empty()) {
     S3::HeadBucketRequest request;
     request.SetBucket(path.bucket.c_str());
@@ -127,10 +130,13 @@ Future<NativeS3Response> NativeS3Operations::Head(const Path& path, bool marker)
   request.SetKey(key.c_str());
   return transport_->Send(request, key, HttpMethod::HTTP_HEAD, "", io_);
 }
-Future<NativeS3Response> NativeS3Operations::List(const Path& path,
-                                                  const std::string& token,
-                                                  bool recursive,
-                                                  int max_keys) {
+Future<NativeS3Response> NativeS3Operations::ListAsync(const std::string& value,
+                                                       const std::string& token,
+                                                       bool recursive,
+                                                       int max_keys) {
+  ARROW_ASSIGN_OR_RAISE(auto path, Path::Parse(value));
+  if (path.bucket.empty())
+    return Status::Invalid("S3 LIST requires a bucket");
   S3::ListObjectsV2Request request;
   request.SetBucket(path.bucket.c_str());
   request.SetPrefix((path.key.empty() ? "" : path.key + "/").c_str());
@@ -148,42 +154,43 @@ Future<FileInfo> NativeS3Operations::GetFileInfoAsync(const std::string& path) {
   if (parsed->bucket.empty())
     return Future<FileInfo>::MakeFinished(Info(path, FileType::Directory));
   auto p = *parsed;
-  return Head(p).Then([self = shared_from_this(), p, path](const NativeS3Response& response) -> Future<FileInfo> {
-    if (!response.HasHttpStatus(404)) {
-      auto status = response.ToStatus();
-      if (!status.ok())
-        return Failed<FileInfo>(status);
-      auto info = Info(path, p.key.empty() ? FileType::Directory : FileType::File);
-      if (!p.key.empty()) {
-        auto size = ContentLength(response);
-        if (!size.ok())
-          return Failed<FileInfo>(size.status());
-        info.set_size(*size);
-        const auto modified = response.headers.find("last-modified");
-        if (modified != response.headers.end()) {
-          Aws::Utils::DateTime time(modified->second, Aws::Utils::DateFormat::RFC822);
-          if (time.WasParseSuccessful())
-            info.set_mtime(time.UnderlyingTimestamp());
+  return HeadAsync(path).Then(
+      [self = shared_from_this(), p, path](const NativeS3Response& response) -> Future<FileInfo> {
+        if (!response.HasHttpStatus(404)) {
+          auto status = response.ToStatus();
+          if (!status.ok())
+            return Failed<FileInfo>(status);
+          auto info = Info(path, p.key.empty() ? FileType::Directory : FileType::File);
+          if (!p.key.empty()) {
+            auto size = ContentLength(response);
+            if (!size.ok())
+              return Failed<FileInfo>(size.status());
+            info.set_size(*size);
+            const auto modified = response.headers.find("last-modified");
+            if (modified != response.headers.end()) {
+              Aws::Utils::DateTime time(modified->second, Aws::Utils::DateFormat::RFC822);
+              if (time.WasParseSuccessful())
+                info.set_mtime(time.UnderlyingTimestamp());
+            }
+            auto type = response.headers.find("content-type");
+            if (*size == 0 && type != response.headers.end() && type->second == "application/x-directory") {
+              info.set_type(FileType::Directory);
+            }
+          }
+          return Future<FileInfo>::MakeFinished(std::move(info));
         }
-        auto type = response.headers.find("content-type");
-        if (*size == 0 && type != response.headers.end() && type->second == "application/x-directory") {
-          info.set_type(FileType::Directory);
-        }
-      }
-      return Future<FileInfo>::MakeFinished(std::move(info));
-    }
-    if (p.key.empty())
-      return Future<FileInfo>::MakeFinished(Info(path, FileType::NotFound));
-    // A directory marker is an object whose key ends in '/'. Prefix listing
-    // also discovers implicit directories and avoids an extra marker HEAD.
-    return self->List(p, "", false, 1).Then([path](const NativeS3Response& listed) -> Result<FileInfo> {
-      if (listed.HasHttpStatus(404))
-        return Info(path, FileType::NotFound);
-      ARROW_ASSIGN_OR_RAISE(auto result, XmlResult<S3::ListObjectsV2Result>(listed));
-      return Info(path, result.GetContents().empty() && result.GetCommonPrefixes().empty() ? FileType::NotFound
-                                                                                           : FileType::Directory);
-    });
-  });
+        if (p.key.empty())
+          return Future<FileInfo>::MakeFinished(Info(path, FileType::NotFound));
+        // A directory marker is an object whose key ends in '/'. Prefix listing
+        // also discovers implicit directories and avoids an extra marker HEAD.
+        return self->ListAsync(path, "", false, 1).Then([path](const NativeS3Response& listed) -> Result<FileInfo> {
+          if (listed.HasHttpStatus(404))
+            return Info(path, FileType::NotFound);
+          ARROW_ASSIGN_OR_RAISE(auto result, XmlResult<S3::ListObjectsV2Result>(listed));
+          return Info(path, result.GetContents().empty() && result.GetCommonPrefixes().empty() ? FileType::NotFound
+                                                                                               : FileType::Directory);
+        });
+      });
 }
 
 arrow::fs::FileInfoGenerator NativeS3Operations::GetFileInfoGenerator(const FileSelector& selector) {
@@ -274,7 +281,7 @@ arrow::fs::FileInfoGenerator NativeS3Operations::GetFileInfoGenerator(const File
   *next = [state, weak]() -> Future<FileInfoVector> {
     if (state->done)
       return Future<FileInfoVector>::MakeFinished(FileInfoVector{});
-    return state->fs->List(state->path, state->token, state->selector.recursive)
+    return state->fs->ListAsync(state->selector.base_dir, state->token, state->selector.recursive)
         .Then([state, weak](const NativeS3Response& response) -> Future<FileInfoVector> {
           if (response.HasHttpStatus(404) && state->selector.allow_not_found) {
             state->done = true;
