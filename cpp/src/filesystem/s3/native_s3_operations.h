@@ -22,10 +22,15 @@ class NativeS3Operations : public std::enable_shared_from_this<NativeS3Operation
   arrow::Future<arrow::fs::FileInfo> GetFileInfoAsync(const std::string& path);
   arrow::fs::FileInfoGenerator GetFileInfoGenerator(const arrow::fs::FileSelector& selector);
 
+  // Paths use bucket/key syntax; ListAsync returns one ListObjectsV2 page.
+  arrow::Future<NativeS3Response> HeadAsync(const std::string& path, bool marker = false);
+  arrow::Future<NativeS3Response> ListAsync(const std::string& path,
+                                            const std::string& token,
+                                            bool recursive,
+                                            int max_keys = 1000);
+
   private:
   struct Path;
-  arrow::Future<NativeS3Response> Head(const Path& path, bool marker = false);
-  arrow::Future<NativeS3Response> List(const Path& path, const std::string& token, bool recursive, int max_keys = 1000);
 
   std::shared_ptr<NativeS3Transport> transport_;
   arrow::io::IOContext io_;
