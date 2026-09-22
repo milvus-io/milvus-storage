@@ -332,7 +332,15 @@ TEST_F(NativeS3Test, WritesAndMultipartUseNativeRequests) {
   });
 }
 TEST_F(NativeS3Test, MultipartCompleteAndAbort) {
+  auto metrics = sync_->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+  metrics->Reset();
   ASSERT_OK(Write("multipart", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a') + "tail")).status());
+  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 1);
+  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 1);
+  EXPECT_EQ(metrics->GetWriteCount(), 2);
+  EXPECT_EQ(metrics->GetWriteBytes(), 5 * 1024 * 1024 + 4);
+  EXPECT_EQ(metrics->GetFailedCount(), 0);
   ASSERT_OK_AND_ASSIGN(auto data, Await(Read("multipart", 5 * 1024 * 1024 - 2, 10)));
   EXPECT_EQ(data->ToString(), "aatail");
   ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream("aborted"));
@@ -340,6 +348,11 @@ TEST_F(NativeS3Test, MultipartCompleteAndAbort) {
   auto async = std::dynamic_pointer_cast<AsyncOutputStream>(stream);
   ASSERT_NE(async, nullptr);
   ASSERT_OK(async->AbortAsync().status());
+  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 2);
+  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 1);
+  EXPECT_EQ(metrics->GetWriteCount(), 3);
+  EXPECT_EQ(metrics->GetWriteBytes(), 10 * 1024 * 1024 + 4);
+  EXPECT_EQ(metrics->GetFailedCount(), 0);
   ASSERT_OK_AND_ASSIGN(auto missing, Await(Stat(fs_, "aborted")));
   EXPECT_EQ(missing.type(), arrow::fs::FileType::NotFound);
 }
@@ -353,9 +366,39 @@ TEST_F(NativeS3Test, MultipartConditionalConflictPreservesObject) {
   EXPECT_EQ(data->ToString(), "original");
 }
 TEST_F(NativeS3Test, MultipartEmbeddedErrorIsNotSuccess) {
+  auto metrics = sync_->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+  metrics->Reset();
   EXPECT_FALSE(Write("error-complete", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))).status().ok());
+  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 1);
+  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 1);
+  EXPECT_EQ(metrics->GetWriteCount(), 1);
+  EXPECT_EQ(metrics->GetWriteBytes(), 5 * 1024 * 1024);
+  EXPECT_EQ(metrics->GetFailedCount(), 1);
   ASSERT_OK_AND_ASSIGN(auto missing, Await(Stat(fs_, "error-complete")));
   EXPECT_EQ(missing.type(), arrow::fs::FileType::NotFound);
+}
+TEST_F(NativeS3Test, SinglePutDoesNotCountMultipartOperations) {
+  auto metrics = sync_->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+  metrics->Reset();
+  ASSERT_OK(Write("put-metrics", arrow::Buffer::FromString("data")).status());
+  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 0);
+  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 0);
+  EXPECT_EQ(metrics->GetWriteCount(), 1);
+  EXPECT_EQ(metrics->GetWriteBytes(), 4);
+  EXPECT_EQ(metrics->GetFailedCount(), 0);
+}
+TEST_F(NativeS3Test, FailedMultipartCreationCountsAttemptAndFailure) {
+  auto metrics = sync_->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+  metrics->Reset();
+  EXPECT_FALSE(Write("denied", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))).status().ok());
+  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 1);
+  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 0);
+  EXPECT_EQ(metrics->GetWriteCount(), 0);
+  EXPECT_EQ(metrics->GetWriteBytes(), 0);
+  EXPECT_EQ(metrics->GetFailedCount(), 1);
 }
 TEST_F(NativeS3Test, RejectedCompletionPreservesSuccessfulWrite) {
   ASSERT_OK(executor_->Shutdown());
