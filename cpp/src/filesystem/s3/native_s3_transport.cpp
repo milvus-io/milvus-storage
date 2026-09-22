@@ -299,6 +299,13 @@ arrow::Future<NativeS3Response> NativeS3Transport::Send(const Aws::AmazonWebServ
       r->write_metrics = lease->GetMetrics();
       r->write_bytes = r->data ? r->data->size() : 0;
       r->write_metrics->IncrementWriteCount();
+    } else if (operation == "CreateMultipartUpload") {
+      // Match the SDK counters: count attempts, including failed requests.
+      r->write_metrics = lease->GetMetrics();
+      r->write_metrics->IncrementMultiPartUploadCreated();
+    } else if (operation == "CompleteMultipartUpload") {
+      r->write_metrics = lease->GetMetrics();
+      r->write_metrics->IncrementMultiPartUploadFinished();
     }
     auto future = r->future;
     auto* pending = r.release();
