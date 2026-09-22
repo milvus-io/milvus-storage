@@ -169,8 +169,6 @@ class S3CrtClientLease {
   ~S3CrtClientLease();
 
   Aws::S3Crt::S3CrtClient* operator->() const;
-  // Borrow the SDK-owned native client; valid only while this lease is held.
-  aws_s3_client* native_client() const;
 
   protected:
   friend class S3CrtClientHolder;

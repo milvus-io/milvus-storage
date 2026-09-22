@@ -7,6 +7,8 @@
 #include <gtest/gtest.h>
 #include <cstdlib>
 #include <future>
+#include <folly/executors/ManualExecutor.h>
+#include "milvus-storage/format/parquet/folly_arrow_executor.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/async_output_stream.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -220,15 +222,63 @@ TEST_F(NativeS3Test, RetainsRequestAfterFilesystemIsReleased) {
   EXPECT_EQ(data->ToString(), "abcdef");
 }
 
-TEST_F(NativeS3Test, RejectedCompletionExecutorPreservesResult) {
-  // Shutdown before submission forces the completion-dispatch fallback.
+TEST_F(NativeS3Test, NativeCompletionDoesNotScheduleCallerExecutor) {
+  folly::ManualExecutor executor;
+  ASSERT_OK_AND_ASSIGN(auto adapter, parquet::MakeFollyArrowExecutor(folly::getKeepAliveToken(executor)));
+  ASSERT_OK_AND_ASSIGN(auto base, S3FileSystem::Make(options_, arrow::io::IOContext(adapter.get())));
+  auto proxy = std::make_shared<FileSystemProxy>(prefix_, base);
+  auto stat = Stat(proxy, "slow");
+  const bool completed = stat.Wait(5);
+  // Drain after observing completion so a regression fails without stranding work.
+  EXPECT_EQ(executor.drain(), 0);
+  ASSERT_TRUE(completed);
+  ASSERT_OK_AND_ASSIGN(auto info, stat.result());
+  EXPECT_EQ(info.size(), 6);
+
+  arrow::fs::FileSelector selector;
+  selector.base_dir = "pages";
+  auto generator = proxy->GetFileInfoGenerator(selector);
+  auto page = generator();
+  const bool listed = page.Wait(5);
+  EXPECT_EQ(executor.drain(), 0);
+  ASSERT_TRUE(listed);
+  ASSERT_OK(page.status());
+  EXPECT_FALSE(page.result()->empty());
+}
+
+TEST_F(NativeS3Test, InputFactoriesDoNotScheduleCallerExecutor) {
+  ASSERT_OK(executor_->Shutdown());
+  executor_stopped_ = true;
+  const std::string path = "missing";
+  arrow::fs::FileInfo info(path, arrow::fs::FileType::File);
+  info.set_size(6);
+  auto by_path = fs_->OpenInputFileAsync(path);
+  auto by_info = fs_->OpenInputFileAsync(info);
+  auto stream_by_path = fs_->OpenInputStreamAsync(path);
+  auto stream_by_info = fs_->OpenInputStreamAsync(info);
+  EXPECT_TRUE(by_path.is_finished());
+  EXPECT_TRUE(by_info.is_finished());
+  EXPECT_TRUE(stream_by_path.is_finished());
+  EXPECT_TRUE(stream_by_info.is_finished());
+  ASSERT_OK(by_path.status());
+  ASSERT_OK(by_info.status());
+  ASSERT_OK(stream_by_path.status());
+  ASSERT_OK(stream_by_info.status());
+  ASSERT_OK(by_path.result().ValueOrDie()->Close());
+  ASSERT_OK(by_info.result().ValueOrDie()->Close());
+  ASSERT_OK(stream_by_path.result().ValueOrDie()->Close());
+  ASSERT_OK(stream_by_info.result().ValueOrDie()->Close());
+}
+
+TEST_F(NativeS3Test, CompletionDoesNotRequireRunningExecutor) {
+  // Native completion must not depend on the filesystem executor accepting work.
   ASSERT_OK(executor_->Shutdown());
   executor_stopped_ = true;
   ASSERT_OK_AND_ASSIGN(auto info, Await(Stat(fs_, "hello #?+% 中文")));
   EXPECT_EQ(info.size(), 6);
 }
 
-TEST_F(NativeS3Test, RejectedCompletionCanReleaseTheLastNativeTransportOwner) {
+TEST_F(NativeS3Test, CompletionCanReleaseTheLastNativeTransportOwner) {
   ASSERT_OK(executor_->Shutdown());
   executor_stopped_ = true;
   auto pending = Stat(fs_, "slow");
@@ -239,7 +289,7 @@ TEST_F(NativeS3Test, RejectedCompletionCanReleaseTheLastNativeTransportOwner) {
   EXPECT_EQ(info.size(), 6);
 }
 
-TEST_F(NativeS3Test, RejectedBatchCompletionDoesNotRetainTheSdkCrtHolder) {
+TEST_F(NativeS3Test, BatchCompletionDoesNotRetainTheSdkCrtHolder) {
   ASSERT_OK(executor_->Shutdown());
   executor_stopped_ = true;
   auto pending = fs_->GetFileInfoAsync(std::vector<std::string>{"slow", "hello #?+% 中文"});
@@ -400,7 +450,7 @@ TEST_F(NativeS3Test, FailedMultipartCreationCountsAttemptAndFailure) {
   EXPECT_EQ(metrics->GetWriteBytes(), 0);
   EXPECT_EQ(metrics->GetFailedCount(), 1);
 }
-TEST_F(NativeS3Test, RejectedCompletionPreservesSuccessfulWrite) {
+TEST_F(NativeS3Test, SuccessfulWriteDoesNotRequireRunningExecutor) {
   ASSERT_OK(executor_->Shutdown());
   executor_stopped_ = true;
   ASSERT_OK(Write("rejected-dispatch", arrow::Buffer::FromString("durable")).status());
