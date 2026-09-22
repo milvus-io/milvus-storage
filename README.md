@@ -121,7 +121,7 @@ make build
 # Test
 make test
 
-# Test with minio
+# Test with MinIO, RustFS, and Azurite
 make test-all
 
 # Run benchmarks
