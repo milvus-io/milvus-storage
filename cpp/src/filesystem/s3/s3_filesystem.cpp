@@ -20,12 +20,15 @@
 #include <cinttypes>
 #include <cstdio>
 #include <chrono>
+#include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <arrow/util/async_generator.h>
 #include "milvus-storage/common/extend_status.h"
@@ -53,6 +56,7 @@
 #include <aws/core/utils/HashingUtils.h>
 #include <aws/core/utils/logging/ConsoleLogSystem.h>
 #include <aws/core/utils/stream/PreallocatedStreamBuf.h>
+#include <aws/core/utils/stream/ResponseStream.h>
 #include <aws/core/utils/xml/XmlSerializer.h>
 #include <aws/identity-management/auth/STSAssumeRoleCredentialsProvider.h>
 #include <aws/s3/S3Client.h>
@@ -403,6 +407,123 @@ class StringViewStream : Aws::Utils::Stream::PreallocatedStreamBuf, public std::
         std::iostream(this) {}
 };
 
+// Successful range responses fit in the caller's buffer and are written there
+// directly, without an intermediate buffer. CRT also rewinds this stream to
+// write error XML, which can exceed the requested range size. This stream does
+// not inspect HTTP status: it allocates overflow storage only when a write no
+// longer fits, so a small error response can still use the caller's buffer.
+class S3ReadStream final : private std::streambuf, public std::iostream {
+  using Traits = std::char_traits<char>;
+  using Position = std::streampos;
+  using Offset = std::streamoff;
+
+  public:
+  // Borrow data; the caller keeps it writable until the read completes (including
+  // async reads). The stream never frees it, and failed reads may overwrite it.
+  S3ReadStream(void* data, int64_t capacity)
+      : std::iostream(this), data_(static_cast<char*>(data)), capacity_(capacity) {}
+
+  private:
+  // Once allocated, owned storage stays active even after a rewind.
+  char* data() { return overflow_buffer_.empty() ? data_ : overflow_buffer_.data(); }
+
+  // Save offsets rather than pointers across vector growth, which may relocate
+  // the backing memory. A new stream has no get area and starts at offset zero.
+  std::streamsize read_position() const { return gptr() ? gptr() - eback() : 0; }
+
+  // Publish only written bytes to std::streambuf's read/unget operations. This
+  // updates pointers without copying data; position must be within the new end.
+  void ResetGetArea(std::streamsize position) {
+    char* const buffer = data();
+    setg(buffer, buffer ? buffer + position : nullptr, buffer ? buffer + write_position_ : nullptr);
+  }
+
+  // Handle SDK block writes directly in the active storage. On the first write
+  // beyond capacity, preserve the existing prefix in stream-owned storage;
+  // neither that allocation nor the prefix copy occurs on normal range reads.
+  std::streamsize xsputn(const char* source, std::streamsize size) override {
+    if (size <= 0 || size > std::numeric_limits<std::streamsize>::max() - write_position_) {
+      return 0;
+    }
+    const auto position = read_position();
+    const auto end = write_position_ + size;
+    if (overflow_buffer_.empty() && end > capacity_) {
+      overflow_buffer_.resize(end);
+      if (write_position_ > 0) {
+        std::memcpy(overflow_buffer_.data(), data_, write_position_);
+      }
+    } else if (!overflow_buffer_.empty() && static_cast<size_t>(end) > overflow_buffer_.size()) {
+      overflow_buffer_.resize(end);
+    }
+    std::memcpy(data() + write_position_, source, size);
+    write_position_ = end;
+    // Rebind the standard get area after growth, which may move its storage.
+    ResetGetArea(position);
+    return size;
+  }
+
+  // Single-character writes use the same bounds checks as block writes. The
+  // standard hook name "overflow" does not itself imply a buffer allocation.
+  Traits::int_type overflow(Traits::int_type value) override {
+    if (Traits::eq_int_type(value, Traits::eof())) {
+      return Traits::not_eof(value);
+    }
+    const char byte = Traits::to_char_type(value);
+    return xsputn(&byte, 1) == 1 ? value : Traits::eof();
+  }
+
+  // Resolve relative seeks within the written response, excluding unused
+  // capacity. Input and output cursors cannot share a relative-current seek.
+  Position seekoff(Offset offset, std::ios_base::seekdir direction, std::ios_base::openmode which) override {
+    Offset base = 0;
+    if (direction == std::ios_base::end) {
+      base = write_position_;
+    } else if (direction == std::ios_base::cur) {
+      if ((which & std::ios_base::in) && (which & std::ios_base::out)) {
+        return Position(Offset(-1));
+      }
+      base = (which & std::ios_base::out) ? write_position_ : read_position();
+    } else if (direction != std::ios_base::beg) {
+      return Position(Offset(-1));
+    }
+    if (offset < -base || offset > write_position_ - base) {
+      return Position(Offset(-1));
+    }
+    return seekpos(Position(base + offset), which);
+  }
+
+  // Output seeks truncate the readable response, as required when CRT replaces
+  // an earlier body with an error. This differs from stringbuf's high-water mark.
+  Position seekpos(Position position, std::ios_base::openmode which) override {
+    const auto offset = static_cast<Offset>(position);
+    if (offset < 0 || offset > write_position_ || !(which & (std::ios_base::in | std::ios_base::out))) {
+      return Position(Offset(-1));
+    }
+    const auto position_in = (which & std::ios_base::in) ? offset : read_position();
+    if (which & std::ios_base::out) {
+      // The output cursor is the readable end, not the buffer capacity or its
+      // previous high-water mark. After CRT rewinds and writes a shorter error,
+      // XML parsing must not consume stale bytes from a successful earlier part.
+      write_position_ = offset;
+    }
+    ResetGetArea(std::min<std::streamsize>(position_in, write_position_));
+    return position;
+  }
+
+  char* const data_;
+  const std::streamsize capacity_;
+  std::streamsize write_position_ = 0;
+  // Owns overflow bytes until stream destruction, including SDK error parsing.
+  // The vector destructor releases them when the SDK deletes the stream.
+  std::vector<char> overflow_buffer_;
+};
+
+// Each invocation creates an independent stream owned by SDK ResponseStream.
+// ResponseStream uses Aws::Delete; the member vector needs no separate cleanup.
+Aws::IOStreamFactory AwsWriteableStreamFactory(void* data, int64_t nbytes) {
+  return [data, nbytes] { return Aws::New<S3ReadStream>("", data, nbytes); };
+}
+
 std::string FormatRange(int64_t start, int64_t length) {
   // Format a HTTP range header value
   std::stringstream ss;
@@ -442,10 +563,6 @@ std::optional<int64_t> GetObjectSizeFromReadResult(const ObjectResult& result, i
   return content_length;
 }
 
-Aws::IOStreamFactory AwsWriteableStreamFactory(void* data, int64_t nbytes) {
-  return [=]() { return Aws::New<StringViewStream>("", data, nbytes); };
-}
-
 arrow::Result<S3Model::GetObjectResult> GetObjectRange(
     Aws::S3::S3Client* client, const S3Path& path, int64_t start, int64_t length, void* out) {
   S3Model::GetObjectRequest req;
@@ -453,7 +570,19 @@ arrow::Result<S3Model::GetObjectResult> GetObjectRange(
   req.SetKey(ToAwsString(path.key));
   req.SetRange(ToAwsString(FormatRange(start, length)));
   req.SetResponseStreamFactory(AwsWriteableStreamFactory(out, length));
-  return OutcomeToResult("GetObject", client->GetObject(req));
+  req.SetHeadersReceivedEventHandler([](const Aws::Http::HttpRequest*, Aws::Http::HttpResponse* response) {
+    if (static_cast<int>(response->GetResponseCode()) >= 300) {
+      // Error XML is unrelated to the requested range size. Switch streams
+      // before receiving it so the SDK can parse the complete service error.
+      response->SwapResponseStreamOwnership() =
+          Aws::Utils::Stream::ResponseStream(Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
+    }
+  });
+  auto outcome = client->GetObject(req);
+  if (!outcome.IsSuccess()) {
+    return ErrorToStatus("GetObject", outcome.GetError());
+  }
+  return outcome.GetResultWithOwnership();
 }
 
 class ObjectInputFile final : public arrow::io::RandomAccessFile {
@@ -862,7 +991,9 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
 
           const auto& result = outcome.GetResult();
           const auto response_content_length = result.GetContentLength();
-          if (response_content_length < 0 || response_content_length > ctx->nbytes) {
+          const auto bytes_received = static_cast<int64_t>(result.GetBody().tellp());
+          if (response_content_length < 0 || response_content_length > ctx->nbytes ||
+              response_content_length != bytes_received) {
             ctx->metrics->IncrementFailedCount();
             ctx->future.MarkFinished(arrow::Result<int64_t>(
                 arrow::Status::IOError("Unexpected GetObject Content-Length ", response_content_length,
