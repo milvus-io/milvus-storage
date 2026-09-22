@@ -2744,6 +2744,60 @@ TEST_P(APIWriterReaderTest, ParquetPrebufferHoleSizeLimitReducesReadIOCount) {
   EXPECT_LT(large_hole_read_count, small_hole_read_count);
 }
 
+TEST_P(APIWriterReaderTest, ParquetEagerPrebufferReadsTheSameRangesAsLazy) {
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Parquet prebuffer properties only apply to parquet format.";
+  }
+  if (!IsLocalFileSystem(fs_)) {
+    GTEST_SKIP() << "This metrics assertion is local-fs only.";
+  }
+
+  auto observable = std::dynamic_pointer_cast<Observable>(fs_);
+  if (!observable) {
+    GTEST_SKIP() << "Filesystem does not expose metrics.";
+  }
+  auto metrics = observable->GetMetrics();
+  if (!metrics) {
+    GTEST_SKIP() << "Filesystem metrics are unavailable.";
+  }
+
+  auto fixed_binary_schema = MakePrebufferFixedBinarySchema();
+  ASSERT_AND_ASSIGN(auto fixed_binary_batch, MakePrebufferFixedBinaryBatch(fixed_binary_schema));
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, fixed_binary_schema));
+  auto writer = Writer::create(base_path_, fixed_binary_schema, std::move(policy), properties_);
+  ASSERT_NE(writer, nullptr);
+  ASSERT_STATUS_OK(writer->write(fixed_binary_batch));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  ASSERT_EQ(cgs->size(), 1);
+
+  // One read call covers the whole file; 2 MiB ranges cut it into several requests.
+  auto read_with_lazy = [&](const char* lazy) -> arrow::Result<std::pair<std::shared_ptr<arrow::Table>, int64_t>> {
+    auto read_properties = MakePrebufferReadProperties(properties_, kPrebufferLargeHoleLimit);
+    SetValue(read_properties, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT,
+             std::to_string(2LL * 1024 * 1024).c_str());
+    SetValue(read_properties, PROPERTY_READER_PARQUET_PREBUFFER_LAZY, lazy);
+    auto reader = Reader::create(cgs, fixed_binary_schema, nullptr, read_properties);
+    if (!reader) {
+      return arrow::Status::Invalid("failed to create reader");
+    }
+    ARROW_ASSIGN_OR_RAISE(auto rb_reader, reader->get_record_batch_reader());
+
+    metrics->Reset();
+    ARROW_ASSIGN_OR_RAISE(auto table, rb_reader->ToTable());
+    ARROW_RETURN_NOT_OK(rb_reader->Close());
+    return std::make_pair(table, metrics->GetReadCount());
+  };
+
+  ASSERT_AND_ASSIGN(auto lazy, read_with_lazy("true"));
+  ASSERT_AND_ASSIGN(auto eager, read_with_lazy("false"));
+
+  EXPECT_GT(lazy.second, 1);
+  EXPECT_EQ(eager.second, lazy.second);
+  ASSERT_EQ(eager.first->num_rows(), kPrebufferTestRows);
+  EXPECT_TRUE(eager.first->Equals(*lazy.first));
+}
+
 INSTANTIATE_TEST_SUITE_P(APIWriterReaderTestP,
                          APIWriterReaderTest,
                          ::testing::Combine(::testing::Values(LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX),

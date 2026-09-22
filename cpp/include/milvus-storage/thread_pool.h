@@ -36,6 +36,17 @@ namespace milvus_storage {
 /// which Rust uses for blocking work such as synchronous object-store IO.
 arrow::Status ConfigureStorageRuntime(uint32_t num_of_cpu_threads, uint32_t num_of_io_threads);
 
+/// Set the capacity of Arrow's process-wide IO thread pool.
+///
+/// Unlike ConfigureStorageRuntime, this may be called at any time and any
+/// number of times, before or after the pool is first used, and Arrow grows or
+/// shrinks the pool safely. A host that learns its read concurrency only after
+/// start-up, such as a Spark executor that runs several read tasks at once,
+/// sizes the pool with it: every coalesced range a Parquet read requests at
+/// once runs a blocking request on one thread of this pool. The host owns the
+/// policy, including whether a later call may lower the capacity.
+arrow::Status SetArrowIOThreadPoolCapacity(uint32_t num_of_io_threads);
+
 class ThreadPoolHolder {
   public:
   ~ThreadPoolHolder() = default;

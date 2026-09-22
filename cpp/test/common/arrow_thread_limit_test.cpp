@@ -26,6 +26,7 @@
 #include <arrow/io/interfaces.h>
 #include <arrow/util/thread_pool.h>
 
+#include "milvus-storage/thread_pool.h"
 #include "test_env.h"
 
 namespace milvus_storage::test {
@@ -177,6 +178,18 @@ TEST_F(StorageRuntimeTest, SetArrowThreadPoolCapacityLimitsRuntimeParallelism) {
                                                   kIoThreads * kTasksPerThread, &io_peak_running));
   std::cout << "io_peak_running=" << io_peak_running << std::endl;
   EXPECT_LE(io_peak_running, kIoThreads);
+}
+
+TEST_F(StorageRuntimeTest, SetArrowIOThreadPoolCapacityGrowsAndShrinks) {
+  ASSERT_STATUS_OK(arrow::io::SetIOThreadPoolCapacity(2));
+
+  ASSERT_STATUS_OK(SetArrowIOThreadPoolCapacity(5));
+  EXPECT_EQ(arrow::io::GetIOThreadPoolCapacity(), 5);
+
+  ASSERT_STATUS_OK(SetArrowIOThreadPoolCapacity(3));
+  EXPECT_EQ(arrow::io::GetIOThreadPoolCapacity(), 3);
+
+  EXPECT_FALSE(SetArrowIOThreadPoolCapacity(0).ok());
 }
 
 }  // namespace milvus_storage::test
