@@ -225,3 +225,15 @@ _loon_fiukey_s3fs_read_fail
 _loon_fiukey_s3fs_readat_fail
 # ColumnGroup
 _loon_fiukey_column_group_write_fail
+
+_loon_transaction_commit_async
+_loon_transaction_begin_async
+_loon_async_cancel
+_loon_async_release
+_loon_io_context_create
+_loon_io_context_shutdown
+_loon_io_context_destroy
+_loon_errcode_async_cancelled
+_loon_errcode_async_deadline
+_loon_errcode_async_overloaded
+_loon_errcode_async_busy

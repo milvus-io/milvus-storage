@@ -25,6 +25,7 @@ void run_properties_suite(void);
 void run_writer_suite(void);
 void run_reader_suite(void);
 void run_manifest_suite(void);
+void run_manifest_async_suite(void);
 void run_external_suite(void);
 void run_filesystem_suite(void);
 void run_fiu_suite(void);
@@ -35,6 +36,7 @@ int main(void) {
   loon_thread_pool_singleton(4);
   run_runtime_suite();
   run_manifest_suite();
+  run_manifest_async_suite();
   run_properties_suite();
   run_writer_suite();
   run_reader_suite();
