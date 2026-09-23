@@ -146,6 +146,7 @@ FFI_EXPORT extern const char* loon_properties_reader_logical_chunk_rows;
 FFI_EXPORT extern const char* loon_properties_reader_metadata_cache_enable;
 FFI_EXPORT extern const char* loon_properties_reader_parquet_prebuffer_hole_size_limit;
 FFI_EXPORT extern const char* loon_properties_reader_parquet_prebuffer_range_size_limit;
+FFI_EXPORT extern const char* loon_properties_reader_parquet_prebuffer_lazy;
 FFI_EXPORT extern const char* loon_properties_reader_vortex_split_row_indices;
 FFI_EXPORT extern const char* loon_properties_reader_async_task_split_strategy;
 FFI_EXPORT extern const char* loon_properties_reader_exttable_snapshot_id;

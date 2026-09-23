@@ -34,4 +34,14 @@ arrow::Status ConfigureStorageRuntime(uint32_t num_of_cpu_threads, uint32_t num_
   return arrow::Status::OK();
 }
 
+arrow::Status SetArrowIOThreadPoolCapacity(uint32_t num_of_io_threads) {
+  if (num_of_io_threads == 0) {
+    return arrow::Status::Invalid("num_of_io_threads must be greater than 0");
+  }
+  if (auto status = arrow::io::SetIOThreadPoolCapacity(static_cast<int>(num_of_io_threads)); !status.ok()) {
+    return arrow::Status::IOError("Failed to set Arrow IO thread pool capacity: ", status.ToString());
+  }
+  return arrow::Status::OK();
+}
+
 }  // namespace milvus_storage

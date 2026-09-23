@@ -167,6 +167,7 @@ struct PropertyInfo {
 #define PROPERTY_READER_METADATA_CACHE_ENABLE "reader.metadata_cache.enable"
 #define PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT "reader.parquet.prebuffer.hole_size_limit"
 #define PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT "reader.parquet.prebuffer.range_size_limit"
+#define PROPERTY_READER_PARQUET_PREBUFFER_LAZY "reader.parquet.prebuffer.lazy"
 #define PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES "reader.vortex.split_row_indices"
 #define PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY "reader.async.task_split_strategy"
 

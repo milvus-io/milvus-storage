@@ -657,6 +657,13 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "Max coalesced read range size in bytes for Parquet reader. 0 uses Arrow default.",
                       int64_t(0),
                       ValidatePropertyType() + ValidatePropertyRange<int64_t>(0, INT64_MAX)),
+    REGISTER_PROPERTY(PROPERTY_READER_PARQUET_PREBUFFER_LAZY,
+                      PropertyType::BOOL,
+                      "Whether the Parquet reader requests each coalesced pre-buffer range only when decoding "
+                      "reaches it, one range at a time (Arrow's default). false requests every range of a read "
+                      "call when the call starts, so the ranges are fetched concurrently on the Arrow IO pool.",
+                      true,
+                      ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES,
                       PropertyType::STRING,
                       "Whether Vortex scan should split projected row indices by natural scan batches. "
