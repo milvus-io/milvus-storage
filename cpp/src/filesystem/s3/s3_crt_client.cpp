@@ -27,6 +27,10 @@
 
 #include <arrow/status.h>
 #include <arrow/util/logging.h>
+#include <arrow/util/thread_pool.h>
+#include <aws/io/io.h>
+#include <aws/io/retry_strategy.h>
+#include <aws/s3/s3_client.h>
 
 #include <aws/core/Aws.h>
 #include <aws/core/auth/signer/AWSAuthV4Signer.h>
@@ -51,9 +55,57 @@ std::shared_ptr<Aws::Client::RetryStrategy> MakeWrappedRetryStrategy(
 
 namespace {
 
+thread_local unsigned crt_callback_depth = 0;
+
+// Only SDK teardown runs here, never network operations. Keep this executor
+// independent of caller executors, which may already have rejected completion.
+const arrow::Result<std::shared_ptr<arrow::internal::ThreadPool>>& CleanupExecutor() {
+  static const auto executor = arrow::internal::ThreadPool::MakeEternal(1);
+  return executor;
+}
+
+// A failed mutating request cannot safely be replayed: a lost response can mean
+// the write succeeded. Admit the first attempt, and deny automatic retries. The
+// CRT stock no-retry strategy rejects even initial token acquisition in 0.12.6.
+aws_retry_strategy* SingleAttempt() {
+  static aws_retry_strategy_vtable policy{
+      [](aws_retry_strategy* s) { aws_mem_release(s->allocator, s); },
+      [](aws_retry_strategy* s, const aws_byte_cursor*, aws_retry_strategy_on_retry_token_acquired_fn* acquired,
+         void* user, uint64_t) -> int {
+        auto* t = static_cast<aws_retry_token*>(aws_mem_calloc(s->allocator, 1, sizeof(aws_retry_token)));
+        if (!t)
+          return aws_raise_error(AWS_ERROR_OOM);
+        t->allocator = s->allocator;
+        t->retry_strategy = s;
+        aws_atomic_init_int(&t->ref_count, 1);
+        aws_retry_strategy_acquire(s);
+        acquired(s, AWS_ERROR_SUCCESS, t, user);
+        return AWS_OP_SUCCESS;
+      },
+      [](aws_retry_token*, aws_retry_error_type, aws_retry_strategy_on_retry_ready_fn*, void*) -> int {
+        return aws_raise_error(AWS_IO_RETRY_PERMISSION_DENIED);
+      },
+      [](aws_retry_token*) -> int { return AWS_OP_SUCCESS; },
+      [](aws_retry_token* t) {
+        auto* s = t->retry_strategy;
+        aws_mem_release(t->allocator, t);
+        aws_retry_strategy_release(s);
+      }};
+  auto* s = static_cast<aws_retry_strategy*>(aws_mem_calloc(aws_default_allocator(), 1, sizeof(aws_retry_strategy)));
+  if (s) {
+    s->allocator = aws_default_allocator();
+    s->vtable = &policy;
+    aws_atomic_init_int(&s->ref_count, 1);
+  }
+  return s;
+}
+
 inline arrow::Status ErrorS3Finalized() { return arrow::Status::Invalid("S3 subsystem is finalized"); }
 
 }  // namespace
+
+S3CrtCallbackScope::S3CrtCallbackScope() { ++crt_callback_depth; }
+S3CrtCallbackScope::~S3CrtCallbackScope() { --crt_callback_depth; }
 
 // Per-holder operation gate shared with every outstanding lease.
 //
@@ -181,7 +233,7 @@ S3CrtClientHolder::S3CrtClientHolder(std::shared_ptr<S3CrtClientFinalizer> final
       operation_state_(std::make_shared<S3CrtClientOperationState>()),
       metrics_(std::move(metrics)) {}
 
-S3CrtClientHolder::~S3CrtClientHolder() { Finalize(); }
+S3CrtClientHolder::~S3CrtClientHolder() { Finalize(true); }
 
 // Holder state transition guarded by operation_state_->mutex:
 //
@@ -222,11 +274,27 @@ arrow::Result<S3CrtClientLease> S3CrtClientHolder::Acquire() {
 // operation state alive and eventually wake this waiter. client.reset() is
 // outside the operation mutex because the SDK destructor may block while CRT
 // completes its own shutdown callbacks.
-void S3CrtClientHolder::Finalize() {
+void S3CrtClientHolder::Finalize(bool from_destructor) {
   std::shared_ptr<Aws::S3Crt::S3CrtClient> client;
   {
     std::unique_lock lock(operation_state_->mutex);
     operation_state_->closing = true;
+    if (client_ && (crt_callback_depth || (from_destructor && operation_state_->active_operations != 0))) {
+      auto status = CleanupExecutor().ValueOrDie()->Spawn(
+          [client = client_, state = operation_state_, finalizer = finalizer_]() mutable {
+            {
+              std::unique_lock lock(state->mutex);
+              state->cv.wait(lock, [&] { return state->active_operations == 0; });
+            }
+            client.reset();
+            finalizer->ClientDestroyed();
+          });
+      // This private executor is never shut down by callers and was checked at
+      // registration. Dropping a rejected cleanup could destroy on this callback.
+      ARROW_CHECK_OK(status);
+      client_.reset();
+      return;
+    }
     operation_state_->cv.wait(lock, [this] { return operation_state_->active_operations == 0; });
     client = std::move(client_);
   }
@@ -256,6 +324,7 @@ std::shared_ptr<FilesystemMetrics> S3CrtClientHolder::GetMetrics() const { retur
 // or multiply-owned client is never counted as live.
 arrow::Result<std::shared_ptr<S3CrtClientHolder>> S3CrtClientFinalizer::AddClient(
     ClientFactory make_client, std::shared_ptr<FilesystemMetrics> metrics) {
+  ARROW_RETURN_NOT_OK(CleanupExecutor().status());
   auto finalizer = shared_from_this();
   {
     std::lock_guard lock(mutex_);
@@ -384,6 +453,11 @@ arrow::Result<std::shared_ptr<S3CrtClientHolder>> ClientBuilder<Aws::S3Crt::S3Cr
         } else {
           client_config_.retryStrategy = std::make_shared<fs::internal::ConnectRetryStrategy>();
         }
+
+        // One client serves SDK GET and native metadata/mutations. CRT retry
+        // policy is client-wide; avoid replaying a write whose response was lost.
+        // The stock NO_RETRY policy also rejects initial acquisition in 0.12.6.
+        client_config_.crtConfigFactories.retryStrategyCreateFn = [](const auto&) { return SingleAttempt(); };
 
         const bool use_virtual_addressing = options_.endpoint_override.empty() || options_.force_virtual_addressing;
         client_config_.useVirtualAddressing = use_virtual_addressing;

@@ -48,6 +48,9 @@ find_package(opentelemetry-cpp REQUIRED)
 find_package(google-cloud-cpp REQUIRED)
 find_package(CURL REQUIRED)
 find_package(AWSSDK REQUIRED CONFIG)
+if(WITH_CRT)
+  include(ExtendS3CrtClient.cmake)
+endif()
 find_package(milvus-common REQUIRED)
 find_package(libavrocpp QUIET)
 if(NOT libavrocpp_FOUND)
@@ -117,6 +120,8 @@ list(APPEND LINK_LIBS
 )
 
 if (WITH_CRT)
+  find_package(aws-c-s3 REQUIRED CONFIG)
+  list(APPEND LINK_LIBS AWS::aws-c-s3)
   list(APPEND LINK_LIBS AWS::aws-sdk-cpp-s3-crt)
 endif()
 

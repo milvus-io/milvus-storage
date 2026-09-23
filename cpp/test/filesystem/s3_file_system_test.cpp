@@ -235,15 +235,17 @@ TEST_P(S3ReadResponseTest, PreservesErrorsLargerThanReadBuffer) {
     options.use_crt_async_reads = GetParam();
     options.connect_timeout = 2;
     options.request_timeout = 5;
-    options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
+    if (!GetParam()) {
+      options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
+    }
     ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
     ASSERT_AND_ASSIGN(auto input, fs->OpenInputFile("bucket/object"));
     std::array<uint8_t, 16> data;
     data.fill(0xa5);
     const auto result = input->ReadAt(0, data.size(), data.data());
     ASSERT_FALSE(result.ok());
-    // Native CRT turns exhausted 503 retries into its own throttling error
-    // without exposing the server XML. Preserve that SDK diagnostic as well.
+    // Native CRT reports 503 using its own throttling diagnostic instead of
+    // exposing the server XML. Preserve that diagnostic as well.
     const auto* diagnostic = GetParam() && http_status == http::status::service_unavailable
                                  ? "Response code indicates throttling"
                                  : "original service diagnostic";
@@ -259,6 +261,7 @@ TEST_P(S3ReadResponseTest, PreservesErrorsLargerThanReadBuffer) {
                                                                        : ExtendStatusCode::StorageTransientThrottling);
     }
     EXPECT_TRUE(std::all_of(data.begin(), data.end(), [](uint8_t value) { return value == 0xa5; }));
+    EXPECT_EQ(server.requests(), 1);
     EXPECT_TRUE(server.only_gets());
     ASSERT_STATUS_OK(input->Close());
   }
@@ -281,10 +284,24 @@ TEST_P(S3ReadResponseTest, RetriesErrorThenReadsIntoCallerBuffer) {
   options.use_crt_async_reads = GetParam();
   options.connect_timeout = 2;
   options.request_timeout = 5;
-  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(1);
+  if (!GetParam()) {
+    options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(1);
+  }
   ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
   ASSERT_AND_ASSIGN(auto input, fs->OpenInputFile("bucket/object"));
   std::array<char, 16> data{};
+  data.fill('?');
+  if (GetParam()) {
+    // The shared CRT client makes one attempt to avoid replaying ambiguous
+    // writes. A caller can explicitly retry this read on the same file/buffer.
+    const auto failed = input->ReadAt(0, data.size(), data.data());
+    ASSERT_FALSE(failed.ok());
+    const auto detail = ExtendStatusDetail::UnwrapStatus(failed.status());
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientThrottling);
+    EXPECT_EQ(server.requests(), 1);
+    EXPECT_TRUE(std::all_of(data.begin(), data.end(), [](char value) { return value == '?'; }));
+  }
   ASSERT_AND_ASSIGN(const auto bytes_read, input->ReadAt(0, data.size(), data.data()));
   EXPECT_EQ(bytes_read, data.size());
   EXPECT_EQ(std::string(data.data(), data.size()), "0123456789abcdef");

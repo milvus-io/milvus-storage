@@ -60,6 +60,12 @@ class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
 
   std::string type_name() const override { return base_fs()->type_name(); }
 
+  using arrow::fs::SubTreeFileSystem::OpenInputFile;
+  using arrow::fs::SubTreeFileSystem::OpenOutputStream;
+  // Arrow 17 SubTreeFileSystem does not forward async batch stat to base_fs().
+  // Forward it here to preserve native I/O and translate subtree paths.
+  arrow::Future<arrow::fs::FileInfoVector> GetFileInfoAsync(const std::vector<std::string>& paths) override;
+
   // Override OpenOutputStream to add fault injection point
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override {
@@ -287,7 +293,9 @@ struct ArrowFileSystemConfig {
   [[nodiscard]] std::string ToString() const;
 };
 
-arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config);
+using FileSystemPtr = std::shared_ptr<FileSystemProxy>;
+
+arrow::Result<FileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config);
 
 class FileSystemProducer {
   public:
@@ -321,7 +329,7 @@ class FilesystemCache {
    * @param path Optional path to determine filesystem (empty = default filesystem)
    * @return Result containing the cached or newly created filesystem
    */
-  [[nodiscard]] arrow::Result<ArrowFileSystemPtr> get(const api::Properties& properties, const std::string& path = "");
+  [[nodiscard]] arrow::Result<FileSystemPtr> get(const api::Properties& properties, const std::string& path = "");
 
   /**
    * @brief Resolve filesystem config from properties and URI path
@@ -345,7 +353,7 @@ class FilesystemCache {
    * for the display key composition. The display key is not the internal cache
    * key accepted by remove().
    */
-  [[nodiscard]] std::vector<std::pair<std::string, ArrowFileSystemPtr>> list() const;
+  [[nodiscard]] std::vector<std::pair<std::string, FileSystemPtr>> list() const;
 
   /**
    * @brief Remove a cached filesystem by key
@@ -369,7 +377,7 @@ class FilesystemCache {
   private:
   struct CacheEntry {
     std::string display_key;
-    ArrowFileSystemPtr filesystem;
+    FileSystemPtr filesystem;
   };
 
   /**
