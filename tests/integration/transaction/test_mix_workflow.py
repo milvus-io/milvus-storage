@@ -7,6 +7,7 @@ Verify complex workflows combining writes, appends, delta logs, and stats.
 import pyarrow as pa
 import pytest
 from milvus_storage import Filesystem, PropertyKeys, Reader, Transaction, Writer
+from milvus_storage.exceptions import FFIError
 from milvus_storage.manifest import ColumnGroups
 
 
@@ -314,9 +315,6 @@ class TestMixWorkflow:
         merged_ids = self._collect_ids(merged_batches)
         assert merged_ids == sorted(expected_ids)
 
-    @pytest.mark.xfail(
-        reason="Row count mismatch validation not enforced in add_column_group",
-    )
     def test_add_field_after_append_fail(
         self,
         temp_case_path: str,
@@ -344,7 +342,7 @@ class TestMixWorkflow:
         txn = Transaction(temp_case_path, default_properties)
         for cg in dup_cg.to_list():
             txn.add_column_group(cg)
-        with pytest.raises(Exception):
+        with pytest.raises(FFIError):
             txn.commit()
         txn.close()
 
@@ -362,7 +360,7 @@ class TestMixWorkflow:
         txn2 = Transaction(temp_case_path, default_properties)
         for cg in new_cg.to_list():
             txn2.add_column_group(cg)
-        with pytest.raises(Exception):
+        with pytest.raises(FFIError):
             txn2.commit()
         txn2.close()
 
@@ -370,8 +368,11 @@ class TestMixWorkflow:
         batches = self._read_all_via_manifest(
             temp_case_path, simple_schema, default_properties
         )
-        assert sum(b.num_rows for b in batches) == 500
-        assert self._collect_ids(batches) == list(range(500))
+        assert pa.Table.from_batches(batches).to_pydict() == {
+            "id": list(range(500)),
+            "name": [f"name_{i}" for i in range(500)],
+            "value": [i * 0.1 for i in range(500)],
+        }
 
     def test_append_after_add_field_fail(
         self,

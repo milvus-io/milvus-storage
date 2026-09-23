@@ -10,6 +10,14 @@ inputs:
     description: Conan version used to build the native library
     required: false
     default: '2.25.1'
+  with-talon:
+    description: Build the native library with Talon support
+    required: false
+    default: 'False'
+  with-tools:
+    description: Build loon for external-table fixtures
+    required: false
+    default: 'False'
 
 runs:
   using: composite
@@ -64,7 +72,16 @@ runs:
     - name: Build C++ library for Python
       shell: bash
       working-directory: ./cpp
-      run: make python-lib
+      run: WITH_CRT=True WITH_TOOLS=${{ inputs.with-tools }} WITH_TALON=${{ inputs.with-talon }} make python-lib
+
+    - name: Verify CRT is available to Python tests
+      shell: bash
+      run: grep -Eq '^WITH_CRT:BOOL=ON$' cpp/build/Release/CMakeCache.txt
+
+    - name: Verify external table fixture tool is available
+      if: ${{ inputs.with-tools == 'True' }}
+      shell: bash
+      run: test -x cpp/build/Release/tools/loon
 
     - name: Save Conan packages
       if: github.ref == 'refs/heads/main' && steps.conan-cache.outputs.cache-hit != 'true'

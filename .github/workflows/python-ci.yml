@@ -5,12 +5,14 @@ on:
     paths:
       - 'python/**'
       - 'cpp/**'
+      - 'tests/**'
       - '.github/actions/setup-python-test/**'
       - '.github/workflows/python-ci.yml'
   pull_request:
     paths:
       - 'python/**'
       - 'cpp/**'
+      - 'tests/**'
       - '.github/actions/setup-python-test/**'
       - '.github/workflows/python-ci.yml'
 
@@ -53,6 +55,19 @@ jobs:
       - name: Run tests
         working-directory: ./python
         run: make test
+
+      - name: Install Python E2E dependencies
+        run: uv pip install --python ./python/.venv/bin/python -r ./tests/requirements.txt
+
+      - name: Run Python E2E smoke
+        run: ./python/.venv/bin/python -m pytest -c tests/pytest.ini tests/integration/ -m e2e_smoke -q --tb=short --junitxml="$RUNNER_TEMP/python-e2e-smoke.xml"
+
+      - name: Upload Python E2E smoke result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-e2e-smoke
+          path: ${{ runner.temp }}/python-e2e-smoke.xml
 
       - name: Upload coverage to Codecov
         if: ${{ github.repository == 'milvus-io/milvus-storage' }}

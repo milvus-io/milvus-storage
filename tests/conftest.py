@@ -10,12 +10,17 @@ import uuid
 from pathlib import Path
 from typing import Callable, Dict, Generator, List, Optional
 
-import pyarrow as pa
-import pytest
-from milvus_storage import Filesystem, Properties, Reader, Writer
-from milvus_storage.fiu import FaultInjector
+# Load the native AWS SDK before PyArrow's bundled copy on macOS.
+from milvus_storage import Properties
 
-from .config import TestConfig, get_config
+Properties()
+
+import pyarrow as pa  # noqa: E402
+import pytest  # noqa: E402
+from milvus_storage import Filesystem, Reader, Writer  # noqa: E402
+from milvus_storage.fiu import FaultInjector  # noqa: E402
+
+from .config import TestConfig, get_config  # noqa: E402
 
 # =============================================================================
 # Configuration Fixtures

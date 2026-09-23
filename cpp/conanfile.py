@@ -26,6 +26,7 @@ class StorageConan(ConanFile):
         "with_asan": [True, False],
         "with_profiler": [True, False],
         "with_ut": [True, False],
+        "with_tools": [True, False],
         "with_benchmark": [True, False],
         "with_jemalloc": [True, False],
         "with_jni": [True, False],
@@ -40,6 +41,7 @@ class StorageConan(ConanFile):
         "with_asan": False,
         "with_profiler": False,
         "with_ut": True,
+        "with_tools": False,
         "with_benchmark": True,
         "with_jemalloc": True,
         "with_jni": False,
@@ -245,6 +247,7 @@ class StorageConan(ConanFile):
         tc.cache_variables["WITH_ASAN"] = self.options.with_asan
         tc.variables["WITH_PROFILER"] = self.options.with_profiler
         tc.cache_variables["WITH_UT"] = self.options.with_ut
+        tc.cache_variables["WITH_TOOLS"] = self.options.with_tools
         tc.cache_variables["WITH_BENCHMARK"] = self.options.with_benchmark
         tc.variables["ARROW_WITH_JEMALLOC"] = self.options.with_jemalloc
         tc.variables["WITH_JNI"] = self.options.with_jni
