@@ -65,7 +65,7 @@ jobs:
       - name: Build
         working-directory: ./cpp
         run: |
-          make build USE_ASAN=True BUILD_TYPE=Release WITH_TALON=True
+          make build USE_ASAN=True BUILD_TYPE=Release
 
       - name: Save rust build cache
         if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true'
@@ -145,7 +145,7 @@ jobs:
       - name: Build
         working-directory: ./cpp
         run: |
-          make build BUILD_TYPE=Release WITH_TALON=True
+          make build BUILD_TYPE=Release
 
       - name: Save rust build cache
         if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true'

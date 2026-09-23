@@ -33,6 +33,7 @@
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/filesystem/observable.h"
+#include "milvus-storage/filesystem/talon/talon_file_system.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/upload_sizable.h"
 #include "milvus-storage/properties.h"
@@ -251,8 +252,10 @@ struct ArrowFileSystemConfig {
   uint32_t iops_initial_rate = 2000;
   uint32_t iops_max_rate = 5000;
 
-  // Whether remote filesystem reads should use Talon block routing.
-  bool talon_enabled = false;
+  // Remote read routing: disabled, full, or small_reads.
+  TalonMode talon_mode = TalonMode::Disabled;
+  // Inclusive limit in bytes for small_reads, applied before EOF clamping.
+  uint32_t talon_small_read_threshold = 512U * 1024U;
   std::string talon_coordinator = "";
   uint32_t talon_block_size = 256U * 1024U * 1024U;
   // Maximum idle TCP connections per peer in each Talon pool; does not cap active connections.
