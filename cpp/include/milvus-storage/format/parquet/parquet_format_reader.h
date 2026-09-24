@@ -69,7 +69,8 @@ class ParquetFormatReader final : public FormatReader, public std::enable_shared
     // Implementation detail, not part of FormatReaderWithMetadata. This helper
     // lives in the nested MetaTrait only to access the reader's private state.
     static arrow::Result<MetadataPtr> create_metadata_from_reader(const std::shared_ptr<ParquetFormatReader>& reader,
-                                                                  const api::ColumnGroupFile& file);
+                                                                  const api::ColumnGroupFile& file,
+                                                                  bool decrypted);
   };
 
   ParquetFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,

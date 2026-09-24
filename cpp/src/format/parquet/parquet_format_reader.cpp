@@ -14,6 +14,7 @@
 
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 
+#include <atomic>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -70,6 +71,12 @@ static ::parquet::ReaderProperties make_reader_properties(
 static std::shared_ptr<arrow::Buffer> try_read_footer_buffer(const std::shared_ptr<arrow::io::RandomAccessFile>& file,
                                                              uint64_t file_size,
                                                              uint64_t footer_size);
+// Only called on metadata decoded from a PAR1 footer or a cached plaintext
+// footer. PAR1 may still contain encrypted columns with a signed plaintext footer.
+static bool is_plain_metadata(const std::shared_ptr<::parquet::FileMetaData>& metadata) {
+  return metadata && !metadata->is_encryption_algorithm_set();
+}
+
 static std::shared_ptr<::parquet::FileMetaData> try_parse_footer_metadata(
     const std::shared_ptr<arrow::Buffer>& suffix, const ::parquet::ReaderProperties& reader_props);
 static arrow::Result<::parquet::ArrowReaderProperties> make_arrow_reader_properties(
@@ -326,7 +333,8 @@ static std::shared_ptr<::parquet::FileMetaData> try_parse_footer_metadata(
   // Deserialize the Thrift FileMetaData from the suffix buffer.
   const uint8_t* thrift_data = data + suffix->size() - kParquetFooterTrailerSize - footer_length;
   try {
-    return ::parquet::FileMetaData::Make(thrift_data, &footer_length, reader_props);
+    auto metadata = ::parquet::FileMetaData::Make(thrift_data, &footer_length, reader_props);
+    return is_plain_metadata(metadata) ? metadata : nullptr;
   } catch (...) {
     return nullptr;
   }
@@ -345,10 +353,7 @@ static arrow::Result<std::shared_ptr<::parquet::arrow::FileReader>> create_parqu
   ::parquet::arrow::FileReaderBuilder builder;
   auto reader_props = make_reader_properties(key_retriever);
   ARROW_ASSIGN_OR_RAISE(auto arrow_reader_props, make_arrow_reader_properties(properties));
-  if (key_retriever) {
-    // Encrypted Parquet needs the parquet reader to initialize decryptors from
-    // its own footer read path. Passing caller-supplied FileMetaData can leave
-    // page decryptors incomplete.
+  if (!is_plain_metadata(metadata)) {
     metadata = nullptr;
   }
 
@@ -362,7 +367,7 @@ static arrow::Result<std::shared_ptr<::parquet::arrow::FileReader>> create_parqu
     ARROW_ASSIGN_OR_RAISE(parquet_file, fs->OpenInputFile(file_path));
   }
 
-  if (!key_retriever && footer_size > 0 && !metadata && file_size > 0 && footer_size <= file_size) {
+  if (footer_size > 0 && !metadata && file_size > 0 && footer_size <= file_size) {
     auto footer_buffer = try_read_footer_buffer(parquet_file, file_size, footer_size);
     metadata = try_parse_footer_metadata(footer_buffer, reader_props);
   }
@@ -412,7 +417,7 @@ std::string ParquetFormatReader::MetaTrait::cache_key(const api::ColumnGroupFile
 }
 
 arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::MetaTrait::create_metadata_from_reader(
-    const std::shared_ptr<ParquetFormatReader>& reader, const api::ColumnGroupFile& file) {
+    const std::shared_ptr<ParquetFormatReader>& reader, const api::ColumnGroupFile& file, bool decrypted) {
   if (!reader || !reader->file_reader_ || !reader->file_reader_->parquet_reader()) {
     return arrow::Status::Invalid("Cannot create parquet metadata from an unopened reader");
   }
@@ -432,7 +437,7 @@ arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::
   metadata->row_group_infos = reader->row_group_infos_;
   metadata->cache_size = parquet_metadata->size();
   metadata->payload.fs = reader->fs_;
-  if (!reader->key_retriever_) {
+  if (!decrypted && is_plain_metadata(parquet_metadata)) {
     metadata->payload.parquet_metadata = std::move(parquet_metadata);
   }
   metadata->payload.properties = reader->properties_;
@@ -447,12 +452,24 @@ arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::
     const api::Properties& properties,
     const milvus_storage::KeyRetriever& key_retriever) {
   ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, file.path));
+  // Arrow 17 does not expose FileMetaData's decryptor. A key request while
+  // opening proves that Arrow initialized decryption state for this footer;
+  // retaining that metadata would share keys/state with another reader.
+  auto decrypted = std::make_shared<std::atomic<bool>>(false);
+  milvus_storage::KeyRetriever tracked_key_retriever;
+  if (key_retriever) {
+    tracked_key_retriever = [decrypted, key_retriever](const std::string& metadata) {
+      decrypted->store(true);
+      return key_retriever(metadata);
+    };
+  }
   ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
   auto reader = std::make_shared<ParquetFormatReader>(std::move(fs), uri.key, properties, std::vector<std::string>{},
-                                                      key_retriever, file.Get<uint64_t>(api::kPropertyFileSize),
+                                                      tracked_key_retriever, file.Get<uint64_t>(api::kPropertyFileSize),
                                                       file.Get<uint64_t>(api::kPropertyFooterSize));
   ARROW_RETURN_NOT_OK(reader->open());
-  return create_metadata_from_reader(reader, file);
+  reader->key_retriever_ = key_retriever;
+  return create_metadata_from_reader(reader, file, decrypted->load());
 }
 
 folly::SemiFuture<arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr>>
@@ -465,17 +482,26 @@ ParquetFormatReader::MetaTrait::load_metadata_async(const api::ColumnGroupFile& 
       [file, properties,
        key_retriever](folly::Unit) -> folly::SemiFuture<arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr>> {
         FOLLY_ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, file.path));
+        auto decrypted = std::make_shared<std::atomic<bool>>(false);
+        milvus_storage::KeyRetriever tracked_key_retriever;
+        if (key_retriever) {
+          tracked_key_retriever = [decrypted, key_retriever](const std::string& metadata) {
+            decrypted->store(true);
+            return key_retriever(metadata);
+          };
+        }
         FOLLY_ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
         auto reader = std::make_shared<ParquetFormatReader>(
-            std::move(fs), uri.key, properties, std::vector<std::string>{}, key_retriever,
+            std::move(fs), uri.key, properties, std::vector<std::string>{}, tracked_key_retriever,
             file.Get<uint64_t>(api::kPropertyFileSize), file.Get<uint64_t>(api::kPropertyFooterSize));
         // Keep the temporary reader alive until its immutable metadata snapshot
         // has been built from the opened footer.
-        return reader->open_async().deferValue(
-            [reader = std::move(reader), file](arrow::Status status) -> arrow::Result<MetadataPtr> {
-              ARROW_RETURN_NOT_OK(status);
-              return create_metadata_from_reader(reader, file);
-            });
+        return reader->open_async().deferValue([reader = std::move(reader), file, decrypted,
+                                                key_retriever](arrow::Status status) -> arrow::Result<MetadataPtr> {
+          ARROW_RETURN_NOT_OK(status);
+          reader->key_retriever_ = key_retriever;
+          return create_metadata_from_reader(reader, file, decrypted->load());
+        });
       });
 }
 
@@ -497,10 +523,7 @@ arrow::Result<std::shared_ptr<ParquetFormatReader>> ParquetFormatReader::MetaTra
         fmt::format("Cannot open parquet reader from metadata without parquet footer. [path={}]", metadata->path));
   }
 
-  std::shared_ptr<::parquet::FileMetaData> parquet_metadata;
-  if (!metadata->payload.key_retriever) {
-    parquet_metadata = metadata->payload.parquet_metadata;
-  }
+  auto parquet_metadata = metadata->payload.parquet_metadata;
 
   const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
   const auto footer_size = file.Get<uint64_t>(api::kPropertyFooterSize);
@@ -526,9 +549,8 @@ ParquetFormatReader::MetaTrait::create_from_metadata_async(MetadataPtr metadata,
                                                            const std::shared_ptr<arrow::Schema>& read_schema,
                                                            const std::vector<std::string>& needed_columns,
                                                            const std::string& predicate) {
-  // A non-null key retriever identifies encrypted Parquet in this codebase. Encrypted
-  // metadata reconstruction intentionally uses this deferred synchronous fallback;
-  // the non-blocking async-open guarantee applies only to unencrypted files.
+  // Cached plaintext metadata skips footer I/O. Encrypted metadata reconstruction
+  // uses this deferred synchronous fallback to initialize a fresh decryptor.
   return folly::makeSemiFuture().deferValue(
       [metadata = std::move(metadata), file, read_schema, needed_columns,
        predicate](folly::Unit) -> arrow::Result<std::shared_ptr<ParquetFormatReader>> {
@@ -714,7 +736,8 @@ static std::shared_ptr<::parquet::FileMetaData> try_parse_plain_footer_metadata(
 
   try {
     auto decoded_length = metadata_length;
-    return ::parquet::FileMetaData::Make(metadata_buffer->data(), &decoded_length, reader_props);
+    auto metadata = ::parquet::FileMetaData::Make(metadata_buffer->data(), &decoded_length, reader_props);
+    return is_plain_metadata(metadata) ? metadata : nullptr;
   } catch (...) {
     return nullptr;
   }
@@ -740,8 +763,7 @@ static arrow::Future<std::shared_ptr<::parquet::FileMetaData>> read_footer_async
   // footer_size is an optimization hint, not part of Parquet correctness.
   // Encrypted files and unusable hints are delegated to Parquet's native
   // open path by returning null metadata.
-  if (reader_properties.file_decryption_properties() || footer_size < kParquetFooterTrailerSize ||
-      footer_size > file_size) {
+  if (footer_size < kParquetFooterTrailerSize || footer_size > file_size) {
     return MetadataFuture::MakeFinished(nullptr);
   }
 
