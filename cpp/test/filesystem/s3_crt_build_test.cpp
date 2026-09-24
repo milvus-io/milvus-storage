@@ -45,6 +45,8 @@
 #include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/gcp/gcp_credential_registry.h"
+#include "milvus-storage/filesystem/gcp/gcp_filesystem_producer.h"
 #include "milvus-storage/filesystem/s3/s3_crt_client.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
@@ -541,16 +543,12 @@ TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileWhenCrtEnabled) {
   if (!IsCloudEnv()) {
     GTEST_SKIP() << "CRT OpenInputFile smoke test skipped in non-cloud environment";
   }
-  auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
-  if (provider.ok() && provider.ValueOrDie() == kCloudProviderGCP) {
-    GTEST_SKIP() << "CRT OpenInputFile smoke test does not run for GCP provider";
-  }
-
   api::Properties properties;
   ASSERT_STATUS_OK(InitTestProperties(properties));
   ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
 
-  const std::string base_path = GetTestBasePath("s3-crt-open-input-file-smoke");
+  const std::string base_path = GetTestBasePath(
+      "s3-crt-open-input-file-smoke-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
   ASSERT_STATUS_OK(DeleteTestDir(fs, base_path));
   ASSERT_STATUS_OK(CreateTestDir(fs, base_path));
 
@@ -1083,7 +1081,7 @@ TEST(S3CrtBuildSupportTest, ZeroLengthAsyncReadsDoNotScheduleIoExecutor) {
   ASSERT_STATUS_OK(input_file->Close());
 }
 
-TEST(S3CrtBuildSupportTest, OpenInputFileFallsBackToSdkFileForGcpProvider) {
+TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileForGcpHmac) {
   ASSERT_STATUS_OK(EnsureS3InitializedForTest());
 
   auto options = S3Options::FromAccessKey("ak", "sk");
@@ -1093,7 +1091,138 @@ TEST(S3CrtBuildSupportTest, OpenInputFileFallsBackToSdkFileForGcpProvider) {
   ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
   ASSERT_AND_ASSIGN(auto input_file, fs->OpenInputFile("bucket/path/object.txt"));
 
-  EXPECT_EQ(dynamic_cast<milvus_storage::NonBlockingRandomAccessFile*>(input_file.get()), nullptr);
+  EXPECT_NE(dynamic_cast<milvus_storage::NonBlockingRandomAccessFile*>(input_file.get()), nullptr);
+}
+
+TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileForGcpIam) {
+  ASSERT_STATUS_OK(EnsureS3InitializedForTest());
+
+  auto options = S3Options::Anonymous();
+  options.cloud_provider = kCloudProviderGCP;
+  options.endpoint_override = "storage.googleapis.com";
+
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  ASSERT_AND_ASSIGN(auto input_file, fs->OpenInputFile("bucket/path/object.txt"));
+
+  EXPECT_NE(dynamic_cast<milvus_storage::NonBlockingRandomAccessFile*>(input_file.get()), nullptr);
+
+  options.use_crt_async_reads = false;
+  ASSERT_AND_ASSIGN(auto sdk_fs, S3FileSystem::Make(options));
+  ASSERT_AND_ASSIGN(auto sdk_file, sdk_fs->OpenInputFile("bucket/path/object.txt"));
+  EXPECT_EQ(dynamic_cast<milvus_storage::NonBlockingRandomAccessFile*>(sdk_file.get()), nullptr);
+}
+
+TEST(S3CrtBuildSupportTest, GcpIamBearerReachesCrtRangeGetAndHead) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "Test requires POSIX process APIs.";
+#else
+  const auto original_death_test_style = GTEST_FLAG_GET(death_test_style);
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const auto run_child = []() -> int {
+    namespace http = boost::beast::http;
+    using Tcp = boost::asio::ip::tcp;
+    class StaticBearerProvider final : public GcpCredentialProvider {
+   public:
+      std::atomic<int> authorization_calls{0};
+      std::optional<std::pair<std::string, std::string>> AuthorizationHeader() override {
+        const int call = ++authorization_calls;
+        return std::make_pair(std::string("Authorization"), "Bearer test-token-" + std::to_string(call));
+      }
+      arrow::Status MaybeSignConditionalWrite(const std::shared_ptr<Aws::Http::HttpRequest>&) override {
+        return arrow::Status::OK();
+      }
+    };
+    const auto fail = [](const std::string& message) {
+      std::cerr << message << std::endl;
+      return 1;
+    };
+
+    boost::asio::io_context server_context;
+    Tcp::acceptor acceptor(server_context, {boost::asio::ip::address_v4::loopback(), 0});
+    ArrowFileSystemConfig config;
+    config.storage_type = "remote";
+    config.cloud_provider = kCloudProviderGCP;
+    config.address = "127.0.0.1:" + std::to_string(acceptor.local_endpoint().port());
+    config.bucket_name = "test-bucket";
+    config.region = "auto";
+    config.use_iam = true;
+    config.s3_crt_async_read = true;
+    auto fs_result = GcpFileSystemProducer(config).Make();
+    if (!fs_result.ok()) {
+      return fail(fs_result.status().ToString());
+    }
+    auto provider = std::make_shared<StaticBearerProvider>();
+    GcpCredentialRegistry::Instance().Register(
+        {NormalizeGcpEndpoint(config.address, config.use_ssl), config.bucket_name}, provider);
+    auto fs = std::move(fs_result).ValueOrDie();
+    arrow::fs::FileInfo file_info("test-bucket/object.txt", arrow::fs::FileType::File);
+    file_info.set_size(9);
+    auto input_result = fs->OpenInputFile(file_info);
+    if (!input_result.ok()) {
+      return fail(input_result.status().ToString());
+    }
+    auto input = std::move(input_result).ValueOrDie();
+    if (dynamic_cast<NonBlockingRandomAccessFile*>(input.get()) == nullptr) {
+      return fail("GCP IAM did not select the CRT input file");
+    }
+
+    auto read = input->ReadAsync({}, 2, 4);
+    Tcp::socket get_socket(server_context);
+    acceptor.accept(get_socket);
+    boost::beast::flat_buffer get_buffer;
+    http::request<http::empty_body> get_request;
+    http::read(get_socket, get_buffer, get_request);
+    const bool get_method_ok = get_request.method() == http::verb::get;
+    const bool get_target_ok = std::string(get_request.target()).ends_with("/test-bucket/object.txt");
+    const bool get_bearer_ok = get_request[http::field::authorization] == "Bearer test-token-1";
+    const bool get_range_ok = get_request[http::field::range] == "bytes=2-5";
+    http::response<http::string_body> get_response{http::status::partial_content, get_request.version()};
+    get_response.set(http::field::content_range, "bytes 2-5/9");
+    get_response.set(http::field::accept_ranges, "bytes");
+    get_response.set(http::field::etag, "\"8aa99b1f439ff71293e95357bac6fd94\"");
+    get_response.body() = "cdef";
+    get_response.prepare_payload();
+    get_response.keep_alive(false);
+    http::write(get_socket, get_response);
+    get_socket.close();
+    auto read_result = read.result();
+    if (!get_method_ok || !get_target_ok || !get_bearer_ok || !get_range_ok) {
+      return fail("CRT GET request: method=" + std::to_string(get_method_ok) +
+                  " target=" + std::string(get_request.target()) + " target_ok=" + std::to_string(get_target_ok) +
+                  " bearer=" + std::to_string(get_bearer_ok) + " range=" + std::to_string(get_range_ok) +
+                  " provider_calls=" + std::to_string(provider->authorization_calls.load()));
+    }
+    if (!read_result.ok() || read_result.ValueOrDie()->ToString() != "cdef") {
+      return fail(read_result.status().ToString());
+    }
+
+    auto metadata = input->ReadMetadataAsync({});
+    Tcp::socket head_socket(server_context);
+    acceptor.accept(head_socket);
+    boost::beast::flat_buffer head_buffer;
+    http::request<http::empty_body> head_request;
+    http::read(head_socket, head_buffer, head_request);
+    const bool head_method_ok = head_request.method() == http::verb::head;
+    const bool head_target_ok = std::string(head_request.target()).ends_with("/test-bucket/object.txt");
+    const bool head_bearer_ok = head_request[http::field::authorization] == "Bearer test-token-2";
+    http::response<http::empty_body> head_response{http::status::ok, head_request.version()};
+    head_response.content_length(9);
+    head_response.set(http::field::etag, "\"8aa99b1f439ff71293e95357bac6fd94\"");
+    head_response.keep_alive(false);
+    http::write(head_socket, head_response);
+    head_socket.close();
+    auto metadata_result = metadata.result();
+    if (!head_method_ok || !head_target_ok || !head_bearer_ok || provider->authorization_calls.load() < 2) {
+      return fail("CRT HEAD did not obtain the GCP IAM bearer header");
+    }
+    if (!metadata_result.ok()) {
+      return fail(metadata_result.status().ToString());
+    }
+    return 0;
+  };
+  EXPECT_EXIT((::alarm(20), ::_exit(run_child())), ::testing::ExitedWithCode(0), "");
+  GTEST_FLAG_SET(death_test_style, original_death_test_style);
+#endif
 }
 
 }  // namespace milvus_storage::test
