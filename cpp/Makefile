@@ -12,6 +12,7 @@ endif
 # Build options (override via env: USE_ASAN=False make build)
 use_asan := $(or $(USE_ASAN),True)
 with_ut := $(or $(WITH_UT),True)
+with_tools := $(or $(WITH_TOOLS),False)
 with_fiu := $(or $(WITH_FIU),True)
 with_crt := $(or $(WITH_CRT),False)
 with_talon := $(or $(WITH_TALON),False)
@@ -37,6 +38,7 @@ build:
 	# Example building debug mode: BUILD_TYPE=Debug WITH_UT=False make
 	# Example building with fault injection: WITH_FIU=True make
 	@echo "with_ut: ${with_ut}"
+	@echo "with_tools: ${with_tools}"
 	@echo "with_benchmark: ${with_benchmark}"
 	@echo "use_asan: ${use_asan}"
 	@echo "build_type: ${build_type}"
@@ -48,11 +50,11 @@ build:
 
 	mkdir -p build && cd build && \
 	${CONAN_BASE} \
-	-o "&:with_ut=${with_ut}" -o "&:with_benchmark=${with_benchmark}" -o "&:with_asan=${use_asan}" \
+	-o "&:with_ut=${with_ut}" -o "&:with_tools=${with_tools}" -o "&:with_benchmark=${with_benchmark}" -o "&:with_asan=${use_asan}" \
 	-o "&:with_jni=${use_jni}" -o "&:with_python_binding=${use_python_binding}" -o "&:with_fiu=${with_fiu}" \
 	-o "&:with_crt=${with_crt}" -o "&:with_talon=${with_talon}" && \
 	conan build .. ${CONAN_SETTINGS} \
-	-o "&:with_ut=${with_ut}" -o "&:with_benchmark=${with_benchmark}" -o "&:with_asan=${use_asan}" \
+	-o "&:with_ut=${with_ut}" -o "&:with_tools=${with_tools}" -o "&:with_benchmark=${with_benchmark}" -o "&:with_asan=${use_asan}" \
 	-o "&:with_jni=${use_jni}" -o "&:with_python_binding=${use_python_binding}" -o "&:with_fiu=${with_fiu}" \
 	-o "&:with_crt=${with_crt}" -o "&:with_talon=${with_talon}"
 
@@ -66,10 +68,12 @@ python-lib:
 	mkdir -p build && cd build && \
 	${CONAN_BASE} \
 	-o "&:with_ut=False" -o "&:with_benchmark=False" -o "&:with_asan=False" -o "&:with_jni=False" -o "&:with_jemalloc=False" \
-	-o "&:with_python_binding=True" -o "&:with_fiu=${with_fiu}" && \
+	-o "&:with_python_binding=True" -o "&:with_fiu=${with_fiu}" \
+	-o "&:with_tools=${with_tools}" -o "&:with_crt=${with_crt}" -o "&:with_talon=${with_talon}" && \
 	conan build .. ${CONAN_SETTINGS} \
 	-o "&:with_ut=False" -o "&:with_benchmark=False" -o "&:with_asan=False" -o "&:with_jni=False" -o "&:with_jemalloc=False" \
-	-o "&:with_python_binding=True" -o "&:with_fiu=${with_fiu}"
+	-o "&:with_python_binding=True" -o "&:with_fiu=${with_fiu}" \
+	-o "&:with_tools=${with_tools}" -o "&:with_crt=${with_crt}" -o "&:with_talon=${with_talon}"
 
 java-lib:
 	@echo "Building library for Java/Scala dependencies..."

@@ -1,26 +1,46 @@
+# OS metadata
+.DS_Store
+
+# Editor and local agent files
+.vscode/*
+cpp/.vscode/*
+cpp/.idea/*
+go/.vscode/*
+go/.idea/*
+.metals/*
+.claude/
+.worktrees/
+AGENTS.md
+
+# Shared build artifacts
+compile_commands.json
+CMakeUserPresets.json
+dist/*
+
+# C++ and Conan
 cpp/build/*
 cpp/debug_build
-cpp/.vscode/*
 cpp/.cache/*
-cpp/.idea/*
 cpp/coverage/*
 cpp/conan.lock
 cpp/conaninfo.txt
 cpp/conanbuildinfo.txt
 cpp/graph_info.json
-go/.vscode/*
-go/.idea/*
-compile_commands.json
-CMakeUserPresets.json
-.vscode/*
+cpp/conan_imports_manifest.txt
+
+# Go
 go/internal/core/output/*
+
+# Java
 java/project/*
 java/target/*
-.metals/*
 java/libmilvus-storage-jni.so
-dist/*
 java/native/*
+
+# Rust
 rust/target/*
+
+# Python environments and generated files
 .python-version
 python/.python-version
 python/*.egg-info/
@@ -28,11 +48,10 @@ python/__pycache__/
 python/**/__pycache__/
 python/*.pyc
 python/.pytest_cache/
+python/.coverage
+python/coverage.xml
 python/build/
 python/dist/
 python/.venv/
 python/venv/
 python/env/
-.claude/
-.worktrees/
-AGENTS.md

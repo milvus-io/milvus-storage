@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(WITH_UT "Build the testing tree." OFF)
+option(WITH_TOOLS "Build command-line fixture tools." OFF)
 option(WITH_ASAN "Build with address sanitizer." OFF)
 option(WITH_BENCHMARK "Build with micro benchmark." ON)
 option(WITH_JNI "Build with JNI library." OFF)
@@ -195,8 +196,9 @@ if (WITH_JNI AND NOT APPLE)
   )
 endif()
 
-# Python bindings: hide all symbols except FFI symbols
-if (WITH_PYTHON_BINDING)
+# The fixture tool links the C++ API from this library; keep those symbols
+# available in test builds while preserving the release Python ABI boundary.
+if (WITH_PYTHON_BINDING AND NOT WITH_TOOLS)
   target_compile_options(milvus-storage PRIVATE -fvisibility=hidden)
   if (APPLE)
     # macOS: use -exported_symbols_list to export only FFI symbols
@@ -220,6 +222,9 @@ if (WITH_UT)
 
   add_definitions(-DBUILD_GTEST)
   add_subdirectory(test)
+endif()
+
+if (WITH_UT OR WITH_TOOLS)
   add_subdirectory(tools)
 endif()
 

@@ -5,11 +5,47 @@ Verify different compression codecs and settings.
 """
 
 import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
 from milvus_storage import PropertyKeys, Reader, Writer
 
 
 class TestCompression:
     """Test compression functionality."""
+
+    @pytest.mark.parametrize("dictionary_enabled", [True, False])
+    @pytest.mark.e2e_smoke
+    def test_parquet_dictionary_setting_changes_written_file(
+        self, temp_case_path, test_config, dictionary_enabled
+    ):
+        if not test_config.is_local:
+            pytest.skip("Inspecting Parquet encoding requires an isolated local file")
+        schema = pa.schema([pa.field("id", pa.int64()), pa.field("name", pa.string())])
+        properties = test_config.get_properties(
+            **{
+                PropertyKeys.WRITER_ENABLE_DICTIONARY: str(dictionary_enabled).lower(),
+                PropertyKeys.WRITER_COMPRESSION: "zstd",
+                PropertyKeys.WRITER_COMPRESSION_LEVEL: "3",
+            }
+        )
+        batch = pa.RecordBatch.from_pydict(
+            {"id": list(range(500)), "name": ["repeated"] * 500}, schema=schema
+        )
+        with Writer(temp_case_path, schema, properties) as writer:
+            writer.write(batch)
+            groups = writer.close()
+        files = groups.to_list()[0].files
+        assert len(files) == 1
+        file_path = f"{test_config.root_path}/{files[0].path}"
+
+        with groups, Reader(groups, schema, properties=properties) as reader:
+            actual = pa.Table.from_batches(list(reader.scan())).to_pydict()
+            assert actual == batch.to_pydict()
+
+        with open(file_path, "rb") as source:
+            name_column = pq.read_metadata(pa.BufferReader(source.read())).row_group(0).column(1)
+        assert name_column.compression == "ZSTD"
+        assert ("RLE_DICTIONARY" in name_column.encodings) is dictionary_enabled
 
     def _write_and_read(self, path, schema, batch_generator, props, num_batches=5):
         """Helper to write data and read it back, returning (column_groups, total_rows)."""
