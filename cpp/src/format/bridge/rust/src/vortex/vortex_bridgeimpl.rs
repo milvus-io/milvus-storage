@@ -1095,6 +1095,21 @@ impl VortexWriter {
     }
 }
 
+// Keep at most one prepared point-Take plan per file; each execution supplies its row.
+struct PreparedPointOutput {
+    data_type: DataType,
+    original_schema: SchemaRef,
+    conversion_plan: Option<Arc<VortexSchemaConversion>>,
+    array_compatible: bool,
+}
+
+struct PreparedPointTake {
+    window: CoalescingWindowKey,
+    projection: Option<Expression>,
+    scan: Arc<vortex::layout::scan::repeated_scan::RepeatedScan<ArrayRef>>,
+    output: Arc<PreparedPointOutput>,
+}
+
 pub(crate) struct VortexFile {
     inner: vortex::file::VortexFile,
     fswrapper: crate::filesystem_c::ThreadSafePtr<c_void>,
@@ -1102,6 +1117,9 @@ pub(crate) struct VortexFile {
     file_size: u64,
     default_window: CoalescingWindowKey,
     views_by_window: Mutex<HashMap<CoalescingWindowKey, vortex::file::VortexFile>>,
+    prepared_point: Arc<Mutex<Option<PreparedPointTake>>>,
+    natural_split_count: usize,
+    direct_point_allowed: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1193,10 +1211,14 @@ impl VortexFile {
         &self,
         window: crate::vortex_ffi::CoalescingWindow,
     ) -> Result<Box<VortexScanBuilder>> {
+        let point_window = CoalescingWindowKey::from_ffi(&window);
         let file = self.open_with_coalescing_window(window)?;
-        let num_natural_splits = file.splits().map_err(VortexError::from)?.len();
         Ok(Box::new(VortexScanBuilder {
             inner: file.scan()?,
+            point_cache: Some(Arc::clone(&self.prepared_point)),
+            point_window,
+            projection_key: None,
+            point_row: None,
             filter: None,
             output_schema: None,
             original_schema: None,
@@ -1204,7 +1226,7 @@ impl VortexFile {
             row_range: None,
             row_ranges: None,
             split_row_indices_override: None,
-            num_natural_splits,
+            num_natural_splits: self.natural_split_count,
         }))
     }
 
@@ -1224,6 +1246,10 @@ impl VortexFile {
 
         Ok(Box::new(VortexScanBuilder {
             inner: self.inner.scan()?,
+            point_cache: None,
+            point_window: self.default_window,
+            projection_key: None,
+            point_row: None,
             filter: None,
             output_schema: Some(converted_schema),
             original_schema: Some(original_schema),
@@ -1593,7 +1619,11 @@ async fn open_file_impl(
         .await
         .map_err(VortexError::from)?;
 
+    let natural_split_count = file.splits().map_err(VortexError::from)?.len();
     Ok(Box::new(VortexFile {
+        prepared_point: Arc::new(Mutex::new(None)),
+        direct_point_allowed: std::sync::atomic::AtomicBool::new(true),
+        natural_split_count,
         inner: file,
         fswrapper: crate::filesystem_c::ThreadSafePtr::new(fswrapper_addr as *mut c_void),
         path,
@@ -1696,6 +1726,10 @@ pub unsafe extern "C" fn vortex_open_file_async(
 
 pub(crate) struct VortexScanBuilder {
     inner: ScanBuilder<ArrayRef>,
+    point_cache: Option<Arc<Mutex<Option<PreparedPointTake>>>>,
+    point_window: CoalescingWindowKey,
+    projection_key: Option<Expression>,
+    point_row: Option<u64>,
     filter: Option<Expression>,
     output_schema: Option<SchemaRef>, // Converted schema for Vortex (FixedSizeList<u8>)
     original_schema: Option<SchemaRef>, // Original schema from user (may contain FixedSizeBinary)
@@ -1711,6 +1745,7 @@ pub(crate) struct VortexScanBuilder {
 
 impl VortexScanBuilder {
     pub(crate) fn with_filter(&mut self, filter: Box<Expr>) {
+        self.point_cache = None;
         self.filter = Some(match self.filter.take() {
             Some(existing) => vortex::expr::and(existing, filter.inner),
             None => filter.inner,
@@ -1718,6 +1753,7 @@ impl VortexScanBuilder {
     }
 
     pub(crate) fn with_filter_ref(&mut self, filter: &Expr) {
+        self.point_cache = None;
         self.filter = Some(match self.filter.take() {
             Some(existing) => vortex::expr::and(existing, filter.inner.clone()),
             None => filter.inner.clone(),
@@ -1725,16 +1761,19 @@ impl VortexScanBuilder {
     }
 
     pub(crate) fn with_projection(&mut self, filter: Box<Expr>) {
+        self.projection_key = Some(filter.inner.clone());
         take_mut::take(&mut self.inner, |inner| inner.with_projection(filter.inner));
     }
 
     pub(crate) fn with_projection_ref(&mut self, filter: &Expr) {
+        self.projection_key = Some(filter.inner.clone());
         take_mut::take(&mut self.inner, |inner| {
             inner.with_projection(filter.inner.clone())
         });
     }
 
     pub(crate) fn with_row_indices_projection(&mut self, field_name: &str) {
+        self.point_cache = None;
         take_mut::take(&mut self.inner, |inner| {
             inner.with_projection(vortex::expr::pack(
                 [(FieldName::from(field_name), row_idx())],
@@ -1744,6 +1783,7 @@ impl VortexScanBuilder {
     }
 
     pub(crate) fn with_split_row_indices(&mut self, split_row_indices: bool) {
+        self.point_cache = None;
         self.split_row_indices_override = Some(split_row_indices);
         take_mut::take(&mut self.inner, |inner| {
             inner.with_split_row_indices(split_row_indices)
@@ -1751,11 +1791,13 @@ impl VortexScanBuilder {
     }
 
     pub(crate) fn with_row_range(&mut self, row_range_start: u64, row_range_end: u64) {
+        self.point_cache = None;
         self.row_range = Some(row_range_start..row_range_end);
         self.row_ranges = None;
     }
 
     pub(crate) fn with_row_ranges(&mut self, starts: &[u64], ends: &[u64]) {
+        self.point_cache = None;
         assert_eq!(starts.len(), ends.len());
         self.row_range = None;
         self.row_ranges = Some(
@@ -1775,6 +1817,11 @@ impl VortexScanBuilder {
     }
 
     pub(crate) fn with_include_by_index(&mut self, include_by_index: &[u64]) {
+        self.point_row = if include_by_index.len() == 1 {
+            Some(include_by_index[0])
+        } else {
+            None
+        };
         self.row_range = None;
         self.row_ranges = None;
         let selection = Selection::IncludeByIndex(Buffer::copy_from(include_by_index));
@@ -1801,6 +1848,7 @@ impl VortexScanBuilder {
     }
 
     pub(crate) fn with_limit(&mut self, limit: u64) {
+        self.point_cache = None;
         take_mut::take(&mut self.inner, |inner| inner.with_limit(limit));
     }
 
@@ -1941,6 +1989,10 @@ pub(crate) unsafe fn scan_builder_into_stream(
         row_ranges,
         split_row_indices_override: _,
         num_natural_splits: _,
+        point_cache: _,
+        point_window: _,
+        projection_key: _,
+        point_row: _,
     } = *builder;
     if let Some(filter) = filter {
         inner = inner.with_filter(filter);
@@ -2049,11 +2101,14 @@ pub unsafe extern "C" fn vortex_free_error_string(ptr: *mut std::ffi::c_char) {
 /// # Safety
 /// * handle must have been produced by scan_builder_into_raw_handle.
 /// * out_stream must point to writable FFI_ArrowArrayStream storage.
+/// * out_array must be null or point to writable FFI_ArrowArray storage.
+/// * Both outputs must be initialized as released and remain valid until callback completes.
 /// * callback must remain valid until invoked.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vortex_scan_collect_async(
+pub unsafe extern "C" fn vortex_scan_collect_async_with_array(
     handle: usize,
     out_stream: *mut FFI_ArrowArrayStream,
+    out_array: *mut FFI_ArrowArray,
     callback: VortexAsyncCallback,
     ctx: *mut c_void,
 ) {
@@ -2068,6 +2123,10 @@ pub unsafe extern "C" fn vortex_scan_collect_async(
         row_ranges,
         split_row_indices_override: _,
         num_natural_splits: _,
+        point_cache,
+        point_window,
+        projection_key,
+        point_row,
     } = *builder;
 
     if let Some(filter) = filter {
@@ -2096,11 +2155,17 @@ pub unsafe extern "C" fn vortex_scan_collect_async(
             },
         };
 
+    let plan = plan.map(Arc::new);
     let data_type = DataType::Struct(vortex_schema.fields().clone());
     let empty_selection = matches!(row_ranges.as_ref(), Some(ranges) if ranges.is_empty())
         || matches!(row_range.as_ref(), Some(range) if range.start == range.end);
 
+    enum Collected {
+        Stream(FFI_ArrowArrayStream),
+        Array(FFI_ArrowArray),
+    }
     let send_stream = out_stream as usize;
+    let send_array = out_array as usize;
     let send_ctx = ctx as usize;
 
     crate::TOKIO_RT.spawn(async move {
@@ -2109,8 +2174,53 @@ pub unsafe extern "C" fn vortex_scan_collect_async(
         let collect_result = std::panic::AssertUnwindSafe(async move {
             let mut batches: Vec<RecordBatch> = Vec::new();
             if !empty_selection {
+                let use_point = point_cache.is_some()
+                    && point_row.is_some()
+                    && row_ranges.is_none()
+                    && row_range.is_none();
+                let scan = if use_point {
+                    let cache = point_cache.as_ref().unwrap();
+                    let hit = {
+                        let guard = cache.lock().unwrap();
+                        guard
+                            .as_ref()
+                            .filter(|p| {
+                                p.window == point_window
+                                    && p.projection == projection_key
+                                    && p.output.data_type == data_type
+                                    && p.output.original_schema.as_ref() == original_schema.as_ref()
+                                    && p.output.array_compatible == (send_array != 0)
+                            })
+                            .map(|p| Arc::clone(&p.scan))
+                    };
+                    if let Some(scan) = hit {
+                        scan
+                    } else {
+                        // The immutable plan covers the file; the invocation supplies its own range.
+                        let scan = Arc::new(inner.with_selection(Selection::All).prepare()?);
+                        let mut guard = cache.lock().unwrap();
+                        *guard = Some(PreparedPointTake {
+                            window: point_window,
+                            projection: projection_key,
+                            scan: Arc::clone(&scan),
+                            output: Arc::new(PreparedPointOutput {
+                                data_type: data_type.clone(),
+                                original_schema: Arc::clone(&original_schema),
+                                conversion_plan: plan.clone(),
+                                array_compatible: send_array != 0,
+                            }),
+                        });
+                        scan
+                    }
+                } else {
+                    Arc::new(inner.prepare()?)
+                };
+                let row_range = if use_point {
+                    point_row.map(|row| row..row + 1)
+                } else {
+                    row_range
+                };
                 if let Some(row_ranges) = row_ranges {
-                    let scan = inner.prepare()?;
                     for row_range in row_ranges {
                         let stream = scan.execute_array_stream(Some(row_range))?;
                         futures::pin_mut!(stream);
@@ -2120,12 +2230,11 @@ pub unsafe extern "C" fn vortex_scan_collect_async(
                                 array,
                                 &data_type,
                                 original_schema.as_ref(),
-                                plan.as_ref(),
+                                plan.as_deref(),
                             )?);
                         }
                     }
                 } else {
-                    let scan = inner.prepare()?;
                     let stream = scan.execute_array_stream(row_range)?;
                     futures::pin_mut!(stream);
                     while let Some(item) = stream.next().await {
@@ -2134,26 +2243,37 @@ pub unsafe extern "C" fn vortex_scan_collect_async(
                             array,
                             &data_type,
                             original_schema.as_ref(),
-                            plan.as_ref(),
+                            plan.as_deref(),
                         )?);
                     }
                 }
             }
 
+            if send_array != 0 && batches.len() == 1 {
+                let array = StructArray::from(batches.pop().expect("single batch checked"));
+                return Ok::<Collected, anyhow::Error>(Collected::Array(FFI_ArrowArray::new(
+                    &array.to_data(),
+                )));
+            }
             let reader: Box<dyn RecordBatchReader + Send> = Box::new(VecBatchReader {
                 schema: original_schema,
                 batches: batches.into_iter(),
             });
-            Ok::<FFI_ArrowArrayStream, anyhow::Error>(FFI_ArrowArrayStream::new(reader))
+            Ok::<Collected, anyhow::Error>(Collected::Stream(FFI_ArrowArrayStream::new(reader)))
         })
         .catch_unwind()
         .await;
 
         match collect_result {
-            Ok(Ok(stream)) => {
+            Ok(Ok(result)) => {
                 let out_stream = send_stream as *mut FFI_ArrowArrayStream;
                 let ctx = send_ctx as *mut c_void;
-                unsafe { std::ptr::write(out_stream, stream) };
+                match result {
+                    Collected::Stream(stream) => unsafe { std::ptr::write(out_stream, stream) },
+                    Collected::Array(array) => unsafe {
+                        std::ptr::write(send_array as *mut FFI_ArrowArray, array)
+                    },
+                }
                 unsafe { callback(ctx, out_stream, std::ptr::null()) };
             }
             Ok(Err(error)) => callback_error(callback, send_ctx as *mut c_void, error),
@@ -2188,5 +2308,139 @@ pub fn row_group_zone_map_pruning_stats_ffi() -> crate::vortex_ffi::RowGroupZone
     crate::vortex_ffi::RowGroupZoneMapPruningStats {
         prune_eval_count,
         pruned_row_group_count,
+    }
+}
+
+/// Keep the existing C ABI for stream-only callers.
+///
+/// # Safety
+/// The handle, output storage, and callback must satisfy vortex_scan_collect_async_with_array.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vortex_scan_collect_async(
+    handle: usize,
+    out_stream: *mut FFI_ArrowArrayStream,
+    callback: VortexAsyncCallback,
+    ctx: *mut c_void,
+) {
+    unsafe {
+        vortex_scan_collect_async_with_array(
+            handle,
+            out_stream,
+            std::ptr::null_mut(),
+            callback,
+            ctx,
+        )
+    };
+}
+
+impl VortexFile {
+    // Metadata-based readers can have different immutable read configurations on one file.
+    pub(crate) fn disable_direct_point_reuse(&self) {
+        self.direct_point_allowed
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Called only by a dedicated FormatReader with an unchanged read configuration.
+    /// False/error means no callback was invoked and the caller still owns its context.
+    ///
+    /// # Safety
+    /// callback must encode a valid VortexAsyncCallback function pointer. Output pointers must
+    /// satisfy vortex_scan_collect_async_with_array and remain valid with ctx until completion.
+    pub(crate) unsafe fn try_take_prepared_async(
+        &self,
+        row: u64,
+        out_stream: usize,
+        out_array: usize,
+        callback: usize,
+        ctx: usize,
+    ) -> Result<bool> {
+        if !self
+            .direct_point_allowed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(false);
+        }
+        if row >= self.row_count() {
+            return Err(anyhow::anyhow!("point row out of bounds"));
+        }
+        let cached = {
+            let guard = self
+                .prepared_point
+                .lock()
+                .map_err(|_| anyhow::anyhow!("point cache poisoned"))?;
+            // Shared metadata may disable reuse while this call is waiting for the cache lock.
+            if !self
+                .direct_point_allowed
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Ok(false);
+            }
+            guard
+                .as_ref()
+                .map(|p| (Arc::clone(&p.scan), Arc::clone(&p.output)))
+        };
+        let Some((scan, output)) = cached else {
+            return Ok(false);
+        };
+        let callback: VortexAsyncCallback = unsafe { std::mem::transmute(callback) };
+        enum Collected {
+            Stream(FFI_ArrowArrayStream),
+            Array(FFI_ArrowArray),
+        }
+        crate::TOKIO_RT.spawn(async move {
+            use futures::{FutureExt, StreamExt};
+            let result = std::panic::AssertUnwindSafe(async move {
+                let mut batches = Vec::new();
+                let stream = scan.execute_array_stream(Some(row..row + 1))?;
+                futures::pin_mut!(stream);
+                while let Some(array) = stream.next().await {
+                    batches.push(array_to_record_batch(
+                        array?,
+                        &output.data_type,
+                        output.original_schema.as_ref(),
+                        output.conversion_plan.as_deref(),
+                    )?);
+                }
+                if out_array != 0 && output.array_compatible && batches.len() == 1 {
+                    let array = StructArray::from(batches.pop().expect("single batch checked"));
+                    return Ok::<Collected, anyhow::Error>(Collected::Array(FFI_ArrowArray::new(
+                        &array.to_data(),
+                    )));
+                }
+                let reader: Box<dyn RecordBatchReader + Send> = Box::new(VecBatchReader {
+                    schema: Arc::clone(&output.original_schema),
+                    batches: batches.into_iter(),
+                });
+                Ok(Collected::Stream(FFI_ArrowArrayStream::new(reader)))
+            })
+            .catch_unwind()
+            .await;
+            match result {
+                Ok(Ok(value)) => {
+                    match value {
+                        Collected::Stream(stream) => unsafe {
+                            std::ptr::write(out_stream as *mut FFI_ArrowArrayStream, stream)
+                        },
+                        Collected::Array(array) => unsafe {
+                            std::ptr::write(out_array as *mut FFI_ArrowArray, array)
+                        },
+                    }
+                    unsafe {
+                        callback(
+                            ctx as *mut c_void,
+                            out_stream as *mut FFI_ArrowArrayStream,
+                            std::ptr::null(),
+                        )
+                    };
+                }
+                Ok(Err(error)) => callback_error(callback, ctx as *mut c_void, error),
+                Err(_) => callback_error(
+                    callback,
+                    ctx as *mut c_void,
+                    "vortex direct point scan panicked",
+                ),
+            }
+        });
+        Ok(true)
     }
 }
