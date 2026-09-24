@@ -1568,25 +1568,41 @@ TEST_P(FormatReaderTest, ParquetCreateFromMetadataSharesParsedMetadata) {
     ASSERT_GT(file.Get<uint64_t>(api::kPropertyFileSize), 0);
     ASSERT_GT(file.Get<uint64_t>(api::kPropertyFooterSize), 0);
 
-    ASSERT_AND_ASSIGN(auto metadata,
-                      FormatReader::load_metadata<parquet::ParquetFormatReader>(file, properties_, key_retriever));
-    ASSERT_NE(nullptr, metadata->payload.parquet_metadata);
-    const auto metadata_ref_count = metadata->payload.parquet_metadata.use_count();
+    for (bool with_hint : {false, true}) {
+      SCOPED_TRACE(with_hint);
+      auto input_file = file;
+      if (!with_hint) {
+        input_file.properties.erase(api::kPropertyFileSize);
+        input_file.properties.erase(api::kPropertyFooterSize);
+      }
+      ASSERT_AND_ASSIGN(auto metadata, FormatReader::load_metadata<parquet::ParquetFormatReader>(
+                                           input_file, properties_, key_retriever));
+      ASSERT_NE(nullptr, metadata->payload.parquet_metadata);
+      const auto metadata_ref_count = metadata->payload.parquet_metadata.use_count();
 
-    ASSERT_AND_ASSIGN(auto first_reader, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
-                                             metadata, file, schema_, {"id"}, ""));
-    ASSERT_AND_ASSIGN(auto second_reader, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
-                                              metadata, file, schema_, {"value"}, ""));
+      ASSERT_AND_ASSIGN(auto first_reader, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
+                                               metadata, input_file, schema_, {"id"}, ""));
+      ASSERT_AND_ASSIGN(auto second_reader, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
+                                                metadata, input_file, schema_, {"value"}, ""));
 
-    ASSERT_GE(metadata->payload.parquet_metadata.use_count(), metadata_ref_count + 2);
+      ASSERT_GE(metadata->payload.parquet_metadata.use_count(), metadata_ref_count + 2);
 
-    ASSERT_AND_ASSIGN(auto first_batch, first_reader->get_chunk(0));
-    ASSERT_AND_ASSIGN(auto second_batch, second_reader->get_chunk(0));
-    ASSERT_EQ(first_batch->num_columns(), 1);
-    ASSERT_EQ(second_batch->num_columns(), 1);
-    ASSERT_EQ(first_batch->schema()->field(0)->name(), "id");
-    ASSERT_EQ(second_batch->schema()->field(0)->name(), "value");
-    EXPECT_EQ(key_requests.load(), 0);
+      ASSERT_AND_ASSIGN(auto first_batch, first_reader->get_chunk(0));
+      ASSERT_AND_ASSIGN(auto second_batch, second_reader->get_chunk(0));
+      ASSERT_EQ(first_batch->num_columns(), 1);
+      ASSERT_EQ(second_batch->num_columns(), 1);
+      ASSERT_EQ(first_batch->schema()->field(0)->name(), "id");
+      ASSERT_EQ(second_batch->schema()->field(0)->name(), "value");
+      // A metadata snapshot without a reusable footer must reopen the file,
+      // including when no key retriever was configured for a plain file.
+      auto uncached = std::make_shared<parquet::ParquetFormatReader::MetaTrait::Metadata>(*metadata);
+      uncached->payload.parquet_metadata.reset();
+      ASSERT_AND_ASSIGN(auto reopened, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
+                                           uncached, input_file, schema_, {}, ""));
+      ASSERT_AND_ASSIGN(auto reopened_batch, reopened->get_chunk(0));
+      ASSERT_TRUE(reopened_batch->Equals(*test_batch_));
+      EXPECT_EQ(key_requests.load(), 0);
+    }
   }
 }
 
@@ -1627,6 +1643,16 @@ TEST_P(FormatReaderTest, ParquetEncryptedMetadataRequiresReaderDecryptionState) 
       ASSERT_AND_ASSIGN(auto batch, reopened->get_chunk(0));
       ASSERT_TRUE(batch->Equals(*test_batch_));
     }
+    // Clones must own independent decryption state after the source is closed.
+    auto original = std::make_shared<parquet::ParquetFormatReader>(
+        fs_, file_path, properties_, std::vector<std::string>{}, key, info.size(), info.size());
+    ASSERT_STATUS_OK(original->open());
+    ASSERT_AND_ASSIGN(auto original_batch, original->get_chunk(0));
+    ASSERT_TRUE(original_batch->Equals(*test_batch_));
+    ASSERT_AND_ASSIGN(auto clone, original->clone_reader());
+    original.reset();
+    ASSERT_AND_ASSIGN(auto clone_batch, clone->get_chunk(0));
+    ASSERT_TRUE(clone_batch->Equals(*test_batch_));
     for (auto wrong_key : {milvus_storage::KeyRetriever{},
                            milvus_storage::KeyRetriever{[](const std::string&) { return std::string(32, 'x'); }}}) {
       auto reader = std::make_shared<parquet::ParquetFormatReader>(

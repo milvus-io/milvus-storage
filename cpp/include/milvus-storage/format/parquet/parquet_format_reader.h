@@ -35,6 +35,7 @@ class ParquetFormatReader final : public FormatReader, public std::enable_shared
   struct MetaTrait {
     struct Payload {
       std::shared_ptr<arrow::fs::FileSystem> fs;
+      // Reusable unencrypted footer, or null when each reader must reopen it.
       std::shared_ptr<::parquet::FileMetaData> parquet_metadata;
       api::Properties properties;
       milvus_storage::KeyRetriever key_retriever;
@@ -69,8 +70,7 @@ class ParquetFormatReader final : public FormatReader, public std::enable_shared
     // Implementation detail, not part of FormatReaderWithMetadata. This helper
     // lives in the nested MetaTrait only to access the reader's private state.
     static arrow::Result<MetadataPtr> create_metadata_from_reader(const std::shared_ptr<ParquetFormatReader>& reader,
-                                                                  const api::ColumnGroupFile& file,
-                                                                  bool decrypted);
+                                                                  const api::ColumnGroupFile& file);
   };
 
   ParquetFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
@@ -130,7 +130,8 @@ class ParquetFormatReader final : public FormatReader, public std::enable_shared
   // Validate a completed file reader, then publish its schema, row-group, and
   // projection state only after all derived values are ready. All failures are
   // returned as Status.
-  [[nodiscard]] arrow::Status finish_open(std::shared_ptr<::parquet::arrow::FileReader> file_reader);
+  [[nodiscard]] arrow::Status finish_open(std::shared_ptr<::parquet::arrow::FileReader> file_reader,
+                                          std::shared_ptr<::parquet::FileMetaData> plain_metadata);
 
   // Resolve top-level column names to Parquet leaf indices and commit the
   // projection. An empty list selects every leaf column.
@@ -152,6 +153,9 @@ class ParquetFormatReader final : public FormatReader, public std::enable_shared
   std::vector<int> projected_leaf_column_indices_;
   std::vector<RowGroupInfo> row_group_infos_;
   std::shared_ptr<::parquet::arrow::FileReader> file_reader_;
+  // Only the unencrypted footer parser can populate this shared cache entry.
+  // Arrow metadata containing reader-owned decryptors must stay private.
+  std::shared_ptr<::parquet::FileMetaData> plain_metadata_;
 };  // ParquetFormatReader
 
 }  // namespace milvus_storage::parquet
