@@ -35,6 +35,26 @@ arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
   arrow::fs::AzureOptions options;
   assert(!config_.access_key_id.empty());
   options.account_name = config_.access_key_id;
+
+  // Milvus passes the Azure endpoint *suffix* (e.g. "core.usgovcloudapi.net",
+  // "core.chinacloudapi.cn"). Arrow treats an authority beginning with '.' as a
+  // relative domain and prepends the account name, yielding the required
+  // virtual-host-style URL "https://{account}.blob.core.usgovcloudapi.net/".
+  // Passing the suffix verbatim would produce a path-style URL
+  // "https://core.usgovcloudapi.net/{account}/", which is invalid for real Azure.
+  // Backport of milvus-io/milvus-storage#478 (main commit 674cf10) adapted to
+  // the pre-Arrow-v23-port Azure producer on the 2.6 branch.
+  if (!config_.address.empty()) {
+    const char* azurite_env = std::getenv("USE_AZURITE");
+    // use the azurite
+    if (azurite_env && (std::string(azurite_env) == "true")) {
+      options.blob_storage_authority = config_.address;
+      options.dfs_storage_authority = config_.address;
+    } else {  // use the azure cloud
+      options.blob_storage_authority = ".blob." + config_.address;
+      options.dfs_storage_authority = ".dfs." + config_.address;
+    }
+  }
   if (config_.use_iam) {
     const char* federated_token = getenv("AZURE_FEDERATED_TOKEN_FILE");
     if (federated_token != nullptr && strlen(federated_token) > 0) {
