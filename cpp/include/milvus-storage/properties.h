@@ -101,7 +101,8 @@ struct PropertyInfo {
 #define PROPERTY_FS_IOPS_MAX_RATE "fs.iops_max_rate"
 
 // talon properties
-#define PROPERTY_FS_TALON_ENABLED "fs.talon.enabled"
+#define PROPERTY_FS_TALON_MODE "fs.talon.mode"
+#define PROPERTY_FS_TALON_SMALL_READ_THRESHOLD "fs.talon.small_read_threshold"
 #define PROPERTY_FS_TALON_COORDINATOR "fs.talon.coordinator"
 #define PROPERTY_FS_TALON_BLOCK_SIZE "fs.talon.block_size"
 #define PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR "fs.talon.max_idle_per_addr"

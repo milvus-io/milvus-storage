@@ -35,22 +35,18 @@
 
 #include <unistd.h>
 
-#ifdef WITH_TALON
 #include <arrow/api.h>
 #include <arrow/filesystem/localfs.h>
 #include <arrow/io/memory.h>
 #include <arrow/util/async_generator.h>
 #include <arrow/util/io_util.h>
-#endif
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
-#ifdef WITH_TALON
 #include "milvus-storage/filesystem/talon/talon_file_system_producer.h"
 #include "talon/talon_bridge.h"
-#endif
 #include "milvus-storage/properties.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/writer.h"
@@ -88,7 +84,6 @@ class ScopedEnv final {
 
 }  // namespace
 
-#ifdef WITH_TALON
 namespace {
 
 class MetadataInputFile final : public arrow::io::RandomAccessFile {
@@ -210,8 +205,26 @@ class AsyncOriginInputFile final : public arrow::io::RandomAccessFile, public No
     return completion;
   }
 
+  arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const arrow::io::IOContext& io_context,
+                                                          int64_t position,
+                                                          int64_t nbytes) override {
+    async_pool = io_context.pool();
+    auto allocated = arrow::AllocateResizableBuffer(nbytes, async_pool);
+    if (!allocated.ok()) {
+      return arrow::Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(allocated.status());
+    }
+    auto buffer = std::move(allocated).ValueOrDie();
+    auto future = ReadAtAsyncInto(position, nbytes, buffer->mutable_data());
+    return future.Then(
+        [buffer = std::move(buffer)](int64_t bytes_read) mutable -> arrow::Result<std::shared_ptr<arrow::Buffer>> {
+          ARROW_RETURN_NOT_OK(buffer->Resize(bytes_read));
+          return std::shared_ptr<arrow::Buffer>(std::move(buffer));
+        });
+  }
+
   arrow::Future<> started = arrow::Future<>::Make();
   arrow::Future<int64_t> completion = arrow::Future<int64_t>::Make();
+  arrow::MemoryPool* async_pool = nullptr;
 
   private:
   arrow::io::BufferReader data_{arrow::Buffer::FromString("payload")};
@@ -291,7 +304,7 @@ class TalonFileSystemServiceFreeTest : public ::testing::Test {
     config.storage_type = "remote";
     config.cloud_provider = kCloudProviderAWS;
     config.bucket_name = "test-bucket";
-    config.talon_enabled = true;
+    config.talon_mode = TalonMode::Full;
     config.talon_coordinator = "127.0.0.1:7000";
     config.talon_block_size = 8388608;
     return config;
@@ -355,7 +368,7 @@ class TalonCloudMetadataTest : public ::testing::TestWithParam<bool> {
     if (GetParam() && (config_.cloud_provider == kCloudProviderAzure || config_.cloud_provider == kCloudProviderGCP)) {
       GTEST_SKIP() << "This provider does not use the S3 CRT reader";
     }
-    config_.talon_enabled = false;
+    config_.talon_mode = TalonMode::Disabled;
     config_.s3_crt_async_read = GetParam();
     ASSERT_AND_ASSIGN(origin_fs_, CreateArrowFileSystem(config_));
     path_ = "talon-etag-validation-" + std::to_string(getpid()) + "-" +
@@ -377,16 +390,203 @@ class TalonCloudMetadataTest : public ::testing::TestWithParam<bool> {
 };
 
 }  // namespace
-#endif
 
 TEST(TalonConfigTest, DefaultsAreDisabled) {
   api::Properties properties;
   ArrowFileSystemConfig config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties, config));
-  EXPECT_FALSE(config.talon_enabled);
+  EXPECT_EQ(config.talon_mode, TalonMode::Disabled);
+  EXPECT_EQ(config.talon_small_read_threshold, 524288U);
   EXPECT_TRUE(config.talon_coordinator.empty());
   EXPECT_EQ(config.talon_block_size, 256U * 1024U * 1024U);
   EXPECT_EQ(config.talon_max_idle_per_addr, 256U);
+}
+
+TEST(TalonConfigTest, RoutingPropertiesValidateInput) {
+  api::Properties properties;
+  for (const char* mode : {"0", "1", "2"}) {
+    EXPECT_EQ(api::SetValue(properties, "fs.talon.mode", mode), std::nullopt);
+  }
+  for (const char* mode : {"", "-1", "3", "256", "4294967296", "disabled", "full", "small_reads"}) {
+    EXPECT_NE(api::SetValue(properties, "fs.talon.mode", mode), std::nullopt);
+  }
+  for (const char* threshold : {"1", "1048576"}) {
+    EXPECT_EQ(api::SetValue(properties, "fs.talon.small_read_threshold", threshold), std::nullopt);
+  }
+  for (const char* threshold : {"0", "-1", "1048577", "1MiB"}) {
+    EXPECT_NE(api::SetValue(properties, "fs.talon.small_read_threshold", threshold), std::nullopt);
+  }
+}
+
+TEST(TalonConfigTest, TypedRoutingPropertiesAreValidated) {
+  api::Properties properties;
+  properties[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+  properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:7000");
+  properties[PROPERTY_FS_TALON_MODE] = std::string("invalid");
+  EXPECT_TRUE(GetFileSystemConfig(properties).status().IsInvalid());
+  for (const uint32_t mode : {3U, 255U, 256U, 258U, UINT32_MAX}) {
+    properties[PROPERTY_FS_TALON_MODE] = mode;
+    EXPECT_TRUE(GetFileSystemConfig(properties).status().IsInvalid());
+  }
+  properties[PROPERTY_FS_TALON_MODE] = static_cast<uint32_t>(TalonMode::SmallReads);
+  for (const uint32_t threshold : {0U, 1048577U}) {
+    properties[PROPERTY_FS_TALON_SMALL_READ_THRESHOLD] = threshold;
+    EXPECT_TRUE(GetFileSystemConfig(properties).status().IsInvalid());
+  }
+  for (const uint32_t threshold : {1U, 1048576U}) {
+    properties[PROPERTY_FS_TALON_SMALL_READ_THRESHOLD] = threshold;
+    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+    EXPECT_EQ(config.talon_mode, TalonMode::SmallReads);
+    EXPECT_EQ(config.talon_small_read_threshold, threshold);
+  }
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, SmallReadsBypassTalonAboveThreshold) {
+  api::Properties properties;
+  properties[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+  properties[PROPERTY_FS_CLOUD_PROVIDER] = std::string(kCloudProviderAWS);
+  properties[PROPERTY_FS_BUCKET_NAME] = std::string("test-bucket");
+  properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:0");
+  properties[PROPERTY_FS_TALON_MODE] = static_cast<uint32_t>(TalonMode::SmallReads);
+  properties["fs.talon.small_read_threshold"] = uint32_t{3};
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+  auto origin = std::make_shared<RecordingFileSystem>("origin");
+  // Large reads must work without the ETag required to initialize a Talon reader.
+  origin->input_file->metadata_result = arrow::Status::IOError("metadata unavailable");
+  ASSERT_AND_ASSIGN(auto fs, Wrap(config, origin));
+  ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile("prefix/object"));
+  uint8_t out[4] = {};
+  ASSERT_AND_ASSIGN(const auto bytes_read, file->ReadAt(1, 4, out));
+  EXPECT_EQ(bytes_read, 4);
+  EXPECT_EQ(std::string(reinterpret_cast<char*>(out), 4), "aylo");
+  ASSERT_AND_ASSIGN(auto buffer, file->ReadAt(1, 4));
+  EXPECT_EQ(buffer->ToString(), "aylo");
+  ASSERT_AND_ASSIGN(auto async_buffer, file->ReadAsync(1, 4).result());
+  EXPECT_EQ(async_buffer->ToString(), "aylo");
+  auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(file.get());
+  ASSERT_NE(async_file, nullptr);
+  ASSERT_AND_ASSIGN(const auto async_bytes, async_file->ReadAtAsyncInto(1, 4, out).result());
+  EXPECT_EQ(async_bytes, 4);
+  ASSERT_STATUS_OK(file->Seek(1));
+  ASSERT_AND_ASSIGN(auto sequential_buffer, file->Read(4));
+  EXPECT_EQ(sequential_buffer->ToString(), "aylo");
+  ASSERT_STATUS_OK(file->Seek(1));
+  ASSERT_AND_ASSIGN(const auto sequential_bytes, file->Read(4, out));
+  EXPECT_EQ(sequential_bytes, 4);
+  EXPECT_EQ(origin->input_file->async_metadata_read_calls.load(), 0);
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, ReadRoutingIncludesThreshold) {
+  for (const auto mode : {TalonMode::Full, TalonMode::SmallReads}) {
+    for (const int64_t nbytes : {2, 3, 4}) {
+      SCOPED_TRACE(static_cast<int>(mode));
+      SCOPED_TRACE(nbytes);
+      auto config = Config();
+      config.talon_mode = mode;
+      config.talon_small_read_threshold = 3;
+      auto origin = std::make_shared<RecordingFileSystem>("origin");
+      const auto error = arrow::Status::IOError("Talon requires origin metadata");
+      origin->input_file->metadata_result = error;
+      ASSERT_AND_ASSIGN(auto fs, Wrap(config, origin));
+      ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile("prefix/object"));
+      auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(file.get());
+      ASSERT_NE(async_file, nullptr);
+      uint8_t out[4] = {};
+      for (const auto& status : {file->ReadAt(0, nbytes, out).status(), file->ReadAt(0, nbytes).status(),
+                                 file->ReadAsync(0, nbytes).result().status(),
+                                 async_file->ReadAtAsyncInto(0, nbytes, out).result().status()}) {
+        if (config.talon_mode == TalonMode::SmallReads && nbytes == 4) {
+          EXPECT_TRUE(status.ok()) << status;
+        } else {
+          EXPECT_EQ(status, error);
+        }
+      }
+    }
+  }
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, LargeReadRoutingPrecedesEofClampingAndPreservesOriginErrors) {
+  auto config = Config();
+  config.talon_mode = TalonMode::SmallReads;
+  config.talon_small_read_threshold = 3;
+  for (const bool warm_metadata : {false, true}) {
+    SCOPED_TRACE(warm_metadata);
+    auto origin = std::make_shared<RecordingFileSystem>("origin");
+    const auto error = MakeExtendError(ExtendStatusCode::AwsErrorAccessDenied, "origin denied", "provider detail");
+    origin->input_file->read_status = error;
+    ASSERT_AND_ASSIGN(auto fs, Wrap(config, origin));
+    ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile("prefix/object"));
+    if (warm_metadata) {
+      ASSERT_AND_ASSIGN(const auto size, file->GetSize());
+      ASSERT_EQ(size, 7);
+    }
+    auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(file.get());
+    ASSERT_NE(async_file, nullptr);
+    uint8_t out[4] = {};
+    // Four requested bytes exceed the threshold even though only one remains.
+    for (const auto& status :
+         {file->ReadAt(6, 4, out).status(), file->ReadAt(6, 4).status(), file->ReadAsync(6, 4).result().status(),
+          async_file->ReadAtAsyncInto(6, 4, out).result().status()}) {
+      EXPECT_EQ(status, error);
+      EXPECT_EQ(status.detail(), error.detail());
+    }
+  }
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, LargeReadsPreserveNativeAsyncOriginAndCallerPool) {
+  for (const bool allocating : {false, true}) {
+    SCOPED_TRACE(allocating);
+    auto config = Config();
+    config.talon_mode = TalonMode::SmallReads;
+    config.talon_small_read_threshold = 2;
+    auto origin = std::make_shared<RecordingFileSystem>("origin");
+    auto origin_file = std::make_shared<AsyncOriginInputFile>();
+    origin->fallback_file = origin_file;
+    ASSERT_AND_ASSIGN(auto fs, Wrap(config, origin));
+    ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile("prefix/object"));
+    auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(file.get());
+    ASSERT_NE(async_file, nullptr);
+    arrow::ProxyMemoryPool pool(arrow::default_memory_pool());
+    uint8_t out[3] = {};
+    auto future =
+        allocating
+            ? file->ReadAsync(arrow::io::IOContext(&pool), 1, 3).Then([](const std::shared_ptr<arrow::Buffer>& buffer) {
+                EXPECT_EQ(buffer->ToString(), "ayl");
+                return buffer->size();
+              })
+            : async_file->ReadAtAsyncInto(1, 3, out);
+    EXPECT_TRUE(origin_file->started.is_finished());
+    EXPECT_FALSE(future.is_finished());
+    origin_file->completion.MarkFinished(3);
+    ASSERT_AND_ASSIGN(const auto bytes_read, future.result());
+    EXPECT_EQ(bytes_read, 3);
+    if (allocating) {
+      EXPECT_EQ(origin_file->async_pool, &pool);
+    } else {
+      EXPECT_EQ(std::string(reinterpret_cast<char*>(out), 3), "ayl");
+    }
+    ASSERT_STATUS_OK(file->Close());
+    EXPECT_TRUE(origin_file->closed());
+  }
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, LargeReadsSupportBlockingOrigin) {
+  auto config = Config();
+  config.talon_mode = TalonMode::SmallReads;
+  config.talon_small_read_threshold = 2;
+  auto origin = std::make_shared<RecordingFileSystem>("origin");
+  ASSERT_AND_ASSIGN(auto fs, Wrap(config, origin));
+  ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile("prefix/object"));
+  auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(file.get());
+  ASSERT_NE(async_file, nullptr);
+
+  uint8_t out[3] = {};
+  // Origins without native async reads may complete synchronously.
+  auto future = async_file->ReadAtAsyncInto(1, 3, out);
+  ASSERT_AND_ASSIGN(const auto bytes_read, future.result());
+  EXPECT_EQ(bytes_read, 3);
+  EXPECT_EQ(std::string(reinterpret_cast<char*>(out), 3), "ayl");
+  EXPECT_EQ(origin->input_file->read_calls.load(), 1);
 }
 
 TEST(TalonConfigTest, MaxIdlePerAddressProperty) {
@@ -410,7 +610,7 @@ TEST(TalonConfigTest, ChecksTypedPoolLimitOnlyWhenEnabled) {
   ArrowFileSystemConfig config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties, config));
 
-  properties[PROPERTY_FS_TALON_ENABLED] = true;
+  properties[PROPERTY_FS_TALON_MODE] = static_cast<uint32_t>(TalonMode::Full);
   const auto status = ArrowFileSystemConfig::create_file_system_config(properties, config);
   EXPECT_TRUE(status.IsInvalid()) << status;
   EXPECT_NE(status.message().find(PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR), std::string::npos);
@@ -419,14 +619,14 @@ TEST(TalonConfigTest, ChecksTypedPoolLimitOnlyWhenEnabled) {
 TEST(TalonConfigTest, ParsesExplicitProperties) {
   api::Properties properties;
   ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_STORAGE_TYPE, "remote"), std::nullopt);
-  ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_ENABLED, "true"), std::nullopt);
+  ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_MODE, "1"), std::nullopt);
   ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_COORDINATOR, "127.0.0.1:7000"), std::nullopt);
   ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_BLOCK_SIZE, "8388608"), std::nullopt);
   ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR, "32"), std::nullopt);
 
   ArrowFileSystemConfig config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties, config));
-  EXPECT_TRUE(config.talon_enabled);
+  EXPECT_EQ(config.talon_mode, TalonMode::Full);
   EXPECT_EQ(config.talon_coordinator, "127.0.0.1:7000");
   EXPECT_EQ(config.talon_block_size, 8388608U);
   EXPECT_EQ(config.talon_max_idle_per_addr, 32U);
@@ -438,7 +638,7 @@ TEST(TalonConfigTest, EnabledRequiresRemoteCoordinatorAndBlockSize) {
            {"local", "127.0.0.1:7000", "8388608"}, {"remote", "", "8388608"}, {"remote", "127.0.0.1:7000", "0"}}) {
     api::Properties properties;
     ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_STORAGE_TYPE, storage_type.c_str()), std::nullopt);
-    ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_ENABLED, "true"), std::nullopt);
+    ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_MODE, "1"), std::nullopt);
     ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_COORDINATOR, coordinator.c_str()), std::nullopt);
     ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_BLOCK_SIZE, block_size.c_str()), std::nullopt);
     ArrowFileSystemConfig config;
@@ -464,6 +664,23 @@ TEST(TalonConfigTest, CacheKeyIgnoresTalonSettingsWhenDisabled) {
   auto other_pool_size = base;
   other_pool_size.talon_max_idle_per_addr = 32;
   EXPECT_EQ(base.GetCacheKey(), other_pool_size.GetCacheKey());
+
+  auto other_threshold = base;
+  other_threshold.talon_small_read_threshold = 1;
+  EXPECT_EQ(base.GetCacheKey(), other_threshold.GetCacheKey());
+}
+
+TEST(TalonConfigTest, CacheKeyIncludesOnlyEffectiveReadRouting) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.talon_mode = TalonMode::Full;
+  auto other = config;
+  other.talon_small_read_threshold = 1;
+  EXPECT_EQ(config.GetCacheKey(), other.GetCacheKey());
+  other.talon_mode = TalonMode::SmallReads;
+  EXPECT_NE(config.GetCacheKey(), other.GetCacheKey());
+  config.talon_mode = TalonMode::SmallReads;
+  EXPECT_NE(config.GetCacheKey(), other.GetCacheKey());
 }
 
 TEST(TalonConfigTest, CacheKeyIncludesTalonRouting) {
@@ -474,7 +691,7 @@ TEST(TalonConfigTest, CacheKeyIncludesTalonRouting) {
   base.bucket_name = "test-bucket";
 
   auto enabled = base;
-  enabled.talon_enabled = true;
+  enabled.talon_mode = TalonMode::Full;
   enabled.talon_coordinator = "127.0.0.1:7000";
   enabled.talon_block_size = 8388608;
   EXPECT_NE(base.GetCacheKey(), enabled.GetCacheKey());
@@ -501,7 +718,8 @@ TEST(TalonTestEnvTest, AddsTalonPropertiesWhenEnabled) {
   api::Properties properties;
   ASSERT_STATUS_OK(InitTestProperties(properties));
   EXPECT_TRUE(IsTalonEnv());
-  EXPECT_TRUE(api::GetValue<bool>(properties, PROPERTY_FS_TALON_ENABLED).ValueOrDie());
+  EXPECT_EQ(api::GetValue<uint32_t>(properties, PROPERTY_FS_TALON_MODE).ValueOrDie(),
+            static_cast<uint32_t>(TalonMode::Full));
   EXPECT_EQ(api::GetValue<std::string>(properties, PROPERTY_FS_TALON_COORDINATOR).ValueOrDie(), "127.0.0.1:7000");
   EXPECT_EQ(api::GetValue<uint32_t>(properties, PROPERTY_FS_TALON_BLOCK_SIZE).ValueOrDie(), 8388608U);
 }
@@ -527,7 +745,7 @@ TEST(TalonTestEnvTest, DoesNotAddTalonPropertiesWhenDisabled) {
   api::Properties properties;
   ASSERT_STATUS_OK(InitTestProperties(properties));
   EXPECT_FALSE(IsTalonEnv());
-  EXPECT_FALSE(properties.contains(PROPERTY_FS_TALON_ENABLED));
+  EXPECT_FALSE(properties.contains(PROPERTY_FS_TALON_MODE));
   EXPECT_FALSE(properties.contains(PROPERTY_FS_TALON_COORDINATOR));
   EXPECT_FALSE(properties.contains(PROPERTY_FS_TALON_BLOCK_SIZE));
 }
@@ -580,7 +798,6 @@ TEST(TalonFileSystemTest, S3CompatibleProviderIdentityIsPartOfEquality) {
   EXPECT_FALSE(aliyun_fs->Equals(*aws_fs));
 }
 
-#ifdef WITH_TALON
 class TalonProviderEqualityTest : public ::testing::TestWithParam<const char*> {};
 
 TEST_P(TalonProviderEqualityTest, ComparesRealProviderAndTalonSymmetrically) {
@@ -598,7 +815,7 @@ TEST_P(TalonProviderEqualityTest, ComparesRealProviderAndTalonSymmetrically) {
   EXPECT_TRUE(disabled->Equals(*same_disabled));
   EXPECT_TRUE(same_disabled->Equals(*disabled));
 
-  config.talon_enabled = true;
+  config.talon_mode = TalonMode::Full;
   config.talon_coordinator = "127.0.0.1:7000";
   ASSERT_AND_ASSIGN(auto enabled, CreateArrowFileSystem(config));
   ASSERT_EQ(disabled->type_name(), enabled->type_name());
@@ -618,7 +835,7 @@ TEST_P(TalonProviderEqualityTest, ComparesRealProviderAndTalonSymmetrically) {
   EXPECT_TRUE(enabled->Equals(*same_enabled));
   EXPECT_TRUE(same_enabled->Equals(*enabled));
 
-  config.talon_enabled = false;
+  config.talon_mode = TalonMode::Disabled;
   config.access_key_id = "differentaccount";
   ASSERT_AND_ASSIGN(auto different_account, CreateArrowFileSystem(config));
   EXPECT_FALSE(disabled->Equals(*different_account));
@@ -711,7 +928,7 @@ TEST(TalonFileSystemTest, PreservesOuterSubtreeAndExtensionInterfaces) {
   config.access_key_value = "minioadmin";
   config.region = "us-east-1";
   config.s3_crt_async_read = false;
-  config.talon_enabled = true;
+  config.talon_mode = TalonMode::Full;
   config.talon_coordinator = "127.0.0.1:7000";
   config.talon_block_size = 8388608;
 
@@ -1127,6 +1344,23 @@ TEST_F(TalonFileSystemServiceFreeTest, EqualityIncludesTalonRouting) {
   const auto pool_size_talon = pool_size_proxy->base_fs();
   EXPECT_FALSE(base_talon->Equals(*pool_size_talon));
   EXPECT_FALSE(pool_size_talon->Equals(*base_talon));
+
+  auto other_threshold = config;
+  other_threshold.talon_small_read_threshold = 1;
+  ASSERT_AND_ASSIGN(auto threshold_fs, Wrap(other_threshold, std::make_shared<RecordingFileSystem>("origin")));
+  EXPECT_TRUE(base->Equals(*threshold_fs));
+  EXPECT_TRUE(threshold_fs->Equals(*base));
+
+  auto small_reads = config;
+  small_reads.talon_mode = TalonMode::SmallReads;
+  ASSERT_AND_ASSIGN(auto small_reads_fs, Wrap(small_reads, std::make_shared<RecordingFileSystem>("origin")));
+  EXPECT_FALSE(base->Equals(*small_reads_fs));
+  EXPECT_FALSE(small_reads_fs->Equals(*base));
+
+  small_reads.talon_small_read_threshold = 1;
+  ASSERT_AND_ASSIGN(auto small_threshold_fs, Wrap(small_reads, std::make_shared<RecordingFileSystem>("origin")));
+  EXPECT_FALSE(small_reads_fs->Equals(*small_threshold_fs));
+  EXPECT_FALSE(small_threshold_fs->Equals(*small_reads_fs));
 }
 
 TEST_F(TalonFileSystemServiceFreeTest, ForwardsStreamingFileInfoGeneratorWithFullSelector) {
@@ -1612,7 +1846,7 @@ TEST_P(TalonCloudMetadataTest, ReadsETagAndReusesMetadataWithoutOriginRequests) 
   ASSERT_EQ(data->ToString(), content);
 
   auto talon_config = config_;
-  talon_config.talon_enabled = true;
+  talon_config.talon_mode = TalonMode::Full;
   // Opening a versioned reader must not require a coordinator RPC.
   talon_config.talon_coordinator = "127.0.0.1:1";
   ASSERT_AND_ASSIGN(auto talon_fs, CreateArrowFileSystem(talon_config));
@@ -1747,18 +1981,5 @@ TEST_F(TalonIntegrationTest, ParquetReadThroughNormalStorageApi) {
   ASSERT_STATUS_OK(batch_reader->ReadNext(&result));
   EXPECT_EQ(result, nullptr);
 }
-#endif
-
-#ifndef WITH_TALON
-TEST(TalonFileSystemTest, EnabledWithoutBuildSupportIsRejected) {
-  ArrowFileSystemConfig config;
-  config.storage_type = "remote";
-  config.talon_enabled = true;
-  config.talon_coordinator = "127.0.0.1:7000";
-  auto result = CreateArrowFileSystem(config);
-  ASSERT_FALSE(result.ok());
-  EXPECT_TRUE(result.status().IsInvalid());
-}
-#endif
 
 }  // namespace milvus_storage::test

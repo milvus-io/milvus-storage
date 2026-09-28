@@ -48,9 +48,7 @@
 #include "milvus-storage/filesystem/s3/s3_crt_client.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
-#ifdef WITH_TALON
 #include "milvus-storage/filesystem/talon/talon_file_system_producer.h"
-#endif
 #include "milvus-storage/format/parquet/folly_arrow_executor.h"
 #include "test_env.h"
 
@@ -895,13 +893,12 @@ TEST_P(S3CrtMetadataTest, AsyncHeadReturnsBeforeResponse) {
       return fail(fs_result.status().ToString());
     }
     ArrowFileSystemPtr fs = std::move(fs_result).ValueOrDie();
-#ifdef WITH_TALON
     if (param.use_talon) {
       ArrowFileSystemConfig config;
       config.storage_type = "remote";
       config.cloud_provider = kCloudProviderAWS;
       config.bucket_name = "test-bucket";
-      config.talon_enabled = true;
+      config.talon_mode = TalonMode::Full;
       config.talon_coordinator = "127.0.0.1:1";
       auto talon_fs = TalonFileSystemProducer(config, fs).Make();
       if (!talon_fs.ok()) {
@@ -909,7 +906,6 @@ TEST_P(S3CrtMetadataTest, AsyncHeadReturnsBeforeResponse) {
       }
       fs = std::move(talon_fs).ValueOrDie();
     }
-#endif
     auto input_result = fs->OpenInputFile("test-bucket/path/object.txt");
     if (!input_result.ok()) {
       return fail(input_result.status().ToString());
@@ -1034,11 +1030,9 @@ INSTANTIATE_TEST_SUITE_P(S3Crt,
                                            S3CrtMetadataTestParam{boost::beast::http::status::not_found},
                                            S3CrtMetadataTestParam{boost::beast::http::status::forbidden}));
 
-#ifdef WITH_TALON
 INSTANTIATE_TEST_SUITE_P(TalonCrt,
                          S3CrtMetadataTest,
                          ::testing::Values(S3CrtMetadataTestParam{boost::beast::http::status::ok, false, true, true}));
-#endif
 
 TEST(S3CrtBuildSupportTest, ZeroLengthAsyncReadsDoNotScheduleIoExecutor) {
   ASSERT_STATUS_OK(EnsureS3InitializedForTest());

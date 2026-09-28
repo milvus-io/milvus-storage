@@ -13,15 +13,10 @@ option(WITH_JNI "Build with JNI library." OFF)
 option(WITH_PYTHON_BINDING "Build for Python bindings with hidden symbols." OFF)
 option(WITH_FIU "Build with fault injection support (libfiu)." OFF)
 option(WITH_CRT "Build with AWS S3 CRT support." OFF)
-option(WITH_TALON "Build with Talon filesystem support." OFF)
 option(ARROW_WITH_JEMALLOC "Build with jemalloc." OFF)
 
 if (WITH_CRT)
   add_compile_definitions(WITH_CRT)
-endif()
-
-if (WITH_TALON)
-  add_compile_definitions(WITH_TALON)
 endif()
 
 include(GNUInstallDirs)
@@ -64,12 +59,9 @@ endif()
 
 # Rust bridge for Vortex and Lance formats (always built)
 set(RUST_BRIDGE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/format/bridge/rust)
-set(CORROSION_FEATURES "")
+set(CORROSION_FEATURES talon)
 if (WITH_CRT)
   list(APPEND CORROSION_FEATURES s3-crt-async)
-endif()
-if (WITH_TALON)
-  list(APPEND CORROSION_FEATURES talon)
 endif()
 add_subdirectory(${RUST_BRIDGE_PATH})
 
@@ -93,9 +85,6 @@ file(GLOB_RECURSE ALL_SRC_FILES
 )
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/bridge/.*\\.(cpp|cc)$")
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
-if (NOT WITH_TALON)
-  list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/filesystem/talon/.*\\.cpp$")
-endif()
 
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
