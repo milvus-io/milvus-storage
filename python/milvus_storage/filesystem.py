@@ -111,6 +111,47 @@ class FilesystemMetrics:
         )
 
 
+class FilesystemMetricsSource:
+    """
+    Snapshot of one named metrics source.
+
+    Attributes:
+        source: Source name, such as "origin" or "talon". Ordering is unspecified.
+        metrics: Independent operation counters; sources must not be blindly summed.
+        display_key: Storage-generated filesystem identifier for cache enumeration,
+            or None for queries on a filesystem handle.
+    """
+
+    def __init__(
+        self,
+        source: str,
+        metrics: FilesystemMetrics,
+        display_key: Optional[str] = None,
+    ):
+        self.source = source
+        self.metrics = metrics
+        self.display_key = display_key
+
+    @classmethod
+    def _from_c(cls, entry) -> "FilesystemMetricsSource":
+        ffi = get_ffi()
+        return cls(
+            source=ffi.string(entry.source).decode("utf-8"),
+            metrics=FilesystemMetrics._from_c(entry.metrics),
+            display_key=(
+                ffi.string(entry.display_key).decode("utf-8")
+                if entry.display_key != ffi.NULL
+                else None
+            ),
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"FilesystemMetricsSource(source={self.source!r}, "
+            f"display_key={self.display_key!r}, metrics={self.metrics!r})"
+        )
+
+
 class FilesystemWriter:
     """
     Output stream for writing to a file.
@@ -794,39 +835,55 @@ class Filesystem:
 
         return size[0], metadata
 
-    def get_metrics(self) -> FilesystemMetrics:
+    def get_metrics_sources(self) -> List[FilesystemMetricsSource]:
         """
-        Get filesystem operation metrics.
+        Get snapshots for all metrics sources of this filesystem.
 
-        Returns:
-            FilesystemMetrics snapshot
+        Each entry has display_key=None. Handles evicted from the cache remain
+        queryable. Fields are sampled independently, not as a transaction.
+        Returned objects remain valid after the filesystem is closed.
 
         Raises:
             ResourceError: If filesystem is closed
-            FFIError: If operation fails or metrics not supported
+            FFIError: If operation fails or metrics are not supported
         """
         if self._closed:
             raise ResourceError("Filesystem is closed")
 
-        metrics = self._ffi.new("LoonFilesystemMetricsSnapshot*")
-        result = self._lib.loon_filesystem_get_metrics(self._handle, metrics)
-        check_result(result)
+        sources = self._ffi.new("LoonFilesystemMetricsSources*")
+        try:
+            result = self._lib.loon_filesystem_get_metrics_sources(self._handle, sources)
+            check_result(result)
+            return [
+                FilesystemMetricsSource._from_c(sources.entries[i]) for i in range(sources.count)
+            ]
+        finally:
+            self._lib.loon_filesystem_free_metrics_sources(sources)
 
-        return FilesystemMetrics._from_c(metrics)
-
-    def reset_metrics(self) -> None:
+    @staticmethod
+    def list_metrics_sources() -> List[FilesystemMetricsSource]:
         """
-        Reset filesystem operation metrics.
+        Get all metrics source snapshots from cached filesystems.
+
+        Each entry includes a storage-generated display_key. The pair
+        (display_key, source) identifies a series; multiple sources can share
+        one filesystem key. An empty cache returns an empty list. Fields are
+        sampled independently, and returned objects outlive cache eviction.
 
         Raises:
-            ResourceError: If filesystem is closed
-            FFIError: If operation fails or metrics not supported
+            FFIError: If enumeration fails or a filesystem is not observable
         """
-        if self._closed:
-            raise ResourceError("Filesystem is closed")
-
-        result = self._lib.loon_filesystem_reset_metrics(self._handle)
-        check_result(result)
+        lib = get_library().lib
+        ffi = get_ffi()
+        sources = ffi.new("LoonFilesystemMetricsSources*")
+        try:
+            result = lib.loon_filesystem_list_metrics_sources(sources)
+            check_result(result)
+            return [
+                FilesystemMetricsSource._from_c(sources.entries[i]) for i in range(sources.count)
+            ]
+        finally:
+            lib.loon_filesystem_free_metrics_sources(sources)
 
     def close(self) -> None:
         """Close the filesystem and release resources."""

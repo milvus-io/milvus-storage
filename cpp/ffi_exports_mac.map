@@ -107,10 +107,9 @@ _loon_filesystem_destroy
 _loon_close_filesystems
 
 # FilesystemMetrics interface
-_loon_filesystem_get_metrics
-_loon_filesystem_list_metrics
-_loon_filesystem_free_metrics_list
-_loon_filesystem_reset_metrics
+_loon_filesystem_get_metrics_sources
+_loon_filesystem_list_metrics_sources
+_loon_filesystem_free_metrics_sources
 
 # Reader interface
 _loon_reader_new

@@ -3828,8 +3828,8 @@ AzureFileSystem::OpenConditionalOutputStream(
   return stream;
 }
 
-std::shared_ptr<milvus_storage::FilesystemMetrics> AzureFileSystem::GetMetrics() const {
-  return impl_->metrics();
+std::unordered_map<std::string, std::shared_ptr<milvus_storage::FilesystemMetrics>> AzureFileSystem::GetMetricsSources() const {
+  return {{milvus_storage::kOriginMetricsSource, impl_->metrics()}};
 }
 
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>>

@@ -146,7 +146,7 @@ class PredicateBenchmark : public FormatBenchFixtureBase<> {
 
   std::shared_ptr<FilesystemMetrics> GetFsMetrics() {
     auto observable = std::dynamic_pointer_cast<Observable>(fs_);
-    return observable ? observable->GetMetrics() : nullptr;
+    return observable ? observable->GetMetrics(kOriginMetricsSource) : nullptr;
   }
 
   std::shared_ptr<arrow::Schema> schema_;

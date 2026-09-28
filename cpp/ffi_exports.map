@@ -109,10 +109,9 @@
     loon_close_filesystems;
 
     # FilesystemMetrics interface
-    loon_filesystem_get_metrics;
-    loon_filesystem_list_metrics;
-    loon_filesystem_free_metrics_list;
-    loon_filesystem_reset_metrics;
+    loon_filesystem_get_metrics_sources;
+    loon_filesystem_list_metrics_sources;
+    loon_filesystem_free_metrics_sources;
 
     # Reader interface
     loon_reader_new;
