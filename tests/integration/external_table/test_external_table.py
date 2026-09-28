@@ -7,12 +7,13 @@ Works with both local and S3/cloud backends.
 
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import vortex as vx
-from milvus_storage import ExternalTable, Reader, Transaction
+from milvus_storage import ExternalTable, Filesystem, Reader, Transaction
 from milvus_storage.manifest import ColumnGroup, ColumnGroupFile, ColumnGroups
 
 
@@ -34,31 +35,17 @@ def _generate_batch(
     return pa.RecordBatch.from_pydict(data, schema=schema)
 
 
-def _get_pyarrow_filesystem(test_config):
-    """Get a pyarrow filesystem for writing test data.
+def _get_write_filesystem(test_config):
+    """Get the storage filesystem used to upload independently produced files.
 
     Returns None for local backend (use os operations directly).
-    Returns pyarrow.fs.S3FileSystem for S3-compatible backends.
+    Returns a Python storage filesystem for S3-compatible backends.
     """
     if test_config.is_local:
         return None
 
     if test_config.is_s3_compatible:
-        import pyarrow.fs as pafs
-
-        config = test_config.backend_config
-        address = config.get("address", "")
-        # Extract host:port from address (remove http:// or https://)
-        endpoint = address.replace("http://", "").replace("https://", "")
-        scheme = "http" if address.startswith("http://") else "https"
-
-        return pafs.S3FileSystem(
-            access_key=config.get("access_key", ""),
-            secret_key=config.get("secret_key", ""),
-            endpoint_override=endpoint,
-            scheme=scheme,
-            region=config.get("region", "") or "us-east-1",
-        )
+        return Filesystem.get(properties=test_config.get_properties())
 
     pytest.skip(
         f"Unsupported backend for external table test: {test_config.storage_backend}"
@@ -69,12 +56,11 @@ def _get_write_path(test_config, relative_path):
     """Get the full write path for the given relative path.
 
     For local: returns OS absolute path (root_path/relative_path)
-    For S3: returns bucket/relative_path (pyarrow S3 format)
+    For S3: returns a path relative to the configured bucket.
     """
     if test_config.is_local:
         return f"{test_config.root_path}/{relative_path}"
-    else:
-        return f"{test_config.bucket_name}/{relative_path}"
+    return relative_path
 
 
 def _get_extfs_properties(default_properties, test_config, alias="ext1"):
@@ -181,7 +167,7 @@ def _write_parquet_files(
     """Write parquet files using pyarrow.
 
     Args:
-        filesystem: Optional pyarrow filesystem. If provided, files are written
+        filesystem: Optional storage filesystem. If provided, files are written
             locally first then uploaded (for S3/remote backends).
     """
     if filesystem is None:
@@ -194,12 +180,13 @@ def _write_parquet_files(
             target_path = f"{directory}/data_{i}.parquet"
             if filesystem is not None:
                 local_path = f"{tmp_dir}/data_{i}.parquet"
-                pq.write_table(table, local_path)
+                with open(local_path, "wb") as output:
+                    pq.write_table(table, output)
                 with open(local_path, "rb") as f:
-                    with filesystem.open_output_stream(target_path) as out:
-                        out.write(f.read())
+                    filesystem.write_file(target_path, f.read())
             else:
-                pq.write_table(table, target_path)
+                with open(target_path, "wb") as output:
+                    pq.write_table(table, output)
             file_paths.append(target_path)
     return file_paths
 
@@ -214,7 +201,7 @@ def _write_vortex_files(
     """Write vortex files using vortex-data library.
 
     Args:
-        filesystem: Optional pyarrow filesystem. If provided, files are written
+        filesystem: Optional storage filesystem. If provided, files are written
             locally first then uploaded (for S3/remote backends).
     """
     if filesystem is None:
@@ -230,8 +217,7 @@ def _write_vortex_files(
                 local_path = f"{tmp_dir}/data_{i}.vortex"
                 vx.io.write(vtx, local_path)
                 with open(local_path, "rb") as f:
-                    with filesystem.open_output_stream(target_path) as out:
-                        out.write(f.read())
+                    filesystem.write_file(target_path, f.read())
             else:
                 vx.io.write(vtx, target_path)
             file_paths.append(target_path)
@@ -243,7 +229,7 @@ def _write_single_file(test_config, write_path, schema, num_rows, fmt="parquet")
 
     Returns the pyarrow filesystem used (None for local).
     """
-    write_fs = _get_pyarrow_filesystem(test_config)
+    write_fs = _get_write_filesystem(test_config)
 
     if write_fs is None:
         os.makedirs(write_path, exist_ok=True)
@@ -258,16 +244,17 @@ def _write_single_file(test_config, write_path, schema, num_rows, fmt="parquet")
         with tempfile.TemporaryDirectory() as tmp_dir:
             local_path = f"{tmp_dir}/test.{ext}"
             if fmt == "parquet":
-                pq.write_table(table, local_path)
+                with open(local_path, "wb") as output:
+                    pq.write_table(table, output)
             else:
                 vtx = vx.array(table)
                 vx.io.write(vtx, local_path)
             with open(local_path, "rb") as f:
-                with write_fs.open_output_stream(target_path) as out:
-                    out.write(f.read())
+                write_fs.write_file(target_path, f.read())
     else:
         if fmt == "parquet":
-            pq.write_table(table, target_path)
+            with open(target_path, "wb") as output:
+                pq.write_table(table, output)
         else:
             vtx = vx.array(table)
             vx.io.write(vtx, target_path)
@@ -278,6 +265,99 @@ def _write_single_file(test_config, write_path, schema, num_rows, fmt="parquet")
 class TestExternalTable:
     """Test external table operations."""
 
+    @pytest.mark.e2e_smoke
+    def test_import_parquet_files_with_different_row_counts(
+        self, temp_case_path, simple_schema, default_properties, test_config
+    ):
+        source_dir = f"{temp_case_path}/unequal_files"
+        properties = _get_extfs_properties(default_properties, test_config)
+        with Filesystem.get(properties=default_properties) as fs:
+            fs.create_dir(source_dir)
+            offset = 0
+            for index, rows in enumerate((1, 7, 13)):
+                batch = _generate_batch(simple_schema, rows, offset=offset)
+                output = pa.BufferOutputStream()
+                pq.write_table(pa.Table.from_batches([batch]), output)
+                fs.write_file(
+                    f"{source_dir}/part_{index}.parquet", output.getvalue().to_pybytes()
+                )
+                offset += rows
+
+        found, manifest_path = ExternalTable.explore(
+            columns=simple_schema.names,
+            format="parquet",
+            base_dir=f"{temp_case_path}/explore_unequal",
+            explore_dir=_get_explore_uri(test_config, source_dir),
+            properties=properties,
+        )
+        assert found == 3
+        explored = ExternalTable.read_manifest(manifest_path, properties=properties)
+        row_counts = [
+            ExternalTable.get_file_info("parquet", file.path, properties)
+            for group in explored.column_groups for file in group.files
+        ]
+        assert sorted(row_counts) == [1, 7, 13]
+
+        normalized = [
+            ColumnGroup(
+                group.columns,
+                group.format,
+                [
+                    ColumnGroupFile(
+                        file.path, 0,
+                        ExternalTable.get_file_info("parquet", file.path, properties),
+                        properties=file.properties,
+                    )
+                    for file in group.files
+                ],
+            )
+            for group in explored.column_groups
+        ]
+        target = f"{temp_case_path}/imported_unequal"
+        with ColumnGroups.from_list(normalized) as groups:
+            with Transaction(target, properties) as txn:
+                txn.append_files(groups)
+                txn.commit()
+        with Transaction(target, properties) as txn:
+            stored = txn.get_manifest()
+        with ColumnGroups.from_list(stored.column_groups) as groups:
+            with Reader(groups, simple_schema, properties=properties) as reader:
+                actual = pa.Table.from_batches(list(reader.scan())).to_pydict()
+        assert sorted(actual["id"]) == list(range(21))
+        assert actual["name"] == [f"v_{row_id}" for row_id in actual["id"]]
+        assert actual["value"] == [float(row_id) for row_id in actual["id"]]
+
+    def test_parquet_explore_accepts_valid_files_with_any_extension(
+        self, temp_case_path, simple_schema, default_properties, test_config
+    ):
+        source_dir = f"{temp_case_path}/mixed_extensions"
+        with Filesystem.get(properties=default_properties) as fs:
+            fs.create_dir(source_dir)
+            for filename, offset in (("data.parquet", 0), ("part.txt", 2)):
+                output = pa.BufferOutputStream()
+                batch = _generate_batch(simple_schema, 2, offset=offset)
+                pq.write_table(pa.Table.from_batches([batch]), output)
+                fs.write_file(f"{source_dir}/{filename}", output.getvalue().to_pybytes())
+
+        properties = _get_extfs_properties(default_properties, test_config)
+        found, manifest_path = ExternalTable.explore(
+            columns=simple_schema.names,
+            format="parquet",
+            base_dir=f"{temp_case_path}/metadata",
+            explore_dir=_get_explore_uri(test_config, source_dir),
+            properties=properties,
+        )
+        assert found == 2
+        manifest = ExternalTable.read_manifest(manifest_path, properties=properties)
+        files = [file for group in manifest.column_groups for file in group.files]
+        assert {file.path.rsplit("/", 1)[-1] for file in files} == {
+            "data.parquet", "part.txt"
+        }
+        assert all(
+            ExternalTable.get_file_info("parquet", file.path, properties) == 2
+            for file in files
+        )
+
     def test_explore_parquet_directory(
         self,
         temp_case_path: str,
@@ -286,7 +366,7 @@ class TestExternalTable:
         test_config,
     ):
         """Explore a directory containing parquet files."""
-        write_fs = _get_pyarrow_filesystem(test_config)
+        write_fs = _get_write_filesystem(test_config)
         write_path = _get_write_path(test_config, f"{temp_case_path}/data")
 
         num_files = 5
@@ -327,7 +407,7 @@ class TestExternalTable:
         test_config,
     ):
         """Explore a directory containing vortex files."""
-        write_fs = _get_pyarrow_filesystem(test_config)
+        write_fs = _get_write_filesystem(test_config)
         write_path = _get_write_path(test_config, f"{temp_case_path}/data")
 
         num_files = 5
@@ -450,9 +530,13 @@ class TestExternalTable:
         # --- Method 1: scan (RecordBatchReader) ---
         print("\n--- Read method 1: scan ---")
         reader = Reader(cg_for_reader, schema, properties=properties)
-        scan_rows = sum(b.num_rows for b in reader.scan())
+        scan_data = pa.Table.from_batches(list(reader.scan())).to_pydict()
+        scan_rows = len(scan_data["id"])
         print(f"  scan total rows: {scan_rows}")
         assert scan_rows == expected_rows
+        assert sorted(scan_data["id"]) == list(range(expected_rows))
+        assert scan_data["name"] == [f"v_{row_id}" for row_id in scan_data["id"]]
+        assert scan_data["value"] == [float(row_id) for row_id in scan_data["id"]]
         reader.close()
 
         # --- Method 2: get_chunk (column group 0) ---
@@ -462,12 +546,15 @@ class TestExternalTable:
         num_chunks = chunk_reader.get_number_of_chunks()
         print(f"  number of chunks: {num_chunks}")
         chunk_rows = 0
+        chunk_ids = []
         for i in range(num_chunks):
             chunk = chunk_reader.get_chunk(i)
             print(f"  chunk[{i}]: {chunk.num_rows} rows")
             chunk_rows += chunk.num_rows
+            chunk_ids.extend(chunk.column("id").to_pylist())
         print(f"  get_chunk total rows: {chunk_rows}")
         assert chunk_rows == expected_rows
+        assert chunk_ids == scan_data["id"]
         chunk_reader.close()
         reader.close()
 
@@ -483,6 +570,11 @@ class TestExternalTable:
         take_rows = sum(b.num_rows for b in batches)
         print(f"  take total rows: {take_rows}")
         assert take_rows == len(take_indices)
+        taken = pa.Table.from_batches(batches).to_pydict()
+        expected_ids = [scan_data["id"][index] for index in take_indices]
+        assert taken["id"] == expected_ids
+        assert taken["name"] == [f"v_{row_id}" for row_id in expected_ids]
+        assert taken["value"] == [float(row_id) for row_id in expected_ids]
         reader.close()
 
     def test_external_table_import_parquet(
@@ -493,7 +585,7 @@ class TestExternalTable:
         test_config,
     ):
         """Import external parquet files into storage via transaction."""
-        write_fs = _get_pyarrow_filesystem(test_config)
+        write_fs = _get_write_filesystem(test_config)
 
         explore_rel = f"{temp_case_path}/external"
         explore_meta_rel = f"{temp_case_path}/explore_meta"
@@ -564,7 +656,7 @@ class TestExternalTable:
         test_config,
     ):
         """Import external vortex files into storage via transaction."""
-        write_fs = _get_pyarrow_filesystem(test_config)
+        write_fs = _get_write_filesystem(test_config)
 
         explore_rel = f"{temp_case_path}/external"
         explore_meta_rel = f"{temp_case_path}/explore_meta"
@@ -748,3 +840,79 @@ class TestExternalTable:
         self._verify_import(
             base_rel, simple_schema, num_batches * rows_per_batch, props
         )
+
+    def test_imported_lance_snapshot_stays_fixed_after_source_append(
+        self, temp_case_path, simple_schema, default_properties, test_config
+    ):
+        lance = pytest.importorskip("lance")
+        dataset_rel = f"{temp_case_path}/snapshot_source"
+        dataset_uri = _get_lance_write_uri(test_config, dataset_rel)
+        storage_options = _get_lance_storage_options(test_config)
+        properties = _get_extfs_properties(default_properties, test_config)
+
+        first = pa.Table.from_batches([_generate_batch(simple_schema, 10, offset=0)])
+        lance.write_dataset(first, dataset_uri, mode="create", storage_options=storage_options)
+
+        def import_snapshot(name):
+            found, explore_manifest_path = ExternalTable.explore(
+                columns=simple_schema.names,
+                format="lance-table",
+                base_dir=f"{temp_case_path}/{name}_explore",
+                explore_dir=_get_explore_uri(test_config, dataset_rel),
+                properties=properties,
+            )
+            assert found > 0
+            explored = ExternalTable.read_manifest(explore_manifest_path, properties=properties)
+            assert all(
+                "dataset_version" in file.properties
+                for group in explored.column_groups for file in group.files
+            )
+            target = f"{temp_case_path}/{name}_imported"
+            with ColumnGroups.from_list(explored.column_groups) as groups:
+                with Transaction(target, properties) as txn:
+                    txn.append_files(groups)
+                    txn.commit()
+            return target
+
+        old_target = import_snapshot("old")
+        second = pa.Table.from_batches([_generate_batch(simple_schema, 10, offset=10)])
+        lance.write_dataset(second, dataset_uri, mode="append", storage_options=storage_options)
+        new_target = import_snapshot("new")
+
+        versioned_manifests = {}
+        for target, expected_rows in ((old_target, 10), (new_target, 20)):
+            with Transaction(target, properties) as txn:
+                stored = txn.get_manifest()
+            versioned_manifests[target] = stored
+            with ColumnGroups.from_list(stored.column_groups) as groups:
+                with Reader(groups, simple_schema, properties=properties) as reader:
+                    actual = pa.Table.from_batches(list(reader.scan())).to_pydict()
+            expected_ids = list(range(expected_rows))
+            assert actual == {
+                "id": expected_ids,
+                "name": [f"v_{i}" for i in expected_ids],
+                "value": [float(i) for i in expected_ids],
+            }
+
+        old_groups = ColumnGroups.from_list(versioned_manifests[old_target].column_groups)
+        new_groups = ColumnGroups.from_list(versioned_manifests[new_target].column_groups)
+        with old_groups, new_groups:
+            with Reader(old_groups, simple_schema, properties=properties) as old_reader:
+                with Reader(new_groups, simple_schema, properties=properties) as new_reader:
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        def ids(reader):
+                            return [
+                                value for batch in reader.scan()
+                                for value in batch.column("id").to_pylist()
+                            ]
+
+                        old_result = pool.submit(ids, old_reader)
+                        new_result = pool.submit(ids, new_reader)
+                        assert old_result.result() == list(range(10))
+                        assert new_result.result() == list(range(20))
+                    old_reader.close()
+                    taken = new_reader.take([0, 10, 19])
+                    assert [
+                        value for batch in taken
+                        for value in batch.column("id").to_pylist()
+                    ] == [0, 10, 19]

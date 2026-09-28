@@ -6,11 +6,39 @@ Verify edge cases and boundary behavior for write/read operations.
 
 import pyarrow as pa
 import pytest
-from milvus_storage import Reader, Writer
+from milvus_storage import Reader, Transaction, Writer
+from milvus_storage.manifest import ColumnGroups
 
 
 class TestBoundaryConditions:
     """Test boundary conditions in write/read operations."""
+
+    def test_zero_row_batches_do_not_change_committed_data(
+        self, temp_case_path, default_properties
+    ):
+        schema = pa.schema([pa.field("id", pa.int64()), pa.field("name", pa.string())])
+        batch = pa.RecordBatch.from_pydict(
+            {"id": [0, 1, 2, 3, 4], "name": [None, "", "name_2", None, "name_4"]},
+            schema=schema,
+        )
+        with Writer(temp_case_path, schema, default_properties) as writer:
+            writer.write(batch.slice(0, 0))
+            writer.write(batch.slice(0, 3))
+            writer.write(batch.slice(3, 0))
+            writer.flush()
+            writer.write(batch.slice(3, 2))
+            writer.write(batch.slice(5, 0))
+            groups = writer.close()
+        with Transaction(temp_case_path, default_properties) as txn:
+            txn.append_files(groups)
+            txn.commit()
+        groups.destroy()
+        with Transaction(temp_case_path, default_properties) as txn:
+            manifest = txn.get_manifest()
+        with ColumnGroups.from_list(manifest.column_groups) as groups:
+            with Reader(groups, schema, properties=default_properties) as reader:
+                actual = pa.Table.from_batches(list(reader.scan())).to_pydict()
+        assert actual == batch.to_pydict()
 
     def test_single_row_write(
         self,
@@ -227,8 +255,9 @@ class TestBoundaryConditions:
         assert total_files == 0
 
     @pytest.mark.xfail(
-        reason="Parquet loses fixed_size_list semantics",
-        raises=Exception,
+        strict=True,
+        reason="D14: Parquet fixed_size_list scan exports an invalid Arrow buffer layout",
+        raises=pa.ArrowInvalid,
     )
     def test_vector_data_roundtrip(
         self,
@@ -238,11 +267,12 @@ class TestBoundaryConditions:
         default_properties,
     ):
         """Write and read vector (fixed-size list) data."""
-        writer = Writer(temp_case_path, vector_schema, default_properties)
+        properties = {**default_properties, "writer.format": "parquet"}
+        writer = Writer(temp_case_path, vector_schema, properties)
         writer.write(vector_batch)
         column_groups = writer.close()
 
-        reader = Reader(column_groups, vector_schema, properties=default_properties)
+        reader = Reader(column_groups, vector_schema, properties=properties)
         result = list(reader.scan())
         total_rows = sum(b.num_rows for b in result)
         assert total_rows == vector_batch.num_rows

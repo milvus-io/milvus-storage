@@ -8,12 +8,67 @@ while Transaction.append_files() is for appending rows with the same schema.
 """
 
 import pyarrow as pa
+import pytest
 from milvus_storage import Reader, Transaction, Writer
 from milvus_storage.manifest import ColumnGroups
 
 
 class TestSchemaEvolution:
     """Test schema evolution (adding columns via separate column groups)."""
+
+    @pytest.mark.e2e_smoke
+    def test_drop_then_add_same_name_preserves_previous_versions(
+        self, temp_case_path, simple_schema, batch_generator, default_properties
+    ):
+        original = batch_generator(10)
+        with Writer(temp_case_path, simple_schema, default_properties) as writer:
+            writer.write(original)
+            written = writer.close()
+        with Transaction(temp_case_path, default_properties) as txn:
+            txn.append_files(written)
+            first_version = txn.commit()
+        written.destroy()
+
+        with Transaction(temp_case_path, default_properties) as txn:
+            txn.drop_column("name")
+            second_version = txn.commit()
+        reduced_schema = pa.schema([simple_schema.field("id"), simple_schema.field("value")])
+
+        with Transaction(temp_case_path, default_properties, read_version=second_version) as txn:
+            reduced_manifest = txn.get_manifest()
+        with ColumnGroups.from_list(reduced_manifest.column_groups) as groups:
+            with Reader(groups, reduced_schema, properties=default_properties) as reader:
+                reduced = pa.Table.from_batches(list(reader.scan())).to_pydict()
+        assert reduced == {"id": list(range(10)), "value": [i * 0.1 for i in range(10)]}
+
+        names = [f"readded_{i}" for i in range(10)]
+        name_schema = pa.schema([pa.field("name", pa.string())])
+        with Writer(temp_case_path, name_schema, default_properties) as writer:
+            writer.write(pa.RecordBatch.from_pydict({"name": names}, schema=name_schema))
+            name_groups = writer.close()
+        with Transaction(temp_case_path, default_properties) as txn:
+            for group in name_groups.to_list():
+                txn.add_column_group(group)
+            txn.commit()
+        name_groups.destroy()
+
+        with Transaction(temp_case_path, default_properties) as txn:
+            latest_manifest = txn.get_manifest()
+        with ColumnGroups.from_list(latest_manifest.column_groups) as groups:
+            with Reader(groups, simple_schema, properties=default_properties) as reader:
+                latest = pa.Table.from_batches(list(reader.scan())).to_pydict()
+        assert latest == {
+            "id": list(range(10)),
+            "name": names,
+            "value": [i * 0.1 for i in range(10)],
+        }
+
+        with Transaction(temp_case_path, default_properties, read_version=first_version) as txn:
+            original_manifest = txn.get_manifest()
+        with ColumnGroups.from_list(original_manifest.column_groups) as groups:
+            with Reader(groups, simple_schema, properties=default_properties) as reader:
+                previous = pa.Table.from_batches(list(reader.scan())).to_pydict()
+        assert previous == original.to_pydict()
 
     def test_read_with_original_schema(
         self,

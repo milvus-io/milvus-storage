@@ -240,13 +240,13 @@ class ChunkReader:
         if self._closed:
             raise ResourceError("ChunkReader is closed")
 
-        if not indices:
-            return []
-
         # Convert to numpy array
         indices_array = np.asarray(indices, dtype=np.int64)
         if indices_array.ndim != 1:
             raise InvalidArgumentError("indices must be 1-dimensional")
+        if indices_array.size == 0:
+            return []
+        indices_array = np.require(indices_array, requirements=["C", "A"])
 
         # Create C array - use numpy's ctypes interop
         indices_ptr = indices_array.ctypes.data
@@ -312,6 +312,9 @@ class ChunkReader:
 
         # Convert to numpy array
         row_indices_array = np.asarray(row_indices, dtype=np.int64)
+        if row_indices_array.ndim != 1:
+            raise InvalidArgumentError("row_indices must be 1-dimensional")
+        row_indices_array = np.require(row_indices_array, requirements=["C", "A"])
         row_indices_ptr = row_indices_array.ctypes.data
 
         chunk_indices_ptr = self._ffi.new("int64_t**")
@@ -533,12 +536,13 @@ class Reader:
         # Convert to numpy array first to handle both list and numpy array
         indices_array = np.asarray(indices, dtype=np.int64)
 
-        if len(indices_array) == 0:
-            raise InvalidArgumentError("indices cannot be empty")
         if indices_array.ndim != 1:
             raise InvalidArgumentError("indices must be 1-dimensional")
+        if indices_array.size == 0:
+            raise InvalidArgumentError("indices cannot be empty")
         if len(indices_array) > 1 and not np.all(np.diff(indices_array) > 0):
             raise InvalidArgumentError("indices must be unique and sorted in ascending order")
+        indices_array = np.require(indices_array, requirements=["C", "A"])
 
         # Create C array - use numpy's ctypes interop
         indices_ptr = indices_array.ctypes.data

@@ -4,9 +4,10 @@ Reader advanced functionality tests.
 Verify column projection, take by indices, and scan patterns.
 """
 
+import numpy as np
 import pyarrow as pa
 import pytest
-from milvus_storage import Reader, Writer
+from milvus_storage import Properties, Reader, Writer
 
 
 class TestReaderAdvanced:
@@ -20,6 +21,174 @@ class TestReaderAdvanced:
         for i in range(num_batches):
             writer.write(batch_generator(rows_per_batch, offset=i * rows_per_batch))
         return writer.close()
+
+    @pytest.mark.e2e_smoke
+    def test_per_call_projection_restores_reader_default(
+        self, temp_case_path, simple_schema, batch_generator, default_properties
+    ):
+        column_groups = self._write_data(
+            temp_case_path, simple_schema, batch_generator, default_properties,
+            num_batches=1, rows_per_batch=10,
+        )
+        with Reader(
+            column_groups, simple_schema, columns=["id", "name"],
+            properties=default_properties,
+        ) as reader:
+            projected = pa.Table.from_batches(reader.take([0, 3], columns=["value"]))
+            assert projected.schema.names == ["value"]
+            assert projected.column("value").to_pylist() == pytest.approx([0.0, 0.3])
+
+            with reader.get_chunk_reader(0, columns=["name"]) as chunk_reader:
+                chunk = chunk_reader.get_chunk(0)
+                assert chunk.schema.names == ["name"]
+                assert chunk.column("name").to_pylist() == [f"name_{i}" for i in range(10)]
+
+            default = pa.Table.from_batches(reader.take([0, 3]))
+            assert default.schema.names == ["id", "name"]
+            assert default.column("id").to_pylist() == [0, 3]
+            assert default.column("name").to_pylist() == ["name_0", "name_3"]
+
+    @pytest.mark.parametrize(
+        "indices",
+        [
+            pytest.param([0, 2, 4, 6, 8], id="list"),
+            pytest.param(np.array([0, 2, 4, 6, 8], dtype=np.int64), id="contiguous"),
+            pytest.param(
+                np.arange(10, dtype=np.int64)[::2],
+                id="strided",
+            ),
+        ],
+    )
+    @pytest.mark.e2e_smoke
+    def test_take_preserves_numpy_index_values(
+        self, temp_case_path, simple_schema, batch_generator, default_properties, indices
+    ):
+        column_groups = self._write_data(
+            temp_case_path, simple_schema, batch_generator, default_properties,
+            num_batches=1, rows_per_batch=10,
+        )
+        with Reader(column_groups, simple_schema, properties=default_properties) as reader:
+            result = pa.Table.from_batches(reader.take(indices))
+        expected = [0, 2, 4, 6, 8]
+        assert result.column("id").to_pylist() == expected
+        assert result.column("name").to_pylist() == [f"name_{i}" for i in expected]
+        assert result.column("value").to_pylist() == pytest.approx([i * 0.1 for i in expected])
+
+    @pytest.mark.e2e_smoke
+    def test_scan_respects_batch_row_limit(
+        self, temp_case_path, simple_schema, batch_generator, default_properties
+    ):
+        groups = self._write_data(
+            temp_case_path, simple_schema, batch_generator, default_properties,
+            num_batches=1, rows_per_batch=31,
+        )
+        properties = dict(default_properties)
+        properties["reader.record_batch_max_rows"] = "7"
+        with groups, Reader(groups, simple_schema, properties=properties) as reader:
+            batches = list(reader.scan())
+        assert len(batches) >= 5
+        assert all(0 < batch.num_rows <= 7 for batch in batches)
+        ids = [row for batch in batches for row in batch.column("id").to_pylist()]
+        assert ids == list(range(31))
+
+    @pytest.mark.parametrize("crt_enabled", ["true", "false"])
+    def test_remote_reads_with_crt_setting(
+        self, temp_case_path, simple_schema, batch_generator,
+        default_properties, test_config, crt_enabled
+    ):
+        if not test_config.is_s3_compatible:
+            pytest.skip("CRT read settings require an S3-compatible backend")
+        groups = self._write_data(
+            temp_case_path, simple_schema, batch_generator, default_properties,
+            num_batches=2, rows_per_batch=10,
+        )
+        read_properties = dict(default_properties)
+        read_properties["fs.s3.crt_async_read"] = crt_enabled
+        with groups, Reader(groups, simple_schema, properties=read_properties) as reader:
+            scanned = pa.Table.from_batches(list(reader.scan())).to_pydict()
+            assert scanned == {
+                "id": list(range(20)),
+                "name": [f"name_{i}" for i in range(20)],
+                "value": [i * 0.1 for i in range(20)],
+            }
+
+            selected = [0, 9, 10, 19]
+            taken = pa.Table.from_batches(reader.take(selected)).to_pydict()
+            assert taken["id"] == selected
+            assert taken["name"] == [f"name_{i}" for i in selected]
+            with reader.get_chunk_reader(0) as chunk_reader:
+                chunk_ids = [
+                    value for index in range(chunk_reader.get_number_of_chunks())
+                    for value in chunk_reader.get_chunk(index).column("id").to_pylist()
+                ]
+            assert chunk_ids == list(range(20))
+
+    @pytest.mark.parametrize("parallelism", [1, 2, 4])
+    def test_take_parallelism_preserves_selected_rows(
+        self, temp_case_path, simple_schema, batch_generator,
+        default_properties, parallelism
+    ):
+        groups = self._write_data(
+            temp_case_path, simple_schema, batch_generator, default_properties,
+            num_batches=2, rows_per_batch=15,
+        )
+        with groups, Reader(groups, simple_schema, properties=default_properties) as reader:
+            selected = [0, 14, 15, 29]
+            taken = pa.Table.from_batches(reader.take(selected, parallelism=parallelism))
+        assert taken.column("id").to_pylist() == selected
+        assert taken.column("name").to_pylist() == [f"name_{i}" for i in selected]
+        assert taken.column("value").to_pylist() == [i * 0.1 for i in selected]
+
+    @pytest.mark.parametrize(
+        "cache_enabled,hole_size,range_size",
+        [("true", "0", "0"), ("false", "64", "256")],
+    )
+    def test_parquet_cache_and_prebuffer_options_preserve_data(
+        self, temp_case_path, simple_schema, batch_generator,
+        default_properties, cache_enabled, hole_size, range_size
+    ):
+        groups = self._write_data(
+            temp_case_path, simple_schema, batch_generator, default_properties,
+            num_batches=1, rows_per_batch=100,
+        )
+        properties = dict(default_properties)
+        properties.update(
+            {
+                "reader.metadata_cache.enable": cache_enabled,
+                "reader.parquet.prebuffer.hole_size_limit": hole_size,
+                "reader.parquet.prebuffer.range_size_limit": range_size,
+            }
+        )
+        reader_properties = Properties(properties)
+        assert reader_properties.get("reader.metadata_cache.enable") == cache_enabled
+        assert reader_properties.get("no.such.option", default="fallback") == "fallback"
+
+        with groups, Reader(groups, simple_schema, properties=properties) as reader:
+            scanned = pa.Table.from_batches(list(reader.scan())).to_pydict()
+            assert scanned == batch_generator(100).to_pydict()
+            selected = [0, 50, 99]
+            taken = pa.Table.from_batches(reader.take(selected)).to_pydict()
+            assert taken["id"] == selected
+            assert taken["name"] == [f"name_{i}" for i in selected]
+
+    def test_small_byte_budget_preserves_scan_values(
+        self, temp_case_path, default_properties
+    ):
+        schema = pa.schema([pa.field("id", pa.int64()), pa.field("payload", pa.string())])
+        payloads = [f"{i:03d}-" + "x" * 64 for i in range(100)]
+        batch = pa.RecordBatch.from_pydict(
+            {"id": list(range(100)), "payload": payloads}, schema=schema
+        )
+        with Writer(temp_case_path, schema, default_properties) as writer:
+            writer.write(batch)
+            groups = writer.close()
+        properties = dict(default_properties)
+        properties["reader.record_batch_max_size"] = "100"
+        properties["reader.record_batch_max_rows"] = "100"
+        with groups, Reader(groups, schema, properties=properties) as reader:
+            batches = list(reader.scan())
+        scanned = pa.Table.from_batches(batches).to_pydict()
+        assert scanned == {"id": list(range(100)), "payload": payloads}
 
     def test_column_projection(
         self,

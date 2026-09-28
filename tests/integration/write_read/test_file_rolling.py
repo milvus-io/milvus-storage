@@ -5,11 +5,55 @@ Verify file rolling behavior under different configurations.
 """
 
 import pyarrow as pa
-from milvus_storage import PropertyKeys, Reader, Writer
+import pytest
+from milvus_storage import PropertyKeys, Reader, Transaction, Writer
+from milvus_storage.manifest import ColumnGroups
 
 
 class TestFileRolling:
     """Test file rolling functionality."""
+
+    @pytest.mark.e2e_smoke
+    def test_sliced_batches_across_rolled_files(
+        self, temp_case_path, simple_schema, batch_generator, default_properties
+    ):
+        properties = dict(default_properties)
+        properties[PropertyKeys.WRITER_FILE_ROLLING_SIZE] = "1024"
+        expected = {name: [] for name in simple_schema.names}
+        with Writer(temp_case_path, simple_schema, properties) as writer:
+            for part in range(4):
+                batch = batch_generator(250, offset=1000 + part * 250).slice(13, 197)
+                for name in simple_schema.names:
+                    expected[name].extend(batch.column(name).to_pylist())
+                writer.write(batch)
+                if part == 1:
+                    writer.flush()
+            written = writer.close()
+        assert sum(len(group.files) for group in written.to_list()) >= 2
+
+        with Transaction(temp_case_path, properties) as txn:
+            txn.append_files(written)
+            txn.commit()
+        written.destroy()
+        with Transaction(temp_case_path, properties) as txn:
+            manifest = txn.get_manifest()
+        with ColumnGroups.from_list(manifest.column_groups) as groups:
+            with Reader(groups, simple_schema, properties=properties) as reader:
+                scanned = pa.Table.from_batches(list(reader.scan())).to_pydict()
+                assert scanned == expected
+
+                selected = [0, 196, 197, 393, 394, 787]
+                taken = pa.Table.from_batches(reader.take(selected)).to_pydict()
+                for name in simple_schema.names:
+                    assert taken[name] == [expected[name][i] for i in selected]
+
+                with reader.get_chunk_reader(0) as chunk_reader:
+                    count = chunk_reader.get_number_of_chunks()
+                    assert count >= 2
+                    first = chunk_reader.get_chunk(0)
+                    last = chunk_reader.get_chunk(count - 1)
+                    assert first.column("id").to_pylist() == expected["id"][:first.num_rows]
+                    assert last.column("id").to_pylist() == expected["id"][-last.num_rows:]
 
     def test_file_rolling_by_size(
         self,

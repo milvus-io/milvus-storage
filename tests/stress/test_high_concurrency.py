@@ -4,8 +4,11 @@ High concurrency stress tests.
 Verify stability and correctness under high thread counts.
 """
 
+import gc
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import psutil
 import pyarrow as pa
 import pytest
 from milvus_storage import Reader, Transaction, Writer
@@ -14,6 +17,17 @@ from milvus_storage import Reader, Transaction, Writer
 @pytest.mark.stress
 class TestHighConcurrency:
     """Test high concurrency scenarios."""
+
+    def test_memory_leak_assertion_detects_retained_allocation(self, assert_no_memory_leak):
+        retained = bytearray(16 * 1024 * 1024)
+        assert len(retained) == 16 * 1024 * 1024
+        try:
+            assert_no_memory_leak(max_growth_mb=1)
+        except AssertionError:
+            detected = True
+        else:
+            detected = False
+        assert detected
 
     def _commit_initial_data(self, path, schema, batch_generator, props, rows=1000):
         """Write initial data and commit via transaction."""
@@ -25,6 +39,60 @@ class TestHighConcurrency:
         txn.append_files(cg)
         txn.commit()
         txn.close()
+
+    def test_many_readers_release_process_resources(
+        self,
+        temp_case_path,
+        simple_schema,
+        batch_generator,
+        default_properties,
+        test_config,
+        request,
+    ):
+        if not test_config.is_local:
+            pytest.skip("Process resource trend is measured against a local filesystem")
+        with Writer(temp_case_path, simple_schema, default_properties) as writer:
+            writer.write(batch_generator(40))
+            groups = writer.close()
+
+        properties = {**default_properties, "reader.record_batch_max_rows": "5"}
+        process = psutil.Process()
+        readers = []
+        try:
+            # Warm shared native caches before taking the baseline.
+            for _ in range(20):
+                with Reader(groups, simple_schema, properties=properties) as reader:
+                    assert next(reader.scan()).column("id").to_pylist() == list(
+                        range(5)
+                    )
+            gc.collect()
+            initial_rss = process.memory_info().rss
+            initial_fds = process.num_fds()
+            initial_threads = process.num_threads()
+
+            scale = request.config.getoption("--stress-scale")
+            if scale is None:
+                scale = float(os.environ.get("STRESS_SCALE_FACTOR", "1.0"))
+            for index in range(max(20, int(1000 * scale))):
+                reader = Reader(groups, simple_schema, properties=properties)
+                readers.append(reader)
+                stream = reader.scan()
+                assert next(stream).column("id").to_pylist() == list(range(5))
+                stream.close()
+                if index % 100 == 0:
+                    assert pa.Table.from_batches(reader.take([0, 39])).column(
+                        "id"
+                    ).to_pylist() == [0, 39]
+        finally:
+            for reader in readers:
+                reader.close()
+            groups.destroy()
+        readers.clear()
+        gc.collect()
+
+        assert process.num_fds() <= initial_fds + 8
+        assert process.num_threads() <= initial_threads + 8
+        assert process.memory_info().rss <= initial_rss + 96 * 1024 * 1024
 
     @pytest.mark.parametrize(
         "num_writers,num_readers",

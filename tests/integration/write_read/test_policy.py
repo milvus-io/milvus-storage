@@ -13,6 +13,48 @@ from milvus_storage.manifest import ColumnGroups
 class TestWriterPolicy:
     """Test writer column group policies."""
 
+    @pytest.mark.e2e_smoke
+    def test_mixed_formats_preserve_reordered_columns(
+        self, temp_case_path, simple_schema, batch_generator, default_properties
+    ):
+        properties = dict(default_properties)
+        properties.update(
+            {
+                PropertyKeys.WRITER_POLICY: "schema_based",
+                PropertyKeys.WRITER_SCHEMA_BASE_PATTERNS: "id|name,value",
+                "writer.split.schema_based.formats": "parquet,vortex",
+            }
+        )
+        expected = batch_generator(30)
+        with Writer(temp_case_path, simple_schema, properties) as writer:
+            writer.write(expected)
+            written = writer.close()
+
+        with Transaction(temp_case_path, properties) as txn:
+            txn.append_files(written)
+            txn.commit()
+        written.destroy()
+
+        with Transaction(temp_case_path, properties) as txn:
+            manifest = txn.get_manifest()
+        assert {group.format for group in manifest.column_groups} == {"parquet", "vortex"}
+
+        with ColumnGroups.from_list(manifest.column_groups) as groups:
+            with Reader(
+                groups, simple_schema, columns=["value", "id", "name"],
+                properties=properties,
+            ) as reader:
+                table = pa.Table.from_batches(list(reader.scan()))
+                assert table.schema.names == ["value", "id", "name"]
+                assert table.column("id").to_pylist() == list(range(30))
+                assert table.column("name").to_pylist() == [f"name_{i}" for i in range(30)]
+                assert table.column("value").to_pylist() == [i * 0.1 for i in range(30)]
+
+                taken = pa.Table.from_batches(reader.take([0, 14, 29]))
+                assert taken.schema.names == ["value", "id", "name"]
+                assert taken.column("id").to_pylist() == [0, 14, 29]
+                assert taken.column("name").to_pylist() == ["name_0", "name_14", "name_29"]
+
     # ===== Single Policy Tests =====
 
     def test_single_policy(

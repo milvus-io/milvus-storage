@@ -4,6 +4,7 @@ Data type tests.
 Verify write/read roundtrip for various Arrow data types.
 """
 
+import math
 import random
 
 import pyarrow as pa
@@ -24,6 +25,43 @@ class TestDataTypes:
         result = list(reader.scan())
         total_rows = sum(b.num_rows for b in result)
         return result, total_rows
+
+    @pytest.mark.e2e_smoke
+    def test_scalar_boundaries_preserve_each_field(self, temp_case_path, default_properties):
+        schema = pa.schema(
+            [
+                pa.field("signed", pa.int32()),
+                pa.field("unsigned", pa.uint64()),
+                pa.field("float32", pa.float32()),
+                pa.field("float64", pa.float64()),
+                pa.field("flag", pa.bool_()),
+                pa.field("text", pa.string()),
+                pa.field("binary", pa.binary()),
+            ]
+        )
+        values = {
+            "signed": [-(2**31), -1, 0, 2**31 - 1],
+            "unsigned": [0, 2**32, 2**63, 2**64 - 1],
+            "float32": [-0.0, float("inf"), float("-inf"), float("nan")],
+            "float64": [1.5, -0.0, float("inf"), float("nan")],
+            "flag": [True, False, None, True],
+            "text": ["中文", "", None, "🎉"],
+            "binary": [b"\x00\xff", b"", None, b"abc"],
+        }
+        batch = pa.RecordBatch.from_pydict(values, schema=schema)
+        with Writer(temp_case_path, schema, default_properties) as writer:
+            writer.write(batch)
+            groups = writer.close()
+        with groups, Reader(groups, schema, properties=default_properties) as reader:
+            actual = pa.Table.from_batches(list(reader.scan())).to_pydict()
+
+        for name in ("signed", "unsigned", "flag", "text", "binary"):
+            assert actual[name] == values[name]
+        for name in ("float32", "float64"):
+            assert actual[name][:3] == values[name][:3]
+            assert math.isnan(actual[name][3])
+        assert math.copysign(1.0, actual["float32"][0]) == -1.0
+        assert math.copysign(1.0, actual["float64"][1]) == -1.0
 
     def test_integer_types(
         self,
@@ -174,8 +212,9 @@ class TestDataTypes:
         assert all_ids == [[1, 2, 3], [], [4], [5, 6]]
 
     @pytest.mark.xfail(
-        reason="Parquet loses fixed_size_list semantics",
-        raises=Exception,
+        strict=True,
+        reason="D14: Parquet fixed_size_list scan exports an invalid Arrow buffer layout",
+        raises=pa.ArrowInvalid,
     )
     def test_fixed_size_list_type(
         self,
@@ -199,15 +238,10 @@ class TestDataTypes:
             schema=schema,
         )
 
-        result, total = self._roundtrip(
-            temp_case_path, schema, batch, default_properties
-        )
+        properties = {**default_properties, "writer.format": "parquet"}
+        result, total = self._roundtrip(temp_case_path, schema, batch, properties)
         assert total == 10
 
-    @pytest.mark.xfail(
-        reason="Parquet reader mishandles struct column indices",
-        raises=Exception,
-    )
     def test_struct_type(
         self,
         temp_case_path: str,
@@ -242,6 +276,11 @@ class TestDataTypes:
             temp_case_path, schema, batch, default_properties
         )
         assert total == 3
+        assert [value for item in result for value in item.column("meta").to_pylist()] == [
+            {"key": "a", "value": 1},
+            {"key": "b", "value": 2},
+            {"key": "c", "value": 3},
+        ]
 
     def test_wide_table(
         self,

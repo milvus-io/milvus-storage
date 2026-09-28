@@ -11,9 +11,12 @@ Core philosophy:
 Requires BUILD_WITH_FIU=ON.
 """
 
+import gc
+
 import pyarrow as pa
 import pytest
-from milvus_storage import PropertyKeys, Reader, Transaction, Writer
+from milvus_storage import Filesystem, PropertyKeys, Reader, Transaction, Writer
+from milvus_storage.exceptions import FFIError
 from milvus_storage.fiu import FaultInjector
 from milvus_storage.manifest import ColumnGroups
 
@@ -89,6 +92,56 @@ def _skip_if_not_s3(test_config, fault_key: str):
 @pytest.mark.fiu
 class TestRecovery:
     """Test data integrity and recoverability under injected faults."""
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize(
+        "fault_key",
+        [
+            "S3FS_CREATE_UPLOAD_FAIL",
+            pytest.param(
+                "S3FS_PART_UPLOAD_FAIL",
+                marks=pytest.mark.xfail(
+                    strict=True,
+                    raises=AssertionError,
+                    reason="D09: failed part upload reports the later completion error",
+                ),
+            ),
+            "S3FS_COMPLETE_UPLOAD_FAIL",
+        ],
+    )
+    def test_multipart_fault_does_not_publish_partial_data(
+        self, test_config, temp_case_path, default_properties, fault_key
+    ):
+        if not test_config.is_s3_compatible:
+            pytest.skip("Multipart faults require an S3-compatible backend")
+        injector = FaultInjector()
+        if not injector.is_enabled():
+            pytest.fail("Multipart recovery test requires an FIU-enabled native library")
+        properties = dict(default_properties)
+        properties["fs.use_custom_part_upload"] = "true"
+        properties["fs.multi_part_upload_size"] = str(10 * 1024 * 1024)
+        payload = bytes(range(251)) * 50_000
+        path = f"{temp_case_path}/multipart-fault.bin"
+
+        with injector, Filesystem.get(properties=properties) as fs:
+            fs.create_dir(temp_case_path)
+            injector.enable(_get_fiu_key(fault_key), one_time=False)
+            writer = None
+            try:
+                with pytest.raises(FFIError) as failure:
+                    with fs.open_writer(path) as writer:
+                        writer.write(payload)
+            finally:
+                writer = None
+                gc.collect()
+                injector.disable(_get_fiu_key(fault_key))
+
+            with pytest.raises(FFIError):
+                fs.read_file(path, 0, 1)
+            fs.write_file(path, payload)
+            if fs.read_file_all(path) != payload:
+                pytest.fail("Retry after multipart fault did not preserve the payload")
+            assert "Injected fault" in str(failure.value)
 
     # -----------------------------------------------------------------
     # helpers
@@ -376,9 +429,14 @@ class TestRecovery:
         )
 
         if fault_key == "FS_OPEN_INPUT_FAIL":
-            # Drop cached file-size/footer properties so the reader exercises
-            # the path-based cold-open operation guarded by this fault point.
-            cg = ColumnGroups.from_list(cg.to_list())
+            # Round-tripping preserves properties, so explicitly drop size hints
+            # to exercise the path-based open guarded by this fault point.
+            column_groups = cg.to_list()
+            for column_group in column_groups:
+                for file in column_group.files:
+                    file.properties.pop("file_size", None)
+                    file.properties.pop("footer_size", None)
+            cg = ColumnGroups.from_list(column_groups)
 
         require_fiu.enable(_get_fiu_key(fault_key), one_time=True)
 
