@@ -20,9 +20,11 @@ NativeS3Operations helper implements metadata and listing over NativeS3Transport
 FileSystemProxy applies its existing subtree prefix. Batch
 stat overrides Arrow's existing virtual API; single-path queries pass a one-element
 vector. Listing reuses GetFileInfoGenerator.
-Existing CRT reads, metadata caches and file objects are reused. CRT input files
+Existing CRT reads, metadata caches and file objects are reused. AWS CRT input files
 require native transport at initialization; unsupported configurations fail to open
-with NotImplemented, rather than falling back to executor-backed metadata reads.
+with NotImplemented. GCP retains the upstream CRT input path and SDK-backed metadata
+requests, including IAM Bearer headers; these metadata requests do not have the
+native nonblocking guarantee provided by this PR's AWS path.
 Unsupported native metadata and listing operations return NotImplemented. The
 existing SDK input path remains available when CRT reads are disabled. Both CRT
 and SDK input factories initialize local handles without network I/O. Arrow's

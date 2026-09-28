@@ -457,7 +457,9 @@ arrow::Result<std::shared_ptr<S3CrtClientHolder>> ClientBuilder<Aws::S3Crt::S3Cr
         // One client serves SDK GET and native metadata/mutations. CRT retry
         // policy is client-wide; avoid replaying a write whose response was lost.
         // The stock NO_RETRY policy also rejects initial acquisition in 0.12.6.
-        client_config_.crtConfigFactories.retryStrategyCreateFn = [](const auto&) { return SingleAttempt(); };
+        if (options_.cloud_provider.empty() || options_.cloud_provider == "aws") {
+          client_config_.crtConfigFactories.retryStrategyCreateFn = [](const auto&) { return SingleAttempt(); };
+        }
 
         const bool use_virtual_addressing = options_.endpoint_override.empty() || options_.force_virtual_addressing;
         client_config_.useVirtualAddressing = use_virtual_addressing;
