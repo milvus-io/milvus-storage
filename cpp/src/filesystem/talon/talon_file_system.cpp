@@ -105,6 +105,7 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
     if (!read_size.ok()) {
       return arrow::Future<int64_t>::MakeFinished(read_size.status());
     }
+    const bool use_talon = ShouldUseTalon(nbytes);
     nbytes = read_size.ValueOrDie();
     if (nbytes > 0 && out == nullptr) {
       return arrow::Future<int64_t>::MakeFinished(
@@ -113,6 +114,13 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
 
     if (nbytes == 0) {
       return arrow::Future<int64_t>::MakeFinished(0);
+    }
+    if (!use_talon) {
+      auto* const origin_file = state_->origin_file.get();
+      if (auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(origin_file)) {
+        return async_file->ReadAtAsyncInto(position, nbytes, out);
+      }
+      return arrow::Future<int64_t>::MakeFinished(origin_file->ReadAt(position, nbytes, out));
     }
 
     return EnsureReaderAsync().Then([position, nbytes, out, origin_file = state_->origin_file.get()](
@@ -140,7 +148,11 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
   }
 
   arrow::Result<std::shared_ptr<arrow::Buffer>> ReadAt(int64_t position, int64_t nbytes) override {
+    const int64_t requested_bytes = nbytes;
     ARROW_ASSIGN_OR_RAISE(nbytes, GetReadSize(position, nbytes));
+    if (!ShouldUseTalon(requested_bytes)) {
+      return state_->origin_file->ReadAt(position, nbytes);
+    }
     // A lazy open may not have a size yet. The synchronous API can wait for
     // initialization before clamping and allocating on the calling thread.
     ARROW_ASSIGN_OR_RAISE(const auto reader, EnsureReaderAsync().result());
@@ -158,9 +170,14 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
     if (!read_size.ok()) {
       return arrow::Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(read_size.status());
     }
+    const bool use_talon = ShouldUseTalon(nbytes);
     nbytes = read_size.ValueOrDie();
     if (nbytes == 0) {
       return arrow::Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(std::make_shared<arrow::Buffer>(nullptr, 0));
+    }
+    if (!use_talon) {
+      // Preserve the origin's native async path and the caller's I/O context.
+      return state_->origin_file->ReadAsync(io_context, position, nbytes);
     }
     return EnsureReaderAsync().Then([position, nbytes, pool = io_context.pool(),
                                      origin_file = state_->origin_file.get()](
@@ -258,6 +275,13 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
   bool closed() const override { return closed_; }
 
   private:
+  bool ShouldUseTalon(const int64_t requested_bytes) const {
+    const auto& config = state_->filesystem->config;
+    // Decide before EOF clamping so warming metadata cannot change routing.
+    return config.talon_mode == TalonMode::Full ||
+           (config.talon_mode == TalonMode::SmallReads && requested_bytes <= config.talon_small_read_threshold);
+  }
+
   /// Retry a failed Talon operation once through the cached origin file.
   /// @ReadOriginAsync takes NonBlockingRandomAccessFile& and returns Future<int64_t>.
   /// @ReadOrigin takes arrow::io::RandomAccessFile& and returns Result<int64_t>.
@@ -472,6 +496,9 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
     const auto* talon = dynamic_cast<const TalonFileSystem*>(&other);
     return talon != nullptr && state_->config.bucket_name == talon->state_->config.bucket_name &&
            state_->config.cloud_provider == talon->state_->config.cloud_provider &&
+           state_->config.talon_mode == talon->state_->config.talon_mode &&
+           (state_->config.talon_mode != TalonMode::SmallReads ||
+            state_->config.talon_small_read_threshold == talon->state_->config.talon_small_read_threshold) &&
            state_->config.talon_coordinator == talon->state_->config.talon_coordinator &&
            state_->config.talon_block_size == talon->state_->config.talon_block_size &&
            state_->config.talon_max_idle_per_addr == talon->state_->config.talon_max_idle_per_addr &&

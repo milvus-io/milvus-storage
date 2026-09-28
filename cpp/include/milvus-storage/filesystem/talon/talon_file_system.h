@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -25,7 +26,9 @@ class FileSystem;
 
 namespace milvus_storage {
 struct ArrowFileSystemConfig;
-}
+
+enum class TalonMode : uint8_t { Disabled, Full, SmallReads };
+}  // namespace milvus_storage
 
 namespace milvus_storage::talon::internal {
 

@@ -86,7 +86,7 @@ arrow::Status InitTestProperties(api::Properties& properties) {
         return arrow::Status::Invalid("Talon test environment requires TEST_ENV_TALON_COORDINATOR");
       }
       const auto block_size = GetEnvVar(ENV_VAR_TALON_BLOCK_SIZE).ValueOr("268435456");
-      if (const auto error = api::SetValue(properties, PROPERTY_FS_TALON_ENABLED, "true"); error.has_value()) {
+      if (const auto error = api::SetValue(properties, PROPERTY_FS_TALON_MODE, "1"); error.has_value()) {
         return arrow::Status::Invalid(*error);
       }
       if (const auto error = api::SetValue(properties, PROPERTY_FS_TALON_COORDINATOR, coordinator.c_str());
