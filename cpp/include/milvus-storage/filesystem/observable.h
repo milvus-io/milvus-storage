@@ -17,7 +17,9 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <arrow/buffer.h>
@@ -27,6 +29,9 @@
 #include <arrow/util/future.h>
 
 namespace milvus_storage {
+
+inline constexpr char kOriginMetricsSource[] = "origin";
+inline constexpr char kTalonMetricsSource[] = "talon";
 
 /// \brief Metrics collection for filesystem operations
 class FilesystemMetrics {
@@ -144,9 +149,17 @@ class Observable {
   public:
   virtual ~Observable() = default;
 
-  /// \brief Get metrics for this filesystem
-  /// \return Shared pointer to FilesystemMetrics, or nullptr if metrics are not available
-  [[nodiscard]] virtual std::shared_ptr<FilesystemMetrics> GetMetrics() const = 0;
+  /// Return named metric sources, or an empty collection if unavailable.
+  /// Each entry owns a non-null metrics pointer. Collection order is unspecified.
+  [[nodiscard]] virtual std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>> GetMetricsSources()
+      const = 0;
+
+  /// Return metrics for one source, or nullptr if the source is unavailable.
+  [[nodiscard]] std::shared_ptr<FilesystemMetrics> GetMetrics(const std::string& source) const {
+    const auto sources = GetMetricsSources();
+    const auto it = sources.find(source);
+    return it == sources.end() ? nullptr : it->second;
+  }
 };
 
 /// \brief Wrapper for InputStream to track read bytes
