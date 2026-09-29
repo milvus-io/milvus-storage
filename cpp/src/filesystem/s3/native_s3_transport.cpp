@@ -174,6 +174,10 @@ arrow::Status NativeS3Response::ToStatus() const {
 arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(
     const S3Options& options, std::shared_ptr<S3ClientHolder> holder, std::shared_ptr<S3CrtClientHolder> crt_holder) {
   ARROW_RETURN_NOT_OK(CheckS3Initialized());
+  // Native requests bypass HttpClient::MakeRequest. In particular, GCP HMAC
+  // conditional writes need the GOOG4 re-signing in GoogleHttpClientDelegator.
+  // This is a native capability check, not a restriction on S3FileSystem: other
+  // providers/options must retain their existing SDK paths and signing hooks.
   if ((!options.cloud_provider.empty() && options.cloud_provider != "aws") || options.retry_strategy ||
       !options.proxy_options.host.empty() || options.credentials_kind == S3CredentialsKind::Role ||
       options.credentials_kind == S3CredentialsKind::WebIdentity) {

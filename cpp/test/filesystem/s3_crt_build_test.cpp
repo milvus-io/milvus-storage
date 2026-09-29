@@ -898,7 +898,7 @@ TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileForNonGcpProvider
   }
 }
 
-TEST(S3CrtBuildSupportTest, OpenInputFileRejectsUnsupportedNativeTransport) {
+TEST(S3CrtBuildSupportTest, UnsupportedNativeOptionsRetainSdkMetadataAndCrtReads) {
   ASSERT_STATUS_OK(EnsureS3InitializedForTest());
   auto options = S3Options::FromAccessKey("ak", "sk");
   options.cloud_provider = kCloudProviderAWS;
@@ -906,21 +906,34 @@ TEST(S3CrtBuildSupportTest, OpenInputFileRejectsUnsupportedNativeTransport) {
   options.scheme = "http";
   options.endpoint_override = "127.0.0.1:1";
   options.use_crt_async_reads = true;
-  // Custom retry providers have no native adapter. Opening must reject the
-  // unsupported configuration even when a caller supplies the file size.
+  // Custom retry providers have no native adapter. Existing APIs must still
+  // work through the SDK rather than failing the native capability check.
   options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
   ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
   const std::string path = "bucket/path/object.txt";
   arrow::fs::FileInfo info(path, arrow::fs::FileType::File);
   info.set_size(9);
-  EXPECT_TRUE(fs->OpenInputFile(path).status().IsNotImplemented());
-  EXPECT_TRUE(fs->OpenInputFile(info).status().IsNotImplemented());
-  EXPECT_TRUE(fs->OpenInputFileAsync(path).status().IsNotImplemented());
-  EXPECT_TRUE(fs->OpenInputFileAsync(info).status().IsNotImplemented());
-  EXPECT_TRUE(fs->GetFileInfoAsync(std::vector<std::string>{path}).status().IsNotImplemented());
+  ASSERT_AND_ASSIGN(auto crt_input, fs->OpenInputFile(path));
+  EXPECT_NE(dynamic_cast<NonBlockingRandomAccessFile*>(crt_input.get()), nullptr);
+  ASSERT_STATUS_OK(crt_input->Close());
+  ASSERT_AND_ASSIGN(crt_input, fs->OpenInputFile(info));
+  EXPECT_NE(dynamic_cast<NonBlockingRandomAccessFile*>(crt_input.get()), nullptr);
+  ASSERT_STATUS_OK(crt_input->Close());
+  for (auto opened : {fs->OpenInputFileAsync(path), fs->OpenInputFileAsync(info)}) {
+    EXPECT_TRUE(opened.is_finished());
+    ASSERT_STATUS_OK(opened.status());
+    ASSERT_STATUS_OK(opened.result().ValueOrDie()->Close());
+  }
+  // The unreachable endpoint must produce an SDK network error, not success
+  // or NotImplemented from the native transport capability check.
+  auto stat_status = fs->GetFileInfoAsync(std::vector<std::string>{path}).status();
+  EXPECT_FALSE(stat_status.ok());
+  EXPECT_FALSE(stat_status.IsNotImplemented());
   arrow::fs::FileSelector selector;
   selector.base_dir = "bucket";
-  EXPECT_TRUE(fs->GetFileInfoGenerator(selector)().status().IsNotImplemented());
+  auto list_status = fs->GetFileInfoGenerator(selector)().status();
+  EXPECT_FALSE(list_status.ok());
+  EXPECT_FALSE(list_status.IsNotImplemented());
 
   options.use_crt_async_reads = false;
   ASSERT_AND_ASSIGN(auto sdk_fs, S3FileSystem::Make(options));
@@ -1195,6 +1208,66 @@ TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileForGcpIam) {
   ASSERT_AND_ASSIGN(auto sdk_fs, S3FileSystem::Make(options));
   ASSERT_AND_ASSIGN(auto sdk_file, sdk_fs->OpenInputFile("bucket/path/object.txt"));
   EXPECT_EQ(dynamic_cast<milvus_storage::NonBlockingRandomAccessFile*>(sdk_file.get()), nullptr);
+}
+
+TEST(S3CrtBuildSupportTest, GcpHmacConditionalWriteKeepsHttpDelegatorSigning) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "Test requires POSIX process APIs.";
+#else
+  const auto original_death_test_style = GTEST_FLAG_GET(death_test_style);
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const auto run_child = []() -> int {
+    namespace http = boost::beast::http;
+    using Tcp = boost::asio::ip::tcp;
+    boost::asio::io_context server_context;
+    Tcp::acceptor acceptor(server_context, {boost::asio::ip::address_v4::loopback(), 0});
+    ArrowFileSystemConfig config;
+    config.storage_type = "remote";
+    config.cloud_provider = kCloudProviderGCP;
+    config.address = "127.0.0.1:" + std::to_string(acceptor.local_endpoint().port());
+    config.bucket_name = "test-bucket";
+    config.region = "auto";
+    config.access_key_id = "test-hmac-key";
+    config.access_key_value = "test-hmac-secret";
+    config.s3_crt_async_read = true;
+    auto result = GcpFileSystemProducer(config).Make();
+    if (!result.ok()) {
+      std::cerr << result.status() << std::endl;
+      return 1;
+    }
+    auto fs = std::make_shared<FileSystemProxy>(config.bucket_name, *result);
+    auto output = fs->OpenConditionalOutputStream("object.txt", nullptr);
+    if (!output.ok() || !(*output)->Write("payload", 7).ok())
+      return 2;
+    // The SDK close may block; receive the request while it runs on a worker.
+    auto close = std::async(std::launch::async, [stream = *output] { return stream->Close(); });
+    Tcp::socket socket(server_context);
+    acceptor.accept(socket);
+    boost::beast::flat_buffer buffer;
+    http::request<http::string_body> request;
+    http::read(socket, buffer, request);
+    const std::string auth(request[http::field::authorization]);
+    const bool signed_by_google =
+        auth.starts_with("GOOG4-HMAC-SHA256 ") && auth.find("x-goog-if-generation-match") != std::string::npos;
+    const bool correct_request = request.method() == http::verb::put && request.target() == "/test-bucket/object.txt" &&
+                                 request.body() == "payload" && request["x-goog-if-generation-match"] == "0";
+    http::response<http::empty_body> response{http::status::ok, request.version()};
+    response.set(http::field::etag, "\"test-etag\"");
+    response.content_length(0);
+    response.keep_alive(false);
+    http::write(socket, response);
+    socket.close();
+    auto status = close.get();
+    if (!status.ok() || !signed_by_google || !correct_request) {
+      std::cerr << status << " google_signature=" << signed_by_google << " correct_request=" << correct_request
+                << std::endl;
+      return 3;
+    }
+    return 0;
+  };
+  EXPECT_EXIT((::alarm(20), ::_exit(run_child())), ::testing::ExitedWithCode(0), "");
+  GTEST_FLAG_SET(death_test_style, original_death_test_style);
+#endif
 }
 
 TEST(S3CrtBuildSupportTest, GcpIamBearerReachesCrtRangeGetAndHead) {

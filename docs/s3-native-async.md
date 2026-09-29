@@ -20,13 +20,14 @@ NativeS3Operations helper implements metadata and listing over NativeS3Transport
 FileSystemProxy applies its existing subtree prefix. Batch
 stat overrides Arrow's existing virtual API; single-path queries pass a one-element
 vector. Listing reuses GetFileInfoGenerator.
-Existing CRT reads, metadata caches and file objects are reused. AWS CRT input files
-require native transport at initialization; unsupported configurations fail to open
-with NotImplemented. GCP retains the upstream CRT input path and SDK-backed metadata
-requests, including IAM Bearer headers; these metadata requests do not have the
-native nonblocking guarantee provided by this PR's AWS path.
-Unsupported native metadata and listing operations return NotImplemented. The
-existing SDK input path remains available when CRT reads are disabled. Both CRT
+Existing CRT reads, metadata caches and file objects are reused. When the native
+transport is unavailable, existing CRT input files retain SDK-backed metadata
+requests, and batch stat/listing retain their SDK executor paths. This includes
+GCP, OSS, COS and OBS, and configurations with CRT disabled or options requiring
+SDK hooks. These paths preserve compatibility without a native nonblocking
+guarantee. GCP writes retain the HTTP delegator's GOOG4 conditional-write signing;
+IAM Bearer headers are injected by the HTTP request factory. The existing SDK
+input path remains available when CRT reads are disabled. Both CRT
 and SDK input factories initialize local handles without network I/O. Arrow's
 async open overrides return an already-completed Future without scheduling work.
 
@@ -97,7 +98,8 @@ callbacks before releasing the AWS SDK.
 
 The transport supports AWS/MinIO with explicit, anonymous or native default-chain
 credentials. Explicit AssumeRole/WebIdentity settings, custom C++ credential/retry
-providers and explicit proxies need adapters and are rejected. Credentials may
+providers and explicit proxies use the existing SDK paths; native support would
+require adapters. Credentials may
 read configuration during setup. Metadata responses are capped at 16 MiB.
 
 Requests make one attempt. A lost mutation response can follow a successful write;

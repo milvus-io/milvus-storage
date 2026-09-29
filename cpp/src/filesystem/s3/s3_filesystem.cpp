@@ -2965,9 +2965,6 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
 
 #ifdef WITH_CRT
     if (use_crt_async_reads_) {
-      if (options().cloud_provider != kCloudProviderGCP) {
-        ARROW_RETURN_NOT_OK(native_operations_.status());
-      }
       auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, kNoSize,
                                                       native_operations_.ok() ? *native_operations_ : nullptr);
       ARROW_RETURN_NOT_OK(ptr->Init());
@@ -2995,9 +2992,6 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
 
 #ifdef WITH_CRT
     if (use_crt_async_reads_) {
-      if (options().cloud_provider != kCloudProviderGCP) {
-        ARROW_RETURN_NOT_OK(native_operations_.status());
-      }
       auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, info.size(),
                                                       native_operations_.ok() ? *native_operations_ : nullptr);
       ARROW_RETURN_NOT_OK(ptr->Init());
@@ -3124,12 +3118,11 @@ arrow::Result<FileInfoVector> S3FileSystem::GetFileInfo(const FileSelector& sele
 
 FileInfoGenerator S3FileSystem::GetFileInfoGenerator(const FileSelector& select) {
 #ifdef WITH_CRT
-  if (!impl_->native_operations_.ok())
-    return arrow::MakeFailingGenerator<FileInfoVector>(impl_->native_operations_.status());
-  return (*impl_->native_operations_)->GetFileInfoGenerator(select);
-#else
-  return impl_->GetFileInfoGenerator(select);
+  if (impl_->native_operations_.ok())
+    return (*impl_->native_operations_)->GetFileInfoGenerator(select);
 #endif
+  // Provider-specific signing and unsupported native options retain the SDK path.
+  return impl_->GetFileInfoGenerator(select);
 }
 
 arrow::Status S3FileSystem::CreateDir(const std::string& s, bool recursive) {
@@ -3341,7 +3334,8 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenOutput
 
 arrow::Future<arrow::fs::FileInfoVector> S3FileSystem::GetFileInfoAsync(const std::vector<std::string>& paths) {
 #ifdef WITH_CRT
-  ARROW_RETURN_NOT_OK(impl_->native_operations_.status());
+  if (!impl_->native_operations_.ok())
+    return arrow::fs::FileSystem::GetFileInfoAsync(paths);
   auto infos = std::make_shared<arrow::fs::FileInfoVector>();
   infos->reserve(paths.size());
   auto result = arrow::Future<>::MakeFinished();

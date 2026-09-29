@@ -123,6 +123,47 @@ TEST_F(NativeS3Test, SameInstanceSupportsSyncAndArrowAsyncCalls) {
   EXPECT_EQ(nested_info.path(), "a");
 }
 
+TEST_F(NativeS3Test, UnsupportedNativeProvidersKeepExistingFilesystemOperations) {
+  // The fixture checks routing and results, not real cloud authentication.
+  for (const auto* provider : {"gcp", "aliyun", "tencent", "huawei", "aws"}) {
+    for (const bool crt_reads : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << "provider=" << provider << " crt=" << crt_reads);
+      auto options = options_;
+      options.cloud_provider = provider;
+      options.use_crt_async_reads = crt_reads;
+      ASSERT_OK_AND_ASSIGN(auto s3, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
+      auto fs = std::make_shared<FileSystemProxy>(prefix_, s3);
+      ASSERT_OK_AND_ASSIGN(auto infos, Await(fs->GetFileInfoAsync({"hello #?+% 中文", "missing"})));
+      ASSERT_EQ(infos.size(), 2);
+      EXPECT_EQ(infos[0].size(), 6);
+      EXPECT_EQ(infos[1].type(), arrow::fs::FileType::NotFound);
+
+      arrow::fs::FileSelector selector;
+      selector.base_dir = "pages";
+      auto generator = fs->GetFileInfoGenerator(selector);
+      size_t count = 0;
+      for (;;) {
+        ASSERT_OK_AND_ASSIGN(auto page, Await(generator()));
+        if (page.empty())
+          break;
+        count += page.size();
+      }
+      EXPECT_EQ(count, 5);
+
+      ASSERT_OK_AND_ASSIGN(auto input, fs->OpenInputFile("hello #?+% 中文"));
+      ASSERT_OK_AND_ASSIGN(auto metadata, Await(input->ReadMetadataAsync({})));
+      EXPECT_NE(metadata, nullptr);
+      ASSERT_OK_AND_ASSIGN(auto data, Await(input->ReadAsync({}, 0, 6)));
+      EXPECT_EQ(data->ToString(), "abcdef");
+      ASSERT_OK(input->Close());
+      ASSERT_OK_AND_ASSIGN(input, fs->OpenInputFile(infos[0]));
+      ASSERT_OK_AND_ASSIGN(data, Await(input->ReadAsync({}, 1, 3)));
+      EXPECT_EQ(data->ToString(), "bcd");
+      ASSERT_OK(input->Close());
+    }
+  }
+}
+
 TEST_F(NativeS3Test, FactoryAndCacheReturnTheSameSyncAsyncHandle) {
   ArrowFileSystemConfig config;
   config.storage_type = "remote";
