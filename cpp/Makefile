@@ -67,11 +67,11 @@ python-lib:
 	${CONAN_BASE} \
 	-o "&:with_ut=False" -o "&:with_benchmark=False" -o "&:with_asan=False" -o "&:with_jni=False" -o "&:with_jemalloc=False" \
 	-o "&:with_python_binding=True" -o "&:with_fiu=${with_fiu}" \
-	-o "&:with_tools=${with_tools}" -o "&:with_crt=${with_crt}" -o "&:with_talon=${with_talon}" && \
+	-o "&:with_tools=${with_tools}" -o "&:with_crt=${with_crt}" && \
 	conan build .. ${CONAN_SETTINGS} \
 	-o "&:with_ut=False" -o "&:with_benchmark=False" -o "&:with_asan=False" -o "&:with_jni=False" -o "&:with_jemalloc=False" \
 	-o "&:with_python_binding=True" -o "&:with_fiu=${with_fiu}" \
-	-o "&:with_tools=${with_tools}" -o "&:with_crt=${with_crt}" -o "&:with_talon=${with_talon}"
+	-o "&:with_tools=${with_tools}" -o "&:with_crt=${with_crt}"
 
 java-lib:
 	@echo "Building library for Java/Scala dependencies..."
