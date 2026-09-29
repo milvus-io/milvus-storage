@@ -19,7 +19,7 @@ else
         docker run -d -p 9000:9000 -p 9001:9001 --name minio \
           -e "MINIO_ACCESS_KEY=minioadmin" \
           -e "MINIO_SECRET_KEY=minioadmin" \
-          quay.io/minio/minio server /data --console-address ":9001"
+          milvusdb/minio:RELEASE.2024-12-18T13-15-44Z server /data --console-address ":9001"
     fi
 fi
 
