@@ -10,10 +10,6 @@ inputs:
     description: Conan version used to build the native library
     required: false
     default: '2.25.1'
-  with-talon:
-    description: Build the native library with Talon support
-    required: false
-    default: 'False'
   with-tools:
     description: Build loon for external-table fixtures
     required: false
@@ -72,7 +68,7 @@ runs:
     - name: Build C++ library for Python
       shell: bash
       working-directory: ./cpp
-      run: WITH_CRT=True WITH_TOOLS=${{ inputs.with-tools }} WITH_TALON=${{ inputs.with-talon }} make python-lib
+      run: WITH_CRT=True WITH_TOOLS=${{ inputs.with-tools }} make python-lib
 
     - name: Verify CRT is available to Python tests
       shell: bash

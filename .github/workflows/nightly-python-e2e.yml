@@ -136,10 +136,6 @@ jobs:
         uses: ./.github/actions/setup-python-test
         with:
           python-version: '3.11'
-          with-talon: 'True'
-
-      - name: Verify Talon is available to Python tests
-        run: grep -Eq '^WITH_TALON:BOOL=ON$' cpp/build/Release/CMakeCache.txt
 
       - name: Install integration test dependencies
         run: uv pip install --python ./python/.venv/bin/python -r ./tests/requirements.txt

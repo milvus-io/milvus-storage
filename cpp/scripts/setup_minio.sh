@@ -16,10 +16,17 @@ else
         fi
     else
         echo "Creating and starting new minio container..."
+        # milvusdb/minio:RELEASE.2024-12-18T13-15-44Z requires Content-MD5 for
+        # DeleteObjects, but our AWS SDK sends CRC checksums, breaking test cleanup.
+        # Pin Chainguard's MinIO RELEASE.2026-09-22T19-25-18Z for amd64 and arm64.
+        # /data matches the server data path below; MinIO does not require this name.
+        # The image pre-creates .minio.sys there. A volume avoids overlayfs EXDEV
+        # errors when MinIO renames those directories during startup.
         docker run -d -p 9000:9000 -p 9001:9001 --name minio \
-          -e "MINIO_ACCESS_KEY=minioadmin" \
-          -e "MINIO_SECRET_KEY=minioadmin" \
-          quay.io/minio/minio server /data --console-address ":9001"
+          -v /data \
+          -e "MINIO_ROOT_USER=minioadmin" \
+          -e "MINIO_ROOT_PASSWORD=minioadmin" \
+          cgr.dev/chainguard/minio:latest@sha256:71674988a1c7ddd5724928633199152b11e4ddefd6c6ce2d60772ff4a8f22ca9 server /data --console-address ":9001"
     fi
 fi
 
