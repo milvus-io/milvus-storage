@@ -14,6 +14,7 @@
 
 #include "milvus-storage/format/lance/lance_format.h"
 
+#include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/lance/lance_common.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -86,6 +87,39 @@ arrow::Result<std::shared_ptr<FormatReader>> LanceFormat::create_reader(
                                                           needed_columns, dataset_version);
   ARROW_RETURN_NOT_OK(reader->open());
   return reader;
+}
+
+folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> LanceFormat::create_reader_async(
+    const std::shared_ptr<arrow::Schema>& read_schema,
+    const api::ColumnGroupFile& file,
+    const api::Properties& properties,
+    const std::vector<std::string>& needed_columns,
+    const std::function<std::string(const std::string&)>& /*key_retriever*/) {
+  // Match PlainFormat's async factory: prepare the reader on the caller's
+  // executor, then let the native Rust runtime perform the open I/O.
+  return folly::makeSemiFuture().deferValue(
+      [read_schema, file, properties,
+       needed_columns](folly::Unit) -> folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> {
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto parsed_uri, lance::ParseLanceUri(file.path));
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, parsed_uri.first));
+        uint64_t dataset_version = 0;
+        const auto version_it = file.properties.find(lance::kDatasetVersionProperty);
+        if (version_it != file.properties.end()) {
+          const auto [valid, version] = api::convert::convertFunc<uint64_t>(version_it->second);
+          if (!valid) {
+            return folly::makeSemiFuture(arrow::Result<std::shared_ptr<FormatReader>>(arrow::Status::Invalid(
+                "Invalid Lance dataset version for file ", file.path, ": ", version_it->second)));
+          }
+          dataset_version = version;
+        }
+        auto reader = std::make_shared<lance::LanceTableReader>(fs, parsed_uri.first, parsed_uri.second, read_schema,
+                                                                properties, needed_columns, dataset_version);
+        return reader->open_async().deferValue(
+            [reader = std::move(reader)](arrow::Status status) -> arrow::Result<std::shared_ptr<FormatReader>> {
+              ARROW_RETURN_NOT_OK(status);
+              return reader;
+            });
+      });
 }
 
 arrow::Result<std::unique_ptr<FormatWriter>> LanceFormat::create_writer(

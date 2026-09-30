@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -190,7 +191,7 @@ class InjectedFailureFileSystem final : public arrow::fs::SubTreeFileSystem {
   int64_t minimum_failure_size_;
 };
 
-#ifdef WITH_CRT
+#if defined(WITH_CRT) || defined(WITH_TALON)
 
 thread_local bool async_completion_active = false;
 
@@ -234,14 +235,20 @@ class AsyncReaderLifecycleState {
     cv_.notify_all();
   }
 
+  size_t PauseCompletions() {
+    std::lock_guard lock(mutex_);
+    allow_completions_ = false;
+    return submitted_reads_;
+  }
+
   void WaitForCompletionPermission() {
     std::unique_lock lock(mutex_);
     cv_.wait(lock, [this] { return allow_completions_; });
   }
 
-  bool WaitForSubmitted(std::chrono::seconds timeout) {
+  bool WaitForSubmitted(std::chrono::seconds timeout, size_t previous_reads = 0) {
     std::unique_lock lock(mutex_);
-    return cv_.wait_for(lock, timeout, [this] { return submitted_reads_ != 0; });
+    return cv_.wait_for(lock, timeout, [this, previous_reads] { return submitted_reads_ > previous_reads; });
   }
 
   bool WaitForAllCompletedAndDestroyed(std::chrono::seconds timeout) {
@@ -385,7 +392,7 @@ class CallbackThreadFileSystem final : public arrow::fs::SubTreeFileSystem {
   std::shared_ptr<AsyncReaderLifecycleState> state_;
 };
 
-#endif  // WITH_CRT
+#endif  // WITH_CRT || WITH_TALON
 
 }  // namespace
 
@@ -636,6 +643,18 @@ TEST_F(LanceBasicTest, MaterializedReadsTranslateDeferredErrors) {
     remaining_failures->store(1'000, std::memory_order_relaxed);
     expect_timeout(reader->take(take_indices).status());
   }
+  {
+    SCOPED_TRACE("read_with_range_async");
+    ASSERT_AND_ASSIGN(auto reader, open_reader());
+    remaining_failures->store(1'000, std::memory_order_relaxed);
+    expect_timeout(std::move(reader->read_with_range_async(0, kRows)).get().status());
+  }
+  {
+    SCOPED_TRACE("take_async");
+    ASSERT_AND_ASSIGN(auto reader, open_reader());
+    remaining_failures->store(1'000, std::memory_order_relaxed);
+    expect_timeout(std::move(reader->take_async(take_indices)).get().status());
+  }
 
   failing_fs.reset();
 
@@ -656,7 +675,248 @@ TEST_F(LanceBasicTest, MaterializedReadsTranslateDeferredErrors) {
       << permission_result.status().ToString();
 }
 
-#ifdef WITH_CRT
+#if defined(WITH_CRT) || defined(WITH_TALON)
+
+TEST_F(LanceBasicTest, AsyncOpenReturnsBeforeIoCompletes) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "This regression uses an injected local filesystem.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer.Close());
+  ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(file.path));
+  auto lifecycle = std::make_shared<AsyncReaderLifecycleState>();
+  auto filesystem = std::make_shared<CallbackThreadFileSystem>(fs_, lifecycle);
+  auto reader =
+      std::make_shared<LanceTableReader>(filesystem, parsed_uri.first, parsed_uri.second, schema_, properties_);
+
+  std::promise<void> returned;
+  auto invocation = returned.get_future();
+  auto completion = std::async(std::launch::async, [&]() {
+    auto future = reader->open_async();
+    returned.set_value();
+    return std::move(future).get();
+  });
+  const bool submitted = lifecycle->WaitForSubmitted(std::chrono::seconds(5));
+  const bool nonblocking = invocation.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+  const bool pending = completion.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout;
+  // Always release the I/O gate before assertions or future destruction.
+  lifecycle->AllowCompletions();
+  const auto status = completion.get();
+  lifecycle->JoinWorkers();
+
+  EXPECT_TRUE(submitted);
+  EXPECT_TRUE(nonblocking) << "open_async blocked its caller waiting for filesystem I/O";
+  EXPECT_TRUE(pending);
+  ASSERT_STATUS_OK(status);
+  ASSERT_AND_ASSIGN(auto chunk, reader->get_chunk(0));
+  EXPECT_TRUE(chunk->Equals(*test_batch_));
+  reader.reset();
+  filesystem.reset();
+  lifecycle->JoinWorkers();
+}
+
+TEST_F(LanceBasicTest, AsyncRangeMaterializesBeforeCompletionAndRetainsReader) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "This regression uses an injected local filesystem.";
+  }
+
+  constexpr int64_t kRows = 32'768;
+  ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, 0, false, kRows));
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(batch));
+  ASSERT_AND_ASSIGN(auto file, writer.Close());
+  ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(file.path));
+  auto lifecycle = std::make_shared<AsyncReaderLifecycleState>();
+  lifecycle->AllowCompletions();
+  auto filesystem = std::make_shared<CallbackThreadFileSystem>(fs_, lifecycle);
+  auto reader =
+      std::make_shared<LanceTableReader>(filesystem, parsed_uri.first, parsed_uri.second, schema_, properties_);
+  ASSERT_STATUS_OK(reader->open());
+  lifecycle->JoinWorkers();
+  const auto previous_reads = lifecycle->PauseCompletions();
+
+  std::promise<void> returned;
+  auto invocation = returned.get_future();
+  auto completion = std::async(std::launch::async, [&]() {
+    auto future = reader->read_with_range_async(0, kRows);
+    returned.set_value();
+    return std::move(future).get();
+  });
+  const bool nonblocking = invocation.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+  const bool submitted = lifecycle->WaitForSubmitted(std::chrono::seconds(5), previous_reads);
+  const bool pending = completion.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout;
+  // Once invocation has returned, only the async operation needs the reader.
+  if (nonblocking) {
+    reader.reset();
+  }
+  lifecycle->AllowCompletions();
+  auto result = completion.get();
+  lifecycle->JoinWorkers();
+  EXPECT_TRUE(nonblocking) << "read_with_range_async blocked its caller";
+  EXPECT_TRUE(submitted);
+  EXPECT_TRUE(pending) << "Range future completed before its data was materialized";
+  ASSERT_TRUE(result.ok()) << result.status().ToString();
+  auto batch_reader = std::move(result).ValueOrDie();
+  reader.reset();
+
+  lifecycle->PauseCompletions();
+  auto consumption =
+      std::async(std::launch::async, [&]() { return arrow::Table::FromRecordBatchReader(batch_reader.get()); });
+  const bool materialized = consumption.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+  lifecycle->AllowCompletions();
+  auto table_result = consumption.get();
+  lifecycle->JoinWorkers();
+  EXPECT_TRUE(materialized) << "Consuming the completed async range performed blocking I/O";
+  ASSERT_TRUE(table_result.ok()) << table_result.status().ToString();
+  ASSERT_AND_ASSIGN(auto actual, table_result.ValueOrDie()->CombineChunksToBatch());
+  EXPECT_TRUE(actual->Equals(*batch));
+  batch_reader.reset();
+  filesystem.reset();
+  lifecycle->JoinWorkers();
+}
+
+TEST_F(LanceBasicTest, AsyncTakeRetainsReaderUntilCompletion) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "This regression uses an injected local filesystem.";
+  }
+
+  ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, 0, false, 32'768));
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(batch));
+  ASSERT_AND_ASSIGN(auto file, writer.Close());
+  ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(file.path));
+  auto lifecycle = std::make_shared<AsyncReaderLifecycleState>();
+  lifecycle->AllowCompletions();
+  auto filesystem = std::make_shared<CallbackThreadFileSystem>(fs_, lifecycle);
+  auto reader =
+      std::make_shared<LanceTableReader>(filesystem, parsed_uri.first, parsed_uri.second, schema_, properties_);
+  ASSERT_STATUS_OK(reader->open());
+  lifecycle->JoinWorkers();
+  const auto previous_reads = lifecycle->PauseCompletions();
+
+  auto future = reader->take_async({0, 1, 2});
+  std::weak_ptr<LanceTableReader> weak_reader = reader;
+  reader.reset();
+  const bool submitted = lifecycle->WaitForSubmitted(std::chrono::seconds(5), previous_reads);
+  const bool pending = !future.isReady();
+  const bool retained = !weak_reader.expired();
+  // Release the I/O gate before assertions or future destruction.
+  lifecycle->AllowCompletions();
+  auto result = std::move(future).get();
+  lifecycle->JoinWorkers();
+
+  EXPECT_TRUE(submitted);
+  EXPECT_TRUE(pending);
+  EXPECT_TRUE(retained);
+  ASSERT_TRUE(result.ok()) << result.status().ToString();
+  ASSERT_AND_ASSIGN(auto actual, result.ValueOrDie()->CombineChunksToBatch());
+  EXPECT_TRUE(actual->Equals(*batch->Slice(0, 3), true));
+}
+
+TEST_F(LanceBasicTest, TimedOutAsyncOpenDoesNotStrandDatasetCache) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "This regression uses an injected local filesystem.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer.Close());
+  ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(file.path));
+  auto lifecycle = std::make_shared<AsyncReaderLifecycleState>();
+  auto filesystem = std::make_shared<CallbackThreadFileSystem>(fs_, lifecycle);
+  // Pin the first write's version so the gated I/O belongs to the dataset
+  // singleflight, rather than the preceding latest-version lookup.
+  auto reader = std::make_shared<LanceTableReader>(filesystem, parsed_uri.first, parsed_uri.second, schema_,
+                                                   properties_, std::vector<std::string>{}, 1);
+  auto timed_open = std::async(std::launch::async, [reader]() {
+    try {
+      (void)std::move(reader->open_async()).get(std::chrono::milliseconds(200));
+      return false;
+    } catch (const folly::FutureTimeout&) {
+      return true;
+    }
+  });
+  const bool submitted = lifecycle->WaitForSubmitted(std::chrono::seconds(5));
+  const bool finished = timed_open.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+  lifecycle->AllowCompletions();
+  const bool timed_out = timed_open.get();
+  reader.reset();
+  lifecycle->JoinWorkers();
+  EXPECT_TRUE(submitted);
+  EXPECT_TRUE(finished);
+  EXPECT_TRUE(timed_out);
+
+  auto status = arrow::Status::Cancelled("Open has not been retried");
+  for (int attempt = 0; attempt < 2 && status.IsCancelled(); ++attempt) {
+    reader = std::make_shared<LanceTableReader>(filesystem, parsed_uri.first, parsed_uri.second, schema_, properties_,
+                                                std::vector<std::string>{}, 1);
+    try {
+      status = std::move(reader->open_async()).get(std::chrono::seconds(5));
+    } catch (const folly::FutureTimeout&) {
+      status = arrow::Status::IOError("A timed-out open stranded the dataset cache singleflight");
+    }
+  }
+  reader.reset();
+  filesystem.reset();
+  lifecycle->JoinWorkers();
+  ASSERT_STATUS_OK(status);
+}
+
+TEST_F(LanceBasicTest, AsyncDatasetCacheSurvivesStaticDestruction) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "This regression uses an injected local filesystem.";
+  }
+
+  const auto original_death_test_style = GTEST_FLAG_GET(death_test_style);
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(([&] {
+                LanceTableWriter writer(base_path_, schema_, properties_);
+                ASSERT_STATUS_OK(writer.Write(test_batch_));
+                ASSERT_AND_ASSIGN(auto file, writer.Close());
+                ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(file.path));
+
+                struct ExitState {
+                  std::shared_ptr<AsyncReaderLifecycleState> lifecycle;
+                  folly::Future<arrow::Status> completion = folly::Future<arrow::Status>::makeEmpty();
+                };
+                // The child keeps this state alive until its exit handler finishes.
+                static auto* exit_state = new ExitState;
+                exit_state->lifecycle = std::make_shared<AsyncReaderLifecycleState>();
+                auto filesystem = std::make_shared<CallbackThreadFileSystem>(fs_, exit_state->lifecycle);
+                auto reader = std::make_shared<LanceTableReader>(filesystem, parsed_uri.first, parsed_uri.second,
+                                                                 schema_, properties_, std::vector<std::string>{}, 1);
+
+                // Register before the first cache access: exit handlers run in reverse
+                // order, so a destructible cache would be gone before this releases I/O.
+                ASSERT_EQ(std::atexit([] {
+                            exit_state->lifecycle->AllowCompletions();
+                            int code = 1;
+                            try {
+                              const auto status = std::move(exit_state->completion).get(std::chrono::seconds(5));
+                              if (status.ok()) {
+                                code = 0;
+                              } else {
+                                std::cerr << status.ToString() << '\n';
+                              }
+                            } catch (const std::exception& e) {
+                              std::cerr << e.what() << '\n';
+                            }
+                            std::_Exit(code);
+                          }),
+                          0);
+
+                // Pin version 1 so the gated read starts after the cache is initialized.
+                exit_state->completion = std::move(reader->open_async()).toUnsafeFuture();
+                ASSERT_TRUE(exit_state->lifecycle->WaitForSubmitted(std::chrono::seconds(5)));
+                ASSERT_FALSE(exit_state->completion.isReady());
+                reader.reset();
+                std::exit(0);
+              })(),
+              ::testing::ExitedWithCode(0), "");
+  GTEST_FLAG_SET(death_test_style, original_death_test_style);
+}
 
 TEST_F(LanceBasicTest, AsyncReaderIsReleasedOutsideCrtCompletionCallback) {
   if (IsCloudEnv()) {
@@ -688,6 +948,9 @@ TEST_F(LanceBasicTest, AsyncReaderIsReleasedOutsideCrtCompletionCallback) {
   auto dataset_result = open_future.get();
   lifecycle->JoinWorkers();
   ASSERT_TRUE(dataset_result.ok()) << dataset_result.status().ToString();
+  // The dataset owns cached reader handles until it is released.
+  auto dataset = std::move(dataset_result).ValueOrDie();
+  dataset.reset();
   ASSERT_TRUE(lifecycle->WaitForAllCompletedAndDestroyed(std::chrono::seconds(5)))
       << "The asynchronous readers were not all completed and destroyed";
   EXPECT_FALSE(lifecycle->close_in_completion())
@@ -698,7 +961,223 @@ TEST_F(LanceBasicTest, AsyncReaderIsReleasedOutsideCrtCompletionCallback) {
          "released outside the callback to avoid destruction deadlock";
 }
 
-#endif  // WITH_CRT
+#endif  // WITH_CRT || WITH_TALON
+
+TEST(LanceReaderAsyncTest, SupportsAsyncMetadataCache) {
+  EXPECT_TRUE((FormatReaderWithAsyncMetadata<LanceTableReader>));
+}
+
+TEST(LanceReaderAsyncTest, FailedBridgeSubmissionDoesNotInvokeCallback) {
+  int callbacks = 0;
+  const auto callback = [](void* context, uint64_t, const char*) { ++*static_cast<int*>(context); };
+  const auto open_status = BlockingDataset::OpenAsync("unused", nullptr, {}, 1, callback, &callbacks);
+  EXPECT_TRUE(open_status.IsInvalid()) << open_status.ToString();
+  const auto version_status = BlockingDataset::ResolveLatestVersionAsync("unused", nullptr, {}, callback, &callbacks);
+  EXPECT_TRUE(version_status.IsInvalid()) << version_status.ToString();
+  EXPECT_EQ(callbacks, 0);
+}
+
+TEST_F(LanceBasicTest, AsyncMetadataReadersSurviveCacheReleaseAcrossFragments) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "This regression uses the local Lance fixture.";
+  }
+
+  for (int fragment = 0; fragment < 2; ++fragment) {
+    LanceTableWriter writer(base_path_, schema_, properties_);
+    ASSERT_STATUS_OK(writer.Write(test_batch_));
+    ASSERT_AND_ASSIGN(auto file, writer.Close());
+    EXPECT_EQ(file.end_index, test_batch_->num_rows());
+  }
+  LanceFormat format;
+  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, properties_));
+  ASSERT_EQ(files.size(), 2);
+
+  auto cache = FormatReaderMetadataCache<LanceTableReader>::Make();
+  size_t metadata_loads = 0;
+  std::vector<folly::SemiFuture<arrow::Result<std::shared_ptr<LanceTableReader>>>> readers;
+  for (const auto& file : files) {
+    auto metadata_future = cache->get_or_open_async(LanceTableReader::MetaTrait::cache_key(file), [&]() {
+      ++metadata_loads;
+      return LanceTableReader::MetaTrait::load_metadata_async(file, properties_, nullptr);
+    });
+    ASSERT_AND_ASSIGN(auto metadata, std::move(metadata_future).get());
+    readers.emplace_back(
+        LanceTableReader::MetaTrait::create_from_metadata_async(metadata, file, nullptr, {"name", "id"}, ""));
+  }
+  EXPECT_EQ(metadata_loads, 1);
+  cache.reset();
+  FilesystemCache::getInstance().clean();
+
+  ASSERT_AND_ASSIGN(auto expected, test_batch_->SelectColumns({1, 0}));
+  for (auto& reader_future : readers) {
+    ASSERT_AND_ASSIGN(auto reader, std::move(reader_future).get());
+    auto range_future = reader->read_with_range_async(0, test_batch_->num_rows());
+    reader.reset();
+    ASSERT_AND_ASSIGN(auto batch_reader, std::move(range_future).get());
+    ASSERT_AND_ASSIGN(auto actual_table, arrow::Table::FromRecordBatchReader(batch_reader.get()));
+    ASSERT_AND_ASSIGN(auto actual, actual_table->CombineChunksToBatch());
+    EXPECT_TRUE(actual->Equals(*expected, true));
+  }
+}
+
+TEST_F(LanceBasicTest, ConcurrentAsyncMetadataCachesShareDatasetAcrossFragments) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "This regression uses the local Lance fixture.";
+  }
+
+  for (int fragment = 0; fragment < 2; ++fragment) {
+    LanceTableWriter writer(base_path_, schema_, properties_);
+    ASSERT_STATUS_OK(writer.Write(test_batch_));
+    ASSERT_AND_ASSIGN(auto file, writer.Close());
+    EXPECT_EQ(file.end_index, test_batch_->num_rows());
+  }
+  LanceFormat format;
+  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, properties_));
+  ASSERT_EQ(files.size(), 2);
+  const auto key = LanceTableReader::MetaTrait::cache_key(files[0]);
+  ASSERT_EQ(key, LanceTableReader::MetaTrait::cache_key(files[1]));
+
+  const auto first_cache = FormatReaderMetadataCache<LanceTableReader>::Make();
+  const auto second_cache = FormatReaderMetadataCache<LanceTableReader>::Make();
+  std::atomic<size_t> metadata_loads = 0;
+  constexpr size_t kReaders = 8;
+  std::barrier start(kReaders);
+  std::vector<std::future<arrow::Result<LanceTableReader::MetaTrait::MetadataPtr>>> futures;
+  for (size_t i = 0; i < kReaders; ++i) {
+    futures.emplace_back(std::async(std::launch::async, [&, i]() {
+      start.arrive_and_wait();
+      const auto& cache = i % 2 == 0 ? first_cache : second_cache;
+      const auto& file = files[(i / 2) % files.size()];
+      return std::move(cache->get_or_open_async(key,
+                                                [&]() {
+                                                  ++metadata_loads;
+                                                  return LanceTableReader::MetaTrait::load_metadata_async(
+                                                      file, properties_, nullptr);
+                                                }))
+          .get();
+    }));
+  }
+  std::vector<LanceTableReader::MetaTrait::MetadataPtr> metadata;
+  for (auto& future : futures) {
+    ASSERT_AND_ASSIGN(auto loaded, future.get());
+    metadata.emplace_back(std::move(loaded));
+  }
+  EXPECT_EQ(metadata_loads.load(), 2);
+  EXPECT_NE(metadata[0].get(), metadata[1].get());
+  for (size_t i = 0; i < metadata.size(); ++i) {
+    EXPECT_EQ(metadata[i].get(), metadata[i % 2].get());
+    EXPECT_EQ(metadata[i]->payload.dataset.get(), metadata[0]->payload.dataset.get());
+  }
+}
+
+TEST_F(LanceBasicTest, PublicAsyncReadersPreserveProjectionAndChunkOrderWithAndWithoutCache) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "This regression uses the local Lance fixture.";
+  }
+
+  const int64_t rows = test_batch_->num_rows();
+  ASSERT_AND_ASSIGN(auto second_batch, CreateTestData(schema_, rows, false, rows));
+  const std::vector<std::shared_ptr<arrow::RecordBatch>> batches = {test_batch_, second_batch};
+  for (const auto& batch : batches) {
+    LanceTableWriter writer(base_path_, schema_, properties_);
+    ASSERT_STATUS_OK(writer.Write(batch));
+    ASSERT_AND_ASSIGN(auto file, writer.Close());
+    EXPECT_EQ(file.end_index, rows);
+  }
+  LanceFormat format;
+  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, properties_));
+  ASSERT_EQ(files.size(), 2);
+  auto column_group = std::make_shared<api::ColumnGroup>();
+  for (const auto& field : schema_->fields()) {
+    column_group->columns.emplace_back(field->name());
+  }
+  column_group->format = LOON_FORMAT_LANCE_TABLE;
+  column_group->files = files;
+  auto column_groups = std::make_shared<api::ColumnGroups>();
+  column_groups->emplace_back(std::move(column_group));
+
+  for (const auto* cache_enabled : {"true", "false"}) {
+    SCOPED_TRACE(cache_enabled);
+    ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, cache_enabled), std::nullopt);
+    auto reader = api::Reader::create(column_groups, schema_, nullptr, properties_);
+    for (const std::vector<int>& projection : {std::vector<int>{0}, std::vector<int>{1, 0}}) {
+      auto names = std::make_shared<std::vector<std::string>>();
+      for (const auto column : projection) {
+        names->emplace_back(schema_->field(column)->name());
+      }
+      ASSERT_AND_ASSIGN(auto chunk_reader, std::move(reader->get_chunk_reader_async(0, names)).get());
+      ASSERT_EQ(chunk_reader->total_number_of_chunks(), 2);
+      const std::vector<int64_t> indices = {1, 0, 1};
+      ASSERT_AND_ASSIGN(auto chunks, std::move(chunk_reader->get_chunks_async(indices, 2)).get());
+      ASSERT_EQ(chunks.size(), indices.size());
+      for (size_t i = 0; i < chunks.size(); ++i) {
+        ASSERT_AND_ASSIGN(auto expected, batches[indices[i]]->SelectColumns(projection));
+        EXPECT_TRUE(chunks[i]->Equals(*expected, true));
+      }
+    }
+    ASSERT_AND_ASSIGN(auto table, std::move(reader->take_async({0, rows, rows + 1}, 2)).get());
+    ASSERT_AND_ASSIGN(auto result, table->CombineChunksToBatch());
+    ASSERT_EQ(result->num_rows(), 3);
+    const auto ids = std::static_pointer_cast<arrow::Int64Array>(result->column(0));
+    EXPECT_EQ(ids->Value(0), 0);
+    EXPECT_EQ(ids->Value(1), rows);
+    EXPECT_EQ(ids->Value(2), rows + 1);
+  }
+}
+
+TEST_F(LanceBasicTest, AsyncRangeAndTakePreserveProjectionMetadataAndDeletedRows) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "This regression uses the local Lance fixture.";
+  }
+
+  auto schema = schema_->WithMetadata(arrow::key_value_metadata({"dataset-purpose"}, {"async-regression"}));
+  auto batch = arrow::RecordBatch::Make(schema, test_batch_->num_rows(), test_batch_->columns());
+  LanceTableWriter writer(base_path_, schema, properties_);
+  ASSERT_STATUS_OK(writer.Write(batch));
+  ASSERT_AND_ASSIGN(auto file, writer.Close());
+  ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(file.path));
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_AND_ASSIGN(auto options, ToWriterOptions(fs_config));
+  ASSERT_STATUS_OK(BlockingDataset::DeleteRows(ToStandardLanceUri(parsed_uri.first), "id < 20", options));
+
+  auto reader = std::make_shared<LanceTableReader>(fs_, parsed_uri.first, parsed_uri.second, nullptr, properties_,
+                                                   std::vector<std::string>{"name", "id"});
+  ASSERT_STATUS_OK(std::move(reader->open_async()).get());
+  ASSERT_AND_ASSIGN(auto groups, reader->get_row_group_infos());
+  ASSERT_FALSE(groups.empty());
+  EXPECT_EQ(groups.back().end_offset, batch->num_rows() - 20);
+
+  ASSERT_AND_ASSIGN(auto batch_reader, std::move(reader->read_with_range_async(3, 15)).get());
+  ASSERT_AND_ASSIGN(auto range_table, arrow::Table::FromRecordBatchReader(batch_reader.get()));
+  ASSERT_AND_ASSIGN(auto actual, range_table->CombineChunksToBatch());
+  ASSERT_AND_ASSIGN(auto expected, test_batch_->Slice(23, 12)->SelectColumns({1, 0}));
+  EXPECT_TRUE(actual->Equals(*expected, true));
+
+  std::vector<int64_t> rows(12);
+  std::iota(rows.begin(), rows.end(), 3);
+  ASSERT_AND_ASSIGN(auto taken, std::move(reader->take_async(rows)).get());
+  EXPECT_TRUE(taken->Equals(*range_table, true));
+
+  ASSERT_AND_ASSIGN(auto empty_reader, std::move(reader->read_with_range_async(5, 5)).get());
+  ASSERT_AND_ASSIGN(auto empty_table, arrow::Table::FromRecordBatchReader(empty_reader.get()));
+  EXPECT_EQ(empty_table->num_rows(), 0);
+  EXPECT_TRUE(empty_table->schema()->Equals(*range_table->schema(), true));
+  const auto inverted = std::move(reader->read_with_range_async(15, 3)).get();
+  EXPECT_TRUE(inverted.status().IsInvalid()) << inverted.status().ToString();
+  const uint64_t beyond_uint32 = static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) + 1;
+  const auto oversized = std::move(reader->read_with_range_async(0, beyond_uint32)).get();
+  EXPECT_TRUE(oversized.status().IsInvalid()) << oversized.status().ToString();
+
+  auto provided_schema = arrow::schema({schema->field(1), schema->field(0)}, schema->metadata());
+  auto explicit_schema_reader =
+      std::make_shared<LanceTableReader>(fs_, parsed_uri.first, parsed_uri.second, provided_schema, properties_);
+  ASSERT_STATUS_OK(std::move(explicit_schema_reader->open_async()).get());
+  ASSERT_AND_ASSIGN(auto nonempty, std::move(explicit_schema_reader->read_with_range_async(0, 1)).get());
+  ASSERT_AND_ASSIGN(auto empty, std::move(explicit_schema_reader->read_with_range_async(0, 0)).get());
+  EXPECT_TRUE(nonempty->schema()->Equals(*provided_schema, true));
+  EXPECT_TRUE(empty->schema()->Equals(*nonempty->schema(), true));
+}
 
 TEST_P(LanceRleStorageVersionTest, WritesAndReadsCustomerShapedRleData) {
   if (IsCloudEnv()) {
