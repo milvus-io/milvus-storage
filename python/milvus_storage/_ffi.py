@@ -539,10 +539,22 @@ _ffi.cdef(
         int64_t multi_part_upload_finished;
     } LoonFilesystemMetricsSnapshot;
 
-    LoonFFIResult loon_filesystem_get_metrics(FileSystemHandle handle,
-                                              LoonFilesystemMetricsSnapshot* out_metrics);
+    typedef struct LoonFilesystemMetricsSourceEntry {
+        char* display_key;
+        char* source;
+        LoonFilesystemMetricsSnapshot metrics;
+    } LoonFilesystemMetricsSourceEntry;
 
-    LoonFFIResult loon_filesystem_reset_metrics(FileSystemHandle handle);
+    typedef struct LoonFilesystemMetricsSources {
+        LoonFilesystemMetricsSourceEntry* entries;
+        uint32_t count;
+    } LoonFilesystemMetricsSources;
+
+    LoonFFIResult loon_filesystem_get_metrics_sources(
+        FileSystemHandle handle, LoonFilesystemMetricsSources* out_sources);
+    LoonFFIResult loon_filesystem_list_metrics_sources(
+        LoonFilesystemMetricsSources* out_sources);
+    void loon_filesystem_free_metrics_sources(LoonFilesystemMetricsSources* sources);
 
     // ==================== Fault Injection C Interface (ffi_fiu_c.h) ====================
     // Fault point key constants (exported from C library)

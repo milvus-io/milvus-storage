@@ -555,7 +555,7 @@ TEST_F(PackedIntegrationTest, ParquetPrebufferHoleSizeLimitReducesReadIOCountV2)
   if (!observable) {
     GTEST_SKIP() << "Filesystem does not expose metrics.";
   }
-  auto metrics = observable->GetMetrics();
+  auto metrics = observable->GetMetrics(kOriginMetricsSource);
   if (!metrics) {
     GTEST_SKIP() << "Filesystem metrics are unavailable.";
   }

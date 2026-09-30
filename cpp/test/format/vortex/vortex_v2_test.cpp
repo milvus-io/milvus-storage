@@ -337,7 +337,7 @@ TEST_F(VortexV2Test, TestInlineArrayNodeSubSegmentRead) {
   ASSERT_AND_ASSIGN(auto cloud_fs, GetFileSystem(properties_));
   auto observable = std::dynamic_pointer_cast<Observable>(cloud_fs);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics();
+  auto metrics = observable->GetMetrics(kOriginMetricsSource);
   ASSERT_NE(metrics, nullptr);
 
   // Build schema with a single FSB(512) column

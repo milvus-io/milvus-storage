@@ -74,8 +74,7 @@ def test_directory_listing_and_file_info(temp_case_path, default_properties):
         assert mtime_ns > 0
         assert fs.get_file_size(path) == 6
         assert any(
-            info.path.endswith("nested") and info.is_dir
-            for info in fs.list_dir(temp_case_path)
+            info.path.endswith("nested") and info.is_dir for info in fs.list_dir(temp_case_path)
         )
         assert any(
             info.path.endswith("payload.bin") and info.size == 6
@@ -98,9 +97,7 @@ def test_exists_reports_missing_path_after_delete(temp_case_path, default_proper
         assert path in str(failure.value)
 
 
-def test_conditional_write_preserves_existing_object(
-    temp_case_path, default_properties
-):
+def test_conditional_write_preserves_existing_object(temp_case_path, default_properties):
     path = f"{temp_case_path}/conditional.bin"
     with Filesystem.get(properties=default_properties) as fs:
         fs.create_dir(temp_case_path)
@@ -114,9 +111,7 @@ def test_conditional_write_preserves_existing_object(
         assert fs.read_file_all(path) == b"second"
 
 
-def test_concurrent_conditional_create_has_one_complete_winner(
-    temp_case_path, default_properties
-):
+def test_concurrent_conditional_create_has_one_complete_winner(temp_case_path, default_properties):
     path = f"{temp_case_path}/winner.bin"
     with Filesystem.get(properties=default_properties) as fs:
         fs.create_dir(temp_case_path)
@@ -178,19 +173,20 @@ def test_remote_file_stats_preserve_written_metadata(
         assert metadata["e2e-label"] == "stored-value"
 
 
-def test_metrics_reset_and_continue_counting(temp_case_path, default_properties):
+def test_metrics_snapshot_deltas_and_continue_counting(temp_case_path, default_properties):
     path = f"{temp_case_path}/metrics.bin"
     with Filesystem.get(properties=default_properties) as fs:
         fs.create_dir(temp_case_path)
-        fs.reset_metrics()
+        # Cached filesystems may already have metrics, so compare snapshot deltas.
+        before = {entry.source: entry.metrics for entry in fs.get_metrics_sources()}
         fs.write_file(path, b"abcdefgh")
         assert fs.read_file(path, 2, 3) == b"cde"
-        metrics = fs.get_metrics()
-        assert metrics.write_count >= 1
-        assert metrics.read_count >= 1
-        fs.reset_metrics()
+        metrics = {entry.source: entry.metrics for entry in fs.get_metrics_sources()}
+        assert metrics["origin"].write_count - before["origin"].write_count >= 1
+        assert metrics["origin"].read_count - before["origin"].read_count >= 1
         assert fs.read_file(path, 0, 2) == b"ab"
-        assert fs.get_metrics().read_count >= 1
+        continued = {entry.source: entry.metrics for entry in fs.get_metrics_sources()}
+        assert continued["origin"].read_count - metrics["origin"].read_count >= 1
 
 
 @pytest.mark.slow
@@ -234,9 +230,7 @@ def test_close_failure_preserves_available_reasons(
             with pytest.raises((FFIError, RuntimeError)) as failure:
                 with fs.open_writer(path) as writer:
                     writer.write(b"contents")
-                    require_fiu.enable(
-                        FaultInjector.S3FS_WRITER_CLOSE_FAIL, one_time=True
-                    )
+                    require_fiu.enable(FaultInjector.S3FS_WRITER_CLOSE_FAIL, one_time=True)
                     if body_fails:
                         raise RuntimeError("e2e-primary-failure")
         finally:

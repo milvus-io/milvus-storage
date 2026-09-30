@@ -41,6 +41,7 @@ from .filesystem import (
     FileInfo,
     Filesystem,
     FilesystemMetrics,
+    FilesystemMetricsSource,
     FilesystemReader,
     FilesystemWriter,
 )
@@ -88,6 +89,7 @@ __all__ = [
     "FilesystemReader",
     "FilesystemWriter",
     "FilesystemMetrics",
+    "FilesystemMetricsSource",
     "FileInfo",
     # Common
     "ThreadPool",

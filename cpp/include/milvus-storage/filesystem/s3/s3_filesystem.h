@@ -97,7 +97,7 @@ class S3FileSystem : public arrow::fs::FileSystem, public UploadConditional, pub
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override;
 
   /// \brief Get filesystem metrics via Observable interface
-  std::shared_ptr<FilesystemMetrics> GetMetrics() const override;
+  std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>> GetMetricsSources() const override;
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(
       const std::string& path, std::shared_ptr<arrow::KeyValueMetadata> metadata) override;
