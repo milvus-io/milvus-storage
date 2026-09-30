@@ -1945,17 +1945,6 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
     native_ = std::move(native);
     native_limit_ = limit;
   }
-  template <class Model>
-  static Result<Model> NativeResult(const NativeS3Response& response) {
-    ARROW_RETURN_NOT_OK(response.ToStatus());
-    Aws::Utils::Xml::XmlDocument xml;
-    if (!response.body.empty()) {
-      xml = Aws::Utils::Xml::XmlDocument::CreateFromXmlString(response.body.c_str());
-      if (!xml.WasParseSuccessful())
-        return Status::IOError("Invalid S3 XML response");
-    }
-    return Model(Aws::AmazonWebServiceResult<Aws::Utils::Xml::XmlDocument>(std::move(xml), response.headers));
-  }
   Status StartNativeMultipart() {
     S3Model::CreateMultipartUploadRequest request;
     request.SetBucket(ToAwsString(path_.bucket));
@@ -1964,14 +1953,14 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
       request.SetChecksumAlgorithm(S3Model::ChecksumAlgorithm::CRC32C);
     ARROW_RETURN_NOT_OK(SetMetadataInRequest(&request, false));
     // Conditions apply to publication, not to acquiring an upload ID.
-    native_multipart_ =
-        native_->Send(request, path_.key, Aws::Http::HttpMethod::HTTP_POST, "?uploads", io_context_)
-            .Then([](const NativeS3Response& response) -> Result<std::string> {
-              ARROW_ASSIGN_OR_RAISE(auto result, NativeResult<S3Model::CreateMultipartUploadResult>(response));
-              if (result.GetUploadId().empty())
-                return Status::IOError("S3 multipart creation has no upload ID");
-              return std::string(result.GetUploadId().c_str());
-            });
+    native_multipart_ = native_->Send(request, path_.key, Aws::Http::HttpMethod::HTTP_POST, "?uploads", io_context_)
+                            .Then([](const Aws::Client::XmlOutcome& response) -> Result<std::string> {
+                              ARROW_RETURN_NOT_OK(OutcomeToStatus("CreateMultipartUpload", response));
+                              S3Model::CreateMultipartUploadResult result(response.GetResult());
+                              if (result.GetUploadId().empty())
+                                return Status::IOError("S3 multipart creation has no upload ID");
+                              return std::string(result.GetUploadId().c_str());
+                            });
     return Status::OK();
   }
   template <class Request>
@@ -1987,8 +1976,9 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
       if (++upload_state_->uploads_in_progress == 1)
         upload_state_->pending_uploads_completed = Future<>::Make();
     }
+    const std::string operation = request.GetServiceRequestName();
     auto send = [self = Self(), request = std::move(request),
-                 data = std::move(data)]() mutable -> Future<NativeS3Response> {
+                 data = std::move(data)]() mutable -> Future<Aws::Client::XmlOutcome> {
       if constexpr (std::is_same_v<Request, S3Model::UploadPartRequest>) {
         return self->native_multipart_.Then([self, request = std::move(request), data](const std::string& id) mutable {
           request.SetUploadId(id.c_str());
@@ -2000,18 +1990,17 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
                                    16 * 1024 * 1024, data);
       }
     };
-    auto notify = [state = upload_state_, number](const Result<NativeS3Response>& response) -> Status {
-      Status status = response.ok() ? response->ToStatus() : response.status();
+    auto notify = [state = upload_state_, number,
+                   operation](const Result<Aws::Client::XmlOutcome>& response) -> Status {
+      Status status = response.ok() ? OutcomeToStatus(operation, *response) : response.status();
       std::optional<S3Model::UploadPartResult> part;
       if constexpr (std::is_same_v<Request, S3Model::UploadPartRequest>) {
         if (status.ok()) {
-          auto result = NativeResult<S3Model::UploadPartResult>(*response);
-          if (!result.ok())
-            status = result.status();
-          else if (result->GetETag().empty())
+          S3Model::UploadPartResult result(response->GetResult());
+          if (result.GetETag().empty())
             status = Status::IOError("S3 upload part has no ETag");
           else
-            part = std::move(*result);
+            part = std::move(result);
         }
       }
       Future<> done;
@@ -2030,7 +2019,7 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
       return status;
     };
     native_tail_ = native_tail_.Then(std::move(send))
-                       .Then([notify](const NativeS3Response& response) { return notify(response); },
+                       .Then([notify](const Aws::Client::XmlOutcome& response) { return notify(response); },
                              [notify](const Status& error) { return notify(error); });
     return Status::OK();
   }
@@ -2049,8 +2038,9 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
       if (!status.ok())
         return Future<>::MakeFinished(status);
       return self->native_->Send(request, self->path_.key, Aws::Http::HttpMethod::HTTP_POST, "", self->io_context_)
-          .Then([](const NativeS3Response& response) -> Status {
-            ARROW_ASSIGN_OR_RAISE(auto result, NativeResult<S3Model::CompleteMultipartUploadResult>(response));
+          .Then([](const Aws::Client::XmlOutcome& response) -> Status {
+            ARROW_RETURN_NOT_OK(OutcomeToStatus("CompleteMultipartUpload", response));
+            S3Model::CompleteMultipartUploadResult result(response.GetResult());
             if (result.GetETag().empty())
               return Status::IOError("Multipart completion has no ETag; outcome may be unknown");
             return Status::OK();
@@ -2066,8 +2056,11 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
       request.SetKey(ToAwsString(self->path_.key));
       request.SetUploadId(id.c_str());
       return self->native_->Send(request, self->path_.key, Aws::Http::HttpMethod::HTTP_DELETE, "", self->io_context_)
-          .Then([](const NativeS3Response& response) {
-            return response.HasHttpStatus(404) ? Status::OK() : response.ToStatus();
+          .Then([](const Aws::Client::XmlOutcome& response) {
+            if (!response.IsSuccess() &&
+                response.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND)
+              return Status::OK();
+            return OutcomeToStatus("AbortMultipartUpload", response);
           });
     });
   }

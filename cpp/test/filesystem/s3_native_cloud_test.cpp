@@ -135,11 +135,8 @@ TEST_F(S3NativeCloudTest, ListingAndContinuationPages) {
     ASSERT_LT(pages++, 10);
     ASSERT_OK_AND_ASSIGN(
         auto response, WaitCloud(operations->ListAsync(config_.bucket_name + "/" + prefix_ + "/list", token, true, 2)));
-    ASSERT_TRUE(response.ToStatus().ok()) << response.ToStatus();
-    auto xml = Aws::Utils::Xml::XmlDocument::CreateFromXmlString(response.body.c_str());
-    ASSERT_TRUE(xml.WasParseSuccessful());
-    Aws::S3::Model::ListObjectsV2Result page(
-        Aws::AmazonWebServiceResult<Aws::Utils::Xml::XmlDocument>(std::move(xml), response.headers));
+    ASSERT_TRUE(response.IsSuccess()) << response.GetError();
+    Aws::S3::Model::ListObjectsV2Result page(response.GetResult());
     EXPECT_EQ(std::string(page.GetPrefix().c_str()), prefix_ + "/list/");
     for (const auto& object : page.GetContents()) EXPECT_TRUE(keys.emplace(object.GetKey().c_str()).second);
     if (!page.GetIsTruncated())

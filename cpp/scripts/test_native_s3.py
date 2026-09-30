@@ -108,6 +108,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply(403, b"<Error><Code>AccessDenied</Code></Error>")
         if self.command in ("PUT", "POST", "DELETE"):
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            if key.startswith("root/service-error/"):
+                code = key.rsplit("/", 1)[1]
+                http_status = {"AccessDenied": 400, "SlowDown": 400, "InternalError": 500, "RequestTimeout": 400,
+                               "PreconditionFailed": 412, "ConditionalRequestConflict": 409}[code]
+                return self.reply(http_status, ("<Error><Code>" + code + "</Code>"
+                                  "<Message>fixture service detail</Message>"
+                                  "<RequestId>fixture-request</RequestId></Error>").encode())
+            if key == "root/truncated-put":
+                return self.reply(200, b"<Result>", length=100)
             google_condition = self.headers.get("x-goog-if-generation-match") == "0"
             if google_condition and not self.valid_google_signature(body):
                 return self.reply(403, b"<Error><Code>SignatureDoesNotMatch</Code></Error>")
@@ -135,7 +144,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     upload["parts"][int(query["partNumber"][0])] = body
                     return self.reply(200)
                 if key == "root/error-complete":
-                    return self.reply(200, b"<Error><Code>InternalError</Code></Error>")
+                    return self.reply(200, b"<Error><Code>InternalError</Code><Message>fixture completion rejected</Message></Error>")
+                if key == "root/error-complete-denied":
+                    return self.reply(200, b"<Error><Code>AccessDenied</Code><Message>fixture completion denied</Message></Error>")
                 xml = ET.fromstring(body)
                 numbers = [int(item.text) for item in xml.iter() if item.tag.endswith("PartNumber")]
                 body = b"".join(upload["parts"][n] for n in numbers)
@@ -161,6 +172,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply(200, headers=self.metadata.get(key), length=len(self.objects[key]))
         if query.get("list-type") == ["2"]:
             prefix = query.get("prefix", [""])[0]
+            if prefix == "root/truncated-list/":
+                return self.reply(404, b"<Error>", length=100)
+            if prefix == "root/invalid-xml/":
+                return self.reply(200, b"<ListBucketResult>")
+            if prefix == "root/oversized-error/":
+                return self.reply(400, b"x" * (16 * 1024 * 1024 + 1))
             delimiter = query.get("delimiter", [""])[0]
             if prefix == "root/bad-token/":
                 return self.reply(200, b"<ListBucketResult><IsTruncated>true</IsTruncated></ListBucketResult>")

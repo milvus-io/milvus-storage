@@ -4,19 +4,19 @@
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 #include "filesystem/s3/native_s3_transport.h"
 #ifdef WITH_CRT
-#include <algorithm>
-#include <cctype>
 #include <mutex>
+#include <optional>
 #include <utility>
 #include <arrow/filesystem/path_util.h>
 #include <aws/core/AmazonSerializableWebServiceRequest.h>
 #include <aws/core/http/HttpClientFactory.h>
+#include <aws/core/http/standard/StandardHttpResponse.h>
 #include <aws/core/utils/stream/PreallocatedStreamBuf.h>
 #include <aws/crt/http/HttpRequestResponse.h>
 #include <aws/common/uri.h>
 #include <aws/auth/credentials.h>
 #include <aws/s3/s3_client.h>
-#include "milvus-storage/common/extend_status.h"
+#include <aws/s3-crt/S3CrtErrorMarshaller.h>
 #include "milvus-storage/filesystem/gcp/gcp_credential_registry.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/util_internal.h"
@@ -50,19 +50,23 @@ struct Request {
   aws_signing_config_aws signing_config{};
   std::unique_ptr<aws_credentials, decltype(&aws_credentials_release)> signing_credentials{nullptr,
                                                                                            aws_credentials_release};
-  NativeS3Response response;
+  std::shared_ptr<Aws::Http::HttpResponse> response;
+  std::optional<Aws::Client::AWSError<Aws::Client::CoreErrors>> service_error;
+  arrow::Status status;
+  size_t received = 0;
   std::atomic<int> http_status{0};
   std::shared_ptr<FilesystemMetrics> write_metrics;
   int64_t write_bytes = 0;
   bool write_finished = false;
   bool charged = false;
   bool network_pending = true;
-  arrow::Future<NativeS3Response> future = arrow::Future<NativeS3Response>::Make();
+  arrow::Future<Aws::Client::XmlOutcome> future = arrow::Future<Aws::Client::XmlOutcome>::Make();
 
   ~Request() {
     if (write_metrics && !write_finished)
       write_metrics->IncrementFailedCount();
     message.reset();
+    response.reset();
     http.reset();
     streambuf.reset();
     data.reset();
@@ -70,33 +74,45 @@ struct Request {
     if (charged)
       state->Retire(network_pending);
   }
+  int AddHeaders(const aws_http_headers* headers) {
+    for (size_t i = 0; i < aws_http_headers_count(headers); ++i) {
+      aws_http_header h{};
+      if (aws_http_headers_get_index(headers, i, &h))
+        return AWS_OP_ERR;
+      response->AddHeader(Aws::String(reinterpret_cast<char*>(h.name.ptr), h.name.len),
+                          Aws::String(reinterpret_cast<char*>(h.value.ptr), h.value.len));
+    }
+    return AWS_OP_SUCCESS;
+  }
+  int AppendBody(const uint8_t* data, size_t size) {
+    if (size > limit - received) {
+      status = arrow::Status::CapacityError("S3 response exceeds configured limit");
+      return aws_raise_error(AWS_ERROR_S3_CANCELED);
+    }
+    response->GetResponseBody().write(reinterpret_cast<const char*>(data), size);
+    if (!response->GetResponseBody()) {
+      status = arrow::Status::IOError("Cannot buffer S3 response");
+      return aws_raise_error(AWS_ERROR_S3_CANCELED);
+    }
+    received += size;
+    return AWS_OP_SUCCESS;
+  }
   static int Headers(aws_s3_meta_request*, const aws_http_headers* headers, int status, void* user) noexcept {
     auto& r = *static_cast<Request*>(user);
     r.http_status.store(status);
     try {
-      for (size_t i = 0; i < aws_http_headers_count(headers); ++i) {
-        aws_http_header h{};
-        if (aws_http_headers_get_index(headers, i, &h))
-          return AWS_OP_ERR;
-        Aws::String name(reinterpret_cast<char*>(h.name.ptr), h.name.len);
-        std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
-        r.response.headers.emplace(std::move(name), Aws::String(reinterpret_cast<char*>(h.value.ptr), h.value.len));
-      }
-      return AWS_OP_SUCCESS;
+      return r.AddHeaders(headers);
     } catch (...) {
+      r.status = arrow::Status::OutOfMemory("S3 response headers");
       return aws_raise_error(AWS_ERROR_OOM);
     }
   }
   static int Body(aws_s3_meta_request*, const aws_byte_cursor* data, uint64_t, void* user) noexcept {
     auto& r = *static_cast<Request*>(user);
-    if (data->len > r.limit - r.response.body.size()) {
-      r.response.status = arrow::Status::CapacityError("S3 response exceeds configured limit");
-      return aws_raise_error(AWS_ERROR_S3_CANCELED);
-    }
     try {
-      r.response.body.append(reinterpret_cast<const char*>(data->ptr), data->len);
-      return AWS_OP_SUCCESS;
+      return r.AppendBody(data->ptr, data->len);
     } catch (...) {
+      r.status = arrow::Status::OutOfMemory("S3 response body");
       return aws_raise_error(AWS_ERROR_OOM);
     }
   }
@@ -111,24 +127,103 @@ struct Request {
     auto& r = *static_cast<Request*>(user);
     if (result->response_status)
       r.http_status.store(result->response_status);
-    r.response.transport_error = result->error_code;
+    try {
+      // CRT delivers failed responses here rather than through the body callback.
+      if (result->error_response_body) {
+        r.response = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("native-s3-response", r.http);
+        r.received = 0;
+        r.AppendBody(result->error_response_body->buffer, result->error_response_body->len);
+      }
+      if (result->error_response_headers && r.AddHeaders(result->error_response_headers) != AWS_OP_SUCCESS)
+        r.status = arrow::Status::IOError("Cannot read S3 error response headers");
+      r.response->SetResponseCode(static_cast<Aws::Http::HttpResponseCode>(r.http_status.load()));
+      // CRT 0.12.6 discards the response body for these recoverable errors when
+      // retries are exhausted. Recover the SDK error type from the CRT signal.
+      const char* error_name = nullptr;
+      switch (result->error_code) {
+        case AWS_ERROR_S3_SLOW_DOWN:
+          error_name = "SlowDown";
+          break;
+        case AWS_ERROR_S3_INTERNAL_ERROR:
+          error_name = "InternalError";
+          break;
+        case AWS_ERROR_S3_REQUEST_TIMEOUT:
+          error_name = "RequestTimeout";
+          break;
+        case AWS_ERROR_S3_REQUEST_TIME_TOO_SKEWED:
+          error_name = "RequestTimeTooSkewed";
+          break;
+      }
+      if (error_name && !result->error_response_body) {
+        r.service_error = Aws::Client::S3CrtErrorMarshaller().FindErrorByName(error_name);
+        r.service_error->SetExceptionName(error_name);
+        r.service_error->SetMessage(Aws::String("CRT service error (outcome may be unknown): ") +
+                                    aws_error_str(result->error_code));
+        r.service_error->SetResponseCode(r.response->GetResponseCode());
+        r.service_error->SetResponseHeaders(r.response->GetHeaders());
+      }
+      const bool is_service_error =
+          r.service_error.has_value() || result->error_response_body ||
+          (r.http_status.load() >= 300 &&
+           (result->error_code == AWS_ERROR_S3_INVALID_RESPONSE_STATUS ||
+            result->error_code == AWS_ERROR_S3_INTERNAL_ERROR || result->error_code == AWS_ERROR_S3_SLOW_DOWN));
+      if (result->error_code && !is_service_error) {
+        // An incomplete response cannot establish success or absence, even if
+        // headers arrived. Keep the CRT diagnostic when using SDK error parsing.
+        r.response->SetResponseCode(Aws::Http::HttpResponseCode::REQUEST_NOT_MADE);
+        r.response->SetClientErrorType(Aws::Client::CoreErrors::NETWORK_CONNECTION);
+        r.response->SetClientErrorMessage(Aws::String("Native S3 request failed (outcome may be unknown): ") +
+                                          aws_error_str(result->error_code));
+      }
+    } catch (const std::bad_alloc&) {
+      r.status = arrow::Status::OutOfMemory("S3 response completion");
+    } catch (const std::exception& e) {
+      r.status = arrow::Status::IOError(e.what());
+    }
     // Release our initial reference. Shutdown, not Finish, is the point at which
     // CRT has stopped using all request buffers and invoking request callbacks.
     aws_s3_meta_request_release(meta);
   }
+  arrow::Result<Aws::Client::XmlOutcome> Outcome() {
+    if (!status.ok())
+      return status;
+    if (service_error)
+      return Aws::Client::XmlOutcome(std::move(*service_error));
+    auto outcome = client_lease->GenerateXmlOutcome(response);
+    if (outcome.IsSuccess()) {
+      auto root = outcome.GetResult().GetPayload().GetRootElement();
+      if (!root.IsNull() && root.GetName() == "Error") {
+        // CompleteMultipartUpload can return an error with HTTP 200. The SDK's
+        // generic outcome conversion only checks HTTP/client errors.
+        response->GetResponseBody().clear();
+        response->GetResponseBody().seekg(0);
+        auto error = Aws::Client::S3CrtErrorMarshaller().Marshall(*response);
+        error.SetResponseHeaders(response->GetHeaders());
+        error.SetResponseCode(response->GetResponseCode());
+        return Aws::Client::XmlOutcome(std::move(error));
+      }
+    }
+    return outcome;
+  }
   static void Shutdown(void* user) noexcept {
     S3CrtCallbackScope callback_scope;
-    auto* request = static_cast<Request*>(user);
-    request->response.http_status = request->http_status.load();
-    if (request->write_metrics) {
-      const auto& result = request->response;
-      if (result.status.ok() && result.transport_error == 0 && result.http_status >= 200 && result.http_status < 300)
-        request->write_metrics->IncrementWriteBytes(request->write_bytes);
+    std::unique_ptr<Request> owned(static_cast<Request*>(user));
+    auto result = [&]() -> arrow::Result<Aws::Client::XmlOutcome> {
+      try {
+        return owned->Outcome();
+      } catch (const std::bad_alloc&) {
+        return arrow::Status::OutOfMemory("S3 response parsing");
+      } catch (const std::exception& e) {
+        return arrow::Status::IOError(e.what());
+      }
+    }();
+    if (owned->write_metrics) {
+      if (result.ok() && result->IsSuccess())
+        owned->write_metrics->IncrementWriteBytes(owned->write_bytes);
       else
-        request->write_metrics->IncrementFailedCount();
-      request->write_finished = true;
+        owned->write_metrics->IncrementFailedCount();
+      owned->write_finished = true;
     }
-    std::unique_ptr<Request> owned(request);
     // Release admission before continuations submit another page or request.
     {
       std::lock_guard lock(owned->state->mutex);
@@ -137,45 +232,10 @@ struct Request {
     }
     // As with native range reads, let callers select their continuation executor.
     // The request lease remains alive until all inline continuations return.
-    owned->future.MarkFinished(std::move(owned->response));
+    owned->future.MarkFinished(std::move(result));
   }
 };
 }  // namespace
-
-bool NativeS3Response::HasHttpStatus(int code) const {
-  return status.ok() && http_status == code &&
-         (transport_error == 0 || transport_error == AWS_ERROR_S3_INVALID_RESPONSE_STATUS ||
-          transport_error == AWS_ERROR_S3_INTERNAL_ERROR || transport_error == AWS_ERROR_S3_SLOW_DOWN);
-}
-
-arrow::Status NativeS3Response::ToStatus() const {
-  if (!status.ok())
-    return status;
-  const bool http_error = http_status >= 400 &&
-                          (transport_error == 0 || transport_error == AWS_ERROR_S3_INVALID_RESPONSE_STATUS ||
-                           transport_error == AWS_ERROR_S3_INTERNAL_ERROR || transport_error == AWS_ERROR_S3_SLOW_DOWN);
-  if (transport_error && !http_error) {
-    return MakeExtendError(
-        ExtendStatusCode::StorageTransientNetwork,
-        std::string("Native S3 request failed (outcome may be unknown): ") + aws_error_str(transport_error));
-  }
-  if (http_status >= 200 && http_status < 300)
-    return arrow::Status::OK();
-  auto code = ExtendStatusCode::AwsErrorNonRetryable;
-  if (http_status == 404)
-    code = ExtendStatusCode::AwsErrorNotFound;
-  else if (http_status == 401 || http_status == 403)
-    code = ExtendStatusCode::AwsErrorAccessDenied;
-  else if (http_status == 409)
-    code = ExtendStatusCode::AwsErrorConflict;
-  else if (http_status == 412)
-    code = ExtendStatusCode::AwsErrorPreConditionFailed;
-  else if (http_status == 429)
-    code = ExtendStatusCode::StorageTransientThrottling;
-  else if (http_status >= 500)
-    code = ExtendStatusCode::StorageTransientService;
-  return MakeExtendError(code, "Native S3 request failed: HTTP " + std::to_string(http_status));
-}
 
 arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(
     const S3Options& options, std::shared_ptr<S3ClientHolder> holder, std::shared_ptr<S3CrtClientHolder> crt_holder) {
@@ -199,14 +259,14 @@ arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(
   return std::shared_ptr<NativeS3Transport>(new NativeS3Transport(std::move(state), std::move(crt_holder)));
 }
 
-arrow::Future<NativeS3Response> NativeS3Transport::Send(const Aws::AmazonWebServiceRequest& model,
-                                                        const std::string& key,
-                                                        Aws::Http::HttpMethod method,
-                                                        const std::string& query,
-                                                        const arrow::io::IOContext& io,
-                                                        size_t limit,
-                                                        std::shared_ptr<arrow::Buffer> data) {
-  auto send = [&]() -> arrow::Result<arrow::Future<NativeS3Response>> {
+arrow::Future<Aws::Client::XmlOutcome> NativeS3Transport::Send(const Aws::AmazonWebServiceRequest& model,
+                                                               const std::string& key,
+                                                               Aws::Http::HttpMethod method,
+                                                               const std::string& query,
+                                                               const arrow::io::IOContext& io,
+                                                               size_t limit,
+                                                               std::shared_ptr<arrow::Buffer> data) {
+  auto send = [&]() -> arrow::Result<arrow::Future<Aws::Client::XmlOutcome>> {
     ARROW_RETURN_NOT_OK(io.stop_token().Poll());
     auto r = std::make_unique<Request>();
     r->state = state_;
@@ -231,6 +291,7 @@ arrow::Future<NativeS3Response> NativeS3Transport::Send(const Aws::AmazonWebServ
     auto uri = resolved.GetURI();
     model.AddQueryStringParameters(uri);
     r->http = Aws::Http::CreateHttpRequest(uri, method, Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
+    r->response = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("native-s3-response", r->http);
     for (const auto& h : model.GetHeaders()) r->http->SetHeaderValue(h.first, h.second);
     for (const auto& h : model.GetAdditionalCustomHeaders()) r->http->SetHeaderValue(h.first, h.second);
     if (!data) {
@@ -327,12 +388,13 @@ arrow::Future<NativeS3Response> NativeS3Transport::Send(const Aws::AmazonWebServ
   try {
     auto result = send();
     if (!result.ok())
-      return arrow::Future<NativeS3Response>::MakeFinished(result.status());
+      return arrow::Future<Aws::Client::XmlOutcome>::MakeFinished(result.status());
     return std::move(result).ValueUnsafe();
   } catch (const std::bad_alloc&) {
-    return arrow::Future<NativeS3Response>::MakeFinished(arrow::Status::OutOfMemory("Native S3 request allocation"));
+    return arrow::Future<Aws::Client::XmlOutcome>::MakeFinished(
+        arrow::Status::OutOfMemory("Native S3 request allocation"));
   } catch (const std::exception& e) {
-    return arrow::Future<NativeS3Response>::MakeFinished(arrow::Status::Invalid(e.what()));
+    return arrow::Future<Aws::Client::XmlOutcome>::MakeFinished(arrow::Status::Invalid(e.what()));
   }
 }
 

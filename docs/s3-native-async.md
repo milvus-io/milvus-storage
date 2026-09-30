@@ -96,6 +96,17 @@ HTTP on an executor. These operations use aws-c-s3 DEFAULT meta requests instead
 the SDK supplies request/response models and endpoint resolution. Existing native
 CRT GET is reused. All native request bodies are memory-backed.
 
+CRT callbacks populate the SDK's HttpResponse, including error headers and bodies
+delivered at completion. S3CrtClient::GenerateXmlOutcome parses responses into the
+SDK's XmlOutcome; typed result models and the existing ErrorToStatus conversion
+handle them. HTTP 200 with an embedded Error is passed to the SDK error marshaller.
+Local buffering failures remain Arrow errors, and incomplete transport responses
+cannot establish success or object absence. The adapter retains response-size
+limits, Arrow future completion and request/lease lifetime management.
+CRT 0.12.6 omits response bodies for some recoverable service errors after retry
+exhaustion. Those errors use the SDK error mapper with the CRT diagnostic; their
+original service message is unavailable.
+
 Setup and global SDK shutdown are synchronous lifecycle boundaries. The supplied
 executor must outlive all pending operations. Completion normally dispatches there;
 if dispatch is rejected it completes inline with the original I/O result. Inline

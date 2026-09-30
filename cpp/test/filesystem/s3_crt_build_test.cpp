@@ -1110,7 +1110,7 @@ TEST_P(S3CrtMetadataTest, AsyncHeadReturnsBeforeResponse) {
       } else {
         const auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
         if (detail == nullptr || detail->code() != ExtendStatusCode::AwsErrorAccessDenied ||
-            message.find("HeadObject") == std::string::npos || message.find("HTTP 403") == std::string::npos) {
+            message.find("HeadObject") == std::string::npos || message.find("ACCESS_DENIED") == std::string::npos) {
           return fail("HEAD error lost its AWS details: " + message);
         }
       }

@@ -18,6 +18,7 @@
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
+#include "milvus-storage/common/extend_status.h"
 
 namespace milvus_storage {
 template <class T>
@@ -550,7 +551,9 @@ TEST_F(NativeS3Test, MultipartEmbeddedErrorIsNotSuccess) {
   auto metrics = sync_->GetMetrics();
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
-  EXPECT_FALSE(Write("error-complete", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))).status().ok());
+  auto status = Write("error-complete", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))).status();
+  EXPECT_FALSE(status.ok());
+  EXPECT_NE(status.message().find("INTERNAL_FAILURE"), std::string::npos);
   EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 1);
   EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 1);
   EXPECT_EQ(metrics->GetWriteCount(), 1);
@@ -558,6 +561,64 @@ TEST_F(NativeS3Test, MultipartEmbeddedErrorIsNotSuccess) {
   EXPECT_EQ(metrics->GetFailedCount(), 1);
   ASSERT_OK_AND_ASSIGN(auto missing, Await(Stat(fs_, "error-complete")));
   EXPECT_EQ(missing.type(), arrow::fs::FileType::NotFound);
+}
+TEST_F(NativeS3Test, SdkServiceErrorsPreserveDetailsAndClassification) {
+  if (std::getenv("STORAGE_NATIVE_S3_REAL"))
+    GTEST_SKIP() << "Requires fixture error responses";
+  for (const auto& [error, expected] : {std::pair{"AccessDenied", ExtendStatusCode::AwsErrorAccessDenied},
+                                        std::pair{"SlowDown", ExtendStatusCode::StorageTransientThrottling},
+                                        std::pair{"InternalError", ExtendStatusCode::StorageTransientService},
+                                        std::pair{"RequestTimeout", ExtendStatusCode::StorageTransientTimeout},
+                                        std::pair{"PreconditionFailed", ExtendStatusCode::AwsErrorPreConditionFailed},
+                                        std::pair{"ConditionalRequestConflict", ExtendStatusCode::AwsErrorConflict}}) {
+    SCOPED_TRACE(error);
+    auto status = Write(std::string("service-error/") + error, arrow::Buffer::FromString("data")).status();
+    ASSERT_FALSE(status.ok());
+    // CRT drops the body of recoverable service errors after retry exhaustion.
+    const bool body_retained = std::string(error) != "SlowDown" && std::string(error) != "InternalError" &&
+                               std::string(error) != "RequestTimeout";
+    EXPECT_NE(status.message().find(body_retained ? "fixture service detail" : "CRT service error"), std::string::npos);
+    EXPECT_NE(status.message().find("PutObject"), std::string::npos);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), expected);
+  }
+}
+TEST_F(NativeS3Test, MultipartEmbeddedServiceErrorPreservesDetails) {
+  if (std::getenv("STORAGE_NATIVE_S3_REAL"))
+    GTEST_SKIP() << "Requires fixture embedded error response";
+  auto status = Write("error-complete-denied", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_NE(status.message().find("fixture completion denied"), std::string::npos);
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr);
+  EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorAccessDenied);
+}
+TEST_F(NativeS3Test, IncompleteResponsesDoNotEstablishSuccessOrAbsence) {
+  if (std::getenv("STORAGE_NATIVE_S3_REAL"))
+    GTEST_SKIP() << "Requires fixture truncated responses";
+  auto status = Write("truncated-put", arrow::Buffer::FromString("data")).status();
+  ASSERT_FALSE(status.ok());
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr);
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork);
+  arrow::fs::FileSelector selector;
+  selector.base_dir = "truncated-list";
+  selector.allow_not_found = true;
+  status = fs_->GetFileInfoGenerator(selector)().status();
+  ASSERT_FALSE(status.ok());
+  detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr);
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork);
+}
+TEST_F(NativeS3Test, InvalidAndOversizedResponsesFail) {
+  if (std::getenv("STORAGE_NATIVE_S3_REAL"))
+    GTEST_SKIP() << "Requires fixture invalid responses";
+  arrow::fs::FileSelector selector;
+  selector.base_dir = "invalid-xml";
+  EXPECT_FALSE(fs_->GetFileInfoGenerator(selector)().status().ok());
+  selector.base_dir = "oversized-error";
+  EXPECT_TRUE(fs_->GetFileInfoGenerator(selector)().status().IsCapacityError());
 }
 TEST_F(NativeS3Test, SinglePutDoesNotCountMultipartOperations) {
   auto metrics = sync_->GetMetrics();

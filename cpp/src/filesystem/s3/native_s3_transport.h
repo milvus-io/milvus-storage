@@ -14,16 +14,6 @@
 
 namespace milvus_storage {
 
-struct NativeS3Response {
-  int http_status = 0;
-  int transport_error = 0;
-  arrow::Status status;
-  std::string body;
-  Aws::Http::HeaderValueCollection headers;
-  arrow::Status ToStatus() const;
-  bool HasHttpStatus(int code) const;
-};
-
 class NativeS3Transport {
   public:
   struct State;
@@ -32,13 +22,13 @@ class NativeS3Transport {
                                                                 std::shared_ptr<S3CrtClientHolder> crt_holder);
   // DEFAULT meta requests never transform PUT into multipart. All bodies are
   // owned memory; no CRT callback reads a blocking file/iostream data source.
-  arrow::Future<NativeS3Response> Send(const Aws::AmazonWebServiceRequest& request,
-                                       const std::string& key,
-                                       Aws::Http::HttpMethod method,
-                                       const std::string& query,
-                                       const arrow::io::IOContext& io_context,
-                                       size_t response_limit = 16 * 1024 * 1024,
-                                       std::shared_ptr<arrow::Buffer> body = nullptr);
+  arrow::Future<Aws::Client::XmlOutcome> Send(const Aws::AmazonWebServiceRequest& request,
+                                              const std::string& key,
+                                              Aws::Http::HttpMethod method,
+                                              const std::string& query,
+                                              const arrow::io::IOContext& io_context,
+                                              size_t response_limit = 16 * 1024 * 1024,
+                                              std::shared_ptr<arrow::Buffer> body = nullptr);
 
   private:
   NativeS3Transport(std::shared_ptr<State> state, std::shared_ptr<S3CrtClientHolder> holder)
