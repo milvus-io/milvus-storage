@@ -40,6 +40,10 @@
 
 #include <aws/s3-crt/S3CrtClient.h>
 #include <aws/s3-crt/S3CrtClientConfiguration.h>
+#include <aws/core/Globals.h>
+#include <aws/crt/io/Bootstrap.h>
+#include <aws/crt/auth/Credentials.h>
+#include <aws/s3/s3_client.h>
 #include <folly/executors/ManualExecutor.h>
 
 #include "milvus-storage/common/extend_status.h"
@@ -297,7 +301,7 @@ TEST(S3CrtClientFinalizerTest, FinalizationWaitsForClientFactoryCleanup) {
   EXPECT_FALSE(holder->Acquire().ok());
 }
 
-TEST(S3CrtClientFinalizerTest, LeaseIsReentrantAndClientDestructionStaysOnHolderThread) {
+TEST(S3CrtClientFinalizerTest, LeaseIsReentrantAndPendingDestructionUsesCleanupThread) {
   auto finalizer = std::make_shared<S3CrtClientFinalizer>();
 
   std::promise<std::thread::id> client_destroyed_promise;
@@ -327,7 +331,8 @@ TEST(S3CrtClientFinalizerTest, LeaseIsReentrantAndClientDestructionStaysOnHolder
                  });
 
   holder_destruction_started.wait();
-  EXPECT_EQ(holder_destroyed.wait_for(std::chrono::milliseconds(250)), std::future_status::timeout);
+  EXPECT_EQ(holder_destroyed.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  EXPECT_EQ(client_destroyed.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
 
   auto leases_released = std::async(
       std::launch::async,
@@ -341,7 +346,7 @@ TEST(S3CrtClientFinalizerTest, LeaseIsReentrantAndClientDestructionStaysOnHolder
   ASSERT_EQ(client_destroyed.wait_for(std::chrono::seconds(5)), std::future_status::ready);
   const auto client_destruction_thread = client_destroyed.get();
 
-  EXPECT_EQ(client_destruction_thread, holder_destruction_thread);
+  EXPECT_NE(client_destruction_thread, holder_destruction_thread);
   EXPECT_NE(client_destruction_thread, lease_release_thread);
 }
 
@@ -537,10 +542,57 @@ TEST(S3CrtClientFinalizerTest, FinalizeWaitsForClientDestructorAlreadyInProgress
   finalized.get();
 }
 
+TEST(S3CrtClientFinalizerTest, NativeLeaseBorrowsTheSdkClient) {
+  ASSERT_STATUS_OK(EnsureS3InitializedForTest());
+  auto finalizer = std::make_shared<S3CrtClientFinalizer>();
+  std::atomic<int> shutdowns{0};
+  ASSERT_AND_ASSIGN(auto holder, finalizer->AddClient(
+                                     [&] {
+                                       Aws::S3Crt::S3CrtClientConfiguration config;
+                                       config.region = "us-east-1";
+                                       config.scheme = Aws::Http::Scheme::HTTP;
+                                       config.clientShutdownCallback = [&](void*) { ++shutdowns; };
+                                       return std::make_shared<Aws::S3Crt::S3CrtClient>(
+                                           std::make_shared<Aws::Auth::AnonymousAWSCredentialsProvider>(), config);
+                                     },
+                                     nullptr));
+  ASSERT_AND_ASSIGN(auto lease, holder->Acquire());
+  auto* native = lease->GetUnderlyingS3Client();
+  ASSERT_NE(native, nullptr);
+  auto moved = std::move(lease);
+  EXPECT_EQ(moved->GetUnderlyingS3Client(), native);
+  moved = S3CrtClientLease{};
+  holder.reset();
+  finalizer->Finalize();
+  EXPECT_EQ(shutdowns.load(), 1);
+}
+
+TEST(S3CrtClientFinalizerTest, CallbackDestructionDefersSdkShutdownUntilLeaseRelease) {
+  auto finalizer = std::make_shared<S3CrtClientFinalizer>();
+  ASSERT_AND_ASSIGN(auto holder, finalizer->AddClient(MakeTestS3CrtClient, nullptr));
+  ASSERT_AND_ASSIGN(auto lease, holder->Acquire());
+  std::weak_ptr<S3CrtClientHolder> weak = holder;
+  {
+    S3CrtCallbackScope callback_scope;
+    holder.reset();
+  }
+  EXPECT_TRUE(weak.expired());
+  auto finalized = std::async(std::launch::async, [finalizer] { finalizer->Finalize(); });
+  EXPECT_EQ(finalized.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  lease = S3CrtClientLease{};
+  ASSERT_EQ(finalized.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  finalized.get();
+}
+
 TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileWhenCrtEnabled) {
   if (!IsCloudEnv()) {
     GTEST_SKIP() << "CRT OpenInputFile smoke test skipped in non-cloud environment";
   }
+  const auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER).ValueOr(kCloudProviderAWS);
+  if (provider != kCloudProviderAWS && provider != kCloudProviderGCP) {
+    GTEST_SKIP() << "CRT OpenInputFile smoke test requires an AWS-compatible or GCP provider";
+  }
+
   api::Properties properties;
   ASSERT_STATUS_OK(InitTestProperties(properties));
   ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
@@ -773,7 +825,6 @@ TEST(S3CrtBuildSupportTest, InFlightNativeReadCompletesDuringFinalizeS3) {
     options.endpoint_override = "127.0.0.1:" + std::to_string(server.port());
     options.connect_timeout = 5;
     options.request_timeout = 5;
-    options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
     options.use_crt_async_reads = true;
 
     auto fs_result = S3FileSystem::Make(options);
@@ -847,6 +898,58 @@ TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileForNonGcpProvider
   }
 }
 
+TEST(S3CrtBuildSupportTest, UnsupportedNativeOptionsRetainSdkMetadataAndCrtReads) {
+  ASSERT_STATUS_OK(EnsureS3InitializedForTest());
+  auto options = S3Options::FromAccessKey("ak", "sk");
+  options.cloud_provider = kCloudProviderAWS;
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = "127.0.0.1:1";
+  options.use_crt_async_reads = true;
+  // Custom retry providers have no native adapter. Existing APIs must still
+  // work through the SDK rather than failing the native capability check.
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  const std::string path = "bucket/path/object.txt";
+  arrow::fs::FileInfo info(path, arrow::fs::FileType::File);
+  info.set_size(9);
+  ASSERT_AND_ASSIGN(auto crt_input, fs->OpenInputFile(path));
+  EXPECT_NE(dynamic_cast<NonBlockingRandomAccessFile*>(crt_input.get()), nullptr);
+  ASSERT_STATUS_OK(crt_input->Close());
+  ASSERT_AND_ASSIGN(crt_input, fs->OpenInputFile(info));
+  EXPECT_NE(dynamic_cast<NonBlockingRandomAccessFile*>(crt_input.get()), nullptr);
+  ASSERT_STATUS_OK(crt_input->Close());
+  for (auto opened : {fs->OpenInputFileAsync(path), fs->OpenInputFileAsync(info)}) {
+    EXPECT_TRUE(opened.is_finished());
+    ASSERT_STATUS_OK(opened.status());
+    ASSERT_STATUS_OK(opened.result().ValueOrDie()->Close());
+  }
+  // The unreachable endpoint must produce an SDK network error, not success
+  // or NotImplemented from the native transport capability check.
+  auto stat_status = fs->GetFileInfoAsync(std::vector<std::string>{path}).status();
+  EXPECT_FALSE(stat_status.ok());
+  EXPECT_FALSE(stat_status.IsNotImplemented());
+  arrow::fs::FileSelector selector;
+  selector.base_dir = "bucket";
+  auto list_status = fs->GetFileInfoGenerator(selector)().status();
+  EXPECT_FALSE(list_status.ok());
+  EXPECT_FALSE(list_status.IsNotImplemented());
+
+  options.use_crt_async_reads = false;
+  ASSERT_AND_ASSIGN(auto sdk_fs, S3FileSystem::Make(options));
+  ASSERT_AND_ASSIGN(auto input, sdk_fs->OpenInputFile(info));
+  EXPECT_EQ(dynamic_cast<NonBlockingRandomAccessFile*>(input.get()), nullptr);
+  ASSERT_STATUS_OK(input->Close());
+  auto by_path = sdk_fs->OpenInputFileAsync(path);
+  auto by_info = sdk_fs->OpenInputFileAsync(info);
+  EXPECT_TRUE(by_path.is_finished());
+  EXPECT_TRUE(by_info.is_finished());
+  ASSERT_STATUS_OK(by_path.status());
+  ASSERT_STATUS_OK(by_info.status());
+  ASSERT_STATUS_OK(by_path.result().ValueOrDie()->Close());
+  ASSERT_STATUS_OK(by_info.result().ValueOrDie()->Close());
+}
+
 struct S3CrtMetadataTestParam {
   boost::beast::http::status response_status;
   bool close_before_completion = false;
@@ -883,7 +986,6 @@ TEST_P(S3CrtMetadataTest, AsyncHeadReturnsBeforeResponse) {
     options.endpoint_override = "127.0.0.1:" + std::to_string(acceptor.local_endpoint().port());
     options.connect_timeout = 2;
     options.request_timeout = 5;
-    options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
     options.use_crt_async_reads = true;
 
     auto fs_result = S3FileSystem::Make(options);
@@ -954,8 +1056,11 @@ TEST_P(S3CrtMetadataTest, AsyncHeadReturnsBeforeResponse) {
       (void)submitted.get();
       return fail("Async HEAD blocked until the response was released");
     }
-    if (request.method() != http::verb::head || request.target() != "/test-bucket/path/object.txt") {
-      return fail("Unexpected HEAD request");
+    // Native requests use origin-form targets, including the bucket root slash.
+    const std::string expected_target = "/test-bucket/path/object.txt";
+    if (request.method() != http::verb::head || request.target() != expected_target) {
+      return fail("Unexpected HEAD request: " + std::string(request.method_string()) + " " +
+                  std::string(request.target()));
     }
     if (param.size_first) {
       if (!size_future.Wait(5) || !size_future.result().ok() || size_future.result().ValueOrDie() != 9) {
@@ -1047,7 +1152,6 @@ TEST(S3CrtBuildSupportTest, ZeroLengthAsyncReadsDoNotScheduleIoExecutor) {
   options.endpoint_override = "127.0.0.1:1";
   options.connect_timeout = 0.1;
   options.request_timeout = 0.1;
-  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
 
   ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options, io_context));
   ASSERT_EQ(fs->io_context().executor(), arrow_executor.get());
@@ -1104,6 +1208,84 @@ TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileForGcpIam) {
   ASSERT_AND_ASSIGN(auto sdk_fs, S3FileSystem::Make(options));
   ASSERT_AND_ASSIGN(auto sdk_file, sdk_fs->OpenInputFile("bucket/path/object.txt"));
   EXPECT_EQ(dynamic_cast<milvus_storage::NonBlockingRandomAccessFile*>(sdk_file.get()), nullptr);
+}
+
+TEST(S3CrtBuildSupportTest, GcpHmacNativeConditionalWritePreservesGoog4Signing) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "Test requires POSIX process APIs.";
+#else
+  const auto original_death_test_style = GTEST_FLAG_GET(death_test_style);
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const auto run_child = []() -> int {
+    namespace http = boost::beast::http;
+    using Tcp = boost::asio::ip::tcp;
+    boost::asio::io_context server_context;
+    Tcp::acceptor acceptor(server_context, {boost::asio::ip::address_v4::loopback(), 0});
+    ArrowFileSystemConfig config;
+    config.storage_type = "remote";
+    config.cloud_provider = kCloudProviderGCP;
+    config.address = "127.0.0.1:" + std::to_string(acceptor.local_endpoint().port());
+    config.bucket_name = "test-bucket";
+    config.region = "auto";
+    config.access_key_id = "test-hmac-key";
+    config.access_key_value = "test-hmac-secret";
+    config.s3_crt_async_read = true;
+    auto result = GcpFileSystemProducer(config).Make();
+    if (!result.ok()) {
+      std::cerr << result.status() << std::endl;
+      return 1;
+    }
+    // Keep the caller executor undriven: an SDK I/O fallback cannot complete.
+    folly::ManualExecutor executor;
+    auto arrow_executor = parquet::MakeFollyArrowExecutor(folly::getKeepAliveToken(executor), 1);
+    if (!arrow_executor.ok())
+      return 2;
+    auto options = S3Options::FromAccessKey(config.access_key_id, config.access_key_value);
+    options.cloud_provider = kCloudProviderGCP;
+    options.endpoint_override = config.address;
+    options.region = config.region;
+    options.scheme = "http";
+    options.use_crt_async_reads = true;
+    auto native_fs = S3FileSystem::Make(options, arrow::io::IOContext(arrow_executor->get()));
+    if (!native_fs.ok())
+      return 2;
+    auto fs = std::make_shared<FileSystemProxy>(config.bucket_name, *native_fs);
+    auto output = fs->OpenConditionalOutputStream("object.txt", nullptr);
+    if (!output.ok() || !(*output)->Write("payload", 7).ok())
+      return 2;
+    auto close = (*output)->CloseAsync();
+    if (close.is_finished())
+      return 2;
+    Tcp::socket socket(server_context);
+    acceptor.accept(socket);
+    boost::beast::flat_buffer buffer;
+    http::request<http::string_body> request;
+    http::read(socket, buffer, request);
+    const std::string auth(request[http::field::authorization]);
+    const bool signed_by_google =
+        auth.starts_with("GOOG4-HMAC-SHA256 ") && auth.find("x-goog-if-generation-match") != std::string::npos;
+    const bool correct_request = request.method() == http::verb::put && request.target() == "/test-bucket/object.txt" &&
+                                 request.body() == "payload" && request["x-goog-if-generation-match"] == "0";
+    http::response<http::empty_body> response{http::status::ok, request.version()};
+    response.set(http::field::etag, "\"test-etag\"");
+    response.content_length(0);
+    response.keep_alive(false);
+    http::write(socket, response);
+    socket.close();
+    if (!close.Wait(5))
+      return 3;
+    auto status = close.status();
+    if (!status.ok() || !signed_by_google || !correct_request) {
+      std::cerr << status << " google_signature=" << signed_by_google << " correct_request=" << correct_request
+                << " target=" << request.target() << " body=" << request.body()
+                << " condition=" << request["x-goog-if-generation-match"] << std::endl;
+      return 3;
+    }
+    return 0;
+  };
+  EXPECT_EXIT((::alarm(20), ::_exit(run_child())), ::testing::ExitedWithCode(0), "");
+  GTEST_FLAG_SET(death_test_style, original_death_test_style);
+#endif
 }
 
 TEST(S3CrtBuildSupportTest, GcpIamBearerReachesCrtRangeGetAndHead) {
