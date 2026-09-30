@@ -5,6 +5,8 @@ Run only inside wt-build. Delayed responses expose synchronous request waits;
 this fixture does not establish real-service authentication/TLS compatibility.
 """
 import http.server
+import hashlib
+import hmac
 import uuid
 import xml.etree.ElementTree as ET
 import os
@@ -44,9 +46,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def valid_google_signature(self, body):
+        # Recompute from bytes received on the wire. This catches CRT changing
+        # signed paths, headers, payload or authorization.
+        auth = self.headers.get("Authorization", "")
+        if not auth.startswith("GOOG4-HMAC-SHA256 "):
+            return False
+        try:
+            fields = dict(item.strip().split("=", 1) for item in auth.split(" ", 1)[1].split(","))
+            key_id, scope = fields["Credential"].split("/", 1)
+            date, region, service, terminal = scope.split("/")
+            signed = fields["SignedHeaders"]
+            if key_id != "fixture" or "x-goog-if-generation-match" not in signed.split(";"):
+                return False
+            payload_hash = hashlib.sha256(body).hexdigest()
+            if self.headers.get("x-goog-content-sha256") != payload_hash:
+                return False
+            uri = urllib.parse.urlsplit(self.path)
+            query = urllib.parse.urlencode(sorted(urllib.parse.parse_qsl(uri.query, keep_blank_values=True)),
+                                           quote_via=urllib.parse.quote, safe="~")
+            headers = "".join(name + ":" + self.headers[name] + "\n" for name in signed.split(";"))
+            canonical = "\n".join((self.command, uri.path, query, headers, signed, payload_hash))
+            to_sign = "\n".join(("GOOG4-HMAC-SHA256", self.headers["x-goog-date"], scope,
+                                 hashlib.sha256(canonical.encode()).hexdigest()))
+            key = b"GOOG4fixture-secret"
+            for part in (date, region, service, terminal):
+                key = hmac.new(key, part.encode(), hashlib.sha256).digest()
+            expected = hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest()
+            return hmac.compare_digest(expected, fields["Signature"])
+        except (KeyError, TypeError, ValueError):
+            return False
+
     def handle_request(self):
         if os.environ.get("STORAGE_NATIVE_S3_DEBUG"):
             print(self.command, self.path, self.headers.get("Range"), flush=True)
+        if not self.path.startswith("/") and "Range" not in self.headers:
+            return self.reply(400, b"<Error><Code>InvalidRequestTarget</Code></Error>")
+        if self.command in ("POST", "PUT") and "Content-Length" not in self.headers:
+            return self.reply(411)
         uri = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(uri.path).lstrip("/")
         bucket, _, key = path.partition("/")
@@ -63,6 +100,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply(403, b"<Error><Code>AccessDenied</Code></Error>")
         if self.command in ("PUT", "POST", "DELETE"):
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            google_condition = self.headers.get("x-goog-if-generation-match") == "0"
+            if google_condition and not self.valid_google_signature(body):
+                return self.reply(403, b"<Error><Code>SignatureDoesNotMatch</Code></Error>")
             if self.command == "POST" and "delete" in query:
                 xml = ET.fromstring(body)
                 keys = [item.text for item in xml.iter() if item.tag.rsplit("}", 1)[-1] == "Key"]
@@ -91,7 +131,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 xml = ET.fromstring(body)
                 numbers = [int(item.text) for item in xml.iter() if item.tag.endswith("PartNumber")]
                 body = b"".join(upload["parts"][n] for n in numbers)
-            if self.headers.get("If-None-Match") == "*" and key in self.objects:
+            create_only = (self.headers.get("If-None-Match") == "*" or google_condition or
+                           self.headers.get("x-oss-forbid-overwrite") == "true" or
+                           self.headers.get("x-cos-forbid-overwrite") == "true")
+            if create_only and key in self.objects:
                 return self.reply(412)
             if "If-Match" in self.headers and self.headers["If-Match"] != '"8aa99b1f439ff71293e95357bac6fd94"':
                 return self.reply(412)

@@ -15,14 +15,18 @@
 #include <aws/core/utils/stream/PreallocatedStreamBuf.h>
 #include <aws/crt/http/HttpRequestResponse.h>
 #include <aws/common/uri.h>
+#include <aws/auth/credentials.h>
 #include <aws/s3/s3_client.h>
 #include "milvus-storage/common/extend_status.h"
+#include "milvus-storage/filesystem/gcp/gcp_credential_registry.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/util_internal.h"
 
 namespace milvus_storage {
 struct NativeS3Transport::State {
   std::mutex mutex;
+  bool is_gcp = false;
+  std::string region;
   size_t inflight = 0;
   size_t limit = 0;
   std::shared_ptr<S3ClientHolder> holder;
@@ -44,6 +48,9 @@ struct Request {
   std::shared_ptr<Aws::Http::HttpRequest> http;
   std::shared_ptr<Aws::Crt::Http::HttpRequest> message;
   aws_uri endpoint{};
+  aws_signing_config_aws signing_config{};
+  std::unique_ptr<aws_credentials, decltype(&aws_credentials_release)> signing_credentials{nullptr,
+                                                                                           aws_credentials_release};
   NativeS3Response response;
   std::atomic<int> http_status{0};
   std::shared_ptr<FilesystemMetrics> write_metrics;
@@ -174,16 +181,11 @@ arrow::Status NativeS3Response::ToStatus() const {
 arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(
     const S3Options& options, std::shared_ptr<S3ClientHolder> holder, std::shared_ptr<S3CrtClientHolder> crt_holder) {
   ARROW_RETURN_NOT_OK(CheckS3Initialized());
-  // Native requests bypass HttpClient::MakeRequest. In particular, GCP HMAC
-  // conditional writes need the GOOG4 re-signing in GoogleHttpClientDelegator.
-  // This is a native capability check, not a restriction on S3FileSystem: other
-  // providers/options must retain their existing SDK paths and signing hooks.
-  if ((!options.cloud_provider.empty() && options.cloud_provider != "aws") || options.retry_strategy ||
-      !options.proxy_options.host.empty() || options.credentials_kind == S3CredentialsKind::Role ||
+  if (options.retry_strategy || !options.proxy_options.host.empty() ||
+      options.credentials_kind == S3CredentialsKind::Role ||
       options.credentials_kind == S3CredentialsKind::WebIdentity) {
     return arrow::Status::NotImplemented(
-        "Native S3 requires AWS/MinIO, explicit/default/anonymous credentials, "
-        "no custom retry strategy and no proxy");
+        "Native S3 requires explicit/default/anonymous credentials, no custom retry strategy and no proxy");
   }
   const auto* provider = options.credentials_provider.get();
   const bool standard_provider =
@@ -205,6 +207,8 @@ arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(
     return arrow::Status::Invalid("SDK CRT client has no underlying native client");
   auto state = std::make_shared<State>();
   state->holder = std::move(holder);
+  state->is_gcp = options.cloud_provider == "gcp";
+  state->region = options.region;
   state->limit = options.max_connections;
   return std::shared_ptr<NativeS3Transport>(new NativeS3Transport(std::move(state), std::move(crt_holder)));
 }
@@ -256,8 +260,42 @@ arrow::Future<NativeS3Response> NativeS3Transport::Send(const Aws::AmazonWebServ
           reinterpret_cast<unsigned char*>(const_cast<uint8_t*>(r->data->data())), r->data->size());
       r->http->AddContentBody(Aws::MakeShared<Aws::IOStream>("native-s3-body", r->streambuf.get()));
       r->http->SetContentLength(std::to_string(r->data->size()).c_str());
+    } else if (method == Aws::Http::HttpMethod::HTTP_POST || method == Aws::Http::HttpMethod::HTTP_PUT) {
+      r->http->SetContentLength("0");
+    }
+    if (state_->is_gcp && r->http->HasHeader("x-goog-if-generation-match")) {
+      // GCS XML multipart completion ignores preconditions. Fail before
+      // publication; the stream aborts its pending upload on this error.
+      if (method != Aws::Http::HttpMethod::HTTP_PUT)
+        return arrow::Status::NotImplemented("GCS XML multipart uploads do not support conditional writes");
+      // Native I/O bypasses HttpClient::MakeRequest. Reuse the same signing
+      // hook as GoogleHttpClientDelegator after headers/body are complete.
+      auto provider = GcpCredentialRegistry::Instance().Lookup(uri);
+      if (!provider)
+        return arrow::Status::Invalid("No GCP credentials registered for native conditional write");
+      ARROW_RETURN_NOT_OK(provider->MaybeSignConditionalWrite(r->http));
+      if (!r->http->HasHeader("Authorization"))
+        return arrow::Status::Invalid("GCP conditional write has no authorization header");
+      if (r->http->GetHeaderValue("Authorization").find("GOOG4-HMAC-SHA256 ") == 0) {
+        // CRT must transmit this signature intact, not overwrite it with SigV4.
+        r->signing_credentials.reset(aws_credentials_new_anonymous(aws_default_allocator()));
+        if (!r->signing_credentials)
+          return arrow::Status::OutOfMemory("Native GCP signing credentials");
+        aws_s3_init_default_signing_config(&r->signing_config, aws_byte_cursor_from_c_str(state_->region.c_str()),
+                                           nullptr);
+        r->signing_config.credentials = r->signing_credentials.get();
+      }
     }
     r->message = r->http->ToCrtHttpRequest();
+    // The SDK conversion uses an absolute URI and drops '/' for bucket roots.
+    // Direct CRT requests need an origin-form target, especially for virtual
+    // hosted bucket listing where providers otherwise reject/ignore the query.
+    auto target = uri.GetURLEncodedPath();
+    if (target.empty())
+      target = "/";
+    target += uri.GetQueryString();
+    if (!r->message->SetPath(Aws::Crt::ByteCursorFromCString(target.c_str())))
+      return arrow::Status::Invalid("Cannot construct native S3 request target");
     const auto url = uri.GetURIString();
     auto cursor = aws_byte_cursor_from_array(url.data(), url.size());
     if (aws_uri_init_parse(&r->endpoint, aws_default_allocator(), &cursor)) {
@@ -267,6 +305,8 @@ arrow::Future<NativeS3Response> NativeS3Transport::Send(const Aws::AmazonWebServ
     options.type = AWS_S3_META_REQUEST_TYPE_DEFAULT;
     options.operation_name = aws_byte_cursor_from_c_str(model.GetServiceRequestName());
     options.message = r->message->GetUnderlyingMessage();
+    if (r->signing_credentials)
+      options.signing_config = &r->signing_config;
     options.endpoint = &r->endpoint;
     options.user_data = r.get();
     options.headers_callback = Request::Headers;

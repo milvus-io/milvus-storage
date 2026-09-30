@@ -20,15 +20,21 @@ NativeS3Operations helper implements metadata and listing over NativeS3Transport
 FileSystemProxy applies its existing subtree prefix. Batch
 stat overrides Arrow's existing virtual API; single-path queries pass a one-element
 vector. Listing reuses GetFileInfoGenerator.
-Existing CRT reads, metadata caches and file objects are reused. When the native
-transport is unavailable, existing CRT input files retain SDK-backed metadata
-requests, and batch stat/listing retain their SDK executor paths. This includes
-GCP, OSS, COS and OBS, and configurations with CRT disabled or options requiring
-SDK hooks. These paths preserve compatibility without a native nonblocking
-guarantee. GCP writes retain the HTTP delegator's GOOG4 conditional-write signing;
-IAM Bearer headers are injected by the HTTP request factory. The existing SDK
-input path remains available when CRT reads are disabled. Both CRT
-and SDK input factories initialize local handles without network I/O. Arrow's
+Existing CRT reads, metadata caches and file objects are reused. Native metadata,
+listing and output requests support AWS/MinIO, OSS, COS, OBS and GCP with the
+supported credentials/options below. GCP conditional writes call the same
+`MaybeSignConditionalWrite` hook as the SDK HTTP delegator after assembling the
+headers and body; a per-request anonymous CRT signing configuration preserves the
+resulting GOOG4 signature. IAM Bearer headers still come from the HTTP request
+factory. No blocking HTTP client is used to send these native requests.
+GCP conditional writes support single PUT only: GCS XML multipart uploads do not
+support preconditions. Native multipart close returns `NotImplemented` and aborts
+the upload before publication, preserving any existing object. OBS retains its
+existing unsupported conditional-output API. Ordinary multipart writes work for
+both providers.
+Configurations with CRT disabled or unsupported credentials/options retain SDK
+metadata/listing and output paths, which do not promise native nonblocking I/O.
+Both CRT and SDK input factories initialize local handles without network I/O. Arrow's
 async open overrides return an already-completed Future without scheduling work.
 
 Native request completion marks the Arrow Future directly on the CRT callback
@@ -96,13 +102,15 @@ if dispatch is rejected it completes inline with the original I/O result. Inline
 continuations must not block. Global shutdown drains native clients and completion
 callbacks before releasing the AWS SDK.
 
-The transport supports AWS/MinIO with explicit, anonymous or native default-chain
+The transport supports S3-compatible providers with explicit, anonymous or native default-chain
 credentials. Explicit AssumeRole/WebIdentity settings, custom C++ credential/retry
 providers and explicit proxies use the existing SDK paths; native support would
 require adapters. Credentials may
 read configuration during setup. Metadata responses are capped at 16 MiB.
 
-Requests make one attempt. A lost mutation response can follow a successful write;
+Native requests make one attempt. The shared CRT client uses the same single-attempt
+policy for reads when enabled for native writes, including GCP, OSS, COS and OBS.
+A lost mutation response can follow a successful write;
 it is reported as an error with an unknown possible outcome, never automatically
 replayed. HTTP 200 with an embedded completion Error is not success. Cancellation
 is checked before dispatch; an already dispatched request is not cancelled.
@@ -115,6 +123,42 @@ requests with one caller worker, pagination, encoded paths, HTTP failures, owned
 buffers, completion with a stopped executor and shutdown. Isolated MinIO validates signing,
 metadata, checksums and service semantics. No throughput or AWS/TLS production
 certification is claimed.
+
+## Provider validation (2026-09-30)
+
+The CRT-enabled Release library and test executable built in the storage development
+container (`WITH_CRT=ON`, `WITH_UT=ON`, ASan and Talon off). Local tests passed:
+30 native HTTP fixture tests and 28 CRT/signing/metadata/lifetime tests, with one
+cloud-only smoke test skipped. The fixture independently verifies GOOG4 signatures
+from the received encoded path, headers and body.
+
+`S3NativeCloudTest.*` uses `test_env.h` and `TEST_ENV_*` to exercise real services.
+Each test uses a unique prefix in an existing bucket and cleans up that prefix.
+The tested filesystem has a stopped I/O executor, so an SDK executor fallback
+cannot pass as native coverage. The four cases cover:
+
+- Single and batch stat, implicit directories, missing/empty objects, metadata,
+  range reads, both input-file and input-stream factories, overwrite and encoded keys.
+- Real listing continuation tokens with two keys per page, plus the filesystem generator.
+- Ordinary and sized output factories, multipart flush/close, boundary reads,
+  buffered abort and multipart abort.
+- Conditional PUT and multipart conflict handling, including encoded keys and
+  preservation of existing data. GCP multipart tests expect explicit rejection;
+  OBS conditional output is skipped because the existing API is unsupported.
+
+| Real service, explicit credentials over TLS | Result |
+| --- | --- |
+| Aliyun OSS | 4 passed |
+| Tencent COS | 4 passed |
+| Huawei OBS | 3 passed, conditional-output case skipped |
+| GCP HMAC | 4 passed, including rejection of unsupported conditional multipart |
+
+These runs exposed and fixed the native request-target/root-slash handling,
+missing zero Content-Length on bodyless upload-control requests, and GOOG4 signing
+of encoded paths. GCS XML multipart [does not support preconditions](https://docs.cloud.google.com/storage/docs/multipart-uploads#considerations);
+native completion rejects them before publication and aborts the upload. This is
+not a successful conditional-multipart implementation. Real IAM, Azure, AWS,
+ASan, load testing and a full CI pass are not claimed for this run.
 
 ## Scope
 

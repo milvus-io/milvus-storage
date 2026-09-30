@@ -1056,8 +1056,8 @@ TEST_P(S3CrtMetadataTest, AsyncHeadReturnsBeforeResponse) {
       (void)submitted.get();
       return fail("Async HEAD blocked until the response was released");
     }
-    // The native HTTP adapter uses an absolute-form request target.
-    const std::string expected_target = "http://" + options.endpoint_override + "/test-bucket/path/object.txt";
+    // Native requests use origin-form targets, including the bucket root slash.
+    const std::string expected_target = "/test-bucket/path/object.txt";
     if (request.method() != http::verb::head || request.target() != expected_target) {
       return fail("Unexpected HEAD request: " + std::string(request.method_string()) + " " +
                   std::string(request.target()));
@@ -1210,7 +1210,7 @@ TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileForGcpIam) {
   EXPECT_EQ(dynamic_cast<milvus_storage::NonBlockingRandomAccessFile*>(sdk_file.get()), nullptr);
 }
 
-TEST(S3CrtBuildSupportTest, GcpHmacConditionalWriteKeepsHttpDelegatorSigning) {
+TEST(S3CrtBuildSupportTest, GcpHmacNativeConditionalWritePreservesGoog4Signing) {
 #if defined(_WIN32)
   GTEST_SKIP() << "Test requires POSIX process APIs.";
 #else
@@ -1235,12 +1235,27 @@ TEST(S3CrtBuildSupportTest, GcpHmacConditionalWriteKeepsHttpDelegatorSigning) {
       std::cerr << result.status() << std::endl;
       return 1;
     }
-    auto fs = std::make_shared<FileSystemProxy>(config.bucket_name, *result);
+    // Keep the caller executor undriven: an SDK I/O fallback cannot complete.
+    folly::ManualExecutor executor;
+    auto arrow_executor = parquet::MakeFollyArrowExecutor(folly::getKeepAliveToken(executor), 1);
+    if (!arrow_executor.ok())
+      return 2;
+    auto options = S3Options::FromAccessKey(config.access_key_id, config.access_key_value);
+    options.cloud_provider = kCloudProviderGCP;
+    options.endpoint_override = config.address;
+    options.region = config.region;
+    options.scheme = "http";
+    options.use_crt_async_reads = true;
+    auto native_fs = S3FileSystem::Make(options, arrow::io::IOContext(arrow_executor->get()));
+    if (!native_fs.ok())
+      return 2;
+    auto fs = std::make_shared<FileSystemProxy>(config.bucket_name, *native_fs);
     auto output = fs->OpenConditionalOutputStream("object.txt", nullptr);
     if (!output.ok() || !(*output)->Write("payload", 7).ok())
       return 2;
-    // The SDK close may block; receive the request while it runs on a worker.
-    auto close = std::async(std::launch::async, [stream = *output] { return stream->Close(); });
+    auto close = (*output)->CloseAsync();
+    if (close.is_finished())
+      return 2;
     Tcp::socket socket(server_context);
     acceptor.accept(socket);
     boost::beast::flat_buffer buffer;
@@ -1257,10 +1272,13 @@ TEST(S3CrtBuildSupportTest, GcpHmacConditionalWriteKeepsHttpDelegatorSigning) {
     response.keep_alive(false);
     http::write(socket, response);
     socket.close();
-    auto status = close.get();
+    if (!close.Wait(5))
+      return 3;
+    auto status = close.status();
     if (!status.ok() || !signed_by_google || !correct_request) {
       std::cerr << status << " google_signature=" << signed_by_google << " correct_request=" << correct_request
-                << std::endl;
+                << " target=" << request.target() << " body=" << request.body()
+                << " condition=" << request["x-goog-if-generation-match"] << std::endl;
       return 3;
     }
     return 0;

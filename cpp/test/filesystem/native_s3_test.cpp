@@ -12,6 +12,7 @@
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/async_output_stream.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/gcp/gcp_credential_registry.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
@@ -123,7 +124,7 @@ TEST_F(NativeS3Test, SameInstanceSupportsSyncAndArrowAsyncCalls) {
   EXPECT_EQ(nested_info.path(), "a");
 }
 
-TEST_F(NativeS3Test, UnsupportedNativeProvidersKeepExistingFilesystemOperations) {
+TEST_F(NativeS3Test, ProviderFilesystemOperationsWithAndWithoutCrt) {
   // The fixture checks routing and results, not real cloud authentication.
   for (const auto* provider : {"gcp", "aliyun", "tencent", "huawei", "aws"}) {
     for (const bool crt_reads : {false, true}) {
@@ -160,6 +161,61 @@ TEST_F(NativeS3Test, UnsupportedNativeProvidersKeepExistingFilesystemOperations)
       ASSERT_OK_AND_ASSIGN(data, Await(input->ReadAsync({}, 1, 3)));
       EXPECT_EQ(data->ToString(), "bcd");
       ASSERT_OK(input->Close());
+    }
+  }
+}
+
+TEST_F(NativeS3Test, OtherProvidersUseNativeRequestsWithoutAnIoWorker) {
+  ASSERT_OK(executor_->Shutdown());
+  executor_stopped_ = true;
+  for (const auto* provider : {"aliyun", "tencent", "gcp"}) {
+    SCOPED_TRACE(provider);
+    auto options = options_;
+    options.cloud_provider = provider;
+    if (options.cloud_provider == "gcp") {
+      ArrowFileSystemConfig config;
+      config.access_key_id = "fixture";
+      config.access_key_value = "fixture-secret";
+      ASSERT_OK_AND_ASSIGN(auto credentials, BuildGcpProviderFromConfig(config));
+      GcpCredentialRegistry::Instance().Register({NormalizeGcpEndpoint(options.endpoint_override, false), "bucket"},
+                                                 std::move(credentials));
+    }
+    ASSERT_OK_AND_ASSIGN(auto s3, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
+    auto fs = std::make_shared<FileSystemProxy>(prefix_, s3);
+    ASSERT_OK_AND_ASSIGN(auto info, Await(Stat(fs, "hello #?+% 中文")));
+    EXPECT_EQ(info.size(), 6);
+    arrow::fs::FileSelector selector;
+    selector.base_dir = "pages";
+    auto generator = fs->GetFileInfoGenerator(selector);
+    size_t count = 0;
+    for (;;) {
+      ASSERT_OK_AND_ASSIGN(auto page, Await(generator()));
+      if (page.empty())
+        break;
+      count += page.size();
+    }
+    EXPECT_EQ(count, 5);
+    ASSERT_OK_AND_ASSIGN(auto input, fs->OpenInputFile("hello #?+% 中文"));
+    ASSERT_OK_AND_ASSIGN(auto metadata, Await(input->ReadMetadataAsync({})));
+    ASSERT_OK(input->Close());
+    for (const auto size : {7, 5 * 1024 * 1024}) {
+      auto name = std::string("native-provider-") + provider + "-" + std::to_string(size) + " #?+% 中文";
+      ASSERT_OK_AND_ASSIGN(auto output, fs->OpenConditionalOutputStream(name, nullptr));
+      ASSERT_OK(output->Write(arrow::Buffer::FromString(std::string(size, 'x'))));
+      auto closed = output->CloseAsync();
+      ASSERT_TRUE(closed.Wait(5));
+      if (options.cloud_provider == "gcp" && size >= options.multi_part_upload_size) {
+        ASSERT_TRUE(closed.status().IsNotImplemented()) << closed.status();
+        ASSERT_OK_AND_ASSIGN(info, Await(Stat(fs, name)));
+        EXPECT_EQ(info.type(), arrow::fs::FileType::NotFound);
+        continue;
+      }
+      ASSERT_OK(closed.status());
+      ASSERT_OK_AND_ASSIGN(info, Await(Stat(fs, name)));
+      EXPECT_EQ(info.size(), size);
+      ASSERT_OK_AND_ASSIGN(auto conflict, fs->OpenConditionalOutputStream(name, nullptr));
+      ASSERT_OK(conflict->Write(arrow::Buffer::FromString("conflict")));
+      EXPECT_FALSE(conflict->CloseAsync().status().ok());
     }
   }
 }

@@ -202,8 +202,8 @@ static std::string BuildCanonicalRequest(const std::shared_ptr<Aws::Http::HttpRe
       break;
   }
 
-  // Canonical URI
-  std::string canonical_uri = request->GetUri().GetPath();
+  // Sign the encoded path that is sent on the wire, including escaped object keys.
+  std::string canonical_uri = request->GetUri().GetURLEncodedPath();
   if (canonical_uri.empty()) {
     canonical_uri = "/";
   }
