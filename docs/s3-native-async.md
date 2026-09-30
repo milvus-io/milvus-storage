@@ -160,6 +160,39 @@ native completion rejects them before publication and aborts the upload. This is
 not a successful conditional-multipart implementation. Real IAM, Azure, AWS,
 ASan, load testing and a full CI pass are not claimed for this run.
 
+## Legacy synchronous API validation (2026-09-30)
+
+`S3SyncCloudTest` calls only synchronous entry points through the production
+filesystem factory. Each of its four cases runs with `s3_crt_async_read=false`
+and `true` in the same `WITH_CRT=ON` build, using normal executors and isolated
+object prefixes. This is a runtime-backend comparison, not a separate no-CRT
+build or an old-binary ABI test.
+
+Coverage includes `Write` (pointer and buffer), `Tell`, `Flush`, `Close`, `Abort`,
+repeated close and closed-handle errors; scalar/batch/selector `GetFileInfo`;
+`GetSize`, `ReadMetadata`, `Read`, `ReadAt`, `Seek`, both input factories and
+cross-backend readback; empty/overwrite/missing objects; directory creation,
+copy/move/delete and directory cleanup. A 5 MiB multipart payload plus a tail is
+read back and compared in full. Conditional conflicts are checked against the
+full original payload.
+
+- Aliyun OSS: all 8 cases passed after accounting for different error timing.
+- Huawei OBS: all 8 cases passed; the two conditional cases assert the existing
+  `NotImplemented` response, not successful conditional writes.
+- GCP HMAC: all 8 cases passed; both conditional cases passed again after adding
+  explicit abort cleanup. SDK conditional multipart is excluded; the native
+  case asserts rejection and preservation of the original object.
+- Tencent COS: all 8 cases were blocked by authentication failures, including a
+  requested retry. The SDK returned `InvalidAccessKeyId`, and CRT returned HTTP
+  403 with the same configuration that had passed the earlier native-only run.
+  No current synchronous compatibility pass is claimed for Tencent.
+
+OSS conditional multipart conflicts can fail during SDK `Write`, while native
+submission reports the conflict at `Close`. Callers must check both results.
+The explicit GCP conditional-multipart rejection remains a behavior difference.
+Consumers must rebuild against this PR's C++ headers; these tests do not establish
+binary ABI compatibility for the changed factory return types.
+
 ## Scope
 
 Native operations cover metadata/stat, listing, input reads and output writes.

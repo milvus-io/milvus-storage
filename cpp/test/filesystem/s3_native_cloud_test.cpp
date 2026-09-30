@@ -234,5 +234,203 @@ TEST_F(S3NativeCloudTest, ConditionalPutAndMultipartPreserveExistingObject) {
     }
   }
 }
+
+// Use only legacy synchronous entry points, with both runtime backends.
+class S3SyncCloudTest : public ::testing::TestWithParam<bool> {
+  protected:
+  void SetUp() override {
+    if (!IsCloudEnv() || GetEnvVar(ENV_VAR_CLOUD_PROVIDER).ValueOr("") == "azure")
+      GTEST_SKIP() << "Requires a configured S3-compatible cloud";
+    api::Properties properties;
+    ASSERT_OK(InitTestProperties(properties));
+    ASSERT_OK_AND_ASSIGN(config_, GetFileSystemConfig(properties));
+    config_.s3_crt_async_read = GetParam();
+    config_.multi_part_upload_size = 5 * 1024 * 1024;
+    config_.max_connections = 4;
+    config_.request_timeout_ms = 30000;
+    config_.log_level = "off";
+    ASSERT_OK_AND_ASSIGN(parent_, CreateArrowFileSystem(config_));
+    prefix_ = "pr693-sync-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + "-" +
+              std::to_string(std::random_device{}());
+    proxy_ = std::make_shared<FileSystemProxy>(prefix_, parent_);
+    fs_ = proxy_;
+    std::cout << "Sync cloud test prefix: " << prefix_ << " crt=" << GetParam() << std::endl;
+  }
+  void TearDown() override {
+    if (parent_ && !prefix_.empty()) {
+      auto status = parent_->DeleteDirContents(prefix_, true);
+      EXPECT_TRUE(status.ok()) << status;
+    }
+  }
+  arrow::Status Put(const std::string& path, const std::string& value) {
+    ARROW_ASSIGN_OR_RAISE(auto out, fs_->OpenOutputStream(path));
+    ARROW_RETURN_NOT_OK(out->Write(value.data(), value.size()));
+    return out->Close();
+  }
+  ArrowFileSystemConfig config_;
+  FileSystemPtr parent_, proxy_;
+  ArrowFileSystemPtr fs_;
+  std::string prefix_;
+};
+
+TEST_P(S3SyncCloudTest, ReadWriteMetadataAndClosedHandles) {
+  const std::string path = "nested/hello #?+% 中文";
+  auto metadata = arrow::key_value_metadata({"Content-Type"}, {"text/plain"});
+  ASSERT_OK_AND_ASSIGN(auto out, fs_->OpenOutputStream(path, metadata));
+  ASSERT_OK(out->Write("abc", 3));
+  ASSERT_OK(out->Write(arrow::Buffer::FromString("def")));
+  ASSERT_OK_AND_ASSIGN(auto position, out->Tell());
+  EXPECT_EQ(position, 6);
+  ASSERT_OK(out->Flush());
+  ASSERT_OK(out->Close());
+  ASSERT_OK(out->Close());
+  EXPECT_TRUE(out->closed());
+  EXPECT_FALSE(out->Write("x", 1).ok());
+  EXPECT_FALSE(out->Flush().ok());
+  ASSERT_OK_AND_ASSIGN(auto info, fs_->GetFileInfo(path));
+  EXPECT_EQ(info.size(), 6);
+  for (const bool by_info : {false, true}) {
+    ASSERT_OK_AND_ASSIGN(auto file, by_info ? fs_->OpenInputFile(info) : fs_->OpenInputFile(path));
+    ASSERT_OK_AND_ASSIGN(auto size, file->GetSize());
+    EXPECT_EQ(size, 6);
+    ASSERT_OK_AND_ASSIGN(auto headers, file->ReadMetadata());
+    ASSERT_OK_AND_ASSIGN(auto content_type, headers->Get("Content-Type"));
+    EXPECT_EQ(content_type, "text/plain");
+    ASSERT_OK_AND_ASSIGN(auto range, file->ReadAt(2, 3));
+    EXPECT_EQ(range->ToString(), "cde");
+    ASSERT_OK(file->Seek(4));
+    ASSERT_OK_AND_ASSIGN(auto tail, file->Read(10));
+    EXPECT_EQ(tail->ToString(), "ef");
+    ASSERT_OK(file->Close());
+    EXPECT_FALSE(file->Read(1).ok());
+    ASSERT_OK_AND_ASSIGN(auto stream, by_info ? fs_->OpenInputStream(info) : fs_->OpenInputStream(path));
+    ASSERT_OK_AND_ASSIGN(auto all, stream->Read(6));
+    EXPECT_EQ(all->ToString(), "abcdef");
+    ASSERT_OK(stream->Close());
+  }
+  auto other_config = config_;
+  other_config.s3_crt_async_read = !GetParam();
+  ASSERT_OK_AND_ASSIGN(auto other, CreateArrowFileSystem(other_config));
+  ASSERT_OK_AND_ASSIGN(auto input, other->OpenInputFile(prefix_ + "/" + path));
+  ASSERT_OK_AND_ASSIGN(auto data, input->Read(6));
+  EXPECT_EQ(data->ToString(), "abcdef");
+  ASSERT_OK(input->Close());
+  ASSERT_OK(Put(path, "replacement"));
+  ASSERT_OK_AND_ASSIGN(info, fs_->GetFileInfo(path));
+  EXPECT_EQ(info.size(), 11);
+  ASSERT_OK(Put("empty", ""));
+  ASSERT_OK_AND_ASSIGN(info, fs_->GetFileInfo("empty"));
+  EXPECT_EQ(info.size(), 0);
+  ASSERT_OK_AND_ASSIGN(auto batch, fs_->GetFileInfo(std::vector<std::string>{path, "nested", "missing"}));
+  ASSERT_EQ(batch.size(), 3);
+  EXPECT_EQ(batch[0].type(), arrow::fs::FileType::File);
+  EXPECT_EQ(batch[1].type(), arrow::fs::FileType::Directory);
+  EXPECT_EQ(batch[2].type(), arrow::fs::FileType::NotFound);
+  // Opening is lazy; missing-object errors must surface when performing I/O.
+  auto missing = fs_->OpenInputFile("missing");
+  if (missing.ok()) {
+    EXPECT_FALSE((*missing)->GetSize().ok());
+    EXPECT_FALSE((*missing)->ReadAt(0, 1).ok());
+    ASSERT_OK((*missing)->Close());
+  }
+}
+
+TEST_P(S3SyncCloudTest, ListingCopyMoveAndDirectoryCleanup) {
+  ASSERT_OK(fs_->CreateDir("dir/sub", true));
+  ASSERT_OK(Put("dir/a", "first"));
+  ASSERT_OK(Put("dir/sub/b", "second"));
+  arrow::fs::FileSelector selector;
+  selector.base_dir = "dir";
+  selector.recursive = true;
+  ASSERT_OK_AND_ASSIGN(auto listed, fs_->GetFileInfo(selector));
+  std::set<std::string> files;
+  for (const auto& info : listed)
+    if (info.IsFile())
+      files.insert(info.path());
+  EXPECT_EQ(files, (std::set<std::string>{"dir/a", "dir/sub/b"}));
+  ASSERT_OK(fs_->CopyFile("dir/a", "dir/copy"));
+  ASSERT_OK(fs_->Move("dir/copy", "dir/moved"));
+  ASSERT_OK_AND_ASSIGN(auto info, fs_->GetFileInfo("dir/copy"));
+  EXPECT_EQ(info.type(), arrow::fs::FileType::NotFound);
+  ASSERT_OK_AND_ASSIGN(auto file, fs_->OpenInputFile("dir/moved"));
+  ASSERT_OK_AND_ASSIGN(auto bytes, file->Read(10));
+  EXPECT_EQ(bytes->ToString(), "first");
+  ASSERT_OK(file->Close());
+  ASSERT_OK(fs_->DeleteFile("dir/moved"));
+  ASSERT_OK(fs_->DeleteDirContents("dir", false));
+  ASSERT_OK_AND_ASSIGN(listed, fs_->GetFileInfo(selector));
+  EXPECT_TRUE(listed.empty());
+  ASSERT_OK(fs_->DeleteDir("dir"));
+  ASSERT_OK_AND_ASSIGN(info, fs_->GetFileInfo("dir"));
+  EXPECT_EQ(info.type(), arrow::fs::FileType::NotFound);
+}
+
+TEST_P(S3SyncCloudTest, MultipartFlushCloseAndAbort) {
+  const std::string part(5 * 1024 * 1024, 'a');
+  ASSERT_OK_AND_ASSIGN(auto out, proxy_->OpenOutputStreamWithUploadSize("multipart", nullptr, part.size()));
+  ASSERT_OK(out->Write(arrow::Buffer::FromString(part)));
+  ASSERT_OK(out->Flush());
+  ASSERT_OK(out->Write("tail", 4));
+  ASSERT_OK(out->Close());
+  ASSERT_OK_AND_ASSIGN(auto file, fs_->OpenInputFile("multipart"));
+  ASSERT_OK_AND_ASSIGN(auto bytes, file->Read(part.size() + 4));
+  EXPECT_EQ(bytes->ToString(), part + "tail");
+  ASSERT_OK(file->Close());
+  for (const bool multipart : {false, true}) {
+    const auto path = multipart ? "abort-multipart" : "abort-buffer";
+    ASSERT_OK_AND_ASSIGN(out, fs_->OpenOutputStream(path));
+    ASSERT_OK(out->Write(arrow::Buffer::FromString(multipart ? part : "buffer")));
+    ASSERT_OK(out->Flush());
+    ASSERT_OK(out->Abort());
+    EXPECT_TRUE(out->closed());
+    ASSERT_OK_AND_ASSIGN(auto info, fs_->GetFileInfo(path));
+    EXPECT_EQ(info.type(), arrow::fs::FileType::NotFound);
+  }
+}
+
+TEST_P(S3SyncCloudTest, ConditionalWritesAndProviderLimits) {
+  if (config_.cloud_provider == kCloudProviderHuawei) {
+    EXPECT_TRUE(proxy_->OpenConditionalOutputStream("conditional", nullptr).status().IsNotImplemented());
+    return;
+  }
+  for (const auto size : {7, 5 * 1024 * 1024}) {
+    // GCP conditional multipart is outside the successful compatibility matrix.
+    // Check the native path's explicit rejection without claiming SDK support.
+    if (config_.cloud_provider == kCloudProviderGCP && !GetParam() && size > 7)
+      continue;
+    const auto path = "conditional-" + std::to_string(size) + " #?+% 中文";
+    if (config_.cloud_provider == kCloudProviderGCP && size > 7)
+      ASSERT_OK(Put(path, "original"));
+    ASSERT_OK_AND_ASSIGN(auto out, proxy_->OpenConditionalOutputStream(path, nullptr));
+    ASSERT_OK(out->Write(arrow::Buffer::FromString(std::string(size, 'a'))));
+    auto status = out->Close();
+    if (config_.cloud_provider == kCloudProviderGCP && size > 7) {
+      ASSERT_TRUE(status.IsNotImplemented()) << status;
+      ASSERT_OK_AND_ASSIGN(auto file, fs_->OpenInputFile(path));
+      ASSERT_OK_AND_ASSIGN(auto bytes, file->Read(16));
+      EXPECT_EQ(bytes->ToString(), "original");
+      ASSERT_OK(file->Close());
+      continue;
+    }
+    ASSERT_OK(status);
+    ASSERT_OK_AND_ASSIGN(auto conflict, proxy_->OpenConditionalOutputStream(path, nullptr));
+    auto rejected = conflict->Write(arrow::Buffer::FromString(std::string(size, 'b')));
+    const bool rejected_on_write = !rejected.ok();
+    if (!rejected_on_write)
+      rejected = conflict->Close();
+    EXPECT_FALSE(rejected.ok());
+    std::cout << "Conditional conflict reported by " << (rejected_on_write ? "Write" : "Close") << std::endl;
+    ASSERT_OK(conflict->Abort());
+    ASSERT_OK_AND_ASSIGN(auto file, fs_->OpenInputFile(path));
+    ASSERT_OK_AND_ASSIGN(auto bytes, file->Read(size));
+    EXPECT_EQ(bytes->ToString(), std::string(size, 'a'));
+    ASSERT_OK(file->Close());
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(SdkAndCrt,
+                         S3SyncCloudTest,
+                         ::testing::Values(false, true),
+                         [](const ::testing::TestParamInfo<bool>& info) { return info.param ? "Crt" : "Sdk"; });
 }  // namespace milvus_storage
 #endif
