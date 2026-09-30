@@ -4,7 +4,6 @@
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "milvus-storage/transaction/transaction.h"
-#include "milvus-storage/common/async_limits.h"
 #include "milvus-storage/common/layout.h"
 #include <gtest/gtest.h>
 #include <arrow/filesystem/mockfs.h>
@@ -51,14 +50,6 @@ BeginResult Begin(const std::shared_ptr<MemoryFileSystem>& fs,
   auto future = Transaction::BeginAsync(fs->path, {}, version, resolver, retries, 3000, operation, fs);
   operation.reset();
   return std::move(future).via(&CallerExecutors::Get().work).get();
-}
-TEST(AsyncManifestLimitsTest, InvalidConfigurationReturnsStatus) {
-  const char* name = "LOON_TEST_ASYNC_LIMIT_SETTING";
-  ASSERT_EQ(setenv(name, "invalid", 1), 0);
-  auto invalid = AsyncManifestLimits::Setting(name, 8, 16);
-  ASSERT_EQ(unsetenv(name), 0);
-  ASSERT_FALSE(invalid.ok());
-  EXPECT_TRUE(invalid.status().IsInvalid());
 }
 TEST(AsyncTransactionTest, UnconsumedFutureStartsNoIO) {
   auto fs = std::make_shared<MemoryFileSystem>();

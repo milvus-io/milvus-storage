@@ -7,7 +7,6 @@
 #include "milvus-storage/ffi_internal/bridge.h"
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/transaction/transaction.h"
-#include "milvus-storage/common/async_limits.h"
 #include <folly/Executor.h>
 #include <folly/executors/InlineExecutor.h>
 #include <condition_variable>
@@ -75,10 +74,7 @@ struct LoonIOContext {
     std::shared_ptr<ExternalExecutor> executor;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      const auto& limits = AsyncManifestLimits::Get();
-      if (!limits.ok())
-        return limits.status();
-      if (stopping_ || active_ >= limits->max_operations)
+      if (stopping_)
         return AsyncStatus::Overloaded;
       executor = executor_;
       ++active_;
@@ -132,7 +128,7 @@ struct LoonIOContext {
   std::mutex mutex_;
   std::condition_variable drained_;
   std::shared_ptr<ExternalExecutor> executor_;
-  size_t active_ = 0;
+  size_t active_ = 0;  // Tracks accepted callbacks for shutdown; concurrency belongs to the caller executor.
   bool stopping_ = false;
 };
 namespace {

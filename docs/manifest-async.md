@@ -78,10 +78,11 @@ cancelled or its deadline expires. There is no interruption of in-flight network
 I/O and no end-to-end deadline guarantee. Input and callback ownership lasts
 until completion. Options default to 30 seconds; the maximum is one day.
 
-`LOON_ASYNC_MAX_OPERATIONS` defaults to 256 and limits C operations per IO context
-through callback return. The caller executor controls native C++ concurrency.
+The caller executor controls concurrency and queue capacity for both C ABI and
+native C++ operations. IO contexts track accepted callbacks only to drain them
+during shutdown; they impose no additional operation limit.
 Existing filesystem memory policies apply; this patch introduces no response-byte limit
-or buffer-budget setting. Invalid admission configuration returns an error.
+or buffer-budget setting.
 
 `loon_io_context_shutdown(io_context)` rejects new admission on that context and
 waits for its accepted callbacks to return. It is idempotent and may run alongside

@@ -506,6 +506,45 @@ static void test_async_context_isolation(void) {
   pthread_cond_destroy(&state.ready);
   pthread_mutex_destroy(&state.mutex);
 }
+static void test_async_executor_controls_capacity(void) {
+  enum { operation_count = 300 };  // Exceeds the former per-context limit of 256.
+  TestExecutor queued_executor;
+  // Hold all operations in the caller's queue until every submission finishes.
+  LoonAsyncExecutor descriptor = test_executor_start(&queued_executor, 0);
+  LoonIOContextHandle context = NULL;
+  LoonFFIResult result = loon_io_context_create(&descriptor, &context);
+  ck_assert_int_eq(result.err_code, 0);
+  loon_ffi_free_result(&result);
+  struct Completion states[operation_count] = {0};
+  LoonProperties properties = {NULL, 0};
+  int accepted = 0;
+  for (int i = 0; i < operation_count; ++i) {
+    pthread_mutex_init(&states[i].mutex, NULL);
+    pthread_cond_init(&states[i].ready, NULL);
+    states[i].expected_executor = &queued_executor;
+    LoonAsyncHandle operation = NULL;
+    result = loon_transaction_begin_async(context, "segment", &properties, 0, 0, 0, NULL, begin_complete,
+                                          (uintptr_t)&states[i], &operation);
+    if (result.err_code == LOON_SUCCESS)
+      ++accepted;
+    loon_ffi_free_result(&result);
+    loon_async_release(operation);
+  }
+  ck_assert_int_eq(pthread_create(&queued_executor.threads[0], NULL, test_executor_worker, &queued_executor), 0);
+  queued_executor.workers = 1;
+  loon_io_context_destroy(context);
+  test_executor_stop(&queued_executor);
+  for (int i = 0; i < operation_count; ++i) {
+    loon_transaction_destroy(states[i].transaction);
+    pthread_cond_destroy(&states[i].ready);
+    pthread_mutex_destroy(&states[i].mutex);
+  }
+  ck_assert_int_eq(accepted, operation_count);
+  for (int i = 0; i < operation_count; ++i) {
+    ck_assert_int_eq(states[i].calls, 1);
+    ck_assert_int_eq(states[i].code, LOON_SUCCESS);
+  }
+}
 static void mark_executor_alive(void* value) { *(int*)value = 1; }
 void run_manifest_async_suite(void) {
   RUN_TEST(test_async_io_context);
@@ -515,6 +554,7 @@ void run_manifest_async_suite(void) {
     RUN_TEST(test_async_begin_minio);
   RUN_TEST(test_async_commit_roundtrip);
   RUN_TEST(test_async_context_isolation);
+  RUN_TEST(test_async_executor_controls_capacity);
   loon_io_context_destroy(io_context);
   io_context = NULL;
   int executor_alive = 0;
