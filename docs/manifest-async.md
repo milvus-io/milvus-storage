@@ -103,8 +103,8 @@ before destroying executors or shutting down storage.
 This single PR includes begin and commit scheduling, lifecycle tests and C/Go
 callers. Native S3 work is outside its scope.
 
-It depends directly on [PR #693](https://github.com/milvus-io/milvus-storage/pull/693)
-(`s3-async/metadata`). The filesystem cache's concrete `FileSystemPtr` is retained
+It builds on [PR #693](https://github.com/milvus-io/milvus-storage/pull/693),
+which is merged into `main`. The filesystem cache's concrete `FileSystemPtr` is retained
 through the transaction's Arrow pointer. This layer still schedules synchronous
 transaction operations; it does not switch them to the base PR's native async
 filesystem methods.
