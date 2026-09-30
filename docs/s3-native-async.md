@@ -102,11 +102,13 @@ if dispatch is rejected it completes inline with the original I/O result. Inline
 continuations must not block. Global shutdown drains native clients and completion
 callbacks before releasing the AWS SDK.
 
-The transport supports S3-compatible providers with explicit, anonymous or native default-chain
-credentials. Explicit AssumeRole/WebIdentity settings, custom C++ credential/retry
-providers and explicit proxies use the existing SDK paths; native support would
-require adapters. Credentials may
-read configuration during setup. Metadata responses are capped at 16 MiB.
+The transport reuses the SDK CRT client's credentials provider, including explicit,
+anonymous, default-chain, AssumeRole, WebIdentity and custom C++ providers. The
+SDK's CRT delegate retrieves credentials through GetAWSCredentials(), preserving
+session tokens and provider-managed refresh. Credential retrieval or refresh may
+block inside the provider; native request submission does not make that work
+asynchronous. Custom retry strategies and explicit proxies use the existing SDK
+paths. Metadata responses are capped at 16 MiB.
 
 Native requests make one attempt. The shared CRT client uses the same single-attempt
 policy for reads when enabled for native writes, including GCP, OSS, COS and OBS.

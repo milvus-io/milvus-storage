@@ -10,7 +10,6 @@
 #include <utility>
 #include <arrow/filesystem/path_util.h>
 #include <aws/core/AmazonSerializableWebServiceRequest.h>
-#include <aws/core/auth/AWSCredentialsProviderChain.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/utils/stream/PreallocatedStreamBuf.h>
 #include <aws/crt/http/HttpRequestResponse.h>
@@ -181,22 +180,9 @@ arrow::Status NativeS3Response::ToStatus() const {
 arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(
     const S3Options& options, std::shared_ptr<S3ClientHolder> holder, std::shared_ptr<S3CrtClientHolder> crt_holder) {
   ARROW_RETURN_NOT_OK(CheckS3Initialized());
-  if (options.retry_strategy || !options.proxy_options.host.empty() ||
-      options.credentials_kind == S3CredentialsKind::Role ||
-      options.credentials_kind == S3CredentialsKind::WebIdentity) {
-    return arrow::Status::NotImplemented(
-        "Native S3 requires explicit/default/anonymous credentials, no custom retry strategy and no proxy");
+  if (options.retry_strategy || !options.proxy_options.host.empty()) {
+    return arrow::Status::NotImplemented("Native S3 requires no custom retry strategy and no proxy");
   }
-  const auto* provider = options.credentials_provider.get();
-  const bool standard_provider =
-      provider && ((options.credentials_kind == S3CredentialsKind::Explicit &&
-                    typeid(*provider) == typeid(Aws::Auth::SimpleAWSCredentialsProvider)) ||
-                   (options.credentials_kind == S3CredentialsKind::Anonymous &&
-                    typeid(*provider) == typeid(Aws::Auth::AnonymousAWSCredentialsProvider)) ||
-                   (options.credentials_kind == S3CredentialsKind::Default &&
-                    typeid(*provider) == typeid(Aws::Auth::DefaultAWSCredentialsProviderChain)));
-  if (!standard_provider)
-    return arrow::Status::NotImplemented("Native S3 custom credentials providers require an adapter");
   if (!options.max_connections || (options.scheme != "http" && options.scheme != "https")) {
     return arrow::Status::Invalid("Invalid native S3 connection options");
   }
@@ -305,6 +291,8 @@ arrow::Future<NativeS3Response> NativeS3Transport::Send(const Aws::AmazonWebServ
     options.type = AWS_S3_META_REQUEST_TYPE_DEFAULT;
     options.operation_name = aws_byte_cursor_from_c_str(model.GetServiceRequestName());
     options.message = r->message->GetUnderlyingMessage();
+    // Otherwise inherit the SDK client's signing config and credentials provider,
+    // including session tokens and refresh through its CRT delegate.
     if (r->signing_credentials)
       options.signing_config = &r->signing_config;
     options.endpoint = &r->endpoint;

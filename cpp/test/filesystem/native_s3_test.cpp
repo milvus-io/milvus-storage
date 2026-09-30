@@ -5,8 +5,10 @@
 #include <arrow/testing/gtest_util.h>
 #include <arrow/util/thread_pool.h>
 #include <gtest/gtest.h>
+#include <atomic>
 #include <cstdlib>
 #include <future>
+#include <aws/core/auth/AWSCredentialsProvider.h>
 #include <folly/executors/ManualExecutor.h>
 #include "milvus-storage/format/parquet/folly_arrow_executor.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
@@ -122,6 +124,38 @@ TEST_F(NativeS3Test, SameInstanceSupportsSyncAndArrowAsyncCalls) {
   auto nested = std::make_shared<FileSystemProxy>("pages", fs_);
   ASSERT_OK_AND_ASSIGN(auto nested_info, Await(Stat(nested, "a")));
   EXPECT_EQ(nested_info.path(), "a");
+}
+
+TEST_F(NativeS3Test, CustomCredentialsProviderRefreshesWithoutAnIoWorker) {
+  if (std::getenv("STORAGE_NATIVE_S3_REAL"))
+    GTEST_SKIP() << "Requires fixture credential inspection";
+  class RotatingCredentialsProvider : public Aws::Auth::AWSCredentialsProvider {
+ public:
+    Aws::Auth::AWSCredentials GetAWSCredentials() override {
+      auto suffix = std::to_string(generation.load());
+      return {("fixture-" + suffix).c_str(), "fixture-secret", ("token-" + suffix).c_str()};
+    }
+    std::atomic<int> generation{1};
+  };
+
+  ASSERT_OK(executor_->Shutdown());
+  executor_stopped_ = true;
+  for (auto kind : {S3CredentialsKind::Default, S3CredentialsKind::Role, S3CredentialsKind::WebIdentity}) {
+    SCOPED_TRACE(static_cast<int>(kind));
+    auto provider = std::make_shared<RotatingCredentialsProvider>();
+    auto options = options_;
+    options.credentials_kind = kind;
+    options.credentials_provider = provider;
+    ASSERT_OK_AND_ASSIGN(auto s3, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
+    auto fs = std::make_shared<FileSystemProxy>(prefix_, s3);
+    for (int generation : {1, 2}) {
+      provider->generation.store(generation);
+      auto result = Stat(fs, "credential-check/" + std::to_string(generation));
+      ASSERT_TRUE(result.Wait(5));
+      ASSERT_OK_AND_ASSIGN(auto info, result.result());
+      EXPECT_EQ(info.size(), 6);
+    }
+  }
 }
 
 TEST_F(NativeS3Test, ProviderFilesystemOperationsWithAndWithoutCrt) {

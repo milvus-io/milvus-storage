@@ -96,6 +96,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply(200, b"<ListAllMyBucketsResult><Buckets><Bucket><Name>bucket</Name></Bucket></Buckets></ListAllMyBucketsResult>")
         if bucket != "bucket":
             return self.reply(404)
+        if key.startswith("root/credential-check/") and self.command == "HEAD":
+            generation = key.rsplit("/", 1)[1]
+            auth = self.headers.get("Authorization", "")
+            if (not auth.startswith("AWS4-HMAC-SHA256 ") or
+                    f"Credential=fixture-{generation}/" not in auth or
+                    self.headers.get("x-amz-security-token") != f"token-{generation}"):
+                return self.reply(403)
+            return self.reply(200, length=6)
         if key == "root/denied":
             return self.reply(403, b"<Error><Code>AccessDenied</Code></Error>")
         if self.command in ("PUT", "POST", "DELETE"):
