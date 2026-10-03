@@ -20,11 +20,11 @@ namespace milvus_storage {
 IndicesBasedSplitter::IndicesBasedSplitter(const std::vector<std::vector<int>>& column_indices)
     : column_indices_(column_indices) {}
 
-std::vector<ColumnGroup> IndicesBasedSplitter::Split(const std::shared_ptr<arrow::RecordBatch>& record) {
+arrow::Result<std::vector<ColumnGroup>> IndicesBasedSplitter::Split(const std::shared_ptr<arrow::RecordBatch>& record) {
   std::vector<ColumnGroup> column_groups;
 
   for (GroupId group_id = 0; group_id < column_indices_.size(); group_id++) {
-    auto batch = record->SelectColumns(column_indices_[group_id]).ValueOrDie();
+    ARROW_ASSIGN_OR_RAISE(auto batch, record->SelectColumns(column_indices_[group_id]));
     column_groups.emplace_back(group_id, column_indices_[group_id], batch);
   }
 
