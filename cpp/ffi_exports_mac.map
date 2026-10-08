@@ -103,6 +103,7 @@ _loon_free_cstr
 
 # FilesystemCache interface
 _loon_filesystem_get
+_loon_filesystem_evict
 _loon_filesystem_destroy
 _loon_close_filesystems
 

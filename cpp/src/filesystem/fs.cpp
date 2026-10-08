@@ -248,7 +248,23 @@ std::vector<std::pair<std::string, FileSystemPtr>> FilesystemCache::list() const
   return entries;
 }
 
-void FilesystemCache::remove(const std::string& key) { cache_.remove(key); }
+void FilesystemCache::remove(const std::string& key) {
+  // Serialize with get()'s miss/create/put, so an in-flight creation cannot
+  // publish the evicted entry after remove returns. Release provider clients
+  // outside the cache locks; their destructors may wait for outstanding I/O.
+  std::optional<std::shared_ptr<CacheEntry>> removed;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    removed = cache_.get(key);
+    cache_.remove(key);
+  }
+}
+
+arrow::Status FilesystemCache::evict(const api::Properties& properties, const std::string& path) {
+  ARROW_ASSIGN_OR_RAISE(const auto config, resolve_config(properties, path));
+  remove(config.GetCacheKey());
+  return arrow::Status::OK();
+}
 
 void FilesystemCache::clean() { cache_.clean(); }
 

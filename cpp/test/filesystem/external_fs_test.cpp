@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/ffi_filesystem_c.h"
 #include "milvus-storage/properties.h"
 
 namespace milvus_storage::test {
@@ -534,6 +535,69 @@ TEST_F(ExternalFilesystemTest, ResolveConfigWithQueryComponent) {
   ASSERT_TRUE(rel.ok()) << rel.status().ToString();
   EXPECT_EQ(rel.ValueOrDie().bucket_name, "default-bucket");
   EXPECT_EQ(rel.ValueOrDie().access_key_id, "default_key");
+}
+
+TEST_F(ExternalFilesystemTest, EvictRecreatesOnlyMatchingFilesystem) {
+  auto& cache = FilesystemCache::getInstance();
+  api::Properties props;
+  props[PROPERTY_FS_STORAGE_TYPE] = std::string("local");
+  props[PROPERTY_FS_ROOT_PATH] = std::string("/tmp/evict-default");
+  props["extfs.collection.storage_type"] = std::string("local");
+  props["extfs.collection.root_path"] = std::string("/tmp/evict-external");
+  props["extfs.collection.address"] = std::string("endpoint");
+  props["extfs.collection.bucket_name"] = std::string("bucket");
+  const std::string path = "s3://endpoint/bucket/object";
+  const auto original = cache.get(props, path);
+  const auto unrelated = cache.get(props);
+  ASSERT_TRUE(original.ok()) << original.status();
+  ASSERT_TRUE(unrelated.ok()) << unrelated.status();
+  ASSERT_EQ(cache.size(), 2);
+
+  ASSERT_TRUE(cache.evict(props, path).ok());
+  EXPECT_EQ(cache.size(), 1);
+  // Repeated eviction must not create a filesystem on a miss.
+  ASSERT_TRUE(cache.evict(props, path).ok());
+  EXPECT_EQ(cache.size(), 1);
+  const auto replacement = cache.get(props, path);
+  ASSERT_TRUE(replacement.ok()) << replacement.status();
+  EXPECT_NE(*original, *replacement);
+  EXPECT_EQ(*unrelated, *cache.get(props));
+  // Eviction releases the cache's reference, not the caller's live handle.
+  EXPECT_TRUE((*original)->GetFileInfo("missing-file").ok());
+}
+
+TEST_F(ExternalFilesystemTest, FFIEvictUsesConfigurationAndPreservesErrors) {
+  const char* keys[] = {"fs.storage_type", "fs.root_path"};
+  const char* values[] = {"local", "/tmp/evict-ffi"};
+  LoonProperties props;
+  auto result = loon_properties_create(keys, values, 2, &props);
+  ASSERT_TRUE(loon_ffi_is_success(&result));
+  loon_ffi_free_result(&result);
+  FileSystemHandle handle = 0;
+  result = loon_filesystem_get(&props, nullptr, 0, &handle);
+  ASSERT_TRUE(loon_ffi_is_success(&result));
+  loon_ffi_free_result(&result);
+  ASSERT_EQ(FilesystemCache::getInstance().size(), 1);
+  result = loon_filesystem_evict(&props, nullptr, 0);
+  EXPECT_TRUE(loon_ffi_is_success(&result));
+  loon_ffi_free_result(&result);
+  EXPECT_EQ(FilesystemCache::getInstance().size(), 0);
+  result = loon_filesystem_evict(&props, nullptr, 0);
+  EXPECT_TRUE(loon_ffi_is_success(&result));
+  loon_ffi_free_result(&result);
+  result = loon_filesystem_evict(nullptr, nullptr, 0);
+  EXPECT_FALSE(loon_ffi_is_success(&result));
+  loon_ffi_free_result(&result);
+  result = loon_filesystem_evict(&props, nullptr, 1);
+  EXPECT_FALSE(loon_ffi_is_success(&result));
+  loon_ffi_free_result(&result);
+  const std::string unknown = "s3://unknown/bucket/file";
+  result = loon_filesystem_evict(&props, unknown.data(), unknown.size());
+  EXPECT_FALSE(loon_ffi_is_success(&result));
+  EXPECT_NE(std::string(loon_ffi_get_errmsg(&result)).find("No matching external"), std::string::npos);
+  loon_ffi_free_result(&result);
+  loon_filesystem_destroy(handle);
+  loon_properties_free(&props);
 }
 
 }  // namespace milvus_storage::test
