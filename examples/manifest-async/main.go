@@ -7,7 +7,7 @@ package main
 #include "milvus-storage/ffi_c.h"
 extern int32_t manifestSubmit(void*, LoonAsyncTask, void*);
 static inline void runManifestTask(LoonAsyncTask task, void* data) { task(data); }
-extern void manifestBeginComplete(uintptr_t, LoonFFIResult, LoonTransactionHandle);
+extern void manifestOpenComplete(uintptr_t, LoonFFIResult, LoonTransactionHandle);
 extern void manifestCommitComplete(uintptr_t, LoonFFIResult, int32_t, int64_t);
 */
 import "C"
@@ -53,8 +53,7 @@ func newExecutor(workers int) *executor {
 	return pool
 }
 func (pool *executor) descriptor() C.LoonAsyncExecutor {
-	return C.LoonAsyncExecutor{struct_size: C.uint32_t(C.sizeof_LoonAsyncExecutor),
-		context: pool.context, submit: (C.LoonAsyncSubmit)(C.manifestSubmit)}
+	return C.LoonAsyncExecutor{context: pool.context, submit: (C.LoonAsyncSubmit)(C.manifestSubmit)}
 }
 func (pool *executor) close() {
 	close(pool.tasks)
@@ -94,8 +93,8 @@ func consume(result C.LoonFFIResult) error {
 	return storageError{int(result.err_code), C.GoString(result.message)}
 }
 
-//export manifestBeginComplete
-func manifestBeginComplete(token C.uintptr_t, result C.LoonFFIResult, transaction C.LoonTransactionHandle) {
+//export manifestOpenComplete
+func manifestOpenComplete(token C.uintptr_t, result C.LoonFFIResult, transaction C.LoonTransactionHandle) {
 	handle := cgo.Handle(token)
 	done := handle.Value().(chan completion)
 	value := completion{transaction, consume(result)}
@@ -103,28 +102,28 @@ func manifestBeginComplete(token C.uintptr_t, result C.LoonFFIResult, transactio
 	done <- value // Buffered before submission; early completion cannot lose notification.
 }
 
-func begin(ctx context.Context, ioContext C.LoonIOContextHandle, path string, properties *C.LoonProperties) (C.LoonTransactionHandle, error) {
-	return beginVersion(ctx, ioContext, path, properties, -1)
+func openTransaction(ctx context.Context, asyncContext C.LoonAsyncContextHandle, path string, properties *C.LoonProperties) (C.LoonTransactionHandle, error) {
+	return openVersion(ctx, asyncContext, path, properties, -1)
 }
 
-func beginVersion(ctx context.Context, ioContext C.LoonIOContextHandle, path string, properties *C.LoonProperties, version int64) (C.LoonTransactionHandle, error) {
+func openVersion(ctx context.Context, asyncContext C.LoonAsyncContextHandle, path string, properties *C.LoonProperties, version int64) (C.LoonTransactionHandle, error) {
 	done := make(chan completion, 1)
 	token := cgo.NewHandle(done)
 	nativePath := C.CString(path)
 	defer C.free(unsafe.Pointer(nativePath))
 	var operation C.LoonAsyncHandle
-	result := C.loon_transaction_begin_async(ioContext, nativePath, properties, C.int64_t(version), 0, 1, nil,
-		(C.LoonTransactionBeginCallback)(C.manifestBeginComplete), C.uintptr_t(token), &operation)
+	result := C.loon_transaction_open_async(asyncContext, nativePath, properties, C.int64_t(version), 0, 1,
+		(C.LoonTransactionOpenCallback)(C.manifestOpenComplete), C.uintptr_t(token), &operation)
 	if err := consume(result); err != nil {
 		token.Delete()
 		return 0, err
 	}
-	defer C.loon_async_release(operation)
+	defer C.loon_async_release(&operation)
 	var value completion
 	select {
 	case value = <-done:
 	case <-ctx.Done():
-		C.loon_async_cancel(operation)
+		C.loon_async_cancel(&operation)
 		value = <-done // Keep transaction/token ownership until the synchronous worker operation completes.
 	}
 	return value.transaction, value.err
@@ -145,22 +144,22 @@ func manifestCommitComplete(token C.uintptr_t, result C.LoonFFIResult, outcome C
 	done <- value
 }
 
-func commit(ctx context.Context, ioContext C.LoonIOContextHandle, transaction C.LoonTransactionHandle) commitCompletion {
+func commit(ctx context.Context, asyncContext C.LoonAsyncContextHandle, transaction C.LoonTransactionHandle) commitCompletion {
 	done := make(chan commitCompletion, 1)
 	token := cgo.NewHandle(done)
 	var operation C.LoonAsyncHandle
-	result := C.loon_transaction_commit_async(ioContext, transaction, nil,
+	result := C.loon_transaction_commit_async(asyncContext, transaction,
 		(C.LoonTransactionCommitCallback)(C.manifestCommitComplete), C.uintptr_t(token), &operation)
 	if err := consume(result); err != nil {
 		token.Delete()
 		return commitCompletion{0, -1, err}
 	}
-	defer C.loon_async_release(operation)
+	defer C.loon_async_release(&operation)
 	select {
 	case value := <-done:
 		return value
 	case <-ctx.Done():
-		C.loon_async_cancel(operation)
+		C.loon_async_cancel(&operation)
 		return <-done // UNKNOWN cannot be converted into context cancellation alone.
 	}
 }
@@ -170,11 +169,11 @@ func main() {
 	pool := newExecutor(1)
 	defer pool.close()
 	descriptor := pool.descriptor()
-	var ioContext C.LoonIOContextHandle
-	if err := consume(C.loon_io_context_create(&descriptor, &ioContext)); err != nil {
+	var asyncContext C.LoonAsyncContextHandle
+	if err := consume(C.loon_async_context_create(&descriptor, &asyncContext)); err != nil {
 		panic(err)
 	}
-	defer C.loon_io_context_destroy(ioContext)
+	defer C.loon_async_context_destroy(asyncContext)
 	pairs := [][2]string{
 		{"fs.storage_type", "remote"}, {"fs.address", os.Getenv("S3_ENDPOINT")},
 		{"fs.bucket_name", os.Getenv("S3_BUCKET")}, {"fs.access_key_id", os.Getenv("S3_ACCESS_KEY")},
@@ -202,7 +201,7 @@ func main() {
 		for i := 0; i < rounds; i++ {
 			ctx, cancel := context.WithCancel(context.Background())
 			go func() { runtime.Gosched(); cancel() }()
-			transaction, err := beginVersion(ctx, ioContext, "cancel-example", &properties, 0)
+			transaction, err := openVersion(ctx, asyncContext, "cancel-example", &properties, 0)
 			cancel()
 			if transaction != 0 {
 				C.loon_transaction_destroy(transaction)
@@ -231,7 +230,7 @@ func main() {
 		fmt.Printf("concurrent goroutine ran; waiting stacks:\n%s\n", stack[:n])
 		close(observed)
 	}()
-	transaction, err := begin(ctx, ioContext, os.Getenv("MANIFEST_PATH"), &properties)
+	transaction, err := openTransaction(ctx, asyncContext, os.Getenv("MANIFEST_PATH"), &properties)
 	if transaction != 0 {
 		defer C.loon_transaction_destroy(transaction)
 		if os.Getenv("MANIFEST_COMMIT") == "1" {
@@ -241,7 +240,7 @@ func main() {
 			if mutationErr != nil {
 				panic(mutationErr)
 			}
-			value := commit(ctx, ioContext, transaction)
+			value := commit(ctx, asyncContext, transaction)
 			fmt.Printf("commit outcome=%d version=%d error=%v\n", value.Outcome, value.Version, value.Err)
 			// UNKNOWN (2) is preserved even for a transient error. Do not blindly retry.
 			if value.Err != nil {
@@ -253,5 +252,5 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println("async begin completed")
+	fmt.Println("async open completed")
 }

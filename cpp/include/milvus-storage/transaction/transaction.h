@@ -28,22 +28,7 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/manifest.h"
 
-namespace milvus_storage {
-struct AsyncStatus {
-  enum Code { OK, Cancelled, Deadline, Overloaded, Busy, Memory, Exception, Arrow };
-  Code code = OK;
-  arrow::Status detail;
-  AsyncStatus() = default;
-  AsyncStatus(Code code) : code(code) {}
-  AsyncStatus(arrow::Status status)
-      : code(status.ok()              ? OK
-             : status.IsOutOfMemory() ? Memory
-             : status.IsCancelled()   ? Cancelled
-                                      : Arrow),
-        detail(std::move(status)) {}
-  bool ok() const { return code == OK; }
-};
-}  // namespace milvus_storage
+#include "milvus-storage/async.h"
 
 namespace milvus_storage::api::transaction {
 
@@ -194,12 +179,7 @@ extern const Resolver& FailResolver;
 
 class Transaction;
 
-class AsyncOperation {
-  public:
-  virtual ~AsyncOperation() = default;
-  virtual void Cancel() = 0;
-};
-struct BeginResult {
+struct OpenResult {
   AsyncStatus status;
   std::unique_ptr<Transaction> transaction;
 };
@@ -234,14 +214,14 @@ class Transaction {
   // I/O cannot be interrupted. The executor must accept tasks through completion.
   // Keep the resolver alive for the lifetime of the returned transaction. Dropping
   // an unconsumed future starts no work; releasing its handle does not cancel it.
-  static folly::SemiFuture<BeginResult> BeginAsync(const std::string& path,
-                                                   Properties properties,
-                                                   int64_t version,
-                                                   const Resolver& resolver,
-                                                   uint32_t retries,
-                                                   uint64_t timeout_ms,
-                                                   std::shared_ptr<AsyncOperation>& operation,
-                                                   ArrowFileSystemPtr filesystem = nullptr);
+  static folly::SemiFuture<OpenResult> OpenAsync(const std::string& path,
+                                                 Properties properties,
+                                                 int64_t version,
+                                                 const Resolver& resolver,
+                                                 uint32_t retries,
+                                                 uint64_t timeout_ms,
+                                                 std::shared_ptr<AsyncOperation>& operation,
+                                                 ArrowFileSystemPtr filesystem = nullptr);
 
   ~Transaction() = default;
 

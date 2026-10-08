@@ -83,7 +83,7 @@ class Transaction:
 
         # Begin transaction
         handle = self._ffi.new("LoonTransactionHandle*")
-        result = self._lib.loon_transaction_begin(
+        result = self._lib.loon_transaction_open(
             base_path.encode("utf-8"),
             self._props._get_c_properties(),
             read_version,

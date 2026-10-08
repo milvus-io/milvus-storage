@@ -26,12 +26,12 @@ Include `milvus-storage/transaction/transaction.h` for both synchronous and
 asynchronous transaction APIs. For example:
 
 ```cpp
-auto begin = Transaction::BeginAsync(path, properties, version, resolver, retries,
+auto open = Transaction::OpenAsync(path, properties, version, resolver, retries,
                                      timeout_ms, operation);
 auto commit = transaction->CommitAsync(timeout_ms, operation);
 ```
 
-`Transaction::BeginAsync` is a static factory that returns a lazy `folly::SemiFuture<BeginResult>`. Consuming it with
+`Transaction::OpenAsync` is a static factory that returns a lazy `folly::SemiFuture<OpenResult>`. Consuming it with
 `.via(&executor)` runs filesystem initialization and `Transaction::Open` on that
 executor. Supply a pool suitable for blocking work, not an event-loop thread.
 Inline executors are rejected. A continuation may select a different executor.
@@ -45,12 +45,17 @@ filesystem and can use existing synchronous methods.
 
 ## C ABI and ownership
 
-Create a caller-owned `LoonIOContextHandle` with
-`loon_io_context_create(&executor, &io_context)`, then pass it explicitly as the
-first argument to `loon_transaction_begin_async` and
+Include `milvus-storage/ffi_async_context.h` for reusable executor, context and
+operation-handle APIs, and `milvus-storage/ffi_c.h` for transaction APIs.
+The synchronous and asynchronous open functions are `loon_transaction_open`
+and `loon_transaction_open_async`, matching C++ `Open` / `OpenAsync`.
+
+Create a caller-owned `LoonAsyncContextHandle` with
+`loon_async_context_create(&executor, &async_context)`, then pass it explicitly as the
+first argument to `loon_transaction_open_async` and
 `loon_transaction_commit_async`. Each context owns its admission/shutdown state;
 there is no process-wide executor configuration. Contexts may use different
-executors or share one, and begin and commit may use different contexts.
+executors or share one, and open and commit may use different contexts.
 The executor's `submit` function must enqueue without waiting or running inline, return zero
 only when it will run the task exactly once, and neither retain nor run a rejected
 task. It must be thread-safe and must not throw. Storage copies the descriptor;
@@ -60,36 +65,55 @@ Submission copies inputs. An initial enqueue rejection returns an error and
 invokes no callback. Accepted operations invoke exactly one callback, normally
 on the supplied executor and possibly before submission returns. Exceptional
 completion-enqueue failure delivers the result on the completing worker.
-Callbacks must not throw, block, or shut down/destroy their own IO context.
+Callbacks must not throw, block, or shut down/destroy their own async context.
 The callback owns its result and successful transaction and must free them using
 the existing APIs.
 
+The caller supplies a zero-initialized `LoonAsyncHandle` for each operation:
+
+```c
+LoonAsyncHandle operation = {.timeout_ms = 1000};
+LoonFFIResult result = loon_transaction_open_async(
+    async_context, path, &properties, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1,
+    on_open, user_data, &operation);
+/* After submission returns, cancel/release through &operation as needed. */
+loon_async_release(&operation);
+```
+
+There is no separate options structure. Submission copies `timeout_ms` and fills
+`internal` on success. Do not modify `internal` or copy a live handle. Reusing a
+live handle returns BUSY without replacing its state or invoking a callback.
+Release clears `internal` and preserves the timeout, allowing reuse. Serialize
+submission, cancellation and release calls on the same handle; the library does
+not retain the caller's handle storage after submission returns. Since callbacks
+may run before submission returns, they must not access that handle concurrently.
+
 Cancel and release are separate: cancel requests skipping work that has not
-started; release only drops the handle. Neither waits. Releasing a handle early
+started; release only drops the internal operation state. Neither waits. Releasing a handle early
 does not cancel accepted work. Dropping an unconsumed C++ future starts no work.
 The resolver must outlive any transaction retaining it.
 
 ## Cancellation, timeout and admission
 
 Cancellation and deadlines are checked before executing the synchronous
-transaction operation (and after filesystem initialization for begin). Once
+transaction operation (and after filesystem initialization for open). Once
 `Transaction::Open` is running, it completes normally, even if the operation is
 cancelled or its deadline expires. There is no interruption of in-flight network
 I/O and no end-to-end deadline guarantee. Input and callback ownership lasts
-until completion. Options default to 30 seconds; the maximum is one day.
+until completion. `LoonAsyncHandle.timeout_ms` defaults to 30 seconds when zero; the maximum is one day.
 
 The caller executor controls concurrency and queue capacity for both C ABI and
-native C++ operations. IO contexts track accepted callbacks only to drain them
+native C++ operations. async contexts track accepted callbacks only to drain them
 during shutdown; they impose no additional operation limit.
 Existing filesystem memory policies apply; this patch introduces no response-byte limit
 or buffer-budget setting.
 
-`loon_io_context_shutdown(io_context)` rejects new admission on that context and
+`loon_async_context_shutdown(async_context)` rejects new admission on that context and
 waits for its accepted callbacks to return. It is idempotent and may run alongside
 submissions. Other contexts continue accepting work. A stopped context cannot be
 restarted, but new contexts may be created at any time.
 
-`loon_io_context_destroy(io_context)` also drains callbacks, then frees the
+`loon_async_context_destroy(async_context)` also drains callbacks, then frees the
 context. Exclude concurrent API calls using the context before destruction.
 Cancel/release of operation handles remains valid after context destruction.
 Call shutdown/destroy on an application thread, never from that context's
@@ -101,7 +125,7 @@ before destroying executors or shutting down storage.
 
 ## Scope and verification
 
-This single PR includes begin and commit scheduling, lifecycle tests and C/Go
+This single PR includes open and commit scheduling, lifecycle tests and C/Go
 callers. Native S3 work is outside its scope.
 
 It builds on [PR #693](https://github.com/milvus-io/milvus-storage/pull/693),

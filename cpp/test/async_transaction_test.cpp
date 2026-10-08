@@ -42,19 +42,19 @@ class MemoryFileSystem : public arrow::fs::internal::MockFileSystem {
     return MockFileSystem::GetFileInfo(name);
   }
 };
-BeginResult Begin(const std::shared_ptr<MemoryFileSystem>& fs,
-                  int64_t version = -1,
-                  const Resolver& resolver = FailResolver,
-                  uint32_t retries = 0) {
+OpenResult Open(const std::shared_ptr<MemoryFileSystem>& fs,
+                int64_t version = -1,
+                const Resolver& resolver = FailResolver,
+                uint32_t retries = 0) {
   std::shared_ptr<AsyncOperation> operation;
-  auto future = Transaction::BeginAsync(fs->path, {}, version, resolver, retries, 3000, operation, fs);
+  auto future = Transaction::OpenAsync(fs->path, {}, version, resolver, retries, 3000, operation, fs);
   operation.reset();
   return std::move(future).via(&CallerExecutors::Get().work).get();
 }
 TEST(AsyncTransactionTest, UnconsumedFutureStartsNoIO) {
   auto fs = std::make_shared<MemoryFileSystem>();
   std::shared_ptr<AsyncOperation> operation;
-  { auto future = Transaction::BeginAsync(fs->path, {}, -1, FailResolver, 0, 3000, operation, fs); }
+  { auto future = Transaction::OpenAsync(fs->path, {}, -1, FailResolver, 0, 3000, operation, fs); }
   EXPECT_EQ(fs->info_calls, 0);
 }
 TEST(AsyncTransactionTest, SynchronousIOUsesCallerExecutor) {
@@ -62,7 +62,7 @@ TEST(AsyncTransactionTest, SynchronousIOUsesCallerExecutor) {
   folly::CPUThreadPoolExecutor executor(1);
   auto worker = folly::via(&executor, [] { return std::this_thread::get_id(); }).get();
   std::shared_ptr<AsyncOperation> operation;
-  auto result = Transaction::BeginAsync(fs->path, {}, -1, FailResolver, 0, 3000, operation, fs).via(&executor).get();
+  auto result = Transaction::OpenAsync(fs->path, {}, -1, FailResolver, 0, 3000, operation, fs).via(&executor).get();
   ASSERT_TRUE(result.status.ok());
   EXPECT_EQ(fs->io_thread, worker);
   EXPECT_EQ(result.transaction->GetReadVersion(), 0);
@@ -73,20 +73,20 @@ TEST(AsyncTransactionTest, ContinuationCanUseAnotherExecutor) {
   auto& executors = CallerExecutors::Get();
   auto completion = folly::via(&executors.completion, [] { return std::this_thread::get_id(); }).get();
   std::shared_ptr<AsyncOperation> operation;
-  auto result = Transaction::BeginAsync(fs->path, {}, 0, FailResolver, 0, 3000, operation, fs)
+  auto result = Transaction::OpenAsync(fs->path, {}, 0, FailResolver, 0, 3000, operation, fs)
                     .via(&executors.work)
                     .via(&executors.completion)
-                    .thenValue([completion](BeginResult result) {
+                    .thenValue([completion](OpenResult result) {
                       EXPECT_EQ(std::this_thread::get_id(), completion);
                       return result;
                     })
                     .get();
   EXPECT_TRUE(result.status.ok());
 }
-TEST(AsyncTransactionTest, CancelledQueuedBeginStartsNoIO) {
+TEST(AsyncTransactionTest, CancelledQueuedOpenStartsNoIO) {
   auto fs = std::make_shared<MemoryFileSystem>();
   std::shared_ptr<AsyncOperation> operation;
-  auto future = Transaction::BeginAsync(fs->path, {}, -1, FailResolver, 0, 3000, operation, fs);
+  auto future = Transaction::OpenAsync(fs->path, {}, -1, FailResolver, 0, 3000, operation, fs);
   operation->Cancel();
   EXPECT_EQ(std::move(future).via(&CallerExecutors::Get().work).get().status.code, AsyncStatus::Cancelled);
   EXPECT_EQ(fs->info_calls, 0);
@@ -95,7 +95,7 @@ TEST(AsyncTransactionTest, DeadlineIncludesQueueTime) {
   auto fs = std::make_shared<MemoryFileSystem>();
   folly::ManualExecutor executor;
   std::shared_ptr<AsyncOperation> operation;
-  auto future = Transaction::BeginAsync(fs->path, {}, -1, FailResolver, 0, 1, operation, fs).via(&executor);
+  auto future = Transaction::OpenAsync(fs->path, {}, -1, FailResolver, 0, 1, operation, fs).via(&executor);
   std::this_thread::sleep_for(std::chrono::milliseconds(10));
   executor.drain();
   EXPECT_EQ(std::move(future).get().status.code, AsyncStatus::Deadline);
@@ -104,7 +104,7 @@ TEST(AsyncTransactionTest, DeadlineIncludesQueueTime) {
 TEST(AsyncTransactionTest, InlineExecutorIsRejected) {
   auto fs = std::make_shared<MemoryFileSystem>();
   std::shared_ptr<AsyncOperation> operation;
-  auto result = Transaction::BeginAsync(fs->path, {}, 0, FailResolver, 0, 3000, operation, fs)
+  auto result = Transaction::OpenAsync(fs->path, {}, 0, FailResolver, 0, 3000, operation, fs)
                     .via(&folly::InlineExecutor::instance())
                     .get();
   EXPECT_FALSE(result.status.ok());
@@ -121,7 +121,7 @@ TEST(AsyncTransactionTest, BlockingIOLeavesSubmissionFreeAndCancellationWaits) {
   };
   std::shared_ptr<AsyncOperation> operation;
   auto future =
-      Transaction::BeginAsync(fs->path, {}, -1, FailResolver, 0, 3000, operation, fs).via(&CallerExecutors::Get().work);
+      Transaction::OpenAsync(fs->path, {}, -1, FailResolver, 0, 3000, operation, fs).via(&CallerExecutors::Get().work);
   EXPECT_EQ(entered_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
   operation->Cancel();
   EXPECT_FALSE(future.isReady());  // In-flight synchronous calls retain ownership.
@@ -130,13 +130,13 @@ TEST(AsyncTransactionTest, BlockingIOLeavesSubmissionFreeAndCancellationWaits) {
 }
 TEST(AsyncTransactionTest, ReturnedTransactionUsesExistingSyncCommitAndRead) {
   auto fs = std::make_shared<MemoryFileSystem>();
-  auto begun = Begin(fs, 0);
+  auto begun = Open(fs, 0);
   ASSERT_TRUE(begun.status.ok());
   begun.transaction->AddDeltaLog({get_delta_filepath(fs->path, "delete"), DeltaLogType::PRIMARY_KEY, 3});
   auto written = begun.transaction->Commit();
   ASSERT_TRUE(written.ok()) << written.status();
   EXPECT_EQ(*written, 1);
-  auto read = Begin(fs);
+  auto read = Open(fs);
   ASSERT_TRUE(read.status.ok());
   EXPECT_EQ(read.transaction->GetReadVersion(), 1);
   auto manifest = read.transaction->GetManifest();
@@ -152,7 +152,7 @@ CommitResult Commit(Transaction* txn) {
 }
 TEST(AsyncTransactionTest, DiscardedCommitReleasesReservation) {
   auto fs = std::make_shared<MemoryFileSystem>();
-  auto begun = Begin(fs, 0);
+  auto begun = Open(fs, 0);
   ASSERT_TRUE(begun.status.ok());
   begun.transaction->AddDeltaLog({get_delta_filepath(fs->path, "own"), DeltaLogType::PRIMARY_KEY, 1});
   std::shared_ptr<AsyncOperation> retained;
@@ -171,7 +171,7 @@ TEST(AsyncTransactionTest, DiscardedCommitReleasesReservation) {
 }
 TEST(AsyncTransactionTest, QueuedCommitCancellationStartsNoIO) {
   auto fs = std::make_shared<MemoryFileSystem>();
-  auto begun = Begin(fs, 0);
+  auto begun = Open(fs, 0);
   ASSERT_TRUE(begun.status.ok());
   begun.transaction->AddDeltaLog({get_delta_filepath(fs->path, "own"), DeltaLogType::PRIMARY_KEY, 1});
   std::shared_ptr<AsyncOperation> operation;
@@ -184,7 +184,7 @@ TEST(AsyncTransactionTest, QueuedCommitCancellationStartsNoIO) {
 }
 TEST(AsyncTransactionTest, CommitUsesAnotherExecutorAndPreservesSuccessAfterCancellation) {
   auto fs = std::make_shared<MemoryFileSystem>();
-  auto begun = Begin(fs, 0);
+  auto begun = Open(fs, 0);
   ASSERT_TRUE(begun.status.ok());
   begun.transaction->AddDeltaLog({get_delta_filepath(fs->path, "own"), DeltaLogType::PRIMARY_KEY, 1});
   folly::CPUThreadPoolExecutor executor(1);
@@ -201,8 +201,8 @@ TEST(AsyncTransactionTest, CommitUsesAnotherExecutorAndPreservesSuccessAfterCanc
 }
 TEST(AsyncTransactionTest, CommitErrorsConservativelyReportUnknown) {
   auto fs = std::make_shared<MemoryFileSystem>();
-  auto stale = Begin(fs, 0);
-  auto winner = Begin(fs, 0);
+  auto stale = Open(fs, 0);
+  auto winner = Open(fs, 0);
   ASSERT_TRUE(stale.status.ok());
   ASSERT_TRUE(winner.status.ok());
   winner.transaction->AddDeltaLog({get_delta_filepath(fs->path, "winner"), DeltaLogType::PRIMARY_KEY, 1});
@@ -228,8 +228,8 @@ TEST(AsyncTransactionTest, CustomResolverReusesSynchronousLatestManifestBehavior
     }
   } resolver;
   auto fs = std::make_shared<MemoryFileSystem>();
-  auto stale = Begin(fs, 0, resolver);
-  auto winner = Begin(fs, 0);
+  auto stale = Open(fs, 0, resolver);
+  auto winner = Open(fs, 0);
   ASSERT_TRUE(stale.status.ok());
   ASSERT_TRUE(winner.status.ok());
   stale.transaction->AddDeltaLog({get_delta_filepath(fs->path, "own"), DeltaLogType::PRIMARY_KEY, 1});
@@ -238,7 +238,7 @@ TEST(AsyncTransactionTest, CustomResolverReusesSynchronousLatestManifestBehavior
   auto result = Commit(stale.transaction.get());
   ASSERT_TRUE(result.status.ok());
   EXPECT_EQ(result.version, 2);
-  auto read = Begin(fs);
+  auto read = Open(fs);
   ASSERT_TRUE(read.status.ok());
   auto manifest = read.transaction->GetManifest();
   ASSERT_TRUE(manifest.ok());

@@ -32,12 +32,12 @@ extern void destroy_column_groups_contents(LoonColumnGroups* cgroups);
 using namespace milvus_storage::api;
 using namespace milvus_storage::api::transaction;
 
-LoonFFIResult loon_transaction_begin(const char* base_path,
-                                     const ::LoonProperties* properties,
-                                     int64_t read_version,
-                                     int32_t resolve_id,
-                                     uint32_t retry_limit,
-                                     LoonTransactionHandle* out_handle) {
+LoonFFIResult loon_transaction_open(const char* base_path,
+                                    const ::LoonProperties* properties,
+                                    int64_t read_version,
+                                    int32_t resolve_id,
+                                    uint32_t retry_limit,
+                                    LoonTransactionHandle* out_handle) {
   if (!base_path || !properties) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: base_path, properties must not be null");
   }

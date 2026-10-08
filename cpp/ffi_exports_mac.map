@@ -145,7 +145,7 @@ _loon_thread_pool_singleton
 _loon_thread_pool_singleton_release
 
 # Transaction interface
-_loon_transaction_begin
+_loon_transaction_open
 _loon_transaction_get_manifest
 _loon_transaction_get_read_version
 _loon_transaction_commit
@@ -227,12 +227,12 @@ _loon_fiukey_s3fs_readat_fail
 _loon_fiukey_column_group_write_fail
 
 _loon_transaction_commit_async
-_loon_transaction_begin_async
+_loon_transaction_open_async
 _loon_async_cancel
 _loon_async_release
-_loon_io_context_create
-_loon_io_context_shutdown
-_loon_io_context_destroy
+_loon_async_context_create
+_loon_async_context_shutdown
+_loon_async_context_destroy
 _loon_errcode_async_cancelled
 _loon_errcode_async_deadline
 _loon_errcode_async_overloaded

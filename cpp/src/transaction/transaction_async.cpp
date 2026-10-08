@@ -26,23 +26,23 @@ struct AsyncManifestOperation final : AsyncOperation {
   }
 };
 
-folly::SemiFuture<BeginResult> Transaction::BeginAsync(const std::string& path,
-                                                       Properties properties,
-                                                       int64_t version,
-                                                       const Resolver& resolver,
-                                                       uint32_t retries,
-                                                       uint64_t timeout_ms,
-                                                       std::shared_ptr<AsyncOperation>& operation,
-                                                       ArrowFileSystemPtr filesystem) {
+folly::SemiFuture<OpenResult> Transaction::OpenAsync(const std::string& path,
+                                                     Properties properties,
+                                                     int64_t version,
+                                                     const Resolver& resolver,
+                                                     uint32_t retries,
+                                                     uint64_t timeout_ms,
+                                                     std::shared_ptr<AsyncOperation>& operation,
+                                                     ArrowFileSystemPtr filesystem) {
   operation.reset();
   if (version < -1 || !timeout_ms || timeout_ms > 24 * 60 * 60 * 1000)
-    return folly::makeSemiFuture(BeginResult{arrow::Status::Invalid("Invalid async transaction arguments"), nullptr});
+    return folly::makeSemiFuture(OpenResult{arrow::Status::Invalid("Invalid async transaction arguments"), nullptr});
   auto state = std::make_shared<AsyncManifestOperation>();
   state->deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   operation = state;
   return folly::makeSemiFuture().deferExValue(
       [state, path, properties = std::move(properties), version, resolver = &resolver, retries,
-       filesystem = std::move(filesystem)](folly::Executor::KeepAlive<> executor, folly::Unit) mutable -> BeginResult {
+       filesystem = std::move(filesystem)](folly::Executor::KeepAlive<> executor, folly::Unit) mutable -> OpenResult {
         try {
           auto status = state->BeforeStart(executor);
           if (!status.ok())

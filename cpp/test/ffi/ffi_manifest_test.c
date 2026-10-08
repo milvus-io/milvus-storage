@@ -75,8 +75,8 @@ static void test_empty_manifests(void) {
   recreate_dir(fs, TEST_BASE_PATH);
 
   // Open transaction to get latest manifest
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
-                              &transaction);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
+                             &transaction);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Get read version
@@ -139,8 +139,8 @@ static void test_manifests_write_read(void) {
 
   create_writer_test_file(TEST_BASE_PATH, &out_cgs, 1, 20, false);
 
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
-                              &tranhandle);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
+                             &tranhandle);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   ck_assert(tranhandle != 0);
 
@@ -154,8 +154,8 @@ static void test_manifests_write_read(void) {
   loon_transaction_destroy(tranhandle);
 
   // Open a new transaction to read the committed manifest
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
-                              &read_transaction);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
+                             &read_transaction);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   int64_t read_version = -1;
@@ -189,8 +189,8 @@ static void test_abort(void) {
   recreate_dir(fs, TEST_BASE_PATH);
 
   // Open first transaction to read initial state
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
-                              &read_transaction1);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
+                             &read_transaction1);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   int64_t read_version = -1;
@@ -201,16 +201,16 @@ static void test_abort(void) {
   rc = loon_transaction_get_manifest(read_transaction1, &cmanifest1);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* read_version */, LOON_TRANSACTION_RESOLVE_FAIL,
-                              1 /* retry_limit */, &tranhandle);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1 /* read_version */, LOON_TRANSACTION_RESOLVE_FAIL,
+                             1 /* retry_limit */, &tranhandle);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   ck_assert(tranhandle != 0);
 
   loon_transaction_destroy(tranhandle);
 
   // Open second transaction to read state after abort
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
-                              &read_transaction2);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
+                             &read_transaction2);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   rc = loon_transaction_get_read_version(read_transaction2, &read_version);
@@ -253,8 +253,8 @@ static void test_add_column_group(void) {
   ck_assert(out_cgs->num_of_column_groups > 0);
 
   // Open transaction
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
-                              &tranhandle);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
+                             &tranhandle);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Add column group (use the first one from writer output)
@@ -269,8 +269,8 @@ static void test_add_column_group(void) {
   loon_transaction_destroy(tranhandle);
 
   // Verify by reading the manifest
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
-                              &read_transaction);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
+                             &read_transaction);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   rc = loon_transaction_get_manifest(read_transaction, &cmanifest);
@@ -322,7 +322,7 @@ static void test_add_index_info_and_commit(void) {
   FileSystemHandle fs = get_fs(&pp);
   recreate_dir(fs, TEST_BASE_PATH);
 
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &transaction);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &transaction);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   rc = loon_transaction_add_index_info(transaction, &index_info);
@@ -333,7 +333,7 @@ static void test_add_index_info_and_commit(void) {
   ck_assert_int_eq(committed_version, 1);
   loon_transaction_destroy(transaction);
 
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &read_transaction);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &read_transaction);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   rc = loon_transaction_get_manifest(read_transaction, &cmanifest);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
@@ -384,7 +384,7 @@ static void test_drop_index_and_commit(void) {
   FileSystemHandle fs = get_fs(&pp);
   recreate_dir(fs, TEST_BASE_PATH);
 
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &transaction);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &transaction);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   rc = loon_transaction_add_index_info(transaction, &index_info);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
@@ -392,7 +392,7 @@ static void test_drop_index_and_commit(void) {
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   loon_transaction_destroy(transaction);
 
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &transaction);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &transaction);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   rc = loon_transaction_drop_index(transaction, 200);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
@@ -400,7 +400,7 @@ static void test_drop_index_and_commit(void) {
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   loon_transaction_destroy(transaction);
 
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &read_transaction);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &read_transaction);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   rc = loon_transaction_get_manifest(read_transaction, &cmanifest);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
@@ -427,8 +427,8 @@ static void test_add_delta_log(void) {
   recreate_dir(fs, TEST_BASE_PATH);
 
   // Open transaction
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
-                              &tranhandle);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
+                             &tranhandle);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Add delta log
@@ -447,8 +447,8 @@ static void test_add_delta_log(void) {
   loon_transaction_destroy(tranhandle);
 
   // Verify by reading the manifest
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
-                              &read_transaction);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
+                             &read_transaction);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   rc = loon_transaction_get_manifest(read_transaction, &cmanifest);
@@ -487,8 +487,8 @@ static void test_update_stat(void) {
   recreate_dir(fs, TEST_BASE_PATH);
 
   // Open transaction
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
-                              &tranhandle);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
+                             &tranhandle);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Add stat with multiple files
@@ -509,8 +509,8 @@ static void test_update_stat(void) {
   loon_transaction_destroy(tranhandle);
 
   // Verify by reading the manifest
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
-                              &read_transaction);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
+                             &read_transaction);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   rc = loon_transaction_get_manifest(read_transaction, &cmanifest);
@@ -566,7 +566,7 @@ static void test_update_stat_with_metadata(void) {
   FileSystemHandle fs = get_fs(&pp);
   recreate_dir(fs, TEST_BASE_PATH);
 
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &tranhandle);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &tranhandle);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Add stat with files and metadata
@@ -586,7 +586,7 @@ static void test_update_stat_with_metadata(void) {
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   loon_transaction_destroy(tranhandle);
 
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &read_transaction);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &read_transaction);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   rc = loon_transaction_get_manifest(read_transaction, &cmanifest);
@@ -645,8 +645,8 @@ static void test_transaction_error_handling(void) {
   LoonManifest* manifest = NULL;
   int64_t version = 0;
 
-  // Test null arguments for loon_transaction_begin
-  rc = loon_transaction_begin(NULL, NULL, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &handle);
+  // Test null arguments for loon_transaction_open
+  rc = loon_transaction_open(NULL, NULL, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &handle);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
@@ -759,12 +759,12 @@ static void test_txn_exhausted_retry(void) {
   create_writer_test_file(TEST_BASE_PATH, &out_cgs, 1, 20, false);
 
   // Both transactions read version 0 (empty), use FailResolver
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 0 /* retry_limit=0 */, &txn_a);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 0 /* retry_limit=0 */, &txn_a);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   rc = loon_transaction_append_files(txn_a, out_cgs);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 0 /* retry_limit=0 */, &txn_b);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 0 /* retry_limit=0 */, &txn_b);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   rc = loon_transaction_append_files(txn_b, out_cgs);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
@@ -832,14 +832,14 @@ static void test_txn_resolution_failed(void) {
   create_writer_test_file(TEST_BASE_PATH, &out_cgs, 1, 20, false);
 
   // Transaction A: read version 0
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &txn_a);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &txn_a);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   rc = loon_transaction_append_files(txn_a, out_cgs);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Transaction B: also read version 0, uses FailResolver
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &txn_b);
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &txn_b);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   rc = loon_transaction_append_files(txn_b, out_cgs);

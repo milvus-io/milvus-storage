@@ -1,7 +1,7 @@
 // Copyright 2026 Zilliz. Licensed under the Apache License, Version 2.0.
 // Test caller's bounded executor. Not part of the storage library.
 #pragma once
-#include "milvus-storage/ffi_c.h"
+#include "milvus-storage/ffi_async_context.h"
 #include <pthread.h>
 #include <stdlib.h>
 
@@ -61,7 +61,7 @@ static LoonAsyncExecutor test_executor_start(TestExecutor* pool, unsigned worker
     if (error)
       abort();
   }
-  LoonAsyncExecutor result = {sizeof(LoonAsyncExecutor), 0, pool, test_executor_submit};
+  LoonAsyncExecutor result = {pool, test_executor_submit};
   return result;
 }
 static void test_executor_stop(TestExecutor* pool) {

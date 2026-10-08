@@ -145,7 +145,7 @@ static void create_committed_segment(LoonProperties* pp) {
   ck_assert_int_eq(output.rows_written, 5);
   ck_assert(output.column_groups != NULL);
 
-  rc = loon_transaction_begin(SEGMENT_TEST_BASE_PATH, pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &txn);
+  rc = loon_transaction_open(SEGMENT_TEST_BASE_PATH, pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &txn);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   rc = loon_transaction_append_files(txn, output.column_groups);
