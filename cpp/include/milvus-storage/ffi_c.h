@@ -19,12 +19,7 @@ extern "C" {
 #ifndef LOON_FFI_C
 #define LOON_FFI_C
 
-// Visibility macro for FFI exports when building Python bindings
-#if defined(__GNUC__) || defined(__clang__)
-#define FFI_EXPORT __attribute__((visibility("default")))
-#else
-#define FFI_EXPORT
-#endif
+#include "milvus-storage/ffi_async_context.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -60,6 +55,11 @@ FFI_EXPORT extern const int loon_errcode_transient_service;
 FFI_EXPORT extern const int loon_errcode_txn_exhausted_retry;
 FFI_EXPORT extern const int loon_errcode_txn_resolution_failed;
 
+FFI_EXPORT extern const int loon_errcode_async_cancelled;
+FFI_EXPORT extern const int loon_errcode_async_deadline;
+FFI_EXPORT extern const int loon_errcode_async_overloaded;
+FFI_EXPORT extern const int loon_errcode_async_busy;
+
 // usage example(caller must free the message string):
 //
 // LoonFFIResult result = SomeFFIFunction(...);
@@ -68,11 +68,6 @@ FFI_EXPORT extern const int loon_errcode_txn_resolution_failed;
 //    ... // handle error, e.g. log result.message
 //    loon_ffi_free_result(&result); // free the message string
 // }
-typedef struct LoonFFIResult {
-  int err_code;
-  char* message;
-} LoonFFIResult;
-
 // check result is success
 FFI_EXPORT int loon_ffi_is_success(LoonFFIResult* result);
 
@@ -739,6 +734,47 @@ FFI_EXPORT void loon_reader_destroy(LoonReaderHandle reader);
 // ==================== Manifest C Interface ====================
 typedef uintptr_t LoonTransactionHandle;
 
+/** Asynchronous scheduling of existing synchronous manifest operations. Submission errors never invoke the callback.
+ * Accepted operations invoke it exactly once, normally on the supplied executor,
+ * possibly before submission returns. Exceptional enqueue failure runs accepted
+ * work on the completing thread. Inputs are copied. The receiver owns the callback result and
+ * successful transaction. release(NULL)/cancel(NULL) are no-ops; release does not cancel.
+ * See docs/manifest-async.md for supported configurations and lifetime requirements.
+ */
+typedef void (*LoonTransactionOpenCallback)(uintptr_t user_data,
+                                            LoonFFIResult result,
+                                            LoonTransactionHandle transaction);
+FFI_EXPORT LoonFFIResult loon_transaction_open_async(LoonAsyncContextHandle async_context,
+                                                     const char* base_path,
+                                                     const LoonProperties* properties,
+                                                     int64_t read_version,
+                                                     int32_t resolve_id,
+                                                     uint32_t retry_limit,
+                                                     LoonTransactionOpenCallback callback,
+                                                     uintptr_t user_data,
+                                                     LoonAsyncHandle* operation);
+/* Fixed int32_t values; outcome and retryability are independent dimensions. */
+#define LOON_COMMIT_NOT_COMMITTED 0
+#define LOON_COMMIT_COMMITTED 1
+#define LOON_COMMIT_UNKNOWN 2
+typedef void (*LoonTransactionCommitCallback)(uintptr_t user_data,
+                                              LoonFFIResult result,
+                                              int32_t commit_outcome,
+                                              int64_t committed_version);
+/** Runs the existing synchronous commit on the caller executor. Errors after
+ * execution begins conservatively report UNKNOWN; backend retries are unchanged.
+ * Cancellation/deadline only prevent execution before it starts.
+ * Accepted commits consume the transaction: only destroy it after the callback.
+ * It must remain alive and unmodified until then. Another submission returns busy.
+ * UNKNOWN must never be automatically replayed based on the error's retryability.
+ * The callback may destroy the transaction immediately. Version is -1 unless COMMITTED.
+ */
+FFI_EXPORT LoonFFIResult loon_transaction_commit_async(LoonAsyncContextHandle async_context,
+                                                       LoonTransactionHandle transaction,
+                                                       LoonTransactionCommitCallback callback,
+                                                       uintptr_t user_data,
+                                                       LoonAsyncHandle* operation);
+
 #define LOON_TRANSACTION_RESOLVE_FAIL 0
 #define LOON_TRANSACTION_RESOLVE_OVERWRITE 2
 
@@ -753,12 +789,12 @@ typedef uintptr_t LoonTransactionHandle;
  * @param out_handle Output transaction handle
  * @return result of FFI
  */
-FFI_EXPORT LoonFFIResult loon_transaction_begin(const char* base_path,
-                                                const LoonProperties* properties,
-                                                int64_t read_version,
-                                                int32_t resolve_id,
-                                                uint32_t retry_limit,
-                                                LoonTransactionHandle* out_handle);
+FFI_EXPORT LoonFFIResult loon_transaction_open(const char* base_path,
+                                               const LoonProperties* properties,
+                                               int64_t read_version,
+                                               int32_t resolve_id,
+                                               uint32_t retry_limit,
+                                               LoonTransactionHandle* out_handle);
 
 /**
  * @brief get the manifest of the transaction

@@ -147,7 +147,7 @@
     loon_thread_pool_singleton_release;
 
     # Transaction interface
-    loon_transaction_begin;
+    loon_transaction_open;
     loon_transaction_get_manifest;
     loon_transaction_get_read_version;
     loon_transaction_commit;
@@ -227,6 +227,18 @@
     loon_fiukey_s3fs_readat_fail;
     # ColumnGroup
     loon_fiukey_column_group_write_fail;
+
+    loon_transaction_commit_async;
+    loon_transaction_open_async;
+    loon_async_cancel;
+    loon_async_release;
+    loon_async_context_create;
+    loon_async_context_shutdown;
+    loon_async_context_destroy;
+    loon_errcode_async_cancelled;
+    loon_errcode_async_deadline;
+    loon_errcode_async_overloaded;
+    loon_errcode_async_busy;
 
   local:
     # Hide all other symbols

@@ -690,8 +690,8 @@ TEST_P(ExternalTableTest, TransactionReadsManifestFromAbsoluteS3Uri) {
   ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
 
   LoonTransactionGuard relative_ffi_txn;
-  rc = loon_transaction_begin(table_base_path.c_str(), &loon_props.properties, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1,
-                              &relative_ffi_txn.handle);
+  rc = loon_transaction_open(table_base_path.c_str(), &loon_props.properties, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1,
+                             &relative_ffi_txn.handle);
   ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
 
   int64_t relative_ffi_read_version = 0;
@@ -706,8 +706,8 @@ TEST_P(ExternalTableTest, TransactionReadsManifestFromAbsoluteS3Uri) {
   ASSERT_EQ(relative_ffi_manifest.manifest->column_groups.num_of_column_groups, 1u);
 
   LoonTransactionGuard absolute_ffi_txn;
-  rc = loon_transaction_begin(absolute_table_uri.c_str(), &loon_props.properties, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1,
-                              &absolute_ffi_txn.handle);
+  rc = loon_transaction_open(absolute_table_uri.c_str(), &loon_props.properties, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1,
+                             &absolute_ffi_txn.handle);
   ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
 
   int64_t absolute_ffi_read_version = 0;
