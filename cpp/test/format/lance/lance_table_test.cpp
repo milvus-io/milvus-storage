@@ -1046,7 +1046,7 @@ TEST_F(LanceBasicTest, LatestVersionFallbackDoesNotReadDatasetManifest) {
 
   auto observable = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics(kOriginMetricsSource);
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
 
@@ -1557,7 +1557,7 @@ TEST_F(LanceBasicTest, ReadsThroughBoundFilesystemMetrics) {
 
   auto observable = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics(kOriginMetricsSource);
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
 
@@ -1624,7 +1624,7 @@ TEST_F(LanceBasicTest, SharedSchedulerReadsAfterOwnerDatasetDrop) {
 
   auto observable = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics(kOriginMetricsSource);
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
   owner_dataset.reset();

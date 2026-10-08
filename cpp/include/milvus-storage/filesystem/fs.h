@@ -95,10 +95,11 @@ class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
     return conditional->OpenConditionalOutputStream(full_path, std::move(metadata));
   }
 
-  std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>> GetMetricsSources() const override {
+  arrow::Result<std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>> GetMetricsSources()
+      const override {
     auto observable = std::dynamic_pointer_cast<Observable>(base_fs());
     if (!observable) {
-      return {};
+      return std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>{};
     }
     return observable->GetMetricsSources();
   }

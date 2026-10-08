@@ -149,14 +149,16 @@ class Observable {
   public:
   virtual ~Observable() = default;
 
-  /// Return named metric sources, or an empty collection if unavailable.
+  /// Return named metric sources, or an empty collection if none are exposed.
+  /// Retrieval failures are returned as errors, not empty collections.
   /// Each entry owns a non-null metrics pointer. Collection order is unspecified.
-  [[nodiscard]] virtual std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>> GetMetricsSources()
-      const = 0;
+  [[nodiscard]] virtual arrow::Result<std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>>
+  GetMetricsSources() const = 0;
 
-  /// Return metrics for one source, or nullptr if the source is unavailable.
-  [[nodiscard]] std::shared_ptr<FilesystemMetrics> GetMetrics(const std::string& source) const {
-    const auto sources = GetMetricsSources();
+  /// Return metrics for one source, or nullptr if the source is absent.
+  /// Propagate errors encountered while retrieving the sources.
+  [[nodiscard]] arrow::Result<std::shared_ptr<FilesystemMetrics>> GetMetrics(const std::string& source) const {
+    ARROW_ASSIGN_OR_RAISE(const auto sources, GetMetricsSources());
     const auto it = sources.find(source);
     return it == sources.end() ? nullptr : it->second;
   }

@@ -604,10 +604,13 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
     return sizable->OpenOutputStreamWithUploadSize(path, metadata, part_size);
   }
 
-  std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>> GetMetricsSources() const override {
+  arrow::Result<std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>> GetMetricsSources()
+      const override {
     const auto observable = std::dynamic_pointer_cast<Observable>(origin_fs_);
-    auto sources = observable == nullptr ? std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>{}
-                                         : observable->GetMetricsSources();
+    std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>> sources;
+    if (observable != nullptr) {
+      ARROW_ASSIGN_OR_RAISE(sources, observable->GetMetricsSources());
+    }
     sources.emplace(kTalonMetricsSource, state_->metrics);
     return sources;
   }

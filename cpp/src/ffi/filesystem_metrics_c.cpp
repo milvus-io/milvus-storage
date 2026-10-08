@@ -93,7 +93,9 @@ LoonFFIResult loon_filesystem_get_metrics_sources(FileSystemHandle handle, LoonF
     if (!observable) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Filesystem does not implement Observable interface");
     }
-    const auto sources = observable->GetMetricsSources();
+    auto sources_result = observable->GetMetricsSources();
+    RETURN_ARROW_ERROR_IF(sources_result.status(), LOON_ARROW_ERROR, sources_result.status().ToString());
+    const auto sources = std::move(sources_result).ValueOrDie();
     if (sources.empty()) {
       RETURN_SUCCESS();
     }
@@ -137,7 +139,10 @@ LoonFFIResult loon_filesystem_list_metrics_sources(LoonFilesystemMetricsSources*
       if (!observable) {
         RETURN_ERROR(LOON_LOGICAL_ERROR, "Cached filesystem does not implement Observable interface");
       }
-      auto sources = observable->GetMetricsSources();
+      auto sources_result = observable->GetMetricsSources();
+      RETURN_ARROW_ERROR_IF(sources_result.status(), LOON_ARROW_ERROR, "Failed to get metrics for ", display_key, ": ",
+                            sources_result.status().ToString());
+      auto sources = std::move(sources_result).ValueOrDie();
       if (sources.size() > std::numeric_limits<uint32_t>::max() - count) {
         RETURN_ERROR(LOON_LOGICAL_ERROR, "Too many filesystem metrics sources");
       }

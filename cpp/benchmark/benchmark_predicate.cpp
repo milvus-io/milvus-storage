@@ -144,9 +144,12 @@ class PredicateBenchmark : public FormatBenchFixtureBase<> {
     }
   }
 
-  std::shared_ptr<FilesystemMetrics> GetFsMetrics() {
+  arrow::Result<std::shared_ptr<FilesystemMetrics>> GetFsMetrics() {
     auto observable = std::dynamic_pointer_cast<Observable>(fs_);
-    return observable ? observable->GetMetrics(kOriginMetricsSource) : nullptr;
+    if (observable == nullptr) {
+      return nullptr;
+    }
+    return observable->GetMetrics(kOriginMetricsSource);
   }
 
   std::shared_ptr<arrow::Schema> schema_;
@@ -173,7 +176,7 @@ BENCHMARK_DEFINE_F(PredicateBenchmark, ReadWithPredicate)(::benchmark::State& st
   BENCH_ASSERT_STATUS_OK(PrepareTestData(format, sorted, cgs, path, num_rows), st);
 
   std::string predicate = BuildPredicate(selectivity_pct, predicate_col, num_rows);
-  auto fs_metrics = GetFsMetrics();
+  BENCH_ASSERT_AND_ASSIGN(auto fs_metrics, GetFsMetrics(), st);
 
   int64_t total_rows_read = 0;
   int64_t total_bytes_read = 0;

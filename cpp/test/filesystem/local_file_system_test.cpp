@@ -17,6 +17,9 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -24,9 +27,11 @@
 #include <boost/filesystem/operations.hpp>
 
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 #include "milvus-storage/ffi_filesystem_metrics_c.h"
 #include "milvus-storage/filesystem/observable.h"
+#include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/upload_sizable.h"
 
@@ -99,7 +104,7 @@ TEST_F(LocalFsTest, Observable) {
   auto observable = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable, nullptr);
 
-  const auto sources = observable->GetMetricsSources();
+  ASSERT_AND_ASSIGN(const auto sources, observable->GetMetricsSources());
   ASSERT_EQ(sources.size(), 1);
   ASSERT_TRUE(sources.contains(kOriginMetricsSource));
   auto metrics = sources.at(kOriginMetricsSource);
@@ -115,7 +120,7 @@ TEST_F(LocalFsTest, Observable) {
   ASSERT_STATUS_OK(output_stream->Write(content.c_str(), content_size));
   ASSERT_STATUS_OK(output_stream->Close());
 
-  metrics = observable->GetMetrics(kOriginMetricsSource);
+  ASSERT_AND_ASSIGN(metrics, observable->GetMetrics(kOriginMetricsSource));
 
   ASSERT_EQ(metrics->GetReadCount(), 0);
   ASSERT_EQ(metrics->GetWriteCount(), 1);
@@ -193,7 +198,7 @@ TEST_F(LocalFsTest, TestRootPath) {
 TEST_F(LocalFsTest, TestMetricsAfterFileOperations) {
   auto observable = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics(kOriginMetricsSource);
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
 
   metrics->Reset();
@@ -246,7 +251,7 @@ TEST_F(LocalFsTest, TestMetricsAfterFileOperations) {
 TEST_F(LocalFsTest, TestMetricsForDirectoryOperations) {
   auto observable = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics(kOriginMetricsSource);
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
 
   metrics->Reset();
@@ -270,7 +275,7 @@ TEST_F(LocalFsTest, TestMetricsForDirectoryOperations) {
 TEST_F(LocalFsTest, TestMetricsForMoveAndCopy) {
   auto observable = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics(kOriginMetricsSource);
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
 
   metrics->Reset();
@@ -308,7 +313,7 @@ TEST_F(LocalFsTest, TestMetricsForMoveAndCopy) {
 TEST_F(LocalFsTest, TestMetricsForFailedOperations) {
   auto observable = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics(kOriginMetricsSource);
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
 
   metrics->Reset();
@@ -332,7 +337,7 @@ TEST_F(LocalFsTest, TestMetricsForFailedOperations) {
 TEST_F(LocalFsTest, TestMetricsForMultipleReadsAndWrites) {
   auto observable = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics(kOriginMetricsSource);
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
 
   metrics->Reset();
@@ -367,7 +372,7 @@ TEST_F(LocalFsTest, TestMetricsForMultipleReadsAndWrites) {
 TEST_F(LocalFsTest, TestMetricsForRandomAccessFile) {
   auto observable = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics(kOriginMetricsSource);
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
 
   metrics->Reset();
@@ -409,23 +414,113 @@ TEST(FilesystemMetricsFfiTest, UnsupportedAndEmptySources) {
   EXPECT_EQ(sources.count, 0);
 }
 
+#if GTEST_HAS_DEATH_TEST
+TEST(FilesystemMetricsFfiTest, ReportsS3LookupFailureAfterFinalization) {
+  // Finalize S3 in a fresh process so other filesystem tests keep their clients.
+  const auto original_death_test_style = GTEST_FLAG_GET(death_test_style);
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      {
+        FilesystemCache::getInstance().clean();
+        api::Properties properties;
+        api::SetValue(properties, PROPERTY_FS_STORAGE_TYPE, "remote");
+        api::SetValue(properties, PROPERTY_FS_CLOUD_PROVIDER, "aws");
+        api::SetValue(properties, PROPERTY_FS_ADDRESS, "127.0.0.1:0");
+        api::SetValue(properties, PROPERTY_FS_BUCKET_NAME, "metrics-test");
+        api::SetValue(properties, PROPERTY_FS_ACCESS_KEY_ID, "ak");
+        api::SetValue(properties, PROPERTY_FS_ACCESS_KEY_VALUE, "sk");
+        api::SetValue(properties, PROPERTY_FS_REGION, "us-east-1");
+        api::SetValue(properties, PROPERTY_FS_USE_SSL, "false");
+        api::SetValue(properties, PROPERTY_FS_S3_CRT_ASYNC_READ, "false");
+        auto origin = GetFileSystem(properties);
+        api::SetValue(properties, PROPERTY_FS_TALON_MODE, "1");
+        api::SetValue(properties, PROPERTY_FS_TALON_COORDINATOR, "127.0.0.1:0");
+        auto talon = GetFileSystem(properties);
+        if (!origin.ok() || !talon.ok()) {
+          std::fprintf(stderr, "origin: %s; talon: %s\n", origin.status().ToString().c_str(),
+                       talon.status().ToString().c_str());
+          std::_Exit(2);
+        }
+
+        LoonFilesystemMetricsSources sources{};
+        auto result = loon_filesystem_list_metrics_sources(&sources);
+        const bool initialized = loon_ffi_is_success(&result) && sources.count == 3;
+        loon_ffi_free_result(&result);
+        loon_filesystem_free_metrics_sources(&sources);
+        if (!initialized || !FinalizeS3().ok()) {
+          std::_Exit(3);
+        }
+
+        const auto filesystems = std::vector<ArrowFileSystemPtr>({origin.ValueOrDie(), talon.ValueOrDie()});
+        for (const auto& fs : filesystems) {
+          FileSystemWrapper wrapper(fs);
+          result = loon_filesystem_get_metrics_sources(reinterpret_cast<FileSystemHandle>(&wrapper), &sources);
+          const bool failed = !loon_ffi_is_success(&result) && result.message != nullptr &&
+                              std::strstr(result.message, "S3 subsystem is finalized") != nullptr &&
+                              sources.entries == nullptr && sources.count == 0;
+          loon_ffi_free_result(&result);
+          loon_filesystem_free_metrics_sources(&sources);
+          if (!failed) {
+            std::_Exit(4);
+          }
+        }
+        result = loon_filesystem_list_metrics_sources(&sources);
+        const bool failed = !loon_ffi_is_success(&result) && result.message != nullptr &&
+                            std::strstr(result.message, "S3 subsystem is finalized") != nullptr &&
+                            sources.entries == nullptr && sources.count == 0;
+        loon_ffi_free_result(&result);
+        loon_filesystem_free_metrics_sources(&sources);
+        std::_Exit(failed ? 0 : 5);
+      },
+      ::testing::ExitedWithCode(0), "");
+  GTEST_FLAG_SET(death_test_style, original_death_test_style);
+}
+#endif
+
 class MultiSourceMetricsFileSystem : public FileSystemProxy {
   public:
   MultiSourceMetricsFileSystem() : FileSystemProxy("/", std::make_shared<arrow::fs::LocalFileSystem>()) {}
 
-  std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>> GetMetricsSources() const override {
-    return {{"cache", cache_metrics}, {kOriginMetricsSource, origin_metrics}};
+  arrow::Result<std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>> GetMetricsSources()
+      const override {
+    ARROW_RETURN_NOT_OK(metrics_status);
+    return std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>{{"cache", cache_metrics},
+                                                                               {kOriginMetricsSource, origin_metrics}};
   }
 
+  arrow::Status metrics_status;
   const std::shared_ptr<FilesystemMetrics> cache_metrics = std::make_shared<FilesystemMetrics>();
   const std::shared_ptr<FilesystemMetrics> origin_metrics = std::make_shared<FilesystemMetrics>();
 };
 
 TEST(FilesystemMetricsTest, FindsNamedSourcesAndReturnsNullForMissingSource) {
   const MultiSourceMetricsFileSystem fs;
-  EXPECT_EQ(fs.GetMetrics(kOriginMetricsSource), fs.origin_metrics);
-  EXPECT_EQ(fs.GetMetrics("cache"), fs.cache_metrics);
-  EXPECT_EQ(fs.GetMetrics("missing"), nullptr);
+  ASSERT_AND_ASSIGN(const auto origin, fs.GetMetrics(kOriginMetricsSource));
+  ASSERT_AND_ASSIGN(const auto cache, fs.GetMetrics("cache"));
+  ASSERT_AND_ASSIGN(const auto missing, fs.GetMetrics("missing"));
+  EXPECT_EQ(origin, fs.origin_metrics);
+  EXPECT_EQ(cache, fs.cache_metrics);
+  EXPECT_EQ(missing, nullptr);
+}
+
+TEST(FilesystemMetricsFfiTest, PreservesSourceErrorCodeAndDetails) {
+  const auto fs = std::make_shared<MultiSourceMetricsFileSystem>();
+  const auto status = MakeExtendError(ExtendStatusCode::AwsErrorAccessDenied, "metrics unavailable", "provider detail");
+  fs->metrics_status = status;
+  const auto proxy = std::make_shared<FileSystemProxy>("/", fs);
+  EXPECT_EQ(proxy->GetMetricsSources().status(), status);
+  EXPECT_EQ(proxy->GetMetrics(kOriginMetricsSource).status(), status);
+
+  FileSystemWrapper wrapper(proxy);
+  LoonFilesystemMetricsSources sources{};
+  auto result = loon_filesystem_get_metrics_sources(reinterpret_cast<FileSystemHandle>(&wrapper), &sources);
+  EXPECT_EQ(result.err_code, static_cast<int>(ExtendStatusCode::AwsErrorAccessDenied));
+  ASSERT_NE(result.message, nullptr);
+  EXPECT_NE(std::strstr(result.message, "metrics unavailable"), nullptr);
+  EXPECT_NE(std::strstr(result.message, "provider detail"), nullptr);
+  loon_ffi_free_result(&result);
+  EXPECT_EQ(sources.entries, nullptr);
+  EXPECT_EQ(sources.count, 0);
 }
 
 TEST(FilesystemMetricsFfiTest, ReturnsIndependentSourceSnapshots) {

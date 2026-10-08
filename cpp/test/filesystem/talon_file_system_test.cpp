@@ -241,8 +241,9 @@ class RecordingFileSystem final : public arrow::fs::LocalFileSystem, public Obse
 
   std::string type_name() const override { return "recording"; }
 
-  std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>> GetMetricsSources() const override {
-    return {{kOriginMetricsSource, metrics}};
+  arrow::Result<std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>> GetMetricsSources()
+      const override {
+    return std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>{{kOriginMetricsSource, metrics}};
   }
 
   const std::shared_ptr<FilesystemMetrics> metrics = std::make_shared<FilesystemMetrics>();
@@ -306,9 +307,13 @@ class RecordingFileSystem final : public arrow::fs::LocalFileSystem, public Obse
   arrow::fs::FileSelector last_generator_selector_;
 };
 
-static std::shared_ptr<FilesystemMetrics> FindMetricsSource(const ArrowFileSystemPtr& fs, const std::string& source) {
+static arrow::Result<std::shared_ptr<FilesystemMetrics>> FindMetricsSource(const ArrowFileSystemPtr& fs,
+                                                                           const std::string& source) {
   const auto observable = std::dynamic_pointer_cast<Observable>(fs);
-  return observable ? observable->GetMetrics(source) : nullptr;
+  if (observable == nullptr) {
+    return nullptr;
+  }
+  return observable->GetMetrics(source);
 }
 
 class TalonFileSystemServiceFreeTest : public ::testing::Test {
@@ -526,7 +531,7 @@ TEST_F(TalonFileSystemServiceFreeTest, MetricsOnlyCountReadsRoutedThroughTalon) 
   config.talon_coordinator = "127.0.0.1:0";
   ASSERT_AND_ASSIGN(auto fs, Wrap(config, std::make_shared<RecordingFileSystem>("origin")));
   ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile("prefix/object"));
-  const auto metrics = FindMetricsSource(fs, kTalonMetricsSource);
+  ASSERT_AND_ASSIGN(const auto metrics, FindMetricsSource(fs, kTalonMetricsSource));
   ASSERT_NE(metrics, nullptr);
   auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(file.get());
   ASSERT_NE(async_file, nullptr);
@@ -1658,7 +1663,7 @@ TEST_F(TalonFileSystemServiceFreeTest, TalonOpenFailureDoesNotFallBack) {
     EXPECT_EQ(origin->input_open_calls, opens_before + 1);
     EXPECT_FALSE(file->ReadAsync(0, 1).result().ok());
   }
-  const auto metrics = FindMetricsSource(fs, kTalonMetricsSource);
+  ASSERT_AND_ASSIGN(const auto metrics, FindMetricsSource(fs, kTalonMetricsSource));
   ASSERT_NE(metrics, nullptr);
   EXPECT_EQ(metrics->GetReadCount(), 0);
   EXPECT_EQ(metrics->GetReadBytes(), 0);
@@ -1696,12 +1701,13 @@ TEST_F(TalonFileSystemServiceFreeTest, TalonReadFailureFallsBackForEveryReadApi)
     ASSERT_AND_ASSIGN(const auto position, file->Tell());
     EXPECT_EQ(position, 7);
     EXPECT_EQ(origin->last_input_path, "test-bucket/prefix/object");
-    const auto metrics = FindMetricsSource(fs, kTalonMetricsSource);
+    ASSERT_AND_ASSIGN(const auto metrics, FindMetricsSource(fs, kTalonMetricsSource));
     ASSERT_NE(metrics, nullptr);
     EXPECT_EQ(metrics->GetReadCount(), 4);
     EXPECT_EQ(metrics->GetReadBytes(), 0);
     EXPECT_EQ(metrics->GetFailedCount(), 4);
-    EXPECT_EQ(FindMetricsSource(fs, kOriginMetricsSource), origin->metrics);
+    ASSERT_AND_ASSIGN(const auto origin_metrics, FindMetricsSource(fs, kOriginMetricsSource));
+    EXPECT_EQ(origin_metrics, origin->metrics);
   }
 }
 
@@ -1711,8 +1717,8 @@ TEST_F(TalonFileSystemServiceFreeTest, MetricsAreSharedByReadersAndIsolatedByFil
   auto origin = std::make_shared<RecordingFileSystem>("origin");
   ASSERT_AND_ASSIGN(auto fs, Wrap(config, origin));
   ASSERT_AND_ASSIGN(auto other_fs, Wrap(config, std::make_shared<RecordingFileSystem>("other")));
-  const auto metrics = FindMetricsSource(fs, kTalonMetricsSource);
-  const auto other_metrics = FindMetricsSource(other_fs, kTalonMetricsSource);
+  ASSERT_AND_ASSIGN(const auto metrics, FindMetricsSource(fs, kTalonMetricsSource));
+  ASSERT_AND_ASSIGN(const auto other_metrics, FindMetricsSource(other_fs, kTalonMetricsSource));
   ASSERT_NE(metrics, nullptr);
   ASSERT_NE(other_metrics, nullptr);
   EXPECT_NE(metrics, other_metrics);
@@ -1805,7 +1811,7 @@ TEST_F(TalonFileSystemServiceFreeTest, MetricsSourcesFfiListsAllSourcesAcrossCac
   for (const auto& [display_key, fs] : cache.list()) {
     const auto observable = std::dynamic_pointer_cast<Observable>(fs);
     ASSERT_NE(observable, nullptr);
-    const auto sources = observable->GetMetricsSources();
+    ASSERT_AND_ASSIGN(const auto sources, observable->GetMetricsSources());
     ASSERT_EQ(sources.size(), fs == talon_fs ? 2 : 1);
     for (const auto& [source, metrics] : sources) {
       ASSERT_NE(metrics, nullptr);
@@ -1860,7 +1866,7 @@ TEST_F(TalonFileSystemServiceFreeTest, TalonFallbackPreservesOriginErrorDetails)
     EXPECT_NE(status.message().find("Talon"), std::string::npos);
     EXPECT_NE(status.message().find("origin denied"), std::string::npos);
   }
-  const auto metrics = FindMetricsSource(fs, kTalonMetricsSource);
+  ASSERT_AND_ASSIGN(const auto metrics, FindMetricsSource(fs, kTalonMetricsSource));
   ASSERT_NE(metrics, nullptr);
   EXPECT_EQ(metrics->GetReadCount(), 2);
   EXPECT_EQ(metrics->GetReadBytes(), 0);
@@ -1974,7 +1980,7 @@ TEST_F(TalonFileSystemServiceFreeTest, InvalidReadsAndKnownEofDoNotFallBack) {
   EXPECT_TRUE(async_file->ReadAtAsyncInto(0, 1, &out).status().IsInvalid());
   EXPECT_EQ(origin->input_open_calls, 1);
   EXPECT_EQ(origin->input_file->read_calls.load(), 0);
-  const auto metrics = FindMetricsSource(fs, kTalonMetricsSource);
+  ASSERT_AND_ASSIGN(const auto metrics, FindMetricsSource(fs, kTalonMetricsSource));
   ASSERT_NE(metrics, nullptr);
   EXPECT_EQ(metrics->GetReadCount(), 0);
   EXPECT_EQ(metrics->GetReadBytes(), 0);
@@ -2002,8 +2008,8 @@ TEST_F(TalonIntegrationTest, FallsBackToConfiguredOriginWhenTalonUnavailable) {
     ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_COORDINATOR, "127.0.0.1:0"), std::nullopt);
     ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_S3_CRT_ASYNC_READ, use_crt ? "true" : "false"), std::nullopt);
     ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
-    const auto talon_metrics = FindMetricsSource(fs, kTalonMetricsSource);
-    const auto origin_metrics = FindMetricsSource(fs, kOriginMetricsSource);
+    ASSERT_AND_ASSIGN(const auto talon_metrics, FindMetricsSource(fs, kTalonMetricsSource));
+    ASSERT_AND_ASSIGN(const auto origin_metrics, FindMetricsSource(fs, kOriginMetricsSource));
     ASSERT_NE(talon_metrics, nullptr);
     ASSERT_NE(origin_metrics, nullptr);
     const auto talon_before = talon_metrics->GetSnapshot();
@@ -2094,7 +2100,7 @@ TEST_P(TalonCloudMetadataTest, ReadsETagAndReusesMetadataWithoutOriginRequests) 
 INSTANTIATE_TEST_SUITE_P(CloudReaders, TalonCloudMetadataTest, ::testing::Bool());
 
 TEST_F(TalonIntegrationTest, OpenWithKnownSize) {
-  const auto metrics = FindMetricsSource(fs_, kTalonMetricsSource);
+  ASSERT_AND_ASSIGN(const auto metrics, FindMetricsSource(fs_, kTalonMetricsSource));
   ASSERT_NE(metrics, nullptr);
   const auto before = metrics->GetSnapshot();
   ASSERT_AND_ASSIGN(const auto info, fs_->GetFileInfo(path_));

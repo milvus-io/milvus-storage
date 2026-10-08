@@ -157,7 +157,7 @@ TEST_F(IcebergIntegrationTest, PlanningUpdatesBoundFilesystemMetrics) {
   ASSERT_AND_ASSIGN(auto config, FilesystemCache::resolve_config(properties_, table_info.metadata_location));
   auto observable = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics(kOriginMetricsSource);
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
 
