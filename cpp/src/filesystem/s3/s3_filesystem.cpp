@@ -2027,6 +2027,9 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
     if (!native_multipart_.is_valid())
       return Future<>::MakeFinished();
     return native_multipart_.Then([self = Self()](const std::string& id) -> Future<> {
+      // Keep completion fault injection on the native path before publishing the object.
+      FIU_RETURN_ON(FIUKEY_S3FS_COMPLETE_UPLOAD_FAIL,
+                    arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_COMPLETE_UPLOAD_FAIL)));
       S3Model::CompleteMultipartUploadRequest request;
       request.SetBucket(ToAwsString(self->path_.bucket));
       request.SetKey(ToAwsString(self->path_.key));

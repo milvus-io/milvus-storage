@@ -19,6 +19,7 @@
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/common/extend_status.h"
+#include "milvus-storage/common/fiu_local.h"
 
 namespace milvus_storage {
 template <class T>
@@ -514,7 +515,7 @@ TEST_F(NativeS3Test, WritesAndMultipartUseNativeRequests) {
   });
 }
 TEST_F(NativeS3Test, MultipartCompleteAndAbort) {
-  auto metrics = sync_->GetMetrics();
+  ASSERT_OK_AND_ASSIGN(const auto metrics, sync_->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
   ASSERT_OK(Write("multipart", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a') + "tail")).status());
@@ -547,8 +548,31 @@ TEST_F(NativeS3Test, MultipartConditionalConflictPreservesObject) {
   ASSERT_OK_AND_ASSIGN(auto data, Await(Read("multipart-conflict", 0, 20)));
   EXPECT_EQ(data->ToString(), "original");
 }
+#ifdef BUILD_WITH_FIU
+TEST_F(NativeS3Test, MultipartCompletionFaultDoesNotPublishObject) {
+  const auto payload = arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a') + "tail");
+  for (const bool async_close : {false, true}) {
+    const std::string path = async_close ? "completion-fault-async" : "completion-fault-sync";
+    SCOPED_TRACE(path);
+    ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream(path));
+    ASSERT_OK(stream->Write(payload));
+    {
+      ScopedFiuFault fault(FIUKEY_S3FS_COMPLETE_UPLOAD_FAIL, /*one_time=*/false);
+      ASSERT_EQ(fault.enable_result(), 0);
+      const auto status = async_close ? stream->CloseAsync().status() : stream->Close();
+      EXPECT_TRUE(status.IsIOError());
+      EXPECT_NE(status.message().find("Injected fault: " FIUKEY_S3FS_COMPLETE_UPLOAD_FAIL), std::string::npos);
+    }
+    ASSERT_OK_AND_ASSIGN(const auto missing, Await(Stat(fs_, path)));
+    EXPECT_EQ(missing.type(), arrow::fs::FileType::NotFound);
+    ASSERT_OK(Write(path, payload).status());
+    ASSERT_OK_AND_ASSIGN(const auto data, Await(Read(path, 0, payload->size())));
+    EXPECT_TRUE(data->Equals(*payload));
+  }
+}
+#endif
 TEST_F(NativeS3Test, MultipartEmbeddedErrorIsNotSuccess) {
-  auto metrics = sync_->GetMetrics();
+  ASSERT_OK_AND_ASSIGN(const auto metrics, sync_->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
   auto status = Write("error-complete", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))).status();
@@ -621,7 +645,7 @@ TEST_F(NativeS3Test, InvalidAndOversizedResponsesFail) {
   EXPECT_TRUE(fs_->GetFileInfoGenerator(selector)().status().IsCapacityError());
 }
 TEST_F(NativeS3Test, SinglePutDoesNotCountMultipartOperations) {
-  auto metrics = sync_->GetMetrics();
+  ASSERT_OK_AND_ASSIGN(const auto metrics, sync_->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
   ASSERT_OK(Write("put-metrics", arrow::Buffer::FromString("data")).status());
@@ -632,7 +656,7 @@ TEST_F(NativeS3Test, SinglePutDoesNotCountMultipartOperations) {
   EXPECT_EQ(metrics->GetFailedCount(), 0);
 }
 TEST_F(NativeS3Test, FailedMultipartCreationCountsAttemptAndFailure) {
-  auto metrics = sync_->GetMetrics();
+  ASSERT_OK_AND_ASSIGN(const auto metrics, sync_->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
   EXPECT_FALSE(Write("denied", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))).status().ok());
