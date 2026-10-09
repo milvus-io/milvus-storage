@@ -116,6 +116,7 @@ _loon_talon_result_free
 
 # FilesystemCache interface
 _loon_filesystem_get
+_loon_filesystem_evict
 _loon_filesystem_destroy
 _loon_close_filesystems
 

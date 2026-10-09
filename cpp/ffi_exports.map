@@ -118,6 +118,7 @@
 
     # FilesystemCache interface
     loon_filesystem_get;
+    loon_filesystem_evict;
     loon_filesystem_destroy;
     loon_close_filesystems;
 
