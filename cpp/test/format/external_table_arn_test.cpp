@@ -1142,8 +1142,7 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE, LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX));
 
 // ===========================================================================
-// Integration test for reading external OSS tables via Aliyun
-// AssumeRoleWithOIDC.
+// Integration tests for reading external OSS/COS tables via role ARN.
 //
 // Exercises both halves of the Aliyun role_arn feature end-to-end:
 //   * C++ native S3FS path — our-side manifest storage through
@@ -1164,44 +1163,54 @@ INSTANTIATE_TEST_SUITE_P(
 //
 // Required environment variables (all must be set; test is skipped otherwise):
 //
-// Our-side OSS bucket (for writing manifest). Unlike the AWS fixture, this
+// Our-side bucket (for writing manifest). Unlike the AWS fixture, this
 // uses static AK/SK rather than `use_iam=true`: our Aliyun credential provider
 // implements AssumeRoleWithOIDC (the K8s RAM-for-Service-Account flow), not
 // ECS instance RAM role. A vanilla ECS host without the RAM-for-SA env vars
 // cannot use `use_iam=true` for the our-side bucket, so the test uses AK/SK
 // there. Only the *customer-side* read path exercises the role_arn flow.
 //   OUR_TEST_ENV_ADDRESS, OUR_TEST_ENV_BUCKET, OUR_TEST_ENV_REGION,
-//   OUR_TEST_ENV_CLOUD_PROVIDER (set to "aliyun"),
+//   OUR_TEST_ENV_CLOUD_PROVIDER (set to "aliyun" or "tencent"),
 //   OUR_TEST_ENV_ACCESS_KEY, OUR_TEST_ENV_SECRET_KEY
 //
-// Customer-side OSS bucket (ARN-based, for reading external data):
+// Customer-side OSS/COS bucket (ARN-based, for reading external data):
 // ===========================================================================
-#define OUR_ENV_ACCESS_KEY "OUR_TEST_ENV_ACCESS_KEY"                // AK for our-side bucket (Aliyun only)
-#define OUR_ENV_SECRET_KEY "OUR_TEST_ENV_SECRET_KEY"                // SK for our-side bucket (Aliyun only)
-#define ALIYUN_ARN_ENV_ADDRESS "ALIYUN_ARN_TEST_ENV_ADDRESS"        // e.g. "oss-cn-hangzhou.aliyuncs.com"
-#define ALIYUN_ARN_ENV_REGION "ALIYUN_ARN_TEST_ENV_REGION"          // e.g. "cn-hangzhou"
-#define ALIYUN_ARN_ENV_BUCKET "ALIYUN_ARN_TEST_ENV_BUCKET"          // target bucket
-#define ALIYUN_ARN_ENV_ACCESS_KEY "ALIYUN_ARN_TEST_ENV_ACCESS_KEY"  // AK with write to bucket
-#define ALIYUN_ARN_ENV_SECRET_KEY "ALIYUN_ARN_TEST_ENV_SECRET_KEY"  // SK
-#define ALIYUN_ARN_ENV_ROLE_ARN "ALIYUN_ARN_TEST_ENV_ROLE_ARN"      // acs:ram::xxx:role/... to assume
+#define OUR_ENV_ACCESS_KEY "OUR_TEST_ENV_ACCESS_KEY"                          // AK for our-side bucket
+#define OUR_ENV_SECRET_KEY "OUR_TEST_ENV_SECRET_KEY"                          // SK for our-side bucket
+#define S3_COMP_ARN_ENV_CLOUD_PROVIDER "S3_COMP_ARN_TEST_ENV_CLOUD_PROVIDER"  // "aliyun" or "tencent"
+#define S3_COMP_ARN_ENV_ADDRESS "S3_COMP_ARN_TEST_ENV_ADDRESS"                // endpoint without scheme or bucket
+#define S3_COMP_ARN_ENV_REGION "S3_COMP_ARN_TEST_ENV_REGION"                  // bucket region
+#define S3_COMP_ARN_ENV_BUCKET "S3_COMP_ARN_TEST_ENV_BUCKET"                  // target bucket
+#define S3_COMP_ARN_ENV_ACCESS_KEY "S3_COMP_ARN_TEST_ENV_ACCESS_KEY"          // AK with write to bucket
+#define S3_COMP_ARN_ENV_SECRET_KEY "S3_COMP_ARN_TEST_ENV_SECRET_KEY"          // SK
+#define S3_COMP_ARN_ENV_ROLE_ARN "S3_COMP_ARN_TEST_ENV_ROLE_ARN"              // target role to assume
 
 // Optional sts:ExternalId for the target role's trust policy.
-#define ALIYUN_ARN_ENV_EXTERNAL_ID "ALIYUN_ARN_TEST_ENV_EXTERNAL_ID"
+#define S3_COMP_ARN_ENV_EXTERNAL_ID "S3_COMP_ARN_TEST_ENV_EXTERNAL_ID"
 
-// Machine identity (pod-level, not per-test): the process env MUST also carry
-// ALIBABA_CLOUD_OIDC_TOKEN_FILE and ALIBABA_CLOUD_OIDC_PROVIDER_ARN. On an
+// Aliyun OIDC machine identity (pod-level, not per-test): the process env must
+// carry ALIBABA_CLOUD_OIDC_TOKEN_FILE and ALIBABA_CLOUD_OIDC_PROVIDER_ARN. On an
 // Aliyun RAM-for-Service-Account pod these are K8s-injected; we do NOT set
 // them here — the dispatch in s3_filesystem_producer.cpp fails fast if they're
 // missing, which is the intended safety net.
 
 // Shared role-ARN fixture. Tencent runs the Parquet case; the other formats
 // below retain their existing Aliyun-only coverage.
+// Both providers use S3_COMP_ARN_TEST_ENV_* for the customer-side bucket and
+// OUR_TEST_ENV_* for the manifest bucket. Select the fixture's provider with
+// S3_COMP_ARN_TEST_ENV_CLOUD_PROVIDER; other providers' fixtures are skipped.
+// Tencent additionally requires TKE_{REGION,ROLE_ARN,WEB_IDENTITY_TOKEN_FILE,
+// PROVIDER_ID}. The target role must differ from the TKE workload role.
 class ExternalTableRoleArnTest : public ::testing::Test {
   protected:
   explicit ExternalTableRoleArnTest(const char* cloud_provider) : cloud_provider_(cloud_provider) {}
 
   void ReadTwoParquetFilesWithArnRole();
   void SetUp() override {
+    if (GetEnvVar(S3_COMP_ARN_ENV_CLOUD_PROVIDER).ValueOr("") != cloud_provider_) {
+      GTEST_SKIP() << "Set " << S3_COMP_ARN_ENV_CLOUD_PROVIDER << "=" << cloud_provider_ << " to run this fixture";
+    }
+
     // Our-side bucket (AK/SK-based; see fixture-level comment for why not IAM).
     our_address_ = GetEnvVar(OUR_ENV_ADDRESS).ValueOr("");
     our_bucket_ = GetEnvVar(OUR_ENV_BUCKET).ValueOr("");
@@ -1210,15 +1219,13 @@ class ExternalTableRoleArnTest : public ::testing::Test {
     our_ak_ = GetEnvVar(OUR_ENV_ACCESS_KEY).ValueOr("");
     our_sk_ = GetEnvVar(OUR_ENV_SECRET_KEY).ValueOr("");
 
-    const std::string env_prefix =
-        cloud_provider_ == kCloudProviderTencent ? "TENCENT_ARN_TEST_ENV_" : "ALIYUN_ARN_TEST_ENV_";
-    address_ = GetEnvVar(env_prefix + "ADDRESS").ValueOr("");
-    region_ = GetEnvVar(env_prefix + "REGION").ValueOr("");
-    arn_bucket_ = GetEnvVar(env_prefix + "BUCKET").ValueOr("");
-    arn_ak_ = GetEnvVar(env_prefix + "ACCESS_KEY").ValueOr("");
-    arn_sk_ = GetEnvVar(env_prefix + "SECRET_KEY").ValueOr("");
-    role_arn_ = GetEnvVar(env_prefix + "ROLE_ARN").ValueOr("");
-    external_id_ = GetEnvVar(env_prefix + "EXTERNAL_ID").ValueOr("");
+    address_ = GetEnvVar(S3_COMP_ARN_ENV_ADDRESS).ValueOr("");
+    region_ = GetEnvVar(S3_COMP_ARN_ENV_REGION).ValueOr("");
+    arn_bucket_ = GetEnvVar(S3_COMP_ARN_ENV_BUCKET).ValueOr("");
+    arn_ak_ = GetEnvVar(S3_COMP_ARN_ENV_ACCESS_KEY).ValueOr("");
+    arn_sk_ = GetEnvVar(S3_COMP_ARN_ENV_SECRET_KEY).ValueOr("");
+    role_arn_ = GetEnvVar(S3_COMP_ARN_ENV_ROLE_ARN).ValueOr("");
+    external_id_ = GetEnvVar(S3_COMP_ARN_ENV_EXTERNAL_ID).ValueOr("");
 
     if (our_address_.empty() || our_bucket_.empty() || our_cloud_provider_.empty() || our_ak_.empty() ||
         our_sk_.empty() || address_.empty() || region_.empty() || arn_bucket_.empty() || arn_ak_.empty() ||
@@ -1226,7 +1233,7 @@ class ExternalTableRoleArnTest : public ::testing::Test {
       GTEST_SKIP() << cloud_provider_
                    << " ARN test requires OUR_TEST_ENV_{ADDRESS,BUCKET,REGION,"
                       "CLOUD_PROVIDER,ACCESS_KEY,SECRET_KEY} and "
-                   << env_prefix << "{ADDRESS,REGION,BUCKET,ACCESS_KEY,SECRET_KEY,ROLE_ARN}";
+                      "S3_COMP_ARN_TEST_ENV_{ADDRESS,REGION,BUCKET,ACCESS_KEY,SECRET_KEY,ROLE_ARN}";
     }
 
     if (cloud_provider_ == kCloudProviderTencent) {
@@ -1846,13 +1853,17 @@ TEST_F(ExternalTableAliyunArnTest, ReadVortexWithArnRole) {
 // template — fill in the token absolute path, then `source` it before
 // running the test. The fixture itself doesn't read any files, just env.
 //
-// Optional `ALIYUN_ARN_TEST_ENV_EXTERNAL_ID` — set only if the customer's
+// Optional `S3_COMP_ARN_TEST_ENV_EXTERNAL_ID` — set only if the customer's
 // role trust policy carries a matching `sts:ExternalId` condition. Empty
 // means no `ExternalId` parameter is sent on the step-2 AssumeRole.
 // ===========================================================================
 class ExternalTableAliyunOIDCArnTest : public ::testing::Test {
   protected:
   void SetUp() override {
+    if (GetEnvVar(S3_COMP_ARN_ENV_CLOUD_PROVIDER).ValueOr("") != kCloudProviderAliyun) {
+      GTEST_SKIP() << "Set " << S3_COMP_ARN_ENV_CLOUD_PROVIDER << "=aliyun to run this fixture";
+    }
+
     // 1. Machine identity must be in process env. The dispatch in
     //    s3_filesystem_producer.cpp fails fast if missing, but skipping
     //    here gives a clearer diagnostic when the user just forgot to
@@ -1873,25 +1884,25 @@ class ExternalTableAliyunOIDCArnTest : public ::testing::Test {
     our_ak_ = GetEnvVar(OUR_ENV_ACCESS_KEY).ValueOr("");
     our_sk_ = GetEnvVar(OUR_ENV_SECRET_KEY).ValueOr("");
 
-    address_ = GetEnvVar(ALIYUN_ARN_ENV_ADDRESS).ValueOr("");
-    region_ = GetEnvVar(ALIYUN_ARN_ENV_REGION).ValueOr("");
-    arn_bucket_ = GetEnvVar(ALIYUN_ARN_ENV_BUCKET).ValueOr("");
-    arn_ak_ = GetEnvVar(ALIYUN_ARN_ENV_ACCESS_KEY).ValueOr("");
-    arn_sk_ = GetEnvVar(ALIYUN_ARN_ENV_SECRET_KEY).ValueOr("");
-    role_arn_ = GetEnvVar(ALIYUN_ARN_ENV_ROLE_ARN).ValueOr("");
+    address_ = GetEnvVar(S3_COMP_ARN_ENV_ADDRESS).ValueOr("");
+    region_ = GetEnvVar(S3_COMP_ARN_ENV_REGION).ValueOr("");
+    arn_bucket_ = GetEnvVar(S3_COMP_ARN_ENV_BUCKET).ValueOr("");
+    arn_ak_ = GetEnvVar(S3_COMP_ARN_ENV_ACCESS_KEY).ValueOr("");
+    arn_sk_ = GetEnvVar(S3_COMP_ARN_ENV_SECRET_KEY).ValueOr("");
+    role_arn_ = GetEnvVar(S3_COMP_ARN_ENV_ROLE_ARN).ValueOr("");
     // ExternalId is optional. Empty == not sent (the chain provider's
     // step-2 body omits the parameter entirely; see
     // TestAliyunOIDCChainProviderForwardsExternalIdToStep2Only).
-    external_id_ = GetEnvVar(ALIYUN_ARN_ENV_EXTERNAL_ID).ValueOr("");
+    external_id_ = GetEnvVar(S3_COMP_ARN_ENV_EXTERNAL_ID).ValueOr("");
 
     if (our_address_.empty() || our_bucket_.empty() || our_cloud_provider_.empty() || our_ak_.empty() ||
         our_sk_.empty() || address_.empty() || region_.empty() || arn_bucket_.empty() || arn_ak_.empty() ||
         arn_sk_.empty() || role_arn_.empty()) {
       GTEST_SKIP() << "Aliyun OIDC chain test requires env vars: " << OUR_ENV_ADDRESS << ", " << OUR_ENV_BUCKET << ", "
                    << OUR_ENV_REGION << ", " << OUR_ENV_CLOUD_PROVIDER << ", " << OUR_ENV_ACCESS_KEY << ", "
-                   << OUR_ENV_SECRET_KEY << ", " << ALIYUN_ARN_ENV_ADDRESS << ", " << ALIYUN_ARN_ENV_REGION << ", "
-                   << ALIYUN_ARN_ENV_BUCKET << ", " << ALIYUN_ARN_ENV_ACCESS_KEY << ", " << ALIYUN_ARN_ENV_SECRET_KEY
-                   << ", " << ALIYUN_ARN_ENV_ROLE_ARN << " (plus optional " << ALIYUN_ARN_ENV_EXTERNAL_ID << ")";
+                   << OUR_ENV_SECRET_KEY << ", " << S3_COMP_ARN_ENV_ADDRESS << ", " << S3_COMP_ARN_ENV_REGION << ", "
+                   << S3_COMP_ARN_ENV_BUCKET << ", " << S3_COMP_ARN_ENV_ACCESS_KEY << ", " << S3_COMP_ARN_ENV_SECRET_KEY
+                   << ", " << S3_COMP_ARN_ENV_ROLE_ARN << " (plus optional " << S3_COMP_ARN_ENV_EXTERNAL_ID << ")";
     }
 
     // 4. write_props_ — AKSK against the customer bucket. Same as
