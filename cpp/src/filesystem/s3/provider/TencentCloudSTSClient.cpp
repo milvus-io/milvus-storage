@@ -18,108 +18,143 @@
 
 #include "milvus-storage/common/log.h"
 
-#include <mutex>
-#include <sstream>
-
-#include <aws/core/internal/AWSHttpResourceClient.h>
-#include <aws/core/client/DefaultRetryStrategy.h>
-#include <aws/core/http/HttpClient.h>
+#include <vector>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <aws/core/http/HttpClientFactory.h>
-#include <aws/core/http/HttpResponse.h>
-#include <aws/core/utils/StringUtils.h>
-#include <aws/core/platform/Environment.h>
-#include <aws/core/client/AWSError.h>
+#include <aws/core/utils/HashingUtils.h>
+#include <aws/core/utils/memory/stl/AWSStringStream.h>
 
 namespace milvus_storage {
-using Aws::Http::HttpClient;
-using Aws::Http::HttpRequest;
-using Aws::Http::HttpResponseCode;
+namespace {
+constexpr const char* kLogTag = "TencentCloudSTSResourceClient";
+constexpr const char* kHost = "sts.tencentcloudapi.com";
+constexpr const char* kContentType = "application/json; charset=utf-8";
 
-static const char STS_RESOURCE_CLIENT_LOG_TAG[] = "TencentCloudSTSResourceClient";  // [tencent cloud]
+Aws::String Sha256Hex(const Aws::String& value) {
+  return Aws::Utils::HashingUtils::HexEncode(Aws::Utils::HashingUtils::CalculateSHA256(value));
+}
+
+std::vector<unsigned char> HmacSha256(const unsigned char* key, size_t key_size, const Aws::String& value) {
+  if (key_size == 0)
+    return {};
+  std::vector<unsigned char> result(EVP_MAX_MD_SIZE);
+  unsigned int size = 0;
+  if (!HMAC(EVP_sha256(), key, static_cast<int>(key_size), reinterpret_cast<const unsigned char*>(value.data()),
+            value.size(), result.data(), &size)) {
+    return {};
+  }
+  result.resize(size);
+  return result;
+}
+
+Aws::Auth::AWSCredentials ParseCredentials(const Aws::String& body) {
+  Aws::Utils::Json::JsonValue value(body);
+  if (!value.WasParseSuccessful() || !value.View().IsObject())
+    return {};
+  auto top = value.View().GetAllObjects();
+  if (!top.count("Response") || !top.at("Response").IsObject())
+    return {};
+  auto response = top.at("Response").GetAllObjects();
+  if (response.count("Error") || !response.count("Credentials") || !response.at("Credentials").IsObject())
+    return {};
+  auto fields = response.at("Credentials").GetAllObjects();
+  for (const char* name : {"TmpSecretId", "TmpSecretKey", "Token"}) {
+    if (!fields.count(name) || !fields.at(name).IsString() || fields.at(name).AsString().empty())
+      return {};
+  }
+  Aws::Utils::DateTime expiration;
+  if (response.count("ExpiredTime") && response.at("ExpiredTime").IsIntegerType()) {
+    expiration = Aws::Utils::DateTime(static_cast<double>(response.at("ExpiredTime").AsInt64()));
+  } else if (response.count("Expiration") && response.at("Expiration").IsString()) {
+    expiration = Aws::Utils::DateTime(response.at("Expiration").AsString(), Aws::Utils::DateFormat::ISO_8601);
+  } else {
+    return {};
+  }
+  if (!expiration.WasParseSuccessful() || expiration <= Aws::Utils::DateTime::Now())
+    return {};
+  Aws::Auth::AWSCredentials credentials(fields.at("TmpSecretId").AsString(), fields.at("TmpSecretKey").AsString(),
+                                        fields.at("Token").AsString());
+  credentials.SetExpiration(expiration);
+  return credentials;
+}
+}  // namespace
 
 TencentCloudSTSCredentialsClient::TencentCloudSTSCredentialsClient(
     const Aws::Client::ClientConfiguration& clientConfiguration)
-    : AWSHttpResourceClient(clientConfiguration, STS_RESOURCE_CLIENT_LOG_TAG) {
-  SetErrorMarshaller(Aws::MakeUnique<Aws::Client::XmlErrorMarshaller>(STS_RESOURCE_CLIENT_LOG_TAG));
-
-  // [tencent cloud]
-  m_endpoint = "https://sts.tencentcloudapi.com";
-
-  LOG_STORAGE_INFO_ << fmt::format("[{}] Creating STS ResourceClient with endpoint: {}", STS_RESOURCE_CLIENT_LOG_TAG,
-                                   m_endpoint);
+    : AWSHttpResourceClient(clientConfiguration, kLogTag), m_endpoint("https://sts.tencentcloudapi.com") {
+  SetErrorMarshaller(Aws::MakeUnique<Aws::Client::JsonErrorMarshaller>(kLogTag));
 }
 
 TencentCloudSTSCredentialsClient::STSAssumeRoleWithWebIdentityResult
 TencentCloudSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
     const STSAssumeRoleWithWebIdentityRequest& request) {
-  // Calculate query string
-  Aws::StringStream ss;
-  // curl -X POST "https://sts.tencentcloudapi.com"
-  // -d "{\"ProviderId\": $ProviderId, \"WebIdentityToken\":
-  // $WebIdentityToken,\"RoleArn\":$RoleArn,\"RoleSessionName\":$RoleSessionName,\"DurationSeconds\":7200}" -H
-  // "Authorization: SKIP" -H "Content-Type: application/json; charset=utf-8" -H "Host: sts.tencentcloudapi.com" -H
-  // "X-TC-Action: AssumeRoleWithWebIdentity" -H "X-TC-Timestamp: $timestamp" -H "X-TC-Version: 2018-08-13" -H
-  // "X-TC-Region: $region" -H "X-TC-Token: $token"
-
-  ss << R"({"ProviderId": ")" << request.providerId << R"(", "WebIdentityToken": ")" << request.webIdentityToken
-     << R"(", "RoleArn": ")" << request.roleArn << R"(", "RoleSessionName": ")" << request.roleSessionName << R"("})";
-
-  std::shared_ptr<Aws::Http::HttpRequest> httpRequest(Aws::Http::CreateHttpRequest(
-      m_endpoint, Aws::Http::HttpMethod::HTTP_POST, Aws::Utils::Stream::DefaultResponseStreamFactoryMethod));
-
-  httpRequest->SetUserAgent(Aws::Client::ComputeUserAgentString());
-  httpRequest->SetHeaderValue("Authorization", "SKIP");
-  httpRequest->SetHeaderValue("Host", "sts.tencentcloudapi.com");
-  httpRequest->SetHeaderValue("X-TC-Action", "AssumeRoleWithWebIdentity");
-  httpRequest->SetHeaderValue("X-TC-Timestamp", std::to_string(Aws::Utils::DateTime::Now().Seconds()));
-  httpRequest->SetHeaderValue("X-TC-Version", "2018-08-13");
-  httpRequest->SetHeaderValue("X-TC-Region", request.region);
-  httpRequest->SetHeaderValue("X-TC-Token", "");
-
-  std::shared_ptr<Aws::IOStream> body = Aws::MakeShared<Aws::StringStream>("STS_RESOURCE_CLIENT_LOG_TAG");
-  *body << ss.str();
-
-  httpRequest->AddContentBody(body);
-  body->seekg(0, body->end);
-  auto streamSize = body->tellg();
-  body->seekg(0, body->beg);
-  Aws::StringStream contentLength;
-  contentLength << streamSize;
-  httpRequest->SetContentLength(contentLength.str());
-  //    httpRequest->SetContentType("application/x-www-form-urlencoded");
-  httpRequest->SetContentType("application/json; charset=utf-8");
-
-  auto headers = httpRequest->GetHeaders();
-  Aws::String credentialsStr = GetResourceWithAWSWebServiceResult(httpRequest).GetPayload();
-
-  // Parse credentials
-  STSAssumeRoleWithWebIdentityResult result;
-  if (credentialsStr.empty()) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get an empty credential from sts", STS_RESOURCE_CLIENT_LOG_TAG);
-    return result;
-  }
-
-  Aws::Utils::Json::JsonValue jsonValue(credentialsStr);
-  auto json = jsonValue.View();
-  auto rootNode = json.GetObject("Response");
-  if (rootNode.IsNull()) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get Response from credential result failed", STS_RESOURCE_CLIENT_LOG_TAG);
-    return result;
-  }
-
-  auto credentialsNode = rootNode.GetObject("Credentials");
-  if (credentialsNode.IsNull()) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get Credentials from Response failed", STS_RESOURCE_CLIENT_LOG_TAG);
-    return result;
-  }
-  result.creds.SetAWSAccessKeyId(credentialsNode.GetString("TmpSecretId"));
-  result.creds.SetAWSSecretKey(credentialsNode.GetString("TmpSecretKey"));
-  result.creds.SetSessionToken(credentialsNode.GetString("Token"));
-  result.creds.SetExpiration(
-      Aws::Utils::DateTime(Aws::Utils::StringUtils::Trim(rootNode.GetString("Expiration").c_str()).c_str(),
-                           Aws::Utils::DateFormat::ISO_8601));
-
-  return result;
+  Aws::Utils::Json::JsonValue payload;
+  payload.WithString("ProviderId", request.providerId)
+      .WithString("WebIdentityToken", request.webIdentityToken)
+      .WithString("RoleArn", request.roleArn)
+      .WithString("RoleSessionName", request.roleSessionName);
+  return {SendRequest("AssumeRoleWithWebIdentity", request.region, payload)};
 }
 
+Aws::Auth::AWSCredentials TencentCloudSTSCredentialsClient::GetAssumeRoleCredentials(
+    const STSAssumeRoleRequest& request) {
+  if (request.callerCredentials.IsExpiredOrEmpty() || request.callerCredentials.GetSessionToken().empty() ||
+      request.roleArn.empty() || request.roleSessionName.empty() || request.region.empty())
+    return {};
+  Aws::Utils::Json::JsonValue payload;
+  payload.WithString("RoleArn", request.roleArn).WithString("RoleSessionName", request.roleSessionName);
+  if (!request.externalId.empty())
+    payload.WithString("ExternalId", request.externalId);
+  return SendRequest("AssumeRole", request.region, payload, &request.callerCredentials);
+}
+
+Aws::Auth::AWSCredentials TencentCloudSTSCredentialsClient::SendRequest(const Aws::String& action,
+                                                                        const Aws::String& region,
+                                                                        const Aws::Utils::Json::JsonValue& payload,
+                                                                        const Aws::Auth::AWSCredentials* caller) {
+  const auto body = payload.View().WriteCompact();
+  const auto now = Aws::Utils::DateTime::Now();
+  const auto timestamp = std::to_string(now.Seconds());
+  auto request = Aws::Http::CreateHttpRequest(m_endpoint, Aws::Http::HttpMethod::HTTP_POST,
+                                              Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
+  request->SetContentType(kContentType);
+  request->SetHeaderValue("Host", kHost);
+  request->SetHeaderValue("X-TC-Action", action);
+  request->SetHeaderValue("X-TC-Timestamp", timestamp);
+  request->SetHeaderValue("X-TC-Version", "2018-08-13");
+  request->SetHeaderValue("X-TC-Region", region);
+  if (caller) {
+    // Sign exactly the body and content type sent below. TC3 uses a UTC date.
+    const auto date = now.ToGmtString("%Y-%m-%d");
+    const Aws::String scope = date + "/sts/tc3_request";
+    const Aws::String canonical = "POST\n/\n\ncontent-type:" + Aws::String(kContentType) + "\nhost:" + kHost +
+                                  "\n\ncontent-type;host\n" + Sha256Hex(body);
+    const Aws::String string_to_sign = "TC3-HMAC-SHA256\n" + timestamp + "\n" + scope + "\n" + Sha256Hex(canonical);
+    const auto secret = "TC3" + caller->GetAWSSecretKey();
+    auto signing = HmacSha256(reinterpret_cast<const unsigned char*>(secret.data()), secret.size(), date);
+    signing = HmacSha256(signing.data(), signing.size(), "sts");
+    signing = HmacSha256(signing.data(), signing.size(), "tc3_request");
+    const auto signature = HmacSha256(signing.data(), signing.size(), string_to_sign);
+    if (signature.empty()) {
+      LOG_STORAGE_WARNING_ << "Tencent STS request signing failed";
+      return {};
+    }
+    request->SetHeaderValue("Authorization", "TC3-HMAC-SHA256 Credential=" + caller->GetAWSAccessKeyId() + "/" + scope +
+                                                 ", SignedHeaders=content-type;host, Signature=" +
+                                                 Aws::Utils::HashingUtils::HexEncode(
+                                                     Aws::Utils::ByteBuffer(signature.data(), signature.size())));
+    request->SetHeaderValue("X-TC-Token", caller->GetSessionToken());
+  } else {
+    request->SetHeaderValue("Authorization", "SKIP");
+  }
+  auto stream = Aws::MakeShared<Aws::StringStream>(kLogTag);
+  *stream << body;
+  request->AddContentBody(stream);
+  request->SetContentLength(std::to_string(body.size()));
+  auto credentials = ParseCredentials(GetResourceWithAWSWebServiceResult(request).GetPayload());
+  if (credentials.IsEmpty())
+    LOG_STORAGE_WARNING_ << "Tencent STS " << action << " returned no valid credentials";
+  return credentials;
+}
 }  // namespace milvus_storage

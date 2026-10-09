@@ -35,10 +35,12 @@
 #define ARN_ENV_ROLE_ARN "ARN_TEST_ENV_ROLE_ARN"        // IAM role ARN to assume for reading
 
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -1142,8 +1144,7 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE, LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX));
 
 // ===========================================================================
-// Integration test for reading external OSS tables via Aliyun
-// AssumeRoleWithOIDC.
+// Integration tests for reading external OSS/COS tables via role ARN.
 //
 // Exercises both halves of the Aliyun role_arn feature end-to-end:
 //   * C++ native S3FS path — our-side manifest storage through
@@ -1162,39 +1163,54 @@ INSTANTIATE_TEST_SUITE_P(
 //
 // Required environment variables (all must be set; test is skipped otherwise):
 //
-// Our-side OSS bucket (for writing manifest). Unlike the AWS fixture, this
+// Our-side bucket (for writing manifest). Unlike the AWS fixture, this
 // uses static AK/SK rather than `use_iam=true`: our Aliyun credential provider
 // implements AssumeRoleWithOIDC (the K8s RAM-for-Service-Account flow), not
 // ECS instance RAM role. A vanilla ECS host without the RAM-for-SA env vars
 // cannot use `use_iam=true` for the our-side bucket, so the test uses AK/SK
 // there. Only the *customer-side* read path exercises the role_arn flow.
 //   OUR_TEST_ENV_ADDRESS, OUR_TEST_ENV_BUCKET, OUR_TEST_ENV_REGION,
-//   OUR_TEST_ENV_CLOUD_PROVIDER (set to "aliyun"),
+//   OUR_TEST_ENV_CLOUD_PROVIDER (set to "aliyun" or "tencent"),
 //   OUR_TEST_ENV_ACCESS_KEY, OUR_TEST_ENV_SECRET_KEY
 //
-// Customer-side OSS bucket (ARN-based, for reading external data):
+// Customer-side OSS/COS bucket (ARN-based, for reading external data):
 // ===========================================================================
-#define OUR_ENV_ACCESS_KEY "OUR_TEST_ENV_ACCESS_KEY"                // AK for our-side bucket (Aliyun only)
-#define OUR_ENV_SECRET_KEY "OUR_TEST_ENV_SECRET_KEY"                // SK for our-side bucket (Aliyun only)
-#define ALIYUN_ARN_ENV_ADDRESS "ALIYUN_ARN_TEST_ENV_ADDRESS"        // e.g. "oss-cn-hangzhou.aliyuncs.com"
-#define ALIYUN_ARN_ENV_REGION "ALIYUN_ARN_TEST_ENV_REGION"          // e.g. "cn-hangzhou"
-#define ALIYUN_ARN_ENV_BUCKET "ALIYUN_ARN_TEST_ENV_BUCKET"          // target bucket
-#define ALIYUN_ARN_ENV_ACCESS_KEY "ALIYUN_ARN_TEST_ENV_ACCESS_KEY"  // AK with write to bucket
-#define ALIYUN_ARN_ENV_SECRET_KEY "ALIYUN_ARN_TEST_ENV_SECRET_KEY"  // SK
-#define ALIYUN_ARN_ENV_ROLE_ARN "ALIYUN_ARN_TEST_ENV_ROLE_ARN"      // acs:ram::xxx:role/... to assume
+#define OUR_ENV_ACCESS_KEY "OUR_TEST_ENV_ACCESS_KEY"                          // AK for our-side bucket
+#define OUR_ENV_SECRET_KEY "OUR_TEST_ENV_SECRET_KEY"                          // SK for our-side bucket
+#define S3_COMP_ARN_ENV_CLOUD_PROVIDER "S3_COMP_ARN_TEST_ENV_CLOUD_PROVIDER"  // "aliyun" or "tencent"
+#define S3_COMP_ARN_ENV_ADDRESS "S3_COMP_ARN_TEST_ENV_ADDRESS"                // endpoint without scheme or bucket
+#define S3_COMP_ARN_ENV_REGION "S3_COMP_ARN_TEST_ENV_REGION"                  // bucket region
+#define S3_COMP_ARN_ENV_BUCKET "S3_COMP_ARN_TEST_ENV_BUCKET"                  // target bucket
+#define S3_COMP_ARN_ENV_ACCESS_KEY "S3_COMP_ARN_TEST_ENV_ACCESS_KEY"          // AK with write to bucket
+#define S3_COMP_ARN_ENV_SECRET_KEY "S3_COMP_ARN_TEST_ENV_SECRET_KEY"          // SK
+#define S3_COMP_ARN_ENV_ROLE_ARN "S3_COMP_ARN_TEST_ENV_ROLE_ARN"              // target role to assume
 
 // Optional sts:ExternalId for the target role's trust policy.
-#define ALIYUN_ARN_ENV_EXTERNAL_ID "ALIYUN_ARN_TEST_ENV_EXTERNAL_ID"
+#define S3_COMP_ARN_ENV_EXTERNAL_ID "S3_COMP_ARN_TEST_ENV_EXTERNAL_ID"
 
-// Machine identity (pod-level, not per-test): the process env MUST also carry
-// ALIBABA_CLOUD_OIDC_TOKEN_FILE and ALIBABA_CLOUD_OIDC_PROVIDER_ARN. On an
+// Aliyun OIDC machine identity (pod-level, not per-test): the process env must
+// carry ALIBABA_CLOUD_OIDC_TOKEN_FILE and ALIBABA_CLOUD_OIDC_PROVIDER_ARN. On an
 // Aliyun RAM-for-Service-Account pod these are K8s-injected; we do NOT set
 // them here — the dispatch in s3_filesystem_producer.cpp fails fast if they're
 // missing, which is the intended safety net.
 
-class ExternalTableAliyunArnTest : public ::testing::Test {
+// Shared role-ARN fixture. Tencent runs the Parquet case; the other formats
+// below retain their existing Aliyun-only coverage.
+// Both providers use S3_COMP_ARN_TEST_ENV_* for the customer-side bucket and
+// OUR_TEST_ENV_* for the manifest bucket. Select the fixture's provider with
+// S3_COMP_ARN_TEST_ENV_CLOUD_PROVIDER; other providers' fixtures are skipped.
+// Tencent additionally requires TKE_{REGION,ROLE_ARN,WEB_IDENTITY_TOKEN_FILE,
+// PROVIDER_ID}. The target role must differ from the TKE workload role.
+class ExternalTableRoleArnTest : public ::testing::Test {
   protected:
+  explicit ExternalTableRoleArnTest(const char* cloud_provider) : cloud_provider_(cloud_provider) {}
+
+  void ReadTwoParquetFilesWithArnRole();
   void SetUp() override {
+    if (GetEnvVar(S3_COMP_ARN_ENV_CLOUD_PROVIDER).ValueOr("") != cloud_provider_) {
+      GTEST_SKIP() << "Set " << S3_COMP_ARN_ENV_CLOUD_PROVIDER << "=" << cloud_provider_ << " to run this fixture";
+    }
+
     // Our-side bucket (AK/SK-based; see fixture-level comment for why not IAM).
     our_address_ = GetEnvVar(OUR_ENV_ADDRESS).ValueOr("");
     our_bucket_ = GetEnvVar(OUR_ENV_BUCKET).ValueOr("");
@@ -1203,51 +1219,57 @@ class ExternalTableAliyunArnTest : public ::testing::Test {
     our_ak_ = GetEnvVar(OUR_ENV_ACCESS_KEY).ValueOr("");
     our_sk_ = GetEnvVar(OUR_ENV_SECRET_KEY).ValueOr("");
 
-    // Customer-side OSS bucket (ARN-based)
-    address_ = GetEnvVar(ALIYUN_ARN_ENV_ADDRESS).ValueOr("");
-    region_ = GetEnvVar(ALIYUN_ARN_ENV_REGION).ValueOr("");
-    arn_bucket_ = GetEnvVar(ALIYUN_ARN_ENV_BUCKET).ValueOr("");
-    arn_ak_ = GetEnvVar(ALIYUN_ARN_ENV_ACCESS_KEY).ValueOr("");
-    arn_sk_ = GetEnvVar(ALIYUN_ARN_ENV_SECRET_KEY).ValueOr("");
-    role_arn_ = GetEnvVar(ALIYUN_ARN_ENV_ROLE_ARN).ValueOr("");
-    external_id_ = GetEnvVar(ALIYUN_ARN_ENV_EXTERNAL_ID).ValueOr("");
+    address_ = GetEnvVar(S3_COMP_ARN_ENV_ADDRESS).ValueOr("");
+    region_ = GetEnvVar(S3_COMP_ARN_ENV_REGION).ValueOr("");
+    arn_bucket_ = GetEnvVar(S3_COMP_ARN_ENV_BUCKET).ValueOr("");
+    arn_ak_ = GetEnvVar(S3_COMP_ARN_ENV_ACCESS_KEY).ValueOr("");
+    arn_sk_ = GetEnvVar(S3_COMP_ARN_ENV_SECRET_KEY).ValueOr("");
+    role_arn_ = GetEnvVar(S3_COMP_ARN_ENV_ROLE_ARN).ValueOr("");
+    external_id_ = GetEnvVar(S3_COMP_ARN_ENV_EXTERNAL_ID).ValueOr("");
 
     if (our_address_.empty() || our_bucket_.empty() || our_cloud_provider_.empty() || our_ak_.empty() ||
         our_sk_.empty() || address_.empty() || region_.empty() || arn_bucket_.empty() || arn_ak_.empty() ||
         arn_sk_.empty() || role_arn_.empty()) {
-      GTEST_SKIP() << "Aliyun ARN test requires env vars: " << OUR_ENV_ADDRESS << ", " << OUR_ENV_BUCKET << ", "
-                   << OUR_ENV_REGION << ", " << OUR_ENV_CLOUD_PROVIDER << ", " << OUR_ENV_ACCESS_KEY << ", "
-                   << OUR_ENV_SECRET_KEY << ", " << ALIYUN_ARN_ENV_ADDRESS << ", " << ALIYUN_ARN_ENV_REGION << ", "
-                   << ALIYUN_ARN_ENV_BUCKET << ", " << ALIYUN_ARN_ENV_ACCESS_KEY << ", " << ALIYUN_ARN_ENV_SECRET_KEY
-                   << ", " << ALIYUN_ARN_ENV_ROLE_ARN;
+      GTEST_SKIP() << cloud_provider_
+                   << " ARN test requires OUR_TEST_ENV_{ADDRESS,BUCKET,REGION,"
+                      "CLOUD_PROVIDER,ACCESS_KEY,SECRET_KEY} and "
+                      "S3_COMP_ARN_TEST_ENV_{ADDRESS,REGION,BUCKET,ACCESS_KEY,SECRET_KEY,ROLE_ARN}";
     }
 
-    // Two machine-identity modes are supported; which one we need depends on
-    // ALIYUN_ROLE_ARN_AUTH_MODE (kept in lockstep with the
-    // dispatch in s3_filesystem_producer.cpp):
-    //   - "ram":  ECS IMDS → sts:AssumeRole. No env vars required; the
-    //             metadata service supplies the caller identity. Only runs
-    //             on an ECS with a RAM role attached.
-    //   - default / "oidc": legacy AssumeRoleWithOIDC. Requires
-    //             ALIBABA_CLOUD_OIDC_TOKEN_FILE + _PROVIDER_ARN in process
-    //             env; without them the C++ filesystem path fails fast with
-    //             a clear configuration error.
-    const char* auth_mode_env = std::getenv("ALIYUN_ROLE_ARN_AUTH_MODE");
-    const bool ram_mode = auth_mode_env != nullptr && std::string(auth_mode_env) == "ram";
-    if (!ram_mode) {
-      if (std::getenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE") == nullptr ||
-          std::getenv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN") == nullptr) {
-        GTEST_SKIP() << "Aliyun ARN test requires ALIBABA_CLOUD_OIDC_TOKEN_FILE and "
-                        "ALIBABA_CLOUD_OIDC_PROVIDER_ARN in process env (pod-level machine identity), "
-                        "or set ALIYUN_ROLE_ARN_AUTH_MODE=ram to use the ECS IMDS path";
+    if (cloud_provider_ == kCloudProviderTencent) {
+      for (const char* name : {"TKE_REGION", "TKE_ROLE_ARN", "TKE_WEB_IDENTITY_TOKEN_FILE", "TKE_PROVIDER_ID"}) {
+        if (GetEnvVar(name).ValueOr("").empty()) {
+          GTEST_SKIP() << "Tencent ARN test requires " << name << " from the TKE workload identity";
+        }
+      }
+      ASSERT_NE(role_arn_, GetEnvVar("TKE_ROLE_ARN").ValueOr(""))
+          << "Use a distinct target role to exercise the second STS hop";
+    } else {
+      // Two machine-identity modes are supported; which one we need depends on
+      // ALIYUN_ROLE_ARN_AUTH_MODE (kept in lockstep with the
+      // dispatch in s3_filesystem_producer.cpp):
+      //   - "ram":  ECS IMDS → sts:AssumeRole. No env vars required; the
+      //             metadata service supplies the caller identity. Only runs
+      //             on an ECS with a RAM role attached.
+      //   - default / "oidc": legacy AssumeRoleWithOIDC. Requires
+      //             ALIBABA_CLOUD_OIDC_TOKEN_FILE + _PROVIDER_ARN in process
+      //             env; without them the C++ filesystem path fails fast with
+      //             a clear configuration error.
+      const char* auth_mode_env = std::getenv("ALIYUN_ROLE_ARN_AUTH_MODE");
+      const bool ram_mode = auth_mode_env != nullptr && std::string(auth_mode_env) == "ram";
+      if (!ram_mode) {
+        if (std::getenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE") == nullptr ||
+            std::getenv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN") == nullptr) {
+          GTEST_SKIP() << "Aliyun ARN test requires ALIBABA_CLOUD_OIDC_TOKEN_FILE and "
+                          "ALIBABA_CLOUD_OIDC_PROVIDER_ARN in process env (pod-level machine identity), "
+                          "or set ALIYUN_ROLE_ARN_AUTH_MODE=ram to use the ECS IMDS path";
+        }
       }
     }
 
-    // Write properties: AKSK to the customer bucket. opendal's Oss service
-    // accepts static AK/SK directly via reqsign's load_via_static — no
-    // indirection needed.
+    // Static credentials are used only to prepare and clean up test data.
     api::SetValue(write_props_, PROPERTY_FS_STORAGE_TYPE, "remote");
-    api::SetValue(write_props_, PROPERTY_FS_CLOUD_PROVIDER, kCloudProviderAliyun);
+    api::SetValue(write_props_, PROPERTY_FS_CLOUD_PROVIDER, cloud_provider_.c_str());
     api::SetValue(write_props_, PROPERTY_FS_ADDRESS, address_.c_str());
     api::SetValue(write_props_, PROPERTY_FS_BUCKET_NAME, arn_bucket_.c_str());
     api::SetValue(write_props_, PROPERTY_FS_REGION, region_.c_str());
@@ -1255,10 +1277,9 @@ class ExternalTableAliyunArnTest : public ::testing::Test {
     api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_VALUE, arn_sk_.c_str());
     api::SetValue(write_props_, PROPERTY_FS_USE_SSL, "true");
 
-    // Read properties: role_arn selects the C++ filesystem's
-    // AssumeRoleWithOIDC path. No AK/SK are needed on this branch.
+    // Read through the workload identity -> target role chain, without AK/SK.
     api::SetValue(read_props_, "extfs.arn.storage_type", "remote");
-    api::SetValue(read_props_, "extfs.arn.cloud_provider", kCloudProviderAliyun);
+    api::SetValue(read_props_, "extfs.arn.cloud_provider", cloud_provider_.c_str());
     api::SetValue(read_props_, "extfs.arn.address", address_.c_str());
     api::SetValue(read_props_, "extfs.arn.bucket_name", arn_bucket_.c_str());
     api::SetValue(read_props_, "extfs.arn.region", region_.c_str());
@@ -1268,16 +1289,19 @@ class ExternalTableAliyunArnTest : public ::testing::Test {
       api::SetValue(read_props_, "extfs.arn.external_id", external_id_.c_str());
     }
 
+    auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+    test_base_ = "zc/" + cloud_provider_ + "-arn-test-" + std::to_string(ts);
+
     // Create write filesystem for cleanup.
     ASSERT_AND_ASSIGN(write_fs_, GetFileSystem(write_props_));
 
     FilesystemCache::getInstance().clean();
-
-    auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
-    test_base_ = "zc/aliyun-arn-test-" + std::to_string(ts);
   }
 
   void TearDown() override {
+    if (manifest_fs_) {
+      EXPECT_TRUE(DeleteTestDir(manifest_fs_, test_base_ + "/manifest").ok());
+    }
     if (write_fs_) {
       (void)DeleteTestDir(write_fs_, test_base_);
     }
@@ -1292,7 +1316,7 @@ class ExternalTableAliyunArnTest : public ::testing::Test {
         {PROPERTY_FS_ADDRESS, our_address_},     {PROPERTY_FS_BUCKET_NAME, our_bucket_},
         {PROPERTY_FS_REGION, our_region_},       {PROPERTY_FS_ACCESS_KEY_ID, our_ak_},
         {PROPERTY_FS_ACCESS_KEY_VALUE, our_sk_}, {PROPERTY_FS_USE_SSL, "true"},
-        {"extfs.arn.storage_type", "remote"},    {"extfs.arn.cloud_provider", kCloudProviderAliyun},
+        {"extfs.arn.storage_type", "remote"},    {"extfs.arn.cloud_provider", cloud_provider_},
         {"extfs.arn.address", address_},         {"extfs.arn.bucket_name", arn_bucket_},
         {"extfs.arn.region", region_},           {"extfs.arn.use_ssl", "true"},
         {"extfs.arn.role_arn", role_arn_},
@@ -1377,15 +1401,18 @@ class ExternalTableAliyunArnTest : public ::testing::Test {
       ARROW_RETURN_NOT_OK(pq_writer->WriteRecordBatch(*batch));
       ARROW_RETURN_NOT_OK(pq_writer->Close());
       ARROW_RETURN_NOT_OK(sink->Close());
-      std::cout << "[Aliyun ARN Test] Parquet file written: " << file_path << std::endl;
+      std::cout << "[" << cloud_provider_ << " ARN Test] Parquet file written: " << file_path << std::endl;
     }
 
     // Trailing slash matches what the existing FFI tests pass to explore for
     // a "directory of parquet" — explore lists the prefix and treats every
     // matching object as a parquet file in a single column group.
-    auto explore_dir = "oss://" + address_ + "/" + arn_bucket_ + "/" + dir + "/";
+    const std::string scheme = cloud_provider_ == kCloudProviderTencent ? "s3://" : "oss://";
+    auto explore_dir = scheme + address_ + "/" + arn_bucket_ + "/" + dir + "/";
     return ArnParquetWriteResult{schema, num_files, rows_per_file, explore_dir};
   }
+
+  const std::string cloud_provider_;
 
   // Our-side
   std::string our_address_;
@@ -1406,7 +1433,18 @@ class ExternalTableAliyunArnTest : public ::testing::Test {
   api::Properties write_props_;
   api::Properties read_props_;
   ArrowFileSystemPtr write_fs_;
+  ArrowFileSystemPtr manifest_fs_;
   std::string test_base_;
+};
+
+class ExternalTableAliyunArnTest : public ExternalTableRoleArnTest {
+  protected:
+  ExternalTableAliyunArnTest() : ExternalTableRoleArnTest(kCloudProviderAliyun) {}
+};
+
+class ExternalTableTencentArnTest : public ExternalTableRoleArnTest {
+  protected:
+  ExternalTableTencentArnTest() : ExternalTableRoleArnTest(kCloudProviderTencent) {}
 };
 
 TEST_F(ExternalTableAliyunArnTest, ReadLanceWithArnRole) {
@@ -1600,7 +1638,7 @@ TEST_F(ExternalTableAliyunArnTest, ReadIcebergWithArnRole) {
 // then exercises loon_exttable_explore + loon_exttable_get_file_info via the
 // role_arn. Verifies the per-file row count from get_file_info before falling
 // through to the same manifest-read + FormatReader pipeline as the Lance test.
-TEST_F(ExternalTableAliyunArnTest, ReadTwoParquetFilesWithArnRole) {
+void ExternalTableRoleArnTest::ReadTwoParquetFilesWithArnRole() {
   const uint64_t num_files = 2;
   const uint64_t rows_per_file = 50;
   const uint64_t total_rows = num_files * rows_per_file;
@@ -1608,14 +1646,19 @@ TEST_F(ExternalTableAliyunArnTest, ReadTwoParquetFilesWithArnRole) {
   // Step 1: Write parquet files with AK/SK (no role_arn involved on this leg).
   ASSERT_AND_ASSIGN(auto result, CreateParquetFiles(num_files, rows_per_file));
 
-  std::cout << "[Aliyun ARN Test] Explore dir: " << result.explore_dir << std::endl;
-  std::cout << "[Aliyun ARN Test] Role ARN: " << role_arn_ << std::endl;
+  std::cout << "[" << cloud_provider_ << " ARN Test] Explore dir: " << result.explore_dir << std::endl;
+  std::cout << "[" << cloud_provider_ << " ARN Test] Role ARN: " << role_arn_ << std::endl;
 
   // Step 2: Build properties for loon_exttable_explore — same structure as
   // the Lance variant so the role_arn dispatch is identical.
   auto manifest_base = test_base_ + "/manifest";
 
   auto props = BaseProps();
+  api::Properties manifest_props;
+  for (const auto& [key, value] : props) {
+    api::SetValue(manifest_props, key.c_str(), value.c_str());
+  }
+  ASSERT_AND_ASSIGN(manifest_fs_, GetFileSystem(manifest_props));
 
   std::vector<const char*> c_keys, c_values;
   c_keys.reserve(props.size());
@@ -1627,6 +1670,7 @@ TEST_F(ExternalTableAliyunArnTest, ReadTwoParquetFilesWithArnRole) {
 
   LoonProperties loon_props = {};
   auto rc = loon_properties_create(c_keys.data(), c_values.data(), c_keys.size(), &loon_props);
+  std::unique_ptr<LoonProperties, decltype(&loon_properties_free)> properties_guard(&loon_props, loon_properties_free);
   ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
 
   // Step 3: Discover the 2 parquet files via role_arn, write manifest to our-side bucket.
@@ -1637,16 +1681,18 @@ TEST_F(ExternalTableAliyunArnTest, ReadTwoParquetFilesWithArnRole) {
   rc = loon_exttable_explore(columns_arr, 3, LOON_FORMAT_PARQUET, manifest_base.c_str(), result.explore_dir.c_str(),
                              &loon_props, &out_num_files, &out_manifest_path);
   ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  std::unique_ptr<char, decltype(&std::free)> path_guard(out_manifest_path, std::free);
   ASSERT_EQ(out_num_files, num_files);
   ASSERT_NE(out_manifest_path, nullptr);
 
-  std::cout << "[Aliyun ARN Test] loon_exttable_explore: found " << out_num_files
+  std::cout << "[" << cloud_provider_ << " ARN Test] loon_exttable_explore: found " << out_num_files
             << " parquet files, manifest=" << out_manifest_path << std::endl;
 
   // Step 4: Read manifest.
   LoonManifest* out_manifest = nullptr;
   rc = loon_exttable_read_manifest(out_manifest_path, &loon_props, &out_manifest);
   ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  std::unique_ptr<LoonManifest, decltype(&loon_manifest_destroy)> manifest_guard(out_manifest, loon_manifest_destroy);
   ASSERT_NE(out_manifest, nullptr);
   ASSERT_EQ(out_manifest->column_groups.num_of_column_groups, 1u);
 
@@ -1662,13 +1708,13 @@ TEST_F(ExternalTableAliyunArnTest, ReadTwoParquetFilesWithArnRole) {
     rc = loon_exttable_get_file_info(LOON_FORMAT_PARQUET, loon_file.path, &loon_props, &per_file_rows);
     ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
     ASSERT_EQ(per_file_rows, rows_per_file) << "File " << f << " (" << loon_file.path << ") row count mismatch";
-    std::cout << "[Aliyun ARN Test] get_file_info[" << f << "]: " << loon_file.path << " rows=" << per_file_rows
-              << std::endl;
+    std::cout << "[" << cloud_provider_ << " ARN Test] get_file_info[" << f << "]: " << loon_file.path
+              << " rows=" << per_file_rows << std::endl;
   }
 
   // Step 6: Read data with FormatReader (same as the Lance variant).
   std::vector<std::string> columns = {"id", "name", "value"};
-  int64_t total_rows_read = 0;
+  std::vector<int64_t> ids;
   for (uint64_t f = 0; f < cg->num_of_files; ++f) {
     auto& loon_file = cg->files[f];
     api::ColumnGroupFile cgfile;
@@ -1686,17 +1732,33 @@ TEST_F(ExternalTableAliyunArnTest, ReadTwoParquetFilesWithArnRole) {
     ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
     for (size_t i = 0; i < rg_infos.size(); ++i) {
       ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
-      total_rows_read += batch->num_rows();
+      ASSERT_TRUE(batch->schema()->Equals(result.schema)) << batch->schema()->ToString();
+      auto id_column = std::static_pointer_cast<arrow::Int64Array>(batch->GetColumnByName("id"));
+      auto name_column = std::static_pointer_cast<arrow::StringArray>(batch->GetColumnByName("name"));
+      auto value_column = std::static_pointer_cast<arrow::DoubleArray>(batch->GetColumnByName("value"));
+      ASSERT_EQ(id_column->null_count(), 0);
+      ASSERT_EQ(name_column->null_count(), 0);
+      ASSERT_EQ(value_column->null_count(), 0);
+      for (int64_t row = 0; row < batch->num_rows(); ++row) {
+        const auto id = id_column->Value(row);
+        ids.push_back(id);
+        EXPECT_EQ(name_column->GetString(row), "name_" + std::to_string(id));
+        EXPECT_DOUBLE_EQ(value_column->Value(row), id * 1.5);
+      }
     }
   }
-  ASSERT_EQ(total_rows_read, static_cast<int64_t>(total_rows));
-  std::cout << "[Aliyun ARN Test] FormatReader read " << total_rows_read << " rows from " << num_files
-            << " parquet files via Aliyun ARN OK" << std::endl;
-
-  loon_manifest_destroy(out_manifest);
-  free(out_manifest_path);
-  loon_properties_free(&loon_props);
+  ASSERT_EQ(ids.size(), total_rows);
+  std::sort(ids.begin(), ids.end());
+  for (uint64_t i = 0; i < total_rows; ++i) {
+    EXPECT_EQ(ids[i], static_cast<int64_t>(i));
+  }
+  std::cout << "[" << cloud_provider_ << " ARN Test] FormatReader read " << ids.size() << " rows from " << num_files
+            << " parquet files via role ARN OK" << std::endl;
 }
+
+TEST_F(ExternalTableAliyunArnTest, ReadTwoParquetFilesWithArnRole) { ReadTwoParquetFilesWithArnRole(); }
+
+TEST_F(ExternalTableTencentArnTest, ReadTwoParquetFilesWithArnRole) { ReadTwoParquetFilesWithArnRole(); }
 
 // Vortex follows the same plain-format path as Parquet. This verifies that
 // discovery, metadata loading, and data reads all use the customer role ARN.
@@ -1792,13 +1854,17 @@ TEST_F(ExternalTableAliyunArnTest, ReadVortexWithArnRole) {
 // template — fill in the token absolute path, then `source` it before
 // running the test. The fixture itself doesn't read any files, just env.
 //
-// Optional `ALIYUN_ARN_TEST_ENV_EXTERNAL_ID` — set only if the customer's
+// Optional `S3_COMP_ARN_TEST_ENV_EXTERNAL_ID` — set only if the customer's
 // role trust policy carries a matching `sts:ExternalId` condition. Empty
 // means no `ExternalId` parameter is sent on the step-2 AssumeRole.
 // ===========================================================================
 class ExternalTableAliyunOIDCArnTest : public ::testing::Test {
   protected:
   void SetUp() override {
+    if (GetEnvVar(S3_COMP_ARN_ENV_CLOUD_PROVIDER).ValueOr("") != kCloudProviderAliyun) {
+      GTEST_SKIP() << "Set " << S3_COMP_ARN_ENV_CLOUD_PROVIDER << "=aliyun to run this fixture";
+    }
+
     // 1. Machine identity must be in process env. The dispatch in
     //    s3_filesystem_producer.cpp fails fast if missing, but skipping
     //    here gives a clearer diagnostic when the user just forgot to
@@ -1819,25 +1885,25 @@ class ExternalTableAliyunOIDCArnTest : public ::testing::Test {
     our_ak_ = GetEnvVar(OUR_ENV_ACCESS_KEY).ValueOr("");
     our_sk_ = GetEnvVar(OUR_ENV_SECRET_KEY).ValueOr("");
 
-    address_ = GetEnvVar(ALIYUN_ARN_ENV_ADDRESS).ValueOr("");
-    region_ = GetEnvVar(ALIYUN_ARN_ENV_REGION).ValueOr("");
-    arn_bucket_ = GetEnvVar(ALIYUN_ARN_ENV_BUCKET).ValueOr("");
-    arn_ak_ = GetEnvVar(ALIYUN_ARN_ENV_ACCESS_KEY).ValueOr("");
-    arn_sk_ = GetEnvVar(ALIYUN_ARN_ENV_SECRET_KEY).ValueOr("");
-    role_arn_ = GetEnvVar(ALIYUN_ARN_ENV_ROLE_ARN).ValueOr("");
+    address_ = GetEnvVar(S3_COMP_ARN_ENV_ADDRESS).ValueOr("");
+    region_ = GetEnvVar(S3_COMP_ARN_ENV_REGION).ValueOr("");
+    arn_bucket_ = GetEnvVar(S3_COMP_ARN_ENV_BUCKET).ValueOr("");
+    arn_ak_ = GetEnvVar(S3_COMP_ARN_ENV_ACCESS_KEY).ValueOr("");
+    arn_sk_ = GetEnvVar(S3_COMP_ARN_ENV_SECRET_KEY).ValueOr("");
+    role_arn_ = GetEnvVar(S3_COMP_ARN_ENV_ROLE_ARN).ValueOr("");
     // ExternalId is optional. Empty == not sent (the chain provider's
     // step-2 body omits the parameter entirely; see
     // TestAliyunOIDCChainProviderForwardsExternalIdToStep2Only).
-    external_id_ = GetEnvVar(ALIYUN_ARN_ENV_EXTERNAL_ID).ValueOr("");
+    external_id_ = GetEnvVar(S3_COMP_ARN_ENV_EXTERNAL_ID).ValueOr("");
 
     if (our_address_.empty() || our_bucket_.empty() || our_cloud_provider_.empty() || our_ak_.empty() ||
         our_sk_.empty() || address_.empty() || region_.empty() || arn_bucket_.empty() || arn_ak_.empty() ||
         arn_sk_.empty() || role_arn_.empty()) {
       GTEST_SKIP() << "Aliyun OIDC chain test requires env vars: " << OUR_ENV_ADDRESS << ", " << OUR_ENV_BUCKET << ", "
                    << OUR_ENV_REGION << ", " << OUR_ENV_CLOUD_PROVIDER << ", " << OUR_ENV_ACCESS_KEY << ", "
-                   << OUR_ENV_SECRET_KEY << ", " << ALIYUN_ARN_ENV_ADDRESS << ", " << ALIYUN_ARN_ENV_REGION << ", "
-                   << ALIYUN_ARN_ENV_BUCKET << ", " << ALIYUN_ARN_ENV_ACCESS_KEY << ", " << ALIYUN_ARN_ENV_SECRET_KEY
-                   << ", " << ALIYUN_ARN_ENV_ROLE_ARN << " (plus optional " << ALIYUN_ARN_ENV_EXTERNAL_ID << ")";
+                   << OUR_ENV_SECRET_KEY << ", " << S3_COMP_ARN_ENV_ADDRESS << ", " << S3_COMP_ARN_ENV_REGION << ", "
+                   << S3_COMP_ARN_ENV_BUCKET << ", " << S3_COMP_ARN_ENV_ACCESS_KEY << ", " << S3_COMP_ARN_ENV_SECRET_KEY
+                   << ", " << S3_COMP_ARN_ENV_ROLE_ARN << " (plus optional " << S3_COMP_ARN_ENV_EXTERNAL_ID << ")";
     }
 
     // 4. write_props_ — AKSK against the customer bucket. Same as

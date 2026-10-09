@@ -27,6 +27,9 @@
 #include <thread>
 #include <vector>
 
+#include <openssl/err.h>
+#include <openssl/evp.h>
+
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/HttpRequest.h>
@@ -35,12 +38,14 @@
 #include <aws/core/http/standard/StandardHttpResponse.h>
 #include <aws/core/http/HttpTypes.h>
 #include <aws/core/utils/stream/ResponseStream.h>
+#include <aws/core/utils/HashingUtils.h>
 
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/TencentCloudOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
@@ -1852,6 +1857,210 @@ TEST_F(S3ProviderTest, TestAliyunOIDCChainProviderEmptySessionNameDefaults) {
   const auto value_end = body.find('&', value_start);
   const auto value = body.substr(value_start, value_end - value_start);
   EXPECT_FALSE(value.empty());
+}
+
+namespace {
+std::string TencentCredentials(const std::string& id, int64_t expires = 4102444800) {
+  return "{\"Response\":{\"Credentials\":{\"TmpSecretId\":\"" + id +
+         "\",\"TmpSecretKey\":\"SECRET\",\"Token\":\"TOKEN\"},\"ExpiredTime\":" + std::to_string(expires) + "}}";
+}
+
+struct TencentEnvironment {
+  TempFile token{"token-before-rotation"};
+  ScopedEnvVar region{"TKE_REGION", "ap-shanghai"};
+  ScopedEnvVar role{"TKE_ROLE_ARN", "qcs::cam::uin/1:roleName/worker"};
+  ScopedEnvVar file{"TKE_WEB_IDENTITY_TOKEN_FILE", token.path()};
+  ScopedEnvVar provider{"TKE_PROVIDER_ID", "cluster-provider"};
+};
+}  // namespace
+
+TEST_F(S3ProviderTest, TencentChainUsesExplicitTargetAndSignsWithWorker) {
+  TencentEnvironment env;
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("WORKER"));
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("TARGET"));
+  TencentCloudOIDCAssumeRoleChainProvider provider("qcs::cam::uin/2:roleName/customer", "job-session", "tenant-2");
+  EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "TARGET");
+  EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "TARGET");
+  auto requests = mock_client_->GetRecordedRequests();
+  ASSERT_EQ(requests.size(), 2u);
+  EXPECT_EQ(requests[0]->GetHeaderValue("X-TC-Action"), "AssumeRoleWithWebIdentity");
+  EXPECT_EQ(requests[0]->GetHeaderValue("Authorization"), "SKIP");
+  Aws::Utils::Json::JsonValue first(ReadRequestBody(requests[0]));
+  EXPECT_EQ(first.View().GetString("RoleArn"), "qcs::cam::uin/1:roleName/worker");
+  EXPECT_FALSE(first.View().ValueExists("ExternalId"));
+  auto request = requests[1];
+  EXPECT_EQ(request->GetHeaderValue("X-TC-Action"), "AssumeRole");
+  EXPECT_EQ(request->GetHeaderValue("X-TC-Token"), "TOKEN");
+  EXPECT_EQ(request->GetHeaderValue("X-TC-Version"), "2018-08-13");
+  const auto body = ReadRequestBody(request);
+  Aws::Utils::Json::JsonValue second(body);
+  EXPECT_EQ(second.View().GetString("RoleArn"), "qcs::cam::uin/2:roleName/customer");
+  EXPECT_EQ(second.View().GetString("RoleSessionName"), "job-session");
+  EXPECT_EQ(second.View().GetString("ExternalId"), "tenant-2");
+
+  // Recompute the signature from the captured wire request with the AWS crypto
+  // implementation; production uses OpenSSL HMAC directly.
+  using Aws::Utils::HashingUtils;
+  auto bytes = [](const Aws::String& text) {
+    return Aws::Utils::ByteBuffer(reinterpret_cast<const unsigned char*>(text.data()), text.size());
+  };
+  const auto timestamp = request->GetHeaderValue("X-TC-Timestamp");
+  const auto date = Aws::Utils::DateTime(static_cast<double>(std::stoll(timestamp))).ToGmtString("%Y-%m-%d");
+  const auto scope = date + "/sts/tc3_request";
+  const auto canonical = "POST\n/\n\ncontent-type:" + request->GetContentType() +
+                         "\nhost:" + request->GetHeaderValue("Host") + "\n\ncontent-type;host\n" +
+                         HashingUtils::HexEncode(HashingUtils::CalculateSHA256(body));
+  const auto to_sign = "TC3-HMAC-SHA256\n" + timestamp + "\n" + scope + "\n" +
+                       HashingUtils::HexEncode(HashingUtils::CalculateSHA256(canonical));
+  auto key = HashingUtils::CalculateSHA256HMAC(bytes(date), bytes("TC3SECRET"));
+  key = HashingUtils::CalculateSHA256HMAC(bytes("sts"), key);
+  key = HashingUtils::CalculateSHA256HMAC(bytes("tc3_request"), key);
+  const auto signature = HashingUtils::HexEncode(HashingUtils::CalculateSHA256HMAC(bytes(to_sign), key));
+  EXPECT_EQ(request->GetHeaderValue("Authorization"),
+            "TC3-HMAC-SHA256 Credential=WORKER/" + scope + ", SignedHeaders=content-type;host, Signature=" + signature);
+}
+
+TEST_F(S3ProviderTest, TencentChainDoesNotUseWorkerWhenTargetFails) {
+  TencentEnvironment env;
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("WORKER"));
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                R"({"Response":{"Error":{"Code":"AuthFailure"}}})");
+  TencentCloudOIDCAssumeRoleChainProvider provider("qcs::cam::uin/2:roleName/customer", "session");
+  EXPECT_TRUE(provider.GetAWSCredentials().IsEmpty());
+  auto requests = mock_client_->GetRecordedRequests();
+  ASSERT_EQ(requests.size(), 2u);
+  Aws::Utils::Json::JsonValue second(ReadRequestBody(requests[1]));
+  EXPECT_FALSE(second.View().ValueExists("ExternalId"));
+}
+
+TEST_F(S3ProviderTest, TencentChainStopsAfterInvalidWorkerResponse) {
+  TencentEnvironment env;
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK, "not-json");
+  TencentCloudOIDCAssumeRoleChainProvider provider("qcs::cam::uin/2:roleName/customer", "session");
+  EXPECT_TRUE(provider.GetAWSCredentials().IsEmpty());
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 1u);
+}
+
+TEST_F(S3ProviderTest, TencentChainRenewsBothHopsAndReadsRotatedToken) {
+  TencentEnvironment env;
+  auto near_expiration = Aws::Utils::DateTime::Now().Seconds() + 60;
+  for (const auto& response :
+       {TencentCredentials("WORKER-OLD", near_expiration), TencentCredentials("TARGET-OLD", near_expiration),
+        TencentCredentials("WORKER-NEW"), TencentCredentials("TARGET-NEW")}) {
+    mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK, response);
+  }
+  TencentCloudOIDCAssumeRoleChainProvider provider("qcs::cam::uin/2:roleName/customer", "session");
+  EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "TARGET-OLD");
+  {
+    std::ofstream file(env.token.path());
+    file << "token-after-rotation";
+  }
+  EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "TARGET-NEW");
+  auto requests = mock_client_->GetRecordedRequests();
+  ASSERT_EQ(requests.size(), 4u);
+  Aws::Utils::Json::JsonValue third(ReadRequestBody(requests[2]));
+  EXPECT_EQ(third.View().GetString("WebIdentityToken"), "token-after-rotation");
+  EXPECT_NE(requests[3]->GetHeaderValue("Authorization").find("Credential=WORKER-NEW/"), Aws::String::npos);
+}
+
+TEST_F(S3ProviderTest, TencentChainConcurrentReadsShareOnlyTheirTargetCache) {
+  TencentEnvironment env;
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("WORKER"));
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("TARGET-A"));
+  TencentCloudOIDCAssumeRoleChainProvider first("qcs::cam::uin/2:roleName/a", "session");
+  std::vector<std::thread> readers;
+  for (int i = 0; i < 12; ++i)
+    readers.emplace_back([&] { EXPECT_EQ(first.GetAWSCredentials().GetAWSAccessKeyId(), "TARGET-A"); });
+  for (auto& thread : readers) thread.join();
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 2u);
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("WORKER"));
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("TARGET-B"));
+  TencentCloudOIDCAssumeRoleChainProvider second("qcs::cam::uin/2:roleName/b", "session");
+  EXPECT_EQ(second.GetAWSCredentials().GetAWSAccessKeyId(), "TARGET-B");
+  EXPECT_EQ(first.GetAWSCredentials().GetAWSAccessKeyId(), "TARGET-A");
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 4u);
+}
+
+TEST_F(S3ProviderTest, TencentChainRejectsIncompleteTkeIdentity) {
+  TencentEnvironment env;
+  for (const char* missing : {"TKE_REGION", "TKE_ROLE_ARN", "TKE_WEB_IDENTITY_TOKEN_FILE", "TKE_PROVIDER_ID"}) {
+    ScopedEnvUnset absent(missing);
+    TencentCloudOIDCAssumeRoleChainProvider provider("qcs::cam::uin/2:roleName/customer", "session");
+    EXPECT_TRUE(provider.GetAWSCredentials().IsEmpty());
+  }
+  EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
+}
+
+TEST_F(S3ProviderTest, TencentChainRequiresAllTkeInputsWithoutFallback) {
+  TencentEnvironment env;
+  for (const char* missing : {"TKE_REGION", "TKE_ROLE_ARN", "TKE_WEB_IDENTITY_TOKEN_FILE", "TKE_PROVIDER_ID"}) {
+    ScopedEnvUnset absent(missing);
+    TencentCloudOIDCAssumeRoleChainProvider provider("qcs::cam::uin/2:roleName/customer", "session");
+    EXPECT_TRUE(provider.GetAWSCredentials().IsEmpty());
+    ArrowFileSystemConfig config;
+    config.cloud_provider = kCloudProviderTencent;
+    config.role_arn = "qcs::cam::uin/2:roleName/customer";
+    EXPECT_FALSE(S3FileSystemProducer(config).CreateS3Options().ok());
+  }
+  EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
+}
+
+TEST_F(S3ProviderTest, TencentDispatcherSelectsTargetRole) {
+  TencentEnvironment env;
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("WORKER"));
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("TARGET"));
+  ArrowFileSystemConfig config;
+  config.cloud_provider = kCloudProviderTencent;
+  config.role_arn = "qcs::cam::uin/2:roleName/customer";
+  config.session_name = "job";
+  config.external_id = "customer-id";
+  config.address = "cos.ap-shanghai.myqcloud.com";
+  ASSERT_AND_ASSIGN(auto options, S3FileSystemProducer(config).CreateS3Options());
+  EXPECT_TRUE(options.force_virtual_addressing);
+  EXPECT_EQ(options.credentials_provider->GetAWSCredentials().GetAWSAccessKeyId(), "TARGET");
+}
+
+TEST_F(S3ProviderTest, TencentStsRejectsInvalidCredentialResponses) {
+  TencentCloudSTSCredentialsClient client(MakeNoImdsClientConfiguration());
+  TencentCloudSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{"ap-shanghai", "provider", "token",
+                                                                                "role", "session"};
+  for (const auto& response : std::vector<std::string>{
+           "garbage", "[]", "{}", R"({"Response":null})", R"({"Response":{"Credentials":null}})",
+           R"({"Response":{"Credentials":{"TmpSecretId":"A","TmpSecretKey":"S","Token":""},"ExpiredTime":4102444800}})",
+           R"({"Response":{"Credentials":{"TmpSecretId":4,"TmpSecretKey":"S","Token":"T"},"ExpiredTime":4102444800}})",
+           R"({"Response":{"Credentials":{"TmpSecretId":"A","TmpSecretKey":"S","Token":"T"}}})",
+           TencentCredentials("EXPIRED", 1)}) {
+    mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK, response);
+    EXPECT_TRUE(client.GetAssumeRoleWithWebIdentityCredentials(request).creds.IsEmpty());
+  }
+}
+
+TEST_F(S3ProviderTest, TencentStsSigningFailureReturnsNoCredentials) {
+  TencentCloudSTSCredentialsClient client(MakeNoImdsClientConfiguration());
+  Aws::Auth::AWSCredentials caller("WORKER", "SECRET", "TOKEN");
+  caller.SetExpiration(Aws::Utils::DateTime(4102444800.0));
+  TencentCloudSTSCredentialsClient::STSAssumeRoleRequest request{caller, "ap-shanghai",
+                                                                 "qcs::cam::uin/2:roleName/customer", "session", ""};
+
+  // Force OpenSSL's HMAC operation to fail, then restore its default provider
+  // before any assertions that could stop the test or subsequent SDK teardown.
+  ASSERT_EQ(EVP_set_default_properties(nullptr, "provider=missing-tencent-test-provider"), 1);
+  Aws::Auth::AWSCredentials credentials;
+  EXPECT_NO_THROW(credentials = client.GetAssumeRoleCredentials(request));
+  EXPECT_EQ(EVP_set_default_properties(nullptr, ""), 1);
+  ERR_clear_error();
+
+  EXPECT_TRUE(credentials.IsEmpty());
+  EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
 }
 
 }  // namespace milvus_storage
