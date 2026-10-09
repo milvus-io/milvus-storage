@@ -1,5 +1,18 @@
+// Copyright 2024 Zilliz
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #include "milvus-storage/filesystem/s3/provider/VolcengineSTSClient.h"
-#include "milvus-storage/common/Util.h"
 #include <aws/core/internal/AWSHttpResourceClient.h>
 #include <aws/core/client/DefaultRetryStrategy.h>
 #include <aws/core/http/HttpClient.h>
@@ -20,11 +33,16 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <ctime>
+#include <iomanip>
 #include <map>
 #include <mutex>
+#include <regex>
 #include <sstream>
+#include <stdexcept>
+#include <string>
 #include <random>
 #include <iostream>
 #include <fstream>
@@ -39,6 +57,44 @@ static const char STS_RESOURCE_CLIENT_LOG_TAG[] = "VolcengineSTSResourceClient";
 static const int DefaultDurationSeconds = 8 * 60 * 60;  // 8h
 
 namespace {
+
+// Normalize an RFC3339 timestamp carrying a numeric timezone offset
+// (e.g. "2021-04-12T11:57:09+08:00") to UTC "...Z" so the AWS SDK's ISO_8601
+// parser accepts it. Throws when the input is not a strict "<datetime>±HH:MM"
+// form; a value already ending in 'Z' is returned unchanged.
+std::string NormalizeToUtcZ(const std::string& s) {
+  if (!s.empty() && s.back() == 'Z') {
+    return s;
+  }
+  static const std::regex re(R"(^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})([+-])(\d{2}):(\d{2})$)");
+  std::smatch m;
+  if (!std::regex_match(s, m, re)) {
+    throw std::runtime_error("Invalid RFC3339 time: " + s);
+  }
+  const std::string datetime = m[1];
+  const char sign = m[2].str()[0];
+  const int off_h = std::stoi(m[3]);
+  const int off_m = std::stoi(m[4]);
+  std::tm tm{};
+  std::istringstream ss(datetime);
+  ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+  if (ss.fail()) {
+    throw std::runtime_error("Invalid datetime body: " + datetime);
+  }
+  time_t t = timegm(&tm);
+  const int offset_sec = off_h * 3600 + off_m * 60;
+  if (sign == '+') {
+    t -= offset_sec;
+  } else {
+    t += offset_sec;
+  }
+  std::tm* utc = gmtime(&t);
+  char buf[32];
+  if (std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", utc) == 0) {
+    throw std::runtime_error("strftime failed");
+  }
+  return std::string(buf);
+}
 
 // Volcengine V4 (HMAC-SHA256) signing primitives. Hand-rolled — the AWS SDK's
 // AWSAuthV4Signer hard-codes 5 things that Volcengine does differently:
@@ -111,7 +167,7 @@ bool ParseStsExpiry(const Aws::String& rawExpiry, Aws::Auth::AWSCredentials& cre
 
   // Attempt 1: normalize a numeric offset to UTC Z, then parse.
   try {
-    std::string normalized = milvus_storage::NormalizeToUtcZ(std::string(trimmed.c_str()));
+    std::string normalized = NormalizeToUtcZ(std::string(trimmed.c_str()));
     Aws::Utils::DateTime dt(normalized.c_str(), Aws::Utils::DateFormat::ISO_8601);
     if (dt.WasParseSuccessful()) {
       creds.SetExpiration(dt);

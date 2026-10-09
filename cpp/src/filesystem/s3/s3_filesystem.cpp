@@ -354,6 +354,7 @@ static std::unordered_map<std::string, std::pair<std::string, std::string>> cond
     {kCloudProviderGCP, {"x-goog-if-generation-match", "0"}},
     {kCloudProviderTencent, {"x-cos-forbid-overwrite", "true"}},
     {kCloudProviderAliyun, {"x-oss-forbid-overwrite", "true"}},
+    {kCloudProviderVolcengine, {"If-None-Match", "*"}},
     {kAzureFileSystemName, {"If-None-Match", "*"}}};
 
 bool IsConditionWriteKey(const std::string& key) { return condition_write_key.find(key) != condition_write_key.end(); }
@@ -2975,6 +2976,8 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenCondit
     metadata->Append("x-cos-forbid-overwrite", "true");
   } else if (type_name == kCloudProviderAliyun) {
     metadata->Append("x-oss-forbid-overwrite", "true");
+  } else if (type_name == kCloudProviderVolcengine) {
+    metadata->Append("If-None-Match", "*");
   } else if (type_name == kAzureFileSystemName) {
     metadata->Append("If-None-Match", "*");
   } else {  // Unsupported fs type
