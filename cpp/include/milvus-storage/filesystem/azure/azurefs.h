@@ -391,7 +391,8 @@ class ARROW_EXPORT AzureFileSystem : public FileSystem,
       const std::string& path, std::shared_ptr<arrow::KeyValueMetadata> metadata) override;
 
   // Observable
-  std::shared_ptr<milvus_storage::FilesystemMetrics> GetMetrics() const override;
+  arrow::Result<std::unordered_map<std::string, std::shared_ptr<milvus_storage::FilesystemMetrics>>> GetMetricsSources()
+      const override;
 
   // UploadSizable
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(

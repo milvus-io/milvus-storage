@@ -67,7 +67,10 @@ class LocalFileSystemWrapper : public arrow::fs::LocalFileSystem, public UploadC
   explicit LocalFileSystemWrapper(const arrow::fs::LocalFileSystemOptions& options)
       : arrow::fs::LocalFileSystem(options), metrics_(std::make_shared<FilesystemMetrics>()) {}
 
-  std::shared_ptr<FilesystemMetrics> GetMetrics() const override { return metrics_; }
+  arrow::Result<std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>> GetMetricsSources()
+      const override {
+    return std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>{{kOriginMetricsSource, metrics_}};
+  }
 
   // Override methods to track metrics
   arrow::Result<arrow::fs::FileInfo> GetFileInfo(const std::string& path) override {

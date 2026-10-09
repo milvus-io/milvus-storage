@@ -3599,12 +3599,13 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenAppend
   return arrow::Status::NotImplemented("It is not possible to append efficiently to S3 objects");
 }
 
-std::shared_ptr<FilesystemMetrics> S3FileSystem::GetMetrics() const {
-  auto result = const_cast<S3FileSystem*>(this)->impl_->GetMetrics();
-  if (result.ok()) {
-    return result.ValueOrDie();
+arrow::Result<std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>> S3FileSystem::GetMetricsSources()
+    const {
+  ARROW_ASSIGN_OR_RAISE(const auto metrics, const_cast<S3FileSystem*>(this)->impl_->GetMetrics());
+  if (metrics) {
+    return std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>{{kOriginMetricsSource, metrics}};
   }
-  return nullptr;
+  return std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>{};
 }
 
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenConditionalOutputStream(

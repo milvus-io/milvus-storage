@@ -154,7 +154,7 @@ TEST_F(NativeS3Test, WritesConditionalMetadataAndOwnedBuffer) {
 }
 
 TEST_F(NativeS3Test, MultipartCompleteAndAbort) {
-  const auto metrics = sync_->GetMetrics();
+  ASSERT_OK_AND_ASSIGN(const auto metrics, sync_->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
   ASSERT_OK(Write("multipart", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a') + "tail")).status());
@@ -218,7 +218,7 @@ TEST_F(NativeS3Test, SmallUploadCountsOneObjectWrite) {
 }
 
 TEST_F(NativeS3Test, FailedMultipartCreationCountsAttemptAndFailure) {
-  const auto metrics = sync_->GetMetrics();
+  ASSERT_OK_AND_ASSIGN(const auto metrics, sync_->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
   EXPECT_FALSE(Write("denied", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))).status().ok());

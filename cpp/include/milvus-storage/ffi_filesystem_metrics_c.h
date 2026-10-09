@@ -47,6 +47,47 @@ typedef struct LoonFilesystemMetricsSnapshot {  // NOLINT
 } LoonFilesystemMetricsSnapshot;  // NOLINT
 
 /**
+ * One named metrics snapshot. Strings are owned by the returned result.
+ * display_key is NULL for handle queries and populated for cache enumeration.
+ */
+typedef struct LoonFilesystemMetricsSourceEntry {  // NOLINT
+  char* display_key;
+  char* source;
+  LoonFilesystemMetricsSnapshot metrics;
+} LoonFilesystemMetricsSourceEntry;  // NOLINT
+
+typedef struct LoonFilesystemMetricsSources {  // NOLINT
+  LoonFilesystemMetricsSourceEntry* entries;
+  uint32_t count;
+} LoonFilesystemMetricsSources;  // NOLINT
+
+/**
+ * Get all metrics sources from a filesystem handle, including uncached handles.
+ * Each display_key is NULL. An empty source collection is a successful result.
+ * Snapshot fields are sampled independently, not as a transaction.
+ * out_sources must not own an existing result; release returned results using
+ * loon_filesystem_free_metrics_sources.
+ */
+FFI_EXPORT LoonFFIResult loon_filesystem_get_metrics_sources(FileSystemHandle handle,
+                                                             LoonFilesystemMetricsSources* out_sources);
+
+/**
+ * List all metrics sources from cached filesystems. Each entry includes a
+ * storage-generated display_key; multiple sources may share that key.
+ * Results own their strings and snapshots independently of the filesystem cache.
+ * Snapshot fields are sampled independently, not as a transaction.
+ * out_sources must not own an existing result; release returned results using
+ * loon_filesystem_free_metrics_sources.
+ */
+FFI_EXPORT LoonFFIResult loon_filesystem_list_metrics_sources(LoonFilesystemMetricsSources* out_sources);
+
+/**
+ * Release a metrics sources result and clear its entries/count.
+ * NULL and repeated calls on the cleared result are safe.
+ */
+FFI_EXPORT void loon_filesystem_free_metrics_sources(LoonFilesystemMetricsSources* sources);
+
+/**
  * Metrics for one cached filesystem.
  */
 typedef struct LoonFilesystemMetricsEntry {  // NOLINT
