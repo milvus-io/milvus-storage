@@ -148,6 +148,16 @@ pub mod lance_ffi {
             storage_options_values: Vec<String>,
             version: u64,
         ) -> Result<Box<BlockingDataset>>;
+        pub unsafe fn open_dataset_async(
+            filesystem: SharedPtr<FileSystemWrapper>,
+            uri: &str,
+            storage_options_keys: Vec<String>,
+            storage_options_values: Vec<String>,
+            version: u64,
+            callback: usize,
+            context: usize,
+        ) -> Result<()>;
+        pub unsafe fn take_dataset_handle(handle: u64) -> Box<BlockingDataset>;
         /// Resolve only the latest manifest location and return its version.
         /// This does not load or decode the manifest, construct a Dataset, or
         /// initialize a ScanScheduler.
@@ -157,6 +167,14 @@ pub mod lance_ffi {
             storage_options_keys: Vec<String>,
             storage_options_values: Vec<String>,
         ) -> Result<u64>;
+        pub unsafe fn resolve_latest_dataset_version_async(
+            filesystem: SharedPtr<FileSystemWrapper>,
+            uri: &str,
+            storage_options_keys: Vec<String>,
+            storage_options_values: Vec<String>,
+            callback: usize,
+            context: usize,
+        ) -> Result<()>;
         pub unsafe fn write_dataset(
             uri: &str,
             stream_ptr: *mut u8,
@@ -187,6 +205,13 @@ pub mod lance_ffi {
             dataset: &BlockingDataset,
             fragment_id: u64,
         ) -> Result<Vec<LanceColumnMemoryEstimate>>;
+        pub unsafe fn estimate_fragment_column_memory_async(
+            dataset: &BlockingDataset,
+            fragment_id: u64,
+            callback: usize,
+            context: usize,
+        ) -> Result<()>;
+        pub unsafe fn take_column_memory_handle(handle: u64) -> Vec<LanceColumnMemoryEstimate>;
         pub fn estimate_fragment_memory(
             dataset: &BlockingDataset,
             fragment_id: u64,
@@ -203,6 +228,14 @@ pub mod lance_ffi {
             fragment_id: u64,
             schema_rawptr: *mut u8,
         ) -> Result<Box<BlockingFragmentReader>>;
+        pub unsafe fn open_fragment_reader_async(
+            dataset: &BlockingDataset,
+            fragment_id: u64,
+            schema_rawptr: *mut u8,
+            callback: usize,
+            context: usize,
+        ) -> Result<()>;
+        pub unsafe fn take_fragment_reader_handle(handle: u64) -> Box<BlockingFragmentReader>;
 
         // BlockingFragmentReader functions
         pub fn number_of_rows(self: &BlockingFragmentReader) -> Result<u64>;
@@ -219,6 +252,14 @@ pub mod lance_ffi {
             out_stream: *mut u8,
         ) -> Result<()>;
 
+        pub unsafe fn take_async(
+            self: &BlockingFragmentReader,
+            indices: &[u32],
+            out_stream: *mut u8,
+            callback: usize,
+            context: usize,
+        ) -> Result<()>;
+
         pub unsafe fn read_all_as_stream(
             self: &BlockingFragmentReader,
             batch_size: u32,
@@ -232,6 +273,15 @@ pub mod lance_ffi {
             batch_size: u32,
             out_stream: *mut u8,
         ) -> Result<()>;
+        pub unsafe fn read_ranges_async(
+            self: &BlockingFragmentReader,
+            row_range_start: u32,
+            row_range_end: u32,
+            batch_size: u32,
+            callback: usize,
+            context: usize,
+        ) -> Result<()>;
+        pub unsafe fn take_record_batch_stream(handle: u64, out_stream: *mut u8);
 
         // BlockingScanner: dataset-level scan
         type BlockingScanner;

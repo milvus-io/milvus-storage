@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <concepts>
 #include <condition_variable>
 #include <functional>
@@ -108,6 +109,7 @@ class FormatReaderMetadataCache final : public std::enable_shared_from_this<Form
     explicit InFlightLoad(LeaderType leader_type = kAsync) : leader_type(leader_type) {}
 
     bool done = false;
+    std::atomic<bool> continuation_attached{false};
     arrow::Status status = arrow::Status::OK();
     LeaderType leader_type;
     std::condition_variable cv;

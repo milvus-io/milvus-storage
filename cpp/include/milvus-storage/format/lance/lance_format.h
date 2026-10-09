@@ -30,6 +30,13 @@ class LanceFormat final : public Format {
       const std::vector<std::string>& needed_columns,
       const std::function<std::string(const std::string&)>& key_retriever) override;
 
+  [[nodiscard]] folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> create_reader_async(
+      const std::shared_ptr<arrow::Schema>& read_schema,
+      const api::ColumnGroupFile& file,
+      const api::Properties& properties,
+      const std::vector<std::string>& needed_columns,
+      const std::function<std::string(const std::string&)>& key_retriever) override;
+
   [[nodiscard]] arrow::Result<std::unique_ptr<FormatWriter>> create_writer(
       const std::shared_ptr<arrow::fs::FileSystem>& fs,
       const std::shared_ptr<arrow::Schema>& schema,
