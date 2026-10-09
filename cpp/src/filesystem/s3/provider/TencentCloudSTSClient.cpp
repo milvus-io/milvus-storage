@@ -18,7 +18,6 @@
 
 #include "milvus-storage/common/log.h"
 
-#include <stdexcept>
 #include <vector>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -37,11 +36,13 @@ Aws::String Sha256Hex(const Aws::String& value) {
 }
 
 std::vector<unsigned char> HmacSha256(const unsigned char* key, size_t key_size, const Aws::String& value) {
+  if (key_size == 0)
+    return {};
   std::vector<unsigned char> result(EVP_MAX_MD_SIZE);
   unsigned int size = 0;
   if (!HMAC(EVP_sha256(), key, static_cast<int>(key_size), reinterpret_cast<const unsigned char*>(value.data()),
             value.size(), result.data(), &size)) {
-    throw std::runtime_error("Tencent STS request signing failed");
+    return {};
   }
   result.resize(size);
   return result;
@@ -135,6 +136,10 @@ Aws::Auth::AWSCredentials TencentCloudSTSCredentialsClient::SendRequest(const Aw
     signing = HmacSha256(signing.data(), signing.size(), "sts");
     signing = HmacSha256(signing.data(), signing.size(), "tc3_request");
     const auto signature = HmacSha256(signing.data(), signing.size(), string_to_sign);
+    if (signature.empty()) {
+      LOG_STORAGE_WARNING_ << "Tencent STS request signing failed";
+      return {};
+    }
     request->SetHeaderValue("Authorization", "TC3-HMAC-SHA256 Credential=" + caller->GetAWSAccessKeyId() + "/" + scope +
                                                  ", SignedHeaders=content-type;host, Signature=" +
                                                  Aws::Utils::HashingUtils::HexEncode(

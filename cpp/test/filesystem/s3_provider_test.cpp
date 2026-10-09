@@ -27,6 +27,9 @@
 #include <thread>
 #include <vector>
 
+#include <openssl/err.h>
+#include <openssl/evp.h>
+
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/HttpRequest.h>
@@ -2039,6 +2042,25 @@ TEST_F(S3ProviderTest, TencentStsRejectsInvalidCredentialResponses) {
     mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK, response);
     EXPECT_TRUE(client.GetAssumeRoleWithWebIdentityCredentials(request).creds.IsEmpty());
   }
+}
+
+TEST_F(S3ProviderTest, TencentStsSigningFailureReturnsNoCredentials) {
+  TencentCloudSTSCredentialsClient client(MakeNoImdsClientConfiguration());
+  Aws::Auth::AWSCredentials caller("WORKER", "SECRET", "TOKEN");
+  caller.SetExpiration(Aws::Utils::DateTime(4102444800.0));
+  TencentCloudSTSCredentialsClient::STSAssumeRoleRequest request{caller, "ap-shanghai",
+                                                                 "qcs::cam::uin/2:roleName/customer", "session", ""};
+
+  // Force OpenSSL's HMAC operation to fail, then restore its default provider
+  // before any assertions that could stop the test or subsequent SDK teardown.
+  ASSERT_EQ(EVP_set_default_properties(nullptr, "provider=missing-tencent-test-provider"), 1);
+  Aws::Auth::AWSCredentials credentials;
+  EXPECT_NO_THROW(credentials = client.GetAssumeRoleCredentials(request));
+  EXPECT_EQ(EVP_set_default_properties(nullptr, ""), 1);
+  ERR_clear_error();
+
+  EXPECT_TRUE(credentials.IsEmpty());
+  EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
 }
 
 }  // namespace milvus_storage
