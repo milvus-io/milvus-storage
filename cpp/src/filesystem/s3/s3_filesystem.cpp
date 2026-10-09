@@ -362,6 +362,7 @@ static std::unordered_map<std::string, std::pair<std::string, std::string>> cond
     {kCloudProviderGCP, {"x-goog-if-generation-match", "0"}},
     {kCloudProviderTencent, {"x-cos-forbid-overwrite", "true"}},
     {kCloudProviderAliyun, {"x-oss-forbid-overwrite", "true"}},
+    {kCloudProviderVolcengine, {"If-None-Match", "*"}},
     {kAzureFileSystemName, {"If-None-Match", "*"}}};
 
 bool IsConditionWriteKey(const std::string& key) { return condition_write_key.find(key) != condition_write_key.end(); }
@@ -2755,11 +2756,12 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
         req.SetChecksumAlgorithm(S3Model::ChecksumAlgorithm::CRC32);
       } else if (options().cloud_provider == kCloudProviderAliyun ||
                  options().cloud_provider == kCloudProviderTencent ||
-                 options().cloud_provider == kCloudProviderHuawei) {
-        // Aliyun OSS / Tencent COS / Huawei OBS only honor Content-MD5 on
-        // DeleteObjects and silently ignore x-amz-checksum-*. AWS SDK >= 1.11.x
-        // no longer auto-computes Content-MD5, so compute it from the
-        // serialized payload and inject it as a custom header.
+                 options().cloud_provider == kCloudProviderHuawei ||
+                 options().cloud_provider == kCloudProviderVolcengine) {
+        // Aliyun OSS / Tencent COS / Huawei OBS / Volcengine TOS only honor
+        // Content-MD5 on DeleteObjects and silently ignore x-amz-checksum-*.
+        // AWS SDK >= 1.11.x no longer auto-computes Content-MD5, so compute it
+        // from the serialized payload and inject it as a custom header.
         req.SetAdditionalCustomHeaderValue(
             "Content-MD5",
             Aws::Utils::HashingUtils::Base64Encode(Aws::Utils::HashingUtils::CalculateMD5(req.SerializePayload())));
@@ -3427,6 +3429,8 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenCondit
     metadata->Append("x-cos-forbid-overwrite", "true");
   } else if (type_name == kCloudProviderAliyun) {
     metadata->Append("x-oss-forbid-overwrite", "true");
+  } else if (type_name == kCloudProviderVolcengine) {
+    metadata->Append("If-None-Match", "*");
   } else if (type_name == kAzureFileSystemName) {
     metadata->Append("If-None-Match", "*");
   } else {  // Unsupported fs type

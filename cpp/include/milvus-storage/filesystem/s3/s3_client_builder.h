@@ -42,7 +42,8 @@ namespace client_builder_internal {
 
 inline Aws::Client::ClientConfigurationInitValues MakeClientConfigurationInitValues(const S3Options& options) {
   if (options.cloud_provider == kCloudProviderGCP || options.cloud_provider == kCloudProviderAliyun ||
-      options.cloud_provider == kCloudProviderTencent || options.cloud_provider == kCloudProviderHuawei) {
+      options.cloud_provider == kCloudProviderTencent || options.cloud_provider == kCloudProviderHuawei ||
+      options.cloud_provider == kCloudProviderVolcengine) {
     return Aws::Client::ClientConfigurationInitValues{/*shouldDisableIMDS=*/true};
   }
   return Aws::Client::ClientConfigurationInitValues();
