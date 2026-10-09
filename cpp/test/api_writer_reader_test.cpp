@@ -2700,7 +2700,7 @@ TEST_P(APIWriterReaderTest, ParquetPrebufferHoleSizeLimitReducesReadIOCount) {
   if (!observable) {
     GTEST_SKIP() << "Filesystem does not expose metrics.";
   }
-  auto metrics = observable->GetMetrics();
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   if (!metrics) {
     GTEST_SKIP() << "Filesystem metrics are unavailable.";
   }
@@ -2756,7 +2756,7 @@ TEST_P(APIWriterReaderTest, ParquetEagerPrebufferReadsTheSameRangesAsLazy) {
   if (!observable) {
     GTEST_SKIP() << "Filesystem does not expose metrics.";
   }
-  auto metrics = observable->GetMetrics();
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   if (!metrics) {
     GTEST_SKIP() << "Filesystem metrics are unavailable.";
   }

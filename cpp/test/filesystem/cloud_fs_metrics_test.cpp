@@ -67,7 +67,7 @@ TEST_F(CloudFsMetricsTest, TestMetricsAfterFileOperations) {
   // Get initial metrics
   auto observable = std::dynamic_pointer_cast<Observable>(arrowfs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics();
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
 
   metrics->Reset();
@@ -96,7 +96,7 @@ TEST_F(CloudFsMetricsTest, TestMetricsAfterFileOperations) {
   ASSERT_STATUS_OK(close_status);
 
   // Get metrics after operations
-  metrics = observable->GetMetrics();
+  ASSERT_AND_ASSIGN(metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   EXPECT_EQ(1, metrics->GetMultiPartUploadCreated());
   EXPECT_EQ(1, metrics->GetMultiPartUploadFinished());
@@ -122,7 +122,7 @@ TEST_F(CloudFsMetricsTest, TestMetricsAfterFileOperations) {
   EXPECT_EQ(test_data, std::string(reinterpret_cast<char*>(buffer.data()), test_data.size()));
 
   // Get metrics after operations
-  metrics = observable->GetMetrics();
+  ASSERT_AND_ASSIGN(metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
 
   EXPECT_EQ(1, metrics->GetReadCount());
@@ -135,7 +135,7 @@ TEST_F(CloudFsMetricsTest, TestMetricsAfterFileOperations) {
 TEST_F(CloudFsMetricsTest, TestBatchingBelowUploadSize) {
   auto observable = std::dynamic_pointer_cast<Observable>(arrowfs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics();
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
 
@@ -156,7 +156,7 @@ TEST_F(CloudFsMetricsTest, TestBatchingBelowUploadSize) {
   }
   ASSERT_STATUS_OK(output_stream->Close());
 
-  metrics = observable->GetMetrics();
+  ASSERT_AND_ASSIGN(metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   // S3 uses PutObject for data < part_size (no multipart), so Created/Finished = 0.
   // Azure always goes through CreateEmptyBlockBlob + StageBlock + CommitBlockList,
@@ -180,7 +180,7 @@ TEST_F(CloudFsMetricsTest, TestBatchingBelowUploadSize) {
 TEST_F(CloudFsMetricsTest, TestReadMetrics) {
   auto observable = std::dynamic_pointer_cast<Observable>(arrowfs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics();
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
 
   // Write a test file first
@@ -201,7 +201,7 @@ TEST_F(CloudFsMetricsTest, TestReadMetrics) {
   EXPECT_EQ(read_buf->size(), static_cast<int64_t>(test_data.size()));
   EXPECT_EQ(read_buf->ToString(), test_data);
 
-  metrics = observable->GetMetrics();
+  ASSERT_AND_ASSIGN(metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   EXPECT_EQ(1, metrics->GetReadCount());
   EXPECT_EQ(static_cast<int64_t>(test_data.size()), metrics->GetReadBytes());
@@ -210,7 +210,7 @@ TEST_F(CloudFsMetricsTest, TestReadMetrics) {
 TEST_F(CloudFsMetricsTest, TestOpenInputDoesNotIncrementReadMetrics) {
   auto observable = std::dynamic_pointer_cast<Observable>(arrowfs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics();
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
 
   std::string test_file_name = GenerateTestFileName();
@@ -234,7 +234,7 @@ TEST_F(CloudFsMetricsTest, TestOpenInputDoesNotIncrementReadMetrics) {
 TEST_F(CloudFsMetricsTest, TestReadMetricsCountSuccessfulReads) {
   auto observable = std::dynamic_pointer_cast<Observable>(arrowfs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics();
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
 
   std::string test_file_name = GenerateTestFileName();
@@ -281,7 +281,7 @@ TEST_F(CloudFsMetricsTest, TestReadMetricsCountSuccessfulReads) {
 TEST_F(CloudFsMetricsTest, TestReadMetricsCountSuccessfulAsyncReads) {
   auto observable = std::dynamic_pointer_cast<Observable>(arrowfs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics();
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
 
   std::string test_file_name = GenerateTestFileName();

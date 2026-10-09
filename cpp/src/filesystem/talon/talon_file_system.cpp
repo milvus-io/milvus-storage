@@ -35,7 +35,6 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/trim.hpp>
 
-#include "milvus-storage/common/log.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -60,6 +59,7 @@ struct TalonFileSystemState {
   const ArrowFileSystemConfig config;
   const std::shared_ptr<TalonClient> client;
   const arrow::io::IOContext io_context;
+  const std::shared_ptr<FilesystemMetrics> metrics = std::make_shared<FilesystemMetrics>();
   // Shared by open files so pending initialization can fill the bounded cache
   // even after the filesystem wrapper is released. Objects remain TTL-free.
   LRUCache<std::string, TalonObjectStat> object_stats{kObjectStatCacheCapacity};
@@ -123,8 +123,9 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
       return arrow::Future<int64_t>::MakeFinished(origin_file->ReadAt(position, nbytes, out));
     }
 
-    return EnsureReaderAsync().Then([position, nbytes, out, origin_file = state_->origin_file.get()](
-                                        const Reader& reader) -> arrow::Future<int64_t> {
+    return EnsureReaderAsync().Then([position, nbytes, out, origin_file = state_->origin_file.get(),
+                                     metrics =
+                                         state_->filesystem->metrics](const Reader& reader) -> arrow::Future<int64_t> {
       auto read_size = GetReadSize(position, nbytes, reader->KnownSize());
       if (!read_size.ok()) {
         return arrow::Future<int64_t>::MakeFinished(read_size.status());
@@ -133,9 +134,12 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
       if (length == 0) {
         return arrow::Future<int64_t>::MakeFinished(0);
       }
+      // Count submitted Talon reads independently of any origin fallback.
+      metrics->IncrementReadCount();
       // A failed Talon read can have written a prefix. Retry the entire range.
       return WithOriginFallback(
           reader->ReadAtAsync(static_cast<uint64_t>(position), static_cast<uint64_t>(length), out), origin_file,
+          metrics,
           [position, length, out](NonBlockingRandomAccessFile& file) {
             return file.ReadAtAsyncInto(position, length, out);
           },
@@ -179,43 +183,45 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
       // Preserve the origin's native async path and the caller's I/O context.
       return state_->origin_file->ReadAsync(io_context, position, nbytes);
     }
-    return EnsureReaderAsync().Then([position, nbytes, pool = io_context.pool(),
-                                     origin_file = state_->origin_file.get()](
-                                        const Reader& reader) -> arrow::Future<std::shared_ptr<arrow::Buffer>> {
-      // A cold open has no size yet. Resolve and clamp before allocating,
-      // including when the caller supplies a large read extending past EOF.
-      auto read_size = GetReadSize(position, nbytes, reader->KnownSize());
-      if (!read_size.ok()) {
-        return arrow::Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(read_size.status());
-      }
-      const auto length = read_size.ValueOrDie();
-      auto maybe_buffer = arrow::AllocateResizableBuffer(length, pool);
-      if (!maybe_buffer.ok()) {
-        return arrow::Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(maybe_buffer.status());
-      }
-      auto buffer = std::move(maybe_buffer).ValueOrDie();
-      if (length == 0) {
-        return arrow::Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(
-            std::shared_ptr<arrow::Buffer>(std::move(buffer)));
-      }
-      auto* const out = buffer->mutable_data();
-      return WithOriginFallback(
-                 reader->ReadAtAsync(static_cast<uint64_t>(position), static_cast<uint64_t>(length), out), origin_file,
-                 [position, length, out](NonBlockingRandomAccessFile& file) {
-                   return file.ReadAtAsyncInto(position, length, out);
-                 },
-                 [position, length, out](arrow::io::RandomAccessFile& file) {
-                   return file.ReadAt(position, length, out);
-                 })
-          .Then([buffer = std::move(buffer),
-                 length](const int64_t bytes_read) mutable -> arrow::Result<std::shared_ptr<arrow::Buffer>> {
-            if (bytes_read > length) {
-              return arrow::Status::IOError("Talon returned more bytes than requested");
-            }
-            ARROW_RETURN_NOT_OK(buffer->Resize(bytes_read));
-            return std::shared_ptr<arrow::Buffer>(std::move(buffer));
-          });
-    });
+    return EnsureReaderAsync().Then(
+        [position, nbytes, pool = io_context.pool(), origin_file = state_->origin_file.get(),
+         metrics = state_->filesystem->metrics](const Reader& reader) -> arrow::Future<std::shared_ptr<arrow::Buffer>> {
+          // A cold open has no size yet. Resolve and clamp before allocating,
+          // including when the caller supplies a large read extending past EOF.
+          auto read_size = GetReadSize(position, nbytes, reader->KnownSize());
+          if (!read_size.ok()) {
+            return arrow::Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(read_size.status());
+          }
+          const auto length = read_size.ValueOrDie();
+          auto maybe_buffer = arrow::AllocateResizableBuffer(length, pool);
+          if (!maybe_buffer.ok()) {
+            return arrow::Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(maybe_buffer.status());
+          }
+          auto buffer = std::move(maybe_buffer).ValueOrDie();
+          if (length == 0) {
+            return arrow::Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(
+                std::shared_ptr<arrow::Buffer>(std::move(buffer)));
+          }
+          auto* const out = buffer->mutable_data();
+          metrics->IncrementReadCount();
+          return WithOriginFallback(
+                     reader->ReadAtAsync(static_cast<uint64_t>(position), static_cast<uint64_t>(length), out),
+                     origin_file, metrics,
+                     [position, length, out](NonBlockingRandomAccessFile& file) {
+                       return file.ReadAtAsyncInto(position, length, out);
+                     },
+                     [position, length, out](arrow::io::RandomAccessFile& file) {
+                       return file.ReadAt(position, length, out);
+                     })
+              .Then([buffer = std::move(buffer),
+                     length](const int64_t bytes_read) mutable -> arrow::Result<std::shared_ptr<arrow::Buffer>> {
+                if (bytes_read > length) {
+                  return arrow::Status::IOError("Talon returned more bytes than requested");
+                }
+                ARROW_RETURN_NOT_OK(buffer->Resize(bytes_read));
+                return std::shared_ptr<arrow::Buffer>(std::move(buffer));
+              });
+        });
   }
 
   arrow::Result<int64_t> Read(int64_t nbytes, void* out) override {
@@ -291,16 +297,18 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
   template <typename ReadOriginAsync, typename ReadOrigin>
   static arrow::Future<int64_t> WithOriginFallback(arrow::Future<int64_t> future,
                                                    arrow::io::RandomAccessFile* const origin_file,
+                                                   const std::shared_ptr<FilesystemMetrics>& metrics,
                                                    ReadOriginAsync read_origin_async,
                                                    ReadOrigin read_origin) {
     return future.Then(
-        [](const int64_t value) { return value; },
-        [origin_file, read_origin_async = std::move(read_origin_async),
+        [metrics](const int64_t value) {
+          metrics->IncrementReadBytes(value);
+          return value;
+        },
+        [metrics, origin_file, read_origin_async = std::move(read_origin_async),
          read_origin = std::move(read_origin)](const arrow::Status& talon_error) -> arrow::Future<int64_t> {
-#if 0
-          // TODO(jiaqizho): Replace fallback logging with metrics.
-          LOG_STORAGE_WARNING_ << "Talon failed, falling back to origin filesystem: " << talon_error;
-#endif
+          // Record the Talon failure before fallback; origin accounts for its own I/O.
+          metrics->IncrementFailedCount();
           arrow::Future<int64_t> origin_future;
           if (auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(origin_file)) {
             origin_future = read_origin_async(*async_file);
@@ -596,11 +604,15 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
     return sizable->OpenOutputStreamWithUploadSize(path, metadata, part_size);
   }
 
-  std::shared_ptr<FilesystemMetrics> GetMetrics() const override {
-    // TODO(jiaqizho): Add dedicated Talon metrics to distinguish accesses through Talon from
-    // direct cloud-provider accesses, keeping them separate from these origin metrics.
+  arrow::Result<std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>> GetMetricsSources()
+      const override {
     const auto observable = std::dynamic_pointer_cast<Observable>(origin_fs_);
-    return observable == nullptr ? nullptr : observable->GetMetrics();
+    std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>> sources;
+    if (observable != nullptr) {
+      ARROW_ASSIGN_OR_RAISE(sources, observable->GetMetricsSources());
+    }
+    sources.emplace(kTalonMetricsSource, state_->metrics);
+    return sources;
   }
 
   private:
