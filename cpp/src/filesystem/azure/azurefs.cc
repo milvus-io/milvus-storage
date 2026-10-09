@@ -17,6 +17,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <exception>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -26,6 +27,7 @@
 #include "milvus-storage/filesystem/azure/azure_sas_token_policy.h"
 #include "milvus-storage/filesystem/azure/azurefs_internal.h"
 #include "milvus-storage/common/extend_status.h"
+#include "milvus-storage/filesystem/async_random_access_file.h"
 #include "arrow/io/memory.h"
 
 // idenfity.hpp triggers -Wattributes warnings cause -Werror builds to fail,
@@ -425,6 +427,15 @@ std::string BuildBaseUrl(const std::string& scheme, const std::string& authority
   return url;
 }
 
+// SDK client URLs may carry static SAS credentials. Diagnostics need only the endpoint and path.
+static std::string DiagnosticUrl(std::string url) {
+  const auto query = url.find_first_of("?#");
+  if (query != std::string::npos) {
+    url.resize(query);
+  }
+  return url;
+}
+
 template <typename... PrefixArgs>
 Status ExceptionToStatus(const Azure::Core::RequestFailedException& exception,
                          PrefixArgs&&... prefix_args) {
@@ -436,16 +447,43 @@ Status ExceptionToStatus(const Azure::Core::RequestFailedException& exception,
       dynamic_cast<const Azure::Core::Http::TransportException*>(&exception) != nullptr;
   auto code = internal::ClassifyAzureError(static_cast<int>(exception.StatusCode),
                                            exception.ErrorCode, transport_failure);
-  if (!code.has_value()) {
-    return Status::IOError(std::forward<PrefixArgs>(prefix_args)..., " Azure Error: [",
-                           exception.ErrorCode, "] ", exception.what());
-  }
-
   std::stringstream ss;
   (ss << ... << std::forward<PrefixArgs>(prefix_args));
   ss << " Azure Error: [" << exception.ErrorCode << "] " << exception.what();
-  auto message = ss.str();
+  if (exception.StatusCode != Http::HttpStatusCode::None) {
+    ss << " http_status=" << static_cast<int>(exception.StatusCode);
+  }
+  const std::string_view original_message(exception.what());
+  if (!exception.Message.empty() && original_message.find(exception.Message) == std::string_view::npos) {
+    ss << " service_message=" << exception.Message;
+  }
+  if (!exception.RequestId.empty() && original_message.find(exception.RequestId) == std::string_view::npos) {
+    ss << " request_id=" << exception.RequestId;
+  }
+  if (!exception.ClientRequestId.empty()) {
+    ss << " client_request_id=" << exception.ClientRequestId;
+  }
+  const auto message = ss.str();
+  if (!code.has_value()) {
+    return Status::IOError(message);
+  }
   return milvus_storage::MakeExtendError(*code, message, message);
+}
+
+template <typename... PrefixArgs>
+Status ExceptionToStatus(const Azure::Core::Credentials::AuthenticationException& exception,
+                         PrefixArgs&&... prefix_args) {
+  std::stringstream ss;
+  (ss << ... << std::forward<PrefixArgs>(prefix_args));
+  ss << " Azure authentication failed: " << exception.what();
+  const auto message = ss.str();
+  return milvus_storage::MakeExtendError(milvus_storage::ExtendStatusCode::AwsErrorAccessDenied, message, message);
+}
+
+template <typename... PrefixArgs>
+Status ExceptionToStatus(const std::exception& exception, PrefixArgs&&... prefix_args) {
+  // Typed SDK failures are handled before this last-resort boundary fallback.
+  return Status::UnknownError(std::forward<PrefixArgs>(prefix_args)..., " Unexpected exception: ", exception.what());
 }
 }  // namespace
 
@@ -458,9 +496,19 @@ std::string AzureOptions::AccountDfsUrl(const std::string& account_name) const {
 }
 
 Status AzureOptions::ConfigureDefaultCredential() {
-  credential_kind_ = CredentialKind::kDefault;
-  token_credential_ = std::make_shared<Azure::Identity::DefaultAzureCredential>();
-  return Status::OK();
+  const auto on_error = [&](const auto& exception) -> Status {
+    return ExceptionToStatus(exception, "ConfigureDefaultCredential failed for account '", account_name, "'.");
+  };
+  try {
+    // Publish the credential kind only after construction succeeds.
+    token_credential_ = std::make_shared<Azure::Identity::DefaultAzureCredential>();
+    credential_kind_ = CredentialKind::kDefault;
+    return Status::OK();
+  } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+    return on_error(exception);
+  } catch (const std::exception& exception) {
+    return on_error(exception);
+  }
 }
 
 Status AzureOptions::ConfigureAnonymousCredential() {
@@ -468,22 +516,24 @@ Status AzureOptions::ConfigureAnonymousCredential() {
   return Status::OK();
 }
 
-Status AzureOptions::ConfigureAccountKeyCredential(const std::string& account_key) {
-  credential_kind_ = CredentialKind::kStorageSharedKey;
+Status AzureOptions::ConfigureAccountKeyCredential(const std::string& account_key) try {
   if (account_name.empty()) {
     return Status::Invalid("AzureOptions doesn't contain a valid account name");
   }
   storage_shared_key_credential_ =
       std::make_shared<Storage::StorageSharedKeyCredential>(account_name, account_key);
+  credential_kind_ = CredentialKind::kStorageSharedKey;
   return Status::OK();
+} catch (const std::exception& exception) {
+  return ExceptionToStatus(exception, "ConfigureAccountKeyCredential failed for account '", account_name, "'.");
 }
 
 Status AzureOptions::ConfigureSASCredential(const std::string& sas_token) {
-  credential_kind_ = CredentialKind::kSASToken;
   if (account_name.empty()) {
     return Status::Invalid("AzureOptions doesn't contain a valid account name");
   }
   sas_token_ = sas_token;
+  credential_kind_ = CredentialKind::kSASToken;
   return Status::OK();
 }
 
@@ -502,114 +552,171 @@ Status AzureOptions::ConfigureSASTokenPolicy(std::shared_ptr<AzureSasTokenPolicy
 Status AzureOptions::ConfigureClientSecretCredential(const std::string& tenant_id,
                                                      const std::string& client_id,
                                                      const std::string& client_secret) {
-  credential_kind_ = CredentialKind::kClientSecret;
-  token_credential_ = std::make_shared<Azure::Identity::ClientSecretCredential>(
-      tenant_id, client_id, client_secret);
-  return Status::OK();
+  const auto on_error = [&](const auto& exception) -> Status {
+    return ExceptionToStatus(exception, "ConfigureClientSecretCredential failed for account '", account_name,
+                             "' (tenant_id='", tenant_id, "', client_id='", client_id, "').");
+  };
+  try {
+    token_credential_ = std::make_shared<Azure::Identity::ClientSecretCredential>(tenant_id, client_id, client_secret);
+    credential_kind_ = CredentialKind::kClientSecret;
+    return Status::OK();
+  } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+    return on_error(exception);
+  } catch (const std::exception& exception) {
+    return on_error(exception);
+  }
 }
 
 Status AzureOptions::ConfigureManagedIdentityCredential(const std::string& client_id) {
-  credential_kind_ = CredentialKind::kManagedIdentity;
-  token_credential_ =
-      std::make_shared<Azure::Identity::ManagedIdentityCredential>(client_id);
-  return Status::OK();
+  const auto on_error = [&](const auto& exception) -> Status {
+    return ExceptionToStatus(exception, "ConfigureManagedIdentityCredential failed for account '", account_name,
+                             "' (client_id='", client_id, "').");
+  };
+  try {
+    token_credential_ = std::make_shared<Azure::Identity::ManagedIdentityCredential>(client_id);
+    credential_kind_ = CredentialKind::kManagedIdentity;
+    return Status::OK();
+  } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+    return on_error(exception);
+  } catch (const std::exception& exception) {
+    return on_error(exception);
+  }
 }
 
 Status AzureOptions::ConfigureCLICredential() {
-  credential_kind_ = CredentialKind::kCLI;
-  token_credential_ = std::make_shared<Azure::Identity::AzureCliCredential>();
-  return Status::OK();
+  const auto on_error = [&](const auto& exception) -> Status {
+    return ExceptionToStatus(exception, "ConfigureCLICredential failed for account '", account_name, "'.");
+  };
+  try {
+    token_credential_ = std::make_shared<Azure::Identity::AzureCliCredential>();
+    credential_kind_ = CredentialKind::kCLI;
+    return Status::OK();
+  } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+    return on_error(exception);
+  } catch (const std::exception& exception) {
+    return on_error(exception);
+  }
 }
 
 Status AzureOptions::ConfigureWorkloadIdentityCredential() {
-  credential_kind_ = CredentialKind::kWorkloadIdentity;
-  token_credential_ = std::make_shared<Azure::Identity::WorkloadIdentityCredential>();
-  return Status::OK();
+  const auto on_error = [&](const auto& exception) -> Status {
+    return ExceptionToStatus(exception, "ConfigureWorkloadIdentityCredential failed for account '", account_name, "'.");
+  };
+  try {
+    token_credential_ = std::make_shared<Azure::Identity::WorkloadIdentityCredential>();
+    credential_kind_ = CredentialKind::kWorkloadIdentity;
+    return Status::OK();
+  } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+    return on_error(exception);
+  } catch (const std::exception& exception) {
+    return on_error(exception);
+  }
 }
 
 Status AzureOptions::ConfigureEnvironmentCredential() {
-  credential_kind_ = CredentialKind::kEnvironment;
-  token_credential_ = std::make_shared<Azure::Identity::EnvironmentCredential>();
-  return Status::OK();
+  const auto on_error = [&](const auto& exception) -> Status {
+    return ExceptionToStatus(exception, "ConfigureEnvironmentCredential failed for account '", account_name, "'.");
+  };
+  try {
+    token_credential_ = std::make_shared<Azure::Identity::EnvironmentCredential>();
+    credential_kind_ = CredentialKind::kEnvironment;
+    return Status::OK();
+  } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+    return on_error(exception);
+  } catch (const std::exception& exception) {
+    return on_error(exception);
+  }
 }
 
-Result<std::unique_ptr<Blobs::BlobServiceClient>> AzureOptions::MakeBlobServiceClient()
-    const {
-  if (account_name.empty()) {
-    return Status::Invalid("AzureOptions doesn't contain a valid account name");
-  }
-  if (!(blob_storage_scheme == "http" || blob_storage_scheme == "https")) {
-    return Status::Invalid("AzureOptions::blob_storage_scheme must be http or https: ",
-                           blob_storage_scheme);
-  }
-  switch (credential_kind_) {
-    case CredentialKind::kAnonymous:
-      return std::make_unique<Blobs::BlobServiceClient>(AccountBlobUrl(account_name));
-    case CredentialKind::kDefault:
-      if (!token_credential_) {
-        token_credential_ = std::make_shared<Azure::Identity::DefaultAzureCredential>();
-      }
-      [[fallthrough]];
-    case CredentialKind::kClientSecret:
-    case CredentialKind::kManagedIdentity:
-    case CredentialKind::kCLI:
-    case CredentialKind::kWorkloadIdentity:
-    case CredentialKind::kEnvironment:
-      return std::make_unique<Blobs::BlobServiceClient>(AccountBlobUrl(account_name),
-                                                        token_credential_);
-    case CredentialKind::kStorageSharedKey:
-      return std::make_unique<Blobs::BlobServiceClient>(AccountBlobUrl(account_name),
-                                                        storage_shared_key_credential_);
-    case CredentialKind::kSASToken:
-      return std::make_unique<Blobs::BlobServiceClient>(AccountBlobUrl(account_name) +
-                                                        sas_token_);
-    case CredentialKind::kDynamicSASToken: {
-      Blobs::BlobClientOptions options;
-      options.PerOperationPolicies.emplace_back(sas_token_policy_->Clone());
-      return std::make_unique<Blobs::BlobServiceClient>(AccountBlobUrl(account_name), options);
+Result<std::unique_ptr<Blobs::BlobServiceClient>> AzureOptions::MakeBlobServiceClient() const {
+  const auto on_error = [&](const auto& exception) -> Status {
+    return ExceptionToStatus(exception, "MakeBlobServiceClient failed for account '", account_name,
+                             "', endpoint=", DiagnosticUrl(AccountBlobUrl(account_name)));
+  };
+  try {
+    if (account_name.empty()) {
+      return Status::Invalid("AzureOptions doesn't contain a valid account name");
     }
+    if (!(blob_storage_scheme == "http" || blob_storage_scheme == "https")) {
+      return Status::Invalid("AzureOptions::blob_storage_scheme must be http or https: ", blob_storage_scheme);
+    }
+    switch (credential_kind_) {
+      case CredentialKind::kAnonymous:
+        return std::make_unique<Blobs::BlobServiceClient>(AccountBlobUrl(account_name));
+      case CredentialKind::kDefault:
+        if (!token_credential_) {
+          token_credential_ = std::make_shared<Azure::Identity::DefaultAzureCredential>();
+        }
+        [[fallthrough]];
+      case CredentialKind::kClientSecret:
+      case CredentialKind::kManagedIdentity:
+      case CredentialKind::kCLI:
+      case CredentialKind::kWorkloadIdentity:
+      case CredentialKind::kEnvironment:
+        return std::make_unique<Blobs::BlobServiceClient>(AccountBlobUrl(account_name), token_credential_);
+      case CredentialKind::kStorageSharedKey:
+        return std::make_unique<Blobs::BlobServiceClient>(AccountBlobUrl(account_name), storage_shared_key_credential_);
+      case CredentialKind::kSASToken:
+        return std::make_unique<Blobs::BlobServiceClient>(AccountBlobUrl(account_name) + sas_token_);
+      case CredentialKind::kDynamicSASToken: {
+        Blobs::BlobClientOptions options;
+        options.PerOperationPolicies.emplace_back(sas_token_policy_->Clone());
+        return std::make_unique<Blobs::BlobServiceClient>(AccountBlobUrl(account_name), options);
+      }
+    }
+    return Status::Invalid("AzureOptions doesn't contain a valid auth configuration");
+  } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+    return on_error(exception);
+  } catch (const std::exception& exception) {
+    return on_error(exception);
   }
-  return Status::Invalid("AzureOptions doesn't contain a valid auth configuration");
 }
 
-Result<std::unique_ptr<DataLake::DataLakeServiceClient>>
-AzureOptions::MakeDataLakeServiceClient() const {
-  if (account_name.empty()) {
-    return Status::Invalid("AzureOptions doesn't contain a valid account name");
-  }
-  if (!(dfs_storage_scheme == "http" || dfs_storage_scheme == "https")) {
-    return Status::Invalid("AzureOptions::dfs_storage_scheme must be http or https: ",
-                           dfs_storage_scheme);
-  }
-  switch (credential_kind_) {
-    case CredentialKind::kAnonymous:
-      return std::make_unique<DataLake::DataLakeServiceClient>(
-          AccountDfsUrl(account_name));
-    case CredentialKind::kDefault:
-      if (!token_credential_) {
-        token_credential_ = std::make_shared<Azure::Identity::DefaultAzureCredential>();
-      }
-      [[fallthrough]];
-    case CredentialKind::kClientSecret:
-    case CredentialKind::kManagedIdentity:
-    case CredentialKind::kCLI:
-    case CredentialKind::kWorkloadIdentity:
-    case CredentialKind::kEnvironment:
-      return std::make_unique<DataLake::DataLakeServiceClient>(
-          AccountDfsUrl(account_name), token_credential_);
-    case CredentialKind::kStorageSharedKey:
-      return std::make_unique<DataLake::DataLakeServiceClient>(
-          AccountDfsUrl(account_name), storage_shared_key_credential_);
-    case CredentialKind::kSASToken:
-      return std::make_unique<DataLake::DataLakeServiceClient>(
-          AccountBlobUrl(account_name) + sas_token_);
-    case CredentialKind::kDynamicSASToken: {
-      DataLake::DataLakeClientOptions options;
-      options.PerOperationPolicies.emplace_back(sas_token_policy_->Clone());
-      return std::make_unique<DataLake::DataLakeServiceClient>(AccountDfsUrl(account_name), options);
+Result<std::unique_ptr<DataLake::DataLakeServiceClient>> AzureOptions::MakeDataLakeServiceClient() const {
+  const auto on_error = [&](const auto& exception) -> Status {
+    return ExceptionToStatus(
+        exception, "MakeDataLakeServiceClient failed for account '", account_name, "', endpoint=",
+        DiagnosticUrl((credential_kind_ == CredentialKind::kSASToken ? AccountBlobUrl(account_name)
+                                                                     : AccountDfsUrl(account_name))));
+  };
+  try {
+    if (account_name.empty()) {
+      return Status::Invalid("AzureOptions doesn't contain a valid account name");
     }
+    if (!(dfs_storage_scheme == "http" || dfs_storage_scheme == "https")) {
+      return Status::Invalid("AzureOptions::dfs_storage_scheme must be http or https: ", dfs_storage_scheme);
+    }
+    switch (credential_kind_) {
+      case CredentialKind::kAnonymous:
+        return std::make_unique<DataLake::DataLakeServiceClient>(AccountDfsUrl(account_name));
+      case CredentialKind::kDefault:
+        if (!token_credential_) {
+          token_credential_ = std::make_shared<Azure::Identity::DefaultAzureCredential>();
+        }
+        [[fallthrough]];
+      case CredentialKind::kClientSecret:
+      case CredentialKind::kManagedIdentity:
+      case CredentialKind::kCLI:
+      case CredentialKind::kWorkloadIdentity:
+      case CredentialKind::kEnvironment:
+        return std::make_unique<DataLake::DataLakeServiceClient>(AccountDfsUrl(account_name), token_credential_);
+      case CredentialKind::kStorageSharedKey:
+        return std::make_unique<DataLake::DataLakeServiceClient>(AccountDfsUrl(account_name),
+                                                                 storage_shared_key_credential_);
+      case CredentialKind::kSASToken:
+        return std::make_unique<DataLake::DataLakeServiceClient>(AccountBlobUrl(account_name) + sas_token_);
+      case CredentialKind::kDynamicSASToken: {
+        DataLake::DataLakeClientOptions options;
+        options.PerOperationPolicies.emplace_back(sas_token_policy_->Clone());
+        return std::make_unique<DataLake::DataLakeServiceClient>(AccountDfsUrl(account_name), options);
+      }
+    }
+    return Status::Invalid("AzureOptions doesn't contain a valid auth configuration");
+  } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+    return on_error(exception);
+  } catch (const std::exception& exception) {
+    return on_error(exception);
   }
-  return Status::Invalid("AzureOptions doesn't contain a valid auth configuration");
 }
 
 namespace {
@@ -922,13 +1029,17 @@ void ArrowMetadataToCommitBlockListOptions(
   }
 }
 
-class ObjectInputFile final : public io::RandomAccessFile {
+class ObjectInputFile final : public io::RandomAccessFile,
+                              public milvus_storage::NonBlockingRandomAccessFile {
  public:
   ObjectInputFile(std::shared_ptr<Blobs::BlobClient> blob_client,
-                  const io::IOContext& io_context, AzureLocation location,
+                  const io::IOContext& io_context,
+                  std::shared_ptr<milvus_storage::FilesystemMetrics> metrics,
+                  AzureLocation location,
                   int64_t size = kNoSize)
       : blob_client_(std::move(blob_client)),
         io_context_(io_context),
+        metrics_(std::move(metrics)),
         location_(std::move(location)),
         content_length_(size) {}
 
@@ -993,6 +1104,32 @@ class ObjectInputFile final : public io::RandomAccessFile {
     return GetCachedContentLength();
   }
 
+  Future<int64_t> GetSizeAsync() override {
+    const auto status = CheckClosed("get size asynchronously");
+    if (!status.ok()) {
+      return Future<int64_t>::MakeFinished(status);
+    }
+    const auto content_length = GetCachedContentLength();
+    if (content_length != kNoSize) {
+      return Future<int64_t>::MakeFinished(content_length);
+    }
+
+    // Keep the file alive until the blocking Azure SDK call leaves the IO pool.
+    auto self = std::shared_ptr<ObjectInputFile>(shared_from_this(), this);
+    auto submitted = io_context_.executor()->Submit([self = std::move(self)]() -> Result<int64_t> {
+      try {
+        return self->GetSize();
+      } catch (const std::exception& exception) {
+        // Arrow executors do not translate exceptions into failed futures.
+        return ExceptionToStatus(exception, "GetSizeAsync failed for '", self->location_.all, "'.");
+      }
+    });
+    if (!submitted.ok()) {
+      return Future<int64_t>::MakeFinished(submitted.status());
+    }
+    return std::move(submitted).ValueOrDie();
+  }
+
   Status Seek(int64_t position) override {
     RETURN_NOT_OK(CheckClosed("seek"));
     RETURN_NOT_OK(CheckPosition(position, "seek"));
@@ -1012,24 +1149,79 @@ class ObjectInputFile final : public io::RandomAccessFile {
     Http::HttpRange range{position, nbytes};
     Storage::Blobs::DownloadBlobToOptions download_options;
     download_options.Range = range;
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "DownloadTo from '", DiagnosticUrl(blob_client_->GetUrl()), "' at position ",
+                               position, " for ", nbytes,
+                               " bytes failed. ReadAt failed to read the required byte range.");
+    };
     try {
       auto result =
           blob_client_->DownloadTo(reinterpret_cast<uint8_t*>(out), nbytes,
                                    download_options);
       const auto bytes_read = result.Value.ContentRange.Length.Value();
       if (bytes_read < 0 || bytes_read > nbytes) {
-        return Status::IOError("Unexpected DownloadTo Content-Range length ",
-                               bytes_read, " for range read of ", nbytes,
-                               " bytes");
+        return Status::IOError("Unexpected DownloadTo Content-Range length ", bytes_read, " for '", location_.all,
+                               "' at position ", position, " for range read of ", nbytes, " bytes");
       }
       RETURN_NOT_OK(CacheContentLengthFromRead(result.Value));
+      if (bytes_read > 0) {
+        metrics_->IncrementReadCount();
+        metrics_->IncrementReadBytes(bytes_read);
+      }
       return bytes_read;
+    } catch (const Storage::StorageException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
     } catch (const Azure::Core::RequestFailedException& exception) {
-      return ExceptionToStatus(
-          exception, "DownloadTo from '", blob_client_->GetUrl(), "' at position ",
-          position, " for ", nbytes,
-          " bytes failed. ReadAt failed to read the required byte range.");
+      // DownloadTo can fail while validating or reading the response body.
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
+  }
+
+  Future<int64_t> ReadAtAsyncInto(int64_t position, int64_t nbytes,
+                                  uint8_t* out) override {
+    const auto status = CheckClosed("read asynchronously");
+    if (!status.ok()) {
+      return Future<int64_t>::MakeFinished(status);
+    }
+    auto maybe_read_size = GetReadSize(position, nbytes);
+    if (!maybe_read_size.ok()) {
+      return Future<int64_t>::MakeFinished(maybe_read_size.status());
+    }
+    nbytes = maybe_read_size.ValueOrDie();
+    if (nbytes > 0 && out == nullptr) {
+      return Future<int64_t>::MakeFinished(
+          Result<int64_t>(Status::Invalid("Azure read destination is null")));
+    }
+    if (nbytes == 0) {
+      return Future<int64_t>::MakeFinished(0);
+    }
+
+    // Azure SDK reads are blocking, so they run on the filesystem's Arrow IO pool.
+    // Parquet CPU work and continuations run on the caller's separate Folly pool.
+    // With this separation, even a synchronous footer wait on the CPU side does
+    // not occupy an IO worker, so this submission cannot cause a same-pool deadlock.
+    // Keep blocking Parquet opens off this IO pool if supplying a custom IOContext.
+    // The caller owns `out`; the file owns itself until the submitted read completes.
+    auto self = std::shared_ptr<ObjectInputFile>(shared_from_this(), this);
+    auto submitted =
+        io_context_.executor()->Submit([self = std::move(self), position, nbytes, out]() -> Result<int64_t> {
+          try {
+            return self->ReadAt(position, nbytes, out);
+          } catch (const std::exception& exception) {
+            return ExceptionToStatus(exception, "ReadAtAsyncInto failed for '", self->location_.all, "' at position ",
+                                     position, " for ", nbytes, " bytes.");
+          }
+        });
+    if (!submitted.ok()) {
+      return Future<int64_t>::MakeFinished(submitted.status());
+    }
+    return std::move(submitted).ValueOrDie();
   }
 
   Result<std::shared_ptr<Buffer>> ReadAt(int64_t position, int64_t nbytes) override {
@@ -1081,6 +1273,9 @@ class ObjectInputFile final : public io::RandomAccessFile {
       return Status::OK();
     }
 
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "GetProperties failed for '", DiagnosticUrl(blob_client_->GetUrl()), "'.");
+    };
     try {
       auto properties = blob_client_->GetProperties();
       if (MetadataIndicatesIsDirectory(properties.Value.Metadata)) {
@@ -1094,12 +1289,17 @@ class ObjectInputFile final : public io::RandomAccessFile {
       }
       SetCachedContentLength(content_length);
       return Status::OK();
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
     } catch (const Azure::Core::RequestFailedException& exception) {
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
         return PathNotFound(location_);
       }
-      return ExceptionToStatus(exception, "GetProperties failed for '",
-                               blob_client_->GetUrl(), "'.");
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
   }
 
@@ -1138,6 +1338,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
  private:
   std::shared_ptr<Blobs::BlobClient> blob_client_;
   const io::IOContext io_context_;
+  const std::shared_ptr<milvus_storage::FilesystemMetrics> metrics_;
   AzureLocation location_;
 
   bool closed_ = false;
@@ -1152,16 +1353,25 @@ Status CreateEmptyBlockBlob(const Blobs::BlockBlobClient& block_blob_client,
   if (metrics) {
     metrics->IncrementMultiPartUploadCreated();
   }
-  try {
-    block_blob_client.UploadFrom(nullptr, 0);
-  } catch (const Storage::StorageException& exception) {
+  // Count one failed SDK operation, after internal retries; status propagation adds no failure.
+  const auto on_error = [&](const auto& exception) -> Status {
     if (metrics) {
       metrics->IncrementFailedCount();
     }
-    return ExceptionToStatus(
-        exception, "UploadFrom failed for '", block_blob_client.GetUrl(),
-        "'. There is no existing blob at this location or the existing blob must be "
-        "replaced so ObjectAppendStream must create a new empty block blob.");
+    return ExceptionToStatus(exception, "UploadFrom failed for '", DiagnosticUrl(block_blob_client.GetUrl()),
+                             "'. There is no existing blob at this location or the existing blob must be "
+                             "replaced so ObjectAppendStream must create a new empty block blob.");
+  };
+  try {
+    block_blob_client.UploadFrom(nullptr, 0);
+  } catch (const Storage::StorageException& exception) {
+    return on_error(exception);
+  } catch (const Azure::Core::Http::TransportException& exception) {
+    return on_error(exception);
+  } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+    return on_error(exception);
+  } catch (const std::exception& exception) {
+    return on_error(exception);
   }
   return Status::OK();
 }
@@ -1171,30 +1381,46 @@ Status CreateEmptyBlockBlobConditional(Blobs::BlockBlobClient& block_blob_client
   if (metrics) {
     metrics->IncrementMultiPartUploadCreated();
   }
+  const auto on_error = [&](const auto& exception) -> Status {
+    if (metrics) {
+      metrics->IncrementFailedCount();
+    }
+    return ExceptionToStatus(exception, "Conditional upload failed for '", DiagnosticUrl(block_blob_client.GetUrl()),
+                             "'. The blob may already exist.");
+  };
   try {
     Blobs::UploadBlockBlobOptions options;
     options.AccessConditions.IfNoneMatch = Azure::ETag::Any();
     auto body = Core::IO::MemoryBodyStream(nullptr, 0);
     block_blob_client.Upload(body, options);
   } catch (const Storage::StorageException& exception) {
-    if (metrics) {
-      metrics->IncrementFailedCount();
-    }
-    return ExceptionToStatus(
-        exception, "Conditional upload failed for '", block_blob_client.GetUrl(),
-        "'. The blob may already exist.");
+    return on_error(exception);
+  } catch (const Azure::Core::Http::TransportException& exception) {
+    return on_error(exception);
+  } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+    return on_error(exception);
+  } catch (const std::exception& exception) {
+    return on_error(exception);
   }
   return Status::OK();
 }
 
 Result<Blobs::Models::GetBlockListResult> GetBlockList(
     std::shared_ptr<Blobs::BlockBlobClient> block_blob_client) {
+  const auto on_error = [&](const auto& exception) -> Status {
+    return ExceptionToStatus(exception, "GetBlockList failed for '", DiagnosticUrl(block_blob_client->GetUrl()),
+                             "'. Cannot write to a file without first fetching the existing block list.");
+  };
   try {
     return block_blob_client->GetBlockList().Value;
-  } catch (Storage::StorageException& exception) {
-    return ExceptionToStatus(
-        exception, "GetBlockList failed for '", block_blob_client->GetUrl(),
-        "'. Cannot write to a file without first fetching the existing block list.");
+  } catch (const Storage::StorageException& exception) {
+    return on_error(exception);
+  } catch (const Azure::Core::Http::TransportException& exception) {
+    return on_error(exception);
+  } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+    return on_error(exception);
+  } catch (const std::exception& exception) {
+    return on_error(exception);
   }
 }
 
@@ -1205,6 +1431,14 @@ Status CommitBlockList(std::shared_ptr<Storage::Blobs::BlockBlobClient> block_bl
   if (metrics) {
     metrics->IncrementMultiPartUploadFinished();
   }
+  const auto on_error = [&](const auto& exception) -> Status {
+    if (metrics) {
+      metrics->IncrementFailedCount();
+    }
+    return ExceptionToStatus(exception, "CommitBlockList failed for '", DiagnosticUrl(block_blob_client->GetUrl()),
+                             "' (block_count=", block_ids.size(), ").",
+                             " Committing is required to flush an output/append stream.");
+  };
   try {
     // CommitBlockList puts all block_ids in the latest element. That means in the case
     // of overlapping block_ids the newly staged block ids will always replace the
@@ -1212,12 +1446,13 @@ Status CommitBlockList(std::shared_ptr<Storage::Blobs::BlockBlobClient> block_bl
     // https://learn.microsoft.com/en-us/rest/api/storageservices/put-block-list?tabs=microsoft-entra-id#request-body
     block_blob_client->CommitBlockList(block_ids, options);
   } catch (const Storage::StorageException& exception) {
-    if (metrics) {
-      metrics->IncrementFailedCount();
-    }
-    return ExceptionToStatus(
-        exception, "CommitBlockList failed for '", block_blob_client->GetUrl(),
-        "'. Committing is required to flush an output/append stream.");
+    return on_error(exception);
+  } catch (const Azure::Core::Http::TransportException& exception) {
+    return on_error(exception);
+  } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+    return on_error(exception);
+  } catch (const std::exception& exception) {
+    return on_error(exception);
   }
   return Status::OK();
 }
@@ -1228,16 +1463,24 @@ Status StageBlock(Blobs::BlockBlobClient* block_blob_client, const std::string& 
   if (metrics) {
     metrics->IncrementWriteCount();
   }
-  try {
-    block_blob_client->StageBlock(id, content);
-  } catch (const Storage::StorageException& exception) {
+  const auto on_error = [&](const auto& exception) -> Status {
     if (metrics) {
       metrics->IncrementFailedCount();
     }
-    return ExceptionToStatus(
-        exception, "StageBlock failed for '", block_blob_client->GetUrl(),
-        "' new_block_id: '", id,
-        "'. Staging new blocks is fundamental to streaming writes to blob storage.");
+    return ExceptionToStatus(exception, "StageBlock failed for '", DiagnosticUrl(block_blob_client->GetUrl()),
+                             "' new_block_id: '", id, "', bytes=", content_length,
+                             ". Staging new blocks is fundamental to streaming writes to blob storage.");
+  };
+  try {
+    block_blob_client->StageBlock(id, content);
+  } catch (const Storage::StorageException& exception) {
+    return on_error(exception);
+  } catch (const Azure::Core::Http::TransportException& exception) {
+    return on_error(exception);
+  } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+    return on_error(exception);
+  } catch (const std::exception& exception) {
+    return on_error(exception);
   }
   if (metrics) {
     metrics->IncrementWriteBytes(content_length);
@@ -1298,6 +1541,11 @@ class ObjectAppendStream final : public io::OutputStream {
         RETURN_NOT_OK(CreateEmptyBlockBlob(*block_blob_client_, metrics_));
       }
     } else {
+      const auto on_error = [&](const auto& exception) -> Status {
+        return ExceptionToStatus(exception, "GetProperties failed for '", DiagnosticUrl(block_blob_client_->GetUrl()),
+                                 "'. Cannot initialise an ObjectAppendStream without knowing whether a "
+                                 "file already exists at this path, and if it exists, its size.");
+      };
       try {
         auto properties = block_blob_client_->GetProperties();
         if (MetadataIndicatesIsDirectory(properties.Value.Metadata)) {
@@ -1313,12 +1561,15 @@ class ObjectAppendStream final : public io::OutputStream {
           RETURN_NOT_OK(ensure_not_flat_namespace_directory());
           RETURN_NOT_OK(CreateEmptyBlockBlob(*block_blob_client_, metrics_));
         } else {
-          return ExceptionToStatus(
-              exception, "GetProperties failed for '", block_blob_client_->GetUrl(),
-              "'. Cannot initialise an ObjectAppendStream without knowing whether a "
-              "file already exists at this path, and if it exists, its size.");
+          return on_error(exception);
         }
         content_length_ = 0;
+      } catch (const Azure::Core::Http::TransportException& exception) {
+        return on_error(exception);
+      } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+        return on_error(exception);
+      } catch (const std::exception& exception) {
+        return on_error(exception);
       }
     }
 
@@ -1431,10 +1682,14 @@ class ObjectAppendStream final : public io::OutputStream {
       pending_blocks_completed = upload_state_->pending_blocks_completed;
     }
 
-    return pending_blocks_completed.Then([self = Self()] {
-      std::unique_lock<std::mutex> lock(self->upload_state_->mutex);
-      return CommitBlockList(self->block_blob_client_, self->upload_state_->block_ids,
-                             self->commit_block_list_options_, self->metrics_);
+    return pending_blocks_completed.Then([self = Self()]() -> Status {
+      try {
+        std::unique_lock<std::mutex> lock(self->upload_state_->mutex);
+        return CommitBlockList(self->block_blob_client_, self->upload_state_->block_ids,
+                               self->commit_block_list_options_, self->metrics_);
+      } catch (const std::exception& exception) {
+        return ExceptionToStatus(exception, "FlushAsync failed for '", self->location_.all, "'.");
+      }
     });
   }
 
@@ -1560,12 +1815,18 @@ class ObjectAppendStream final : public io::OutputStream {
       }
 
       // The closure keeps the buffer and the upload state alive
-      auto deferred = [owned_buffer, block_id, block_blob_client = block_blob_client_,
+      auto deferred = [owned_buffer, block_id, path = location_.all, block_blob_client = block_blob_client_,
                        state = upload_state_, metrics = metrics_]() mutable -> Status {
-        Core::IO::MemoryBodyStream block_content(owned_buffer->data(),
-                                                 owned_buffer->size());
-        auto status = StageBlock(block_blob_client.get(), block_id, block_content,
-                                 static_cast<int64_t>(owned_buffer->size()), metrics);
+        Status status;
+        try {
+          Core::IO::MemoryBodyStream block_content(owned_buffer->data(), owned_buffer->size());
+          status = StageBlock(block_blob_client.get(), block_id, block_content,
+                              static_cast<int64_t>(owned_buffer->size()), metrics);
+        } catch (const std::exception& exception) {
+          status = ExceptionToStatus(exception, "Background upload failed for '", path, "', block_id=", block_id,
+                                     ", bytes=", owned_buffer->size());
+        }
+        // Always settle the upload state, including when the SDK throws.
         HandleUploadOutcome(state, status);
         return Status::OK();
       };
@@ -1641,6 +1902,10 @@ namespace internal {
 
 Result<HNSSupport> CheckIfHierarchicalNamespaceIsEnabled(
     const DataLake::DataLakeFileSystemClient& adlfs_client, const AzureOptions& options) {
+  const auto on_error = [&](const auto& exception) -> Status {
+    return ExceptionToStatus(exception, "Check for Hierarchical Namespace support on '",
+                             DiagnosticUrl(adlfs_client.GetUrl()), "' failed.");
+  };
   try {
     auto directory_client = adlfs_client.GetDirectoryClient("");
     // GetAccessControlList will fail on storage accounts
@@ -1681,17 +1946,15 @@ Result<HNSSupport> CheckIfHierarchicalNamespaceIsEnabled(
         if (exception.ErrorCode == "HierarchicalNamespaceNotEnabled") {
           return HNSSupport::kDisabled;
         }
-        return ExceptionToStatus(exception,
-                                 "Check for Hierarchical Namespace support on '",
-                                 adlfs_client.GetUrl(), "' failed.");
+        return on_error(exception);
     }
   } catch (const Azure::Core::Http::TransportException& exception) {
-    return ExceptionToStatus(exception, "Check for Hierarchical Namespace support on '",
-                             adlfs_client.GetUrl(), "' failed.");
+    return on_error(exception);
+  } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+    return on_error(exception);
   } catch (const std::exception& exception) {
-    return Status::UnknownError(
-        "Check for Hierarchical Namespace support on '", adlfs_client.GetUrl(),
-        "' failed: ", typeid(exception).name(), ": ", exception.what());
+    return Status::UnknownError("Check for Hierarchical Namespace support on '", DiagnosticUrl(adlfs_client.GetUrl()),
+                                "' failed: ", typeid(exception).name(), ": ", exception.what());
   }
 }
 
@@ -1716,6 +1979,9 @@ Result<FileInfo> GetContainerPropsAsFileInfo(const AzureLocation& location,
                                              const ContainerClient& container_client) {
   DCHECK(!location.container.empty());
   FileInfo info{location.path.empty() ? location.all : location.container};
+  const auto on_error = [&](const auto& exception) -> Status {
+    return ExceptionToStatus(exception, "GetProperties for '", DiagnosticUrl(container_client.GetUrl()), "' failed.");
+  };
   try {
     auto properties = container_client.GetProperties();
     info.set_type(FileType::Directory);
@@ -1726,20 +1992,34 @@ Result<FileInfo> GetContainerPropsAsFileInfo(const AzureLocation& location,
       info.set_type(FileType::NotFound);
       return info;
     }
-    return ExceptionToStatus(exception, "GetProperties for '", container_client.GetUrl(),
-                             "' failed.");
+    return on_error(exception);
+  } catch (const Azure::Core::Http::TransportException& exception) {
+    return on_error(exception);
+  } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+    return on_error(exception);
+  } catch (const std::exception& exception) {
+    return on_error(exception);
   }
 }
 
 template <class ContainerClient>
 Status CreateContainerIfNotExists(const std::string& container_name,
                                   const ContainerClient& container_client) {
+  const auto on_error = [&](const auto& exception) -> Status {
+    return ExceptionToStatus(exception, "Failed to create a container: ", container_name, ": ",
+                             DiagnosticUrl(container_client.GetUrl()));
+  };
   try {
     container_client.CreateIfNotExists();
     return Status::OK();
   } catch (const Storage::StorageException& exception) {
-    return ExceptionToStatus(exception, "Failed to create a container: ", container_name,
-                             ": ", container_client.GetUrl());
+    return on_error(exception);
+  } catch (const Azure::Core::Http::TransportException& exception) {
+    return on_error(exception);
+  } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+    return on_error(exception);
+  } catch (const std::exception& exception) {
+    return on_error(exception);
   }
 }
 
@@ -1792,6 +2072,7 @@ class LeaseGuard {
   /// the true time_point.
   SteadyClock::time_point break_or_expires_at_;
   const std::unique_ptr<Blobs::BlobLeaseClient> lease_client_;
+  const std::string resource_;
   bool release_attempt_pending_ = true;
 
   /// \brief The latest known expiry time of a lease guarded by this class
@@ -1802,14 +2083,15 @@ class LeaseGuard {
   static constexpr std::chrono::seconds kMaxLeaseDuration{60};
 
  public:
-  LeaseGuard(std::unique_ptr<Blobs::BlobLeaseClient> lease_client,
-             std::chrono::seconds lease_duration)
-      : break_or_expires_at_(SteadyClock::now() +
-                             std::min(kMaxLeaseDuration, lease_duration)),
-        lease_client_(std::move(lease_client)) {
-    DCHECK(lease_duration <= kMaxLeaseDuration);
-    DCHECK(this->lease_client_);
-  }
+    LeaseGuard(std::unique_ptr<Blobs::BlobLeaseClient> lease_client,
+               std::chrono::seconds lease_duration,
+               std::string resource)
+        : break_or_expires_at_(SteadyClock::now() + std::min(kMaxLeaseDuration, lease_duration)),
+          lease_client_(std::move(lease_client)),
+          resource_(std::move(resource)) {
+      DCHECK(lease_duration <= kMaxLeaseDuration);
+      DCHECK(this->lease_client_);
+    }
 
   ARROW_DISALLOW_COPY_AND_ASSIGN(LeaseGuard);
 
@@ -1828,11 +2110,20 @@ class LeaseGuard {
  private:
   Status DoRelease() {
     DCHECK(release_attempt_pending_);
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "Failed to release the ", lease_client_->GetLeaseId(), " lease on '",
+                               resource_, "'");
+    };
     try {
       lease_client_->Release();
     } catch (const Storage::StorageException& exception) {
-      return ExceptionToStatus(exception, "Failed to release the ",
-                               lease_client_->GetLeaseId(), " lease");
+      return on_error(exception);
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
     return Status::OK();
   }
@@ -1868,15 +2159,24 @@ class LeaseGuard {
 #endif
     Blobs::BreakLeaseOptions options;
     options.BreakPeriod = break_period;
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "Failed to break the ", lease_client_->GetLeaseId(), " lease on '", resource_,
+                               "' expiring in ", remaining_time_ms().count(),
+                               "ms (break_period_seconds=", break_period.ValueOr(std::chrono::seconds{0}).count(), ")");
+    };
     try {
       lease_client_->Break(options);
       break_or_expires_at_ =
           std::min(break_or_expires_at_,
                    SteadyClock::now() + break_period.ValueOr(std::chrono::seconds{0}));
     } catch (const Storage::StorageException& exception) {
-      return ExceptionToStatus(exception, "Failed to break the ",
-                               lease_client_->GetLeaseId(), " lease expiring in ",
-                               remaining_time_ms().count(), "ms");
+      return on_error(exception);
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
     return Status::OK();
   }
@@ -1896,9 +2196,7 @@ class LeaseGuard {
   /// and if it's too large the only consequence is that a lease on a non-existent
   /// resource will remain in the "Breaking" state for a while blocking others
   /// from recreating the resource.
-  void BreakBeforeDeletion(std::chrono::seconds break_period) {
-    ARROW_CHECK_OK(Break(break_period));
-  }
+  Status BreakBeforeDeletion(std::chrono::seconds break_period) { return Break(break_period); }
 
   // These functions are marked ARROW_NOINLINE because they are called from
   // multiple locations, but are not performance-critical.
@@ -2052,6 +2350,10 @@ class AzureFileSystem::Impl {
     auto file_client = adlfs_client.GetFileClient(location.path);
     DataLake::GetPathPropertiesOptions options;
     options.AccessConditions.LeaseId = std::move(lease_id);
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "GetProperties for '", DiagnosticUrl(file_client.GetUrl()),
+                               "' failed. GetFileInfo is unable to determine whether the path exists.");
+    };
     try {
       FileInfo info{location.all};
       auto properties = file_client.GetProperties(options);
@@ -2075,9 +2377,13 @@ class AzureFileSystem::Impl {
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
         return FileInfo{location.all, FileType::NotFound};
       }
-      return ExceptionToStatus(
-          exception, "GetProperties for '", file_client.GetUrl(),
-          "' failed. GetFileInfo is unable to determine whether the path exists.");
+      return on_error(exception);
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
   }
 
@@ -2093,6 +2399,12 @@ class AzureFileSystem::Impl {
     options.Prefix = internal::RemoveTrailingSlash(location.path);
     options.PageSizeHint = 1;
 
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "ListBlobsByHierarchy failed for prefix='", *options.Prefix,
+                               "' in container '", location.container,
+                               "', endpoint=", DiagnosticUrl(container_client.GetUrl()),
+                               ". GetFileInfo is unable to determine whether the path exists.");
+    };
     try {
       FileInfo info{location.all};
       auto list_response = container_client.ListBlobsByHierarchy(kDelimiter, options);
@@ -2150,9 +2462,13 @@ class AzureFileSystem::Impl {
       if (IsContainerNotFound(exception)) {
         return FileInfo{location.all, FileType::NotFound};
       }
-      return ExceptionToStatus(
-          exception, "ListBlobsByHierarchy failed for prefix='", *options.Prefix,
-          "'. GetFileInfo is unable to determine whether the path exists.");
+      return on_error(exception);
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
   }
 
@@ -2197,6 +2513,10 @@ class AzureFileSystem::Impl {
   template <typename OnContainer>
   Status VisitContainers(const Core::Context& context, OnContainer&& on_container) const {
     Blobs::ListBlobContainersOptions options;
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "Failed to list containers for account '", options_.account_name,
+                               "', endpoint=", DiagnosticUrl(blob_service_client_->GetUrl()));
+    };
     try {
       auto container_list_response =
           blob_service_client_->ListBlobContainers(options, context);
@@ -2207,7 +2527,13 @@ class AzureFileSystem::Impl {
         }
       }
     } catch (const Storage::StorageException& exception) {
-      return ExceptionToStatus(exception, "Failed to list account containers.");
+      return on_error(exception);
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
     return Status::OK();
   }
@@ -2239,6 +2565,10 @@ class AzureFileSystem::Impl {
     options.PageSizeHint = page_size_hint;
 
     auto base_path_depth = internal::GetAbstractPathDepth(base_location.path);
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "Failed to list paths in a directory: ", select.base_dir, ": ",
+                               DiagnosticUrl(directory_client.GetUrl()));
+    };
     try {
       auto list_response = directory_client.ListPaths(select.recursive, options, context);
       for (; list_response.HasPage(); list_response.MoveToNextPage(context)) {
@@ -2265,10 +2595,14 @@ class AzureFileSystem::Impl {
       if (IsContainerNotFound(exception) || exception.ErrorCode == "PathNotFound") {
         found = false;
       } else {
-        return ExceptionToStatus(exception,
-                                 "Failed to list paths in a directory: ", select.base_dir,
-                                 ": ", directory_client.GetUrl());
+        return on_error(exception);
       }
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
 
     return found || select.allow_not_found
@@ -2328,6 +2662,10 @@ class AzureFileSystem::Impl {
       return recurse(prefix);
     };
 
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "Failed to list blobs in a directory: ", select.base_dir, ": ",
+                               DiagnosticUrl(container_client.GetUrl()));
+    };
     try {
       auto list_response =
           container_client.ListBlobsByHierarchy(/*delimiter=*/"/", options, context);
@@ -2378,10 +2716,14 @@ class AzureFileSystem::Impl {
       if (IsContainerNotFound(exception)) {
         found = false;
       } else {
-        return ExceptionToStatus(exception,
-                                 "Failed to list blobs in a directory: ", select.base_dir,
-                                 ": ", container_client.GetUrl());
+        return on_error(exception);
       }
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
 
     return found || select.allow_not_found
@@ -2451,7 +2793,7 @@ class AzureFileSystem::Impl {
     auto blob_client = std::make_shared<Blobs::BlobClient>(
         GetBlobClient(location.container, location.path));
 
-    auto ptr = std::make_shared<ObjectInputFile>(blob_client, fs->io_context(),
+    auto ptr = std::make_shared<ObjectInputFile>(blob_client, fs->io_context(), metrics(),
                                                  std::move(location));
     RETURN_NOT_OK(ptr->Init());
     return ptr;
@@ -2470,7 +2812,7 @@ class AzureFileSystem::Impl {
     auto blob_client = std::make_shared<Blobs::BlobClient>(
         GetBlobClient(location.container, location.path));
 
-    auto ptr = std::make_shared<ObjectInputFile>(blob_client, fs->io_context(),
+    auto ptr = std::make_shared<ObjectInputFile>(blob_client, fs->io_context(), metrics(),
                                                  std::move(location), info.size());
     RETURN_NOT_OK(ptr->Init());
     return ptr;
@@ -2487,6 +2829,10 @@ class AzureFileSystem::Impl {
                            const AzureLocation& location, bool recursive) {
     DCHECK(!location.container.empty());
     DCHECK(!location.path.empty());
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "Failed to create directory '", location.all,
+                               "': ", DiagnosticUrl(container_client.GetUrl()));
+    };
     if (recursive) {
       // Recursive CreateDir calls require that all path segments be
       // either a directory or not found.
@@ -2511,11 +2857,17 @@ class AzureFileSystem::Impl {
       ARROW_ASSIGN_OR_RAISE(auto container_info,
                             GetContainerPropsAsFileInfo(container, container_client));
       if (container_info.type() == FileType::NotFound) {
+
         try {
           container_client.CreateIfNotExists();
         } catch (const Storage::StorageException& exception) {
-          return ExceptionToStatus(exception, "Failed to create directory '",
-                                   location.all, "': ", container_client.GetUrl());
+          return on_error(exception);
+        } catch (const Azure::Core::Http::TransportException& exception) {
+          return on_error(exception);
+        } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+          return on_error(exception);
+        } catch (const std::exception& exception) {
+          return on_error(exception);
         }
       }
       // Create nonexistent directories from shorter to longer:
@@ -2538,11 +2890,20 @@ class AzureFileSystem::Impl {
       //   3. /container/a/c/d/
       for (size_t i = nonexistent_locations.size(); i > 0; --i) {
         const auto& nonexistent_location = nonexistent_locations[i - 1];
+        const auto on_ancestor_error = [&](const auto& exception) -> Status {
+          return ExceptionToStatus(exception, "Failed to create directory '", nonexistent_location.all,
+                                   "' while creating '", location.all, "': ", DiagnosticUrl(container_client.GetUrl()));
+        };
         try {
           create_if_not_exists(container_client, nonexistent_location);
         } catch (const Storage::StorageException& exception) {
-          return ExceptionToStatus(exception, "Failed to create directory '",
-                                   location.all, "': ", container_client.GetUrl());
+          return on_ancestor_error(exception);
+        } catch (const Azure::Core::Http::TransportException& exception) {
+          return on_ancestor_error(exception);
+        } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+          return on_ancestor_error(exception);
+        } catch (const std::exception& exception) {
+          return on_ancestor_error(exception);
         }
       }
       return Status::OK();
@@ -2555,6 +2916,7 @@ class AzureFileSystem::Impl {
       // If the parent location is just the container, we don't need to check if it
       // exists because the operation we perform below will fail if the container
       // doesn't exist and we can handle that error according to the recursive flag.
+
       try {
         create_if_not_exists(container_client, location);
         return Status::OK();
@@ -2563,8 +2925,13 @@ class AzureFileSystem::Impl {
           auto parent = location.parent();
           return PathNotFound(parent);
         }
-        return ExceptionToStatus(exception, "Failed to create directory '", location.all,
-                                 "': ", container_client.GetUrl());
+        return on_error(exception);
+      } catch (const Azure::Core::Http::TransportException& exception) {
+        return on_error(exception);
+      } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+        return on_error(exception);
+      } catch (const std::exception& exception) {
+        return on_error(exception);
       }
     }
   }
@@ -2667,13 +3034,21 @@ class AzureFileSystem::Impl {
       // Nothing to do. The container already exists per the preconditions.
       return Status::OK();
     }
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, operation_name, " failed to ensure empty directory marker '", location.path,
+                               "' exists in container: ", DiagnosticUrl(container_client.GetUrl()));
+    };
     try {
       EnsureEmptyDirExistsImplThatThrows(container_client, location.path);
       return Status::OK();
     } catch (const Storage::StorageException& exception) {
-      return ExceptionToStatus(
-          exception, operation_name, " failed to ensure empty directory marker '",
-          location.path, "' exists in container: ", container_client.GetUrl());
+      return on_error(exception);
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
   }
 
@@ -2683,6 +3058,10 @@ class AzureFileSystem::Impl {
                          const AzureLocation& location) {
     DCHECK(!location.container.empty());
     DCHECK(location.path.empty());
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "Failed to delete a container: ", location.container, ": ",
+                               DiagnosticUrl(container_client.GetUrl()));
+    };
     try {
       auto response = container_client.Delete();
       // Only the "*IfExists" functions ever set Deleted to false.
@@ -2692,9 +3071,13 @@ class AzureFileSystem::Impl {
       if (IsContainerNotFound(exception)) {
         return PathNotFound(location);
       }
-      return ExceptionToStatus(exception,
-                               "Failed to delete a container: ", location.container, ": ",
-                               container_client.GetUrl());
+      return on_error(exception);
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
     return Status::OK();
   }
@@ -2735,6 +3118,10 @@ class AzureFileSystem::Impl {
     options.PageSizeHint = kNumMaxRequestsInBatch;
     // trusted only if preserve_dir_marker_blob is true.
     bool found_dir_marker_blob = false;
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "Failed to list blobs in a directory: ", location.path, ": ",
+                               DiagnosticUrl(container_client.GetUrl()));
+    };
     try {
       auto list_response = container_client.ListBlobs(options);
       if (list_response.Blobs.empty()) {
@@ -2767,6 +3154,10 @@ class AzureFileSystem::Impl {
           deferred_responses.emplace_back(blob_item.Name,
                                           batch.DeleteBlob(blob_item.Name));
         }
+        const auto on_batch_error = [&](const auto& exception) -> Status {
+          return ExceptionToStatus(exception, "Failed to delete blobs in a directory: ", location.path, ": ",
+                                   DiagnosticUrl(container_client.GetUrl()));
+        };
         try {
           // Before submitting the batch deleting directory contents, ensure
           // the empty directory marker blob exists. Doing this first, means that
@@ -2785,8 +3176,13 @@ class AzureFileSystem::Impl {
             container_client.SubmitBatch(batch);
           }
         } catch (const Storage::StorageException& exception) {
-          return ExceptionToStatus(exception, "Failed to delete blobs in a directory: ",
-                                   location.path, ": ", container_client.GetUrl());
+          return on_batch_error(exception);
+        } catch (const Azure::Core::Http::TransportException& exception) {
+          return on_batch_error(exception);
+        } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+          return on_batch_error(exception);
+        } catch (const std::exception& exception) {
+          return on_batch_error(exception);
         }
         std::vector<std::string> failed_blob_names;
         // Keep the first per-blob failure as a classified Status. Discarding
@@ -2796,15 +3192,24 @@ class AzureFileSystem::Impl {
         std::optional<Status> first_failure_status;
         for (auto& [blob_name_view, deferred_response] : deferred_responses) {
           bool success = true;
+          const auto on_blob_error = [&, blob_name_view = blob_name_view](const auto& exception) {
+            success = false;
+            if (!first_failure_status.has_value()) {
+              first_failure_status = ExceptionToStatus(exception, "Failed to delete blob: ", blob_name_view, ": ",
+                                                       DiagnosticUrl(container_client.GetUrl()));
+            }
+          };
           try {
             auto delete_result = deferred_response.GetResponse();
             success = delete_result.Value.Deleted;
           } catch (const Storage::StorageException& exception) {
-            success = false;
-            if (!first_failure_status.has_value()) {
-              first_failure_status = ExceptionToStatus(exception, "Failed to delete blob: ",
-                                                       blob_name_view, ": ");
-            }
+            on_blob_error(exception);
+          } catch (const Azure::Core::Http::TransportException& exception) {
+            on_blob_error(exception);
+          } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+            on_blob_error(exception);
+          } catch (const std::exception& exception) {
+            on_blob_error(exception);
           }
           if (!success) {
             failed_blob_names.emplace_back(blob_name_view);
@@ -2814,11 +3219,10 @@ class AzureFileSystem::Impl {
           std::stringstream message_stream;
           if (failed_blob_names.size() == 1) {
             message_stream << "Failed to delete a blob: " << failed_blob_names[0] << ": "
-                           << container_client.GetUrl();
+                           << DiagnosticUrl(container_client.GetUrl());
           } else {
-            message_stream << "Failed to delete blobs: ["
-                           << arrow::internal::JoinStrings(failed_blob_names, ", ")
-                           << "]: " << container_client.GetUrl();
+            message_stream << "Failed to delete blobs: [" << arrow::internal::JoinStrings(failed_blob_names, ", ")
+                           << "]: " << DiagnosticUrl(container_client.GetUrl());
           }
           auto message = message_stream.str();
           if (first_failure_status.has_value()) {
@@ -2835,9 +3239,13 @@ class AzureFileSystem::Impl {
       }
       return Status::OK();
     } catch (const Storage::StorageException& exception) {
-      return ExceptionToStatus(exception,
-                               "Failed to list blobs in a directory: ", location.path,
-                               ": ", container_client.GetUrl());
+      return on_error(exception);
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
   }
 
@@ -2864,6 +3272,10 @@ class AzureFileSystem::Impl {
         std::string(internal::RemoveTrailingSlash(location.path)));
     DataLake::DeleteDirectoryOptions options;
     options.AccessConditions.LeaseId = std::move(lease_id);
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "Failed to delete a directory: ", location.path, ": ",
+                               DiagnosticUrl(directory_client.GetUrl()));
+    };
     try {
       auto response = recursive ? directory_client.DeleteRecursive(options)
                                 : directory_client.DeleteEmpty(options);
@@ -2878,8 +3290,13 @@ class AzureFileSystem::Impl {
         }
         return Status::OK();
       }
-      return ExceptionToStatus(exception, "Failed to delete a directory: ", location.path,
-                               ": ", directory_client.GetUrl());
+      return on_error(exception);
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
     return Status::OK();
   }
@@ -2889,30 +3306,50 @@ class AzureFileSystem::Impl {
       const DataLake::DataLakeFileSystemClient& adlfs_client,
       const AzureLocation& location, bool missing_dir_ok) {
     auto directory_client = adlfs_client.GetDirectoryClient(location.path);
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "Failed to delete directory contents: ", location.path, ": ",
+                               DiagnosticUrl(directory_client.GetUrl()));
+    };
     try {
       auto list_response = directory_client.ListPaths(false);
       for (; list_response.HasPage(); list_response.MoveToNextPage()) {
         for (const auto& path : list_response.Paths) {
           if (path.IsDirectory) {
             auto sub_directory_client = adlfs_client.GetDirectoryClient(path.Name);
+            const auto on_subdirectory_error = [&](const auto& exception) -> Status {
+              return ExceptionToStatus(exception, "Failed to delete a sub directory: ", location.container, kDelimiter,
+                                       path.Name, ": ", DiagnosticUrl(sub_directory_client.GetUrl()));
+            };
             try {
               sub_directory_client.DeleteRecursive();
             } catch (const Storage::StorageException& exception) {
-              return ExceptionToStatus(
-                  exception, "Failed to delete a sub directory: ", location.container,
-                  kDelimiter, path.Name, ": ", sub_directory_client.GetUrl());
+              return on_subdirectory_error(exception);
+            } catch (const Azure::Core::Http::TransportException& exception) {
+              return on_subdirectory_error(exception);
+            } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+              return on_subdirectory_error(exception);
+            } catch (const std::exception& exception) {
+              return on_subdirectory_error(exception);
             }
           } else {
             if (path.Name == location.path) {
               return NotADir(location);
             }
             auto sub_file_client = adlfs_client.GetFileClient(path.Name);
+            const auto on_subfile_error = [&](const auto& exception) -> Status {
+              return ExceptionToStatus(exception, "Failed to delete a sub file: ", location.container, kDelimiter,
+                                       path.Name, ": ", DiagnosticUrl(sub_file_client.GetUrl()));
+            };
             try {
               sub_file_client.Delete();
             } catch (const Storage::StorageException& exception) {
-              return ExceptionToStatus(
-                  exception, "Failed to delete a sub file: ", location.container,
-                  kDelimiter, path.Name, ": ", sub_file_client.GetUrl());
+              return on_subfile_error(exception);
+            } catch (const Azure::Core::Http::TransportException& exception) {
+              return on_subfile_error(exception);
+            } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+              return on_subfile_error(exception);
+            } catch (const std::exception& exception) {
+              return on_subfile_error(exception);
             }
           }
         }
@@ -2922,9 +3359,13 @@ class AzureFileSystem::Impl {
       if (missing_dir_ok && exception.StatusCode == Http::HttpStatusCode::NotFound) {
         return Status::OK();
       }
-      return ExceptionToStatus(exception,
-                               "Failed to delete directory contents: ", location.path,
-                               ": ", directory_client.GetUrl());
+      return on_error(exception);
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
   }
 
@@ -2944,6 +3385,10 @@ class AzureFileSystem::Impl {
     auto container_url = container_client.GetUrl();
     auto lease_client = std::make_unique<Blobs::BlobLeaseClient>(
         std::move(container_client), std::move(lease_id));
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "Failed to acquire a lease on container '", location.container,
+                               "': ", DiagnosticUrl(container_url));
+    };
     try {
       [[maybe_unused]] auto result = lease_client->Acquire(lease_duration);
       DCHECK_EQ(result.Value.LeaseId, lease_client->GetLeaseId());
@@ -2961,8 +3406,13 @@ class AzureFileSystem::Impl {
                                        /*retry_allowed=*/false);
         }
       }
-      return ExceptionToStatus(exception, "Failed to acquire a lease on container '",
-                               location.container, "': ", container_url);
+      return on_error(exception);
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
     return lease_client;
   }
@@ -2984,6 +3434,10 @@ class AzureFileSystem::Impl {
     auto blob_url = blob_client.GetUrl();
     auto lease_client = std::make_unique<Blobs::BlobLeaseClient>(std::move(blob_client),
                                                                  std::move(lease_id));
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "Failed to acquire a lease on file '", location.all,
+                               "': ", DiagnosticUrl(blob_url));
+    };
     try {
       [[maybe_unused]] auto result = lease_client->Acquire(lease_duration);
       DCHECK_EQ(result.Value.LeaseId, lease_client->GetLeaseId());
@@ -3001,8 +3455,13 @@ class AzureFileSystem::Impl {
                                   /*retry_allowed=*/false);
         }
       }
-      return ExceptionToStatus(exception, "Failed to acquire a lease on file '",
-                               location.all, "': ", blob_url);
+      return on_error(exception);
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
     return lease_client;
   }
@@ -3049,6 +3508,10 @@ class AzureFileSystem::Impl {
     auto path_no_trailing_slash =
         std::string{internal::RemoveTrailingSlash(location.path)};
     auto file_client = adlfs_client.GetFileClient(path_no_trailing_slash);
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "Failed to delete a file: ", location.path, ": ",
+                               DiagnosticUrl(file_client.GetUrl()));
+    };
     try {
       // This is necessary to avoid deletion of directories via DeleteFile.
       auto properties = file_client.GetProperties();
@@ -3070,8 +3533,13 @@ class AzureFileSystem::Impl {
         }
         return Status::OK();
       }
-      return ExceptionToStatus(exception, "Failed to delete a file: ", location.path,
-                               ": ", file_client.GetUrl());
+      return on_error(exception);
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
     return Status::OK();
   }
@@ -3126,8 +3594,8 @@ class AzureFileSystem::Impl {
                             AcquireBlobLease(location, kFileBlobLeaseTime,
                                              /*allow_missing=*/true));
       if (file_blob_lease_client) {
-        file_blob_lease_guard.emplace(std::move(file_blob_lease_client),
-                                      kFileBlobLeaseTime);
+        file_blob_lease_guard.emplace(std::move(file_blob_lease_client), kFileBlobLeaseTime,
+                                      options_.account_name + "/" + location.all);
         // Ensure the empty directory marker blob of the parent exists before the file is
         // deleted.
         //
@@ -3149,6 +3617,10 @@ class AzureFileSystem::Impl {
     if (file_blob_lease_guard) {
       options.AccessConditions.LeaseId = file_blob_lease_guard->LeaseId();
     }
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "Failed to delete a file: ", location.all, ": ",
+                               DiagnosticUrl(blob_client.GetUrl()));
+    };
     try {
       auto response = blob_client.Delete(options);
       // Only the "*IfExists" functions ever set Deleted to false.
@@ -3158,8 +3630,13 @@ class AzureFileSystem::Impl {
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
         return check_if_location_exists_as_dir();
       }
-      return ExceptionToStatus(exception, "Failed to delete a file: ", location.all, ": ",
-                               blob_client.GetUrl());
+      return on_error(exception);
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
     return Status::OK();
   }
@@ -3198,7 +3675,7 @@ class AzureFileSystem::Impl {
     // before rename and (2) it works as a way of checking the container exists.
     ARROW_ASSIGN_OR_RAISE(auto src_lease_client,
                           AcquireContainerLease(src, kLeaseDuration));
-    LeaseGuard src_lease_guard{std::move(src_lease_client), kLeaseDuration};
+    LeaseGuard src_lease_guard{std::move(src_lease_client), kLeaseDuration, options_.account_name + "/" + src.all};
     // Check dest.container doesn't exist or is empty.
     auto dest_container_client = GetBlobContainerClient(dest.container);
     std::optional<LeaseGuard> dest_lease_guard;
@@ -3208,11 +3685,15 @@ class AzureFileSystem::Impl {
         auto dest_lease_client,
         AcquireContainerLease(dest, kLeaseDuration, /*allow_missing_container*/ true));
     if (dest_lease_client) {
-      dest_lease_guard.emplace(std::move(dest_lease_client), kLeaseDuration);
+      dest_lease_guard.emplace(std::move(dest_lease_client), kLeaseDuration, options_.account_name + "/" + dest.all);
       dest_exists = true;
       // Emptiness check after successful acquisition of the lease.
       Blobs::ListBlobsOptions list_blobs_options;
       list_blobs_options.PageSizeHint = 1;
+      const auto on_error = [&](const auto& exception) -> Status {
+        return ExceptionToStatus(exception, "Failed to check that '", dest.container,
+                                 "' is empty: ", DiagnosticUrl(dest_container_client.GetUrl()));
+      };
       try {
         auto dest_list_response = dest_container_client.ListBlobs(list_blobs_options);
         dest_is_empty = dest_list_response.Blobs.empty();
@@ -3220,8 +3701,13 @@ class AzureFileSystem::Impl {
           return NotEmpty(dest);
         }
       } catch (const Storage::StorageException& exception) {
-        return ExceptionToStatus(exception, "Failed to check that '", dest.container,
-                                 "' is empty: ", dest_container_client.GetUrl());
+        return on_error(exception);
+      } catch (const Azure::Core::Http::TransportException& exception) {
+        return on_error(exception);
+      } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+        return on_error(exception);
+      } catch (const std::exception& exception) {
+        return on_error(exception);
       }
     }
     DCHECK(!dest_exists || dest_is_empty);
@@ -3230,8 +3716,12 @@ class AzureFileSystem::Impl {
       // Rename the source container.
       Blobs::RenameBlobContainerOptions options;
       options.SourceAccessConditions.LeaseId = src_lease_guard.LeaseId();
+      const auto on_error = [&](const auto& exception) -> Status {
+        return ExceptionToStatus(exception, "Failed to rename container '", src.container, "' to '", dest.container,
+                                 "': ", DiagnosticUrl(blob_service_client_->GetUrl()));
+      };
       try {
-        src_lease_guard.BreakBeforeDeletion(kTimeNeededForContainerRename);
+        RETURN_NOT_OK(src_lease_guard.BreakBeforeDeletion(kTimeNeededForContainerRename));
         blob_service_client_->RenameBlobContainer(src.container, dest.container, options);
         src_lease_guard.Forget();
       } catch (const Storage::StorageException& exception) {
@@ -3240,15 +3730,18 @@ class AzureFileSystem::Impl {
           auto param_name = exception.AdditionalInformation.find("QueryParameterName");
           if (param_name != exception.AdditionalInformation.end() &&
               param_name->second == "comp") {
-            return ExceptionToStatus(
-                exception, "The 'rename' operation is not supported on containers. ",
-                "Attempting a rename of '", src.container, "' to '", dest.container,
-                "': ", blob_service_client_->GetUrl());
+            return ExceptionToStatus(exception, "The 'rename' operation is not supported on containers. ",
+                                     "Attempting a rename of '", src.container, "' to '", dest.container,
+                                     "': ", DiagnosticUrl(blob_service_client_->GetUrl()));
           }
         }
-        return ExceptionToStatus(exception, "Failed to rename container '", src.container,
-                                 "' to '", dest.container,
-                                 "': ", blob_service_client_->GetUrl());
+        return on_error(exception);
+      } catch (const Azure::Core::Http::TransportException& exception) {
+        return on_error(exception);
+      } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+        return on_error(exception);
+      } catch (const std::exception& exception) {
+        return on_error(exception);
       }
     } else if (dest_is_empty) {
       // Even if we deleted the empty dest.container, RenameBlobContainer() would still
@@ -3262,12 +3755,16 @@ class AzureFileSystem::Impl {
       // to also be empty).
       Blobs::ListBlobsOptions list_blobs_options;
       list_blobs_options.PageSizeHint = 1;
+      const auto on_error = [&](const auto& exception) -> Status {
+        return ExceptionToStatus(exception, "Unable to replace empty container from '", src.all, "' to '", dest.all,
+                                 "': ", DiagnosticUrl(dest_container_client.GetUrl()));
+      };
       try {
         auto src_list_response = src_container_client.ListBlobs(list_blobs_options);
         if (!src_list_response.Blobs.empty()) {
           // Reminder: dest is used here because we're semantically replacing dest
           // with src. By deleting src if it's empty just like dest.
-          return Status::IOError("Unable to replace empty container: '", dest.all, "'");
+          return Status::IOError("Unable to replace empty container from '", src.all, "' to '", dest.all, "'");
         }
         // Delete the source container now that we know it's empty.
         Blobs::DeleteBlobContainerOptions options;
@@ -3277,21 +3774,35 @@ class AzureFileSystem::Impl {
         // the destination container is not deleted by another process/client before
         // Move() returns.
         if (!dest_lease_guard->StillValidFor(kTimeNeededForContainerDeletion)) {
-          return Status::IOError("Unable to replace empty container: '", dest.all, "'. ",
+          return Status::IOError("Unable to replace empty container from '", src.all, "' to '", dest.all, "'. ",
                                  "Preparation for the operation took too long and a "
                                  "container lease expired.");
         }
+        const auto on_delete_source_error = [&](const auto& exception) -> Status {
+          return ExceptionToStatus(exception, "Failed to delete empty container: '", src.container,
+                                   "': ", DiagnosticUrl(src_container_client.GetUrl()));
+        };
         try {
-          src_lease_guard.BreakBeforeDeletion(kTimeNeededForContainerDeletion);
+          RETURN_NOT_OK(src_lease_guard.BreakBeforeDeletion(kTimeNeededForContainerDeletion));
           src_container_client.Delete(options);
           src_lease_guard.Forget();
         } catch (const Storage::StorageException& exception) {
-          return ExceptionToStatus(exception, "Failed to delete empty container: '",
-                                   src.container, "': ", src_container_client.GetUrl());
+          return on_delete_source_error(exception);
+        } catch (const Azure::Core::Http::TransportException& exception) {
+          return on_delete_source_error(exception);
+        } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+          return on_delete_source_error(exception);
+        } catch (const std::exception& exception) {
+          return on_delete_source_error(exception);
         }
       } catch (const Storage::StorageException& exception) {
-        return ExceptionToStatus(exception, "Unable to replace empty container: '",
-                                 dest.all, "': ", dest_container_client.GetUrl());
+        return on_error(exception);
+      } catch (const Azure::Core::Http::TransportException& exception) {
+        return on_error(exception);
+      } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+        return on_error(exception);
+      } catch (const std::exception& exception) {
+        return on_error(exception);
       }
     }
     return Status::OK();
@@ -3347,7 +3858,7 @@ class AzureFileSystem::Impl {
     // Ensure that src exists and, if path has a trailing slash, that it's a directory.
     ARROW_ASSIGN_OR_RAISE(auto src_lease_client,
                           AcquireBlobLease(src, kLeaseDuration, /*allow_missing=*/false));
-    LeaseGuard src_lease_guard{std::move(src_lease_client), kLeaseDuration};
+    LeaseGuard src_lease_guard{std::move(src_lease_client), kLeaseDuration, options_.account_name + "/" + src.all};
     // It might be necessary to check src is a directory 0-3 times in this function,
     // so we use a lazy evaluation function to avoid redundant calls to GetFileInfo().
     std::optional<bool> src_is_dir_opt{};
@@ -3376,7 +3887,7 @@ class AzureFileSystem::Impl {
                           AcquireBlobLease(dest, kLeaseDuration, /*allow_missing=*/true));
     std::optional<LeaseGuard> dest_lease_guard;
     if (dest_lease_client) {
-      dest_lease_guard.emplace(std::move(dest_lease_client), kLeaseDuration);
+      dest_lease_guard.emplace(std::move(dest_lease_client), kLeaseDuration, options_.account_name + "/" + dest.all);
       // Perform all the checks on dest (and src) before proceeding with the rename.
       auto dest_adlfs_client = GetFileSystemClient(dest.container);
       ARROW_ASSIGN_OR_RAISE(auto dest_info, GetFileInfo(dest_adlfs_client, dest,
@@ -3410,6 +3921,10 @@ class AzureFileSystem::Impl {
       return CrossContainerMoveNotImplemented(src, dest);
     }
 
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "Failed to rename '", src.all, "' to '", dest.all,
+                               "': ", DiagnosticUrl(src_adlfs_client.GetUrl()));
+    };
     try {
       // NOTE: The Azure SDK provides a RenameDirectory() function, but the
       // implementation is the same as RenameFile() with the only difference being
@@ -3427,7 +3942,7 @@ class AzureFileSystem::Impl {
       if (dest_lease_guard.has_value()) {
         options.AccessConditions.LeaseId = dest_lease_guard->LeaseId();
       }
-      src_lease_guard.BreakBeforeDeletion(kTimeNeededForFileOrDirectoryRename);
+      RETURN_NOT_OK(src_lease_guard.BreakBeforeDeletion(kTimeNeededForFileOrDirectoryRename));
       src_adlfs_client.RenameFile(src_path, dest_path, options);
       src_lease_guard.Forget();
     } catch (const Storage::StorageException& exception) {
@@ -3450,8 +3965,13 @@ class AzureFileSystem::Impl {
         // non-empty directory, so we produce the appropriate error.
         return NotEmpty(dest);
       }
-      return ExceptionToStatus(exception, "Failed to rename '", src.all, "' to '",
-                               dest.all, "': ", src_adlfs_client.GetUrl());
+      return on_error(exception);
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
     return Status::OK();
   }
@@ -3505,6 +4025,10 @@ class AzureFileSystem::Impl {
         }
       }
     }
+    const auto on_error = [&](const auto& exception) -> Status {
+      return ExceptionToStatus(exception, "Failed to copy blob. (", DiagnosticUrl(src_url), " -> ",
+                               DiagnosticUrl(dest_blob_client.GetUrl()), ")");
+    };
     try {
       // We use StartCopyFromUri instead of CopyFromUri because it supports blobs larger
       // than 256 MiB and it doesn't require generating a SAS token to authenticate
@@ -3515,13 +4039,17 @@ class AzureFileSystem::Impl {
       copy_operation.PollUntilDone(std::chrono::milliseconds(1000));
     } catch (const Storage::StorageException& exception) {
       // StartCopyFromUri failed or a GetProperties call inside PollUntilDone failed.
-      return ExceptionToStatus(
-          exception, "Failed to start blob copy or poll status of ongoing copy. (",
-          src_url, " -> ", dest_blob_client.GetUrl(), ")");
+      return ExceptionToStatus(exception, "Failed to start blob copy or poll status of ongoing copy. (",
+                               DiagnosticUrl(src_url), " -> ", DiagnosticUrl(dest_blob_client.GetUrl()), ")");
+    } catch (const Azure::Core::Http::TransportException& exception) {
+      return on_error(exception);
     } catch (const Azure::Core::RequestFailedException& exception) {
-      // A GetProperties call inside PollUntilDone returned a failed CopyStatus.
-      return ExceptionToStatus(exception, "Failed to copy blob. (", src_url, " -> ",
-                               dest_blob_client.GetUrl(), ")");
+      // PollUntilDone reports a failed copy with a plain RequestFailedException.
+      return on_error(exception);
+    } catch (const Azure::Core::Credentials::AuthenticationException& exception) {
+      return on_error(exception);
+    } catch (const std::exception& exception) {
+      return on_error(exception);
     }
     return Status::OK();
   }
@@ -3615,8 +4143,8 @@ Status AzureFileSystem::CreateDir(const std::string& path, bool recursive) {
       // We only get kContainerNotFound if we are unable to read the properties of the
       // container we just created. This is very unlikely, but theoretically possible in
       // a concurrent system, so the error is handled to avoid infinite recursion.
-      return Status::IOError("Unable to read properties of a newly created container: ",
-                             location.container, ": " + container_client.GetUrl());
+      return Status::IOError("Unable to read properties of a newly created container: ", location.container, ": ",
+                             DiagnosticUrl(container_client.GetUrl()));
     }
   }
   // CreateDirOnFileSystem and CreateDirOnContainer can handle the container
@@ -3748,30 +4276,26 @@ Result<std::shared_ptr<io::InputStream>> AzureFileSystem::OpenInputStream(
     const std::string& path) {
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   ARROW_ASSIGN_OR_RAISE(auto stream, impl_->OpenInputFile(location, this));
-  return std::make_shared<milvus_storage::MetricsInputStream>(std::move(stream),
-                                                              impl_->metrics());
+  return stream;
 }
 
 Result<std::shared_ptr<io::InputStream>> AzureFileSystem::OpenInputStream(
     const FileInfo& info) {
   ARROW_ASSIGN_OR_RAISE(auto stream, impl_->OpenInputFile(info, this));
-  return std::make_shared<milvus_storage::MetricsInputStream>(std::move(stream),
-                                                              impl_->metrics());
+  return stream;
 }
 
 Result<std::shared_ptr<io::RandomAccessFile>> AzureFileSystem::OpenInputFile(
     const std::string& path) {
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   ARROW_ASSIGN_OR_RAISE(auto file, impl_->OpenInputFile(location, this));
-  return std::make_shared<milvus_storage::MetricsRandomAccessFile>(std::move(file),
-                                                                   impl_->metrics());
+  return file;
 }
 
 Result<std::shared_ptr<io::RandomAccessFile>> AzureFileSystem::OpenInputFile(
     const FileInfo& info) {
   ARROW_ASSIGN_OR_RAISE(auto file, impl_->OpenInputFile(info, this));
-  return std::make_shared<milvus_storage::MetricsRandomAccessFile>(std::move(file),
-                                                                   impl_->metrics());
+  return file;
 }
 
 Result<std::shared_ptr<io::OutputStream>> AzureFileSystem::OpenOutputStream(
