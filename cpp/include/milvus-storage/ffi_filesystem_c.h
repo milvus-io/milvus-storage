@@ -73,6 +73,16 @@ FFI_EXPORT LoonFFIResult loon_filesystem_get(const LoonProperties* properties,
                                              FileSystemHandle* out_handle);
 
 /**
+ * @brief Evict one filesystem selected by properties and optional path.
+ *
+ * Uses the same selection as loon_filesystem_get, including extfs.* resolution.
+ * A missing entry succeeds without creating a filesystem. Already-open handles
+ * remain usable; subsequent gets create a new filesystem with fresh metadata.
+ * The path may be NULL only when path_len is zero. Safe for concurrent cache access.
+ */
+FFI_EXPORT LoonFFIResult loon_filesystem_evict(const LoonProperties* properties, const char* path, uint32_t path_len);
+
+/**
  * @brief Destroy a filesystem handle
  *
  * This function releases the resources associated with a filesystem handle.

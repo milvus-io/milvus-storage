@@ -346,6 +346,13 @@ class FilesystemCache {
                                                                            const std::string& path = "");
 
   /**
+   * @brief Evict the filesystem selected by the same properties/path as get().
+   * A cache miss succeeds without creating a filesystem. Existing holders remain
+   * valid; subsequent get() calls create a new instance with fresh metadata.
+   */
+  [[nodiscard]] arrow::Status evict(const api::Properties& properties, const std::string& path = "");
+
+  /**
    * @brief Get the size of cached filesystems
    */
   [[nodiscard]] size_t size() const;

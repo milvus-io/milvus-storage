@@ -2099,6 +2099,42 @@ TEST_P(TalonCloudMetadataTest, ReadsETagAndReusesMetadataWithoutOriginRequests) 
 
 INSTANTIATE_TEST_SUITE_P(CloudReaders, TalonCloudMetadataTest, ::testing::Bool());
 
+TEST_F(TalonIntegrationTest, EvictionReadsReplacementAtSamePath) {
+  ASSERT_AND_ASSIGN(auto file, fs_->OpenInputFile(path_));
+  ASSERT_AND_ASSIGN(auto warmed, file->ReadAt(0, static_cast<int64_t>(expected_.size())));
+  ASSERT_EQ(warmed->size(), expected_.size());
+  ASSERT_EQ(std::memcmp(warmed->data(), expected_.data(), expected_.size()), 0);
+  ASSERT_STATUS_OK(file->Close());
+
+  // Model final collection release, followed by replacing the external object.
+  // Keep the size unchanged: a size-only check must not hide a stale ETag.
+  auto& cache = FilesystemCache::getInstance();
+  ASSERT_STATUS_OK(cache.evict(properties_));
+  auto replacement = expected_;
+  for (auto& byte : replacement) {
+    byte ^= 0xff;
+  }
+  ASSERT_AND_ASSIGN(auto output, fs_->OpenOutputStream(path_));
+  ASSERT_STATUS_OK(output->Write(replacement.data(), static_cast<int64_t>(replacement.size())));
+  ASSERT_STATUS_OK(output->Close());
+
+  // The retained old filesystem still reads the warmed old-version blocks.
+  // This also proves the test is exercising Talon, not just origin fallback.
+  ASSERT_AND_ASSIGN(auto stale_reader, fs_->OpenInputFile(path_));
+  ASSERT_AND_ASSIGN(auto stale, stale_reader->ReadAt(0, static_cast<int64_t>(expected_.size())));
+  ASSERT_EQ(stale->size(), expected_.size());
+  ASSERT_EQ(std::memcmp(stale->data(), expected_.data(), expected_.size()), 0);
+  ASSERT_STATUS_OK(stale_reader->Close());
+
+  ASSERT_AND_ASSIGN(auto recreated_fs, cache.get(properties_));
+  ASSERT_NE(recreated_fs, fs_);
+  ASSERT_AND_ASSIGN(auto reopened, recreated_fs->OpenInputFile(path_));
+  ASSERT_AND_ASSIGN(auto actual, reopened->ReadAt(0, static_cast<int64_t>(replacement.size())));
+  ASSERT_EQ(actual->size(), replacement.size());
+  EXPECT_EQ(std::memcmp(actual->data(), replacement.data(), replacement.size()), 0);
+  ASSERT_STATUS_OK(reopened->Close());
+}
+
 TEST_F(TalonIntegrationTest, OpenWithKnownSize) {
   ASSERT_AND_ASSIGN(const auto metrics, FindMetricsSource(fs_, kTalonMetricsSource));
   ASSERT_NE(metrics, nullptr);
