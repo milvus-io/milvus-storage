@@ -24,12 +24,14 @@
 namespace milvus_storage {
 
 static const char kLogTag[] = "VolcengineOIDCAssumeRoleChainProvider";
-// Refresh when less than this many ms remain. Matches the single-step
-// Volcengine provider (30min) so both rotate on the same schedule.
-static const int kRefreshGraceMs = 30 * 60 * 1000;
+// Refresh when less than this many ms remain. Matches the sibling Aliyun
+// chain provider and the other Volcengine/Aliyun STS providers so credentials
+// across every provider rotate on the same 3-minute pre-expiry window.
+static const int kRefreshGraceMs = 180 * 1000;
 
 VolcengineOIDCAssumeRoleChainProvider::VolcengineOIDCAssumeRoleChainProvider(const Aws::String& target_role_trn,
-                                                                             const Aws::String& target_session_name)
+                                                                             const Aws::String& target_session_name,
+                                                                             int duration_seconds)
     : m_targetRoleTrn(target_role_trn), m_targetSessionName(target_session_name) {
   if (m_targetSessionName.empty()) {
     m_targetSessionName = Aws::Utils::UUID::RandomUUID();
@@ -42,16 +44,18 @@ VolcengineOIDCAssumeRoleChainProvider::VolcengineOIDCAssumeRoleChainProvider(con
   // VOLCENGINE_OIDC_TOKEN_FILE / VOLCENGINE_OIDC_ROLE_SESSION_NAME. The dispatch
   // layer in s3_filesystem_producer.cpp pre-flights the token file and role trn
   // before constructing this provider, so we do not re-validate here.
-  m_innerOidc = Aws::MakeUnique<VolcengineSTSAssumeRoleWebIdentityCredentialsProvider>(kLogTag);
+  m_innerOidc = Aws::MakeUnique<VolcengineSTSAssumeRoleWebIdentityCredentialsProvider>(kLogTag, duration_seconds);
 
-  // Step 2: cross-account AssumeRole client, V4-signed over HTTPS.
+  // Step 2: cross-account AssumeRole client, V4-signed over HTTPS. IMDS is
+  // disabled for the same reason as the step-1 provider: VKE pods cannot reach
+  // 169.254.169.254 and the probe would stall every refresh.
   Aws::Client::ClientConfiguration cfg(Aws::Client::ClientConfigurationInitValues{/*shouldDisableIMDS=*/true});
   cfg.scheme = Aws::Http::Scheme::HTTPS;
-  m_stsClient = Aws::MakeUnique<VolcengineSTSCredentialsClient>(kLogTag, cfg);
+  m_stsClient = Aws::MakeUnique<VolcengineSTSCredentialsClient>(kLogTag, cfg, duration_seconds);
 
   LOG_STORAGE_INFO_ << fmt::format(
-      "[{}] Created OIDC chain provider; target_role_trn={} step1_role_trn={} session={}", kLogTag, m_targetRoleTrn,
-      m_step1RoleTrn, m_targetSessionName);
+      "[{}] Created OIDC chain provider; target_role_trn={} step1_role_trn={} session={} duration_seconds={}", kLogTag,
+      m_targetRoleTrn, m_step1RoleTrn, m_targetSessionName, duration_seconds);
 }
 
 Aws::Auth::AWSCredentials VolcengineOIDCAssumeRoleChainProvider::GetAWSCredentials() {

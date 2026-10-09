@@ -25,14 +25,19 @@ class VolcengineSTSAssumeRoleWebIdentityCredentialsProvider : public Aws::Auth::
   // Env-only ctor: RoleTrn / token file / session are all read from the
   // VOLCENGINE_OIDC_* environment variables. Backs the use_iam=true path,
   // where VKE injects the machine identity and target role via env.
-  VolcengineSTSAssumeRoleWebIdentityCredentialsProvider();
+  // `duration_seconds` is plumbed to VolcengineSTSCredentialsClient and
+  // becomes the AssumeRoleWithOIDC DurationSeconds. Callers must supply the
+  // active FileSystemConfig::load_frequency; the inner client clamps the
+  // value into Volcengine STS's [900, 43200] window.
+  explicit VolcengineSTSAssumeRoleWebIdentityCredentialsProvider(int duration_seconds);
 
   // Per-tenant ctor: RoleTrn (and optionally session name) are supplied by the
   // caller, typically from an external-table spec (extfs.role_arn). The OIDC
   // web-identity token file is still read from VOLCENGINE_OIDC_TOKEN_FILE — it
   // is the VKE-injected machine identity and never appears in a user spec.
   VolcengineSTSAssumeRoleWebIdentityCredentialsProvider(const Aws::String& role_arn,
-                                                        const Aws::String& session_name);
+                                                        const Aws::String& session_name,
+                                                        int duration_seconds);
   Aws::Auth::AWSCredentials GetAWSCredentials() override;
 
   protected:
@@ -51,6 +56,7 @@ class VolcengineSTSAssumeRoleWebIdentityCredentialsProvider : public Aws::Auth::
   Aws::String m_tokenFile;
   Aws::String m_sessionName;
   Aws::String m_token;
+  int m_durationSeconds;
   bool m_initialized;
   bool ExpiresSoon() const;
 };

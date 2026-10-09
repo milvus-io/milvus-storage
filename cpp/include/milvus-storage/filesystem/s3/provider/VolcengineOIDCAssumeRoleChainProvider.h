@@ -49,8 +49,13 @@ namespace milvus_storage {
 // Mirrors the structure of AliyunOIDCAssumeRoleChainProvider.
 class AWS_CORE_API VolcengineOIDCAssumeRoleChainProvider : public ::Aws::Auth::AWSCredentialsProvider {
   public:
+  // `duration_seconds` is applied uniformly to both hops of the chain
+  // (AssumeRoleWithOIDC in step 1, AssumeRole in step 2). Callers must supply
+  // the active FileSystemConfig::load_frequency; the inner STS client clamps
+  // the value into Volcengine STS's [900, 43200] window.
   VolcengineOIDCAssumeRoleChainProvider(const ::Aws::String& target_role_trn,
-                                        const ::Aws::String& target_session_name);
+                                        const ::Aws::String& target_session_name,
+                                        int duration_seconds);
 
   ::Aws::Auth::AWSCredentials GetAWSCredentials() override;
 

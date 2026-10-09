@@ -271,11 +271,11 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
       if (!config_.external_id.empty()) {
         LOG_STORAGE_WARNING_ << "Volcengine AssumeRole has no ExternalId; external_id ignored";
       }
-      if (config_.load_frequency > 0) {
-        LOG_STORAGE_WARNING_ << "Volcengine OIDC chain AssumeRole refresh grace is fixed; load_frequency ignored";
-      }
+      // load_frequency flows through to both STS hops as DurationSeconds. The
+      // inner STS client clamps the value into Volcengine's [900, 43200]
+      // window; the refresh grace itself is a separate 3-minute watermark.
       options.credentials_provider = Aws::MakeShared<VolcengineOIDCAssumeRoleChainProvider>(
-          "VolcengineOIDCAssumeRoleChainProvider", config_.role_arn, config_.session_name);
+          "VolcengineOIDCAssumeRoleChainProvider", config_.role_arn, config_.session_name, config_.load_frequency);
       options.credentials_kind = S3CredentialsKind::WebIdentity;
     } else {
       return arrow::Status::Invalid("role_arn not supported for cloud provider: ", config_.cloud_provider);
@@ -329,7 +329,7 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateH
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateVolcengineCredentialsProvider() {
   return Aws::MakeShared<VolcengineSTSAssumeRoleWebIdentityCredentialsProvider>(
-      "VolcengineSTSAssumeRoleWebIdentityCredentialsProvider");
+      "VolcengineSTSAssumeRoleWebIdentityCredentialsProvider", config_.load_frequency);
 }
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateAwsCredentialsProvider() {

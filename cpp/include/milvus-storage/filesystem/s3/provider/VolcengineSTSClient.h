@@ -20,7 +20,14 @@ namespace milvus_storage {
 
 class AWS_CORE_API VolcengineSTSCredentialsClient : public ::Aws::Internal::AWSHttpResourceClient {
   public:
-  explicit VolcengineSTSCredentialsClient(const Aws::Client::ClientConfiguration& clientConfiguration);
+  // `duration_seconds` is the requested lifetime for AssumeRoleWithOIDC /
+  // AssumeRole credentials. It is clamped to the Volcengine STS valid range
+  // [900, 43200] (15 min — 12 h). A role with MaxSessionDuration smaller than
+  // this value will reject the request, so callers should pass the lifetime
+  // from the active FileSystemConfig::load_frequency rather than a fixed
+  // large default.
+  explicit VolcengineSTSCredentialsClient(const Aws::Client::ClientConfiguration& clientConfiguration,
+                                          int duration_seconds);
 
   VolcengineSTSCredentialsClient& operator=(VolcengineSTSCredentialsClient& rhs) = delete;
   VolcengineSTSCredentialsClient(const VolcengineSTSCredentialsClient& rhs) = delete;
@@ -28,9 +35,9 @@ class AWS_CORE_API VolcengineSTSCredentialsClient : public ::Aws::Internal::AWSH
   VolcengineSTSCredentialsClient(const VolcengineSTSCredentialsClient&& rhs) = delete;
 
   struct STSAssumeRoleWithWebIdentityRequest {
-      Aws::String webIdentityToken;
-      Aws::String roleArn;
-      Aws::String roleSessionName;
+    Aws::String webIdentityToken;
+    Aws::String roleArn;
+    Aws::String roleSessionName;
   };
 
   struct STSAssumeRoleWithWebIdentityResult {
@@ -46,11 +53,11 @@ class AWS_CORE_API VolcengineSTSCredentialsClient : public ::Aws::Internal::AWSH
   // token *is* the credential and the request is unsigned), this request is
   // signed with Volcengine V4 (HMAC-SHA256) using the caller's AK/SK.
   struct STSAssumeRoleRequest {
-      Aws::String callerAccessKeyId;
-      Aws::String callerAccessKeySecret;
-      Aws::String callerSecurityToken;  // step-1 SessionToken; goes in X-Security-Token
-      Aws::String roleTrn;              // customer target role (extfs.role_arn)
-      Aws::String roleSessionName;
+    Aws::String callerAccessKeyId;
+    Aws::String callerAccessKeySecret;
+    Aws::String callerSecurityToken;  // step-1 SessionToken; goes in X-Security-Token
+    Aws::String roleTrn;              // customer target role (extfs.role_arn)
+    Aws::String roleSessionName;
   };
 
   struct STSAssumeRoleResult {
@@ -63,10 +70,10 @@ class AWS_CORE_API VolcengineSTSCredentialsClient : public ::Aws::Internal::AWSH
   // --- Volcengine V4 signing (exposed for golden-vector testing) -----------
   // Result of signing a request with Volcengine V4 (HMAC-SHA256).
   struct V4SignResult {
-    Aws::String authorization;     // full Authorization header value
-    Aws::String signature;         // lowercase hex signature only
-    Aws::String signedHeaders;     // e.g. "content-type;host;x-content-sha256;x-date"
-    Aws::String xContentSha256;    // hex SHA256 of the body (X-Content-Sha256 header)
+    Aws::String authorization;   // full Authorization header value
+    Aws::String signature;       // lowercase hex signature only
+    Aws::String signedHeaders;   // e.g. "content-type;host;x-content-sha256;x-date"
+    Aws::String xContentSha256;  // hex SHA256 of the body (X-Content-Sha256 header)
   };
 
   // Signs a POST to path "/" that carries `canonicalQuery` in the URL and
@@ -91,5 +98,6 @@ class AWS_CORE_API VolcengineSTSCredentialsClient : public ::Aws::Internal::AWSH
   Aws::String m_endpoint;
   Aws::String m_region;   // Volcengine V4 credential-scope region; default cn-beijing
   Aws::String m_service;  // "sts"
+  int m_durationSeconds;  // Clamped to [900, 43200]; see constructor doc.
 };
 }  // namespace milvus_storage

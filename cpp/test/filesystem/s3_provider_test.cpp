@@ -485,7 +485,7 @@ TEST_F(S3ProviderTest, TestVolcengineProvider) {
     ScopedEnvUnset unset_token("VOLCENGINE_OIDC_TOKEN_FILE");
     ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
 
-    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider;
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider(/*duration_seconds=*/900);
     auto creds = provider.GetAWSCredentials();
     EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
     EXPECT_TRUE(creds.GetAWSSecretKey().empty());
@@ -498,7 +498,7 @@ TEST_F(S3ProviderTest, TestVolcengineProvider) {
     ScopedEnvUnset unset_token("VOLCENGINE_OIDC_TOKEN_FILE");
     ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
 
-    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider;
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider(/*duration_seconds=*/900);
     auto creds = provider.GetAWSCredentials();
     EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
   }
@@ -509,7 +509,7 @@ TEST_F(S3ProviderTest, TestVolcengineProvider) {
     ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", "/tmp/some_token");
     ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
 
-    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider;
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider(/*duration_seconds=*/900);
     auto creds = provider.GetAWSCredentials();
     EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
   }
@@ -521,7 +521,7 @@ TEST_F(S3ProviderTest, TestVolcengineProvider) {
     ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", "/tmp/nonexistent_volc_token_file_12345");
     ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
 
-    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider;
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider(/*duration_seconds=*/900);
     auto creds = provider.GetAWSCredentials();
     EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
   }
@@ -548,7 +548,7 @@ TEST_F(S3ProviderTest, TestVolcengineProvider) {
 
     mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, json_response);
 
-    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider;
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider(/*duration_seconds=*/900);
     auto creds = provider.GetAWSCredentials();
     EXPECT_EQ(creds.GetAWSAccessKeyId(), "MOCK_AK");
     EXPECT_EQ(creds.GetAWSSecretKey(), "MOCK_SK");
@@ -565,7 +565,7 @@ TEST_F(S3ProviderTest, TestVolcengineProvider) {
 
     mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, "");
 
-    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider;
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider(/*duration_seconds=*/900);
     auto creds = provider.GetAWSCredentials();
     EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
   }
@@ -594,8 +594,8 @@ TEST_F(S3ProviderTest, TestVolcengineProvider) {
 
     mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, json_response);
 
-    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider("trn:iam::111:role/tenant-A",
-                                                                   "tenant-A-session");
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider("trn:iam::111:role/tenant-A", "tenant-A-session",
+                                                                   /*duration_seconds=*/900);
     auto creds = provider.GetAWSCredentials();
     EXPECT_EQ(creds.GetAWSAccessKeyId(), "ARG_AK");
     EXPECT_EQ(creds.GetAWSSecretKey(), "ARG_SK");
@@ -620,8 +620,8 @@ TEST_F(S3ProviderTest, TestVolcengineProvider) {
   {
     ScopedEnvUnset unset_token("VOLCENGINE_OIDC_TOKEN_FILE");
 
-    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider("trn:iam::111:role/tenant-A",
-                                                                   "tenant-A-session");
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider("trn:iam::111:role/tenant-A", "tenant-A-session",
+                                                                   /*duration_seconds=*/900);
     auto creds = provider.GetAWSCredentials();
     EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
   }
@@ -631,8 +631,8 @@ TEST_F(S3ProviderTest, TestVolcengineProvider) {
   {
     ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", "/tmp/nonexistent_volc_token_param_ctor");
 
-    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider("trn:iam::111:role/tenant-A",
-                                                                   "tenant-A-session");
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider("trn:iam::111:role/tenant-A", "tenant-A-session",
+                                                                   /*duration_seconds=*/900);
     auto creds = provider.GetAWSCredentials();
     EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
   }
@@ -655,8 +655,7 @@ TEST_F(S3ProviderTest, TestVolcengineV4SignGoldenVector) {
   const Aws::String canonical_query = "Action=AssumeRole&Version=2018-01-01";
   // RoleTrn percent-encoded (colons -> %3A, slash -> %2F) exactly as the
   // production body builder emits it.
-  const Aws::String body =
-      "RoleTrn=trn%3Aiam%3A%3A2112796134%3Arole%2Fllqtestexternal&RoleSessionName=golden-session";
+  const Aws::String body = "RoleTrn=trn%3Aiam%3A%3A2112796134%3Arole%2Fllqtestexternal&RoleSessionName=golden-session";
   const Aws::String content_type = "application/x-www-form-urlencoded";
   const Aws::String x_date = "20260717T120000Z";
   const Aws::String scope_date = "20260717";
@@ -731,7 +730,8 @@ TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderEndToEnd) {
   ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
   ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
 
-  VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/llqtestexternal", "tenant-A-session");
+  VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/llqtestexternal", "tenant-A-session",
+                                                 /*duration_seconds=*/900);
   auto creds = provider.GetAWSCredentials();
   EXPECT_EQ(creds.GetAWSAccessKeyId(), "OUTER_AK");
   EXPECT_EQ(creds.GetAWSSecretKey(), "OUTER_SK");
@@ -799,7 +799,8 @@ TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderInnerStepFailsReturnsEmpty
   ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
   ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
 
-  VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/llqtestexternal", "sess");
+  VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/llqtestexternal", "sess",
+                                                 /*duration_seconds=*/900);
   auto creds = provider.GetAWSCredentials();
   EXPECT_TRUE(creds.IsEmpty());
 
@@ -824,7 +825,8 @@ TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderOuterStepEmptyReturnsEmpty
   ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
   ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
 
-  VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/llqtestexternal", "sess");
+  VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/llqtestexternal", "sess",
+                                                 /*duration_seconds=*/900);
   auto creds = provider.GetAWSCredentials();
   EXPECT_TRUE(creds.IsEmpty());
 }
@@ -841,7 +843,8 @@ TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderShortCircuitsWhenTargetEqu
   ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
   ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
 
-  VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2100211764:role/MilvusTos", "sess");
+  VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2100211764:role/MilvusTos", "sess",
+                                                 /*duration_seconds=*/900);
   auto creds = provider.GetAWSCredentials();
   EXPECT_EQ(creds.GetAWSAccessKeyId(), "INNER_AK") << "single-account path must reuse step-1 credentials";
   EXPECT_EQ(creds.GetSessionToken(), "INNER_TOKEN");
@@ -864,7 +867,7 @@ TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderShortCircuitsWhenTargetEmp
   ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
   ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
 
-  VolcengineOIDCAssumeRoleChainProvider provider(/*target_role_trn=*/"", "sess");
+  VolcengineOIDCAssumeRoleChainProvider provider(/*target_role_trn=*/"", "sess", /*duration_seconds=*/900);
   auto creds = provider.GetAWSCredentials();
   EXPECT_EQ(creds.GetAWSAccessKeyId(), "INNER_AK");
 
@@ -889,7 +892,7 @@ TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderEmptySessionNameDefaults) 
   ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
 
   VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/llqtestexternal",
-                                                 /*target_session_name=*/"");
+                                                 /*target_session_name=*/"", /*duration_seconds=*/900);
   auto creds = provider.GetAWSCredentials();
   EXPECT_EQ(creds.GetAWSAccessKeyId(), "OUTER_AK");
 
@@ -935,7 +938,8 @@ TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderToleratesMalformedExpiry) 
   ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
   ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
 
-  VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/llqtestexternal", "tenant-A-session");
+  VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/llqtestexternal", "tenant-A-session",
+                                                 /*duration_seconds=*/900);
   auto creds = provider.GetAWSCredentials();
 
   // Credentials survive the unparseable expiry.
