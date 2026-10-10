@@ -62,6 +62,20 @@ namespace {
 
 constexpr const char* kTlsFactoryAllocationTag = "TlsHttpClientFactory";
 
+class AwsCredentialsProviderChain final : public Aws::Auth::AWSCredentialsProviderChain {
+  public:
+  AwsCredentialsProviderChain() {
+    // Prefer AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY from the environment,
+    // with AWS_SESSION_TOKEN when temporary credentials are used.
+    AddProvider(std::make_shared<Aws::Auth::EnvironmentAWSCredentialsProvider>());
+
+    // Otherwise exchange AWS_WEB_IDENTITY_TOKEN_FILE through STS for the IRSA
+    // Pod Role (AWS_ROLE_ARN). Keep this last: a Node Role fallback could stay
+    // cached even after IRSA recovers.
+    AddProvider(std::make_shared<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>());
+  }
+};
+
 // HttpClientFactory that creates TlsCurlHttpClient instances so the AWS SDK
 // honors the configured minimum TLS version for S3-compatible providers.
 class TlsHttpClientFactory : public Aws::Http::HttpClientFactory {
@@ -254,7 +268,10 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
     auto credentials = provider->GetAWSCredentials();
     assert(!credentials.GetAWSAccessKeyId().empty() && "AWS Access Key ID is empty");
     assert(!credentials.GetAWSSecretKey().empty() && "AWS Secret Key is empty");
-    assert(!credentials.GetSessionToken().empty() && "AWS Session Token is empty");
+    // AWS environment credentials may be long-term AK/SK without a session token.
+    if (config_.cloud_provider != kCloudProviderAWS) {
+      assert(!credentials.GetSessionToken().empty() && "AWS Session Token is empty");
+    }
     options.credentials_provider = provider;
   } else {
     options.ConfigureAccessKey(config_.access_key_id, config_.access_key_value);
@@ -291,7 +308,7 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateH
 }
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateAwsCredentialsProvider() {
-  return std::make_shared<Aws::Auth::DefaultAWSCredentialsProviderChain>();
+  return std::make_shared<AwsCredentialsProviderChain>();
 }
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateAliyunCredentialsProvider() {
