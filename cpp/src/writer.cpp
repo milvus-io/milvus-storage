@@ -20,7 +20,6 @@
 #include <sstream>
 #include <memory>
 #include <queue>
-#include <map>
 #include <algorithm>
 
 #include <arrow/io/file.h>
@@ -370,14 +369,8 @@ class WriterImpl : public Writer {
     }
 
     // Flush all column group writers
-    for (const auto& writer : column_group_writers_) {
-      ARROW_RETURN_NOT_OK(writer->Flush());
-    }
-
-    // Clear memory tracking
-    current_memory_usage_ = 0;
-    while (!memory_heap_.empty()) {
-      memory_heap_.pop();
+    for (size_t i = 0; i < column_group_writers_.size(); ++i) {
+      ARROW_RETURN_NOT_OK(flush_group(i));
     }
 
     return arrow::Status::OK();
@@ -452,9 +445,9 @@ class WriterImpl : public Writer {
   std::vector<std::unique_ptr<ColumnGroupWriter>> column_group_writers_;  ///< Writers for each column group
 
   // Memory management components (similar to packed implementation)
-  size_t current_memory_usage_{0};                              ///< Current memory usage for buffered data
-  size_t buffer_size_;                                          ///< Maximum buffer size before flushing
-  std::priority_queue<std::pair<size_t, size_t>> memory_heap_;  ///< Memory usage tracking heap (group_id, memory_usage)
+  size_t current_memory_usage_{0};          ///< Current memory usage for buffered data
+  size_t buffer_size_;                      ///< Maximum buffer size before flushing
+  std::vector<size_t> group_memory_usage_;  ///< Buffered input bytes per column group
 
   // ==================== Internal Helper Methods ====================
 
@@ -502,6 +495,7 @@ class WriterImpl : public Writer {
                             ColumnGroupWriter::create(base_path_, i, column_group, column_group_schema, properties_));
 
       column_group_writers_.emplace_back(std::move(writer));
+      group_memory_usage_.push_back(0);
       FIU_RETURN_ON(
           FIUKEY_WRITER_INIT_COLUMN_GROUP_WRITERS_FAIL,
           arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_WRITER_INIT_COLUMN_GROUP_WRITERS_FAIL)));
@@ -522,18 +516,21 @@ class WriterImpl : public Writer {
       return arrow::Status::Invalid("Fail to distribute record batchs, no column groups initialized");
     }
 
-    // Flush column groups until there's enough room for the new batch
-    // to ensure that memory usage stays strictly below the limit
+    // Prefer the largest group, not the highest group index. Try each group at
+    // most once: incomplete row groups can retain all their input after Flush().
+    // Oversized batches and retained tails can exceed the target buffer size.
     size_t next_batch_size = GetRecordBatchMemorySize(batch);
-    while (current_memory_usage_ + next_batch_size >= buffer_size_ && !memory_heap_.empty()) {
-      auto max_group = memory_heap_.top();
-      memory_heap_.pop();
-      current_memory_usage_ -= max_group.second;
-
-      assert(max_group.first < column_group_writers_.size());
-      // Find the specific column group writer and flush it
-      if (max_group.first < column_group_writers_.size()) {
-        ARROW_RETURN_NOT_OK(column_group_writers_[max_group.first]->Flush());
+    if (current_memory_usage_ + next_batch_size >= buffer_size_) {
+      std::priority_queue<std::pair<size_t, size_t>> candidates;  // (bytes, group_id)
+      for (size_t i = 0; i < group_memory_usage_.size(); ++i) {
+        if (group_memory_usage_[i] > 0) {
+          candidates.emplace(group_memory_usage_[i], i);
+        }
+      }
+      while (current_memory_usage_ + next_batch_size >= buffer_size_ && !candidates.empty()) {
+        auto group_id = candidates.top().second;
+        candidates.pop();
+        ARROW_RETURN_NOT_OK(flush_group(group_id));
       }
     }
 
@@ -558,8 +555,6 @@ class WriterImpl : public Writer {
 
         // Calculate memory usage for this group's data
         size_t group_memory = GetRecordBatchMemorySize(group_batch);
-        current_memory_usage_ += group_memory;
-        memory_heap_.emplace(i, group_memory);
 
         // Write data to the column group writer
         if (i >= column_group_writers_.size()) {
@@ -569,28 +564,23 @@ class WriterImpl : public Writer {
         }
 
         ARROW_RETURN_NOT_OK(column_group_writers_[i]->Write(group_batch));
+        current_memory_usage_ += group_memory;
+        group_memory_usage_[i] += group_memory;
       }
     }
 
-    return balanceMemoryHeap();
+    return arrow::Status::OK();
   }
 
   /**
-   * @brief Balances the memory heap to avoid duplicate entries
-   *
-   * @return Status indicating success or error condition
+   * @brief Flush a group and retain accounting for input buffers still cached.
    */
-  arrow::Status balanceMemoryHeap() {
-    std::map<size_t, size_t> group_map;
-    while (!memory_heap_.empty()) {
-      auto pair = memory_heap_.top();
-      memory_heap_.pop();
-      group_map[pair.first] += pair.second;
-    }
-    for (auto& pair : group_map) {
-      memory_heap_.emplace(pair.first, pair.second);
-    }
-    group_map.clear();
+  arrow::Status flush_group(size_t group_id) {
+    auto& writer = column_group_writers_[group_id];
+    ARROW_RETURN_NOT_OK(writer->Flush());
+    current_memory_usage_ -= group_memory_usage_[group_id];
+    group_memory_usage_[group_id] = writer->GetRetainedBufferSize();
+    current_memory_usage_ += group_memory_usage_[group_id];
     return arrow::Status::OK();
   }
 };

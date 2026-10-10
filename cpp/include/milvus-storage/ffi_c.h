@@ -443,6 +443,10 @@ FFI_EXPORT LoonFFIResult loon_writer_new(const char* base_path,
 
 /**
  * @brief Writes a record batch to the dataset
+ *
+ * With valid non-null arguments, consumes the ArrowArray, including on import
+ * failure. On success, releases the root before returning; individual columns
+ * may remain retained until flushed or closed. No input buffers are copied.
  * @param handle Writer handle
  * @param array Arrow array representing the record batch to write
  * @return 0 on success, others is error code

@@ -38,6 +38,7 @@ class ColumnGroupWriter {
 
   [[nodiscard]] virtual arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) = 0;
   [[nodiscard]] virtual arrow::Status Flush() = 0;
+  [[nodiscard]] virtual size_t GetRetainedBufferSize() const = 0;
   [[nodiscard]] virtual arrow::Result<std::vector<ColumnGroupFile>> Close() = 0;
 
   /**
