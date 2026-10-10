@@ -74,6 +74,8 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
     return arrow::Status::OK();
   }
 
+  [[nodiscard]] size_t GetRetainedBufferSize() const override { return format_writer_->GetRetainedBufferSize(); }
+
   [[nodiscard]] arrow::Result<std::vector<ColumnGroupFile>> Close() override {
     assert(format_writer_);
     ARROW_ASSIGN_OR_RAISE(auto column_group_file, format_writer_->Close());
