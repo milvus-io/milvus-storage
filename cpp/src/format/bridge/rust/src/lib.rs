@@ -426,6 +426,15 @@ pub mod vortex_ffi {
         // reader
         type VortexFile;
         fn row_count(self: &VortexFile) -> u64;
+        fn disable_direct_point_reuse(self: &VortexFile);
+        unsafe fn try_take_prepared_async(
+            self: &VortexFile,
+            row: u64,
+            out_stream: usize,
+            out_array: usize,
+            callback: usize,
+            ctx: usize,
+        ) -> Result<bool>;
         unsafe fn get_schema(self: &VortexFile, out_schema: *mut u8) -> Result<()>;
         fn scan_builder(
             self: &VortexFile,
