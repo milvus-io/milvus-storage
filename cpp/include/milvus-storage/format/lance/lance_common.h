@@ -60,7 +60,7 @@ std::string MakeLanceUri(const std::string& base_path, uint64_t fragment_id);
 ///
 /// For local storage, returns the absolute path.
 ///
-/// Returns error for unsupported providers (Tencent, Huawei).
+/// Returns error for unsupported providers.
 ///
 /// @param config The filesystem configuration containing storage type and bucket info
 /// @param relative_path The relative path within the bucket/filesystem

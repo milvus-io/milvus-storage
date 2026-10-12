@@ -954,6 +954,13 @@ TEST(TalonBridgeTest, MapsOpenErrorAndPreservesTalonMessage) {
   EXPECT_NE(result.status().message().find("bucket and object key must be non-empty"), std::string::npos);
 }
 
+TEST(TalonBridgeTest, OpensVolcengineObjectWithKnownMetadata) {
+  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make("127.0.0.1:7000", 8U * 1024U * 1024U, 8));
+  ASSERT_AND_ASSIGN(auto reader,
+                    client->OpenObject("volcengine", "test-bucket", "path/a", talon::TalonObjectStat{7, "etag"}));
+  EXPECT_EQ(reader.KnownSize(), 7);
+}
+
 TEST(TalonBridgeTest, MapsAsyncErrorAndPreservesTalonMessage) {
   ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make("127.0.0.1:7000", 8U * 1024U * 1024U, 8));
   ASSERT_AND_ASSIGN(auto reader, client->OpenObject("aws", "test-bucket", "path/a", talon::TalonObjectStat{0, ""}));

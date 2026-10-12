@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/s3/provider/VolcengineSTSClient.h"
+#include "milvus-storage/common/log.h"
 #include <aws/core/internal/AWSHttpResourceClient.h>
 #include <aws/core/client/AWSClient.h>
 #include <aws/core/client/AWSError.h>
@@ -25,7 +26,6 @@
 #include <aws/core/utils/StringUtils.h>
 #include <aws/core/utils/HashingUtils.h>
 #include <aws/core/utils/json/JsonSerializer.h>
-#include <aws/core/utils/logging/LogMacros.h>
 #include <aws/core/utils/xml/XmlSerializer.h>
 #include <aws/core/platform/Environment.h>
 #include <arrow/result.h>
@@ -35,7 +35,6 @@
 #include <limits.h>
 #include <algorithm>
 #include <cctype>
-#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
@@ -207,64 +206,48 @@ class VolcengineJsonErrorMarshaller final : public Aws::Client::JsonErrorMarshal
     if (code.empty() && message.empty() && request_id.empty()) {
       return Aws::Client::JsonErrorMarshaller::Marshall(response);
     }
-    Aws::Client::AWSError<Aws::Client::CoreErrors> error(Aws::Client::CoreErrors::UNKNOWN, code, message,
-                                                         /*isRetryable=*/false);
+    // Preserve both service and HTTP retry semantics. The SDK's core mapper
+    // does not always recognize Volcengine's RequestLimitExceeded code.
+    const auto code_error = FindErrorByName(code == "RequestLimitExceeded" ? "Throttling" : code.c_str());
+    const auto http_error = FindErrorByHttpResponseCode(response.GetResponseCode());
+    const auto error_type = code_error.GetErrorType() == Aws::Client::CoreErrors::UNKNOWN ? http_error.GetErrorType()
+                                                                                          : code_error.GetErrorType();
+    Aws::Client::AWSError<Aws::Client::CoreErrors> error(error_type, code, message,
+                                                         code_error.ShouldRetry() || http_error.ShouldRetry());
     error.SetRequestId(request_id);
     error.SetResponseHeaders(response.GetHeaders());
     error.SetResponseCode(response.GetResponseCode());
+    // AWSHttpResourceClient only uses the returned error to decide whether to
+    // retry, then discards it. Record the diagnostics before they are lost.
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] STS request failed: HTTP {}, Code={}, Message={}, RequestId={}",
+                                        STS_RESOURCE_CLIENT_LOG_TAG, static_cast<int>(response.GetResponseCode()), code,
+                                        message, request_id);
     return error;
   }
 };
 
-// Parse an STS expiry string into an AWS DateTime, tolerating formats the docs
-// never actually pin down. Volcengine's AssumeRole / AssumeRoleWithOIDC docs
-// only give an *example* value ("2021-04-12T11:57:09+08:00") with no field-level
-// format contract, so we must not assume the offset is always +HH:MM. Order:
-//   1. NormalizeToUtcZ  — folds a +HH:MM / +HHMM / Z offset to a Z instant;
-// If the input is unparseable we DO NOT drop the credentials: the expiry only
-// drives our local refresh clock (it is never signed or sent upstream), so
-// losing it must never invalidate an otherwise-good AK/SK/token. We fall back
-// to a conservative TTL, causing an early proactive re-fetch rather than a
-// hard failure. Returns false only when even the fallback cannot be applied.
-bool ParseStsExpiry(const Aws::String& rawExpiry, Aws::Auth::AWSCredentials& creds) {
+// Normalize supported RFC3339 forms before parsing. Credentials without a
+// parseable expiration must be rejected instead of assigning a local TTL.
+arrow::Status ParseStsExpiry(const Aws::String& rawExpiry, Aws::Auth::AWSCredentials& creds) {
   const Aws::String trimmed = Aws::Utils::StringUtils::Trim(rawExpiry.c_str());
-
-  auto normalized = NormalizeToUtcZ(std::string(trimmed.c_str()));
-  if (normalized.ok()) {
-    Aws::Utils::DateTime dt(normalized->c_str(), Aws::Utils::DateFormat::ISO_8601);
-    if (dt.WasParseSuccessful()) {
-      creds.SetExpiration(dt);
-      return true;
-    }
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG,
-                       "ISO-8601 parse rejected normalized STS expiry '" << normalized.ValueOrDie().c_str() << "'");
-  } else {
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG,
-                       "NormalizeToUtcZ rejected STS expiry '" << trimmed << "': " << normalized.status().ToString());
+  ARROW_ASSIGN_OR_RAISE(const auto normalized, NormalizeToUtcZ(std::string(trimmed.c_str())));
+  const Aws::Utils::DateTime expiration(normalized.c_str(), Aws::Utils::DateFormat::ISO_8601);
+  if (!expiration.WasParseSuccessful()) {
+    return arrow::Status::Invalid("ISO-8601 parser rejected normalized STS expiry: ", normalized);
   }
-
-  // Fallback: keep the credentials but assign a conservative TTL so the
-  // provider re-fetches well before an unknown real lifetime could lapse. Kept
-  // above the chain provider's refresh grace so we still cache for a usable
-  // window instead of re-fetching on every single call.
-  static const int kFallbackTtlSeconds = 60 * 60;  // 1h
-  const Aws::Utils::DateTime fallback = Aws::Utils::DateTime::Now() + std::chrono::seconds(kFallbackTtlSeconds);
-  creds.SetExpiration(fallback);
-  AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG,
-                     "Unparseable STS expiry '" << trimmed << "'; keeping credentials with a " << kFallbackTtlSeconds
-                                                << "s fallback TTL to force an early refresh");
-  return true;
+  creds.SetExpiration(expiration);
+  return arrow::Status::OK();
 }
 
 int ClampDurationSeconds(int duration) {
   if (duration < kMinDurationSeconds) {
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG, "DurationSeconds=" << duration << " below Volcengine STS minimum "
-                                                                       << kMinDurationSeconds << "; clamping");
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] DurationSeconds={} below Volcengine STS minimum {}; clamping",
+                                        STS_RESOURCE_CLIENT_LOG_TAG, duration, kMinDurationSeconds);
     return kMinDurationSeconds;
   }
   if (duration > kMaxDurationSeconds) {
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG, "DurationSeconds=" << duration << " above Volcengine STS maximum "
-                                                                       << kMaxDurationSeconds << "; clamping");
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] DurationSeconds={} above Volcengine STS maximum {}; clamping",
+                                        STS_RESOURCE_CLIENT_LOG_TAG, duration, kMaxDurationSeconds);
     return kMaxDurationSeconds;
   }
   return duration;
@@ -295,9 +278,9 @@ VolcengineSTSCredentialsClient::VolcengineSTSCredentialsClient(
   }
   m_service = "sts";
 
-  AWS_LOGSTREAM_INFO(STS_RESOURCE_CLIENT_LOG_TAG,
-                     "Creating STS ResourceClient with endpoint: " << m_endpoint << ", region: " << m_region
-                                                                   << ", durationSeconds: " << m_durationSeconds);
+  LOG_STORAGE_INFO_ << fmt::format(
+      "[{}] Creating STS ResourceClient with endpoint: {}, region: {}, durationSeconds: {}",
+      STS_RESOURCE_CLIENT_LOG_TAG, m_endpoint, m_region, m_durationSeconds);
 }
 
 VolcengineSTSCredentialsClient::STSAssumeRoleWithWebIdentityResult
@@ -329,30 +312,38 @@ VolcengineSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
   Aws::StringStream contentLength;
   contentLength << streamSize;
   httpRequest->SetContentLength(contentLength.str());
+  // AWSHttpResourceClient retries POST requests without rewinding their bodies.
+  // Curl/CRT create a response stream before each upload, including retries
+  // after bodyless errors, so reset the form body for every attempt here.
+  httpRequest->SetResponseStreamFactory([body] {
+    body->clear();
+    body->seekg(0);
+    return Aws::Utils::Stream::DefaultResponseStreamFactoryMethod();
+  });
 
   Aws::String credentialsStr = GetResourceWithAWSWebServiceResult(httpRequest).GetPayload();
 
   // Parse credentials
   STSAssumeRoleWithWebIdentityResult result;
   if (credentialsStr.empty()) {
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG, "Get an empty credential from sts");
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get an empty credential from sts", STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
   }
 
   Aws::Utils::Json::JsonValue jsonValue(credentialsStr);
   if (!jsonValue.WasParseSuccessful()) {
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG, "Failed to parse STS response as JSON");
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Failed to parse STS response as JSON", STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
   }
   auto json = jsonValue.View();
   if (!json.ValueExists("Result")) {
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG, "Get 'Result' node from response failed");
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get 'Result' node from response failed", STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
   }
   auto resultNode = json.GetObject("Result");
 
   if (!resultNode.ValueExists("Credentials")) {
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG, "Get 'Credentials' node from Result failed");
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get 'Credentials' node from Result failed", STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
   }
   auto credentialsNode = resultNode.GetObject("Credentials");
@@ -360,9 +351,12 @@ VolcengineSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
   result.creds.SetAWSAccessKeyId(credentialsNode.GetString("AccessKeyId"));
   result.creds.SetAWSSecretKey(credentialsNode.GetString("SecretAccessKey"));
   result.creds.SetSessionToken(credentialsNode.GetString("SessionToken"));
-  // AssumeRoleWithOIDC reports the expiry as "Expiration". Parse defensively:
-  // the docs only give an example value with no format contract.
-  ParseStsExpiry(credentialsNode.GetString("Expiration"), result.creds);
+  const auto expiry_status = ParseStsExpiry(credentialsNode.GetString("Expiration"), result.creds);
+  if (!expiry_status.ok()) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Rejecting AssumeRoleWithOIDC credentials: {}",
+                                        STS_RESOURCE_CLIENT_LOG_TAG, expiry_status.ToString());
+    return {};
+  }
 
   return result;
 }
@@ -495,28 +489,37 @@ VolcengineSTSCredentialsClient::STSAssumeRoleResult VolcengineSTSCredentialsClie
   Aws::StringStream contentLength;
   contentLength << body_str.size();
   httpRequest->SetContentLength(contentLength.str());
+  // As in the OIDC request, resend the complete signed body on every attempt.
+  httpRequest->SetResponseStreamFactory([body] {
+    body->clear();
+    body->seekg(0);
+    return Aws::Utils::Stream::DefaultResponseStreamFactoryMethod();
+  });
 
   Aws::String credentialsStr = GetResourceWithAWSWebServiceResult(httpRequest).GetPayload();
 
   if (credentialsStr.empty()) {
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG, "Get an empty credential from sts AssumeRole");
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get an empty credential from sts AssumeRole",
+                                        STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
   }
 
   Aws::Utils::Json::JsonValue jsonValue(credentialsStr);
   if (!jsonValue.WasParseSuccessful()) {
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG, "Failed to parse AssumeRole response as JSON: " << credentialsStr);
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Failed to parse AssumeRole response as JSON",
+                                        STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
   }
   auto json = jsonValue.View();
   if (!json.ValueExists("Result")) {
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG,
-                       "Get 'Result' node from AssumeRole response failed: " << credentialsStr);
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get 'Result' node from AssumeRole response failed",
+                                        STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
   }
   auto resultNode = json.GetObject("Result");
   if (!resultNode.ValueExists("Credentials")) {
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG, "Get 'Credentials' node from AssumeRole Result failed");
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get 'Credentials' node from AssumeRole Result failed",
+                                        STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
   }
   auto credentialsNode = resultNode.GetObject("Credentials");
@@ -524,15 +527,17 @@ VolcengineSTSCredentialsClient::STSAssumeRoleResult VolcengineSTSCredentialsClie
   result.creds.SetAWSAccessKeyId(credentialsNode.GetString("AccessKeyId"));
   result.creds.SetAWSSecretKey(credentialsNode.GetString("SecretAccessKey"));
   result.creds.SetSessionToken(credentialsNode.GetString("SessionToken"));
-  // AssumeRole names the expiry "ExpiredTime" whereas AssumeRoleWithOIDC uses
-  // "Expiration" — read the former first and fall back to the latter so an
-  // empty field never reaches the parser. ParseStsExpiry then tolerates any
-  // format drift (the docs only give an example value, no format contract).
+  // AssumeRole uses "ExpiredTime"; keep accepting "Expiration" as an alias.
   Aws::String expiredTimeStr = credentialsNode.GetString("ExpiredTime");
   if (expiredTimeStr.empty()) {
     expiredTimeStr = credentialsNode.GetString("Expiration");
   }
-  ParseStsExpiry(expiredTimeStr, result.creds);
+  const auto expiry_status = ParseStsExpiry(expiredTimeStr, result.creds);
+  if (!expiry_status.ok()) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Rejecting AssumeRole credentials: {}", STS_RESOURCE_CLIENT_LOG_TAG,
+                                        expiry_status.ToString());
+    return {};
+  }
 
   return result;
 }

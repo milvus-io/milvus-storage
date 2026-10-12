@@ -79,7 +79,7 @@ fn talon_uri(provider: &str, bucket: &str, key: &str) -> Result<String> {
     let scheme = match provider {
         // Milvus accesses these providers through their S3-compatible APIs, so
         // the corresponding Talon deployment must use its S3 backend as well.
-        "aws" | "aliyun" | "tencent" | "huawei" | "gcp" => "s3",
+        "aws" | "aliyun" | "tencent" | "huawei" | "gcp" | "volcengine" => "s3",
         "azure" => "az",
         value => bail!("Talon does not support cloud provider {value:?}"),
     };
@@ -443,7 +443,7 @@ mod tests {
 
     #[test]
     fn maps_storage_providers_to_canonical_talon_uris() {
-        for provider in ["aws", "aliyun", "tencent", "huawei", "gcp"] {
+        for provider in ["aws", "aliyun", "tencent", "huawei", "gcp", "volcengine"] {
             assert_eq!(
                 talon_uri(provider, "bucket", "path/a").unwrap(),
                 "s3://bucket/path/a"

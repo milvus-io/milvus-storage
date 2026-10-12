@@ -31,6 +31,9 @@
 #include <openssl/err.h>
 #include <openssl/evp.h>
 
+#include <folly/ScopeGuard.h>
+#include <glog/logging.h>
+
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/HttpRequest.h>
@@ -156,7 +159,7 @@ struct MockResponseSpec {
 
 class MockHttpClient : public Aws::Http::HttpClient {
   public:
-  MockHttpClient() {}
+  explicit MockHttpClient(bool consume_request_bodies = false) : consume_request_bodies_(consume_request_bodies) {}
 
   std::shared_ptr<Aws::Http::HttpResponse> MakeRequest(
       const std::shared_ptr<Aws::Http::HttpRequest>& request,
@@ -177,9 +180,7 @@ class MockHttpClient : public Aws::Http::HttpClient {
     }
 
     // Default: return 404 for unmatched requests (e.g., background SDK requests)
-    auto resp = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("MockHttpClient", request);
-    resp->SetResponseCode(Aws::Http::HttpResponseCode::NOT_FOUND);
-    return resp;
+    return BuildResponse(request, {Aws::Http::HttpResponseCode::NOT_FOUND, "", {}});
   }
 
   void EnqueueResponse(const std::string& url_match,
@@ -194,10 +195,25 @@ class MockHttpClient : public Aws::Http::HttpClient {
     return recorded_requests_;
   }
 
+  std::vector<std::string> GetRecordedRequestBodies() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return recorded_request_bodies_;
+  }
+
   private:
-  static std::shared_ptr<Aws::Http::HttpResponse> BuildResponse(const std::shared_ptr<Aws::Http::HttpRequest>& request,
-                                                                const MockResponseSpec& spec) {
+  std::shared_ptr<Aws::Http::HttpResponse> BuildResponse(const std::shared_ptr<Aws::Http::HttpRequest>& request,
+                                                         const MockResponseSpec& spec) const {
     auto resp = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("MockHttpClient", request);
+    // Curl and CRT create the response stream before consuming the POST body.
+    if (consume_request_bodies_) {
+      const auto& body = request->GetContentBody();
+      std::string sent_body;
+      if (body) {
+        sent_body.assign(std::istreambuf_iterator<char>(*body), std::istreambuf_iterator<char>());
+        body->setstate(std::ios::eofbit | std::ios::failbit);
+      }
+      recorded_request_bodies_.push_back(std::move(sent_body));
+    }
     resp->SetResponseCode(spec.code);
     for (const auto& h : spec.headers) {
       resp->AddHeader(h.first, h.second);
@@ -208,9 +224,11 @@ class MockHttpClient : public Aws::Http::HttpClient {
     return resp;
   }
 
+  const bool consume_request_bodies_;
   mutable std::mutex mutex_;
   mutable std::map<std::string, std::queue<MockResponseSpec>> response_map_;
   mutable std::vector<std::shared_ptr<Aws::Http::HttpRequest>> recorded_requests_;
+  mutable std::vector<std::string> recorded_request_bodies_;
 };
 
 class MockHttpClientFactory : public Aws::Http::HttpClientFactory {
@@ -723,6 +741,136 @@ constexpr const char* kVolcOuterAssumeRoleSuccessJson = R"({
 
 }  // namespace
 
+TEST_F(S3ProviderTest, TestVolcengineOIDCProviderRejectsInvalidExpiry) {
+  TempFile token_file("oidc-jwt-payload");
+  ScopedEnvVar set_machine_role("VOLCENGINE_OIDC_ROLE_TRN", "trn:iam::2100211764:role/MilvusTos");
+  ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
+
+  for (const char* expiry_field : {R"(,"Expiration":"4102415999")", R"(,"Expiration":"")", ""}) {
+    SCOPED_TRACE(expiry_field);
+    mock_client_ = std::make_shared<MockHttpClient>();
+    Aws::Http::SetHttpClientFactory(std::make_shared<MockHttpClientFactory>(mock_client_));
+    const std::string response = std::string(R"({"Result":{"Credentials":{"AccessKeyId":"INVALID_AK",)") +
+                                 R"("SecretAccessKey":"INNER_SK","SessionToken":"INNER_TOKEN")" + expiry_field + "}}}";
+    mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, response);
+    mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, kVolcInnerOidcSuccessJson);
+
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider(/*duration_seconds=*/900);
+    EXPECT_TRUE(provider.GetAWSCredentials().IsEmpty());
+    // A rejected response must not be cached or prevent the next valid refresh.
+    EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "INNER_AK");
+    EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 2);
+  }
+}
+
+TEST_F(S3ProviderTest, TestVolcengineStsErrorRetryClassification) {
+  using Aws::Http::HttpResponseCode;
+  const struct {
+    HttpResponseCode status;
+    const char* code;
+    bool retryable;
+  } cases[] = {
+      {HttpResponseCode::SERVICE_UNAVAILABLE, "ServiceUnavailableTemp", true},
+      {HttpResponseCode::SERVICE_UNAVAILABLE, "", true},  // Empty responses bypass the error marshaller.
+      {HttpResponseCode::TOO_MANY_REQUESTS, "FlowLimitExceeded", true},
+      {HttpResponseCode::BAD_REQUEST, "Throttling", true},
+      {HttpResponseCode::BAD_REQUEST, "RequestLimitExceeded", true},
+      {HttpResponseCode::BAD_REQUEST, "InvalidOIDCToken", false},
+      {HttpResponseCode::FORBIDDEN, "AccessDenied", false},
+      {HttpResponseCode::BAD_REQUEST, "UnknownStsError", false},
+  };
+  TempFile token_file("oidc-jwt-payload");
+  ScopedEnvVar set_machine_role("VOLCENGINE_OIDC_ROLE_TRN", "trn:iam::2100211764:role/MilvusTos");
+  ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
+
+  for (const bool chain : {false, true}) {
+    SCOPED_TRACE(chain ? "AssumeRole" : "AssumeRoleWithOIDC");
+    for (const auto& test_case : cases) {
+      SCOPED_TRACE(test_case.code[0] == '\0' ? "empty error response" : test_case.code);
+      mock_client_ = std::make_shared<MockHttpClient>(/*consume_request_bodies=*/true);
+      Aws::Http::SetHttpClientFactory(std::make_shared<MockHttpClientFactory>(mock_client_));
+      if (chain) {
+        mock_client_->EnqueueResponse("sts.volcengineapi.com", HttpResponseCode::OK, kVolcInnerOidcSuccessJson);
+      }
+      const std::string error_json =
+          test_case.code[0] == '\0'
+              ? ""
+              : std::string(R"({"ResponseMetadata":{"RequestId":"retry-test","Error":{"Code":")") + test_case.code +
+                    R"(","Message":"STS request failed"}}})";
+      mock_client_->EnqueueResponse("sts.volcengineapi.com", test_case.status, error_json);
+      if (test_case.retryable) {
+        mock_client_->EnqueueResponse("sts.volcengineapi.com", HttpResponseCode::OK,
+                                      chain ? kVolcOuterAssumeRoleSuccessJson : kVolcInnerOidcSuccessJson);
+      }
+
+      Aws::Auth::AWSCredentials creds;
+      if (chain) {
+        VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/target", "session", 900);
+        creds = provider.GetAWSCredentials();
+      } else {
+        VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider(900);
+        creds = provider.GetAWSCredentials();
+      }
+      if (test_case.retryable) {
+        EXPECT_EQ(creds.GetAWSAccessKeyId(), chain ? "OUTER_AK" : "INNER_AK");
+      } else {
+        EXPECT_TRUE(creds.IsEmpty());
+      }
+      EXPECT_EQ(mock_client_->GetRecordedRequests().size(), (chain ? 1 : 0) + (test_case.retryable ? 2 : 1));
+      if (test_case.retryable) {
+        const auto bodies = mock_client_->GetRecordedRequestBodies();
+        ASSERT_EQ(bodies.size(), chain ? 3 : 2);
+        const auto& first_attempt = bodies[chain ? 1 : 0];
+        EXPECT_FALSE(first_attempt.empty());
+        EXPECT_EQ(bodies.back(), first_attempt) << "Retries must resend the complete POST body";
+      }
+    }
+  }
+}
+
+TEST_F(S3ProviderTest, TestVolcengineStsErrorPreservesDiagnostics) {
+  class DiagnosticLogSink final : public google::LogSink {
+ public:
+    void send(google::LogSeverity,
+              const char*,
+              const char*,
+              int,
+              const google::LogMessageTime&,
+              const char* message,
+              const size_t message_len) override {
+      std::lock_guard<std::mutex> lock(mutex_);
+      messages.append(message, message_len);
+      messages.push_back('\n');
+    }
+
+    std::string messages;
+
+ private:
+    std::mutex mutex_;
+  } sink;
+
+  mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::FORBIDDEN, R"({
+    "ResponseMetadata": {
+      "RequestId": "diagnostic-request-123",
+      "Error": {"Code": "AccessDenied", "Message": "role trust policy denies the caller"}
+    }
+  })");
+  VolcengineSTSCredentialsClient client(MakeNoImdsClientConfiguration(), 900);
+  {
+    // Capture storage's glog output and unregister before inspecting the buffer.
+    google::AddLogSink(&sink);
+    const auto remove_sink = folly::makeGuard([&sink] { google::RemoveLogSink(&sink); });
+    const auto result =
+        client.GetAssumeRoleWithWebIdentityCredentials({"oidc-token", "trn:iam::123:role/test", "session"});
+    EXPECT_TRUE(result.creds.IsEmpty());
+  }
+  const auto& messages = sink.messages;
+  EXPECT_NE(messages.find("AccessDenied"), std::string::npos) << messages;
+  EXPECT_NE(messages.find("role trust policy denies the caller"), std::string::npos) << messages;
+  EXPECT_NE(messages.find("diagnostic-request-123"), std::string::npos) << messages;
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 1);
+}
+
 TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderEndToEnd) {
   // Two responses queued under the same STS URL; consumed FIFO. The chain
   // issues AssumeRoleWithOIDC first (inner) then sts:AssumeRole (outer).
@@ -917,49 +1065,29 @@ TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderEmptySessionNameDefaults) 
   EXPECT_FALSE(value.empty());
 }
 
-TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderToleratesMalformedExpiry) {
-  // The Volcengine STS docs only give an example expiry value, not a format
-  // contract. This ExpiredTime is a bare Unix-epoch integer — a realistic drift
-  // (Tencent's ExpiredTime is exactly that) that NormalizeToUtcZ's regex throws
-  // on AND the SDK's ISO-8601 parser rejects. The credentials must still come
-  // through; only the expiry falls back to a bounded TTL. A regression would
-  // throw "Invalid RFC3339 time" and drop the whole credential set.
-  static constexpr const char* kOuterMalformedExpiryJson = R"({
-    "ResponseMetadata": {"RequestId": "OUTER-RID"},
-    "Result": {
-      "Credentials": {
-        "AccessKeyId": "OUTER_AK",
-        "SecretAccessKey": "OUTER_SK",
-        "SessionToken": "OUTER_TOKEN",
-        "ExpiredTime": "4102415999"
-      }
-    }
-  })";
-  mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, kVolcInnerOidcSuccessJson);
-  mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, kOuterMalformedExpiryJson);
-
+TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderRejectsInvalidExpiry) {
   TempFile token_file("oidc-jwt-payload");
   ScopedEnvVar set_machine_role("VOLCENGINE_OIDC_ROLE_TRN", "trn:iam::2100211764:role/MilvusTos");
   ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
   ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
 
-  VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/llqtestexternal", "tenant-A-session",
-                                                 /*duration_seconds=*/900);
-  auto creds = provider.GetAWSCredentials();
+  for (const char* expiry_field : {R"(,"ExpiredTime":"4102415999")", R"(,"ExpiredTime":"")", ""}) {
+    SCOPED_TRACE(expiry_field);
+    mock_client_ = std::make_shared<MockHttpClient>();
+    Aws::Http::SetHttpClientFactory(std::make_shared<MockHttpClientFactory>(mock_client_));
+    const std::string response = std::string(R"({"Result":{"Credentials":{"AccessKeyId":"INVALID_AK",)") +
+                                 R"("SecretAccessKey":"OUTER_SK","SessionToken":"OUTER_TOKEN")" + expiry_field + "}}}";
+    mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, kVolcInnerOidcSuccessJson);
+    mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, response);
+    mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK,
+                                  kVolcOuterAssumeRoleSuccessJson);
 
-  // Credentials survive the unparseable expiry.
-  EXPECT_EQ(creds.GetAWSAccessKeyId(), "OUTER_AK") << "unparseable expiry must not discard the credentials";
-  EXPECT_EQ(creds.GetSessionToken(), "OUTER_TOKEN");
-
-  // Expiry falls back to a bounded future TTL rather than throwing or landing in
-  // the past (which would make the creds look permanently expired). The impl
-  // uses 1h; anything in (now, now+2h] proves a sane fallback was applied rather
-  // than an epoch/zero value.
-  const auto now = Aws::Utils::DateTime::Now();
-  EXPECT_GT(creds.GetExpiration().Millis(), now.Millis())
-      << "fallback expiry must be in the future so the creds are usable now";
-  EXPECT_LE(creds.GetExpiration().Millis(), (now + std::chrono::hours(2)).Millis())
-      << "fallback expiry must be bounded so the provider re-fetches";
+    VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/llqtestexternal", "tenant-A-session",
+                                                   /*duration_seconds=*/900);
+    EXPECT_TRUE(provider.GetAWSCredentials().IsEmpty());
+    EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "OUTER_AK");
+    EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 3);
+  }
 }
 
 // ============================================================================
