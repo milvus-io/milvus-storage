@@ -171,12 +171,14 @@ arrow::Status ClientBuilderBase::PrepareClientConfig(Aws::Client::ClientConfigur
 
   client_config->maxConnections = std::max(client_config->maxConnections, options_.max_connections);
 
-  // Non-AWS S3-compatible APIs (GCP, Aliyun OSS, Tencent COS, Huawei OBS) do
-  // not accept the extra x-amz-checksum-* headers / aws-chunked streaming that
-  // AWS SDK >= 1.11.x sends by default (WHEN_SUPPORTED). Restrict to
-  // WHEN_REQUIRED so the SDK only adds checksums when the API mandates them.
+  // Non-AWS S3-compatible APIs (GCP, Aliyun OSS, Tencent COS, Huawei OBS,
+  // Volcengine TOS) do not accept the extra x-amz-checksum-* headers /
+  // aws-chunked streaming that AWS SDK >= 1.11.x sends by default
+  // (WHEN_SUPPORTED). Restrict to WHEN_REQUIRED so the SDK only adds checksums
+  // when the API mandates them.
   if (options_.cloud_provider == kCloudProviderGCP || options_.cloud_provider == kCloudProviderAliyun ||
-      options_.cloud_provider == kCloudProviderTencent || options_.cloud_provider == kCloudProviderHuawei) {
+      options_.cloud_provider == kCloudProviderTencent || options_.cloud_provider == kCloudProviderHuawei ||
+      options_.cloud_provider == kCloudProviderVolcengine) {
     client_config->checksumConfig.requestChecksumCalculation = Aws::Client::RequestChecksumCalculation::WHEN_REQUIRED;
     client_config->checksumConfig.responseChecksumValidation = Aws::Client::ResponseChecksumValidation::WHEN_REQUIRED;
   }
