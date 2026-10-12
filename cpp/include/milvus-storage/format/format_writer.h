@@ -38,10 +38,15 @@ class FormatWriter {
 
   /**
    * @brief Flush the writer
-   *        After call this function, the data should no longer exist in memory
+   *        A format may retain an incomplete row group for the next write.
    * @return arrow::Status
    */
   [[nodiscard]] virtual arrow::Status Flush() = 0;
+
+  // Report cached Arrow input buffers after Flush(), when supported. The default
+  // preserves legacy accounting for formats without a retained-buffer report.
+  // This does not include codec, I/O, or producer-private allocations.
+  [[nodiscard]] virtual size_t GetRetainedBufferSize() const { return 0; }
 
   /**
    * @brief Close the writer

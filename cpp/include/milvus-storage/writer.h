@@ -172,6 +172,9 @@ class Writer {
    *
    * @note The batch schema must be compatible with the writer's schema.
    *       All batches written to the same writer should have consistent schemas.
+   *       writer.buffer_size is a target for buffered input: incomplete row
+   *       groups and a single oversized batch can exceed it. Flush prioritizes
+   *       the largest group and keeps Parquet tail buffers in the accounting.
    */
   virtual arrow::Status write(const std::shared_ptr<arrow::RecordBatch>& batch) = 0;
 
