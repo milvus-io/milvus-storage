@@ -101,7 +101,7 @@ struct SegmentWriterStats {
 //   auto output = writer->Close();  // returns ColumnGroups + LobFileInfo, does NOT commit
 //
 //   // caller commits via Transaction:
-//   auto txn = Transaction::Open(fs, segment_path, read_version, ...);
+//   auto txn = Transaction::Open(fs, segment_path, read_version, -1, ...);
 //   txn->AppendFiles(*output.column_groups);
 //   for (auto& lob : output.lob_files) txn->AddLobFile(lob);
 //   auto version = txn->Commit();

@@ -87,6 +87,7 @@ class Transaction:
             base_path.encode("utf-8"),
             self._props._get_c_properties(),
             read_version,
+            -1,
             resolve_id,
             retry_limit,
             handle,
@@ -312,7 +313,7 @@ class Transaction:
             raise ResourceError("Transaction is already committed")
 
         version = self._ffi.new("int64_t*")
-        result = self._lib.loon_transaction_commit(self._handle, version)
+        result = self._lib.loon_transaction_commit(self._handle, version, self._ffi.NULL)
         check_result(result)
 
         self._committed = True

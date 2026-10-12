@@ -305,6 +305,7 @@ const Resolver& FailResolver = g_fail_resolver;
 arrow::Result<std::unique_ptr<Transaction>> Transaction::Open(const milvus_storage::ArrowFileSystemPtr& fs,
                                                               const std::string& base_path,
                                                               int64_t read_version,
+                                                              const int64_t manifest_size,
                                                               const Resolver& resolver,
                                                               uint32_t retry_limit) {
   ARROW_ASSIGN_OR_RAISE(auto storage_uri, milvus_storage::StorageUri::Parse(base_path));
@@ -323,7 +324,8 @@ arrow::Result<std::unique_ptr<Transaction>> Transaction::Open(const milvus_stora
 
   // Eagerly load manifest if version exists (version > 0)
   if (actual_read_version > 0) {
-    ARROW_ASSIGN_OR_RAISE(txn->read_manifest_, txn->read_manifest(actual_read_version));
+    ARROW_ASSIGN_OR_RAISE(txn->read_manifest_,
+                          txn->read_manifest(actual_read_version, read_version > 0 ? manifest_size : -1));
   } else {
     // Version 0: no manifest exists yet, create empty manifest
     txn->read_manifest_ = std::make_shared<Manifest>();
@@ -348,7 +350,7 @@ Transaction::Transaction(const milvus_storage::ArrowFileSystemPtr& fs,
       fs_(fs),
       retry_limit_(retry_limit) {}
 
-arrow::Result<int64_t> Transaction::Commit() {
+arrow::Result<int64_t> Transaction::Commit(int64_t* out_manifest_size) {
   // Fault injection point for testing
   FIU_RETURN_ON(FIUKEY_MANIFEST_COMMIT_FAIL,
                 arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_MANIFEST_COMMIT_FAIL)));
@@ -408,13 +410,17 @@ arrow::Result<int64_t> Transaction::Commit() {
     int64_t committed_version = latest_version + 1;
 
     // Try to commit the resolved manifest
-    auto status = write_manifest(resolved_manifest, latest_version, committed_version);
+    int64_t manifest_size = -1;
+    auto status = write_manifest(resolved_manifest, latest_version, committed_version, &manifest_size);
 
     // If commit succeeded, return the committed revision.
     if (status.ok()) {
       LOG_STORAGE_DEBUG_ << fmt::format(
           "Manifest committed successfully: [committed_version={}][read_version={}][retries={}]", committed_version,
           read_version_, retry_count);
+      if (out_manifest_size) {
+        *out_manifest_size = manifest_size;
+      }
       return committed_version;
     }
 
@@ -459,7 +465,7 @@ arrow::Result<std::shared_ptr<Manifest>> Transaction::GetManifest() {
 
 int64_t Transaction::GetReadVersion() const { return read_version_; }
 
-arrow::Result<std::shared_ptr<Manifest>> Transaction::read_manifest(int64_t version) {
+arrow::Result<std::shared_ptr<Manifest>> Transaction::read_manifest(int64_t version, const int64_t manifest_size) {
   // Fault injection point for testing
   FIU_RETURN_ON(FIUKEY_MANIFEST_READ_FAIL,
                 arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_MANIFEST_READ_FAIL)));
@@ -470,7 +476,7 @@ arrow::Result<std::shared_ptr<Manifest>> Transaction::read_manifest(int64_t vers
   }
 
   auto path = get_manifest_filepath(base_path_, version);
-  return Manifest::ReadFrom(fs_, path);
+  return Manifest::ReadFrom(fs_, path, manifest_size);
 }
 
 Transaction& Transaction::DropColumn(const std::string& column_name) {
@@ -557,7 +563,8 @@ arrow::Result<int64_t> Transaction::get_latest_version() {
 
 arrow::Status Transaction::write_manifest(const std::shared_ptr<Manifest>& manifest,
                                           int64_t old_version,
-                                          int64_t new_version) {
+                                          int64_t new_version,
+                                          int64_t* out_manifest_size) {
   // Fault injection point for testing
   FIU_RETURN_ON(FIUKEY_MANIFEST_WRITE_FAIL,
                 arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_MANIFEST_WRITE_FAIL)));
@@ -567,7 +574,7 @@ arrow::Status Transaction::write_manifest(const std::shared_ptr<Manifest>& manif
   // transaction sneak in and claim the same target version first.
   FIU_DO_ON(FIUKEY_SLEEP_BEFORE_COMMIT_MANIFEST, { std::this_thread::sleep_for(std::chrono::seconds(5)); });
 
-  return Manifest::WriteTo(fs_, get_manifest_filepath(base_path_, new_version), *manifest);
+  return Manifest::WriteTo(fs_, get_manifest_filepath(base_path_, new_version), *manifest, out_manifest_size);
 }
 
 }  // namespace milvus_storage::api::transaction

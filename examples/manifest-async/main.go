@@ -8,7 +8,7 @@ package main
 extern int32_t manifestSubmit(void*, LoonAsyncTask, void*);
 static inline void runManifestTask(LoonAsyncTask task, void* data) { task(data); }
 extern void manifestOpenComplete(uintptr_t, LoonFFIResult, LoonTransactionHandle);
-extern void manifestCommitComplete(uintptr_t, LoonFFIResult, int32_t, int64_t);
+extern void manifestCommitComplete(uintptr_t, LoonFFIResult, int32_t, int64_t, int64_t);
 */
 import "C"
 
@@ -112,7 +112,7 @@ func openVersion(ctx context.Context, asyncContext C.LoonAsyncContextHandle, pat
 	nativePath := C.CString(path)
 	defer C.free(unsafe.Pointer(nativePath))
 	var operation C.LoonAsyncHandle
-	result := C.loon_transaction_open_async(asyncContext, nativePath, properties, C.int64_t(version), 0, 1,
+	result := C.loon_transaction_open_async(asyncContext, nativePath, properties, C.int64_t(version), -1, 0, 1,
 		(C.LoonTransactionOpenCallback)(C.manifestOpenComplete), C.uintptr_t(token), &operation)
 	if err := consume(result); err != nil {
 		token.Delete()
@@ -136,7 +136,7 @@ type commitCompletion struct {
 }
 
 //export manifestCommitComplete
-func manifestCommitComplete(token C.uintptr_t, result C.LoonFFIResult, outcome C.int32_t, version C.int64_t) {
+func manifestCommitComplete(token C.uintptr_t, result C.LoonFFIResult, outcome C.int32_t, version C.int64_t, _ C.int64_t) {
 	handle := cgo.Handle(token)
 	done := handle.Value().(chan commitCompletion)
 	value := commitCompletion{int32(outcome), int64(version), consume(result)}

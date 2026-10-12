@@ -76,6 +76,43 @@ class ManifestTest : public ::testing::Test {
 
 // ---------- Read-Write Roundtrip Tests ----------
 
+TEST_F(ManifestTest, KnownSizeSkipsMetadataLookup) {
+  class SizeOnlyFileSystem final : public arrow::fs::SubTreeFileSystem {
+ public:
+    explicit SizeOnlyFileSystem(const ArrowFileSystemPtr& fs) : SubTreeFileSystem("", fs) {}
+    arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string&) override {
+      return arrow::Status::IOError("Opening without a size would require HEAD");
+    }
+    arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(
+        const arrow::fs::FileInfo& info) override {
+      if (info.size() <= 0 || info.type() != arrow::fs::FileType::File) {
+        return arrow::Status::Invalid("Expected known manifest size");
+      }
+      return SubTreeFileSystem::OpenInputFile(info);
+    }
+  };
+  const auto path = get_manifest_filepath(base_path_, 1);
+  Manifest manifest({}, {{get_delta_filepath(base_path_, "delete"), DeltaLogType::PRIMARY_KEY, 7}});
+  int64_t size = -1;
+  ASSERT_STATUS_OK(Manifest::WriteTo(fs_, path, manifest, &size));
+  ASSERT_AND_ASSIGN(auto info, fs_->GetFileInfo(path));
+  ASSERT_EQ(size, info.size());
+  ASSERT_GT(size, 0);
+
+  auto sized_fs = std::make_shared<SizeOnlyFileSystem>(fs_);
+  Manifest::CleanCache();
+  ASSERT_AND_ASSIGN(auto read, Manifest::ReadFrom(sized_fs, path, size));
+  ASSERT_EQ(read->deltaLogs().size(), 1);
+  EXPECT_EQ(read->deltaLogs()[0].num_entries, 7);
+  Manifest::CleanCache();
+  EXPECT_FALSE(Manifest::ReadFrom(sized_fs, path).ok());
+
+  // A failed conditional write must not publish a size.
+  size = -1;
+  EXPECT_TRUE(Manifest::WriteTo(fs_, path, manifest, &size).IsAlreadyExists());
+  EXPECT_EQ(size, -1);
+}
+
 TEST_F(ManifestTest, EmptyManifestRoundTrip) {
   Manifest manifest;
   auto read_back = RoundTrip(manifest);
