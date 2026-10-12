@@ -22,6 +22,8 @@ class KeyRetriever : public ::parquet::DecryptionKeyRetriever {
   public:
   KeyRetriever(const std::function<std::string(const std::string&)>& callback);
 
+  // The native callback returns raw binary AES key bytes, including any NULs.
+  // Text encoding for the C interface is handled by its callback adapter.
   std::string GetKey(const std::string& key_metadata) override;
 
   private:

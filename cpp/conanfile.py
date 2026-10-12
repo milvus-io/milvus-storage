@@ -26,13 +26,13 @@ class StorageConan(ConanFile):
         "with_asan": [True, False],
         "with_profiler": [True, False],
         "with_ut": [True, False],
+        "with_tools": [True, False],
         "with_benchmark": [True, False],
         "with_jemalloc": [True, False],
         "with_jni": [True, False],
         "with_python_binding": [True, False],
         "with_fiu": [True, False],
         "with_crt": [True, False],
-        "with_talon": [True, False],
     }
     default_options = {
         "shared": True,
@@ -40,13 +40,13 @@ class StorageConan(ConanFile):
         "with_asan": False,
         "with_profiler": False,
         "with_ut": True,
+        "with_tools": False,
         "with_benchmark": True,
         "with_jemalloc": True,
         "with_jni": False,
         "with_python_binding": False,
         "with_fiu": False,
         "with_crt": False,
-        "with_talon": False,
         "folly/*:shared": True,
         "glog/*:with_gflags": True,
         "glog/*:shared": True,
@@ -68,6 +68,10 @@ class StorageConan(ConanFile):
         # aws_mem_acquire because s3's private allocator is still NULL. See
         # docs/aws-sdk-cpp-multi-copy-bug.md for the full root-cause analysis.
         "aws-c-*/*:shared": True,
+        "aws-crt-cpp/*:shared": True,
+        # Arrow embeds jemalloc and is loaded into an already running JVM.
+        "jemalloc/*:enable_cxx": False,
+        "jemalloc/*:enable_initial_exec_tls": False,
         "arrow/*:with_s3": True,
         "arrow/*:filesystem_layer": True,
         "arrow/*:dataset_modules": True,
@@ -154,6 +158,8 @@ class StorageConan(ConanFile):
             self.options["gflags"].shared = True
 
     def requirements(self):
+        if self.options.with_crt:
+            self.requires("aws-c-s3/0.12.6")
         self.requires("xz_utils/5.4.5#fc4e36861e0a47ecd4a40a00e6d29ac8")
         self.requires("glog/0.7.1#a306e61d7b8311db8cb148ad62c48030")
         self.requires("zstd/1.5.5#70dc5eb8ea16708fc946fbac884c507e")
@@ -241,13 +247,13 @@ class StorageConan(ConanFile):
         tc.cache_variables["WITH_ASAN"] = self.options.with_asan
         tc.variables["WITH_PROFILER"] = self.options.with_profiler
         tc.cache_variables["WITH_UT"] = self.options.with_ut
+        tc.cache_variables["WITH_TOOLS"] = self.options.with_tools
         tc.cache_variables["WITH_BENCHMARK"] = self.options.with_benchmark
         tc.variables["ARROW_WITH_JEMALLOC"] = self.options.with_jemalloc
         tc.variables["WITH_JNI"] = self.options.with_jni
         tc.variables["WITH_PYTHON_BINDING"] = self.options.with_python_binding
         tc.variables["WITH_FIU"] = self.options.with_fiu
         tc.cache_variables["WITH_CRT"] = self.options.with_crt
-        tc.cache_variables["WITH_TALON"] = self.options.with_talon
 
         # Set JAVA_HOME for JNI compilation
         if self.options.with_jni:

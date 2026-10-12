@@ -7,21 +7,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(WITH_UT "Build the testing tree." OFF)
+option(WITH_TOOLS "Build command-line fixture tools." OFF)
 option(WITH_ASAN "Build with address sanitizer." OFF)
 option(WITH_BENCHMARK "Build with micro benchmark." ON)
 option(WITH_JNI "Build with JNI library." OFF)
 option(WITH_PYTHON_BINDING "Build for Python bindings with hidden symbols." OFF)
 option(WITH_FIU "Build with fault injection support (libfiu)." OFF)
 option(WITH_CRT "Build with AWS S3 CRT support." OFF)
-option(WITH_TALON "Build with Talon filesystem support." OFF)
 option(ARROW_WITH_JEMALLOC "Build with jemalloc." OFF)
 
 if (WITH_CRT)
   add_compile_definitions(WITH_CRT)
-endif()
-
-if (WITH_TALON)
-  add_compile_definitions(WITH_TALON)
 endif()
 
 include(GNUInstallDirs)
@@ -48,6 +44,9 @@ find_package(opentelemetry-cpp REQUIRED)
 find_package(google-cloud-cpp REQUIRED)
 find_package(CURL REQUIRED)
 find_package(AWSSDK REQUIRED CONFIG)
+if(WITH_CRT)
+  include(ExtendS3CrtClient.cmake)
+endif()
 find_package(milvus-common REQUIRED)
 find_package(libavrocpp QUIET)
 if(NOT libavrocpp_FOUND)
@@ -64,12 +63,9 @@ endif()
 
 # Rust bridge for Vortex and Lance formats (always built)
 set(RUST_BRIDGE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/format/bridge/rust)
-set(CORROSION_FEATURES "")
+set(CORROSION_FEATURES talon)
 if (WITH_CRT)
   list(APPEND CORROSION_FEATURES s3-crt-async)
-endif()
-if (WITH_TALON)
-  list(APPEND CORROSION_FEATURES talon)
 endif()
 add_subdirectory(${RUST_BRIDGE_PATH})
 
@@ -93,9 +89,6 @@ file(GLOB_RECURSE ALL_SRC_FILES
 )
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/bridge/.*\\.(cpp|cc)$")
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
-if (NOT WITH_TALON)
-  list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/filesystem/talon/.*\\.cpp$")
-endif()
 
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
@@ -117,6 +110,8 @@ list(APPEND LINK_LIBS
 )
 
 if (WITH_CRT)
+  find_package(aws-c-s3 REQUIRED CONFIG)
+  list(APPEND LINK_LIBS AWS::aws-c-s3)
   list(APPEND LINK_LIBS AWS::aws-sdk-cpp-s3-crt)
 endif()
 
@@ -195,8 +190,9 @@ if (WITH_JNI AND NOT APPLE)
   )
 endif()
 
-# Python bindings: hide all symbols except FFI symbols
-if (WITH_PYTHON_BINDING)
+# The fixture tool links the C++ API from this library; keep those symbols
+# available in test builds while preserving the release Python ABI boundary.
+if (WITH_PYTHON_BINDING AND NOT WITH_TOOLS)
   target_compile_options(milvus-storage PRIVATE -fvisibility=hidden)
   if (APPLE)
     # macOS: use -exported_symbols_list to export only FFI symbols
@@ -220,6 +216,9 @@ if (WITH_UT)
 
   add_definitions(-DBUILD_GTEST)
   add_subdirectory(test)
+endif()
+
+if (WITH_UT OR WITH_TOOLS)
   add_subdirectory(tools)
 endif()
 

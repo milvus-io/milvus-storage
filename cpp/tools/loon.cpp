@@ -49,9 +49,9 @@
 #include <folly/json.h>
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "milvus-storage/format/paimon/paimon_common.h"
-#include "iceberg_bridge.h"
-#include "lance_bridge.h"
-#include "paimon_bridge.h"
+#include "iceberg/iceberg_bridge.h"
+#include "lance/lance_bridge.h"
+#include "paimon/paimon_bridge.h"
 
 using milvus_storage::FilesystemCache;
 using milvus_storage::FormatReader;

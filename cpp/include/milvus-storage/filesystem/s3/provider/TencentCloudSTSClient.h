@@ -25,15 +25,15 @@
 #include <aws/core/AmazonWebServiceResult.h>
 #include <aws/core/utils/DateTime.h>
 #include <aws/core/internal/AWSHttpResourceClient.h>
+#include <aws/core/utils/json/JsonSerializer.h>
 #include <memory>
 #include <mutex>
 
 namespace milvus_storage {
 
 /**
- * To support retrieving credentials from STS.
- * Note that STS accepts request with protocol of queryxml. Calling GetResource() will trigger
- * a query request using AWSHttpResourceClient under the hood.
+ * Retrieves credentials through Tencent's JSON STS API. Web identity calls
+ * establish the caller; signed AssumeRole calls select an explicit data role.
  */
 class AWS_CORE_API TencentCloudSTSCredentialsClient : public Aws::Internal::AWSHttpResourceClient {
   public:
@@ -65,7 +65,21 @@ class AWS_CORE_API TencentCloudSTSCredentialsClient : public Aws::Internal::AWSH
   STSAssumeRoleWithWebIdentityResult GetAssumeRoleWithWebIdentityCredentials(
       const STSAssumeRoleWithWebIdentityRequest& request);
 
+  struct STSAssumeRoleRequest {
+    Aws::Auth::AWSCredentials callerCredentials;
+    Aws::String region;
+    Aws::String roleArn;
+    Aws::String roleSessionName;
+    Aws::String externalId;
+  };
+
+  Aws::Auth::AWSCredentials GetAssumeRoleCredentials(const STSAssumeRoleRequest& request);
+
   private:
+  Aws::Auth::AWSCredentials SendRequest(const Aws::String& action,
+                                        const Aws::String& region,
+                                        const Aws::Utils::Json::JsonValue& payload,
+                                        const Aws::Auth::AWSCredentials* caller = nullptr);
   Aws::String m_endpoint;
 };
 

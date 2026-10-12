@@ -43,6 +43,9 @@ class S3FileSystem : public arrow::fs::FileSystem, public UploadConditional, pub
   public:
   ~S3FileSystem() override;
 
+  // Sync and async operations share this filesystem's clients and IOContext.
+  arrow::Future<arrow::fs::FileInfoVector> GetFileInfoAsync(const std::vector<std::string>& paths) override;
+
   std::string type_name() const override;
 
   bool Equals(const FileSystem& other) const override;
@@ -82,6 +85,11 @@ class S3FileSystem : public arrow::fs::FileSystem, public UploadConditional, pub
 
   arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const FileInfo& info) override;
 
+  arrow::Future<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFileAsync(const std::string& path) override;
+  arrow::Future<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFileAsync(const FileInfo& info) override;
+  arrow::Future<std::shared_ptr<arrow::io::InputStream>> OpenInputStreamAsync(const std::string& path) override;
+  arrow::Future<std::shared_ptr<arrow::io::InputStream>> OpenInputStreamAsync(const FileInfo& info) override;
+
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override;
 
@@ -89,7 +97,7 @@ class S3FileSystem : public arrow::fs::FileSystem, public UploadConditional, pub
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override;
 
   /// \brief Get filesystem metrics via Observable interface
-  std::shared_ptr<FilesystemMetrics> GetMetrics() const override;
+  arrow::Result<std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>> GetMetricsSources() const override;
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(
       const std::string& path, std::shared_ptr<arrow::KeyValueMetadata> metadata) override;

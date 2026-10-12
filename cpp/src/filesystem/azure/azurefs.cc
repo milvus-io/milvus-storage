@@ -1024,7 +1024,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
       }
       RETURN_NOT_OK(CacheContentLengthFromRead(result.Value));
       return bytes_read;
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Azure::Core::RequestFailedException& exception) {
       return ExceptionToStatus(
           exception, "DownloadTo from '", blob_client_->GetUrl(), "' at position ",
           position, " for ", nbytes,
@@ -1094,7 +1094,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
       }
       SetCachedContentLength(content_length);
       return Status::OK();
-    } catch (const Storage::StorageException& exception) {
+    } catch (const Azure::Core::RequestFailedException& exception) {
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
         return PathNotFound(location_);
       }
@@ -3828,8 +3828,10 @@ AzureFileSystem::OpenConditionalOutputStream(
   return stream;
 }
 
-std::shared_ptr<milvus_storage::FilesystemMetrics> AzureFileSystem::GetMetrics() const {
-  return impl_->metrics();
+arrow::Result<std::unordered_map<std::string, std::shared_ptr<milvus_storage::FilesystemMetrics>>>
+AzureFileSystem::GetMetricsSources() const {
+  return std::unordered_map<std::string, std::shared_ptr<milvus_storage::FilesystemMetrics>>{
+      {milvus_storage::kOriginMetricsSource, impl_->metrics()}};
 }
 
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>>

@@ -47,55 +47,45 @@ typedef struct LoonFilesystemMetricsSnapshot {  // NOLINT
 } LoonFilesystemMetricsSnapshot;  // NOLINT
 
 /**
- * Metrics for one cached filesystem.
+ * One named metrics snapshot. Strings are owned by the returned result.
+ * display_key is NULL for handle queries and populated for cache enumeration.
  */
-typedef struct LoonFilesystemMetricsEntry {  // NOLINT
+typedef struct LoonFilesystemMetricsSourceEntry {  // NOLINT
   char* display_key;
+  char* source;
   LoonFilesystemMetricsSnapshot metrics;
-} LoonFilesystemMetricsEntry;  // NOLINT
+} LoonFilesystemMetricsSourceEntry;  // NOLINT
 
-/**
- * Metrics for all cached filesystems.
- */
-typedef struct LoonFilesystemMetricsList {  // NOLINT
-  LoonFilesystemMetricsEntry* entries;
+typedef struct LoonFilesystemMetricsSources {  // NOLINT
+  LoonFilesystemMetricsSourceEntry* entries;
   uint32_t count;
-} LoonFilesystemMetricsList;  // NOLINT
+} LoonFilesystemMetricsSources;  // NOLINT
 
 /**
- * Get metrics from a filesystem handle.
- * Returns metrics if the filesystem is observable, otherwise returns error.
- *
- * @param handle The filesystem instance handle.
- * @param out_metrics The output metrics snapshot structure (caller allocates).
- * @return result of FFI
+ * Get all metrics sources from a filesystem handle, including uncached handles.
+ * Each display_key is NULL. An empty source collection is a successful result.
+ * Snapshot fields are sampled independently, not as a transaction.
+ * out_sources must not own an existing result; release returned results using
+ * loon_filesystem_free_metrics_sources.
  */
-FFI_EXPORT LoonFFIResult loon_filesystem_get_metrics(FileSystemHandle handle,
-                                                     LoonFilesystemMetricsSnapshot* out_metrics);
+FFI_EXPORT LoonFFIResult loon_filesystem_get_metrics_sources(FileSystemHandle handle,
+                                                             LoonFilesystemMetricsSources* out_sources);
 
 /**
- * List metrics for all cached filesystems.
- *
- * @param out_list The output metrics list. Must be released with
- *                 loon_filesystem_free_metrics_list.
- * @return result of FFI
+ * List all metrics sources from cached filesystems. Each entry includes a
+ * storage-generated display_key; multiple sources may share that key.
+ * Results own their strings and snapshots independently of the filesystem cache.
+ * Snapshot fields are sampled independently, not as a transaction.
+ * out_sources must not own an existing result; release returned results using
+ * loon_filesystem_free_metrics_sources.
  */
-FFI_EXPORT LoonFFIResult loon_filesystem_list_metrics(LoonFilesystemMetricsList* out_list);
+FFI_EXPORT LoonFFIResult loon_filesystem_list_metrics_sources(LoonFilesystemMetricsSources* out_sources);
 
 /**
- * Release a filesystem metrics list.
- *
- * @param list The list returned by loon_filesystem_list_metrics.
+ * Release a metrics sources result and clear its entries/count.
+ * NULL and repeated calls on the cleared result are safe.
  */
-FFI_EXPORT void loon_filesystem_free_metrics_list(LoonFilesystemMetricsList* list);
-
-/**
- * Reset all metrics for a filesystem.
- *
- * @param handle The filesystem instance handle.
- * @return result of FFI
- */
-FFI_EXPORT LoonFFIResult loon_filesystem_reset_metrics(FileSystemHandle handle);
+FFI_EXPORT void loon_filesystem_free_metrics_sources(LoonFilesystemMetricsSources* sources);
 
 #endif  // LOON_FILESYSTEM_METRICS_C
 

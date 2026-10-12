@@ -233,8 +233,9 @@ class TestLargeScaleWrite:
         _verify_read(reader, num_rows, schema, random.Random(42))
 
     @pytest.mark.xfail(
-        reason="Parquet loses fixed_size_list semantics",
-        raises=Exception,
+        strict=True,
+        reason="D14: Parquet fixed_size_list scan exports an invalid Arrow buffer layout",
+        raises=pa.ArrowInvalid,
     )
     def test_large_vector_data(
         self,
@@ -269,14 +270,15 @@ class TestLargeScaleWrite:
                 schema=schema,
             )
 
+        properties = {**default_properties, "writer.format": "parquet"}
         _segmented_write(
             temp_case_path,
             schema,
-            default_properties,
+            properties,
             total_batches=num_rows // rows_per_batch,
             make_batch=make_batch,
             num_closes=0,
         )
 
-        reader = _read_via_manifest(temp_case_path, schema, default_properties)
+        reader = _read_via_manifest(temp_case_path, schema, properties)
         _verify_read(reader, num_rows, schema, rng)

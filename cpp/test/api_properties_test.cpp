@@ -140,6 +140,13 @@ TEST_F(APIPropertiesTest, parquet_reader_prebuffer_properties) {
                PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT);
   EXPECT_STREQ(loon_properties_reader_parquet_prebuffer_range_size_limit,
                PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT);
+
+  // Unset keeps Arrow's lazy cache; false requests every range of a read call at once.
+  EXPECT_TRUE(GetValueNoError<bool>(pp, PROPERTY_READER_PARQUET_PREBUFFER_LAZY));
+  EXPECT_EQ(SetValue(pp, PROPERTY_READER_PARQUET_PREBUFFER_LAZY, "false"), std::nullopt);
+  EXPECT_FALSE(GetValueNoError<bool>(pp, PROPERTY_READER_PARQUET_PREBUFFER_LAZY));
+  EXPECT_NE(SetValue(pp, PROPERTY_READER_PARQUET_PREBUFFER_LAZY, "sometimes"), std::nullopt);
+  EXPECT_STREQ(loon_properties_reader_parquet_prebuffer_lazy, PROPERTY_READER_PARQUET_PREBUFFER_LAZY);
 }
 
 TEST_F(APIPropertiesTest, vortex_split_row_indices_mode) {

@@ -17,7 +17,7 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/paimon/paimon_common.h"
 #include "milvus-storage/format/paimon/paimon_format_reader.h"
-#include "paimon_bridge.h"
+#include "paimon/paimon_bridge.h"
 
 namespace milvus_storage {
 

@@ -645,7 +645,7 @@ TEST_F(CloudFsTest, OpenInputFileWithFileInfoUsesKnownSize) {
   std::shared_ptr<FilesystemMetrics> metrics;
   auto observable_fs = std::dynamic_pointer_cast<Observable>(fs_);
   if (observable_fs != nullptr) {
-    metrics = observable_fs->GetMetrics();
+    ASSERT_AND_ASSIGN(metrics, observable_fs->GetMetrics(kOriginMetricsSource));
     if (metrics != nullptr) {
       metrics->Reset();
     }
@@ -671,7 +671,7 @@ TEST_F(CloudFsTest, OpenInputFileMetricsStayLazyAfterCachedRead) {
   if (observable_fs == nullptr) {
     GTEST_SKIP() << "Current filesystem does not support metrics";
   }
-  auto metrics = observable_fs->GetMetrics();
+  ASSERT_AND_ASSIGN(auto metrics, observable_fs->GetMetrics(kOriginMetricsSource));
   if (metrics == nullptr) {
     GTEST_SKIP() << "Current filesystem does not provide metrics";
   }
@@ -903,7 +903,7 @@ TEST_F(CloudFsTest, GetMetrics) {
   auto observable_fs = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable_fs, nullptr);
   // Should not crash; may return nullptr for providers that don't implement it yet
-  observable_fs->GetMetrics();
+  ASSERT_STATUS_OK(observable_fs->GetMetrics(kOriginMetricsSource).status());
 }
 
 TEST_F(CloudFsTest, OpenInputFileClosed) {

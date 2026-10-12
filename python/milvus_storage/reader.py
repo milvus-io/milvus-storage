@@ -2,6 +2,7 @@
 Reader classes for milvus-storage.
 """
 
+import base64
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 import numpy as np
@@ -239,13 +240,13 @@ class ChunkReader:
         if self._closed:
             raise ResourceError("ChunkReader is closed")
 
-        if not indices:
-            return []
-
         # Convert to numpy array
         indices_array = np.asarray(indices, dtype=np.int64)
         if indices_array.ndim != 1:
             raise InvalidArgumentError("indices must be 1-dimensional")
+        if indices_array.size == 0:
+            return []
+        indices_array = np.require(indices_array, requirements=["C", "A"])
 
         # Create C array - use numpy's ctypes interop
         indices_ptr = indices_array.ctypes.data
@@ -311,6 +312,9 @@ class ChunkReader:
 
         # Convert to numpy array
         row_indices_array = np.asarray(row_indices, dtype=np.int64)
+        if row_indices_array.ndim != 1:
+            raise InvalidArgumentError("row_indices must be 1-dimensional")
+        row_indices_array = np.require(row_indices_array, requirements=["C", "A"])
         row_indices_ptr = row_indices_array.ctypes.data
 
         chunk_indices_ptr = self._ffi.new("int64_t**")
@@ -532,12 +536,13 @@ class Reader:
         # Convert to numpy array first to handle both list and numpy array
         indices_array = np.asarray(indices, dtype=np.int64)
 
-        if len(indices_array) == 0:
-            raise InvalidArgumentError("indices cannot be empty")
         if indices_array.ndim != 1:
             raise InvalidArgumentError("indices must be 1-dimensional")
+        if indices_array.size == 0:
+            raise InvalidArgumentError("indices cannot be empty")
         if len(indices_array) > 1 and not np.all(np.diff(indices_array) > 0):
             raise InvalidArgumentError("indices must be unique and sorted in ascending order")
+        indices_array = np.require(indices_array, requirements=["C", "A"])
 
         # Create C array - use numpy's ctypes interop
         indices_ptr = indices_array.ctypes.data
@@ -636,16 +641,18 @@ class Reader:
         retrieve encryption keys based on metadata.
 
         Args:
-            key_retriever: A callable that takes metadata (str) and returns
-                          the encryption key (str). The function signature is:
-                          def key_retriever(metadata: str) -> str
+            key_retriever: A callable that takes metadata (str) and returns the
+                          raw AES key as bytes (16, 24 or 32 bytes), or None if
+                          unavailable. For compatibility, str results are
+                          encoded as UTF-8. The binding handles Base64 encoding
+                          for the C interface; do not encode the key yourself.
 
         Raises:
             ResourceError: If reader is closed
             InvalidArgumentError: If key_retriever is not callable
 
         Example:
-            >>> def my_key_retriever(metadata: str) -> str:
+            >>> def my_key_retriever(metadata: str) -> bytes:
             ...     # Fetch key from KMS based on metadata
             ...     return fetch_key_from_kms(metadata)
             >>>
@@ -665,9 +672,10 @@ class Reader:
                 result = key_retriever(metadata)
                 if result is None:
                     return self._ffi.NULL
-                # Allocate C string that will be managed by the caller
-                result_bytes = result.encode("utf-8")
-                c_str = self._ffi.new("char[]", result_bytes)
+                # The C callback carries text; encode raw keys before crossing
+                # it so embedded NUL bytes are preserved.
+                result_bytes = result if isinstance(result, bytes) else result.encode("utf-8")
+                c_str = self._ffi.new("char[]", base64.b64encode(result_bytes))
                 # Store reference to prevent GC
                 self._key_result = c_str
                 return c_str

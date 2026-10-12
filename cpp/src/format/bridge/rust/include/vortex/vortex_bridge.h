@@ -1,0 +1,408 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright the Vortex contributors
+
+#pragma once
+#include <string>
+#include <string_view>
+#include <cstdint>
+#include <optional>
+#include <type_traits>
+#include <vector>
+#include <memory>
+
+#include <arrow/c/abi.h>
+#include <arrow/result.h>
+#include <arrow/status.h>
+
+#include "runtime/bridge_util.h"
+#include "rust/cxx.h"
+#include "rust-bridge/lib.h"
+
+namespace arrow {
+class RecordBatchReader;
+}  // namespace arrow
+
+namespace milvus_storage::vortex {
+
+namespace internal {
+std::shared_ptr<arrow::RecordBatchReader> WrapVortexRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner);
+}  // namespace internal
+
+enum class PType : uint8_t {
+  U8 = 0,
+  U16,
+  U32,
+  U64,
+  I8,
+  I16,
+  I32,
+  I64,
+  F16,
+  F32,
+  F64,
+};
+
+namespace dtype {
+class DType {
+  public:
+  DType() = delete;
+  explicit DType(rust::Box<ffi::DType> impl) : impl_(std::move(impl)) {}
+  DType(DType&& other) noexcept = default;
+  DType& operator=(DType&& other) = default;
+  ~DType() = default;
+
+  DType(const DType&) = delete;
+  DType& operator=(const DType&) = delete;
+
+  std::string ToString() const;
+
+  const rust::Box<ffi::DType>& GetImpl() { return impl_; }
+
+  private:
+  rust::Box<ffi::DType> impl_;
+};
+
+// Factory functions
+DType null();
+DType bool_(bool nullable = false);
+DType primitive(PType ptype, bool nullable = false);
+DType int8(bool nullable = false);
+DType int16(bool nullable = false);
+DType int32(bool nullable = false);
+DType int64(bool nullable = false);
+DType uint8(bool nullable = false);
+DType uint16(bool nullable = false);
+DType uint32(bool nullable = false);
+DType uint64(bool nullable = false);
+DType float16(bool nullable = false);
+DType float32(bool nullable = false);
+DType float64(bool nullable = false);
+DType decimal(uint8_t precision = 10, int8_t scale = 0, bool nullable = false);
+DType utf8(bool nullable = false);
+DType binary(bool nullable = false);
+/// TODO: Other DTypes are only supported by creating from Arrow for now.
+arrow::Result<DType> from_arrow(struct ArrowSchema& schema, bool non_nullable = false);
+}  // namespace dtype
+
+namespace scalar {
+using dtype::DType;
+class Scalar {
+  public:
+  Scalar() = delete;
+  explicit Scalar(rust::Box<ffi::Scalar> impl) : impl_(std::move(impl)) {}
+  Scalar(Scalar&& other) noexcept = default;
+  Scalar& operator=(Scalar&& other) noexcept = default;
+  ~Scalar() = default;
+
+  Scalar(const Scalar&) = delete;
+  Scalar& operator=(const Scalar&) = delete;
+
+  rust::Box<ffi::Scalar> IntoImpl() && { return std::move(impl_); }
+
+  private:
+  rust::Box<ffi::Scalar> impl_;
+};
+
+// Factory functions for creating scalar values
+Scalar bool_(bool value);
+Scalar int8(int8_t value);
+Scalar int16(int16_t value);
+Scalar int32(int32_t value);
+Scalar int64(int64_t value);
+Scalar uint8(uint8_t value);
+Scalar uint16(uint16_t value);
+Scalar uint32(uint32_t value);
+Scalar uint64(uint64_t value);
+Scalar float32(float value);
+Scalar float64(double value);
+Scalar string(std::string_view value);
+Scalar binary(const uint8_t* data, size_t length);
+/// TODO: Other Scalars are only supported by casting for now.
+arrow::Result<Scalar> cast(Scalar scalar, DType dtype);
+}  // namespace scalar
+
+namespace expr {
+using scalar::Scalar;
+class Expr {
+  public:
+  Expr() = delete;
+  explicit Expr(rust::Box<ffi::Expr> impl) : impl_(std::move(impl)) {}
+  Expr(Expr&& other) noexcept = default;
+  Expr& operator=(Expr&& other) noexcept = default;
+  ~Expr() = default;
+
+  Expr(const Expr&) = delete;
+  Expr& operator=(const Expr&) = delete;
+
+  rust::Box<ffi::Expr> IntoImpl() && { return std::move(impl_); }
+
+  const ffi::Expr& Impl() const& { return *impl_; }
+
+  private:
+  rust::Box<ffi::Expr> impl_;
+};
+
+Expr literal(Scalar scalar);
+Expr root();
+Expr column(std::string_view name);
+Expr get_item(std::string_view field, Expr expr);
+Expr not_(Expr expr);
+Expr is_null(Expr expr);
+Expr eq(Expr lhs, Expr rhs);
+Expr not_eq_(Expr lhs, Expr rhs);
+Expr gt(Expr lhs, Expr rhs);
+Expr gt_eq(Expr lhs, Expr rhs);
+Expr lt(Expr lhs, Expr rhs);
+Expr lt_eq(Expr lhs, Expr rhs);
+Expr and_(Expr lhs, Expr rhs);
+Expr or_(Expr lhs, Expr rhs);
+Expr checked_add(Expr lhs, Expr rhs);
+Expr select(const std::vector<std::string_view>& fields, Expr child);
+
+/// Column metadata passed to predicate parsing. `type_tag` mirrors the small
+/// Rust-side enum:
+///   0=Int, 1=UInt, 2=Float, 3=Utf8, 4=Bool, 5=Other.
+struct PredicateColumn {
+  std::string name;
+  uint8_t type_tag;
+};
+
+/// Parse a SQL predicate string into a Vortex expression.
+///
+/// Returns std::nullopt when no usable filter remains after best-effort
+/// translation. Hard errors (syntax error, unknown column, empty input) are
+/// returned as Arrow statuses. Warnings about dropped sub-expressions are
+/// emitted to stderr inside the Rust parser.
+arrow::Result<std::optional<Expr>> parse_predicate(const std::string& predicate,
+                                                   const std::vector<PredicateColumn>& schema);
+}  // namespace expr
+
+class ScanBuilder;
+class VortexWriter;
+class VortexFile;
+
+uint64_t VortexEofSize();
+
+class VortexWriter {
+  public:
+  static arrow::Result<VortexWriter> Open(
+      uint8_t* fs_rawptr, const std::string& path, bool enable_stats, uint32_t format_version, uint64_t row_group_size);
+
+  arrow::Status Write(ArrowSchema& in_schema, ArrowArray& in_array);
+  arrow::Status Flush();
+  arrow::Result<ffi::VortexWriteSummary> Close();
+
+  VortexWriter(VortexWriter&& other) noexcept = default;
+  VortexWriter& operator=(VortexWriter&& other) noexcept = default;
+  ~VortexWriter() = default;
+
+  VortexWriter(const VortexWriter&) = delete;
+  VortexWriter& operator=(const VortexWriter&) = delete;
+
+  private:
+  explicit VortexWriter(rust::Box<ffi::VortexWriter> impl) : impl_(std::move(impl)) {}
+
+  rust::Box<ffi::VortexWriter> impl_;
+};
+
+class VortexFile {
+  public:
+  static arrow::Result<VortexFile> Open(uint8_t* fs_rawptr,
+                                        const std::string& path,
+                                        uint64_t file_size = 0,
+                                        uint64_t footer_size = 0);
+  static arrow::Result<std::unique_ptr<VortexFile>> OpenUnique(uint8_t* fs_rawptr,
+                                                               const std::string& path,
+                                                               uint64_t file_size = 0,
+                                                               uint64_t footer_size = 0);
+  /// Adopt the owned raw handle returned by vortex_open_file_async().
+  /// On success the returned VortexFile becomes responsible for destroying it.
+  static arrow::Result<std::unique_ptr<VortexFile>> FromRawHandle(uintptr_t handle);
+
+  VortexFile(VortexFile&& other) noexcept = default;
+  VortexFile& operator=(VortexFile&& other) noexcept = default;
+  ~VortexFile() = default;
+
+  VortexFile(const VortexFile&) = delete;
+  VortexFile& operator=(const VortexFile&) = delete;
+
+  /// Get the number of rows in the file.
+  uint64_t RowCount() const;
+
+  /// Get the file schema, exported as Arrow C schema.
+  arrow::Status GetFileSchema(ArrowSchema& out_schema) const;
+
+  /// Create a scan builder for the file.
+  /// The scan builder can be used to scan the file.
+  arrow::Result<ScanBuilder> CreateScanBuilder(ffi::CoalescingWindow coalescing_window) const;
+
+  /// Create a scan builder with arrow schema for the file.
+  arrow::Result<ScanBuilder> CreateScanBuilderWithSchema(ArrowSchema& in_schema) const;
+
+  // get the row splits of the file
+  arrow::Result<std::vector<uint64_t>> Splits() const;
+
+  // get the uncompressed sizes of each column
+  // if current no exist statistics, return empty vector
+  // if current current statistics is invalid, return vector with usize::MAX
+  // otherwise, return vector with uncompressed sizes
+  std::vector<uint64_t> GetUncompressedSizes() const;
+
+  std::string RootLayoutEncoding() const;
+  arrow::Result<uint64_t> RowGroupZoneMapCount() const;
+  arrow::Result<bool> RowGroupZoneMapDataBeforeZones() const;
+
+  /// Get flat segment IDs for all known Vortex zonemap layouts. This covers
+  /// upstream V1 zoned layout and Milvus V2 row-group zonemap layout.
+  arrow::Result<std::vector<uint64_t>> ZoneMapSegmentIds() const;
+
+  /// Get [offset, length] for the complete footer/tail region.
+  arrow::Result<std::vector<uint64_t>> FooterByteRange(uint64_t file_size) const;
+
+  /// Get [offset, length] for a given flat segment ID.
+  arrow::Result<std::vector<uint64_t>> SegmentBytes(uint64_t flat_segment_id) const;
+
+  /// Get Vortex physical layout units for a specific field.
+  /// Returns: [granularity, total_units,
+  ///           unit_id, row_offset, row_count, num_flat_segments,
+  ///           flat_segment_id0, flat_segment_id1, ..., ...]
+  arrow::Result<std::vector<uint64_t>> FieldLayoutUnits(const std::string& field_name) const;
+
+  /// Return the candidate row-group IDs that cannot be skipped by footer stats.
+  /// Unsupported predicates or non-row-group layouts conservatively keep all candidates.
+  arrow::Result<std::vector<uint64_t>> PruneRowGroups(const std::string& predicate,
+                                                      const std::vector<uint64_t>& candidate_row_group_ids) const;
+
+  private:
+  explicit VortexFile(rust::Box<ffi::VortexFile> impl) : impl_(std::move(impl)) {}
+
+  rust::Box<ffi::VortexFile> impl_;
+};
+
+class ScanBuilder {
+  public:
+  ScanBuilder(ScanBuilder&& other) noexcept = default;
+  ScanBuilder& operator=(ScanBuilder&& other) noexcept {
+    if (this != &other) {
+      impl_ = std::move(other.impl_);
+    }
+    return *this;
+  }
+  ~ScanBuilder() = default;
+
+  ScanBuilder(const ScanBuilder&) = delete;
+  ScanBuilder& operator=(const ScanBuilder&) = delete;
+
+  /// Only include rows that match the filter expressions.
+  ScanBuilder& WithFilter(expr::Expr&& expr) &;
+  ScanBuilder& WithFilter(const expr::Expr& expr) &;
+  ScanBuilder&& WithFilter(expr::Expr&& expr) &&;
+  ScanBuilder&& WithFilter(const expr::Expr& expr) &&;
+
+  /// Only include columns that match the projection expressions.
+  ScanBuilder& WithProjection(expr::Expr&& expr) &;
+  ScanBuilder& WithProjection(const expr::Expr& expr) &;
+  ScanBuilder&& WithProjection(expr::Expr&& expr) &&;
+  ScanBuilder&& WithProjection(const expr::Expr& expr) &&;
+
+  /// Project the Vortex row index expression as a single UInt64 column.
+  ScanBuilder& WithRowIndicesProjection(const std::string& field_name) &;
+  ScanBuilder&& WithRowIndicesProjection(const std::string& field_name) &&;
+
+  /// Control whether projected row indices should be split by natural scan batches.
+  ScanBuilder& WithSplitRowIndices(bool split_row_indices) &;
+  ScanBuilder&& WithSplitRowIndices(bool split_row_indices) &&;
+
+  /// Only include rows in the range [row_range_start, row_range_end).
+  ScanBuilder& WithRowRange(uint64_t row_range_start, uint64_t row_range_end) &;
+  ScanBuilder&& WithRowRange(uint64_t row_range_start, uint64_t row_range_end) &&;
+
+  /// Only include rows in the given ranges [starts[i], ends[i]).
+  ScanBuilder& WithRowRanges(const uint64_t* starts, const uint64_t* ends, std::size_t size) &;
+  ScanBuilder&& WithRowRanges(const uint64_t* starts, const uint64_t* ends, std::size_t size) &&;
+
+  /// Only include rows with the given indices.
+  ScanBuilder& WithIncludeByIndex(const uint64_t* indices, std::size_t size) &;
+  ScanBuilder&& WithIncludeByIndex(const uint64_t* indices, std::size_t size) &&;
+
+  /// Set the limit on the number of rows to scan out.
+  ScanBuilder& WithLimit(uint64_t limit) &;
+  ScanBuilder&& WithLimit(uint64_t limit) &&;
+
+  /// Set the output schema on the scan builder.
+  /// TODO: currently if pass in this option, the schema needs to be the schema after adding projection.
+  arrow::Status WithOutputSchema(ArrowSchema& output_schema) &;
+  arrow::Status WithOutputSchema(ArrowSchema& output_schema) &&;
+
+  /// Take ownership and consume the scan builder to a stream of record batches.
+  arrow::Result<ArrowArrayStream> IntoStream() &&;
+
+  /// Transfer ownership of the underlying Rust VortexScanBuilder to a raw
+  /// handle. Used by the async path so the handle can be passed to the extern
+  /// "C" callback API.
+  uintptr_t IntoRawHandle() &&;
+
+  private:
+  friend class VortexFile;
+
+  explicit ScanBuilder(rust::Box<ffi::VortexScanBuilder> impl) : impl_(std::move(impl)) {}
+
+  rust::Box<ffi::VortexScanBuilder> impl_;
+};
+
+// Success supplies a stream/handle with null error_msg; failure supplies only error_msg.
+using VortexAsyncCallback = void (*)(void* ctx, ArrowArrayStream* out_stream, const char* error_msg);
+using VortexOpenAsyncCallback = void (*)(void* ctx, uintptr_t handle, const char* error_msg);
+
+extern "C" {
+
+/// Open a file on the shared Tokio runtime and invoke callback exactly once.
+/// fs_rawptr and ctx must remain valid until callback; path is copied during
+/// this call. On success the callback owns a non-zero handle. On failure,
+/// error_msg must be released with vortex_free_error_string().
+void vortex_open_file_async(uint8_t* fs_rawptr,
+                            const char* path,
+                            size_t path_len,
+                            uint64_t file_size,
+                            uint64_t footer_size,
+                            VortexOpenAsyncCallback callback,
+                            void* ctx);
+
+/// Consume a handle from ScanBuilder::IntoRawHandle(), collect all batches on
+/// Tokio, write out_stream on success, and invoke callback exactly once. The
+/// callback may run synchronously for setup errors; out_stream and ctx must stay valid.
+/// A non-null error_msg must be released with vortex_free_error_string().
+void vortex_scan_collect_async(uintptr_t handle, ArrowArrayStream* out_stream, VortexAsyncCallback callback, void* ctx);
+
+/// Release a non-null error string received by an async Vortex callback.
+void vortex_free_error_string(char* ptr);
+
+}  // extern "C"
+
+/// IO trace: enable tracing and reset state
+inline void ResetIOTrace() { ffi::reset_io_trace_ffi(); }
+
+/// IO trace: print collected trace to stderr
+inline void PrintIOTrace() { ffi::print_io_trace_ffi(); }
+
+/// IO trace: disable and clear
+inline void DisableIOTrace() { ffi::disable_io_trace_ffi(); }
+
+struct RowGroupZoneMapPruningStats {
+  uint64_t prune_eval_count = 0;
+  uint64_t pruned_row_group_count = 0;
+};
+
+/// Row-group zonemap pruning diagnostics: reset counters.
+inline void ResetRowGroupZoneMapPruningStats() { ffi::reset_row_group_zone_map_pruning_stats_ffi(); }
+
+/// Row-group zonemap pruning diagnostics: return counters since the last reset.
+inline RowGroupZoneMapPruningStats GetRowGroupZoneMapPruningStats() {
+  auto stats = ffi::row_group_zone_map_pruning_stats_ffi();
+  RowGroupZoneMapPruningStats out;
+  out.prune_eval_count = stats.prune_eval_count;
+  out.pruned_row_group_count = stats.pruned_row_group_count;
+  return out;
+}
+
+}  // namespace milvus_storage::vortex

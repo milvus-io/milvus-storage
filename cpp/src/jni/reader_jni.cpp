@@ -16,8 +16,10 @@
 #include "milvus-storage/ffi_c.h"
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/reader.h"
+#include "jni_raii.h"
 #include <arrow/array.h>
 #include <arrow/array/concatenate.h>
+#include <arrow/buffer.h>
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
 #include <arrow/record_batch.h>
@@ -28,6 +30,7 @@
 
 using namespace milvus_storage::api;
 using namespace milvus_storage;
+using namespace milvus_storage::jni;
 
 // ==================== Per-batch RecordBatchReader (JNI-only helpers) ====================
 //
@@ -52,7 +55,87 @@ namespace {
 
 struct RecordBatchReaderHolder {
   std::shared_ptr<arrow::RecordBatchReader> reader;
+  // Temporary diagnostics for the concat workaround below. copies counts
+  // materialized columns; copied_bytes is only a rough estimate, not an exact
+  // count of bytes copied or allocated. Remove these stats and their JNI API
+  // when JVM consumers support offsets and the concat workaround is removed.
+  int64_t batches = 0;
+  int64_t copies = 0;
+  int64_t copied_bytes = 0;
 };
+
+// Count only top-level buffers for a cheap diagnostic estimate. This omits
+// child arrays (e.g. FixedSizeList embeddings) and dictionaries, so it can
+// undercount substantially; do not use it for precise memory accounting.
+int64_t BufferBytes(const arrow::Array& array) {
+  int64_t bytes = 0;
+  for (const auto& buffer : array.data()->buffers) {
+    if (buffer != nullptr)
+      bytes += buffer->size();
+  }
+  return bytes;
+}
+
+// Importing each ArrowArray transfers its release callback, but the outer
+// allocation still belongs to loon_take. This also frees unconsumed arrays
+// after an import failure or a Java allocation failure.
+struct TakeOutput {
+  ArrowArray* arrays = nullptr;
+  size_t count = 0;
+  ArrowSchema schema{};
+
+  ~TakeOutput() {
+    if (schema.release != nullptr)
+      schema.release(&schema);
+    loon_free_chunk_arrays(arrays, count);
+  }
+};
+
+void ThrowArgument(JNIEnv* env, const char* message) { Throw(env, "java/lang/IllegalArgumentException", message); }
+
+void ThrowArrowStatus(JNIEnv* env, const arrow::Status& status) {
+  std::string message = status.ToString();
+  LoonFFIResult result{FFIErrorCodeFromExtendStatus(status), const_cast<char*>(message.c_str())};
+  ThrowJavaExceptionFromFFIResult(env, &result);
+}
+
+bool PrepareTake(JNIEnv* env,
+                 jlong reader,
+                 jlongArray row_indices,
+                 jlong parallelism,
+                 jobjectArray needed_columns,
+                 bool require_sorted,
+                 TakeOutput* output) {
+  if (reader == 0 || row_indices == nullptr || parallelism <= 0) {
+    ThrowArgument(env, "reader and row indices are required; parallelism must be positive");
+    return false;
+  }
+  jsize count = env->GetArrayLength(row_indices);
+  if (count == 0) {
+    ThrowArgument(env, "row indices must not be empty");
+    return false;
+  }
+  std::vector<jlong> java_indices(static_cast<size_t>(count));
+  env->GetLongArrayRegion(row_indices, 0, count, java_indices.data());
+  if (env->ExceptionCheck())
+    return false;
+  std::vector<int64_t> indices(java_indices.begin(), java_indices.end());
+  for (size_t i = 0; i < indices.size(); ++i) {
+    if (indices[i] < 0 || (require_sorted && i > 0 && indices[i] <= indices[i - 1])) {
+      ThrowArgument(env, "row indices must be nonnegative, sorted and unique");
+      return false;
+    }
+  }
+  size_t num_columns = 0;
+  const char** columns = ConvertFromJavaStringArray(env, needed_columns, &num_columns);
+  if (env->ExceptionCheck())
+    return false;
+  LoonFFIResult result =
+      loon_take(static_cast<LoonReaderHandle>(reader), indices.data(), indices.size(), static_cast<size_t>(parallelism),
+                columns, num_columns, &output->arrays, &output->count, &output->schema);
+  FreeStringArray(env, columns, num_columns);
+  return CheckResult(env, result);
+}
 
 }  // namespace
 
@@ -100,11 +183,13 @@ extern "C" LoonFFIResult loon_record_batch_reader_read_next(LoonRecordBatchReade
     // PackedRecordBatchReader::ReadNext can hand back a RecordBatch whose
     // column arrays carry a non-zero `offset` — this happens whenever the
     // underlying chunk is larger than min_rows and the remainder is kept
-    // in the queue via `rb->Slice(min_rows)` (see reader.cpp). ArrowArray's
-    // C Data Interface specifies consumers must honour `offset`, but Arrow
-    // Java's `Data.importVectorSchemaRoot` ignores it. Materialize sliced
-    // columns into fresh offset=0 arrays via arrow::Concatenate (copies
-    // only the slice range). Non-sliced columns pass through unchanged.
+    // in the queue via `rb->Slice(min_rows)` (see reader.cpp). The Arrow Java
+    // C Data importer used by JVM consumers ignores this offset, so exporting
+    // a slice directly would read from the buffer start and repeat earlier rows.
+    // Concatenate({col}) materializes the slice into an offset=0 array for
+    // correct Java imports. Non-sliced columns pass through unchanged. Once
+    // JVM consumers handle offsets correctly, remove this workaround together
+    // with its temporary copy statistics.
     if (batch != nullptr) {
       bool has_sliced_column = false;
       for (int i = 0; i < batch->num_columns(); ++i) {
@@ -125,7 +210,10 @@ extern "C" LoonFFIResult loon_record_batch_reader_read_next(LoonRecordBatchReade
             if (!concat_result.ok()) {
               RETURN_ERROR(LOON_ARROW_ERROR, concat_result.status().ToString());
             }
-            fresh_cols.push_back(concat_result.ValueOrDie());
+            auto copied = concat_result.ValueOrDie();
+            holder->copies += 1;
+            holder->copied_bytes += BufferBytes(*copied);
+            fresh_cols.push_back(std::move(copied));
           }
         }
         batch = arrow::RecordBatch::Make(batch->schema(), batch->num_rows(), fresh_cols);
@@ -135,6 +223,7 @@ extern "C" LoonFFIResult loon_record_batch_reader_read_next(LoonRecordBatchReade
       if (!export_status.ok()) {
         RETURN_ERROR(LOON_ARROW_ERROR, export_status.ToString());
       }
+      holder->batches += 1;
     } else {  // batch == nullptr
       out_array->release = nullptr;
       out_schema->release = nullptr;
@@ -179,6 +268,8 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(JNI
 
     size_t num_columns = 0;
     const char** columns = ConvertFromJavaStringArray(env, needed_columns, &num_columns);
+    if (env->ExceptionCheck())
+      return 0;
 
     LoonReaderHandle reader_handle;
     LoonFFIResult result = loon_reader_new(column_groups_ptr, schema, columns, num_columns, properties, &reader_handle);
@@ -191,11 +282,11 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(JNI
       return -1;
     }
 
+    loon_ffi_free_result(&result);
     return static_cast<jlong>(reader_handle);
   } catch (const std::exception& e) {
-    jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to create reader: " + std::string(e.what());
-    env->ThrowNew(exc_class, error_msg.c_str());
+    Throw(env, "java/lang/RuntimeException", error_msg.c_str());
     return -1;
   }
 }
@@ -218,6 +309,8 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchRe
   try {
     LoonReaderHandle handle = static_cast<LoonReaderHandle>(reader_handle);
     const char* predicate_cstr = predicate ? env->GetStringUTFChars(predicate, nullptr) : nullptr;
+    if (env->ExceptionCheck())
+      return 0;
 
     LoonRecordBatchReaderHandle rbr_handle = 0;
     LoonFFIResult result = loon_record_batch_reader_new(handle, predicate_cstr, &rbr_handle);
@@ -232,11 +325,11 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchRe
       return -1;
     }
 
+    loon_ffi_free_result(&result);
     return static_cast<jlong>(rbr_handle);
   } catch (const std::exception& e) {
-    jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to open record batch reader: " + std::string(e.what());
-    env->ThrowNew(exc_class, error_msg.c_str());
+    Throw(env, "java/lang/RuntimeException", error_msg.c_str());
     return -1;
   }
 }
@@ -263,12 +356,12 @@ JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatc
       return JNI_FALSE;
     }
 
+    loon_ffi_free_result(&result);
     // EOF contract: release == nullptr on both structs.
     return (out_array->release == nullptr) ? JNI_FALSE : JNI_TRUE;
   } catch (const std::exception& e) {
-    jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to read next record batch: " + std::string(e.what());
-    env->ThrowNew(exc_class, error_msg.c_str());
+    Throw(env, "java/lang/RuntimeException", error_msg.c_str());
     return JNI_FALSE;
   }
 }
@@ -279,9 +372,8 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchRea
   try {
     loon_record_batch_reader_destroy(static_cast<LoonRecordBatchReaderHandle>(rbr_handle));
   } catch (const std::exception& e) {
-    jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to destroy record batch reader: " + std::string(e.what());
-    env->ThrowNew(exc_class, error_msg.c_str());
+    Throw(env, "java/lang/RuntimeException", error_msg.c_str());
   }
 }
 
@@ -292,6 +384,8 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReade
 
     size_t num_columns = 0;
     const char** columns = ConvertFromJavaStringArray(env, needed_columns, &num_columns);
+    if (env->ExceptionCheck())
+      return 0;
 
     LoonChunkReaderHandle chunk_reader_handle;
     LoonFFIResult result = loon_get_chunk_reader(handle, static_cast<int64_t>(column_group_id), columns, num_columns,
@@ -305,66 +399,120 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReade
       return -1;
     }
 
+    loon_ffi_free_result(&result);
     return static_cast<jlong>(chunk_reader_handle);
   } catch (const std::exception& e) {
-    jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to get chunk reader: " + std::string(e.what());
-    env->ThrowNew(exc_class, error_msg.c_str());
+    Throw(env, "java/lang/RuntimeException", error_msg.c_str());
     return -1;
   }
 }
 
-JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageReader_take(JNIEnv* env,
-                                                                             jobject obj,
-                                                                             jlong reader_handle,
-                                                                             jlongArray row_indices,
-                                                                             jlong parallelism,
-                                                                             jobjectArray needed_columns) {
-  try {
-    LoonReaderHandle handle = static_cast<LoonReaderHandle>(reader_handle);
-
-    jsize length = env->GetArrayLength(row_indices);
-    jlong* indices_array = env->GetLongArrayElements(row_indices, nullptr);
-
-    std::vector<int64_t> indices(length);
-    for (jsize i = 0; i < length; ++i) {
-      indices[i] = static_cast<int64_t>(indices_array[i]);
-    }
-
-    size_t num_columns = 0;
-    const char** columns = ConvertFromJavaStringArray(env, needed_columns, &num_columns);
-
-    ArrowArray* arrays = nullptr;
-    size_t num_arrays = 0;
-    LoonFFIResult result =
-        loon_take(handle, indices.data(), static_cast<size_t>(length), static_cast<int64_t>(parallelism), columns,
-                  num_columns, &arrays, &num_arrays, nullptr);
-
-    FreeStringArray(env, columns, num_columns);
-    env->ReleaseLongArrayElements(row_indices, indices_array, JNI_ABORT);
-
-    if (!loon_ffi_is_success(&result)) {
-      ThrowJavaExceptionFromFFIResult(env, &result);
-      loon_ffi_free_result(&result);
+JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageReader_take(
+    JNIEnv* env, jobject, jlong reader, jlongArray row_indices, jlong parallelism, jobjectArray needed_columns) {
+  return Guard<jlongArray>(env, nullptr, [&]() -> jlongArray {
+    TakeOutput output;
+    if (!PrepareTake(env, reader, row_indices, parallelism, needed_columns, false, &output))
       return nullptr;
+    std::vector<jlong> addresses(output.count);
+    for (size_t i = 0; i < output.count; ++i) addresses[i] = reinterpret_cast<jlong>(&output.arrays[i]);
+    jlongArray result = env->NewLongArray(static_cast<jsize>(output.count));
+    if (result == nullptr)
+      return nullptr;
+    env->SetLongArrayRegion(result, 0, static_cast<jsize>(output.count), addresses.data());
+    if (env->ExceptionCheck())
+      return nullptr;
+    output.arrays = nullptr;
+    output.count = 0;
+    return result;
+  });
+}
+
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageReader_freeTakeRows(JNIEnv* env,
+                                                                               jobject,
+                                                                               jlongArray addresses) {
+  if (addresses == nullptr)
+    return;
+  GuardVoid(env, [&] {
+    jsize count = env->GetArrayLength(addresses);
+    if (count == 0)
+      return;
+    std::vector<jlong> values(static_cast<size_t>(count));
+    env->GetLongArrayRegion(addresses, 0, count, values.data());
+    if (env->ExceptionCheck())
+      return;
+    auto* arrays = reinterpret_cast<ArrowArray*>(values.front());
+    if (arrays == nullptr) {
+      ThrowArgument(env, "take arrays must be the unmodified result of one take call");
+      return;
     }
-
-    jlongArray java_arrays = env->NewLongArray(static_cast<jsize>(num_arrays));
-    jlong* java_arrays_ptr = env->GetLongArrayElements(java_arrays, nullptr);
-
-    for (size_t i = 0; i < num_arrays; ++i) {
-      java_arrays_ptr[i] = reinterpret_cast<jlong>(&arrays[i]);
+    for (jsize i = 0; i < count; ++i) {
+      if (values[i] != reinterpret_cast<jlong>(&arrays[i])) {
+        ThrowArgument(env, "take arrays must be the unmodified result of one take call");
+        return;
+      }
     }
+    loon_free_chunk_arrays(arrays, static_cast<size_t>(count));
+  });
+}
 
-    env->ReleaseLongArrayElements(java_arrays, java_arrays_ptr, 0);
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_takeRecordBatchReader(
+    JNIEnv* env, jobject, jlong reader, jlongArray row_indices, jlong parallelism, jobjectArray needed_columns) {
+  return Guard<jlong>(env, 0, [&]() -> jlong {
+    TakeOutput output;
+    if (!PrepareTake(env, reader, row_indices, parallelism, needed_columns, true, &output))
+      return 0;
+    if (output.arrays == nullptr || output.count == 0 || output.schema.release == nullptr) {
+      ThrowArrowStatus(env, arrow::Status::Invalid("loon_take returned no batches for nonempty indices"));
+      return 0;
+    }
+    auto imported_schema = arrow::ImportSchema(&output.schema);
+    if (!imported_schema.ok()) {
+      ThrowArrowStatus(env, imported_schema.status());
+      return 0;
+    }
+    auto schema = imported_schema.MoveValueUnsafe();
+    std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+    batches.reserve(output.count);
+    int64_t rows = 0;
+    for (size_t i = 0; i < output.count; ++i) {
+      auto imported = arrow::ImportRecordBatch(&output.arrays[i], schema);
+      if (!imported.ok()) {
+        ThrowArrowStatus(env, imported.status());
+        return 0;
+      }
+      auto batch = imported.MoveValueUnsafe();
+      rows += batch->num_rows();
+      batches.push_back(std::move(batch));
+    }
+    if (rows != env->GetArrayLength(row_indices)) {
+      ThrowArrowStatus(env, arrow::Status::Invalid("loon_take returned a different number of rows than requested"));
+      return 0;
+    }
+    auto batch_reader = arrow::RecordBatchReader::Make(std::move(batches), schema);
+    if (!batch_reader.ok()) {
+      ThrowArrowStatus(env, batch_reader.status());
+      return 0;
+    }
+    auto holder = std::make_unique<RecordBatchReaderHolder>();
+    holder->reader = batch_reader.MoveValueUnsafe();
+    return reinterpret_cast<jlong>(holder.release());
+  });
+}
 
-    return java_arrays;
-  } catch (const std::exception& e) {
-    jclass exc_class = env->FindClass("java/lang/RuntimeException");
-    std::string error_msg = "Failed to take rows: " + std::string(e.what());
-    env->ThrowNew(exc_class, error_msg.c_str());
+JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchReaderStats(JNIEnv* env,
+                                                                                               jobject,
+                                                                                               jlong handle) {
+  if (handle == 0) {
+    ThrowArgument(env, "record batch reader must not be null");
     return nullptr;
   }
+  auto* holder = reinterpret_cast<RecordBatchReaderHolder*>(handle);
+  jlong values[3] = {holder->batches, holder->copies, holder->copied_bytes};
+  jlongArray result = env->NewLongArray(3);
+  if (result != nullptr)
+    env->SetLongArrayRegion(result, 0, 3, values);
+  return result;
 }
 
 JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageReader_readerDestroy(JNIEnv* env,
@@ -374,9 +522,8 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageReader_readerDestroy(
     LoonReaderHandle handle = static_cast<LoonReaderHandle>(reader_handle);
     loon_reader_destroy(handle);
   } catch (const std::exception& e) {
-    jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to destroy reader: " + std::string(e.what());
-    env->ThrowNew(exc_class, error_msg.c_str());
+    Throw(env, "java/lang/RuntimeException", error_msg.c_str());
     return;
   }
 }

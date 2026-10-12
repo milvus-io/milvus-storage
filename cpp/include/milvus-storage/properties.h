@@ -101,9 +101,11 @@ struct PropertyInfo {
 #define PROPERTY_FS_IOPS_MAX_RATE "fs.iops_max_rate"
 
 // talon properties
-#define PROPERTY_FS_TALON_ENABLED "fs.talon.enabled"
+#define PROPERTY_FS_TALON_MODE "fs.talon.mode"
+#define PROPERTY_FS_TALON_SMALL_READ_THRESHOLD "fs.talon.small_read_threshold"
 #define PROPERTY_FS_TALON_COORDINATOR "fs.talon.coordinator"
 #define PROPERTY_FS_TALON_BLOCK_SIZE "fs.talon.block_size"
+#define PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR "fs.talon.max_idle_per_addr"
 
 // Cross-tenant access properties
 #define PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT "fs.gcp_target_service_account"
@@ -166,6 +168,7 @@ struct PropertyInfo {
 #define PROPERTY_READER_METADATA_CACHE_ENABLE "reader.metadata_cache.enable"
 #define PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT "reader.parquet.prebuffer.hole_size_limit"
 #define PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT "reader.parquet.prebuffer.range_size_limit"
+#define PROPERTY_READER_PARQUET_PREBUFFER_LAZY "reader.parquet.prebuffer.lazy"
 #define PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES "reader.vortex.split_row_indices"
 #define PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY "reader.async.task_split_strategy"
 

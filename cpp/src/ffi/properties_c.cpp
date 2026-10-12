@@ -92,6 +92,7 @@ const char* loon_properties_reader_parquet_prebuffer_hole_size_limit =
     PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT;
 const char* loon_properties_reader_parquet_prebuffer_range_size_limit =
     PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT;
+const char* loon_properties_reader_parquet_prebuffer_lazy = PROPERTY_READER_PARQUET_PREBUFFER_LAZY;
 const char* loon_properties_reader_vortex_split_row_indices = PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES;
 const char* loon_properties_reader_async_task_split_strategy = PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY;
 const char* loon_properties_reader_exttable_snapshot_id = PROPERTY_READER_EXTTABLE_SNAPSHOT_ID;

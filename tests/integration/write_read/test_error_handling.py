@@ -6,12 +6,46 @@ Verify correct error reporting for invalid operations.
 
 import pyarrow as pa
 import pytest
-from milvus_storage import Reader, Writer
-from milvus_storage.exceptions import InvalidArgumentError, ResourceError
+from milvus_storage import Filesystem, Reader, Writer
+from milvus_storage.exceptions import FFIError, InvalidArgumentError, ResourceError
 
 
 class TestErrorHandling:
     """Test error handling in write/read operations."""
+
+    @pytest.mark.e2e_smoke
+    def test_invalid_reader_property_keeps_range_reason(
+        self, temp_case_path, simple_schema, batch_generator, default_properties
+    ):
+        with Writer(temp_case_path, simple_schema, default_properties) as writer:
+            writer.write(batch_generator(5))
+            groups = writer.close()
+        properties = dict(default_properties)
+        properties["reader.record_batch_max_rows"] = "0"
+        with groups, pytest.raises(FFIError) as failure:
+            with Reader(groups, simple_schema, properties=properties) as reader:
+                list(reader.scan())
+        message = str(failure.value)
+        assert "value '0' not in range" in message
+
+    def test_corrupt_parquet_footer_keeps_parse_reason(
+        self, temp_case_path, simple_schema, batch_generator, default_properties
+    ):
+        with Writer(temp_case_path, simple_schema, default_properties) as writer:
+            writer.write(batch_generator(10))
+            groups = writer.close()
+        file_path = groups.to_list()[0].files[0].path
+        with Filesystem.get(properties=default_properties) as fs:
+            fs.write_file(file_path, b"not-a-parquet-footer")
+
+        properties = dict(default_properties)
+        properties["reader.metadata_cache.enable"] = "false"
+        with groups, pytest.raises((FFIError, pa.ArrowException)) as failure:
+            with Reader(groups, simple_schema, properties=properties) as reader:
+                list(reader.scan())
+        message = str(failure.value)
+        assert "parquet" in message.lower()
+        assert "footer" in message.lower()
 
     def test_write_after_close_raises(
         self,

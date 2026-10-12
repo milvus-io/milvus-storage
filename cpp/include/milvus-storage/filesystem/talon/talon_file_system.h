@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -25,7 +26,9 @@ class FileSystem;
 
 namespace milvus_storage {
 struct ArrowFileSystemConfig;
-}
+
+enum class TalonMode : uint8_t { Disabled, Full, SmallReads };
+}  // namespace milvus_storage
 
 namespace milvus_storage::talon::internal {
 
@@ -33,8 +36,10 @@ namespace milvus_storage::talon::internal {
 ///
 /// No concrete filesystem type is required. `bucket` is the normalized,
 /// non-empty bucket name used with the cloud provider and object key to
-/// construct Talon's ObjectId. Reads use Talon; all other operations delegate
-/// to `origin_fs`.
+/// construct Talon's ObjectId. Reads use Talon and fall back to `origin_fs` if
+/// stat or read fails. Talon reader construction errors propagate directly.
+/// All other operations delegate to `origin_fs`. A failed read retries its
+/// entire range through the origin.
 arrow::Result<std::shared_ptr<arrow::fs::FileSystem>> MakeTalonFileSystem(
     const ArrowFileSystemConfig& config, std::shared_ptr<arrow::fs::FileSystem> origin_fs, std::string bucket);
 

@@ -29,7 +29,7 @@
 #endif
 
 #include <arrow/table.h>
-#include "iceberg_bridge.h"
+#include "iceberg/iceberg_bridge.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"

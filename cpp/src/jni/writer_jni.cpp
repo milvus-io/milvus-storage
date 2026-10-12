@@ -14,38 +14,31 @@
 
 #include "milvus-storage/ffi_jni.h"
 #include "milvus-storage/ffi_c.h"
+#include "jni_raii.h"
 #include <arrow/c/abi.h>
 #include <cassert>
 #include <memory>
 #include <string>
 
+using namespace milvus_storage::jni;
+
 // ==================== JNI Writer Implementation ====================
 
 JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerNew(
     JNIEnv* env, jobject obj, jstring base_path, jlong schema_ptr, jlong properties_ptr) {
-  try {
-    const char* base_path_cstr = env->GetStringUTFChars(base_path, nullptr);
+  return Guard<jlong>(env, 0, [&] {
+    ScopedUtf8 path(env, base_path);
+    if (!path.valid())
+      return jlong{0};
     ArrowSchema* schema = reinterpret_cast<ArrowSchema*>(schema_ptr);
     LoonProperties* properties = reinterpret_cast<LoonProperties*>(properties_ptr);
 
-    LoonWriterHandle writer_handle;
-    LoonFFIResult result = loon_writer_new(base_path_cstr, schema, properties, &writer_handle);
-
-    env->ReleaseStringUTFChars(base_path, base_path_cstr);
-
-    if (!loon_ffi_is_success(&result)) {
-      ThrowJavaExceptionFromFFIResult(env, &result);
-      loon_ffi_free_result(&result);
-      return -1;
-    }
+    LoonWriterHandle writer_handle = 0;
+    if (!CheckResult(env, loon_writer_new(path.get(), schema, properties, &writer_handle)))
+      return jlong{0};
 
     return static_cast<jlong>(writer_handle);
-  } catch (const std::exception& e) {
-    jclass exc_class = env->FindClass("java/lang/RuntimeException");
-    std::string error_msg = "Failed to create writer: " + std::string(e.what());
-    env->ThrowNew(exc_class, error_msg.c_str());
-    return -1;
-  }
+  });
 }
 
 JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerWrite(JNIEnv* env,

@@ -153,6 +153,8 @@ def assert_no_memory_leak(memory_tracker):
         Args:
             max_growth_mb: Maximum allowed memory growth in MB
         """
+        current, _ = tracemalloc.get_traced_memory()
+        memory_tracker["current_mb"] = current / (1024 * 1024)
         growth = memory_tracker["current_mb"] - memory_tracker["start_mb"]
         assert growth < max_growth_mb, (
             f"Memory leak detected: grew by {growth:.2f}MB "

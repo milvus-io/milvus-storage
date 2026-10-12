@@ -5,11 +5,54 @@ Verify manifest structure, versioning, and content after operations.
 """
 
 import pyarrow as pa
-from milvus_storage import Transaction, Writer
+from milvus_storage import Filesystem, Transaction, Writer
 
 
 class TestManifest:
     """Test manifest structure and content."""
+
+    def test_stat_and_delta_metadata_survive_versioned_reopen(
+        self, temp_case_path, simple_schema, batch_generator, default_properties
+    ):
+        written = self._write_initial_data(
+            temp_case_path, simple_schema, batch_generator, default_properties,
+            rows=10,
+        )
+        written.destroy()
+        with Transaction(temp_case_path, default_properties) as txn:
+            first_version = txn.get_read_version()
+
+        stat_path = f"{temp_case_path}/_stats/stats.bin"
+        delta_path = f"{temp_case_path}/_delta/delta.bin"
+        with Filesystem.get(properties=default_properties) as fs:
+            fs.create_dir(f"{temp_case_path}/_stats")
+            fs.create_dir(f"{temp_case_path}/_delta")
+            fs.write_file(stat_path, b"stat-v2")
+            fs.write_file(delta_path, b"delta-v2")
+            with Transaction(temp_case_path, default_properties) as txn:
+                txn.update_stat(
+                    "e2e.stat", ["stats.bin"], metadata={"version": "2", "label": "中文"}
+                )
+                txn.add_delta_log("delta.bin", 3)
+                second_version = txn.commit()
+            assert fs.read_file_all(stat_path) == b"stat-v2"
+            assert fs.read_file_all(delta_path) == b"delta-v2"
+
+        assert second_version > first_version
+        with Transaction(temp_case_path, default_properties, read_version=first_version) as txn:
+            old = txn.get_manifest()
+        assert old.stats == []
+        assert old.delta_logs == []
+
+        with Transaction(temp_case_path, default_properties, read_version=second_version) as txn:
+            current = txn.get_manifest()
+        assert len(current.stats) == 1
+        assert current.stats[0].key == "e2e.stat"
+        assert current.stats[0].files == [stat_path]
+        assert current.stats[0].metadata == {"version": "2", "label": "中文"}
+        assert len(current.delta_logs) == 1
+        assert current.delta_logs[0].path == delta_path
+        assert current.delta_logs[0].num_entries == 3
 
     def _write_initial_data(self, path, schema, batch_generator, props, rows=1000):
         """Write initial data and commit via transaction."""

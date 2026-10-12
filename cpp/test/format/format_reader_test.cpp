@@ -1094,7 +1094,7 @@ TEST_P(FormatReaderTest, ParquetOpenAsyncPropagatesCallerExecutorRejection) {
   executor.reject_next_add();
   pending_open->complete_size(static_cast<int64_t>(file.Get<uint64_t>(api::kPropertyFileSize)));
 
-  auto result = std::move(open_future).within(kWaitTimeout).getTry();
+  auto result = std::move(open_future).getTry(kWaitTimeout);
   ASSERT_TRUE(result.hasValue()) << result.exception().what();
   const auto& status = result.value();
   EXPECT_FALSE(status.ok());

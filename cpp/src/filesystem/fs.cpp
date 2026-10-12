@@ -28,9 +28,7 @@
 #include "milvus-storage/common/lrucache.h"
 
 #include "milvus-storage/filesystem/azure/azure_fs_producer.h"
-#ifdef WITH_TALON
 #include "milvus-storage/filesystem/talon/talon_file_system_producer.h"
-#endif
 
 namespace milvus_storage {
 
@@ -98,9 +96,16 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
   hash_combine(use_crc32c_checksum);
   hash_combine(s3_crt_async_read);
   hash_combine(load_frequency);
-  hash_combine(talon_enabled);
-  hash_combine(talon_coordinator);
-  hash_combine(talon_block_size);
+  hash_combine(talon_mode);
+  // Disabled Talon settings do not affect the origin filesystem's identity.
+  if (talon_mode != TalonMode::Disabled) {
+    hash_combine(talon_coordinator);
+    hash_combine(talon_block_size);
+    hash_combine(talon_max_idle_per_addr);
+    if (talon_mode == TalonMode::SmallReads) {
+      hash_combine(talon_small_read_threshold);
+    }
+  }
 
   if (IsAzureCredentialBrokerEnabled()) {
     hash_combine(access_key_id);
@@ -133,6 +138,18 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
 }
 
 std::string ArrowFileSystemConfig::ToString() const {
+  const char* talon_mode_name = "unknown";
+  switch (talon_mode) {
+    case TalonMode::Disabled:
+      talon_mode_name = "disabled";
+      break;
+    case TalonMode::Full:
+      talon_mode_name = "full";
+      break;
+    case TalonMode::SmallReads:
+      talon_mode_name = "small_reads";
+      break;
+  }
   std::stringstream ss;
   ss << "[address=" << address << ", bucket_name=" << bucket_name << ", root_path=" << root_path
      << ", storage_type=" << storage_type << ", cloud_provider=" << cloud_provider << ", log_level=" << log_level
@@ -142,8 +159,9 @@ std::string ArrowFileSystemConfig::ToString() const {
      << ", request_timeout_ms=" << request_timeout_ms << ", max_connections=" << max_connections
      << ", tls_min_version=" << (tls_min_version.empty() ? "(default)" : tls_min_version)
      << ", use_crc32c_checksum=" << std::boolalpha << use_crc32c_checksum << ", s3_crt_async_read=" << std::boolalpha
-     << s3_crt_async_read << ", talon_enabled=" << std::boolalpha << talon_enabled
-     << ", talon_coordinator=" << talon_coordinator << ", talon_block_size=" << talon_block_size;
+     << s3_crt_async_read << ", talon_mode=" << talon_mode_name
+     << ", talon_small_read_threshold=" << talon_small_read_threshold << ", talon_coordinator=" << talon_coordinator
+     << ", talon_block_size=" << talon_block_size << ", talon_max_idle_per_addr=" << talon_max_idle_per_addr;
   if (!alias.empty()) {
     ss << ", alias=" << alias;
   }
@@ -152,20 +170,19 @@ std::string ArrowFileSystemConfig::ToString() const {
   return ss.str();
 }
 
-arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config) {
-  if (config.talon_enabled) {
-    if (config.storage_type != "remote") {
-      return arrow::Status::Invalid("Talon requires remote storage");
-    }
-#ifndef WITH_TALON
-    return arrow::Status::Invalid("Talon support is not enabled in this build");
-#endif
+arrow::Result<FileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config) {
+  if (config.talon_mode != TalonMode::Disabled && config.storage_type != "remote") {
+    return arrow::Status::Invalid("Talon requires remote storage");
   }
 
   auto storage_type = StorageType_Map[config.storage_type];
   switch (storage_type) {
     case StorageType::Local: {
-      return LocalFileSystemProducer(config).Make();
+      ARROW_ASSIGN_OR_RAISE(auto filesystem, LocalFileSystemProducer(config).Make());
+      auto proxy = std::dynamic_pointer_cast<FileSystemProxy>(filesystem);
+      if (!proxy)
+        return arrow::Status::Invalid("Local producer must return FileSystemProxy");
+      return proxy;
     }
     case StorageType::Remote: {
       // Create the raw provider filesystem first. Remote producers must not
@@ -194,13 +211,11 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
         }
       }
 
-#ifdef WITH_TALON
       // Talon decorates reads without depending on the concrete provider type
       // or taking ownership of bucket path rooting.
-      if (config.talon_enabled) {
+      if (config.talon_mode != TalonMode::Disabled) {
         ARROW_ASSIGN_OR_RAISE(raw_fs, TalonFileSystemProducer(config, std::move(raw_fs)).Make());
       }
-#endif
       // Apply the bucket subtree exactly once, after all optional decorators.
       return std::make_shared<FileSystemProxy>(config.bucket_name, std::move(raw_fs));
     }
@@ -226,9 +241,9 @@ FilesystemCache& FilesystemCache::getInstance() {
 
 size_t FilesystemCache::size() const { return cache_.size(); }
 
-std::vector<std::pair<std::string, ArrowFileSystemPtr>> FilesystemCache::list() const {
+std::vector<std::pair<std::string, FileSystemPtr>> FilesystemCache::list() const {
   auto cached_entries = cache_.list();
-  std::vector<std::pair<std::string, ArrowFileSystemPtr>> entries;
+  std::vector<std::pair<std::string, FileSystemPtr>> entries;
   entries.reserve(cached_entries.size());
   for (const auto& cached_entry : cached_entries) {
     entries.emplace_back(cached_entry.second->display_key, cached_entry.second->filesystem);
@@ -236,7 +251,23 @@ std::vector<std::pair<std::string, ArrowFileSystemPtr>> FilesystemCache::list() 
   return entries;
 }
 
-void FilesystemCache::remove(const std::string& key) { cache_.remove(key); }
+void FilesystemCache::remove(const std::string& key) {
+  // Serialize with get()'s miss/create/put, so an in-flight creation cannot
+  // publish the evicted entry after remove returns. Release provider clients
+  // outside the cache locks; their destructors may wait for outstanding I/O.
+  std::optional<std::shared_ptr<CacheEntry>> removed;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    removed = cache_.get(key);
+    cache_.remove(key);
+  }
+}
+
+arrow::Status FilesystemCache::evict(const api::Properties& properties, const std::string& path) {
+  ARROW_ASSIGN_OR_RAISE(const auto config, resolve_config(properties, path));
+  remove(config.GetCacheKey());
+  return arrow::Status::OK();
+}
 
 void FilesystemCache::clean() { cache_.clean(); }
 
@@ -247,7 +278,7 @@ std::string FilesystemCache::MakeDisplayKey(const ArrowFileSystemConfig& config,
     return "file://" + config.root_path + "#" + cache_key;
   }
   const std::string remote_path = (config.address.empty() ? "<null>" : config.address) + "/" + config.bucket_name;
-  if (config.talon_enabled) {
+  if (config.talon_mode != TalonMode::Disabled) {
     return remote_path + "?talon=" + config.talon_coordinator + "#" + cache_key;
   }
   return remote_path + "#" + cache_key;
@@ -291,10 +322,19 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
   ARROW_ASSIGN_OR_RAISE(result.use_crc32c_checksum,
                         api::GetValue<bool>(properties_map, PROPERTY_FS_USE_CRC32C_CHECKSUM));
   ARROW_ASSIGN_OR_RAISE(result.s3_crt_async_read, api::GetValue<bool>(properties_map, PROPERTY_FS_S3_CRT_ASYNC_READ));
-  ARROW_ASSIGN_OR_RAISE(result.talon_enabled, api::GetValue<bool>(properties_map, PROPERTY_FS_TALON_ENABLED));
+  ARROW_ASSIGN_OR_RAISE(const auto talon_mode, api::GetValue<uint32_t>(properties_map, PROPERTY_FS_TALON_MODE));
+  // Typed Properties can bypass SetValue; validate before narrowing to the enum.
+  if (talon_mode > static_cast<uint32_t>(TalonMode::SmallReads)) {
+    return arrow::Status::Invalid("fs.talon.mode must be 0 (disabled), 1 (full), or 2 (small_reads)");
+  }
+  result.talon_mode = static_cast<TalonMode>(talon_mode);
+  ARROW_ASSIGN_OR_RAISE(result.talon_small_read_threshold,
+                        api::GetValue<uint32_t>(properties_map, PROPERTY_FS_TALON_SMALL_READ_THRESHOLD));
   ARROW_ASSIGN_OR_RAISE(result.talon_coordinator,
                         api::GetValue<std::string>(properties_map, PROPERTY_FS_TALON_COORDINATOR));
   ARROW_ASSIGN_OR_RAISE(result.talon_block_size, api::GetValue<uint32_t>(properties_map, PROPERTY_FS_TALON_BLOCK_SIZE));
+  ARROW_ASSIGN_OR_RAISE(result.talon_max_idle_per_addr,
+                        api::GetValue<uint32_t>(properties_map, PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR));
   ARROW_ASSIGN_OR_RAISE(result.lance_io_parallelism,
                         api::GetValue<uint32_t>(properties_map, PROPERTY_FS_LANCE_IO_PARALLELISM));
   ARROW_ASSIGN_OR_RAISE(result.iops_initial_rate,
@@ -312,15 +352,22 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
   ARROW_ASSIGN_OR_RAISE(result.azure_credential_endpoint,
                         api::GetValue<std::string>(properties_map, PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT));
 
-  if (result.talon_enabled) {
+  if (result.talon_mode == TalonMode::SmallReads &&
+      (result.talon_small_read_threshold == 0 || result.talon_small_read_threshold > 1024U * 1024U)) {
+    return arrow::Status::Invalid("fs.talon.small_read_threshold must be between 1 and 1048576 bytes");
+  }
+  if (result.talon_mode != TalonMode::Disabled) {
     if (result.storage_type != "remote") {
       return arrow::Status::Invalid("Talon requires fs.storage_type=remote");
     }
     if (result.talon_coordinator.empty()) {
-      return arrow::Status::Invalid("fs.talon.enabled=true requires fs.talon.coordinator");
+      return arrow::Status::Invalid("fs.talon.mode=", talon_mode, " requires fs.talon.coordinator");
     }
     if (result.talon_block_size == 0) {
       return arrow::Status::Invalid("fs.talon.block_size must be greater than zero");
+    }
+    if (result.talon_max_idle_per_addr == 0) {
+      return arrow::Status::Invalid("fs.talon.max_idle_per_addr must be greater than zero");
     }
   }
 
@@ -413,7 +460,7 @@ arrow::Status CreateExternalFsConfig(const std::string& alias,
 
 }  // namespace
 
-arrow::Result<ArrowFileSystemPtr> FilesystemCache::get(const api::Properties& properties, const std::string& path) {
+arrow::Result<FileSystemPtr> FilesystemCache::get(const api::Properties& properties, const std::string& path) {
   ARROW_ASSIGN_OR_RAISE(auto config, resolve_config(properties, path));
 
   std::string cache_key = config.GetCacheKey();

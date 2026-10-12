@@ -351,7 +351,6 @@ class CallbackThreadRandomAccessFile final : public arrow::io::RandomAccessFile,
     state_->AddWorker(std::move(worker));
     return future;
   }
-  arrow::Future<int64_t> GetSizeAsync() override { return arrow::Future<int64_t>::MakeFinished(file_->GetSize()); }
   arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const arrow::io::IOContext& io_context,
                                                           int64_t position,
                                                           int64_t nbytes) override {
@@ -1047,7 +1046,7 @@ TEST_F(LanceBasicTest, LatestVersionFallbackDoesNotReadDatasetManifest) {
 
   auto observable = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics();
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
 
@@ -1558,7 +1557,7 @@ TEST_F(LanceBasicTest, ReadsThroughBoundFilesystemMetrics) {
 
   auto observable = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics();
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
 
@@ -1625,7 +1624,7 @@ TEST_F(LanceBasicTest, SharedSchedulerReadsAfterOwnerDatasetDrop) {
 
   auto observable = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable, nullptr);
-  auto metrics = observable->GetMetrics();
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
   owner_dataset.reset();

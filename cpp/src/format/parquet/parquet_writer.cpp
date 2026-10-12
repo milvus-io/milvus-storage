@@ -30,6 +30,7 @@
 #include <fmt/format.h>
 
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/encryption_util.h"
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
@@ -57,13 +58,18 @@ static ::parquet::Compression::type convert_compression_type(const std::string& 
   }
 }
 
-static std::shared_ptr<::parquet::WriterProperties> convert_write_properties(
+static arrow::Result<std::shared_ptr<::parquet::WriterProperties>> convert_write_properties(
     const milvus_storage::api::Properties& properties) {
   ::parquet::WriterProperties::Builder builder;
 
   bool enc_enable = api::GetValueNoError<bool>(properties, PROPERTY_WRITER_ENC_ENABLE);
   if (enc_enable) {
-    auto enc_key = api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_KEY);
+    const auto encoded_key = api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_KEY);
+    auto key_result = DecodeBase64EncryptionKey(encoded_key);
+    if (!key_result.ok()) {
+      return key_result.status().WithMessage("writer.enc.key: ", key_result.status().message());
+    }
+    auto enc_key = std::move(key_result).ValueOrDie();
     auto enc_meta = api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_META);
     auto enc_algorithm = api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_ALGORITHM);
 
@@ -178,8 +184,9 @@ arrow::Result<std::unique_ptr<ParquetFileWriter>> ParquetFileWriter::Make(
     const milvus_storage::api::Properties& properties) {
   ARROW_ASSIGN_OR_RAISE(auto part_size,
                         milvus_storage::api::GetValue<int64_t>(properties, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE));
+  ARROW_ASSIGN_OR_RAISE(auto writer_properties, convert_write_properties(properties));
   return ParquetFileWriter::Make(std::move(schema), std::move(fs), file_path, milvus_storage::StorageConfig{part_size},
-                                 convert_write_properties(properties));
+                                 writer_properties);
 }
 
 arrow::Result<std::unique_ptr<ParquetFileWriter>> ParquetFileWriter::Make(

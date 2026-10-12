@@ -1,7 +1,7 @@
 package io.milvus.storage
 
 import java.util.{Map => JMap}
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 /**
  * Scala wrapper for MilvusStorage Properties

@@ -389,6 +389,10 @@ static arrow::Result<::parquet::ArrowReaderProperties> make_arrow_reader_propert
   if (range_size_limit > 0) {
     cache_options.range_size_limit = range_size_limit;
   }
+  // Arrow's reader defaults to a lazy cache, which fetches one coalesced range at a time as decoding reaches it.
+  // Every call here pre-buffers only the row groups it decodes, so an eager cache holds no more bytes; it requests
+  // the ranges together.
+  cache_options.lazy = milvus_storage::api::GetValueNoError<bool>(properties, PROPERTY_READER_PARQUET_PREBUFFER_LAZY);
   if (cache_options.range_size_limit <= cache_options.hole_size_limit) {
     return arrow::Status::Invalid(fmt::format(
         "{} must be greater than {} for Arrow read-range coalescing. [range_size_limit={}, hole_size_limit={}]",

@@ -262,7 +262,8 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
       drained_index = i;
       break;
     }
-    chunk_manager_->ResetChunkState(i);
+    // Chunk cursors use original path indexes, not projected reader indexes.
+    chunk_manager_->ResetChunkState(file_reader_to_path_index_[i]);
   }
 
   if (drained_index >= 0) {

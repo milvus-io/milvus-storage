@@ -1,0 +1,996 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright The Lance Authors
+
+use crate::TOKIO_RT;
+
+use futures::TryStreamExt;
+use futures::stream::StreamExt;
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
+use std::result::Result as RustResult;
+use std::sync::{Arc, OnceLock};
+use tokio::runtime::Handle;
+
+use arrow_array::Array;
+use arrow_array::ffi::FFI_ArrowArray;
+use arrow_array::{RecordBatch, RecordBatchReader, StructArray};
+use arrow_schema::Schema as ArrowSchema;
+use arrow::datatypes::SchemaRef;
+use arrow::error::ArrowError;
+use arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
+
+use lance::dataset::AutoCleanupParams;
+use lance::dataset::builder::DatasetBuilder;
+use lance::dataset::cleanup::{CleanupPolicy, RemovalStats};
+use lance::dataset::fragment::{FileFragment, FragReadConfig, FragmentReader};
+use lance::dataset::optimize::{CompactionOptions as RustCompactionOptions, compact_files};
+use lance::dataset::refs::{Ref, TagContents};
+use lance::dataset::scanner::Scanner;
+use lance::dataset::statistics::{DataStatistics, DatasetStatisticsExt};
+use lance::dataset::transaction::{Operation, Transaction};
+use lance::dataset::{CommitBuilder, Dataset, ReadParams, Version, WriteMode, WriteParams};
+use lance::{Error as LanceError, Result};
+use lance_encoding::version::LanceFileVersion;
+
+use crate::lance_ffi::{LanceColumnMemoryEstimate, LanceDataStorageFormat};
+
+use lance::index::DatasetIndexExt;
+use lance_table::format::{Fragment, IndexMetadata};
+use lance_table::utils::stream::ReadBatchFutStream;
+
+use lance::io::ObjectStoreParams;
+use lance_io::object_store::{ObjectStoreProvider, StorageOptionsAccessor};
+use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
+
+use crate::lance_object_store::{
+    FFIObjectStoreProvider, FFIReadOptions, build_filesystem_session, native_mutation_store_params,
+    shared_scan_scheduler,
+};
+
+#[derive(Clone)]
+pub struct BlockingDataset {
+    pub(crate) inner: Dataset,
+    object_store: Arc<lance::io::ObjectStore>,
+    // The scheduler is dataset-local by default and domain-shared when explicitly
+    // configured.
+    scan_scheduler: Arc<OnceLock<Arc<ScanScheduler>>>,
+}
+
+impl BlockingDataset {
+    fn new(inner: Dataset) -> Result<Self> {
+        let object_store = TOKIO_RT.block_on(inner.object_store(None))?;
+        Ok(Self {
+            inner,
+            object_store,
+            scan_scheduler: Arc::new(OnceLock::new()),
+        })
+    }
+
+    fn fragment_read_config(&self, read_config: FragReadConfig) -> FragReadConfig {
+        if read_config.scan_scheduler.is_some() {
+            return read_config;
+        }
+
+        let scan_scheduler = self
+            .scan_scheduler
+            .get_or_init(|| {
+                TOKIO_RT.block_on(async {
+                    ScanScheduler::new(
+                        self.object_store.clone(),
+                        SchedulerConfig::max_bandwidth(&self.object_store),
+                    )
+                })
+            })
+            .clone();
+        read_config.with_scan_scheduler(scan_scheduler)
+    }
+
+    pub fn write(
+        reader: impl RecordBatchReader + Send + 'static,
+        uri: &str,
+        params: Option<WriteParams>,
+    ) -> Result<Self> {
+        let inner = TOKIO_RT.block_on(Dataset::write(reader, uri, params))?;
+        Self::new(inner)
+    }
+
+    pub fn commit(
+        uri: &str,
+        operation: Operation,
+        read_version: Option<u64>,
+        storage_options: HashMap<String, String>,
+    ) -> Result<Self> {
+        let inner = TOKIO_RT.block_on(Dataset::commit(
+            uri,
+            operation,
+            read_version,
+            Some(ObjectStoreParams {
+                storage_options_accessor: Some(Arc::new(
+                    StorageOptionsAccessor::with_static_options(storage_options),
+                )),
+                ..Default::default()
+            }),
+            None,
+            Default::default(),
+            false, // TODO: support enable_v2_manifest_paths
+        ))?;
+        Self::new(inner)
+    }
+
+    pub fn latest_version(&self) -> Result<u64> {
+        let version = TOKIO_RT.block_on(self.inner.latest_version_id())?;
+        Ok(version)
+    }
+
+    pub fn list_versions(&self) -> Result<Vec<Version>> {
+        let versions = TOKIO_RT.block_on(self.inner.versions())?;
+        Ok(versions)
+    }
+
+    pub fn version(&self) -> u64 {
+        self.inner.version().version
+    }
+
+    pub fn checkout_version(&mut self, version: u64) -> Result<Self> {
+        let inner = TOKIO_RT.block_on(self.inner.checkout_version(version))?;
+        Self::new(inner)
+    }
+
+    pub fn checkout_tag(&mut self, tag: &str) -> Result<Self> {
+        let inner = TOKIO_RT.block_on(self.inner.checkout_version(tag))?;
+        Self::new(inner)
+    }
+
+    pub fn checkout_latest(&mut self) -> Result<()> {
+        TOKIO_RT.block_on(self.inner.checkout_latest())?;
+        Ok(())
+    }
+
+    pub fn restore(&mut self) -> Result<()> {
+        TOKIO_RT.block_on(self.inner.restore())?;
+        Ok(())
+    }
+
+    pub fn list_tags(&self) -> Result<HashMap<String, TagContents>> {
+        let tags = TOKIO_RT.block_on(self.inner.tags().list())?;
+        Ok(tags)
+    }
+
+    pub fn list_branches(&self) -> Result<HashMap<String, lance::dataset::refs::BranchContents>> {
+        let branches = TOKIO_RT.block_on(self.inner.list_branches())?;
+        Ok(branches)
+    }
+
+    pub fn create_branch(
+        &mut self,
+        branch: &str,
+        version: u64,
+        source_branch: Option<&str>,
+    ) -> Result<Self> {
+        let reference = match source_branch {
+            Some(b) => Ref::from((b, version)),
+            None => Ref::from(version),
+        };
+        let inner = TOKIO_RT.block_on(self.inner.create_branch(branch, reference, None))?;
+        Self::new(inner)
+    }
+
+    pub fn delete_branch(&mut self, branch: &str) -> Result<()> {
+        TOKIO_RT.block_on(self.inner.delete_branch(branch))?;
+        Ok(())
+    }
+
+    pub fn checkout_reference(
+        &mut self,
+        branch: Option<String>,
+        version: Option<u64>,
+        tag: Option<String>,
+    ) -> Result<Self> {
+        let reference = if let Some(tag_name) = tag {
+            Ref::from(tag_name.as_str())
+        } else {
+            Ref::Version(branch, version)
+        };
+        let inner = TOKIO_RT.block_on(self.inner.checkout_version(reference))?;
+        Self::new(inner)
+    }
+
+    pub fn create_tag(
+        &mut self,
+        tag: &str,
+        version_number: u64,
+        branch: Option<&str>,
+    ) -> Result<()> {
+        let reference = Ref::Version(branch.map(str::to_string), Some(version_number));
+        TOKIO_RT.block_on(self.inner.tags().create(tag, reference))?;
+        Ok(())
+    }
+
+    pub fn delete_tag(&mut self, tag: &str) -> Result<()> {
+        TOKIO_RT.block_on(self.inner.tags().delete(tag))?;
+        Ok(())
+    }
+
+    pub fn update_tag(&mut self, tag: &str, version: u64, branch: Option<&str>) -> Result<()> {
+        let reference = Ref::Version(branch.map(str::to_string), Some(version));
+        TOKIO_RT.block_on(self.inner.tags().update(tag, reference))?;
+        Ok(())
+    }
+
+    pub fn get_version(&self, tag: &str) -> Result<u64> {
+        let version = TOKIO_RT.block_on(self.inner.tags().get_version(tag))?;
+        Ok(version)
+    }
+
+    pub fn count_rows(&self, filter: Option<String>) -> Result<usize> {
+        let rows = TOKIO_RT.block_on(self.inner.count_rows(filter))?;
+        Ok(rows)
+    }
+
+    pub fn calculate_data_stats(&self) -> Result<DataStatistics> {
+        let stats = TOKIO_RT.block_on(Arc::new(self.clone().inner).calculate_data_stats())?;
+        Ok(stats)
+    }
+
+    pub fn list_indexes(&self) -> Result<Arc<Vec<IndexMetadata>>> {
+        let indexes = TOKIO_RT.block_on(self.inner.load_indices())?;
+        Ok(indexes)
+    }
+
+    pub fn commit_transaction(
+        &mut self,
+        transaction: Transaction,
+        write_params: HashMap<String, String>,
+    ) -> Result<Self> {
+        let new_dataset = TOKIO_RT.block_on(
+            CommitBuilder::new(Arc::new(self.clone().inner))
+                .with_store_params(ObjectStoreParams {
+                    storage_options_accessor: Some(Arc::new(
+                        StorageOptionsAccessor::with_static_options(write_params),
+                    )),
+                    ..Default::default()
+                })
+                .execute(transaction),
+        )?;
+        Self::new(new_dataset)
+    }
+
+    pub fn read_transaction(&self) -> Result<Option<Transaction>> {
+        let transaction = TOKIO_RT.block_on(self.inner.read_transaction())?;
+        Ok(transaction)
+    }
+
+    pub fn get_table_metadata(&self) -> Result<HashMap<String, String>> {
+        Ok(self.inner.metadata().clone())
+    }
+
+    pub fn compact(&mut self, options: RustCompactionOptions) -> Result<()> {
+        TOKIO_RT.block_on(compact_files(&mut self.inner, options, None))?;
+        Ok(())
+    }
+
+    pub fn cleanup_with_policy(&mut self, policy: CleanupPolicy) -> Result<RemovalStats> {
+        Ok(TOKIO_RT.block_on(self.inner.cleanup_with_policy(policy))?)
+    }
+
+    pub fn get_all_fragments(&self) -> Vec<Fragment> {
+        self.inner.manifest().fragments.clone().to_vec()
+    }
+
+    pub fn get_fragment(&self, id: u64) -> Option<Fragment> {
+        self.inner
+            .manifest()
+            .fragments
+            .iter()
+            .find(|f| f.id == id)
+            .cloned()
+    }
+}
+
+impl BlockingDataset {
+    pub fn io_stats_incremental(&self) -> crate::lance_ffi::LanceIOStats {
+        let stats = self.object_store.io_stats_incremental();
+        crate::lance_ffi::LanceIOStats {
+            read_iops: stats.read_iops,
+            read_bytes: stats.read_bytes,
+        }
+    }
+
+    pub fn get_all_fragment_ids(&self) -> Vec<u64> {
+        self.inner
+            .manifest()
+            .fragments
+            .iter()
+            .map(|f| f.id)
+            .collect()
+    }
+}
+
+use crate::iceberg_bridgeimpl::vec_to_hashmap;
+
+fn filesystem_dataset_builder(
+    filesystem: cxx::SharedPtr<crate::lance_ffi::FileSystemWrapper>,
+    uri: &str,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
+) -> Result<(DatasetBuilder, FFIReadOptions)> {
+    if filesystem.is_null() {
+        return Err(LanceError::invalid_input(
+            "open_dataset requires a non-null filesystem",
+        ));
+    }
+
+    let storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
+    let read_options = FFIReadOptions::parse(storage_options)?;
+    let dataset_url = lance_io::object_store::uri_to_url(uri)?;
+    let provider = Arc::new(FFIObjectStoreProvider::new(
+        filesystem,
+        &dataset_url,
+        &read_options,
+    )?) as Arc<dyn ObjectStoreProvider>;
+    let session = build_filesystem_session(dataset_url.scheme(), provider);
+    let read_params = ReadParams {
+        index_cache_size_bytes: 0,
+        metadata_cache_size_bytes: 0,
+        store_options: Some(ObjectStoreParams::default()),
+        ..Default::default()
+    };
+    let builder = DatasetBuilder::from_uri(uri)
+        .with_read_params(read_params)
+        .with_session(session);
+    Ok((builder, read_options))
+}
+
+pub fn open_dataset(
+    filesystem: cxx::SharedPtr<crate::lance_ffi::FileSystemWrapper>,
+    uri: &str,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
+    version: u64,
+) -> Result<Box<BlockingDataset>> {
+    let (mut builder, read_options) = filesystem_dataset_builder(
+        filesystem,
+        uri,
+        storage_options_keys,
+        storage_options_values,
+    )?;
+    if version != 0 {
+        builder = builder.with_version(version);
+    }
+    let inner = TOKIO_RT.block_on(builder.load())?;
+    let dataset = BlockingDataset::new(inner)?;
+
+    let scheduler = shared_scan_scheduler(
+        read_options.object_store_prefix().to_string(),
+        &dataset.object_store,
+    )?;
+    dataset
+        .scan_scheduler
+        .set(scheduler)
+        .expect("a newly opened BlockingDataset has no scan scheduler");
+    Ok(Box::new(dataset))
+}
+
+pub fn resolve_latest_dataset_version(
+    filesystem: cxx::SharedPtr<crate::lance_ffi::FileSystemWrapper>,
+    uri: &str,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
+) -> Result<u64> {
+    let (builder, _) = filesystem_dataset_builder(
+        filesystem,
+        uri,
+        storage_options_keys,
+        storage_options_values,
+    )?;
+    let (object_store, base_path, commit_handler) =
+        TOKIO_RT.block_on(builder.build_object_store())?;
+    let location = TOKIO_RT
+        .block_on(commit_handler.resolve_latest_location(&base_path, object_store.as_ref()))?;
+    Ok(location.version)
+}
+
+pub unsafe fn write_dataset(
+    uri: &str,
+    stream_ptr: *mut u8,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
+    data_storage_format: LanceDataStorageFormat,
+) -> Result<Vec<u64>> {
+    let storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
+    let store_params = native_mutation_store_params(storage_options)?;
+
+    let read_params = ReadParams {
+        index_cache_size_bytes: 0,
+        metadata_cache_size_bytes: 0,
+        store_options: Some(store_params.clone()),
+        ..Default::default()
+    };
+    let builder = DatasetBuilder::from_uri(uri).with_read_params(read_params);
+    let existing_dataset = match TOKIO_RT.block_on(builder.load()) {
+        Ok(dataset) => Some(dataset),
+        Err(LanceError::DatasetNotFound { .. } | LanceError::NotFound { .. }) => None,
+        Err(error) => return Err(error),
+    };
+    let original_fragment_ids = existing_dataset
+        .as_ref()
+        .map(|dataset| {
+            dataset
+                .manifest()
+                .fragments
+                .iter()
+                .map(|fragment| fragment.id)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+
+    let stream_ptr = stream_ptr as *mut FFI_ArrowArrayStream;
+    let stream = unsafe { std::ptr::replace(stream_ptr, FFI_ArrowArrayStream::empty()) };
+    let reader = ArrowArrayStreamReader::try_new(stream).map_err(|e| LanceError::IO {
+        source: Box::new(e),
+        location: snafu::location!(),
+    })?;
+
+    let lance_file_version = match data_storage_format {
+        LanceDataStorageFormat::Legacy => LanceFileVersion::Legacy,
+        LanceDataStorageFormat::V2_1 => LanceFileVersion::V2_1,
+        LanceDataStorageFormat::V2_2 => LanceFileVersion::V2_2,
+        LanceDataStorageFormat::V2_3 => LanceFileVersion::V2_3,
+        _ => LanceFileVersion::Legacy,
+    };
+
+    let mut write_params = WriteParams {
+        mode: WriteMode::Append,
+        data_storage_version: Some(lance_file_version),
+        enable_v2_manifest_paths: false,
+        auto_cleanup: Some(AutoCleanupParams::default()),
+        ..Default::default()
+    };
+    write_params.store_params = Some(store_params);
+
+    let inner = match existing_dataset {
+        Some(dataset) => TOKIO_RT.block_on(Dataset::write(
+            reader,
+            Arc::new(dataset),
+            Some(write_params),
+        ))?,
+        None => TOKIO_RT.block_on(Dataset::write(reader, uri, Some(write_params)))?,
+    };
+    Ok(inner
+        .manifest()
+        .fragments
+        .iter()
+        .filter_map(|fragment| {
+            (!original_fragment_ids.contains(&fragment.id)).then_some(fragment.id)
+        })
+        .collect())
+}
+
+pub fn delete_rows(
+    uri: &str,
+    predicate: &str,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
+) -> Result<()> {
+    let storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
+    let store_params = native_mutation_store_params(storage_options)?;
+    let read_params = ReadParams {
+        index_cache_size_bytes: 0,
+        metadata_cache_size_bytes: 0,
+        store_options: Some(store_params),
+        ..Default::default()
+    };
+    let builder = DatasetBuilder::from_uri(uri).with_read_params(read_params);
+    let mut dataset = TOKIO_RT.block_on(builder.load())?;
+    TOKIO_RT.block_on(dataset.delete(predicate))?;
+    Ok(())
+}
+
+struct BatchFutStreamReader {
+    stream: futures::stream::Buffered<ReadBatchFutStream>,
+    schema: SchemaRef,
+    runtime_handle: Handle,
+}
+
+impl Iterator for BatchFutStreamReader {
+    type Item = RustResult<RecordBatch, ArrowError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Use the runtime handle to block on the async stream
+        self.runtime_handle
+            .block_on(async { self.stream.next().await })
+            .map(|res| {
+                // Convert Lance Error to Arrow Error
+                res.map_err(|e| ArrowError::from_external_error(Box::new(e)))
+            })
+    }
+}
+
+impl RecordBatchReader for BatchFutStreamReader {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+pub trait ToFFIStream {
+    fn to_ffi_stream(self, schema: SchemaRef, handle: Handle) -> FFI_ArrowArrayStream;
+}
+
+pub trait ToFFIArray {
+    fn to_ffi_array(self) -> FFI_ArrowArray;
+}
+
+impl ToFFIStream for ReadBatchFutStream {
+    fn to_ffi_stream(self, schema: SchemaRef, handle: Handle) -> FFI_ArrowArrayStream {
+        // Buffer the stream for concurrency
+        let buffered_stream = self.buffered(1); // Adjust buffer size as needed
+
+        let reader = BatchFutStreamReader {
+            stream: buffered_stream,
+            schema,
+            runtime_handle: handle,
+        };
+
+        // Create FFI stream from the reader
+        FFI_ArrowArrayStream::new(Box::new(reader))
+    }
+}
+
+impl ToFFIArray for RecordBatch {
+    fn to_ffi_array(self) -> FFI_ArrowArray {
+        let struct_array = StructArray::from(self);
+        let data = struct_array.into_data();
+        FFI_ArrowArray::new(&data)
+    }
+}
+
+pub async fn collect_stream_to_batches(
+    stream: ReadBatchFutStream,
+    concurrency: usize,
+) -> Result<Vec<RecordBatch>> {
+    stream.buffered(concurrency).try_collect::<Vec<_>>().await
+}
+
+#[derive(Clone)]
+pub struct BlockingFragmentReader {
+    pub inner: FragmentReader,
+    pub fragment: FileFragment,
+    pub projection: ArrowSchema,
+    sorted_deletions: Vec<u32>,
+}
+
+impl BlockingFragmentReader {
+    pub fn open(
+        dataset: &BlockingDataset,
+        fragment: Fragment,
+        arrow_projection: &ArrowSchema,
+        read_config: FragReadConfig,
+    ) -> Result<Self> {
+        let projection = arrow_projection.clone();
+        let fragment = FileFragment::new(Arc::new(dataset.inner.clone()), fragment);
+
+        // Load deletion vector for logical→physical index mapping in take()
+        let sorted_deletions = {
+            let dv = TOKIO_RT.block_on(fragment.get_deletion_vector())?;
+            match dv {
+                Some(dv) => {
+                    let mut dels: Vec<u32> =
+                        dv.as_ref().clone().into_iter().map(|i| i as u32).collect();
+                    dels.sort();
+                    dels
+                }
+                None => vec![],
+            }
+        };
+
+        let meta_schema = fragment.schema();
+        let meta_columns: std::collections::HashSet<_> =
+            meta_schema.fields.iter().map(|f| f.name.clone()).collect();
+
+        let columns: Vec<_> = arrow_projection
+            .fields()
+            .iter()
+            .map(|f| f.name())
+            .filter(|n| meta_columns.contains(*n))
+            .map(|n| n.clone())
+            .collect();
+
+        let fragment_reader =
+            TOKIO_RT.block_on(fragment.open(&meta_schema.project(&columns)?, read_config))?;
+
+        Ok(Self {
+            inner: fragment_reader,
+            fragment,
+            projection,
+            sorted_deletions,
+        })
+    }
+
+    /// Map logical index to physical index, accounting for deletions.
+    fn logical_to_physical(&self, logical: u32) -> u32 {
+        if self.sorted_deletions.is_empty() {
+            return logical;
+        }
+        let mut physical = logical;
+        loop {
+            let num_dels = self.sorted_deletions.partition_point(|&d| d <= physical) as u32;
+            let new_physical = logical + num_dels;
+            if new_physical == physical {
+                break;
+            }
+            physical = new_physical;
+        }
+        physical
+    }
+
+    fn map_logical_indices(&self, logical_indices: &[u32]) -> Vec<u32> {
+        if self.sorted_deletions.is_empty() {
+            return logical_indices.to_vec();
+        }
+        logical_indices
+            .iter()
+            .map(|&i| self.logical_to_physical(i))
+            .collect()
+    }
+
+    pub fn number_of_rows(&self) -> Result<u64> {
+        Ok(TOKIO_RT.block_on(self.fragment.count_rows(None))? as u64)
+    }
+
+    pub fn take_as_single_batch(&self, indices: &[u32], out_array: *mut u8) -> Result<()> {
+        let physical_indices = self.map_logical_indices(indices);
+        let ffi_array = TOKIO_RT
+            .block_on(self.inner.take_as_batch(&physical_indices, None))?
+            .to_ffi_array();
+        let out_array = out_array as *mut FFI_ArrowArray;
+        // # Safety
+        // Arrow C array interface
+        unsafe { std::ptr::write(out_array, ffi_array) };
+        Ok(())
+    }
+
+    pub unsafe fn take_as_stream(
+        &self,
+        indices: &[u32],
+        batch_size: u32,
+        out_stream: *mut u8,
+    ) -> Result<()> {
+        let physical_indices = self.map_logical_indices(indices);
+        let read_batch_fut_stream =
+            TOKIO_RT.block_on(self.inner.take(&physical_indices, batch_size, None));
+
+        let ffi_stream = read_batch_fut_stream?
+            .to_ffi_stream(Arc::new(self.projection.clone()), TOKIO_RT.handle().clone());
+        let out_stream = out_stream as *mut FFI_ArrowArrayStream;
+        // # Safety
+        // Arrow C stream interface
+        unsafe { std::ptr::write(out_stream, ffi_stream) };
+        Ok(())
+    }
+
+    pub unsafe fn read_all_as_stream(&self, batch_size: u32, out_stream: *mut u8) -> Result<()> {
+        let read_batch_fut_stream = TOKIO_RT.block_on(self.inner.read_all(batch_size))?;
+
+        let ffi_stream = read_batch_fut_stream
+            .to_ffi_stream(Arc::new(self.projection.clone()), TOKIO_RT.handle().clone());
+        let out_stream = out_stream as *mut FFI_ArrowArrayStream;
+        unsafe { std::ptr::write(out_stream, ffi_stream) };
+        Ok(())
+    }
+
+    pub unsafe fn read_ranges_as_stream_internal(
+        &self,
+        range: Range<u32>,
+        batch_size: u32,
+        out_stream: *mut u8,
+    ) -> Result<()> {
+        let read_batch_fut_stream = TOKIO_RT.block_on(self.inner.read_range(range, batch_size))?;
+
+        let ffi_stream = read_batch_fut_stream
+            .to_ffi_stream(Arc::new(self.projection.clone()), TOKIO_RT.handle().clone());
+        let out_stream = out_stream as *mut FFI_ArrowArrayStream;
+        unsafe { std::ptr::write(out_stream, ffi_stream) };
+        Ok(())
+    }
+
+    pub unsafe fn read_ranges_as_stream(
+        self: &BlockingFragmentReader,
+        row_range_start: u32,
+        row_range_end: u32,
+        batch_size: u32,
+        out_stream: *mut u8,
+    ) -> Result<()> {
+        unsafe {
+            self.read_ranges_as_stream_internal(
+                Range {
+                    start: row_range_start,
+                    end: row_range_end,
+                },
+                batch_size,
+                out_stream,
+            )
+        }
+    }
+}
+
+pub unsafe fn open_fragment_reader(
+    dataset: &BlockingDataset,
+    fragment_id: u64,
+    schema_rawptr: *mut u8,
+) -> Result<Box<BlockingFragmentReader>> {
+    let fragment = dataset
+        .get_fragment(fragment_id)
+        .ok_or_else(|| LanceError::InvalidInput {
+            source: format!("Fragment {} not found", fragment_id).into(),
+            location: snafu::location!(),
+        })?;
+
+    let ffi_schema = unsafe {
+        arrow::ffi::FFI_ArrowSchema::from_raw(schema_rawptr as *mut arrow::ffi::FFI_ArrowSchema)
+    };
+    let arrow_schema =
+        ArrowSchema::try_from(&ffi_schema).map_err(|e| LanceError::InvalidInput {
+            source: format!("Failed to convert schema: {}", e.to_string()).into(),
+            location: snafu::location!(),
+        })?;
+
+    let reader = BlockingFragmentReader::open(
+        dataset,
+        fragment,
+        &arrow_schema,
+        dataset.fragment_read_config(FragReadConfig::default()),
+    )?;
+    Ok(Box::new(reader))
+}
+
+/// Get sorted deletion positions for a fragment. Returns empty vec if no deletions.
+pub fn get_fragment_deletion_positions(
+    dataset: &BlockingDataset,
+    fragment_id: u64,
+) -> Result<Vec<u64>> {
+    let fragment_meta =
+        dataset
+            .get_fragment(fragment_id)
+            .ok_or_else(|| LanceError::InvalidInput {
+                source: format!("Fragment {} not found", fragment_id).into(),
+                location: snafu::location!(),
+            })?;
+    let fragment = FileFragment::new(Arc::new(dataset.inner.clone()), fragment_meta);
+    let dv = TOKIO_RT.block_on(fragment.get_deletion_vector())?;
+    match dv {
+        Some(dv) => {
+            let mut positions: Vec<u64> =
+                dv.as_ref().clone().into_iter().map(|i| i as u64).collect();
+            positions.sort();
+            Ok(positions)
+        }
+        None => Ok(vec![]),
+    }
+}
+
+pub fn get_fragment_physical_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64> {
+    let fragment = dataset
+        .get_fragment(fragment_id)
+        .ok_or_else(|| LanceError::InvalidInput {
+            source: format!("Fragment {} not found", fragment_id).into(),
+            location: snafu::location!(),
+        })?;
+    fragment
+        .physical_rows
+        .map(|n| n as u64)
+        .ok_or_else(|| LanceError::InvalidInput {
+            source: format!("Fragment {} has no physical_rows metadata", fragment_id).into(),
+            location: snafu::location!(),
+        })
+}
+
+pub fn get_fragment_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64> {
+    let fragment = dataset
+        .get_fragment(fragment_id)
+        .ok_or_else(|| LanceError::InvalidInput {
+            source: format!("Fragment {} not found", fragment_id).into(),
+            location: snafu::location!(),
+        })?;
+    fragment
+        .num_rows()
+        .map(|n| n as u64)
+        .ok_or_else(|| LanceError::InvalidInput {
+            source: format!("Fragment {} has no row count metadata", fragment_id).into(),
+            location: snafu::location!(),
+        })
+}
+
+fn estimate_fragment_columns(
+    dataset: &BlockingDataset,
+    fragment_id: u64,
+) -> Result<Vec<LanceColumnMemoryEstimate>> {
+    let fragment = dataset
+        .get_fragment(fragment_id)
+        .ok_or_else(|| LanceError::InvalidInput {
+            source: format!("Fragment {} not found", fragment_id).into(),
+            location: snafu::location!(),
+        })?;
+
+    // Reuse the same scheduler and object-store configuration as normal reads;
+    // the estimator itself only schedules footer and column/page metadata I/O.
+    let scheduler = dataset
+        .fragment_read_config(FragReadConfig::default())
+        .scan_scheduler
+        .expect("fragment_read_config always installs a scheduler");
+    TOKIO_RT.block_on(
+        crate::lance_memory_estimator::estimate_fragment_column_memory(
+            &dataset.inner,
+            &fragment,
+            scheduler,
+        ),
+    )
+}
+
+/// Estimate each top-level column's decoded Arrow buffer size in schema order.
+///
+/// The estimator reads footer and page metadata only. Variable-width columns
+/// use Lance's decoded page-size target instead of interpreting page encodings.
+pub fn estimate_fragment_column_memory(
+    dataset: &BlockingDataset,
+    fragment_id: u64,
+) -> Result<Vec<LanceColumnMemoryEstimate>> {
+    estimate_fragment_columns(dataset, fragment_id)
+}
+
+/// Estimate the decoded Arrow buffer size of a fragment without reading data pages.
+///
+/// This compatibility API is the saturating sum of the per-column estimates.
+/// Errors are returned through cxx so the C++ best-effort wrapper can fall back
+/// to zero.
+pub fn estimate_fragment_memory(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64> {
+    Ok(estimate_fragment_columns(dataset, fragment_id)?
+        .into_iter()
+        .map(|estimate| estimate.memory_size)
+        .fold(0_u64, u64::saturating_add))
+}
+
+pub unsafe fn get_fragment_schema(
+    dataset: &BlockingDataset,
+    fragment_id: u64,
+    out_schema_ptr: *mut u8,
+) -> Result<()> {
+    let fragment_meta =
+        dataset
+            .get_fragment(fragment_id)
+            .ok_or_else(|| LanceError::InvalidInput {
+                source: format!("Fragment {} not found", fragment_id).into(),
+                location: snafu::location!(),
+            })?;
+
+    // In Lance 7, FileFragment::schema() returns the current dataset schema. It
+    // includes evolved nullable fields that may not be physically stored in this
+    // fragment, matching the schema order used by the column memory estimator.
+    // The clone is cheap because Dataset internally wraps state in Arcs.
+    let file_fragment = FileFragment::new(Arc::new(dataset.inner.clone()), fragment_meta);
+    let lance_schema = file_fragment.schema();
+    let arrow_schema: ArrowSchema = lance_schema.into();
+
+    let ffi_schema = arrow::ffi::FFI_ArrowSchema::try_from(&arrow_schema).map_err(|e| {
+        LanceError::InvalidInput {
+            source: format!("Failed to export fragment schema: {}", e).into(),
+            location: snafu::location!(),
+        }
+    })?;
+
+    let out_ptr = out_schema_ptr as *mut arrow::ffi::FFI_ArrowSchema;
+    unsafe { std::ptr::write(out_ptr, ffi_schema) };
+    Ok(())
+}
+
+//=============================================================================
+// BlockingScanner: dataset-level scan support
+//=============================================================================
+
+/// Simple RecordBatchReader backed by a Vec of batches
+struct VecBatchReader {
+    batches: std::vec::IntoIter<RecordBatch>,
+    schema: SchemaRef,
+}
+
+impl Iterator for VecBatchReader {
+    type Item = RustResult<RecordBatch, ArrowError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.batches.next().map(Ok)
+    }
+}
+
+impl RecordBatchReader for VecBatchReader {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+pub struct BlockingScanner {
+    inner: Scanner,
+    schema: SchemaRef,
+}
+
+impl BlockingScanner {
+    pub fn count_rows(&self) -> Result<u64> {
+        Ok(TOKIO_RT.block_on(self.inner.count_rows())?)
+    }
+
+    pub unsafe fn open_stream(&self, out_stream: *mut u8) -> Result<()> {
+        let stream = TOKIO_RT.block_on(self.inner.try_into_stream())?;
+        let batches: Vec<RecordBatch> = TOKIO_RT.block_on(stream.try_collect::<Vec<_>>())?;
+
+        let reader = VecBatchReader {
+            batches: batches.into_iter(),
+            schema: self.schema.clone(),
+        };
+        let ffi_stream = FFI_ArrowArrayStream::new(Box::new(reader));
+        let out_stream_ptr = out_stream as *mut FFI_ArrowArrayStream;
+        unsafe { std::ptr::write(out_stream_ptr, ffi_stream) };
+        Ok(())
+    }
+}
+
+pub unsafe fn create_scanner(
+    dataset: &BlockingDataset,
+    schema_ptr: *mut u8,
+    batch_size: u32,
+) -> Result<Box<BlockingScanner>> {
+    let ffi_schema = unsafe {
+        arrow::ffi::FFI_ArrowSchema::from_raw(schema_ptr as *mut arrow::ffi::FFI_ArrowSchema)
+    };
+    let arrow_schema =
+        ArrowSchema::try_from(&ffi_schema).map_err(|e| LanceError::InvalidInput {
+            source: format!("Failed to convert schema: {}", e).into(),
+            location: snafu::location!(),
+        })?;
+
+    let column_names: Vec<&str> = arrow_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+
+    let mut scanner = dataset.inner.scan();
+    scanner.project(&column_names)?;
+    scanner.batch_size(batch_size as usize);
+
+    Ok(Box::new(BlockingScanner {
+        inner: scanner,
+        schema: Arc::new(arrow_schema),
+    }))
+}
+
+pub unsafe fn dataset_take(
+    dataset: &BlockingDataset,
+    indices: &[u64],
+    schema_ptr: *mut u8,
+    out_stream: *mut u8,
+) -> Result<()> {
+    let ffi_schema = unsafe {
+        arrow::ffi::FFI_ArrowSchema::from_raw(schema_ptr as *mut arrow::ffi::FFI_ArrowSchema)
+    };
+    let arrow_schema =
+        ArrowSchema::try_from(&ffi_schema).map_err(|e| LanceError::InvalidInput {
+            source: format!("Failed to convert schema: {}", e).into(),
+            location: snafu::location!(),
+        })?;
+
+    let column_names: Vec<&str> = arrow_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+
+    let projection = dataset.inner.schema().project(&column_names)?;
+    let batch = TOKIO_RT.block_on(dataset.inner.take(indices, projection))?;
+
+    let reader = VecBatchReader {
+        batches: vec![batch].into_iter(),
+        schema: Arc::new(arrow_schema),
+    };
+    let ffi_stream = FFI_ArrowArrayStream::new(Box::new(reader));
+    let out_stream_ptr = out_stream as *mut FFI_ArrowArrayStream;
+    unsafe { std::ptr::write(out_stream_ptr, ffi_stream) };
+    Ok(())
+}
