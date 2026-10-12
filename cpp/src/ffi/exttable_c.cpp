@@ -164,6 +164,7 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
 }
 
 static arrow::Result<std::shared_ptr<milvus_storage::api::Manifest>> read_manifest(const char* path,
+                                                                                   int64_t manifest_size,
                                                                                    const ::LoonProperties* properties) {
   milvus_storage::api::Properties properties_map;
 
@@ -173,19 +174,26 @@ static arrow::Result<std::shared_ptr<milvus_storage::api::Manifest>> read_manife
   }
 
   ARROW_ASSIGN_OR_RAISE(auto fs, milvus_storage::FilesystemCache::getInstance().get(properties_map, path));
-  return milvus_storage::api::Manifest::ReadFrom(fs, path);
+  return milvus_storage::api::Manifest::ReadFrom(fs, path, manifest_size);
 }
 
 LoonFFIResult loon_exttable_read_manifest(const char* manifest_file_path,
                                           const ::LoonProperties* properties,
                                           LoonManifest** out_manifest) {
+  return loon_exttable_read_manifest_with_size(manifest_file_path, -1, properties, out_manifest);
+}
+
+LoonFFIResult loon_exttable_read_manifest_with_size(const char* manifest_file_path,
+                                                    int64_t manifest_size,
+                                                    const ::LoonProperties* properties,
+                                                    LoonManifest** out_manifest) {
   if (!manifest_file_path || !properties || !out_manifest) {
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: manifest_file_path, properties, and out_manifest must not be null");
   }
 
   try {
-    auto manifest_res = read_manifest(manifest_file_path, properties);
+    auto manifest_res = read_manifest(manifest_file_path, manifest_size, properties);
     RETURN_ARROW_ERROR_IF(manifest_res.status(), LOON_ARROW_ERROR, manifest_res.status().ToString());
     auto manifest = manifest_res.ValueOrDie();
 

@@ -306,7 +306,8 @@ arrow::Result<std::unique_ptr<Transaction>> Transaction::Open(const milvus_stora
                                                               const std::string& base_path,
                                                               int64_t read_version,
                                                               const Resolver& resolver,
-                                                              uint32_t retry_limit) {
+                                                              uint32_t retry_limit,
+                                                              int64_t read_manifest_size) {
   ARROW_ASSIGN_OR_RAISE(auto storage_uri, milvus_storage::StorageUri::Parse(base_path));
   auto txn = std::unique_ptr<Transaction>(
       new Transaction(fs, storage_uri.ToRelativePath(), read_version, resolver, retry_limit));
@@ -316,6 +317,8 @@ arrow::Result<std::unique_ptr<Transaction>> Transaction::Open(const milvus_stora
   if (read_version == LATEST) {
     ARROW_ASSIGN_OR_RAISE(actual_read_version, txn->get_latest_version());
     // If no manifests exist, actual_read_version will be 0
+    // The size hint describes a specific version, not whichever is latest.
+    read_manifest_size = -1;
   }
 
   // Record read_version_
@@ -323,7 +326,7 @@ arrow::Result<std::unique_ptr<Transaction>> Transaction::Open(const milvus_stora
 
   // Eagerly load manifest if version exists (version > 0)
   if (actual_read_version > 0) {
-    ARROW_ASSIGN_OR_RAISE(txn->read_manifest_, txn->read_manifest(actual_read_version));
+    ARROW_ASSIGN_OR_RAISE(txn->read_manifest_, txn->read_manifest(actual_read_version, read_manifest_size));
   } else {
     // Version 0: no manifest exists yet, create empty manifest
     txn->read_manifest_ = std::make_shared<Manifest>();
@@ -359,6 +362,7 @@ arrow::Result<int64_t> Transaction::Commit() {
   if (!updates_.hasChanges()) {
     return arrow::Status::Invalid("Cannot commit: no updates recorded");
   }
+  committed_manifest_size_ = -1;
 
   // Lambda to reload latest manifest and return version and manifest.
   // Skips the disk read for manifest-N.avro when the resolver declares it doesn't
@@ -459,7 +463,9 @@ arrow::Result<std::shared_ptr<Manifest>> Transaction::GetManifest() {
 
 int64_t Transaction::GetReadVersion() const { return read_version_; }
 
-arrow::Result<std::shared_ptr<Manifest>> Transaction::read_manifest(int64_t version) {
+int64_t Transaction::GetCommittedManifestSize() const { return committed_manifest_size_; }
+
+arrow::Result<std::shared_ptr<Manifest>> Transaction::read_manifest(int64_t version, int64_t size_hint) {
   // Fault injection point for testing
   FIU_RETURN_ON(FIUKEY_MANIFEST_READ_FAIL,
                 arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_MANIFEST_READ_FAIL)));
@@ -470,7 +476,7 @@ arrow::Result<std::shared_ptr<Manifest>> Transaction::read_manifest(int64_t vers
   }
 
   auto path = get_manifest_filepath(base_path_, version);
-  return Manifest::ReadFrom(fs_, path);
+  return Manifest::ReadFrom(fs_, path, size_hint);
 }
 
 Transaction& Transaction::DropColumn(const std::string& column_name) {
@@ -567,7 +573,7 @@ arrow::Status Transaction::write_manifest(const std::shared_ptr<Manifest>& manif
   // transaction sneak in and claim the same target version first.
   FIU_DO_ON(FIUKEY_SLEEP_BEFORE_COMMIT_MANIFEST, { std::this_thread::sleep_for(std::chrono::seconds(5)); });
 
-  return Manifest::WriteTo(fs_, get_manifest_filepath(base_path_, new_version), *manifest);
+  return Manifest::WriteTo(fs_, get_manifest_filepath(base_path_, new_version), *manifest, &committed_manifest_size_);
 }
 
 }  // namespace milvus_storage::api::transaction

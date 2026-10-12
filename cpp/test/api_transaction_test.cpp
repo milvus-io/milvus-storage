@@ -538,6 +538,35 @@ TEST_F(TransactionTest, ReadFromCachesManifest) {
   ASSERT_EQ(manifest1->columnGroups().size(), 1);
 }
 
+TEST_F(TransactionTest, CommitReportsManifestSizeForReopen) {
+  int64_t committed_version = 0;
+  int64_t manifest_size = -1;
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    EXPECT_EQ(transaction->GetCommittedManifestSize(), -1);
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_sized.parquet"));
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(committed_version, transaction->Commit());
+    manifest_size = transaction->GetCommittedManifestSize();
+  }
+  ASSERT_AND_ASSIGN(auto info, fs_->GetFileInfo(get_manifest_filepath(base_path_, committed_version)));
+  EXPECT_EQ(info.size(), manifest_size);
+
+  // Reopen by the recorded size; a wrong size still reads the right manifest,
+  // and LATEST ignores the size because it does not name a version.
+  for (int64_t size_hint : {manifest_size, manifest_size - 1, manifest_size + 1}) {
+    Manifest::CleanCache();
+    ASSERT_AND_ASSIGN(auto transaction,
+                      Transaction::Open(fs_, base_path_, committed_version, FailResolver, 1, size_hint));
+    ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+    ASSERT_EQ(manifest->columnGroups().size(), 1);
+    EXPECT_EQ(manifest->columnGroups()[0]->files.size(), 1);
+  }
+  Manifest::CleanCache();
+  ASSERT_AND_ASSIGN(auto latest, Transaction::Open(fs_, base_path_, LATEST, FailResolver, 1, manifest_size - 1));
+  EXPECT_EQ(latest->GetReadVersion(), committed_version);
+}
+
 TEST_F(TransactionTest, ManifestCacheKeyIncludesRootPath) {
   // Write a manifest under base_path_
   {

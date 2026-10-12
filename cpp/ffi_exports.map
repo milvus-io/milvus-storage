@@ -148,9 +148,11 @@
 
     # Transaction interface
     loon_transaction_open;
+    loon_transaction_open_with_manifest_size;
     loon_transaction_get_manifest;
     loon_transaction_get_read_version;
     loon_transaction_commit;
+    loon_transaction_get_committed_manifest_size;
     loon_transaction_destroy;
     loon_transaction_drop_column;
     loon_transaction_add_column_group;
@@ -164,6 +166,7 @@
     loon_exttable_explore;
     loon_exttable_get_file_info;
     loon_exttable_read_manifest;
+    loon_exttable_read_manifest_with_size;
 
     # Filesystem interface
     loon_filesystem_open_writer;

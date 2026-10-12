@@ -212,21 +212,29 @@ class Manifest final {
    * @brief Read a manifest from filesystem, using cache for immutable manifests.
    * @param fs Arrow filesystem (must be FileSystemProxy wrapping SubTreeFileSystem)
    * @param path Path to the manifest file (relative to fs root)
+   * @param size_hint Byte size of the manifest file as reported by WriteTo, or a
+   *        non-positive value if unknown. A known size lets the read skip the
+   *        object metadata request (an S3 HEAD). A file larger than the hint is
+   *        read again by its queried size, so a wrong hint costs a request but
+   *        never a wrong result.
    * @return Shared pointer to the deserialized manifest
    */
   static arrow::Result<std::shared_ptr<Manifest>> ReadFrom(const milvus_storage::ArrowFileSystemPtr& fs,
-                                                           const std::string& path);
+                                                           const std::string& path,
+                                                           int64_t size_hint = -1);
 
   /**
    * @brief Write a manifest to filesystem. Always uses conditional write (fails if file exists).
    * @param fs Arrow filesystem (must be FileSystemProxy wrapping SubTreeFileSystem)
    * @param path Path to write the manifest file
    * @param manifest Manifest to write
+   * @param out_size If not null, receives the byte size of the written file on success
    * @return Status (AlreadyExists if file already exists)
    */
   static arrow::Status WriteTo(const milvus_storage::ArrowFileSystemPtr& fs,
                                const std::string& path,
-                               const Manifest& manifest);
+                               const Manifest& manifest,
+                               int64_t* out_size = nullptr);
 
   /**
    * @brief Clean the manifest cache

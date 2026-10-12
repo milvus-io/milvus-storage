@@ -797,6 +797,25 @@ FFI_EXPORT LoonFFIResult loon_transaction_open(const char* base_path,
                                                LoonTransactionHandle* out_handle);
 
 /**
+ * @brief Opens a transaction like loon_transaction_open, with the byte size of the
+ *        manifest file at read_version
+ *
+ * The size, as reported by loon_transaction_get_committed_manifest_size when that
+ * version was committed, lets the manifest read skip the object metadata request
+ * (an S3 HEAD). A size that does not match the file costs that request but never
+ * a wrong read. Ignored when read_version is negative.
+ *
+ * @param manifest_size Byte size of the manifest file, or a non-positive value if unknown
+ */
+FFI_EXPORT LoonFFIResult loon_transaction_open_with_manifest_size(const char* base_path,
+                                                                  const LoonProperties* properties,
+                                                                  int64_t read_version,
+                                                                  int32_t resolve_id,
+                                                                  uint32_t retry_limit,
+                                                                  int64_t manifest_size,
+                                                                  LoonTransactionHandle* out_handle);
+
+/**
  * @brief get the manifest of the transaction
  *
  * @param handle Transaction handle
@@ -823,6 +842,18 @@ FFI_EXPORT LoonFFIResult loon_transaction_get_read_version(LoonTransactionHandle
  * @return result of FFI
  */
 FFI_EXPORT LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out_committed_version);
+
+/**
+ * @brief Gets the byte size of the manifest file written by the last successful commit
+ *
+ * Record it alongside the committed version and pass it back when opening that
+ * version, see loon_transaction_open_with_manifest_size.
+ *
+ * @param handle Transaction handle
+ * @param out_size Output manifest file size, -1 before a successful commit
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_transaction_get_committed_manifest_size(LoonTransactionHandle handle, int64_t* out_size);
 
 /**
  * @brief Destroys a Transaction
@@ -1066,6 +1097,22 @@ FFI_EXPORT LoonFFIResult loon_segment_reader_open(const char* segment_path,
                                                   const LoonSegmentReaderConfig* config,
                                                   const LoonProperties* properties,
                                                   LoonSegmentReaderHandle* out_handle);
+
+/**
+ * @brief Opens a SegmentReader like loon_segment_reader_open, with the byte size of
+ *        the manifest file at version (see loon_transaction_open_with_manifest_size)
+ *
+ * @param manifest_size Byte size of the manifest file, or a non-positive value if unknown
+ */
+FFI_EXPORT LoonFFIResult loon_segment_reader_open_with_manifest_size(const char* segment_path,
+                                                                     int64_t version,
+                                                                     int64_t manifest_size,
+                                                                     struct ArrowSchema* schema,
+                                                                     const char** needed_columns,
+                                                                     int64_t num_columns,
+                                                                     const LoonSegmentReaderConfig* config,
+                                                                     const LoonProperties* properties,
+                                                                     LoonSegmentReaderHandle* out_handle);
 
 /**
  * @brief Gets an ArrowArrayStream from the SegmentReader

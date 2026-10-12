@@ -38,6 +38,17 @@ LoonFFIResult loon_transaction_open(const char* base_path,
                                     int32_t resolve_id,
                                     uint32_t retry_limit,
                                     LoonTransactionHandle* out_handle) {
+  return loon_transaction_open_with_manifest_size(base_path, properties, read_version, resolve_id, retry_limit, -1,
+                                                  out_handle);
+}
+
+LoonFFIResult loon_transaction_open_with_manifest_size(const char* base_path,
+                                                       const ::LoonProperties* properties,
+                                                       int64_t read_version,
+                                                       int32_t resolve_id,
+                                                       uint32_t retry_limit,
+                                                       int64_t manifest_size,
+                                                       LoonTransactionHandle* out_handle) {
   if (!base_path || !properties) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: base_path, properties must not be null");
   }
@@ -64,7 +75,7 @@ LoonFFIResult loon_transaction_open(const char* base_path,
     auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map, base_path);
     RETURN_ARROW_ERROR_IF(fs_result.status(), LOON_ARROW_ERROR, fs_result.status().ToString());
     auto transaction_result =
-        Transaction::Open(fs_result.ValueOrDie(), base_path, read_version, *resolver, retry_limit);
+        Transaction::Open(fs_result.ValueOrDie(), base_path, read_version, *resolver, retry_limit, manifest_size);
     RETURN_ARROW_ERROR_IF(transaction_result.status(), LOON_ARROW_ERROR, transaction_result.status().ToString());
     auto transaction = std::move(transaction_result.ValueOrDie());
 
@@ -97,6 +108,14 @@ LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out
   }
 
   RETURN_UNREACHABLE();
+}
+
+LoonFFIResult loon_transaction_get_committed_manifest_size(LoonTransactionHandle handle, int64_t* out_size) {
+  if (!handle || !out_size) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_size must not be null");
+  }
+  *out_size = reinterpret_cast<Transaction*>(handle)->GetCommittedManifestSize();
+  RETURN_SUCCESS();
 }
 
 void loon_transaction_destroy(LoonTransactionHandle handle) {
