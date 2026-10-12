@@ -261,6 +261,15 @@ arrow::Status ParquetFileWriter::Write(const std::shared_ptr<arrow::RecordBatch>
   return arrow::Status::OK();
 }
 
+size_t ParquetFileWriter::GetRetainedBufferSize() const {
+  size_t size = 0;
+  for (const auto& batch : cached_batches_) {
+    // Count backing buffers, not just the logical rows of a retained slice.
+    size += GetRecordBatchMemorySize(batch);
+  }
+  return size;
+}
+
 arrow::Status ParquetFileWriter::Flush() {
   std::vector<std::shared_ptr<arrow::RecordBatch>> row_group_batches;
   std::vector<size_t> row_group_batch_sizes;

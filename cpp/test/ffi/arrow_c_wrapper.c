@@ -207,6 +207,7 @@ void release_string_array_data(struct ArrowArray* array) {
     free((char*)array->buffers[2]);
   }
   free(array->buffers);
+  array->release = NULL;
 }
 
 void release_primitive_array_data(struct ArrowArray* array) {
@@ -220,6 +221,7 @@ void release_primitive_array_data(struct ArrowArray* array) {
     free((uint8_t*)array->buffers[1]);
   }
   free(array->buffers);
+  array->release = NULL;
 }
 
 void release_root_array(struct ArrowArray* array) {
