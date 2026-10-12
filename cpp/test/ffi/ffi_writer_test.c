@@ -336,6 +336,50 @@ static void test_write_with_meta(void) {
   loon_column_groups_destroy(out_cgs);
 }
 
+void release_root_array(struct ArrowArray* array);
+
+static int caller_batch_released;
+
+static void track_release(struct ArrowArray* array) {
+  caller_batch_released = 1;
+  release_root_array(array);
+}
+
+// The writer must release the caller's batch when write returns, not at close.
+static void test_write_releases_caller_batch(void) {
+  LoonWriterHandle writer_handle;
+  LoonProperties rp;
+  LoonColumnGroups* out_cgs = NULL;
+  int64_t int64_data[] = {1, 2, 3};
+  int32_t int32_data[] = {25, 30, 35};
+  const char* str_data[] = {"ABC", "BCD", "DDDD"};
+  struct ArrowArray* struct_array = create_test_struct_arrow_array(int64_data, int32_data, str_data, 3);
+  struct ArrowSchema* schema = create_test_struct_schema();
+  struct_array->release = track_release;
+  caller_batch_released = 0;
+
+  LoonFFIResult rc = create_test_writer_pp(&rp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_writer_new(TEST_BASE_PATH, schema, &rp, &writer_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_writer_write(writer_handle, struct_array);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  int released_after_write = caller_batch_released;
+
+  rc = loon_writer_close(writer_handle, NULL, NULL, 0, &out_cgs);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  loon_column_groups_destroy(out_cgs);
+  loon_writer_destroy(writer_handle);
+  free(struct_array);
+  if (schema->release) {
+    schema->release(schema);
+  }
+  free(schema);
+  loon_properties_free(&rp);
+
+  ck_assert_msg(released_after_write, "writer still holds the caller's batch after write");
+}
+
 // Test error handling for writer functions
 static void test_writer_error_handling(void) {
   LoonFFIResult rc;
@@ -414,4 +458,5 @@ void run_writer_suite(void) {
   RUN_TEST(test_multi_write_size_based);
   RUN_TEST(test_write_with_meta);
   RUN_TEST(test_writer_error_handling);
+  RUN_TEST(test_write_releases_caller_batch);
 }

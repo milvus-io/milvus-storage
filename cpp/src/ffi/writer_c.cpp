@@ -20,9 +20,25 @@
 
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
+#include <arrow/array.h>
+#include <arrow/device.h>
+#include <arrow/record_batch.h>
 
 using namespace milvus_storage::api;
 using namespace milvus_storage;
+
+// Copies each column into buffers from the default memory pool.
+static arrow::Result<std::shared_ptr<arrow::RecordBatch>> CopyToWriterMemory(
+    const std::shared_ptr<arrow::RecordBatch>& batch) {
+  auto mm = arrow::default_cpu_memory_manager();
+  std::vector<std::shared_ptr<arrow::Array>> columns;
+  columns.reserve(batch->num_columns());
+  for (const auto& column : batch->columns()) {
+    ARROW_ASSIGN_OR_RAISE(auto copied, column->CopyTo(mm));
+    columns.emplace_back(std::move(copied));
+  }
+  return arrow::RecordBatch::Make(batch->schema(), batch->num_rows(), std::move(columns));
+}
 
 LoonFFIResult loon_writer_new(const char* base_path,
                               ArrowSchema* schema_raw,
@@ -73,7 +89,11 @@ LoonFFIResult loon_writer_write(LoonWriterHandle handle, struct ArrowArray* arra
       array->release(array);
       RETURN_ARROW_ERROR(rb_result.status(), LOON_ARROW_ERROR, rb_result.status().ToString());
     }
-    auto record_batch = rb_result.ValueOrDie();
+    // The writer may cache slices of this batch until close, and any slice
+    // keeps the caller's whole batch alive. Copy it so we only hold our own memory.
+    auto owned_result = CopyToWriterMemory(rb_result.ValueOrDie());
+    RETURN_ARROW_ERROR_IF(owned_result.status(), LOON_ARROW_ERROR, owned_result.status().ToString());
+    auto record_batch = owned_result.ValueOrDie();
 
     auto status = cpp_writer->write(record_batch);
     RETURN_ARROW_ERROR_IF(status, LOON_ARROW_ERROR, status.ToString());
