@@ -14,13 +14,13 @@
 
 #include "milvus-storage/filesystem/s3/provider/VolcengineCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/VolcengineSTSClient.h"
+#include "milvus-storage/common/log.h"
 #include <aws/core/internal/AWSHttpResourceClient.h>
 #include <aws/core/client/DefaultRetryStrategy.h>
 #include <aws/core/client/SpecifiedRetryableErrorsRetryStrategy.h>
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/HttpResponse.h>
-#include <aws/core/utils/logging/LogMacros.h>
 #include <aws/core/utils/StringUtils.h>
 #include <aws/core/utils/HashingUtils.h>
 #include <aws/core/utils/UUID.h>
@@ -69,36 +69,30 @@ VolcengineSTSAssumeRoleWebIdentityCredentialsProvider::VolcengineSTSAssumeRoleWe
 
 void VolcengineSTSAssumeRoleWebIdentityCredentialsProvider::InitClient() {
   if (m_tokenFile.empty()) {
-    AWS_LOGSTREAM_WARN(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                       "Token file must be specified to use STS AssumeRole "
-                       "web identity creds provider.");
+    LOG_STORAGE_WARNING_ << fmt::format(
+        "[{}] Token file must be specified to use STS AssumeRole web identity creds provider.",
+        STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
     return;  // No need to do further constructing
   } else {
-    AWS_LOGSTREAM_DEBUG(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                        "Resolved token_file from profile_config or "
-                        "environment variable to be "
-                            << m_tokenFile);
+    LOG_STORAGE_DEBUG_ << fmt::format("[{}] Resolved token_file from profile_config or environment variable to be {}",
+                                      STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, m_tokenFile);
   }
 
   if (m_roleArn.empty()) {
-    AWS_LOGSTREAM_WARN(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                       "RoleArn must be specified to use STS AssumeRole "
-                       "web identity creds provider.");
+    LOG_STORAGE_WARNING_ << fmt::format(
+        "[{}] RoleArn must be specified to use STS AssumeRole web identity creds provider.",
+        STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
     return;  // No need to do further constructing
   } else {
-    AWS_LOGSTREAM_DEBUG(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                        "Resolved role_arn from profile_config or "
-                        "environment variable to be "
-                            << m_roleArn);
+    LOG_STORAGE_DEBUG_ << fmt::format("[{}] Resolved role_arn from profile_config or environment variable to be {}",
+                                      STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, m_roleArn);
   }
 
   if (m_sessionName.empty()) {
     m_sessionName = Aws::Utils::UUID::RandomUUID();
   } else {
-    AWS_LOGSTREAM_DEBUG(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                        "Resolved session_name from profile_config or "
-                        "environment variable to be "
-                            << m_sessionName);
+    LOG_STORAGE_DEBUG_ << fmt::format("[{}] Resolved session_name from profile_config or environment variable to be {}",
+                                      STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, m_sessionName);
   }
 
   // Disable the AWS SDK's IMDS probe. On VKE the EC2 169.254.169.254 endpoint
@@ -117,7 +111,8 @@ void VolcengineSTSAssumeRoleWebIdentityCredentialsProvider::InitClient() {
   m_client =
       Aws::MakeUnique<VolcengineSTSCredentialsClient>(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, config, m_durationSeconds);
   m_initialized = true;
-  AWS_LOGSTREAM_INFO(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Creating STS AssumeRole with web identity creds provider.");
+  LOG_STORAGE_INFO_ << fmt::format("[{}] Creating STS AssumeRole with web identity creds provider.",
+                                   STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
 }
 
 Aws::Auth::AWSCredentials VolcengineSTSAssumeRoleWebIdentityCredentialsProvider::GetAWSCredentials() {
@@ -132,7 +127,8 @@ Aws::Auth::AWSCredentials VolcengineSTSAssumeRoleWebIdentityCredentialsProvider:
 }
 
 void VolcengineSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
-  AWS_LOGSTREAM_INFO(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Credentials have expired, attempting to renew from STS.");
+  LOG_STORAGE_INFO_ << fmt::format("[{}] Credentials have expired, attempting to renew from STS.",
+                                   STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
 
   Aws::IFStream tokenFile(m_tokenFile.c_str());
   if (tokenFile) {
@@ -142,18 +138,18 @@ void VolcengineSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
     }
     m_token = token;
   } else {
-    AWS_LOGSTREAM_ERROR(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Can't open token file: " << m_tokenFile);
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] Can't open token file: {}", STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
+                                      m_tokenFile);
     return;
   }
   VolcengineSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{m_token, m_roleArn, m_sessionName};
 
   auto result = m_client->GetAssumeRoleWithWebIdentityCredentials(request);
   if (result.creds.IsEmpty()) {
-    AWS_LOGSTREAM_ERROR(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                        "Failed to retrieve valid credentials - credentials are empty");
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] Failed to retrieve valid credentials - credentials are empty",
+                                      STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
   } else {
-    AWS_LOGSTREAM_TRACE(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                        "Successfully retrieved credentials with AWS_ACCESS_KEY: " << result.creds.GetAWSAccessKeyId());
+    LOG_STORAGE_TRACE_ << fmt::format("[{}] Successfully retrieved credentials", STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
     m_credentials = result.creds;
   }
 }
