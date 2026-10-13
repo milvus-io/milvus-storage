@@ -473,6 +473,54 @@ static void test_add_delta_log(void) {
   loon_properties_free(&pp);
 }
 
+// Test loon_transaction_get_committed_manifest_size and reopening by that size
+static void test_manifest_size_round_trip(void) {
+  LoonTransactionHandle tranhandle;
+  LoonTransactionHandle read_transaction = 0;
+  LoonProperties pp;
+  LoonFFIResult rc;
+  LoonManifest* cmanifest = NULL;
+  int64_t committed_version = 0;
+  int64_t manifest_size = 0;
+
+  create_test_pp(&pp);
+  FileSystemHandle fs = get_fs(&pp);
+  recreate_dir(fs, TEST_BASE_PATH);
+
+  rc = loon_transaction_open(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
+                             &tranhandle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_transaction_get_committed_manifest_size(tranhandle, &manifest_size);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert_int_eq(manifest_size, -1);
+
+  rc = loon_transaction_add_delta_log(tranhandle, "delta_log_path_1.log", 100);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_transaction_commit(tranhandle, &committed_version);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_transaction_get_committed_manifest_size(tranhandle, &manifest_size);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert(manifest_size > 0);
+  loon_transaction_destroy(tranhandle);
+
+  rc = loon_transaction_get_committed_manifest_size(0, &manifest_size);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_transaction_open_with_manifest_size(TEST_BASE_PATH, &pp, committed_version, LOON_TRANSACTION_RESOLVE_FAIL,
+                                                1 /* retry_limit */, manifest_size, &read_transaction);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_transaction_get_manifest(read_transaction, &cmanifest);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert_int_eq(cmanifest->delta_logs.num_delta_logs, 1);
+
+  loon_manifest_destroy(cmanifest);
+  loon_transaction_destroy(read_transaction);
+  clean_test_dir(fs, TEST_BASE_PATH);
+  loon_filesystem_destroy(fs);
+  loon_properties_free(&pp);
+}
+
 // Test loon_transaction_update_stat
 static void test_update_stat(void) {
   LoonTransactionHandle tranhandle;
@@ -892,6 +940,8 @@ void run_manifest_suite(void) {
   RUN_TEST(test_drop_index_and_commit);
   loon_reset_context();
   RUN_TEST(test_add_delta_log);
+  loon_reset_context();
+  RUN_TEST(test_manifest_size_round_trip);
   loon_reset_context();
   RUN_TEST(test_update_stat);
   loon_reset_context();

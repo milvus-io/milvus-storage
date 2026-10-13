@@ -57,6 +57,19 @@ LoonFFIResult loon_segment_reader_open(const char* segment_path,
                                        const LoonSegmentReaderConfig* config,
                                        const LoonProperties* properties,
                                        LoonSegmentReaderHandle* out_handle) {
+  return loon_segment_reader_open_with_manifest_size(segment_path, version, -1, schema_raw, needed_columns, num_columns,
+                                                     config, properties, out_handle);
+}
+
+LoonFFIResult loon_segment_reader_open_with_manifest_size(const char* segment_path,
+                                                          int64_t version,
+                                                          int64_t manifest_size,
+                                                          ArrowSchema* schema_raw,
+                                                          const char** needed_columns,
+                                                          int64_t num_columns,
+                                                          const LoonSegmentReaderConfig* config,
+                                                          const LoonProperties* properties,
+                                                          LoonSegmentReaderHandle* out_handle) {
   if (!segment_path || !schema_raw || !config || !properties || !out_handle) {
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: segment_path, schema_raw, config, properties, and out_handle must not be null");
@@ -94,7 +107,8 @@ LoonFFIResult loon_segment_reader_open(const char* segment_path,
     auto fs = std::move(fs_result).ValueOrDie();
 
     // open transaction to read manifest
-    auto txn_result = api::transaction::Transaction::Open(fs, segment_path, version, api::transaction::FailResolver, 1);
+    auto txn_result = api::transaction::Transaction::Open(fs, segment_path, version, api::transaction::FailResolver, 1,
+                                                          manifest_size);
     RETURN_ARROW_ERROR_IF(txn_result.status(), LOON_ARROW_ERROR, txn_result.status().ToString());
     auto txn = std::move(txn_result).ValueOrDie();
 

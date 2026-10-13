@@ -495,6 +495,63 @@ TEST_F(ManifestTest, ReadFromCachesResult) {
   EXPECT_EQ(m1.get(), m2.get());  // same pointer from cache
 }
 
+// Records how files are opened: by path, which makes the filesystem learn the
+// size itself (an S3 HEAD), or by a FileInfo that already carries the size.
+class OpenCountingFileSystem : public arrow::fs::SlowFileSystem {
+  public:
+  explicit OpenCountingFileSystem(std::shared_ptr<arrow::fs::FileSystem> base)
+      : arrow::fs::SlowFileSystem(std::move(base), /*average_latency=*/0) {}
+
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string& path) override {
+    ++path_opens;
+    return arrow::fs::SlowFileSystem::OpenInputFile(path);
+  }
+
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const arrow::fs::FileInfo& info) override {
+    ++sized_opens;
+    return arrow::fs::SlowFileSystem::OpenInputFile(info);
+  }
+
+  int path_opens = 0;
+  int sized_opens = 0;
+};
+
+// WriteTo reports the file size that ReadFrom takes back as a hint to open the
+// file by size. A wrong hint never yields a wrong manifest: a file that fits a
+// larger hint still comes back from that one open, while a smaller hint, even
+// one short of just the trailing 16-byte avro sync marker, falls back to
+// opening the file by path. A hint above the cap is not used at all.
+TEST_F(ManifestTest, ReadFromWithSizeHint) {
+  std::string data_path = get_data_filepath(base_path_, "hinted.parquet");
+  Manifest manifest({MakeCG({"id"}, LOON_FORMAT_PARQUET, {{.path = data_path, .start_index = 0, .end_index = 10}})});
+  std::string path = get_manifest_filepath(base_path_, 1);
+  int64_t size = -1;
+  ASSERT_STATUS_OK(Manifest::WriteTo(fs_, path, manifest, &size));
+  ASSERT_AND_ASSIGN(auto info, fs_->GetFileInfo(path));
+  ASSERT_EQ(info.size(), size);
+
+  struct HintCase {
+    int64_t size_hint;
+    int sized_opens;
+    int path_opens;
+  };
+  for (const auto& c : std::vector<HintCase>{{size, 1, 0},
+                                             {size + 1, 1, 0},
+                                             {size * 2, 1, 0},
+                                             {size - 1, 1, 1},
+                                             {size - 16, 1, 1},
+                                             {int64_t{1} << 40, 0, 1}}) {
+    Manifest::CleanCache();
+    auto counting_fs = std::make_shared<OpenCountingFileSystem>(fs_);
+    ASSERT_AND_ASSIGN(auto read_back, Manifest::ReadFrom(counting_fs, path, c.size_hint));
+    EXPECT_EQ(counting_fs->sized_opens, c.sized_opens) << "size hint " << c.size_hint;
+    EXPECT_EQ(counting_fs->path_opens, c.path_opens) << "size hint " << c.size_hint;
+    ASSERT_EQ(read_back->columnGroups().size(), 1);
+    ASSERT_EQ(read_back->columnGroups()[0]->files.size(), 1);
+    EXPECT_EQ(read_back->columnGroups()[0]->files[0].path, data_path);
+  }
+}
+
 TEST_F(ManifestTest, ManifestVersion) {
   Manifest manifest;
   EXPECT_EQ(manifest.version(), MANIFEST_VERSION);

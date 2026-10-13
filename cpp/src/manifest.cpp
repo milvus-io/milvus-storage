@@ -30,6 +30,7 @@
 
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/common/layout.h"
+#include "milvus-storage/common/log.h"
 #include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
@@ -622,17 +623,39 @@ static std::string MakeCacheKey(const milvus_storage::ArrowFileSystemPtr& fs, co
   return fs->type_name() + "://" + path;
 }
 
-arrow::Result<std::shared_ptr<Manifest>> Manifest::ReadFrom(const milvus_storage::ArrowFileSystemPtr& fs,
-                                                            const std::string& path) {
-  std::string cache_key = MakeCacheKey(fs, path);
+// Size hints above this are not trusted for an allocation; such a manifest is
+// read by its queried size, where the extra request is noise next to the transfer.
+static constexpr int64_t kMaxManifestSizeHint = 64LL << 20;
 
-  auto& cache = getCache();
-  auto cached = cache.get(cache_key);
-  if (cached.has_value()) {
-    return std::move(cached.value());
+// Reads a whole manifest file into a string (single allocation, avro needs a
+// std::istream). A size_hint opens the file by that size, sparing the
+// filesystem the metadata request (an S3 HEAD) it would make to learn it, and
+// asks for one byte more: a file that fits comes back whole and short of the
+// request. Only a full read means the file is larger than the hint; it is then
+// read again by its queried size, so a wrong hint costs a request but never a
+// wrong result.
+static arrow::Result<std::string> ReadManifestBytes(const milvus_storage::ArrowFileSystemPtr& fs,
+                                                    const std::string& path,
+                                                    int64_t size_hint) {
+  if (size_hint > 0 && size_hint <= kMaxManifestSizeHint) {
+    const int64_t request_size = size_hint + 1;
+    arrow::fs::FileInfo info(path, arrow::fs::FileType::File);
+    info.set_size(request_size);
+    ARROW_ASSIGN_OR_RAISE(auto input_file, fs->OpenInputFile(info));
+    std::string data(request_size, '\0');
+    ARROW_ASSIGN_OR_RAISE(auto bytes_read, input_file->Read(request_size, data.data()));
+    ARROW_RETURN_NOT_OK(input_file->Close());
+    if (bytes_read != size_hint) {
+      LOG_STORAGE_WARNING_ << fmt::format(
+          "Manifest size hint does not match the file [path={}][size_hint={}][bytes_read={}]", path, size_hint,
+          bytes_read);
+    }
+    if (bytes_read < request_size) {
+      data.resize(bytes_read);
+      return data;
+    }
   }
 
-  // Read file into string (single allocation, avro needs std::istream)
   ARROW_ASSIGN_OR_RAISE(auto input_file, fs->OpenInputFile(path));
   ARROW_ASSIGN_OR_RAISE(auto file_size, input_file->GetSize());
   std::string data(file_size, '\0');
@@ -642,6 +665,21 @@ arrow::Result<std::shared_ptr<Manifest>> Manifest::ReadFrom(const milvus_storage
         fmt::format("Failed to read the complete file, expected size={}, actual size={}", file_size, bytes_read));
   }
   ARROW_RETURN_NOT_OK(input_file->Close());
+  return data;
+}
+
+arrow::Result<std::shared_ptr<Manifest>> Manifest::ReadFrom(const milvus_storage::ArrowFileSystemPtr& fs,
+                                                            const std::string& path,
+                                                            int64_t size_hint) {
+  std::string cache_key = MakeCacheKey(fs, path);
+
+  auto& cache = getCache();
+  auto cached = cache.get(cache_key);
+  if (cached.has_value()) {
+    return std::move(cached.value());
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto data, ReadManifestBytes(fs, path, size_hint));
   std::istringstream in(data);
 
   auto manifest = std::make_shared<Manifest>();
@@ -668,7 +706,8 @@ static bool IsConditionalWriteConflict(const arrow::Status& status) {
 
 arrow::Status Manifest::WriteTo(const milvus_storage::ArrowFileSystemPtr& fs,
                                 const std::string& path,
-                                const Manifest& manifest) {
+                                const Manifest& manifest,
+                                int64_t* out_size) {
   std::string base_path = milvus_storage::base_path_for_manifest(path);
 
   // Convert to relative paths and serialize
@@ -699,6 +738,9 @@ arrow::Status Manifest::WriteTo(const milvus_storage::ArrowFileSystemPtr& fs,
         }
         return close_status;
       }
+      if (out_size != nullptr) {
+        *out_size = static_cast<int64_t>(data.size());
+      }
       return arrow::Status::OK();
     }
     if (IsConditionalWriteConflict(res.status())) {
@@ -719,7 +761,11 @@ arrow::Status Manifest::WriteTo(const milvus_storage::ArrowFileSystemPtr& fs,
 
   ARROW_ASSIGN_OR_RAISE(auto output_stream, fs->OpenOutputStream(path));
   ARROW_RETURN_NOT_OK(output_stream->Write(data.data(), data.size()));
-  return output_stream->Close();
+  ARROW_RETURN_NOT_OK(output_stream->Close());
+  if (out_size != nullptr) {
+    *out_size = static_cast<int64_t>(data.size());
+  }
+  return arrow::Status::OK();
 }
 
 }  // namespace milvus_storage::api

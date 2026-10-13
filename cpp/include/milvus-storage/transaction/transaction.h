@@ -202,11 +202,16 @@ class Transaction {
   //        the resolver alive for the lifetime of the returned Transaction. Do not pass
   //        a temporary.
   // @param retry_limit Maximum number of retry attempts on commit conflicts (default: 1)
+  // @param read_manifest_size Byte size of the manifest file at version, as returned
+  //        by GetCommittedManifestSize when it was committed, or -1 if unknown. It
+  //        lets the read skip the object metadata request; see Manifest::ReadFrom.
+  //        Ignored when version is LATEST.
   static arrow::Result<std::unique_ptr<Transaction>> Open(const milvus_storage::ArrowFileSystemPtr& fs,
                                                           const std::string& base_path,
                                                           int64_t version = LATEST,
                                                           const Resolver& resolver = FailResolver,
-                                                          uint32_t retry_limit = 1);
+                                                          uint32_t retry_limit = 1,
+                                                          int64_t read_manifest_size = -1);
 
   // Lazy scheduling of the existing synchronous transaction API. Consume on a
   // caller-owned blocking-work executor. No filesystem or transport is replaced.
@@ -243,6 +248,10 @@ class Transaction {
 
   // Get the read version of this transaction
   [[nodiscard]] int64_t GetReadVersion() const;
+
+  // Byte size of the manifest file written by the last successful Commit, or -1
+  // before one. Readers pass it back as read_manifest_size to skip a request.
+  [[nodiscard]] int64_t GetCommittedManifestSize() const;
 
   // ==================== Fluent-style Builder Methods ====================
 
@@ -322,8 +331,8 @@ class Transaction {
   // Get latest version from filesystem
   arrow::Result<int64_t> get_latest_version();
 
-  // Read manifest from filesystem at given version
-  arrow::Result<std::shared_ptr<Manifest>> read_manifest(int64_t version);
+  // Read manifest from filesystem at given version; size_hint as in Manifest::ReadFrom
+  arrow::Result<std::shared_ptr<Manifest>> read_manifest(int64_t version, int64_t size_hint = -1);
 
   arrow::Status write_manifest(const std::shared_ptr<Manifest>& manifest, int64_t old_version, int64_t new_version);
 
@@ -333,7 +342,8 @@ class Transaction {
   Updates updates_;           ///< Transaction updates tracked for resolver
   const Resolver* resolver_;  ///< Non-owning pointer to the resolver supplied at Open()
   milvus_storage::ArrowFileSystemPtr fs_;
-  uint32_t retry_limit_;  ///< Maximum number of retry attempts on commit conflicts
+  uint32_t retry_limit_;                  ///< Maximum number of retry attempts on commit conflicts
+  int64_t committed_manifest_size_ = -1;  ///< Size of the manifest file the last Commit wrote
 };
 
 }  // namespace milvus_storage::api::transaction

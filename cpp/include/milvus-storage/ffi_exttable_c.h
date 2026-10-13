@@ -72,6 +72,17 @@ FFI_EXPORT LoonFFIResult loon_exttable_read_manifest(const char* manifest_file_p
                                                      const LoonProperties* properties,
                                                      LoonManifest** out_manifest);
 
+/**
+ * @brief Read manifest from file like loon_exttable_read_manifest, with the byte size
+ *        of the file (see loon_transaction_open_with_manifest_size)
+ *
+ * @param manifest_size Byte size of the manifest file, or a non-positive value if unknown
+ */
+FFI_EXPORT LoonFFIResult loon_exttable_read_manifest_with_size(const char* manifest_file_path,
+                                                               int64_t manifest_size,
+                                                               const LoonProperties* properties,
+                                                               LoonManifest** out_manifest);
+
 #endif  // LOON_FFI_EXTERNAL_TABLE_C
 
 #ifdef __cplusplus
