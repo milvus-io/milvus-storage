@@ -37,8 +37,8 @@ arrow::Result<int64_t> ToArrowIoResult(const char* operation,
 }  // namespace internal
 
 /// Optional object metadata supplied by storage when opening a Talon reader.
-/// The version is the origin ETag without surrounding quotes. Supplied metadata
-/// must have a non-empty version for Talon's exact-version reads.
+/// The version is the origin ETag without surrounding quotes. An empty version
+/// skips ETag matching for immutable objects whose size is already known.
 struct TalonObjectStat {
   uint64_t size;
   std::string version;

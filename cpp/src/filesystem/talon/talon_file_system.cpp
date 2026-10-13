@@ -427,6 +427,9 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
       // Prepare the owning task before HEAD completion. The provider callback
       // only borrows its state, then transfers the whole task to the runtime.
       auto finish = std::make_unique<TalonTask>([state] { FinishInitialization(state); });
+      // TODO(jiaqizho): In small_reads mode, a preceding large origin GET may have cached
+      // the object size without metadata. Reuse that size without I/O and open
+      // an unchecked Talon reader instead of issuing HEAD solely for the ETag.
       auto metadata = state->origin_file->ReadMetadataAsync(state->filesystem->io_context);
       metadata.AddCallback(
           [state = state.get(), finish = std::move(finish)](const arrow::Result<Metadata>& result) mutable {
@@ -567,7 +570,7 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
     if (info.type() != arrow::fs::FileType::File && info.type() != arrow::fs::FileType::Unknown) {
       return arrow::fs::internal::NotAFile(info.path());
     }
-    return OpenTalon(info.path());
+    return OpenTalon(info.path(), info.size());
   }
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
@@ -629,15 +632,26 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
     return key;
   }
 
-  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenTalon(const std::string& path) {
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenTalon(const std::string& path,
+                                                                        const int64_t size = -1) {
     ARROW_ASSIGN_OR_RAISE(const auto key, ObjectKey(path));
-    ARROW_ASSIGN_OR_RAISE(auto origin_file, origin_fs_->OpenInputFile(path));
+    // Storage objects are immutable. A supplied size avoids HEAD and uses
+    // Talon's unchecked version; only unknown sizes need cached origin metadata.
+    const auto initial_stat = size >= 0
+                                  ? std::optional<TalonObjectStat>(TalonObjectStat{static_cast<uint64_t>(size), ""})
+                                  : state_->object_stats.get(key);
+    arrow::fs::FileInfo info(path, arrow::fs::FileType::File);
+    if (initial_stat.has_value()) {
+      // Also keep origin fallback reads from issuing another HEAD for size.
+      info.set_size(static_cast<int64_t>(initial_stat->size));
+    }
+    ARROW_ASSIGN_OR_RAISE(auto origin_file, origin_fs_->OpenInputFile(info));
     std::shared_ptr<TalonObjectReader> reader;
-    if (const auto initial_stat = state_->object_stats.get(key); initial_stat.has_value()) {
+    if (initial_stat.has_value()) {
       ARROW_ASSIGN_OR_RAISE(
-          auto cached_reader,
+          auto initial_reader,
           state_->client->OpenObject(state_->config.cloud_provider, state_->config.bucket_name, key, initial_stat));
-      reader = std::make_shared<TalonObjectReader>(std::move(cached_reader));
+      reader = std::make_shared<TalonObjectReader>(std::move(initial_reader));
     }
     return std::make_shared<TalonInputFile>(state_, std::move(origin_file), key, std::move(reader));
   }

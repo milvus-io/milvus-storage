@@ -284,6 +284,7 @@ class RecordingFileSystem final : public arrow::fs::LocalFileSystem, public Obse
   }
 
   arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const arrow::fs::FileInfo& info) override {
+    last_input_size = info.size();
     return OpenInputFile(info.path());
   }
 
@@ -292,6 +293,7 @@ class RecordingFileSystem final : public arrow::fs::LocalFileSystem, public Obse
   arrow::Status input_open_status;
   int input_open_calls = 0;
   std::string last_input_path;
+  std::atomic<int64_t> last_input_size{-1};
 
   int synchronous_listing_calls() const { return synchronous_listing_calls_; }
   int generator_calls() const { return generator_calls_; }
@@ -362,6 +364,10 @@ class TalonIntegrationTest : public ::testing::Test {
 
   void TearDown() override {
     if (fs_ != nullptr) {
+      // Let request traces distinguish read-path HEADs from cleanup's existence checks.
+      RecordProperty("read_phase_end_unix_ns", std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                  std::chrono::system_clock::now().time_since_epoch())
+                                                                  .count()));
       (void)fs_->DeleteFile(path_);
       (void)fs_->DeleteDir(parquet_path_);
       FilesystemCache::getInstance().clean();
@@ -1161,7 +1167,6 @@ TEST_F(TalonFileSystemServiceFreeTest, CachesObjectMetadataAcrossOpens) {
   second_origin->metadata_result = metadata_error;
   origin->input_file = second_origin;
   arrow::fs::FileInfo info("prefix/object", arrow::fs::FileType::File);
-  info.set_size(99);
   ASSERT_AND_ASSIGN(auto second, fs->OpenInputFile(info));
   ASSERT_AND_ASSIGN(const auto cached_size, second->GetSize());
   EXPECT_EQ(cached_size, 7);
@@ -1317,12 +1322,51 @@ TEST_F(TalonFileSystemServiceFreeTest, OpenWithFileInfoAcceptsFileAndUnknown) {
       origin->input_file = std::make_shared<MetadataInputFile>();
       ASSERT_AND_ASSIGN(auto stream, fs->OpenInputStream(info));
       ASSERT_AND_ASSIGN(const auto known_size, file->GetSize());
-      EXPECT_EQ(known_size, 7);
+      EXPECT_EQ(known_size, size >= 0 ? size : 7);
       ASSERT_STATUS_OK(file->Close());
       ASSERT_STATUS_OK(stream->Close());
     }
   }
   EXPECT_EQ(origin->input_open_calls, 12);
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, KnownSizeSkipsMetadataAndReachesOrigin) {
+  for (const auto type : {arrow::fs::FileType::File, arrow::fs::FileType::Unknown}) {
+    for (const int64_t size : {0, 7}) {
+      SCOPED_TRACE(::testing::Message() << "type=" << static_cast<int>(type) << ", size=" << size);
+      auto origin = std::make_shared<RecordingFileSystem>("origin");
+      origin->input_file = std::make_shared<MetadataInputFile>(size);
+      origin->input_file->metadata_result = arrow::Status::IOError("HEAD must not be called");
+      auto config = Config();
+      config.talon_coordinator = "127.0.0.1:0";
+      ASSERT_AND_ASSIGN(auto fs, Wrap(config, origin));
+      arrow::fs::FileInfo info("prefix/object", type);
+      info.set_size(size);
+      ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile(info));
+      EXPECT_EQ(origin->last_input_size.load(), size);
+      EXPECT_EQ(origin->last_input_path, "test-bucket/prefix/object");
+      ASSERT_AND_ASSIGN(const auto known_size, file->GetSize());
+      EXPECT_EQ(known_size, size);
+      auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(file.get());
+      ASSERT_NE(async_file, nullptr);
+      ASSERT_AND_ASSIGN(const auto async_size, async_file->GetSizeAsync().result());
+      EXPECT_EQ(async_size, size);
+      ASSERT_AND_ASSIGN(const auto buffer, file->ReadAsync({}, 0, 16).result());
+      EXPECT_EQ(buffer->ToString(), size == 0 ? "" : "payload");
+      EXPECT_EQ(origin->input_file->metadata_read_calls, 0);
+      EXPECT_EQ(origin->input_file->async_metadata_read_calls.load(), 0);
+      ASSERT_STATUS_OK(file->Close());
+
+      origin->input_file = std::make_shared<MetadataInputFile>(size);
+      origin->input_file->metadata_result = arrow::Status::IOError("HEAD must not be called");
+      ASSERT_AND_ASSIGN(auto stream, fs->OpenInputStream(info));
+      ASSERT_AND_ASSIGN(const auto bytes, stream->Read(16));
+      EXPECT_EQ(bytes->ToString(), size == 0 ? "" : "payload");
+      EXPECT_EQ(origin->input_file->metadata_read_calls, 0);
+      EXPECT_EQ(origin->input_file->async_metadata_read_calls.load(), 0);
+      ASSERT_STATUS_OK(stream->Close());
+    }
+  }
 }
 
 TEST_F(TalonFileSystemServiceFreeTest, EquivalentTalonFilesystemsCompareEqualSymmetrically) {
@@ -1656,12 +1700,17 @@ TEST_F(TalonFileSystemServiceFreeTest, TalonOpenFailureDoesNotFallBack) {
     SCOPED_TRACE(known_size);
     origin->input_file = std::make_shared<MetadataInputFile>();
     const auto opens_before = origin->input_open_calls;
-    ASSERT_AND_ASSIGN(auto file, known_size ? fs->OpenInputFile(info) : fs->OpenInputFile("prefix/object"));
-    const auto result = file->GetSize();
-    ASSERT_FALSE(result.ok());
-    EXPECT_NE(result.status().message().find("Talon does not support cloud provider"), std::string::npos);
+    const auto result = known_size ? fs->OpenInputFile(info) : fs->OpenInputFile("prefix/object");
+    // A known size initializes the Talon reader immediately; unknown sizes
+    // still defer initialization until the first metadata-dependent request.
+    EXPECT_EQ(result.ok(), !known_size);
+    const auto status = result.ok() ? result.ValueOrDie()->GetSize().status() : result.status();
+    ASSERT_FALSE(status.ok());
+    EXPECT_NE(status.message().find("Talon does not support cloud provider"), std::string::npos);
     EXPECT_EQ(origin->input_open_calls, opens_before + 1);
-    EXPECT_FALSE(file->ReadAsync(0, 1).result().ok());
+    if (result.ok()) {
+      EXPECT_FALSE(result.ValueOrDie()->ReadAsync(0, 1).result().ok());
+    }
   }
   ASSERT_AND_ASSIGN(const auto metrics, FindMetricsSource(fs, kTalonMetricsSource));
   ASSERT_NE(metrics, nullptr);
@@ -2069,7 +2118,6 @@ TEST_P(TalonCloudMetadataTest, ReadsETagAndReusesMetadataWithoutOriginRequests) 
   talon_config.talon_coordinator = "127.0.0.1:1";
   ASSERT_AND_ASSIGN(auto talon_fs, CreateArrowFileSystem(talon_config));
   arrow::fs::FileInfo info(path_, arrow::fs::FileType::File);
-  info.set_size(9999);
   ASSERT_AND_ASSIGN(auto talon_file, talon_fs->OpenInputFile(info));
   ASSERT_AND_ASSIGN(const auto talon_size, talon_file->GetSize());
   EXPECT_EQ(talon_size, size);
@@ -2103,9 +2151,9 @@ TEST_F(TalonIntegrationTest, OpenWithKnownSize) {
   ASSERT_AND_ASSIGN(const auto metrics, FindMetricsSource(fs_, kTalonMetricsSource));
   ASSERT_NE(metrics, nullptr);
   const auto before = metrics->GetSnapshot();
-  ASSERT_AND_ASSIGN(const auto info, fs_->GetFileInfo(path_));
-  ASSERT_EQ(info.type(), arrow::fs::FileType::File);
-  ASSERT_EQ(info.size(), static_cast<int64_t>(expected_.size()));
+  // Supply the writer-known size so this test does not issue a HEAD itself.
+  arrow::fs::FileInfo info(path_, arrow::fs::FileType::File);
+  info.set_size(static_cast<int64_t>(expected_.size()));
   ASSERT_AND_ASSIGN(auto file, fs_->OpenInputFile(info));
   ASSERT_AND_ASSIGN(const auto size, file->GetSize());
   EXPECT_EQ(size, static_cast<int64_t>(expected_.size()));
@@ -2123,6 +2171,9 @@ TEST_F(TalonIntegrationTest, OpenWithKnownSize) {
 }
 
 TEST_F(TalonIntegrationTest, OpenWithoutKnownSize) {
+  ASSERT_AND_ASSIGN(const auto metrics, FindMetricsSource(fs_, kTalonMetricsSource));
+  ASSERT_NE(metrics, nullptr);
+  const auto before = metrics->GetSnapshot();
   ASSERT_AND_ASSIGN(auto file, fs_->OpenInputFile(path_));
   ASSERT_AND_ASSIGN(const auto size, file->GetSize());
   ASSERT_EQ(size, static_cast<int64_t>(expected_.size()));
@@ -2132,6 +2183,9 @@ TEST_F(TalonIntegrationTest, OpenWithoutKnownSize) {
   ASSERT_AND_ASSIGN(auto buffer, file->ReadAt(kOffset, kLength));
   ASSERT_EQ(buffer->size(), kLength);
   EXPECT_EQ(std::memcmp(buffer->data(), expected_.data() + kOffset, kLength), 0);
+  EXPECT_EQ(metrics->GetReadCount() - before.read_count, 1);
+  EXPECT_EQ(metrics->GetReadBytes() - before.read_bytes, kLength);
+  EXPECT_EQ(metrics->GetFailedCount() - before.failed_count, 0);
 }
 
 TEST_F(TalonIntegrationTest, AsyncReadAtIntoCallerBuffer) {
