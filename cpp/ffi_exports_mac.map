@@ -101,6 +101,19 @@ _loon_writer_close
 _loon_writer_destroy
 _loon_free_cstr
 
+# Talon raw interface
+_loon_talon_client_create
+_loon_talon_client_destroy
+_loon_talon_read
+_loon_talon_read_async
+_loon_talon_stat
+_loon_talon_stat_async
+_loon_talon_load
+_loon_talon_load_async
+_loon_talon_batch_load
+_loon_talon_batch_load_async
+_loon_talon_result_free
+
 # FilesystemCache interface
 _loon_filesystem_get
 _loon_filesystem_evict
