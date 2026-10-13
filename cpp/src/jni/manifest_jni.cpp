@@ -34,7 +34,7 @@ jlongArray OpenManifest(JNIEnv* env, jstring path, jlong properties, jlong versi
   if (!p.valid())
     return nullptr;
   TransactionOwner transaction;
-  if (!CheckResult(env, loon_transaction_open(p.get(), reinterpret_cast<LoonProperties*>(properties), version,
+  if (!CheckResult(env, loon_transaction_open(p.get(), reinterpret_cast<LoonProperties*>(properties), version, -1,
                                               LOON_TRANSACTION_RESOLVE_FAIL, 1, &transaction.handle)))
     return nullptr;
   int64_t actual_version = 0;
@@ -96,7 +96,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
       return jlong{0};
     }
     LoonTransactionHandle handle = 0;
-    if (!CheckResult(env, loon_transaction_open(p.get(), reinterpret_cast<LoonProperties*>(properties), version,
+    if (!CheckResult(env, loon_transaction_open(p.get(), reinterpret_cast<LoonProperties*>(properties), version, -1,
                                                 resolve, static_cast<uint32_t>(retries), &handle)))
       return jlong{0};
     return static_cast<jlong>(handle);
@@ -149,7 +149,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
                                                                                           jlong handle) {
   return Guard<jlong>(env, -1, [&] {
     int64_t version = 0;
-    if (!CheckResult(env, loon_transaction_commit(static_cast<LoonTransactionHandle>(handle), &version)))
+    if (!CheckResult(env, loon_transaction_commit(static_cast<LoonTransactionHandle>(handle), &version, nullptr)))
       return jlong{-1};
     return static_cast<jlong>(version);
   });

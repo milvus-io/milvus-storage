@@ -35,6 +35,7 @@ using namespace milvus_storage::api::transaction;
 LoonFFIResult loon_transaction_open(const char* base_path,
                                     const ::LoonProperties* properties,
                                     int64_t read_version,
+                                    const int64_t manifest_size,
                                     int32_t resolve_id,
                                     uint32_t retry_limit,
                                     LoonTransactionHandle* out_handle) {
@@ -64,7 +65,7 @@ LoonFFIResult loon_transaction_open(const char* base_path,
     auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map, base_path);
     RETURN_ARROW_ERROR_IF(fs_result.status(), LOON_ARROW_ERROR, fs_result.status().ToString());
     auto transaction_result =
-        Transaction::Open(fs_result.ValueOrDie(), base_path, read_version, *resolver, retry_limit);
+        Transaction::Open(fs_result.ValueOrDie(), base_path, read_version, manifest_size, *resolver, retry_limit);
     RETURN_ARROW_ERROR_IF(transaction_result.status(), LOON_ARROW_ERROR, transaction_result.status().ToString());
     auto transaction = std::move(transaction_result.ValueOrDie());
 
@@ -80,14 +81,16 @@ LoonFFIResult loon_transaction_open(const char* base_path,
   RETURN_UNREACHABLE();
 }
 
-LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out_committed_version) {
+LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle,
+                                      int64_t* out_committed_version,
+                                      int64_t* out_manifest_size) {
   if (!handle || !out_committed_version) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_committed_version must not be null");
   }
   try {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
     // Commit
-    auto commit_result = cpp_transaction->Commit();
+    auto commit_result = cpp_transaction->Commit(out_manifest_size);
     RETURN_ARROW_ERROR_IF(commit_result.status(), LOON_LOGICAL_ERROR, commit_result.status().ToString());
 
     *out_committed_version = commit_result.ValueOrDie();

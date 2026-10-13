@@ -20,6 +20,7 @@ struct Completion {
   LoonTransactionHandle transaction;
   int32_t outcome;
   int64_t version;
+  int64_t manifest_size;
   int destroy_on_commit;
   TestExecutor* expected_executor;
 };
@@ -37,7 +38,8 @@ static void open_complete(uintptr_t token, LoonFFIResult result, LoonTransaction
   pthread_cond_signal(&state->ready);
   pthread_mutex_unlock(&state->mutex);
 }
-static void commit_complete(uintptr_t token, LoonFFIResult result, int32_t outcome, int64_t version) {
+static void commit_complete(
+    uintptr_t token, LoonFFIResult result, int32_t outcome, int64_t version, int64_t manifest_size) {
   struct Completion* state = (struct Completion*)token;
   TestExecutor* expected = state->expected_executor ? state->expected_executor : &executor;
   ck_assert(pthread_equal(pthread_self(), expected->threads[0]));
@@ -50,6 +52,8 @@ static void commit_complete(uintptr_t token, LoonFFIResult result, int32_t outco
   }
   state->outcome = outcome;
   state->version = version;
+  state->manifest_size = manifest_size;
+  ck_assert(outcome == LOON_COMMIT_COMMITTED ? manifest_size > 0 : manifest_size == -1);
   loon_ffi_free_result(&result);
   pthread_cond_signal(&state->ready);
   pthread_mutex_unlock(&state->mutex);
@@ -73,7 +77,7 @@ static void test_async_open_contract(void) {
                           {"fs.access_key_value", "secret"}};
   LoonProperties properties = {items, sizeof(items) / sizeof(items[0])};
   LoonAsyncHandle operation = {.timeout_ms = 86400001};
-  LoonFFIResult result = loon_transaction_open_async(async_context, "segment", &properties, 0, 0, 0, open_complete,
+  LoonFFIResult result = loon_transaction_open_async(async_context, "segment", &properties, 0, -1, 0, 0, open_complete,
                                                      (uintptr_t)&state, &operation);
   ck_assert_int_eq(result.err_code, LOON_INVALID_ARGS);
   loon_ffi_free_result(&result);
@@ -81,8 +85,8 @@ static void test_async_open_contract(void) {
   ck_assert_int_eq(state.calls, 0);
   operation.timeout_ms = 0;
   // Default timeout is accepted. Version zero must not contact the closed endpoint.
-  result = loon_transaction_open_async(async_context, "segment", &properties, 0, 0, 0, open_complete, (uintptr_t)&state,
-                                       &operation);
+  result = loon_transaction_open_async(async_context, "segment", &properties, 0, -1, 0, 0, open_complete,
+                                       (uintptr_t)&state, &operation);
   ck_assert_msg(result.err_code == 0, "%s", result.message);
   loon_ffi_free_result(&result);
   ck_assert(operation.internal != NULL);
@@ -105,7 +109,7 @@ static void test_async_open_local(void) {
   struct Completion state = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, 0};
   LoonProperties properties = {NULL, 0};
   LoonAsyncHandle operation = {0};
-  LoonFFIResult result = loon_transaction_open_async(async_context, "segment", &properties, 0, 0, 0, open_complete,
+  LoonFFIResult result = loon_transaction_open_async(async_context, "segment", &properties, 0, -1, 0, 0, open_complete,
                                                      (uintptr_t)&state, &operation);
   ck_assert_int_eq(result.err_code, 0);
   loon_ffi_free_result(&result);
@@ -133,20 +137,20 @@ static void test_async_open_minio(void) {
   char path[128];
   snprintf(path, sizeof(path), "open-%ld-%ld", (long)time(NULL), (long)getpid());
   LoonTransactionHandle sync_transaction = 0;
-  LoonFFIResult result = loon_transaction_open(path, &properties, 0, 0, 0, &sync_transaction);
+  LoonFFIResult result = loon_transaction_open(path, &properties, 0, -1, 0, 0, &sync_transaction);
   ck_assert_msg(result.err_code == 0, "%s", result.message);
   loon_ffi_free_result(&result);
   result = loon_transaction_add_delta_log(sync_transaction, "_delta/delete", 42);
   ck_assert_int_eq(result.err_code, 0);
   loon_ffi_free_result(&result);
   int64_t version = -1;
-  result = loon_transaction_commit(sync_transaction, &version);
+  result = loon_transaction_commit(sync_transaction, &version, NULL);
   ck_assert_msg(result.err_code == 0, "%s", result.message);
   loon_ffi_free_result(&result);
   loon_transaction_destroy(sync_transaction);
   ck_assert_int_eq(version, 1);
   LoonAsyncHandle operation = {0};
-  result = loon_transaction_open_async(async_context, path, &properties, -1, 0, 0, open_complete, (uintptr_t)&state,
+  result = loon_transaction_open_async(async_context, path, &properties, -1, -1, 0, 0, open_complete, (uintptr_t)&state,
                                        &operation);
   ck_assert_msg(result.err_code == 0, "%s", result.message);
   loon_ffi_free_result(&result);
@@ -167,7 +171,7 @@ static void test_async_open_minio(void) {
   result = loon_transaction_add_delta_log(state.transaction, "_delta/sync-after-open", 1);
   ck_assert_int_eq(result.err_code, 0);
   loon_ffi_free_result(&result);
-  result = loon_transaction_commit(state.transaction, &version);
+  result = loon_transaction_commit(state.transaction, &version, NULL);
   ck_assert_msg(result.err_code == 0, "%s", result.message);
   loon_ffi_free_result(&result);
   ck_assert_int_eq(version, 2);
@@ -175,8 +179,8 @@ static void test_async_open_minio(void) {
   for (int cancel = 0; cancel < 2; ++cancel) {
     state.calls = 0;
     operation.timeout_ms = 1000;
-    result = loon_transaction_open_async(async_context, path, &properties, -1, 0, 0, open_complete, (uintptr_t)&state,
-                                         &operation);
+    result = loon_transaction_open_async(async_context, path, &properties, -1, -1, 0, 0, open_complete,
+                                         (uintptr_t)&state, &operation);
     ck_assert_int_eq(result.err_code, 0);
     loon_ffi_free_result(&result);
     ck_assert_int_eq(await_open(&state), 0);
@@ -191,7 +195,7 @@ static void test_async_open_minio(void) {
     result = loon_transaction_add_delta_log(state.transaction, "_delta/later-sync", 1);
     ck_assert_int_eq(result.err_code, 0);
     loon_ffi_free_result(&result);
-    result = loon_transaction_commit(state.transaction, &version);
+    result = loon_transaction_commit(state.transaction, &version, NULL);
     ck_assert_msg(result.err_code == 0, "%s", result.message);
     loon_ffi_free_result(&result);
     ck_assert_int_eq(version, 3 + cancel);
@@ -214,7 +218,7 @@ static void test_async_commit_roundtrip(void) {
   char path[128];
   snprintf(path, sizeof(path), "commit-%ld-%ld", (long)time(NULL), (long)getpid());
   LoonAsyncHandle operation = {0};
-  LoonFFIResult result = loon_transaction_open_async(async_context, path, &properties, 0, 0, 1, open_complete,
+  LoonFFIResult result = loon_transaction_open_async(async_context, path, &properties, 0, -1, 0, 1, open_complete,
                                                      (uintptr_t)&state, &operation);
   ck_assert_msg(result.err_code == 0, "%s", result.message);
   loon_ffi_free_result(&result);
@@ -276,7 +280,7 @@ static void test_async_commit_roundtrip(void) {
   ck_assert_int_eq(state.outcome, LOON_COMMIT_COMMITTED);
   ck_assert_int_eq(state.version, 1);
   loon_transaction_destroy(transaction);
-  result = loon_transaction_open(path, &properties, -1, 0, 0, &transaction);
+  result = loon_transaction_open(path, &properties, state.version, state.manifest_size, 0, 0, &transaction);
   ck_assert_msg(result.err_code == 0, "%s", result.message);
   loon_ffi_free_result(&result);
   LoonManifest* manifest = NULL;
@@ -313,7 +317,7 @@ static void test_async_commit_roundtrip(void) {
   ck_assert_int_eq(state.outcome, LOON_COMMIT_COMMITTED);
   ck_assert_int_eq(state.version, 2);
   loon_transaction_destroy(transaction);
-  result = loon_transaction_open(path, &properties, 2, 0, 0, &transaction);
+  result = loon_transaction_open(path, &properties, 2, -1, 0, 0, &transaction);
   ck_assert_int_eq(result.err_code, 0);
   loon_ffi_free_result(&result);
   result = loon_transaction_get_manifest(transaction, &manifest);
@@ -337,7 +341,7 @@ static void test_async_commit_roundtrip(void) {
   ck_assert_int_eq(state.code, 0);
   ck_assert_int_eq(state.version, 3);
   ck_assert_int_eq(state.transaction, 0);
-  result = loon_transaction_open(path, &properties, 3, 0, 0, &transaction);
+  result = loon_transaction_open(path, &properties, 3, -1, 0, 0, &transaction);
   ck_assert_int_eq(result.err_code, 0);
   loon_ffi_free_result(&result);
   result = loon_transaction_get_manifest(transaction, &manifest);
@@ -358,7 +362,7 @@ static void test_async_context(void) {
                           {"fs.access_key_value", "secret"}};
   LoonProperties properties = {items, sizeof(items) / sizeof(items[0])};
   LoonAsyncHandle operation = {0};
-  LoonFFIResult result = loon_transaction_open_async(async_context, "segment", &properties, 0, 0, 0, open_complete,
+  LoonFFIResult result = loon_transaction_open_async(async_context, "segment", &properties, 0, -1, 0, 0, open_complete,
                                                      (uintptr_t)&state, &operation);
   ck_assert(result.err_code != 0);
   ck_assert(!operation.internal && state.calls == 0);
@@ -384,8 +388,8 @@ static void test_async_context(void) {
   pthread_mutex_lock(&executor.mutex);
   executor.reject = 1;
   pthread_mutex_unlock(&executor.mutex);
-  result = loon_transaction_open_async(async_context, "segment", &properties, 0, 0, 0, open_complete, (uintptr_t)&state,
-                                       &operation);
+  result = loon_transaction_open_async(async_context, "segment", &properties, 0, -1, 0, 0, open_complete,
+                                       (uintptr_t)&state, &operation);
   ck_assert_int_eq(result.err_code, LOON_ASYNC_OVERLOADED);
   ck_assert(!operation.internal && state.calls == 0);
   loon_ffi_free_result(&result);
@@ -394,8 +398,8 @@ static void test_async_context(void) {
   executor.accepts_remaining = 1;
   pthread_mutex_unlock(&executor.mutex);
   // Initial admission succeeds, but final callback enqueue is rejected.
-  result = loon_transaction_open_async(async_context, "segment", &properties, 0, 0, 0, open_complete, (uintptr_t)&state,
-                                       &operation);
+  result = loon_transaction_open_async(async_context, "segment", &properties, 0, -1, 0, 0, open_complete,
+                                       (uintptr_t)&state, &operation);
   ck_assert_int_eq(result.err_code, 0);
   loon_ffi_free_result(&result);
   ck_assert_int_eq(await_open(&state), 0);
@@ -429,7 +433,8 @@ static void test_async_context_isolation(void) {
   LoonAsyncHandle operation = {0};
   char path[128];
   snprintf(path, sizeof(path), "context-%ld-%ld", (long)time(NULL), (long)getpid());
-  result = loon_transaction_open_async(first, path, &properties, 0, 0, 1, open_complete, (uintptr_t)&state, &operation);
+  result =
+      loon_transaction_open_async(first, path, &properties, 0, -1, 0, 1, open_complete, (uintptr_t)&state, &operation);
   ck_assert_int_eq(result.err_code, 0);
   loon_ffi_free_result(&result);
   // No await: shutdown must drain the accepted callback, including early release.
@@ -440,7 +445,8 @@ static void test_async_context_isolation(void) {
   ck_assert_int_eq(state.code, 0);
   LoonTransactionHandle transaction = state.transaction;
   state.calls = 0;
-  result = loon_transaction_open_async(first, path, &properties, 0, 0, 1, open_complete, (uintptr_t)&state, &operation);
+  result =
+      loon_transaction_open_async(first, path, &properties, 0, -1, 0, 1, open_complete, (uintptr_t)&state, &operation);
   ck_assert_int_eq(result.err_code, LOON_ASYNC_OVERLOADED);
   ck_assert(operation.internal == NULL);
   ck_assert_int_eq(state.calls, 0);
@@ -471,7 +477,7 @@ static void test_async_context_isolation(void) {
   state.calls = 0;
   state.expected_executor = &other_executor;
   result =
-      loon_transaction_open_async(second, path, &properties, 1, 0, 1, open_complete, (uintptr_t)&state, &operation);
+      loon_transaction_open_async(second, path, &properties, 1, -1, 0, 1, open_complete, (uintptr_t)&state, &operation);
   ck_assert_int_eq(result.err_code, 0);
   loon_ffi_free_result(&result);
   loon_async_context_destroy(second);
@@ -509,8 +515,8 @@ static void test_async_executor_controls_capacity(void) {
     pthread_cond_init(&states[i].ready, NULL);
     states[i].expected_executor = &queued_executor;
     LoonAsyncHandle operation = {0};
-    result = loon_transaction_open_async(context, "segment", &properties, 0, 0, 0, open_complete, (uintptr_t)&states[i],
-                                         &operation);
+    result = loon_transaction_open_async(context, "segment", &properties, 0, -1, 0, 0, open_complete,
+                                         (uintptr_t)&states[i], &operation);
     if (result.err_code == LOON_SUCCESS)
       ++accepted;
     loon_ffi_free_result(&result);
@@ -546,14 +552,14 @@ static void test_async_handle_lifecycle(void) {
     states[i].expected_executor = &queued_executor;
   }
   LoonAsyncHandle operation = {0};
-  result = loon_transaction_open_async(context, "segment", &properties, 0, 0, 0, open_complete, (uintptr_t)&states[0],
-                                       &operation);
+  result = loon_transaction_open_async(context, "segment", &properties, 0, -1, 0, 0, open_complete,
+                                       (uintptr_t)&states[0], &operation);
   ck_assert_int_eq(result.err_code, LOON_SUCCESS);
   loon_ffi_free_result(&result);
   struct LoonAsyncOperation* original = operation.internal;
   ck_assert(original != NULL);
-  result = loon_transaction_open_async(context, "segment", &properties, 0, 0, 0, open_complete, (uintptr_t)&states[0],
-                                       &operation);
+  result = loon_transaction_open_async(context, "segment", &properties, 0, -1, 0, 0, open_complete,
+                                       (uintptr_t)&states[0], &operation);
   ck_assert_int_eq(result.err_code, LOON_ASYNC_BUSY);
   ck_assert(operation.internal == original);
   loon_ffi_free_result(&result);
@@ -564,16 +570,16 @@ static void test_async_handle_lifecycle(void) {
   loon_async_release(&operation);
 
   operation.timeout_ms = 1;
-  result = loon_transaction_open_async(context, "segment", &properties, 0, 0, 0, open_complete, (uintptr_t)&states[1],
-                                       &operation);
+  result = loon_transaction_open_async(context, "segment", &properties, 0, -1, 0, 0, open_complete,
+                                       (uintptr_t)&states[1], &operation);
   ck_assert_int_eq(result.err_code, LOON_SUCCESS);
   loon_ffi_free_result(&result);
   // The queued operation keeps its copied deadline after handle reuse.
   loon_async_release(&operation);
   ck_assert_int_eq(operation.timeout_ms, 1);
   operation.timeout_ms = 86400000;
-  result = loon_transaction_open_async(context, "segment", &properties, 0, 0, 0, open_complete, (uintptr_t)&states[2],
-                                       &operation);
+  result = loon_transaction_open_async(context, "segment", &properties, 0, -1, 0, 0, open_complete,
+                                       (uintptr_t)&states[2], &operation);
   ck_assert_int_eq(result.err_code, LOON_SUCCESS);
   loon_ffi_free_result(&result);
   loon_async_release(&operation);

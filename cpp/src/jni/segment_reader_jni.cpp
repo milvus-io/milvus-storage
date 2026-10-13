@@ -76,7 +76,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusSegmentReader_segmentReader
     config.read_buffer_size = 0;  // use default
 
     LoonSegmentReaderHandle handle;
-    LoonFFIResult result = loon_segment_reader_open(seg_path, version, schema, columns,
+    LoonFFIResult result = loon_segment_reader_open(seg_path, version, -1, schema, columns,
                                                     static_cast<int64_t>(num_columns), &config, properties, &handle);
 
     // Cleanup

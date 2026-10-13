@@ -48,6 +48,7 @@ LoonFFIResult loon_transaction_open_async(LoonAsyncContextHandle async_context,
                                           const char* base_path,
                                           const LoonProperties* properties,
                                           int64_t read_version,
+                                          const int64_t manifest_size,
                                           int32_t resolve_id,
                                           uint32_t retry_limit,
                                           LoonTransactionOpenCallback callback,
@@ -79,8 +80,8 @@ LoonFFIResult loon_transaction_open_async(LoonAsyncContextHandle async_context,
     auto uri = StorageUri::Parse(base_path);
     if (!uri.ok())
       return StatusResult(uri.status());
-    auto future = transaction::Transaction::OpenAsync(base_path, std::move(native_properties), read_version, resolver,
-                                                      retry_limit, timeout, handle->state);
+    auto future = transaction::Transaction::OpenAsync(base_path, std::move(native_properties), read_version,
+                                                      manifest_size, resolver, retry_limit, timeout, handle->state);
     auto accepted =
         async_context->Submit(std::move(future), [callback, user_data](folly::Try<transaction::OpenResult>&& value) {
           if (value.hasException()) {
@@ -126,14 +127,14 @@ LoonFFIResult loon_transaction_commit_async(LoonAsyncContextHandle async_context
     auto accepted =
         async_context->Submit(std::move(future), [callback, user_data](folly::Try<transaction::CommitResult>&& value) {
           if (value.hasException()) {
-            callback(user_data, StatusResult(AsyncStatus::Exception), LOON_COMMIT_UNKNOWN, -1);
+            callback(user_data, StatusResult(AsyncStatus::Exception), LOON_COMMIT_UNKNOWN, -1, -1);
             return;
           }
           auto result = std::move(value).value();
           auto native_outcome = result.outcome == transaction::CommitOutcome::Committed ? LOON_COMMIT_COMMITTED
                                 : result.outcome == transaction::CommitOutcome::Unknown ? LOON_COMMIT_UNKNOWN
                                                                                         : LOON_COMMIT_NOT_COMMITTED;
-          callback(user_data, StatusResult(result.status), native_outcome, result.version);
+          callback(user_data, StatusResult(result.status), native_outcome, result.version, result.manifest_size);
         });
     if (!accepted.ok())
       return StatusResult(accepted);

@@ -743,6 +743,7 @@ typedef uintptr_t LoonTransactionHandle;
  * possibly before submission returns. Exceptional enqueue failure runs accepted
  * work on the completing thread. Inputs are copied. The receiver owns the callback result and
  * successful transaction. release(NULL)/cancel(NULL) are no-ops; release does not cancel.
+ * manifest_size is the exact file size in bytes, or <= 0 if unknown; ignored for LATEST.
  * See docs/manifest-async.md for supported configurations and lifetime requirements.
  */
 typedef void (*LoonTransactionOpenCallback)(uintptr_t user_data,
@@ -752,6 +753,7 @@ FFI_EXPORT LoonFFIResult loon_transaction_open_async(LoonAsyncContextHandle asyn
                                                      const char* base_path,
                                                      const LoonProperties* properties,
                                                      int64_t read_version,
+                                                     int64_t manifest_size,
                                                      int32_t resolve_id,
                                                      uint32_t retry_limit,
                                                      LoonTransactionOpenCallback callback,
@@ -764,14 +766,15 @@ FFI_EXPORT LoonFFIResult loon_transaction_open_async(LoonAsyncContextHandle asyn
 typedef void (*LoonTransactionCommitCallback)(uintptr_t user_data,
                                               LoonFFIResult result,
                                               int32_t commit_outcome,
-                                              int64_t committed_version);
+                                              int64_t committed_version,
+                                              int64_t manifest_size);
 /** Runs the existing synchronous commit on the caller executor. Errors after
  * execution begins conservatively report UNKNOWN; backend retries are unchanged.
  * Cancellation/deadline only prevent execution before it starts.
  * Accepted commits consume the transaction: only destroy it after the callback.
  * It must remain alive and unmodified until then. Another submission returns busy.
  * UNKNOWN must never be automatically replayed based on the error's retryability.
- * The callback may destroy the transaction immediately. Version is -1 unless COMMITTED.
+ * The callback may destroy the transaction immediately. Version and manifest size are -1 unless COMMITTED.
  */
 FFI_EXPORT LoonFFIResult loon_transaction_commit_async(LoonAsyncContextHandle async_context,
                                                        LoonTransactionHandle transaction,
@@ -788,6 +791,7 @@ FFI_EXPORT LoonFFIResult loon_transaction_commit_async(LoonAsyncContextHandle as
  * @param base_path Base path in the filesystem for the transaction
  * @param properties configuration properties
  * @param read_version Version to read (<0 means fetch greatest version)
+ * @param manifest_size Exact size in bytes of read_version, or <= 0 if unknown; ignored for LATEST
  * @param resolve_id The resolve strategy, see LOON_TRANSACTION_RESOLVE_*
  * @param retry_limit Maximum number of retry attempts on commit conflicts (default: 1)
  * @param out_handle Output transaction handle
@@ -796,6 +800,7 @@ FFI_EXPORT LoonFFIResult loon_transaction_commit_async(LoonAsyncContextHandle as
 FFI_EXPORT LoonFFIResult loon_transaction_open(const char* base_path,
                                                const LoonProperties* properties,
                                                int64_t read_version,
+                                               int64_t manifest_size,
                                                int32_t resolve_id,
                                                uint32_t retry_limit,
                                                LoonTransactionHandle* out_handle);
@@ -824,9 +829,12 @@ FFI_EXPORT LoonFFIResult loon_transaction_get_read_version(LoonTransactionHandle
  *
  * @param handle Transaction handle
  * @param out_committed_version Output committed version (valid only if commit succeeds)
+ * @param out_manifest_size Optional output size in bytes (may be NULL); unchanged on failure
  * @return result of FFI
  */
-FFI_EXPORT LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out_committed_version);
+FFI_EXPORT LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle,
+                                                 int64_t* out_committed_version,
+                                                 int64_t* out_manifest_size);
 
 /**
  * @brief Destroys a Transaction
@@ -1054,6 +1062,7 @@ typedef struct LoonSegmentReaderConfig {
  *
  * @param segment_path Base path where manifest and data files are stored
  * @param version Manifest version to read (-1 = latest)
+ * @param manifest_size Exact size in bytes of that version, or <= 0 if unknown; ignored for latest
  * @param schema Arrow schema with TEXT columns as utf8() type
  * @param needed_columns Column names to read (NULL = all columns)
  * @param num_columns Number of needed columns
@@ -1064,6 +1073,7 @@ typedef struct LoonSegmentReaderConfig {
  */
 FFI_EXPORT LoonFFIResult loon_segment_reader_open(const char* segment_path,
                                                   int64_t version,
+                                                  int64_t manifest_size,
                                                   struct ArrowSchema* schema,
                                                   const char** needed_columns,
                                                   int64_t num_columns,

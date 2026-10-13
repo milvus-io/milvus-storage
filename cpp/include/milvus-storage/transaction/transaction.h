@@ -189,6 +189,7 @@ struct CommitResult {
   AsyncStatus status;
   CommitOutcome outcome = CommitOutcome::NotCommitted;
   int64_t version = -1;
+  int64_t manifest_size = -1;  ///< Written manifest size in bytes; -1 unless committed
 };
 
 class Transaction {
@@ -197,6 +198,8 @@ class Transaction {
   // @param fs Filesystem to use
   // @param base_path Base path for the storage
   // @param version Version to read from (default: LATEST = fetch greatest version)
+  // @param manifest_size Exact size of the manifest at version, or <= 0 if unknown.
+  //        Ignored for LATEST, whose version is not known until listing completes.
   // @param resolver Resolver for conflict resolution (default: FailResolver). The
   //        Transaction stores a non-owning pointer to this object; the caller MUST keep
   //        the resolver alive for the lifetime of the returned Transaction. Do not pass
@@ -205,6 +208,7 @@ class Transaction {
   static arrow::Result<std::unique_ptr<Transaction>> Open(const milvus_storage::ArrowFileSystemPtr& fs,
                                                           const std::string& base_path,
                                                           int64_t version = LATEST,
+                                                          int64_t manifest_size = -1,
                                                           const Resolver& resolver = FailResolver,
                                                           uint32_t retry_limit = 1);
 
@@ -217,6 +221,7 @@ class Transaction {
   static folly::SemiFuture<OpenResult> OpenAsync(const std::string& path,
                                                  Properties properties,
                                                  int64_t version,
+                                                 int64_t manifest_size,
                                                  const Resolver& resolver,
                                                  uint32_t retries,
                                                  uint64_t timeout_ms,
@@ -226,8 +231,9 @@ class Transaction {
   ~Transaction() = default;
 
   // Commit using Updates (uses the resolver set via Open)
-  // Returns the committed version number on success
-  arrow::Result<int64_t> Commit();
+  // Returns the committed version number on success; optionally outputs the written
+  // manifest size in bytes. The output is unchanged on failure.
+  arrow::Result<int64_t> Commit(int64_t* out_manifest_size = nullptr);
 
   // Schedules Transaction::Commit on the consuming executor. A discarded lazy
   // future releases its reservation; execution consumes the transaction even on
@@ -323,9 +329,12 @@ class Transaction {
   arrow::Result<int64_t> get_latest_version();
 
   // Read manifest from filesystem at given version
-  arrow::Result<std::shared_ptr<Manifest>> read_manifest(int64_t version);
+  arrow::Result<std::shared_ptr<Manifest>> read_manifest(int64_t version, int64_t manifest_size = -1);
 
-  arrow::Status write_manifest(const std::shared_ptr<Manifest>& manifest, int64_t old_version, int64_t new_version);
+  arrow::Status write_manifest(const std::shared_ptr<Manifest>& manifest,
+                               int64_t old_version,
+                               int64_t new_version,
+                               int64_t* out_manifest_size);
 
   int64_t read_version_;
   std::shared_ptr<Manifest> read_manifest_;
