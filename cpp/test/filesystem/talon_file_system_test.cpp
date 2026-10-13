@@ -2367,19 +2367,24 @@ TEST_F(TalonIntegrationTest, RawPrewarmReadAndPartialFailure) {
   EXPECT_EQ(failed_detail->code(), ExtendStatusCode::AwsErrorNonRetryable);
   EXPECT_NE(failed.status().message().find("worker"), std::string::npos) << failed.status();
   EXPECT_NE(failed.status().message().find("offset"), std::string::npos) << failed.status();
-  ASSERT_AND_ASSIGN(
-      const auto partial,
-      client->BatchLoad({{uri, stat.size, stat.version}, {uri, stat.size, "missing-version"}, {uri, 0, ""}}));
+  ASSERT_AND_ASSIGN(const auto partial, client->BatchLoad({{uri, stat.size, stat.version},
+                                                           {uri, stat.size, "missing-version"},
+                                                           {uri, 0, ""},
+                                                           {uri, stat.size, "another-missing-version"}}));
   EXPECT_FALSE(partial.status.ok());
   const auto partial_detail = ExtendStatusDetail::UnwrapStatus(partial.status);
   ASSERT_NE(partial_detail, nullptr) << partial.status;
   EXPECT_EQ(partial_detail->code(), ExtendStatusCode::AwsErrorNonRetryable);
+  EXPECT_NE(partial.status.message().find("batch load incomplete for 2 file(s):"), std::string::npos) << partial.status;
   EXPECT_NE(partial.status.message().find("worker"), std::string::npos) << partial.status;
   EXPECT_TRUE(partial.results.empty());
-  ASSERT_EQ(partial.failed_files.size(), 1);
+  ASSERT_EQ(partial.failed_files.size(), 2);
   EXPECT_EQ(partial.failed_files[0].index, 1);
+  EXPECT_EQ(partial.failed_files[1].index, 3);
   EXPECT_FALSE(partial.failed_files[0].uncertain);
+  EXPECT_FALSE(partial.failed_files[1].uncertain);
   EXPECT_FALSE(partial.failed_files[0].error.empty());
+  EXPECT_FALSE(partial.failed_files[1].error.empty());
 
   // Requests and client ownership can disappear immediately after submission.
   arrow::Future<talon::TalonBatchLoadResult> batch;

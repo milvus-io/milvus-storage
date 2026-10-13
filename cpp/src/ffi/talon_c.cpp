@@ -30,6 +30,11 @@ struct TalonAsyncState final : milvus_storage::AsyncOperation {
   void Cancel() override { cancelled.store(true, std::memory_order_relaxed); }
 };
 
+// Async calls queue native submission so admission, cancellation, and deadline
+// checks happen before I/O. The C API can return before Rust reads the requests,
+// so the queued task must own the URI/version strings instead of borrowing them.
+// The vector is moved into that task. Sync calls reuse this conversion to match
+// the bridge's owning request type.
 static bool CopyRequests(const LoonTalonLoadRequest* requests, size_t count, std::vector<TalonLoadRequest>& copied) {
   if (count && !requests)
     return false;
@@ -124,7 +129,7 @@ static LoonFFIResult SubmitRaw(LoonAsyncContextHandle context,
                                uintptr_t user_data,
                                LoonAsyncHandle* operation,
                                uint64_t timeout) {
-  using Outcome = std::variant<milvus_storage::AsyncStatus::Code, arrow::Result<T>>;
+  using Outcome = std::variant<milvus_storage::AsyncStatus::Code, arrow::Future<T>>;
   auto handle = std::make_unique<LoonAsyncOperation>();
   auto state = std::make_shared<TalonAsyncState>();
   state->deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
@@ -138,15 +143,19 @@ static LoonFFIResult SubmitRaw(LoonAsyncContextHandle context,
           return folly::makeSemiFuture(Outcome(std::in_place_index<0>, milvus_storage::AsyncStatus::Deadline));
         folly::Promise<Outcome> promise;
         auto result = promise.getSemiFuture();
-        // Native Talon I/O runs on its shared Tokio runtime. Never wait on this caller worker.
+        // Native Talon I/O runs on its shared Tokio runtime without waiting on this caller worker.
         auto native = start(*client);
-        native.AddCallback([promise = std::move(promise), client](const arrow::Result<T>& completed) mutable {
-          try {
-            promise.setValue(Outcome(std::in_place_index<1>, completed));
-          } catch (...) {
-            promise.setException(folly::exception_wrapper(std::current_exception()));
-          }
-        });
+        try {
+          native.AddCallback([promise = std::move(promise), client, native](const arrow::Result<T>&) mutable {
+            // Retain the completed result without copying batch vectors or diagnostics on the native thread.
+            promise.setValue(Outcome(std::in_place_index<1>, std::move(native)));
+          });
+        } catch (...) {
+          // Registration failure must not release the caller's buffer while native I/O can still write it.
+          // Only this exceptional path waits; the failed future preserves the original registration error.
+          native.Wait();
+          return folly::makeSemiFuture<Outcome>(folly::exception_wrapper(std::current_exception()));
+        }
         return result;
       });
   auto admission = context->Submit(std::move(future), [callback, user_data, tag](folly::Try<Outcome>&& value) {
@@ -158,7 +167,8 @@ static LoonFFIResult SubmitRaw(LoonAsyncContextHandle context,
         const auto code = std::get<0>(outcome);
         status = {code == milvus_storage::AsyncStatus::Cancelled ? LOON_ASYNC_CANCELLED : LOON_ASYNC_DEADLINE, nullptr};
       } else {
-        status = ExportResult(std::get<1>(outcome), tag, &payload);
+        // The native callback already observed completion, so result() cannot block here.
+        status = ExportResult(std::get<1>(outcome).result(), tag, &payload);
       }
     } catch (const std::bad_alloc&) {
       status = {LOON_MEMORY_ERROR, nullptr};
@@ -303,7 +313,8 @@ LoonFFIResult loon_talon_batch_load(LoonTalonClientHandle client,
     if (!CopyRequests(requests, count, copied)) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Invalid Talon load requests");
     }
-    return ExportResult((*cpp_client)->BatchLoad(copied), LOON_TALON_BATCH_LOAD, result);
+    // The temporary Future owns the batch throughout export; no intermediate result copy is needed.
+    return ExportResult((*cpp_client)->BatchLoadAsync(copied).result(), LOON_TALON_BATCH_LOAD, result);
   } catch (const std::bad_alloc&) {
     return {LOON_MEMORY_ERROR, nullptr};
   } catch (const std::exception& error) {

@@ -650,17 +650,18 @@ pub unsafe extern "C" fn talon_raw_load_async(
                 );
             }
             Ok(Err(error)) => {
-                // Capture per-file detail before consuming the typed cause. Partial failures have no result array.
-                let failures = error.failed_files().to_vec();
-                complete_raw(
-                    callback,
-                    context,
-                    talon_load_error_result(error),
-                    "",
-                    0,
-                    &[],
-                    &failures,
-                );
+                // Preserve the outer diagnostic before moving the failure list and classifying the cause.
+                let message = error.to_string();
+                let (cause, failures) = match error {
+                    talon::LoadError::Batch {
+                        source,
+                        failed_files,
+                    } => (*source, failed_files),
+                    other => (other, Vec::new()),
+                };
+                let mut result = talon_load_error_result(cause);
+                result.message = message;
+                complete_raw(callback, context, result, "", 0, &[], &failures);
             }
             Err(_) => complete_raw(
                 callback,
