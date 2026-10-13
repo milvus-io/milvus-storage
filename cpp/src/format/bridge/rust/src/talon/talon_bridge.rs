@@ -6,8 +6,10 @@ use std::{
 
 use anyhow::{Result, bail};
 use futures::FutureExt;
-use talon::{Client, ClientBuilder, ObjectId, ObjectStat, parse_uri};
-use talon_cache_client::{BlockReadError, CacheReadError};
+use talon::{
+    BlockReadError, CacheReadError, Client, ClientBuilder, ObjectId, ObjectStat, UNCHECKED_VERSION,
+    parse_uri,
+};
 use tokio::sync::OnceCell;
 
 #[cxx::bridge(namespace = "milvus_storage::talon::ffi")]
@@ -116,7 +118,11 @@ pub fn open_talon_object(
     }
     let initial_stat = has_initial_stat.then(|| ObjectStat {
         size: initial_size,
-        version: initial_version.into(),
+        version: if initial_version.is_empty() {
+            UNCHECKED_VERSION.into()
+        } else {
+            initial_version.into()
+        },
     });
     Ok(Box::new(TalonObjectReader {
         client: Arc::clone(&client.inner),
@@ -167,12 +173,11 @@ fn talon_error_result(error: talon::Error) -> TalonIoResult {
         talon::Error::Block(error) => match error {
             BlockReadError::Coordinator(error) => cache_error_code(error.into()),
             BlockReadError::Worker(error)
+            | BlockReadError::Target { source: error, .. }
             | BlockReadError::AllReplicasFailed { source: error, .. } => {
                 cache_error_code(error.into())
             }
-            BlockReadError::NoOwners | BlockReadError::UnresolvedOwner => {
-                ffi::TalonErrorCode::Unavailable
-            }
+            BlockReadError::NoOwners => ffi::TalonErrorCode::Unavailable,
         },
     };
     TalonIoResult {
@@ -346,8 +351,7 @@ pub unsafe extern "C" fn talon_object_read_async(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use talon_cache_client::{CoordinatorError, WorkerError};
-    use talon_transport::{DataErrorCode, DataPlaneError};
+    use talon::{CoordinatorError, DataErrorCode, DataPlaneError, WorkerError};
 
     #[test]
     fn worker_errors_preserve_codes_and_replica_diagnostics() {
@@ -369,7 +373,7 @@ mod tests {
             (DataErrorCode::Unknown, ffi::TalonErrorCode::NonRetryable),
             (DataErrorCode::CacheMiss, ffi::TalonErrorCode::NonRetryable),
         ] {
-            for exhausted in [false, true] {
+            for (targeted, exhausted) in [(false, false), (true, false), (true, true)] {
                 let source = WorkerError::Remote(DataPlaneError {
                     code: remote_code,
                     // Classification must use the code, never diagnostic text.
@@ -378,6 +382,15 @@ mod tests {
                 let error = if exhausted {
                     BlockReadError::AllReplicasFailed {
                         worker: "10.0.0.8:9000".into(),
+                        worker_id: "worker-1".into(),
+                        instance_id: Some("instance-1".into()),
+                        source,
+                    }
+                } else if targeted {
+                    BlockReadError::Target {
+                        worker_id: "worker-1".into(),
+                        instance_id: "instance-1".into(),
+                        address: "10.0.0.8:9000".into(),
                         source,
                     }
                 } else {
@@ -388,8 +401,10 @@ mod tests {
                 assert_eq!(result.code, expected.repr, "{message}");
                 assert_eq!(result.message, message);
                 assert_eq!(result.value, 0);
-                assert_eq!(result.message.contains("10.0.0.8:9000"), exhausted);
-                assert_eq!(result.message.contains("after refresh"), exhausted);
+                assert_eq!(result.message.contains("10.0.0.8:9000"), targeted);
+                assert_eq!(result.message.contains("worker-1"), targeted);
+                assert_eq!(result.message.contains("instance-1"), targeted);
+                assert_eq!(result.message.contains("all replicas failed"), exhausted);
             }
         }
     }
@@ -407,8 +422,17 @@ mod tests {
                 talon::Error::Coordinator(CoordinatorError::Io(kind.into())),
                 BlockReadError::Coordinator(CoordinatorError::Io(kind.into())).into(),
                 BlockReadError::Worker(WorkerError::Io(kind.into())).into(),
+                BlockReadError::Target {
+                    worker_id: "worker-1".into(),
+                    instance_id: "instance-1".into(),
+                    address: "10.0.0.8:9000".into(),
+                    source: WorkerError::Io(kind.into()),
+                }
+                .into(),
                 BlockReadError::AllReplicasFailed {
                     worker: "10.0.0.8:9000".into(),
+                    worker_id: "worker-1".into(),
+                    instance_id: Some("instance-1".into()),
                     source: WorkerError::Io(kind.into()),
                 }
                 .into(),
@@ -417,12 +441,10 @@ mod tests {
                 assert_eq!(talon_error_result(error).code, expected.repr);
             }
         }
-        for error in [BlockReadError::NoOwners, BlockReadError::UnresolvedOwner] {
-            assert_eq!(
-                talon_error_result(error.into()).code,
-                ffi::TalonErrorCode::Unavailable.repr
-            );
-        }
+        assert_eq!(
+            talon_error_result(BlockReadError::NoOwners.into()).code,
+            ffi::TalonErrorCode::Unavailable.repr
+        );
         assert_eq!(
             talon_error_result(talon::Error::InvalidArgument("bad range".into())).code,
             ffi::TalonErrorCode::InvalidArgument.repr
@@ -464,6 +486,17 @@ mod tests {
         assert_eq!(talon_object_known_size(&reader), 123);
         assert_eq!(reader.stat.get().unwrap().size, 123);
         assert_eq!(reader.stat.get().unwrap().version, "etag-v1");
+    }
+
+    #[test]
+    fn open_object_with_size_only_skips_etag_matching() {
+        let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024, 8).unwrap();
+        for size in [0, 123] {
+            let reader =
+                open_talon_object(&client, "aws", "test-bucket", "path/a", true, size, "").unwrap();
+            assert_eq!(talon_object_known_size(&reader), size as i64);
+            assert_eq!(reader.stat.get().unwrap().version, "__talon_unchecked__");
+        }
     }
 
     #[test]
