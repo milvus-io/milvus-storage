@@ -204,7 +204,29 @@ struct ArrowFileSystemConfig {
   // To align with the old logical, set to `int64_t`(should be `uint64_t`)
   int64_t multi_part_upload_size = DEFAULT_MULTIPART_UPLOAD_PART_SIZE;
 
-  // AssumeRole credentials
+  // Temporary credentials can come from this HTTP(S) broker or from native
+  // cloud APIs, such as AWS STS AssumeRole or GCP Service Account Impersonation.
+  // With an empty endpoint, S3 uses native AssumeRole when role_arn is set,
+  // otherwise IAM when use_iam=true, or explicit AK/SK. Azure broker identity
+  // fields still require an endpoint; incomplete broker settings are rejected.
+  // Current storage support (not the remote broker's full capability):
+  //
+  // Cloud              | Native role/identity delegation   | credential_broker_endpoint
+  // -------------------+-----------------------------------+---------------------------
+  // S3 / S3-compatible | AssumeRole / OIDC role chains [1] | AWS STS flow [2]
+  // Azure              | No target-role delegation [3]     | SAS
+  // GCP                | Service Account Impersonation     | Not integrated
+  //
+  // [1] Native role_arn supports AWS, Aliyun OSS, Tencent COS and Volcengine TOS.
+  // [2] S3-compatible providers share the AWS STS broker contract (csp=aws).
+  // [3] Azure supports native workload/managed identity authentication, which
+  //     is separate from target-role delegation.
+  // GCP's native path uses use_iam + gcp_target_service_account, not role_arn.
+  std::string credential_broker_endpoint = "";
+
+  // AssumeRole credentials for supported S3 / S3-compatible providers.
+  // The target role is used by native STS and the shared STS broker flow. external_id
+  // is forwarded where supported; session_name applies only to native requests.
   std::string role_arn = "";
   std::string session_name = "";
   std::string external_id = "";
@@ -216,7 +238,6 @@ struct ArrowFileSystemConfig {
   // Azure broker-backed temporary SAS authentication.
   std::string azure_client_id = "";
   std::string azure_tenant_id = "";
-  std::string azure_credential_endpoint = "";
 
   // Lifetime requested for cross-tenant temporary credentials, in seconds.
   // Shared across providers that mint short-lived tokens:
@@ -228,6 +249,7 @@ struct ArrowFileSystemConfig {
   //     if outside [900, 3600] (the `iam.allowServiceAccountCredentialLifetimeExtension`
   //     org-policy escape hatch is not plumbed through).
   //   - Azure credential broker: requested SAS lifetime.
+  //   - AWS credential broker: requested STS lifetime in [900, 3600].
   // Long-lived readers refresh credentials ahead of expiry; one-shot readers
   // request credentials with this lifetime when they start.
   // Ignored by providers that don't mint temporary credentials (plain AKSK,
@@ -284,6 +306,15 @@ struct ArrowFileSystemConfig {
    * back to another Azure authentication mechanism.
    */
   [[nodiscard]] bool IsAzureCredentialBrokerEnabled() const;
+
+  /**
+   * @brief Return whether AWS STS broker authentication was requested for S3.
+   *
+   * S3 and S3-compatible providers use the same broker contract when
+   * credential_broker_endpoint is non-empty. Required broker settings are
+   * validated separately; an empty endpoint keeps native role/IAM/AKSK selection.
+   */
+  [[nodiscard]] bool IsAwsCredentialBrokerEnabled() const;
 
   /**
    * @brief Get the cache key for this filesystem configuration

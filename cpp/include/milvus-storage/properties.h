@@ -108,10 +108,10 @@ struct PropertyInfo {
 #define PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR "fs.talon.max_idle_per_addr"
 
 // Cross-tenant access properties
+#define PROPERTY_FS_CREDENTIAL_BROKER_ENDPOINT "fs.credential_broker_endpoint"
 #define PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT "fs.gcp_target_service_account"
 #define PROPERTY_FS_AZURE_CLIENT_ID "fs.azure_client_id"
 #define PROPERTY_FS_AZURE_TENANT_ID "fs.azure_tenant_id"
-#define PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT "fs.azure_credential_endpoint"
 
 // --- External Filesystem Properties ---
 // External filesystems are configured with properties following the pattern:
