@@ -27,7 +27,18 @@
 
 namespace milvus_storage::test {
 
-class FileReaderTest : public PackedTestBase {};
+class FileReaderTest : public PackedTestBase {
+  protected:
+  void SetUp() override {
+    PackedTestBase::SetUp();
+    FileRowGroupReader::CleanFooterMetadataCache();
+  }
+
+  void TearDown() override {
+    FileRowGroupReader::CleanFooterMetadataCache();
+    PackedTestBase::TearDown();
+  }
+};
 
 TEST_F(FileReaderTest, ReadAllColumnsWithEnoughMemory) {
   // read all row groups with enough memory. Only 1 readRowGroups() call.
@@ -522,6 +533,41 @@ TEST_F(FileReaderTest, NullSchemaPointer) {
   ASSERT_EQ(file_schema->num_fields(), schema_->num_fields());
 
   ASSERT_STATUS_OK(fr->Close());
+}
+
+TEST_F(FileReaderTest, ReusesCachedFooterMetadata) {
+  SetupOneFile();
+
+  ASSERT_AND_ASSIGN(auto fr1, FileRowGroupReader::Make(fs_, one_file_path_, schema_, reader_memory_));
+  auto metadata1 = fr1->file_metadata()->GetParquetMetadata();
+
+  // A second Make for the same file must reuse the cached footer instead of
+  // re-parsing it, so both readers share the identical FileMetaData instance.
+  ASSERT_AND_ASSIGN(auto fr2, FileRowGroupReader::Make(fs_, one_file_path_, schema_, reader_memory_));
+  auto metadata2 = fr2->file_metadata()->GetParquetMetadata();
+
+  EXPECT_EQ(metadata1.get(), metadata2.get());
+  EXPECT_EQ(FileRowGroupReader::getFooterMetadataCache().size(), 1);
+
+  ASSERT_STATUS_OK(fr1->Close());
+  ASSERT_STATUS_OK(fr2->Close());
+}
+
+TEST_F(FileReaderTest, CleanFooterMetadataCacheForcesReparse) {
+  SetupOneFile();
+
+  ASSERT_AND_ASSIGN(auto fr1, FileRowGroupReader::Make(fs_, one_file_path_, schema_, reader_memory_));
+  auto metadata1 = fr1->file_metadata()->GetParquetMetadata();
+
+  FileRowGroupReader::CleanFooterMetadataCache();
+
+  ASSERT_AND_ASSIGN(auto fr2, FileRowGroupReader::Make(fs_, one_file_path_, schema_, reader_memory_));
+  auto metadata2 = fr2->file_metadata()->GetParquetMetadata();
+
+  EXPECT_NE(metadata1.get(), metadata2.get());
+
+  ASSERT_STATUS_OK(fr1->Close());
+  ASSERT_STATUS_OK(fr2->Close());
 }
 
 }  // namespace milvus_storage::test
