@@ -531,7 +531,7 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       std::nullopt),
     REGISTER_PROPERTY(PROPERTY_FS_CREDENTIAL_ENDPOINT,
                       PropertyType::STRING,
-                      "The HTTP(S) credential Broker endpoint for Azure SAS and Talon requests. "
+                      "The HTTP(S) credential Broker endpoint for AWS STS, Azure SAS and Talon requests. "
                       "Talon derives the Broker request and origin settings from the filesystem properties.",
                       "",
                       std::nullopt),

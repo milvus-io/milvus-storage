@@ -374,6 +374,38 @@ TEST_F(FileSystemCacheTest, GcpCacheKeyUsesImpersonationIdentityOnly) {
   EXPECT_NE(base.GetCacheKey(), different_target_sa.GetCacheKey());
 }
 
+TEST_F(FileSystemCacheTest, AwsBrokerCacheKeyUsesBrokerIdentity) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderAWS;
+  config.region = "us-west-2";
+  config.role_arn = "arn:aws:iam::123456789012:role/reader";
+  config.credential_endpoint = "http://broker/";
+  auto changed = config;
+  changed.credential_endpoint = "http://other-broker/";
+  EXPECT_NE(config.GetCacheKey(), changed.GetCacheKey());
+  changed = config;
+  changed.external_id = "another-tenant";
+  EXPECT_NE(config.GetCacheKey(), changed.GetCacheKey());
+  changed = config;
+  changed.role_arn = "arn:aws:iam::123456789012:role/other";
+  EXPECT_NE(config.GetCacheKey(), changed.GetCacheKey());
+  changed = config;
+  changed.session_name = "unused";
+  changed.access_key_id = "unused";
+  changed.access_key_value = "unused";
+  EXPECT_EQ(config.GetCacheKey(), changed.GetCacheKey());
+  changed = config;
+  changed.use_iam = true;
+  EXPECT_NE(config.GetCacheKey(), changed.GetCacheKey());
+  auto native_iam = changed;
+  native_iam.credential_endpoint.clear();
+  EXPECT_EQ(changed.GetCacheKey(), native_iam.GetCacheKey());
+  changed = config;
+  changed.credential_endpoint.clear();
+  EXPECT_NE(config.GetCacheKey(), changed.GetCacheKey());
+}
+
 TEST_F(FileSystemCacheTest, AzureBrokerCacheKeyUsesBrokerIdentity) {
   ArrowFileSystemConfig base;
   base.storage_type = "remote";
@@ -473,9 +505,9 @@ TEST_F(FileSystemCacheTest, TalonBrokerIamSeparatesClientsWithTheSameOriginRole)
   auto iam = base;
   iam.use_iam = true;
   EXPECT_NE(base.GetCacheKey(), iam.GetCacheKey());
-  // The native S3 producer still prioritizes the explicit role over use_iam.
+  // With Talon disabled, use_iam selects native STS instead of the Broker.
   base.talon_mode = iam.talon_mode = TalonMode::Disabled;
-  EXPECT_EQ(base.GetCacheKey(), iam.GetCacheKey());
+  EXPECT_NE(base.GetCacheKey(), iam.GetCacheKey());
 }
 
 TEST_F(FileSystemCacheTest, TalonNamespaceUsesConfiguredIdentityIndependentlyOfBroker) {

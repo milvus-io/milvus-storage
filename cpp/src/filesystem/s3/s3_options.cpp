@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/s3/s3_options.h"
+#include "milvus-storage/filesystem/s3/provider/AwsCredentialBrokerProvider.h"
 
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/auth/STSCredentialsProvider.h>
@@ -257,6 +258,11 @@ arrow::Result<S3Options> S3Options::FromUri(const std::string& uri_string, std::
 }
 
 bool S3Options::Equals(const S3Options& other) const {
+  const auto* broker = dynamic_cast<const AwsCredentialBrokerProvider*>(credentials_provider.get());
+  const auto* other_broker = dynamic_cast<const AwsCredentialBrokerProvider*>(other.credentials_provider.get());
+  if ((broker || other_broker) && (!broker || !other_broker || !broker->Equals(*other_broker))) {
+    return false;
+  }
   const int64_t default_metadata_size = default_metadata ? default_metadata->size() : 0;
   const bool default_metadata_equals =
       default_metadata_size ? (other.default_metadata && other.default_metadata->Equals(*default_metadata))
@@ -270,8 +276,9 @@ bool S3Options::Equals(const S3Options& other) const {
           use_crc32c_checksum == other.use_crc32c_checksum && use_crt_async_reads == other.use_crt_async_reads &&
           allow_bucket_creation == other.allow_bucket_creation &&
           allow_bucket_deletion == other.allow_bucket_deletion && default_metadata_equals &&
-          GetAccessKey() == other.GetAccessKey() && GetSecretKey() == other.GetSecretKey() &&
-          GetSessionToken() == other.GetSessionToken());
+          // Compare broker identity without fetching or comparing rotating credentials.
+          (broker || (GetAccessKey() == other.GetAccessKey() && GetSecretKey() == other.GetSecretKey() &&
+                      GetSessionToken() == other.GetSessionToken())));
 }
 
 bool S3ProxyOptions::Equals(const S3ProxyOptions& other) const {
