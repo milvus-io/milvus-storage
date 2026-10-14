@@ -829,7 +829,7 @@ impl opendal::raw::Access for FilesystemAccess {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::filesystem_c::LoonFFIResult;
     use std::ffi::{CString, c_char};
@@ -855,9 +855,9 @@ mod tests {
         ) -> LoonFFIResult;
     }
 
-    struct LocalOperatorFixture {
-        operator: Operator,
-        root: tempfile::TempDir,
+    pub(crate) struct LocalOperatorFixture {
+        pub(crate) operator: Operator,
+        pub(crate) root: tempfile::TempDir,
     }
 
     #[cfg(feature = "s3-crt-async")]
@@ -871,7 +871,7 @@ mod tests {
     }
 
     impl LocalOperatorFixture {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let root = tempfile::tempdir().unwrap();
 
             let storage_type_key = CString::new("fs.storage_type").unwrap();
