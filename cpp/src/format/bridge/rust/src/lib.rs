@@ -28,6 +28,8 @@ mod lance_memory_estimator;
 mod lance_object_store;
 #[path = "paimon/paimon_bridgeimpl.rs"]
 mod paimon_bridgeimpl;
+#[path = "paimon/paimon_opendal.rs"]
+mod paimon_opendal;
 #[path = "paimon/paimon_split_serde.rs"]
 mod paimon_split_serde;
 #[path = "paimon/paimon_testutil.rs"]
@@ -263,6 +265,12 @@ unsafe impl Sync for lance_ffi::FileSystemWrapper {}
 
 #[cxx::bridge(namespace = "milvus_storage::paimon::ffi")]
 pub mod paimon_ffi {
+    unsafe extern "C++" {
+        #[namespace = ""]
+        #[cxx_name = "FileSystemWrapper"]
+        type PaimonFileSystemWrapper = crate::lance_ffi::FileSystemWrapper;
+    }
+
     /// A single physical file or atomic DataSplit returned by Paimon planning.
     struct PaimonFileInfo {
         path: String,
@@ -274,6 +282,7 @@ pub mod paimon_ffi {
         type BlockingPaimonDataSplitReader;
 
         fn paimon_plan_files(
+            filesystem: SharedPtr<PaimonFileSystemWrapper>,
             table_location: &str,
             snapshot_id: i64,
             scan_mode: &str,
@@ -282,7 +291,9 @@ pub mod paimon_ffi {
         ) -> Result<Vec<PaimonFileInfo>>;
 
         fn paimon_read_deletion_vector(
+            filesystem: SharedPtr<PaimonFileSystemWrapper>,
             path: &str,
+            data_file_path: &str,
             offset: u64,
             length: u64,
             expected_cardinality: i64,
@@ -291,6 +302,7 @@ pub mod paimon_ffi {
         ) -> Result<Vec<u64>>;
 
         fn paimon_open_data_split_reader(
+            filesystem: SharedPtr<PaimonFileSystemWrapper>,
             metadata_json: &str,
             expected_table_location: &str,
             storage_options_keys: Vec<String>,
