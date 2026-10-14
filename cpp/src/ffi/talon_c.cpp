@@ -234,10 +234,10 @@ void loon_talon_client_destroy(LoonTalonClientHandle client) {
 LoonFFIResult loon_talon_read(LoonTalonClientHandle client,
                               const char* uri,
                               uint64_t offset,
-                              uint8_t* dst,
                               uint64_t length,
                               const char* version,
                               const uint64_t* object_size,
+                              uint8_t* dst,
                               LoonTalonResult** result) {
   if (result)
     *result = nullptr;
@@ -328,10 +328,10 @@ LoonFFIResult loon_talon_read_async(LoonAsyncContextHandle context,
                                     LoonTalonClientHandle client,
                                     const char* uri,
                                     uint64_t offset,
-                                    uint8_t* dst,
                                     uint64_t length,
                                     const char* version,
                                     const uint64_t* object_size,
+                                    uint8_t* dst,
                                     LoonTalonCallback callback,
                                     uintptr_t user_data,
                                     LoonAsyncHandle* operation) {

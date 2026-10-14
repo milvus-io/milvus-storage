@@ -88,7 +88,7 @@ static void test_talon_header_and_empty_results(void) {
   loon_talon_result_free(result);
   result = NULL;
   uint64_t zero = 0;
-  status = loon_talon_read(client, "s3://bucket/empty", 0, NULL, 0, NULL, &zero, &result);
+  status = loon_talon_read(client, "s3://bucket/empty", 0, 0, NULL, &zero, NULL, &result);
   ck_assert_int_eq(status.err_code, LOON_SUCCESS);
   ck_assert(result != NULL);
   ck_assert_int_eq(result->operation, LOON_TALON_READ);
@@ -120,11 +120,11 @@ static void test_talon_invalid_inputs(void) {
   client = test_client();
   ck_assert(client != 0);
   LoonTalonResult* result = (LoonTalonResult*)(uintptr_t)1;
-  status = loon_talon_read(client, "s3://bucket/key", 0, NULL, 1, NULL, NULL, &result);
+  status = loon_talon_read(client, "s3://bucket/key", 0, 1, NULL, NULL, NULL, &result);
   ck_assert_int_eq(status.err_code, LOON_INVALID_ARGS);
   ck_assert(result == NULL);
   loon_ffi_free_result(&status);
-  status = loon_talon_read(client, "s3://bucket/key", 0, NULL, 0, "etag", NULL, &result);
+  status = loon_talon_read(client, "s3://bucket/key", 0, 0, "etag", NULL, NULL, &result);
   ck_assert_int_eq(status.err_code, LOON_INVALID_ARGS);
   ck_assert(result == NULL);
   loon_ffi_free_result(&status);
@@ -182,17 +182,17 @@ static void test_talon_async_admission_and_lifetime(void) {
   LoonAsyncHandle operation = {0};
   uint64_t size = 0;
   executor.reject = 1;
-  status = loon_talon_read_async(context, client, "s3://bucket/empty", 0, NULL, 0, NULL, &size, talon_complete,
+  status = loon_talon_read_async(context, client, "s3://bucket/empty", 0, 0, NULL, &size, NULL, talon_complete,
                                  (uintptr_t)&states[0], &operation);
   ck_assert_int_eq(status.err_code, LOON_ASYNC_OVERLOADED);
   ck_assert(operation.internal == NULL && states[0].calls == 0);
   loon_ffi_free_result(&status);
   executor.reject = 0;
-  status = loon_talon_read_async(context, client, "s3://bucket/empty", 0, NULL, 0, NULL, &size, talon_complete,
+  status = loon_talon_read_async(context, client, "s3://bucket/empty", 0, 0, NULL, &size, NULL, talon_complete,
                                  (uintptr_t)&states[0], &operation);
   ck_assert_int_eq(status.err_code, LOON_SUCCESS);
   loon_ffi_free_result(&status);
-  status = loon_talon_read_async(context, client, "s3://bucket/empty", 0, NULL, 0, NULL, &size, talon_complete,
+  status = loon_talon_read_async(context, client, "s3://bucket/empty", 0, 0, NULL, &size, NULL, talon_complete,
                                  (uintptr_t)&states[0], &operation);
   ck_assert_int_eq(status.err_code, LOON_ASYNC_BUSY);
   loon_ffi_free_result(&status);
@@ -206,7 +206,7 @@ static void test_talon_async_admission_and_lifetime(void) {
   operation.timeout_ms = 0;
   char uri[] = "s3://bucket/empty";
   uint8_t read_byte = 0;
-  status = loon_talon_read_async(context, client, uri, 0, &read_byte, 1, NULL, &size, talon_complete,
+  status = loon_talon_read_async(context, client, uri, 0, 1, NULL, &size, &read_byte, talon_complete,
                                  (uintptr_t)&states[2], &operation);
   ck_assert_int_eq(status.err_code, LOON_SUCCESS);
   loon_ffi_free_result(&status);
@@ -342,7 +342,7 @@ static void test_talon_native_wait_does_not_hold_caller_worker(void) {
     pthread_mutex_unlock(&server.mutex);
     if (connected) {
       uint64_t zero = 0;
-      status = loon_talon_read_async(context, client, "s3://bucket/empty", 0, NULL, 0, NULL, &zero, talon_complete,
+      status = loon_talon_read_async(context, client, "s3://bucket/empty", 0, 0, NULL, &zero, NULL, talon_complete,
                                      (uintptr_t)&read, &read_operation);
       read_admission = status.err_code;
       loon_ffi_free_result(&status);
@@ -462,7 +462,7 @@ static void test_talon_real_raw_operations(void) {
   loon_talon_result_free(result);
   uint8_t output[sizeof(payload)] = {0};
   uint64_t size = sizeof(payload) - 1;
-  status = loon_talon_read(client, uri, 0, output, size, version, &size, &result);
+  status = loon_talon_read(client, uri, 0, size, version, &size, output, &result);
   ck_assert_msg(status.err_code == 0, "%s", loon_ffi_get_errmsg(&status));
   ck_assert(result && result->data.bytes_read == (int64_t)size);
   ck_assert(memcmp(output, payload, size) == 0);
@@ -514,7 +514,7 @@ static void test_talon_real_raw_operations(void) {
   ck_assert_int_eq(states[2].code, 0);
   ck_assert(states[2].result && !states[2].result->data.load.failed && states[2].result->data.load.count == 1);
   memset(output, 0, sizeof(output));
-  status = loon_talon_read_async(context, client, uri, 0, output, size, version, &size, talon_complete,
+  status = loon_talon_read_async(context, client, uri, 0, size, version, &size, output, talon_complete,
                                  (uintptr_t)&states[3], &operations[3]);
   ck_assert_int_eq(status.err_code, 0);
   loon_ffi_free_result(&status);
