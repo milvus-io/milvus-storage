@@ -14,6 +14,7 @@
 
 #pragma once
 #include "arrow/filesystem/filesystem.h"
+#include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/common/metadata.h"
 #include "parquet/arrow/reader.h"
 #include "parquet/properties.h"
@@ -39,6 +40,18 @@ class FileRowGroupReader {
       const ::parquet::ArrowReaderProperties& arrow_reader_props = ::parquet::default_arrow_reader_properties());
 
   arrow::Status SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num);
+
+  /**
+   * @brief Process-wide LRU cache of parsed parquet footers (FileMetaData),
+   * keyed by filesystem identity + path. Lets FileRowGroupReader::Make reuse a
+   * footer already parsed by an earlier batch reader instead of re-reading it.
+   */
+  static milvus_storage::LRUCache<std::string, std::shared_ptr<::parquet::FileMetaData>>& getFooterMetadataCache();
+
+  /**
+   * @brief Clears the process-wide footer metadata cache.
+   */
+  static void CleanFooterMetadataCache();
 
   std::shared_ptr<arrow::Schema> schema() const;
   /**
