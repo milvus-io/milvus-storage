@@ -78,6 +78,9 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
   [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
       const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) override;
 
+  [[nodiscard]] arrow::Status get_chunks_into(const std::vector<int64_t>& chunk_indices,
+                                              std::span<uint8_t> dst) override;
+
   [[nodiscard]] arrow::Result<uint64_t> get_chunk_estimated_size(int64_t chunk_index) override;
   [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_column_estimated_sizes(int64_t chunk_index) override;
   [[nodiscard]] arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) override;
@@ -102,7 +105,8 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
                                                    const std::vector<RowGroupInfo>& row_group_in_file,
                                                    size_t& rows_in_all_files);
 
-  ChunkRBMapResult read_chunks_from_files(const std::vector<int64_t>& task_indices);
+  ChunkRBMapResult read_chunks_from_files(const std::vector<int64_t>& task_indices,
+                                          std::optional<std::span<uint8_t>> dst = std::nullopt);
   arrow::Result<std::shared_ptr<ReaderT>> open_reader_for_file(size_t file_index);
   folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> open_reader_for_file_async(size_t file_index);
 
@@ -199,6 +203,7 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::append_file_metadata(size_t file_i
             .global_row_end = rows_in_all_files + rows_in_file,
             .avg_memory_size = chunk_memory_size,
             .memory_size_available = row_group_in_file[j].memory_size_available,
+            .file_range = row_group_in_file[j].file_range,
         });
       }
     }
@@ -218,6 +223,7 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::append_file_metadata(size_t file_i
           .global_row_end = rows_in_all_files + rows_in_file,
           .avg_memory_size = row_group_in_file[j].memory_size,
           .memory_size_available = row_group_in_file[j].memory_size_available,
+          .file_range = row_group_in_file[j].file_range,
       });
     }
   }
@@ -518,7 +524,8 @@ static std::vector<std::vector<int64_t>> split_chunks(const std::vector<int64_t>
 }
 
 template <typename ReaderT>
-ChunkRBMapResult ColumnGroupReaderImpl<ReaderT>::read_chunks_from_files(const std::vector<int64_t>& task_indices) {
+ChunkRBMapResult ColumnGroupReaderImpl<ReaderT>::read_chunks_from_files(const std::vector<int64_t>& task_indices,
+                                                                        std::optional<std::span<uint8_t>> dst) {
   std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> chunk_rb_map;
   std::vector<std::vector<int64_t>> chunk_idxs_in_files(column_group_->files.size());
 
@@ -562,12 +569,52 @@ ChunkRBMapResult ColumnGroupReaderImpl<ReaderT>::read_chunks_from_files(const st
       }
     }
 
-    ARROW_ASSIGN_OR_RAISE(auto reader, open_reader_for_file(file_idx));
+    // Reuse the prepared projection and metadata, but keep decoding state
+    // independent for concurrent reads.
+    ARROW_ASSIGN_OR_RAISE(auto reader, format_readers_[file_idx]->clone_reader());
+    size_t row_bytes = 0;
+    if (dst) {
+      const auto schema = reader->get_schema();
+      if (needed_columns_.size() > 1 || (needed_columns_.empty() && schema->num_fields() != 1)) {
+        return arrow::Status::Invalid("Fixed-width destination requires a single projected column");
+      }
+      const auto field = needed_columns_.empty() ? schema->field(0) : schema->GetFieldByName(needed_columns_.front());
+      if (!field) {
+        return arrow::Status::Invalid("Destination column is not present in the file schema");
+      }
+      if (field->type()->id() != arrow::Type::FIXED_SIZE_BINARY) {
+        return arrow::Status::NotImplemented("Destination reads require a fixed-size binary column");
+      }
+      const auto output_field =
+          needed_columns_.empty() ? file_schema_->field(0) : file_schema_->GetFieldByName(needed_columns_.front());
+      if (!output_field || !field->type()->Equals(output_field->type())) {
+        return arrow::Status::Invalid("Destination columns have inconsistent row layouts");
+      }
+      row_bytes = std::static_pointer_cast<arrow::FixedSizeBinaryType>(field->type())->byte_width();
+      if (!dst->data() || row_bytes == 0 || total_rows_ > dst->size() / row_bytes) {
+        return arrow::Status::Invalid("Fixed-width column exceeds its destination capacity");
+      }
+    }
     std::vector<std::shared_ptr<arrow::RecordBatch>> rbs_in_file;
     for (auto& range : ranges_in_file) {
-      ARROW_ASSIGN_OR_RAISE(auto rbreader, reader->read_with_range(range.first, range.second));
-      ARROW_ASSIGN_OR_RAISE(auto rbs, rbreader->ToRecordBatches());
-      std::move(rbs.begin(), rbs.end(), std::back_inserter(rbs_in_file));
+      if (dst) {
+        const auto& first = chunk_infos_[chunk_idxs.front()];
+        const uint64_t row_offset =
+            first.global_row_end - first.number_of_rows + (range.first - first.row_offset_in_file);
+        const uint64_t rows = range.second - range.first;
+        if (row_offset > dst->size() / row_bytes || rows > dst->size() / row_bytes - row_offset) {
+          return arrow::Status::Invalid("Fixed-width range exceeds its destination capacity");
+        }
+        ARROW_RETURN_NOT_OK(
+            reader->read_with_range_into(range.first, range.second, dst->data() + row_offset * row_bytes));
+      } else {
+        ARROW_ASSIGN_OR_RAISE(auto rbreader, reader->read_with_range(range.first, range.second));
+        ARROW_ASSIGN_OR_RAISE(auto rbs, rbreader->ToRecordBatches());
+        std::move(rbs.begin(), rbs.end(), std::back_inserter(rbs_in_file));
+      }
+    }
+    if (dst) {
+      continue;
     }
 
     // generate chunk_rb_map
@@ -648,6 +695,21 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReade
   }
 
   return result;
+}
+
+template <typename ReaderT>
+arrow::Status ColumnGroupReaderImpl<ReaderT>::get_chunks_into(const std::vector<int64_t>& chunk_indices,
+                                                              std::span<uint8_t> dst) {
+  assert(opened_);
+
+  FIU_RETURN_ON(FIUKEY_COLUMN_GROUP_READ_FAIL,
+                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_COLUMN_GROUP_READ_FAIL)));
+
+  std::vector<int64_t> unique_chunk_indices(chunk_indices.begin(), chunk_indices.end());
+  std::sort(unique_chunk_indices.begin(), unique_chunk_indices.end());
+  unique_chunk_indices.erase(std::unique(unique_chunk_indices.begin(), unique_chunk_indices.end()),
+                             unique_chunk_indices.end());
+  return read_chunks_from_files(unique_chunk_indices, dst).status();
 }
 
 template <typename ReaderT>

@@ -14,6 +14,7 @@
 
 #include "milvus-storage/filesystem/s3/s3_global.h"
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -35,6 +36,11 @@
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
 #ifdef WITH_CRT
+#include <arrow/util/cpu_info.h>
+#include <aws/crt/io/Bootstrap.h>
+#include <aws/crt/io/EventLoopGroup.h>
+#include <aws/crt/io/HostResolver.h>
+
 #include "milvus-storage/filesystem/s3/s3_crt_client.h"
 #endif
 namespace milvus_storage {
@@ -176,6 +182,17 @@ struct AwsInstance {
     if (options.override_default_http_options) {
       aws_options_.httpOptions = options.http_options;
     }
+#ifdef WITH_CRT
+    // Size the SDK's shared network runtime to the available CPUs; the SDK owns its lifetime.
+    aws_options_.ioOptions.clientBootstrap_create_fn = [] {
+      Aws::Crt::Io::EventLoopGroup event_loops(
+          static_cast<uint16_t>(std::clamp(arrow::internal::CpuInfo::GetInstance()->num_cores(), 1, 65535)));
+      Aws::Crt::Io::DefaultHostResolver resolver(event_loops, 8, 60);
+      auto bootstrap = std::make_shared<Aws::Crt::Io::ClientBootstrap>(event_loops, resolver);
+      bootstrap->EnableBlockingShutdown();
+      return bootstrap;
+    };
+#endif
     Aws::InitAPI(aws_options_);
   }
 

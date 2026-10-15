@@ -107,6 +107,8 @@ class ParquetFormatReader final : public FormatReader, public std::enable_shared
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> read_with_range(
       const uint64_t& start_offset, const uint64_t& end_offset) override;
 
+  [[nodiscard]] arrow::Status read_with_range_into(uint64_t start_offset, uint64_t end_offset, uint8_t* dst) override;
+
   [[nodiscard]] arrow::Result<std::shared_ptr<FormatReader>> clone_reader() override;
 
   // Decode overlapping row groups with Arrow's async generator, then trim to
@@ -132,7 +134,7 @@ class ParquetFormatReader final : public FormatReader, public std::enable_shared
   [[nodiscard]] arrow::Status finish_open(std::shared_ptr<::parquet::arrow::FileReader> file_reader);
 
   // Resolve top-level column names to Parquet leaf indices and commit the
-  // projection. An empty list selects every leaf column.
+  // projection and row-group byte ranges. An empty list selects every leaf column.
   [[nodiscard]] arrow::Status set_needed_columns(const std::vector<std::string>& needed_columns);
 
   ParquetFormatReader(const ParquetFormatReader& other, std::shared_ptr<::parquet::arrow::FileReader> file_reader);

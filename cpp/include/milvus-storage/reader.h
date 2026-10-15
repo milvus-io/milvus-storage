@@ -14,6 +14,9 @@
 
 #pragma once
 
+#include <cstdint>
+#include <span>
+
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
@@ -21,6 +24,7 @@
 #include <folly/futures/Future.h>
 
 #include "milvus-storage/column_groups.h"
+#include "milvus-storage/format/column_group_reader.h"
 #include "milvus-storage/common/row_offset_heap.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/common/config.h"
@@ -90,6 +94,17 @@ class ChunkReader {
       const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) = 0;
 
   /**
+   * @brief Reads chunks into their logical positions in a caller-owned buffer.
+   *
+   * dst must fit the decoded column group and remain valid until the
+   * call returns, including on error. Concurrent calls must select disjoint chunks.
+   * Row width comes from the selected column schema. Unsupported formats return
+   * NotImplemented; supported column layouts depend on the format.
+   */
+  [[nodiscard]] virtual arrow::Status get_chunks_into(const std::vector<int64_t>& chunk_indices,
+                                                      std::span<uint8_t> dst) = 0;
+
+  /**
    * @brief Retrieves multiple chunks asynchronously by their indices.
    *
    * The returned future completes with the same ordered result as get_chunks().
@@ -131,6 +146,14 @@ class ChunkReader {
    * @return Estimated sizes in bytes arranged as [column][chunk], or an error status.
    */
   [[nodiscard]] virtual arrow::Result<std::vector<std::vector<uint64_t>>> get_chunk_column_estimated_size() = 0;
+
+  /**
+   * @brief Returns metadata in chunk order.
+   *
+   * Optional file ranges describe stored bytes and may cover more rows than
+   * the logical chunk. Formats without physical range metadata leave them unset.
+   */
+  [[nodiscard]] virtual arrow::Result<std::vector<ChunkInfo>> get_chunk_infos() = 0;
 
   /**
    * @brief Returns the exact logical row count of every chunk.

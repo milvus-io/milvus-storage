@@ -19,7 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
-#include <folly/executors/IOThreadPoolExecutor.h>
+#include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/executors/ThreadPoolExecutor.h>
 
 namespace milvus_storage {
@@ -64,7 +64,8 @@ class ThreadPoolHolder {
       return;
     }
 
-    thread_pool_ = std::make_shared<folly::IOThreadPoolExecutor>(num_threads);
+    // Blocking reads share a queue so an idle worker can take the next task.
+    thread_pool_ = std::make_shared<folly::CPUThreadPoolExecutor>(num_threads);
   }
 
   // get the thread pool
@@ -74,7 +75,7 @@ class ThreadPoolHolder {
   static std::shared_ptr<folly::ThreadPoolExecutor> GetThreadPool(size_t parallelism_hint) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!thread_pool_) {
-      return std::make_shared<folly::IOThreadPoolExecutor>(parallelism_hint);
+      return std::make_shared<folly::CPUThreadPoolExecutor>(parallelism_hint);
     }
     return thread_pool_;
   }

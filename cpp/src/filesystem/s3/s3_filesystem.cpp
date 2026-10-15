@@ -1565,7 +1565,7 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
       const auto parts = (current_part_size_ + nbytes) / part_upload_size_;
       std::lock_guard lock(upload_state_->mutex);
       if (parts > native_limit_ - upload_state_->uploads_in_progress)
-        return Status::CapacityError("Native upload queue full; await FlushAsync and use smaller writes");
+        return Status::CapacityError("Native upload queue full; await WaitForCapacityAsync before retrying");
     }
 #endif
     if (closed_) {
@@ -1602,7 +1602,10 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
 
     // We can upload chunks without copying them into a buffer
     while (nbytes >= part_upload_size_) {
-      ARROW_RETURN_NOT_OK(UploadPart(data_ptr, part_upload_size_));
+      auto part = owned_buffer ? arrow::SliceBuffer(owned_buffer, data_ptr - reinterpret_cast<const int8_t*>(data),
+                                                    part_upload_size_)
+                               : nullptr;
+      ARROW_RETURN_NOT_OK(UploadPart(data_ptr, part_upload_size_, part));
       advance_ptr(part_upload_size_);
       pos_ += part_upload_size_;
     }
@@ -1640,6 +1643,30 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
     // Wait for background writes to finish
     std::unique_lock<std::mutex> lock(upload_state_->mutex);
     return upload_state_->pending_uploads_completed;
+  }
+
+  Future<> WaitForCapacityAsync(int64_t nbytes) override {
+#ifdef WITH_CRT
+    if (native_) {
+      if (closed_ || native_closing_) {
+        return Status::Invalid("Operation on closed or closing stream");
+      }
+      if (nbytes < 0 || nbytes > INT64_MAX - current_part_size_) {
+        return Status::Invalid("Invalid write size");
+      }
+      const auto parts = (current_part_size_ + nbytes) / part_upload_size_;
+      std::lock_guard lock(upload_state_->mutex);
+      ARROW_RETURN_NOT_OK(upload_state_->status);
+      if (parts > native_limit_) {
+        return Status::CapacityError("Write exceeds the native upload request window");
+      }
+      if (parts > native_limit_ - upload_state_->uploads_in_progress) {
+        return upload_state_->part_completed;
+      }
+      return Future<>::MakeFinished();
+    }
+#endif
+    return Status::NotImplemented("Upload capacity notifications are unavailable for this stream");
   }
 
   // Upload-related helpers
@@ -1990,8 +2017,7 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
                                    16 * 1024 * 1024, data);
       }
     };
-    auto notify = [state = upload_state_, number,
-                   operation](const Result<Aws::Client::XmlOutcome>& response) -> Status {
+    auto notify = [state = upload_state_, number, operation](const Result<Aws::Client::XmlOutcome>& response) {
       Status status = response.ok() ? OutcomeToStatus(operation, *response) : response.status();
       std::optional<S3Model::UploadPartResult> part;
       if constexpr (std::is_same_v<Request, S3Model::UploadPartRequest>) {
@@ -2004,6 +2030,7 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
         }
       }
       Future<> done;
+      Future<> part_completed;
       Status accumulated;
       {
         std::lock_guard lock(state->mutex);
@@ -2012,15 +2039,19 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
           AddCompletedPart(state, number, *part);
         if (--state->uploads_in_progress == 0)
           done = state->pending_uploads_completed;
+        part_completed = state->part_completed;
+        state->part_completed = Future<>::Make();
         accumulated = state->status;
       }
+      // Completing a future can invoke callbacks immediately. Publish both
+      // notifications after releasing the upload-state mutex.
       if (done.is_valid())
         done.MarkFinished(accumulated);
-      return status;
+      part_completed.MarkFinished(accumulated);
     };
-    native_tail_ = native_tail_.Then(std::move(send))
-                       .Then([notify](const Aws::Client::XmlOutcome& response) { return notify(response); },
-                             [notify](const Status& error) { return notify(error); });
+    // Parts share the upload ID, not a completion chain. Flush/close wait on
+    // the pending count, which also drains every request before aborting.
+    send().AddCallback(std::move(notify));
     return Status::OK();
   }
   Future<> FinishNativeMultipart() {
@@ -2069,16 +2100,19 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
       return Future<>::MakeFinished();
     if (native_closing_)
       return native_close_;
+    auto capacity = WaitForCapacityAsync(part_upload_size_ - current_part_size_);
     native_closing_ = true;
-    // Drain queued parts before submitting the final buffer, so even a one-slot
-    // client can close without exceeding admission. All waits are continuations.
-    native_close_ = FlushAsync()
-                        .Then([self = Self()]() -> Future<> {
-                          auto ready = self->EnsureReadyToFlushFromClose();
-                          if (!ready.ok())
-                            return Future<>::MakeFinished(ready);
-                          return self->FlushAsync();
-                        })
+    // The final buffer needs one free slot, not an empty queue. Drain every
+    // submitted part after it is queued, including when an earlier part fails.
+    native_close_ = capacity
+                        .Then(
+                            [self = Self()]() -> Future<> {
+                              auto ready = self->EnsureReadyToFlushFromClose();
+                              if (!ready.ok())
+                                return Future<>::MakeFinished(ready);
+                              return self->FlushAsync();
+                            },
+                            [self = Self()](const Status&) { return self->FlushAsync(); })
                         .Then([self = Self()] { return self->FinishNativeMultipart(); })
                         .Then([self = Self()] { return self->CleanupAfterClose(); },
                               [self = Self()](const Status& error) {
@@ -2114,7 +2148,6 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
   int64_t native_limit_ = 1;
   bool native_closing_ = false;
   Future<std::string> native_multipart_;
-  Future<> native_tail_ = Future<>::MakeFinished();
   Future<> native_close_;
 #endif
   Aws::String multipart_upload_id_;
@@ -2134,6 +2167,9 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
     int64_t uploads_in_progress = 0;
     arrow::Status status;
     arrow::Future<> pending_uploads_completed = arrow::Future<>::MakeFinished(arrow::Status::OK());
+#ifdef WITH_CRT
+    arrow::Future<> part_completed = arrow::Future<>::Make();
+#endif
   };
   std::shared_ptr<UploadState> upload_state_;
 };

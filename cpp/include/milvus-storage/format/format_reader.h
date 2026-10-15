@@ -19,9 +19,11 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include <arrow/io/interfaces.h>
 #include <arrow/status.h>
 #include <arrow/result.h>
 #include <arrow/record_batch.h>
@@ -45,6 +47,10 @@ struct RowGroupInfo {
   // statistics failure is intentionally not retained; public estimate APIs
   // return a generic NotImplemented status instead.
   bool memory_size_available = true;
+
+  // Stored bytes covering the projected columns, including dictionaries.
+  // Formats without physical ranges leave this unset.
+  std::optional<arrow::io::ReadRange> file_range = std::nullopt;
 
   std::string ToString() const;
 };
@@ -118,6 +124,15 @@ class FormatReader {
   // there will be an additional memory copy.
   [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> read_with_range(
       const uint64_t& start_offset, const uint64_t& end_offset) = 0;
+
+  // Decode [start_offset, end_offset) into caller-owned storage. Offsets are
+  // file-local rows; dst must fit all requested values. Currently implemented
+  // for one projected, non-null fixed-size binary column.
+  [[nodiscard]] virtual arrow::Status read_with_range_into(uint64_t /*start_offset*/,
+                                                           uint64_t /*end_offset*/,
+                                                           uint8_t* /*dst*/) {
+    return arrow::Status::NotImplemented("Reading into caller-owned storage is unavailable for this format");
+  }
 
   // Async version of read_with_range. Must be called on a cloned reader.
   // The default implementation runs the sync method on the caller thread and
