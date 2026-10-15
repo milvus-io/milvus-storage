@@ -129,17 +129,16 @@ arrow::Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs
   buffer_size_limit_ = buffer_size <= 0 ? INT64_MAX : buffer_size;
 
   // Reuse a previously parsed footer when available so each batch reader
-  // created by FileRowGroupReader::Make skips the footer read. Encrypted files
-  // cannot share parsed metadata, so they are always opened fresh.
+  // created by FileRowGroupReader::Make skips the footer read. Cache entries
+  // are only ever populated for plaintext files (see the put below), so a hit
+  // is safe to reuse regardless of whether the caller configured decryption
+  // properties.
   std::shared_ptr<::parquet::FileMetaData> cached_metadata;
-  const bool cacheable = reader_props.file_decryption_properties() == nullptr;
-  if (cacheable) {
-    auto cached = getFooterMetadataCache().get(path_);
-    if (cached.has_value()) {
-      cached_metadata = *cached;
-    }
+  auto cached = getFooterMetadataCache().get(path_);
+  if (cached.has_value()) {
+    cached_metadata = *cached;
   }
-  const bool cache_miss = cacheable && !cached_metadata;
+  const bool cache_miss = !cached_metadata;
 
   // Open the file; a non-null metadata makes Arrow skip footer parsing.
   ARROW_ASSIGN_OR_RAISE(
@@ -147,7 +146,11 @@ arrow::Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs
 
   if (cache_miss) {
     auto metadata = file_reader_->parquet_reader()->metadata();
-    if (metadata) {
+    // Only cache plaintext files. A configured key retriever does not mean the
+    // file is encrypted; encryption is declared in the footer itself, so judge
+    // cacheability from the parsed metadata. Encrypted files are always opened
+    // fresh and never share cached metadata.
+    if (metadata && !metadata->is_encryption_algorithm_set()) {
       getFooterMetadataCache().put(path_, metadata);
     }
   }
