@@ -156,8 +156,9 @@ struct ReadBuffer {
 unsafe impl Send for ReadBuffer {}
 
 impl ReadBuffer {
-    unsafe fn into_mut_slice(self) -> &'static mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    unsafe fn into_mut_slice(self, len: usize) -> &'static mut [u8] {
+        debug_assert!(len <= self.len);
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, len) }
     }
 }
 
@@ -207,10 +208,8 @@ fn complete_talon_io(callback: TalonIoCallback, context: *mut c_void, result: Ta
     let error_msg = if result.code == 0 {
         std::ptr::null()
     } else {
-        CString::new(result.message)
-            .unwrap_or_else(|_| {
-                CString::new("Talon IO error contains an interior NUL byte").unwrap()
-            })
+        CString::new(result.message.replace('\0', "\\0"))
+            .unwrap()
             .into_raw()
     };
     unsafe { callback(context, result.code, result.value, error_msg) };
@@ -297,6 +296,10 @@ pub unsafe extern "C" fn talon_object_read_async(
     callback: TalonIoCallback,
     context: *mut c_void,
 ) {
+    if offset.checked_add(length).is_none() {
+        complete_talon_error(callback, context, 1, "Talon read range overflows u64");
+        return;
+    }
     if length > isize::MAX as u64 {
         complete_talon_error(callback, context, 1, "Talon read length exceeds isize::MAX");
         return;
@@ -322,7 +325,11 @@ pub unsafe extern "C" fn talon_object_read_async(
                 return Ok(0usize);
             }
             let stat = reader.resolved_stat().await?;
-            let dst = unsafe { buffer.into_mut_slice() };
+            let len = (buffer.len as u64).min(stat.size.saturating_sub(offset)) as usize;
+            if len == 0 {
+                return Ok(0usize);
+            }
+            let dst = unsafe { buffer.into_mut_slice(len) };
             reader
                 .client
                 .read_into(&reader.object, offset, dst, Some(stat))
@@ -348,10 +355,420 @@ pub unsafe extern "C" fn talon_object_read_async(
     });
 }
 
+// These records borrow their strings and arrays until the completion callback returns.
+#[repr(C)]
+pub struct TalonRawRequest {
+    uri: *const u8,
+    uri_len: usize,
+    size: u64,
+    version: *const u8,
+    version_len: usize,
+}
+#[repr(C)]
+struct TalonRawLoadResult {
+    size: u64,
+    blocks: u64,
+}
+#[repr(C)]
+struct TalonRawFailure {
+    index: u64,
+    uncertain: bool,
+    error: *const c_char,
+}
+#[repr(C)]
+pub struct TalonRawResult {
+    code: i32,
+    error: *const c_char,
+    size: u64,
+    version: *const c_char,
+    blocks: u64,
+    results: *const TalonRawLoadResult,
+    results_len: usize,
+    failures: *const TalonRawFailure,
+    failures_len: usize,
+}
+type TalonRawCallback = unsafe extern "C" fn(*mut c_void, *const TalonRawResult);
+
+unsafe fn raw_string(ptr: *const u8, len: usize) -> Result<String, talon::Error> {
+    if len == 0 {
+        return Ok(String::new());
+    }
+    if ptr.is_null() {
+        return Err(talon::Error::InvalidArgument(
+            "null Talon input string".into(),
+        ));
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|error| talon::Error::InvalidArgument(error.to_string()))
+}
+
+fn complete_raw(
+    callback: TalonRawCallback,
+    context: usize,
+    io: TalonIoResult,
+    version: &str,
+    blocks: u64,
+    results: &[talon::LoadResult],
+    failures: &[talon::LoadFailure],
+) {
+    // Escaping an interior NUL preserves the rest of the original diagnostic.
+    let error = CString::new(io.message.replace('\0', "\\0")).unwrap();
+    let version = CString::new(version.replace('\0', "\\0")).unwrap();
+    let failure_errors = failures
+        .iter()
+        .map(|failure| CString::new(failure.error.replace('\0', "\\0")).unwrap())
+        .collect::<Vec<_>>();
+    let failures = failures
+        .iter()
+        .zip(&failure_errors)
+        .map(|(failure, error)| TalonRawFailure {
+            index: failure.index as u64,
+            uncertain: failure.uncertain,
+            error: error.as_ptr(),
+        })
+        .collect::<Vec<_>>();
+    let results = results
+        .iter()
+        .map(|result| TalonRawLoadResult {
+            size: result.size,
+            blocks: result.blocks,
+        })
+        .collect::<Vec<_>>();
+    let result = TalonRawResult {
+        code: io.code,
+        error: error.as_ptr(),
+        size: io.value,
+        version: version.as_ptr(),
+        blocks,
+        results: results.as_ptr(),
+        results_len: results.len(),
+        failures: failures.as_ptr(),
+        failures_len: failures.len(),
+    };
+    unsafe { callback(context as *mut c_void, &result) };
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn talon_raw_stat_async(
+    client: *const c_void,
+    uri: *const u8,
+    uri_len: usize,
+    callback: TalonRawCallback,
+    context: *mut c_void,
+) {
+    let context = context as usize;
+    let parsed = unsafe { raw_string(uri, uri_len) }.and_then(|uri| parse_uri(&uri));
+    let object = match parsed {
+        Ok(object) => object,
+        Err(error) => {
+            complete_raw(
+                callback,
+                context,
+                talon_error_result(error),
+                "",
+                0,
+                &[],
+                &[],
+            );
+            return;
+        }
+    };
+    // The C++ owner may be released immediately after submission.
+    let client = Arc::clone(&unsafe { &*(client as *const TalonClient) }.inner);
+    crate::TOKIO_RT.spawn(async move {
+        match AssertUnwindSafe(client.stat(&object)).catch_unwind().await {
+            Ok(Ok(stat)) => complete_raw(
+                callback,
+                context,
+                TalonIoResult {
+                    code: 0,
+                    value: stat.size,
+                    message: String::new(),
+                },
+                &stat.version,
+                0,
+                &[],
+                &[],
+            ),
+            Ok(Err(error)) => complete_raw(
+                callback,
+                context,
+                talon_error_result(error),
+                "",
+                0,
+                &[],
+                &[],
+            ),
+            Err(_) => complete_raw(
+                callback,
+                context,
+                TalonIoResult {
+                    code: -1,
+                    value: 0,
+                    message: "Talon stat task panicked".into(),
+                },
+                "",
+                0,
+                &[],
+                &[],
+            ),
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn talon_raw_read_async(
+    client: *const c_void,
+    uri: *const u8,
+    uri_len: usize,
+    offset: u64,
+    length: u64,
+    dst: *mut u8,
+    has_stat: bool,
+    size: u64,
+    version: *const u8,
+    version_len: usize,
+    callback: TalonIoCallback,
+    context: *mut c_void,
+) {
+    let parsed = unsafe { raw_string(uri, uri_len) }
+        .and_then(|uri| parse_uri(&uri))
+        .and_then(|object| {
+            unsafe { raw_string(version, version_len) }.map(|version| (object, version))
+        });
+    let (object, version) = match parsed {
+        Ok(value) => value,
+        Err(error) => {
+            complete_talon_io(callback, context, talon_error_result(error));
+            return;
+        }
+    };
+    let reader = TalonObjectReader {
+        client: Arc::clone(&unsafe { &*(client as *const TalonClient) }.inner),
+        object,
+        stat: Arc::new(OnceCell::new_with(has_stat.then(|| ObjectStat {
+            size,
+            version: if version.is_empty() {
+                UNCHECKED_VERSION.into()
+            } else {
+                version
+            },
+        }))),
+    };
+    // Existing submission clones reader state before returning and retains the buffer until completion.
+    unsafe {
+        talon_object_read_async(
+            &reader as *const _ as *const c_void,
+            offset,
+            length,
+            dst,
+            callback,
+            context,
+        )
+    };
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn talon_raw_load_async(
+    client: *const c_void,
+    requests: *const TalonRawRequest,
+    count: usize,
+    batch: bool,
+    callback: TalonRawCallback,
+    context: *mut c_void,
+) {
+    let context = context as usize;
+    let requests = if count == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(requests, count) }
+    };
+    // Parse and own every URI/version before dispatch, including empty-file requests.
+    let requests = requests
+        .iter()
+        .map(|request| {
+            let object = parse_uri(&unsafe { raw_string(request.uri, request.uri_len) }?)?;
+            let version = unsafe { raw_string(request.version, request.version_len) }?;
+            Ok(talon::LoadRequest {
+                object,
+                size: request.size,
+                version: if version.is_empty() {
+                    talon::Version::new(UNCHECKED_VERSION)
+                } else {
+                    talon::Version::new(version)
+                },
+            })
+        })
+        .collect::<Result<Vec<_>, talon::Error>>();
+    let requests = match requests {
+        Ok(requests) => requests,
+        Err(error) => {
+            complete_raw(
+                callback,
+                context,
+                talon_error_result(error),
+                "",
+                0,
+                &[],
+                &[],
+            );
+            return;
+        }
+    };
+    let client = Arc::clone(&unsafe { &*(client as *const TalonClient) }.inner);
+    crate::TOKIO_RT.spawn(async move {
+        let operation = AssertUnwindSafe(async {
+            if batch {
+                client.batch_load(&requests).await
+            } else {
+                let request = &requests[0];
+                client
+                    .load(&request.object, &request.version, request.size)
+                    .await
+                    .map(|result| vec![result])
+            }
+        })
+        .catch_unwind()
+        .await;
+        match operation {
+            Ok(Ok(results)) => {
+                let first = results.first();
+                complete_raw(
+                    callback,
+                    context,
+                    TalonIoResult {
+                        code: 0,
+                        value: first.map_or(0, |result| result.size),
+                        message: String::new(),
+                    },
+                    "",
+                    first.map_or(0, |result| result.blocks),
+                    if batch { &results } else { &[] },
+                    &[],
+                );
+            }
+            Ok(Err(error)) => {
+                // Preserve the outer diagnostic before moving the failure list and classifying the cause.
+                let message = error.to_string();
+                let (cause, failures) = match error {
+                    talon::LoadError::Batch {
+                        source,
+                        failed_files,
+                    } => (*source, failed_files),
+                    other => (other, Vec::new()),
+                };
+                let mut result = talon_load_error_result(cause);
+                result.message = message;
+                complete_raw(callback, context, result, "", 0, &[], &failures);
+            }
+            Err(_) => complete_raw(
+                callback,
+                context,
+                TalonIoResult {
+                    code: -1,
+                    value: 0,
+                    message: "Talon load task panicked".into(),
+                },
+                "",
+                0,
+                &[],
+                &[],
+            ),
+        }
+    });
+}
+
+fn talon_load_error_result(error: talon::LoadError) -> TalonIoResult {
+    // Retain the outer diagnostic, including the worker address and block offset.
+    let message = error.to_string();
+    let worker_code = |source: talon::WorkerLoadError| match source {
+        talon::WorkerLoadError::Instance(error) => cache_error_code(error.into()),
+        talon::WorkerLoadError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+            ffi::TalonErrorCode::Timeout
+        }
+        talon::WorkerLoadError::Io(_) => ffi::TalonErrorCode::Unavailable,
+        talon::WorkerLoadError::Codec(_)
+        | talon::WorkerLoadError::Protocol(_)
+        | talon::WorkerLoadError::Rejected(_) => ffi::TalonErrorCode::NonRetryable,
+    };
+    let code = match error {
+        talon::LoadError::Batch { source, .. } => talon_load_error_result(*source).code,
+        talon::LoadError::InvalidArgument(_) => ffi::TalonErrorCode::InvalidArgument.repr,
+        talon::LoadError::Placement(error) => talon_error_result(error.into()).code,
+        talon::LoadError::Worker { source, .. } | talon::LoadError::WorkerBatch { source, .. } => {
+            worker_code(source).repr
+        }
+        talon::LoadError::Timeout => ffi::TalonErrorCode::Timeout.repr,
+        talon::LoadError::MembershipChanged => ffi::TalonErrorCode::Unavailable.repr,
+    };
+    TalonIoResult {
+        code,
+        value: 0,
+        message,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use talon::{CoordinatorError, DataErrorCode, DataPlaneError, WorkerError};
+
+    #[test]
+    fn load_errors_preserve_classification_and_complete_diagnostics() {
+        use talon::{LoadError, LoadFailure, WorkerLoadError};
+        let errors = [
+            (
+                LoadError::InvalidArgument("bad size".into()),
+                ffi::TalonErrorCode::InvalidArgument,
+            ),
+            (LoadError::Timeout, ffi::TalonErrorCode::Timeout),
+            (
+                LoadError::MembershipChanged,
+                ffi::TalonErrorCode::Unavailable,
+            ),
+            (
+                LoadError::Placement(BlockReadError::NoOwners),
+                ffi::TalonErrorCode::Unavailable,
+            ),
+            (
+                LoadError::Worker {
+                    worker: "worker:9000".into(),
+                    offset: 8388608,
+                    source: WorkerLoadError::Io(std::io::ErrorKind::TimedOut.into()),
+                },
+                ffi::TalonErrorCode::Timeout,
+            ),
+            (
+                LoadError::WorkerBatch {
+                    worker: "worker:9000".into(),
+                    source: WorkerLoadError::Rejected("original rejection".into()),
+                },
+                ffi::TalonErrorCode::NonRetryable,
+            ),
+            (
+                LoadError::Batch {
+                    failed_files: vec![LoadFailure {
+                        index: 3,
+                        uncertain: true,
+                        error: "original rejection".into(),
+                    }],
+                    source: Box::new(LoadError::WorkerBatch {
+                        worker: "worker:9000".into(),
+                        source: WorkerLoadError::Io(std::io::ErrorKind::ConnectionReset.into()),
+                    }),
+                },
+                ffi::TalonErrorCode::Unavailable,
+            ),
+        ];
+        for (error, expected) in errors {
+            let message = error.to_string();
+            let result = talon_load_error_result(error);
+            assert_eq!(result.code, expected.repr, "{message}");
+            assert_eq!(result.message, message);
+        }
+    }
 
     #[test]
     fn worker_errors_preserve_codes_and_replica_diagnostics() {
