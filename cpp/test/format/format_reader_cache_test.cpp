@@ -23,6 +23,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -530,6 +531,57 @@ arrow::Status RunAsyncLeaderDoesNotBlockSyncFollower(const std::shared_ptr<Cache
 }
 
 template <typename CacheT>
+arrow::Status RunAsyncLeaderTimeoutNotifiesWaitersAndAllowsRetry(const std::shared_ptr<CacheT>& cache) {
+  using MetadataResult = typename CacheT::MetadataResult;
+  const std::string key = "async-leader-timeout";
+  auto metadata = MakeMetadata<CacheT>(key);
+  folly::Promise<MetadataResult> loader_promise;
+  std::optional<folly::Future<MetadataResult>> follower;
+  int loader_calls = 0;
+
+  auto leader = cache->get_or_open_async(key, [&]() -> folly::SemiFuture<MetadataResult> {
+    ++loader_calls;
+    // Subscribe while the leader is loading, before its timed wait detaches.
+    follower.emplace(std::move(cache->get_or_open_async(key, [&]() -> folly::SemiFuture<MetadataResult> {
+                       ++loader_calls;
+                       return folly::makeSemiFuture(MetadataResult(arrow::Status::Invalid("follower ran loader")));
+                     })).toUnsafeFuture());
+    return loader_promise.getSemiFuture();
+  });
+  try {
+    (void)std::move(leader).get(std::chrono::milliseconds(5));
+    return arrow::Status::Invalid("pending metadata leader unexpectedly completed before timeout");
+  } catch (const folly::FutureTimeout&) {
+  }
+
+  // Resolving the loader after timeout destroys the abandoned continuation.
+  // Its singleflight must be completed even though the leader no longer waits.
+  loader_promise.setValue(MetadataResult(metadata));
+  try {
+    auto follower_result = std::move(*follower).get(std::chrono::seconds(1));
+    if (!follower_result.status().IsCancelled()) {
+      return arrow::Status::Invalid("abandoned metadata leader did not cancel its follower: ",
+                                    follower_result.status().ToString());
+    }
+  } catch (const folly::FutureTimeout&) {
+    return arrow::Status::Invalid("abandoned metadata leader stranded its follower");
+  }
+  if (cache->get(key).has_value()) {
+    return arrow::Status::Invalid("abandoned metadata leader populated cache");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto retried,
+                        std::move(cache->get_or_open_async(key, [&]() -> folly::SemiFuture<MetadataResult> {
+                          ++loader_calls;
+                          return folly::makeSemiFuture(MetadataResult(metadata));
+                        })).get(std::chrono::seconds(1)));
+  if (loader_calls != 2 || retried.get() != metadata.get()) {
+    return arrow::Status::Invalid("metadata retry after timeout did not run a fresh loader");
+  }
+  return arrow::Status::OK();
+}
+
+template <typename CacheT>
 arrow::Status RunAsyncFailuresDoNotPoisonCacheAndAllowRetry(const std::shared_ptr<CacheT>& cache) {
   using MetadataPtr = typename CacheT::MetadataPtr;
   auto metadata = MakeMetadata<CacheT>("async-failure-retry");
@@ -557,6 +609,15 @@ arrow::Status RunAsyncFailuresDoNotPoisonCacheAndAllowRetry(const std::shared_pt
       })).get();
   if (exception_result.ok() || cache->get("async-exception").has_value()) {
     return arrow::Status::Invalid("async loader exception poisoned metadata cache");
+  }
+
+  auto thrown_result =
+      std::move(cache->get_or_open_async("async-thrown", []() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+        throw std::runtime_error("original synchronous loader error");
+      })).get();
+  if (!thrown_result.status().IsUnknownError() ||
+      thrown_result.status().message().find("original synchronous loader error") == std::string::npos) {
+    return arrow::Status::Invalid("async loader lost original synchronous exception");
   }
 
   ARROW_ASSIGN_OR_RAISE(
@@ -1033,6 +1094,45 @@ TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenAsyncFailuresDoNotPoisonCach
   ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
     using CacheT = std::decay_t<decltype(*cache)>;
     return RunAsyncFailuresDoNotPoisonCacheAndAllowRetry<CacheT>(cache);
+  }));
+}
+
+TEST_P(FormatReaderMetadataCacheParamTest, InvalidAsyncFuturePreservesErrorForWaitersAndAllowsRetry) {
+  ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
+    using CacheT = std::decay_t<decltype(*cache)>;
+    using MetadataResult = typename CacheT::MetadataResult;
+    const std::string key = "invalid-async-future";
+    const auto metadata = MakeMetadata<CacheT>(key);
+    std::optional<folly::Future<MetadataResult>> follower;
+    auto leader = cache->get_or_open_async(key, [&]() -> folly::SemiFuture<MetadataResult> {
+      follower.emplace(std::move(cache->get_or_open_async(key, [&]() {
+                         return folly::makeSemiFuture(MetadataResult(metadata));
+                       })).toUnsafeFuture());
+      return folly::SemiFuture<MetadataResult>::makeEmpty();
+    });
+
+    const auto leader_result = std::move(leader).get(std::chrono::seconds(1));
+    EXPECT_TRUE(leader_result.status().IsUnknownError()) << leader_result.status().ToString();
+    EXPECT_NE(leader_result.status().message().find(folly::FutureInvalid().what()), std::string::npos);
+    if (!follower) {
+      return arrow::Status::Invalid("invalid future loader did not subscribe its follower");
+    }
+    const auto follower_result = std::move(*follower).get(std::chrono::seconds(1));
+    EXPECT_EQ(follower_result.status().ToString(), leader_result.status().ToString());
+    EXPECT_FALSE(cache->get(key).has_value());
+
+    ARROW_ASSIGN_OR_RAISE(auto retried, std::move(cache->get_or_open_async(key, [&]() {
+                                          return folly::makeSemiFuture(MetadataResult(metadata));
+                                        })).get(std::chrono::seconds(1)));
+    EXPECT_EQ(retried.get(), metadata.get());
+    return arrow::Status::OK();
+  }));
+}
+
+TEST_P(FormatReaderMetadataCacheParamTest, AsyncLeaderTimeoutNotifiesWaitersAndAllowsRetry) {
+  ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) {
+    using CacheT = typename std::decay_t<decltype(cache)>::element_type;
+    return RunAsyncLeaderTimeoutNotifiesWaitersAndAllowsRetry<CacheT>(cache);
   }));
 }
 
