@@ -136,6 +136,9 @@ _loon_column_groups_destroy
 _loon_column_groups_debug_string
 
 # Manifest interface
+_loon_manifest_serialize
+_loon_manifest_deserialize
+_loon_manifest_free_buffer
 _loon_manifest_destroy
 _loon_manifest_debug_string
 
