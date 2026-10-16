@@ -332,7 +332,7 @@ unsafe extern "C" {
     ) -> LoonFFIResult;
 }
 
-const LOON_FFI_ERRCODE_MARKER: &str = "__LOON_FFI_ERRCODE__=";
+pub(crate) const LOON_FFI_ERRCODE_MARKER: &str = "__LOON_FFI_ERRCODE__=";
 
 #[derive(Debug)]
 pub struct LoonFFIError {

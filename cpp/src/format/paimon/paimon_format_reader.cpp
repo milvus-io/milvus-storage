@@ -30,6 +30,7 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "milvus-storage/format/paimon/paimon_common.h"
 #include "paimon/paimon_bridge.h"
 
@@ -436,7 +437,8 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
   }
   ARROW_ASSIGN_OR_RAISE(auto parsed, ParseMetadata(metadata_json));
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, file.path));
-  ARROW_ASSIGN_OR_RAISE(auto storage_options, ToStorageOptions(fs_config));
+  ARROW_ASSIGN_OR_RAISE(auto filesystem, FilesystemCache::getInstance().get(properties, file.path));
+  auto read_options = iceberg::ToReaderOptions(fs_config);
 
   auto metadata = std::make_shared<Metadata>();
   metadata->cache_key = cache_key(file);
@@ -489,8 +491,8 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
         return arrow::Status::Invalid("Paimon deletion_file has invalid path or range");
       }
       ARROW_ASSIGN_OR_RAISE(auto positions,
-                            ReadDeletionVector(path, static_cast<uint64_t>(offset), static_cast<uint64_t>(length),
-                                               cardinality, storage_options));
+                            ReadDeletionVector(path, ToStandardUri(file.path), static_cast<uint64_t>(offset),
+                                               static_cast<uint64_t>(length), cardinality, filesystem, read_options));
       deletions->reserve(positions.size());
       for (auto position : positions) {
         if (position >= physical_rows) {
@@ -515,8 +517,8 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
   } else {
     ARROW_ASSIGN_OR_RAISE(auto logical_chunk_rows,
                           api::GetValue<uint64_t>(properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
-    ARROW_ASSIGN_OR_RAISE(
-        auto reader, BlockingPaimonDataSplitReader::Open(metadata_json, ToStandardUri(file.path), storage_options));
+    ARROW_ASSIGN_OR_RAISE(auto reader, BlockingPaimonDataSplitReader::Open(metadata_json, ToStandardUri(file.path),
+                                                                           filesystem, read_options));
     ArrowSchema c_schema{};
     ARROW_RETURN_NOT_OK(reader->ExportSchema(&c_schema));
     ARROW_ASSIGN_OR_RAISE(metadata->file_schema, arrow::ImportSchema(&c_schema));

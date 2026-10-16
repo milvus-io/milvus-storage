@@ -15,6 +15,7 @@
 #include <string>
 
 #include <gtest/gtest.h>
+#include <arrow/util/uri.h>
 
 #include "milvus-storage/format/paimon/paimon_common.h"
 #include "test_env.h"
@@ -185,7 +186,33 @@ TEST(PaimonStorageOptionsTest, MilvusUriConversion) {
   EXPECT_EQ(ToMilvusUri("s3://bucket/table/data.parquet", "localhost:9000"),
             "s3://localhost:9000/bucket/table/data.parquet");
   EXPECT_EQ(ToMilvusUri("/tmp/table/data.parquet", "localhost:9000"), "/tmp/table/data.parquet");
-  EXPECT_EQ(ToMilvusUri("s3://bucket/table/data.parquet", ""), "s3://bucket/table/data.parquet");
+  EXPECT_EQ(ToMilvusUri("s3://bucket/table/data.parquet", ""), "s3:///bucket/table/data.parquet");
+}
+
+TEST(PaimonStorageOptionsTest, RawObjectKeysSurviveMilvusUriRoundTrip) {
+  const std::string key = "table/p=a%2Fb%25c%3Dd%252Fe/中文 空格/data.parquet";
+  for (const auto& prefix : {"s3://bucket/", "s3a://bucket/", "oss://bucket/", "gs://bucket/", "gcs://bucket/",
+                             "abfss://bucket@account.dfs.core.windows.net/",
+                             "abfss://account.dfs.core.windows.net/bucket/", "az://bucket/"}) {
+    for (const auto& address : {"endpoint:9000", ""}) {
+      SCOPED_TRACE(std::string(prefix) + address);
+      auto milvus_uri = ToMilvusUri(std::string(prefix) + key, address);
+      ASSERT_AND_ASSIGN(auto parsed, StorageUri::Parse(milvus_uri));
+      EXPECT_EQ(parsed.address, address);
+      EXPECT_EQ(parsed.bucket_name, "bucket");
+      EXPECT_EQ(parsed.key, key);
+      EXPECT_EQ(ToStandardUri(milvus_uri), parsed.scheme + "://bucket/" + key);
+    }
+  }
+}
+
+TEST(PaimonStorageOptionsTest, LocalFileUriPreservesRawPath) {
+  const std::string path = "/tmp/table/p=a%2Fb/中文 空格/data.parquet";
+  ASSERT_AND_ASSIGN(auto encoded_uri, arrow::util::UriFromAbsolutePath(path));
+  EXPECT_EQ(ToStandardUri(encoded_uri), path);
+  EXPECT_EQ(ToMilvusUri("file://" + path, ""), path);
+  EXPECT_EQ(ToMilvusUri("file:" + path, ""), path);
+  EXPECT_EQ(ToMilvusUri(path, ""), path);
 }
 
 }  // namespace
