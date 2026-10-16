@@ -233,10 +233,12 @@ class Manifest final {
    */
   static void CleanCache();
 
-  private:
+  // Raw stream codecs used by the backup/restore FFI. They do not normalize paths
+  // or provide transaction-safe reads and commits.
   [[nodiscard]] arrow::Status serialize(std::ostream& output_stream) const;
   arrow::Status deserialize(std::istream& input_stream);
 
+  private:
   void deserializeLegacy(std::istream& input_stream);
 
   [[nodiscard]] Manifest toRelativePaths(const std::string& base_path) const;
