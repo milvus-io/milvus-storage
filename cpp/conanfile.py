@@ -164,7 +164,7 @@ class StorageConan(ConanFile):
         self.requires("zlib/1.3.1#8045430172a5f8d56ba001b14561b4ea")
         self.requires("libcurl/8.10.1#a3113369c86086b0e84231844e7ed0a9", force=True, override=True)
         self.requires("folly/2026.04.20.00@milvus/dev#06852bea5b6449f0c4eb0df002b5779c")
-        self.requires("libavrocpp/1.12.1.1@milvus/dev#cde7bb587a29f6f233bae7e18b71815d")
+        self.requires("libavrocpp/1.12.1.1@milvus/dev#b4854183542196740ec9a004fdfff7ec")
         self.requires("google-cloud-cpp/2.28.0@milvus/dev#468918b43cec43624531a0340398cf43")
         self.requires("opentelemetry-cpp/1.23.0@milvus/dev#11bc565ec6e82910ae8f7471da756720")
         self.requires("milvus-common/1.0.0-60a563c@milvus/dev#a7448f82ed17d10934eacb6d1b152fd8")
