@@ -32,6 +32,7 @@
 #include <folly/synchronization/Baton.h>
 #include <parquet/arrow/schema.h>
 #include <parquet/metadata.h>
+#include <parquet/encryption/encryption.h>
 #include <parquet/type_fwd.h>
 #include <parquet/arrow/writer.h>
 
@@ -813,37 +814,49 @@ TEST_P(FormatReaderTest, ParquetOpenAsyncIsLazyAndSupportsThreadedExecutor) {
     GTEST_SKIP() << "Test parquet only.";
   }
 
-  const auto file_path = base_path_ + "/async_open.parquet";
-  StorageConfig config;
-  ASSERT_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(schema_, fs_, file_path, config));
-  ASSERT_STATUS_OK(writer->Write(test_batch_));
-  ASSERT_AND_ASSIGN(auto file, writer->Close());
+  for (bool provide_key_retriever : {false, true}) {
+    SCOPED_TRACE(provide_key_retriever);
+    std::atomic<int> key_requests{0};
+    milvus_storage::KeyRetriever key_retriever;
+    if (provide_key_retriever) {
+      key_retriever = [&key_requests](const std::string&) {
+        ++key_requests;
+        return std::string(32, 'k');
+      };
+    }
+    const auto file_path = base_path_ + "/async_open.parquet";
+    StorageConfig config;
+    ASSERT_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(schema_, fs_, file_path, config));
+    ASSERT_STATUS_OK(writer->Write(test_batch_));
+    ASSERT_AND_ASSIGN(auto file, writer->Close());
 
-  auto stats = std::make_shared<FileSystemReadStats>();
-  auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
-  auto reader = std::make_shared<parquet::ParquetFormatReader>(
-      counting_fs, file_path, properties_, /*needed_columns=*/std::vector<std::string>{}, nullptr,
-      file.Get<uint64_t>(api::kPropertyFileSize), file.Get<uint64_t>(api::kPropertyFooterSize));
+    auto stats = std::make_shared<FileSystemReadStats>();
+    auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
+    auto reader = std::make_shared<parquet::ParquetFormatReader>(
+        counting_fs, file_path, properties_, /*needed_columns=*/std::vector<std::string>{}, key_retriever,
+        file.Get<uint64_t>(api::kPropertyFileSize), file.Get<uint64_t>(api::kPropertyFooterSize));
 
-  folly::ThreadedExecutor executor;
-  std::weak_ptr<parquet::ParquetFormatReader> weak_reader = reader;
-  auto future = reader->open_async();
-  reader.reset();
+    folly::ThreadedExecutor executor;
+    std::weak_ptr<parquet::ParquetFormatReader> weak_reader = reader;
+    auto future = reader->open_async();
+    reader.reset();
 
-  EXPECT_EQ(stats->open_path_count.load(std::memory_order_relaxed), 0);
-  EXPECT_EQ(stats->open_info_count.load(std::memory_order_relaxed), 0);
-  ASSERT_FALSE(weak_reader.expired());
+    EXPECT_EQ(stats->open_path_count.load(std::memory_order_relaxed), 0);
+    EXPECT_EQ(stats->open_info_count.load(std::memory_order_relaxed), 0);
+    ASSERT_FALSE(weak_reader.expired());
 
-  ASSERT_STATUS_OK(std::move(future).via(&executor).get());
-  EXPECT_EQ(
-      stats->open_path_count.load(std::memory_order_relaxed) + stats->open_info_count.load(std::memory_order_relaxed),
-      1);
-  EXPECT_EQ(stats->async_read_into_count.load(std::memory_order_relaxed), 1);
-  EXPECT_EQ(stats->async_get_size_count.load(std::memory_order_relaxed), 0);
-  const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
-  const auto footer_size = file.Get<uint64_t>(api::kPropertyFooterSize);
-  EXPECT_EQ(stats->first_async_read_position.load(std::memory_order_relaxed), file_size - footer_size);
-  EXPECT_EQ(stats->first_async_read_size.load(std::memory_order_relaxed), footer_size);
+    ASSERT_STATUS_OK(std::move(future).via(&executor).get());
+    EXPECT_EQ(
+        stats->open_path_count.load(std::memory_order_relaxed) + stats->open_info_count.load(std::memory_order_relaxed),
+        1);
+    EXPECT_EQ(stats->async_read_into_count.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(stats->async_get_size_count.load(std::memory_order_relaxed), 0);
+    const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
+    const auto footer_size = file.Get<uint64_t>(api::kPropertyFooterSize);
+    EXPECT_EQ(stats->first_async_read_position.load(std::memory_order_relaxed), file_size - footer_size);
+    EXPECT_EQ(stats->first_async_read_size.load(std::memory_order_relaxed), footer_size);
+    EXPECT_EQ(key_requests.load(), 0);
+  }
 }
 
 TEST_P(FormatReaderTest, ParquetOpenAsyncReadsMetadataAgainWhenFooterHintIsTooSmall) {
@@ -1537,32 +1550,120 @@ TEST_P(FormatReaderTest, ParquetCreateFromMetadataSharesParsedMetadata) {
     GTEST_SKIP() << "Test parquet only.";
   }
 
-  const auto file_path = base_path_ + "/shared_metadata.parquet";
-  StorageConfig config;
-  ASSERT_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(schema_, fs_, file_path, config));
-  ASSERT_STATUS_OK(writer->Write(test_batch_));
-  ASSERT_AND_ASSIGN(auto file, writer->Close());
-  ASSERT_GT(file.Get<uint64_t>(api::kPropertyFileSize), 0);
-  ASSERT_GT(file.Get<uint64_t>(api::kPropertyFooterSize), 0);
+  for (bool provide_key_retriever : {false, true}) {
+    SCOPED_TRACE(provide_key_retriever);
+    std::atomic<int> key_requests{0};
+    milvus_storage::KeyRetriever key_retriever;
+    if (provide_key_retriever) {
+      key_retriever = [&key_requests](const std::string&) {
+        ++key_requests;
+        return std::string(32, 'k');
+      };
+    }
+    const auto file_path = base_path_ + "/shared_metadata.parquet";
+    StorageConfig config;
+    ASSERT_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(schema_, fs_, file_path, config));
+    ASSERT_STATUS_OK(writer->Write(test_batch_));
+    ASSERT_AND_ASSIGN(auto file, writer->Close());
+    ASSERT_GT(file.Get<uint64_t>(api::kPropertyFileSize), 0);
+    ASSERT_GT(file.Get<uint64_t>(api::kPropertyFooterSize), 0);
 
-  ASSERT_AND_ASSIGN(auto metadata,
-                    FormatReader::load_metadata<parquet::ParquetFormatReader>(file, properties_, nullptr));
-  ASSERT_NE(nullptr, metadata->payload.parquet_metadata);
-  const auto metadata_ref_count = metadata->payload.parquet_metadata.use_count();
+    for (bool with_hint : {false, true}) {
+      SCOPED_TRACE(with_hint);
+      auto input_file = file;
+      if (!with_hint) {
+        input_file.properties.erase(api::kPropertyFileSize);
+        input_file.properties.erase(api::kPropertyFooterSize);
+      }
+      ASSERT_AND_ASSIGN(auto metadata, FormatReader::load_metadata<parquet::ParquetFormatReader>(
+                                           input_file, properties_, key_retriever));
+      ASSERT_NE(nullptr, metadata->payload.parquet_metadata);
+      const auto metadata_ref_count = metadata->payload.parquet_metadata.use_count();
 
-  ASSERT_AND_ASSIGN(auto first_reader, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
-                                           metadata, file, schema_, {"id"}, ""));
-  ASSERT_AND_ASSIGN(auto second_reader, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
-                                            metadata, file, schema_, {"value"}, ""));
+      ASSERT_AND_ASSIGN(auto first_reader, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
+                                               metadata, input_file, schema_, {"id"}, ""));
+      ASSERT_AND_ASSIGN(auto second_reader, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
+                                                metadata, input_file, schema_, {"value"}, ""));
 
-  ASSERT_GE(metadata->payload.parquet_metadata.use_count(), metadata_ref_count + 2);
+      ASSERT_GE(metadata->payload.parquet_metadata.use_count(), metadata_ref_count + 2);
 
-  ASSERT_AND_ASSIGN(auto first_batch, first_reader->get_chunk(0));
-  ASSERT_AND_ASSIGN(auto second_batch, second_reader->get_chunk(0));
-  ASSERT_EQ(first_batch->num_columns(), 1);
-  ASSERT_EQ(second_batch->num_columns(), 1);
-  ASSERT_EQ(first_batch->schema()->field(0)->name(), "id");
-  ASSERT_EQ(second_batch->schema()->field(0)->name(), "value");
+      ASSERT_AND_ASSIGN(auto first_batch, first_reader->get_chunk(0));
+      ASSERT_AND_ASSIGN(auto second_batch, second_reader->get_chunk(0));
+      ASSERT_EQ(first_batch->num_columns(), 1);
+      ASSERT_EQ(second_batch->num_columns(), 1);
+      ASSERT_EQ(first_batch->schema()->field(0)->name(), "id");
+      ASSERT_EQ(second_batch->schema()->field(0)->name(), "value");
+      // A metadata snapshot without a reusable footer must reopen the file,
+      // including when no key retriever was configured for a plain file.
+      auto uncached = std::make_shared<parquet::ParquetFormatReader::MetaTrait::Metadata>(*metadata);
+      uncached->payload.parquet_metadata.reset();
+      ASSERT_AND_ASSIGN(auto reopened, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
+                                           uncached, input_file, schema_, {}, ""));
+      ASSERT_AND_ASSIGN(auto reopened_batch, reopened->get_chunk(0));
+      ASSERT_TRUE(reopened_batch->Equals(*test_batch_));
+      EXPECT_EQ(key_requests.load(), 0);
+    }
+  }
+}
+
+TEST_P(FormatReaderTest, ParquetEncryptedMetadataRequiresReaderDecryptionState) {
+  if (GetParam() != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+  for (bool plaintext_footer : {false, true}) {
+    SCOPED_TRACE(plaintext_footer);
+    const auto file_path = base_path_ + (plaintext_footer ? "/plain_footer_encrypted.parquet" : "/encrypted.parquet");
+    ::parquet::FileEncryptionProperties::Builder encryption(std::string(32, 'k'));
+    encryption.footer_key_metadata("test-key");
+    if (plaintext_footer) {
+      encryption.set_plaintext_footer();
+    }
+    auto writer_properties = ::parquet::WriterProperties::Builder().encryption(encryption.build())->build();
+    ASSERT_AND_ASSIGN(auto sink, fs_->OpenOutputStream(file_path));
+    ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatches({test_batch_}));
+    ASSERT_STATUS_OK(::parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), sink, 1024, writer_properties));
+    ASSERT_STATUS_OK(sink->Close());
+    ASSERT_AND_ASSIGN(auto info, fs_->GetFileInfo(file_path));
+    api::ColumnGroupFile file{.path = file_path, .start_index = 0, .end_index = test_batch_->num_rows()};
+    file.properties[api::kPropertyFileSize] = std::to_string(info.size());
+    file.properties[api::kPropertyFooterSize] = std::to_string(info.size());
+    auto key = [](const std::string&) { return std::string(32, 'k'); };
+    for (bool async : {false, true}) {
+      SCOPED_TRACE(async);
+      folly::ThreadedExecutor executor;
+      ASSERT_AND_ASSIGN(
+          auto metadata,
+          async ? std::move(parquet::ParquetFormatReader::MetaTrait::load_metadata_async(file, properties_, key))
+                      .via(&executor)
+                      .get()
+                : parquet::ParquetFormatReader::MetaTrait::load_metadata(file, properties_, key));
+      EXPECT_EQ(metadata->payload.parquet_metadata, nullptr);
+      ASSERT_AND_ASSIGN(auto reopened, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
+                                           metadata, file, schema_, {}, ""));
+      ASSERT_AND_ASSIGN(auto batch, reopened->get_chunk(0));
+      ASSERT_TRUE(batch->Equals(*test_batch_));
+    }
+    // Clones must own independent decryption state after the source is closed.
+    auto original = std::make_shared<parquet::ParquetFormatReader>(
+        fs_, file_path, properties_, std::vector<std::string>{}, key, info.size(), info.size());
+    ASSERT_STATUS_OK(original->open());
+    ASSERT_AND_ASSIGN(auto original_batch, original->get_chunk(0));
+    ASSERT_TRUE(original_batch->Equals(*test_batch_));
+    ASSERT_AND_ASSIGN(auto clone, original->clone_reader());
+    original.reset();
+    ASSERT_AND_ASSIGN(auto clone_batch, clone->get_chunk(0));
+    ASSERT_TRUE(clone_batch->Equals(*test_batch_));
+    for (auto wrong_key : {milvus_storage::KeyRetriever{},
+                           milvus_storage::KeyRetriever{[](const std::string&) { return std::string(32, 'x'); }}}) {
+      auto reader = std::make_shared<parquet::ParquetFormatReader>(
+          fs_, file_path, properties_, std::vector<std::string>{}, wrong_key, info.size(), info.size());
+      auto status = reader->open();
+      if (status.ok()) {
+        // A plaintext footer may open without a key; encrypted pages must not read.
+        EXPECT_FALSE(reader->get_chunk(0).ok());
+      }
+    }
+  }
 }
 
 TEST_P(FormatReaderTest, NestedProjectionPreservesTopLevelColumns) {
