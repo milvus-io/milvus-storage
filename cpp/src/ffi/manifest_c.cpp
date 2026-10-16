@@ -15,9 +15,14 @@
 #include "milvus-storage/ffi_c.h"
 
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <vector>
+
+#include <boost/iostreams/device/array.hpp>
+#include <boost/iostreams/stream.hpp>
 
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/ffi_internal/bridge.h"
@@ -31,6 +36,74 @@ extern void destroy_column_groups_contents(LoonColumnGroups* cgroups);
 
 using namespace milvus_storage::api;
 using namespace milvus_storage::api::transaction;
+
+LoonFFIResult loon_manifest_serialize(const LoonManifest* manifest, uint8_t** out_data, size_t* out_size) {
+  if (out_data) {
+    *out_data = nullptr;
+  }
+  if (out_size) {
+    *out_size = 0;
+  }
+  if (!manifest || !out_data || !out_size) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: manifest, out_data, and out_size must not be null");
+  }
+  try {
+    std::shared_ptr<Manifest> cpp_manifest;
+    const auto import_status = milvus_storage::manifest_import(manifest, &cpp_manifest);
+    RETURN_ARROW_ERROR_IF(import_status, LOON_LOGICAL_ERROR, import_status.ToString());
+
+    // Expose the written range without str()'s copy or C++20 stringbuf::view(),
+    // which is unavailable in some supported standard libraries (e.g. GCC 10).
+    struct OutputBuffer : std::stringbuf {
+      using std::stringbuf::pbase;
+      using std::stringbuf::pptr;
+    } output;
+    std::ostream stream(&output);
+    const auto status = cpp_manifest->serialize(stream);
+    RETURN_ARROW_ERROR_IF(status, LOON_ARROW_ERROR, status.ToString());
+    const auto size = static_cast<size_t>(output.pptr() - output.pbase());
+    auto* buffer = new uint8_t[size];
+    std::memcpy(buffer, output.pbase(), size);
+    *out_data = buffer;
+    *out_size = size;
+    RETURN_SUCCESS();
+  } catch (const std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+}
+
+LoonFFIResult loon_manifest_deserialize(const uint8_t* data, const size_t size, LoonManifest** out_manifest) {
+  if (out_manifest) {
+    *out_manifest = nullptr;
+  }
+  if (!data || size == 0 || !out_manifest) {
+    RETURN_ERROR(LOON_INVALID_ARGS,
+                 "Invalid arguments: data and out_manifest must not be null and size must be nonzero");
+  }
+  try {
+    // Borrow the input bytes while supporting the codec's format probe and seekg(0).
+    boost::iostreams::stream<boost::iostreams::array_source> stream(reinterpret_cast<const char*>(data), size);
+    auto manifest = std::make_shared<Manifest>();
+    const auto status = manifest->deserialize(stream);
+    RETURN_ARROW_ERROR_IF(status, LOON_ARROW_ERROR, status.ToString());
+
+    // The existing FFI bridge filters delta types and narrows counts. Backup/restore
+    // must fail explicitly if exporting would lose metadata.
+    for (const auto& delta : manifest->deltaLogs()) {
+      if (delta.type != DeltaLogType::PRIMARY_KEY || delta.num_entries < 0 ||
+          delta.num_entries > std::numeric_limits<uint32_t>::max()) {
+        RETURN_ERROR(LOON_NOT_SUPPORT, "Delta log cannot be represented by LoonManifest: ", delta.path);
+      }
+    }
+    const auto export_status = milvus_storage::manifest_export(manifest, out_manifest);
+    RETURN_ARROW_ERROR_IF(export_status, LOON_LOGICAL_ERROR, export_status.ToString());
+    RETURN_SUCCESS();
+  } catch (const std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+}
+
+void loon_manifest_free_buffer(uint8_t* data) { delete[] data; }
 
 LoonFFIResult loon_transaction_open(const char* base_path,
                                     const ::LoonProperties* properties,

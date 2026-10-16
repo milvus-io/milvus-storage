@@ -152,6 +152,9 @@
     loon_column_groups_debug_string;
 
     # Manifest interface
+    loon_manifest_serialize;
+    loon_manifest_deserialize;
+    loon_manifest_free_buffer;
     loon_manifest_destroy;
     loon_manifest_debug_string;
 

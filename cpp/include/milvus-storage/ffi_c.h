@@ -322,6 +322,42 @@ typedef struct LoonManifest {
 } LoonManifest;
 
 /**
+ * @brief Serialize a manifest to an Avro binary buffer for backup/restore only.
+ *
+ * @warning This low-level interface bypasses transaction-safe reads and commits.
+ * Do not use it in normal read/write paths; use the transaction APIs instead.
+ * It performs no filesystem I/O or path normalization. Paths are serialized as-is.
+ *
+ * @param manifest Manifest to serialize, borrowed for this call
+ * @param out_data Output binary buffer (not a C string); release with loon_manifest_free_buffer
+ * @param out_size Output buffer size in bytes
+ * @return FFI result; on failure, supplied outputs are set to NULL and zero
+ */
+FFI_EXPORT LoonFFIResult loon_manifest_serialize(const LoonManifest* manifest, uint8_t** out_data, size_t* out_size);
+
+/**
+ * @brief Deserialize manifest bytes for backup/restore only.
+ *
+ * @warning This low-level interface bypasses transaction-safe reads and commits.
+ * Do not use it in normal read/write paths; use the transaction APIs instead.
+ * It performs no filesystem I/O or path normalization. Paths are returned as stored.
+ * Supports the same Avro and legacy formats as the manifest reader. Delta logs that
+ * LoonManifest cannot represent (non-PRIMARY_KEY type or entry count outside uint32_t)
+ * return loon_errcode_not_support rather than silently losing data.
+ *
+ * @param data Input binary buffer, borrowed only for this call
+ * @param size Input buffer size in bytes (must be nonzero)
+ * @param out_manifest Output manifest owning all nested data; release with loon_manifest_destroy
+ * @return FFI result; on failure, out_manifest is set to NULL when supplied
+ */
+FFI_EXPORT LoonFFIResult loon_manifest_deserialize(const uint8_t* data, size_t size, LoonManifest** out_manifest);
+
+/**
+ * @brief Free a buffer returned by loon_manifest_serialize (NULL is allowed).
+ */
+FFI_EXPORT void loon_manifest_free_buffer(uint8_t* data);
+
+/**
  * @brief Destroys a CManifest and frees all allocated memory
  *
  * A manifest returned by this library owns all of its nested storage,
