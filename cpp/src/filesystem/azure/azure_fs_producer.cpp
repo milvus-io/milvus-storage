@@ -54,7 +54,7 @@ arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
 
   if (config_.IsAzureCredentialBrokerEnabled()) {
     fs::AzureSasBrokerConfig broker_config{
-        .endpoint = config_.azure_credential_endpoint,
+        .endpoint = config_.credential_broker_endpoint,
         .region = config_.region,
         .bucket = config_.bucket_name,
         .client_id = config_.azure_client_id,

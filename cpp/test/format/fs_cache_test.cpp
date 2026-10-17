@@ -312,6 +312,33 @@ TEST_F(FileSystemCacheTest, GcpCacheKeyUsesImpersonationIdentityOnly) {
   EXPECT_NE(base.GetCacheKey(), different_target_sa.GetCacheKey());
 }
 
+TEST_F(FileSystemCacheTest, AwsBrokerCacheKeyUsesBrokerIdentity) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderAWS;
+  config.region = "us-west-2";
+  config.role_arn = "arn:aws:iam::123456789012:role/reader";
+  config.credential_broker_endpoint = "http://broker/";
+  auto changed = config;
+  changed.credential_broker_endpoint = "http://other-broker/";
+  EXPECT_NE(config.GetCacheKey(), changed.GetCacheKey());
+  changed = config;
+  changed.external_id = "another-tenant";
+  EXPECT_NE(config.GetCacheKey(), changed.GetCacheKey());
+  changed = config;
+  changed.role_arn = "arn:aws:iam::123456789012:role/other";
+  EXPECT_NE(config.GetCacheKey(), changed.GetCacheKey());
+  changed = config;
+  changed.session_name = "unused";
+  changed.use_iam = true;
+  changed.access_key_id = "unused";
+  changed.access_key_value = "unused";
+  EXPECT_EQ(config.GetCacheKey(), changed.GetCacheKey());
+  changed = config;
+  changed.credential_broker_endpoint.clear();
+  EXPECT_NE(config.GetCacheKey(), changed.GetCacheKey());
+}
+
 TEST_F(FileSystemCacheTest, AzureBrokerCacheKeyUsesBrokerIdentity) {
   ArrowFileSystemConfig base;
   base.storage_type = "remote";
@@ -322,7 +349,7 @@ TEST_F(FileSystemCacheTest, AzureBrokerCacheKeyUsesBrokerIdentity) {
   base.access_key_id = "account";
   base.azure_client_id = "client-a";
   base.azure_tenant_id = "tenant-a";
-  base.azure_credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
+  base.credential_broker_endpoint = "http://credential-broker/v1/credentials/assume-role";
   base.load_frequency = 3600;
 
   auto different_client = base;
@@ -334,7 +361,7 @@ TEST_F(FileSystemCacheTest, AzureBrokerCacheKeyUsesBrokerIdentity) {
   EXPECT_NE(base.GetCacheKey(), different_tenant.GetCacheKey());
 
   auto different_endpoint = base;
-  different_endpoint.azure_credential_endpoint = "https://other-broker/v1/credentials/assume-role";
+  different_endpoint.credential_broker_endpoint = "https://other-broker/v1/credentials/assume-role";
   EXPECT_NE(base.GetCacheKey(), different_endpoint.GetCacheKey());
 
   auto different_static_secret = base;
