@@ -14,6 +14,9 @@
 
 #pragma once
 
+#include <cstdint>
+#include <optional>
+#include <span>
 #include <string>
 
 #include <arrow/filesystem/filesystem.h>
@@ -38,6 +41,10 @@ struct ChunkInfo {
   // False means avg_memory_size is only a placeholder and column estimates are unavailable.
   bool memory_size_available;
 
+  // Stored bytes may cover the full row group even for a partial logical chunk.
+  // Formats without physical ranges leave this unset.
+  std::optional<arrow::io::ReadRange> file_range = std::nullopt;
+
   // Format all logical/file offset fields for diagnostics.
   [[nodiscard]] std::string ToString() const;
 };
@@ -56,6 +63,10 @@ class ColumnGroupReader {
   // Thread-safe: each call opens an independent FormatReader from reusable metadata.
   virtual arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
       const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) = 0;
+
+  // Thread-safe for disjoint chunk selections. dst must fit the decoded
+  // column group and must outlive the call. Unsupported formats return NotImplemented.
+  virtual arrow::Status get_chunks_into(const std::vector<int64_t>& chunk_indices, std::span<uint8_t> dst) = 0;
 
   virtual arrow::Result<uint64_t> get_chunk_estimated_size(int64_t chunk_index) = 0;
   virtual arrow::Result<std::vector<uint64_t>> get_chunk_column_estimated_sizes(int64_t chunk_index) = 0;

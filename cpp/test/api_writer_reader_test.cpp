@@ -106,6 +106,14 @@ class SyncOnlyChunkReader final : public ChunkReader {
     return std::vector<uint64_t>{0, 0, 0};
   }
 
+  [[nodiscard]] arrow::Result<std::vector<ChunkInfo>> get_chunk_infos() override {
+    return arrow::Status::NotImplemented("Chunk metadata is not provided by this test reader");
+  }
+
+  [[nodiscard]] arrow::Status get_chunks_into(const std::vector<int64_t>&, std::span<uint8_t>) override {
+    return arrow::Status::NotImplemented("Destination reads are not provided by this test reader");
+  }
+
   size_t last_parallelism = 0;
   std::vector<int64_t> last_chunk_indices;
 };

@@ -685,6 +685,30 @@ TEST_F(NativeS3Test, StreamBackpressureDoesNotConsumeRejectedWrite) {
   ASSERT_OK(stream->CloseAsync().status());
 }
 
+TEST_F(NativeS3Test, WaitForCapacityAllowsRetryingWrites) {
+  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream("capacity"));
+  auto async = std::dynamic_pointer_cast<AsyncOutputStream>(stream);
+  ASSERT_NE(async, nullptr);
+  auto ready = async->WaitForCapacityAsync(5 * 1024 * 1024);
+  ASSERT_TRUE(ready.is_finished());
+  ASSERT_OK(ready.status());
+  auto oversized = async->WaitForCapacityAsync(10 * 1024 * 1024);
+  ASSERT_TRUE(oversized.is_finished());
+  EXPECT_TRUE(oversized.status().IsCapacityError());
+  ASSERT_OK_AND_ASSIGN(auto offset, stream->Tell());
+  EXPECT_EQ(offset, 0);
+
+  ASSERT_OK(stream->Write(arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))));
+  ready = async->WaitForCapacityAsync(5 * 1024 * 1024);
+  ASSERT_TRUE(ready.Wait(5));
+  ASSERT_OK(ready.status());
+  ASSERT_OK(stream->Write(arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'b'))));
+  ASSERT_OK(stream->Write(arrow::Buffer::FromString("tail")));
+  ASSERT_OK(stream->CloseAsync().status());
+  ASSERT_OK_AND_ASSIGN(auto data, Await(Read("capacity", 0, 10 * 1024 * 1024 + 4)));
+  EXPECT_EQ(data->ToString(), std::string(5 * 1024 * 1024, 'a') + std::string(5 * 1024 * 1024, 'b') + "tail");
+}
+
 TEST_F(NativeS3Test, DirectoryContentsRetainsExistingSdkBehavior) {
   auto options = options_;
   options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);

@@ -42,6 +42,7 @@
 #include <parquet/file_reader.h>
 #include <parquet/arrow/schema.h>
 #include <parquet/metadata.h>
+#include <parquet/column_reader.h>
 #include <parquet/type_fwd.h>
 
 #include "milvus-storage/format/parquet/folly_arrow_executor.h"
@@ -65,6 +66,9 @@ static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos_from_meta
     const std::shared_ptr<::parquet::FileMetaData>& metadata,
     const arrow::Schema& file_schema,
     const std::string& path);
+static arrow::Status set_row_group_file_ranges(const std::shared_ptr<::parquet::FileMetaData>& metadata,
+                                               const std::vector<int>& column_indices,
+                                               std::vector<RowGroupInfo>& infos);
 static ::parquet::ReaderProperties make_reader_properties(
     const std::function<std::string(const std::string&)>& key_retriever);
 static std::shared_ptr<arrow::Buffer> try_read_footer_buffer(const std::shared_ptr<arrow::io::RandomAccessFile>& file,
@@ -226,6 +230,37 @@ static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos_from_meta
         fmt::format("Parquet row-group metadata count does not match the footer. [path={}]", path));
   }
   return row_group_infos;
+}
+
+static arrow::Status set_row_group_file_ranges(const std::shared_ptr<::parquet::FileMetaData>& metadata,
+                                               const std::vector<int>& column_indices,
+                                               std::vector<RowGroupInfo>& infos) {
+  try {
+    for (size_t row_group_index = 0; row_group_index < infos.size(); ++row_group_index) {
+      auto row_group = metadata->RowGroup(row_group_index);
+      int64_t range_start = std::numeric_limits<int64_t>::max();
+      int64_t range_end = 0;
+      for (int column_index : column_indices) {
+        auto column = row_group->ColumnChunk(column_index);
+        auto offset = column->data_page_offset();
+        if (column->has_dictionary_page()) {
+          offset = std::min(offset, column->dictionary_page_offset());
+        }
+        const auto size = column->total_compressed_size();
+        if (offset < 0 || size < 0 || offset > std::numeric_limits<int64_t>::max() - size) {
+          return arrow::Status::Invalid("Invalid Parquet column byte range");
+        }
+        range_start = std::min(range_start, offset);
+        range_end = std::max(range_end, offset + size);
+      }
+      infos[row_group_index].file_range =
+          range_start <= range_end ? std::make_optional(arrow::io::ReadRange{range_start, range_end - range_start})
+                                   : std::nullopt;
+    }
+    return arrow::Status::OK();
+  } catch (const ::parquet::ParquetException& error) {
+    return arrow::Status::IOError(error.what());
+  }
 }
 
 ParquetFormatReader::ParquetFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
@@ -434,6 +469,11 @@ arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::
   metadata->path = reader->path_;
   metadata->file_schema = reader->schema_;
   metadata->row_group_infos = reader->row_group_infos_;
+  // A cached footer is shared across projections; physical ranges belong to
+  // the individual reader's selected columns.
+  for (auto& info : metadata->row_group_infos) {
+    info.file_range.reset();
+  }
   metadata->cache_size = parquet_metadata->size();
   metadata->payload.fs = reader->fs_;
   if (!reader->key_retriever_) {
@@ -571,6 +611,8 @@ arrow::Status ParquetFormatReader::finish_open(std::shared_ptr<::parquet::arrow:
                           create_row_group_infos_from_metadata(parquet_reader->metadata(), path_));
     ARROW_ASSIGN_OR_RAISE(auto projected_leaf_column_indices,
                           get_leaf_column_indices(*file_schema, needed_columns_, path_));
+    ARROW_RETURN_NOT_OK(
+        set_row_group_file_ranges(parquet_reader->metadata(), projected_leaf_column_indices, row_group_infos));
 
     // Commit only after schema, row-group metadata, and projection have all
     // been validated successfully. These moves do not allocate.
@@ -1159,9 +1201,13 @@ arrow::Status ParquetFormatReader::set_needed_columns(const std::vector<std::str
   }
 
   ARROW_ASSIGN_OR_RAISE(auto leaf_column_indices, get_leaf_column_indices(*schema_, needed_columns, path_));
+  auto row_group_infos = row_group_infos_;
+  ARROW_RETURN_NOT_OK(
+      set_row_group_file_ranges(file_reader_->parquet_reader()->metadata(), leaf_column_indices, row_group_infos));
 
   needed_columns_ = needed_columns;
   projected_leaf_column_indices_ = std::move(leaf_column_indices);
+  row_group_infos_ = std::move(row_group_infos);
 
   return arrow::Status::OK();
 }
@@ -1406,6 +1452,73 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> ParquetFormatReader::re
   // Use RangeRecordBatchReader which internally uses ReadRowGroups for batch I/O
   return std::make_shared<RangeRecordBatchReader>(file_reader_, projected_schema, std::move(rg_indices),
                                                   projected_leaf_column_indices_, first_rg_slice_offset, total_rows);
+}
+
+arrow::Status ParquetFormatReader::read_with_range_into(uint64_t start_offset, uint64_t end_offset, uint8_t* dst) {
+  if (projected_leaf_column_indices_.size() != 1 || start_offset >= end_offset || row_group_infos_.empty() ||
+      end_offset > row_group_infos_.back().end_offset) {
+    return arrow::Status::Invalid("Invalid Parquet fixed-width destination");
+  }
+  try {
+    auto* parquet_reader = file_reader_->parquet_reader();
+    const int column_index = projected_leaf_column_indices_.front();
+    const auto* column = parquet_reader->metadata()->schema()->Column(column_index);
+    const auto field = schema_->GetFieldByName(column->path()->ToDotString());
+    if (!field || field->type()->id() != arrow::Type::FIXED_SIZE_BINARY ||
+        column->physical_type() != ::parquet::Type::FIXED_LEN_BYTE_ARRAY || column->max_repetition_level() != 0 ||
+        column->max_definition_level() > 1) {
+      return arrow::Status::Invalid("Parquet destination requires a flat fixed-width column");
+    }
+    const size_t row_bytes = std::static_pointer_cast<arrow::FixedSizeBinaryType>(field->type())->byte_width();
+    if (column->type_length() != row_bytes) {
+      return arrow::Status::Invalid("Parquet column width does not match its schema");
+    }
+    std::vector<int> row_group_indices;
+    for (size_t i = 0; i < row_group_infos_.size(); ++i) {
+      if (row_group_infos_[i].end_offset > start_offset && row_group_infos_[i].start_offset < end_offset) {
+        row_group_indices.push_back(i);
+      }
+    }
+    auto cache_options = file_reader_->properties().cache_options();
+    // The caller has selected the range. Do not split it again or defer its I/O
+    // until decoding reaches each page.
+    cache_options.range_size_limit = std::numeric_limits<int64_t>::max();
+    cache_options.lazy = false;
+    parquet_reader->PreBuffer(row_group_indices, {column_index}, arrow::io::default_io_context(), cache_options);
+
+    // Decode into the final output rather than an intermediate Arrow array.
+    // This batch bounds decoder scratch space; it does not split network reads.
+    constexpr int64_t kDecodeBatchSize = 1024;
+    std::vector<::parquet::FixedLenByteArray> values(kDecodeBatchSize);
+    std::vector<int16_t> definitions(kDecodeBatchSize);
+    for (auto row_group_index : row_group_indices) {
+      const auto& info = row_group_infos_[row_group_index];
+      const auto first_row = std::max<uint64_t>(start_offset, info.start_offset);
+      const auto last_row = std::min<uint64_t>(end_offset, info.end_offset);
+      auto column_reader = std::static_pointer_cast<::parquet::FixedLenByteArrayReader>(
+          parquet_reader->RowGroup(row_group_index)->Column(column_index));
+      const auto rows_to_skip = first_row - info.start_offset;
+      if (column_reader->Skip(rows_to_skip) != rows_to_skip) {
+        return arrow::Status::Invalid("Truncated Parquet fixed-width column");
+      }
+      uint64_t row = first_row;
+      while (row < last_row) {
+        int64_t values_read = 0;
+        auto levels_read = column_reader->ReadBatch(std::min<uint64_t>(kDecodeBatchSize, last_row - row),
+                                                    definitions.data(), nullptr, values.data(), &values_read);
+        if (levels_read <= 0 || levels_read != values_read) {
+          return arrow::Status::Invalid("Null or truncated Parquet fixed-width column");
+        }
+        for (int64_t i = 0; i < values_read; ++i) {
+          std::memcpy(dst + (row - start_offset + i) * row_bytes, values[i].ptr, row_bytes);
+        }
+        row += values_read;
+      }
+    }
+    return arrow::Status::OK();
+  } catch (const ::parquet::ParquetException& error) {
+    return arrow::Status::IOError(error.what());
+  }
 }
 
 arrow::Result<std::shared_ptr<FormatReader>> ParquetFormatReader::clone_reader() {

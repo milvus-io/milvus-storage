@@ -539,10 +539,13 @@ class ChunkReaderImpl : public ChunkReader {
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) override;
   [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
       const std::vector<int64_t>& chunk_indices, size_t parallelism) override;
+  [[nodiscard]] arrow::Status get_chunks_into(const std::vector<int64_t>& chunk_indices,
+                                              std::span<uint8_t> dst) override;
   [[nodiscard]] folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>> get_chunks_async(
       const std::vector<int64_t>& chunk_indices, size_t parallelism) override;
   [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_estimated_size() override;
   [[nodiscard]] arrow::Result<std::vector<std::vector<uint64_t>>> get_chunk_column_estimated_size() override;
+  [[nodiscard]] arrow::Result<std::vector<ChunkInfo>> get_chunk_infos() override;
   [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_rows() override;
 
   private:
@@ -696,6 +699,10 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReaderImpl:
   return sliced_results;
 }
 
+arrow::Status ChunkReaderImpl::get_chunks_into(const std::vector<int64_t>& chunk_indices, std::span<uint8_t> dst) {
+  return chunk_reader_->get_chunks_into(chunk_indices, dst);
+}
+
 folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>> ChunkReaderImpl::get_chunks_async(
     const std::vector<int64_t>& chunk_indices, size_t parallelism) {
   // Plan on sorted unique chunks; fan-in below restores caller order and duplicates.
@@ -801,6 +808,16 @@ arrow::Result<std::vector<std::vector<uint64_t>>> ChunkReaderImpl::get_chunk_col
     }
   }
   return result;
+}
+
+arrow::Result<std::vector<ChunkInfo>> ChunkReaderImpl::get_chunk_infos() {
+  std::vector<ChunkInfo> infos;
+  const auto count = total_number_of_chunks();
+  infos.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    infos.push_back(chunk_reader_->get_chunk_info(i));
+  }
+  return infos;
 }
 
 arrow::Result<std::vector<uint64_t>> ChunkReaderImpl::get_chunk_rows() {
