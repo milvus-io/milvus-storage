@@ -192,7 +192,6 @@ struct ArrowFileSystemConfig {
   bool use_ssl = false;
   std::string ssl_ca_cert = "";
   bool use_iam = false;
-  std::string iam_credential_source = "default";
   bool use_virtual_host = false;
   int64_t request_timeout_ms = 3000;
   bool gcp_native_without_auth = false;  // Deprecated
@@ -293,6 +292,8 @@ struct ArrowFileSystemConfig {
    * that target the same bucket with different credentials (for example,
    * different role_arn values).
    */
+  std::string iam_credential_source = "default";
+
   [[nodiscard]] std::string GetCacheKey() const;
 
   [[nodiscard]] std::string ToString() const;
