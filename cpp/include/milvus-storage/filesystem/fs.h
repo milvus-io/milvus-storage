@@ -46,6 +46,7 @@ inline constexpr const char* kCloudProviderAliyun = "aliyun";
 inline constexpr const char* kCloudProviderTencent = "tencent";
 inline constexpr const char* kCloudProviderHuawei = "huawei";
 inline constexpr const char* kCloudProviderAzure = "azure";
+inline constexpr const char* kCloudProviderVolcengine = "volcengine";
 
 inline constexpr const char* kAzureFileSystemName = "abfs";
 
@@ -272,6 +273,9 @@ struct ArrowFileSystemConfig {
   // Empty for default filesystem
   std::string alias = "";
 
+  // Explicit AWS IAM sources never fall back to another identity.
+  std::string iam_credential_source = "default";
+
   static arrow::Status create_file_system_config(const milvus_storage::api::Properties& properties_map,
                                                  ArrowFileSystemConfig& result);
 
@@ -292,8 +296,6 @@ struct ArrowFileSystemConfig {
    * that target the same bucket with different credentials (for example,
    * different role_arn values).
    */
-  std::string iam_credential_source = "default";
-
   [[nodiscard]] std::string GetCacheKey() const;
 
   [[nodiscard]] std::string ToString() const;

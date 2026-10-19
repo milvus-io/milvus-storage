@@ -19,29 +19,43 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <arrow/result.h>
 #include <arrow/util/future.h>
 
+#include "milvus-storage/properties.h"
 #include "rust/cxx.h"
 #include "rust-bridge/talon/talon_bridge.h"
 
 namespace milvus_storage::talon {
 
-namespace internal {
-// Convert the typed Rust callback result without parsing its diagnostic text.
-arrow::Result<int64_t> ToArrowIoResult(const char* operation,
-                                       int32_t error_code,
-                                       uint64_t value,
-                                       const char* error_msg);
-}  // namespace internal
-
 /// Optional object metadata supplied by storage when opening a Talon reader.
-/// The version is the origin ETag without surrounding quotes. Supplied metadata
-/// must have a non-empty version for Talon's exact-version reads.
+/// The version is the origin ETag without surrounding quotes. An empty version
+/// skips ETag matching for immutable objects whose size is already known.
 struct TalonObjectStat {
   uint64_t size;
   std::string version;
+};
+
+struct TalonLoadRequest {
+  std::string uri;
+  uint64_t size;
+  std::string version;
+};
+struct TalonLoadResult {
+  uint64_t size;
+  uint64_t blocks;
+};
+struct TalonLoadFailure {
+  uint64_t index;
+  bool uncertain;
+  std::string error;
+};
+struct TalonBatchLoadResult {
+  arrow::Status status;
+  std::vector<TalonLoadResult> results;
+  std::vector<TalonLoadFailure> failed_files;
 };
 
 /// Owns a Rust Talon object reader and exposes only Arrow-native results to C++ callers.
@@ -77,6 +91,29 @@ class TalonClient final {
   static arrow::Result<std::shared_ptr<TalonClient>> Make(const std::string& coordinator,
                                                           uint32_t block_size,
                                                           uint32_t max_idle_per_addr);
+
+  static arrow::Result<std::shared_ptr<TalonClient>> Make(const api::Properties& properties);
+  /// Raw operations use Talon directly, independently of filesystem routing mode.
+  /// The caller retains dst until completion; present size-zero metadata is a known empty file.
+  arrow::Future<int64_t> ReadAsync(const std::string& uri,
+                                   uint64_t offset,
+                                   uint64_t length,
+                                   uint8_t* dst,
+                                   const std::optional<TalonObjectStat>& initial_stat = std::nullopt) const;
+  arrow::Result<int64_t> Read(const std::string& uri,
+                              uint64_t offset,
+                              uint64_t length,
+                              uint8_t* dst,
+                              const std::optional<TalonObjectStat>& initial_stat = std::nullopt) const;
+  arrow::Future<TalonObjectStat> StatAsync(const std::string& uri) const;
+  arrow::Result<TalonObjectStat> Stat(const std::string& uri) const;
+  /// Uses caller-provided size/version without HEAD; an empty version skips version matching.
+  arrow::Future<TalonLoadResult> LoadAsync(const TalonLoadRequest& request) const;
+  arrow::Result<TalonLoadResult> Load(const TalonLoadRequest& request) const;
+  /// Native batch errors stay in the value's status, preserving ordered failed_files.
+  /// An outer future error denotes a bridge failure. Partial failure has no results array.
+  arrow::Future<TalonBatchLoadResult> BatchLoadAsync(const std::vector<TalonLoadRequest>& requests) const;
+  arrow::Result<TalonBatchLoadResult> BatchLoad(const std::vector<TalonLoadRequest>& requests) const;
 
   arrow::Result<TalonObjectReader> OpenObject(const std::string& cloud_provider,
                                               const std::string& bucket,

@@ -189,125 +189,131 @@ struct CommitResult {
   AsyncStatus status;
   CommitOutcome outcome = CommitOutcome::NotCommitted;
   int64_t version = -1;
+  int64_t manifest_size = -1;  ///< Written manifest size in bytes; -1 unless committed
 };
 
 class Transaction {
   public:
-  // Static factory method to open a transaction
-  // @param fs Filesystem to use
-  // @param base_path Base path for the storage
-  // @param version Version to read from (default: LATEST = fetch greatest version)
-  // @param resolver Resolver for conflict resolution (default: FailResolver). The
-  //        Transaction stores a non-owning pointer to this object; the caller MUST keep
-  //        the resolver alive for the lifetime of the returned Transaction. Do not pass
-  //        a temporary.
-  // @param retry_limit Maximum number of retry attempts on commit conflicts (default: 1)
-  static arrow::Result<std::unique_ptr<Transaction>> Open(const milvus_storage::ArrowFileSystemPtr& fs,
-                                                          const std::string& base_path,
-                                                          int64_t version = LATEST,
-                                                          const Resolver& resolver = FailResolver,
-                                                          uint32_t retry_limit = 1);
+     // Static factory method to open a transaction
+     // @param fs Filesystem to use
+     // @param base_path Base path for the storage
+     // @param version Version to read from (default: LATEST = fetch greatest version)
+     // @param manifest_size Exact size of the manifest at version, or <= 0 if unknown.
+     //        Ignored for LATEST, whose version is not known until listing completes.
+     // @param resolver Resolver for conflict resolution (default: FailResolver). The
+     //        Transaction stores a non-owning pointer to this object; the caller MUST keep
+     //        the resolver alive for the lifetime of the returned Transaction. Do not pass
+     //        a temporary.
+     // @param retry_limit Maximum number of retry attempts on commit conflicts (default: 1)
+     static arrow::Result<std::unique_ptr<Transaction>> Open(const milvus_storage::ArrowFileSystemPtr& fs,
+                                                             const std::string& base_path,
+                                                             int64_t version = LATEST,
+                                                             int64_t manifest_size = -1,
+                                                             const Resolver& resolver = FailResolver,
+                                                             uint32_t retry_limit = 1);
 
-  // Lazy scheduling of the existing synchronous transaction API. Consume on a
-  // caller-owned blocking-work executor. No filesystem or transport is replaced.
-  // Cancellation/deadline checks happen before Open starts; in-flight synchronous
-  // I/O cannot be interrupted. The executor must accept tasks through completion.
-  // Keep the resolver alive for the lifetime of the returned transaction. Dropping
-  // an unconsumed future starts no work; releasing its handle does not cancel it.
-  static folly::SemiFuture<OpenResult> OpenAsync(const std::string& path,
-                                                 Properties properties,
-                                                 int64_t version,
-                                                 const Resolver& resolver,
-                                                 uint32_t retries,
-                                                 uint64_t timeout_ms,
-                                                 std::shared_ptr<AsyncOperation>& operation,
-                                                 ArrowFileSystemPtr filesystem = nullptr);
+     // Lazy scheduling of the existing synchronous transaction API. Consume on a
+     // caller-owned blocking-work executor. No filesystem or transport is replaced.
+     // Cancellation/deadline checks happen before Open starts; in-flight synchronous
+     // I/O cannot be interrupted. The executor must accept tasks through completion.
+     // Keep the resolver alive for the lifetime of the returned transaction. Dropping
+     // an unconsumed future starts no work; releasing its handle does not cancel it.
+     static folly::SemiFuture<OpenResult> OpenAsync(const std::string& path,
+                                                    Properties properties,
+                                                    int64_t version,
+                                                    int64_t manifest_size,
+                                                    const Resolver& resolver,
+                                                    uint32_t retries,
+                                                    uint64_t timeout_ms,
+                                                    std::shared_ptr<AsyncOperation>& operation,
+                                                    ArrowFileSystemPtr filesystem = nullptr);
 
-  ~Transaction() = default;
+     ~Transaction() = default;
 
-  // Commit using Updates (uses the resolver set via Open)
-  // Returns the committed version number on success
-  arrow::Result<int64_t> Commit();
+     // Commit using Updates (uses the resolver set via Open)
+     // Returns the committed version number on success; optionally outputs the written
+     // manifest size in bytes. The output is unchanged on failure.
+     arrow::Result<int64_t> Commit(int64_t* out_manifest_size = nullptr);
 
-  // Schedules Transaction::Commit on the consuming executor. A discarded lazy
-  // future releases its reservation; execution consumes the transaction even on
-  // cancellation/failure. Keep it alive and unmodified until completion. Errors
-  // from the synchronous commit conservatively carry Unknown; only pre-execution
-  // rejection/cancellation/deadline can guarantee NotCommitted. In-flight calls
-  // run to completion and success wins over cancellation or deadline expiry.
-  folly::SemiFuture<CommitResult> CommitAsync(uint64_t timeout_ms, std::shared_ptr<AsyncOperation>& operation);
+     // Schedules Transaction::Commit on the consuming executor. A discarded lazy
+     // future releases its reservation; execution consumes the transaction even on
+     // cancellation/failure. Keep it alive and unmodified until completion. Errors
+     // from the synchronous commit conservatively carry Unknown; only pre-execution
+     // rejection/cancellation/deadline can guarantee NotCommitted. In-flight calls
+     // run to completion and success wins over cancellation or deadline expiry.
+     folly::SemiFuture<CommitResult> CommitAsync(uint64_t timeout_ms, std::shared_ptr<AsyncOperation>& operation);
 
-  // Get manifest on read version
-  // Returns empty manifest if read_version_ is 0 (no manifest exists)
-  arrow::Result<std::shared_ptr<Manifest>> GetManifest();
+     // Get manifest on read version
+     // Returns empty manifest if read_version_ is 0 (no manifest exists)
+     arrow::Result<std::shared_ptr<Manifest>> GetManifest();
 
-  // Get the read version of this transaction
-  [[nodiscard]] int64_t GetReadVersion() const;
+     // Get the read version of this transaction
+     [[nodiscard]] int64_t GetReadVersion() const;
 
-  // ==================== Fluent-style Builder Methods ====================
+     // ==================== Fluent-style Builder Methods ====================
 
-  /**
-   * @brief Drop a single column from the manifest
-   *
-   * Removes the column from its column group. If the column group becomes
-   * empty after removal, the entire column group is removed.
-   * Automatically drops all indexes on this column.
-   * Noop if the column doesn't exist (consistent with DropIndex).
-   *
-   * @param column_name Name of the column to drop
-   * @return Reference to this transaction for method chaining
-   */
-  Transaction& DropColumn(const std::string& column_name);
+     /**
+      * @brief Drop a single column from the manifest
+      *
+      * Removes the column from its column group. If the column group becomes
+      * empty after removal, the entire column group is removed.
+      * Automatically drops all indexes on this column.
+      * Noop if the column doesn't exist (consistent with DropIndex).
+      *
+      * @param column_name Name of the column to drop
+      * @return Reference to this transaction for method chaining
+      */
+     Transaction& DropColumn(const std::string& column_name);
 
-  /**
-   * @brief Add a new column group to the transaction updates
-   * @param cg Column group to add
-   * @return Reference to this transaction for method chaining
-   */
-  Transaction& AddColumnGroup(const std::shared_ptr<ColumnGroup>& cg);
+     /**
+      * @brief Add a new column group to the transaction updates
+      * @param cg Column group to add
+      * @return Reference to this transaction for method chaining
+      */
+     Transaction& AddColumnGroup(const std::shared_ptr<ColumnGroup>& cg);
 
-  /**
-   * @brief Append files to existing column groups
-   * @param cgs Column groups containing files to append
-   * @return Reference to this transaction for method chaining
-   */
-  Transaction& AppendFiles(const std::vector<std::shared_ptr<ColumnGroup>>& cgs);
+     /**
+      * @brief Append files to existing column groups
+      * @param cgs Column groups containing files to append
+      * @return Reference to this transaction for method chaining
+      */
+     Transaction& AppendFiles(const std::vector<std::shared_ptr<ColumnGroup>>& cgs);
 
-  /**
-   * @brief Add a delta log to the transaction updates
-   * @param delta_log Delta log to add
-   * @return Reference to this transaction for method chaining
-   */
-  Transaction& AddDeltaLog(const DeltaLog& delta_log);
+     /**
+      * @brief Add a delta log to the transaction updates
+      * @param delta_log Delta log to add
+      * @return Reference to this transaction for method chaining
+      */
+     Transaction& AddDeltaLog(const DeltaLog& delta_log);
 
-  /**
-   * @brief Add a stat entry to the transaction updates
-   * @param key Stat key (e.g., "pk.delete", "bloomfilter", "bm25")
-   * @param stat Statistics containing file paths and optional metadata
-   * @return Reference to this transaction for method chaining
-   */
-  Transaction& UpdateStat(const std::string& key, const Statistics& stat);
+     /**
+      * @brief Add a stat entry to the transaction updates
+      * @param key Stat key (e.g., "pk.delete", "bloomfilter", "bm25")
+      * @param stat Statistics containing file paths and optional metadata
+      * @return Reference to this transaction for method chaining
+      */
+     Transaction& UpdateStat(const std::string& key, const Statistics& stat);
 
-  /**
-   * @brief Record or replace metadata for an already-written index file.
-   *
-   * This method only records Index metadata. It does not perform index-file
-   * I/O or return a file handle.
-   */
-  Transaction& AddIndexInfo(const Index& index);
+     /**
+      * @brief Record or replace metadata for an already-written index file.
+      *
+      * This method only records Index metadata. It does not perform index-file
+      * I/O or return a file handle.
+      */
+     Transaction& AddIndexInfo(const Index& index);
 
-  /**
-   * @brief Drop all completed artifacts for an index.
-   * @return Reference to this transaction for method chaining
-   */
-  Transaction& DropIndex(int64_t index_id);
+     /**
+      * @brief Drop all completed artifacts for an index.
+      * @return Reference to this transaction for method chaining
+      */
+     Transaction& DropIndex(int64_t index_id);
 
-  /**
-   * @brief Add a LOB file to the transaction updates
-   * @param lob_file LOB file info to add
-   * @return Reference to this transaction for method chaining
-   */
-  Transaction& AddLobFile(const LobFileInfo& lob_file);
+     /**
+      * @brief Add a LOB file to the transaction updates
+      * @param lob_file LOB file info to add
+      * @return Reference to this transaction for method chaining
+      */
+     Transaction& AddLobFile(const LobFileInfo& lob_file);
 
   private:
   friend struct AsyncManifestOperation;
@@ -323,9 +329,12 @@ class Transaction {
   arrow::Result<int64_t> get_latest_version();
 
   // Read manifest from filesystem at given version
-  arrow::Result<std::shared_ptr<Manifest>> read_manifest(int64_t version);
+  arrow::Result<std::shared_ptr<Manifest>> read_manifest(int64_t version, int64_t manifest_size = -1);
 
-  arrow::Status write_manifest(const std::shared_ptr<Manifest>& manifest, int64_t old_version, int64_t new_version);
+  arrow::Status write_manifest(const std::shared_ptr<Manifest>& manifest,
+                               int64_t old_version,
+                               int64_t new_version,
+                               int64_t* out_manifest_size);
 
   int64_t read_version_;
   std::shared_ptr<Manifest> read_manifest_;

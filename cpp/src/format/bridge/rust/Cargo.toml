@@ -10,11 +10,10 @@ crate-type = ["staticlib"]
 [features]
 io-trace = []
 s3-crt-async = []
-talon = ["dep:talon", "dep:talon-cache-client", "s3-crt-async"]
+talon = ["dep:talon", "s3-crt-async"]
 
 [dependencies]
-talon = { package = "talon-rust-client", git = "https://github.com/milvus-io/talon.git", rev = "c85bbc294874d146fab9f1e41f9ac7a9f4035cc3", optional = true }
-talon-cache-client = { git = "https://github.com/milvus-io/talon.git", rev = "c85bbc294874d146fab9f1e41f9ac7a9f4035cc3", optional = true }
+talon = { package = "talon-rust-client", git = "https://github.com/milvus-io/talon.git", rev = "c6ba5c97d09c2cec2d58eebec3c7d661521bb99b", optional = true }
 
 # common dependencies
 anyhow = "1.0.99"
@@ -93,7 +92,6 @@ sqlparser = "0.55"
 cxx = "1.0.184"
 
 [dev-dependencies]
-talon-transport = { git = "https://github.com/milvus-io/talon.git", rev = "c85bbc294874d146fab9f1e41f9ac7a9f4035cc3" }
 tempfile = "3"
 # Match Paimon's OpenDAL type in snapshot error-classification tests.
 opendal-paimon = { package = "opendal-core", version = "=0.58.0" }

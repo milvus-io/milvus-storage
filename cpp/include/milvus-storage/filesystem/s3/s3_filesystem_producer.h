@@ -52,6 +52,8 @@ class S3FileSystemProducer : public FileSystemProducer {
 
   std::shared_ptr<Aws::Auth::AWSCredentialsProvider> CreateHuaweiCredentialsProvider();
 
+  std::shared_ptr<Aws::Auth::AWSCredentialsProvider> CreateVolcengineCredentialsProvider();
+
   private:
   const ArrowFileSystemConfig config_;
 };

@@ -18,6 +18,7 @@
 #include <string_view>
 #include <utility>
 
+#include <arrow/c/bridge.h>
 #include <arrow/record_batch.h>
 
 #include "runtime/bridge_util.h"
@@ -81,6 +82,25 @@ arrow::Result<std::shared_ptr<BlockingDataset>> BlockingDataset::Open(
   });
 }
 
+arrow::Status BlockingDataset::OpenAsync(const std::string& uri,
+                                         const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+                                         const StorageOptions& read_options,
+                                         uint64_t version,
+                                         LanceAsyncCallback callback,
+                                         void* context) {
+  if (!filesystem) {
+    return arrow::Status::Invalid("BlockingDataset::OpenAsync requires a non-null filesystem");
+  }
+  return CatchRustStatus("Failed to open Lance dataset", [&]() {
+    rust::Vec<rust::String> keys, values;
+    ConvertStorageOptions(read_options, keys, values);
+    auto filesystem_lease = std::make_shared<FileSystemWrapper>(filesystem);
+    ffi::open_dataset_async(std::move(filesystem_lease), rust::Str(uri.data(), uri.length()), std::move(keys),
+                            std::move(values), version, reinterpret_cast<size_t>(callback),
+                            reinterpret_cast<size_t>(context));
+  });
+}
+
 arrow::Result<uint64_t> BlockingDataset::ResolveLatestVersion(const std::string& uri,
                                                               const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
                                                               const StorageOptions& read_options) {
@@ -93,6 +113,24 @@ arrow::Result<uint64_t> BlockingDataset::ResolveLatestVersion(const std::string&
     auto filesystem_lease = std::make_shared<FileSystemWrapper>(filesystem);
     return ffi::resolve_latest_dataset_version(std::move(filesystem_lease), rust::Str(uri.data(), uri.length()),
                                                std::move(keys), std::move(values));
+  });
+}
+
+arrow::Status BlockingDataset::ResolveLatestVersionAsync(const std::string& uri,
+                                                         const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+                                                         const StorageOptions& read_options,
+                                                         LanceAsyncCallback callback,
+                                                         void* context) {
+  if (!filesystem) {
+    return arrow::Status::Invalid("BlockingDataset::ResolveLatestVersionAsync requires a non-null filesystem");
+  }
+  return CatchRustStatus("Failed to resolve latest Lance dataset version", [&]() {
+    rust::Vec<rust::String> keys, values;
+    ConvertStorageOptions(read_options, keys, values);
+    auto filesystem_lease = std::make_shared<FileSystemWrapper>(filesystem);
+    ffi::resolve_latest_dataset_version_async(std::move(filesystem_lease), rust::Str(uri.data(), uri.length()),
+                                              std::move(keys), std::move(values), reinterpret_cast<size_t>(callback),
+                                              reinterpret_cast<size_t>(context));
   });
 }
 
@@ -166,6 +204,25 @@ arrow::Result<std::vector<uint64_t>> BlockingDataset::EstimateFragmentColumnMemo
   return result;
 }
 
+arrow::Status BlockingDataset::EstimateFragmentColumnMemoryAsync(uint64_t fragment_id,
+                                                                 LanceAsyncCallback callback,
+                                                                 void* context) const {
+  return CatchRustStatus("Failed to estimate Lance column memory", [&]() {
+    ffi::estimate_fragment_column_memory_async(*impl_, fragment_id, reinterpret_cast<size_t>(callback),
+                                               reinterpret_cast<size_t>(context));
+  });
+}
+
+std::vector<uint64_t> BlockingDataset::TakeColumnMemoryResult(uint64_t handle) {
+  auto estimates = ffi::take_column_memory_handle(handle);
+  std::vector<uint64_t> memory_sizes;
+  memory_sizes.reserve(estimates.size());
+  for (const auto& estimate : estimates) {
+    memory_sizes.push_back(estimate.memory_size);
+  }
+  return memory_sizes;
+}
+
 arrow::Result<uint64_t> BlockingDataset::EstimateFragmentMemory(uint64_t fragment_id) const {
   return CatchRustResult<uint64_t>("Failed to estimate Lance fragment memory",
                                    [&]() { return ffi::estimate_fragment_memory(*impl_, fragment_id); });
@@ -188,6 +245,18 @@ arrow::Result<std::unique_ptr<BlockingFragmentReader>> BlockingFragmentReader::O
     auto impl = ffi::open_fragment_reader(dataset.Impl(), fragment_id, reinterpret_cast<uint8_t*>(&schema));
     schema_guard.Disarm();
     return std::make_unique<BlockingFragmentReader>(std::move(impl));
+  });
+}
+
+arrow::Status BlockingFragmentReader::OpenAsync(const BlockingDataset& dataset,
+                                                uint64_t fragment_id,
+                                                ArrowSchema& schema,
+                                                LanceAsyncCallback callback,
+                                                void* context) {
+  ArrowCDataReleaseGuard schema_guard(&schema);
+  return CatchRustStatus("Failed to open Lance fragment reader", [&]() {
+    ffi::open_fragment_reader_async(dataset.Impl(), fragment_id, reinterpret_cast<uint8_t*>(&schema),
+                                    reinterpret_cast<size_t>(callback), reinterpret_cast<size_t>(context));
   });
 }
 
@@ -219,6 +288,17 @@ arrow::Result<ArrowArrayStream> BlockingFragmentReader::TakeAsStream(const std::
   });
 }
 
+arrow::Status BlockingFragmentReader::TakeAsync(const std::vector<uint32_t>& indices,
+                                                ArrowArrayStream* out_stream,
+                                                LanceAsyncCallback callback,
+                                                void* context) {
+  return CatchRustStatus("Failed to submit Lance take", [&]() {
+    impl_->take_async(rust::Slice<const uint32_t>(indices.data(), indices.size()),
+                      reinterpret_cast<uint8_t*>(out_stream), reinterpret_cast<size_t>(callback),
+                      reinterpret_cast<size_t>(context));
+  });
+}
+
 arrow::Result<ArrowArrayStream> BlockingFragmentReader::ReadAllAsStream(uint32_t batch_size) {
   return CatchRustResult<ArrowArrayStream>("Failed to read Lance fragment", [&]() {
     ArrowArrayStream stream{};
@@ -238,6 +318,14 @@ arrow::Result<ArrowArrayStream> BlockingFragmentReader::ReadRangesAsStream(uint3
     impl_->read_ranges_as_stream(row_range_start, row_range_end, batch_size, reinterpret_cast<uint8_t*>(&stream));
     stream_guard.Disarm();
     return stream;
+  });
+}
+
+arrow::Status BlockingFragmentReader::ReadRangesAsync(
+    uint32_t row_range_start, uint32_t row_range_end, uint32_t batch_size, LanceAsyncCallback callback, void* context) {
+  return CatchRustStatus("Failed to read Lance fragment range", [&]() {
+    impl_->read_ranges_async(row_range_start, row_range_end, batch_size, reinterpret_cast<size_t>(callback),
+                             reinterpret_cast<size_t>(context));
   });
 }
 

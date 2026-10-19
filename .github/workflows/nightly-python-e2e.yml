@@ -157,6 +157,10 @@ jobs:
           ref: ${{ steps.talon_revision.outputs.revision }}
           path: talon
 
+      - name: Prepare patched Monoio
+        working-directory: ./talon
+        run: python3 scripts/prepare_monoio.py
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 

@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <cctype>
 #include <mutex>
 #include <fstream>
 #include <map>
@@ -29,6 +30,12 @@
 #include <thread>
 #include <vector>
 
+#include <openssl/err.h>
+#include <openssl/evp.h>
+
+#include <folly/ScopeGuard.h>
+#include <glog/logging.h>
+
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/HttpRequest.h>
@@ -37,13 +44,18 @@
 #include <aws/core/http/standard/StandardHttpResponse.h>
 #include <aws/core/http/HttpTypes.h>
 #include <aws/core/utils/stream/ResponseStream.h>
+#include <aws/core/utils/HashingUtils.h>
 
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/TencentCloudOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/VolcengineCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/VolcengineOIDCAssumeRoleChainProvider.h"
+#include "milvus-storage/filesystem/s3/provider/VolcengineSTSClient.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/common/arrow_util.h"
@@ -149,31 +161,29 @@ struct MockResponseSpec {
 
 class MockHttpClient : public Aws::Http::HttpClient {
   public:
-  MockHttpClient() {}
+     explicit MockHttpClient(bool consume_request_bodies = false) : consume_request_bodies_(consume_request_bodies) {}
 
-  std::shared_ptr<Aws::Http::HttpResponse> MakeRequest(
-      const std::shared_ptr<Aws::Http::HttpRequest>& request,
-      Aws::Utils::RateLimits::RateLimiterInterface* readLimiter = nullptr,
-      Aws::Utils::RateLimits::RateLimiterInterface* writeLimiter = nullptr) const override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    recorded_requests_.push_back(request);
+     std::shared_ptr<Aws::Http::HttpResponse> MakeRequest(
+         const std::shared_ptr<Aws::Http::HttpRequest>& request,
+         Aws::Utils::RateLimits::RateLimiterInterface* readLimiter = nullptr,
+         Aws::Utils::RateLimits::RateLimiterInterface* writeLimiter = nullptr) const override {
+       std::lock_guard<std::mutex> lock(mutex_);
+       recorded_requests_.push_back(request);
 
-    auto uri = request->GetURIString();
+       auto uri = request->GetURIString();
 
-    // Find a matching response queue by URL substring
-    for (auto& [url_key, q] : response_map_) {
-      if (!q.empty() && uri.find(url_key) != Aws::String::npos) {
-        auto spec = q.front();
-        q.pop();
-        return BuildResponse(request, spec);
-      }
-    }
+       // Find a matching response queue by URL substring
+       for (auto& [url_key, q] : response_map_) {
+         if (!q.empty() && uri.find(url_key) != Aws::String::npos) {
+           auto spec = q.front();
+           q.pop();
+           return BuildResponse(request, spec);
+         }
+       }
 
-    // Default: return 404 for unmatched requests (e.g., background SDK requests)
-    auto resp = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("MockHttpClient", request);
-    resp->SetResponseCode(Aws::Http::HttpResponseCode::NOT_FOUND);
-    return resp;
-  }
+       // Default: return 404 for unmatched requests (e.g., background SDK requests)
+       return BuildResponse(request, {Aws::Http::HttpResponseCode::NOT_FOUND, "", {}});
+     }
 
   void EnqueueResponse(const std::string& url_match,
                        Aws::Http::HttpResponseCode code,
@@ -187,23 +197,40 @@ class MockHttpClient : public Aws::Http::HttpClient {
     return recorded_requests_;
   }
 
-  private:
-  static std::shared_ptr<Aws::Http::HttpResponse> BuildResponse(const std::shared_ptr<Aws::Http::HttpRequest>& request,
-                                                                const MockResponseSpec& spec) {
-    auto resp = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("MockHttpClient", request);
-    resp->SetResponseCode(spec.code);
-    for (const auto& h : spec.headers) {
-      resp->AddHeader(h.first, h.second);
-    }
-    if (!spec.body.empty()) {
-      resp->GetResponseBody() << spec.body;
-    }
-    return resp;
+  std::vector<std::string> GetRecordedRequestBodies() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return recorded_request_bodies_;
   }
 
-  mutable std::mutex mutex_;
-  mutable std::map<std::string, std::queue<MockResponseSpec>> response_map_;
-  mutable std::vector<std::shared_ptr<Aws::Http::HttpRequest>> recorded_requests_;
+  private:
+     std::shared_ptr<Aws::Http::HttpResponse> BuildResponse(const std::shared_ptr<Aws::Http::HttpRequest>& request,
+                                                            const MockResponseSpec& spec) const {
+       auto resp = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("MockHttpClient", request);
+       // Curl and CRT create the response stream before consuming the POST body.
+       if (consume_request_bodies_) {
+         const auto& body = request->GetContentBody();
+         std::string sent_body;
+         if (body) {
+           sent_body.assign(std::istreambuf_iterator<char>(*body), std::istreambuf_iterator<char>());
+           body->setstate(std::ios::eofbit | std::ios::failbit);
+         }
+         recorded_request_bodies_.push_back(std::move(sent_body));
+       }
+       resp->SetResponseCode(spec.code);
+       for (const auto& h : spec.headers) {
+         resp->AddHeader(h.first, h.second);
+       }
+       if (!spec.body.empty()) {
+         resp->GetResponseBody() << spec.body;
+       }
+       return resp;
+     }
+
+     const bool consume_request_bodies_;
+     mutable std::mutex mutex_;
+     mutable std::map<std::string, std::queue<MockResponseSpec>> response_map_;
+     mutable std::vector<std::shared_ptr<Aws::Http::HttpRequest>> recorded_requests_;
+     mutable std::vector<std::string> recorded_request_bodies_;
 };
 
 class MockHttpClientFactory : public Aws::Http::HttpClientFactory {
@@ -469,6 +496,599 @@ TEST_F(S3ProviderTest, TestAliyunProvider) {
     AliyunSTSAssumeRoleWebIdentityCredentialsProvider provider("acs:ram::111:role/tenant-A", "tenant-A-session");
     auto creds = provider.GetAWSCredentials();
     EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
+  }
+}
+
+// ============================================================================
+// Volcengine Provider Tests
+// ============================================================================
+
+TEST_F(S3ProviderTest, TestVolcengineProvider) {
+  // Sub-test: Env-only ctor, uninitialized (missing env vars) → empty creds
+  {
+    ScopedEnvUnset unset_arn("VOLCENGINE_OIDC_ROLE_TRN");
+    ScopedEnvUnset unset_token("VOLCENGINE_OIDC_TOKEN_FILE");
+    ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
+
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider(/*duration_seconds=*/900);
+    auto creds = provider.GetAWSCredentials();
+    EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
+    EXPECT_TRUE(creds.GetAWSSecretKey().empty());
+    EXPECT_TRUE(creds.GetSessionToken().empty());
+  }
+
+  // Sub-test: Env-only ctor, missing token file env → empty creds
+  {
+    ScopedEnvVar set_arn("VOLCENGINE_OIDC_ROLE_TRN", "trn:iam::123456:role/test-role");
+    ScopedEnvUnset unset_token("VOLCENGINE_OIDC_TOKEN_FILE");
+    ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
+
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider(/*duration_seconds=*/900);
+    auto creds = provider.GetAWSCredentials();
+    EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
+  }
+
+  // Sub-test: Env-only ctor, missing role trn → empty creds
+  {
+    ScopedEnvUnset unset_arn("VOLCENGINE_OIDC_ROLE_TRN");
+    ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", "/tmp/some_token");
+    ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
+
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider(/*duration_seconds=*/900);
+    auto creds = provider.GetAWSCredentials();
+    EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
+  }
+
+  // Sub-test: Env-only ctor, token file path set but file missing on disk
+  // → empty creds (Reload fails to open)
+  {
+    ScopedEnvVar set_arn("VOLCENGINE_OIDC_ROLE_TRN", "trn:iam::123456:role/test-role");
+    ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", "/tmp/nonexistent_volc_token_file_12345");
+    ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
+
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider(/*duration_seconds=*/900);
+    auto creds = provider.GetAWSCredentials();
+    EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
+  }
+
+  // Sub-test: Env-only ctor, success flow — mock returns valid JSON
+  {
+    TempFile token_file("mock_oidc_token_content");
+
+    ScopedEnvVar set_arn("VOLCENGINE_OIDC_ROLE_TRN", "trn:iam::123456:role/test-role");
+    ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
+    ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
+
+    std::string json_response = R"({
+        "ResponseMetadata": {"RequestId": "TEST-REQUEST-ID"},
+        "Result": {
+            "Credentials": {
+                "AccessKeyId": "MOCK_AK",
+                "SecretAccessKey": "MOCK_SK",
+                "SessionToken": "MOCK_TOKEN",
+                "Expiration": "2099-12-31T23:59:59Z"
+            }
+        }
+    })";
+
+    mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, json_response);
+
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider(/*duration_seconds=*/900);
+    auto creds = provider.GetAWSCredentials();
+    EXPECT_EQ(creds.GetAWSAccessKeyId(), "MOCK_AK");
+    EXPECT_EQ(creds.GetAWSSecretKey(), "MOCK_SK");
+    EXPECT_EQ(creds.GetSessionToken(), "MOCK_TOKEN");
+  }
+
+  // Sub-test: STS returns empty body → empty credentials
+  {
+    TempFile token_file("mock_oidc_token_content");
+
+    ScopedEnvVar set_arn("VOLCENGINE_OIDC_ROLE_TRN", "trn:iam::123456:role/test-role");
+    ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
+    ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
+
+    mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, "");
+
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider(/*duration_seconds=*/900);
+    auto creds = provider.GetAWSCredentials();
+    EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
+  }
+
+  // Sub-test: Parameterized (per-tenant) ctor — the arg RoleTrn/session drive
+  // the request, while the OIDC token file is still read from env. Volcengine
+  // carries RoleTrn in the URL query string (not the body), so assert on the
+  // recorded request URI. The env has a DIFFERENT role to prove args win.
+  {
+    TempFile token_file("mock_oidc_token_content");
+
+    ScopedEnvVar set_arn_env("VOLCENGINE_OIDC_ROLE_TRN", "trn:iam::000:role/env-role");
+    ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
+    ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
+
+    std::string json_response = R"({
+        "Result": {
+            "Credentials": {
+                "AccessKeyId": "ARG_AK",
+                "SecretAccessKey": "ARG_SK",
+                "SessionToken": "ARG_TOKEN",
+                "Expiration": "2099-12-31T23:59:59Z"
+            }
+        }
+    })";
+
+    mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, json_response);
+
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider("trn:iam::111:role/tenant-A", "tenant-A-session",
+                                                                   /*duration_seconds=*/900);
+    auto creds = provider.GetAWSCredentials();
+    EXPECT_EQ(creds.GetAWSAccessKeyId(), "ARG_AK");
+    EXPECT_EQ(creds.GetAWSSecretKey(), "ARG_SK");
+    EXPECT_EQ(creds.GetSessionToken(), "ARG_TOKEN");
+
+    // Verify the STS request used the arg role (in the URL RoleTrn query), not
+    // the env role, and that the session name arg reached the request body.
+    auto recorded = mock_client_->GetRecordedRequests();
+    ASSERT_FALSE(recorded.empty());
+    auto& req = recorded.back();
+    auto uri = req->GetURIString();
+    EXPECT_NE(uri.find("tenant-A"), std::string::npos) << "URI should contain tenant-A role: " << uri;
+    EXPECT_EQ(uri.find("env-role"), std::string::npos) << "URI should not contain env role: " << uri;
+
+    auto body_stream = req->GetContentBody();
+    ASSERT_NE(body_stream, nullptr);
+    std::string body((std::istreambuf_iterator<char>(*body_stream)), std::istreambuf_iterator<char>());
+    EXPECT_NE(body.find("tenant-A-session"), std::string::npos) << "body should contain arg session: " << body;
+  }
+
+  // Sub-test: Parameterized ctor — missing OIDC_TOKEN_FILE env → empty creds
+  {
+    ScopedEnvUnset unset_token("VOLCENGINE_OIDC_TOKEN_FILE");
+
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider("trn:iam::111:role/tenant-A", "tenant-A-session",
+                                                                   /*duration_seconds=*/900);
+    auto creds = provider.GetAWSCredentials();
+    EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
+  }
+
+  // Sub-test: Parameterized ctor — token file path set but file missing on disk
+  // → empty creds (Reload fails to open)
+  {
+    ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", "/tmp/nonexistent_volc_token_param_ctor");
+
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider("trn:iam::111:role/tenant-A", "tenant-A-session",
+                                                                   /*duration_seconds=*/900);
+    auto creds = provider.GetAWSCredentials();
+    EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
+  }
+}
+
+// ============================================================================
+// Volcengine V4 signing — golden vector
+// ============================================================================
+
+// Locks the hand-rolled Volcengine V4 signer against a reference vector
+// computed independently (Python hmac/hashlib). If any of the 5 Volcengine-vs-
+// AWS-SigV4 differences regress (AWS4 prefix, aws4_request tail, X-Amz-* header
+// names, algorithm token), this signature diverges and the test fails.
+TEST_F(S3ProviderTest, TestVolcengineV4SignGoldenVector) {
+  const Aws::String ak = "AKGOLDEN";
+  const Aws::String sk = "SKGOLDENSECRET";
+  const Aws::String region = "cn-beijing";
+  const Aws::String service = "sts";
+  const Aws::String host = "sts.volcengineapi.com";
+  const Aws::String canonical_query = "Action=AssumeRole&Version=2018-01-01";
+  // RoleTrn percent-encoded (colons -> %3A, slash -> %2F) exactly as the
+  // production body builder emits it.
+  const Aws::String body = "RoleTrn=trn%3Aiam%3A%3A2112796134%3Arole%2Fllqtestexternal&RoleSessionName=golden-session";
+  const Aws::String content_type = "application/x-www-form-urlencoded";
+  const Aws::String x_date = "20260717T120000Z";
+  const Aws::String scope_date = "20260717";
+
+  auto sig = VolcengineSTSCredentialsClient::SignRequestV4(ak, sk, region, service, host, canonical_query, body,
+                                                           content_type, x_date, scope_date);
+
+  EXPECT_EQ(sig.xContentSha256, "2060595ad22ad6cfd245503adb78bb3701cc0ebbaff38add038cf0be8fd85347");
+  EXPECT_EQ(sig.signature, "3ef4e60d3d6990843010c51f1d92e021c5f7a6a087fc9fa03b7a35cbc361a5c2");
+  EXPECT_EQ(sig.signedHeaders, "content-type;host;x-content-sha256;x-date");
+  EXPECT_EQ(sig.authorization,
+            "HMAC-SHA256 Credential=AKGOLDEN/20260717/cn-beijing/sts/request, "
+            "SignedHeaders=content-type;host;x-content-sha256;x-date, "
+            "Signature=3ef4e60d3d6990843010c51f1d92e021c5f7a6a087fc9fa03b7a35cbc361a5c2");
+}
+
+// ============================================================================
+// Volcengine OIDC AssumeRole chain provider (two-step)
+// ============================================================================
+
+namespace {
+
+// Read the form-urlencoded body of a recorded POST request.
+std::string ReadRequestBody(const std::shared_ptr<Aws::Http::HttpRequest>& req) {
+  auto& stream = req->GetContentBody();
+  if (!stream)
+    return {};
+  stream->seekg(0);
+  return {std::istreambuf_iterator<char>(*stream), std::istreambuf_iterator<char>()};
+}
+
+// step-1 AssumeRoleWithOIDC success (big-account machine identity).
+constexpr const char* kVolcInnerOidcSuccessJson = R"({
+  "ResponseMetadata": {"RequestId": "INNER-RID"},
+  "Result": {
+    "Credentials": {
+      "AccessKeyId": "INNER_AK",
+      "SecretAccessKey": "INNER_SK",
+      "SessionToken": "INNER_TOKEN",
+      "Expiration": "2099-12-31T23:59:59Z"
+    }
+  }
+})";
+
+// step-2 sts:AssumeRole success (customer target role). Volcengine's AssumeRole
+// response names the expiry "ExpiredTime" (not "Expiration", which is what the
+// OIDC step returns) and carries a +08:00 offset rather than a Z suffix — mirror
+// that here so the mock matches the real wire format the provider must parse.
+constexpr const char* kVolcOuterAssumeRoleSuccessJson = R"({
+  "ResponseMetadata": {"RequestId": "OUTER-RID"},
+  "Result": {
+    "Credentials": {
+      "AccessKeyId": "OUTER_AK",
+      "SecretAccessKey": "OUTER_SK",
+      "SessionToken": "OUTER_TOKEN",
+      "ExpiredTime": "2099-12-31T23:59:59+08:00"
+    }
+  }
+})";
+
+}  // namespace
+
+TEST_F(S3ProviderTest, TestVolcengineOIDCProviderRejectsInvalidExpiry) {
+  TempFile token_file("oidc-jwt-payload");
+  ScopedEnvVar set_machine_role("VOLCENGINE_OIDC_ROLE_TRN", "trn:iam::2100211764:role/MilvusTos");
+  ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
+
+  for (const char* expiry_field : {R"(,"Expiration":"4102415999")", R"(,"Expiration":"")", ""}) {
+    SCOPED_TRACE(expiry_field);
+    mock_client_ = std::make_shared<MockHttpClient>();
+    Aws::Http::SetHttpClientFactory(std::make_shared<MockHttpClientFactory>(mock_client_));
+    const std::string response = std::string(R"({"Result":{"Credentials":{"AccessKeyId":"INVALID_AK",)") +
+                                 R"("SecretAccessKey":"INNER_SK","SessionToken":"INNER_TOKEN")" + expiry_field + "}}}";
+    mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, response);
+    mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, kVolcInnerOidcSuccessJson);
+
+    VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider(/*duration_seconds=*/900);
+    EXPECT_TRUE(provider.GetAWSCredentials().IsEmpty());
+    // A rejected response must not be cached or prevent the next valid refresh.
+    EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "INNER_AK");
+    EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 2);
+  }
+}
+
+TEST_F(S3ProviderTest, TestVolcengineStsErrorRetryClassification) {
+  using Aws::Http::HttpResponseCode;
+  const struct {
+    HttpResponseCode status;
+    const char* code;
+    bool retryable;
+  } cases[] = {
+      {HttpResponseCode::SERVICE_UNAVAILABLE, "ServiceUnavailableTemp", true},
+      {HttpResponseCode::SERVICE_UNAVAILABLE, "", true},  // Empty responses bypass the error marshaller.
+      {HttpResponseCode::TOO_MANY_REQUESTS, "FlowLimitExceeded", true},
+      {HttpResponseCode::BAD_REQUEST, "Throttling", true},
+      {HttpResponseCode::BAD_REQUEST, "RequestLimitExceeded", true},
+      {HttpResponseCode::BAD_REQUEST, "InvalidOIDCToken", false},
+      {HttpResponseCode::FORBIDDEN, "AccessDenied", false},
+      {HttpResponseCode::BAD_REQUEST, "UnknownStsError", false},
+  };
+  TempFile token_file("oidc-jwt-payload");
+  ScopedEnvVar set_machine_role("VOLCENGINE_OIDC_ROLE_TRN", "trn:iam::2100211764:role/MilvusTos");
+  ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
+
+  for (const bool chain : {false, true}) {
+    SCOPED_TRACE(chain ? "AssumeRole" : "AssumeRoleWithOIDC");
+    for (const auto& test_case : cases) {
+      SCOPED_TRACE(test_case.code[0] == '\0' ? "empty error response" : test_case.code);
+      mock_client_ = std::make_shared<MockHttpClient>(/*consume_request_bodies=*/true);
+      Aws::Http::SetHttpClientFactory(std::make_shared<MockHttpClientFactory>(mock_client_));
+      if (chain) {
+        mock_client_->EnqueueResponse("sts.volcengineapi.com", HttpResponseCode::OK, kVolcInnerOidcSuccessJson);
+      }
+      const std::string error_json =
+          test_case.code[0] == '\0'
+              ? ""
+              : std::string(R"({"ResponseMetadata":{"RequestId":"retry-test","Error":{"Code":")") + test_case.code +
+                    R"(","Message":"STS request failed"}}})";
+      mock_client_->EnqueueResponse("sts.volcengineapi.com", test_case.status, error_json);
+      if (test_case.retryable) {
+        mock_client_->EnqueueResponse("sts.volcengineapi.com", HttpResponseCode::OK,
+                                      chain ? kVolcOuterAssumeRoleSuccessJson : kVolcInnerOidcSuccessJson);
+      }
+
+      Aws::Auth::AWSCredentials creds;
+      if (chain) {
+        VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/target", "session", 900);
+        creds = provider.GetAWSCredentials();
+      } else {
+        VolcengineSTSAssumeRoleWebIdentityCredentialsProvider provider(900);
+        creds = provider.GetAWSCredentials();
+      }
+      if (test_case.retryable) {
+        EXPECT_EQ(creds.GetAWSAccessKeyId(), chain ? "OUTER_AK" : "INNER_AK");
+      } else {
+        EXPECT_TRUE(creds.IsEmpty());
+      }
+      EXPECT_EQ(mock_client_->GetRecordedRequests().size(), (chain ? 1 : 0) + (test_case.retryable ? 2 : 1));
+      if (test_case.retryable) {
+        const auto bodies = mock_client_->GetRecordedRequestBodies();
+        ASSERT_EQ(bodies.size(), chain ? 3 : 2);
+        const auto& first_attempt = bodies[chain ? 1 : 0];
+        EXPECT_FALSE(first_attempt.empty());
+        EXPECT_EQ(bodies.back(), first_attempt) << "Retries must resend the complete POST body";
+      }
+    }
+  }
+}
+
+TEST_F(S3ProviderTest, TestVolcengineStsErrorPreservesDiagnostics) {
+  class DiagnosticLogSink final : public google::LogSink {
+ public:
+    void send(google::LogSeverity,
+              const char*,
+              const char*,
+              int,
+              const google::LogMessageTime&,
+              const char* message,
+              const size_t message_len) override {
+      std::lock_guard<std::mutex> lock(mutex_);
+      messages.append(message, message_len);
+      messages.push_back('\n');
+    }
+
+    std::string messages;
+
+ private:
+    std::mutex mutex_;
+  } sink;
+
+  mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::FORBIDDEN, R"({
+    "ResponseMetadata": {
+      "RequestId": "diagnostic-request-123",
+      "Error": {"Code": "AccessDenied", "Message": "role trust policy denies the caller"}
+    }
+  })");
+  VolcengineSTSCredentialsClient client(MakeNoImdsClientConfiguration(), 900);
+  {
+    // Capture storage's glog output and unregister before inspecting the buffer.
+    google::AddLogSink(&sink);
+    const auto remove_sink = folly::makeGuard([&sink] { google::RemoveLogSink(&sink); });
+    const auto result =
+        client.GetAssumeRoleWithWebIdentityCredentials({"oidc-token", "trn:iam::123:role/test", "session"});
+    EXPECT_TRUE(result.creds.IsEmpty());
+  }
+  const auto& messages = sink.messages;
+  EXPECT_NE(messages.find("AccessDenied"), std::string::npos) << messages;
+  EXPECT_NE(messages.find("role trust policy denies the caller"), std::string::npos) << messages;
+  EXPECT_NE(messages.find("diagnostic-request-123"), std::string::npos) << messages;
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 1);
+}
+
+TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderEndToEnd) {
+  // Two responses queued under the same STS URL; consumed FIFO. The chain
+  // issues AssumeRoleWithOIDC first (inner) then sts:AssumeRole (outer).
+  mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, kVolcInnerOidcSuccessJson);
+  mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK,
+                                kVolcOuterAssumeRoleSuccessJson);
+
+  TempFile token_file("oidc-jwt-payload");
+  ScopedEnvVar set_machine_role("VOLCENGINE_OIDC_ROLE_TRN", "trn:iam::2100211764:role/MilvusTos");
+  ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
+  ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
+
+  VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/llqtestexternal", "tenant-A-session",
+                                                 /*duration_seconds=*/900);
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_EQ(creds.GetAWSAccessKeyId(), "OUTER_AK");
+  EXPECT_EQ(creds.GetAWSSecretKey(), "OUTER_SK");
+  EXPECT_EQ(creds.GetSessionToken(), "OUTER_TOKEN");
+  // AssumeRole reports expiry as "ExpiredTime" with a +08:00 offset; the provider
+  // must read that field (not "Expiration") and fold the offset to UTC, so the
+  // 23:59:59+08:00 instant lands at 15:59:59Z. A regression on either the field
+  // name or the offset math would throw "Invalid RFC3339 time" and fail earlier.
+  EXPECT_EQ(creds.GetExpiration().Millis(),
+            Aws::Utils::DateTime("2099-12-31T15:59:59Z", Aws::Utils::DateFormat::ISO_8601).Millis())
+      << "ExpiredTime +08:00 must normalize to the equivalent UTC Z instant";
+
+  const auto recorded = mock_client_->GetRecordedRequests();
+  std::vector<std::shared_ptr<Aws::Http::HttpRequest>> sts_reqs;
+  for (const auto& r : recorded) {
+    if (r->GetURIString().find("sts.volcengineapi.com") != Aws::String::npos) {
+      sts_reqs.push_back(r);
+    }
+  }
+  ASSERT_EQ(sts_reqs.size(), 2u) << "chain must issue exactly two STS calls";
+
+  // Inner request: AssumeRoleWithOIDC against the env-driven machine-identity
+  // role. Customer's target role must NOT appear here — that was the bug this
+  // provider exists to fix. Volcengine carries RoleTrn in the URL query.
+  const auto inner_uri = sts_reqs[0]->GetURIString();
+  EXPECT_NE(inner_uri.find("Action=AssumeRoleWithOIDC"), std::string::npos) << inner_uri;
+  EXPECT_NE(inner_uri.find("MilvusTos"), std::string::npos) << inner_uri;
+  EXPECT_EQ(inner_uri.find("llqtestexternal"), std::string::npos)
+      << "inner OIDC step must not carry the customer target role: " << inner_uri;
+
+  // Outer request: sts:AssumeRole signed by the inner step's STS creds. RoleTrn
+  // rides in the body (percent-encoded); the caller session token rides in the
+  // X-Security-Token header; the Authorization credential names INNER_AK.
+  const auto outer_uri = sts_reqs[1]->GetURIString();
+  EXPECT_NE(outer_uri.find("Action=AssumeRole"), std::string::npos) << outer_uri;
+  const auto outer_body = ReadRequestBody(sts_reqs[1]);
+  EXPECT_NE(outer_body.find("RoleTrn=trn%3Aiam%3A%3A2112796134%3Arole%2Fllqtestexternal"), std::string::npos)
+      << outer_body;
+  EXPECT_NE(outer_body.find("RoleSessionName=tenant-A-session"), std::string::npos) << outer_body;
+
+  const auto& outer_headers = sts_reqs[1]->GetHeaders();
+  auto header_value = [&](const std::string& lname) -> std::string {
+    for (const auto& h : outer_headers) {
+      std::string key(h.first.c_str());
+      std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return std::tolower(c); });
+      if (key == lname)
+        return std::string(h.second.c_str());
+    }
+    return {};
+  };
+  EXPECT_EQ(header_value("x-security-token"), "INNER_TOKEN") << "step-1 session token must ride in X-Security-Token";
+  const auto authz = header_value("authorization");
+  EXPECT_NE(authz.find("HMAC-SHA256 Credential=INNER_AK/"), std::string::npos)
+      << "outer request must be signed by the inner step's AK: " << authz;
+  EXPECT_NE(authz.find("/cn-beijing/sts/request"), std::string::npos) << authz;
+}
+
+TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderInnerStepFailsReturnsEmpty) {
+  // Inner AssumeRoleWithOIDC returns empty — outer must never fire and the
+  // provider surfaces empty creds rather than falling back to anonymous.
+  mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, "");
+
+  TempFile token_file("oidc-jwt-payload");
+  ScopedEnvVar set_machine_role("VOLCENGINE_OIDC_ROLE_TRN", "trn:iam::2100211764:role/MilvusTos");
+  ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
+  ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
+
+  VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/llqtestexternal", "sess",
+                                                 /*duration_seconds=*/900);
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds.IsEmpty());
+
+  size_t sts_calls = 0;
+  for (const auto& r : mock_client_->GetRecordedRequests()) {
+    if (r->GetURIString().find("sts.volcengineapi.com") != Aws::String::npos)
+      ++sts_calls;
+  }
+  EXPECT_EQ(sts_calls, 1u) << "outer AssumeRole must be skipped when inner step fails";
+}
+
+TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderOuterStepEmptyReturnsEmpty) {
+  // Inner succeeds, outer AssumeRole returns empty (e.g. cross-account trust
+  // policy not yet configured). Provider must surface empty creds, not the
+  // inner step's creds — those would let the caller into the customer bucket
+  // using the big account's identity.
+  mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, kVolcInnerOidcSuccessJson);
+  mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, "");
+
+  TempFile token_file("oidc-jwt-payload");
+  ScopedEnvVar set_machine_role("VOLCENGINE_OIDC_ROLE_TRN", "trn:iam::2100211764:role/MilvusTos");
+  ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
+  ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
+
+  VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/llqtestexternal", "sess",
+                                                 /*duration_seconds=*/900);
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds.IsEmpty());
+}
+
+TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderShortCircuitsWhenTargetEqualsMachineRole) {
+  // Single-account degradation: target role == step-1 machine role. Step 2
+  // must be skipped and the step-1 creds returned directly, so historical
+  // single-account role_arn deployments keep working without the target role
+  // needing to trust itself for sts:AssumeRole. Only ONE STS call fires.
+  mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, kVolcInnerOidcSuccessJson);
+
+  TempFile token_file("oidc-jwt-payload");
+  ScopedEnvVar set_machine_role("VOLCENGINE_OIDC_ROLE_TRN", "trn:iam::2100211764:role/MilvusTos");
+  ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
+  ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
+
+  VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2100211764:role/MilvusTos", "sess",
+                                                 /*duration_seconds=*/900);
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_EQ(creds.GetAWSAccessKeyId(), "INNER_AK") << "single-account path must reuse step-1 credentials";
+  EXPECT_EQ(creds.GetSessionToken(), "INNER_TOKEN");
+
+  size_t sts_calls = 0;
+  for (const auto& r : mock_client_->GetRecordedRequests()) {
+    if (r->GetURIString().find("sts.volcengineapi.com") != Aws::String::npos)
+      ++sts_calls;
+  }
+  EXPECT_EQ(sts_calls, 1u) << "short-circuit must skip the step-2 AssumeRole";
+}
+
+TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderShortCircuitsWhenTargetEmpty) {
+  // Empty target role is also the single-account path (extfs.role_arn unset):
+  // return step-1 creds, no second STS call.
+  mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, kVolcInnerOidcSuccessJson);
+
+  TempFile token_file("oidc-jwt-payload");
+  ScopedEnvVar set_machine_role("VOLCENGINE_OIDC_ROLE_TRN", "trn:iam::2100211764:role/MilvusTos");
+  ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
+  ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
+
+  VolcengineOIDCAssumeRoleChainProvider provider(/*target_role_trn=*/"", "sess", /*duration_seconds=*/900);
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_EQ(creds.GetAWSAccessKeyId(), "INNER_AK");
+
+  size_t sts_calls = 0;
+  for (const auto& r : mock_client_->GetRecordedRequests()) {
+    if (r->GetURIString().find("sts.volcengineapi.com") != Aws::String::npos)
+      ++sts_calls;
+  }
+  EXPECT_EQ(sts_calls, 1u);
+}
+
+TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderEmptySessionNameDefaults) {
+  // Empty target session name should be replaced by a UUID — the outer
+  // AssumeRole body must never carry an empty RoleSessionName.
+  mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, kVolcInnerOidcSuccessJson);
+  mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK,
+                                kVolcOuterAssumeRoleSuccessJson);
+
+  TempFile token_file("oidc-jwt-payload");
+  ScopedEnvVar set_machine_role("VOLCENGINE_OIDC_ROLE_TRN", "trn:iam::2100211764:role/MilvusTos");
+  ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
+  ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
+
+  VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/llqtestexternal",
+                                                 /*target_session_name=*/"", /*duration_seconds=*/900);
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_EQ(creds.GetAWSAccessKeyId(), "OUTER_AK");
+
+  std::shared_ptr<Aws::Http::HttpRequest> outer_req;
+  for (const auto& r : mock_client_->GetRecordedRequests()) {
+    if (r->GetURIString().find("Action=AssumeRole&") != std::string::npos) {
+      outer_req = r;
+    }
+  }
+  ASSERT_NE(outer_req, nullptr);
+  const auto body = ReadRequestBody(outer_req);
+  const auto pos = body.find("RoleSessionName=");
+  ASSERT_NE(pos, std::string::npos) << body;
+  const auto value_start = pos + std::string("RoleSessionName=").size();
+  const auto value_end = body.find('&', value_start);
+  const auto value = body.substr(value_start, value_end - value_start);
+  EXPECT_FALSE(value.empty());
+}
+
+TEST_F(S3ProviderTest, TestVolcengineOIDCChainProviderRejectsInvalidExpiry) {
+  TempFile token_file("oidc-jwt-payload");
+  ScopedEnvVar set_machine_role("VOLCENGINE_OIDC_ROLE_TRN", "trn:iam::2100211764:role/MilvusTos");
+  ScopedEnvVar set_token("VOLCENGINE_OIDC_TOKEN_FILE", token_file.path());
+  ScopedEnvUnset unset_session("VOLCENGINE_OIDC_ROLE_SESSION_NAME");
+
+  for (const char* expiry_field : {R"(,"ExpiredTime":"4102415999")", R"(,"ExpiredTime":"")", ""}) {
+    SCOPED_TRACE(expiry_field);
+    mock_client_ = std::make_shared<MockHttpClient>();
+    Aws::Http::SetHttpClientFactory(std::make_shared<MockHttpClientFactory>(mock_client_));
+    const std::string response = std::string(R"({"Result":{"Credentials":{"AccessKeyId":"INVALID_AK",)") +
+                                 R"("SecretAccessKey":"OUTER_SK","SessionToken":"OUTER_TOKEN")" + expiry_field + "}}}";
+    mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, kVolcInnerOidcSuccessJson);
+    mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, response);
+    mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK,
+                                  kVolcOuterAssumeRoleSuccessJson);
+
+    VolcengineOIDCAssumeRoleChainProvider provider("trn:iam::2112796134:role/llqtestexternal", "tenant-A-session",
+                                                   /*duration_seconds=*/900);
+    EXPECT_TRUE(provider.GetAWSCredentials().IsEmpty());
+    EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "OUTER_AK");
+    EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 3);
   }
 }
 
@@ -1180,15 +1800,6 @@ TEST_F(S3ProviderTest, TestHuaweiProviderStep2InvalidExpiresAtFormat) {
 
 namespace {
 
-// Read the form-urlencoded body of a recorded POST request.
-std::string ReadRequestBody(const std::shared_ptr<Aws::Http::HttpRequest>& req) {
-  auto& stream = req->GetContentBody();
-  if (!stream)
-    return {};
-  stream->seekg(0);
-  return {std::istreambuf_iterator<char>(*stream), std::istreambuf_iterator<char>()};
-}
-
 constexpr const char* kSTSSuccessXml = R"(<?xml version='1.0' encoding='UTF-8'?>
 <AssumeRoleResponse>
   <RequestId>TEST-RID</RequestId>
@@ -1854,6 +2465,210 @@ TEST_F(S3ProviderTest, TestAliyunOIDCChainProviderEmptySessionNameDefaults) {
   const auto value_end = body.find('&', value_start);
   const auto value = body.substr(value_start, value_end - value_start);
   EXPECT_FALSE(value.empty());
+}
+
+namespace {
+std::string TencentCredentials(const std::string& id, int64_t expires = 4102444800) {
+  return "{\"Response\":{\"Credentials\":{\"TmpSecretId\":\"" + id +
+         "\",\"TmpSecretKey\":\"SECRET\",\"Token\":\"TOKEN\"},\"ExpiredTime\":" + std::to_string(expires) + "}}";
+}
+
+struct TencentEnvironment {
+  TempFile token{"token-before-rotation"};
+  ScopedEnvVar region{"TKE_REGION", "ap-shanghai"};
+  ScopedEnvVar role{"TKE_ROLE_ARN", "qcs::cam::uin/1:roleName/worker"};
+  ScopedEnvVar file{"TKE_WEB_IDENTITY_TOKEN_FILE", token.path()};
+  ScopedEnvVar provider{"TKE_PROVIDER_ID", "cluster-provider"};
+};
+}  // namespace
+
+TEST_F(S3ProviderTest, TencentChainUsesExplicitTargetAndSignsWithWorker) {
+  TencentEnvironment env;
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("WORKER"));
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("TARGET"));
+  TencentCloudOIDCAssumeRoleChainProvider provider("qcs::cam::uin/2:roleName/customer", "job-session", "tenant-2");
+  EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "TARGET");
+  EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "TARGET");
+  auto requests = mock_client_->GetRecordedRequests();
+  ASSERT_EQ(requests.size(), 2u);
+  EXPECT_EQ(requests[0]->GetHeaderValue("X-TC-Action"), "AssumeRoleWithWebIdentity");
+  EXPECT_EQ(requests[0]->GetHeaderValue("Authorization"), "SKIP");
+  Aws::Utils::Json::JsonValue first(ReadRequestBody(requests[0]));
+  EXPECT_EQ(first.View().GetString("RoleArn"), "qcs::cam::uin/1:roleName/worker");
+  EXPECT_FALSE(first.View().ValueExists("ExternalId"));
+  auto request = requests[1];
+  EXPECT_EQ(request->GetHeaderValue("X-TC-Action"), "AssumeRole");
+  EXPECT_EQ(request->GetHeaderValue("X-TC-Token"), "TOKEN");
+  EXPECT_EQ(request->GetHeaderValue("X-TC-Version"), "2018-08-13");
+  const auto body = ReadRequestBody(request);
+  Aws::Utils::Json::JsonValue second(body);
+  EXPECT_EQ(second.View().GetString("RoleArn"), "qcs::cam::uin/2:roleName/customer");
+  EXPECT_EQ(second.View().GetString("RoleSessionName"), "job-session");
+  EXPECT_EQ(second.View().GetString("ExternalId"), "tenant-2");
+
+  // Recompute the signature from the captured wire request with the AWS crypto
+  // implementation; production uses OpenSSL HMAC directly.
+  using Aws::Utils::HashingUtils;
+  auto bytes = [](const Aws::String& text) {
+    return Aws::Utils::ByteBuffer(reinterpret_cast<const unsigned char*>(text.data()), text.size());
+  };
+  const auto timestamp = request->GetHeaderValue("X-TC-Timestamp");
+  const auto date = Aws::Utils::DateTime(static_cast<double>(std::stoll(timestamp))).ToGmtString("%Y-%m-%d");
+  const auto scope = date + "/sts/tc3_request";
+  const auto canonical = "POST\n/\n\ncontent-type:" + request->GetContentType() +
+                         "\nhost:" + request->GetHeaderValue("Host") + "\n\ncontent-type;host\n" +
+                         HashingUtils::HexEncode(HashingUtils::CalculateSHA256(body));
+  const auto to_sign = "TC3-HMAC-SHA256\n" + timestamp + "\n" + scope + "\n" +
+                       HashingUtils::HexEncode(HashingUtils::CalculateSHA256(canonical));
+  auto key = HashingUtils::CalculateSHA256HMAC(bytes(date), bytes("TC3SECRET"));
+  key = HashingUtils::CalculateSHA256HMAC(bytes("sts"), key);
+  key = HashingUtils::CalculateSHA256HMAC(bytes("tc3_request"), key);
+  const auto signature = HashingUtils::HexEncode(HashingUtils::CalculateSHA256HMAC(bytes(to_sign), key));
+  EXPECT_EQ(request->GetHeaderValue("Authorization"),
+            "TC3-HMAC-SHA256 Credential=WORKER/" + scope + ", SignedHeaders=content-type;host, Signature=" + signature);
+}
+
+TEST_F(S3ProviderTest, TencentChainDoesNotUseWorkerWhenTargetFails) {
+  TencentEnvironment env;
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("WORKER"));
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                R"({"Response":{"Error":{"Code":"AuthFailure"}}})");
+  TencentCloudOIDCAssumeRoleChainProvider provider("qcs::cam::uin/2:roleName/customer", "session");
+  EXPECT_TRUE(provider.GetAWSCredentials().IsEmpty());
+  auto requests = mock_client_->GetRecordedRequests();
+  ASSERT_EQ(requests.size(), 2u);
+  Aws::Utils::Json::JsonValue second(ReadRequestBody(requests[1]));
+  EXPECT_FALSE(second.View().ValueExists("ExternalId"));
+}
+
+TEST_F(S3ProviderTest, TencentChainStopsAfterInvalidWorkerResponse) {
+  TencentEnvironment env;
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK, "not-json");
+  TencentCloudOIDCAssumeRoleChainProvider provider("qcs::cam::uin/2:roleName/customer", "session");
+  EXPECT_TRUE(provider.GetAWSCredentials().IsEmpty());
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 1u);
+}
+
+TEST_F(S3ProviderTest, TencentChainRenewsBothHopsAndReadsRotatedToken) {
+  TencentEnvironment env;
+  auto near_expiration = Aws::Utils::DateTime::Now().Seconds() + 60;
+  for (const auto& response :
+       {TencentCredentials("WORKER-OLD", near_expiration), TencentCredentials("TARGET-OLD", near_expiration),
+        TencentCredentials("WORKER-NEW"), TencentCredentials("TARGET-NEW")}) {
+    mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK, response);
+  }
+  TencentCloudOIDCAssumeRoleChainProvider provider("qcs::cam::uin/2:roleName/customer", "session");
+  EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "TARGET-OLD");
+  {
+    std::ofstream file(env.token.path());
+    file << "token-after-rotation";
+  }
+  EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "TARGET-NEW");
+  auto requests = mock_client_->GetRecordedRequests();
+  ASSERT_EQ(requests.size(), 4u);
+  Aws::Utils::Json::JsonValue third(ReadRequestBody(requests[2]));
+  EXPECT_EQ(third.View().GetString("WebIdentityToken"), "token-after-rotation");
+  EXPECT_NE(requests[3]->GetHeaderValue("Authorization").find("Credential=WORKER-NEW/"), Aws::String::npos);
+}
+
+TEST_F(S3ProviderTest, TencentChainConcurrentReadsShareOnlyTheirTargetCache) {
+  TencentEnvironment env;
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("WORKER"));
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("TARGET-A"));
+  TencentCloudOIDCAssumeRoleChainProvider first("qcs::cam::uin/2:roleName/a", "session");
+  std::vector<std::thread> readers;
+  for (int i = 0; i < 12; ++i)
+    readers.emplace_back([&] { EXPECT_EQ(first.GetAWSCredentials().GetAWSAccessKeyId(), "TARGET-A"); });
+  for (auto& thread : readers) thread.join();
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 2u);
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("WORKER"));
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("TARGET-B"));
+  TencentCloudOIDCAssumeRoleChainProvider second("qcs::cam::uin/2:roleName/b", "session");
+  EXPECT_EQ(second.GetAWSCredentials().GetAWSAccessKeyId(), "TARGET-B");
+  EXPECT_EQ(first.GetAWSCredentials().GetAWSAccessKeyId(), "TARGET-A");
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 4u);
+}
+
+TEST_F(S3ProviderTest, TencentChainRejectsIncompleteTkeIdentity) {
+  TencentEnvironment env;
+  for (const char* missing : {"TKE_REGION", "TKE_ROLE_ARN", "TKE_WEB_IDENTITY_TOKEN_FILE", "TKE_PROVIDER_ID"}) {
+    ScopedEnvUnset absent(missing);
+    TencentCloudOIDCAssumeRoleChainProvider provider("qcs::cam::uin/2:roleName/customer", "session");
+    EXPECT_TRUE(provider.GetAWSCredentials().IsEmpty());
+  }
+  EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
+}
+
+TEST_F(S3ProviderTest, TencentChainRequiresAllTkeInputsWithoutFallback) {
+  TencentEnvironment env;
+  for (const char* missing : {"TKE_REGION", "TKE_ROLE_ARN", "TKE_WEB_IDENTITY_TOKEN_FILE", "TKE_PROVIDER_ID"}) {
+    ScopedEnvUnset absent(missing);
+    TencentCloudOIDCAssumeRoleChainProvider provider("qcs::cam::uin/2:roleName/customer", "session");
+    EXPECT_TRUE(provider.GetAWSCredentials().IsEmpty());
+    ArrowFileSystemConfig config;
+    config.cloud_provider = kCloudProviderTencent;
+    config.role_arn = "qcs::cam::uin/2:roleName/customer";
+    EXPECT_FALSE(S3FileSystemProducer(config).CreateS3Options().ok());
+  }
+  EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
+}
+
+TEST_F(S3ProviderTest, TencentDispatcherSelectsTargetRole) {
+  TencentEnvironment env;
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("WORKER"));
+  mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK,
+                                TencentCredentials("TARGET"));
+  ArrowFileSystemConfig config;
+  config.cloud_provider = kCloudProviderTencent;
+  config.role_arn = "qcs::cam::uin/2:roleName/customer";
+  config.session_name = "job";
+  config.external_id = "customer-id";
+  config.address = "cos.ap-shanghai.myqcloud.com";
+  ASSERT_AND_ASSIGN(auto options, S3FileSystemProducer(config).CreateS3Options());
+  EXPECT_TRUE(options.force_virtual_addressing);
+  EXPECT_EQ(options.credentials_provider->GetAWSCredentials().GetAWSAccessKeyId(), "TARGET");
+}
+
+TEST_F(S3ProviderTest, TencentStsRejectsInvalidCredentialResponses) {
+  TencentCloudSTSCredentialsClient client(MakeNoImdsClientConfiguration());
+  TencentCloudSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{"ap-shanghai", "provider", "token",
+                                                                                "role", "session"};
+  for (const auto& response : std::vector<std::string>{
+           "garbage", "[]", "{}", R"({"Response":null})", R"({"Response":{"Credentials":null}})",
+           R"({"Response":{"Credentials":{"TmpSecretId":"A","TmpSecretKey":"S","Token":""},"ExpiredTime":4102444800}})",
+           R"({"Response":{"Credentials":{"TmpSecretId":4,"TmpSecretKey":"S","Token":"T"},"ExpiredTime":4102444800}})",
+           R"({"Response":{"Credentials":{"TmpSecretId":"A","TmpSecretKey":"S","Token":"T"}}})",
+           TencentCredentials("EXPIRED", 1)}) {
+    mock_client_->EnqueueResponse("sts.tencentcloudapi.com", Aws::Http::HttpResponseCode::OK, response);
+    EXPECT_TRUE(client.GetAssumeRoleWithWebIdentityCredentials(request).creds.IsEmpty());
+  }
+}
+
+TEST_F(S3ProviderTest, TencentStsSigningFailureReturnsNoCredentials) {
+  TencentCloudSTSCredentialsClient client(MakeNoImdsClientConfiguration());
+  Aws::Auth::AWSCredentials caller("WORKER", "SECRET", "TOKEN");
+  caller.SetExpiration(Aws::Utils::DateTime(4102444800.0));
+  TencentCloudSTSCredentialsClient::STSAssumeRoleRequest request{caller, "ap-shanghai",
+                                                                 "qcs::cam::uin/2:roleName/customer", "session", ""};
+
+  // Force OpenSSL's HMAC operation to fail, then restore its default provider
+  // before any assertions that could stop the test or subsequent SDK teardown.
+  ASSERT_EQ(EVP_set_default_properties(nullptr, "provider=missing-tencent-test-provider"), 1);
+  Aws::Auth::AWSCredentials credentials;
+  EXPECT_NO_THROW(credentials = client.GetAssumeRoleCredentials(request));
+  EXPECT_EQ(EVP_set_default_properties(nullptr, ""), 1);
+  ERR_clear_error();
+
+  EXPECT_TRUE(credentials.IsEmpty());
+  EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
 }
 
 TEST_F(S3ProviderTest, ExplicitAwsIAMSourcesNeverConstructFallbackChains) {

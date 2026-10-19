@@ -322,6 +322,42 @@ typedef struct LoonManifest {
 } LoonManifest;
 
 /**
+ * @brief Serialize a manifest to an Avro binary buffer for backup/restore only.
+ *
+ * @warning This low-level interface bypasses transaction-safe reads and commits.
+ * Do not use it in normal read/write paths; use the transaction APIs instead.
+ * It performs no filesystem I/O or path normalization. Paths are serialized as-is.
+ *
+ * @param manifest Manifest to serialize, borrowed for this call
+ * @param out_data Output binary buffer (not a C string); release with loon_manifest_free_buffer
+ * @param out_size Output buffer size in bytes
+ * @return FFI result; on failure, supplied outputs are set to NULL and zero
+ */
+FFI_EXPORT LoonFFIResult loon_manifest_serialize(const LoonManifest* manifest, uint8_t** out_data, size_t* out_size);
+
+/**
+ * @brief Deserialize manifest bytes for backup/restore only.
+ *
+ * @warning This low-level interface bypasses transaction-safe reads and commits.
+ * Do not use it in normal read/write paths; use the transaction APIs instead.
+ * It performs no filesystem I/O or path normalization. Paths are returned as stored.
+ * Supports the same Avro and legacy formats as the manifest reader. Delta logs that
+ * LoonManifest cannot represent (non-PRIMARY_KEY type or entry count outside uint32_t)
+ * return loon_errcode_not_support rather than silently losing data.
+ *
+ * @param data Input binary buffer, borrowed only for this call
+ * @param size Input buffer size in bytes (must be nonzero)
+ * @param out_manifest Output manifest owning all nested data; release with loon_manifest_destroy
+ * @return FFI result; on failure, out_manifest is set to NULL when supplied
+ */
+FFI_EXPORT LoonFFIResult loon_manifest_deserialize(const uint8_t* data, size_t size, LoonManifest** out_manifest);
+
+/**
+ * @brief Free a buffer returned by loon_manifest_serialize (NULL is allowed).
+ */
+FFI_EXPORT void loon_manifest_free_buffer(uint8_t* data);
+
+/**
  * @brief Destroys a CManifest and frees all allocated memory
  *
  * A manifest returned by this library owns all of its nested storage,
@@ -443,6 +479,10 @@ FFI_EXPORT LoonFFIResult loon_writer_new(const char* base_path,
 
 /**
  * @brief Writes a record batch to the dataset
+ *
+ * With valid non-null arguments, consumes the ArrowArray, including on import
+ * failure. On success, releases the root before returning; individual columns
+ * may remain retained until flushed or closed. No input buffers are copied.
  * @param handle Writer handle
  * @param array Arrow array representing the record batch to write
  * @return 0 on success, others is error code
@@ -739,6 +779,7 @@ typedef uintptr_t LoonTransactionHandle;
  * possibly before submission returns. Exceptional enqueue failure runs accepted
  * work on the completing thread. Inputs are copied. The receiver owns the callback result and
  * successful transaction. release(NULL)/cancel(NULL) are no-ops; release does not cancel.
+ * manifest_size is the exact file size in bytes, or <= 0 if unknown; ignored for LATEST.
  * See docs/manifest-async.md for supported configurations and lifetime requirements.
  */
 typedef void (*LoonTransactionOpenCallback)(uintptr_t user_data,
@@ -748,6 +789,7 @@ FFI_EXPORT LoonFFIResult loon_transaction_open_async(LoonAsyncContextHandle asyn
                                                      const char* base_path,
                                                      const LoonProperties* properties,
                                                      int64_t read_version,
+                                                     int64_t manifest_size,
                                                      int32_t resolve_id,
                                                      uint32_t retry_limit,
                                                      LoonTransactionOpenCallback callback,
@@ -760,14 +802,15 @@ FFI_EXPORT LoonFFIResult loon_transaction_open_async(LoonAsyncContextHandle asyn
 typedef void (*LoonTransactionCommitCallback)(uintptr_t user_data,
                                               LoonFFIResult result,
                                               int32_t commit_outcome,
-                                              int64_t committed_version);
+                                              int64_t committed_version,
+                                              int64_t manifest_size);
 /** Runs the existing synchronous commit on the caller executor. Errors after
  * execution begins conservatively report UNKNOWN; backend retries are unchanged.
  * Cancellation/deadline only prevent execution before it starts.
  * Accepted commits consume the transaction: only destroy it after the callback.
  * It must remain alive and unmodified until then. Another submission returns busy.
  * UNKNOWN must never be automatically replayed based on the error's retryability.
- * The callback may destroy the transaction immediately. Version is -1 unless COMMITTED.
+ * The callback may destroy the transaction immediately. Version and manifest size are -1 unless COMMITTED.
  */
 FFI_EXPORT LoonFFIResult loon_transaction_commit_async(LoonAsyncContextHandle async_context,
                                                        LoonTransactionHandle transaction,
@@ -784,6 +827,7 @@ FFI_EXPORT LoonFFIResult loon_transaction_commit_async(LoonAsyncContextHandle as
  * @param base_path Base path in the filesystem for the transaction
  * @param properties configuration properties
  * @param read_version Version to read (<0 means fetch greatest version)
+ * @param manifest_size Exact size in bytes of read_version, or <= 0 if unknown; ignored for LATEST
  * @param resolve_id The resolve strategy, see LOON_TRANSACTION_RESOLVE_*
  * @param retry_limit Maximum number of retry attempts on commit conflicts (default: 1)
  * @param out_handle Output transaction handle
@@ -792,6 +836,7 @@ FFI_EXPORT LoonFFIResult loon_transaction_commit_async(LoonAsyncContextHandle as
 FFI_EXPORT LoonFFIResult loon_transaction_open(const char* base_path,
                                                const LoonProperties* properties,
                                                int64_t read_version,
+                                               int64_t manifest_size,
                                                int32_t resolve_id,
                                                uint32_t retry_limit,
                                                LoonTransactionHandle* out_handle);
@@ -820,9 +865,12 @@ FFI_EXPORT LoonFFIResult loon_transaction_get_read_version(LoonTransactionHandle
  *
  * @param handle Transaction handle
  * @param out_committed_version Output committed version (valid only if commit succeeds)
+ * @param out_manifest_size Optional output size in bytes (may be NULL); unchanged on failure
  * @return result of FFI
  */
-FFI_EXPORT LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out_committed_version);
+FFI_EXPORT LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle,
+                                                 int64_t* out_committed_version,
+                                                 int64_t* out_manifest_size);
 
 /**
  * @brief Destroys a Transaction
@@ -1050,6 +1098,7 @@ typedef struct LoonSegmentReaderConfig {
  *
  * @param segment_path Base path where manifest and data files are stored
  * @param version Manifest version to read (-1 = latest)
+ * @param manifest_size Exact size in bytes of that version, or <= 0 if unknown; ignored for latest
  * @param schema Arrow schema with TEXT columns as utf8() type
  * @param needed_columns Column names to read (NULL = all columns)
  * @param num_columns Number of needed columns
@@ -1060,6 +1109,7 @@ typedef struct LoonSegmentReaderConfig {
  */
 FFI_EXPORT LoonFFIResult loon_segment_reader_open(const char* segment_path,
                                                   int64_t version,
+                                                  int64_t manifest_size,
                                                   struct ArrowSchema* schema,
                                                   const char** needed_columns,
                                                   int64_t num_columns,

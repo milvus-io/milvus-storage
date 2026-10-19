@@ -29,6 +29,7 @@ struct AsyncManifestOperation final : AsyncOperation {
 folly::SemiFuture<OpenResult> Transaction::OpenAsync(const std::string& path,
                                                      Properties properties,
                                                      int64_t version,
+                                                     const int64_t manifest_size,
                                                      const Resolver& resolver,
                                                      uint32_t retries,
                                                      uint64_t timeout_ms,
@@ -42,7 +43,8 @@ folly::SemiFuture<OpenResult> Transaction::OpenAsync(const std::string& path,
   operation = state;
   return folly::makeSemiFuture().deferExValue(
       [state, path, properties = std::move(properties), version, resolver = &resolver, retries,
-       filesystem = std::move(filesystem)](folly::Executor::KeepAlive<> executor, folly::Unit) mutable -> OpenResult {
+       filesystem = std::move(filesystem),
+       manifest_size](folly::Executor::KeepAlive<> executor, folly::Unit) mutable -> OpenResult {
         try {
           auto status = state->BeforeStart(executor);
           if (!status.ok())
@@ -56,7 +58,7 @@ folly::SemiFuture<OpenResult> Transaction::OpenAsync(const std::string& path,
           status = state->BeforeStart(executor);
           if (!status.ok())
             return {std::move(status), nullptr};
-          auto result = Transaction::Open(filesystem, path, version, *resolver, retries);
+          auto result = Transaction::Open(filesystem, path, version, manifest_size, *resolver, retries);
           if (!result.ok())
             return {result.status(), nullptr};
           return {{}, std::move(result).ValueUnsafe()};
@@ -90,13 +92,14 @@ folly::SemiFuture<CommitResult> Transaction::CommitAsync(uint64_t timeout_ms,
           if (!status.ok())
             return {std::move(status)};
           started = true;
-          auto result = transaction->Commit();
+          int64_t manifest_size = -1;
+          auto result = transaction->Commit(&manifest_size);
           // The existing synchronous API does not expose a write-dispatch or
           // durability outcome. Conservatively preserve uncertainty on errors.
           if (!result.ok())
             return {result.status(), CommitOutcome::Unknown};
           // Cancellation after execution began cannot erase a confirmed success.
-          return {{}, CommitOutcome::Committed, *result};
+          return {{}, CommitOutcome::Committed, *result, manifest_size};
         } catch (const std::bad_alloc&) {
           return {AsyncStatus::Memory, started ? CommitOutcome::Unknown : CommitOutcome::NotCommitted};
         } catch (...) {

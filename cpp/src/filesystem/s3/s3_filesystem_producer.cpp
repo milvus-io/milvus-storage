@@ -46,11 +46,14 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudSTSClient.h"
+#include "milvus-storage/filesystem/s3/provider/TencentCloudOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/VolcengineCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/VolcengineOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_options.h"
@@ -193,7 +196,7 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
 
   options.force_virtual_addressing = config_.use_virtual_host;
   if (config_.cloud_provider == kCloudProviderAliyun || config_.cloud_provider == kCloudProviderTencent ||
-      config_.cloud_provider == kCloudProviderHuawei) {
+      config_.cloud_provider == kCloudProviderHuawei || config_.cloud_provider == kCloudProviderVolcengine) {
     options.force_virtual_addressing = true;
   }
 
@@ -280,6 +283,49 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
             "AliyunOIDCAssumeRoleChainProvider", config_.role_arn, config_.session_name, config_.external_id);
         options.credentials_kind = S3CredentialsKind::WebIdentity;
       }
+    } else if (config_.cloud_provider == kCloudProviderVolcengine) {
+      // Two-step chain: env-driven AssumeRoleWithOIDC for the machine-identity
+      // role (VOLCENGINE_OIDC_ROLE_TRN, the big account) -> sts:AssumeRole into
+      // the customer's target role (config_.role_arn, from extfs.role_arn, a
+      // different account). The previous single-step variant fed
+      // config_.role_arn straight into AssumeRoleWithOIDC, which Volcengine STS
+      // rejects whenever the OIDC IdP and RoleTrn live in different accounts
+      // (the cross-tenant external-table case). The chain provider degrades to
+      // step-1 credentials automatically when the target role is empty or equals
+      // the machine role, so historical single-account role_arn deployments are
+      // unaffected.
+      //
+      // Both the machine-identity token file and the machine role trn must live
+      // in process env. Fail fast if either is missing so the misconfig surfaces
+      // here rather than as an empty-credential request later.
+      if (Aws::Environment::GetEnv("VOLCENGINE_OIDC_TOKEN_FILE").empty() ||
+          Aws::Environment::GetEnv("VOLCENGINE_OIDC_ROLE_TRN").empty()) {
+        return arrow::Status::Invalid(
+            "Volcengine role_arn requires VOLCENGINE_OIDC_TOKEN_FILE and "
+            "VOLCENGINE_OIDC_ROLE_TRN in process environment (VKE-injected OIDC "
+            "web-identity token and the big-account machine role for the "
+            "AssumeRoleWithOIDC step)");
+      }
+      if (!config_.external_id.empty()) {
+        LOG_STORAGE_WARNING_ << "Volcengine AssumeRole has no ExternalId; external_id ignored";
+      }
+      // load_frequency flows through to both STS hops as DurationSeconds. The
+      // inner STS client clamps the value into Volcengine's [900, 43200]
+      // window; the refresh grace itself is a separate 3-minute watermark.
+      options.credentials_provider = Aws::MakeShared<VolcengineOIDCAssumeRoleChainProvider>(
+          "VolcengineOIDCAssumeRoleChainProvider", config_.role_arn, config_.session_name, config_.load_frequency);
+      options.credentials_kind = S3CredentialsKind::WebIdentity;
+    } else if (config_.cloud_provider == kCloudProviderTencent) {
+      if (Aws::Environment::GetEnv("TKE_REGION").empty() || Aws::Environment::GetEnv("TKE_ROLE_ARN").empty() ||
+          Aws::Environment::GetEnv("TKE_WEB_IDENTITY_TOKEN_FILE").empty() ||
+          Aws::Environment::GetEnv("TKE_PROVIDER_ID").empty()) {
+        return arrow::Status::Invalid(
+            "Tencent role_arn requires TKE_REGION, TKE_ROLE_ARN, "
+            "TKE_WEB_IDENTITY_TOKEN_FILE and TKE_PROVIDER_ID in process environment");
+      }
+      options.credentials_provider = Aws::MakeShared<TencentCloudOIDCAssumeRoleChainProvider>(
+          "TencentCloudOIDCAssumeRoleChainProvider", config_.role_arn, config_.session_name, config_.external_id);
+      options.credentials_kind = S3CredentialsKind::WebIdentity;
     } else {
       return arrow::Status::Invalid("role_arn not supported for cloud provider: ", config_.cloud_provider);
     }
@@ -324,6 +370,9 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateC
   if (config_.cloud_provider == kCloudProviderHuawei) {
     return CreateHuaweiCredentialsProvider();
   }
+  if (config_.cloud_provider == kCloudProviderVolcengine) {
+    return CreateVolcengineCredentialsProvider();
+  }
   return nullptr;
 }
 
@@ -336,6 +385,11 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateC
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateHuaweiCredentialsProvider() {
   return Aws::MakeShared<HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider>(
       "HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider");
+}
+
+std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateVolcengineCredentialsProvider() {
+  return Aws::MakeShared<VolcengineSTSAssumeRoleWebIdentityCredentialsProvider>(
+      "VolcengineSTSAssumeRoleWebIdentityCredentialsProvider", config_.load_frequency);
 }
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateAwsCredentialsProvider() {

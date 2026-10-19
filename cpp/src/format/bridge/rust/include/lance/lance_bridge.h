@@ -58,6 +58,10 @@ struct LanceIOStats {
 /// Storage options type for S3/cloud access (key-value pairs).
 using StorageOptions = std::unordered_map<std::string, std::string>;
 
+// Successful submission invokes the callback exactly once; failed submission never does.
+// Error text is borrowed during the callback. A successful result handle must be consumed once.
+using LanceAsyncCallback = void (*)(void*, uint64_t, const char*);
+
 /// Lance data storage format (file version)
 enum class LanceDataStorageFormat : uint8_t {
   Legacy = 0,  // Lance 0.1 format, data in data/
@@ -74,9 +78,22 @@ class BlockingDataset {
                                                               const StorageOptions& read_options,
                                                               uint64_t version = 0 /* 0 means latest snapshot */);
 
+  static arrow::Status OpenAsync(const std::string& uri,
+                                 const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+                                 const StorageOptions& read_options,
+                                 uint64_t version,
+                                 LanceAsyncCallback callback,
+                                 void* context);
+
   static arrow::Result<uint64_t> ResolveLatestVersion(const std::string& uri,
                                                       const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
                                                       const StorageOptions& read_options);
+
+  static arrow::Status ResolveLatestVersionAsync(const std::string& uri,
+                                                 const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+                                                 const StorageOptions& read_options,
+                                                 LanceAsyncCallback callback,
+                                                 void* context);
 
   static arrow::Result<std::vector<uint64_t>> WriteDataset(
       const std::string& uri,
@@ -89,6 +106,11 @@ class BlockingDataset {
                                   const StorageOptions& native_options = {});
 
   explicit BlockingDataset(rust::Box<ffi::BlockingDataset> impl) : impl_(std::move(impl)) {}
+
+  static std::shared_ptr<BlockingDataset> FromHandle(uint64_t handle) {
+    auto impl = ffi::take_dataset_handle(handle);
+    return std::make_shared<BlockingDataset>(std::move(impl));
+  }
 
   BlockingDataset(BlockingDataset&&) noexcept = default;
   BlockingDataset& operator=(BlockingDataset&&) noexcept = default;
@@ -108,6 +130,12 @@ class BlockingDataset {
 
   // Top-level dataset columns in schema order; returns NotImplemented when estimation is unavailable.
   arrow::Result<std::vector<uint64_t>> EstimateFragmentColumnMemory(uint64_t fragment_id) const;
+
+  arrow::Status EstimateFragmentColumnMemoryAsync(uint64_t fragment_id,
+                                                  LanceAsyncCallback callback,
+                                                  void* context) const;
+
+  static std::vector<uint64_t> TakeColumnMemoryResult(uint64_t handle);
 
   arrow::Result<uint64_t> EstimateFragmentMemory(uint64_t fragment_id) const;
 
@@ -141,7 +169,19 @@ class BlockingFragmentReader {
                                                                      uint64_t fragment_id,
                                                                      ArrowSchema& schema);
 
+  // Consumes schema before returning; the task retains its own dataset reference.
+  static arrow::Status OpenAsync(const BlockingDataset& dataset,
+                                 uint64_t fragment_id,
+                                 ArrowSchema& schema,
+                                 LanceAsyncCallback callback,
+                                 void* context);
+
   explicit BlockingFragmentReader(rust::Box<ffi::BlockingFragmentReader> impl) : impl_(std::move(impl)) {}
+
+  static std::unique_ptr<BlockingFragmentReader> FromHandle(uint64_t handle) {
+    auto impl = ffi::take_fragment_reader_handle(handle);
+    return std::make_unique<BlockingFragmentReader>(std::move(impl));
+  }
 
   BlockingFragmentReader(BlockingFragmentReader&&) noexcept = default;
   BlockingFragmentReader& operator=(BlockingFragmentReader&&) noexcept = default;
@@ -155,11 +195,29 @@ class BlockingFragmentReader {
 
   arrow::Result<ArrowArrayStream> TakeAsStream(const std::vector<int64_t>& indices, uint32_t batch_size);
 
+  // Writes a materialized stream before completion; callback value is unused.
+  // Output storage must remain valid until the callback returns.
+  arrow::Status TakeAsync(const std::vector<uint32_t>& indices,
+                          ArrowArrayStream* out_stream,
+                          LanceAsyncCallback callback,
+                          void* context);
+
   arrow::Result<ArrowArrayStream> ReadAllAsStream(uint32_t batch_size);
 
   arrow::Result<ArrowArrayStream> ReadRangesAsStream(uint32_t row_range_start,
                                                      uint32_t row_range_end,
                                                      uint32_t batch_size);
+
+  // Completes after all requested batches are materialized; ReadNext performs no I/O.
+  arrow::Status ReadRangesAsync(uint32_t row_range_start,
+                                uint32_t row_range_end,
+                                uint32_t batch_size,
+                                LanceAsyncCallback callback,
+                                void* context);
+
+  static void TakeRecordBatchStream(uint64_t handle, ArrowArrayStream& out_stream) {
+    ffi::take_record_batch_stream(handle, reinterpret_cast<uint8_t*>(&out_stream));
+  }
 
   private:
   rust::Box<ffi::BlockingFragmentReader> impl_;

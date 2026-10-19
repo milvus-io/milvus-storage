@@ -51,6 +51,7 @@ static arrow::Result<SegmentReaderConfig> ConvertReaderConfig(const LoonSegmentR
 
 LoonFFIResult loon_segment_reader_open(const char* segment_path,
                                        int64_t version,
+                                       const int64_t manifest_size,
                                        ArrowSchema* schema_raw,
                                        const char** needed_columns,
                                        int64_t num_columns,
@@ -94,7 +95,8 @@ LoonFFIResult loon_segment_reader_open(const char* segment_path,
     auto fs = std::move(fs_result).ValueOrDie();
 
     // open transaction to read manifest
-    auto txn_result = api::transaction::Transaction::Open(fs, segment_path, version, api::transaction::FailResolver, 1);
+    auto txn_result = api::transaction::Transaction::Open(fs, segment_path, version, manifest_size,
+                                                          api::transaction::FailResolver, 1);
     RETURN_ARROW_ERROR_IF(txn_result.status(), LOON_ARROW_ERROR, txn_result.status().ToString());
     auto txn = std::move(txn_result).ValueOrDie();
 

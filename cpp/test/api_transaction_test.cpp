@@ -100,6 +100,30 @@ class TransactionTest : public ::testing::Test {
   std::string base_path_;
 };
 
+TEST_F(TransactionTest, CommitReturnsManifestSize) {
+  ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+  transaction->AddDeltaLog({get_delta_filepath(base_path_, "delete"), DeltaLogType::PRIMARY_KEY, 7});
+  int64_t size = -1;
+  ASSERT_AND_ASSIGN(const auto version, transaction->Commit(&size));
+  ASSERT_AND_ASSIGN(auto info, fs_->GetFileInfo(get_manifest_filepath(base_path_, version)));
+  ASSERT_EQ(size, info.size());
+  ASSERT_GT(size, 0);
+  Manifest::CleanCache();
+  ASSERT_AND_ASSIGN(auto read, Transaction::Open(fs_, base_path_, version, size, FailResolver, 1));
+  ASSERT_AND_ASSIGN(auto manifest, read->GetManifest());
+  ASSERT_EQ(manifest->deltaLogs().size(), 1);
+  EXPECT_EQ(manifest->deltaLogs()[0].num_entries, 7);
+
+  size = -1;
+  EXPECT_FALSE(transaction->Commit(&size).ok());
+  EXPECT_EQ(size, -1);
+
+  // LATEST cannot use the size of a caller's previously observed version.
+  Manifest::CleanCache();
+  ASSERT_AND_ASSIGN(auto latest, Transaction::Open(fs_, base_path_, LATEST, 1, FailResolver, 1));
+  EXPECT_EQ(latest->GetReadVersion(), version);
+}
+
 TEST_F(TransactionTest, EmptyManifestTest) {
   // read latest manifest with empty directory
   {
@@ -384,7 +408,7 @@ TEST_F(TransactionTest, ConflictResolveOverwriteTest) {
   }
 
   // overwrite from 3
-  ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_, 3, OverwriteResolver));
+  ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_, 3, -1, OverwriteResolver));
   ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
   ASSERT_EQ(manifest->columnGroups().size(), 1);
   ASSERT_EQ(manifest->columnGroups()[0]->files.size(), 3);
@@ -426,7 +450,7 @@ TEST_F(TransactionTest, CommitSkipsUnusedLatestManifestReadForOverwrite) {
   }
 
   // Open at read_version=1 so a subsequent commit sees version drift (latest=2).
-  ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_, 1, OverwriteResolver));
+  ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_, 1, -1, OverwriteResolver));
 
   // Corrupt manifest-2.avro so any attempt to read it fails. The filename still
   // exists so get_latest_version() still reports 2 and the drift branch fires.
@@ -463,7 +487,7 @@ TEST_F(TransactionTest, CommitSkipsUnusedLatestManifestReadForFailOnDrift) {
     ASSERT_EQ(v, 2);
   }
 
-  ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_, 1, FailResolver));
+  ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_, 1, -1, FailResolver));
 
   Manifest::CleanCache();
   std::string manifest_2_path = get_manifest_filepath(base_path_, 2);

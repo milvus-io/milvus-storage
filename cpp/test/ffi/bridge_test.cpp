@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <limits>
 #include <sstream>
 #include <unordered_map>
 #include <random>
@@ -498,6 +499,96 @@ TEST_F(BridgeTest, ManifestDebugStringValid) {
   ASSERT_TRUE(result.find("file_size_bytes=1024") != std::string::npos);
 
   loon_manifest_destroy(cmanifest);
+}
+
+TEST_F(BridgeTest, DeserializeManifestRejectsUnrepresentableDeltaLogs) {
+  const std::vector<DeltaLog> unsupported = {
+      {"delete.log", DeltaLogType::POSITIONAL, 1},
+      {"delete.log", DeltaLogType::EQUALITY, 1},
+      {"delete.log", DeltaLogType::PRIMARY_KEY, -1},
+      {"delete.log", DeltaLogType::PRIMARY_KEY, static_cast<int64_t>(std::numeric_limits<uint32_t>::max()) + 1}};
+  for (const auto& delta : unsupported) {
+    const Manifest manifest({}, {delta});
+    std::ostringstream stream;
+    ASSERT_STATUS_OK(manifest.serialize(stream));
+    const auto bytes = stream.str();
+    LoonManifest* restored = nullptr;
+    auto result = loon_manifest_deserialize(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(), &restored);
+    EXPECT_EQ(result.err_code, loon_errcode_not_support) << result.message;
+    EXPECT_EQ(restored, nullptr);
+    loon_ffi_free_result(&result);
+    loon_manifest_destroy(restored);
+  }
+}
+
+TEST_F(BridgeTest, DeserializeManifestAcceptsMaximumDeltaEntryCount) {
+  const Manifest manifest({}, {{"delete.log", DeltaLogType::PRIMARY_KEY, std::numeric_limits<uint32_t>::max()}});
+  std::ostringstream stream;
+  ASSERT_STATUS_OK(manifest.serialize(stream));
+  const auto bytes = stream.str();
+  LoonManifest* restored = nullptr;
+  auto result = loon_manifest_deserialize(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(), &restored);
+  ASSERT_EQ(result.err_code, loon_errcode_success) << result.message;
+  std::unique_ptr<LoonManifest, decltype(&loon_manifest_destroy)> owned(restored, loon_manifest_destroy);
+  ASSERT_EQ(restored->delta_logs.num_delta_logs, 1);
+  EXPECT_STREQ(restored->delta_logs.delta_log_paths[0], "delete.log");
+  EXPECT_EQ(restored->delta_logs.delta_log_num_entries[0], std::numeric_limits<uint32_t>::max());
+}
+
+TEST_F(BridgeTest, LargeManifestSerializationRoundTrip) {
+  // Exceed the codec's stream buffer and default block sizes.
+  std::string metadata(128 * 1024, 'x');
+  for (size_t i = 0; i < metadata.size(); ++i) {
+    metadata[i] = static_cast<char>('!' + i % 90);
+  }
+  const char* stat_keys[] = {"bloom"};
+  const char* metadata_keys[] = {"payload"};
+  const char* metadata_values[] = {metadata.c_str()};
+  const char** stat_metadata_keys[] = {metadata_keys};
+  const char** stat_metadata_values[] = {metadata_values};
+  const char** stat_files[] = {nullptr};
+  uint32_t file_counts[] = {0};
+  uint32_t metadata_counts[] = {1};
+  LoonManifest manifest{};
+  manifest.stats = {stat_keys, stat_files, file_counts, stat_metadata_keys, stat_metadata_values, metadata_counts, 1};
+  uint8_t* data = nullptr;
+  size_t size = 0;
+  auto result = loon_manifest_serialize(&manifest, &data, &size);
+  ASSERT_EQ(result.err_code, loon_errcode_success) << result.message;
+  std::unique_ptr<uint8_t, decltype(&loon_manifest_free_buffer)> owned_data(data, loon_manifest_free_buffer);
+  ASSERT_GT(size, metadata.size());
+  LoonManifest* restored = nullptr;
+  result = loon_manifest_deserialize(data, size, &restored);
+  ASSERT_EQ(result.err_code, loon_errcode_success) << result.message;
+  std::unique_ptr<LoonManifest, decltype(&loon_manifest_destroy)> owned_manifest(restored, loon_manifest_destroy);
+  owned_data.reset();
+  ASSERT_EQ(restored->stats.num_stats, 1);
+  ASSERT_EQ(restored->stats.stat_metadata_counts[0], 1);
+  EXPECT_STREQ(restored->stats.stat_metadata_keys[0][0], "payload");
+  EXPECT_EQ(std::string(restored->stats.stat_metadata_values[0][0]), metadata);
+}
+
+TEST_F(BridgeTest, DeserializeLegacyManifestBytes) {
+  // Raw MILV v1: empty column groups, one PRIMARY_KEY delta (7 entries),
+  // and one legacy stat with a file path and no metadata map.
+  const uint8_t bytes[] = {0xac, 0xb1, 0xca, 0xd4, 0x09, 0x02, 0x00, 0x02, 0x14, 'd',  'e',  'l', 'e', 't',
+                           'e',  '.',  'l',  'o',  'g',  0x00, 0x0e, 0x00, 0x02, 0x08, 'r',  'o', 'w', 's',
+                           0x02, 0x10, 's',  't',  'a',  't',  '.',  'b',  'i',  'n',  0x00, 0x00};
+  LoonManifest* restored = nullptr;
+  auto result = loon_manifest_deserialize(bytes, sizeof(bytes), &restored);
+  ASSERT_EQ(result.err_code, loon_errcode_success) << result.message;
+  std::unique_ptr<LoonManifest, decltype(&loon_manifest_destroy)> owned(restored, loon_manifest_destroy);
+  EXPECT_EQ(restored->column_groups.num_of_column_groups, 0);
+  ASSERT_EQ(restored->delta_logs.num_delta_logs, 1);
+  EXPECT_STREQ(restored->delta_logs.delta_log_paths[0], "delete.log");
+  EXPECT_EQ(restored->delta_logs.delta_log_num_entries[0], 7);
+  ASSERT_EQ(restored->stats.num_stats, 1);
+  EXPECT_STREQ(restored->stats.stat_keys[0], "rows");
+  ASSERT_EQ(restored->stats.stat_file_counts[0], 1);
+  EXPECT_STREQ(restored->stats.stat_files[0][0], "stat.bin");
+  EXPECT_EQ(restored->stats.stat_metadata_counts[0], 0);
+  EXPECT_EQ(restored->indexes.num_indexes, 0);
+  EXPECT_EQ(restored->lob_files.num_files, 0);
 }
 
 }  // namespace milvus_storage::test

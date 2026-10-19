@@ -157,10 +157,7 @@ static arrow::Result<std::string> GetCloudUriScheme(const std::string& provider)
   if (provider == kCloudProviderAliyun) {
     return "oss";
   }
-  if (provider == kCloudProviderTencent || provider == kCloudProviderHuawei) {
-    return arrow::Status::Invalid("Lance does not support cloud provider: " + provider);
-  }
-  return arrow::Status::Invalid("Unknown cloud provider: " + provider);
+  return arrow::Status::Invalid("Lance does not support cloud provider: " + provider);
 }
 
 arrow::Result<std::string> BuildLanceBaseUri(const ArrowFileSystemConfig& config, const std::string& relative_path) {

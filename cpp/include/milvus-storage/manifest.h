@@ -212,31 +212,38 @@ class Manifest final {
    * @brief Read a manifest from filesystem, using cache for immutable manifests.
    * @param fs Arrow filesystem (must be FileSystemProxy wrapping SubTreeFileSystem)
    * @param path Path to the manifest file (relative to fs root)
+   * @param manifest_size Exact file size in bytes, or a non-positive value if unknown.
+   *        A known size avoids the filesystem metadata request (HEAD on S3).
    * @return Shared pointer to the deserialized manifest
    */
   static arrow::Result<std::shared_ptr<Manifest>> ReadFrom(const milvus_storage::ArrowFileSystemPtr& fs,
-                                                           const std::string& path);
+                                                           const std::string& path,
+                                                           int64_t manifest_size = -1);
 
   /**
    * @brief Write a manifest to filesystem. Always uses conditional write (fails if file exists).
    * @param fs Arrow filesystem (must be FileSystemProxy wrapping SubTreeFileSystem)
    * @param path Path to write the manifest file
    * @param manifest Manifest to write
+   * @param out_manifest_size Optional output size in bytes, written only on success
    * @return Status (AlreadyExists if file already exists)
    */
   static arrow::Status WriteTo(const milvus_storage::ArrowFileSystemPtr& fs,
                                const std::string& path,
-                               const Manifest& manifest);
+                               const Manifest& manifest,
+                               int64_t* out_manifest_size = nullptr);
 
   /**
    * @brief Clean the manifest cache
    */
   static void CleanCache();
 
-  private:
+  // Raw stream codecs used by the backup/restore FFI. They do not normalize paths
+  // or provide transaction-safe reads and commits.
   [[nodiscard]] arrow::Status serialize(std::ostream& output_stream) const;
   arrow::Status deserialize(std::istream& input_stream);
 
+  private:
   void deserializeLegacy(std::istream& input_stream);
 
   [[nodiscard]] Manifest toRelativePaths(const std::string& base_path) const;

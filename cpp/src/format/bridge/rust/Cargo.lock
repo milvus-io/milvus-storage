@@ -7124,9 +7124,7 @@ dependencies = [
  "snafu 0.9.1",
  "sqlparser 0.55.0",
  "take_mut",
- "talon-cache-client",
  "talon-rust-client",
- "talon-transport",
  "tempfile",
  "tokio",
  "typetag",
@@ -7995,7 +7993,7 @@ checksum = "f764005d11ee5f36500a149ace24e00e3da98b0158b3e2d53a7495660d3f4d60"
 [[package]]
 name = "talon-cache-client"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=c85bbc294874d146fab9f1e41f9ac7a9f4035cc3#c85bbc294874d146fab9f1e41f9ac7a9f4035cc3"
+source = "git+https://github.com/milvus-io/talon.git?rev=c6ba5c97d09c2cec2d58eebec3c7d661521bb99b#c6ba5c97d09c2cec2d58eebec3c7d661521bb99b"
 dependencies = [
  "bytes",
  "futures",
@@ -8010,7 +8008,7 @@ dependencies = [
 [[package]]
 name = "talon-core"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=c85bbc294874d146fab9f1e41f9ac7a9f4035cc3#c85bbc294874d146fab9f1e41f9ac7a9f4035cc3"
+source = "git+https://github.com/milvus-io/talon.git?rev=c6ba5c97d09c2cec2d58eebec3c7d661521bb99b#c6ba5c97d09c2cec2d58eebec3c7d661521bb99b"
 dependencies = [
  "async-trait",
  "bytes",
@@ -8028,7 +8026,7 @@ dependencies = [
 [[package]]
 name = "talon-rust-client"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=c85bbc294874d146fab9f1e41f9ac7a9f4035cc3#c85bbc294874d146fab9f1e41f9ac7a9f4035cc3"
+source = "git+https://github.com/milvus-io/talon.git?rev=c6ba5c97d09c2cec2d58eebec3c7d661521bb99b#c6ba5c97d09c2cec2d58eebec3c7d661521bb99b"
 dependencies = [
  "futures",
  "talon-cache-client",
@@ -8036,12 +8034,13 @@ dependencies = [
  "talon-telemetry",
  "talon-transport",
  "thiserror 2.0.17",
+ "tokio",
 ]
 
 [[package]]
 name = "talon-telemetry"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=c85bbc294874d146fab9f1e41f9ac7a9f4035cc3#c85bbc294874d146fab9f1e41f9ac7a9f4035cc3"
+source = "git+https://github.com/milvus-io/talon.git?rev=c6ba5c97d09c2cec2d58eebec3c7d661521bb99b#c6ba5c97d09c2cec2d58eebec3c7d661521bb99b"
 dependencies = [
  "pin-project-lite",
  "scoped-tls",
@@ -8052,7 +8051,7 @@ dependencies = [
 [[package]]
 name = "talon-transport"
 version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=c85bbc294874d146fab9f1e41f9ac7a9f4035cc3#c85bbc294874d146fab9f1e41f9ac7a9f4035cc3"
+source = "git+https://github.com/milvus-io/talon.git?rev=c6ba5c97d09c2cec2d58eebec3c7d661521bb99b#c6ba5c97d09c2cec2d58eebec3c7d661521bb99b"
 dependencies = [
  "anyhow",
  "bincode",

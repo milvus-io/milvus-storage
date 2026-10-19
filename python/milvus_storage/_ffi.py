@@ -360,9 +360,9 @@ _ffi.cdef(
     void loon_async_context_destroy(LoonAsyncContextHandle);
     typedef struct { uint64_t timeout_ms; struct LoonAsyncOperation* internal; } LoonAsyncHandle;
     typedef void (*LoonTransactionOpenCallback)(uintptr_t, LoonFFIResult, LoonTransactionHandle);
-    LoonFFIResult loon_transaction_open_async(LoonAsyncContextHandle, const char*, const LoonProperties*, int64_t, int32_t,
-        uint32_t, LoonTransactionOpenCallback, uintptr_t, LoonAsyncHandle*);
-    typedef void (*LoonTransactionCommitCallback)(uintptr_t, LoonFFIResult, int32_t, int64_t);
+    LoonFFIResult loon_transaction_open_async(LoonAsyncContextHandle, const char*, const LoonProperties*, int64_t, int64_t,
+        int32_t, uint32_t, LoonTransactionOpenCallback, uintptr_t, LoonAsyncHandle*);
+    typedef void (*LoonTransactionCommitCallback)(uintptr_t, LoonFFIResult, int32_t, int64_t, int64_t);
     LoonFFIResult loon_transaction_commit_async(LoonAsyncContextHandle, LoonTransactionHandle,
         LoonTransactionCommitCallback, uintptr_t, LoonAsyncHandle*);
     void loon_async_cancel(LoonAsyncHandle*);
@@ -371,6 +371,7 @@ _ffi.cdef(
     LoonFFIResult loon_transaction_open(const char* base_path,
                                          const LoonProperties* properties,
                                          int64_t read_version,
+                                         int64_t manifest_size,
                                          int32_t resolve_id,
                                          uint32_t retry_limit,
                                          LoonTransactionHandle* out_handle);
@@ -379,7 +380,8 @@ _ffi.cdef(
 
     LoonFFIResult loon_transaction_get_read_version(LoonTransactionHandle handle, int64_t* out_read_version);
 
-    LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out_committed_version);
+    LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out_committed_version,
+                                          int64_t* out_manifest_size);
 
     void loon_transaction_destroy(LoonTransactionHandle handle);
 

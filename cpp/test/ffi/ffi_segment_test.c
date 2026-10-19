@@ -113,7 +113,7 @@ static void assert_stream_first_batch(struct ArrowArrayStream* stream, int64_t e
   out_array.release(&out_array);
 }
 
-static void create_committed_segment(LoonProperties* pp) {
+static void create_committed_segment(LoonProperties* pp, int64_t* manifest_size) {
   LoonFFIResult rc;
   LoonSegmentWriterHandle writer = 0;
   LoonTransactionHandle txn = 0;
@@ -145,7 +145,7 @@ static void create_committed_segment(LoonProperties* pp) {
   ck_assert_int_eq(output.rows_written, 5);
   ck_assert(output.column_groups != NULL);
 
-  rc = loon_transaction_open(SEGMENT_TEST_BASE_PATH, pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &txn);
+  rc = loon_transaction_open(SEGMENT_TEST_BASE_PATH, pp, -1, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &txn);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   rc = loon_transaction_append_files(txn, output.column_groups);
@@ -156,7 +156,7 @@ static void create_committed_segment(LoonProperties* pp) {
     ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   }
 
-  rc = loon_transaction_commit(txn, &committed_version);
+  rc = loon_transaction_commit(txn, &committed_version, manifest_size);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   ck_assert_int_gt(committed_version, 0);
 
@@ -189,10 +189,13 @@ static void test_segment_writer_reader_basic(void) {
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   clean_segment_test_path(&pp);
-  create_committed_segment(&pp);
+  int64_t manifest_size = -1;
+  create_committed_segment(&pp, &manifest_size);
+  ck_assert_int_gt(manifest_size, 0);
 
   schema = create_test_struct_schema();
-  rc = loon_segment_reader_open(SEGMENT_TEST_BASE_PATH, -1, schema, needed_columns, 3, &reader_config, &pp, &reader);
+  rc = loon_segment_reader_open(SEGMENT_TEST_BASE_PATH, 1, manifest_size, schema, needed_columns, 3, &reader_config,
+                                &pp, &reader);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   release_schema(schema);
 
@@ -255,7 +258,7 @@ static void test_segment_error_handling(void) {
   loon_segment_writer_destroy(0);
   loon_segment_write_output_free(NULL);
 
-  rc = loon_segment_reader_open(NULL, -1, NULL, NULL, 0, NULL, NULL, NULL);
+  rc = loon_segment_reader_open(NULL, -1, -1, NULL, NULL, 0, NULL, NULL, NULL);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 

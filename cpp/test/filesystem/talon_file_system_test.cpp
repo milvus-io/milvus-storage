@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <future>
 #include <limits>
@@ -28,12 +29,15 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
 
+#include <arpa/inet.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <arrow/api.h>
@@ -55,7 +59,118 @@
 #include "milvus-storage/writer.h"
 #include "test_env.h"
 
+namespace milvus_storage::talon::internal {
+arrow::Result<int64_t> ToArrowIoResult(const char* operation,
+                                       int32_t error_code,
+                                       uint64_t value,
+                                       const char* error_msg);
+}
+
 namespace milvus_storage::test {
+
+class TalonCallbackDeathTest : public ::testing::TestWithParam<bool> {};
+
+TEST_P(TalonCallbackDeathTest, ThrowingContinuationDoesNotRetryCompletion) {
+  const auto original_death_test_style = GTEST_FLAG_GET(death_test_style);
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      {
+        ::alarm(10);
+        const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (listener < 0)
+          std::_Exit(1);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t address_size = sizeof(address);
+        if (::bind(listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0 ||
+            ::listen(listener, 1) != 0 ||
+            ::getsockname(listener, reinterpret_cast<sockaddr*>(&address), &address_size) != 0) {
+          std::_Exit(1);
+        }
+        const auto client =
+            talon::TalonClient::Make("127.0.0.1:" + std::to_string(ntohs(address.sin_port)), 8388608, 8);
+        if (!client.ok())
+          std::_Exit(1);
+        const bool raw_stat = GetParam();
+        uint8_t output = 0;
+        // Only an exception escaping completion should reach these handlers.
+        if (raw_stat) {
+          (*client)->StatAsync("s3://bucket/key").AddCallback([](const arrow::Result<talon::TalonObjectStat>&) {
+            std::set_terminate([] { std::_Exit(86); });
+            throw std::runtime_error("Talon consumer callback failed");
+          });
+        } else {
+          (*client)->ReadAsync("s3://bucket/key", 0, 1, &output).AddCallback([](const arrow::Result<int64_t>&) {
+            std::set_terminate([] { std::_Exit(86); });
+            throw 42;
+          });
+        }
+        // Hold the RPC open until the continuation is registered, then fail it.
+        const int connection = ::accept(listener, nullptr, nullptr);
+        if (connection < 0)
+          std::_Exit(1);
+        ::close(listener);
+        ::close(connection);
+        // The old catch-and-retry path silently survives until the alarm fires.
+        for (;;) ::pause();
+      },
+      ::testing::ExitedWithCode(86), "");
+  GTEST_FLAG_SET(death_test_style, original_death_test_style);
+}
+
+INSTANTIATE_TEST_SUITE_P(Bridge, TalonCallbackDeathTest, ::testing::Bool());
+
+TEST(TalonRawBridgeTest, PropertiesNeedOnlyClientConfiguration) {
+  api::Properties properties;
+  properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
+  properties[PROPERTY_FS_TALON_BLOCK_SIZE] = uint32_t{8388608};
+  properties[PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR] = uint32_t{8};
+  ASSERT_TRUE(talon::TalonClient::Make(properties).ok());
+}
+
+TEST(TalonRawBridgeTest, EmptyOperationsDoNotContactCoordinator) {
+  ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make("127.0.0.1:1", 8388608, 8));
+  uint8_t output = 0x7f;
+  ASSERT_AND_ASSIGN(const auto read, client->Read("s3://bucket/empty", 0, 1, &output, talon::TalonObjectStat{0, ""}));
+  EXPECT_EQ(read, 0);
+  EXPECT_EQ(output, 0x7f);
+  ASSERT_AND_ASSIGN(const auto load, client->Load({"s3://bucket/empty", 0, ""}));
+  EXPECT_EQ(load.size, 0);
+  EXPECT_EQ(load.blocks, 0);
+  ASSERT_AND_ASSIGN(const auto batch, client->BatchLoad({}));
+  EXPECT_TRUE(batch.status.ok());
+  EXPECT_TRUE(batch.results.empty());
+  EXPECT_TRUE(batch.failed_files.empty());
+}
+
+TEST(TalonRawBridgeTest, ValidatesRawInputsBeforeNetworkIO) {
+  ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make("127.0.0.1:1", 8388608, 8));
+  uint8_t output = 0x7f;
+  EXPECT_TRUE(client->Stat("invalid").status().IsInvalid());
+  EXPECT_TRUE(client->Read("invalid", 0, 0, nullptr).status().IsInvalid());
+  EXPECT_TRUE(client->Read("s3://bucket/key", 0, 1, nullptr).status().IsInvalid());
+  EXPECT_TRUE(client->Read("s3://bucket/key", 0, UINT64_MAX, &output).status().IsInvalid());
+  EXPECT_TRUE(client->Read("s3://bucket/key", UINT64_MAX, 1, &output).status().IsInvalid());
+  EXPECT_TRUE(client->Load({"invalid", 0, ""}).status().IsInvalid());
+  EXPECT_TRUE(client->Load({"s3://bucket/key", UINT64_MAX, ""}).status().IsInvalid());
+  const auto batch = client->BatchLoad({{"s3://bucket/key", 0, ""}, {"invalid", 0, ""}});
+  ASSERT_TRUE(batch.ok()) << batch.status();
+  EXPECT_TRUE(batch->status.IsInvalid()) << batch->status;
+  EXPECT_TRUE(batch->results.empty());
+  EXPECT_TRUE(batch->failed_files.empty());
+  EXPECT_EQ(output, 0x7f);
+}
+
+TEST(TalonRawBridgeTest, InvalidConfigurationPreservesDiagnostic) {
+  api::Properties properties;
+  properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
+  properties[PROPERTY_FS_TALON_BLOCK_SIZE] = uint32_t{0};
+  properties[PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR] = uint32_t{8};
+  const auto result = talon::TalonClient::Make(properties);
+  ASSERT_FALSE(result.ok());
+  EXPECT_NE(result.status().message().find("block_size"), std::string::npos) << result.status();
+}
 
 namespace {
 
@@ -284,6 +399,7 @@ class RecordingFileSystem final : public arrow::fs::LocalFileSystem, public Obse
   }
 
   arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const arrow::fs::FileInfo& info) override {
+    last_input_size = info.size();
     return OpenInputFile(info.path());
   }
 
@@ -292,6 +408,7 @@ class RecordingFileSystem final : public arrow::fs::LocalFileSystem, public Obse
   arrow::Status input_open_status;
   int input_open_calls = 0;
   std::string last_input_path;
+  std::atomic<int64_t> last_input_size{-1};
 
   int synchronous_listing_calls() const { return synchronous_listing_calls_; }
   int generator_calls() const { return generator_calls_; }
@@ -362,6 +479,10 @@ class TalonIntegrationTest : public ::testing::Test {
 
   void TearDown() override {
     if (fs_ != nullptr) {
+      // Let request traces distinguish read-path HEADs from cleanup's existence checks.
+      RecordProperty("read_phase_end_unix_ns", std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                  std::chrono::system_clock::now().time_since_epoch())
+                                                                  .count()));
       (void)fs_->DeleteFile(path_);
       (void)fs_->DeleteDir(parquet_path_);
       FilesystemCache::getInstance().clean();
@@ -954,6 +1075,13 @@ TEST(TalonBridgeTest, MapsOpenErrorAndPreservesTalonMessage) {
   EXPECT_NE(result.status().message().find("bucket and object key must be non-empty"), std::string::npos);
 }
 
+TEST(TalonBridgeTest, OpensVolcengineObjectWithKnownMetadata) {
+  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make("127.0.0.1:7000", 8U * 1024U * 1024U, 8));
+  ASSERT_AND_ASSIGN(auto reader,
+                    client->OpenObject("volcengine", "test-bucket", "path/a", talon::TalonObjectStat{7, "etag"}));
+  EXPECT_EQ(reader.KnownSize(), 7);
+}
+
 TEST(TalonBridgeTest, MapsAsyncErrorAndPreservesTalonMessage) {
   ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make("127.0.0.1:7000", 8U * 1024U * 1024U, 8));
   ASSERT_AND_ASSIGN(auto reader, client->OpenObject("aws", "test-bucket", "path/a", talon::TalonObjectStat{0, ""}));
@@ -1161,7 +1289,6 @@ TEST_F(TalonFileSystemServiceFreeTest, CachesObjectMetadataAcrossOpens) {
   second_origin->metadata_result = metadata_error;
   origin->input_file = second_origin;
   arrow::fs::FileInfo info("prefix/object", arrow::fs::FileType::File);
-  info.set_size(99);
   ASSERT_AND_ASSIGN(auto second, fs->OpenInputFile(info));
   ASSERT_AND_ASSIGN(const auto cached_size, second->GetSize());
   EXPECT_EQ(cached_size, 7);
@@ -1317,12 +1444,51 @@ TEST_F(TalonFileSystemServiceFreeTest, OpenWithFileInfoAcceptsFileAndUnknown) {
       origin->input_file = std::make_shared<MetadataInputFile>();
       ASSERT_AND_ASSIGN(auto stream, fs->OpenInputStream(info));
       ASSERT_AND_ASSIGN(const auto known_size, file->GetSize());
-      EXPECT_EQ(known_size, 7);
+      EXPECT_EQ(known_size, size >= 0 ? size : 7);
       ASSERT_STATUS_OK(file->Close());
       ASSERT_STATUS_OK(stream->Close());
     }
   }
   EXPECT_EQ(origin->input_open_calls, 12);
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, KnownSizeSkipsMetadataAndReachesOrigin) {
+  for (const auto type : {arrow::fs::FileType::File, arrow::fs::FileType::Unknown}) {
+    for (const int64_t size : {0, 7}) {
+      SCOPED_TRACE(::testing::Message() << "type=" << static_cast<int>(type) << ", size=" << size);
+      auto origin = std::make_shared<RecordingFileSystem>("origin");
+      origin->input_file = std::make_shared<MetadataInputFile>(size);
+      origin->input_file->metadata_result = arrow::Status::IOError("HEAD must not be called");
+      auto config = Config();
+      config.talon_coordinator = "127.0.0.1:0";
+      ASSERT_AND_ASSIGN(auto fs, Wrap(config, origin));
+      arrow::fs::FileInfo info("prefix/object", type);
+      info.set_size(size);
+      ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile(info));
+      EXPECT_EQ(origin->last_input_size.load(), size);
+      EXPECT_EQ(origin->last_input_path, "test-bucket/prefix/object");
+      ASSERT_AND_ASSIGN(const auto known_size, file->GetSize());
+      EXPECT_EQ(known_size, size);
+      auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(file.get());
+      ASSERT_NE(async_file, nullptr);
+      ASSERT_AND_ASSIGN(const auto async_size, async_file->GetSizeAsync().result());
+      EXPECT_EQ(async_size, size);
+      ASSERT_AND_ASSIGN(const auto buffer, file->ReadAsync({}, 0, 16).result());
+      EXPECT_EQ(buffer->ToString(), size == 0 ? "" : "payload");
+      EXPECT_EQ(origin->input_file->metadata_read_calls, 0);
+      EXPECT_EQ(origin->input_file->async_metadata_read_calls.load(), 0);
+      ASSERT_STATUS_OK(file->Close());
+
+      origin->input_file = std::make_shared<MetadataInputFile>(size);
+      origin->input_file->metadata_result = arrow::Status::IOError("HEAD must not be called");
+      ASSERT_AND_ASSIGN(auto stream, fs->OpenInputStream(info));
+      ASSERT_AND_ASSIGN(const auto bytes, stream->Read(16));
+      EXPECT_EQ(bytes->ToString(), size == 0 ? "" : "payload");
+      EXPECT_EQ(origin->input_file->metadata_read_calls, 0);
+      EXPECT_EQ(origin->input_file->async_metadata_read_calls.load(), 0);
+      ASSERT_STATUS_OK(stream->Close());
+    }
+  }
 }
 
 TEST_F(TalonFileSystemServiceFreeTest, EquivalentTalonFilesystemsCompareEqualSymmetrically) {
@@ -1656,12 +1822,17 @@ TEST_F(TalonFileSystemServiceFreeTest, TalonOpenFailureDoesNotFallBack) {
     SCOPED_TRACE(known_size);
     origin->input_file = std::make_shared<MetadataInputFile>();
     const auto opens_before = origin->input_open_calls;
-    ASSERT_AND_ASSIGN(auto file, known_size ? fs->OpenInputFile(info) : fs->OpenInputFile("prefix/object"));
-    const auto result = file->GetSize();
-    ASSERT_FALSE(result.ok());
-    EXPECT_NE(result.status().message().find("Talon does not support cloud provider"), std::string::npos);
+    const auto result = known_size ? fs->OpenInputFile(info) : fs->OpenInputFile("prefix/object");
+    // A known size initializes the Talon reader immediately; unknown sizes
+    // still defer initialization until the first metadata-dependent request.
+    EXPECT_EQ(result.ok(), !known_size);
+    const auto status = result.ok() ? result.ValueOrDie()->GetSize().status() : result.status();
+    ASSERT_FALSE(status.ok());
+    EXPECT_NE(status.message().find("Talon does not support cloud provider"), std::string::npos);
     EXPECT_EQ(origin->input_open_calls, opens_before + 1);
-    EXPECT_FALSE(file->ReadAsync(0, 1).result().ok());
+    if (result.ok()) {
+      EXPECT_FALSE(result.ValueOrDie()->ReadAsync(0, 1).result().ok());
+    }
   }
   ASSERT_AND_ASSIGN(const auto metrics, FindMetricsSource(fs, kTalonMetricsSource));
   ASSERT_NE(metrics, nullptr);
@@ -2069,7 +2240,6 @@ TEST_P(TalonCloudMetadataTest, ReadsETagAndReusesMetadataWithoutOriginRequests) 
   talon_config.talon_coordinator = "127.0.0.1:1";
   ASSERT_AND_ASSIGN(auto talon_fs, CreateArrowFileSystem(talon_config));
   arrow::fs::FileInfo info(path_, arrow::fs::FileType::File);
-  info.set_size(9999);
   ASSERT_AND_ASSIGN(auto talon_file, talon_fs->OpenInputFile(info));
   ASSERT_AND_ASSIGN(const auto talon_size, talon_file->GetSize());
   EXPECT_EQ(talon_size, size);
@@ -2135,13 +2305,118 @@ TEST_F(TalonIntegrationTest, EvictionReadsReplacementAtSamePath) {
   ASSERT_STATUS_OK(reopened->Close());
 }
 
+TEST_F(TalonIntegrationTest, RawPrewarmThenNormalReader) {
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties_));
+  const std::string scheme = config.cloud_provider == kCloudProviderAzure ? "az" : "s3";
+  const std::string uri = scheme + "://" + config.bucket_name + "/" + path_;
+  RecordProperty("raw_uri", uri);
+  RecordProperty("object_path", path_);
+  ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make(properties_));
+  RecordProperty("prewarm_start_unix_ns", std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                             std::chrono::system_clock::now().time_since_epoch())
+                                                             .count()));
+  // Normal known-size readers use the unchecked cache identity, so prewarm must match it.
+  ASSERT_AND_ASSIGN(const auto load, client->Load({uri, expected_.size(), ""}));
+  ASSERT_EQ(load.size, expected_.size());
+  RecordProperty("prewarm_end_unix_ns", std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                           std::chrono::system_clock::now().time_since_epoch())
+                                                           .count()));
+  ASSERT_AND_ASSIGN(const auto metrics, FindMetricsSource(fs_, kTalonMetricsSource));
+  ASSERT_NE(metrics, nullptr);
+  const auto before = metrics->GetSnapshot();
+  RecordProperty("read_phase_start_unix_ns", std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                std::chrono::system_clock::now().time_since_epoch())
+                                                                .count()));
+  arrow::fs::FileInfo info(path_, arrow::fs::FileType::File);
+  info.set_size(static_cast<int64_t>(expected_.size()));
+  ASSERT_AND_ASSIGN(auto file, fs_->OpenInputFile(info));
+  ASSERT_AND_ASSIGN(const auto data, file->ReadAt(0, info.size()));
+  ASSERT_EQ(data->size(), info.size());
+  EXPECT_EQ(std::memcmp(data->data(), expected_.data(), expected_.size()), 0);
+  EXPECT_EQ(metrics->GetReadCount() - before.read_count, 1);
+  EXPECT_EQ(metrics->GetReadBytes() - before.read_bytes, expected_.size());
+  EXPECT_EQ(metrics->GetFailedCount() - before.failed_count, 0);
+  ASSERT_STATUS_OK(file->Close());
+  RecordProperty("read_phase_end_unix_ns", std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                              std::chrono::system_clock::now().time_since_epoch())
+                                                              .count()));
+}
+
+TEST_F(TalonIntegrationTest, RawPrewarmReadAndPartialFailure) {
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties_));
+  const std::string scheme = config.cloud_provider == kCloudProviderAzure ? "az" : "s3";
+  const std::string uri = scheme + "://" + config.bucket_name + "/" + path_;
+  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make(properties_));
+  ASSERT_AND_ASSIGN(const auto stat, client->Stat(uri));
+  EXPECT_EQ(stat.size, expected_.size());
+  ASSERT_FALSE(stat.version.empty());
+  ASSERT_AND_ASSIGN(const auto load, client->Load({uri, stat.size, stat.version}));
+  EXPECT_EQ(load.size, expected_.size());
+  EXPECT_EQ(load.blocks, 1);
+  ASSERT_AND_ASSIGN(const auto unchecked, client->Load({uri, stat.size, ""}));
+  EXPECT_EQ(unchecked.size, expected_.size());
+  std::vector<uint8_t> output(expected_.size());
+  ASSERT_AND_ASSIGN(const auto read, client->Read(uri, 0, output.size(), output.data(), stat));
+  EXPECT_EQ(read, expected_.size());
+  EXPECT_EQ(output, expected_);
+
+  const auto failed = client->Load({uri, stat.size, "missing-version"});
+  ASSERT_FALSE(failed.ok());
+  const auto failed_detail = ExtendStatusDetail::UnwrapStatus(failed.status());
+  ASSERT_NE(failed_detail, nullptr) << failed.status();
+  EXPECT_EQ(failed_detail->code(), ExtendStatusCode::AwsErrorNonRetryable);
+  EXPECT_NE(failed.status().message().find("worker"), std::string::npos) << failed.status();
+  EXPECT_NE(failed.status().message().find("offset"), std::string::npos) << failed.status();
+  ASSERT_AND_ASSIGN(const auto partial, client->BatchLoad({{uri, stat.size, stat.version},
+                                                           {uri, stat.size, "missing-version"},
+                                                           {uri, 0, ""},
+                                                           {uri, stat.size, "another-missing-version"}}));
+  EXPECT_FALSE(partial.status.ok());
+  const auto partial_detail = ExtendStatusDetail::UnwrapStatus(partial.status);
+  ASSERT_NE(partial_detail, nullptr) << partial.status;
+  EXPECT_EQ(partial_detail->code(), ExtendStatusCode::AwsErrorNonRetryable);
+  EXPECT_NE(partial.status.message().find("batch load incomplete for 2 file(s):"), std::string::npos) << partial.status;
+  EXPECT_NE(partial.status.message().find("worker"), std::string::npos) << partial.status;
+  EXPECT_TRUE(partial.results.empty());
+  ASSERT_EQ(partial.failed_files.size(), 2);
+  EXPECT_EQ(partial.failed_files[0].index, 1);
+  EXPECT_EQ(partial.failed_files[1].index, 3);
+  EXPECT_FALSE(partial.failed_files[0].uncertain);
+  EXPECT_FALSE(partial.failed_files[1].uncertain);
+  EXPECT_FALSE(partial.failed_files[0].error.empty());
+  EXPECT_FALSE(partial.failed_files[1].error.empty());
+
+  // Requests and client ownership can disappear immediately after submission.
+  arrow::Future<talon::TalonBatchLoadResult> batch;
+  {
+    std::vector<talon::TalonLoadRequest> requests{
+        {uri, stat.size, stat.version}, {uri, 0, ""}, {uri, stat.size, stat.version}};
+    batch = client->BatchLoadAsync(requests);
+  }
+  auto read_future = client->ReadAsync(uri, 4096, 8192, output.data());
+  client.reset();
+  // Drain both operations before assertions release the caller-owned buffer.
+  read_future.Wait();
+  batch.Wait();
+  ASSERT_AND_ASSIGN(const auto copied_batch, batch.result());
+  ASSERT_TRUE(copied_batch.status.ok()) << copied_batch.status;
+  ASSERT_EQ(copied_batch.results.size(), 3);
+  EXPECT_EQ(copied_batch.results[0].size, expected_.size());
+  EXPECT_EQ(copied_batch.results[1].size, 0);
+  EXPECT_EQ(copied_batch.results[1].blocks, 0);
+  EXPECT_EQ(copied_batch.results[2].size, expected_.size());
+  ASSERT_AND_ASSIGN(const auto copied_read, read_future.result());
+  EXPECT_EQ(copied_read, 8192);
+  EXPECT_TRUE(std::equal(output.begin(), output.begin() + 8192, expected_.begin() + 4096));
+}
+
 TEST_F(TalonIntegrationTest, OpenWithKnownSize) {
   ASSERT_AND_ASSIGN(const auto metrics, FindMetricsSource(fs_, kTalonMetricsSource));
   ASSERT_NE(metrics, nullptr);
   const auto before = metrics->GetSnapshot();
-  ASSERT_AND_ASSIGN(const auto info, fs_->GetFileInfo(path_));
-  ASSERT_EQ(info.type(), arrow::fs::FileType::File);
-  ASSERT_EQ(info.size(), static_cast<int64_t>(expected_.size()));
+  // Supply the writer-known size so this test does not issue a HEAD itself.
+  arrow::fs::FileInfo info(path_, arrow::fs::FileType::File);
+  info.set_size(static_cast<int64_t>(expected_.size()));
   ASSERT_AND_ASSIGN(auto file, fs_->OpenInputFile(info));
   ASSERT_AND_ASSIGN(const auto size, file->GetSize());
   EXPECT_EQ(size, static_cast<int64_t>(expected_.size()));
@@ -2159,6 +2434,9 @@ TEST_F(TalonIntegrationTest, OpenWithKnownSize) {
 }
 
 TEST_F(TalonIntegrationTest, OpenWithoutKnownSize) {
+  ASSERT_AND_ASSIGN(const auto metrics, FindMetricsSource(fs_, kTalonMetricsSource));
+  ASSERT_NE(metrics, nullptr);
+  const auto before = metrics->GetSnapshot();
   ASSERT_AND_ASSIGN(auto file, fs_->OpenInputFile(path_));
   ASSERT_AND_ASSIGN(const auto size, file->GetSize());
   ASSERT_EQ(size, static_cast<int64_t>(expected_.size()));
@@ -2168,6 +2446,9 @@ TEST_F(TalonIntegrationTest, OpenWithoutKnownSize) {
   ASSERT_AND_ASSIGN(auto buffer, file->ReadAt(kOffset, kLength));
   ASSERT_EQ(buffer->size(), kLength);
   EXPECT_EQ(std::memcmp(buffer->data(), expected_.data() + kOffset, kLength), 0);
+  EXPECT_EQ(metrics->GetReadCount() - before.read_count, 1);
+  EXPECT_EQ(metrics->GetReadBytes() - before.read_bytes, kLength);
+  EXPECT_EQ(metrics->GetFailedCount() - before.failed_count, 0);
 }
 
 TEST_F(TalonIntegrationTest, AsyncReadAtIntoCallerBuffer) {
