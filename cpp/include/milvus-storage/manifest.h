@@ -31,6 +31,10 @@
 
 namespace milvus_storage::api {
 
+namespace detail {
+struct IndexPathOrigin;
+}  // namespace detail
+
 // Manifest version history:
 // - Version 1: Initial format with column_groups, delta_logs, stats
 // - Version 2: Added indexes field for index metadata support
@@ -106,6 +110,10 @@ struct Index {
   int32_t index_store_path_version = 0;
   std::vector<std::string> index_file_keys;       ///< File names relative to path
   std::map<std::string, std::string> properties;  ///< Index-specific properties
+
+  // Internal read provenance, copied with the index but never serialized or
+  // exported through FFI. Callers should leave this unset for new indexes.
+  std::shared_ptr<const detail::IndexPathOrigin> path_origin;
 };
 
 /**

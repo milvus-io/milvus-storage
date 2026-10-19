@@ -18,9 +18,11 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <sstream>
 
 #include <arrow/api.h>
 #include <arrow/filesystem/localfs.h>
+#include <arrow/io/api.h>
 
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/common/config.h"
@@ -122,6 +124,104 @@ TEST_F(ManifestTest, EmptyManifestRoundTrip) {
   EXPECT_TRUE(read_back->stats().empty());
   EXPECT_TRUE(read_back->indexes().empty());
   EXPECT_TRUE(read_back->lobFiles().empty());
+}
+
+TEST_F(ManifestTest, IndexPathRepresentationsRoundTrip) {
+  const std::vector<std::string> paths = {"plain",
+                                          "./dot",
+                                          "../sibling",
+                                          "../../../../../index_files/1/1/P/S",
+                                          "../../../../../index_v1/2/1/P/S",
+                                          "/absolute/index",
+                                          "s3://endpoint/bucket/index",
+                                          "file:///absolute/index",
+                                          "_index-other/prefix",
+                                          "",
+                                          "dir//part/./leaf"};
+  for (const std::string root : {"", "R/", "tenant/root/"}) {
+    auto bucket = std::make_shared<arrow::fs::SubTreeFileSystem>(base_path_, fs_);
+    const auto segment = root + "insert_log/C/P/S";
+    ASSERT_STATUS_OK(bucket->CreateDir(get_manifest_path(segment), true));
+    Manifest manifest;
+    std::vector<std::string> expected;
+    for (const auto& path : paths) {
+      manifest.indexes().push_back(Index{.path = path});
+      expected.push_back(path.find("://") != std::string::npos || (!path.empty() && path[0] == '/')
+                             ? path
+                             : (std::filesystem::path(segment) / "_index" / path).lexically_normal().string());
+    }
+    for (int version = 1; version <= 3; ++version) {
+      const auto path = get_manifest_filepath(segment, version);
+      ASSERT_STATUS_OK(Manifest::WriteTo(bucket, path, manifest));
+      Manifest::CleanCache();
+      ASSERT_AND_ASSIGN(auto read, Manifest::ReadFrom(bucket, path));
+      ASSERT_EQ(read->indexes().size(), paths.size());
+      for (size_t i = 0; i < paths.size(); ++i) {
+        SCOPED_TRACE(paths[i]);
+        EXPECT_EQ(read->indexes()[i].path, expected[i]);
+      }
+      ASSERT_AND_ASSIGN(auto input, bucket->OpenInputFile(path));
+      ASSERT_AND_ASSIGN(auto size, input->GetSize());
+      ASSERT_AND_ASSIGN(auto buffer, input->Read(size));
+      ASSERT_STATUS_OK(input->Close());
+      std::istringstream stream(buffer->ToString());
+      Manifest raw;
+      ASSERT_STATUS_OK(raw.deserialize(stream));
+      for (size_t i = 0; i < paths.size(); ++i) {
+        EXPECT_EQ(raw.indexes()[i].path, paths[i]);
+      }
+      // Exercise both Manifest copy operations used by callers/resolvers.
+      Manifest copy(*read);
+      manifest = copy;
+    }
+  }
+}
+
+TEST_F(ManifestTest, IndexPathEditsAndSegmentCopy) {
+  Manifest manifest({}, {}, {}, {Index{.path = "plain"}});
+  auto original = RoundTrip(manifest);
+  // Copy a loaded Index into a fresh Manifest; its source representation travels with it.
+  auto copied = RoundTrip(Manifest({}, {}, {}, original->indexes()), 2);
+  EXPECT_EQ(copied->indexes()[0].path, base_path_ + "/_index/plain");
+  copied->indexes()[0].path = "../replacement";
+  auto edited = RoundTrip(*copied, 3);
+  EXPECT_EQ(edited->indexes()[0].path, base_path_ + "/replacement");
+
+  // Moving a persisted dataset keeps segment-relative paths segment-relative.
+  const auto new_base = base_path_ + "/new-segment";
+  ASSERT_STATUS_OK(CreateTestDir(fs_, new_base));
+  const auto destination = get_manifest_filepath(new_base, 1);
+  ASSERT_STATUS_OK(fs_->CreateDir(get_manifest_path(new_base), true));
+  ASSERT_STATUS_OK(fs_->CopyFile(get_manifest_filepath(base_path_, 1), destination));
+  Manifest::CleanCache();
+  ASSERT_AND_ASSIGN(auto moved, Manifest::ReadFrom(fs_, destination));
+  EXPECT_EQ(moved->indexes()[0].path, new_base + "/_index/plain");
+
+  // Publishing a loaded index into another segment keeps the original target.
+  const auto rewritten = get_manifest_filepath(new_base, 2);
+  ASSERT_STATUS_OK(Manifest::WriteTo(fs_, rewritten, *original));
+  Manifest::CleanCache();
+  ASSERT_AND_ASSIGN(auto retained, Manifest::ReadFrom(fs_, rewritten));
+  EXPECT_EQ(retained->indexes()[0].path, base_path_ + "/_index/plain");
+}
+
+TEST_F(ManifestTest, HistoricalIncorrectIndexPathIsNotGuessed) {
+  // A full object key stored by an old writer is ambiguous with a relative
+  // input. Preserve it; never infer and strip prefixes as a data repair.
+  for (const auto& stored : {"R/index_files/1", "R/insert_log/C/P/S/_index/R/index_files/1"}) {
+    const auto segment = base_path_ + "/history-" + std::to_string(std::string(stored).size());
+    const auto first = get_manifest_filepath(segment, 1);
+    ASSERT_STATUS_OK(fs_->CreateDir(get_manifest_path(segment), true));
+    ASSERT_STATUS_OK(Manifest::WriteTo(fs_, first, Manifest({}, {}, {}, {Index{.path = stored}})));
+    Manifest::CleanCache();
+    ASSERT_AND_ASSIGN(auto read, Manifest::ReadFrom(fs_, first));
+    EXPECT_EQ(read->indexes()[0].path, segment + "/_index/" + stored);
+    const auto next = get_manifest_filepath(segment, 2);
+    ASSERT_STATUS_OK(Manifest::WriteTo(fs_, next, *read));
+    Manifest::CleanCache();
+    ASSERT_AND_ASSIGN(auto reread, Manifest::ReadFrom(fs_, next));
+    EXPECT_EQ(reread->indexes()[0].path, read->indexes()[0].path);
+  }
 }
 
 TEST_F(ManifestTest, ColumnGroupsRoundTrip) {

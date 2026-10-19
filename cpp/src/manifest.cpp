@@ -160,6 +160,7 @@ struct codec_traits<milvus_storage::api::Index> {
   }
 
   static void decode(Decoder& d, milvus_storage::api::Index& idx) {
+    idx.path_origin.reset();
     avro::decode(d, idx.column_name);
     avro::decode(d, idx.index_name);
     avro::decode(d, idx.index_type);
@@ -233,6 +234,14 @@ struct codec_traits<milvus_storage::api::Manifest> {
 }  // namespace avro
 
 namespace milvus_storage::api {
+
+namespace detail {
+struct IndexPathOrigin {
+  std::string stored_path;
+  std::string resolved_path;
+  std::string base_path;
+};
+}  // namespace detail
 
 // Legacy manifest format magic number (used for detecting old format)
 constexpr int32_t MANIFEST_MAGIC = 0x4D494C56;  // "MILV" in ASCII
@@ -556,7 +565,21 @@ Manifest Manifest::toRelativePaths(const std::string& base_path) const {
 
   // normalize index paths (convert absolute to relative)
   for (auto& idx : copy_manifest.indexes_) {
-    idx.path = ToRelative(idx.path, std::optional<std::string>(base_path), milvus_storage::kIndexPath);
+    const auto& origin = idx.path_origin;
+    if (origin && idx.path == origin->resolved_path && base_path == origin->base_path) {
+      // A read index may be an object key outside _index, even without a
+      // leading '/'. Restore its stored representation, not a guessed prefix.
+      idx.path = origin->stored_path;
+    } else if (origin && idx.path == origin->resolved_path && std::filesystem::path(idx.path).is_relative() &&
+               milvus_storage::StorageUri::Parse(idx.path).ValueOr(milvus_storage::StorageUri{}).scheme.empty()) {
+      // A loaded index written to another segment must keep its original target.
+      // Only known expanded keys enter this branch; new '../' inputs do not.
+      const auto relative =
+          std::filesystem::path(idx.path).lexically_relative(milvus_storage::get_index_path(base_path));
+      idx.path = relative.empty() ? idx.path : relative.string();
+    } else {
+      idx.path = ToRelative(idx.path, std::optional<std::string>(base_path), milvus_storage::kIndexPath);
+    }
   }
 
   // normalize LOB file paths (convert absolute to relative)
@@ -589,7 +612,10 @@ void Manifest::ToAbsolutePaths(const std::string& base_path) {
 
   // denormalize index paths (convert relative to absolute)
   for (auto& idx : indexes_) {
+    const auto stored_path = idx.path;
     idx.path = ToAbsolute(idx.path, std::optional<std::string>(base_path), milvus_storage::kIndexPath);
+    idx.path_origin =
+        std::make_shared<const detail::IndexPathOrigin>(detail::IndexPathOrigin{stored_path, idx.path, base_path});
   }
 
   // denormalize LOB file paths (convert relative to absolute)
