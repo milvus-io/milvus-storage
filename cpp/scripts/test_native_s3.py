@@ -26,6 +26,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     metadata = {}
     uploads = {}
+    upload_condition = threading.Condition()
+    started_parts = set()
+    released_parts = set()
+    aborted_uploads = set()
 
     def log_message(self, *_):
         pass
@@ -96,6 +100,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply(200, b"<ListAllMyBucketsResult><Buckets><Bucket><Name>bucket</Name></Bucket></Buckets></ListAllMyBucketsResult>")
         if bucket != "bucket":
             return self.reply(404)
+        if key.startswith("root/upload-started/") and self.command == "HEAD":
+            part = key.removeprefix("root/upload-started/")
+            with self.upload_condition:
+                started = self.upload_condition.wait_for(lambda: part in self.started_parts, timeout=5)
+            return self.reply(200 if started else 404)
+        if key.startswith("root/upload-observed/") and self.command == "HEAD":
+            part = key.removeprefix("root/upload-observed/")
+            with self.upload_condition:
+                started = part in self.started_parts
+            return self.reply(200 if started else 404)
+        if key.startswith("root/upload-aborted/") and self.command == "HEAD":
+            with self.upload_condition:
+                aborted = key.removeprefix("root/upload-aborted/") in self.aborted_uploads
+            return self.reply(200 if aborted else 404)
+        if key.startswith("root/upload-release/") and self.command == "HEAD":
+            return self.reply(200)
         if key.startswith("root/credential-check/") and self.command == "HEAD":
             generation = key.rsplit("/", 1)[1]
             auth = self.headers.get("Authorization", "")
@@ -108,6 +128,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply(403, b"<Error><Code>AccessDenied</Code></Error>")
         if self.command in ("PUT", "POST", "DELETE"):
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            if key.startswith("root/upload-release/") and self.command == "DELETE":
+                part = key.removeprefix("root/upload-release/")
+                with self.upload_condition:
+                    self.released_parts.add(part)
+                    self.upload_condition.notify_all()
+                return self.reply(204)
+            if key.startswith("root/held/") and self.command == "PUT" and "partNumber" in query:
+                part = key.removeprefix("root/held/") + "/" + query["partNumber"][0]
+                with self.upload_condition:
+                    self.started_parts.add(part)
+                    self.upload_condition.notify_all()
+                    released = self.upload_condition.wait_for(lambda: part in self.released_parts, timeout=15)
+                if not released:
+                    return self.reply(400, b"<Error><Code>RequestTimeout</Code></Error>")
+                if key == "root/held/failed-part" and query["partNumber"] == ["2"]:
+                    return self.reply(403, b"<Error><Code>AccessDenied</Code></Error>")
             if key.startswith("root/service-error/"):
                 code = key.rsplit("/", 1)[1]
                 http_status = {"AccessDenied": 400, "SlowDown": 400, "InternalError": 500, "RequestTimeout": 400,
@@ -130,6 +166,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.reply(200, ("<DeleteResult>" + deleted + "</DeleteResult>").encode())
             if self.command == "DELETE" and "uploadId" in query:
                 self.uploads.pop(query["uploadId"][0], None)
+                with self.upload_condition:
+                    self.aborted_uploads.add(key.removeprefix("root/"))
                 return self.reply(204)
             if self.command == "POST" and "uploads" in query:
                 upload_id = str(uuid.uuid4())
