@@ -58,6 +58,38 @@
 
 namespace milvus_storage {
 
+arrow::Result<std::shared_ptr<Aws::Auth::AWSCredentialsProvider>> CreateAWSCredentialsProvider(
+    const std::string& source, const std::string& region) {
+  if (source.empty() || source == "default") {
+    return std::static_pointer_cast<Aws::Auth::AWSCredentialsProvider>(
+        std::make_shared<Aws::Auth::DefaultAWSCredentialsProviderChain>());
+  }
+  if (source == "web_identity") {
+    if (Aws::Environment::GetEnv("AWS_ROLE_ARN").empty() ||
+        Aws::Environment::GetEnv("AWS_WEB_IDENTITY_TOKEN_FILE").empty()) {
+      return arrow::Status::Invalid("web_identity requires AWS_ROLE_ARN and AWS_WEB_IDENTITY_TOKEN_FILE");
+    }
+    Aws::Client::ClientConfiguration::CredentialProviderConfiguration config{};
+    config.region = region.c_str();
+    if (config.region.empty())
+      config.region = Aws::Environment::GetEnv("AWS_REGION");
+    if (config.region.empty())
+      config.region = Aws::Environment::GetEnv("AWS_DEFAULT_REGION");
+    if (config.region.empty())
+      return arrow::Status::Invalid("web_identity requires an AWS region");
+    config.stsCredentialsProviderConfig.roleArn = Aws::Environment::GetEnv("AWS_ROLE_ARN");
+    config.stsCredentialsProviderConfig.tokenFilePath = Aws::Environment::GetEnv("AWS_WEB_IDENTITY_TOKEN_FILE");
+    config.stsCredentialsProviderConfig.sessionName = Aws::Environment::GetEnv("AWS_ROLE_SESSION_NAME");
+    return std::static_pointer_cast<Aws::Auth::AWSCredentialsProvider>(
+        std::make_shared<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>(config));
+  }
+  if (source == "instance_profile") {
+    return std::static_pointer_cast<Aws::Auth::AWSCredentialsProvider>(
+        std::make_shared<Aws::Auth::InstanceProfileCredentialsProvider>());
+  }
+  return arrow::Status::Invalid("Unknown AWS IAM credential source: ", source);
+}
+
 namespace {
 
 constexpr const char* kTlsFactoryAllocationTag = "TlsHttpClientFactory";
@@ -178,6 +210,11 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
   options.use_crc32c_checksum = config_.use_crc32c_checksum;
   options.use_crt_async_reads = config_.s3_crt_async_read;
 
+  if (!config_.iam_credential_source.empty() && config_.iam_credential_source != "default" &&
+      (!config_.use_iam || config_.cloud_provider != kCloudProviderAWS || !config_.role_arn.empty())) {
+    return arrow::Status::Invalid("Explicit IAM credential source requires AWS use_iam=true without role_arn");
+  }
+
   // Credential configuration priority:
   // 1. AssumeRole (role_arn) — AWS (AssumeRole) or Aliyun (AssumeRoleWithOIDC)
   // 2. IAM — use provider-specific STS credential providers
@@ -247,14 +284,25 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
       return arrow::Status::Invalid("role_arn not supported for cloud provider: ", config_.cloud_provider);
     }
   } else if (config_.use_iam) {
-    auto provider = CreateCredentialsProvider();
+    std::shared_ptr<Aws::Auth::AWSCredentialsProvider> provider;
+    if (config_.cloud_provider == kCloudProviderAWS) {
+      ARROW_ASSIGN_OR_RAISE(provider, CreateAWSCredentialsProvider(config_.iam_credential_source, config_.region));
+    } else {
+      provider = CreateCredentialsProvider();
+    }
     if (!provider) {
       return arrow::Status::Invalid("Unknown credentials provider, cloud provider: ", config_.cloud_provider);
     }
-    auto credentials = provider->GetAWSCredentials();
-    assert(!credentials.GetAWSAccessKeyId().empty() && "AWS Access Key ID is empty");
-    assert(!credentials.GetAWSSecretKey().empty() && "AWS Secret Key is empty");
-    assert(!credentials.GetSessionToken().empty() && "AWS Session Token is empty");
+    // Explicit providers are lazy: a transient STS/IMDS failure must not abort
+    // the process or replace the selected identity. Subsequent I/O retries the
+    // same provider. Preserve the historical eager check for other modes.
+    if (config_.iam_credential_source.empty() || config_.iam_credential_source == "default") {
+      auto credentials = provider->GetAWSCredentials();
+      if (credentials.GetAWSAccessKeyId().empty() || credentials.GetAWSSecretKey().empty() ||
+          credentials.GetSessionToken().empty()) {
+        return arrow::Status::IOError("Failed to obtain IAM credentials");
+      }
+    }
     options.credentials_provider = provider;
   } else {
     options.ConfigureAccessKey(config_.access_key_id, config_.access_key_value);

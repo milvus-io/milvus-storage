@@ -192,6 +192,7 @@ struct ArrowFileSystemConfig {
   bool use_ssl = false;
   std::string ssl_ca_cert = "";
   bool use_iam = false;
+  std::string iam_credential_source = "default";
   bool use_virtual_host = false;
   int64_t request_timeout_ms = 3000;
   bool gcp_native_without_auth = false;  // Deprecated

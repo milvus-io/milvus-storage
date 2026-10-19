@@ -336,6 +336,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                                                                                  kCloudProviderAzure,
                                                                                  kCloudProviderTencent,
                                                                                  kCloudProviderHuawei)),
+    REGISTER_PROPERTY(
+        PROPERTY_FS_IAM_CREDENTIAL_SOURCE,
+        PropertyType::STRING,
+        "AWS IAM credential source. Explicit sources never fall back to another identity.",
+        "default",
+        ValidatePropertyType() + ValidatePropertyEnum<std::string>("default", "web_identity", "instance_profile")),
     REGISTER_PROPERTY(PROPERTY_FS_IAM_ENDPOINT,
                       PropertyType::STRING,
                       "The IAM endpoint for the filesystem storage service.",

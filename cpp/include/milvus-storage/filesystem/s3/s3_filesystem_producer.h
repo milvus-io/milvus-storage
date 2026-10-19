@@ -27,6 +27,10 @@
 
 namespace milvus_storage {
 
+// Select one credential source, never a fallback chain for explicit sources.
+arrow::Result<std::shared_ptr<Aws::Auth::AWSCredentialsProvider>> CreateAWSCredentialsProvider(
+    const std::string& source, const std::string& region = "");
+
 class S3FileSystemProducer : public FileSystemProducer {
   public:
   S3FileSystemProducer(const ArrowFileSystemConfig& config) : config_(config) {}
