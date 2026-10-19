@@ -60,9 +60,7 @@ OpenResult Open(const std::shared_ptr<MemoryFileSystem>& fs,
 TEST(AsyncTransactionTest, UnconsumedFutureStartsNoIO) {
   auto fs = std::make_shared<MemoryFileSystem>();
   std::shared_ptr<AsyncOperation> operation;
-  {
-    auto future = Transaction::OpenAsync(fs->path, {}, -1, -1, FailResolver, 0, 3000, operation, fs);
-  }
+  { auto future = Transaction::OpenAsync(fs->path, {}, -1, -1, FailResolver, 0, 3000, operation, fs); }
   EXPECT_EQ(fs->info_calls, 0);
 }
 TEST(AsyncTransactionTest, SynchronousIOUsesCallerExecutor) {

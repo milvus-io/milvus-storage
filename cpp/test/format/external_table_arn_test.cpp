@@ -1203,100 +1203,100 @@ INSTANTIATE_TEST_SUITE_P(
 // PROVIDER_ID}. The target role must differ from the TKE workload role.
 class ExternalTableRoleArnTest : public ::testing::Test {
   protected:
-     explicit ExternalTableRoleArnTest(const char* cloud_provider) : cloud_provider_(cloud_provider) {}
+  explicit ExternalTableRoleArnTest(const char* cloud_provider) : cloud_provider_(cloud_provider) {}
 
-     void ReadTwoParquetFilesWithArnRole();
-     void SetUp() override {
-       if (GetEnvVar(S3_COMP_ARN_ENV_CLOUD_PROVIDER).ValueOr("") != cloud_provider_) {
-         GTEST_SKIP() << "Set " << S3_COMP_ARN_ENV_CLOUD_PROVIDER << "=" << cloud_provider_ << " to run this fixture";
-       }
+  void ReadTwoParquetFilesWithArnRole();
+  void SetUp() override {
+    if (GetEnvVar(S3_COMP_ARN_ENV_CLOUD_PROVIDER).ValueOr("") != cloud_provider_) {
+      GTEST_SKIP() << "Set " << S3_COMP_ARN_ENV_CLOUD_PROVIDER << "=" << cloud_provider_ << " to run this fixture";
+    }
 
-       // Our-side bucket (AK/SK-based; see fixture-level comment for why not IAM).
-       our_address_ = GetEnvVar(OUR_ENV_ADDRESS).ValueOr("");
-       our_bucket_ = GetEnvVar(OUR_ENV_BUCKET).ValueOr("");
-       our_region_ = GetEnvVar(OUR_ENV_REGION).ValueOr("");
-       our_cloud_provider_ = GetEnvVar(OUR_ENV_CLOUD_PROVIDER).ValueOr("");
-       our_ak_ = GetEnvVar(OUR_ENV_ACCESS_KEY).ValueOr("");
-       our_sk_ = GetEnvVar(OUR_ENV_SECRET_KEY).ValueOr("");
+    // Our-side bucket (AK/SK-based; see fixture-level comment for why not IAM).
+    our_address_ = GetEnvVar(OUR_ENV_ADDRESS).ValueOr("");
+    our_bucket_ = GetEnvVar(OUR_ENV_BUCKET).ValueOr("");
+    our_region_ = GetEnvVar(OUR_ENV_REGION).ValueOr("");
+    our_cloud_provider_ = GetEnvVar(OUR_ENV_CLOUD_PROVIDER).ValueOr("");
+    our_ak_ = GetEnvVar(OUR_ENV_ACCESS_KEY).ValueOr("");
+    our_sk_ = GetEnvVar(OUR_ENV_SECRET_KEY).ValueOr("");
 
-       address_ = GetEnvVar(S3_COMP_ARN_ENV_ADDRESS).ValueOr("");
-       region_ = GetEnvVar(S3_COMP_ARN_ENV_REGION).ValueOr("");
-       arn_bucket_ = GetEnvVar(S3_COMP_ARN_ENV_BUCKET).ValueOr("");
-       arn_ak_ = GetEnvVar(S3_COMP_ARN_ENV_ACCESS_KEY).ValueOr("");
-       arn_sk_ = GetEnvVar(S3_COMP_ARN_ENV_SECRET_KEY).ValueOr("");
-       role_arn_ = GetEnvVar(S3_COMP_ARN_ENV_ROLE_ARN).ValueOr("");
-       external_id_ = GetEnvVar(S3_COMP_ARN_ENV_EXTERNAL_ID).ValueOr("");
+    address_ = GetEnvVar(S3_COMP_ARN_ENV_ADDRESS).ValueOr("");
+    region_ = GetEnvVar(S3_COMP_ARN_ENV_REGION).ValueOr("");
+    arn_bucket_ = GetEnvVar(S3_COMP_ARN_ENV_BUCKET).ValueOr("");
+    arn_ak_ = GetEnvVar(S3_COMP_ARN_ENV_ACCESS_KEY).ValueOr("");
+    arn_sk_ = GetEnvVar(S3_COMP_ARN_ENV_SECRET_KEY).ValueOr("");
+    role_arn_ = GetEnvVar(S3_COMP_ARN_ENV_ROLE_ARN).ValueOr("");
+    external_id_ = GetEnvVar(S3_COMP_ARN_ENV_EXTERNAL_ID).ValueOr("");
 
-       if (our_address_.empty() || our_bucket_.empty() || our_cloud_provider_.empty() || our_ak_.empty() ||
-           our_sk_.empty() || address_.empty() || region_.empty() || arn_bucket_.empty() || arn_ak_.empty() ||
-           arn_sk_.empty() || role_arn_.empty()) {
-         GTEST_SKIP() << cloud_provider_
-                      << " ARN test requires OUR_TEST_ENV_{ADDRESS,BUCKET,REGION,"
-                         "CLOUD_PROVIDER,ACCESS_KEY,SECRET_KEY} and "
-                         "S3_COMP_ARN_TEST_ENV_{ADDRESS,REGION,BUCKET,ACCESS_KEY,SECRET_KEY,ROLE_ARN}";
-       }
+    if (our_address_.empty() || our_bucket_.empty() || our_cloud_provider_.empty() || our_ak_.empty() ||
+        our_sk_.empty() || address_.empty() || region_.empty() || arn_bucket_.empty() || arn_ak_.empty() ||
+        arn_sk_.empty() || role_arn_.empty()) {
+      GTEST_SKIP() << cloud_provider_
+                   << " ARN test requires OUR_TEST_ENV_{ADDRESS,BUCKET,REGION,"
+                      "CLOUD_PROVIDER,ACCESS_KEY,SECRET_KEY} and "
+                      "S3_COMP_ARN_TEST_ENV_{ADDRESS,REGION,BUCKET,ACCESS_KEY,SECRET_KEY,ROLE_ARN}";
+    }
 
-       if (cloud_provider_ == kCloudProviderTencent) {
-         for (const char* name : {"TKE_REGION", "TKE_ROLE_ARN", "TKE_WEB_IDENTITY_TOKEN_FILE", "TKE_PROVIDER_ID"}) {
-           if (GetEnvVar(name).ValueOr("").empty()) {
-             GTEST_SKIP() << "Tencent ARN test requires " << name << " from the TKE workload identity";
-           }
-         }
-         ASSERT_NE(role_arn_, GetEnvVar("TKE_ROLE_ARN").ValueOr(""))
-             << "Use a distinct target role to exercise the second STS hop";
-       } else {
-         // Two machine-identity modes are supported; which one we need depends on
-         // ALIYUN_ROLE_ARN_AUTH_MODE (kept in lockstep with the
-         // dispatch in s3_filesystem_producer.cpp):
-         //   - "ram":  ECS IMDS → sts:AssumeRole. No env vars required; the
-         //             metadata service supplies the caller identity. Only runs
-         //             on an ECS with a RAM role attached.
-         //   - default / "oidc": legacy AssumeRoleWithOIDC. Requires
-         //             ALIBABA_CLOUD_OIDC_TOKEN_FILE + _PROVIDER_ARN in process
-         //             env; without them the C++ filesystem path fails fast with
-         //             a clear configuration error.
-         const char* auth_mode_env = std::getenv("ALIYUN_ROLE_ARN_AUTH_MODE");
-         const bool ram_mode = auth_mode_env != nullptr && std::string(auth_mode_env) == "ram";
-         if (!ram_mode) {
-           if (std::getenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE") == nullptr ||
-               std::getenv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN") == nullptr) {
-             GTEST_SKIP() << "Aliyun ARN test requires ALIBABA_CLOUD_OIDC_TOKEN_FILE and "
-                             "ALIBABA_CLOUD_OIDC_PROVIDER_ARN in process env (pod-level machine identity), "
-                             "or set ALIYUN_ROLE_ARN_AUTH_MODE=ram to use the ECS IMDS path";
-           }
-         }
-       }
+    if (cloud_provider_ == kCloudProviderTencent) {
+      for (const char* name : {"TKE_REGION", "TKE_ROLE_ARN", "TKE_WEB_IDENTITY_TOKEN_FILE", "TKE_PROVIDER_ID"}) {
+        if (GetEnvVar(name).ValueOr("").empty()) {
+          GTEST_SKIP() << "Tencent ARN test requires " << name << " from the TKE workload identity";
+        }
+      }
+      ASSERT_NE(role_arn_, GetEnvVar("TKE_ROLE_ARN").ValueOr(""))
+          << "Use a distinct target role to exercise the second STS hop";
+    } else {
+      // Two machine-identity modes are supported; which one we need depends on
+      // ALIYUN_ROLE_ARN_AUTH_MODE (kept in lockstep with the
+      // dispatch in s3_filesystem_producer.cpp):
+      //   - "ram":  ECS IMDS → sts:AssumeRole. No env vars required; the
+      //             metadata service supplies the caller identity. Only runs
+      //             on an ECS with a RAM role attached.
+      //   - default / "oidc": legacy AssumeRoleWithOIDC. Requires
+      //             ALIBABA_CLOUD_OIDC_TOKEN_FILE + _PROVIDER_ARN in process
+      //             env; without them the C++ filesystem path fails fast with
+      //             a clear configuration error.
+      const char* auth_mode_env = std::getenv("ALIYUN_ROLE_ARN_AUTH_MODE");
+      const bool ram_mode = auth_mode_env != nullptr && std::string(auth_mode_env) == "ram";
+      if (!ram_mode) {
+        if (std::getenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE") == nullptr ||
+            std::getenv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN") == nullptr) {
+          GTEST_SKIP() << "Aliyun ARN test requires ALIBABA_CLOUD_OIDC_TOKEN_FILE and "
+                          "ALIBABA_CLOUD_OIDC_PROVIDER_ARN in process env (pod-level machine identity), "
+                          "or set ALIYUN_ROLE_ARN_AUTH_MODE=ram to use the ECS IMDS path";
+        }
+      }
+    }
 
-       // Static credentials are used only to prepare and clean up test data.
-       api::SetValue(write_props_, PROPERTY_FS_STORAGE_TYPE, "remote");
-       api::SetValue(write_props_, PROPERTY_FS_CLOUD_PROVIDER, cloud_provider_.c_str());
-       api::SetValue(write_props_, PROPERTY_FS_ADDRESS, address_.c_str());
-       api::SetValue(write_props_, PROPERTY_FS_BUCKET_NAME, arn_bucket_.c_str());
-       api::SetValue(write_props_, PROPERTY_FS_REGION, region_.c_str());
-       api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_ID, arn_ak_.c_str());
-       api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_VALUE, arn_sk_.c_str());
-       api::SetValue(write_props_, PROPERTY_FS_USE_SSL, "true");
+    // Static credentials are used only to prepare and clean up test data.
+    api::SetValue(write_props_, PROPERTY_FS_STORAGE_TYPE, "remote");
+    api::SetValue(write_props_, PROPERTY_FS_CLOUD_PROVIDER, cloud_provider_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_ADDRESS, address_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_BUCKET_NAME, arn_bucket_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_REGION, region_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_ID, arn_ak_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_VALUE, arn_sk_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_USE_SSL, "true");
 
-       // Read through the workload identity -> target role chain, without AK/SK.
-       api::SetValue(read_props_, "extfs.arn.storage_type", "remote");
-       api::SetValue(read_props_, "extfs.arn.cloud_provider", cloud_provider_.c_str());
-       api::SetValue(read_props_, "extfs.arn.address", address_.c_str());
-       api::SetValue(read_props_, "extfs.arn.bucket_name", arn_bucket_.c_str());
-       api::SetValue(read_props_, "extfs.arn.region", region_.c_str());
-       api::SetValue(read_props_, "extfs.arn.use_ssl", "true");
-       api::SetValue(read_props_, "extfs.arn.role_arn", role_arn_.c_str());
-       if (!external_id_.empty()) {
-         api::SetValue(read_props_, "extfs.arn.external_id", external_id_.c_str());
-       }
+    // Read through the workload identity -> target role chain, without AK/SK.
+    api::SetValue(read_props_, "extfs.arn.storage_type", "remote");
+    api::SetValue(read_props_, "extfs.arn.cloud_provider", cloud_provider_.c_str());
+    api::SetValue(read_props_, "extfs.arn.address", address_.c_str());
+    api::SetValue(read_props_, "extfs.arn.bucket_name", arn_bucket_.c_str());
+    api::SetValue(read_props_, "extfs.arn.region", region_.c_str());
+    api::SetValue(read_props_, "extfs.arn.use_ssl", "true");
+    api::SetValue(read_props_, "extfs.arn.role_arn", role_arn_.c_str());
+    if (!external_id_.empty()) {
+      api::SetValue(read_props_, "extfs.arn.external_id", external_id_.c_str());
+    }
 
-       auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
-       test_base_ = "zc/" + cloud_provider_ + "-arn-test-" + std::to_string(ts);
+    auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+    test_base_ = "zc/" + cloud_provider_ + "-arn-test-" + std::to_string(ts);
 
-       // Create write filesystem for cleanup.
-       ASSERT_AND_ASSIGN(write_fs_, GetFileSystem(write_props_));
+    // Create write filesystem for cleanup.
+    ASSERT_AND_ASSIGN(write_fs_, GetFileSystem(write_props_));
 
-       FilesystemCache::getInstance().clean();
-     }
+    FilesystemCache::getInstance().clean();
+  }
 
   void TearDown() override {
     if (manifest_fs_) {

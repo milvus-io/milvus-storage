@@ -118,58 +118,58 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
   [[nodiscard]] std::shared_ptr<arrow::Schema> get_schema() const override;
 
   private:
-     // Cache state lives in lance_table_cache.cpp; async completion stays in the reader.
-     static arrow::Result<std::shared_ptr<BlockingDataset>> get_or_open_dataset(
-         const std::string& base_uri,
-         const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
-         const StorageOptions& read_options,
-         const std::string& filesystem_cache_key,
-         uint64_t version);
+  // Cache state lives in lance_table_cache.cpp; async completion stays in the reader.
+  static arrow::Result<std::shared_ptr<BlockingDataset>> get_or_open_dataset(
+      const std::string& base_uri,
+      const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+      const StorageOptions& read_options,
+      const std::string& filesystem_cache_key,
+      uint64_t version);
 
-     static folly::SemiFuture<arrow::Result<std::shared_ptr<BlockingDataset>>> get_or_open_dataset_async(
-         const std::string& base_uri,
-         const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
-         const StorageOptions& read_options,
-         const std::string& filesystem_cache_key,
-         uint64_t version);
+  static folly::SemiFuture<arrow::Result<std::shared_ptr<BlockingDataset>>> get_or_open_dataset_async(
+      const std::string& base_uri,
+      const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+      const StorageOptions& read_options,
+      const std::string& filesystem_cache_key,
+      uint64_t version);
 
-     static folly::SemiFuture<arrow::Result<std::shared_ptr<BlockingDataset>>> load_dataset_async(
-         const std::string& lance_uri,
-         const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
-         const StorageOptions& read_options,
-         uint64_t version);
+  static folly::SemiFuture<arrow::Result<std::shared_ptr<BlockingDataset>>> load_dataset_async(
+      const std::string& lance_uri,
+      const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+      const StorageOptions& read_options,
+      uint64_t version);
 
-     static folly::SemiFuture<arrow::Result<std::shared_ptr<BlockingDataset>>> open_dataset_async(
-         const std::string& base_uri,
-         const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
-         const api::Properties& properties,
-         uint64_t version);
+  static folly::SemiFuture<arrow::Result<std::shared_ptr<BlockingDataset>>> open_dataset_async(
+      const std::string& base_uri,
+      const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+      const api::Properties& properties,
+      uint64_t version);
 
-     folly::SemiFuture<arrow::Status> open_fragment_async(
-         const std::shared_ptr<const MetaTrait::FragmentMetadata>& metadata);
+  folly::SemiFuture<arrow::Status> open_fragment_async(
+      const std::shared_ptr<const MetaTrait::FragmentMetadata>& metadata);
 
-     LanceTableReader(MetaTrait::MetadataPtr metadata,
-                      uint64_t fragment_id,
-                      const std::shared_ptr<arrow::Schema>& schema,
-                      const std::vector<std::string>& needed_columns = {});
+  LanceTableReader(MetaTrait::MetadataPtr metadata,
+                   uint64_t fragment_id,
+                   const std::shared_ptr<arrow::Schema>& schema,
+                   const std::vector<std::string>& needed_columns = {});
 
-     // Keep the filesystem alive until all Rust-backed reader members are destroyed.
-     std::shared_ptr<arrow::fs::FileSystem> filesystem_;
-     std::shared_ptr<BlockingDataset> dataset_;
-     std::string uri_;
-     uint64_t fragment_id_;
-     uint64_t dataset_version_ = 0;
-     std::shared_ptr<arrow::Schema> read_schema_;
-     milvus_storage::api::Properties properties_;
-     std::vector<std::string> needed_columns_;
+  // Keep the filesystem alive until all Rust-backed reader members are destroyed.
+  std::shared_ptr<arrow::fs::FileSystem> filesystem_;
+  std::shared_ptr<BlockingDataset> dataset_;
+  std::string uri_;
+  uint64_t fragment_id_;
+  uint64_t dataset_version_ = 0;
+  std::shared_ptr<arrow::Schema> read_schema_;
+  milvus_storage::api::Properties properties_;
+  std::vector<std::string> needed_columns_;
 
-     std::shared_ptr<arrow::Schema> file_schema_;  // always derived from fragment metadata in open()
+  std::shared_ptr<arrow::Schema> file_schema_;  // always derived from fragment metadata in open()
 
-     uint64_t logical_chunk_rows_;
-     uint64_t num_deletions_ = 0;  // physical_rows - logical_rows
-     std::shared_ptr<const std::vector<uint64_t>> column_memory_weights_;
-     std::vector<RowGroupInfo> row_group_infos_;
-     std::unique_ptr<BlockingFragmentReader> fragment_reader_;
+  uint64_t logical_chunk_rows_;
+  uint64_t num_deletions_ = 0;  // physical_rows - logical_rows
+  std::shared_ptr<const std::vector<uint64_t>> column_memory_weights_;
+  std::vector<RowGroupInfo> row_group_infos_;
+  std::unique_ptr<BlockingFragmentReader> fragment_reader_;
 };
 
 }  // namespace milvus_storage::lance

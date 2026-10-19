@@ -76,11 +76,11 @@ class AWS_CORE_API TencentCloudSTSCredentialsClient : public Aws::Internal::AWSH
   Aws::Auth::AWSCredentials GetAssumeRoleCredentials(const STSAssumeRoleRequest& request);
 
   private:
-     Aws::Auth::AWSCredentials SendRequest(const Aws::String& action,
-                                           const Aws::String& region,
-                                           const Aws::Utils::Json::JsonValue& payload,
-                                           const Aws::Auth::AWSCredentials* caller = nullptr);
-     Aws::String m_endpoint;
+  Aws::Auth::AWSCredentials SendRequest(const Aws::String& action,
+                                        const Aws::String& region,
+                                        const Aws::Utils::Json::JsonValue& payload,
+                                        const Aws::Auth::AWSCredentials* caller = nullptr);
+  Aws::String m_endpoint;
 };
 
 }  // namespace milvus_storage

@@ -161,29 +161,29 @@ struct MockResponseSpec {
 
 class MockHttpClient : public Aws::Http::HttpClient {
   public:
-     explicit MockHttpClient(bool consume_request_bodies = false) : consume_request_bodies_(consume_request_bodies) {}
+  explicit MockHttpClient(bool consume_request_bodies = false) : consume_request_bodies_(consume_request_bodies) {}
 
-     std::shared_ptr<Aws::Http::HttpResponse> MakeRequest(
-         const std::shared_ptr<Aws::Http::HttpRequest>& request,
-         Aws::Utils::RateLimits::RateLimiterInterface* readLimiter = nullptr,
-         Aws::Utils::RateLimits::RateLimiterInterface* writeLimiter = nullptr) const override {
-       std::lock_guard<std::mutex> lock(mutex_);
-       recorded_requests_.push_back(request);
+  std::shared_ptr<Aws::Http::HttpResponse> MakeRequest(
+      const std::shared_ptr<Aws::Http::HttpRequest>& request,
+      Aws::Utils::RateLimits::RateLimiterInterface* readLimiter = nullptr,
+      Aws::Utils::RateLimits::RateLimiterInterface* writeLimiter = nullptr) const override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    recorded_requests_.push_back(request);
 
-       auto uri = request->GetURIString();
+    auto uri = request->GetURIString();
 
-       // Find a matching response queue by URL substring
-       for (auto& [url_key, q] : response_map_) {
-         if (!q.empty() && uri.find(url_key) != Aws::String::npos) {
-           auto spec = q.front();
-           q.pop();
-           return BuildResponse(request, spec);
-         }
-       }
+    // Find a matching response queue by URL substring
+    for (auto& [url_key, q] : response_map_) {
+      if (!q.empty() && uri.find(url_key) != Aws::String::npos) {
+        auto spec = q.front();
+        q.pop();
+        return BuildResponse(request, spec);
+      }
+    }
 
-       // Default: return 404 for unmatched requests (e.g., background SDK requests)
-       return BuildResponse(request, {Aws::Http::HttpResponseCode::NOT_FOUND, "", {}});
-     }
+    // Default: return 404 for unmatched requests (e.g., background SDK requests)
+    return BuildResponse(request, {Aws::Http::HttpResponseCode::NOT_FOUND, "", {}});
+  }
 
   void EnqueueResponse(const std::string& url_match,
                        Aws::Http::HttpResponseCode code,
@@ -203,34 +203,34 @@ class MockHttpClient : public Aws::Http::HttpClient {
   }
 
   private:
-     std::shared_ptr<Aws::Http::HttpResponse> BuildResponse(const std::shared_ptr<Aws::Http::HttpRequest>& request,
-                                                            const MockResponseSpec& spec) const {
-       auto resp = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("MockHttpClient", request);
-       // Curl and CRT create the response stream before consuming the POST body.
-       if (consume_request_bodies_) {
-         const auto& body = request->GetContentBody();
-         std::string sent_body;
-         if (body) {
-           sent_body.assign(std::istreambuf_iterator<char>(*body), std::istreambuf_iterator<char>());
-           body->setstate(std::ios::eofbit | std::ios::failbit);
-         }
-         recorded_request_bodies_.push_back(std::move(sent_body));
-       }
-       resp->SetResponseCode(spec.code);
-       for (const auto& h : spec.headers) {
-         resp->AddHeader(h.first, h.second);
-       }
-       if (!spec.body.empty()) {
-         resp->GetResponseBody() << spec.body;
-       }
-       return resp;
-     }
+  std::shared_ptr<Aws::Http::HttpResponse> BuildResponse(const std::shared_ptr<Aws::Http::HttpRequest>& request,
+                                                         const MockResponseSpec& spec) const {
+    auto resp = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("MockHttpClient", request);
+    // Curl and CRT create the response stream before consuming the POST body.
+    if (consume_request_bodies_) {
+      const auto& body = request->GetContentBody();
+      std::string sent_body;
+      if (body) {
+        sent_body.assign(std::istreambuf_iterator<char>(*body), std::istreambuf_iterator<char>());
+        body->setstate(std::ios::eofbit | std::ios::failbit);
+      }
+      recorded_request_bodies_.push_back(std::move(sent_body));
+    }
+    resp->SetResponseCode(spec.code);
+    for (const auto& h : spec.headers) {
+      resp->AddHeader(h.first, h.second);
+    }
+    if (!spec.body.empty()) {
+      resp->GetResponseBody() << spec.body;
+    }
+    return resp;
+  }
 
-     const bool consume_request_bodies_;
-     mutable std::mutex mutex_;
-     mutable std::map<std::string, std::queue<MockResponseSpec>> response_map_;
-     mutable std::vector<std::shared_ptr<Aws::Http::HttpRequest>> recorded_requests_;
-     mutable std::vector<std::string> recorded_request_bodies_;
+  const bool consume_request_bodies_;
+  mutable std::mutex mutex_;
+  mutable std::map<std::string, std::queue<MockResponseSpec>> response_map_;
+  mutable std::vector<std::shared_ptr<Aws::Http::HttpRequest>> recorded_requests_;
+  mutable std::vector<std::string> recorded_request_bodies_;
 };
 
 class MockHttpClientFactory : public Aws::Http::HttpClientFactory {
