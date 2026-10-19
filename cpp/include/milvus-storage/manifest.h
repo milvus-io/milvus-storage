@@ -31,10 +31,6 @@
 
 namespace milvus_storage::api {
 
-namespace detail {
-struct IndexPathOrigin;
-}  // namespace detail
-
 // Manifest version history:
 // - Version 1: Initial format with column_groups, delta_logs, stats
 // - Version 2: Added indexes field for index metadata support
@@ -97,7 +93,7 @@ struct Index {
   std::string column_name;  ///< Column this index is built on; field_id is authoritative for loading
   std::string index_name;   ///< User-visible index name carried in the QueryNode load request
   std::string index_type;   ///< Index type: "hnsw", "ivf-sq", "ivf-pq", "inverted", "bitmap", "ordered"
-  std::string path;         ///< Artifact directory/prefix; combine with index_file_keys for full file paths
+  std::string path;         ///< Full canonical directory under <segment>/_index/ when committing
   int64_t field_id = 0;
   int64_t index_id = 0;
   int64_t build_id = 0;
@@ -110,10 +106,6 @@ struct Index {
   int32_t index_store_path_version = 0;
   std::vector<std::string> index_file_keys;       ///< File names relative to path
   std::map<std::string, std::string> properties;  ///< Index-specific properties
-
-  // Internal read provenance, copied with the index but never serialized or
-  // exported through FFI. Callers should leave this unset for new indexes.
-  std::shared_ptr<const detail::IndexPathOrigin> path_origin;
 };
 
 /**
@@ -234,7 +226,8 @@ class Manifest final {
    * @param path Path to write the manifest file
    * @param manifest Manifest to write
    * @param out_manifest_size Optional output size in bytes, written only on success
-   * @return Status (AlreadyExists if file already exists)
+   * @return Status (Invalid if an index is not a canonical child of <segment>/_index/,
+   *         AlreadyExists if the manifest file already exists)
    */
   static arrow::Status WriteTo(const milvus_storage::ArrowFileSystemPtr& fs,
                                const std::string& path,

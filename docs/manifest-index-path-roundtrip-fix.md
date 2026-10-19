@@ -1,150 +1,126 @@
-# Manifest index path roundtrip fix
+# Require segment-local index paths at manifest commit
 
-## Failure and scope
+Index metadata may only reference artifacts beneath the current segment's
+`_index/` directory. `Manifest::WriteTo` validates every retained and newly
+added index before serializing or opening an output stream. An invalid path
+returns an error and leaves the next manifest version unpublished.
 
-On `main` revision `5fab6a311dca39414d977303c271c86f1250d693`, reading an
-index expands its segment-relative directory into an object key. A subsequent
-transaction retaining that index writes the full key unchanged when it is
-outside `<segment>/_index/`. Reading that manifest prepends the segment again.
-Publishing another index, updating stats or deltalogs, or deleting another
-index can all trigger this without concurrency.
+## Path contract
 
-New indexes supplied by Milvus already use paths relative to
-`<segment>/_index/`, including `..` components for `index_files` and `index_v1`.
-Those inputs must remain distinguishable from indexes expanded during a read.
+Writers must supply a full, canonical filesystem path or object key with a
+nonempty suffix after `<segment>/_index/`. For example, for segment
+`R/insert_log/C/P/S`:
 
-## Representation and compatibility
+| Input | Result |
+| --- | --- |
+| `R/insert_log/C/P/S/_index/build-A` | Accepted; stored as `build-A` |
+| `R/insert_log/C/P/S/_index/build-A/` | Accepted; directory suffix retained |
+| `build-A` or `./build-A` | Rejected; missing segment prefix |
+| `../../../../../index_files/A` | Rejected |
+| `R/index_files/A` or `R/index_v1/A` | Rejected |
+| `R/insert_log/C/P/S/_index-other/A` | Rejected; not an `_index/` child |
+| `R/insert_log/C/P/S/_index/../outside` | Rejected |
+| `_index` directory itself, empty path, external URI | Rejected |
 
-Retain the original stored path, expanded path, and source segment as internal
-provenance on each index read by `Manifest::ReadFrom`. Copies of indexes and
-manifests retain that provenance, including the copy in `applyUpdates`.
-Writing an unchanged index to the same segment reuses its stored path exactly.
-Changing its path invalidates the provenance by value comparison, so a new
-relative path is not interpreted as a previously expanded object key.
+The prefix includes the directory separator. Paths with redundant separators,
+`.` or `..` components are rejected rather than normalized and redirected.
+Local absolute paths are accepted when they use the current absolute segment
+prefix. This is a lexical metadata check; it does not issue object-existence
+requests or resolve filesystem symlinks.
 
-When a loaded index is explicitly written into another segment's manifest,
-an expanded object key is made relative to the new index base. This keeps its
-existing target, without guessing the root directory or its depth. Copying an
-Avro file to another segment continues to rebase its stored relative paths on
-read. External URIs and local absolute paths keep the existing behavior.
-URI coverage uses the existing `StorageUri` endpoint/bucket/key syntax (for
-example `s3://endpoint/bucket/index`); this does not add support for URI forms
-rejected by the current parser.
+Writing strips the accepted prefix using the existing conversion. Reading
+restores it using the existing reader. No path provenance is retained and no
+`Index` layout or manifest schema change is needed. Column groups, stats,
+deltalogs, LOB paths, index identities, and conflict resolution are unchanged.
+Raw backup/restore `serialize`/`deserialize` codecs remain raw codecs; without
+a segment context they do not perform this commit-time check.
 
-The Avro schema/version, C FFI layout, index identities, conflict resolution,
-file locations, and full-path read results are unchanged. The C++ `Index`
-layout gains internal provenance; C++ consumers must rebuild against matching
-headers and library. Newly constructed indexes still follow the existing input
-contract: a segment-relative path, an absolute local path, a URI, or the
-previously supported full path under the current index directory. Arbitrary
-unmarked object keys outside that directory are not a new input format.
+## Transaction behavior and callers
 
-The shared `ToRelative`/`ToAbsolute` helpers and column group, stats, deltalog,
-and LOB conversions are unchanged. Both asynchronous transaction methods call
-the synchronous implementation; no separate async path conversion is needed.
-FFI additions construct fresh indexes, while retained indexes stay in the C++
-transaction. Raw `serialize`/`deserialize` APIs remain raw codecs and do not
-carry runtime provenance across a serialization boundary.
+`AddIndexInfo` stages metadata; validation happens at commit, after updates
+have been applied. Both synchronous and asynchronous commits call the same
+`Manifest::WriteTo` implementation. Validation covers old indexes retained by
+stats, deltalog, or unrelated index updates as well as newly added indexes.
+Dropping an invalid old index can therefore unblock future commits.
 
-The existing reader normalizes relative paths lexically. Object keys containing
-literal repeated separators, `.` or `..` therefore still have that limitation.
-This fix preserves the stored representation on unchanged roundtrips; it does
-not claim arbitrary object-key fidelity or introduce broader normalization.
+This intentionally removes support for publishing legacy `index_files` and
+external `index_v1` layouts. Milvus callers that currently generate `../...`
+paths must instead produce artifacts beneath the segment's `_index/` and pass
+the full directory to the transaction API before adopting this change. Bare
+relative paths in existing FFI examples/tests have been updated to full paths.
+No Milvus dependency pin, file placement, or UAT data is changed here.
 
-## Historical manifests
+Reading old manifests remains unchanged. A legacy index expanded outside
+`_index/` prevents any commit that retains it. Already-corrupted metadata that
+looks like a path *inside* `_index/` cannot be identified by prefix validation;
+this check does not repair or prove the correctness of historical records.
 
-This prevents new corruption; it does not repair already incorrect manifests.
-An unchanged previously corrupted entry is preserved as stored, with the same
-incorrect read target. No repeated prefix is stripped heuristically.
-Repair requires the original manifests/version chain, layout and index IDs,
-verified object existence, and a separately designed conditional rewrite with
-cache/recovery checks and rollback. No UAT data or index files are modified.
+Copying stored Avro to a new segment retains the existing relative-path
+rebasing behavior. Writing an already-expanded manifest from another segment
+fails unless callers update its index paths to the new segment's prefix.
 
 ## Regression coverage
 
-- `TransactionTest.IndexPathsSurviveIndependentCommits`: real synchronous and
-  asynchronous open/commit calls, empty/single/multiple-component roots, ten
-  separate index publications alternating `index_files` and `index_v1`, then
-  stats, deltalog, replacement, and deletion commits. Each commit clears the
-  cache, reads persisted data, checks every remaining index, and decodes Avro
-  directly to check stored paths against the pre-fix reader's resolution rule.
-- `ManifestTest.IndexPathRepresentationsRoundTrip`: repeated reads/writes of
-  plain, `./`, `../`, external-layout, empty, absolute, URI, prefix-lookalike,
-  and lexically normalized inputs, including Manifest copies.
-- `ManifestTest.IndexPathEditsAndSegmentCopy`: copying a read index, changing
-  its path, copying the stored manifest into a different segment, and writing
-  a loaded index to another segment while retaining its target.
-- `ManifestTest.HistoricalIncorrectIndexPathIsNotGuessed`: historical incorrect
-  paths stay incorrect and stable; no heuristic data repair occurs.
+- Ten independent indexes followed by stats, deltalog, replacement, and
+  deletion commits; sync and async entrypoints; empty, single-component, and
+  multi-component roots. Every commit clears the cache and verifies all index
+  metadata and stored Avro suffixes.
+- Invalid prefixes, legacy layouts, relative inputs, URIs, empty paths, and
+  traversal/noncanonical inputs: errors leave no new manifest and do not
+  publish an output size.
+- New invalid indexes and retained legacy indexes both fail through sync/async
+  commits; reopening sees the original version and dropping the invalid index
+  allows a new commit.
+- Local absolute paths and copying stored manifests to another segment.
 
-Validation results and commands are recorded below. A local
-SubTreeFileSystem regression is distinct from a MinIO backend test. Neither is
-Milvus integration, CI, or UAT evidence. Milvus's dependency pin and its
-different-ID FFI/DataCoord regression should be updated after this fix is
-published and merged; this change does not preemptively change that pin.
+All builds, tests, and formatting run in the configured development container
+through `wt-build`, with ASAN, CRT, and FIU enabled and data-backed caches and
+outputs. Verification results for this revised policy are recorded below;
+results for the preceding compatibility implementation do not validate it.
 
-### Baseline reproduction (2026-10-19)
+### Verification of the revised policy
 
-Built the unchanged implementation at the revision above with the first three
-new tests. The transaction matrix and representation roundtrip failed; the
-path-edit/file-copy test passed (3 tests, 2 failed, exit 1). The transaction
-failure includes both synchronous and asynchronous calls and all three roots.
-For example, the expected `index_files/0/1/P/S` became
-`insert_log/C/P/sync/_index/index_files/0/1/P/S`; raw Avro contained the full
-object key instead of `../../../../../index_files/0/1/P/S`.
+Before adding validation, both new rejection tests failed against `0f5022e4`:
+invalid paths were committed and the next manifest version was visible.
+The baseline build/run exited 1; its log is
+`20261019T085215.714748Z/output.log` under this worktree's launcher log directory.
 
-All compilation and execution used the configured milvus-storage development
-container via `wt-build`, preserving ASAN, CRT, unit tests, and fault injection.
-The existing coverage files emitted checksum mismatch warnings after the
-branch update; subsequent runs use separate data-backed coverage directories.
+After validation was added:
 
-### Fixed implementation validation (2026-10-19)
-
-| Scope | Result |
+| Check | Result |
 | --- | --- |
-| C++ build, ASAN/CRT/FIU enabled | Passed |
-| `ManifestTest.*:TransactionTest.*:AsyncTransactionTest.*`, local filesystem | 67 passed; 1 remote-only conditional-write test skipped; 0 failed |
-| `Test_FFI`, local environment | 100 reported tests, 0 failed; cloud-only cases retain their existing skip behavior |
-| MinIO: four added regressions plus concurrent conditional commits | 5 passed, 0 skipped, 0 failed |
-| clang-format 18.1.8 on changed lines, `git diff --check` | Passed |
-| Milvus Go/FFI/DataCoord integration, CI, UAT | Not run |
+| C++ build with ASAN/CRT/FIU | Passed |
+| `ManifestTest.*:TransactionTest.*:AsyncTransactionTest.*` | 69 passed, 1 remote-only test skipped, 0 failed |
+| Local `Test_FFI` | 100 reported tests, 0 failed; existing cloud-only skip retained |
+| MinIO: valid roundtrips, invalid/new/retained paths, copying, conditional commits | 6 passed, 0 skipped, 0 failed |
+| clang-format 18.1.8 on changed lines; `git diff --check` | Passed |
 
-The MinIO run used the locally available `RELEASE.2025-09-07T16-13-09Z`
-image, digest `sha256:69b2ec208575b69597784255eec6fa6a2985ee9e1a47f4411a51f7f5fdd193a9`,
-on `localhost:19040`, with a dedicated bucket. It is a real local S3-compatible
-backend test, not an AWS S3 or UAT test. Its container root was read-only,
-file logging disabled, and data/tmp directories bind-mounted from `/data/yuruiz`.
-
-Build through the configured local launcher:
+Build and local tests used:
 
 ```bash
-wt-build <checkout> -- storage-build USE_ASAN=True WITH_CRT=True WITH_BENCHMARK=False
+wt-build <checkout> -- bash -c '
+  cmake --build cpp/build/Release --target milvus_test Test_FFI -j 32 &&
+  source cpp/build/Release/generators/conanrun.sh &&
+  export GCOV_PREFIX="$BUILD_CACHE_LOG_DIR/gcov" &&
+  cpp/build/Release/test/milvus_test --gtest_filter=ManifestTest.*:TransactionTest.*:AsyncTransactionTest.* &&
+  cpp/build/Release/test/Test_FFI'
 ```
 
-Inside that container, after sourcing `cpp/build/Release/generators/conanrun.sh`:
+The MinIO run used `TEST_ENV_STORAGE_TYPE=remote`, address
+`http://localhost:19040`, bucket `manifest-index-roundtrip`, region `us-east-1`,
+and direct localhost proxy exclusions. It ran the two new transaction tests,
+the existing concurrent-commit test, `ManifestTest.IndexPaths*`, and
+`ManifestTest.RejectInvalidIndexPathsBeforeWriting`. The server was
+`RELEASE.2025-09-07T16-13-09Z`, with a read-only container root, logging disabled,
+and data-backed bind mounts. This is local S3-compatible backend evidence;
+Milvus integration, CI, AWS S3, and UAT were not run.
 
-```bash
-export GCOV_PREFIX="$BUILD_CACHE_LOG_DIR/gcov"
-cpp/build/Release/test/milvus_test \
-  --gtest_filter='ManifestTest.*:TransactionTest.*:AsyncTransactionTest.*'
-cpp/build/Release/test/Test_FFI
-
-env TEST_ENV_STORAGE_TYPE=remote TEST_ENV_ADDRESS=http://localhost:19040 \
-  TEST_ENV_BUCKET_NAME=manifest-index-roundtrip TEST_ENV_REGION=us-east-1 \
-  NO_PROXY=localhost,127.0.0.1 no_proxy=localhost,127.0.0.1 \
-  cpp/build/Release/test/milvus_test \
-  --gtest_filter='TransactionTest.IndexPathsSurviveIndependentCommits:TransactionTest.ConcurrentCommitsWithConditionalWrite:ManifestTest.IndexPath*:ManifestTest.HistoricalIncorrectIndexPathIsNotGuessed'
-```
-
-Local evidence is in the launcher's worktree log directory
+Evidence under
 `/data/yuruiz/build-cache/state/f7db44d3c4dbc13e-milvus-storage/worktrees/eacb77401875b444/logs/`:
 
-- Baseline failure: `20261019T083543.646751Z`.
-- Final build: `20261019T084042.440459Z`.
-- Local C++ and FFI: `20261019T084245.094470Z`.
-- MinIO: `20261019T084309.997767Z`.
-- Changed-line format check: `20261019T084325.347161Z`.
+- Baseline failure: `20261019T085215.714748Z`.
+- Build, local C++ and FFI: `20261019T085423.905526Z`.
+- MinIO: `20261019T085732.007875Z`.
+- Changed-line format check: `20261019T085747.218670Z`.
 
-Each directory contains `output.log` and `report.json`. The delivery commit
-identifies this implementation; it must be published/merged before Milvus can
-pin a remotely available revision.
+Each run has `output.log` and `report.json`.

@@ -950,7 +950,8 @@ FFI_EXPORT LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle hand
  * @brief Record metadata for an index file that has already been written.
  *
  * The transaction stores metadata only; it does not create or write the file
- * identified by index_info->path.
+ * identified by index_info->path. At commit, path must be a full canonical
+ * path under the transaction segment's _index/ directory.
  */
 FFI_EXPORT LoonFFIResult loon_transaction_add_index_info(LoonTransactionHandle handle, const LoonIndexInfo* index_info);
 
