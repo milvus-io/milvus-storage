@@ -302,7 +302,7 @@ static void test_add_index_info_and_commit(void) {
       .column_name = "vector",
       .index_name = "vector_hnsw",
       .index_type = "HNSW",
-      .path = TEST_BASE_PATH "/_index/vector-hnsw",
+      .path = "vector-hnsw",
       .field_id = 100,
       .index_id = 200,
       .build_id = 300,
@@ -377,7 +377,7 @@ static void test_drop_index_and_commit(void) {
       .column_name = "vector",
       .index_name = "vector_hnsw",
       .index_type = "HNSW",
-      .path = TEST_BASE_PATH "/_index/vector-hnsw",
+      .path = "vector-hnsw",
       .index_id = 200,
       .build_id = 300,
   };

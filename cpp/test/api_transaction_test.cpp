@@ -224,7 +224,9 @@ TEST_F(TransactionTest, IndexPathsSurviveIndependentCommits) {
                     .index_store_path_version = i % 2,
                     .index_file_keys = {"header", "data"},
                     .properties = {{"M", "32"}}};
-        transaction->AddIndexInfo(index);
+        auto input_index = index;
+        input_index.path = relative;
+        transaction->AddIndexInfo(input_index);
         expected.push_back(index);
         stored_paths.push_back(relative);
         ASSERT_NO_FATAL_FAILURE(commit_and_check(*transaction));
@@ -262,69 +264,59 @@ TEST_F(TransactionTest, IndexPathsSurviveIndependentCommits) {
   }
 }
 
-TEST_F(TransactionTest, InvalidIndexPathRejectsNewAndRetainedIndexes) {
+TEST_F(TransactionTest, ParentRelativeIndexPathRejectsCommit) {
   folly::CPUThreadPoolExecutor executor(1);
   for (bool async : {false, true}) {
-    for (bool legacy : {false, true}) {
-      const auto segment = base_path_ + "/reject-" + std::to_string(async) + "-" + std::to_string(legacy);
-      const auto first = get_manifest_filepath(segment, 1);
-      ASSERT_STATUS_OK(fs_->CreateDir(get_manifest_path(segment), true));
-      // Seed raw Avro to model manifests written before prefix validation.
-      Manifest raw({}, {}, {}, {Index{.path = "valid", .index_id = 1}});
-      if (legacy) {
-        raw.indexes().push_back(Index{.path = "../../../../../index_files/A", .index_id = 2});
-      }
-      std::ostringstream bytes;
-      ASSERT_STATUS_OK(raw.serialize(bytes));
-      ASSERT_AND_ASSIGN(auto output, fs_->OpenOutputStream(first));
-      ASSERT_STATUS_OK(output->Write(bytes.str()));
-      ASSERT_STATUS_OK(output->Close());
-      Manifest::CleanCache();
-      std::unique_ptr<Transaction> transaction;
-      if (async) {
-        std::shared_ptr<AsyncOperation> operation;
-        auto result = Transaction::OpenAsync(segment, {}, LATEST, -1, FailResolver, 1, 30000, operation, fs_)
-                          .via(&executor)
-                          .get();
-        ASSERT_TRUE(result.status.ok());
-        transaction = std::move(result.transaction);
-      } else {
-        ASSERT_AND_ASSIGN(transaction, Transaction::Open(fs_, segment));
-      }
-      if (legacy) {
-        transaction->UpdateStat("bloom", Statistics{{"bloom.bin"}, {}});
-      } else {
-        transaction->AddIndexInfo(Index{.path = "../../../../../index_files/B", .index_id = 2});
-      }
-      arrow::Status status;
-      if (async) {
-        std::shared_ptr<AsyncOperation> operation;
-        auto result = transaction->CommitAsync(30000, operation).via(&executor).get();
-        status = result.status.detail;
-        EXPECT_FALSE(result.status.ok());
-        EXPECT_EQ(result.version, -1);
-        EXPECT_EQ(result.manifest_size, -1);
-      } else {
-        int64_t size = 123;
-        auto result = transaction->Commit(&size);
-        status = result.status();
-        EXPECT_FALSE(result.ok());
-        EXPECT_EQ(size, 123);
-      }
-      EXPECT_NE(status.ToString().find("Invalid index path"), std::string::npos) << status;
-      ASSERT_AND_ASSIGN(auto info, fs_->GetFileInfo(get_manifest_filepath(segment, 2)));
-      EXPECT_EQ(info.type(), arrow::fs::FileType::NotFound);
-      Manifest::CleanCache();
-      ASSERT_AND_ASSIGN(auto reopened, Transaction::Open(fs_, segment));
-      EXPECT_EQ(reopened->GetReadVersion(), 1);
-      ASSERT_AND_ASSIGN(auto manifest, reopened->GetManifest());
-      EXPECT_TRUE(manifest->stats().empty());
-      EXPECT_EQ(manifest->indexes()[0].path, segment + "/_index/valid");
-      // Removing the old invalid entry allows a subsequent commit to succeed.
-      reopened->DropIndex(2);
-      ASSERT_AND_ASSIGN(auto version, reopened->Commit());
-      EXPECT_EQ(version, 2);
+    const auto segment = base_path_ + "/reject-" + std::to_string(async);
+    const auto first = get_manifest_filepath(segment, 1);
+    ASSERT_STATUS_OK(fs_->CreateDir(get_manifest_path(segment), true));
+    // Seed a valid relative index path in the existing manifest.
+    Manifest raw({}, {}, {}, {Index{.path = "valid", .index_id = 1}});
+    std::ostringstream bytes;
+    ASSERT_STATUS_OK(raw.serialize(bytes));
+    ASSERT_AND_ASSIGN(auto output, fs_->OpenOutputStream(first));
+    ASSERT_STATUS_OK(output->Write(bytes.str()));
+    ASSERT_STATUS_OK(output->Close());
+    Manifest::CleanCache();
+    std::unique_ptr<Transaction> transaction;
+    if (async) {
+      std::shared_ptr<AsyncOperation> operation;
+      auto result =
+          Transaction::OpenAsync(segment, {}, LATEST, -1, FailResolver, 1, 30000, operation, fs_).via(&executor).get();
+      ASSERT_TRUE(result.status.ok());
+      transaction = std::move(result.transaction);
+    } else {
+      ASSERT_AND_ASSIGN(transaction, Transaction::Open(fs_, segment));
     }
+    transaction->AddIndexInfo(Index{.path = "../../../../../index_files/B", .index_id = 2});
+    arrow::Status status;
+    if (async) {
+      std::shared_ptr<AsyncOperation> operation;
+      auto result = transaction->CommitAsync(30000, operation).via(&executor).get();
+      status = result.status.detail;
+      EXPECT_FALSE(result.status.ok());
+      EXPECT_EQ(result.version, -1);
+      EXPECT_EQ(result.manifest_size, -1);
+    } else {
+      int64_t size = 123;
+      auto result = transaction->Commit(&size);
+      status = result.status();
+      EXPECT_FALSE(result.ok());
+      EXPECT_EQ(size, 123);
+    }
+    EXPECT_NE(status.ToString().find("Invalid index path"), std::string::npos) << status;
+    ASSERT_AND_ASSIGN(auto info, fs_->GetFileInfo(get_manifest_filepath(segment, 2)));
+    EXPECT_EQ(info.type(), arrow::fs::FileType::NotFound);
+    Manifest::CleanCache();
+    ASSERT_AND_ASSIGN(auto reopened, Transaction::Open(fs_, segment));
+    EXPECT_EQ(reopened->GetReadVersion(), 1);
+    ASSERT_AND_ASSIGN(auto manifest, reopened->GetManifest());
+    EXPECT_TRUE(manifest->stats().empty());
+    EXPECT_EQ(manifest->indexes()[0].path, segment + "/_index/valid");
+    // Replace the rejected staged entry with a valid relative path and retry.
+    transaction->AddIndexInfo(Index{.path = "replacement", .index_id = 2});
+    ASSERT_AND_ASSIGN(auto version, transaction->Commit());
+    EXPECT_EQ(version, 2);
   }
 }
 

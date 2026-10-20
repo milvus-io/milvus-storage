@@ -93,7 +93,7 @@ struct Index {
   std::string column_name;  ///< Column this index is built on; field_id is authoritative for loading
   std::string index_name;   ///< User-visible index name carried in the QueryNode load request
   std::string index_type;   ///< Index type: "hnsw", "ivf-sq", "ivf-pq", "inverted", "bitmap", "ordered"
-  std::string path;         ///< Full canonical directory under <segment>/_index/ when committing
+  std::string path;         ///< Artifact directory/prefix; combine with index_file_keys for full file paths
   int64_t field_id = 0;
   int64_t index_id = 0;
   int64_t build_id = 0;
@@ -226,7 +226,7 @@ class Manifest final {
    * @param path Path to write the manifest file
    * @param manifest Manifest to write
    * @param out_manifest_size Optional output size in bytes, written only on success
-   * @return Status (Invalid if an index is not a canonical child of <segment>/_index/,
+   * @return Status (Invalid if a normalized relative index path starts with a parent component,
    *         AlreadyExists if the manifest file already exists)
    */
   static arrow::Status WriteTo(const milvus_storage::ArrowFileSystemPtr& fs,

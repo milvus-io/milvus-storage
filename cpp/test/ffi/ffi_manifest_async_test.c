@@ -235,12 +235,10 @@ static void test_async_commit_roundtrip(void) {
   result = loon_transaction_add_column_group(transaction, &group);
   ck_assert_int_eq(result.err_code, 0);
   loon_ffi_free_result(&result);
-  char index_path[160];
-  snprintf(index_path, sizeof(index_path), "%s/_index/hnsw", path);
   LoonIndexInfo index = {.column_name = "vector",
                          .index_name = "vector_hnsw",
                          .index_type = "HNSW",
-                         .path = index_path,
+                         .path = "_index/hnsw",
                          .field_id = 100,
                          .index_id = 7};
   result = loon_transaction_add_index_info(transaction, &index);

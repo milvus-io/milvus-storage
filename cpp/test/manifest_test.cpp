@@ -131,10 +131,11 @@ TEST_F(ManifestTest, IndexPathsUnderPrefixRoundTrip) {
     auto bucket = std::make_shared<arrow::fs::SubTreeFileSystem>(base_path_, fs_);
     const auto segment = root + "insert_log/C/P/S";
     ASSERT_STATUS_OK(bucket->CreateDir(get_manifest_path(segment), true));
-    const std::vector<std::string> suffixes = {"plain", "nested/file", "directory/"};
+    const std::vector<std::string> suffixes = {"plain", "nested/file",       "directory/",
+                                               "./dot", "nested/../sibling", "..hidden"};
     Manifest manifest;
     for (const auto& suffix : suffixes) {
-      manifest.indexes().push_back(Index{.path = segment + "/_index/" + suffix});
+      manifest.indexes().push_back(Index{.path = suffix});
     }
     for (int version = 1; version <= 3; ++version) {
       const auto path = get_manifest_filepath(segment, version);
@@ -143,7 +144,8 @@ TEST_F(ManifestTest, IndexPathsUnderPrefixRoundTrip) {
       ASSERT_AND_ASSIGN(auto read, Manifest::ReadFrom(bucket, path));
       ASSERT_EQ(read->indexes().size(), suffixes.size());
       for (size_t i = 0; i < suffixes.size(); ++i) {
-        EXPECT_EQ(read->indexes()[i].path, segment + "/_index/" + suffixes[i]);
+        EXPECT_EQ(read->indexes()[i].path,
+                  (std::filesystem::path(segment) / "_index" / suffixes[i]).lexically_normal().string());
       }
       ASSERT_AND_ASSIGN(auto input, bucket->OpenInputFile(path));
       ASSERT_AND_ASSIGN(auto size, input->GetSize());
@@ -154,7 +156,8 @@ TEST_F(ManifestTest, IndexPathsUnderPrefixRoundTrip) {
       ASSERT_STATUS_OK(raw.deserialize(stream));
       ASSERT_EQ(raw.indexes().size(), suffixes.size());
       for (size_t i = 0; i < suffixes.size(); ++i) {
-        EXPECT_EQ(raw.indexes()[i].path, suffixes[i]);
+        EXPECT_EQ(raw.indexes()[i].path,
+                  version == 1 ? suffixes[i] : std::filesystem::path(suffixes[i]).lexically_normal().string());
       }
       manifest = *read;
     }
@@ -163,24 +166,13 @@ TEST_F(ManifestTest, IndexPathsUnderPrefixRoundTrip) {
 
 TEST_F(ManifestTest, RejectInvalidIndexPathsBeforeWriting) {
   const auto prefix = base_path_ + "/_index/";
-  const std::vector<std::string> invalid = {"",
-                                            "plain",
-                                            "./plain",
+  const std::vector<std::string> invalid = {"..",
                                             "../index_files/A",
                                             "../../../../../index_v1/B",
-                                            "R/index_files/A",
-                                            "R/index_v1/B",
-                                            "other-segment/_index/A",
-                                            "/outside/index",
-                                            "s3://endpoint/bucket/index",
-                                            base_path_ + "/_index-other/A",
-                                            base_path_ + "/_index",
-                                            prefix,
+                                            "./../A",
+                                            "nested/../../A",
                                             prefix + "../escape",
-                                            prefix + "nested/../../escape",
-                                            prefix + "./A",
-                                            prefix + "nested/../A",
-                                            prefix + "/A"};
+                                            prefix + "nested/../../escape"};
   for (size_t i = 0; i < invalid.size(); ++i) {
     SCOPED_TRACE(invalid[i]);
     const auto path = get_manifest_filepath(base_path_, i + 1);
@@ -188,7 +180,7 @@ TEST_F(ManifestTest, RejectInvalidIndexPathsBeforeWriting) {
     Manifest manifest({}, {}, {}, {Index{.path = invalid[i]}});
     const auto status = Manifest::WriteTo(fs_, path, manifest, &size);
     EXPECT_TRUE(status.IsInvalid()) << status;
-    EXPECT_NE(status.message().find(prefix), std::string::npos);
+    EXPECT_NE(status.message().find("must not start with"), std::string::npos);
     EXPECT_EQ(size, 123);
     EXPECT_EQ(manifest.indexes()[0].path, invalid[i]);
     ASSERT_AND_ASSIGN(auto info, fs_->GetFileInfo(path));
@@ -198,7 +190,7 @@ TEST_F(ManifestTest, RejectInvalidIndexPathsBeforeWriting) {
 
 TEST_F(ManifestTest, IndexPathsRebaseWhenStoredManifestIsCopied) {
   Manifest manifest({}, {}, {}, {Index{.path = base_path_ + "/_index/plain"}});
-  auto original = RoundTrip(manifest);
+  RoundTrip(manifest);
   const auto new_base = base_path_ + "/new-segment";
   ASSERT_STATUS_OK(fs_->CreateDir(get_manifest_path(new_base), true));
   const auto destination = get_manifest_filepath(new_base, 1);
@@ -206,11 +198,10 @@ TEST_F(ManifestTest, IndexPathsRebaseWhenStoredManifestIsCopied) {
   Manifest::CleanCache();
   ASSERT_AND_ASSIGN(auto moved, Manifest::ReadFrom(fs_, destination));
   EXPECT_EQ(moved->indexes()[0].path, new_base + "/_index/plain");
-  EXPECT_TRUE(Manifest::WriteTo(fs_, get_manifest_filepath(new_base, 2), *original).IsInvalid());
   ASSERT_STATUS_OK(Manifest::WriteTo(fs_, get_manifest_filepath(new_base, 2), *moved));
 }
 
-TEST_F(ManifestTest, LocalAbsoluteIndexPathMustUseSegmentPrefix) {
+TEST_F(ManifestTest, LocalAbsoluteIndexPathsRemainSupported) {
   if (IsCloudEnv()) {
     GTEST_SKIP() << "Local absolute paths use a local filesystem";
   }
@@ -225,7 +216,10 @@ TEST_F(ManifestTest, LocalAbsoluteIndexPathMustUseSegmentPrefix) {
   ASSERT_AND_ASSIGN(auto read, Manifest::ReadFrom(local, path));
   EXPECT_EQ(read->indexes()[0].path, manifest.indexes()[0].path);
   read->indexes()[0].path = segment + "/index_files/A";
-  EXPECT_TRUE(Manifest::WriteTo(local, get_manifest_filepath(segment, 2), *read).IsInvalid());
+  ASSERT_STATUS_OK(Manifest::WriteTo(local, get_manifest_filepath(segment, 2), *read));
+  Manifest::CleanCache();
+  ASSERT_AND_ASSIGN(auto external, Manifest::ReadFrom(local, get_manifest_filepath(segment, 2)));
+  EXPECT_EQ(external->indexes()[0].path, segment + "/index_files/A");
 }
 
 TEST_F(ManifestTest, ColumnGroupsRoundTrip) {
