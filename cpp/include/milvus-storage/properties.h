@@ -75,6 +75,7 @@ struct PropertyInfo {
 #define PROPERTY_FS_ROOT_PATH "fs.root_path"
 #define PROPERTY_FS_STORAGE_TYPE "fs.storage_type"
 #define PROPERTY_FS_CLOUD_PROVIDER "fs.cloud_provider"
+#define PROPERTY_FS_IAM_CREDENTIAL_SOURCE "fs.iam_credential_source"
 #define PROPERTY_FS_IAM_ENDPOINT "fs.iam_endpoint"
 #define PROPERTY_FS_LOG_LEVEL "fs.log_level"
 #define PROPERTY_FS_REGION "fs.region"

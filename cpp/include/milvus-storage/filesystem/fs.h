@@ -273,6 +273,9 @@ struct ArrowFileSystemConfig {
   // Empty for default filesystem
   std::string alias = "";
 
+  // Explicit AWS IAM sources never fall back to another identity.
+  std::string iam_credential_source = "default";
+
   static arrow::Status create_file_system_config(const milvus_storage::api::Properties& properties_map,
                                                  ArrowFileSystemConfig& result);
 

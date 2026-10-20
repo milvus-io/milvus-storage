@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+#include <aws/core/auth/AWSCredentialsProviderChain.h>
+#include <aws/core/auth/STSCredentialsProvider.h>
 
 #include <algorithm>
 #include <chrono>
@@ -2667,6 +2669,68 @@ TEST_F(S3ProviderTest, TencentStsSigningFailureReturnsNoCredentials) {
 
   EXPECT_TRUE(credentials.IsEmpty());
   EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
+}
+
+TEST_F(S3ProviderTest, ExplicitAwsIAMSourcesNeverConstructFallbackChains) {
+  ScopedEnvVar role("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/storage");
+  TempFile token("test-token");
+  ScopedEnvVar token_file("AWS_WEB_IDENTITY_TOKEN_FILE", token.path());
+  ScopedEnvVar region("AWS_DEFAULT_REGION", "us-east-1");
+  // Conflicting ambient credentials must not influence explicit selection.
+  ScopedEnvVar access_key("AWS_ACCESS_KEY_ID", "WRONG_ENVIRONMENT_KEY");
+  ScopedEnvVar secret_key("AWS_SECRET_ACCESS_KEY", "wrong-environment-secret");
+  ASSERT_AND_ASSIGN(auto web, CreateAWSCredentialsProvider("web_identity", "us-east-1"));
+  EXPECT_NE(dynamic_cast<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider*>(web.get()), nullptr);
+  EXPECT_EQ(dynamic_cast<Aws::Auth::AWSCredentialsProviderChain*>(web.get()), nullptr);
+  ASSERT_AND_ASSIGN(auto ec2, CreateAWSCredentialsProvider("instance_profile"));
+  EXPECT_NE(dynamic_cast<Aws::Auth::InstanceProfileCredentialsProvider*>(ec2.get()), nullptr);
+  EXPECT_EQ(dynamic_cast<Aws::Auth::AWSCredentialsProviderChain*>(ec2.get()), nullptr);
+  ASSERT_AND_ASSIGN(auto legacy, CreateAWSCredentialsProvider("default"));
+  EXPECT_NE(dynamic_cast<Aws::Auth::DefaultAWSCredentialsProviderChain*>(legacy.get()), nullptr);
+  EXPECT_FALSE(CreateAWSCredentialsProvider("typo").ok());
+}
+
+TEST_F(S3ProviderTest, ExplicitWebIdentityValidatesConfigurationWithoutFallback) {
+  ScopedEnvUnset role("AWS_ROLE_ARN");
+  EXPECT_FALSE(CreateAWSCredentialsProvider("web_identity").ok());
+  ScopedEnvVar set_role("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/storage");
+  ScopedEnvUnset token("AWS_WEB_IDENTITY_TOKEN_FILE");
+  EXPECT_FALSE(CreateAWSCredentialsProvider("web_identity").ok());
+  ScopedEnvVar set_token("AWS_WEB_IDENTITY_TOKEN_FILE", "/missing/token");
+  ScopedEnvUnset region("AWS_REGION");
+  ScopedEnvUnset default_region("AWS_DEFAULT_REGION");
+  EXPECT_FALSE(CreateAWSCredentialsProvider("web_identity").ok());
+}
+
+TEST_F(S3ProviderTest, ExplicitIAMRejectsIncompatibleConfig) {
+  ArrowFileSystemConfig config;
+  config.cloud_provider = kCloudProviderAWS;
+  config.iam_credential_source = "instance_profile";
+  config.use_iam = false;
+  EXPECT_FALSE(S3FileSystemProducer(config).CreateS3Options().ok());
+  config.use_iam = true;
+  config.cloud_provider = kCloudProviderAliyun;
+  EXPECT_FALSE(S3FileSystemProducer(config).CreateS3Options().ok());
+  config.cloud_provider = kCloudProviderAWS;
+  config.role_arn = "arn:aws:iam::123456789012:role/target";
+  EXPECT_FALSE(S3FileSystemProducer(config).CreateS3Options().ok());
+}
+
+TEST_F(S3ProviderTest, ExplicitIAMCacheIdentityAndLazyInitialization) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderAWS;
+  config.use_iam = true;
+  auto legacy_key = config.GetCacheKey();
+  config.iam_credential_source = "instance_profile";
+  auto ec2_key = config.GetCacheKey();
+  EXPECT_NE(legacy_key, ec2_key);
+  // No credential warm-up: an unavailable metadata service does not abort.
+  ASSERT_AND_ASSIGN(auto options, S3FileSystemProducer(config).CreateS3Options());
+  EXPECT_NE(dynamic_cast<Aws::Auth::InstanceProfileCredentialsProvider*>(options.credentials_provider.get()), nullptr);
+  config.iam_credential_source = "web_identity";
+  EXPECT_NE(config.GetCacheKey(), legacy_key);
+  EXPECT_NE(config.GetCacheKey(), ec2_key);
 }
 
 }  // namespace milvus_storage

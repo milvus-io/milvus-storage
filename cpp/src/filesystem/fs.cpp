@@ -82,6 +82,7 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
   }
 
   hash_combine(cloud_provider);
+  hash_combine(iam_credential_source);
   hash_combine(address);
   hash_combine(bucket_name);
   hash_combine(region);
@@ -300,6 +301,9 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
   ARROW_ASSIGN_OR_RAISE(result.use_ssl, api::GetValue<bool>(properties_map, PROPERTY_FS_USE_SSL));
   ARROW_ASSIGN_OR_RAISE(result.ssl_ca_cert, api::GetValue<std::string>(properties_map, PROPERTY_FS_SSL_CA_CERT));
   ARROW_ASSIGN_OR_RAISE(result.use_iam, api::GetValue<bool>(properties_map, PROPERTY_FS_USE_IAM));
+  ARROW_ASSIGN_OR_RAISE(result.iam_credential_source,
+                        api::GetValue<std::string>(properties_map, PROPERTY_FS_IAM_CREDENTIAL_SOURCE));
+
   ARROW_ASSIGN_OR_RAISE(result.use_virtual_host, api::GetValue<bool>(properties_map, PROPERTY_FS_USE_VIRTUAL_HOST));
   ARROW_ASSIGN_OR_RAISE(result.request_timeout_ms,
                         api::GetValue<int64_t>(properties_map, PROPERTY_FS_REQUEST_TIMEOUT_MS));
@@ -313,6 +317,10 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
   ARROW_ASSIGN_OR_RAISE(result.multi_part_upload_size,
                         api::GetValue<int64_t>(properties_map, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE));
   ARROW_ASSIGN_OR_RAISE(result.role_arn, api::GetValue<std::string>(properties_map, PROPERTY_FS_ROLE_ARN));
+  if (result.iam_credential_source != "default" &&
+      (!result.use_iam || result.cloud_provider != kCloudProviderAWS || !result.role_arn.empty())) {
+    return arrow::Status::Invalid("Explicit IAM credential source requires AWS use_iam=true without role_arn");
+  }
   ARROW_ASSIGN_OR_RAISE(result.session_name, api::GetValue<std::string>(properties_map, PROPERTY_FS_SESSION_NAME));
   ARROW_ASSIGN_OR_RAISE(result.external_id, api::GetValue<std::string>(properties_map, PROPERTY_FS_EXTERNAL_ID));
   ARROW_ASSIGN_OR_RAISE(result.load_frequency, api::GetValue<int32_t>(properties_map, PROPERTY_FS_LOAD_FREQUENCY));
