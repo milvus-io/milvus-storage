@@ -1852,13 +1852,18 @@ TEST_F(S3ProviderTest, AwsIamCredentialsPreferEnvironmentThenWebIdentityThenInst
   EXPECT_TRUE(credentials.GetSessionToken().empty());
 
   // Keep EC2 instance credentials behind environment credentials and Web Identity.
-  const auto chain = std::dynamic_pointer_cast<Aws::Auth::AWSCredentialsProviderChain>(options.credentials_provider);
+  const auto chain = std::dynamic_pointer_cast<AwsCredentialsProviderChain>(options.credentials_provider);
   ASSERT_NE(chain, nullptr);
   const auto& providers = chain->GetProviders();
   ASSERT_EQ(providers.size(), 3u);
   EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::EnvironmentAWSCredentialsProvider>(providers[0]), nullptr);
   EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>(providers[1]), nullptr);
   EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::InstanceProfileCredentialsProvider>(providers[2]), nullptr);
+
+  // External callers can construct the same policy through the public header.
+  const auto external_chain = std::make_shared<AwsCredentialsProviderChain>();
+  EXPECT_EQ(external_chain->GetAWSCredentials().GetAWSAccessKeyId(), "ENV_AK");
+  EXPECT_TRUE(external_chain->GetAWSCredentials().GetSessionToken().empty());
 }
 
 TEST_F(S3ProviderTest, AwsIamCredentialsExcludeInstanceProfileUnlessEnabled) {

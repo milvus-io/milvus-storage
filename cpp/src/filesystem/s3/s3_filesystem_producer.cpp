@@ -22,7 +22,6 @@
 #include <utility>
 
 #include <aws/core/auth/AWSCredentials.h>
-#include <aws/core/auth/AWSCredentialsProviderChain.h>
 #include <aws/core/auth/STSCredentialsProvider.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/standard/StandardHttpRequest.h>
@@ -66,26 +65,6 @@ namespace {
 
 constexpr const char* kTlsFactoryAllocationTag = "TlsHttpClientFactory";
 
-class AwsCredentialsProviderChain final : public Aws::Auth::AWSCredentialsProviderChain {
-  public:
-  AwsCredentialsProviderChain() {
-    // Prefer AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY from the environment,
-    // with AWS_SESSION_TOKEN when temporary credentials are used.
-    AddProvider(std::make_shared<Aws::Auth::EnvironmentAWSCredentialsProvider>());
-
-    // Otherwise exchange AWS_WEB_IDENTITY_TOKEN_FILE through STS for the IRSA
-    // Pod Role (AWS_ROLE_ARN).
-    AddProvider(std::make_shared<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>());
-
-    // Explicitly opt in to the EC2 Node Role for EC2 testing. Keep it disabled by
-    // default so an IRSA failure cannot fall back to a cached Node Role identity.
-    const auto metadata_enabled = Aws::Environment::GetEnv("AWS_EC2_METADATA_ENABLE");
-    if (Aws::Utils::StringUtils::ToLower(metadata_enabled.c_str()) == "true") {
-      AddProvider(std::make_shared<Aws::Auth::InstanceProfileCredentialsProvider>());
-    }
-  }
-};
-
 // HttpClientFactory that creates TlsCurlHttpClient instances so the AWS SDK
 // honors the configured minimum TLS version for S3-compatible providers.
 class TlsHttpClientFactory : public Aws::Http::HttpClientFactory {
@@ -124,6 +103,17 @@ class TlsHttpClientFactory : public Aws::Http::HttpClientFactory {
 };
 
 }  // namespace
+
+AwsCredentialsProviderChain::AwsCredentialsProviderChain() {
+  AddProvider(std::make_shared<Aws::Auth::EnvironmentAWSCredentialsProvider>());
+  AddProvider(std::make_shared<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>());
+
+  // Keep Node Role fallback opt-in: the SDK may cache it after an IRSA failure.
+  const auto metadata_enabled = Aws::Environment::GetEnv("AWS_EC2_METADATA_ENABLE");
+  if (Aws::Utils::StringUtils::ToLower(metadata_enabled.c_str()) == "true") {
+    AddProvider(std::make_shared<Aws::Auth::InstanceProfileCredentialsProvider>());
+  }
+}
 
 static std::unordered_map<std::string, S3LogLevel> LogLevel_Map = {
     {"off", S3LogLevel::Off},   {"fatal", S3LogLevel::Fatal}, {"error", S3LogLevel::Error}, {"warn", S3LogLevel::Warn},
@@ -321,10 +311,6 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
     auto credentials = provider->GetAWSCredentials();
     assert(!credentials.GetAWSAccessKeyId().empty() && "AWS Access Key ID is empty");
     assert(!credentials.GetAWSSecretKey().empty() && "AWS Secret Key is empty");
-    // AWS environment credentials may be long-term AK/SK without a session token.
-    if (config_.cloud_provider != kCloudProviderAWS) {
-      assert(!credentials.GetSessionToken().empty() && "AWS Session Token is empty");
-    }
     options.credentials_provider = provider;
   } else {
     options.ConfigureAccessKey(config_.access_key_id, config_.access_key_value);
