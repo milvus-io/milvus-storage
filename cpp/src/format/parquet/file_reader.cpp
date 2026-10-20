@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cstring>
 #include <memory>
 #include <numeric>
 #include <string>
@@ -74,19 +75,15 @@ arrow::Result<std::shared_ptr<FileRowGroupReader>> FileRowGroupReader::Make(
   return reader;
 }
 
-// Parquet data files are immutable once written, so their footer metadata is
-// stable and safe to share across batch readers. Capacity is entry-based;
-// footers are typically a few KB to a few hundred KB. StorageV2 object keys
-// (insert_log/<collectionID>/<partitionID>/<segmentID>/<columnGroupID>/<logID>)
-// are unique by construction, so the path alone is a safe cache key.
-static constexpr size_t kFooterMetadataCacheCapacity = 256;
-
-LRUCache<std::string, std::shared_ptr<::parquet::FileMetaData>>& FileRowGroupReader::getFooterMetadataCache() {
-  static LRUCache<std::string, std::shared_ptr<::parquet::FileMetaData>> cache(kFooterMetadataCacheCapacity);
-  return cache;
+// Arrow DeepClone isolates key material and utilized state. Its key retriever
+// and AAD verifier remain shared callbacks, as in the existing reader path.
+static parquet::ReaderProperties CloneReaderProperties(const parquet::ReaderProperties& props) {
+  auto copy = props;
+  if (props.file_decryption_properties()) {
+    copy.file_decryption_properties(props.file_decryption_properties()->DeepClone());
+  }
+  return copy;
 }
-
-void FileRowGroupReader::CleanFooterMetadataCache() { getFooterMetadataCache().clean(); }
 
 // Open a parquet Arrow reader, reusing a caller-provided FileMetaData when
 // available so Arrow skips the footer read. Kept file-local so the public
@@ -96,21 +93,27 @@ static arrow::Result<std::unique_ptr<parquet::arrow::FileReader>> OpenParquetFil
     const std::string& file_path,
     const parquet::ReaderProperties& reader_props,
     const parquet::ArrowReaderProperties& arrow_reader_props,
-    std::shared_ptr<parquet::FileMetaData> metadata) {
+    std::shared_ptr<parquet::FileMetaData> metadata,
+    bool* encrypted_footer = nullptr) {
   ARROW_ASSIGN_OR_RAISE(auto file, fs.OpenInputFile(file_path));
+  // Arrow 17 only exposes the encryption_algorithm flag for plaintext
+  // footers. The encrypted-footer decryptor is private, so inspect the trailer
+  // on the probe's existing handle rather than retaining encrypted metadata.
+  if (encrypted_footer) {
+    *encrypted_footer = false;
+    ARROW_ASSIGN_OR_RAISE(auto size, file->GetSize());
+    if (size >= 4) {
+      ARROW_ASSIGN_OR_RAISE(auto magic, file->ReadAt(size - 4, 4));
+      *encrypted_footer = magic->size() == 4 && std::memcmp(magic->data(), "PARE", 4) == 0;
+    }
+  }
   parquet::arrow::FileReaderBuilder builder;
   std::unique_ptr<parquet::arrow::FileReader> reader;
 
-  // Create a completely independent deep copy of reader_props to prevent any
-  // mutations. This ensures the original reader_props object remains unchanged.
-  auto reader_props_copy = std::make_shared<parquet::ReaderProperties>(reader_props);
-  if (reader_props.file_decryption_properties()) {
-    auto deep_copied_decryption = reader_props.file_decryption_properties()->DeepClone();
-    reader_props_copy->file_decryption_properties(std::move(deep_copied_decryption));
-  }
+  auto reader_props_copy = CloneReaderProperties(reader_props);
 
   // A non-null metadata makes Arrow skip ParseMetaData() (the footer read).
-  ARROW_RETURN_NOT_OK(builder.Open(std::move(file), *reader_props_copy, std::move(metadata)));
+  ARROW_RETURN_NOT_OK(builder.Open(std::move(file), reader_props_copy, std::move(metadata)));
   ARROW_RETURN_NOT_OK(
       builder.memory_pool(arrow::default_memory_pool())->properties(arrow_reader_props)->Build(&reader));
   return std::move(reader);
@@ -121,39 +124,19 @@ arrow::Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs
                                        const int64_t buffer_size,
                                        const std::shared_ptr<arrow::Schema> schema,
                                        parquet::ReaderProperties reader_props,
-                                       const parquet::ArrowReaderProperties& arrow_reader_props) {
+                                       const parquet::ArrowReaderProperties& arrow_reader_props,
+                                       std::shared_ptr<parquet::FileMetaData> metadata) {
   fs_ = std::move(fs);
   path_ = path;
   buffer_size_limit_ = buffer_size <= 0 ? INT64_MAX : buffer_size;
 
-  // Reuse a previously parsed footer when available so each batch reader
-  // created by FileRowGroupReader::Make skips the footer read. Cache entries
-  // are only ever populated for plaintext files (see the put below), so a hit
-  // is safe to reuse regardless of whether the caller configured decryption
-  // properties.
-  std::shared_ptr<::parquet::FileMetaData> cached_metadata;
-  auto cached = getFooterMetadataCache().get(path_);
-  if (cached.has_value()) {
-    cached_metadata = *cached;
+  if (!fs_) {
+    return arrow::Status::Invalid("Parquet filesystem must not be null");
   }
-  const bool cache_miss = !cached_metadata;
+  ARROW_ASSIGN_OR_RAISE(file_reader_,
+                        OpenParquetFileReader(*fs_, path_, reader_props, arrow_reader_props, std::move(metadata)));
 
-  // Open the file; a non-null metadata makes Arrow skip footer parsing.
-  ARROW_ASSIGN_OR_RAISE(
-      file_reader_, OpenParquetFileReader(*fs_, path_, reader_props, arrow_reader_props, std::move(cached_metadata)));
-
-  if (cache_miss) {
-    auto metadata = file_reader_->parquet_reader()->metadata();
-    // Only cache plaintext files. A configured key retriever does not mean the
-    // file is encrypted; encryption is declared in the footer itself, so judge
-    // cacheability from the parsed metadata. Encrypted files are always opened
-    // fresh and never share cached metadata.
-    if (metadata && !metadata->is_encryption_algorithm_set()) {
-      getFooterMetadataCache().put(path_, metadata);
-    }
-  }
-
-  auto metadata = file_reader_->parquet_reader()->metadata();
+  metadata = file_reader_->parquet_reader()->metadata();
   ARROW_ASSIGN_OR_RAISE(file_metadata_, PackedFileMetadata::Make(metadata));
 
   // If schema is not provided, use the schema from the file
@@ -164,7 +147,7 @@ arrow::Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs
       return status;
     }
     schema_ = file_schema;
-    field_id_list_ = FieldIDList::Make(schema_).ValueOrDie();
+    ARROW_ASSIGN_OR_RAISE(field_id_list_, FieldIDList::Make(schema_));
     for (size_t i = 0; i < field_id_list_.size(); ++i) {
       needed_columns_.emplace_back(i);
     }
@@ -187,6 +170,52 @@ arrow::Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs
   }
 
   return arrow::Status::OK();
+}
+
+PreparedParquetFile::PreparedParquetFile(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                         std::string path,
+                                         const parquet::ReaderProperties& reader_props)
+    : fs_(std::move(fs)), path_(std::move(path)), reader_props_(CloneReaderProperties(reader_props)) {}
+
+arrow::Result<std::shared_ptr<PreparedParquetFile>> PreparedParquetFile::Open(
+    std::shared_ptr<arrow::fs::FileSystem> fs, const std::string& path, const parquet::ReaderProperties& reader_props) {
+  if (!fs) {
+    return arrow::Status::Invalid("Parquet filesystem must not be null");
+  }
+  auto prepared = std::shared_ptr<PreparedParquetFile>(new PreparedParquetFile(std::move(fs), path, reader_props));
+  // Always take the normal open path first: metadata injection skips Arrow's
+  // plaintext/decryption policy checks. Only publish after those checks and all
+  // packed layout/schema validation have succeeded.
+  bool encrypted_footer = false;
+  ARROW_ASSIGN_OR_RAISE(auto probe,
+                        OpenParquetFileReader(*prepared->fs_, path, prepared->reader_props_,
+                                              parquet::default_arrow_reader_properties(), nullptr, &encrypted_footer));
+  std::shared_ptr<arrow::Schema> file_schema;
+  ARROW_RETURN_NOT_OK(probe->GetSchema(&file_schema));
+  ARROW_RETURN_NOT_OK(FieldIDList::Make(file_schema).status());
+  auto metadata = probe->parquet_reader()->metadata();
+  ARROW_ASSIGN_OR_RAISE(auto packed, PackedFileMetadata::Make(metadata));
+  prepared->row_group_metadata_ = packed->GetRowGroupMetadataVector();
+  prepared->field_id_mapping_ = packed->GetFieldIDMapping();
+  prepared->group_field_id_list_ = packed->GetGroupFieldIDList();
+  prepared->storage_version_ = packed->GetStorageVersion();
+  if (!encrypted_footer && !metadata->is_encryption_algorithm_set()) {
+    prepared->plaintext_metadata_ = metadata;
+  }
+  // Probe, packed metadata and file handle are local. Encrypted metadata is not
+  // retained by the context; only independent layout values survive.
+  return prepared;
+}
+
+arrow::Result<std::shared_ptr<FileRowGroupReader>> PreparedParquetFile::MakeReader(
+    const std::shared_ptr<arrow::Schema>& schema,
+    int64_t buffer_size,
+    const parquet::ArrowReaderProperties& arrow_reader_props) const {
+  auto reader =
+      std::shared_ptr<FileRowGroupReader>(new FileRowGroupReader(fs_, path_, schema, buffer_size, reader_props_));
+  ARROW_RETURN_NOT_OK(
+      reader->init(fs_, path_, buffer_size, schema, reader_props_, arrow_reader_props, plaintext_metadata_));
+  return reader;
 }
 
 std::shared_ptr<PackedFileMetadata> FileRowGroupReader::file_metadata() { return file_metadata_; }

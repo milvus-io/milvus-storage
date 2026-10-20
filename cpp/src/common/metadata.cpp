@@ -282,6 +282,9 @@ arrow::Result<std::shared_ptr<PackedFileMetadata>> PackedFileMetadata::Make(
     std::shared_ptr<parquet::FileMetaData> metadata) {
   // deserialize row group metadata
   auto key_value_metadata = metadata->key_value_metadata();
+  if (!key_value_metadata) {
+    return arrow::Status::Invalid("Not a packed parquet file: no key-value metadata present");
+  }
   auto row_group_meta = key_value_metadata->Get(ROW_GROUP_META_KEY);
   if (!row_group_meta.ok()) {
     return arrow::Status::Invalid("Row group metadata not found");
