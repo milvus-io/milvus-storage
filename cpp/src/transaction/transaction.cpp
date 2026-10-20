@@ -17,6 +17,7 @@
 #include <cassert>
 #include <charconv>
 #include <chrono>
+#include <filesystem>
 #include <set>
 #include <thread>
 #include <fmt/format.h>
@@ -198,6 +199,13 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   }
 
   for (const auto& new_idx : updates.GetAddedIndexes()) {
+    // Validate only newly added/replaced paths; keep the supplied representation.
+    const auto normalized = std::filesystem::path(new_idx.path).lexically_normal();
+    if (!normalized.empty() && *normalized.begin() == "..") {
+      return arrow::Status::Invalid(
+          fmt::format("Invalid index path '{}' for index {}: relative path must not start with '..'", new_idx.path,
+                      new_idx.index_id));
+    }
     indexes.erase(std::remove_if(indexes.begin(), indexes.end(),
                                  [&](const Index& idx) {
                                    // index_id is the stable identity of a user index. It

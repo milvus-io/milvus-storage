@@ -950,7 +950,8 @@ FFI_EXPORT LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle hand
  * @brief Record metadata for an index file that has already been written.
  *
  * The transaction stores metadata only; it does not create or write the file
- * identified by index_info->path.
+ * identified by index_info->path. Relative paths are resolved under _index/;
+ * commit rejects newly added/replaced paths that normalize to a leading parent component.
  */
 FFI_EXPORT LoonFFIResult loon_transaction_add_index_info(LoonTransactionHandle handle, const LoonIndexInfo* index_info);
 
