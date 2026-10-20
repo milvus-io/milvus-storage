@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -21,6 +22,7 @@
 #include <cctype>
 #include <mutex>
 #include <fstream>
+#include <future>
 #include <map>
 #include <memory>
 #include <queue>
@@ -44,6 +46,7 @@
 #include <aws/core/utils/stream/ResponseStream.h>
 #include <aws/core/utils/HashingUtils.h>
 
+#include "milvus-storage/filesystem/s3/provider/AwsCredentialBrokerProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
@@ -760,6 +763,30 @@ TEST_F(S3ProviderTest, TestVolcengineOIDCProviderRejectsInvalidExpiry) {
     // A rejected response must not be cached or prevent the next valid refresh.
     EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "INNER_AK");
     EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 2);
+  }
+}
+
+TEST_F(S3ProviderTest, TestVolcengineStsHonorsExpirationTimezoneOffsets) {
+  const Aws::Utils::DateTime expiration("2099-12-31T16:30:00Z", Aws::Utils::DateFormat::ISO_8601);
+  for (const auto* expired_at :
+       {"2099-12-31T16:30:00Z", "2100-01-01T00:30:00+08:00", "2099-12-31T12:00:00-04:30", "2100-01-01T00:30:00+0800",
+        "2099-12-31T12:00:00.1-0430", "2100-01-01T00:30:00.123456789+08:00"}) {
+    SCOPED_TRACE(expired_at);
+    auto inner = nlohmann::json::parse(kVolcInnerOidcSuccessJson);
+    inner["Result"]["Credentials"]["Expiration"] = expired_at;
+    auto outer = nlohmann::json::parse(kVolcOuterAssumeRoleSuccessJson);
+    outer["Result"]["Credentials"]["ExpiredTime"] = expired_at;
+    mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, inner.dump());
+    mock_client_->EnqueueResponse("sts.volcengineapi.com", Aws::Http::HttpResponseCode::OK, outer.dump());
+
+    VolcengineSTSCredentialsClient client(MakeNoImdsClientConfiguration(), 900);
+    const auto oidc = client.GetAssumeRoleWithWebIdentityCredentials({"oidc-token", "machine-role", "session"});
+    EXPECT_EQ(oidc.creds.GetAWSAccessKeyId(), "INNER_AK");
+    EXPECT_EQ(oidc.creds.GetExpiration().Millis(), expiration.Millis());
+    const auto assumed =
+        client.GetAssumeRoleCredentials({"INNER_AK", "INNER_SK", "INNER_TOKEN", "target-role", "session"});
+    EXPECT_EQ(assumed.creds.GetAWSAccessKeyId(), "OUTER_AK");
+    EXPECT_EQ(assumed.creds.GetExpiration().Millis(), expiration.Millis());
   }
 }
 
@@ -1827,6 +1854,278 @@ constexpr const char* kAwsStsSuccessXml = R"(<?xml version="1.0" encoding="UTF-8
 </AssumeRoleResponse>)";
 
 }  // namespace
+
+static std::string AwsBrokerResponse(const std::string& key, const Aws::Utils::DateTime& expires) {
+  return nlohmann::json({{"success", true},
+                         {"credentials",
+                          {{"tempAk", key},
+                           {"tempSk", "broker-secret"},
+                           {"sessionToken", "broker-session"},
+                           {"expiredAt", std::string(expires.ToGmtString(Aws::Utils::DateFormat::ISO_8601))}}}})
+      .dump();
+}
+
+TEST_F(S3ProviderTest, AwsBrokerSdkGetterFetchesLazilyAndCachesCredentials) {
+  auto provider = std::make_shared<AwsCredentialBrokerProvider>(
+      AwsCredentialBrokerConfig{"http://broker/v1/credentials/assume-role", "us-west-2", "role", "", 900, 1000});
+  EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                AwsBrokerResponse("sdk-key", Aws::Utils::DateTime::Now() + std::chrono::seconds(900)));
+  EXPECT_EQ(provider->GetAWSCredentials().GetAWSAccessKeyId(), "sdk-key");
+  EXPECT_EQ(provider->GetAWSCredentials().GetAWSAccessKeyId(), "sdk-key");
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 1);
+}
+
+TEST_F(S3ProviderTest, AwsBrokerRequestsAndRefreshesCredentialsThroughSdkGetter) {
+  auto now = Aws::Utils::DateTime::Now();
+  auto provider = std::make_shared<AwsCredentialBrokerProvider>(
+      AwsCredentialBrokerConfig{"http://broker/v1/credentials/assume-role", "us-west-2",
+                                "arn:aws:iam::123456789012:role/reader", "external-id", 1800, 1000},
+      [&now] { return now; });
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                AwsBrokerResponse("first-key", now + std::chrono::seconds(1800)));
+  const auto credentials = provider->GetAWSCredentials();
+  EXPECT_EQ(credentials.GetAWSAccessKeyId(), "first-key");
+  EXPECT_EQ(credentials.GetAWSSecretKey(), "broker-secret");
+  EXPECT_EQ(credentials.GetSessionToken(), "broker-session");
+  const auto requests = mock_client_->GetRecordedRequests();
+  ASSERT_EQ(requests.size(), 1);
+  EXPECT_EQ(requests[0]->GetMethod(), Aws::Http::HttpMethod::HTTP_POST);
+  EXPECT_FALSE(requests[0]->HasHeader("Authorization"));
+  EXPECT_EQ(nlohmann::json::parse(ReadRequestBody(requests[0])),
+            nlohmann::json({{"csp", "aws"},
+                            {"region", "us-west-2"},
+                            {"roleArn", "arn:aws:iam::123456789012:role/reader"},
+                            {"externalId", "external-id"},
+                            {"durationSeconds", 1800}}));
+  now = now + std::chrono::seconds(1741);
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                AwsBrokerResponse("second-key", now + std::chrono::seconds(1800)));
+  EXPECT_EQ(provider->GetAWSCredentials().GetAWSAccessKeyId(), "second-key");
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 2);
+}
+
+TEST_F(S3ProviderTest, AwsBrokerConcurrentRequestsShareOneRefresh) {
+  auto provider = std::make_shared<AwsCredentialBrokerProvider>(
+      AwsCredentialBrokerConfig{"http://broker/v1/credentials/assume-role", "us-west-2", "role", "", 900, 1000});
+  mock_client_->EnqueueResponse(
+      "http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+      AwsBrokerResponse("shared-key", Aws::Utils::DateTime::Now() + std::chrono::seconds(900)));
+  std::promise<void> start;
+  const auto ready = start.get_future().share();
+  std::vector<std::future<Aws::Auth::AWSCredentials>> results;
+  for (int i = 0; i < 16; ++i) {
+    results.push_back(std::async(std::launch::async, [provider, ready] {
+      ready.wait();
+      return provider->GetAWSCredentials();
+    }));
+  }
+  start.set_value();
+  for (auto& result : results) {
+    EXPECT_EQ(result.get().GetAWSAccessKeyId(), "shared-key");
+  }
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 1);
+}
+
+TEST_F(S3ProviderTest, AwsBrokerHonorsExpirationTimezoneOffsets) {
+  const Aws::Utils::DateTime expiration("2026-10-14T04:00:00.125Z", Aws::Utils::DateFormat::ISO_8601);
+  for (const auto* expired_at :
+       {"2026-10-14T04:00:00.125Z", "2026-10-14T04:00:00.125+00:00", "2026-10-14T12:00:00.125+08:00",
+        "2026-10-13T23:30:00.125-04:30", "2026-10-14T09:45:00.125+0545", "2026-10-13T23:30:00.125-0430"}) {
+    SCOPED_TRACE(expired_at);
+    auto now = expiration - std::chrono::seconds(900);
+    AwsCredentialBrokerProvider provider(
+        {"http://broker/v1/credentials/assume-role", "us-west-2", "role", "", 900, 1000}, [&now] { return now; });
+    auto body = nlohmann::json::parse(AwsBrokerResponse("first-key", expiration));
+    body["credentials"]["expiredAt"] = expired_at;
+    mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                  body.dump());
+    ASSERT_AND_ASSIGN(const auto credentials, provider.GetCredentials());
+    EXPECT_EQ(credentials.GetExpiration().Millis(), expiration.Millis());
+
+    now = expiration - std::chrono::seconds(61);
+    EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "first-key");
+    now = expiration - std::chrono::seconds(60);
+    mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                  AwsBrokerResponse("refreshed-key", now + std::chrono::seconds(900)));
+    EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "refreshed-key");
+  }
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 12);
+}
+
+TEST_F(S3ProviderTest, AwsBrokerRejectsExpiredCredentialsWithTimezoneOffset) {
+  const Aws::Utils::DateTime now("2026-10-14T04:00:00Z", Aws::Utils::DateFormat::ISO_8601);
+  AwsCredentialBrokerProvider provider({"http://broker/v1/credentials/assume-role", "us-west-2", "role", "", 900, 1000},
+                                       [now] { return now; });
+  auto body = nlohmann::json::parse(AwsBrokerResponse("expired-key", now));
+  body["credentials"]["expiredAt"] = "2026-10-14T12:00:00+08:00";
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                body.dump());
+  const auto result = provider.GetCredentials();
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsIOError());
+  EXPECT_NE(result.status().ToString().find("expired credentials"), std::string::npos);
+}
+
+TEST_F(S3ProviderTest, AwsBrokerRefreshFailureReturnsOldCredentialsAndRetriesEveryRequest) {
+  auto now = Aws::Utils::DateTime::Now();
+  auto provider = std::make_shared<AwsCredentialBrokerProvider>(
+      AwsCredentialBrokerConfig{"http://broker/v1/credentials/assume-role", "us-west-2", "role", "", 900, 1000},
+      [&now] { return now; });
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                AwsBrokerResponse("first-key", now + std::chrono::seconds(900)));
+  ASSERT_EQ(provider->GetAWSCredentials().GetAWSAccessKeyId(), "first-key");
+  now = now + std::chrono::seconds(850);
+  const std::string denied = R"({"success":false,"msg":"assume role failed","detail":"AccessDenied: trust policy"})";
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK, denied);
+  EXPECT_EQ(provider->GetAWSCredentials().GetAWSAccessKeyId(), "first-key");
+  now = now + std::chrono::seconds(60);
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK, denied);
+  ASSERT_AND_ASSIGN(auto expired_credentials, provider->GetCredentials());
+  EXPECT_EQ(expired_credentials.GetAWSAccessKeyId(), "first-key");
+  EXPECT_LT(expired_credentials.GetExpiration(), now);
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK, denied);
+  EXPECT_EQ(provider->GetAWSCredentials().GetAWSAccessKeyId(), "first-key");
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 4);
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                AwsBrokerResponse("recovered-key", now + std::chrono::seconds(900)));
+  EXPECT_EQ(provider->GetAWSCredentials().GetAWSAccessKeyId(), "recovered-key");
+  EXPECT_EQ(provider->GetAWSCredentials().GetAWSAccessKeyId(), "recovered-key");
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 5);
+}
+
+TEST_F(S3ProviderTest, AwsBrokerRejectsInvalidResponses) {
+  const auto now = Aws::Utils::DateTime::Now();
+  const auto valid = nlohmann::json::parse(AwsBrokerResponse("test-key", now + std::chrono::seconds(900)));
+  std::vector<std::string> bodies = {"invalid JSON", R"({"success":true})", R"({"success":"true"})",
+                                     AwsBrokerResponse("key", now - std::chrono::seconds(1))};
+  for (const auto* field : {"tempAk", "tempSk", "sessionToken", "expiredAt"}) {
+    auto body = valid;
+    body["credentials"][field] = "";
+    bodies.push_back(body.dump());
+  }
+  auto invalid_date = valid;
+  invalid_date["credentials"]["expiredAt"] = "not-a-date";
+  bodies.push_back(invalid_date.dump());
+  for (const auto& body : bodies) {
+    auto provider = std::make_shared<AwsCredentialBrokerProvider>(
+        AwsCredentialBrokerConfig{"http://broker/v1/credentials/assume-role", "us-west-2", "role", "", 900, 1000});
+    mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK, body);
+    EXPECT_FALSE(provider->GetCredentials().ok());
+  }
+  auto provider = std::make_shared<AwsCredentialBrokerProvider>(
+      AwsCredentialBrokerConfig{"http://broker/v1/credentials/assume-role", "us-west-2", "role", "", 900, 1000});
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role",
+                                Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE,
+                                R"({"msg":"broker unavailable","detail":"upstream timeout"})");
+  const auto result = provider->GetCredentials();
+  ASSERT_FALSE(result.ok());
+  EXPECT_NE(result.status().ToString().find("503"), std::string::npos);
+  EXPECT_NE(result.status().ToString().find("upstream timeout"), std::string::npos);
+}
+
+TEST_F(S3ProviderTest, AwsBrokerRetriesAfterInitialFailure) {
+  auto provider = std::make_shared<AwsCredentialBrokerProvider>(
+      AwsCredentialBrokerConfig{"http://broker/v1/credentials/assume-role", "us-west-2", "role", "", 900, 1000});
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                R"({"success":false,"msg":"temporarily unavailable","detail":"retry"})");
+  EXPECT_TRUE(provider->GetAWSCredentials().IsEmpty());
+  mock_client_->EnqueueResponse(
+      "http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+      AwsBrokerResponse("recovered-key", Aws::Utils::DateTime::Now() + std::chrono::seconds(900)));
+  EXPECT_EQ(provider->GetAWSCredentials().GetAWSAccessKeyId(), "recovered-key");
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 2);
+}
+
+TEST_F(S3ProviderTest, AwsBrokerDispatcherSelectsBrokerInsteadOfDirectSts) {
+  for (const auto* cloud : {kCloudProviderAWS, kCloudProviderAliyun, kCloudProviderTencent, kCloudProviderHuawei,
+                            kCloudProviderVolcengine}) {
+    SCOPED_TRACE(cloud);
+    ArrowFileSystemConfig config;
+    config.cloud_provider = cloud;
+    config.region = "us-west-2";
+    config.role_arn = "arn:aws:iam::123456789012:role/reader";
+    config.external_id = "external-id";
+    EXPECT_FALSE(config.IsAwsCredentialBrokerEnabled());
+    config.credential_broker_endpoint = "http://broker/v1/credentials/assume-role";
+    const auto request_count = mock_client_->GetRecordedRequests().size();
+    mock_client_->EnqueueResponse(
+        config.credential_broker_endpoint, Aws::Http::HttpResponseCode::OK,
+        AwsBrokerResponse("broker-key", Aws::Utils::DateTime::Now() + std::chrono::seconds(900)));
+    ASSERT_AND_ASSIGN(auto options, S3FileSystemProducer(config).CreateS3Options());
+    ASSERT_NE(std::dynamic_pointer_cast<AwsCredentialBrokerProvider>(options.credentials_provider), nullptr);
+    EXPECT_EQ(options.credentials_provider->GetAWSCredentials().GetAWSAccessKeyId(), "broker-key");
+    EXPECT_EQ(options.credentials_provider->GetAWSCredentials().GetSessionToken(), "broker-session");
+    const auto requests = mock_client_->GetRecordedRequests();
+    ASSERT_EQ(requests.size(), request_count + 1);
+    EXPECT_EQ(requests.back()->GetURIString(), config.credential_broker_endpoint.c_str());
+    EXPECT_EQ(nlohmann::json::parse(ReadRequestBody(requests.back())),
+              nlohmann::json({{"csp", "aws"},
+                              {"region", config.region},
+                              {"roleArn", config.role_arn},
+                              {"externalId", config.external_id},
+                              {"durationSeconds", config.load_frequency}}));
+  }
+  for (const auto* cloud : {kCloudProviderAzure, kCloudProviderGCP}) {
+    SCOPED_TRACE(cloud);
+    ArrowFileSystemConfig config;
+    config.cloud_provider = cloud;
+    config.credential_broker_endpoint = "http://broker/v1/credentials/assume-role";
+    EXPECT_FALSE(config.IsAwsCredentialBrokerEnabled());
+  }
+}
+
+TEST_F(S3ProviderTest, AwsBrokerOptionsCompareIdentityWithoutFetchingCredentials) {
+  ArrowFileSystemConfig config;
+  config.cloud_provider = kCloudProviderAWS;
+  config.region = "us-west-2";
+  config.role_arn = "arn:aws:iam::123456789012:role/reader";
+  config.credential_broker_endpoint = "http://broker/v1/credentials/assume-role";
+  ASSERT_AND_ASSIGN(auto first, S3FileSystemProducer(config).CreateS3Options());
+  ASSERT_AND_ASSIGN(auto same, S3FileSystemProducer(config).CreateS3Options());
+  EXPECT_TRUE(first.Equals(same));
+  config.credential_broker_endpoint = "http://other-broker/v1/credentials/assume-role";
+  ASSERT_AND_ASSIGN(auto other, S3FileSystemProducer(config).CreateS3Options());
+  EXPECT_FALSE(first.Equals(other));
+  EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
+}
+
+TEST_F(S3ProviderTest, AwsBrokerCredentialsSignS3Requests) {
+  ScopedEnvVar disable_imds("AWS_EC2_METADATA_DISABLED", "true");
+  ScopedEnvVar default_region("AWS_DEFAULT_REGION", "us-west-2");
+  auto options = S3Options::Defaults();
+  options.region = "us-west-2";
+  options.endpoint_override = "storage.test";
+  options.scheme = "http";
+  options.cloud_provider = kCloudProviderAWS;
+  auto now = Aws::Utils::DateTime::Now();
+  options.credentials_provider = std::make_shared<AwsCredentialBrokerProvider>(
+      AwsCredentialBrokerConfig{"http://broker/v1/credentials/assume-role", "us-west-2", "role", "", 900, 1000},
+      [&now] { return now; });
+  options.use_crt_async_reads = false;
+  mock_client_->EnqueueResponse(
+      "http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+      AwsBrokerResponse("broker-key", Aws::Utils::DateTime::Now() + std::chrono::seconds(900)));
+  mock_client_->EnqueueResponse("storage.test", Aws::Http::HttpResponseCode::OK, "", {{"content-length", "4"}});
+  // SDK client construction may resolve credentials before the first S3 call.
+  ASSERT_AND_ASSIGN(auto filesystem, S3FileSystem::Make(options));
+  ASSERT_AND_ASSIGN(auto info, filesystem->GetFileInfo("bucket/file"));
+  EXPECT_EQ(info.size(), 4);
+  const auto requests = mock_client_->GetRecordedRequests();
+  ASSERT_EQ(requests.size(), 2);
+  EXPECT_NE(requests[1]->GetHeaderValue("Authorization").find("broker-key/"), Aws::String::npos);
+  EXPECT_EQ(requests[1]->GetHeaderValue("x-amz-security-token"), "broker-session");
+
+  now = now + std::chrono::seconds(901);
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role",
+                                Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE, R"({"msg":"broker unavailable"})");
+  mock_client_->EnqueueResponse("storage.test", Aws::Http::HttpResponseCode::OK, "", {{"content-length", "4"}});
+  ASSERT_AND_ASSIGN(auto cached_info, filesystem->GetFileInfo("bucket/file"));
+  EXPECT_EQ(cached_info.size(), 4);
+  const auto cached_requests = mock_client_->GetRecordedRequests();
+  EXPECT_NE(cached_requests.back()->GetHeaderValue("Authorization").find("broker-key/"), Aws::String::npos);
+  EXPECT_EQ(cached_requests.back()->GetHeaderValue("x-amz-security-token"), "broker-session");
+}
 
 TEST_F(S3ProviderTest, AwsAssumeRoleForwardsFilesystemConfigurationToSts) {
   ScopedEnvVar set_access_key("AWS_ACCESS_KEY_ID", "BASE_AK");

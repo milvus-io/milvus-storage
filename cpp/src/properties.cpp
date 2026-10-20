@@ -502,6 +502,11 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       uint32_t(256),
                       ValidatePropertyType() + ValidatePropertyRange<uint32_t>(1, UINT32_MAX)),
     // --- Cross-tenant access properties define ---
+    REGISTER_PROPERTY(PROPERTY_FS_CREDENTIAL_BROKER_ENDPOINT,
+                      PropertyType::STRING,
+                      "The HTTP(S) endpoint used to obtain temporary AWS STS or Azure SAS credentials.",
+                      "",
+                      std::nullopt),
     REGISTER_PROPERTY(PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT,
                       PropertyType::STRING,
                       "The target GCP service account email for cross-project impersonation.",
@@ -515,11 +520,6 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
     REGISTER_PROPERTY(PROPERTY_FS_AZURE_TENANT_ID,
                       PropertyType::STRING,
                       "The Azure tenant ID sent to the temporary credential broker.",
-                      "",
-                      std::nullopt),
-    REGISTER_PROPERTY(PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT,
-                      PropertyType::STRING,
-                      "The HTTP(S) endpoint used to obtain temporary Azure SAS credentials.",
                       "",
                       std::nullopt),
     // --- writer properties define ---

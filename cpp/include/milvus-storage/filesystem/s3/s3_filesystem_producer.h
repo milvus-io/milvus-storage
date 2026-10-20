@@ -38,6 +38,12 @@ class S3FileSystemProducer : public FileSystemProducer {
   arrow::Status InitS3();
 
   private:
+  // Select broker, AssumeRole, IAM, or explicit credentials in priority order.
+  arrow::Status ConfigureCredentials(S3Options& options);
+  arrow::Status ConfigureAssumeRoleCredentials(S3Options& options) const;
+  arrow::Status ConfigureAliyunAssumeRoleCredentials(S3Options& options) const;
+  arrow::Status ConfigureVolcengineAssumeRoleCredentials(S3Options& options) const;
+
   std::shared_ptr<Aws::Auth::AWSCredentialsProvider> CreateCredentialsProvider();
 
   std::shared_ptr<Aws::Auth::AWSCredentialsProvider> CreateAwsCredentialsProvider();
