@@ -226,8 +226,7 @@ class Manifest final {
    * @param path Path to write the manifest file
    * @param manifest Manifest to write
    * @param out_manifest_size Optional output size in bytes, written only on success
-   * @return Status (Invalid if a normalized relative index path starts with a parent component,
-   *         AlreadyExists if the manifest file already exists)
+   * @return Status (AlreadyExists if file already exists)
    */
   static arrow::Status WriteTo(const milvus_storage::ArrowFileSystemPtr& fs,
                                const std::string& path,

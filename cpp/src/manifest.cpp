@@ -683,17 +683,8 @@ arrow::Status Manifest::WriteTo(const milvus_storage::ArrowFileSystemPtr& fs,
                                 int64_t* out_manifest_size) {
   std::string base_path = milvus_storage::base_path_for_manifest(path);
 
-  // Keep the existing relative/full-path conversion, but reject parent traversal
-  // before serializing or opening an output. Normalize only for validation.
+  // Convert to relative paths and serialize
   Manifest relative_manifest = manifest.toRelativePaths(base_path);
-  for (const auto& index : relative_manifest.indexes()) {
-    const auto normalized = std::filesystem::path(index.path).lexically_normal();
-    if (!normalized.empty() && *normalized.begin() == "..") {
-      return arrow::Status::Invalid(fmt::format(
-          "Invalid index path '{}' for index {}: relative path must not start with '..'", index.path, index.index_id));
-    }
-  }
-
   std::ostringstream oss;
   ARROW_RETURN_NOT_OK(relative_manifest.serialize(oss));
   std::string data = oss.str();

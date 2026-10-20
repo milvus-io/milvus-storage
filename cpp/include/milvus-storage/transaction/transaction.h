@@ -299,7 +299,7 @@ class Transaction {
    *
    * This method only records Index metadata. It does not perform index-file
    * I/O or return a file handle. Relative paths are resolved under _index/;
-   * commit rejects normalized relative paths starting with a parent component.
+   * commit rejects newly added/replaced paths that normalize to a leading parent component.
    */
   Transaction& AddIndexInfo(const Index& index);
 

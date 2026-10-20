@@ -264,6 +264,45 @@ TEST_F(TransactionTest, IndexPathsSurviveIndependentCommits) {
   }
 }
 
+TEST_F(TransactionTest, ApplyUpdatesValidatesOnlyAddedIndexPaths) {
+  auto manifest = std::make_shared<Manifest>();
+  manifest->indexes().push_back(Index{.path = "../existing", .index_id = 1});
+  // Applying stats/delta updates does not revalidate retained metadata.
+  Updates metadata;
+  metadata.UpdateStat("bloom", Statistics{{"bloom.bin"}, {}});
+  metadata.AddDeltaLog({"delete.parquet", DeltaLogType::PRIMARY_KEY, 7});
+  ASSERT_AND_ASSIGN(auto retained, applyUpdates(manifest, metadata));
+  ASSERT_EQ(retained->indexes().size(), 1);
+  EXPECT_EQ(retained->indexes()[0].path, "../existing");
+  EXPECT_EQ(retained->stats().size(), 1);
+  EXPECT_EQ(retained->deltaLogs().size(), 1);
+
+  for (int64_t index_id : {1, 2}) {
+    SCOPED_TRACE(index_id);  // Cover replacement and addition.
+    for (const std::string path : {"..", "../A", "../../index_files/A", "./../A", "nested/../../A"}) {
+      SCOPED_TRACE(path);
+      Updates updates;
+      updates.AddIndex(Index{.path = path, .index_id = index_id});
+      auto result = applyUpdates(manifest, updates);
+      EXPECT_TRUE(result.status().IsInvalid()) << result.status();
+    }
+    for (const std::string path : {"plain", "./plain", "nested/../plain", "..hidden", "segment/_index/plain",
+                                   "/absolute/plain", "s3://bucket/plain"}) {
+      SCOPED_TRACE(path);
+      Updates updates;
+      updates.AddIndex(Index{.path = path, .index_id = index_id});
+      ASSERT_AND_ASSIGN(auto result, applyUpdates(manifest, updates));
+      ASSERT_EQ(result->indexes().size(), static_cast<size_t>(index_id));
+      EXPECT_EQ(result->indexes().back().path, path);
+    }
+  }
+  // Neither successful updates nor rejected replacements mutate the input.
+  ASSERT_EQ(manifest->indexes().size(), 1);
+  EXPECT_EQ(manifest->indexes()[0].path, "../existing");
+  EXPECT_TRUE(manifest->stats().empty());
+  EXPECT_TRUE(manifest->deltaLogs().empty());
+}
+
 TEST_F(TransactionTest, ParentRelativeIndexPathRejectsCommit) {
   folly::CPUThreadPoolExecutor executor(1);
   for (bool async : {false, true}) {
@@ -313,9 +352,9 @@ TEST_F(TransactionTest, ParentRelativeIndexPathRejectsCommit) {
     ASSERT_AND_ASSIGN(auto manifest, reopened->GetManifest());
     EXPECT_TRUE(manifest->stats().empty());
     EXPECT_EQ(manifest->indexes()[0].path, segment + "/_index/valid");
-    // Replace the rejected staged entry with a valid relative path and retry.
-    transaction->AddIndexInfo(Index{.path = "replacement", .index_id = 2});
-    ASSERT_AND_ASSIGN(auto version, transaction->Commit());
+    // A fresh transaction can commit a valid relative path after rejection.
+    reopened->AddIndexInfo(Index{.path = "replacement", .index_id = 2});
+    ASSERT_AND_ASSIGN(auto version, reopened->Commit());
     EXPECT_EQ(version, 2);
   }
 }

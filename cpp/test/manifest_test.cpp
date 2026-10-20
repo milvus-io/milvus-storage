@@ -164,28 +164,19 @@ TEST_F(ManifestTest, IndexPathsUnderPrefixRoundTrip) {
   }
 }
 
-TEST_F(ManifestTest, RejectInvalidIndexPathsBeforeWriting) {
-  const auto prefix = base_path_ + "/_index/";
-  const std::vector<std::string> invalid = {"..",
-                                            "../index_files/A",
-                                            "../../../../../index_v1/B",
-                                            "./../A",
-                                            "nested/../../A",
-                                            prefix + "../escape",
-                                            prefix + "nested/../../escape"};
-  for (size_t i = 0; i < invalid.size(); ++i) {
-    SCOPED_TRACE(invalid[i]);
-    const auto path = get_manifest_filepath(base_path_, i + 1);
-    int64_t size = 123;
-    Manifest manifest({}, {}, {}, {Index{.path = invalid[i]}});
-    const auto status = Manifest::WriteTo(fs_, path, manifest, &size);
-    EXPECT_TRUE(status.IsInvalid()) << status;
-    EXPECT_NE(status.message().find("must not start with"), std::string::npos);
-    EXPECT_EQ(size, 123);
-    EXPECT_EQ(manifest.indexes()[0].path, invalid[i]);
-    ASSERT_AND_ASSIGN(auto info, fs_->GetFileInfo(path));
-    EXPECT_EQ(info.type(), arrow::fs::FileType::NotFound);
-  }
+TEST_F(ManifestTest, WriteToPreservesRelativeIndexPaths) {
+  const auto path = get_manifest_filepath(base_path_, 1);
+  Manifest manifest({}, {}, {}, {Index{.path = "../index_files/A"}});
+  ASSERT_STATUS_OK(Manifest::WriteTo(fs_, path, manifest));
+  ASSERT_AND_ASSIGN(auto input, fs_->OpenInputFile(path));
+  ASSERT_AND_ASSIGN(auto size, input->GetSize());
+  ASSERT_AND_ASSIGN(auto buffer, input->Read(size));
+  ASSERT_STATUS_OK(input->Close());
+  std::istringstream stream(buffer->ToString());
+  Manifest raw;
+  ASSERT_STATUS_OK(raw.deserialize(stream));
+  ASSERT_EQ(raw.indexes().size(), 1);
+  EXPECT_EQ(raw.indexes()[0].path, "../index_files/A");
 }
 
 TEST_F(ManifestTest, IndexPathsRebaseWhenStoredManifestIsCopied) {
