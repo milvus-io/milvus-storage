@@ -14,7 +14,6 @@
 
 #pragma once
 #include "arrow/filesystem/filesystem.h"
-#include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/common/metadata.h"
 #include "parquet/arrow/reader.h"
 #include "parquet/properties.h"
@@ -22,6 +21,10 @@
 
 namespace milvus_storage {
 
+class PreparedParquetFile;
+
+// Make opens independently without an implicit footer cache. To share plaintext
+// footer parsing across batches, use PreparedParquetFile instead.
 class FileRowGroupReader {
   public:
   static arrow::Result<std::shared_ptr<FileRowGroupReader>> Make(
@@ -41,21 +44,11 @@ class FileRowGroupReader {
 
   arrow::Status SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num);
 
-  /**
-   * @brief Process-wide LRU cache of parsed parquet footers (FileMetaData),
-   * keyed by filesystem identity + path. Lets FileRowGroupReader::Make reuse a
-   * footer already parsed by an earlier batch reader instead of re-reading it.
-   */
-  static milvus_storage::LRUCache<std::string, std::shared_ptr<::parquet::FileMetaData>>& getFooterMetadataCache();
-
-  /**
-   * @brief Clears the process-wide footer metadata cache.
-   */
-  static void CleanFooterMetadataCache();
-
   std::shared_ptr<arrow::Schema> schema() const;
   /**
    * @brief Returns packed file metadata.
+   * Metadata obtained from a prepared reader must be treated as read-only:
+   * its Parquet footer is shared with the context and other batch readers.
    */
   std::shared_ptr<PackedFileMetadata> file_metadata();
 
@@ -105,13 +98,16 @@ class FileRowGroupReader {
                      const ::parquet::ReaderProperties& reader_props = ::parquet::default_reader_properties());
 
   private:
+  friend class PreparedParquetFile;
+
   arrow::Status init(
       std::shared_ptr<arrow::fs::FileSystem> fs,
       const std::string& path,
       const int64_t buffer_size,
       const std::shared_ptr<arrow::Schema>& schema = nullptr,
       const ::parquet::ReaderProperties& reader_props = ::parquet::default_reader_properties(),
-      const ::parquet::ArrowReaderProperties& arrow_reader_props = ::parquet::default_arrow_reader_properties());
+      const ::parquet::ArrowReaderProperties& arrow_reader_props = ::parquet::default_arrow_reader_properties(),
+      std::shared_ptr<::parquet::FileMetaData> metadata = nullptr);
 
   /**
    * @brief Slices a row group from the table and updates the buffer state.
@@ -138,6 +134,49 @@ class FileRowGroupReader {
   int64_t buffer_size_ = 0;
   std::shared_ptr<PackedFileMetadata> file_metadata_;
   std::shared_ptr<arrow::Table> buffer_table_ = nullptr;
+};
+
+/**
+ * Caller-owned context for an immutable packed Parquet file. Open once and
+ * distribute to batch tasks by shared_ptr. Each MakeReader has its own file
+ * handle, row-group range, cursor and data buffers. There is no global cache.
+ *
+ * The filesystem and original path are bound at Open; a rewritten file needs a
+ * new context. Plaintext footers are shared read-only. Encrypted files are opened
+ * fresh for every reader. Key retrievers/verifiers retained by Arrow DeepClone
+ * must themselves support concurrent calls when readers are created in parallel.
+ */
+class PreparedParquetFile {
+  public:
+  static arrow::Result<std::shared_ptr<PreparedParquetFile>> Open(
+      std::shared_ptr<arrow::fs::FileSystem> fs,
+      const std::string& path,
+      const ::parquet::ReaderProperties& reader_props = ::parquet::default_reader_properties());
+
+  arrow::Result<std::shared_ptr<FileRowGroupReader>> MakeReader(
+      const std::shared_ptr<arrow::Schema>& schema = nullptr,
+      int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
+      const ::parquet::ArrowReaderProperties& arrow_reader_props = ::parquet::default_arrow_reader_properties()) const;
+
+  const RowGroupMetadataVector& row_group_metadata() const { return row_group_metadata_; }
+  const std::map<FieldID, ColumnOffset>& field_id_mapping() const { return field_id_mapping_; }
+  const GroupFieldIDList& group_field_id_list() const { return group_field_id_list_; }
+  const std::string& storage_version() const { return storage_version_; }
+
+  private:
+  PreparedParquetFile(std::shared_ptr<arrow::fs::FileSystem> fs,
+                      std::string path,
+                      const ::parquet::ReaderProperties& reader_props);
+
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
+  std::string path_;
+  ::parquet::ReaderProperties reader_props_;
+  // Null for encrypted files; never expose mutable shared metadata here.
+  std::shared_ptr<::parquet::FileMetaData> plaintext_metadata_;
+  RowGroupMetadataVector row_group_metadata_;
+  std::map<FieldID, ColumnOffset> field_id_mapping_;
+  GroupFieldIDList group_field_id_list_;
+  std::string storage_version_;
 };
 
 }  // namespace milvus_storage
