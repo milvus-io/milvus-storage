@@ -298,7 +298,8 @@ class Transaction {
    * @brief Record or replace metadata for an already-written index file.
    *
    * This method only records Index metadata. It does not perform index-file
-   * I/O or return a file handle.
+   * I/O or return a file handle. Relative paths are resolved under _index/;
+   * commit rejects newly added/replaced paths that normalize to a leading parent component.
    */
   Transaction& AddIndexInfo(const Index& index);
 

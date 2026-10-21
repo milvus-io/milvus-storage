@@ -880,7 +880,194 @@ static void test_txn_resolution_failed(void) {
   loon_properties_free(&pp);
 }
 
+static void test_manifest_serialization_round_trip(void) {
+  const char* columns[] = {"id", "vector"};
+  const char* property_keys[] = {"storage_version"};
+  const char* property_values[] = {"3"};
+  LoonColumnGroupFile file = {.path = "source/_data/data.parquet",
+                              .start_index = 10,
+                              .end_index = 100,
+                              .property_keys = property_keys,
+                              .property_values = property_values,
+                              .num_properties = 1};
+  LoonColumnGroup group = {
+      .columns = columns, .num_of_columns = 2, .format = "parquet", .files = &file, .num_of_files = 1};
+  const char* delta_paths[] = {"_delta/delete.log"};
+  uint32_t delta_entries[] = {42};
+  const char* stat_keys[] = {"bloom_filter.100"};
+  const char* stat_paths[] = {"source/_stats/bloom.bin"};
+  const char** stat_files[] = {stat_paths};
+  uint32_t stat_counts[] = {1};
+  const char* metadata_keys[] = {"version"};
+  const char* metadata_values[] = {"7"};
+  const char** stat_metadata_keys[] = {metadata_keys};
+  const char** stat_metadata_values[] = {metadata_values};
+  LoonLobFileInfo lob = {.path = "../lobs/100/_data/lob.vortex",
+                         .field_id = 100,
+                         .total_rows = 90,
+                         .valid_rows = 80,
+                         .file_size_bytes = 4096};
+  const char* index_keys[] = {"index.bin", "raw.bin"};
+  LoonIndexInfo index = {.column_name = "vector",
+                         .index_name = "vector_idx",
+                         .index_type = "HNSW",
+                         .path = "s3://backup/index",
+                         .field_id = 101,
+                         .index_id = 200,
+                         .build_id = 300,
+                         .index_version = 4,
+                         .num_rows = 90,
+                         .serialized_size = 1024,
+                         .mem_size = 2048,
+                         .current_index_version = 15,
+                         .current_scalar_index_version = 7,
+                         .index_store_path_version = 1,
+                         .index_file_keys = index_keys,
+                         .num_index_file_keys = 2,
+                         .property_keys = property_keys,
+                         .property_values = property_values,
+                         .num_properties = 1};
+  const LoonManifest manifest = {
+      .column_groups = {&group, 1},
+      .delta_logs = {delta_paths, delta_entries, 1},
+      .stats = {stat_keys, stat_files, stat_counts, stat_metadata_keys, stat_metadata_values, stat_counts, 1},
+      .lob_files = {&lob, 1},
+      .indexes = {&index, 1}};
+  uint8_t* data = NULL;
+  size_t size = 0;
+  LoonFFIResult rc = loon_manifest_serialize(&manifest, &data, &size);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert(data != NULL);
+  ck_assert_int_gt(size, 4);
+  ck_assert(memcmp(data, "Obj\x01", 4) == 0);
+
+  LoonManifest* restored = NULL;
+  rc = loon_manifest_deserialize(data, size, &restored);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  // The decoded manifest owns its data independently of the serialized buffer.
+  loon_manifest_free_buffer(data);
+  ck_assert(restored != NULL);
+  ck_assert_int_eq(restored->column_groups.num_of_column_groups, 1);
+  const LoonColumnGroup* restored_group = &restored->column_groups.column_group_array[0];
+  ck_assert_int_eq(restored_group->num_of_columns, 2);
+  ck_assert_str_eq(restored_group->columns[0], "id");
+  ck_assert_str_eq(restored_group->columns[1], "vector");
+  ck_assert_str_eq(restored_group->format, "parquet");
+  ck_assert_int_eq(restored_group->num_of_files, 1);
+  ck_assert_str_eq(restored_group->files[0].path, "source/_data/data.parquet");
+  ck_assert_int_eq(restored_group->files[0].start_index, 10);
+  ck_assert_int_eq(restored_group->files[0].end_index, 100);
+  ck_assert_int_eq(restored_group->files[0].num_properties, 1);
+  ck_assert_str_eq(restored_group->files[0].property_keys[0], "storage_version");
+  ck_assert_str_eq(restored_group->files[0].property_values[0], "3");
+  ck_assert_int_eq(restored->delta_logs.num_delta_logs, 1);
+  ck_assert_str_eq(restored->delta_logs.delta_log_paths[0], "_delta/delete.log");
+  ck_assert_int_eq(restored->delta_logs.delta_log_num_entries[0], 42);
+  ck_assert_int_eq(restored->stats.num_stats, 1);
+  ck_assert_str_eq(restored->stats.stat_keys[0], "bloom_filter.100");
+  ck_assert_int_eq(restored->stats.stat_file_counts[0], 1);
+  ck_assert_str_eq(restored->stats.stat_files[0][0], "source/_stats/bloom.bin");
+  ck_assert_int_eq(restored->stats.stat_metadata_counts[0], 1);
+  ck_assert_str_eq(restored->stats.stat_metadata_keys[0][0], "version");
+  ck_assert_str_eq(restored->stats.stat_metadata_values[0][0], "7");
+  ck_assert_int_eq(restored->lob_files.num_files, 1);
+  ck_assert_str_eq(restored->lob_files.files[0].path, "../lobs/100/_data/lob.vortex");
+  ck_assert_int_eq(restored->lob_files.files[0].field_id, 100);
+  ck_assert_int_eq(restored->lob_files.files[0].total_rows, 90);
+  ck_assert_int_eq(restored->lob_files.files[0].valid_rows, 80);
+  ck_assert_int_eq(restored->lob_files.files[0].file_size_bytes, 4096);
+  ck_assert_int_eq(restored->indexes.num_indexes, 1);
+  const LoonIndexInfo* restored_index = &restored->indexes.indexes[0];
+  ck_assert_str_eq(restored_index->column_name, "vector");
+  ck_assert_str_eq(restored_index->index_name, "vector_idx");
+  ck_assert_str_eq(restored_index->index_type, "HNSW");
+  ck_assert_str_eq(restored_index->path, "s3://backup/index");
+  ck_assert_int_eq(restored_index->field_id, 101);
+  ck_assert_int_eq(restored_index->index_id, 200);
+  ck_assert_int_eq(restored_index->build_id, 300);
+  ck_assert_int_eq(restored_index->index_version, 4);
+  ck_assert_int_eq(restored_index->num_rows, 90);
+  ck_assert_int_eq(restored_index->serialized_size, 1024);
+  ck_assert_int_eq(restored_index->mem_size, 2048);
+  ck_assert_int_eq(restored_index->current_index_version, 15);
+  ck_assert_int_eq(restored_index->current_scalar_index_version, 7);
+  ck_assert_int_eq(restored_index->index_store_path_version, 1);
+  ck_assert_int_eq(restored_index->num_index_file_keys, 2);
+  ck_assert_str_eq(restored_index->index_file_keys[0], "index.bin");
+  ck_assert_str_eq(restored_index->index_file_keys[1], "raw.bin");
+  ck_assert_int_eq(restored_index->num_properties, 1);
+  ck_assert_str_eq(restored_index->property_keys[0], "storage_version");
+  ck_assert_str_eq(restored_index->property_values[0], "3");
+  loon_manifest_destroy(restored);
+}
+
+static void test_empty_manifest_serialization(void) {
+  const LoonManifest manifest = {0};
+  uint8_t* data = NULL;
+  size_t size = 0;
+  LoonFFIResult rc = loon_manifest_serialize(&manifest, &data, &size);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  LoonManifest* restored = NULL;
+  rc = loon_manifest_deserialize(data, size, &restored);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert(restored != NULL);
+  ck_assert_int_eq(restored->column_groups.num_of_column_groups, 0);
+  ck_assert_int_eq(restored->delta_logs.num_delta_logs, 0);
+  ck_assert_int_eq(restored->stats.num_stats, 0);
+  ck_assert_int_eq(restored->lob_files.num_files, 0);
+  ck_assert_int_eq(restored->indexes.num_indexes, 0);
+  loon_manifest_destroy(restored);
+  loon_manifest_free_buffer(data);
+  loon_manifest_free_buffer(NULL);
+}
+
+static void test_manifest_serialization_errors(void) {
+  const LoonManifest manifest = {0};
+  uint8_t* data = NULL;
+  size_t size = 99;
+  LoonManifest* restored = NULL;
+  LoonFFIResult rc = loon_manifest_serialize(NULL, &data, &size);
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  ck_assert(data == NULL);
+  ck_assert_int_eq(size, 0);
+  loon_ffi_free_result(&rc);
+  rc = loon_manifest_serialize(&manifest, NULL, &size);
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  loon_ffi_free_result(&rc);
+  rc = loon_manifest_serialize(&manifest, &data, NULL);
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  loon_ffi_free_result(&rc);
+  rc = loon_manifest_deserialize(NULL, 1, &restored);
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  loon_ffi_free_result(&rc);
+  const uint8_t invalid[] = {'b', 'a', 'd', '!'};
+  rc = loon_manifest_deserialize(invalid, sizeof(invalid), NULL);
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  loon_ffi_free_result(&rc);
+  rc = loon_manifest_deserialize(invalid, 0, &restored);
+  ck_assert_int_eq(rc.err_code, loon_errcode_invalid_args);
+  loon_ffi_free_result(&rc);
+  for (size_t length = 1; length <= sizeof(invalid); ++length) {
+    rc = loon_manifest_deserialize(invalid, length, &restored);
+    ck_assert(!loon_ffi_is_success(&rc));
+    ck_assert(restored == NULL);
+    ck_assert_msg(strstr(loon_ffi_get_errmsg(&rc), "deserialize Manifest") != NULL, "%s", loon_ffi_get_errmsg(&rc));
+    loon_ffi_free_result(&rc);
+  }
+  rc = loon_manifest_serialize(&manifest, &data, &size);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  // A truncated Avro header must report the codec error without returning a manifest.
+  rc = loon_manifest_deserialize(data, 4, &restored);
+  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert(restored == NULL);
+  loon_ffi_free_result(&rc);
+  loon_manifest_free_buffer(data);
+}
+
 void run_manifest_suite(void) {
+  RUN_TEST(test_manifest_serialization_round_trip);
+  RUN_TEST(test_empty_manifest_serialization);
+  RUN_TEST(test_manifest_serialization_errors);
   RUN_TEST(test_empty_manifests);
   loon_reset_context();
   RUN_TEST(test_manifests_write_read);

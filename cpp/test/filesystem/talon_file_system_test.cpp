@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <future>
 #include <limits>
@@ -28,12 +29,15 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
 
+#include <arpa/inet.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <arrow/api.h>
@@ -55,7 +59,118 @@
 #include "milvus-storage/writer.h"
 #include "test_env.h"
 
+namespace milvus_storage::talon::internal {
+arrow::Result<int64_t> ToArrowIoResult(const char* operation,
+                                       int32_t error_code,
+                                       uint64_t value,
+                                       const char* error_msg);
+}
+
 namespace milvus_storage::test {
+
+class TalonCallbackDeathTest : public ::testing::TestWithParam<bool> {};
+
+TEST_P(TalonCallbackDeathTest, ThrowingContinuationDoesNotRetryCompletion) {
+  const auto original_death_test_style = GTEST_FLAG_GET(death_test_style);
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      {
+        ::alarm(10);
+        const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (listener < 0)
+          std::_Exit(1);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t address_size = sizeof(address);
+        if (::bind(listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0 ||
+            ::listen(listener, 1) != 0 ||
+            ::getsockname(listener, reinterpret_cast<sockaddr*>(&address), &address_size) != 0) {
+          std::_Exit(1);
+        }
+        const auto client =
+            talon::TalonClient::Make("127.0.0.1:" + std::to_string(ntohs(address.sin_port)), 8388608, 8);
+        if (!client.ok())
+          std::_Exit(1);
+        const bool raw_stat = GetParam();
+        uint8_t output = 0;
+        // Only an exception escaping completion should reach these handlers.
+        if (raw_stat) {
+          (*client)->StatAsync("s3://bucket/key").AddCallback([](const arrow::Result<talon::TalonObjectStat>&) {
+            std::set_terminate([] { std::_Exit(86); });
+            throw std::runtime_error("Talon consumer callback failed");
+          });
+        } else {
+          (*client)->ReadAsync("s3://bucket/key", 0, 1, &output).AddCallback([](const arrow::Result<int64_t>&) {
+            std::set_terminate([] { std::_Exit(86); });
+            throw 42;
+          });
+        }
+        // Hold the RPC open until the continuation is registered, then fail it.
+        const int connection = ::accept(listener, nullptr, nullptr);
+        if (connection < 0)
+          std::_Exit(1);
+        ::close(listener);
+        ::close(connection);
+        // The old catch-and-retry path silently survives until the alarm fires.
+        for (;;) ::pause();
+      },
+      ::testing::ExitedWithCode(86), "");
+  GTEST_FLAG_SET(death_test_style, original_death_test_style);
+}
+
+INSTANTIATE_TEST_SUITE_P(Bridge, TalonCallbackDeathTest, ::testing::Bool());
+
+TEST(TalonRawBridgeTest, PropertiesNeedOnlyClientConfiguration) {
+  api::Properties properties;
+  properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
+  properties[PROPERTY_FS_TALON_BLOCK_SIZE] = uint32_t{8388608};
+  properties[PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR] = uint32_t{8};
+  ASSERT_TRUE(talon::TalonClient::Make(properties).ok());
+}
+
+TEST(TalonRawBridgeTest, EmptyOperationsDoNotContactCoordinator) {
+  ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make("127.0.0.1:1", 8388608, 8));
+  uint8_t output = 0x7f;
+  ASSERT_AND_ASSIGN(const auto read, client->Read("s3://bucket/empty", 0, 1, &output, talon::TalonObjectStat{0, ""}));
+  EXPECT_EQ(read, 0);
+  EXPECT_EQ(output, 0x7f);
+  ASSERT_AND_ASSIGN(const auto load, client->Load({"s3://bucket/empty", 0, ""}));
+  EXPECT_EQ(load.size, 0);
+  EXPECT_EQ(load.blocks, 0);
+  ASSERT_AND_ASSIGN(const auto batch, client->BatchLoad({}));
+  EXPECT_TRUE(batch.status.ok());
+  EXPECT_TRUE(batch.results.empty());
+  EXPECT_TRUE(batch.failed_files.empty());
+}
+
+TEST(TalonRawBridgeTest, ValidatesRawInputsBeforeNetworkIO) {
+  ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make("127.0.0.1:1", 8388608, 8));
+  uint8_t output = 0x7f;
+  EXPECT_TRUE(client->Stat("invalid").status().IsInvalid());
+  EXPECT_TRUE(client->Read("invalid", 0, 0, nullptr).status().IsInvalid());
+  EXPECT_TRUE(client->Read("s3://bucket/key", 0, 1, nullptr).status().IsInvalid());
+  EXPECT_TRUE(client->Read("s3://bucket/key", 0, UINT64_MAX, &output).status().IsInvalid());
+  EXPECT_TRUE(client->Read("s3://bucket/key", UINT64_MAX, 1, &output).status().IsInvalid());
+  EXPECT_TRUE(client->Load({"invalid", 0, ""}).status().IsInvalid());
+  EXPECT_TRUE(client->Load({"s3://bucket/key", UINT64_MAX, ""}).status().IsInvalid());
+  const auto batch = client->BatchLoad({{"s3://bucket/key", 0, ""}, {"invalid", 0, ""}});
+  ASSERT_TRUE(batch.ok()) << batch.status();
+  EXPECT_TRUE(batch->status.IsInvalid()) << batch->status;
+  EXPECT_TRUE(batch->results.empty());
+  EXPECT_TRUE(batch->failed_files.empty());
+  EXPECT_EQ(output, 0x7f);
+}
+
+TEST(TalonRawBridgeTest, InvalidConfigurationPreservesDiagnostic) {
+  api::Properties properties;
+  properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
+  properties[PROPERTY_FS_TALON_BLOCK_SIZE] = uint32_t{0};
+  properties[PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR] = uint32_t{8};
+  const auto result = talon::TalonClient::Make(properties);
+  ASSERT_FALSE(result.ok());
+  EXPECT_NE(result.status().message().find("block_size"), std::string::npos) << result.status();
+}
 
 namespace {
 
@@ -2188,6 +2303,111 @@ TEST_F(TalonIntegrationTest, EvictionReadsReplacementAtSamePath) {
   ASSERT_EQ(actual->size(), replacement.size());
   EXPECT_EQ(std::memcmp(actual->data(), replacement.data(), replacement.size()), 0);
   ASSERT_STATUS_OK(reopened->Close());
+}
+
+TEST_F(TalonIntegrationTest, RawPrewarmThenNormalReader) {
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties_));
+  const std::string scheme = config.cloud_provider == kCloudProviderAzure ? "az" : "s3";
+  const std::string uri = scheme + "://" + config.bucket_name + "/" + path_;
+  RecordProperty("raw_uri", uri);
+  RecordProperty("object_path", path_);
+  ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make(properties_));
+  RecordProperty("prewarm_start_unix_ns", std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                             std::chrono::system_clock::now().time_since_epoch())
+                                                             .count()));
+  // Normal known-size readers use the unchecked cache identity, so prewarm must match it.
+  ASSERT_AND_ASSIGN(const auto load, client->Load({uri, expected_.size(), ""}));
+  ASSERT_EQ(load.size, expected_.size());
+  RecordProperty("prewarm_end_unix_ns", std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                           std::chrono::system_clock::now().time_since_epoch())
+                                                           .count()));
+  ASSERT_AND_ASSIGN(const auto metrics, FindMetricsSource(fs_, kTalonMetricsSource));
+  ASSERT_NE(metrics, nullptr);
+  const auto before = metrics->GetSnapshot();
+  RecordProperty("read_phase_start_unix_ns", std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                std::chrono::system_clock::now().time_since_epoch())
+                                                                .count()));
+  arrow::fs::FileInfo info(path_, arrow::fs::FileType::File);
+  info.set_size(static_cast<int64_t>(expected_.size()));
+  ASSERT_AND_ASSIGN(auto file, fs_->OpenInputFile(info));
+  ASSERT_AND_ASSIGN(const auto data, file->ReadAt(0, info.size()));
+  ASSERT_EQ(data->size(), info.size());
+  EXPECT_EQ(std::memcmp(data->data(), expected_.data(), expected_.size()), 0);
+  EXPECT_EQ(metrics->GetReadCount() - before.read_count, 1);
+  EXPECT_EQ(metrics->GetReadBytes() - before.read_bytes, expected_.size());
+  EXPECT_EQ(metrics->GetFailedCount() - before.failed_count, 0);
+  ASSERT_STATUS_OK(file->Close());
+  RecordProperty("read_phase_end_unix_ns", std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                              std::chrono::system_clock::now().time_since_epoch())
+                                                              .count()));
+}
+
+TEST_F(TalonIntegrationTest, RawPrewarmReadAndPartialFailure) {
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties_));
+  const std::string scheme = config.cloud_provider == kCloudProviderAzure ? "az" : "s3";
+  const std::string uri = scheme + "://" + config.bucket_name + "/" + path_;
+  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make(properties_));
+  ASSERT_AND_ASSIGN(const auto stat, client->Stat(uri));
+  EXPECT_EQ(stat.size, expected_.size());
+  ASSERT_FALSE(stat.version.empty());
+  ASSERT_AND_ASSIGN(const auto load, client->Load({uri, stat.size, stat.version}));
+  EXPECT_EQ(load.size, expected_.size());
+  EXPECT_EQ(load.blocks, 1);
+  ASSERT_AND_ASSIGN(const auto unchecked, client->Load({uri, stat.size, ""}));
+  EXPECT_EQ(unchecked.size, expected_.size());
+  std::vector<uint8_t> output(expected_.size());
+  ASSERT_AND_ASSIGN(const auto read, client->Read(uri, 0, output.size(), output.data(), stat));
+  EXPECT_EQ(read, expected_.size());
+  EXPECT_EQ(output, expected_);
+
+  const auto failed = client->Load({uri, stat.size, "missing-version"});
+  ASSERT_FALSE(failed.ok());
+  const auto failed_detail = ExtendStatusDetail::UnwrapStatus(failed.status());
+  ASSERT_NE(failed_detail, nullptr) << failed.status();
+  EXPECT_EQ(failed_detail->code(), ExtendStatusCode::AwsErrorNonRetryable);
+  EXPECT_NE(failed.status().message().find("worker"), std::string::npos) << failed.status();
+  EXPECT_NE(failed.status().message().find("offset"), std::string::npos) << failed.status();
+  ASSERT_AND_ASSIGN(const auto partial, client->BatchLoad({{uri, stat.size, stat.version},
+                                                           {uri, stat.size, "missing-version"},
+                                                           {uri, 0, ""},
+                                                           {uri, stat.size, "another-missing-version"}}));
+  EXPECT_FALSE(partial.status.ok());
+  const auto partial_detail = ExtendStatusDetail::UnwrapStatus(partial.status);
+  ASSERT_NE(partial_detail, nullptr) << partial.status;
+  EXPECT_EQ(partial_detail->code(), ExtendStatusCode::AwsErrorNonRetryable);
+  EXPECT_NE(partial.status.message().find("batch load incomplete for 2 file(s):"), std::string::npos) << partial.status;
+  EXPECT_NE(partial.status.message().find("worker"), std::string::npos) << partial.status;
+  EXPECT_TRUE(partial.results.empty());
+  ASSERT_EQ(partial.failed_files.size(), 2);
+  EXPECT_EQ(partial.failed_files[0].index, 1);
+  EXPECT_EQ(partial.failed_files[1].index, 3);
+  EXPECT_FALSE(partial.failed_files[0].uncertain);
+  EXPECT_FALSE(partial.failed_files[1].uncertain);
+  EXPECT_FALSE(partial.failed_files[0].error.empty());
+  EXPECT_FALSE(partial.failed_files[1].error.empty());
+
+  // Requests and client ownership can disappear immediately after submission.
+  arrow::Future<talon::TalonBatchLoadResult> batch;
+  {
+    std::vector<talon::TalonLoadRequest> requests{
+        {uri, stat.size, stat.version}, {uri, 0, ""}, {uri, stat.size, stat.version}};
+    batch = client->BatchLoadAsync(requests);
+  }
+  auto read_future = client->ReadAsync(uri, 4096, 8192, output.data());
+  client.reset();
+  // Drain both operations before assertions release the caller-owned buffer.
+  read_future.Wait();
+  batch.Wait();
+  ASSERT_AND_ASSIGN(const auto copied_batch, batch.result());
+  ASSERT_TRUE(copied_batch.status.ok()) << copied_batch.status;
+  ASSERT_EQ(copied_batch.results.size(), 3);
+  EXPECT_EQ(copied_batch.results[0].size, expected_.size());
+  EXPECT_EQ(copied_batch.results[1].size, 0);
+  EXPECT_EQ(copied_batch.results[1].blocks, 0);
+  EXPECT_EQ(copied_batch.results[2].size, expected_.size());
+  ASSERT_AND_ASSIGN(const auto copied_read, read_future.result());
+  EXPECT_EQ(copied_read, 8192);
+  EXPECT_TRUE(std::equal(output.begin(), output.begin() + 8192, expected_.begin() + 4096));
 }
 
 TEST_F(TalonIntegrationTest, OpenWithKnownSize) {

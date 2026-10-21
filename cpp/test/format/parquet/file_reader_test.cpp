@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 #include <cstdint>
 #include <arrow/table.h>
+#include <parquet/encryption/encryption.h>
 
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"
@@ -522,6 +523,13 @@ TEST_F(FileReaderTest, NullSchemaPointer) {
   ASSERT_EQ(file_schema->num_fields(), schema_->num_fields());
 
   ASSERT_STATUS_OK(fr->Close());
+}
+
+TEST_F(FileReaderTest, LegacyMakeOpensIndependently) {
+  SetupOneFile();
+  ASSERT_AND_ASSIGN(auto first, FileRowGroupReader::Make(fs_, one_file_path_, schema_, reader_memory_));
+  ASSERT_AND_ASSIGN(auto second, FileRowGroupReader::Make(fs_, one_file_path_, schema_, reader_memory_));
+  EXPECT_NE(first->file_metadata()->GetParquetMetadata(), second->file_metadata()->GetParquetMetadata());
 }
 
 }  // namespace milvus_storage::test

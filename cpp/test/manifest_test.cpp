@@ -18,9 +18,11 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <sstream>
 
 #include <arrow/api.h>
 #include <arrow/filesystem/localfs.h>
+#include <arrow/io/api.h>
 
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/common/config.h"
@@ -122,6 +124,93 @@ TEST_F(ManifestTest, EmptyManifestRoundTrip) {
   EXPECT_TRUE(read_back->stats().empty());
   EXPECT_TRUE(read_back->indexes().empty());
   EXPECT_TRUE(read_back->lobFiles().empty());
+}
+
+TEST_F(ManifestTest, IndexPathsUnderPrefixRoundTrip) {
+  for (const std::string root : {"", "R/", "tenant/root/"}) {
+    auto bucket = std::make_shared<arrow::fs::SubTreeFileSystem>(base_path_, fs_);
+    const auto segment = root + "insert_log/C/P/S";
+    ASSERT_STATUS_OK(bucket->CreateDir(get_manifest_path(segment), true));
+    const std::vector<std::string> suffixes = {"plain", "nested/file",       "directory/",
+                                               "./dot", "nested/../sibling", "..hidden"};
+    Manifest manifest;
+    for (const auto& suffix : suffixes) {
+      manifest.indexes().push_back(Index{.path = suffix});
+    }
+    for (int version = 1; version <= 3; ++version) {
+      const auto path = get_manifest_filepath(segment, version);
+      ASSERT_STATUS_OK(Manifest::WriteTo(bucket, path, manifest));
+      Manifest::CleanCache();
+      ASSERT_AND_ASSIGN(auto read, Manifest::ReadFrom(bucket, path));
+      ASSERT_EQ(read->indexes().size(), suffixes.size());
+      for (size_t i = 0; i < suffixes.size(); ++i) {
+        EXPECT_EQ(read->indexes()[i].path,
+                  (std::filesystem::path(segment) / "_index" / suffixes[i]).lexically_normal().string());
+      }
+      ASSERT_AND_ASSIGN(auto input, bucket->OpenInputFile(path));
+      ASSERT_AND_ASSIGN(auto size, input->GetSize());
+      ASSERT_AND_ASSIGN(auto buffer, input->Read(size));
+      ASSERT_STATUS_OK(input->Close());
+      std::istringstream stream(buffer->ToString());
+      Manifest raw;
+      ASSERT_STATUS_OK(raw.deserialize(stream));
+      ASSERT_EQ(raw.indexes().size(), suffixes.size());
+      for (size_t i = 0; i < suffixes.size(); ++i) {
+        EXPECT_EQ(raw.indexes()[i].path,
+                  version == 1 ? suffixes[i] : std::filesystem::path(suffixes[i]).lexically_normal().string());
+      }
+      manifest = *read;
+    }
+  }
+}
+
+TEST_F(ManifestTest, WriteToPreservesRelativeIndexPaths) {
+  const auto path = get_manifest_filepath(base_path_, 1);
+  Manifest manifest({}, {}, {}, {Index{.path = "../index_files/A"}});
+  ASSERT_STATUS_OK(Manifest::WriteTo(fs_, path, manifest));
+  ASSERT_AND_ASSIGN(auto input, fs_->OpenInputFile(path));
+  ASSERT_AND_ASSIGN(auto size, input->GetSize());
+  ASSERT_AND_ASSIGN(auto buffer, input->Read(size));
+  ASSERT_STATUS_OK(input->Close());
+  std::istringstream stream(buffer->ToString());
+  Manifest raw;
+  ASSERT_STATUS_OK(raw.deserialize(stream));
+  ASSERT_EQ(raw.indexes().size(), 1);
+  EXPECT_EQ(raw.indexes()[0].path, "../index_files/A");
+}
+
+TEST_F(ManifestTest, IndexPathsRebaseWhenStoredManifestIsCopied) {
+  Manifest manifest({}, {}, {}, {Index{.path = base_path_ + "/_index/plain"}});
+  RoundTrip(manifest);
+  const auto new_base = base_path_ + "/new-segment";
+  ASSERT_STATUS_OK(fs_->CreateDir(get_manifest_path(new_base), true));
+  const auto destination = get_manifest_filepath(new_base, 1);
+  ASSERT_STATUS_OK(fs_->CopyFile(get_manifest_filepath(base_path_, 1), destination));
+  Manifest::CleanCache();
+  ASSERT_AND_ASSIGN(auto moved, Manifest::ReadFrom(fs_, destination));
+  EXPECT_EQ(moved->indexes()[0].path, new_base + "/_index/plain");
+  ASSERT_STATUS_OK(Manifest::WriteTo(fs_, get_manifest_filepath(new_base, 2), *moved));
+}
+
+TEST_F(ManifestTest, LocalAbsoluteIndexPathsRemainSupported) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Local absolute paths use a local filesystem";
+  }
+  auto* subtree = dynamic_cast<arrow::fs::SubTreeFileSystem*>(fs_.get());
+  ASSERT_NE(subtree, nullptr);
+  auto local = std::make_shared<arrow::fs::LocalFileSystem>();
+  const auto segment = (std::filesystem::path(subtree->base_path()) / base_path_ / "absolute").string();
+  const auto path = get_manifest_filepath(segment, 1);
+  Manifest manifest({}, {}, {}, {Index{.path = segment + "/_index/plain"}});
+  ASSERT_STATUS_OK(Manifest::WriteTo(local, path, manifest));
+  Manifest::CleanCache();
+  ASSERT_AND_ASSIGN(auto read, Manifest::ReadFrom(local, path));
+  EXPECT_EQ(read->indexes()[0].path, manifest.indexes()[0].path);
+  read->indexes()[0].path = segment + "/index_files/A";
+  ASSERT_STATUS_OK(Manifest::WriteTo(local, get_manifest_filepath(segment, 2), *read));
+  Manifest::CleanCache();
+  ASSERT_AND_ASSIGN(auto external, Manifest::ReadFrom(local, get_manifest_filepath(segment, 2)));
+  EXPECT_EQ(external->indexes()[0].path, segment + "/index_files/A");
 }
 
 TEST_F(ManifestTest, ColumnGroupsRoundTrip) {

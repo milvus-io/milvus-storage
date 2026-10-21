@@ -21,6 +21,10 @@
 #include <vector>
 #include <thread>
 #include <future>
+#include <filesystem>
+#include <sstream>
+
+#include <folly/executors/CPUThreadPoolExecutor.h>
 
 #include <arrow/api.h>
 #include <arrow/filesystem/localfs.h>
@@ -122,6 +126,237 @@ TEST_F(TransactionTest, CommitReturnsManifestSize) {
   Manifest::CleanCache();
   ASSERT_AND_ASSIGN(auto latest, Transaction::Open(fs_, base_path_, LATEST, 1, FailResolver, 1));
   EXPECT_EQ(latest->GetReadVersion(), version);
+}
+
+TEST_F(TransactionTest, IndexPathsSurviveIndependentCommits) {
+  // A bucket-like filesystem keeps manifest paths as object keys, without '/'.
+  auto bucket = std::make_shared<arrow::fs::SubTreeFileSystem>(base_path_, fs_);
+  folly::CPUThreadPoolExecutor executor(1);
+  for (bool async : {false, true}) {
+    for (const std::string root : {"", "R/", "tenant/root/"}) {
+      SCOPED_TRACE(root + (async ? "async" : "sync"));
+      const auto segment = root + "insert_log/C/P/" + (async ? "async" : "sync");
+      ASSERT_STATUS_OK(bucket->CreateDir(get_manifest_path(segment), true));
+      std::vector<Index> expected;
+      std::vector<std::string> stored_paths;
+      auto open = [&]() -> std::unique_ptr<Transaction> {
+        Manifest::CleanCache();
+        if (async) {
+          std::shared_ptr<AsyncOperation> operation;
+          auto result = Transaction::OpenAsync(segment, {}, LATEST, -1, FailResolver, 1, 30000, operation, bucket)
+                            .via(&executor)
+                            .get();
+          EXPECT_TRUE(result.status.ok());
+          return std::move(result.transaction);
+        }
+        auto result = Transaction::Open(bucket, segment);
+        EXPECT_TRUE(result.ok()) << result.status();
+        return result.ok() ? std::move(result).ValueOrDie() : nullptr;
+      };
+      auto commit_and_check = [&](Transaction& transaction) {
+        int64_t version;
+        if (async) {
+          std::shared_ptr<AsyncOperation> operation;
+          auto result = transaction.CommitAsync(30000, operation).via(&executor).get();
+          ASSERT_TRUE(result.status.ok());
+          ASSERT_EQ(result.outcome, CommitOutcome::Committed);
+          version = result.version;
+        } else {
+          ASSERT_AND_ASSIGN(version, transaction.Commit());
+        }
+        const auto path = get_manifest_filepath(segment, version);
+        Manifest::CleanCache();
+        ASSERT_AND_ASSIGN(auto manifest, Manifest::ReadFrom(bucket, path));
+        ASSERT_EQ(manifest->indexes().size(), expected.size());
+        // Compare all persisted index fields, not only the newly published entry.
+        for (size_t i = 0; i < expected.size(); ++i) {
+          const auto& actual = manifest->indexes()[i];
+          EXPECT_EQ(actual.path, expected[i].path);
+          EXPECT_EQ(actual.index_id, expected[i].index_id);
+          EXPECT_EQ(actual.build_id, expected[i].build_id);
+          EXPECT_EQ(actual.index_file_keys, expected[i].index_file_keys);
+          EXPECT_EQ(actual.properties, expected[i].properties);
+          EXPECT_EQ(actual.field_id, expected[i].field_id);
+          EXPECT_EQ(actual.index_name, expected[i].index_name);
+          EXPECT_EQ(actual.column_name, expected[i].column_name);
+          EXPECT_EQ(actual.index_type, expected[i].index_type);
+          EXPECT_EQ(actual.index_version, expected[i].index_version);
+          EXPECT_EQ(actual.num_rows, expected[i].num_rows);
+          EXPECT_EQ(actual.serialized_size, expected[i].serialized_size);
+          EXPECT_EQ(actual.mem_size, expected[i].mem_size);
+          EXPECT_EQ(actual.current_index_version, expected[i].current_index_version);
+          EXPECT_EQ(actual.current_scalar_index_version, expected[i].current_scalar_index_version);
+          EXPECT_EQ(actual.index_store_path_version, expected[i].index_store_path_version);
+        }
+        ASSERT_AND_ASSIGN(auto input, bucket->OpenInputFile(path));
+        ASSERT_AND_ASSIGN(auto size, input->GetSize());
+        ASSERT_AND_ASSIGN(auto buffer, input->Read(size));
+        ASSERT_STATUS_OK(input->Close());
+        std::istringstream stream(buffer->ToString());
+        Manifest raw;
+        ASSERT_STATUS_OK(raw.deserialize(stream));
+        ASSERT_EQ(raw.indexes().size(), stored_paths.size());
+        for (size_t i = 0; i < stored_paths.size(); ++i) {
+          EXPECT_EQ(raw.indexes()[i].path, stored_paths[i]);
+          // Stored paths continue to work with the existing reader.
+          EXPECT_EQ((std::filesystem::path(segment) / "_index" / raw.indexes()[i].path).lexically_normal().string(),
+                    expected[i].path);
+        }
+      };
+      for (int i = 0; i < 10; ++i) {
+        auto transaction = open();
+        ASSERT_NE(transaction, nullptr);
+        const auto relative = "build-" + std::to_string(i);
+        const auto target = segment + "/_index/" + relative;
+        Index index{.column_name = "vector",
+                    .index_name = "index" + std::to_string(i),
+                    .index_type = "hnsw",
+                    .path = target,
+                    .field_id = 100,
+                    .index_id = i + 1,
+                    .build_id = 1000 + i,
+                    .index_version = 3,
+                    .num_rows = 42,
+                    .serialized_size = 1024,
+                    .mem_size = 2048,
+                    .current_index_version = 5,
+                    .current_scalar_index_version = 6,
+                    .index_store_path_version = i % 2,
+                    .index_file_keys = {"header", "data"},
+                    .properties = {{"M", "32"}}};
+        auto input_index = index;
+        input_index.path = relative;
+        transaction->AddIndexInfo(input_index);
+        expected.push_back(index);
+        stored_paths.push_back(relative);
+        ASSERT_NO_FATAL_FAILURE(commit_and_check(*transaction));
+      }
+      for (int update = 0; update < 4; ++update) {
+        auto transaction = open();
+        ASSERT_NE(transaction, nullptr);
+        if (update == 0) {
+          transaction->UpdateStat("bloom", Statistics{{"bloom.bin"}, {{"fpp", "0.01"}}});
+        } else if (update == 1) {
+          transaction->AddDeltaLog({"delete.parquet", DeltaLogType::PRIMARY_KEY, 7});
+        } else if (update == 2) {
+          auto replacement = expected.back();
+          replacement.path = segment + "/_index/replacement";
+          replacement.build_id = 9999;
+          transaction->AddIndexInfo(replacement);
+          expected.back() = replacement;
+          stored_paths.back() = "replacement";
+        } else {
+          transaction->DropIndex(expected.back().index_id);
+          expected.pop_back();
+          stored_paths.pop_back();
+        }
+        ASSERT_NO_FATAL_FAILURE(commit_and_check(*transaction));
+        auto reopened = open();
+        ASSERT_NE(reopened, nullptr);
+        ASSERT_AND_ASSIGN(auto manifest, reopened->GetManifest());
+        EXPECT_EQ(manifest->stats().at("bloom").paths[0], segment + "/_stats/bloom.bin");
+        if (update >= 1) {
+          ASSERT_EQ(manifest->deltaLogs().size(), 1);
+          EXPECT_EQ(manifest->deltaLogs()[0].num_entries, 7);
+        }
+      }
+    }
+  }
+}
+
+TEST_F(TransactionTest, ApplyUpdatesValidatesOnlyAddedIndexPaths) {
+  auto manifest = std::make_shared<Manifest>();
+  manifest->indexes().push_back(Index{.path = "../existing", .index_id = 1});
+  // Applying stats/delta updates does not revalidate retained metadata.
+  Updates metadata;
+  metadata.UpdateStat("bloom", Statistics{{"bloom.bin"}, {}});
+  metadata.AddDeltaLog({"delete.parquet", DeltaLogType::PRIMARY_KEY, 7});
+  ASSERT_AND_ASSIGN(auto retained, applyUpdates(manifest, metadata));
+  ASSERT_EQ(retained->indexes().size(), 1);
+  EXPECT_EQ(retained->indexes()[0].path, "../existing");
+  EXPECT_EQ(retained->stats().size(), 1);
+  EXPECT_EQ(retained->deltaLogs().size(), 1);
+
+  for (int64_t index_id : {1, 2}) {
+    SCOPED_TRACE(index_id);  // Cover replacement and addition.
+    for (const std::string path : {"..", "../A", "../../index_files/A", "./../A", "nested/../../A"}) {
+      SCOPED_TRACE(path);
+      Updates updates;
+      updates.AddIndex(Index{.path = path, .index_id = index_id});
+      auto result = applyUpdates(manifest, updates);
+      EXPECT_TRUE(result.status().IsInvalid()) << result.status();
+    }
+    for (const std::string path : {"plain", "./plain", "nested/../plain", "..hidden", "segment/_index/plain",
+                                   "/absolute/plain", "s3://bucket/plain"}) {
+      SCOPED_TRACE(path);
+      Updates updates;
+      updates.AddIndex(Index{.path = path, .index_id = index_id});
+      ASSERT_AND_ASSIGN(auto result, applyUpdates(manifest, updates));
+      ASSERT_EQ(result->indexes().size(), static_cast<size_t>(index_id));
+      EXPECT_EQ(result->indexes().back().path, path);
+    }
+  }
+  // Neither successful updates nor rejected replacements mutate the input.
+  ASSERT_EQ(manifest->indexes().size(), 1);
+  EXPECT_EQ(manifest->indexes()[0].path, "../existing");
+  EXPECT_TRUE(manifest->stats().empty());
+  EXPECT_TRUE(manifest->deltaLogs().empty());
+}
+
+TEST_F(TransactionTest, ParentRelativeIndexPathRejectsCommit) {
+  folly::CPUThreadPoolExecutor executor(1);
+  for (bool async : {false, true}) {
+    const auto segment = base_path_ + "/reject-" + std::to_string(async);
+    const auto first = get_manifest_filepath(segment, 1);
+    ASSERT_STATUS_OK(fs_->CreateDir(get_manifest_path(segment), true));
+    // Seed a valid relative index path in the existing manifest.
+    Manifest raw({}, {}, {}, {Index{.path = "valid", .index_id = 1}});
+    std::ostringstream bytes;
+    ASSERT_STATUS_OK(raw.serialize(bytes));
+    ASSERT_AND_ASSIGN(auto output, fs_->OpenOutputStream(first));
+    ASSERT_STATUS_OK(output->Write(bytes.str()));
+    ASSERT_STATUS_OK(output->Close());
+    Manifest::CleanCache();
+    std::unique_ptr<Transaction> transaction;
+    if (async) {
+      std::shared_ptr<AsyncOperation> operation;
+      auto result =
+          Transaction::OpenAsync(segment, {}, LATEST, -1, FailResolver, 1, 30000, operation, fs_).via(&executor).get();
+      ASSERT_TRUE(result.status.ok());
+      transaction = std::move(result.transaction);
+    } else {
+      ASSERT_AND_ASSIGN(transaction, Transaction::Open(fs_, segment));
+    }
+    transaction->AddIndexInfo(Index{.path = "../../../../../index_files/B", .index_id = 2});
+    arrow::Status status;
+    if (async) {
+      std::shared_ptr<AsyncOperation> operation;
+      auto result = transaction->CommitAsync(30000, operation).via(&executor).get();
+      status = result.status.detail;
+      EXPECT_FALSE(result.status.ok());
+      EXPECT_EQ(result.version, -1);
+      EXPECT_EQ(result.manifest_size, -1);
+    } else {
+      int64_t size = 123;
+      auto result = transaction->Commit(&size);
+      status = result.status();
+      EXPECT_FALSE(result.ok());
+      EXPECT_EQ(size, 123);
+    }
+    EXPECT_NE(status.ToString().find("Invalid index path"), std::string::npos) << status;
+    ASSERT_AND_ASSIGN(auto info, fs_->GetFileInfo(get_manifest_filepath(segment, 2)));
+    EXPECT_EQ(info.type(), arrow::fs::FileType::NotFound);
+    Manifest::CleanCache();
+    ASSERT_AND_ASSIGN(auto reopened, Transaction::Open(fs_, segment));
+    EXPECT_EQ(reopened->GetReadVersion(), 1);
+    ASSERT_AND_ASSIGN(auto manifest, reopened->GetManifest());
+    EXPECT_TRUE(manifest->stats().empty());
+    EXPECT_EQ(manifest->indexes()[0].path, segment + "/_index/valid");
+    // A fresh transaction can commit a valid relative path after rejection.
+    reopened->AddIndexInfo(Index{.path = "replacement", .index_id = 2});
+    ASSERT_AND_ASSIGN(auto version, reopened->Commit());
+    EXPECT_EQ(version, 2);
+  }
 }
 
 TEST_F(TransactionTest, EmptyManifestTest) {

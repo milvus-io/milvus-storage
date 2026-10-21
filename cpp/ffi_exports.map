@@ -103,6 +103,19 @@
     loon_writer_destroy;
     loon_free_cstr;
 
+    # Talon raw interface
+    loon_talon_client_create;
+    loon_talon_client_destroy;
+    loon_talon_read;
+    loon_talon_read_async;
+    loon_talon_stat;
+    loon_talon_stat_async;
+    loon_talon_load;
+    loon_talon_load_async;
+    loon_talon_batch_load;
+    loon_talon_batch_load_async;
+    loon_talon_result_free;
+
     # FilesystemCache interface
     loon_filesystem_get;
     loon_filesystem_evict;
@@ -139,6 +152,9 @@
     loon_column_groups_debug_string;
 
     # Manifest interface
+    loon_manifest_serialize;
+    loon_manifest_deserialize;
+    loon_manifest_free_buffer;
     loon_manifest_destroy;
     loon_manifest_debug_string;
 
