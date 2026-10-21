@@ -105,9 +105,9 @@ class StatPeer {
           }
           received_.set_value();
           release_.wait();
-          // schema=2, ObjectStat variant=11, size=7, version="v1" (little endian).
-          const std::array<uint8_t, 24> reply{2, 0, 11, 0, 0, 0, 7, 0, 0, 0, 0,   0,
-                                              0, 0, 2,  0, 0, 0, 0, 0, 0, 0, 'v', '1'};
+          // Pinned Talon codec.rs: schema=6, ObjectStat variant=9, size=7, version="v1" (little endian).
+          const std::array<uint8_t, 24> reply{6, 0, 9, 0, 0, 0, 7, 0, 0, 0, 0,   0,
+                                              0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 'v', '1'};
           const auto length = htonl(reply.size());
           std::memcpy(header.data() + 12, &length, 4);
           std::vector<uint8_t> frame(header.begin(), header.end());

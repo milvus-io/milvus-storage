@@ -169,7 +169,7 @@ Talon SDK 随 Storage 一起构建，使用 `tracing-opentelemetry` 连接 Talon
 
 远端传播仍受协议兼容性约束：部署确认 Coordinator/Worker 支持 Talon v2 后，设置 `TALON_TELEMETRY_V2_ENDPOINTS` 为允许的端点列表，或在全部端点已升级时设为 `*`。默认未声明能力的端点继续使用 v1，本地 SDK spans 仍可记录；不会通过失败重试探测 v2，也不会因开启 Storage telemetry 自动改变远端服务的 tracing 策略。
 
-适配依赖 Talon [#594](https://github.com/milvus-io/talon/pull/594) 的 `Operation::disabled()` 请求级开关。其余初始化由 Storage 内部完成。配置初始化失败时 `SetTracerProvider` 返回错误并保留此前的 Storage 配置；宿主应检查已有 API 的返回值。
+适配使用 Talon [#594](https://github.com/milvus-io/talon/pull/594) 的 `Operation::disabled()` 请求级开关。当前 SDK 固定版本 `c6ba5c97` 尚未包含该接口，因此仅在 `vendor/talon-telemetry` 回移该修复；Cargo 的 Git-source patch 保证 SDK、transport 和 Storage 使用同一个 telemetry 实例，其他 Talon 包仍保持主干固定版本。固定版本包含该修复后应移除本地补丁。其余初始化由 Storage 内部完成。配置初始化失败时 `SetTracerProvider` 返回错误并保留此前的 Storage 配置；宿主应检查已有 API 的返回值。
 
 ### Lance 默认 scheduler
 

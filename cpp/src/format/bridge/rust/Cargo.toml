@@ -5,7 +5,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = ["vendor/lance-io"]
+members = ["vendor/lance-io", "vendor/talon-telemetry"]
 
 [lib]
 crate-type = ["staticlib"]
@@ -120,6 +120,11 @@ lance-arrow = { git = "https://github.com/zilliztech/lance", rev = "d512a02e6360
 lance-core = { git = "https://github.com/zilliztech/lance", rev = "d512a02e636057fc9e3bdd2304548e19bbd1a369" }
 lance-io = { path = "vendor/lance-io" }
 lance-namespace = { git = "https://github.com/zilliztech/lance", rev = "d512a02e636057fc9e3bdd2304548e19bbd1a369" }
+
+# Keep the current SDK revision while backporting request-local suppression.
+# Remove after the pinned Talon includes milvus-io/talon#594.
+[patch."https://github.com/milvus-io/talon.git"]
+talon-telemetry = { path = "vendor/talon-telemetry" }
 
 [lints.rust]
 deprecated = "deny"
