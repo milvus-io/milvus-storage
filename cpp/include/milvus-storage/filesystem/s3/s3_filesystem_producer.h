@@ -15,6 +15,7 @@
 #pragma once
 
 #include <aws/core/Aws.h>
+#include <aws/core/auth/AWSCredentialsProviderChain.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/curl/CurlHttpClient.h>
 #include <aws/core/http/standard/StandardHttpRequest.h>
@@ -26,6 +27,20 @@
 #include "milvus-storage/filesystem/s3/s3_options.h"
 
 namespace milvus_storage {
+
+/// Shared AWS credential-source policy for storage filesystems and external
+/// callers such as Milvus ChunkManager.
+///
+/// Initial lookup order: environment AK/SK (with an optional session token),
+/// then STS Web Identity (IRSA). EC2 instance-profile credentials are added last
+/// only when AWS_EC2_METADATA_ENABLE equals "true", ignoring case, at construction.
+/// No profile, SSO, or container credential providers are added. With EC2 enabled,
+/// an IRSA failure can fall back to the Node Role, which the SDK chain may cache.
+/// Construct and destroy this provider within the initialized AWS SDK lifetime.
+class AwsCredentialsProviderChain final : public Aws::Auth::AWSCredentialsProviderChain {
+  public:
+  AwsCredentialsProviderChain();
+};
 
 class S3FileSystemProducer : public FileSystemProducer {
   public:
