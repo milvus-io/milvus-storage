@@ -17,7 +17,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result as AnyResult, anyhow, bail};
 use async_trait::async_trait;
@@ -43,6 +43,7 @@ pub(crate) const AZURE_BROKER_DURATION_SECONDS: &str = "azure_broker_duration_se
 pub(crate) const AZURE_BROKER_REQUEST_TIMEOUT_MS: &str = "azure_broker_request_timeout_ms";
 
 const REFRESH_OFFSET_SECONDS: i64 = 60;
+const INITIAL_FETCH_RETRIES: u32 = 3;
 
 // These options are private to the C++/Rust bridge. They must be consumed
 // before the remaining storage options are passed to Lance or OpenDAL.
@@ -177,6 +178,64 @@ struct BrokerCredentials {
 }
 
 impl AzureBrokerClient {
+    fn json_error(error: serde_json::Error) -> anyhow::Error {
+        let position = format!(" at line {} column {}", error.line(), error.column());
+        let rendered = error.to_string();
+        let message = rendered.strip_suffix(&position).unwrap_or(&rendered);
+        let mut detail = "response does not match broker schema".to_string();
+
+        // Serde's syntax/EOF diagnostics have fixed wording. Data errors can
+        // embed arbitrary response values (including a whole encoded token).
+        if error.is_syntax() || error.is_eof() {
+            detail = message.to_string();
+        } else {
+            // Reconstruct only known diagnostics from constants. An unfamiliar
+            // Serde message falls back to its category and position, never its text.
+            if let Some((actual, expected)) = message
+                .strip_prefix("invalid type: ")
+                .and_then(|message| message.rsplit_once(", expected "))
+                && [
+                    "struct BrokerResponse",
+                    "struct BrokerCredentials",
+                    "a boolean",
+                    "a string",
+                ]
+                .contains(&expected)
+                && let Some(kind) = [
+                    "string",
+                    "integer",
+                    "floating point",
+                    "boolean",
+                    "null",
+                    "sequence",
+                    "map",
+                ]
+                .into_iter()
+                .find(|kind| actual == *kind || actual.starts_with(&format!("{kind} ")))
+            {
+                detail = format!("invalid type: {kind} [REDACTED], expected {expected}");
+            }
+            for field in [
+                "success",
+                "credentials",
+                "tempAk",
+                "sessionToken",
+                "expiredAt",
+            ] {
+                for reason in ["missing", "duplicate"] {
+                    let diagnostic = format!("{reason} field `{field}`");
+                    if message == diagnostic {
+                        detail = diagnostic;
+                    }
+                }
+            }
+        }
+
+        // Do not attach the original error as a source: Debug and error-chain
+        // formatting in logs, Lance and Iceberg must all see only safe details.
+        anyhow!("{:?}: {detail}{position}", error.classify()).context("invalid_json")
+    }
+
     pub(crate) fn new(config: AzureBrokerConfig) -> AnyResult<Self> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(config.request_timeout_ms))
@@ -201,13 +260,16 @@ impl AzureBrokerClient {
             .json(&request)
             .send()
             .await
-            .map_err(|error| anyhow!("transport_error: {error}"))?;
+            .map_err(|error| anyhow::Error::new(error.without_url()).context("transport_error"))?;
         let status = response.status();
         if !status.is_success() {
             bail!("http_status={}", status.as_u16());
         }
-        let response: BrokerResponse =
-            response.json().await.map_err(|_| anyhow!("invalid_json"))?;
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| anyhow::Error::new(error.without_url()).context("transport_error"))?;
+        let response: BrokerResponse = serde_json::from_slice(&body).map_err(Self::json_error)?;
         if !response.success {
             bail!("business_failure");
         }
@@ -255,6 +317,7 @@ type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 pub(crate) struct AzureSasStorageOptionsProvider {
     provider_id: String,
+    request_timeout_ms: u64,
     fetcher: Arc<dyn AzureSasFetcher>,
     clock: Clock,
     cached: RwLock<Option<AzureSasCredential>>,
@@ -275,9 +338,11 @@ impl fmt::Debug for AzureSasStorageOptionsProvider {
 impl AzureSasStorageOptionsProvider {
     pub(crate) fn new(config: AzureBrokerConfig) -> AnyResult<Self> {
         let provider_id = config.provider_id();
+        let request_timeout_ms = config.request_timeout_ms;
         let fetcher = Arc::new(AzureBrokerClient::new(config)?);
         Ok(Self {
             provider_id,
+            request_timeout_ms,
             fetcher,
             clock: Arc::new(Utc::now),
             cached: RwLock::new(None),
@@ -292,6 +357,7 @@ impl AzureSasStorageOptionsProvider {
     ) -> Self {
         Self {
             provider_id: config.provider_id(),
+            request_timeout_ms: config.request_timeout_ms,
             fetcher,
             clock,
             cached: RwLock::new(None),
@@ -317,7 +383,7 @@ impl AzureSasStorageOptionsProvider {
 
     fn lance_error(error: &anyhow::Error) -> LanceError {
         LanceError::io_source(Box::new(std::io::Error::other(format!(
-            "Azure SAS credential broker failure: {error}"
+            "Azure SAS credential broker failure: {error:#}"
         ))))
     }
 
@@ -340,22 +406,57 @@ impl AzureSasStorageOptionsProvider {
             return Ok(credential.clone());
         }
 
-        match self.fetcher.fetch(now).await {
-            Ok(credential) => {
-                *cached = Some(credential.clone());
-                Ok(credential)
-            }
-            Err(error) => {
-                let has_cached_sas = cached.is_some();
-                let cached_expired = cached
-                    .as_ref()
-                    .map(|credential| credential.expires_at <= now)
-                    .unwrap_or(false);
-                eprintln!(
-                    "Warning: Azure SAS credential broker refresh failed: {}, has_cached_sas={}, cached_expired={}",
-                    error, has_cached_sas, cached_expired
-                );
-                Err(error)
+        let mut retries = 0;
+        loop {
+            now = (self.clock)();
+            let started = Instant::now();
+            match self.fetcher.fetch(now).await {
+                Ok(credential) => {
+                    *cached = Some(credential.clone());
+                    return Ok(credential);
+                }
+                Err(error) => {
+                    let has_cached_sas = cached.is_some();
+                    let cached_expired = cached
+                        .as_ref()
+                        .map(|credential| credential.expires_at <= (self.clock)())
+                        .unwrap_or(false);
+                    let request_error = error.downcast_ref::<reqwest::Error>();
+                    let is_timeout = request_error.is_some_and(reqwest::Error::is_timeout);
+                    let is_connect = request_error.is_some_and(reqwest::Error::is_connect);
+                    // JSON errors are converted separately by json_error(); reqwest
+                    // body/decode errors here come from collecting the response body.
+                    let retryable = is_timeout
+                        || is_connect
+                        || request_error.is_some_and(reqwest::Error::is_request)
+                        || request_error.is_some_and(reqwest::Error::is_body)
+                        || request_error.is_some_and(reqwest::Error::is_decode);
+                    let will_retry =
+                        !has_cached_sas && retries < INITIAL_FETCH_RETRIES && retryable;
+                    let retry_delay_ms = if will_retry { 200 << retries } else { 0 };
+                    eprintln!(
+                        "Warning: Azure SAS credential broker refresh failed: {:#}, has_cached_sas={}, cached_expired={}, attempt={}, is_timeout={}, is_connect={}, elapsed_ms={}, request_timeout_ms={}, will_retry={}, retry_delay_ms={}",
+                        error,
+                        has_cached_sas,
+                        cached_expired,
+                        retries + 1,
+                        is_timeout,
+                        is_connect,
+                        started.elapsed().as_millis(),
+                        self.request_timeout_ms,
+                        will_retry,
+                        retry_delay_ms
+                    );
+                    if !will_retry {
+                        return Err(error);
+                    }
+
+                    // Initial credentials are fetched before Lance's read retries apply.
+                    // Keep this single-flight and back off 200/400/800 ms; cached
+                    // credential refreshes retain their existing fail-fast behavior.
+                    tokio::time::sleep(Duration::from_millis(retry_delay_ms)).await;
+                    retries += 1;
+                }
             }
         }
     }
@@ -378,7 +479,7 @@ impl StorageOptionsProvider for AzureSasStorageOptionsProvider {
 fn azure_iceberg_credential_error(error: anyhow::Error) -> IcebergError {
     IcebergError::new(
         IcebergErrorKind::Unexpected,
-        format!("Azure SAS credential resolution failed: {error}"),
+        format!("Azure SAS credential resolution failed: {error:#}"),
     )
 }
 
@@ -654,6 +755,504 @@ mod tests {
             fetcher,
             Arc::new(move || now),
         ))
+    }
+
+    async fn start_test_broker(
+        responses: Vec<Option<(u16, String)>>,
+    ) -> (
+        AzureBrokerConfig,
+        Arc<Mutex<Vec<std::time::Instant>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let responses = responses
+            .into_iter()
+            .map(|response| {
+                response.map(|(status, body)| {
+                    format!(
+                        "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                })
+            })
+            .collect();
+        start_raw_test_broker(responses).await
+    }
+
+    async fn start_raw_test_broker(
+        responses: Vec<Option<String>>,
+    ) -> (
+        AzureBrokerConfig,
+        Arc<Mutex<Vec<std::time::Instant>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut broker_config = config();
+        broker_config.endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            let mut responses = responses.into_iter();
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                server_requests
+                    .lock()
+                    .unwrap()
+                    .push(std::time::Instant::now());
+                let mut request = [0_u8; 4096];
+                socket.read(&mut request).await.unwrap();
+                // Closing without a response reproduces a broker transport failure.
+                if let Some(Some(response)) = responses.next() {
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                }
+            }
+        });
+        (broker_config, requests, server)
+    }
+
+    #[tokio::test]
+    async fn initial_transport_failure_recovers_with_backoff() {
+        let body = serde_json::json!({
+            "success": true,
+            "credentials": {
+                "tempAk": "account",
+                "sessionToken": "sv=1&sig=recovered",
+                "expiredAt": (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+            }
+        })
+        .to_string();
+        let (config, requests, server) =
+            start_test_broker(vec![None, None, None, Some((200, body))]).await;
+
+        let provider = build_lance_provider(config).await.unwrap();
+        let options = provider.fetch_storage_options().await.unwrap().unwrap();
+        server.abort();
+        assert_eq!(options["azure_storage_sas_token"], "sv=1&sig=recovered");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        for (attempts, delay_ms) in requests.windows(2).zip([200, 400, 800]) {
+            assert!(attempts[1].duration_since(attempts[0]) >= Duration::from_millis(delay_ms));
+        }
+    }
+
+    #[tokio::test]
+    async fn initial_transport_failure_stops_after_three_retries() {
+        let (config, requests, server) = start_test_broker(Vec::new()).await;
+        let provider = AzureSasStorageOptionsProvider::new(config).unwrap();
+
+        let error = provider.current_credential().await.err().unwrap();
+        server.abort();
+        assert_eq!(requests.lock().unwrap().len(), 4);
+        assert!(provider.cached.read().await.is_none());
+        assert!(format!("{error:#}").contains("transport_error"));
+    }
+
+    #[tokio::test]
+    async fn initial_body_transfer_failure_recovers_with_backoff() {
+        let body = serde_json::json!({
+            "success": true,
+            "credentials": {
+                "tempAk": "account",
+                "tempSk": "",
+                "sessionToken": "sv=1&sig=recovered",
+                "expiredAt": (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+            }
+        })
+        .to_string();
+        // A valid JSON body with a larger advertised size fails during transfer,
+        // before JSON parsing. The fourth response completes successfully.
+        let responses = [body.len() + 1, body.len() + 1, body.len() + 1, body.len()]
+            .into_iter()
+            .map(|length| {
+                Some(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}"
+                ))
+            })
+            .collect();
+        let (config, requests, server) = start_raw_test_broker(responses).await;
+        let provider = build_lance_provider(config).await;
+        server.abort();
+        let options = provider
+            .unwrap()
+            .fetch_storage_options()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(options["azure_storage_sas_token"], "sv=1&sig=recovered");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        for (attempts, delay_ms) in requests.windows(2).zip([200, 400, 800]) {
+            assert!(attempts[1].duration_since(attempts[0]) >= Duration::from_millis(delay_ms));
+        }
+    }
+
+    #[tokio::test]
+    async fn initial_body_transfer_failure_stops_after_three_retries() {
+        let response = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{}";
+        let (config, requests, server) =
+            start_raw_test_broker(vec![Some(response.to_string()); 4]).await;
+        let provider = AzureSasStorageOptionsProvider::new(config).unwrap();
+        let error = provider.current_credential().await.err().unwrap();
+        server.abort();
+        assert_eq!(requests.lock().unwrap().len(), 4);
+        assert!(provider.cached.read().await.is_none());
+        assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_decode());
+        assert_eq!(error.to_string(), "transport_error");
+    }
+
+    #[tokio::test]
+    async fn cached_body_transfer_failure_is_not_retried_even_after_expiration() {
+        let response = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{}";
+        let (config, requests, server) =
+            start_raw_test_broker(vec![Some(response.to_string()); 2]).await;
+        let provider = AzureSasStorageOptionsProvider::new(config).unwrap();
+        for (index, remaining_secs) in [30, -1].into_iter().enumerate() {
+            *provider.cached.write().await = Some(AzureSasCredential {
+                token: "sv=1&sig=old".to_string(),
+                expires_at: Utc::now() + chrono::Duration::seconds(remaining_secs),
+            });
+            let error = provider.current_credential().await.err().unwrap();
+            assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_decode());
+            assert_eq!(requests.lock().unwrap().len(), index + 1);
+            assert_eq!(
+                provider.cached.read().await.as_ref().unwrap().token,
+                "sv=1&sig=old"
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn broker_transport_error_preserves_chain() {
+        let (mut config, _, server) = start_test_broker(Vec::new()).await;
+        config
+            .endpoint
+            .push_str("/secret-path?api_key=secret-query");
+        let client = AzureBrokerClient::new(config).unwrap();
+
+        let error = client.fetch(Utc::now()).await.err().unwrap();
+        server.abort();
+        assert!(
+            error
+                .downcast_ref::<reqwest::Error>()
+                .unwrap()
+                .url()
+                .is_none()
+        );
+        assert!(error.chain().count() > 2);
+        for formatted in [format!("{error:#}"), format!("{error:?}")] {
+            assert!(!formatted.contains("secret-path"));
+            assert!(!formatted.contains("secret-query"));
+        }
+        let root_cause = error.root_cause().to_string();
+        assert_ne!(root_cause, "transport_error");
+        let lance_error = AzureSasStorageOptionsProvider::lance_error(&error).to_string();
+        assert!(lance_error.contains("transport_error"));
+        assert!(lance_error.contains(&root_cause));
+        assert!(
+            azure_iceberg_credential_error(error)
+                .to_string()
+                .contains(&root_cause)
+        );
+    }
+
+    #[tokio::test]
+    async fn broker_json_errors_redact_response_values() {
+        let secret = "SAS_SECRET_SENTINEL";
+        let credential_json = format!(
+            r#"{{"success":true,"credentials":{{"tempAk":"account","tempSk":"","sessionToken":"sig={secret}","expiredAt":"2099-01-01T00:00:00Z"}}}}"#
+        );
+        for (body, expected) in [
+            (
+                serde_json::to_string(&credential_json).unwrap(),
+                "invalid type: string [REDACTED], expected struct BrokerResponse",
+            ),
+            (
+                serde_json::to_string(&serde_json::json!({
+                    "success": false,
+                    "msg": "generate SAS token for storage account [account] failed",
+                    "detail": secret,
+                    "credentials": {"tempAk": "", "tempSk": "", "sessionToken": "", "expiredAt": ""},
+                }).to_string()).unwrap(),
+                "invalid type: string [REDACTED], expected struct BrokerResponse",
+            ),
+            (
+                format!(r#"{{"success":"{secret}"}}"#),
+                "invalid type: string [REDACTED], expected a boolean",
+            ),
+            (
+                format!(r#"{{"success":true,"credentials":"{secret}"}}"#),
+                "invalid type: string [REDACTED], expected struct BrokerCredentials",
+            ),
+            (
+                r#"{"success":9876543210}"#.to_string(),
+                "invalid type: integer [REDACTED], expected a boolean",
+            ),
+            (
+                r#"{"success":9876543210.5}"#.to_string(),
+                "invalid type: floating point [REDACTED], expected a boolean",
+            ),
+            (
+                format!(r#"{{"success":true,"credentials":{{"tempAk":"{secret}","sessionToken":9876543210}}}}"#),
+                "invalid type: integer [REDACTED], expected a string",
+            ),
+            (
+                format!(r#"{{"success":true,"credentials":{{"tempAk":"{secret}"}}}}"#),
+                "missing field `sessionToken`",
+            ),
+            (
+                format!(r#"{{"success":true,"credentials":{{"tempAk":"{secret}","tempAk":"{secret}"}}}}"#),
+                "duplicate field `tempAk`",
+            ),
+            (
+                format!("{{\n\"success\":true,\n\"credentials\":{{\"tempAk\":\"{secret}\""),
+                "EOF while parsing an object",
+            ),
+            (
+                format!(r#"{{"success":true,"credentials":{{"tempAk":"{secret}" "sessionToken":"{secret}"}}}}"#),
+                "expected `,` or `}`",
+            ),
+        ] {
+            let (config, requests, server) = start_test_broker(vec![Some((200, body))]).await;
+            let provider = AzureSasStorageOptionsProvider::new(config).unwrap();
+            let error = provider.current_credential().await.err().unwrap();
+            server.abort();
+            assert_eq!(requests.lock().unwrap().len(), 1);
+            assert_eq!(error.to_string(), "invalid_json");
+            let mut diagnostics = vec![
+                format!("{error:#}"),
+                format!("{error:?}"),
+                format!("{error:#?}"),
+                AzureSasStorageOptionsProvider::lance_error(&error).to_string(),
+            ];
+            for cause in error.chain() {
+                assert!(!format!("{cause:?}").contains(secret));
+                assert!(!cause.to_string().contains("9876543210"));
+            }
+            diagnostics.push(azure_iceberg_credential_error(error).to_string());
+            for diagnostic in diagnostics {
+                assert!(!diagnostic.contains(secret), "credential leaked");
+                assert!(!diagnostic.contains("9876543210"), "response value leaked");
+                assert!(diagnostic.contains(expected), "{diagnostic}");
+                assert!(diagnostic.contains("line "), "{diagnostic}");
+                assert!(diagnostic.contains("column "), "{diagnostic}");
+            }
+        }
+    }
+
+    #[test]
+    fn broker_json_error_logs_are_redacted() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "azure_sas_provider::tests::broker_json_errors_redact_response_values",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            !stderr.contains("SAS_SECRET_SENTINEL"),
+            "credential leaked in log"
+        );
+        assert!(
+            !stderr.contains("9876543210"),
+            "response value leaked in log"
+        );
+        assert!(output.status.success(), "{stderr}");
+        assert!(stderr.contains("invalid type: string [REDACTED]"));
+        assert!(stderr.contains("missing field `sessionToken`"));
+        assert!(stderr.contains("attempt=1"));
+        assert!(stderr.contains("will_retry=false"));
+    }
+
+    #[test]
+    fn broker_json_error_redacts_unrecognized_diagnostics() {
+        for message in [
+            "SAS_SECRET_SENTINEL",
+            "invalid type: string \"value\", expected SAS_SECRET_SENTINEL",
+            "missing field `SAS_SECRET_SENTINEL`",
+        ] {
+            let error = <serde_json::Error as serde::de::Error>::custom(message);
+            let error = AzureBrokerClient::json_error(error);
+            assert!(error.downcast_ref::<serde_json::Error>().is_none());
+            for diagnostic in [format!("{error:#}"), format!("{error:#?}")] {
+                assert!(!diagnostic.contains("SAS_SECRET_SENTINEL"));
+                assert!(diagnostic.contains("Data: response does not match broker schema"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn broker_body_read_error_preserves_transport_chain() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = config();
+        config.endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n{\"sessionToken\":\"SAS_SECRET_SENTINEL")
+                .await
+                .unwrap();
+        });
+        let error = AzureBrokerClient::new(config)
+            .unwrap()
+            .fetch(Utc::now())
+            .await
+            .err()
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(error.to_string(), "transport_error");
+        assert!(error.downcast_ref::<reqwest::Error>().is_some());
+        assert!(error.chain().count() > 2);
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("body"), "{diagnostic}");
+        assert!(!diagnostic.contains("SAS_SECRET_SENTINEL"));
+    }
+
+    #[test]
+    fn transport_failure_logs_diagnostic_fields() {
+        // Check actual stderr in a child process without intercepting other
+        // tests' concurrent logging.
+        for (test_name, is_timeout, has_cached_sas, timeout_ms, delays) in [
+            (
+                "azure_sas_provider::tests::initial_transport_failure_stops_after_three_retries",
+                false,
+                false,
+                1000,
+                &[200, 400, 800, 0][..],
+            ),
+            (
+                "azure_sas_provider::tests::cached_transport_timeout_is_reported",
+                true,
+                true,
+                100,
+                &[0][..],
+            ),
+            (
+                "azure_sas_provider::tests::initial_body_transfer_failure_stops_after_three_retries",
+                false,
+                false,
+                1000,
+                &[200, 400, 800, 0][..],
+            ),
+        ] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test_name, "--nocapture"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            let failures = stderr
+                .lines()
+                .filter(|line| {
+                    line.starts_with("Warning: Azure SAS credential broker refresh failed:")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(failures.len(), delays.len(), "{stderr}");
+            for (index, (line, delay_ms)) in failures.iter().zip(delays).enumerate() {
+                assert!(line.contains(&format!("is_timeout={is_timeout}")), "{line}");
+                assert!(line.contains("is_connect=false"), "{line}");
+                assert!(
+                    line.contains(&format!("request_timeout_ms={timeout_ms}")),
+                    "{line}"
+                );
+                assert!(line.contains(&format!("attempt={}", index + 1)), "{line}");
+                assert!(
+                    line.contains(&format!("will_retry={}", *delay_ms > 0)),
+                    "{line}"
+                );
+                assert!(
+                    line.contains(&format!("retry_delay_ms={delay_ms}")),
+                    "{line}"
+                );
+                let elapsed_ms = line
+                    .split("elapsed_ms=")
+                    .nth(1)
+                    .unwrap()
+                    .split(',')
+                    .next()
+                    .unwrap()
+                    .parse::<u128>()
+                    .unwrap();
+                if is_timeout {
+                    assert!(elapsed_ms >= 50, "{line}");
+                    assert!(line.contains("operation timed out"), "{line}");
+                }
+                assert!(
+                    line.contains(&format!("has_cached_sas={has_cached_sas}")),
+                    "{line}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_transport_timeout_is_reported() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = config();
+        config.endpoint = format!("http://{}", listener.local_addr().unwrap());
+        config.request_timeout_ms = 100;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            socket.read(&mut request).await.unwrap();
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        let provider = AzureSasStorageOptionsProvider::new(config).unwrap();
+        *provider.cached.write().await = Some(AzureSasCredential {
+            token: "sv=1&sig=old".to_string(),
+            expires_at: Utc::now() + chrono::Duration::seconds(30),
+        });
+
+        let error = provider.current_credential().await.err().unwrap();
+        server.abort();
+        assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_timeout());
+    }
+
+    #[tokio::test]
+    async fn cached_transport_failure_is_not_retried_even_after_expiration() {
+        let (config, requests, server) = start_test_broker(Vec::new()).await;
+        let provider = AzureSasStorageOptionsProvider::new(config).unwrap();
+
+        for (index, remaining_secs) in [30, -1].into_iter().enumerate() {
+            *provider.cached.write().await = Some(AzureSasCredential {
+                token: "sv=1&sig=old".to_string(),
+                expires_at: Utc::now() + chrono::Duration::seconds(remaining_secs),
+            });
+            assert!(provider.current_credential().await.is_err());
+            assert_eq!(requests.lock().unwrap().len(), index + 1);
+            assert_eq!(
+                provider.cached.read().await.as_ref().unwrap().token,
+                "sv=1&sig=old"
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn initial_broker_rejections_are_not_retried() {
+        for (status, body, expected) in [
+            (403, "{}", "http_status=403"),
+            (500, "{}", "http_status=500"),
+            (200, "not json", "invalid_json"),
+            (200, r#"{"success":false}"#, "business_failure"),
+        ] {
+            let (config, requests, server) =
+                start_test_broker(vec![Some((status, body.to_string()))]).await;
+            let provider = AzureSasStorageOptionsProvider::new(config).unwrap();
+
+            let error = provider.current_credential().await.err().unwrap();
+            server.abort();
+            assert_eq!(error.to_string(), expected);
+            assert_eq!(requests.lock().unwrap().len(), 1);
+            if expected == "invalid_json" {
+                assert!(error.downcast_ref::<reqwest::Error>().is_none());
+                assert!(format!("{error:#}").contains("Syntax: expected ident"));
+            }
+        }
     }
 
     #[tokio::test]
