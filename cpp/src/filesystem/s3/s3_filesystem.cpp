@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "common/exception.h"
+#include "tracing/runtime.h"
+
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/fs.h"
 
@@ -890,13 +893,28 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     }
 
     if (native_) {
-      return native_->ReadMetadataAsync(path_.full_path, io_context)
-          .Then([state = read_state_](const NativeS3ObjectMetadata& result) {
-            std::lock_guard lock(state->metadata_mutex);
-            state->content_length.store(result.content_length, std::memory_order_release);
-            state->metadata = result.metadata;
-            return result.metadata;
-          });
+      auto trace = tracing::OperationTrace::Native("storage.backend.request", true);
+      tracing::ContextScope trace_scope(trace.context());
+      trace.Attribute("storage.backend", "s3-crt");
+      trace.Attribute("storage.operation", "head");
+      try {
+        return tracing::Observe(native_->ReadMetadataAsync(path_.full_path, io_context)
+                                    .Then(tracing::Bind([state = read_state_](const NativeS3ObjectMetadata& result) {
+                                      std::lock_guard lock(state->metadata_mutex);
+                                      state->content_length.store(result.content_length, std::memory_order_release);
+                                      state->metadata = result.metadata;
+                                      return result.metadata;
+                                    })),
+                                trace);
+      } catch (const std::exception& e) {
+        auto error = detail::ExceptionStatus("HeadObject submission exception", &e);
+        trace.Finish(error);
+        return Future<std::shared_ptr<const arrow::KeyValueMetadata>>::MakeFinished(std::move(error));
+      } catch (...) {
+        auto error = detail::ExceptionStatus("HeadObject submission exception");
+        trace.Finish(error);
+        return Future<std::shared_ptr<const arrow::KeyValueMetadata>>::MakeFinished(std::move(error));
+      }
     }
 
     // Preserve the SDK metadata path for GCP CRT reads, including IAM headers.
@@ -913,39 +931,49 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     ctx->request.SetBucket(ToAwsString(path_.bucket));
     ctx->request.SetKey(ToAwsString(path_.key));
 
-    ctx->client_lease->HeadObjectAsync(
-        ctx->request, [ctx](const Aws::S3Crt::S3CrtClient*, const S3CrtModel::HeadObjectRequest&,
-                            const S3CrtModel::HeadObjectOutcome& outcome,
-                            const std::shared_ptr<const Aws::Client::AsyncCallerContext>&) mutable {
-          if (!outcome.IsSuccess()) {
-            if (outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
-              ctx->future.MarkFinished(PathNotFound(ctx->path));
+    ctx->trace.Attribute("storage.backend", "s3-crt");
+    ctx->trace.Attribute("storage.operation", "head");
+    (void)tracing::Observe(ctx->future, ctx->trace);
+    try {
+      ctx->client_lease->HeadObjectAsync(
+          ctx->request, [ctx](const Aws::S3Crt::S3CrtClient*, const S3CrtModel::HeadObjectRequest&,
+                              const S3CrtModel::HeadObjectOutcome& outcome,
+                              const std::shared_ptr<const Aws::Client::AsyncCallerContext>&) mutable {
+            tracing::ContextScope trace_scope(ctx->trace.context());
+            if (!outcome.IsSuccess()) {
+              if (outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
+                ctx->future.MarkFinished(PathNotFound(ctx->path));
+                return;
+              }
+              ctx->future.MarkFinished(
+                  ErrorToStatus(std::forward_as_tuple("When reading information for key '", ctx->path.key,
+                                                      "' in bucket '", ctx->path.bucket, "': "),
+                                "HeadObject", outcome.GetError()));
               return;
             }
-            ctx->future.MarkFinished(
-                ErrorToStatus(std::forward_as_tuple("When reading information for key '", ctx->path.key,
-                                                    "' in bucket '", ctx->path.bucket, "': "),
-                              "HeadObject", outcome.GetError()));
-            return;
-          }
 
-          const auto content_length = outcome.GetResult().GetContentLength();
-          if (content_length < 0) {
-            ctx->future.MarkFinished(arrow::Status::IOError("HeadObject returned a negative Content-Length"));
-            return;
-          }
+            const auto content_length = outcome.GetResult().GetContentLength();
+            if (content_length < 0) {
+              ctx->future.MarkFinished(arrow::Status::IOError("HeadObject returned a negative Content-Length"));
+              return;
+            }
 
-          auto metadata = GetObjectMetadata(outcome.GetResult());
-          {
-            std::lock_guard<std::mutex> lock(ctx->read_state->metadata_mutex);
-            // Publish both values from this HEAD before making metadata visible.
-            ctx->read_state->content_length.store(content_length, std::memory_order_release);
-            ctx->read_state->metadata = metadata;
-          }
-          // Complete outside the metadata lock: a caller continuation can read
-          // the cache immediately. Executor selection remains with the caller.
-          ctx->future.MarkFinished(std::move(metadata));
-        });
+            auto metadata = GetObjectMetadata(outcome.GetResult());
+            {
+              std::lock_guard<std::mutex> lock(ctx->read_state->metadata_mutex);
+              // Publish both values from this HEAD before making metadata visible.
+              ctx->read_state->content_length.store(content_length, std::memory_order_release);
+              ctx->read_state->metadata = metadata;
+            }
+            // Complete outside the metadata lock: a caller continuation can read
+            // the cache immediately. Executor selection remains with the caller.
+            ctx->future.MarkFinished(std::move(metadata));
+          });
+    } catch (const std::exception& e) {
+      ctx->future.MarkFinished(detail::ExceptionStatus("HeadObject submission exception", &e));
+    } catch (...) {
+      ctx->future.MarkFinished(detail::ExceptionStatus("HeadObject submission exception"));
+    }
     return ctx->future;
   }
 
@@ -1028,41 +1056,53 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     ctx->request.SetResponseStreamFactory(AwsWriteableStreamFactory(out, nbytes));
 
     ctx->metrics->IncrementReadCount();
-    ctx->client_lease->GetObjectAsync(
-        ctx->request,
-        [ctx](const Aws::S3Crt::S3CrtClient*, const S3CrtModel::GetObjectRequest&, S3CrtModel::GetObjectOutcome outcome,
-              const std::shared_ptr<const Aws::Client::AsyncCallerContext>&) mutable {
-          if (!outcome.IsSuccess()) {
-            ctx->metrics->IncrementFailedCount();
-            ctx->future.MarkFinished(arrow::Result<int64_t>(ErrorToStatus("GetObject", outcome.GetError())));
-            return;
-          }
+    ctx->trace.Attribute("storage.backend", "s3-crt");
+    ctx->trace.Attribute("storage.operation", "get");
+    (void)tracing::Observe(ctx->future, ctx->trace);
+    try {
+      ctx->client_lease->GetObjectAsync(
+          ctx->request, [ctx](const Aws::S3Crt::S3CrtClient*, const S3CrtModel::GetObjectRequest&,
+                              S3CrtModel::GetObjectOutcome outcome,
+                              const std::shared_ptr<const Aws::Client::AsyncCallerContext>&) mutable {
+            tracing::ContextScope trace_scope(ctx->trace.context());
+            if (!outcome.IsSuccess()) {
+              ctx->metrics->IncrementFailedCount();
+              ctx->future.MarkFinished(arrow::Result<int64_t>(ErrorToStatus("GetObject", outcome.GetError())));
+              return;
+            }
 
-          const auto& result = outcome.GetResult();
-          const auto response_content_length = result.GetContentLength();
-          const auto bytes_received = static_cast<int64_t>(result.GetBody().tellp());
-          if (response_content_length < 0 || response_content_length > ctx->nbytes ||
-              response_content_length != bytes_received) {
-            ctx->metrics->IncrementFailedCount();
-            ctx->future.MarkFinished(arrow::Result<int64_t>(
-                arrow::Status::IOError("Unexpected GetObject Content-Length ", response_content_length,
-                                       " for range read of ", ctx->nbytes, " bytes")));
-            return;
-          }
+            const auto& result = outcome.GetResult();
+            const auto response_content_length = result.GetContentLength();
+            const auto bytes_received = static_cast<int64_t>(result.GetBody().tellp());
+            if (response_content_length < 0 || response_content_length > ctx->nbytes ||
+                response_content_length != bytes_received) {
+              ctx->metrics->IncrementFailedCount();
+              ctx->future.MarkFinished(arrow::Result<int64_t>(
+                  arrow::Status::IOError("Unexpected GetObject Content-Length ", response_content_length,
+                                         " for range read of ", ctx->nbytes, " bytes")));
+              return;
+            }
 
-          const int64_t bytes_read = response_content_length;
-          auto content_length = GetObjectSizeFromReadResult(result, ctx->position);
-          if (content_length) {
-            DCHECK_LE(ctx->position + bytes_read, *content_length);
-            int64_t expected = kNoSize;
-            ctx->read_state->content_length.compare_exchange_strong(
-                expected, *content_length, std::memory_order_acq_rel, std::memory_order_acquire);
-          }
-          if (bytes_read > 0) {
-            ctx->metrics->IncrementReadBytes(bytes_read);
-          }
-          ctx->future.MarkFinished(bytes_read);
-        });
+            const int64_t bytes_read = response_content_length;
+            auto content_length = GetObjectSizeFromReadResult(result, ctx->position);
+            if (content_length) {
+              DCHECK_LE(ctx->position + bytes_read, *content_length);
+              int64_t expected = kNoSize;
+              ctx->read_state->content_length.compare_exchange_strong(
+                  expected, *content_length, std::memory_order_acq_rel, std::memory_order_acquire);
+            }
+            if (bytes_read > 0) {
+              ctx->metrics->IncrementReadBytes(bytes_read);
+            }
+            ctx->future.MarkFinished(bytes_read);
+          });
+    } catch (const std::exception& e) {
+      ctx->metrics->IncrementFailedCount();
+      ctx->future.MarkFinished(detail::ExceptionStatus("GetObject submission exception", &e));
+    } catch (...) {
+      ctx->metrics->IncrementFailedCount();
+      ctx->future.MarkFinished(detail::ExceptionStatus("GetObject submission exception"));
+    }
     // Keep executor selection at the caller-owned continuation boundary.
     return ctx->future;
   }
@@ -1227,6 +1267,7 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
   std::shared_ptr<NativeS3Operations> native_;
 
   struct AsyncReadContext {
+    tracing::OperationTrace trace = tracing::OperationTrace::Native("storage.backend.request", true);
     // AWS CRT retains this context through the callback. Never add owning
     // references to S3CrtClient, S3CrtClientHolder, or ObjectCrtInputFile here.
     // The lease owns only operation state and a non-owning client pointer.
@@ -1240,6 +1281,7 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
   };
 
   struct AsyncHeadContext {
+    tracing::OperationTrace trace = tracing::OperationTrace::Native("storage.backend.request", true);
     // Keep the same non-owning CRT client lifetime model as AsyncReadContext.
     // The path and read state remain valid without owning the file or holder.
     Future<std::shared_ptr<const arrow::KeyValueMetadata>> future;

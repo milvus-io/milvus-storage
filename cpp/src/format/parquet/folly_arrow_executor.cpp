@@ -14,6 +14,8 @@
 
 #include "milvus-storage/format/parquet/folly_arrow_executor.h"
 
+#include "tracing/runtime.h"
+
 #include <exception>
 #include <utility>
 
@@ -28,7 +30,7 @@ namespace {
 class FollyArrowExecutor final : public arrow::internal::Executor {
   public:
   FollyArrowExecutor(folly::Executor::KeepAlive<> executor, int capacity)
-      : executor_(std::move(executor)), capacity_(capacity) {}
+      : executor_(std::move(executor)), capacity_(capacity), context_(tracing::Capture()) {}
 
   // Folly's base Executor has no worker-count API. Capacity is a caller-provided
   // Arrow scheduling hint; it does not create additional workers.
@@ -49,8 +51,10 @@ class FollyArrowExecutor final : public arrow::internal::Executor {
     }
 
     try {
-      executor_->add([task = std::move(task), stop_token = std::move(stop_token),
+      executor_->add([context = context_, task = std::move(task), stop_token = std::move(stop_token),
                       stop_callback = std::move(stop_callback)]() mutable {
+        tracing::ContextScope scope(context);
+        tracing::StartCurrent();
         if (!stop_token.IsStopRequested()) {
           std::move(task)();
         } else if (stop_callback) {
@@ -70,6 +74,8 @@ class FollyArrowExecutor final : public arrow::internal::Executor {
   // Keep the caller-owned executor alive for every outstanding Arrow task.
   folly::Executor::KeepAlive<> executor_;
   int capacity_;
+  // Operation-specific executor, including submissions from foreign completion threads.
+  tracing::ContextPtr context_;
 };
 
 }  // namespace

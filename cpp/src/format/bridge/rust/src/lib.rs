@@ -14,10 +14,10 @@
 
 #[path = "filesystem/filesystem_opendal.rs"]
 mod filesystem_opendal;
-#[path = "iceberg/iceberg_opendal.rs"]
-mod iceberg_opendal;
 #[path = "iceberg/iceberg_bridgeimpl.rs"]
 mod iceberg_bridgeimpl;
+#[path = "iceberg/iceberg_opendal.rs"]
+mod iceberg_opendal;
 #[path = "iceberg/iceberg_testutil.rs"]
 mod iceberg_testutil;
 #[path = "lance/lance_bridgeimpl.rs"]
@@ -36,6 +36,8 @@ mod paimon_testutil;
 mod predicate_parser;
 #[path = "runtime/rust_runtime.rs"]
 mod rust_runtime;
+#[path = "runtime/storage_tracing.rs"]
+mod storage_tracing;
 #[cfg(feature = "talon")]
 #[path = "talon/talon_bridge.rs"]
 mod talon_bridge;
@@ -58,9 +60,9 @@ use vortex_bridgeimpl::*;
 
 use std::sync::LazyLock;
 
+use storage_tracing::TracedRuntime;
 use vortex::VortexSessionDefault;
 use vortex::io::runtime::BlockingRuntime;
-use vortex::io::runtime::tokio::TokioRuntime;
 use vortex::io::session::RuntimeSessionExt;
 use vortex::layout::LayoutEncodingRef;
 use vortex::layout::session::LayoutSessionExt;
@@ -74,8 +76,8 @@ pub(crate) use rust_runtime::TOKIO_RT;
 ///
 /// This is not a second Tokio runtime; it only gives Vortex APIs a
 /// `BlockingRuntime` view over `TOKIO_RT`.
-static VORTEX_RT: LazyLock<TokioRuntime> =
-    LazyLock::new(|| TokioRuntime::new(TOKIO_RT.handle().clone()));
+static VORTEX_RT: LazyLock<TracedRuntime> =
+    LazyLock::new(|| TracedRuntime::new(TOKIO_RT.handle().clone()));
 
 static VORTEX_SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
     let session = VortexSession::default().with_handle(VORTEX_RT.handle());
@@ -87,6 +89,16 @@ static VORTEX_SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
 
 #[cxx::bridge(namespace = "milvus_storage::rust_bridge::ffi")]
 pub mod rust_runtime_ffi {
+    unsafe extern "C++" {
+        include!("tracing_bridge.h");
+        type TraceContext;
+        type TraceAttachment;
+        fn record_trace_bridge_failure(attachment: bool);
+        fn capture_trace_context() -> Result<SharedPtr<TraceContext>>;
+        fn attach_trace_context(
+            context: &SharedPtr<TraceContext>,
+        ) -> Result<UniquePtr<TraceAttachment>>;
+    }
     extern "Rust" {
         fn configure_rust_runtime(worker_threads: u32, max_blocking_threads: u32) -> Result<()>;
     }
@@ -212,10 +224,8 @@ pub mod lance_ffi {
             context: usize,
         ) -> Result<()>;
         pub unsafe fn take_column_memory_handle(handle: u64) -> Vec<LanceColumnMemoryEstimate>;
-        pub fn estimate_fragment_memory(
-            dataset: &BlockingDataset,
-            fragment_id: u64,
-        ) -> Result<u64>;
+        pub fn estimate_fragment_memory(dataset: &BlockingDataset, fragment_id: u64)
+        -> Result<u64>;
         pub unsafe fn get_fragment_schema(
             dataset: &BlockingDataset,
             fragment_id: u64,

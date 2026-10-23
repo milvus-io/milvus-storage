@@ -50,6 +50,11 @@
 #define FIUKEY_READER_OPEN_FAIL "reader.open.fail"
 #define FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL "memory_size_estimation.fail"
 
+// Optional tracing must never replace the business operation's result.
+#define FIUKEY_TRACING_SCOPE_FAIL "tracing.scope.fail"
+#define FIUKEY_TRACING_CONTEXT_ATTACH_FAIL "tracing.context.attach.fail"
+#define FIUKEY_TRACING_CONFIGURATION_FAIL "tracing.configuration.fail"
+
 // Transaction/Manifest fault points
 #define FIUKEY_MANIFEST_COMMIT_FAIL "manifest.commit.fail"
 #define FIUKEY_MANIFEST_READ_FAIL "manifest.read.fail"
