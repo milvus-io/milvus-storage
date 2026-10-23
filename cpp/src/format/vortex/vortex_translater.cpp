@@ -22,6 +22,8 @@
 #include <arrow/io/interfaces.h>
 #include <fmt/format.h>
 
+#include "milvus-storage/common/extend_status.h"
+
 namespace milvus_storage::vortex {
 
 namespace {
@@ -177,7 +179,18 @@ std::vector<std::pair<milvus::cachinglayer::cid_t, std::unique_ptr<VortexCellGua
   }
   auto status = cell_loader_(cids);
   if (!status.ok()) {
-    throw std::runtime_error(status.ToString());
+    // Translator::get_cells returns a vector, so milvus-common's caching layer
+    // reports load failures through exceptions -- that part is the interface's
+    // contract and not ours to change. WHAT we throw is ours, though, and
+    // `std::runtime_error(status.ToString())` threw the classification away.
+    //
+    // The status arriving here is fully classified on the object-store path:
+    // S3FileSystem's ErrorToStatus attaches an ExtendStatusDetail, and both
+    // hops up (FillVortexRangeFile, the loader lambda) propagate it untouched
+    // via ARROW_*_RAISE. Stringifying it turned a retriable throttle into an
+    // untyped message that lands on the permanent bucket, so a vortex cache
+    // miss during throttling was never retried.
+    throw ToSegcoreError(status);
   }
   for (auto cid : cids) {
     cells.emplace_back(cid, std::make_unique<VortexCellGuard>(cell_metas_, static_cast<uint64_t>(cid), range_file_));
