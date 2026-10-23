@@ -4,7 +4,6 @@
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 #include "filesystem/s3/native_s3_transport.h"
 #ifdef WITH_CRT
-#include <mutex>
 #include <optional>
 #include <utility>
 #include <arrow/filesystem/path_util.h>
@@ -23,24 +22,14 @@
 
 namespace milvus_storage {
 struct NativeS3Transport::State {
-  std::mutex mutex;
   bool is_gcp = false;
   std::string region;
-  size_t inflight = 0;
-  size_t limit = 0;
   std::shared_ptr<S3ClientHolder> holder;
-
-  void Retire(bool network_pending) {
-    std::lock_guard lock(mutex);
-    if (network_pending)
-      --inflight;
-  }
 };
 
 namespace {
 struct Request {
   S3CrtClientLease client_lease;
-  std::shared_ptr<NativeS3Transport::State> state;
   size_t limit;
   std::shared_ptr<arrow::Buffer> data;
   std::unique_ptr<Aws::Utils::Stream::PreallocatedStreamBuf> streambuf;
@@ -58,8 +47,6 @@ struct Request {
   std::shared_ptr<FilesystemMetrics> write_metrics;
   int64_t write_bytes = 0;
   bool write_finished = false;
-  bool charged = false;
-  bool network_pending = true;
   arrow::Future<Aws::Client::XmlOutcome> future = arrow::Future<Aws::Client::XmlOutcome>::Make();
 
   ~Request() {
@@ -71,8 +58,6 @@ struct Request {
     streambuf.reset();
     data.reset();
     aws_uri_clean_up(&endpoint);
-    if (charged)
-      state->Retire(network_pending);
   }
   int AddHeaders(const aws_http_headers* headers) {
     for (size_t i = 0; i < aws_http_headers_count(headers); ++i) {
@@ -224,12 +209,6 @@ struct Request {
         owned->write_metrics->IncrementFailedCount();
       owned->write_finished = true;
     }
-    // Release admission before continuations submit another page or request.
-    {
-      std::lock_guard lock(owned->state->mutex);
-      --owned->state->inflight;
-      owned->network_pending = false;
-    }
     // As with native range reads, let callers select their continuation executor.
     // The request lease remains alive until all inline continuations return.
     owned->future.MarkFinished(std::move(result));
@@ -255,7 +234,6 @@ arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(
   state->holder = std::move(holder);
   state->is_gcp = options.cloud_provider == "gcp";
   state->region = options.region;
-  state->limit = options.max_connections;
   return std::shared_ptr<NativeS3Transport>(new NativeS3Transport(std::move(state), std::move(crt_holder)));
 }
 
@@ -269,16 +247,8 @@ arrow::Future<Aws::Client::XmlOutcome> NativeS3Transport::Send(const Aws::Amazon
   auto send = [&]() -> arrow::Result<arrow::Future<Aws::Client::XmlOutcome>> {
     ARROW_RETURN_NOT_OK(io.stop_token().Poll());
     auto r = std::make_unique<Request>();
-    r->state = state_;
     r->limit = limit;
     ARROW_ASSIGN_OR_RAISE(r->client_lease, holder_->Acquire());
-    {
-      std::lock_guard lock(state_->mutex);
-      if (state_->inflight >= state_->limit)
-        return arrow::Status::CapacityError("Native S3 request limit reached");
-      ++state_->inflight;
-      r->charged = true;
-    }
     ARROW_ASSIGN_OR_RAISE(auto lease, state_->holder->Lock());
     auto endpoint = lease->accessEndpointProvider()->ResolveEndpoint(model.GetEndpointContextParams());
     if (!endpoint.IsSuccess())
@@ -378,6 +348,8 @@ arrow::Future<Aws::Client::XmlOutcome> NativeS3Transport::Send(const Aws::Amazon
     }
     auto future = r->future;
     auto* pending = r.release();
+    // CRT queues requests from all streams and schedules available connections.
+    // A busy shared client must not turn an admitted stream write into a failure.
     auto* meta = aws_s3_client_make_meta_request(pending->client_lease->GetUnderlyingS3Client(), &options);
     if (!meta) {
       r.reset(pending);
