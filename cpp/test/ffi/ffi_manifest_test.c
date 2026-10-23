@@ -1064,7 +1064,82 @@ static void test_manifest_serialization_errors(void) {
   loon_manifest_free_buffer(data);
 }
 
+static void test_index_invalidation_by_field_id(void) {
+  LoonProperties pp;
+  create_test_pp(&pp);
+  FileSystemHandle fs = get_fs(&pp);
+  for (int drop = 0; drop < 2; ++drop) {
+    recreate_dir(fs, TEST_BASE_PATH);
+    const char* columns[] = {"102", "103"};
+    LoonColumnGroupFile file = {.path = "_data/first.parquet", .start_index = 0, .end_index = 10};
+    LoonColumnGroup groups[] = {{columns, 1, "parquet", &file, 1}, {columns + 1, 1, "parquet", &file, 1}};
+    LoonColumnGroups cgs = {groups, 2};
+    LoonIndexInfo indexes[] = {
+        {.column_name = "chunks[embedding]", .index_type = "HNSW", .path = "nested", .field_id = 102, .index_id = 201},
+        {.column_name = "", .index_type = "HNSW", .path = "empty", .field_id = 102, .index_id = 202},
+        {.column_name = "102", .index_type = "HNSW", .path = "other", .field_id = 103, .index_id = 203},
+        {.column_name = "102", .index_type = "HNSW", .path = "legacy", .field_id = 0, .index_id = 204}};
+    LoonTransactionHandle transaction = 0;
+    LoonFFIResult rc =
+        loon_transaction_open(TEST_BASE_PATH, &pp, -1, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &transaction);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    rc = loon_transaction_append_files(transaction, &cgs);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    for (size_t i = 0; i < 4; ++i) {
+      rc = loon_transaction_add_index_info(transaction, &indexes[i]);
+      ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    }
+    int64_t version = 0;
+    rc = loon_transaction_commit(transaction, &version, NULL);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    loon_transaction_destroy(transaction);
+    rc = loon_transaction_open(TEST_BASE_PATH, &pp, version, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &transaction);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    LoonManifest* before = NULL;
+    rc = loon_transaction_get_manifest(transaction, &before);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    ck_assert_int_eq(before->indexes.num_indexes, 4);
+    if (drop) {
+      rc = loon_transaction_drop_column(transaction, "102");
+    } else {
+      file.path = "_data/next.parquet";
+      file.start_index = 10;
+      file.end_index = 20;
+      groups[1].num_of_files = 0;
+      rc = loon_transaction_append_files(transaction, &cgs);
+    }
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    rc = loon_transaction_commit(transaction, &version, NULL);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    loon_transaction_destroy(transaction);
+    rc = loon_transaction_open(TEST_BASE_PATH, &pp, version, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &transaction);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    LoonManifest* after = NULL;
+    rc = loon_transaction_get_manifest(transaction, &after);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    ck_assert_int_eq(after->indexes.num_indexes, 2);
+    for (size_t i = 0; i < 2; ++i) {
+      ck_assert_int_eq(after->indexes.indexes[i].index_id, before->indexes.indexes[i + 2].index_id);
+      ck_assert_int_eq(after->indexes.indexes[i].field_id, before->indexes.indexes[i + 2].field_id);
+      ck_assert_str_eq(after->indexes.indexes[i].column_name, before->indexes.indexes[i + 2].column_name);
+      ck_assert_str_eq(after->indexes.indexes[i].path, before->indexes.indexes[i + 2].path);
+    }
+    ck_assert_int_eq(after->column_groups.num_of_column_groups, drop ? 1 : 2);
+    ck_assert_int_eq(after->column_groups.column_group_array[0].num_of_files, drop ? 1 : 2);
+    ck_assert_str_eq(after->column_groups.column_group_array[0].columns[0], drop ? "103" : "102");
+    loon_manifest_destroy(before);
+    loon_manifest_destroy(after);
+    loon_transaction_destroy(transaction);
+    clean_test_dir(fs, TEST_BASE_PATH);
+    loon_reset_context();
+  }
+  loon_filesystem_destroy(fs);
+  loon_properties_free(&pp);
+}
+
 void run_manifest_suite(void) {
+  RUN_TEST(test_index_invalidation_by_field_id);
+  loon_reset_context();
   RUN_TEST(test_manifest_serialization_round_trip);
   RUN_TEST(test_empty_manifest_serialization);
   RUN_TEST(test_manifest_serialization_errors);

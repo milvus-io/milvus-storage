@@ -79,6 +79,11 @@ const std::vector<LobFileInfo>& Updates::GetAddedLobFiles() const { return added
 
 // ==================== Helper Functions ====================
 
+namespace {
+// Milvus internal data columns use decimal FieldIDs, not user-visible schema names.
+std::string indexDataColumnName(const Index& index) { return std::to_string(index.field_id); }
+}  // namespace
+
 arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Manifest>& manifest,
                                                       const Updates& updates) {
   // Deep copy the entire manifest to avoid mutating the (potentially cached) original
@@ -93,13 +98,20 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   // Apply dropped columns (MUST execute before AddColumnGroup validation)
   // Noop if column doesn't exist — consistent with DropIndex, supports idempotency
   for (const auto& col_name : updates.GetDroppedColumns()) {
+    bool removed = false;
     // Phase 1: remove the column name from every column group that contains it
     for (const auto& cg : cgs) {
       if (!cg) {
         return arrow::Status::Invalid("Unexpected null column group in manifest");
       }
       auto& cols = cg->columns;
+      const auto old_size = cols.size();
       cols.erase(std::remove(cols.begin(), cols.end(), col_name), cols.end());
+      removed |= cols.size() != old_size;
+    }
+
+    if (!removed) {
+      continue;
     }
 
     // Phase 2: drop any column group that became empty after removal
@@ -108,9 +120,9 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
               cgs.end());
 
     // Phase 3: auto-drop all indexes attached to this column
-    indexes.erase(
-        std::remove_if(indexes.begin(), indexes.end(), [&](const Index& idx) { return idx.column_name == col_name; }),
-        indexes.end());
+    indexes.erase(std::remove_if(indexes.begin(), indexes.end(),
+                                 [&](const Index& idx) { return indexDataColumnName(idx) == col_name; }),
+                  indexes.end());
   }
 
   // Validate: Check if adding column groups has existing column names
@@ -187,9 +199,10 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   }
 
   // Resolve indexes: drop affected, apply DropIndex, apply AddIndex.
-  indexes.erase(std::remove_if(
-                    indexes.begin(), indexes.end(),
-                    [&](const Index& idx) { return affected_columns.find(idx.column_name) != affected_columns.end(); }),
+  indexes.erase(std::remove_if(indexes.begin(), indexes.end(),
+                               [&](const Index& idx) {
+                                 return affected_columns.find(indexDataColumnName(idx)) != affected_columns.end();
+                               }),
                 indexes.end());
 
   for (const auto& dropped : updates.GetDroppedIndexes()) {

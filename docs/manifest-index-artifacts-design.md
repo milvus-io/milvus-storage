@@ -72,7 +72,7 @@ return value exposes the existing `Index::path` and `Index::properties`; the
 manifest layer deliberately stops there. This proposal adds no index-specific
 `Manifest` method such as `ReadIndexFile`.
 
-The existing transaction API already stores an `Index` in its update set and replaces an index with the same `(column_name, index_type)` during manifest resolution. The proposed API makes that intent explicit for engine callers:
+The existing transaction API already stores an `Index` in its update set and replaces an index with the same nonzero `index_id` during manifest resolution. The proposed API makes that intent explicit for engine callers:
 
 ```cpp
 Transaction& Transaction::AddIndexInfo(const Index& index);
@@ -110,7 +110,7 @@ The engine sequence is:
 
 ```cpp
 Index index{
-    .column_name = "100",
+    .column_name = "embedding",
     .index_name = "vector_hnsw",
     .index_type = "HNSW",
     .path = "<segment-base>/_index/<artifact-prefix>",
@@ -148,7 +148,37 @@ The source manifest revision is transaction state: DataCoord opens the transacti
 
 This initial engine rule is deliberately conservative: a concurrent stats or delta-only change may require a rebuild. A later optimization may compare the affected column-group files and safely rebase only when their source data is unchanged. It is not part of the storage-only API change in this document.
 
-`AddIndexInfo` replaces the matching `(column_name, index_type)` metadata entry. The pre-existing file lifecycle is outside this transaction; when a new path replaces an old path, DataCoord garbage collection determines when the no-longer-referenced old file is safe to delete.
+`AddIndexInfo` replaces the matching nonzero `index_id` metadata entry. For legacy entries with `index_id=0`, replacement retains the `(column_name, index_type)` key. The pre-existing file lifecycle is outside this transaction; when a new path replaces an old path, DataCoord garbage collection determines when the no-longer-referenced old file is safe to delete.
+
+### Data changes and field identity
+
+For Milvus internal storage, `ColumnGroup.columns` contains physical column names
+such as `"102"`. `Index.field_id` identifies the owning field; `Index.column_name`
+is the schema name (for example `"chunks[embedding]"`) and may be empty in older
+entries. Transactions associate an index with a data column only when
+`data_column_name == std::to_string(index.field_id)`. They do not parse or rewrite
+schema names, query Milvus metadata, or fall back to matching `column_name`.
+
+- `DropColumn("102")` removes that physical column and any now-empty group, and
+  removes every index with `field_id=102`. Dropping an absent column is a no-op,
+  including for indexes; repeated deletion is idempotent.
+- `AppendFiles` invalidates all indexes belonging to columns in groups with new
+  files. Groups without new files, `AddColumnGroup`, stats-only updates, and
+  delta-only updates do not invalidate indexes.
+- Data invalidation and explicit `DropIndex(index_id)` run before `AddIndexInfo`.
+  An index added in the same transaction survives data invalidation; different
+  nonzero IndexIDs on the same field and of the same type can coexist.
+- Data and index metadata changes publish in one manifest commit. Removing an
+  index entry does not immediately delete its files; existing GC rules apply.
+
+The existing index schema defaults missing `field_id` to zero. Such legacy entries
+are not associated with ordinary user fields by their names and remain untouched
+when those fields change. The literal physical column `"0"` matches FieldID zero;
+there is no inference of another field identity or automatic migration. Correct
+nonzero FieldIDs work even with empty, stale, or misleading `column_name` values.
+This rule supports the numeric internal layout only: arbitrary external source
+column names are not reverse-mapped to FieldIDs. Public signatures, FFI layouts,
+manifest serialization, and transaction conflict/retry behavior are unchanged.
 
 ## DataCoord and etcd publication
 
@@ -226,7 +256,7 @@ There is no transaction streaming-write FFI and no index-artifact ABI.
 | Area | Required tests |
 | --- | --- |
 | Manifest | Version-6 Avro round-trip preserves every typed Index load field, file key, and property; existing manifests without index entries remain readable. No index-file read API is added. |
-| Transaction | `AddIndexInfo` adds or replaces index metadata for the matching `(column_name, index_type)`. |
+| Transaction | `AddIndexInfo` adds or replaces index metadata by nonzero `index_id`, with the legacy name/type key for zero IDs. |
 | Conflict | Milvus integration test: an index built from a stale source manifest is rejected after a data append; its old file stays unreferenced and is eligible for GC. |
 | DataCoord | Form QueryNode load metadata entirely from the manifest Index; do not read completed-artifact paths, sizes, or identity from SegmentIndex. |
 | QueryNode | A manifest Index loads through the existing file-manager/index-loader path; replacement produces a different cache/mmap identity. |

@@ -1008,15 +1008,168 @@ TEST_F(TransactionTest, IndexUniqueConstraintTest) {
   }
 }
 
+// Exercise persisted transactions through both entry points, including cache-free reads.
+TEST_F(TransactionTest, IndexInvalidationUsesFieldID) {
+  folly::CPUThreadPoolExecutor executor(1);
+  for (bool async : {false, true}) {
+    for (bool drop : {false, true}) {
+      SCOPED_TRACE(std::string(async ? "async/" : "sync/") + (drop ? "drop" : "append"));
+      const auto segment = base_path_ + "/identity-" + std::to_string(async) + "-" + std::to_string(drop);
+      ASSERT_STATUS_OK(fs_->CreateDir(get_manifest_path(segment), true));
+      auto open = [&]() -> std::unique_ptr<Transaction> {
+        Manifest::CleanCache();
+        if (async) {
+          std::shared_ptr<AsyncOperation> operation;
+          auto result = Transaction::OpenAsync(segment, {}, LATEST, -1, FailResolver, 1, 30000, operation, fs_)
+                            .via(&executor)
+                            .get();
+          EXPECT_TRUE(result.status.ok());
+          return std::move(result.transaction);
+        }
+        auto result = Transaction::Open(fs_, segment);
+        EXPECT_TRUE(result.ok()) << result.status();
+        return result.ok() ? std::move(result).ValueOrDie() : nullptr;
+      };
+      auto commit = [&](Transaction& txn) {
+        if (async) {
+          std::shared_ptr<AsyncOperation> operation;
+          auto result = txn.CommitAsync(30000, operation).via(&executor).get();
+          ASSERT_TRUE(result.status.ok());
+          ASSERT_EQ(result.outcome, CommitOutcome::Committed);
+        } else {
+          ASSERT_AND_ASSIGN(auto version, txn.Commit());
+          ASSERT_GT(version, 0);
+        }
+      };
+      auto group = [&](std::vector<std::string> columns, bool files) {
+        auto cg = std::make_shared<ColumnGroup>();
+        cg->columns = std::move(columns);
+        cg->format = LOON_FORMAT_PARQUET;
+        if (files)
+          cg->files = {{.path = segment + "/_data/file.parquet"}};
+        return cg;
+      };
+      std::vector<Index> expected;
+      auto add = [&](int64_t field, int64_t id, const std::string& name) {
+        expected.push_back(Index{.column_name = name,
+                                 .index_name = "idx-" + std::to_string(id),
+                                 .index_type = "inverted",
+                                 .path = segment + "/_index/" + std::to_string(id),
+                                 .field_id = field,
+                                 .index_id = id,
+                                 .build_id = id + 1000,
+                                 .index_file_keys = {"data"}});
+      };
+      add(102, 201, "embedding");
+      add(102, 202, "");
+      add(102, 203, "chunks[embedding]");
+      add(103, 204, "102");  // A misleading name must not invalidate another field.
+      add(104, 205, "same_group");
+      add(105, 206, "solo");
+      add(106, 207, "absent");
+      add(0, 208, "102");  // Legacy/default FieldID must not fall back to the name.
+      add(107, 209, "external_name");
+      auto check = [&](const Manifest& manifest) {
+        ASSERT_EQ(manifest.indexes().size(), expected.size());
+        for (size_t i = 0; i < expected.size(); ++i) {
+          const auto& actual = manifest.indexes()[i];
+          EXPECT_EQ(actual.field_id, expected[i].field_id);
+          EXPECT_EQ(actual.index_id, expected[i].index_id);
+          EXPECT_EQ(actual.column_name, expected[i].column_name);
+          EXPECT_EQ(actual.index_name, expected[i].index_name);
+          EXPECT_EQ(actual.path, expected[i].path);
+          EXPECT_EQ(actual.index_type, expected[i].index_type);
+          EXPECT_EQ(actual.build_id, expected[i].build_id);
+          EXPECT_EQ(actual.index_file_keys, expected[i].index_file_keys);
+        }
+      };
+      auto txn = open();
+      ASSERT_NE(txn, nullptr);
+      txn->AppendFiles(
+          {group({"102", "104"}, true), group({"103"}, true), group({"105"}, true), group({"external_name"}, true)});
+      for (const auto& index : expected) txn->AddIndexInfo(index);
+      ASSERT_NO_FATAL_FAILURE(commit(*txn));
+
+      // Each independent update must retain indexes, including an orphan for absent column 106.
+      for (int update = 0; update < 5; ++update) {
+        txn = open();
+        ASSERT_NE(txn, nullptr);
+        ASSERT_AND_ASSIGN(auto before, txn->GetManifest());
+        ASSERT_NO_FATAL_FAILURE(check(*before));
+        if (update == 0) {
+          txn->DropColumn("106");
+        } else if (update == 1) {
+          txn->AppendFiles({group({"102", "104"}, false), group({"103"}, false), group({"105"}, false),
+                            group({"external_name"}, false)});
+        } else if (update == 2) {
+          txn->UpdateStat("bloom", Statistics{{"bloom.bin"}, {}});
+        } else if (update == 3) {
+          txn->AddDeltaLog({"delete.parquet", DeltaLogType::PRIMARY_KEY, 1});
+        } else {
+          txn->AddColumnGroup(group({"106"}, true));
+        }
+        ASSERT_NO_FATAL_FAILURE(commit(*txn));
+      }
+      txn = open();
+      ASSERT_NE(txn, nullptr);
+      ASSERT_AND_ASSIGN(auto before, txn->GetManifest());
+      ASSERT_NO_FATAL_FAILURE(check(*before));
+      // Explicit deletion removes just one of the same-field, same-type indexes.
+      txn->DropIndex(201);
+      expected.erase(expected.begin());
+      ASSERT_NO_FATAL_FAILURE(commit(*txn));
+      txn = open();
+      ASSERT_NE(txn, nullptr);
+      ASSERT_AND_ASSIGN(before, txn->GetManifest());
+      ASSERT_NO_FATAL_FAILURE(check(*before));
+      if (drop) {
+        txn->DropColumn("102").DropColumn("102").DropColumn("105").DropColumn("external_name");
+      } else {
+        txn->AppendFiles({group({"102", "104"}, true), group({"103"}, false), group({"105"}, true),
+                          group({"external_name"}, true), group({"106"}, false)});
+      }
+      expected.erase(std::remove_if(expected.begin(), expected.end(),
+                                    [&](const Index& index) {
+                                      return index.field_id == 102 || index.field_id == 105 ||
+                                             (!drop && index.field_id == 104);
+                                    }),
+                     expected.end());
+      // Data invalidation precedes new indexes even when AddIndexInfo is in the same commit.
+      add(102, 210, "rebuilt");
+      txn->AddIndexInfo(expected.back());
+      ASSERT_NO_FATAL_FAILURE(commit(*txn));
+      txn = open();
+      ASSERT_NE(txn, nullptr);
+      ASSERT_AND_ASSIGN(auto after, txn->GetManifest());
+      ASSERT_NO_FATAL_FAILURE(check(*after));
+      EXPECT_EQ(after->columnGroups().size(), drop ? 3 : 5);
+      EXPECT_EQ(after->columnGroups()[0]->columns,
+                drop ? std::vector<std::string>{"104"} : std::vector<std::string>({"102", "104"}));
+      EXPECT_EQ(after->columnGroups()[0]->files.size(), drop ? 1 : 2);
+      EXPECT_EQ(after->columnGroups()[1]->files.size(), 1);
+      if (drop) {
+        // Retrying the deletion cannot remove the newly added orphan index.
+        txn->DropColumn("102").DropColumn("105");
+        ASSERT_NO_FATAL_FAILURE(commit(*txn));
+        txn = open();
+        ASSERT_NE(txn, nullptr);
+        ASSERT_AND_ASSIGN(after, txn->GetManifest());
+        ASSERT_NO_FATAL_FAILURE(check(*after));
+      }
+    }
+  }
+}
+
 TEST_F(TransactionTest, IndexDeprecationOnAppendFilesTest) {
   // Initial commit with column groups and index
   {
     ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
-    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"id", "name"}));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"100", "101"}));
     transaction->AppendFiles(manifest->columnGroups());
 
     Index idx;
     idx.column_name = "id";
+    idx.field_id = 100;
     idx.index_type = "hnsw";
     idx.path = base_path_ + "/_index/id_hnsw.idx";
     idx.properties = {};
@@ -1034,7 +1187,7 @@ TEST_F(TransactionTest, IndexDeprecationOnAppendFilesTest) {
   // Append files to the same column group - index should be automatically deprecated
   {
     ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
-    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_append.parquet", {"id", "name"}));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_append.parquet", {"100", "101"}));
     transaction->AppendFiles(manifest->columnGroups());
     ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
     ASSERT_EQ(committed_version, 2);
@@ -1093,13 +1246,13 @@ TEST_F(TransactionTest, IndexMultipleColumnsDeprecationTest) {
 
     // First column group
     auto cg1 = std::make_shared<ColumnGroup>();
-    cg1->columns = {"id", "name"};
+    cg1->columns = {"100", "101"};
     cg1->files = {{.path = base_path_ + "/cg1.parquet"}};
     cg1->format = LOON_FORMAT_PARQUET;
 
     // Second column group
     auto cg2 = std::make_shared<ColumnGroup>();
-    cg2->columns = {"value", "vector"};
+    cg2->columns = {"102", "103"};
     cg2->files = {{.path = base_path_ + "/cg2.parquet"}};
     cg2->format = LOON_FORMAT_PARQUET;
 
@@ -1109,12 +1262,14 @@ TEST_F(TransactionTest, IndexMultipleColumnsDeprecationTest) {
     // Add indexes on both column groups
     Index idx1;
     idx1.column_name = "id";
+    idx1.field_id = 100;
     idx1.index_type = "hnsw";
     idx1.path = base_path_ + "/_index/id_hnsw.idx";
     idx1.properties = {};
 
     Index idx2;
     idx2.column_name = "vector";
+    idx2.field_id = 103;
     idx2.index_type = "ivf-pq";
     idx2.path = base_path_ + "/_index/vector_ivfpq.idx";
     idx2.properties = {};
@@ -1135,12 +1290,12 @@ TEST_F(TransactionTest, IndexMultipleColumnsDeprecationTest) {
     ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
 
     auto cg1_append = std::make_shared<ColumnGroup>();
-    cg1_append->columns = {"id", "name"};
+    cg1_append->columns = {"100", "101"};
     cg1_append->files = {{.path = base_path_ + "/cg1_append.parquet"}};
     cg1_append->format = LOON_FORMAT_PARQUET;
 
     auto cg2_empty = std::make_shared<ColumnGroup>();
-    cg2_empty->columns = {"value", "vector"};
+    cg2_empty->columns = {"102", "103"};
     cg2_empty->files = {};  // No files appended to cg2
     cg2_empty->format = LOON_FORMAT_PARQUET;
 
@@ -1449,7 +1604,7 @@ TEST_F(TransactionTest, DropColumnAutoDropsIndex) {
   // Initial commit
   {
     ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
-    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"id", "name"}));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"100", "101"}));
     transaction->AppendFiles(manifest->columnGroups());
     ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
     ASSERT_EQ(committed_version, 1);
@@ -1460,6 +1615,7 @@ TEST_F(TransactionTest, DropColumnAutoDropsIndex) {
     ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
     Index idx;
     idx.column_name = "name";
+    idx.field_id = 101;
     idx.index_type = "inverted";
     idx.path = base_path_ + "/_index/name_inverted.idx";
     transaction->AddIndexInfo(idx);
@@ -1467,10 +1623,10 @@ TEST_F(TransactionTest, DropColumnAutoDropsIndex) {
     ASSERT_EQ(committed_version, 2);
   }
 
-  // Drop "name" — index should also be removed
+  // Drop physical column "101" (schema name "name") — index should also be removed
   {
     ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
-    transaction->DropColumn("name");
+    transaction->DropColumn("101");
     ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
     ASSERT_EQ(committed_version, 3);
 
@@ -1479,7 +1635,7 @@ TEST_F(TransactionTest, DropColumnAutoDropsIndex) {
     ASSERT_AND_ASSIGN(auto manifest, read_txn->GetManifest());
     ASSERT_EQ(manifest->columnGroups().size(), 1);
     ASSERT_EQ(manifest->columnGroups()[0]->columns.size(), 1);
-    ASSERT_EQ(manifest->columnGroups()[0]->columns[0], "id");
+    ASSERT_EQ(manifest->columnGroups()[0]->columns[0], "100");
     ASSERT_TRUE(manifest->indexes().empty());
   }
 }
