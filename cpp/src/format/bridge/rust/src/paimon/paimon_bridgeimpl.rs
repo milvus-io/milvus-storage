@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 
 use crate::TOKIO_RT;
-use crate::paimon_ffi::PaimonFileInfo;
+use crate::paimon_ffi::{PaimonFileInfo, PaimonFileSystemWrapper};
 
 const METADATA_VERSION: u32 = 1;
 const ERROR_INVALID_PREFIX: &str = "[paimon:error=invalid]";
@@ -62,7 +62,8 @@ fn not_implemented_message(message: impl std::fmt::Display) -> String {
 
 fn classify_bridge_error(error: anyhow::Error) -> anyhow::Error {
     let message = format!("{error:#}");
-    if [ERROR_INVALID_PREFIX, ERROR_NOT_IMPLEMENTED_PREFIX]
+    // The C++ filesystem already supplied its authoritative status category.
+    if [crate::filesystem_c::LOON_FFI_ERRCODE_MARKER, ERROR_INVALID_PREFIX, ERROR_NOT_IMPLEMENTED_PREFIX]
         .iter()
         .any(|marker| message.contains(marker))
     {
@@ -255,6 +256,7 @@ fn pinned_metadata_result<T>(
 ) -> Result<T> {
     result.map_err(|error| {
         let not_found = match &error {
+            paimon::Error::SnapshotNotExist { .. } => true,
             paimon::Error::IoUnexpected { source, .. } => {
                 source.kind().into_static() == "NotFound"
             }
@@ -278,22 +280,9 @@ fn pinned_metadata_result<T>(
 
 async fn load_table(
     table_location: &str,
-    storage_options: &HashMap<String, String>,
+    file_io: FileIO,
     snapshot_id: Option<i64>,
 ) -> Result<Table> {
-    let file_io = FileIO::from_path(table_location)
-        .with_context(|| {
-            invalid_message(format_args!(
-                "cannot infer Paimon storage from '{table_location}'"
-            ))
-        })?
-        .with_props(storage_options)
-        .build()
-        .with_context(|| {
-            invalid_message(format_args!(
-                "cannot build Paimon FileIO for '{table_location}'"
-            ))
-        })?;
     let schema_manager = SchemaManager::new(file_io.clone(), table_location.to_string());
     let latest_schema = schema_manager.latest().await?.ok_or_else(|| {
         anyhow!(invalid_message(format_args!(
@@ -544,9 +533,8 @@ fn metadata_split_row_count(split: &DataSplit) -> Result<Option<u64>> {
 }
 
 async fn count_split_rows(table: &Table, split: &DataSplit) -> Result<u64> {
-    // `DataSplit::merged_row_count` describes the full file group and does
-    // not account for an attached row-range selection. Such splits must be
-    // counted through the actual Paimon reader.
+    // Conservatively count row-range selections through the reader so the
+    // manifest reflects the rows returned after read-time filtering.
     if let Some(count) = metadata_split_row_count(split)? {
         return Ok(count);
     }
@@ -706,6 +694,7 @@ fn encode_direct_metadata(
 }
 
 pub fn paimon_plan_files(
+    filesystem: cxx::SharedPtr<PaimonFileSystemWrapper>,
     table_location: &str,
     snapshot_id: i64,
     scan_mode: &str,
@@ -717,7 +706,8 @@ pub fn paimon_plan_files(
         .map_err(classify_bridge_error)?;
     TOKIO_RT.block_on(async move {
         let snapshot_id = (snapshot_id >= 0).then_some(snapshot_id);
-        let table = load_table(table_location, &options, snapshot_id).await?;
+        let (file_io, binding) = crate::paimon_opendal::file_io(filesystem, table_location, options)?;
+        let table = load_table(table_location, file_io, snapshot_id).await?;
         let table_read_semantics = TableReadSemantics::from_table(&table)?;
         let plan = table.new_read_builder().new_scan().plan().await?;
         let mut result = Vec::new();
@@ -752,7 +742,7 @@ pub fn paimon_plan_files(
                                     "deletion vector cardinality",
                                 )?,
                                 None => {
-                                    read_deletion_vector(&options, deletion).await?.len() as u64
+                                    read_deletion_vector(table.file_io(), deletion).await?.len() as u64
                                 }
                             },
                         };
@@ -770,6 +760,12 @@ pub fn paimon_plan_files(
                             continue;
                         }
                         let path = split.data_file_path(file);
+                        // FileIO::new_input defers provider resolution until IO.
+                        // Check manifest paths now without an extra storage request.
+                        binding.relative_path(&path)?;
+                        if let Some(deletion) = deletion {
+                            binding.relative_path(deletion.path())?;
+                        }
                         let data_format = file_format(&path);
                         result.push(PaimonFileInfo {
                             path,
@@ -790,7 +786,7 @@ pub fn paimon_plan_files(
 }
 
 async fn read_deletion_vector(
-    storage_options: &HashMap<String, String>,
+    file_io: &FileIO,
     deletion_file: &DeletionFile,
 ) -> Result<Vec<u64>> {
     let offset = checked_non_negative(deletion_file.offset(), "deletion vector offset")?;
@@ -800,7 +796,7 @@ async fn read_deletion_vector(
         offset,
         length,
         deletion_file.cardinality().unwrap_or(-1),
-        storage_options,
+        file_io,
     )
     .await
 }
@@ -810,7 +806,7 @@ async fn read_deletion_vector_at(
     offset: u64,
     length: u64,
     expected_cardinality: i64,
-    storage_options: &HashMap<String, String>,
+    file_io: &FileIO,
 ) -> Result<Vec<u64>> {
     ensure!(
         expected_cardinality >= -1,
@@ -824,19 +820,6 @@ async fn read_deletion_vector_at(
             "Paimon deletion vector length is too small: {length}"
         ))
     );
-    let file_io = FileIO::from_path(path)
-        .with_context(|| {
-            invalid_message(format_args!(
-                "cannot infer Paimon deletion vector storage from '{path}'"
-            ))
-        })?
-        .with_props(storage_options)
-        .build()
-        .with_context(|| {
-            invalid_message(format_args!(
-                "cannot build Paimon deletion vector FileIO for '{path}'"
-            ))
-        })?;
     let input = file_io.new_input(path).with_context(|| {
         invalid_message(format_args!(
             "cannot address Paimon deletion vector file '{path}'"
@@ -985,7 +968,9 @@ async fn read_deletion_vector_at(
 }
 
 pub fn paimon_read_deletion_vector(
+    filesystem: cxx::SharedPtr<PaimonFileSystemWrapper>,
     path: &str,
+    data_file_path: &str,
     offset: u64,
     length: u64,
     expected_cardinality: i64,
@@ -994,12 +979,15 @@ pub fn paimon_read_deletion_vector(
 ) -> Result<Vec<u64>> {
     let options = options_from_vecs(storage_options_keys, storage_options_values)
         .map_err(classify_bridge_error)?;
+    // A persisted DV path must not redefine the data file's filesystem binding.
+    let (file_io, _) = crate::paimon_opendal::file_io(filesystem, data_file_path, options)
+        .map_err(|error| classify_bridge_error(error.into()))?;
     TOKIO_RT.block_on(read_deletion_vector_at(
         path,
         offset,
         length,
         expected_cardinality,
-        &options,
+        &file_io,
     ))
     .map_err(classify_bridge_error)
 }
@@ -1054,6 +1042,7 @@ pub struct BlockingPaimonDataSplitReader {
 }
 
 fn open_data_split_reader_impl(
+    filesystem: cxx::SharedPtr<PaimonFileSystemWrapper>,
     metadata_json: &str,
     expected_table_location: &str,
     storage_options_keys: Vec<String>,
@@ -1070,7 +1059,8 @@ fn open_data_split_reader_impl(
         .table_location
         .as_deref()
         .ok_or_else(|| anyhow!("Paimon data-split descriptor has no table_location"))?;
-    let table = TOKIO_RT.block_on(load_table(table_location, &options, metadata.snapshot_id))?;
+    let (file_io, _) = crate::paimon_opendal::file_io(filesystem, table_location, options)?;
+    let table = TOKIO_RT.block_on(load_table(table_location, file_io, metadata.snapshot_id))?;
     let read = table.new_read_builder().new_read()?;
     let schema = paimon::arrow::build_target_arrow_schema(read.read_type())?;
     Ok(Box::new(BlockingPaimonDataSplitReader {
@@ -1081,12 +1071,14 @@ fn open_data_split_reader_impl(
 }
 
 pub fn paimon_open_data_split_reader(
+    filesystem: cxx::SharedPtr<PaimonFileSystemWrapper>,
     metadata_json: &str,
     expected_table_location: &str,
     storage_options_keys: Vec<String>,
     storage_options_values: Vec<String>,
 ) -> Result<Box<BlockingPaimonDataSplitReader>> {
     open_data_split_reader_impl(
+        filesystem,
         metadata_json,
         expected_table_location,
         storage_options_keys,
@@ -1351,7 +1343,7 @@ mod tests {
             .with_raw_convertible(true)
             .build()
             .unwrap();
-        assert_eq!(with_range.merged_row_count(), Some(10));
+        assert_eq!(with_range.merged_row_count(), Some(3));
         assert_eq!(metadata_split_row_count(&with_range).unwrap(), None);
         let mut evolved_file = test_file("data.parquet");
         evolved_file.write_cols = Some(vec!["id".to_string()]);
@@ -1778,7 +1770,7 @@ mod tests {
         let table = TOKIO_RT
             .block_on(load_table(
                 table_location,
-                &HashMap::new(),
+                FileIO::from_path(table_location).unwrap().build().unwrap(),
                 Some(snapshot_id),
             ))
             .unwrap();
@@ -1819,7 +1811,7 @@ mod tests {
         let table = TOKIO_RT
             .block_on(load_table(
                 table_location,
-                &HashMap::new(),
+                FileIO::from_path(table_location).unwrap().build().unwrap(),
                 Some(snapshot_id),
             ))
             .unwrap();
@@ -1835,7 +1827,7 @@ mod tests {
         let error = TOKIO_RT
             .block_on(load_table(
                 table_location,
-                &HashMap::new(),
+                FileIO::from_path(table_location).unwrap().build().unwrap(),
                 Some(snapshot_id + 1000),
             ))
             .unwrap_err();
@@ -1872,7 +1864,7 @@ mod tests {
         let error = TOKIO_RT
             .block_on(load_table(
                 table_location,
-                &HashMap::new(),
+                FileIO::from_path(table_location).unwrap().build().unwrap(),
                 Some(snapshot_id),
             ))
             .unwrap_err();
@@ -1929,13 +1921,15 @@ mod tests {
         bytes.extend_from_slice(&crc.finalize().to_be_bytes());
         std::fs::write(&path, &bytes).unwrap();
 
+        let file_io = FileIO::from_path(path.to_str().unwrap()).unwrap().build().unwrap();
+
         let positions = TOKIO_RT
             .block_on(read_deletion_vector_at(
                 path.to_str().unwrap(),
                 0,
                 length,
                 2,
-                &HashMap::new(),
+                &file_io,
             ))
             .unwrap();
         assert_eq!(positions, vec![1, 9]);
@@ -1946,7 +1940,7 @@ mod tests {
                 0,
                 length,
                 3,
-                &HashMap::new(),
+                &file_io,
             ))
             .unwrap_err();
         assert!(
@@ -1961,7 +1955,7 @@ mod tests {
                 0,
                 length,
                 2,
-                &HashMap::new(),
+                &file_io,
             ))
             .unwrap_err();
         assert!(
@@ -1980,7 +1974,7 @@ mod tests {
                 0,
                 length,
                 2,
-                &HashMap::new(),
+                &file_io,
             ))
             .unwrap_err();
         assert!(
