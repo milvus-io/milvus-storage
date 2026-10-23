@@ -257,7 +257,8 @@ class Transaction {
    *
    * Removes the column from its column group. If the column group becomes
    * empty after removal, the entire column group is removed.
-   * Automatically drops all indexes on this column.
+   * For Milvus internal numeric columns, drops all indexes whose field_id
+   * formats to this data column name. Index.column_name is not used for matching.
    * Noop if the column doesn't exist (consistent with DropIndex).
    *
    * @param column_name Name of the column to drop
@@ -274,6 +275,9 @@ class Transaction {
 
   /**
    * @brief Append files to existing column groups
+   * Groups with new files invalidate indexes whose decimal field_id matches
+   * a data column name (Milvus internal layout), regardless of Index.column_name.
+   * Groups without new files leave their indexes unchanged.
    * @param cgs Column groups containing files to append
    * @return Reference to this transaction for method chaining
    */

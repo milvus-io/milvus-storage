@@ -90,11 +90,11 @@ struct DeltaLog {
  * as metric_type, M, and efConstruction.
  */
 struct Index {
-  std::string column_name;  ///< Column this index is built on; field_id is authoritative for loading
+  std::string column_name;  ///< User-visible schema field name; not the physical data column name
   std::string index_name;   ///< User-visible index name carried in the QueryNode load request
   std::string index_type;   ///< Index type: "hnsw", "ivf-sq", "ivf-pq", "inverted", "bitmap", "ordered"
   std::string path;         ///< Artifact directory/prefix; combine with index_file_keys for full file paths
-  int64_t field_id = 0;
+  int64_t field_id = 0;     ///< Field identity; decimal string matches Milvus internal data columns
   int64_t index_id = 0;
   int64_t build_id = 0;
   int64_t index_version = 0;
