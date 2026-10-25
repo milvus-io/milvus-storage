@@ -59,6 +59,9 @@
 // Filesystem fault points
 #define FIUKEY_FS_OPEN_OUTPUT_FAIL "fs.open_output.fail"
 #define FIUKEY_FS_OPEN_INPUT_FAIL "fs.open_input.fail"
+#define FIUKEY_LOCAL_FILE_SYNC_FAIL "local.file.sync.fail"
+#define FIUKEY_LOCAL_DIRECTORY_SYNC_FAIL "local.directory.sync.fail"
+#define FIUKEY_LOCAL_OUTPUT_CLOSE_FAIL "local.output.close.fail"
 
 // S3 Filesystem fault points
 #define FIUKEY_S3FS_CREATE_UPLOAD_FAIL "s3fs.create_upload.fail"

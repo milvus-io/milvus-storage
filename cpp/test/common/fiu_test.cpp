@@ -82,6 +82,16 @@ class FaultInjectionTest : public ::testing::Test {
   milvus_storage::api::Properties properties_;
 };
 
+TEST_F(FaultInjectionTest, LocalFileSyncFailurePropagatesThroughWriterClose) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Local durability fault";
+  }
+  ScopedFiuFault fault(FIUKEY_LOCAL_FILE_SYNC_FAIL, false);
+  auto result = WriteTestData();
+  ASSERT_FALSE(result.ok());
+  ASSERT_TRUE(result.status().IsIOError()) << result.status().ToString();
+}
+
 TEST_F(FaultInjectionTest, WriterWriteFail) {
   // Enable fault point
   FIU_ENABLE_FAULT_ONETIME(FIUKEY_WRITER_WRITE_FAIL);
