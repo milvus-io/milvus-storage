@@ -320,6 +320,24 @@ TEST_F(ExternalFilesystemTest, ExtractExternalFsPropertiesTypeConversion) {
   EXPECT_EQ(config.alias, "myfs");
 }
 
+TEST_F(ExternalFilesystemTest, TalonBrokerReusesExternalUseIam) {
+  api::Properties props;
+  props["extfs.source.storage_type"] = std::string("remote");
+  props["extfs.source.cloud_provider"] = std::string("aws");
+  props["extfs.source.address"] = std::string("s3.us-west-2.amazonaws.com");
+  props["extfs.source.bucket_name"] = std::string("bucket");
+  props["extfs.source.region"] = std::string("us-west-2");
+  props["extfs.source.credential_endpoint"] = std::string("https://broker/credentials");
+  props["extfs.source.use_iam"] = std::string("true");
+  props["extfs.source.talon.mode"] = std::string("1");
+  props["extfs.source.talon.coordinator"] = std::string("127.0.0.1:1");
+  const auto config = FilesystemCache::resolve_config(props, "s3://s3.us-west-2.amazonaws.com/bucket/key");
+  ASSERT_TRUE(config.ok()) << config.status();
+  EXPECT_TRUE(config->use_iam);
+  EXPECT_EQ(config->talon_mode, TalonMode::Full);
+  EXPECT_EQ(config->credential_endpoint, "https://broker/credentials");
+}
+
 TEST_F(ExternalFilesystemTest, AzureCredentialBrokerConfigValidation) {
   api::Properties props;
   props[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
@@ -359,6 +377,30 @@ TEST_F(ExternalFilesystemTest, AzureCredentialBrokerConfigValidation) {
   auto missing_host_result = FilesystemCache::resolve_config(missing_host);
   ASSERT_FALSE(missing_host_result.ok());
   EXPECT_TRUE(missing_host_result.status().IsInvalid());
+}
+
+TEST_F(ExternalFilesystemTest, AzureIamIgnoresUnusedBrokerConfiguration) {
+  api::Properties props;
+  props[PROPERTY_FS_CLOUD_PROVIDER] = std::string(kCloudProviderAzure);
+  props[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("https://broker/credentials");
+  props[PROPERTY_FS_ACCESS_KEY_ID] = std::string("account");
+  props[PROPERTY_FS_BUCKET_NAME] = std::string("container");
+  props[PROPERTY_FS_REGION] = std::string();
+  props[PROPERTY_FS_USE_IAM] = true;
+  const auto config = FilesystemCache::resolve_config(props);
+  ASSERT_TRUE(config.ok()) << config.status();
+  EXPECT_TRUE(config->azure_client_id.empty());
+  EXPECT_TRUE(config->azure_tenant_id.empty());
+  EXPECT_TRUE(config->region.empty());
+
+  auto unused_broker = props;
+  unused_broker[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("file:///credentials");
+  EXPECT_TRUE(FilesystemCache::resolve_config(unused_broker).ok());
+  unused_broker[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string();
+  unused_broker[PROPERTY_FS_AZURE_CLIENT_ID] = std::string("unused-client");
+  EXPECT_TRUE(FilesystemCache::resolve_config(unused_broker).ok());
+  props[PROPERTY_FS_USE_IAM] = false;
+  EXPECT_TRUE(FilesystemCache::resolve_config(props).status().IsInvalid());
 }
 
 TEST_F(ExternalFilesystemTest, ExtractExternalFsRejectsUndefinedProperty) {

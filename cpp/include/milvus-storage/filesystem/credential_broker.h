@@ -18,6 +18,7 @@ namespace milvus_storage::credential_broker {
 
 // Credential Broker HTTP request fields. These names are part of the wire protocol.
 inline constexpr char kCsp[] = "csp";
+inline constexpr char kCredentialType[] = "credentialType";
 inline constexpr char kRegion[] = "region";
 inline constexpr char kBucket[] = "bucket";
 inline constexpr char kDurationSeconds[] = "durationSeconds";
@@ -27,6 +28,9 @@ inline constexpr char kGcpServiceAccountEmail[] = "gcpServiceAccountEmail";
 inline constexpr char kAzureAccountName[] = "azureAccountName";
 inline constexpr char kAzureClientId[] = "azureClientId";
 inline constexpr char kAzureTenantId[] = "azureTenantId";
+
+// IAM uses the Broker's own identity; omitting credentialType retains target-identity mode.
+inline constexpr char kIam[] = "iam";
 
 // Credential Broker HTTP response fields consumed by the Azure SAS provider.
 inline constexpr char kSuccess[] = "success";

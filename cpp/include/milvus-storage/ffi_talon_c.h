@@ -12,6 +12,8 @@ extern "C" {
 /// fs.talon.block_size, and fs.talon.max_idle_per_addr. Optional fs.talon.namespace
 /// and fs.credential_endpoint are independent request defaults. fs.credential_endpoint
 /// uses the fs.* cloud identity and origin settings for every Stat/Read/Load request.
+/// With fs.credential_endpoint, fs.use_iam=true selects the Broker's own IAM identity
+/// and ignores target identity fields. false (default) uses the supplied target identity.
 /// Property-derived Broker defaults are scoped to fs.bucket_name. Per-request
 /// Broker overrides supply their own descriptor; URI buckets must match it.
 /// Broker-backed GCP objects use gcs:// URIs; S3 and Azure use s3:// and az://.

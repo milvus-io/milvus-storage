@@ -192,6 +192,7 @@ struct ArrowFileSystemConfig {
   std::string region = "";
   bool use_ssl = false;
   std::string ssl_ca_cert = "";
+  // For Talon Broker requests, true selects the Broker's own IAM identity.
   bool use_iam = false;
   bool use_virtual_host = false;
   int64_t request_timeout_ms = 3000;
@@ -281,11 +282,11 @@ struct ArrowFileSystemConfig {
                                                  ArrowFileSystemConfig& result);
 
   /**
-   * @brief Return whether Azure credential broker authentication was requested.
+   * @brief Return whether Azure broker-specific settings were supplied.
    *
-   * For Azure, any broker-specific property enables this mode so incomplete
-   * configurations are rejected during validation instead of silently falling
-   * back to another Azure authentication mechanism.
+   * Native Azure authentication uses these settings only when use_iam is false.
+   * Detect partial configurations too so active SAS Broker settings are validated.
+   * Talon independently consumes credential_endpoint for its Broker requests.
    */
   [[nodiscard]] bool IsAzureCredentialBrokerEnabled() const;
 

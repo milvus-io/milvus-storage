@@ -180,6 +180,29 @@ static void test_talon_broker_configuration(void) {
   loon_talon_client_destroy(client);
 }
 
+static void test_talon_azure_iam_configuration(void) {
+  LoonProperty values[] = {{"fs.talon.coordinator", "127.0.0.1:1"},
+                           {"fs.cloud_provider", "azure"},
+                           {"fs.credential_endpoint", "https://broker/credentials"},
+                           {"fs.use_iam", "true"},
+                           {"fs.address", "core.windows.net"},
+                           {"fs.access_key_id", "account"},
+                           {"fs.bucket_name", "container"},
+                           {"fs.region", ""}};
+  LoonProperties properties = {values, sizeof(values) / sizeof(values[0])};
+  LoonTalonClientHandle client = 0;
+  LoonFFIResult status = loon_talon_client_create(&properties, &client);
+  ck_assert_msg(status.err_code == LOON_SUCCESS, "%s", loon_ffi_get_errmsg(&status));
+  loon_ffi_free_result(&status);
+  const LoonTalonLoadRequest request = {"az://container/empty", 0, NULL};
+  LoonTalonResult* result = NULL;
+  status = loon_talon_load(client, &request, NULL, &result);
+  ck_assert_msg(status.err_code == LOON_SUCCESS, "%s", loon_ffi_get_errmsg(&status));
+  loon_ffi_free_result(&status);
+  loon_talon_result_free(result);
+  loon_talon_client_destroy(client);
+}
+
 static void test_talon_request_options_are_optional_and_owned(void) {
   const char* broker_json =
       "{\"url\":\"https://broker/credentials\",\"request\":{\"csp\":\"aws\"},"
@@ -720,6 +743,7 @@ void run_talon_suite(void) {
   RUN_TEST(test_talon_header_and_empty_results);
   RUN_TEST(test_talon_invalid_inputs);
   RUN_TEST(test_talon_broker_configuration);
+  RUN_TEST(test_talon_azure_iam_configuration);
   RUN_TEST(test_talon_request_options_are_optional_and_owned);
   RUN_TEST(test_talon_valid_properties_have_no_new_size_caps);
   RUN_TEST(test_talon_async_admission_and_lifetime);

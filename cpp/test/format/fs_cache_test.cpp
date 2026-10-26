@@ -238,6 +238,10 @@ TEST_F(FileSystemCacheTest, CacheKeyIncludesCredentialIdentity) {
   different_role.role_arn = "arn:aws:iam::222222222222:role/target";
   EXPECT_NE(base.GetCacheKey(), different_role.GetCacheKey());
 
+  auto different_session = base;
+  different_session.session_name = "target-session";
+  EXPECT_NE(base.GetCacheKey(), different_session.GetCacheKey());
+
   auto different_external_id = base;
   different_external_id.external_id = "target-external";
   EXPECT_NE(base.GetCacheKey(), different_external_id.GetCacheKey());
@@ -297,6 +301,53 @@ TEST_F(FileSystemCacheTest, CacheKeyIgnoresUnusedCredentialFields) {
   EXPECT_EQ(gcp_impersonation.GetCacheKey(), different_role_arn_for_gcp.GetCacheKey());
 }
 
+TEST_F(FileSystemCacheTest, S3CompatibleIamAndStaticCredentialsHaveSeparateCacheKeys) {
+  for (const auto* provider : {kCloudProviderAWS, kCloudProviderAliyun, kCloudProviderTencent, kCloudProviderHuawei,
+                               kCloudProviderVolcengine}) {
+    SCOPED_TRACE(provider);
+    ArrowFileSystemConfig iam;
+    iam.storage_type = "remote";
+    iam.cloud_provider = provider;
+    iam.bucket_name = "bucket";
+    iam.use_iam = true;
+    auto unused_keys = iam;
+    unused_keys.access_key_id = "unused-ak";
+    unused_keys.access_key_value = "unused-sk";
+    EXPECT_EQ(iam.GetCacheKey(), unused_keys.GetCacheKey());
+
+    auto static_keys = unused_keys;
+    static_keys.use_iam = false;
+    EXPECT_NE(iam.GetCacheKey(), static_keys.GetCacheKey());
+    auto different_ak = static_keys;
+    different_ak.access_key_id = "other-ak";
+    EXPECT_NE(static_keys.GetCacheKey(), different_ak.GetCacheKey());
+    auto different_sk = static_keys;
+    different_sk.access_key_value = "other-sk";
+    EXPECT_NE(static_keys.GetCacheKey(), different_sk.GetCacheKey());
+  }
+}
+
+TEST_F(FileSystemCacheTest, GcpHmacDefaultIamAndImpersonationHaveSeparateCacheKeys) {
+  ArrowFileSystemConfig hmac;
+  hmac.storage_type = "remote";
+  hmac.cloud_provider = kCloudProviderGCP;
+  hmac.bucket_name = "bucket";
+  hmac.access_key_id = "hmac-id";
+  hmac.access_key_value = "hmac-key";
+  auto different_key = hmac;
+  different_key.access_key_value = "other-key";
+  EXPECT_NE(hmac.GetCacheKey(), different_key.GetCacheKey());
+  auto different_id = hmac;
+  different_id.access_key_id = "other-id";
+  EXPECT_NE(hmac.GetCacheKey(), different_id.GetCacheKey());
+  auto iam = hmac;
+  iam.use_iam = true;
+  EXPECT_NE(hmac.GetCacheKey(), iam.GetCacheKey());
+  auto impersonation = iam;
+  impersonation.gcp_target_service_account = "reader@example.iam.gserviceaccount.com";
+  EXPECT_NE(iam.GetCacheKey(), impersonation.GetCacheKey());
+}
+
 TEST_F(FileSystemCacheTest, GcpCacheKeyUsesImpersonationIdentityOnly) {
   ArrowFileSystemConfig base;
   base.storage_type = "remote";
@@ -309,6 +360,10 @@ TEST_F(FileSystemCacheTest, GcpCacheKeyUsesImpersonationIdentityOnly) {
 
   auto different_target_sa = base;
   different_target_sa.gcp_target_service_account = "target@project.iam.gserviceaccount.com";
+  EXPECT_NE(base.GetCacheKey(), different_target_sa.GetCacheKey());
+  // Talon Broker IAM ignores the target SA, but native GCP fallback still uses it.
+  base.talon_mode = different_target_sa.talon_mode = TalonMode::Full;
+  base.credential_endpoint = different_target_sa.credential_endpoint = "https://broker/credentials";
   EXPECT_NE(base.GetCacheKey(), different_target_sa.GetCacheKey());
 }
 
@@ -339,8 +394,43 @@ TEST_F(FileSystemCacheTest, AzureBrokerCacheKeyUsesBrokerIdentity) {
 
   auto different_static_secret = base;
   different_static_secret.access_key_value = "unused";
-  different_static_secret.use_iam = true;
   EXPECT_EQ(base.GetCacheKey(), different_static_secret.GetCacheKey());
+
+  auto iam = base;
+  iam.use_iam = true;
+  EXPECT_NE(base.GetCacheKey(), iam.GetCacheKey());
+  auto different_broker = iam;
+  different_broker.azure_client_id = "unused-client";
+  different_broker.azure_tenant_id = "unused-tenant";
+  different_broker.access_key_value = "unused-secret";
+  EXPECT_EQ(iam.GetCacheKey(), different_broker.GetCacheKey());
+  different_broker.credential_endpoint = "https://other-broker/credentials";
+  EXPECT_EQ(iam.GetCacheKey(), different_broker.GetCacheKey());
+  auto no_broker = iam;
+  no_broker.credential_endpoint.clear();
+  no_broker.azure_client_id.clear();
+  no_broker.azure_tenant_id.clear();
+  EXPECT_EQ(iam.GetCacheKey(), no_broker.GetCacheKey());
+  auto different_account = iam;
+  different_account.access_key_id = "otheraccount";
+  EXPECT_NE(iam.GetCacheKey(), different_account.GetCacheKey());
+  iam.talon_mode = different_broker.talon_mode = TalonMode::Full;
+  EXPECT_NE(iam.GetCacheKey(), different_broker.GetCacheKey());
+  auto ignored_targets = iam;
+  ignored_targets.azure_client_id = "unused-client";
+  ignored_targets.azure_tenant_id = "unused-tenant";
+  ignored_targets.role_arn = "unused-role";
+  ignored_targets.external_id = "unused-external-id";
+  ignored_targets.gcp_target_service_account = "unused@example.com";
+  EXPECT_EQ(iam.GetCacheKey(), ignored_targets.GetCacheKey());
+
+  auto account_key = no_broker;
+  account_key.use_iam = false;
+  account_key.access_key_value = "key-a";
+  EXPECT_NE(no_broker.GetCacheKey(), account_key.GetCacheKey());
+  auto other_key = account_key;
+  other_key.access_key_value = "key-b";
+  EXPECT_NE(account_key.GetCacheKey(), other_key.GetCacheKey());
 }
 
 TEST_F(FileSystemCacheTest, TalonBrokerIdentityIsolatedFromLocalOriginCredentials) {
@@ -352,6 +442,9 @@ TEST_F(FileSystemCacheTest, TalonBrokerIdentityIsolatedFromLocalOriginCredential
   base.use_iam = false;
   base.gcp_target_service_account = "reader-a@example.com";
   auto different = base;
+  different.use_iam = true;
+  EXPECT_NE(base.GetCacheKey(), different.GetCacheKey());
+  different = base;
   different.gcp_target_service_account = "reader-b@example.com";
   EXPECT_NE(base.GetCacheKey(), different.GetCacheKey());
   different = base;
@@ -361,6 +454,21 @@ TEST_F(FileSystemCacheTest, TalonBrokerIdentityIsolatedFromLocalOriginCredential
   base.talon_mode = TalonMode::Disabled;
   different.talon_mode = TalonMode::Disabled;
   EXPECT_EQ(base.GetCacheKey(), different.GetCacheKey());
+}
+
+TEST_F(FileSystemCacheTest, TalonBrokerIamSeparatesClientsWithTheSameOriginRole) {
+  ArrowFileSystemConfig base;
+  base.storage_type = "remote";
+  base.cloud_provider = kCloudProviderAWS;
+  base.talon_mode = TalonMode::Full;
+  base.credential_endpoint = "https://broker/credentials";
+  base.role_arn = "arn:aws:iam::123456789012:role/reader";
+  auto iam = base;
+  iam.use_iam = true;
+  EXPECT_NE(base.GetCacheKey(), iam.GetCacheKey());
+  // The native S3 producer still prioritizes the explicit role over use_iam.
+  base.talon_mode = iam.talon_mode = TalonMode::Disabled;
+  EXPECT_EQ(base.GetCacheKey(), iam.GetCacheKey());
 }
 
 TEST_F(FileSystemCacheTest, TalonNamespaceUsesConfiguredIdentityIndependentlyOfBroker) {

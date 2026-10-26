@@ -728,6 +728,105 @@ TEST_F(TalonBrokerRequestTest, AzureDescriptorExpandsAccountAndCloudSuffix) {
   EXPECT_EQ(descriptor["origin"]["use_virtual_host"], true);
 }
 
+class TalonBrokerIamTest : public TalonBrokerRequestTest,
+                           public ::testing::WithParamInterface<std::tuple<const char*, bool>> {};
+
+TEST_P(TalonBrokerIamTest, UseIamSelectsBrokerIdentityAndOmitsTargetFields) {
+  ScopedEnv azurite("USE_AZURITE", nullptr);
+  const auto [provider, with_target_fields] = GetParam();
+  api::Properties properties;
+  properties[PROPERTY_FS_CLOUD_PROVIDER] = std::string(provider);
+  properties[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("https://broker/credentials");
+  properties[PROPERTY_FS_REGION] = std::string();
+  properties[PROPERTY_FS_USE_IAM] = true;
+  properties[PROPERTY_FS_USE_SSL] = true;
+  properties[PROPERTY_FS_BUCKET_NAME] = std::string("bucket");
+  std::string uri;
+  if (std::string(provider) == "aws") {
+    properties[PROPERTY_FS_ADDRESS] = std::string("s3.us-west-2.amazonaws.com");
+    properties[PROPERTY_FS_REGION] = std::string("us-west-2");
+    uri = "s3://bucket/key";
+  } else if (std::string(provider) == "gcp") {
+    properties[PROPERTY_FS_ADDRESS] = std::string("storage.googleapis.com");
+    uri = "gcs://bucket/key";
+  } else {
+    properties[PROPERTY_FS_ADDRESS] = std::string("core.windows.net");
+    properties[PROPERTY_FS_ACCESS_KEY_ID] = std::string("account");
+    uri = "az://bucket/key";
+  }
+  if (with_target_fields) {
+    properties[PROPERTY_FS_ROLE_ARN] = std::string("unused-role");
+    properties[PROPERTY_FS_EXTERNAL_ID] = std::string("unused-external-id");
+    properties[PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT] = std::string("unused@example.com");
+    properties[PROPERTY_FS_AZURE_CLIENT_ID] = std::string("unused-client");
+    properties[PROPERTY_FS_AZURE_TENANT_ID] = std::string("unused-tenant");
+  }
+  nlohmann::json descriptor;
+  CaptureRequest(properties, provider, uri, Operation::ImplicitStat, descriptor);
+  ASSERT_FALSE(descriptor.empty());
+  const auto& request = descriptor.at("request");
+  EXPECT_EQ(request.at("credentialType"), "iam");
+  EXPECT_EQ(request.at("csp"), provider);
+  EXPECT_EQ(request.at("bucket"), "bucket");
+  for (const auto* field : {"roleArn", "externalId", "gcpServiceAccountEmail", "azureClientId", "azureTenantId"}) {
+    EXPECT_FALSE(request.contains(field));
+  }
+  if (std::string(provider) == "azure") {
+    EXPECT_EQ(request.at("azureAccountName"), "account");
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(Clouds,
+                         TalonBrokerIamTest,
+                         ::testing::Combine(::testing::Values("aws", "gcp", "azure"), ::testing::Bool()));
+
+TEST(TalonRawBridgeTest, UseIamSelectsBrokerMode) {
+  ArrowFileSystemConfig config;
+  config.talon_coordinator = "127.0.0.1:1";
+  config.address = "s3.us-west-2.amazonaws.com";
+  config.bucket_name = "bucket";
+  config.region = "us-west-2";
+  config.credential_endpoint = "https://broker/credentials";
+  EXPECT_TRUE(talon::TalonClient::Make(config).status().IsInvalid());
+  config.use_iam = true;
+  EXPECT_TRUE(talon::TalonClient::Make(config).ok());
+  config.use_iam = false;
+  config.role_arn = "arn:aws:iam::123456789012:role/reader";
+  EXPECT_TRUE(talon::TalonClient::Make(config).ok());
+}
+
+TEST(TalonRawBridgeTest, AzureBrokerIamValidatesActiveRequestConfiguration) {
+  ArrowFileSystemConfig config;
+  config.talon_coordinator = "127.0.0.1:1";
+  config.cloud_provider = kCloudProviderAzure;
+  config.address = "core.windows.net";
+  config.access_key_id = "account";
+  config.bucket_name = "container";
+  config.credential_endpoint = "https://broker/credentials";
+  config.use_iam = true;
+  EXPECT_TRUE(talon::TalonClient::Make(config).ok());
+  auto missing_account = config;
+  missing_account.access_key_id.clear();
+  EXPECT_TRUE(talon::TalonClient::Make(missing_account).status().IsInvalid());
+  auto missing_bucket = config;
+  missing_bucket.bucket_name.clear();
+  EXPECT_TRUE(talon::TalonClient::Make(missing_bucket).status().IsInvalid());
+  auto invalid_timeout = config;
+  invalid_timeout.request_timeout_ms = 0;
+  EXPECT_TRUE(talon::TalonClient::Make(invalid_timeout).status().IsInvalid());
+  config.credential_endpoint = "file:///credentials";
+  ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make(config));
+  EXPECT_TRUE(client->Load({"az://container/empty", 0, ""}).status().IsInvalid());
+}
+
+TEST_F(TalonBrokerRequestTest, UseIamWithoutBrokerEndpointKeepsStaticRequests) {
+  api::Properties properties;
+  properties[PROPERTY_FS_USE_IAM] = true;
+  nlohmann::json descriptor;
+  CaptureRequest(properties, "aws", "s3://bucket/key", Operation::Stat, descriptor);
+  EXPECT_TRUE(descriptor.empty());
+}
+
 namespace {
 
 class MetadataInputFile final : public arrow::io::RandomAccessFile {

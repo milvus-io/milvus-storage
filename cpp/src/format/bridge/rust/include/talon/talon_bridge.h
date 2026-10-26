@@ -125,7 +125,8 @@ class TalonClient final {
                                               const std::optional<TalonObjectStat>& initial_stat) const;
 
   private:
-  static arrow::Result<std::string> BuildCredentialBrokerJson(const ArrowFileSystemConfig& config);
+  static arrow::Result<std::string> BuildCredentialBrokerIAMJson(const ArrowFileSystemConfig& config);
+  static arrow::Result<std::string> BuildCredentialBrokerARNJson(const ArrowFileSystemConfig& config);
 
   explicit TalonClient(rust::Box<ffi::TalonClient> impl) : impl_(std::move(impl)) {}
 
