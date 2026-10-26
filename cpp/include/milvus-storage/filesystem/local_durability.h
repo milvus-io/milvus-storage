@@ -26,12 +26,10 @@ arrow::Status SyncLocalFile(const std::string& path);
 // of durability: an existing parent can belong to another in-flight writer.
 arrow::Status SyncLocalDirectoryTree(const std::string& directory);
 
-// Complete-object writes publish a synchronized sibling temporary file only on
-// explicit successful Close. exclusive publication never replaces an existing
-// object (also across processes). Append streams sync their existing file on
-// Close. Write/Flush do not issue a disk synchronization per small input chunk.
+// Write directly to the target path, synchronizing its file and directory on
+// successful Close. Write/Flush do not synchronize each small input chunk.
+// Failed or abandoned writes can leave incomplete files, as before.
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenDurableLocalOutput(const std::string& path,
-                                                                               bool exclusive = false,
                                                                                bool append = false);
 
 }  // namespace milvus_storage

@@ -20,7 +20,6 @@
 #include <boost/filesystem/operations.hpp>
 
 #include <arrow/filesystem/localfs.h>
-#include <arrow/buffer.h>
 
 #include "milvus-storage/filesystem/observable.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
@@ -112,16 +111,9 @@ class LocalFileSystemWrapper : public arrow::fs::LocalFileSystem, public UploadC
 
   arrow::Status CopyFile(const std::string& src, const std::string& dest) override {
     TRACK_METRICS(IncrementCopyFileCount, ([&]() -> arrow::Status {
-                    ARROW_ASSIGN_OR_RAISE(auto input, arrow::fs::LocalFileSystem::OpenInputStream(src));
-                    ARROW_ASSIGN_OR_RAISE(auto output, OpenDurableLocalOutput(dest));
-                    for (;;) {
-                      ARROW_ASSIGN_OR_RAISE(auto buffer, input->Read(1024 * 1024));
-                      if (buffer->size() == 0)
-                        break;
-                      ARROW_RETURN_NOT_OK(output->Write(buffer));
-                    }
-                    ARROW_RETURN_NOT_OK(input->Close());
-                    return output->Close();
+                    ARROW_RETURN_NOT_OK(arrow::fs::LocalFileSystem::CopyFile(src, dest));
+                    ARROW_RETURN_NOT_OK(SyncLocalFile(dest));
+                    return SyncLocalDirectoryTree(std::filesystem::path(dest).parent_path().string());
                   })());
   }
 
@@ -156,11 +148,15 @@ class LocalFileSystemWrapper : public arrow::fs::LocalFileSystem, public UploadC
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenAppendStream(
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override {
-    TRACK_METRICS_AND_WRAP(IncrementWriteCount, OpenDurableLocalOutput(path, false, true), MetricsOutputStream);
+    TRACK_METRICS_AND_WRAP(IncrementWriteCount, OpenDurableLocalOutput(path, true), MetricsOutputStream);
   }
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(
       const std::string& path, std::shared_ptr<arrow::KeyValueMetadata> metadata) override {
+    // This lock is only for testing purposes.
+    static std::mutex local_conditional_write_mutex;
+    std::scoped_lock lock(local_conditional_write_mutex);
+
     auto file_info_result = arrow::fs::LocalFileSystem::GetFileInfo(path);
     if (!file_info_result.ok()) {
       metrics_->IncrementFailedCount();
@@ -171,7 +167,7 @@ class LocalFileSystemWrapper : public arrow::fs::LocalFileSystem, public UploadC
       metrics_->IncrementFailedCount();
       return MakeExtendError(ExtendStatusCode::AwsErrorConflict, "File already exists: " + path, "");
     }
-    TRACK_METRICS_AND_WRAP(IncrementWriteCount, OpenDurableLocalOutput(path, true), MetricsOutputStream);
+    return OpenOutputStream(path, metadata);
   }
 
   private:

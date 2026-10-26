@@ -11,18 +11,14 @@
 
 #include "milvus-storage/filesystem/local_durability.h"
 
-#include <atomic>
 #include <cerrno>
-#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fcntl.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #include <arrow/io/file.h>
 
-#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/fiu_local.h"
 
 namespace milvus_storage {
@@ -45,27 +41,20 @@ arrow::Status SyncFD(int fd, const std::string& path, bool directory) {
   return result == 0 ? arrow::Status::OK() : IOError("fsync", path, errno);
 }
 
-class DurableLocalOutput final : public arrow::io::OutputStream {
+// Keep the filesystem's existing direct-write behavior. A failed or abandoned
+// write can leave an incomplete file; callers must not commit its metadata.
+class SyncOnCloseOutput final : public arrow::io::OutputStream {
   public:
-  DurableLocalOutput(std::shared_ptr<arrow::io::FileOutputStream> stream,
-                     std::string path,
-                     std::string temporary,
-                     bool exclusive)
-      : stream_(std::move(stream)), path_(std::move(path)), temporary_(std::move(temporary)), exclusive_(exclusive) {}
+  SyncOnCloseOutput(std::shared_ptr<arrow::io::FileOutputStream> stream, std::string path)
+      : stream_(std::move(stream)), path_(std::move(path)) {}
 
-  ~DurableLocalOutput() override { (void)Abort(); }
+  ~SyncOnCloseOutput() override { (void)Abort(); }
 
-  bool closed() const override { return closed_; }
+  bool closed() const override { return stream_->closed(); }
 
-  arrow::Result<int64_t> Tell() const override {
-    if (closed_)
-      return arrow::Status::Invalid("Output stream is closed: ", path_);
-    return stream_->Tell();
-  }
+  arrow::Result<int64_t> Tell() const override { return stream_->Tell(); }
 
   arrow::Status Write(const void* data, int64_t size) override {
-    if (closed_)
-      return arrow::Status::Invalid("Output stream is closed: ", path_);
     if (!status_.ok())
       return status_;
     status_ = stream_->Write(data, size);
@@ -73,8 +62,6 @@ class DurableLocalOutput final : public arrow::io::OutputStream {
   }
 
   arrow::Status Flush() override {
-    if (closed_)
-      return arrow::Status::Invalid("Output stream is closed: ", path_);
     if (!status_.ok())
       return status_;
     status_ = stream_->Flush();
@@ -82,18 +69,14 @@ class DurableLocalOutput final : public arrow::io::OutputStream {
   }
 
   arrow::Status Abort() override {
-    if (closed_)
+    if (closed())
       return arrow::Status::OK();
-    closed_ = true;
-    status_ = arrow::Status::Cancelled("Local object publication aborted: ", path_);
-    auto status = stream_->Close();
-    if (!temporary_.empty())
-      (void)::unlink(temporary_.c_str());
-    return status;
+    status_ = arrow::Status::Cancelled("Local output aborted: ", path_);
+    return stream_->Close();
   }
 
   arrow::Status Close() override {
-    if (closed_)
+    if (closed())
       return status_;
     if (status_.ok())
       status_ = SyncFD(stream_->file_descriptor(), path_, false);
@@ -102,39 +85,16 @@ class DurableLocalOutput final : public arrow::io::OutputStream {
         status_ = arrow::Status::IOError("Injected local close failure");
     });
     auto close_status = stream_->Close();
-    closed_ = true;
     if (status_.ok())
       status_ = close_status;
-    if (!status_.ok()) {
-      if (!temporary_.empty())
-        (void)::unlink(temporary_.c_str());
-      return status_;
-    }
-    if (!temporary_.empty()) {
-      // link is an atomic no-replace publication. A check-then-open guarded by
-      // a process mutex cannot provide manifest CAS or hide incomplete files.
-      int result = exclusive_ ? ::link(temporary_.c_str(), path_.c_str()) : ::rename(temporary_.c_str(), path_.c_str());
-      const int error = errno;
-      if (exclusive_ || result != 0)
-        (void)::unlink(temporary_.c_str());
-      temporary_.clear();
-      if (result != 0) {
-        status_ = exclusive_ && error == EEXIST
-                      ? MakeExtendError(ExtendStatusCode::AwsErrorConflict, "File already exists: " + path_, "")
-                      : IOError("publish", path_, error);
-        return status_;
-      }
-    }
-    status_ = SyncLocalDirectoryTree(std::filesystem::path(path_).parent_path().string());
+    if (status_.ok())
+      status_ = SyncLocalDirectoryTree(std::filesystem::path(path_).parent_path().string());
     return status_;
   }
 
   private:
   std::shared_ptr<arrow::io::FileOutputStream> stream_;
   std::string path_;
-  std::string temporary_;
-  bool exclusive_;
-  bool closed_ = false;
   arrow::Status status_;
 };
 
@@ -170,46 +130,9 @@ arrow::Status SyncLocalDirectoryTree(const std::string& directory) {
   }
 }
 
-arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenDurableLocalOutput(const std::string& path,
-                                                                               bool exclusive,
-                                                                               bool append) {
-  static std::atomic<uint64_t> sequence{0};
-  std::string temporary;
-  int fd = -1;
-  struct stat existing;
-  bool preserve_mode = !append && !exclusive && ::stat(path.c_str(), &existing) == 0 && S_ISREG(existing.st_mode);
-  if (append) {
-    fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
-  } else {
-    const auto parent = std::filesystem::path(path).parent_path();
-    for (int attempt = 0; attempt < 16; ++attempt) {
-      temporary = (parent / (".milvus-tmp-" + std::to_string(::getpid()) + "-" +
-                             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" +
-                             std::to_string(sequence.fetch_add(1))))
-                      .string();
-      fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
-      if (fd >= 0 || errno != EEXIST)
-        break;
-    }
-  }
-  if (fd < 0)
-    return IOError("open output", path, errno);
-  // Replacement must not reset permissions on an existing object. The initial
-  // open still applies the process umask to newly created objects.
-  if (preserve_mode && ::fchmod(fd, existing.st_mode & 0777) != 0) {
-    const int error = errno;
-    (void)::close(fd);
-    (void)::unlink(temporary.c_str());
-    return IOError("preserve permissions", path, error);
-  }
-  auto stream = arrow::io::FileOutputStream::Open(fd);
-  if (!stream.ok()) {
-    (void)::close(fd);
-    if (!temporary.empty())
-      (void)::unlink(temporary.c_str());
-    return stream.status();
-  }
-  return std::make_shared<DurableLocalOutput>(std::move(stream).ValueOrDie(), path, temporary, exclusive);
+arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenDurableLocalOutput(const std::string& path, bool append) {
+  ARROW_ASSIGN_OR_RAISE(auto stream, arrow::io::FileOutputStream::Open(path, append));
+  return std::make_shared<SyncOnCloseOutput>(std::move(stream), path);
 }
 
 }  // namespace milvus_storage
