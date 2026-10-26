@@ -69,7 +69,7 @@ fn metadata(value: &opendal::Metadata) -> Result<Metadata> {
 }
 
 #[derive(Debug)]
-struct FilesystemService(opendal::Operator);
+struct FilesystemService(FilesystemAccess);
 
 impl Service for FilesystemService {
     type Reader = oio::StreamReader<FilesystemReader>;
@@ -93,13 +93,14 @@ impl Service for FilesystemService {
     }
 
     async fn stat(&self, _: &OperationContext, path: &str, _: OpStat) -> Result<RpStat> {
-        let value = self.0.stat(path).await.map_err(translate_error)?;
+        let operator = self.0.clone().into_operator();
+        let value = operator.stat(path).await.map_err(translate_error)?;
         Ok(RpStat::new(metadata(&value)?))
     }
 
     fn read(&self, _: &OperationContext, path: &str, _: OpRead) -> Result<Self::Reader> {
         Ok(oio::StreamReader::new(FilesystemReader {
-            operator: self.0.clone(),
+            access: self.0.clone(),
             path: path.to_string(),
             reader: OnceCell::new(),
         }))
@@ -107,7 +108,7 @@ impl Service for FilesystemService {
 
     fn list(&self, _: &OperationContext, path: &str, args: OpList) -> Result<Self::Lister> {
         Ok(FilesystemLister {
-            operator: self.0.clone(),
+            operator: self.0.clone().into_operator(),
             path: path.to_string(),
             recursive: args.recursive(),
             entries: None,
@@ -165,7 +166,7 @@ fn read_only() -> Error {
 }
 
 struct FilesystemReader {
-    operator: opendal::Operator,
+    access: FilesystemAccess,
     path: String,
     reader: OnceCell<opendal::Reader>,
 }
@@ -175,8 +176,9 @@ impl oio::StreamRead for FilesystemReader {
         let reader = self
             .reader
             .get_or_try_init(|| async {
-                self.operator
-                    .reader(&self.path)
+                self.access
+                    .clone()
+                    .into_reader(&self.path)
                     .await
                     .map_err(translate_error)
             })
@@ -378,7 +380,7 @@ pub(crate) fn file_io(
     let access = FilesystemAccess::new(filesystem).map_err(translate_error)?;
     let operator = Operator::from_parts(
         OperationContext::default(),
-        Arc::new(FilesystemService(access.into_operator())),
+        Arc::new(FilesystemService(access)),
     );
     let file_io = paimon::io::FileIOBuilder::new("milvus-filesystem")
         .with_provider(Arc::new(BoundOperator { operator, binding: binding.clone() }))
@@ -390,6 +392,7 @@ pub(crate) fn file_io(
 mod tests {
     use super::*;
     use crate::filesystem_opendal::tests::LocalOperatorFixture;
+    use std::sync::atomic::Ordering::Relaxed;
 
     #[test]
     fn remote_binding_preserves_paimon_paths() {
@@ -527,7 +530,7 @@ mod tests {
         ] {
             let operator = Operator::from_parts(
                 OperationContext::default(),
-                Arc::new(FilesystemService(fixture.operator.clone())),
+                Arc::new(FilesystemService(fixture.access.clone())),
             );
             let binding = PaimonUriBinding::new(&format!("{prefix}/table"), &options).unwrap();
             let file_io = paimon::io::FileIOBuilder::new("milvus-filesystem")
@@ -556,9 +559,10 @@ mod tests {
         let fixture = LocalOperatorFixture::new();
         std::fs::write(fixture.root.path().join("payload"), b"0123456789").unwrap();
         std::fs::write(fixture.root.path().join("empty"), b"").unwrap();
+        std::fs::create_dir(fixture.root.path().join("directory")).unwrap();
         let operator = Operator::from_parts(
             OperationContext::default(),
-            Arc::new(FilesystemService(fixture.operator.clone())),
+            Arc::new(FilesystemService(fixture.access.clone())),
         );
         let info = operator.stat("payload").await.unwrap();
         assert!(info.mode().is_file());
@@ -567,7 +571,13 @@ mod tests {
         for (range, expected) in [(2..6, b"2345".as_slice()), (8..10, b"89"), (10..10, b"")] {
             assert_eq!(reader.read(range).await.unwrap().to_bytes().as_ref(), expected);
         }
+        let opens = fixture.access.io_counts[1].load(Relaxed);
         assert!(operator.read("empty").await.unwrap().is_empty());
+        assert_eq!(
+            operator.read("directory/").await.unwrap_err().kind(),
+            ErrorKind::IsADirectory
+        );
+        assert_eq!(fixture.access.io_counts[1].load(Relaxed), opens);
         // The shared OpenDAL layer must not silently return a truncated range.
         assert!(reader.read(8..12).await.is_err());
         assert_eq!(reader.read(11..12).await.unwrap_err().kind(), ErrorKind::RangeNotSatisfied);
@@ -577,6 +587,101 @@ mod tests {
         ] {
             assert_eq!(error.kind(), ErrorKind::NotFound);
             assert!(format!("{error:?}").contains(crate::filesystem_c::LOON_FFI_ERRCODE_MARKER));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn range_reads_reuse_native_reader_and_size() {
+        for concurrent in [false, true] {
+            let fixture = LocalOperatorFixture::new();
+            let data: Vec<u8> = (0..64).collect();
+            std::fs::write(fixture.root.path().join("payload"), &data).unwrap();
+            let operator = Operator::from_parts(
+                OperationContext::default(),
+                Arc::new(FilesystemService(fixture.access.clone())),
+            );
+            let reader = operator.reader("payload").await.unwrap();
+            let barrier = tokio::sync::Barrier::new(if concurrent { 16 } else { 1 });
+            let read = |i: usize| {
+                let reader = reader.clone();
+                let data = &data;
+                let barrier = &barrier;
+                async move {
+                    barrier.wait().await;
+                    // Disjoint, overlapping and backwards ranges on the same file.
+                    let start = (i * 13) % 56;
+                    let bytes = reader.read(start as u64..(start + 8) as u64).await.unwrap();
+                    assert_eq!(bytes.to_bytes().as_ref(), &data[start..start + 8]);
+                }
+            };
+            if concurrent {
+                futures::future::join_all((0..16).map(read)).await;
+            } else {
+                for i in 0..16 {
+                    read(i).await;
+                }
+            }
+            for count in fixture.access.io_counts.iter() {
+                assert_eq!(count.load(Relaxed), 1);
+            }
+            // A new reader has its own state, not a filesystem-wide handle cache.
+            let next_reader = operator.reader("payload").await.unwrap();
+            next_reader.read(0..1).await.unwrap();
+            for count in fixture.access.io_counts.iter() {
+                assert_eq!(count.load(Relaxed), 2);
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_reads_retry_failed_initialization() {
+        let fixture = LocalOperatorFixture::new();
+        let operator = Operator::from_parts(
+            OperationContext::default(),
+            Arc::new(FilesystemService(fixture.access.clone())),
+        );
+        let reader = operator.reader("payload").await.unwrap();
+        let barrier = tokio::sync::Barrier::new(16);
+        futures::future::join_all((0..16).map(|_| async {
+            barrier.wait().await;
+            assert_eq!(
+                reader.read(0..1).await.unwrap_err().kind(),
+                ErrorKind::NotFound
+            );
+        }))
+        .await;
+        // Failed initialization is not cached; each waiting caller tries once.
+        assert_eq!(fixture.access.io_counts[0].load(Relaxed), 16);
+        assert_eq!(fixture.access.io_counts[1].load(Relaxed), 0);
+        std::fs::write(fixture.root.path().join("payload"), b"abc").unwrap();
+        for (range, expected) in [(0..1, b"a".as_slice()), (1..3, b"bc")] {
+            let bytes = reader.read(range).await.unwrap();
+            assert_eq!(bytes.to_bytes().as_ref(), expected);
+        }
+        assert_eq!(fixture.access.io_counts[0].load(Relaxed), 17);
+        assert_eq!(fixture.access.io_counts[1].load(Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn cached_reader_recovers_after_read_failure() {
+        let fixture = LocalOperatorFixture::new();
+        let path = fixture.root.path().join("payload");
+        std::fs::write(&path, b"abc").unwrap();
+        let operator = Operator::from_parts(
+            OperationContext::default(),
+            Arc::new(FilesystemService(fixture.access.clone())),
+        );
+        let reader = operator.reader("payload").await.unwrap();
+        assert_eq!(reader.read(0..1).await.unwrap().to_bytes().as_ref(), b"a");
+        // Truncate in place to fail native ReadAt against the cached size.
+        std::fs::write(&path, b"").unwrap();
+        let error = reader.read(0..3).await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unexpected);
+        assert!(format!("{error:?}").contains("Read size mismatch"));
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(reader.read(0..3).await.unwrap().to_bytes().as_ref(), b"abc");
+        for count in fixture.access.io_counts.iter() {
+            assert_eq!(count.load(Relaxed), 1);
         }
     }
 
