@@ -213,10 +213,12 @@ struct ArrowFileSystemConfig {
   // Target service account email to impersonate (e.g., "sa@project.iam.gserviceaccount.com")
   std::string gcp_target_service_account = "";
 
+  // HTTP(S) Broker endpoint shared by Azure SAS and Talon request credentials.
+  std::string credential_endpoint = "";
+
   // Azure broker-backed temporary SAS authentication.
   std::string azure_client_id = "";
   std::string azure_tenant_id = "";
-  std::string azure_credential_endpoint = "";
 
   // Lifetime requested for cross-tenant temporary credentials, in seconds.
   // Shared across providers that mint short-lived tokens:
@@ -265,6 +267,8 @@ struct ArrowFileSystemConfig {
   // Inclusive limit in bytes for small_reads, applied before EOF clamping.
   uint32_t talon_small_read_threshold = 512U * 1024U;
   std::string talon_coordinator = "";
+  // Optional request namespace. Empty selects Talon's default namespace.
+  std::string talon_namespace = "";
   uint32_t talon_block_size = 256U * 1024U * 1024U;
   // Maximum idle TCP connections per peer in each Talon pool; does not cap active connections.
   uint32_t talon_max_idle_per_addr = 256;

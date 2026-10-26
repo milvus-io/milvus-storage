@@ -322,7 +322,7 @@ TEST_F(FileSystemCacheTest, AzureBrokerCacheKeyUsesBrokerIdentity) {
   base.access_key_id = "account";
   base.azure_client_id = "client-a";
   base.azure_tenant_id = "tenant-a";
-  base.azure_credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
+  base.credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
   base.load_frequency = 3600;
 
   auto different_client = base;
@@ -334,13 +334,48 @@ TEST_F(FileSystemCacheTest, AzureBrokerCacheKeyUsesBrokerIdentity) {
   EXPECT_NE(base.GetCacheKey(), different_tenant.GetCacheKey());
 
   auto different_endpoint = base;
-  different_endpoint.azure_credential_endpoint = "https://other-broker/v1/credentials/assume-role";
+  different_endpoint.credential_endpoint = "https://other-broker/v1/credentials/assume-role";
   EXPECT_NE(base.GetCacheKey(), different_endpoint.GetCacheKey());
 
   auto different_static_secret = base;
   different_static_secret.access_key_value = "unused";
   different_static_secret.use_iam = true;
   EXPECT_EQ(base.GetCacheKey(), different_static_secret.GetCacheKey());
+}
+
+TEST_F(FileSystemCacheTest, TalonBrokerIdentityIsolatedFromLocalOriginCredentials) {
+  ArrowFileSystemConfig base;
+  base.storage_type = "remote";
+  base.talon_mode = TalonMode::Full;
+  base.credential_endpoint = "https://broker/assume-role";
+  base.cloud_provider = kCloudProviderGCP;
+  base.use_iam = false;
+  base.gcp_target_service_account = "reader-a@example.com";
+  auto different = base;
+  different.gcp_target_service_account = "reader-b@example.com";
+  EXPECT_NE(base.GetCacheKey(), different.GetCacheKey());
+  different = base;
+  different.credential_endpoint = "https://other-broker/assume-role";
+  EXPECT_NE(base.GetCacheKey(), different.GetCacheKey());
+  EXPECT_EQ(base.ToString().find("https://broker"), std::string::npos);
+  base.talon_mode = TalonMode::Disabled;
+  different.talon_mode = TalonMode::Disabled;
+  EXPECT_EQ(base.GetCacheKey(), different.GetCacheKey());
+}
+
+TEST_F(FileSystemCacheTest, TalonNamespaceUsesConfiguredIdentityIndependentlyOfBroker) {
+  ArrowFileSystemConfig base;
+  base.storage_type = "remote";
+  base.talon_mode = TalonMode::Full;
+  auto other = base;
+  other.talon_namespace = "default";
+  EXPECT_NE(base.GetCacheKey(), other.GetCacheKey());
+  other.talon_namespace = "tenant-a";
+  EXPECT_NE(base.GetCacheKey(), other.GetCacheKey());
+  base.talon_namespace = "tenant-b";
+  EXPECT_NE(base.GetCacheKey(), other.GetCacheKey());
+  base.talon_mode = other.talon_mode = TalonMode::Disabled;
+  EXPECT_EQ(base.GetCacheKey(), other.GetCacheKey());
 }
 
 TEST_F(FileSystemCacheTest, CacheKeyIgnoresAlias) {

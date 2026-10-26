@@ -104,6 +104,7 @@ struct PropertyInfo {
 #define PROPERTY_FS_TALON_MODE "fs.talon.mode"
 #define PROPERTY_FS_TALON_SMALL_READ_THRESHOLD "fs.talon.small_read_threshold"
 #define PROPERTY_FS_TALON_COORDINATOR "fs.talon.coordinator"
+#define PROPERTY_FS_TALON_NAMESPACE "fs.talon.namespace"
 #define PROPERTY_FS_TALON_BLOCK_SIZE "fs.talon.block_size"
 #define PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR "fs.talon.max_idle_per_addr"
 
@@ -111,7 +112,7 @@ struct PropertyInfo {
 #define PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT "fs.gcp_target_service_account"
 #define PROPERTY_FS_AZURE_CLIENT_ID "fs.azure_client_id"
 #define PROPERTY_FS_AZURE_TENANT_ID "fs.azure_tenant_id"
-#define PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT "fs.azure_credential_endpoint"
+#define PROPERTY_FS_CREDENTIAL_ENDPOINT "fs.credential_endpoint"
 
 // --- External Filesystem Properties ---
 // External filesystems are configured with properties following the pattern:

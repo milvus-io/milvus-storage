@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -23,6 +24,8 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <fstream>
+#include <iterator>
 #include <future>
 #include <limits>
 #include <map>
@@ -37,6 +40,7 @@
 #include <vector>
 
 #include <arpa/inet.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -45,6 +49,8 @@
 #include <arrow/io/memory.h>
 #include <arrow/util/async_generator.h>
 #include <arrow/util/io_util.h>
+#include <nlohmann/json.hpp>
+#include <folly/ScopeGuard.h>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/extend_status.h"
@@ -53,6 +59,7 @@
 #include "milvus-storage/filesystem/talon/talon_file_system_producer.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 #include "milvus-storage/ffi_filesystem_metrics_c.h"
+#include "milvus-storage/ffi_talon_c.h"
 #include "talon/talon_bridge.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/reader.h"
@@ -88,8 +95,11 @@ TEST_P(TalonCallbackDeathTest, ThrowingContinuationDoesNotRetryCompletion) {
             ::getsockname(listener, reinterpret_cast<sockaddr*>(&address), &address_size) != 0) {
           std::_Exit(1);
         }
-        const auto client =
-            talon::TalonClient::Make("127.0.0.1:" + std::to_string(ntohs(address.sin_port)), 8388608, 8);
+        ArrowFileSystemConfig config;
+        config.talon_coordinator = "127.0.0.1:" + std::to_string(ntohs(address.sin_port));
+        config.talon_block_size = 8388608;
+        config.talon_max_idle_per_addr = 8;
+        const auto client = talon::TalonClient::Make(config);
         if (!client.ok())
           std::_Exit(1);
         const bool raw_stat = GetParam();
@@ -126,11 +136,383 @@ TEST(TalonRawBridgeTest, PropertiesNeedOnlyClientConfiguration) {
   properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
   properties[PROPERTY_FS_TALON_BLOCK_SIZE] = uint32_t{8388608};
   properties[PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR] = uint32_t{8};
-  ASSERT_TRUE(talon::TalonClient::Make(properties).ok());
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+  ASSERT_TRUE(talon::TalonClient::Make(config).ok());
 }
 
+TEST(TalonRawBridgeTest, RejectsInvalidCredentialEndpointBeforeDispatch) {
+  api::Properties properties;
+  properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
+  properties["fs.credential_endpoint"] = std::string("file:///broker-secret");
+  properties[PROPERTY_FS_CLOUD_PROVIDER] = std::string("aws");
+  properties[PROPERTY_FS_ADDRESS] = std::string("s3.us-west-2.amazonaws.com");
+  properties[PROPERTY_FS_REGION] = std::string("us-west-2");
+  properties[PROPERTY_FS_BUCKET_NAME] = std::string("bucket");
+  properties[PROPERTY_FS_ROLE_ARN] = std::string("role-secret");
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+  ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make(config));
+  const auto result = client->Load({"s3://bucket/empty", 0, ""});
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid());
+  EXPECT_EQ(result.status().message().find("broker-secret"), std::string::npos);
+  EXPECT_EQ(result.status().message().find("role-secret"), std::string::npos);
+}
+
+TEST(TalonRawBridgeTest, InvalidBrokerIdentityEncodingReturnsStatus) {
+  api::Properties properties;
+  properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
+  properties[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("https://broker/assume-role");
+  properties[PROPERTY_FS_REGION] = std::string("us-west-2");
+  properties[PROPERTY_FS_ROLE_ARN] = std::string("arn:aws:iam::123456789012:role/reader");
+  properties[PROPERTY_FS_EXTERNAL_ID] = std::string("secret-") + char(0xff);
+  EXPECT_NO_THROW({
+    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+    const auto result = talon::TalonClient::Make(config);
+    EXPECT_TRUE(result.status().IsInvalid());
+    EXPECT_EQ(result.status().message().find("secret-"), std::string::npos);
+  });
+}
+
+TEST(TalonRawBridgeTest, RejectsUnsupportedBrokerCloudsWithoutAwsSubstitution) {
+  for (const auto* provider : {"aliyun", "tencent", "huawei", "volcengine"}) {
+    api::Properties properties;
+    properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
+    properties[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("https://broker/assume-role");
+    properties[PROPERTY_FS_CLOUD_PROVIDER] = std::string(provider);
+    properties[PROPERTY_FS_REGION] = std::string("us-west-2");
+    properties[PROPERTY_FS_ROLE_ARN] = std::string("role");
+    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+    const auto result = talon::TalonClient::Make(config);
+    ASSERT_FALSE(result.ok()) << provider;
+    EXPECT_TRUE(result.status().IsInvalid());
+  }
+}
+
+class TalonBrokerRequestTest : public ::testing::Test {
+  protected:
+  void TearDown() override {
+    if (connection_ >= 0)
+      ::close(connection_);
+    if (listener_ >= 0)
+      ::close(listener_);
+  }
+
+  enum class Operation { Stat, ImplicitStat, Read, Load, BatchLoad };
+
+  void CaptureRequest(api::Properties properties,
+                      const std::string& provider,
+                      const std::string& uri,
+                      Operation operation,
+                      nlohmann::json& descriptor,
+                      const LoonTalonRequestOptions* overrides = nullptr) {
+    const auto namespace_it = properties.find("fs.talon.namespace");
+    std::string expected_namespace =
+        namespace_it == properties.end() ? "" : std::get<std::string>(namespace_it->second);
+    const auto broker_it = properties.find(PROPERTY_FS_CREDENTIAL_ENDPOINT);
+    bool expect_broker = broker_it != properties.end() && !std::get<std::string>(broker_it->second).empty();
+    if (overrides && overrides->namespace_name)
+      expected_namespace = overrides->namespace_name;
+    if (overrides && overrides->credential_broker)
+      expect_broker = *overrides->credential_broker != '\0';
+    listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(listener_, 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ASSERT_EQ(::bind(listener_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)), 0);
+    ASSERT_EQ(::listen(listener_, 1), 0);
+    socklen_t size = sizeof(address);
+    ASSERT_EQ(::getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &size), 0);
+    properties[PROPERTY_FS_TALON_COORDINATOR] = "127.0.0.1:" + std::to_string(ntohs(address.sin_port));
+    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+    ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make(config));
+    if (overrides && overrides->namespace_name) {
+      ASSERT_AND_ASSIGN(auto request_client, client->WithNamespace(overrides->namespace_name));
+      client = std::move(request_client);
+    }
+    if (overrides && overrides->credential_broker) {
+      ASSERT_AND_ASSIGN(auto request_client, client->WithCredentialBroker(overrides->credential_broker));
+      client = std::move(request_client);
+    }
+    arrow::Future<int64_t> future;
+    uint8_t output = 0;
+    if (operation == Operation::ImplicitStat) {
+      ASSERT_AND_ASSIGN(auto reader, client->OpenObject(provider, "bucket", "key", std::nullopt));
+      future = reader.ReadAtAsync(0, 1, &output);
+    } else if (operation == Operation::Read) {
+      future = client->ReadAsync(uri, 0, 1, &output, talon::TalonObjectStat{1, "v1"});
+    } else if (operation == Operation::Load) {
+      future = client->LoadAsync({uri, 1, "v1"}).Then([](const talon::TalonLoadResult& result) {
+        return int64_t(result.size);
+      });
+    } else if (operation == Operation::BatchLoad) {
+      future = client->BatchLoadAsync({{uri, 1, "v1"}})
+                   .Then([](const talon::TalonBatchLoadResult& result) -> arrow::Result<int64_t> {
+                     ARROW_RETURN_NOT_OK(result.status);
+                     if (result.results.size() != 1)
+                       return arrow::Status::Invalid("Expected one batch result");
+                     return int64_t(result.results[0].size);
+                   });
+    } else {
+      future = client->StatAsync(uri).Then([](const talon::TalonObjectStat& stat) { return int64_t(stat.size); });
+    }
+    client.reset();  // Submitted requests must retain both client and credentials.
+    for (int exchange = 0; exchange < 4; ++exchange) {
+      pollfd ready{listener_, POLLIN, 0};
+      ASSERT_EQ(::poll(&ready, 1, 5000), 1);
+      connection_ = ::accept(listener_, nullptr, nullptr);
+      ASSERT_GE(connection_, 0);
+      const timeval timeout{5, 0};
+      ASSERT_EQ(::setsockopt(connection_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)), 0);
+      std::array<uint8_t, 16> header{};
+      ASSERT_EQ(::recv(connection_, header.data(), header.size(), MSG_WAITALL), header.size());
+      uint32_t payload_size;
+      std::memcpy(&payload_size, header.data() + 12, sizeof(payload_size));
+      payload_size = ntohl(payload_size);
+      ASSERT_LT(payload_size, 32768);
+      std::vector<uint8_t> payload(payload_size);
+      ASSERT_EQ(::recv(connection_, payload.data(), payload.size(), MSG_WAITALL), payload.size());
+      size_t metadata_end = 0;
+      std::string wire_namespace;
+      if (header[2] >= 2) {
+        ASSERT_GE(payload.size(), 2);
+        metadata_end = 2 + (uint16_t(payload[0]) << 8) + payload[1];
+        ASSERT_LE(metadata_end, payload.size());
+        for (size_t pos = 2; pos < metadata_end;) {
+          ASSERT_LE(pos + 3, metadata_end);
+          const uint8_t key = payload[pos];
+          const size_t length = (uint16_t(payload[pos + 1]) << 8) + payload[pos + 2];
+          pos += 3;
+          ASSERT_LE(pos + length, metadata_end);
+          if (key == 5)
+            wire_namespace.assign(payload.begin() + pos, payload.begin() + pos + length);
+          if (key == 6)
+            descriptor = nlohmann::json::parse(payload.begin() + pos, payload.begin() + pos + length);
+          pos += length;
+        }
+      }
+      if (header[3] == 11) {
+        // Named versioned reads carry NamespaceId in the business payload,
+        // rather than duplicating it in the metadata envelope.
+        ASSERT_GE(payload.size(), metadata_end + 12);
+        EXPECT_EQ(payload[metadata_end], 0);  // NamespaceId::Named
+        uint64_t length = 0;
+        for (int i = 0; i < 8; ++i) length |= uint64_t(payload[metadata_end + 4 + i]) << (8 * i);
+        ASSERT_LE(length, payload.size() - metadata_end - 12);
+        wire_namespace.assign(payload.begin() + metadata_end + 12, payload.begin() + metadata_end + 12 + length);
+      }
+      ASSERT_GE(payload.size(), metadata_end + 6);
+      const bool membership = header[3] == 0 && payload[metadata_end + 2] == 4;
+      std::vector<uint8_t> body;
+      if (membership) {
+        EXPECT_TRUE(descriptor.empty());  // Shared discovery must not carry request options.
+        EXPECT_TRUE(wire_namespace.empty());
+        // Control schema 6, MembershipList: one serving worker at this listener.
+        body = {6, 0, 5, 0, 0, 0};
+        auto append_u64 = [&body](uint64_t value) {
+          for (int i = 0; i < 8; ++i) body.push_back(static_cast<uint8_t>(value >> (8 * i)));
+        };
+        auto append_string = [&body, &append_u64](const std::string& value) {
+          append_u64(value.size());
+          body.insert(body.end(), value.begin(), value.end());
+        };
+        append_u64(1);      // topology token
+        append_u64(1);      // state token
+        append_u64(30000);  // discovery freshness
+        append_u64(1);      // worker count
+        append_string("worker");
+        body.insert(body.end(), {0, 0, 2, 0, 0, 0});  // no zone, not retired, Serving
+        append_string("instance");
+        append_string("127.0.0.1:" + std::to_string(ntohs(address.sin_port)));
+      } else {
+        EXPECT_EQ(wire_namespace, expected_namespace == "default" ? "" : expected_namespace);
+        EXPECT_EQ(!descriptor.empty(), expect_broker);
+        if (expect_broker) {
+          EXPECT_EQ(header[2], 4);  // Broker metadata requires the v4 envelope.
+        } else if (!wire_namespace.empty() && header[3] != 11) {
+          EXPECT_EQ(header[2], 3);
+        } else {
+          EXPECT_LE(header[2], 2);
+        }
+        if (operation == Operation::Read) {
+          EXPECT_TRUE(header[3] == 10 || header[3] == 11);
+          header[3] = 2;  // Raw GetRange response.
+          body = {0x5a};
+        } else if (operation == Operation::Load) {
+          EXPECT_EQ(payload[metadata_end + 2], 19);  // LoadBlock
+          body = {6, 0, 6, 0, 0, 0, 1, 0};           // Ack(ok=true, detail=None)
+        } else if (operation == Operation::BatchLoad) {
+          EXPECT_EQ(payload[metadata_end + 2], 20);  // BatchLoad
+          body = {6, 0, 21, 0, 0, 0};                // BatchLoadResult with no failures
+          body.resize(14, 0);
+        } else {
+          EXPECT_EQ(payload[metadata_end + 2], 8);  // StatObject
+          // Object backend follows the schema and message discriminant.
+          ASSERT_GE(payload.size(), metadata_end + 10);
+          EXPECT_EQ(payload[metadata_end + 6], provider == "gcp" ? 1 : provider == "azure" ? 2 : 0);
+          body = {6, 0, 9, 0, 0, 0};  // ObjectStat(size=0, version="")
+          body.resize(22, 0);
+        }
+      }
+      std::vector<uint8_t> response(header.begin(), header.end());
+      const uint32_t response_size = htonl(body.size());
+      std::memcpy(response.data() + 12, &response_size, sizeof(response_size));
+      response.insert(response.end(), body.begin(), body.end());
+      ASSERT_EQ(::send(connection_, response.data(), response.size(), 0), response.size());
+      ::close(connection_);
+      connection_ = -1;
+      if (!membership) {
+        ASSERT_TRUE(future.Wait(5.0));
+        ASSERT_AND_ASSIGN(const auto result, future.result());
+        EXPECT_EQ(result, operation == Operation::Stat || operation == Operation::ImplicitStat ? 0 : 1);
+        if (operation == Operation::Read)
+          EXPECT_EQ(output, 0x5a);
+        return;
+      }
+    }
+    FAIL() << "No object request after discovery";
+  }
+
+  int listener_ = -1;
+  int connection_ = -1;
+};
+
+TEST_F(TalonBrokerRequestTest, S3DescriptorIncludesOriginAndEscapedIdentity) {
+  api::Properties properties;
+  properties[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("https://broker/assume-role");
+  properties[PROPERTY_FS_ADDRESS] = std::string("https://s3.us-west-2.amazonaws.com");
+  properties[PROPERTY_FS_REGION] = std::string("us-west-2");
+  properties[PROPERTY_FS_BUCKET_NAME] = std::string("bucket");
+  properties[PROPERTY_FS_ROLE_ARN] = std::string("arn:aws:iam::123456789012:role/reader");
+  properties[PROPERTY_FS_EXTERNAL_ID] = std::string("quoted\"identity\\value");
+  properties[PROPERTY_FS_USE_VIRTUAL_HOST] = true;
+  nlohmann::json descriptor;
+  CaptureRequest(properties, "aws", "s3://bucket/key", Operation::Stat, descriptor);
+  ASSERT_FALSE(descriptor.empty());
+  EXPECT_EQ(descriptor["url"], "https://broker/assume-role");
+  EXPECT_EQ(descriptor["request"], (nlohmann::json{{"csp", "aws"},
+                                                   {"region", "us-west-2"},
+                                                   {"bucket", "bucket"},
+                                                   {"durationSeconds", 900},
+                                                   {"roleArn", "arn:aws:iam::123456789012:role/reader"},
+                                                   {"externalId", "quoted\"identity\\value"}}));
+  EXPECT_EQ(descriptor["origin"], (nlohmann::json{{"endpoint", "https://s3.us-west-2.amazonaws.com"},
+                                                  {"region", "us-west-2"},
+                                                  {"use_virtual_host", true},
+                                                  {"request_timeout_ms", 3000}}));
+}
+
+TEST_F(TalonBrokerRequestTest, GcpImplicitStatUsesBearerBackendAndRetainsDescriptor) {
+  api::Properties properties;
+  properties[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("https://broker/assume-role");
+  properties[PROPERTY_FS_CLOUD_PROVIDER] = std::string("gcp");
+  properties[PROPERTY_FS_ADDRESS] = std::string("storage.googleapis.com");
+  properties[PROPERTY_FS_USE_SSL] = true;
+  properties[PROPERTY_FS_BUCKET_NAME] = std::string("bucket");
+  properties[PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT] = std::string("reader@example.iam.gserviceaccount.com");
+  nlohmann::json descriptor;
+  CaptureRequest(properties, "gcp", "gcs://bucket/key", Operation::ImplicitStat, descriptor);
+  ASSERT_FALSE(descriptor.empty());
+  EXPECT_EQ(descriptor["request"]["csp"], "gcp");
+  EXPECT_EQ(descriptor["request"]["gcpServiceAccountEmail"], "reader@example.iam.gserviceaccount.com");
+  EXPECT_EQ(descriptor["origin"]["endpoint"], "https://storage.googleapis.com");
+}
+
+class TalonBrokerOperationTest : public TalonBrokerRequestTest,
+                                 public ::testing::WithParamInterface<std::tuple<int, bool, bool>> {};
+
+TEST_P(TalonBrokerOperationTest, OptionalNamespaceAndBrokerReachEveryOperation) {
+  const auto [operation, with_namespace, with_broker] = GetParam();
+  api::Properties properties;
+  if (with_namespace)
+    properties["fs.talon.namespace"] = std::string("tenant-a");
+  if (with_broker) {
+    properties[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("https://broker/assume-role");
+    properties[PROPERTY_FS_ADDRESS] = std::string("https://s3.us-west-2.amazonaws.com");
+    properties[PROPERTY_FS_REGION] = std::string("us-west-2");
+    properties[PROPERTY_FS_BUCKET_NAME] = std::string("bucket");
+    properties[PROPERTY_FS_ROLE_ARN] = std::string("arn:aws:iam::123456789012:role/reader");
+  }
+  const Operation operations[] = {Operation::Stat, Operation::ImplicitStat, Operation::Read, Operation::Load,
+                                  Operation::BatchLoad};
+  nlohmann::json descriptor;
+  CaptureRequest(properties, "aws", "s3://bucket/key", operations[operation], descriptor);
+  if (with_broker) {
+    ASSERT_FALSE(descriptor.empty());
+    EXPECT_EQ(descriptor["url"], "https://broker/assume-role");
+    EXPECT_EQ(descriptor["request"]["roleArn"], "arn:aws:iam::123456789012:role/reader");
+  } else {
+    EXPECT_TRUE(descriptor.empty());
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(OptionalRequestOptions,
+                         TalonBrokerOperationTest,
+                         ::testing::Combine(::testing::Range(0, 5), ::testing::Bool(), ::testing::Bool()));
+
+TEST(TalonRawBridgeTest, RejectsInvalidNamespaceWithoutRequiringBroker) {
+  api::Properties properties;
+  properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
+  for (const auto& name : {std::string("../escape"), std::string("worker_identity"), std::string(256, 'n')}) {
+    properties["fs.talon.namespace"] = name;
+    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+    ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make(config));
+    EXPECT_TRUE(client->Load({"s3://bucket/empty", 0, ""}).status().IsInvalid());
+  }
+}
+
+TEST(TalonRawBridgeTest, EmptyNamespaceAndBrokerDoNotRequireCloudProperties) {
+  api::Properties properties;
+  properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
+  properties[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string();
+  for (const auto* name : {"", "default", "tenant-a"}) {
+    properties[PROPERTY_FS_TALON_NAMESPACE] = std::string(name);
+    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+    EXPECT_TRUE(talon::TalonClient::Make(config).ok());
+  }
+}
+
+TEST(TalonRawBridgeTest, InvalidNamespaceEncodingReturnsStatus) {
+  api::Properties properties;
+  properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
+  properties[PROPERTY_FS_TALON_NAMESPACE] = std::string(1, char(0xff));
+  EXPECT_NO_THROW({
+    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+    const auto result = talon::TalonClient::Make(config);
+    EXPECT_TRUE(result.status().IsInvalid());
+  });
+}
+
+class TalonRequestOverrideTest : public TalonBrokerRequestTest, public ::testing::WithParamInterface<int> {};
+
+TEST_P(TalonRequestOverrideTest, OverridesInheritAndClearIndependently) {
+  api::Properties properties;
+  properties[PROPERTY_FS_TALON_NAMESPACE] = std::string("base-ns");
+  properties[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("https://broker/default");
+  properties[PROPERTY_FS_REGION] = std::string("us-west-2");
+  properties[PROPERTY_FS_ROLE_ARN] = std::string("role");
+  const char* broker =
+      R"({"url":"https://broker/request","request":{"csp":"aws"},"origin":{"endpoint":"storage.example","region":"us-west-2"}})";
+  const LoonTalonRequestOptions options[] = {
+      {nullptr, nullptr}, {"request-ns", nullptr}, {nullptr, broker}, {"", ""}, {"default", nullptr}};
+  nlohmann::json descriptor;
+  CaptureRequest(properties, "aws", "s3://bucket/key", Operation::Stat, descriptor, &options[GetParam()]);
+  if (GetParam() == 3) {
+    EXPECT_TRUE(descriptor.empty());
+  } else {
+    ASSERT_FALSE(descriptor.empty());
+    EXPECT_EQ(descriptor["url"], GetParam() == 2 ? "https://broker/request" : "https://broker/default");
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(Independent, TalonRequestOverrideTest, ::testing::Range(0, 5));
+
 TEST(TalonRawBridgeTest, EmptyOperationsDoNotContactCoordinator) {
-  ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make("127.0.0.1:1", 8388608, 8));
+  ArrowFileSystemConfig config;
+  config.talon_coordinator = "127.0.0.1:1";
+  config.talon_block_size = 8388608;
+  config.talon_max_idle_per_addr = 8;
+  ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make(config));
   uint8_t output = 0x7f;
   ASSERT_AND_ASSIGN(const auto read, client->Read("s3://bucket/empty", 0, 1, &output, talon::TalonObjectStat{0, ""}));
   EXPECT_EQ(read, 0);
@@ -145,7 +527,11 @@ TEST(TalonRawBridgeTest, EmptyOperationsDoNotContactCoordinator) {
 }
 
 TEST(TalonRawBridgeTest, ValidatesRawInputsBeforeNetworkIO) {
-  ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make("127.0.0.1:1", 8388608, 8));
+  ArrowFileSystemConfig config;
+  config.talon_coordinator = "127.0.0.1:1";
+  config.talon_block_size = 8388608;
+  config.talon_max_idle_per_addr = 8;
+  ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make(config));
   uint8_t output = 0x7f;
   EXPECT_TRUE(client->Stat("invalid").status().IsInvalid());
   EXPECT_TRUE(client->Read("invalid", 0, 0, nullptr).status().IsInvalid());
@@ -167,9 +553,123 @@ TEST(TalonRawBridgeTest, InvalidConfigurationPreservesDiagnostic) {
   properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
   properties[PROPERTY_FS_TALON_BLOCK_SIZE] = uint32_t{0};
   properties[PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR] = uint32_t{8};
-  const auto result = talon::TalonClient::Make(properties);
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+  const auto result = talon::TalonClient::Make(config);
   ASSERT_FALSE(result.ok());
   EXPECT_NE(result.status().message().find("block_size"), std::string::npos) << result.status();
+}
+
+TEST(TalonBrokerLiveTest, ReadsAndPrewarmsWithRequestCredentials) {
+  const char* case_path = std::getenv("TEST_ENV_TALON_BROKER_CASE");
+  if (case_path == nullptr) {
+    GTEST_SKIP()
+        << "Set TEST_ENV_TALON_BROKER_CASE to a JSON file with properties, uri, key, reference, and credential_broker";
+  }
+  std::ifstream case_file(case_path);
+  ASSERT_TRUE(case_file.good());
+  const auto live = nlohmann::json::parse(case_file);
+  api::Properties properties;
+  for (const auto& [name, value] : live.at("properties").items()) {
+    ASSERT_EQ(api::SetValue(properties, name.c_str(), value.get<std::string>().c_str()), std::nullopt);
+  }
+  const auto uri = live.at("uri").get<std::string>();
+  std::ifstream reference(live.at("reference").get<std::string>(), std::ios::binary);
+  ASSERT_TRUE(reference.good());
+  const std::vector<uint8_t> expected{std::istreambuf_iterator<char>(reference), std::istreambuf_iterator<char>()};
+  ASSERT_FALSE(expected.empty());
+  ASSERT_LE(expected.size(), 1024);
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+  ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make(config));
+  ASSERT_AND_ASSIGN(const auto stat, client->Stat(uri));
+  ASSERT_GE(stat.size, expected.size());
+  ASSERT_LE(stat.size, 1024U * 1024U);  // Bound real-cloud prewarm traffic.
+  RecordProperty("object_size", std::to_string(stat.size));
+  RecordProperty("compared_bytes", std::to_string(expected.size()));
+  std::vector<uint8_t> output(expected.size());
+  for (int i = 0; i < 2; ++i) {
+    ASSERT_AND_ASSIGN(const auto count, client->Read(uri, 0, output.size(), output.data()));
+    ASSERT_EQ(count, expected.size());
+    EXPECT_TRUE(output == expected);
+  }
+  ASSERT_AND_ASSIGN(const auto provider, api::GetValue<std::string>(properties, PROPERTY_FS_CLOUD_PROVIDER));
+  ASSERT_AND_ASSIGN(const auto bucket, api::GetValue<std::string>(properties, PROPERTY_FS_BUCKET_NAME));
+  ASSERT_AND_ASSIGN(auto reader, client->OpenObject(provider, bucket, live.at("key").get<std::string>(), std::nullopt));
+  ASSERT_AND_ASSIGN(const auto read, reader.ReadAtAsync(0, output.size(), output.data()).result());
+  EXPECT_EQ(read, expected.size());
+  EXPECT_TRUE(output == expected);
+  const talon::TalonLoadRequest request{uri, stat.size, stat.version};
+  ASSERT_AND_ASSIGN(const auto load, client->Load(request));
+  EXPECT_EQ(load.size, stat.size);
+  ASSERT_AND_ASSIGN(const auto batch, client->BatchLoad({request}));
+  ASSERT_STATUS_OK(batch.status);
+  ASSERT_EQ(batch.results.size(), 1);
+  EXPECT_EQ(batch.results[0].size, stat.size);
+  ASSERT_AND_ASSIGN(const auto after_prewarm, client->Read(uri, 0, output.size(), output.data(), stat));
+  EXPECT_EQ(after_prewarm, expected.size());
+  EXPECT_TRUE(output == expected);
+
+  // A second namespace uses the public C request options on a client with no
+  // cloud defaults. The live harness verifies a separate cold fill, then reuse.
+  ASSERT_AND_ASSIGN(const auto namespace_name, api::GetValue<std::string>(properties, PROPERTY_FS_TALON_NAMESPACE));
+  ASSERT_AND_ASSIGN(const auto coordinator, api::GetValue<std::string>(properties, PROPERTY_FS_TALON_COORDINATOR));
+  ASSERT_AND_ASSIGN(const auto block_size, api::GetValue<uint32_t>(properties, PROPERTY_FS_TALON_BLOCK_SIZE));
+  std::array<std::string, 3> ffi_keys = {PROPERTY_FS_TALON_COORDINATOR, PROPERTY_FS_TALON_BLOCK_SIZE,
+                                         PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR};
+  std::array<std::string, 3> ffi_values = {coordinator, std::to_string(block_size), "8"};
+  LoonProperty ffi_items[3];
+  for (size_t i = 0; i < 3; ++i) ffi_items[i] = {ffi_keys[i].data(), ffi_values[i].data()};
+  const LoonProperties ffi_properties{ffi_items, 3};
+  LoonTalonClientHandle ffi_client = 0;
+  const auto ffi_cleanup = folly::makeGuard([&] { loon_talon_client_destroy(ffi_client); });
+  const auto ffi_ok = [](LoonFFIResult status) {
+    const bool ok = status.err_code == LOON_SUCCESS;
+    if (!ok)
+      ADD_FAILURE() << loon_ffi_get_errmsg(&status);
+    loon_ffi_free_result(&status);
+    return ok;
+  };
+  ASSERT_TRUE(ffi_ok(loon_talon_client_create(&ffi_properties, &ffi_client)));
+  const std::string ffi_namespace = namespace_name + "-ffi";
+  const auto broker_json = live.at("credential_broker").get<std::string>();
+  const LoonTalonRequestOptions options{ffi_namespace.c_str(), broker_json.c_str()};
+  LoonTalonResult* raw = nullptr;
+  ASSERT_TRUE(ffi_ok(loon_talon_stat(ffi_client, uri.c_str(), &options, &raw)));
+  std::unique_ptr<LoonTalonResult, decltype(&loon_talon_result_free)> ffi_result(raw, loon_talon_result_free);
+  ASSERT_NE(ffi_result, nullptr);
+  EXPECT_EQ(ffi_result->data.stat.size, stat.size);
+  for (int i = 0; i < 2; ++i) {
+    ASSERT_TRUE(ffi_ok(loon_talon_read(ffi_client, uri.c_str(), 0, output.size(), stat.version.c_str(), &stat.size,
+                                       output.data(), &options, &raw)));
+    ffi_result.reset(raw);
+    ASSERT_NE(ffi_result, nullptr);
+    EXPECT_EQ(ffi_result->data.bytes_read, expected.size());
+    EXPECT_TRUE(output == expected);
+  }
+  const LoonTalonLoadRequest ffi_request{uri.c_str(), stat.size, stat.version.c_str()};
+  ASSERT_TRUE(ffi_ok(loon_talon_load(ffi_client, &ffi_request, &options, &raw)));
+  ffi_result.reset(raw);
+  ASSERT_NE(ffi_result, nullptr);
+  EXPECT_EQ(ffi_result->data.load.entries.results[0].size, stat.size);
+  ASSERT_TRUE(ffi_ok(loon_talon_batch_load(ffi_client, &ffi_request, 1, &options, &raw)));
+  ffi_result.reset(raw);
+  ASSERT_NE(ffi_result, nullptr);
+  EXPECT_EQ(ffi_result->data.load.count, 1);
+  auto denied = loon_talon_read(ffi_client, uri.c_str(), 0, output.size(), stat.version.c_str(), &stat.size,
+                                output.data(), nullptr, &raw);
+  ffi_result.reset(raw);
+  EXPECT_NE(denied.err_code, LOON_SUCCESS);
+  loon_ffi_free_result(&denied);
+
+  auto static_config = config;
+  static_config.credential_endpoint.clear();
+  ASSERT_AND_ASSIGN(const auto static_client, talon::TalonClient::Make(static_config));
+  EXPECT_FALSE(static_client->Read(uri, 0, output.size(), output.data(), stat).ok());
+  if (live.value("reject_external_id", false)) {
+    auto wrong_config = config;
+    wrong_config.external_id += "-invalid";
+    ASSERT_AND_ASSIGN(const auto wrong_identity, talon::TalonClient::Make(wrong_config));
+    EXPECT_FALSE(wrong_identity->Read(uri, 0, output.size(), output.data(), stat).ok());
+  }
 }
 
 namespace {
@@ -201,6 +701,32 @@ class ScopedEnv final {
 };
 
 }  // namespace
+
+TEST_F(TalonBrokerRequestTest, AzureDescriptorExpandsAccountAndCloudSuffix) {
+  ScopedEnv azurite("USE_AZURITE", nullptr);
+  api::Properties properties;
+  properties[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("https://broker/assume-role");
+  properties[PROPERTY_FS_CLOUD_PROVIDER] = std::string("azure");
+  properties[PROPERTY_FS_ADDRESS] = std::string("core.windows.net");
+  properties[PROPERTY_FS_USE_SSL] = true;
+  properties[PROPERTY_FS_REGION] = std::string("westus3");
+  properties[PROPERTY_FS_BUCKET_NAME] = std::string("bucket");
+  properties[PROPERTY_FS_ACCESS_KEY_ID] = std::string("account");
+  properties[PROPERTY_FS_AZURE_CLIENT_ID] = std::string("client");
+  properties[PROPERTY_FS_AZURE_TENANT_ID] = std::string("tenant");
+  nlohmann::json descriptor;
+  CaptureRequest(properties, "azure", "az://bucket/key", Operation::Stat, descriptor);
+  ASSERT_FALSE(descriptor.empty());
+  EXPECT_EQ(descriptor["request"], (nlohmann::json{{"csp", "azure"},
+                                                   {"region", "westus3"},
+                                                   {"bucket", "bucket"},
+                                                   {"durationSeconds", 900},
+                                                   {"azureAccountName", "account"},
+                                                   {"azureClientId", "client"},
+                                                   {"azureTenantId", "tenant"}}));
+  EXPECT_EQ(descriptor["origin"]["endpoint"], "https://account.blob.core.windows.net");
+  EXPECT_EQ(descriptor["origin"]["use_virtual_host"], true);
+}
 
 namespace {
 
@@ -1056,7 +1582,11 @@ TEST(TalonBridgeErrorTest, HandlesInvalidMissingAndUnknownErrors) {
 }
 
 TEST(TalonBridgeTest, MapsClientCreationErrorAndPreservesTalonMessage) {
-  const auto result = talon::TalonClient::Make("127.0.0.1:7000", 0, 8);
+  ArrowFileSystemConfig config;
+  config.talon_coordinator = "127.0.0.1:7000";
+  config.talon_block_size = 0;
+  config.talon_max_idle_per_addr = 8;
+  const auto result = talon::TalonClient::Make(config);
 
   ASSERT_FALSE(result.ok());
   EXPECT_TRUE(result.status().IsIOError()) << result.status().ToString();
@@ -1065,7 +1595,11 @@ TEST(TalonBridgeTest, MapsClientCreationErrorAndPreservesTalonMessage) {
 }
 
 TEST(TalonBridgeTest, MapsOpenErrorAndPreservesTalonMessage) {
-  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make("127.0.0.1:7000", 8U * 1024U * 1024U, 8));
+  ArrowFileSystemConfig config;
+  config.talon_coordinator = "127.0.0.1:7000";
+  config.talon_block_size = 8U * 1024U * 1024U;
+  config.talon_max_idle_per_addr = 8;
+  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make(config));
 
   const auto result = client->OpenObject("aws", "test-bucket", "", std::nullopt);
 
@@ -1076,14 +1610,22 @@ TEST(TalonBridgeTest, MapsOpenErrorAndPreservesTalonMessage) {
 }
 
 TEST(TalonBridgeTest, OpensVolcengineObjectWithKnownMetadata) {
-  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make("127.0.0.1:7000", 8U * 1024U * 1024U, 8));
+  ArrowFileSystemConfig config;
+  config.talon_coordinator = "127.0.0.1:7000";
+  config.talon_block_size = 8U * 1024U * 1024U;
+  config.talon_max_idle_per_addr = 8;
+  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make(config));
   ASSERT_AND_ASSIGN(auto reader,
                     client->OpenObject("volcengine", "test-bucket", "path/a", talon::TalonObjectStat{7, "etag"}));
   EXPECT_EQ(reader.KnownSize(), 7);
 }
 
 TEST(TalonBridgeTest, MapsAsyncErrorAndPreservesTalonMessage) {
-  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make("127.0.0.1:7000", 8U * 1024U * 1024U, 8));
+  ArrowFileSystemConfig config;
+  config.talon_coordinator = "127.0.0.1:7000";
+  config.talon_block_size = 8U * 1024U * 1024U;
+  config.talon_max_idle_per_addr = 8;
+  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make(config));
   ASSERT_AND_ASSIGN(auto reader, client->OpenObject("aws", "test-bucket", "path/a", talon::TalonObjectStat{0, ""}));
 
   const auto result = reader.ReadAtAsync(0, std::numeric_limits<uint64_t>::max(), nullptr).result();
@@ -1408,6 +1950,47 @@ TEST_F(TalonFileSystemServiceFreeTest, ForwardsPoolLimitAndPreservesTalonValidat
   ASSERT_FALSE(result.ok());
   EXPECT_TRUE(result.status().IsIOError()) << result.status();
   EXPECT_NE(result.status().message().find("max_idle_per_addr must be non-zero"), std::string::npos);
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, BrokerOriginIsValidatedOnRequest) {
+  auto config = Config();
+  config.credential_endpoint = "https://broker/assume-role";
+  config.region = "us-west-2";
+  config.role_arn = "arn:aws:iam::123456789012:role/reader";
+  config.address = "https://storage.example/path-not-an-endpoint";
+  ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make(config));
+  const auto result = client->Load({"s3://bucket/empty", 0, ""});
+  ASSERT_FALSE(result.ok());
+  EXPECT_NE(result.status().message().find("origin endpoint"), std::string::npos);
+  EXPECT_EQ(result.status().message().find("path-not-an-endpoint"), std::string::npos);
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, NamespaceIsolatesFilesystemIdentityWithoutBroker) {
+  auto config = Config();
+  auto origin = std::make_shared<RecordingFileSystem>("origin");
+  ASSERT_AND_ASSIGN(auto unset_namespace, Wrap(config, origin));
+  config.talon_namespace = "default";
+  ASSERT_AND_ASSIGN(auto explicit_namespace, Wrap(config, origin));
+  EXPECT_FALSE(unset_namespace->Equals(*explicit_namespace));
+  config.talon_namespace = "tenant-a";
+  ASSERT_AND_ASSIGN(auto tenant_a, Wrap(config, origin));
+  config.talon_namespace = "tenant-b";
+  ASSERT_AND_ASSIGN(auto tenant_b, Wrap(config, origin));
+  EXPECT_FALSE(tenant_a->Equals(*tenant_b));
+  EXPECT_FALSE(tenant_a->Equals(*unset_namespace));
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, BrokerEndpointsDoNotShareFilesystemIdentity) {
+  auto config = Config();
+  config.credential_endpoint = "https://broker/assume-role";
+  config.region = "us-west-2";
+  config.role_arn = "arn:aws:iam::123456789012:role/reader";
+  config.address = "https://storage.example";
+  auto origin = std::make_shared<RecordingFileSystem>("origin");
+  ASSERT_AND_ASSIGN(auto first, Wrap(config, origin));
+  config.credential_endpoint = "https://other-broker/assume-role";
+  ASSERT_AND_ASSIGN(auto second, Wrap(config, origin));
+  EXPECT_FALSE(first->Equals(*second));
 }
 
 TEST_F(TalonFileSystemServiceFreeTest, OpenWithFileInfoRejectsNonFiles) {
@@ -2311,7 +2894,7 @@ TEST_F(TalonIntegrationTest, RawPrewarmThenNormalReader) {
   const std::string uri = scheme + "://" + config.bucket_name + "/" + path_;
   RecordProperty("raw_uri", uri);
   RecordProperty("object_path", path_);
-  ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make(properties_));
+  ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make(config));
   RecordProperty("prewarm_start_unix_ns", std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                                              std::chrono::system_clock::now().time_since_epoch())
                                                              .count()));
@@ -2346,7 +2929,7 @@ TEST_F(TalonIntegrationTest, RawPrewarmReadAndPartialFailure) {
   ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties_));
   const std::string scheme = config.cloud_provider == kCloudProviderAzure ? "az" : "s3";
   const std::string uri = scheme + "://" + config.bucket_name + "/" + path_;
-  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make(properties_));
+  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make(config));
   ASSERT_AND_ASSIGN(const auto stat, client->Stat(uri));
   EXPECT_EQ(stat.size, expected_.size());
   ASSERT_FALSE(stat.version.empty());

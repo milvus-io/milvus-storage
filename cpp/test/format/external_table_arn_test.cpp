@@ -870,7 +870,7 @@ class ExternalTableAzureArnTest : public ::testing::TestWithParam<std::string> {
     api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_ID, account_name_.c_str());
     api::SetValue(write_props_, PROPERTY_FS_AZURE_CLIENT_ID, client_id_.c_str());
     api::SetValue(write_props_, PROPERTY_FS_AZURE_TENANT_ID, tenant_id_.c_str());
-    api::SetValue(write_props_, PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT, credential_endpoint_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_CREDENTIAL_ENDPOINT, credential_endpoint_.c_str());
     api::SetValue(write_props_, PROPERTY_FS_LOAD_FREQUENCY, "3600");
     api::SetValue(write_props_, PROPERTY_FS_REQUEST_TIMEOUT_MS, "10000");
     api::SetValue(write_props_, PROPERTY_FS_USE_SSL, "true");
@@ -884,7 +884,7 @@ class ExternalTableAzureArnTest : public ::testing::TestWithParam<std::string> {
     api::SetValue(read_props_, "extfs.azsas.access_key_id", account_name_.c_str());
     api::SetValue(read_props_, "extfs.azsas.azure_client_id", client_id_.c_str());
     api::SetValue(read_props_, "extfs.azsas.azure_tenant_id", tenant_id_.c_str());
-    api::SetValue(read_props_, "extfs.azsas.azure_credential_endpoint", credential_endpoint_.c_str());
+    api::SetValue(read_props_, "extfs.azsas.credential_endpoint", credential_endpoint_.c_str());
     api::SetValue(read_props_, "extfs.azsas.load_frequency", "3600");
     api::SetValue(read_props_, "extfs.azsas.request_timeout_ms", "10000");
     api::SetValue(read_props_, "extfs.azsas.use_ssl", "true");
@@ -1006,7 +1006,7 @@ TEST_P(ExternalTableAzureArnTest, ReadWithBrokeredSas) {
       {"extfs.azsas.access_key_id", account_name_},
       {"extfs.azsas.azure_client_id", client_id_},
       {"extfs.azsas.azure_tenant_id", tenant_id_},
-      {"extfs.azsas.azure_credential_endpoint", credential_endpoint_},
+      {"extfs.azsas.credential_endpoint", credential_endpoint_},
       {"extfs.azsas.load_frequency", "3600"},
       {"extfs.azsas.request_timeout_ms", "10000"},
       {"extfs.azsas.use_ssl", "true"},
@@ -1092,7 +1092,7 @@ TEST_P(ExternalTableAzureArnTest, CachedReadsFetchBrokeredSasOnce) {
 
   OneShotHttpPostRelay broker_relay(credential_endpoint_);
   auto cache_read_props = read_props_;
-  api::SetValue(cache_read_props, "extfs.azsas.azure_credential_endpoint", broker_relay.endpoint().c_str());
+  api::SetValue(cache_read_props, "extfs.azsas.credential_endpoint", broker_relay.endpoint().c_str());
   ASSERT_AND_ASSIGN(auto fs_config, FilesystemCache::resolve_config(cache_read_props, result.explore_dir.c_str()));
 
   constexpr size_t cache_hit_iterations = 10;

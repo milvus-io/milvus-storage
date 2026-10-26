@@ -112,7 +112,7 @@ TEST_F(IcebergStorageOptionsTest, WriterRejectsAzureCredentialBroker) {
   config.use_iam = true;
   config.azure_client_id = "client-id";
   config.azure_tenant_id = "tenant-id";
-  config.azure_credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
+  config.credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
   config.load_frequency = 3600;
   config.request_timeout_ms = 5000;
 

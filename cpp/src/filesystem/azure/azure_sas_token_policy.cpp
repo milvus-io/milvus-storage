@@ -30,6 +30,8 @@
 #include <nlohmann/json.hpp>
 
 #include "milvus-storage/common/log.h"
+#include "milvus-storage/filesystem/credential_broker.h"
+#include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage::fs {
 
@@ -60,15 +62,15 @@ struct AzureSasBrokerResponse {
 };
 
 static void from_json(const nlohmann::json& json, AzureSasBrokerToken& token) {
-  json.at("tempAk").get_to(token.account_name);
-  json.at("sessionToken").get_to(token.sas_token);
-  json.at("expiredAt").get_to(token.expired_at);
+  json.at(credential_broker::kTempAk).get_to(token.account_name);
+  json.at(credential_broker::kSessionToken).get_to(token.sas_token);
+  json.at(credential_broker::kExpiredAt).get_to(token.expired_at);
 }
 
 static void from_json(const nlohmann::json& json, AzureSasBrokerResponse& response) {
-  json.at("success").get_to(response.success);
+  json.at(credential_broker::kSuccess).get_to(response.success);
   if (response.success) {
-    json.at("credentials").get_to(response.token);
+    json.at(credential_broker::kCredentials).get_to(response.token);
   }
 }
 
@@ -93,13 +95,13 @@ bool AzureSasTokenPolicy::IsFresh(TimePoint expires_at, TimePoint now) { return 
 
 arrow::Result<std::string> AzureSasTokenPolicy::FetchSasToken(TimePoint now, TimePoint* expires_at) const {
   const nlohmann::json request_json = {
-      {"csp", "azure"},
-      {"region", state_->config.region},
-      {"bucket", state_->config.bucket},
-      {"durationSeconds", state_->config.duration_seconds},
-      {"azureClientId", state_->config.client_id},
-      {"azureTenantId", state_->config.tenant_id},
-      {"azureAccountName", state_->config.account_name},
+      {credential_broker::kCsp, kCloudProviderAzure},
+      {credential_broker::kRegion, state_->config.region},
+      {credential_broker::kBucket, state_->config.bucket},
+      {credential_broker::kDurationSeconds, state_->config.duration_seconds},
+      {credential_broker::kAzureClientId, state_->config.client_id},
+      {credential_broker::kAzureTenantId, state_->config.tenant_id},
+      {credential_broker::kAzureAccountName, state_->config.account_name},
   };
 
   const auto request_body = request_json.dump();

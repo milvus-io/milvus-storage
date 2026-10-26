@@ -63,7 +63,7 @@ static std::map<std::string, CloudProviderType> CloudProviderType_Map = {
 
 bool ArrowFileSystemConfig::IsAzureCredentialBrokerEnabled() const {
   return cloud_provider == kCloudProviderAzure &&
-         (!azure_client_id.empty() || !azure_tenant_id.empty() || !azure_credential_endpoint.empty());
+         (!azure_client_id.empty() || !azure_tenant_id.empty() || !credential_endpoint.empty());
 }
 
 std::string ArrowFileSystemConfig::GetCacheKey() const {
@@ -100,8 +100,16 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
   // Disabled Talon settings do not affect the origin filesystem's identity.
   if (talon_mode != TalonMode::Disabled) {
     hash_combine(talon_coordinator);
+    hash_combine(talon_namespace);
     hash_combine(talon_block_size);
     hash_combine(talon_max_idle_per_addr);
+    hash_combine(credential_endpoint);
+    if (!credential_endpoint.empty()) {
+      // Talon credentials are request-scoped even when the local origin uses AK/SK.
+      hash_combine(role_arn);
+      hash_combine(external_id);
+      hash_combine(gcp_target_service_account);
+    }
     if (talon_mode == TalonMode::SmallReads) {
       hash_combine(talon_small_read_threshold);
     }
@@ -111,7 +119,7 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
     hash_combine(access_key_id);
     hash_combine(azure_client_id);
     hash_combine(azure_tenant_id);
-    hash_combine(azure_credential_endpoint);
+    hash_combine(credential_endpoint);
   } else if (cloud_provider == kCloudProviderGCP) {
     hash_combine(use_iam);
     if (use_iam) {
@@ -332,6 +340,8 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
                         api::GetValue<uint32_t>(properties_map, PROPERTY_FS_TALON_SMALL_READ_THRESHOLD));
   ARROW_ASSIGN_OR_RAISE(result.talon_coordinator,
                         api::GetValue<std::string>(properties_map, PROPERTY_FS_TALON_COORDINATOR));
+  ARROW_ASSIGN_OR_RAISE(result.talon_namespace,
+                        api::GetValue<std::string>(properties_map, PROPERTY_FS_TALON_NAMESPACE));
   ARROW_ASSIGN_OR_RAISE(result.talon_block_size, api::GetValue<uint32_t>(properties_map, PROPERTY_FS_TALON_BLOCK_SIZE));
   ARROW_ASSIGN_OR_RAISE(result.talon_max_idle_per_addr,
                         api::GetValue<uint32_t>(properties_map, PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR));
@@ -349,8 +359,8 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
                         api::GetValue<std::string>(properties_map, PROPERTY_FS_AZURE_CLIENT_ID));
   ARROW_ASSIGN_OR_RAISE(result.azure_tenant_id,
                         api::GetValue<std::string>(properties_map, PROPERTY_FS_AZURE_TENANT_ID));
-  ARROW_ASSIGN_OR_RAISE(result.azure_credential_endpoint,
-                        api::GetValue<std::string>(properties_map, PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT));
+  ARROW_ASSIGN_OR_RAISE(result.credential_endpoint,
+                        api::GetValue<std::string>(properties_map, PROPERTY_FS_CREDENTIAL_ENDPOINT));
 
   if (result.talon_mode == TalonMode::SmallReads &&
       (result.talon_small_read_threshold == 0 || result.talon_small_read_threshold > 1024U * 1024U)) {
@@ -372,20 +382,20 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
   }
 
   if (result.cloud_provider == kCloudProviderAzure && result.IsAzureCredentialBrokerEnabled()) {
-    if (result.azure_client_id.empty() || result.azure_tenant_id.empty() || result.azure_credential_endpoint.empty() ||
+    if (result.azure_client_id.empty() || result.azure_tenant_id.empty() || result.credential_endpoint.empty() ||
         result.access_key_id.empty() || result.bucket_name.empty() || result.region.empty() ||
         result.request_timeout_ms <= 0) {
       return arrow::Status::Invalid(
           "Azure credential broker mode requires fs.azure_client_id, fs.azure_tenant_id, "
-          "fs.azure_credential_endpoint, fs.access_key_id, fs.bucket_name, fs.region, and a positive "
+          "fs.credential_endpoint, fs.access_key_id, fs.bucket_name, fs.region, and a positive "
           "fs.request_timeout_ms");
     }
 
     arrow::util::Uri endpoint;
-    auto endpoint_status = endpoint.Parse(result.azure_credential_endpoint);
+    auto endpoint_status = endpoint.Parse(result.credential_endpoint);
     if (!endpoint_status.ok() || endpoint.host().empty() ||
         (endpoint.scheme() != "http" && endpoint.scheme() != "https")) {
-      return arrow::Status::Invalid("fs.azure_credential_endpoint must be a valid HTTP(S) URL");
+      return arrow::Status::Invalid("fs.credential_endpoint must be a valid HTTP(S) URL");
     }
   }
   return arrow::Status::OK();

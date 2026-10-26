@@ -9,8 +9,25 @@ extern "C" {
 #endif
 
 /// Independent raw client configured with fs.talon.coordinator,
-/// fs.talon.block_size, and fs.talon.max_idle_per_addr.
+/// fs.talon.block_size, and fs.talon.max_idle_per_addr. Optional fs.talon.namespace
+/// and fs.credential_endpoint are independent request defaults. fs.credential_endpoint
+/// uses the fs.* cloud identity and origin settings for every Stat/Read/Load request.
+/// Property-derived Broker defaults are scoped to fs.bucket_name. Per-request
+/// Broker overrides supply their own descriptor; URI buckets must match it.
+/// Broker-backed GCP objects use gcs:// URIs; S3 and Azure use s3:// and az://.
 typedef uintptr_t LoonTalonClientHandle;
+
+/// Optional overrides for one operation, without changing the shared client.
+/// NULL options or NULL fields inherit fs.talon.namespace / fs.credential_endpoint
+/// defaults captured at client creation. An empty string explicitly clears an
+/// option: default namespace / worker-side static credentials, respectively.
+/// Async calls copy both strings before returning; callers may then release them.
+typedef struct LoonTalonRequestOptions {
+  const char* namespace_name;
+  /// Complete UTF-8 JSON {url, request, origin:{endpoint,...}}, at most 16 KiB.
+  /// S3 descriptors also require origin.region. No cloud access keys are sent.
+  const char* credential_broker;
+} LoonTalonRequestOptions;
 typedef enum LoonTalonOperation {
   /// Read object bytes into the caller's buffer.
   LOON_TALON_READ = 0,
@@ -85,20 +102,28 @@ FFI_EXPORT LoonFFIResult loon_talon_read(LoonTalonClientHandle client,
                                          const char* version,
                                          const uint64_t* object_size,
                                          uint8_t* dst,
+                                         const LoonTalonRequestOptions* options,
                                          LoonTalonResult** result);
-FFI_EXPORT LoonFFIResult loon_talon_stat(LoonTalonClientHandle client, const char* uri, LoonTalonResult** result);
+FFI_EXPORT LoonFFIResult loon_talon_stat(LoonTalonClientHandle client,
+                                         const char* uri,
+                                         const LoonTalonRequestOptions* options,
+                                         LoonTalonResult** result);
 FFI_EXPORT LoonFFIResult loon_talon_load(LoonTalonClientHandle client,
                                          const LoonTalonLoadRequest* request,
+                                         const LoonTalonRequestOptions* options,
                                          LoonTalonResult** result);
 FFI_EXPORT LoonFFIResult loon_talon_batch_load(LoonTalonClientHandle client,
                                                const LoonTalonLoadRequest* requests,
                                                size_t count,
+                                               const LoonTalonRequestOptions* options,
                                                LoonTalonResult** result);
 /// Async inputs except dst are copied before successful admission. Rejection
 /// returns an error synchronously, starts no I/O, and calls no callback.
 /// Accepted work calls back exactly once on the context's caller executor,
-/// subject to its existing queue-rejection fallback. Cancellation and deadline
-/// are checked only before native dispatch; native timeouts govern in-flight I/O.
+/// subject to its existing queue-rejection fallback. Namespace and Broker
+/// validation errors from the Talon SDK are reported through that callback.
+/// Cancellation and deadline are checked only before native dispatch; native
+/// timeouts govern in-flight I/O.
 /// Keep dst valid until the actual callback, even after cancellation. Releasing
 /// the operation handle does not cancel accepted work.
 FFI_EXPORT LoonFFIResult loon_talon_read_async(LoonAsyncContextHandle context,
@@ -109,18 +134,21 @@ FFI_EXPORT LoonFFIResult loon_talon_read_async(LoonAsyncContextHandle context,
                                                const char* version,
                                                const uint64_t* object_size,
                                                uint8_t* dst,
+                                               const LoonTalonRequestOptions* options,
                                                LoonTalonCallback callback,
                                                uintptr_t user_data,
                                                LoonAsyncHandle* operation);
 FFI_EXPORT LoonFFIResult loon_talon_stat_async(LoonAsyncContextHandle context,
                                                LoonTalonClientHandle client,
                                                const char* uri,
+                                               const LoonTalonRequestOptions* options,
                                                LoonTalonCallback callback,
                                                uintptr_t user_data,
                                                LoonAsyncHandle* operation);
 FFI_EXPORT LoonFFIResult loon_talon_load_async(LoonAsyncContextHandle context,
                                                LoonTalonClientHandle client,
                                                const LoonTalonLoadRequest* request,
+                                               const LoonTalonRequestOptions* options,
                                                LoonTalonCallback callback,
                                                uintptr_t user_data,
                                                LoonAsyncHandle* operation);
@@ -128,6 +156,7 @@ FFI_EXPORT LoonFFIResult loon_talon_batch_load_async(LoonAsyncContextHandle cont
                                                      LoonTalonClientHandle client,
                                                      const LoonTalonLoadRequest* requests,
                                                      size_t count,
+                                                     const LoonTalonRequestOptions* options,
                                                      LoonTalonCallback callback,
                                                      uintptr_t user_data,
                                                      LoonAsyncHandle* operation);
