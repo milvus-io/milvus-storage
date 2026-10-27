@@ -4,6 +4,7 @@
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 #include <memory>
 #include <arrow/testing/gtest_util.h>
+#include <arrow/memory_pool.h>
 #include <arrow/util/thread_pool.h>
 #include <arrow/util/cancel.h>
 #include <gtest/gtest.h>
@@ -499,6 +500,13 @@ TEST_F(NativeS3Test, WritesConditionalMetadataAndOwnedBuffer) {
   EXPECT_EQ(data->ToString(), "hello");
   ASSERT_OK(Write("empty-write", arrow::Buffer::FromString("")).status());
 }
+TEST_F(NativeS3Test, WritesAndMultipartUseNativeRequests) {
+  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream("slow-write"));
+  ASSERT_OK(stream->Write(arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a') + "tail")));
+  // Write may wait for shared capacity, but closing must not occupy the worker
+  // while the final part waits behind an earlier request.
+  CompletesWithoutBlockingWorker<arrow::internal::Empty>([stream] { return stream->CloseAsync(); });
+}
 TEST_F(NativeS3Test, MultipartCompleteAndAbort) {
   ASSERT_OK_AND_ASSIGN(const auto metrics, sync_->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
@@ -698,37 +706,150 @@ TEST_F(NativeS3Test, WholeBufferMultipartUpload) {
   EXPECT_EQ(data->ToString(), expected);
 }
 
-TEST_F(NativeS3Test, MultipartSubmitsAllPartsAndRetainsBuffers) {
+TEST_F(NativeS3Test, PendingCreationDoesNotAllocateRawUploadBuffers) {
+  if (std::getenv("STORAGE_NATIVE_S3_REAL"))
+    GTEST_SKIP() << "Requires fixture-controlled multipart creation";
+  arrow::ProxyMemoryPool pool(arrow::default_memory_pool());
+  ASSERT_OK_AND_ASSIGN(auto s3, S3FileSystem::Make(options_, arrow::io::IOContext(&pool, executor_.get())));
+  ASSERT_OK_AND_ASSIGN(auto stream, s3->OpenOutputStream(prefix_ + "/held-create/raw", nullptr));
+  const std::string data(5 * 1024 * 1024, 'a');
+  std::future<arrow::Status> written;
+  auto release = folly::makeGuard([&] { (void)ControlUpload("create/raw", true); });
+  written = std::async(std::launch::async, [stream, &data] {
+    for (int i = 0; i < 3; ++i) {
+      ARROW_RETURN_NOT_OK(stream->Write(data.data(), data.size()));
+    }
+    return arrow::Status::OK();
+  });
+  ASSERT_OK(ControlUpload("create/raw", false));
+  EXPECT_EQ(written.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  EXPECT_EQ(pool.bytes_allocated(), 0);
+  EXPECT_EQ(pool.max_memory(), 0);
+  ASSERT_OK(ControlUpload("create/raw", true));
+  ASSERT_EQ(written.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  ASSERT_OK(written.get());
+  ASSERT_OK(stream->CloseAsync().status());
+  EXPECT_EQ(pool.bytes_allocated(), 0);
+  EXPECT_LE(pool.max_memory(), data.size());
+}
+
+TEST_F(NativeS3Test, RawWritesWaitBeforeAllocatingBeyondSharedCapacity) {
   if (std::getenv("STORAGE_NATIVE_S3_REAL"))
     GTEST_SKIP() << "Requires fixture-controlled part completion";
-  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream("held/capacity"));
+  arrow::ProxyMemoryPool pool(arrow::default_memory_pool());
+  ASSERT_OK_AND_ASSIGN(auto s3, S3FileSystem::Make(options_, arrow::io::IOContext(&pool, executor_.get())));
+  ASSERT_OK_AND_ASSIGN(auto stream, s3->OpenOutputStream(prefix_ + "/held/raw-capacity", nullptr));
+  const std::string data(5 * 1024 * 1024, 'a');
+  std::future<arrow::Status> written;
   auto release = folly::makeGuard([&] {
-    for (int part = 1; part <= 3; ++part) (void)ControlUpload("capacity/" + std::to_string(part), true);
+    for (int part = 1; part <= 3; ++part) (void)ControlUpload("raw-capacity/" + std::to_string(part), true);
   });
-  const auto expected = std::string(5 * 1024 * 1024, 'a') + std::string(5 * 1024 * 1024, 'b') + "tail";
-  auto buffer = arrow::Buffer::FromString(expected.substr(0, expected.size() - 4));
+  ASSERT_OK(stream->Write(data.data(), data.size()));
+  ASSERT_OK(ControlUpload("raw-capacity/1", false));
+  written = std::async(std::launch::async, [stream, &data] {
+    ARROW_RETURN_NOT_OK(stream->Write(data.data(), data.size()));
+    return stream->Write(data.data(), data.size());
+  });
+  EXPECT_EQ(written.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  EXPECT_EQ(pool.bytes_allocated(), data.size());
+  ASSERT_OK_AND_ASSIGN(auto started, UploadStarted("raw-capacity/2"));
+  EXPECT_FALSE(started);
+  ASSERT_OK(ControlUpload("raw-capacity/1", true));
+  ASSERT_OK(ControlUpload("raw-capacity/2", false));
+  EXPECT_EQ(written.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  ASSERT_OK(ControlUpload("raw-capacity/2", true));
+  ASSERT_OK(ControlUpload("raw-capacity/3", false));
+  ASSERT_EQ(written.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  ASSERT_OK(written.get());
+  auto closed = stream->CloseAsync();
+  ASSERT_OK(ControlUpload("raw-capacity/3", true));
+  ASSERT_TRUE(closed.Wait(5));
+  ASSERT_OK(closed.status());
+  EXPECT_EQ(pool.bytes_allocated(), 0);
+  EXPECT_LE(pool.max_memory(), data.size());
+}
+
+TEST_F(NativeS3Test, WaitingRawWriteStopsOnCancellationOrPartFailure) {
+  if (std::getenv("STORAGE_NATIVE_S3_REAL"))
+    GTEST_SKIP() << "Requires fixture-controlled part completion";
+  for (bool cancel : {false, true}) {
+    arrow::StopSource stop;
+    arrow::ProxyMemoryPool pool(arrow::default_memory_pool());
+    ASSERT_OK_AND_ASSIGN(auto s3,
+                         S3FileSystem::Make(options_, arrow::io::IOContext(&pool, executor_.get(), stop.token())));
+    const std::string name = cancel ? "cancel-wait" : "failed-wait";
+    ASSERT_OK_AND_ASSIGN(auto stream, s3->OpenOutputStream(prefix_ + "/held/" + name, nullptr));
+    const std::string data(5 * 1024 * 1024, 'a');
+    std::future<arrow::Status> written;
+    auto release = folly::makeGuard([&] { (void)ControlUpload(name + "/1", true); });
+    ASSERT_OK(stream->Write(data.data(), data.size()));
+    ASSERT_OK(ControlUpload(name + "/1", false));
+    written = std::async(std::launch::async, [stream, &data] { return stream->Write(data.data(), data.size()); });
+    EXPECT_EQ(written.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+    if (cancel)
+      stop.RequestStop();
+    else
+      ASSERT_OK(ControlUpload(name + "/1", true));
+    ASSERT_EQ(written.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    auto status = written.get();
+    EXPECT_FALSE(status.ok());
+    EXPECT_FALSE(status.IsCapacityError());
+    if (cancel)
+      EXPECT_TRUE(status.IsCancelled());
+    ASSERT_OK_AND_ASSIGN(auto offset, stream->Tell());
+    EXPECT_EQ(offset, data.size());
+    EXPECT_LE(pool.max_memory(), data.size());
+    ASSERT_OK(ControlUpload(name + "/1", true));
+    auto aborted = std::dynamic_pointer_cast<AsyncOutputStream>(stream)->AbortAsync();
+    ASSERT_TRUE(aborted.Wait(5));
+    ASSERT_OK(aborted.status());
+    EXPECT_EQ(pool.bytes_allocated(), 0);
+    ASSERT_OK_AND_ASSIGN(auto started, UploadStarted(name + "/2"));
+    EXPECT_FALSE(started);
+  }
+}
+
+TEST_F(NativeS3Test, WholeBufferWaitsForSharedCapacityAndRetainsBuffers) {
+  if (std::getenv("STORAGE_NATIVE_S3_REAL"))
+    GTEST_SKIP() << "Requires fixture-controlled part completion";
+  auto options = options_;
+  options.max_connections = 2;
+  ASSERT_OK_AND_ASSIGN(auto s3, S3FileSystem::Make(options));
+  ASSERT_OK_AND_ASSIGN(auto stream, s3->OpenOutputStream(prefix_ + "/held/capacity", nullptr));
+  std::future<arrow::Status> written;
+  auto release = folly::makeGuard([&] {
+    for (int part = 1; part <= 4; ++part) (void)ControlUpload("capacity/" + std::to_string(part), true);
+  });
+  const auto expected = std::string(15 * 1024 * 1024, 'a') + "tail";
+  auto buffer = arrow::Buffer::FromString(expected);
   std::weak_ptr<arrow::Buffer> retained = buffer;
-  ASSERT_OK(stream->Write(buffer));
+  written = std::async(std::launch::async, [stream, buffer] { return stream->Write(buffer); });
   buffer.reset();
+  ASSERT_OK(ControlUpload("capacity/1", false));
+  ASSERT_OK(ControlUpload("capacity/2", false));
+  EXPECT_EQ(written.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  ASSERT_OK_AND_ASSIGN(auto started, UploadStarted("capacity/3"));
+  EXPECT_FALSE(started);
   EXPECT_FALSE(retained.expired());
-  // The buffered tail is submitted at close, independently of earlier parts.
-  ASSERT_OK(stream->Write(arrow::Buffer::FromString("tail")));
+  // Completing part 2 admits part 3 while part 1 is still pending.
+  ASSERT_OK(ControlUpload("capacity/2", true));
+  ASSERT_OK(ControlUpload("capacity/3", false));
+  ASSERT_EQ(written.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  ASSERT_OK(written.get());
   ASSERT_OK_AND_ASSIGN(auto offset, stream->Tell());
   EXPECT_EQ(offset, expected.size());
   auto closed = stream->CloseAsync();
-  ASSERT_OK(ControlUpload("capacity/1", false));
   EXPECT_FALSE(closed.is_finished());
-  ASSERT_OK(ControlUpload("capacity/2", false));
-  ASSERT_OK(ControlUpload("capacity/3", false));
-  // All requests reach the server before any response is released, even
-  // though this fixture's max_connections is one.
-  EXPECT_FALSE(retained.expired());
-  EXPECT_FALSE(closed.is_finished());
-  ASSERT_OK(ControlUpload("capacity/1", true));
-  ASSERT_OK(ControlUpload("capacity/2", true));
+  ASSERT_OK_AND_ASSIGN(started, UploadStarted("capacity/4"));
+  EXPECT_FALSE(started);
   ASSERT_OK(ControlUpload("capacity/3", true));
+  ASSERT_OK(ControlUpload("capacity/4", false));
+  ASSERT_OK(ControlUpload("capacity/4", true));
+  EXPECT_FALSE(retained.expired());
+  ASSERT_OK(ControlUpload("capacity/1", true));
   ASSERT_TRUE(closed.Wait(5));
   ASSERT_OK(closed.status());
+  EXPECT_TRUE(retained.expired());
   ASSERT_OK_AND_ASSIGN(auto data, Await(Read("held/capacity", 0, expected.size())));
   EXPECT_EQ(data->ToString(), expected);
 }
@@ -766,9 +887,10 @@ TEST_F(NativeS3Test, MultipartReassemblesOutOfOrderCompletions) {
   EXPECT_TRUE(retained.expired());
 }
 
-TEST_F(NativeS3Test, UploadStreamsShareClientWithoutSharingAdmission) {
+TEST_F(NativeS3Test, UploadStreamsWaitForSharedAdmission) {
   if (std::getenv("STORAGE_NATIVE_S3_REAL"))
     GTEST_SKIP() << "Requires fixture-controlled part completion";
+  std::future<arrow::Status> written;
   auto release = folly::makeGuard([&] {
     (void)ControlUpload("first-stream/1", true);
     (void)ControlUpload("second-stream/1", true);
@@ -778,19 +900,21 @@ TEST_F(NativeS3Test, UploadStreamsShareClientWithoutSharingAdmission) {
   auto data = arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'));
   ASSERT_OK(first->Write(data));
   ASSERT_OK(ControlUpload("first-stream/1", false));
-  ASSERT_OK(second->Write(data));
-  ASSERT_OK(ControlUpload("second-stream/1", false));
+  written = std::async(std::launch::async, [second, data] { return second->Write(data); });
+  EXPECT_EQ(written.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  ASSERT_OK_AND_ASSIGN(auto started, UploadStarted("second-stream/1"));
+  EXPECT_FALSE(started);
   auto first_closed = first->CloseAsync();
-  auto second_closed = second->CloseAsync();
-  EXPECT_FALSE(first_closed.is_finished());
-  EXPECT_FALSE(second_closed.is_finished());
-  ASSERT_OK(ControlUpload("second-stream/1", true));
-  ASSERT_TRUE(second_closed.Wait(5));
-  ASSERT_OK(second_closed.status());
-  EXPECT_FALSE(first_closed.is_finished());
   ASSERT_OK(ControlUpload("first-stream/1", true));
+  ASSERT_OK(ControlUpload("second-stream/1", false));
+  ASSERT_EQ(written.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  ASSERT_OK(written.get());
+  auto second_closed = second->CloseAsync();
+  ASSERT_OK(ControlUpload("second-stream/1", true));
   ASSERT_TRUE(first_closed.Wait(5));
   ASSERT_OK(first_closed.status());
+  ASSERT_TRUE(second_closed.Wait(5));
+  ASSERT_OK(second_closed.status());
   for (const auto* name : {"held/first-stream", "held/second-stream"}) {
     ASSERT_OK_AND_ASSIGN(auto uploaded, Await(Read(name, 0, data->size())));
     EXPECT_EQ(uploaded->ToString(), data->ToString());
@@ -801,7 +925,7 @@ TEST_F(NativeS3Test, FailedPartWaitsForOutstandingUploadsBeforeClose) {
   if (std::getenv("STORAGE_NATIVE_S3_REAL"))
     GTEST_SKIP() << "Requires fixture-controlled part completion";
   auto options = options_;
-  options.max_connections = 2;
+  options.max_connections = 3;
   ASSERT_OK_AND_ASSIGN(auto s3, S3FileSystem::Make(options));
   ASSERT_OK_AND_ASSIGN(auto stream, s3->OpenOutputStream(prefix_ + "/held/failed-part", nullptr));
   auto release = folly::makeGuard([&] {
@@ -839,7 +963,10 @@ TEST_F(NativeS3Test, FailedPartWaitsForOutstandingUploadsBeforeClose) {
 TEST_F(NativeS3Test, AbortDiscardsTailAndWaitsForSubmittedUploads) {
   if (std::getenv("STORAGE_NATIVE_S3_REAL"))
     GTEST_SKIP() << "Requires fixture-controlled part completion";
-  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream("held/aborted-queue"));
+  auto options = options_;
+  options.max_connections = 2;
+  ASSERT_OK_AND_ASSIGN(auto s3, S3FileSystem::Make(options));
+  ASSERT_OK_AND_ASSIGN(auto stream, s3->OpenOutputStream(prefix_ + "/held/aborted-queue", nullptr));
   auto release = folly::makeGuard([&] {
     (void)ControlUpload("aborted-queue/1", true);
     (void)ControlUpload("aborted-queue/2", true);

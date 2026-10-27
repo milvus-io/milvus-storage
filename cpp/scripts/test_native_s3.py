@@ -149,7 +149,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     released = self.upload_condition.wait_for(lambda: part in self.released_parts, timeout=15)
                 if not released:
                     return self.reply(400, b"<Error><Code>RequestTimeout</Code></Error>")
-                if key == "root/held/failed-part" and query["partNumber"] == ["2"]:
+                if ((key == "root/held/failed-part" and query["partNumber"] == ["2"]) or
+                        key == "root/held/failed-wait") :
                     return self.reply(403, b"<Error><Code>AccessDenied</Code></Error>")
             if key.startswith("root/service-error/"):
                 code = key.rsplit("/", 1)[1]
@@ -177,6 +178,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.aborted_uploads.add(key.removeprefix("root/"))
                 return self.reply(204)
             if self.command == "POST" and "uploads" in query:
+                if key.startswith("root/held-create/"):
+                    part = "create/" + key.removeprefix("root/held-create/")
+                    with self.upload_condition:
+                        self.started_parts.add(part)
+                        self.upload_condition.notify_all()
+                        released = self.upload_condition.wait_for(lambda: part in self.released_parts, timeout=15)
+                    if not released:
+                        return self.reply(400, b"<Error><Code>RequestTimeout</Code></Error>")
                 upload_id = str(uuid.uuid4())
                 self.uploads[upload_id] = {"parts": {}, "key": key}
                 return self.reply(200, ("<InitiateMultipartUploadResult><UploadId>" + upload_id +

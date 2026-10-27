@@ -1701,6 +1701,28 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
       req.SetChecksumAlgorithm(S3Model::ChecksumAlgorithm::CRC32C);
     }
 
+#ifdef WITH_CRT
+    if (native_) {
+      // A blocked producer must not allocate payloads while creation or shared
+      // request capacity is pending. CloseAsync uses already-owned tail data.
+      std::shared_ptr<NativeS3Transport::Permit> permit;
+      if (!native_closing_) {
+        if constexpr (std::is_same_v<RequestType, S3Model::UploadPartRequest>) {
+          ARROW_RETURN_NOT_OK(WaitForNative(native_multipart_).status());
+        }
+        ARROW_ASSIGN_OR_RAISE(permit, WaitForNative(native_->Acquire(io_context_)));
+      }
+      if (!owned_buffer) {
+        ARROW_ASSIGN_OR_RAISE(owned_buffer, AllocateBuffer(nbytes, io_context_.pool()));
+        if (nbytes)
+          memcpy(owned_buffer->mutable_data(), data, nbytes);
+      }
+      auto status = UploadNative(std::move(req), std::move(owned_buffer), std::move(permit));
+      if (status.ok())
+        ++part_number_;
+      return status;
+    }
+#endif
     if (!background_writes_) {
       // GH-45304: avoid setting a body stream if length is 0.
       // This workaround can be removed once we require AWS SDK 1.11.489 or later.
@@ -1943,8 +1965,22 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
                             });
     return Status::OK();
   }
+  template <class T>
+  Result<T> WaitForNative(const Future<T>& future) {
+    do {
+      ARROW_RETURN_NOT_OK(io_context_.stop_token().Poll());
+      std::lock_guard lock(upload_state_->mutex);
+      ARROW_RETURN_NOT_OK(upload_state_->status);
+    } while (!future.Wait(0.05));
+    ARROW_RETURN_NOT_OK(io_context_.stop_token().Poll());
+    std::lock_guard lock(upload_state_->mutex);
+    ARROW_RETURN_NOT_OK(upload_state_->status);
+    return future.result();
+  }
   template <class Request>
-  Status UploadNative(Request request, std::shared_ptr<Buffer> data) {
+  Status UploadNative(Request request,
+                      std::shared_ptr<Buffer> data,
+                      std::shared_ptr<NativeS3Transport::Permit> permit = nullptr) {
     if (use_crc32c_checksum_) {
       StringViewStream memory(data->data(), data->size());
       request.SetChecksumCRC32C(
@@ -1952,11 +1988,11 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
     }
     const int number = part_number_;
     const std::string operation = request.GetServiceRequestName();
-    auto send = [self = Self(), request = std::move(request),
-                 data = std::move(data)]() mutable -> Future<Aws::Client::XmlOutcome> {
+    auto send = [self = Self(), request = std::move(request), data = std::move(data),
+                 permit = std::move(permit)]() mutable -> Future<Aws::Client::XmlOutcome> {
       if constexpr (std::is_same_v<Request, S3Model::UploadPartRequest>) {
-        return self->native_multipart_.Then([self, request = std::move(request),
-                                             data](const std::string& id) mutable -> Future<Aws::Client::XmlOutcome> {
+        return self->native_multipart_.Then([self, request = std::move(request), data,
+                                             permit](const std::string& id) mutable -> Future<Aws::Client::XmlOutcome> {
           {
             std::lock_guard lock(self->upload_state_->mutex);
             if (!self->upload_state_->status.ok())
@@ -1964,11 +2000,11 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
           }
           request.SetUploadId(id.c_str());
           return self->native_->Send(request, self->path_.key, Aws::Http::HttpMethod::HTTP_PUT, "", self->io_context_,
-                                     16 * 1024 * 1024, data);
+                                     16 * 1024 * 1024, data, std::move(permit));
         });
       } else {
         return self->native_->Send(request, self->path_.key, Aws::Http::HttpMethod::HTTP_PUT, "", self->io_context_,
-                                   16 * 1024 * 1024, data);
+                                   16 * 1024 * 1024, data, std::move(permit));
       }
     };
     auto notify = [state = upload_state_, number, operation](const Result<Aws::Client::XmlOutcome>& response) {
@@ -2005,8 +2041,8 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
         upload_state_->pending_uploads_completed = Future<>::Make();
       ++upload_state_->uploads_in_progress;
     }
-    // CRT schedules the requests. Each request retains its slice until completion;
-    // the count also includes parts waiting for multipart creation.
+    // Each request retains its slice until completion. The count also includes
+    // the close-time tail waiting for multipart creation or shared capacity.
     try {
       send().AddCallback(notify);
     } catch (const std::bad_alloc&) {

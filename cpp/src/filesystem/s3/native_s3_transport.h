@@ -16,16 +16,33 @@ namespace milvus_storage {
 class NativeS3Transport {
   public:
   struct State;
+  class Permit {
+ public:
+    ~Permit();
+    Permit(const Permit&) = delete;
+    Permit& operator=(const Permit&) = delete;
+
+ private:
+    friend class NativeS3Transport;
+    friend struct State;
+    explicit Permit(std::shared_ptr<State> state) : state_(std::move(state)) {}
+    std::shared_ptr<State> state_;
+  };
   static arrow::Result<std::shared_ptr<NativeS3Transport>> Make(const S3Options& options,
                                                                 std::shared_ptr<S3ClientHolder> holder,
                                                                 std::shared_ptr<S3CrtClientHolder> crt_holder);
-  // Read-only metadata requests. Object uploads remain on the SDK output path.
+  // Reserve shared request capacity before allocating an upload payload.
+  arrow::Future<std::shared_ptr<Permit>> Acquire(const arrow::io::IOContext& io_context);
+  // DEFAULT meta requests never transform PUT into multipart. All bodies are
+  // owned memory; no CRT callback reads a blocking file/iostream data source.
   arrow::Future<Aws::Client::XmlOutcome> Send(const Aws::AmazonWebServiceRequest& request,
                                               const std::string& key,
                                               Aws::Http::HttpMethod method,
                                               const std::string& query,
                                               const arrow::io::IOContext& io_context,
-                                              size_t response_limit = 16 * 1024 * 1024);
+                                              size_t response_limit = 16 * 1024 * 1024,
+                                              std::shared_ptr<arrow::Buffer> body = nullptr,
+                                              std::shared_ptr<Permit> permit = nullptr);
 
   private:
   NativeS3Transport(std::shared_ptr<State> state, std::shared_ptr<S3CrtClientHolder> holder)
