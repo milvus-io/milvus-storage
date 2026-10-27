@@ -15,9 +15,12 @@
 #include <cstdlib>
 
 #include <arrow/util/base64.h>
+#include <arrow/util/uri.h>
 
 namespace milvus_storage::paimon {
 
+// Native test-writer options only. Production reads use the supplied C++
+// filesystem and credential-free identity options, as in Iceberg.
 arrow::Result<std::unordered_map<std::string, std::string>> ToStorageOptions(const ArrowFileSystemConfig& config) {
   std::unordered_map<std::string, std::string> options;
   auto set = [&options](const std::string& key, const std::string& value) {
@@ -32,9 +35,8 @@ arrow::Result<std::unordered_map<std::string, std::string>> ToStorageOptions(con
   if (config.storage_type == "local") {
     return options;
   }
-  // Delegated credentials are intentionally outside the initial direct-file
-  // integration. Reject them instead of silently falling back to another
-  // credential source.
+  // The native test writer does not share the C++ credential providers.
+  // Reject delegated credentials instead of falling back to another source.
   if (!config.role_arn.empty()) {
     return arrow::Status::NotImplemented("Paimon role ARN credentials are not supported");
   }
@@ -96,6 +98,10 @@ arrow::Result<std::unordered_map<std::string, std::string>> ToStorageOptions(con
 }
 
 std::string ToStandardUri(const std::string& milvus_uri) {
+  arrow::util::Uri uri;
+  if (uri.Parse(milvus_uri).ok() && uri.is_file_scheme() && uri.host().empty()) {
+    return uri.path();
+  }
   auto parsed = StorageUri::Parse(milvus_uri);
   if (!parsed.ok() || parsed->scheme.empty()) {
     return milvus_uri;
@@ -105,15 +111,51 @@ std::string ToStandardUri(const std::string& milvus_uri) {
 }
 
 std::string ToMilvusUri(const std::string& standard_uri, const std::string& address) {
-  if (address.empty()) {
+  // Paimon stores raw Path strings, including literal partition escapes.
+  // Local paths must not pass through StorageUri's bucket/key parsing.
+  if (standard_uri.rfind("file:///", 0) == 0) {
+    return standard_uri.substr(7);
+  }
+  if (standard_uri.rfind("file:/", 0) == 0 && standard_uri.rfind("file://", 0) != 0) {
+    return standard_uri.substr(5);
+  }
+  const auto scheme_end = standard_uri.find("://");
+  const auto path_start = scheme_end == std::string::npos ? std::string::npos : standard_uri.find('/', scheme_end + 3);
+  if (path_start == std::string::npos) {
     return standard_uri;
   }
-  auto parsed = StorageUri::Parse(standard_uri, false);
-  if (!parsed.ok() || parsed->scheme.empty()) {
+  arrow::util::Uri uri;
+  if (!uri.Parse(standard_uri.substr(0, path_start) + "/").ok() || uri.is_file_scheme()) {
     return standard_uri;
   }
-  parsed->address = address;
-  auto result = StorageUri::Make(parsed.ValueOrDie());
+  auto bucket = uri.host();
+  auto path = standard_uri.substr(path_start);
+  const auto scheme = uri.scheme();
+  if (scheme == "azure" || scheme == "az" || scheme == "azdfs" || scheme == "azdls" || scheme == "abfs" ||
+      scheme == "abfss" || scheme == "wasb" || scheme == "wasbs") {
+    if (!uri.username().empty()) {
+      bucket = uri.username();
+    } else if (bucket.find('.') != std::string::npos) {
+      const auto separator = path.find('/', 1);
+      if (separator == std::string::npos) {
+        return standard_uri;
+      }
+      bucket = path.substr(1, separator - 1);
+      path = path.substr(separator);
+    }
+  }
+  // StorageUri::Parse decodes once before C++ opens the file. Encode the raw
+  // key here, preserving separators, so p=a%2Fb is not opened as p=a/b.
+  auto escaped = arrow::util::UriFromAbsolutePath(path);
+  if (!escaped.ok()) {
+    return standard_uri;
+  }
+  StorageUri converted;
+  converted.scheme = scheme;
+  converted.address = address;
+  converted.bucket_name = bucket;
+  converted.key = escaped->substr(8);  // file:///key -> key
+  auto result = StorageUri::Make(converted);
   return result.ok() ? result.ValueOrDie() : standard_uri;
 }
 

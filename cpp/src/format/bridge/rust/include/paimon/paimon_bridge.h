@@ -22,6 +22,7 @@
 #include <vector>
 
 #include <arrow/result.h>
+#include <arrow/filesystem/filesystem.h>
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"
 
@@ -54,13 +55,16 @@ std::shared_ptr<arrow::RecordBatchReader> WrapPaimonRecordBatchReader(std::share
 arrow::Result<std::vector<PaimonFileInfo>> PlanFiles(const std::string& table_location,
                                                      int64_t snapshot_id,
                                                      const std::string& scan_mode,
-                                                     const StorageOptions& storage_options);
+                                                     const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+                                                     const StorageOptions& read_options);
 
 arrow::Result<std::vector<uint64_t>> ReadDeletionVector(const std::string& path,
+                                                        const std::string& data_file_path,
                                                         uint64_t offset,
                                                         uint64_t length,
                                                         int64_t expected_cardinality,
-                                                        const StorageOptions& storage_options);
+                                                        const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+                                                        const StorageOptions& read_options);
 
 arrow::Result<PaimonTestTableInfo> CreateTestTableInfo(const std::string& table_location,
                                                        uint64_t num_rows,
@@ -84,9 +88,11 @@ arrow::Result<int64_t> CreateTestTable(const std::string& table_location,
 /// same cached metadata.
 class BlockingPaimonDataSplitReader {
   public:
-  static arrow::Result<std::shared_ptr<BlockingPaimonDataSplitReader>> Open(const std::string& metadata_json,
-                                                                            const std::string& expected_table_location,
-                                                                            const StorageOptions& storage_options);
+  static arrow::Result<std::shared_ptr<BlockingPaimonDataSplitReader>> Open(
+      const std::string& metadata_json,
+      const std::string& expected_table_location,
+      const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+      const StorageOptions& read_options);
 
   explicit BlockingPaimonDataSplitReader(rust::Box<ffi::BlockingPaimonDataSplitReader> impl) : impl_(std::move(impl)) {}
 

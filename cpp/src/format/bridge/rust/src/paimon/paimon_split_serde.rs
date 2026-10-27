@@ -15,6 +15,8 @@
 //! The payload uses paimon-rust's Java-compatible `SplitSerializer` frame.
 //! The outer Milvus metadata selects the codec; the payload owns its wire
 //! version, magic, and split type.
+//! Paimon 0.4 reads native v8 and writes v9. Upgrade readers before refreshing
+//! descriptors; rolling back to 0.3 requires restoring or regenerating v8 payloads.
 
 use paimon::DataSplit;
 use paimon::spec::POSTPONE_BUCKET;
@@ -350,6 +352,47 @@ mod tests {
         assert_eq!(decoded.row_ranges().unwrap(), &[RowRange::new(2, 7)]);
         let deletion = decoded.deletion_file_for_data_file_index(0).unwrap();
         assert_eq!((deletion.offset(), deletion.length()), (4, 24));
+    }
+
+    #[test]
+    fn native_decoder_accepts_v8_descriptor() {
+        use base64::Engine;
+
+        // Java-generated datasplit_v8.bin shipped with paimon-rust 0.3.0:
+        // https://github.com/apache/paimon-rust/blob/v0.3.0/crates/paimon/src/table/goldens/datasplit_v8.bin
+        let body = base64::engine::general_purpose::STANDARD.decode(concat!(
+            "3sPSMCwZ7GYAAAAIAAAAAAAAABIAAAAUAAAAAQAAAAAAAAAAYWFhYWEAAIUAAAAUAAdteSBwYXRoAQAAACAAAAAAAAAA",
+            "AAEAAAI4AAAAAAAAAABteV9maWxlhwAAEAAAAAAAAAQAAAAAAAAUAAAAqAAAABQAAADAAAAAYAAAANgAAACAAAAAOAEA",
+            "AA8AAAAAAAAAyAAAAAAAAAAFAAAAAAAAAAMAAAAAAAAAGAAAALgBAABgTEpMfwEAAAsAAAAAAAAAAQIEAAAAAIMBAAAA",
+            "AAAAACAAAADQAQAAGQAAAPABAAAMAAAAAAAAACgAAAAQAgAAAAAAAQAAAAAAAAAAbWluX2tleYcAAAAAAAAAAQAAAAAA",
+            "AAAAbWF4X2tleYcAAAAAAAAAAAAAAAAUAAAAIAAAABQAAAA4AAAAEAAAAFAAAAAAAAABAAAAAAAAAABtaW5fa2V5hwAA",
+            "AAAAAAABAAAAAAAAAABtYXhfa2V5hwAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkAAAAIAAAACQAAABIAAAAEAAA",
+            "AHAAAAAAAAABAAAAAAAAAAAJAAAAEAAAAG1pbl92YWx1ZQAAAAAAAAAAAAAAAAAAAQAAAAAAAAAACQAAABAAAABtYXhf",
+            "dmFsdWUAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAACAAAAAAAAAGV4dHJhMQCGZXh0cmEyAIYDAAAAAAAAAGZpZWxk",
+            "MQCGZmllbGQyAIZmaWVsZDMAhmhkZnM6Ly8vcGF0aC90by93YXJlaG91c2UAAAAAAAAABAAAAAAAAABhAAAAAAAAgWIA",
+            "AAAAAACBYwAAAAAAAIFmAAAAAAAAgQEAAAABAQANZGVsZXRpb25fZmlsZQAAAAAAAABkAAAAAAAAABYAAAAAAAAAIQAA",
+        )).unwrap();
+        // Wrap the unchanged v8 body in the persisted SplitSerializer data frame.
+        let mut payload = b"SPLIT_V1\0\0\0\x01\0\0\0\x01".to_vec();
+        payload.extend_from_slice(&body);
+        let decoded = deserialize(NATIVE_CODEC, &payload).unwrap();
+        assert_eq!(decoded.snapshot_id(), 18);
+        assert_eq!((decoded.bucket(), decoded.total_buckets()), (20, 32));
+        assert_eq!(decoded.partition().arity(), 1);
+        let file = &decoded.data_files()[0];
+        assert_eq!(file.file_name, "my_file");
+        assert_eq!(file.row_count, 1024);
+        assert_eq!(file.write_cols.as_ref().unwrap(), &["a", "b", "c", "f"]);
+        assert!(file.column_max_sequence_numbers.is_none());
+        let deletion = decoded.deletion_file_for_data_file_index(0).unwrap();
+        assert_eq!(deletion.path(), "deletion_file");
+        assert_eq!((deletion.offset(), deletion.length(), deletion.cardinality()), (100, 22, Some(33)));
+
+        let encoded = serialize(&decoded).unwrap();
+        assert_eq!(encoded.codec, NATIVE_CODEC);
+        assert_eq!(&encoded.payload[24..28], &9i32.to_be_bytes());
+        let restored = deserialize(encoded.codec, &encoded.payload).unwrap();
+        assert_eq!(restored, split_without_stats(&decoded).unwrap());
     }
 
     #[test]

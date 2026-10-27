@@ -339,15 +339,26 @@ fn resolve_read_range(range: opendal::raw::BytesRange, size: u64) -> opendal::Re
 // Generic read-only OpenDAL Access implementation
 // -----------------------------------------------------------------------------
 
+#[derive(Clone)]
+struct FileReadContext {
+    metadata: ObjectInfo,
+    reader: Option<Arc<ReaderHandle>>,
+}
+
 /// OpenDAL accessor that delegates relative paths to one shared C++ filesystem.
 ///
 /// The shared pointer is the lifetime lease: cloning this accessor keeps the
 /// cached filesystem alive even if `FilesystemCache` is cleared concurrently.
 /// The wrapper is immutable after construction and is declared Send/Sync at the
 /// CXX boundary because the underlying Arrow filesystem is concurrency-safe.
+#[derive(Clone)]
 pub(crate) struct FilesystemAccess {
     filesystem: cxx::SharedPtr<crate::lance_ffi::FileSystemWrapper>,
     info: Arc<AccessorInfo>,
+    file: Option<FileReadContext>,
+    // Counts native stat/open calls, including failed attempts.
+    #[cfg(test)]
+    pub(crate) io_counts: Arc<[std::sync::atomic::AtomicUsize; 2]>,
 }
 
 impl fmt::Debug for FilesystemAccess {
@@ -392,6 +403,9 @@ impl FilesystemAccess {
         Self {
             filesystem,
             info: Arc::new(info),
+            file: None,
+            #[cfg(test)]
+            io_counts: Arc::new(Default::default()),
         }
     }
 
@@ -401,11 +415,43 @@ impl FilesystemAccess {
         OperatorBuilder::new(self).finish()
     }
 
+    /// Retain metadata and a native handle for this reader's immutable file only.
+    /// The scoped operator is not exposed, so it cannot be used for another path.
+    pub(crate) async fn into_reader(mut self, path: &str) -> opendal::Result<opendal::Reader> {
+        let metadata = self.object_info(path).await?;
+        // Empty files need no ReadAt handle; directories are rejected by read().
+        let reader = if metadata.size == 0 || metadata.is_dir {
+            None
+        } else {
+            let access = self.clone();
+            let ffi_path = path.to_string();
+            Some(
+                TOKIO_RT
+                    .spawn_blocking(move || access.open_reader(&ffi_path, metadata.size))
+                    .await
+                    .map_err(|source| {
+                        opendal::Error::new(
+                            opendal::ErrorKind::Unexpected,
+                            "filesystem open blocking task failed",
+                        )
+                        .with_operation("read")
+                        .with_context("path", path)
+                        .set_source(source)
+                    })??,
+            )
+        };
+        self.file = Some(FileReadContext { metadata, reader });
+        self.into_operator().reader(path).await
+    }
+
     /// Fetch metadata for one relative filesystem path.
     ///
     /// No URI normalization belongs here; callers must bind and strip absolute
     /// URIs before entering the generic access layer.
     async fn object_info(&self, path: &str) -> opendal::Result<ObjectInfo> {
+        if let Some(file) = &self.file {
+            return Ok(file.metadata);
+        }
         // OpenDAL treats its empty root as a directory. Avoid a provider call
         // for this synthetic entry because some object stores have no root key.
         if path.is_empty() {
@@ -419,6 +465,8 @@ impl FilesystemAccess {
         let filesystem = self.filesystem.clone();
         let ffi_path = path.to_string();
         let error_path = ffi_path.clone();
+        #[cfg(test)]
+        let io_counts = self.io_counts.clone();
         // Arrow filesystem calls are synchronous. Move them off Tokio workers;
         // the cloned shared pointer keeps the C++ object alive in the task.
         TOKIO_RT
@@ -435,6 +483,8 @@ impl FilesystemAccess {
                 let mut size = 0;
                 let mut mtime_ns = 0;
                 let mut is_dir = false;
+                #[cfg(test)]
+                io_counts[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // SAFETY: the shared filesystem and path bytes outlive this
                 // synchronous call; all output pointers reference stack values.
                 let mut result = unsafe {
@@ -467,11 +517,59 @@ impl FilesystemAccess {
             })?
     }
 
+    // Called on the blocking pool by both ordinary and scoped readers.
+    fn open_reader(&self, path: &str, size: u64) -> opendal::Result<Arc<ReaderHandle>> {
+        let path_len = u32::try_from(path.len()).map_err(|source| {
+            opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                "filesystem path length does not fit in u32",
+            )
+            .with_operation("read")
+            .with_context("path", path)
+            .set_source(source)
+        })?;
+        let mut reader_raw = std::ptr::null_mut();
+        #[cfg(test)]
+        self.io_counts[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: inputs stay alive for the synchronous open call and
+        // `reader_raw` is initialized by C++ on success.
+        let mut result = unsafe {
+            loon_filesystem_open_reader(
+                self.filesystem.as_mut_ptr().cast::<c_void>(),
+                path.as_ptr(),
+                path_len,
+                size,
+                &mut reader_raw,
+            )
+        };
+        check_loon_ffi_result(&mut result, "open OpenDAL object reader")
+            .map_err(|error| into_opendal_error(error, "read", path))?;
+
+        let supports_async = match reader_supports_async(reader_raw) {
+            Ok(supported) => supported,
+            Err(error) => unsafe {
+                // Ownership has not reached ReaderHandle yet. Close and
+                // destroy the raw reader on this error path explicitly.
+                let mut close_result = loon_filesystem_reader_close(reader_raw);
+                if let Err(close_error) =
+                    check_loon_ffi_result(&mut close_result, "close OpenDAL object reader")
+                {
+                    eprintln!("Warning: ReaderHandle close failed: {close_error}");
+                }
+                loon_filesystem_reader_destroy(reader_raw);
+                return Err(into_opendal_error(error, "read", path));
+            },
+        };
+        Ok(Arc::new(ReaderHandle {
+            ptr: reader_raw,
+            supports_async,
+        }))
+    }
+
     /// Read one already-bounded range from a relative path.
     ///
-    /// A reader handle is opened per OpenDAL read request. Its RAII wrapper
-    /// closes the C++ RandomAccessFile after either the callback or blocking
-    /// ReadAt path completes.
+    /// Ordinary operators open per request; scoped readers retain the handle.
+    /// In-flight reads hold their own Arc until ReadAt or its callback completes.
     async fn read_range(
         &self,
         path: &str,
@@ -506,7 +604,7 @@ impl FilesystemAccess {
             Complete(Bytes),
         }
 
-        let filesystem = self.filesystem.clone();
+        let access = self.clone();
         let ffi_path = path.to_string();
         let error_path = ffi_path.clone();
         let offset = range.start;
@@ -515,53 +613,14 @@ impl FilesystemAccess {
         // blocking-pool thread while network I/O is in flight.
         let outcome = TOKIO_RT
             .spawn_blocking(move || {
-                let path_len = u32::try_from(ffi_path.len()).map_err(|source| {
-                    opendal::Error::new(
-                        opendal::ErrorKind::Unexpected,
-                        "filesystem path length does not fit in u32",
-                    )
-                    .with_operation("read")
-                    .with_context("path", &ffi_path)
-                    .set_source(source)
-                })?;
-                let mut reader_raw = std::ptr::null_mut();
-                // SAFETY: inputs stay alive for the synchronous open call and
-                // `reader_raw` is initialized by C++ on success.
-                let mut result = unsafe {
-                    loon_filesystem_open_reader(
-                        filesystem.as_mut_ptr().cast::<c_void>(),
-                        ffi_path.as_ptr(),
-                        path_len,
-                        size,
-                        &mut reader_raw,
-                    )
-                };
-                check_loon_ffi_result(&mut result, "open OpenDAL object reader")
-                    .map_err(|error| into_opendal_error(error, "read", &ffi_path))?;
-
-                let supports_async = match reader_supports_async(reader_raw) {
-                    Ok(supported) => supported,
-                    Err(error) => unsafe {
-                        // Ownership has not reached ReaderHandle yet. Close and
-                        // destroy the raw reader on this error path explicitly.
-                        let mut close_result = loon_filesystem_reader_close(reader_raw);
-                        if let Err(close_error) =
-                            check_loon_ffi_result(&mut close_result, "close OpenDAL object reader")
-                        {
-                            eprintln!("Warning: ReaderHandle close failed: {close_error}");
-                        }
-                        loon_filesystem_reader_destroy(reader_raw);
-                        return Err(into_opendal_error(error, "read", &ffi_path));
-                    },
-                };
-                let reader = ReaderHandle {
-                    ptr: reader_raw,
-                    supports_async,
+                let reader = match access.file.as_ref().and_then(|file| file.reader.as_ref()) {
+                    Some(reader) => reader.clone(),
+                    None => access.open_reader(&ffi_path, size)?,
                 };
 
                 #[cfg(feature = "s3-crt-async")]
                 if reader.supports_async {
-                    return Ok(ReadOutcome::Async(Arc::new(reader)));
+                    return Ok(ReadOutcome::Async(reader));
                 }
 
                 let mut buffer = BytesMut::with_capacity(length_usize);
@@ -786,9 +845,8 @@ impl opendal::raw::Access for FilesystemAccess {
         // so the potential saving is only three metadata RPCs per refresh (table
         // metadata, manifest list, and manifest). A future fix should reuse the C++
         // input stream's cached size rather than adding another metadata cache.
-        // TODO(jiaqizho): Replace the Buffer reader with a stateful oio::Read before
-        // enabling ranged FileRead consumers. Otherwise every range for one file
-        // repeats this stat plus reader open and close.
+        // Ranged consumers use into_reader() to retain one file's metadata and
+        // native handle; ordinary operators keep per-request stat/open/close.
         let info = self.object_info(path).await?;
         if info.is_dir {
             return Err(opendal::Error::new(
@@ -829,7 +887,7 @@ impl opendal::raw::Access for FilesystemAccess {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::filesystem_c::LoonFFIResult;
     use std::ffi::{CString, c_char};
@@ -855,9 +913,11 @@ mod tests {
         ) -> LoonFFIResult;
     }
 
-    struct LocalOperatorFixture {
-        operator: Operator,
-        root: tempfile::TempDir,
+    pub(crate) struct LocalOperatorFixture {
+        pub(crate) filesystem: cxx::SharedPtr<crate::lance_ffi::FileSystemWrapper>,
+        pub(crate) operator: Operator,
+        pub(crate) root: tempfile::TempDir,
+        pub(crate) access: FilesystemAccess,
     }
 
     #[cfg(feature = "s3-crt-async")]
@@ -871,7 +931,7 @@ mod tests {
     }
 
     impl LocalOperatorFixture {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let root = tempfile::tempdir().unwrap();
 
             let storage_type_key = CString::new("fs.storage_type").unwrap();
@@ -905,8 +965,14 @@ mod tests {
             let filesystem = unsafe {
                 cxx::SharedPtr::from_raw(handle as *mut crate::lance_ffi::FileSystemWrapper)
             };
-            let operator = FilesystemAccess::new(filesystem).unwrap().into_operator();
-            Self { operator, root }
+            let access = FilesystemAccess::new(filesystem.clone()).unwrap();
+            let operator = access.clone().into_operator();
+            Self {
+                filesystem,
+                operator,
+                root,
+                access,
+            }
         }
     }
 
@@ -1025,6 +1091,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(content.to_bytes().as_ref(), b"2345");
+        // Ordinary operators (including Iceberg's) retain per-request stat/open.
+        fixture
+            .operator
+            .read_with("payload.bin")
+            .range(0..1)
+            .await
+            .unwrap();
+        for count in fixture.access.io_counts.iter() {
+            assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 2);
+        }
     }
 
     #[tokio::test]
