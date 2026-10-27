@@ -66,20 +66,42 @@ arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
     ARROW_RETURN_NOT_OK(
         options.ConfigureSASTokenPolicy(std::make_shared<fs::AzureSasTokenPolicy>(std::move(broker_config))));
   } else if (config_.use_iam) {
-    const char* federated_token = getenv("AZURE_FEDERATED_TOKEN_FILE");
+    const char* federated_token = std::getenv("AZURE_FEDERATED_TOKEN_FILE");
+    const char* client_secret = std::getenv("AZURE_CLIENT_SECRET");
     if (federated_token != nullptr && strlen(federated_token) > 0) {
-      // Workload Identity
-      if (std::getenv("AZURE_CLIENT_ID") == nullptr) {
+      // Workload Identity — checked first to preserve existing WI deployments that may
+      // also have AZURE_CLIENT_SECRET set.
+      LOG_STORAGE_INFO_ << "AzureFileSystemProducer: credential=WorkloadIdentity";
+      const char* azure_client_id = std::getenv("AZURE_CLIENT_ID");
+      if (azure_client_id == nullptr || strlen(azure_client_id) == 0) {
         return arrow::Status::Invalid("AZURE_CLIENT_ID environment variable is not set");
       }
-      if (std::getenv("AZURE_TENANT_ID") == nullptr) {
+      const char* azure_tenant_id = std::getenv("AZURE_TENANT_ID");
+      if (azure_tenant_id == nullptr || strlen(azure_tenant_id) == 0) {
         return arrow::Status::Invalid("AZURE_TENANT_ID environment variable is not set");
       }
       ARROW_RETURN_NOT_OK(options.ConfigureWorkloadIdentityCredential());
+    } else if (client_secret != nullptr && strlen(client_secret) > 0) {
+      // Service Principal (client secret) — EnvironmentCredential reads
+      // AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, and AZURE_TENANT_ID.
+      const char* azure_client_id = std::getenv("AZURE_CLIENT_ID");
+      if (azure_client_id == nullptr || strlen(azure_client_id) == 0) {
+        return arrow::Status::Invalid(
+            "AZURE_CLIENT_ID environment variable is not set (required when AZURE_CLIENT_SECRET is set)");
+      }
+      const char* azure_tenant_id = std::getenv("AZURE_TENANT_ID");
+      if (azure_tenant_id == nullptr || strlen(azure_tenant_id) == 0) {
+        return arrow::Status::Invalid(
+            "AZURE_TENANT_ID environment variable is not set (required when AZURE_CLIENT_SECRET is set)");
+      }
+      LOG_STORAGE_INFO_ << "AzureFileSystemProducer: credential=EnvironmentCredential(SPN)"
+                        << " tenant_id=set client_id=set client_secret=set";
+      ARROW_RETURN_NOT_OK(options.ConfigureEnvironmentCredential());
     } else {
       // Managed Identity
+      LOG_STORAGE_INFO_ << "AzureFileSystemProducer: credential=ManagedIdentity";
       const char* client_id = std::getenv("AZURE_CLIENT_ID");
-      if (client_id == nullptr) {
+      if (client_id == nullptr || strlen(client_id) == 0) {
         return arrow::Status::Invalid("AZURE_CLIENT_ID environment variable is not set");
       }
       ARROW_RETURN_NOT_OK(options.ConfigureManagedIdentityCredential(std::string(client_id)));
