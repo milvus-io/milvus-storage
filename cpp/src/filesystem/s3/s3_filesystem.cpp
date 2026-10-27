@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -1402,7 +1403,24 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
 
   // OutputStream interface
 
-  bool ShouldBeMultipartUpload() const { return pos_ > part_upload_size_ - 1 || !allow_delayed_open_; }
+  Status Prepare(int64_t expected_size) override {
+    if (closed_)
+      return Status::Invalid("Prepare on closed stream");
+    if (expected_size < 0)
+      return Status::Invalid("Negative upload size hint");
+#ifdef WITH_CRT
+    if (native_) {
+      if (native_closing_)
+        return Status::Invalid("Prepare on closing stream");
+      return expected_size >= part_upload_size_ ? StartNativeMultipart() : Status::OK();
+    }
+#endif
+    return Status::NotImplemented("Stream has no asynchronous upload preparation");
+  }
+
+  bool ShouldBeMultipartUpload() const {
+    return IsMultipartCreated() || pos_ > part_upload_size_ - 1 || !allow_delayed_open_;
+  }
 
   bool IsMultipartCreated() const { return !multipart_upload_id_.empty(); }
 
@@ -1525,6 +1543,16 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
   arrow::Status Write(const void* data, int64_t nbytes) override { return DoWrite(data, nbytes); }
 
   arrow::Status DoWrite(const void* data, int64_t nbytes, const std::shared_ptr<Buffer>& owned_buffer = nullptr) {
+#ifdef WITH_CRT
+    if (native_) {
+      if (native_closing_)
+        return Status::Invalid("Write on closing stream");
+      if (nbytes < 0 || (nbytes && !data) || nbytes > INT64_MAX - current_part_size_)
+        return Status::Invalid("Invalid write buffer");
+      std::lock_guard lock(upload_state_->mutex);
+      ARROW_RETURN_NOT_OK(upload_state_->status);
+    }
+#endif
     if (closed_) {
       return arrow::Status::Invalid("Operation on closed stream");
     }
@@ -1559,7 +1587,10 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
 
     // We can upload chunks without copying them into a buffer
     while (nbytes >= part_upload_size_) {
-      ARROW_RETURN_NOT_OK(UploadPart(data_ptr, part_upload_size_));
+      auto part = owned_buffer ? arrow::SliceBuffer(owned_buffer, data_ptr - reinterpret_cast<const int8_t*>(data),
+                                                    part_upload_size_)
+                               : nullptr;
+      ARROW_RETURN_NOT_OK(UploadPart(data_ptr, part_upload_size_, part));
       advance_ptr(part_upload_size_);
       pos_ += part_upload_size_;
     }
@@ -1861,8 +1892,208 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
   }
 
   Future<> AbortAsync() override {
+#ifdef WITH_CRT
+    if (native_) {
+      if (closed_)
+        return Future<>::MakeFinished();
+      if (native_closing_)
+        return native_close_;
+      native_closing_ = true;
+      {
+        std::lock_guard lock(upload_state_->mutex);
+        // Stop parts still waiting for the upload ID; drain submitted requests
+        // before removing the multipart upload.
+        upload_state_->status &= Status::Cancelled("Upload aborted");
+      }
+      current_part_.reset();
+      current_part_buffer_.reset();
+      current_part_size_ = 0;
+      auto abort = [self = Self()] { return self->AbortNativeUpload(); };
+      native_close_ = FlushAsync()
+                          .Then(abort, [abort](const Status&) { return abort(); })
+                          .Then([self = Self()] { return self->CleanupAfterClose(); },
+                                [self = Self()](const Status& error) {
+                                  (void)self->CleanupAfterClose();
+                                  return error;
+                                });
+      return native_close_;
+    }
+#endif
     return Future<>::MakeFinished(Status::NotImplemented("Stream has no native async abort"));
   }
+#ifdef WITH_CRT
+  void SetNativeTransport(std::shared_ptr<NativeS3Transport> native) { native_ = std::move(native); }
+  Status StartNativeMultipart() {
+    if (native_multipart_.is_valid())
+      return Status::OK();
+    S3Model::CreateMultipartUploadRequest request;
+    request.SetBucket(ToAwsString(path_.bucket));
+    request.SetKey(ToAwsString(path_.key));
+    if (use_crc32c_checksum_)
+      request.SetChecksumAlgorithm(S3Model::ChecksumAlgorithm::CRC32C);
+    ARROW_RETURN_NOT_OK(SetMetadataInRequest(&request, false));
+    // Conditions apply to publication, not to acquiring an upload ID.
+    native_multipart_ = native_->Send(request, path_.key, Aws::Http::HttpMethod::HTTP_POST, "?uploads", io_context_)
+                            .Then([](const Aws::Client::XmlOutcome& response) -> Result<std::string> {
+                              ARROW_RETURN_NOT_OK(OutcomeToStatus("CreateMultipartUpload", response));
+                              S3Model::CreateMultipartUploadResult result(response.GetResult());
+                              if (result.GetUploadId().empty())
+                                return Status::IOError("S3 multipart creation has no upload ID");
+                              return std::string(result.GetUploadId().c_str());
+                            });
+    return Status::OK();
+  }
+  template <class Request>
+  Status UploadNative(Request request, std::shared_ptr<Buffer> data) {
+    if (use_crc32c_checksum_) {
+      StringViewStream memory(data->data(), data->size());
+      request.SetChecksumCRC32C(
+          Aws::Utils::HashingUtils::Base64Encode(Aws::Utils::HashingUtils::CalculateCRC32C(memory)));
+    }
+    const int number = part_number_;
+    const std::string operation = request.GetServiceRequestName();
+    auto send = [self = Self(), request = std::move(request),
+                 data = std::move(data)]() mutable -> Future<Aws::Client::XmlOutcome> {
+      if constexpr (std::is_same_v<Request, S3Model::UploadPartRequest>) {
+        return self->native_multipart_.Then([self, request = std::move(request),
+                                             data](const std::string& id) mutable -> Future<Aws::Client::XmlOutcome> {
+          {
+            std::lock_guard lock(self->upload_state_->mutex);
+            if (!self->upload_state_->status.ok())
+              return self->upload_state_->status;
+          }
+          request.SetUploadId(id.c_str());
+          return self->native_->Send(request, self->path_.key, Aws::Http::HttpMethod::HTTP_PUT, "", self->io_context_,
+                                     16 * 1024 * 1024, data);
+        });
+      } else {
+        return self->native_->Send(request, self->path_.key, Aws::Http::HttpMethod::HTTP_PUT, "", self->io_context_,
+                                   16 * 1024 * 1024, data);
+      }
+    };
+    auto notify = [state = upload_state_, number, operation](const Result<Aws::Client::XmlOutcome>& response) {
+      Status status = response.ok() ? OutcomeToStatus(operation, *response) : response.status();
+      std::optional<S3Model::UploadPartResult> part;
+      if constexpr (std::is_same_v<Request, S3Model::UploadPartRequest>) {
+        if (status.ok()) {
+          S3Model::UploadPartResult result(response->GetResult());
+          if (result.GetETag().empty())
+            status = Status::IOError("S3 upload part has no ETag");
+          else
+            part = std::move(result);
+        }
+      }
+      Future<> done;
+      Status accumulated;
+      {
+        std::lock_guard lock(state->mutex);
+        state->status &= status;
+        if (part)
+          AddCompletedPart(state, number, *part);
+        if (--state->uploads_in_progress == 0)
+          done = state->pending_uploads_completed;
+        accumulated = state->status;
+      }
+      // Completing a future can invoke close/abort inline, outside this lock.
+      if (done.is_valid())
+        done.MarkFinished(accumulated);
+    };
+    {
+      std::lock_guard lock(upload_state_->mutex);
+      ARROW_RETURN_NOT_OK(upload_state_->status);
+      if (upload_state_->uploads_in_progress == 0)
+        upload_state_->pending_uploads_completed = Future<>::Make();
+      ++upload_state_->uploads_in_progress;
+    }
+    // CRT schedules the requests. Each request retains its slice until completion;
+    // the count also includes parts waiting for multipart creation.
+    try {
+      send().AddCallback(notify);
+    } catch (const std::bad_alloc&) {
+      const auto error = Status::OutOfMemory("Cannot submit S3 upload");
+      notify(error);
+      return error;
+    }
+    return Status::OK();
+  }
+  Future<> FinishNativeMultipart() {
+    if (!native_multipart_.is_valid())
+      return Future<>::MakeFinished();
+    return native_multipart_.Then([self = Self()](const std::string& id) -> Future<> {
+      // Keep completion fault injection on the native path before publishing the object.
+      FIU_RETURN_ON(FIUKEY_S3FS_COMPLETE_UPLOAD_FAIL,
+                    arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_COMPLETE_UPLOAD_FAIL)));
+      S3Model::CompleteMultipartUploadRequest request;
+      request.SetBucket(ToAwsString(self->path_.bucket));
+      request.SetKey(ToAwsString(self->path_.key));
+      request.SetUploadId(id.c_str());
+      S3Model::CompletedMultipartUpload upload;
+      upload.SetParts(self->upload_state_->completed_parts);
+      request.SetMultipartUpload(std::move(upload));
+      auto status = self->SetMetadataInRequest(&request);
+      if (!status.ok())
+        return Future<>::MakeFinished(status);
+      return self->native_->Send(request, self->path_.key, Aws::Http::HttpMethod::HTTP_POST, "", self->io_context_)
+          .Then([](const Aws::Client::XmlOutcome& response) -> Status {
+            ARROW_RETURN_NOT_OK(OutcomeToStatus("CompleteMultipartUpload", response));
+            S3Model::CompleteMultipartUploadResult result(response.GetResult());
+            if (result.GetETag().empty())
+              return Status::IOError("Multipart completion has no ETag; outcome may be unknown");
+            return Status::OK();
+          });
+    });
+  }
+  Future<> AbortNativeUpload() {
+    if (!native_multipart_.is_valid())
+      return Future<>::MakeFinished();
+    return native_multipart_.Then([self = Self()](const std::string& id) {
+      S3Model::AbortMultipartUploadRequest request;
+      request.SetBucket(ToAwsString(self->path_.bucket));
+      request.SetKey(ToAwsString(self->path_.key));
+      request.SetUploadId(id.c_str());
+      // Cancellation stops data requests, not the cleanup of an existing upload.
+      const arrow::io::IOContext cleanup(self->io_context_.pool(), self->io_context_.executor(),
+                                         arrow::StopToken::Unstoppable(), self->io_context_.external_id());
+      return self->native_->Send(request, self->path_.key, Aws::Http::HttpMethod::HTTP_DELETE, "", cleanup)
+          .Then([](const Aws::Client::XmlOutcome& response) {
+            if (!response.IsSuccess() &&
+                response.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND)
+              return Status::OK();
+            return OutcomeToStatus("AbortMultipartUpload", response);
+          });
+    });
+  }
+  Future<> CloseNativeAsync() {
+    if (closed_)
+      return Future<>::MakeFinished();
+    if (native_closing_)
+      return native_close_;
+    native_closing_ = true;
+    // Submit the final partial part, then drain every request before publication
+    // or abort, including when the final write fails.
+    native_close_ =
+        Future<>::MakeFinished(EnsureReadyToFlushFromClose())
+            .Then([self = Self()] { return self->FlushAsync(); },
+                  [self = Self()](const Status& error) {
+                    return self->FlushAsync().Then([error] { return error; }, [error](const Status&) { return error; });
+                  })
+            .Then([self = Self()] { return self->FinishNativeMultipart(); })
+            .Then([self = Self()] { return self->CleanupAfterClose(); },
+                  [self = Self()](const Status& error) {
+                    return self->AbortNativeUpload().Then(
+                        [self, error] {
+                          (void)self->CleanupAfterClose();
+                          return error;
+                        },
+                        [self, error](const Status& abort_error) {
+                          (void)self->CleanupAfterClose();
+                          return error.WithMessage(error.message(),
+                                                   "; multipart cleanup failed: ", abort_error.ToString());
+                        });
+                  });
+    return native_close_;
+  }
+#endif
 
   protected:
   std::shared_ptr<S3ClientHolder> holder_;
@@ -1876,6 +2107,12 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
 
   int64_t part_upload_size_;
 
+#ifdef WITH_CRT
+  std::shared_ptr<NativeS3Transport> native_;
+  bool native_closing_ = false;
+  Future<std::string> native_multipart_;
+  Future<> native_close_;
+#endif
   Aws::String multipart_upload_id_;
   bool closed_ = true;
   int64_t pos_ = 0;
@@ -3070,6 +3307,11 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenOutput
 
   auto ptr =
       std::make_shared<CustomOutputStream>(impl_->holder_, io_context(), path, impl_->options(), metadata, upload_size);
+#ifdef WITH_CRT
+  // Opening only initializes local state. Network I/O starts on Write/CloseAsync.
+  if (impl_->native_)
+    ptr->SetNativeTransport(impl_->native_);
+#endif
   ARROW_RETURN_NOT_OK(ptr->Init());
   return ptr;
 };
