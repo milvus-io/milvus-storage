@@ -50,6 +50,8 @@ lance-table = "=7.0.0"
 # OpenDAL 0.56 interfaces used by the generic filesystem-backed bridge. No cloud
 # service is selected here: production reads delegate every operation to the C++ filesystem.
 opendal = "0.56"
+# Paimon uses OpenDAL 0.58; adapt it to the shared filesystem-backed bridge.
+opendal-paimon = { package = "opendal-core", version = "=0.58.0" }
 
 # Iceberg Ecosystem
 # `iceberg-storage-opendal` is used only by the native `CreateTestTable` writer.
@@ -83,7 +85,7 @@ roaring = "0.11"
 
 # Apache Paimon planner and test writer. Keep the exact release and Cargo.lock
 # together. Paimon uses the Arrow 58 already present for Lance.
-paimon = { version = "=0.3.0", default-features = false, features = ["storage-fs", "storage-s3", "storage-oss", "storage-azdls", "storage-gcs", "vortex"] }
+paimon = { version = "=0.4.0", default-features = false, features = ["storage-fs", "storage-s3", "storage-oss", "storage-azdls", "storage-gcs", "vortex"] }
 
 # SQL predicate parsing
 sqlparser = "0.55"
@@ -93,8 +95,6 @@ cxx = "1.0.184"
 
 [dev-dependencies]
 tempfile = "3"
-# Match Paimon's OpenDAL type in snapshot error-classification tests.
-opendal-paimon = { package = "opendal-core", version = "=0.58.0" }
 
 [build-dependencies]
 cxx-build = "1.0.184"

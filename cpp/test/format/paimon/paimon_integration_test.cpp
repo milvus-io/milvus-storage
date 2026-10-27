@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include <cerrno>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -20,7 +21,10 @@
 
 #include <arrow/api.h>
 #include <arrow/io/file.h>
+#include <arrow/c/bridge.h>
+#include <arrow/filesystem/localfs.h>
 #include <arrow/util/io_util.h>
+#include <arrow/util/uri.h>
 #include <fmt/format.h>
 #include <folly/json.h>
 #include <parquet/arrow/writer.h>
@@ -33,9 +37,12 @@
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/format/paimon/paimon_common.h"
 #include "milvus-storage/format/paimon/paimon_format_reader.h"
+#include "milvus-storage/manifest.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/reader.h"
 #include "paimon/paimon_bridge.h"
+#include "runtime/bridge_util.h"
+#include "milvus-storage/ffi_c.h"
 #include "test_env.h"
 
 namespace milvus_storage::test {
@@ -70,6 +77,26 @@ class PaimonIntegrationTest : public ::testing::Test {
 
   api::Properties properties_;
   std::string table_dir_;
+};
+
+// As in the Iceberg bridge tests, route cloud-style URIs through a supplied
+// local filesystem. Any native cloud-provider fallback would fail these reads.
+class PaimonTestFileSystem final : public FileSystemProxy {
+  public:
+  PaimonTestFileSystem() : FileSystemProxy("/", std::make_shared<arrow::fs::LocalFileSystem>()) {}
+
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string& path) override {
+    ++opens;
+    ARROW_RETURN_NOT_OK(failure);
+    return FileSystemProxy::OpenInputFile(path);
+  }
+
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const arrow::fs::FileInfo& info) override {
+    return OpenInputFile(info.path());
+  }
+
+  std::atomic<int64_t> opens{0};
+  arrow::Status failure;
 };
 
 class FailingRecordBatchReader : public arrow::RecordBatchReader {
@@ -168,6 +195,29 @@ TEST_F(PaimonIntegrationTest, ReadsWithoutMetadataCache) {
   EXPECT_EQ(std::accumulate(batches.begin(), batches.end(), int64_t{0},
                             [](int64_t rows, const auto& batch) { return rows + batch->num_rows(); }),
             static_cast<int64_t>(kRows));
+}
+
+TEST_F(PaimonIntegrationTest, RejectsBlobTablesAtExploreAndDataSplitOpen) {
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 1, "append").status());
+  ASSERT_AND_ASSIGN(auto files, Explore("data-split"));
+  ASSERT_EQ(files.size(), 1);
+
+  const auto schema_path = table_dir_ + "/schema/schema-0";
+  std::ifstream input(schema_path);
+  auto schema = folly::parseJson(std::string(std::istreambuf_iterator<char>(input), {}));
+  input.close();
+  schema["fields"][1]["type"] = "BLOB";
+  schema["options"]["blob-descriptor-field"] = "name";
+  std::ofstream(schema_path) << folly::toJson(schema);
+
+  for (const auto* mode : {"auto", "direct-file", "data-split"}) {
+    auto result = Explore(mode);
+    EXPECT_TRUE(result.status().IsNotImplemented()) << mode << ": " << result.status();
+  }
+  // Reopening an existing descriptor must use the same table-level guard,
+  // even when the requested projection does not include the BLOB column.
+  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
+  EXPECT_TRUE(reader.status().IsNotImplemented()) << reader.status();
 }
 
 TEST_F(PaimonIntegrationTest, DeletionVectorReadsBypassDisabledMetadataCache) {
@@ -289,7 +339,7 @@ TEST_F(PaimonIntegrationTest, ScanOptionsAreValidatedForLatestAndPinnedSnapshots
   auto latest_schema =
       folly::parseJson(std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()));
   latest_schema["id"] = 1;
-  latest_schema["options"]["scan.watermark"] = "5";
+  latest_schema["options"]["incremental-between"] = "1,2";
   std::ofstream output(fmt::format("{}/schema/schema-1", table_dir_));
   ASSERT_TRUE(output.is_open());
   output << folly::toJson(latest_schema);
@@ -299,14 +349,14 @@ TEST_F(PaimonIntegrationTest, ScanOptionsAreValidatedForLatestAndPinnedSnapshots
   auto files = Explore("auto");
   ASSERT_FALSE(files.ok());
   EXPECT_TRUE(files.status().IsNotImplemented()) << files.status().ToString();
-  EXPECT_NE(files.status().ToString().find("scan.watermark"), std::string::npos);
+  EXPECT_NE(files.status().ToString().find("incremental-between"), std::string::npos);
 
   ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, std::to_string(snapshot_id).c_str()),
             std::nullopt);
   files = Explore("auto");
   ASSERT_FALSE(files.ok());
   EXPECT_TRUE(files.status().IsNotImplemented()) << files.status().ToString();
-  EXPECT_NE(files.status().ToString().find("scan.watermark"), std::string::npos);
+  EXPECT_NE(files.status().ToString().find("incremental-between"), std::string::npos);
 }
 
 TEST_F(PaimonIntegrationTest, ExplicitDataSplitReadsAppendTable) {
@@ -895,6 +945,209 @@ TEST_F(PaimonIntegrationTest, MissingTableFailsAndWriterIsReadOnly) {
                                       properties_);
   ASSERT_FALSE(writer.ok());
   EXPECT_TRUE(writer.status().IsNotImplemented());
+}
+
+TEST_F(PaimonIntegrationTest, PlanningRejectsInvalidFilesystemOptions) {
+  auto filesystem = std::make_shared<PaimonTestFileSystem>();
+  const paimon::StorageOptions options{{"milvus_fs_is_local", "false"}, {"milvus_fs_bucket", "bucket"}};
+  auto before = filesystem->opens.load();
+  auto wrong_bucket = paimon::PlanFiles("s3://other" + table_dir_, -1, "auto", filesystem, options);
+  EXPECT_TRUE(wrong_bucket.status().IsInvalid()) << wrong_bucket.status().ToString();
+  EXPECT_EQ(filesystem->opens.load(), before);
+  auto secret_options = options;
+  secret_options["s3.secret-key"] = "must-not-be-logged";
+  auto rejected = paimon::PlanFiles("s3://bucket" + table_dir_, -1, "auto", filesystem, secret_options);
+  EXPECT_TRUE(rejected.status().IsInvalid());
+  EXPECT_EQ(rejected.status().ToString().find("must-not-be-logged"), std::string::npos);
+  EXPECT_EQ(filesystem->opens.load(), before);
+}
+
+TEST_F(PaimonIntegrationTest, EscapedPathsSurvivePlanningAndReads) {
+  const auto table_path = table_dir_ + "/p=a%2Fb%25c%3Dd%252Fe/中文 空格";
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_path, 12, "deletion-vector", {1, 5, 9}).status());
+  auto filesystem = std::make_shared<PaimonTestFileSystem>();
+  for (const auto& prefix :
+       {"file://", "s3://bucket", "oss://bucket", "gs://bucket", "abfss://bucket@account.dfs.core.windows.net"}) {
+    SCOPED_TRACE(prefix);
+    const paimon::StorageOptions options =
+        std::string(prefix) == "file://"
+            ? paimon::StorageOptions{{"milvus_fs_is_local", "true"}, {"milvus_fs_root_path", "/"}}
+            : paimon::StorageOptions{{"milvus_fs_is_local", "false"}, {"milvus_fs_bucket", "bucket"}};
+    const auto location = std::string(prefix) + table_path;
+    ASSERT_AND_ASSIGN(auto files, paimon::PlanFiles(location, -1, "direct-file", filesystem, options));
+    ASSERT_EQ(files.size(), 1);
+    auto descriptor = folly::parseJson(files.front().metadata_json);
+    EXPECT_EQ(descriptor["record_count"].asInt(), 9);
+    const auto& deletion = descriptor["deletion_file"];
+    auto before = filesystem->opens.load();
+    ASSERT_AND_ASSIGN(auto positions, paimon::ReadDeletionVector(deletion["path"].asString(), files.front().path,
+                                                                 deletion["offset"].asInt(), deletion["length"].asInt(),
+                                                                 3, filesystem, options));
+    EXPECT_EQ(positions, (std::vector<uint64_t>{1, 5, 9}));
+    EXPECT_GT(filesystem->opens.load(), before);
+
+    ASSERT_AND_ASSIGN(files, paimon::PlanFiles(location, -1, "data-split", filesystem, options));
+    ASSERT_EQ(files.size(), 1);
+    ASSERT_AND_ASSIGN(auto reader, paimon::BlockingPaimonDataSplitReader::Open(files.front().metadata_json, location,
+                                                                               filesystem, options));
+    ASSERT_AND_ASSIGN(auto stream, reader->OpenStream({"id"}));
+    ASSERT_AND_ASSIGN(auto batches, arrow::ImportRecordBatchReader(&stream));
+    ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatchReader(batches.get()));
+    EXPECT_EQ(table->num_rows(), 9);
+  }
+}
+
+TEST_F(PaimonIntegrationTest, DeletionVectorCannotChangeDataFileBinding) {
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 12, "deletion-vector", {1, 5, 9}).status());
+  auto filesystem = std::make_shared<PaimonTestFileSystem>();
+  const paimon::StorageOptions options{{"milvus_fs_is_local", "false"}, {"milvus_fs_bucket", "bucket"}};
+  ASSERT_AND_ASSIGN(auto files, paimon::PlanFiles("s3://bucket" + table_dir_, -1, "direct-file", filesystem, options));
+  ASSERT_EQ(files.size(), 1);
+  const auto descriptor = folly::parseJson(files.front().metadata_json);
+  const auto& deletion = descriptor["deletion_file"];
+  const auto path = deletion["path"].asString();
+  ASSERT_EQ(path.rfind("s3://bucket/", 0), 0);
+  const auto key = path.substr(std::string("s3://bucket").size());
+  // These URIs address the same local fixture if the binding is not checked.
+  for (const auto& prefix : {"gs://bucket", "oss://bucket", "s3://other", "file://"}) {
+    SCOPED_TRACE(prefix);
+    const auto before = filesystem->opens.load();
+    const auto result =
+        paimon::ReadDeletionVector(std::string(prefix) + key, files.front().path, deletion["offset"].asInt(),
+                                   deletion["length"].asInt(), 3, filesystem, options);
+    EXPECT_TRUE(result.status().IsInvalid()) << result.status().ToString();
+    EXPECT_EQ(filesystem->opens.load(), before);
+  }
+  ASSERT_AND_ASSIGN(auto positions,
+                    paimon::ReadDeletionVector("s3a://bucket" + key, files.front().path, deletion["offset"].asInt(),
+                                               deletion["length"].asInt(), 3, filesystem, options));
+  EXPECT_EQ(positions, (std::vector<uint64_t>{1, 5, 9}));
+}
+
+TEST_F(PaimonIntegrationTest, EscapedPathsSurviveFormatExploreAndReads) {
+  ASSERT_AND_ASSIGN(auto* format, Format::get(LOON_FORMAT_PAIMON_TABLE));
+  for (const auto& data_format : {"parquet", "vortex"}) {
+    const auto path = table_dir_ + "/p=a%2Fb%25c%3Dd%252Fe/中文 空格/" + data_format;
+    ASSERT_STATUS_OK(paimon::CreateTestTable(path, 12, "deletion-vector", {1, 5, 9}, data_format).status());
+    ASSERT_AND_ASSIGN(auto uri, arrow::util::UriFromAbsolutePath(path));
+    for (const auto& location : {path, uri}) {
+      for (const auto& mode : {"direct-file", "data-split"}) {
+        SCOPED_TRACE(location + ": " + mode);
+        ASSERT_EQ(api::SetValue(properties_, PROPERTY_PAIMON_SCAN_MODE, mode), std::nullopt);
+        ASSERT_AND_ASSIGN(auto files, format->explore(location, properties_));
+        ASSERT_EQ(files.size(), 1);
+        EXPECT_EQ(ReadPath(files.front()), mode);
+        ASSERT_AND_ASSIGN(auto reader, format->create_reader(nullptr, files.front(), properties_, {"id"}, nullptr));
+        ASSERT_AND_ASSIGN(auto stream, reader->read_with_range(0, 9));
+        ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatchReader(stream.get()));
+        const std::vector<int64_t> expected{0, 2, 3, 4, 6, 7, 8, 10, 11};
+        ASSERT_EQ(table->num_rows(), expected.size());
+        for (int64_t row = 0; row < table->num_rows(); ++row) {
+          ASSERT_AND_ASSIGN(auto value, table->column(0)->GetScalar(row));
+          EXPECT_TRUE(value->Equals(arrow::Int64Scalar(expected[row])));
+        }
+        ASSERT_AND_ASSIGN(auto taken, reader->take({1, 8}));
+        ASSERT_EQ(taken->num_rows(), 2);
+        ASSERT_AND_ASSIGN(auto first, taken->column(0)->GetScalar(0));
+        ASSERT_AND_ASSIGN(auto last, taken->column(0)->GetScalar(1));
+        EXPECT_TRUE(first->Equals(arrow::Int64Scalar(2)));
+        EXPECT_TRUE(last->Equals(arrow::Int64Scalar(11)));
+      }
+    }
+  }
+}
+
+TEST_F(PaimonIntegrationTest, CloudManifestPathsSurviveDirectFileReaderResolution) {
+  const auto path = table_dir_ + "/p=a%2Fb%25c%3Dd%252Fe/中文 空格";
+  ASSERT_STATUS_OK(paimon::CreateTestTable(path, 12, "append").status());
+  auto filesystem = std::make_shared<PaimonTestFileSystem>();
+  const paimon::StorageOptions options{{"milvus_fs_is_local", "false"}, {"milvus_fs_bucket", "bucket"}};
+  // Exercise the same URI conversion/cache resolution as explore -> reader,
+  // routing the resulting extfs entry to local fixture files.
+  properties_["extfs.test.storage_type"] = std::string("local");
+  properties_["extfs.test.root_path"] = std::string("/");
+  properties_["extfs.test.bucket_name"] = std::string("bucket");
+  int manifest_id = 0;
+  for (const auto& prefix :
+       {"s3://bucket", "oss://bucket", "gs://bucket", "abfss://bucket@account.dfs.core.windows.net"}) {
+    SCOPED_TRACE(prefix);
+    auto before = filesystem->opens.load();
+    ASSERT_AND_ASSIGN(auto files,
+                      paimon::PlanFiles(std::string(prefix) + path, -1, "direct-file", filesystem, options));
+    ASSERT_EQ(files.size(), 1);
+    EXPECT_GT(filesystem->opens.load(), before);
+    EXPECT_EQ(folly::parseJson(files.front().metadata_json)["record_count"].asInt(), 12);
+    for (const auto& address : {"endpoint", ""}) {
+      SCOPED_TRACE(address);
+      properties_["extfs.test.address"] = std::string(address);
+      api::ColumnGroupFile file{paimon::ToMilvusUri(files.front().path, address), 0, 12, {}};
+      file.Set(api::kPropertyMetadata, files.front().metadata_json);
+      if (std::string(address).empty()) {
+        EXPECT_NE(file.path.find(":///bucket/"), std::string::npos);
+      }
+      auto group = std::make_shared<api::ColumnGroup>();
+      group->columns = {"id"};
+      group->format = LOON_FORMAT_PAIMON_TABLE;
+      group->files = {file};
+      const auto manifest_path = table_dir_ + "/manifest-" + std::to_string(manifest_id++) + ".avro";
+      ASSERT_STATUS_OK(api::Manifest::WriteTo(filesystem, manifest_path, api::Manifest({group})));
+      api::Manifest::CleanCache();
+      ASSERT_AND_ASSIGN(auto manifest, api::Manifest::ReadFrom(filesystem, manifest_path));
+      const auto& restored = manifest->columnGroups().front()->files.front();
+      EXPECT_EQ(restored.path, file.path);
+      EXPECT_EQ(restored.properties, file.properties);
+      ASSERT_AND_ASSIGN(
+          auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, restored, properties_, {"id"}, nullptr));
+      ASSERT_AND_ASSIGN(auto taken, reader->take({0, 11}));
+      ASSERT_EQ(taken->num_rows(), 2);
+      ASSERT_AND_ASSIGN(auto last, taken->column(0)->GetScalar(1));
+      EXPECT_TRUE(last->Equals(arrow::Int64Scalar(11)));
+    }
+  }
+}
+
+TEST_F(PaimonIntegrationTest, DataSplitStreamRetainsSuppliedFilesystem) {
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 17, "mor").status());
+  auto filesystem = std::make_shared<PaimonTestFileSystem>();
+  std::weak_ptr<PaimonTestFileSystem> lease = filesystem;
+  const paimon::StorageOptions options{{"milvus_fs_is_local", "false"}, {"milvus_fs_bucket", "bucket"}};
+  auto location = "oss://bucket" + table_dir_;
+  ASSERT_AND_ASSIGN(auto files, paimon::PlanFiles(location, -1, "auto", filesystem, options));
+  ASSERT_EQ(files.size(), 1);
+  ASSERT_AND_ASSIGN(auto reader, paimon::BlockingPaimonDataSplitReader::Open(files.front().metadata_json, location,
+                                                                             filesystem, options));
+  ASSERT_AND_ASSIGN(auto stream, reader->OpenStream({"id"}));
+  filesystem.reset();
+  reader.reset();
+  EXPECT_FALSE(lease.expired());
+  ASSERT_AND_ASSIGN(auto batches, arrow::ImportRecordBatchReader(&stream));
+  ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatchReader(batches.get()));
+  EXPECT_EQ(table->num_rows(), 17);
+  EXPECT_EQ(table->num_columns(), 1);
+}
+
+TEST_F(PaimonIntegrationTest, PlanningPreservesFilesystemStatusDetails) {
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 12, "append").status());
+  auto filesystem = std::make_shared<PaimonTestFileSystem>();
+  const paimon::StorageOptions options{{"milvus_fs_is_local", "true"}, {"milvus_fs_root_path", "/"}};
+  filesystem->failure = MakeExtendError(ExtendStatusCode::StorageTransientThrottling, "injected", "injected");
+  auto result = paimon::PlanFiles(table_dir_, -1, "auto", filesystem, options);
+  auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+  ASSERT_NE(detail, nullptr) << result.status().ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientThrottling);
+  filesystem->failure =
+      arrow::Status::IOError("injected permission error").WithDetail(arrow::internal::StatusDetailFromErrno(EACCES));
+  result = paimon::PlanFiles(table_dir_, -1, "auto", filesystem, options);
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(result.status()), EACCES) << result.status().ToString();
+}
+
+TEST(PaimonBridgeErrorClassification, StreamReaderPreservesFilesystemStatus) {
+  auto message = std::string(kFFIErrorCodeMarker) + std::to_string(LOON_PERMISSION_DENIED) + "; permission denied";
+  auto inner = std::make_shared<FailingRecordBatchReader>(arrow::Status::IOError(message));
+  auto reader = paimon::internal::WrapPaimonRecordBatchReader(inner, arrow::schema({}));
+  std::shared_ptr<arrow::RecordBatch> batch;
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(reader->ReadNext(&batch)), EACCES);
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(reader->Close()), EACCES);
 }
 
 TEST(PaimonBridgeErrorClassification, MarkersMapToArrowStatuses) {

@@ -23,7 +23,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use futures::{StreamExt, stream::BoxStream};
 use paimon::catalog::Identifier;
 use paimon::io::{FileIO, FileRead};
-use paimon::spec::{CoreOptions, MergeEngine, SCAN_SNAPSHOT_ID_OPTION};
+use paimon::spec::{CoreOptions, DataType, MergeEngine, SCAN_SNAPSHOT_ID_OPTION};
 use paimon::table::{SchemaManager, SnapshotManager};
 use paimon::{DataSplit, DeletionFile, Table};
 use roaring::RoaringBitmap;
@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 
 use crate::TOKIO_RT;
-use crate::paimon_ffi::PaimonFileInfo;
+use crate::paimon_ffi::{PaimonFileInfo, PaimonFileSystemWrapper};
 
 const METADATA_VERSION: u32 = 1;
 const ERROR_INVALID_PREFIX: &str = "[paimon:error=invalid]";
@@ -62,7 +62,8 @@ fn not_implemented_message(message: impl std::fmt::Display) -> String {
 
 fn classify_bridge_error(error: anyhow::Error) -> anyhow::Error {
     let message = format!("{error:#}");
-    if [ERROR_INVALID_PREFIX, ERROR_NOT_IMPLEMENTED_PREFIX]
+    // The C++ filesystem already supplied its authoritative status category.
+    if [crate::filesystem_c::LOON_FFI_ERRCODE_MARKER, ERROR_INVALID_PREFIX, ERROR_NOT_IMPLEMENTED_PREFIX]
         .iter()
         .any(|marker| message.contains(marker))
     {
@@ -255,6 +256,7 @@ fn pinned_metadata_result<T>(
 ) -> Result<T> {
     result.map_err(|error| {
         let not_found = match &error {
+            paimon::Error::SnapshotNotExist { .. } => true,
             paimon::Error::IoUnexpected { source, .. } => {
                 source.kind().into_static() == "NotFound"
             }
@@ -276,24 +278,22 @@ fn pinned_metadata_result<T>(
     })
 }
 
+fn contains_blob(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::Blob(_) => true,
+        DataType::Array(array) => contains_blob(array.element_type()),
+        DataType::Map(map) => contains_blob(map.key_type()) || contains_blob(map.value_type()),
+        DataType::Multiset(multiset) => contains_blob(multiset.element_type()),
+        DataType::Row(row) => row.fields().iter().any(|field| contains_blob(field.data_type())),
+        _ => false,
+    }
+}
+
 async fn load_table(
     table_location: &str,
-    storage_options: &HashMap<String, String>,
+    file_io: FileIO,
     snapshot_id: Option<i64>,
 ) -> Result<Table> {
-    let file_io = FileIO::from_path(table_location)
-        .with_context(|| {
-            invalid_message(format_args!(
-                "cannot infer Paimon storage from '{table_location}'"
-            ))
-        })?
-        .with_props(storage_options)
-        .build()
-        .with_context(|| {
-            invalid_message(format_args!(
-                "cannot build Paimon FileIO for '{table_location}'"
-            ))
-        })?;
     let schema_manager = SchemaManager::new(file_io.clone(), table_location.to_string());
     let latest_schema = schema_manager.latest().await?.ok_or_else(|| {
         anyhow!(invalid_message(format_args!(
@@ -327,6 +327,13 @@ async fn load_table(
         None => (*latest_schema).clone(),
     };
     CoreOptions::new(schema.options()).validate_scan_options()?;
+    // HTTP BLOB resolution bypasses FileIOProvider and its filesystem binding.
+    // Reject it before either Explore or a persisted DataSplit opens a stream.
+    ensure!(
+        schema.core_options().blob_fields().is_empty()
+            && !schema.fields().iter().any(|field| contains_blob(field.data_type())),
+        not_implemented_message("Paimon BLOB tables are not supported by the shared filesystem reader")
+    );
     Ok(Table::new(
         file_io,
         Identifier::new("unknown", table_name(table_location)),
@@ -544,9 +551,8 @@ fn metadata_split_row_count(split: &DataSplit) -> Result<Option<u64>> {
 }
 
 async fn count_split_rows(table: &Table, split: &DataSplit) -> Result<u64> {
-    // `DataSplit::merged_row_count` describes the full file group and does
-    // not account for an attached row-range selection. Such splits must be
-    // counted through the actual Paimon reader.
+    // Conservatively count row-range selections through the reader so the
+    // manifest reflects the rows returned after read-time filtering.
     if let Some(count) = metadata_split_row_count(split)? {
         return Ok(count);
     }
@@ -706,6 +712,7 @@ fn encode_direct_metadata(
 }
 
 pub fn paimon_plan_files(
+    filesystem: cxx::SharedPtr<PaimonFileSystemWrapper>,
     table_location: &str,
     snapshot_id: i64,
     scan_mode: &str,
@@ -717,7 +724,8 @@ pub fn paimon_plan_files(
         .map_err(classify_bridge_error)?;
     TOKIO_RT.block_on(async move {
         let snapshot_id = (snapshot_id >= 0).then_some(snapshot_id);
-        let table = load_table(table_location, &options, snapshot_id).await?;
+        let (file_io, binding) = crate::paimon_opendal::file_io(filesystem, table_location, options)?;
+        let table = load_table(table_location, file_io, snapshot_id).await?;
         let table_read_semantics = TableReadSemantics::from_table(&table)?;
         let plan = table.new_read_builder().new_scan().plan().await?;
         let mut result = Vec::new();
@@ -752,7 +760,7 @@ pub fn paimon_plan_files(
                                     "deletion vector cardinality",
                                 )?,
                                 None => {
-                                    read_deletion_vector(&options, deletion).await?.len() as u64
+                                    read_deletion_vector(table.file_io(), deletion).await?.len() as u64
                                 }
                             },
                         };
@@ -770,6 +778,12 @@ pub fn paimon_plan_files(
                             continue;
                         }
                         let path = split.data_file_path(file);
+                        // FileIO::new_input defers provider resolution until IO.
+                        // Check manifest paths now without an extra storage request.
+                        binding.relative_path(&path)?;
+                        if let Some(deletion) = deletion {
+                            binding.relative_path(deletion.path())?;
+                        }
                         let data_format = file_format(&path);
                         result.push(PaimonFileInfo {
                             path,
@@ -790,7 +804,7 @@ pub fn paimon_plan_files(
 }
 
 async fn read_deletion_vector(
-    storage_options: &HashMap<String, String>,
+    file_io: &FileIO,
     deletion_file: &DeletionFile,
 ) -> Result<Vec<u64>> {
     let offset = checked_non_negative(deletion_file.offset(), "deletion vector offset")?;
@@ -800,7 +814,7 @@ async fn read_deletion_vector(
         offset,
         length,
         deletion_file.cardinality().unwrap_or(-1),
-        storage_options,
+        file_io,
     )
     .await
 }
@@ -810,7 +824,7 @@ async fn read_deletion_vector_at(
     offset: u64,
     length: u64,
     expected_cardinality: i64,
-    storage_options: &HashMap<String, String>,
+    file_io: &FileIO,
 ) -> Result<Vec<u64>> {
     ensure!(
         expected_cardinality >= -1,
@@ -824,19 +838,6 @@ async fn read_deletion_vector_at(
             "Paimon deletion vector length is too small: {length}"
         ))
     );
-    let file_io = FileIO::from_path(path)
-        .with_context(|| {
-            invalid_message(format_args!(
-                "cannot infer Paimon deletion vector storage from '{path}'"
-            ))
-        })?
-        .with_props(storage_options)
-        .build()
-        .with_context(|| {
-            invalid_message(format_args!(
-                "cannot build Paimon deletion vector FileIO for '{path}'"
-            ))
-        })?;
     let input = file_io.new_input(path).with_context(|| {
         invalid_message(format_args!(
             "cannot address Paimon deletion vector file '{path}'"
@@ -985,7 +986,9 @@ async fn read_deletion_vector_at(
 }
 
 pub fn paimon_read_deletion_vector(
+    filesystem: cxx::SharedPtr<PaimonFileSystemWrapper>,
     path: &str,
+    data_file_path: &str,
     offset: u64,
     length: u64,
     expected_cardinality: i64,
@@ -994,12 +997,15 @@ pub fn paimon_read_deletion_vector(
 ) -> Result<Vec<u64>> {
     let options = options_from_vecs(storage_options_keys, storage_options_values)
         .map_err(classify_bridge_error)?;
+    // A persisted DV path must not redefine the data file's filesystem binding.
+    let (file_io, _) = crate::paimon_opendal::file_io(filesystem, data_file_path, options)
+        .map_err(|error| classify_bridge_error(error.into()))?;
     TOKIO_RT.block_on(read_deletion_vector_at(
         path,
         offset,
         length,
         expected_cardinality,
-        &options,
+        &file_io,
     ))
     .map_err(classify_bridge_error)
 }
@@ -1054,6 +1060,7 @@ pub struct BlockingPaimonDataSplitReader {
 }
 
 fn open_data_split_reader_impl(
+    filesystem: cxx::SharedPtr<PaimonFileSystemWrapper>,
     metadata_json: &str,
     expected_table_location: &str,
     storage_options_keys: Vec<String>,
@@ -1070,7 +1077,8 @@ fn open_data_split_reader_impl(
         .table_location
         .as_deref()
         .ok_or_else(|| anyhow!("Paimon data-split descriptor has no table_location"))?;
-    let table = TOKIO_RT.block_on(load_table(table_location, &options, metadata.snapshot_id))?;
+    let (file_io, _) = crate::paimon_opendal::file_io(filesystem, table_location, options)?;
+    let table = TOKIO_RT.block_on(load_table(table_location, file_io, metadata.snapshot_id))?;
     let read = table.new_read_builder().new_read()?;
     let schema = paimon::arrow::build_target_arrow_schema(read.read_type())?;
     Ok(Box::new(BlockingPaimonDataSplitReader {
@@ -1081,12 +1089,14 @@ fn open_data_split_reader_impl(
 }
 
 pub fn paimon_open_data_split_reader(
+    filesystem: cxx::SharedPtr<PaimonFileSystemWrapper>,
     metadata_json: &str,
     expected_table_location: &str,
     storage_options_keys: Vec<String>,
     storage_options_values: Vec<String>,
 ) -> Result<Box<BlockingPaimonDataSplitReader>> {
     open_data_split_reader_impl(
+        filesystem,
         metadata_json,
         expected_table_location,
         storage_options_keys,
@@ -1351,7 +1361,7 @@ mod tests {
             .with_raw_convertible(true)
             .build()
             .unwrap();
-        assert_eq!(with_range.merged_row_count(), Some(10));
+        assert_eq!(with_range.merged_row_count(), Some(3));
         assert_eq!(metadata_split_row_count(&with_range).unwrap(), None);
         let mut evolved_file = test_file("data.parquet");
         evolved_file.write_cols = Some(vec!["id".to_string()]);
@@ -1739,6 +1749,330 @@ mod tests {
     }
 
     #[test]
+    fn load_table_rejects_blob_types_and_options() {
+        use paimon::spec::{
+            ArrayType, BlobType, DataField, DataType, FloatType, MapType, MultisetType, RowType,
+            VarBinaryType, VectorType,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("table");
+        let location = path.to_str().unwrap();
+        crate::paimon_testutil::paimon_create_test_table(
+            location,
+            1,
+            "append",
+            vec![],
+            vec![],
+            vec![],
+            "parquet",
+            0,
+        )
+        .unwrap();
+        let schema_path = format!("{location}/schema/schema-0");
+        let original: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&schema_path).unwrap()).unwrap();
+        let blob = DataType::Blob(BlobType::new());
+        let binary = DataType::VarBinary(VarBinaryType::new(32).unwrap());
+        let float = DataType::Float(FloatType::new());
+        for (data_type, rejected) in [
+            (blob.clone(), true),
+            (DataType::Array(ArrayType::new(blob.clone())), true),
+            (
+                DataType::Map(MapType::new(binary.clone(), blob.clone())),
+                true,
+            ),
+            (
+                DataType::Map(MapType::new(blob.clone(), binary.clone())),
+                true,
+            ),
+            (DataType::Multiset(MultisetType::new(blob.clone())), true),
+            (
+                DataType::Row(RowType::new(vec![DataField::new(
+                    3,
+                    "nested".to_string(),
+                    blob,
+                )])),
+                true,
+            ),
+            (binary.clone(), false),
+            (DataType::Array(ArrayType::new(float.clone())), false),
+            (DataType::Vector(VectorType::new(4, float).unwrap()), false),
+        ] {
+            let mut schema = original.clone();
+            schema["fields"][1]["type"] = serde_json::to_value(&data_type).unwrap();
+            std::fs::write(&schema_path, serde_json::to_vec(&schema).unwrap()).unwrap();
+            let result = TOKIO_RT.block_on(load_table(
+                location,
+                FileIO::from_path(location).unwrap().build().unwrap(),
+                None,
+            ));
+            if rejected {
+                let error = result.err().expect("BLOB schema must be rejected");
+                assert!(
+                    error.to_string().contains(ERROR_NOT_IMPLEMENTED_PREFIX),
+                    "{data_type}: {error:#}"
+                );
+            } else {
+                assert!(result.is_ok(), "{data_type}: {:?}", result.err());
+            }
+        }
+        for (option, read_option) in [
+            ("blob-field", None),
+            ("blob-descriptor-field", None),
+            ("blob.stored-descriptor-fields", None),
+            ("blob-view-field", None),
+            ("video-frame-field", None),
+            ("blob-descriptor-field", Some(("blob-as-descriptor", "true"))),
+            ("blob-view-field", Some(("blob-view.resolve.enabled", "false"))),
+        ] {
+            let mut schema = original.clone();
+            schema["fields"][1]["type"] = serde_json::to_value(&binary).unwrap();
+            schema["options"][option] = serde_json::json!("name");
+            if let Some((key, value)) = read_option {
+                schema["options"][key] = serde_json::json!(value);
+            }
+            std::fs::write(&schema_path, serde_json::to_vec(&schema).unwrap()).unwrap();
+            let error = TOKIO_RT
+                .block_on(load_table(
+                    location,
+                    FileIO::from_path(location).unwrap().build().unwrap(),
+                    None,
+                ))
+                .err()
+                .expect("BLOB option must be rejected");
+            assert!(
+                error.to_string().contains(ERROR_NOT_IMPLEMENTED_PREFIX),
+                "{option}, {read_option:?}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn blob_reads_are_rejected_before_http_requests() {
+        use arrow_array::{ArrayRef, Int64Array, LargeBinaryArray};
+        use paimon::spec::{BigIntType, BlobDescriptor, BlobType, DataType, Schema, TableSchema};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let fixture = crate::filesystem_opendal::tests::LocalOperatorFixture::new();
+        let table_path = fixture.root.path().join("blob-table");
+        let location = table_path.to_str().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = requests.clone();
+        // JoinSet aborts the listener on drop, including assertion failures.
+        let (server, address) =
+            TOKIO_RT.block_on(async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let mut server = tokio::task::JoinSet::new();
+                server.spawn(async move {
+                    loop {
+                        let (socket, _) = listener.accept().await.unwrap();
+                        let mut socket = BufReader::new(socket);
+                        let mut header = String::new();
+                        loop {
+                            assert!(socket.read_line(&mut header).await.unwrap() > 0);
+                            if header == "\r\n" {
+                                break;
+                            }
+                            header.clear();
+                        }
+                        request_count.fetch_add(1, Ordering::SeqCst);
+                        socket.get_mut().write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc",
+                    ).await.unwrap();
+                    }
+                });
+                (server, address)
+            });
+        let descriptor = BlobDescriptor::new(format!("http://{address}/payload"), 0, 3).serialize();
+        let schema = TableSchema::new(
+            0,
+            &Schema::builder()
+                .column("id", DataType::BigInt(BigIntType::new()))
+                .column("payload", DataType::Blob(BlobType::new()))
+                .option("row-tracking.enabled", "true")
+                .option("data-evolution.enabled", "true")
+                .option("blob-descriptor-field", "payload")
+                .build()
+                .unwrap(),
+        );
+        let file_io = FileIO::from_path(location).unwrap().build().unwrap();
+        let table = Table::new(
+            file_io.clone(),
+            Identifier::new("default", "blob-table"),
+            location.to_string(),
+            schema.clone(),
+            None,
+        );
+        let batch = RecordBatch::try_from_iter([
+            ("id", Arc::new(Int64Array::from(vec![1])) as ArrayRef),
+            (
+                "payload",
+                Arc::new(LargeBinaryArray::from(vec![Some(descriptor.as_slice())])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        let split = TOKIO_RT.block_on(async {
+            for directory in ["schema", "snapshot", "manifest"] {
+                file_io
+                    .mkdirs(&format!("{location}/{directory}"))
+                    .await
+                    .unwrap();
+            }
+            file_io
+                .new_output(&format!("{location}/schema/schema-0"))
+                .unwrap()
+                .write(bytes::Bytes::from(serde_json::to_vec(&schema).unwrap()))
+                .await
+                .unwrap();
+            let builder = table.new_write_builder();
+            let mut writer = builder.new_write().unwrap();
+            writer.write_arrow_batch(&batch).await.unwrap();
+            builder
+                .new_commit()
+                .commit(writer.prepare_commit().await.unwrap())
+                .await
+                .unwrap();
+            let plan = table.new_read_builder().new_scan().plan().await.unwrap();
+            assert_eq!(plan.splits().len(), 1);
+            plan.splits()[0].clone()
+        });
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        let keys = vec![
+            "milvus_fs_is_local".to_string(),
+            "milvus_fs_root_path".to_string(),
+        ];
+        let values = vec![
+            "true".to_string(),
+            fixture.root.path().to_str().unwrap().to_string(),
+        ];
+        let (bound_io, _) = crate::paimon_opendal::file_io(
+            fixture.filesystem.clone(),
+            location,
+            options_from_vecs(keys.clone(), values.clone()).unwrap(),
+        )
+        .unwrap();
+        // Positive control: the same table really resolves HTTP through Paimon,
+        // bypassing the bound provider unless our load_table policy rejects it.
+        let upstream_table = Table::new(
+            bound_io,
+            Identifier::new("default", "blob-table"),
+            location.to_string(),
+            schema,
+            None,
+        );
+        TOKIO_RT.block_on(async {
+            let read = upstream_table.new_read_builder().new_read().unwrap();
+            let mut stream = read.to_arrow(std::slice::from_ref(&split)).unwrap();
+            let batch = tokio::time::timeout(std::time::Duration::from_secs(10), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let payload = batch
+                .column_by_name("payload")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .unwrap();
+            assert_eq!(payload.value(0), b"abc");
+            assert!(stream.next().await.is_none());
+        });
+        assert!(requests.swap(0, Ordering::SeqCst) > 0);
+
+        for snapshot_id in [-1, split.snapshot_id()] {
+            for mode in ["auto", "direct-file", "data-split"] {
+                let error = paimon_plan_files(
+                    fixture.filesystem.clone(),
+                    location,
+                    snapshot_id,
+                    mode,
+                    keys.clone(),
+                    values.clone(),
+                )
+                .err()
+                .expect("BLOB Explore must be rejected");
+                assert!(
+                    error.to_string().contains(ERROR_NOT_IMPLEMENTED_PREFIX),
+                    "{error:#}"
+                );
+                assert!(error.to_string().contains("BLOB"), "{error:#}");
+            }
+        }
+        // A descriptor persisted before the guard must not bypass it on reopen.
+        let metadata = encode_split_metadata(location, &split, 1).unwrap();
+        let error = paimon_open_data_split_reader(
+            fixture.filesystem.clone(),
+            &metadata,
+            location,
+            keys.clone(),
+            values.clone(),
+        )
+        .err()
+        .expect("BLOB DataSplit must be rejected");
+        assert!(
+            error.to_string().contains(ERROR_NOT_IMPLEMENTED_PREFIX),
+            "{error:#}"
+        );
+        assert!(error.to_string().contains("BLOB"), "{error:#}");
+
+        // Dropping BLOB from the latest schema must not hide it in an old snapshot.
+        let mut latest_schema: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(format!("{location}/schema/schema-0")).unwrap(),
+        )
+        .unwrap();
+        latest_schema["id"] = serde_json::json!(1);
+        latest_schema["fields"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|field| field["name"] != "payload");
+        latest_schema["options"]
+            .as_object_mut()
+            .unwrap()
+            .remove("blob-descriptor-field");
+        std::fs::write(
+            format!("{location}/schema/schema-1"),
+            serde_json::to_vec(&latest_schema).unwrap(),
+        )
+        .unwrap();
+        TOKIO_RT
+            .block_on(load_table(
+                location,
+                FileIO::from_path(location).unwrap().build().unwrap(),
+                None,
+            ))
+            .expect("latest schema without BLOB must remain readable");
+        let error = paimon_plan_files(
+            fixture.filesystem.clone(),
+            location,
+            split.snapshot_id(),
+            "auto",
+            keys.clone(),
+            values.clone(),
+        )
+        .err()
+        .expect("pinned BLOB snapshot must be rejected after schema evolution");
+        assert!(error.to_string().contains(ERROR_NOT_IMPLEMENTED_PREFIX), "{error:#}");
+        let error = paimon_open_data_split_reader(
+            fixture.filesystem.clone(),
+            &metadata,
+            location,
+            keys,
+            values,
+        )
+        .err()
+        .expect("persisted BLOB DataSplit must retain its historical schema check");
+        assert!(error.to_string().contains(ERROR_NOT_IMPLEMENTED_PREFIX), "{error:#}");
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        drop(server);
+    }
+
+    #[test]
     fn pinned_snapshot_uses_historical_schema_with_latest_options() {
         let directory = tempfile::tempdir().unwrap();
         let table_location = directory.path().join("snap-table");
@@ -1778,7 +2112,7 @@ mod tests {
         let table = TOKIO_RT
             .block_on(load_table(
                 table_location,
-                &HashMap::new(),
+                FileIO::from_path(table_location).unwrap().build().unwrap(),
                 Some(snapshot_id),
             ))
             .unwrap();
@@ -1819,7 +2153,7 @@ mod tests {
         let table = TOKIO_RT
             .block_on(load_table(
                 table_location,
-                &HashMap::new(),
+                FileIO::from_path(table_location).unwrap().build().unwrap(),
                 Some(snapshot_id),
             ))
             .unwrap();
@@ -1835,7 +2169,7 @@ mod tests {
         let error = TOKIO_RT
             .block_on(load_table(
                 table_location,
-                &HashMap::new(),
+                FileIO::from_path(table_location).unwrap().build().unwrap(),
                 Some(snapshot_id + 1000),
             ))
             .unwrap_err();
@@ -1872,7 +2206,7 @@ mod tests {
         let error = TOKIO_RT
             .block_on(load_table(
                 table_location,
-                &HashMap::new(),
+                FileIO::from_path(table_location).unwrap().build().unwrap(),
                 Some(snapshot_id),
             ))
             .unwrap_err();
@@ -1929,13 +2263,15 @@ mod tests {
         bytes.extend_from_slice(&crc.finalize().to_be_bytes());
         std::fs::write(&path, &bytes).unwrap();
 
+        let file_io = FileIO::from_path(path.to_str().unwrap()).unwrap().build().unwrap();
+
         let positions = TOKIO_RT
             .block_on(read_deletion_vector_at(
                 path.to_str().unwrap(),
                 0,
                 length,
                 2,
-                &HashMap::new(),
+                &file_io,
             ))
             .unwrap();
         assert_eq!(positions, vec![1, 9]);
@@ -1946,7 +2282,7 @@ mod tests {
                 0,
                 length,
                 3,
-                &HashMap::new(),
+                &file_io,
             ))
             .unwrap_err();
         assert!(
@@ -1961,7 +2297,7 @@ mod tests {
                 0,
                 length,
                 2,
-                &HashMap::new(),
+                &file_io,
             ))
             .unwrap_err();
         assert!(
@@ -1980,7 +2316,7 @@ mod tests {
                 0,
                 length,
                 2,
-                &HashMap::new(),
+                &file_io,
             ))
             .unwrap_err();
         assert!(
