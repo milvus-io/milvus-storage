@@ -5,12 +5,10 @@ on:
     paths:
       - 'cpp/conanfile.py'
       - '.github/workflows/cpp-ci.yml'
-      - '.github/workflows/cpp-mac-ci.yml'
   pull_request:
     paths:
       - 'cpp/conanfile.py'
       - '.github/workflows/cpp-ci.yml'
-      - '.github/workflows/cpp-mac-ci.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -38,9 +36,6 @@ jobs:
           echo "CC=$LLVM_PREFIX/bin/clang" >> "$GITHUB_ENV"
           echo "CXX=$LLVM_PREFIX/bin/clang++" >> "$GITHUB_ENV"
           echo "$LLVM_PREFIX/bin" >> "$GITHUB_PATH"
-          # Match the SDK to the active Xcode linker, not Homebrew's CLT default.
-          MACOS_SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
-          echo "SDKROOT=$MACOS_SDK_PATH" >> "$GITHUB_ENV"
 
       - name: Setup Rust
         id: rust-toolchain
@@ -79,7 +74,6 @@ jobs:
             echo
             echo "[conf]"
             echo "tools.cmake:cmake_program=$SETUP_CPP_CMAKE"
-            echo "tools.apple:sdk_path=$SDKROOT"
             echo 'libsodium/*:tools.build:cflags=["-march=armv8-a+crypto+aes"]'
           } >> "${CONAN_HOME:-$HOME/.conan2}/profiles/default"
           conan profile show -pr:h default -pr:b default
