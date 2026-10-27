@@ -3,21 +3,21 @@
 
 use crate::TOKIO_RT;
 
-use futures::{FutureExt, TryStreamExt};
 use futures::stream::StreamExt;
+use futures::{FutureExt, TryStreamExt};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::result::Result as RustResult;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Handle;
 
+use arrow::datatypes::SchemaRef;
+use arrow::error::ArrowError;
+use arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
 use arrow_array::Array;
 use arrow_array::ffi::FFI_ArrowArray;
 use arrow_array::{RecordBatch, RecordBatchReader, StructArray};
 use arrow_schema::Schema as ArrowSchema;
-use arrow::datatypes::SchemaRef;
-use arrow::error::ArrowError;
-use arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
 
 use lance::dataset::AutoCleanupParams;
 use lance::dataset::builder::DatasetBuilder;
@@ -75,9 +75,10 @@ impl BlockingDataset {
         let scan_scheduler = self
             .scan_scheduler
             .get_or_init(|| {
-                ScanScheduler::new(
+                ScanScheduler::new_with_reader_wrapper(
                     self.object_store.clone(),
                     SchedulerConfig::max_bandwidth(&self.object_store),
+                    Some(crate::storage_tracing::wrap_lance_request),
                 )
             })
             .clone();
@@ -403,8 +404,8 @@ fn lance_async_panic_error(payload: Box<dyn std::any::Any + Send>) -> LanceError
     }
 }
 
-// transfer owned results through the completion callback. The callback reclaims 
-// every handle, even if the future was dropped. Submission errors never invoke 
+// transfer owned results through the completion callback. The callback reclaims
+// every handle, even if the future was dropped. Submission errors never invoke
 // the callback; successful submissions invoke it once.
 unsafe fn spawn_lance_async(
     future: impl std::future::Future<Output = Result<u64>> + Send + 'static,
@@ -728,7 +729,9 @@ impl BlockingFragmentReader {
             .map(|n| n.clone())
             .collect();
 
-        let fragment_reader = fragment.open(&meta_schema.project(&columns)?, read_config).await?;
+        let fragment_reader = fragment
+            .open(&meta_schema.project(&columns)?, read_config)
+            .await?;
 
         Ok(Self {
             inner: Arc::new(fragment_reader),
@@ -805,7 +808,8 @@ impl BlockingFragmentReader {
                     let batches: Vec<RecordBatch> = stream.buffered(1).try_collect().await?;
                     // Export materialized batches so C stream get_next never re-enters Tokio.
                     let batches = arrow_array::RecordBatchIterator::new(
-                        batches.into_iter().map(Ok::<_, ArrowError>), schema,
+                        batches.into_iter().map(Ok::<_, ArrowError>),
+                        schema,
                     );
                     let stream = FFI_ArrowArrayStream::new(Box::new(batches));
                     std::ptr::write(out_stream as *mut FFI_ArrowArrayStream, stream);

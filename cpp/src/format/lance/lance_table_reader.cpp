@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "tracing/runtime.h"
+
 #include "milvus-storage/format/lance/lance_table_reader.h"
 
 #include <algorithm>
@@ -53,10 +55,11 @@ struct LanceAsyncContext {
   folly::Promise<arrow::Result<T>> promise;
   const char* const operation;
   ImportFn import_result;
+  tracing::OperationTrace trace;
   ArrowArrayStream stream{};
 
-  LanceAsyncContext(const char* operation, ImportFn import_result)
-      : operation(operation), import_result(std::move(import_result)) {}
+  LanceAsyncContext(const char* operation, ImportFn import_result, tracing::OperationTrace trace)
+      : operation(operation), import_result(std::move(import_result)), trace(std::move(trace)) {}
 
   ~LanceAsyncContext() {
     // Arrow clears release after import; otherwise the context still owns the stream.
@@ -80,12 +83,17 @@ struct LanceAsyncContext {
           imported.hasException()
               ? arrow::Result<T>(MakeBridgeErrorStatus(context->operation, imported.exception().what().toStdString()))
               : std::move(imported).value();
+      // Native completion only queues the span; the host drain owns End/export.
+      // Observe completion even when the consumer has dropped its future.
+      context->trace.Finish(result.status());
       context->promise.setValue(std::move(result));
     } catch (const std::exception& e) {
+      context->trace.FinishException();
       // No exception may cross the Rust callback boundary. An unfulfilled
       // promise reports BrokenPromise on destruction; retain the cause here.
       RAW_LOG(ERROR, "%s: failed to publish callback result: %s", context->operation, e.what());
     } catch (...) {
+      context->trace.FinishException();
       RAW_LOG(ERROR, "%s: unknown exception publishing callback result", context->operation);
     }
   }
@@ -94,9 +102,10 @@ struct LanceAsyncContext {
 template <typename T, typename ImportFn, typename SubmitFn>
 static folly::SemiFuture<arrow::Result<T>> submit_lance_async(const char* operation,
                                                               ImportFn import_result,
-                                                              SubmitFn&& submit) {
+                                                              SubmitFn&& submit,
+                                                              tracing::OperationTrace trace = {}) {
   using Context = LanceAsyncContext<T, ImportFn>;
-  auto context = std::make_unique<Context>(operation, std::move(import_result));
+  auto context = std::make_unique<Context>(operation, std::move(import_result), std::move(trace));
   auto future = context->promise.getSemiFuture();
   // Completion can race with submission returning. Only failed submission
   // leaves ownership here; otherwise the callback reclaims the context.
@@ -111,6 +120,7 @@ static folly::SemiFuture<arrow::Result<T>> submit_lance_async(const char* operat
   }
   if (!status.ok()) {
     std::unique_ptr<Context> failed(raw);
+    failed->trace.Finish(status);
     failed->promise.setValue(std::move(status));
   }
   return future;
@@ -197,8 +207,8 @@ class LanceTableReader::MetaTrait::FragmentMetadataCache final
                                                                           FragmentMetadataLoader load_fn) {
     auto self = shared_from_this();
     return folly::makeSemiFuture().deferValue(
-        [self = std::move(self), fragment_id,
-         load_fn = std::move(load_fn)](folly::Unit) -> folly::SemiFuture<arrow::Result<FragmentMetadataPtr>> {
+        tracing::Bind([self = std::move(self), fragment_id, load_fn = std::move(load_fn)](
+                          folly::Unit) -> folly::SemiFuture<arrow::Result<FragmentMetadataPtr>> {
           std::shared_ptr<InFlightLoad> flight;
           {
             std::lock_guard<std::mutex> lock(self->mutex_);
@@ -229,9 +239,9 @@ class LanceTableReader::MetaTrait::FragmentMetadataCache final
                         error ? error->what() : "unknown exception");
               }
             });
-            auto pending =
-                std::move(future).defer([self, fragment_id, flight, abandoned = std::move(abandoned)](
-                                            folly::Try<arrow::Result<FragmentMetadataPtr>>&& result) mutable {
+            auto pending = std::move(future).defer(
+                tracing::Bind([self, fragment_id, flight, abandoned = std::move(abandoned)](
+                                  folly::Try<arrow::Result<FragmentMetadataPtr>>&& result) mutable {
                   auto loaded = result.hasException()
                                     ? arrow::Result<FragmentMetadataPtr>(arrow::Status::UnknownError(
                                           "Exception while asynchronously loading Lance fragment metadata: ",
@@ -240,7 +250,7 @@ class LanceTableReader::MetaTrait::FragmentMetadataCache final
                   auto completed = self->complete_load(fragment_id, flight, std::move(loaded));
                   abandoned.dismiss();
                   return completed;
-                });
+                }));
             // Attachment failures belong to the catch below, not to cancellation.
             flight->continuation_attached.store(true, std::memory_order_release);
             return pending;
@@ -253,7 +263,7 @@ class LanceTableReader::MetaTrait::FragmentMetadataCache final
                 fragment_id, flight,
                 arrow::Status::UnknownError("Unknown exception submitting Lance fragment metadata load")));
           }
-        });
+        }));
   }
 
   private:
@@ -345,12 +355,12 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<BlockingDataset>>> LanceTableRea
                 })
           : folly::makeSemiFuture(arrow::Result<uint64_t>(version));
   return std::move(resolved_version)
-      .deferValue(
+      .deferValue(tracing::Bind(
           [base_uri, filesystem, options, filesystem_key = fs_config.GetCacheKey()](
               arrow::Result<uint64_t> result) -> folly::SemiFuture<arrow::Result<std::shared_ptr<BlockingDataset>>> {
             FOLLY_ARROW_ASSIGN_OR_RAISE(const auto version, std::move(result));
             return get_or_open_dataset_async(base_uri, filesystem, options, filesystem_key, version);
-          });
+          }));
 }
 
 LanceTableReader::LanceTableReader(MetaTrait::MetadataPtr metadata,
@@ -522,15 +532,16 @@ load_fragment_metadata_async(uint64_t fragment_id,
                [&](LanceAsyncCallback callback, void* context) {
                  return dataset->EstimateFragmentColumnMemoryAsync(fragment_id, callback, context);
                })
-        .deferValue([](arrow::Result<std::vector<uint64_t>> result) -> arrow::Result<std::vector<uint64_t>> {
-          if (!result.ok()) {
-            return arrow::Status::NotImplemented("Lance column memory size estimation is not available: ",
-                                                 result.status().message());
-          }
-          return result;
-        });
+        .deferValue(
+            tracing::Bind([](arrow::Result<std::vector<uint64_t>> result) -> arrow::Result<std::vector<uint64_t>> {
+              if (!result.ok()) {
+                return arrow::Status::NotImplemented("Lance column memory size estimation is not available: ",
+                                                     result.status().message());
+              }
+              return result;
+            }));
   }();
-  return std::move(estimates).deferValue(
+  return std::move(estimates).deferValue(tracing::Bind(
       [dataset, fragment_id, logical_rows, metadata = std::move(metadata)](arrow::Result<std::vector<uint64_t>> result)
           -> arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>> {
         if (result.ok()) {
@@ -565,7 +576,7 @@ load_fragment_metadata_async(uint64_t fragment_id,
         }
         std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata> immutable = std::move(metadata);
         return immutable;
-      });
+      }));
 }
 
 static arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>> load_fragment_metadata(
@@ -644,7 +655,7 @@ LanceTableReader::MetaTrait::load_metadata_async(const api::ColumnGroupFile& fil
                                                  const api::Properties& properties,
                                                  const KeyRetriever& /*key_retriever*/) {
   return folly::makeSemiFuture().deferValue(
-      [file, properties](folly::Unit) -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+      tracing::Bind([file, properties](folly::Unit) -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
         FOLLY_ARROW_ASSIGN_OR_RAISE(auto parsed_uri, ParseLanceUri(file.path));
         auto base_uri = std::move(parsed_uri.first);
         const auto fragment_id = parsed_uri.second;
@@ -660,31 +671,31 @@ LanceTableReader::MetaTrait::load_metadata_async(const api::ColumnGroupFile& fil
           version = parsed_version;
         }
         return open_dataset_async(base_uri, fs, properties, version)
-            .deferValue(
-                [file, properties, base_uri, fs, fragment_id](arrow::Result<std::shared_ptr<BlockingDataset>> result)
-                    -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
-                  FOLLY_ARROW_ASSIGN_OR_RAISE(auto dataset, std::move(result));
-                  auto cache = std::make_shared<FragmentMetadataCache>();
-                  return cache
-                      ->get_or_load_async(fragment_id,
-                                          [fragment_id, properties, dataset]() {
-                                            return load_fragment_metadata_async(fragment_id, properties, dataset);
-                                          })
-                      .deferValue([file, properties, base_uri, fs, dataset,
-                                   cache](arrow::Result<std::shared_ptr<const FragmentMetadata>> fragment_result)
-                                      -> arrow::Result<MetadataPtr> {
-                        ARROW_ASSIGN_OR_RAISE(auto fragment, std::move(fragment_result));
-                        auto metadata = std::make_shared<Metadata>();
-                        metadata->cache_key = cache_key(file);
-                        metadata->path = base_uri;
-                        metadata->file_schema = fragment->file_schema;
-                        metadata->cache_size = sizeof(Metadata);
-                        metadata->payload = Payload{base_uri, fs, dataset, cache, properties};
-                        MetadataPtr immutable = std::move(metadata);
-                        return immutable;
-                      });
-                });
-      });
+            .deferValue(tracing::Bind([file, properties, base_uri, fs,
+                                       fragment_id](arrow::Result<std::shared_ptr<BlockingDataset>> result)
+                                          -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+              FOLLY_ARROW_ASSIGN_OR_RAISE(auto dataset, std::move(result));
+              auto cache = std::make_shared<FragmentMetadataCache>();
+              return cache
+                  ->get_or_load_async(fragment_id,
+                                      [fragment_id, properties, dataset]() {
+                                        return load_fragment_metadata_async(fragment_id, properties, dataset);
+                                      })
+                  .deferValue(tracing::Bind([file, properties, base_uri, fs, dataset, cache](
+                                                arrow::Result<std::shared_ptr<const FragmentMetadata>> fragment_result)
+                                                -> arrow::Result<MetadataPtr> {
+                    ARROW_ASSIGN_OR_RAISE(auto fragment, std::move(fragment_result));
+                    auto metadata = std::make_shared<Metadata>();
+                    metadata->cache_key = cache_key(file);
+                    metadata->path = base_uri;
+                    metadata->file_schema = fragment->file_schema;
+                    metadata->cache_size = sizeof(Metadata);
+                    metadata->payload = Payload{base_uri, fs, dataset, cache, properties};
+                    MetadataPtr immutable = std::move(metadata);
+                    return immutable;
+                  }));
+            }));
+      }));
 }
 
 arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::create_from_metadata(
@@ -752,51 +763,52 @@ LanceTableReader::MetaTrait::create_from_metadata_async(MetadataPtr metadata,
                                                         const std::shared_ptr<arrow::Schema>& read_schema,
                                                         const std::vector<std::string>& needed_columns,
                                                         const std::string& /*predicate*/) {
-  return folly::makeSemiFuture().deferValue([metadata = std::move(metadata), file, read_schema,
-                                             needed_columns](folly::Unit)
-                                                -> folly::SemiFuture<arrow::Result<std::shared_ptr<LanceTableReader>>> {
-    if (!metadata || !metadata->payload.filesystem || !metadata->payload.dataset ||
-        !metadata->payload.fragment_metadata_cache) {
-      return folly::makeSemiFuture(arrow::Result<std::shared_ptr<LanceTableReader>>(
-          arrow::Status::Invalid("Cannot open Lance reader from incomplete metadata")));
-    }
-    FOLLY_ARROW_ASSIGN_OR_RAISE(auto parsed_uri, ParseLanceUri(file.path));
-    if (parsed_uri.first != metadata->payload.base_uri) {
-      return folly::makeSemiFuture(arrow::Result<std::shared_ptr<LanceTableReader>>(arrow::Status::Invalid(
-          "Lance metadata base URI does not match file URI: ", metadata->payload.base_uri, " != ", parsed_uri.first)));
-    }
-    const auto version_it = file.properties.find(kDatasetVersionProperty);
-    if (version_it != file.properties.end()) {
-      const auto [valid, version] = api::convert::convertFunc<uint64_t>(version_it->second);
-      if (!valid) {
-        return folly::makeSemiFuture(arrow::Result<std::shared_ptr<LanceTableReader>>(
-            arrow::Status::Invalid("Invalid Lance dataset version for file ", file.path, ": ", version_it->second)));
-      }
-      if (version != 0 && version != metadata->payload.dataset->Version()) {
-        return folly::makeSemiFuture(arrow::Result<std::shared_ptr<LanceTableReader>>(
-            arrow::Status::Invalid("Lance dataset version does not match cached metadata for file ", file.path, ": ",
-                                   version, " != ", metadata->payload.dataset->Version())));
-      }
-    }
-    const auto fragment_id = parsed_uri.second;
-    auto reader =
-        std::shared_ptr<LanceTableReader>(new LanceTableReader(metadata, fragment_id, read_schema, needed_columns));
-    return metadata->payload.fragment_metadata_cache
-        ->get_or_load_async(fragment_id,
-                            [metadata, fragment_id]() {
-                              return load_fragment_metadata_async(fragment_id, metadata->payload.properties,
-                                                                  metadata->payload.dataset);
-                            })
-        .deferValue([reader](arrow::Result<std::shared_ptr<const FragmentMetadata>> result)
-                        -> folly::SemiFuture<arrow::Result<std::shared_ptr<LanceTableReader>>> {
-          FOLLY_ARROW_ASSIGN_OR_RAISE(auto fragment, std::move(result));
-          return reader->open_fragment_async(fragment).deferValue(
-              [reader](arrow::Status status) -> arrow::Result<std::shared_ptr<LanceTableReader>> {
-                ARROW_RETURN_NOT_OK(status);
-                return reader;
-              });
-        });
-  });
+  return folly::makeSemiFuture().deferValue(
+      tracing::Bind([metadata = std::move(metadata), file, read_schema, needed_columns](
+                        folly::Unit) -> folly::SemiFuture<arrow::Result<std::shared_ptr<LanceTableReader>>> {
+        if (!metadata || !metadata->payload.filesystem || !metadata->payload.dataset ||
+            !metadata->payload.fragment_metadata_cache) {
+          return folly::makeSemiFuture(arrow::Result<std::shared_ptr<LanceTableReader>>(
+              arrow::Status::Invalid("Cannot open Lance reader from incomplete metadata")));
+        }
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto parsed_uri, ParseLanceUri(file.path));
+        if (parsed_uri.first != metadata->payload.base_uri) {
+          return folly::makeSemiFuture(arrow::Result<std::shared_ptr<LanceTableReader>>(
+              arrow::Status::Invalid("Lance metadata base URI does not match file URI: ", metadata->payload.base_uri,
+                                     " != ", parsed_uri.first)));
+        }
+        const auto version_it = file.properties.find(kDatasetVersionProperty);
+        if (version_it != file.properties.end()) {
+          const auto [valid, version] = api::convert::convertFunc<uint64_t>(version_it->second);
+          if (!valid) {
+            return folly::makeSemiFuture(arrow::Result<std::shared_ptr<LanceTableReader>>(arrow::Status::Invalid(
+                "Invalid Lance dataset version for file ", file.path, ": ", version_it->second)));
+          }
+          if (version != 0 && version != metadata->payload.dataset->Version()) {
+            return folly::makeSemiFuture(arrow::Result<std::shared_ptr<LanceTableReader>>(
+                arrow::Status::Invalid("Lance dataset version does not match cached metadata for file ", file.path,
+                                       ": ", version, " != ", metadata->payload.dataset->Version())));
+          }
+        }
+        const auto fragment_id = parsed_uri.second;
+        auto reader =
+            std::shared_ptr<LanceTableReader>(new LanceTableReader(metadata, fragment_id, read_schema, needed_columns));
+        return metadata->payload.fragment_metadata_cache
+            ->get_or_load_async(fragment_id,
+                                [metadata, fragment_id]() {
+                                  return load_fragment_metadata_async(fragment_id, metadata->payload.properties,
+                                                                      metadata->payload.dataset);
+                                })
+            .deferValue(tracing::Bind([reader](arrow::Result<std::shared_ptr<const FragmentMetadata>> result)
+                                          -> folly::SemiFuture<arrow::Result<std::shared_ptr<LanceTableReader>>> {
+              FOLLY_ARROW_ASSIGN_OR_RAISE(auto fragment, std::move(result));
+              return reader->open_fragment_async(fragment).deferValue(
+                  tracing::Bind([reader](arrow::Status status) -> arrow::Result<std::shared_ptr<LanceTableReader>> {
+                    ARROW_RETURN_NOT_OK(status);
+                    return reader;
+                  }));
+            }));
+      }));
 }
 
 folly::SemiFuture<arrow::Status> LanceTableReader::open_fragment_async(
@@ -817,8 +829,8 @@ folly::SemiFuture<arrow::Status> LanceTableReader::open_fragment_async(
              [&](LanceAsyncCallback callback, void* context) {
                return BlockingFragmentReader::OpenAsync(*dataset_, fragment_id_, c_schema, callback, context);
              })
-      .deferValue([self, metadata,
-                   requested_schema](arrow::Result<std::unique_ptr<BlockingFragmentReader>> result) -> arrow::Status {
+      .deferValue(tracing::Bind([self, metadata, requested_schema](
+                                    arrow::Result<std::unique_ptr<BlockingFragmentReader>> result) -> arrow::Status {
         ARROW_ASSIGN_OR_RAISE(auto fragment_reader, std::move(result));
         self->file_schema_ = metadata->file_schema;
         self->logical_chunk_rows_ = metadata->logical_chunk_rows;
@@ -828,102 +840,116 @@ folly::SemiFuture<arrow::Status> LanceTableReader::open_fragment_async(
         self->read_schema_ = requested_schema->metadata() ? requested_schema->RemoveMetadata() : requested_schema;
         self->fragment_reader_ = std::move(fragment_reader);
         return arrow::Status::OK();
-      });
+      }));
 }
 
 folly::SemiFuture<arrow::Status> LanceTableReader::open_async() {
-  assert(!fragment_reader_);
-  auto self = shared_from_this();
-  auto dataset = dataset_ ? folly::makeSemiFuture(arrow::Result<std::shared_ptr<BlockingDataset>>(dataset_))
-                          : open_dataset_async(uri_, filesystem_, properties_, dataset_version_);
-  return std::move(dataset).deferValue(
-      [self](arrow::Result<std::shared_ptr<BlockingDataset>> result) -> folly::SemiFuture<arrow::Status> {
-        FOLLY_ARROW_ASSIGN_OR_RAISE(self->dataset_, std::move(result));
-        self->dataset_version_ = self->dataset_->Version();
-        return load_fragment_metadata_async(self->fragment_id_, self->properties_, self->dataset_)
-            .deferValue([self](arrow::Result<std::shared_ptr<const MetaTrait::FragmentMetadata>> metadata)
-                            -> folly::SemiFuture<arrow::Status> {
-              FOLLY_ARROW_ASSIGN_OR_RAISE(auto fragment, std::move(metadata));
-              return self->open_fragment_async(fragment);
-            });
-      });
+  return tracing::RunAsync(
+      "storage.metadata.load",
+      [&]() -> folly::SemiFuture<arrow::Status> {
+        assert(!fragment_reader_);
+        auto self = shared_from_this();
+        auto dataset = dataset_ ? folly::makeSemiFuture(arrow::Result<std::shared_ptr<BlockingDataset>>(dataset_))
+                                : open_dataset_async(uri_, filesystem_, properties_, dataset_version_);
+        return std::move(dataset).deferValue(tracing::Bind(
+            [self](arrow::Result<std::shared_ptr<BlockingDataset>> result) -> folly::SemiFuture<arrow::Status> {
+              FOLLY_ARROW_ASSIGN_OR_RAISE(self->dataset_, std::move(result));
+              self->dataset_version_ = self->dataset_->Version();
+              return load_fragment_metadata_async(self->fragment_id_, self->properties_, self->dataset_)
+                  .deferValue(
+                      tracing::Bind([self](arrow::Result<std::shared_ptr<const MetaTrait::FragmentMetadata>> metadata)
+                                        -> folly::SemiFuture<arrow::Status> {
+                        FOLLY_ARROW_ASSIGN_OR_RAISE(auto fragment, std::move(metadata));
+                        return self->open_fragment_async(fragment);
+                      }));
+            }));
+      },
+      "open", "lance");
 }
 
 arrow::Status LanceTableReader::open() {
-  assert(!fragment_reader_);
+  return tracing::Run(
+      "storage.metadata.load",
+      [&]() -> arrow::Status {
+        assert(!fragment_reader_);
 
-  if (!dataset_) {
-    // uri_ is in Milvus format (scheme://address/bucket/key) so extfs.<alias>.*
-    // can be resolved by address+bucket. Strip the address back to standard form
-    // (scheme://bucket/key) before handing to Lance, whose object_store treats
-    // the host as the bucket.
-    ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties_, uri_));
-    const auto lance_uri = ToStandardLanceUri(uri_);
-    const auto reader_options = ToReaderOptions(fs_config);
+        if (!dataset_) {
+          // uri_ is in Milvus format (scheme://address/bucket/key) so extfs.<alias>.*
+          // can be resolved by address+bucket. Strip the address back to standard form
+          // (scheme://bucket/key) before handing to Lance, whose object_store treats
+          // the host as the bucket.
+          ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties_, uri_));
+          const auto lance_uri = ToStandardLanceUri(uri_);
+          const auto reader_options = ToReaderOptions(fs_config);
 
-    // Version zero means latest, but it cannot identify a stable global cache
-    // entry. Resolve only the latest manifest location before the cache lookup.
-    if (dataset_version_ == 0) {
-      ARROW_ASSIGN_OR_RAISE(dataset_version_,
-                            BlockingDataset::ResolveLatestVersion(lance_uri, filesystem_, reader_options));
-    }
+          // Version zero means latest, but it cannot identify a stable global cache
+          // entry. Resolve only the latest manifest location before the cache lookup.
+          if (dataset_version_ == 0) {
+            ARROW_ASSIGN_OR_RAISE(dataset_version_,
+                                  BlockingDataset::ResolveLatestVersion(lance_uri, filesystem_, reader_options));
+          }
 
-    ARROW_ASSIGN_OR_RAISE(
-        dataset_, get_or_open_dataset(uri_, filesystem_, reader_options, fs_config.GetCacheKey(), dataset_version_));
-  }
+          ARROW_ASSIGN_OR_RAISE(dataset_, get_or_open_dataset(uri_, filesystem_, reader_options,
+                                                              fs_config.GetCacheKey(), dataset_version_));
+        }
 
-  // Lance 7 exposes the current dataset schema through FileFragment::schema().
-  {
-    ArrowSchema c_fragment_schema{};
-    ARROW_RETURN_NOT_OK(dataset_->GetFragmentSchema(fragment_id_, c_fragment_schema));
-    ARROW_ASSIGN_OR_RAISE(file_schema_, arrow::ImportSchema(&c_fragment_schema));
-  }
+        // Lance 7 exposes the current dataset schema through FileFragment::schema().
+        {
+          ArrowSchema c_fragment_schema{};
+          ARROW_RETURN_NOT_OK(dataset_->GetFragmentSchema(fragment_id_, c_fragment_schema));
+          ARROW_ASSIGN_OR_RAISE(file_schema_, arrow::ImportSchema(&c_fragment_schema));
+        }
 
-  // Build the read schema for fragment reader:
-  // use user-provided schema if available, otherwise project file schema by needed_columns
-  ARROW_ASSIGN_OR_RAISE(auto read_schema, build_read_schema(file_schema_, read_schema_, needed_columns_));
+        // Build the read schema for fragment reader:
+        // use user-provided schema if available, otherwise project file schema by needed_columns
+        ARROW_ASSIGN_OR_RAISE(auto read_schema, build_read_schema(file_schema_, read_schema_, needed_columns_));
 
-  ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
+        ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_,
+                              api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
 
-  ArrowSchema c_arrow_schema{};
-  ARROW_RETURN_NOT_OK(arrow::ExportSchema(*read_schema, &c_arrow_schema));
-  read_schema_ = read_schema->metadata() ? read_schema->RemoveMetadata() : read_schema;
-  ARROW_ASSIGN_OR_RAISE(fragment_reader_, BlockingFragmentReader::Open(*dataset_, fragment_id_, c_arrow_schema));
+        ArrowSchema c_arrow_schema{};
+        ARROW_RETURN_NOT_OK(arrow::ExportSchema(*read_schema, &c_arrow_schema));
+        read_schema_ = read_schema->metadata() ? read_schema->RemoveMetadata() : read_schema;
+        ARROW_ASSIGN_OR_RAISE(fragment_reader_, BlockingFragmentReader::Open(*dataset_, fragment_id_, c_arrow_schema));
 
-  // Lance's read_range accepts logical indices (post-deletion) and internally
-  // patches the range to skip deleted rows. So row_group_infos uses logical row count.
-  // However, read_range's batch_size is applied to the *physical* range after
-  // patch_range_for_deletions, so we add num_deletions_ to batch_size to ensure
-  // each read produces a single output batch.
-  ARROW_ASSIGN_OR_RAISE(auto logical_rows, fragment_reader_->RowCount());
-  ARROW_ASSIGN_OR_RAISE(auto physical_rows, dataset_->GetFragmentPhysicalRowCount(fragment_id_));
-  if (physical_rows < logical_rows) {
-    return arrow::Status::Invalid("Fragment ", fragment_id_, " has inconsistent metadata: physical_rows (",
-                                  physical_rows, ") < logical_rows (", logical_rows, ")");
-  }
-  num_deletions_ = physical_rows - logical_rows;
+        // Lance's read_range accepts logical indices (post-deletion) and internally
+        // patches the range to skip deleted rows. So row_group_infos uses logical row count.
+        // However, read_range's batch_size is applied to the *physical* range after
+        // patch_range_for_deletions, so we add num_deletions_ to batch_size to ensure
+        // each read produces a single output batch.
+        ARROW_ASSIGN_OR_RAISE(auto logical_rows, fragment_reader_->RowCount());
+        ARROW_ASSIGN_OR_RAISE(auto physical_rows, dataset_->GetFragmentPhysicalRowCount(fragment_id_));
+        if (physical_rows < logical_rows) {
+          return arrow::Status::Invalid("Fragment ", fragment_id_, " has inconsistent metadata: physical_rows (",
+                                        physical_rows, ") < logical_rows (", logical_rows, ")");
+        }
+        num_deletions_ = physical_rows - logical_rows;
 
-  auto column_memory_sizes_result =
-      estimate_fragment_column_memory_sizes(*dataset_, fragment_id_, static_cast<size_t>(file_schema_->num_fields()));
-  const bool memory_size_available = column_memory_sizes_result.ok();
-  std::vector<uint64_t> fragment_column_memory_sizes;
-  if (memory_size_available) {
-    fragment_column_memory_sizes = std::move(column_memory_sizes_result).ValueOrDie();
-  } else {
-    // Memory statistics are optional. Do not retain the underlying failure in
-    // row-group metadata: estimate APIs return a generic NotImplemented status
-    // instead. Keep the detailed reason in the debug log for diagnostics only.
-    LOG_STORAGE_DEBUG_ << "Lance column memory estimation is unavailable while opening the reader"
-                       << ", fragment_id=" << fragment_id_
-                       << ", status=" << column_memory_sizes_result.status().ToString();
-  }
-  ARROW_ASSIGN_OR_RAISE(row_group_infos_, create_row_group_infos(logical_rows, logical_chunk_rows_,
-                                                                 fragment_column_memory_sizes, memory_size_available));
-  column_memory_weights_ = memory_size_available
-                               ? std::make_shared<const std::vector<uint64_t>>(std::move(fragment_column_memory_sizes))
-                               : nullptr;
+        auto column_memory_sizes_result = estimate_fragment_column_memory_sizes(
+            *dataset_, fragment_id_, static_cast<size_t>(file_schema_->num_fields()));
+        const bool memory_size_available = column_memory_sizes_result.ok();
+        std::vector<uint64_t> fragment_column_memory_sizes;
+        if (memory_size_available) {
+          fragment_column_memory_sizes = std::move(column_memory_sizes_result).ValueOrDie();
+        } else {
+          // Memory statistics are optional. Do not retain the underlying failure in
+          // row-group metadata: estimate APIs return a generic NotImplemented status
+          // instead. Keep the detailed reason in the debug log for diagnostics only.
+          LOG_STORAGE_DEBUG_ << "Lance column memory estimation is unavailable while opening the reader"
+                             << ", fragment_id=" << fragment_id_
+                             << ", status=" << column_memory_sizes_result.status().ToString();
+        }
+        ARROW_ASSIGN_OR_RAISE(row_group_infos_,
+                              create_row_group_infos(logical_rows, logical_chunk_rows_, fragment_column_memory_sizes,
+                                                     memory_size_available));
+        column_memory_weights_ =
+            memory_size_available
+                ? std::make_shared<const std::vector<uint64_t>>(std::move(fragment_column_memory_sizes))
+                : nullptr;
 
-  return arrow::Status::OK();
+        return arrow::Status::OK();
+      },
+      false, "open", "lance");
 }
 
 std::shared_ptr<arrow::Schema> LanceTableReader::get_schema() const { return file_schema_; }
@@ -944,181 +970,217 @@ arrow::Result<std::vector<uint64_t>> LanceTableReader::get_rg_column_memsz(int64
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> LanceTableReader::get_chunk(const int& row_group_index) {
-  assert(fragment_reader_);
-  auto start_idx = row_group_infos_[row_group_index].start_offset;
-  auto end_idx = row_group_infos_[row_group_index].end_offset;
-  // FIXME: Lance's read_range may produce multiple output batches for two reasons:
-  // 1. batch_size is applied to the *physical* range (after patch_range_for_deletions),
-  //    so deletions cause the physical range to exceed batch_size.
-  // 2. Lance may split at internal page boundaries regardless of batch_size.
-  // We add num_deletions_ to mitigate (1), but (2) is not addressed — if Lance
-  // splits at page boundaries, chunk(0) will silently lose trailing rows in Release
-  // builds (assert is a no-op). A robust fix would combine all chunks here.
-  ARROW_ASSIGN_OR_RAISE(auto array_stream,
-                        fragment_reader_->ReadRangesAsStream(start_idx, end_idx, end_idx - start_idx + num_deletions_));
-  auto chunkedarray_result = arrow::ImportChunkedArray(&array_stream);
-  if (!chunkedarray_result.ok()) {
-    return MakeBridgeErrorStatus("Failed to import Lance chunked array", chunkedarray_result.status());
-  }
-  auto chunkedarray = chunkedarray_result.ValueOrDie();
-  assert(chunkedarray != nullptr && chunkedarray->num_chunks() == 1);
-  return arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0));
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
+        assert(fragment_reader_);
+        auto start_idx = row_group_infos_[row_group_index].start_offset;
+        auto end_idx = row_group_infos_[row_group_index].end_offset;
+        // FIXME: Lance's read_range may produce multiple output batches for two reasons:
+        // 1. batch_size is applied to the *physical* range (after patch_range_for_deletions),
+        //    so deletions cause the physical range to exceed batch_size.
+        // 2. Lance may split at internal page boundaries regardless of batch_size.
+        // We add num_deletions_ to mitigate (1), but (2) is not addressed — if Lance
+        // splits at page boundaries, chunk(0) will silently lose trailing rows in Release
+        // builds (assert is a no-op). A robust fix would combine all chunks here.
+        ARROW_ASSIGN_OR_RAISE(auto array_stream, fragment_reader_->ReadRangesAsStream(
+                                                     start_idx, end_idx, end_idx - start_idx + num_deletions_));
+        auto chunkedarray_result = arrow::ImportChunkedArray(&array_stream);
+        if (!chunkedarray_result.ok()) {
+          return MakeBridgeErrorStatus("Failed to import Lance chunked array", chunkedarray_result.status());
+        }
+        auto chunkedarray = chunkedarray_result.ValueOrDie();
+        assert(chunkedarray != nullptr && chunkedarray->num_chunks() == 1);
+        return arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0));
+      },
+      false, "get_chunk", "lance");
 }
 
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> LanceTableReader::get_chunks(
     const std::vector<int>& rg_indices_in_file) {
-  assert(fragment_reader_);
-  std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
+        assert(fragment_reader_);
+        std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
 
 #ifndef NDEBUG
-  // verify rg_indices_in_file have been sorted
-  for (size_t i = 1; i < rg_indices_in_file.size(); ++i) {
-    assert(rg_indices_in_file[i] >= rg_indices_in_file[i - 1]);
-  }
+        // verify rg_indices_in_file have been sorted
+        for (size_t i = 1; i < rg_indices_in_file.size(); ++i) {
+          assert(rg_indices_in_file[i] >= rg_indices_in_file[i - 1]);
+        }
 #endif
 
-  std::vector<std::pair<uint64_t, uint64_t>> rg_idx_ranges;
+        std::vector<std::pair<uint64_t, uint64_t>> rg_idx_ranges;
 
-  // calc continuous ranges
-  // ex. [1, 2, 3, 5] -> [(1, 3), (5, 5)]
-  size_t start_idx = 0;
-  for (size_t i = 1; i < rg_indices_in_file.size(); ++i) {
-    if (rg_indices_in_file[i] != rg_indices_in_file[i - 1] + 1) {
-      rg_idx_ranges.emplace_back(rg_indices_in_file[start_idx], rg_indices_in_file[i - 1]);
-      start_idx = i;
-    }
-  }
+        // calc continuous ranges
+        // ex. [1, 2, 3, 5] -> [(1, 3), (5, 5)]
+        size_t start_idx = 0;
+        for (size_t i = 1; i < rg_indices_in_file.size(); ++i) {
+          if (rg_indices_in_file[i] != rg_indices_in_file[i - 1] + 1) {
+            rg_idx_ranges.emplace_back(rg_indices_in_file[start_idx], rg_indices_in_file[i - 1]);
+            start_idx = i;
+          }
+        }
 
-  if (start_idx < rg_indices_in_file.size()) {
-    rg_idx_ranges.emplace_back(rg_indices_in_file[start_idx], rg_indices_in_file.back());
-  }
+        if (start_idx < rg_indices_in_file.size()) {
+          rg_idx_ranges.emplace_back(rg_indices_in_file[start_idx], rg_indices_in_file.back());
+        }
 
-  for (const auto& rg_range : rg_idx_ranges) {
-    // load continuous chunks in one read
-    const auto& start_rg_info = row_group_infos_[rg_range.first];
-    const auto& end_rg_info = row_group_infos_[rg_range.second];
+        for (const auto& rg_range : rg_idx_ranges) {
+          // load continuous chunks in one read
+          const auto& start_rg_info = row_group_infos_[rg_range.first];
+          const auto& end_rg_info = row_group_infos_[rg_range.second];
 
-    // batch_size adds num_deletions_ for the same reason as get_chunk — see comment there.
-    ARROW_ASSIGN_OR_RAISE(auto array_stream, fragment_reader_->ReadRangesAsStream(
-                                                 start_rg_info.start_offset, end_rg_info.end_offset,
-                                                 end_rg_info.end_offset - start_rg_info.start_offset + num_deletions_));
-    auto chunkedarray_result = arrow::ImportChunkedArray(&array_stream);
-    if (!chunkedarray_result.ok()) {
-      return MakeBridgeErrorStatus("Failed to import Lance chunked array", chunkedarray_result.status());
-    }
-    auto chunkedarray = chunkedarray_result.ValueOrDie();
-    assert(chunkedarray != nullptr);
+          // batch_size adds num_deletions_ for the same reason as get_chunk — see comment there.
+          ARROW_ASSIGN_OR_RAISE(auto array_stream,
+                                fragment_reader_->ReadRangesAsStream(
+                                    start_rg_info.start_offset, end_rg_info.end_offset,
+                                    end_rg_info.end_offset - start_rg_info.start_offset + num_deletions_));
+          auto chunkedarray_result = arrow::ImportChunkedArray(&array_stream);
+          if (!chunkedarray_result.ok()) {
+            return MakeBridgeErrorStatus("Failed to import Lance chunked array", chunkedarray_result.status());
+          }
+          auto chunkedarray = chunkedarray_result.ValueOrDie();
+          assert(chunkedarray != nullptr);
 
-    // assign to rbs
-    for (size_t j = 0; j < chunkedarray->num_chunks(); ++j) {
-      ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(j)));
-      rbs.emplace_back(rb);
-    }
-  }
+          // assign to rbs
+          for (size_t j = 0; j < chunkedarray->num_chunks(); ++j) {
+            ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(j)));
+            rbs.emplace_back(rb);
+          }
+        }
 
-  return rbs;
+        return rbs;
+      },
+      false, "get_chunks", "lance");
 }
 
 arrow::Result<std::shared_ptr<arrow::Table>> LanceTableReader::take(const std::vector<int64_t>& row_indices) {
-  assert(fragment_reader_);
-  ARROW_ASSIGN_OR_RAISE(auto array_stream, fragment_reader_->TakeAsStream(row_indices, row_indices.size()));
-  auto chunkedarray_result = arrow::ImportChunkedArray(&array_stream);
-  if (!chunkedarray_result.ok()) {
-    return MakeBridgeErrorStatus("Failed to import Lance take result", chunkedarray_result.status());
-  }
-  auto chunkedarray = chunkedarray_result.ValueOrDie();
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::Table>> {
+        assert(fragment_reader_);
+        ARROW_ASSIGN_OR_RAISE(auto array_stream, fragment_reader_->TakeAsStream(row_indices, row_indices.size()));
+        auto chunkedarray_result = arrow::ImportChunkedArray(&array_stream);
+        if (!chunkedarray_result.ok()) {
+          return MakeBridgeErrorStatus("Failed to import Lance take result", chunkedarray_result.status());
+        }
+        auto chunkedarray = chunkedarray_result.ValueOrDie();
 
-  // out of range
-  if (chunkedarray->num_chunks() == 0) {
-    ARROW_ASSIGN_OR_RAISE(auto row_count, fragment_reader_->RowCount());
-    return arrow::Status::Invalid(fmt::format("out of row range [0, {}]", row_count));
-  }
+        // out of range
+        if (chunkedarray->num_chunks() == 0) {
+          ARROW_ASSIGN_OR_RAISE(auto row_count, fragment_reader_->RowCount());
+          return arrow::Status::Invalid(fmt::format("out of row range [0, {}]", row_count));
+        }
 
-  std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
-  for (size_t i = 0; i < chunkedarray->num_chunks(); ++i) {
-    ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(i)));
-    rbs.emplace_back(rb);
-  }
+        std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
+        for (size_t i = 0; i < chunkedarray->num_chunks(); ++i) {
+          ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(i)));
+          rbs.emplace_back(rb);
+        }
 
-  return arrow::Table::FromRecordBatches(rbs);
+        return arrow::Table::FromRecordBatches(rbs);
+      },
+      false, "take", "lance");
 }
 
 folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> LanceTableReader::take_async(
     const std::vector<int64_t>& row_indices) {
-  assert(fragment_reader_);
-  if (row_indices.empty()) {
-    return folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::Table>>(
-        arrow::Status::Invalid("Lance take_async requires a nonempty row selection")));
-  }
-  std::vector<uint32_t> converted;
-  converted.reserve(row_indices.size());
-  for (const auto index : row_indices) {
-    if (index < 0 || static_cast<uint64_t>(index) > std::numeric_limits<uint32_t>::max()) {
-      return folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::Table>>(
-          arrow::Status::Invalid("Lance row index is outside the uint32 range")));
-    }
-    converted.push_back(static_cast<uint32_t>(index));
-  }
-  return submit_lance_async<std::shared_ptr<arrow::Table>>(
-      "Failed to take Lance rows asynchronously",
-      [reader = shared_from_this()](uint64_t,
-                                    ArrowArrayStream& stream) -> arrow::Result<std::shared_ptr<arrow::Table>> {
-        // Keep the reader alive until its output has been imported.
-        (void)reader;
-        ARROW_ASSIGN_OR_RAISE(auto chunks, arrow::ImportChunkedArray(&stream));
-        if (chunks->num_chunks() == 0) {
-          return arrow::Status::Invalid("Lance take_async returned no rows");
+  return tracing::RunNativeAsync(
+      "storage.format.read",
+      [&](tracing::OperationTrace trace) -> folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> {
+        assert(fragment_reader_);
+        if (row_indices.empty()) {
+          return folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::Table>>(
+              arrow::Status::Invalid("Lance take_async requires a nonempty row selection")));
         }
-        std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
-        batches.reserve(chunks->num_chunks());
-        for (const auto& chunk : chunks->chunks()) {
-          ARROW_ASSIGN_OR_RAISE(auto batch, arrow::RecordBatch::FromStructArray(chunk));
-          batches.push_back(std::move(batch));
+        std::vector<uint32_t> converted;
+        converted.reserve(row_indices.size());
+        for (const auto index : row_indices) {
+          if (index < 0 || static_cast<uint64_t>(index) > std::numeric_limits<uint32_t>::max()) {
+            return folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::Table>>(
+                arrow::Status::Invalid("Lance row index is outside the uint32 range")));
+          }
+          converted.push_back(static_cast<uint32_t>(index));
         }
-        return arrow::Table::FromRecordBatches(batches);
+        return submit_lance_async<std::shared_ptr<arrow::Table>>(
+            "Failed to take Lance rows asynchronously",
+            [reader = shared_from_this()](uint64_t,
+                                          ArrowArrayStream& stream) -> arrow::Result<std::shared_ptr<arrow::Table>> {
+              // Keep the reader alive until its output has been imported.
+              (void)reader;
+              ARROW_ASSIGN_OR_RAISE(auto chunks, arrow::ImportChunkedArray(&stream));
+              if (chunks->num_chunks() == 0) {
+                return arrow::Status::Invalid("Lance take_async returned no rows");
+              }
+              std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+              batches.reserve(chunks->num_chunks());
+              for (const auto& chunk : chunks->chunks()) {
+                ARROW_ASSIGN_OR_RAISE(auto batch, arrow::RecordBatch::FromStructArray(chunk));
+                batches.push_back(std::move(batch));
+              }
+              return arrow::Table::FromRecordBatches(batches);
+            },
+            [&](LanceAsyncCallback callback, auto* context) {
+              return fragment_reader_->TakeAsync(converted, &context->stream, callback, context);
+            },
+            trace);
       },
-      [&](LanceAsyncCallback callback, auto* context) {
-        return fragment_reader_->TakeAsync(converted, &context->stream, callback, context);
-      });
+      "take", "lance");
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> LanceTableReader::read_with_range(const uint64_t& start_offset,
                                                                                            const uint64_t& end_offset) {
-  assert(fragment_reader_);
-  // Lance's read_range accepts logical indices directly.
-  // batch_size adds num_deletions_ for the same reason as get_chunk — see comment there.
-  ARROW_ASSIGN_OR_RAISE(auto array_stream, fragment_reader_->ReadRangesAsStream(
-                                               start_offset, end_offset, end_offset - start_offset + num_deletions_));
-  ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&array_stream));
-  return internal::WrapLanceRecordBatchReader(std::move(reader));
+  return tracing::Run(
+      "storage.format.read",
+      [&]() -> arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> {
+        assert(fragment_reader_);
+        // Lance's read_range accepts logical indices directly.
+        // batch_size adds num_deletions_ for the same reason as get_chunk — see comment there.
+        ARROW_ASSIGN_OR_RAISE(
+            auto array_stream,
+            fragment_reader_->ReadRangesAsStream(start_offset, end_offset, end_offset - start_offset + num_deletions_));
+        ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&array_stream));
+        return internal::WrapLanceRecordBatchReader(std::move(reader));
+      },
+      false, "read_with_range", "lance");
 }
 
 folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>> LanceTableReader::read_with_range_async(
     uint64_t start_offset, uint64_t end_offset) {
-  assert(fragment_reader_);
-  if (start_offset > end_offset || end_offset > std::numeric_limits<uint32_t>::max()) {
-    return folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>(
-        arrow::Status::Invalid("Lance row range must be ordered and fit in uint32")));
-  }
-  // Empty ranges use the Rust projection schema too, preserving the same
-  // schema-level metadata as nonempty ranges without storing another schema.
-  const auto batch_size = std::max<uint64_t>(
-      1, std::min<uint64_t>(end_offset - start_offset + num_deletions_, std::numeric_limits<uint32_t>::max()));
-  // Rust owns the fragment reader and materializes all batches before completing
-  // this future, so the caller can drain the result without waiting for I/O.
-  return submit_lance_async<std::shared_ptr<arrow::RecordBatchReader>>(
-      "Failed to read Lance fragment range",
-      [](uint64_t handle, ArrowArrayStream&) -> arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> {
-        ArrowArrayStream stream{};
-        ArrowCDataReleaseGuard stream_guard(&stream);
-        BlockingFragmentReader::TakeRecordBatchStream(handle, stream);
-        ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&stream));
-        return internal::WrapLanceRecordBatchReader(std::move(reader));
+  return tracing::RunNativeAsync(
+      "storage.format.read",
+      [&](tracing::OperationTrace trace)
+          -> folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>> {
+        assert(fragment_reader_);
+        if (start_offset > end_offset || end_offset > std::numeric_limits<uint32_t>::max()) {
+          return folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>(
+              arrow::Status::Invalid("Lance row range must be ordered and fit in uint32")));
+        }
+        // Empty ranges use the Rust projection schema too, preserving the same
+        // schema-level metadata as nonempty ranges without storing another schema.
+        const auto batch_size = std::max<uint64_t>(
+            1, std::min<uint64_t>(end_offset - start_offset + num_deletions_, std::numeric_limits<uint32_t>::max()));
+        // Rust owns the fragment reader and materializes all batches before completing
+        // this future, so the caller can drain the result without waiting for I/O.
+        return submit_lance_async<std::shared_ptr<arrow::RecordBatchReader>>(
+            "Failed to read Lance fragment range",
+            [](uint64_t handle, ArrowArrayStream&) -> arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> {
+              ArrowArrayStream stream{};
+              ArrowCDataReleaseGuard stream_guard(&stream);
+              BlockingFragmentReader::TakeRecordBatchStream(handle, stream);
+              ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&stream));
+              return internal::WrapLanceRecordBatchReader(std::move(reader));
+            },
+            [&](LanceAsyncCallback callback, void* context) {
+              return fragment_reader_->ReadRangesAsync(static_cast<uint32_t>(start_offset),
+                                                       static_cast<uint32_t>(end_offset),
+                                                       static_cast<uint32_t>(batch_size), callback, context);
+            },
+            trace);
       },
-      [&](LanceAsyncCallback callback, void* context) {
-        return fragment_reader_->ReadRangesAsync(static_cast<uint32_t>(start_offset), static_cast<uint32_t>(end_offset),
-                                                 static_cast<uint32_t>(batch_size), callback, context);
-      });
+      "read_with_range", "lance");
 }
 
 arrow::Result<std::shared_ptr<FormatReader>> LanceTableReader::clone_reader() {

@@ -1,0 +1,34 @@
+[package]
+name = "lance-io"
+version = "7.0.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+lance-io-upstream = { package = "lance-io", git = "https://github.com/zilliztech/lance", rev = "d512a02e636057fc9e3bdd2304548e19bbd1a369", default-features = false }
+lance-core = "=7.0.0"
+bytes = "1"
+futures = "0.3"
+object_store = "0.13"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+log = "0.4"
+
+[dev-dependencies]
+arrow-array = "58"
+async-trait = "0.1"
+deepsize = "0.2"
+rand = "0.9"
+mockall = "0.13.1"
+test-log = "0.2.15"
+url = "2"
+tempfile = "=3.23.0"
+
+[features]
+default = ["aws", "azure", "gcp"]
+aws = ["lance-io-upstream/aws"]
+azure = ["lance-io-upstream/azure"]
+gcp = ["lance-io-upstream/gcp"]
+oss = ["lance-io-upstream/oss"]
+test-util = ["lance-io-upstream/test-util"]
+gcs-test = ["lance-io-upstream/gcs-test"]

@@ -11,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+#include "tracing/runtime.h"
+
 #include "milvus-storage/ffi_filesystem_c.h"
 
 #include <chrono>
@@ -463,28 +465,42 @@ LoonFFIResult loon_filesystem_reader_readat_async(FileSystemReaderHandle handle,
     }
 
     auto future = async_file->ReadAtAsyncInto(offset, nbytes, out_data);
-    future.AddCallback(
-        [input_file, callback, user_data, nbytes, offset](const arrow::Result<int64_t>& read_result) mutable {
-          (void)input_file;
-          if (read_result.ok()) {
-            auto bytes_read = read_result.ValueOrDie();
-            if (bytes_read != nbytes) {
-              auto result = CreateFFIResult(LOON_LOGICAL_ERROR, "Read size mismatch, expected size=", nbytes,
-                                            ", actual size=", bytes_read, ", [offset=", offset, "]");
-              callback(user_data, result, 0);
+    future.AddCallback(tracing::Bind(
+        [input_file, callback, user_data, nbytes, offset](const arrow::Result<int64_t>& read_result) mutable noexcept {
+          try {
+            (void)input_file;
+            if (read_result.ok()) {
+              auto bytes_read = read_result.ValueOrDie();
+              if (bytes_read != nbytes) {
+                auto result = CreateFFIResult(LOON_LOGICAL_ERROR, "Read size mismatch, expected size=", nbytes,
+                                              ", actual size=", bytes_read, ", [offset=", offset, "]");
+                callback(user_data, result, 0);
+                return;
+              }
+
+              callback(user_data, LoonFFIResult{LOON_SUCCESS, nullptr}, static_cast<uint64_t>(bytes_read));
               return;
             }
 
-            callback(user_data, LoonFFIResult{LOON_SUCCESS, nullptr}, static_cast<uint64_t>(bytes_read));
+            auto status = read_result.status();
+            auto result = CreateFFIResult(FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR),
+                                          "Fail to read object data asynchronously, details: ", status.ToString());
+            callback(user_data, result, 0);
             return;
+          } catch (const std::bad_alloc&) {
+            callback(user_data, LoonFFIResult{LOON_GOT_EXCEPTION, nullptr}, 0);
+          } catch (const std::exception& e) {
+            LoonFFIResult failure{LOON_GOT_EXCEPTION, nullptr};
+            try {
+              failure = CreateFFIResult(LOON_GOT_EXCEPTION, e.what());
+            } catch (...) {
+              // Allocation-free fallback if constructing the diagnostic also fails.
+            }
+            callback(user_data, failure, 0);
+          } catch (...) {
+            callback(user_data, LoonFFIResult{LOON_GOT_EXCEPTION, nullptr}, 0);
           }
-
-          auto status = read_result.status();
-          auto result = CreateFFIResult(FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR),
-                                        "Fail to read object data asynchronously, details: ", status.ToString());
-          callback(user_data, result, 0);
-          return;
-        });
+        }));
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {

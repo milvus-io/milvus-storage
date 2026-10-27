@@ -422,9 +422,10 @@ pub(crate) fn shared_scan_scheduler(
     schedulers.retain(|_, scheduler| scheduler.strong_count() != 0);
     // Construct while holding the registry lock so concurrent first opens
     // cannot select different stores for the same filesystem identity.
-    let scheduler = ScanScheduler::new(
+    let scheduler = ScanScheduler::new_with_reader_wrapper(
         object_store.clone(),
         SchedulerConfig::max_bandwidth(object_store),
+        Some(crate::storage_tracing::wrap_lance_request),
     );
     schedulers.insert(fs_cache_key, Arc::downgrade(&scheduler));
     Ok(scheduler)
