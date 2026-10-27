@@ -197,6 +197,29 @@ TEST_F(PaimonIntegrationTest, ReadsWithoutMetadataCache) {
             static_cast<int64_t>(kRows));
 }
 
+TEST_F(PaimonIntegrationTest, RejectsBlobTablesAtExploreAndDataSplitOpen) {
+  ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, 1, "append").status());
+  ASSERT_AND_ASSIGN(auto files, Explore("data-split"));
+  ASSERT_EQ(files.size(), 1);
+
+  const auto schema_path = table_dir_ + "/schema/schema-0";
+  std::ifstream input(schema_path);
+  auto schema = folly::parseJson(std::string(std::istreambuf_iterator<char>(input), {}));
+  input.close();
+  schema["fields"][1]["type"] = "BLOB";
+  schema["options"]["blob-descriptor-field"] = "name";
+  std::ofstream(schema_path) << folly::toJson(schema);
+
+  for (const auto* mode : {"auto", "direct-file", "data-split"}) {
+    auto result = Explore(mode);
+    EXPECT_TRUE(result.status().IsNotImplemented()) << mode << ": " << result.status();
+  }
+  // Reopening an existing descriptor must use the same table-level guard,
+  // even when the requested projection does not include the BLOB column.
+  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
+  EXPECT_TRUE(reader.status().IsNotImplemented()) << reader.status();
+}
+
 TEST_F(PaimonIntegrationTest, DeletionVectorReadsBypassDisabledMetadataCache) {
   constexpr uint64_t kRows = 10;
   ASSERT_STATUS_OK(paimon::CreateTestTable(table_dir_, kRows, "deletion-vector", {1, 5, 9}).status());

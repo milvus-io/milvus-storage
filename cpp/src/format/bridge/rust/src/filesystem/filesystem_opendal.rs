@@ -914,6 +914,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) struct LocalOperatorFixture {
+        pub(crate) filesystem: cxx::SharedPtr<crate::lance_ffi::FileSystemWrapper>,
         pub(crate) operator: Operator,
         pub(crate) root: tempfile::TempDir,
         pub(crate) access: FilesystemAccess,
@@ -964,9 +965,10 @@ pub(crate) mod tests {
             let filesystem = unsafe {
                 cxx::SharedPtr::from_raw(handle as *mut crate::lance_ffi::FileSystemWrapper)
             };
-            let access = FilesystemAccess::new(filesystem).unwrap();
+            let access = FilesystemAccess::new(filesystem.clone()).unwrap();
             let operator = access.clone().into_operator();
             Self {
+                filesystem,
                 operator,
                 root,
                 access,
