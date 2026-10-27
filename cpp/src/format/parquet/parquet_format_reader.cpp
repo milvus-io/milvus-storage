@@ -83,7 +83,10 @@ static arrow::Result<std::vector<RowGroupInfo>> try_build_row_group_infos(
 }
 
 static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos_from_metadata(
-    const std::shared_ptr<::parquet::FileMetaData>& metadata, const std::string& path) {
+    const std::shared_ptr<::parquet::FileMetaData>& metadata,
+    const std::vector<int>& column_indices,
+    const std::string& path,
+    std::vector<RowGroupInfo> row_group_infos = {}) {
   // Keep the existing row-group memory estimate as the total-size anchor: prefer
   // Milvus private metadata when available, otherwise fall back to the Parquet
   // footer's total byte size.
@@ -92,8 +95,10 @@ static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos_from_meta
     return arrow::Status::Invalid(fmt::format("Failed to get parquet file metadata for file: {}", path));
   }
 
-  // try use the private kv metas to build row group infos
-  ARROW_ASSIGN_OR_RAISE(auto row_group_infos, try_build_row_group_infos(metadata));
+  // Reuse cached row ranges and memory sizes, or build them from file metadata.
+  if (row_group_infos.empty()) {
+    ARROW_ASSIGN_OR_RAISE(row_group_infos, try_build_row_group_infos(metadata));
+  }
   if (row_group_infos.empty()) {
     // use the parquet file metadata to build row group infos
     row_group_infos.reserve(metadata->num_row_groups());
@@ -118,12 +123,24 @@ static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos_from_meta
     return arrow::Status::Invalid(
         fmt::format("Parquet row-group metadata count does not match the footer. [path={}]", path));
   }
+  for (size_t i = 0; i < row_group_infos.size(); ++i) {
+    const auto row_group = metadata->RowGroup(static_cast<int>(i));
+    uint64_t bytes = 0;
+    for (int column_index : column_indices) {
+      const auto size = row_group->ColumnChunk(column_index)->total_compressed_size();
+      if (size < 0 || static_cast<uint64_t>(size) > std::numeric_limits<uint64_t>::max() - bytes) {
+        return arrow::Status::Invalid("Invalid Parquet projected column byte size");
+      }
+      bytes += static_cast<uint64_t>(size);
+    }
+    row_group_infos[i].read_size = bytes;
+  }
   return row_group_infos;
 }
 
 arrow::Result<std::vector<RowGroupInfo>> ParquetFormatReader::create_row_group_infos(
     const std::shared_ptr<::parquet::FileMetaData>& metadata) {
-  return create_row_group_infos_from_metadata(metadata, path_);
+  return create_row_group_infos_from_metadata(metadata, projected_leaf_column_indices_, path_);
 }
 
 ParquetFormatReader::ParquetFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
@@ -336,6 +353,10 @@ arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::
   metadata->path = reader->path_;
   metadata->file_schema = reader->schema_;
   metadata->row_group_infos = reader->row_group_infos_;
+  // Read sizes depend on the reader's projection, not just the cached file.
+  for (auto& info : metadata->row_group_infos) {
+    info.read_size.reset();
+  }
   metadata->cache_size = parquet_metadata->size();
   metadata->payload.fs = reader->fs_;
   if (!reader->key_retriever_) {
@@ -420,9 +441,12 @@ arrow::Result<std::shared_ptr<ParquetFormatReader>> ParquetFormatReader::MetaTra
       std::make_shared<ParquetFormatReader>(metadata->payload.fs, metadata->path, metadata->payload.properties,
                                             needed_columns, metadata->payload.key_retriever, file_size, footer_size);
   reader->schema_ = metadata->file_schema;
-  reader->row_group_infos_ = metadata->row_group_infos;
   reader->file_reader_ = std::shared_ptr<::parquet::arrow::FileReader>(std::move(file_reader));
   ARROW_RETURN_NOT_OK(reader->set_needed_columns(needed_columns));
+  ARROW_ASSIGN_OR_RAISE(reader->row_group_infos_,
+                        create_row_group_infos_from_metadata(reader->file_reader_->parquet_reader()->metadata(),
+                                                             reader->projected_leaf_column_indices_, metadata->path,
+                                                             metadata->row_group_infos));
   return reader;
 }
 
@@ -452,11 +476,13 @@ arrow::Status ParquetFormatReader::open() {
   ARROW_RETURN_NOT_OK(file_reader_->GetSchema(&file_schema));
   schema_ = file_schema;
 
+  ARROW_RETURN_NOT_OK(set_needed_columns(needed_columns_));
+
   // create row group infos
   assert(file_reader_->parquet_reader() && "arrow logical fault");
   ARROW_ASSIGN_OR_RAISE(row_group_infos_, create_row_group_infos(file_reader_->parquet_reader()->metadata()));
 
-  return set_needed_columns(needed_columns_);
+  return arrow::Status::OK();
 }
 
 folly::SemiFuture<arrow::Status> ParquetFormatReader::open_async() {

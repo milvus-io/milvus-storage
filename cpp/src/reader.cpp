@@ -728,7 +728,8 @@ folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>
   // task granularity only; it does not select or cap an executor.
   auto all_tasks = ChunkTask::Build(unique_chunk_indices, get_chunk_info);
   SplitAsyncTasks(all_tasks, std::max<size_t>(parallelism, 1), ChunkTask::SplitTraits{get_chunk_info},
-                  GetAsyncTaskSplitStrategy(properties_));
+                  GetAsyncTaskSplitStrategy(properties_),
+                  GetValueNoError<uint64_t>(properties_, PROPERTY_READER_ASYNC_TASK_SPLIT_SIZE_BYTES));
 
   std::vector<folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>>> futures;
   std::vector<std::vector<int64_t>> task_chunk_lists;
@@ -1331,7 +1332,8 @@ folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::Table>>>> Rea
   auto& readers = *lazy_readers;
 
   SplitAsyncTasks(all_tasks, std::max<size_t>(parallelism, 1), TakeTask::SplitTraits{},
-                  GetAsyncTaskSplitStrategy(properties_));
+                  GetAsyncTaskSplitStrategy(properties_),
+                  GetValueNoError<uint64_t>(properties_, PROPERTY_READER_ASYNC_TASK_SPLIT_SIZE_BYTES));
 
   std::vector<size_t> task_cg_indices;
   std::vector<std::vector<size_t>> task_positions;

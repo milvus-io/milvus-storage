@@ -50,6 +50,42 @@ ChunkTask ChunkTask::SplitTraits::split(ChunkTask& left) const {
   return right;
 }
 
+bool ChunkTask::SplitTraits::split_by_bytes(std::vector<ChunkTask>& tasks, uint64_t target_bytes) const {
+  if (target_bytes == 0) {
+    return false;
+  }
+  for (const auto& task : tasks) {
+    for (auto index : task.chunk_indices) {
+      if (!get_chunk_info_(index).read_size.has_value()) {
+        return false;
+      }
+    }
+  }
+
+  std::vector<ChunkTask> result;
+  for (const auto& task : tasks) {
+    uint64_t bytes = 0;
+    ChunkTask current{.file_index = task.file_index, .range_start = task.range_start};
+    for (auto index : task.chunk_indices) {
+      const auto& info = get_chunk_info_(index);
+      const auto size = *info.read_size;
+      if (!current.chunk_indices.empty() && (bytes >= target_bytes || size > target_bytes - bytes)) {
+        result.push_back(std::move(current));
+        current = ChunkTask{.file_index = task.file_index, .range_start = info.row_offset_in_file};
+        bytes = 0;
+      }
+      current.chunk_indices.push_back(index);
+      current.range_end = info.row_offset_in_file + info.number_of_rows;
+      bytes += size;
+    }
+    if (!current.chunk_indices.empty()) {
+      result.push_back(std::move(current));
+    }
+  }
+  tasks = std::move(result);
+  return true;
+}
+
 std::vector<ChunkTask> ChunkTask::Build(const std::vector<int64_t>& chunk_indices,
                                         const std::function<const ChunkInfo&(int64_t)>& get_chunk_info) {
   // Build file-local natural tasks; only physically adjacent chunks are merged
@@ -286,8 +322,19 @@ template <typename Task, typename Traits>
 void SplitAsyncTasks(std::vector<Task>& tasks,
                      size_t target_count,
                      const Traits& traits,
-                     AsyncTaskSplitStrategy strategy) {
+                     AsyncTaskSplitStrategy strategy,
+                     uint64_t target_bytes) {
   static_assert(AsyncTaskSplitTraits<Traits, Task>);
+
+  if (strategy == AsyncTaskSplitStrategy::kSplitByBytes) {
+    if constexpr (requires { traits.split_by_bytes(tasks, target_bytes); }) {
+      if (traits.split_by_bytes(tasks, target_bytes)) {
+        return;
+      }
+    }
+    SplitToParallelismPolicy<Task, Traits>::split(tasks, target_count, traits);
+    return;
+  }
 
   using SplitFn = void (*)(std::vector<Task>&, size_t, const Traits&);
   static constexpr std::array<SplitFn, 3> kSplitFns = {
@@ -308,6 +355,9 @@ AsyncTaskSplitStrategy GetAsyncTaskSplitStrategy(const Properties& properties) {
   if (strategy == "none") {
     return AsyncTaskSplitStrategy::kNoSplit;
   }
+  if (strategy == "bytes") {
+    return AsyncTaskSplitStrategy::kSplitByBytes;
+  }
   if (strategy == "all") {
     return AsyncTaskSplitStrategy::kSplitAll;
   }
@@ -318,11 +368,13 @@ AsyncTaskSplitStrategy GetAsyncTaskSplitStrategy(const Properties& properties) {
 template void SplitAsyncTasks<ChunkTask, ChunkTask::SplitTraits>(std::vector<ChunkTask>& tasks,
                                                                  size_t target_count,
                                                                  const ChunkTask::SplitTraits& traits,
-                                                                 AsyncTaskSplitStrategy strategy);
+                                                                 AsyncTaskSplitStrategy strategy,
+                                                                 uint64_t target_bytes);
 
 template void SplitAsyncTasks<TakeTask, TakeTask::SplitTraits>(std::vector<TakeTask>& tasks,
                                                                size_t target_count,
                                                                const TakeTask::SplitTraits& traits,
-                                                               AsyncTaskSplitStrategy strategy);
+                                                               AsyncTaskSplitStrategy strategy,
+                                                               uint64_t target_bytes);
 
 }  // namespace milvus_storage::api
