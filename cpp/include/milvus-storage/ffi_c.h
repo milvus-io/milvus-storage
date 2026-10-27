@@ -274,11 +274,11 @@ typedef struct LoonIndexInfo {
   // A dropped index is represented by removing its Index entry from the
   // manifest. Build-task state is intentionally not persisted here: this
   // structure describes only a completed artifact that QueryNode can load.
-  const char* column_name;
+  const char* column_name;  ///< User-visible schema field name, not the physical data column name
   const char* index_name;
   const char* index_type;
   const char* path;  ///< Artifact directory/prefix
-  int64_t field_id;
+  int64_t field_id;  ///< Decimal string matches Milvus internal data columns
   int64_t index_id;
   int64_t build_id;
   int64_t index_version;
@@ -884,7 +884,8 @@ FFI_EXPORT void loon_transaction_destroy(LoonTransactionHandle handle);
  *
  * Removes the column from its column group. If the column group becomes
  * empty after removal, the entire column group is removed.
- * Automatically drops all indexes on this column.
+ * For Milvus internal numeric columns, drops indexes whose decimal field_id
+ * matches the removed data column name, regardless of the index column_name.
  * Noop if the column doesn't exist.
  *
  * @param handle Transaction handle
@@ -905,6 +906,10 @@ FFI_EXPORT LoonFFIResult loon_transaction_add_column_group(LoonTransactionHandle
 
 /**
  * @brief Append files to existing column groups in the transaction updates
+ *
+ * Groups with new files invalidate indexes whose decimal field_id matches a
+ * data column name (Milvus internal layout). Index column_name is not used.
+ * Groups without new files leave their indexes unchanged.
  *
  * @param handle Transaction handle
  * @param column_groups LoonColumnGroups structure containing files to append
