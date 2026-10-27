@@ -33,8 +33,8 @@ arrow-array = { version = "58.0.0", features = ["ffi"] }
 arrow-schema = "58.0.0"
 
 # Vortex Ecosystem
-vortex = { git = "https://github.com/zilliztech/vortex", branch = "v0.75.0-patched", features = ["tokio"] }
-vortex-btrblocks = { git = "https://github.com/zilliztech/vortex", branch = "v0.75.0-patched" }
+vortex = { git = "https://github.com/zilliztech/vortex", rev = "088063f0fdf2dd9e6a3db7ed4bb8137e18ca5ee3", features = ["tokio"] }
+vortex-btrblocks = { git = "https://github.com/zilliztech/vortex", rev = "088063f0fdf2dd9e6a3db7ed4bb8137e18ca5ee3" }
 
 # Lance Ecosystem
 # Cloud features remain enabled for native Lance writers. Lance reads use the
