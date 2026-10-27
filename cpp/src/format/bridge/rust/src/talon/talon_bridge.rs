@@ -12,6 +12,10 @@ use talon::{
 };
 use tokio::sync::OnceCell;
 
+#[path = "telemetry.rs"]
+mod telemetry;
+use telemetry::initialize_storage_talon_tracing;
+
 #[cxx::bridge(namespace = "milvus_storage::talon::ffi")]
 pub mod ffi {
     #[repr(i32)]
@@ -26,7 +30,47 @@ pub mod ffi {
         NonRetryable = 8,
     }
 
+    #[derive(Clone, Default)]
+    struct TraceCarrier {
+        trace_id: [u8; 16],
+        span_id: [u8; 8],
+        flags: u8,
+        remote: bool,
+        state: String,
+    }
+    struct SpanAttribute {
+        key: String,
+        kind: u8,
+        boolean: bool,
+        integer: i64,
+        floating: f64,
+        text: String,
+    }
+    unsafe extern "C++" {
+        include!("talon/tracing_bridge.h");
+        type TalonTrace;
+        type TalonSpan;
+        fn capture_talon_trace() -> SharedPtr<TalonTrace>;
+        fn talon_trace_parent(trace: &TalonTrace) -> Result<TraceCarrier>;
+        fn start_talon_span(
+            trace: &SharedPtr<TalonTrace>,
+            name: &str,
+            kind: u8,
+            parent: &TraceCarrier,
+            start_ns: u64,
+            attributes: &[SpanAttribute],
+        ) -> Result<SharedPtr<TalonSpan>>;
+        fn talon_span_context(span: &TalonSpan) -> Result<TraceCarrier>;
+        fn finish_talon_span(
+            span: &TalonSpan,
+            name: &str,
+            status: u8,
+            end_ns: u64,
+            attributes: &[SpanAttribute],
+        ) -> Result<()>;
+    }
     extern "Rust" {
+        fn initialize_storage_talon_tracing() -> Result<()>;
         type TalonClient;
         type TalonObjectReader;
 
@@ -141,9 +185,14 @@ pub fn talon_object_known_size(reader: &TalonObjectReader) -> i64 {
 }
 
 impl TalonObjectReader {
-    async fn resolved_stat(&self) -> Result<&ObjectStat, talon::Error> {
+    async fn resolved_stat(
+        &self,
+        options: &talon::RequestOptions<'_>,
+    ) -> Result<&ObjectStat, talon::Error> {
         self.stat
-            .get_or_try_init(|| async { self.client.stat(&self.object).await })
+            .get_or_try_init(|| async {
+                self.client.stat_with_options(&self.object, options).await
+            })
             .await
     }
 }
@@ -266,8 +315,11 @@ pub unsafe extern "C" fn talon_object_stat_async(
     };
     let reader = reader.clone();
     let context_addr = context as usize;
-    crate::TOKIO_RT.spawn(async move {
-        let result = match AssertUnwindSafe(reader.resolved_stat())
+    let mut trace = telemetry::RequestTrace::capture();
+    let parent = trace.parent.take();
+    crate::TOKIO_RT.spawn(trace.run(async move {
+        let options = telemetry::options(parent.as_ref());
+        let result = match AssertUnwindSafe(reader.resolved_stat(&options))
             .catch_unwind()
             .await
         {
@@ -284,7 +336,7 @@ pub unsafe extern "C" fn talon_object_stat_async(
             },
         };
         complete_talon_io(callback, context_addr as *mut c_void, result);
-    });
+    }));
 }
 
 #[unsafe(no_mangle)]
@@ -319,12 +371,15 @@ pub unsafe extern "C" fn talon_object_read_async(
         len: length as usize,
     };
     let context_addr = context as usize;
-    crate::TOKIO_RT.spawn(async move {
+    let mut trace = telemetry::RequestTrace::capture();
+    let parent = trace.parent.take();
+    crate::TOKIO_RT.spawn(trace.run(async move {
+        let options = telemetry::options(parent.as_ref());
         let read_result = AssertUnwindSafe(async {
             if buffer.len == 0 {
                 return Ok(0usize);
             }
-            let stat = reader.resolved_stat().await?;
+            let stat = reader.resolved_stat(&options).await?;
             let len = (buffer.len as u64).min(stat.size.saturating_sub(offset)) as usize;
             if len == 0 {
                 return Ok(0usize);
@@ -332,7 +387,7 @@ pub unsafe extern "C" fn talon_object_read_async(
             let dst = unsafe { buffer.into_mut_slice(len) };
             reader
                 .client
-                .read_into(&reader.object, offset, dst, Some(stat))
+                .read_into_with_options(&reader.object, offset, dst, Some(stat), &options)
                 .await
         })
         .catch_unwind()
@@ -352,7 +407,7 @@ pub unsafe extern "C" fn talon_object_read_async(
             },
         };
         complete_talon_io(callback, context_addr as *mut c_void, result);
-    });
+    }));
 }
 
 // These records borrow their strings and arrays until the completion callback returns.
@@ -898,8 +953,16 @@ mod tests {
     #[test]
     fn open_object_with_stat_initializes_metadata_without_resolving() {
         let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024, 8).unwrap();
-        let reader =
-            open_talon_object(&client, "aws", "test-bucket", "path/a", true, 123, "etag-v1").unwrap();
+        let reader = open_talon_object(
+            &client,
+            "aws",
+            "test-bucket",
+            "path/a",
+            true,
+            123,
+            "etag-v1",
+        )
+        .unwrap();
         assert_eq!(talon_object_known_size(&reader), 123);
         assert_eq!(reader.stat.get().unwrap().size, 123);
         assert_eq!(reader.stat.get().unwrap().version, "etag-v1");
