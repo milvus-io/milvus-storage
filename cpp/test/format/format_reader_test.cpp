@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <mutex>
 #include <numeric>
 #include <random>
@@ -27,6 +28,7 @@
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
+#include <folly/ScopeGuard.h>
 #include <folly/executors/InlineExecutor.h>
 #include <folly/executors/ThreadedExecutor.h>
 #include <folly/synchronization/Baton.h>
@@ -108,6 +110,9 @@ struct FileSystemReadStats {
   std::atomic<int> async_get_size_count{0};
   std::atomic<int64_t> first_async_read_position{-1};
   std::atomic<int64_t> first_async_read_size{-1};
+  std::function<arrow::Future<std::shared_ptr<arrow::Buffer>>(
+      std::shared_ptr<arrow::io::RandomAccessFile>, int64_t, int64_t)>
+      read_async;
 
   int record_async_read(int64_t position, int64_t nbytes) {
     const auto read_index = async_read_into_count.fetch_add(1, std::memory_order_relaxed);
@@ -287,6 +292,9 @@ class AsyncCountingRandomAccessFile final : public arrow::io::RandomAccessFile,
   arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const arrow::io::IOContext& io_context,
                                                           int64_t position,
                                                           int64_t nbytes) override {
+    if (stats_->read_async) {
+      return stats_->read_async(file_, position, nbytes);
+    }
     return file_->ReadAsync(io_context, position, nbytes);
   }
   arrow::Status WillNeed(const std::vector<arrow::io::ReadRange>& ranges) override { return file_->WillNeed(ranges); }
@@ -777,6 +785,78 @@ TEST_P(FormatReaderTest, ParquetAsyncReadUsesCallerExecutorForDecode) {
   ASSERT_EQ(batches.size(), 1);
   ASSERT_EQ(batches.front()->num_rows(), test_batch_->num_rows());
   ASSERT_GT(executor.add_count(), 1);
+}
+
+TEST_P(FormatReaderTest, ParquetAsyncRangesProgressWhileEarlierReadsArePending) {
+  if (GetParam() != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+  ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, 0, false, 1000, 32));
+  for (auto compression : {::parquet::Compression::UNCOMPRESSED, ::parquet::Compression::ZSTD}) {
+    SCOPED_TRACE(static_cast<int>(compression));
+    const auto path = base_path_ + "/async_ranges.parquet";
+    auto writer_properties = ::parquet::WriterProperties::Builder().compression(compression)->build();
+    ASSERT_AND_ASSIGN(auto sink, fs_->OpenOutputStream(path));
+    ASSERT_AND_ASSIGN(auto writer, ::parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink,
+                                                                      writer_properties));
+    int64_t offset = 0;
+    for (int64_t rows : {100, 200, 300, 400}) {
+      ASSERT_STATUS_OK(writer->NewBufferedRowGroup());
+      ASSERT_STATUS_OK(writer->WriteRecordBatch(*batch->Slice(offset, rows)));
+      offset += rows;
+    }
+    ASSERT_STATUS_OK(writer->Close());
+    ASSERT_STATUS_OK(sink->Close());
+
+    // Keep each selected column chunk in its own lazy read range. Holding a
+    // response must not stop independent row groups from issuing their reads.
+    auto properties = properties_;
+    ASSERT_EQ(SetValue(properties, PROPERTY_READER_PARQUET_PREBUFFER_LAZY, "true"), std::nullopt);
+    ASSERT_EQ(SetValue(properties, PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT, "1"), std::nullopt);
+    ASSERT_EQ(SetValue(properties, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT, "2"), std::nullopt);
+    auto stats = std::make_shared<FileSystemReadStats>();
+    auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
+    auto reader = std::make_shared<parquet::ParquetFormatReader>(counting_fs, path, properties,
+                                                                 std::vector<std::string>{"vector"}, nullptr);
+    ASSERT_STATUS_OK(reader->open());
+    ASSERT_AND_ASSIGN(auto row_groups, reader->get_row_group_infos());
+    ASSERT_EQ(row_groups.size(), 4);
+
+    auto first = arrow::Future<>::Make();
+    auto second = arrow::Future<>::Make();
+    auto reads = std::make_shared<std::atomic<int>>(0);
+    auto later_requested = std::make_shared<folly::Baton<>>();
+    stats->read_async = [first, second, reads, later_requested](std::shared_ptr<arrow::io::RandomAccessFile> file,
+                                                                int64_t position, int64_t nbytes) {
+      const auto index = reads->fetch_add(1);
+      auto ready = index == 0 ? first : index == 1 ? second : arrow::Future<>::MakeFinished();
+      if (index == 2) {
+        later_requested->post();
+      }
+      return ready.Then([file, position, nbytes] { return file->ReadAt(position, nbytes); });
+    };
+
+    folly::CPUThreadPoolExecutor executor(1);
+    auto release = folly::makeGuard([&] {
+      if (!first.is_finished())
+        first.MarkFinished();
+      if (!second.is_finished())
+        second.MarkFinished();
+    });
+    auto result = reader->read_with_range_async(1, 999).via(&executor);
+    EXPECT_TRUE(later_requested->try_wait_for(std::chrono::seconds(5)));
+    EXPECT_FALSE(result.isReady());
+    second.MarkFinished();
+    EXPECT_FALSE(result.isReady());
+    first.MarkFinished();
+    ASSERT_AND_ASSIGN(auto batches, std::move(result).get());
+    ASSERT_AND_ASSIGN(auto table, batches->ToTable());
+    ASSERT_AND_ASSIGN(auto actual, table->CombineChunksToBatch());
+    ASSERT_EQ(actual->num_rows(), 998);
+    ASSERT_EQ(actual->num_columns(), 1);
+    EXPECT_TRUE(actual->column(0)->Equals(*batch->GetColumnByName("vector")->Slice(1, 998)));
+    EXPECT_EQ(reads->load(), 4);
+  }
 }
 
 TEST_P(FormatReaderTest, ParquetAsyncReadRejectsInlineExecutor) {

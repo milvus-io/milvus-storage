@@ -263,11 +263,12 @@ bool S3Options::Equals(const S3Options& other) const {
                             : (!other.default_metadata || other.default_metadata->size() == 0);
   return (region == other.region && connect_timeout == other.connect_timeout &&
           request_timeout == other.request_timeout && endpoint_override == other.endpoint_override &&
-          scheme == other.scheme && role_arn == other.role_arn && session_name == other.session_name &&
-          external_id == other.external_id && load_frequency == other.load_frequency &&
-          proxy_options.Equals(other.proxy_options) && credentials_kind == other.credentials_kind &&
-          background_writes == other.background_writes && use_crc32c_checksum == other.use_crc32c_checksum &&
-          use_crt_async_reads == other.use_crt_async_reads && allow_bucket_creation == other.allow_bucket_creation &&
+          throughput_target_gbps == other.throughput_target_gbps && scheme == other.scheme &&
+          role_arn == other.role_arn && session_name == other.session_name && external_id == other.external_id &&
+          load_frequency == other.load_frequency && proxy_options.Equals(other.proxy_options) &&
+          credentials_kind == other.credentials_kind && background_writes == other.background_writes &&
+          use_crc32c_checksum == other.use_crc32c_checksum && use_crt_async_reads == other.use_crt_async_reads &&
+          allow_bucket_creation == other.allow_bucket_creation &&
           allow_bucket_deletion == other.allow_bucket_deletion && default_metadata_equals &&
           GetAccessKey() == other.GetAccessKey() && GetSecretKey() == other.GetSecretKey() &&
           GetSessionToken() == other.GetSessionToken());

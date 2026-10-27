@@ -28,10 +28,10 @@ struct LoonProperties;
 namespace milvus_storage::api {
 struct PropertyInfo;
 // Define property types and variants
-enum class PropertyType { STRING, INT32, INT64, UINT32, UINT64, BOOL, VECTOR_STR };
+enum class PropertyType { STRING, INT32, INT64, UINT32, UINT64, BOOL, VECTOR_STR, DOUBLE };
 // A variant that can hold any of the property types
-using PropertyVariant =
-    std::variant<std::string, int32_t, int64_t, uint32_t, uint64_t, bool, std::vector<std::string>, std::nullptr_t>;
+using PropertyVariant = std::
+    variant<std::string, int32_t, int64_t, uint32_t, uint64_t, bool, std::vector<std::string>, std::nullptr_t, double>;
 // A map of property names to their variants
 using Properties = std::unordered_map<std::string, PropertyVariant>;
 // Validator function type
@@ -87,6 +87,7 @@ struct PropertyInfo {
 #define PROPERTY_FS_GCP_CREDENTIAL_JSON "fs.gcp_credential_json"
 #define PROPERTY_FS_USE_CUSTOM_PART_UPLOAD "fs.use_custom_part_upload"
 #define PROPERTY_FS_MAX_CONNECTIONS "fs.max_connections"
+#define PROPERTY_FS_S3_THROUGHPUT_TARGET_GBPS "fs.s3.throughput_target_gbps"
 #define PROPERTY_FS_MULTI_PART_UPLOAD_SIZE "fs.multi_part_upload_size"
 #define PROPERTY_FS_ROLE_ARN "fs.role_arn"
 #define PROPERTY_FS_SESSION_NAME "fs.session_name"

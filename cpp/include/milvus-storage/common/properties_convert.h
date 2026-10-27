@@ -59,6 +59,13 @@ inline std::pair<bool, uint64_t> convertFunc<uint64_t>(const std::string& str) {
   return convertIntFunc<uint64_t>(str);
 }
 
+template <>
+inline std::pair<bool, double> convertFunc<double>(const std::string& str) {
+  double result{};
+  auto [ptr, ec] = std::from_chars(str.data(), str.data() + str.size(), result);
+  return {ec == std::errc{} && ptr == str.data() + str.size(), result};
+}
+
 // --- string (identity) ---
 
 template <>

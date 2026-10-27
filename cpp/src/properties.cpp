@@ -92,6 +92,10 @@ bool ValidatePropertyValueType(const PropertyInfo& property_info, const std::str
       auto [ok, _val] = convert::convertFunc<uint64_t>(v);
       return ok;
     }
+    case PropertyType::DOUBLE: {
+      auto [ok, _val] = convert::convertFunc<double>(v);
+      return ok;
+    }
     default:
       return false;
   }
@@ -145,6 +149,14 @@ T GetPropertyValue(const PropertyInfo& property_info, const std::string& v) {
         }
       }
       break;
+    case PropertyType::DOUBLE:
+      if constexpr (std::is_same_v<T, double>) {
+        auto [ok, val] = convert::convertFunc<double>(v);
+        if (ok) {
+          return val;
+        }
+      }
+      break;
     case PropertyType::UINT64:
       if constexpr (std::is_same_v<T, uint64_t>) {
         auto [ok, val] = convert::convertFunc<uint64_t>(v);
@@ -176,6 +188,8 @@ PropertyVariant GetPropertyValue(const PropertyInfo& property_info, const std::s
       return GetPropertyValue<uint32_t>(property_info, v);
     case PropertyType::UINT64:
       return GetPropertyValue<uint64_t>(property_info, v);
+    case PropertyType::DOUBLE:
+      return GetPropertyValue<double>(property_info, v);
     default:
       assert(false && "unknown property type");
       return nullptr;
@@ -394,6 +408,11 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       PropertyType::UINT32,
                       "The maximum number of connections for the filesystem storage service.",
                       uint32_t(100),
+                      ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_S3_THROUGHPUT_TARGET_GBPS,
+                      PropertyType::DOUBLE,
+                      "S3 CRT throughput target in Gbps, used to size transfer resources.",
+                      50.0,
                       ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_FS_MULTI_PART_UPLOAD_SIZE,
                       PropertyType::INT64,
@@ -735,6 +754,7 @@ template arrow::Result<int32_t> GetValue<int32_t>(const Properties&, const char*
 template arrow::Result<int64_t> GetValue<int64_t>(const Properties&, const char*);
 template arrow::Result<uint32_t> GetValue<uint32_t>(const Properties&, const char*);
 template arrow::Result<uint64_t> GetValue<uint64_t>(const Properties&, const char*);
+template arrow::Result<double> GetValue<double>(const Properties&, const char*);
 template arrow::Result<bool> GetValue<bool>(const Properties&, const char*);
 template arrow::Result<std::vector<std::string>> GetValue<std::vector<std::string>>(const Properties&, const char*);
 
@@ -756,6 +776,7 @@ template int32_t GetValueNoError<int32_t>(const Properties&, const char*);
 template int64_t GetValueNoError<int64_t>(const Properties&, const char*);
 template uint32_t GetValueNoError<uint32_t>(const Properties&, const char*);
 template uint64_t GetValueNoError<uint64_t>(const Properties&, const char*);
+template double GetValueNoError<double>(const Properties&, const char*);
 template bool GetValueNoError<bool>(const Properties&, const char*);
 template std::vector<std::string> GetValueNoError<std::vector<std::string>>(const Properties&, const char*);
 

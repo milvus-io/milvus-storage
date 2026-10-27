@@ -99,6 +99,9 @@ static std::vector<int> get_leaf_column_offsets_by_field(const arrow::Schema& fi
 static arrow::Result<std::vector<int>> get_leaf_column_indices(const arrow::Schema& file_schema,
                                                                const std::vector<std::string>& needed_columns,
                                                                const std::string& path);
+static arrow::Result<std::vector<std::vector<int>>> group_row_groups(const ::parquet::arrow::FileReader& reader,
+                                                                     const std::vector<int>& row_groups,
+                                                                     const std::vector<int>& column_indices);
 
 template <typename ArrowFuture, typename T = typename ArrowFuture::SyncType>
 static folly::SemiFuture<T> bridge_arrow_future(
@@ -1431,6 +1434,95 @@ ParquetFormatReader::ParquetFormatReader(const ParquetFormatReader& other,
       row_group_infos_(other.row_group_infos_),
       file_reader_(std::move(cloned_file_reader)) {}
 
+static arrow::Result<std::vector<std::vector<int>>> group_row_groups(const ::parquet::arrow::FileReader& reader,
+                                                                     const std::vector<int>& row_groups,
+                                                                     const std::vector<int>& column_indices) {
+  const auto metadata = reader.parquet_reader()->metadata();
+  std::vector<arrow::io::ReadRange> column_ranges;
+  for (int row_group : row_groups) {
+    const auto group = metadata->RowGroup(row_group);
+    for (int column_index : column_indices) {
+      const auto column = group->ColumnChunk(column_index);
+      auto offset = column->data_page_offset();
+      if (column->has_dictionary_page() && column->dictionary_page_offset() > 0) {
+        offset = std::min(offset, column->dictionary_page_offset());
+      }
+      const auto length = column->total_compressed_size();
+      if (offset < 0 || length < 0 || offset > std::numeric_limits<int64_t>::max() - length) {
+        return arrow::Status::Invalid("Invalid Parquet column byte range");
+      }
+      column_ranges.push_back({offset, length});
+    }
+  }
+
+  // Arrow does not install its range-merger header. Use the reader's existing
+  // cache limits to group stored column bytes, including compressed chunks.
+  const auto& options = reader.properties().cache_options();
+  auto sorted_ranges = column_ranges;
+  std::sort(sorted_ranges.begin(), sorted_ranges.end(), [](const auto& left, const auto& right) {
+    return left.offset < right.offset || (left.offset == right.offset && left.length > right.length);
+  });
+  std::vector<arrow::io::ReadRange> ranges;
+  for (const auto& range : sorted_ranges) {
+    if (range.length == 0 || (!ranges.empty() && ranges.back().Contains(range))) {
+      continue;
+    }
+    if (!ranges.empty()) {
+      auto& previous = ranges.back();
+      const auto end = range.offset + range.length;
+      if (range.offset - (previous.offset + previous.length) <= options.hole_size_limit &&
+          end - previous.offset <= options.range_size_limit) {
+        previous.length = end - previous.offset;
+        continue;
+      }
+    }
+    ranges.push_back(range);
+  }
+  if (ranges.empty()) {
+    return std::vector<std::vector<int>>{row_groups};
+  }
+
+  std::vector<size_t> range_indices(column_ranges.size(), ranges.size());
+  std::vector<size_t> last_group(ranges.size());
+  for (size_t i = 0; i < column_ranges.size(); ++i) {
+    const auto& column = column_ranges[i];
+    if (column.length == 0) {
+      continue;
+    }
+    const auto range =
+        std::lower_bound(ranges.begin(), ranges.end(), column, [](const auto& range, const auto& column) {
+          return range.offset + range.length < column.offset + column.length;
+        });
+    if (range == ranges.end() || !range->Contains(column)) {
+      return arrow::Status::Invalid("Parquet column is outside its coalesced read range");
+    }
+    const auto index = static_cast<size_t>(range - ranges.begin());
+    range_indices[i] = index;
+    last_group[index] = i / column_indices.size();
+  }
+
+  // Keep row groups that share a coalesced range together instead of turning
+  // one combined read into smaller requests. Multi-column groups may join
+  // several ranges into one task; no row group is decoded more than once.
+  std::vector<std::vector<int>> result;
+  size_t start = 0;
+  size_t end = 0;
+  for (size_t i = 0; i < row_groups.size(); ++i) {
+    end = std::max(end, i);
+    for (size_t j = 0; j < column_indices.size(); ++j) {
+      const auto index = range_indices[i * column_indices.size() + j];
+      if (index < ranges.size()) {
+        end = std::max(end, last_group[index]);
+      }
+    }
+    if (i == end) {
+      result.emplace_back(row_groups.begin() + start, row_groups.begin() + i + 1);
+      start = i + 1;
+    }
+  }
+  return result;
+}
+
 folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>> ParquetFormatReader::read_with_range_async(
     uint64_t start_offset, uint64_t end_offset) {
   using ResultType = arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>;
@@ -1485,31 +1577,53 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>> Parq
     projected_schema = arrow::schema(std::move(fields));
   }
 
-  // Defer both generator work and executor binding until the future is consumed.
-  // Building this SemiFuture does not create or select a thread pool: Folly keeps
-  // a DeferredExecutor placeholder until via() or get() supplies the executor.
-  return folly::makeSemiFuture().deferExValue(
-      [file_reader = file_reader_, rg_indices = std::move(rg_indices),
-       projected_leaf_column_indices = projected_leaf_column_indices_, first_rg_slice_offset, total_rows,
-       projected_schema = std::move(projected_schema)](folly::Executor::KeepAlive<> executor,
-                                                       folly::Unit) mutable -> folly::SemiFuture<ResultType> {
-        // The callback now receives a concrete KeepAlive token for the consumer's
-        // executor. The Arrow adapter only retains that token and forwards work;
-        // it does not create an executor or worker thread.
-        FOLLY_ARROW_ASSIGN_OR_RAISE(auto arrow_executor, MakeFollyArrowExecutor(std::move(executor)));
-        // file_reader is captured by shared ownership because Arrow may use it
-        // after this continuation returns.
-        FOLLY_ARROW_ASSIGN_OR_RAISE(
-            auto gen, file_reader->GetRecordBatchGenerator(file_reader, rg_indices, projected_leaf_column_indices,
-                                                           arrow_executor.get(), 0));
+  // Plan and open range readers only when the caller consumes the future.
+  // Each range has independent mutable Parquet state and inherits the caller's
+  // executor; the number of ranges does not depend on the executor's size.
+  return folly::makeSemiFuture().deferValue(
+      [file_reader = file_reader_, fs = fs_, path = path_, properties = properties_, key_retriever = key_retriever_,
+       file_size = file_size_, footer_size = footer_size_, column_indices = projected_leaf_column_indices_,
+       rg_indices = std::move(rg_indices), first_rg_slice_offset, total_rows,
+       projected_schema = std::move(projected_schema)](folly::Unit) mutable -> folly::SemiFuture<ResultType> {
+        using Batches = std::vector<std::shared_ptr<arrow::RecordBatch>>;
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto groups, group_row_groups(*file_reader, rg_indices, column_indices));
+        std::vector<folly::SemiFuture<arrow::Result<Batches>>> futures;
+        futures.reserve(groups.size());
+        for (size_t i = 0; i < groups.size(); ++i) {
+          futures.push_back(folly::makeSemiFuture().deferExValue(
+              [file_reader, fs, path, properties, key_retriever, file_size, footer_size, column_indices,
+               row_groups = std::move(groups[i]),
+               reuse_reader = (i == 0)](folly::Executor::KeepAlive<> executor,
+                                        folly::Unit) mutable -> folly::SemiFuture<arrow::Result<Batches>> {
+                if (!reuse_reader) {
+                  FOLLY_ARROW_ASSIGN_OR_RAISE(
+                      file_reader,
+                      create_parquet_file_reader(fs, path, properties, key_retriever,
+                                                 file_reader->parquet_reader()->metadata(), file_size, footer_size));
+                }
+                FOLLY_ARROW_ASSIGN_OR_RAISE(auto arrow_executor, MakeFollyArrowExecutor(std::move(executor)));
+                FOLLY_ARROW_ASSIGN_OR_RAISE(
+                    auto gen, file_reader->GetRecordBatchGenerator(file_reader, row_groups, column_indices,
+                                                                   arrow_executor.get(), 0));
+                return bridge_arrow_future(arrow::CollectAsyncGenerator(std::move(gen)), std::move(arrow_executor));
+              }));
+        }
 
-        // Resolve the future only after all selected row groups are materialized;
-        // the returned RecordBatchReader is not progressively fed by the generator.
-        auto arrow_future = arrow::CollectAsyncGenerator(std::move(gen));
-        return bridge_arrow_future(
-            arrow_future.Then([first_rg_slice_offset, total_rows, projected_schema = std::move(projected_schema)](
-                                  std::vector<std::shared_ptr<arrow::RecordBatch>> batches)
-                                  -> arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> {
+        // Ranges run independently. Wait for every range even on failure before
+        // releasing its readers, then concatenate in file order, not completion order.
+        return folly::collectAll(std::move(futures))
+            .deferValue([first_rg_slice_offset, total_rows,
+                         projected_schema = std::move(projected_schema)](auto&& results) -> ResultType {
+              Batches batches;
+              for (auto& result : results) {
+                if (result.hasException()) {
+                  return arrow::Status::IOError(result.exception().what().toStdString());
+                }
+                ARROW_ASSIGN_OR_RAISE(auto group_batches, std::move(result.value()));
+                for (auto& batch : group_batches) {
+                  batches.push_back(std::move(batch));
+                }
+              }
               // Keep the projected schema even when Arrow produces no batches.
               if (batches.empty()) {
                 return arrow::RecordBatchReader::Make({}, projected_schema);
@@ -1533,8 +1647,7 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>> Parq
               }
 
               return arrow::RecordBatchReader::Make(std::move(batches), projected_schema);
-            }),
-            std::move(arrow_executor));
+            });
       });
 }
 

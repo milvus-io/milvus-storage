@@ -463,10 +463,7 @@ arrow::Result<std::shared_ptr<S3CrtClientHolder>> ClientBuilder<Aws::S3Crt::S3Cr
 
         const bool use_virtual_addressing = options_.endpoint_override.empty() || options_.force_virtual_addressing;
         client_config_.useVirtualAddressing = use_virtual_addressing;
-        // Raise the CRT target from its SDK default so small concurrent range reads
-        // get enough connection budget for the Vortex reader workload.
-        // TODO: make this configurable instead of using a fixed workload-specific default.
-        client_config_.throughputTargetGbps = 50.0;
+        client_config_.throughputTargetGbps = options_.throughput_target_gbps;
 
         return std::make_shared<Aws::S3Crt::S3CrtClient>(credentials_provider_, client_config_,
                                                          client_config_.payloadSigningPolicy,

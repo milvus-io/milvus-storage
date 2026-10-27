@@ -165,6 +165,7 @@ struct S3Options {
 
   /// \brief Maximum number of connections to the S3 server
   uint32_t max_connections = 100;
+  double throughput_target_gbps = 50.0;
 
   /// Multipart upload part size
   int64_t multi_part_upload_size = DEFAULT_MULTIPART_UPLOAD_PART_SIZE;

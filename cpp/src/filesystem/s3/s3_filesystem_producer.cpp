@@ -186,6 +186,7 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
   options.request_timeout = config_.request_timeout_ms <= 0 ? DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC
                                                             : config_.request_timeout_ms / 1000;
   options.max_connections = config_.max_connections;
+  options.throughput_target_gbps = config_.throughput_target_gbps;
   options.multi_part_upload_size = config_.multi_part_upload_size;
   options.cloud_provider = config_.cloud_provider;
   options.background_writes = config_.background_writes;
