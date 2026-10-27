@@ -199,6 +199,7 @@ struct ArrowFileSystemConfig {
   std::string gcp_credential_json = "";  // Deprecated
   bool use_custom_part_upload = true;    // Deprecated
   uint32_t max_connections = 100;
+  uint32_t crt_queue_sizes = 125;
 
   // Work on S3FileSystem, not worked on azurefs
   // To align with the old logical, set to `int64_t`(should be `uint64_t`)

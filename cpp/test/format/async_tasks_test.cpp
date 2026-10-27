@@ -292,4 +292,83 @@ TEST(AsyncTasksTest, SplitAllCreatesOneTaskPerLogicalItem) {
   }
 }
 
+TEST(AsyncTasksTest, SplitByBytesPacksWholeChunksWithinNaturalRanges) {
+  std::vector<ChunkInfo> infos = {
+      {.file_index = 0, .row_offset_in_file = 0, .number_of_rows = 10, .read_size = 3},
+      {.file_index = 0, .row_offset_in_file = 10, .number_of_rows = 10, .read_size = 5},
+      {.file_index = 0, .row_offset_in_file = 20, .number_of_rows = 10, .read_size = 9},
+      {.file_index = 0, .row_offset_in_file = 30, .number_of_rows = 10, .read_size = 2},
+      {.file_index = 0, .row_offset_in_file = 40, .number_of_rows = 10, .read_size = 4},
+      {.file_index = 0, .row_offset_in_file = 60, .number_of_rows = 10, .read_size = 1},
+      {.file_index = 1, .row_offset_in_file = 0, .number_of_rows = 10, .read_size = 1},
+  };
+  auto lookup = [&infos](int64_t i) -> const ChunkInfo& { return infos[i]; };
+  auto tasks = ChunkTask::Build({0, 1, 2, 3, 4, 5, 6}, lookup);
+  SplitAsyncTasks(tasks, 1, ChunkTask::SplitTraits{lookup}, AsyncTaskSplitStrategy::kSplitByBytes, 8);
+  ASSERT_EQ(tasks.size(), 5);
+  EXPECT_EQ(tasks[0].chunk_indices, (std::vector<int64_t>{0, 1}));
+  EXPECT_EQ(tasks[0].range_start, 0);
+  EXPECT_EQ(tasks[0].range_end, 20);
+  EXPECT_EQ(tasks[1].chunk_indices, (std::vector<int64_t>{2}));
+  EXPECT_EQ(tasks[1].range_start, 20);
+  EXPECT_EQ(tasks[1].range_end, 30);
+  EXPECT_EQ(tasks[2].chunk_indices, (std::vector<int64_t>{3, 4}));
+  EXPECT_EQ(tasks[2].range_start, 30);
+  EXPECT_EQ(tasks[2].range_end, 50);
+  EXPECT_EQ(tasks[3].chunk_indices, (std::vector<int64_t>{5}));
+  EXPECT_EQ(tasks[3].range_start, 60);
+  EXPECT_EQ(tasks[4].file_index, 1);
+}
+
+TEST(AsyncTasksTest, SplitByBytesFallsBackWhenStoredSizesAreUnavailable) {
+  std::vector<ChunkInfo> infos = {
+      {.row_offset_in_file = 0, .number_of_rows = 10, .read_size = 4},
+      {.row_offset_in_file = 10, .number_of_rows = 10},
+      {.row_offset_in_file = 20, .number_of_rows = 10, .read_size = 4},
+      {.row_offset_in_file = 30, .number_of_rows = 10, .read_size = 4},
+  };
+  auto lookup = [&infos](int64_t i) -> const ChunkInfo& { return infos[i]; };
+  auto tasks = ChunkTask::Build({0, 1, 2, 3}, lookup);
+  SplitAsyncTasks(tasks, 2, ChunkTask::SplitTraits{lookup}, AsyncTaskSplitStrategy::kSplitByBytes, 1);
+  ASSERT_EQ(tasks.size(), 2);
+  EXPECT_EQ(tasks[0].chunk_indices, (std::vector<int64_t>{0, 1}));
+  EXPECT_EQ(tasks[1].chunk_indices, (std::vector<int64_t>{2, 3}));
+}
+
+TEST(AsyncTasksTest, SplitByBytesHandlesZeroAndMaximumStoredSizes) {
+  std::vector<ChunkInfo> infos = {
+      {.row_offset_in_file = 0, .number_of_rows = 1, .read_size = 0},
+      {.row_offset_in_file = 1, .number_of_rows = 1, .read_size = UINT64_MAX},
+      {.row_offset_in_file = 2, .number_of_rows = 1, .read_size = 1},
+  };
+  auto lookup = [&infos](int64_t i) -> const ChunkInfo& { return infos[i]; };
+  auto tasks = ChunkTask::Build({0, 1, 2}, lookup);
+  SplitAsyncTasks(tasks, 1, ChunkTask::SplitTraits{lookup}, AsyncTaskSplitStrategy::kSplitByBytes, UINT64_MAX);
+  ASSERT_EQ(tasks.size(), 2);
+  EXPECT_EQ(tasks[0].chunk_indices, (std::vector<int64_t>{0, 1}));
+  EXPECT_EQ(tasks[1].chunk_indices, (std::vector<int64_t>{2}));
+  tasks.clear();
+  SplitAsyncTasks(tasks, 1, ChunkTask::SplitTraits{lookup}, AsyncTaskSplitStrategy::kSplitByBytes, 8);
+  EXPECT_TRUE(tasks.empty());
+}
+
+TEST(AsyncTasksTest, SplitByBytesUsesParallelismForTakeTasks) {
+  std::vector<TakeTask> tasks = {
+      {.reader_index = 0, .file_index = 0, .row_indices = {0, 1, 2, 3}, .original_positions = {0, 1, 2, 3}}};
+  SplitAsyncTasks(tasks, 2, TakeTask::SplitTraits{}, AsyncTaskSplitStrategy::kSplitByBytes, 1);
+  ASSERT_EQ(tasks.size(), 2);
+  EXPECT_EQ(tasks[0].row_indices, (std::vector<int64_t>{0, 1}));
+  EXPECT_EQ(tasks[1].original_positions, (std::vector<size_t>{2, 3}));
+}
+
+TEST(AsyncTasksTest, BytesPropertiesKeepParallelismDefaultAndRejectZeroSize) {
+  Properties properties;
+  ASSERT_TRUE(GetValue<std::string>(properties, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY).ok());
+  EXPECT_EQ(GetAsyncTaskSplitStrategy(properties), AsyncTaskSplitStrategy::kSplitToParallelism);
+  EXPECT_EQ(GetValueNoError<uint64_t>(properties, PROPERTY_READER_ASYNC_TASK_SPLIT_SIZE_BYTES), 8388608);
+  EXPECT_EQ(SetValue(properties, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY, "bytes"), std::nullopt);
+  EXPECT_EQ(GetAsyncTaskSplitStrategy(properties), AsyncTaskSplitStrategy::kSplitByBytes);
+  EXPECT_NE(SetValue(properties, PROPERTY_READER_ASYNC_TASK_SPLIT_SIZE_BYTES, "0"), std::nullopt);
+}
+
 }  // namespace milvus_storage::test

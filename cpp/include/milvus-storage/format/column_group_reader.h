@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 
 #include <arrow/filesystem/filesystem.h>
@@ -37,6 +38,8 @@ struct ChunkInfo {
   uint64_t avg_memory_size;        // average memory usage of this row group
   // False means avg_memory_size is only a placeholder and column estimates are unavailable.
   bool memory_size_available;
+  // A partial row-group slice still reads the full projected row group.
+  std::optional<uint64_t> read_size;
 
   // Format all logical/file offset fields for diagnostics.
   [[nodiscard]] std::string ToString() const;

@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -45,6 +46,8 @@ struct RowGroupInfo {
   // statistics failure is intentionally not retained; public estimate APIs
   // return a generic NotImplemented status instead.
   bool memory_size_available = true;
+  // Stored bytes for the projected columns of the whole row group, when known.
+  std::optional<uint64_t> read_size;
 
   std::string ToString() const;
 };
