@@ -139,16 +139,19 @@ VortexTranslater::VortexTranslater(VortexCellMetasPtr cell_metas,
 
 milvus::cachinglayer::cid_t VortexTranslater::cell_id_of(milvus::cachinglayer::uid_t uid) const { return uid; }
 
-std::pair<milvus::cachinglayer::ResourceUsage, milvus::cachinglayer::ResourceUsage>
-VortexTranslater::estimated_byte_size_of_cell(milvus::cachinglayer::cid_t cid) const {
+milvus::cachinglayer::LoadingResourceUsage VortexTranslater::estimated_loading_usage(
+    const std::vector<milvus::cachinglayer::cid_t>& cids) const {
+  uint64_t total = 0;
   const auto& cell_metas = *cell_metas_;
-  if (cid < 0 || static_cast<size_t>(cid) >= cell_metas.size()) {
-    throw std::out_of_range(fmt::format("Vortex cell id {} is out of range, num_cells={}", cid, cell_metas.size()));
+  for (auto cid : cids) {
+    if (cid < 0 || static_cast<size_t>(cid) >= cell_metas.size()) {
+      throw std::out_of_range(fmt::format("Vortex cell id {} is out of range, num_cells={}", cid, cell_metas.size()));
+    }
+    total = CheckedAddByteSize(total, PinnedByteSize(cell_metas[cid]), "Vortex cells byte size");
   }
-  const auto bytes = ToResourceBytes(PinnedByteSize(cell_metas[cid]), "Vortex cell byte size");
-  milvus::cachinglayer::ResourceUsage loaded(bytes, 0);
-  milvus::cachinglayer::ResourceUsage loading_overhead(bytes, 0);
-  return {loaded, loading_overhead};
+  const auto bytes = ToResourceBytes(total, "Vortex cells byte size");
+  // Range reads have no shared admission; retain the conservative scratch estimate as private overhead.
+  return {{bytes, 0}, {bytes, 0}, {0, 0}};
 }
 
 int64_t VortexTranslater::cells_storage_bytes(const std::vector<milvus::cachinglayer::cid_t>& cids) const {
