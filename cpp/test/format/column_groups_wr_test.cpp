@@ -575,6 +575,43 @@ TEST_P(ColumnGroupsWRTest, TestTakeAsync) {
             std::nullopt);
 }
 
+TEST_P(ColumnGroupsWRTest, BytesSplitPreservesSlicedChunksAndRequestOrder) {
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Requires projected stored-byte metadata";
+  }
+  std::array<bool, 4> projection = {true, false, false, true};
+  ASSERT_AND_ASSIGN(auto schema, CreateTestSchema(projection));
+  ASSERT_AND_ASSIGN(auto cgsvec, generate_25600_rows_data(format, schema, projection));
+  std::shared_ptr<ColumnGroup> cg;
+  std::vector<int64_t> expected_ids;
+  std::tie(cg, expected_ids) = generate_test_external_cg(cgsvec, false);
+  ASSERT_EQ(SetValue(properties_, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY, "bytes"), std::nullopt);
+  ASSERT_EQ(SetValue(properties_, PROPERTY_READER_ASYNC_TASK_SPLIT_SIZE_BYTES, "1"), std::nullopt);
+  for (const char* cache : {"true", "false"}) {
+    ASSERT_EQ(SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, cache), std::nullopt);
+    auto groups = std::make_shared<ColumnGroups>();
+    groups->push_back(cg);
+    auto reader = Reader::create(groups, schema,
+                                 std::make_shared<std::vector<std::string>>(std::initializer_list<std::string>{"id"}),
+                                 properties_);
+    ASSERT_AND_ASSIGN(auto chunks, reader->get_chunk_reader(0));
+    ASSERT_AND_ASSIGN(auto rows, chunks->get_chunk_rows());
+    ASSERT_GT(rows.size(), 1);
+    std::vector<int64_t> indices = {static_cast<int64_t>(rows.size() - 1), 0, 0};
+    ASSERT_AND_ASSIGN(auto result,
+                      chunks->get_chunks_async(indices).via(ThreadPoolHolder::GetThreadPool(2).get()).get());
+    ASSERT_EQ(result.size(), indices.size());
+    for (size_t i = 0; i < indices.size(); ++i) {
+      ASSERT_EQ(result[i]->num_rows(), rows[indices[i]]);
+      int64_t start = std::accumulate(rows.begin(), rows.begin() + indices[i], int64_t(0));
+      auto ids = std::static_pointer_cast<arrow::Int64Array>(result[i]->column(0));
+      for (int64_t j = 0; j < ids->length(); ++j) {
+        EXPECT_EQ(ids->Value(j), expected_ids[start + j]);
+      }
+    }
+  }
+}
+
 TEST_P(ColumnGroupsWRTest, TestGetChunksAsync) {
   int total_rows = 1000000;
 

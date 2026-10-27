@@ -92,10 +92,6 @@ bool ValidatePropertyValueType(const PropertyInfo& property_info, const std::str
       auto [ok, _val] = convert::convertFunc<uint64_t>(v);
       return ok;
     }
-    case PropertyType::DOUBLE: {
-      auto [ok, _val] = convert::convertFunc<double>(v);
-      return ok;
-    }
     default:
       return false;
   }
@@ -149,14 +145,6 @@ T GetPropertyValue(const PropertyInfo& property_info, const std::string& v) {
         }
       }
       break;
-    case PropertyType::DOUBLE:
-      if constexpr (std::is_same_v<T, double>) {
-        auto [ok, val] = convert::convertFunc<double>(v);
-        if (ok) {
-          return val;
-        }
-      }
-      break;
     case PropertyType::UINT64:
       if constexpr (std::is_same_v<T, uint64_t>) {
         auto [ok, val] = convert::convertFunc<uint64_t>(v);
@@ -188,8 +176,6 @@ PropertyVariant GetPropertyValue(const PropertyInfo& property_info, const std::s
       return GetPropertyValue<uint32_t>(property_info, v);
     case PropertyType::UINT64:
       return GetPropertyValue<uint64_t>(property_info, v);
-    case PropertyType::DOUBLE:
-      return GetPropertyValue<double>(property_info, v);
     default:
       assert(false && "unknown property type");
       return nullptr;
@@ -409,10 +395,10 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "The maximum number of connections for the filesystem storage service.",
                       uint32_t(100),
                       ValidatePropertyType()),
-    REGISTER_PROPERTY(PROPERTY_FS_S3_THROUGHPUT_TARGET_GBPS,
-                      PropertyType::DOUBLE,
-                      "S3 CRT throughput target in Gbps, used to size transfer resources.",
-                      50.0,
+    REGISTER_PROPERTY(PROPERTY_FS_S3_CRT_QUEUE_SIZES,
+                      PropertyType::UINT32,
+                      "S3 CRT queue sizes, converted to the SDK throughput target as value * 0.4 Gbps.",
+                      uint32_t(125),
                       ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_FS_MULTI_PART_UPLOAD_SIZE,
                       PropertyType::INT64,
@@ -698,11 +684,18 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "Options: auto, true, false. auto keeps Vortex's density-based strategy.",
                       "auto",
                       ValidatePropertyType() + ValidatePropertyEnum<std::string>("auto", "true", "false")),
-    REGISTER_PROPERTY(PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY,
-                      PropertyType::STRING,
-                      "Async read task split strategy. Options: parallelism, none, all.",
-                      "parallelism",
-                      ValidatePropertyType() + ValidatePropertyEnum<std::string>("parallelism", "none", "all")),
+    REGISTER_PROPERTY(
+        PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY,
+        PropertyType::STRING,
+        "Async read task split strategy. Options: parallelism, none, all, bytes. bytes groups chunks by projected "
+        "stored-byte size; unavailable sizes and take tasks use parallelism.",
+        "parallelism",
+        ValidatePropertyType() + ValidatePropertyEnum<std::string>("parallelism", "none", "all", "bytes")),
+    REGISTER_PROPERTY(PROPERTY_READER_ASYNC_TASK_SPLIT_SIZE_BYTES,
+                      PropertyType::UINT64,
+                      "Target stored bytes per async chunk task with bytes strategy. A larger chunk remains one task.",
+                      uint64_t(8 * 1024 * 1024),
+                      ValidatePropertyType() + ValidatePropertyRange<uint64_t>(1, UINT64_MAX)),
 
     // --- Define external table common property keys ---
     REGISTER_PROPERTY(PROPERTY_READER_EXTTABLE_SNAPSHOT_ID,
@@ -754,7 +747,6 @@ template arrow::Result<int32_t> GetValue<int32_t>(const Properties&, const char*
 template arrow::Result<int64_t> GetValue<int64_t>(const Properties&, const char*);
 template arrow::Result<uint32_t> GetValue<uint32_t>(const Properties&, const char*);
 template arrow::Result<uint64_t> GetValue<uint64_t>(const Properties&, const char*);
-template arrow::Result<double> GetValue<double>(const Properties&, const char*);
 template arrow::Result<bool> GetValue<bool>(const Properties&, const char*);
 template arrow::Result<std::vector<std::string>> GetValue<std::vector<std::string>>(const Properties&, const char*);
 
@@ -776,7 +768,6 @@ template int32_t GetValueNoError<int32_t>(const Properties&, const char*);
 template int64_t GetValueNoError<int64_t>(const Properties&, const char*);
 template uint32_t GetValueNoError<uint32_t>(const Properties&, const char*);
 template uint64_t GetValueNoError<uint64_t>(const Properties&, const char*);
-template double GetValueNoError<double>(const Properties&, const char*);
 template bool GetValueNoError<bool>(const Properties&, const char*);
 template std::vector<std::string> GetValueNoError<std::vector<std::string>>(const Properties&, const char*);
 

@@ -90,7 +90,7 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
   hash_combine(use_virtual_host);
   hash_combine(request_timeout_ms);
   hash_combine(max_connections);
-  hash_combine(throughput_target_gbps);
+  hash_combine(crt_queue_sizes);
   hash_combine(multi_part_upload_size);
   hash_combine(tls_min_version);
   hash_combine(background_writes);
@@ -158,7 +158,7 @@ std::string ArrowFileSystemConfig::ToString() const {
      << ", ssl_ca_cert_length=" << ssl_ca_cert.size()  // only print cert length
      << ", use_iam=" << std::boolalpha << use_iam << ", use_virtual_host=" << std::boolalpha << use_virtual_host
      << ", request_timeout_ms=" << request_timeout_ms << ", max_connections=" << max_connections
-     << ", throughput_target_gbps=" << throughput_target_gbps
+     << ", crt_queue_sizes=" << crt_queue_sizes
      << ", tls_min_version=" << (tls_min_version.empty() ? "(default)" : tls_min_version)
      << ", use_crc32c_checksum=" << std::boolalpha << use_crc32c_checksum << ", s3_crt_async_read=" << std::boolalpha
      << s3_crt_async_read << ", talon_mode=" << talon_mode_name
@@ -312,8 +312,8 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
   ARROW_ASSIGN_OR_RAISE(result.use_custom_part_upload,
                         api::GetValue<bool>(properties_map, PROPERTY_FS_USE_CUSTOM_PART_UPLOAD));
   ARROW_ASSIGN_OR_RAISE(result.max_connections, api::GetValue<uint32_t>(properties_map, PROPERTY_FS_MAX_CONNECTIONS));
-  ARROW_ASSIGN_OR_RAISE(result.throughput_target_gbps,
-                        api::GetValue<double>(properties_map, PROPERTY_FS_S3_THROUGHPUT_TARGET_GBPS));
+  ARROW_ASSIGN_OR_RAISE(result.crt_queue_sizes,
+                        api::GetValue<uint32_t>(properties_map, PROPERTY_FS_S3_CRT_QUEUE_SIZES));
   ARROW_ASSIGN_OR_RAISE(result.multi_part_upload_size,
                         api::GetValue<int64_t>(properties_map, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE));
   ARROW_ASSIGN_OR_RAISE(result.role_arn, api::GetValue<std::string>(properties_map, PROPERTY_FS_ROLE_ARN));

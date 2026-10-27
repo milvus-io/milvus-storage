@@ -263,8 +263,8 @@ bool S3Options::Equals(const S3Options& other) const {
                             : (!other.default_metadata || other.default_metadata->size() == 0);
   return (region == other.region && connect_timeout == other.connect_timeout &&
           request_timeout == other.request_timeout && endpoint_override == other.endpoint_override &&
-          throughput_target_gbps == other.throughput_target_gbps && scheme == other.scheme &&
-          role_arn == other.role_arn && session_name == other.session_name && external_id == other.external_id &&
+          crt_queue_sizes == other.crt_queue_sizes && scheme == other.scheme && role_arn == other.role_arn &&
+          session_name == other.session_name && external_id == other.external_id &&
           load_frequency == other.load_frequency && proxy_options.Equals(other.proxy_options) &&
           credentials_kind == other.credentials_kind && background_writes == other.background_writes &&
           use_crc32c_checksum == other.use_crc32c_checksum && use_crt_async_reads == other.use_crt_async_reads &&

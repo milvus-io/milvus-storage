@@ -463,7 +463,7 @@ arrow::Result<std::shared_ptr<S3CrtClientHolder>> ClientBuilder<Aws::S3Crt::S3Cr
 
         const bool use_virtual_addressing = options_.endpoint_override.empty() || options_.force_virtual_addressing;
         client_config_.useVirtualAddressing = use_virtual_addressing;
-        client_config_.throughputTargetGbps = options_.throughput_target_gbps;
+        client_config_.throughputTargetGbps = options_.crt_queue_sizes * 0.4;
 
         return std::make_shared<Aws::S3Crt::S3CrtClient>(credentials_provider_, client_config_,
                                                          client_config_.payloadSigningPolicy,

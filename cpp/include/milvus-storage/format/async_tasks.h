@@ -33,6 +33,7 @@ enum class AsyncTaskSplitStrategy : size_t {
   kNoSplit = 0,
   kSplitToParallelism = 1,
   kSplitAll = 2,
+  kSplitByBytes = 3,
 };
 
 // Resolve reader.async.task_split_strategy; unknown values use the default
@@ -58,6 +59,9 @@ struct ChunkTask {
     [[nodiscard]] bool can_split(const ChunkTask& task) const;
     // Shrink left to its first half and return the contiguous right half.
     [[nodiscard]] ChunkTask split(ChunkTask& left) const;
+    // Pack complete chunks in file order. Return false without modifying tasks
+    // when projected stored-byte sizes are unavailable.
+    bool split_by_bytes(std::vector<ChunkTask>& tasks, uint64_t target_bytes) const;
 
  private:
     std::function<const ChunkInfo&(int64_t)> get_chunk_info_;
@@ -95,10 +99,13 @@ struct TakeTask {
 
 // Split natural tasks toward target_count according to strategy. target_count
 // controls task granularity, not an executor or concurrency limit; tasks are never merged.
+// kSplitByBytes uses target_bytes instead. Unsupported task/format metadata falls
+// back to split-to-parallelism.
 template <typename Task, typename Traits>
 void SplitAsyncTasks(std::vector<Task>& tasks,
                      size_t target_count,
                      const Traits& traits,
-                     AsyncTaskSplitStrategy strategy);
+                     AsyncTaskSplitStrategy strategy,
+                     uint64_t target_bytes = 0);
 
 }  // namespace milvus_storage::api

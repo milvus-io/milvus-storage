@@ -64,7 +64,8 @@ class ThreadPoolHolder {
       return;
     }
 
-    thread_pool_ = std::make_shared<folly::IOThreadPoolExecutor>(num_threads);
+    // Start all shared workers during initialization instead of on the first read.
+    thread_pool_ = std::make_shared<folly::IOThreadPoolExecutor>(num_threads, num_threads);
   }
 
   // get the thread pool
