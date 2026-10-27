@@ -79,11 +79,6 @@ const std::vector<LobFileInfo>& Updates::GetAddedLobFiles() const { return added
 
 // ==================== Helper Functions ====================
 
-namespace {
-// Milvus internal data columns use decimal FieldIDs, not user-visible schema names.
-std::string indexDataColumnName(const Index& index) { return std::to_string(index.field_id); }
-}  // namespace
-
 arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Manifest>& manifest,
                                                       const Updates& updates) {
   // Deep copy the entire manifest to avoid mutating the (potentially cached) original
@@ -120,8 +115,9 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
               cgs.end());
 
     // Phase 3: auto-drop all indexes attached to this column
+    // Milvus internal data columns use decimal FieldIDs, not user-visible schema names.
     indexes.erase(std::remove_if(indexes.begin(), indexes.end(),
-                                 [&](const Index& idx) { return indexDataColumnName(idx) == col_name; }),
+                                 [&](const Index& idx) { return std::to_string(idx.field_id) == col_name; }),
                   indexes.end());
   }
 
@@ -201,7 +197,7 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   // Resolve indexes: drop affected, apply DropIndex, apply AddIndex.
   indexes.erase(std::remove_if(indexes.begin(), indexes.end(),
                                [&](const Index& idx) {
-                                 return affected_columns.find(indexDataColumnName(idx)) != affected_columns.end();
+                                 return affected_columns.find(std::to_string(idx.field_id)) != affected_columns.end();
                                }),
                 indexes.end());
 
