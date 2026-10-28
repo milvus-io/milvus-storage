@@ -48,6 +48,7 @@
 
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/format/column_group_reader.h"
+#include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_writer.h"
 #include "milvus-storage/thread_pool.h"
 #include "test_env.h"
@@ -348,6 +349,60 @@ TEST(VortexSessionDeadlockTest, DISABLED_ChildWrite) {
   std::fflush(stderr);
 }
 
+TEST(VortexSessionDeadlockTest, DISABLED_Issue54615NullableVectorArrayWriteClose) {
+  // Run before the first bridge call: an earlier Arrow conversion can hide the
+  // lazy ArrowSession initialization that deadlocked in milvus-io/milvus#54615.
+  // On Linux, CPU affinity also reduces the old DashMap's default shard count.
+  PinToOneAllowedCpu();
+  ASSERT_STATUS_OK(ConfigureStorageRuntime(2, 2));
+
+  api::Properties properties;
+  ASSERT_STATUS_OK(ConfigureReproProperties(properties));
+  api::SetValue(properties, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "true");
+  ASSERT_AND_ASSIGN(auto file_system, GetFileSystem(properties));
+
+  // Milvus flattens ArrayOfStruct subfields into separate columns. Its
+  // ArrayOfVector leaf is a nullable List<FixedSizeBinary(dim * sizeof(float))>.
+  // The row inserted before AddField is null; the later row contains two vectors.
+  constexpr int kVectorBytes = 8 * sizeof(float);
+  const auto vector_type = arrow::fixed_size_binary(kVectorBytes);
+  auto values = std::make_shared<arrow::FixedSizeBinaryBuilder>(vector_type);
+  arrow::ListBuilder lists(arrow::default_memory_pool(), values);
+  ASSERT_STATUS_OK(lists.AppendNull());
+  ASSERT_STATUS_OK(lists.Append());
+  const std::array<std::array<float, 8>, 2> vectors{{
+      {0.047042836F, 0.47521433F, 0.9629778F, 0.47345504F, 0.11395988F, 0.685901F, 0.9310565F, 0.12719889F},
+      {0.14575358F, 0.9686612F, 0.79961944F, 0.097402774F, 0.9770819F, 0.15683438F, 0.934192F, 0.37095058F},
+  }};
+  for (const auto& vector : vectors) {
+    ASSERT_STATUS_OK(values->Append(reinterpret_cast<const uint8_t*>(vector.data())));
+  }
+  std::shared_ptr<arrow::Array> array;
+  ASSERT_STATUS_OK(lists.Finish(&array));
+  const auto metadata = arrow::key_value_metadata({"PARQUET:field_id", "elementType", "dim"}, {"104", "101", "8"});
+  const auto schema = arrow::schema({arrow::field("104", array->type(), true, metadata)});
+  const auto batch = arrow::RecordBatch::Make(schema, 2, {array});
+  ASSERT_STATUS_OK(batch->ValidateFull());
+
+  constexpr char kPath[] = "issue54615-nullable-vector-array.vortex";
+  ASSERT_AND_ASSIGN(auto writer, VortexFileWriter::Open(file_system, schema, kPath, properties));
+  ASSERT_STATUS_OK(writer->Write(batch));
+  // Small writes can return while statistics are still being computed. Close
+  // must wait for List offset normalization / Arrow arithmetic to finish.
+  std::fprintf(stderr, "issue54615: closing nullable vector array writer (V%u)\n", ReproFormatVersion());
+  std::fflush(stderr);
+  ASSERT_AND_ASSIGN(auto file, writer->Close());
+  ASSERT_EQ(file.end_index, 2);
+  std::fprintf(stderr, "issue54615: close completed\n");
+  std::fflush(stderr);
+
+  VortexFormatReader reader(file_system, schema, kPath, properties, {"104"});
+  ASSERT_STATUS_OK(reader.open());
+  ASSERT_AND_ASSIGN(auto actual, reader.get_chunk(0));
+  ASSERT_STATUS_OK(actual->ValidateFull());
+  ASSERT_TRUE(actual->Equals(*batch)) << actual->ToString();
+}
+
 struct ChildWaitResult {
   bool exited = false;
   int status = 0;
@@ -509,6 +564,25 @@ TEST(VortexSessionDeadlockTest, IssueColumnGroupsReaderCompletes) {
   ASSERT_TRUE(reader_result.exited) << "reader child timed out; status=" << reader_result.status;
   ASSERT_TRUE(WIFEXITED(reader_result.status));
   ASSERT_EQ(WEXITSTATUS(reader_result.status), 0);
+}
+
+TEST(VortexSessionDeadlockTest, Issue54615NullableVectorArrayWriteCloseCompletes) {
+  for (const uint32_t format_version : {1U, 2U}) {
+    SCOPED_TRACE("Vortex format V" + std::to_string(format_version));
+    const auto root = MakeTemporaryRoot();
+    const auto pid =
+        SpawnChild("--gtest_filter=VortexSessionDeadlockTest.DISABLED_Issue54615NullableVectorArrayWriteClose", root,
+                   format_version);
+    ASSERT_GT(pid, 0) << "fork failed: " << std::strerror(errno);
+    const auto result = WaitForChild(pid, kWriteTimeout);
+
+    std::error_code cleanup_error;
+    std::filesystem::remove_all(root, cleanup_error);
+
+    ASSERT_TRUE(result.exited) << "nullable vector array write/close timed out (milvus-io/milvus#54615)";
+    ASSERT_TRUE(WIFEXITED(result.status));
+    ASSERT_EQ(WEXITSTATUS(result.status), 0);
+  }
 }
 
 }  // namespace milvus_storage::vortex
