@@ -22,14 +22,20 @@ namespace milvus_storage {
 // Synchronize an existing local file, including errors reported by close.
 arrow::Status SyncLocalFile(const std::string& path);
 
-// Persist the directory entry and all ancestor links. Existence is not proof
-// of durability: an existing parent can belong to another in-flight writer.
-arrow::Status SyncLocalDirectoryTree(const std::string& directory);
+// Sync physical directories bottom-up through the provisioned storage root.
+// The root and symlinks leading to it must be stable, durably provisioned by
+// the caller. Do not delete/recreate that boundary while the filesystem is used.
+arrow::Status SyncLocalDirectoryTree(const std::string& directory, const std::string& root);
+
+// Resolve an existing provisioned root, or create and sync a missing root
+// through the nearest existing (provisioned) ancestor during initialization.
+arrow::Result<std::string> PrepareLocalRoot(const std::string& root);
 
 // Write directly to the target path, synchronizing its file and directory on
 // successful Close. Write/Flush do not synchronize each small input chunk.
 // Failed or abandoned writes can leave incomplete files, as before.
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenDurableLocalOutput(const std::string& path,
-                                                                               bool append = false);
+                                                                               bool append,
+                                                                               const std::string& root);
 
 }  // namespace milvus_storage

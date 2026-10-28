@@ -15,6 +15,9 @@
 #include <filesystem>
 #include <fstream>
 #include <thread>
+#include <sys/stat.h>
+
+#include "milvus-storage/filesystem/local_durability.h"
 #include <unistd.h>
 
 #include "milvus-storage/common/fiu_local.h"
@@ -119,7 +122,76 @@ TEST_F(LocalDurabilityTest, ManifestVersionsRoundTripAndNeverOverwrite) {
   ASSERT_TRUE(api::Manifest::WriteTo(fs_, "objects/manifest-1.avro", manifest).IsAlreadyExists());
 }
 
+TEST_F(LocalDurabilityTest, SymlinkThenDotDotSelectsPhysicalRoot) {
+  std::filesystem::create_directories(root_ + "/actual/child");
+  std::filesystem::create_directories(root_ + "/actual/dataset");
+  std::filesystem::create_directory_symlink(root_ + "/actual/child", root_ + "/link");
+  // Deliberately do not create the lexically normalized root_/dataset.
+  config_.root_path = root_ + "/link/../dataset";
+  auto result = LocalFileSystemProducer(config_).Make();
+  ASSERT_TRUE(result.ok()) << result.status();
+  auto output = result.ValueOrDie()->OpenOutputStream("data").ValueOrDie();
+  ASSERT_TRUE(output->Write("data", 4).ok());
+  ASSERT_TRUE(output->Close().ok());
+  ASSERT_EQ(Read("actual/dataset/data"), "data");
+  ASSERT_TRUE(SyncLocalDirectoryTree(config_.root_path, root_ + "/actual").ok());
+}
+
+TEST_F(LocalDurabilityTest, SearchOnlyAncestorOutsideDataRoot) {
+  if (::geteuid() == 0)
+    GTEST_SKIP() << "root bypasses directory read permissions";
+  std::filesystem::create_directories(root_ + "/search/data");
+  auto ancestor = root_ + "/search";
+  ASSERT_EQ(::chmod(ancestor.c_str(), 0111), 0);
+  config_.root_path = ancestor + "/data";
+  auto result = LocalFileSystemProducer(config_).Make();
+  // Restore even if an assertion later fails.
+  struct Restore {
+    std::string path;
+    ~Restore() { ::chmod(path.c_str(), 0700); }
+  } restore{ancestor};
+  ASSERT_TRUE(result.ok()) << result.status();
+  auto fs = result.ValueOrDie();
+  ASSERT_TRUE(fs->CreateDir("new/parents", true).ok());
+  auto output = fs->OpenOutputStream("new/parents/data").ValueOrDie();
+  ASSERT_TRUE(output->Write("data", 4).ok());
+  ASSERT_TRUE(output->Close().ok());
+  ASSERT_TRUE(fs->CopyFile("new/parents/data", "copy").ok());
+  ASSERT_TRUE(fs->Move("copy", "moved").ok());
+
+  // Milvus uses '/' as its key namespace but the same physical data boundary.
+  config_.root_path = "/";
+  config_.local_durability_root = ancestor + "/data";
+  result = LocalFileSystemProducer(config_).Make();
+  ASSERT_TRUE(result.ok()) << result.status();
+  output = result.ValueOrDie()->OpenOutputStream(ancestor + "/data/absolute").ValueOrDie();
+  ASSERT_TRUE(output->Write("data", 4).ok());
+  ASSERT_TRUE(output->Close().ok());
+}
+
+TEST_F(LocalDurabilityTest, BoundaryRejectsOutsideDirectoriesAndSeparatesCache) {
+  auto other = config_;
+  other.local_durability_root = root_ + "/objects";
+  ASSERT_NE(config_.GetCacheKey(), other.GetCacheKey());
+  ASSERT_TRUE(SyncLocalDirectoryTree(root_, root_ + "/objects").IsInvalid());
+}
+
 #ifdef BUILD_WITH_FIU
+TEST_F(LocalDurabilityTest, OpeningProvisionedRootDoesNotSynchronizeReadPaths) {
+  auto output = fs_->OpenOutputStream("objects/readable").ValueOrDie();
+  ASSERT_TRUE(output->Write("data", 4).ok());
+  ASSERT_TRUE(output->Close().ok());
+  ScopedFiuFault fault(FIUKEY_LOCAL_DIRECTORY_SYNC_FAIL, false);
+  auto reopened = LocalFileSystemProducer(config_).Make();
+  ASSERT_TRUE(reopened.ok()) << reopened.status();
+  auto input = reopened.ValueOrDie()->OpenInputFile("objects/readable");
+  ASSERT_TRUE(input.ok()) << input.status();
+  ASSERT_TRUE(input.ValueOrDie()->Close().ok());
+  output = reopened.ValueOrDie()->OpenOutputStream("objects/written").ValueOrDie();
+  ASSERT_TRUE(output->Write("data", 4).ok());
+  ASSERT_FALSE(output->Close().ok());
+}
+
 TEST_F(LocalDurabilityTest, CloseFailureCannotReturnSuccess) {
   auto output = fs_->OpenOutputStream("objects/unclosed").ValueOrDie();
   ASSERT_TRUE(output->Write("data", 4).ok());
@@ -168,6 +240,20 @@ TEST_F(LocalDurabilityTest, CopyMoveAndCreatePropagateSyncFailure) {
   }
   ScopedFiuFault fault(FIUKEY_LOCAL_DIRECTORY_SYNC_FAIL, false);
   ASSERT_FALSE(fs_->CreateDir("unsynced/parent", true).ok());
+}
+
+TEST_F(LocalDurabilityTest, FailedCreateRetryAndRecreatedDirectoryStillSynchronize) {
+  {
+    ScopedFiuFault fault(FIUKEY_LOCAL_DIRECTORY_SYNC_FAIL, false);
+    ASSERT_FALSE(fs_->CreateDir("retry/nested", true).ok());
+  }
+  ASSERT_TRUE(fs_->CreateDir("retry/nested", true).ok());
+  ASSERT_TRUE(fs_->DeleteDir("retry").ok());
+  {
+    ScopedFiuFault fault(FIUKEY_LOCAL_DIRECTORY_SYNC_FAIL, false);
+    ASSERT_FALSE(fs_->CreateDir("retry/nested", true).ok());
+  }
+  ASSERT_TRUE(fs_->CreateDir("retry/nested", true).ok());
 }
 
 TEST_F(LocalDurabilityTest, ManifestSyncFailureCannotReturnCommitSuccess) {

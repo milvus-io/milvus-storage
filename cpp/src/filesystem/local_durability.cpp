@@ -45,8 +45,8 @@ arrow::Status SyncFD(int fd, const std::string& path, bool directory) {
 // write can leave an incomplete file; callers must not commit its metadata.
 class SyncOnCloseOutput final : public arrow::io::OutputStream {
   public:
-  SyncOnCloseOutput(std::shared_ptr<arrow::io::FileOutputStream> stream, std::string path)
-      : stream_(std::move(stream)), path_(std::move(path)) {}
+  SyncOnCloseOutput(std::shared_ptr<arrow::io::FileOutputStream> stream, std::string path, std::string root)
+      : stream_(std::move(stream)), path_(std::move(path)), root_(std::move(root)) {}
 
   ~SyncOnCloseOutput() override { (void)Abort(); }
 
@@ -88,13 +88,14 @@ class SyncOnCloseOutput final : public arrow::io::OutputStream {
     if (status_.ok())
       status_ = close_status;
     if (status_.ok())
-      status_ = SyncLocalDirectoryTree(std::filesystem::path(path_).parent_path().string());
+      status_ = SyncLocalDirectoryTree(std::filesystem::path(path_).parent_path().string(), root_);
     return status_;
   }
 
   private:
   std::shared_ptr<arrow::io::FileOutputStream> stream_;
   std::string path_;
+  std::string root_;
   arrow::Status status_;
 };
 
@@ -110,11 +111,19 @@ arrow::Status SyncLocalFile(const std::string& path) {
   return status;
 }
 
-arrow::Status SyncLocalDirectoryTree(const std::string& directory) {
+arrow::Status SyncLocalDirectoryTree(const std::string& directory, const std::string& root) {
   std::error_code error;
-  auto current = std::filesystem::absolute(directory.empty() ? "." : directory, error).lexically_normal();
+  // canonical resolves symlinks before '..', matching POSIX I/O. Lexical
+  // normalization can silently select an unrelated directory for fsync.
+  auto current = std::filesystem::canonical(directory.empty() ? "." : directory, error);
   if (error)
     return arrow::Status::IOError("resolve directory ", directory, ": ", error.message());
+  auto boundary = std::filesystem::canonical(root, error);
+  if (error)
+    return arrow::Status::IOError("resolve storage root ", root, ": ", error.message());
+  auto relative = current.lexically_relative(boundary);
+  if (relative.empty() || *relative.begin() == "..")
+    return arrow::Status::Invalid("Directory ", directory, " is outside durability root ", root);
   for (;;) {
     int fd = ::open(current.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (fd < 0)
@@ -123,16 +132,39 @@ arrow::Status SyncLocalDirectoryTree(const std::string& directory) {
     if (::close(fd) != 0 && status.ok())
       status = IOError("close directory", current.string(), errno);
     ARROW_RETURN_NOT_OK(status);
-    auto parent = current.parent_path();
-    if (parent == current)
+    if (current == boundary)
       return arrow::Status::OK();
-    current = std::move(parent);
+    current = current.parent_path();
   }
 }
 
-arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenDurableLocalOutput(const std::string& path, bool append) {
+arrow::Result<std::string> PrepareLocalRoot(const std::string& root) {
+  std::error_code error;
+  auto path = std::filesystem::absolute(root.empty() ? "." : root, error);
+  if (error)
+    return arrow::Status::IOError("resolve storage root ", root, ": ", error.message());
+  auto ancestor = path;
+  while (!std::filesystem::exists(ancestor, error)) {
+    if (error)
+      return arrow::Status::IOError("stat storage root ", ancestor.string(), ": ", error.message());
+    ancestor = ancestor.parent_path();
+  }
+  std::filesystem::create_directories(path, error);
+  if (error)
+    return arrow::Status::IOError("create storage root ", root, ": ", error.message());
+  if (ancestor != path)
+    ARROW_RETURN_NOT_OK(SyncLocalDirectoryTree(path.string(), ancestor.string()));
+  auto resolved = std::filesystem::canonical(path, error);
+  if (error)
+    return arrow::Status::IOError("resolve storage root ", root, ": ", error.message());
+  return resolved.string();
+}
+
+arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenDurableLocalOutput(const std::string& path,
+                                                                               bool append,
+                                                                               const std::string& root) {
   ARROW_ASSIGN_OR_RAISE(auto stream, arrow::io::FileOutputStream::Open(path, append));
-  return std::make_shared<SyncOnCloseOutput>(std::move(stream), path);
+  return std::make_shared<SyncOnCloseOutput>(std::move(stream), path, root);
 }
 
 }  // namespace milvus_storage

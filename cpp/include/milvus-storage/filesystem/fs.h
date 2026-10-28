@@ -185,6 +185,8 @@ struct ArrowFileSystemConfig {
   // Supports absolute and relative paths, A relative path
   // is relative to the working directory of the current process.
   std::string root_path = "files";
+  // Does not prefix object keys. Empty uses root_path.
+  std::string local_durability_root;
   std::string storage_type = "local";
   std::string cloud_provider = kCloudProviderAWS;
   std::string iam_endpoint = "";   // Deprecated
