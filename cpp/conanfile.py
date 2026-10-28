@@ -175,7 +175,7 @@ class StorageConan(ConanFile):
         self.requires("libavrocpp/1.12.1.1@milvus/dev#b4854183542196740ec9a004fdfff7ec")
         self.requires("google-cloud-cpp/2.28.0@milvus/dev#468918b43cec43624531a0340398cf43")
         self.requires("opentelemetry-cpp/1.23.0@milvus/dev#11bc565ec6e82910ae8f7471da756720")
-        self.requires("milvus-common/1.0.0-60a563c@milvus/dev#a7448f82ed17d10934eacb6d1b152fd8")
+        self.requires("milvus-common/1.0.0-a88c21f@milvus/dev#0eb9a7f2f5d5fe0e7d37f45f3f9a38ea")
         # azure-sdk-for-cpp is a transitive dep of Arrow, but must be declared
         # as a direct dep so CMakeDeps generates standalone cmake config files.
         # Without this, find_package(Azure) can't find include directories.
