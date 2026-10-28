@@ -14,7 +14,10 @@
 
 #include "milvus-storage/filesystem/s3/provider/AwsCredentialBrokerProvider.h"
 
+#include <algorithm>
+#include <chrono>
 #include <exception>
+#include <thread>
 #include <utility>
 
 #include <aws/core/client/ClientConfiguration.h>
@@ -31,6 +34,8 @@
 using ::milvus_storage::fs::internal::ToAwsString;
 
 namespace milvus_storage {
+
+static constexpr int kMaxInitialRetries = 3;
 
 AwsCredentialBrokerProvider::AwsCredentialBrokerProvider(AwsCredentialBrokerConfig config, Clock clock)
     : config_(std::move(config)), clock_(clock ? std::move(clock) : Clock([] { return Aws::Utils::DateTime::Now(); })) {
@@ -62,7 +67,19 @@ arrow::Result<Aws::Auth::AWSCredentials> AwsCredentialBrokerProvider::GetCredent
   if (!credentials_.IsEmpty() && credentials_.GetExpiration().Millis() - clock_().Millis() > 60000) {
     return credentials_;
   }
+  const bool had_cached_credentials = !credentials_.IsEmpty();
   auto fetched = FetchCredentials();
+  auto retry_delay = std::chrono::milliseconds(100);
+  // Match Azure SAS: only initial fetches retry; cached refreshes stay single
+  // attempts, even after expiration. Each HTTP attempt gets its own timeout.
+  for (int retries = 0; !had_cached_credentials && !fetched.ok() && retries < kMaxInitialRetries; ++retries) {
+    LOG_STORAGE_WARNING_ << "AWS credential broker initial fetch failed: " << fetched.status().ToString()
+                         << ", endpoint=" << config_.endpoint << ", retry=" << retries + 1 << "/" << kMaxInitialRetries
+                         << ", retry_delay_ms=" << retry_delay.count();
+    std::this_thread::sleep_for(retry_delay);
+    fetched = FetchCredentials();
+    retry_delay = std::min(retry_delay * 2, std::chrono::milliseconds(1000));
+  }
   if (fetched.ok()) {
     credentials_ = std::move(fetched).ValueUnsafe();
     return credentials_;

@@ -49,6 +49,7 @@
 #include <aws/core/utils/HashingUtils.h>
 
 #include "milvus-storage/filesystem/s3/provider/AwsCredentialBrokerProvider.h"
+#include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
@@ -1979,6 +1980,75 @@ TEST_F(S3ProviderTest, AwsExplicitCredentialsTakePrecedenceOverEnvironment) {
   EXPECT_EQ(credentials.GetAWSSecretKey(), "CONFIG_SK");
 }
 
+// Opt-in, read-only integration test. The reference bytes must come from an
+// independent read of an existing S3 object. No mock HTTP factory is installed.
+TEST(AwsBrokerLiveTest, ReadsExistingObjectWithBrokerCredentials) {
+  const char* case_path = std::getenv("TEST_ENV_AWS_BROKER_CASE");
+  if (case_path == nullptr) {
+    GTEST_SKIP() << "Set TEST_ENV_AWS_BROKER_CASE to a JSON file with properties, key, size, and reference";
+  }
+  std::ifstream case_file(case_path);
+  ASSERT_TRUE(case_file.good());
+  const auto live = nlohmann::json::parse(case_file);
+  api::Properties properties;
+  for (const auto& [key, value] : live.at("properties").items()) {
+    ASSERT_EQ(api::SetValue(properties, key.c_str(), value.get<std::string>().c_str()), std::nullopt);
+  }
+  std::ifstream reference(live.at("reference").get<std::string>(), std::ios::binary);
+  ASSERT_TRUE(reference.good());
+  const std::string expected{std::istreambuf_iterator<char>(reference), std::istreambuf_iterator<char>()};
+  ASSERT_FALSE(expected.empty());
+  ASSERT_LE(expected.size(), 1024);
+  const auto key = live.at("key").get<std::string>();
+  const auto lookup = live.value("lookup", std::string());
+  const auto cleanup = folly::makeGuard([] { FilesystemCache::getInstance().clean(); });
+  const auto shared_properties = std::make_shared<const api::Properties>(std::move(properties));
+  ASSERT_AND_ASSIGN(const auto fs, FilesystemCache::getInstance().get(shared_properties, lookup));
+  ASSERT_AND_ASSIGN(const auto cached, FilesystemCache::getInstance().get(shared_properties, lookup));
+  ASSERT_EQ(fs.get(), cached.get());
+  ASSERT_AND_ASSIGN(const auto info, fs->GetFileInfo(key));
+  ASSERT_EQ(info.size(), live.at("size").get<int64_t>());
+  RecordProperty("object_size", std::to_string(info.size()));
+  RecordProperty("compared_bytes", std::to_string(expected.size()));
+  ASSERT_AND_ASSIGN(const auto input, fs->OpenInputFile(key));
+  for (int i = 0; i < 3; ++i) {
+    ASSERT_AND_ASSIGN(const auto bytes, input->ReadAt(0, expected.size()));
+    EXPECT_TRUE(bytes->ToString() == expected);
+  }
+  std::vector<std::future<arrow::Result<std::shared_ptr<arrow::Buffer>>>> reads;
+  for (int i = 0; i < 8; ++i) {
+    reads.push_back(
+        std::async(std::launch::async, [input, length = expected.size()] { return input->ReadAt(0, length); }));
+  }
+  for (auto& read : reads) {
+    ASSERT_AND_ASSIGN(const auto bytes, read.get());
+    EXPECT_TRUE(bytes->ToString() == expected);
+  }
+  if (live.value("async", false)) {
+    auto* async_input = dynamic_cast<NonBlockingRandomAccessFile*>(input.get());
+    ASSERT_NE(async_input, nullptr);
+    std::vector<uint8_t> output(expected.size());
+    const auto future = async_input->ReadAtAsyncInto(0, output.size(), output.data());
+    ASSERT_AND_ASSIGN(const auto count, future.result());
+    EXPECT_EQ(count, expected.size());
+    EXPECT_TRUE(std::equal(output.begin(), output.end(), expected.begin(),
+                           [](uint8_t actual, char wanted) { return actual == static_cast<uint8_t>(wanted); }));
+  }
+  ASSERT_STATUS_OK(input->Close());
+
+  // A fresh provider with the wrong identity must return the real Broker cause,
+  // even though the successful filesystem has already cached valid credentials.
+  ASSERT_AND_ASSIGN(const auto config, FilesystemCache::resolve_config(shared_properties, lookup));
+  AwsCredentialBrokerProvider denied({config.credential_endpoint, config.region, config.role_arn,
+                                      config.external_id + "-invalid", config.load_frequency,
+                                      config.request_timeout_ms});
+  const auto credentials = denied.GetCredentials();
+  ASSERT_FALSE(credentials.ok());
+  EXPECT_NE(credentials.status().message().find("AWS credential broker"), std::string::npos);
+  EXPECT_NE(credentials.status().message().find("AccessDenied"), std::string::npos);
+  RecordProperty("invalid_identity_status", credentials.status().ToString());
+}
+
 static std::string AwsBrokerResponse(const std::string& key, const Aws::Utils::DateTime& expires) {
   return nlohmann::json({{"success", true},
                          {"credentials",
@@ -2006,32 +2076,47 @@ TEST_F(S3ProviderTest, AwsBrokerRequestsAndRefreshesCredentialsThroughSdkGetter)
       AwsCredentialBrokerConfig{"http://broker/v1/credentials/assume-role", "us-west-2",
                                 "arn:aws:iam::123456789012:role/reader", "external-id", 1800, 1000},
       [&now] { return now; });
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role",
+                                Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE, "unavailable");
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                "{invalid-json}");
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                R"({"success":false,"msg":"temporarily unavailable"})");
   mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
                                 AwsBrokerResponse("first-key", now + std::chrono::seconds(1800)));
+  const auto started = std::chrono::steady_clock::now();
   const auto credentials = provider->GetAWSCredentials();
+  ASSERT_FALSE(credentials.IsEmpty());
+  EXPECT_GE(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(700));
   EXPECT_EQ(credentials.GetAWSAccessKeyId(), "first-key");
   EXPECT_EQ(credentials.GetAWSSecretKey(), "broker-secret");
   EXPECT_EQ(credentials.GetSessionToken(), "broker-session");
   const auto requests = mock_client_->GetRecordedRequests();
-  ASSERT_EQ(requests.size(), 1);
-  EXPECT_EQ(requests[0]->GetMethod(), Aws::Http::HttpMethod::HTTP_POST);
-  EXPECT_FALSE(requests[0]->HasHeader("Authorization"));
-  EXPECT_EQ(nlohmann::json::parse(ReadRequestBody(requests[0])),
-            nlohmann::json({{"csp", "aws"},
-                            {"region", "us-west-2"},
-                            {"roleArn", "arn:aws:iam::123456789012:role/reader"},
-                            {"externalId", "external-id"},
-                            {"durationSeconds", 1800}}));
+  ASSERT_EQ(requests.size(), 4);
+  for (const auto& request : requests) {
+    EXPECT_EQ(request->GetMethod(), Aws::Http::HttpMethod::HTTP_POST);
+    EXPECT_FALSE(request->HasHeader("Authorization"));
+    EXPECT_EQ(nlohmann::json::parse(ReadRequestBody(request)),
+              nlohmann::json({{"csp", "aws"},
+                              {"region", "us-west-2"},
+                              {"roleArn", "arn:aws:iam::123456789012:role/reader"},
+                              {"externalId", "external-id"},
+                              {"durationSeconds", 1800}}));
+  }
+  EXPECT_EQ(provider->GetAWSCredentials().GetAWSAccessKeyId(), "first-key");
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 4);
   now = now + std::chrono::seconds(1741);
   mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
                                 AwsBrokerResponse("second-key", now + std::chrono::seconds(1800)));
   EXPECT_EQ(provider->GetAWSCredentials().GetAWSAccessKeyId(), "second-key");
-  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 2);
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 5);
 }
 
 TEST_F(S3ProviderTest, AwsBrokerConcurrentRequestsShareOneRefresh) {
   auto provider = std::make_shared<AwsCredentialBrokerProvider>(
       AwsCredentialBrokerConfig{"http://broker/v1/credentials/assume-role", "us-west-2", "role", "", 900, 1000});
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role",
+                                Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE, "unavailable");
   mock_client_->EnqueueResponse(
       "http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
       AwsBrokerResponse("shared-key", Aws::Utils::DateTime::Now() + std::chrono::seconds(900)));
@@ -2048,7 +2133,7 @@ TEST_F(S3ProviderTest, AwsBrokerConcurrentRequestsShareOneRefresh) {
   for (auto& result : results) {
     EXPECT_EQ(result.get().GetAWSAccessKeyId(), "shared-key");
   }
-  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 1);
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 2);
 }
 
 TEST_F(S3ProviderTest, AwsBrokerHonorsExpirationTimezoneOffsets) {
@@ -2083,12 +2168,15 @@ TEST_F(S3ProviderTest, AwsBrokerRejectsExpiredCredentialsWithTimezoneOffset) {
                                        [now] { return now; });
   auto body = nlohmann::json::parse(AwsBrokerResponse("expired-key", now));
   body["credentials"]["expiredAt"] = "2026-10-14T12:00:00+08:00";
-  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
-                                body.dump());
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                  body.dump());
+  }
   const auto result = provider.GetCredentials();
   ASSERT_FALSE(result.ok());
   EXPECT_TRUE(result.status().IsIOError());
   EXPECT_NE(result.status().ToString().find("expired credentials"), std::string::npos);
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 4);
 }
 
 TEST_F(S3ProviderTest, AwsBrokerRefreshFailureReturnsOldCredentialsAndRetriesEveryRequest) {
@@ -2134,14 +2222,18 @@ TEST_F(S3ProviderTest, AwsBrokerRejectsInvalidResponses) {
   for (const auto& body : bodies) {
     auto provider = std::make_shared<AwsCredentialBrokerProvider>(
         AwsCredentialBrokerConfig{"http://broker/v1/credentials/assume-role", "us-west-2", "role", "", 900, 1000});
-    mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK, body);
+    for (int attempt = 0; attempt < 4; ++attempt) {
+      mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK, body);
+    }
     EXPECT_FALSE(provider->GetCredentials().ok());
   }
   auto provider = std::make_shared<AwsCredentialBrokerProvider>(
       AwsCredentialBrokerConfig{"http://broker/v1/credentials/assume-role", "us-west-2", "role", "", 900, 1000});
-  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role",
-                                Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE,
-                                R"({"msg":"broker unavailable","detail":"upstream timeout"})");
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role",
+                                  Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE,
+                                  R"({"msg":"broker unavailable","detail":"upstream timeout"})");
+  }
   const auto result = provider->GetCredentials();
   ASSERT_FALSE(result.ok());
   EXPECT_NE(result.status().ToString().find("503"), std::string::npos);
@@ -2151,14 +2243,24 @@ TEST_F(S3ProviderTest, AwsBrokerRejectsInvalidResponses) {
 TEST_F(S3ProviderTest, AwsBrokerRetriesAfterInitialFailure) {
   auto provider = std::make_shared<AwsCredentialBrokerProvider>(
       AwsCredentialBrokerConfig{"http://broker/v1/credentials/assume-role", "us-west-2", "role", "", 900, 1000});
-  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
-                                R"({"success":false,"msg":"temporarily unavailable","detail":"retry"})");
-  EXPECT_TRUE(provider->GetAWSCredentials().IsEmpty());
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    mock_client_->EnqueueResponse(
+        "http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE,
+        nlohmann::json({{"msg", "broker unavailable"}, {"detail", "attempt " + std::to_string(attempt)}}).dump());
+  }
+  const auto started = std::chrono::steady_clock::now();
+  const auto result = provider->GetCredentials();
+  ASSERT_FALSE(result.ok());
+  EXPECT_GE(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(700));
+  EXPECT_NE(result.status().ToString().find("503"), std::string::npos);
+  EXPECT_NE(result.status().ToString().find("attempt 3"), std::string::npos);
+  ASSERT_EQ(mock_client_->GetRecordedRequests().size(), 4);
   mock_client_->EnqueueResponse(
       "http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
       AwsBrokerResponse("recovered-key", Aws::Utils::DateTime::Now() + std::chrono::seconds(900)));
   EXPECT_EQ(provider->GetAWSCredentials().GetAWSAccessKeyId(), "recovered-key");
-  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 2);
+  EXPECT_EQ(provider->GetAWSCredentials().GetAWSAccessKeyId(), "recovered-key");
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 5);
 }
 
 TEST_F(S3ProviderTest, AwsBrokerDispatcherSelectsBrokerInsteadOfDirectSts) {
