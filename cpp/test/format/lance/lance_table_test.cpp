@@ -456,7 +456,7 @@ TEST(LanceWriterOwnershipTest, RejectedWriterOptionsReleaseBufferedBatches) {
         {PROPERTY_FS_CLOUD_PROVIDER, std::string(kCloudProviderAWS)},
         {PROPERTY_FS_ROLE_ARN, std::string("arn:aws:iam::123456789012:role/test-role")},
     };
-    LanceTableWriter writer("unused", schema, properties);
+    LanceTableWriter writer("unused", schema, std::make_shared<const api::Properties>(properties));
     ASSERT_STATUS_OK(writer.Write(batch));
     batch.reset();
 
@@ -477,7 +477,7 @@ class LanceBasicTest : public ::testing::Test {
 
   void SetUp() override {
     ASSERT_STATUS_OK(InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
 
     // For Arrow filesystem operations
     arrow_base_path_ = GetTestBasePath("lance-fragment-test");
@@ -564,7 +564,7 @@ TEST_F(LanceBasicTest, AimdRetriesFfiThrottlingDuringRangeRead) {
   }
 
   api::SetValue(properties_, PROPERTY_FS_LANCE_IO_PARALLELISM, "1");
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto column_group_file, writer.Close());
   ASSERT_EQ(column_group_file.end_index, test_batch_->num_rows());
@@ -575,7 +575,8 @@ TEST_F(LanceBasicTest, AimdRetriesFfiThrottlingDuringRangeRead) {
       fs_, remaining_failures,
       MakeExtendError(ExtendStatusCode::StorageTransientThrottling, "Injected throttling", "Injected throttling"));
 
-  LanceTableReader reader(throttling_fs, parsed_uri.first, parsed_uri.second, schema_, properties_);
+  LanceTableReader reader(throttling_fs, parsed_uri.first, parsed_uri.second, schema_,
+                          std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(reader.open());
   ASSERT_AND_ASSIGN(auto row_groups, reader.get_row_group_infos());
   ASSERT_FALSE(row_groups.empty());
@@ -596,7 +597,7 @@ TEST_F(LanceBasicTest, MaterializedReadsTranslateDeferredErrors) {
   constexpr int64_t kRows = 32'768;
   api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "32768");
   ASSERT_AND_ASSIGN(auto large_batch, CreateTestData(schema_, 0, false, kRows));
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(large_batch));
   ASSERT_AND_ASSIGN(auto column_group_file, writer.Close());
   ASSERT_EQ(column_group_file.end_index, large_batch->num_rows());
@@ -610,8 +611,8 @@ TEST_F(LanceBasicTest, MaterializedReadsTranslateDeferredErrors) {
 
   auto open_reader = [&]() -> arrow::Result<std::shared_ptr<LanceTableReader>> {
     remaining_failures->store(0, std::memory_order_relaxed);
-    auto reader =
-        std::make_shared<LanceTableReader>(failing_fs, parsed_uri.first, parsed_uri.second, schema_, properties_);
+    auto reader = std::make_shared<LanceTableReader>(failing_fs, parsed_uri.first, parsed_uri.second, schema_,
+                                                     std::make_shared<const api::Properties>(properties_));
     ARROW_RETURN_NOT_OK(reader->open());
     return reader;
   };
@@ -663,7 +664,8 @@ TEST_F(LanceBasicTest, MaterializedReadsTranslateDeferredErrors) {
       arrow::Status::IOError("Injected permission failure").WithDetail(arrow::internal::StatusDetailFromErrno(EACCES));
   auto permission_fs =
       std::make_shared<InjectedFailureFileSystem>(fs_, permission_failures, std::move(permission_status), 4 * 1024);
-  LanceTableReader permission_reader(permission_fs, parsed_uri.first, parsed_uri.second, schema_, properties_);
+  LanceTableReader permission_reader(permission_fs, parsed_uri.first, parsed_uri.second, schema_,
+                                     std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(permission_reader.open());
 
   permission_failures->store(1'000, std::memory_order_relaxed);
@@ -682,14 +684,14 @@ TEST_F(LanceBasicTest, AsyncOpenReturnsBeforeIoCompletes) {
     GTEST_SKIP() << "This regression uses an injected local filesystem.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto file, writer.Close());
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(file.path));
   auto lifecycle = std::make_shared<AsyncReaderLifecycleState>();
   auto filesystem = std::make_shared<CallbackThreadFileSystem>(fs_, lifecycle);
-  auto reader =
-      std::make_shared<LanceTableReader>(filesystem, parsed_uri.first, parsed_uri.second, schema_, properties_);
+  auto reader = std::make_shared<LanceTableReader>(filesystem, parsed_uri.first, parsed_uri.second, schema_,
+                                                   std::make_shared<const api::Properties>(properties_));
 
   std::promise<void> returned;
   auto invocation = returned.get_future();
@@ -724,15 +726,15 @@ TEST_F(LanceBasicTest, AsyncRangeMaterializesBeforeCompletionAndRetainsReader) {
 
   constexpr int64_t kRows = 32'768;
   ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, 0, false, kRows));
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(batch));
   ASSERT_AND_ASSIGN(auto file, writer.Close());
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(file.path));
   auto lifecycle = std::make_shared<AsyncReaderLifecycleState>();
   lifecycle->AllowCompletions();
   auto filesystem = std::make_shared<CallbackThreadFileSystem>(fs_, lifecycle);
-  auto reader =
-      std::make_shared<LanceTableReader>(filesystem, parsed_uri.first, parsed_uri.second, schema_, properties_);
+  auto reader = std::make_shared<LanceTableReader>(filesystem, parsed_uri.first, parsed_uri.second, schema_,
+                                                   std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(reader->open());
   lifecycle->JoinWorkers();
   const auto previous_reads = lifecycle->PauseCompletions();
@@ -783,15 +785,15 @@ TEST_F(LanceBasicTest, AsyncTakeRetainsReaderUntilCompletion) {
   }
 
   ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, 0, false, 32'768));
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(batch));
   ASSERT_AND_ASSIGN(auto file, writer.Close());
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(file.path));
   auto lifecycle = std::make_shared<AsyncReaderLifecycleState>();
   lifecycle->AllowCompletions();
   auto filesystem = std::make_shared<CallbackThreadFileSystem>(fs_, lifecycle);
-  auto reader =
-      std::make_shared<LanceTableReader>(filesystem, parsed_uri.first, parsed_uri.second, schema_, properties_);
+  auto reader = std::make_shared<LanceTableReader>(filesystem, parsed_uri.first, parsed_uri.second, schema_,
+                                                   std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(reader->open());
   lifecycle->JoinWorkers();
   const auto previous_reads = lifecycle->PauseCompletions();
@@ -820,7 +822,7 @@ TEST_F(LanceBasicTest, TimedOutAsyncOpenDoesNotStrandDatasetCache) {
     GTEST_SKIP() << "This regression uses an injected local filesystem.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto file, writer.Close());
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(file.path));
@@ -829,7 +831,8 @@ TEST_F(LanceBasicTest, TimedOutAsyncOpenDoesNotStrandDatasetCache) {
   // Pin the first write's version so the gated I/O belongs to the dataset
   // singleflight, rather than the preceding latest-version lookup.
   auto reader = std::make_shared<LanceTableReader>(filesystem, parsed_uri.first, parsed_uri.second, schema_,
-                                                   properties_, std::vector<std::string>{}, 1);
+                                                   std::make_shared<const api::Properties>(properties_),
+                                                   std::vector<std::string>{}, 1);
   auto timed_open = std::async(std::launch::async, [reader]() {
     try {
       (void)std::move(reader->open_async()).get(std::chrono::milliseconds(200));
@@ -850,7 +853,8 @@ TEST_F(LanceBasicTest, TimedOutAsyncOpenDoesNotStrandDatasetCache) {
 
   auto status = arrow::Status::Cancelled("Open has not been retried");
   for (int attempt = 0; attempt < 2 && status.IsCancelled(); ++attempt) {
-    reader = std::make_shared<LanceTableReader>(filesystem, parsed_uri.first, parsed_uri.second, schema_, properties_,
+    reader = std::make_shared<LanceTableReader>(filesystem, parsed_uri.first, parsed_uri.second, schema_,
+                                                std::make_shared<const api::Properties>(properties_),
                                                 std::vector<std::string>{}, 1);
     try {
       status = std::move(reader->open_async()).get(std::chrono::seconds(5));
@@ -872,7 +876,7 @@ TEST_F(LanceBasicTest, AsyncDatasetCacheSurvivesStaticDestruction) {
   const auto original_death_test_style = GTEST_FLAG_GET(death_test_style);
   GTEST_FLAG_SET(death_test_style, "threadsafe");
   EXPECT_EXIT(([&] {
-                LanceTableWriter writer(base_path_, schema_, properties_);
+                LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
                 ASSERT_STATUS_OK(writer.Write(test_batch_));
                 ASSERT_AND_ASSIGN(auto file, writer.Close());
                 ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(file.path));
@@ -885,8 +889,9 @@ TEST_F(LanceBasicTest, AsyncDatasetCacheSurvivesStaticDestruction) {
                 static auto* exit_state = new ExitState;
                 exit_state->lifecycle = std::make_shared<AsyncReaderLifecycleState>();
                 auto filesystem = std::make_shared<CallbackThreadFileSystem>(fs_, exit_state->lifecycle);
-                auto reader = std::make_shared<LanceTableReader>(filesystem, parsed_uri.first, parsed_uri.second,
-                                                                 schema_, properties_, std::vector<std::string>{}, 1);
+                auto reader = std::make_shared<LanceTableReader>(
+                    filesystem, parsed_uri.first, parsed_uri.second, schema_,
+                    std::make_shared<const api::Properties>(properties_), std::vector<std::string>{}, 1);
 
                 // Register before the first cache access: exit handlers run in reverse
                 // order, so a destructible cache would be gone before this releases I/O.
@@ -923,13 +928,14 @@ TEST_F(LanceBasicTest, AsyncReaderIsReleasedOutsideCrtCompletionCallback) {
     GTEST_SKIP() << "This regression uses an injected local filesystem.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto column_group_file, writer.Close());
   ASSERT_EQ(column_group_file.end_index, test_batch_->num_rows());
 
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
+      std::make_shared<const api::Properties>(properties_), fs_config));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
 
   auto lifecycle = std::make_shared<AsyncReaderLifecycleState>();
@@ -983,13 +989,13 @@ TEST_F(LanceBasicTest, AsyncMetadataReadersSurviveCacheReleaseAcrossFragments) {
   }
 
   for (int fragment = 0; fragment < 2; ++fragment) {
-    LanceTableWriter writer(base_path_, schema_, properties_);
+    LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
     ASSERT_STATUS_OK(writer.Write(test_batch_));
     ASSERT_AND_ASSIGN(auto file, writer.Close());
     EXPECT_EQ(file.end_index, test_batch_->num_rows());
   }
   LanceFormat format;
-  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, properties_));
+  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, std::make_shared<const api::Properties>(properties_)));
   ASSERT_EQ(files.size(), 2);
 
   auto cache = FormatReaderMetadataCache<LanceTableReader>::Make();
@@ -998,7 +1004,8 @@ TEST_F(LanceBasicTest, AsyncMetadataReadersSurviveCacheReleaseAcrossFragments) {
   for (const auto& file : files) {
     auto metadata_future = cache->get_or_open_async(LanceTableReader::MetaTrait::cache_key(file), [&]() {
       ++metadata_loads;
-      return LanceTableReader::MetaTrait::load_metadata_async(file, properties_, nullptr);
+      return LanceTableReader::MetaTrait::load_metadata_async(
+          file, std::make_shared<const api::Properties>(properties_), nullptr);
     });
     ASSERT_AND_ASSIGN(auto metadata, std::move(metadata_future).get());
     readers.emplace_back(
@@ -1026,13 +1033,13 @@ TEST_F(LanceBasicTest, ConcurrentAsyncMetadataCachesShareDatasetAcrossFragments)
   }
 
   for (int fragment = 0; fragment < 2; ++fragment) {
-    LanceTableWriter writer(base_path_, schema_, properties_);
+    LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
     ASSERT_STATUS_OK(writer.Write(test_batch_));
     ASSERT_AND_ASSIGN(auto file, writer.Close());
     EXPECT_EQ(file.end_index, test_batch_->num_rows());
   }
   LanceFormat format;
-  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, properties_));
+  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, std::make_shared<const api::Properties>(properties_)));
   ASSERT_EQ(files.size(), 2);
   const auto key = LanceTableReader::MetaTrait::cache_key(files[0]);
   ASSERT_EQ(key, LanceTableReader::MetaTrait::cache_key(files[1]));
@@ -1052,7 +1059,8 @@ TEST_F(LanceBasicTest, ConcurrentAsyncMetadataCachesShareDatasetAcrossFragments)
                                                 [&]() {
                                                   ++metadata_loads;
                                                   return LanceTableReader::MetaTrait::load_metadata_async(
-                                                      file, properties_, nullptr);
+                                                      file, std::make_shared<const api::Properties>(properties_),
+                                                      nullptr);
                                                 }))
           .get();
     }));
@@ -1079,13 +1087,13 @@ TEST_F(LanceBasicTest, PublicAsyncReadersPreserveProjectionAndChunkOrderWithAndW
   ASSERT_AND_ASSIGN(auto second_batch, CreateTestData(schema_, rows, false, rows));
   const std::vector<std::shared_ptr<arrow::RecordBatch>> batches = {test_batch_, second_batch};
   for (const auto& batch : batches) {
-    LanceTableWriter writer(base_path_, schema_, properties_);
+    LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
     ASSERT_STATUS_OK(writer.Write(batch));
     ASSERT_AND_ASSIGN(auto file, writer.Close());
     EXPECT_EQ(file.end_index, rows);
   }
   LanceFormat format;
-  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, properties_));
+  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, std::make_shared<const api::Properties>(properties_)));
   ASSERT_EQ(files.size(), 2);
   auto column_group = std::make_shared<api::ColumnGroup>();
   for (const auto& field : schema_->fields()) {
@@ -1099,7 +1107,8 @@ TEST_F(LanceBasicTest, PublicAsyncReadersPreserveProjectionAndChunkOrderWithAndW
   for (const auto* cache_enabled : {"true", "false"}) {
     SCOPED_TRACE(cache_enabled);
     ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, cache_enabled), std::nullopt);
-    auto reader = api::Reader::create(column_groups, schema_, nullptr, properties_);
+    auto reader =
+        api::Reader::create(column_groups, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
     for (const std::vector<int>& projection : {std::vector<int>{0}, std::vector<int>{1, 0}}) {
       auto names = std::make_shared<std::vector<std::string>>();
       for (const auto column : projection) {
@@ -1132,16 +1141,18 @@ TEST_F(LanceBasicTest, AsyncRangeAndTakePreserveProjectionMetadataAndDeletedRows
 
   auto schema = schema_->WithMetadata(arrow::key_value_metadata({"dataset-purpose"}, {"async-regression"}));
   auto batch = arrow::RecordBatch::Make(schema, test_batch_->num_rows(), test_batch_->columns());
-  LanceTableWriter writer(base_path_, schema, properties_);
+  LanceTableWriter writer(base_path_, schema, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(batch));
   ASSERT_AND_ASSIGN(auto file, writer.Close());
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(file.path));
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
+      std::make_shared<const api::Properties>(properties_), fs_config));
   ASSERT_AND_ASSIGN(auto options, ToWriterOptions(fs_config));
   ASSERT_STATUS_OK(BlockingDataset::DeleteRows(ToStandardLanceUri(parsed_uri.first), "id < 20", options));
 
-  auto reader = std::make_shared<LanceTableReader>(fs_, parsed_uri.first, parsed_uri.second, nullptr, properties_,
+  auto reader = std::make_shared<LanceTableReader>(fs_, parsed_uri.first, parsed_uri.second, nullptr,
+                                                   std::make_shared<const api::Properties>(properties_),
                                                    std::vector<std::string>{"name", "id"});
   ASSERT_STATUS_OK(std::move(reader->open_async()).get());
   ASSERT_AND_ASSIGN(auto groups, reader->get_row_group_infos());
@@ -1170,8 +1181,8 @@ TEST_F(LanceBasicTest, AsyncRangeAndTakePreserveProjectionMetadataAndDeletedRows
   EXPECT_TRUE(oversized.status().IsInvalid()) << oversized.status().ToString();
 
   auto provided_schema = arrow::schema({schema->field(1), schema->field(0)}, schema->metadata());
-  auto explicit_schema_reader =
-      std::make_shared<LanceTableReader>(fs_, parsed_uri.first, parsed_uri.second, provided_schema, properties_);
+  auto explicit_schema_reader = std::make_shared<LanceTableReader>(
+      fs_, parsed_uri.first, parsed_uri.second, provided_schema, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(std::move(explicit_schema_reader->open_async()).get());
   ASSERT_AND_ASSIGN(auto nonempty, std::move(explicit_schema_reader->read_with_range_async(0, 1)).get());
   ASSERT_AND_ASSIGN(auto empty, std::move(explicit_schema_reader->read_with_range_async(0, 0)).get());
@@ -1235,7 +1246,7 @@ TEST_P(LanceRleStorageVersionTest, WritesAndReadsCustomerShapedRleData) {
   ASSERT_STATUS_OK(curr_time_builder.Finish(&curr_time_array));
   auto batch = arrow::RecordBatch::Make(rle_schema, kRows, {embedding_array, uuid_array, curr_time_array});
 
-  LanceTableWriter writer(base_path_, rle_schema, properties_, GetParam());
+  LanceTableWriter writer(base_path_, rle_schema, std::make_shared<const api::Properties>(properties_), GetParam());
   ASSERT_STATUS_OK(writer.Write(batch));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, kRows);
@@ -1254,7 +1265,8 @@ TEST_P(LanceRleStorageVersionTest, WritesAndReadsCustomerShapedRleData) {
       {"embedding", "uuid", "curr_time"},
   };
   for (const auto& projection : projections) {
-    LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, nullptr, properties_, projection);
+    LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, nullptr,
+                            std::make_shared<const api::Properties>(properties_), projection);
     ASSERT_STATUS_OK(reader.open());
     ASSERT_AND_ASSIGN(auto table, reader.take(row_indices));
     ASSERT_STATUS_OK(table->ValidateFull());
@@ -1319,7 +1331,7 @@ TEST_F(LanceBasicTest, DefaultStorageVersionIsV2_1) {
     GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_AND_ASSIGN(auto storage_version, ReadLanceDataFileVersion());
@@ -1333,7 +1345,8 @@ TEST_F(LanceBasicTest, WriteDatasetReturnsOnlyFragmentsCreatedByEachWrite) {
   }
 
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
+      std::make_shared<const api::Properties>(properties_), fs_config));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
   ASSERT_AND_ASSIGN(auto storage_options, ToWriterOptions(fs_config));
 
@@ -1353,7 +1366,8 @@ TEST_F(LanceBasicTest, WriteDatasetReturnsOnlyFragmentsCreatedByEachWrite) {
   ASSERT_EQ(second_write_fragment_ids.size(), 1);
   EXPECT_NE(first_write_fragment_ids[0], second_write_fragment_ids[0]);
 
-  ASSERT_AND_ASSIGN(auto read_fs, FilesystemCache::getInstance().get(properties_, lance_uri));
+  ASSERT_AND_ASSIGN(auto read_fs, FilesystemCache::getInstance().get(
+                                      std::make_shared<const api::Properties>(properties_), lance_uri));
   ASSERT_AND_ASSIGN(auto dataset, BlockingDataset::Open(lance_uri, read_fs, ToReaderOptions(fs_config)));
   ASSERT_AND_ASSIGN(auto all_fragment_ids, dataset->GetAllFragmentIds());
   std::sort(all_fragment_ids.begin(), all_fragment_ids.end());
@@ -1375,22 +1389,24 @@ TEST_F(LanceBasicTest, ExploreCarriesDatasetSnapshotVersion) {
     GTEST_SKIP() << "Focused snapshot-version test uses the local Lance fixture.";
   }
 
-  LanceTableWriter first_writer(base_path_, schema_, properties_);
+  LanceTableWriter first_writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(first_writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto first_file, first_writer.Close());
 
   LanceFormat format;
-  ASSERT_AND_ASSIGN(auto first_snapshot_files, format.explore(base_path_, properties_));
+  ASSERT_AND_ASSIGN(auto first_snapshot_files,
+                    format.explore(base_path_, std::make_shared<const api::Properties>(properties_)));
   ASSERT_EQ(first_snapshot_files.size(), 1);
   auto first_version = first_snapshot_files[0].properties.find(kDatasetVersionProperty);
   ASSERT_NE(first_version, first_snapshot_files[0].properties.end());
   EXPECT_EQ(first_version->second, "1");
 
-  LanceTableWriter second_writer(base_path_, schema_, properties_);
+  LanceTableWriter second_writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(second_writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto second_file, second_writer.Close());
 
-  ASSERT_AND_ASSIGN(auto second_snapshot_files, format.explore(base_path_, properties_));
+  ASSERT_AND_ASSIGN(auto second_snapshot_files,
+                    format.explore(base_path_, std::make_shared<const api::Properties>(properties_)));
   ASSERT_EQ(second_snapshot_files.size(), 2);
   for (const auto& file : second_snapshot_files) {
     auto version = file.properties.find(kDatasetVersionProperty);
@@ -1400,7 +1416,8 @@ TEST_F(LanceBasicTest, ExploreCarriesDatasetSnapshotVersion) {
 
   auto pinned_properties = properties_;
   ASSERT_EQ(api::SetValue(pinned_properties, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, "1"), std::nullopt);
-  ASSERT_AND_ASSIGN(auto pinned_snapshot_files, format.explore(base_path_, pinned_properties));
+  ASSERT_AND_ASSIGN(auto pinned_snapshot_files,
+                    format.explore(base_path_, std::make_shared<const api::Properties>(pinned_properties)));
   ASSERT_EQ(pinned_snapshot_files.size(), 1);
   auto pinned_version = pinned_snapshot_files[0].properties.find(kDatasetVersionProperty);
   ASSERT_NE(pinned_version, pinned_snapshot_files[0].properties.end());
@@ -1412,22 +1429,24 @@ TEST_F(LanceBasicTest, SeparateTopLevelReaderCachesShareSameDatasetSnapshot) {
     GTEST_SKIP() << "Focused dataset-cache test uses the local Lance fixture.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto written_file, writer.Close());
 
   LanceFormat format;
-  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, properties_));
+  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, std::make_shared<const api::Properties>(properties_)));
   ASSERT_EQ(files.size(), 1);
 
   MetadataCache first_reader_cache;
   MetadataCache second_reader_cache;
   const auto key = LanceTableReader::MetaTrait::cache_key(files[0]);
   ASSERT_AND_ASSIGN(auto first_metadata, first_reader_cache.get<LanceTableReader>()->get_or_open(key, [&]() {
-    return LanceTableReader::MetaTrait::load_metadata(files[0], properties_, nullptr /* key_retriever */);
+    return LanceTableReader::MetaTrait::load_metadata(files[0], std::make_shared<const api::Properties>(properties_),
+                                                      nullptr /* key_retriever */);
   }));
   ASSERT_AND_ASSIGN(auto second_metadata, second_reader_cache.get<LanceTableReader>()->get_or_open(key, [&]() {
-    return LanceTableReader::MetaTrait::load_metadata(files[0], properties_, nullptr /* key_retriever */);
+    return LanceTableReader::MetaTrait::load_metadata(files[0], std::make_shared<const api::Properties>(properties_),
+                                                      nullptr /* key_retriever */);
   }));
 
   EXPECT_EQ(first_metadata->payload.dataset.get(), second_metadata->payload.dataset.get());
@@ -1438,12 +1457,12 @@ TEST_F(LanceBasicTest, ConcurrentMetadataLoadsShareSameDatasetSnapshot) {
     GTEST_SKIP() << "Focused dataset-cache test uses the local Lance fixture.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto written_file, writer.Close());
 
   LanceFormat format;
-  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, properties_));
+  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, std::make_shared<const api::Properties>(properties_)));
   ASSERT_EQ(files.size(), 1);
 
   constexpr size_t kReaderCount = 8;
@@ -1453,7 +1472,8 @@ TEST_F(LanceBasicTest, ConcurrentMetadataLoadsShareSameDatasetSnapshot) {
   for (size_t i = 0; i < kReaderCount; ++i) {
     futures.emplace_back(std::async(std::launch::async, [&]() {
       start.arrive_and_wait();
-      return LanceTableReader::MetaTrait::load_metadata(files[0], properties_, nullptr /* key_retriever */);
+      return LanceTableReader::MetaTrait::load_metadata(files[0], std::make_shared<const api::Properties>(properties_),
+                                                        nullptr /* key_retriever */);
     }));
   }
 
@@ -1473,7 +1493,8 @@ TEST_F(LanceBasicTest, FailedDatasetOpenDoesNotPoisonGlobalCache) {
     GTEST_SKIP() << "Focused dataset-cache test uses the local Lance fixture.";
   }
 
-  ASSERT_AND_ASSIGN(auto fs_config, FilesystemCache::resolve_config(properties_, base_path_));
+  ASSERT_AND_ASSIGN(auto fs_config,
+                    FilesystemCache::resolve_config(std::make_shared<const api::Properties>(properties_), base_path_));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
   api::ColumnGroupFile file{
       .path = MakeLanceUri(ToMilvusLanceUri(lance_uri, fs_config.address), 0),
@@ -1482,15 +1503,17 @@ TEST_F(LanceBasicTest, FailedDatasetOpenDoesNotPoisonGlobalCache) {
       .properties = {{kDatasetVersionProperty, "1"}},
   };
 
-  auto missing_result = LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr /* key_retriever */);
+  auto missing_result = LanceTableReader::MetaTrait::load_metadata(
+      file, std::make_shared<const api::Properties>(properties_), nullptr /* key_retriever */);
   ASSERT_FALSE(missing_result.ok());
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto written_file, writer.Close());
 
   ASSERT_AND_ASSIGN(auto metadata,
-                    LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr /* key_retriever */));
+                    LanceTableReader::MetaTrait::load_metadata(
+                        file, std::make_shared<const api::Properties>(properties_), nullptr /* key_retriever */));
   EXPECT_NE(metadata->payload.dataset, nullptr);
 }
 
@@ -1499,15 +1522,17 @@ TEST_F(LanceBasicTest, MissingDatasetSnapshotVersionResolvesLatestAndSharesIt) {
     GTEST_SKIP() << "Focused dataset-cache test uses the local Lance fixture.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto file, writer.Close());
   ASSERT_EQ(file.properties.find(kDatasetVersionProperty), file.properties.end());
 
   ASSERT_AND_ASSIGN(auto first_metadata,
-                    LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr /* key_retriever */));
+                    LanceTableReader::MetaTrait::load_metadata(
+                        file, std::make_shared<const api::Properties>(properties_), nullptr /* key_retriever */));
   ASSERT_AND_ASSIGN(auto second_metadata,
-                    LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr /* key_retriever */));
+                    LanceTableReader::MetaTrait::load_metadata(
+                        file, std::make_shared<const api::Properties>(properties_), nullptr /* key_retriever */));
 
   EXPECT_EQ(first_metadata->payload.dataset.get(), second_metadata->payload.dataset.get());
 }
@@ -1517,11 +1542,12 @@ TEST_F(LanceBasicTest, LatestVersionFallbackDoesNotReadDatasetManifest) {
     GTEST_SKIP() << "Focused latest-version test uses the local Lance fixture.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto file, writer.Close());
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(file.path));
-  ASSERT_AND_ASSIGN(auto fs_config, FilesystemCache::resolve_config(properties_, parsed_uri.first));
+  ASSERT_AND_ASSIGN(auto fs_config, FilesystemCache::resolve_config(
+                                        std::make_shared<const api::Properties>(properties_), parsed_uri.first));
 
   auto observable = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable, nullptr);
@@ -1546,25 +1572,30 @@ TEST_F(LanceBasicTest, VersionedFileOpensExploredSnapshot) {
     GTEST_SKIP() << "Focused snapshot-version test uses the local Lance fixture.";
   }
 
-  LanceTableWriter first_writer(base_path_, schema_, properties_);
+  LanceTableWriter first_writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(first_writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto first_file, first_writer.Close());
 
   LanceFormat format;
-  ASSERT_AND_ASSIGN(auto first_snapshot_files, format.explore(base_path_, properties_));
+  ASSERT_AND_ASSIGN(auto first_snapshot_files,
+                    format.explore(base_path_, std::make_shared<const api::Properties>(properties_)));
   ASSERT_EQ(first_snapshot_files.size(), 1);
 
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
+      std::make_shared<const api::Properties>(properties_), fs_config));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
   ASSERT_AND_ASSIGN(auto storage_options, ToWriterOptions(fs_config));
   ASSERT_STATUS_OK(BlockingDataset::DeleteRows(lance_uri, "id < 10", storage_options));
 
-  ASSERT_AND_ASSIGN(auto metadata, LanceTableReader::MetaTrait::load_metadata(first_snapshot_files[0], properties_,
-                                                                              nullptr /* key_retriever */));
+  ASSERT_AND_ASSIGN(auto metadata, LanceTableReader::MetaTrait::load_metadata(
+                                       first_snapshot_files[0], std::make_shared<const api::Properties>(properties_),
+                                       nullptr /* key_retriever */));
   EXPECT_EQ(metadata->payload.dataset->Version(), 1);
 
-  ASSERT_AND_ASSIGN(auto reader, format.create_reader(schema_, first_snapshot_files[0], properties_, {}, nullptr));
+  ASSERT_AND_ASSIGN(auto reader,
+                    format.create_reader(schema_, first_snapshot_files[0],
+                                         std::make_shared<const api::Properties>(properties_), {}, nullptr));
   ASSERT_AND_ASSIGN(auto row_groups, reader->get_row_group_infos());
   ASSERT_FALSE(row_groups.empty());
   EXPECT_EQ(row_groups.back().end_offset, test_batch_->num_rows());
@@ -1575,23 +1606,26 @@ TEST_F(LanceBasicTest, InvalidDatasetSnapshotVersionIsRejected) {
     GTEST_SKIP() << "Focused snapshot-version test uses the local Lance fixture.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto file, writer.Close());
   file.properties[kDatasetVersionProperty] = "invalid";
 
   LanceFormat format;
-  auto direct_result = format.create_reader(schema_, file, properties_, {}, nullptr);
+  auto direct_result =
+      format.create_reader(schema_, file, std::make_shared<const api::Properties>(properties_), {}, nullptr);
   ASSERT_FALSE(direct_result.ok());
   EXPECT_TRUE(direct_result.status().IsInvalid()) << direct_result.status().ToString();
 
-  auto invalid_result = LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr /* key_retriever */);
+  auto invalid_result = LanceTableReader::MetaTrait::load_metadata(
+      file, std::make_shared<const api::Properties>(properties_), nullptr /* key_retriever */);
   ASSERT_FALSE(invalid_result.ok());
   EXPECT_TRUE(invalid_result.status().IsInvalid()) << invalid_result.status().ToString();
 
   file.properties[kDatasetVersionProperty] = "0";
   ASSERT_AND_ASSIGN(auto latest_metadata,
-                    LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr /* key_retriever */));
+                    LanceTableReader::MetaTrait::load_metadata(
+                        file, std::make_shared<const api::Properties>(properties_), nullptr /* key_retriever */));
   EXPECT_EQ(latest_metadata->payload.dataset->Version(), 1);
 }
 
@@ -1600,13 +1634,14 @@ TEST_F(LanceBasicTest, CachedMetadataValidatesDatasetSnapshotVersion) {
     GTEST_SKIP() << "Focused snapshot-version test uses the local Lance fixture.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto file, writer.Close());
   ASSERT_EQ(file.properties.find(kDatasetVersionProperty), file.properties.end());
 
   ASSERT_AND_ASSIGN(auto metadata,
-                    LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr /* key_retriever */));
+                    LanceTableReader::MetaTrait::load_metadata(
+                        file, std::make_shared<const api::Properties>(properties_), nullptr /* key_retriever */));
   EXPECT_EQ(metadata->payload.dataset->Version(), 1);
 
   ASSERT_AND_ASSIGN(auto legacy_reader,
@@ -1639,11 +1674,11 @@ TEST_F(LanceBasicTest, DifferentFragmentsShareDatasetMetadata) {
     GTEST_SKIP() << "Focused metadata-cache reproduction uses the local Lance fixture.";
   }
 
-  LanceTableWriter first_writer(base_path_, schema_, properties_);
+  LanceTableWriter first_writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(first_writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto first_file, first_writer.Close());
 
-  LanceTableWriter second_writer(base_path_, schema_, properties_);
+  LanceTableWriter second_writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(second_writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto second_file, second_writer.Close());
   ASSERT_NE(first_file.path, second_file.path);
@@ -1665,7 +1700,8 @@ TEST_F(LanceBasicTest, DifferentFragmentsShareDatasetMetadata) {
         auto metadata, cache->get_or_open(key, [&]() -> arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> {
           ++metadata_load_count;
           std::cout << "[ LANCE_METADATA_CACHE_MISS ] key=" << key << std::endl;
-          return LanceTableReader::MetaTrait::load_metadata(files[i], properties_, nullptr /* key_retriever */);
+          return LanceTableReader::MetaTrait::load_metadata(
+              files[i], std::make_shared<const api::Properties>(properties_), nullptr /* key_retriever */);
         }));
     ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(files[i].path));
     std::cout << "[ LANCE_DATASET ] fragment_id=" << parsed_uri.second
@@ -1697,11 +1733,11 @@ TEST_F(LanceBasicTest, DifferentBaseUrisDoNotShareDataset) {
     GTEST_SKIP() << "Focused dataset-cache test uses the local Lance fixture.";
   }
 
-  LanceTableWriter first_writer(base_path_ + "/first", schema_, properties_);
+  LanceTableWriter first_writer(base_path_ + "/first", schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(first_writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto first_file, first_writer.Close());
 
-  LanceTableWriter second_writer(base_path_ + "/second", schema_, properties_);
+  LanceTableWriter second_writer(base_path_ + "/second", schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(second_writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto second_file, second_writer.Close());
 
@@ -1710,9 +1746,11 @@ TEST_F(LanceBasicTest, DifferentBaseUrisDoNotShareDataset) {
   ASSERT_NE(first_uri.first, second_uri.first);
 
   ASSERT_AND_ASSIGN(auto first_metadata,
-                    LanceTableReader::MetaTrait::load_metadata(first_file, properties_, nullptr /* key_retriever */));
-  ASSERT_AND_ASSIGN(auto second_metadata,
-                    LanceTableReader::MetaTrait::load_metadata(second_file, properties_, nullptr /* key_retriever */));
+                    LanceTableReader::MetaTrait::load_metadata(
+                        first_file, std::make_shared<const api::Properties>(properties_), nullptr /* key_retriever */));
+  ASSERT_AND_ASSIGN(auto second_metadata, LanceTableReader::MetaTrait::load_metadata(
+                                              second_file, std::make_shared<const api::Properties>(properties_),
+                                              nullptr /* key_retriever */));
   EXPECT_NE(first_metadata->payload.dataset.get(), second_metadata->payload.dataset.get());
 }
 
@@ -1721,24 +1759,30 @@ TEST_F(LanceBasicTest, DifferentFilesystemCacheKeysDoNotShareDataset) {
     GTEST_SKIP() << "Focused filesystem-identity test uses the local Lance fixture.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto written_file, writer.Close());
 
   LanceFormat format;
-  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, properties_));
+  ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, std::make_shared<const api::Properties>(properties_)));
   ASSERT_EQ(files.size(), 1);
 
   auto alternate_properties = properties_;
   api::SetValue(alternate_properties, PROPERTY_FS_ROOT_PATH, "/tmp/milvus-storage-test/.");
-  ASSERT_AND_ASSIGN(auto first_config, FilesystemCache::resolve_config(properties_, files[0].path));
-  ASSERT_AND_ASSIGN(auto alternate_config, FilesystemCache::resolve_config(alternate_properties, files[0].path));
+  ASSERT_AND_ASSIGN(auto first_config, FilesystemCache::resolve_config(
+                                           std::make_shared<const api::Properties>(properties_), files[0].path));
+  ASSERT_AND_ASSIGN(
+      auto alternate_config,
+      FilesystemCache::resolve_config(std::make_shared<const api::Properties>(alternate_properties), files[0].path));
   ASSERT_NE(first_config.GetCacheKey(), alternate_config.GetCacheKey());
 
   ASSERT_AND_ASSIGN(auto first_metadata,
-                    LanceTableReader::MetaTrait::load_metadata(files[0], properties_, nullptr /* key_retriever */));
-  ASSERT_AND_ASSIGN(auto alternate_metadata, LanceTableReader::MetaTrait::load_metadata(files[0], alternate_properties,
-                                                                                        nullptr /* key_retriever */));
+                    LanceTableReader::MetaTrait::load_metadata(
+                        files[0], std::make_shared<const api::Properties>(properties_), nullptr /* key_retriever */));
+  ASSERT_AND_ASSIGN(
+      auto alternate_metadata,
+      LanceTableReader::MetaTrait::load_metadata(
+          files[0], std::make_shared<const api::Properties>(alternate_properties), nullptr /* key_retriever */));
   EXPECT_NE(first_metadata->payload.dataset.get(), alternate_metadata->payload.dataset.get());
 }
 
@@ -1747,7 +1791,7 @@ TEST_F(LanceBasicTest, SeparateTopLevelReaderCachesDoNotShareDataset) {
     GTEST_SKIP() << "Focused dataset-cache test uses the local Lance fixture.";
   }
 
-  LanceTableWriter first_writer(base_path_, schema_, properties_);
+  LanceTableWriter first_writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(first_writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto first_file, first_writer.Close());
   const auto key = LanceTableReader::MetaTrait::cache_key(first_file);
@@ -1756,16 +1800,18 @@ TEST_F(LanceBasicTest, SeparateTopLevelReaderCachesDoNotShareDataset) {
   // top-level readers with independent Dataset metadata.
   MetadataCache first_reader_cache;
   ASSERT_AND_ASSIGN(auto first_metadata, first_reader_cache.get<LanceTableReader>()->get_or_open(key, [&]() {
-    return LanceTableReader::MetaTrait::load_metadata(first_file, properties_, nullptr /* key_retriever */);
+    return LanceTableReader::MetaTrait::load_metadata(first_file, std::make_shared<const api::Properties>(properties_),
+                                                      nullptr /* key_retriever */);
   }));
 
-  LanceTableWriter second_writer(base_path_, schema_, properties_);
+  LanceTableWriter second_writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(second_writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto second_file, second_writer.Close());
   ASSERT_EQ(key, LanceTableReader::MetaTrait::cache_key(second_file));
 
   ASSERT_AND_ASSIGN(auto first_metadata_again, first_reader_cache.get<LanceTableReader>()->get_or_open(key, [&]() {
-    return LanceTableReader::MetaTrait::load_metadata(second_file, properties_, nullptr /* key_retriever */);
+    return LanceTableReader::MetaTrait::load_metadata(second_file, std::make_shared<const api::Properties>(properties_),
+                                                      nullptr /* key_retriever */);
   }));
   ASSERT_EQ(first_metadata.get(), first_metadata_again.get());
   auto stale_fragment_result = LanceTableReader::MetaTrait::create_from_metadata(
@@ -1774,7 +1820,8 @@ TEST_F(LanceBasicTest, SeparateTopLevelReaderCachesDoNotShareDataset) {
 
   MetadataCache second_reader_cache;
   ASSERT_AND_ASSIGN(auto second_metadata, second_reader_cache.get<LanceTableReader>()->get_or_open(key, [&]() {
-    return LanceTableReader::MetaTrait::load_metadata(second_file, properties_, nullptr /* key_retriever */);
+    return LanceTableReader::MetaTrait::load_metadata(second_file, std::make_shared<const api::Properties>(properties_),
+                                                      nullptr /* key_retriever */);
   }));
   ASSERT_AND_ASSIGN(auto second_reader, LanceTableReader::MetaTrait::create_from_metadata(
                                             second_metadata, second_file, schema_, std::vector<std::string>{}, ""));
@@ -1787,7 +1834,7 @@ TEST_F(LanceBasicTest, SameFragmentMetadataIsReusedWithinReaderCache) {
     GTEST_SKIP() << "Focused metadata-cache test uses the local Lance fixture.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto file, writer.Close());
 
@@ -1797,7 +1844,8 @@ TEST_F(LanceBasicTest, SameFragmentMetadataIsReusedWithinReaderCache) {
   size_t metadata_load_count = 0;
   auto load_metadata = [&]() -> arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> {
     ++metadata_load_count;
-    return LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr /* key_retriever */);
+    return LanceTableReader::MetaTrait::load_metadata(file, std::make_shared<const api::Properties>(properties_),
+                                                      nullptr /* key_retriever */);
   };
 
   ASSERT_AND_ASSIGN(auto first_metadata, cache->get_or_open(key, load_metadata));
@@ -1814,14 +1862,15 @@ TEST_F(LanceBasicTest, TestBasic) {
 
   // Build Lance URI from relative path
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
+      std::make_shared<const api::Properties>(properties_), fs_config));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
   ASSERT_AND_ASSIGN(auto storage_options, milvus_storage::lance::ToWriterOptions(fs_config));
   const auto reader_uri = ToMilvusLanceUri(lance_uri, fs_config.address);
 
   // write without flush, single fragment
   {
-    LanceTableWriter writer(base_path_, schema_, properties_);
+    LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
     for (int i = 0; i < num_of_batches; i++) {
       ASSERT_STATUS_OK(writer.Write(test_batch_));
     }
@@ -1835,7 +1884,8 @@ TEST_F(LanceBasicTest, TestBasic) {
 
     uint64_t total_rows = 0;
     for (const auto& fragment_id : fragment_ids) {
-      LanceTableReader reader(fs_, reader_uri, fragment_id, schema_, properties_);
+      LanceTableReader reader(fs_, reader_uri, fragment_id, schema_,
+                              std::make_shared<const api::Properties>(properties_));
       ASSERT_STATUS_OK(reader.open());
       ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
       ASSERT_FALSE(rgs.empty());
@@ -1850,7 +1900,7 @@ TEST_F(LanceBasicTest, TestBasic) {
 
   // write with flush, multiple fragments
   {
-    LanceTableWriter writer(base_path_, schema_, properties_);
+    LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
     for (int i = 0; i < num_of_batches; i++) {
       ASSERT_STATUS_OK(writer.Write(test_batch_));
       ASSERT_STATUS_OK(writer.Flush());
@@ -1880,20 +1930,21 @@ TEST_F(LanceBasicTest, TestReaderHandlesFragmentMissingNullableDatasetColumn) {
   evolved_columns.push_back(std::move(new_column));
   auto evolved_batch = arrow::RecordBatch::Make(evolved_schema, original_batch->num_rows(), std::move(evolved_columns));
 
-  LanceTableWriter initial_writer(base_path_, evolved_schema, properties_);
+  LanceTableWriter initial_writer(base_path_, evolved_schema, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(initial_writer.Write(evolved_batch));
   ASSERT_AND_ASSIGN(auto initial_file, initial_writer.Close());
 
   // Lance permits an appended fragment to omit nullable dataset columns. This
   // has the same dataset-schema/physical-fragment shape as an old fragment
   // after a nullable column is added through schema evolution.
-  LanceTableWriter append_writer(base_path_, original_schema, properties_);
+  LanceTableWriter append_writer(base_path_, original_schema, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(append_writer.Write(original_batch));
   ASSERT_AND_ASSIGN(auto appended_file, append_writer.Close());
 
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(appended_file.path));
 
-  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, nullptr, properties_);
+  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, nullptr,
+                          std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(reader.open());
   ASSERT_EQ(reader.get_schema()->num_fields(), evolved_schema->num_fields());
 
@@ -1919,12 +1970,13 @@ TEST_F(LanceBasicTest, TestRead) {
 
   // Build Lance URI from relative path
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
+      std::make_shared<const api::Properties>(properties_), fs_config));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
   ASSERT_AND_ASSIGN(auto storage_options, milvus_storage::lance::ToWriterOptions(fs_config));
   const auto reader_uri = ToMilvusLanceUri(lance_uri, fs_config.address);
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(large_batch));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, large_batch->num_rows());
@@ -1935,7 +1987,8 @@ TEST_F(LanceBasicTest, TestRead) {
   // The splitting conditions(`WriteParams`) in lance are very strict.
   // So the default setting will only generate one fragment.
   ASSERT_EQ(fragment_ids.size(), 1);
-  LanceTableReader reader(fs_, reader_uri, fragment_ids[0], schema_, properties_);
+  LanceTableReader reader(fs_, reader_uri, fragment_ids[0], schema_,
+                          std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(reader.open());
   ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
   ASSERT_FALSE(rgs.empty());
@@ -1991,7 +2044,8 @@ TEST_F(LanceBasicTest, TestRead) {
   {
     ASSERT_AND_ASSIGN(auto projection_schema, CreateTestSchema({true, true, false, false}));
 
-    LanceTableReader projection_reader(fs_, reader_uri, fragment_ids[0], projection_schema, properties_);
+    LanceTableReader projection_reader(fs_, reader_uri, fragment_ids[0], projection_schema,
+                                       std::make_shared<const api::Properties>(properties_));
     ASSERT_STATUS_OK(projection_reader.open());
     ASSERT_AND_ASSIGN(auto projection_rgs, projection_reader.get_row_group_infos());
     ASSERT_EQ(projection_rgs.size(), rgs.size());
@@ -2022,13 +2076,14 @@ TEST_F(LanceBasicTest, ReadsThroughBoundFilesystemMetrics) {
     GTEST_SKIP() << "Focused filesystem metrics assertion uses the local Lance fixture.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(cgfile.path));
 
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
+      std::make_shared<const api::Properties>(properties_), fs_config));
   ASSERT_AND_ASSIGN(auto dataset,
                     BlockingDataset::Open(ToStandardLanceUri(parsed_uri.first), fs_, ToReaderOptions(fs_config)));
   ASSERT_AND_ASSIGN(auto initial_io_stats, dataset->IOStatsIncremental());
@@ -2040,7 +2095,8 @@ TEST_F(LanceBasicTest, ReadsThroughBoundFilesystemMetrics) {
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
 
-  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, schema_, properties_);
+  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, schema_,
+                          std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(reader.open());
   EXPECT_GT(metrics->GetGetFileInfoCount(), 0);
   ASSERT_AND_ASSIGN(auto open_io_stats, dataset->IOStatsIncremental());
@@ -2060,12 +2116,13 @@ TEST_F(LanceBasicTest, CachedReaderReadsAfterMetadataRelease) {
     GTEST_SKIP() << "Focused filesystem lifetime assertion uses the local Lance fixture.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
 
   ASSERT_AND_ASSIGN(auto metadata,
-                    LanceTableReader::MetaTrait::load_metadata(cgfile, properties_, nullptr /* key_retriever */));
+                    LanceTableReader::MetaTrait::load_metadata(
+                        cgfile, std::make_shared<const api::Properties>(properties_), nullptr /* key_retriever */));
   ASSERT_AND_ASSIGN(auto reader, LanceTableReader::MetaTrait::create_from_metadata(metadata, cgfile, schema_,
                                                                                    std::vector<std::string>{}, ""));
   metadata.reset();
@@ -2080,21 +2137,23 @@ TEST_F(LanceBasicTest, SharedSchedulerReadsAfterOwnerDatasetDrop) {
     GTEST_SKIP() << "This regression uses the local Lance fixture.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(cgfile.path));
 
   api::SetValue(properties_, PROPERTY_FS_LANCE_IO_PARALLELISM, "0");
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
+      std::make_shared<const api::Properties>(properties_), fs_config));
   ASSERT_EQ(fs_config.lance_io_parallelism, 0);
   auto read_options = ToReaderOptions(fs_config);
   ASSERT_AND_ASSIGN(auto owner_dataset, BlockingDataset::Open(parsed_uri.first, fs_, read_options));
   ASSERT_AND_ASSIGN(auto owner_initial_stats, owner_dataset->IOStatsIncremental());
   (void)owner_initial_stats;
 
-  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, schema_, properties_);
+  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, schema_,
+                          std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(reader.open());
   ASSERT_AND_ASSIGN(auto chunk, reader.get_chunk(0));
   EXPECT_EQ(chunk->num_rows(), test_batch_->num_rows());
@@ -2107,7 +2166,8 @@ TEST_F(LanceBasicTest, SharedSchedulerReadsAfterOwnerDatasetDrop) {
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
   owner_dataset.reset();
-  LanceTableReader reader_after_owner_drop(fs_, parsed_uri.first, parsed_uri.second, schema_, properties_);
+  LanceTableReader reader_after_owner_drop(fs_, parsed_uri.first, parsed_uri.second, schema_,
+                                           std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(reader_after_owner_drop.open());
   ASSERT_AND_ASSIGN(auto chunk_after_owner_drop, reader_after_owner_drop.get_chunk(0));
   EXPECT_EQ(chunk_after_owner_drop->num_rows(), test_batch_->num_rows());
@@ -2126,17 +2186,19 @@ TEST_F(LanceBasicTest, EstimatedMemoryAccountsForDeletions) {
   ASSERT_AND_ASSIGN(auto batch, CreateTestData(id_schema, 0, false, kRows, 4, 50, {true, false, false, false}));
 
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
+      std::make_shared<const api::Properties>(properties_), fs_config));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
   ASSERT_AND_ASSIGN(auto storage_options, milvus_storage::lance::ToWriterOptions(fs_config));
 
-  LanceTableWriter writer(base_path_, id_schema, properties_);
+  LanceTableWriter writer(base_path_, id_schema, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(batch));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, kRows);
   ASSERT_STATUS_OK(BlockingDataset::DeleteRows(lance_uri, "id < 2000", storage_options));
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(cgfile.path));
-  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, id_schema, properties_);
+  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, id_schema,
+                          std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(reader.open());
   ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
   ASSERT_EQ(rgs.size(), 1);
@@ -2165,12 +2227,13 @@ TEST_F(LanceBasicTest, FixedSizeListUsesExactMemoryEstimate) {
   ASSERT_STATUS_OK(vector_builder.Finish(&vector_array));
   auto batch = arrow::RecordBatch::Make(vector_schema, kRows, {vector_array});
 
-  LanceTableWriter writer(base_path_, vector_schema, properties_);
+  LanceTableWriter writer(base_path_, vector_schema, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(batch));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(cgfile.path));
 
-  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, vector_schema, properties_);
+  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, vector_schema,
+                          std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(reader.open());
   ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
   auto estimated_memory_size =
@@ -2185,7 +2248,7 @@ TEST_F(LanceBasicTest, MemorySizeEstimationFailureDoesNotBlockOpen) {
     GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(cgfile.path));
@@ -2202,7 +2265,8 @@ TEST_F(LanceBasicTest, MemorySizeEstimationFailureDoesNotBlockOpen) {
     ScopedFiuFault fault(FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL);
     ASSERT_EQ(fault.enable_result(), 0);
 
-    LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, schema_, properties_);
+    LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, schema_,
+                            std::make_shared<const api::Properties>(properties_));
     ASSERT_STATUS_OK(reader.open());
     ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());
     assert_memory_size_unavailable(row_group_infos);
@@ -2216,7 +2280,8 @@ TEST_F(LanceBasicTest, MemorySizeEstimationFailureDoesNotBlockOpen) {
     ScopedFiuFault fault(FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL);
     ASSERT_EQ(fault.enable_result(), 0);
     ASSERT_AND_ASSIGN(metadata,
-                      LanceTableReader::MetaTrait::load_metadata(cgfile, properties_, nullptr /* key_retriever */));
+                      LanceTableReader::MetaTrait::load_metadata(
+                          cgfile, std::make_shared<const api::Properties>(properties_), nullptr /* key_retriever */));
   }
 
   ASSERT_AND_ASSIGN(auto cached_reader, LanceTableReader::MetaTrait::create_from_metadata(
@@ -2239,11 +2304,13 @@ TEST_F(LanceBasicTest, LegacyFormatReadsWhenMemoryEstimateIsUnavailable) {
   ASSERT_AND_ASSIGN(auto batch, CreateTestData(vector_schema, 0, false, kRows, 4, 50, {false, false, false, true}));
 
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
+      std::make_shared<const api::Properties>(properties_), fs_config));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
   ASSERT_AND_ASSIGN(auto storage_options, milvus_storage::lance::ToWriterOptions(fs_config));
 
-  LanceTableWriter writer(base_path_, vector_schema, properties_, LanceDataStorageFormat::Legacy);
+  LanceTableWriter writer(base_path_, vector_schema, std::make_shared<const api::Properties>(properties_),
+                          LanceDataStorageFormat::Legacy);
   ASSERT_STATUS_OK(writer.Write(batch));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, kRows);
@@ -2256,7 +2323,8 @@ TEST_F(LanceBasicTest, LegacyFormatReadsWhenMemoryEstimateIsUnavailable) {
   auto estimate_result = dataset->EstimateFragmentColumnMemory(fragment_ids[0]);
   ASSERT_TRUE(estimate_result.status().IsNotImplemented()) << estimate_result.status().ToString();
 
-  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, vector_schema, properties_);
+  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, vector_schema,
+                          std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(reader.open());
   ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());
   ASSERT_FALSE(row_group_infos.empty());
@@ -2277,7 +2345,8 @@ TEST_F(LanceBasicTest, LegacyFormatReadsWhenMemoryEstimateIsUnavailable) {
   auto column_groups = std::make_shared<api::ColumnGroups>();
   column_groups->emplace_back(std::move(column_group));
 
-  auto api_reader = api::Reader::create(column_groups, vector_schema, nullptr, properties_);
+  auto api_reader =
+      api::Reader::create(column_groups, vector_schema, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(api_reader, nullptr);
   ASSERT_AND_ASSIGN(auto chunk_reader, api_reader->get_chunk_reader(0));
   EXPECT_TRUE(chunk_reader->get_chunk_estimated_size().status().IsNotImplemented());
@@ -2295,12 +2364,13 @@ TEST_F(LanceBasicTest, TestCachedOpenRejectsMissingNeededColumnWithoutReadSchema
     GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
 
   ASSERT_AND_ASSIGN(auto metadata,
-                    LanceTableReader::MetaTrait::load_metadata(cgfile, properties_, nullptr /* key_retriever */));
+                    LanceTableReader::MetaTrait::load_metadata(
+                        cgfile, std::make_shared<const api::Properties>(properties_), nullptr /* key_retriever */));
 
   auto reader_result = LanceTableReader::MetaTrait::create_from_metadata(metadata, cgfile, nullptr /* read_schema */,
                                                                          {"id", "missing_column"}, "");
@@ -2314,12 +2384,13 @@ TEST_F(LanceBasicTest, CachedCreateReaderReappliesProjection) {
     GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
   }
 
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
 
   ASSERT_AND_ASSIGN(auto metadata,
-                    LanceTableReader::MetaTrait::load_metadata(cgfile, properties_, nullptr /* key_retriever */));
+                    LanceTableReader::MetaTrait::load_metadata(
+                        cgfile, std::make_shared<const api::Properties>(properties_), nullptr /* key_retriever */));
   auto id_metadata = metadata;
   auto value_metadata = metadata;
   ASSERT_EQ(id_metadata.get(), value_metadata.get());
@@ -2365,7 +2436,8 @@ void LanceBasicTest::RunCloudWideTableDuplicatedFragmentTake(int64_t column_coun
                                                              size_t reader_count,
                                                              CloudTakeIops& result) {
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
+      std::make_shared<const api::Properties>(properties_), fs_config));
   api::SetValue(properties_, "extfs.default.storage_type", fs_config.storage_type.c_str());
   api::SetValue(properties_, "extfs.default.cloud_provider", fs_config.cloud_provider.c_str());
   api::SetValue(properties_, "extfs.default.address", fs_config.address.c_str());
@@ -2402,7 +2474,7 @@ void LanceBasicTest::RunCloudWideTableDuplicatedFragmentTake(int64_t column_coun
   std::vector<std::shared_ptr<arrow::Array>> columns(column_count, values);
   auto wide_batch = arrow::RecordBatch::Make(wide_schema, row_count, std::move(columns));
 
-  LanceTableWriter writer(base_path_, wide_schema, properties_);
+  LanceTableWriter writer(base_path_, wide_schema, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(wide_batch));
   ASSERT_AND_ASSIGN(auto written_file, writer.Close());
   ASSERT_EQ(written_file.end_index - written_file.start_index, row_count);
@@ -2434,7 +2506,8 @@ void LanceBasicTest::RunCloudWideTableDuplicatedFragmentTake(int64_t column_coun
   std::vector<std::unique_ptr<api::Reader>> readers;
   readers.reserve(reader_count);
   for (size_t reader_index = 0; reader_index < reader_count; ++reader_index) {
-    auto reader = api::Reader::create(column_groups, wide_schema, nullptr, properties_);
+    auto reader =
+        api::Reader::create(column_groups, wide_schema, nullptr, std::make_shared<const api::Properties>(properties_));
     ASSERT_NE(reader, nullptr);
     readers.emplace_back(std::move(reader));
   }
@@ -2552,7 +2625,8 @@ TEST_F(LanceBasicTest, CloudWideTableDuplicatedFragmentTakeRateLimitRepro) {
   api::SetValue(properties_, PROPERTY_FS_LANCE_IO_PARALLELISM, "64");
 
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
+      std::make_shared<const api::Properties>(properties_), fs_config));
   ASSERT_EQ(fs_config.lance_io_parallelism, kLanceIoParallelism);
 
   CloudTakeIops result;
@@ -2577,7 +2651,8 @@ TEST_F(LanceBasicTest, CloudConfiguredAimdRateLimit) {
   api::SetValue(properties_, "extfs.default.iops_max_rate", aimd_rate.c_str());
 
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
+      std::make_shared<const api::Properties>(properties_), fs_config));
   ASSERT_EQ(fs_config.iops_initial_rate, kAimdRate);
   ASSERT_EQ(fs_config.iops_max_rate, kAimdRate);
 
@@ -2600,7 +2675,8 @@ TEST_F(LanceBasicTest, CloudConfiguredAimdRateLimit) {
 TEST_F(LanceBasicTest, TestStorageOptionsIntegration) {
   // Mirror fs.* into extfs.default.* so resolve_config can match by address+bucket
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
+      std::make_shared<const api::Properties>(properties_), fs_config));
   if (fs_config.storage_type == "remote") {
     api::SetValue(properties_, "extfs.default.storage_type", "remote");
     api::SetValue(properties_, "extfs.default.cloud_provider", fs_config.cloud_provider.c_str());
@@ -2618,13 +2694,15 @@ TEST_F(LanceBasicTest, TestStorageOptionsIntegration) {
   }
 
   // Writer uses storage options from properties
-  LanceTableWriter writer(base_path_, schema_, properties_);
+  LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, test_batch_->num_rows());
 
   LanceFormat format;
-  ASSERT_AND_ASSIGN(auto reader, format.create_reader(schema_, cgfile, properties_, {}, nullptr));
+  ASSERT_AND_ASSIGN(
+      auto reader,
+      format.create_reader(schema_, cgfile, std::make_shared<const api::Properties>(properties_), {}, nullptr));
   ASSERT_AND_ASSIGN(auto rgs, reader->get_row_group_infos());
   ASSERT_FALSE(rgs.empty());
   ASSERT_EQ(rgs.back().end_offset, test_batch_->num_rows());

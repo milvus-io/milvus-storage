@@ -39,7 +39,7 @@ class ManifestTest : public ::testing::Test {
   void SetUp() override {
     Manifest::CleanCache();
     ASSERT_STATUS_OK(InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
 
     base_path_ = GetTestBasePath("manifest-test");
     ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));

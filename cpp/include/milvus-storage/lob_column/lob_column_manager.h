@@ -68,7 +68,7 @@ struct LobColumnConfig {
   bool rewrite_mode = false;
 
   // storage properties (filesystem config, compression, etc.)
-  api::Properties properties;
+  std::shared_ptr<const api::Properties> properties = std::make_shared<const api::Properties>();
 };
 
 // manager for a single LOB column (TEXT or BINARY)

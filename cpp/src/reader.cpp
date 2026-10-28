@@ -53,7 +53,7 @@ namespace milvus_storage::api {
 
 namespace {
 
-bool metadata_cache_enabled(const Properties& properties) {
+bool metadata_cache_enabled(const std::shared_ptr<const Properties>& properties) {
   return GetValueNoError<bool>(properties, PROPERTY_READER_METADATA_CACHE_ENABLE);
 }
 
@@ -73,7 +73,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
                           MetadataCache metadata_cache,
                           const std::shared_ptr<arrow::Schema>& schema,
                           const std::vector<std::string>& needed_columns,
-                          const Properties& properties,
+                          std::shared_ptr<const Properties> properties,
                           const std::function<std::string(const std::string&)>& key_retriever,
                           const std::string& predicate = "")
       : column_groups_(column_groups),
@@ -82,7 +82,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
         needed_columns_(needed_columns),
         out_field_map_(needed_columns.size()),
         out_schema_(nullptr),
-        properties_(properties),
+        properties_(std::move(properties)),
         key_retriever_callback_(key_retriever),
         predicate_(predicate),
         number_of_chunks_per_cg_(column_groups.size()),
@@ -477,7 +477,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
   std::vector<std::string> needed_columns_;
   std::vector<std::pair<std::int32_t, std::int32_t>> out_field_map_;
   std::shared_ptr<arrow::Schema> out_schema_;
-  Properties properties_;
+  std::shared_ptr<const Properties> properties_;
   std::function<std::string(const std::string&)> key_retriever_callback_;
   std::string predicate_;
 
@@ -520,7 +520,7 @@ class ChunkReaderImpl : public ChunkReader {
   ChunkReaderImpl(const std::shared_ptr<arrow::Schema>& schema,
                   const std::shared_ptr<ColumnGroup>& column_group,
                   const std::vector<std::string>& needed_columns,
-                  const Properties& properties,
+                  std::shared_ptr<const Properties> properties,
                   const std::function<std::string(const std::string&)>& key_retriever,
                   MetadataCache metadata_cache);
 
@@ -553,7 +553,7 @@ class ChunkReaderImpl : public ChunkReader {
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<ColumnGroup> column_group_;  ///< Column group metadata and configuration
   std::vector<std::string> needed_columns_;    ///< Subset of columns to read (empty = all columns)
-  Properties properties_;
+  std::shared_ptr<const Properties> properties_;
   std::function<std::string(const std::string&)> key_retriever_callback_;
   MetadataCache metadata_cache_;
   std::unique_ptr<ColumnGroupReader> chunk_reader_;
@@ -564,13 +564,13 @@ class ChunkReaderImpl : public ChunkReader {
 ChunkReaderImpl::ChunkReaderImpl(const std::shared_ptr<arrow::Schema>& schema,
                                  const std::shared_ptr<ColumnGroup>& column_group,
                                  const std::vector<std::string>& needed_columns,
-                                 const Properties& properties,
+                                 std::shared_ptr<const Properties> properties,
                                  const std::function<std::string(const std::string&)>& key_retriever,
                                  MetadataCache metadata_cache)
     : schema_(schema),
       column_group_(column_group),
       needed_columns_(needed_columns),
-      properties_(properties),
+      properties_(std::move(properties)),
       key_retriever_callback_(key_retriever),
       metadata_cache_(std::move(metadata_cache)) {}
 
@@ -843,13 +843,13 @@ class ReaderImpl : public Reader {
   ReaderImpl(const std::shared_ptr<ColumnGroups>& cgs,
              const std::shared_ptr<arrow::Schema>& schema,
              const std::shared_ptr<std::vector<std::string>>& needed_columns,
-             const Properties& properties)
+             std::shared_ptr<const Properties> properties)
       : cgs_(cgs),
         schema_(schema),
         needed_columns_(needed_columns),
-        properties_(properties),
+        properties_(std::move(properties)),
         key_retriever_callback_(nullptr),
-        metadata_cache_(metadata_cache_enabled(properties)) {
+        metadata_cache_(metadata_cache_enabled(properties_)) {
     // Validate required parameters
     assert(cgs_);
   }
@@ -1071,7 +1071,7 @@ class ReaderImpl : public Reader {
   std::shared_ptr<ColumnGroups> cgs_;                         ///< Dataset column groups with metadata and layout info
   std::shared_ptr<arrow::Schema> schema_;                     ///< Logical Arrow schema defining data structure
   std::shared_ptr<std::vector<std::string>> needed_columns_;  ///< Column projection (nullptr = all columns)
-  Properties properties_;                                     ///< Configuration properties including encryption
+  std::shared_ptr<const Properties> properties_;              ///< Configuration properties including encryption
   std::function<std::string(const std::string&)>
       key_retriever_callback_;  ///< Callback function for retrieving encryption keys
   mutable std::mutex metadata_cache_mutex_;
@@ -1400,8 +1400,9 @@ folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::Table>>>> Rea
 std::unique_ptr<Reader> Reader::create(const std::shared_ptr<ColumnGroups>& cgs,
                                        const std::shared_ptr<arrow::Schema>& schema,
                                        const std::shared_ptr<std::vector<std::string>>& needed_columns,
-                                       const Properties& properties) {
-  return std::make_unique<ReaderImpl>(cgs, schema, needed_columns, properties);
+                                       std::shared_ptr<const Properties> properties) {
+  assert(properties);
+  return std::make_unique<ReaderImpl>(cgs, schema, needed_columns, std::move(properties));
 }
 
 }  // namespace milvus_storage::api

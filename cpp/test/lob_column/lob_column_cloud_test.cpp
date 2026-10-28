@@ -38,7 +38,7 @@ class LobColumnCloudTest : public ::testing::Test {
     }
 
     ASSERT_STATUS_OK(InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
 
     // create test base path
     test_base_path_ = GetTestBasePath("text-column-cloud-test");
@@ -51,7 +51,7 @@ class LobColumnCloudTest : public ::testing::Test {
     config_.inline_threshold = 20;
     config_.max_lob_file_bytes = 1024 * 1024;   // 1MB
     config_.flush_threshold_bytes = 64 * 1024;  // 64KB
-    config_.properties = properties_;
+    config_.properties = std::make_shared<const api::Properties>(properties_);
   }
 
   void TearDown() override {

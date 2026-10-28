@@ -85,7 +85,7 @@ class ColumnGroupPolicy {
    * properties as needed to configure the policy.
    */
   static arrow::Result<std::unique_ptr<ColumnGroupPolicy>> create_column_group_policy(
-      const Properties& properties_map, const std::shared_ptr<arrow::Schema>& schema);
+      const std::shared_ptr<const Properties>& properties_map, const std::shared_ptr<arrow::Schema>& schema);
 
   protected:
   std::shared_ptr<arrow::Schema> schema_;  ///< Schema for the columns being grouped
@@ -127,10 +127,9 @@ class Writer {
    *   arrow::field("value", arrow::float64())
    * });
    *
-   * auto properties = WritePropertiesBuilder()
-   *                     .with_compression(CompressionType::ZSTD)
-   *                     .with_max_row_group_size(100000)
-   *                     .build();
+   * Properties props;
+   * SetValue(props, PROPERTY_WRITER_COMPRESSION, "zstd");
+   * auto properties = std::make_shared<const Properties>(std::move(props));
    *
    * auto policy = std::make_unique<SingleColumnGroupPolicy>(schema);
    * auto writer = Writer::create("/path/to/dataset", schema, std::move(policy), properties);
@@ -140,10 +139,11 @@ class Writer {
    * auto column_groups = writer->close().ValueOrDie();
    * @endcode
    */
-  static std::unique_ptr<Writer> create(std::string base_path,
-                                        std::shared_ptr<arrow::Schema> schema,
-                                        std::unique_ptr<ColumnGroupPolicy> column_group_policy,
-                                        const Properties& properties = {});
+  static std::unique_ptr<Writer> create(
+      std::string base_path,
+      std::shared_ptr<arrow::Schema> schema,
+      std::unique_ptr<ColumnGroupPolicy> column_group_policy,
+      std::shared_ptr<const Properties> properties = std::make_shared<const Properties>());
 
   /**
    * @brief Virtual destructor

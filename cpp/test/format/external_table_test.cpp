@@ -119,13 +119,13 @@ static std::string PropertyValueToString(const api::PropertyVariant& value) {
       value);
 }
 
-static LoonFFIResult CreateLoonPropertiesFromApiProperties(const api::Properties& properties,
+static LoonFFIResult CreateLoonPropertiesFromApiProperties(const std::shared_ptr<const api::Properties>& properties,
                                                            LoonProperties* loon_properties) {
   std::vector<std::string> keys;
   std::vector<std::string> values;
-  keys.reserve(properties.size());
-  values.reserve(properties.size());
-  for (const auto& [key, value] : properties) {
+  keys.reserve(properties->size());
+  values.reserve(properties->size());
+  for (const auto& [key, value] : *properties) {
     keys.push_back(key);
     values.push_back(PropertyValueToString(value));
   }
@@ -168,8 +168,8 @@ class ExternalTableTest : public ::testing::TestWithParam<std::string> {
       GTEST_SKIP() << "External table tests require real cloud storage, not Azurite";
     }
     ASSERT_STATUS_OK(InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
-    ASSERT_AND_ASSIGN(fs_config_, GetFileSystemConfig(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
+    ASSERT_AND_ASSIGN(fs_config_, GetFileSystemConfig(std::make_shared<const api::Properties>(properties_)));
 
     auto address = GetEnvVar(ENV_VAR_ADDRESS).ValueOr("");
     auto bucket = GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("");
@@ -257,7 +257,7 @@ class ExternalTableTest : public ::testing::TestWithParam<std::string> {
     ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
     ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
     auto path = test_base_ + "/lance";
-    lance::LanceTableWriter writer(path, schema, properties_);
+    lance::LanceTableWriter writer(path, schema, std::make_shared<const api::Properties>(properties_));
     ARROW_RETURN_NOT_OK(writer.Write(batch));
     ARROW_ASSIGN_OR_RAISE(auto cgfile, writer.Close());
     return WriteResult{std::move(cgfile), schema, num_rows};
@@ -274,7 +274,8 @@ class ExternalTableTest : public ::testing::TestWithParam<std::string> {
     auto lance_uri = lance::ToStandardLanceUri(parsed.first);
 
     ArrowFileSystemConfig fs_config;
-    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(
+        std::make_shared<const api::Properties>(properties_), fs_config));
     ARROW_ASSIGN_OR_RAISE(auto storage_options, lance::ToWriterOptions(fs_config));
 
     // Build predicate like "id in (3, 10, 25)"
@@ -343,9 +344,9 @@ class ExternalSplitColumnGroupTest : public ::testing::TestWithParam<std::string
   void SetUp() override {
     api::Manifest::CleanCache();
     ASSERT_STATUS_OK(InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_config_, GetFileSystemConfig(properties_));
+    ASSERT_AND_ASSIGN(fs_config_, GetFileSystemConfig(std::make_shared<const api::Properties>(properties_)));
     ConfigureExternalFilesystemProperties();
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
 
     ASSERT_AND_ASSIGN(schema_, CreateTestSchema({true, true, true, false}));
 
@@ -479,7 +480,8 @@ class ExternalSplitColumnGroupTest : public ::testing::TestWithParam<std::string
     const auto file_path = get_data_filepath(test_base_, "one_2m_rows." + suffix);
     const auto table_base_path = test_base_ + "/" + suffix;
     ARROW_ASSIGN_OR_RAISE(auto writer,
-                          format_impl->create_writer(fs_, schema_, file_path, table_base_path, properties_));
+                          format_impl->create_writer(fs_, schema_, file_path, table_base_path,
+                                                     std::make_shared<const api::Properties>(properties_)));
 
     for (int64_t start = 0; start < kSplitExternalTotalRows; start += kSplitExternalWriteBatchRows) {
       const auto rows = std::min(kSplitExternalWriteBatchRows, kSplitExternalTotalRows - start);
@@ -499,7 +501,8 @@ class ExternalSplitColumnGroupTest : public ::testing::TestWithParam<std::string
     const auto table_base_path = test_base_ + "/lance";
     for (int64_t start = 0; start < kSplitExternalTotalRows; start += kSplitExternalRowsPerFile) {
       ARROW_ASSIGN_OR_RAISE(auto writer,
-                            format_impl->create_writer(fs_, schema_, "" /* file_path */, table_base_path, properties_));
+                            format_impl->create_writer(fs_, schema_, "" /* file_path */, table_base_path,
+                                                       std::make_shared<const api::Properties>(properties_)));
       ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema_, start, false, kSplitExternalRowsPerFile, 4, 50,
                                                        {true, true, true, false}));
       ARROW_RETURN_NOT_OK(writer->Write(batch));
@@ -600,7 +603,8 @@ TEST_P(ExternalSplitColumnGroupTest, TwoMillionRowsSplitIntoMillionRowFilesReada
 
   auto column_group = CreateSplitColumnGroup(format, std::move(split_files));
   auto columns = SplitExternalColumns();
-  ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema_, column_group, columns, properties_,
+  ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema_, column_group, columns,
+                                                                std::make_shared<const api::Properties>(properties_),
                                                                 nullptr /* key_retriever */));
 
   ASSERT_EQ(reader->total_rows(), kSplitExternalTotalRows);
@@ -663,7 +667,8 @@ TEST_P(ExternalTableTest, TransactionReadsManifestFromAbsoluteS3Uri) {
   table_uri.key = table_base_path;
   ASSERT_AND_ASSIGN(auto absolute_table_uri, StorageUri::Make(table_uri));
 
-  ASSERT_AND_ASSIGN(auto uri_fs, FilesystemCache::getInstance().get(properties_, absolute_table_uri));
+  ASSERT_AND_ASSIGN(auto uri_fs, FilesystemCache::getInstance().get(
+                                     std::make_shared<const api::Properties>(properties_), absolute_table_uri));
   ASSERT_AND_ASSIGN(auto reader_txn,
                     api::transaction::Transaction::Open(uri_fs, absolute_table_uri, api::transaction::LATEST));
   ASSERT_EQ(reader_txn->GetReadVersion(), 1);
@@ -686,7 +691,8 @@ TEST_P(ExternalTableTest, TransactionReadsManifestFromAbsoluteS3Uri) {
   ASSERT_EQ(direct_manifest->columnGroups().size(), 1);
 
   LoonPropertiesGuard loon_props;
-  auto rc = CreateLoonPropertiesFromApiProperties(properties_, &loon_props.properties);
+  auto rc = CreateLoonPropertiesFromApiProperties(std::make_shared<const api::Properties>(properties_),
+                                                  &loon_props.properties);
   ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
 
   LoonTransactionGuard relative_ffi_txn;
@@ -733,7 +739,8 @@ TEST_P(ExternalTableTest, WriteAndRead) {
 
   std::vector<std::string> columns = {"id", "name", "value"};
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(result.schema, format, result.cgfile, properties_, columns, nullptr));
+                    FormatReader::create(result.schema, format, result.cgfile,
+                                         std::make_shared<const api::Properties>(properties_), columns, nullptr));
 
   // Read all row groups and count total rows
   ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
@@ -779,7 +786,8 @@ TEST_P(ExternalTableTest, WriteAndReadWithDeletes) {
 
   std::vector<std::string> columns = {"id", "name", "value"};
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(result.schema, format, result.cgfile, properties_, columns, nullptr));
+                    FormatReader::create(result.schema, format, result.cgfile,
+                                         std::make_shared<const api::Properties>(properties_), columns, nullptr));
 
   const auto expected_rows = static_cast<int64_t>(num_rows - deleted_ids.size());
 
@@ -883,7 +891,8 @@ TEST_P(ExternalTableTest, LargeTableWithDeletesAcrossRowGroups) {
 
   std::vector<std::string> columns = {"id", "name", "value"};
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(result.schema, format, result.cgfile, properties_, columns, nullptr));
+                    FormatReader::create(result.schema, format, result.cgfile,
+                                         std::make_shared<const api::Properties>(properties_), columns, nullptr));
 
   const auto expected_rows = static_cast<int64_t>(num_rows - deleted_ids.size());
 
@@ -974,7 +983,8 @@ TEST_P(ExternalTableTest, DeleteEntireFirstRowGroup) {
 
   std::vector<std::string> columns = {"id", "name", "value"};
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(result.schema, format, result.cgfile, properties_, columns, nullptr));
+                    FormatReader::create(result.schema, format, result.cgfile,
+                                         std::make_shared<const api::Properties>(properties_), columns, nullptr));
 
   const auto expected_rows = static_cast<int64_t>(num_rows - deleted_ids.size());
 
@@ -1028,7 +1038,8 @@ TEST_P(ExternalTableTest, DeleteAllRows) {
 
   std::vector<std::string> columns = {"id", "name", "value"};
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(result.schema, format, result.cgfile, properties_, columns, nullptr));
+                    FormatReader::create(result.schema, format, result.cgfile,
+                                         std::make_shared<const api::Properties>(properties_), columns, nullptr));
 
   // Row group infos should sum to 0 logical rows
   ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
@@ -1066,7 +1077,8 @@ TEST_P(ExternalTableTest, ReadWithRangeAcrossRowGroups) {
 
   std::vector<std::string> columns = {"id", "name", "value"};
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(result.schema, format, result.cgfile, properties_, columns, nullptr));
+                    FormatReader::create(result.schema, format, result.cgfile,
+                                         std::make_shared<const api::Properties>(properties_), columns, nullptr));
 
   const auto expected_total = static_cast<int64_t>(num_rows - deleted_ids.size());
 
@@ -1112,7 +1124,8 @@ TEST_P(ExternalTableTest, TakeAcrossRowGroupBoundary) {
 
   std::vector<std::string> columns = {"id", "name", "value"};
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(result.schema, format, result.cgfile, properties_, columns, nullptr));
+                    FormatReader::create(result.schema, format, result.cgfile,
+                                         std::make_shared<const api::Properties>(properties_), columns, nullptr));
 
   const auto expected_total = static_cast<int64_t>(num_rows - deleted_ids.size());
 
@@ -1207,7 +1220,8 @@ TEST_P(ExternalTableTest, IcebergAzureUriFlow) {
   // --- Create reader and exercise all operations ---
   std::vector<std::string> columns = {"id", "name", "value"};
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(result.schema, format, result.cgfile, properties_, columns, nullptr));
+                    FormatReader::create(result.schema, format, result.cgfile,
+                                         std::make_shared<const api::Properties>(properties_), columns, nullptr));
 
   // 1. get_row_group_infos: verify logical row counts
   ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
@@ -1331,7 +1345,7 @@ class GcpS3CompatWriteTest : public ::testing::Test {
     api::SetValue(props_, "extfs.s3gcp.access_key_value", sk_.c_str());
     api::SetValue(props_, "extfs.s3gcp.use_ssl", "true");
 
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(props_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(props_)));
     FilesystemCache::getInstance().clean();
 
     auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -1361,14 +1375,15 @@ TEST_F(GcpS3CompatWriteTest, LanceWriteAndRead) {
   ASSERT_AND_ASSIGN(auto schema, CreateTestSchema({true, true, true, false}));
   ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
   auto path = test_base_ + "/lance";
-  lance::LanceTableWriter writer(path, schema, props_);
+  lance::LanceTableWriter writer(path, schema, std::make_shared<const api::Properties>(props_));
   ASSERT_STATUS_OK(writer.Write(batch));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   std::cout << "[GCP S3-compat] lance-table write OK: " << cgfile.ToString() << std::endl;
 
   std::vector<std::string> columns = {"id", "name", "value"};
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(schema, LOON_FORMAT_LANCE_TABLE, cgfile, props_, columns, nullptr));
+                    FormatReader::create(schema, LOON_FORMAT_LANCE_TABLE, cgfile,
+                                         std::make_shared<const api::Properties>(props_), columns, nullptr));
   ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
 
   int64_t total = 0;
@@ -1390,7 +1405,8 @@ TEST_F(GcpS3CompatWriteTest, IcebergWriteAndPlanFiles) {
   auto table_uri = "s3://" + bucket_ + "/" + path;
 
   ArrowFileSystemConfig config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(props_, config));
+  ASSERT_STATUS_OK(
+      ArrowFileSystemConfig::create_file_system_config(std::make_shared<const api::Properties>(props_), config));
   ASSERT_AND_ASSIGN(auto storage_options, iceberg::ToWriterOptions(config));
 
   ASSERT_AND_ASSIGN(auto table_info, iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options));

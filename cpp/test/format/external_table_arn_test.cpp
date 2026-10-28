@@ -92,7 +92,7 @@ struct ArnWriteResult {
 static arrow::Result<ArnWriteResult> WritePlainFormatFile(const std::string& format,
                                                           uint64_t num_rows,
                                                           const ArrowFileSystemPtr& write_fs,
-                                                          const api::Properties& write_props,
+                                                          const std::shared_ptr<const api::Properties>& write_props,
                                                           const std::string& test_base,
                                                           const std::string& uri_scheme,
                                                           const std::string& address,
@@ -159,7 +159,7 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
     api::SetValue(read_props_, "extfs.arn.role_arn", role_arn_.c_str());
 
     // Create write filesystem for cleanup
-    ASSERT_AND_ASSIGN(write_fs_, GetFileSystem(write_props_));
+    ASSERT_AND_ASSIGN(write_fs_, GetFileSystem(std::make_shared<const api::Properties>(write_props_)));
 
     FilesystemCache::getInstance().clean();
 
@@ -180,7 +180,8 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
     } else if (format == LOON_FORMAT_ICEBERG_TABLE) {
       return CreateIcebergTable(num_rows);
     } else if (format == LOON_FORMAT_PARQUET || format == LOON_FORMAT_VORTEX) {
-      return WritePlainFormatFile(format, num_rows, write_fs_, write_props_, test_base_, "s3", address_, arn_bucket_);
+      return WritePlainFormatFile(format, num_rows, write_fs_, std::make_shared<const api::Properties>(write_props_),
+                                  test_base_, "s3", address_, arn_bucket_);
     }
     return arrow::Status::Invalid("Unknown format: " + format);
   }
@@ -208,7 +209,7 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
     ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
     ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
     auto path = test_base_ + "/lance";
-    lance::LanceTableWriter writer(path, schema, write_props_);
+    lance::LanceTableWriter writer(path, schema, std::make_shared<const api::Properties>(write_props_));
     ARROW_RETURN_NOT_OK(writer.Write(batch));
     ARROW_ASSIGN_OR_RAISE(auto cgfile, writer.Close());
     std::cout << "[ARN Test] Lance cgfile: " << cgfile.ToString() << std::endl;
@@ -222,7 +223,8 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
     auto table_uri = "s3://" + arn_bucket_ + "/" + path;
 
     ArrowFileSystemConfig write_config;
-    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(write_props_, write_config));
+    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(
+        std::make_shared<const api::Properties>(write_props_), write_config));
     ARROW_ASSIGN_OR_RAISE(auto storage_options, iceberg::ToWriterOptions(write_config));
 
     ARROW_ASSIGN_OR_RAISE(auto table_info, iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options));
@@ -335,7 +337,9 @@ TEST_P(ExternalTableArnTest, ReadWithArnRole) {
       }
     }
 
-    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, format, cgfile, read_props_, columns, nullptr));
+    ASSERT_AND_ASSIGN(auto reader,
+                      FormatReader::create(result.schema, format, cgfile,
+                                           std::make_shared<const api::Properties>(read_props_), columns, nullptr));
     ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
 
     for (size_t i = 0; i < rg_infos.size(); ++i) {
@@ -379,8 +383,9 @@ TEST_F(ExternalTableArnTest, LanceCredentialRefresh) {
 
   // --- First read ---
   {
-    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, LOON_FORMAT_LANCE_TABLE, result.cgfile, props,
-                                                        columns, nullptr));
+    ASSERT_AND_ASSIGN(auto reader,
+                      FormatReader::create(result.schema, LOON_FORMAT_LANCE_TABLE, result.cgfile,
+                                           std::make_shared<const api::Properties>(props), columns, nullptr));
     ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
 
     int64_t total = 0;
@@ -399,8 +404,9 @@ TEST_F(ExternalTableArnTest, LanceCredentialRefresh) {
   // --- Second read (after credential refresh) ---
   {
     FilesystemCache::getInstance().clean();
-    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, LOON_FORMAT_LANCE_TABLE, result.cgfile, props,
-                                                        columns, nullptr));
+    ASSERT_AND_ASSIGN(auto reader,
+                      FormatReader::create(result.schema, LOON_FORMAT_LANCE_TABLE, result.cgfile,
+                                           std::make_shared<const api::Properties>(props), columns, nullptr));
     ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
 
     int64_t total = 0;
@@ -514,8 +520,10 @@ class ExternalTableGcpImpersonationTest : public ::testing::TestWithParam<std::s
     } else if (format == LOON_FORMAT_ICEBERG_TABLE) {
       return CreateIcebergTable(num_rows);
     } else if (format == LOON_FORMAT_PARQUET || format == LOON_FORMAT_VORTEX) {
-      ARROW_ASSIGN_OR_RAISE(auto write_fs, GetFileSystem(plain_write_props_));
-      return WritePlainFormatFile(format, num_rows, write_fs, plain_write_props_, test_base_, "gs", address_, bucket_);
+      ARROW_ASSIGN_OR_RAISE(auto write_fs, GetFileSystem(std::make_shared<const api::Properties>(plain_write_props_)));
+      return WritePlainFormatFile(format, num_rows, write_fs,
+                                  std::make_shared<const api::Properties>(plain_write_props_), test_base_, "gs",
+                                  address_, bucket_);
     }
     return arrow::Status::Invalid("Unknown format: " + format);
   }
@@ -542,7 +550,7 @@ class ExternalTableGcpImpersonationTest : public ::testing::TestWithParam<std::s
     ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
     ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
     auto path = test_base_ + "/lance";
-    lance::LanceTableWriter writer(path, schema, write_props_);
+    lance::LanceTableWriter writer(path, schema, std::make_shared<const api::Properties>(write_props_));
     ARROW_RETURN_NOT_OK(writer.Write(batch));
     ARROW_ASSIGN_OR_RAISE(auto cgfile, writer.Close());
     std::cout << "[GCP Imp Test] Lance cgfile: " << cgfile.ToString() << std::endl;
@@ -563,7 +571,8 @@ class ExternalTableGcpImpersonationTest : public ::testing::TestWithParam<std::s
     auto table_uri = "s3://" + bucket_ + "/" + path;
 
     ArrowFileSystemConfig write_config;
-    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(write_props_, write_config));
+    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(
+        std::make_shared<const api::Properties>(write_props_), write_config));
     ARROW_ASSIGN_OR_RAISE(auto storage_options, iceberg::ToWriterOptions(write_config));
 
     ARROW_ASSIGN_OR_RAISE(auto table_info,
@@ -697,7 +706,9 @@ TEST_P(ExternalTableGcpImpersonationTest, ReadWithImpersonation) {
     }
     std::cout << "[GCP Imp Test] reading cgfile[" << f << "]: " << cgfile.ToString() << std::endl;
 
-    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, format, cgfile, read_props_, columns, nullptr));
+    ASSERT_AND_ASSIGN(auto reader,
+                      FormatReader::create(result.schema, format, cgfile,
+                                           std::make_shared<const api::Properties>(read_props_), columns, nullptr));
     ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
 
     for (size_t i = 0; i < rg_infos.size(); ++i) {
@@ -898,8 +909,8 @@ class ExternalTableAzureArnTest : public ::testing::TestWithParam<std::string> {
     api::SetValue(manifest_props_, PROPERTY_FS_STORAGE_TYPE, "local");
     api::SetValue(manifest_props_, PROPERTY_FS_ROOT_PATH, manifest_root_.c_str());
 
-    ASSERT_AND_ASSIGN(write_fs_, GetFileSystem(write_props_));
-    ASSERT_AND_ASSIGN(manifest_fs_, GetFileSystem(manifest_props_));
+    ASSERT_AND_ASSIGN(write_fs_, GetFileSystem(std::make_shared<const api::Properties>(write_props_)));
+    ASSERT_AND_ASSIGN(manifest_fs_, GetFileSystem(std::make_shared<const api::Properties>(manifest_props_)));
   }
 
   void TearDown() override {
@@ -918,7 +929,8 @@ class ExternalTableAzureArnTest : public ::testing::TestWithParam<std::string> {
     } else if (format == LOON_FORMAT_ICEBERG_TABLE) {
       return CreateIcebergTable(num_rows);
     } else if (format == LOON_FORMAT_PARQUET || format == LOON_FORMAT_VORTEX) {
-      return WritePlainFormatFile(format, num_rows, write_fs_, write_props_, test_base_, "az", address_, container_);
+      return WritePlainFormatFile(format, num_rows, write_fs_, std::make_shared<const api::Properties>(write_props_),
+                                  test_base_, "az", address_, container_);
     }
     return arrow::Status::Invalid("Unknown format: " + format);
   }
@@ -944,7 +956,7 @@ class ExternalTableAzureArnTest : public ::testing::TestWithParam<std::string> {
     ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
     ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
     auto path = test_base_ + "/lance";
-    lance::LanceTableWriter writer(path, schema, write_props_);
+    lance::LanceTableWriter writer(path, schema, std::make_shared<const api::Properties>(write_props_));
     ARROW_RETURN_NOT_OK(writer.Write(batch));
     ARROW_ASSIGN_OR_RAISE(auto cgfile, writer.Close());
     std::cout << "[Azure ARN Test] Lance cgfile: " << cgfile.ToString() << std::endl;
@@ -957,7 +969,8 @@ class ExternalTableAzureArnTest : public ::testing::TestWithParam<std::string> {
     auto table_uri = "abfss://" + container_ + "/" + path;
 
     ArrowFileSystemConfig write_config;
-    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(write_props_, write_config));
+    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(
+        std::make_shared<const api::Properties>(write_props_), write_config));
     ARROW_ASSIGN_OR_RAISE(auto storage_options, iceberg::ToWriterOptions(write_config));
 
     ARROW_ASSIGN_OR_RAISE(auto table_info, iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options));
@@ -1066,7 +1079,9 @@ TEST_P(ExternalTableAzureArnTest, ReadWithBrokeredSas) {
       }
     }
 
-    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, format, cgfile, read_props_, columns, nullptr));
+    ASSERT_AND_ASSIGN(auto reader,
+                      FormatReader::create(result.schema, format, cgfile,
+                                           std::make_shared<const api::Properties>(read_props_), columns, nullptr));
     ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
     for (size_t i = 0; i < rg_infos.size(); ++i) {
       ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
@@ -1093,7 +1108,9 @@ TEST_P(ExternalTableAzureArnTest, CachedReadsFetchBrokeredSasOnce) {
   OneShotHttpPostRelay broker_relay(credential_endpoint_);
   auto cache_read_props = read_props_;
   api::SetValue(cache_read_props, "extfs.azsas.credential_endpoint", broker_relay.endpoint().c_str());
-  ASSERT_AND_ASSIGN(auto fs_config, FilesystemCache::resolve_config(cache_read_props, result.explore_dir.c_str()));
+  ASSERT_AND_ASSIGN(auto fs_config,
+                    FilesystemCache::resolve_config(std::make_shared<const api::Properties>(cache_read_props),
+                                                    result.explore_dir.c_str()));
 
   constexpr size_t cache_hit_iterations = 10;
   if (format == LOON_FORMAT_LANCE_TABLE) {
@@ -1106,8 +1123,9 @@ TEST_P(ExternalTableAzureArnTest, CachedReadsFetchBrokeredSasOnce) {
     std::shared_ptr<FormatReader> reader;
     for (size_t iteration = 0; iteration < cache_hit_iterations; ++iteration) {
       SCOPED_TRACE(::testing::Message() << "cache hit iteration " << iteration);
-      ASSERT_AND_ASSIGN(reader,
-                        FormatReader::create(result.schema, format, result.cgfile, cache_read_props, columns, nullptr));
+      ASSERT_AND_ASSIGN(
+          reader, FormatReader::create(result.schema, format, result.cgfile,
+                                       std::make_shared<const api::Properties>(cache_read_props), columns, nullptr));
     }
 
     ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
@@ -1129,7 +1147,8 @@ TEST_P(ExternalTableAzureArnTest, CachedReadsFetchBrokeredSasOnce) {
     ASSERT_AND_ASSIGN(auto* iceberg_format, Format::get(format));
     for (size_t iteration = 0; iteration < cache_hit_iterations; ++iteration) {
       SCOPED_TRACE(::testing::Message() << "cache hit iteration " << iteration);
-      ASSERT_AND_ASSIGN(auto files, iceberg_format->explore(result.explore_dir, cache_read_props));
+      ASSERT_AND_ASSIGN(auto files, iceberg_format->explore(result.explore_dir,
+                                                            std::make_shared<const api::Properties>(cache_read_props)));
       ASSERT_FALSE(files.empty());
     }
   }
@@ -1293,7 +1312,7 @@ class ExternalTableRoleArnTest : public ::testing::Test {
     test_base_ = "zc/" + cloud_provider_ + "-arn-test-" + std::to_string(ts);
 
     // Create write filesystem for cleanup.
-    ASSERT_AND_ASSIGN(write_fs_, GetFileSystem(write_props_));
+    ASSERT_AND_ASSIGN(write_fs_, GetFileSystem(std::make_shared<const api::Properties>(write_props_)));
 
     FilesystemCache::getInstance().clean();
   }
@@ -1331,7 +1350,7 @@ class ExternalTableRoleArnTest : public ::testing::Test {
     ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
     ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
     auto path = test_base_ + "/lance";
-    lance::LanceTableWriter writer(path, schema, write_props_);
+    lance::LanceTableWriter writer(path, schema, std::make_shared<const api::Properties>(write_props_));
     ARROW_RETURN_NOT_OK(writer.Write(batch));
     ARROW_ASSIGN_OR_RAISE(auto cgfile, writer.Close());
     std::cout << "[Aliyun ARN Test] Lance cgfile: " << cgfile.ToString() << std::endl;
@@ -1354,7 +1373,8 @@ class ExternalTableRoleArnTest : public ::testing::Test {
     auto table_uri = "oss://" + arn_bucket_ + "/" + path;
 
     ArrowFileSystemConfig write_config;
-    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(write_props_, write_config));
+    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(
+        std::make_shared<const api::Properties>(write_props_), write_config));
     ARROW_ASSIGN_OR_RAISE(auto storage_options, iceberg::ToWriterOptions(write_config));
 
     ARROW_ASSIGN_OR_RAISE(auto table_info, iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options));
@@ -1518,8 +1538,9 @@ TEST_F(ExternalTableAliyunArnTest, ReadLanceWithArnRole) {
       }
     }
 
-    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, LOON_FORMAT_LANCE_TABLE, cgfile, read_props_,
-                                                        columns, nullptr));
+    ASSERT_AND_ASSIGN(auto reader,
+                      FormatReader::create(result.schema, LOON_FORMAT_LANCE_TABLE, cgfile,
+                                           std::make_shared<const api::Properties>(read_props_), columns, nullptr));
     ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
     for (size_t i = 0; i < rg_infos.size(); ++i) {
       ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
@@ -1617,8 +1638,9 @@ TEST_F(ExternalTableAliyunArnTest, ReadIcebergWithArnRole) {
       }
     }
 
-    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, LOON_FORMAT_ICEBERG_TABLE, cgfile, read_props_,
-                                                        columns, nullptr));
+    ASSERT_AND_ASSIGN(auto reader,
+                      FormatReader::create(result.schema, LOON_FORMAT_ICEBERG_TABLE, cgfile,
+                                           std::make_shared<const api::Properties>(read_props_), columns, nullptr));
     ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
     for (size_t i = 0; i < rg_infos.size(); ++i) {
       ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
@@ -1658,7 +1680,7 @@ void ExternalTableRoleArnTest::ReadTwoParquetFilesWithArnRole() {
   for (const auto& [key, value] : props) {
     api::SetValue(manifest_props, key.c_str(), value.c_str());
   }
-  ASSERT_AND_ASSIGN(manifest_fs_, GetFileSystem(manifest_props));
+  ASSERT_AND_ASSIGN(manifest_fs_, GetFileSystem(std::make_shared<const api::Properties>(manifest_props)));
 
   std::vector<const char*> c_keys, c_values;
   c_keys.reserve(props.size());
@@ -1728,7 +1750,8 @@ void ExternalTableRoleArnTest::ReadTwoParquetFilesWithArnRole() {
     }
 
     ASSERT_AND_ASSIGN(auto reader,
-                      FormatReader::create(result.schema, LOON_FORMAT_PARQUET, cgfile, read_props_, columns, nullptr));
+                      FormatReader::create(result.schema, LOON_FORMAT_PARQUET, cgfile,
+                                           std::make_shared<const api::Properties>(read_props_), columns, nullptr));
     ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
     for (size_t i = 0; i < rg_infos.size(); ++i) {
       ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
@@ -1765,7 +1788,8 @@ TEST_F(ExternalTableTencentArnTest, ReadTwoParquetFilesWithArnRole) { ReadTwoPar
 TEST_F(ExternalTableAliyunArnTest, ReadVortexWithArnRole) {
   const uint64_t num_rows = 100;
 
-  ASSERT_AND_ASSIGN(auto result, WritePlainFormatFile(LOON_FORMAT_VORTEX, num_rows, write_fs_, write_props_, test_base_,
+  ASSERT_AND_ASSIGN(auto result, WritePlainFormatFile(LOON_FORMAT_VORTEX, num_rows, write_fs_,
+                                                      std::make_shared<const api::Properties>(write_props_), test_base_,
                                                       "oss", address_, arn_bucket_));
 
   std::cout << "[Aliyun ARN Test] Vortex explore dir: " << result.explore_dir << std::endl;
@@ -1822,7 +1846,8 @@ TEST_F(ExternalTableAliyunArnTest, ReadVortexWithArnRole) {
 
   std::vector<std::string> columns = {"id", "name", "value"};
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(result.schema, LOON_FORMAT_VORTEX, cgfile, read_props_, columns, nullptr));
+                    FormatReader::create(result.schema, LOON_FORMAT_VORTEX, cgfile,
+                                         std::make_shared<const api::Properties>(read_props_), columns, nullptr));
   ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
   int64_t total_rows_read = 0;
   for (size_t i = 0; i < rg_infos.size(); ++i) {
@@ -1931,7 +1956,7 @@ class ExternalTableAliyunOIDCArnTest : public ::testing::Test {
       api::SetValue(read_props_, "extfs.arn.external_id", external_id_.c_str());
     }
 
-    ASSERT_AND_ASSIGN(write_fs_, GetFileSystem(write_props_));
+    ASSERT_AND_ASSIGN(write_fs_, GetFileSystem(std::make_shared<const api::Properties>(write_props_)));
     FilesystemCache::getInstance().clean();
 
     auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -1996,7 +2021,7 @@ class ExternalTableAliyunOIDCArnTest : public ::testing::Test {
     ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
     ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
     auto path = test_base_ + "/lance";
-    lance::LanceTableWriter writer(path, schema, write_props_);
+    lance::LanceTableWriter writer(path, schema, std::make_shared<const api::Properties>(write_props_));
     ARROW_RETURN_NOT_OK(writer.Write(batch));
     ARROW_ASSIGN_OR_RAISE(auto cgfile, writer.Close());
     auto explore_dir = "oss://" + address_ + "/" + arn_bucket_ + "/" + path;
@@ -2007,7 +2032,8 @@ class ExternalTableAliyunOIDCArnTest : public ::testing::Test {
     auto path = test_base_ + "/iceberg";
     auto table_uri = "oss://" + arn_bucket_ + "/" + path;
     ArrowFileSystemConfig write_config;
-    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(write_props_, write_config));
+    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(
+        std::make_shared<const api::Properties>(write_props_), write_config));
     ARROW_ASSIGN_OR_RAISE(auto storage_options, iceberg::ToWriterOptions(write_config));
 
     ARROW_ASSIGN_OR_RAISE(auto table_info, iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options));
@@ -2128,8 +2154,10 @@ TEST_F(ExternalTableAliyunOIDCArnTest, ReadLanceWithOIDCChain) {
         cgfile.properties[loon_file.property_keys[p]] = loon_file.property_values[p];
       }
     }
-    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, LOON_FORMAT_LANCE_TABLE, cgfile,
-                                                        rate_limited_read_props, columns, nullptr));
+    ASSERT_AND_ASSIGN(
+        auto reader,
+        FormatReader::create(result.schema, LOON_FORMAT_LANCE_TABLE, cgfile,
+                             std::make_shared<const api::Properties>(rate_limited_read_props), columns, nullptr));
     ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
     for (size_t i = 0; i < rg_infos.size(); ++i) {
       ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
@@ -2155,7 +2183,9 @@ TEST_F(ExternalTableAliyunOIDCArnTest, LanceFilesystemCacheHitDoesNotReloadOidcT
   auto cache_read_props = read_props_;
   api::SetValue(cache_read_props, "extfs.arn.session_name", session_name.c_str());
 
-  ASSERT_AND_ASSIGN(auto fs_config, FilesystemCache::resolve_config(cache_read_props, result.explore_dir.c_str()));
+  ASSERT_AND_ASSIGN(auto fs_config,
+                    FilesystemCache::resolve_config(std::make_shared<const api::Properties>(cache_read_props),
+                                                    result.explore_dir.c_str()));
   auto storage_options = lance::ToReaderOptions(fs_config);
   auto cache_key = storage_options.find("milvus_fs_cache_key");
   ASSERT_NE(cache_key, storage_options.end());
@@ -2198,8 +2228,9 @@ TEST_F(ExternalTableAliyunOIDCArnTest, LanceFilesystemCacheHitDoesNotReloadOidcT
               << std::endl;
     for (size_t iteration = 0; iteration < cache_hit_iterations; ++iteration) {
       SCOPED_TRACE(::testing::Message() << "cache hit iteration " << iteration);
-      ASSERT_AND_ASSIGN(reader, FormatReader::create(result.schema, LOON_FORMAT_LANCE_TABLE, result.cgfile,
-                                                     cache_read_props, columns, nullptr));
+      ASSERT_AND_ASSIGN(
+          reader, FormatReader::create(result.schema, LOON_FORMAT_LANCE_TABLE, result.cgfile,
+                                       std::make_shared<const api::Properties>(cache_read_props), columns, nullptr));
     }
     std::cout << "[Aliyun OIDC Cache Test] Lance: completed " << cache_hit_iterations << " cache-hit opens"
               << std::endl;
@@ -2272,8 +2303,9 @@ TEST_F(ExternalTableAliyunOIDCArnTest, ReadIcebergWithOIDCChain) {
         cgfile.properties[loon_file.property_keys[p]] = loon_file.property_values[p];
       }
     }
-    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, LOON_FORMAT_ICEBERG_TABLE, cgfile, read_props_,
-                                                        columns, nullptr));
+    ASSERT_AND_ASSIGN(auto reader,
+                      FormatReader::create(result.schema, LOON_FORMAT_ICEBERG_TABLE, cgfile,
+                                           std::make_shared<const api::Properties>(read_props_), columns, nullptr));
     ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
     for (size_t i = 0; i < rg_infos.size(); ++i) {
       ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
@@ -2297,7 +2329,9 @@ TEST_F(ExternalTableAliyunOIDCArnTest, IcebergFilesystemCacheHitDoesNotReloadOid
   api::SetValue(cache_read_props, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID,
                 std::to_string(result.iceberg_snapshot_id).c_str());
 
-  ASSERT_AND_ASSIGN(auto fs_config, FilesystemCache::resolve_config(cache_read_props, result.explore_dir.c_str()));
+  ASSERT_AND_ASSIGN(auto fs_config,
+                    FilesystemCache::resolve_config(std::make_shared<const api::Properties>(cache_read_props),
+                                                    result.explore_dir.c_str()));
   auto reader_options = iceberg::ToReaderOptions(fs_config);
   EXPECT_EQ(reader_options, (std::unordered_map<std::string, std::string>{
                                 {"milvus_fs_is_local", "false"}, {"milvus_fs_bucket", fs_config.bucket_name}}));
@@ -2338,7 +2372,8 @@ TEST_F(ExternalTableAliyunOIDCArnTest, IcebergFilesystemCacheHitDoesNotReloadOid
               << std::endl;
     for (size_t iteration = 0; iteration < cache_hit_iterations; ++iteration) {
       SCOPED_TRACE(::testing::Message() << "cache hit iteration " << iteration);
-      ASSERT_AND_ASSIGN(auto files, iceberg_format->explore(result.explore_dir, cache_read_props));
+      ASSERT_AND_ASSIGN(auto files, iceberg_format->explore(result.explore_dir,
+                                                            std::make_shared<const api::Properties>(cache_read_props)));
       ASSERT_EQ(files.size(), first_num_files);
     }
     std::cout << "[Aliyun OIDC Cache Test] Iceberg: completed " << cache_hit_iterations << " cache-hit explores"
@@ -2414,7 +2449,8 @@ TEST_F(ExternalTableAliyunOIDCArnTest, ReadTwoParquetFilesWithOIDCChain) {
       }
     }
     ASSERT_AND_ASSIGN(auto reader,
-                      FormatReader::create(result.schema, LOON_FORMAT_PARQUET, cgfile, read_props_, columns, nullptr));
+                      FormatReader::create(result.schema, LOON_FORMAT_PARQUET, cgfile,
+                                           std::make_shared<const api::Properties>(read_props_), columns, nullptr));
     ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
     for (size_t i = 0; i < rg_infos.size(); ++i) {
       ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
@@ -2433,7 +2469,8 @@ TEST_F(ExternalTableAliyunOIDCArnTest, ReadTwoParquetFilesWithOIDCChain) {
 TEST_F(ExternalTableAliyunOIDCArnTest, ReadVortexWithOIDCChain) {
   const uint64_t num_rows = 100;
 
-  ASSERT_AND_ASSIGN(auto result, WritePlainFormatFile(LOON_FORMAT_VORTEX, num_rows, write_fs_, write_props_, test_base_,
+  ASSERT_AND_ASSIGN(auto result, WritePlainFormatFile(LOON_FORMAT_VORTEX, num_rows, write_fs_,
+                                                      std::make_shared<const api::Properties>(write_props_), test_base_,
                                                       "oss", address_, arn_bucket_));
 
   std::cout << "[Aliyun OIDC Test] Vortex explore dir: " << result.explore_dir << std::endl;
@@ -2489,7 +2526,8 @@ TEST_F(ExternalTableAliyunOIDCArnTest, ReadVortexWithOIDCChain) {
 
   std::vector<std::string> columns = {"id", "name", "value"};
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(result.schema, LOON_FORMAT_VORTEX, cgfile, read_props_, columns, nullptr));
+                    FormatReader::create(result.schema, LOON_FORMAT_VORTEX, cgfile,
+                                         std::make_shared<const api::Properties>(read_props_), columns, nullptr));
   ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
   int64_t total_rows_read = 0;
   for (size_t i = 0; i < rg_infos.size(); ++i) {

@@ -41,7 +41,7 @@ class FaultInjectionTest : public ::testing::Test {
     // Initialize FIU once (thread-safe, only on first test run)
     ASSERT_EQ(0, InitFiuOnce());
     ASSERT_STATUS_OK(InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
 
     base_path_ = GetTestBasePath("fiu-test");
     ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
@@ -69,7 +69,8 @@ class FaultInjectionTest : public ::testing::Test {
   // Helper to write test data and return column groups
   arrow::Result<std::shared_ptr<ColumnGroups>> WriteTestData() {
     ARROW_ASSIGN_OR_RAISE(auto policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
-    auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+    auto writer =
+        Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
     ARROW_RETURN_NOT_OK(writer->write(test_batch_));
     return writer->close();
   }
@@ -87,7 +88,8 @@ TEST_F(FaultInjectionTest, WriterWriteFail) {
   FIU_ENABLE_FAULT_ONETIME(FIUKEY_WRITER_WRITE_FAIL);
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
 
   // First write should fail
   auto status = writer->write(test_batch_);
@@ -115,7 +117,8 @@ TEST_F(FaultInjectionTest, WriterFlushFail) {
   FIU_ENABLE_FAULT_ONETIME(FIUKEY_WRITER_FLUSH_FAIL);
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
 
   ASSERT_STATUS_OK(writer->write(test_batch_));
 
@@ -135,7 +138,8 @@ TEST_F(FaultInjectionTest, WriterCloseFail) {
   FIU_ENABLE_FAULT_ONETIME(FIUKEY_WRITER_CLOSE_FAIL);
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
 
   ASSERT_STATUS_OK(writer->write(test_batch_));
 
@@ -149,7 +153,7 @@ TEST_F(FaultInjectionTest, ColumnGroupReadFail) {
   // First write valid data
   ASSERT_AND_ASSIGN(auto cgs, WriteTestData());
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   // Enable fault point
@@ -171,7 +175,7 @@ TEST_F(FaultInjectionTest, ColumnGroupReadFailMultiple) {
   // First write valid data
   ASSERT_AND_ASSIGN(auto cgs, WriteTestData());
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   // Enable fault point with failnum=-1 (fail forever)
@@ -195,7 +199,7 @@ TEST_F(FaultInjectionTest, TakeRowsFail) {
   // First write valid data
   ASSERT_AND_ASSIGN(auto cgs, WriteTestData());
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   // Enable fault point
@@ -219,7 +223,8 @@ TEST_F(FaultInjectionTest, ColumnGroupWriteFail) {
   FIU_ENABLE_FAULT_ONETIME(FIUKEY_COLUMN_GROUP_WRITE_FAIL);
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
 
   // Write should fail due to column group write failure
   auto status = writer->write(test_batch_);
@@ -237,7 +242,8 @@ TEST_F(FaultInjectionTest, RecoveryAfterWriterFault) {
   FIU_ENABLE_FAULT_ONETIME(FIUKEY_WRITER_WRITE_FAIL);
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
-  auto writer = Writer::create(base_path_ + "/recovery1", schema_, std::move(policy), properties_);
+  auto writer = Writer::create(base_path_ + "/recovery1", schema_, std::move(policy),
+                               std::make_shared<const api::Properties>(properties_));
 
   // First write fails
   ASSERT_FALSE(writer->write(test_batch_).ok());
@@ -247,7 +253,7 @@ TEST_F(FaultInjectionTest, RecoveryAfterWriterFault) {
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
   // And data is readable
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
   ASSERT_AND_ASSIGN(auto table, batch_reader->ToTable());
   EXPECT_EQ(table->num_rows(), test_batch_->num_rows());
@@ -256,11 +262,12 @@ TEST_F(FaultInjectionTest, RecoveryAfterWriterFault) {
 TEST_F(FaultInjectionTest, RecoveryAfterReaderFault) {
   // Write valid data first
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
-  auto writer = Writer::create(base_path_ + "/recovery2", schema_, std::move(policy), properties_);
+  auto writer = Writer::create(base_path_ + "/recovery2", schema_, std::move(policy),
+                               std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
 
   // Enable fault
@@ -278,7 +285,7 @@ TEST_F(FaultInjectionTest, GetChunksFail) {
   // First write valid data
   ASSERT_AND_ASSIGN(auto cgs, WriteTestData());
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   // Enable fault point

@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -32,7 +33,9 @@ enum class PropertyType { STRING, INT32, INT64, UINT32, UINT64, BOOL, VECTOR_STR
 // A variant that can hold any of the property types
 using PropertyVariant =
     std::variant<std::string, int32_t, int64_t, uint32_t, uint64_t, bool, std::vector<std::string>, std::nullptr_t>;
-// A map of property names to their variants
+// Build a map with SetValue/ConvertFFIProperties, then publish it as
+// std::shared_ptr<const Properties>. Readers, writers and deferred operations
+// share that immutable configuration; callers must not mutate it through aliases.
 using Properties = std::unordered_map<std::string, PropertyVariant>;
 // Validator function type
 using ValidatorFunc = std::function<std::optional<std::string>(const PropertyInfo& property_info, const std::string&)>;
@@ -193,9 +196,10 @@ struct PropertyInfo {
  *    property, will return the default value.
  * 3. If the key does not exist both in the `Properties` and predefined
  *    properties, will return an error.
+ * The shared configuration must not be null.
  */
 template <typename T>
-arrow::Result<T> GetValue(const Properties& properties, const char* key);
+arrow::Result<T> GetValue(const std::shared_ptr<const Properties>& properties, const char* key);
 
 /**
  * Get the value of a property by key. Will raise assert if the key does
@@ -206,11 +210,22 @@ arrow::Result<T> GetValue(const Properties& properties, const char* key);
  * logical error.
  */
 template <typename T>
-T GetValueNoError(const Properties& properties, const char* key);
+T GetValueNoError(const std::shared_ptr<const Properties>& properties, const char* key);
+
+/**
+ * Set a value while building a mutable configuration, e.g. during FFI/external
+ * filesystem parsing or in tools, gtests and benchmarks. Once the map is shared
+ * as std::shared_ptr<const Properties>, it must not be modified through aliases.
+ * Reader/writer paths consume the shared immutable configuration.
+ * Returns std::nullopt on success, or the validation error.
+ */
 std::optional<std::string> SetValue(Properties& properties,
                                     const char* key,
                                     const char* value,
                                     bool allow_undefined_key = true);
-std::optional<std::string> ConvertFFIProperties(Properties& result, const ::LoonProperties* properties);
+// Merge FFI values into a new immutable configuration, preserving any existing
+// result and its shared owners on error. Success always produces a non-null result.
+std::optional<std::string> ConvertFFIProperties(std::shared_ptr<const Properties>& result,
+                                                const ::LoonProperties* properties);
 
 }  // namespace milvus_storage::api

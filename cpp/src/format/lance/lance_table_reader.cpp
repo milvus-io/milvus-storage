@@ -330,7 +330,7 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<BlockingDataset>>> LanceTableRea
 folly::SemiFuture<arrow::Result<std::shared_ptr<BlockingDataset>>> LanceTableReader::open_dataset_async(
     const std::string& base_uri,
     const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
-    const api::Properties& properties,
+    const std::shared_ptr<const api::Properties>& properties,
     uint64_t version) {
   FOLLY_ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, base_uri));
   const auto lance_uri = ToStandardLanceUri(base_uri);
@@ -370,7 +370,7 @@ LanceTableReader::LanceTableReader(const std::shared_ptr<arrow::fs::FileSystem>&
                                    const std::string& uri,
                                    uint64_t fragment_id,
                                    const std::shared_ptr<arrow::Schema>& schema,
-                                   const milvus_storage::api::Properties& properties,
+                                   const std::shared_ptr<const milvus_storage::api::Properties>& properties,
                                    const std::vector<std::string>& needed_columns,
                                    uint64_t dataset_version)
     : filesystem_(filesystem),
@@ -487,7 +487,7 @@ std::string LanceTableReader::MetaTrait::cache_key(const milvus_storage::api::Co
 
 static folly::SemiFuture<arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>>>
 load_fragment_metadata_async(uint64_t fragment_id,
-                             const milvus_storage::api::Properties& properties,
+                             const std::shared_ptr<const milvus_storage::api::Properties>& properties,
                              const std::shared_ptr<BlockingDataset>& dataset) {
   // These getters inspect the loaded manifest. Only the memory estimator needs
   // footer/page I/O, which is submitted to the shared Rust runtime below.
@@ -570,14 +570,14 @@ load_fragment_metadata_async(uint64_t fragment_id,
 
 static arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>> load_fragment_metadata(
     uint64_t fragment_id,
-    const milvus_storage::api::Properties& properties,
+    const std::shared_ptr<const milvus_storage::api::Properties>& properties,
     const std::shared_ptr<BlockingDataset>& dataset) {
   return load_fragment_metadata_async(fragment_id, properties, dataset).get();
 }
 
 arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTrait::load_metadata(
     const milvus_storage::api::ColumnGroupFile& file,
-    const milvus_storage::api::Properties& properties,
+    const std::shared_ptr<const milvus_storage::api::Properties>& properties,
     const KeyRetriever& key_retriever) {
   (void)key_retriever;
 
@@ -641,7 +641,7 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
 
 folly::SemiFuture<arrow::Result<LanceTableReader::MetaTrait::MetadataPtr>>
 LanceTableReader::MetaTrait::load_metadata_async(const api::ColumnGroupFile& file,
-                                                 const api::Properties& properties,
+                                                 const std::shared_ptr<const api::Properties>& properties,
                                                  const KeyRetriever& /*key_retriever*/) {
   return folly::makeSemiFuture().deferValue(
       [file, properties](folly::Unit) -> folly::SemiFuture<arrow::Result<MetadataPtr>> {

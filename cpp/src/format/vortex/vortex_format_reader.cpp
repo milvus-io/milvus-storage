@@ -476,7 +476,9 @@ arrow::Result<VortexFormatReader::MetaTrait::MetadataPtr> VortexFormatReader::Me
 }
 
 arrow::Result<VortexFormatReader::MetaTrait::MetadataPtr> VortexFormatReader::MetaTrait::load_metadata(
-    const api::ColumnGroupFile& file, const api::Properties& properties, const KeyRetriever& key_retriever) {
+    const api::ColumnGroupFile& file,
+    const std::shared_ptr<const api::Properties>& properties,
+    const KeyRetriever& key_retriever) {
   (void)key_retriever;
   ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, file.path));
   ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
@@ -489,7 +491,7 @@ arrow::Result<VortexFormatReader::MetaTrait::MetadataPtr> VortexFormatReader::Me
 
 folly::SemiFuture<arrow::Result<VortexFormatReader::MetaTrait::MetadataPtr>>
 VortexFormatReader::MetaTrait::load_metadata_async(const api::ColumnGroupFile& file,
-                                                   const api::Properties& properties,
+                                                   const std::shared_ptr<const api::Properties>& properties,
                                                    const KeyRetriever& key_retriever) {
   (void)key_retriever;
 
@@ -549,7 +551,7 @@ VortexFormatReader::MetaTrait::create_from_metadata_async(MetadataPtr metadata,
 VortexFormatReader::VortexFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                        const std::shared_ptr<arrow::Schema>& schema,
                                        const std::string& path,
-                                       const milvus_storage::api::Properties& properties,
+                                       const std::shared_ptr<const milvus_storage::api::Properties>& properties,
                                        const std::vector<std::string>& needed_columns,
                                        uint64_t file_size,
                                        uint64_t footer_size)

@@ -73,7 +73,7 @@ arrow::Result<std::shared_ptr<FormatReader>> FormatReader::create(
     const std::shared_ptr<arrow::Schema>& read_schema,
     const std::string& format,
     const api::ColumnGroupFile& file,
-    const api::Properties& properties,
+    const std::shared_ptr<const api::Properties>& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& key_retriever) {
   ARROW_ASSIGN_OR_RAISE(auto* fmt, Format::get(format));
@@ -88,7 +88,7 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> FormatReader::cr
     const std::shared_ptr<arrow::Schema>& read_schema,
     const std::string& format,
     const api::ColumnGroupFile& file,
-    const api::Properties& properties,
+    const std::shared_ptr<const api::Properties>& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& key_retriever) {
   // Preserve the format-specific async factory semantics instead of selecting

@@ -37,7 +37,7 @@ namespace milvus_storage::lance {
 
 LanceTableWriter::LanceTableWriter(const std::string& base_path,
                                    std::shared_ptr<arrow::Schema> schema,
-                                   const api::Properties& properties,
+                                   const std::shared_ptr<const api::Properties>& properties,
                                    LanceDataStorageFormat data_storage_format)
     : closed_(false),
       base_path_(base_path),

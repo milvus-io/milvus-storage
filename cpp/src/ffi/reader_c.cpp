@@ -382,7 +382,7 @@ LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
     // Fault injection point for testing
     FIU_DO_ON(FIUKEY_READER_OPEN_FAIL,
               RETURN_ERROR(LOON_FAULT_INJECT_ERROR, fmt::format("Injected fault: {}", FIUKEY_READER_OPEN_FAIL)));
-    milvus_storage::api::Properties properties_map;
+    std::shared_ptr<const milvus_storage::api::Properties> properties_map;
     auto opt = ConvertFFIProperties(properties_map, properties);
     if (opt != std::nullopt) {
       RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");

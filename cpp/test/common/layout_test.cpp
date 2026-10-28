@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <memory>
 #include <gtest/gtest.h>
 
 #include <unistd.h>
@@ -37,7 +38,7 @@ class FileLayoutTest : public ::testing::Test {
     base_path_ = "layout_test";
     new_base_path_ = "new_layout_test";
     ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
 
     // no need create dir in new_base_path_, just delete it
     ASSERT_STATUS_OK(DeleteTestDir(fs_, new_base_path_));
@@ -63,7 +64,8 @@ class FileLayoutTest : public ::testing::Test {
 
 TEST_F(FileLayoutTest, CheckLayoutCreation) {
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto column_groups, writer->close());
 
@@ -126,7 +128,8 @@ TEST_F(FileLayoutTest, TestChangeBasePath) {
                     "This test relies on MoveTestBasePath which calls Move() internally.";
   }
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto column_groups, writer->close());
 
@@ -139,7 +142,7 @@ TEST_F(FileLayoutTest, TestChangeBasePath) {
   }
 
   auto verify_read = [&](auto cgs) {
-    auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+    auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
     ASSERT_NE(reader, nullptr);
     ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
     ASSERT_NE(batch_reader, nullptr);

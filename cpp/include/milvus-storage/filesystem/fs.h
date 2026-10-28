@@ -279,8 +279,8 @@ struct ArrowFileSystemConfig {
   // Empty for default filesystem
   std::string alias = "";
 
-  static arrow::Status create_file_system_config(const milvus_storage::api::Properties& properties_map,
-                                                 ArrowFileSystemConfig& result);
+  static arrow::Status create_file_system_config(
+      const std::shared_ptr<const milvus_storage::api::Properties>& properties_map, ArrowFileSystemConfig& result);
 
   /**
    * @brief Return whether Azure broker-specific settings were supplied.
@@ -340,7 +340,8 @@ class FilesystemCache {
    * @param path Optional path to determine filesystem (empty = default filesystem)
    * @return Result containing the cached or newly created filesystem
    */
-  [[nodiscard]] arrow::Result<FileSystemPtr> get(const api::Properties& properties, const std::string& path = "");
+  [[nodiscard]] arrow::Result<FileSystemPtr> get(const std::shared_ptr<const api::Properties>& properties,
+                                                 const std::string& path = "");
 
   /**
    * @brief Resolve filesystem config from properties and URI path
@@ -349,15 +350,16 @@ class FilesystemCache {
    * Otherwise returns default fs.* config.
    * Does NOT create a filesystem or touch the cache.
    */
-  [[nodiscard]] static arrow::Result<ArrowFileSystemConfig> resolve_config(const api::Properties& properties,
-                                                                           const std::string& path = "");
+  [[nodiscard]] static arrow::Result<ArrowFileSystemConfig> resolve_config(
+      const std::shared_ptr<const api::Properties>& properties, const std::string& path = "");
 
   /**
    * @brief Evict the filesystem selected by the same properties/path as get().
    * A cache miss succeeds without creating a filesystem. Existing holders remain
    * valid; subsequent get() calls create a new instance with fresh metadata.
    */
-  [[nodiscard]] arrow::Status evict(const api::Properties& properties, const std::string& path = "");
+  [[nodiscard]] arrow::Status evict(const std::shared_ptr<const api::Properties>& properties,
+                                    const std::string& path = "");
 
   /**
    * @brief Get the size of cached filesystems

@@ -52,7 +52,7 @@ LoonFFIResult loon_exttable_explore(const char** columns,
   }
 
   try {
-    milvus_storage::api::Properties properties_map;
+    std::shared_ptr<const milvus_storage::api::Properties> properties_map;
     std::string format_str(format);
 
     auto opt = milvus_storage::api::ConvertFFIProperties(properties_map, properties);
@@ -113,7 +113,7 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
   }
 
   try {
-    milvus_storage::api::Properties properties_map;
+    std::shared_ptr<const milvus_storage::api::Properties> properties_map;
     std::string format_str(format);
 
     auto opt = milvus_storage::api::ConvertFFIProperties(properties_map, properties);
@@ -165,7 +165,7 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
 
 static arrow::Result<std::shared_ptr<milvus_storage::api::Manifest>> read_manifest(const char* path,
                                                                                    const ::LoonProperties* properties) {
-  milvus_storage::api::Properties properties_map;
+  std::shared_ptr<const milvus_storage::api::Properties> properties_map;
 
   auto opt = milvus_storage::api::ConvertFFIProperties(properties_map, properties);
   if (opt != std::nullopt) {

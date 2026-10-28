@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <memory>
 #include "test_env.h"
 
 #include <cassert>
@@ -106,13 +107,15 @@ arrow::Status InitTestProperties(api::Properties& properties) {
   return arrow::Status::OK();
 }
 
-arrow::Result<milvus_storage::ArrowFileSystemConfig> GetFileSystemConfig(const api::Properties& properties) {
+arrow::Result<milvus_storage::ArrowFileSystemConfig> GetFileSystemConfig(
+    const std::shared_ptr<const api::Properties>& properties) {
   milvus_storage::ArrowFileSystemConfig fs_config;
   ARROW_RETURN_NOT_OK(milvus_storage::ArrowFileSystemConfig::create_file_system_config(properties, fs_config));
   return fs_config;
 }
 
-arrow::Result<milvus_storage::ArrowFileSystemPtr> GetFileSystem(const api::Properties& properties) {
+arrow::Result<milvus_storage::ArrowFileSystemPtr> GetFileSystem(
+    const std::shared_ptr<const api::Properties>& properties) {
   // Use get_file_system which handles caching automatically
   return milvus_storage::FilesystemCache::getInstance().get(properties);
 }
@@ -376,7 +379,7 @@ arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSinglePolicy(const std::
   SetValue(properties, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SINGLE);
   SetValue(properties, PROPERTY_WRITER_FORMAT, format.c_str());
 
-  return ColumnGroupPolicy::create_column_group_policy(properties, schema);
+  return ColumnGroupPolicy::create_column_group_policy(std::make_shared<const api::Properties>(properties), schema);
 }
 
 arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSchemaBasePolicy(const std::string& patterns,
@@ -387,7 +390,7 @@ arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSchemaBasePolicy(const s
   SetValue(properties, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS, patterns.c_str());
   SetValue(properties, PROPERTY_WRITER_FORMAT, format.c_str());
 
-  return ColumnGroupPolicy::create_column_group_policy(properties, schema);
+  return ColumnGroupPolicy::create_column_group_policy(std::make_shared<const api::Properties>(properties), schema);
 }
 
 arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSizeBasePolicy(int64_t max_avg_column_size,
@@ -400,7 +403,7 @@ arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSizeBasePolicy(int64_t m
   SetValue(properties, PROPERTY_WRITER_SIZE_BASE_MCIG, std::to_string(max_columns_in_group).c_str());
   SetValue(properties, PROPERTY_WRITER_FORMAT, format.c_str());
 
-  return ColumnGroupPolicy::create_column_group_policy(properties, schema);
+  return ColumnGroupPolicy::create_column_group_policy(std::make_shared<const api::Properties>(properties), schema);
 }
 
 arrow::Result<std::vector<int64_t>> GenerateSortedUniqueArray(int rand_counts,

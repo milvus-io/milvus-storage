@@ -226,7 +226,7 @@ class VortexLocalFormatTest : public ::testing::Test {
       record_batches_.emplace_back(std::move(rb));
     }
 
-    ASSERT_AND_ASSIGN(file_system_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(file_system_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
   }
 
   void TearDown() override {
@@ -258,7 +258,8 @@ class VortexLocalFormatTest : public ::testing::Test {
 
   arrow::Result<api::ColumnGroupFile> WriteVortexFile() {
     ARROW_ASSIGN_OR_RAISE(auto vx_writer,
-                          vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                          vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                         std::make_shared<const api::Properties>(properties_)));
     for (const auto& rb : record_batches_) {
       ARROW_RETURN_NOT_OK(vx_writer->Write(rb));
     }
@@ -268,7 +269,8 @@ class VortexLocalFormatTest : public ::testing::Test {
 
   arrow::Result<api::ColumnGroupFile> WriteEmptyVortexFile() {
     ARROW_ASSIGN_OR_RAISE(auto vx_writer,
-                          vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                          vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                         std::make_shared<const api::Properties>(properties_)));
     ARROW_ASSIGN_OR_RAISE(auto empty_rb, CreateTestData(schema_, 0, false, 0, 4, 50, needed_columns_));
     ARROW_RETURN_NOT_OK(vx_writer->Write(empty_rb));
     ARROW_RETURN_NOT_OK(vx_writer->Flush());
@@ -334,7 +336,8 @@ TEST_F(VortexLocalFormatTest, TestFooterReaderOpensZeroRowVortexFile) {
 
 TEST_F(VortexLocalFormatTest, TestFooterReaderOpenAfterWriterCloseWithoutWriteIfFileExists) {
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
   ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(0, cgfile.end_index);
 
@@ -512,9 +515,9 @@ TEST_F(VortexLocalFormatTest, TestReadByPlanAppliesPredicate) {
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, std::to_string(128 * 1024).c_str());
   ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile());
 
-  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
-                                              cgfile.Get<uint64_t>(api::kPropertyFileSize),
-                                              cgfile.Get<uint64_t>(api::kPropertyFooterSize));
+  auto vx_reader = vortex::VortexFormatReader(
+      file_system_, schema_, test_file_name_, std::make_shared<const api::Properties>(properties_), data_columns(),
+      cgfile.Get<uint64_t>(api::kPropertyFileSize), cgfile.Get<uint64_t>(api::kPropertyFooterSize));
   ASSERT_STATUS_OK(vx_reader.open());
 
   ASSERT_AND_ASSIGN(auto array_stream, vx_reader.read_with_plan(VortexReadPlan{
@@ -538,9 +541,9 @@ TEST_F(VortexLocalFormatTest, TestReadByPlanAppliesPredicate) {
 TEST_F(VortexLocalFormatTest, TestReadByPlanEmptyRangeReturnsEmptyStream) {
   ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile());
 
-  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
-                                              cgfile.Get<uint64_t>(api::kPropertyFileSize),
-                                              cgfile.Get<uint64_t>(api::kPropertyFooterSize));
+  auto vx_reader = vortex::VortexFormatReader(
+      file_system_, schema_, test_file_name_, std::make_shared<const api::Properties>(properties_), data_columns(),
+      cgfile.Get<uint64_t>(api::kPropertyFileSize), cgfile.Get<uint64_t>(api::kPropertyFooterSize));
   ASSERT_STATUS_OK(vx_reader.open());
 
   ASSERT_AND_ASSIGN(auto array_stream, vx_reader.read_with_plan(VortexReadPlan{

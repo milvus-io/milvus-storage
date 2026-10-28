@@ -95,7 +95,7 @@ LoonFFIResult loon_writer_new(const char* base_path,
                  "Invalid arguments: base_path, schema_raw, properties, and out_handle must not be null");
   }
   try {
-    milvus_storage::api::Properties properties_map;
+    std::shared_ptr<const milvus_storage::api::Properties> properties_map;
     auto opt = ConvertFFIProperties(properties_map, properties);
     if (opt != std::nullopt) {
       RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");

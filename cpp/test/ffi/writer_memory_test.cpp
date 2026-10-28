@@ -224,11 +224,12 @@ TEST_F(WriterMemoryTest, SlicedColumnsAndUnknownRootNullCount) {
 TEST_F(WriterMemoryTest, NativeWriterAccountsForTailsAfterAutomaticAndExplicitFlush) {
   for (bool explicit_flush : {false, true}) {
     SCOPED_TRACE(explicit_flush);
-    Properties properties{{PROPERTY_FS_STORAGE_TYPE, std::string("local")},
-                          {PROPERTY_FS_ROOT_PATH, root_},
-                          {PROPERTY_WRITER_POLICY, std::string("single")},
-                          {PROPERTY_WRITER_FORMAT, std::string("parquet")},
-                          {PROPERTY_WRITER_BUFFER_SIZE, int32_t(kMiB + 1)}};
+    const auto properties =
+        std::make_shared<const Properties>(Properties{{PROPERTY_FS_STORAGE_TYPE, std::string("local")},
+                                                      {PROPERTY_FS_ROOT_PATH, root_},
+                                                      {PROPERTY_WRITER_POLICY, std::string("single")},
+                                                      {PROPERTY_WRITER_FORMAT, std::string("parquet")},
+                                                      {PROPERTY_WRITER_BUFFER_SIZE, int32_t(kMiB + 1)}});
     ASSERT_OK_AND_ASSIGN(auto first, MakeBatch(768, false));
     ASSERT_OK_AND_ASSIGN(auto second, MakeBatch(768, false));
     ASSERT_OK_AND_ASSIGN(auto third, MakeBatch(256, false));
@@ -260,7 +261,8 @@ TEST_F(WriterMemoryTest, NativeWriterAccountsForTailsAfterAutomaticAndExplicitFl
 TEST_F(WriterMemoryTest, ParquetCountsBackingBuffersOfRetainedSlices) {
   ASSERT_OK_AND_ASSIGN(auto batch, MakeBatch(2049, false));
   auto fs = std::make_shared<arrow::fs::LocalFileSystem>();
-  ASSERT_OK_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(fs, batch->schema(), root_ + "/tail.parquet", {}));
+  ASSERT_OK_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(fs, batch->schema(), root_ + "/tail.parquet",
+                                                                     std::make_shared<const Properties>()));
   ASSERT_OK(writer->Write(batch));
   ASSERT_OK(writer->Flush());
   EXPECT_EQ(writer->GetRetainedBufferSize(), GetRecordBatchMemorySize(batch));

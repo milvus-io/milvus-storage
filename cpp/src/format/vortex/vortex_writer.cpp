@@ -31,7 +31,7 @@ arrow::Result<std::unique_ptr<VortexFileWriter>> VortexFileWriter::Open(
     const std::shared_ptr<arrow::fs::FileSystem>& fs,
     std::shared_ptr<arrow::Schema> schema,
     const std::string& file_path,
-    const api::Properties& properties) {
+    const std::shared_ptr<const api::Properties>& properties) {
   auto fs_holder = std::make_unique<FileSystemWrapper>(fs);
   ARROW_ASSIGN_OR_RAISE(
       auto vx_writer,
@@ -48,7 +48,7 @@ VortexFileWriter::VortexFileWriter(std::unique_ptr<FileSystemWrapper> fs_holder,
                                    VortexWriter vx_writer,
                                    std::shared_ptr<arrow::Schema> schema,
                                    std::string file_path,
-                                   api::Properties properties)
+                                   std::shared_ptr<const api::Properties> properties)
     : closed_(false),
       file_path_(std::move(file_path)),
       fs_holder_(std::move(fs_holder)),

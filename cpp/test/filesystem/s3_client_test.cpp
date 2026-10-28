@@ -51,7 +51,7 @@ class S3ClientTest : public ::testing::Test {
 
     api::Properties properties;
     ASSERT_STATUS_OK(InitTestProperties(properties));
-    ASSERT_AND_ASSIGN(auto fs_config, GetFileSystemConfig(properties));
+    ASSERT_AND_ASSIGN(auto fs_config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
 
     milvus_storage::S3FileSystemProducer producer(fs_config);
     ASSERT_STATUS_OK(producer.InitS3());

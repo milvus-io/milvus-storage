@@ -54,7 +54,7 @@ class ColumnGroupWriter {
       const size_t& column_group_id,
       const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
       const std::shared_ptr<arrow::Schema>& schema,
-      const milvus_storage::api::Properties& properties);
+      const std::shared_ptr<const milvus_storage::api::Properties>& properties);
 
   protected:
   [[nodiscard]] virtual arrow::Status Open() = 0;

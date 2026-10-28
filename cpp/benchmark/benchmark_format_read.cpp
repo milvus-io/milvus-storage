@@ -141,7 +141,7 @@ std::shared_ptr<arrow::Schema> ProjectSchema(const std::shared_ptr<arrow::Schema
 template <typename ReaderT>
 arrow::Result<std::vector<std::shared_ptr<FormatReader>>> OpenManyReadersFromSharedMetadata(
     const ColumnGroupFile& file,
-    const Properties& properties,
+    const std::shared_ptr<const Properties>& properties,
     const std::shared_ptr<arrow::Schema>& read_schema,
     const std::vector<std::string>& needed_columns,
     size_t reader_count,
@@ -168,7 +168,7 @@ arrow::Result<std::vector<std::shared_ptr<FormatReader>>> OpenManyReadersFromSha
 arrow::Result<std::vector<std::shared_ptr<FormatReader>>> OpenManyReadersFromSharedMetadata(
     const std::string& format,
     const ColumnGroupFile& file,
-    const Properties& properties,
+    const std::shared_ptr<const Properties>& properties,
     const std::shared_ptr<arrow::Schema>& read_schema,
     const std::vector<std::string>& needed_columns,
     size_t reader_count,

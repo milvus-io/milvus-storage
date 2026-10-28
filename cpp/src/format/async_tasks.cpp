@@ -350,7 +350,7 @@ void SplitAsyncTasks(std::vector<Task>& tasks,
   kSplitFns[index](tasks, target_count, traits);
 }
 
-AsyncTaskSplitStrategy GetAsyncTaskSplitStrategy(const Properties& properties) {
+AsyncTaskSplitStrategy GetAsyncTaskSplitStrategy(const std::shared_ptr<const Properties>& properties) {
   auto strategy = GetValueNoError<std::string>(properties, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY);
   if (strategy == "none") {
     return AsyncTaskSplitStrategy::kNoSplit;

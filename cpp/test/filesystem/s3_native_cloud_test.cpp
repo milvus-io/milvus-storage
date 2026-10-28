@@ -3,6 +3,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 #ifdef WITH_CRT
+#include <memory>
 #include <chrono>
 #include <random>
 #include <set>
@@ -35,7 +36,7 @@ class S3NativeCloudTest : public ::testing::Test {
       GTEST_SKIP() << "Requires a configured S3-compatible cloud";
     api::Properties properties;
     ASSERT_OK(InitTestProperties(properties));
-    ASSERT_OK_AND_ASSIGN(config_, GetFileSystemConfig(properties));
+    ASSERT_OK_AND_ASSIGN(config_, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
     config_.s3_crt_async_read = true;
     config_.multi_part_upload_size = 5 * 1024 * 1024;
     config_.max_connections = 4;
@@ -240,7 +241,7 @@ class S3SyncCloudTest : public ::testing::TestWithParam<bool> {
       GTEST_SKIP() << "Requires a configured S3-compatible cloud";
     api::Properties properties;
     ASSERT_OK(InitTestProperties(properties));
-    ASSERT_OK_AND_ASSIGN(config_, GetFileSystemConfig(properties));
+    ASSERT_OK_AND_ASSIGN(config_, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
     config_.s3_crt_async_read = GetParam();
     config_.multi_part_upload_size = 5 * 1024 * 1024;
     config_.max_connections = 4;

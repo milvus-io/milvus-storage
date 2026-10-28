@@ -43,7 +43,7 @@ class CloudFsTest : public ::testing::Test {
       GTEST_SKIP() << "S3 tests skipped in non-cloud environment";
     }
     ASSERT_STATUS_OK(InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
   }
 
   milvus_storage::api::Properties properties_;
@@ -207,7 +207,7 @@ TEST_F(CloudFsTest, BackgroundWritesConcurrent) {
     ASSERT_STATUS_OK(InitTestProperties(properties));
     api::SetValue(properties, PROPERTY_FS_BACKGROUND_WRITES, background_writes ? "true" : "false");
 
-    ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
+    ASSERT_AND_ASSIGN(auto fs, GetFileSystem(std::make_shared<const api::Properties>(properties)));
 
     std::string dir = base_dir + (background_writes ? "/bg_true" : "/bg_false");
     (void)fs->DeleteDirContents(dir, true);
@@ -287,7 +287,7 @@ TEST_F(CloudFsTest, Crc32cChecksumWriteAndRead) {
     // Use the minimum S3 part size (5MB) to trigger multipart upload with less data
     api::SetValue(properties, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE, "5242880");
 
-    ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
+    ASSERT_AND_ASSIGN(auto fs, GetFileSystem(std::make_shared<const api::Properties>(properties)));
 
     std::string dir = base_dir + (use_crc32c ? "/crc32c_on" : "/crc32c_off");
     (void)fs->DeleteDirContents(dir, true);

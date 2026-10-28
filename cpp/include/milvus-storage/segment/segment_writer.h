@@ -51,7 +51,7 @@ struct SegmentWriterConfig {
   //   - LOON_COLUMN_GROUP_POLICY_SINGLE: all columns in one group
   //   - LOON_COLUMN_GROUP_POLICY_SCHEMA_BASED: group by column name patterns
   //   - LOON_COLUMN_GROUP_POLICY_SIZE_BASED: group by column sizes
-  api::Properties properties;
+  std::shared_ptr<const api::Properties> properties = std::make_shared<const api::Properties>();
 };
 
 // output returned by SegmentWriter::Close()

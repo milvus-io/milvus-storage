@@ -426,7 +426,9 @@ std::string PaimonFormatReader::MetaTrait::cache_key(const api::ColumnGroupFile&
 }
 
 arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::MetaTrait::load_metadata(
-    const api::ColumnGroupFile& file, const api::Properties& properties, const KeyRetriever& key_retriever) {
+    const api::ColumnGroupFile& file,
+    const std::shared_ptr<const api::Properties>& properties,
+    const KeyRetriever& key_retriever) {
   const auto metadata_json = file.Get<std::string>(api::kPropertyMetadata);
   if (metadata_json.empty()) {
     return arrow::Status::Invalid("Paimon column group is missing metadata");

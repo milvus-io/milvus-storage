@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <memory>
 #include <gtest/gtest.h>
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/ffi_filesystem_c.h"
@@ -111,7 +112,8 @@ TEST_F(ExternalFilesystemTest, ExternalFsRejectInvalidFormat) {
     props["extfs.prod"] = std::string("value");
 
     // With lazy evaluation, provide a path with scheme to trigger extraction
-    auto fs_result = milvus_storage::FilesystemCache::getInstance().get(props, "s3://test.com/bucket/key");
+    auto fs_result = milvus_storage::FilesystemCache::getInstance().get(std::make_shared<const api::Properties>(props),
+                                                                        "s3://test.com/bucket/key");
     EXPECT_FALSE(fs_result.ok());
     EXPECT_TRUE(fs_result.status().IsInvalid());
     EXPECT_NE(fs_result.status().ToString().find("Invalid external filesystem property format"), std::string::npos);
@@ -122,7 +124,8 @@ TEST_F(ExternalFilesystemTest, ExternalFsRejectInvalidFormat) {
     api::Properties props;
     props["extfs..address"] = std::string("value");
 
-    auto fs_result = milvus_storage::FilesystemCache::getInstance().get(props, "s3://test.com/bucket/key");
+    auto fs_result = milvus_storage::FilesystemCache::getInstance().get(std::make_shared<const api::Properties>(props),
+                                                                        "s3://test.com/bucket/key");
     EXPECT_FALSE(fs_result.ok());
     EXPECT_TRUE(fs_result.status().IsInvalid());
     EXPECT_NE(fs_result.status().ToString().find("Empty external filesystem name"), std::string::npos);
@@ -133,7 +136,8 @@ TEST_F(ExternalFilesystemTest, ExternalFsRejectInvalidFormat) {
     api::Properties props;
     props["extfs.prod."] = std::string("value");
 
-    auto fs_result = milvus_storage::FilesystemCache::getInstance().get(props, "s3://test.com/bucket/key");
+    auto fs_result = milvus_storage::FilesystemCache::getInstance().get(std::make_shared<const api::Properties>(props),
+                                                                        "s3://test.com/bucket/key");
     EXPECT_FALSE(fs_result.ok());
     EXPECT_TRUE(fs_result.status().IsInvalid());
     EXPECT_NE(fs_result.status().ToString().find("Empty property name"), std::string::npos);
@@ -166,13 +170,14 @@ TEST_F(ExternalFilesystemTest, ExternalFsAllowDifferentBuckets) {
   props["extfs.backup.cloud_provider"] = std::string(kCloudProviderAWS);
 
   // Should succeed - different buckets are allowed
-  auto fs_result = milvus_storage::FilesystemCache::getInstance().get(props, "");
+  auto fs_result =
+      milvus_storage::FilesystemCache::getInstance().get(std::make_shared<const api::Properties>(props), "");
   ASSERT_TRUE(fs_result.ok()) << fs_result.status().ToString();
   fs_result = milvus_storage::FilesystemCache::getInstance().get(
-      props, "s3://s3.amazonaws.com/backup-bucket/data/file.parquet");
+      std::make_shared<const api::Properties>(props), "s3://s3.amazonaws.com/backup-bucket/data/file.parquet");
   ASSERT_TRUE(fs_result.ok()) << fs_result.status().ToString();
-  fs_result =
-      milvus_storage::FilesystemCache::getInstance().get(props, "s3://s3.amazonaws.com/prod-bucket/data/file.parquet");
+  fs_result = milvus_storage::FilesystemCache::getInstance().get(std::make_shared<const api::Properties>(props),
+                                                                 "s3://s3.amazonaws.com/prod-bucket/data/file.parquet");
   ASSERT_TRUE(fs_result.ok()) << fs_result.status().ToString();
 }
 
@@ -194,12 +199,13 @@ TEST_F(ExternalFilesystemTest, IntegrationExternalFsWithPath) {
   props["extfs.prod.access_key_value"] = std::string("test");
 
   // Get filesystem with matching URI - should use extfs.prod config
-  auto fs_result =
-      milvus_storage::FilesystemCache::getInstance().get(props, "s3://s3.amazonaws.com/prod-bucket/data/file.parquet");
+  auto fs_result = milvus_storage::FilesystemCache::getInstance().get(
+      std::make_shared<const api::Properties>(props), "s3://s3.amazonaws.com/prod-bucket/data/file.parquet");
   ASSERT_TRUE(fs_result.ok()) << fs_result.status().ToString();
 
   // Get filesystem with non-matching URI - should use default fs
-  auto fs_default = milvus_storage::FilesystemCache::getInstance().get(props, "");
+  auto fs_default =
+      milvus_storage::FilesystemCache::getInstance().get(std::make_shared<const api::Properties>(props), "");
   ASSERT_TRUE(fs_default.ok()) << fs_default.status().ToString();
 }
 
@@ -224,12 +230,12 @@ TEST_F(ExternalFilesystemTest, IntegrationMultipleExternalFs) {
 
   // Get filesystem with prod bucket URI
   auto fs_prod = milvus_storage::FilesystemCache::getInstance().get(
-      props, "s3://s3.us-west-2.amazonaws.com/prod-data/file.parquet");
+      std::make_shared<const api::Properties>(props), "s3://s3.us-west-2.amazonaws.com/prod-data/file.parquet");
   ASSERT_TRUE(fs_prod.ok()) << fs_prod.status().ToString();
 
   // Get filesystem with backup bucket URI
   auto fs_backup = milvus_storage::FilesystemCache::getInstance().get(
-      props, "s3://s3.us-east-1.amazonaws.com/backup-data/file.parquet");
+      std::make_shared<const api::Properties>(props), "s3://s3.us-east-1.amazonaws.com/backup-data/file.parquet");
   ASSERT_TRUE(fs_backup.ok()) << fs_backup.status().ToString();
 }
 
@@ -275,8 +281,8 @@ TEST_F(ExternalFilesystemTest, ExtractExternalFsPropertiesTypeConversion) {
   props["extfs.myfs.iops_max_rate"] = std::string("5000");
 
   // resolve_config should succeed and produce correctly typed values
-  auto config_result =
-      FilesystemCache::resolve_config(props, "s3://s3.us-west-2.amazonaws.com/my-bucket/data/file.parquet");
+  auto config_result = FilesystemCache::resolve_config(std::make_shared<const api::Properties>(props),
+                                                       "s3://s3.us-west-2.amazonaws.com/my-bucket/data/file.parquet");
   ASSERT_TRUE(config_result.ok()) << config_result.status().ToString();
 
   auto config = config_result.ValueOrDie();
@@ -331,7 +337,8 @@ TEST_F(ExternalFilesystemTest, TalonBrokerReusesExternalUseIam) {
   props["extfs.source.use_iam"] = std::string("true");
   props["extfs.source.talon.mode"] = std::string("1");
   props["extfs.source.talon.coordinator"] = std::string("127.0.0.1:1");
-  const auto config = FilesystemCache::resolve_config(props, "s3://s3.us-west-2.amazonaws.com/bucket/key");
+  const auto config = FilesystemCache::resolve_config(std::make_shared<const api::Properties>(props),
+                                                      "s3://s3.us-west-2.amazonaws.com/bucket/key");
   ASSERT_TRUE(config.ok()) << config.status();
   EXPECT_TRUE(config->use_iam);
   EXPECT_EQ(config->talon_mode, TalonMode::Full);
@@ -349,7 +356,7 @@ TEST_F(ExternalFilesystemTest, AzureCredentialBrokerConfigValidation) {
   props[PROPERTY_FS_AZURE_TENANT_ID] = std::string("tenant");
   props["fs.credential_endpoint"] = std::string("http://credential-broker/v1/credentials/assume-role");
 
-  auto config_result = FilesystemCache::resolve_config(props);
+  auto config_result = FilesystemCache::resolve_config(std::make_shared<const api::Properties>(props));
   ASSERT_TRUE(config_result.ok()) << config_result.status().ToString();
   EXPECT_TRUE(config_result->IsAzureCredentialBrokerEnabled());
   EXPECT_EQ(config_result->azure_client_id, "client");
@@ -362,19 +369,20 @@ TEST_F(ExternalFilesystemTest, AzureCredentialBrokerConfigValidation) {
 
   auto partial = props;
   partial.erase(PROPERTY_FS_AZURE_TENANT_ID);
-  auto partial_result = FilesystemCache::resolve_config(partial);
+  auto partial_result = FilesystemCache::resolve_config(std::make_shared<const api::Properties>(partial));
   ASSERT_FALSE(partial_result.ok());
   EXPECT_TRUE(partial_result.status().IsInvalid());
 
   auto invalid_endpoint = props;
   invalid_endpoint[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("file:///tmp/credentials");
-  auto invalid_endpoint_result = FilesystemCache::resolve_config(invalid_endpoint);
+  auto invalid_endpoint_result =
+      FilesystemCache::resolve_config(std::make_shared<const api::Properties>(invalid_endpoint));
   ASSERT_FALSE(invalid_endpoint_result.ok());
   EXPECT_TRUE(invalid_endpoint_result.status().IsInvalid());
 
   auto missing_host = props;
   missing_host[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("http:///credentials");
-  auto missing_host_result = FilesystemCache::resolve_config(missing_host);
+  auto missing_host_result = FilesystemCache::resolve_config(std::make_shared<const api::Properties>(missing_host));
   ASSERT_FALSE(missing_host_result.ok());
   EXPECT_TRUE(missing_host_result.status().IsInvalid());
 }
@@ -387,7 +395,7 @@ TEST_F(ExternalFilesystemTest, AzureIamIgnoresUnusedBrokerConfiguration) {
   props[PROPERTY_FS_BUCKET_NAME] = std::string("container");
   props[PROPERTY_FS_REGION] = std::string();
   props[PROPERTY_FS_USE_IAM] = true;
-  const auto config = FilesystemCache::resolve_config(props);
+  const auto config = FilesystemCache::resolve_config(std::make_shared<const api::Properties>(props));
   ASSERT_TRUE(config.ok()) << config.status();
   EXPECT_TRUE(config->azure_client_id.empty());
   EXPECT_TRUE(config->azure_tenant_id.empty());
@@ -395,12 +403,12 @@ TEST_F(ExternalFilesystemTest, AzureIamIgnoresUnusedBrokerConfiguration) {
 
   auto unused_broker = props;
   unused_broker[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("file:///credentials");
-  EXPECT_TRUE(FilesystemCache::resolve_config(unused_broker).ok());
+  EXPECT_TRUE(FilesystemCache::resolve_config(std::make_shared<const api::Properties>(unused_broker)).ok());
   unused_broker[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string();
   unused_broker[PROPERTY_FS_AZURE_CLIENT_ID] = std::string("unused-client");
-  EXPECT_TRUE(FilesystemCache::resolve_config(unused_broker).ok());
+  EXPECT_TRUE(FilesystemCache::resolve_config(std::make_shared<const api::Properties>(unused_broker)).ok());
   props[PROPERTY_FS_USE_IAM] = false;
-  EXPECT_TRUE(FilesystemCache::resolve_config(props).status().IsInvalid());
+  EXPECT_TRUE(FilesystemCache::resolve_config(std::make_shared<const api::Properties>(props)).status().IsInvalid());
 }
 
 TEST_F(ExternalFilesystemTest, ExtractExternalFsRejectsUndefinedProperty) {
@@ -414,7 +422,8 @@ TEST_F(ExternalFilesystemTest, ExtractExternalFsRejectsUndefinedProperty) {
   // Set an undefined property that doesn't map to any registered fs.* key
   props["extfs.myfs.nonexistent_key"] = std::string("some_value");
 
-  auto config_result = FilesystemCache::resolve_config(props, "s3://s3.amazonaws.com/my-bucket/data/file.parquet");
+  auto config_result = FilesystemCache::resolve_config(std::make_shared<const api::Properties>(props),
+                                                       "s3://s3.amazonaws.com/my-bucket/data/file.parquet");
   EXPECT_FALSE(config_result.ok());
   EXPECT_TRUE(config_result.status().IsInvalid());
 }
@@ -555,7 +564,7 @@ TEST_F(ExternalFilesystemTest, ResolveConfigWithQueryComponent) {
       {"abfs://myaccount.dfs.core.windows.net/az-container/tbl?fragment_id=6", "azprod", "azprod_key", "az-container"},
   };
   for (const auto& c : match_cases) {
-    auto cfg = FilesystemCache::resolve_config(props, c.uri);
+    auto cfg = FilesystemCache::resolve_config(std::make_shared<const api::Properties>(props), c.uri);
     ASSERT_TRUE(cfg.ok()) << c.uri << ": " << cfg.status().ToString();
     EXPECT_EQ(cfg.ValueOrDie().alias, c.expected_alias) << c.uri;
     EXPECT_EQ(cfg.ValueOrDie().access_key_id, c.expected_key) << c.uri;
@@ -568,12 +577,13 @@ TEST_F(ExternalFilesystemTest, ResolveConfigWithQueryComponent) {
            "gs://storage.googleapis.com/other-bucket/tbl?fragment_id=9",
            "abfss://myaccount.dfs.core.windows.net/other-container/tbl?fragment_id=9",
        }) {
-    auto cfg = FilesystemCache::resolve_config(props, uri);
+    auto cfg = FilesystemCache::resolve_config(std::make_shared<const api::Properties>(props), uri);
     EXPECT_FALSE(cfg.ok()) << uri;
   }
 
   // 3) Relative path (no scheme): resolve_config must fall back to default fs.*.
-  auto rel = FilesystemCache::resolve_config(props, "lance-dir/tbl?fragment_id=42");
+  auto rel =
+      FilesystemCache::resolve_config(std::make_shared<const api::Properties>(props), "lance-dir/tbl?fragment_id=42");
   ASSERT_TRUE(rel.ok()) << rel.status().ToString();
   EXPECT_EQ(rel.ValueOrDie().bucket_name, "default-bucket");
   EXPECT_EQ(rel.ValueOrDie().access_key_id, "default_key");
@@ -589,21 +599,21 @@ TEST_F(ExternalFilesystemTest, EvictRecreatesOnlyMatchingFilesystem) {
   props["extfs.collection.address"] = std::string("endpoint");
   props["extfs.collection.bucket_name"] = std::string("bucket");
   const std::string path = "s3://endpoint/bucket/object";
-  const auto original = cache.get(props, path);
-  const auto unrelated = cache.get(props);
+  const auto original = cache.get(std::make_shared<const api::Properties>(props), path);
+  const auto unrelated = cache.get(std::make_shared<const api::Properties>(props));
   ASSERT_TRUE(original.ok()) << original.status();
   ASSERT_TRUE(unrelated.ok()) << unrelated.status();
   ASSERT_EQ(cache.size(), 2);
 
-  ASSERT_TRUE(cache.evict(props, path).ok());
+  ASSERT_TRUE(cache.evict(std::make_shared<const api::Properties>(props), path).ok());
   EXPECT_EQ(cache.size(), 1);
   // Repeated eviction must not create a filesystem on a miss.
-  ASSERT_TRUE(cache.evict(props, path).ok());
+  ASSERT_TRUE(cache.evict(std::make_shared<const api::Properties>(props), path).ok());
   EXPECT_EQ(cache.size(), 1);
-  const auto replacement = cache.get(props, path);
+  const auto replacement = cache.get(std::make_shared<const api::Properties>(props), path);
   ASSERT_TRUE(replacement.ok()) << replacement.status();
   EXPECT_NE(*original, *replacement);
-  EXPECT_EQ(*unrelated, *cache.get(props));
+  EXPECT_EQ(*unrelated, *cache.get(std::make_shared<const api::Properties>(props)));
   // Eviction releases the cache's reference, not the caller's live handle.
   EXPECT_TRUE((*original)->GetFileInfo("missing-file").ok());
 }

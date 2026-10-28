@@ -172,8 +172,9 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> MakePrebufferFixedBinaryBatch
   return arrow::RecordBatch::Make(schema, kPrebufferTestRows, {array});
 }
 
-api::Properties MakePrebufferReadProperties(const api::Properties& base_properties, int64_t hole_size_limit) {
-  auto properties = base_properties;
+api::Properties MakePrebufferReadProperties(const std::shared_ptr<const api::Properties>& base_properties,
+                                            int64_t hole_size_limit) {
+  auto properties = *base_properties;
   SetValue(properties, PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT, std::to_string(hole_size_limit).c_str());
   SetValue(properties, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT,
            std::to_string(kPrebufferRangeSizeLimit).c_str());
@@ -269,7 +270,7 @@ class APIWriterReaderTest : public ::testing::TestWithParam<std::tuple<std::stri
     milvus_storage::api::Manifest::CleanCache();
     // Create temporary directory for test files
     ASSERT_STATUS_OK(InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
 
     base_path_ = GetTestBasePath("api-writer-reader-test");
     ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
@@ -314,8 +315,12 @@ class VortexWriterBufferTest : public APIWriterReaderTest {};
 
 TEST_P(APIWriterReaderTest, SingleColumnGroupWriteRead) {
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer_properties = std::make_shared<const Properties>(properties_);
+  std::weak_ptr<const Properties> weak_writer_properties = writer_properties;
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), writer_properties);
   ASSERT_NE(writer, nullptr);
+  writer_properties.reset();
+  EXPECT_FALSE(weak_writer_properties.expired());
 
   // Write test data
   ASSERT_OK(writer->write(test_batch_));
@@ -324,20 +329,29 @@ TEST_P(APIWriterReaderTest, SingleColumnGroupWriteRead) {
   auto cgs_result = writer->close();
   ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
   auto cgs = std::move(cgs_result).ValueOrDie();
+  writer.reset();
+  EXPECT_TRUE(weak_writer_properties.expired());
 
   EXPECT_EQ(cgs->size(), 1);
   auto column_groups = *cgs;
   EXPECT_EQ(column_groups[0]->format, format);
   EXPECT_EQ(column_groups[0]->columns.size(), 4);
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader_properties = std::make_shared<const Properties>(properties_);
+  std::weak_ptr<const Properties> weak_reader_properties = reader_properties;
+  auto reader = Reader::create(cgs, schema_, nullptr, reader_properties);
 
   ASSERT_NE(reader, nullptr);
+  reader_properties.reset();
+  EXPECT_FALSE(weak_reader_properties.expired());
 
   // Test get_record_batch_reader (uses PackedRecordBatchReader internally)
   auto batch_reader_result = reader->get_record_batch_reader();
   ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
   auto batch_reader = std::move(batch_reader_result).ValueOrDie();
+  // A child reader must retain the shared configuration independently of its parent.
+  reader.reset();
+  EXPECT_FALSE(weak_reader_properties.expired());
 
   std::shared_ptr<arrow::RecordBatch> batch;
   ASSERT_OK(batch_reader->ReadNext(&batch));
@@ -351,6 +365,8 @@ TEST_P(APIWriterReaderTest, SingleColumnGroupWriteRead) {
   // Read until end to verify complete data
   ASSERT_OK(batch_reader->ReadNext(&batch));
   EXPECT_EQ(batch, nullptr);  // Should be at end
+  batch_reader.reset();
+  EXPECT_TRUE(weak_reader_properties.expired());
 }
 
 TEST_P(APIWriterReaderTest, SchemaBasedColumnGroupWriteRead) {
@@ -358,7 +374,8 @@ TEST_P(APIWriterReaderTest, SchemaBasedColumnGroupWriteRead) {
   std::string patterns = "id|value,name,vector";
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
 
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(writer, nullptr);
 
   // Write test data
@@ -374,7 +391,7 @@ TEST_P(APIWriterReaderTest, SchemaBasedColumnGroupWriteRead) {
   EXPECT_EQ(column_groups.size(), 3);
 
   // Test reading without column projection first (column groups may not contain all columns)
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   // Test chunk reader
@@ -396,7 +413,8 @@ TEST_P(APIWriterReaderTest, SizeBasedColumnGroupPolicy) {
 
   ASSERT_AND_ASSIGN(auto policy, CreateSizeBasePolicy(max_avg_column_size, max_columns_in_group, format, schema_));
 
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(writer, nullptr);
 
   // Write test data (this should trigger sampling)
@@ -427,7 +445,8 @@ TEST_P(APIWriterReaderTest, WriterCloseAfterInitColumnGroupWritersFail) {
   FIU_ENABLE_FAULT_ONETIME(FIUKEY_WRITER_INIT_COLUMN_GROUP_WRITERS_FAIL);
 
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy("id,name,value,vector", format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
 
   auto status = writer->write(test_batch_);
   ASSERT_FALSE(status.ok());
@@ -442,7 +461,7 @@ TEST_P(APIWriterReaderTest, WriterCloseAfterInitColumnGroupWritersFail) {
 #endif
 
 TEST_P(APIWriterReaderTest, TestWriteNotExistPath) {
-  auto verify_writer = [&](const std::string& base_path, api::Properties& properties) {
+  auto verify_writer = [&](const std::string& base_path, const std::shared_ptr<const api::Properties>& properties) {
     ASSERT_AND_ASSIGN(auto temp_fs, GetFileSystem(properties));
     ASSERT_STATUS_OK(DeleteTestDir(temp_fs, base_path));
 
@@ -470,27 +489,30 @@ TEST_P(APIWriterReaderTest, TestWriteNotExistPath) {
   api::Properties local_properties;
   api::SetValue(local_properties, PROPERTY_FS_STORAGE_TYPE, "local");
   api::SetValue(local_properties, PROPERTY_FS_ROOT_PATH, "/tmp/");
-  verify_writer("not-exist-path1", local_properties);
-  verify_writer("not-exist-path2", local_properties);
-  verify_writer("not-exist-path3", local_properties);
-  verify_writer("not-exist-path4/path1/path2/path3/path4", local_properties);
-  verify_writer("not-exist-path5///", local_properties);  // will do lexically_normal
+  verify_writer("not-exist-path1", std::make_shared<const api::Properties>(local_properties));
+  verify_writer("not-exist-path2", std::make_shared<const api::Properties>(local_properties));
+  verify_writer("not-exist-path3", std::make_shared<const api::Properties>(local_properties));
+  verify_writer("not-exist-path4/path1/path2/path3/path4", std::make_shared<const api::Properties>(local_properties));
+  verify_writer("not-exist-path5///",
+                std::make_shared<const api::Properties>(local_properties));  // will do lexically_normal
 
   if (!IsCloudEnv()) {
     GTEST_SKIP() << "No cloud env, skipped.";
   }
 
   // use the properties_ which is the cloud env
-  verify_writer("not-exist-path1", properties_);
-  verify_writer("not-exist-path2/path1/path2/path3/path4", properties_);
-  verify_writer("not-exist-path5///", properties_);  // will do lexically_normal
+  verify_writer("not-exist-path1", std::make_shared<const api::Properties>(properties_));
+  verify_writer("not-exist-path2/path1/path2/path3/path4", std::make_shared<const api::Properties>(properties_));
+  verify_writer("not-exist-path5///",
+                std::make_shared<const api::Properties>(properties_));  // will do lexically_normal
 }
 
 TEST_P(APIWriterReaderTest, WriteWithTransactionAppendFiles) {
   int loop_times = 5;
   auto write_file = [&]() -> arrow::Result<std::shared_ptr<ColumnGroups>> {
     ARROW_ASSIGN_OR_RAISE(auto policy, CreateSinglePolicy(format, schema_));
-    auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+    auto writer =
+        Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
     // Write test data
     ARROW_RETURN_NOT_OK(writer->write(test_batch_));
 
@@ -500,7 +522,7 @@ TEST_P(APIWriterReaderTest, WriteWithTransactionAppendFiles) {
   };
 
   auto append_files = [&](std::shared_ptr<ColumnGroups>& cgs) -> arrow::Result<bool> {
-    ARROW_ASSIGN_OR_RAISE(auto fs, GetFileSystem(properties_));
+    ARROW_ASSIGN_OR_RAISE(auto fs, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
     ARROW_ASSIGN_OR_RAISE(auto transaction, Transaction::Open(fs, base_path_));
     transaction->AppendFiles(*cgs);
     ARROW_ASSIGN_OR_RAISE(auto committed_version, transaction->Commit());
@@ -523,7 +545,7 @@ TEST_P(APIWriterReaderTest, WriteWithTransactionAppendFiles) {
 
   // verify data
   auto cgs_ptr = std::make_shared<ColumnGroups>(cgs);
-  auto reader = Reader::create(cgs_ptr, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs_ptr, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
   ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
   ASSERT_NE(batch_reader, nullptr);
@@ -539,7 +561,8 @@ TEST_P(APIWriterReaderTest, WriteWithTransactionAppendFiles) {
 TEST_P(APIWriterReaderTest, RandomAccessReading) {
   // Write data first
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(writer, nullptr);
 
   ASSERT_OK(writer->write(test_batch_));
@@ -548,7 +571,7 @@ TEST_P(APIWriterReaderTest, RandomAccessReading) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Test random access reading
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   // Test take with specific row indices
@@ -604,7 +627,8 @@ TEST_P(APIWriterReaderTest, RandomAccessReading) {
 TEST_P(APIWriterReaderTest, FormatIntegration) {
   // Test that FileFormat uses packed reader/writer correctly
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
 
   // Write multiple batches
   for (int i = 0; i < 5; ++i) {
@@ -622,7 +646,7 @@ TEST_P(APIWriterReaderTest, FormatIntegration) {
   }
 
   // Test reading with packed reader integration
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   auto batch_reader_result = reader->get_record_batch_reader();
   ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
   auto batch_reader = std::move(batch_reader_result).ValueOrDie();
@@ -644,7 +668,8 @@ TEST_P(APIWriterReaderTest, FormatIntegration) {
 TEST_P(APIWriterReaderTest, ColumnProjection) {
   // Test column projection with packed reader - simplified to avoid memory issues
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
 
   ASSERT_OK(writer->write(test_batch_));
   auto cgs_result = writer->close();
@@ -664,7 +689,7 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
                                                                {"name", "id"}};
     for (const auto& col_names : valid_projections) {
       auto needed_columns = std::make_shared<std::vector<std::string>>(col_names);
-      auto reader = Reader::create(cgs, schema_, needed_columns, properties_);
+      auto reader = Reader::create(cgs, schema_, needed_columns, std::make_shared<const api::Properties>(properties_));
 
       // record batch reader
       {
@@ -704,7 +729,7 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
 
   // Test basic reading without column projection
   {
-    auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+    auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
 
     // record batch reader
     {
@@ -760,7 +785,8 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
 TEST_P(APIWriterReaderTest, ColumnOrderReorderedSchemaAndProjection) {
   // Write with default schema order: a=id, b=name, c=value, d=vector.
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
@@ -776,7 +802,7 @@ TEST_P(APIWriterReaderTest, ColumnOrderReorderedSchemaAndProjection) {
   auto needed_columns =
       std::make_shared<std::vector<std::string>>(std::vector<std::string>{"vector", "value", "name", "id"});
 
-  auto reader = Reader::create(cgs, schema_read, needed_columns, properties_);
+  auto reader = Reader::create(cgs, schema_read, needed_columns, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   const std::vector<std::string> kExpectedNames = {"vector", "value", "name", "id"};
@@ -856,7 +882,8 @@ TEST_P(APIWriterReaderTest, NumericFieldNameRoundTripReorder) {
 
   // Step 1: write to disk.
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, write_schema));
-  auto writer = Writer::create(base_path_, write_schema, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, write_schema, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(writer, nullptr);
   ASSERT_OK(writer->write(write_batch));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
@@ -901,7 +928,7 @@ TEST_P(APIWriterReaderTest, NumericFieldNameRoundTripReorder) {
   for (const auto& v : variants) {
     SCOPED_TRACE(v.label);
 
-    auto reader = Reader::create(cgs, read_schema, v.projection, properties_);
+    auto reader = Reader::create(cgs, read_schema, v.projection, std::make_shared<const api::Properties>(properties_));
     ASSERT_NE(reader, nullptr);
 
     // 2a: PackedRecordBatchReader.
@@ -936,13 +963,14 @@ TEST_P(APIWriterReaderTest, NumericFieldNameRoundTripReorder) {
 
   auto step3_schema = reread_batch->schema();
   ASSERT_AND_ASSIGN(auto policy3, CreateSinglePolicy(format, step3_schema));
-  auto writer3 = Writer::create(step3_path, step3_schema, std::move(policy3), properties_);
+  auto writer3 = Writer::create(step3_path, step3_schema, std::move(policy3),
+                                std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(writer3, nullptr);
   ASSERT_OK(writer3->write(reread_batch));
   ASSERT_AND_ASSIGN(auto cgs3, writer3->close());
 
   // Step 4: read back from the new file and verify.
-  auto reader3 = Reader::create(cgs3, step3_schema, nullptr, properties_);
+  auto reader3 = Reader::create(cgs3, step3_schema, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader3, nullptr);
 
   // 4a: PackedRecordBatchReader.
@@ -974,7 +1002,8 @@ TEST_P(APIWriterReaderTest, ReorderedProjectionAcrossMultipleColumnGroups) {
   // Pattern syntax: ',' splits top-level patterns, '|' is regex alternation inside a pattern.
   std::string patterns = "id|value,name|vector";
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
   ASSERT_EQ(cgs->size(), 2);
@@ -983,7 +1012,7 @@ TEST_P(APIWriterReaderTest, ReorderedProjectionAcrossMultipleColumnGroups) {
   // Output should be: [vector(from CG1), id(from CG0), name(from CG1), value(from CG0)]
   auto projection =
       std::make_shared<std::vector<std::string>>(std::vector<std::string>{"vector", "id", "name", "value"});
-  auto reader = Reader::create(cgs, schema_, projection, properties_);
+  auto reader = Reader::create(cgs, schema_, projection, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   const std::vector<std::string> kExpectedNames = {"vector", "id", "name", "value"};
@@ -1035,7 +1064,8 @@ TEST_P(APIWriterReaderTest, ProjectionWithInterleavedNullFill) {
   // Write only id, name (value, vector are missing from CGs).
   ASSERT_AND_ASSIGN(auto schema_write, CreateTestSchema({true, true, false, false}));
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_write));
-  auto writer = Writer::create(base_path_, schema_write, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_write, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_AND_ASSIGN(auto batch_write,
                     CreateTestData(schema_write, 0, false, 100, 4, 50, std::array<bool, 4>{true, true, false, false}));
   ASSERT_OK(writer->write(batch_write));
@@ -1045,7 +1075,7 @@ TEST_P(APIWriterReaderTest, ProjectionWithInterleavedNullFill) {
   ASSERT_AND_ASSIGN(auto schema_read, CreateTestSchema({true, true, true, true}));
   auto projection =
       std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "value", "name", "vector"});
-  auto reader = Reader::create(cgs, schema_read, projection, properties_);
+  auto reader = Reader::create(cgs, schema_read, projection, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
@@ -1078,14 +1108,15 @@ TEST_P(APIWriterReaderTest, ChunkReaderIntersectionSemantics) {
   // CG0=[id, name], CG1=[value, vector]. ',' splits groups; '|' is regex OR inside a group.
   std::string patterns = "id|name,value|vector";
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
   ASSERT_EQ(cgs->size(), 2);
 
   // Projection spans both CGs.
   auto projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "value"});
-  auto reader = Reader::create(cgs, schema_, projection, properties_);
+  auto reader = Reader::create(cgs, schema_, projection, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   // CG0 intersection with projection = [id].
@@ -1113,13 +1144,14 @@ TEST_P(APIWriterReaderTest, ChunkReaderIntersectionSemantics) {
 // These overrides are in the public API (reader.h) but previously unexercised.
 TEST_P(APIWriterReaderTest, PerCallProjectionOverride) {
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
   // Default projection asks for 2 columns; overrides on individual calls ask for 1.
   auto default_projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "name"});
-  auto reader = Reader::create(cgs, schema_, default_projection, properties_);
+  auto reader = Reader::create(cgs, schema_, default_projection, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   // get_chunk_reader with override keeps only "name".
@@ -1158,12 +1190,13 @@ TEST_P(APIWriterReaderTest, PerCallProjectionOverride) {
 
 TEST_P(APIWriterReaderTest, ChunkColumnEstimatedSizeMetadataIgnoresProjection) {
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
   auto projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id"});
-  auto reader = Reader::create(cgs, schema_, projection, properties_);
+  auto reader = Reader::create(cgs, schema_, projection, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
@@ -1186,13 +1219,14 @@ TEST_P(APIWriterReaderTest, ChunkColumnEstimatedSizeMetadataIgnoresProjection) {
 
 TEST_P(APIWriterReaderTest, EmptyTakeHonorsProjection) {
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
   const std::vector<std::string> default_columns = {"name", "id"};
   auto default_projection = std::make_shared<std::vector<std::string>>(default_columns);
-  auto reader = Reader::create(cgs, schema_, default_projection, properties_);
+  auto reader = Reader::create(cgs, schema_, default_projection, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   auto verify_empty_table = [](const std::shared_ptr<arrow::Table>& table,
@@ -1222,13 +1256,14 @@ TEST_P(APIWriterReaderTest, EmptyTakeHonorsProjection) {
 
 TEST_P(APIWriterReaderTest, MetadataCacheWarmupDoesNotFreezePerCallProjection) {
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
   ASSERT_EQ(cgs->size(), 1);
 
   auto default_projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "name"});
-  auto reader = Reader::create(cgs, schema_, default_projection, properties_);
+  auto reader = Reader::create(cgs, schema_, default_projection, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   {
@@ -1269,13 +1304,14 @@ TEST_P(APIWriterReaderTest, MetadataCacheWarmupDoesNotFreezePerCallProjection) {
 // reader.h doc: "All column names in `needed_columns` must exist as field names in the schema."
 TEST_P(APIWriterReaderTest, ProjectionColumnNotInSchemaShouldFail) {
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
   // "bogus" is not in schema_.
   auto projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "bogus"});
-  auto reader = Reader::create(cgs, schema_, projection, properties_);
+  auto reader = Reader::create(cgs, schema_, projection, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   // All three entry points funnel through resolve_needed_columns, so every one
@@ -1292,13 +1328,14 @@ TEST_P(APIWriterReaderTest, ProjectionColumnNotInSchemaShouldFail) {
 // Parquet ReadRowGroup when duplicate column indices are passed down.
 TEST_P(APIWriterReaderTest, ProjectionDuplicateColumnNamesShouldFail) {
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
   // Default projection with "id" repeated.
   auto dup_projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "name", "id"});
-  auto reader = Reader::create(cgs, schema_, dup_projection, properties_);
+  auto reader = Reader::create(cgs, schema_, dup_projection, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   // Every entry point that consults resolve_needed_columns must reject.
@@ -1313,7 +1350,7 @@ TEST_P(APIWriterReaderTest, ProjectionDuplicateColumnNamesShouldFail) {
 
   // Sanity: a clean reader with no duplicates still works.
   auto clean = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "name"});
-  auto ok_reader = Reader::create(cgs, schema_, clean, properties_);
+  auto ok_reader = Reader::create(cgs, schema_, clean, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(ok_reader, nullptr);
   EXPECT_TRUE(ok_reader->get_record_batch_reader().ok());
 }
@@ -1331,7 +1368,8 @@ TEST_P(APIWriterReaderTest, ColumnProjectionWithMissingField) {
   policies.push_back(std::move(schema_base_policy));
 
   for (auto& policy : policies) {
-    auto writer = Writer::create(base_path_, schema_write, std::move(policy), properties_);
+    auto writer = Writer::create(base_path_, schema_write, std::move(policy),
+                                 std::make_shared<const api::Properties>(properties_));
     ASSERT_AND_ASSIGN(auto batch_write,
                       CreateTestData(schema_write /*schema*/, 0 /*start_offset*/, false /*randdata*/, 100 /*num_rows*/,
                                      4 /*vector_dim*/, 50 /*str_length*/,
@@ -1345,7 +1383,7 @@ TEST_P(APIWriterReaderTest, ColumnProjectionWithMissingField) {
 
     {
       auto projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"value", "vector"});
-      auto reader = Reader::create(cgs, schema_read, projection, properties_);
+      auto reader = Reader::create(cgs, schema_read, projection, std::make_shared<const api::Properties>(properties_));
 
       // no exist needed columns in column group 0, should be failed
       ASSERT_STATUS_NOT_OK(reader->get_chunk_reader(0));
@@ -1384,7 +1422,8 @@ TEST_P(APIWriterReaderTest, ColumnProjectionWithMissingField) {
 TEST_P(APIWriterReaderTest, MultipleWritesWithFlush) {
   // Test multiple writes with explicit flush operations
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
 
   // Write and flush multiple times
   ASSERT_OK(writer->write(test_batch_));
@@ -1398,7 +1437,7 @@ TEST_P(APIWriterReaderTest, MultipleWritesWithFlush) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Verify data integrity after multiple flushes
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   auto batch_reader_result = reader->get_record_batch_reader();
   ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
   auto batch_reader = std::move(batch_reader_result).ValueOrDie();
@@ -1424,7 +1463,8 @@ TEST_P(APIWriterReaderTest, RowAlignmentMultiColumnGroups) {
   std::string patterns = "id, name|value, vector";
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
 
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
 
   // Write test data
   for (int i = 0; i < batch_size / 100; ++i) {
@@ -1440,7 +1480,7 @@ TEST_P(APIWriterReaderTest, RowAlignmentMultiColumnGroups) {
   EXPECT_EQ(column_groups.size(), 3);
 
   // Test row alignment with get_record_batch_reader
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   auto batch_reader_result = reader->get_record_batch_reader();
   ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
   auto batch_reader = std::move(batch_reader_result).ValueOrDie();
@@ -1475,7 +1515,8 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithTakeOperation) {
   std::string patterns = "id, name|value, vector";
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
 
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
 
   // Write test data
   for (int i = 0; i < batch_size / 100; ++i) {
@@ -1487,7 +1528,7 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithTakeOperation) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Test take operation with specific row indices
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   std::vector<int64_t> row_indices = {0, 10, 25, 50, 75, 99, 150, 250, 350, 450};
 
   ASSERT_AND_ASSIGN(auto table, reader->take(row_indices, parallelism_));
@@ -1515,7 +1556,8 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithChunkReader) {
   std::string patterns = "id, name, value, vector";
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
 
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
 
   // Write test data
   for (int i = 0; i < batch_size / 100; ++i) {
@@ -1530,7 +1572,7 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithChunkReader) {
   auto column_groups = *cgs;
   EXPECT_EQ(column_groups.size(), 4);
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
 
   // Get chunk readers for each column group
   std::vector<std::shared_ptr<ChunkReader>> chunk_readers;
@@ -1587,7 +1629,8 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithMultipleRowGroups) {
   auto properties = milvus_storage::api::Properties{};
   ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties));
   SetValue(properties, PROPERTY_WRITER_BUFFER_SIZE, small_buffer);
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties));
 
   // Write test data
   for (int i = 0; i < batch_size / 100; ++i) {
@@ -1599,7 +1642,7 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithMultipleRowGroups) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Read and verify row alignment across multiple row groups
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   auto batch_reader_result = reader->get_record_batch_reader();
   ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
   auto batch_reader = std::move(batch_reader_result).ValueOrDie();
@@ -1636,7 +1679,8 @@ TEST_P(VortexWriterBufferTest, V2BoundsRetainedInputBuffers) {
   ASSERT_EQ(SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, "131072"), std::nullopt);
 
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy("id|name,value|vector", format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(writer, nullptr);
 
   std::vector<std::weak_ptr<arrow::Buffer>> input_buffers;
@@ -1666,11 +1710,12 @@ TEST_P(APIWriterReaderTest, TakeMethodTest) {
   std::string patterns = "id, name, value|vector";
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
 
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
 
   auto do_take = [parallelism = parallelism_](
                      const auto& reader,
@@ -1723,7 +1768,8 @@ TEST_P(APIWriterReaderTest, TakeWithMultiFiles) {
 
     ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
     ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
-    auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+    auto writer =
+        Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
     ASSERT_STATUS_OK(writer->write(batch));
     ASSERT_AND_ASSIGN(auto cgs, writer->close());
     transaction->AppendFiles(*cgs);
@@ -1739,7 +1785,7 @@ TEST_P(APIWriterReaderTest, TakeWithMultiFiles) {
 
   auto projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "name"});
   auto cgs_ptr = std::make_shared<ColumnGroups>(cgs);
-  auto reader = Reader::create(cgs_ptr, schema_, projection, properties_);
+  auto reader = Reader::create(cgs_ptr, schema_, projection, std::make_shared<const api::Properties>(properties_));
 
   auto do_take = [parallelism = parallelism_](
                      const auto& reader,
@@ -1801,7 +1847,8 @@ TEST_P(APIWriterReaderTest, TakeAsyncMultiCGReorder) {
 
     ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
     ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
-    auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+    auto writer =
+        Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
     ASSERT_STATUS_OK(writer->write(batch));
     ASSERT_AND_ASSIGN(auto cgs, writer->close());
     transaction->AppendFiles(*cgs);
@@ -1816,7 +1863,7 @@ TEST_P(APIWriterReaderTest, TakeAsyncMultiCGReorder) {
   auto cgs = manifest->columnGroups();
 
   auto cgs_ptr = std::make_shared<ColumnGroups>(cgs);
-  auto reader = Reader::create(cgs_ptr, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs_ptr, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
 
   auto do_take = [parallelism = parallelism_](
                      const auto& reader,
@@ -1867,11 +1914,12 @@ TEST_P(APIWriterReaderTest, TakeAsyncMultiCGReorder) {
 
 TEST_P(APIWriterReaderTest, PublicTakeAsync) {
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   std::vector<int64_t> row_indices = {0, 3, 7, 50};
 
   ASSERT_AND_ASSIGN(auto table, std::move(reader->take_async(row_indices, parallelism_)).get());
@@ -1886,11 +1934,12 @@ TEST_P(APIWriterReaderTest, PublicTakeAsync) {
 
 TEST_P(APIWriterReaderTest, PublicGetChunksAsync) {
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
 
   ASSERT_AND_ASSIGN(auto chunks, std::move(chunk_reader->get_chunks_async({0}, parallelism_)).get());
@@ -1921,14 +1970,15 @@ TEST_P(APIWriterReaderTest, PublicGetChunksAsyncMultipleRowGroups) {
   ASSERT_EQ(SetValue(properties_, PROPERTY_WRITER_COMPRESSION, "uncompressed"), std::nullopt);
   ASSERT_EQ(SetValue(properties_, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT, "1048576"), std::nullopt);
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer->write(batch));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
   ASSERT_EQ(cgs->size(), 1);
   ASSERT_EQ(cgs->front()->files.size(), 1);
 
   auto columns = std::make_shared<std::vector<std::string>>(std::initializer_list<std::string>{"vector"});
-  auto reader = Reader::create(cgs, schema_, columns, properties_);
+  auto reader = Reader::create(cgs, schema_, columns, std::make_shared<const api::Properties>(properties_));
   ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
   ASSERT_GT(chunk_reader->total_number_of_chunks(), 1);
   std::vector<int64_t> indices(chunk_reader->total_number_of_chunks());
@@ -1940,7 +1990,7 @@ TEST_P(APIWriterReaderTest, PublicGetChunksAsyncMultipleRowGroups) {
   auto pool = ThreadPoolHolder::GetThreadPool(parallelism_);
   for (const auto* strategy : {"parallelism", "none", "all"}) {
     ASSERT_EQ(SetValue(properties_, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY, strategy), std::nullopt);
-    auto async_reader = Reader::create(cgs, schema_, columns, properties_);
+    auto async_reader = Reader::create(cgs, schema_, columns, std::make_shared<const api::Properties>(properties_));
     ASSERT_AND_ASSIGN(auto async_chunks, async_reader->get_chunk_reader(0));
     ASSERT_AND_ASSIGN(auto actual, std::move(async_chunks->get_chunks_async(indices)).via(pool.get()).get());
     ASSERT_EQ(actual.size(), indices.size());
@@ -1952,11 +2002,12 @@ TEST_P(APIWriterReaderTest, PublicGetChunksAsyncMultipleRowGroups) {
 
 TEST_P(APIWriterReaderTest, PublicGetChunkReaderAsync) {
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
 
   ASSERT_AND_ASSIGN(auto chunk_reader, std::move(reader->get_chunk_reader_async(0)).get());
   ASSERT_AND_ASSIGN(auto chunks, std::move(chunk_reader->get_chunks_async({0}, parallelism_)).get());
@@ -1971,11 +2022,12 @@ TEST_P(APIWriterReaderTest, PublicParquetAsyncAPIsPropagateCallerExecutor) {
   }
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
 
   CountingExecutor open_executor;
   auto open_future = reader->get_chunk_reader_async(0);
@@ -2009,13 +2061,14 @@ TEST_P(APIWriterReaderTest, PublicGetChunksAsyncDefersParquetReaderReopen) {
   }
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
   cgs->front()->files.front().properties.erase(api::kPropertyFileSize);
   cgs->front()->files.front().properties.erase(api::kPropertyFooterSize);
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_AND_ASSIGN(auto chunk_reader, std::move(reader->get_chunk_reader_async(0)).get());
 
   auto future = [&]() {
@@ -2031,13 +2084,14 @@ TEST_P(APIWriterReaderTest, PublicGetChunksAsyncDefersParquetReaderReopen) {
 
 TEST_P(APIWriterReaderTest, PublicTakeAsyncDefersColdCacheOpen) {
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
   cgs->front()->files.front().properties.erase(api::kPropertyFileSize);
   cgs->front()->files.front().properties.erase(api::kPropertyFooterSize);
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   auto future = [&]() {
     ScopedFiuFault fault(FIUKEY_FS_OPEN_INPUT_FAIL, false);
     EXPECT_EQ(fault.enable_result(), 0);
@@ -2050,11 +2104,12 @@ TEST_P(APIWriterReaderTest, PublicTakeAsyncDefersColdCacheOpen) {
 
 TEST_P(APIWriterReaderTest, TakeOutOfRangeWithParallelism) {
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
 
   {
     std::vector<int64_t> row_indices = {0, 10, 99999};
@@ -2078,11 +2133,12 @@ TEST_P(APIWriterReaderTest, TakeRowsFailWithParallelism) {
   std::call_once(api_writer_reader_fiu_init_flag, []() { FIU_INIT(); });
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
 
   std::vector<int64_t> row_indices = {0, 10, 50};
 
@@ -2107,7 +2163,8 @@ TEST_P(APIWriterReaderTest, GetChucksTest) {
 
   ASSERT_AND_ASSIGN(auto policy, CreateSizeBasePolicy(max_avg_column_size, max_columns_in_group, format, schema_));
 
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(writer, nullptr);
 
   // Write test data (this should trigger sampling)
@@ -2118,7 +2175,7 @@ TEST_P(APIWriterReaderTest, GetChucksTest) {
   ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
   auto cgs = std::move(cgs_result).ValueOrDie();
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   // Test chunk reader
@@ -2164,7 +2221,8 @@ TEST_P(APIWriterReaderTest, EnrypytionWriterReaderTest) {
   SetValue(properties, PROPERTY_WRITER_ENC_META, "encryption_meta_data");
   SetValue(properties, PROPERTY_WRITER_ENC_ALGORITHM, ENCRYPTION_ALGORITHM_AES_GCM_V1);
 
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties));
   ASSERT_NE(writer, nullptr);
 
   // Write test data
@@ -2176,7 +2234,7 @@ TEST_P(APIWriterReaderTest, EnrypytionWriterReaderTest) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Test reading with encryption
-  auto reader = Reader::create(cgs, schema_, nullptr, properties);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties));
   ASSERT_NE(reader, nullptr);
   int called_keyretriever = 0;
   std::string key_id_used;
@@ -2205,7 +2263,8 @@ TEST_P(APIWriterReaderTest, EnrypytionWriterReaderTest) {
   ASSERT_NE(chunk_result.ValueOrDie(), nullptr);
   ASSERT_TRUE(chunk_result.ValueOrDie()->Equals(*test_batch_));
   ASSERT_GE(called_keyretriever, 1);
-  EXPECT_EQ(GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_KEY), encoded_key);
+  EXPECT_EQ(GetValueNoError<std::string>(std::make_shared<const api::Properties>(properties), PROPERTY_WRITER_ENC_KEY),
+            encoded_key);
 }
 
 TEST_P(APIWriterReaderTest, DisabledMetadataCacheReopensEncryptedParquetMetadata) {
@@ -2223,7 +2282,8 @@ TEST_P(APIWriterReaderTest, DisabledMetadataCacheReopensEncryptedParquetMetadata
   ASSERT_EQ(SetValue(properties, PROPERTY_WRITER_ENC_ALGORITHM, ENCRYPTION_ALGORITHM_AES_GCM_V1), std::nullopt);
   ASSERT_EQ(SetValue(properties, PROPERTY_READER_METADATA_CACHE_ENABLE, "false"), std::nullopt);
 
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties));
   ASSERT_NE(writer, nullptr);
   ASSERT_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
@@ -2242,20 +2302,23 @@ TEST_P(APIWriterReaderTest, DisabledMetadataCacheReopensEncryptedParquetMetadata
   }
 
   ASSERT_AND_ASSIGN(auto direct_chunk_reader,
-                    ColumnGroupReader::create(schema_, (*cgs)[0], all_columns, properties, key_retriever));
+                    ColumnGroupReader::create(schema_, (*cgs)[0], all_columns,
+                                              std::make_shared<const api::Properties>(properties), key_retriever));
   ASSERT_NE(direct_chunk_reader, nullptr);
   ASSERT_GT(called_keyretriever, 0);
   const auto calls_after_direct_chunk_reader = called_keyretriever;
 
-  ASSERT_AND_ASSIGN(auto direct_lazy_reader,
-                    ColumnGroupLazyReader::create(schema_, (*cgs)[0], properties, all_columns, key_retriever));
+  ASSERT_AND_ASSIGN(
+      auto direct_lazy_reader,
+      ColumnGroupLazyReader::create(schema_, (*cgs)[0], std::make_shared<const api::Properties>(properties),
+                                    all_columns, key_retriever));
   ASSERT_NE(direct_lazy_reader, nullptr);
   ASSERT_AND_ASSIGN(auto direct_table, direct_lazy_reader->take({0}, 1));
   ASSERT_NE(direct_table, nullptr);
   ASSERT_GT(called_keyretriever, calls_after_direct_chunk_reader);
   const auto calls_after_direct_lazy_reader = called_keyretriever;
 
-  auto reader = Reader::create(cgs, schema_, nullptr, properties);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties));
   ASSERT_NE(reader, nullptr);
   reader->set_keyretriever(key_retriever);
 
@@ -2312,7 +2375,8 @@ TEST_P(APIWriterReaderTest, TestNullableFields) {
   // writer
   std::string patterns = "int32|int64,str";
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, nullable_schema));
-  auto writer = Writer::create(base_path_, nullable_schema, std::move(policy), properties_);
+  auto writer = Writer::create(base_path_, nullable_schema, std::move(policy),
+                               std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(writer, nullptr);
 
   for (int i = 0; i < batch_size; ++i) {
@@ -2324,7 +2388,7 @@ TEST_P(APIWriterReaderTest, TestNullableFields) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   // reader
-  auto reader = Reader::create(cgs, nullable_schema, nullptr, properties_);
+  auto reader = Reader::create(cgs, nullable_schema, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   auto batch_reader_result = reader->get_record_batch_reader();
@@ -2378,7 +2442,8 @@ TEST_P(APIWriterReaderTest, TestMixedNullableAndNonNullable) {
   // writer
   std::string patterns = "str,int32|int64";
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, mixed_schema));
-  auto writer = Writer::create(base_path_, mixed_schema, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, mixed_schema, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(writer, nullptr);
 
   for (int i = 0; i < batch_size; ++i) {
@@ -2390,7 +2455,7 @@ TEST_P(APIWriterReaderTest, TestMixedNullableAndNonNullable) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Test reading full schema
-  auto reader1 = Reader::create(cgs, mixed_schema, nullptr, properties_);
+  auto reader1 = Reader::create(cgs, mixed_schema, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader1, nullptr);
 
   auto batch_reader_result1 = reader1->get_record_batch_reader();
@@ -2415,7 +2480,7 @@ TEST_P(APIWriterReaderTest, TestMixedNullableAndNonNullable) {
                    arrow::key_value_metadata({"PARQUET:field_id"}, {"300"}))  // changed to nullable
   });
 
-  auto reader2 = Reader::create(cgs, evolved_schema, nullptr, properties_);
+  auto reader2 = Reader::create(cgs, evolved_schema, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader2, nullptr);
 
   auto batch_reader_result2 = reader2->get_record_batch_reader();
@@ -2465,7 +2530,8 @@ TEST_P(APIWriterReaderTest, TestAllNullFields) {
   // writer
   std::string patterns = "int32|int64,str";
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, all_nullable_schema));
-  auto writer = Writer::create(base_path_, all_nullable_schema, std::move(policy), properties_);
+  auto writer = Writer::create(base_path_, all_nullable_schema, std::move(policy),
+                               std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(writer, nullptr);
 
   for (int i = 0; i < batch_size; ++i) {
@@ -2477,7 +2543,7 @@ TEST_P(APIWriterReaderTest, TestAllNullFields) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   // reader
-  auto reader = Reader::create(cgs, all_nullable_schema, nullptr, properties_);
+  auto reader = Reader::create(cgs, all_nullable_schema, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
   auto batch_reader_result = reader->get_record_batch_reader();
   ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
@@ -2515,7 +2581,8 @@ TEST_P(APIWriterReaderTest, TestLargeBatch) {
   // writer
   std::string patterns = "id|value, name, vector";
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(writer, nullptr);
 
   EXPECT_TRUE(writer->write(large_batch).ok());
@@ -2525,7 +2592,7 @@ TEST_P(APIWriterReaderTest, TestLargeBatch) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   // reader
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
   auto batch_reader_result = reader->get_record_batch_reader();
   ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
@@ -2547,7 +2614,8 @@ TEST_P(APIWriterReaderTest, TestEmptyFiles) {
   // writer
   std::string patterns = "id|value, name, vector";
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
   for (const auto& cg : *cgs) {
@@ -2555,7 +2623,7 @@ TEST_P(APIWriterReaderTest, TestEmptyFiles) {
   }
 
   // reader
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
   // Read and validate empty batch
   ASSERT_AND_ASSIGN(auto table, batch_reader->ToTable());
@@ -2605,7 +2673,8 @@ TEST_P(APIWriterReaderTest, TestFileRolling) {
     SetValue(properties, PROPERTY_WRITER_FILE_ROLLING_SIZE, std::to_string(rolling_size).c_str());
 
     ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-    auto writer = Writer::create(base_path_, schema_, std::move(policy), properties);
+    auto writer =
+        Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties));
     for (size_t i = 0; i < write_times; ++i) {
       ASSERT_OK(writer->write(test_batch_));
       ASSERT_OK(writer->flush());
@@ -2637,7 +2706,8 @@ TEST_P(APIWriterReaderTest, TestFileRolling) {
     SetValue(properties, PROPERTY_WRITER_FILE_ROLLING_SIZE, std::to_string(rolling_size).c_str());
 
     ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy("id, value, name, vector", format, schema_));
-    auto writer = Writer::create(base_path_, schema_, std::move(policy), properties);
+    auto writer =
+        Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties));
     for (size_t i = 0; i < write_times; ++i) {
       ASSERT_OK(writer->write(test_batch_512_dim));
       ASSERT_OK(writer->flush());
@@ -2659,8 +2729,8 @@ TEST_P(APIWriterReaderTest, ReadWithoutSchema) {
 
   auto verify_read = [&](const std::shared_ptr<ColumnGroups>& cgs,
                          const std::shared_ptr<std::vector<std::string>>& needed_columns, size_t expected_columns,
-                         const api::Properties& props = {}) {
-    auto read_props = props.empty() ? properties_ : props;
+                         const std::shared_ptr<const api::Properties>& props = nullptr) {
+    auto read_props = props ? props : std::make_shared<const api::Properties>(properties_);
     auto reader = Reader::create(cgs, nullptr, needed_columns, read_props);
     ASSERT_NE(reader, nullptr);
 
@@ -2699,7 +2769,8 @@ TEST_P(APIWriterReaderTest, ReadWithoutSchema) {
   // Single CG
   {
     ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-    auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+    auto writer =
+        Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
     ASSERT_OK(writer->write(test_batch_));
     ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
@@ -2718,7 +2789,8 @@ TEST_P(APIWriterReaderTest, ReadWithoutSchema) {
   {
     std::string patterns = "id, name|value, vector";
     ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
-    auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+    auto writer =
+        Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
     ASSERT_OK(writer->write(test_batch_));
     ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
@@ -2732,7 +2804,7 @@ TEST_P(APIWriterReaderTest, ReadWithoutSchema) {
     // tiny memory budget (1 byte): verify schema derivation still works
     auto small_budget_props = properties_;
     SetValue(small_budget_props, PROPERTY_READER_RECORD_BATCH_MAX_SIZE, "1");
-    verify_read(cgs, nullptr, 4, small_budget_props);
+    verify_read(cgs, nullptr, 4, std::make_shared<const api::Properties>(small_budget_props));
   }
 }
 
@@ -2757,7 +2829,8 @@ TEST_P(APIWriterReaderTest, ParquetPrebufferHoleSizeLimitReducesReadIOCount) {
   ASSERT_AND_ASSIGN(auto fixed_binary_batch, MakePrebufferFixedBinaryBatch(fixed_binary_schema));
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, fixed_binary_schema));
-  auto writer = Writer::create(base_path_, fixed_binary_schema, std::move(policy), properties_);
+  auto writer = Writer::create(base_path_, fixed_binary_schema, std::move(policy),
+                               std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(writer, nullptr);
   ASSERT_STATUS_OK(writer->write(fixed_binary_batch));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
@@ -2766,8 +2839,10 @@ TEST_P(APIWriterReaderTest, ParquetPrebufferHoleSizeLimitReducesReadIOCount) {
   ASSERT_EQ((*cgs)[0]->columns, std::vector<std::string>{"embedding"});
 
   auto read_count_with_hole_limit = [&](int64_t hole_size_limit) -> arrow::Result<int64_t> {
-    auto read_properties = MakePrebufferReadProperties(properties_, hole_size_limit);
-    auto reader = Reader::create(cgs, fixed_binary_schema, nullptr, read_properties);
+    auto read_properties =
+        MakePrebufferReadProperties(std::make_shared<const api::Properties>(properties_), hole_size_limit);
+    auto reader =
+        Reader::create(cgs, fixed_binary_schema, nullptr, std::make_shared<const api::Properties>(read_properties));
     if (!reader) {
       return arrow::Status::Invalid("failed to create reader");
     }
@@ -2813,7 +2888,8 @@ TEST_P(APIWriterReaderTest, ParquetEagerPrebufferReadsTheSameRangesAsLazy) {
   ASSERT_AND_ASSIGN(auto fixed_binary_batch, MakePrebufferFixedBinaryBatch(fixed_binary_schema));
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, fixed_binary_schema));
-  auto writer = Writer::create(base_path_, fixed_binary_schema, std::move(policy), properties_);
+  auto writer = Writer::create(base_path_, fixed_binary_schema, std::move(policy),
+                               std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(writer, nullptr);
   ASSERT_STATUS_OK(writer->write(fixed_binary_batch));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
@@ -2821,11 +2897,13 @@ TEST_P(APIWriterReaderTest, ParquetEagerPrebufferReadsTheSameRangesAsLazy) {
 
   // One read call covers the whole file; 2 MiB ranges cut it into several requests.
   auto read_with_lazy = [&](const char* lazy) -> arrow::Result<std::pair<std::shared_ptr<arrow::Table>, int64_t>> {
-    auto read_properties = MakePrebufferReadProperties(properties_, kPrebufferLargeHoleLimit);
+    auto read_properties =
+        MakePrebufferReadProperties(std::make_shared<const api::Properties>(properties_), kPrebufferLargeHoleLimit);
     SetValue(read_properties, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT,
              std::to_string(2LL * 1024 * 1024).c_str());
     SetValue(read_properties, PROPERTY_READER_PARQUET_PREBUFFER_LAZY, lazy);
-    auto reader = Reader::create(cgs, fixed_binary_schema, nullptr, read_properties);
+    auto reader =
+        Reader::create(cgs, fixed_binary_schema, nullptr, std::make_shared<const api::Properties>(read_properties));
     if (!reader) {
       return arrow::Status::Invalid("failed to create reader");
     }

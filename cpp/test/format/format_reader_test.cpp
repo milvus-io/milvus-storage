@@ -354,11 +354,13 @@ class FormatReaderTest : public ::testing::TestWithParam<std::string> {
   void SetUp() override {
     // Create temporary directory for test files
     ASSERT_STATUS_OK(InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
 
     // Mirror fs.* into extfs.default.* so resolve_config can match Lance's Milvus-format URI
     ArrowFileSystemConfig fs_config;
-    if (ArrowFileSystemConfig::create_file_system_config(properties_, fs_config).ok() &&
+    if (ArrowFileSystemConfig::create_file_system_config(std::make_shared<const api::Properties>(properties_),
+                                                         fs_config)
+            .ok() &&
         fs_config.storage_type == "remote") {
       api::SetValue(properties_, "extfs.default.storage_type", "remote");
       api::SetValue(properties_, "extfs.default.cloud_provider", fs_config.cloud_provider.c_str());
@@ -406,14 +408,16 @@ TEST_P(FormatReaderTest, EstimatedMemorySizesAreReasonable) {
   ASSERT_AND_ASSIGN(auto estimated_batch, CreateTestData(schema_, 0, false, 10000));
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_OK(writer->write(estimated_batch));
   ASSERT_AND_ASSIGN(auto column_groups, writer->close());
   ASSERT_EQ(column_groups->size(), 1);
   ASSERT_EQ(column_groups->front()->files.size(), 1);
 
-  ASSERT_AND_ASSIGN(auto format_reader, FormatReader::create(schema_, format, column_groups->front()->files.front(),
-                                                             properties_, {}, nullptr));
+  ASSERT_AND_ASSIGN(auto format_reader,
+                    FormatReader::create(schema_, format, column_groups->front()->files.front(),
+                                         std::make_shared<const api::Properties>(properties_), {}, nullptr));
   ASSERT_AND_ASSIGN(auto row_group_infos, format_reader->get_row_group_infos());
   ASSERT_FALSE(row_group_infos.empty());
 
@@ -477,7 +481,8 @@ TEST_P(FormatReaderTest, MultiFileColumnEstimatesFollowFieldNames) {
                                 test_batch_->GetColumnByName("value")});
 
   ASSERT_AND_ASSIGN(auto ordered_policy, CreateSinglePolicy(format, ordered_schema));
-  auto ordered_writer = Writer::create(base_path_ + "/ordered", ordered_schema, std::move(ordered_policy), properties_);
+  auto ordered_writer = Writer::create(base_path_ + "/ordered", ordered_schema, std::move(ordered_policy),
+                                       std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(ordered_writer, nullptr);
   ASSERT_OK(ordered_writer->write(ordered_batch));
   ASSERT_AND_ASSIGN(auto ordered_groups, ordered_writer->close());
@@ -485,8 +490,8 @@ TEST_P(FormatReaderTest, MultiFileColumnEstimatesFollowFieldNames) {
   ASSERT_EQ(ordered_groups->front()->files.size(), 1);
 
   ASSERT_AND_ASSIGN(auto reordered_policy, CreateSinglePolicy(format, reordered_schema));
-  auto reordered_writer =
-      Writer::create(base_path_ + "/reordered", reordered_schema, std::move(reordered_policy), properties_);
+  auto reordered_writer = Writer::create(base_path_ + "/reordered", reordered_schema, std::move(reordered_policy),
+                                         std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reordered_writer, nullptr);
   ASSERT_OK(reordered_writer->write(reordered_batch));
   ASSERT_AND_ASSIGN(auto reordered_groups, reordered_writer->close());
@@ -494,7 +499,8 @@ TEST_P(FormatReaderTest, MultiFileColumnEstimatesFollowFieldNames) {
   ASSERT_EQ(reordered_groups->front()->files.size(), 1);
 
   ASSERT_AND_ASSIGN(auto id_only_policy, CreateSinglePolicy(format, id_only_schema));
-  auto id_only_writer = Writer::create(base_path_ + "/id-only", id_only_schema, std::move(id_only_policy), properties_);
+  auto id_only_writer = Writer::create(base_path_ + "/id-only", id_only_schema, std::move(id_only_policy),
+                                       std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(id_only_writer, nullptr);
   ASSERT_OK(id_only_writer->write(id_only_batch));
   ASSERT_AND_ASSIGN(auto id_only_groups, id_only_writer->close());
@@ -503,28 +509,29 @@ TEST_P(FormatReaderTest, MultiFileColumnEstimatesFollowFieldNames) {
 
   ASSERT_AND_ASSIGN(auto extra_column_policy, CreateSinglePolicy(format, extra_column_schema));
   auto extra_column_writer =
-      Writer::create(base_path_ + "/extra-column", extra_column_schema, std::move(extra_column_policy), properties_);
+      Writer::create(base_path_ + "/extra-column", extra_column_schema, std::move(extra_column_policy),
+                     std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(extra_column_writer, nullptr);
   ASSERT_OK(extra_column_writer->write(extra_column_batch));
   ASSERT_AND_ASSIGN(auto extra_column_groups, extra_column_writer->close());
   ASSERT_EQ(extra_column_groups->size(), 1);
   ASSERT_EQ(extra_column_groups->front()->files.size(), 1);
 
-  ASSERT_AND_ASSIGN(
-      auto ordered_format_reader,
-      FormatReader::create(ordered_schema, format, ordered_groups->front()->files.front(), properties_, {}, nullptr));
+  ASSERT_AND_ASSIGN(auto ordered_format_reader,
+                    FormatReader::create(ordered_schema, format, ordered_groups->front()->files.front(),
+                                         std::make_shared<const api::Properties>(properties_), {}, nullptr));
   ASSERT_AND_ASSIGN(auto ordered_row_groups, ordered_format_reader->get_row_group_infos());
   ASSERT_AND_ASSIGN(auto reordered_format_reader,
                     FormatReader::create(reordered_schema, format, reordered_groups->front()->files.front(),
-                                         properties_, {}, nullptr));
+                                         std::make_shared<const api::Properties>(properties_), {}, nullptr));
   ASSERT_AND_ASSIGN(auto reordered_row_groups, reordered_format_reader->get_row_group_infos());
-  ASSERT_AND_ASSIGN(
-      auto id_only_format_reader,
-      FormatReader::create(id_only_schema, format, id_only_groups->front()->files.front(), properties_, {}, nullptr));
+  ASSERT_AND_ASSIGN(auto id_only_format_reader,
+                    FormatReader::create(id_only_schema, format, id_only_groups->front()->files.front(),
+                                         std::make_shared<const api::Properties>(properties_), {}, nullptr));
   ASSERT_AND_ASSIGN(auto id_only_row_groups, id_only_format_reader->get_row_group_infos());
   ASSERT_AND_ASSIGN(auto extra_column_format_reader,
                     FormatReader::create(extra_column_schema, format, extra_column_groups->front()->files.front(),
-                                         properties_, {}, nullptr));
+                                         std::make_shared<const api::Properties>(properties_), {}, nullptr));
   ASSERT_AND_ASSIGN(auto extra_column_row_groups, extra_column_format_reader->get_row_group_infos());
 
   std::vector<uint64_t> expected_id_sizes;
@@ -579,7 +586,8 @@ TEST_P(FormatReaderTest, MultiFileColumnEstimatesFollowFieldNames) {
     SCOPED_TRACE(cache_enabled ? "metadata cache enabled" : "metadata cache disabled");
     auto read_properties = properties_;
     api::SetValue(read_properties, PROPERTY_READER_METADATA_CACHE_ENABLE, cache_enabled ? "true" : "false");
-    auto reader = api::Reader::create(combined_groups, ordered_schema, nullptr, read_properties);
+    auto reader = api::Reader::create(combined_groups, ordered_schema, nullptr,
+                                      std::make_shared<const api::Properties>(read_properties));
     ASSERT_NE(reader, nullptr);
     ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0, id_projection));
 
@@ -615,13 +623,15 @@ TEST_P(FormatReaderTest, MissingPhysicalColumnEstimateIsZero) {
                                {test_batch_->GetColumnByName("id"), test_batch_->GetColumnByName("name")});
 
   const auto lance_path = base_path_ + "/missing-physical-column";
-  lance::LanceTableWriter initial_writer(lance_path, evolved_schema, properties_);
+  lance::LanceTableWriter initial_writer(lance_path, evolved_schema,
+                                         std::make_shared<const api::Properties>(properties_));
   ASSERT_OK(initial_writer.Write(evolved_batch));
   ASSERT_AND_ASSIGN(auto initial_file, initial_writer.Close());
 
   // The appended fragment omits the nullable logical column. Lance fills it
   // with nulls when reading through the evolved schema.
-  lance::LanceTableWriter append_writer(lance_path, original_schema, properties_);
+  lance::LanceTableWriter append_writer(lance_path, original_schema,
+                                        std::make_shared<const api::Properties>(properties_));
   ASSERT_OK(append_writer.Write(original_batch));
   ASSERT_AND_ASSIGN(auto appended_file, append_writer.Close());
 
@@ -636,7 +646,8 @@ TEST_P(FormatReaderTest, MissingPhysicalColumnEstimateIsZero) {
     SCOPED_TRACE(cache_enabled ? "metadata cache enabled" : "metadata cache disabled");
     auto read_properties = properties_;
     api::SetValue(read_properties, PROPERTY_READER_METADATA_CACHE_ENABLE, cache_enabled ? "true" : "false");
-    auto reader = api::Reader::create(column_groups, evolved_schema, nullptr, read_properties);
+    auto reader = api::Reader::create(column_groups, evolved_schema, nullptr,
+                                      std::make_shared<const api::Properties>(read_properties));
     ASSERT_NE(reader, nullptr);
     ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
     ASSERT_EQ(chunk_reader->total_number_of_chunks(), 2);
@@ -681,12 +692,13 @@ TEST_P(FormatReaderTest, ReadParquetWithoutMeta) {
   ASSERT_STATUS_OK(parquet_writer->Close());
   ASSERT_STATUS_OK(sink->Close());
 
-  ASSERT_AND_ASSIGN(auto format_reader,
-                    FormatReader::create(schema_, LOON_FORMAT_PARQUET,
-                                         api::ColumnGroupFile{.path = base_path_ + "/test.parquet",
-                                                              .start_index = 0,
-                                                              .end_index = test_batch_->num_rows() * 10},
-                                         properties_, std::vector<std::string>{"id"}, nullptr));
+  ASSERT_AND_ASSIGN(
+      auto format_reader,
+      FormatReader::create(
+          schema_, LOON_FORMAT_PARQUET,
+          api::ColumnGroupFile{
+              .path = base_path_ + "/test.parquet", .start_index = 0, .end_index = test_batch_->num_rows() * 10},
+          std::make_shared<const api::Properties>(properties_), std::vector<std::string>{"id"}, nullptr));
 
   ASSERT_AND_ASSIGN(auto row_group_infos, format_reader->get_row_group_infos());
   ASSERT_EQ(row_group_infos.size(), 10);
@@ -728,7 +740,8 @@ TEST_P(FormatReaderTest, ParquetOpenRejectsOverflowingFooterLength) {
   ASSERT_STATUS_OK(sink->Close());
 
   auto reader = std::make_shared<parquet::ParquetFormatReader>(
-      fs_, file_path, properties_, /*needed_columns=*/std::vector<std::string>{}, nullptr, malformed_file.size(),
+      fs_, file_path, std::make_shared<const api::Properties>(properties_),
+      /*needed_columns=*/std::vector<std::string>{}, nullptr, malformed_file.size(),
       /*footer_size=*/8);
   EXPECT_FALSE(reader->open().ok());
 }
@@ -748,8 +761,8 @@ TEST_P(FormatReaderTest, ParquetFooterFastPathUsesCrtReadAtAsyncInto) {
   auto stats = std::make_shared<FileSystemReadStats>();
   auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
 
-  parquet::ParquetFormatReader reader(counting_fs, file_path, properties_, /*needed_columns=*/{}, nullptr,
-                                      file.Get<uint64_t>(api::kPropertyFileSize),
+  parquet::ParquetFormatReader reader(counting_fs, file_path, std::make_shared<const api::Properties>(properties_),
+                                      /*needed_columns=*/{}, nullptr, file.Get<uint64_t>(api::kPropertyFileSize),
                                       file.Get<uint64_t>(api::kPropertyFooterSize));
   ASSERT_STATUS_OK(reader.open());
   ASSERT_EQ(stats->open_path_count.load(std::memory_order_relaxed), 0);
@@ -776,7 +789,8 @@ TEST_P(FormatReaderTest, ParquetAsyncReadUsesCallerExecutorForDecode) {
   ASSERT_STATUS_OK(writer->Write(test_batch_));
   ASSERT_AND_ASSIGN(auto file, writer->Close());
 
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(schema_, LOON_FORMAT_PARQUET, file, properties_,
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(schema_, LOON_FORMAT_PARQUET, file,
+                                                      std::make_shared<const api::Properties>(properties_),
                                                       /*needed_columns=*/{}, nullptr));
 
   CountingExecutor executor;
@@ -820,7 +834,8 @@ TEST_P(FormatReaderTest, ParquetByteTasksProgressWhileEarlierReadsArePending) {
     ASSERT_EQ(SetValue(properties, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT, "2"), std::nullopt);
     auto stats = std::make_shared<FileSystemReadStats>();
     auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
-    auto reader = std::make_shared<parquet::ParquetFormatReader>(counting_fs, path, properties,
+    auto reader = std::make_shared<parquet::ParquetFormatReader>(counting_fs, path,
+                                                                 std::make_shared<const api::Properties>(properties),
                                                                  std::vector<std::string>{"vector"}, nullptr);
     ASSERT_STATUS_OK(reader->open());
     ASSERT_AND_ASSIGN(auto row_groups, reader->get_row_group_infos());
@@ -856,8 +871,10 @@ TEST_P(FormatReaderTest, ParquetByteTasksProgressWhileEarlierReadsArePending) {
     }
     auto lookup = [&infos](int64_t index) -> const ChunkInfo& { return infos[index]; };
     auto tasks = ChunkTask::Build({0, 1, 2, 3}, lookup);
-    SplitAsyncTasks(tasks, 1, ChunkTask::SplitTraits{lookup}, GetAsyncTaskSplitStrategy(properties),
-                    GetValueNoError<uint64_t>(properties, PROPERTY_READER_ASYNC_TASK_SPLIT_SIZE_BYTES));
+    SplitAsyncTasks(tasks, 1, ChunkTask::SplitTraits{lookup},
+                    GetAsyncTaskSplitStrategy(std::make_shared<const api::Properties>(properties)),
+                    GetValueNoError<uint64_t>(std::make_shared<const api::Properties>(properties),
+                                              PROPERTY_READER_ASYNC_TASK_SPLIT_SIZE_BYTES));
     ASSERT_EQ(tasks.size(), 4);
     std::vector<folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>>> futures;
     for (const auto& task : tasks) {
@@ -899,7 +916,8 @@ TEST_P(FormatReaderTest, ParquetAsyncReadRejectsInlineExecutor) {
   ASSERT_STATUS_OK(writer->Write(test_batch_));
   ASSERT_AND_ASSIGN(auto file, writer->Close());
 
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(schema_, LOON_FORMAT_PARQUET, file, properties_,
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(schema_, LOON_FORMAT_PARQUET, file,
+                                                      std::make_shared<const api::Properties>(properties_),
                                                       /*needed_columns=*/{}, nullptr));
 
   auto range_result = std::move(reader->read_with_range_async(0, test_batch_->num_rows()))
@@ -930,8 +948,9 @@ TEST_P(FormatReaderTest, ParquetOpenAsyncIsLazyAndSupportsThreadedExecutor) {
   auto stats = std::make_shared<FileSystemReadStats>();
   auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
   auto reader = std::make_shared<parquet::ParquetFormatReader>(
-      counting_fs, file_path, properties_, /*needed_columns=*/std::vector<std::string>{}, nullptr,
-      file.Get<uint64_t>(api::kPropertyFileSize), file.Get<uint64_t>(api::kPropertyFooterSize));
+      counting_fs, file_path, std::make_shared<const api::Properties>(properties_),
+      /*needed_columns=*/std::vector<std::string>{}, nullptr, file.Get<uint64_t>(api::kPropertyFileSize),
+      file.Get<uint64_t>(api::kPropertyFooterSize));
 
   folly::ThreadedExecutor executor;
   std::weak_ptr<parquet::ParquetFormatReader> weak_reader = reader;
@@ -969,8 +988,9 @@ TEST_P(FormatReaderTest, ParquetOpenAsyncReadsMetadataAgainWhenFooterHintIsTooSm
   auto stats = std::make_shared<FileSystemReadStats>();
   auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
   auto reader = std::make_shared<parquet::ParquetFormatReader>(
-      counting_fs, file_path, properties_, /*needed_columns=*/std::vector<std::string>{}, nullptr,
-      file.Get<uint64_t>(api::kPropertyFileSize), /*footer_size=*/8);
+      counting_fs, file_path, std::make_shared<const api::Properties>(properties_),
+      /*needed_columns=*/std::vector<std::string>{}, nullptr, file.Get<uint64_t>(api::kPropertyFileSize),
+      /*footer_size=*/8);
 
   CountingExecutor executor;
   ASSERT_STATUS_OK(std::move(reader->open_async()).via(&executor).get());
@@ -998,8 +1018,9 @@ TEST_P(FormatReaderTest, ParquetOpenAsyncWithoutFooterHintUsesNativeAsyncOpen) {
   auto stats = std::make_shared<FileSystemReadStats>();
   auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
   auto reader = std::make_shared<parquet::ParquetFormatReader>(
-      counting_fs, file_path, properties_, /*needed_columns=*/std::vector<std::string>{}, nullptr,
-      file.Get<uint64_t>(api::kPropertyFileSize), /*footer_size=*/0);
+      counting_fs, file_path, std::make_shared<const api::Properties>(properties_),
+      /*needed_columns=*/std::vector<std::string>{}, nullptr, file.Get<uint64_t>(api::kPropertyFileSize),
+      /*footer_size=*/0);
 
   CountingExecutor executor;
   ASSERT_STATUS_OK(std::move(reader->open_async()).via(&executor).get());
@@ -1028,7 +1049,8 @@ TEST_P(FormatReaderTest, ParquetOpenAsyncGetsMissingFileSizeAsynchronously) {
   auto stats = std::make_shared<FileSystemReadStats>();
   auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
   auto reader = std::make_shared<parquet::ParquetFormatReader>(
-      counting_fs, file_path, properties_, /*needed_columns=*/std::vector<std::string>{}, nullptr,
+      counting_fs, file_path, std::make_shared<const api::Properties>(properties_),
+      /*needed_columns=*/std::vector<std::string>{}, nullptr,
       /*file_size=*/0, file.Get<uint64_t>(api::kPropertyFooterSize));
 
   CountingExecutor executor;
@@ -1060,8 +1082,9 @@ TEST_P(FormatReaderTest, ParquetOpenAsyncReturnsMalformedRowGroupMetadataAsStatu
   ASSERT_AND_ASSIGN(auto file_info, fs_->GetFileInfo(file_path));
   ASSERT_GT(file_info.size(), 0);
   auto reader = std::make_shared<parquet::ParquetFormatReader>(
-      fs_, file_path, properties_, /*needed_columns=*/std::vector<std::string>{}, nullptr,
-      static_cast<uint64_t>(file_info.size()), /*footer_size=*/0);
+      fs_, file_path, std::make_shared<const api::Properties>(properties_),
+      /*needed_columns=*/std::vector<std::string>{}, nullptr, static_cast<uint64_t>(file_info.size()),
+      /*footer_size=*/0);
 
   CountingExecutor executor;
   arrow::Status status;
@@ -1087,7 +1110,8 @@ TEST_P(FormatReaderTest, ParquetOpenAsyncKeepsCallerExecutorAvailableWhileIoIsPe
   auto pending_open = std::make_shared<PendingAsyncOpenState>();
   auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats, pending_open);
   auto reader = std::make_shared<parquet::ParquetFormatReader>(
-      counting_fs, file_path, properties_, /*needed_columns=*/std::vector<std::string>{}, nullptr,
+      counting_fs, file_path, std::make_shared<const api::Properties>(properties_),
+      /*needed_columns=*/std::vector<std::string>{}, nullptr,
       /*file_size=*/0, file.Get<uint64_t>(api::kPropertyFooterSize));
 
   CountingExecutor executor;
@@ -1134,7 +1158,8 @@ TEST_P(FormatReaderTest, ParquetOpenAsyncRunsOpenContinuationsOnCallerExecutor) 
   auto stats = std::make_shared<FileSystemReadStats>();
   auto pending_open = std::make_shared<PendingAsyncOpenState>();
   auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats, pending_open);
-  auto reader = std::make_shared<parquet::ParquetFormatReader>(counting_fs, file_path, properties_,
+  auto reader = std::make_shared<parquet::ParquetFormatReader>(counting_fs, file_path,
+                                                               std::make_shared<const api::Properties>(properties_),
                                                                /*needed_columns=*/std::vector<std::string>{}, nullptr,
                                                                /*file_size=*/0, /*footer_size=*/8);
 
@@ -1187,7 +1212,8 @@ TEST_P(FormatReaderTest, ParquetOpenAsyncPropagatesCallerExecutorRejection) {
   auto pending_open = std::make_shared<PendingAsyncOpenState>();
   auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats, pending_open);
   auto reader = std::make_shared<parquet::ParquetFormatReader>(
-      counting_fs, file_path, properties_, /*needed_columns=*/std::vector<std::string>{}, nullptr,
+      counting_fs, file_path, std::make_shared<const api::Properties>(properties_),
+      /*needed_columns=*/std::vector<std::string>{}, nullptr,
       /*file_size=*/0, file.Get<uint64_t>(api::kPropertyFooterSize));
 
   RejectOnceExecutor executor;
@@ -1216,15 +1242,17 @@ TEST_P(FormatReaderTest, VortexOpenAsyncUsesTokioRuntime) {
   }
 
   const auto file_path = base_path_ + "/async_open.vortex";
-  ASSERT_AND_ASSIGN(auto writer, vortex::VortexFileWriter::Open(fs_, schema_, file_path, properties_));
+  ASSERT_AND_ASSIGN(auto writer, vortex::VortexFileWriter::Open(fs_, schema_, file_path,
+                                                                std::make_shared<const api::Properties>(properties_)));
   ASSERT_STATUS_OK(writer->Write(test_batch_));
   ASSERT_AND_ASSIGN(auto file, writer->Close());
 
   auto stats = std::make_shared<FileSystemReadStats>();
   auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
   auto reader = std::make_shared<vortex::VortexFormatReader>(
-      counting_fs, schema_, file_path, properties_, /*needed_columns=*/std::vector<std::string>{},
-      file.Get<uint64_t>(api::kPropertyFileSize), file.Get<uint64_t>(api::kPropertyFooterSize));
+      counting_fs, schema_, file_path, std::make_shared<const api::Properties>(properties_),
+      /*needed_columns=*/std::vector<std::string>{}, file.Get<uint64_t>(api::kPropertyFileSize),
+      file.Get<uint64_t>(api::kPropertyFooterSize));
 
   CountingExecutor executor;
   const auto caller_thread = std::this_thread::get_id();
@@ -1245,15 +1273,17 @@ TEST_P(FormatReaderTest, VortexReadWithRangeAsyncCreatesLargeWindowViewSynchrono
   }
 
   const auto file_path = base_path_ + "/async_read_range.vortex";
-  ASSERT_AND_ASSIGN(auto writer, vortex::VortexFileWriter::Open(fs_, schema_, file_path, properties_));
+  ASSERT_AND_ASSIGN(auto writer, vortex::VortexFileWriter::Open(fs_, schema_, file_path,
+                                                                std::make_shared<const api::Properties>(properties_)));
   ASSERT_STATUS_OK(writer->Write(test_batch_));
   ASSERT_AND_ASSIGN(auto file, writer->Close());
 
   auto stats = std::make_shared<FileSystemReadStats>();
   auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
   auto reader = std::make_shared<vortex::VortexFormatReader>(
-      counting_fs, schema_, file_path, properties_, /*needed_columns=*/std::vector<std::string>{},
-      file.Get<uint64_t>(api::kPropertyFileSize), file.Get<uint64_t>(api::kPropertyFooterSize));
+      counting_fs, schema_, file_path, std::make_shared<const api::Properties>(properties_),
+      /*needed_columns=*/std::vector<std::string>{}, file.Get<uint64_t>(api::kPropertyFileSize),
+      file.Get<uint64_t>(api::kPropertyFooterSize));
 
   const auto caller_thread = std::this_thread::get_id();
   ASSERT_STATUS_OK(std::move(reader->open_async()).get());
@@ -1285,7 +1315,8 @@ TEST_P(FormatReaderTest, VortexOpenAsyncReturnsFailureThroughFuture) {
     GTEST_SKIP() << "Test vortex only.";
   }
 
-  auto reader = std::make_shared<vortex::VortexFormatReader>(fs_, schema_, base_path_ + "/missing.vortex", properties_,
+  auto reader = std::make_shared<vortex::VortexFormatReader>(fs_, schema_, base_path_ + "/missing.vortex",
+                                                             std::make_shared<const api::Properties>(properties_),
                                                              /*needed_columns=*/std::vector<std::string>{});
 
   auto status = std::move(reader->open_async()).get();
@@ -1300,14 +1331,19 @@ TEST_P(FormatReaderTest, CreateAsyncDefersPlainFormatOpen) {
   }
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto column_groups, writer->close());
   ASSERT_EQ(column_groups->size(), 1);
   ASSERT_EQ(column_groups->front()->files.size(), 1);
 
-  auto future = FormatReader::create_async(schema_, format, column_groups->front()->files.front(), properties_,
+  auto shared_properties = std::make_shared<const api::Properties>(properties_);
+  std::weak_ptr<const api::Properties> weak_properties = shared_properties;
+  auto future = FormatReader::create_async(schema_, format, column_groups->front()->files.front(), shared_properties,
                                            /*needed_columns=*/{}, nullptr);
+  shared_properties.reset();
+  EXPECT_FALSE(weak_properties.expired());
   EXPECT_FALSE(future.isReady());
 
   CountingExecutor executor;
@@ -1316,6 +1352,9 @@ TEST_P(FormatReaderTest, CreateAsyncDefersPlainFormatOpen) {
   ASSERT_NE(reader->get_schema(), nullptr);
   EXPECT_EQ(reader->get_schema()->num_fields(), schema_->num_fields());
   EXPECT_GT(executor.add_count(), 0);
+  EXPECT_FALSE(weak_properties.expired());
+  reader.reset();
+  EXPECT_TRUE(weak_properties.expired());
 }
 
 TEST_P(FormatReaderTest, ParquetLoadMetadataAsyncUsesCallerExecutor) {
@@ -1324,12 +1363,14 @@ TEST_P(FormatReaderTest, ParquetLoadMetadataAsyncUsesCallerExecutor) {
   }
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto column_groups, writer->close());
   const auto& file = column_groups->front()->files.front();
 
-  auto future = parquet::ParquetFormatReader::MetaTrait::load_metadata_async(file, properties_, nullptr);
+  auto future = parquet::ParquetFormatReader::MetaTrait::load_metadata_async(
+      file, std::make_shared<const api::Properties>(properties_), nullptr);
   EXPECT_FALSE(future.isReady());
 
   CountingExecutor executor;
@@ -1346,12 +1387,14 @@ TEST_P(FormatReaderTest, VortexLoadMetadataAsyncUsesTokioOpen) {
   }
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_VORTEX, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto column_groups, writer->close());
   const auto& file = column_groups->front()->files.front();
 
-  auto future = vortex::VortexFormatReader::MetaTrait::load_metadata_async(file, properties_, nullptr);
+  auto future = vortex::VortexFormatReader::MetaTrait::load_metadata_async(
+      file, std::make_shared<const api::Properties>(properties_), nullptr);
   EXPECT_FALSE(future.isReady());
 
   CountingExecutor executor;
@@ -1368,11 +1411,13 @@ TEST_P(FormatReaderTest, VortexCreateFromMetadataAsyncDefersAndAppliesReadState)
   }
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_VORTEX, schema_));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto column_groups, writer->close());
   const auto& file = column_groups->front()->files.front();
-  ASSERT_AND_ASSIGN(auto metadata, FormatReader::load_metadata<vortex::VortexFormatReader>(file, properties_, nullptr));
+  ASSERT_AND_ASSIGN(auto metadata, FormatReader::load_metadata<vortex::VortexFormatReader>(
+                                       file, std::make_shared<const api::Properties>(properties_), nullptr));
 
   auto id_schema = arrow::schema({schema_->field(0)});
   auto future = vortex::VortexFormatReader::MetaTrait::create_from_metadata_async(std::move(metadata), file, id_schema,
@@ -1395,7 +1440,8 @@ TEST_P(FormatReaderTest, TestReadWithRange) {
   ASSERT_AND_ASSIGN(auto id_schema, CreateTestSchema(std::array<bool, 4>{true, false, false, false}));
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, two_cols_schema));
-  auto writer = Writer::create(base_path_, two_cols_schema, std::move(policy), properties_);
+  auto writer = Writer::create(base_path_, two_cols_schema, std::move(policy),
+                               std::make_shared<const api::Properties>(properties_));
 
   ASSERT_AND_ASSIGN(
       auto rb_2560_rows,
@@ -1413,7 +1459,8 @@ TEST_P(FormatReaderTest, TestReadWithRange) {
   ASSERT_NE(cg, cgs->end());
   ASSERT_EQ((*cg)->files.size(), 1);
 
-  ASSERT_AND_ASSIGN(auto format_reader, FormatReader::create(id_schema, format, (*cg)->files[0], properties_,
+  ASSERT_AND_ASSIGN(auto format_reader, FormatReader::create(id_schema, format, (*cg)->files[0],
+                                                             std::make_shared<const api::Properties>(properties_),
                                                              std::vector<std::string>{"id"}, nullptr));
 
   for (int i = 0; i < 10; ++i) {
@@ -1447,7 +1494,8 @@ TEST_P(FormatReaderTest, S3FilesystemWriterCloseFailureShouldPropagate) {
   }
 
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
+      std::make_shared<const api::Properties>(properties_), fs_config));
   const auto is_s3_provider =
       fs_config.cloud_provider == kCloudProviderAWS || fs_config.cloud_provider == kCloudProviderAliyun ||
       fs_config.cloud_provider == kCloudProviderTencent || fs_config.cloud_provider == kCloudProviderHuawei;
@@ -1465,7 +1513,8 @@ TEST_P(FormatReaderTest, S3FilesystemWriterCloseFailureShouldPropagate) {
   for (const auto* fault_key : fault_keys) {
     SCOPED_TRACE(fault_key);
     ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-    auto writer = Writer::create(base_path_ + "/" + fault_key, schema_, std::move(policy), properties_);
+    auto writer = Writer::create(base_path_ + "/" + fault_key, schema_, std::move(policy),
+                                 std::make_shared<const api::Properties>(properties_));
     ASSERT_OK(writer->write(test_batch_));
 
     ScopedFiuFault fault(fault_key);
@@ -1483,7 +1532,8 @@ TEST_P(FormatReaderTest, S3FilesystemReaderFailureShouldPropagate) {
   }
 
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
+      std::make_shared<const api::Properties>(properties_), fs_config));
   const auto is_s3_provider =
       fs_config.cloud_provider == kCloudProviderAWS || fs_config.cloud_provider == kCloudProviderAliyun ||
       fs_config.cloud_provider == kCloudProviderTencent || fs_config.cloud_provider == kCloudProviderHuawei;
@@ -1523,7 +1573,8 @@ TEST_P(FormatReaderTest, S3FilesystemReaderFailureShouldPropagate) {
 
   ASSERT_AND_ASSIGN(auto id_schema, CreateTestSchema(std::array<bool, 4>{true, false, false, false}));
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
-  auto writer = Writer::create(base_path_ + "/reader-fiu-" + format, schema_, std::move(policy), properties_);
+  auto writer = Writer::create(base_path_ + "/reader-fiu-" + format, schema_, std::move(policy),
+                               std::make_shared<const api::Properties>(properties_));
   ASSERT_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
   auto cg = std::find_if(cgs->begin(), cgs->end(),
@@ -1535,7 +1586,8 @@ TEST_P(FormatReaderTest, S3FilesystemReaderFailureShouldPropagate) {
   ASSERT_EQ(0, fault.enable_result());
   try {
     auto format_reader_result =
-        FormatReader::create(id_schema, format, (*cg)->files[0], properties_, std::vector<std::string>{"id"}, nullptr);
+        FormatReader::create(id_schema, format, (*cg)->files[0], std::make_shared<const api::Properties>(properties_),
+                             std::vector<std::string>{"id"}, nullptr);
     EXPECT_FALSE(format_reader_result.ok()) << "FormatReader::create unexpectedly succeeded after filesystem fault "
                                             << FIUKEY_S3FS_READER_READAT_FAIL << " for format=" << format;
   } catch (const std::exception& e) {
@@ -1569,11 +1621,12 @@ TEST_P(FormatReaderTest, ParquetReadWithRangeReaderOutlivesFormatReader) {
   std::shared_ptr<arrow::RecordBatchReader> rb_reader;
   {
     std::shared_ptr<FormatReader> format_reader;
-    ASSERT_AND_ASSIGN(format_reader, FormatReader::create(
-                                         schema_, LOON_FORMAT_PARQUET,
-                                         api::ColumnGroupFile{
-                                             .path = file_path, .start_index = 0, .end_index = test_batch_->num_rows()},
-                                         properties_, std::vector<std::string>{"id"}, nullptr));
+    ASSERT_AND_ASSIGN(
+        format_reader,
+        FormatReader::create(
+            schema_, LOON_FORMAT_PARQUET,
+            api::ColumnGroupFile{.path = file_path, .start_index = 0, .end_index = test_batch_->num_rows()},
+            std::make_shared<const api::Properties>(properties_), std::vector<std::string>{"id"}, nullptr));
     ASSERT_AND_ASSIGN(rb_reader, format_reader->read_with_range(1, 4));
   }
 
@@ -1608,8 +1661,8 @@ TEST_P(FormatReaderTest, ParquetCreateFromMetadataReappliesProjection) {
   ASSERT_STATUS_OK(sink->Close());
 
   api::ColumnGroupFile file{.path = file_path, .start_index = 0, .end_index = two_cols_batch->num_rows()};
-  ASSERT_AND_ASSIGN(auto metadata,
-                    FormatReader::load_metadata<parquet::ParquetFormatReader>(file, properties_, nullptr));
+  ASSERT_AND_ASSIGN(auto metadata, FormatReader::load_metadata<parquet::ParquetFormatReader>(
+                                       file, std::make_shared<const api::Properties>(properties_), nullptr));
   auto id_metadata = metadata;
   auto value_metadata = metadata;
   ASSERT_EQ(id_metadata.get(), value_metadata.get());
@@ -1670,8 +1723,8 @@ TEST_P(FormatReaderTest, ParquetCreateFromMetadataSharesParsedMetadata) {
   ASSERT_GT(file.Get<uint64_t>(api::kPropertyFileSize), 0);
   ASSERT_GT(file.Get<uint64_t>(api::kPropertyFooterSize), 0);
 
-  ASSERT_AND_ASSIGN(auto metadata,
-                    FormatReader::load_metadata<parquet::ParquetFormatReader>(file, properties_, nullptr));
+  ASSERT_AND_ASSIGN(auto metadata, FormatReader::load_metadata<parquet::ParquetFormatReader>(
+                                       file, std::make_shared<const api::Properties>(properties_), nullptr));
   ASSERT_NE(nullptr, metadata->payload.parquet_metadata);
   const auto metadata_ref_count = metadata->payload.parquet_metadata.use_count();
 
@@ -1741,7 +1794,8 @@ TEST_P(FormatReaderTest, NestedProjectionPreservesTopLevelColumns) {
   auto record_batch = arrow::RecordBatch::Make(nested_schema, 4, {ids, profiles, events, notes});
 
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, nested_schema));
-  auto writer = Writer::create(base_path_, nested_schema, std::move(policy), properties_);
+  auto writer = Writer::create(base_path_, nested_schema, std::move(policy),
+                               std::make_shared<const api::Properties>(properties_));
   ASSERT_OK(writer->write(record_batch));
   ASSERT_AND_ASSIGN(auto column_groups, writer->close());
   ASSERT_EQ(column_groups->size(), 1);
@@ -1749,8 +1803,8 @@ TEST_P(FormatReaderTest, NestedProjectionPreservesTopLevelColumns) {
 
   if (format == LOON_FORMAT_PARQUET) {
     const auto& file = column_groups->front()->files.front();
-    ASSERT_AND_ASSIGN(auto metadata,
-                      parquet::ParquetFormatReader::MetaTrait::load_metadata(file, properties_, nullptr));
+    ASSERT_AND_ASSIGN(auto metadata, parquet::ParquetFormatReader::MetaTrait::load_metadata(
+                                         file, std::make_shared<const api::Properties>(properties_), nullptr));
     ASSERT_NE(metadata->payload.parquet_metadata, nullptr);
     ASSERT_EQ(metadata->row_group_infos.size(), 1);
 
@@ -1799,9 +1853,10 @@ TEST_P(FormatReaderTest, NestedProjectionPreservesTopLevelColumns) {
     }
 
     ASSERT_AND_ASSIGN(auto expected_batch, record_batch->SelectColumns(projected_field_indices));
-    ASSERT_AND_ASSIGN(auto format_reader,
-                      FormatReader::create(expected_batch->schema(), format, column_groups->front()->files.front(),
-                                           properties_, needed_columns, nullptr));
+    ASSERT_AND_ASSIGN(
+        auto format_reader,
+        FormatReader::create(expected_batch->schema(), format, column_groups->front()->files.front(),
+                             std::make_shared<const api::Properties>(properties_), needed_columns, nullptr));
 
     ASSERT_AND_ASSIGN(auto chunk, format_reader->get_chunk(0));
     assert_batch_equal(chunk, expected_batch);
@@ -1857,8 +1912,8 @@ TEST_P(FormatReaderTest, NestedProjectionPreservesTopLevelColumns) {
   auto extension_storage_batch = arrow::RecordBatch::Make(extension_storage_schema, 4, {ids, extension_storage, notes});
 
   ASSERT_AND_ASSIGN(auto extension_policy, CreateSinglePolicy(format, extension_schema));
-  auto extension_writer =
-      Writer::create(base_path_ + "/extension", extension_schema, std::move(extension_policy), properties_);
+  auto extension_writer = Writer::create(base_path_ + "/extension", extension_schema, std::move(extension_policy),
+                                         std::make_shared<const api::Properties>(properties_));
   ASSERT_OK(extension_writer->write(extension_batch));
   ASSERT_AND_ASSIGN(auto extension_column_groups, extension_writer->close());
   ASSERT_EQ(extension_column_groups->size(), 1);
@@ -1866,7 +1921,8 @@ TEST_P(FormatReaderTest, NestedProjectionPreservesTopLevelColumns) {
 
   const auto& extension_file = extension_column_groups->front()->files.front();
   ASSERT_AND_ASSIGN(auto loaded_metadata,
-                    parquet::ParquetFormatReader::MetaTrait::load_metadata(extension_file, properties_, nullptr));
+                    parquet::ParquetFormatReader::MetaTrait::load_metadata(
+                        extension_file, std::make_shared<const api::Properties>(properties_), nullptr));
   auto metadata = std::make_shared<parquet::ParquetFormatReader::MetaTrait::Metadata>(*loaded_metadata);
 
   // The file reader can return the extension column as its storage struct, which is allowed here.

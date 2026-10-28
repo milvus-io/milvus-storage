@@ -119,7 +119,7 @@ ColumnGroupPolicy::ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, cons
     : schema_(std::move(schema)), default_format_(default_format) {}
 
 arrow::Result<std::unique_ptr<ColumnGroupPolicy>> ColumnGroupPolicy::create_column_group_policy(
-    const Properties& properties_map, const std::shared_ptr<arrow::Schema>& schema) {
+    const std::shared_ptr<const Properties>& properties_map, const std::shared_ptr<arrow::Schema>& schema) {
   ARROW_ASSIGN_OR_RAISE(auto policy_name, GetValue<std::string>(properties_map, PROPERTY_WRITER_POLICY));
   ARROW_ASSIGN_OR_RAISE(auto fallback_format, GetValue<std::string>(properties_map, PROPERTY_WRITER_FORMAT));
 
@@ -293,13 +293,13 @@ class WriterImpl : public Writer {
   WriterImpl(std::string base_path,
              std::shared_ptr<arrow::Schema> schema,
              std::unique_ptr<ColumnGroupPolicy> column_group_policy,
-             const Properties& properties)
+             std::shared_ptr<const Properties> properties)
       : base_path_(std::move(base_path)),
         schema_(std::move(schema)),
         column_group_policy_(std::move(column_group_policy)),
-        properties_(properties),
+        properties_(std::move(properties)),
         cgs_(std::make_shared<ColumnGroups>()),
-        buffer_size_(GetValueNoError<int32_t>(properties, PROPERTY_WRITER_BUFFER_SIZE)) {}
+        buffer_size_(GetValueNoError<int32_t>(properties_, PROPERTY_WRITER_BUFFER_SIZE)) {}
 
   /**
    * @brief Gets the schema of the dataset being written
@@ -438,7 +438,7 @@ class WriterImpl : public Writer {
   std::string base_path_;                                   ///< Base directory for column group files
   std::shared_ptr<arrow::Schema> schema_;                   ///< Logical schema of the dataset
   std::unique_ptr<ColumnGroupPolicy> column_group_policy_;  ///< Policy for organizing columns
-  Properties properties_;                                   ///< Write configuration properties
+  std::shared_ptr<const Properties> properties_;            ///< Write configuration properties
 
   std::shared_ptr<ColumnGroups> cgs_;                                     ///< Dataset column groups being built
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;               ///< Column groups metadata
@@ -590,9 +590,10 @@ class WriterImpl : public Writer {
 std::unique_ptr<Writer> Writer::create(std::string base_path,
                                        std::shared_ptr<arrow::Schema> schema,
                                        std::unique_ptr<ColumnGroupPolicy> column_group_policy,
-                                       const Properties& properties) {
+                                       std::shared_ptr<const Properties> properties) {
+  assert(properties);
   return std::make_unique<WriterImpl>(std::move(base_path), std::move(schema), std::move(column_group_policy),
-                                      properties);
+                                      std::move(properties));
 }
 
 }  // namespace milvus_storage::api

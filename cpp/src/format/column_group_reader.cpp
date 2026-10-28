@@ -59,7 +59,7 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
   public:
   ColumnGroupReaderImpl(const std::shared_ptr<arrow::Schema>& schema,
                         const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
-                        const milvus_storage::api::Properties& properties,
+                        const std::shared_ptr<const milvus_storage::api::Properties>& properties,
                         const std::vector<std::string>& needed_columns,
                         const std::function<std::string(const std::string&)>& key_retriever,
                         const milvus_storage::MetadataCache& cache,
@@ -109,7 +109,7 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
   protected:
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<milvus_storage::api::ColumnGroup> column_group_;
-  milvus_storage::api::Properties properties_;
+  std::shared_ptr<const milvus_storage::api::Properties> properties_;
   std::vector<std::string> needed_columns_;
   std::function<std::string(const std::string&)> key_retriever_;
   milvus_storage::MetadataCache cache_;
@@ -139,7 +139,7 @@ template <typename ReaderT>
 ColumnGroupReaderImpl<ReaderT>::ColumnGroupReaderImpl(
     const std::shared_ptr<arrow::Schema>& schema,
     const std::shared_ptr<api::ColumnGroup>& column_group,
-    const api::Properties& properties,
+    const std::shared_ptr<const api::Properties>& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& key_retriever,
     const milvus_storage::MetadataCache& cache,
@@ -799,7 +799,7 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
     const std::shared_ptr<arrow::Schema>& schema,
     const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
     const std::vector<std::string>& needed_columns,
-    const milvus_storage::api::Properties& properties,
+    const std::shared_ptr<const milvus_storage::api::Properties>& properties,
     const std::function<std::string(const std::string&)>& key_retriever,
     const std::string& predicate,
     const milvus_storage::MetadataCache& cache) {
@@ -859,7 +859,7 @@ folly::SemiFuture<arrow::Result<std::unique_ptr<ColumnGroupReader>>> ColumnGroup
     const std::shared_ptr<arrow::Schema>& schema,
     const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
     const std::vector<std::string>& needed_columns,
-    const milvus_storage::api::Properties& properties,
+    const std::shared_ptr<const milvus_storage::api::Properties>& properties,
     const std::function<std::string(const std::string&)>& key_retriever,
     const std::string& predicate,
     const milvus_storage::MetadataCache& cache) {

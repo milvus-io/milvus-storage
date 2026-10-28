@@ -60,16 +60,22 @@ class SegmentReaderTextTest : public ::testing::Test {
     text_config.inline_threshold = 20;
     text_config.max_lob_file_bytes = 1024 * 1024;
     text_config.flush_threshold_bytes = 64 * 1024;
-    ASSERT_STATUS_OK(InitTestProperties(text_config.properties));
+    api::Properties text_config_properties;
+    ASSERT_STATUS_OK(InitTestProperties(text_config_properties));
+    text_config.properties = std::make_shared<const api::Properties>(std::move(text_config_properties));
 
     writer_config_.lob_columns[101] = text_config;
-    ASSERT_STATUS_OK(InitTestProperties(writer_config_.properties));
-    writer_config_.properties[PROPERTY_WRITER_POLICY] = LOON_COLUMN_GROUP_POLICY_SINGLE;
-    writer_config_.properties[PROPERTY_WRITER_FORMAT] = LOON_FORMAT_PARQUET;
+    api::Properties writer_config_properties;
+    ASSERT_STATUS_OK(InitTestProperties(writer_config_properties));
+    writer_config_properties[PROPERTY_WRITER_POLICY] = LOON_COLUMN_GROUP_POLICY_SINGLE;
+    writer_config_properties[PROPERTY_WRITER_FORMAT] = LOON_FORMAT_PARQUET;
+    writer_config_.properties = std::make_shared<const api::Properties>(std::move(writer_config_properties));
 
     // configure reader
     reader_config_.lob_columns = writer_config_.lob_columns;
-    ASSERT_STATUS_OK(InitTestProperties(reader_config_.properties));
+    api::Properties reader_config_properties;
+    ASSERT_STATUS_OK(InitTestProperties(reader_config_properties));
+    reader_config_.properties = std::make_shared<const api::Properties>(std::move(reader_config_properties));
   }
 
   void TearDown() override { boost::filesystem::remove_all(test_dir_); }
@@ -938,7 +944,9 @@ TEST_F(SegmentReaderTextTest, GetStreamWithoutLobColumns) {
   // open reader with only non-LOB columns
   std::vector<std::string> columns = {"id", "value"};
   SegmentReaderConfig config_no_lob;
-  ASSERT_STATUS_OK(InitTestProperties(config_no_lob.properties));
+  api::Properties config_no_lob_properties;
+  ASSERT_STATUS_OK(InitTestProperties(config_no_lob_properties));
+  config_no_lob.properties = std::make_shared<const api::Properties>(std::move(config_no_lob_properties));
   // no lob_columns configured
 
   auto manifest = OpenManifest(writer_config_.segment_path, version);

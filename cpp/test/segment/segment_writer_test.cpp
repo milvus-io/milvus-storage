@@ -60,14 +60,18 @@ class SegmentWriterTest : public ::testing::Test {
     text_config.inline_threshold = 20;  // small threshold for testing
     text_config.max_lob_file_bytes = 1024 * 1024;
     text_config.flush_threshold_bytes = 64 * 1024;
-    ASSERT_STATUS_OK(InitTestProperties(text_config.properties));
+    api::Properties text_config_properties;
+    ASSERT_STATUS_OK(InitTestProperties(text_config_properties));
+    text_config.properties = std::make_shared<const api::Properties>(std::move(text_config_properties));
 
     config_.lob_columns[101] = text_config;
 
     // properties for ColumnGroupPolicy (single policy - all columns in one group)
-    ASSERT_STATUS_OK(InitTestProperties(config_.properties));
-    config_.properties[PROPERTY_WRITER_POLICY] = LOON_COLUMN_GROUP_POLICY_SINGLE;
-    config_.properties[PROPERTY_WRITER_FORMAT] = LOON_FORMAT_PARQUET;
+    api::Properties config_properties;
+    ASSERT_STATUS_OK(InitTestProperties(config_properties));
+    config_properties[PROPERTY_WRITER_POLICY] = LOON_COLUMN_GROUP_POLICY_SINGLE;
+    config_properties[PROPERTY_WRITER_FORMAT] = LOON_FORMAT_PARQUET;
+    config_.properties = std::make_shared<const api::Properties>(std::move(config_properties));
   }
 
   void TearDown() override {
@@ -173,7 +177,9 @@ TEST_F(SegmentWriterTest, CreateWriterInvalidConfig) {
 
   // missing writer policy
   invalid_config = config_;
-  invalid_config.properties.erase(PROPERTY_WRITER_POLICY);
+  auto invalid_properties = *invalid_config.properties;
+  invalid_properties.erase(PROPERTY_WRITER_POLICY);
+  invalid_config.properties = std::make_shared<const api::Properties>(std::move(invalid_properties));
   auto result5 = SegmentWriter::Create(fs_, schema_, invalid_config);
   ASSERT_FALSE(result5.ok());
 }
@@ -292,7 +298,9 @@ TEST_F(SegmentWriterTest, WriteAndReadFromManifest) {
   {
     SegmentReaderConfig reader_config;
     reader_config.lob_columns = config_.lob_columns;
-    ASSERT_STATUS_OK(InitTestProperties(reader_config.properties));
+    api::Properties reader_config_properties;
+    ASSERT_STATUS_OK(InitTestProperties(reader_config_properties));
+    reader_config.properties = std::make_shared<const api::Properties>(std::move(reader_config_properties));
 
     // open transaction to get manifest
     auto txn_result =
@@ -405,7 +413,9 @@ TEST_F(SegmentWriterTest, IncrementalWrites) {
   {
     SegmentReaderConfig reader_config;
     reader_config.lob_columns = config_.lob_columns;
-    ASSERT_STATUS_OK(InitTestProperties(reader_config.properties));
+    api::Properties reader_config_properties;
+    ASSERT_STATUS_OK(InitTestProperties(reader_config_properties));
+    reader_config.properties = std::make_shared<const api::Properties>(std::move(reader_config_properties));
 
     auto txn_result =
         api::transaction::Transaction::Open(fs_, config_.segment_path, version2, -1, api::transaction::FailResolver, 1);
@@ -511,9 +521,11 @@ TEST_F(SegmentWriterTest, SchemaWithoutLobColumns) {
   SegmentWriterConfig no_text_config;
   no_text_config.segment_path = test_dir_ + "/no_text/segments/seg-001";
   boost::filesystem::create_directories(test_dir_ + "/no_text");
-  ASSERT_STATUS_OK(InitTestProperties(no_text_config.properties));
-  no_text_config.properties[PROPERTY_WRITER_POLICY] = LOON_COLUMN_GROUP_POLICY_SINGLE;
-  no_text_config.properties[PROPERTY_WRITER_FORMAT] = LOON_FORMAT_PARQUET;
+  api::Properties no_text_config_properties;
+  ASSERT_STATUS_OK(InitTestProperties(no_text_config_properties));
+  no_text_config_properties[PROPERTY_WRITER_POLICY] = LOON_COLUMN_GROUP_POLICY_SINGLE;
+  no_text_config_properties[PROPERTY_WRITER_FORMAT] = LOON_FORMAT_PARQUET;
+  no_text_config.properties = std::make_shared<const api::Properties>(std::move(no_text_config_properties));
 
   auto writer_result = SegmentWriter::Create(fs_, no_text_schema, no_text_config);
   ASSERT_TRUE(writer_result.ok()) << writer_result.status().message();

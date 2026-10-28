@@ -68,7 +68,9 @@ using namespace milvus_storage::api;
 class StorageFixture : public benchmark::Fixture {
   protected:
   void SetUp(::benchmark::State& state) override {
-    GBENCH_ASSERT_STATUS_OK(InitTestProperties(properties_), state);
+    api::Properties properties;
+    GBENCH_ASSERT_STATUS_OK(InitTestProperties(properties), state);
+    properties_ = std::make_shared<const api::Properties>(std::move(properties));
     GBENCH_ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_), state);
     base_path_ = GetTestBasePath("googlebench");
     GBENCH_ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_), state);
@@ -79,7 +81,7 @@ class StorageFixture : public benchmark::Fixture {
     // GBENCH_ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_), state);
   }
 
-  api::Properties properties_;
+  std::shared_ptr<const api::Properties> properties_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::string base_path_;
 };
@@ -95,7 +97,7 @@ struct WriteDataConfig {
 static void APIWriteBenchmark(benchmark::State& st,
                               const std::shared_ptr<arrow::fs::FileSystem>& fs,
                               std::string& base_path,
-                              const api::Properties& properties,
+                              const std::shared_ptr<const api::Properties>& properties,
                               size_t loop_times,
                               const WriteDataConfig& write_config) {
   GBENCH_ASSERT_AND_ASSIGN(auto schema, CreateTestSchema(write_config.needed_columns), st);
@@ -134,7 +136,7 @@ static std::shared_ptr<std::vector<std::string>> GetProjection(std::array<bool, 
 static void APIFullReadBenchmark(benchmark::State& st,
                                  const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                  std::string& base_path,
-                                 const api::Properties& properties,
+                                 const std::shared_ptr<const api::Properties>& properties,
                                  size_t loop_times,
                                  const WriteDataConfig& write_config,
                                  const FullReadDataConfig& read_config) {
@@ -174,7 +176,7 @@ static void APIFullReadBenchmark(benchmark::State& st,
 static void APIWriteLargeBenchmark(benchmark::State& st,
                                    const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                    std::string& base_path,
-                                   const api::Properties& properties,
+                                   const std::shared_ptr<const api::Properties>& properties,
                                    size_t target_row,
                                    size_t multi_random_rb_counts,
                                    const WriteDataConfig& write_config,

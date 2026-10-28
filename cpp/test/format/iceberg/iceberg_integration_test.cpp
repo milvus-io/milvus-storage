@@ -57,7 +57,7 @@ class IcebergIntegrationTest : public ::testing::Test {
     // Clear the filesystem cache to pick up the new root
     FilesystemCache::getInstance().clean();
 
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
 
     // Use an absolute temp path within /tmp for the test table
     abs_table_dir_ = "/tmp/iceberg-integration-test/test_table";
@@ -74,7 +74,9 @@ class IcebergIntegrationTest : public ::testing::Test {
   }
 
   arrow::Result<std::vector<IcebergFileInfo>> PlanTableFiles(const IcebergTestTableInfo& table_info) {
-    ARROW_ASSIGN_OR_RAISE(auto config, FilesystemCache::resolve_config(properties_, table_info.metadata_location));
+    ARROW_ASSIGN_OR_RAISE(auto config,
+                          FilesystemCache::resolve_config(std::make_shared<const api::Properties>(properties_),
+                                                          table_info.metadata_location));
     return PlanFiles(table_info.metadata_location, table_info.snapshot_id, fs_, ToReaderOptions(config));
   }
 
@@ -103,7 +105,8 @@ TEST_F(IcebergIntegrationTest, ExploreAndReadBasic) {
 
   std::vector<std::string> columns = {"id", "name", "value"};
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, cg_file, properties_, columns, nullptr));
+                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, cg_file,
+                                         std::make_shared<const api::Properties>(properties_), columns, nullptr));
 
   // 4. Read all row groups
   ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
@@ -146,7 +149,8 @@ TEST_F(IcebergIntegrationTest, ExploreThroughFormatUsesFilesystemPlanner) {
   api::SetValue(properties_, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, std::to_string(table_info.snapshot_id).c_str());
 
   ASSERT_AND_ASSIGN(auto* format, Format::get(LOON_FORMAT_ICEBERG_TABLE));
-  ASSERT_AND_ASSIGN(auto files, format->explore(table_info.metadata_location, properties_));
+  ASSERT_AND_ASSIGN(
+      auto files, format->explore(table_info.metadata_location, std::make_shared<const api::Properties>(properties_)));
 
   ASSERT_EQ(files.size(), 1);
   EXPECT_EQ(files.front().end_index, static_cast<int64_t>(num_rows));
@@ -154,7 +158,8 @@ TEST_F(IcebergIntegrationTest, ExploreThroughFormatUsesFilesystemPlanner) {
 
 TEST_F(IcebergIntegrationTest, PlanningUpdatesBoundFilesystemMetrics) {
   ASSERT_AND_ASSIGN(auto table_info, CreateTestTable(abs_table_dir_, 50, false, {}));
-  ASSERT_AND_ASSIGN(auto config, FilesystemCache::resolve_config(properties_, table_info.metadata_location));
+  ASSERT_AND_ASSIGN(auto config, FilesystemCache::resolve_config(std::make_shared<const api::Properties>(properties_),
+                                                                 table_info.metadata_location));
   auto observable = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable, nullptr);
   ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
@@ -191,7 +196,8 @@ TEST_F(IcebergIntegrationTest, ExploreAndReadWithPositionalDeletes) {
 
   std::vector<std::string> columns = {"id", "name", "value"};
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, cg_file, properties_, columns, nullptr));
+                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, cg_file,
+                                         std::make_shared<const api::Properties>(properties_), columns, nullptr));
 
   // 4. Read and count rows — should be num_rows - deleted_positions.size()
   ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
@@ -246,7 +252,8 @@ TEST_F(IcebergIntegrationTest, TakeWithPositionalDeletes) {
 
   std::vector<std::string> columns = {"id", "value"};
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, cg_file, properties_, columns, nullptr));
+                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, cg_file,
+                                         std::make_shared<const api::Properties>(properties_), columns, nullptr));
 
   // Logical doc IDs (post-delete indices)
   std::vector<int64_t> take_positions = {0, 5, 9, 18};
@@ -283,7 +290,8 @@ TEST_F(IcebergIntegrationTest, ColumnProjection) {
   // Read only "name" column
   std::vector<std::string> columns = {"name"};
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, cg_file, properties_, columns, nullptr));
+                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, cg_file,
+                                         std::make_shared<const api::Properties>(properties_), columns, nullptr));
 
   ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
   ASSERT_EQ(batch->num_columns(), 1);
@@ -308,7 +316,8 @@ TEST_F(IcebergIntegrationTest, CloneReaderSharesDeletes) {
 
   std::vector<std::string> columns = {"id"};
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, cg_file, properties_, columns, nullptr));
+                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, cg_file,
+                                         std::make_shared<const api::Properties>(properties_), columns, nullptr));
 
   ASSERT_AND_ASSIGN(auto cloned, reader->clone_reader());
 

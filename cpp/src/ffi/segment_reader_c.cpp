@@ -26,8 +26,8 @@ using namespace milvus_storage;
 using namespace milvus_storage::api;
 using namespace milvus_storage::segment;
 
-static arrow::Result<SegmentReaderConfig> ConvertReaderConfig(const LoonSegmentReaderConfig* config,
-                                                              const api::Properties& properties) {
+static arrow::Result<SegmentReaderConfig> ConvertReaderConfig(
+    const LoonSegmentReaderConfig* config, const std::shared_ptr<const api::Properties>& properties) {
   SegmentReaderConfig cpp_config;
   cpp_config.properties = properties;
 
@@ -65,7 +65,7 @@ LoonFFIResult loon_segment_reader_open(const char* segment_path,
 
   try {
     // convert properties
-    api::Properties props_map;
+    std::shared_ptr<const api::Properties> props_map;
     auto opt = ConvertFFIProperties(props_map, properties);
     if (opt != std::nullopt) {
       RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties: ", opt->c_str());

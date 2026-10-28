@@ -23,7 +23,7 @@ std::shared_ptr<FormatReader> ParquetFormat::make_reader(
     const std::shared_ptr<arrow::fs::FileSystem>& fs,
     const std::shared_ptr<arrow::Schema>& /*read_schema*/,
     const std::string& resolved_path,
-    const api::Properties& properties,
+    const std::shared_ptr<const api::Properties>& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& key_retriever,
     uint64_t file_size,
@@ -36,7 +36,7 @@ arrow::Result<std::unique_ptr<FormatWriter>> ParquetFormat::make_writer(
     const std::shared_ptr<arrow::fs::FileSystem>& fs,
     const std::shared_ptr<arrow::Schema>& schema,
     const std::string& file_path,
-    const api::Properties& properties) {
+    const std::shared_ptr<const api::Properties>& properties) {
   return parquet::ParquetFileWriter::Make(fs, schema, file_path, properties);
 }
 

@@ -62,7 +62,7 @@ class VortexV2Test : public ::testing::Test {
       record_batches_.emplace_back(std::move(rb));
     }
 
-    ASSERT_AND_ASSIGN(file_system_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(file_system_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
   }
 
   void TearDown() override {
@@ -113,7 +113,8 @@ TEST_F(VortexV2Test, TestV2StatsEnabledUsesRowGroupZoneMapLayout) {
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, std::to_string(128 * 1024).c_str());
 
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
   for (const auto& rb : record_batches_) {
     ASSERT_TRUE(vx_writer->Write(rb).ok());
   }
@@ -137,7 +138,8 @@ TEST_F(VortexV2Test, TestV2StatsEnabledUsesRowGroupZoneMapLayout) {
   ASSERT_AND_ASSIGN(auto zone_map_segment_ids, vxfile.ZoneMapSegmentIds());
   ASSERT_FALSE(zone_map_segment_ids.empty());
 
-  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
+  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_,
+                                              std::make_shared<const api::Properties>(properties_), data_columns(),
                                               vx_file_size, vx_footer_size);
   ASSERT_STATUS_OK(vx_reader.open());
   ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows(), kSmallCoalescingWindow));
@@ -154,7 +156,8 @@ TEST_F(VortexV2Test, TestV2StatsDisabledUsesPlainRowGroupLayout) {
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, std::to_string(128 * 1024).c_str());
 
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
   for (const auto& rb : record_batches_) {
     ASSERT_TRUE(vx_writer->Write(rb).ok());
   }
@@ -178,7 +181,8 @@ TEST_F(VortexV2Test, TestV2StatsDisabledUsesPlainRowGroupLayout) {
   ASSERT_AND_ASSIGN(auto splits, vxfile.Splits());
   ASSERT_GT(splits.size(), 1u);
 
-  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
+  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_,
+                                              std::make_shared<const api::Properties>(properties_), data_columns(),
                                               vx_file_size, vx_footer_size);
   ASSERT_STATUS_OK(vx_reader.open());
   ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows(), kSmallCoalescingWindow));
@@ -191,7 +195,8 @@ TEST_F(VortexV2Test, TestV1StatsEnabledExposesZoneMapSegments) {
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "true");
 
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
   for (const auto& rb : record_batches_) {
     ASSERT_TRUE(vx_writer->Write(rb).ok());
   }
@@ -215,7 +220,8 @@ TEST_F(VortexV2Test, TestV2RowGroupZoneMapFilterScan) {
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, std::to_string(128 * 1024).c_str());
 
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
   for (const auto& rb : record_batches_) {
     ASSERT_TRUE(vx_writer->Write(rb).ok());
   }
@@ -251,7 +257,8 @@ TEST_F(VortexV2Test, TestV2RowGroupWrite) {
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, std::to_string(128 * 1024).c_str());
 
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
   for (const auto& rb : record_batches_) {
     ASSERT_TRUE(vx_writer->Write(rb).ok());
   }
@@ -262,7 +269,8 @@ TEST_F(VortexV2Test, TestV2RowGroupWrite) {
   auto total_rows = recordBatchsRows();
 
   // --- blocking_read: full scan ---
-  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns());
+  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_,
+                                              std::make_shared<const api::Properties>(properties_), data_columns());
   ASSERT_STATUS_OK(vx_reader.open());
   ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, total_rows, kSmallCoalescingWindow));
   ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
@@ -293,8 +301,9 @@ TEST_F(VortexV2Test, TestV2RowGroupWrite) {
 
   // --- take: random access ---
   auto proj_schema = arrow::schema({schema_->field(0)});
-  auto take_reader = vortex::VortexFormatReader(file_system_, proj_schema, test_file_name_, properties_,
-                                                std::vector<std::string>{"id"});
+  auto take_reader =
+      vortex::VortexFormatReader(file_system_, proj_schema, test_file_name_,
+                                 std::make_shared<const api::Properties>(properties_), std::vector<std::string>{"id"});
   ASSERT_STATUS_OK(take_reader.open());
 
   std::vector<int64_t> take_indices = {0, 42, total_rows / 2, total_rows - 1};
@@ -334,7 +343,7 @@ TEST_F(VortexV2Test, TestInlineArrayNodeSubSegmentRead) {
   }
 
   // Get cloud filesystem with metrics
-  ASSERT_AND_ASSIGN(auto cloud_fs, GetFileSystem(properties_));
+  ASSERT_AND_ASSIGN(auto cloud_fs, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
   auto observable = std::dynamic_pointer_cast<Observable>(cloud_fs);
   ASSERT_NE(observable, nullptr);
   ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
@@ -350,7 +359,9 @@ TEST_F(VortexV2Test, TestInlineArrayNodeSubSegmentRead) {
   std::string test_path = GetTestBasePath("vortex-inline-test") + "/test-fsb.vx";
 
   {
-    ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(cloud_fs, fsb_schema, test_path, properties_));
+    ASSERT_AND_ASSIGN(auto vx_writer,
+                      vortex::VortexFileWriter::Open(cloud_fs, fsb_schema, test_path,
+                                                     std::make_shared<const api::Properties>(properties_)));
 
     arrow::FixedSizeBinaryBuilder fsb_builder(arrow::fixed_size_binary(fsb_width));
     std::string row_data(fsb_width, '\0');
@@ -375,7 +386,8 @@ TEST_F(VortexV2Test, TestInlineArrayNodeSubSegmentRead) {
 
   // Open reader and take 1 row
   auto vx_reader =
-      vortex::VortexFormatReader(cloud_fs, fsb_schema, test_path, properties_, std::vector<std::string>{"embedding"});
+      vortex::VortexFormatReader(cloud_fs, fsb_schema, test_path, std::make_shared<const api::Properties>(properties_),
+                                 std::vector<std::string>{"embedding"});
   ASSERT_STATUS_OK(vx_reader.open());
 
   // Reset metrics before take
@@ -394,7 +406,8 @@ TEST_F(VortexV2Test, TestInlineArrayNodeSubSegmentRead) {
 
 TEST_F(VortexV2Test, TestTakeRejectsMixedNegativeRowIndex) {
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
   for (const auto& rb : record_batches_) {
     ASSERT_STATUS_OK(vx_writer->Write(rb));
   }
@@ -402,7 +415,8 @@ TEST_F(VortexV2Test, TestTakeRejectsMixedNegativeRowIndex) {
   ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
 
-  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns());
+  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_,
+                                              std::make_shared<const api::Properties>(properties_), data_columns());
   ASSERT_STATUS_OK(vx_reader.open());
 
   std::vector<int64_t> row_indices = {0, -1};
@@ -467,14 +481,17 @@ TEST_F(VortexV2Test, TestV2StringCodecDistributionsRoundTrip) {
     ASSERT_AND_ASSIGN(auto array, builder.Finish());
     auto rb = arrow::RecordBatch::Make(str_schema, static_cast<int64_t>(test_case.values.size()), {array});
 
-    ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, str_schema, test_path, properties_));
+    ASSERT_AND_ASSIGN(auto vx_writer,
+                      vortex::VortexFileWriter::Open(file_system_, str_schema, test_path,
+                                                     std::make_shared<const api::Properties>(properties_)));
     ASSERT_STATUS_OK(vx_writer->Write(rb));
     ASSERT_STATUS_OK(vx_writer->Flush());
     ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
     ASSERT_EQ(static_cast<int64_t>(test_case.values.size()), cgfile.end_index) << test_case.name;
 
-    auto vx_reader =
-        vortex::VortexFormatReader(file_system_, str_schema, test_path, properties_, std::vector<std::string>{"str"});
+    auto vx_reader = vortex::VortexFormatReader(file_system_, str_schema, test_path,
+                                                std::make_shared<const api::Properties>(properties_),
+                                                std::vector<std::string>{"str"});
     ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, test_case.values.size(), kSmallCoalescingWindow));
     ASSERT_AND_ASSIGN(auto read_rb, ChunkedArrayToRecordBatch(chunked_array));
@@ -525,7 +542,9 @@ TEST_F(VortexV2Test, TestV2RowGroupSplitsBySize) {
 
   // Write: batch1 = 8192 rows * 128B, batch2 = 8192 rows * 512B
   {
-    ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, str_schema, test_path, properties_));
+    ASSERT_AND_ASSIGN(auto vx_writer,
+                      vortex::VortexFileWriter::Open(file_system_, str_schema, test_path,
+                                                     std::make_shared<const api::Properties>(properties_)));
     ASSERT_TRUE(vx_writer->Write(make_string_batch(small_str_len, rows_per_batch)).ok());
     ASSERT_TRUE(vx_writer->Write(make_string_batch(large_str_len, rows_per_batch)).ok());
     ASSERT_TRUE(vx_writer->Flush().ok());
@@ -535,7 +554,8 @@ TEST_F(VortexV2Test, TestV2RowGroupSplitsBySize) {
 
   // Read back and check row group infos
   auto vx_reader =
-      vortex::VortexFormatReader(file_system_, str_schema, test_path, properties_, std::vector<std::string>{"str"});
+      vortex::VortexFormatReader(file_system_, str_schema, test_path,
+                                 std::make_shared<const api::Properties>(properties_), std::vector<std::string>{"str"});
   ASSERT_STATUS_OK(vx_reader.open());
 
   ASSERT_AND_ASSIGN(auto rg_infos, vx_reader.get_row_group_infos());
@@ -642,7 +662,8 @@ TEST_F(VortexV2Test, TestV2RowGroupMultiColumnSplitsBySize) {
   // Total: 4 * 8192 = 32768 rows ≈ 56.4 MB
   {
     ASSERT_AND_ASSIGN(auto vx_writer,
-                      vortex::VortexFileWriter::Open(file_system_, multi_schema, test_path, properties_));
+                      vortex::VortexFileWriter::Open(file_system_, multi_schema, test_path,
+                                                     std::make_shared<const api::Properties>(properties_)));
     for (int i = 0; i < 4; ++i) {
       ASSERT_TRUE(vx_writer->Write(make_batch(rows_per_batch)).ok());
     }
@@ -652,7 +673,8 @@ TEST_F(VortexV2Test, TestV2RowGroupMultiColumnSplitsBySize) {
   }
 
   // Read back and check row group infos
-  auto vx_reader = vortex::VortexFormatReader(file_system_, multi_schema, test_path, properties_,
+  auto vx_reader = vortex::VortexFormatReader(file_system_, multi_schema, test_path,
+                                              std::make_shared<const api::Properties>(properties_),
                                               std::vector<std::string>{"col_a", "col_b", "col_c"});
   ASSERT_STATUS_OK(vx_reader.open());
 

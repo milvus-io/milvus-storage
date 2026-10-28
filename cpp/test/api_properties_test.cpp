@@ -1,5 +1,6 @@
 
 
+#include <memory>
 #include <gtest/gtest.h>
 
 #include "milvus-storage/common/config.h"
@@ -20,11 +21,15 @@ TEST_F(APIPropertiesTest, basic) {
   milvus_storage::api::Properties pp{};
 
   // Test get default value
-  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_WRITER_COMPRESSION), "zstd");
-  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_WRITER_FORMAT), LOON_FORMAT_PARQUET);
-  EXPECT_EQ(GetValueNoError<int32_t>(pp, PROPERTY_WRITER_COMPRESSION_LEVEL), 3);
-  EXPECT_EQ(GetValueNoError<int32_t>(pp, PROPERTY_WRITER_BUFFER_SIZE), 32 * 1024 * 1024);
-  EXPECT_TRUE(GetValueNoError<bool>(pp, PROPERTY_WRITER_ENABLE_DICTIONARY));
+  EXPECT_EQ(GetValueNoError<std::string>(std::make_shared<const api::Properties>(pp), PROPERTY_WRITER_COMPRESSION),
+            "zstd");
+  EXPECT_EQ(GetValueNoError<std::string>(std::make_shared<const api::Properties>(pp), PROPERTY_WRITER_FORMAT),
+            LOON_FORMAT_PARQUET);
+  EXPECT_EQ(GetValueNoError<int32_t>(std::make_shared<const api::Properties>(pp), PROPERTY_WRITER_COMPRESSION_LEVEL),
+            3);
+  EXPECT_EQ(GetValueNoError<int32_t>(std::make_shared<const api::Properties>(pp), PROPERTY_WRITER_BUFFER_SIZE),
+            32 * 1024 * 1024);
+  EXPECT_TRUE(GetValueNoError<bool>(std::make_shared<const api::Properties>(pp), PROPERTY_WRITER_ENABLE_DICTIONARY));
 
   // Test set & get properties
   EXPECT_EQ(SetValue(pp, PROPERTY_WRITER_COMPRESSION, "gzip"), std::nullopt);
@@ -33,11 +38,15 @@ TEST_F(APIPropertiesTest, basic) {
   EXPECT_EQ(SetValue(pp, PROPERTY_WRITER_BUFFER_SIZE, "67108864"), std::nullopt);
   EXPECT_EQ(SetValue(pp, PROPERTY_WRITER_ENABLE_DICTIONARY, "false"), std::nullopt);
 
-  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_WRITER_COMPRESSION), "gzip");
-  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_WRITER_FORMAT), LOON_FORMAT_VORTEX);
-  EXPECT_EQ(GetValueNoError<int32_t>(pp, PROPERTY_WRITER_COMPRESSION_LEVEL), 3);
-  EXPECT_EQ(GetValueNoError<int32_t>(pp, PROPERTY_WRITER_BUFFER_SIZE), 64 * 1024 * 1024);
-  EXPECT_FALSE(GetValueNoError<bool>(pp, PROPERTY_WRITER_ENABLE_DICTIONARY));
+  EXPECT_EQ(GetValueNoError<std::string>(std::make_shared<const api::Properties>(pp), PROPERTY_WRITER_COMPRESSION),
+            "gzip");
+  EXPECT_EQ(GetValueNoError<std::string>(std::make_shared<const api::Properties>(pp), PROPERTY_WRITER_FORMAT),
+            LOON_FORMAT_VORTEX);
+  EXPECT_EQ(GetValueNoError<int32_t>(std::make_shared<const api::Properties>(pp), PROPERTY_WRITER_COMPRESSION_LEVEL),
+            3);
+  EXPECT_EQ(GetValueNoError<int32_t>(std::make_shared<const api::Properties>(pp), PROPERTY_WRITER_BUFFER_SIZE),
+            64 * 1024 * 1024);
+  EXPECT_FALSE(GetValueNoError<bool>(std::make_shared<const api::Properties>(pp), PROPERTY_WRITER_ENABLE_DICTIONARY));
 
   EXPECT_STREQ(loon_properties_writer_format, PROPERTY_WRITER_FORMAT);
 }
@@ -48,7 +57,8 @@ TEST_F(APIPropertiesTest, SinglePolicyFallsBackToWriterFormat) {
   ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SINGLE), std::nullopt);
   ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_FORMAT, LOON_FORMAT_VORTEX), std::nullopt);
 
-  ASSERT_AND_ASSIGN(auto policy, ColumnGroupPolicy::create_column_group_policy(pp, schema));
+  ASSERT_AND_ASSIGN(auto policy,
+                    ColumnGroupPolicy::create_column_group_policy(std::make_shared<const api::Properties>(pp), schema));
   auto groups = policy->get_column_groups();
 
   ASSERT_EQ(groups.size(), 1);
@@ -63,7 +73,8 @@ TEST_F(APIPropertiesTest, SchemaBasedFormatsOverrideWriterFormatAndUnmatchedFall
   ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS, "id|value,vector"), std::nullopt);
   ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_SCHEMA_BASE_FORMATS, "vortex,parquet"), std::nullopt);
 
-  ASSERT_AND_ASSIGN(auto policy, ColumnGroupPolicy::create_column_group_policy(pp, schema));
+  ASSERT_AND_ASSIGN(auto policy,
+                    ColumnGroupPolicy::create_column_group_policy(std::make_shared<const api::Properties>(pp), schema));
   auto groups = policy->get_column_groups();
 
   ASSERT_EQ(groups.size(), 3);
@@ -82,7 +93,8 @@ TEST_F(APIPropertiesTest, SchemaBasedFallsBackToWriterFormatWhenFormatsEmpty) {
   ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_FORMAT, LOON_FORMAT_VORTEX), std::nullopt);
   ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS, "id|value,vector"), std::nullopt);
 
-  ASSERT_AND_ASSIGN(auto policy, ColumnGroupPolicy::create_column_group_policy(pp, schema));
+  ASSERT_AND_ASSIGN(auto policy,
+                    ColumnGroupPolicy::create_column_group_policy(std::make_shared<const api::Properties>(pp), schema));
   auto groups = policy->get_column_groups();
 
   ASSERT_EQ(groups.size(), 3);
@@ -99,7 +111,7 @@ TEST_F(APIPropertiesTest, SchemaBasedFormatsLengthMismatchFails) {
   ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS, "id|value,vector"), std::nullopt);
   ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_SCHEMA_BASE_FORMATS, "vortex"), std::nullopt);
 
-  auto policy = ColumnGroupPolicy::create_column_group_policy(pp, schema);
+  auto policy = ColumnGroupPolicy::create_column_group_policy(std::make_shared<const api::Properties>(pp), schema);
   ASSERT_STATUS_NOT_OK(policy.status());
 }
 
@@ -112,7 +124,8 @@ TEST_F(APIPropertiesTest, SchemaBasedInvalidFormatFailsValidation) {
   ::LoonProperty kvp[] = {
       {const_cast<char*>(PROPERTY_WRITER_SCHEMA_BASE_FORMATS), const_cast<char*>("unsupported-format")}};
   ::LoonProperties ffi_props{kvp, 1};
-  err = ConvertFFIProperties(pp, &ffi_props);
+  std::shared_ptr<const Properties> converted;
+  err = ConvertFFIProperties(converted, &ffi_props);
   ASSERT_NE(err, std::nullopt);
   EXPECT_NE(err->find("unsupported-format"), std::string::npos) << *err;
 
@@ -124,14 +137,22 @@ TEST_F(APIPropertiesTest, SchemaBasedInvalidFormatFailsValidation) {
 TEST_F(APIPropertiesTest, parquet_reader_prebuffer_properties) {
   milvus_storage::api::Properties pp{};
 
-  EXPECT_EQ(GetValueNoError<int64_t>(pp, PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT), 0);
-  EXPECT_EQ(GetValueNoError<int64_t>(pp, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT), 0);
+  EXPECT_EQ(GetValueNoError<int64_t>(std::make_shared<const api::Properties>(pp),
+                                     PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT),
+            0);
+  EXPECT_EQ(GetValueNoError<int64_t>(std::make_shared<const api::Properties>(pp),
+                                     PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT),
+            0);
 
   EXPECT_EQ(SetValue(pp, PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT, "16384"), std::nullopt);
   EXPECT_EQ(SetValue(pp, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT, "67108864"), std::nullopt);
 
-  EXPECT_EQ(GetValueNoError<int64_t>(pp, PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT), 16384);
-  EXPECT_EQ(GetValueNoError<int64_t>(pp, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT), 64LL * 1024 * 1024);
+  EXPECT_EQ(GetValueNoError<int64_t>(std::make_shared<const api::Properties>(pp),
+                                     PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT),
+            16384);
+  EXPECT_EQ(GetValueNoError<int64_t>(std::make_shared<const api::Properties>(pp),
+                                     PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT),
+            64LL * 1024 * 1024);
 
   EXPECT_NE(SetValue(pp, PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT, "-1"), std::nullopt);
   EXPECT_EQ(SetValue(pp, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT, "0"), std::nullopt);
@@ -142,9 +163,11 @@ TEST_F(APIPropertiesTest, parquet_reader_prebuffer_properties) {
                PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT);
 
   // Unset keeps Arrow's lazy cache; false requests every range of a read call at once.
-  EXPECT_TRUE(GetValueNoError<bool>(pp, PROPERTY_READER_PARQUET_PREBUFFER_LAZY));
+  EXPECT_TRUE(
+      GetValueNoError<bool>(std::make_shared<const api::Properties>(pp), PROPERTY_READER_PARQUET_PREBUFFER_LAZY));
   EXPECT_EQ(SetValue(pp, PROPERTY_READER_PARQUET_PREBUFFER_LAZY, "false"), std::nullopt);
-  EXPECT_FALSE(GetValueNoError<bool>(pp, PROPERTY_READER_PARQUET_PREBUFFER_LAZY));
+  EXPECT_FALSE(
+      GetValueNoError<bool>(std::make_shared<const api::Properties>(pp), PROPERTY_READER_PARQUET_PREBUFFER_LAZY));
   EXPECT_NE(SetValue(pp, PROPERTY_READER_PARQUET_PREBUFFER_LAZY, "sometimes"), std::nullopt);
   EXPECT_STREQ(loon_properties_reader_parquet_prebuffer_lazy, PROPERTY_READER_PARQUET_PREBUFFER_LAZY);
 }
@@ -152,16 +175,24 @@ TEST_F(APIPropertiesTest, parquet_reader_prebuffer_properties) {
 TEST_F(APIPropertiesTest, vortex_split_row_indices_mode) {
   milvus_storage::api::Properties pp{};
 
-  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES), "auto");
+  EXPECT_EQ(GetValueNoError<std::string>(std::make_shared<const api::Properties>(pp),
+                                         PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES),
+            "auto");
 
   EXPECT_EQ(SetValue(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES, "true"), std::nullopt);
-  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES), "true");
+  EXPECT_EQ(GetValueNoError<std::string>(std::make_shared<const api::Properties>(pp),
+                                         PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES),
+            "true");
 
   EXPECT_EQ(SetValue(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES, "false"), std::nullopt);
-  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES), "false");
+  EXPECT_EQ(GetValueNoError<std::string>(std::make_shared<const api::Properties>(pp),
+                                         PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES),
+            "false");
 
   EXPECT_EQ(SetValue(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES, "auto"), std::nullopt);
-  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES), "auto");
+  EXPECT_EQ(GetValueNoError<std::string>(std::make_shared<const api::Properties>(pp),
+                                         PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES),
+            "auto");
 
   EXPECT_NE(SetValue(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES, "invalid"), std::nullopt);
 }
@@ -169,11 +200,13 @@ TEST_F(APIPropertiesTest, vortex_split_row_indices_mode) {
 TEST_F(APIPropertiesTest, paimon_scan_mode) {
   milvus_storage::api::Properties pp{};
 
-  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_PAIMON_SCAN_MODE), "auto");
+  EXPECT_EQ(GetValueNoError<std::string>(std::make_shared<const api::Properties>(pp), PROPERTY_PAIMON_SCAN_MODE),
+            "auto");
 
   for (const auto* mode : {"auto", "direct-file", "data-split"}) {
     EXPECT_EQ(SetValue(pp, PROPERTY_PAIMON_SCAN_MODE, mode), std::nullopt);
-    EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_PAIMON_SCAN_MODE), mode);
+    EXPECT_EQ(GetValueNoError<std::string>(std::make_shared<const api::Properties>(pp), PROPERTY_PAIMON_SCAN_MODE),
+              mode);
   }
 
   EXPECT_NE(SetValue(pp, PROPERTY_PAIMON_SCAN_MODE, "invalid"), std::nullopt);
@@ -183,9 +216,11 @@ TEST_F(APIPropertiesTest, paimon_scan_mode) {
 TEST_F(APIPropertiesTest, reader_exttable_snapshot_id) {
   milvus_storage::api::Properties pp{};
 
-  EXPECT_EQ(GetValueNoError<int64_t>(pp, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID), -1);
+  EXPECT_EQ(GetValueNoError<int64_t>(std::make_shared<const api::Properties>(pp), PROPERTY_READER_EXTTABLE_SNAPSHOT_ID),
+            -1);
   EXPECT_EQ(SetValue(pp, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, "42"), std::nullopt);
-  EXPECT_EQ(GetValueNoError<int64_t>(pp, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID), 42);
+  EXPECT_EQ(GetValueNoError<int64_t>(std::make_shared<const api::Properties>(pp), PROPERTY_READER_EXTTABLE_SNAPSHOT_ID),
+            42);
   EXPECT_NE(SetValue(pp, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, "-2"), std::nullopt);
   EXPECT_STREQ(loon_properties_reader_exttable_snapshot_id, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID);
 }
@@ -193,13 +228,16 @@ TEST_F(APIPropertiesTest, reader_exttable_snapshot_id) {
 TEST_F(APIPropertiesTest, reader_metadata_cache_enable_property) {
   milvus_storage::api::Properties pp{};
 
-  EXPECT_TRUE(GetValueNoError<bool>(pp, PROPERTY_READER_METADATA_CACHE_ENABLE));
+  EXPECT_TRUE(
+      GetValueNoError<bool>(std::make_shared<const api::Properties>(pp), PROPERTY_READER_METADATA_CACHE_ENABLE));
 
   EXPECT_EQ(SetValue(pp, PROPERTY_READER_METADATA_CACHE_ENABLE, "false"), std::nullopt);
-  EXPECT_FALSE(GetValueNoError<bool>(pp, PROPERTY_READER_METADATA_CACHE_ENABLE));
+  EXPECT_FALSE(
+      GetValueNoError<bool>(std::make_shared<const api::Properties>(pp), PROPERTY_READER_METADATA_CACHE_ENABLE));
 
   EXPECT_EQ(SetValue(pp, PROPERTY_READER_METADATA_CACHE_ENABLE, "true"), std::nullopt);
-  EXPECT_TRUE(GetValueNoError<bool>(pp, PROPERTY_READER_METADATA_CACHE_ENABLE));
+  EXPECT_TRUE(
+      GetValueNoError<bool>(std::make_shared<const api::Properties>(pp), PROPERTY_READER_METADATA_CACHE_ENABLE));
 
   EXPECT_STREQ(loon_properties_reader_metadata_cache_enable, PROPERTY_READER_METADATA_CACHE_ENABLE);
 }
@@ -207,19 +245,22 @@ TEST_F(APIPropertiesTest, reader_metadata_cache_enable_property) {
 TEST_F(APIPropertiesTest, lance_io_parallelism_property) {
   milvus_storage::api::Properties pp{};
 
-  EXPECT_EQ(GetValueNoError<uint32_t>(pp, PROPERTY_FS_LANCE_IO_PARALLELISM), 64u);
+  EXPECT_EQ(GetValueNoError<uint32_t>(std::make_shared<const api::Properties>(pp), PROPERTY_FS_LANCE_IO_PARALLELISM),
+            64u);
 
   for (const char* value : {"0", "1", "64", "256"}) {
     EXPECT_EQ(SetValue(pp, PROPERTY_FS_LANCE_IO_PARALLELISM, value), std::nullopt);
   }
-  EXPECT_EQ(GetValueNoError<uint32_t>(pp, PROPERTY_FS_LANCE_IO_PARALLELISM), 256u);
+  EXPECT_EQ(GetValueNoError<uint32_t>(std::make_shared<const api::Properties>(pp), PROPERTY_FS_LANCE_IO_PARALLELISM),
+            256u);
 
   for (const char* value : {"257", "-1", "invalid"}) {
     EXPECT_NE(SetValue(pp, PROPERTY_FS_LANCE_IO_PARALLELISM, value), std::nullopt);
   }
 
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(pp, fs_config));
+  ASSERT_STATUS_OK(
+      ArrowFileSystemConfig::create_file_system_config(std::make_shared<const api::Properties>(pp), fs_config));
   EXPECT_EQ(fs_config.lance_io_parallelism, 256u);
 
   EXPECT_STREQ(loon_properties_fs_lance_io_parallelism, PROPERTY_FS_LANCE_IO_PARALLELISM);
@@ -229,7 +270,8 @@ TEST_F(APIPropertiesTest, iops_rate_properties) {
   milvus_storage::api::Properties pp{};
 
   ArrowFileSystemConfig default_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(pp, default_config));
+  ASSERT_STATUS_OK(
+      ArrowFileSystemConfig::create_file_system_config(std::make_shared<const api::Properties>(pp), default_config));
   EXPECT_EQ(default_config.iops_initial_rate, 2000u);
   EXPECT_EQ(default_config.iops_max_rate, 5000u);
 
@@ -237,14 +279,16 @@ TEST_F(APIPropertiesTest, iops_rate_properties) {
   EXPECT_EQ(SetValue(pp, PROPERTY_FS_IOPS_MAX_RATE, "5000"), std::nullopt);
 
   ArrowFileSystemConfig configured;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(pp, configured));
+  ASSERT_STATUS_OK(
+      ArrowFileSystemConfig::create_file_system_config(std::make_shared<const api::Properties>(pp), configured));
   EXPECT_EQ(configured.iops_initial_rate, 4000u);
   EXPECT_EQ(configured.iops_max_rate, 5000u);
 
   EXPECT_NE(SetValue(pp, PROPERTY_FS_IOPS_INITIAL_RATE, "0"), std::nullopt);
   EXPECT_EQ(SetValue(pp, PROPERTY_FS_IOPS_MAX_RATE, "0"), std::nullopt);
   ArrowFileSystemConfig unlimited;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(pp, unlimited));
+  ASSERT_STATUS_OK(
+      ArrowFileSystemConfig::create_file_system_config(std::make_shared<const api::Properties>(pp), unlimited));
   EXPECT_EQ(unlimited.iops_initial_rate, 4000u);
   EXPECT_EQ(unlimited.iops_max_rate, 0u);
   EXPECT_NE(SetValue(pp, PROPERTY_FS_IOPS_INITIAL_RATE, "-1"), std::nullopt);
@@ -253,7 +297,8 @@ TEST_F(APIPropertiesTest, iops_rate_properties) {
   EXPECT_EQ(SetValue(pp, PROPERTY_FS_IOPS_INITIAL_RATE, "6000"), std::nullopt);
   EXPECT_EQ(SetValue(pp, PROPERTY_FS_IOPS_MAX_RATE, "5000"), std::nullopt);
   ArrowFileSystemConfig capped;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(pp, capped));
+  ASSERT_STATUS_OK(
+      ArrowFileSystemConfig::create_file_system_config(std::make_shared<const api::Properties>(pp), capped));
   EXPECT_EQ(capped.iops_initial_rate, 5000u);
   EXPECT_EQ(capped.iops_max_rate, 5000u);
 
@@ -264,16 +309,24 @@ TEST_F(APIPropertiesTest, iops_rate_properties) {
 TEST_F(APIPropertiesTest, async_task_split_strategy) {
   milvus_storage::api::Properties pp{};
 
-  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY), "parallelism");
+  EXPECT_EQ(GetValueNoError<std::string>(std::make_shared<const api::Properties>(pp),
+                                         PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY),
+            "parallelism");
 
   EXPECT_EQ(SetValue(pp, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY, "none"), std::nullopt);
-  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY), "none");
+  EXPECT_EQ(GetValueNoError<std::string>(std::make_shared<const api::Properties>(pp),
+                                         PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY),
+            "none");
 
   EXPECT_EQ(SetValue(pp, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY, "all"), std::nullopt);
-  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY), "all");
+  EXPECT_EQ(GetValueNoError<std::string>(std::make_shared<const api::Properties>(pp),
+                                         PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY),
+            "all");
 
   EXPECT_EQ(SetValue(pp, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY, "parallelism"), std::nullopt);
-  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY), "parallelism");
+  EXPECT_EQ(GetValueNoError<std::string>(std::make_shared<const api::Properties>(pp),
+                                         PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY),
+            "parallelism");
 
   EXPECT_NE(SetValue(pp, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY, "invalid"), std::nullopt);
   EXPECT_STREQ(loon_properties_reader_async_task_split_strategy, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY);
@@ -283,23 +336,28 @@ TEST_F(APIPropertiesTest, get_invalid_key) {
   milvus_storage::api::Properties pp{};
 
   // Unknown keys
-  EXPECT_FALSE(GetValue<int32_t>(pp, "nonexistent.key").ok());
+  EXPECT_FALSE(GetValue<int32_t>(std::make_shared<const api::Properties>(pp), "nonexistent.key").ok());
 
   // set a new key without defined
   EXPECT_NE(SetValue(pp, "testkey1", "testval1", false), std::nullopt);
 
   // register a new key and get it as different type
   EXPECT_EQ(SetValue(pp, "testkey1", "testval1", true), std::nullopt);
-  auto testkey1_result = GetValue<int32_t>(pp, "testkey1");  // invalid type
+  auto testkey1_result = GetValue<int32_t>(std::make_shared<const api::Properties>(pp), "testkey1");  // invalid type
   EXPECT_FALSE(testkey1_result.ok());
 
   // get a predefined key as different type
-  auto buffer_size_result = GetValue<std::string>(pp, PROPERTY_WRITER_BUFFER_SIZE);  // invalid type
+  auto buffer_size_result =
+      GetValue<std::string>(std::make_shared<const api::Properties>(pp), PROPERTY_WRITER_BUFFER_SIZE);  // invalid type
   EXPECT_FALSE(buffer_size_result.ok());
 }
 
 TEST_F(APIPropertiesTest, test_ffi_convert) {
-  milvus_storage::api::Properties pp{};
+  std::shared_ptr<const Properties> pp;
+
+  ASSERT_EQ(ConvertFFIProperties(pp, nullptr), std::nullopt);
+  ASSERT_NE(pp, nullptr);
+  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_WRITER_COMPRESSION), "zstd");
 
   // Test FFI properties conversion
   {
@@ -334,8 +392,11 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
     kvp[1].value = const_cast<char*>("invalid_int");
     ffi_props.properties = kvp;
 
+    const auto before_invalid_conversion = pp;
     auto opt = ConvertFFIProperties(pp, &ffi_props);
     EXPECT_NE(opt, std::nullopt);
+    // Invalid input must not publish a partially parsed configuration.
+    EXPECT_EQ(pp, before_invalid_conversion);
 
     // invalid bool
     kvp[1].key = const_cast<char*>(PROPERTY_FS_USE_SSL);
@@ -356,7 +417,11 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
     kvp[1].value = const_cast<char*>("2147483647");  // won't overflow int32
 
     opt = ConvertFFIProperties(pp, &ffi_props);
-    EXPECT_EQ(opt, std::nullopt);
+    ASSERT_EQ(opt, std::nullopt);
+    EXPECT_NE(pp, before_invalid_conversion);
+    EXPECT_EQ(GetValueNoError<int32_t>(before_invalid_conversion, PROPERTY_WRITER_BUFFER_SIZE), 32 * 1024 * 1024);
+    EXPECT_EQ(GetValueNoError<int32_t>(pp, PROPERTY_WRITER_BUFFER_SIZE), 2147483647);
+    EXPECT_EQ(GetValueNoError<std::string>(pp, "custom.key"), "custom_value");
   }
 
   // Test FFI properties with invalid enum value
@@ -376,7 +441,7 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
 TEST_F(APIPropertiesTest, invalid_cloud_provider_error) {
   const char* invalid_provider = "unknown-cloud-provider";
   milvus_storage::api::Properties pp{};
-  milvus_storage::api::Properties converted{};
+  std::shared_ptr<const Properties> converted;
   ::LoonProperty kvp[] = {{const_cast<char*>(loon_properties_fs_cloud_provider), const_cast<char*>(invalid_provider)}};
   ::LoonProperties ffi_props{kvp, 1};
 

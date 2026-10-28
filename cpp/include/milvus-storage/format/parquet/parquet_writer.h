@@ -32,10 +32,11 @@ namespace milvus_storage::parquet {
 
 class ParquetFileWriter : public FormatWriter {
   public:
-  static arrow::Result<std::unique_ptr<ParquetFileWriter>> Make(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                                std::shared_ptr<arrow::Schema> schema,
-                                                                const std::string& file_path,
-                                                                const api::Properties& properties);
+  static arrow::Result<std::unique_ptr<ParquetFileWriter>> Make(
+      std::shared_ptr<arrow::fs::FileSystem> fs,
+      std::shared_ptr<arrow::Schema> schema,
+      const std::string& file_path,
+      const std::shared_ptr<const api::Properties>& properties);
 
   static arrow::Result<std::unique_ptr<ParquetFileWriter>> Make(
       std::shared_ptr<arrow::Schema> schema,

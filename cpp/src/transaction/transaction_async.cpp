@@ -27,7 +27,7 @@ struct AsyncManifestOperation final : AsyncOperation {
 };
 
 folly::SemiFuture<OpenResult> Transaction::OpenAsync(const std::string& path,
-                                                     Properties properties,
+                                                     std::shared_ptr<const Properties> properties,
                                                      int64_t version,
                                                      const int64_t manifest_size,
                                                      const Resolver& resolver,

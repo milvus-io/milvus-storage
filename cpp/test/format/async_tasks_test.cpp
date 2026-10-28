@@ -363,11 +363,17 @@ TEST(AsyncTasksTest, SplitByBytesUsesParallelismForTakeTasks) {
 
 TEST(AsyncTasksTest, BytesPropertiesKeepParallelismDefaultAndRejectZeroSize) {
   Properties properties;
-  ASSERT_TRUE(GetValue<std::string>(properties, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY).ok());
-  EXPECT_EQ(GetAsyncTaskSplitStrategy(properties), AsyncTaskSplitStrategy::kSplitToParallelism);
-  EXPECT_EQ(GetValueNoError<uint64_t>(properties, PROPERTY_READER_ASYNC_TASK_SPLIT_SIZE_BYTES), 8388608);
+  ASSERT_TRUE(GetValue<std::string>(std::make_shared<const api::Properties>(properties),
+                                    PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY)
+                  .ok());
+  EXPECT_EQ(GetAsyncTaskSplitStrategy(std::make_shared<const api::Properties>(properties)),
+            AsyncTaskSplitStrategy::kSplitToParallelism);
+  EXPECT_EQ(GetValueNoError<uint64_t>(std::make_shared<const api::Properties>(properties),
+                                      PROPERTY_READER_ASYNC_TASK_SPLIT_SIZE_BYTES),
+            8388608);
   EXPECT_EQ(SetValue(properties, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY, "bytes"), std::nullopt);
-  EXPECT_EQ(GetAsyncTaskSplitStrategy(properties), AsyncTaskSplitStrategy::kSplitByBytes);
+  EXPECT_EQ(GetAsyncTaskSplitStrategy(std::make_shared<const api::Properties>(properties)),
+            AsyncTaskSplitStrategy::kSplitByBytes);
   EXPECT_NE(SetValue(properties, PROPERTY_READER_ASYNC_TASK_SPLIT_SIZE_BYTES, "0"), std::nullopt);
 }
 

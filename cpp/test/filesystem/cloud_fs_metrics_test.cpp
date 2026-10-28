@@ -38,7 +38,7 @@ class CloudFsMetricsTest : public ::testing::Test {
     }
     api::Properties properties;
     ASSERT_STATUS_OK(InitTestProperties(properties));
-    ASSERT_AND_ASSIGN(arrowfs_, GetFileSystem(properties));
+    ASSERT_AND_ASSIGN(arrowfs_, GetFileSystem(std::make_shared<const api::Properties>(properties)));
 
     base_path_ = GetTestBasePath("cloud-fs-metrics");
     ASSERT_STATUS_OK(CreateTestDir(arrowfs_, base_path_));

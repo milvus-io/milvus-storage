@@ -48,7 +48,7 @@ class PackedTestBase : public ::testing::Test {
   void SetUp() override {
     api::Properties properties;
     ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties)));
     path_ = GetTestBasePath("packed-test");
     ASSERT_STATUS_OK(DeleteTestDir(fs_, path_));
     ASSERT_STATUS_OK(CreateTestDir(fs_, path_));

@@ -136,7 +136,7 @@ TEST(TalonRawBridgeTest, PropertiesNeedOnlyClientConfiguration) {
   properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
   properties[PROPERTY_FS_TALON_BLOCK_SIZE] = uint32_t{8388608};
   properties[PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR] = uint32_t{8};
-  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
   ASSERT_TRUE(talon::TalonClient::Make(config).ok());
 }
 
@@ -149,7 +149,7 @@ TEST(TalonRawBridgeTest, RejectsInvalidCredentialEndpointBeforeDispatch) {
   properties[PROPERTY_FS_REGION] = std::string("us-west-2");
   properties[PROPERTY_FS_BUCKET_NAME] = std::string("bucket");
   properties[PROPERTY_FS_ROLE_ARN] = std::string("role-secret");
-  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
   ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make(config));
   const auto result = client->Load({"s3://bucket/empty", 0, ""});
   ASSERT_FALSE(result.ok());
@@ -166,7 +166,7 @@ TEST(TalonRawBridgeTest, InvalidBrokerIdentityEncodingReturnsStatus) {
   properties[PROPERTY_FS_ROLE_ARN] = std::string("arn:aws:iam::123456789012:role/reader");
   properties[PROPERTY_FS_EXTERNAL_ID] = std::string("secret-") + char(0xff);
   EXPECT_NO_THROW({
-    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
     const auto result = talon::TalonClient::Make(config);
     EXPECT_TRUE(result.status().IsInvalid());
     EXPECT_EQ(result.status().message().find("secret-"), std::string::npos);
@@ -181,7 +181,7 @@ TEST(TalonRawBridgeTest, RejectsUnsupportedBrokerCloudsWithoutAwsSubstitution) {
     properties[PROPERTY_FS_CLOUD_PROVIDER] = std::string(provider);
     properties[PROPERTY_FS_REGION] = std::string("us-west-2");
     properties[PROPERTY_FS_ROLE_ARN] = std::string("role");
-    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
     const auto result = talon::TalonClient::Make(config);
     ASSERT_FALSE(result.ok()) << provider;
     EXPECT_TRUE(result.status().IsInvalid());
@@ -224,7 +224,7 @@ class TalonBrokerRequestTest : public ::testing::Test {
     socklen_t size = sizeof(address);
     ASSERT_EQ(::getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &size), 0);
     properties[PROPERTY_FS_TALON_COORDINATOR] = "127.0.0.1:" + std::to_string(ntohs(address.sin_port));
-    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
     ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make(config));
     if (overrides && overrides->namespace_name) {
       ASSERT_AND_ASSIGN(auto request_client, client->WithNamespace(overrides->namespace_name));
@@ -455,7 +455,7 @@ TEST(TalonRawBridgeTest, RejectsInvalidNamespaceWithoutRequiringBroker) {
   properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
   for (const auto& name : {std::string("../escape"), std::string("worker_identity"), std::string(256, 'n')}) {
     properties["fs.talon.namespace"] = name;
-    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
     ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make(config));
     EXPECT_TRUE(client->Load({"s3://bucket/empty", 0, ""}).status().IsInvalid());
   }
@@ -467,7 +467,7 @@ TEST(TalonRawBridgeTest, EmptyNamespaceAndBrokerDoNotRequireCloudProperties) {
   properties[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string();
   for (const auto* name : {"", "default", "tenant-a"}) {
     properties[PROPERTY_FS_TALON_NAMESPACE] = std::string(name);
-    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
     EXPECT_TRUE(talon::TalonClient::Make(config).ok());
   }
 }
@@ -477,7 +477,7 @@ TEST(TalonRawBridgeTest, InvalidNamespaceEncodingReturnsStatus) {
   properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
   properties[PROPERTY_FS_TALON_NAMESPACE] = std::string(1, char(0xff));
   EXPECT_NO_THROW({
-    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
     const auto result = talon::TalonClient::Make(config);
     EXPECT_TRUE(result.status().IsInvalid());
   });
@@ -553,7 +553,7 @@ TEST(TalonRawBridgeTest, InvalidConfigurationPreservesDiagnostic) {
   properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
   properties[PROPERTY_FS_TALON_BLOCK_SIZE] = uint32_t{0};
   properties[PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR] = uint32_t{8};
-  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
   const auto result = talon::TalonClient::Make(config);
   ASSERT_FALSE(result.ok());
   EXPECT_NE(result.status().message().find("block_size"), std::string::npos) << result.status();
@@ -578,7 +578,7 @@ TEST(TalonBrokerLiveTest, ReadsAndPrewarmsWithRequestCredentials) {
   const std::vector<uint8_t> expected{std::istreambuf_iterator<char>(reference), std::istreambuf_iterator<char>()};
   ASSERT_FALSE(expected.empty());
   ASSERT_LE(expected.size(), 1024);
-  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
   ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make(config));
   ASSERT_AND_ASSIGN(const auto stat, client->Stat(uri));
   ASSERT_GE(stat.size, expected.size());
@@ -591,8 +591,10 @@ TEST(TalonBrokerLiveTest, ReadsAndPrewarmsWithRequestCredentials) {
     ASSERT_EQ(count, expected.size());
     EXPECT_TRUE(output == expected);
   }
-  ASSERT_AND_ASSIGN(const auto provider, api::GetValue<std::string>(properties, PROPERTY_FS_CLOUD_PROVIDER));
-  ASSERT_AND_ASSIGN(const auto bucket, api::GetValue<std::string>(properties, PROPERTY_FS_BUCKET_NAME));
+  ASSERT_AND_ASSIGN(const auto provider, api::GetValue<std::string>(std::make_shared<const api::Properties>(properties),
+                                                                    PROPERTY_FS_CLOUD_PROVIDER));
+  ASSERT_AND_ASSIGN(const auto bucket, api::GetValue<std::string>(std::make_shared<const api::Properties>(properties),
+                                                                  PROPERTY_FS_BUCKET_NAME));
   ASSERT_AND_ASSIGN(auto reader, client->OpenObject(provider, bucket, live.at("key").get<std::string>(), std::nullopt));
   ASSERT_AND_ASSIGN(const auto read, reader.ReadAtAsync(0, output.size(), output.data()).result());
   EXPECT_EQ(read, expected.size());
@@ -610,9 +612,14 @@ TEST(TalonBrokerLiveTest, ReadsAndPrewarmsWithRequestCredentials) {
 
   // A second namespace uses the public C request options on a client with no
   // cloud defaults. The live harness verifies a separate cold fill, then reuse.
-  ASSERT_AND_ASSIGN(const auto namespace_name, api::GetValue<std::string>(properties, PROPERTY_FS_TALON_NAMESPACE));
-  ASSERT_AND_ASSIGN(const auto coordinator, api::GetValue<std::string>(properties, PROPERTY_FS_TALON_COORDINATOR));
-  ASSERT_AND_ASSIGN(const auto block_size, api::GetValue<uint32_t>(properties, PROPERTY_FS_TALON_BLOCK_SIZE));
+  ASSERT_AND_ASSIGN(
+      const auto namespace_name,
+      api::GetValue<std::string>(std::make_shared<const api::Properties>(properties), PROPERTY_FS_TALON_NAMESPACE));
+  ASSERT_AND_ASSIGN(
+      const auto coordinator,
+      api::GetValue<std::string>(std::make_shared<const api::Properties>(properties), PROPERTY_FS_TALON_COORDINATOR));
+  ASSERT_AND_ASSIGN(const auto block_size, api::GetValue<uint32_t>(std::make_shared<const api::Properties>(properties),
+                                                                   PROPERTY_FS_TALON_BLOCK_SIZE));
   std::array<std::string, 3> ffi_keys = {PROPERTY_FS_TALON_COORDINATOR, PROPERTY_FS_TALON_BLOCK_SIZE,
                                          PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR};
   std::array<std::string, 3> ffi_values = {coordinator, std::to_string(block_size), "8"};
@@ -1087,7 +1094,7 @@ class TalonIntegrationTest : public ::testing::Test {
 
     ASSERT_STATUS_OK(InitTestProperties(properties_));
     FilesystemCache::getInstance().clean();
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
 
     path_ = "talon-integration/" + std::string(::testing::UnitTest::GetInstance()->current_test_info()->name()) + "-" +
             std::to_string(getpid());
@@ -1129,7 +1136,7 @@ class TalonCloudMetadataTest : public ::testing::TestWithParam<bool> {
     }
     api::Properties properties;
     ASSERT_STATUS_OK(InitTestProperties(properties));
-    ASSERT_AND_ASSIGN(config_, GetFileSystemConfig(properties));
+    ASSERT_AND_ASSIGN(config_, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
     if (GetParam() && (config_.cloud_provider == kCloudProviderAzure || config_.cloud_provider == kCloudProviderGCP)) {
       GTEST_SKIP() << "This provider does not use the S3 CRT reader";
     }
@@ -1159,7 +1166,8 @@ class TalonCloudMetadataTest : public ::testing::TestWithParam<bool> {
 TEST(TalonConfigTest, DefaultsAreDisabled) {
   api::Properties properties;
   ArrowFileSystemConfig config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties, config));
+  ASSERT_STATUS_OK(
+      ArrowFileSystemConfig::create_file_system_config(std::make_shared<const api::Properties>(properties), config));
   EXPECT_EQ(config.talon_mode, TalonMode::Disabled);
   EXPECT_EQ(config.talon_small_read_threshold, 524288U);
   EXPECT_TRUE(config.talon_coordinator.empty());
@@ -1188,19 +1196,19 @@ TEST(TalonConfigTest, TypedRoutingPropertiesAreValidated) {
   properties[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
   properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:7000");
   properties[PROPERTY_FS_TALON_MODE] = std::string("invalid");
-  EXPECT_TRUE(GetFileSystemConfig(properties).status().IsInvalid());
+  EXPECT_TRUE(GetFileSystemConfig(std::make_shared<const api::Properties>(properties)).status().IsInvalid());
   for (const uint32_t mode : {3U, 255U, 256U, 258U, UINT32_MAX}) {
     properties[PROPERTY_FS_TALON_MODE] = mode;
-    EXPECT_TRUE(GetFileSystemConfig(properties).status().IsInvalid());
+    EXPECT_TRUE(GetFileSystemConfig(std::make_shared<const api::Properties>(properties)).status().IsInvalid());
   }
   properties[PROPERTY_FS_TALON_MODE] = static_cast<uint32_t>(TalonMode::SmallReads);
   for (const uint32_t threshold : {0U, 1048577U}) {
     properties[PROPERTY_FS_TALON_SMALL_READ_THRESHOLD] = threshold;
-    EXPECT_TRUE(GetFileSystemConfig(properties).status().IsInvalid());
+    EXPECT_TRUE(GetFileSystemConfig(std::make_shared<const api::Properties>(properties)).status().IsInvalid());
   }
   for (const uint32_t threshold : {1U, 1048576U}) {
     properties[PROPERTY_FS_TALON_SMALL_READ_THRESHOLD] = threshold;
-    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+    ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
     EXPECT_EQ(config.talon_mode, TalonMode::SmallReads);
     EXPECT_EQ(config.talon_small_read_threshold, threshold);
   }
@@ -1214,7 +1222,7 @@ TEST_F(TalonFileSystemServiceFreeTest, SmallReadsBypassTalonAboveThreshold) {
   properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:0");
   properties[PROPERTY_FS_TALON_MODE] = static_cast<uint32_t>(TalonMode::SmallReads);
   properties["fs.talon.small_read_threshold"] = uint32_t{3};
-  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties));
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
   auto origin = std::make_shared<RecordingFileSystem>("origin");
   // Large reads must work without the ETag required to initialize a Talon reader.
   origin->input_file->metadata_result = arrow::Status::IOError("metadata unavailable");
@@ -1386,10 +1394,12 @@ TEST_F(TalonFileSystemServiceFreeTest, LargeReadsSupportBlockingOrigin) {
 TEST(TalonConfigTest, MaxIdlePerAddressProperty) {
   constexpr auto key = PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR;
   api::Properties properties;
-  ASSERT_AND_ASSIGN(const auto default_limit, api::GetValue<uint32_t>(properties, key));
+  ASSERT_AND_ASSIGN(const auto default_limit,
+                    api::GetValue<uint32_t>(std::make_shared<const api::Properties>(properties), key));
   EXPECT_EQ(default_limit, 256U);
   ASSERT_EQ(api::SetValue(properties, key, "32"), std::nullopt);
-  ASSERT_AND_ASSIGN(const auto explicit_limit, api::GetValue<uint32_t>(properties, key));
+  ASSERT_AND_ASSIGN(const auto explicit_limit,
+                    api::GetValue<uint32_t>(std::make_shared<const api::Properties>(properties), key));
   EXPECT_EQ(explicit_limit, 32U);
   for (const char* invalid : {"0", "-1", "4294967296", "invalid"}) {
     EXPECT_NE(api::SetValue(properties, key, invalid), std::nullopt);
@@ -1402,10 +1412,12 @@ TEST(TalonConfigTest, ChecksTypedPoolLimitOnlyWhenEnabled) {
   properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:7000");
   properties[PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR] = uint32_t{0};
   ArrowFileSystemConfig config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties, config));
+  ASSERT_STATUS_OK(
+      ArrowFileSystemConfig::create_file_system_config(std::make_shared<const api::Properties>(properties), config));
 
   properties[PROPERTY_FS_TALON_MODE] = static_cast<uint32_t>(TalonMode::Full);
-  const auto status = ArrowFileSystemConfig::create_file_system_config(properties, config);
+  const auto status =
+      ArrowFileSystemConfig::create_file_system_config(std::make_shared<const api::Properties>(properties), config);
   EXPECT_TRUE(status.IsInvalid()) << status;
   EXPECT_NE(status.message().find(PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR), std::string::npos);
 }
@@ -1419,7 +1431,8 @@ TEST(TalonConfigTest, ParsesExplicitProperties) {
   ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR, "32"), std::nullopt);
 
   ArrowFileSystemConfig config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties, config));
+  ASSERT_STATUS_OK(
+      ArrowFileSystemConfig::create_file_system_config(std::make_shared<const api::Properties>(properties), config));
   EXPECT_EQ(config.talon_mode, TalonMode::Full);
   EXPECT_EQ(config.talon_coordinator, "127.0.0.1:7000");
   EXPECT_EQ(config.talon_block_size, 8388608U);
@@ -1436,7 +1449,9 @@ TEST(TalonConfigTest, EnabledRequiresRemoteCoordinatorAndBlockSize) {
     ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_COORDINATOR, coordinator.c_str()), std::nullopt);
     ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_BLOCK_SIZE, block_size.c_str()), std::nullopt);
     ArrowFileSystemConfig config;
-    EXPECT_FALSE(ArrowFileSystemConfig::create_file_system_config(properties, config).ok());
+    EXPECT_FALSE(
+        ArrowFileSystemConfig::create_file_system_config(std::make_shared<const api::Properties>(properties), config)
+            .ok());
   }
 }
 
@@ -1512,10 +1527,16 @@ TEST(TalonTestEnvTest, AddsTalonPropertiesWhenEnabled) {
   api::Properties properties;
   ASSERT_STATUS_OK(InitTestProperties(properties));
   EXPECT_TRUE(IsTalonEnv());
-  EXPECT_EQ(api::GetValue<uint32_t>(properties, PROPERTY_FS_TALON_MODE).ValueOrDie(),
-            static_cast<uint32_t>(TalonMode::Full));
-  EXPECT_EQ(api::GetValue<std::string>(properties, PROPERTY_FS_TALON_COORDINATOR).ValueOrDie(), "127.0.0.1:7000");
-  EXPECT_EQ(api::GetValue<uint32_t>(properties, PROPERTY_FS_TALON_BLOCK_SIZE).ValueOrDie(), 8388608U);
+  EXPECT_EQ(
+      api::GetValue<uint32_t>(std::make_shared<const api::Properties>(properties), PROPERTY_FS_TALON_MODE).ValueOrDie(),
+      static_cast<uint32_t>(TalonMode::Full));
+  EXPECT_EQ(
+      api::GetValue<std::string>(std::make_shared<const api::Properties>(properties), PROPERTY_FS_TALON_COORDINATOR)
+          .ValueOrDie(),
+      "127.0.0.1:7000");
+  EXPECT_EQ(api::GetValue<uint32_t>(std::make_shared<const api::Properties>(properties), PROPERTY_FS_TALON_BLOCK_SIZE)
+                .ValueOrDie(),
+            8388608U);
 }
 
 TEST(TalonTestEnvTest, AcceptsOneAndUsesDefaultBlockSize) {
@@ -1527,7 +1548,9 @@ TEST(TalonTestEnvTest, AcceptsOneAndUsesDefaultBlockSize) {
   api::Properties properties;
   ASSERT_STATUS_OK(InitTestProperties(properties));
   EXPECT_TRUE(IsTalonEnv());
-  EXPECT_EQ(api::GetValue<uint32_t>(properties, PROPERTY_FS_TALON_BLOCK_SIZE).ValueOrDie(), 268435456U);
+  EXPECT_EQ(api::GetValue<uint32_t>(std::make_shared<const api::Properties>(properties), PROPERTY_FS_TALON_BLOCK_SIZE)
+                .ValueOrDie(),
+            268435456U);
 }
 
 TEST(TalonTestEnvTest, DoesNotAddTalonPropertiesWhenDisabled) {
@@ -2651,10 +2674,10 @@ TEST_F(TalonFileSystemServiceFreeTest, MetricsSourcesFfiListsAllSourcesAcrossCac
   ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_USE_SSL, "false"), std::nullopt);
   ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_USE_IAM, "false"), std::nullopt);
   ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_MODE, "0"), std::nullopt);
-  ASSERT_AND_ASSIGN(auto origin_fs, cache.get(properties));
+  ASSERT_AND_ASSIGN(auto origin_fs, cache.get(std::make_shared<const api::Properties>(properties)));
   ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_MODE, "1"), std::nullopt);
   ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_COORDINATOR, "127.0.0.1:0"), std::nullopt);
-  ASSERT_AND_ASSIGN(auto talon_fs, cache.get(properties));
+  ASSERT_AND_ASSIGN(auto talon_fs, cache.get(std::make_shared<const api::Properties>(properties)));
   ASSERT_NE(origin_fs, talon_fs);
   ASSERT_EQ(cache.size(), 2);
 
@@ -2852,7 +2875,7 @@ TEST_F(TalonIntegrationTest, FallsBackToConfiguredOriginWhenTalonUnavailable) {
   // This test requires only the origin service: Talon must fail deterministically.
   // Set TEST_ENV_TALON_ENABLED=true and TEST_ENV_TALON_COORDINATOR=127.0.0.1:0.
   // The AWS configuration exercises both the SDK and CRT origin read paths.
-  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties_));
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties_)));
   const auto crt_modes =
       config.cloud_provider == kCloudProviderAWS ? std::vector<bool>{false, true} : std::vector<bool>{false};
   for (const bool use_crt : crt_modes) {
@@ -2860,7 +2883,7 @@ TEST_F(TalonIntegrationTest, FallsBackToConfiguredOriginWhenTalonUnavailable) {
     auto properties = properties_;
     ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_COORDINATOR, "127.0.0.1:0"), std::nullopt);
     ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_S3_CRT_ASYNC_READ, use_crt ? "true" : "false"), std::nullopt);
-    ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
+    ASSERT_AND_ASSIGN(auto fs, GetFileSystem(std::make_shared<const api::Properties>(properties)));
     ASSERT_AND_ASSIGN(const auto talon_metrics, FindMetricsSource(fs, kTalonMetricsSource));
     ASSERT_AND_ASSIGN(const auto origin_metrics, FindMetricsSource(fs, kOriginMetricsSource));
     ASSERT_NE(talon_metrics, nullptr);
@@ -2961,7 +2984,7 @@ TEST_F(TalonIntegrationTest, EvictionReadsReplacementAtSamePath) {
   // Model final collection release, followed by replacing the external object.
   // Keep the size unchanged: a size-only check must not hide a stale ETag.
   auto& cache = FilesystemCache::getInstance();
-  ASSERT_STATUS_OK(cache.evict(properties_));
+  ASSERT_STATUS_OK(cache.evict(std::make_shared<const api::Properties>(properties_)));
   auto replacement = expected_;
   for (auto& byte : replacement) {
     byte ^= 0xff;
@@ -2978,7 +3001,7 @@ TEST_F(TalonIntegrationTest, EvictionReadsReplacementAtSamePath) {
   ASSERT_EQ(std::memcmp(stale->data(), expected_.data(), expected_.size()), 0);
   ASSERT_STATUS_OK(stale_reader->Close());
 
-  ASSERT_AND_ASSIGN(auto recreated_fs, cache.get(properties_));
+  ASSERT_AND_ASSIGN(auto recreated_fs, cache.get(std::make_shared<const api::Properties>(properties_)));
   ASSERT_NE(recreated_fs, fs_);
   ASSERT_AND_ASSIGN(auto reopened, recreated_fs->OpenInputFile(path_));
   ASSERT_AND_ASSIGN(auto actual, reopened->ReadAt(0, static_cast<int64_t>(replacement.size())));
@@ -2988,7 +3011,7 @@ TEST_F(TalonIntegrationTest, EvictionReadsReplacementAtSamePath) {
 }
 
 TEST_F(TalonIntegrationTest, RawPrewarmThenNormalReader) {
-  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties_));
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties_)));
   const std::string scheme = config.cloud_provider == kCloudProviderAzure ? "az" : "s3";
   const std::string uri = scheme + "://" + config.bucket_name + "/" + path_;
   RecordProperty("raw_uri", uri);
@@ -3025,7 +3048,7 @@ TEST_F(TalonIntegrationTest, RawPrewarmThenNormalReader) {
 }
 
 TEST_F(TalonIntegrationTest, RawPrewarmReadAndPartialFailure) {
-  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties_));
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties_)));
   const std::string scheme = config.cloud_provider == kCloudProviderAzure ? "az" : "s3";
   const std::string uri = scheme + "://" + config.bucket_name + "/" + path_;
   ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make(config));
@@ -3193,12 +3216,14 @@ TEST_F(TalonIntegrationTest, ParquetReadThroughNormalStorageApi) {
   ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema));
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema));
 
-  auto writer = api::Writer::create(parquet_path_, schema, std::move(policy), properties_);
+  auto writer = api::Writer::create(parquet_path_, schema, std::move(policy),
+                                    std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(writer, nullptr);
   ASSERT_STATUS_OK(writer->write(batch));
   ASSERT_AND_ASSIGN(auto column_groups, writer->close());
 
-  auto reader = api::Reader::create(column_groups, schema, nullptr, properties_);
+  auto reader =
+      api::Reader::create(column_groups, schema, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
   ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
   std::shared_ptr<arrow::RecordBatch> result;

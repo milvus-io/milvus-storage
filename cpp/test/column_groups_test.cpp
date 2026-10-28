@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <memory>
 #include <gtest/gtest.h>
 #include <cstdint>
 #include <sstream>
@@ -36,7 +37,7 @@ class ColumnGroupsTest : public ::testing::Test {
   void SetUp() override {
     Manifest::CleanCache();
     ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
     base_path_ = GetTestBasePath("column-groups-test");
     ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
     ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_));

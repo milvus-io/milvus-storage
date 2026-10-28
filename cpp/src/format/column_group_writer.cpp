@@ -39,7 +39,7 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
                         const size_t& column_group_id,
                         const std::shared_ptr<ColumnGroup>& column_group,
                         const std::shared_ptr<arrow::Schema>& schema,
-                        const Properties& properties)
+                        const std::shared_ptr<const Properties>& properties)
       : base_path_(base_path),
         column_group_id_(column_group_id),
         column_group_(column_group),
@@ -100,7 +100,7 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
       const size_t& column_group_id,
       const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
       const std::shared_ptr<arrow::Schema>& schema,
-      const milvus_storage::api::Properties& properties) {
+      const std::shared_ptr<const milvus_storage::api::Properties>& properties) {
     assert(column_group && schema);
     auto format = column_group->format;
 
@@ -134,7 +134,7 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
   size_t column_group_id_;
   std::shared_ptr<ColumnGroup> column_group_;
   std::shared_ptr<arrow::Schema> schema_;
-  Properties properties_;
+  std::shared_ptr<const Properties> properties_;
 
   std::unique_ptr<FormatWriter> format_writer_;
 
@@ -149,7 +149,7 @@ arrow::Result<std::unique_ptr<ColumnGroupWriter>> ColumnGroupWriter::create(
     const size_t& column_group_id,
     const std::shared_ptr<ColumnGroup>& column_group,
     const std::shared_ptr<arrow::Schema>& schema,
-    const Properties& properties) {
+    const std::shared_ptr<const Properties>& properties) {
   std::unique_ptr<ColumnGroupWriterImpl> writer;
   assert(column_group && schema);
   writer = std::make_unique<ColumnGroupWriterImpl>(base_path, column_group_id, column_group, schema, properties);

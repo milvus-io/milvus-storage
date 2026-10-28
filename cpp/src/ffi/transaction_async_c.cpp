@@ -70,7 +70,7 @@ LoonFFIResult loon_transaction_open_async(LoonAsyncContextHandle async_context,
       if (!item.key || !item.value || strnlen(item.key, 1025) > 1024 || strnlen(item.value, 16385) > 16384)
         return CreateFFIResult(LOON_INVALID_ARGS, "Invalid property");
     }
-    Properties native_properties;
+    std::shared_ptr<const Properties> native_properties;
     auto error = ConvertFFIProperties(native_properties, properties);
     if (error)
       return CreateFFIResult(LOON_INVALID_PROPERTIES, *error);

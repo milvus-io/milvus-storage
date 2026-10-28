@@ -36,7 +36,7 @@ class ParquetFormatReader final : public FormatReader, public std::enable_shared
     struct Payload {
       std::shared_ptr<arrow::fs::FileSystem> fs;
       std::shared_ptr<::parquet::FileMetaData> parquet_metadata;
-      api::Properties properties;
+      std::shared_ptr<const api::Properties> properties;
       milvus_storage::KeyRetriever key_retriever;
     };
 
@@ -45,12 +45,12 @@ class ParquetFormatReader final : public FormatReader, public std::enable_shared
 
     static std::string cache_key(const api::ColumnGroupFile& file);
     static arrow::Result<MetadataPtr> load_metadata(const api::ColumnGroupFile& file,
-                                                    const api::Properties& properties,
+                                                    const std::shared_ptr<const api::Properties>& properties,
                                                     const milvus_storage::KeyRetriever& key_retriever);
     // Defer footer/schema loading and return immutable metadata suitable for the cache.
     static folly::SemiFuture<arrow::Result<MetadataPtr>> load_metadata_async(
         const api::ColumnGroupFile& file,
-        const api::Properties& properties,
+        const std::shared_ptr<const api::Properties>& properties,
         const milvus_storage::KeyRetriever& key_retriever);
     static arrow::Result<std::shared_ptr<ParquetFormatReader>> create_from_metadata(
         MetadataPtr metadata,
@@ -74,7 +74,7 @@ class ParquetFormatReader final : public FormatReader, public std::enable_shared
 
   ParquetFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                       const std::string& path,
-                      const milvus_storage::api::Properties& properties,
+                      const std::shared_ptr<const milvus_storage::api::Properties>& properties,
                       const std::vector<std::string>& needed_columns,
                       const std::function<std::string(const std::string&)>& key_retriever,
                       uint64_t file_size = 0,
@@ -140,7 +140,7 @@ class ParquetFormatReader final : public FormatReader, public std::enable_shared
   std::string path_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;
-  milvus_storage::api::Properties properties_;
+  std::shared_ptr<const milvus_storage::api::Properties> properties_;
   std::vector<std::string> needed_columns_;
   std::function<std::string(const std::string&)> key_retriever_;
   uint64_t file_size_ = 0;    ///< Pre-known file size to skip S3 HEAD requests
