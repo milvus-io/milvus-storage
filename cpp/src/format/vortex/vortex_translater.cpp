@@ -150,7 +150,9 @@ milvus::cachinglayer::LoadingResourceUsage VortexTranslater::estimated_loading_u
     total = CheckedAddByteSize(total, PinnedByteSize(cell_metas[cid]), "Vortex cells byte size");
   }
   const auto bytes = ToResourceBytes(total, "Vortex cells byte size");
-  // Range reads have no shared admission; retain the conservative scratch estimate as private overhead.
+  // TODO: Accept the caller's admission group and per-task scratch bound before
+  // accounting for pool-limited reads as shared overhead. Keep scratch private
+  // until admission covers its full lifetime.
   return {{bytes, 0}, {bytes, 0}, {0, 0}};
 }
 
