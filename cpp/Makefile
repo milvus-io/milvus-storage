@@ -24,11 +24,6 @@ libcxx_setting = -s:h compiler.cppstd=20 -s:b compiler.cppstd=20
 uname_s := $(shell uname -s)
 ifeq ($(uname_s),Darwin)
 	libcxx_setting = -s:h compiler.libcxx=libc++ -s:h compiler.cppstd=20 -s:b compiler.libcxx=libc++ -s:b compiler.cppstd=20
-	# Keep Homebrew Clang and Conan on the SDK paired with the active Xcode linker.
-	export SDKROOT := $(or $(SDKROOT),$(shell xcrun --sdk macosx --show-sdk-path))
-ifeq ($(strip $(SDKROOT)),)
-$(error Unable to locate the macOS SDK; set SDKROOT or select Xcode with xcode-select)
-endif
 	# Ensure enough Mach-O header padding so Conan's fix_apple_shared_install_name
 	# (install_name_tool) can rewrite rpaths in dependency binaries like openssl.
 	export LDFLAGS := $(LDFLAGS) -headerpad_max_install_names
@@ -36,9 +31,6 @@ endif
 
 # Common conan flags
 CONAN_SETTINGS = ${libcxx_setting} -s:h build_type=${build_type} -s:b build_type=${build_type}
-ifeq ($(uname_s),Darwin)
-	CONAN_SETTINGS += -c:h tools.apple:sdk_path="$(SDKROOT)" -c:b tools.apple:sdk_path="$(SDKROOT)"
-endif
 CONAN_BASE = conan install .. --build=arrow --build=missing ${CONAN_SETTINGS}
 
 build:
