@@ -362,7 +362,8 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       std::nullopt),
     REGISTER_PROPERTY(PROPERTY_FS_USE_IAM,
                       PropertyType::BOOL,
-                      "Whether to use IAM for the filesystem storage service.",
+                      "Whether to use IAM for the filesystem storage service. For Talon credential Broker requests, "
+                      "true selects the Broker's own IAM identity; false uses the supplied target identity.",
                       false,
                       ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_FS_USE_VIRTUAL_HOST,
@@ -495,6 +496,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "The Talon coordinator address used for block routing.",
                       "",
                       ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_NAMESPACE,
+                      PropertyType::STRING,
+                      "Optional Talon request namespace. Empty uses the default namespace, independently of "
+                      "fs.credential_endpoint.",
+                      "",
+                      ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_FS_TALON_BLOCK_SIZE,
                       PropertyType::UINT32,
                       "The Talon block size in bytes.",
@@ -522,9 +529,10 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "The Azure tenant ID sent to the temporary credential broker.",
                       "",
                       std::nullopt),
-    REGISTER_PROPERTY(PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT,
+    REGISTER_PROPERTY(PROPERTY_FS_CREDENTIAL_ENDPOINT,
                       PropertyType::STRING,
-                      "The HTTP(S) endpoint used to obtain temporary Azure SAS credentials.",
+                      "The HTTP(S) credential Broker endpoint for Azure SAS and Talon requests. "
+                      "Talon derives the Broker request and origin settings from the filesystem properties.",
                       "",
                       std::nullopt),
     // --- writer properties define ---

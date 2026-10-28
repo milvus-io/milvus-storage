@@ -100,7 +100,7 @@ TEST_F(LanceStorageOptionsTest, AzureKeys) {
   EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
 }
 
-TEST_F(LanceStorageOptionsTest, WriterRejectsAzureCredentialBroker) {
+TEST_F(LanceStorageOptionsTest, AzureCredentialBrokerRespectsIamMode) {
   ScopedUnsetAzurite no_azurite;
   ArrowFileSystemConfig config;
   config.storage_type = "remote";
@@ -111,16 +111,32 @@ TEST_F(LanceStorageOptionsTest, WriterRejectsAzureCredentialBroker) {
   config.region = "westus3";
   config.address = "core.windows.net";
   config.use_ssl = true;
-  config.use_iam = true;
+  config.use_iam = false;
   config.azure_client_id = "client-id";
   config.azure_tenant_id = "tenant-id";
-  config.azure_credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
+  config.credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
   config.load_frequency = 3600;
   config.request_timeout_ms = 5000;
 
   auto result = ToWriterOptions(config);
   ASSERT_FALSE(result.ok());
   EXPECT_TRUE(result.status().IsNotImplemented()) << result.status().ToString();
+
+  // Native IAM ignores Broker fields, including an endpoint used only by Talon.
+  config.use_iam = true;
+  for (const bool include_target_identity : {false, true}) {
+    SCOPED_TRACE(include_target_identity);
+    config.azure_client_id = include_target_identity ? "client-id" : "";
+    config.azure_tenant_id = include_target_identity ? "tenant-id" : "";
+
+    ASSERT_AND_ASSIGN(const auto opts, ToWriterOptions(config));
+    EXPECT_EQ(opts.at("azure_storage_account_name"), "myaccount");
+    EXPECT_EQ(opts.at("azure_endpoint"), "https://myaccount.blob.core.windows.net");
+    EXPECT_EQ(opts.count("azure_storage_account_key"), 0);
+    EXPECT_EQ(opts.count("azure_broker_endpoint"), 0);
+    EXPECT_EQ(opts.count("azure_broker_client_id"), 0);
+    EXPECT_EQ(opts.count("azure_broker_tenant_id"), 0);
+  }
 }
 
 TEST_F(LanceStorageOptionsTest, AliyunKeys) {

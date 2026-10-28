@@ -15,19 +15,24 @@
 #include "talon/talon_bridge.h"
 
 #include <exception>
+#include <cstdlib>
 #include <cerrno>
 #include <limits>
 #include <memory>
 #include <new>
 #include <string>
+#include <stdexcept>
 #include <utility>
 #include <type_traits>
 
 #include <arrow/status.h>
 #include <arrow/util/io_util.h>
+#include <nlohmann/json.hpp>
 
 #include "runtime/bridge_util.h"
 #include "milvus-storage/common/extend_status.h"
+#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/credential_broker.h"
 
 namespace milvus_storage::talon {
 namespace {
@@ -210,13 +215,166 @@ void TalonIoCallbackImpl(void* context, int32_t error_code, uint64_t value, cons
 
 }  // namespace
 
-arrow::Result<std::shared_ptr<TalonClient>> TalonClient::Make(const std::string& coordinator,
-                                                              uint32_t block_size,
-                                                              uint32_t max_idle_per_addr) {
-  return CatchRustResult<std::shared_ptr<TalonClient>>("Failed to create Talon client", [&]() {
-    auto impl = ffi::new_talon_client(coordinator, block_size, max_idle_per_addr);
+arrow::Result<std::string> TalonClient::BuildCredentialBrokerIAMJson(const ArrowFileSystemConfig& config) {
+  // Broker IAM ignores target identity fields, even when they are present in the filesystem config.
+  nlohmann::json request = {{credential_broker::kCredentialType, credential_broker::kIam}};
+  if (config.request_timeout_ms <= 0 || config.bucket_name.empty()) {
+    return arrow::Status::Invalid("Talon credential Broker requires fs.bucket_name and positive fs.request_timeout_ms");
+  }
+  request[credential_broker::kCsp] = config.cloud_provider;
+  request[credential_broker::kRegion] = config.region;
+  request[credential_broker::kBucket] = config.bucket_name;
+  request[credential_broker::kDurationSeconds] = config.load_frequency;
+  std::string endpoint = config.address;
+  bool use_virtual_host = config.use_virtual_host;
+  if (config.cloud_provider == kCloudProviderAzure) {
+    if (config.access_key_id.empty()) {
+      return arrow::Status::Invalid("Talon Azure Broker requires fs.access_key_id");
+    }
+    request[credential_broker::kAzureAccountName] = config.access_key_id;
+    // Match AzureFileSystemProducer: address is a cloud suffix except under Azurite.
+    const char* azurite = std::getenv("USE_AZURITE");
+    use_virtual_host = endpoint.empty() || azurite == nullptr || std::string(azurite) != "true";
+    if (use_virtual_host) {
+      endpoint = config.access_key_id + ".blob." + (endpoint.empty() ? "core.windows.net" : endpoint);
+    }
+  } else if (config.cloud_provider == kCloudProviderAWS) {
+    if (config.region.empty() || config.load_frequency < 900 || config.load_frequency > 3600) {
+      return arrow::Status::Invalid("Talon S3 Broker requires fs.region and fs.load_frequency in [900, 3600]");
+    }
+  } else if (config.cloud_provider != kCloudProviderGCP) {
+    return arrow::Status::Invalid("Talon credential Broker supports AWS, GCP, and Azure target identities");
+  }
+  if (endpoint.empty()) {
+    return arrow::Status::Invalid("Talon credential Broker requires fs.address");
+  }
+  nlohmann::json origin = {{credential_broker::kEndpoint, StorageUri::BuildEndpointUrl(endpoint, config.use_ssl)},
+                           {credential_broker::kUseVirtualHost, use_virtual_host},
+                           {credential_broker::kRequestTimeoutMs, config.request_timeout_ms}};
+  if (!config.region.empty()) {
+    origin[credential_broker::kRegion] = config.region;
+  }
+  // Do not send local CA file paths or reserved transport settings as effective options.
+  try {
+    const nlohmann::json descriptor = {{credential_broker::kUrl, config.credential_endpoint},
+                                       {credential_broker::kRequest, std::move(request)},
+                                       {credential_broker::kOrigin, std::move(origin)}};
+    return descriptor.dump();
+  } catch (const nlohmann::json::type_error& error) {
+    // Preserve the serialization error code without exposing credential field contents.
+    return arrow::Status::Invalid("Talon credential Broker fields must be valid UTF-8 (JSON error ", error.id, ")");
+  }
+}
+
+arrow::Result<std::string> TalonClient::BuildCredentialBrokerARNJson(const ArrowFileSystemConfig& config) {
+  nlohmann::json request = nlohmann::json::object();
+  if (config.request_timeout_ms <= 0 || config.bucket_name.empty()) {
+    return arrow::Status::Invalid("Talon credential Broker requires fs.bucket_name and positive fs.request_timeout_ms");
+  }
+  request[credential_broker::kCsp] = config.cloud_provider;
+  request[credential_broker::kRegion] = config.region;
+  request[credential_broker::kBucket] = config.bucket_name;
+  request[credential_broker::kDurationSeconds] = config.load_frequency;
+  std::string endpoint = config.address;
+  bool use_virtual_host = config.use_virtual_host;
+  if (config.cloud_provider == kCloudProviderAzure) {
+    if (config.access_key_id.empty()) {
+      return arrow::Status::Invalid("Talon Azure Broker requires fs.access_key_id");
+    }
+    if (config.azure_client_id.empty() || config.azure_tenant_id.empty() || config.region.empty()) {
+      return arrow::Status::Invalid(
+          "Talon Azure Broker stsAssumeRole requires fs.azure_client_id, "
+          "fs.azure_tenant_id, and fs.region");
+    }
+    request[credential_broker::kAzureAccountName] = config.access_key_id;
+    request[credential_broker::kAzureClientId] = config.azure_client_id;
+    request[credential_broker::kAzureTenantId] = config.azure_tenant_id;
+    // Match AzureFileSystemProducer: address is a cloud suffix except under Azurite.
+    const char* azurite = std::getenv("USE_AZURITE");
+    use_virtual_host = endpoint.empty() || azurite == nullptr || std::string(azurite) != "true";
+    if (use_virtual_host) {
+      endpoint = config.access_key_id + ".blob." + (endpoint.empty() ? "core.windows.net" : endpoint);
+    }
+  } else if (config.cloud_provider == kCloudProviderAWS) {
+    if (config.region.empty() || config.load_frequency < 900 || config.load_frequency > 3600) {
+      return arrow::Status::Invalid("Talon S3 Broker requires fs.region and fs.load_frequency in [900, 3600]");
+    }
+    if (config.role_arn.empty()) {
+      return arrow::Status::Invalid("Talon S3 Broker stsAssumeRole requires fs.role_arn");
+    }
+    request[credential_broker::kRoleArn] = config.role_arn;
+    if (!config.external_id.empty()) {
+      request[credential_broker::kExternalId] = config.external_id;
+    }
+  } else if (config.cloud_provider == kCloudProviderGCP) {
+    if (config.gcp_target_service_account.empty()) {
+      return arrow::Status::Invalid("Talon GCP Broker stsAssumeRole requires fs.gcp_target_service_account");
+    }
+    request[credential_broker::kGcpServiceAccountEmail] = config.gcp_target_service_account;
+  } else {
+    return arrow::Status::Invalid("Talon credential Broker supports AWS, GCP, and Azure target identities");
+  }
+  if (endpoint.empty()) {
+    return arrow::Status::Invalid("Talon credential Broker requires fs.address");
+  }
+  nlohmann::json origin = {{credential_broker::kEndpoint, StorageUri::BuildEndpointUrl(endpoint, config.use_ssl)},
+                           {credential_broker::kUseVirtualHost, use_virtual_host},
+                           {credential_broker::kRequestTimeoutMs, config.request_timeout_ms}};
+  if (!config.region.empty()) {
+    origin[credential_broker::kRegion] = config.region;
+  }
+  // Do not send local CA file paths or reserved transport settings as effective options.
+  try {
+    const nlohmann::json descriptor = {{credential_broker::kUrl, config.credential_endpoint},
+                                       {credential_broker::kRequest, std::move(request)},
+                                       {credential_broker::kOrigin, std::move(origin)}};
+    return descriptor.dump();
+  } catch (const nlohmann::json::type_error& error) {
+    // Preserve the serialization error code without exposing credential field contents.
+    return arrow::Status::Invalid("Talon credential Broker fields must be valid UTF-8 (JSON error ", error.id, ")");
+  }
+}
+
+arrow::Result<std::shared_ptr<TalonClient>> TalonClient::Make(const ArrowFileSystemConfig& config) {
+  std::string credential_broker_json;
+  if (!config.credential_endpoint.empty()) {
+    if (config.use_iam) {
+      ARROW_ASSIGN_OR_RAISE(credential_broker_json, BuildCredentialBrokerIAMJson(config));
+    } else {
+      ARROW_ASSIGN_OR_RAISE(credential_broker_json, BuildCredentialBrokerARNJson(config));
+    }
+  }
+  try {
+    return CatchRustResult<std::shared_ptr<TalonClient>>("Failed to create Talon client", [&]() {
+      auto impl = ffi::new_talon_client(config.talon_coordinator, config.talon_block_size,
+                                        config.talon_max_idle_per_addr, config.talon_namespace, credential_broker_json);
+      return std::shared_ptr<TalonClient>(new TalonClient(std::move(impl)));
+    });
+  } catch (const std::invalid_argument& error) {
+    // CXX rejects non-UTF-8 strings before entering Rust; its diagnostic contains no input bytes.
+    return arrow::Status::Invalid("Invalid Talon client options: ", error.what());
+  }
+}
+
+arrow::Result<std::shared_ptr<TalonClient>> TalonClient::WithNamespace(std::string_view namespace_name) const {
+  try {
+    auto impl =
+        impl_->with_namespace(rust::Str(namespace_name.empty() ? "" : namespace_name.data(), namespace_name.size()));
     return std::shared_ptr<TalonClient>(new TalonClient(std::move(impl)));
-  });
+  } catch (const std::invalid_argument& error) {
+    return arrow::Status::Invalid("Invalid Talon request options: ", error.what());
+  }
+}
+
+arrow::Result<std::shared_ptr<TalonClient>> TalonClient::WithCredentialBroker(
+    std::string_view credential_broker) const {
+  try {
+    auto impl = impl_->with_credential_broker(
+        rust::Str(credential_broker.empty() ? "" : credential_broker.data(), credential_broker.size()));
+    return std::shared_ptr<TalonClient>(new TalonClient(std::move(impl)));
+  } catch (const std::invalid_argument& error) {
+    return arrow::Status::Invalid("Invalid Talon request options: ", error.what());
+  }
 }
 
 arrow::Result<TalonObjectReader> TalonClient::OpenObject(const std::string& cloud_provider,
@@ -230,13 +388,6 @@ arrow::Result<TalonObjectReader> TalonClient::OpenObject(const std::string& clou
                                                     has_initial_stat ? initial_stat->size : 0,
                                                     has_initial_stat ? initial_stat->version : empty_version));
   });
-}
-
-arrow::Result<std::shared_ptr<TalonClient>> TalonClient::Make(const api::Properties& properties) {
-  ARROW_ASSIGN_OR_RAISE(const auto coordinator, api::GetValue<std::string>(properties, PROPERTY_FS_TALON_COORDINATOR));
-  ARROW_ASSIGN_OR_RAISE(const auto block_size, api::GetValue<uint32_t>(properties, PROPERTY_FS_TALON_BLOCK_SIZE));
-  ARROW_ASSIGN_OR_RAISE(const auto max_idle, api::GetValue<uint32_t>(properties, PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR));
-  return Make(coordinator, block_size, max_idle);
 }
 
 arrow::Future<int64_t> TalonClient::ReadAsync(const std::string& uri,

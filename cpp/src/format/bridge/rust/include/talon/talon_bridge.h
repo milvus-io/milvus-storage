@@ -18,15 +18,19 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <arrow/result.h>
 #include <arrow/util/future.h>
 
-#include "milvus-storage/properties.h"
 #include "rust/cxx.h"
 #include "rust-bridge/talon/talon_bridge.h"
+
+namespace milvus_storage {
+struct ArrowFileSystemConfig;
+}
 
 namespace milvus_storage::talon {
 
@@ -88,11 +92,11 @@ class TalonObjectReader final {
 /// Owns a Rust Talon client and converts every fallible FFI operation to Arrow errors.
 class TalonClient final {
   public:
-  static arrow::Result<std::shared_ptr<TalonClient>> Make(const std::string& coordinator,
-                                                          uint32_t block_size,
-                                                          uint32_t max_idle_per_addr);
-
-  static arrow::Result<std::shared_ptr<TalonClient>> Make(const api::Properties& properties);
+  static arrow::Result<std::shared_ptr<TalonClient>> Make(const ArrowFileSystemConfig& config);
+  /// Derives an immutable request view while sharing the original connection pools.
+  /// Call only for a provided override; an empty string clears that option.
+  arrow::Result<std::shared_ptr<TalonClient>> WithNamespace(std::string_view namespace_name) const;
+  arrow::Result<std::shared_ptr<TalonClient>> WithCredentialBroker(std::string_view credential_broker) const;
   /// Raw operations use Talon directly, independently of filesystem routing mode.
   /// The caller retains dst until completion; present size-zero metadata is a known empty file.
   arrow::Future<int64_t> ReadAsync(const std::string& uri,
@@ -121,6 +125,9 @@ class TalonClient final {
                                               const std::optional<TalonObjectStat>& initial_stat) const;
 
   private:
+  static arrow::Result<std::string> BuildCredentialBrokerIAMJson(const ArrowFileSystemConfig& config);
+  static arrow::Result<std::string> BuildCredentialBrokerARNJson(const ArrowFileSystemConfig& config);
+
   explicit TalonClient(rust::Box<ffi::TalonClient> impl) : impl_(std::move(impl)) {}
 
   rust::Box<ffi::TalonClient> impl_;

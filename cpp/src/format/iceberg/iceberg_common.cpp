@@ -118,8 +118,8 @@ arrow::Result<std::unordered_map<std::string, std::string>> ToWriterOptions(cons
   }
   if (provider == kCloudProviderAzure) {
     // Broker-issued SAS credentials belong to the C++ filesystem read path and
-    // are not reconstructed by the native writer.
-    if (use_supported_credentials && !config.IsAzureCredentialBrokerEnabled()) {
+    // are not reconstructed by the native writer. Native IAM ignores Broker settings.
+    if (use_supported_credentials && (config.use_iam || !config.IsAzureCredentialBrokerEnabled())) {
       set("adls.account-name", config.access_key_id);
       set("adls.endpoint-suffix", config.address);
       if (use_ak_sk) {

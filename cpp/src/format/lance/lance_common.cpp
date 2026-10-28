@@ -76,7 +76,8 @@ arrow::Result<StorageOptions> ToWriterOptions(const ArrowFileSystemConfig& confi
     }
   }
   if (provider == kCloudProviderAzure) {
-    if (use_supported_credentials && !config.IsAzureCredentialBrokerEnabled()) {
+    // Native IAM ignores Broker settings used by Talon reads.
+    if (use_supported_credentials && (config.use_iam || !config.IsAzureCredentialBrokerEnabled())) {
       set("azure_storage_account_name", config.access_key_id);
       if (use_ak_sk) {
         set("azure_storage_account_key", config.access_key_value);

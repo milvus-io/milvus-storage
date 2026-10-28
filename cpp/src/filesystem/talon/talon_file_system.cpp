@@ -511,8 +511,11 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
            (state_->config.talon_mode != TalonMode::SmallReads ||
             state_->config.talon_small_read_threshold == talon->state_->config.talon_small_read_threshold) &&
            state_->config.talon_coordinator == talon->state_->config.talon_coordinator &&
+           state_->config.talon_namespace == talon->state_->config.talon_namespace &&
            state_->config.talon_block_size == talon->state_->config.talon_block_size &&
            state_->config.talon_max_idle_per_addr == talon->state_->config.talon_max_idle_per_addr &&
+           ((state_->config.credential_endpoint.empty() && talon->state_->config.credential_endpoint.empty()) ||
+            state_->config.GetCacheKey() == talon->state_->config.GetCacheKey()) &&
            origin_fs_->Equals(*talon->origin_fs_);
   }
 
@@ -667,11 +670,10 @@ namespace internal {
 arrow::Result<ArrowFileSystemPtr> MakeTalonFileSystem(const ArrowFileSystemConfig& config,
                                                       ArrowFileSystemPtr origin_fs,
                                                       std::string bucket) {
-  ARROW_ASSIGN_OR_RAISE(auto client, TalonClient::Make(config.talon_coordinator, config.talon_block_size,
-                                                       config.talon_max_idle_per_addr));
   auto talon_config = config;
   // Readers use the producer's normalized bucket rather than the original spelling.
   talon_config.bucket_name = std::move(bucket);
+  ARROW_ASSIGN_OR_RAISE(auto client, TalonClient::Make(talon_config));
   return std::make_shared<TalonFileSystem>(std::move(talon_config), std::move(origin_fs), std::move(client));
 }
 

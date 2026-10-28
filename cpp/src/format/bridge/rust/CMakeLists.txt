@@ -49,4 +49,4 @@ target_include_directories(prsbridge PRIVATE
     $<TARGET_PROPERTY:milvus-common::milvus-common,INTERFACE_INCLUDE_DIRECTORIES>
 )
 
-target_link_libraries(prsbridge PUBLIC rust-bridge)
+target_link_libraries(prsbridge PUBLIC rust-bridge PRIVATE nlohmann_json::nlohmann_json)
