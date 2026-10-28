@@ -1778,7 +1778,10 @@ TEST(TalonFileSystemTest, PreservesOuterSubtreeAndExtensionInterfaces) {
   EXPECT_EQ(proxy->base_path(), "test-bucket/");
   EXPECT_EQ(std::dynamic_pointer_cast<FileSystemProxy>(proxy->base_fs()), nullptr);
   EXPECT_NE(std::dynamic_pointer_cast<UploadConditional>(fs), nullptr);
-  EXPECT_NE(std::dynamic_pointer_cast<UploadSizable>(fs), nullptr);
+  auto sizable = std::dynamic_pointer_cast<UploadSizable>(fs);
+  ASSERT_NE(sizable, nullptr);
+  ASSERT_AND_ASSIGN(auto output, sizable->OpenOutputStreamWithFixedSize("fixed-size", nullptr, 1));
+  ASSERT_STATUS_OK(output->Abort());
   EXPECT_NE(std::dynamic_pointer_cast<Observable>(fs), nullptr);
 }
 

@@ -26,7 +26,6 @@
 #include <vector>
 
 #include <arrow/status.h>
-#include <arrow/util/cpu_info.h>
 #include <arrow/util/logging.h>
 #include <arrow/util/thread_pool.h>
 #include <aws/io/io.h>
@@ -35,9 +34,6 @@
 #include <aws/core/Aws.h>
 #include <aws/core/auth/signer/AWSAuthV4Signer.h>
 #include <aws/core/client/RetryStrategy.h>
-#include <aws/crt/io/Bootstrap.h>
-#include <aws/crt/io/EventLoopGroup.h>
-#include <aws/crt/io/HostResolver.h>
 #include <aws/s3-crt/S3CrtClient.h>
 #include <aws/s3-crt/S3CrtClientConfiguration.h>
 
@@ -278,28 +274,6 @@ void S3CrtClientHolder::Finalize(bool from_destructor) {
 
 std::shared_ptr<FilesystemMetrics> S3CrtClientHolder::GetMetrics() const { return metrics_; }
 
-arrow::Status S3CrtClientFinalizer::ConfigureClient(Aws::S3Crt::S3CrtClientConfiguration& config) {
-  std::lock_guard lock(mutex_);
-  if (!bootstrap_) {
-    // InitAPI only honors the first caller's options. Configure our clients
-    // explicitly, after SDK initialization, regardless of who initialized it.
-    Aws::Crt::Io::EventLoopGroup event_loops(
-        static_cast<uint16_t>(std::clamp(arrow::internal::CpuInfo::GetInstance()->num_cores(), 1, 65535)));
-    if (!event_loops)
-      return arrow::Status::IOError("Cannot create S3 event loops: ", event_loops.LastError());
-    Aws::Crt::Io::DefaultHostResolver resolver(event_loops, 8, 60);
-    if (!resolver)
-      return arrow::Status::IOError("Cannot create S3 host resolver: ", resolver.LastError());
-    auto bootstrap = std::make_shared<Aws::Crt::Io::ClientBootstrap>(event_loops, resolver);
-    if (!*bootstrap)
-      return arrow::Status::IOError("Cannot create S3 client bootstrap: ", bootstrap->LastError());
-    bootstrap->EnableBlockingShutdown();
-    bootstrap_ = std::move(bootstrap);
-  }
-  config.clientBootstrap = bootstrap_;
-  return arrow::Status::OK();
-}
-
 // Construction is published as one transaction under mutex_:
 //
 //   before factory:  constructing_clients_++
@@ -402,9 +376,6 @@ void S3CrtClientFinalizer::Finalize() {
 
   std::unique_lock lock(mutex_);
   cv_.wait(lock, [this] { return live_clients_ == 0; });
-  // No client or construction can still use this runtime. Keep concurrent
-  // finalizers behind the lock until its network threads have exited.
-  bootstrap_.reset();
 }
 
 void S3CrtClientFinalizer::ClientDestroyed() {
@@ -450,11 +421,9 @@ arrow::Result<std::shared_ptr<S3CrtClientHolder>> ClientBuilder<Aws::S3Crt::S3Cr
         client_config_.useVirtualAddressing = use_virtual_addressing;
         client_config_.throughputTargetGbps = options_.crt_queue_sizes * 0.4;
 
-        // Do not retain the runtime in the builder beyond client construction.
-        auto config = client_config_;
-        ARROW_RETURN_NOT_OK(GetCrtClientFinalizer()->ConfigureClient(config));
-        return std::make_shared<Aws::S3Crt::S3CrtClient>(credentials_provider_, config, config.payloadSigningPolicy,
-                                                         config.useVirtualAddressing);
+        return std::make_shared<Aws::S3Crt::S3CrtClient>(credentials_provider_, client_config_,
+                                                         client_config_.payloadSigningPolicy,
+                                                         client_config_.useVirtualAddressing);
       },
       std::move(metrics));
 }

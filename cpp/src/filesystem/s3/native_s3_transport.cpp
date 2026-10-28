@@ -4,8 +4,6 @@
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 #include "filesystem/s3/native_s3_transport.h"
 #ifdef WITH_CRT
-#include <deque>
-#include <mutex>
 #include <optional>
 #include <utility>
 #include <arrow/filesystem/path_util.h>
@@ -19,60 +17,11 @@
 #include "milvus-storage/filesystem/util_internal.h"
 
 namespace milvus_storage {
-struct NativeS3Transport::State : std::enable_shared_from_this<NativeS3Transport::State> {
-  std::mutex mutex;
-  size_t inflight = 0;
-  size_t limit = 0;
-  std::deque<arrow::Future<std::shared_ptr<Permit>>> waiters;
-
-  void Release() {
-    arrow::Future<std::shared_ptr<Permit>> next;
-    {
-      std::lock_guard lock(mutex);
-      if (waiters.empty()) {
-        --inflight;
-        return;
-      }
-      next = std::move(waiters.front());
-      waiters.pop_front();
-    }
-    // Hand over the slot before running continuations, without holding the lock.
-    std::shared_ptr<Permit> permit;
-    try {
-      permit = std::shared_ptr<Permit>(new Permit(nullptr));
-    } catch (const std::bad_alloc&) {
-      next.MarkFinished(arrow::Status::OutOfMemory("S3 request admission"));
-      Release();
-      return;
-    }
-    permit->state_ = shared_from_this();
-    next.MarkFinished(std::move(permit));
-  }
-
+struct NativeS3Transport::State {
   bool is_gcp = false;
   std::string region;
   std::shared_ptr<S3ClientHolder> holder;
 };
-
-NativeS3Transport::Permit::~Permit() {
-  if (state_)
-    state_->Release();
-}
-
-arrow::Future<std::shared_ptr<NativeS3Transport::Permit>> NativeS3Transport::Acquire(const arrow::io::IOContext& io) {
-  ARROW_RETURN_NOT_OK(io.stop_token().Poll());
-  auto future = arrow::Future<std::shared_ptr<Permit>>::Make();
-  auto permit = std::shared_ptr<Permit>(new Permit(nullptr));
-  std::lock_guard lock(state_->mutex);
-  if (state_->inflight < state_->limit) {
-    ++state_->inflight;
-    permit->state_ = state_;
-    future.MarkFinished(std::move(permit));
-  } else {
-    state_->waiters.push_back(future);
-  }
-  return future;
-}
 
 namespace {
 struct Request {
@@ -90,6 +39,7 @@ struct Request {
   std::shared_ptr<FilesystemMetrics> write_metrics;
   int64_t write_bytes = 0;
   bool write_finished = false;
+  std::function<arrow::Status(const arrow::Result<Aws::Client::XmlOutcome>&)> before_release;
   arrow::Future<Aws::Client::XmlOutcome> future = arrow::Future<Aws::Client::XmlOutcome>::Make();
 
   ~Request() {
@@ -255,16 +205,26 @@ struct Request {
     owned->http.reset();
     owned->streambuf.reset();
     owned->data.reset();
-    // As with native range reads, let callers select their continuation executor.
-    // The request lease remains alive until all inline continuations return.
-    owned->future.MarkFinished(std::move(result));
+    // Record upload failures before admitting another write. This hook must not
+    // wait or notify users; stream completion notifications use the CPU executor.
+    if (owned->before_release) {
+      auto status = owned->before_release(result);
+      if (!status.ok()) {
+        result = std::move(status);
+      }
+    }
     owned->permit.reset();
+    // Internal continuations must progress even when user callbacks occupy the
+    // CPU pool. Keep the client lease alive until these continuations return.
+    owned->future.MarkFinished(std::move(result));
   }
 };
 }  // namespace
 
-arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(
-    const S3Options& options, std::shared_ptr<S3ClientHolder> holder, std::shared_ptr<S3CrtClientHolder> crt_holder) {
+arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(const S3Options& options,
+                                                                          std::shared_ptr<S3ClientHolder> holder,
+                                                                          std::shared_ptr<S3CrtClientHolder> crt_holder,
+                                                                          std::shared_ptr<S3RequestLimiter> limiter) {
   ARROW_RETURN_NOT_OK(CheckS3Initialized());
   if (options.retry_strategy || !options.proxy_options.host.empty()) {
     return arrow::Status::NotImplemented("Native S3 requires no custom retry strategy and no proxy");
@@ -281,18 +241,24 @@ arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(
   state->holder = std::move(holder);
   state->is_gcp = options.cloud_provider == "gcp";
   state->region = options.region;
-  state->limit = options.max_connections;
-  return std::shared_ptr<NativeS3Transport>(new NativeS3Transport(std::move(state), std::move(crt_holder)));
+  return std::shared_ptr<NativeS3Transport>(
+      new NativeS3Transport(std::move(state), std::move(crt_holder), std::move(limiter)));
 }
 
-arrow::Future<Aws::Client::XmlOutcome> NativeS3Transport::Send(const Aws::AmazonWebServiceRequest& model,
-                                                               const std::string& key,
-                                                               Aws::Http::HttpMethod method,
-                                                               const std::string& query,
-                                                               const arrow::io::IOContext& io,
-                                                               size_t limit,
-                                                               std::shared_ptr<arrow::Buffer> data,
-                                                               std::shared_ptr<Permit> permit) {
+arrow::Future<std::shared_ptr<NativeS3Transport::Permit>> NativeS3Transport::Acquire(const arrow::io::IOContext& io) {
+  return limiter_->Acquire(io);
+}
+
+arrow::Future<Aws::Client::XmlOutcome> NativeS3Transport::Send(
+    const Aws::AmazonWebServiceRequest& model,
+    const std::string& key,
+    Aws::Http::HttpMethod method,
+    const std::string& query,
+    const arrow::io::IOContext& io,
+    size_t limit,
+    std::shared_ptr<arrow::Buffer> data,
+    std::shared_ptr<Permit> permit,
+    std::function<arrow::Status(const arrow::Result<Aws::Client::XmlOutcome>&)> before_release) {
   auto send = [&]() -> arrow::Result<arrow::Future<Aws::Client::XmlOutcome>> {
     if (method != Aws::Http::HttpMethod::HTTP_HEAD && method != Aws::Http::HttpMethod::HTTP_GET)
       return arrow::Status::NotImplemented("Native S3 transport only supports metadata reads");
@@ -300,6 +266,7 @@ arrow::Future<Aws::Client::XmlOutcome> NativeS3Transport::Send(const Aws::Amazon
     auto r = std::make_unique<Request>();
     r->limit = limit;
     r->permit = std::move(permit);
+    r->before_release = std::move(before_release);
     ARROW_ASSIGN_OR_RAISE(r->client_lease, holder_->Acquire());
     ARROW_ASSIGN_OR_RAISE(auto lease, state_->holder->Lock());
     auto endpoint = lease->accessEndpointProvider()->ResolveEndpoint(model.GetEndpointContextParams());

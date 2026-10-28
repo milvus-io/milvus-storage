@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <arrow/testing/gtest_util.h>
+#include <arrow/util/cpu_info.h>
 #include <arrow/buffer.h>
 #include <arrow/io/memory.h>
 #include <gtest/gtest.h>
@@ -21,6 +22,7 @@
 #include <array>
 #include <atomic>
 #include <cstdlib>
+#include <fstream>
 #include <iterator>
 #include <memory>
 #include <sstream>
@@ -33,6 +35,10 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 
+#include <aws/core/Globals.h>
+#include <aws/crt/io/Bootstrap.h>
+#include <aws/io/channel_bootstrap.h>
+#include <aws/io/event_loop.h>
 #include <aws/core/http/standard/StandardHttpRequest.h>
 #include <aws/core/http/standard/StandardHttpResponse.h>
 #include <aws/core/utils/stream/ResponseStream.h>
@@ -60,6 +66,60 @@ Aws::IOStreamFactory AwsWriteableStreamFactory(void* data, int64_t nbytes);
 // ============================================================================
 // Non-cloud unit tests — S3 SDK initialized but no real cloud connection needed
 // ============================================================================
+
+// SDK initialization is process-wide and cannot be reset by a normal fixture.
+class S3SdkInitializationDeathTest : public ::testing::TestWithParam<bool> {};
+
+TEST_P(S3SdkInitializationDeathTest, KeepsSdkAliveUntilApplicationClientsAreDestroyed) {
+  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+  const bool application_first = GetParam();
+  ASSERT_EXIT(
+      {
+        auto check = [application_first] {
+          std::shared_ptr<S3GlobalLifetime> lifetime;
+          if (application_first) {
+            ASSERT_AND_ASSIGN(lifetime, AcquireS3(S3GlobalOptions::Defaults()));
+          } else {
+            ASSERT_STATUS_OK(EnsureS3Initialized());
+          }
+          auto* bootstrap = Aws::GetDefaultClientBootstrap();
+          ASSERT_NE(bootstrap, nullptr);
+          ASSERT_TRUE(*bootstrap);
+          const auto threads = aws_event_loop_group_get_loop_count(bootstrap->GetUnderlyingHandle()->event_loop_group);
+          EXPECT_GT(threads, 0);
+#if defined(WITH_CRT) && defined(__linux__)
+          std::ifstream smt("/sys/devices/system/cpu/smt/active");
+          std::string active;
+          if (smt >> active && active == "0") {
+            EXPECT_EQ(threads, std::min(arrow::internal::CpuInfo::GetInstance()->num_cores(), 65535));
+          }
+#endif
+          if (application_first) {
+            ASSERT_STATUS_OK(EnsureS3Initialized());
+          } else {
+            ASSERT_AND_ASSIGN(lifetime, AcquireS3(S3GlobalOptions::Defaults()));
+          }
+          EXPECT_EQ(Aws::GetDefaultClientBootstrap(), bootstrap);
+          ASSERT_AND_ASSIGN(auto other_lifetime, AcquireS3(S3GlobalOptions::Defaults()));
+          EXPECT_EQ(other_lifetime, lifetime);
+          ASSERT_STATUS_OK(FinalizeS3());
+          EXPECT_FALSE(AcquireS3(S3GlobalOptions::Defaults()).ok());
+          EXPECT_FALSE(EnsureS3Initialized().ok());
+          // Application-owned clients can outlive Storage's filesystem registry.
+          lifetime.reset();
+          EXPECT_EQ(Aws::GetDefaultClientBootstrap(), bootstrap);
+          EXPECT_EQ(aws_event_loop_group_get_loop_count(bootstrap->GetUnderlyingHandle()->event_loop_group), threads);
+          other_lifetime.reset();
+          EXPECT_EQ(Aws::GetDefaultClientBootstrap(), nullptr);
+          ASSERT_STATUS_OK(FinalizeS3());
+        };
+        check();
+        std::_Exit(::testing::Test::HasFailure() ? 1 : 0);
+      },
+      ::testing::ExitedWithCode(0), "");
+}
+
+INSTANTIATE_TEST_SUITE_P(StartupOrder, S3SdkInitializationDeathTest, ::testing::Bool());
 
 class S3UnitTest : public ::testing::Test {
   protected:

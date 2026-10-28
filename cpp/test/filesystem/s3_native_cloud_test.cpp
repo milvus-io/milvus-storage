@@ -129,7 +129,9 @@ TEST_F(S3NativeCloudTest, ListingAndContinuationPages) {
   auto io = arrow::io::IOContext(executor_.get());
   ASSERT_OK_AND_ASSIGN(auto sdk, ClientBuilder<S3Client>(options_).BuildClient(io));
   ASSERT_OK_AND_ASSIGN(auto crt, ClientBuilder<Aws::S3Crt::S3CrtClient>(options_).BuildClient(io));
-  ASSERT_OK_AND_ASSIGN(auto transport, NativeS3Transport::Make(options_, sdk, crt));
+  ASSERT_OK_AND_ASSIGN(
+      auto transport,
+      NativeS3Transport::Make(options_, sdk, crt, std::make_shared<S3RequestLimiter>(options_.max_connections)));
   ASSERT_OK_AND_ASSIGN(auto operations, MakeNativeS3Operations(io, transport));
   std::string token;
   std::set<std::string> keys;

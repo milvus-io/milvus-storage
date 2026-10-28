@@ -256,8 +256,6 @@ class S3CrtClientFinalizer : public std::enable_shared_from_this<S3CrtClientFina
   protected:
   friend class S3CrtClientConstructionLease;
   friend class S3CrtClientHolder;
-  friend class ClientBuilder<Aws::S3Crt::S3CrtClient>;
-  arrow::Status ConfigureClient(Aws::S3Crt::S3CrtClientConfiguration& config);
   void ClientDestroyed();
 
   // Protects holders_ and both counters. It is never held while invoking a
@@ -269,8 +267,6 @@ class S3CrtClientFinalizer : public std::enable_shared_from_this<S3CrtClientFina
   // Weak ownership is intentional: ordinary filesystem ownership decides when
   // a holder dies; the registry is used only to find holders during shutdown.
   ClientHolderList holders_;
-  // Shared by clients, released after their destructors and before SDK shutdown.
-  std::shared_ptr<Aws::Crt::Io::ClientBootstrap> bootstrap_;
   // Reservations acquired before running a client factory. The RAII
   // construction lease decrements this counter on every failure path.
   std::size_t constructing_clients_ = 0;

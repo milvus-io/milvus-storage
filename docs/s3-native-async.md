@@ -37,10 +37,16 @@ metadata/listing and output paths, which do not promise native nonblocking I/O.
 Both CRT and SDK input factories initialize local handles without network I/O. Arrow's
 async open overrides return an already-completed Future without scheduling work.
 
-Native request completion marks the Arrow Future directly on the CRT callback
-thread, as range reads already do. Callers select the executor for their consuming
-continuations; the transport does not enqueue completion on the filesystem's
-IOContext executor. Requests retain their buffers and client leases through
+The shared request limiter drains returned permits iteratively. Reentrant and concurrent
+returns are counted under its mutex; waiter callbacks and permit destruction run outside
+the mutex, so a long canceled queue does not build a recursive release stack.
+
+Native request completion records upload errors and returns admission capacity
+before finishing its internal Arrow Future on the CRT callback thread. Input and
+metadata consumers select their continuation executor. Output streams dispatch
+public completion notifications on Arrow's existing CPU pool; the transport does
+not enqueue internal completion on the filesystem's IOContext executor. Payload buffers
+are retained until CRT request shutdown; client leases also cover inline internal
 completion, including when the filesystem has already been released.
 
 The transport borrows the **same** `aws_s3_client` owned by the filesystem's
@@ -83,16 +89,55 @@ blocking wrappers. An `AsyncOutputStream` extension adds only `FlushAsync` and
 `AbortAsync`, which Arrow does not expose. It does not redefine Write or Close.
 
 Callers serialize calls on a stream. Shared input buffers must remain immutable
-until FlushAsync or CloseAsync completes. All streams on one filesystem share
-max_connections request slots. Write waits for multipart creation and reserves
-a slot before copying each full part; a large write can therefore block while
-submitting its parts, instead of failing because the whole write exceeds the
-available slots. Completion admits the next waiting request. CRT callbacks never
-block on admission, and CloseAsync queues the already-buffered tail asynchronously.
-This bounds full-part copies, not caller-owned whole buffers or the one partial
-buffer retained per stream. Failed close attempts drain submitted requests and
-abort known multipart uploads; cleanup failure is reported with the original
-error. No destructor starts I/O.
+until FlushAsync or CloseAsync completes. The pending part count is bounded by
+max_connections; an oversized Write returns CapacityError before consuming bytes.
+Await FlushAsync and submit smaller chunks. Closing drains pending parts before
+submitting the last buffer. Failed close attempts abort known multipart uploads;
+cleanup failure is reported with the original error. No destructor starts I/O.
+
+## Fixed-size output streams
+
+`UploadSizable::OpenOutputStreamWithFixedSize(path, metadata, total_size)` selects the independent
+`S3FixedSizeOutputStream` for both ordinary SDK and native CRT S3 clients. Large objects start multipart
+initialization at open; objects below the configured part size use one PUT at close.
+Writes exceeding the declared length fail before consuming bytes. Close rejects
+short writes, drains submitted requests and aborts the multipart upload.
+
+A shared Buffer is sliced for complete parts without another whole-buffer copy.
+Partial writes are combined in one part buffer. The caller serializes stream calls
+and keeps shared input immutable until completion. Write waits for the shared
+filesystem's `max_connections` admission before submitting each complete part.
+Complete raw-pointer parts are copied only after admission; each stream may also
+hold one partial-part buffer. Ordinary SDK requests run on the existing IO executor;
+native requests use the CRT transport. Both use the same admission implementation,
+and native requests share its instance with fixed-size streams on that filesystem.
+Write must not run on SDK IO workers or CRT completion callbacks, because waiting
+could block the workers needed to release capacity. Close and abort use asynchronous
+continuations. SDK workers release request bodies and permits before completing
+their futures, and record failures before releasing capacity.
+
+Both output streams separate internal upload futures from public FlushAsync,
+CloseAsync and AbortAsync notifications. Pending public notifications are queued
+on the existing Arrow CPU pool, so a registered continuation can call Write without
+blocking a CRT or SDK IO worker. Multipart creation, result bookkeeping, admission
+and internal close/abort continue independently of that pool. Synchronous operations
+wait for internal completion directly, including when called from a CPU worker.
+A caller-provided IO executor must not use the same CPU workers for network requests
+and blocking upload continuations. As with other Arrow futures, attaching a callback
+after completion may run it on the registering thread. Failure to dispatch completion
+returns an error instead of leaving an unfinished future; its error continuation can
+run on the reporting thread. No guarantee is made for arbitrary blocking callbacks.
+
+The limit bounds admitted requests and their copied payloads, not memory already
+owned by callers. Existing output streams retain their original bounded write API.
+
+Milvus explicitly selects this entry point for whole-buffer artifact uploads,
+passing the declared length before serialization or the completed Buffer length
+when no stream was opened early. Length mismatches are errors; there is no reopen
+or retry with a different length. FileSystemProxy applies its path prefix and
+forwards through UploadSizable; Talon forwards the same capability to its origin.
+Unsupported filesystems, including Azure, return NotImplemented. This API never
+falls back to an ordinary output stream.
 
 ## Transport and lifetime
 

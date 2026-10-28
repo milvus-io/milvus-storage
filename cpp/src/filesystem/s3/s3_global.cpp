@@ -15,6 +15,8 @@
 #include "milvus-storage/filesystem/s3/s3_global.h"
 
 #include <atomic>
+#include <cstdlib>
+#include <utility>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -35,6 +37,13 @@
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
 #ifdef WITH_CRT
+#include <algorithm>
+#include <cstdint>
+#include <fstream>
+#include <arrow/util/cpu_info.h>
+#include <aws/crt/io/Bootstrap.h>
+#include <aws/crt/io/EventLoopGroup.h>
+#include <aws/crt/io/HostResolver.h>
 #include "milvus-storage/filesystem/s3/s3_crt_client.h"
 #endif
 namespace milvus_storage {
@@ -82,6 +91,16 @@ S3GlobalOptions S3GlobalOptions::Defaults() {
 // -----------------------------------------------------------------------
 // AWS SDK Initialization and finalization
 
+class S3GlobalLifetime {
+  public:
+  explicit S3GlobalLifetime(Aws::SDKOptions options) : options_(std::move(options)) { Aws::InitAPI(options_); }
+
+  ~S3GlobalLifetime() { Aws::ShutdownAPI(options_); }
+
+  private:
+  Aws::SDKOptions options_;
+};
+
 struct AwsInstance {
   AwsInstance() : is_initialized_(false), is_finalized_(false) {}
   ~AwsInstance() { Finalize(/*from_destructor=*/true); }
@@ -101,10 +120,23 @@ struct AwsInstance {
       bool was_initialized = is_initialized_.load();
       DCHECK(!was_initialized);
       DoInitialize(options);
+      // Register before returning to callers that construct application clients.
+      // Their lifetime references also protect clients destroyed after this hook.
+      std::atexit([]() {
+        auto status = EnsureS3Finalized();
+        if (!status.ok()) {
+          LOG_STORAGE_ERROR_ << "Failed to finalize S3: " << status.ToString();
+        }
+      });
       newly_initialized = true;
       is_initialized_.exchange(true);
     });
     return newly_initialized;
+  }
+
+  arrow::Result<std::shared_ptr<S3GlobalLifetime>> Acquire(const S3GlobalOptions& options) {
+    ARROW_RETURN_NOT_OK(EnsureInitialized(options).status());
+    return lifetime_;
   }
 
   bool IsInitialized() { return !is_finalized_ && is_initialized_; }
@@ -131,6 +163,8 @@ struct AwsInstance {
         ARROW_UNUSED(leaked_crt_shared_ptr);
 #endif
         ARROW_UNUSED(leaked_shared_ptr);
+        auto* leaked_lifetime = new std::shared_ptr<S3GlobalLifetime>(std::move(lifetime_));
+        ARROW_UNUSED(leaked_lifetime);
         return;
       }
 #ifdef WITH_CRT
@@ -142,7 +176,7 @@ struct AwsInstance {
 #ifdef ARROW_S3_HAS_S3CLIENT_CONFIGURATION
       EndpointProviderCache::Instance()->Reset();
 #endif
-      Aws::ShutdownAPI(aws_options_);
+      lifetime_.reset();
     }
   }
 
@@ -168,18 +202,45 @@ struct AwsInstance {
 
 #undef LOG_LEVEL_CASE
 
-    aws_options_.loggingOptions.logLevel = aws_log_level;
+    Aws::SDKOptions aws_options;
+    aws_options.loggingOptions.logLevel = aws_log_level;
     // Redirect AWS SDK logs to glog instead of console
-    aws_options_.loggingOptions.logger_create_fn = [aws_log_level] {
+    aws_options.loggingOptions.logger_create_fn = [aws_log_level] {
       return std::make_shared<GlogAwsLogger>(aws_log_level);
     };
-    if (options.override_default_http_options) {
-      aws_options_.httpOptions = options.http_options;
+    if (options.override_default_logging_options) {
+      aws_options.loggingOptions = options.logging_options;
     }
-    Aws::InitAPI(aws_options_);
+    if (options.override_default_http_options) {
+      aws_options.httpOptions = options.http_options;
+    }
+#ifdef WITH_CRT
+    // CRT halves the logical CPU count to avoid SMT siblings. Override that
+    // default only when Linux confirms SMT is inactive; cache the startup probe.
+    static const int cpu_count = [] {
+#ifdef __linux__
+      std::ifstream smt("/sys/devices/system/cpu/smt/active");
+      std::string active;
+      if (smt >> active && active == "0") {
+        return arrow::internal::CpuInfo::GetInstance()->num_cores();
+      }
+#endif
+      return 0;
+    }();
+    if (cpu_count > 0) {
+      aws_options.ioOptions.clientBootstrap_create_fn = [] {
+        Aws::Crt::Io::EventLoopGroup event_loops(static_cast<uint16_t>(std::min(cpu_count, 65535)));
+        Aws::Crt::Io::DefaultHostResolver resolver(event_loops, 8, 30);
+        auto bootstrap = Aws::MakeShared<Aws::Crt::Io::ClientBootstrap>("milvus-storage", event_loops, resolver);
+        bootstrap->EnableBlockingShutdown();
+        return bootstrap;
+      };
+    }
+#endif
+    lifetime_ = std::make_shared<S3GlobalLifetime>(std::move(aws_options));
   }
 
-  Aws::SDKOptions aws_options_;
+  std::shared_ptr<S3GlobalLifetime> lifetime_;
   std::atomic<bool> is_initialized_;
   std::atomic<bool> is_finalized_;
   std::once_flag initialize_flag_;
@@ -210,7 +271,13 @@ arrow::Status InitializeS3(const S3GlobalOptions& options) {
   return arrow::Status::OK();
 }
 
-arrow::Status EnsureS3Initialized() { return EnsureAwsInstanceInitialized(S3GlobalOptions::Defaults()).status(); }
+arrow::Status EnsureS3Initialized(const S3GlobalOptions& options) {
+  return EnsureAwsInstanceInitialized(options).status();
+}
+
+arrow::Result<std::shared_ptr<S3GlobalLifetime>> AcquireS3(const S3GlobalOptions& options) {
+  return GetAwsInstance()->Acquire(options);
+}
 
 arrow::Status FinalizeS3() {
   // GetAwsInstance()->Finalize();

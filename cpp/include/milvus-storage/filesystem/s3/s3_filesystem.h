@@ -105,6 +105,17 @@ class S3FileSystem : public arrow::fs::FileSystem, public UploadConditional, pub
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(
       const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t part_size) override;
 
+  // Fixed-size uploads initialize multipart at open for large objects and reject
+  // a written length different from total_size. SDK requests use the IO executor;
+  // native CRT requests use the shared transport. Calls are serialized by the caller.
+  // Write may wait for shared capacity and must not run on either backend's workers.
+  // Pending Flush/Close/Abort notifications are dispatched on the Arrow CPU pool;
+  // synchronous operations and internal completion do not depend on that pool.
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithFixedSize(
+      const std::string& path,
+      const std::shared_ptr<const arrow::KeyValueMetadata>& metadata,
+      int64_t total_size) override;
+
   protected:
   explicit S3FileSystem(const S3Options& options, const arrow::io::IOContext& io_context);
 

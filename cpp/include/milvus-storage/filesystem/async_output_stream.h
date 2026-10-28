@@ -3,7 +3,6 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 #pragma once
-#include <cstdint>
 #include <arrow/util/future.h>
 namespace milvus_storage {
 /// Only the operations missing from Arrow OutputStream. Data still uses Write;
@@ -12,9 +11,6 @@ namespace milvus_storage {
 class AsyncOutputStream {
   public:
   virtual ~AsyncOutputStream() = default;
-  /// Start upload initialization without reading payload bytes. expected_size is
-  /// a hint; Write supplies the data and CloseAsync publishes the completed object.
-  virtual arrow::Status Prepare(int64_t expected_size) = 0;
   virtual arrow::Future<> FlushAsync() = 0;
   // Optional capability; SDK-backed streams return NotImplemented.
   virtual arrow::Future<> AbortAsync() = 0;

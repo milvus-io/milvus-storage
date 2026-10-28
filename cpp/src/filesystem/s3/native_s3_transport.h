@@ -4,10 +4,13 @@
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 #pragma once
 #ifdef WITH_CRT
+#include <functional>
+#include <arrow/buffer.h>
 #include <arrow/io/interfaces.h>
 #include <arrow/util/future.h>
 #include <aws/core/http/HttpTypes.h>
 #include <aws/s3/S3Request.h>
+#include "filesystem/s3/s3_request_limiter.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
 #include "milvus-storage/filesystem/s3/s3_crt_client.h"
 
@@ -16,39 +19,36 @@ namespace milvus_storage {
 class NativeS3Transport {
   public:
   struct State;
-  class Permit {
- public:
-    ~Permit();
-    Permit(const Permit&) = delete;
-    Permit& operator=(const Permit&) = delete;
-
- private:
-    friend class NativeS3Transport;
-    friend struct State;
-    explicit Permit(std::shared_ptr<State> state) : state_(std::move(state)) {}
-    std::shared_ptr<State> state_;
-  };
+  using Permit = S3RequestLimiter::Permit;
   static arrow::Result<std::shared_ptr<NativeS3Transport>> Make(const S3Options& options,
                                                                 std::shared_ptr<S3ClientHolder> holder,
-                                                                std::shared_ptr<S3CrtClientHolder> crt_holder);
+                                                                std::shared_ptr<S3CrtClientHolder> crt_holder,
+                                                                std::shared_ptr<S3RequestLimiter> limiter);
   // Reserve shared request capacity before allocating an upload payload.
   arrow::Future<std::shared_ptr<Permit>> Acquire(const arrow::io::IOContext& io_context);
   // DEFAULT meta requests never transform PUT into multipart. All bodies are
   // owned memory; no CRT callback reads a blocking file/iostream data source.
-  arrow::Future<Aws::Client::XmlOutcome> Send(const Aws::AmazonWebServiceRequest& request,
-                                              const std::string& key,
-                                              Aws::Http::HttpMethod method,
-                                              const std::string& query,
-                                              const arrow::io::IOContext& io_context,
-                                              size_t response_limit = 16 * 1024 * 1024,
-                                              std::shared_ptr<arrow::Buffer> body = nullptr,
-                                              std::shared_ptr<Permit> permit = nullptr);
+  // before_release parses upload results and records errors before returning
+  // capacity. Its error becomes the future's result; it must not wait or notify users.
+  arrow::Future<Aws::Client::XmlOutcome> Send(
+      const Aws::AmazonWebServiceRequest& request,
+      const std::string& key,
+      Aws::Http::HttpMethod method,
+      const std::string& query,
+      const arrow::io::IOContext& io_context,
+      size_t response_limit = 16 * 1024 * 1024,
+      std::shared_ptr<arrow::Buffer> body = nullptr,
+      std::shared_ptr<Permit> permit = nullptr,
+      std::function<arrow::Status(const arrow::Result<Aws::Client::XmlOutcome>&)> before_release = {});
 
   private:
-  NativeS3Transport(std::shared_ptr<State> state, std::shared_ptr<S3CrtClientHolder> holder)
-      : state_(std::move(state)), holder_(std::move(holder)) {}
+  NativeS3Transport(std::shared_ptr<State> state,
+                    std::shared_ptr<S3CrtClientHolder> holder,
+                    std::shared_ptr<S3RequestLimiter> limiter)
+      : state_(std::move(state)), holder_(std::move(holder)), limiter_(std::move(limiter)) {}
   std::shared_ptr<State> state_;
   std::shared_ptr<S3CrtClientHolder> holder_;
+  std::shared_ptr<S3RequestLimiter> limiter_;
 };
 }  // namespace milvus_storage
 #endif

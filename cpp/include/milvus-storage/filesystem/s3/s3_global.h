@@ -14,13 +14,18 @@
 
 #pragma once
 
+#include <memory>
+
 #include <aws/core/Aws.h>
 #include <aws/core/http/HttpTypes.h>
 
 #include <arrow/status.h>
+#include <arrow/result.h>
 #include "milvus-storage/common/log.h"
 
 namespace milvus_storage {
+
+class S3GlobalLifetime;
 
 enum class S3LogLevel : int8_t { Off, Fatal, Error, Warn, Info, Debug, Trace };
 
@@ -52,6 +57,10 @@ struct S3GlobalOptions {
   /// \brief Override default http options
   bool override_default_http_options = false;
 
+  /// \brief Optional application logger; otherwise Storage supplies its logger.
+  Aws::LoggingOptions logging_options;
+  bool override_default_logging_options = false;
+
   /// \brief Initialize with default options
   ///
   /// For log_level, this method first tries to extract a suitable value from the
@@ -68,14 +77,20 @@ struct S3GlobalOptions {
 ///
 /// It is required to call this function at least once before using S3FileSystem.
 ///
-/// Once this function is called you MUST call FinalizeS3 before the end of the
-/// application in order to avoid a segmentation fault at shutdown.
+/// Call FinalizeS3 after Storage I/O has stopped. A process-exit handler also
+/// finalizes S3 if the application has not already done so.
 arrow::Status InitializeS3(const S3GlobalOptions& options);
 
 /// \brief Ensure the S3 APIs are initialized, but only if not already done.
 ///
-/// If necessary, this will call InitializeS3() with some default options.
-arrow::Status EnsureS3Initialized();
+/// The first call selects the process-wide options; subsequent calls reuse
+/// that initialization without replacing its HTTP or logging configuration.
+arrow::Status EnsureS3Initialized(const S3GlobalOptions& options = S3GlobalOptions::Defaults());
+
+/// \brief Initialize S3 if needed and keep the SDK alive for an application-owned
+/// client. Destroy that client before releasing this reference. FinalizeS3
+/// closes Storage clients; SDK shutdown waits for the last reference to leave.
+arrow::Result<std::shared_ptr<S3GlobalLifetime>> AcquireS3(const S3GlobalOptions& options);
 
 /// Whether S3 was initialized, and not finalized.
 bool IsS3Initialized();
@@ -92,9 +107,9 @@ arrow::Status CheckS3Initialized();
 /// race conditions.
 /// After this function has been called, all S3 calls will fail with an error.
 ///
-/// Calls to InitializeS3() and FinalizeS3() should be serialized by the
-/// application (this also applies to EnsureS3Initialized() and
-/// EnsureS3Finalized()).
+/// Application clients holding an AcquireS3 reference keep the SDK alive until
+/// they release it. Calls to InitializeS3(), EnsureS3Initialized() and AcquireS3()
+/// must be serialized with FinalizeS3()/EnsureS3Finalized() by the application.
 arrow::Status FinalizeS3();
 
 /// Whether S3 was finalized.

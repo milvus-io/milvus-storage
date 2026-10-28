@@ -117,6 +117,21 @@ class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
     ARROW_ASSIGN_OR_RAISE(auto full_path, PrependBase(path));
     return sizable->OpenOutputStreamWithUploadSize(full_path, metadata, part_size);
   }
+
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithFixedSize(
+      const std::string& path,
+      const std::shared_ptr<const arrow::KeyValueMetadata>& metadata,
+      int64_t total_size) override {
+    FIU_RETURN_ON(FIUKEY_FS_OPEN_OUTPUT_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_FS_OPEN_OUTPUT_FAIL)));
+    auto sizable = std::dynamic_pointer_cast<UploadSizable>(base_fs());
+    if (!sizable) {
+      return arrow::Status::NotImplemented("Filesystem does not implement UploadSizable");
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto full_path, PrependBase(path));
+    return sizable->OpenOutputStreamWithFixedSize(full_path, metadata, total_size);
+  }
 };
 
 /**

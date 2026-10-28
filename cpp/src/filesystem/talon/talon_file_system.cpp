@@ -610,6 +610,19 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
     return sizable->OpenOutputStreamWithUploadSize(path, metadata, part_size);
   }
 
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithFixedSize(
+      const std::string& path,
+      const std::shared_ptr<const arrow::KeyValueMetadata>& metadata,
+      int64_t total_size) override {
+    const auto sizable = std::dynamic_pointer_cast<UploadSizable>(origin_fs_);
+    if (sizable == nullptr) {
+      return arrow::Status::NotImplemented("Talon cannot forward fixed-size output stream for path '", path,
+                                           "' with total size ", total_size, ": origin filesystem type '",
+                                           origin_fs_->type_name(), "' does not implement UploadSizable");
+    }
+    return sizable->OpenOutputStreamWithFixedSize(path, metadata, total_size);
+  }
+
   arrow::Result<std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>> GetMetricsSources()
       const override {
     const auto observable = std::dynamic_pointer_cast<Observable>(origin_fs_);

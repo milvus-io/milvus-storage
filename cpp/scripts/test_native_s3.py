@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Run native S3 tests against an isolated in-memory HTTP fixture (no AWS account).
+"""Run SDK and native S3 tests against an isolated HTTP fixture (no AWS account).
 
-Run only inside wt-build. Delayed responses expose synchronous request waits;
+Delayed responses expose synchronous request waits;
 this fixture does not establish real-service authentication/TLS compatibility.
 """
-import http.server
 import hashlib
 import hmac
-import uuid
-import xml.etree.ElementTree as ET
+import http.server
+import io
 import os
 import resource
 import subprocess
@@ -16,6 +15,8 @@ import sys
 import threading
 import time
 import urllib.parse
+import uuid
+import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
 
@@ -50,6 +51,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
+
+    @staticmethod
+    def read_chunks(stream):
+        chunks = []
+        while True:
+            size = int(stream.readline().split(b";", 1)[0].strip(), 16)
+            if size == 0:
+                while stream.readline().strip():
+                    pass
+                return b"".join(chunks)
+            data = stream.read(size)
+            if len(data) != size or stream.read(2) != b"\r\n":
+                raise ValueError("Incomplete chunked request")
+            chunks.append(data)
+
+    def read_body(self):
+        if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+            body = self.read_chunks(self.rfile)
+        else:
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        if "aws-chunked" in self.headers.get("Content-Encoding", ""):
+            body = self.read_chunks(io.BytesIO(body))
+        return body
 
     def valid_google_signature(self, body):
         # Recompute from bytes received on the wire. This catches CRT changing
@@ -87,8 +111,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             print(self.command, self.path, self.headers.get("Range"), flush=True)
         if not self.path.startswith("/") and "Range" not in self.headers:
             return self.reply(400, b"<Error><Code>InvalidRequestTarget</Code></Error>")
-        if (self.command in ("POST", "PUT") and "Content-Length" not in self.headers
-                and self.headers.get("Transfer-Encoding", "").lower() != "chunked"):
+        if (
+            self.command in ("POST", "PUT")
+            and "Content-Length" not in self.headers
+            and self.headers.get("Transfer-Encoding", "").lower() != "chunked"
+        ):
             return self.reply(411)
         uri = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(uri.path).lstrip("/")
@@ -102,6 +129,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply(200, b"<ListAllMyBucketsResult><Buckets><Bucket><Name>bucket</Name></Bucket></Buckets></ListAllMyBucketsResult>")
         if bucket != "bucket":
             return self.reply(404)
+        if key == "root/upload-reset" and self.command == "HEAD":
+            return self.reply(200)
+        if key == "root/upload-reset" and self.command == "DELETE":
+            with self.upload_condition:
+                self.started_parts.clear()
+                self.released_parts.clear()
+                self.aborted_uploads.clear()
+            return self.reply(204)
         if key.startswith("root/upload-started/") and self.command == "HEAD":
             part = key.removeprefix("root/upload-started/")
             with self.upload_condition:
@@ -134,7 +169,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if key == "root/denied":
             return self.reply(403, b"<Error><Code>AccessDenied</Code></Error>")
         if self.command in ("PUT", "POST", "DELETE"):
-            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = self.read_body()
             if key.startswith("root/upload-release/") and self.command == "DELETE":
                 part = key.removeprefix("root/upload-release/")
                 with self.upload_condition:
@@ -149,8 +184,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     released = self.upload_condition.wait_for(lambda: part in self.released_parts, timeout=15)
                 if not released:
                     return self.reply(400, b"<Error><Code>RequestTimeout</Code></Error>")
-                if ((key == "root/held/failed-part" and query["partNumber"] == ["2"]) or
-                        key == "root/held/failed-wait") :
+                if (
+                    (key == "root/held/failed-part" and query["partNumber"] == ["2"])
+                    or key == "root/held/failed-wait"
+                ):
                     return self.reply(403, b"<Error><Code>AccessDenied</Code></Error>")
             if key.startswith("root/service-error/"):
                 code = key.rsplit("/", 1)[1]
@@ -289,9 +326,17 @@ def main():
     thread.start()
     env = dict(os.environ, NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost", AWS_EC2_METADATA_DISABLED="true", STORAGE_NATIVE_S3_ENDPOINT=f"127.0.0.1:{server.server_port}")
     try:
-        result = subprocess.run(sys.argv[1:] or ["cpp/build/Release/test/milvus_test", "--gtest_filter=NativeS3*"],
-                                env=env, timeout=180)
-        return result.returncode
+        # The native shutdown suite finalizes AWS globally. Run fixed-size tests
+        # in their own process so parameterized suite order cannot follow shutdown.
+        commands = [sys.argv[1:]] if sys.argv[1:] else [
+            ["cpp/build/Release/test/milvus_test", "--gtest_filter=Backends/FixedSizeS3Test.*"],
+            ["cpp/build/Release/test/milvus_test", "--gtest_filter=NativeS3*"],
+        ]
+        for command in commands:
+            result = subprocess.run(command, env=env, timeout=180)
+            if result.returncode:
+                return result.returncode
+        return 0
     finally:
         server.shutdown()
         server.server_close()
