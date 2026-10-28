@@ -244,6 +244,17 @@ arrow::Result<std::unique_ptr<VortexFile>> VortexFile::FromRawHandle(uintptr_t h
 
 uint64_t VortexFile::RowCount() const { return impl_->row_count(); }
 
+void VortexFile::DisableDirectPointReuse() const { impl_->disable_direct_point_reuse(); }
+
+arrow::Result<bool> VortexFile::TryTakePreparedAsync(
+    uint64_t row, ArrowArrayStream* out_stream, ArrowArray* out_array, uintptr_t callback, void* ctx) const {
+  return CatchRustResult<bool>([&]() {
+    return impl_->try_take_prepared_async(row, reinterpret_cast<uintptr_t>(out_stream),
+                                          reinterpret_cast<uintptr_t>(out_array), callback,
+                                          reinterpret_cast<uintptr_t>(ctx));
+  });
+}
+
 arrow::Status VortexFile::GetFileSchema(ArrowSchema& out_schema) const {
   return CatchRustStatus([&]() { impl_->get_schema(reinterpret_cast<uint8_t*>(&out_schema)); });
 }

@@ -229,6 +229,15 @@ class VortexFile {
   /// Get the number of rows in the file.
   uint64_t RowCount() const;
 
+  /// Disable unkeyed point-scan reuse when this file is shared by readers with different configurations.
+  void DisableDirectPointReuse() const;
+
+  /// Reuse a prepared point scan for a dedicated reader with unchanged projection and output schema.
+  /// A false result or error means callback was not invoked and the caller still owns ctx.
+  /// On acceptance, callback, ctx, and output storage must remain valid until callback completes.
+  arrow::Result<bool> TryTakePreparedAsync(
+      uint64_t row, ArrowArrayStream* out_stream, ArrowArray* out_array, uintptr_t callback, void* ctx) const;
+
   /// Get the file schema, exported as Arrow C schema.
   arrow::Status GetFileSchema(ArrowSchema& out_schema) const;
 
@@ -373,6 +382,13 @@ void vortex_open_file_async(uint8_t* fs_rawptr,
 /// callback may run synchronously for setup errors; out_stream and ctx must stay valid.
 /// A non-null error_msg must be released with vortex_free_error_string().
 void vortex_scan_collect_async(uintptr_t handle, ArrowArrayStream* out_stream, VortexAsyncCallback callback, void* ctx);
+
+/// Like vortex_scan_collect_async, but export a single batch through out_array when non-null.
+/// Initialize both outputs to zero and retain them through callback. On success, exactly one
+/// output has a non-null release callback; import or release that output to take ownership.
+/// The caller must supply the matching output schema when importing out_array.
+void vortex_scan_collect_async_with_array(
+    uintptr_t handle, ArrowArrayStream* out_stream, ArrowArray* out_array, VortexAsyncCallback callback, void* ctx);
 
 /// Release a non-null error string received by an async Vortex callback.
 void vortex_free_error_string(char* ptr);

@@ -196,15 +196,18 @@ static arrow::Status apply_read_plan_selection(ScanBuilder* scan_builder,
   return arrow::Status::Invalid("Unsupported Vortex read plan operation");
 }
 
-static void remove_metadata_from_schema(ArrowSchema* schema) {
+static bool remove_metadata_from_schema(ArrowSchema* schema) {
   assert(schema != nullptr);
+  bool removed = schema->metadata != nullptr;
   for (int64_t i = 0; i < schema->n_children; ++i) {
-    remove_metadata_from_schema(schema->children[i]);
+    removed |= remove_metadata_from_schema(schema->children[i]);
   }
   schema->metadata = nullptr;
+  return removed;
 }
 
-static arrow::Result<ArrowSchema> export_c_arrow_schema(const std::shared_ptr<arrow::Schema>& schema) {
+static arrow::Result<ArrowSchema> export_c_arrow_schema(const std::shared_ptr<arrow::Schema>& schema,
+                                                        bool* metadata_removed = nullptr) {
   ArrowSchema c_arrow_schema;
 
   ARROW_RETURN_NOT_OK(arrow::ExportSchema(*schema, &c_arrow_schema));
@@ -213,7 +216,9 @@ static arrow::Result<ArrowSchema> export_c_arrow_schema(const std::shared_ptr<ar
   // in writer side. So caller have to set metadata to nullptr here.
   // Don't consider memory leak here, direct set to nullptr is safe, because the metadata alloced by arrow::ExportSchema
   // which stored in the private_data of c_schema_, so when c_schema_ destructed, the metadata will be freed too.
-  remove_metadata_from_schema(&c_arrow_schema);
+  const bool removed = remove_metadata_from_schema(&c_arrow_schema);
+  if (metadata_removed)
+    *metadata_removed = removed;
 
   return c_arrow_schema;
 }
@@ -457,6 +462,7 @@ arrow::Result<VortexFormatReader::MetaTrait::MetadataPtr> VortexFormatReader::Me
     return arrow::Status::Invalid("Cannot create vortex metadata from an unopened reader");
   }
 
+  reader->vxfile_->DisableDirectPointReuse();
   auto metadata = std::make_shared<Metadata>(Metadata{
       .cache_key = cache_key(file),
       .path = reader->path_,
@@ -521,6 +527,7 @@ arrow::Result<std::shared_ptr<VortexFormatReader>> VortexFormatReader::MetaTrait
     return arrow::Status::Invalid("Cannot open vortex reader from incomplete metadata");
   }
 
+  metadata->payload.vxfile->DisableDirectPointReuse();
   auto reader = std::shared_ptr<VortexFormatReader>(
       new VortexFormatReader(metadata, file.Get<uint64_t>(api::kPropertyFileSize),
                              file.Get<uint64_t>(api::kPropertyFooterSize), read_schema, needed_columns));
@@ -983,10 +990,15 @@ arrow::Result<uint64_t> VortexFormatReader::total_mem_usage() {
 template <typename T>
 struct VortexAsyncContext {
   folly::Promise<arrow::Result<T>> promise;
-  // Rust writes the owned C stream here before invoking a success callback.
+  // Rust writes either an owned C stream or array before invoking a success callback.
   ArrowArrayStream stream{};
+  ArrowArray array{};
+  std::shared_ptr<arrow::Schema> array_schema;
+  std::shared_ptr<VortexFormatReader> keepalive;
 
   ~VortexAsyncContext() noexcept {
+    if (array.release)
+      array.release(&array);
     // Arrow clears release after taking ownership; otherwise this context still
     // owns the Rust stream and must release it on every exit path.
     if (stream.release) {
@@ -1010,8 +1022,17 @@ static void vortex_take_async_callback(void* ctx_raw,
       return;
     }
 
-    // Rust has already collected the scan and written its C stream into the
-    // context. Importing it transfers the stream into Arrow-owned objects.
+    // Rust has already collected the scan. Import whichever C output it populated
+    // to transfer ownership into Arrow objects.
+    if (ctx->array.release) {
+      auto batch = arrow::ImportRecordBatch(&ctx->array, ctx->array_schema);
+      if (!batch.ok()) {
+        ctx->promise.setValue(batch.status());
+        return;
+      }
+      ctx->promise.setValue(arrow::Table::FromRecordBatches({std::move(batch).ValueUnsafe()}));
+      return;
+    }
     auto result = arrow::ImportChunkedArray(&ctx->stream);
     if (!result.ok()) {
       ctx->promise.setValue(MakeBridgeErrorStatus("Failed to import vortex take result", result.status()));
@@ -1080,6 +1101,25 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> VortexFormatRead
     const std::vector<int64_t>& row_indices) {
   assert(vxfile_);
 
+  if (row_indices.size() == 1) {
+    FOLLY_ARROW_ASSIGN_OR_RAISE(auto indices, validate_and_cast_row_indices(row_indices, vxfile_->RowCount(), path_));
+    if (auto self = weak_from_this().lock()) {
+      auto context = std::make_unique<VortexAsyncContext<std::shared_ptr<arrow::Table>>>();
+      context->keepalive = std::move(self);
+      context->array_schema = read_schema_;
+      auto future = context->promise.getSemiFuture();
+      auto* raw = context.release();
+      auto accepted = vxfile_->TryTakePreparedAsync(indices[0], &raw->stream, raw->array_schema ? &raw->array : nullptr,
+                                                    reinterpret_cast<uintptr_t>(vortex_take_async_callback), raw);
+      if (accepted.ok() && accepted.ValueUnsafe())
+        return future;
+      // Rejected calls never invoke the callback; reclaim the unused context.
+      context.reset(raw);
+      if (!accepted.ok())
+        return folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::Table>>(accepted.status()));
+    }
+  }
+
   // Configure one native scan from the already-open Vortex file. Actual scan
   // execution is handed to the shared Rust Tokio runtime below.
   FOLLY_ARROW_ASSIGN_OR_RAISE(auto scan_builder, vxfile_->CreateScanBuilder(kSmallCoalescingWindow));
@@ -1090,8 +1130,9 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> VortexFormatRead
 
   // read_schema_ carries logical Arrow types that may require conversion on the
   // Rust side; it is independent of the physical column projection above.
+  bool metadata_removed = false;
   if (read_schema_) {
-    FOLLY_ARROW_ASSIGN_OR_RAISE(auto c_schema, export_c_arrow_schema(read_schema_));
+    FOLLY_ARROW_ASSIGN_OR_RAISE(auto c_schema, export_c_arrow_schema(read_schema_, &metadata_removed));
     FOLLY_ARROW_RETURN_NOT_OK(
         MakeBridgeErrorStatus("Failed to take from vortex file", scan_builder.WithOutputSchema(c_schema)));
   }
@@ -1103,6 +1144,10 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> VortexFormatRead
   scan_builder.WithIncludeByIndex(include_indices.data(), include_indices.size());
 
   auto ctx = std::make_unique<VortexAsyncContext<std::shared_ptr<arrow::Table>>>();
+  if (read_schema_ && !metadata_removed) {
+    // Preserve the existing recursive metadata-stripping behavior via Stream fallback.
+    ctx->array_schema = read_schema_;
+  }
   auto semi_future = ctx->promise.getSemiFuture();
   // Rust consumes the scan handle and may invoke the callback synchronously on
   // setup failure, so hand off the callback context before the FFI call.
@@ -1111,7 +1156,8 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> VortexFormatRead
 
   // This call schedules collection on Tokio. The Folly promise is only the C++
   // completion bridge; a caller-supplied Folly executor does not run the scan.
-  vortex_scan_collect_async(handle, &raw_ctx->stream, vortex_take_async_callback, static_cast<void*>(raw_ctx));
+  vortex_scan_collect_async_with_array(handle, &raw_ctx->stream, raw_ctx->array_schema ? &raw_ctx->array : nullptr,
+                                       vortex_take_async_callback, static_cast<void*>(raw_ctx));
   return semi_future;
 }
 

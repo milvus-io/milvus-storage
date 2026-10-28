@@ -156,6 +156,8 @@ class FailingRecordBatchReader : public arrow::RecordBatchReader {
 
 struct AsyncScanTestContext {
   ArrowArrayStream stream{};
+  ArrowArray array{};
+  bool expect_array = false;
   std::promise<std::string> completion;
   std::shared_ptr<FileSystemWrapper> fs_holder;
 };
@@ -167,6 +169,11 @@ void AsyncScanTestCallback(void* raw_ctx, ArrowArrayStream* out_stream, const ch
   if (error_msg != nullptr) {
     error = error_msg;
     vortex::vortex_free_error_string(const_cast<char*>(error_msg));
+  } else if (ctx->expect_array && (ctx->array.release == nullptr || ctx->array.length != 1)) {
+    error = "Expected one row exported through ArrowArray";
+  }
+  if (ctx->array.release != nullptr) {
+    ctx->array.release(&ctx->array);
   }
   if (out_stream != nullptr && out_stream->release != nullptr) {
     out_stream->release(out_stream);
@@ -1360,6 +1367,127 @@ TEST_P(VortexBasicTest, TestBasicTake) {
   take_verify(vx_reader, all_rows, recordBatchsRows());
   // Note: vortex 0.56+ does not gracefully handle out-of-range indices (panics instead of returning error),
   // so we removed the out-of-range index tests.
+}
+
+TEST_P(VortexBasicTest, AsyncPointTakeReusesPreparedScanByDefault) {
+  ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile(test_file_name_));
+  auto fs_holder = std::make_shared<FileSystemWrapper>(file_system_);
+  ASSERT_AND_ASSIGN(auto vxfile, VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_,
+                                                  cgfile.Get<uint64_t>(api::kPropertyFileSize),
+                                                  cgfile.Get<uint64_t>(api::kPropertyFooterSize)));
+
+  for (const uint64_t row : {uint64_t{0}, vxfile.RowCount() - 1, uint64_t{42}}) {
+    auto ctx = std::make_unique<AsyncScanTestContext>();
+    ctx->fs_holder = fs_holder;
+    ctx->expect_array = true;
+    auto completion = ctx->completion.get_future();
+    if (row == 0) {
+      ASSERT_AND_ASSIGN(auto scan_builder, vxfile.CreateScanBuilder(kSmallCoalescingWindow));
+      scan_builder.WithIncludeByIndex(&row, 1);
+      const auto handle = std::move(scan_builder).IntoRawHandle();
+      auto* raw_ctx = ctx.release();
+      vortex_scan_collect_async_with_array(handle, &raw_ctx->stream, &raw_ctx->array, AsyncScanTestCallback, raw_ctx);
+    } else {
+      auto* raw_ctx = ctx.release();
+      auto accepted = vxfile.TryTakePreparedAsync(row, &raw_ctx->stream, &raw_ctx->array,
+                                                  reinterpret_cast<uintptr_t>(AsyncScanTestCallback), raw_ctx);
+      if (!accepted.ok() || !accepted.ValueUnsafe()) {
+        ctx.reset(raw_ctx);
+      }
+      ASSERT_STATUS_OK(accepted.status());
+      ASSERT_TRUE(accepted.ValueUnsafe()) << "The previous point take must leave a reusable scan";
+    }
+    ASSERT_EQ(completion.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    const auto error = completion.get();
+    EXPECT_TRUE(error.empty()) << error;
+  }
+
+  vxfile.DisableDirectPointReuse();
+  auto ctx = std::make_unique<AsyncScanTestContext>();
+  auto* raw_ctx = ctx.release();
+  auto accepted = vxfile.TryTakePreparedAsync(0, &raw_ctx->stream, &raw_ctx->array,
+                                              reinterpret_cast<uintptr_t>(AsyncScanTestCallback), raw_ctx);
+  if (!accepted.ok() || !accepted.ValueUnsafe()) {
+    ctx.reset(raw_ctx);
+  }
+  ASSERT_STATUS_OK(accepted.status());
+  EXPECT_FALSE(accepted.ValueUnsafe());
+}
+
+TEST_P(VortexBasicTest, AsyncRepeatedPointTakePreservesRowsAndSchema) {
+  ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile(test_file_name_));
+  for (const bool with_metadata : {false, true}) {
+    auto field = schema_->field(0)->RemoveMetadata();
+    if (with_metadata) {
+      field = field->WithMetadata(arrow::key_value_metadata({"test"}, {"point-take"}));
+    }
+    const auto read_schema = arrow::schema({field});
+    auto reader = std::make_shared<VortexFormatReader>(file_system_, read_schema, test_file_name_, properties_,
+                                                       std::vector<std::string>{"id"});
+    ASSERT_STATUS_OK(reader->open());
+    for (const int64_t row : {int64_t{0}, recordBatchsRows() - 1, int64_t{42}}) {
+      ASSERT_AND_ASSIGN(auto table, std::move(reader->take_async({row})).get());
+      ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
+      ASSERT_EQ(batch->num_rows(), 1);
+      ASSERT_EQ(batch->num_columns(), 1);
+      ASSERT_EQ(batch->schema()->field(0)->name(), "id");
+      EXPECT_FALSE(batch->schema()->field(0)->HasMetadata());
+      const auto values = std::static_pointer_cast<arrow::Int64Array>(batch->column(0));
+      EXPECT_EQ(values->Value(0), row);
+    }
+    EXPECT_FALSE(std::move(reader->take_async({-1})).get().ok());
+    EXPECT_FALSE(std::move(reader->take_async({recordBatchsRows()})).get().ok());
+  }
+}
+
+TEST_P(VortexBasicTest, AsyncPointTakeKeepsSharedMetadataProjectionsIndependent) {
+  ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile(test_file_name_));
+  ASSERT_AND_ASSIGN(auto metadata, VortexFormatReader::MetaTrait::load_metadata(cgfile, properties_, nullptr));
+  const auto id_schema = arrow::schema({schema_->field(0)->RemoveMetadata()});
+  const auto value_schema = arrow::schema({schema_->field(2)->RemoveMetadata()});
+  ASSERT_AND_ASSIGN(auto id_reader, VortexFormatReader::MetaTrait::create_from_metadata(
+                                        metadata, cgfile, id_schema, std::vector<std::string>{"id"}, ""));
+  ASSERT_AND_ASSIGN(auto value_reader, VortexFormatReader::MetaTrait::create_from_metadata(
+                                           metadata, cgfile, value_schema, std::vector<std::string>{"value"}, ""));
+  for (const int64_t row : {int64_t{0}, recordBatchsRows() - 1, int64_t{42}}) {
+    ASSERT_AND_ASSIGN(auto id_table, std::move(id_reader->take_async({row})).get());
+    ASSERT_AND_ASSIGN(auto id_batch, id_table->CombineChunksToBatch());
+    ASSERT_EQ(id_batch->num_rows(), 1);
+    ASSERT_EQ(id_batch->num_columns(), 1);
+    ASSERT_EQ(id_batch->schema()->field(0)->name(), "id");
+    EXPECT_EQ(std::static_pointer_cast<arrow::Int64Array>(id_batch->column(0))->Value(0), row);
+
+    ASSERT_AND_ASSIGN(auto value_table, std::move(value_reader->take_async({row})).get());
+    ASSERT_AND_ASSIGN(auto value_batch, value_table->CombineChunksToBatch());
+    ASSERT_EQ(value_batch->num_rows(), 1);
+    ASSERT_EQ(value_batch->num_columns(), 1);
+    ASSERT_EQ(value_batch->schema()->field(0)->name(), "value");
+    EXPECT_DOUBLE_EQ(std::static_pointer_cast<arrow::DoubleArray>(value_batch->column(0))->Value(0), row * 1.5);
+  }
+}
+
+TEST_P(VortexBasicTest, AsyncRepeatedPointTakePreservesFixedSizeBinary) {
+  const int vector_width = 16;
+  const auto write_schema = arrow::schema({arrow::field("vector", arrow::fixed_size_binary(vector_width), false,
+                                                        arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
+  ASSERT_AND_ASSIGN(auto values, MakeFixedSizeBinaryArray(64, vector_width));
+  ASSERT_AND_ASSIGN(auto writer, VortexFileWriter::Open(file_system_, write_schema, test_file_name_, properties_));
+  ASSERT_STATUS_OK(writer->Write(arrow::RecordBatch::Make(write_schema, 64, {values})));
+  ASSERT_STATUS_OK(writer->Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, writer->Close());
+
+  const auto read_schema = arrow::schema({write_schema->field(0)->RemoveMetadata()});
+  auto reader = std::make_shared<VortexFormatReader>(file_system_, read_schema, test_file_name_, properties_,
+                                                     std::vector<std::string>{"vector"});
+  ASSERT_STATUS_OK(reader->open());
+  for (const int64_t row : {0, 63, 42}) {
+    ASSERT_AND_ASSIGN(auto table, std::move(reader->take_async({row})).get());
+    ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
+    ASSERT_EQ(batch->num_columns(), 1);
+    ASSERT_EQ(batch->column(0)->type_id(), arrow::Type::FIXED_SIZE_BINARY);
+    AssertFixedSizeBinaryArray(std::static_pointer_cast<arrow::FixedSizeBinaryArray>(batch->column(0)), row, 1,
+                               vector_width);
+  }
 }
 
 TEST_P(VortexBasicTest, AsyncScanFailureCompletesCallbackWithError) {
