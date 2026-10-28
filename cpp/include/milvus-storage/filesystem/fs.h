@@ -185,6 +185,7 @@ struct ArrowFileSystemConfig {
   std::string region = "";
   bool use_ssl = false;
   std::string ssl_ca_cert = "";
+  // Select the Broker's own IAM identity for supported S3 and Talon requests.
   bool use_iam = false;
   bool use_virtual_host = false;
   int64_t request_timeout_ms = 3000;
@@ -216,13 +217,22 @@ struct ArrowFileSystemConfig {
   // Target service account email to impersonate (e.g., "sa@project.iam.gserviceaccount.com")
   std::string gcp_target_service_account = "";
 
-  // HTTP(S) Broker endpoint for S3 temporary credentials.
+  // HTTP(S) Broker endpoint for S3 credentials, Azure SAS and Talon requests.
   std::string credential_endpoint = "";
 
   // Azure broker-backed temporary SAS authentication.
   std::string azure_client_id = "";
   std::string azure_tenant_id = "";
+  // 3.0's Azure-only endpoint always delegates to the configured target.
+  // A nonempty fs.credential_endpoint takes precedence and supports both modes.
   std::string azure_credential_endpoint = "";
+
+  [[nodiscard]] const std::string& GetCredentialEndpoint() const {
+    return cloud_provider == kCloudProviderAzure && credential_endpoint.empty() ? azure_credential_endpoint
+                                                                                : credential_endpoint;
+  }
+
+  [[nodiscard]] bool UsesBrokerIam() const { return use_iam && !credential_endpoint.empty(); }
 
   // Lifetime requested for cross-tenant temporary credentials, in seconds.
   // Shared across providers that mint short-lived tokens:
@@ -275,6 +285,8 @@ struct ArrowFileSystemConfig {
   // Inclusive limit in bytes for small_reads, applied before EOF clamping.
   uint32_t talon_small_read_threshold = 512U * 1024U;
   std::string talon_coordinator = "";
+  // Optional request namespace. Empty selects Talon's default namespace.
+  std::string talon_namespace = "";
   uint32_t talon_block_size = 256U * 1024U * 1024U;
   // Maximum idle TCP connections per peer in each Talon pool; does not cap active connections.
   uint32_t talon_max_idle_per_addr = 256;
@@ -287,11 +299,11 @@ struct ArrowFileSystemConfig {
                                                  ArrowFileSystemConfig& result);
 
   /**
-   * @brief Return whether Azure credential broker authentication was requested.
+   * @brief Return whether Azure broker-specific settings were supplied.
    *
-   * For Azure, any broker-specific property enables this mode so incomplete
-   * configurations are rejected during validation instead of silently falling
-   * back to another Azure authentication mechanism.
+   * Native Azure uses a target SAS for the legacy endpoint even when use_iam is true.
+   * Detect partial configurations too so active SAS Broker settings are validated.
+   * Talon independently consumes credential_endpoint for its Broker requests.
    */
   [[nodiscard]] bool IsAzureCredentialBrokerEnabled() const;
 

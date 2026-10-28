@@ -361,7 +361,7 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       std::nullopt),
     REGISTER_PROPERTY(PROPERTY_FS_USE_IAM,
                       PropertyType::BOOL,
-                      "Whether to use IAM for the filesystem storage service. For AWS, Aliyun and Tencent "
+                      "Whether to use IAM for the filesystem storage service. For supported S3 and Talon "
                       "credential Broker requests, "
                       "true selects the Broker's own IAM identity; false uses the supplied target identity.",
                       false,
@@ -507,6 +507,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "The Talon coordinator address used for block routing.",
                       "",
                       ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_NAMESPACE,
+                      PropertyType::STRING,
+                      "Optional Talon request namespace. Empty uses the default namespace, independently of "
+                      "fs.credential_endpoint.",
+                      "",
+                      ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_FS_TALON_BLOCK_SIZE,
                       PropertyType::UINT32,
                       "The Talon block size in bytes.",
@@ -536,14 +542,15 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       std::nullopt),
     REGISTER_PROPERTY(PROPERTY_FS_CREDENTIAL_ENDPOINT,
                       PropertyType::STRING,
-                      "The HTTP(S) credential Broker endpoint for S3 temporary credentials.",
+                      "The HTTP(S) credential Broker endpoint for S3 credentials, Azure SAS and Talon requests.",
                       "",
                       std::nullopt),
-    REGISTER_PROPERTY(PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT,
-                      PropertyType::STRING,
-                      "The HTTP(S) endpoint used to obtain temporary Azure SAS credentials.",
-                      "",
-                      std::nullopt),
+    REGISTER_PROPERTY(
+        PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT,
+        PropertyType::STRING,
+        "Legacy Azure target-identity SAS broker endpoint. A nonempty fs.credential_endpoint takes precedence.",
+        "",
+        std::nullopt),
     // --- writer properties define ---
     REGISTER_PROPERTY(PROPERTY_WRITER_POLICY,
                       PropertyType::STRING,

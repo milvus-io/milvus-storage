@@ -3,6 +3,7 @@
 
 #include "milvus-storage/ffi_internal/async_context.h"
 #include "milvus-storage/ffi_internal/result.h"
+#include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/properties.h"
 #include "talon/talon_bridge.h"
 
@@ -45,6 +46,22 @@ static bool CopyRequests(const LoonTalonLoadRequest* requests, size_t count, std
     copied.push_back({requests[i].uri, requests[i].size, requests[i].version ? requests[i].version : ""});
   }
   return true;
+}
+
+// Resolve immutable request overrides before async admission. Rust owns the
+// copied strings and reuses the original client's pools/discovery state.
+static arrow::Result<std::shared_ptr<TalonClient>> ResolveRequestOptions(LoonTalonClientHandle client,
+                                                                         const LoonTalonRequestOptions* options) {
+  auto native = *reinterpret_cast<std::shared_ptr<TalonClient>*>(client);
+  if (!options)
+    return native;
+  if (options->namespace_name) {
+    ARROW_ASSIGN_OR_RAISE(native, native->WithNamespace(options->namespace_name));
+  }
+  if (options->credential_broker) {
+    ARROW_ASSIGN_OR_RAISE(native, native->WithCredentialBroker(options->credential_broker));
+  }
+  return native;
 }
 
 template <typename T>
@@ -210,7 +227,13 @@ LoonFFIResult loon_talon_client_create(const LoonProperties* properties, LoonTal
     if (auto error = milvus_storage::api::ConvertFFIProperties(native, properties)) {
       RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", *error, "]");
     }
-    auto made = TalonClient::Make(native);
+    // Raw clients use Talon directly, independently of filesystem routing mode.
+    native[PROPERTY_FS_TALON_MODE] = static_cast<uint32_t>(milvus_storage::TalonMode::Disabled);
+    milvus_storage::ArrowFileSystemConfig config;
+    const auto config_status = milvus_storage::ArrowFileSystemConfig::create_file_system_config(native, config);
+    RETURN_ARROW_ERROR_IF(config_status, config_status.IsInvalid() ? LOON_INVALID_ARGS : LOON_INVALID_PROPERTIES,
+                          config_status.ToString());
+    auto made = TalonClient::Make(config);
     if (made.status().IsInvalid()) {
       RETURN_ERROR(LOON_INVALID_ARGS, made.status().ToString());
     }
@@ -238,6 +261,7 @@ LoonFFIResult loon_talon_read(LoonTalonClientHandle client,
                               const char* version,
                               const uint64_t* object_size,
                               uint8_t* dst,
+                              const LoonTalonRequestOptions* options,
                               LoonTalonResult** result) {
   if (result)
     *result = nullptr;
@@ -245,11 +269,13 @@ LoonFFIResult loon_talon_read(LoonTalonClientHandle client,
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid Talon read arguments");
   }
   try {
-    auto* cpp_client = reinterpret_cast<std::shared_ptr<TalonClient>*>(client);
+    auto selected = ResolveRequestOptions(client, options);
+    RETURN_ARROW_ERROR_IF(selected.status(), LOON_INVALID_ARGS, selected.status().ToString());
+    auto cpp_client = std::move(selected).ValueUnsafe();
     std::optional<TalonObjectStat> stat;
     if (object_size)
       stat = TalonObjectStat{*object_size, version ? version : ""};
-    return ExportResult((*cpp_client)->Read(uri, offset, length, dst, stat), LOON_TALON_READ, result);
+    return ExportResult(cpp_client->Read(uri, offset, length, dst, stat), LOON_TALON_READ, result);
   } catch (const std::bad_alloc&) {
     return {LOON_MEMORY_ERROR, nullptr};
   } catch (const std::exception& error) {
@@ -259,15 +285,20 @@ LoonFFIResult loon_talon_read(LoonTalonClientHandle client,
   }
 }
 
-LoonFFIResult loon_talon_stat(LoonTalonClientHandle client, const char* uri, LoonTalonResult** result) {
+LoonFFIResult loon_talon_stat(LoonTalonClientHandle client,
+                              const char* uri,
+                              const LoonTalonRequestOptions* options,
+                              LoonTalonResult** result) {
   if (result)
     *result = nullptr;
   if (!result || !client || !uri || !*uri) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid Talon stat arguments");
   }
   try {
-    auto* cpp_client = reinterpret_cast<std::shared_ptr<TalonClient>*>(client);
-    return ExportResult((*cpp_client)->Stat(uri), LOON_TALON_STAT, result);
+    auto selected = ResolveRequestOptions(client, options);
+    RETURN_ARROW_ERROR_IF(selected.status(), LOON_INVALID_ARGS, selected.status().ToString());
+    auto cpp_client = std::move(selected).ValueUnsafe();
+    return ExportResult(cpp_client->Stat(uri), LOON_TALON_STAT, result);
   } catch (const std::bad_alloc&) {
     return {LOON_MEMORY_ERROR, nullptr};
   } catch (const std::exception& error) {
@@ -279,6 +310,7 @@ LoonFFIResult loon_talon_stat(LoonTalonClientHandle client, const char* uri, Loo
 
 LoonFFIResult loon_talon_load(LoonTalonClientHandle client,
                               const LoonTalonLoadRequest* request,
+                              const LoonTalonRequestOptions* options,
                               LoonTalonResult** result) {
   if (result)
     *result = nullptr;
@@ -286,9 +318,11 @@ LoonFFIResult loon_talon_load(LoonTalonClientHandle client,
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid Talon load arguments");
   }
   try {
-    auto* cpp_client = reinterpret_cast<std::shared_ptr<TalonClient>*>(client);
+    auto selected = ResolveRequestOptions(client, options);
+    RETURN_ARROW_ERROR_IF(selected.status(), LOON_INVALID_ARGS, selected.status().ToString());
+    auto cpp_client = std::move(selected).ValueUnsafe();
     const TalonLoadRequest copied{request->uri, request->size, request->version ? request->version : ""};
-    return ExportResult((*cpp_client)->Load(copied), LOON_TALON_LOAD, result);
+    return ExportResult(cpp_client->Load(copied), LOON_TALON_LOAD, result);
   } catch (const std::bad_alloc&) {
     return {LOON_MEMORY_ERROR, nullptr};
   } catch (const std::exception& error) {
@@ -301,6 +335,7 @@ LoonFFIResult loon_talon_load(LoonTalonClientHandle client,
 LoonFFIResult loon_talon_batch_load(LoonTalonClientHandle client,
                                     const LoonTalonLoadRequest* requests,
                                     size_t count,
+                                    const LoonTalonRequestOptions* options,
                                     LoonTalonResult** result) {
   if (result)
     *result = nullptr;
@@ -308,13 +343,15 @@ LoonFFIResult loon_talon_batch_load(LoonTalonClientHandle client,
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid Talon batch load arguments");
   }
   try {
-    auto* cpp_client = reinterpret_cast<std::shared_ptr<TalonClient>*>(client);
+    auto selected = ResolveRequestOptions(client, options);
+    RETURN_ARROW_ERROR_IF(selected.status(), LOON_INVALID_ARGS, selected.status().ToString());
+    auto cpp_client = std::move(selected).ValueUnsafe();
     std::vector<TalonLoadRequest> copied;
     if (!CopyRequests(requests, count, copied)) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Invalid Talon load requests");
     }
     // The temporary Future owns the batch throughout export; no intermediate result copy is needed.
-    return ExportResult((*cpp_client)->BatchLoadAsync(copied).result(), LOON_TALON_BATCH_LOAD, result);
+    return ExportResult(cpp_client->BatchLoadAsync(copied).result(), LOON_TALON_BATCH_LOAD, result);
   } catch (const std::bad_alloc&) {
     return {LOON_MEMORY_ERROR, nullptr};
   } catch (const std::exception& error) {
@@ -332,6 +369,7 @@ LoonFFIResult loon_talon_read_async(LoonAsyncContextHandle context,
                                     const char* version,
                                     const uint64_t* object_size,
                                     uint8_t* dst,
+                                    const LoonTalonRequestOptions* options,
                                     LoonTalonCallback callback,
                                     uintptr_t user_data,
                                     LoonAsyncHandle* operation) {
@@ -346,13 +384,15 @@ LoonFFIResult loon_talon_read_async(LoonAsyncContextHandle context,
     if (!uri || !*uri || (!dst && length) || (version && *version && !object_size)) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Invalid Talon read arguments");
     }
-    auto* cpp_client = reinterpret_cast<std::shared_ptr<TalonClient>*>(client);
+    auto selected = ResolveRequestOptions(client, options);
+    RETURN_ARROW_ERROR_IF(selected.status(), LOON_INVALID_ARGS, selected.status().ToString());
+    auto cpp_client = std::move(selected).ValueUnsafe();
     const std::string copied_uri(uri);
     std::optional<TalonObjectStat> stat;
     if (object_size)
       stat = TalonObjectStat{*object_size, version ? version : ""};
     return SubmitRaw<int64_t>(
-        context, *cpp_client,
+        context, cpp_client,
         [copied_uri, stat = std::move(stat), offset, length, dst](const TalonClient& native) {
           return native.ReadAsync(copied_uri, offset, length, dst, stat);
         },
@@ -369,6 +409,7 @@ LoonFFIResult loon_talon_read_async(LoonAsyncContextHandle context,
 LoonFFIResult loon_talon_stat_async(LoonAsyncContextHandle context,
                                     LoonTalonClientHandle client,
                                     const char* uri,
+                                    const LoonTalonRequestOptions* options,
                                     LoonTalonCallback callback,
                                     uintptr_t user_data,
                                     LoonAsyncHandle* operation) {
@@ -383,10 +424,12 @@ LoonFFIResult loon_talon_stat_async(LoonAsyncContextHandle context,
     if (!uri || !*uri) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Invalid Talon stat arguments");
     }
-    auto* cpp_client = reinterpret_cast<std::shared_ptr<TalonClient>*>(client);
+    auto selected = ResolveRequestOptions(client, options);
+    RETURN_ARROW_ERROR_IF(selected.status(), LOON_INVALID_ARGS, selected.status().ToString());
+    auto cpp_client = std::move(selected).ValueUnsafe();
     const std::string copied_uri(uri);
     return SubmitRaw<TalonObjectStat>(
-        context, *cpp_client, [copied_uri](const TalonClient& native) { return native.StatAsync(copied_uri); },
+        context, cpp_client, [copied_uri](const TalonClient& native) { return native.StatAsync(copied_uri); },
         LOON_TALON_STAT, callback, user_data, operation, timeout);
   } catch (const std::bad_alloc&) {
     return {LOON_MEMORY_ERROR, nullptr};
@@ -400,6 +443,7 @@ LoonFFIResult loon_talon_stat_async(LoonAsyncContextHandle context,
 LoonFFIResult loon_talon_load_async(LoonAsyncContextHandle context,
                                     LoonTalonClientHandle client,
                                     const LoonTalonLoadRequest* request,
+                                    const LoonTalonRequestOptions* options,
                                     LoonTalonCallback callback,
                                     uintptr_t user_data,
                                     LoonAsyncHandle* operation) {
@@ -414,10 +458,12 @@ LoonFFIResult loon_talon_load_async(LoonAsyncContextHandle context,
     if (!request || !request->uri || !*request->uri) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Invalid Talon load arguments");
     }
-    auto* cpp_client = reinterpret_cast<std::shared_ptr<TalonClient>*>(client);
+    auto selected = ResolveRequestOptions(client, options);
+    RETURN_ARROW_ERROR_IF(selected.status(), LOON_INVALID_ARGS, selected.status().ToString());
+    auto cpp_client = std::move(selected).ValueUnsafe();
     const TalonLoadRequest copied{request->uri, request->size, request->version ? request->version : ""};
     return SubmitRaw<TalonLoadResult>(
-        context, *cpp_client, [copied](const TalonClient& native) { return native.LoadAsync(copied); }, LOON_TALON_LOAD,
+        context, cpp_client, [copied](const TalonClient& native) { return native.LoadAsync(copied); }, LOON_TALON_LOAD,
         callback, user_data, operation, timeout);
   } catch (const std::bad_alloc&) {
     return {LOON_MEMORY_ERROR, nullptr};
@@ -432,6 +478,7 @@ LoonFFIResult loon_talon_batch_load_async(LoonAsyncContextHandle context,
                                           LoonTalonClientHandle client,
                                           const LoonTalonLoadRequest* requests,
                                           size_t count,
+                                          const LoonTalonRequestOptions* options,
                                           LoonTalonCallback callback,
                                           uintptr_t user_data,
                                           LoonAsyncHandle* operation) {
@@ -443,13 +490,15 @@ LoonFFIResult loon_talon_batch_load_async(LoonAsyncContextHandle context,
     const auto status = milvus_storage::ValidateAsyncHandle(operation, timeout);
     if (status.err_code)
       return status;
-    auto* cpp_client = reinterpret_cast<std::shared_ptr<TalonClient>*>(client);
+    auto selected = ResolveRequestOptions(client, options);
+    RETURN_ARROW_ERROR_IF(selected.status(), LOON_INVALID_ARGS, selected.status().ToString());
+    auto cpp_client = std::move(selected).ValueUnsafe();
     std::vector<TalonLoadRequest> copied;
     if (!CopyRequests(requests, count, copied)) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Invalid Talon load requests");
     }
     return SubmitRaw<TalonBatchLoadResult>(
-        context, *cpp_client,
+        context, cpp_client,
         [copied = std::move(copied)](const TalonClient& native) { return native.BatchLoadAsync(copied); },
         LOON_TALON_BATCH_LOAD, callback, user_data, operation, timeout);
   } catch (const std::bad_alloc&) {

@@ -7,8 +7,8 @@ use std::{
 use anyhow::{Result, bail};
 use futures::FutureExt;
 use talon::{
-    BlockReadError, CacheReadError, Client, ClientBuilder, ObjectId, ObjectStat, UNCHECKED_VERSION,
-    parse_uri,
+    BlockReadError, CacheReadError, Client, ClientBuilder, ObjectId, ObjectStat, RequestOptions,
+    UNCHECKED_VERSION, parse_uri,
 };
 use tokio::sync::OnceCell;
 
@@ -34,7 +34,11 @@ pub mod ffi {
             coordinator: &str,
             block_size: u32,
             max_idle_per_addr: u32,
+            namespace_name: &str,
+            credential_broker: &str,
         ) -> Result<Box<TalonClient>>;
+        fn with_namespace(self: &TalonClient, namespace_name: &str) -> Box<TalonClient>;
+        fn with_credential_broker(self: &TalonClient, credential_broker: &str) -> Box<TalonClient>;
         fn open_talon_object(
             client: &TalonClient,
             cloud_provider: &str,
@@ -62,23 +66,40 @@ struct TalonIoResult {
 }
 
 pub struct TalonClient {
-    inner: Arc<Client>,
+    inner: Arc<TalonClientState>,
+}
+
+// Keep one descriptor per shared client, including requests submitted before
+// the C++ owner is released. Readers only clone this Arc.
+struct TalonClientState {
+    client: Arc<Client>,
+    namespace: Option<Arc<str>>,
+    credential_broker: Option<Arc<str>>,
+}
+
+impl TalonClientState {
+    fn request_options(&self) -> RequestOptions<'_> {
+        let options =
+            RequestOptions::default().with_credential_broker(self.credential_broker.as_deref());
+        match self.namespace.as_deref() {
+            Some(namespace) => options.with_namespace(namespace),
+            None => options,
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct TalonObjectReader {
-    client: Arc<Client>,
+    client: Arc<TalonClientState>,
     object: ObjectId,
     stat: Arc<OnceCell<ObjectStat>>,
 }
 
-// A Talon deployment serves one origin credential domain. The coordinator
-// selects that deployment, so its endpoint, account, and credentials are
-// deployment configuration rather than part of ObjectId. Within the selected
-// origin, ObjectId deliberately consists only of backend, bucket/container,
-// and key; a different origin must use a different Talon deployment.
-fn talon_uri(provider: &str, bucket: &str, key: &str) -> Result<String> {
+// Static requests retain deployment-configured origins. Broker requests carry
+// their own origin and credential scope; GCP then uses Talon's bearer-token backend.
+fn talon_uri(provider: &str, bucket: &str, key: &str, broker_credentials: bool) -> Result<String> {
     let scheme = match provider {
+        "gcp" if broker_credentials => "gcs",
         // Milvus accesses these providers through their S3-compatible APIs, so
         // the corresponding Talon deployment must use its S3 backend as well.
         "aws" | "aliyun" | "tencent" | "huawei" | "gcp" | "volcengine" => "s3",
@@ -92,16 +113,48 @@ pub fn new_talon_client(
     coordinator: &str,
     block_size: u32,
     max_idle_per_addr: u32,
+    namespace_name: &str,
+    credential_broker: &str,
 ) -> Result<Box<TalonClient>> {
     Ok(Box::new(TalonClient {
-        inner: Arc::new(
-            ClientBuilder::default()
-                .with_coordinator(coordinator)
-                .with_block_size(block_size)
-                .with_max_idle_per_addr(max_idle_per_addr as usize)
-                .build()?,
-        ),
+        inner: Arc::new(TalonClientState {
+            client: Arc::new(
+                ClientBuilder::default()
+                    .with_coordinator(coordinator)
+                    .with_block_size(block_size)
+                    .with_max_idle_per_addr(max_idle_per_addr as usize)
+                    .build()?,
+            ),
+            namespace: (!namespace_name.is_empty()).then(|| Arc::from(namespace_name)),
+            credential_broker: (!credential_broker.is_empty())
+                .then(|| Arc::from(credential_broker)),
+        }),
     }))
+}
+
+impl TalonClient {
+    // Each method creates an immutable request view. The unchanged option and
+    // the native client's connection pools and discovery state remain shared.
+    pub fn with_namespace(&self, namespace_name: &str) -> Box<Self> {
+        Box::new(Self {
+            inner: Arc::new(TalonClientState {
+                client: Arc::clone(&self.inner.client),
+                namespace: (!namespace_name.is_empty()).then(|| Arc::from(namespace_name)),
+                credential_broker: self.inner.credential_broker.clone(),
+            }),
+        })
+    }
+
+    pub fn with_credential_broker(&self, credential_broker: &str) -> Box<Self> {
+        Box::new(Self {
+            inner: Arc::new(TalonClientState {
+                client: Arc::clone(&self.inner.client),
+                namespace: self.inner.namespace.clone(),
+                credential_broker: (!credential_broker.is_empty())
+                    .then(|| Arc::from(credential_broker)),
+            }),
+        })
+    }
 }
 
 pub fn open_talon_object(
@@ -126,7 +179,12 @@ pub fn open_talon_object(
     });
     Ok(Box::new(TalonObjectReader {
         client: Arc::clone(&client.inner),
-        object: parse_uri(&talon_uri(cloud_provider, bucket, key)?)?,
+        object: parse_uri(&talon_uri(
+            cloud_provider,
+            bucket,
+            key,
+            client.inner.credential_broker.is_some(),
+        )?)?,
         stat: Arc::new(OnceCell::new_with(initial_stat)),
     }))
 }
@@ -143,7 +201,12 @@ pub fn talon_object_known_size(reader: &TalonObjectReader) -> i64 {
 impl TalonObjectReader {
     async fn resolved_stat(&self) -> Result<&ObjectStat, talon::Error> {
         self.stat
-            .get_or_try_init(|| async { self.client.stat(&self.object).await })
+            .get_or_try_init(|| async {
+                self.client
+                    .client
+                    .stat(&self.object, &self.client.request_options())
+                    .await
+            })
             .await
     }
 }
@@ -173,6 +236,7 @@ fn talon_error_result(error: talon::Error) -> TalonIoResult {
         talon::Error::Coordinator(error) => cache_error_code(error.into()),
         talon::Error::Block(error) => match error {
             BlockReadError::Coordinator(error) => cache_error_code(error.into()),
+            BlockReadError::Discovery(error) => cache_error_code(error.as_ref().into()),
             BlockReadError::Worker(error)
             | BlockReadError::Target { source: error, .. }
             | BlockReadError::AllReplicasFailed { source: error, .. } => {
@@ -321,18 +385,30 @@ pub unsafe extern "C" fn talon_object_read_async(
     let context_addr = context as usize;
     crate::TOKIO_RT.spawn(async move {
         let read_result = AssertUnwindSafe(async {
-            if buffer.len == 0 {
-                return Ok(0usize);
-            }
-            let stat = reader.resolved_stat().await?;
-            let len = (buffer.len as u64).min(stat.size.saturating_sub(offset)) as usize;
-            if len == 0 {
-                return Ok(0usize);
-            }
-            let dst = unsafe { buffer.into_mut_slice(len) };
+            let stat = if buffer.len == 0 {
+                None
+            } else {
+                Some(reader.resolved_stat().await?)
+            };
+            let len = stat.map_or(0, |stat| {
+                (buffer.len as u64).min(stat.size.saturating_sub(offset)) as usize
+            });
+            // The SDK validates request options even for empty reads, without I/O.
+            let dst = if len == 0 {
+                &mut []
+            } else {
+                unsafe { buffer.into_mut_slice(len) }
+            };
             reader
                 .client
-                .read_into(&reader.object, offset, dst, Some(stat))
+                .client
+                .read_into(
+                    &reader.object,
+                    offset,
+                    dst,
+                    stat,
+                    &reader.client.request_options(),
+                )
                 .await
         })
         .catch_unwind()
@@ -478,7 +554,10 @@ pub unsafe extern "C" fn talon_raw_stat_async(
     // The C++ owner may be released immediately after submission.
     let client = Arc::clone(&unsafe { &*(client as *const TalonClient) }.inner);
     crate::TOKIO_RT.spawn(async move {
-        match AssertUnwindSafe(client.stat(&object)).catch_unwind().await {
+        match AssertUnwindSafe(client.client.stat(&object, &client.request_options()))
+            .catch_unwind()
+            .await
+        {
             Ok(Ok(stat)) => complete_raw(
                 callback,
                 context,
@@ -621,11 +700,20 @@ pub unsafe extern "C" fn talon_raw_load_async(
     crate::TOKIO_RT.spawn(async move {
         let operation = AssertUnwindSafe(async {
             if batch {
-                client.batch_load(&requests).await
+                client
+                    .client
+                    .batch_load(&requests, &client.request_options())
+                    .await
             } else {
                 let request = &requests[0];
                 client
-                    .load(&request.object, &request.version, request.size)
+                    .client
+                    .load(
+                        &request.object,
+                        &request.version,
+                        request.size,
+                        &client.request_options(),
+                    )
                     .await
                     .map(|result| vec![result])
             }
@@ -884,22 +972,30 @@ mod tests {
     fn maps_storage_providers_to_canonical_talon_uris() {
         for provider in ["aws", "aliyun", "tencent", "huawei", "gcp", "volcengine"] {
             assert_eq!(
-                talon_uri(provider, "bucket", "path/a").unwrap(),
+                talon_uri(provider, "bucket", "path/a", false).unwrap(),
                 "s3://bucket/path/a"
             );
         }
         assert_eq!(
-            talon_uri("azure", "container", "path/a").unwrap(),
+            talon_uri("azure", "container", "path/a", false).unwrap(),
             "az://container/path/a"
         );
-        assert!(talon_uri("local", "bucket", "path/a").is_err());
+        assert!(talon_uri("local", "bucket", "path/a", false).is_err());
     }
 
     #[test]
     fn open_object_with_stat_initializes_metadata_without_resolving() {
-        let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024, 8).unwrap();
-        let reader =
-            open_talon_object(&client, "aws", "test-bucket", "path/a", true, 123, "etag-v1").unwrap();
+        let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024, 8, "", "").unwrap();
+        let reader = open_talon_object(
+            &client,
+            "aws",
+            "test-bucket",
+            "path/a",
+            true,
+            123,
+            "etag-v1",
+        )
+        .unwrap();
         assert_eq!(talon_object_known_size(&reader), 123);
         assert_eq!(reader.stat.get().unwrap().size, 123);
         assert_eq!(reader.stat.get().unwrap().version, "etag-v1");
@@ -907,7 +1003,7 @@ mod tests {
 
     #[test]
     fn open_object_with_size_only_skips_etag_matching() {
-        let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024, 8).unwrap();
+        let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024, 8, "", "").unwrap();
         for size in [0, 123] {
             let reader =
                 open_talon_object(&client, "aws", "test-bucket", "path/a", true, size, "").unwrap();
@@ -918,7 +1014,7 @@ mod tests {
 
     #[test]
     fn open_object_without_stat_leaves_metadata_unresolved() {
-        let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024, 8).unwrap();
+        let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024, 8, "", "").unwrap();
         let reader =
             open_talon_object(&client, "aws", "test-bucket", "path/a", false, 0, "").unwrap();
         assert_eq!(talon_object_known_size(&reader), -1);
@@ -927,7 +1023,7 @@ mod tests {
 
     #[test]
     fn resolved_stat_is_shared_by_reader_clones() {
-        let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024, 8).unwrap();
+        let client = new_talon_client("127.0.0.1:7000", 8 * 1024 * 1024, 8, "", "").unwrap();
         let reader =
             open_talon_object(&client, "aws", "test-bucket", "path/a", false, 0, "").unwrap();
         reader

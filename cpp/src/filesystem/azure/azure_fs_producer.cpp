@@ -121,9 +121,9 @@ arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
   }
   options.background_writes = config_.background_writes;
 
-  if (config_.IsAzureCredentialBrokerEnabled()) {
+  if (config_.IsAzureCredentialBrokerEnabled() && !config_.UsesBrokerIam()) {
     fs::AzureSasBrokerConfig broker_config{
-        .endpoint = config_.azure_credential_endpoint,
+        .endpoint = config_.GetCredentialEndpoint(),
         .region = config_.region,
         .bucket = config_.bucket_name,
         .client_id = config_.azure_client_id,
