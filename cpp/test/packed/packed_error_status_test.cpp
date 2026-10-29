@@ -14,9 +14,7 @@
 
 #include <gtest/gtest.h>
 
-#include <functional>
 #include <memory>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -42,15 +40,6 @@ void ExpectPackedCode(const arrow::Status& status, ExtendStatusCode code) {
   auto detail = ExtendStatusDetail::UnwrapStatus(status);
   ASSERT_NE(detail, nullptr) << status.ToString();
   EXPECT_EQ(detail->code(), code);
-}
-
-void ExpectExceptionMessageContainsCode(const std::function<void()>& fn, const std::string& code_name) {
-  try {
-    fn();
-    FAIL() << "expected runtime_error";
-  } catch (const std::runtime_error& e) {
-    EXPECT_NE(std::string(e.what()).find(code_name), std::string::npos) << e.what();
-  }
 }
 
 }  // namespace
@@ -101,11 +90,14 @@ TEST_F(PackedErrorStatusTest, ReaderMissingFileKeepsFilesystemError) {
 
   try {
     PackedRecordBatchReader reader(fs_, paths, schema_, reader_memory_);
-    FAIL() << "expected runtime_error";
-  } catch (const std::runtime_error& e) {
+    FAIL() << "expected the classified open failure to surface";
+  } catch (const milvus::SegcoreError& e) {
+    EXPECT_EQ(e.get_error_code(), milvus::ObjectNotExist);
     auto message = std::string(e.what());
     EXPECT_NE(message.find("missing.parquet"), std::string::npos) << message;
     EXPECT_EQ(message.find("PackedStorageIO"), std::string::npos) << message;
+  } catch (const std::exception& e) {
+    FAIL() << "reader open failure lost its type, got: " << e.what();
   }
 }
 
@@ -127,8 +119,15 @@ TEST_F(PackedErrorStatusTest, ReaderMissingPackedMetadataIsMetadataCorrupted) {
   ASSERT_STATUS_OK(sink->Close());
   std::vector<std::string> paths = {parquet_path};
 
-  ExpectExceptionMessageContainsCode([&]() { PackedRecordBatchReader reader(fs_, paths, schema_, reader_memory_); },
-                                     "PackedMetadataCorrupted");
+  try {
+    PackedRecordBatchReader reader(fs_, paths, schema_, reader_memory_);
+    FAIL() << "expected the classified metadata failure to surface";
+  } catch (const milvus::SegcoreError& e) {
+    EXPECT_EQ(e.get_error_code(), milvus::DataFormatBroken);
+    EXPECT_NE(std::string(e.what()).find("PackedMetadataCorrupted"), std::string::npos) << e.what();
+  } catch (const std::exception& e) {
+    FAIL() << "metadata failure lost its type, got: " << e.what();
+  }
 }
 
 TEST_F(PackedErrorStatusTest, MakeReportsMissingFileAsStatusWithClassification) {
