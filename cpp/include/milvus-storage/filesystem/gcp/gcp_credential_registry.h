@@ -20,7 +20,9 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
+#include <arrow/status.h>
 #include <aws/core/http/URI.h>
 
 #include "milvus-storage/filesystem/gcp/gcp_credential_provider.h"
@@ -46,6 +48,15 @@ struct GcpBucketKey {
 
   bool operator==(const GcpBucketKey& other) const noexcept {
     return endpoint == other.endpoint && bucket_name == other.bucket_name;
+  }
+};
+
+struct GcpEndpointKeyHash {
+  size_t operator()(const GcpEndpointKey& k) const noexcept {
+    size_t hash = std::hash<int>{}(static_cast<int>(k.scheme));
+    hash ^= std::hash<uint16_t>{}(k.port) << 1;
+    hash ^= std::hash<std::string>{}(k.host) << 2;
+    return hash;
   }
 };
 
@@ -75,14 +86,22 @@ class GcpCredentialRegistry {
   public:
   static GcpCredentialRegistry& Instance();
 
-  // Register or replace the provider for a (endpoint, bucket) pair.
+  // Register the provider for a (endpoint, bucket) pair.
   //
-  // Registration is idempotent: a second Register with the same key silently
-  // replaces the prior provider. In practice this only happens when the same
-  // bucket is configured via both `fs.*` and an `extfs.<ns>.*` slot, or when
-  // the same config Make()s twice — in both cases the identity is identical.
-  // Same bucket + different identity is not a supported configuration.
-  void Register(GcpBucketKey key, std::shared_ptr<GcpCredentialProvider> provider);
+  // One (endpoint, bucket) maps to one identity per process. A second
+  // Register with the same key keeps the existing provider when the identity
+  // (GcpCredentialProvider::Identity) is the same, and fails with Invalid when
+  // it differs, so a filesystem never authenticates with another filesystem's
+  // identity. A trusted (operator) registration may replace an untrusted one;
+  // an untrusted registration never replaces a trusted one.
+  //
+  // trusted_endpoint marks key.endpoint as configured by the operator (the
+  // primary filesystem's own address), so Bearer tokens may be sent to it even
+  // when it is not an HTTPS Google API host. Endpoints of external filesystems
+  // come from user specs and must not be marked.
+  arrow::Status Register(GcpBucketKey key,
+                         std::shared_ptr<GcpCredentialProvider> provider,
+                         bool trusted_endpoint = false);
 
   // Look up the provider for an outgoing request URI. Tries both path-style
   // (request endpoint + first path segment) and virtual-host-style (first
@@ -90,11 +109,22 @@ class GcpCredentialRegistry {
   // no match.
   std::shared_ptr<GcpCredentialProvider> Lookup(const Aws::Http::URI& uri) const;
 
+  // Whether a request to this URI may carry a Bearer token: it is HTTPS to a
+  // Google API host (*.googleapis.com), or its endpoint (path-style) or parent
+  // endpoint (virtual-host-style) was registered as trusted.
+  bool MayCarryBearerToken(const Aws::Http::URI& uri) const;
+
   private:
   GcpCredentialRegistry() = default;
 
+  struct Entry {
+    std::shared_ptr<GcpCredentialProvider> provider;
+    bool trusted;
+  };
+
   mutable std::mutex mu_;
-  std::unordered_map<GcpBucketKey, std::shared_ptr<GcpCredentialProvider>, GcpBucketKeyHash> providers_;
+  std::unordered_map<GcpBucketKey, Entry, GcpBucketKeyHash> providers_;
+  std::unordered_set<GcpEndpointKey, GcpEndpointKeyHash> trusted_endpoints_;
 };
 
 }  // namespace milvus_storage

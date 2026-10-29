@@ -12,8 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <cstdlib>
+#include <algorithm>
+#include <array>
 #include <cassert>
+#include <cctype>
+#include <cstdlib>
+#include <string>
+#include <string_view>
 
 #include "milvus-storage/filesystem/azure/azurefs.h"
 #include "milvus-storage/filesystem/azure/azure_sas_token_policy.h"
@@ -25,7 +30,60 @@
 
 namespace milvus_storage {
 
+namespace {
+
+// Azure Storage authorities (fs.address) of the public, China, US Government
+// and Germany clouds. The producer prefixes them with ".blob." / ".dfs.".
+constexpr std::array<std::string_view, 4> kAzureStorageAuthorities = {
+    "core.windows.net",
+    "core.chinacloudapi.cn",
+    "core.usgovcloudapi.net",
+    "core.cloudapi.de",
+};
+
+bool IsAzureStorageAuthority(const std::string& address) {
+  std::string lower = address;
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return std::find(kAzureStorageAuthorities.begin(), kAzureStorageAuthorities.end(), lower) !=
+         kAzureStorageAuthorities.end();
+}
+
+// External filesystems (alias set) take their address from user specs. When
+// the filesystem attaches a credential to each request (workload identity or
+// managed identity bearer tokens with use_iam; SAS tokens from the credential
+// Broker), that address must be an Azure Storage authority reached over
+// HTTPS, so a spec cannot redirect the credential to another host. Shared
+// keys sign requests instead of being attached, so they are not gated.
+// Primary filesystems (alias empty) are operator configuration and keep their
+// behavior, including USE_AZURITE.
+arrow::Status ValidateExternalCredentialTarget(const ArrowFileSystemConfig& config) {
+  if (config.alias.empty()) {
+    return arrow::Status::OK();
+  }
+  const bool attaches_credential = config.use_iam || config.IsAzureCredentialBrokerEnabled();
+  if (!attaches_credential) {
+    return arrow::Status::OK();
+  }
+  if (!config.address.empty() && !IsAzureStorageAuthority(config.address)) {
+    return arrow::Status::Invalid("Azure external filesystem '", config.alias, "': address '", config.address,
+                                  "' is not an Azure Storage authority. Identity credentials (use_iam or the "
+                                  "credential Broker) may only be sent to core.windows.net, "
+                                  "core.chinacloudapi.cn, core.usgovcloudapi.net or core.cloudapi.de");
+  }
+  if (!config.use_ssl) {
+    return arrow::Status::Invalid("Azure external filesystem '", config.alias,
+                                  "': use_ssl must be true when use_iam or the credential Broker attaches a "
+                                  "credential to requests");
+  }
+  return arrow::Status::OK();
+}
+
+}  // namespace
+
 arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
+  ARROW_RETURN_NOT_OK(ValidateExternalCredentialTarget(config_));
+
   if (!config_.tls_min_version.empty()) {
     LOG_STORAGE_WARNING_ << "tls_min_version is not yet supported for Azure filesystem. "
                          << "Requested version: " << config_.tls_min_version << ". Ignoring.";
