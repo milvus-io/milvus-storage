@@ -12,6 +12,7 @@ class AsyncOutputStream {
   public:
   virtual ~AsyncOutputStream() = default;
   virtual arrow::Future<> FlushAsync() = 0;
+  // Optional capability; SDK-backed streams return NotImplemented.
   virtual arrow::Future<> AbortAsync() = 0;
 };
 }  // namespace milvus_storage

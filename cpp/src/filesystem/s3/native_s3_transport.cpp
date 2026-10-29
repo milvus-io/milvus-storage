@@ -8,24 +8,18 @@
 #include <optional>
 #include <utility>
 #include <arrow/filesystem/path_util.h>
-#include <aws/core/AmazonSerializableWebServiceRequest.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/standard/StandardHttpResponse.h>
-#include <aws/core/utils/stream/PreallocatedStreamBuf.h>
 #include <aws/crt/http/HttpRequestResponse.h>
 #include <aws/common/uri.h>
-#include <aws/auth/credentials.h>
 #include <aws/s3/s3_client.h>
 #include <aws/s3-crt/S3CrtErrorMarshaller.h>
-#include "milvus-storage/filesystem/gcp/gcp_credential_registry.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/util_internal.h"
 
 namespace milvus_storage {
 struct NativeS3Transport::State {
   std::mutex mutex;
-  bool is_gcp = false;
-  std::string region;
   size_t inflight = 0;
   size_t limit = 0;
   std::shared_ptr<S3ClientHolder> holder;
@@ -42,34 +36,22 @@ struct Request {
   S3CrtClientLease client_lease;
   std::shared_ptr<NativeS3Transport::State> state;
   size_t limit;
-  std::shared_ptr<arrow::Buffer> data;
-  std::unique_ptr<Aws::Utils::Stream::PreallocatedStreamBuf> streambuf;
   std::shared_ptr<Aws::Http::HttpRequest> http;
   std::shared_ptr<Aws::Crt::Http::HttpRequest> message;
   aws_uri endpoint{};
-  aws_signing_config_aws signing_config{};
-  std::unique_ptr<aws_credentials, decltype(&aws_credentials_release)> signing_credentials{nullptr,
-                                                                                           aws_credentials_release};
   std::shared_ptr<Aws::Http::HttpResponse> response;
   std::optional<Aws::Client::AWSError<Aws::Client::CoreErrors>> service_error;
   arrow::Status status;
   size_t received = 0;
   std::atomic<int> http_status{0};
-  std::shared_ptr<FilesystemMetrics> write_metrics;
-  int64_t write_bytes = 0;
-  bool write_finished = false;
   bool charged = false;
   bool network_pending = true;
   arrow::Future<Aws::Client::XmlOutcome> future = arrow::Future<Aws::Client::XmlOutcome>::Make();
 
   ~Request() {
-    if (write_metrics && !write_finished)
-      write_metrics->IncrementFailedCount();
     message.reset();
     response.reset();
     http.reset();
-    streambuf.reset();
-    data.reset();
     aws_uri_clean_up(&endpoint);
     if (charged)
       state->Retire(network_pending);
@@ -217,13 +199,6 @@ struct Request {
         return arrow::Status::IOError(e.what());
       }
     }();
-    if (owned->write_metrics) {
-      if (result.ok() && result->IsSuccess())
-        owned->write_metrics->IncrementWriteBytes(owned->write_bytes);
-      else
-        owned->write_metrics->IncrementFailedCount();
-      owned->write_finished = true;
-    }
     // Release admission before continuations submit another page or request.
     {
       std::lock_guard lock(owned->state->mutex);
@@ -253,8 +228,6 @@ arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(
     return arrow::Status::Invalid("SDK CRT client has no underlying native client");
   auto state = std::make_shared<State>();
   state->holder = std::move(holder);
-  state->is_gcp = options.cloud_provider == "gcp";
-  state->region = options.region;
   state->limit = options.max_connections;
   return std::shared_ptr<NativeS3Transport>(new NativeS3Transport(std::move(state), std::move(crt_holder)));
 }
@@ -264,9 +237,10 @@ arrow::Future<Aws::Client::XmlOutcome> NativeS3Transport::Send(const Aws::Amazon
                                                                Aws::Http::HttpMethod method,
                                                                const std::string& query,
                                                                const arrow::io::IOContext& io,
-                                                               size_t limit,
-                                                               std::shared_ptr<arrow::Buffer> data) {
+                                                               size_t limit) {
   auto send = [&]() -> arrow::Result<arrow::Future<Aws::Client::XmlOutcome>> {
+    if (method != Aws::Http::HttpMethod::HTTP_HEAD && method != Aws::Http::HttpMethod::HTTP_GET)
+      return arrow::Status::NotImplemented("Native S3 transport only supports metadata reads");
     ARROW_RETURN_NOT_OK(io.stop_token().Poll());
     auto r = std::make_unique<Request>();
     r->state = state_;
@@ -294,45 +268,6 @@ arrow::Future<Aws::Client::XmlOutcome> NativeS3Transport::Send(const Aws::Amazon
     r->response = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("native-s3-response", r->http);
     for (const auto& h : model.GetHeaders()) r->http->SetHeaderValue(h.first, h.second);
     for (const auto& h : model.GetAdditionalCustomHeaders()) r->http->SetHeaderValue(h.first, h.second);
-    if (!data) {
-      if (auto serializable = dynamic_cast<const Aws::AmazonSerializableWebServiceRequest*>(&model)) {
-        const auto payload = serializable->SerializePayload();
-        if (!payload.empty())
-          data = arrow::Buffer::FromString(std::string(payload.data(), payload.size()));
-      }
-    }
-    if (data) {
-      r->data = std::move(data);
-      r->streambuf = std::make_unique<Aws::Utils::Stream::PreallocatedStreamBuf>(
-          reinterpret_cast<unsigned char*>(const_cast<uint8_t*>(r->data->data())), r->data->size());
-      r->http->AddContentBody(Aws::MakeShared<Aws::IOStream>("native-s3-body", r->streambuf.get()));
-      r->http->SetContentLength(std::to_string(r->data->size()).c_str());
-    } else if (method == Aws::Http::HttpMethod::HTTP_POST || method == Aws::Http::HttpMethod::HTTP_PUT) {
-      r->http->SetContentLength("0");
-    }
-    if (state_->is_gcp && r->http->HasHeader("x-goog-if-generation-match")) {
-      // GCS XML multipart completion ignores preconditions. Fail before
-      // publication; the stream aborts its pending upload on this error.
-      if (method != Aws::Http::HttpMethod::HTTP_PUT)
-        return arrow::Status::NotImplemented("GCS XML multipart uploads do not support conditional writes");
-      // Native I/O bypasses HttpClient::MakeRequest. Reuse the same signing
-      // hook as GoogleHttpClientDelegator after headers/body are complete.
-      auto provider = GcpCredentialRegistry::Instance().Lookup(uri);
-      if (!provider)
-        return arrow::Status::Invalid("No GCP credentials registered for native conditional write");
-      ARROW_RETURN_NOT_OK(provider->MaybeSignConditionalWrite(r->http));
-      if (!r->http->HasHeader("Authorization"))
-        return arrow::Status::Invalid("GCP conditional write has no authorization header");
-      if (r->http->GetHeaderValue("Authorization").find("GOOG4-HMAC-SHA256 ") == 0) {
-        // CRT must transmit this signature intact, not overwrite it with SigV4.
-        r->signing_credentials.reset(aws_credentials_new_anonymous(aws_default_allocator()));
-        if (!r->signing_credentials)
-          return arrow::Status::OutOfMemory("Native GCP signing credentials");
-        aws_s3_init_default_signing_config(&r->signing_config, aws_byte_cursor_from_c_str(state_->region.c_str()),
-                                           nullptr);
-        r->signing_config.credentials = r->signing_credentials.get();
-      }
-    }
     r->message = r->http->ToCrtHttpRequest();
     // The SDK conversion uses an absolute URI and drops '/' for bucket roots.
     // Direct CRT requests need an origin-form target, especially for virtual
@@ -352,10 +287,7 @@ arrow::Future<Aws::Client::XmlOutcome> NativeS3Transport::Send(const Aws::Amazon
     options.type = AWS_S3_META_REQUEST_TYPE_DEFAULT;
     options.operation_name = aws_byte_cursor_from_c_str(model.GetServiceRequestName());
     options.message = r->message->GetUnderlyingMessage();
-    // Otherwise inherit the SDK client's signing config and credentials provider,
-    // including session tokens and refresh through its CRT delegate.
-    if (r->signing_credentials)
-      options.signing_config = &r->signing_config;
+    // Inherit the SDK client signing configuration and credentials provider.
     options.endpoint = &r->endpoint;
     options.user_data = r.get();
     options.headers_callback = Request::Headers;
@@ -363,19 +295,6 @@ arrow::Future<Aws::Client::XmlOutcome> NativeS3Transport::Send(const Aws::Amazon
     options.telemetry_callback = Request::Telemetry;
     options.finish_callback = Request::Finish;
     options.shutdown_callback = Request::Shutdown;
-    const std::string operation = model.GetServiceRequestName();
-    if (operation == "PutObject" || operation == "UploadPart") {
-      r->write_metrics = lease->GetMetrics();
-      r->write_bytes = r->data ? r->data->size() : 0;
-      r->write_metrics->IncrementWriteCount();
-    } else if (operation == "CreateMultipartUpload") {
-      // Match the SDK counters: count attempts, including failed requests.
-      r->write_metrics = lease->GetMetrics();
-      r->write_metrics->IncrementMultiPartUploadCreated();
-    } else if (operation == "CompleteMultipartUpload") {
-      r->write_metrics = lease->GetMetrics();
-      r->write_metrics->IncrementMultiPartUploadFinished();
-    }
     auto future = r->future;
     auto* pending = r.release();
     auto* meta = aws_s3_client_make_meta_request(pending->client_lease->GetUnderlyingS3Client(), &options);

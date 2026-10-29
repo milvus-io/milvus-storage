@@ -43,7 +43,7 @@ class S3NativeCloudTest : public ::testing::Test {
     config_.request_timeout_ms = 30000;
     config_.log_level = "off";
     // Initialize through the real producer, including the GCP HTTP factory and
-    // credential registry. Keep this normal executor instance for cleanup only.
+    // credential registry. Use its normal executor for SDK writes and cleanup.
     ASSERT_OK_AND_ASSIGN(cleanup_, CreateArrowFileSystem(config_));
     ASSERT_OK_AND_ASSIGN(options_, S3FileSystemProducer(config_).CreateS3Options());
     options_.connect_timeout = 10;
@@ -53,6 +53,7 @@ class S3NativeCloudTest : public ::testing::Test {
     prefix_ = "pr693-native-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + "-" +
               std::to_string(std::random_device{}());
     fs_ = std::make_shared<FileSystemProxy>(config_.bucket_name + "/" + prefix_, raw);
+    writes_ = std::make_shared<FileSystemProxy>(prefix_, cleanup_);
     std::cout << "Native cloud test prefix: " << prefix_ << std::endl;
   }
   void TearDown() override {
@@ -62,7 +63,7 @@ class S3NativeCloudTest : public ::testing::Test {
     }
   }
   arrow::Status Put(const std::string& path, const std::string& data) {
-    ARROW_ASSIGN_OR_RAISE(auto out, fs_->OpenOutputStream(path));
+    ARROW_ASSIGN_OR_RAISE(auto out, writes_->OpenOutputStream(path));
     ARROW_RETURN_NOT_OK(out->Write(arrow::Buffer::FromString(data)));
     return WaitCloud(out->CloseAsync()).status();
   }
@@ -74,6 +75,7 @@ class S3NativeCloudTest : public ::testing::Test {
   S3Options options_;
   FileSystemPtr cleanup_;
   FileSystemPtr fs_;
+  FileSystemPtr writes_;
   std::shared_ptr<arrow::internal::ThreadPool> executor_;
   std::string prefix_;
 };
@@ -81,7 +83,7 @@ class S3NativeCloudTest : public ::testing::Test {
 TEST_F(S3NativeCloudTest, PutMetadataRangeReadAndOverwrite) {
   const std::string path = "nested/hello #?+% 中文";
   auto metadata = arrow::key_value_metadata({"Content-Type"}, {"text/plain"});
-  ASSERT_OK_AND_ASSIGN(auto out, fs_->OpenOutputStream(path, metadata));
+  ASSERT_OK_AND_ASSIGN(auto out, writes_->OpenOutputStream(path, metadata));
   ASSERT_NE(std::dynamic_pointer_cast<AsyncOutputStream>(out), nullptr);
   ASSERT_OK(out->Write(arrow::Buffer::FromString("abcdef")));
   ASSERT_OK(WaitCloud(out->CloseAsync()));
@@ -165,7 +167,7 @@ TEST_F(S3NativeCloudTest, ListingAndContinuationPages) {
 
 TEST_F(S3NativeCloudTest, MultipartFlushCloseAndAbort) {
   const std::string part(5 * 1024 * 1024, 'a');
-  ASSERT_OK_AND_ASSIGN(auto out, fs_->OpenOutputStream("multipart"));
+  ASSERT_OK_AND_ASSIGN(auto out, writes_->OpenOutputStream("multipart"));
   auto async = std::dynamic_pointer_cast<AsyncOutputStream>(out);
   ASSERT_NE(async, nullptr);
   ASSERT_OK(out->Write(arrow::Buffer::FromString(part)));
@@ -178,7 +180,7 @@ TEST_F(S3NativeCloudTest, MultipartFlushCloseAndAbort) {
   ASSERT_OK_AND_ASSIGN(auto bytes, WaitCloud(file->ReadAsync({}, part.size() - 2, 6)));
   EXPECT_EQ(bytes->ToString(), "aatail");
   ASSERT_OK(file->Close());
-  ASSERT_OK_AND_ASSIGN(auto sized, fs_->OpenOutputStreamWithUploadSize("sized", nullptr, 6 * 1024 * 1024));
+  ASSERT_OK_AND_ASSIGN(auto sized, writes_->OpenOutputStreamWithUploadSize("sized", nullptr, 6 * 1024 * 1024));
   ASSERT_NE(std::dynamic_pointer_cast<AsyncOutputStream>(sized), nullptr);
   ASSERT_OK(sized->Write(arrow::Buffer::FromString(part)));
   ASSERT_OK(WaitCloud(sized->CloseAsync()));
@@ -186,13 +188,14 @@ TEST_F(S3NativeCloudTest, MultipartFlushCloseAndAbort) {
   EXPECT_EQ(info.size(), part.size());
   for (const bool multipart : {false, true}) {
     auto path = multipart ? "abort-multipart" : "abort-buffer";
-    ASSERT_OK_AND_ASSIGN(out, fs_->OpenOutputStream(path));
+    ASSERT_OK_AND_ASSIGN(out, writes_->OpenOutputStream(path));
     async = std::dynamic_pointer_cast<AsyncOutputStream>(out);
     ASSERT_NE(async, nullptr);
     ASSERT_OK(out->Write(arrow::Buffer::FromString(multipart ? part : "buffer")));
     if (multipart)
       ASSERT_OK(WaitCloud(async->FlushAsync()));
-    ASSERT_OK(WaitCloud(async->AbortAsync()));
+    ASSERT_OK(out->Flush());
+    ASSERT_OK(out->Abort());
     ASSERT_OK_AND_ASSIGN(info, Stat(path));
     EXPECT_EQ(info.type(), arrow::fs::FileType::NotFound);
   }
@@ -203,26 +206,25 @@ TEST_F(S3NativeCloudTest, ConditionalPutAndMultipartPreserveExistingObject) {
     GTEST_SKIP() << "Existing OBS conditional-output API is not implemented";
   for (const auto size : {7, 5 * 1024 * 1024}) {
     auto path = "conditional-" + std::to_string(size) + " #?+% 中文";
-    ASSERT_OK_AND_ASSIGN(auto out, fs_->OpenConditionalOutputStream(path, nullptr));
-    ASSERT_OK(out->Write(arrow::Buffer::FromString(std::string(size, 'a'))));
-    auto created = WaitCloud(out->CloseAsync());
-    if (config_.cloud_provider == kCloudProviderGCP && size >= config_.multi_part_upload_size) {
-      ASSERT_TRUE(created.status().IsNotImplemented()) << created.status();
+    ASSERT_OK_AND_ASSIGN(auto out, writes_->OpenConditionalOutputStream(path, nullptr));
+    auto written = out->Write(arrow::Buffer::FromString(std::string(size, 'a')));
+    if (config_.cloud_provider == kCloudProviderGCP && size > 7) {
+      ASSERT_TRUE(written.IsNotImplemented()) << written;
+      ASSERT_OK(out->Abort());
       ASSERT_OK_AND_ASSIGN(auto absent, Stat(path));
       EXPECT_EQ(absent.type(), arrow::fs::FileType::NotFound);
       continue;
     }
+    ASSERT_OK(written);
+    auto created = WaitCloud(out->CloseAsync());
     ASSERT_OK(created);
     for (const auto conflict_size : {7, 5 * 1024 * 1024}) {
-      ASSERT_OK_AND_ASSIGN(auto conflict, fs_->OpenConditionalOutputStream(path, nullptr));
-      ASSERT_OK(conflict->Write(arrow::Buffer::FromString(std::string(conflict_size, 'b'))));
-      auto rejected = WaitCloud(conflict->CloseAsync());
+      ASSERT_OK_AND_ASSIGN(auto conflict, writes_->OpenConditionalOutputStream(path, nullptr));
+      auto rejected = conflict->Write(arrow::Buffer::FromString(std::string(conflict_size, 'b')));
+      if (rejected.ok())
+        rejected = WaitCloud(conflict->CloseAsync()).status();
       EXPECT_FALSE(rejected.ok());
-      if (config_.cloud_provider == kCloudProviderGCP && conflict_size >= config_.multi_part_upload_size)
-        EXPECT_TRUE(rejected.status().IsNotImplemented()) << rejected.status();
-      auto async = std::dynamic_pointer_cast<AsyncOutputStream>(conflict);
-      ASSERT_NE(async, nullptr);
-      ASSERT_OK(WaitCloud(async->AbortAsync()));
+      ASSERT_OK(conflict->Abort());
       ASSERT_OK_AND_ASSIGN(auto info, Stat(path));
       EXPECT_EQ(info.size(), size);
       ASSERT_OK_AND_ASSIGN(auto file, fs_->OpenInputFile(info));
@@ -392,24 +394,22 @@ TEST_P(S3SyncCloudTest, ConditionalWritesAndProviderLimits) {
     return;
   }
   for (const auto size : {7, 5 * 1024 * 1024}) {
-    // GCP conditional multipart is outside the successful compatibility matrix.
-    // Check the native path's explicit rejection without claiming SDK support.
-    if (config_.cloud_provider == kCloudProviderGCP && !GetParam() && size > 7)
-      continue;
     const auto path = "conditional-" + std::to_string(size) + " #?+% 中文";
     if (config_.cloud_provider == kCloudProviderGCP && size > 7)
       ASSERT_OK(Put(path, "original"));
     ASSERT_OK_AND_ASSIGN(auto out, proxy_->OpenConditionalOutputStream(path, nullptr));
-    ASSERT_OK(out->Write(arrow::Buffer::FromString(std::string(size, 'a'))));
-    auto status = out->Close();
+    auto written = out->Write(arrow::Buffer::FromString(std::string(size, 'a')));
     if (config_.cloud_provider == kCloudProviderGCP && size > 7) {
-      ASSERT_TRUE(status.IsNotImplemented()) << status;
+      ASSERT_TRUE(written.IsNotImplemented()) << written;
+      ASSERT_OK(out->Abort());
       ASSERT_OK_AND_ASSIGN(auto file, fs_->OpenInputFile(path));
       ASSERT_OK_AND_ASSIGN(auto bytes, file->Read(16));
       EXPECT_EQ(bytes->ToString(), "original");
       ASSERT_OK(file->Close());
       continue;
     }
+    ASSERT_OK(written);
+    auto status = out->Close();
     ASSERT_OK(status);
     ASSERT_OK_AND_ASSIGN(auto conflict, proxy_->OpenConditionalOutputStream(path, nullptr));
     auto rejected = conflict->Write(arrow::Buffer::FromString(std::string(size, 'b')));

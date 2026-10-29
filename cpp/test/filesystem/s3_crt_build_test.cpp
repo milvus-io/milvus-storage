@@ -1211,7 +1211,7 @@ TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileForGcpIam) {
   EXPECT_EQ(dynamic_cast<milvus_storage::NonBlockingRandomAccessFile*>(sdk_file.get()), nullptr);
 }
 
-TEST(S3CrtBuildSupportTest, GcpHmacNativeConditionalWritePreservesGoog4Signing) {
+TEST(S3CrtBuildSupportTest, GcpHmacSdkConditionalWriteWithCrtReadsPreservesGoog4Signing) {
 #if defined(_WIN32)
   GTEST_SKIP() << "Test requires POSIX process APIs.";
 #else
@@ -1236,9 +1236,8 @@ TEST(S3CrtBuildSupportTest, GcpHmacNativeConditionalWritePreservesGoog4Signing) 
       std::cerr << result.status() << std::endl;
       return 1;
     }
-    // Keep the caller executor undriven: an SDK I/O fallback cannot complete.
-    folly::ManualExecutor executor;
-    auto arrow_executor = parquet::MakeFollyArrowExecutor(folly::getKeepAliveToken(executor), 1);
+    // Uploads use the SDK executor even when CRT reads are enabled.
+    auto arrow_executor = arrow::internal::ThreadPool::Make(1);
     if (!arrow_executor.ok())
       return 2;
     auto options = S3Options::FromAccessKey(config.access_key_id, config.access_key_value);

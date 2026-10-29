@@ -235,25 +235,6 @@ TEST_F(NativeS3Test, OtherProvidersUseNativeRequestsWithoutAnIoWorker) {
     ASSERT_OK_AND_ASSIGN(auto input, fs->OpenInputFile("hello #?+% 中文"));
     ASSERT_OK_AND_ASSIGN(auto metadata, Await(input->ReadMetadataAsync({})));
     ASSERT_OK(input->Close());
-    for (const auto size : {7, 5 * 1024 * 1024}) {
-      auto name = std::string("native-provider-") + provider + "-" + std::to_string(size) + " #?+% 中文";
-      ASSERT_OK_AND_ASSIGN(auto output, fs->OpenConditionalOutputStream(name, nullptr));
-      ASSERT_OK(output->Write(arrow::Buffer::FromString(std::string(size, 'x'))));
-      auto closed = output->CloseAsync();
-      ASSERT_TRUE(closed.Wait(5));
-      if (options.cloud_provider == "gcp" && size >= options.multi_part_upload_size) {
-        ASSERT_TRUE(closed.status().IsNotImplemented()) << closed.status();
-        ASSERT_OK_AND_ASSIGN(info, Await(Stat(fs, name)));
-        EXPECT_EQ(info.type(), arrow::fs::FileType::NotFound);
-        continue;
-      }
-      ASSERT_OK(closed.status());
-      ASSERT_OK_AND_ASSIGN(info, Await(Stat(fs, name)));
-      EXPECT_EQ(info.size(), size);
-      ASSERT_OK_AND_ASSIGN(auto conflict, fs->OpenConditionalOutputStream(name, nullptr));
-      ASSERT_OK(conflict->Write(arrow::Buffer::FromString("conflict")));
-      EXPECT_FALSE(conflict->CloseAsync().status().ok());
-    }
   }
 }
 
@@ -458,30 +439,17 @@ TEST_F(NativeS3Test, ExistingOutputFactoriesOpenWithoutIo) {
   auto async = std::dynamic_pointer_cast<AsyncOutputStream>(stream);
   ASSERT_NE(async, nullptr);
   ASSERT_OK(async->FlushAsync().status());
-  ASSERT_OK(async->AbortAsync().status());
+  ASSERT_OK(stream->Flush());
+  ASSERT_OK(stream->Abort());
   ASSERT_OK_AND_ASSIGN(auto conditional, proxy->OpenConditionalOutputStream("no-network", nullptr));
   auto conditional_async = std::dynamic_pointer_cast<AsyncOutputStream>(conditional);
   ASSERT_NE(conditional_async, nullptr);
-  ASSERT_OK(conditional_async->AbortAsync().status());
+  ASSERT_OK(conditional->Abort());
   // The sized factory uses its argument, not the default part size in options.
-  EXPECT_TRUE(s3->OpenOutputStreamWithUploadSize("bucket/key", nullptr, 1).status().IsInvalid());
   ASSERT_OK_AND_ASSIGN(auto sized, s3->OpenOutputStreamWithUploadSize("bucket/key", nullptr, 6 * 1024 * 1024));
   auto sized_async = std::dynamic_pointer_cast<AsyncOutputStream>(sized);
   ASSERT_NE(sized_async, nullptr);
-  ASSERT_OK(sized_async->AbortAsync().status());
-}
-
-TEST_F(NativeS3Test, ExistingConditionalOutputStreamUsesNativeWrites) {
-  CompletesWithoutBlockingWorker<arrow::internal::Empty>([this]() -> arrow::Future<> {
-    ARROW_ASSIGN_OR_RAISE(auto stream, fs_->OpenConditionalOutputStream("slow-conditional", nullptr));
-    ARROW_RETURN_NOT_OK(stream->Write(arrow::Buffer::FromString("original")));
-    return stream->CloseAsync();
-  });
-  ASSERT_OK_AND_ASSIGN(auto conflicting, fs_->OpenConditionalOutputStream("slow-conditional", nullptr));
-  ASSERT_OK(conflicting->Write(arrow::Buffer::FromString("replacement")));
-  EXPECT_FALSE(conflicting->CloseAsync().status().ok());
-  ASSERT_OK_AND_ASSIGN(auto data, Await(Read("slow-conditional", 0, 20)));
-  EXPECT_EQ(data->ToString(), "original");
+  ASSERT_OK(sized->Abort());
 }
 
 TEST_F(NativeS3Test, AsyncWriteAndSyncReadShareOneHandle) {
@@ -508,13 +476,6 @@ TEST_F(NativeS3Test, WritesConditionalMetadataAndOwnedBuffer) {
   EXPECT_EQ(data->ToString(), "hello");
   ASSERT_OK(Write("empty-write", arrow::Buffer::FromString("")).status());
 }
-TEST_F(NativeS3Test, WritesAndMultipartUseNativeRequests) {
-  CompletesWithoutBlockingWorker<std::shared_ptr<arrow::Buffer>>([this] {
-    return Write("slow-write", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a') + "tail")).Then([] {
-      return arrow::Buffer::FromString("done");
-    });
-  });
-}
 TEST_F(NativeS3Test, MultipartCompleteAndAbort) {
   ASSERT_OK_AND_ASSIGN(const auto metrics, sync_->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
@@ -531,7 +492,8 @@ TEST_F(NativeS3Test, MultipartCompleteAndAbort) {
   ASSERT_OK(stream->Write(arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))));
   auto async = std::dynamic_pointer_cast<AsyncOutputStream>(stream);
   ASSERT_NE(async, nullptr);
-  ASSERT_OK(async->AbortAsync().status());
+  ASSERT_OK(stream->Flush());
+  ASSERT_OK(stream->Abort());
   EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 2);
   EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 1);
   EXPECT_EQ(metrics->GetWriteCount(), 3);
@@ -572,67 +534,33 @@ TEST_F(NativeS3Test, MultipartCompletionFaultDoesNotPublishObject) {
   }
 }
 #endif
-TEST_F(NativeS3Test, MultipartEmbeddedErrorIsNotSuccess) {
-  ASSERT_OK_AND_ASSIGN(const auto metrics, sync_->GetMetrics(kOriginMetricsSource));
-  ASSERT_NE(metrics, nullptr);
-  metrics->Reset();
-  auto status = Write("error-complete", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))).status();
-  EXPECT_FALSE(status.ok());
-  EXPECT_NE(status.message().find("INTERNAL_FAILURE"), std::string::npos);
-  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 1);
-  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 1);
-  EXPECT_EQ(metrics->GetWriteCount(), 1);
-  EXPECT_EQ(metrics->GetWriteBytes(), 5 * 1024 * 1024);
-  EXPECT_EQ(metrics->GetFailedCount(), 1);
-  ASSERT_OK_AND_ASSIGN(auto missing, Await(Stat(fs_, "error-complete")));
-  EXPECT_EQ(missing.type(), arrow::fs::FileType::NotFound);
-}
-TEST_F(NativeS3Test, SdkServiceErrorsPreserveDetailsAndClassification) {
+TEST_F(NativeS3Test, MetadataServiceErrorsPreserveDetailsAndClassification) {
   if (std::getenv("STORAGE_NATIVE_S3_REAL"))
     GTEST_SKIP() << "Requires fixture error responses";
   for (const auto& [error, expected] : {std::pair{"AccessDenied", ExtendStatusCode::AwsErrorAccessDenied},
-                                        std::pair{"SlowDown", ExtendStatusCode::StorageTransientThrottling},
-                                        std::pair{"InternalError", ExtendStatusCode::StorageTransientService},
-                                        std::pair{"RequestTimeout", ExtendStatusCode::StorageTransientTimeout},
                                         std::pair{"PreconditionFailed", ExtendStatusCode::AwsErrorPreConditionFailed},
                                         std::pair{"ConditionalRequestConflict", ExtendStatusCode::AwsErrorConflict}}) {
     SCOPED_TRACE(error);
-    auto status = Write(std::string("service-error/") + error, arrow::Buffer::FromString("data")).status();
+    arrow::fs::FileSelector selector;
+    selector.base_dir = std::string("service-error/") + error;
+    auto status = fs_->GetFileInfoGenerator(selector)().status();
     ASSERT_FALSE(status.ok());
-    // CRT drops the body of recoverable service errors after retry exhaustion.
-    const bool body_retained = std::string(error) != "SlowDown" && std::string(error) != "InternalError" &&
-                               std::string(error) != "RequestTimeout";
-    EXPECT_NE(status.message().find(body_retained ? "fixture service detail" : "CRT service error"), std::string::npos);
-    EXPECT_NE(status.message().find("PutObject"), std::string::npos);
+    EXPECT_NE(status.message().find("fixture service detail"), std::string::npos);
     auto detail = ExtendStatusDetail::UnwrapStatus(status);
     ASSERT_NE(detail, nullptr);
     EXPECT_EQ(detail->code(), expected);
   }
 }
-TEST_F(NativeS3Test, MultipartEmbeddedServiceErrorPreservesDetails) {
-  if (std::getenv("STORAGE_NATIVE_S3_REAL"))
-    GTEST_SKIP() << "Requires fixture embedded error response";
-  auto status = Write("error-complete-denied", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))).status();
-  ASSERT_FALSE(status.ok());
-  EXPECT_NE(status.message().find("fixture completion denied"), std::string::npos);
-  auto detail = ExtendStatusDetail::UnwrapStatus(status);
-  ASSERT_NE(detail, nullptr);
-  EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorAccessDenied);
-}
+
 TEST_F(NativeS3Test, IncompleteResponsesDoNotEstablishSuccessOrAbsence) {
   if (std::getenv("STORAGE_NATIVE_S3_REAL"))
     GTEST_SKIP() << "Requires fixture truncated responses";
-  auto status = Write("truncated-put", arrow::Buffer::FromString("data")).status();
-  ASSERT_FALSE(status.ok());
-  auto detail = ExtendStatusDetail::UnwrapStatus(status);
-  ASSERT_NE(detail, nullptr);
-  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork);
   arrow::fs::FileSelector selector;
   selector.base_dir = "truncated-list";
   selector.allow_not_found = true;
-  status = fs_->GetFileInfoGenerator(selector)().status();
+  auto status = fs_->GetFileInfoGenerator(selector)().status();
   ASSERT_FALSE(status.ok());
-  detail = ExtendStatusDetail::UnwrapStatus(status);
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
   ASSERT_NE(detail, nullptr);
   EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork);
 }
@@ -667,23 +595,74 @@ TEST_F(NativeS3Test, FailedMultipartCreationCountsAttemptAndFailure) {
   EXPECT_EQ(metrics->GetWriteBytes(), 0);
   EXPECT_EQ(metrics->GetFailedCount(), 1);
 }
-TEST_F(NativeS3Test, SuccessfulWriteDoesNotRequireRunningExecutor) {
+// Native metadata must not change output routing or impose a part admission limit.
+TEST_F(NativeS3Test, OutputFactoriesRetainSdkExecutorAndWriteSemantics) {
   ASSERT_OK(executor_->Shutdown());
   executor_stopped_ = true;
-  ASSERT_OK(Write("rejected-dispatch", arrow::Buffer::FromString("durable")).status());
-  ASSERT_OK_AND_ASSIGN(auto data, Await(Read("rejected-dispatch", 0, 7)));
-  EXPECT_EQ(data->ToString(), "durable");
+  for (const bool crt : {false, true}) {
+    auto options = options_;
+    options.use_crt_async_reads = crt;
+    for (const bool background : {false, true}) {
+      options.background_writes = background;
+      ASSERT_OK_AND_ASSIGN(auto raw, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
+      auto fs = std::make_shared<FileSystemProxy>(prefix_, raw);
+      for (int factory = 0; factory < 3; ++factory) {
+        SCOPED_TRACE(::testing::Message() << "crt=" << crt << " background=" << background << " factory=" << factory);
+        const auto name =
+            "sdk-output-" + std::to_string(crt) + "-" + std::to_string(background) + "-" + std::to_string(factory);
+        auto opened = factory == 0   ? fs->OpenOutputStream(name)
+                      : factory == 1 ? fs->OpenConditionalOutputStream(name, nullptr)
+                                     : fs->OpenOutputStreamWithUploadSize(name, nullptr, 5 * 1024 * 1024);
+        ASSERT_OK_AND_ASSIGN(auto stream, opened);
+        // Two parts in one Write exceeds the old native limit (max_connections=1).
+        auto payload = arrow::Buffer::FromString(std::string(background ? 7 : 10 * 1024 * 1024, 'x'));
+        ASSERT_OK(stream->Write(payload));
+        auto closed = stream->CloseAsync();
+        ASSERT_TRUE(closed.Wait(5));
+        if (background) {
+          // The SDK path requires its executor even when native metadata is enabled.
+          EXPECT_FALSE(closed.status().ok());
+        } else {
+          ASSERT_OK(closed.status());
+          ASSERT_OK_AND_ASSIGN(auto input, fs->OpenInputFile(name));
+          ASSERT_OK_AND_ASSIGN(auto data, input->Read(payload->size()));
+          EXPECT_TRUE(data->Equals(*payload));
+          ASSERT_OK(input->Close());
+        }
+      }
+    }
+  }
 }
-TEST_F(NativeS3Test, StreamBackpressureDoesNotConsumeRejectedWrite) {
-  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream("backpressure"));
-  auto async = std::dynamic_pointer_cast<AsyncOutputStream>(stream);
-  EXPECT_TRUE(stream->Write(arrow::Buffer::FromString(std::string(10 * 1024 * 1024, 'x'))).IsCapacityError());
-  ASSERT_OK_AND_ASSIGN(auto offset, stream->Tell());
-  EXPECT_EQ(offset, 0);
-  ASSERT_OK(stream->Write(arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))));
-  ASSERT_OK(async->FlushAsync().status());
-  ASSERT_OK(stream->Write(arrow::Buffer::FromString("tail")));
-  ASSERT_OK(stream->CloseAsync().status());
+
+TEST_F(NativeS3Test, GcpConditionalMultipartIsRejectedBeforeCreatingAnUpload) {
+  ASSERT_OK(Write("gcp-multipart-guard", arrow::Buffer::FromString("original")).status());
+  for (const bool crt : {false, true}) {
+    auto options = options_;
+    options.cloud_provider = kCloudProviderGCP;
+    options.use_crt_async_reads = crt;
+    ASSERT_OK_AND_ASSIGN(auto raw, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
+    auto fs = std::make_shared<FileSystemProxy>(prefix_, raw);
+    ASSERT_OK_AND_ASSIGN(auto output, fs->OpenConditionalOutputStream("gcp-multipart-guard", nullptr));
+    ASSERT_OK_AND_ASSIGN(auto metrics, raw->GetMetrics(kOriginMetricsSource));
+    metrics->Reset();
+    auto status = output->Write(arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'x')));
+    EXPECT_TRUE(status.IsNotImplemented()) << status;
+    EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 0);
+    ASSERT_OK(output->Abort());
+    ASSERT_OK_AND_ASSIGN(auto data, Await(Read("gcp-multipart-guard", 0, 8)));
+    EXPECT_EQ(data->ToString(), "original");
+  }
+}
+
+TEST_F(NativeS3Test, CrtMetadataAndRangeReadsRetryTransientFailures) {
+  if (std::getenv("STORAGE_NATIVE_S3_REAL"))
+    GTEST_SKIP() << "Requires fixture transient failures";
+  ASSERT_OK(executor_->Shutdown());
+  executor_stopped_ = true;
+  ASSERT_OK_AND_ASSIGN(auto info, Await(Stat(fs_, "retry-head")));
+  EXPECT_EQ(info.size(), 6);
+  ASSERT_OK_AND_ASSIGN(auto data, Await(Read("retry-get", 0, 6)));
+  EXPECT_EQ(data->ToString(), "abcdef");
 }
 
 TEST_F(NativeS3Test, DirectoryContentsRetainsExistingSdkBehavior) {
@@ -691,7 +670,7 @@ TEST_F(NativeS3Test, DirectoryContentsRetainsExistingSdkBehavior) {
   options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
   ASSERT_OK_AND_ASSIGN(auto fs, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
   // Directory cleanup retains the existing SDK implementation even when
-  // native read/write transport does not support this configuration.
+  // native metadata transport does not support this configuration.
   ASSERT_OK(fs->DeleteDirContentsAsync("bucket/absent", true).status());
   EXPECT_FALSE(fs->DeleteDirContentsAsync("bucket/absent", false).status().ok());
   EXPECT_TRUE(fs->DeleteDirContentsAsync("", true).status().IsNotImplemented());
@@ -708,8 +687,8 @@ TEST_F(NativeS3Test, DirectoryContentsRetainsExistingSdkBehavior) {
 }
 
 class NativeS3ShutdownTest : public NativeS3Test {};
-TEST_F(NativeS3ShutdownTest, DrainsPendingWriteBeforeAwsShutdown) {
-  auto pending = Write("slow-write", arrow::Buffer::FromString("shutdown"));
+TEST_F(NativeS3ShutdownTest, DrainsPendingMetadataBeforeAwsShutdown) {
+  auto pending = Stat(fs_, "slow");
   auto shutdown = std::async(std::launch::async, [] { return FinalizeS3(); });
   ASSERT_TRUE(pending.Wait(5));
   ASSERT_OK(pending.status());

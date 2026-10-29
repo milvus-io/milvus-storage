@@ -4,7 +4,6 @@
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 #pragma once
 #ifdef WITH_CRT
-#include <arrow/buffer.h>
 #include <arrow/io/interfaces.h>
 #include <arrow/util/future.h>
 #include <aws/core/http/HttpTypes.h>
@@ -20,15 +19,13 @@ class NativeS3Transport {
   static arrow::Result<std::shared_ptr<NativeS3Transport>> Make(const S3Options& options,
                                                                 std::shared_ptr<S3ClientHolder> holder,
                                                                 std::shared_ptr<S3CrtClientHolder> crt_holder);
-  // DEFAULT meta requests never transform PUT into multipart. All bodies are
-  // owned memory; no CRT callback reads a blocking file/iostream data source.
+  // Read-only metadata requests. Object uploads remain on the SDK output path.
   arrow::Future<Aws::Client::XmlOutcome> Send(const Aws::AmazonWebServiceRequest& request,
                                               const std::string& key,
                                               Aws::Http::HttpMethod method,
                                               const std::string& query,
                                               const arrow::io::IOContext& io_context,
-                                              size_t response_limit = 16 * 1024 * 1024,
-                                              std::shared_ptr<arrow::Buffer> body = nullptr);
+                                              size_t response_limit = 16 * 1024 * 1024);
 
   private:
   NativeS3Transport(std::shared_ptr<State> state, std::shared_ptr<S3CrtClientHolder> holder)
