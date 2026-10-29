@@ -154,23 +154,19 @@ static void test_talon_broker_configuration(void) {
   LoonProperties properties = {values, sizeof(values) / sizeof(values[0])};
   LoonTalonClientHandle client = 0;
   LoonFFIResult status = loon_talon_client_create(&properties, &client);
-  ck_assert_int_eq(status.err_code, LOON_SUCCESS);
-  ck_assert(client != 0);
-  loon_ffi_free_result(&status);
-  const LoonTalonLoadRequest request = {"s3://bucket/empty", 0, NULL};
-  LoonTalonResult* result = NULL;
-  status = loon_talon_load(client, &request, NULL, &result);
+  // The shared AWS Broker endpoint is validated before a Talon client is created.
   ck_assert_int_eq(status.err_code, LOON_INVALID_ARGS);
-  ck_assert(result == NULL);
+  ck_assert(client == 0);
   ck_assert(strstr(loon_ffi_get_errmsg(&status), "broker-secret") == NULL);
   loon_ffi_free_result(&status);
-  loon_talon_client_destroy(client);
 
   values[1].value = "https://broker/assume-role";
   status = loon_talon_client_create(&properties, &client);
   ck_assert_msg(status.err_code == LOON_SUCCESS, "%s", loon_ffi_get_errmsg(&status));
   loon_ffi_free_result(&status);
   // Empty prewarm must not issue object or Broker I/O.
+  const LoonTalonLoadRequest request = {"s3://bucket/empty", 0, NULL};
+  LoonTalonResult* result = NULL;
   status = loon_talon_load(client, &request, NULL, &result);
   ck_assert_msg(status.err_code == LOON_SUCCESS, "%s", loon_ffi_get_errmsg(&status));
   ck_assert(result != NULL);
