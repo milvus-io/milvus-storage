@@ -144,10 +144,13 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
       }
     }
   } else if (cloud_provider == kCloudProviderGCP) {
+    // Mirrors BuildGcpProviderFromConfig: the target selects impersonation
+    // with or without use_iam, and credential_endpoint selects the Broker only
+    // without use_iam.
     hash_combine(use_iam);
-    if (use_iam) {
-      hash_combine(gcp_target_service_account);
-    } else {
+    hash_combine(gcp_target_service_account);
+    if (!use_iam) {
+      hash_combine(credential_endpoint);
       hash_combine(access_key_id);
       hash_combine(access_key_value);
     }
@@ -434,6 +437,20 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(
           "fs.request_timeout_ms");
     }
 
+    arrow::util::Uri endpoint;
+    auto endpoint_status = endpoint.Parse(result.credential_endpoint);
+    if (!endpoint_status.ok() || endpoint.host().empty() ||
+        (endpoint.scheme() != "http" && endpoint.scheme() != "https")) {
+      return arrow::Status::Invalid("fs.credential_endpoint must be a valid HTTP(S) URL");
+    }
+  }
+  // Native GCP, like native Azure, uses the Broker only without use_iam.
+  if (result.cloud_provider == kCloudProviderGCP && !result.use_iam && !result.credential_endpoint.empty()) {
+    if (result.gcp_target_service_account.empty() || result.bucket_name.empty() || result.request_timeout_ms <= 0) {
+      return arrow::Status::Invalid(
+          "GCP credential broker mode requires fs.gcp_target_service_account, fs.bucket_name, and a positive "
+          "fs.request_timeout_ms");
+    }
     arrow::util::Uri endpoint;
     auto endpoint_status = endpoint.Parse(result.credential_endpoint);
     if (!endpoint_status.ok() || endpoint.host().empty() ||

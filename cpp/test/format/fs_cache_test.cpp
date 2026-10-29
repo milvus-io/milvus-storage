@@ -472,7 +472,10 @@ TEST_F(FileSystemCacheTest, AzureBrokerCacheKeyUsesBrokerIdentity) {
   EXPECT_NE(account_key.GetCacheKey(), other_key.GetCacheKey());
 }
 
-TEST_F(FileSystemCacheTest, TalonBrokerIdentityIsolatedFromLocalOriginCredentials) {
+// For GCP without use_iam, credential_endpoint selects the native Broker
+// identity, so GetCacheKey hashes it whether or not Talon is enabled. Only
+// Talon-specific settings stay out of the origin filesystem's identity.
+TEST_F(FileSystemCacheTest, GcpBrokerEndpointIsPartOfOriginIdentityRegardlessOfTalon) {
   ArrowFileSystemConfig base;
   base.storage_type = "remote";
   base.talon_mode = TalonMode::Full;
@@ -489,10 +492,32 @@ TEST_F(FileSystemCacheTest, TalonBrokerIdentityIsolatedFromLocalOriginCredential
   different = base;
   different.credential_endpoint = "https://other-broker/assume-role";
   EXPECT_NE(base.GetCacheKey(), different.GetCacheKey());
+  // The endpoint is a credential selector, not part of the display string.
   EXPECT_EQ(base.ToString().find("https://broker"), std::string::npos);
-  base.talon_mode = TalonMode::Disabled;
-  different.talon_mode = TalonMode::Disabled;
-  EXPECT_EQ(base.GetCacheKey(), different.GetCacheKey());
+
+  // Disabling Talon does not merge the two Broker identities: the endpoint
+  // still picks the native GcpBrokerCredentialProvider.
+  auto base_native = base;
+  auto different_native = different;
+  base_native.talon_mode = TalonMode::Disabled;
+  different_native.talon_mode = TalonMode::Disabled;
+  EXPECT_NE(base_native.GetCacheKey(), different_native.GetCacheKey());
+
+  // Talon-only settings never change the origin identity.
+  auto talon_only = base_native;
+  talon_only.talon_coordinator = "talon-coordinator.other:9000";
+  talon_only.talon_namespace = "other-namespace";
+  talon_only.talon_block_size = base_native.talon_block_size * 2;
+  EXPECT_EQ(base_native.GetCacheKey(), talon_only.GetCacheKey());
+
+  // With use_iam the native filesystem uses this process's identity and the
+  // endpoint describes only Talon's Broker request, so it drops out of the
+  // origin identity once Talon is disabled.
+  auto iam_a = base_native;
+  iam_a.use_iam = true;
+  auto iam_b = different_native;
+  iam_b.use_iam = true;
+  EXPECT_EQ(iam_a.GetCacheKey(), iam_b.GetCacheKey());
 }
 
 TEST_F(FileSystemCacheTest, TalonBrokerIamSeparatesClientsWithTheSameOriginRole) {

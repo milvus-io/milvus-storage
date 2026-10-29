@@ -1307,6 +1307,8 @@ TEST(S3CrtBuildSupportTest, GcpIamBearerReachesCrtRangeGetAndHead) {
       arrow::Status MaybeSignConditionalWrite(const std::shared_ptr<Aws::Http::HttpRequest>&) override {
         return arrow::Status::OK();
       }
+      bool IssuesBearerToken() const override { return true; }
+      std::string Identity() const override { return "iam"; }
     };
     const auto fail = [](const std::string& message) {
       std::cerr << message << std::endl;
