@@ -56,7 +56,7 @@ class LoonTest : public ::testing::Test {
     ASSERT_STATUS_OK(InitTestProperties(properties_));
     SetValue(properties_, PROPERTY_FS_ROOT_PATH, "/");
     FilesystemCache::getInstance().clean();
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
 
     base_dir_ = "/tmp/loon-test";
     table_dir_ = base_dir_ + "/iceberg_source";
@@ -72,7 +72,9 @@ class LoonTest : public ::testing::Test {
 
   arrow::Result<std::vector<iceberg::IcebergFileInfo>> PlanIcebergTable(
       const iceberg::IcebergTestTableInfo& table_info) {
-    ARROW_ASSIGN_OR_RAISE(auto config, FilesystemCache::resolve_config(properties_, table_info.metadata_location));
+    ARROW_ASSIGN_OR_RAISE(auto config,
+                          FilesystemCache::resolve_config(std::make_shared<const api::Properties>(properties_),
+                                                          table_info.metadata_location));
     return PlanFiles(table_info.metadata_location, table_info.snapshot_id, fs_, iceberg::ToReaderOptions(config));
   }
 
@@ -89,7 +91,7 @@ void VerifyPaimonManifestRoundTrip(const std::string& source,
                                    uint64_t rows,
                                    const std::vector<int64_t>& deletions,
                                    const std::shared_ptr<arrow::fs::FileSystem>& fs,
-                                   const Properties& properties,
+                                   const std::shared_ptr<const Properties>& properties,
                                    const std::string& file_format = "parquet",
                                    uint32_t dimension = 0) {
   ASSERT_STATUS_OK(paimon::CreateTestTable(source, rows, mode, deletions, file_format, dimension).status());
@@ -129,37 +131,37 @@ void VerifyPaimonManifestRoundTrip(const std::string& source,
 
 TEST_F(LoonTest, CreateAndReadPaimonAppend) {
   VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_append", target_dir_ + "/paimon_append", "append", 30, {}, fs_,
-                                properties_);
+                                std::make_shared<const api::Properties>(properties_));
 }
 
 TEST_F(LoonTest, CreateAndReadPaimonMergeOnRead) {
   VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_mor", target_dir_ + "/paimon_mor", "mor", 30, {}, fs_,
-                                properties_);
+                                std::make_shared<const api::Properties>(properties_));
 }
 
 TEST_F(LoonTest, CreateAndReadPaimonDeletionVector) {
   VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_dv", target_dir_ + "/paimon_dv", "deletion-vector", 30, {0, 5, 29},
-                                fs_, properties_);
+                                fs_, std::make_shared<const api::Properties>(properties_));
 }
 
 TEST_F(LoonTest, CreateAndReadPaimonVortex) {
   VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_vortex", target_dir_ + "/paimon_vortex", "append", 30, {}, fs_,
-                                properties_, "vortex");
+                                std::make_shared<const api::Properties>(properties_), "vortex");
 }
 
 TEST_F(LoonTest, CreateAndReadPaimonVortexDeletionVector) {
   VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_vortex_dv", target_dir_ + "/paimon_vortex_dv", "deletion-vector",
-                                30, {0, 5, 29}, fs_, properties_, "vortex");
+                                30, {0, 5, 29}, fs_, std::make_shared<const api::Properties>(properties_), "vortex");
 }
 
 TEST_F(LoonTest, CreateAndReadPaimonVectorAppend) {
   VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_vector_append", target_dir_ + "/paimon_vector_append", "append", 6,
-                                {}, fs_, properties_, "parquet", 4);
+                                {}, fs_, std::make_shared<const api::Properties>(properties_), "parquet", 4);
 }
 
 TEST_F(LoonTest, CreateAndReadPaimonVectorDeletionVector) {
   VerifyPaimonManifestRoundTrip(base_dir_ + "/paimon_vector_dv", target_dir_ + "/paimon_vector_dv", "deletion-vector",
-                                6, {0, 5}, fs_, properties_, "parquet", 4);
+                                6, {0, 5}, fs_, std::make_shared<const api::Properties>(properties_), "parquet", 4);
 }
 
 // Create manifest from Iceberg table and read back sequentially
@@ -206,7 +208,9 @@ TEST_F(LoonTest, CreateAndReadIceberg) {
 
   // 5. Read data via FormatReader
   auto& f = read_cgs[0]->files[0];
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, read_cgs[0]->format, f, properties_, columns, nullptr));
+  ASSERT_AND_ASSIGN(auto reader,
+                    FormatReader::create(nullptr, read_cgs[0]->format, f,
+                                         std::make_shared<const api::Properties>(properties_), columns, nullptr));
 
   ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
   ASSERT_GE(rg_infos.size(), 1);
@@ -264,7 +268,8 @@ TEST_F(LoonTest, CreateAndTakeWithDeletes) {
   // Take with logical doc IDs
   auto& f = manifest->columnGroups()[0]->files[0];
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, f, properties_, columns, nullptr));
+                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, f,
+                                         std::make_shared<const api::Properties>(properties_), columns, nullptr));
 
   std::vector<int64_t> take_positions = {0, 3, 6, 13, 16};
   ASSERT_AND_ASSIGN(auto table, reader->take(take_positions));
@@ -315,7 +320,8 @@ TEST_F(LoonTest, SequentialReadFiltersDeletes) {
 
   auto& f = manifest->columnGroups()[0]->files[0];
   ASSERT_AND_ASSIGN(auto reader,
-                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, f, properties_, columns, nullptr));
+                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, f,
+                                         std::make_shared<const api::Properties>(properties_), columns, nullptr));
 
   ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
 

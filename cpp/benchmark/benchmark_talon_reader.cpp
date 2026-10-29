@@ -41,12 +41,14 @@ class TalonReaderBenchmark : public ::benchmark::Fixture {
       return;
     }
 
-    const auto properties_status = InitTestProperties(properties_);
+    api::Properties properties;
+    const auto properties_status = InitTestProperties(properties);
     if (!properties_status.ok()) {
       state.SkipWithError(("Failed to initialize Talon benchmark properties: " + properties_status.ToString()).c_str());
       return;
     }
 
+    properties_ = std::make_shared<const api::Properties>(std::move(properties));
     FilesystemCache::getInstance().clean();
     auto fs_result = GetFileSystem(properties_);
     if (!fs_result.ok()) {
@@ -143,7 +145,7 @@ class TalonReaderBenchmark : public ::benchmark::Fixture {
   static constexpr size_t kSmallIoSize = 4U * 1024U;
   static constexpr size_t kIopsBatchSize = 64U;
 
-  api::Properties properties_;
+  std::shared_ptr<const api::Properties> properties_;
   ArrowFileSystemPtr fs_;
   std::shared_ptr<arrow::io::RandomAccessFile> file_;
   std::string path_;

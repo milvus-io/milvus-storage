@@ -110,16 +110,19 @@ TEST_F(FileSystemCacheTest, Basic) {
   EXPECT_EQ(cache.size(), 0);
 
   // Get filesystem for props1 with matching path
-  ASSERT_AND_ASSIGN(auto fs1, cache.get(props1, "s3://localhost_A/bucket_A/file.parquet"));
+  ASSERT_AND_ASSIGN(
+      auto fs1, cache.get(std::make_shared<const api::Properties>(props1), "s3://localhost_A/bucket_A/file.parquet"));
   EXPECT_EQ(cache.size(), 1);
 
   // Get filesystem for props1 again, should return the same instance
-  ASSERT_AND_ASSIGN(auto fs1_again, cache.get(props1, "s3://localhost_A/bucket_A/file2.parquet"));
+  ASSERT_AND_ASSIGN(auto fs1_again, cache.get(std::make_shared<const api::Properties>(props1),
+                                              "s3://localhost_A/bucket_A/file2.parquet"));
   EXPECT_EQ(fs1, fs1_again);
   EXPECT_EQ(cache.size(), 1);
 
   // Get filesystem for props2 with matching path
-  ASSERT_AND_ASSIGN(auto fs2, cache.get(props2, "s3://localhost_B/bucket_B/file.parquet"));
+  ASSERT_AND_ASSIGN(
+      auto fs2, cache.get(std::make_shared<const api::Properties>(props2), "s3://localhost_B/bucket_B/file.parquet"));
   EXPECT_EQ(cache.size(), 2);
 
   // Cache entries persist across different property instances with same values
@@ -134,11 +137,15 @@ TEST_F(FileSystemCacheTest, List) {
   auto props2 = MakeProperties("LIST_B");
   auto& cache = FilesystemCache::getInstance();
 
-  ASSERT_AND_ASSIGN(auto config1, cache.resolve_config(props1, "s3://localhost_LIST_A/bucket_LIST_A/file.parquet"));
-  ASSERT_AND_ASSIGN(auto config2, cache.resolve_config(props2, "s3://localhost_LIST_B/bucket_LIST_B/file.parquet"));
+  ASSERT_AND_ASSIGN(auto config1, cache.resolve_config(std::make_shared<const api::Properties>(props1),
+                                                       "s3://localhost_LIST_A/bucket_LIST_A/file.parquet"));
+  ASSERT_AND_ASSIGN(auto config2, cache.resolve_config(std::make_shared<const api::Properties>(props2),
+                                                       "s3://localhost_LIST_B/bucket_LIST_B/file.parquet"));
 
-  ASSERT_AND_ASSIGN(auto fs1, cache.get(props1, "s3://localhost_LIST_A/bucket_LIST_A/file.parquet"));
-  ASSERT_AND_ASSIGN(auto fs2, cache.get(props2, "s3://localhost_LIST_B/bucket_LIST_B/file.parquet"));
+  ASSERT_AND_ASSIGN(auto fs1, cache.get(std::make_shared<const api::Properties>(props1),
+                                        "s3://localhost_LIST_A/bucket_LIST_A/file.parquet"));
+  ASSERT_AND_ASSIGN(auto fs2, cache.get(std::make_shared<const api::Properties>(props2),
+                                        "s3://localhost_LIST_B/bucket_LIST_B/file.parquet"));
 
   auto entries = cache.list();
   ASSERT_EQ(entries.size(), 2u);
@@ -173,8 +180,8 @@ TEST_F(FileSystemCacheTest, ListReturnsRemoteDisplayKey) {
   props[PROPERTY_FS_ACCESS_KEY_VALUE] = std::string("sk");
 
   auto& cache = FilesystemCache::getInstance();
-  ASSERT_AND_ASSIGN(auto config, cache.resolve_config(props));
-  ASSERT_AND_ASSIGN(auto fs, cache.get(props));
+  ASSERT_AND_ASSIGN(auto config, cache.resolve_config(std::make_shared<const api::Properties>(props)));
+  ASSERT_AND_ASSIGN(auto fs, cache.get(std::make_shared<const api::Properties>(props)));
 
   auto entries = cache.list();
   ASSERT_EQ(entries.size(), 1u);
@@ -195,8 +202,8 @@ TEST_F(FileSystemCacheTest, ListReturnsTalonDisplayKey) {
   props[PROPERTY_FS_TALON_BLOCK_SIZE] = uint32_t{8U * 1024U * 1024U};
 
   auto& cache = FilesystemCache::getInstance();
-  ASSERT_AND_ASSIGN(auto config, cache.resolve_config(props));
-  ASSERT_AND_ASSIGN(auto fs, cache.get(props));
+  ASSERT_AND_ASSIGN(auto config, cache.resolve_config(std::make_shared<const api::Properties>(props)));
+  ASSERT_AND_ASSIGN(auto fs, cache.get(std::make_shared<const api::Properties>(props)));
 
   auto entries = cache.list();
   ASSERT_EQ(entries.size(), 1u);
@@ -214,9 +221,9 @@ TEST_F(FileSystemCacheTest, ListUsesNullForEmptyRemoteAddress) {
   props[PROPERTY_FS_ACCESS_KEY_VALUE] = std::string("sk");
 
   auto& cache = FilesystemCache::getInstance();
-  ASSERT_AND_ASSIGN(auto config, cache.resolve_config(props));
+  ASSERT_AND_ASSIGN(auto config, cache.resolve_config(std::make_shared<const api::Properties>(props)));
   ASSERT_TRUE(config.address.empty());
-  ASSERT_AND_ASSIGN(auto fs, cache.get(props));
+  ASSERT_AND_ASSIGN(auto fs, cache.get(std::make_shared<const api::Properties>(props)));
 
   auto entries = cache.list();
   ASSERT_EQ(entries.size(), 1u);
@@ -532,9 +539,9 @@ TEST_F(FileSystemCacheTest, FilesystemCacheSeparatesSameBucketWithDifferentCrede
   auto props_a = make_props("ak", "sk-a");
   auto props_b = make_props("ak", "sk-b");
 
-  ASSERT_AND_ASSIGN(auto fs_a, cache.get(props_a));
-  ASSERT_AND_ASSIGN(auto fs_a_again, cache.get(props_a));
-  ASSERT_AND_ASSIGN(auto fs_b, cache.get(props_b));
+  ASSERT_AND_ASSIGN(auto fs_a, cache.get(std::make_shared<const api::Properties>(props_a)));
+  ASSERT_AND_ASSIGN(auto fs_a_again, cache.get(std::make_shared<const api::Properties>(props_a)));
+  ASSERT_AND_ASSIGN(auto fs_b, cache.get(std::make_shared<const api::Properties>(props_b)));
 
   EXPECT_EQ(fs_a, fs_a_again);
   EXPECT_NE(fs_a, fs_b);
@@ -550,15 +557,19 @@ TEST_F(FileSystemCacheTest, FileSystemCacheLRUEviction) {
   auto props3 = MakeProperties("C");
 
   // Insert two entries
-  ASSERT_AND_ASSIGN(auto res1, cache.get(props1, "s3://localhost_A/bucket_A/file.parquet"));
-  ASSERT_AND_ASSIGN(auto res2, cache.get(props2, "s3://localhost_B/bucket_B/file.parquet"));
+  ASSERT_AND_ASSIGN(
+      auto res1, cache.get(std::make_shared<const api::Properties>(props1), "s3://localhost_A/bucket_A/file.parquet"));
+  ASSERT_AND_ASSIGN(
+      auto res2, cache.get(std::make_shared<const api::Properties>(props2), "s3://localhost_B/bucket_B/file.parquet"));
 
   // Insert third -> should evict least recently used (props1)
-  ASSERT_AND_ASSIGN(auto res3, cache.get(props3, "s3://localhost_C/bucket_C/file.parquet"));
+  ASSERT_AND_ASSIGN(
+      auto res3, cache.get(std::make_shared<const api::Properties>(props3), "s3://localhost_C/bucket_C/file.parquet"));
   EXPECT_EQ(cache.size(), 2u);
 
   // Accessing props1 should recreate it
-  ASSERT_AND_ASSIGN(auto res1b, cache.get(props1, "s3://localhost_A/bucket_A/file.parquet"));
+  ASSERT_AND_ASSIGN(
+      auto res1b, cache.get(std::make_shared<const api::Properties>(props1), "s3://localhost_A/bucket_A/file.parquet"));
   EXPECT_NE(res1, res1b);
 
   cache.clean();
@@ -574,21 +585,26 @@ TEST_F(FileSystemCacheTest, FileSystemCacheLRUUpdateOnAccess) {
   auto C = MakeProperties("Z");
 
   // Insert A and B
-  ASSERT_AND_ASSIGN(auto res1, cache.get(A, "s3://localhost_X/bucket_X/file.parquet"));
-  ASSERT_AND_ASSIGN(auto res2, cache.get(B, "s3://localhost_Y/bucket_Y/file.parquet"));
+  ASSERT_AND_ASSIGN(auto res1,
+                    cache.get(std::make_shared<const api::Properties>(A), "s3://localhost_X/bucket_X/file.parquet"));
+  ASSERT_AND_ASSIGN(auto res2,
+                    cache.get(std::make_shared<const api::Properties>(B), "s3://localhost_Y/bucket_Y/file.parquet"));
   EXPECT_EQ(cache.size(), 2u);
 
   // Access A again to make it most-recent
-  ASSERT_AND_ASSIGN(auto res3, cache.get(A, "s3://localhost_X/bucket_X/file.parquet"));
+  ASSERT_AND_ASSIGN(auto res3,
+                    cache.get(std::make_shared<const api::Properties>(A), "s3://localhost_X/bucket_X/file.parquet"));
   EXPECT_EQ(cache.size(), 2u);
   EXPECT_EQ(res1, res3);
 
   // Insert C -> should evict B
-  ASSERT_AND_ASSIGN(auto res4, cache.get(C, "s3://localhost_Z/bucket_Z/file.parquet"));
+  ASSERT_AND_ASSIGN(auto res4,
+                    cache.get(std::make_shared<const api::Properties>(C), "s3://localhost_Z/bucket_Z/file.parquet"));
   EXPECT_EQ(cache.size(), 2u);
 
   // B should be gone and recreated when requested
-  ASSERT_AND_ASSIGN(auto res5, cache.get(B, "s3://localhost_Y/bucket_Y/file.parquet"));
+  ASSERT_AND_ASSIGN(auto res5,
+                    cache.get(std::make_shared<const api::Properties>(B), "s3://localhost_Y/bucket_Y/file.parquet"));
   EXPECT_NE(res2, res5);  // B have been evicted earlier
 
   // clean up
@@ -668,7 +684,7 @@ TEST_F(FileSystemCacheTest, ConcurrentGetsSingleCreate) {
   for (int i = 0; i < thread_count; ++i) {
     threads.emplace_back([&cache, &props, &path, calls_per_thread, &failed]() {
       for (int j = 0; j < calls_per_thread; ++j) {
-        auto result = cache.get(props, path);
+        auto result = cache.get(std::make_shared<const api::Properties>(props), path);
         if (!result.ok()) {
           failed.store(true);
           return;
@@ -710,7 +726,7 @@ TEST_F(FileSystemCacheTest, ConcurrentSameKeyGetsReturnSingleCachedInstance) {
         std::this_thread::yield();
       }
 
-      auto result = cache.get(props, path);
+      auto result = cache.get(std::make_shared<const api::Properties>(props), path);
       if (!result.ok()) {
         errors[i] = result.status().ToString();
         return;
@@ -756,7 +772,7 @@ TEST_F(FileSystemCacheTest, ConcurrentGetsAndCreate) {
         auto id = "THREAD_" + std::to_string(j);
         auto props = MakeProperties(id);
         std::string path = "s3://localhost_" + id + "/bucket_" + id + "/file.parquet";
-        auto result = cache.get(props, path);
+        auto result = cache.get(std::make_shared<const api::Properties>(props), path);
         if (!result.ok()) {
           failed.store(true);
           return;

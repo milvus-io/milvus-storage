@@ -72,7 +72,7 @@ class PaimonIntegrationTest : public ::testing::Test {
       return arrow::Status::Invalid(*error);
     }
     ARROW_ASSIGN_OR_RAISE(auto* format, Format::get(LOON_FORMAT_PAIMON_TABLE));
-    return format->explore(table_dir_, properties_);
+    return format->explore(table_dir_, std::make_shared<const api::Properties>(properties_));
   }
 
   api::Properties properties_;
@@ -168,8 +168,9 @@ TEST_F(PaimonIntegrationTest, AutoUsesDirectFileForAppendParquet) {
     EXPECT_GT(file.Get<uint64_t>(api::kPropertyFileSize), 0);
   }
 
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
-                                                      {"id", "name"}, nullptr));
+  ASSERT_AND_ASSIGN(
+      auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                        std::make_shared<const api::Properties>(properties_), {"id", "name"}, nullptr));
   EXPECT_EQ(ReadAllRows(reader), files.front().end_index);
 }
 
@@ -187,7 +188,8 @@ TEST_F(PaimonIntegrationTest, ReadsWithoutMetadataCache) {
   ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, "false"), std::nullopt);
 
   ASSERT_AND_ASSIGN(auto reader,
-                    api::ColumnGroupReader::create(schema, column_group, {"id", "name"}, properties_, nullptr));
+                    api::ColumnGroupReader::create(schema, column_group, {"id", "name"},
+                                                   std::make_shared<const api::Properties>(properties_), nullptr));
   EXPECT_EQ(reader->total_rows(), static_cast<int64_t>(kRows));
   std::vector<int64_t> chunk_indices(reader->total_number_of_chunks());
   std::iota(chunk_indices.begin(), chunk_indices.end(), 0);
@@ -216,7 +218,8 @@ TEST_F(PaimonIntegrationTest, RejectsBlobTablesAtExploreAndDataSplitOpen) {
   }
   // Reopening an existing descriptor must use the same table-level guard,
   // even when the requested projection does not include the BLOB column.
-  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
+  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                     std::make_shared<const api::Properties>(properties_), {"id"}, nullptr);
   EXPECT_TRUE(reader.status().IsNotImplemented()) << reader.status();
 }
 
@@ -237,7 +240,8 @@ TEST_F(PaimonIntegrationTest, DeletionVectorReadsBypassDisabledMetadataCache) {
   const std::vector<int64_t> expected_ids = {0, 2, 3, 4, 6, 7, 8};
   MetadataCache cache;
   for (int round = 0; round < 2; ++round) {
-    ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema, column_group, {"id", "name"}, properties_,
+    ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema, column_group, {"id", "name"},
+                                                                  std::make_shared<const api::Properties>(properties_),
                                                                   nullptr, "", cache));
     ASSERT_EQ(reader->total_rows(), static_cast<int64_t>(expected_ids.size()));
     std::vector<int64_t> chunk_indices(reader->total_number_of_chunks());
@@ -258,8 +262,9 @@ TEST_F(PaimonIntegrationTest, DeletionVectorReadsBypassDisabledMetadataCache) {
   }
 
   ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, "true"), std::nullopt);
-  ASSERT_AND_ASSIGN(auto cached_reader, api::ColumnGroupReader::create(schema, column_group, {"id", "name"},
-                                                                       properties_, nullptr, "", cache));
+  ASSERT_AND_ASSIGN(auto cached_reader, api::ColumnGroupReader::create(
+                                            schema, column_group, {"id", "name"},
+                                            std::make_shared<const api::Properties>(properties_), nullptr, "", cache));
   ASSERT_EQ(cached_reader->total_rows(), static_cast<int64_t>(expected_ids.size()));
   EXPECT_TRUE(cache.get<paimon::PaimonFormatReader>()->get(key).has_value());
 }
@@ -275,8 +280,9 @@ TEST_F(PaimonIntegrationTest, AutoUsesDirectFileForAppendVortex) {
   const auto descriptor = folly::parseJson(files.front().Get<std::string>(api::kPropertyMetadata));
   EXPECT_EQ(descriptor["data_format"].asString(), "vortex");
 
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
-                                                      {"id", "name"}, nullptr));
+  ASSERT_AND_ASSIGN(
+      auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                        std::make_shared<const api::Properties>(properties_), {"id", "name"}, nullptr));
   EXPECT_EQ(ReadAllRows(reader), static_cast<int64_t>(kRows));
 
   ASSERT_AND_ASSIGN(auto taken, reader->take({0, 4, 16}));
@@ -309,8 +315,9 @@ TEST_F(PaimonIntegrationTest, VortexDeletionVectorUsesDirectFile) {
   EXPECT_EQ(ReadPath(files.front()), "direct-file");
   EXPECT_EQ(files.front().end_index, 7);
 
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
-                                                      {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto reader,
+                    FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                         std::make_shared<const api::Properties>(properties_), {"id"}, nullptr));
   ASSERT_AND_ASSIGN(auto taken, reader->take({0, 1, 4, 6}));
   ASSERT_EQ(taken->num_rows(), 4);
   const std::vector<int64_t> expected = {0, 2, 6, 8};
@@ -367,8 +374,9 @@ TEST_F(PaimonIntegrationTest, ExplicitDataSplitReadsAppendTable) {
   ASSERT_EQ(files.size(), 1);
   EXPECT_EQ(ReadPath(files.front()), "data-split");
   ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, "false"), std::nullopt);
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
-                                                      {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto reader,
+                    FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                         std::make_shared<const api::Properties>(properties_), {"id"}, nullptr));
   ASSERT_AND_ASSIGN(auto row_groups, reader->get_row_group_infos());
   ASSERT_FALSE(row_groups.empty());
   EXPECT_FALSE(row_groups.front().memory_size_available);
@@ -383,8 +391,10 @@ TEST_F(PaimonIntegrationTest, ExplicitDataSplitReadsAppendTable) {
   column_group->files = files;
   auto schema = arrow::schema({arrow::field("id", arrow::int64())});
   MetadataCache cache;
-  ASSERT_AND_ASSIGN(auto column_group_reader,
-                    api::ColumnGroupReader::create(schema, column_group, {"id"}, properties_, nullptr, "", cache));
+  ASSERT_AND_ASSIGN(
+      auto column_group_reader,
+      api::ColumnGroupReader::create(schema, column_group, {"id"}, std::make_shared<const api::Properties>(properties_),
+                                     nullptr, "", cache));
   EXPECT_EQ(column_group_reader->total_rows(), static_cast<int64_t>(kRows));
   EXPECT_FALSE(cache.get<paimon::PaimonFormatReader>()
                    ->get(paimon::PaimonFormatReader::MetaTrait::cache_key(files.front()))
@@ -397,8 +407,9 @@ TEST_F(PaimonIntegrationTest, ExplicitDataSplitAppliesDeletionVector) {
   ASSERT_AND_ASSIGN(auto files, Explore("data-split"));
   ASSERT_EQ(files.size(), 1);
   ASSERT_EQ(ReadPath(files.front()), "data-split");
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
-                                                      {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto reader,
+                    FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                         std::make_shared<const api::Properties>(properties_), {"id"}, nullptr));
 
   std::vector<int64_t> ids;
   ASSERT_AND_ASSIGN(auto groups, reader->get_row_group_infos());
@@ -429,7 +440,8 @@ TEST_F(PaimonIntegrationTest, MalformedMetadataTypesFailClosed) {
   auto descriptor = folly::parseJson(files.front().Get<std::string>(api::kPropertyMetadata));
   descriptor["record_count"] = "ten";
   files.front().Set(api::kPropertyMetadata, folly::toJson(descriptor));
-  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
+  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                     std::make_shared<const api::Properties>(properties_), {"id"}, nullptr);
   ASSERT_FALSE(reader.ok());
   EXPECT_TRUE(reader.status().IsInvalid());
   EXPECT_NE(reader.status().ToString().find("field types"), std::string::npos);
@@ -443,7 +455,8 @@ TEST_F(PaimonIntegrationTest, MalformedDeletionMetadataTypesFailClosed) {
   auto descriptor = folly::parseJson(files.front().Get<std::string>(api::kPropertyMetadata));
   descriptor["deletion_file"]["offset"] = "zero";
   files.front().Set(api::kPropertyMetadata, folly::toJson(descriptor));
-  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
+  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                     std::make_shared<const api::Properties>(properties_), {"id"}, nullptr);
   ASSERT_FALSE(reader.ok());
   EXPECT_TRUE(reader.status().IsInvalid());
   EXPECT_NE(reader.status().ToString().find("deletion_file has invalid field types"), std::string::npos);
@@ -476,7 +489,8 @@ TEST_F(PaimonIntegrationTest, JavaBitmap64DeletionVectorFailsClosedAsNotImplemen
   descriptor["deletion_file"]["length"] = static_cast<int64_t>(sizeof(kJavaBitmap64));
   files.front().Set(api::kPropertyMetadata, folly::toJson(descriptor));
 
-  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
+  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                     std::make_shared<const api::Properties>(properties_), {"id"}, nullptr);
   ASSERT_FALSE(reader.ok());
   EXPECT_TRUE(reader.status().IsNotImplemented()) << reader.status().ToString();
   const auto message = reader.status().ToString();
@@ -493,8 +507,9 @@ TEST_F(PaimonIntegrationTest, AutoUsesDirectFileAndAppliesDeletionVector) {
   ASSERT_EQ(ReadPath(files.front()), "direct-file");
   ASSERT_EQ(files.front().end_index, 7);
 
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
-                                                      {"id", "name"}, nullptr));
+  ASSERT_AND_ASSIGN(
+      auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                        std::make_shared<const api::Properties>(properties_), {"id", "name"}, nullptr));
   EXPECT_EQ(ReadAllRows(reader), 7);
 
   ASSERT_AND_ASSIGN(auto taken, reader->take({0, 1, 4, 6}));
@@ -527,7 +542,8 @@ TEST_F(PaimonIntegrationTest, AutoUsesDirectFileAndAppliesDeletionVector) {
   auto descriptor = folly::parseJson(tampered.Get<std::string>(api::kPropertyMetadata));
   descriptor["deletion_file"]["cardinality"] = 99;
   tampered.Set(api::kPropertyMetadata, folly::toJson(descriptor));
-  auto invalid = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, tampered, properties_, {"id"}, nullptr);
+  auto invalid = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, tampered,
+                                      std::make_shared<const api::Properties>(properties_), {"id"}, nullptr);
   ASSERT_FALSE(invalid.ok());
   EXPECT_TRUE(invalid.status().IsInvalid()) << invalid.status().ToString();
 }
@@ -554,7 +570,8 @@ TEST_F(PaimonIntegrationTest, CorruptDeletionVectorCrcFailsAsInvalid) {
   ASSERT_TRUE(stream.good());
   stream.close();
 
-  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
+  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                     std::make_shared<const api::Properties>(properties_), {"id"}, nullptr);
   ASSERT_FALSE(reader.ok());
   EXPECT_TRUE(reader.status().IsInvalid()) << reader.status().ToString();
   EXPECT_NE(reader.status().ToString().find("CRC mismatch"), std::string::npos);
@@ -569,7 +586,8 @@ TEST_F(PaimonIntegrationTest, MissingDeletionVectorFileRemainsIOError) {
   descriptor["deletion_file"]["path"] = fmt::format("file://{}/missing.dv", table_dir_);
   files.front().Set(api::kPropertyMetadata, folly::toJson(descriptor));
 
-  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
+  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                     std::make_shared<const api::Properties>(properties_), {"id"}, nullptr);
   ASSERT_FALSE(reader.ok());
   EXPECT_TRUE(reader.status().IsIOError()) << reader.status().ToString();
   EXPECT_EQ(arrow::internal::ErrnoFromStatus(reader.status()), ENOENT);
@@ -589,7 +607,9 @@ TEST_F(PaimonIntegrationTest, DirectFileFragmentRangeUsesPostDeletionLogicalRows
   column_group->format = LOON_FORMAT_PAIMON_TABLE;
   column_group->files = {std::move(fragment)};
   auto schema = arrow::schema({arrow::field("id", arrow::int64())});
-  ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema, column_group, {"id"}, properties_, nullptr));
+  ASSERT_AND_ASSIGN(auto reader,
+                    api::ColumnGroupReader::create(schema, column_group, {"id"},
+                                                   std::make_shared<const api::Properties>(properties_), nullptr));
   ASSERT_EQ(reader->total_rows(), 4);
 
   std::vector<int64_t> chunk_indices(reader->total_number_of_chunks());
@@ -619,8 +639,9 @@ TEST_F(PaimonIntegrationTest, IgnoredPredicatePreservesDirectFileFragmentRange) 
   column_group->format = LOON_FORMAT_PAIMON_TABLE;
   column_group->files = {std::move(fragment)};
   auto schema = arrow::schema({arrow::field("id", arrow::int64())});
-  ASSERT_AND_ASSIGN(auto reader,
-                    api::ColumnGroupReader::create(schema, column_group, {"id"}, properties_, nullptr, "id >= 0"));
+  ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema, column_group, {"id"},
+                                                                std::make_shared<const api::Properties>(properties_),
+                                                                nullptr, "id >= 0"));
 
   ASSERT_EQ(reader->total_number_of_chunks(), 1);
   ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
@@ -647,8 +668,9 @@ TEST_F(PaimonIntegrationTest, AutoUsesDataSplitForMergeOnRead) {
   ASSERT_EQ(files.size(), 1);
   ASSERT_EQ(ReadPath(files.front()), "data-split");
 
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
-                                                      {"id", "name"}, nullptr));
+  ASSERT_AND_ASSIGN(
+      auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                        std::make_shared<const api::Properties>(properties_), {"id", "name"}, nullptr));
   int64_t rows = 0;
   ASSERT_AND_ASSIGN(auto groups, reader->get_row_group_infos());
   for (size_t group = 0; group < groups.size(); ++group) {
@@ -673,8 +695,9 @@ TEST_F(PaimonIntegrationTest, DataSplitSupportsRangeAndCloneReads) {
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
 
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
-                                                      {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto reader,
+                    FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                         std::make_shared<const api::Properties>(properties_), {"id"}, nullptr));
   ASSERT_AND_ASSIGN(auto range, reader->read_with_range(3, 9));
   ASSERT_AND_ASSIGN(auto range_table, arrow::Table::FromRecordBatchReader(range.get()));
   EXPECT_EQ(range_table->num_rows(), 6);
@@ -697,8 +720,9 @@ TEST_F(PaimonIntegrationTest, DataSplitLogicalChunkSpansPaimonBatches) {
   ASSERT_EQ(files.size(), 1);
   ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "8192"), std::nullopt);
 
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
-                                                      {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto reader,
+                    FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                         std::make_shared<const api::Properties>(properties_), {"id"}, nullptr));
   ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
   ASSERT_EQ(batch->num_rows(), 8192);
   auto ids = std::dynamic_pointer_cast<arrow::Int64Array>(batch->column(0));
@@ -714,8 +738,9 @@ TEST_F(PaimonIntegrationTest, DataSplitReadsNonContiguousChunks) {
   ASSERT_EQ(files.size(), 1);
   ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "512"), std::nullopt);
 
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
-                                                      {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto reader,
+                    FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                         std::make_shared<const api::Properties>(properties_), {"id"}, nullptr));
   const std::vector<int> chunks = {0, 2, 4, 6};
   ASSERT_AND_ASSIGN(auto batches, reader->get_chunks(chunks));
   ASSERT_EQ(batches.size(), chunks.size());
@@ -735,8 +760,9 @@ TEST_F(PaimonIntegrationTest, DataSplitSupportsForwardAndBackwardChunkReads) {
   ASSERT_EQ(files.size(), 1);
   ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "512"), std::nullopt);
 
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
-                                                      {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto reader,
+                    FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                         std::make_shared<const api::Properties>(properties_), {"id"}, nullptr));
   for (auto chunk : {1, 2, 3, 1, 2}) {
     ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(chunk));
     const auto& ids = static_cast<const arrow::Int64Array&>(*batch->column(0));
@@ -752,8 +778,9 @@ TEST_F(PaimonIntegrationTest, DataSplitTakeCompactsSparseBatches) {
   ASSERT_AND_ASSIGN(auto files, Explore("auto"));
   ASSERT_EQ(files.size(), 1);
 
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
-                                                      {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto reader,
+                    FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                         std::make_shared<const api::Properties>(properties_), {"id"}, nullptr));
   ASSERT_AND_ASSIGN(auto taken, reader->take({0, 2048, 4095}));
   ASSERT_EQ(taken->num_rows(), 3);
 
@@ -799,7 +826,8 @@ TEST_F(PaimonIntegrationTest, ProjectsReadSchemaParentForDirectFileAndDataSplit)
     auto read_schema = arrow::schema({arrow::field("id", arrow::int64()), arrow::field("name", arrow::utf8()),
                                       arrow::field("value", arrow::float64())});
     ASSERT_AND_ASSIGN(auto reader, FormatReader::create(read_schema, LOON_FORMAT_PAIMON_TABLE, files.front(),
-                                                        properties_, {"name", "id"}, nullptr));
+                                                        std::make_shared<const api::Properties>(properties_),
+                                                        {"name", "id"}, nullptr));
     ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
     EXPECT_EQ(batch->schema()->field_names(), (std::vector<std::string>{"name", "id"}));
     ASSERT_GT(batch->num_rows(), 0);
@@ -828,8 +856,9 @@ TEST_F(PaimonIntegrationTest, DataSplitHonorsReadSchemaForTakeAndRange) {
   ASSERT_EQ(files.size(), 1);
 
   auto read_schema = arrow::schema({arrow::field("id", arrow::int64(), false)});
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(read_schema, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
-                                                      {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto reader,
+                    FormatReader::create(read_schema, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                         std::make_shared<const api::Properties>(properties_), {"id"}, nullptr));
 
   ASSERT_AND_ASSIGN(auto taken, reader->take({0, 8, 16}));
   EXPECT_TRUE(taken->schema()->Equals(*read_schema));
@@ -841,8 +870,9 @@ TEST_F(PaimonIntegrationTest, DataSplitHonorsReadSchemaForTakeAndRange) {
   EXPECT_EQ(range_table->num_rows(), 6);
 
   auto incompatible_schema = arrow::schema({arrow::field("id", arrow::int32())});
-  ASSERT_AND_ASSIGN(auto incompatible_reader, FormatReader::create(incompatible_schema, LOON_FORMAT_PAIMON_TABLE,
-                                                                   files.front(), properties_, {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto incompatible_reader,
+                    FormatReader::create(incompatible_schema, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                         std::make_shared<const api::Properties>(properties_), {"id"}, nullptr));
   auto incompatible = incompatible_reader->take({0});
   ASSERT_FALSE(incompatible.ok());
   EXPECT_TRUE(incompatible.status().IsInvalid()) << incompatible.status().ToString();
@@ -860,7 +890,8 @@ TEST_F(PaimonIntegrationTest, AsyncDataSplitChunksSpanSourceBatches) {
   column_groups->push_back(std::make_shared<api::ColumnGroup>(
       api::ColumnGroup{.columns = {"id"}, .format = LOON_FORMAT_PAIMON_TABLE, .files = {files.front()}}));
   auto schema = arrow::schema({arrow::field("id", arrow::int64())});
-  auto reader = api::Reader::create(column_groups, schema, nullptr, properties_);
+  auto reader =
+      api::Reader::create(column_groups, schema, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
 
   const std::vector<int64_t> chunks = {0, 1};
@@ -884,7 +915,8 @@ TEST_F(PaimonIntegrationTest, MalformedDataSplitDescriptorFailsAsInvalid) {
   auto descriptor = folly::parseJson(files.front().Get<std::string>(api::kPropertyMetadata));
   descriptor["read_path"] = "data-split";
   files.front().Set(api::kPropertyMetadata, folly::toJson(descriptor));
-  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
+  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                     std::make_shared<const api::Properties>(properties_), {"id"}, nullptr);
   ASSERT_FALSE(reader.ok());
   EXPECT_TRUE(reader.status().IsInvalid()) << reader.status().ToString();
 }
@@ -897,7 +929,8 @@ TEST_F(PaimonIntegrationTest, ZeroRowDataSplitDescriptorFailsAsInvalid) {
   auto descriptor = folly::parseJson(files.front().Get<std::string>(api::kPropertyMetadata));
   descriptor["record_count"] = 0;
   files.front().Set(api::kPropertyMetadata, folly::toJson(descriptor));
-  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_, {"id"}, nullptr);
+  auto reader = FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                     std::make_shared<const api::Properties>(properties_), {"id"}, nullptr);
   ASSERT_FALSE(reader.ok());
   EXPECT_TRUE(reader.status().IsInvalid()) << reader.status().ToString();
   EXPECT_NE(reader.status().ToString().find("zero record_count"), std::string::npos);
@@ -921,7 +954,9 @@ TEST_F(PaimonIntegrationTest, FullyDeletedTrailingRowGroupIsNotExposedAsChunk) {
   column_group->format = LOON_FORMAT_PAIMON_TABLE;
   column_group->files = files;
   auto schema = arrow::schema({arrow::field("id", arrow::int64())});
-  ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema, column_group, {"id"}, properties_, nullptr));
+  ASSERT_AND_ASSIGN(auto reader,
+                    api::ColumnGroupReader::create(schema, column_group, {"id"},
+                                                   std::make_shared<const api::Properties>(properties_), nullptr));
   ASSERT_EQ(reader->total_number_of_chunks(), 2);
 
   ASSERT_AND_ASSIGN(auto batches, reader->get_chunks({0, 1}, 1));
@@ -942,7 +977,7 @@ TEST_F(PaimonIntegrationTest, MissingTableFailsAndWriterIsReadOnly) {
 
   ASSERT_AND_ASSIGN(auto* format, Format::get(LOON_FORMAT_PAIMON_TABLE));
   auto writer = format->create_writer(nullptr, arrow::schema({arrow::field("id", arrow::int64())}), "unused", "unused",
-                                      properties_);
+                                      std::make_shared<const api::Properties>(properties_));
   ASSERT_FALSE(writer.ok());
   EXPECT_TRUE(writer.status().IsNotImplemented());
 }
@@ -1034,10 +1069,12 @@ TEST_F(PaimonIntegrationTest, EscapedPathsSurviveFormatExploreAndReads) {
       for (const auto& mode : {"direct-file", "data-split"}) {
         SCOPED_TRACE(location + ": " + mode);
         ASSERT_EQ(api::SetValue(properties_, PROPERTY_PAIMON_SCAN_MODE, mode), std::nullopt);
-        ASSERT_AND_ASSIGN(auto files, format->explore(location, properties_));
+        ASSERT_AND_ASSIGN(auto files, format->explore(location, std::make_shared<const api::Properties>(properties_)));
         ASSERT_EQ(files.size(), 1);
         EXPECT_EQ(ReadPath(files.front()), mode);
-        ASSERT_AND_ASSIGN(auto reader, format->create_reader(nullptr, files.front(), properties_, {"id"}, nullptr));
+        ASSERT_AND_ASSIGN(auto reader,
+                          format->create_reader(nullptr, files.front(),
+                                                std::make_shared<const api::Properties>(properties_), {"id"}, nullptr));
         ASSERT_AND_ASSIGN(auto stream, reader->read_with_range(0, 9));
         ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatchReader(stream.get()));
         const std::vector<int64_t> expected{0, 2, 3, 4, 6, 7, 8, 10, 11};
@@ -1096,8 +1133,9 @@ TEST_F(PaimonIntegrationTest, CloudManifestPathsSurviveDirectFileReaderResolutio
       const auto& restored = manifest->columnGroups().front()->files.front();
       EXPECT_EQ(restored.path, file.path);
       EXPECT_EQ(restored.properties, file.properties);
-      ASSERT_AND_ASSIGN(
-          auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, restored, properties_, {"id"}, nullptr));
+      ASSERT_AND_ASSIGN(auto reader,
+                        FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, restored,
+                                             std::make_shared<const api::Properties>(properties_), {"id"}, nullptr));
       ASSERT_AND_ASSIGN(auto taken, reader->take({0, 11}));
       ASSERT_EQ(taken->num_rows(), 2);
       ASSERT_AND_ASSIGN(auto last, taken->column(0)->GetScalar(1));
@@ -1206,8 +1244,9 @@ TEST_F(PaimonIntegrationTest, DataSplitMissingObjectPreservesErrno) {
 
   ASSERT_AND_ASSIGN(auto files, Explore("data-split"));
   ASSERT_EQ(files.size(), 1);
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(), properties_,
-                                                      {"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto reader,
+                    FormatReader::create(nullptr, LOON_FORMAT_PAIMON_TABLE, files.front(),
+                                         std::make_shared<const api::Properties>(properties_), {"id"}, nullptr));
 
   // Delete before opening the stream so the assertion is independent of
   // paimon-rust's eager/lazy open behavior and POSIX unlink semantics.
@@ -1269,7 +1308,8 @@ TEST_F(PaimonIntegrationTest, VortexWithoutMemoryStatisticsReturnsNotImplemented
   column_group->files = files;
   auto schema = arrow::schema({arrow::field("id", arrow::int64()), arrow::field("name", arrow::utf8())});
   ASSERT_AND_ASSIGN(auto reader,
-                    api::ColumnGroupReader::create(schema, column_group, {"id", "name"}, properties_, nullptr));
+                    api::ColumnGroupReader::create(schema, column_group, {"id", "name"},
+                                                   std::make_shared<const api::Properties>(properties_), nullptr));
   ASSERT_GT(reader->total_number_of_chunks(), 0);
   auto estimate = reader->get_chunk_estimated_size(0);
   EXPECT_TRUE(estimate.status().IsNotImplemented()) << estimate.status().ToString();

@@ -47,7 +47,7 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
       std::shared_ptr<VortexFile> vxfile;
       uint64_t logical_chunk_rows = 0;
       std::shared_ptr<const std::vector<uint64_t>> column_memory_weights;
-      api::Properties properties;
+      std::shared_ptr<const api::Properties> properties;
     };
 
     using Metadata = FormatReaderMetadata<Payload>;
@@ -56,13 +56,14 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
     static std::string cache_key(const api::ColumnGroupFile& file);
 
     static arrow::Result<MetadataPtr> load_metadata(const api::ColumnGroupFile& file,
-                                                    const api::Properties& properties,
+                                                    const std::shared_ptr<const api::Properties>& properties,
                                                     const KeyRetriever& key_retriever);
 
     // Open on the shared Tokio runtime and return immutable metadata for cache reuse.
-    static folly::SemiFuture<arrow::Result<MetadataPtr>> load_metadata_async(const api::ColumnGroupFile& file,
-                                                                             const api::Properties& properties,
-                                                                             const KeyRetriever& key_retriever);
+    static folly::SemiFuture<arrow::Result<MetadataPtr>> load_metadata_async(
+        const api::ColumnGroupFile& file,
+        const std::shared_ptr<const api::Properties>& properties,
+        const KeyRetriever& key_retriever);
 
     static arrow::Result<std::shared_ptr<VortexFormatReader>> create_from_metadata(
         MetadataPtr metadata,
@@ -87,7 +88,7 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
   VortexFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                      const std::shared_ptr<arrow::Schema>& schema,
                      const std::string& path,
-                     const milvus_storage::api::Properties& properties,
+                     const std::shared_ptr<const milvus_storage::api::Properties>& properties,
                      const std::vector<std::string>& needed_columns,
                      uint64_t file_size = 0,
                      uint64_t footer_size = 0);
@@ -176,7 +177,7 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
   std::vector<std::string> proj_cols_;
   std::string path_;
   std::shared_ptr<arrow::Schema> read_schema_;
-  milvus_storage::api::Properties properties_;
+  std::shared_ptr<const milvus_storage::api::Properties> properties_;
   uint64_t file_size_ = 0;    ///< Pre-known file size to skip S3 HEAD requests
   uint64_t footer_size_ = 0;  ///< Pre-known footer size for single-IO footer read
   std::optional<bool> split_row_indices_;

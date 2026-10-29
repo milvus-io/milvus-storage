@@ -46,14 +46,14 @@ class Format {
   virtual ~Format() = default;
 
   // Explore a directory to discover data files of this format.
-  [[nodiscard]] virtual arrow::Result<std::vector<api::ColumnGroupFile>> explore(const std::string& explore_dir,
-                                                                                 const api::Properties& properties) = 0;
+  [[nodiscard]] virtual arrow::Result<std::vector<api::ColumnGroupFile>> explore(
+      const std::string& explore_dir, const std::shared_ptr<const api::Properties>& properties) = 0;
 
   // Create and open a reader for a specific file.
   [[nodiscard]] virtual arrow::Result<std::shared_ptr<FormatReader>> create_reader(
       const std::shared_ptr<arrow::Schema>& read_schema,
       const api::ColumnGroupFile& file,
-      const api::Properties& properties,
+      const std::shared_ptr<const api::Properties>& properties,
       const std::vector<std::string>& needed_columns,
       const std::function<std::string(const std::string&)>& key_retriever) = 0;
 
@@ -64,7 +64,7 @@ class Format {
   [[nodiscard]] virtual folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> create_reader_async(
       const std::shared_ptr<arrow::Schema>& read_schema,
       const api::ColumnGroupFile& file,
-      const api::Properties& properties,
+      const std::shared_ptr<const api::Properties>& properties,
       const std::vector<std::string>& needed_columns,
       const std::function<std::string(const std::string&)>& key_retriever);
 
@@ -74,7 +74,7 @@ class Format {
       const std::shared_ptr<arrow::Schema>& schema,
       const std::string& file_path,
       const std::string& base_path,
-      const api::Properties& properties) = 0;
+      const std::shared_ptr<const api::Properties>& properties) = 0;
 
   // Lookup the Format singleton by format name (e.g. "parquet", "vortex").
   static arrow::Result<Format*> get(const std::string& format);
@@ -85,13 +85,13 @@ class Format {
 // Subclasses only need to implement make_reader() and make_writer().
 class PlainFormat : public Format {
   public:
-  [[nodiscard]] arrow::Result<std::vector<api::ColumnGroupFile>> explore(const std::string& explore_dir,
-                                                                         const api::Properties& properties) override;
+  [[nodiscard]] arrow::Result<std::vector<api::ColumnGroupFile>> explore(
+      const std::string& explore_dir, const std::shared_ptr<const api::Properties>& properties) override;
 
   [[nodiscard]] arrow::Result<std::shared_ptr<FormatReader>> create_reader(
       const std::shared_ptr<arrow::Schema>& read_schema,
       const api::ColumnGroupFile& file,
-      const api::Properties& properties,
+      const std::shared_ptr<const api::Properties>& properties,
       const std::vector<std::string>& needed_columns,
       const std::function<std::string(const std::string&)>& key_retriever) override;
 
@@ -100,7 +100,7 @@ class PlainFormat : public Format {
   [[nodiscard]] folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> create_reader_async(
       const std::shared_ptr<arrow::Schema>& read_schema,
       const api::ColumnGroupFile& file,
-      const api::Properties& properties,
+      const std::shared_ptr<const api::Properties>& properties,
       const std::vector<std::string>& needed_columns,
       const std::function<std::string(const std::string&)>& key_retriever) override;
 
@@ -109,14 +109,14 @@ class PlainFormat : public Format {
       const std::shared_ptr<arrow::Schema>& schema,
       const std::string& file_path,
       const std::string& base_path,
-      const api::Properties& properties) override;
+      const std::shared_ptr<const api::Properties>& properties) override;
 
   protected:
   [[nodiscard]] virtual std::shared_ptr<FormatReader> make_reader(
       const std::shared_ptr<arrow::fs::FileSystem>& fs,
       const std::shared_ptr<arrow::Schema>& read_schema,
       const std::string& resolved_path,
-      const api::Properties& properties,
+      const std::shared_ptr<const api::Properties>& properties,
       const std::vector<std::string>& needed_columns,
       const std::function<std::string(const std::string&)>& key_retriever,
       uint64_t file_size,
@@ -126,7 +126,7 @@ class PlainFormat : public Format {
       const std::shared_ptr<arrow::fs::FileSystem>& fs,
       const std::shared_ptr<arrow::Schema>& schema,
       const std::string& file_path,
-      const api::Properties& properties) = 0;
+      const std::shared_ptr<const api::Properties>& properties) = 0;
 };
 
 }  // namespace milvus_storage

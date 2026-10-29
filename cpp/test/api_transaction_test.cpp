@@ -49,7 +49,7 @@ class TransactionTest : public ::testing::Test {
     // Clean up manifest cache
     milvus_storage::api::Manifest::CleanCache();
     ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
     // Use a path structure that simulates real {partition}/{seg_id} layout
     // so that kLobPath (../lobs/) can correctly resolve LOB file paths
     partition_path_ = GetTestBasePath("transaction-test-partition");
@@ -87,9 +87,10 @@ class TransactionTest : public ::testing::Test {
     return manifest;
   }
 
-  arrow::Result<std::shared_ptr<ColumnGroups>> WriteColumnGroups(std::shared_ptr<arrow::Schema> schema,
-                                                                 std::shared_ptr<arrow::RecordBatch> batch,
-                                                                 const api::Properties& properties) {
+  arrow::Result<std::shared_ptr<ColumnGroups>> WriteColumnGroups(
+      std::shared_ptr<arrow::Schema> schema,
+      std::shared_ptr<arrow::RecordBatch> batch,
+      const std::shared_ptr<const api::Properties>& properties) {
     ARROW_ASSIGN_OR_RAISE(auto policy, ColumnGroupPolicy::create_column_group_policy(properties, schema));
     auto writer = Writer::create(base_path_, std::move(schema), std::move(policy), properties);
     ARROW_RETURN_NOT_OK(writer->write(batch));
@@ -143,7 +144,8 @@ TEST_F(TransactionTest, IndexPathsSurviveIndependentCommits) {
         Manifest::CleanCache();
         if (async) {
           std::shared_ptr<AsyncOperation> operation;
-          auto result = Transaction::OpenAsync(segment, {}, LATEST, -1, FailResolver, 1, 30000, operation, bucket)
+          auto result = Transaction::OpenAsync(segment, std::make_shared<const Properties>(), LATEST, -1, FailResolver,
+                                               1, 30000, operation, bucket)
                             .via(&executor)
                             .get();
           EXPECT_TRUE(result.status.ok());
@@ -320,8 +322,10 @@ TEST_F(TransactionTest, ParentRelativeIndexPathRejectsCommit) {
     std::unique_ptr<Transaction> transaction;
     if (async) {
       std::shared_ptr<AsyncOperation> operation;
-      auto result =
-          Transaction::OpenAsync(segment, {}, LATEST, -1, FailResolver, 1, 30000, operation, fs_).via(&executor).get();
+      auto result = Transaction::OpenAsync(segment, std::make_shared<const Properties>(), LATEST, -1, FailResolver, 1,
+                                           30000, operation, fs_)
+                        .via(&executor)
+                        .get();
       ASSERT_TRUE(result.status.ok());
       transaction = std::move(result.transaction);
     } else {
@@ -368,8 +372,8 @@ TEST_F(TransactionTest, EmptyManifestTest) {
     ASSERT_AND_ASSIGN(auto latest_manifest, transaction->GetManifest());
     ASSERT_NE(latest_manifest, nullptr);
 
-    auto reader =
-        Reader::create(std::make_shared<ColumnGroups>(latest_manifest->columnGroups()), schema_, nullptr, properties_);
+    auto reader = Reader::create(std::make_shared<ColumnGroups>(latest_manifest->columnGroups()), schema_, nullptr,
+                                 std::make_shared<const api::Properties>(properties_));
     ASSERT_NE(reader, nullptr);
 
     // Test get_record_batch_reader with empty manifest
@@ -813,7 +817,7 @@ TEST_F(TransactionTest, ManifestCacheKeyIncludesRootPath) {
   ASSERT_STATUS_OK(CreateTestDir(fs_, alt_base_path));
 
   // Write a different manifest under alt_base_path (same relative structure)
-  ASSERT_AND_ASSIGN(auto alt_fs, GetFileSystem(properties_));
+  ASSERT_AND_ASSIGN(auto alt_fs, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
   {
     ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(alt_fs, alt_base_path));
     ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_alt.parquet", {"id", "name", "value"}));
@@ -1020,7 +1024,8 @@ TEST_F(TransactionTest, IndexInvalidationUsesFieldID) {
         Manifest::CleanCache();
         if (async) {
           std::shared_ptr<AsyncOperation> operation;
-          auto result = Transaction::OpenAsync(segment, {}, LATEST, -1, FailResolver, 1, 30000, operation, fs_)
+          auto result = Transaction::OpenAsync(segment, std::make_shared<const Properties>(), LATEST, -1, FailResolver,
+                                               1, 30000, operation, fs_)
                             .via(&executor)
                             .get();
           EXPECT_TRUE(result.status.ok());
@@ -1438,7 +1443,8 @@ TEST_F(TransactionTest, SchemaBasedMixedLocalFormatsTransactionPath) {
   ASSERT_EQ(SetValue(writer_props, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS, "id|value,vector,name"), std::nullopt);
   ASSERT_EQ(SetValue(writer_props, PROPERTY_WRITER_SCHEMA_BASE_FORMATS, "vortex,parquet,parquet"), std::nullopt);
 
-  ASSERT_AND_ASSIGN(auto cgs_v1, WriteColumnGroups(schema_, batch_v1, writer_props));
+  ASSERT_AND_ASSIGN(auto cgs_v1,
+                    WriteColumnGroups(schema_, batch_v1, std::make_shared<const api::Properties>(writer_props)));
   ASSERT_EQ(cgs_v1->size(), 3);
   EXPECT_EQ((*cgs_v1)[0]->format, LOON_FORMAT_VORTEX);
   EXPECT_EQ((*cgs_v1)[1]->format, LOON_FORMAT_PARQUET);
@@ -1454,7 +1460,8 @@ TEST_F(TransactionTest, SchemaBasedMixedLocalFormatsTransactionPath) {
   ASSERT_AND_ASSIGN(auto batch_bad, CreateTestData(schema_, 100, false, 100));
   auto mismatch_props = writer_props;
   ASSERT_EQ(SetValue(mismatch_props, PROPERTY_WRITER_SCHEMA_BASE_FORMATS, "parquet,parquet,parquet"), std::nullopt);
-  ASSERT_AND_ASSIGN(auto cgs_bad, WriteColumnGroups(schema_, batch_bad, mismatch_props));
+  ASSERT_AND_ASSIGN(auto cgs_bad,
+                    WriteColumnGroups(schema_, batch_bad, std::make_shared<const api::Properties>(mismatch_props)));
   ASSERT_EQ((*cgs_bad)[0]->format, LOON_FORMAT_PARQUET);
 
   {
@@ -1467,7 +1474,8 @@ TEST_F(TransactionTest, SchemaBasedMixedLocalFormatsTransactionPath) {
   }
 
   ASSERT_AND_ASSIGN(auto batch_v2, CreateTestData(schema_, 100, false, 100));
-  ASSERT_AND_ASSIGN(auto cgs_v2, WriteColumnGroups(schema_, batch_v2, writer_props));
+  ASSERT_AND_ASSIGN(auto cgs_v2,
+                    WriteColumnGroups(schema_, batch_v2, std::make_shared<const api::Properties>(writer_props)));
   {
     ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
     txn->AppendFiles(*cgs_v2);

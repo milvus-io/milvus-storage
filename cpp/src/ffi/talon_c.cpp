@@ -223,12 +223,16 @@ LoonFFIResult loon_talon_client_create(const LoonProperties* properties, LoonTal
         RETURN_ERROR(LOON_INVALID_ARGS, "Invalid Talon property: key and value must not be null");
       }
     }
-    milvus_storage::api::Properties native;
-    if (auto error = milvus_storage::api::ConvertFFIProperties(native, properties)) {
-      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", *error, "]");
+    milvus_storage::api::Properties native_values;
+    for (size_t i = 0; i < properties->count; ++i) {
+      const auto& item = properties->properties[i];
+      if (auto error = milvus_storage::api::SetValue(native_values, item.key, item.value)) {
+        RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", *error, "]");
+      }
     }
     // Raw clients use Talon directly, independently of filesystem routing mode.
-    native[PROPERTY_FS_TALON_MODE] = static_cast<uint32_t>(milvus_storage::TalonMode::Disabled);
+    native_values[PROPERTY_FS_TALON_MODE] = static_cast<uint32_t>(milvus_storage::TalonMode::Disabled);
+    auto native = std::make_shared<const milvus_storage::api::Properties>(std::move(native_values));
     milvus_storage::ArrowFileSystemConfig config;
     const auto config_status = milvus_storage::ArrowFileSystemConfig::create_file_system_config(native, config);
     RETURN_ARROW_ERROR_IF(config_status, config_status.IsInvalid() ? LOON_INVALID_ARGS : LOON_INVALID_PROPERTIES,

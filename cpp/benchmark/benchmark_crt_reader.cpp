@@ -350,15 +350,15 @@ class CrtReaderBenchmark : public FormatBenchFixtureBase<false, false> {
   void TearDown(::benchmark::State& st) override { FormatBenchFixtureBase<false, false>::TearDown(st); }
 
   protected:
-  api::Properties PropertiesForMode(const std::string& format, CrtIoMode mode) const {
-    auto properties = properties_;
+  std::shared_ptr<const api::Properties> PropertiesForMode(const std::string& format, CrtIoMode mode) const {
+    auto properties = *properties_;
     api::SetValue(properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "32768");
     api::SetValue(properties, PROPERTY_READER_METADATA_CACHE_ENABLE, "true");
     api::SetValue(properties, PROPERTY_FS_S3_CRT_ASYNC_READ, mode == CrtIoMode::AsyncCrt ? "true" : "false");
     if (format == LOON_FORMAT_VORTEX) {
       api::SetValue(properties, PROPERTY_WRITER_VORTEX_FORMAT_VERSION, "2");
     }
-    return properties;
+    return std::make_shared<const api::Properties>(std::move(properties));
   }
 
   bool CheckCommonRequirements(::benchmark::State& st, const std::string& format, CrtIoMode mode) {
@@ -379,7 +379,7 @@ class CrtReaderBenchmark : public FormatBenchFixtureBase<false, false> {
   }
 
   arrow::Status PrepareData(const std::string& format,
-                            const api::Properties& properties,
+                            const std::shared_ptr<const api::Properties>& properties,
                             const CrtDataConfig& config,
                             const std::shared_ptr<std::vector<std::string>>& projection,
                             PreparedData* out) {
@@ -426,11 +426,12 @@ class CrtReaderBenchmark : public FormatBenchFixtureBase<false, false> {
     return arrow::Status::OK();
   }
 
-  arrow::Result<ConcurrentReadMetrics> RunConcurrentChunkReaders(const PreparedData& prepared,
-                                                                 const api::Properties& properties,
-                                                                 size_t reader_count,
-                                                                 size_t chunks_per_reader,
-                                                                 size_t warmup_reads) {
+  arrow::Result<ConcurrentReadMetrics> RunConcurrentChunkReaders(
+      const PreparedData& prepared,
+      const std::shared_ptr<const api::Properties>& properties,
+      size_t reader_count,
+      size_t chunks_per_reader,
+      size_t warmup_reads) {
     ConcurrentReadMetrics metrics;
     ThreadTracker thread_tracker;
 
@@ -589,11 +590,12 @@ class CrtReaderBenchmark : public FormatBenchFixtureBase<false, false> {
     return metrics;
   }
 
-  arrow::Result<ConcurrentReadMetrics> RunConcurrentTakeReaders(const PreparedData& prepared,
-                                                                const api::Properties& properties,
-                                                                size_t reader_count,
-                                                                size_t rows_per_take,
-                                                                size_t warmup_reads) {
+  arrow::Result<ConcurrentReadMetrics> RunConcurrentTakeReaders(
+      const PreparedData& prepared,
+      const std::shared_ptr<const api::Properties>& properties,
+      size_t reader_count,
+      size_t rows_per_take,
+      size_t warmup_reads) {
     ConcurrentReadMetrics metrics;
     ThreadTracker thread_tracker;
 
@@ -749,11 +751,12 @@ class CrtReaderBenchmark : public FormatBenchFixtureBase<false, false> {
     return metrics;
   }
 
-  arrow::Result<ConcurrentReadMetrics> RunConcurrentGetAllChunksReaders(const PreparedData& prepared,
-                                                                        const api::Properties& properties,
-                                                                        const std::vector<int64_t>& chunk_indices,
-                                                                        size_t reader_count,
-                                                                        size_t warmup_reads) {
+  arrow::Result<ConcurrentReadMetrics> RunConcurrentGetAllChunksReaders(
+      const PreparedData& prepared,
+      const std::shared_ptr<const api::Properties>& properties,
+      const std::vector<int64_t>& chunk_indices,
+      size_t reader_count,
+      size_t warmup_reads) {
     ConcurrentReadMetrics metrics;
     ThreadTracker thread_tracker;
 
@@ -953,7 +956,7 @@ class CrtReaderBenchmark : public FormatBenchFixtureBase<false, false> {
       return;
     }
 
-    auto properties = PropertiesForMode(format, mode);
+    const auto properties = PropertiesForMode(format, mode);
 
     PreparedData prepared;
     BENCH_ASSERT_STATUS_OK(PrepareData(format, properties, config, VectorProjection(), &prepared), st);
@@ -1007,7 +1010,7 @@ BENCHMARK_DEFINE_F(CrtReaderBenchmark, ConcurrentOpenRead)(::benchmark::State& s
     return;
   }
 
-  auto properties = PropertiesForMode(format, mode);
+  const auto properties = PropertiesForMode(format, mode);
   PreparedData prepared;
   auto config = FullSyntheticConfig();
   BENCH_ASSERT_STATUS_OK(PrepareData(format, properties, config, nullptr, &prepared), st);
@@ -1062,7 +1065,7 @@ BENCHMARK_DEFINE_F(CrtReaderBenchmark, ConcurrentOpenTake)(::benchmark::State& s
     return;
   }
 
-  auto properties = PropertiesForMode(format, mode);
+  const auto properties = PropertiesForMode(format, mode);
 
   PreparedData prepared;
   auto config = VectorConfig(

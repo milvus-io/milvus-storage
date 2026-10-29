@@ -53,7 +53,8 @@ TEST(TlsMinVersionTest, PropertySetGetAndValidation) {
     auto err = api::SetValue(properties, PROPERTY_FS_TLS_MIN_VERSION, value);
     EXPECT_EQ(err, std::nullopt) << "Failed to set tls_min_version to '" << value << "': " << err.value_or("");
 
-    auto result = api::GetValue<std::string>(properties, PROPERTY_FS_TLS_MIN_VERSION);
+    auto result =
+        api::GetValue<std::string>(std::make_shared<const api::Properties>(properties), PROPERTY_FS_TLS_MIN_VERSION);
     ASSERT_TRUE(result.ok()) << result.status().ToString();
     EXPECT_EQ(result.ValueOrDie(), value);
   }
@@ -68,7 +69,8 @@ TEST(TlsMinVersionTest, PropertySetGetAndValidation) {
   // Default value is empty string (system default)
   {
     api::Properties properties;
-    auto result = api::GetValue<std::string>(properties, PROPERTY_FS_TLS_MIN_VERSION);
+    auto result =
+        api::GetValue<std::string>(std::make_shared<const api::Properties>(properties), PROPERTY_FS_TLS_MIN_VERSION);
     ASSERT_TRUE(result.ok()) << result.status().ToString();
     EXPECT_EQ(result.ValueOrDie(), "");
   }
@@ -81,7 +83,8 @@ TEST(TlsMinVersionTest, ConfigIntegration) {
     api::SetValue(properties, PROPERTY_FS_TLS_MIN_VERSION, "1.3");
 
     ArrowFileSystemConfig config;
-    ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties, config));
+    ASSERT_STATUS_OK(
+        ArrowFileSystemConfig::create_file_system_config(std::make_shared<const api::Properties>(properties), config));
     EXPECT_EQ(config.tls_min_version, "1.3");
   }
 
@@ -89,7 +92,8 @@ TEST(TlsMinVersionTest, ConfigIntegration) {
   {
     api::Properties properties;
     ArrowFileSystemConfig config;
-    ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties, config));
+    ASSERT_STATUS_OK(
+        ArrowFileSystemConfig::create_file_system_config(std::make_shared<const api::Properties>(properties), config));
     EXPECT_EQ(config.tls_min_version, "");
   }
 
@@ -115,7 +119,8 @@ TEST(TlsMinVersionTest, ConfigIntegration) {
     api::SetValue(properties, PROPERTY_FS_TLS_MIN_VERSION, "1.2");
 
     ArrowFileSystemConfig config;
-    ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties, config));
+    ASSERT_STATUS_OK(
+        ArrowFileSystemConfig::create_file_system_config(std::make_shared<const api::Properties>(properties), config));
     EXPECT_EQ(config.tls_min_version, "1.2");
     EXPECT_EQ(config.use_ssl, true);
   }
@@ -245,7 +250,7 @@ class S3TlsVersionTest : public ::testing::Test {
     api::Properties properties;
     ASSERT_STATUS_OK(InitTestProperties(properties));
     ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_USE_SSL, "true"), std::nullopt);
-    ASSERT_AND_ASSIGN(fs_config_, GetFileSystemConfig(properties));
+    ASSERT_AND_ASSIGN(fs_config_, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
   }
 
   // Build an S3 client with curl verbose tracing and make a PutObject request.
@@ -324,7 +329,8 @@ TEST_F(S3TlsVersionTest, EnforceMinTlsTest) {
     ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TLS_MIN_VERSION, target_tls_version.c_str()), std::nullopt);
 
     ArrowFileSystemConfig config;
-    ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties, config));
+    ASSERT_STATUS_OK(
+        ArrowFileSystemConfig::create_file_system_config(std::make_shared<const api::Properties>(properties), config));
     EXPECT_EQ(config.tls_min_version, target_tls_version);
     EXPECT_TRUE(config.use_ssl);
   }
@@ -416,7 +422,8 @@ TEST_F(S3TlsVersionTest, EnforceMinTlsArrowFsTest) {
   // Verify config plumbing: tls_min_version flows through properties → config.
   {
     ArrowFileSystemConfig config;
-    ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties, config));
+    ASSERT_STATUS_OK(
+        ArrowFileSystemConfig::create_file_system_config(std::make_shared<const api::Properties>(properties), config));
     EXPECT_EQ(config.tls_min_version, target_tls_version);
     EXPECT_TRUE(config.use_ssl);
   }
@@ -434,7 +441,7 @@ TEST_F(S3TlsVersionTest, EnforceMinTlsArrowFsTest) {
   Aws::Utils::Logging::InitializeAWSLogging(logger);
 
   // --- Part 1: Arrow filesystem production path write + read ---
-  ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
+  ASSERT_AND_ASSIGN(auto fs, GetFileSystem(std::make_shared<const api::Properties>(properties)));
 
   const std::string test_path = "/unittest/tls_arrow_fs_test.txt";
   const std::string content = "tls arrow filesystem test";

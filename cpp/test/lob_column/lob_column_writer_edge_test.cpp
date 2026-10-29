@@ -47,7 +47,9 @@ class LobColumnWriterEdgeTest : public ::testing::Test {
     config_.max_lob_file_bytes = 1024 * 1024;   // 1MB for testing
     config_.flush_threshold_bytes = 64 * 1024;  // 64KB for testing
 
-    ASSERT_STATUS_OK(InitTestProperties(config_.properties));
+    api::Properties config_properties;
+    ASSERT_STATUS_OK(InitTestProperties(config_properties));
+    config_.properties = std::make_shared<const api::Properties>(std::move(config_properties));
   }
 
   void TearDown() override {

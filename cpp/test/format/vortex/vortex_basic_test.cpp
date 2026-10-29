@@ -62,7 +62,7 @@ class VortexTestBase : public ::testing::Test {
       record_batches_.emplace_back(std::move(rb));
     }
 
-    ASSERT_AND_ASSIGN(file_system_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(file_system_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
   }
 
   void TearDown() override {
@@ -99,7 +99,8 @@ class VortexTestBase : public ::testing::Test {
 
   arrow::Result<api::ColumnGroupFile> WriteVortexFile(const std::string& file_path) {
     ARROW_ASSIGN_OR_RAISE(auto vx_writer,
-                          vortex::VortexFileWriter::Open(file_system_, schema_, file_path, properties_));
+                          vortex::VortexFileWriter::Open(file_system_, schema_, file_path,
+                                                         std::make_shared<const api::Properties>(properties_)));
     for (const auto& rb : record_batches_) {
       ARROW_RETURN_NOT_OK(vx_writer->Write(rb));
     }
@@ -544,7 +545,8 @@ arrow::Result<std::shared_ptr<arrow::Array>> MakeFixedSizeListUInt8ArrayWithChil
 
 TEST_P(VortexBasicTest, TestBasicWrite) {
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
 
   for (const auto& rb : record_batches_) {
     ASSERT_TRUE(vx_writer->Write(rb).ok());
@@ -562,8 +564,9 @@ TEST_P(VortexBasicTest, RowGroupColumnMemorySizesUseFullFileSchema) {
 
   auto projection_schema = arrow::schema({schema_->field(0)});
   auto vx_reader = vortex::VortexFormatReader(
-      file_system_, projection_schema, test_file_name_, properties_, std::vector<std::string>{"id"},
-      cgfile.Get<uint64_t>(api::kPropertyFileSize), cgfile.Get<uint64_t>(api::kPropertyFooterSize));
+      file_system_, projection_schema, test_file_name_, std::make_shared<const api::Properties>(properties_),
+      std::vector<std::string>{"id"}, cgfile.Get<uint64_t>(api::kPropertyFileSize),
+      cgfile.Get<uint64_t>(api::kPropertyFooterSize));
   ASSERT_STATUS_OK(vx_reader.open());
   ASSERT_AND_ASSIGN(auto row_group_infos, vx_reader.get_row_group_infos());
 
@@ -596,7 +599,8 @@ TEST_P(VortexBasicTest, MemorySizeUnavailableDoesNotBlockOpen) {
     ScopedFiuFault fault(FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL);
     ASSERT_EQ(fault.enable_result(), 0);
 
-    auto reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
+    auto reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_,
+                                             std::make_shared<const api::Properties>(properties_), data_columns(),
                                              file_size, footer_size);
     ASSERT_STATUS_OK(reader.open());
     ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());
@@ -611,7 +615,8 @@ TEST_P(VortexBasicTest, MemorySizeUnavailableDoesNotBlockOpen) {
   {
     ScopedFiuFault fault(FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL);
     ASSERT_EQ(fault.enable_result(), 0);
-    ASSERT_AND_ASSIGN(metadata, vortex::VortexFormatReader::MetaTrait::load_metadata(cgfile, properties_, nullptr));
+    ASSERT_AND_ASSIGN(metadata, vortex::VortexFormatReader::MetaTrait::load_metadata(
+                                    cgfile, std::make_shared<const api::Properties>(properties_), nullptr));
   }
   assert_memory_size_unavailable(metadata->row_group_infos);
 
@@ -628,7 +633,8 @@ TEST_P(VortexBasicTest, FlushAllowsSubsequentWrites) {
   ASSERT_AND_ASSIGN(auto first_batch, MakeTestData(0, 1));
   ASSERT_AND_ASSIGN(auto second_batch, MakeTestData(1, 1));
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
   ASSERT_STATUS_OK(vx_writer->Write(first_batch));
   ASSERT_STATUS_OK(vx_writer->Flush());
   ASSERT_STATUS_OK(vx_writer->Write(second_batch));
@@ -636,7 +642,8 @@ TEST_P(VortexBasicTest, FlushAllowsSubsequentWrites) {
   ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(first_batch->num_rows() + second_batch->num_rows(), cgfile.end_index);
 
-  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns());
+  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_,
+                                              std::make_shared<const api::Properties>(properties_), data_columns());
   ASSERT_STATUS_OK(vx_reader.open());
   ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, cgfile.end_index, kSmallCoalescingWindow));
   ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
@@ -646,7 +653,8 @@ TEST_P(VortexBasicTest, FlushAllowsSubsequentWrites) {
 #ifdef BUILD_WITH_FIU
 TEST_P(VortexBasicTest, S3FlushFailureCloseReturnsErrorAndLeavesNoObject) {
   ArrowFileSystemConfig fs_config;
-  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
+      std::make_shared<const api::Properties>(properties_), fs_config));
   const auto is_s3_provider =
       fs_config.cloud_provider == kCloudProviderAWS || fs_config.cloud_provider == kCloudProviderAliyun ||
       fs_config.cloud_provider == kCloudProviderTencent || fs_config.cloud_provider == kCloudProviderHuawei;
@@ -660,7 +668,9 @@ TEST_P(VortexBasicTest, S3FlushFailureCloseReturnsErrorAndLeavesNoObject) {
       GetTestBasePath("vortex-s3-flush-fiu") + "/flush-fail-v" + std::to_string(GetParam()) + ".vx";
   (void)file_system_->DeleteFile(test_path);
 
-  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, schema_, test_path, properties_));
+  ASSERT_AND_ASSIGN(auto vx_writer,
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_path,
+                                                   std::make_shared<const api::Properties>(properties_)));
   const auto rows_per_batch = record_batches_.front()->num_rows();
   for (int i = 0; i < 10; ++i) {
     ASSERT_AND_ASSIGN(auto rb, MakeTestData(i * rows_per_batch, rows_per_batch));
@@ -694,7 +704,7 @@ TEST_P(VortexBasicTest, CloudFiuWriterErrorsCarryStatusDetails) {
   if (!IsCloudEnv()) {
     GTEST_SKIP() << "Test requires cloud env.";
   }
-  ASSERT_AND_ASSIGN(auto fs_config, GetFileSystemConfig(properties_));
+  ASSERT_AND_ASSIGN(auto fs_config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties_)));
   if (fs_config.cloud_provider == kCloudProviderAzure) {
     GTEST_SKIP() << "Azure does not use S3 FIU fault points.";
   }
@@ -708,7 +718,9 @@ TEST_P(VortexBasicTest, CloudFiuWriterErrorsCarryStatusDetails) {
   ASSERT_EQ(recordBatchsRows(), baseline_cgfile.end_index);
 
   const std::string test_path = base_path + "/writer-close-fault.vx";
-  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, schema_, test_path, properties_));
+  ASSERT_AND_ASSIGN(auto vx_writer,
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_path,
+                                                   std::make_shared<const api::Properties>(properties_)));
   ASSERT_STATUS_OK(vx_writer->Write(record_batches_.front()));
   ASSERT_STATUS_OK(vx_writer->Flush());
 
@@ -731,7 +743,7 @@ TEST_P(VortexBasicTest, CloudFiuReaderErrorsCarryStatusDetails) {
   if (!IsCloudEnv()) {
     GTEST_SKIP() << "Test requires cloud env.";
   }
-  ASSERT_AND_ASSIGN(auto fs_config, GetFileSystemConfig(properties_));
+  ASSERT_AND_ASSIGN(auto fs_config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties_)));
   if (fs_config.cloud_provider == kCloudProviderAzure) {
     GTEST_SKIP() << "Azure does not use S3 FIU fault points.";
   }
@@ -748,7 +760,8 @@ TEST_P(VortexBasicTest, CloudFiuReaderErrorsCarryStatusDetails) {
   const auto file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
   const auto footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
   {
-    auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_path, properties_, data_columns(),
+    auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_path,
+                                                std::make_shared<const api::Properties>(properties_), data_columns(),
                                                 file_size, footer_size);
     ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows(), kSmallCoalescingWindow));
@@ -757,7 +770,8 @@ TEST_P(VortexBasicTest, CloudFiuReaderErrorsCarryStatusDetails) {
   }
 
   auto vx_reader =
-      vortex::VortexFormatReader(file_system_, schema_, test_path, properties_, data_columns(), file_size, footer_size);
+      vortex::VortexFormatReader(file_system_, schema_, test_path, std::make_shared<const api::Properties>(properties_),
+                                 data_columns(), file_size, footer_size);
   ScopedFiuFault fault(FIUKEY_S3FS_READER_READAT_FAIL);
   ASSERT_EQ(0, fault.enable_result());
   auto status = vx_reader.open();
@@ -808,13 +822,15 @@ TEST_P(VortexBasicTest, TestListOfFixedSizeBinary512WriteRead) {
 
   auto rb = arrow::RecordBatch::Make(vector_array_schema, num_rows, {vector_array});
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, vector_array_schema, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, vector_array_schema, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
   ASSERT_STATUS_OK(vx_writer->Write(rb));
   ASSERT_STATUS_OK(vx_writer->Flush());
   ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(num_rows, cgfile.end_index);
 
-  auto vx_reader = vortex::VortexFormatReader(file_system_, vector_array_schema, test_file_name_, properties_,
+  auto vx_reader = vortex::VortexFormatReader(file_system_, vector_array_schema, test_file_name_,
+                                              std::make_shared<const api::Properties>(properties_),
                                               std::vector<std::string>{"vector_array"});
   ASSERT_STATUS_OK(vx_reader.open());
   ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, num_rows, kSmallCoalescingWindow));
@@ -854,13 +870,15 @@ TEST_P(VortexBasicTest, TestSlicedListOfFixedSizeBinaryWriteRead) {
   auto rb = arrow::RecordBatch::Make(vector_array_schema, slice_length, {sliced_vector_array});
 
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, vector_array_schema, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, vector_array_schema, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
   ASSERT_STATUS_OK(vx_writer->Write(rb));
   ASSERT_STATUS_OK(vx_writer->Flush());
   ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(slice_length, cgfile.end_index);
 
-  auto vx_reader = vortex::VortexFormatReader(file_system_, vector_array_schema, test_file_name_, properties_,
+  auto vx_reader = vortex::VortexFormatReader(file_system_, vector_array_schema, test_file_name_,
+                                              std::make_shared<const api::Properties>(properties_),
                                               std::vector<std::string>{"vector_array"});
   ASSERT_STATUS_OK(vx_reader.open());
 
@@ -892,13 +910,15 @@ TEST_P(VortexBasicTest, TestLargeListOfFixedSizeBinaryWriteRead) {
   auto rb = arrow::RecordBatch::Make(vector_schema, num_rows, {vector_array});
 
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, vector_schema, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, vector_schema, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
   ASSERT_STATUS_OK(vx_writer->Write(rb));
   ASSERT_STATUS_OK(vx_writer->Flush());
   ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(num_rows, cgfile.end_index);
 
-  auto vx_reader = vortex::VortexFormatReader(file_system_, vector_schema, test_file_name_, properties_,
+  auto vx_reader = vortex::VortexFormatReader(file_system_, vector_schema, test_file_name_,
+                                              std::make_shared<const api::Properties>(properties_),
                                               std::vector<std::string>{"large_vector_array"});
   ASSERT_STATUS_OK(vx_reader.open());
   ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, num_rows, kSmallCoalescingWindow));
@@ -920,13 +940,15 @@ TEST_P(VortexBasicTest, TestFixedSizeListOfFixedSizeBinaryWriteRead) {
   auto rb = arrow::RecordBatch::Make(vector_schema, num_rows, {vector_array});
 
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, vector_schema, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, vector_schema, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
   ASSERT_STATUS_OK(vx_writer->Write(rb));
   ASSERT_STATUS_OK(vx_writer->Flush());
   ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(num_rows, cgfile.end_index);
 
-  auto vx_reader = vortex::VortexFormatReader(file_system_, vector_schema, test_file_name_, properties_,
+  auto vx_reader = vortex::VortexFormatReader(file_system_, vector_schema, test_file_name_,
+                                              std::make_shared<const api::Properties>(properties_),
                                               std::vector<std::string>{"fixed_vector_array"});
   ASSERT_STATUS_OK(vx_reader.open());
   ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, num_rows, kSmallCoalescingWindow));
@@ -951,13 +973,15 @@ TEST_P(VortexBasicTest, TestSlicedFixedSizeBinaryWriteRead) {
   auto rb = arrow::RecordBatch::Make(vector_schema, slice_length, {sliced_vector_array});
 
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, vector_schema, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, vector_schema, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
   ASSERT_STATUS_OK(vx_writer->Write(rb));
   ASSERT_STATUS_OK(vx_writer->Flush());
   ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(slice_length, cgfile.end_index);
 
-  auto vx_reader = vortex::VortexFormatReader(file_system_, vector_schema, test_file_name_, properties_,
+  auto vx_reader = vortex::VortexFormatReader(file_system_, vector_schema, test_file_name_,
+                                              std::make_shared<const api::Properties>(properties_),
                                               std::vector<std::string>{"embedding"});
   ASSERT_STATUS_OK(vx_reader.open());
 
@@ -999,15 +1023,16 @@ TEST_P(VortexBasicTest, TestNestedFixedSizeBinaryWriteRead) {
 
   auto rb = arrow::RecordBatch::Make(nested_schema, num_rows, {struct_array, nullable_array, nested_list_array});
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, nested_schema, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, nested_schema, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
   ASSERT_STATUS_OK(vx_writer->Write(rb));
   ASSERT_STATUS_OK(vx_writer->Flush());
   ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(num_rows, cgfile.end_index);
 
-  auto vx_reader =
-      vortex::VortexFormatReader(file_system_, nested_schema, test_file_name_, properties_,
-                                 std::vector<std::string>{"entity", "nullable_embedding", "nested_vectors"});
+  auto vx_reader = vortex::VortexFormatReader(
+      file_system_, nested_schema, test_file_name_, std::make_shared<const api::Properties>(properties_),
+      std::vector<std::string>{"entity", "nullable_embedding", "nested_vectors"});
   ASSERT_STATUS_OK(vx_reader.open());
   ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, num_rows, kSmallCoalescingWindow));
   ASSERT_AND_ASSIGN(auto read_rb, ChunkedArrayToRecordBatch(chunked_array));
@@ -1068,7 +1093,8 @@ TEST_P(VortexBasicTest, TestDictionaryOfFixedSizeBinaryWriteFails) {
                                                        arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
   auto rb = arrow::RecordBatch::Make(dictionary_schema, num_rows, {dictionary_array});
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, dictionary_schema, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, dictionary_schema, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
 
   auto status = vx_writer->Write(rb);
   if (status.ok()) {
@@ -1098,7 +1124,8 @@ TEST_P(VortexBasicTest, TestFixedSizeListWidthMismatchReadFails) {
   auto rb = arrow::RecordBatch::Make(write_schema, num_rows, {vector_array});
 
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, write_schema, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, write_schema, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
   ASSERT_STATUS_OK(vx_writer->Write(rb));
   ASSERT_STATUS_OK(vx_writer->Flush());
   ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
@@ -1106,7 +1133,8 @@ TEST_P(VortexBasicTest, TestFixedSizeListWidthMismatchReadFails) {
 
   auto read_schema = arrow::schema({arrow::field("embedding", arrow::fixed_size_binary(read_width), false,
                                                  arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
-  auto vx_reader = vortex::VortexFormatReader(file_system_, read_schema, test_file_name_, properties_,
+  auto vx_reader = vortex::VortexFormatReader(file_system_, read_schema, test_file_name_,
+                                              std::make_shared<const api::Properties>(properties_),
                                               std::vector<std::string>{"embedding"});
   ASSERT_STATUS_OK(vx_reader.open());
 
@@ -1127,7 +1155,8 @@ TEST_P(VortexBasicTest, TestFixedSizeListChildNullReadFails) {
   auto rb = arrow::RecordBatch::Make(write_schema, num_rows, {vector_array});
 
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, write_schema, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, write_schema, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
   ASSERT_STATUS_OK(vx_writer->Write(rb));
   ASSERT_STATUS_OK(vx_writer->Flush());
   ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
@@ -1135,7 +1164,8 @@ TEST_P(VortexBasicTest, TestFixedSizeListChildNullReadFails) {
 
   auto read_schema = arrow::schema({arrow::field("embedding", arrow::fixed_size_binary(vector_width), false,
                                                  arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
-  auto vx_reader = vortex::VortexFormatReader(file_system_, read_schema, test_file_name_, properties_,
+  auto vx_reader = vortex::VortexFormatReader(file_system_, read_schema, test_file_name_,
+                                              std::make_shared<const api::Properties>(properties_),
                                               std::vector<std::string>{"embedding"});
   ASSERT_STATUS_OK(vx_reader.open());
 
@@ -1147,7 +1177,8 @@ TEST_P(VortexBasicTest, TestFixedSizeListChildNullReadFails) {
 
 TEST_P(VortexBasicTest, TestBasicRead) {
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
 
   for (const auto& rb : record_batches_) {
     ASSERT_TRUE(vx_writer->Write(rb).ok());
@@ -1157,7 +1188,8 @@ TEST_P(VortexBasicTest, TestBasicRead) {
   ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
 
-  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns());
+  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_,
+                                              std::make_shared<const api::Properties>(properties_), data_columns());
   ASSERT_STATUS_OK(vx_reader.open());
   ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows(), kSmallCoalescingWindow));
   ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
@@ -1179,7 +1211,8 @@ TEST_P(VortexBasicTest, TestBasicRead) {
 
 TEST_P(VortexBasicTest, TestEmptyWriteRead) {
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
 
   ASSERT_AND_ASSIGN(auto empty_rb, MakeTestData(0, 0));
   ASSERT_TRUE(vx_writer->Write(empty_rb).ok());
@@ -1188,7 +1221,8 @@ TEST_P(VortexBasicTest, TestEmptyWriteRead) {
   ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(0, cgfile.end_index);
 
-  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns());
+  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_,
+                                              std::make_shared<const api::Properties>(properties_), data_columns());
   ASSERT_STATUS_OK(vx_reader.open());
   ASSERT_EQ(0, vx_reader.rows());
 
@@ -1198,7 +1232,8 @@ TEST_P(VortexBasicTest, TestEmptyWriteRead) {
 
 TEST_P(VortexBasicTest, TestReaderProjection) {
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
 
   for (const auto& rb : record_batches_) {
     ASSERT_TRUE(vx_writer->Write(rb).ok());
@@ -1210,7 +1245,8 @@ TEST_P(VortexBasicTest, TestReaderProjection) {
 
   // all projection
   {
-    auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns());
+    auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_,
+                                                std::make_shared<const api::Properties>(properties_), data_columns());
     ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
@@ -1231,7 +1267,8 @@ TEST_P(VortexBasicTest, TestReaderProjection) {
         schema_->field(0),
     });
 
-    auto vx_reader = vortex::VortexFormatReader(file_system_, projection_schema, test_file_name_, properties_,
+    auto vx_reader = vortex::VortexFormatReader(file_system_, projection_schema, test_file_name_,
+                                                std::make_shared<const api::Properties>(properties_),
                                                 std::vector<std::string>{"value", "name", "id"});
     ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
@@ -1250,7 +1287,8 @@ TEST_P(VortexBasicTest, TestReaderProjection) {
   {
     auto projection_schema = arrow::schema({schema_->field(0)});
 
-    auto vx_reader = vortex::VortexFormatReader(file_system_, projection_schema, test_file_name_, properties_,
+    auto vx_reader = vortex::VortexFormatReader(file_system_, projection_schema, test_file_name_,
+                                                std::make_shared<const api::Properties>(properties_),
                                                 std::vector<std::string>{"id"});
     ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
@@ -1266,8 +1304,9 @@ TEST_P(VortexBasicTest, TestReaderProjection) {
   // empty projection
   {
     auto projection_schema = arrow::schema({});
-    auto vx_reader = vortex::VortexFormatReader(file_system_, projection_schema, test_file_name_, properties_,
-                                                std::vector<std::string>{});
+    auto vx_reader =
+        vortex::VortexFormatReader(file_system_, projection_schema, test_file_name_,
+                                   std::make_shared<const api::Properties>(properties_), std::vector<std::string>{});
     ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
@@ -1280,7 +1319,8 @@ TEST_P(VortexBasicTest, TestReaderProjection) {
 
 TEST_P(VortexBasicTest, CachedCreateReaderKeepsProjectionForEmptyPredicateResult) {
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
 
   for (const auto& rb : record_batches_) {
     ASSERT_STATUS_OK(vx_writer->Write(rb));
@@ -1291,8 +1331,8 @@ TEST_P(VortexBasicTest, CachedCreateReaderKeepsProjectionForEmptyPredicateResult
   ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
 
   KeyRetriever key_retriever;
-  ASSERT_AND_ASSIGN(auto metadata,
-                    vortex::VortexFormatReader::MetaTrait::load_metadata(cgfile, properties_, key_retriever));
+  ASSERT_AND_ASSIGN(auto metadata, vortex::VortexFormatReader::MetaTrait::load_metadata(
+                                       cgfile, std::make_shared<const api::Properties>(properties_), key_retriever));
 
   auto id_schema = arrow::schema({schema_->field(0)});
   ASSERT_AND_ASSIGN(auto filtered_reader,
@@ -1314,7 +1354,8 @@ TEST_P(VortexBasicTest, CachedCreateReaderKeepsProjectionForEmptyPredicateResult
 
 TEST_P(VortexBasicTest, TestBasicTake) {
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
 
   for (const auto& rb : record_batches_) {
     ASSERT_TRUE(vx_writer->Write(rb).ok());
@@ -1341,8 +1382,9 @@ TEST_P(VortexBasicTest, TestBasicTake) {
 
   auto projection_schema = arrow::schema({schema_->field(0)});
 
-  auto vx_reader = vortex::VortexFormatReader(file_system_, projection_schema, test_file_name_, properties_,
-                                              std::vector<std::string>{"id"});
+  auto vx_reader =
+      vortex::VortexFormatReader(file_system_, projection_schema, test_file_name_,
+                                 std::make_shared<const api::Properties>(properties_), std::vector<std::string>{"id"});
   ASSERT_STATUS_OK(vx_reader.open());
 
   ASSERT_AND_ASSIGN(auto one_random_row, GenerateSortedUniqueArray(1, recordBatchsRows()));
@@ -1398,7 +1440,8 @@ TEST_P(VortexBasicTest, AsyncScanFailureCompletesCallbackWithError) {
 
 TEST_P(VortexBasicTest, FooterSizeMatchesActualFile) {
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
 
   // Zero-row output covers footer-size computation without data rows. Vortex may still emit
   // schema and layout segments before the footer.
@@ -1446,7 +1489,8 @@ TEST_P(VortexBasicTest, FooterSizeMatchesActualFile) {
 TEST_P(VortexBasicTest, FooterSizeNotMatch) {
   // Write a vortex file
   ASSERT_AND_ASSIGN(auto vx_writer,
-                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_,
+                                                   std::make_shared<const api::Properties>(properties_)));
   for (const auto& rb : record_batches_) {
     ASSERT_TRUE(vx_writer->Write(rb).ok());
   }
@@ -1463,7 +1507,8 @@ TEST_P(VortexBasicTest, FooterSizeNotMatch) {
                                                     vx_file_size2, footer_size));
     ASSERT_EQ(vxfile.RowCount(), static_cast<uint64_t>(recordBatchsRows()));
 
-    auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
+    auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_,
+                                                std::make_shared<const api::Properties>(properties_), data_columns(),
                                                 vx_file_size2, footer_size);
     ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows(), kSmallCoalescingWindow));

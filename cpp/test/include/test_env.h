@@ -86,8 +86,10 @@ arrow::Status MoveTestBasePath(const milvus_storage::ArrowFileSystemPtr& fs,
                                const std::string& old_dir,
                                const std::string& new_dir);
 
-arrow::Result<milvus_storage::ArrowFileSystemConfig> GetFileSystemConfig(const api::Properties& properties);
-arrow::Result<milvus_storage::ArrowFileSystemPtr> GetFileSystem(const api::Properties& properties);
+arrow::Result<milvus_storage::ArrowFileSystemConfig> GetFileSystemConfig(
+    const std::shared_ptr<const api::Properties>& properties);
+arrow::Result<milvus_storage::ArrowFileSystemPtr> GetFileSystem(
+    const std::shared_ptr<const api::Properties>& properties);
 arrow::Status CreateTestDir(const milvus_storage::ArrowFileSystemPtr& fs, const std::string& path);
 arrow::Status DeleteTestDir(const milvus_storage::ArrowFileSystemPtr& fs,
                             const std::string& path,

@@ -20,13 +20,13 @@ namespace milvus_storage {
 
 class IcebergFormat final : public Format {
   public:
-  [[nodiscard]] arrow::Result<std::vector<api::ColumnGroupFile>> explore(const std::string& explore_dir,
-                                                                         const api::Properties& properties) override;
+  [[nodiscard]] arrow::Result<std::vector<api::ColumnGroupFile>> explore(
+      const std::string& explore_dir, const std::shared_ptr<const api::Properties>& properties) override;
 
   [[nodiscard]] arrow::Result<std::shared_ptr<FormatReader>> create_reader(
       const std::shared_ptr<arrow::Schema>& read_schema,
       const api::ColumnGroupFile& file,
-      const api::Properties& properties,
+      const std::shared_ptr<const api::Properties>& properties,
       const std::vector<std::string>& needed_columns,
       const std::function<std::string(const std::string&)>& key_retriever) override;
 
@@ -35,7 +35,7 @@ class IcebergFormat final : public Format {
       const std::shared_ptr<arrow::Schema>& schema,
       const std::string& file_path,
       const std::string& base_path,
-      const api::Properties& properties) override;
+      const std::shared_ptr<const api::Properties>& properties) override;
 };
 
 }  // namespace milvus_storage

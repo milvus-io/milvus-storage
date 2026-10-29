@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+#include <memory>
 #include <arrow/testing/gtest_util.h>
 #include <arrow/util/thread_pool.h>
 #include <gtest/gtest.h>
@@ -279,8 +280,8 @@ TEST_F(NativeS3Test, FactoryAndCacheReturnTheSameSyncAsyncHandle) {
   properties[PROPERTY_FS_REGION] = std::string("us-east-1");
   properties[PROPERTY_FS_USE_SSL] = false;
   auto& cache = FilesystemCache::getInstance();
-  ASSERT_OK_AND_ASSIGN(auto cached, cache.get(properties));
-  ASSERT_OK_AND_ASSIGN(auto cached_again, cache.get(properties));
+  ASSERT_OK_AND_ASSIGN(auto cached, cache.get(std::make_shared<const api::Properties>(properties)));
+  ASSERT_OK_AND_ASSIGN(auto cached_again, cache.get(std::make_shared<const api::Properties>(properties)));
   EXPECT_EQ(cached.get(), cached_again.get());
   ASSERT_OK_AND_ASSIGN(auto cached_info, Await(Stat(cached, info.path())));
   EXPECT_EQ(cached_info, info);

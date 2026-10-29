@@ -219,7 +219,7 @@ class Transaction {
   // Keep the resolver alive for the lifetime of the returned transaction. Dropping
   // an unconsumed future starts no work; releasing its handle does not cancel it.
   static folly::SemiFuture<OpenResult> OpenAsync(const std::string& path,
-                                                 Properties properties,
+                                                 std::shared_ptr<const Properties> properties,
                                                  int64_t version,
                                                  int64_t manifest_size,
                                                  const Resolver& resolver,

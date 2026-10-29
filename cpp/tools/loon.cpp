@@ -219,9 +219,10 @@ static int DoDemoTable(int argc, char** argv) {
       milvus_storage::paimon::StorageOptions storage_options;
       std::string table_path = path;
       if (path.find("://") != std::string::npos || !extra_props.empty()) {
-        Properties properties;
-        SetValue(properties, PROPERTY_FS_ROOT_PATH, "/");
-        ApplyProps(properties, extra_props);
+        Properties mutable_properties;
+        SetValue(mutable_properties, PROPERTY_FS_ROOT_PATH, "/");
+        ApplyProps(mutable_properties, extra_props);
+        const auto properties = std::make_shared<const Properties>(std::move(mutable_properties));
         FilesystemCache::getInstance().clean();
         auto config = FilesystemCache::resolve_config(properties, path);
         if (!config.ok()) {
@@ -263,9 +264,10 @@ static int DoDemoTable(int argc, char** argv) {
     std::string table_path = path;
 
     if (!extra_props.empty()) {
-      Properties properties;
-      SetValue(properties, PROPERTY_FS_ROOT_PATH, "/");
-      ApplyProps(properties, extra_props);
+      Properties mutable_properties;
+      SetValue(mutable_properties, PROPERTY_FS_ROOT_PATH, "/");
+      ApplyProps(mutable_properties, extra_props);
+      const auto properties = std::make_shared<const Properties>(std::move(mutable_properties));
       FilesystemCache::getInstance().clean();
 
       auto config_result = FilesystemCache::resolve_config(properties, path);
@@ -322,8 +324,8 @@ static int DoDemoTable(int argc, char** argv) {
 
 // ─── explore helpers (from exttable_c.cpp pattern) ───────────────────
 
-static arrow::Result<std::vector<ColumnGroupFile>> ExploreParquetOrVortex(const std::string& source,
-                                                                          const Properties& properties) {
+static arrow::Result<std::vector<ColumnGroupFile>> ExploreParquetOrVortex(
+    const std::string& source, const std::shared_ptr<const Properties>& properties) {
   // Resolve explore_dir: if URI, extract key
   std::string resolved_dir = source;
   StorageUri explore_uri;
@@ -375,7 +377,7 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreParquetOrVortex(const 
 }
 
 static arrow::Result<std::vector<ColumnGroupFile>> ExploreLance(const std::string& source,
-                                                                const Properties& properties) {
+                                                                const std::shared_ptr<const Properties>& properties) {
   ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, source));
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, source));
 
@@ -404,7 +406,7 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreLance(const std::strin
 }
 
 static arrow::Result<std::vector<ColumnGroupFile>> ExploreIceberg(const std::string& source,
-                                                                  const Properties& properties) {
+                                                                  const std::shared_ptr<const Properties>& properties) {
   ARROW_ASSIGN_OR_RAISE(auto filesystem, FilesystemCache::getInstance().get(properties, source));
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, source));
   auto read_options = milvus_storage::iceberg::ToReaderOptions(fs_config);
@@ -417,9 +419,8 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreIceberg(const std::str
     ARROW_ASSIGN_OR_RAISE(iceberg_uri, StorageUri::Make(parsed_uri, false));
   }
 
-  ARROW_ASSIGN_OR_RAISE(
-      auto file_infos,
-      milvus_storage::iceberg::PlanFiles(iceberg_uri, snapshot_id, filesystem, read_options));
+  ARROW_ASSIGN_OR_RAISE(auto file_infos,
+                        milvus_storage::iceberg::PlanFiles(iceberg_uri, snapshot_id, filesystem, read_options));
 
   std::vector<ColumnGroupFile> files;
   files.reserve(file_infos.size());
@@ -480,9 +481,10 @@ static int DoCreate(int argc, char** argv) {
     target = ResolvePath(target);
 
     // Build properties — default to local filesystem with root "/"
-    Properties properties;
-    SetValue(properties, PROPERTY_FS_ROOT_PATH, "/");
-    ApplyProps(properties, extra_props);
+    Properties mutable_properties;
+    SetValue(mutable_properties, PROPERTY_FS_ROOT_PATH, "/");
+    ApplyProps(mutable_properties, extra_props);
+    const auto properties = std::make_shared<const Properties>(std::move(mutable_properties));
     FilesystemCache::getInstance().clean();
 
     // 1. Explore source → get ColumnGroupFiles
@@ -565,7 +567,7 @@ static int DoCreate(int argc, char** argv) {
 
 /// Read and deserialize a manifest file, returning the Manifest object.
 static arrow::Result<std::shared_ptr<Manifest>> ReadManifest(const std::string& manifest_path,
-                                                             const Properties& properties) {
+                                                             const std::shared_ptr<const Properties>& properties) {
   ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, manifest_path));
   return Manifest::ReadFrom(fs, manifest_path);
 }
@@ -588,9 +590,10 @@ static int DoDescribe(int argc, char** argv) {
   try {
     manifest_path = ResolvePath(manifest_path);
 
-    Properties properties;
-    SetValue(properties, PROPERTY_FS_ROOT_PATH, "/");
-    ApplyProps(properties, extra_props);
+    Properties mutable_properties;
+    SetValue(mutable_properties, PROPERTY_FS_ROOT_PATH, "/");
+    ApplyProps(mutable_properties, extra_props);
+    const auto properties = std::make_shared<const Properties>(std::move(mutable_properties));
     FilesystemCache::getInstance().clean();
 
     auto manifest_res = ReadManifest(manifest_path, properties);
@@ -711,9 +714,10 @@ static int DoRead(int argc, char** argv) {
     manifest_path = ResolvePath(manifest_path);
 
     // Build properties — default to local filesystem with root "/"
-    Properties properties;
-    SetValue(properties, PROPERTY_FS_ROOT_PATH, "/");
-    ApplyProps(properties, extra_props);
+    Properties mutable_properties;
+    SetValue(mutable_properties, PROPERTY_FS_ROOT_PATH, "/");
+    ApplyProps(mutable_properties, extra_props);
+    const auto properties = std::make_shared<const Properties>(std::move(mutable_properties));
     FilesystemCache::getInstance().clean();
 
     // 1. Read manifest

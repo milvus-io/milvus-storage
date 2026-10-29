@@ -639,8 +639,8 @@ class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std:
   protected:
   void SetUp() override {
     ASSERT_STATUS_OK(InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_config_, GetFileSystemConfig(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_config_, GetFileSystemConfig(std::make_shared<const api::Properties>(properties_)));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
     ASSERT_STATUS_OK(MirrorDefaultExternalFilesystemConfig());
 
     base_path_ = GetTestBasePath("format-reader-cache-stress-" + GetParam());
@@ -668,7 +668,8 @@ class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std:
     }
 
     ARROW_ASSIGN_OR_RAISE(auto policy, CreateSinglePolicy(format, schema_));
-    auto writer = api::Writer::create(base_path_, schema_, std::move(policy), properties_);
+    auto writer = api::Writer::create(base_path_, schema_, std::move(policy),
+                                      std::make_shared<const api::Properties>(properties_));
     if (!writer) {
       return arrow::Status::Invalid("Writer::create returned null");
     }
@@ -1196,7 +1197,7 @@ TEST_P(FormatReaderMetadataCacheStressTest, ConcurrentReaderCacheOpenAndRead) {
   ASSERT_NE((*cgs)[0], nullptr);
   ASSERT_FALSE((*cgs)[0]->files.empty());
 
-  auto reader = api::Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = api::Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   ASSERT_AND_ASSIGN(auto iterations, RunConcurrentReadStress(reader.get()));

@@ -71,7 +71,7 @@ uint64_t EstimateDeleteChargeBytes(const std::vector<uint8_t>& delete_metadata,
 
 arrow::Status ReadPositionalDeleteFile(const std::string& delete_file_path,
                                        const std::string& data_file_uri,
-                                       const api::Properties& properties,
+                                       const std::shared_ptr<const api::Properties>& properties,
                                        std::unordered_set<int64_t>* deleted_positions) {
   if (!deleted_positions) {
     return arrow::Status::Invalid("Deleted positions output cannot be null");
@@ -139,7 +139,9 @@ arrow::Status ReadPositionalDeleteFile(const std::string& delete_file_path,
 }
 
 arrow::Result<std::shared_ptr<const std::unordered_set<int64_t>>> LoadPositionalDeletes(
-    const std::vector<uint8_t>& delete_metadata, const std::string& data_file_uri, const api::Properties& properties) {
+    const std::vector<uint8_t>& delete_metadata,
+    const std::string& data_file_uri,
+    const std::shared_ptr<const api::Properties>& properties) {
   auto deleted_positions = std::make_shared<std::unordered_set<int64_t>>();
   if (delete_metadata.empty()) {
     return std::static_pointer_cast<const std::unordered_set<int64_t>>(deleted_positions);
@@ -193,7 +195,7 @@ std::string IcebergFormatReader::MetaTrait::cache_key(const api::ColumnGroupFile
 
 arrow::Result<IcebergFormatReader::MetaTrait::MetadataPtr> IcebergFormatReader::MetaTrait::load_metadata(
     const api::ColumnGroupFile& file,
-    const api::Properties& properties,
+    const std::shared_ptr<const api::Properties>& properties,
     const milvus_storage::KeyRetriever& key_retriever) {
   ARROW_ASSIGN_OR_RAISE(auto data_metadata,
                         parquet::ParquetFormatReader::MetaTrait::load_metadata(file, properties, key_retriever));
@@ -259,7 +261,7 @@ IcebergFormatReader::IcebergFormatReader(const std::shared_ptr<arrow::fs::FileSy
                                          const std::string& resolved_path,
                                          const std::string& data_file_uri,
                                          const std::vector<uint8_t>& delete_metadata,
-                                         const api::Properties& properties,
+                                         const std::shared_ptr<const api::Properties>& properties,
                                          const std::vector<std::string>& needed_columns,
                                          const std::function<std::string(const std::string&)>& key_retriever)
     : inner_reader_(
@@ -274,7 +276,7 @@ IcebergFormatReader::IcebergFormatReader(const std::shared_ptr<arrow::fs::FileSy
 
 IcebergFormatReader::IcebergFormatReader(std::shared_ptr<parquet::ParquetFormatReader> inner,
                                          const std::string& data_file_uri,
-                                         const api::Properties& properties,
+                                         const std::shared_ptr<const api::Properties>& properties,
                                          std::vector<uint8_t> delete_metadata,
                                          std::shared_ptr<const std::unordered_set<int64_t>> deleted_positions,
                                          std::shared_ptr<const std::vector<int64_t>> sorted_deletions,

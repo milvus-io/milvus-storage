@@ -54,8 +54,8 @@ arrow::Result<Format*> Format::get(const std::string& format) {
   return arrow::Status::Invalid(fmt::format("Unknown file format: {}", format));
 }
 
-arrow::Result<std::vector<api::ColumnGroupFile>> PlainFormat::explore(const std::string& explore_dir,
-                                                                      const api::Properties& properties) {
+arrow::Result<std::vector<api::ColumnGroupFile>> PlainFormat::explore(
+    const std::string& explore_dir, const std::shared_ptr<const api::Properties>& properties) {
   // Resolve URI — keep full parsed URI for constructing file URIs later
   ARROW_ASSIGN_OR_RAISE(auto explore_uri, StorageUri::Parse(explore_dir));
 
@@ -108,7 +108,7 @@ arrow::Result<std::vector<api::ColumnGroupFile>> PlainFormat::explore(const std:
 folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> Format::create_reader_async(
     const std::shared_ptr<arrow::Schema>& read_schema,
     const api::ColumnGroupFile& file,
-    const api::Properties& properties,
+    const std::shared_ptr<const api::Properties>& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& key_retriever) {
   // Compatibility fallback only: create_reader() runs synchronously before the
@@ -119,7 +119,7 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> Format::create_r
 arrow::Result<std::shared_ptr<FormatReader>> PlainFormat::create_reader(
     const std::shared_ptr<arrow::Schema>& read_schema,
     const api::ColumnGroupFile& file,
-    const api::Properties& properties,
+    const std::shared_ptr<const api::Properties>& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& key_retriever) {
   ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, file.path));
@@ -134,7 +134,7 @@ arrow::Result<std::shared_ptr<FormatReader>> PlainFormat::create_reader(
 folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> PlainFormat::create_reader_async(
     const std::shared_ptr<arrow::Schema>& read_schema,
     const api::ColumnGroupFile& file,
-    const api::Properties& properties,
+    const std::shared_ptr<const api::Properties>& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& key_retriever) {
   // Delay filesystem lookup and reader construction until the future is consumed.
@@ -161,7 +161,7 @@ arrow::Result<std::unique_ptr<FormatWriter>> PlainFormat::create_writer(
     const std::shared_ptr<arrow::Schema>& schema,
     const std::string& file_path,
     const std::string& /*base_path*/,
-    const api::Properties& properties) {
+    const std::shared_ptr<const api::Properties>& properties) {
   return make_writer(fs, schema, file_path, properties);
 }
 

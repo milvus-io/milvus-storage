@@ -74,11 +74,11 @@ static std::shared_ptr<arrow::Buffer> try_read_footer_buffer(const std::shared_p
 static std::shared_ptr<::parquet::FileMetaData> try_parse_footer_metadata(
     const std::shared_ptr<arrow::Buffer>& suffix, const ::parquet::ReaderProperties& reader_props);
 static arrow::Result<::parquet::ArrowReaderProperties> make_arrow_reader_properties(
-    const milvus_storage::api::Properties& properties);
+    const std::shared_ptr<const milvus_storage::api::Properties>& properties);
 static arrow::Result<std::shared_ptr<::parquet::arrow::FileReader>> create_parquet_file_reader(
     const std::shared_ptr<arrow::fs::FileSystem>& fs,
     const std::string& file_path,
-    const milvus_storage::api::Properties& properties,
+    const std::shared_ptr<const milvus_storage::api::Properties>& properties,
     const std::function<std::string(const std::string&)>& key_retriever,
     std::shared_ptr<::parquet::FileMetaData> metadata = nullptr,
     uint64_t file_size = 0,
@@ -248,7 +248,7 @@ static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos_from_meta
 
 ParquetFormatReader::ParquetFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                          const std::string& path,
-                                         const milvus_storage::api::Properties& properties,
+                                         const std::shared_ptr<const milvus_storage::api::Properties>& properties,
                                          const std::vector<std::string>& needed_columns,
                                          const std::function<std::string(const std::string&)>& key_retriever,
                                          uint64_t file_size,
@@ -353,7 +353,7 @@ static std::shared_ptr<::parquet::FileMetaData> try_parse_footer_metadata(
 static arrow::Result<std::shared_ptr<::parquet::arrow::FileReader>> create_parquet_file_reader(
     const std::shared_ptr<arrow::fs::FileSystem>& fs,
     const std::string& file_path,
-    const milvus_storage::api::Properties& properties,
+    const std::shared_ptr<const milvus_storage::api::Properties>& properties,
     const std::function<std::string(const std::string&)>& key_retriever,
     std::shared_ptr<::parquet::FileMetaData> metadata,
     uint64_t file_size,
@@ -392,7 +392,7 @@ static arrow::Result<std::shared_ptr<::parquet::arrow::FileReader>> create_parqu
 }
 
 static arrow::Result<::parquet::ArrowReaderProperties> make_arrow_reader_properties(
-    const milvus_storage::api::Properties& properties) {
+    const std::shared_ptr<const milvus_storage::api::Properties>& properties) {
   auto arrow_reader_props = ::parquet::default_arrow_reader_properties();
   arrow_reader_props.set_batch_size(INT64_MAX);
   arrow_reader_props.set_pre_buffer(true);
@@ -470,7 +470,7 @@ arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::
 
 arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::MetaTrait::load_metadata(
     const api::ColumnGroupFile& file,
-    const api::Properties& properties,
+    const std::shared_ptr<const api::Properties>& properties,
     const milvus_storage::KeyRetriever& key_retriever) {
   ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, file.path));
   ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
@@ -483,7 +483,7 @@ arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::
 
 folly::SemiFuture<arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr>>
 ParquetFormatReader::MetaTrait::load_metadata_async(const api::ColumnGroupFile& file,
-                                                    const api::Properties& properties,
+                                                    const std::shared_ptr<const api::Properties>& properties,
                                                     const milvus_storage::KeyRetriever& key_retriever) {
   // Metadata loading is deferred so same-key cache followers can join the
   // singleflight before footer work starts.

@@ -38,7 +38,7 @@ enum class AsyncTaskSplitStrategy : size_t {
 
 // Resolve reader.async.task_split_strategy; unknown values use the default
 // split-to-parallelism policy.
-AsyncTaskSplitStrategy GetAsyncTaskSplitStrategy(const Properties& properties);
+AsyncTaskSplitStrategy GetAsyncTaskSplitStrategy(const std::shared_ptr<const Properties>& properties);
 
 // One natural chunk task covers a contiguous half-open row range in one file.
 // Splitting preserves the file and range-continuity invariant.

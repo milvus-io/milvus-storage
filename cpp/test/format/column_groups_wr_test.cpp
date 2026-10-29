@@ -46,7 +46,7 @@ class ColumnGroupsWRTest : public ::testing::TestWithParam<std::tuple<std::strin
   void SetUp() override {
     // Create temporary directory for test files
     ASSERT_STATUS_OK(InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
 
     base_path_ = GetTestBasePath("column-group-writer-reader-test");
     ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
@@ -84,7 +84,8 @@ class ColumnGroupsWRTest : public ::testing::TestWithParam<std::tuple<std::strin
     // two files, col0 is [0~25600], col1 always (1024 * 4)B used to fill row groups
     for (int i = 0; i < 2; i++) {
       ARROW_ASSIGN_OR_RAISE(auto policy, CreateSinglePolicy(format, schema));
-      auto writer = Writer::create(base_path_, schema, std::move(policy), properties_);
+      auto writer =
+          Writer::create(base_path_, schema, std::move(policy), std::make_shared<const api::Properties>(properties_));
 
       // Write test data
       for (int j = 0; j < 100; ++j) {
@@ -186,7 +187,8 @@ TEST_P(ColumnGroupsWRTest, TestGetChunksSliced) {
   std::vector<std::string> patterns = {"id|name|value|vector"};
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns[0], format, schema_));
 
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
 
   // Write test data in parallel
   for (int i = 0; i < total_rows / 1000; ++i) {
@@ -199,7 +201,7 @@ TEST_P(ColumnGroupsWRTest, TestGetChunksSliced) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Read and verify data
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
 
   std::vector<int64_t> row_indices;
@@ -258,11 +260,13 @@ TEST_P(ColumnGroupsWRTest, TestStartEndIndex) {
   std::tie(file_cg, expected_ids) = generate_test_external_cg(cgsvec, format == LOON_FORMAT_LANCE_TABLE);
 
   // make sure vortex chunk rows is 256
-  ASSERT_AND_ASSIGN(auto origin_chunk_rows, GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
+  ASSERT_AND_ASSIGN(auto origin_chunk_rows, GetValue<uint64_t>(std::make_shared<const api::Properties>(properties_),
+                                                               PROPERTY_READER_LOGICAL_CHUNK_ROWS));
   EXPECT_EQ(SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "256"), std::nullopt);
 
   // reader
-  ASSERT_AND_ASSIGN(auto chunk_reader, ColumnGroupReader::create(two_cols_schema, file_cg, {"id"}, properties_,
+  ASSERT_AND_ASSIGN(auto chunk_reader, ColumnGroupReader::create(two_cols_schema, file_cg, {"id"},
+                                                                 std::make_shared<const api::Properties>(properties_),
                                                                  nullptr /* key_retriever */));
   auto total_number_of_chunks = chunk_reader->total_number_of_chunks();
   auto total_rows = chunk_reader->total_rows();
@@ -326,12 +330,15 @@ TEST_P(ColumnGroupsWRTest, TestTake) {
   std::tie(file_cg, expected_ids) = generate_test_external_cg(cgsvec, format == LOON_FORMAT_LANCE_TABLE);
 
   // make sure vortex chunk rows is 256
-  ASSERT_AND_ASSIGN(auto origin_chunk_rows, GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
+  ASSERT_AND_ASSIGN(auto origin_chunk_rows, GetValue<uint64_t>(std::make_shared<const api::Properties>(properties_),
+                                                               PROPERTY_READER_LOGICAL_CHUNK_ROWS));
   EXPECT_EQ(SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "256"), std::nullopt);
 
   // reader
-  ASSERT_AND_ASSIGN(auto take_reader, ColumnGroupLazyReader::create(two_cols_schema, file_cg, properties_, {"id"},
-                                                                    nullptr /* key_retriever */));
+  ASSERT_AND_ASSIGN(
+      auto take_reader,
+      ColumnGroupLazyReader::create(two_cols_schema, file_cg, std::make_shared<const api::Properties>(properties_),
+                                    {"id"}, nullptr /* key_retriever */));
 
   auto do_take = [parallelism = parallelism_](
                      const auto& reader,
@@ -381,12 +388,14 @@ TEST_P(ColumnGroupsWRTest, TestFullProjection) {
   std::vector<std::string> patterns = {"id|name,value|vector"};
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns[0], format, schema_));
 
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
   ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema_, (*cgs)[0], {"id", "name", "value", "vector"},
-                                                                properties_, nullptr /* key_retriever */));
+                                                                std::make_shared<const api::Properties>(properties_),
+                                                                nullptr /* key_retriever */));
 
   ASSERT_GT(reader->total_number_of_chunks(), 0);
   ASSERT_AND_ASSIGN(auto chunk, reader->get_chunk(0));
@@ -397,7 +406,8 @@ TEST_P(ColumnGroupsWRTest, TestProjection) {
   std::vector<std::string> patterns = {"id|name|value|vector"};
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns[0], format, schema_));
 
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   ASSERT_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
@@ -412,7 +422,8 @@ TEST_P(ColumnGroupsWRTest, TestProjection) {
                                                              {"name", "id"}};
 
   for (const auto& col_names : valid_projections) {
-    ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema_, (*cgs)[0], col_names, properties_,
+    ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema_, (*cgs)[0], col_names,
+                                                                  std::make_shared<const api::Properties>(properties_),
                                                                   nullptr /* key_retriever */));
 
     ASSERT_GT(reader->total_number_of_chunks(), 0);
@@ -432,7 +443,8 @@ TEST_P(ColumnGroupsWRTest, TestProjection) {
       {"no-exist1", "no-exist2", "no-exist3", "id"},
       {"no-exist1", "no-exist2", "no-exist3", "no-exist4", "id"}};
   for (const auto& col_names : projections_with_invalid_columns) {
-    ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema_, (*cgs)[0], col_names, properties_,
+    ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema_, (*cgs)[0], col_names,
+                                                                  std::make_shared<const api::Properties>(properties_),
                                                                   nullptr /* key_retriever */));
     ASSERT_GT(reader->total_number_of_chunks(), 0);
     ASSERT_AND_ASSIGN(auto chunk, reader->get_chunk(0));
@@ -487,7 +499,8 @@ TEST_P(ColumnGroupsWRTest, TestMultiFileGroupBuildLoonReadsAllRows) {
 
   // Read back through the native packed reader and pin total rows == sum of
   // per-file row counts (regression: file 2+ used to disappear silently).
-  ASSERT_AND_ASSIGN(auto chunk_reader, ColumnGroupReader::create(two_cols_schema, imported[0], {"id"}, properties_,
+  ASSERT_AND_ASSIGN(auto chunk_reader, ColumnGroupReader::create(two_cols_schema, imported[0], {"id"},
+                                                                 std::make_shared<const api::Properties>(properties_),
                                                                  nullptr /* key_retriever */));
   const int64_t expected_total = rows0 + rows1;
   EXPECT_EQ(chunk_reader->total_rows(), static_cast<size_t>(expected_total));
@@ -512,11 +525,14 @@ TEST_P(ColumnGroupsWRTest, TestTakeAsync) {
   std::vector<int64_t> expected_ids;
   std::tie(file_cg, expected_ids) = generate_test_external_cg(cgsvec, format == LOON_FORMAT_LANCE_TABLE);
 
-  ASSERT_AND_ASSIGN(auto origin_chunk_rows, GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
+  ASSERT_AND_ASSIGN(auto origin_chunk_rows, GetValue<uint64_t>(std::make_shared<const api::Properties>(properties_),
+                                                               PROPERTY_READER_LOGICAL_CHUNK_ROWS));
   EXPECT_EQ(SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "256"), std::nullopt);
 
-  ASSERT_AND_ASSIGN(auto take_reader, ColumnGroupLazyReader::create(two_cols_schema, file_cg, properties_, {"id"},
-                                                                    nullptr /* key_retriever */));
+  ASSERT_AND_ASSIGN(
+      auto take_reader,
+      ColumnGroupLazyReader::create(two_cols_schema, file_cg, std::make_shared<const api::Properties>(properties_),
+                                    {"id"}, nullptr /* key_retriever */));
 
   auto verify_take_result = [](const auto& result_batch, const std::vector<int64_t>& expect_id,
                                const auto& row_indices) {
@@ -593,7 +609,7 @@ TEST_P(ColumnGroupsWRTest, BytesSplitPreservesSlicedChunksAndRequestOrder) {
     groups->push_back(cg);
     auto reader = Reader::create(groups, schema,
                                  std::make_shared<std::vector<std::string>>(std::initializer_list<std::string>{"id"}),
-                                 properties_);
+                                 std::make_shared<const api::Properties>(properties_));
     ASSERT_AND_ASSIGN(auto chunks, reader->get_chunk_reader(0));
     ASSERT_AND_ASSIGN(auto rows, chunks->get_chunk_rows());
     ASSERT_GT(rows.size(), 1);
@@ -618,7 +634,8 @@ TEST_P(ColumnGroupsWRTest, TestGetChunksAsync) {
   std::vector<std::string> patterns = {"id|name|value|vector"};
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns[0], format, schema_));
 
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   for (int i = 0; i < total_rows / 1000; ++i) {
     ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, 0, true, 1000, (i % 24) + 1));
     ASSERT_OK(writer->write(batch));
@@ -628,7 +645,8 @@ TEST_P(ColumnGroupsWRTest, TestGetChunksAsync) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   ASSERT_AND_ASSIGN(auto chunk_reader, ColumnGroupReader::create(schema_, (*cgs)[0], {"id", "name", "value", "vector"},
-                                                                 properties_, nullptr /* key_retriever */));
+                                                                 std::make_shared<const api::Properties>(properties_),
+                                                                 nullptr /* key_retriever */));
 
   auto total_chunks = chunk_reader->total_number_of_chunks();
   ASSERT_GT(total_chunks, 0);
@@ -673,7 +691,8 @@ TEST_P(ColumnGroupsWRTest, GetChunksFailWithParallelism) {
   std::vector<std::string> patterns = {"id|name|value|vector"};
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns[0], format, schema_));
 
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
   for (int i = 0; i < total_rows / 1000; ++i) {
     ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, 0, true, 1000, (i % 24) + 1));
     ASSERT_OK(writer->write(batch));
@@ -683,7 +702,8 @@ TEST_P(ColumnGroupsWRTest, GetChunksFailWithParallelism) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   ASSERT_AND_ASSIGN(auto chunk_reader, ColumnGroupReader::create(schema_, (*cgs)[0], {"id", "name", "value", "vector"},
-                                                                 properties_, nullptr /* key_retriever */));
+                                                                 std::make_shared<const api::Properties>(properties_),
+                                                                 nullptr /* key_retriever */));
 
   auto total_chunks = chunk_reader->total_number_of_chunks();
   ASSERT_GT(total_chunks, 0);

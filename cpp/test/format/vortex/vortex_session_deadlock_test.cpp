@@ -308,7 +308,7 @@ TEST(VortexSessionDeadlockTest, DISABLED_ChildWrite) {
 
   api::Properties properties;
   ASSERT_STATUS_OK(ConfigureReproProperties(properties));
-  ASSERT_AND_ASSIGN(auto file_system, GetFileSystem(properties));
+  ASSERT_AND_ASSIGN(auto file_system, GetFileSystem(std::make_shared<const api::Properties>(properties)));
   ASSERT_AND_ASSIGN(auto schema, MakeIssueSchema());
   const auto group0_schema = SelectSchema(schema, {"100", "0", "1"});
   const auto group1_schema = SelectSchema(schema, {"102"});
@@ -318,9 +318,12 @@ TEST(VortexSessionDeadlockTest, DISABLED_ChildWrite) {
                ReproFormatVersion());
   std::fflush(stderr);
 
-  ASSERT_AND_ASSIGN(auto group0_writer, VortexFileWriter::Open(file_system, group0_schema, kGroup0Path, properties));
-  ASSERT_AND_ASSIGN(auto group1_writer, VortexFileWriter::Open(file_system, group1_schema, kGroup1Path, properties));
-  ASSERT_AND_ASSIGN(auto group2_writer, VortexFileWriter::Open(file_system, group2_schema, kGroup2Path, properties));
+  ASSERT_AND_ASSIGN(auto group0_writer, VortexFileWriter::Open(file_system, group0_schema, kGroup0Path,
+                                                               std::make_shared<const api::Properties>(properties)));
+  ASSERT_AND_ASSIGN(auto group1_writer, VortexFileWriter::Open(file_system, group1_schema, kGroup1Path,
+                                                               std::make_shared<const api::Properties>(properties)));
+  ASSERT_AND_ASSIGN(auto group2_writer, VortexFileWriter::Open(file_system, group2_schema, kGroup2Path,
+                                                               std::make_shared<const api::Properties>(properties)));
 
   std::mt19937 issue_rng(kIssueSeed);
   std::mt19937 vector_rng(kIssueSeed);
@@ -359,7 +362,7 @@ TEST(VortexSessionDeadlockTest, DISABLED_Issue54615NullableVectorArrayWriteClose
   api::Properties properties;
   ASSERT_STATUS_OK(ConfigureReproProperties(properties));
   api::SetValue(properties, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "true");
-  ASSERT_AND_ASSIGN(auto file_system, GetFileSystem(properties));
+  ASSERT_AND_ASSIGN(auto file_system, GetFileSystem(std::make_shared<const api::Properties>(properties)));
 
   // Milvus flattens ArrayOfStruct subfields into separate columns. Its
   // ArrayOfVector leaf is a nullable List<FixedSizeBinary(dim * sizeof(float))>.
@@ -385,7 +388,8 @@ TEST(VortexSessionDeadlockTest, DISABLED_Issue54615NullableVectorArrayWriteClose
   ASSERT_STATUS_OK(batch->ValidateFull());
 
   constexpr char kPath[] = "issue54615-nullable-vector-array.vortex";
-  ASSERT_AND_ASSIGN(auto writer, VortexFileWriter::Open(file_system, schema, kPath, properties));
+  ASSERT_AND_ASSIGN(auto writer, VortexFileWriter::Open(file_system, schema, kPath,
+                                                        std::make_shared<const api::Properties>(properties)));
   ASSERT_STATUS_OK(writer->Write(batch));
   // Small writes can return while statistics are still being computed. Close
   // must wait for List offset normalization / Arrow arithmetic to finish.
@@ -396,7 +400,7 @@ TEST(VortexSessionDeadlockTest, DISABLED_Issue54615NullableVectorArrayWriteClose
   std::fprintf(stderr, "issue54615: close completed\n");
   std::fflush(stderr);
 
-  VortexFormatReader reader(file_system, schema, kPath, properties, {"104"});
+  VortexFormatReader reader(file_system, schema, kPath, std::make_shared<const api::Properties>(properties), {"104"});
   ASSERT_STATUS_OK(reader.open());
   ASSERT_AND_ASSIGN(auto actual, reader.get_chunk(0));
   ASSERT_STATUS_OK(actual->ValidateFull());
@@ -478,7 +482,7 @@ TEST(VortexSessionDeadlockTest, DISABLED_ChildRead) {
 
   api::Properties properties;
   ASSERT_STATUS_OK(ConfigureReproProperties(properties));
-  ASSERT_AND_ASSIGN(auto file_system, GetFileSystem(properties));
+  ASSERT_AND_ASSIGN(auto file_system, GetFileSystem(std::make_shared<const api::Properties>(properties)));
   ASSERT_AND_ASSIGN(auto schema, MakeIssueSchema());
 
   auto group0 = std::make_shared<api::ColumnGroup>(MakeColumnGroup({"100", "0", "1"}, kGroup0Path, 0, 0));
@@ -490,9 +494,14 @@ TEST(VortexSessionDeadlockTest, DISABLED_ChildRead) {
   // column-group path.  The file sizes are optional for local files; open()
   // obtains them from the footer when the supplied value is zero.
   ASSERT_AND_ASSIGN(auto reader0,
-                    api::ColumnGroupReader::create(schema, group0, {"100", "0", "1"}, properties, nullptr));
-  ASSERT_AND_ASSIGN(auto reader1, api::ColumnGroupReader::create(schema, group1, {"102"}, properties, nullptr));
-  ASSERT_AND_ASSIGN(auto reader2, api::ColumnGroupReader::create(schema, group2, {"101"}, properties, nullptr));
+                    api::ColumnGroupReader::create(schema, group0, {"100", "0", "1"},
+                                                   std::make_shared<const api::Properties>(properties), nullptr));
+  ASSERT_AND_ASSIGN(auto reader1,
+                    api::ColumnGroupReader::create(schema, group1, {"102"},
+                                                   std::make_shared<const api::Properties>(properties), nullptr));
+  ASSERT_AND_ASSIGN(auto reader2,
+                    api::ColumnGroupReader::create(schema, group2, {"101"},
+                                                   std::make_shared<const api::Properties>(properties), nullptr));
 
   std::array<std::unique_ptr<api::ColumnGroupReader>*, 3> readers{&reader0, &reader1, &reader2};
   std::array<std::vector<int64_t>, 3> chunk_indices;

@@ -496,7 +496,7 @@ TEST_F(IcebergBridgeTest, PlanFilesSurvivesFilesystemCacheClearDuringInflightRea
   api::SetValue(properties, PROPERTY_FS_ROOT_PATH, "/");
   auto& cache = FilesystemCache::getInstance();
   cache.clean();
-  ASSERT_AND_ASSIGN(auto cached_filesystem, GetFileSystem(properties));
+  ASSERT_AND_ASSIGN(auto cached_filesystem, GetFileSystem(std::make_shared<const api::Properties>(properties)));
   ASSERT_EQ(cache.size(), 1);
 
   auto lifecycle = std::make_shared<AsyncReaderLifecycleState>();

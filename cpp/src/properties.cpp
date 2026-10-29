@@ -728,9 +728,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
 };
 
 template <typename T>
-arrow::Result<T> GetValue(const Properties& properties, const char* key) {
-  auto it = properties.find(key);
-  if (it == properties.end()) {
+arrow::Result<T> GetValue(const std::shared_ptr<const Properties>& properties, const char* key) {
+  if (!properties) {
+    return arrow::Status::Invalid("Properties must not be null");
+  }
+  auto it = properties->find(key);
+  if (it == properties->end()) {
     auto pisit = property_infos.find(key);
     if (pisit == property_infos.end()) {
       return arrow::Status::Invalid(fmt::format("[key={}] not found(no predefined and no inserted)", std::string(key)));
@@ -750,18 +753,20 @@ arrow::Result<T> GetValue(const Properties& properties, const char* key) {
   return std::get<T>(it->second);
 }
 
-template arrow::Result<std::string> GetValue<std::string>(const Properties&, const char*);
-template arrow::Result<int32_t> GetValue<int32_t>(const Properties&, const char*);
-template arrow::Result<int64_t> GetValue<int64_t>(const Properties&, const char*);
-template arrow::Result<uint32_t> GetValue<uint32_t>(const Properties&, const char*);
-template arrow::Result<uint64_t> GetValue<uint64_t>(const Properties&, const char*);
-template arrow::Result<bool> GetValue<bool>(const Properties&, const char*);
-template arrow::Result<std::vector<std::string>> GetValue<std::vector<std::string>>(const Properties&, const char*);
+template arrow::Result<std::string> GetValue<std::string>(const std::shared_ptr<const Properties>&, const char*);
+template arrow::Result<int32_t> GetValue<int32_t>(const std::shared_ptr<const Properties>&, const char*);
+template arrow::Result<int64_t> GetValue<int64_t>(const std::shared_ptr<const Properties>&, const char*);
+template arrow::Result<uint32_t> GetValue<uint32_t>(const std::shared_ptr<const Properties>&, const char*);
+template arrow::Result<uint64_t> GetValue<uint64_t>(const std::shared_ptr<const Properties>&, const char*);
+template arrow::Result<bool> GetValue<bool>(const std::shared_ptr<const Properties>&, const char*);
+template arrow::Result<std::vector<std::string>> GetValue<std::vector<std::string>>(
+    const std::shared_ptr<const Properties>&, const char*);
 
 template <typename T>
-T GetValueNoError(const Properties& properties, const char* key) {
-  auto it = properties.find(key);
-  if (it == properties.end()) {
+T GetValueNoError(const std::shared_ptr<const Properties>& properties, const char* key) {
+  assert(properties);
+  auto it = properties->find(key);
+  if (it == properties->end()) {
     auto pisit = property_infos.find(key);
     assert(pisit != property_infos.end() && "key not found(no predefined and no inserted)");
     return std::get<T>(pisit->second.defval);
@@ -771,13 +776,14 @@ T GetValueNoError(const Properties& properties, const char* key) {
   return std::get<T>(it->second);
 }
 
-template std::string GetValueNoError<std::string>(const Properties&, const char*);
-template int32_t GetValueNoError<int32_t>(const Properties&, const char*);
-template int64_t GetValueNoError<int64_t>(const Properties&, const char*);
-template uint32_t GetValueNoError<uint32_t>(const Properties&, const char*);
-template uint64_t GetValueNoError<uint64_t>(const Properties&, const char*);
-template bool GetValueNoError<bool>(const Properties&, const char*);
-template std::vector<std::string> GetValueNoError<std::vector<std::string>>(const Properties&, const char*);
+template std::string GetValueNoError<std::string>(const std::shared_ptr<const Properties>&, const char*);
+template int32_t GetValueNoError<int32_t>(const std::shared_ptr<const Properties>&, const char*);
+template int64_t GetValueNoError<int64_t>(const std::shared_ptr<const Properties>&, const char*);
+template uint32_t GetValueNoError<uint32_t>(const std::shared_ptr<const Properties>&, const char*);
+template uint64_t GetValueNoError<uint64_t>(const std::shared_ptr<const Properties>&, const char*);
+template bool GetValueNoError<bool>(const std::shared_ptr<const Properties>&, const char*);
+template std::vector<std::string> GetValueNoError<std::vector<std::string>>(const std::shared_ptr<const Properties>&,
+                                                                            const char*);
 
 std::optional<std::string> SetValue(Properties& properties,
                                     const char* key,
@@ -806,17 +812,26 @@ std::optional<std::string> SetValue(Properties& properties,
   return std::nullopt;
 }
 
-std::optional<std::string> ConvertFFIProperties(Properties& result, const ::LoonProperties* properties) {
-  if (properties && properties->properties && properties->count > 0) {
-    for (size_t i = 0; i < properties->count; ++i) {
-      const auto& prop = properties->properties[i];
-      assert(prop.key && prop.value);
-      if (auto rc = SetValue(result, prop.key, prop.value, true); rc != std::nullopt) {
-        return rc;
-      }
+std::optional<std::string> ConvertFFIProperties(std::shared_ptr<const Properties>& result,
+                                                const ::LoonProperties* properties) {
+  if (!properties || !properties->properties || properties->count == 0) {
+    if (!result) {
+      result = std::make_shared<const Properties>();
     }
+    return std::nullopt;
   }
 
+  // FFI entry points start with a null result, so parsing builds the only map.
+  // When merging into an existing snapshot, copy once without mutating its owners.
+  Properties values = result ? *result : Properties{};
+  for (size_t i = 0; i < properties->count; ++i) {
+    const auto& prop = properties->properties[i];
+    assert(prop.key && prop.value);
+    if (auto rc = SetValue(values, prop.key, prop.value, true); rc != std::nullopt) {
+      return rc;
+    }
+  }
+  result = std::make_shared<const Properties>(std::move(values));
   return std::nullopt;
 }
 

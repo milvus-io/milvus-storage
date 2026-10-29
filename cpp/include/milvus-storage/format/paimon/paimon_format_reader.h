@@ -57,7 +57,7 @@ class PaimonFormatReader final : public FormatReader {
 
     static std::string cache_key(const api::ColumnGroupFile& file);
     static arrow::Result<MetadataPtr> load_metadata(const api::ColumnGroupFile& file,
-                                                    const api::Properties& properties,
+                                                    const std::shared_ptr<const api::Properties>& properties,
                                                     const KeyRetriever& key_retriever);
     static arrow::Result<std::shared_ptr<PaimonFormatReader>> create_from_metadata(
         MetadataPtr metadata,

@@ -55,7 +55,7 @@ class VortexV2RowGroupSizeTest : public ::testing::Test {
 
     ASSERT_STATUS_OK(InitTestProperties(properties_));
     api::SetValue(properties_, PROPERTY_WRITER_VORTEX_FORMAT_VERSION, "2");
-    ASSERT_AND_ASSIGN(file_system_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(file_system_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
   }
 
   void TearDown() override {
@@ -278,7 +278,9 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupCountUsesLogicalSizeForSlicedUtf8
   ASSERT_STATUS_OK(builder.Finish(&full_array));
 
   auto test_path = RegisterTestPath("sliced-utf8");
-  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, str_schema, test_path, properties_));
+  ASSERT_AND_ASSIGN(auto vx_writer,
+                    vortex::VortexFileWriter::Open(file_system_, str_schema, test_path,
+                                                   std::make_shared<const api::Properties>(properties_)));
   for (int64_t offset = 0; offset < total_rows; offset += rows_per_slice) {
     auto slice_len = std::min<int64_t>(rows_per_slice, total_rows - offset);
     auto rb = arrow::RecordBatch::Make(str_schema, slice_len, {full_array->Slice(offset, slice_len)});
@@ -290,7 +292,8 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupCountUsesLogicalSizeForSlicedUtf8
 
   auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
   auto vx_file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
-  auto vx_reader = vortex::VortexFormatReader(file_system_, str_schema, test_path, properties_,
+  auto vx_reader = vortex::VortexFormatReader(file_system_, str_schema, test_path,
+                                              std::make_shared<const api::Properties>(properties_),
                                               std::vector<std::string>{"str"}, vx_file_size, vx_footer_size);
   ASSERT_STATUS_OK(vx_reader.open());
 
@@ -331,7 +334,9 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupCountUsesLogicalSizeForSlicedStri
   ASSERT_STATUS_OK(builder.Finish(&full_array));
 
   auto test_path = RegisterTestPath("sliced-utf8-view");
-  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, schema, test_path, properties_));
+  ASSERT_AND_ASSIGN(auto vx_writer,
+                    vortex::VortexFileWriter::Open(file_system_, schema, test_path,
+                                                   std::make_shared<const api::Properties>(properties_)));
   for (int64_t offset = 0; offset < total_rows; offset += rows_per_slice) {
     auto slice_len = std::min<int64_t>(rows_per_slice, total_rows - offset);
     auto rb = arrow::RecordBatch::Make(schema, slice_len, {full_array->Slice(offset, slice_len)});
@@ -343,8 +348,9 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupCountUsesLogicalSizeForSlicedStri
 
   auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
   auto vx_file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
-  auto vx_reader = vortex::VortexFormatReader(file_system_, schema, test_path, properties_,
-                                              std::vector<std::string>{"str"}, vx_file_size, vx_footer_size);
+  auto vx_reader =
+      vortex::VortexFormatReader(file_system_, schema, test_path, std::make_shared<const api::Properties>(properties_),
+                                 std::vector<std::string>{"str"}, vx_file_size, vx_footer_size);
   ASSERT_STATUS_OK(vx_reader.open());
 
   ASSERT_AND_ASSIGN(auto rg_infos, vx_reader.get_row_group_infos());
@@ -386,7 +392,9 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupCountUsesAverageSampleForSkewedSt
   ASSERT_STATUS_OK(builder.Finish(&full_array));
 
   auto test_path = RegisterTestPath("skewed-utf8-view");
-  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, schema, test_path, properties_));
+  ASSERT_AND_ASSIGN(auto vx_writer,
+                    vortex::VortexFileWriter::Open(file_system_, schema, test_path,
+                                                   std::make_shared<const api::Properties>(properties_)));
   for (int64_t offset = 0; offset < total_rows; offset += rows_per_slice) {
     auto slice_len = std::min<int64_t>(rows_per_slice, total_rows - offset);
     auto rb = arrow::RecordBatch::Make(schema, slice_len, {full_array->Slice(offset, slice_len)});
@@ -398,8 +406,9 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupCountUsesAverageSampleForSkewedSt
 
   auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
   auto vx_file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
-  auto vx_reader = vortex::VortexFormatReader(file_system_, schema, test_path, properties_,
-                                              std::vector<std::string>{"str"}, vx_file_size, vx_footer_size);
+  auto vx_reader =
+      vortex::VortexFormatReader(file_system_, schema, test_path, std::make_shared<const api::Properties>(properties_),
+                                 std::vector<std::string>{"str"}, vx_file_size, vx_footer_size);
   ASSERT_STATUS_OK(vx_reader.open());
 
   ASSERT_AND_ASSIGN(auto rg_infos, vx_reader.get_row_group_infos());
@@ -440,7 +449,9 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupReestimatesSkewedSingleBatchRemai
   ASSERT_STATUS_OK(builder.Finish(&array));
 
   auto test_path = RegisterTestPath("skewed-single-batch-remainder");
-  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, schema, test_path, properties_));
+  ASSERT_AND_ASSIGN(auto vx_writer,
+                    vortex::VortexFileWriter::Open(file_system_, schema, test_path,
+                                                   std::make_shared<const api::Properties>(properties_)));
   auto rb = arrow::RecordBatch::Make(schema, total_rows, {array});
   ASSERT_STATUS_OK(vx_writer->Write(rb));
   ASSERT_STATUS_OK(vx_writer->Flush());
@@ -449,8 +460,9 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupReestimatesSkewedSingleBatchRemai
 
   auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
   auto vx_file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
-  auto vx_reader = vortex::VortexFormatReader(file_system_, schema, test_path, properties_,
-                                              std::vector<std::string>{"str"}, vx_file_size, vx_footer_size);
+  auto vx_reader =
+      vortex::VortexFormatReader(file_system_, schema, test_path, std::make_shared<const api::Properties>(properties_),
+                                 std::vector<std::string>{"str"}, vx_file_size, vx_footer_size);
   ASSERT_STATUS_OK(vx_reader.open());
 
   ASSERT_AND_ASSIGN(auto rg_infos, vx_reader.get_row_group_infos());
@@ -481,7 +493,9 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupSplitsSingleLargeBatch) {
   ASSERT_AND_ASSIGN(auto array, BuildBytesArray<arrow::StringViewBuilder>(total_rows, str_len));
 
   auto test_path = RegisterTestPath("single-large-batch");
-  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, schema, test_path, properties_));
+  ASSERT_AND_ASSIGN(auto vx_writer,
+                    vortex::VortexFileWriter::Open(file_system_, schema, test_path,
+                                                   std::make_shared<const api::Properties>(properties_)));
   auto rb = arrow::RecordBatch::Make(schema, total_rows, {array});
   ASSERT_STATUS_OK(vx_writer->Write(rb));
   ASSERT_STATUS_OK(vx_writer->Flush());
@@ -490,8 +504,9 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupSplitsSingleLargeBatch) {
 
   auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
   auto vx_file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
-  auto vx_reader = vortex::VortexFormatReader(file_system_, schema, test_path, properties_,
-                                              std::vector<std::string>{"str"}, vx_file_size, vx_footer_size);
+  auto vx_reader =
+      vortex::VortexFormatReader(file_system_, schema, test_path, std::make_shared<const api::Properties>(properties_),
+                                 std::vector<std::string>{"str"}, vx_file_size, vx_footer_size);
   ASSERT_STATUS_OK(vx_reader.open());
 
   ASSERT_AND_ASSIGN(auto rg_infos, vx_reader.get_row_group_infos());
@@ -534,7 +549,8 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupSizes) {
     auto test_path = RegisterTestPath(name);
 
     ASSERT_AND_ASSIGN(auto vx_writer,
-                      vortex::VortexFileWriter::Open(file_system_, case_schema, test_path, properties_));
+                      vortex::VortexFileWriter::Open(file_system_, case_schema, test_path,
+                                                     std::make_shared<const api::Properties>(properties_)));
     for (int64_t offset = 0; offset < array->length(); offset += rows_per_slice) {
       auto slice_len = std::min<int64_t>(rows_per_slice, array->length() - offset);
       auto rb = arrow::RecordBatch::Make(case_schema, slice_len, {array->Slice(offset, slice_len)});
@@ -546,7 +562,8 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupSizes) {
 
     auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
     auto vx_file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
-    auto vx_reader = vortex::VortexFormatReader(file_system_, case_schema, test_path, properties_,
+    auto vx_reader = vortex::VortexFormatReader(file_system_, case_schema, test_path,
+                                                std::make_shared<const api::Properties>(properties_),
                                                 std::vector<std::string>{field_name}, vx_file_size, vx_footer_size);
     ASSERT_STATUS_OK(vx_reader.open());
 
@@ -966,7 +983,9 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupSizesForListOfStructValues) {
     auto schema = arrow::schema({arrow::field("value", array->type(), nullable)});
     auto test_path = RegisterTestPath(name);
 
-    ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, schema, test_path, properties_));
+    ASSERT_AND_ASSIGN(auto vx_writer,
+                      vortex::VortexFileWriter::Open(file_system_, schema, test_path,
+                                                     std::make_shared<const api::Properties>(properties_)));
     for (int64_t offset = 0; offset < array->length(); offset += rows_per_slice) {
       auto slice_len = std::min<int64_t>(rows_per_slice, array->length() - offset);
       auto rb = arrow::RecordBatch::Make(schema, slice_len, {array->Slice(offset, slice_len)});
@@ -978,7 +997,8 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupSizesForListOfStructValues) {
 
     auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
     auto vx_file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
-    auto vx_reader = vortex::VortexFormatReader(file_system_, schema, test_path, properties_,
+    auto vx_reader = vortex::VortexFormatReader(file_system_, schema, test_path,
+                                                std::make_shared<const api::Properties>(properties_),
                                                 std::vector<std::string>{"value"}, vx_file_size, vx_footer_size);
     ASSERT_STATUS_OK(vx_reader.open());
 
@@ -1055,7 +1075,9 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupSizesForMixedTopLevelColumns) {
   });
 
   auto test_path = RegisterTestPath("mixed-top-level");
-  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, schema, test_path, properties_));
+  ASSERT_AND_ASSIGN(auto vx_writer,
+                    vortex::VortexFileWriter::Open(file_system_, schema, test_path,
+                                                   std::make_shared<const api::Properties>(properties_)));
   for (int64_t offset = 0; offset < total_rows; offset += rows_per_slice) {
     auto slice_len = std::min<int64_t>(rows_per_slice, total_rows - offset);
     auto rb = arrow::RecordBatch::Make(
@@ -1070,7 +1092,7 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupSizesForMixedTopLevelColumns) {
   auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
   auto vx_file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
   auto vx_reader =
-      vortex::VortexFormatReader(file_system_, schema, test_path, properties_,
+      vortex::VortexFormatReader(file_system_, schema, test_path, std::make_shared<const api::Properties>(properties_),
                                  std::vector<std::string>{"id", "str", "vector"}, vx_file_size, vx_footer_size);
   ASSERT_STATUS_OK(vx_reader.open());
 

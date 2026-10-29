@@ -28,10 +28,11 @@ namespace milvus_storage::vortex {
 
 class VortexFileWriter final : public FormatWriter {
   public:
-  static arrow::Result<std::unique_ptr<VortexFileWriter>> Open(const std::shared_ptr<arrow::fs::FileSystem>& fs,
-                                                               std::shared_ptr<arrow::Schema> schema,
-                                                               const std::string& file_path,
-                                                               const api::Properties& properties);
+  static arrow::Result<std::unique_ptr<VortexFileWriter>> Open(
+      const std::shared_ptr<arrow::fs::FileSystem>& fs,
+      std::shared_ptr<arrow::Schema> schema,
+      const std::string& file_path,
+      const std::shared_ptr<const api::Properties>& properties);
 
   ~VortexFileWriter() = default;
 
@@ -52,14 +53,14 @@ class VortexFileWriter final : public FormatWriter {
                    VortexWriter vx_writer,
                    std::shared_ptr<arrow::Schema> schema,
                    std::string file_path,
-                   api::Properties properties);
+                   std::shared_ptr<const api::Properties> properties);
 
   bool closed_;
   std::string file_path_;
   std::unique_ptr<FileSystemWrapper> fs_holder_;
   VortexWriter vx_writer_;
   std::shared_ptr<arrow::Schema> schema_;
-  api::Properties properties_;
+  std::shared_ptr<const api::Properties> properties_;
 
   int64_t written_rows_ = 0;
 };

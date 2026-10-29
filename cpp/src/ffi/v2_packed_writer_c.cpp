@@ -70,7 +70,7 @@ LoonFFIResult loon_packed_writer_new(const char* const* paths,
   }
 
   try {
-    Properties properties_map;
+    std::shared_ptr<const Properties> properties_map;
     auto opt = ConvertFFIProperties(properties_map, properties);
     if (opt != std::nullopt) {
       RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");

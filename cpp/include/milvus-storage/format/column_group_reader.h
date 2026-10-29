@@ -91,7 +91,7 @@ class ColumnGroupReader {
       const std::shared_ptr<arrow::Schema>& schema,
       const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
       const std::vector<std::string>& needed_columns,
-      const milvus_storage::api::Properties& properties,
+      const std::shared_ptr<const milvus_storage::api::Properties>& properties,
       const std::function<std::string(const std::string&)>& key_retriever,
       const std::string& predicate = "",
       const milvus_storage::MetadataCache& cache = milvus_storage::MetadataCache());
@@ -102,7 +102,7 @@ class ColumnGroupReader {
       const std::shared_ptr<arrow::Schema>& schema,
       const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
       const std::vector<std::string>& needed_columns,
-      const milvus_storage::api::Properties& properties,
+      const std::shared_ptr<const milvus_storage::api::Properties>& properties,
       const std::function<std::string(const std::string&)>& key_retriever,
       const std::string& predicate = "",
       const milvus_storage::MetadataCache& cache = milvus_storage::MetadataCache());

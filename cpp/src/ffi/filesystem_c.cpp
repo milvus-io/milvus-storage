@@ -46,7 +46,7 @@ LoonFFIResult loon_filesystem_get(const ::LoonProperties* properties,
       RETURN_ERROR(LOON_INVALID_ARGS, "properties and out_handle must not be null");
     }
 
-    milvus_storage::api::Properties properties_map;
+    std::shared_ptr<const milvus_storage::api::Properties> properties_map;
     auto opt = ConvertFFIProperties(properties_map, properties);
     if (opt != std::nullopt) {
       RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
@@ -77,7 +77,7 @@ LoonFFIResult loon_filesystem_evict(const ::LoonProperties* properties, const ch
     if (properties == nullptr || (path == nullptr && path_len != 0)) {
       RETURN_ERROR(LOON_INVALID_ARGS, "properties must not be null and a non-empty path requires a pointer");
     }
-    api::Properties properties_map;
+    std::shared_ptr<const api::Properties> properties_map;
     const auto error = ConvertFFIProperties(properties_map, properties);
     if (error.has_value()) {
       RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", *error, "]");

@@ -3,6 +3,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 
+#include <memory>
 #include "milvus-storage/transaction/transaction.h"
 #include "milvus-storage/common/layout.h"
 #include <gtest/gtest.h>
@@ -53,14 +54,18 @@ OpenResult Open(const std::shared_ptr<MemoryFileSystem>& fs,
                 const Resolver& resolver = FailResolver,
                 uint32_t retries = 0) {
   std::shared_ptr<AsyncOperation> operation;
-  auto future = Transaction::OpenAsync(fs->path, {}, version, -1, resolver, retries, 3000, operation, fs);
+  auto future = Transaction::OpenAsync(fs->path, std::make_shared<const Properties>(), version, -1, resolver, retries,
+                                       3000, operation, fs);
   operation.reset();
   return std::move(future).via(&CallerExecutors::Get().work).get();
 }
 TEST(AsyncTransactionTest, UnconsumedFutureStartsNoIO) {
   auto fs = std::make_shared<MemoryFileSystem>();
   std::shared_ptr<AsyncOperation> operation;
-  { auto future = Transaction::OpenAsync(fs->path, {}, -1, -1, FailResolver, 0, 3000, operation, fs); }
+  {
+    auto future = Transaction::OpenAsync(fs->path, std::make_shared<const Properties>(), -1, -1, FailResolver, 0, 3000,
+                                         operation, fs);
+  }
   EXPECT_EQ(fs->info_calls, 0);
 }
 TEST(AsyncTransactionTest, SynchronousIOUsesCallerExecutor) {
@@ -68,7 +73,10 @@ TEST(AsyncTransactionTest, SynchronousIOUsesCallerExecutor) {
   folly::CPUThreadPoolExecutor executor(1);
   auto worker = folly::via(&executor, [] { return std::this_thread::get_id(); }).get();
   std::shared_ptr<AsyncOperation> operation;
-  auto result = Transaction::OpenAsync(fs->path, {}, -1, -1, FailResolver, 0, 3000, operation, fs).via(&executor).get();
+  auto result = Transaction::OpenAsync(fs->path, std::make_shared<const Properties>(), -1, -1, FailResolver, 0, 3000,
+                                       operation, fs)
+                    .via(&executor)
+                    .get();
   ASSERT_TRUE(result.status.ok());
   EXPECT_EQ(fs->io_thread, worker);
   EXPECT_EQ(result.transaction->GetReadVersion(), 0);
@@ -79,7 +87,8 @@ TEST(AsyncTransactionTest, ContinuationCanUseAnotherExecutor) {
   auto& executors = CallerExecutors::Get();
   auto completion = folly::via(&executors.completion, [] { return std::this_thread::get_id(); }).get();
   std::shared_ptr<AsyncOperation> operation;
-  auto result = Transaction::OpenAsync(fs->path, {}, 0, -1, FailResolver, 0, 3000, operation, fs)
+  auto result = Transaction::OpenAsync(fs->path, std::make_shared<const Properties>(), 0, -1, FailResolver, 0, 3000,
+                                       operation, fs)
                     .via(&executors.work)
                     .via(&executors.completion)
                     .thenValue([completion](OpenResult result) {
@@ -92,7 +101,8 @@ TEST(AsyncTransactionTest, ContinuationCanUseAnotherExecutor) {
 TEST(AsyncTransactionTest, CancelledQueuedOpenStartsNoIO) {
   auto fs = std::make_shared<MemoryFileSystem>();
   std::shared_ptr<AsyncOperation> operation;
-  auto future = Transaction::OpenAsync(fs->path, {}, -1, -1, FailResolver, 0, 3000, operation, fs);
+  auto future = Transaction::OpenAsync(fs->path, std::make_shared<const Properties>(), -1, -1, FailResolver, 0, 3000,
+                                       operation, fs);
   operation->Cancel();
   EXPECT_EQ(std::move(future).via(&CallerExecutors::Get().work).get().status.code, AsyncStatus::Cancelled);
   EXPECT_EQ(fs->info_calls, 0);
@@ -101,7 +111,9 @@ TEST(AsyncTransactionTest, DeadlineIncludesQueueTime) {
   auto fs = std::make_shared<MemoryFileSystem>();
   folly::ManualExecutor executor;
   std::shared_ptr<AsyncOperation> operation;
-  auto future = Transaction::OpenAsync(fs->path, {}, -1, -1, FailResolver, 0, 1, operation, fs).via(&executor);
+  auto future =
+      Transaction::OpenAsync(fs->path, std::make_shared<const Properties>(), -1, -1, FailResolver, 0, 1, operation, fs)
+          .via(&executor);
   std::this_thread::sleep_for(std::chrono::milliseconds(10));
   executor.drain();
   EXPECT_EQ(std::move(future).get().status.code, AsyncStatus::Deadline);
@@ -110,7 +122,8 @@ TEST(AsyncTransactionTest, DeadlineIncludesQueueTime) {
 TEST(AsyncTransactionTest, InlineExecutorIsRejected) {
   auto fs = std::make_shared<MemoryFileSystem>();
   std::shared_ptr<AsyncOperation> operation;
-  auto result = Transaction::OpenAsync(fs->path, {}, 0, -1, FailResolver, 0, 3000, operation, fs)
+  auto result = Transaction::OpenAsync(fs->path, std::make_shared<const Properties>(), 0, -1, FailResolver, 0, 3000,
+                                       operation, fs)
                     .via(&folly::InlineExecutor::instance())
                     .get();
   EXPECT_FALSE(result.status.ok());
@@ -126,7 +139,8 @@ TEST(AsyncTransactionTest, BlockingIOLeavesSubmissionFreeAndCancellationWaits) {
     gate.wait();
   };
   std::shared_ptr<AsyncOperation> operation;
-  auto future = Transaction::OpenAsync(fs->path, {}, -1, -1, FailResolver, 0, 3000, operation, fs)
+  auto future = Transaction::OpenAsync(fs->path, std::make_shared<const Properties>(), -1, -1, FailResolver, 0, 3000,
+                                       operation, fs)
                     .via(&CallerExecutors::Get().work);
   EXPECT_EQ(entered_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
   operation->Cancel();
@@ -188,10 +202,10 @@ TEST(AsyncTransactionTest, ManifestSizeRoundTrip) {
   EXPECT_EQ(written.manifest_size, info->size());
   Manifest::CleanCache();
   std::shared_ptr<AsyncOperation> operation;
-  auto read =
-      Transaction::OpenAsync(fs->path, {}, written.version, written.manifest_size, FailResolver, 0, 3000, operation, fs)
-          .via(&CallerExecutors::Get().work)
-          .get();
+  auto read = Transaction::OpenAsync(fs->path, std::make_shared<const Properties>(), written.version,
+                                     written.manifest_size, FailResolver, 0, 3000, operation, fs)
+                  .via(&CallerExecutors::Get().work)
+                  .get();
   ASSERT_TRUE(read.status.ok());
   EXPECT_EQ(fs->opened_size, written.manifest_size);
   const auto manifest = read.transaction->GetManifest();

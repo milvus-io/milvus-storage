@@ -152,7 +152,7 @@ class FormatReader {
   // MetadataCache and later reuse to create independent readers.
   template <typename ReaderT>
   static arrow::Result<MetadataPtr<ReaderT>> load_metadata(const api::ColumnGroupFile& file,
-                                                           const api::Properties& properties,
+                                                           const std::shared_ptr<const api::Properties>& properties,
                                                            const KeyRetriever& key_retriever);
 
   // Create a new stateful reader from cached metadata. The file carries
@@ -172,7 +172,7 @@ class FormatReader {
       const std::shared_ptr<arrow::Schema>& read_schema,
       const std::string& format,
       const api::ColumnGroupFile& file,
-      const api::Properties& properties,
+      const std::shared_ptr<const api::Properties>& properties,
       const std::vector<std::string>& needed_columns,
       const std::function<std::string(const std::string&)>& key_retriever);
 
@@ -184,7 +184,7 @@ class FormatReader {
       const std::shared_ptr<arrow::Schema>& read_schema,
       const std::string& format,
       const api::ColumnGroupFile& file,
-      const api::Properties& properties,
+      const std::shared_ptr<const api::Properties>& properties,
       const std::vector<std::string>& needed_columns,
       const std::function<std::string(const std::string&)>& key_retriever);
 
@@ -193,7 +193,7 @@ class FormatReader {
 template <typename ReaderT>
 concept FormatReaderWithMetadata =
     std::derived_from<ReaderT, FormatReader> && requires(const api::ColumnGroupFile& file,
-                                                         const api::Properties& properties,
+                                                         const std::shared_ptr<const api::Properties>& properties,
                                                          const KeyRetriever& key_retriever,
                                                          typename ReaderT::MetaTrait::MetadataPtr metadata,
                                                          const api::ColumnGroupFile& metadata_file,
@@ -225,7 +225,7 @@ concept FormatReaderWithMetadata =
 template <typename ReaderT>
 concept FormatReaderWithAsyncMetadata =
     FormatReaderWithMetadata<ReaderT> && requires(const api::ColumnGroupFile& file,
-                                                  const api::Properties& properties,
+                                                  const std::shared_ptr<const api::Properties>& properties,
                                                   const KeyRetriever& key_retriever,
                                                   typename ReaderT::MetaTrait::MetadataPtr metadata,
                                                   const std::shared_ptr<arrow::Schema>& read_schema,
@@ -240,9 +240,10 @@ concept FormatReaderWithAsyncMetadata =
     };
 
 template <typename ReaderT>
-arrow::Result<FormatReader::MetadataPtr<ReaderT>> FormatReader::load_metadata(const api::ColumnGroupFile& file,
-                                                                              const api::Properties& properties,
-                                                                              const KeyRetriever& key_retriever) {
+arrow::Result<FormatReader::MetadataPtr<ReaderT>> FormatReader::load_metadata(
+    const api::ColumnGroupFile& file,
+    const std::shared_ptr<const api::Properties>& properties,
+    const KeyRetriever& key_retriever) {
   static_assert(FormatReaderWithMetadata<ReaderT>,
                 "ReaderT must derive from FormatReader and define MetaTrait with Payload, Metadata, MetadataPtr, "
                 "cache_key, load_metadata, and create_from_metadata.");

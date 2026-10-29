@@ -298,7 +298,11 @@ arrow::Result<std::unique_ptr<SegmentWriter>> SegmentWriter::Create(std::shared_
   }
 
   // validate required properties for ColumnGroupPolicy
-  if (config.properties.find(PROPERTY_WRITER_POLICY) == config.properties.end()) {
+  if (!config.properties) {
+    return arrow::Status::Invalid("Properties must not be null");
+  }
+
+  if (config.properties->find(PROPERTY_WRITER_POLICY) == config.properties->end()) {
     return arrow::Status::Invalid("properties must contain " + std::string(PROPERTY_WRITER_POLICY));
   }
 

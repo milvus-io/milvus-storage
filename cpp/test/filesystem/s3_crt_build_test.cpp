@@ -14,6 +14,7 @@
 
 #ifdef WITH_CRT
 
+#include <memory>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -595,7 +596,7 @@ TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileWhenCrtEnabled) {
 
   api::Properties properties;
   ASSERT_STATUS_OK(InitTestProperties(properties));
-  ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
+  ASSERT_AND_ASSIGN(auto fs, GetFileSystem(std::make_shared<const api::Properties>(properties)));
 
   const std::string base_path = GetTestBasePath(
       "s3-crt-open-input-file-smoke-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));

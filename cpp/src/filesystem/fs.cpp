@@ -282,7 +282,8 @@ void FilesystemCache::remove(const std::string& key) {
   }
 }
 
-arrow::Status FilesystemCache::evict(const api::Properties& properties, const std::string& path) {
+arrow::Status FilesystemCache::evict(const std::shared_ptr<const api::Properties>& properties,
+                                     const std::string& path) {
   ARROW_ASSIGN_OR_RAISE(const auto config, resolve_config(properties, path));
   remove(config.GetCacheKey());
   return arrow::Status::OK();
@@ -303,8 +304,8 @@ std::string FilesystemCache::MakeDisplayKey(const ArrowFileSystemConfig& config,
   return remote_path + "#" + cache_key;
 }
 
-arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_storage::api::Properties& properties_map,
-                                                               ArrowFileSystemConfig& result) {
+arrow::Status ArrowFileSystemConfig::create_file_system_config(
+    const std::shared_ptr<const milvus_storage::api::Properties>& properties_map, ArrowFileSystemConfig& result) {
   ARROW_ASSIGN_OR_RAISE(result.address, api::GetValue<std::string>(properties_map, PROPERTY_FS_ADDRESS));
   ARROW_ASSIGN_OR_RAISE(result.bucket_name, api::GetValue<std::string>(properties_map, PROPERTY_FS_BUCKET_NAME));
   ARROW_ASSIGN_OR_RAISE(result.access_key_id, api::GetValue<std::string>(properties_map, PROPERTY_FS_ACCESS_KEY_ID));
@@ -428,12 +429,12 @@ namespace {
  * @param properties Input properties map
  * @return Map of external_fs_name -> Properties with fs.* keys
  */
-arrow::Result<std::unordered_map<std::string, api::Properties>> ExtractExternalFsProperties(
-    const api::Properties& properties) {
-  std::unordered_map<std::string, api::Properties> external_fs_map;
+arrow::Result<std::unordered_map<std::string, std::shared_ptr<api::Properties>>> ExtractExternalFsProperties(
+    const std::shared_ptr<const api::Properties>& properties) {
+  std::unordered_map<std::string, std::shared_ptr<api::Properties>> external_fs_map;
 
   const std::string prefix = PROPERTY_EXTFS_PREFIX;
-  for (const auto& [key, value] : properties) {
+  for (const auto& [key, value] : *properties) {
     if (key.size() <= prefix.size() || key.substr(0, prefix.size()) != prefix) {
       continue;  // Not an external fs property
     }
@@ -459,8 +460,11 @@ arrow::Result<std::unordered_map<std::string, api::Properties>> ExtractExternalF
 
     // Map to standard fs.* property name, convert through SetValue for proper type resolution
     std::string standard_key = std::string(PROPERTY_FS_PREFIX) + fs_property;
-    if (auto err =
-            api::SetValue(external_fs_map[fs_name], standard_key.c_str(), std::get<std::string>(value).c_str(), false);
+    auto& fs_properties = external_fs_map[fs_name];
+    if (!fs_properties) {
+      fs_properties = std::make_shared<api::Properties>();
+    }
+    if (auto err = api::SetValue(*fs_properties, standard_key.c_str(), std::get<std::string>(value).c_str(), false);
         err) {
       return arrow::Status::Invalid("Failed to set external fs property '", standard_key, "': ", *err);
     }
@@ -473,7 +477,7 @@ arrow::Result<std::unordered_map<std::string, api::Properties>> ExtractExternalF
  * @brief Create an ArrowFileSystemConfig from extracted properties with alias
  */
 arrow::Status CreateExternalFsConfig(const std::string& alias,
-                                     const api::Properties& props,
+                                     const std::shared_ptr<const api::Properties>& props,
                                      ArrowFileSystemConfig& result) {
   auto status = ArrowFileSystemConfig::create_file_system_config(props, result);
   if (status.ok()) {
@@ -484,7 +488,8 @@ arrow::Status CreateExternalFsConfig(const std::string& alias,
 
 }  // namespace
 
-arrow::Result<FileSystemPtr> FilesystemCache::get(const api::Properties& properties, const std::string& path) {
+arrow::Result<FileSystemPtr> FilesystemCache::get(const std::shared_ptr<const api::Properties>& properties,
+                                                  const std::string& path) {
   ARROW_ASSIGN_OR_RAISE(auto config, resolve_config(properties, path));
 
   std::string cache_key = config.GetCacheKey();
@@ -504,15 +509,20 @@ arrow::Result<FileSystemPtr> FilesystemCache::get(const api::Properties& propert
   return fs;
 }
 
-arrow::Result<ArrowFileSystemConfig> FilesystemCache::resolve_config(const api::Properties& properties,
-                                                                     const std::string& path) {
+arrow::Result<ArrowFileSystemConfig> FilesystemCache::resolve_config(
+    const std::shared_ptr<const api::Properties>& properties, const std::string& path) {
+  if (!properties) {
+    return arrow::Status::Invalid("Properties must not be null");
+  }
   if (!path.empty()) {
     ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(path));
 
     if (uri.IsAbsoluteUri()) {
       ARROW_ASSIGN_OR_RAISE(auto external_fs_props_map, ExtractExternalFsProperties(properties));
 
-      for (const auto& [fs_alias, fs_props] : external_fs_props_map) {
+      for (auto& [fs_alias, mutable_props] : external_fs_props_map) {
+        // Parsing is complete: publish the same map as immutable, without copying it.
+        const std::shared_ptr<const api::Properties> fs_props = std::move(mutable_props);
         auto address_result = api::GetValue<std::string>(fs_props, PROPERTY_FS_ADDRESS);
         auto bucket_result = api::GetValue<std::string>(fs_props, PROPERTY_FS_BUCKET_NAME);
 

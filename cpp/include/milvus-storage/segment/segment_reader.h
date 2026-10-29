@@ -44,7 +44,7 @@ struct SegmentReaderConfig {
   size_t read_buffer_size = 64U * 1024U * 1024U;  // 64MB default
 
   // storage properties
-  api::Properties properties;
+  std::shared_ptr<const api::Properties> properties = std::make_shared<const api::Properties>();
 };
 
 // SegmentReader reads row data from storage with optional column selection

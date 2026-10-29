@@ -202,7 +202,9 @@ BENCHMARK_DEFINE_F(FormatWriteBenchmark, StageBreakdown)(::benchmark::State& st)
   }
 
   const int64_t writer_buffer_bytes = writer_buffer_mib * 1024 * 1024;
-  api::SetValue(properties_, PROPERTY_WRITER_BUFFER_SIZE, std::to_string(writer_buffer_bytes).c_str());
+  auto properties = *properties_;
+  api::SetValue(properties, PROPERTY_WRITER_BUFFER_SIZE, std::to_string(writer_buffer_bytes).c_str());
+  properties_ = std::make_shared<const api::Properties>(std::move(properties));
 
   int64_t input_rows = 0;
   int64_t input_bytes = 0;

@@ -45,7 +45,7 @@ class LocalFsTest : public ::testing::Test {
     // init local filesystem properties
     api::SetValue(properties_, PROPERTY_FS_STORAGE_TYPE, "local");
     api::SetValue(properties_, PROPERTY_FS_ROOT_PATH, "/tmp/milvus-storage-test");
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
     base_path_ = GetTestBasePath("local-fs-test");
     ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_));
   }
@@ -432,10 +432,10 @@ TEST(FilesystemMetricsFfiTest, ReportsS3LookupFailureAfterFinalization) {
         api::SetValue(properties, PROPERTY_FS_REGION, "us-east-1");
         api::SetValue(properties, PROPERTY_FS_USE_SSL, "false");
         api::SetValue(properties, PROPERTY_FS_S3_CRT_ASYNC_READ, "false");
-        auto origin = GetFileSystem(properties);
+        auto origin = GetFileSystem(std::make_shared<const api::Properties>(properties));
         api::SetValue(properties, PROPERTY_FS_TALON_MODE, "1");
         api::SetValue(properties, PROPERTY_FS_TALON_COORDINATOR, "127.0.0.1:0");
-        auto talon = GetFileSystem(properties);
+        auto talon = GetFileSystem(std::make_shared<const api::Properties>(properties));
         if (!origin.ok() || !talon.ok()) {
           std::fprintf(stderr, "origin: %s; talon: %s\n", origin.status().ToString().c_str(),
                        talon.status().ToString().c_str());

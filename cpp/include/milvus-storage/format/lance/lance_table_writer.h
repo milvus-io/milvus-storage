@@ -36,7 +36,7 @@ class LanceTableWriter final : public FormatWriter {
   public:
   LanceTableWriter(const std::string& base_path,
                    std::shared_ptr<arrow::Schema> schema,
-                   const api::Properties& properties,
+                   const std::shared_ptr<const api::Properties>& properties,
                    LanceDataStorageFormat data_storage_format = LanceDataStorageFormat::Stable);
 
   ~LanceTableWriter() = default;
@@ -53,7 +53,7 @@ class LanceTableWriter final : public FormatWriter {
   bool closed_;
   std::string base_path_;
   std::shared_ptr<arrow::Schema> schema_;
-  api::Properties properties_;
+  std::shared_ptr<const api::Properties> properties_;
   LanceDataStorageFormat data_storage_format_;
 
   std::vector<std::shared_ptr<arrow::RecordBatch>> record_batches_;

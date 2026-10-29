@@ -23,7 +23,7 @@ std::shared_ptr<FormatReader> VortexFormat::make_reader(
     const std::shared_ptr<arrow::fs::FileSystem>& fs,
     const std::shared_ptr<arrow::Schema>& read_schema,
     const std::string& resolved_path,
-    const api::Properties& properties,
+    const std::shared_ptr<const api::Properties>& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& /*key_retriever*/,
     uint64_t file_size,
@@ -32,10 +32,11 @@ std::shared_ptr<FormatReader> VortexFormat::make_reader(
                                                       file_size, footer_size);
 }
 
-arrow::Result<std::unique_ptr<FormatWriter>> VortexFormat::make_writer(const std::shared_ptr<arrow::fs::FileSystem>& fs,
-                                                                       const std::shared_ptr<arrow::Schema>& schema,
-                                                                       const std::string& file_path,
-                                                                       const api::Properties& properties) {
+arrow::Result<std::unique_ptr<FormatWriter>> VortexFormat::make_writer(
+    const std::shared_ptr<arrow::fs::FileSystem>& fs,
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::string& file_path,
+    const std::shared_ptr<const api::Properties>& properties) {
   ARROW_ASSIGN_OR_RAISE(auto writer, vortex::VortexFileWriter::Open(fs, schema, file_path, properties));
   return std::unique_ptr<FormatWriter>(std::move(writer));
 }

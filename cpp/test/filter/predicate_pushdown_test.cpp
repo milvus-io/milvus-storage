@@ -37,7 +37,7 @@ class PredicatePushdownTest : public ::testing::TestWithParam<std::string> {
   void SetUp() override {
     Manifest::CleanCache();
     ASSERT_STATUS_OK(InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
 
     base_path_ = GetTestBasePath("predicate-pushdown-test");
     ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
@@ -65,7 +65,8 @@ class PredicatePushdownTest : public ::testing::TestWithParam<std::string> {
 
     // Write data using the Writer API
     ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format_, schema_));
-    auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+    auto writer =
+        Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
     ASSERT_NE(writer, nullptr);
     ASSERT_TRUE(writer->write(test_batch_).ok());
     auto cgs_result = writer->close();
@@ -100,14 +101,14 @@ class PredicatePushdownTest : public ::testing::TestWithParam<std::string> {
   }
 
   int64_t CountRowsWithPredicate(const std::string& predicate) {
-    auto reader = Reader::create(cgs_, schema_, nullptr, properties_);
+    auto reader = Reader::create(cgs_, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
     return CountRowsWithReader(*reader, predicate);
   }
 
   // Returns the arrow::Status produced when opening the reader with the given
   // predicate. Used to assert hard-error scenarios.
   arrow::Status OpenStatusWithPredicate(const std::string& predicate) {
-    auto reader = Reader::create(cgs_, schema_, nullptr, properties_);
+    auto reader = Reader::create(cgs_, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
     auto batch_reader_result = reader->get_record_batch_reader(predicate);
     return batch_reader_result.status();
   }
@@ -178,7 +179,7 @@ TEST_P(PredicatePushdownTest, MetadataCacheWarmupDoesNotFreezePredicate) {
     GTEST_SKIP() << "Predicate pushdown only supported for vortex format";
   }
 
-  auto reader = Reader::create(cgs_, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs_, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   ASSERT_NE(reader, nullptr);
 
   EXPECT_EQ(CountRowsWithReader(*reader, "age > 1000000"), 0);

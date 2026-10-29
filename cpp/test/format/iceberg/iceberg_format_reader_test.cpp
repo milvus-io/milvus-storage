@@ -37,7 +37,7 @@ class IcebergFormatReaderTest : public ::testing::Test {
   protected:
   void SetUp() override {
     ASSERT_STATUS_OK(InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
 
     base_path_ = GetTestBasePath("iceberg-format-reader-test");
     ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
@@ -119,10 +119,12 @@ TEST_F(IcebergFormatReaderTest, NoDeletes) {
 
   ColumnGroupFile file{data_file_path_, 0, data_num_rows_, {}};
   ASSERT_AND_ASSIGN(auto parquet_reader,
-                    FormatReader::create(nullptr, LOON_FORMAT_PARQUET, file, properties_, {}, nullptr));
+                    FormatReader::create(nullptr, LOON_FORMAT_PARQUET, file,
+                                         std::make_shared<const api::Properties>(properties_), {}, nullptr));
   ASSERT_AND_ASSIGN(auto parquet_rg_infos, parquet_reader->get_row_group_infos());
   ASSERT_FALSE(parquet_rg_infos.empty());
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file, properties_,
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file,
+                                                      std::make_shared<const api::Properties>(properties_),
                                                       std::vector<std::string>{"id"}, nullptr));
 
   ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
@@ -150,7 +152,8 @@ TEST_F(IcebergFormatReaderTest, PositionalDeleteGetChunk) {
 
   auto metadata = MakeDeleteMetadataJson(delete_file_path_);
   ColumnGroupFile file{data_file_path_, 0, data_num_rows_, metadata};
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file, properties_,
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file,
+                                                      std::make_shared<const api::Properties>(properties_),
                                                       std::vector<std::string>{"id"}, nullptr));
 
   ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
@@ -183,7 +186,8 @@ TEST_F(IcebergFormatReaderTest, PositionalDeleteMatchesAzureAliasesWithRecordedE
         std::string(scheme) + "://account.blob.core.windows.net/container/table/data.parquet";
     WritePositionalDeleteFile(recorded_data_uri, {2, 5, 8});
 
-    IcebergFormatReader reader(fs_, data_file_path_, milvus_data_uri, delete_metadata, properties_, {"id"}, nullptr);
+    IcebergFormatReader reader(fs_, data_file_path_, milvus_data_uri, delete_metadata,
+                               std::make_shared<const api::Properties>(properties_), {"id"}, nullptr);
     ASSERT_STATUS_OK(reader.open());
     ASSERT_AND_ASSIGN(auto batch, reader.get_chunk(0));
     ASSERT_EQ(batch->num_rows(), static_cast<int64_t>(expected_ids.size()));
@@ -201,7 +205,8 @@ TEST_F(IcebergFormatReaderTest, PartialDeletesScaleRowGroupMemorySizes) {
 
   ColumnGroupFile parquet_file{data_file_path_, 0, data_num_rows_, {}};
   ASSERT_AND_ASSIGN(auto parquet_reader,
-                    FormatReader::create(nullptr, LOON_FORMAT_PARQUET, parquet_file, properties_, {}, nullptr));
+                    FormatReader::create(nullptr, LOON_FORMAT_PARQUET, parquet_file,
+                                         std::make_shared<const api::Properties>(properties_), {}, nullptr));
   ASSERT_AND_ASSIGN(auto physical_infos, parquet_reader->get_row_group_infos());
   ASSERT_EQ(physical_infos.size(), 1);
   ASSERT_AND_ASSIGN(auto physical_memory_sizes, parquet_reader->get_rg_column_memsz(0));
@@ -211,7 +216,8 @@ TEST_F(IcebergFormatReaderTest, PartialDeletesScaleRowGroupMemorySizes) {
   auto metadata = MakeDeleteMetadataJson(delete_file_path_);
   ColumnGroupFile iceberg_file{data_file_path_, 0, data_num_rows_, metadata};
   ASSERT_AND_ASSIGN(auto iceberg_reader,
-                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, iceberg_file, properties_, {}, nullptr));
+                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, iceberg_file,
+                                         std::make_shared<const api::Properties>(properties_), {}, nullptr));
   ASSERT_AND_ASSIGN(auto logical_infos, iceberg_reader->get_row_group_infos());
   ASSERT_EQ(logical_infos.size(), 1);
 
@@ -239,7 +245,8 @@ TEST_F(IcebergFormatReaderTest, FullDeletesZeroRowGroupMemorySizes) {
 
   ColumnGroupFile parquet_file{data_file_path_, 0, data_num_rows_, {}};
   ASSERT_AND_ASSIGN(auto parquet_reader,
-                    FormatReader::create(nullptr, LOON_FORMAT_PARQUET, parquet_file, properties_, {}, nullptr));
+                    FormatReader::create(nullptr, LOON_FORMAT_PARQUET, parquet_file,
+                                         std::make_shared<const api::Properties>(properties_), {}, nullptr));
   ASSERT_AND_ASSIGN(auto physical_infos, parquet_reader->get_row_group_infos());
   ASSERT_EQ(physical_infos.size(), 1);
   ASSERT_AND_ASSIGN(auto physical_memory_sizes, parquet_reader->get_rg_column_memsz(0));
@@ -249,7 +256,8 @@ TEST_F(IcebergFormatReaderTest, FullDeletesZeroRowGroupMemorySizes) {
   auto metadata = MakeDeleteMetadataJson(delete_file_path_);
   ColumnGroupFile iceberg_file{data_file_path_, 0, 0, metadata};
   ASSERT_AND_ASSIGN(auto iceberg_reader,
-                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, iceberg_file, properties_, {}, nullptr));
+                    FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, iceberg_file,
+                                         std::make_shared<const api::Properties>(properties_), {}, nullptr));
   ASSERT_AND_ASSIGN(auto logical_infos, iceberg_reader->get_row_group_infos());
   ASSERT_EQ(logical_infos.size(), 1);
 
@@ -278,7 +286,8 @@ TEST_F(IcebergFormatReaderTest, PositionalDeleteTake) {
 
   auto metadata = MakeDeleteMetadataJson(delete_file_path_);
   ColumnGroupFile file{data_file_path_, 0, data_num_rows_, metadata};
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file, properties_,
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file,
+                                                      std::make_shared<const api::Properties>(properties_),
                                                       std::vector<std::string>{"id"}, nullptr));
 
   // Logical doc IDs from the index perspective
@@ -310,10 +319,12 @@ TEST_F(IcebergFormatReaderTest, CacheCreateReaderReappliesProjectionWhenAllRowsD
   auto cache = milvus_storage::FormatReaderMetadataCache<IcebergFormatReader>::Make();
   auto key = IcebergFormatReader::MetaTrait::cache_key(file);
   ASSERT_AND_ASSIGN(auto cached_metadata, cache->get_or_open(key, [&]() {
-    return IcebergFormatReader::MetaTrait::load_metadata(file, properties_, nullptr);
+    return IcebergFormatReader::MetaTrait::load_metadata(file, std::make_shared<const api::Properties>(properties_),
+                                                         nullptr);
   }));
   ASSERT_AND_ASSIGN(auto cached_metadata_again, cache->get_or_open(key, [&]() {
-    return IcebergFormatReader::MetaTrait::load_metadata(file, properties_, nullptr);
+    return IcebergFormatReader::MetaTrait::load_metadata(file, std::make_shared<const api::Properties>(properties_),
+                                                         nullptr);
   }));
   ASSERT_EQ(cached_metadata.get(), cached_metadata_again.get());
 
@@ -352,10 +363,12 @@ TEST_F(IcebergFormatReaderTest, CacheCreateReaderReappliesProjectionWithPartialD
   auto cache = milvus_storage::FormatReaderMetadataCache<IcebergFormatReader>::Make();
   auto key = IcebergFormatReader::MetaTrait::cache_key(file);
   ASSERT_AND_ASSIGN(auto cached_metadata, cache->get_or_open(key, [&]() {
-    return IcebergFormatReader::MetaTrait::load_metadata(file, properties_, nullptr);
+    return IcebergFormatReader::MetaTrait::load_metadata(file, std::make_shared<const api::Properties>(properties_),
+                                                         nullptr);
   }));
   ASSERT_AND_ASSIGN(auto cached_metadata_again, cache->get_or_open(key, [&]() {
-    return IcebergFormatReader::MetaTrait::load_metadata(file, properties_, nullptr);
+    return IcebergFormatReader::MetaTrait::load_metadata(file, std::make_shared<const api::Properties>(properties_),
+                                                         nullptr);
   }));
   ASSERT_EQ(cached_metadata.get(), cached_metadata_again.get());
 
@@ -390,7 +403,8 @@ TEST_F(IcebergFormatReaderTest, TakeNoDeletes) {
   WriteDataFile(10);
 
   ColumnGroupFile file{data_file_path_, 0, data_num_rows_, {}};
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file, properties_,
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file,
+                                                      std::make_shared<const api::Properties>(properties_),
                                                       std::vector<std::string>{"id"}, nullptr));
 
   std::vector<int64_t> take_positions = {0, 3, 9};
@@ -413,7 +427,8 @@ TEST_F(IcebergFormatReaderTest, DeleteForDifferentFile) {
 
   auto metadata = MakeDeleteMetadataJson(delete_file_path_);
   ColumnGroupFile file{data_file_path_, 0, data_num_rows_, metadata};
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file, properties_,
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file,
+                                                      std::make_shared<const api::Properties>(properties_),
                                                       std::vector<std::string>{"id"}, nullptr));
 
   ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
@@ -429,7 +444,8 @@ TEST_F(IcebergFormatReaderTest, CloneSharesDeletes) {
 
   auto metadata = MakeDeleteMetadataJson(delete_file_path_);
   ColumnGroupFile file{data_file_path_, 0, data_num_rows_, metadata};
-  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file, properties_,
+  ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file,
+                                                      std::make_shared<const api::Properties>(properties_),
                                                       std::vector<std::string>{"id"}, nullptr));
 
   ASSERT_AND_ASSIGN(auto cloned, reader->clone_reader());
@@ -446,7 +462,8 @@ TEST_F(IcebergFormatReaderTest, EqualityDeleteRejected) {
   std::unordered_map<std::string, std::string> metadata{{kPropertyMetadata, json}};
 
   ColumnGroupFile file{data_file_path_, 0, data_num_rows_, metadata};
-  auto result = FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file, properties_,
+  auto result = FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file,
+                                     std::make_shared<const api::Properties>(properties_),
                                      std::vector<std::string>{"id"}, nullptr);
 
   ASSERT_FALSE(result.ok());
@@ -462,7 +479,8 @@ TEST_F(IcebergFormatReaderTest, InvalidJsonMetadata) {
   std::unordered_map<std::string, std::string> metadata{{kPropertyMetadata, json}};
 
   ColumnGroupFile file{data_file_path_, 0, data_num_rows_, metadata};
-  auto result = FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file, properties_,
+  auto result = FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file,
+                                     std::make_shared<const api::Properties>(properties_),
                                      std::vector<std::string>{"id"}, nullptr);
 
   ASSERT_FALSE(result.ok());

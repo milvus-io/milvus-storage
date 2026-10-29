@@ -119,7 +119,7 @@ class ParquetFileWriterTest : public ::testing::Test {
   protected:
   void SetUp() override {
     ASSERT_STATUS_OK(InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
 
     base_path_ = GetTestBasePath("parquet-file-writer-test");
     ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
@@ -756,7 +756,7 @@ arrow::Result<std::vector<::parquet::Compression::type>> WriteAndReadColumnCompr
     const std::shared_ptr<arrow::RecordBatch>& batch,
     const std::string& file_path,
     bool use_properties_make,
-    const milvus_storage::api::Properties& properties) {
+    const std::shared_ptr<const milvus_storage::api::Properties>& properties) {
   if (use_properties_make) {
     ARROW_ASSIGN_OR_RAISE(auto writer,
                           milvus_storage::parquet::ParquetFileWriter::Make(fs, schema, file_path, properties));
@@ -819,7 +819,8 @@ TEST_F(ParquetFileWriterTest, FixedSizeBinaryColumnsAreUncompressed) {
   {
     auto file_path = base_path_ + "/data/vector_uncompressed_legacy.parquet";
     ASSERT_AND_ASSIGN(auto codecs, WriteAndReadColumnCompression(fs_, schema, batch, file_path,
-                                                                 /*use_properties_make=*/false, properties_));
+                                                                 /*use_properties_make=*/false,
+                                                                 std::make_shared<const api::Properties>(properties_)));
     ASSERT_EQ(codecs.size(), 3u);
     EXPECT_EQ(codecs[0], ::parquet::Compression::ZSTD) << "id should be ZSTD";
     EXPECT_EQ(codecs[1], ::parquet::Compression::UNCOMPRESSED) << "dense_vec should be UNCOMPRESSED";
@@ -830,7 +831,8 @@ TEST_F(ParquetFileWriterTest, FixedSizeBinaryColumnsAreUncompressed) {
   {
     auto file_path = base_path_ + "/data/vector_uncompressed_props.parquet";
     ASSERT_AND_ASSIGN(auto codecs, WriteAndReadColumnCompression(fs_, schema, batch, file_path,
-                                                                 /*use_properties_make=*/true, properties_));
+                                                                 /*use_properties_make=*/true,
+                                                                 std::make_shared<const api::Properties>(properties_)));
     ASSERT_EQ(codecs.size(), 3u);
     EXPECT_EQ(codecs[0], ::parquet::Compression::ZSTD) << "id should be ZSTD";
     EXPECT_EQ(codecs[1], ::parquet::Compression::UNCOMPRESSED) << "dense_vec should be UNCOMPRESSED";
@@ -892,9 +894,9 @@ TEST_F(ParquetFileWriterTest, FooterSizeNotMatch) {
   // The reader uses footer_size to pre-read the footer in a single IO;
   // if the size is wrong, it falls back to Arrow's normal 2-step footer read.
   auto verify_read = [&](uint64_t footer_size) {
-    auto reader =
-        milvus_storage::parquet::ParquetFormatReader(fs_, temp_file, properties_, /*needed_columns=*/{},
-                                                     /*key_retriever=*/nullptr, cached_file_size, footer_size);
+    auto reader = milvus_storage::parquet::ParquetFormatReader(
+        fs_, temp_file, std::make_shared<const api::Properties>(properties_), /*needed_columns=*/{},
+        /*key_retriever=*/nullptr, cached_file_size, footer_size);
     ASSERT_STATUS_OK(reader.open());
 
     ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());
@@ -946,8 +948,9 @@ TEST_F(ParquetFileWriterTest, StructRoundTripThroughParquetFormatReader) {
 
   auto file_size = close_result.Get<uint64_t>(api::kPropertyFileSize);
   auto footer_size = close_result.Get<uint64_t>(api::kPropertyFooterSize);
-  auto reader = milvus_storage::parquet::ParquetFormatReader(fs_, temp_file, properties_, /*needed_columns=*/{},
-                                                             /*key_retriever=*/nullptr, file_size, footer_size);
+  auto reader = milvus_storage::parquet::ParquetFormatReader(
+      fs_, temp_file, std::make_shared<const api::Properties>(properties_), /*needed_columns=*/{},
+      /*key_retriever=*/nullptr, file_size, footer_size);
   ASSERT_STATUS_OK(reader.open());
   ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());
   ASSERT_EQ(row_group_infos.size(), 1);
@@ -987,8 +990,9 @@ TEST_F(ParquetFileWriterTest, DISABLED_FixedSizeListRoundTripThroughParquetForma
 
   auto file_size = close_result.Get<uint64_t>(api::kPropertyFileSize);
   auto footer_size = close_result.Get<uint64_t>(api::kPropertyFooterSize);
-  auto reader = milvus_storage::parquet::ParquetFormatReader(fs_, temp_file, properties_, /*needed_columns=*/{},
-                                                             /*key_retriever=*/nullptr, file_size, footer_size);
+  auto reader = milvus_storage::parquet::ParquetFormatReader(
+      fs_, temp_file, std::make_shared<const api::Properties>(properties_), /*needed_columns=*/{},
+      /*key_retriever=*/nullptr, file_size, footer_size);
   ASSERT_STATUS_OK(reader.open());
   ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());
   ASSERT_EQ(row_group_infos.size(), 1);

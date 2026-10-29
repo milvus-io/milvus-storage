@@ -390,10 +390,12 @@ class FormatBenchFixtureBase : public ::benchmark::Fixture {
   public:
   void SetUp(::benchmark::State& st) override {
     // Initialize properties from environment
-    BENCH_ASSERT_STATUS_OK(InitTestProperties(properties_), st);
+    api::Properties properties;
+    BENCH_ASSERT_STATUS_OK(InitTestProperties(properties), st);
 
-    // Configure global properties for benchmarks
-    ConfigureGlobalProp();
+    // Configure global properties before sharing the immutable configuration.
+    api::SetValue(properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "32768");
+    properties_ = std::make_shared<const api::Properties>(std::move(properties));
 
     // Get filesystem
     BENCH_ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_), st);
@@ -447,14 +449,13 @@ class FormatBenchFixtureBase : public ::benchmark::Fixture {
   }
 
   protected:
-  // Configure global properties for all benchmarks
-  void ConfigureGlobalProp() { api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "32768"); }
-
-  // Configure memory settings based on MemoryConfig
+  // Configure memory settings once before creating readers or writers.
   void ConfigureMemory(const MemoryConfig& config) {
-    api::SetValue(properties_, PROPERTY_WRITER_BUFFER_SIZE, std::to_string(config.buffer_size).c_str());
-    api::SetValue(properties_, PROPERTY_READER_RECORD_BATCH_MAX_ROWS, std::to_string(config.batch_size).c_str());
-    api::SetValue(properties_, PROPERTY_READER_RECORD_BATCH_MAX_SIZE, std::to_string(config.buffer_size).c_str());
+    auto properties = *properties_;
+    api::SetValue(properties, PROPERTY_WRITER_BUFFER_SIZE, std::to_string(config.buffer_size).c_str());
+    api::SetValue(properties, PROPERTY_READER_RECORD_BATCH_MAX_ROWS, std::to_string(config.batch_size).c_str());
+    api::SetValue(properties, PROPERTY_READER_RECORD_BATCH_MAX_SIZE, std::to_string(config.buffer_size).c_str());
+    properties_ = std::make_shared<const api::Properties>(std::move(properties));
   }
 
   //-----------------------------------------------------------------------
@@ -562,7 +563,7 @@ class FormatBenchFixtureBase : public ::benchmark::Fixture {
   }
 
   protected:
-  api::Properties properties_;
+  std::shared_ptr<const api::Properties> properties_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::string base_path_;
   std::vector<std::string> available_formats_;

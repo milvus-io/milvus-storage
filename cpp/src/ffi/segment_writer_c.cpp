@@ -30,8 +30,8 @@ using namespace milvus_storage::api;
 using namespace milvus_storage::segment;
 
 // helper to convert FFI config to C++ config
-static arrow::Result<SegmentWriterConfig> ConvertWriterConfig(const LoonSegmentWriterConfig* config,
-                                                              const api::Properties& properties) {
+static arrow::Result<SegmentWriterConfig> ConvertWriterConfig(
+    const LoonSegmentWriterConfig* config, const std::shared_ptr<const api::Properties>& properties) {
   SegmentWriterConfig cpp_config;
 
   if (!config->segment_path) {
@@ -71,7 +71,7 @@ LoonFFIResult loon_segment_writer_new(ArrowSchema* schema_raw,
 
   try {
     // convert properties
-    api::Properties props_map;
+    std::shared_ptr<const api::Properties> props_map;
     auto opt = ConvertFFIProperties(props_map, properties);
     if (opt != std::nullopt) {
       RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties: ", opt->c_str());

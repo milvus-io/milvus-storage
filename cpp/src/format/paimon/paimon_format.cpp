@@ -22,8 +22,8 @@
 
 namespace milvus_storage {
 
-arrow::Result<std::vector<api::ColumnGroupFile>> PaimonFormat::explore(const std::string& explore_dir,
-                                                                       const api::Properties& properties) {
+arrow::Result<std::vector<api::ColumnGroupFile>> PaimonFormat::explore(
+    const std::string& explore_dir, const std::shared_ptr<const api::Properties>& properties) {
   auto table_location = paimon::ToStandardUri(explore_dir);
   const auto& filesystem_path = explore_dir.rfind("file:", 0) == 0 ? table_location : explore_dir;
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, filesystem_path));
@@ -71,7 +71,7 @@ arrow::Result<std::vector<api::ColumnGroupFile>> PaimonFormat::explore(const std
 arrow::Result<std::shared_ptr<FormatReader>> PaimonFormat::create_reader(
     const std::shared_ptr<arrow::Schema>& read_schema,
     const api::ColumnGroupFile& file,
-    const api::Properties& properties,
+    const std::shared_ptr<const api::Properties>& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& key_retriever) {
   ARROW_ASSIGN_OR_RAISE(auto metadata,
@@ -82,11 +82,12 @@ arrow::Result<std::shared_ptr<FormatReader>> PaimonFormat::create_reader(
   return std::static_pointer_cast<FormatReader>(reader);
 }
 
-arrow::Result<std::unique_ptr<FormatWriter>> PaimonFormat::create_writer(const std::shared_ptr<arrow::fs::FileSystem>&,
-                                                                         const std::shared_ptr<arrow::Schema>&,
-                                                                         const std::string&,
-                                                                         const std::string&,
-                                                                         const api::Properties&) {
+arrow::Result<std::unique_ptr<FormatWriter>> PaimonFormat::create_writer(
+    const std::shared_ptr<arrow::fs::FileSystem>&,
+    const std::shared_ptr<arrow::Schema>&,
+    const std::string&,
+    const std::string&,
+    const std::shared_ptr<const api::Properties>&) {
   return arrow::Status::NotImplemented("Paimon format does not support writing");
 }
 

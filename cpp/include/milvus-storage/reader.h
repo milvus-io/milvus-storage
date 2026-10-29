@@ -173,7 +173,7 @@ class Reader {
    * @param cgs Dataset column group information
    * @param schema Arrow schema defining the logical structure of the data.
    *        If nullptr, the schema is derived from the underlying file metadata.
-   * @param properties Read configuration properties including encryption settings
+   * @param properties Non-null shared read configuration; callers must not mutate it through aliases
    * @return Unique pointer to a Reader instance
    *
    * @example
@@ -183,11 +183,12 @@ class Reader {
    * Manifest manifest = LoadManifest(fs, "/path/to/dataset");
    * auto schema = manifest.schema();
    *
-   * ReadProperties props;
+   * Properties props;
    * props["cipher_type"] = "AES256";
    * props["buffer_size"] = "65536";
+   * auto properties = std::make_shared<const Properties>(std::move(props));
    *
-   * auto reader = Reader::create(manifest, schema, props);
+   * auto reader = Reader::create(manifest, schema, nullptr, properties);
    * auto batch_reader = reader->get_record_batch_reader().ValueOrDie();
    *
    * std::shared_ptr<arrow::RecordBatch> batch;
@@ -252,10 +253,11 @@ class Reader {
    *  Format Reader: If the schema is empty or nullptr, it reads the columns specified in
    *    `needed_columns`. If `needed_columns` is also empty or nullptr, it reads all columns.
    */
-  static std::unique_ptr<Reader> create(const std::shared_ptr<ColumnGroups>& cgs,
-                                        const std::shared_ptr<arrow::Schema>& schema = nullptr,
-                                        const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr,
-                                        const Properties& properties = {});
+  static std::unique_ptr<Reader> create(
+      const std::shared_ptr<ColumnGroups>& cgs,
+      const std::shared_ptr<arrow::Schema>& schema = nullptr,
+      const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr,
+      std::shared_ptr<const Properties> properties = std::make_shared<const Properties>());
 
   /**
    * @brief Virtual destructor

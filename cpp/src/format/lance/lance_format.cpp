@@ -25,8 +25,8 @@
 
 namespace milvus_storage {
 
-arrow::Result<std::vector<api::ColumnGroupFile>> LanceFormat::explore(const std::string& explore_dir,
-                                                                      const api::Properties& properties) {
+arrow::Result<std::vector<api::ColumnGroupFile>> LanceFormat::explore(
+    const std::string& explore_dir, const std::shared_ptr<const api::Properties>& properties) {
   ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, explore_dir));
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, explore_dir.c_str()));
 
@@ -65,7 +65,7 @@ arrow::Result<std::vector<api::ColumnGroupFile>> LanceFormat::explore(const std:
 arrow::Result<std::shared_ptr<FormatReader>> LanceFormat::create_reader(
     const std::shared_ptr<arrow::Schema>& read_schema,
     const api::ColumnGroupFile& file,
-    const api::Properties& properties,
+    const std::shared_ptr<const api::Properties>& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& /*key_retriever*/) {
   std::string base_path;
@@ -92,7 +92,7 @@ arrow::Result<std::shared_ptr<FormatReader>> LanceFormat::create_reader(
 folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> LanceFormat::create_reader_async(
     const std::shared_ptr<arrow::Schema>& read_schema,
     const api::ColumnGroupFile& file,
-    const api::Properties& properties,
+    const std::shared_ptr<const api::Properties>& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& /*key_retriever*/) {
   // Match PlainFormat's async factory: prepare the reader on the caller's
@@ -127,7 +127,7 @@ arrow::Result<std::unique_ptr<FormatWriter>> LanceFormat::create_writer(
     const std::shared_ptr<arrow::Schema>& schema,
     const std::string& /*file_path*/,
     const std::string& base_path,
-    const api::Properties& properties) {
+    const std::shared_ptr<const api::Properties>& properties) {
 #ifdef BUILD_GTEST
   return std::make_unique<lance::LanceTableWriter>(base_path, schema, properties);
 #else

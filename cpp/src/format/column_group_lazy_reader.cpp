@@ -50,7 +50,7 @@ class ColumnGroupLazyReaderImpl : public ColumnGroupLazyReader {
   public:
   ColumnGroupLazyReaderImpl(const std::shared_ptr<arrow::Schema>& schema,
                             const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
-                            const milvus_storage::api::Properties& properties,
+                            const std::shared_ptr<const milvus_storage::api::Properties>& properties,
                             const std::vector<std::string>& needed_columns,
                             const std::function<std::string(const std::string&)>& key_retriever,
                             const milvus_storage::MetadataCache& cache);
@@ -69,7 +69,7 @@ class ColumnGroupLazyReaderImpl : public ColumnGroupLazyReader {
 
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<milvus_storage::api::ColumnGroup> column_group_;
-  milvus_storage::api::Properties properties_;
+  std::shared_ptr<const milvus_storage::api::Properties> properties_;
   std::vector<std::string> needed_columns_;
   std::function<std::string(const std::string&)> key_retriever_;
   milvus_storage::MetadataCache cache_;
@@ -330,7 +330,7 @@ template <typename ReaderT>
 ColumnGroupLazyReaderImpl<ReaderT>::ColumnGroupLazyReaderImpl(
     const std::shared_ptr<arrow::Schema>& schema,
     const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
-    const milvus_storage::api::Properties& properties,
+    const std::shared_ptr<const milvus_storage::api::Properties>& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& key_retriever,
     const milvus_storage::MetadataCache& cache)
@@ -344,7 +344,7 @@ ColumnGroupLazyReaderImpl<ReaderT>::ColumnGroupLazyReaderImpl(
 arrow::Result<std::unique_ptr<ColumnGroupLazyReader>> ColumnGroupLazyReader::create(
     const std::shared_ptr<arrow::Schema>& schema,
     const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
-    const milvus_storage::api::Properties& properties,
+    const std::shared_ptr<const milvus_storage::api::Properties>& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& key_retriever,
     const milvus_storage::MetadataCache& cache) {

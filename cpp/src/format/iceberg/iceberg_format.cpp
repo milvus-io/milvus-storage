@@ -21,8 +21,8 @@
 
 namespace milvus_storage {
 
-arrow::Result<std::vector<api::ColumnGroupFile>> IcebergFormat::explore(const std::string& explore_dir,
-                                                                        const api::Properties& properties) {
+arrow::Result<std::vector<api::ColumnGroupFile>> IcebergFormat::explore(
+    const std::string& explore_dir, const std::shared_ptr<const api::Properties>& properties) {
   ARROW_ASSIGN_OR_RAISE(auto filesystem, FilesystemCache::getInstance().get(properties, explore_dir));
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, explore_dir.c_str()));
   auto read_options = iceberg::ToReaderOptions(fs_config);
@@ -61,7 +61,7 @@ arrow::Result<std::vector<api::ColumnGroupFile>> IcebergFormat::explore(const st
 arrow::Result<std::shared_ptr<FormatReader>> IcebergFormat::create_reader(
     const std::shared_ptr<arrow::Schema>& /*read_schema*/,
     const api::ColumnGroupFile& file,
-    const api::Properties& properties,
+    const std::shared_ptr<const api::Properties>& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& key_retriever) {
   ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, file.path));
@@ -85,7 +85,7 @@ arrow::Result<std::unique_ptr<FormatWriter>> IcebergFormat::create_writer(
     const std::shared_ptr<arrow::Schema>& /*schema*/,
     const std::string& /*file_path*/,
     const std::string& /*base_path*/,
-    const api::Properties& /*properties*/) {
+    const std::shared_ptr<const api::Properties>& /*properties*/) {
   return arrow::Status::NotImplemented("Iceberg format does not support writing");
 }
 

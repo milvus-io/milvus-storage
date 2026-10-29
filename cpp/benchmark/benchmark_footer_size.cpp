@@ -166,7 +166,9 @@ arrow::Result<int64_t> GetParquetFooterSize(const std::shared_ptr<arrow::fs::Fil
 class FooterSizeFixture : public ::benchmark::Fixture {
   protected:
   void SetUp(::benchmark::State& state) override {
-    GBENCH_ASSERT_STATUS_OK(InitTestProperties(properties_), state);
+    api::Properties properties;
+    GBENCH_ASSERT_STATUS_OK(InitTestProperties(properties), state);
+    properties_ = std::make_shared<const api::Properties>(std::move(properties));
     GBENCH_ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_), state);
     base_path_ = GetTestBasePath("footer_benchmark");
     GBENCH_ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_), state);
@@ -177,7 +179,7 @@ class FooterSizeFixture : public ::benchmark::Fixture {
     // Cleanup if needed
   }
 
-  api::Properties properties_;
+  std::shared_ptr<const api::Properties> properties_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::string base_path_;
 };

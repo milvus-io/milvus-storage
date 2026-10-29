@@ -59,7 +59,7 @@ static ::parquet::Compression::type convert_compression_type(const std::string& 
 }
 
 static arrow::Result<std::shared_ptr<::parquet::WriterProperties>> convert_write_properties(
-    const milvus_storage::api::Properties& properties) {
+    const std::shared_ptr<const milvus_storage::api::Properties>& properties) {
   ::parquet::WriterProperties::Builder builder;
 
   bool enc_enable = api::GetValueNoError<bool>(properties, PROPERTY_WRITER_ENC_ENABLE);
@@ -181,7 +181,7 @@ arrow::Result<std::unique_ptr<ParquetFileWriter>> ParquetFileWriter::Make(
     std::shared_ptr<arrow::fs::FileSystem> fs,
     std::shared_ptr<arrow::Schema> schema,
     const std::string& file_path,
-    const milvus_storage::api::Properties& properties) {
+    const std::shared_ptr<const milvus_storage::api::Properties>& properties) {
   ARROW_ASSIGN_OR_RAISE(auto part_size,
                         milvus_storage::api::GetValue<int64_t>(properties, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE));
   ARROW_ASSIGN_OR_RAISE(auto writer_properties, convert_write_properties(properties));
