@@ -261,7 +261,13 @@ TEST_P(S3ReadResponseTest, PreservesErrorsLargerThanReadBuffer) {
                                                                        : ExtendStatusCode::StorageTransientThrottling);
     }
     EXPECT_TRUE(std::all_of(data.begin(), data.end(), [](uint8_t value) { return value == 0xa5; }));
-    EXPECT_EQ(server.requests(), 1);
+    if (GetParam() && http_status == http::status::service_unavailable) {
+      // The CRT read client retries throttling responses before returning the
+      // final error. Do not couple this test to its default retry count.
+      EXPECT_GT(server.requests(), 1);
+    } else {
+      EXPECT_EQ(server.requests(), 1);
+    }
     EXPECT_TRUE(server.only_gets());
     ASSERT_STATUS_OK(input->Close());
   }
@@ -291,17 +297,8 @@ TEST_P(S3ReadResponseTest, RetriesErrorThenReadsIntoCallerBuffer) {
   ASSERT_AND_ASSIGN(auto input, fs->OpenInputFile("bucket/object"));
   std::array<char, 16> data{};
   data.fill('?');
-  if (GetParam()) {
-    // The shared CRT client makes one attempt to avoid replaying ambiguous
-    // writes. A caller can explicitly retry this read on the same file/buffer.
-    const auto failed = input->ReadAt(0, data.size(), data.data());
-    ASSERT_FALSE(failed.ok());
-    const auto detail = ExtendStatusDetail::UnwrapStatus(failed.status());
-    ASSERT_NE(detail, nullptr);
-    EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientThrottling);
-    EXPECT_EQ(server.requests(), 1);
-    EXPECT_TRUE(std::all_of(data.begin(), data.end(), [](char value) { return value == '?'; }));
-  }
+  // Both clients retry internally: a single read must consume the 503 and then
+  // return the successful response in the caller's buffer.
   ASSERT_AND_ASSIGN(const auto bytes_read, input->ReadAt(0, data.size(), data.data()));
   EXPECT_EQ(bytes_read, data.size());
   EXPECT_EQ(std::string(data.data(), data.size()), "0123456789abcdef");
