@@ -17,6 +17,7 @@
 #include <arrow/result.h>
 
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/gcp/gcp_credential_provider.h"
 #include "milvus-storage/filesystem/s3/s3_options.h"
 
 namespace milvus_storage {
@@ -45,10 +46,13 @@ class GcpFileSystemProducer : public FileSystemProducer {
   // Per-Make: build a credential provider from the given config and register
   // it in GcpCredentialRegistry under (endpoint, bucket). Must be called
   // after InitS3Compat. Returns Status::Invalid when the config doesn't
-  // match any supported credential mode.
-  static arrow::Status RegisterIdentity(const ArrowFileSystemConfig& config);
+  // match any supported credential mode, or when the bucket already maps to
+  // another identity.
+  static arrow::Result<std::shared_ptr<GcpCredentialProvider>> RegisterIdentity(const ArrowFileSystemConfig& config);
 
-  arrow::Result<S3Options> CreateS3Options();
+  // bearer_token: the provider injects Authorization, so the AWS signer must
+  // not sign (anonymous credentials).
+  arrow::Result<S3Options> CreateS3Options(bool bearer_token);
 
   const ArrowFileSystemConfig config_;
 };

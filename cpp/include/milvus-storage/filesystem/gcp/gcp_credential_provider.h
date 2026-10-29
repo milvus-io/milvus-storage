@@ -48,6 +48,16 @@ class GcpCredentialProvider {
   // Re-signs conditional writes using GOOG4-HMAC-SHA256 (HMAC mode only).
   // No-op for IAM/Impersonation modes.
   virtual arrow::Status MaybeSignConditionalWrite(const std::shared_ptr<Aws::Http::HttpRequest>& request) = 0;
+
+  // Whether AuthorizationHeader() can return an OAuth2 Bearer token. HMAC
+  // providers sign requests instead and never return a header.
+  [[nodiscard]] virtual bool IssuesBearerToken() const = 0;
+
+  // A stable description of the identity this provider authenticates as, for
+  // example "iam", "impersonate:<sa>" or "hmac:<access_key_id>".
+  // GcpCredentialRegistry refuses to map one (endpoint, bucket) to two
+  // providers with different identities.
+  [[nodiscard]] virtual std::string Identity() const = 0;
 };
 
 // Build the appropriate provider from a filesystem config. Returns
