@@ -2305,8 +2305,8 @@ TEST_F(LanceBasicTest, EstimatedMemoryAccountsForDeletions) {
 
   constexpr int64_t kRows = 10'000;
   constexpr int64_t kDeletedRows = 2'000;
-  ASSERT_AND_ASSIGN(auto id_schema, CreateTestSchema({true, false, false, false}));
-  ASSERT_AND_ASSIGN(auto batch, CreateTestData(id_schema, 0, false, kRows, 4, 50, {true, false, false, false}));
+  ASSERT_AND_ASSIGN(auto schema, CreateTestSchema({true, false, true, false}));
+  ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema, 0, false, kRows, 4, 50, {true, false, true, false}));
 
   ArrowFileSystemConfig fs_config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(
@@ -2314,20 +2314,89 @@ TEST_F(LanceBasicTest, EstimatedMemoryAccountsForDeletions) {
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
   ASSERT_AND_ASSIGN(auto storage_options, milvus_storage::lance::ToWriterOptions(fs_config));
 
-  LanceTableWriter writer(base_path_, id_schema, std::make_shared<const api::Properties>(properties_));
+  LanceTableWriter writer(base_path_, schema, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(batch));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, kRows);
   ASSERT_STATUS_OK(BlockingDataset::DeleteRows(lance_uri, "id < 2000", storage_options));
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(cgfile.path));
-  LanceTableReader reader(fs_, parsed_uri.first, parsed_uri.second, id_schema,
+
+  // Count actual reads of deletion files separately from manifests and footers.
+  class DeletionMetricsFileSystem final : public arrow::fs::SubTreeFileSystem {
+ public:
+    DeletionMetricsFileSystem(std::shared_ptr<arrow::fs::FileSystem> filesystem,
+                              std::shared_ptr<FilesystemMetrics> metrics)
+        : arrow::fs::SubTreeFileSystem("", std::move(filesystem)), metrics_(std::move(metrics)) {}
+
+    arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string& path) override {
+      ARROW_ASSIGN_OR_RAISE(auto file, arrow::fs::SubTreeFileSystem::OpenInputFile(path));
+      if (path.find("/_deletions/") != std::string::npos) {
+        return std::make_shared<MetricsRandomAccessFile>(std::move(file), metrics_);
+      }
+      return file;
+    }
+
+    arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(
+        const arrow::fs::FileInfo& info) override {
+      ARROW_ASSIGN_OR_RAISE(auto file, arrow::fs::SubTreeFileSystem::OpenInputFile(info));
+      if (info.path().find("/_deletions/") != std::string::npos) {
+        return std::make_shared<MetricsRandomAccessFile>(std::move(file), metrics_);
+      }
+      return file;
+    }
+
+ private:
+    const std::shared_ptr<FilesystemMetrics> metrics_;
+  };
+  const auto deletion_metrics = std::make_shared<FilesystemMetrics>();
+  const auto filesystem = std::make_shared<DeletionMetricsFileSystem>(fs_, deletion_metrics);
+  LanceTableReader reader(filesystem, parsed_uri.first, parsed_uri.second, schema,
                           std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(reader.open());
+  EXPECT_EQ(deletion_metrics->GetReadCount(), 1);
+  EXPECT_GT(deletion_metrics->GetReadBytes(), 0);
   ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
   ASSERT_EQ(rgs.size(), 1);
   ASSERT_EQ(rgs[0].end_offset, kRows - kDeletedRows);
   ASSERT_AND_ASSIGN(auto chunk, reader.get_chunk(0));
   ASSERT_EQ(rgs[0].memory_size, GetRecordBatchMemorySize(chunk));
+  EXPECT_TRUE(chunk->column(0)->Equals(batch->column(0)->Slice(kDeletedRows)));
+
+  auto column_group = std::make_shared<api::ColumnGroup>();
+  column_group->columns = {"id", "value"};
+  column_group->format = LOON_FORMAT_LANCE_TABLE;
+  // The write returned the pre-delete snapshot; pin readers to the new snapshot.
+  ASSERT_AND_ASSIGN(auto version,
+                    BlockingDataset::ResolveLatestVersion(lance_uri, filesystem, ToReaderOptions(fs_config)));
+  cgfile.properties[kDatasetVersionProperty] = std::to_string(version);
+  cgfile.end_index = kRows - kDeletedRows;
+  column_group->files = {cgfile};
+  auto column_groups = std::make_shared<api::ColumnGroups>();
+  column_groups->push_back(std::move(column_group));
+  const auto properties = std::make_shared<const api::Properties>(properties_);
+  const auto ids = std::make_shared<std::vector<std::string>>(std::initializer_list<std::string>{"id"});
+  const auto values = std::make_shared<std::vector<std::string>>(std::initializer_list<std::string>{"value"});
+  ASSERT_AND_ASSIGN(auto metrics, std::dynamic_pointer_cast<Observable>(fs_)->GetMetrics(kOriginMetricsSource));
+  for (const bool async_first : {false, true}) {
+    SCOPED_TRACE(async_first ? "async cold open" : "sync cold open");
+    auto cached_reader = api::Reader::create(column_groups, schema, nullptr, properties);
+    deletion_metrics->Reset();
+    ASSERT_AND_ASSIGN(auto first, async_first ? cached_reader->get_chunk_reader_async(0, ids).get()
+                                              : cached_reader->get_chunk_reader(0, ids));
+    EXPECT_EQ(deletion_metrics->GetReadCount(), 1);
+    first.reset();
+
+    metrics->Reset();
+    deletion_metrics->Reset();
+    ASSERT_AND_ASSIGN(auto same, cached_reader->get_chunk_reader(0, ids));
+    ASSERT_AND_ASSIGN(auto other, cached_reader->get_chunk_reader_async(0, values).get());
+    EXPECT_EQ(deletion_metrics->GetReadCount(), 0);
+    EXPECT_EQ(metrics->GetReadCount(), 0);
+    ASSERT_AND_ASSIGN(auto value_chunk, other->get_chunk(0));
+    EXPECT_TRUE(value_chunk->column(0)->Equals(batch->column(1)->Slice(kDeletedRows, value_chunk->num_rows())));
+    ASSERT_AND_ASSIGN(auto id_chunk, same->get_chunk(0));
+    EXPECT_TRUE(id_chunk->column(0)->Equals(batch->column(0)->Slice(kDeletedRows, id_chunk->num_rows())));
+  }
 }
 
 TEST_F(LanceBasicTest, FixedSizeListUsesExactMemoryEstimate) {

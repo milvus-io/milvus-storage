@@ -183,6 +183,7 @@ pub mod lance_ffi {
             storage_options_keys: Vec<String>,
             storage_options_values: Vec<String>,
             data_storage_format: LanceDataStorageFormat,
+            enable_stable_row_ids: bool,
         ) -> Result<Vec<u64>>;
         pub fn delete_rows(
             uri: &str,
@@ -190,6 +191,8 @@ pub mod lance_ffi {
             storage_options_keys: Vec<String>,
             storage_options_values: Vec<String>,
         ) -> Result<()>;
+
+        pub fn externalize_row_ids_for_testing(uri: &str) -> Result<()>;
 
         pub fn version(self: &BlockingDataset) -> u64;
         pub fn get_all_fragment_ids(self: &BlockingDataset) -> Vec<u64>;

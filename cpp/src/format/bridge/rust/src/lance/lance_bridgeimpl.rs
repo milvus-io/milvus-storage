@@ -30,12 +30,14 @@ use lance::dataset::statistics::{DataStatistics, DatasetStatisticsExt};
 use lance::dataset::transaction::{Operation, Transaction};
 use lance::dataset::{CommitBuilder, Dataset, ReadParams, Version, WriteMode, WriteParams};
 use lance::{Error as LanceError, Result};
+use lance_core::utils::deletion::DeletionVector;
 use lance_encoding::version::LanceFileVersion;
 
 use crate::lance_ffi::{LanceColumnMemoryEstimate, LanceDataStorageFormat};
 
 use lance::index::DatasetIndexExt;
 use lance_table::format::{Fragment, IndexMetadata};
+use lance_table::rowids::RowIdSequence;
 use lance_table::utils::stream::ReadBatchFutStream;
 
 use lance::io::ObjectStoreParams;
@@ -56,10 +58,13 @@ pub struct BlockingDataset {
     scan_scheduler: Arc<OnceLock<Arc<ScanScheduler>>>,
 }
 
-/// Immutable footers retained by the reader and shared with C++ metadata owners.
+/// Immutable file footers, deletion state, and stable row IDs for one snapshot's fragment.
 #[derive(Clone)]
 pub struct FragmentFilesMetadata {
     files: Arc<FileMetadataMap>,
+    deletion_vector: Option<Arc<DeletionVector>>,
+    sorted_deletions: Arc<[u32]>,
+    row_id_sequence: Option<Arc<RowIdSequence>>,
     uri: String,
     version: u64,
     fragment_id: u64,
@@ -556,6 +561,7 @@ pub unsafe fn write_dataset(
     storage_options_keys: Vec<String>,
     storage_options_values: Vec<String>,
     data_storage_format: LanceDataStorageFormat,
+    enable_stable_row_ids: bool,
 ) -> Result<Vec<u64>> {
     let storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
     let store_params = native_mutation_store_params(storage_options)?;
@@ -602,6 +608,7 @@ pub unsafe fn write_dataset(
     let mut write_params = WriteParams {
         mode: WriteMode::Append,
         data_storage_version: Some(lance_file_version),
+        enable_stable_row_ids,
         enable_v2_manifest_paths: false,
         auto_cleanup: Some(AutoCleanupParams::default()),
         ..Default::default()
@@ -644,6 +651,47 @@ pub fn delete_rows(
     let mut dataset = TOKIO_RT.block_on(builder.load())?;
     TOKIO_RT.block_on(dataset.delete(predicate))?;
     Ok(())
+}
+
+/// Convert existing stable row IDs to external files for local cache tests.
+pub fn externalize_row_ids_for_testing(uri: &str) -> Result<()> {
+    use lance_table::format::{ExternalFile, RowIdMeta};
+
+    TOKIO_RT.block_on(async {
+        let dataset = Dataset::open(uri).await?;
+        let store = dataset.object_store(None).await?;
+        let mut updated_fragments = dataset.manifest().fragments.as_ref().clone();
+        for metadata in &mut updated_fragments {
+            let Some(RowIdMeta::Inline(data)) = &metadata.row_id_meta else {
+                return Err(LanceError::invalid_input(
+                    "test requires inline stable row IDs",
+                ));
+            };
+            let path = format!("row_ids_{}.bin", metadata.id);
+            store
+                .put(&dataset.branch_location().path.join(path.as_str()), data)
+                .await?;
+            metadata.row_id_meta = Some(RowIdMeta::External(ExternalFile {
+                path,
+                offset: 0,
+                size: data.len() as u64,
+            }));
+        }
+        // Publish the new row-ID references, preserving all data and deletions.
+        // A false predicate records that this metadata update deletes no rows.
+        let transaction = Transaction::new_from_version(
+            dataset.version().version,
+            Operation::Delete {
+                updated_fragments,
+                deleted_fragment_ids: Vec::new(),
+                predicate: "false".into(),
+            },
+        );
+        CommitBuilder::new(Arc::new(dataset))
+            .execute(transaction)
+            .await?;
+        Ok(())
+    })
 }
 
 struct BatchFutStreamReader {
@@ -716,7 +764,6 @@ pub struct BlockingFragmentReader {
     pub inner: Arc<FragmentReader>,
     pub fragment: FileFragment,
     pub projection: ArrowSchema,
-    sorted_deletions: Vec<u32>,
     files_metadata: FragmentFilesMetadata,
 }
 
@@ -725,31 +772,24 @@ impl BlockingFragmentReader {
         dataset: &BlockingDataset,
         fragment: Fragment,
         arrow_projection: &ArrowSchema,
-        read_config: FragReadConfig,
+        mut read_config: FragReadConfig,
         files_metadata: Option<FragmentFilesMetadata>,
     ) -> Result<Self> {
         let projection = arrow_projection.clone();
         let fragment = FileFragment::new(Arc::new(dataset.inner.clone()), fragment);
 
-        // Load deletion vector for logical→physical index mapping in take()
-        let sorted_deletions = {
-            let dv = fragment.get_deletion_vector().await?;
-            match dv {
-                Some(dv) => {
-                    let mut dels: Vec<u32> =
-                        dv.as_ref().clone().into_iter().map(|i| i as u32).collect();
-                    dels.sort();
-                    dels
-                }
-                None => vec![],
-            }
-        };
-
-        // Retain every v2 footer before applying the initial projection so later
-        // readers and estimates can use columns from all physical files.
+        // Retain all v2 footers, deletions, and row IDs before applying the initial
+        // projection. Later readers share both without rereading or sorting.
         let files_metadata = match files_metadata {
             Some(metadata) => metadata,
             None => {
+                let deletion_vector = fragment.get_deletion_vector().await?;
+                let mut sorted_deletions = deletion_vector
+                    .as_ref()
+                    .map(|vector| vector.iter().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                sorted_deletions.sort_unstable();
+                let row_id_sequence = fragment.get_row_id_sequence().await?;
                 let default_scheduler = read_config
                     .scan_scheduler
                     .as_ref()
@@ -801,12 +841,21 @@ impl BlockingFragmentReader {
                 }
                 FragmentFilesMetadata {
                     files: Arc::new(files),
+                    deletion_vector,
+                    sorted_deletions: sorted_deletions.into(),
+                    row_id_sequence,
                     uri: dataset.inner.uri().to_string(),
                     version: dataset.inner.version().version,
                     fragment_id: fragment.id() as u64,
                 }
             }
         };
+        if let Some(vector) = &files_metadata.deletion_vector {
+            read_config = read_config.with_deletion_vector(vector.clone());
+        }
+        if let Some(sequence) = &files_metadata.row_id_sequence {
+            read_config = read_config.with_row_id_sequence(sequence.clone());
+        }
 
         let meta_schema = fragment.schema();
         let meta_columns: std::collections::HashSet<_> =
@@ -829,19 +878,21 @@ impl BlockingFragmentReader {
             inner: Arc::new(fragment_reader),
             fragment,
             projection,
-            sorted_deletions,
             files_metadata,
         })
     }
 
     /// Map logical index to physical index, accounting for deletions.
     fn logical_to_physical(&self, logical: u32) -> u32 {
-        if self.sorted_deletions.is_empty() {
+        if self.files_metadata.sorted_deletions.is_empty() {
             return logical;
         }
         let mut physical = logical;
         loop {
-            let num_dels = self.sorted_deletions.partition_point(|&d| d <= physical) as u32;
+            let num_dels = self
+                .files_metadata
+                .sorted_deletions
+                .partition_point(|&d| d <= physical) as u32;
             let new_physical = logical + num_dels;
             if new_physical == physical {
                 break;
@@ -852,7 +903,7 @@ impl BlockingFragmentReader {
     }
 
     fn map_logical_indices(&self, logical_indices: &[u32]) -> Vec<u32> {
-        if self.sorted_deletions.is_empty() {
+        if self.files_metadata.sorted_deletions.is_empty() {
             return logical_indices.to_vec();
         }
         logical_indices
@@ -871,7 +922,7 @@ impl BlockingFragmentReader {
             self.fragment.schema(),
             self.fragment.metadata(),
             &self.files_metadata.files,
-            self.sorted_deletions.len() as u64,
+            self.files_metadata.sorted_deletions.len() as u64,
         )
     }
 
@@ -883,7 +934,7 @@ impl BlockingFragmentReader {
         // Own every estimator input before the borrowed C++ reader can expire.
         let fragment = self.fragment.clone();
         let files = self.files_metadata.files.clone();
-        let deletion_count = self.sorted_deletions.len() as u64;
+        let deletion_count = self.files_metadata.sorted_deletions.len() as u64;
         unsafe {
             spawn_lance_async(
                 async move {
@@ -913,7 +964,7 @@ impl BlockingFragmentReader {
     }
 
     pub fn number_of_rows(&self) -> Result<u64> {
-        Ok(TOKIO_RT.block_on(self.fragment.count_rows(None))? as u64)
+        Ok(self.inner.num_rows() as u64)
     }
 
     pub fn take_as_single_batch(&self, indices: &[u32], out_array: *mut u8) -> Result<()> {
@@ -1138,7 +1189,7 @@ pub unsafe fn open_fragment_reader_async(
     let schema = unsafe {
         arrow::ffi::FFI_ArrowSchema::from_raw(schema_rawptr as *mut arrow::ffi::FFI_ArrowSchema)
     };
-    // Retain the supplied footers before the borrowed C++ handle can be released.
+    // Retain supplied metadata before the borrowed C++ handle can be released.
     let files_metadata = unsafe { metadata.as_ref() }
         .map(|metadata| metadata.for_fragment(dataset, fragment_id))
         .transpose()?;
@@ -1395,6 +1446,139 @@ pub unsafe fn dataset_take(
 mod tests {
     use super::*;
     use lance::dataset::NewColumnTransform;
+    use lance_table::format::{ExternalFile, RowIdMeta};
+
+    #[test]
+    fn projected_readers_reuse_stable_row_ids_across_sessions() {
+        for external in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let uri = directory.path().to_str().unwrap();
+            let batch =
+                arrow_array::record_batch!(("i", Int32, [1, 2, 3]), ("j", Int32, [10, 20, 30]))
+                    .unwrap();
+            let mut manifest = TOKIO_RT.block_on(async {
+                let mut dataset = Dataset::write(
+                    arrow_array::RecordBatchIterator::new(vec![Ok(batch.clone())], batch.schema()),
+                    uri,
+                    Some(WriteParams {
+                        enable_stable_row_ids: true,
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .unwrap();
+                dataset.delete("i = 1").await.unwrap();
+                dataset.manifest().clone()
+            });
+            if external {
+                let Some(RowIdMeta::Inline(data)) = &manifest.fragments[0].row_id_meta else {
+                    panic!("small fixture should have inline row IDs");
+                };
+                let size = data.len() as u64;
+                std::fs::write(directory.path().join("row_ids.bin"), data).unwrap();
+                Arc::make_mut(&mut manifest.fragments)[0].row_id_meta =
+                    Some(RowIdMeta::External(ExternalFile {
+                        path: "row_ids.bin".into(),
+                        offset: 0,
+                        size,
+                    }));
+            }
+            let serialized = manifest.serialized();
+            let dataset = TOKIO_RT
+                .block_on(
+                    DatasetBuilder::from_uri(uri)
+                        .with_serialized_manifest(&serialized)
+                        .unwrap()
+                        .with_session(Arc::new(lance::session::Session::new(
+                            0,
+                            0,
+                            Default::default(),
+                        )))
+                        .load(),
+                )
+                .unwrap();
+            let dataset = BlockingDataset::new(dataset).unwrap();
+            let fragment = dataset.inner.manifest().fragments[0].clone();
+            let projection = ArrowSchema::from(&dataset.inner.schema().project(&["i"]).unwrap());
+            dataset.object_store.io_stats_incremental();
+            let reader = TOKIO_RT
+                .block_on(async {
+                    BlockingFragmentReader::open(
+                        &dataset,
+                        fragment.clone(),
+                        &projection,
+                        dataset.fragment_read_config(FragReadConfig::default().with_row_id(true)),
+                        None,
+                    )
+                    .await
+                })
+                .unwrap();
+            let cold_io = dataset.object_store.io_stats_incremental();
+            assert_eq!(cold_io.read_iops, 2 + u64::from(external));
+            let metadata = reader.get_files_metadata();
+            let session = Arc::downgrade(&dataset.inner.session());
+            drop(reader);
+            drop(dataset);
+            assert!(session.upgrade().is_none());
+
+            let dataset = TOKIO_RT
+                .block_on(
+                    DatasetBuilder::from_uri(uri)
+                        .with_serialized_manifest(&serialized)
+                        .unwrap()
+                        .with_session(Arc::new(lance::session::Session::new(
+                            0,
+                            0,
+                            Default::default(),
+                        )))
+                        .load(),
+                )
+                .unwrap();
+            let dataset = BlockingDataset::new(dataset).unwrap();
+            let metadata = metadata.for_fragment(&dataset, fragment.id).unwrap();
+            let projection = ArrowSchema::from(&dataset.inner.schema().project(&["j"]).unwrap());
+            dataset.object_store.io_stats_incremental();
+            let reader = TOKIO_RT
+                .block_on(async {
+                    BlockingFragmentReader::open(
+                        &dataset,
+                        fragment,
+                        &projection,
+                        dataset.fragment_read_config(FragReadConfig::default().with_row_id(true)),
+                        Some(metadata),
+                    )
+                    .await
+                })
+                .unwrap();
+            let warm_io = dataset.object_store.io_stats_incremental();
+            assert_eq!(warm_io.read_iops, 0, "external row IDs: {external}");
+            assert_eq!(warm_io.read_bytes, 0, "external row IDs: {external}");
+            let batches = TOKIO_RT
+                .block_on(async {
+                    reader
+                        .inner
+                        .read_all(3)
+                        .await?
+                        .buffered(1)
+                        .try_collect::<Vec<_>>()
+                        .await
+                })
+                .unwrap();
+            assert_eq!(batches.len(), 1);
+            let batch = &batches[0];
+            assert_eq!(batch.num_rows(), 2);
+            let values = batch["j"]
+                .as_any()
+                .downcast_ref::<arrow_array::Int32Array>()
+                .unwrap();
+            assert_eq!(values.values().as_ref(), &[20, 30]);
+            let ids = batch["_rowid"]
+                .as_any()
+                .downcast_ref::<arrow_array::UInt64Array>()
+                .unwrap();
+            assert_eq!(ids.values().as_ref(), &[1, 2]);
+        }
+    }
 
     #[test]
     fn legacy_reader_opens_without_v2_footers() {
@@ -1459,6 +1643,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            dataset.delete("i = 1").await.unwrap();
             dataset
         });
         let dataset = BlockingDataset::new(dataset).unwrap();
@@ -1478,6 +1663,18 @@ mod tests {
             })
             .unwrap();
         let metadata = reader.get_files_metadata();
+        assert_eq!(reader.number_of_rows().unwrap(), 2);
+        assert_eq!(metadata.sorted_deletions.as_ref(), &[0]);
+        let previous = TOKIO_RT
+            .block_on(
+                dataset
+                    .inner
+                    .checkout_version(dataset.inner.version().version - 1),
+            )
+            .unwrap();
+        let previous = BlockingDataset::new(previous).unwrap();
+        assert!(metadata.for_fragment(&previous, fragment.id).is_err());
+        drop(previous);
         assert_eq!(metadata.files.len(), 2);
         assert!(metadata.for_fragment(&dataset, fragment.id + 1).is_err());
         assert!(Arc::ptr_eq(
@@ -1493,8 +1690,8 @@ mod tests {
                 .all(|estimate| estimate.memory_size > 0)
         );
 
-        // Footers describe immutable files, so another Session for the same
-        // snapshot can reuse them after the original Dataset and reader are gone.
+        // Footers and deletion state can be reused by another Session for the
+        // same snapshot after the original Dataset and reader are gone.
         let version = dataset.inner.version().version;
         let previous_session = Arc::downgrade(&dataset.inner.session());
         drop(reader);
@@ -1539,7 +1736,12 @@ mod tests {
                 stream.buffered(1).try_collect::<Vec<_>>().await
             })
             .unwrap();
-        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
         assert_eq!(batches[0].schema().field(0).name(), "j");
+        assert_eq!(reader.map_logical_indices(&[0, 1]), vec![1, 2]);
+        assert!(Arc::ptr_eq(
+            &metadata.sorted_deletions,
+            &reader.files_metadata.sorted_deletions
+        ));
     }
 }

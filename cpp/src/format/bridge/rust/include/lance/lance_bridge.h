@@ -53,6 +53,9 @@ struct LanceIOStats {
   uint64_t read_iops = 0;
   uint64_t read_bytes = 0;
 };
+
+/// Move existing stable row IDs to external files for local cache tests.
+arrow::Status ExternalizeRowIdsForTesting(const std::string& uri);
 #endif  // BUILD_GTEST
 
 /// Storage options type for S3/cloud access (key-value pairs).
@@ -71,16 +74,17 @@ enum class LanceDataStorageFormat : uint8_t {
   V2_3 = 3,
 };
 
-/// Shared, decoded footer metadata for all v2 data files in one fragment.
+/// Shared file footers, deletion state, and stable row IDs for one snapshot's fragment.
 ///
 /// Obtained from BlockingFragmentReader::GetFilesMetadata() after opening a reader.
 /// Keeping this handle in the top-level Reader's cache lets later Open/OpenAsync
-/// calls reuse the footers across projections, even after the first reader is destroyed.
+/// calls reuse footers, the deletion vector, sorted deletion positions, and the
+/// row-ID sequence across projections, even after the first reader is destroyed.
 ///
-/// The Rust object maps (base_id, path) to Arc<CachedFileMetadata>; handles share
-/// these allocations without copying the footers. Reuse requires the same dataset
-/// URI, snapshot version, and fragment ID, but not the original Session. Footer
-/// allocations are freed when their last shared reference is released.
+/// The Rust object maps (base_id, path) to Arc<CachedFileMetadata> and retains the
+/// decoded deletion vector, sorted positions, and row-ID sequence through shared allocations.
+/// Reuse requires the same dataset URI, snapshot version, and fragment ID, but
+/// not the original Session. Allocations are freed with their last shared owner.
 class FragmentFilesMetadata {
   public:
   explicit FragmentFilesMetadata(rust::Box<ffi::FragmentFilesMetadata> impl) : impl_(std::move(impl)) {}
@@ -119,7 +123,8 @@ class BlockingDataset {
       const std::string& uri,
       struct ArrowArrayStream* stream,
       const StorageOptions& storage_options = {},
-      LanceDataStorageFormat format = LanceDataStorageFormat::Stable);
+      LanceDataStorageFormat format = LanceDataStorageFormat::Stable,
+      bool enable_stable_row_ids = false);
 
   static arrow::Status DeleteRows(const std::string& uri,
                                   const std::string& predicate,
@@ -204,7 +209,7 @@ class BlockingFragmentReader {
 
   arrow::Result<uint64_t> RowCount() const;
 
-  // Shares all retained v2 footers, independent of this reader's projection.
+  // Shares retained v2 footers, deletion state, and row IDs, independent of this projection.
   std::shared_ptr<const FragmentFilesMetadata> GetFilesMetadata() const;
 
   // Top-level dataset columns in schema order. Uses retained footers without I/O;

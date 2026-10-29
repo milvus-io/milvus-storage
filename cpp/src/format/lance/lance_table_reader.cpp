@@ -20,7 +20,6 @@
 #include <exception>
 #include <limits>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -465,50 +464,23 @@ std::string LanceTableReader::MetaTrait::cache_key(const milvus_storage::api::Co
 static folly::SemiFuture<arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>>>
 load_fragment_metadata_async(uint64_t fragment_id,
                              const std::shared_ptr<const milvus_storage::api::Properties>& properties,
-                             const std::shared_ptr<BlockingDataset>& dataset,
-                             std::optional<uint64_t> resolved_logical_rows = std::nullopt) {
-  // These getters inspect the loaded manifest. Any deletion-count fallback
-  // and footer loading run asynchronously on the shared Rust runtime below.
+                             const std::shared_ptr<BlockingDataset>& dataset) {
+  // These getters inspect the loaded manifest. Footer and deletion loading run
+  // asynchronously on the shared Rust runtime below.
   std::shared_ptr<arrow::Schema> file_schema;
   {
     ArrowSchema c_fragment_schema{};
     FOLLY_ARROW_RETURN_NOT_OK(dataset->GetFragmentSchema(fragment_id, c_fragment_schema));
     FOLLY_ARROW_ASSIGN_OR_RAISE(file_schema, arrow::ImportSchema(&c_fragment_schema));
   }
-  const auto logical_rows_result = resolved_logical_rows ? arrow::Result<uint64_t>(*resolved_logical_rows)
-                                                         : dataset->GetFragmentRowCount(fragment_id);
-  if (!logical_rows_result.ok()) {
-    // Older manifests can omit the deletion count. Resolve it without blocking
-    // an async caller or opening a full fragment reader just to count rows.
-    return submit_lance_async<uint64_t>(
-               "Failed to get Lance fragment row count",
-               [](uint64_t rows, ArrowArrayStream&) -> arrow::Result<uint64_t> { return rows; },
-               [&](LanceAsyncCallback callback, void* context) {
-                 return dataset->GetFragmentRowCountAsync(fragment_id, callback, context);
-               })
-        .deferValue([dataset, fragment_id, properties](arrow::Result<uint64_t> result)
-                        -> folly::SemiFuture<
-                            arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>>> {
-          FOLLY_ARROW_ASSIGN_OR_RAISE(const auto rows, std::move(result));
-          return load_fragment_metadata_async(fragment_id, properties, dataset, rows);
-        });
-  }
-  const auto logical_rows = *logical_rows_result;
   FOLLY_ARROW_ASSIGN_OR_RAISE(auto physical_rows, dataset->GetFragmentPhysicalRowCount(fragment_id));
-  if (physical_rows < logical_rows) {
-    return folly::makeSemiFuture(arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>>(
-        arrow::Status::Invalid("Fragment ", fragment_id, " has inconsistent metadata: physical_rows (", physical_rows,
-                               ") < logical_rows (", logical_rows, ")")));
-  }
   FOLLY_ARROW_ASSIGN_OR_RAISE(auto logical_chunk_rows,
                               milvus_storage::api::GetValue<uint64_t>(properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
   auto metadata = std::make_shared<LanceTableReader::MetaTrait::FragmentMetadata>();
   metadata->file_schema = std::move(file_schema);
-  metadata->num_deletions = physical_rows - logical_rows;
   metadata->logical_chunk_rows = logical_chunk_rows;
-  // The first reader owns the complete footer set before any estimate is computed.
-  // Only the metadata survives this bootstrap reader, so projections do not retain
-  // its file readers, schema adapters, or deletion state.
+  // Retain immutable footers and deletion state, without keeping this bootstrap
+  // reader's projection-specific file readers or schema adapters in the cache.
   ArrowSchema c_schema{};
   FOLLY_ARROW_RETURN_NOT_OK(arrow::ExportSchema(*metadata->file_schema, &c_schema));
   ArrowCDataReleaseGuard schema_guard(&c_schema);
@@ -520,11 +492,21 @@ load_fragment_metadata_async(uint64_t fragment_id,
              [&](LanceAsyncCallback callback, void* context) {
                return BlockingFragmentReader::OpenAsync(*dataset, fragment_id, c_schema, callback, context);
              })
-      .deferValue([dataset, fragment_id, logical_rows,
+      .deferValue([dataset, fragment_id, physical_rows,
                    metadata = std::move(metadata)](arrow::Result<std::unique_ptr<BlockingFragmentReader>> opened)
                       -> folly::SemiFuture<
                           arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>>> {
         FOLLY_ARROW_ASSIGN_OR_RAISE(auto reader, std::move(opened));
+        // RowCount uses the already loaded vector even if the manifest omitted
+        // its deletion count; it performs no additional I/O.
+        FOLLY_ARROW_ASSIGN_OR_RAISE(const auto logical_rows, reader->RowCount());
+        if (physical_rows < logical_rows) {
+          return folly::makeSemiFuture(
+              arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>>(
+                  arrow::Status::Invalid("Fragment ", fragment_id, " has inconsistent metadata: physical_rows (",
+                                         physical_rows, ") < logical_rows (", logical_rows, ")")));
+        }
+        metadata->num_deletions = physical_rows - logical_rows;
         metadata->file_metadata = reader->GetFilesMetadata();
         auto estimates = [&]() -> folly::SemiFuture<arrow::Result<std::vector<uint64_t>>> {
           FIU_RETURN_ON(FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL,

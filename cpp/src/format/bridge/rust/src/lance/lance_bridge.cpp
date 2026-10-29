@@ -64,6 +64,13 @@ void ReplaceLanceRuntime(uint32_t num_threads) {}
 
 using milvus_storage::ConvertStorageOptions;
 
+#ifdef BUILD_GTEST
+arrow::Status ExternalizeRowIdsForTesting(const std::string& uri) {
+  return CatchRustStatus("Failed to externalize Lance row IDs for testing",
+                         [&]() { ffi::externalize_row_ids_for_testing(rust::Str(uri.data(), uri.length())); });
+}
+#endif  // BUILD_GTEST
+
 arrow::Result<std::shared_ptr<BlockingDataset>> BlockingDataset::Open(
     const std::string& uri,
     const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
@@ -139,14 +146,15 @@ uint64_t BlockingDataset::Version() const { return impl_->version(); }
 arrow::Result<std::vector<uint64_t>> BlockingDataset::WriteDataset(const std::string& uri,
                                                                    struct ArrowArrayStream* stream,
                                                                    const StorageOptions& storage_options,
-                                                                   LanceDataStorageFormat format) {
+                                                                   LanceDataStorageFormat format,
+                                                                   bool enable_stable_row_ids) {
   return CatchRustResult<std::vector<uint64_t>>("Failed to write Lance dataset", [&]() {
     ArrowCDataReleaseGuard stream_guard(stream);
     rust::Vec<rust::String> keys, values;
     ConvertStorageOptions(storage_options, keys, values);
     auto ffi_format = static_cast<ffi::LanceDataStorageFormat>(format);
     auto fragment_ids = ffi::write_dataset(rust::Str(uri.data(), uri.length()), reinterpret_cast<uint8_t*>(stream),
-                                           std::move(keys), std::move(values), ffi_format);
+                                           std::move(keys), std::move(values), ffi_format, enable_stable_row_ids);
     stream_guard.Disarm();
     return std::vector<uint64_t>(fragment_ids.begin(), fragment_ids.end());
   });

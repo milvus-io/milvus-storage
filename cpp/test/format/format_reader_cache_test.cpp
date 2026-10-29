@@ -33,6 +33,7 @@
 #include <vector>
 
 #include <arrow/api.h>
+#include <arrow/c/bridge.h>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -50,6 +51,7 @@
 #include "milvus-storage/thread_pool.h"
 #include "milvus-storage/writer.h"
 #include "iceberg/iceberg_bridge.h"
+#include "lance/lance_bridge.h"
 #include "paimon/paimon_bridge.h"
 #include "test_env.h"
 
@@ -1153,6 +1155,7 @@ TEST_P(FormatReaderMetadataCacheIOTest, ProjectedReadersLoadEachFileFooterOnce) 
   constexpr int kFiles = 2;
   constexpr int64_t kRowsPerFile = 16;
   const auto format = GetParam();
+  const int64_t expected_rows = kFiles * (kRowsPerFile - (format == LOON_FORMAT_LANCE_TABLE ? 1 : 0));
   auto column_group = std::make_shared<api::ColumnGroup>();
   column_group->columns = schema_->field_names();
   column_group->format = format;
@@ -1160,7 +1163,19 @@ TEST_P(FormatReaderMetadataCacheIOTest, ProjectedReadersLoadEachFileFooterOnce) 
   for (int file_index = 0; file_index < kFiles; ++file_index) {
     const auto path =
         format == LOON_FORMAT_LANCE_TABLE ? lance_dataset_path : base_path_ + "/file-" + std::to_string(file_index);
-    if (format == LOON_FORMAT_ICEBERG_TABLE) {
+    if (format == LOON_FORMAT_LANCE_TABLE) {
+      ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, file_index * kRowsPerFile, false, kRowsPerFile, 4, 50,
+                                                   {true, true, true, false}));
+      ASSERT_AND_ASSIGN(auto batch_reader, arrow::RecordBatchReader::Make({batch}, schema_));
+      ArrowArrayStream stream{};
+      ASSERT_STATUS_OK(arrow::ExportRecordBatchReader(batch_reader, &stream));
+      ASSERT_AND_ASSIGN(auto uri, lance::BuildLanceBaseUri(fs_config_, path));
+      ASSERT_AND_ASSIGN(auto write_options, lance::ToWriterOptions(fs_config_));
+      ASSERT_AND_ASSIGN(auto fragment_ids, lance::BlockingDataset::WriteDataset(uri, &stream, write_options,
+                                                                                lance::LanceDataStorageFormat::V2_1,
+                                                                                /*enable_stable_row_ids=*/true));
+      ASSERT_EQ(fragment_ids.size(), 1);
+    } else if (format == LOON_FORMAT_ICEBERG_TABLE) {
       ASSERT_AND_ASSIGN(auto table, iceberg::CreateTestTable(path, kRowsPerFile, false, {}));
       ASSERT_AND_ASSIGN(auto files, iceberg::PlanFiles(table.metadata_location, table.snapshot_id, fs_,
                                                        iceberg::ToReaderOptions(fs_config_)));
@@ -1187,7 +1202,13 @@ TEST_P(FormatReaderMetadataCacheIOTest, ProjectedReadersLoadEachFileFooterOnce) 
     }
   }
   if (format == LOON_FORMAT_LANCE_TABLE) {
-    // Discover after both appends so every fragment is pinned to the same snapshot.
+    ASSERT_AND_ASSIGN(auto uri, lance::BuildLanceBaseUri(fs_config_, lance_dataset_path));
+    ASSERT_AND_ASSIGN(auto write_options, lance::ToWriterOptions(fs_config_));
+    ASSERT_STATUS_OK(
+        lance::BlockingDataset::DeleteRows(uri, "id % " + std::to_string(kRowsPerFile) + " = 0", write_options));
+    ASSERT_STATUS_OK(lance::ExternalizeRowIdsForTesting(uri));
+    // Discover after publishing deletions and external row IDs so both fragments
+    // are pinned to the same snapshot.
     ASSERT_AND_ASSIGN(auto* format_impl, Format::get(format));
     ASSERT_AND_ASSIGN(column_group->files,
                       format_impl->explore(lance_dataset_path, std::make_shared<const api::Properties>(properties_)));
@@ -1223,9 +1244,9 @@ TEST_P(FormatReaderMetadataCacheIOTest, ProjectedReadersLoadEachFileFooterOnce) 
   metrics->Reset();
   auto first_columns = std::make_shared<std::vector<std::string>>(std::vector<std::string>{schema_->field(0)->name()});
   ASSERT_AND_ASSIGN(auto first, reader->get_chunk_reader(0, first_columns));
-  // Both Lance fragments share one Dataset manifest, in addition to their two
-  // data-file footers. Other formats only load their file footers at this point.
-  EXPECT_EQ(metrics->GetReadCount(), format == LOON_FORMAT_LANCE_TABLE ? 1 + kFiles : kFiles);
+  // Lance reads one shared manifest, then one footer, deletion file, and external
+  // row-ID sequence per fragment. Other formats only load their file footers.
+  EXPECT_EQ(metrics->GetReadCount(), format == LOON_FORMAT_LANCE_TABLE ? 1 + 3 * kFiles : kFiles);
   EXPECT_GT(metrics->GetReadBytes(), 0);
   first.reset();
 
@@ -1245,9 +1266,9 @@ TEST_P(FormatReaderMetadataCacheIOTest, ProjectedReadersLoadEachFileFooterOnce) 
   EXPECT_EQ(metrics->GetReadBytes(), 0);
   EXPECT_EQ(metrics->GetGetFileInfoCount(), 0);
   ASSERT_AND_ASSIGN(auto chunk_rows, remaining->get_chunk_rows());
-  EXPECT_EQ(std::accumulate(chunk_rows.begin(), chunk_rows.end(), uint64_t{0}), kFiles * kRowsPerFile);
-  ASSERT_STATUS_OK(ReadProjectedChunks(reader.get(), *first_columns, kFiles * kRowsPerFile, 1));
-  ASSERT_STATUS_OK(ReadProjectedChunks(reader.get(), *remaining_columns, kFiles * kRowsPerFile, 1));
+  EXPECT_EQ(std::accumulate(chunk_rows.begin(), chunk_rows.end(), uint64_t{0}), expected_rows);
+  ASSERT_STATUS_OK(ReadProjectedChunks(reader.get(), *first_columns, expected_rows, 1));
+  ASSERT_STATUS_OK(ReadProjectedChunks(reader.get(), *remaining_columns, expected_rows, 1));
 }
 
 INSTANTIATE_TEST_SUITE_P(Formats,
