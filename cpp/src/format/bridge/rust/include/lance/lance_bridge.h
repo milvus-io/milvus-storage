@@ -71,6 +71,26 @@ enum class LanceDataStorageFormat : uint8_t {
   V2_3 = 3,
 };
 
+/// Shared, decoded footer metadata for all v2 data files in one fragment.
+///
+/// Obtained from BlockingFragmentReader::GetFilesMetadata() after opening a reader.
+/// Keeping this handle in the top-level Reader's cache lets later Open/OpenAsync
+/// calls reuse the footers across projections, even after the first reader is destroyed.
+///
+/// The Rust object maps (base_id, path) to Arc<CachedFileMetadata>; handles share
+/// these allocations without copying the footers. Reuse requires the same dataset
+/// URI, snapshot version, and fragment ID, but not the original Session. Footer
+/// allocations are freed when their last shared reference is released.
+class FragmentFilesMetadata {
+  public:
+  explicit FragmentFilesMetadata(rust::Box<ffi::FragmentFilesMetadata> impl) : impl_(std::move(impl)) {}
+
+  const ffi::FragmentFilesMetadata& Impl() const { return *impl_; }
+
+  private:
+  rust::Box<ffi::FragmentFilesMetadata> impl_;
+};
+
 class BlockingDataset {
   public:
   static arrow::Result<std::shared_ptr<BlockingDataset>> Open(const std::string& uri,
@@ -128,16 +148,7 @@ class BlockingDataset {
 
   arrow::Result<uint64_t> GetFragmentRowCount(uint64_t fragment_id) const;
 
-  // Top-level dataset columns in schema order; returns NotImplemented when estimation is unavailable.
-  arrow::Result<std::vector<uint64_t>> EstimateFragmentColumnMemory(uint64_t fragment_id) const;
-
-  arrow::Status EstimateFragmentColumnMemoryAsync(uint64_t fragment_id,
-                                                  LanceAsyncCallback callback,
-                                                  void* context) const;
-
-  static std::vector<uint64_t> TakeColumnMemoryResult(uint64_t handle);
-
-  arrow::Result<uint64_t> EstimateFragmentMemory(uint64_t fragment_id) const;
+  arrow::Status GetFragmentRowCountAsync(uint64_t fragment_id, LanceAsyncCallback callback, void* context) const;
 
   // Lance 7 exposes the current dataset schema through FileFragment::schema().
   // It can include evolved nullable columns that are not physically stored in this fragment.
@@ -167,14 +178,16 @@ class BlockingFragmentReader {
   public:
   static arrow::Result<std::unique_ptr<BlockingFragmentReader>> Open(const BlockingDataset& dataset,
                                                                      uint64_t fragment_id,
-                                                                     ArrowSchema& schema);
+                                                                     ArrowSchema& schema,
+                                                                     const FragmentFilesMetadata* metadata = nullptr);
 
   // Consumes schema before returning; the task retains its own dataset reference.
   static arrow::Status OpenAsync(const BlockingDataset& dataset,
                                  uint64_t fragment_id,
                                  ArrowSchema& schema,
                                  LanceAsyncCallback callback,
-                                 void* context);
+                                 void* context,
+                                 const FragmentFilesMetadata* metadata = nullptr);
 
   explicit BlockingFragmentReader(rust::Box<ffi::BlockingFragmentReader> impl) : impl_(std::move(impl)) {}
 
@@ -190,6 +203,19 @@ class BlockingFragmentReader {
   BlockingFragmentReader& operator=(const BlockingFragmentReader&) = delete;
 
   arrow::Result<uint64_t> RowCount() const;
+
+  // Shares all retained v2 footers, independent of this reader's projection.
+  std::shared_ptr<const FragmentFilesMetadata> GetFilesMetadata() const;
+
+  // Top-level dataset columns in schema order. Uses retained footers without I/O;
+  // returns NotImplemented when estimation is unavailable, including legacy files.
+  arrow::Result<std::vector<uint64_t>> EstimateFragmentColumnMemory() const;
+  arrow::Status EstimateFragmentColumnMemoryAsync(LanceAsyncCallback callback, void* context) const;
+
+  // Consumes the async estimate result exactly once.
+  static std::vector<uint64_t> TakeColumnMemorySizes(uint64_t handle);
+
+  arrow::Result<uint64_t> EstimateFragmentMemory() const;
 
   arrow::Status TakeAsSingleBatch(const std::vector<int64_t>& indices, ArrowArray& out_array);
 

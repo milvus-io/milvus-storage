@@ -3,26 +3,26 @@
 
 use crate::TOKIO_RT;
 
-use futures::{FutureExt, TryStreamExt};
 use futures::stream::StreamExt;
+use futures::{FutureExt, TryStreamExt};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::result::Result as RustResult;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Handle;
 
+use arrow::datatypes::SchemaRef;
+use arrow::error::ArrowError;
+use arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
 use arrow_array::Array;
 use arrow_array::ffi::FFI_ArrowArray;
 use arrow_array::{RecordBatch, RecordBatchReader, StructArray};
 use arrow_schema::Schema as ArrowSchema;
-use arrow::datatypes::SchemaRef;
-use arrow::error::ArrowError;
-use arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
 
 use lance::dataset::AutoCleanupParams;
 use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::cleanup::{CleanupPolicy, RemovalStats};
-use lance::dataset::fragment::{FileFragment, FragReadConfig, FragmentReader};
+use lance::dataset::fragment::{FileFragment, FileMetadataMap, FragReadConfig, FragmentReader};
 use lance::dataset::optimize::{CompactionOptions as RustCompactionOptions, compact_files};
 use lance::dataset::refs::{Ref, TagContents};
 use lance::dataset::scanner::Scanner;
@@ -56,6 +56,33 @@ pub struct BlockingDataset {
     scan_scheduler: Arc<OnceLock<Arc<ScanScheduler>>>,
 }
 
+/// Immutable footers retained by the reader and shared with C++ metadata owners.
+#[derive(Clone)]
+pub struct FragmentFilesMetadata {
+    files: Arc<FileMetadataMap>,
+    uri: String,
+    version: u64,
+    fragment_id: u64,
+}
+
+impl FragmentFilesMetadata {
+    fn for_fragment(&self, dataset: &BlockingDataset, fragment_id: u64) -> Result<Self> {
+        if self.fragment_id != fragment_id
+            || self.uri != dataset.inner.uri()
+            || self.version != dataset.inner.version().version
+        {
+            return Err(LanceError::invalid_input(format!(
+                "File metadata does not belong to this dataset and fragment: expected fragment {} version {}, got fragment {} version {}",
+                fragment_id,
+                dataset.inner.version().version,
+                self.fragment_id,
+                self.version
+            )));
+        }
+        Ok(self.clone())
+    }
+}
+
 impl BlockingDataset {
     fn new(inner: Dataset) -> Result<Self> {
         let object_store = TOKIO_RT.block_on(inner.object_store(None))?;
@@ -66,7 +93,7 @@ impl BlockingDataset {
         })
     }
 
-    // Called inside TOKIO_RT by the fragment-open and metadata-estimation futures.
+    // Called inside TOKIO_RT when opening fragment readers.
     fn fragment_read_config(&self, read_config: FragReadConfig) -> FragReadConfig {
         if read_config.scan_scheduler.is_some() {
             return read_config;
@@ -403,8 +430,8 @@ fn lance_async_panic_error(payload: Box<dyn std::any::Any + Send>) -> LanceError
     }
 }
 
-// transfer owned results through the completion callback. The callback reclaims 
-// every handle, even if the future was dropped. Submission errors never invoke 
+// transfer owned results through the completion callback. The callback reclaims
+// every handle, even if the future was dropped. Submission errors never invoke
 // the callback; successful submissions invoke it once.
 unsafe fn spawn_lance_async(
     future: impl std::future::Future<Output = Result<u64>> + Send + 'static,
@@ -690,6 +717,7 @@ pub struct BlockingFragmentReader {
     pub fragment: FileFragment,
     pub projection: ArrowSchema,
     sorted_deletions: Vec<u32>,
+    files_metadata: FragmentFilesMetadata,
 }
 
 impl BlockingFragmentReader {
@@ -698,6 +726,7 @@ impl BlockingFragmentReader {
         fragment: Fragment,
         arrow_projection: &ArrowSchema,
         read_config: FragReadConfig,
+        files_metadata: Option<FragmentFilesMetadata>,
     ) -> Result<Self> {
         let projection = arrow_projection.clone();
         let fragment = FileFragment::new(Arc::new(dataset.inner.clone()), fragment);
@@ -716,6 +745,69 @@ impl BlockingFragmentReader {
             }
         };
 
+        // Retain every v2 footer before applying the initial projection so later
+        // readers and estimates can use columns from all physical files.
+        let files_metadata = match files_metadata {
+            Some(metadata) => metadata,
+            None => {
+                let default_scheduler = read_config
+                    .scan_scheduler
+                    .as_ref()
+                    .expect("fragment_read_config always installs a scheduler");
+                let mut files = FileMetadataMap::with_capacity(fragment.metadata().files.len());
+                for data_file in &fragment.metadata().files {
+                    // Legacy readers use their own footer format and still open normally.
+                    if data_file.is_legacy_file() {
+                        continue;
+                    }
+                    let data_dir = match data_file.base_id {
+                        Some(base_id) => {
+                            let base_path = dataset
+                                .inner
+                                .manifest()
+                                .base_paths
+                                .get(&base_id)
+                                .ok_or_else(|| {
+                                    LanceError::invalid_input(format!(
+                                        "base path {} not found",
+                                        base_id
+                                    ))
+                                })?;
+                            let path =
+                                base_path.extract_path(dataset.inner.session().store_registry())?;
+                            if base_path.is_dataset_root {
+                                path.join("data")
+                            } else {
+                                path
+                            }
+                        }
+                        None => dataset.inner.data_dir(),
+                    };
+                    let path = data_dir.join(data_file.path.as_str());
+                    let scheduler = if data_file.base_id.is_none() {
+                        default_scheduler.clone()
+                    } else {
+                        let object_store = dataset.inner.object_store(data_file.base_id).await?;
+                        ScanScheduler::new(
+                            object_store.clone(),
+                            SchedulerConfig::max_bandwidth(&object_store),
+                        )
+                    };
+                    let file_scheduler = scheduler
+                        .open_file_with_priority(&path, 0, &data_file.file_size_bytes)
+                        .await?;
+                    let metadata = fragment.get_file_metadata(&file_scheduler).await?;
+                    files.insert((data_file.base_id, data_file.path.clone()), metadata);
+                }
+                FragmentFilesMetadata {
+                    files: Arc::new(files),
+                    uri: dataset.inner.uri().to_string(),
+                    version: dataset.inner.version().version,
+                    fragment_id: fragment.id() as u64,
+                }
+            }
+        };
+
         let meta_schema = fragment.schema();
         let meta_columns: std::collections::HashSet<_> =
             meta_schema.fields.iter().map(|f| f.name.clone()).collect();
@@ -728,13 +820,17 @@ impl BlockingFragmentReader {
             .map(|n| n.clone())
             .collect();
 
-        let fragment_reader = fragment.open(&meta_schema.project(&columns)?, read_config).await?;
+        let projected_schema = meta_schema.project(&columns)?;
+        let fragment_reader = fragment
+            .open(&projected_schema, read_config, Some(&files_metadata.files))
+            .await?;
 
         Ok(Self {
             inner: Arc::new(fragment_reader),
             fragment,
             projection,
             sorted_deletions,
+            files_metadata,
         })
     }
 
@@ -763,6 +859,57 @@ impl BlockingFragmentReader {
             .iter()
             .map(|&i| self.logical_to_physical(i))
             .collect()
+    }
+
+    pub fn get_files_metadata(&self) -> Box<FragmentFilesMetadata> {
+        Box::new(self.files_metadata.clone())
+    }
+
+    /// Estimate all top-level dataset columns from retained footers, without I/O.
+    pub fn estimate_fragment_column_memory(&self) -> Result<Vec<LanceColumnMemoryEstimate>> {
+        crate::lance_memory_estimator::estimate_fragment_column_memory(
+            self.fragment.schema(),
+            self.fragment.metadata(),
+            &self.files_metadata.files,
+            self.sorted_deletions.len() as u64,
+        )
+    }
+
+    pub unsafe fn estimate_fragment_column_memory_async(
+        &self,
+        callback: usize,
+        context: usize,
+    ) -> Result<()> {
+        // Own every estimator input before the borrowed C++ reader can expire.
+        let fragment = self.fragment.clone();
+        let files = self.files_metadata.files.clone();
+        let deletion_count = self.sorted_deletions.len() as u64;
+        unsafe {
+            spawn_lance_async(
+                async move {
+                    let sizes = crate::lance_memory_estimator::estimate_fragment_column_memory(
+                        fragment.schema(),
+                        fragment.metadata(),
+                        &files,
+                        deletion_count,
+                    )?
+                    .into_iter()
+                    .map(|estimate| estimate.memory_size)
+                    .collect::<Vec<_>>();
+                    Ok(Box::into_raw(Box::new(sizes)) as u64)
+                },
+                callback,
+                context,
+            )
+        }
+    }
+
+    pub fn estimate_fragment_memory(&self) -> Result<u64> {
+        Ok(self
+            .estimate_fragment_column_memory()?
+            .into_iter()
+            .map(|estimate| estimate.memory_size)
+            .fold(0_u64, u64::saturating_add))
     }
 
     pub fn number_of_rows(&self) -> Result<u64> {
@@ -805,7 +952,8 @@ impl BlockingFragmentReader {
                     let batches: Vec<RecordBatch> = stream.buffered(1).try_collect().await?;
                     // Export materialized batches so C stream get_next never re-enters Tokio.
                     let batches = arrow_array::RecordBatchIterator::new(
-                        batches.into_iter().map(Ok::<_, ArrowError>), schema,
+                        batches.into_iter().map(Ok::<_, ArrowError>),
+                        schema,
                     );
                     let stream = FFI_ArrowArrayStream::new(Box::new(batches));
                     std::ptr::write(out_stream as *mut FFI_ArrowArrayStream, stream);
@@ -931,6 +1079,7 @@ async fn open_fragment_reader_impl(
     dataset: &BlockingDataset,
     fragment_id: u64,
     ffi_schema: arrow::ffi::FFI_ArrowSchema,
+    files_metadata: Option<FragmentFilesMetadata>,
 ) -> Result<Box<BlockingFragmentReader>> {
     let fragment = dataset
         .get_fragment(fragment_id)
@@ -950,6 +1099,7 @@ async fn open_fragment_reader_impl(
         fragment,
         &arrow_schema,
         dataset.fragment_read_config(FragReadConfig::default()),
+        files_metadata,
     )
     .await?;
     Ok(Box::new(reader))
@@ -959,17 +1109,27 @@ pub unsafe fn open_fragment_reader(
     dataset: &BlockingDataset,
     fragment_id: u64,
     schema_rawptr: *mut u8,
+    metadata: *const FragmentFilesMetadata,
 ) -> Result<Box<BlockingFragmentReader>> {
     let schema = unsafe {
         arrow::ffi::FFI_ArrowSchema::from_raw(schema_rawptr as *mut arrow::ffi::FFI_ArrowSchema)
     };
-    TOKIO_RT.block_on(open_fragment_reader_impl(dataset, fragment_id, schema))
+    let files_metadata = unsafe { metadata.as_ref() }
+        .map(|metadata| metadata.for_fragment(dataset, fragment_id))
+        .transpose()?;
+    TOKIO_RT.block_on(open_fragment_reader_impl(
+        dataset,
+        fragment_id,
+        schema,
+        files_metadata,
+    ))
 }
 
 pub unsafe fn open_fragment_reader_async(
     dataset: &BlockingDataset,
     fragment_id: u64,
     schema_rawptr: *mut u8,
+    metadata: *const FragmentFilesMetadata,
     callback: usize,
     context: usize,
 ) -> Result<()> {
@@ -978,11 +1138,17 @@ pub unsafe fn open_fragment_reader_async(
     let schema = unsafe {
         arrow::ffi::FFI_ArrowSchema::from_raw(schema_rawptr as *mut arrow::ffi::FFI_ArrowSchema)
     };
+    // Retain the supplied footers before the borrowed C++ handle can be released.
+    let files_metadata = unsafe { metadata.as_ref() }
+        .map(|metadata| metadata.for_fragment(dataset, fragment_id))
+        .transpose()?;
     let dataset = dataset.clone();
     unsafe {
         spawn_lance_async(
             async move {
-                let reader = open_fragment_reader_impl(&dataset, fragment_id, schema).await?;
+                let reader =
+                    open_fragment_reader_impl(&dataset, fragment_id, schema, files_metadata)
+                        .await?;
                 Ok(Box::into_raw(reader) as u64)
             },
             callback,
@@ -1052,43 +1218,7 @@ pub fn get_fragment_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Re
         })
 }
 
-async fn estimate_fragment_columns(
-    dataset: &BlockingDataset,
-    fragment_id: u64,
-) -> Result<Vec<LanceColumnMemoryEstimate>> {
-    let fragment = dataset
-        .get_fragment(fragment_id)
-        .ok_or_else(|| LanceError::InvalidInput {
-            source: format!("Fragment {} not found", fragment_id).into(),
-            location: snafu::location!(),
-        })?;
-
-    // Reuse the same scheduler and object-store configuration as normal reads;
-    // the estimator itself only schedules footer and column/page metadata I/O.
-    let scheduler = dataset
-        .fragment_read_config(FragReadConfig::default())
-        .scan_scheduler
-        .expect("fragment_read_config always installs a scheduler");
-    crate::lance_memory_estimator::estimate_fragment_column_memory(
-        &dataset.inner,
-        &fragment,
-        scheduler,
-    )
-    .await
-}
-
-/// Estimate each top-level column's decoded Arrow buffer size in schema order.
-///
-/// The estimator reads footer and page metadata only. Variable-width columns
-/// use Lance's decoded page-size target instead of interpreting page encodings.
-pub fn estimate_fragment_column_memory(
-    dataset: &BlockingDataset,
-    fragment_id: u64,
-) -> Result<Vec<LanceColumnMemoryEstimate>> {
-    TOKIO_RT.block_on(estimate_fragment_columns(dataset, fragment_id))
-}
-
-pub unsafe fn estimate_fragment_column_memory_async(
+pub unsafe fn get_fragment_row_count_async(
     dataset: &BlockingDataset,
     fragment_id: u64,
     callback: usize,
@@ -1098,8 +1228,11 @@ pub unsafe fn estimate_fragment_column_memory_async(
     unsafe {
         spawn_lance_async(
             async move {
-                let estimates = estimate_fragment_columns(&dataset, fragment_id).await?;
-                Ok(Box::into_raw(Box::new(estimates)) as u64)
+                let metadata = dataset.get_fragment(fragment_id).ok_or_else(|| {
+                    LanceError::invalid_input(format!("Fragment {} not found", fragment_id))
+                })?;
+                let fragment = FileFragment::new(Arc::new(dataset.inner), metadata);
+                Ok(fragment.count_rows(None).await? as u64)
             },
             callback,
             context,
@@ -1107,21 +1240,9 @@ pub unsafe fn estimate_fragment_column_memory_async(
     }
 }
 
-pub unsafe fn take_column_memory_handle(handle: u64) -> Vec<LanceColumnMemoryEstimate> {
-    unsafe { *Box::from_raw(handle as *mut Vec<LanceColumnMemoryEstimate>) }
-}
-
-/// Estimate the decoded Arrow buffer size of a fragment without reading data pages.
-///
-/// This compatibility API is the saturating sum of the per-column estimates.
-/// Errors are returned through cxx so the C++ best-effort wrapper can fall back
-/// to zero.
-pub fn estimate_fragment_memory(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64> {
-    Ok(TOKIO_RT
-        .block_on(estimate_fragment_columns(dataset, fragment_id))?
-        .into_iter()
-        .map(|estimate| estimate.memory_size)
-        .fold(0_u64, u64::saturating_add))
+/// Consume the successful async estimator result exactly once.
+pub unsafe fn take_column_memory_sizes(handle: u64) -> Vec<u64> {
+    unsafe { *Box::from_raw(handle as *mut Vec<u64>) }
 }
 
 pub unsafe fn get_fragment_schema(
@@ -1268,4 +1389,157 @@ pub unsafe fn dataset_take(
     let out_stream_ptr = out_stream as *mut FFI_ArrowArrayStream;
     unsafe { std::ptr::write(out_stream_ptr, ffi_stream) };
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lance::dataset::NewColumnTransform;
+
+    #[test]
+    fn legacy_reader_opens_without_v2_footers() {
+        let directory = tempfile::tempdir().unwrap();
+        let uri = directory.path().to_str().unwrap();
+        let batch = arrow_array::record_batch!(("i", Int32, [1, 2, 3])).unwrap();
+        let projection = batch.schema();
+        let dataset = TOKIO_RT
+            .block_on(Dataset::write(
+                arrow_array::RecordBatchIterator::new(vec![Ok(batch)], projection.clone()),
+                uri,
+                Some(lance::dataset::WriteParams {
+                    data_storage_version: Some(lance_encoding::version::LanceFileVersion::Legacy),
+                    ..Default::default()
+                }),
+            ))
+            .unwrap();
+        let dataset = BlockingDataset::new(dataset).unwrap();
+        let fragment = dataset.inner.manifest().fragments[0].clone();
+        assert!(fragment.files[0].is_legacy_file());
+        let reader = TOKIO_RT
+            .block_on(async {
+                BlockingFragmentReader::open(
+                    &dataset,
+                    fragment,
+                    &projection,
+                    dataset.fragment_read_config(FragReadConfig::default()),
+                    None,
+                )
+                .await
+            })
+            .unwrap();
+        assert!(reader.get_files_metadata().files.is_empty());
+        assert!(reader.estimate_fragment_column_memory().is_err());
+        let batches = TOKIO_RT
+            .block_on(async {
+                let stream = reader.inner.read_all(3).await?;
+                stream.buffered(1).try_collect::<Vec<_>>().await
+            })
+            .unwrap();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
+    }
+
+    #[test]
+    fn narrow_projection_retains_footers_for_all_physical_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let uri = directory.path().to_str().unwrap();
+        let batch = arrow_array::record_batch!(("i", Int32, [1, 2, 3])).unwrap();
+        let dataset = TOKIO_RT.block_on(async {
+            let mut dataset = Dataset::write(
+                arrow_array::RecordBatchIterator::new(vec![Ok(batch.clone())], batch.schema()),
+                uri,
+                None,
+            )
+            .await
+            .unwrap();
+            dataset
+                .add_columns(
+                    NewColumnTransform::SqlExpressions(vec![("j".into(), "i + 1".into())]),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            dataset
+        });
+        let dataset = BlockingDataset::new(dataset).unwrap();
+        let fragment = dataset.inner.manifest().fragments[0].clone();
+        assert_eq!(fragment.files.len(), 2);
+        let projection = ArrowSchema::from(&dataset.inner.schema().project(&["i"]).unwrap());
+        let reader = TOKIO_RT
+            .block_on(async {
+                BlockingFragmentReader::open(
+                    &dataset,
+                    fragment.clone(),
+                    &projection,
+                    dataset.fragment_read_config(FragReadConfig::default()),
+                    None,
+                )
+                .await
+            })
+            .unwrap();
+        let metadata = reader.get_files_metadata();
+        assert_eq!(metadata.files.len(), 2);
+        assert!(metadata.for_fragment(&dataset, fragment.id + 1).is_err());
+        assert!(Arc::ptr_eq(
+            &metadata.for_fragment(&dataset, fragment.id).unwrap().files,
+            &metadata.files,
+        ));
+        assert!(Arc::ptr_eq(&metadata.files, &reader.files_metadata.files));
+        assert!(
+            reader
+                .estimate_fragment_column_memory()
+                .unwrap()
+                .iter()
+                .all(|estimate| estimate.memory_size > 0)
+        );
+
+        // Footers describe immutable files, so another Session for the same
+        // snapshot can reuse them after the original Dataset and reader are gone.
+        let version = dataset.inner.version().version;
+        let previous_session = Arc::downgrade(&dataset.inner.session());
+        drop(reader);
+        drop(dataset);
+        assert!(previous_session.upgrade().is_none());
+        let dataset = TOKIO_RT
+            .block_on(
+                lance::dataset::builder::DatasetBuilder::from_uri(uri)
+                    .with_version(version)
+                    .with_session(Arc::new(lance::session::Session::new(
+                        0,
+                        0,
+                        Default::default(),
+                    )))
+                    .load(),
+            )
+            .unwrap();
+        let dataset = BlockingDataset::new(dataset).unwrap();
+        assert!(!previous_session.ptr_eq(&Arc::downgrade(&dataset.inner.session())));
+        let shared_metadata = metadata.for_fragment(&dataset, fragment.id).unwrap();
+        assert!(Arc::ptr_eq(&shared_metadata.files, &metadata.files));
+        dataset.object_store.io_stats_incremental();
+        let projection = ArrowSchema::from(&dataset.inner.schema().project(&["j"]).unwrap());
+        let reader = TOKIO_RT
+            .block_on(async {
+                BlockingFragmentReader::open(
+                    &dataset,
+                    fragment,
+                    &projection,
+                    dataset.fragment_read_config(FragReadConfig::default()),
+                    Some(shared_metadata),
+                )
+                .await
+            })
+            .unwrap();
+        let open_io = dataset.object_store.io_stats_incremental();
+        assert_eq!(open_io.read_iops, 0);
+        assert_eq!(open_io.read_bytes, 0);
+        let batches = TOKIO_RT
+            .block_on(async {
+                let stream = reader.inner.read_all(3).await?;
+                stream.buffered(1).try_collect::<Vec<_>>().await
+            })
+            .unwrap();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
+        assert_eq!(batches[0].schema().field(0).name(), "j");
+    }
 }

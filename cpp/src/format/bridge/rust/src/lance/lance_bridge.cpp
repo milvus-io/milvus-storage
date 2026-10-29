@@ -187,9 +187,60 @@ arrow::Result<uint64_t> BlockingDataset::GetFragmentRowCount(uint64_t fragment_i
                                    [&]() { return ffi::get_fragment_row_count(*impl_, fragment_id); });
 }
 
-arrow::Result<std::vector<uint64_t>> BlockingDataset::EstimateFragmentColumnMemory(uint64_t fragment_id) const {
+arrow::Status BlockingDataset::GetFragmentRowCountAsync(uint64_t fragment_id,
+                                                        LanceAsyncCallback callback,
+                                                        void* context) const {
+  return CatchRustStatus("Failed to get Lance fragment row count", [&]() {
+    ffi::get_fragment_row_count_async(*impl_, fragment_id, reinterpret_cast<size_t>(callback),
+                                      reinterpret_cast<size_t>(context));
+  });
+}
+
+arrow::Status BlockingDataset::GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_schema) const {
+  out_schema = {};
+  return CatchRustStatus("Failed to get Lance fragment schema", [&]() {
+    ArrowCDataReleaseGuard schema_guard(&out_schema);
+    ffi::get_fragment_schema(*impl_, fragment_id, reinterpret_cast<uint8_t*>(&out_schema));
+    schema_guard.Disarm();
+  });
+}
+
+arrow::Result<std::unique_ptr<BlockingFragmentReader>> BlockingFragmentReader::Open(
+    const BlockingDataset& dataset, uint64_t fragment_id, ArrowSchema& schema, const FragmentFilesMetadata* metadata) {
+  return CatchRustResult<std::unique_ptr<BlockingFragmentReader>>("Failed to open Lance fragment reader", [&]() {
+    ArrowCDataReleaseGuard schema_guard(&schema);
+    auto impl = ffi::open_fragment_reader(dataset.Impl(), fragment_id, reinterpret_cast<uint8_t*>(&schema),
+                                          metadata ? &metadata->Impl() : nullptr);
+    schema_guard.Disarm();
+    return std::make_unique<BlockingFragmentReader>(std::move(impl));
+  });
+}
+
+arrow::Status BlockingFragmentReader::OpenAsync(const BlockingDataset& dataset,
+                                                uint64_t fragment_id,
+                                                ArrowSchema& schema,
+                                                LanceAsyncCallback callback,
+                                                void* context,
+                                                const FragmentFilesMetadata* metadata) {
+  ArrowCDataReleaseGuard schema_guard(&schema);
+  return CatchRustStatus("Failed to open Lance fragment reader", [&]() {
+    ffi::open_fragment_reader_async(dataset.Impl(), fragment_id, reinterpret_cast<uint8_t*>(&schema),
+                                    metadata ? &metadata->Impl() : nullptr, reinterpret_cast<size_t>(callback),
+                                    reinterpret_cast<size_t>(context));
+  });
+}
+
+arrow::Result<uint64_t> BlockingFragmentReader::RowCount() const {
+  return CatchRustResult<uint64_t>("Failed to get Lance fragment row count", [&]() { return impl_->number_of_rows(); });
+}
+
+std::shared_ptr<const FragmentFilesMetadata> BlockingFragmentReader::GetFilesMetadata() const {
+  return std::make_shared<FragmentFilesMetadata>(impl_->get_files_metadata());
+}
+
+arrow::Result<std::vector<uint64_t>> BlockingFragmentReader::EstimateFragmentColumnMemory() const {
   auto result = CatchRustResult<std::vector<uint64_t>>([&]() {
-    auto estimates = ffi::estimate_fragment_column_memory(*impl_, fragment_id);
+    auto estimates = impl_->estimate_fragment_column_memory();
     std::vector<uint64_t> memory_sizes;
     memory_sizes.reserve(estimates.size());
     for (const auto& estimate : estimates) {
@@ -204,64 +255,21 @@ arrow::Result<std::vector<uint64_t>> BlockingDataset::EstimateFragmentColumnMemo
   return result;
 }
 
-arrow::Status BlockingDataset::EstimateFragmentColumnMemoryAsync(uint64_t fragment_id,
-                                                                 LanceAsyncCallback callback,
-                                                                 void* context) const {
+arrow::Status BlockingFragmentReader::EstimateFragmentColumnMemoryAsync(LanceAsyncCallback callback,
+                                                                        void* context) const {
   return CatchRustStatus("Failed to estimate Lance column memory", [&]() {
-    ffi::estimate_fragment_column_memory_async(*impl_, fragment_id, reinterpret_cast<size_t>(callback),
-                                               reinterpret_cast<size_t>(context));
+    impl_->estimate_fragment_column_memory_async(reinterpret_cast<size_t>(callback), reinterpret_cast<size_t>(context));
   });
 }
 
-std::vector<uint64_t> BlockingDataset::TakeColumnMemoryResult(uint64_t handle) {
-  auto estimates = ffi::take_column_memory_handle(handle);
-  std::vector<uint64_t> memory_sizes;
-  memory_sizes.reserve(estimates.size());
-  for (const auto& estimate : estimates) {
-    memory_sizes.push_back(estimate.memory_size);
-  }
-  return memory_sizes;
+std::vector<uint64_t> BlockingFragmentReader::TakeColumnMemorySizes(uint64_t handle) {
+  const auto sizes = ffi::take_column_memory_sizes(handle);
+  return std::vector<uint64_t>(sizes.begin(), sizes.end());
 }
 
-arrow::Result<uint64_t> BlockingDataset::EstimateFragmentMemory(uint64_t fragment_id) const {
+arrow::Result<uint64_t> BlockingFragmentReader::EstimateFragmentMemory() const {
   return CatchRustResult<uint64_t>("Failed to estimate Lance fragment memory",
-                                   [&]() { return ffi::estimate_fragment_memory(*impl_, fragment_id); });
-}
-
-arrow::Status BlockingDataset::GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_schema) const {
-  out_schema = {};
-  return CatchRustStatus("Failed to get Lance fragment schema", [&]() {
-    ArrowCDataReleaseGuard schema_guard(&out_schema);
-    ffi::get_fragment_schema(*impl_, fragment_id, reinterpret_cast<uint8_t*>(&out_schema));
-    schema_guard.Disarm();
-  });
-}
-
-arrow::Result<std::unique_ptr<BlockingFragmentReader>> BlockingFragmentReader::Open(const BlockingDataset& dataset,
-                                                                                    uint64_t fragment_id,
-                                                                                    ArrowSchema& schema) {
-  return CatchRustResult<std::unique_ptr<BlockingFragmentReader>>("Failed to open Lance fragment reader", [&]() {
-    ArrowCDataReleaseGuard schema_guard(&schema);
-    auto impl = ffi::open_fragment_reader(dataset.Impl(), fragment_id, reinterpret_cast<uint8_t*>(&schema));
-    schema_guard.Disarm();
-    return std::make_unique<BlockingFragmentReader>(std::move(impl));
-  });
-}
-
-arrow::Status BlockingFragmentReader::OpenAsync(const BlockingDataset& dataset,
-                                                uint64_t fragment_id,
-                                                ArrowSchema& schema,
-                                                LanceAsyncCallback callback,
-                                                void* context) {
-  ArrowCDataReleaseGuard schema_guard(&schema);
-  return CatchRustStatus("Failed to open Lance fragment reader", [&]() {
-    ffi::open_fragment_reader_async(dataset.Impl(), fragment_id, reinterpret_cast<uint8_t*>(&schema),
-                                    reinterpret_cast<size_t>(callback), reinterpret_cast<size_t>(context));
-  });
-}
-
-arrow::Result<uint64_t> BlockingFragmentReader::RowCount() const {
-  return CatchRustResult<uint64_t>("Failed to get Lance fragment row count", [&]() { return impl_->number_of_rows(); });
+                                   [&]() { return impl_->estimate_fragment_memory(); });
 }
 
 arrow::Status BlockingFragmentReader::TakeAsSingleBatch(const std::vector<int64_t>& indices, ArrowArray& out_array) {

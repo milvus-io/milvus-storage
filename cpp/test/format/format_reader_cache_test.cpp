@@ -36,9 +36,11 @@
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/format/format.h"
 #include "milvus-storage/format/format_reader_cache.h"
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
+#include "milvus-storage/format/lance/lance_common.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/paimon/paimon_format_reader.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
@@ -48,6 +50,7 @@
 #include "milvus-storage/thread_pool.h"
 #include "milvus-storage/writer.h"
 #include "iceberg/iceberg_bridge.h"
+#include "paimon/paimon_bridge.h"
 #include "test_env.h"
 
 namespace milvus_storage::test {
@@ -581,65 +584,59 @@ arrow::Status RunAsyncLeaderTimeoutNotifiesWaitersAndAllowsRetry(const std::shar
   return arrow::Status::OK();
 }
 
-template <typename CacheT>
-arrow::Status RunAsyncFailuresDoNotPoisonCacheAndAllowRetry(const std::shared_ptr<CacheT>& cache) {
-  using MetadataPtr = typename CacheT::MetadataPtr;
-  auto metadata = MakeMetadata<CacheT>("async-failure-retry");
-
-  auto failed =
-      std::move(cache->get_or_open_async("async-error", []() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
-        return folly::makeSemiFuture(arrow::Result<MetadataPtr>(arrow::Status::Invalid("async metadata load failed")));
-      })).get();
-  if (!failed.status().IsInvalid() || cache->get("async-error").has_value()) {
-    return arrow::Status::Invalid("async loader error poisoned metadata cache");
-  }
-
-  auto null_result =
-      std::move(cache->get_or_open_async("async-null", []() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
-        return folly::makeSemiFuture(arrow::Result<MetadataPtr>(MetadataPtr{}));
-      })).get();
-  if (!null_result.status().IsInvalid() || cache->get("async-null").has_value()) {
-    return arrow::Status::Invalid("async null metadata poisoned cache");
-  }
-
-  auto exception_result =
-      std::move(cache->get_or_open_async("async-exception", []() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
-        return folly::makeSemiFuture<arrow::Result<MetadataPtr>>(
-            folly::make_exception_wrapper<std::runtime_error>("async metadata loader exploded"));
-      })).get();
-  if (exception_result.ok() || cache->get("async-exception").has_value()) {
-    return arrow::Status::Invalid("async loader exception poisoned metadata cache");
-  }
-
-  auto thrown_result =
-      std::move(cache->get_or_open_async("async-thrown", []() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
-        throw std::runtime_error("original synchronous loader error");
-      })).get();
-  if (!thrown_result.status().IsUnknownError() ||
-      thrown_result.status().message().find("original synchronous loader error") == std::string::npos) {
-    return arrow::Status::Invalid("async loader lost original synchronous exception");
-  }
-
-  ARROW_ASSIGN_OR_RAISE(
-      auto retried,
-      std::move(cache->get_or_open_async("async-exception", [&]() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
-        return folly::makeSemiFuture(arrow::Result<MetadataPtr>(metadata));
-      })).get());
-  if (retried.get() != metadata.get()) {
-    return arrow::Status::Invalid("async metadata retry returned unexpected pointer");
-  }
-  return arrow::Status::OK();
-}
-
 }  // namespace
 
 class FormatReaderMetadataCacheParamTest : public ::testing::TestWithParam<std::string> {};
+
+class FormatReaderMetadataCacheIOTest : public ::testing::TestWithParam<std::string> {
+  protected:
+  void SetUp() override {
+    if (IsCloudEnv()) {
+      GTEST_SKIP() << "Exact footer I/O assertions use local files";
+    }
+    ASSERT_STATUS_OK(InitTestProperties(properties_));
+    ASSERT_EQ(api::SetValue(properties_, PROPERTY_FS_ROOT_PATH, "/"), std::nullopt);
+    ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, "true"), std::nullopt);
+    ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "32"), std::nullopt);
+    ASSERT_AND_ASSIGN(fs_config_, GetFileSystemConfig(std::make_shared<const api::Properties>(properties_)));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
+    ASSERT_AND_ASSIGN(schema_, CreateTestSchema({true, true, true, false}));
+    base_path_ = (std::filesystem::temp_directory_path() /
+                  ("milvus-storage-cache-io-" + GetParam() + "-" +
+                   std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())))
+                     .string();
+    ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_));
+    ThreadPoolHolder::WithSingleton(4);
+  }
+
+  void TearDown() override {
+    if (fs_) {
+      ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
+      ThreadPoolHolder::Release();
+    }
+  }
+
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
+  std::shared_ptr<arrow::Schema> schema_;
+  std::string base_path_;
+  api::Properties properties_;
+  ArrowFileSystemConfig fs_config_;
+};
 
 class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std::string> {
   protected:
   void SetUp() override {
     ASSERT_STATUS_OK(InitTestProperties(properties_));
     ASSERT_AND_ASSIGN(fs_config_, GetFileSystemConfig(std::make_shared<const api::Properties>(properties_)));
+    if (fs_config_.storage_type == "local") {
+      // The native Iceberg test writer canonicalizes every recorded file URI.
+      // Bind the reader to the same root, including /tmp symlinks on macOS.
+      std::error_code error;
+      const auto root = std::filesystem::weakly_canonical(fs_config_.root_path, error);
+      ASSERT_FALSE(error) << error.message();
+      fs_config_.root_path = root.string();
+      ASSERT_EQ(api::SetValue(properties_, PROPERTY_FS_ROOT_PATH, fs_config_.root_path.c_str()), std::nullopt);
+    }
     ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
     ASSERT_STATUS_OK(MirrorDefaultExternalFilesystemConfig());
 
@@ -894,56 +891,46 @@ class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std:
   ArrowFileSystemConfig fs_config_;
 };
 
-TEST_P(FormatReaderMetadataCacheParamTest, FormatReaderMetadataCachesOwnsTypedCache) {
+TEST_P(FormatReaderMetadataCacheParamTest, TypedCachesAreStableAndSharedAcrossCopies) {
+  const MetadataCache default_cache;
+  EXPECT_TRUE(default_cache.enabled());
   TestMetadataCaches caches;
-
+  const auto caches_copy = caches;
   ASSERT_STATUS_OK(VisitFormatReaderMetadataCachesForFormat(GetParam(), caches, [&](const auto& typed_cache) {
     using CacheT = std::decay_t<decltype(*typed_cache)>;
     using ReaderT = typename CacheT::ReaderType;
-    auto typed_cache_again = caches.get<ReaderT>();
-
-    if (!typed_cache || !typed_cache_again) {
+    if (!typed_cache) {
       return arrow::Status::Invalid("format reader metadata caches returned null typed cache");
     }
-    EXPECT_EQ(typed_cache.get(), typed_cache_again.get());
-    return arrow::Status::OK();
-  }));
-}
+    EXPECT_EQ(typed_cache.get(), caches.get<ReaderT>().get());
+    EXPECT_EQ(typed_cache.get(), caches_copy.get<ReaderT>().get());
 
-TEST_P(FormatReaderMetadataCacheParamTest, MetadataCacheOwnsTypedCache) {
-  MetadataCache cache;
+    for (const bool enabled : {false, true}) {
+      SCOPED_TRACE(enabled ? "enabled" : "disabled");
+      MetadataCache original(enabled);
+      const auto copy = original;
+      EXPECT_EQ(original.enabled(), enabled);
+      EXPECT_EQ(copy.enabled(), enabled);
+      const auto original_cache = original.get<ReaderT>();
+      const auto copied_cache = copy.get<ReaderT>();
+      if (!original_cache || !copied_cache) {
+        return arrow::Status::Invalid("metadata cache or its copy returned null typed cache");
+      }
+      ARROW_ASSIGN_OR_RAISE(
+          auto dispatched,
+          original.dispatch(GetParam(), [](const auto& cache) -> arrow::Result<const void*> { return cache.get(); }));
+      EXPECT_EQ(dispatched, original_cache.get());
+      EXPECT_EQ(original_cache.get(), copied_cache.get());
 
-  ASSERT_STATUS_OK(cache.dispatch(GetParam(), [&](const auto& typed_cache) -> arrow::Status {
-    using CacheT = std::decay_t<decltype(*typed_cache)>;
-    using ReaderT = typename CacheT::ReaderType;
-    auto typed_cache_again = cache.get<ReaderT>();
-
-    if (!typed_cache || !typed_cache_again) {
-      return arrow::Status::Invalid("metadata cache returned null typed cache");
+      const std::string key = "shared-cache-copy";
+      const auto metadata = MakeMetadata<CacheT>(key);
+      ARROW_RETURN_NOT_OK(original_cache->add(key, metadata));
+      const auto cached = copied_cache->get(key);
+      EXPECT_TRUE(cached.has_value());
+      if (cached) {
+        EXPECT_EQ(cached->get(), metadata.get());
+      }
     }
-    EXPECT_EQ(typed_cache.get(), typed_cache_again.get());
-    return arrow::Status::OK();
-  }));
-}
-
-TEST_P(FormatReaderMetadataCacheParamTest, MetadataCacheTracksEnabledStateAcrossCopies) {
-  MetadataCache enabled_cache;
-  EXPECT_TRUE(enabled_cache.enabled());
-
-  MetadataCache disabled_cache(false);
-  EXPECT_FALSE(disabled_cache.enabled());
-
-  MetadataCache disabled_copy = disabled_cache;
-  EXPECT_FALSE(disabled_copy.enabled());
-  ASSERT_STATUS_OK(disabled_cache.dispatch(GetParam(), [&](const auto& original_cache) -> arrow::Status {
-    using CacheT = std::decay_t<decltype(*original_cache)>;
-    using ReaderT = typename CacheT::ReaderType;
-    auto copied_cache = disabled_copy.get<ReaderT>();
-
-    if (!copied_cache) {
-      return arrow::Status::Invalid("metadata cache copy returned null typed cache");
-    }
-    EXPECT_EQ(original_cache.get(), copied_cache.get());
     return arrow::Status::OK();
   }));
 }
@@ -987,63 +974,73 @@ TEST_P(FormatReaderMetadataCacheParamTest, AddRejectsNullMetadataAndLeavesKeyAbs
   }));
 }
 
-TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenErrorDoesNotPoisonCache) {
+TEST_P(FormatReaderMetadataCacheParamTest, FailedLoadsDoNotPoisonCacheAndAllowRetry) {
+  enum class Failure { kStatus, kNullMetadata, kThrownException, kExceptionalFuture };
   ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
     using CacheT = std::decay_t<decltype(*cache)>;
-    const std::string key = "error-retry";
-    auto metadata = MakeMetadata<CacheT>(key);
-    int loader_calls = 0;
-
-    auto failed = cache->get_or_open(key, [&]() -> arrow::Result<typename CacheT::MetadataPtr> {
-      ++loader_calls;
-      return arrow::Status::Invalid("load failed");
-    });
-    EXPECT_TRUE(failed.status().IsInvalid()) << failed.status().ToString();
-    EXPECT_FALSE(cache->get(key).has_value());
-
-    ARROW_ASSIGN_OR_RAISE(auto retried_metadata,
-                          cache->get_or_open(key, [&]() -> arrow::Result<typename CacheT::MetadataPtr> {
-                            ++loader_calls;
-                            return metadata;
-                          }));
-
-    EXPECT_EQ(loader_calls, 2);
-    EXPECT_EQ(retried_metadata.get(), metadata.get());
-    auto cached = cache->get(key);
-    EXPECT_TRUE(cached.has_value());
-    if (cached.has_value()) {
-      EXPECT_EQ(cached.value().get(), metadata.get());
-    }
-    return arrow::Status::OK();
-  }));
-}
-
-TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenNullMetadataDoesNotPoisonCache) {
-  ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
-    using CacheT = std::decay_t<decltype(*cache)>;
-    const std::string key = "null-retry";
-    auto metadata = MakeMetadata<CacheT>(key);
-    int loader_calls = 0;
-
-    auto failed = cache->get_or_open(key, [&]() -> arrow::Result<typename CacheT::MetadataPtr> {
-      ++loader_calls;
-      return typename CacheT::MetadataPtr{};
-    });
-    EXPECT_TRUE(failed.status().IsInvalid()) << failed.status().ToString();
-    EXPECT_FALSE(cache->get(key).has_value());
-
-    ARROW_ASSIGN_OR_RAISE(auto retried_metadata,
-                          cache->get_or_open(key, [&]() -> arrow::Result<typename CacheT::MetadataPtr> {
-                            ++loader_calls;
-                            return metadata;
-                          }));
-
-    EXPECT_EQ(loader_calls, 2);
-    EXPECT_EQ(retried_metadata.get(), metadata.get());
-    auto cached = cache->get(key);
-    EXPECT_TRUE(cached.has_value());
-    if (cached.has_value()) {
-      EXPECT_EQ(cached.value().get(), metadata.get());
+    using MetadataResult = typename CacheT::MetadataResult;
+    for (const bool asynchronous : {false, true}) {
+      for (const auto failure :
+           {Failure::kStatus, Failure::kNullMetadata, Failure::kThrownException, Failure::kExceptionalFuture}) {
+        if (!asynchronous && failure == Failure::kExceptionalFuture) {
+          continue;
+        }
+        SCOPED_TRACE(::testing::Message() << "async=" << asynchronous << ", failure=" << static_cast<int>(failure));
+        const auto key = std::to_string(asynchronous) + "-failure-" + std::to_string(static_cast<int>(failure));
+        const auto metadata = MakeMetadata<CacheT>(key);
+        int loader_calls = 0;
+        auto fail = [&]() -> MetadataResult {
+          ++loader_calls;
+          if (failure == Failure::kStatus) {
+            return arrow::Status::Invalid("original metadata loader failure");
+          }
+          if (failure == Failure::kNullMetadata) {
+            return typename CacheT::MetadataPtr{};
+          }
+          throw std::runtime_error("original metadata loader failure");
+        };
+        const auto failed = [&]() -> MetadataResult {
+          if (!asynchronous) {
+            return cache->get_or_open(key, fail);
+          }
+          return std::move(cache->get_or_open_async(key,
+                                                    [&]() -> folly::SemiFuture<MetadataResult> {
+                                                      if (failure == Failure::kExceptionalFuture) {
+                                                        ++loader_calls;
+                                                        return folly::makeSemiFuture<MetadataResult>(
+                                                            folly::make_exception_wrapper<std::runtime_error>(
+                                                                "original metadata loader failure"));
+                                                      }
+                                                      return folly::makeSemiFuture(fail());
+                                                    }))
+              .get();
+        }();
+        if (failure == Failure::kStatus || failure == Failure::kNullMetadata) {
+          EXPECT_TRUE(failed.status().IsInvalid()) << failed.status().ToString();
+        } else {
+          EXPECT_TRUE(failed.status().IsUnknownError()) << failed.status().ToString();
+        }
+        if (failure != Failure::kNullMetadata) {
+          EXPECT_NE(failed.status().message().find("original metadata loader failure"), std::string::npos);
+        }
+        EXPECT_FALSE(cache->get(key).has_value());
+        auto retry = [&]() -> MetadataResult {
+          ++loader_calls;
+          return metadata;
+        };
+        ARROW_ASSIGN_OR_RAISE(
+            auto retried,
+            asynchronous
+                ? std::move(cache->get_or_open_async(key, [&]() { return folly::makeSemiFuture(retry()); })).get()
+                : cache->get_or_open(key, retry));
+        EXPECT_EQ(loader_calls, 2);
+        EXPECT_EQ(retried.get(), metadata.get());
+        const auto cached = cache->get(key);
+        EXPECT_TRUE(cached.has_value());
+        if (cached) {
+          EXPECT_EQ(cached->get(), metadata.get());
+        }
+      }
     }
     return arrow::Status::OK();
   }));
@@ -1091,13 +1088,6 @@ TEST_P(FormatReaderMetadataCacheParamTest, AsyncLeaderDoesNotBlockSyncFollower) 
   }));
 }
 
-TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenAsyncFailuresDoNotPoisonCacheAndAllowRetry) {
-  ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
-    using CacheT = std::decay_t<decltype(*cache)>;
-    return RunAsyncFailuresDoNotPoisonCacheAndAllowRetry<CacheT>(cache);
-  }));
-}
-
 TEST_P(FormatReaderMetadataCacheParamTest, InvalidAsyncFuturePreservesErrorForWaitersAndAllowsRetry) {
   ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
     using CacheT = std::decay_t<decltype(*cache)>;
@@ -1137,47 +1127,131 @@ TEST_P(FormatReaderMetadataCacheParamTest, AsyncLeaderTimeoutNotifiesWaitersAndA
   }));
 }
 
-TEST_P(FormatReaderMetadataCacheParamTest, MetadataCacheCopySharesTypedCaches) {
-  MetadataCache original;
-  MetadataCache copy = original;
+class InvalidMetadataCacheFormatTest : public ::testing::TestWithParam<std::string> {};
 
-  ASSERT_STATUS_OK(original.dispatch(GetParam(), [&](const auto& original_cache) -> arrow::Status {
-    using CacheT = std::decay_t<decltype(*original_cache)>;
-    using ReaderT = typename CacheT::ReaderType;
-    auto copied_cache = copy.get<ReaderT>();
-
-    if (!copied_cache) {
-      return arrow::Status::Invalid("metadata cache copy returned null typed cache");
-    }
-    EXPECT_EQ(original_cache.get(), copied_cache.get());
-    return arrow::Status::OK();
-  }));
-}
-
-TEST_P(FormatReaderMetadataCacheParamTest, MetadataCacheDispatchSelectsCorrectTypedCache) {
-  MetadataCache cache;
-
-  ASSERT_STATUS_OK(cache.dispatch(GetParam(), [&](const auto& expected_cache) -> arrow::Status {
-    auto dispatch_result = cache.dispatch(
-        GetParam(), [](const auto& typed_cache) -> arrow::Result<const void*> { return typed_cache.get(); });
-    if (!dispatch_result.ok()) {
-      return dispatch_result.status();
-    }
-    EXPECT_EQ(dispatch_result.ValueOrDie(), expected_cache.get());
-    return arrow::Status::OK();
-  }));
-}
-
-TEST(FormatReaderMetadataCacheTest, MetadataCacheDispatchRejectsUnknownFormat) {
+TEST_P(InvalidMetadataCacheFormatTest, DispatchRejectsUnknownFormat) {
   MetadataCache cache;
 
   auto unknown_result = cache.dispatch(
-      "unknown-format", [](const auto& typed_cache) -> arrow::Result<const void*> { return typed_cache.get(); });
+      GetParam(), [](const auto& typed_cache) -> arrow::Result<const void*> { return typed_cache.get(); });
   EXPECT_TRUE(unknown_result.status().IsInvalid()) << unknown_result.status().ToString();
 }
 
+INSTANTIATE_TEST_SUITE_P(InvalidFormats,
+                         InvalidMetadataCacheFormatTest,
+                         ::testing::Values("", "unknown-format", "Parquet"));
+
 INSTANTIATE_TEST_SUITE_P(Formats,
                          FormatReaderMetadataCacheParamTest,
+                         ::testing::Values(LOON_FORMAT_PARQUET,
+                                           LOON_FORMAT_VORTEX,
+                                           LOON_FORMAT_LANCE_TABLE,
+                                           LOON_FORMAT_ICEBERG_TABLE,
+                                           LOON_FORMAT_PAIMON_TABLE));
+
+TEST_P(FormatReaderMetadataCacheIOTest, ProjectedReadersLoadEachFileFooterOnce) {
+  constexpr int kFiles = 2;
+  constexpr int64_t kRowsPerFile = 16;
+  const auto format = GetParam();
+  auto column_group = std::make_shared<api::ColumnGroup>();
+  column_group->columns = schema_->field_names();
+  column_group->format = format;
+  const auto lance_dataset_path = base_path_ + "/dataset";
+  for (int file_index = 0; file_index < kFiles; ++file_index) {
+    const auto path =
+        format == LOON_FORMAT_LANCE_TABLE ? lance_dataset_path : base_path_ + "/file-" + std::to_string(file_index);
+    if (format == LOON_FORMAT_ICEBERG_TABLE) {
+      ASSERT_AND_ASSIGN(auto table, iceberg::CreateTestTable(path, kRowsPerFile, false, {}));
+      ASSERT_AND_ASSIGN(auto files, iceberg::PlanFiles(table.metadata_location, table.snapshot_id, fs_,
+                                                       iceberg::ToReaderOptions(fs_config_)));
+      ASSERT_EQ(files.size(), 1);
+      column_group->files.emplace_back(
+          api::ColumnGroupFile{files[0].data_file_path, 0, static_cast<int64_t>(files[0].record_count), {}});
+    } else if (format == LOON_FORMAT_PAIMON_TABLE) {
+      ASSERT_STATUS_OK(paimon::CreateTestTableInfo(path, kRowsPerFile, "append").status());
+      ASSERT_AND_ASSIGN(auto* format_impl, Format::get(format));
+      ASSERT_AND_ASSIGN(auto files, format_impl->explore(path, std::make_shared<const api::Properties>(properties_)));
+      ASSERT_EQ(files.size(), 1);
+      column_group->files.push_back(std::move(files[0]));
+    } else {
+      ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+      auto writer =
+          api::Writer::create(path, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
+      ASSERT_NE(writer, nullptr);
+      ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, file_index * kRowsPerFile, false, kRowsPerFile));
+      ASSERT_STATUS_OK(writer->write(batch));
+      ASSERT_AND_ASSIGN(auto files, writer->close());
+      ASSERT_EQ(files->size(), 1);
+      ASSERT_EQ((*files)[0]->files.size(), 1);
+      column_group->files.push_back((*files)[0]->files[0]);
+    }
+  }
+  if (format == LOON_FORMAT_LANCE_TABLE) {
+    // Discover after both appends so every fragment is pinned to the same snapshot.
+    ASSERT_AND_ASSIGN(auto* format_impl, Format::get(format));
+    ASSERT_AND_ASSIGN(column_group->files,
+                      format_impl->explore(lance_dataset_path, std::make_shared<const api::Properties>(properties_)));
+  }
+  ASSERT_GE(column_group->columns.size(), 2);
+  ASSERT_EQ(column_group->files.size(), kFiles);
+  ASSERT_NE(column_group->files[0].path, column_group->files[1].path);
+  if (format == LOON_FORMAT_LANCE_TABLE) {
+    ASSERT_AND_ASSIGN(auto first_fragment, lance::ParseLanceUri(column_group->files[0].path));
+    ASSERT_AND_ASSIGN(auto second_fragment, lance::ParseLanceUri(column_group->files[1].path));
+    ASSERT_EQ(first_fragment.first, second_fragment.first);
+    ASSERT_NE(first_fragment.second, second_fragment.second);
+    const auto& first_properties = column_group->files[0].properties;
+    const auto& second_properties = column_group->files[1].properties;
+    const auto first_version = first_properties.find(lance::kDatasetVersionProperty);
+    const auto second_version = second_properties.find(lance::kDatasetVersionProperty);
+    ASSERT_NE(first_version, first_properties.end());
+    ASSERT_NE(second_version, second_properties.end());
+    EXPECT_EQ(first_version->second, second_version->second);
+    EXPECT_NE(first_version->second, "0");
+  }
+  auto column_groups = std::make_shared<api::ColumnGroups>();
+  column_groups->push_back(std::move(column_group));
+  auto reader =
+      api::Reader::create(column_groups, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
+  ASSERT_NE(reader, nullptr);
+  auto observable = std::dynamic_pointer_cast<Observable>(fs_);
+  ASSERT_NE(observable, nullptr);
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
+  ASSERT_NE(metrics, nullptr);
+
+  // get_chunk_reader completes open before returning. No data batches are requested here.
+  metrics->Reset();
+  auto first_columns = std::make_shared<std::vector<std::string>>(std::vector<std::string>{schema_->field(0)->name()});
+  ASSERT_AND_ASSIGN(auto first, reader->get_chunk_reader(0, first_columns));
+  // Both Lance fragments share one Dataset manifest, in addition to their two
+  // data-file footers. Other formats only load their file footers at this point.
+  EXPECT_EQ(metrics->GetReadCount(), format == LOON_FORMAT_LANCE_TABLE ? 1 + kFiles : kFiles);
+  EXPECT_GT(metrics->GetReadBytes(), 0);
+  first.reset();
+
+  // Reopening the same column on this Reader must also reuse its footer cache.
+  metrics->Reset();
+  ASSERT_AND_ASSIGN(auto cached_first, reader->get_chunk_reader(0, first_columns));
+  EXPECT_EQ(metrics->GetReadCount(), 0);
+  EXPECT_EQ(metrics->GetReadBytes(), 0);
+  EXPECT_EQ(metrics->GetGetFileInfoCount(), 0);
+  cached_first.reset();
+
+  const auto columns = schema_->field_names();
+  auto remaining_columns = std::make_shared<std::vector<std::string>>(columns.begin() + 1, columns.end());
+  metrics->Reset();
+  ASSERT_AND_ASSIGN(auto remaining, reader->get_chunk_reader(0, remaining_columns));
+  EXPECT_EQ(metrics->GetReadCount(), 0);
+  EXPECT_EQ(metrics->GetReadBytes(), 0);
+  EXPECT_EQ(metrics->GetGetFileInfoCount(), 0);
+  ASSERT_AND_ASSIGN(auto chunk_rows, remaining->get_chunk_rows());
+  EXPECT_EQ(std::accumulate(chunk_rows.begin(), chunk_rows.end(), uint64_t{0}), kFiles * kRowsPerFile);
+  ASSERT_STATUS_OK(ReadProjectedChunks(reader.get(), *first_columns, kFiles * kRowsPerFile, 1));
+  ASSERT_STATUS_OK(ReadProjectedChunks(reader.get(), *remaining_columns, kFiles * kRowsPerFile, 1));
+}
+
+INSTANTIATE_TEST_SUITE_P(Formats,
+                         FormatReaderMetadataCacheIOTest,
                          ::testing::Values(LOON_FORMAT_PARQUET,
                                            LOON_FORMAT_VORTEX,
                                            LOON_FORMAT_LANCE_TABLE,
