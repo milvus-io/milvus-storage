@@ -361,7 +361,9 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       std::nullopt),
     REGISTER_PROPERTY(PROPERTY_FS_USE_IAM,
                       PropertyType::BOOL,
-                      "Whether to use IAM for the filesystem storage service.",
+                      "Whether to use IAM for the filesystem storage service. For AWS, Aliyun and Tencent "
+                      "credential Broker requests, "
+                      "true selects the Broker's own IAM identity; false uses the supplied target identity.",
                       false,
                       ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_FS_USE_VIRTUAL_HOST,
@@ -483,6 +485,11 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
     REGISTER_PROPERTY(PROPERTY_FS_AZURE_TENANT_ID,
                       PropertyType::STRING,
                       "The Azure tenant ID sent to the temporary credential broker.",
+                      "",
+                      std::nullopt),
+    REGISTER_PROPERTY(PROPERTY_FS_CREDENTIAL_ENDPOINT,
+                      PropertyType::STRING,
+                      "The HTTP(S) credential Broker endpoint for S3 temporary credentials.",
                       "",
                       std::nullopt),
     REGISTER_PROPERTY(PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT,

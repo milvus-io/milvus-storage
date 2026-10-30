@@ -104,6 +104,7 @@ struct PropertyInfo {
 #define PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT "fs.gcp_target_service_account"
 #define PROPERTY_FS_AZURE_CLIENT_ID "fs.azure_client_id"
 #define PROPERTY_FS_AZURE_TENANT_ID "fs.azure_tenant_id"
+#define PROPERTY_FS_CREDENTIAL_ENDPOINT "fs.credential_endpoint"
 #define PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT "fs.azure_credential_endpoint"
 
 // --- External Filesystem Properties ---

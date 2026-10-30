@@ -43,7 +43,9 @@
 
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"
+#include "milvus-storage/filesystem/credential_broker.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/s3/provider/AwsCredentialBrokerProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
@@ -178,74 +180,36 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
   options.use_crc32c_checksum = config_.use_crc32c_checksum;
   options.use_crt_async_reads = config_.s3_crt_async_read;
 
+  ARROW_RETURN_NOT_OK(ConfigureCredentials(options));
+  return options;
+}
+
+arrow::Status S3FileSystemProducer::ConfigureCredentials(S3Options& options) {
   // Credential configuration priority:
-  // 1. AssumeRole (role_arn) — AWS (AssumeRole) or Aliyun (AssumeRoleWithOIDC)
-  // 2. IAM — use provider-specific STS credential providers
-  // 3. Explicit access key / secret key
-  if (!config_.role_arn.empty()) {
-    LOG_STORAGE_DEBUG_ << "using AssumeRole credentials, cloud_provider=" << config_.cloud_provider
-                       << ", role_arn=" << config_.role_arn
-                       << ", external_id_set=" << (config_.external_id.empty() ? "false" : "true")
-                       << ", load_frequency=" << config_.load_frequency;
-    if (config_.cloud_provider == kCloudProviderAWS) {
-      std::shared_ptr<Aws::STS::STSClient> sts_client;
-      if (!config_.region.empty()) {
-        Aws::Client::ClientConfiguration sts_config;
-        sts_config.region = config_.region.c_str();
-        sts_client = Aws::MakeShared<Aws::STS::STSClient>("S3FileSystemProducer", sts_config);
-      }
-      options.ConfigureAssumeRoleCredentials(config_.role_arn, config_.session_name, config_.external_id,
-                                             config_.load_frequency, sts_client);
-    } else if (config_.cloud_provider == kCloudProviderAliyun) {
-      // Two Aliyun AssumeRole flows are supported; the dispatcher picks one
-      // explicitly via ALIYUN_ROLE_ARN_AUTH_MODE. No auto-
-      // detect — a silent fallback during a missing-OIDC-token incident in
-      // prod would be much harder to diagnose than an explicit mode switch.
-      //
-      //   unset / "oidc" (default): AssumeRoleWithOIDC. Used when pods carry
-      //     K8s-injected ALIBABA_CLOUD_OIDC_TOKEN_FILE / OIDC_PROVIDER_ARN.
-      //   "ram": ECS IMDS -> sts:AssumeRole. Used on plain ECS instances
-      //     whose attached RAM role is trusted by the customer's target role.
-      const auto auth_mode = Aws::Environment::GetEnv("ALIYUN_ROLE_ARN_AUTH_MODE");
-      if (auth_mode == "ram") {
-        if (config_.load_frequency > 0) {
-          LOG_STORAGE_WARNING_ << "Aliyun RAM AssumeRole refresh grace is fixed; load_frequency ignored";
-        }
-        options.credentials_provider = Aws::MakeShared<AliyunRAMCredentialsProvider>(
-            "AliyunRAMCredentialsProvider", config_.role_arn, config_.session_name, config_.external_id);
-        options.credentials_kind = S3CredentialsKind::Role;
-      } else {
-        // OIDC chain path: the machine identity (token file, provider ARN,
-        // and the same-account role to assume in step 1) must all live in
-        // process env. Fail fast if any is missing so the misconfig surfaces
-        // here rather than as a silent anonymous OSS request later.
-        if (Aws::Environment::GetEnv("ALIBABA_CLOUD_OIDC_TOKEN_FILE").empty() ||
-            Aws::Environment::GetEnv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN").empty() ||
-            Aws::Environment::GetEnv("ALIBABA_CLOUD_ROLE_ARN").empty()) {
-          return arrow::Status::Invalid(
-              "Aliyun role_arn requires ALIBABA_CLOUD_OIDC_TOKEN_FILE, "
-              "ALIBABA_CLOUD_OIDC_PROVIDER_ARN and ALIBABA_CLOUD_ROLE_ARN "
-              "in process environment (or set ALIYUN_ROLE_ARN_AUTH_MODE=ram "
-              "for ECS IMDS-based AssumeRole)");
-        }
-        if (config_.load_frequency > 0) {
-          LOG_STORAGE_WARNING_ << "Aliyun OIDC chain AssumeRole refresh grace is fixed; load_frequency ignored";
-        }
-        // Two-step chain: env-driven AssumeRoleWithOIDC for the machine
-        // identity role (account A) -> sts:AssumeRole into the customer's
-        // target role (account B). The previous single-step variant fed
-        // config_.role_arn straight into AssumeRoleWithOIDC, which Aliyun
-        // rejects whenever RoleArn and OIDCProviderArn live in different
-        // accounts (the cross-tenant case this provider exists for).
-        // external_id is forwarded to step 2 only — Aliyun's
-        // AssumeRoleWithOIDC has no ExternalId concept.
-        options.credentials_provider = Aws::MakeShared<AliyunOIDCAssumeRoleChainProvider>(
-            "AliyunOIDCAssumeRoleChainProvider", config_.role_arn, config_.session_name, config_.external_id);
-        options.credentials_kind = S3CredentialsKind::WebIdentity;
-      }
-    } else {
-      return arrow::Status::Invalid("role_arn not supported for cloud provider: ", config_.cloud_provider);
-    }
+  // 1. Shared credential broker for S3/S3-compatible providers, when configured
+  // 2. AssumeRole (role_arn) — AWS (AssumeRole) or Aliyun (AssumeRoleWithOIDC)
+  // 3. IAM — use provider-specific STS credential providers
+  // 4. Explicit access key / secret key
+  if (config_.IsAwsCredentialBrokerEnabled()) {
+    // Preserve the existing AssumeRole contract; IAM uses the broker's cloud aliases.
+    const char* const csp =
+        config_.use_iam && config_.cloud_provider == kCloudProviderAliyun    ? credential_broker::kCspAliyun
+        : config_.use_iam && config_.cloud_provider == kCloudProviderTencent ? credential_broker::kCspTencent
+                                                                             : credential_broker::kCspAws;
+    options.credentials_provider = std::make_shared<AwsCredentialBrokerProvider>(AwsCredentialBrokerConfig{
+        .endpoint = config_.credential_endpoint,
+        .region = config_.region,
+        // Discard inactive target fields so provider equality reflects the IAM request identity.
+        .role_arn = config_.use_iam ? "" : config_.role_arn,
+        .external_id = config_.use_iam ? "" : config_.external_id,
+        .duration_seconds = config_.load_frequency,
+        .request_timeout_ms = config_.request_timeout_ms,
+        .use_iam = config_.use_iam,
+        .csp = csp,
+    });
+    options.credentials_kind = S3CredentialsKind::Role;
+  } else if (!config_.role_arn.empty()) {
+    return ConfigureAssumeRoleCredentials(options);
   } else if (config_.use_iam) {
     auto provider = CreateCredentialsProvider();
     if (!provider) {
@@ -260,7 +224,79 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
     options.ConfigureAccessKey(config_.access_key_id, config_.access_key_value);
   }
 
-  return options;
+  return arrow::Status::OK();
+}
+
+arrow::Status S3FileSystemProducer::ConfigureAssumeRoleCredentials(S3Options& options) const {
+  LOG_STORAGE_DEBUG_ << "using AssumeRole credentials, cloud_provider=" << config_.cloud_provider
+                     << ", role_arn=" << config_.role_arn
+                     << ", external_id_set=" << (config_.external_id.empty() ? "false" : "true")
+                     << ", load_frequency=" << config_.load_frequency;
+  if (config_.cloud_provider == kCloudProviderAWS) {
+    std::shared_ptr<Aws::STS::STSClient> sts_client;
+    if (!config_.region.empty()) {
+      Aws::Client::ClientConfiguration sts_config;
+      sts_config.region = config_.region.c_str();
+      sts_client = Aws::MakeShared<Aws::STS::STSClient>("S3FileSystemProducer", sts_config);
+    }
+    options.ConfigureAssumeRoleCredentials(config_.role_arn, config_.session_name, config_.external_id,
+                                           config_.load_frequency, sts_client);
+  } else if (config_.cloud_provider == kCloudProviderAliyun) {
+    return ConfigureAliyunAssumeRoleCredentials(options);
+  } else {
+    return arrow::Status::Invalid("role_arn not supported for cloud provider: ", config_.cloud_provider);
+  }
+  return arrow::Status::OK();
+}
+
+arrow::Status S3FileSystemProducer::ConfigureAliyunAssumeRoleCredentials(S3Options& options) const {
+  // Two Aliyun AssumeRole flows are supported; the dispatcher picks one
+  // explicitly via ALIYUN_ROLE_ARN_AUTH_MODE. No auto-
+  // detect — a silent fallback during a missing-OIDC-token incident in
+  // prod would be much harder to diagnose than an explicit mode switch.
+  //
+  //   unset / "oidc" (default): AssumeRoleWithOIDC. Used when pods carry
+  //     K8s-injected ALIBABA_CLOUD_OIDC_TOKEN_FILE / OIDC_PROVIDER_ARN.
+  //   "ram": ECS IMDS -> sts:AssumeRole. Used on plain ECS instances
+  //     whose attached RAM role is trusted by the customer's target role.
+  const auto auth_mode = Aws::Environment::GetEnv("ALIYUN_ROLE_ARN_AUTH_MODE");
+  if (auth_mode == "ram") {
+    if (config_.load_frequency > 0) {
+      LOG_STORAGE_WARNING_ << "Aliyun RAM AssumeRole refresh grace is fixed; load_frequency ignored";
+    }
+    options.credentials_provider = Aws::MakeShared<AliyunRAMCredentialsProvider>(
+        "AliyunRAMCredentialsProvider", config_.role_arn, config_.session_name, config_.external_id);
+    options.credentials_kind = S3CredentialsKind::Role;
+  } else {
+    // OIDC chain path: the machine identity (token file, provider ARN,
+    // and the same-account role to assume in step 1) must all live in
+    // process env. Fail fast if any is missing so the misconfig surfaces
+    // here rather than as a silent anonymous OSS request later.
+    if (Aws::Environment::GetEnv("ALIBABA_CLOUD_OIDC_TOKEN_FILE").empty() ||
+        Aws::Environment::GetEnv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN").empty() ||
+        Aws::Environment::GetEnv("ALIBABA_CLOUD_ROLE_ARN").empty()) {
+      return arrow::Status::Invalid(
+          "Aliyun role_arn requires ALIBABA_CLOUD_OIDC_TOKEN_FILE, "
+          "ALIBABA_CLOUD_OIDC_PROVIDER_ARN and ALIBABA_CLOUD_ROLE_ARN "
+          "in process environment (or set ALIYUN_ROLE_ARN_AUTH_MODE=ram "
+          "for ECS IMDS-based AssumeRole)");
+    }
+    if (config_.load_frequency > 0) {
+      LOG_STORAGE_WARNING_ << "Aliyun OIDC chain AssumeRole refresh grace is fixed; load_frequency ignored";
+    }
+    // Two-step chain: env-driven AssumeRoleWithOIDC for the machine
+    // identity role (account A) -> sts:AssumeRole into the customer's
+    // target role (account B). The previous single-step variant fed
+    // config_.role_arn straight into AssumeRoleWithOIDC, which Aliyun
+    // rejects whenever RoleArn and OIDCProviderArn live in different
+    // accounts (the cross-tenant case this provider exists for).
+    // external_id is forwarded to step 2 only — Aliyun's
+    // AssumeRoleWithOIDC has no ExternalId concept.
+    options.credentials_provider = Aws::MakeShared<AliyunOIDCAssumeRoleChainProvider>(
+        "AliyunOIDCAssumeRoleChainProvider", config_.role_arn, config_.session_name, config_.external_id);
+    options.credentials_kind = S3CredentialsKind::WebIdentity;
+  }
+  return arrow::Status::OK();
 }
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateCredentialsProvider() {
