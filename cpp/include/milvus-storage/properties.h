@@ -76,6 +76,7 @@ struct PropertyInfo {
 #define PROPERTY_FS_ACCESS_KEY_ID "fs.access_key_id"
 #define PROPERTY_FS_ACCESS_KEY_VALUE "fs.access_key_value"
 #define PROPERTY_FS_ROOT_PATH "fs.root_path"
+#define PROPERTY_FS_LOCAL_DURABILITY_ROOT "fs.local_durability_root"
 #define PROPERTY_FS_STORAGE_TYPE "fs.storage_type"
 #define PROPERTY_FS_CLOUD_PROVIDER "fs.cloud_provider"
 #define PROPERTY_FS_IAM_ENDPOINT "fs.iam_endpoint"

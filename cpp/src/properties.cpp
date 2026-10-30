@@ -320,6 +320,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "The root path in the bucket for storing data.",
                       "files",
                       std::nullopt),
+    REGISTER_PROPERTY(PROPERTY_FS_LOCAL_DURABILITY_ROOT,
+                      PropertyType::STRING,
+                      "Provisioned local data root for directory synchronization; empty uses fs.root_path. "
+                      "The root and its external ancestor links must already be durable and stable.",
+                      "",
+                      std::nullopt),
     REGISTER_PROPERTY(
         PROPERTY_FS_STORAGE_TYPE,
         PropertyType::STRING,

@@ -85,6 +85,7 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
   // bypass local
   if (storage_type == "local") {
     hash_combine(root_path);
+    hash_combine(local_durability_root);
     return "fs:" + std::to_string(seed);
   }
 
@@ -323,6 +324,8 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(
   ARROW_ASSIGN_OR_RAISE(result.access_key_value,
                         api::GetValue<std::string>(properties_map, PROPERTY_FS_ACCESS_KEY_VALUE));
   ARROW_ASSIGN_OR_RAISE(result.root_path, api::GetValue<std::string>(properties_map, PROPERTY_FS_ROOT_PATH));
+  ARROW_ASSIGN_OR_RAISE(result.local_durability_root,
+                        api::GetValue<std::string>(properties_map, PROPERTY_FS_LOCAL_DURABILITY_ROOT));
   ARROW_ASSIGN_OR_RAISE(result.storage_type, api::GetValue<std::string>(properties_map, PROPERTY_FS_STORAGE_TYPE));
   ARROW_ASSIGN_OR_RAISE(result.cloud_provider, api::GetValue<std::string>(properties_map, PROPERTY_FS_CLOUD_PROVIDER));
   ARROW_ASSIGN_OR_RAISE(result.iam_endpoint, api::GetValue<std::string>(properties_map, PROPERTY_FS_IAM_ENDPOINT));
