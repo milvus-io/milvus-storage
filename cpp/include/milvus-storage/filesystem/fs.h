@@ -213,8 +213,9 @@ struct ArrowFileSystemConfig {
   // With an empty endpoint, S3 uses native AssumeRole when role_arn is set,
   // otherwise IAM when use_iam=true, or explicit AK/SK. Azure broker identity
   // fields still require an endpoint; incomplete broker settings are rejected.
-  // With use_iam=true, native S3/Azure authentication ignores the endpoint;
-  // Talon independently uses it to request the Broker's own IAM credentials.
+  // With an endpoint and use_iam=true, AWS, Aliyun and Tencent use the Broker's
+  // own IAM credentials. Native Azure IAM ignores the endpoint; Talon uses it
+  // independently for Broker IAM requests.
   // Native filesystem support (Talon also supports GCP Broker credentials):
   //
   // Cloud              | Native role/identity delegation   | credential_endpoint
@@ -225,6 +226,7 @@ struct ArrowFileSystemConfig {
   //
   // [1] Native role_arn supports AWS, Aliyun OSS, Tencent COS and Volcengine TOS.
   // [2] S3-compatible providers share the AWS STS broker contract (csp=aws).
+  //     Broker IAM uses csp=aws/ali/tc for AWS/Aliyun/Tencent respectively.
   // [3] Azure supports native workload/managed identity authentication, which
   //     is separate from target-role delegation.
   // GCP's native path uses use_iam + gcp_target_service_account, not role_arn.
@@ -318,12 +320,13 @@ struct ArrowFileSystemConfig {
   [[nodiscard]] bool IsAzureCredentialBrokerEnabled() const;
 
   /**
-   * @brief Return whether AWS STS broker authentication was requested for S3.
+   * @brief Return whether credential broker authentication was requested for S3.
    *
-   * S3 and S3-compatible providers use the same broker contract when
-   * credential_endpoint is non-empty and use_iam is false. Required broker
-   * settings are validated separately; use_iam or an empty endpoint keeps
-   * native role/IAM/AKSK selection.
+   * A non-empty credential_endpoint selects the broker for AWS, Aliyun and
+   * Tencent: use_iam chooses the broker's own identity, otherwise a target role.
+   * Huawei and Volcengine support only the existing AWS STS broker contract.
+   * Required settings are validated separately; an empty endpoint keeps native
+   * role/IAM/AKSK selection.
    */
   [[nodiscard]] bool IsAwsCredentialBrokerEnabled() const;
 

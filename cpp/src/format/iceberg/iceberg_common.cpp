@@ -101,7 +101,8 @@ arrow::Result<std::unordered_map<std::string, std::string>> ToWriterOptions(cons
 
   // A non-IAM configuration is usable only when both credential values exist.
   const bool use_ak_sk = !config.use_iam && !config.access_key_id.empty() && !config.access_key_value.empty();
-  const bool use_supported_credentials = config.use_iam || use_ak_sk;
+  // S3 broker credentials cannot be reconstructed by the native writer.
+  const bool use_supported_credentials = (config.use_iam || use_ak_sk) && !config.IsAwsCredentialBrokerEnabled();
   const auto& provider = config.cloud_provider;
   if (provider == kCloudProviderAWS) {
     // role_arn selects AssumeRole, which intentionally falls through to the

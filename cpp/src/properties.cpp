@@ -368,7 +368,8 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       std::nullopt),
     REGISTER_PROPERTY(PROPERTY_FS_USE_IAM,
                       PropertyType::BOOL,
-                      "Whether to use IAM for the filesystem storage service. For Talon credential Broker requests, "
+                      "Whether to use IAM for the filesystem storage service. For AWS, Aliyun, Tencent and Talon "
+                      "credential Broker requests, "
                       "true selects the Broker's own IAM identity; false uses the supplied target identity.",
                       false,
                       ValidatePropertyType()),

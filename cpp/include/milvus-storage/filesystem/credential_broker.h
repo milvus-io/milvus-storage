@@ -32,10 +32,18 @@ inline constexpr char kAzureTenantId[] = "azureTenantId";
 // IAM uses the Broker's own identity; omitting credentialType retains target-identity mode.
 inline constexpr char kIam[] = "iam";
 
-// Credential Broker HTTP response fields consumed by the Azure SAS provider.
+// Broker CSP aliases differ from storage provider names for Aliyun and Tencent.
+inline constexpr char kCspAws[] = "aws";
+inline constexpr char kCspAliyun[] = "ali";
+inline constexpr char kCspTencent[] = "tc";
+
+// Credential Broker HTTP response fields shared by credential providers.
 inline constexpr char kSuccess[] = "success";
+inline constexpr char kMsg[] = "msg";
+inline constexpr char kDetail[] = "detail";
 inline constexpr char kCredentials[] = "credentials";
 inline constexpr char kTempAk[] = "tempAk";
+inline constexpr char kTempSk[] = "tempSk";
 inline constexpr char kSessionToken[] = "sessionToken";
 inline constexpr char kExpiredAt[] = "expiredAt";
 
