@@ -36,7 +36,6 @@
 #include "milvus-storage/filesystem/talon/talon_file_system.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/upload_sizable.h"
-#include "milvus-storage/filesystem/upload_parallel.h"
 #include "milvus-storage/properties.h"
 
 namespace milvus_storage {
@@ -56,8 +55,7 @@ using ArrowFileSystemPtr = std::shared_ptr<arrow::fs::FileSystem>;
 class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
                         public UploadConditional,
                         public Observable,
-                        public UploadSizable,
-                        public UploadParallel {
+                        public UploadSizable {
   public:
   FileSystemProxy(const std::string& base_path, std::shared_ptr<arrow::fs::FileSystem> base_fs)
       : arrow::fs::SubTreeFileSystem(base_path, std::move(base_fs)) {}
@@ -118,19 +116,6 @@ class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
 
     ARROW_ASSIGN_OR_RAISE(auto full_path, PrependBase(path));
     return sizable->OpenOutputStreamWithUploadSize(full_path, metadata, part_size);
-  }
-
-  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenParallelUploadOutputStream(
-      const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override {
-    FIU_RETURN_ON(FIUKEY_FS_OPEN_OUTPUT_FAIL,
-                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_FS_OPEN_OUTPUT_FAIL)));
-    auto parallel = std::dynamic_pointer_cast<UploadParallel>(base_fs());
-    if (!parallel) {
-      return arrow::Status::NotImplemented("Filesystem does not implement UploadParallel");
-    }
-
-    ARROW_ASSIGN_OR_RAISE(auto full_path, PrependBase(path));
-    return parallel->OpenParallelUploadOutputStream(full_path, metadata);
   }
 };
 
@@ -267,7 +252,7 @@ struct ArrowFileSystemConfig {
   // Tencent COS, GCS S3-compat) will silently ignore the checksum header.
   bool use_crc32c_checksum = false;
 
-  // Whether S3 OpenInputFile should use the AWS CRT-backed async reader when
+  // Whether S3 reads and supported uploads should use AWS CRT when
   // WITH_CRT is enabled. Ignored by non-S3 filesystems and non-CRT builds.
   bool s3_crt_async_read = true;
 

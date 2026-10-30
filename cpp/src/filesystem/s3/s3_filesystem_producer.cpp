@@ -138,11 +138,19 @@ arrow::Status S3FileSystemProducer::InitS3() {
       global_options.override_default_http_options = true;
     }
 
-    auto status = EnsureS3Initialized(global_options);
+    auto status = InitializeS3(global_options);
     if (!status.ok()) {
       init_status = arrow::Status::Invalid("S3FileSystemProducer failed to initialize S3: ", status.ToString());
       return;
     }
+
+    // Register cleanup on exit. atexit handlers must not throw, so log on failure.
+    std::atexit([]() {
+      auto status = EnsureS3Finalized();
+      if (!status.ok()) {
+        LOG_STORAGE_ERROR_ << "S3FileSystemProducer failed to finalize S3: " << status.ToString();
+      }
+    });
   });
   return init_status;
 }

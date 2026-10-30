@@ -77,7 +77,7 @@ TEST(S3SdkInitializationDeathTest, ConfiguresSharedBootstrap) {
       {
         auto check = [] {
           ASSERT_STATUS_OK(ConfigureStorageRuntime(3, 2));
-          ASSERT_STATUS_OK(EnsureS3Initialized());
+          ASSERT_STATUS_OK(InitializeS3(S3GlobalOptions::Defaults()));
           auto* bootstrap = Aws::GetDefaultClientBootstrap();
           ASSERT_NE(bootstrap, nullptr);
           ASSERT_TRUE(*bootstrap);
@@ -90,12 +90,12 @@ TEST(S3SdkInitializationDeathTest, ConfiguresSharedBootstrap) {
             EXPECT_EQ(threads, 3);
           }
 #endif
-          ASSERT_STATUS_OK(EnsureS3Initialized());
+          EXPECT_TRUE(InitializeS3(S3GlobalOptions::Defaults()).IsInvalid());
           S3FileSystemProducer producer(ArrowFileSystemConfig{});
-          ASSERT_STATUS_OK(producer.InitS3());
+          EXPECT_TRUE(producer.InitS3().IsInvalid());
           EXPECT_EQ(Aws::GetDefaultClientBootstrap(), bootstrap);
           ASSERT_STATUS_OK(FinalizeS3());
-          EXPECT_FALSE(EnsureS3Initialized().ok());
+          EXPECT_TRUE(InitializeS3(S3GlobalOptions::Defaults()).IsInvalid());
           EXPECT_EQ(Aws::GetDefaultClientBootstrap(), nullptr);
           ASSERT_STATUS_OK(FinalizeS3());
         };
@@ -118,7 +118,7 @@ class S3UnitTest : public ::testing::Test {
     if (provider.ok() && provider.ValueOrDie() != kCloudProviderAWS) {
       return;
     }
-    ASSERT_TRUE(EnsureS3Initialized().ok());
+    ASSERT_STATUS_OK(S3FileSystemProducer(ArrowFileSystemConfig{}).InitS3());
   }
 };
 
@@ -443,7 +443,7 @@ INSTANTIATE_TEST_SUITE_P(SdkAndCrt, S3ReadResponseTest, ::testing::Bool());
 INSTANTIATE_TEST_SUITE_P(Sdk, S3ReadResponseTest, ::testing::Values(false));
 #endif
 
-// Ordinary uploads use the SDK in both CRT and non-CRT builds.
+// Both SDK and CRT uploads preserve service errors and permit cleanup afterward.
 TEST_F(S3UnitTest, UploadErrorsPreserveServiceDetails) {
   namespace http = boost::beast::http;
   for (const auto& [http_status, code, expected] :
@@ -497,7 +497,7 @@ TEST_F(S3UnitTest, TruncatedUploadResponseIsNotSuccess) {
   const auto status = stream->CloseAsync().status();
   ASSERT_FALSE(status.ok());
   const auto detail = ExtendStatusDetail::UnwrapStatus(status);
-  ASSERT_NE(detail, nullptr);
+  ASSERT_NE(detail, nullptr) << status;
   EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork);
   ASSERT_STATUS_OK(stream->Abort());
 }

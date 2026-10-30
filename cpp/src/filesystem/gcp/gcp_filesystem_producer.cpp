@@ -180,7 +180,7 @@ arrow::Status GcpFileSystemProducer::InitS3Compat(const ArrowFileSystemConfig& f
     global_options.http_options = http_options;
     global_options.override_default_http_options = true;
 
-    auto status = EnsureS3Initialized(global_options);
+    auto status = InitializeS3(global_options);
     if (!status.ok()) {
       // Keep the original status code and detail. Stringifying into
       // Status::Invalid turned a credential/network init failure into a
@@ -190,6 +190,14 @@ arrow::Status GcpFileSystemProducer::InitS3Compat(const ArrowFileSystemConfig& f
                                   status.detail());
       return;
     }
+
+    // Register cleanup on exit. atexit handlers must not throw, so log on failure.
+    std::atexit([]() {
+      auto status = EnsureS3Finalized();
+      if (!status.ok()) {
+        LOG_STORAGE_ERROR_ << "GcpFileSystemProducer failed to finalize S3: " << status.ToString();
+      }
+    });
   });
   return init_status;
 }

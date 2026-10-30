@@ -29,7 +29,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     metadata = {}
     uploads = {}
     upload_condition = threading.Condition()
-    started_parts = set()
+    started_parts = {}
     released_parts = set()
     aborted_uploads = set()
 
@@ -133,7 +133,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             part = key.removeprefix("root/upload-started/")
             with self.upload_condition:
                 started = self.upload_condition.wait_for(lambda: part in self.started_parts, timeout=5)
-            return self.reply(200 if started else 404)
+            return self.reply(200 if started else 404, length=self.started_parts.get(part, 0))
         if key.startswith("root/upload-aborted/") and self.command == "HEAD":
             with self.upload_condition:
                 aborted = key.removeprefix("root/upload-aborted/") in self.aborted_uploads
@@ -166,7 +166,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if key.startswith("root/held/") and self.command == "PUT" and "partNumber" in query:
                 part = key.removeprefix("root/held/") + "/" + query["partNumber"][0]
                 with self.upload_condition:
-                    self.started_parts.add(part)
+                    self.started_parts[part] = len(body)
                     self.upload_condition.notify_all()
                     released = self.upload_condition.wait_for(lambda: part in self.released_parts, timeout=15)
                 if not released:

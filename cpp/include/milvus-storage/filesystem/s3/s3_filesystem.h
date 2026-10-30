@@ -33,18 +33,13 @@
 #include "milvus-storage/filesystem/observable.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/upload_sizable.h"
-#include "milvus-storage/filesystem/upload_parallel.h"
 
 using ::arrow::fs::FileInfo;
 using ::arrow::fs::FileInfoGenerator;
 
 namespace milvus_storage {
 
-class S3FileSystem : public arrow::fs::FileSystem,
-                     public UploadConditional,
-                     public Observable,
-                     public UploadSizable,
-                     public UploadParallel {
+class S3FileSystem : public arrow::fs::FileSystem, public UploadConditional, public Observable, public UploadSizable {
   public:
   ~S3FileSystem() override;
 
@@ -95,6 +90,10 @@ class S3FileSystem : public arrow::fs::FileSystem,
   arrow::Future<std::shared_ptr<arrow::io::InputStream>> OpenInputStreamAsync(const std::string& path) override;
   arrow::Future<std::shared_ptr<arrow::io::InputStream>> OpenInputStreamAsync(const FileInfo& info) override;
 
+  // GCP uploads use the SDK path. Other providers use streaming multipart
+  // uploads when built with CRT and use_crt_async_reads is enabled, including
+  // small objects. Their public async completions use io_context().executor(), which must remain
+  // available and schedule callbacks off CRT threads until completion.
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override;
 
@@ -109,15 +108,6 @@ class S3FileSystem : public arrow::fs::FileSystem,
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(
       const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t part_size) override;
-
-  // Requires an enabled CRT client; otherwise returns NotImplemented.
-  // CRT uses multipart for unknown-length input, including small objects.
-  // Write retains owned buffers until consumed;
-  // Close signals EOF and waits for publication, Abort cancels the upload.
-  // Public async completions use io_context().executor(), which must remain
-  // available and schedule callbacks off CRT threads until completion.
-  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenParallelUploadOutputStream(
-      const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override;
 
   protected:
   explicit S3FileSystem(const S3Options& options, const arrow::io::IOContext& io_context);

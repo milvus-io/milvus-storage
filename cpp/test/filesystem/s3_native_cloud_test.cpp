@@ -208,8 +208,8 @@ TEST_F(S3NativeCloudTest, ConditionalPutAndMultipartPreserveExistingObject) {
     auto path = "conditional-" + std::to_string(size) + " #?+% 中文";
     ASSERT_OK_AND_ASSIGN(auto out, sdk_upload_fs_->OpenConditionalOutputStream(path, nullptr));
     auto written = out->Write(arrow::Buffer::FromString(std::string(size, 'a')));
-    if (config_.cloud_provider == kCloudProviderGCP && size > 7) {
-      ASSERT_TRUE(written.IsNotImplemented()) << written;
+    if (config_.cloud_provider == kCloudProviderGCP && size >= 5 * 1024 * 1024) {
+      EXPECT_TRUE(written.IsNotImplemented()) << written;
       ASSERT_OK(out->Abort());
       ASSERT_OK_AND_ASSIGN(auto absent, Stat(path));
       EXPECT_EQ(absent.type(), arrow::fs::FileType::NotFound);
@@ -395,12 +395,10 @@ TEST_P(S3SyncCloudTest, ConditionalWritesAndProviderLimits) {
   }
   for (const auto size : {7, 5 * 1024 * 1024}) {
     const auto path = "conditional-" + std::to_string(size) + " #?+% 中文";
-    if (config_.cloud_provider == kCloudProviderGCP && size > 7)
+    if (config_.cloud_provider == kCloudProviderGCP && size >= 5 * 1024 * 1024) {
       ASSERT_OK(Put(path, "original"));
-    ASSERT_OK_AND_ASSIGN(auto out, proxy_->OpenConditionalOutputStream(path, nullptr));
-    auto written = out->Write(arrow::Buffer::FromString(std::string(size, 'a')));
-    if (config_.cloud_provider == kCloudProviderGCP && size > 7) {
-      ASSERT_TRUE(written.IsNotImplemented()) << written;
+      ASSERT_OK_AND_ASSIGN(auto out, proxy_->OpenConditionalOutputStream(path, nullptr));
+      EXPECT_TRUE(out->Write(arrow::Buffer::FromString(std::string(size, 'a'))).IsNotImplemented());
       ASSERT_OK(out->Abort());
       ASSERT_OK_AND_ASSIGN(auto file, fs_->OpenInputFile(path));
       ASSERT_OK_AND_ASSIGN(auto bytes, file->Read(16));
@@ -408,6 +406,8 @@ TEST_P(S3SyncCloudTest, ConditionalWritesAndProviderLimits) {
       ASSERT_OK(file->Close());
       continue;
     }
+    ASSERT_OK_AND_ASSIGN(auto out, proxy_->OpenConditionalOutputStream(path, nullptr));
+    auto written = out->Write(arrow::Buffer::FromString(std::string(size, 'a')));
     ASSERT_OK(written);
     auto status = out->Close();
     ASSERT_OK(status);

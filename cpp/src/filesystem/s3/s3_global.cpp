@@ -15,7 +15,6 @@
 #include "milvus-storage/filesystem/s3/s3_global.h"
 
 #include <atomic>
-#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -228,31 +227,12 @@ AwsInstance* GetAwsInstance() {
   return instance.get();
 }
 
-arrow::Result<bool> EnsureAwsInstanceInitialized(const S3GlobalOptions& options) {
-  return GetAwsInstance()->EnsureInitialized(options);
-}
-
 arrow::Status InitializeS3(const S3GlobalOptions& options) {
-  ARROW_ASSIGN_OR_RAISE(bool successfully_initialized, EnsureAwsInstanceInitialized(options));
+  ARROW_ASSIGN_OR_RAISE(const bool successfully_initialized, GetAwsInstance()->EnsureInitialized(options));
   if (!successfully_initialized) {
     return arrow::Status::Invalid(
         "S3 was already initialized.  It is safe to use but the options passed in this "
         "call have been ignored.");
-  }
-  return arrow::Status::OK();
-}
-
-arrow::Status EnsureS3Initialized() { return EnsureS3Initialized(S3GlobalOptions::Defaults()); }
-
-arrow::Status EnsureS3Initialized(const S3GlobalOptions& options) {
-  ARROW_ASSIGN_OR_RAISE(bool newly_initialized, EnsureAwsInstanceInitialized(options));
-  if (newly_initialized) {
-    std::atexit([]() {
-      auto status = EnsureS3Finalized();
-      if (!status.ok()) {
-        LOG_STORAGE_ERROR_ << "Failed to finalize S3: " << status.ToString();
-      }
-    });
   }
   return arrow::Status::OK();
 }

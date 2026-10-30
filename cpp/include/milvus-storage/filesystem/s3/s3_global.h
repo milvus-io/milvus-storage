@@ -72,15 +72,6 @@ struct S3GlobalOptions {
 /// application in order to avoid a segmentation fault at shutdown.
 arrow::Status InitializeS3(const S3GlobalOptions& options);
 
-/// \brief Ensure the S3 APIs are initialized, but only if not already done.
-///
-/// If necessary, this will call InitializeS3() with some default options.
-arrow::Status EnsureS3Initialized();
-
-/// Initialize with options only on the first call; later calls reuse the SDK.
-/// Storage registers finalization at process exit for the first initialization.
-arrow::Status EnsureS3Initialized(const S3GlobalOptions& options);
-
 /// Whether S3 was initialized, and not finalized.
 bool IsS3Initialized();
 
@@ -97,8 +88,7 @@ arrow::Status CheckS3Initialized();
 /// After this function has been called, all S3 calls will fail with an error.
 ///
 /// Calls to InitializeS3() and FinalizeS3() should be serialized by the
-/// application (this also applies to EnsureS3Initialized() and
-/// EnsureS3Finalized()).
+/// application (this also applies to EnsureS3Finalized()).
 arrow::Status FinalizeS3();
 
 /// Whether S3 was finalized.

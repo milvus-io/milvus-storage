@@ -1915,19 +1915,28 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
 
 #ifdef WITH_CRT
 // CRT consumes streaming input and owns multipart scheduling and cleanup.
-class S3ParallelUploadOutputStream final : public arrow::io::OutputStream, public AsyncOutputStream {
+class S3CrtOutputStream final : public arrow::io::OutputStream, public AsyncOutputStream {
   public:
-  explicit S3ParallelUploadOutputStream(const arrow::io::IOContext& io_context)
+  explicit S3CrtOutputStream(const arrow::io::IOContext& io_context)
       : io_context_(io_context), upload_(std::make_shared<UploadState>(io_context.stop_token())) {}
 
-  ~S3ParallelUploadOutputStream() override { upload_->Cancel(); }
+  ~S3CrtOutputStream() override { upload_->Cancel(); }
 
   arrow::Status Init(const std::shared_ptr<S3ClientHolder>& holder,
                      const std::shared_ptr<S3CrtClientHolder>& crt_holder,
                      const S3Path& path,
                      const S3Options& options,
-                     const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) {
+                     const std::shared_ptr<const arrow::KeyValueMetadata>& metadata,
+                     const int64_t part_size) {
     ARROW_RETURN_NOT_OK(io_context_.stop_token().Poll());
+    // The SDK uses CRT's default memory budget, whose minimum configurable
+    // value is 1 GiB. Keep parts within half that budget: larger reservations
+    // can hit a native buffer-pool assertion instead of returning an error.
+    constexpr int64_t max_part_size = 512LL * 1024 * 1024;
+    if (part_size <= 0 || part_size > max_part_size) {
+      return arrow::Status::Invalid("CRT upload part size must be between 1 and ", max_part_size, " bytes, got ",
+                                    part_size);
+    }
     ARROW_ASSIGN_OR_RAISE(upload_->lease, crt_holder->Acquire());
     if (!upload_->lease->GetUnderlyingS3Client()) {
       return arrow::Status::Invalid("SDK CRT client has no underlying native client");
@@ -1937,6 +1946,12 @@ class S3ParallelUploadOutputStream final : public arrow::io::OutputStream, publi
     request.SetBucket(ToAwsString(path.bucket));
     request.SetKey(ToAwsString(path.key));
     ARROW_RETURN_NOT_OK(SetUploadMetadata(&request, metadata, options.default_metadata));
+    // CRT streams always use multipart; GCS ignores generation preconditions there.
+    // Do not return NotImplemented: manifest writers would fall back to a
+    // non-atomic existence check followed by an unconditional upload.
+    if (request.GetAdditionalCustomHeaders().count("x-goog-if-generation-match")) {
+      return arrow::Status::Invalid("GCS XML multipart uploads do not support conditional writes");
+    }
     ARROW_ASSIGN_OR_RAISE(auto client, holder->Lock());
     auto endpoint = client->accessEndpointProvider()->ResolveEndpoint(request.GetEndpointContextParams());
     if (!endpoint.IsSuccess()) {
@@ -1947,6 +1962,9 @@ class S3ParallelUploadOutputStream final : public arrow::io::OutputStream, publi
     upload_->http = Aws::Http::CreateHttpRequest(uri, Aws::Http::HttpMethod::HTTP_PUT,
                                                  Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
     for (const auto& header : request.GetHeaders()) {
+      upload_->http->SetHeaderValue(header.first, header.second);
+    }
+    for (const auto& header : request.GetAdditionalCustomHeaders()) {
       upload_->http->SetHeaderValue(header.first, header.second);
     }
     upload_->message = upload_->http->ToCrtHttpRequest();
@@ -1966,6 +1984,7 @@ class S3ParallelUploadOutputStream final : public arrow::io::OutputStream, publi
     checksum.location = AWS_SCL_TRAILER;
     aws_s3_meta_request_options config{};
     config.type = AWS_S3_META_REQUEST_TYPE_PUT_OBJECT;
+    config.part_size = part_size;
     config.message = upload_->message->GetUnderlyingMessage();
     config.endpoint = &upload_->endpoint;
     config.send_using_async_writes = true;
@@ -1993,7 +2012,11 @@ class S3ParallelUploadOutputStream final : public arrow::io::OutputStream, publi
 
   arrow::Status Close() override { return FinishUpload().status(); }
 
-  Future<> CloseAsync() override { return NotifyUploadCompletion(FinishUpload()); }
+  Future<> CloseAsync() override {
+    // Callers may release the stream after starting CloseAsync. Keep it alive
+    // until completion so the destructor cannot cancel an in-flight upload.
+    return NotifyUploadCompletion(FinishUpload()).Then([self = shared_from_this()] {});
+  }
 
   bool closed() const override { return closing_ && close_future_.is_finished(); }
 
@@ -2093,8 +2116,13 @@ class S3ParallelUploadOutputStream final : public arrow::io::OutputStream, publi
               error.SetResponseHeaders(response->GetHeaders());
               upload.status = ErrorToStatus("PutObject", error);
             } else {
-              upload.status = arrow::Status::IOError("CRT S3 upload failed: ", aws_error_str(result->error_code),
-                                                     " (HTTP ", result->response_status, ")");
+              const auto message = fmt::format("CRT S3 upload failed: {} (HTTP {})", aws_error_str(result->error_code),
+                                               result->response_status);
+              // As in the SDK CRT client, no response status means the transport
+              // failed before a complete service response was available.
+              upload.status = result->response_status == 0
+                                  ? MakeExtendError(ExtendStatusCode::StorageTransientNetwork, message, message)
+                                  : arrow::Status::IOError(message);
             }
           }
           upload.metrics->IncrementFailedCount();
@@ -2252,6 +2280,8 @@ class S3ParallelUploadOutputStream final : public arrow::io::OutputStream, publi
     status &= io_context_.stop_token().Poll();
     FIU_DO_ON(FIUKEY_S3FS_WRITER_CLOSE_FAIL,
               status = arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_CLOSE_FAIL)));
+    FIU_DO_ON(FIUKEY_S3FS_COMPLETE_UPLOAD_FAIL,
+              status = arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_COMPLETE_UPLOAD_FAIL)));
     if (!status.ok()) {
       upload_->Cancel();
       return close_future_ =
@@ -2272,6 +2302,9 @@ class S3ParallelUploadOutputStream final : public arrow::io::OutputStream, publi
   }
 
   Future<> AbortUpload() {
+    if (closed()) {
+      return Future<>::MakeFinished();
+    }
     upload_->Cancel();
     closing_ = true;
     return close_future_ = WaitForUpload().Then(
@@ -2357,17 +2390,17 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
         return arrow::Status::IOError("Failed to build S3 CRT client: ", crt_result.status().ToString());
       }
       ARROW_RETURN_NOT_OK(std::move(crt_result).Value(&crt_holder_));
-    }
-    auto native_options = options();
-    native_options.region = region();
-    auto native = NativeS3Transport::Make(native_options, holder_, crt_holder_);
-    if (native.ok()) {
-      native_operations_ = MakeNativeS3Operations(io_context_, *native);
-      ARROW_RETURN_NOT_OK(native_operations_.status());
-    } else {
-      native_operations_ = native.status();
-      if (!native.status().IsNotImplemented())
-        return native.status();
+      auto native_options = options();
+      native_options.region = region();
+      auto native = NativeS3Transport::Make(native_options, holder_, crt_holder_);
+      if (native.ok()) {
+        native_operations_ = MakeNativeS3Operations(io_context_, *native);
+        ARROW_RETURN_NOT_OK(native_operations_.status());
+      } else {
+        native_operations_ = native.status();
+        if (!native.status().IsNotImplemented())
+          return native.status();
+      }
     }
 #endif
     return arrow::Status::OK();
@@ -3481,29 +3514,20 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenOutput
 
   ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
+#ifdef WITH_CRT
+  // GCP needs the SDK path for conditional single PUTs and per-request authentication.
+  if (impl_->use_crt_async_reads_ && impl_->options().cloud_provider != kCloudProviderGCP) {
+    auto stream = std::make_shared<S3CrtOutputStream>(io_context());
+    ARROW_RETURN_NOT_OK(
+        stream->Init(impl_->holder_, impl_->crt_holder_, path, impl_->options(), metadata, upload_size));
+    return stream;
+  }
+#endif
   auto ptr =
       std::make_shared<CustomOutputStream>(impl_->holder_, io_context(), path, impl_->options(), metadata, upload_size);
   ARROW_RETURN_NOT_OK(ptr->Init());
   return ptr;
 };
-
-arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenParallelUploadOutputStream(
-    const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) {
-#ifdef WITH_CRT
-  if (!impl_->crt_holder_) {
-    return arrow::Status::NotImplemented("Parallel S3 uploads require an enabled CRT client");
-  }
-  ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(path));
-  ARROW_ASSIGN_OR_RAISE(auto s3_path, S3Path::FromString(path));
-  ARROW_RETURN_NOT_OK(ValidateFilePath(s3_path));
-  ARROW_RETURN_NOT_OK(CheckS3Initialized());
-  auto stream = std::make_shared<S3ParallelUploadOutputStream>(io_context());
-  ARROW_RETURN_NOT_OK(stream->Init(impl_->holder_, impl_->crt_holder_, s3_path, impl_->options(), metadata));
-  return stream;
-#else
-  return arrow::Status::NotImplemented("Parallel S3 uploads require a CRT build");
-#endif
-}
 
 arrow::Future<arrow::fs::FileInfoVector> S3FileSystem::GetFileInfoAsync(const std::vector<std::string>& paths) {
 #ifdef WITH_CRT

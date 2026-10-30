@@ -45,14 +45,15 @@ arrow::Future<arrow::fs::FileInfo> Stat(const std::shared_ptr<arrow::fs::FileSys
 class NativeS3Test : public ::testing::Test {
   protected:
   static void SetUpTestSuite() {
-    ArrowFileSystemConfig config;
-    ASSERT_OK(S3FileSystemProducer(config).InitS3());
+    if (std::getenv("STORAGE_NATIVE_S3_ENDPOINT") && !IsS3Initialized()) {
+      ASSERT_OK(S3FileSystemProducer(ArrowFileSystemConfig{}).InitS3());
+    }
   }
   void SetUp() override {
     const char* endpoint = std::getenv("STORAGE_NATIVE_S3_ENDPOINT");
     if (!endpoint)
       GTEST_SKIP() << "Run cpp/scripts/test_native_s3.py for isolated S3 fixture";
-    ASSERT_OK(EnsureS3Initialized());
+    ASSERT_OK(CheckS3Initialized());
     ASSERT_OK_AND_ASSIGN(executor_, arrow::internal::ThreadPool::Make(1));
     options_ = S3Options::FromAccessKey("fixture", "fixture-secret");
     options_.scheme = "http";
@@ -433,9 +434,8 @@ TEST_F(NativeS3Test, RootListingSkipsEmptyContinuationPage) {
   EXPECT_TRUE(Stat(fs_, "../file").status().IsInvalid());
 }
 
-TEST_F(NativeS3Test, ExistingOutputFactoriesOpenWithoutIo) {
+TEST_F(NativeS3Test, ExistingOutputFactoriesSupportAsyncFlushAndAbort) {
   auto options = options_;
-  options.endpoint_override = "127.0.0.1:1";
   ASSERT_OK_AND_ASSIGN(auto s3, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
   auto proxy = std::make_shared<FileSystemProxy>("bucket/root", s3);
   std::shared_ptr<arrow::fs::FileSystem> fs = proxy;
@@ -454,6 +454,10 @@ TEST_F(NativeS3Test, ExistingOutputFactoriesOpenWithoutIo) {
   auto sized_async = std::dynamic_pointer_cast<AsyncOutputStream>(sized);
   ASSERT_NE(sized_async, nullptr);
   ASSERT_OK(sized->Abort());
+  for (const int64_t part_size : {-1LL, 0LL, 512LL * 1024 * 1024 + 1, 5LL * 1024 * 1024 * 1024}) {
+    const auto status = s3->OpenOutputStreamWithUploadSize("bucket/key", nullptr, part_size).status();
+    EXPECT_TRUE(status.IsInvalid()) << status;
+  }
 }
 
 TEST_F(NativeS3Test, AsyncWriteAndSyncReadShareOneHandle) {
@@ -485,9 +489,8 @@ TEST_F(NativeS3Test, MultipartCompleteAndAbort) {
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
   ASSERT_OK(Write("multipart", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a') + "tail")).status());
-  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 1);
-  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 1);
-  EXPECT_EQ(metrics->GetWriteCount(), 2);
+  // CRT reports object writes; it owns multipart request scheduling internally.
+  EXPECT_EQ(metrics->GetWriteCount(), 1);
   EXPECT_EQ(metrics->GetWriteBytes(), 5 * 1024 * 1024 + 4);
   EXPECT_EQ(metrics->GetFailedCount(), 0);
   ASSERT_OK_AND_ASSIGN(auto data, Await(Read("multipart", 5 * 1024 * 1024 - 2, 10)));
@@ -498,11 +501,9 @@ TEST_F(NativeS3Test, MultipartCompleteAndAbort) {
   ASSERT_NE(async, nullptr);
   ASSERT_OK(stream->Flush());
   ASSERT_OK(stream->Abort());
-  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 2);
-  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 1);
-  EXPECT_EQ(metrics->GetWriteCount(), 3);
-  EXPECT_EQ(metrics->GetWriteBytes(), 10 * 1024 * 1024 + 4);
-  EXPECT_EQ(metrics->GetFailedCount(), 0);
+  EXPECT_EQ(metrics->GetWriteCount(), 2);
+  EXPECT_EQ(metrics->GetWriteBytes(), 5 * 1024 * 1024 + 4);
+  EXPECT_EQ(metrics->GetFailedCount(), 1);
   ASSERT_OK_AND_ASSIGN(auto missing, Await(Stat(fs_, "aborted")));
   EXPECT_EQ(missing.type(), arrow::fs::FileType::NotFound);
 }
@@ -512,6 +513,9 @@ TEST_F(NativeS3Test, MultipartConditionalConflictPreservesObject) {
   EXPECT_FALSE(Write("multipart-conflict", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'x')), condition)
                    .status()
                    .ok());
+  ASSERT_OK_AND_ASSIGN(auto output, fs_->OpenConditionalOutputStream("multipart-conflict", nullptr));
+  ASSERT_OK(output->Write(arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'x'))));
+  EXPECT_FALSE(output->CloseAsync().status().ok());
   ASSERT_OK_AND_ASSIGN(auto data, Await(Read("multipart-conflict", 0, 20)));
   EXPECT_EQ(data->ToString(), "original");
 }
@@ -577,7 +581,7 @@ TEST_F(NativeS3Test, InvalidAndOversizedResponsesFail) {
   selector.base_dir = "oversized-error";
   EXPECT_TRUE(fs_->GetFileInfoGenerator(selector)().status().IsCapacityError());
 }
-TEST_F(NativeS3Test, SinglePutDoesNotCountMultipartOperations) {
+TEST_F(NativeS3Test, SmallUploadCountsOneObjectWrite) {
   ASSERT_OK_AND_ASSIGN(const auto metrics, sync_->GetMetrics(kOriginMetricsSource));
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
@@ -593,14 +597,13 @@ TEST_F(NativeS3Test, FailedMultipartCreationCountsAttemptAndFailure) {
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
   EXPECT_FALSE(Write("denied", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))).status().ok());
-  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 1);
+  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 0);
   EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 0);
-  EXPECT_EQ(metrics->GetWriteCount(), 0);
+  EXPECT_EQ(metrics->GetWriteCount(), 1);
   EXPECT_EQ(metrics->GetWriteBytes(), 0);
   EXPECT_EQ(metrics->GetFailedCount(), 1);
 }
-// Native metadata must not change output routing or impose a part admission limit.
-TEST_F(NativeS3Test, OutputFactoriesRetainSdkExecutorAndWriteSemantics) {
+TEST_F(NativeS3Test, OutputFactoriesRespectCrtAndBackgroundSettings) {
   ASSERT_OK(executor_->Shutdown());
   executor_stopped_ = true;
   for (const bool crt : {false, true}) {
@@ -613,7 +616,7 @@ TEST_F(NativeS3Test, OutputFactoriesRetainSdkExecutorAndWriteSemantics) {
       for (int factory = 0; factory < 3; ++factory) {
         SCOPED_TRACE(::testing::Message() << "crt=" << crt << " background=" << background << " factory=" << factory);
         const auto name =
-            "sdk-output-" + std::to_string(crt) + "-" + std::to_string(background) + "-" + std::to_string(factory);
+            "output-" + std::to_string(crt) + "-" + std::to_string(background) + "-" + std::to_string(factory);
         auto opened = factory == 0   ? fs->OpenOutputStream(name)
                       : factory == 1 ? fs->OpenConditionalOutputStream(name, nullptr)
                                      : fs->OpenOutputStreamWithUploadSize(name, nullptr, 5 * 1024 * 1024);
@@ -621,18 +624,18 @@ TEST_F(NativeS3Test, OutputFactoriesRetainSdkExecutorAndWriteSemantics) {
         // Two parts in one Write exceeds the old native limit (max_connections=1).
         auto payload = arrow::Buffer::FromString(std::string(background ? 7 : 10 * 1024 * 1024, 'x'));
         ASSERT_OK(stream->Write(payload));
-        auto closed = stream->CloseAsync();
-        ASSERT_TRUE(closed.Wait(5));
-        if (background) {
-          // The SDK path requires its executor even when native metadata is enabled.
-          EXPECT_FALSE(closed.status().ok());
-        } else {
-          ASSERT_OK(closed.status());
-          ASSERT_OK_AND_ASSIGN(auto input, fs->OpenInputFile(name));
-          ASSERT_OK_AND_ASSIGN(auto data, input->Read(payload->size()));
-          EXPECT_TRUE(data->Equals(*payload));
-          ASSERT_OK(input->Close());
+        const auto status = stream->Close();
+        if (!crt && background) {
+          // SDK background writes require the caller's I/O executor.
+          EXPECT_FALSE(status.ok());
+          continue;
         }
+        // CRT uploads and synchronous SDK writes do not require that executor.
+        ASSERT_OK(status);
+        ASSERT_OK_AND_ASSIGN(auto input, fs->OpenInputFile(name));
+        ASSERT_OK_AND_ASSIGN(auto data, input->Read(payload->size()));
+        EXPECT_TRUE(data->Equals(*payload));
+        ASSERT_OK(input->Close());
       }
     }
   }
@@ -646,13 +649,14 @@ TEST_F(NativeS3Test, GcpConditionalMultipartIsRejectedBeforeCreatingAnUpload) {
     options.use_crt_async_reads = crt;
     ASSERT_OK_AND_ASSIGN(auto raw, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
     auto fs = std::make_shared<FileSystemProxy>(prefix_, raw);
-    ASSERT_OK_AND_ASSIGN(auto output, fs->OpenConditionalOutputStream("gcp-multipart-guard", nullptr));
     ASSERT_OK_AND_ASSIGN(auto metrics, raw->GetMetrics(kOriginMetricsSource));
     metrics->Reset();
-    auto status = output->Write(arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'x')));
+    ASSERT_OK_AND_ASSIGN(auto out, fs->OpenConditionalOutputStream("gcp-multipart-guard", nullptr));
+    const auto status = out->Write(arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a')));
     EXPECT_TRUE(status.IsNotImplemented()) << status;
+    EXPECT_EQ(metrics->GetWriteCount(), 0);
     EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 0);
-    ASSERT_OK(output->Abort());
+    ASSERT_OK(out->Abort());
     ASSERT_OK_AND_ASSIGN(auto data, Await(Read("gcp-multipart-guard", 0, 8)));
     EXPECT_EQ(data->ToString(), "original");
   }
@@ -721,7 +725,7 @@ TEST_F(ParallelUploadS3Test, SmallAndEmptyUploadsUseCrtWithoutIoWorker) {
   executor_stopped_ = true;
   for (const auto& data : {std::string(), std::string("payload")}) {
     const auto path = "parallel-small-" + std::to_string(data.size());
-    ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenParallelUploadOutputStream(path, nullptr));
+    ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream(path));
     ASSERT_OK(stream->Write(arrow::Buffer::FromString(data)));
     ASSERT_OK(stream->Close());
     ASSERT_OK_AND_ASSIGN(auto uploaded, Await(Read(path, 0, data.size())));
@@ -731,7 +735,7 @@ TEST_F(ParallelUploadS3Test, SmallAndEmptyUploadsUseCrtWithoutIoWorker) {
 
 TEST_F(ParallelUploadS3Test, CombinesWritesAcrossPartBoundaries) {
   const auto expected = std::string(4 * 1024 * 1024, 'a') + std::string(6 * 1024 * 1024, 'b') + "tail";
-  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenParallelUploadOutputStream("parallel-cross-write", nullptr));
+  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream("parallel-cross-write", nullptr));
   auto first = expected.substr(0, 4 * 1024 * 1024);
   ASSERT_OK(stream->Write(first.data(), first.size()));
   first.assign(first.size(), 'x');
@@ -747,7 +751,8 @@ TEST_F(ParallelUploadS3Test, CrtUploadsPartsBeforeClose) {
   ASSERT_OK(executor_->Shutdown());
   executor_stopped_ = true;
   const auto expected = std::string(20 * 1024 * 1024, 'a') + "tail";
-  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenParallelUploadOutputStream("held/crt-parallel", nullptr));
+  constexpr int64_t part_size = 6 * 1024 * 1024;
+  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStreamWithUploadSize("held/crt-parallel", nullptr, part_size));
   std::future<arrow::Status> closed;
   auto release = folly::makeGuard([&] {
     for (int part = 1; part <= 4; ++part) (void)ControlUpload("crt-parallel/" + std::to_string(part), true);
@@ -759,7 +764,9 @@ TEST_F(ParallelUploadS3Test, CrtUploadsPartsBeforeClose) {
   // Parts upload before EOF, while the final object remains unpublished.
   ASSERT_OK_AND_ASSIGN(auto before, Await(Stat(fs_, "held/crt-parallel")));
   EXPECT_EQ(before.type(), arrow::fs::FileType::NotFound);
-  ASSERT_OK(ControlUpload("crt-parallel/1", false));
+  ASSERT_OK_AND_ASSIGN(const auto first_part, control_->GetFileInfo(prefix_ + "/upload-started/crt-parallel/1"));
+  ASSERT_EQ(first_part.type(), arrow::fs::FileType::File);
+  EXPECT_EQ(first_part.size(), part_size);
   ASSERT_OK(ControlUpload("crt-parallel/2", false));
   closed = std::async(std::launch::async, [stream] { return stream->Close(); });
   EXPECT_EQ(closed.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
@@ -777,7 +784,7 @@ TEST_F(ParallelUploadS3Test, CrtUploadsPartsBeforeClose) {
 
 TEST_F(ParallelUploadS3Test, CrtAbortCancelsUnpublishedUpload) {
   const auto data = arrow::Buffer::FromString(std::string(10 * 1024 * 1024, 'a'));
-  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenParallelUploadOutputStream("crt-abort", nullptr));
+  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream("crt-abort", nullptr));
   ASSERT_OK(stream->Write(data));
   ASSERT_OK(stream->Abort());
   ASSERT_OK_AND_ASSIGN(auto info, Await(Stat(fs_, "crt-abort")));
@@ -785,9 +792,9 @@ TEST_F(ParallelUploadS3Test, CrtAbortCancelsUnpublishedUpload) {
 }
 
 TEST_F(ParallelUploadS3Test, IdleInputDoesNotBlockAnotherUpload) {
-  ASSERT_OK_AND_ASSIGN(auto idle, fs_->OpenParallelUploadOutputStream("parallel-idle", nullptr));
+  ASSERT_OK_AND_ASSIGN(auto idle, fs_->OpenOutputStream("parallel-idle", nullptr));
   ASSERT_OK(idle->Write(arrow::Buffer::FromString("prefix")));
-  ASSERT_OK_AND_ASSIGN(auto next, fs_->OpenParallelUploadOutputStream("parallel-next", nullptr));
+  ASSERT_OK_AND_ASSIGN(auto next, fs_->OpenOutputStream("parallel-next", nullptr));
   ASSERT_OK(next->Write(arrow::Buffer::FromString("payload")));
   auto closed = next->CloseAsync();
   ASSERT_TRUE(closed.Wait(5));
@@ -800,7 +807,7 @@ TEST_F(ParallelUploadS3Test, IdleInputDoesNotBlockAnotherUpload) {
 TEST_F(ParallelUploadS3Test, AbortDuringCloseCancelsUpload) {
   if (std::getenv("STORAGE_NATIVE_S3_REAL"))
     GTEST_SKIP() << "Requires fixture-controlled requests";
-  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenParallelUploadOutputStream("held/abort-closing", nullptr));
+  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream("held/abort-closing", nullptr));
   auto release = folly::makeGuard([&] {
     for (int part = 1; part <= 3; ++part) (void)ControlUpload("abort-closing/" + std::to_string(part), true);
   });
@@ -822,10 +829,10 @@ TEST_F(ParallelUploadS3Test, AbortDuringCloseCancelsUpload) {
 
 TEST_F(ParallelUploadS3Test, DestructionCancelsUnclosedUpload) {
   {
-    ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenParallelUploadOutputStream("parallel-dropped", nullptr));
+    ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream("parallel-dropped", nullptr));
     ASSERT_OK(stream->Write(arrow::Buffer::FromString("payload")));
   }
-  ASSERT_OK_AND_ASSIGN(auto next, fs_->OpenParallelUploadOutputStream("parallel-after-drop", nullptr));
+  ASSERT_OK_AND_ASSIGN(auto next, fs_->OpenOutputStream("parallel-after-drop", nullptr));
   ASSERT_OK(next->Write(arrow::Buffer::FromString("next")));
   ASSERT_OK(next->Close());
   ASSERT_OK_AND_ASSIGN(auto missing, Await(Stat(fs_, "parallel-dropped")));
@@ -836,7 +843,7 @@ TEST_F(ParallelUploadS3Test, CloseContinuationUsesCallerExecutorAndCanUpload) {
   if (std::getenv("STORAGE_NATIVE_S3_REAL"))
     GTEST_SKIP() << "Requires fixture-controlled requests";
   const auto data = arrow::Buffer::FromString(std::string(10 * 1024 * 1024, 'a'));
-  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenParallelUploadOutputStream("held/crt-continuation", nullptr));
+  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream("held/crt-continuation", nullptr));
   auto release = folly::makeGuard([&] {
     for (int part = 1; part <= 3; ++part) (void)ControlUpload("crt-continuation/" + std::to_string(part), true);
   });
@@ -845,7 +852,7 @@ TEST_F(ParallelUploadS3Test, CloseContinuationUsesCallerExecutorAndCanUpload) {
   ASSERT_OK(ControlUpload("crt-continuation/1", false));
   auto continued = closed.Then([this, data]() -> arrow::Status {
     EXPECT_TRUE(executor_->OwnsThisThread());
-    ARROW_ASSIGN_OR_RAISE(auto next, fs_->OpenParallelUploadOutputStream("crt-continuation-next", nullptr));
+    ARROW_ASSIGN_OR_RAISE(auto next, fs_->OpenOutputStream("crt-continuation-next", nullptr));
     ARROW_RETURN_NOT_OK(next->Write(data));
     return next->Close();
   });
@@ -857,7 +864,7 @@ TEST_F(ParallelUploadS3Test, CloseContinuationUsesCallerExecutorAndCanUpload) {
 }
 
 TEST_F(ParallelUploadS3Test, FlushContinuationCanWriteAndCloseOnCallerExecutor) {
-  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenParallelUploadOutputStream("parallel-flush-continuation", nullptr));
+  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream("parallel-flush-continuation", nullptr));
   auto chunk = arrow::Buffer::FromString(std::string(10 * 1024 * 1024, 'a'));
   ASSERT_OK(stream->Write(chunk));
   std::promise<void> entered;
@@ -889,7 +896,7 @@ TEST_F(ParallelUploadS3Test, CrtPartFailureCleansMultipartUpload) {
     GTEST_SKIP() << "Requires fixture-controlled requests";
   auto data = arrow::Buffer::FromString(std::string(10 * 1024 * 1024, 'a'));
   std::weak_ptr<arrow::Buffer> retained = data;
-  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenParallelUploadOutputStream("held/failed-wait", nullptr));
+  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream("held/failed-wait", nullptr));
   auto release = folly::makeGuard([&] {
     for (int part = 1; part <= 3; ++part) (void)ControlUpload("failed-wait/" + std::to_string(part), true);
   });
@@ -916,7 +923,7 @@ TEST_F(ParallelUploadS3Test, CrtCancellationBeforeCloseDoesNotPublish) {
   arrow::StopSource stop;
   ASSERT_OK_AND_ASSIGN(auto fs, S3FileSystem::Make(options_, arrow::io::IOContext(executor_.get(), stop.token())));
   const auto data = arrow::Buffer::FromString(std::string(10 * 1024 * 1024, 'a'));
-  ASSERT_OK_AND_ASSIGN(auto stream, fs->OpenParallelUploadOutputStream(prefix_ + "/crt-cancel", nullptr));
+  ASSERT_OK_AND_ASSIGN(auto stream, fs->OpenOutputStream(prefix_ + "/crt-cancel", nullptr));
   ASSERT_OK(stream->Write(data));
   stop.RequestStop();
   EXPECT_TRUE(stream->CloseAsync().status().IsCancelled());
@@ -930,7 +937,7 @@ TEST_F(ParallelUploadS3Test, CrtCancellationDuringCloseCleansMultipartUpload) {
   arrow::StopSource stop;
   ASSERT_OK_AND_ASSIGN(auto s3, S3FileSystem::Make(options_, arrow::io::IOContext(executor_.get(), stop.token())));
   const auto data = arrow::Buffer::FromString(std::string(10 * 1024 * 1024, 'a'));
-  ASSERT_OK_AND_ASSIGN(auto stream, s3->OpenParallelUploadOutputStream(prefix_ + "/held/crt-canceled", nullptr));
+  ASSERT_OK_AND_ASSIGN(auto stream, s3->OpenOutputStream(prefix_ + "/held/crt-canceled", nullptr));
   auto release = folly::makeGuard([&] {
     stop.RequestStop();
     for (int part = 1; part <= 3; ++part) (void)ControlUpload("crt-canceled/" + std::to_string(part), true);
@@ -953,7 +960,7 @@ TEST_F(ParallelUploadS3Test, MultipartPreservesObjectMetadata) {
   const auto data = arrow::Buffer::FromString(std::string(10 * 1024 * 1024, 'a') + "tail");
   auto metadata = arrow::key_value_metadata({"Content-Type", "test"}, {"application/test", "parallel-upload"});
   const std::string path = "parallel-metadata #?+% 中文";
-  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenParallelUploadOutputStream(path, metadata));
+  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream(path, metadata));
   ASSERT_OK(stream->Write(data));
   ASSERT_OK(stream->Close());
   ASSERT_OK_AND_ASSIGN(auto uploaded, Await(Read(path, 0, data->size())));
@@ -966,7 +973,7 @@ TEST_F(ParallelUploadS3Test, MultipartPreservesObjectMetadata) {
 }
 
 TEST_F(ParallelUploadS3Test, StoppedCompletionExecutorReportsFailure) {
-  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenParallelUploadOutputStream("stopped-completion", nullptr));
+  ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream("stopped-completion", nullptr));
   ASSERT_OK(stream->Write(arrow::Buffer::FromString("payload")));
   ASSERT_OK(executor_->Shutdown());
   executor_stopped_ = true;
