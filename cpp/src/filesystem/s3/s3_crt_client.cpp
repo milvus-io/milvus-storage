@@ -29,7 +29,6 @@
 #include <arrow/util/logging.h>
 #include <arrow/util/thread_pool.h>
 #include <aws/io/io.h>
-#include <aws/io/retry_strategy.h>
 #include <aws/s3/s3_client.h>
 
 #include <aws/core/Aws.h>
@@ -62,42 +61,6 @@ thread_local unsigned crt_callback_depth = 0;
 const arrow::Result<std::shared_ptr<arrow::internal::ThreadPool>>& CleanupExecutor() {
   static const auto executor = arrow::internal::ThreadPool::MakeEternal(1);
   return executor;
-}
-
-// A failed mutating request cannot safely be replayed: a lost response can mean
-// the write succeeded. Admit the first attempt, and deny automatic retries. The
-// CRT stock no-retry strategy rejects even initial token acquisition in 0.12.6.
-aws_retry_strategy* SingleAttempt() {
-  static aws_retry_strategy_vtable policy{
-      [](aws_retry_strategy* s) { aws_mem_release(s->allocator, s); },
-      [](aws_retry_strategy* s, const aws_byte_cursor*, aws_retry_strategy_on_retry_token_acquired_fn* acquired,
-         void* user, uint64_t) -> int {
-        auto* t = static_cast<aws_retry_token*>(aws_mem_calloc(s->allocator, 1, sizeof(aws_retry_token)));
-        if (!t)
-          return aws_raise_error(AWS_ERROR_OOM);
-        t->allocator = s->allocator;
-        t->retry_strategy = s;
-        aws_atomic_init_int(&t->ref_count, 1);
-        aws_retry_strategy_acquire(s);
-        acquired(s, AWS_ERROR_SUCCESS, t, user);
-        return AWS_OP_SUCCESS;
-      },
-      [](aws_retry_token*, aws_retry_error_type, aws_retry_strategy_on_retry_ready_fn*, void*) -> int {
-        return aws_raise_error(AWS_IO_RETRY_PERMISSION_DENIED);
-      },
-      [](aws_retry_token*) -> int { return AWS_OP_SUCCESS; },
-      [](aws_retry_token* t) {
-        auto* s = t->retry_strategy;
-        aws_mem_release(t->allocator, t);
-        aws_retry_strategy_release(s);
-      }};
-  auto* s = static_cast<aws_retry_strategy*>(aws_mem_calloc(aws_default_allocator(), 1, sizeof(aws_retry_strategy)));
-  if (s) {
-    s->allocator = aws_default_allocator();
-    s->vtable = &policy;
-    aws_atomic_init_int(&s->ref_count, 1);
-  }
-  return s;
 }
 
 inline arrow::Status ErrorS3Finalized() { return arrow::Status::Invalid("S3 subsystem is finalized"); }
@@ -452,13 +415,6 @@ arrow::Result<std::shared_ptr<S3CrtClientHolder>> ClientBuilder<Aws::S3Crt::S3Cr
           client_config_.retryStrategy = fs::internal::MakeWrappedRetryStrategy(options_.retry_strategy);
         } else {
           client_config_.retryStrategy = std::make_shared<fs::internal::ConnectRetryStrategy>();
-        }
-
-        // One client serves SDK GET and native metadata/mutations. CRT retry
-        // policy is client-wide; avoid replaying a write whose response was lost.
-        // The stock NO_RETRY policy also rejects initial acquisition in 0.12.6.
-        if (!options_.retry_strategy && options_.proxy_options.host.empty()) {
-          client_config_.crtConfigFactories.retryStrategyCreateFn = [](const auto&) { return SingleAttempt(); };
         }
 
         const bool use_virtual_addressing = options_.endpoint_override.empty() || options_.force_virtual_addressing;

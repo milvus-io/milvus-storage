@@ -22,8 +22,9 @@ from xml.sax.saxutils import escape
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     objects = {"root/hello #?+% 中文": b"abcdef", "root/slow": b"abcdef",
-               "root/slow-list/file": b"data", **{"root/pages/" + str(i): b"data" for i in range(5)}}
+               "root/slow-list/file": b"data", "root/retry-head": b"abcdef", "root/retry-get": b"abcdef", **{"root/pages/" + str(i): b"data" for i in range(5)}}
 
+    attempts = {}
     metadata = {}
     uploads = {}
 
@@ -82,7 +83,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             print(self.command, self.path, self.headers.get("Range"), flush=True)
         if not self.path.startswith("/") and "Range" not in self.headers:
             return self.reply(400, b"<Error><Code>InvalidRequestTarget</Code></Error>")
-        if self.command in ("POST", "PUT") and "Content-Length" not in self.headers:
+        if (self.command in ("POST", "PUT") and "Content-Length" not in self.headers
+                and self.headers.get("Transfer-Encoding", "").lower() != "chunked"):
             return self.reply(411)
         uri = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(uri.path).lstrip("/")
@@ -104,10 +106,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.headers.get("x-amz-security-token") != f"token-{generation}"):
                 return self.reply(403)
             return self.reply(200, length=6)
+        if (key, self.command) in (("root/retry-head", "HEAD"), ("root/retry-get", "GET")):
+            attempt = self.attempts.get((key, self.command), 0)
+            self.attempts[key, self.command] = attempt + 1
+            if attempt == 0:
+                return self.reply(503, b"<Error><Code>SlowDown</Code></Error>")
         if key == "root/denied":
             return self.reply(403, b"<Error><Code>AccessDenied</Code></Error>")
         if self.command in ("PUT", "POST", "DELETE"):
-            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+                chunks = []
+                while True:
+                    size = int(self.rfile.readline().split(b";", 1)[0].strip(), 16)
+                    if not size:
+                        while self.rfile.readline().strip():
+                            pass
+                        break
+                    chunks.append(self.rfile.read(size))
+                    assert self.rfile.read(2) == b"\r\n"
+                body = b"".join(chunks)
+            else:
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            if "aws-chunked" in self.headers.get("Content-Encoding", ""):
+                import io
+                encoded = io.BytesIO(body)
+                chunks = []
+                while True:
+                    size = int(encoded.readline().split(b";", 1)[0].strip(), 16)
+                    if not size:
+                        break
+                    chunks.append(encoded.read(size))
+                    assert encoded.read(2) == b"\r\n"
+                body = b"".join(chunks)
             if key.startswith("root/service-error/"):
                 code = key.rsplit("/", 1)[1]
                 http_status = {"AccessDenied": 400, "SlowDown": 400, "InternalError": 500, "RequestTimeout": 400,
@@ -172,6 +202,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply(200, headers=self.metadata.get(key), length=len(self.objects[key]))
         if query.get("list-type") == ["2"]:
             prefix = query.get("prefix", [""])[0]
+            if prefix.startswith("root/service-error/"):
+                code = prefix.rstrip("/").rsplit("/", 1)[1]
+                status = {"AccessDenied": 403, "PreconditionFailed": 412, "ConditionalRequestConflict": 409}[code]
+                return self.reply(status, ("<Error><Code>" + code + "</Code>"
+                                           "<Message>fixture service detail</Message></Error>").encode())
             if prefix == "root/truncated-list/":
                 return self.reply(404, b"<Error>", length=100)
             if prefix == "root/invalid-xml/":
