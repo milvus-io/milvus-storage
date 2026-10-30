@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
@@ -1871,7 +1872,6 @@ TEST_F(S3ProviderTest, AwsIamCredentialsPreferEnvironmentThenWebIdentityThenInst
   ArrowFileSystemConfig config;
   config.cloud_provider = kCloudProviderAWS;
   config.use_iam = true;
-  config.credential_endpoint = "http://broker/v1/credentials/assume-role";
 
   S3FileSystemProducer producer(config);
   ASSERT_AND_ASSIGN(auto options, producer.CreateS3Options());
@@ -2036,9 +2036,13 @@ TEST(AwsBrokerLiveTest, ReadsExistingObjectWithBrokerCredentials) {
   }
   ASSERT_STATUS_OK(input->Close());
 
+  ASSERT_AND_ASSIGN(const auto config, FilesystemCache::resolve_config(shared_properties, lookup));
+  // Broker IAM has no caller-selected target identity or external ID to invalidate.
+  if (config.use_iam) {
+    return;
+  }
   // A fresh provider with the wrong identity must return the real Broker cause,
   // even though the successful filesystem has already cached valid credentials.
-  ASSERT_AND_ASSIGN(const auto config, FilesystemCache::resolve_config(shared_properties, lookup));
   AwsCredentialBrokerProvider denied({config.credential_endpoint, config.region, config.role_arn,
                                       config.external_id + "-invalid", config.load_frequency,
                                       config.request_timeout_ms});
@@ -2264,33 +2268,55 @@ TEST_F(S3ProviderTest, AwsBrokerRetriesAfterInitialFailure) {
 }
 
 TEST_F(S3ProviderTest, AwsBrokerDispatcherSelectsBrokerInsteadOfDirectSts) {
-  for (const auto* cloud : {kCloudProviderAWS, kCloudProviderAliyun, kCloudProviderTencent, kCloudProviderHuawei,
-                            kCloudProviderVolcengine}) {
-    SCOPED_TRACE(cloud);
-    ArrowFileSystemConfig config;
-    config.cloud_provider = cloud;
-    config.region = "us-west-2";
-    config.role_arn = "arn:aws:iam::123456789012:role/reader";
-    config.external_id = "external-id";
-    EXPECT_FALSE(config.IsAwsCredentialBrokerEnabled());
-    config.credential_endpoint = "http://broker/v1/credentials/assume-role";
-    const auto request_count = mock_client_->GetRecordedRequests().size();
-    mock_client_->EnqueueResponse(
-        config.credential_endpoint, Aws::Http::HttpResponseCode::OK,
-        AwsBrokerResponse("broker-key", Aws::Utils::DateTime::Now() + std::chrono::seconds(900)));
-    ASSERT_AND_ASSIGN(auto options, S3FileSystemProducer(config).CreateS3Options());
-    ASSERT_NE(std::dynamic_pointer_cast<AwsCredentialBrokerProvider>(options.credentials_provider), nullptr);
-    EXPECT_EQ(options.credentials_provider->GetAWSCredentials().GetAWSAccessKeyId(), "broker-key");
-    EXPECT_EQ(options.credentials_provider->GetAWSCredentials().GetSessionToken(), "broker-session");
-    const auto requests = mock_client_->GetRecordedRequests();
-    ASSERT_EQ(requests.size(), request_count + 1);
-    EXPECT_EQ(requests.back()->GetURIString(), config.credential_endpoint.c_str());
-    EXPECT_EQ(nlohmann::json::parse(ReadRequestBody(requests.back())),
-              nlohmann::json({{"csp", "aws"},
-                              {"region", config.region},
-                              {"roleArn", config.role_arn},
-                              {"externalId", config.external_id},
-                              {"durationSeconds", config.load_frequency}}));
+  const std::array<std::pair<const char*, const char*>, 5> clouds = {{{kCloudProviderAWS, "aws"},
+                                                                      {kCloudProviderAliyun, "ali"},
+                                                                      {kCloudProviderTencent, "tc"},
+                                                                      {kCloudProviderHuawei, nullptr},
+                                                                      {kCloudProviderVolcengine, nullptr}}};
+  for (const auto& [cloud, iam_csp] : clouds) {
+    for (const bool use_iam : {false, true}) {
+      if (use_iam && iam_csp == nullptr) {
+        continue;
+      }
+      SCOPED_TRACE(cloud);
+      SCOPED_TRACE(use_iam);
+      ArrowFileSystemConfig config;
+      config.cloud_provider = cloud;
+      config.region = "us-west-2";
+      config.use_iam = use_iam;
+      config.role_arn = "arn:aws:iam::123456789012:role/reader";
+      config.external_id = "external-id";
+      EXPECT_FALSE(config.IsAwsCredentialBrokerEnabled());
+      config.credential_endpoint = "http://broker/v1/credentials/assume-role";
+      ASSERT_TRUE(config.IsAwsCredentialBrokerEnabled());
+      const auto request_count = mock_client_->GetRecordedRequests().size();
+      if (use_iam) {
+        mock_client_->EnqueueResponse(config.credential_endpoint, Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE,
+                                      R"({"msg":"temporarily unavailable"})");
+      }
+      mock_client_->EnqueueResponse(
+          config.credential_endpoint, Aws::Http::HttpResponseCode::OK,
+          AwsBrokerResponse("broker-key", Aws::Utils::DateTime::Now() + std::chrono::seconds(900)));
+      ASSERT_AND_ASSIGN(auto options, S3FileSystemProducer(config).CreateS3Options());
+      ASSERT_NE(std::dynamic_pointer_cast<AwsCredentialBrokerProvider>(options.credentials_provider), nullptr);
+      EXPECT_EQ(options.credentials_provider->GetAWSCredentials().GetAWSAccessKeyId(), "broker-key");
+      EXPECT_EQ(options.credentials_provider->GetAWSCredentials().GetSessionToken(), "broker-session");
+      const auto requests = mock_client_->GetRecordedRequests();
+      ASSERT_EQ(requests.size(), request_count + (use_iam ? 2 : 1));
+      nlohmann::json expected = {{"csp", use_iam ? iam_csp : "aws"}, {"region", "us-west-2"}, {"durationSeconds", 900}};
+      if (use_iam) {
+        expected["credentialType"] = "iam";
+      } else {
+        expected["roleArn"] = "arn:aws:iam::123456789012:role/reader";
+        expected["externalId"] = "external-id";
+      }
+      for (size_t i = request_count; i < requests.size(); ++i) {
+        EXPECT_EQ(requests[i]->GetURIString(), config.credential_endpoint.c_str());
+        EXPECT_EQ(requests[i]->GetMethod(), Aws::Http::HttpMethod::HTTP_POST);
+        EXPECT_FALSE(requests[i]->HasHeader("Authorization"));
+        EXPECT_EQ(nlohmann::json::parse(ReadRequestBody(requests[i])), expected);
+      }
+    }
   }
   for (const auto* cloud : {kCloudProviderAzure, kCloudProviderGCP}) {
     SCOPED_TRACE(cloud);
@@ -2313,6 +2339,21 @@ TEST_F(S3ProviderTest, AwsBrokerOptionsCompareIdentityWithoutFetchingCredentials
   config.credential_endpoint = "http://other-broker/v1/credentials/assume-role";
   ASSERT_AND_ASSIGN(auto other, S3FileSystemProducer(config).CreateS3Options());
   EXPECT_FALSE(first.Equals(other));
+  config.use_iam = true;
+  ASSERT_AND_ASSIGN(auto iam, S3FileSystemProducer(config).CreateS3Options());
+  ASSERT_NE(std::dynamic_pointer_cast<AwsCredentialBrokerProvider>(iam.credentials_provider), nullptr);
+  EXPECT_FALSE(other.Equals(iam));
+  config.role_arn = "unused-role";
+  config.external_id = "unused-external-id";
+  config.session_name = "unused-session";
+  ASSERT_AND_ASSIGN(auto same_iam, S3FileSystemProducer(config).CreateS3Options());
+  EXPECT_TRUE(iam.Equals(same_iam));
+  config.cloud_provider = kCloudProviderAliyun;
+  ASSERT_AND_ASSIGN(auto aliyun_iam, S3FileSystemProducer(config).CreateS3Options());
+  EXPECT_FALSE(iam.Equals(aliyun_iam));
+  config.cloud_provider = kCloudProviderTencent;
+  ASSERT_AND_ASSIGN(auto tencent_iam, S3FileSystemProducer(config).CreateS3Options());
+  EXPECT_FALSE(aliyun_iam.Equals(tencent_iam));
   EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
 }
 
@@ -2371,7 +2412,6 @@ TEST_F(S3ProviderTest, AwsAssumeRoleForwardsFilesystemConfigurationToSts) {
   config.external_id = "tenant-external-id";
   config.load_frequency = 1800;
   config.use_iam = true;
-  config.credential_endpoint = "http://broker/v1/credentials/assume-role";
 
   S3FileSystemProducer producer(config);
   ASSERT_AND_ASSIGN(auto options, producer.CreateS3Options());
