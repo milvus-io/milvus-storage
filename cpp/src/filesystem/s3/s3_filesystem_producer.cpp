@@ -43,6 +43,7 @@
 
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"
+#include "milvus-storage/filesystem/credential_broker.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/provider/AwsCredentialBrokerProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunSTSClient.h"
@@ -200,18 +201,26 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
 
 arrow::Status S3FileSystemProducer::ConfigureCredentials(S3Options& options) {
   // Credential configuration priority:
-  // 1. Shared AWS STS broker for S3/S3-compatible providers, when configured and use_iam=false
+  // 1. Shared credential broker for S3/S3-compatible providers, when configured
   // 2. AssumeRole (role_arn) — AWS (AssumeRole) or Aliyun (AssumeRoleWithOIDC)
   // 3. IAM — use provider-specific STS credential providers
   // 4. Explicit access key / secret key
   if (config_.IsAwsCredentialBrokerEnabled()) {
+    // Preserve the existing AssumeRole contract; IAM uses the broker's cloud aliases.
+    const char* const csp =
+        config_.use_iam && config_.cloud_provider == kCloudProviderAliyun    ? credential_broker::kCspAliyun
+        : config_.use_iam && config_.cloud_provider == kCloudProviderTencent ? credential_broker::kCspTencent
+                                                                             : credential_broker::kCspAws;
     options.credentials_provider = std::make_shared<AwsCredentialBrokerProvider>(AwsCredentialBrokerConfig{
         .endpoint = config_.credential_endpoint,
         .region = config_.region,
-        .role_arn = config_.role_arn,
-        .external_id = config_.external_id,
+        // Discard inactive target fields so provider equality reflects the IAM request identity.
+        .role_arn = config_.use_iam ? "" : config_.role_arn,
+        .external_id = config_.use_iam ? "" : config_.external_id,
         .duration_seconds = config_.load_frequency,
         .request_timeout_ms = config_.request_timeout_ms,
+        .use_iam = config_.use_iam,
+        .csp = csp,
     });
     options.credentials_kind = S3CredentialsKind::Role;
   } else if (!config_.role_arn.empty()) {

@@ -371,9 +371,9 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "Whether to authenticate with this process's own cloud identity (AWS instance role, Azure "
                       "workload/managed identity or service principal, GCP VM service account). For GCP, "
                       "fs.gcp_target_service_account selects impersonation with or without use_iam, and use_iam=true "
-                      "disables the credential Broker selected by fs.credential_endpoint. For Talon credential "
-                      "Broker requests, true selects the Broker's own IAM identity; false uses the supplied target "
-                      "identity.",
+                      "disables the credential Broker selected by fs.credential_endpoint. For AWS, Aliyun, Tencent "
+                      "and Talon credential Broker requests, "
+                      "true selects the Broker's own IAM identity; false uses the supplied target identity.",
                       false,
                       ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_FS_USE_VIRTUAL_HOST,
