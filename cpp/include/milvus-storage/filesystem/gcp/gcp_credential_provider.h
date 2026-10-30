@@ -48,11 +48,29 @@ class GcpCredentialProvider {
   // Re-signs conditional writes using GOOG4-HMAC-SHA256 (HMAC mode only).
   // No-op for IAM/Impersonation modes.
   virtual arrow::Status MaybeSignConditionalWrite(const std::shared_ptr<Aws::Http::HttpRequest>& request) = 0;
+
+  // Whether AuthorizationHeader() can return an OAuth2 Bearer token. HMAC
+  // providers sign requests instead and never return a header.
+  [[nodiscard]] virtual bool IssuesBearerToken() const = 0;
+
+  // A stable description of the identity this provider authenticates as, for
+  // example "iam", "impersonate:<sa>", "broker:<endpoint>|<sa>" or
+  // "hmac:<access_key_id>". GcpCredentialRegistry refuses to map one
+  // (endpoint, bucket) to two providers with different identities.
+  [[nodiscard]] virtual std::string Identity() const = 0;
 };
 
-// Build the appropriate provider from a filesystem config. Returns
-// arrow::Status::Invalid when the config doesn't match any supported credential
-// mode (no use_iam, and incomplete/missing HMAC AK/SK).
+// Build the appropriate provider from a filesystem config, in this order:
+//   1. credential_endpoint without use_iam: the credential Broker mints tokens
+//      for gcp_target_service_account.
+//   2. gcp_target_service_account: this process impersonates the target.
+//   3. use_iam: this process's own identity (VM SA or ADC).
+//   4. HMAC access_key_id/access_key_value.
+// Returns arrow::Status::Invalid when the config matches none of them.
 arrow::Result<std::shared_ptr<GcpCredentialProvider>> BuildGcpProviderFromConfig(const ArrowFileSystemConfig& config);
+
+// With HMAC keys and a target or Broker endpoint in one config, the native
+// filesystem keeps HMAC when Talon is enabled (the Broker fields describe
+// Talon's identity) and rejects the config as ambiguous otherwise.
 
 }  // namespace milvus_storage
