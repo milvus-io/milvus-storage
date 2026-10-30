@@ -38,6 +38,7 @@
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/upload_parallel.h"
 #include "milvus-storage/filesystem/util_internal.h"
 #include "talon/talon_bridge.h"
 
@@ -483,6 +484,7 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
 class TalonFileSystem final : public arrow::fs::FileSystem,
                               public UploadConditional,
                               public UploadSizable,
+                              public UploadParallel,
                               public Observable {
   public:
   TalonFileSystem(ArrowFileSystemConfig config, ArrowFileSystemPtr origin_fs, std::shared_ptr<TalonClient> client)
@@ -610,17 +612,15 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
     return sizable->OpenOutputStreamWithUploadSize(path, metadata, part_size);
   }
 
-  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithFixedSize(
-      const std::string& path,
-      const std::shared_ptr<const arrow::KeyValueMetadata>& metadata,
-      int64_t total_size) override {
-    const auto sizable = std::dynamic_pointer_cast<UploadSizable>(origin_fs_);
-    if (sizable == nullptr) {
-      return arrow::Status::NotImplemented("Talon cannot forward fixed-size output stream for path '", path,
-                                           "' with total size ", total_size, ": origin filesystem type '",
-                                           origin_fs_->type_name(), "' does not implement UploadSizable");
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenParallelUploadOutputStream(
+      const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override {
+    const auto parallel = std::dynamic_pointer_cast<UploadParallel>(origin_fs_);
+    if (parallel == nullptr) {
+      return arrow::Status::NotImplemented("Talon cannot forward parallel upload output stream for path '", path,
+                                           "': origin filesystem type '", origin_fs_->type_name(),
+                                           "' does not implement UploadParallel");
     }
-    return sizable->OpenOutputStreamWithFixedSize(path, metadata, total_size);
+    return parallel->OpenParallelUploadOutputStream(path, metadata);
   }
 
   arrow::Result<std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>> GetMetricsSources()

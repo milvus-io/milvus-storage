@@ -22,7 +22,11 @@
 
 namespace milvus_storage {
 
-/// \brief Interface for output streams with a specified part size or fixed total size
+/// \brief Interface for filesystems that support opening output streams with a specified upload size
+///
+/// This interface allows filesystems to optimize multipart uploads by specifying
+/// the part size upfront, which is particularly useful for S3 and other cloud storage
+/// systems that support multipart uploads.
 class UploadSizable {
   public:
   virtual ~UploadSizable() = default;
@@ -34,14 +38,6 @@ class UploadSizable {
   /// \return Output stream for writing
   [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t upload_size) = 0;
-
-  /// \brief Open an output stream whose written length must match total_size
-  /// \param path The file path
-  /// \param metadata Optional metadata
-  /// \param total_size The exact number of bytes to write
-  /// \return Output stream for writing, or NotImplemented if unsupported
-  [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithFixedSize(
-      const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t total_size) = 0;
 };
 
 }  // namespace milvus_storage

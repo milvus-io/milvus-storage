@@ -63,12 +63,6 @@ TEST_F(LocalFsTest, UploadSizableNotImplemented) {
 
   auto result = sizable->OpenOutputStreamWithUploadSize("local-not-implemented.txt", nullptr, 5);
   ASSERT_TRUE(result.status().IsNotImplemented());
-
-  const auto path = base_path_ + "/fixed-not-implemented.txt";
-  result = sizable->OpenOutputStreamWithFixedSize(path, nullptr, 5);
-  ASSERT_TRUE(result.status().IsNotImplemented());
-  ASSERT_AND_ASSIGN(auto info, fs_->GetFileInfo(path));
-  EXPECT_EQ(info.type(), arrow::fs::FileType::NotFound);
 }
 
 TEST_F(LocalFsTest, UploadConditional) {

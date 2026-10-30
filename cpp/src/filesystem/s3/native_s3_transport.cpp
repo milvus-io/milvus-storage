@@ -4,6 +4,7 @@
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 #include "filesystem/s3/native_s3_transport.h"
 #ifdef WITH_CRT
+#include <mutex>
 #include <optional>
 #include <utility>
 #include <arrow/filesystem/path_util.h>
@@ -18,15 +19,22 @@
 
 namespace milvus_storage {
 struct NativeS3Transport::State {
-  bool is_gcp = false;
-  std::string region;
+  std::mutex mutex;
+  size_t inflight = 0;
+  size_t limit = 0;
   std::shared_ptr<S3ClientHolder> holder;
+
+  void Retire(bool network_pending) {
+    std::lock_guard lock(mutex);
+    if (network_pending)
+      --inflight;
+  }
 };
 
 namespace {
 struct Request {
-  std::shared_ptr<NativeS3Transport::Permit> permit;
   S3CrtClientLease client_lease;
+  std::shared_ptr<NativeS3Transport::State> state;
   size_t limit;
   std::shared_ptr<Aws::Http::HttpRequest> http;
   std::shared_ptr<Aws::Crt::Http::HttpRequest> message;
@@ -36,10 +44,8 @@ struct Request {
   arrow::Status status;
   size_t received = 0;
   std::atomic<int> http_status{0};
-  std::shared_ptr<FilesystemMetrics> write_metrics;
-  int64_t write_bytes = 0;
-  bool write_finished = false;
-  std::function<arrow::Status(const arrow::Result<Aws::Client::XmlOutcome>&)> before_release;
+  bool charged = false;
+  bool network_pending = true;
   arrow::Future<Aws::Client::XmlOutcome> future = arrow::Future<Aws::Client::XmlOutcome>::Make();
 
   ~Request() {
@@ -47,6 +53,8 @@ struct Request {
     response.reset();
     http.reset();
     aws_uri_clean_up(&endpoint);
+    if (charged)
+      state->Retire(network_pending);
   }
   int AddHeaders(const aws_http_headers* headers) {
     for (size_t i = 0; i < aws_http_headers_count(headers); ++i) {
@@ -191,40 +199,21 @@ struct Request {
         return arrow::Status::IOError(e.what());
       }
     }();
-    if (owned->write_metrics) {
-      if (result.ok() && result->IsSuccess())
-        owned->write_metrics->IncrementWriteBytes(owned->write_bytes);
-      else
-        owned->write_metrics->IncrementFailedCount();
-      owned->write_finished = true;
+    // Release admission before continuations submit another page or request.
+    {
+      std::lock_guard lock(owned->state->mutex);
+      --owned->state->inflight;
+      owned->network_pending = false;
     }
-    // CRT has released the payload. Publish failures before waking producers;
-    // close/abort continuations enqueue capacity requests without blocking.
-    owned->message.reset();
-    owned->response.reset();
-    owned->http.reset();
-    owned->streambuf.reset();
-    owned->data.reset();
-    // Record upload failures before admitting another write. This hook must not
-    // wait or notify users; stream completion notifications use the CPU executor.
-    if (owned->before_release) {
-      auto status = owned->before_release(result);
-      if (!status.ok()) {
-        result = std::move(status);
-      }
-    }
-    owned->permit.reset();
-    // Internal continuations must progress even when user callbacks occupy the
-    // CPU pool. Keep the client lease alive until these continuations return.
+    // As with native range reads, let callers select their continuation executor.
+    // The request lease remains alive until all inline continuations return.
     owned->future.MarkFinished(std::move(result));
   }
 };
 }  // namespace
 
-arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(const S3Options& options,
-                                                                          std::shared_ptr<S3ClientHolder> holder,
-                                                                          std::shared_ptr<S3CrtClientHolder> crt_holder,
-                                                                          std::shared_ptr<S3RequestLimiter> limiter) {
+arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(
+    const S3Options& options, std::shared_ptr<S3ClientHolder> holder, std::shared_ptr<S3CrtClientHolder> crt_holder) {
   ARROW_RETURN_NOT_OK(CheckS3Initialized());
   if (options.retry_strategy || !options.proxy_options.host.empty()) {
     return arrow::Status::NotImplemented("Native S3 requires no custom retry strategy and no proxy");
@@ -239,35 +228,31 @@ arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(const 
     return arrow::Status::Invalid("SDK CRT client has no underlying native client");
   auto state = std::make_shared<State>();
   state->holder = std::move(holder);
-  state->is_gcp = options.cloud_provider == "gcp";
-  state->region = options.region;
-  return std::shared_ptr<NativeS3Transport>(
-      new NativeS3Transport(std::move(state), std::move(crt_holder), std::move(limiter)));
+  state->limit = options.max_connections;
+  return std::shared_ptr<NativeS3Transport>(new NativeS3Transport(std::move(state), std::move(crt_holder)));
 }
 
-arrow::Future<std::shared_ptr<NativeS3Transport::Permit>> NativeS3Transport::Acquire(const arrow::io::IOContext& io) {
-  return limiter_->Acquire(io);
-}
-
-arrow::Future<Aws::Client::XmlOutcome> NativeS3Transport::Send(
-    const Aws::AmazonWebServiceRequest& model,
-    const std::string& key,
-    Aws::Http::HttpMethod method,
-    const std::string& query,
-    const arrow::io::IOContext& io,
-    size_t limit,
-    std::shared_ptr<arrow::Buffer> data,
-    std::shared_ptr<Permit> permit,
-    std::function<arrow::Status(const arrow::Result<Aws::Client::XmlOutcome>&)> before_release) {
+arrow::Future<Aws::Client::XmlOutcome> NativeS3Transport::Send(const Aws::AmazonWebServiceRequest& model,
+                                                               const std::string& key,
+                                                               Aws::Http::HttpMethod method,
+                                                               const std::string& query,
+                                                               const arrow::io::IOContext& io,
+                                                               size_t limit) {
   auto send = [&]() -> arrow::Result<arrow::Future<Aws::Client::XmlOutcome>> {
     if (method != Aws::Http::HttpMethod::HTTP_HEAD && method != Aws::Http::HttpMethod::HTTP_GET)
       return arrow::Status::NotImplemented("Native S3 transport only supports metadata reads");
     ARROW_RETURN_NOT_OK(io.stop_token().Poll());
     auto r = std::make_unique<Request>();
+    r->state = state_;
     r->limit = limit;
-    r->permit = std::move(permit);
-    r->before_release = std::move(before_release);
     ARROW_ASSIGN_OR_RAISE(r->client_lease, holder_->Acquire());
+    {
+      std::lock_guard lock(state_->mutex);
+      if (state_->inflight >= state_->limit)
+        return arrow::Status::CapacityError("Native S3 request limit reached");
+      ++state_->inflight;
+      r->charged = true;
+    }
     ARROW_ASSIGN_OR_RAISE(auto lease, state_->holder->Lock());
     auto endpoint = lease->accessEndpointProvider()->ResolveEndpoint(model.GetEndpointContextParams());
     if (!endpoint.IsSuccess())
@@ -298,48 +283,26 @@ arrow::Future<Aws::Client::XmlOutcome> NativeS3Transport::Send(
     if (aws_uri_init_parse(&r->endpoint, aws_default_allocator(), &cursor)) {
       return arrow::Status::Invalid("Cannot parse native S3 endpoint");
     }
-    const std::string operation = model.GetServiceRequestName();
-    if (operation == "PutObject" || operation == "UploadPart") {
-      r->write_metrics = lease->GetMetrics();
-      r->write_bytes = r->data ? r->data->size() : 0;
-      r->write_metrics->IncrementWriteCount();
-    } else if (operation == "CreateMultipartUpload") {
-      // Match the SDK counters: count attempts, including failed requests.
-      r->write_metrics = lease->GetMetrics();
-      r->write_metrics->IncrementMultiPartUploadCreated();
-    } else if (operation == "CompleteMultipartUpload") {
-      r->write_metrics = lease->GetMetrics();
-      r->write_metrics->IncrementMultiPartUploadFinished();
+    aws_s3_meta_request_options options{};
+    options.type = AWS_S3_META_REQUEST_TYPE_DEFAULT;
+    options.operation_name = aws_byte_cursor_from_c_str(model.GetServiceRequestName());
+    options.message = r->message->GetUnderlyingMessage();
+    // Inherit the SDK client signing configuration and credentials provider.
+    options.endpoint = &r->endpoint;
+    options.user_data = r.get();
+    options.headers_callback = Request::Headers;
+    options.body_callback = Request::Body;
+    options.telemetry_callback = Request::Telemetry;
+    options.finish_callback = Request::Finish;
+    options.shutdown_callback = Request::Shutdown;
+    auto future = r->future;
+    auto* pending = r.release();
+    auto* meta = aws_s3_client_make_meta_request(pending->client_lease->GetUnderlyingS3Client(), &options);
+    if (!meta) {
+      r.reset(pending);
+      return arrow::Status::IOError("CRT rejected S3 request: ", aws_error_str(aws_last_error()));
     }
-    auto admitted = r->permit ? arrow::Future<std::shared_ptr<Permit>>::MakeFinished(r->permit) : Acquire(io);
-    return admitted.Then([r = std::move(r), operation,
-                          io](const std::shared_ptr<Permit>& permit) mutable -> arrow::Future<Aws::Client::XmlOutcome> {
-      r->permit = permit;
-      ARROW_RETURN_NOT_OK(io.stop_token().Poll());
-      aws_s3_meta_request_options options{};
-      options.type = AWS_S3_META_REQUEST_TYPE_DEFAULT;
-      options.operation_name = aws_byte_cursor_from_c_str(operation.c_str());
-      options.message = r->message->GetUnderlyingMessage();
-      // Otherwise inherit the SDK client's signing config and credentials provider,
-      // including session tokens and refresh through its CRT delegate.
-      if (r->signing_credentials)
-        options.signing_config = &r->signing_config;
-      options.endpoint = &r->endpoint;
-      options.user_data = r.get();
-      options.headers_callback = Request::Headers;
-      options.body_callback = Request::Body;
-      options.telemetry_callback = Request::Telemetry;
-      options.finish_callback = Request::Finish;
-      options.shutdown_callback = Request::Shutdown;
-      auto future = r->future;
-      auto* pending = r.release();
-      auto* meta = aws_s3_client_make_meta_request(pending->client_lease->GetUnderlyingS3Client(), &options);
-      if (!meta) {
-        r.reset(pending);
-        return arrow::Status::IOError("CRT rejected S3 request: ", aws_error_str(aws_last_error()));
-      }
-      return future;
-    });
+    return future;
   };
   try {
     auto result = send();

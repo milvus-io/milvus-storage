@@ -243,7 +243,8 @@ jobs:
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)/build/Release:$(pwd)/build/Release/libs
           source ./scripts/azurite_env.sh && ./build/Release/test/milvus_test
 
-      - name: Run S3 HTTP fixture tests
+      - name: Run native S3 HTTP fixture tests
+        if: matrix.with_crt == 'True'
         run: |
           export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:$(pwd)/cpp/build/Release:$(pwd)/cpp/build/Release/libs"
           python3 cpp/scripts/test_native_s3.py

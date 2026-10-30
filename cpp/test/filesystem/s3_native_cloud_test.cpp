@@ -27,8 +27,8 @@ arrow::Result<T> WaitCloud(arrow::Future<T> future) {
 }
 }  // namespace
 
-// Each test uses a fresh prefix in an existing bucket. A stopped I/O executor
-// makes SDK executor fallback fail instead of disguising it as native coverage.
+// native_fs_ uses a stopped IO executor to expose SDK fallback in reads and metadata.
+// sdk_upload_fs_ wraps cleanup_ with the test prefix and uses its normal IO executor.
 class S3NativeCloudTest : public ::testing::Test {
   protected:
   void SetUp() override {
@@ -52,8 +52,8 @@ class S3NativeCloudTest : public ::testing::Test {
     ASSERT_OK_AND_ASSIGN(auto raw, S3FileSystem::Make(options_, arrow::io::IOContext(executor_.get())));
     prefix_ = "pr693-native-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + "-" +
               std::to_string(std::random_device{}());
-    fs_ = std::make_shared<FileSystemProxy>(config_.bucket_name + "/" + prefix_, raw);
-    writes_ = std::make_shared<FileSystemProxy>(prefix_, cleanup_);
+    native_fs_ = std::make_shared<FileSystemProxy>(config_.bucket_name + "/" + prefix_, raw);
+    sdk_upload_fs_ = std::make_shared<FileSystemProxy>(prefix_, cleanup_);
     std::cout << "Native cloud test prefix: " << prefix_ << std::endl;
   }
   void TearDown() override {
@@ -63,19 +63,19 @@ class S3NativeCloudTest : public ::testing::Test {
     }
   }
   arrow::Status Put(const std::string& path, const std::string& data) {
-    ARROW_ASSIGN_OR_RAISE(auto out, writes_->OpenOutputStream(path));
+    ARROW_ASSIGN_OR_RAISE(auto out, sdk_upload_fs_->OpenOutputStream(path));
     ARROW_RETURN_NOT_OK(out->Write(arrow::Buffer::FromString(data)));
     return WaitCloud(out->CloseAsync()).status();
   }
   arrow::Result<arrow::fs::FileInfo> Stat(const std::string& path) {
-    ARROW_ASSIGN_OR_RAISE(auto infos, WaitCloud(fs_->GetFileInfoAsync({path})));
+    ARROW_ASSIGN_OR_RAISE(auto infos, WaitCloud(native_fs_->GetFileInfoAsync({path})));
     return infos.at(0);
   }
   ArrowFileSystemConfig config_;
   S3Options options_;
   FileSystemPtr cleanup_;
-  FileSystemPtr fs_;
-  FileSystemPtr writes_;
+  FileSystemPtr native_fs_;
+  FileSystemPtr sdk_upload_fs_;
   std::shared_ptr<arrow::internal::ThreadPool> executor_;
   std::string prefix_;
 };
@@ -83,13 +83,13 @@ class S3NativeCloudTest : public ::testing::Test {
 TEST_F(S3NativeCloudTest, PutMetadataRangeReadAndOverwrite) {
   const std::string path = "nested/hello #?+% 中文";
   auto metadata = arrow::key_value_metadata({"Content-Type"}, {"text/plain"});
-  ASSERT_OK_AND_ASSIGN(auto out, writes_->OpenOutputStream(path, metadata));
+  ASSERT_OK_AND_ASSIGN(auto out, sdk_upload_fs_->OpenOutputStream(path, metadata));
   ASSERT_NE(std::dynamic_pointer_cast<AsyncOutputStream>(out), nullptr);
   ASSERT_OK(out->Write(arrow::Buffer::FromString("abcdef")));
   ASSERT_OK(WaitCloud(out->CloseAsync()));
   ASSERT_OK_AND_ASSIGN(auto info, Stat(path));
   EXPECT_EQ(info.size(), 6);
-  ASSERT_OK_AND_ASSIGN(auto file, WaitCloud(fs_->OpenInputFileAsync(path)));
+  ASSERT_OK_AND_ASSIGN(auto file, WaitCloud(native_fs_->OpenInputFileAsync(path)));
   ASSERT_NE(std::dynamic_pointer_cast<NonBlockingRandomAccessFile>(file), nullptr);
   ASSERT_OK_AND_ASSIGN(auto headers, WaitCloud(file->ReadMetadataAsync({})));
   ASSERT_OK_AND_ASSIGN(auto content_type, headers->Get("Content-Type"));
@@ -97,18 +97,18 @@ TEST_F(S3NativeCloudTest, PutMetadataRangeReadAndOverwrite) {
   ASSERT_OK_AND_ASSIGN(auto data, WaitCloud(file->ReadAsync({}, 2, 3)));
   EXPECT_EQ(data->ToString(), "cde");
   ASSERT_OK(file->Close());
-  ASSERT_OK_AND_ASSIGN(file, WaitCloud(fs_->OpenInputFileAsync(info)));
+  ASSERT_OK_AND_ASSIGN(file, WaitCloud(native_fs_->OpenInputFileAsync(info)));
   ASSERT_OK_AND_ASSIGN(data, WaitCloud(file->ReadAsync({}, 0, 6)));
   EXPECT_EQ(data->ToString(), "abcdef");
   ASSERT_OK(file->Close());
   for (const bool by_info : {false, true}) {
-    ASSERT_OK_AND_ASSIGN(auto stream,
-                         WaitCloud(by_info ? fs_->OpenInputStreamAsync(info) : fs_->OpenInputStreamAsync(path)));
+    ASSERT_OK_AND_ASSIGN(auto stream, WaitCloud(by_info ? native_fs_->OpenInputStreamAsync(info)
+                                                        : native_fs_->OpenInputStreamAsync(path)));
     ASSERT_OK_AND_ASSIGN(auto streamed, stream->Read(6));
     EXPECT_EQ(streamed->ToString(), "abcdef");
     ASSERT_OK(stream->Close());
   }
-  ASSERT_OK_AND_ASSIGN(auto batch, WaitCloud(fs_->GetFileInfoAsync({path, "nested", "missing"})));
+  ASSERT_OK_AND_ASSIGN(auto batch, WaitCloud(native_fs_->GetFileInfoAsync({path, "nested", "missing"})));
   ASSERT_EQ(batch.size(), 3);
   EXPECT_EQ(batch[0].type(), arrow::fs::FileType::File);
   EXPECT_EQ(batch[1].type(), arrow::fs::FileType::Directory);
@@ -129,9 +129,7 @@ TEST_F(S3NativeCloudTest, ListingAndContinuationPages) {
   auto io = arrow::io::IOContext(executor_.get());
   ASSERT_OK_AND_ASSIGN(auto sdk, ClientBuilder<S3Client>(options_).BuildClient(io));
   ASSERT_OK_AND_ASSIGN(auto crt, ClientBuilder<Aws::S3Crt::S3CrtClient>(options_).BuildClient(io));
-  ASSERT_OK_AND_ASSIGN(
-      auto transport,
-      NativeS3Transport::Make(options_, sdk, crt, std::make_shared<S3RequestLimiter>(options_.max_connections)));
+  ASSERT_OK_AND_ASSIGN(auto transport, NativeS3Transport::Make(options_, sdk, crt));
   ASSERT_OK_AND_ASSIGN(auto operations, MakeNativeS3Operations(io, transport));
   std::string token;
   std::set<std::string> keys;
@@ -156,7 +154,7 @@ TEST_F(S3NativeCloudTest, ListingAndContinuationPages) {
   arrow::fs::FileSelector selector;
   selector.base_dir = "list";
   selector.recursive = true;
-  auto generator = fs_->GetFileInfoGenerator(selector);
+  auto generator = native_fs_->GetFileInfoGenerator(selector);
   size_t count = 0;
   for (;;) {
     ASSERT_OK_AND_ASSIGN(auto page, WaitCloud(generator()));
@@ -169,7 +167,7 @@ TEST_F(S3NativeCloudTest, ListingAndContinuationPages) {
 
 TEST_F(S3NativeCloudTest, MultipartFlushCloseAndAbort) {
   const std::string part(5 * 1024 * 1024, 'a');
-  ASSERT_OK_AND_ASSIGN(auto out, writes_->OpenOutputStream("multipart"));
+  ASSERT_OK_AND_ASSIGN(auto out, sdk_upload_fs_->OpenOutputStream("multipart"));
   auto async = std::dynamic_pointer_cast<AsyncOutputStream>(out);
   ASSERT_NE(async, nullptr);
   ASSERT_OK(out->Write(arrow::Buffer::FromString(part)));
@@ -178,11 +176,11 @@ TEST_F(S3NativeCloudTest, MultipartFlushCloseAndAbort) {
   ASSERT_OK(WaitCloud(out->CloseAsync()));
   ASSERT_OK_AND_ASSIGN(auto info, Stat("multipart"));
   EXPECT_EQ(info.size(), part.size() + 4);
-  ASSERT_OK_AND_ASSIGN(auto file, fs_->OpenInputFile(info));
+  ASSERT_OK_AND_ASSIGN(auto file, native_fs_->OpenInputFile(info));
   ASSERT_OK_AND_ASSIGN(auto bytes, WaitCloud(file->ReadAsync({}, part.size() - 2, 6)));
   EXPECT_EQ(bytes->ToString(), "aatail");
   ASSERT_OK(file->Close());
-  ASSERT_OK_AND_ASSIGN(auto sized, writes_->OpenOutputStreamWithUploadSize("sized", nullptr, 6 * 1024 * 1024));
+  ASSERT_OK_AND_ASSIGN(auto sized, sdk_upload_fs_->OpenOutputStreamWithUploadSize("sized", nullptr, 6 * 1024 * 1024));
   ASSERT_NE(std::dynamic_pointer_cast<AsyncOutputStream>(sized), nullptr);
   ASSERT_OK(sized->Write(arrow::Buffer::FromString(part)));
   ASSERT_OK(WaitCloud(sized->CloseAsync()));
@@ -190,7 +188,7 @@ TEST_F(S3NativeCloudTest, MultipartFlushCloseAndAbort) {
   EXPECT_EQ(info.size(), part.size());
   for (const bool multipart : {false, true}) {
     auto path = multipart ? "abort-multipart" : "abort-buffer";
-    ASSERT_OK_AND_ASSIGN(out, writes_->OpenOutputStream(path));
+    ASSERT_OK_AND_ASSIGN(out, sdk_upload_fs_->OpenOutputStream(path));
     async = std::dynamic_pointer_cast<AsyncOutputStream>(out);
     ASSERT_NE(async, nullptr);
     ASSERT_OK(out->Write(arrow::Buffer::FromString(multipart ? part : "buffer")));
@@ -208,7 +206,7 @@ TEST_F(S3NativeCloudTest, ConditionalPutAndMultipartPreserveExistingObject) {
     GTEST_SKIP() << "Existing OBS conditional-output API is not implemented";
   for (const auto size : {7, 5 * 1024 * 1024}) {
     auto path = "conditional-" + std::to_string(size) + " #?+% 中文";
-    ASSERT_OK_AND_ASSIGN(auto out, writes_->OpenConditionalOutputStream(path, nullptr));
+    ASSERT_OK_AND_ASSIGN(auto out, sdk_upload_fs_->OpenConditionalOutputStream(path, nullptr));
     auto written = out->Write(arrow::Buffer::FromString(std::string(size, 'a')));
     if (config_.cloud_provider == kCloudProviderGCP && size > 7) {
       ASSERT_TRUE(written.IsNotImplemented()) << written;
@@ -221,7 +219,7 @@ TEST_F(S3NativeCloudTest, ConditionalPutAndMultipartPreserveExistingObject) {
     auto created = WaitCloud(out->CloseAsync());
     ASSERT_OK(created);
     for (const auto conflict_size : {7, 5 * 1024 * 1024}) {
-      ASSERT_OK_AND_ASSIGN(auto conflict, writes_->OpenConditionalOutputStream(path, nullptr));
+      ASSERT_OK_AND_ASSIGN(auto conflict, sdk_upload_fs_->OpenConditionalOutputStream(path, nullptr));
       auto rejected = conflict->Write(arrow::Buffer::FromString(std::string(conflict_size, 'b')));
       if (rejected.ok())
         rejected = WaitCloud(conflict->CloseAsync()).status();
@@ -229,7 +227,7 @@ TEST_F(S3NativeCloudTest, ConditionalPutAndMultipartPreserveExistingObject) {
       ASSERT_OK(conflict->Abort());
       ASSERT_OK_AND_ASSIGN(auto info, Stat(path));
       EXPECT_EQ(info.size(), size);
-      ASSERT_OK_AND_ASSIGN(auto file, fs_->OpenInputFile(info));
+      ASSERT_OK_AND_ASSIGN(auto file, native_fs_->OpenInputFile(info));
       ASSERT_OK_AND_ASSIGN(auto bytes, WaitCloud(file->ReadAsync({}, 0, 7)));
       EXPECT_EQ(bytes->ToString(), "aaaaaaa");
       ASSERT_OK(file->Close());

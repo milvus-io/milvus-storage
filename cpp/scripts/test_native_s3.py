@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Run SDK and native S3 tests against an isolated HTTP fixture (no AWS account).
+"""Run native S3 tests against an isolated in-memory HTTP fixture (no AWS account).
 
 Delayed responses expose synchronous request waits;
 this fixture does not establish real-service authentication/TLS compatibility.
 """
-import hashlib
-import hmac
 import http.server
 import io
+import hashlib
+import hmac
+import uuid
+import xml.etree.ElementTree as ET
 import os
 import resource
 import subprocess
@@ -15,8 +17,6 @@ import sys
 import threading
 import time
 import urllib.parse
-import uuid
-import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
 
@@ -129,23 +129,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply(200, b"<ListAllMyBucketsResult><Buckets><Bucket><Name>bucket</Name></Bucket></Buckets></ListAllMyBucketsResult>")
         if bucket != "bucket":
             return self.reply(404)
-        if key == "root/upload-reset" and self.command == "HEAD":
-            return self.reply(200)
-        if key == "root/upload-reset" and self.command == "DELETE":
-            with self.upload_condition:
-                self.started_parts.clear()
-                self.released_parts.clear()
-                self.aborted_uploads.clear()
-            return self.reply(204)
         if key.startswith("root/upload-started/") and self.command == "HEAD":
             part = key.removeprefix("root/upload-started/")
             with self.upload_condition:
                 started = self.upload_condition.wait_for(lambda: part in self.started_parts, timeout=5)
-            return self.reply(200 if started else 404)
-        if key.startswith("root/upload-observed/") and self.command == "HEAD":
-            part = key.removeprefix("root/upload-observed/")
-            with self.upload_condition:
-                started = part in self.started_parts
             return self.reply(200 if started else 404)
         if key.startswith("root/upload-aborted/") and self.command == "HEAD":
             with self.upload_condition:
@@ -184,10 +171,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     released = self.upload_condition.wait_for(lambda: part in self.released_parts, timeout=15)
                 if not released:
                     return self.reply(400, b"<Error><Code>RequestTimeout</Code></Error>")
-                if (
-                    (key == "root/held/failed-part" and query["partNumber"] == ["2"])
-                    or key == "root/held/failed-wait"
-                ):
+                if key == "root/held/failed-wait":
                     return self.reply(403, b"<Error><Code>AccessDenied</Code></Error>")
             if key.startswith("root/service-error/"):
                 code = key.rsplit("/", 1)[1]
@@ -215,16 +199,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.aborted_uploads.add(key.removeprefix("root/"))
                 return self.reply(204)
             if self.command == "POST" and "uploads" in query:
-                if key.startswith("root/held-create/"):
-                    part = "create/" + key.removeprefix("root/held-create/")
-                    with self.upload_condition:
-                        self.started_parts.add(part)
-                        self.upload_condition.notify_all()
-                        released = self.upload_condition.wait_for(lambda: part in self.released_parts, timeout=15)
-                    if not released:
-                        return self.reply(400, b"<Error><Code>RequestTimeout</Code></Error>")
                 upload_id = str(uuid.uuid4())
-                self.uploads[upload_id] = {"parts": {}, "key": key}
+                self.uploads[upload_id] = {
+                    "parts": {}, "key": key,
+                    "metadata": {k: v for k, v in self.headers.items()
+                                 if k.lower().startswith("x-amz-meta-") or k.lower() == "content-type"},
+                }
                 return self.reply(200, ("<InitiateMultipartUploadResult><UploadId>" + upload_id +
                                        "</UploadId></InitiateMultipartUploadResult>").encode())
             if "uploadId" in query:
@@ -249,8 +229,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if "If-Match" in self.headers and self.headers["If-Match"] != '"8aa99b1f439ff71293e95357bac6fd94"':
                 return self.reply(412)
             self.objects[key] = body
-            self.metadata[key] = {k: v for k, v in self.headers.items()
-                                  if k.lower().startswith("x-amz-meta-") or k.lower() == "content-type"}
+            # Multipart object metadata is set at creation, not completion.
+            if "uploadId" in query:
+                self.metadata[key] = upload["metadata"]
+            else:
+                self.metadata[key] = {k: v for k, v in self.headers.items()
+                                      if k.lower().startswith("x-amz-meta-") or k.lower() == "content-type"}
             if self.command == "POST":
                 self.uploads.pop(query["uploadId"][0], None)
                 return self.reply(200, b'<CompleteMultipartUploadResult><ETag>"8aa99b1f439ff71293e95357bac6fd94"</ETag></CompleteMultipartUploadResult>')
@@ -326,10 +310,10 @@ def main():
     thread.start()
     env = dict(os.environ, NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost", AWS_EC2_METADATA_DISABLED="true", STORAGE_NATIVE_S3_ENDPOINT=f"127.0.0.1:{server.server_port}")
     try:
-        # The native shutdown suite finalizes AWS globally. Run fixed-size tests
-        # in their own process so parameterized suite order cannot follow shutdown.
+        # The native shutdown suite finalizes AWS globally. Run parallel upload tests
+        # in their own process so upload tests cannot follow shutdown.
         commands = [sys.argv[1:]] if sys.argv[1:] else [
-            ["cpp/build/Release/test/milvus_test", "--gtest_filter=Backends/FixedSizeS3Test.*"],
+            ["cpp/build/Release/test/milvus_test", "--gtest_filter=ParallelUploadS3Test.*"],
             ["cpp/build/Release/test/milvus_test", "--gtest_filter=NativeS3*"],
         ]
         for command in commands:

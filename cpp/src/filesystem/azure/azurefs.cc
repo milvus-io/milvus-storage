@@ -3845,11 +3845,4 @@ AzureFileSystem::OpenOutputStreamWithUploadSize(
   return stream;
 }
 
-arrow::Result<std::shared_ptr<arrow::io::OutputStream>> AzureFileSystem::OpenOutputStreamWithFixedSize(
-    const std::string& /*path*/,
-    const std::shared_ptr<const arrow::KeyValueMetadata>& /*metadata*/,
-    int64_t /*total_size*/) {
-  return arrow::Status::NotImplemented("Azure filesystem does not support fixed-size output streams");
-}
-
 }  // namespace milvus_storage::fs

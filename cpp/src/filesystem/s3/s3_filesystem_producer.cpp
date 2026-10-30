@@ -16,6 +16,8 @@
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/filesystem/fs.h"
 
+#include <cstdlib>
+#include <mutex>
 #include <sstream>
 #include <utility>
 
@@ -113,28 +115,36 @@ AwsCredentialsProviderChain::AwsCredentialsProviderChain() {
   }
 }
 
-static const std::unordered_map<std::string, S3LogLevel> LogLevel_Map = {
+static std::unordered_map<std::string, S3LogLevel> LogLevel_Map = {
     {"off", S3LogLevel::Off},   {"fatal", S3LogLevel::Fatal}, {"error", S3LogLevel::Error}, {"warn", S3LogLevel::Warn},
     {"info", S3LogLevel::Info}, {"debug", S3LogLevel::Debug}, {"trace", S3LogLevel::Trace}};
 
 arrow::Status S3FileSystemProducer::InitS3() {
-  S3GlobalOptions global_options;
-  auto it = LogLevel_Map.find(config_.log_level);
-  global_options.log_level = it != LogLevel_Map.end() ? it->second : S3LogLevel::Off;
+  static std::once_flag s3_init_flag;
+  static arrow::Status init_status = arrow::Status::OK();
+  std::call_once(s3_init_flag, [this]() {
+    S3GlobalOptions global_options;
+    global_options.log_level = LogLevel_Map[config_.log_level];
 
-  // tls_min_version only takes effect when use_ssl is enabled
-  std::string tls_min_ver = (config_.use_ssl && !config_.tls_min_version.empty()) ? config_.tls_min_version : "";
+    // tls_min_version only takes effect when use_ssl is enabled
+    std::string tls_min_ver = (config_.use_ssl && !config_.tls_min_version.empty()) ? config_.tls_min_version : "";
 
-  if (!tls_min_ver.empty()) {
-    Aws::HttpOptions http_options;
-    http_options.httpClientFactory_create_fn = [tls_min_ver]() {
-      return Aws::MakeShared<TlsHttpClientFactory>(kTlsFactoryAllocationTag, tls_min_ver);
-    };
-    global_options.http_options = http_options;
-    global_options.override_default_http_options = true;
-  }
+    if (!tls_min_ver.empty()) {
+      Aws::HttpOptions http_options;
+      http_options.httpClientFactory_create_fn = [tls_min_ver]() {
+        return Aws::MakeShared<TlsHttpClientFactory>(kTlsFactoryAllocationTag, tls_min_ver);
+      };
+      global_options.http_options = http_options;
+      global_options.override_default_http_options = true;
+    }
 
-  return EnsureS3Initialized(global_options);
+    auto status = EnsureS3Initialized(global_options);
+    if (!status.ok()) {
+      init_status = arrow::Status::Invalid("S3FileSystemProducer failed to initialize S3: ", status.ToString());
+      return;
+    }
+  });
+  return init_status;
 }
 
 arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {

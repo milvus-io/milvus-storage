@@ -14,7 +14,9 @@
 
 #include "milvus-storage/filesystem/gcp/gcp_filesystem_producer.h"
 
+#include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -155,23 +157,41 @@ class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
 }  // namespace
 
 arrow::Status GcpFileSystemProducer::InitS3Compat(const ArrowFileSystemConfig& first_config) {
-  S3GlobalOptions global_options;
-  auto it = kLogLevelMap.find(first_config.log_level);
-  global_options.log_level = it != kLogLevelMap.end() ? it->second : S3LogLevel::Off;
+  // FIXME: assumes no cross-cloud-provider usage in practice; if it does happen,
+  // this will produce unknown issues (InitializeS3 installs the HttpClientFactory
+  // process-globally, and whichever producer runs call_once first wins).
+  static std::once_flag s3_init_flag;
+  static arrow::Status init_status = arrow::Status::OK();
+  std::call_once(s3_init_flag, [&first_config]() {
+    S3GlobalOptions global_options;
+    auto it = kLogLevelMap.find(first_config.log_level);
+    global_options.log_level = it != kLogLevelMap.end() ? it->second : S3LogLevel::Off;
 
-  // TLS options apply only with SSL. The first process-wide S3 initialization
-  // selects the HTTP factory; later producers reuse it.
-  std::string tls_min_ver =
-      (first_config.use_ssl && !first_config.tls_min_version.empty()) ? first_config.tls_min_version : "";
+    // tls_min_version only takes effect when use_ssl is enabled. The TLS floor
+    // is fixed by the first GCP Make() (the factory is installed once). This
+    // matches the pre-refactor behavior; treat it as a separate concern.
+    std::string tls_min_ver =
+        (first_config.use_ssl && !first_config.tls_min_version.empty()) ? first_config.tls_min_version : "";
 
-  Aws::HttpOptions http_options;
-  http_options.httpClientFactory_create_fn = [tls_min_ver]() {
-    return Aws::MakeShared<GoogleHttpClientFactory>(kGoogleClientFactoryAllocationTag, tls_min_ver);
-  };
-  global_options.http_options = http_options;
-  global_options.override_default_http_options = true;
+    Aws::HttpOptions http_options;
+    http_options.httpClientFactory_create_fn = [tls_min_ver]() {
+      return Aws::MakeShared<GoogleHttpClientFactory>(kGoogleClientFactoryAllocationTag, tls_min_ver);
+    };
+    global_options.http_options = http_options;
+    global_options.override_default_http_options = true;
 
-  return EnsureS3Initialized(global_options);
+    auto status = EnsureS3Initialized(global_options);
+    if (!status.ok()) {
+      // Keep the original status code and detail. Stringifying into
+      // Status::Invalid turned a credential/network init failure into a
+      // data-class error (segcore DataFormatBroken/2024) and destroyed whatever
+      // classification the cause carried.
+      init_status = arrow::Status(status.code(), "GcpFileSystemProducer failed to initialize S3: " + status.message(),
+                                  status.detail());
+      return;
+    }
+  });
+  return init_status;
 }
 
 arrow::Status GcpFileSystemProducer::RegisterIdentity(const ArrowFileSystemConfig& config) {

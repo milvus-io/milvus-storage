@@ -899,6 +899,83 @@ TEST_F(CloudFsTest, OpenOutputStreamWithUploadSize) {
   (void)fs_->DeleteFile(path);
 }
 
+TEST_F(CloudFsTest, MultipartFlushCloseAndAbort) {
+  const auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER).ValueOr("");
+  if (provider == "azure") {
+    GTEST_SKIP() << "Requires S3 multipart upload";
+  }
+  ASSERT_FALSE(api::SetValue(properties_, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE, "10485760").has_value());
+  ASSERT_AND_ASSIGN(auto fs, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
+  (void)fs->DeleteFile("multipart");
+  const std::string part(10 * 1024 * 1024, 'a');
+  auto sizable = std::dynamic_pointer_cast<UploadSizable>(fs);
+  ASSERT_NE(sizable, nullptr);
+  ASSERT_AND_ASSIGN(auto out, sizable->OpenOutputStreamWithUploadSize("multipart", nullptr, part.size()));
+  ASSERT_STATUS_OK(out->Write(arrow::Buffer::FromString(part)));
+  ASSERT_STATUS_OK(out->Flush());
+  ASSERT_STATUS_OK(out->Write("tail", 4));
+  ASSERT_STATUS_OK(out->CloseAsync().status());
+  ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile("multipart"));
+  ASSERT_AND_ASSIGN(auto bytes, file->Read(part.size() + 4));
+  EXPECT_EQ(bytes->ToString(), part + "tail");
+  ASSERT_STATUS_OK(file->Close());
+  ASSERT_STATUS_OK(fs->DeleteFile("multipart"));
+  for (const bool multipart : {false, true}) {
+    const auto path = multipart ? "abort-multipart" : "abort-buffer";
+    (void)fs->DeleteFile(path);
+    ASSERT_AND_ASSIGN(out, fs->OpenOutputStream(path));
+    ASSERT_STATUS_OK(out->Write(arrow::Buffer::FromString(multipart ? part : "buffer")));
+    ASSERT_STATUS_OK(out->Flush());
+    ASSERT_STATUS_OK(out->Abort());
+    EXPECT_TRUE(out->closed());
+    ASSERT_AND_ASSIGN(auto info, fs->GetFileInfo(path));
+    EXPECT_EQ(info.type(), arrow::fs::FileType::NotFound);
+  }
+}
+
+TEST_F(CloudFsTest, ConditionalMultipartPreservesExistingObject) {
+  const auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER).ValueOr("");
+  if (provider == "azure") {
+    GTEST_SKIP() << "Requires S3 multipart upload";
+  }
+  ASSERT_FALSE(api::SetValue(properties_, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE, "10485760").has_value());
+  ASSERT_AND_ASSIGN(auto fs, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
+  auto conditional = std::dynamic_pointer_cast<UploadConditional>(fs);
+  ASSERT_NE(conditional, nullptr);
+  if (provider == "huawei") {
+    EXPECT_TRUE(conditional->OpenConditionalOutputStream("conditional", nullptr).status().IsNotImplemented());
+    return;
+  }
+  auto observable = std::dynamic_pointer_cast<Observable>(fs);
+  ASSERT_NE(observable, nullptr);
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
+  ASSERT_NE(metrics, nullptr);
+  const auto created = metrics->GetMultiPartUploadCreated();
+  const auto finished = metrics->GetMultiPartUploadFinished();
+  const int64_t size = 10 * 1024 * 1024 + 4;
+  const auto path = "conditional-" + std::to_string(size) + " #?+% 中文";
+  (void)fs->DeleteFile(path);
+  ASSERT_AND_ASSIGN(auto out, conditional->OpenConditionalOutputStream(path, nullptr));
+  ASSERT_STATUS_OK(out->Write(arrow::Buffer::FromString(std::string(size, 'a'))));
+  ASSERT_STATUS_OK(out->Close());
+  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), created + 1);
+  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), finished + 1);
+  ASSERT_AND_ASSIGN(auto conflict, conditional->OpenConditionalOutputStream(path, nullptr));
+  auto rejected = conflict->Write(arrow::Buffer::FromString(std::string(size, 'b')));
+  const bool rejected_on_write = !rejected.ok();
+  if (!rejected_on_write)
+    rejected = conflict->Close();
+  EXPECT_FALSE(rejected.ok());
+  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), created + 2);
+  std::cout << "Conditional conflict reported by " << (rejected_on_write ? "Write" : "Close") << std::endl;
+  ASSERT_STATUS_OK(conflict->Abort());
+  ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile(path));
+  ASSERT_AND_ASSIGN(auto bytes, file->Read(size));
+  EXPECT_EQ(bytes->ToString(), std::string(size, 'a'));
+  ASSERT_STATUS_OK(file->Close());
+  ASSERT_STATUS_OK(fs->DeleteFile(path));
+}
+
 TEST_F(CloudFsTest, GetMetrics) {
   auto observable_fs = std::dynamic_pointer_cast<Observable>(fs_);
   ASSERT_NE(observable_fs, nullptr);
