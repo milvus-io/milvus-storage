@@ -214,8 +214,8 @@ TEST_F(NativeS3Test, OtherProvidersUseNativeRequestsWithoutAnIoWorker) {
       config.access_key_id = "fixture";
       config.access_key_value = "fixture-secret";
       ASSERT_OK_AND_ASSIGN(auto credentials, BuildGcpProviderFromConfig(config));
-      GcpCredentialRegistry::Instance().Register({NormalizeGcpEndpoint(options.endpoint_override, false), "bucket"},
-                                                 std::move(credentials));
+      ASSERT_OK(GcpCredentialRegistry::Instance().Register(
+          {NormalizeGcpEndpoint(options.endpoint_override, false), "bucket"}, std::move(credentials)));
     }
     ASSERT_OK_AND_ASSIGN(auto s3, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
     auto fs = std::make_shared<FileSystemProxy>(prefix_, s3);

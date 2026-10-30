@@ -1325,13 +1325,18 @@ TEST(S3CrtBuildSupportTest, GcpIamBearerReachesCrtRangeGetAndHead) {
     config.region = "auto";
     config.use_iam = true;
     config.s3_crt_async_read = true;
+    // The registry keeps the first provider for an identity. Install the test
+    // provider before Make() registers the process's real IAM credentials.
+    auto provider = std::make_shared<StaticBearerProvider>();
+    const auto register_status = GcpCredentialRegistry::Instance().Register(
+        {NormalizeGcpEndpoint(config.address, config.use_ssl), config.bucket_name}, provider);
+    if (!register_status.ok()) {
+      return fail(register_status.ToString());
+    }
     auto fs_result = GcpFileSystemProducer(config).Make();
     if (!fs_result.ok()) {
       return fail(fs_result.status().ToString());
     }
-    auto provider = std::make_shared<StaticBearerProvider>();
-    GcpCredentialRegistry::Instance().Register(
-        {NormalizeGcpEndpoint(config.address, config.use_ssl), config.bucket_name}, provider);
     auto fs = std::move(fs_result).ValueOrDie();
     arrow::fs::FileInfo file_info("test-bucket/object.txt", arrow::fs::FileType::File);
     file_info.set_size(9);
