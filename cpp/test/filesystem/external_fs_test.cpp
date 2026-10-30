@@ -319,10 +319,64 @@ TEST_F(ExternalFilesystemTest, ExtractExternalFsPropertiesTypeConversion) {
   EXPECT_EQ(config.alias, "myfs");
 }
 
+TEST_F(ExternalFilesystemTest, AwsCredentialBrokerExternalConfig) {
+  for (const auto* cloud : {kCloudProviderAWS, kCloudProviderAliyun, kCloudProviderTencent, kCloudProviderHuawei}) {
+    SCOPED_TRACE(cloud);
+    api::Properties props;
+    props["extfs.broker.storage_type"] = std::string("remote");
+    props["extfs.broker.cloud_provider"] = std::string(cloud);
+    props["extfs.broker.address"] = std::string("s3.us-west-2.amazonaws.com");
+    props["extfs.broker.bucket_name"] = std::string("customer-bucket");
+    props["extfs.broker.region"] = std::string("us-west-2");
+    props["extfs.broker.role_arn"] = std::string("arn:aws:iam::123456789012:role/reader");
+    props["extfs.broker.credential_endpoint"] = std::string("http://credential-broker/v1/credentials/assume-role");
+
+    auto result = FilesystemCache::resolve_config(props, "s3://s3.us-west-2.amazonaws.com/customer-bucket/file");
+    ASSERT_TRUE(result.ok()) << result.status();
+    EXPECT_EQ(result->credential_endpoint, "http://credential-broker/v1/credentials/assume-role");
+    EXPECT_TRUE(result->IsAwsCredentialBrokerEnabled());
+    EXPECT_FALSE(result->IsAzureCredentialBrokerEnabled());
+
+    api::Properties default_props;
+    const std::string external_prefix = "extfs.broker.";
+    for (const auto& [key, value] : props) {
+      default_props[std::string(PROPERTY_FS_PREFIX) + key.substr(external_prefix.size())] = value;
+    }
+    auto default_result = FilesystemCache::resolve_config(default_props);
+    ASSERT_TRUE(default_result.ok()) << default_result.status();
+    EXPECT_EQ(default_result->GetCacheKey(), result->GetCacheKey());
+
+    const auto valid = props;
+    for (const auto* field : {"region", "role_arn"}) {
+      auto invalid = valid;
+      invalid[std::string("extfs.broker.") + field] = std::string("");
+      EXPECT_FALSE(
+          FilesystemCache::resolve_config(invalid, "s3://s3.us-west-2.amazonaws.com/customer-bucket/file").ok());
+    }
+    auto invalid_duration = valid;
+    invalid_duration["extfs.broker.load_frequency"] = std::string("3601");
+    EXPECT_FALSE(
+        FilesystemCache::resolve_config(invalid_duration, "s3://s3.us-west-2.amazonaws.com/customer-bucket/file").ok());
+
+    props["extfs.broker.credential_endpoint"] = std::string("file:///credentials");
+    result = FilesystemCache::resolve_config(props, "s3://s3.us-west-2.amazonaws.com/customer-bucket/file");
+    ASSERT_FALSE(result.ok());
+    EXPECT_TRUE(result.status().IsInvalid());
+
+    // Native IAM ignores the shared Broker endpoint and does not require a target role.
+    props["extfs.broker.use_iam"] = std::string("true");
+    props.erase("extfs.broker.role_arn");
+    result = FilesystemCache::resolve_config(props, "s3://s3.us-west-2.amazonaws.com/customer-bucket/file");
+    ASSERT_TRUE(result.ok()) << result.status();
+    EXPECT_FALSE(result->IsAwsCredentialBrokerEnabled());
+  }
+}
+
 TEST_F(ExternalFilesystemTest, AzureCredentialBrokerConfigValidation) {
   api::Properties props;
   props[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
   props[PROPERTY_FS_CLOUD_PROVIDER] = std::string(kCloudProviderAzure);
+  props[PROPERTY_FS_ADDRESS] = std::string("core.windows.net");
   props[PROPERTY_FS_ACCESS_KEY_ID] = std::string("account");
   props[PROPERTY_FS_BUCKET_NAME] = std::string("container");
   props[PROPERTY_FS_REGION] = std::string("westus3");
@@ -333,9 +387,19 @@ TEST_F(ExternalFilesystemTest, AzureCredentialBrokerConfigValidation) {
   auto config_result = FilesystemCache::resolve_config(props);
   ASSERT_TRUE(config_result.ok()) << config_result.status().ToString();
   EXPECT_TRUE(config_result->IsAzureCredentialBrokerEnabled());
+  EXPECT_FALSE(config_result->IsAwsCredentialBrokerEnabled());
   EXPECT_EQ(config_result->azure_client_id, "client");
   EXPECT_EQ(config_result->azure_tenant_id, "tenant");
   EXPECT_EQ(config_result->azure_credential_endpoint, "http://credential-broker/v1/credentials/assume-role");
+
+  api::Properties external_props;
+  const std::string fs_prefix = PROPERTY_FS_PREFIX;
+  for (const auto& [key, value] : props) {
+    external_props["extfs.broker." + key.substr(fs_prefix.size())] = value;
+  }
+  auto external_result = FilesystemCache::resolve_config(external_props, "azure://core.windows.net/container/file");
+  ASSERT_TRUE(external_result.ok()) << external_result.status();
+  EXPECT_EQ(external_result->GetCacheKey(), config_result->GetCacheKey());
 
   auto non_azure_config = *config_result;
   non_azure_config.cloud_provider = kCloudProviderAWS;

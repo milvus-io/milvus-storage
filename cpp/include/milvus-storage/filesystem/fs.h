@@ -195,7 +195,14 @@ struct ArrowFileSystemConfig {
   // To align with the old logical, set to `int64_t`(should be `uint64_t`)
   int64_t multi_part_upload_size = DEFAULT_MULTIPART_UPLOAD_PART_SIZE;
 
-  // AssumeRole credentials
+  // S3 temporary credentials can come from this HTTP(S) broker or native cloud APIs.
+  // An empty endpoint keeps native AssumeRole, IAM or explicit AK/SK selection.
+  // S3-compatible providers share the AWS STS broker contract (csp=aws).
+  // Azure retains fs.azure_credential_endpoint on the 3.0 branch.
+
+  // AssumeRole credentials for supported S3 / S3-compatible providers.
+  // The target role is used by native STS and the shared STS broker flow. external_id
+  // is forwarded where supported; session_name applies only to native requests.
   std::string role_arn = "";
   std::string session_name = "";
   std::string external_id = "";
@@ -203,6 +210,9 @@ struct ArrowFileSystemConfig {
   // GCP cross-tenant access (Service Account Impersonation)
   // Target service account email to impersonate (e.g., "sa@project.iam.gserviceaccount.com")
   std::string gcp_target_service_account = "";
+
+  // HTTP(S) Broker endpoint for S3 temporary credentials.
+  std::string credential_endpoint = "";
 
   // Azure broker-backed temporary SAS authentication.
   std::string azure_client_id = "";
@@ -219,6 +229,7 @@ struct ArrowFileSystemConfig {
   //     if outside [900, 3600] (the `iam.allowServiceAccountCredentialLifetimeExtension`
   //     org-policy escape hatch is not plumbed through).
   //   - Azure credential broker: requested SAS lifetime.
+  //   - AWS credential broker: requested STS lifetime in [900, 3600].
   // Long-lived readers refresh credentials ahead of expiry; one-shot readers
   // request credentials with this lifetime when they start.
   // Ignored by providers that don't mint temporary credentials (plain AKSK,
@@ -266,6 +277,16 @@ struct ArrowFileSystemConfig {
    * back to another Azure authentication mechanism.
    */
   [[nodiscard]] bool IsAzureCredentialBrokerEnabled() const;
+
+  /**
+   * @brief Return whether AWS STS broker authentication was requested for S3.
+   *
+   * S3 and S3-compatible providers use the same broker contract when
+   * credential_endpoint is non-empty and use_iam is false. Required broker
+   * settings are validated separately; use_iam or an empty endpoint keeps
+   * native role/IAM/AKSK selection.
+   */
+  [[nodiscard]] bool IsAwsCredentialBrokerEnabled() const;
 
   /**
    * @brief Get the cache key for this filesystem configuration

@@ -63,6 +63,12 @@ bool ArrowFileSystemConfig::IsAzureCredentialBrokerEnabled() const {
          (!azure_client_id.empty() || !azure_tenant_id.empty() || !azure_credential_endpoint.empty());
 }
 
+bool ArrowFileSystemConfig::IsAwsCredentialBrokerEnabled() const {
+  return !use_iam && !credential_endpoint.empty() &&
+         (cloud_provider == kCloudProviderAWS || cloud_provider == kCloudProviderAliyun ||
+          cloud_provider == kCloudProviderTencent || cloud_provider == kCloudProviderHuawei);
+}
+
 std::string ArrowFileSystemConfig::GetCacheKey() const {
   size_t seed = 0;
   auto hash_combine = [&seed](const auto& value) {
@@ -94,7 +100,11 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
   hash_combine(s3_crt_async_read);
   hash_combine(load_frequency);
 
-  if (IsAzureCredentialBrokerEnabled()) {
+  if (IsAwsCredentialBrokerEnabled()) {
+    hash_combine(credential_endpoint);
+    hash_combine(role_arn);
+    hash_combine(external_id);
+  } else if (IsAzureCredentialBrokerEnabled()) {
     hash_combine(access_key_id);
     hash_combine(azure_client_id);
     hash_combine(azure_tenant_id);
@@ -266,8 +276,24 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
                         api::GetValue<std::string>(properties_map, PROPERTY_FS_AZURE_CLIENT_ID));
   ARROW_ASSIGN_OR_RAISE(result.azure_tenant_id,
                         api::GetValue<std::string>(properties_map, PROPERTY_FS_AZURE_TENANT_ID));
+  ARROW_ASSIGN_OR_RAISE(result.credential_endpoint,
+                        api::GetValue<std::string>(properties_map, PROPERTY_FS_CREDENTIAL_ENDPOINT));
   ARROW_ASSIGN_OR_RAISE(result.azure_credential_endpoint,
                         api::GetValue<std::string>(properties_map, PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT));
+
+  if (result.IsAwsCredentialBrokerEnabled()) {
+    if (result.region.empty() || result.role_arn.empty() || result.request_timeout_ms <= 0 ||
+        result.load_frequency < 900 || result.load_frequency > 3600) {
+      return arrow::Status::Invalid(
+          "AWS credential broker requires fs.region, fs.role_arn, positive "
+          "fs.request_timeout_ms, and fs.load_frequency in [900, 3600]");
+    }
+    arrow::util::Uri endpoint;
+    const auto status = endpoint.Parse(result.credential_endpoint);
+    if (!status.ok() || endpoint.host().empty() || (endpoint.scheme() != "http" && endpoint.scheme() != "https")) {
+      return arrow::Status::Invalid("fs.credential_endpoint must be a valid HTTP(S) URL");
+    }
+  }
 
   if (result.cloud_provider == kCloudProviderAzure && result.IsAzureCredentialBrokerEnabled()) {
     if (result.azure_client_id.empty() || result.azure_tenant_id.empty() || result.azure_credential_endpoint.empty() ||
