@@ -133,6 +133,7 @@ struct LanceTableReader::MetaTrait::FragmentMetadata {
   uint64_t num_deletions = 0;
   uint64_t logical_chunk_rows = 0;
   std::shared_ptr<const std::vector<uint64_t>> column_memory_weights;
+  std::shared_ptr<const FragmentFilesMetadata> file_metadata;
 };
 
 class LanceTableReader::MetaTrait::FragmentMetadataCache final
@@ -382,31 +383,6 @@ LanceTableReader::LanceTableReader(const std::shared_ptr<arrow::fs::FileSystem>&
       needed_columns_(needed_columns),
       fragment_reader_(nullptr) {}
 
-static arrow::Result<std::vector<uint64_t>> estimate_fragment_column_memory_sizes(const BlockingDataset& dataset,
-                                                                                  uint64_t fragment_id,
-                                                                                  size_t num_columns) {
-  FIU_RETURN_ON(FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL,
-                arrow::Status::NotImplemented("Injected fault: ", FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL));
-
-  // Lance 7 returns both this estimate and FileFragment::schema() in current
-  // dataset-schema order. Fields not physically present in the fragment have a
-  // zero estimate, so schema evolution does not require positional remapping.
-  ARROW_ASSIGN_OR_RAISE(auto memory_sizes, dataset.EstimateFragmentColumnMemory(fragment_id));
-  if (memory_sizes.size() != num_columns) {
-    return arrow::Status::Invalid("Lance column memory estimate count does not match the file schema: ",
-                                  memory_sizes.size(), " != ", num_columns);
-  }
-
-  uint64_t total_size = 0;
-  for (auto memory_size : memory_sizes) {
-    if (memory_size > std::numeric_limits<uint64_t>::max() - total_size) {
-      return arrow::Status::Invalid("Lance column memory estimates exceed the uint64_t range");
-    }
-    total_size += memory_size;
-  }
-  return memory_sizes;
-}
-
 static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos(
     uint64_t rows_in_file,
     uint64_t logical_chunk_rows,
@@ -489,82 +465,99 @@ static folly::SemiFuture<arrow::Result<std::shared_ptr<const LanceTableReader::M
 load_fragment_metadata_async(uint64_t fragment_id,
                              const std::shared_ptr<const milvus_storage::api::Properties>& properties,
                              const std::shared_ptr<BlockingDataset>& dataset) {
-  // These getters inspect the loaded manifest. Only the memory estimator needs
-  // footer/page I/O, which is submitted to the shared Rust runtime below.
+  // These getters inspect the loaded manifest. Footer and deletion loading run
+  // asynchronously on the shared Rust runtime below.
   std::shared_ptr<arrow::Schema> file_schema;
   {
     ArrowSchema c_fragment_schema{};
     FOLLY_ARROW_RETURN_NOT_OK(dataset->GetFragmentSchema(fragment_id, c_fragment_schema));
     FOLLY_ARROW_ASSIGN_OR_RAISE(file_schema, arrow::ImportSchema(&c_fragment_schema));
   }
-  FOLLY_ARROW_ASSIGN_OR_RAISE(auto logical_rows, dataset->GetFragmentRowCount(fragment_id));
   FOLLY_ARROW_ASSIGN_OR_RAISE(auto physical_rows, dataset->GetFragmentPhysicalRowCount(fragment_id));
-  if (physical_rows < logical_rows) {
-    return folly::makeSemiFuture(arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>>(
-        arrow::Status::Invalid("Fragment ", fragment_id, " has inconsistent metadata: physical_rows (", physical_rows,
-                               ") < logical_rows (", logical_rows, ")")));
-  }
   FOLLY_ARROW_ASSIGN_OR_RAISE(auto logical_chunk_rows,
                               milvus_storage::api::GetValue<uint64_t>(properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
   auto metadata = std::make_shared<LanceTableReader::MetaTrait::FragmentMetadata>();
   metadata->file_schema = std::move(file_schema);
-  metadata->num_deletions = physical_rows - logical_rows;
   metadata->logical_chunk_rows = logical_chunk_rows;
-  auto estimates = [&]() -> folly::SemiFuture<arrow::Result<std::vector<uint64_t>>> {
-    FIU_RETURN_ON(FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL,
-                  folly::makeSemiFuture(arrow::Result<std::vector<uint64_t>>(
-                      arrow::Status::NotImplemented("Injected fault: ", FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL))));
-    return submit_lance_async<std::vector<uint64_t>>(
-               "Failed to estimate Lance column memory",
-               [](uint64_t handle, ArrowArrayStream&) -> arrow::Result<std::vector<uint64_t>> {
-                 return BlockingDataset::TakeColumnMemoryResult(handle);
-               },
-               [&](LanceAsyncCallback callback, void* context) {
-                 return dataset->EstimateFragmentColumnMemoryAsync(fragment_id, callback, context);
-               })
-        .deferValue([](arrow::Result<std::vector<uint64_t>> result) -> arrow::Result<std::vector<uint64_t>> {
-          if (!result.ok()) {
-            return arrow::Status::NotImplemented("Lance column memory size estimation is not available: ",
-                                                 result.status().message());
-          }
-          return result;
-        });
-  }();
-  return std::move(estimates).deferValue(
-      [dataset, fragment_id, logical_rows, metadata = std::move(metadata)](arrow::Result<std::vector<uint64_t>> result)
-          -> arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>> {
-        if (result.ok()) {
-          const auto& sizes = *result;
-          if (sizes.size() != static_cast<size_t>(metadata->file_schema->num_fields())) {
-            result = arrow::Status::Invalid("Lance column memory estimate count does not match the file schema");
-          } else {
-            uint64_t total = 0;
-            for (const auto size : sizes) {
-              if (size > std::numeric_limits<uint64_t>::max() - total) {
-                result = arrow::Status::Invalid("Lance column memory estimates exceed the uint64_t range");
-                break;
+  // Retain immutable footers and deletion state, without keeping this bootstrap
+  // reader's projection-specific file readers or schema adapters in the cache.
+  ArrowSchema c_schema{};
+  FOLLY_ARROW_RETURN_NOT_OK(arrow::ExportSchema(*metadata->file_schema, &c_schema));
+  ArrowCDataReleaseGuard schema_guard(&c_schema);
+  return submit_lance_async<std::unique_ptr<BlockingFragmentReader>>(
+             "Failed to open Lance fragment metadata",
+             [](uint64_t handle, ArrowArrayStream&) -> arrow::Result<std::unique_ptr<BlockingFragmentReader>> {
+               return BlockingFragmentReader::FromHandle(handle);
+             },
+             [&](LanceAsyncCallback callback, void* context) {
+               return BlockingFragmentReader::OpenAsync(*dataset, fragment_id, c_schema, callback, context);
+             })
+      .deferValue([dataset, fragment_id, physical_rows,
+                   metadata = std::move(metadata)](arrow::Result<std::unique_ptr<BlockingFragmentReader>> opened)
+                      -> folly::SemiFuture<
+                          arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>>> {
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto reader, std::move(opened));
+        // RowCount uses the already loaded vector even if the manifest omitted
+        // its deletion count; it performs no additional I/O.
+        FOLLY_ARROW_ASSIGN_OR_RAISE(const auto logical_rows, reader->RowCount());
+        if (physical_rows < logical_rows) {
+          return folly::makeSemiFuture(
+              arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>>(
+                  arrow::Status::Invalid("Fragment ", fragment_id, " has inconsistent metadata: physical_rows (",
+                                         physical_rows, ") < logical_rows (", logical_rows, ")")));
+        }
+        metadata->num_deletions = physical_rows - logical_rows;
+        metadata->file_metadata = reader->GetFilesMetadata();
+        auto estimates = [&]() -> folly::SemiFuture<arrow::Result<std::vector<uint64_t>>> {
+          FIU_RETURN_ON(FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL,
+                        folly::makeSemiFuture(arrow::Result<std::vector<uint64_t>>(
+                            arrow::Status::NotImplemented("Injected fault: ", FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL))));
+          return submit_lance_async<std::vector<uint64_t>>(
+              "Failed to estimate Lance column memory",
+              [](uint64_t handle, ArrowArrayStream&) -> arrow::Result<std::vector<uint64_t>> {
+                return BlockingFragmentReader::TakeColumnMemorySizes(handle);
+              },
+              [&](LanceAsyncCallback callback, void* context) {
+                return reader->EstimateFragmentColumnMemoryAsync(callback, context);
+              });
+        }();
+        return std::move(estimates).deferValue(
+            [dataset, fragment_id, logical_rows, metadata = std::move(metadata),
+             reader = std::move(reader)](arrow::Result<std::vector<uint64_t>> result)
+                -> arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>> {
+              if (result.ok()) {
+                const auto& sizes = *result;
+                if (sizes.size() != static_cast<size_t>(metadata->file_schema->num_fields())) {
+                  result = arrow::Status::Invalid("Lance column memory estimate count does not match the file schema");
+                } else {
+                  uint64_t total = 0;
+                  for (const auto size : sizes) {
+                    if (size > std::numeric_limits<uint64_t>::max() - total) {
+                      result = arrow::Status::Invalid("Lance column memory estimates exceed the uint64_t range");
+                      break;
+                    }
+                    total += size;
+                  }
+                }
               }
-              total += size;
-            }
-          }
-        }
-        const bool memory_size_available = result.ok();
-        std::vector<uint64_t> sizes;
-        if (memory_size_available) {
-          sizes = std::move(result).ValueOrDie();
-        } else {
-          // Preserve optional-estimate behavior and retain the failure in logs.
-          LOG_STORAGE_DEBUG_ << "Lance column memory estimation is unavailable while loading metadata"
-                             << ", fragment_id=" << fragment_id << ", status=" << result.status().ToString();
-        }
-        ARROW_ASSIGN_OR_RAISE(
-            metadata->row_group_infos,
-            create_row_group_infos(logical_rows, metadata->logical_chunk_rows, sizes, memory_size_available));
-        if (memory_size_available) {
-          metadata->column_memory_weights = std::make_shared<const std::vector<uint64_t>>(std::move(sizes));
-        }
-        std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata> immutable = std::move(metadata);
-        return immutable;
+              const bool memory_size_available = result.ok();
+              std::vector<uint64_t> sizes;
+              if (memory_size_available) {
+                sizes = std::move(result).ValueOrDie();
+              } else {
+                // Optional estimation failure does not discard the reader's retained footers.
+                LOG_STORAGE_DEBUG_ << "Lance column memory estimation is unavailable while loading metadata"
+                                   << ", fragment_id=" << fragment_id << ", status=" << result.status().ToString();
+              }
+              ARROW_ASSIGN_OR_RAISE(
+                  metadata->row_group_infos,
+                  create_row_group_infos(logical_rows, metadata->logical_chunk_rows, sizes, memory_size_available));
+              if (memory_size_available) {
+                metadata->column_memory_weights = std::make_shared<const std::vector<uint64_t>>(std::move(sizes));
+              }
+              std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata> immutable = std::move(metadata);
+              return immutable;
+            });
       });
 }
 
@@ -741,7 +734,8 @@ arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::cr
   // Preserve legacy output schema metadata semantics; field metadata remains intact.
   reader->read_schema_ = requested_schema->metadata() ? requested_schema->RemoveMetadata() : requested_schema;
   ARROW_ASSIGN_OR_RAISE(reader->fragment_reader_,
-                        BlockingFragmentReader::Open(*metadata->payload.dataset, fragment_id, c_arrow_schema));
+                        BlockingFragmentReader::Open(*metadata->payload.dataset, fragment_id, c_arrow_schema,
+                                                     fragment_metadata->file_metadata.get()));
 
   return reader;
 }
@@ -815,7 +809,8 @@ folly::SemiFuture<arrow::Status> LanceTableReader::open_fragment_async(
                return BlockingFragmentReader::FromHandle(handle);
              },
              [&](LanceAsyncCallback callback, void* context) {
-               return BlockingFragmentReader::OpenAsync(*dataset_, fragment_id_, c_schema, callback, context);
+               return BlockingFragmentReader::OpenAsync(*dataset_, fragment_id_, c_schema, callback, context,
+                                                        metadata->file_metadata.get());
              })
       .deferValue([self, metadata,
                    requested_schema](arrow::Result<std::unique_ptr<BlockingFragmentReader>> result) -> arrow::Status {
@@ -872,57 +867,18 @@ arrow::Status LanceTableReader::open() {
         dataset_, get_or_open_dataset(uri_, filesystem_, reader_options, fs_config.GetCacheKey(), dataset_version_));
   }
 
-  // Lance 7 exposes the current dataset schema through FileFragment::schema().
-  {
-    ArrowSchema c_fragment_schema{};
-    ARROW_RETURN_NOT_OK(dataset_->GetFragmentSchema(fragment_id_, c_fragment_schema));
-    ARROW_ASSIGN_OR_RAISE(file_schema_, arrow::ImportSchema(&c_fragment_schema));
-  }
-
-  // Build the read schema for fragment reader:
-  // use user-provided schema if available, otherwise project file schema by needed_columns
-  ARROW_ASSIGN_OR_RAISE(auto read_schema, build_read_schema(file_schema_, read_schema_, needed_columns_));
-
-  ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
-
+  ARROW_ASSIGN_OR_RAISE(auto metadata, load_fragment_metadata(fragment_id_, properties_, dataset_));
+  ARROW_ASSIGN_OR_RAISE(auto read_schema, build_read_schema(metadata->file_schema, read_schema_, needed_columns_));
   ArrowSchema c_arrow_schema{};
   ARROW_RETURN_NOT_OK(arrow::ExportSchema(*read_schema, &c_arrow_schema));
+  ARROW_ASSIGN_OR_RAISE(fragment_reader_, BlockingFragmentReader::Open(*dataset_, fragment_id_, c_arrow_schema,
+                                                                       metadata->file_metadata.get()));
+  file_schema_ = metadata->file_schema;
+  logical_chunk_rows_ = metadata->logical_chunk_rows;
+  num_deletions_ = metadata->num_deletions;
+  column_memory_weights_ = metadata->column_memory_weights;
+  row_group_infos_ = metadata->row_group_infos;
   read_schema_ = read_schema->metadata() ? read_schema->RemoveMetadata() : read_schema;
-  ARROW_ASSIGN_OR_RAISE(fragment_reader_, BlockingFragmentReader::Open(*dataset_, fragment_id_, c_arrow_schema));
-
-  // Lance's read_range accepts logical indices (post-deletion) and internally
-  // patches the range to skip deleted rows. So row_group_infos uses logical row count.
-  // However, read_range's batch_size is applied to the *physical* range after
-  // patch_range_for_deletions, so we add num_deletions_ to batch_size to ensure
-  // each read produces a single output batch.
-  ARROW_ASSIGN_OR_RAISE(auto logical_rows, fragment_reader_->RowCount());
-  ARROW_ASSIGN_OR_RAISE(auto physical_rows, dataset_->GetFragmentPhysicalRowCount(fragment_id_));
-  if (physical_rows < logical_rows) {
-    return arrow::Status::Invalid("Fragment ", fragment_id_, " has inconsistent metadata: physical_rows (",
-                                  physical_rows, ") < logical_rows (", logical_rows, ")");
-  }
-  num_deletions_ = physical_rows - logical_rows;
-
-  auto column_memory_sizes_result =
-      estimate_fragment_column_memory_sizes(*dataset_, fragment_id_, static_cast<size_t>(file_schema_->num_fields()));
-  const bool memory_size_available = column_memory_sizes_result.ok();
-  std::vector<uint64_t> fragment_column_memory_sizes;
-  if (memory_size_available) {
-    fragment_column_memory_sizes = std::move(column_memory_sizes_result).ValueOrDie();
-  } else {
-    // Memory statistics are optional. Do not retain the underlying failure in
-    // row-group metadata: estimate APIs return a generic NotImplemented status
-    // instead. Keep the detailed reason in the debug log for diagnostics only.
-    LOG_STORAGE_DEBUG_ << "Lance column memory estimation is unavailable while opening the reader"
-                       << ", fragment_id=" << fragment_id_
-                       << ", status=" << column_memory_sizes_result.status().ToString();
-  }
-  ARROW_ASSIGN_OR_RAISE(row_group_infos_, create_row_group_infos(logical_rows, logical_chunk_rows_,
-                                                                 fragment_column_memory_sizes, memory_size_available));
-  column_memory_weights_ = memory_size_available
-                               ? std::make_shared<const std::vector<uint64_t>>(std::move(fragment_column_memory_sizes))
-                               : nullptr;
-
   return arrow::Status::OK();
 }
 

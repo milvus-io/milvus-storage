@@ -281,7 +281,7 @@ class LanceDatasetCache final {
 
   // Weak entries are cheap, while this larger bound absorbs normal snapshot
   // churn without allowing versioned keys to grow for the process lifetime.
-  static constexpr size_t kDatasetCacheCapacity = 4096;
+  static constexpr size_t kDatasetCacheCapacity = 512;
 
   std::mutex mutex_;
   LRUCache<Key, std::weak_ptr<BlockingDataset>> datasets_{kDatasetCacheCapacity};

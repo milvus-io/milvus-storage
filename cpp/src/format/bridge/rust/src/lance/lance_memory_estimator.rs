@@ -3,8 +3,8 @@
 
 //! Best-effort decoded Arrow buffer size estimation from Lance file metadata.
 //!
-//! Loading this metadata reads file footers and column/page descriptions only.
-//! No data page is read or decompressed.
+//! Uses immutable footers already retained by the fragment reader.
+//! Estimation performs no I/O or decompression.
 //!
 //! Estimation rules:
 //! - A fixed-width leaf, including fixed-size lists, uses its exact logical
@@ -20,21 +20,17 @@
 //! so this estimator does not contain format-version or encoding-specific logic.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use arrow_schema::DataType;
-use lance::dataset::Dataset;
+use lance::dataset::fragment::FileMetadataMap;
 use lance::{Error, Result};
 use lance_core::datatypes::{Field, Schema};
 use lance_encoding::decoder::{ColumnInfo, PageInfo};
-use lance_file::reader::{CachedFileMetadata, FileReader};
-use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
+use lance_file::reader::CachedFileMetadata;
 use lance_table::format::{DataFile, Fragment};
-use object_store::path::Path;
 
 use crate::lance_ffi::LanceColumnMemoryEstimate;
 
-const DATA_DIR: &str = "data";
 // Lance's standard writer normally flushes a page after accumulating about
 // 8 MiB of Arrow data. This is a heuristic, not a value read from the footer.
 const DEFAULT_PAGE_BYTES: u64 = 8 * 1024 * 1024;
@@ -70,10 +66,9 @@ fn fixed_data_type_memory(data_type: &DataType, rows: u64) -> Option<u64> {
         DataType::Null => Some(0),
         DataType::Boolean => Some(bitmap_bytes(rows)),
         DataType::FixedSizeBinary(width) => Some((*width as u64).saturating_mul(rows)),
-        DataType::FixedSizeList(item, list_size) => fixed_data_type_memory(
-            item.data_type(),
-            rows.saturating_mul(*list_size as u64),
-        ),
+        DataType::FixedSizeList(item, list_size) => {
+            fixed_data_type_memory(item.data_type(), rows.saturating_mul(*list_size as u64))
+        }
         DataType::Dictionary(_, _) => None,
         data_type => data_type
             .primitive_width()
@@ -93,60 +88,6 @@ fn fixed_column_memory(field: &Field, rows: u64) -> Option<u64> {
     }
 
     fixed_data_type_memory(&field.data_type(), rows)
-}
-
-/// Resolve a fragment data file, including files stored under an external base
-/// path rather than the dataset's own `data/` directory.
-fn data_file_path(dataset: &Dataset, data_file: &DataFile) -> Result<Path> {
-    let data_dir = match data_file.base_id {
-        Some(base_id) => {
-            let base_path = dataset
-                .manifest()
-                .base_paths
-                .get(&base_id)
-                .ok_or_else(|| invalid_input(format!("base path {} not found", base_id)))?;
-            let path = base_path.extract_path(dataset.session().store_registry())?;
-            if base_path.is_dataset_root {
-                path.join(DATA_DIR)
-            } else {
-                path
-            }
-        }
-        None => dataset.data_dir(),
-    };
-    Ok(data_dir.join(data_file.path.as_str()))
-}
-
-/// Read the Lance footer and its column/page metadata.
-///
-/// `FileReader::read_all_metadata` reads file-tail metadata only. It does not
-/// schedule any data-page reads or decompression.
-async fn load_file_metadata(
-    dataset: &Dataset,
-    data_file: &DataFile,
-    default_scheduler: &Arc<ScanScheduler>,
-) -> Result<CachedFileMetadata> {
-    let path = data_file_path(dataset, data_file)?;
-    let scheduler = if data_file.base_id.is_none() {
-        default_scheduler.clone()
-    } else {
-        let object_store = dataset.object_store(data_file.base_id).await?;
-        ScanScheduler::new(
-            object_store.clone(),
-            SchedulerConfig::max_bandwidth(&object_store),
-        )
-    };
-    let file_scheduler = scheduler
-        .open_file_with_priority(&path, 0, &data_file.file_size_bytes)
-        .await?;
-
-    // FIXME: `FileFragment::get_file_metadata` is not currently a public API.
-    // `FileReader::read_all_metadata` is public, but calling it directly cannot
-    // reuse Lance's metadata cache and may cause duplicate footer I/O. After
-    // https://github.com/lance-format/lance/pull/7820 is available in the Lance
-    // version used here, use `get_file_metadata` to reuse cached metadata and
-    // remove this extra I/O.
-    FileReader::read_all_metadata(&file_scheduler).await
 }
 
 /// Sum the encoded buffers referenced by a page.
@@ -257,10 +198,11 @@ fn field_owners(schema: &Schema) -> HashMap<i32, usize> {
 ///
 /// A result is returned for every top-level schema field. A field not present in
 /// this fragment, for example after schema evolution, receives a zero estimate.
-pub(crate) async fn estimate_fragment_column_memory(
-    dataset: &Dataset,
+pub(crate) fn estimate_fragment_column_memory(
+    schema: &Schema,
     fragment: &Fragment,
-    default_scheduler: Arc<ScanScheduler>,
+    file_metadata: &FileMetadataMap,
+    deletion_count: u64,
 ) -> Result<Vec<LanceColumnMemoryEstimate>> {
     let physical_rows = fragment.physical_rows.ok_or_else(|| {
         invalid_input(format!(
@@ -268,10 +210,12 @@ pub(crate) async fn estimate_fragment_column_memory(
             fragment.id
         ))
     })? as u64;
-    let logical_rows = fragment.num_rows().ok_or_else(|| {
-        invalid_input(format!("fragment {} has no logical row count", fragment.id))
-    })? as u64;
-    let schema = dataset.schema();
+    let logical_rows = physical_rows.checked_sub(deletion_count).ok_or_else(|| {
+        invalid_input(format!(
+            "fragment {} has {} deletions but only {} physical rows",
+            fragment.id, deletion_count, physical_rows
+        ))
+    })?;
 
     // Footer entries for nested columns use descendant field ids. Group those
     // physical columns back into the top-level fields exposed by the API.
@@ -289,7 +233,20 @@ pub(crate) async fn estimate_fragment_column_memory(
     let mut estimates = vec![None; schema.fields.len()];
 
     for data_file in &fragment.files {
-        let metadata = load_file_metadata(dataset, data_file, &default_scheduler).await?;
+        if data_file.is_legacy_file() {
+            return Err(invalid_input(format!(
+                "memory estimation is unavailable for legacy file {} in fragment {}",
+                data_file.path, fragment.id
+            )));
+        }
+        let metadata = file_metadata
+            .get(&(data_file.base_id, data_file.path.clone()))
+            .ok_or_else(|| {
+                invalid_input(format!(
+                    "missing retained metadata for fragment {} file {} (base_id {:?})",
+                    fragment.id, data_file.path, data_file.base_id
+                ))
+            })?;
         let field_columns = file_field_columns(data_file, &metadata);
         for (field_id, column_index) in
             physical_column_fields(&field_columns, metadata.column_infos.len())
@@ -306,11 +263,7 @@ pub(crate) async fn estimate_fragment_column_memory(
 
             // Page metadata describes physical rows. Apply the fragment's live
             // row ratio once to obtain the estimate after deletions.
-            let bytes = mul_div_round(
-                estimate_page_column(column),
-                logical_rows,
-                physical_rows,
-            );
+            let bytes = mul_div_round(estimate_page_column(column), logical_rows, physical_rows);
             let estimate = estimates[top_level_index].get_or_insert(0_u64);
             *estimate = estimate.saturating_add(bytes);
         }
@@ -332,6 +285,7 @@ mod tests {
     use super::*;
     use lance_encoding::decoder::PageEncoding;
     use lance_encoding::format::pb21::PageLayout;
+    use std::sync::Arc;
 
     fn test_page(rows: u64, disk_bytes: u64) -> PageInfo {
         PageInfo {
@@ -344,6 +298,94 @@ mod tests {
 
     fn test_column(pages: Vec<PageInfo>) -> ColumnInfo {
         ColumnInfo::new(0, pages.into(), vec![], Default::default())
+    }
+
+    fn test_fragment_metadata() -> (Schema, Fragment, FileMetadataMap) {
+        let schema = Schema::try_from(&arrow_schema::Schema::new(vec![
+            arrow_schema::Field::new("i", DataType::Int32, false),
+            arrow_schema::Field::new("s", DataType::Utf8, false),
+        ]))
+        .unwrap();
+        let mut fragment = Fragment::new(7);
+        fragment.physical_rows = Some(3);
+        let mut files = FileMetadataMap::new();
+        for (column, field) in schema.fields.iter().enumerate() {
+            let data_file = DataFile::new(
+                format!("{column}.lance"),
+                vec![field.id],
+                vec![0],
+                2,
+                1,
+                None,
+                None,
+            );
+            let metadata = CachedFileMetadata {
+                file_schema: Arc::new(schema.clone()),
+                column_metadatas: vec![],
+                column_infos: vec![Arc::new(test_column(vec![test_page(3, 30)]))],
+                num_rows: 3,
+                file_buffers: vec![],
+                num_data_bytes: 0,
+                num_column_metadata_bytes: 0,
+                num_global_buffer_bytes: 0,
+                num_footer_bytes: 0,
+                major_version: 2,
+                minor_version: 1,
+                file_size_bytes: 0,
+            };
+            files.insert(
+                (data_file.base_id, data_file.path.clone()),
+                Arc::new(metadata),
+            );
+            fragment.files.push(data_file);
+        }
+        (schema, fragment, files)
+    }
+
+    #[test]
+    fn estimate_uses_known_deletions_when_manifest_count_is_missing() {
+        let (schema, mut fragment, files) = test_fragment_metadata();
+        fragment.deletion_file = Some(lance_table::format::DeletionFile {
+            read_version: 1,
+            id: 1,
+            file_type: lance_table::format::DeletionFileType::Array,
+            num_deleted_rows: None,
+            base_id: None,
+        });
+        assert!(fragment.num_rows().is_none());
+        let estimates = estimate_fragment_column_memory(&schema, &fragment, &files, 1).unwrap();
+        assert_eq!(estimates.len(), 2);
+        assert_eq!(estimates[0].memory_size, 8);
+        assert_eq!(estimates[1].memory_size, 20);
+    }
+
+    #[test]
+    fn estimate_uses_all_physical_files() {
+        let (schema, fragment, files) = test_fragment_metadata();
+        let estimates = estimate_fragment_column_memory(&schema, &fragment, &files, 0).unwrap();
+        assert_eq!(estimates[0].field_id, schema.fields[0].id);
+        assert_eq!(estimates[0].memory_size, 12);
+        assert_eq!(estimates[1].field_id, schema.fields[1].id);
+        assert_eq!(estimates[1].memory_size, 30);
+    }
+
+    #[test]
+    fn estimate_rejects_missing_footer_and_legacy_files() {
+        let (schema, fragment, mut files) = test_fragment_metadata();
+        files.remove(&(None, fragment.files[1].path.clone()));
+        assert!(estimate_fragment_column_memory(&schema, &fragment, &files, 0).is_err());
+        let (schema, mut fragment, files) = test_fragment_metadata();
+        fragment.files[0].file_major_version = 0;
+        fragment.files[0].file_minor_version = 2;
+        assert!(estimate_fragment_column_memory(&schema, &fragment, &files, 0).is_err());
+    }
+
+    #[test]
+    fn estimate_rejects_more_deletions_than_physical_rows() {
+        let (schema, fragment, files) = test_fragment_metadata();
+        assert!(estimate_fragment_column_memory(&schema, &fragment, &files, 4).is_err());
+        let estimates = estimate_fragment_column_memory(&schema, &fragment, &files, 3).unwrap();
+        assert!(estimates.iter().all(|estimate| estimate.memory_size == 0));
     }
 
     #[test]

@@ -14,10 +14,10 @@
 
 #[path = "filesystem/filesystem_opendal.rs"]
 mod filesystem_opendal;
-#[path = "iceberg/iceberg_opendal.rs"]
-mod iceberg_opendal;
 #[path = "iceberg/iceberg_bridgeimpl.rs"]
 mod iceberg_bridgeimpl;
+#[path = "iceberg/iceberg_opendal.rs"]
+mod iceberg_opendal;
 #[path = "iceberg/iceberg_testutil.rs"]
 mod iceberg_testutil;
 #[path = "lance/lance_bridgeimpl.rs"]
@@ -183,6 +183,7 @@ pub mod lance_ffi {
             storage_options_keys: Vec<String>,
             storage_options_values: Vec<String>,
             data_storage_format: LanceDataStorageFormat,
+            enable_stable_row_ids: bool,
         ) -> Result<Vec<u64>>;
         pub fn delete_rows(
             uri: &str,
@@ -190,6 +191,8 @@ pub mod lance_ffi {
             storage_options_keys: Vec<String>,
             storage_options_values: Vec<String>,
         ) -> Result<()>;
+
+        pub fn externalize_row_ids_for_testing(uri: &str) -> Result<()>;
 
         pub fn version(self: &BlockingDataset) -> u64;
         pub fn get_all_fragment_ids(self: &BlockingDataset) -> Vec<u64>;
@@ -202,22 +205,14 @@ pub mod lance_ffi {
             fragment_id: u64,
         ) -> Result<u64>;
         pub fn get_fragment_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64>;
-        // Top-level dataset columns in schema order.
-        pub fn estimate_fragment_column_memory(
-            dataset: &BlockingDataset,
-            fragment_id: u64,
-        ) -> Result<Vec<LanceColumnMemoryEstimate>>;
-        pub unsafe fn estimate_fragment_column_memory_async(
+        pub unsafe fn get_fragment_row_count_async(
             dataset: &BlockingDataset,
             fragment_id: u64,
             callback: usize,
             context: usize,
         ) -> Result<()>;
-        pub unsafe fn take_column_memory_handle(handle: u64) -> Vec<LanceColumnMemoryEstimate>;
-        pub fn estimate_fragment_memory(
-            dataset: &BlockingDataset,
-            fragment_id: u64,
-        ) -> Result<u64>;
+        type FragmentFilesMetadata;
+        pub unsafe fn take_column_memory_sizes(handle: u64) -> Vec<u64>;
         pub unsafe fn get_fragment_schema(
             dataset: &BlockingDataset,
             fragment_id: u64,
@@ -229,17 +224,30 @@ pub mod lance_ffi {
             dataset: &BlockingDataset,
             fragment_id: u64,
             schema_rawptr: *mut u8,
+            metadata: *const FragmentFilesMetadata,
         ) -> Result<Box<BlockingFragmentReader>>;
         pub unsafe fn open_fragment_reader_async(
             dataset: &BlockingDataset,
             fragment_id: u64,
             schema_rawptr: *mut u8,
+            metadata: *const FragmentFilesMetadata,
             callback: usize,
             context: usize,
         ) -> Result<()>;
         pub unsafe fn take_fragment_reader_handle(handle: u64) -> Box<BlockingFragmentReader>;
 
         // BlockingFragmentReader functions
+        pub fn get_files_metadata(self: &BlockingFragmentReader) -> Box<FragmentFilesMetadata>;
+        // Top-level dataset columns in schema order, using retained footers.
+        pub fn estimate_fragment_column_memory(
+            self: &BlockingFragmentReader,
+        ) -> Result<Vec<LanceColumnMemoryEstimate>>;
+        pub unsafe fn estimate_fragment_column_memory_async(
+            self: &BlockingFragmentReader,
+            callback: usize,
+            context: usize,
+        ) -> Result<()>;
+        pub fn estimate_fragment_memory(self: &BlockingFragmentReader) -> Result<u64>;
         pub fn number_of_rows(self: &BlockingFragmentReader) -> Result<u64>;
         pub unsafe fn take_as_single_batch(
             self: &BlockingFragmentReader,
