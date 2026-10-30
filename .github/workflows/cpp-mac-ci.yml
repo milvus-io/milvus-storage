@@ -77,8 +77,10 @@ jobs:
             echo 'libsodium/*:tools.build:cflags=["-march=armv8-a+crypto+aes"]'
           } >> "${CONAN_HOME:-$HOME/.conan2}/profiles/default"
           conan profile show -pr:h default -pr:b default
-          # || true: Conan 2.x errors if the remote already exists (e.g. restored from cache)
-          conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 || true
+          # --index 0 --force: keep the milvus remote first so its fork recipes
+          # (aws-c-* with aws-c-common/0.14.0) beat identical versions published
+          # later on conancenter (aws-c-event-stream/0.7.1 requires 0.14.5).
+          conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 --index 0 --force || true
           conan remote list
 
       - name: Build
