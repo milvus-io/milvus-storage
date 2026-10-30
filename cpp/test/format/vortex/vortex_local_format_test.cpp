@@ -18,6 +18,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -212,6 +213,56 @@ void AssertLoadableEmptyCellMetas(const VortexCellMetasPtr& cell_metas) {
 }
 
 }  // namespace
+
+TEST(VortexTranslaterResourceTest, EstimatesRequestedCellsAndKeepsScratchPrivate) {
+  auto fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+  auto cell_metas = std::make_shared<VortexCellMetas>(3);
+  (*cell_metas)[0].storage_bytes = 8;
+  (*cell_metas)[0].flat_segment_ranges = {{0, 8}, {4, 8}};
+  (*cell_metas)[1].storage_bytes = 20;
+  (*cell_metas)[1].flat_segment_ranges = {{8, 8}};
+  (*cell_metas)[2].storage_bytes = 16;
+  (*cell_metas)[2].flat_segment_ranges = {{64, 16}};
+  ASSERT_AND_ASSIGN(auto translater, VortexTranslater::Make(cell_metas, fs, "source", fs, "sparse"));
+
+  using milvus::cachinglayer::ResourceUsage;
+  auto usage = translater->estimated_loading_usage({0});
+  EXPECT_EQ(usage.resident, (ResourceUsage{12, 0}));
+  EXPECT_EQ(usage.private_overhead, usage.resident);
+  EXPECT_EQ(usage.shared_overhead, (ResourceUsage{0, 0}));
+
+  usage = translater->estimated_loading_usage({0, 1});
+  // Overlapping cells are still charged independently after loading.
+  EXPECT_EQ(usage.resident, (ResourceUsage{32, 0}));
+  EXPECT_EQ(usage.private_overhead, usage.resident);
+  EXPECT_EQ(usage.shared_overhead, (ResourceUsage{0, 0}));
+
+  usage = translater->estimated_loading_usage({2, 0});
+  EXPECT_EQ(usage.resident, (ResourceUsage{28, 0}));
+  EXPECT_EQ(usage.private_overhead, usage.resident);
+  EXPECT_EQ(usage.shared_overhead, (ResourceUsage{0, 0}));
+
+  usage = translater->estimated_loading_usage({});
+  EXPECT_EQ(usage.resident, (ResourceUsage{0, 0}));
+  EXPECT_EQ(usage.private_overhead, (ResourceUsage{0, 0}));
+  EXPECT_EQ(usage.shared_overhead, (ResourceUsage{0, 0}));
+}
+
+TEST(VortexTranslaterResourceTest, RejectsInvalidCellsAndOverflowingBatches) {
+  auto fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+  auto cell_metas = std::make_shared<VortexCellMetas>(3);
+  (*cell_metas)[0].storage_bytes = std::numeric_limits<int64_t>::max();
+  (*cell_metas)[1].storage_bytes = 1;
+  (*cell_metas)[2].storage_bytes = std::numeric_limits<uint64_t>::max();
+  ASSERT_AND_ASSIGN(auto translater, VortexTranslater::Make(cell_metas, fs, "source", fs, "sparse"));
+
+  EXPECT_EQ(translater->estimated_loading_usage({0}).resident.memory_bytes, std::numeric_limits<int64_t>::max());
+  EXPECT_THROW((void)translater->estimated_loading_usage({-1}), std::out_of_range);
+  EXPECT_THROW((void)translater->estimated_loading_usage({0, 3}), std::out_of_range);
+  EXPECT_THROW((void)translater->estimated_loading_usage({0, 1}), std::overflow_error);
+  EXPECT_THROW((void)translater->estimated_loading_usage({2}), std::overflow_error);
+  EXPECT_THROW((void)translater->estimated_loading_usage({2, 1}), std::overflow_error);
+}
 
 class VortexLocalFormatTest : public ::testing::Test {
   protected:
@@ -578,9 +629,10 @@ TEST_F(VortexLocalFormatTest, TestTranslaterLoadsAndReleasesCellRanges) {
   for (const auto& range : MergeByteRanges((*cell_metas)[0].flat_segment_ranges)) {
     expected_pinned_bytes += range.length;
   }
-  auto [loaded, loading_overhead] = translater->estimated_byte_size_of_cell(0);
-  ASSERT_GT(loaded.memory_bytes, 0);
-  ASSERT_EQ(loaded.memory_bytes, loading_overhead.memory_bytes);
+  const auto usage = translater->estimated_loading_usage({0});
+  ASSERT_GT(usage.resident.memory_bytes, 0);
+  ASSERT_EQ(usage.resident, usage.private_overhead);
+  ASSERT_EQ(usage.shared_overhead, (milvus::cachinglayer::ResourceUsage{0, 0}));
 
   ASSERT_AND_ASSIGN(auto sparse_file, sparse_fs->GetInMemoryFile(kSparsePath));
   ASSERT_EQ(sparse_file->Size(), cgfile.Get<uint64_t>(api::kPropertyFileSize));
@@ -606,7 +658,9 @@ TEST_F(VortexLocalFormatTest, TestTranslaterLoadsAndReleasesCellRanges) {
                     sparse_file->ReadAt(static_cast<int64_t>((*cell_metas)[0].flat_segment_ranges[0].offset), 1));
   ASSERT_EQ(punched_data->data()[0], 0);
 
-  EXPECT_THROW((void)translater->estimated_byte_size_of_cell(translater->num_cells()), std::out_of_range);
+  EXPECT_THROW(
+      (void)translater->estimated_loading_usage({static_cast<milvus::cachinglayer::cid_t>(translater->num_cells())}),
+      std::out_of_range);
   EXPECT_THROW(
       (void)translater->cells_storage_bytes({static_cast<milvus::cachinglayer::cid_t>(translater->num_cells())}),
       std::out_of_range);
