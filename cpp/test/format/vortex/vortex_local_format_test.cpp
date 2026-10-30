@@ -79,8 +79,16 @@ class InMemoryVortexRangeFile : public VortexRangeFile, public arrow::io::Random
     if (end > data_.size()) {
       data_.resize(end);
     }
-    std::memcpy(data_.data() + offset, data->data(), data->size());
-    write_ranges_.push_back(ByteRange{offset, static_cast<uint64_t>(data->size())});
+    const bool fail = static_cast<int64_t>(offset) == write_failure_offset_;
+    const auto written = fail ? data->size() / 2 : data->size();
+    std::memcpy(data_.data() + offset, data->data(), written);
+    write_ranges_.push_back(ByteRange{offset, static_cast<uint64_t>(written)});
+    if (fail) {
+      if (throw_write_failure_) {
+        throw std::runtime_error("injected partial write exception");
+      }
+      return arrow::Status::IOError("injected partial write failure");
+    }
     return arrow::Status::OK();
   }
 
@@ -97,6 +105,9 @@ class InMemoryVortexRangeFile : public VortexRangeFile, public arrow::io::Random
 
     std::memset(out, 0, static_cast<size_t>(nbytes));
     std::lock_guard<std::mutex> lock(mutex_);
+    if (position == read_failure_offset_) {
+      return arrow::Status::IOError("injected source read failure");
+    }
     const auto offset = static_cast<uint64_t>(position);
     if (offset >= data_.size()) {
       return nbytes;
@@ -160,12 +171,26 @@ class InMemoryVortexRangeFile : public VortexRangeFile, public arrow::io::Random
     return write_ranges_;
   }
 
+  void FailReadAt(int64_t offset) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    read_failure_offset_ = offset;
+  }
+
+  void FailWriteAt(int64_t offset, bool throw_failure = false) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    write_failure_offset_ = offset;
+    throw_write_failure_ = throw_failure;
+  }
+
   private:
   mutable std::mutex mutex_;
   std::vector<uint8_t> data_;
   std::vector<ByteRange> write_ranges_;
   int64_t position_ = 0;
   bool closed_ = false;
+  int64_t read_failure_offset_ = -1;
+  int64_t write_failure_offset_ = -1;
+  bool throw_write_failure_ = false;
 };
 
 class InMemoryVortexRangeFileSystem : public arrow::fs::LocalFileSystem, public VortexRangeFileProvider {
@@ -262,6 +287,72 @@ TEST(VortexTranslaterResourceTest, RejectsInvalidCellsAndOverflowingBatches) {
   EXPECT_THROW((void)translater->estimated_loading_usage({0, 1}), std::overflow_error);
   EXPECT_THROW((void)translater->estimated_loading_usage({2}), std::overflow_error);
   EXPECT_THROW((void)translater->estimated_loading_usage({2, 1}), std::overflow_error);
+}
+
+TEST(VortexTranslaterResourceTest, FailedLoadsReleaseRequestedRangesAndCanRetry) {
+  enum class Failure { Read, PartialWrite, WriteException };
+  for (const auto failure : {Failure::Read, Failure::PartialWrite, Failure::WriteException}) {
+    SCOPED_TRACE(static_cast<int>(failure));
+    auto fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+    ASSERT_AND_ASSIGN(auto source, fs->GetInMemoryFile("source"));
+    ASSERT_STATUS_OK(source->WriteAt(0, arrow::Buffer::FromString(std::string(40, 'x'))));
+    ASSERT_AND_ASSIGN(auto sparse, fs->GetInMemoryFile("sparse"));
+    ASSERT_STATUS_OK(sparse->WriteAt(8, arrow::Buffer::FromString(std::string(8, 'f'))));
+
+    auto cell_metas = std::make_shared<VortexCellMetas>(3);
+    for (size_t i = 0; i < cell_metas->size(); ++i) {
+      (*cell_metas)[i].cell_id = i;
+      (*cell_metas)[i].storage_bytes = 8;
+      (*cell_metas)[i].flat_segment_ranges = {{i * 16, 8}};
+    }
+    ASSERT_AND_ASSIGN(auto translater, VortexTranslater::Make(cell_metas, fs, "source", fs, "sparse"));
+    auto retained = translater->get_cells(nullptr, {2});
+    const auto writes_before = sparse->WriteRanges().size();
+
+    // Validate the complete request before creating cleanup owners.
+    EXPECT_THROW((void)translater->get_cells(nullptr, {2, -1}), std::out_of_range);
+    EXPECT_EQ(sparse->WriteRanges().size(), writes_before);
+
+    if (failure == Failure::Read) {
+      source->FailReadAt(16);
+    } else {
+      sparse->FailWriteAt(16, failure == Failure::WriteException);
+    }
+    EXPECT_THROW((void)translater->get_cells(nullptr, {0, 1}), std::runtime_error);
+    const auto writes = sparse->WriteRanges();
+    ASSERT_GT(writes.size(), writes_before);
+    EXPECT_EQ(writes[writes_before].offset, 0u);
+    EXPECT_EQ(writes[writes_before].length, 8u);
+    if (failure != Failure::Read) {
+      EXPECT_EQ(writes.back().offset, 16u);
+      EXPECT_EQ(writes.back().length, 4u);
+    }
+    for (const auto offset : {0, 16}) {
+      ASSERT_AND_ASSIGN(auto data, sparse->ReadAt(offset, 8));
+      EXPECT_EQ(std::string(reinterpret_cast<const char*>(data->data()), 8), std::string(8, '\0'));
+    }
+    ASSERT_AND_ASSIGN(auto footer, sparse->ReadAt(8, 8));
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(footer->data()), 8), std::string(8, 'f'));
+    ASSERT_AND_ASSIGN(auto retained_data, sparse->ReadAt(32, 8));
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(retained_data->data()), 8), std::string(8, 'x'));
+
+    source->FailReadAt(-1);
+    sparse->FailWriteAt(-1);
+    {
+      auto retried = translater->get_cells(nullptr, {0, 1});
+      ASSERT_EQ(retried.size(), 2u);
+      for (const auto offset : {0, 16}) {
+        ASSERT_AND_ASSIGN(auto data, sparse->ReadAt(offset, 8));
+        EXPECT_EQ(std::string(reinterpret_cast<const char*>(data->data()), 8), std::string(8, 'x'));
+      }
+    }
+    for (const auto offset : {0, 16}) {
+      ASSERT_AND_ASSIGN(auto data, sparse->ReadAt(offset, 8));
+      EXPECT_EQ(std::string(reinterpret_cast<const char*>(data->data()), 8), std::string(8, '\0'));
+    }
+    ASSERT_AND_ASSIGN(auto still_retained, sparse->ReadAt(32, 8));
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(still_retained->data()), 8), std::string(8, 'x'));
+  }
 }
 
 class VortexLocalFormatTest : public ::testing::Test {

@@ -180,12 +180,13 @@ std::vector<std::pair<milvus::cachinglayer::cid_t, std::unique_ptr<VortexCellGua
       throw std::out_of_range(fmt::format("Vortex cell id {} is out of range, num_cells={}", cid, cell_metas.size()));
     }
   }
+  // Own the ranges before loading so failures also release partial writes.
+  for (auto cid : cids) {
+    cells.emplace_back(cid, std::make_unique<VortexCellGuard>(cell_metas_, static_cast<uint64_t>(cid), range_file_));
+  }
   auto status = cell_loader_(cids);
   if (!status.ok()) {
     throw std::runtime_error(status.ToString());
-  }
-  for (auto cid : cids) {
-    cells.emplace_back(cid, std::make_unique<VortexCellGuard>(cell_metas_, static_cast<uint64_t>(cid), range_file_));
   }
   return cells;
 }
