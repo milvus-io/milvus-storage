@@ -35,6 +35,13 @@
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
 #ifdef WITH_CRT
+#include <algorithm>
+#include <cstdint>
+#include <fstream>
+#include <arrow/util/thread_pool.h>
+#include <aws/crt/io/Bootstrap.h>
+#include <aws/crt/io/EventLoopGroup.h>
+#include <aws/crt/io/HostResolver.h>
 #include "milvus-storage/filesystem/s3/s3_crt_client.h"
 #endif
 namespace milvus_storage {
@@ -176,6 +183,30 @@ struct AwsInstance {
     if (options.override_default_http_options) {
       aws_options_.httpOptions = options.http_options;
     }
+#ifdef WITH_CRT
+    // Reuse the caller's ConfigureStorageRuntime CPU budget only when Linux
+    // confirms SMT is inactive. The bootstrap is fixed at SDK initialization.
+    static const int cpu_count = [] {
+#ifdef __linux__
+      std::ifstream smt("/sys/devices/system/cpu/smt/active");
+      std::string active;
+      if (smt >> active && active == "0") {
+        // FIXME: Obtain the CPU count from Milvus instead of the Arrow CPU pool capacity.
+        return arrow::GetCpuThreadPoolCapacity();
+      }
+#endif
+      return 0;
+    }();
+    if (cpu_count > 0) {
+      aws_options_.ioOptions.clientBootstrap_create_fn = [] {
+        Aws::Crt::Io::EventLoopGroup event_loops(static_cast<uint16_t>(std::min(cpu_count, 65535)));
+        Aws::Crt::Io::DefaultHostResolver resolver(event_loops, 8, 30);
+        auto bootstrap = Aws::MakeShared<Aws::Crt::Io::ClientBootstrap>("milvus-storage", event_loops, resolver);
+        bootstrap->EnableBlockingShutdown();
+        return bootstrap;
+      };
+    }
+#endif
     Aws::InitAPI(aws_options_);
   }
 
@@ -196,12 +227,8 @@ AwsInstance* GetAwsInstance() {
   return instance.get();
 }
 
-arrow::Result<bool> EnsureAwsInstanceInitialized(const S3GlobalOptions& options) {
-  return GetAwsInstance()->EnsureInitialized(options);
-}
-
 arrow::Status InitializeS3(const S3GlobalOptions& options) {
-  ARROW_ASSIGN_OR_RAISE(bool successfully_initialized, EnsureAwsInstanceInitialized(options));
+  ARROW_ASSIGN_OR_RAISE(const bool successfully_initialized, GetAwsInstance()->EnsureInitialized(options));
   if (!successfully_initialized) {
     return arrow::Status::Invalid(
         "S3 was already initialized.  It is safe to use but the options passed in this "
@@ -209,8 +236,6 @@ arrow::Status InitializeS3(const S3GlobalOptions& options) {
   }
   return arrow::Status::OK();
 }
-
-arrow::Status EnsureS3Initialized() { return EnsureAwsInstanceInitialized(S3GlobalOptions::Defaults()).status(); }
 
 arrow::Status FinalizeS3() {
   // GetAwsInstance()->Finalize();

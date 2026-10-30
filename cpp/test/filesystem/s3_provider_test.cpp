@@ -277,11 +277,7 @@ class S3ProviderTest : public ::testing::Test {
     if (provider.ok() && provider.ValueOrDie() != kCloudProviderAWS) {
       return;
     }
-    ASSERT_TRUE(EnsureS3Initialized().ok());
-    // Register S3 cleanup at process exit, so it runs after all test suites
-    // but before AwsInstance's static destructor (which would warn otherwise).
-    static std::once_flag flag;
-    std::call_once(flag, [] { std::atexit([] { EnsureS3Finalized().ok(); }); });
+    ASSERT_STATUS_OK(S3FileSystemProducer(ArrowFileSystemConfig{}).InitS3());
   }
 
   void SetUp() override {

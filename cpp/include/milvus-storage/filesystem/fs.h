@@ -278,7 +278,7 @@ struct ArrowFileSystemConfig {
   // Tencent COS, GCS S3-compat) will silently ignore the checksum header.
   bool use_crc32c_checksum = false;
 
-  // Whether S3 OpenInputFile should use the AWS CRT-backed async reader when
+  // Whether S3 reads and supported uploads should use AWS CRT when
   // WITH_CRT is enabled. Ignored by non-S3 filesystems and non-CRT builds.
   bool s3_crt_async_read = true;
 
