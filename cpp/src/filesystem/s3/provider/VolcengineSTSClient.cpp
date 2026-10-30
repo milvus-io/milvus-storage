@@ -28,6 +28,8 @@
 #include <aws/core/utils/json/JsonSerializer.h>
 #include <aws/core/utils/xml/XmlSerializer.h>
 #include <aws/core/platform/Environment.h>
+#include <aws/crt/Api.h>
+#include <aws/crt/DateTime.h>
 #include <arrow/result.h>
 #include <arrow/status.h>
 #include <openssl/evp.h>
@@ -41,7 +43,6 @@
 #include <iomanip>
 #include <map>
 #include <mutex>
-#include <regex>
 #include <sstream>
 #include <string>
 #include <random>
@@ -62,55 +63,6 @@ static const int kMinDurationSeconds = 900;    // 15 min
 static const int kMaxDurationSeconds = 43200;  // 12 h
 
 namespace {
-
-// Normalize an RFC3339 timestamp to UTC "...Z" so AWS SDK's ISO_8601 parser
-// returns the correct instant. Accepts:
-//   - "<datetime>(.frac)?Z"        pass-through (fractional seconds dropped)
-//   - "<datetime>(.frac)?[+-]HH:MM" numeric offset, folded to UTC
-//   - "<datetime>(.frac)?[+-]HHMM"  colon-less offset (SDK 1.11.842 silently
-//                                   mis-parses this form), folded to UTC
-// Returns Invalid for any other shape. We intentionally do NOT fall back to
-// the SDK's lax ISO_8601 parse, since WasParseSuccessful() returns true for
-// several offset-bearing strings whose offset the SDK does not apply.
-arrow::Result<std::string> NormalizeToUtcZ(const std::string& s) {
-  static const std::regex re(R"(^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})$)");
-  std::smatch m;
-  if (!std::regex_match(s, m, re)) {
-    return arrow::Status::Invalid("invalid RFC3339 timestamp: ", s);
-  }
-  std::tm tm_in{};
-  tm_in.tm_year = std::stoi(m[1]) - 1900;
-  tm_in.tm_mon = std::stoi(m[2]) - 1;
-  tm_in.tm_mday = std::stoi(m[3]);
-  tm_in.tm_hour = std::stoi(m[4]);
-  tm_in.tm_min = std::stoi(m[5]);
-  tm_in.tm_sec = std::stoi(m[6]);
-  std::time_t t = timegm(&tm_in);  // treat captured fields as UTC, then apply offset below
-  const std::string off = m[7];
-  if (off != "Z") {
-    const int sign = (off[0] == '+') ? -1 : 1;  // "+08:00" -> UTC = local - 8h
-    const int hh = std::stoi(off.substr(1, 2));
-    int mm = 0;
-    if (off.size() == 6) {  // +HH:MM
-      mm = std::stoi(off.substr(4, 2));
-    } else if (off.size() == 5) {  // +HHMM
-      mm = std::stoi(off.substr(3, 2));
-    }
-    t += sign * (hh * 3600 + mm * 60);
-  }
-  // Thread-safe UTC breakdown: `gmtime` returns a pointer to a process-wide
-  // shared tm that concurrent provider refreshes can clobber between here and
-  // strftime. Use the reentrant form with a stack buffer.
-  std::tm utc{};
-  if (gmtime_r(&t, &utc) == nullptr) {
-    return arrow::Status::Invalid("gmtime_r failed for timestamp: ", s);
-  }
-  char buf[32];
-  if (std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &utc) == 0) {
-    return arrow::Status::Invalid("strftime failed for timestamp: ", s);
-  }
-  return std::string(buf);
-}
 
 // Volcengine V4 (HMAC-SHA256) signing primitives. Hand-rolled — the AWS SDK's
 // AWSAuthV4Signer hard-codes 5 things that Volcengine does differently:
@@ -226,16 +178,16 @@ class VolcengineJsonErrorMarshaller final : public Aws::Client::JsonErrorMarshal
   }
 };
 
-// Normalize supported RFC3339 forms before parsing. Credentials without a
-// parseable expiration must be rejected instead of assigning a local TTL.
+// CRT handles numeric timezone offsets directly, retaining the existing second precision.
+// Credentials without a parseable expiration must be rejected instead of assigning a local TTL.
 arrow::Status ParseStsExpiry(const Aws::String& rawExpiry, Aws::Auth::AWSCredentials& creds) {
   const Aws::String trimmed = Aws::Utils::StringUtils::Trim(rawExpiry.c_str());
-  ARROW_ASSIGN_OR_RAISE(const auto normalized, NormalizeToUtcZ(std::string(trimmed.c_str())));
-  const Aws::Utils::DateTime expiration(normalized.c_str(), Aws::Utils::DateFormat::ISO_8601);
-  if (!expiration.WasParseSuccessful()) {
-    return arrow::Status::Invalid("ISO-8601 parser rejected normalized STS expiry: ", normalized);
+  const Aws::Crt::DateTime expiration(trimmed.c_str(), Aws::Crt::DateFormat::ISO_8601);
+  if (!expiration) {
+    return arrow::Status::Invalid("ISO-8601 parser rejected STS expiry: ", trimmed.c_str(), "; ",
+                                  Aws::Crt::ErrorDebugString(expiration.GetLastError()));
   }
-  creds.SetExpiration(expiration);
+  creds.SetExpiration(Aws::Utils::DateTime(expiration.UnderlyingTimestamp()));
   return arrow::Status::OK();
 }
 

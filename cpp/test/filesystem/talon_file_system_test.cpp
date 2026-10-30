@@ -149,9 +149,7 @@ TEST(TalonRawBridgeTest, RejectsInvalidCredentialEndpointBeforeDispatch) {
   properties[PROPERTY_FS_REGION] = std::string("us-west-2");
   properties[PROPERTY_FS_BUCKET_NAME] = std::string("bucket");
   properties[PROPERTY_FS_ROLE_ARN] = std::string("role-secret");
-  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
-  ASSERT_AND_ASSIGN(const auto client, talon::TalonClient::Make(config));
-  const auto result = client->Load({"s3://bucket/empty", 0, ""});
+  const auto result = GetFileSystemConfig(std::make_shared<const api::Properties>(properties));
   ASSERT_FALSE(result.ok());
   EXPECT_TRUE(result.status().IsInvalid());
   EXPECT_EQ(result.status().message().find("broker-secret"), std::string::npos);
