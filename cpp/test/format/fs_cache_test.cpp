@@ -316,7 +316,17 @@ TEST_F(FileSystemCacheTest, AwsBrokerCacheKeyUsesBrokerIdentity) {
   EXPECT_NE(config.GetCacheKey(), changed.GetCacheKey());
   auto native_iam = changed;
   native_iam.credential_endpoint.clear();
-  EXPECT_EQ(changed.GetCacheKey(), native_iam.GetCacheKey());
+  EXPECT_NE(changed.GetCacheKey(), native_iam.GetCacheKey());
+  for (const auto* cloud : {kCloudProviderAWS, kCloudProviderAliyun, kCloudProviderTencent}) {
+    changed.cloud_provider = cloud;
+    auto ignored_targets = changed;
+    ignored_targets.role_arn.clear();
+    ignored_targets.external_id = "unused-external-id";
+    ignored_targets.session_name = "unused-session";
+    ignored_targets.access_key_id = "unused-key";
+    ignored_targets.access_key_value = "unused-secret";
+    EXPECT_EQ(changed.GetCacheKey(), ignored_targets.GetCacheKey());
+  }
   changed = config;
   changed.credential_endpoint.clear();
   EXPECT_NE(config.GetCacheKey(), changed.GetCacheKey());

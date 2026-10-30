@@ -363,12 +363,28 @@ TEST_F(ExternalFilesystemTest, AwsCredentialBrokerExternalConfig) {
     ASSERT_FALSE(result.ok());
     EXPECT_TRUE(result.status().IsInvalid());
 
-    // Native IAM ignores the shared Broker endpoint and does not require a target role.
+    // Broker IAM has no target role, but still validates its active request settings.
     props["extfs.broker.use_iam"] = std::string("true");
     props.erase("extfs.broker.role_arn");
     result = FilesystemCache::resolve_config(props, "s3://s3.us-west-2.amazonaws.com/customer-bucket/file");
+    if (std::string(cloud) == kCloudProviderHuawei) {
+      ASSERT_TRUE(result.ok()) << result.status();
+      EXPECT_FALSE(result->IsAwsCredentialBrokerEnabled());
+      continue;
+    }
+    ASSERT_FALSE(result.ok());
+    EXPECT_TRUE(result.status().IsInvalid());
+    props["extfs.broker.credential_endpoint"] = valid.at("extfs.broker.credential_endpoint");
+    result = FilesystemCache::resolve_config(props, "s3://s3.us-west-2.amazonaws.com/customer-bucket/file");
     ASSERT_TRUE(result.ok()) << result.status();
-    EXPECT_FALSE(result->IsAwsCredentialBrokerEnabled());
+    EXPECT_TRUE(result->IsAwsCredentialBrokerEnabled());
+    for (const auto& [field, value] :
+         {std::pair{"region", ""}, {"request_timeout_ms", "0"}, {"load_frequency", "3601"}}) {
+      auto invalid_iam = props;
+      invalid_iam[std::string("extfs.broker.") + field] = std::string(value);
+      EXPECT_FALSE(
+          FilesystemCache::resolve_config(invalid_iam, "s3://s3.us-west-2.amazonaws.com/customer-bucket/file").ok());
+    }
   }
 }
 

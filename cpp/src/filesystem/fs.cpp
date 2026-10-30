@@ -64,9 +64,9 @@ bool ArrowFileSystemConfig::IsAzureCredentialBrokerEnabled() const {
 }
 
 bool ArrowFileSystemConfig::IsAwsCredentialBrokerEnabled() const {
-  return !use_iam && !credential_endpoint.empty() &&
+  return !credential_endpoint.empty() &&
          (cloud_provider == kCloudProviderAWS || cloud_provider == kCloudProviderAliyun ||
-          cloud_provider == kCloudProviderTencent || cloud_provider == kCloudProviderHuawei);
+          cloud_provider == kCloudProviderTencent || (!use_iam && cloud_provider == kCloudProviderHuawei));
 }
 
 std::string ArrowFileSystemConfig::GetCacheKey() const {
@@ -102,8 +102,11 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
 
   if (IsAwsCredentialBrokerEnabled()) {
     hash_combine(credential_endpoint);
-    hash_combine(role_arn);
-    hash_combine(external_id);
+    hash_combine(use_iam);
+    if (!use_iam) {
+      hash_combine(role_arn);
+      hash_combine(external_id);
+    }
   } else if (IsAzureCredentialBrokerEnabled()) {
     hash_combine(access_key_id);
     hash_combine(azure_client_id);
@@ -282,11 +285,22 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
                         api::GetValue<std::string>(properties_map, PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT));
 
   if (result.IsAwsCredentialBrokerEnabled()) {
-    if (result.region.empty() || result.role_arn.empty() || result.request_timeout_ms <= 0 ||
-        result.load_frequency < 900 || result.load_frequency > 3600) {
-      return arrow::Status::Invalid(
-          "AWS credential broker requires fs.region, fs.role_arn, positive "
-          "fs.request_timeout_ms, and fs.load_frequency in [900, 3600]");
+    if (result.use_iam) {
+      // Broker IAM uses the broker Pod's identity and does not require a target role.
+      if (result.region.empty() || result.request_timeout_ms <= 0 || result.load_frequency < 900 ||
+          result.load_frequency > 3600) {
+        return arrow::Status::Invalid(
+            "AWS credential broker IAM requires fs.region, positive "
+            "fs.request_timeout_ms, and fs.load_frequency in [900, 3600]");
+      }
+    } else {
+      // AssumeRole requires the target role; external_id remains optional.
+      if (result.region.empty() || result.role_arn.empty() || result.request_timeout_ms <= 0 ||
+          result.load_frequency < 900 || result.load_frequency > 3600) {
+        return arrow::Status::Invalid(
+            "AWS credential broker AssumeRole requires fs.region, fs.role_arn, positive "
+            "fs.request_timeout_ms, and fs.load_frequency in [900, 3600]");
+      }
     }
     arrow::util::Uri endpoint;
     const auto status = endpoint.Parse(result.credential_endpoint);

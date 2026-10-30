@@ -198,6 +198,8 @@ struct ArrowFileSystemConfig {
   // S3 temporary credentials can come from this HTTP(S) broker or native cloud APIs.
   // An empty endpoint keeps native AssumeRole, IAM or explicit AK/SK selection.
   // S3-compatible providers share the AWS STS broker contract (csp=aws).
+  // With an endpoint and use_iam=true, AWS, Aliyun and Tencent use the broker's
+  // own IAM identity, with csp=aws/ali/tc respectively.
   // Azure retains fs.azure_credential_endpoint on the 3.0 branch.
 
   // AssumeRole credentials for supported S3 / S3-compatible providers.
@@ -279,12 +281,13 @@ struct ArrowFileSystemConfig {
   [[nodiscard]] bool IsAzureCredentialBrokerEnabled() const;
 
   /**
-   * @brief Return whether AWS STS broker authentication was requested for S3.
+   * @brief Return whether credential broker authentication was requested for S3.
    *
-   * S3 and S3-compatible providers use the same broker contract when
-   * credential_endpoint is non-empty and use_iam is false. Required broker
-   * settings are validated separately; use_iam or an empty endpoint keeps
-   * native role/IAM/AKSK selection.
+   * A non-empty credential_endpoint selects the broker for AWS, Aliyun and
+   * Tencent: use_iam chooses the broker's own identity, otherwise a target role.
+   * Huawei supports only the existing AWS STS broker contract.
+   * Required settings are validated separately; an empty endpoint keeps native
+   * role/IAM/AKSK selection.
    */
   [[nodiscard]] bool IsAwsCredentialBrokerEnabled() const;
 
