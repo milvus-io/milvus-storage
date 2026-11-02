@@ -82,14 +82,22 @@ class OAuth2BearerProvider : public GcpCredentialProvider {
     return arrow::Status::OK();
   }
 
+  bool IssuesBearerToken() const override { return true; }
+
+  std::string Identity() const override { return identity_; }
+
   protected:
   OAuth2BearerProvider(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials,
-                       std::string credential_type)
-      : credentials_(std::move(credentials)), credential_type_(std::move(credential_type)) {}
+                       std::string credential_type,
+                       std::string identity)
+      : credentials_(std::move(credentials)),
+        credential_type_(std::move(credential_type)),
+        identity_(std::move(identity)) {}
 
   private:
   std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials_;
   std::string credential_type_;
+  std::string identity_;
   std::once_flag success_log_once_;
 };
 
@@ -98,8 +106,8 @@ class OAuth2BearerProvider : public GcpCredentialProvider {
 class IamVmProvider : public OAuth2BearerProvider {
   public:
   IamVmProvider()
-      : OAuth2BearerProvider(MakeInternalCredentials(google::cloud::MakeGoogleDefaultCredentials()),
-                             "application_default") {}
+      : OAuth2BearerProvider(
+            MakeInternalCredentials(google::cloud::MakeGoogleDefaultCredentials()), "application_default", "iam") {}
 };
 
 // Service Account Impersonation: VM/ADC identity impersonates a target SA,
@@ -109,7 +117,8 @@ class IamImpersonateProvider : public OAuth2BearerProvider {
   IamImpersonateProvider(const std::string& target_service_account, int token_lifetime_seconds)
       : OAuth2BearerProvider(
             MakeInternalCredentials(MakeImpersonationPublicCreds(target_service_account, token_lifetime_seconds)),
-            "service_account_impersonation") {}
+            "service_account_impersonation",
+            "impersonate:" + target_service_account) {}
 
   private:
   static std::shared_ptr<google::cloud::Credentials> MakeImpersonationPublicCreds(const std::string& target_sa,
@@ -132,6 +141,10 @@ class HmacProvider : public GcpCredentialProvider {
       : access_key_(std::move(access_key)), secret_key_(std::move(secret_key)) {}
 
   std::optional<std::pair<std::string, std::string>> AuthorizationHeader() override { return std::nullopt; }
+
+  bool IssuesBearerToken() const override { return false; }
+
+  std::string Identity() const override { return "hmac:" + access_key_; }
 
   arrow::Status MaybeSignConditionalWrite(const std::shared_ptr<Aws::Http::HttpRequest>& request) override {
     // Only re-sign conditional writes; GCS rejects SigV4 Authorization for
