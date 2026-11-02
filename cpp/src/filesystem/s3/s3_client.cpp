@@ -252,6 +252,7 @@ S3Model::CompleteMultipartUploadOutcome S3Client::CompleteMultipartUploadWithErr
     auto outcome = Aws::S3::S3Client::S3Client::CompleteMultipartUpload(request);
     if (!outcome.IsSuccess()) {
       // Error returned in HTTP headers (or client failure)
+      metrics_->IncrementFailedCount();
       return outcome;
     }
     if (!aws_error.has_value()) {

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Run native S3 tests against an isolated in-memory HTTP fixture (no AWS account).
 
-Run only inside wt-build. Delayed responses expose synchronous request waits;
+Delayed responses expose synchronous request waits;
 this fixture does not establish real-service authentication/TLS compatibility.
 """
 import http.server
+import io
 import hashlib
 import hmac
 import uuid
@@ -27,6 +28,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     attempts = {}
     metadata = {}
     uploads = {}
+    upload_condition = threading.Condition()
+    started_parts = {}
+    released_parts = set()
+    aborted_uploads = set()
 
     def log_message(self, *_):
         pass
@@ -46,6 +51,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
+
+    @staticmethod
+    def read_chunks(stream):
+        chunks = []
+        while True:
+            size = int(stream.readline().split(b";", 1)[0].strip(), 16)
+            if size == 0:
+                while stream.readline().strip():
+                    pass
+                return b"".join(chunks)
+            data = stream.read(size)
+            if len(data) != size or stream.read(2) != b"\r\n":
+                raise ValueError("Incomplete chunked request")
+            chunks.append(data)
+
+    def read_body(self):
+        if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+            body = self.read_chunks(self.rfile)
+        else:
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        if "aws-chunked" in self.headers.get("Content-Encoding", ""):
+            body = self.read_chunks(io.BytesIO(body))
+        return body
 
     def valid_google_signature(self, body):
         # Recompute from bytes received on the wire. This catches CRT changing
@@ -83,8 +111,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             print(self.command, self.path, self.headers.get("Range"), flush=True)
         if not self.path.startswith("/") and "Range" not in self.headers:
             return self.reply(400, b"<Error><Code>InvalidRequestTarget</Code></Error>")
-        if (self.command in ("POST", "PUT") and "Content-Length" not in self.headers
-                and self.headers.get("Transfer-Encoding", "").lower() != "chunked"):
+        if (
+            self.command in ("POST", "PUT")
+            and "Content-Length" not in self.headers
+            and self.headers.get("Transfer-Encoding", "").lower() != "chunked"
+        ):
             return self.reply(411)
         uri = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(uri.path).lstrip("/")
@@ -98,6 +129,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply(200, b"<ListAllMyBucketsResult><Buckets><Bucket><Name>bucket</Name></Bucket></Buckets></ListAllMyBucketsResult>")
         if bucket != "bucket":
             return self.reply(404)
+        if key.startswith("root/upload-started/") and self.command == "HEAD":
+            part = key.removeprefix("root/upload-started/")
+            with self.upload_condition:
+                started = self.upload_condition.wait_for(lambda: part in self.started_parts, timeout=5)
+            return self.reply(200 if started else 404, length=self.started_parts.get(part, 0))
+        if key.startswith("root/upload-aborted/") and self.command == "HEAD":
+            with self.upload_condition:
+                aborted = key.removeprefix("root/upload-aborted/") in self.aborted_uploads
+            return self.reply(200 if aborted else 404)
+        if key.startswith("root/upload-release/") and self.command == "HEAD":
+            return self.reply(200)
         if key.startswith("root/credential-check/") and self.command == "HEAD":
             generation = key.rsplit("/", 1)[1]
             auth = self.headers.get("Authorization", "")
@@ -114,30 +156,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if key == "root/denied":
             return self.reply(403, b"<Error><Code>AccessDenied</Code></Error>")
         if self.command in ("PUT", "POST", "DELETE"):
-            if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
-                chunks = []
-                while True:
-                    size = int(self.rfile.readline().split(b";", 1)[0].strip(), 16)
-                    if not size:
-                        while self.rfile.readline().strip():
-                            pass
-                        break
-                    chunks.append(self.rfile.read(size))
-                    assert self.rfile.read(2) == b"\r\n"
-                body = b"".join(chunks)
-            else:
-                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            if "aws-chunked" in self.headers.get("Content-Encoding", ""):
-                import io
-                encoded = io.BytesIO(body)
-                chunks = []
-                while True:
-                    size = int(encoded.readline().split(b";", 1)[0].strip(), 16)
-                    if not size:
-                        break
-                    chunks.append(encoded.read(size))
-                    assert encoded.read(2) == b"\r\n"
-                body = b"".join(chunks)
+            body = self.read_body()
+            if key.startswith("root/upload-release/") and self.command == "DELETE":
+                part = key.removeprefix("root/upload-release/")
+                with self.upload_condition:
+                    self.released_parts.add(part)
+                    self.upload_condition.notify_all()
+                return self.reply(204)
+            if key.startswith("root/held/") and self.command == "PUT" and "partNumber" in query:
+                part = key.removeprefix("root/held/") + "/" + query["partNumber"][0]
+                with self.upload_condition:
+                    self.started_parts[part] = len(body)
+                    self.upload_condition.notify_all()
+                    released = self.upload_condition.wait_for(lambda: part in self.released_parts, timeout=15)
+                if not released:
+                    return self.reply(400, b"<Error><Code>RequestTimeout</Code></Error>")
+                if key == "root/held/failed-wait":
+                    return self.reply(403, b"<Error><Code>AccessDenied</Code></Error>")
             if key.startswith("root/service-error/"):
                 code = key.rsplit("/", 1)[1]
                 http_status = {"AccessDenied": 400, "SlowDown": 400, "InternalError": 500, "RequestTimeout": 400,
@@ -160,10 +195,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.reply(200, ("<DeleteResult>" + deleted + "</DeleteResult>").encode())
             if self.command == "DELETE" and "uploadId" in query:
                 self.uploads.pop(query["uploadId"][0], None)
+                with self.upload_condition:
+                    self.aborted_uploads.add(key.removeprefix("root/"))
                 return self.reply(204)
             if self.command == "POST" and "uploads" in query:
                 upload_id = str(uuid.uuid4())
-                self.uploads[upload_id] = {"parts": {}, "key": key}
+                self.uploads[upload_id] = {
+                    "parts": {}, "key": key,
+                    "metadata": {k: v for k, v in self.headers.items()
+                                 if k.lower().startswith("x-amz-meta-") or k.lower() == "content-type"},
+                }
                 return self.reply(200, ("<InitiateMultipartUploadResult><UploadId>" + upload_id +
                                        "</UploadId></InitiateMultipartUploadResult>").encode())
             if "uploadId" in query:
@@ -188,8 +229,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if "If-Match" in self.headers and self.headers["If-Match"] != '"8aa99b1f439ff71293e95357bac6fd94"':
                 return self.reply(412)
             self.objects[key] = body
-            self.metadata[key] = {k: v for k, v in self.headers.items()
-                                  if k.lower().startswith("x-amz-meta-") or k.lower() == "content-type"}
+            # Multipart object metadata is set at creation, not completion.
+            if "uploadId" in query:
+                self.metadata[key] = upload["metadata"]
+            else:
+                self.metadata[key] = {k: v for k, v in self.headers.items()
+                                      if k.lower().startswith("x-amz-meta-") or k.lower() == "content-type"}
             if self.command == "POST":
                 self.uploads.pop(query["uploadId"][0], None)
                 return self.reply(200, b'<CompleteMultipartUploadResult><ETag>"8aa99b1f439ff71293e95357bac6fd94"</ETag></CompleteMultipartUploadResult>')
@@ -265,9 +310,17 @@ def main():
     thread.start()
     env = dict(os.environ, NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost", AWS_EC2_METADATA_DISABLED="true", STORAGE_NATIVE_S3_ENDPOINT=f"127.0.0.1:{server.server_port}")
     try:
-        result = subprocess.run(sys.argv[1:] or ["cpp/build/Release/test/milvus_test", "--gtest_filter=NativeS3*"],
-                                env=env, timeout=180)
-        return result.returncode
+        # The native shutdown suite finalizes AWS globally. Run parallel upload tests
+        # in their own process so upload tests cannot follow shutdown.
+        commands = [sys.argv[1:]] if sys.argv[1:] else [
+            ["cpp/build/Release/test/milvus_test", "--gtest_filter=ParallelUploadS3Test.*"],
+            ["cpp/build/Release/test/milvus_test", "--gtest_filter=NativeS3*"],
+        ]
+        for command in commands:
+            result = subprocess.run(command, env=env, timeout=180)
+            if result.returncode:
+                return result.returncode
+        return 0
     finally:
         server.shutdown()
         server.server_close()

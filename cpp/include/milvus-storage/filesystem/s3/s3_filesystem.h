@@ -90,6 +90,10 @@ class S3FileSystem : public arrow::fs::FileSystem, public UploadConditional, pub
   arrow::Future<std::shared_ptr<arrow::io::InputStream>> OpenInputStreamAsync(const std::string& path) override;
   arrow::Future<std::shared_ptr<arrow::io::InputStream>> OpenInputStreamAsync(const FileInfo& info) override;
 
+  // GCP uploads use the SDK path. Other providers use streaming multipart
+  // uploads when built with CRT and use_crt_async_reads is enabled, including
+  // small objects. Their public async completions use io_context().executor(), which must remain
+  // available and schedule callbacks off CRT threads until completion.
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override;
 

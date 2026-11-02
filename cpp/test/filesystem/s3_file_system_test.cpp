@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <arrow/testing/gtest_util.h>
+#include <arrow/util/thread_pool.h>
 #include <arrow/buffer.h>
 #include <arrow/io/memory.h>
 #include <gtest/gtest.h>
@@ -21,10 +22,12 @@
 #include <array>
 #include <atomic>
 #include <cstdlib>
+#include <fstream>
 #include <iterator>
 #include <memory>
 #include <sstream>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 
 #include <boost/filesystem/path.hpp>
@@ -33,11 +36,17 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 
+#include <aws/core/Globals.h>
+#include <aws/crt/io/Bootstrap.h>
+#include <aws/io/channel_bootstrap.h>
+#include <aws/io/event_loop.h>
 #include <aws/core/http/standard/StandardHttpRequest.h>
 #include <aws/core/http/standard/StandardHttpResponse.h>
 #include <aws/core/utils/stream/ResponseStream.h>
 #include <aws/s3/model/PutObjectResult.h>
+#include <aws/s3/model/CompleteMultipartUploadRequest.h>
 
+#include "milvus-storage/thread_pool.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/upload_sizable.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
@@ -61,6 +70,41 @@ Aws::IOStreamFactory AwsWriteableStreamFactory(void* data, int64_t nbytes);
 // Non-cloud unit tests — S3 SDK initialized but no real cloud connection needed
 // ============================================================================
 
+// SDK initialization is process-wide and cannot be reset by a normal fixture.
+TEST(S3SdkInitializationDeathTest, ConfiguresSharedBootstrap) {
+  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+  ASSERT_EXIT(
+      {
+        auto check = [] {
+          ASSERT_STATUS_OK(ConfigureStorageRuntime(3, 2));
+          ASSERT_STATUS_OK(InitializeS3(S3GlobalOptions::Defaults()));
+          auto* bootstrap = Aws::GetDefaultClientBootstrap();
+          ASSERT_NE(bootstrap, nullptr);
+          ASSERT_TRUE(*bootstrap);
+          const auto threads = aws_event_loop_group_get_loop_count(bootstrap->GetUnderlyingHandle()->event_loop_group);
+          EXPECT_GT(threads, 0);
+#if defined(WITH_CRT) && defined(__linux__)
+          std::ifstream smt("/sys/devices/system/cpu/smt/active");
+          std::string active;
+          if (smt >> active && active == "0") {
+            EXPECT_EQ(threads, 3);
+          }
+#endif
+          EXPECT_TRUE(InitializeS3(S3GlobalOptions::Defaults()).IsInvalid());
+          S3FileSystemProducer producer(ArrowFileSystemConfig{});
+          EXPECT_TRUE(producer.InitS3().IsInvalid());
+          EXPECT_EQ(Aws::GetDefaultClientBootstrap(), bootstrap);
+          ASSERT_STATUS_OK(FinalizeS3());
+          EXPECT_TRUE(InitializeS3(S3GlobalOptions::Defaults()).IsInvalid());
+          EXPECT_EQ(Aws::GetDefaultClientBootstrap(), nullptr);
+          ASSERT_STATUS_OK(FinalizeS3());
+        };
+        check();
+        std::_Exit(::testing::Test::HasFailure() ? 1 : 0);
+      },
+      ::testing::ExitedWithCode(0), "");
+}
+
 class S3UnitTest : public ::testing::Test {
   protected:
   void SetUp() override {
@@ -74,24 +118,24 @@ class S3UnitTest : public ::testing::Test {
     if (provider.ok() && provider.ValueOrDie() != kCloudProviderAWS) {
       return;
     }
-    ASSERT_TRUE(EnsureS3Initialized().ok());
+    ASSERT_STATUS_OK(S3FileSystemProducer(ArrowFileSystemConfig{}).InitS3());
   }
 };
 
-// Exercise the real SDK HTTP/error parser, including responses larger than the
-// caller's read buffer. Async server operations let teardown stop a failed test.
-class S3ReadResponseServer {
+// Exercise the real SDK HTTP/error parser with controlled read and upload responses.
+// Async server operations let teardown stop a failed test.
+class S3ResponseServer {
   using Tcp = boost::asio::ip::tcp;
   using Response = boost::beast::http::response<boost::beast::http::string_body>;
 
   public:
-  explicit S3ReadResponseServer(std::vector<Response> responses)
+  explicit S3ResponseServer(std::vector<Response> responses)
       : acceptor_(context_, {boost::asio::ip::address_v4::loopback(), 0}), responses_(std::move(responses)) {
     Accept();
     thread_ = std::thread([this] { context_.run(); });
   }
 
-  ~S3ReadResponseServer() {
+  ~S3ResponseServer() {
     context_.stop();
     thread_.join();
   }
@@ -107,26 +151,48 @@ class S3ReadResponseServer {
       if (error) {
         return;
       }
-      request_ = {};
+      parser_ = std::make_unique<boost::beast::http::request_parser<boost::beast::http::string_body>>();
+      parser_->body_limit(20 * 1024 * 1024);
       buffer_.consume(buffer_.size());
-      boost::beast::http::async_read(
-          *socket_, buffer_, request_, [this](const boost::system::error_code& read_error, size_t) {
+      boost::beast::http::async_read_header(
+          *socket_, buffer_, *parser_, [this](const boost::system::error_code& read_error, size_t) {
             if (read_error) {
               return;
             }
-            if (request_.method() != boost::beast::http::verb::get) {
-              only_gets_ = false;
+            if (parser_->get()[boost::beast::http::field::expect] == "100-continue") {
+              boost::beast::http::async_write(*socket_, continue_response_,
+                                              [this](const boost::system::error_code& error, size_t) {
+                                                if (!error) {
+                                                  ReadBody();
+                                                }
+                                              });
+            } else {
+              ReadBody();
             }
-            const auto index = requests_.fetch_add(1);
-            auto& response = responses_[std::min(index, responses_.size() - 1)];
-            response.keep_alive(false);
-            response.prepare_payload();
-            boost::beast::http::async_write(*socket_, response, [this](const boost::system::error_code&, size_t) {
-              boost::system::error_code ignored;
-              socket_->close(ignored);
-              Accept();
-            });
           });
+    });
+  }
+
+  void ReadBody() {
+    boost::beast::http::async_read(*socket_, buffer_, *parser_, [this](const boost::system::error_code& error, size_t) {
+      if (error) {
+        return;
+      }
+      if (parser_->get().method() != boost::beast::http::verb::get) {
+        only_gets_ = false;
+      }
+      const auto index = requests_.fetch_add(1);
+      auto& response = responses_[std::min(index, responses_.size() - 1)];
+      response.keep_alive(false);
+      // An explicit length allows tests to send a deliberately truncated response.
+      if (!response.has_content_length()) {
+        response.prepare_payload();
+      }
+      boost::beast::http::async_write(*socket_, response, [this](const boost::system::error_code&, size_t) {
+        boost::system::error_code ignored;
+        socket_->close(ignored);
+        Accept();
+      });
     });
   }
 
@@ -134,7 +200,9 @@ class S3ReadResponseServer {
   Tcp::acceptor acceptor_;
   std::unique_ptr<Tcp::socket> socket_;
   boost::beast::flat_buffer buffer_;
-  boost::beast::http::request<boost::beast::http::string_body> request_;
+  std::unique_ptr<boost::beast::http::request_parser<boost::beast::http::string_body>> parser_;
+  boost::beast::http::response<boost::beast::http::empty_body> continue_response_{boost::beast::http::status::continue_,
+                                                                                  11};
   std::vector<Response> responses_;
   std::atomic<size_t> requests_{0};
   std::atomic<bool> only_gets_{true};
@@ -227,7 +295,7 @@ TEST_P(S3ReadResponseTest, PreservesErrorsLargerThanReadBuffer) {
     response.set(http::field::content_type, "application/xml");
     response.body() = "<?xml version=\"1.0\"?><Error><Code>" + code +
                       "</Code><Message>original service diagnostic must survive a small read</Message></Error>";
-    S3ReadResponseServer server({std::move(response)});
+    S3ResponseServer server({std::move(response)});
     auto options = S3Options::FromAccessKey("ak", "sk");
     options.region = "us-east-1";
     options.scheme = "http";
@@ -282,7 +350,7 @@ TEST_P(S3ReadResponseTest, RetriesErrorThenReadsIntoCallerBuffer) {
   success.set(http::field::etag, "\"4032af8d61035123906e58e067140cc5\"");
   success.set(http::field::content_range, "bytes 0-15/16");
   success.body() = "0123456789abcdef";
-  S3ReadResponseServer server({std::move(error), std::move(success)});
+  S3ResponseServer server({std::move(error), std::move(success)});
   auto options = S3Options::FromAccessKey("ak", "sk");
   options.region = "us-east-1";
   options.scheme = "http";
@@ -333,7 +401,7 @@ TEST_P(S3ReadResponseTest, ReadsMultiplePartsAndPreservesLaterErrors) {
                                                "/" + std::to_string(total_size));
       last.body() = std::string(16, 'b');
     }
-    S3ReadResponseServer server({std::move(first), std::move(last)});
+    S3ResponseServer server({std::move(first), std::move(last)});
     auto options = S3Options::FromAccessKey("ak", "sk");
     options.region = "us-east-1";
     options.scheme = "http";
@@ -374,6 +442,93 @@ INSTANTIATE_TEST_SUITE_P(SdkAndCrt, S3ReadResponseTest, ::testing::Bool());
 #else
 INSTANTIATE_TEST_SUITE_P(Sdk, S3ReadResponseTest, ::testing::Values(false));
 #endif
+
+// Both SDK and CRT uploads preserve service errors and permit cleanup afterward.
+TEST_F(S3UnitTest, UploadErrorsPreserveServiceDetails) {
+  namespace http = boost::beast::http;
+  for (const auto& [http_status, code, expected] :
+       {std::tuple{http::status::forbidden, "AccessDenied", ExtendStatusCode::AwsErrorAccessDenied},
+        std::tuple{http::status::precondition_failed, "PreconditionFailed",
+                   ExtendStatusCode::AwsErrorPreConditionFailed}}) {
+    SCOPED_TRACE(code);
+    http::response<http::string_body> response{http_status, 11};
+    response.set(http::field::content_type, "application/xml");
+    response.body() = std::string("<Error><Code>") + code + "</Code><Message>upload rejected</Message></Error>";
+    S3ResponseServer server({std::move(response)});
+    auto options = S3Options::FromAccessKey("ak", "sk");
+    options.region = "us-east-1";
+    options.scheme = "http";
+    options.endpoint_override = server.endpoint();
+    options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
+    options.connect_timeout = 2;
+    options.request_timeout = 5;
+    ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+    ASSERT_AND_ASSIGN(auto stream, fs->OpenOutputStream("bucket/object", nullptr));
+    ASSERT_STATUS_OK(stream->Write(arrow::Buffer::FromString("data")));
+    const auto status = stream->CloseAsync().status();
+    ASSERT_FALSE(status.ok());
+    const auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), expected);
+    EXPECT_NE(status.message().find("upload rejected"), std::string::npos);
+    ASSERT_AND_ASSIGN(auto metrics, fs->GetMetrics(kOriginMetricsSource));
+    EXPECT_EQ(metrics->GetFailedCount(), 1);
+    EXPECT_EQ(server.requests(), 1);
+    ASSERT_STATUS_OK(stream->Abort());
+  }
+}
+
+TEST_F(S3UnitTest, TruncatedUploadResponseIsNotSuccess) {
+  namespace http = boost::beast::http;
+  http::response<http::string_body> response{http::status::ok, 11};
+  response.content_length(100);
+  response.body() = "incomplete";
+  S3ResponseServer server({std::move(response)});
+  auto options = S3Options::FromAccessKey("ak", "sk");
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = server.endpoint();
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
+  options.connect_timeout = 2;
+  options.request_timeout = 5;
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  ASSERT_AND_ASSIGN(auto stream, fs->OpenOutputStream("bucket/object", nullptr));
+  ASSERT_STATUS_OK(stream->Write(arrow::Buffer::FromString("data")));
+  const auto status = stream->CloseAsync().status();
+  ASSERT_FALSE(status.ok());
+  const auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status;
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork);
+  ASSERT_STATUS_OK(stream->Abort());
+}
+
+TEST_F(S3UnitTest, MultipartCompletionErrorCountsFailure) {
+  namespace http = boost::beast::http;
+  http::response<http::string_body> response{http::status::ok, 11};
+  response.set(http::field::content_type, "application/xml");
+  response.body() = "<Error><Code>AccessDenied</Code><Message>completion rejected</Message></Error>";
+  S3ResponseServer server({std::move(response)});
+  auto options = S3Options::FromAccessKey("ak", "sk");
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = server.endpoint();
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
+  options.connect_timeout = 2;
+  options.request_timeout = 5;
+  ASSERT_AND_ASSIGN(auto holder, ClientBuilder<S3Client>(options).BuildClient());
+  ASSERT_AND_ASSIGN(auto client, holder->Lock());
+  Aws::S3::Model::CompleteMultipartUploadRequest request;
+  request.SetBucket("bucket");
+  request.SetKey("object");
+  request.SetUploadId("upload-id");
+  const auto outcome = client->CompleteMultipartUploadWithErrorFixup(std::move(request));
+  ASSERT_FALSE(outcome.IsSuccess());
+  EXPECT_EQ(outcome.GetError().GetErrorType(), Aws::S3::S3Errors::ACCESS_DENIED);
+  EXPECT_NE(outcome.GetError().GetMessage().find("completion rejected"), Aws::String::npos);
+  EXPECT_EQ(client->GetMetrics()->GetFailedCount(), 1);
+  EXPECT_EQ(client->GetMetrics()->GetMultiPartUploadFinished(), 1);
+  EXPECT_EQ(server.requests(), 1);
+}
 
 TEST_F(S3UnitTest, TestExtendErrorInFs) {
   Aws::Client::AWSError<Aws::S3::S3Errors> test_err(Aws::S3::S3Errors::NO_SUCH_UPLOAD,
