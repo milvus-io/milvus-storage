@@ -939,8 +939,7 @@ TEST_F(CloudFsTest, ConditionalMultipartPreservesExistingObject) {
     GTEST_SKIP() << "Requires S3 multipart upload";
   }
   ASSERT_FALSE(api::SetValue(properties_, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE, "10485760").has_value());
-  const auto properties = std::make_shared<const api::Properties>(properties_);
-  ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
+  ASSERT_AND_ASSIGN(auto fs, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
   auto conditional = std::dynamic_pointer_cast<UploadConditional>(fs);
   ASSERT_NE(conditional, nullptr);
   if (provider == "huawei") {
@@ -953,13 +952,6 @@ TEST_F(CloudFsTest, ConditionalMultipartPreservesExistingObject) {
     ASSERT_STATUS_OK(out->Abort());
     return;
   }
-#ifdef WITH_CRT
-  // CRT owns multipart scheduling; SDK multipart counters are not incremented.
-  ASSERT_AND_ASSIGN(const auto use_crt, api::GetValue<bool>(properties, PROPERTY_FS_S3_CRT_ASYNC_READ));
-  const int64_t multipart_increment = use_crt ? 0 : 1;
-#else
-  constexpr int64_t multipart_increment = 1;
-#endif
   auto observable = std::dynamic_pointer_cast<Observable>(fs);
   ASSERT_NE(observable, nullptr);
   ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kOriginMetricsSource));
@@ -972,15 +964,15 @@ TEST_F(CloudFsTest, ConditionalMultipartPreservesExistingObject) {
   ASSERT_AND_ASSIGN(auto out, conditional->OpenConditionalOutputStream(path, nullptr));
   ASSERT_STATUS_OK(out->Write(arrow::Buffer::FromString(std::string(size, 'a'))));
   ASSERT_STATUS_OK(out->Close());
-  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), created + multipart_increment);
-  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), finished + multipart_increment);
+  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), created + 1);
+  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), finished + 1);
   ASSERT_AND_ASSIGN(auto conflict, conditional->OpenConditionalOutputStream(path, nullptr));
   auto rejected = conflict->Write(arrow::Buffer::FromString(std::string(size, 'b')));
   const bool rejected_on_write = !rejected.ok();
   if (!rejected_on_write)
     rejected = conflict->Close();
   EXPECT_FALSE(rejected.ok());
-  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), created + 2 * multipart_increment);
+  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), created + 2);
   std::cout << "Conditional conflict reported by " << (rejected_on_write ? "Write" : "Close") << std::endl;
   ASSERT_STATUS_OK(conflict->Abort());
   ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile(path));

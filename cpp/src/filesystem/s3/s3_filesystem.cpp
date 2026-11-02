@@ -1991,6 +1991,7 @@ class S3CrtOutputStream final : public arrow::io::OutputStream, public AsyncOutp
     config.checksum_config = options.use_crc32c_checksum ? &checksum : nullptr;
     config.headers_callback = UploadState::Headers;
     config.progress_callback = UploadState::Progress;
+    config.telemetry_callback = UploadState::Telemetry;
     config.finish_callback = UploadState::Finish;
     config.shutdown_callback = UploadState::Shutdown;
     auto callback = std::make_unique<std::shared_ptr<UploadState>>(upload_);
@@ -2002,7 +2003,6 @@ class S3CrtOutputStream final : public arrow::io::OutputStream, public AsyncOutp
       return arrow::Status::IOError("CRT rejected S3 upload: ", aws_error_str(aws_last_error()));
     }
     callback.release();
-    upload_->metrics->IncrementWriteCount();
     return arrow::Status::OK();
   }
 
@@ -2085,6 +2085,37 @@ class S3CrtOutputStream final : public arrow::io::OutputStream, public AsyncOutp
       auto& upload = FromCallback(user);
       if (!upload.token.Poll().ok()) {
         upload.Cancel();
+      }
+    }
+
+    static void Telemetry(aws_s3_meta_request*, aws_s3_request_metrics* request_metrics, void* user) noexcept {
+      // Match SDK operation counts, which exclude internal HTTP retries.
+      if (aws_s3_request_metrics_get_retry_attempt(request_metrics) != 0) {
+        return;
+      }
+      auto& metrics = *FromCallback(user).metrics;
+      aws_s3_request_type type;
+      aws_s3_request_metrics_get_request_type(request_metrics, &type);
+      switch (type) {
+        case AWS_S3_REQUEST_TYPE_CREATE_MULTIPART_UPLOAD:
+          metrics.IncrementMultiPartUploadCreated();
+          break;
+        case AWS_S3_REQUEST_TYPE_UPLOAD_PART: {
+          uint64_t start, end;
+          aws_s3_request_metrics_get_part_range_start(request_metrics, &start);
+          aws_s3_request_metrics_get_part_range_end(request_metrics, &end);
+          // At an exact part boundary CRT emits an empty tail without sending HTTP.
+          // Its inclusive range is inverted; a genuinely empty first part starts at 0.
+          if (end >= start) {
+            metrics.IncrementWriteCount();
+          }
+          break;
+        }
+        case AWS_S3_REQUEST_TYPE_COMPLETE_MULTIPART_UPLOAD:
+          metrics.IncrementMultiPartUploadFinished();
+          break;
+        default:
+          break;
       }
     }
 
@@ -2228,7 +2259,9 @@ class S3CrtOutputStream final : public arrow::io::OutputStream, public AsyncOutp
       return arrow::Status::Invalid("Flush on closing stream");
     }
     FIU_RETURN_ON(FIUKEY_S3FS_WRITER_FLUSH_FAIL,
-                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_FLUSH_FAIL)));
+                  MakeExtendError(ExtendStatusCode::StorageTransientNetwork,
+                                  fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_FLUSH_FAIL),
+                                  fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_FLUSH_FAIL)));
     ARROW_RETURN_NOT_OK(status_);
     ARROW_RETURN_NOT_OK(io_context_.stop_token().Poll());
     return upload_->completed.is_finished() ? upload_->completed.status() : arrow::Status::OK();
@@ -2255,7 +2288,9 @@ class S3CrtOutputStream final : public arrow::io::OutputStream, public AsyncOutp
     }
     ARROW_RETURN_NOT_OK(WaitForWrite());
     FIU_RETURN_ON(FIUKEY_S3FS_WRITER_WRITE_FAIL,
-                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_WRITE_FAIL)));
+                  MakeExtendError(ExtendStatusCode::StorageTransientNetwork,
+                                  fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_WRITE_FAIL),
+                                  fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_WRITE_FAIL)));
     if (nbytes == 0) {
       return arrow::Status::OK();
     }
@@ -2279,7 +2314,9 @@ class S3CrtOutputStream final : public arrow::io::OutputStream, public AsyncOutp
     auto status = status_;
     status &= io_context_.stop_token().Poll();
     FIU_DO_ON(FIUKEY_S3FS_WRITER_CLOSE_FAIL,
-              status = arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_CLOSE_FAIL)));
+              status = MakeExtendError(ExtendStatusCode::StorageTransientNetwork,
+                                       fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_CLOSE_FAIL),
+                                       fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_CLOSE_FAIL)));
     FIU_DO_ON(FIUKEY_S3FS_COMPLETE_UPLOAD_FAIL,
               status = arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_COMPLETE_UPLOAD_FAIL)));
     if (!status.ok()) {

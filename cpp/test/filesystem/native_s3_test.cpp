@@ -489,21 +489,35 @@ TEST_F(NativeS3Test, MultipartCompleteAndAbort) {
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
   ASSERT_OK(Write("multipart", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a') + "tail")).status());
-  // CRT reports object writes; it owns multipart request scheduling internally.
-  EXPECT_EQ(metrics->GetWriteCount(), 1);
+  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 1);
+  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 1);
+  EXPECT_EQ(metrics->GetWriteCount(), 2);
   EXPECT_EQ(metrics->GetWriteBytes(), 5 * 1024 * 1024 + 4);
   EXPECT_EQ(metrics->GetFailedCount(), 0);
-  ASSERT_OK_AND_ASSIGN(auto data, Await(Read("multipart", 5 * 1024 * 1024 - 2, 10)));
+  ASSERT_OK_AND_ASSIGN(auto input, fs_->OpenInputFile("multipart"));
+  ASSERT_OK_AND_ASSIGN(auto data, input->ReadAt(5 * 1024 * 1024 - 2, 10));
   EXPECT_EQ(data->ToString(), "aatail");
+  ASSERT_OK(input->Close());
   ASSERT_OK_AND_ASSIGN(auto stream, fs_->OpenOutputStream("aborted"));
   ASSERT_OK(stream->Write(arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))));
   auto async = std::dynamic_pointer_cast<AsyncOutputStream>(stream);
   ASSERT_NE(async, nullptr);
   ASSERT_OK(stream->Flush());
   ASSERT_OK(stream->Abort());
-  EXPECT_EQ(metrics->GetWriteCount(), 2);
-  EXPECT_EQ(metrics->GetWriteBytes(), 5 * 1024 * 1024 + 4);
-  EXPECT_EQ(metrics->GetFailedCount(), 1);
+  if (options_.use_crt_async_reads) {
+    // CRT Flush only waits for input consumption; Abort may race with the part request.
+    EXPECT_GE(metrics->GetWriteCount(), 2);
+    EXPECT_LE(metrics->GetWriteCount(), 3);
+    EXPECT_EQ(metrics->GetWriteBytes(), 5 * 1024 * 1024 + 4);
+    EXPECT_EQ(metrics->GetFailedCount(), 1);
+  } else {
+    // SDK Flush waits for uploaded parts; aborting the multipart session is not a failed write.
+    EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 2);
+    EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 1);
+    EXPECT_EQ(metrics->GetWriteCount(), 3);
+    EXPECT_EQ(metrics->GetWriteBytes(), 10 * 1024 * 1024 + 4);
+    EXPECT_EQ(metrics->GetFailedCount(), 0);
+  }
   ASSERT_OK_AND_ASSIGN(auto missing, Await(Stat(fs_, "aborted")));
   EXPECT_EQ(missing.type(), arrow::fs::FileType::NotFound);
 }
@@ -586,8 +600,9 @@ TEST_F(NativeS3Test, SmallUploadCountsOneObjectWrite) {
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
   ASSERT_OK(Write("put-metrics", arrow::Buffer::FromString("data")).status());
-  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 0);
-  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 0);
+  // SDK uses PutObject; CRT streaming uses multipart even for one small part.
+  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), options_.use_crt_async_reads ? 1 : 0);
+  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), options_.use_crt_async_reads ? 1 : 0);
   EXPECT_EQ(metrics->GetWriteCount(), 1);
   EXPECT_EQ(metrics->GetWriteBytes(), 4);
   EXPECT_EQ(metrics->GetFailedCount(), 0);
@@ -597,9 +612,9 @@ TEST_F(NativeS3Test, FailedMultipartCreationCountsAttemptAndFailure) {
   ASSERT_NE(metrics, nullptr);
   metrics->Reset();
   EXPECT_FALSE(Write("denied", arrow::Buffer::FromString(std::string(5 * 1024 * 1024, 'a'))).status().ok());
-  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 0);
+  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 1);
   EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 0);
-  EXPECT_EQ(metrics->GetWriteCount(), 1);
+  EXPECT_EQ(metrics->GetWriteCount(), 0);
   EXPECT_EQ(metrics->GetWriteBytes(), 0);
   EXPECT_EQ(metrics->GetFailedCount(), 1);
 }
