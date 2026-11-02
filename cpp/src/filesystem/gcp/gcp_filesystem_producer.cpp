@@ -300,7 +300,7 @@ arrow::Result<S3Options> GcpFileSystemProducer::CreateS3Options(bool bearer_toke
   }
 
   if (bearer_token) {
-    // GCP+IAM / Impersonation: the Authorization header is injected by the
+    // GCP+IAM / Impersonation / Broker: the Authorization header is injected by the
     // registry-backed HTTP factory. Use anonymous credentials so the AWS SDK's
     // SigV4 signer does not overwrite the injected Bearer.
     options.ConfigureAnonymousCredentials();

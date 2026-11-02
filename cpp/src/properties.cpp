@@ -361,9 +361,9 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       std::nullopt),
     REGISTER_PROPERTY(PROPERTY_FS_USE_IAM,
                       PropertyType::BOOL,
-                      "Whether to use IAM for the filesystem storage service. For supported S3 and Talon "
-                      "credential Broker requests, "
-                      "true selects the Broker's own IAM identity; false uses the supplied target identity.",
+                      "Use the process's cloud identity, or the broker's IAM identity for supported S3 and Talon "
+                      "requests. Native GCP uses a target service account for impersonation with either setting; "
+                      "fs.use_iam=false and fs.credential_endpoint select the target-account broker.",
                       false,
                       ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_FS_USE_VIRTUAL_HOST,
@@ -542,7 +542,8 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       std::nullopt),
     REGISTER_PROPERTY(PROPERTY_FS_CREDENTIAL_ENDPOINT,
                       PropertyType::STRING,
-                      "The HTTP(S) credential Broker endpoint for S3 credentials, Azure SAS and Talon requests.",
+                      "The HTTP(S) credential Broker endpoint for S3 credentials, Azure SAS tokens, GCP "
+                      "target-service-account access tokens and Talon requests.",
                       "",
                       std::nullopt),
     REGISTER_PROPERTY(
