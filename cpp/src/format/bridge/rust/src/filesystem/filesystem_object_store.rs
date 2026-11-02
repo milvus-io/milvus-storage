@@ -27,7 +27,6 @@ use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use cxx::SharedPtr;
 use futures::StreamExt;
-#[cfg(feature = "s3-crt-async")]
 use futures::channel::oneshot;
 use futures::stream::{self, BoxStream};
 use lru::LruCache;
@@ -47,11 +46,9 @@ use crate::filesystem_c::{
     loon_filesystem_open_reader, loon_filesystem_reader_close, loon_filesystem_reader_destroy,
     loon_filesystem_reader_readat, reader_supports_async,
 };
-#[cfg(feature = "s3-crt-async")]
 use crate::filesystem_c::{LoonFFIResult, loon_filesystem_reader_readat_async};
 use crate::lance_ffi::FileSystemWrapper;
 
-#[cfg(feature = "s3-crt-async")]
 struct ObjectStoreAsyncReadCallbackState {
     sender: Option<oneshot::Sender<(object_store::Result<Bytes>, Arc<ReaderHandle>)>>,
     reader: Arc<ReaderHandle>,
@@ -60,7 +57,6 @@ struct ObjectStoreAsyncReadCallbackState {
     expected_len: usize,
 }
 
-#[cfg(feature = "s3-crt-async")]
 unsafe extern "C" fn object_store_async_read_callback(
     user_data: *mut c_void,
     mut result: LoonFFIResult,
@@ -114,7 +110,6 @@ unsafe extern "C" fn object_store_async_read_callback(
     }
 }
 
-#[cfg(feature = "s3-crt-async")]
 async fn read_object_store_async_via_ffi(
     reader: Arc<ReaderHandle>,
     location: ObjectPath,
@@ -437,7 +432,6 @@ pub(crate) struct FilesystemObjectStore {
     mapper: FFIPathMapper,
     metadata: MetadataCache,
     // Diagnostic only: immutable benchmark objects; bounded shared native handles.
-    #[cfg(feature = "s3-crt-async")]
     read_handles: Arc<Mutex<LruCache<ObjectPath, Arc<ReaderHandle>>>>,
 }
 
@@ -447,7 +441,6 @@ impl FilesystemObjectStore {
             filesystem,
             mapper,
             metadata: MetadataCache::new(),
-            #[cfg(feature = "s3-crt-async")]
             read_handles: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(128).unwrap()))),
         }
     }
@@ -687,7 +680,6 @@ impl FilesystemObjectStore {
                 source: Box::new(source),
             })?;
 
-        #[cfg(feature = "s3-crt-async")]
         {
             let cached = { self.read_handles.lock().unwrap().get(location).cloned() };
             if let Some(reader) = cached {
@@ -696,7 +688,6 @@ impl FilesystemObjectStore {
         }
 
         enum ReadOutcome {
-            #[cfg(feature = "s3-crt-async")]
             Async(Arc<ReaderHandle>),
             Complete(Bytes),
         }
@@ -747,7 +738,6 @@ impl FilesystemObjectStore {
                     supports_async,
                 };
 
-                #[cfg(feature = "s3-crt-async")]
                 if reader.supports_async {
                     return Ok(ReadOutcome::Async(Arc::new(reader)));
                 }
@@ -771,7 +761,6 @@ impl FilesystemObjectStore {
             })??;
 
         match outcome {
-            #[cfg(feature = "s3-crt-async")]
             ReadOutcome::Async(reader) => {
                 // Drop replaced/evicted handles outside the cache lock and outside callbacks.
                 let evicted = self

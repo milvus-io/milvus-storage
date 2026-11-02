@@ -32,7 +32,6 @@ class StorageConan(ConanFile):
         "with_jni": [True, False],
         "with_python_binding": [True, False],
         "with_fiu": [True, False],
-        "with_crt": [True, False],
     }
     default_options = {
         "shared": True,
@@ -46,7 +45,6 @@ class StorageConan(ConanFile):
         "with_jni": False,
         "with_python_binding": False,
         "with_fiu": False,
-        "with_crt": False,
         "folly/*:shared": True,
         "glog/*:with_gflags": True,
         "glog/*:shared": True,
@@ -57,7 +55,7 @@ class StorageConan(ConanFile):
         "grpc/*:secure": True,
         "aws-sdk-cpp/*:config": True,
         "aws-sdk-cpp/*:shared": True,
-        "aws-sdk-cpp/*:s3-crt": False,
+        "aws-sdk-cpp/*:s3-crt": True,
         "aws-sdk-cpp/*:text-to-speech": False,
         "aws-sdk-cpp/*:transfer": False,
         # Force aws-c-* / s2n to be shared so all aws-cpp-sdk subdir .so files
@@ -140,10 +138,6 @@ class StorageConan(ConanFile):
         # macOS cannot build opentelemetry-cpp with shared=True.
         if self.settings.os == "Linux":
             self.options["opentelemetry-cpp"].shared = True
-        if self.options.with_crt:
-            # aws-sdk-cpp uses a hyphenated option name; package-pattern syntax
-            # sets the real option, while .s3_crt does not.
-            self.options.update(options_values={"aws-sdk-cpp/*:s3-crt": "True"})
         self.options["arrow"].with_azure = True
         if self.options.with_jni and self.settings.os != "Macos":
             self.options["arrow"].shared = True
@@ -161,13 +155,11 @@ class StorageConan(ConanFile):
             self.options["gflags"].shared = True
 
     def requirements(self):
-        # Tests inspect CRT event loops even when S3 CRT support is disabled.
+        # Native requests use HTTP and future APIs directly; shared SDK
+        # libraries do not expose these transitive link dependencies.
         self.requires("aws-c-io/1.1.1#2dd777871cf93ce4f35ba714a1ba87ef")
-        if self.options.with_crt:
-            # Native requests use HTTP and future APIs directly; shared SDK
-            # libraries do not expose these transitive link dependencies.
-            self.requires("aws-c-http/1.1.1#4ebd9cad4c949ed136f95419ce0ceee3")
-            self.requires("aws-c-s3/1.5.1#41f018ea69dd13668a2ffe76d0731742")
+        self.requires("aws-c-http/1.1.1#4ebd9cad4c949ed136f95419ce0ceee3")
+        self.requires("aws-c-s3/1.5.1#41f018ea69dd13668a2ffe76d0731742")
         self.requires("xz_utils/5.4.5#fc4e36861e0a47ecd4a40a00e6d29ac8")
         self.requires("glog/0.7.1#a306e61d7b8311db8cb148ad62c48030")
         self.requires("zstd/1.5.5#70dc5eb8ea16708fc946fbac884c507e")
@@ -263,7 +255,6 @@ class StorageConan(ConanFile):
         tc.variables["WITH_JNI"] = self.options.with_jni
         tc.variables["WITH_PYTHON_BINDING"] = self.options.with_python_binding
         tc.variables["WITH_FIU"] = self.options.with_fiu
-        tc.cache_variables["WITH_CRT"] = self.options.with_crt
 
         # Set JAVA_HOME for JNI compilation
         if self.options.with_jni:

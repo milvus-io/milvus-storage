@@ -9,8 +9,7 @@ crate-type = ["staticlib"]
 
 [features]
 io-trace = []
-s3-crt-async = []
-talon = ["dep:talon", "s3-crt-async"]
+talon = ["dep:talon"]
 
 [dependencies]
 talon = { package = "talon-rust-client", git = "https://github.com/milvus-io/talon.git", rev = "010ab9bc9945ca21959e6e773ebd802041b5d079", optional = true }

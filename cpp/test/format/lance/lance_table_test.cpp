@@ -191,8 +191,6 @@ class InjectedFailureFileSystem final : public arrow::fs::SubTreeFileSystem {
   int64_t minimum_failure_size_;
 };
 
-#if defined(WITH_CRT) || defined(WITH_TALON)
-
 thread_local bool async_completion_active = false;
 
 class AsyncReaderLifecycleState {
@@ -391,8 +389,6 @@ class CallbackThreadFileSystem final : public arrow::fs::SubTreeFileSystem {
   private:
   std::shared_ptr<AsyncReaderLifecycleState> state_;
 };
-
-#endif  // WITH_CRT || WITH_TALON
 
 }  // namespace
 
@@ -676,8 +672,6 @@ TEST_F(LanceBasicTest, MaterializedReadsTranslateDeferredErrors) {
   EXPECT_EQ(permission_result.status().message().find("Generic filesystem_c error"), std::string::npos)
       << permission_result.status().ToString();
 }
-
-#if defined(WITH_CRT) || defined(WITH_TALON)
 
 TEST_F(LanceBasicTest, AsyncOpenReturnsBeforeIoCompletes) {
   if (IsCloudEnv()) {
@@ -966,8 +960,6 @@ TEST_F(LanceBasicTest, AsyncReaderIsReleasedOutsideCrtCompletionCallback) {
       << "The CRT completion thread destroyed RandomAccessFile inside the CRT callback; CRT resources must be "
          "released outside the callback to avoid destruction deadlock";
 }
-
-#endif  // WITH_CRT || WITH_TALON
 
 TEST(LanceReaderAsyncTest, SupportsAsyncMetadataCache) {
   EXPECT_TRUE((FormatReaderWithAsyncMetadata<LanceTableReader>));

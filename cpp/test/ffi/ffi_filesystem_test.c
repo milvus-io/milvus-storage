@@ -155,6 +155,11 @@ static void test_filesystem_write_and_read(void) {
     bool supports_async = true;
     rc = loon_filesystem_reader_supports_async(reader_handle, &supports_async);
     ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    const char* crt_mode = getenv("TEST_ENV_S3_USE_CRT");
+    const char* provider = getenv("TEST_ENV_CLOUD_PROVIDER");
+    if (is_cloud_env() && crt_mode && (!provider || strcmp(provider, "azure") != 0)) {
+      ck_assert_int_eq(supports_async, strcmp(crt_mode, "true") == 0);
+    }
     if (!supports_async) {
       int callback_count = 0;
       rc = loon_filesystem_reader_readat_async(reader_handle, 0, TEST_BUFFER_SIZE, read_buffer, count_async_callback,

@@ -28,7 +28,6 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-#[cfg(feature = "s3-crt-async")]
 use futures::channel::oneshot;
 use opendal::raw::AccessorInfo;
 use opendal::{Capability, Operator, OperatorBuilder};
@@ -43,7 +42,6 @@ use crate::filesystem_c::{
     loon_filesystem_list_dir, loon_filesystem_open_reader, loon_filesystem_reader_close,
     loon_filesystem_reader_destroy, loon_filesystem_reader_readat, reader_supports_async,
 };
-#[cfg(feature = "s3-crt-async")]
 use crate::filesystem_c::{LoonFFIResult, loon_filesystem_reader_readat_async};
 
 // TODO(jiaqizho): Move shared stat/read/list and CRT reader lifecycle plumbing
@@ -164,7 +162,6 @@ impl opendal::raw::oio::List for FilesystemLister {
 // Optional CRT asynchronous range-read bridge
 // -----------------------------------------------------------------------------
 
-#[cfg(feature = "s3-crt-async")]
 /// State whose ownership is transferred to the C callback.
 ///
 /// Keeping the reader and buffer in the same box guarantees that the native
@@ -179,7 +176,6 @@ struct FilesystemAsyncReadCallbackState {
     expected_len: usize,
 }
 
-#[cfg(feature = "s3-crt-async")]
 fn send_async_read_completion<R: Send + 'static>(
     sender: Option<oneshot::Sender<(opendal::Result<Bytes>, R)>>,
     read_result: opendal::Result<Bytes>,
@@ -197,7 +193,6 @@ fn send_async_read_completion<R: Send + 'static>(
     }
 }
 
-#[cfg(feature = "s3-crt-async")]
 /// # Safety
 ///
 /// `user_data` must be either null or the unique pointer returned by
@@ -246,7 +241,6 @@ unsafe extern "C" fn filesystem_async_read_callback(
     send_async_read_completion(sender, read_result, reader);
 }
 
-#[cfg(feature = "s3-crt-async")]
 /// Submit one range read without blocking a Tokio worker.
 ///
 /// The callback state is deliberately self-contained: cancellation can drop the
@@ -599,7 +593,6 @@ impl FilesystemAccess {
         })?;
 
         enum ReadOutcome {
-            #[cfg(feature = "s3-crt-async")]
             Async(Arc<ReaderHandle>),
             Complete(Bytes),
         }
@@ -618,7 +611,6 @@ impl FilesystemAccess {
                     None => access.open_reader(&ffi_path, size)?,
                 };
 
-                #[cfg(feature = "s3-crt-async")]
                 if reader.supports_async {
                     return Ok(ReadOutcome::Async(reader));
                 }
@@ -649,7 +641,6 @@ impl FilesystemAccess {
             })??;
 
         match outcome {
-            #[cfg(feature = "s3-crt-async")]
             ReadOutcome::Async(reader) => {
                 read_async_via_ffi(reader, path.to_string(), range).await
             }
@@ -920,10 +911,8 @@ pub(crate) mod tests {
         pub(crate) access: FilesystemAccess,
     }
 
-    #[cfg(feature = "s3-crt-async")]
     struct DropThreadProbe(std::sync::mpsc::Sender<std::thread::ThreadId>);
 
-    #[cfg(feature = "s3-crt-async")]
     impl Drop for DropThreadProbe {
         fn drop(&mut self) {
             let _ = self.0.send(std::thread::current().id());
@@ -1012,7 +1001,6 @@ pub(crate) mod tests {
         assert!(!capability.rename);
     }
 
-    #[cfg(feature = "s3-crt-async")]
     #[test]
     fn canceled_async_completion_defers_reader_drop() {
         let callback_thread = std::thread::current().id();

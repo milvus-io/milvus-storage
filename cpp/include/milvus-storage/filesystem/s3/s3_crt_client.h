@@ -14,8 +14,6 @@
 
 #pragma once
 
-#ifdef WITH_CRT
-
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -282,5 +280,3 @@ class S3CrtClientFinalizer : public std::enable_shared_from_this<S3CrtClientFina
 std::shared_ptr<S3CrtClientFinalizer> GetCrtClientFinalizer();
 
 }  // namespace milvus_storage
-
-#endif  // WITH_CRT

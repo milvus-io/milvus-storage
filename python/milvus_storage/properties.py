@@ -32,7 +32,7 @@ _PROPERTY_KEY_MAPPING = {
     "FS_SESSION_NAME": "loon_properties_fs_session_name",
     "FS_EXTERNAL_ID": "loon_properties_fs_external_id",
     "FS_LOAD_FREQUENCY": "loon_properties_fs_load_frequency",
-    "FS_S3_CRT_ASYNC_READ": "loon_properties_fs_s3_crt_async_read",
+    "FS_S3_USE_CRT": "loon_properties_fs_s3_use_crt",
     "FS_LANCE_IO_PARALLELISM": "loon_properties_fs_lance_io_parallelism",
     "FS_IOPS_INITIAL_RATE": "loon_properties_fs_iops_initial_rate",
     "FS_IOPS_MAX_RATE": "loon_properties_fs_iops_max_rate",

@@ -2367,7 +2367,7 @@ TEST_F(S3ProviderTest, AwsBrokerCredentialsSignS3Requests) {
   options.credentials_provider = std::make_shared<AwsCredentialBrokerProvider>(
       AwsCredentialBrokerConfig{"http://broker/v1/credentials/assume-role", "us-west-2", "role", "", 900, 1000},
       [&now] { return now; });
-  options.use_crt_async_reads = false;
+  options.use_crt = false;
   mock_client_->EnqueueResponse(
       "http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
       AwsBrokerResponse("broker-key", Aws::Utils::DateTime::Now() + std::chrono::seconds(900)));

@@ -37,6 +37,11 @@ size_t init_test_props(const char** keys, const char** vals, size_t count, size_
     count++;                  \
   } while (0)
 
+  const char* crt_mode = getenv("TEST_ENV_S3_USE_CRT");
+  if (crt_mode) {
+    APPEND_PROP(loon_properties_fs_s3_use_crt, crt_mode);
+  }
+
   if (is_cloud_env()) {
     const char* cloud_provider = getenv("TEST_ENV_CLOUD_PROVIDER");
     const char* address = getenv("TEST_ENV_ADDRESS");

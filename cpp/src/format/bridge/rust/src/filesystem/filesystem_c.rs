@@ -10,12 +10,10 @@ use std::time::Instant;
 
 use async_compat::Compat;
 use futures::FutureExt;
-#[cfg(feature = "s3-crt-async")]
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 
 use vortex::array::buffer::BufferHandle;
-#[cfg(feature = "s3-crt-async")]
 use vortex::buffer::Alignment;
 use vortex::buffer::{ByteBuffer, ByteBufferMut};
 use vortex::error::{VortexError, VortexResult, vortex_err};
@@ -232,7 +230,6 @@ pub struct LoonFileInfoList {
     pub count: u32,
 }
 
-#[cfg(feature = "s3-crt-async")]
 pub type LoonFileSystemReadAsyncCallback =
     unsafe extern "C" fn(*mut std::ffi::c_void, LoonFFIResult, u64);
 
@@ -315,7 +312,6 @@ unsafe extern "C" {
     pub unsafe fn loon_filesystem_reader_destroy(reader: *mut std::ffi::c_void);
 }
 
-#[cfg(feature = "s3-crt-async")]
 unsafe extern "C" {
     unsafe fn loon_filesystem_reader_supports_async(
         reader: *mut std::ffi::c_void,
@@ -383,7 +379,6 @@ pub fn check_loon_ffi_result(
     Ok(())
 }
 
-#[cfg(feature = "s3-crt-async")]
 pub fn reader_supports_async(reader: *mut c_void) -> Result<bool, LoonFFIError> {
     let mut supported = false;
     let mut result =
@@ -392,15 +387,8 @@ pub fn reader_supports_async(reader: *mut c_void) -> Result<bool, LoonFFIError> 
     Ok(supported)
 }
 
-#[cfg(not(feature = "s3-crt-async"))]
-pub fn reader_supports_async(_reader: *mut c_void) -> Result<bool, LoonFFIError> {
-    Ok(false)
-}
-
-#[cfg(feature = "s3-crt-async")]
 type AsyncReadResult = Result<ByteBuffer, VortexError>;
 
-#[cfg(feature = "s3-crt-async")]
 struct AsyncReadCallbackState {
     sender: Option<oneshot::Sender<AsyncReadResult>>,
     buffer: ByteBufferMut,
@@ -409,7 +397,6 @@ struct AsyncReadCallbackState {
     trace_start: IoTraceStart,
 }
 
-#[cfg(feature = "s3-crt-async")]
 unsafe extern "C" fn async_read_callback(
     user_data: *mut c_void,
     mut result: LoonFFIResult,
@@ -453,7 +440,6 @@ unsafe extern "C" fn async_read_callback(
     }
 }
 
-#[cfg(feature = "s3-crt-async")]
 async fn read_async_via_ffi(
     reader: Arc<ReaderHandle>,
     start: u64,
@@ -807,7 +793,6 @@ fn vortex_read_source_uri(path: &str) -> Arc<str> {
 /// is only closed/destroyed after all concurrent read tasks are done.
 pub struct ReaderHandle {
     pub ptr: *mut c_void,
-    #[cfg_attr(not(feature = "s3-crt-async"), allow(dead_code))]
     pub supports_async: bool,
 }
 
@@ -954,7 +939,6 @@ impl VortexReadAt for ObjectStoreReadSourceCpp {
             let len = u64::try_from(length)
                 .map_err(|_| vortex_err!("read length does not fit in u64"))?;
 
-            #[cfg(feature = "s3-crt-async")]
             if reader.supports_async {
                 let buffer = read_async_via_ffi(reader, offset, len, alignment).await?;
                 return Ok(BufferHandle::new_host(buffer));

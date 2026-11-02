@@ -767,11 +767,7 @@ TEST_P(FormatReaderTest, ParquetFooterFastPathUsesCrtReadAtAsyncInto) {
   ASSERT_STATUS_OK(reader.open());
   ASSERT_EQ(stats->open_path_count.load(std::memory_order_relaxed), 0);
   ASSERT_EQ(stats->open_info_count.load(std::memory_order_relaxed), 1);
-#ifdef WITH_CRT
   ASSERT_GT(stats->async_read_into_count.load(std::memory_order_relaxed), 0);
-#else
-  ASSERT_EQ(stats->async_read_into_count.load(std::memory_order_relaxed), 0);
-#endif
 
   ASSERT_AND_ASSIGN(auto batch, reader.get_chunk(0));
   ASSERT_EQ(batch->num_rows(), test_batch_->num_rows());

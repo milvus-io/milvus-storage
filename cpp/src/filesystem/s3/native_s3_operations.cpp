@@ -3,7 +3,6 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 #include "filesystem/s3/native_s3_operations.h"
-#ifdef WITH_CRT
 #include <charconv>
 #include <cctype>
 #include <limits>
@@ -365,4 +364,3 @@ Result<std::shared_ptr<NativeS3Operations>> MakeNativeS3Operations(const arrow::
   return std::make_shared<NativeS3Operations>(std::move(transport), io_context);
 }
 }  // namespace milvus_storage
-#endif

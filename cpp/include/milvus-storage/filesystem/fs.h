@@ -286,9 +286,9 @@ struct ArrowFileSystemConfig {
   // Tencent COS, GCS S3-compat) will silently ignore the checksum header.
   bool use_crc32c_checksum = false;
 
-  // Whether S3 reads and supported uploads should use AWS CRT when
-  // WITH_CRT is enabled. Ignored by non-S3 filesystems and non-CRT builds.
-  bool s3_crt_async_read = true;
+  // Whether S3 reads and supported uploads use AWS CRT.
+  // Ignored by non-S3 filesystems. GCP uploads always use the SDK path.
+  bool s3_use_crt = true;
 
   // Shared Lance scheduler capacity for local and remote reader fragment I/O.
   // Zero selects Lance's default of 64; it does not disable scheduler sharing.

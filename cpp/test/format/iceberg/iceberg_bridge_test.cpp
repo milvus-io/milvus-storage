@@ -91,8 +91,6 @@ class FailingInputFileSystem final : public FileSystemProxy {
   ExtendStatusCode code_;
 };
 
-#ifdef WITH_CRT
-
 thread_local bool async_completion_active = false;
 
 class AsyncReaderLifecycleState {
@@ -286,8 +284,6 @@ class CallbackThreadFileSystem final : public arrow::fs::SubTreeFileSystem {
   std::shared_ptr<AsyncReaderLifecycleState> state_;
 };
 
-#endif  // WITH_CRT
-
 static std::filesystem::path NewIcebergBridgeTestDir(const std::string& suffix) {
   auto id = std::chrono::steady_clock::now().time_since_epoch().count();
   return std::filesystem::temp_directory_path() / ("iceberg-bridge-" + suffix + "-" + std::to_string(id));
@@ -452,8 +448,6 @@ TEST_F(IcebergBridgeTest, PlanFilesReleasesFilesystemLease) {
   std::filesystem::remove_all(table_dir);
 }
 
-#ifdef WITH_CRT
-
 TEST_F(IcebergBridgeTest, PlanFilesReleasesAsyncReaderOutsideCrtCompletionCallback) {
   auto table_dir = NewIcebergBridgeTestDir("async-reader-lifecycle");
   ASSERT_AND_ASSIGN(auto table_info, CreateTestTable(table_dir.string(), 10, false, {}));
@@ -546,8 +540,6 @@ TEST_F(IcebergBridgeTest, PlanFilesSurvivesFilesystemCacheClearDuringInflightRea
   EXPECT_TRUE(callback_weak.expired());
   EXPECT_TRUE(cached_weak.expired());
 }
-
-#endif  // WITH_CRT
 
 // IcebergFileInfo default construction
 TEST_F(IcebergBridgeTest, FileInfoStructConstruction) {

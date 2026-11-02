@@ -48,6 +48,11 @@ bool IsTalonEnv() {
 }
 
 arrow::Status InitTestProperties(api::Properties& properties) {
+  if (const auto crt_mode = GetEnvVar(ENV_VAR_S3_USE_CRT); crt_mode.ok()) {
+    if (const auto error = api::SetValue(properties, PROPERTY_FS_S3_USE_CRT, crt_mode->c_str()); error) {
+      return arrow::Status::Invalid(ENV_VAR_S3_USE_CRT, ": ", *error);
+    }
+  }
   const auto storage_type = GetEnvVar(ENV_VAR_STORAGE_TYPE).ValueOr("");
   const bool talon_enabled = IsTalonEnv();
 

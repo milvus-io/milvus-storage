@@ -193,7 +193,7 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
   options.cloud_provider = config_.cloud_provider;
   options.background_writes = config_.background_writes;
   options.use_crc32c_checksum = config_.use_crc32c_checksum;
-  options.use_crt_async_reads = config_.s3_crt_async_read;
+  options.use_crt = config_.s3_use_crt;
 
   ARROW_RETURN_NOT_OK(ConfigureCredentials(options));
   return options;

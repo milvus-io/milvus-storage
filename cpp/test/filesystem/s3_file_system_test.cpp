@@ -83,7 +83,7 @@ TEST(S3SdkInitializationDeathTest, ConfiguresSharedBootstrap) {
           ASSERT_TRUE(*bootstrap);
           const auto threads = aws_event_loop_group_get_loop_count(bootstrap->GetUnderlyingHandle()->event_loop_group);
           EXPECT_GT(threads, 0);
-#if defined(WITH_CRT) && defined(__linux__)
+#if defined(__linux__)
           std::ifstream smt("/sys/devices/system/cpu/smt/active");
           std::string active;
           if (smt >> active && active == "0") {
@@ -300,7 +300,7 @@ TEST_P(S3ReadResponseTest, PreservesErrorsLargerThanReadBuffer) {
     options.region = "us-east-1";
     options.scheme = "http";
     options.endpoint_override = server.endpoint();
-    options.use_crt_async_reads = GetParam();
+    options.use_crt = GetParam();
     options.connect_timeout = 2;
     options.request_timeout = 5;
     if (!GetParam()) {
@@ -355,7 +355,7 @@ TEST_P(S3ReadResponseTest, RetriesErrorThenReadsIntoCallerBuffer) {
   options.region = "us-east-1";
   options.scheme = "http";
   options.endpoint_override = server.endpoint();
-  options.use_crt_async_reads = GetParam();
+  options.use_crt = GetParam();
   options.connect_timeout = 2;
   options.request_timeout = 5;
   if (!GetParam()) {
@@ -406,7 +406,7 @@ TEST_P(S3ReadResponseTest, ReadsMultiplePartsAndPreservesLaterErrors) {
     options.region = "us-east-1";
     options.scheme = "http";
     options.endpoint_override = server.endpoint();
-    options.use_crt_async_reads = true;
+    options.use_crt = true;
     options.connect_timeout = 2;
     options.request_timeout = 5;
     ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
@@ -437,11 +437,7 @@ TEST_P(S3ReadResponseTest, ReadsMultiplePartsAndPreservesLaterErrors) {
   }
 }
 
-#ifdef WITH_CRT
 INSTANTIATE_TEST_SUITE_P(SdkAndCrt, S3ReadResponseTest, ::testing::Bool());
-#else
-INSTANTIATE_TEST_SUITE_P(Sdk, S3ReadResponseTest, ::testing::Values(false));
-#endif
 
 // Both SDK and CRT uploads preserve service errors and permit cleanup afterward.
 TEST_F(S3UnitTest, UploadErrorsPreserveServiceDetails) {

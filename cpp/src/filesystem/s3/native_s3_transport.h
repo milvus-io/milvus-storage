@@ -3,7 +3,6 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 #pragma once
-#ifdef WITH_CRT
 #include <arrow/io/interfaces.h>
 #include <arrow/util/future.h>
 #include <aws/core/http/HttpTypes.h>
@@ -34,4 +33,3 @@ class NativeS3Transport {
   std::shared_ptr<S3CrtClientHolder> holder_;
 };
 }  // namespace milvus_storage
-#endif

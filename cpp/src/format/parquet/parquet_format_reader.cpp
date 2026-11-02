@@ -284,7 +284,6 @@ static std::shared_ptr<arrow::Buffer> try_read_footer_buffer(const std::shared_p
   const auto offset = static_cast<int64_t>(file_size - footer_size);
   const auto size = static_cast<int64_t>(footer_size);
   std::shared_ptr<arrow::Buffer> suffix;
-#ifdef WITH_CRT
   if (auto* async_file = dynamic_cast<milvus_storage::NonBlockingRandomAccessFile*>(file.get())) {
     auto maybe_buf = arrow::AllocateResizableBuffer(size, file->io_context().pool());
     if (!maybe_buf.ok()) {
@@ -300,9 +299,7 @@ static std::shared_ptr<arrow::Buffer> try_read_footer_buffer(const std::shared_p
       return nullptr;
     }
     suffix = std::shared_ptr<arrow::Buffer>(std::move(buf));
-  } else
-#endif
-  {
+  } else {
     auto suffix_result = file->ReadAt(offset, size);
     if (!suffix_result.ok()) {
       return nullptr;
