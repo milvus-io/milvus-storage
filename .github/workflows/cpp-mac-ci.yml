@@ -5,10 +5,12 @@ on:
     paths:
       - 'cpp/conanfile.py'
       - '.github/workflows/cpp-ci.yml'
+      - '.github/workflows/cpp-mac-ci.yml'
   pull_request:
     paths:
       - 'cpp/conanfile.py'
       - '.github/workflows/cpp-ci.yml'
+      - '.github/workflows/cpp-mac-ci.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
