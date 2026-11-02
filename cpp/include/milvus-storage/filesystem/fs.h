@@ -194,7 +194,11 @@ struct ArrowFileSystemConfig {
   std::string region = "";
   bool use_ssl = false;
   std::string ssl_ca_cert = "";
-  // For Talon Broker requests, true selects the Broker's own IAM identity.
+  // Authenticate with this process's own cloud identity (instance role, VM
+  // service account, workload/managed identity). GCP: gcp_target_service_account
+  // selects impersonation with or without use_iam; use_iam=true disables the
+  // Broker selected by credential_endpoint. For Talon Broker requests, true
+  // selects the Broker's own IAM identity.
   bool use_iam = false;
   bool use_virtual_host = false;
   int64_t request_timeout_ms = 3000;
@@ -240,7 +244,9 @@ struct ArrowFileSystemConfig {
   // Target service account email to impersonate (e.g., "sa@project.iam.gserviceaccount.com")
   std::string gcp_target_service_account = "";
 
-  // HTTP(S) Broker endpoint shared by AWS STS, Azure SAS and Talon request credentials.
+  // HTTP(S) credential Broker endpoint. AWS STS credentials, Azure SAS tokens, GCP native Broker
+  // access tokens for gcp_target_service_account (without use_iam), and Talon
+  // request credentials are all fetched from it.
   std::string credential_endpoint = "";
 
   // Azure broker-backed temporary SAS authentication.

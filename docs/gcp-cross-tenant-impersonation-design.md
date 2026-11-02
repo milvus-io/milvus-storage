@@ -1,6 +1,8 @@
 # GCP Cross-Tenant Access via Service Account Impersonation — Design Doc
 
 **Status:** Landed (commit `4e3a7e9`)
+**Updated:** 2026-10-28 — credential Broker mode, provider precedence, one
+identity per bucket, Bearer delivery rule (§5.3, §6.2–§6.5, §6.8)
 **Author:** jiaqizho
 **Date:** 2026-04-21
 **Supersedes the working notes in:**
@@ -47,7 +49,8 @@ Support GCP target-SA impersonation for External Table reads:
   SA, a target SA, or HMAC AK/SK).
 - Customer-facing surface area is one new property:
   `fs.gcp_target_service_account`. `fs.load_frequency` is reused as the
-  requested token lifetime.
+  requested token lifetime. Later, `fs.credential_endpoint` (shared with
+  Azure SAS and Talon) selects the credential Broker mode (§6.4).
 
 ## 3. Non-goals
 
@@ -138,17 +141,26 @@ passed through to `AccessTokenLifetimeOption` on the C++ side and to
 `gcp_credential_refresh_secs` on the Rust side; providers that do not mint
 temporary credentials ignore it.
 
-### 5.3 Cache-key invariant
+### 5.3 Cache key and the one-identity-per-bucket rule
 
-`GetCacheKey()` remains `"{address}/{bucket_name}"`. Identity fields are
-deliberately omitted because a single `(address, bucket)` pair **cannot
-legally be accessed by two different credentials in the same process**
-(GCS permissions live at bucket granularity). Two configs resolving to the
-same cache key therefore carry the same identity, and sharing the cached
-filesystem instance is safe. The comment in `fs.h` states this invariant
-explicitly because it is load-bearing for both filesystem caching and the
-`GcpCredentialRegistry` "idempotent register, no conflict check" design
-(§6.3).
+The original design kept identity fields out of `GetCacheKey()` and relied
+on the assumption that one `(address, bucket)` is never accessed with two
+credentials in one process. That assumption is no longer load-bearing;
+instead it is enforced:
+
+- `GetCacheKey()` hashes the credential selectors for GCP, mirroring
+  `BuildGcpProviderFromConfig`: `use_iam`, `gcp_target_service_account`, and
+  — only when `use_iam` is false — `credential_endpoint` and the HMAC key
+  pair. Two configs that would build different providers never share a
+  cached filesystem. The `credential_endpoint` is hashed whether or not Talon
+  is enabled, because without `use_iam` it selects the native Broker
+  provider (§6.4); Talon-only settings (`talon_coordinator`, namespace,
+  block size) stay out of the origin identity.
+- `GcpCredentialRegistry::Register` returns `arrow::Status` and **refuses a
+  second provider with a different `Identity()` on the same `(endpoint,
+  bucket)`** (§6.3). A filesystem therefore can never authenticate with
+  another filesystem's identity, and one `(endpoint, bucket)` maps to one
+  identity per process.
 
 ## 6. C++ side: multi-identity GCP filesystem producer
 
@@ -178,29 +190,41 @@ to a `GcpCredentialProvider`; each outbound request looks up its own provider.
 ```
 ┌─ GcpCredentialProvider (interface) ──────────────────────────────┐
 │   AuthorizationHeader()  → optional<{name, value}>               │
-│     IAM/Impersonate → Bearer; HMAC → nullopt                     │
+│     IAM/Impersonate/Broker → Bearer; HMAC → nullopt              │
 │   MaybeSignConditionalWrite(request) → Status                    │
-│     HMAC → GOOG4 re-sign; IAM/Impersonate → OK                   │
+│     HMAC → GOOG4 re-sign; Bearer providers → OK                  │
+│   IssuesBearerToken() → bool   // false only for HMAC            │
+│   Identity() → string          // "iam", "impersonate:<sa>",     │
+│                                // "broker:<endpoint>|<sa>",      │
+│                                // "hmac:<access_key_id>"         │
 │                                                                    │
-│   Implementations (all internal to the .cpp):                     │
-│     IamVmProvider         (MakeGoogleDefaultCredentials)          │
-│     IamImpersonateProvider(MakeImpersonateServiceAccount)         │
-│     HmacProvider          (AKSK + auth_signer::googv4::SignRequest)│
+│   Implementations:                                                 │
+│     IamVmProvider              (MakeGoogleDefaultCredentials)     │
+│     IamImpersonateProvider     (MakeImpersonateServiceAccount)    │
+│     GcpBrokerCredentialProvider(credential Broker, own header)    │
+│     HmacProvider               (AKSK + googv4::SignRequest)       │
 └──────────────────┬───────────────────────────────────────────────┘
-                   │ register / lookup by (endpoint_host, bucket_name)
+                   │ register / lookup by (endpoint, bucket_name)
                    ▼
 ┌─ GcpCredentialRegistry (process singleton, mutex-guarded) ────────┐
-│   unordered_map<GcpBucketKey, shared_ptr<Provider>>                │
-│   Register(key, provider)   // idempotent silent replace           │
+│   unordered_map<GcpBucketKey, {provider, trusted}>                 │
+│   unordered_set<GcpEndpointKey> trusted_endpoints                  │
+│   Register(key, provider, trusted_endpoint) → Status               │
+│     same key + same Identity()  → keep existing, OK                │
+│     same key + other Identity() → Invalid                          │
 │   Lookup(request_uri)       // tries path-style, then vhost-style  │
+│   MayCarryBearerToken(uri)  // HTTPS *.googleapis.com, or trusted  │
 └──────────────────┬───────────────────────────────────────────────┘
                    ▼
 ┌─ GoogleHttpClientFactory (stateless — only holds tls_min_version) ┐
 │   CreateHttpRequest(uri, …):                                       │
 │     req = StandardHttpRequest{…}                                   │
-│     if provider = Registry::Lookup(uri):                           │
-│       if header = provider->AuthorizationHeader():                 │
-│         req.SetHeader(header.first, header.second)                 │
+│     provider = Registry::Lookup(uri);  if none: log, return req    │
+│     if !provider->IssuesBearerToken(): return req   // HMAC        │
+│     if !Registry::MayCarryBearerToken(uri): warn once, return req  │
+│     try { header = provider->AuthorizationHeader() }               │
+│     catch (...) { log }        // SDK is exception-free            │
+│     if header: req.SetHeader(header.first, header.second)          │
 │     return req                                                      │
 │                                                                      │
 │   CreateHttpClient(cfg):                                            │
@@ -234,16 +258,32 @@ to a `GcpCredentialProvider`; each outbound request looks up its own provider.
   The first hit wins. This mirrors exactly how the AWS SDK emits URIs under
   the two addressing modes.
 
-- **Idempotent Register.** A second `Register` with the same key silently
-  replaces the prior provider. This is correct because of the cache-key
-  invariant (§5.3) — same `(endpoint, bucket)` always means same identity.
-  The prior "conflict detection" draft was explicitly dropped as defensive
-  code against a configuration that cannot happen.
+- **One identity per `(endpoint, bucket)` per process.** `Register` returns
+  `arrow::Status`. A second `Register` with the same key keeps the existing
+  provider when `Identity()` matches and fails with `Invalid` when it
+  differs. External filesystems take their endpoint and bucket from user
+  specs, so without this check a second spec for the same bucket could have
+  swapped the identity under a filesystem that was already cached (§5.3).
 
-### 6.4 Three provider implementations
+- **Trusted endpoints.** `Register(key, provider, trusted_endpoint)` marks
+  `key.endpoint` as operator configuration when `trusted_endpoint` is true.
+  `GcpFileSystemProducer::RegisterIdentity` passes `config.alias.empty()`:
+  only the primary filesystem's address is operator configuration; external
+  filesystems (alias set by `CreateExternalFsConfig`) are never trusted. A
+  trusted registration may replace an untrusted one for the same key; an
+  untrusted one never replaces a trusted one.
 
-All three live in the `.cpp` file; only `GcpCredentialProvider` and
-`BuildGcpProviderFromConfig` are exposed in the header.
+- **Bearer delivery rule.** `MayCarryBearerToken(uri)` is true when the
+  request is HTTPS to a `*.googleapis.com` host, or when its endpoint
+  (path-style) or parent endpoint (virtual-host-style) is trusted. See §6.8
+  for how the factory applies it.
+
+### 6.4 Provider implementations and precedence
+
+`IamVmProvider`, `IamImpersonateProvider` and `HmacProvider` live in
+`gcp_credential_provider.cpp`; `GcpBrokerCredentialProvider` has its own
+header and source. Only `GcpCredentialProvider` and
+`BuildGcpProviderFromConfig` are exposed from the provider header.
 
 - **`IamVmProvider`** — VM / ADC identity. Built from
   `google::cloud::MakeGoogleDefaultCredentials()`, wrapped via
@@ -275,22 +315,51 @@ All three live in the `.cpp` file; only `GcpCredentialProvider` and
   This code used to live inline in `GoogleHttpClientDelegator` — it moved
   verbatim into `HmacProvider` as part of the refactor, no behavior change.
 
-`BuildGcpProviderFromConfig` dispatches:
-`use_iam && !target_sa.empty()` → impersonation; `use_iam` → VM/ADC;
-both AK and SK set → HMAC; otherwise a detailed `Invalid` status naming the
-three mutually exclusive valid combinations.
+- **`GcpBrokerCredentialProvider`** (Broker mode) — instead of this process
+  impersonating the target itself, a credential Broker reachable at
+  `credential_endpoint` mints the access token for
+  `gcp_target_service_account`. The provider calls the Broker with the
+  bucket, region, target SA and `load_frequency` as the requested lifetime,
+  caches the token and refreshes it ahead of expiry. Its `Identity()` is
+  `"broker:<endpoint>|<sa>"`, so the same target reached through two Brokers
+  is two identities. `create_file_system_config` validates the Broker
+  settings (target SA, bucket, positive `request_timeout_ms`, HTTP(S)
+  endpoint URL) as soon as `credential_endpoint` is set without `use_iam`.
+
+`BuildGcpProviderFromConfig` dispatches in this order:
+
+1. **Broker:** `credential_endpoint` set and `use_iam` false →
+   `GcpBrokerCredentialProvider` (requires `gcp_target_service_account`).
+2. **Target impersonation:** `gcp_target_service_account` set →
+   `IamImpersonateProvider`. **The target alone selects impersonation**;
+   `use_iam=true` is accepted but not required.
+3. **Own identity:** `use_iam` → `IamVmProvider` (VM SA / ADC).
+4. **HMAC:** `access_key_id` and `access_key_value` → `HmacProvider`.
+
+Otherwise a detailed `Invalid` status names the valid combinations. As for
+Azure, `use_iam=true` means "this process's own identity", so it switches
+the Broker off; the target still applies. HMAC keys combined with a target
+or a Broker endpoint are rejected as ambiguous unless Talon is enabled, in
+which case the Broker fields describe Talon's identity and the native
+filesystem keeps HMAC. For modes 1 and 2, `load_frequency` is the requested
+token lifetime and must lie in `[900, 3600]`; out-of-range values are
+rejected rather than clamped.
 
 ### 6.5 Make() flow
 
 ```cpp
 arrow::Result<ArrowFileSystemPtr> GcpFileSystemProducer::Make() {
-  ARROW_RETURN_NOT_OK(InitS3Compat(config_));     // call_once: stateless factory + InitializeS3
-  ARROW_RETURN_NOT_OK(RegisterIdentity(config_)); // per-call: build + register provider
-  ARROW_ASSIGN_OR_RAISE(auto s3_options, CreateS3Options());
-  ARROW_ASSIGN_OR_RAISE(auto fs, S3FileSystem::Make(s3_options));
-  return std::make_shared<FileSystemProxy>(config_.bucket_name, fs);
+  ARROW_RETURN_NOT_OK(InitS3Compat(config_));                    // call_once: stateless factory + InitializeS3
+  ARROW_ASSIGN_OR_RAISE(auto provider, RegisterIdentity(config_)); // build + Register(key, provider, alias.empty())
+  ARROW_ASSIGN_OR_RAISE(auto s3_options, CreateS3Options(provider->IssuesBearerToken()));
+  return S3FileSystem::Make(s3_options);
 }
 ```
+
+`RegisterIdentity` fails the `Make()` when the bucket is already bound to a
+different identity (§6.3). `CreateS3Options(bearer_token)` feeds the AWS SDK
+anonymous credentials for Bearer providers, so SigV4 does not overwrite the
+injected header, and HMAC keys otherwise.
 
 `call_once` stays because `Aws::InitializeS3` can only be called once per
 process — that is an AWS SDK hard constraint, not something our refactor is
@@ -340,6 +409,29 @@ Direct includes of `oauth2_internal/oauth2_google_credentials.h`,
 only the `AuthorizationHeader` helper and the `MapCredentials` bridge remain
 as internal-namespace dependencies, and those are one step away from being
 public in upstream google-cloud-cpp.
+
+### 6.8 Bearer delivery: HTTPS Google APIs or a trusted endpoint
+
+An OAuth2 Bearer token is a reusable credential, and external filesystems
+register providers for endpoints taken from user specs. The factory
+therefore adds the `Authorization` header only when all of the following hold:
+
+1. `Lookup(uri)` finds a provider (otherwise the request goes out unsigned
+   and the delegator or GCS rejects it, §6.6);
+2. `provider->IssuesBearerToken()` is true (HMAC providers are signed by the
+   AWS SDK and the GOOG4 re-sign instead, and are never asked for a header);
+3. `MayCarryBearerToken(uri)` is true: the request is **HTTPS to a
+   `*.googleapis.com` host**, or its endpoint was registered as **trusted**
+   by the primary filesystem (operator configuration, any scheme — this is
+   what keeps GCS emulators over plain HTTP working).
+
+Requests that fail rule 3 are logged once per endpoint and sent without the
+header. The provider call is wrapped in `try/catch`, since the factory runs
+inside the exception-free AWS SDK; a throwing token fetch yields an unsigned
+request, not a crash. `GoogleHttpClientDelegator::MakeRequest` applies the
+same lookup for the GOOG4 re-sign path. The gate is covered by
+`cpp/test/filesystem/gcp_http_factory_test.cpp`, which builds the factory
+through `gcp_internal::MakeGoogleHttpClientFactory`.
 
 ## 7. Rust side: impersonation for Lance and Iceberg
 
@@ -429,12 +521,20 @@ ahead of expiry.
 
 ### 7.4 Wiring into lance-io via a per-call Session
 
+> **Superseded.** `GcpImpersonationConfig::extract` no longer exists. Lance
+> reads resolve their filesystem through the C++ read adapter, so the
+> identity is the C++ provider's (§6.4), and
+> `lance_object_store.rs::native_mutation_store_params` rejects the
+> bridge-private keys `gcp_target_service_account` /
+> `gcp_credential_refresh_secs` for native mutations. The steps below
+> describe the original design.
+
 Instead of replacing lance-io's global registry, `lance_bridgeimpl`:
 
-1. `GcpImpersonationConfig::extract` pulls bridge-private keys
-   `gcp_target_service_account` and `gcp_credential_refresh_secs` out of the
-   `storage_options` map (consuming them with `remove`, so they cannot leak
-   onward to lance-io / object_store where they are unrecognized).
+1. The bridge pulled bridge-private keys `gcp_target_service_account` and
+   `gcp_credential_refresh_secs` out of the `storage_options` map
+   (consuming them with `remove`, so they could not leak onward to lance-io /
+   object_store where they are unrecognized).
 2. `build_gcp_impersonation_session(config)` creates a fresh
    `Session::new(0, 0, ObjectStoreRegistry)` whose registry overrides `gs`
    with a new `ImpersonatingGcsStoreProvider`.
@@ -650,9 +750,10 @@ Notable fixture decisions:
 - **`region=auto`** for the S3-compat write side. GCS S3-compat ignores the
   region value but opendal's S3 Builder rejects empty strings.
 - **Iceberg write uses `record_scheme_override = "gs"`** (§9).
-- **`use_iam=true` is mandatory for impersonation reads**, otherwise
-  `BuildGcpProviderFromConfig` falls through to `HmacProvider` with empty
-  AK/SK and requests ship unsigned, returning 403.
+- **The target alone selects impersonation.** `BuildGcpProviderFromConfig`
+  picks `IamImpersonateProvider` whenever `gcp_target_service_account` is
+  set (§6.4); the fixture still passes `use_iam=true`, which is accepted and
+  keeps the slot from reading as a Broker configuration.
 
 ## 11. Risks and open items
 
@@ -682,4 +783,3 @@ Notable fixture decisions:
    together when any of them is renamed. Keeping the split in one place
    (the format-layer `ToStorageOptions` functions) is how we make that
    tractable today.
-   carry a real subject and reference this design doc.

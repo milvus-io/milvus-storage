@@ -482,6 +482,58 @@ TEST_F(ExternalFilesystemTest, AzureIamIgnoresUnusedBrokerConfiguration) {
   EXPECT_TRUE(FilesystemCache::resolve_config(std::make_shared<const api::Properties>(props)).status().IsInvalid());
 }
 
+TEST_F(ExternalFilesystemTest, GcpCredentialBrokerConfigValidation) {
+  api::Properties props;
+  props[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+  props[PROPERTY_FS_CLOUD_PROVIDER] = std::string(kCloudProviderGCP);
+  props[PROPERTY_FS_ADDRESS] = std::string("storage.googleapis.com");
+  props[PROPERTY_FS_BUCKET_NAME] = std::string("bucket");
+  props[PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT] = std::string("reader@project.iam.gserviceaccount.com");
+  props[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("http://credential-broker/v1/credentials/assume-role");
+
+  auto config_result = FilesystemCache::resolve_config(std::make_shared<const api::Properties>(props));
+  ASSERT_TRUE(config_result.ok()) << config_result.status().ToString();
+  EXPECT_EQ(config_result->credential_endpoint, "http://credential-broker/v1/credentials/assume-role");
+
+  auto missing_target = props;
+  missing_target[PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT] = std::string();
+  EXPECT_TRUE(
+      FilesystemCache::resolve_config(std::make_shared<const api::Properties>(missing_target)).status().IsInvalid());
+
+  auto invalid_endpoint = props;
+  invalid_endpoint[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("file:///tmp/credentials");
+  EXPECT_TRUE(
+      FilesystemCache::resolve_config(std::make_shared<const api::Properties>(invalid_endpoint)).status().IsInvalid());
+
+  // use_iam selects this process's identity, so the Broker settings are unused.
+  auto native_iam = invalid_endpoint;
+  native_iam[PROPERTY_FS_USE_IAM] = true;
+  EXPECT_TRUE(FilesystemCache::resolve_config(std::make_shared<const api::Properties>(native_iam)).ok());
+}
+
+TEST_F(ExternalFilesystemTest, GcpCacheKeySeparatesTargetIdentities) {
+  ArrowFileSystemConfig base;
+  base.storage_type = "remote";
+  base.cloud_provider = kCloudProviderGCP;
+  base.address = "storage.googleapis.com";
+  base.bucket_name = "bucket";
+  base.gcp_target_service_account = "a@project.iam.gserviceaccount.com";
+
+  auto other_target = base;
+  other_target.gcp_target_service_account = "b@project.iam.gserviceaccount.com";
+  EXPECT_NE(base.GetCacheKey(), other_target.GetCacheKey());
+
+  auto broker = base;
+  broker.credential_endpoint = "https://broker/credentials";
+  EXPECT_NE(base.GetCacheKey(), broker.GetCacheKey());
+
+  auto iam_target = base;
+  iam_target.use_iam = true;
+  auto iam_other_target = other_target;
+  iam_other_target.use_iam = true;
+  EXPECT_NE(iam_target.GetCacheKey(), iam_other_target.GetCacheKey());
+}
+
 TEST_F(ExternalFilesystemTest, ExtractExternalFsRejectsUndefinedProperty) {
   api::Properties props;
 

@@ -560,10 +560,11 @@ class ExternalTableGcpImpersonationTest : public ::testing::TestWithParam<std::s
     api::SetValue(plain_write_props_, PROPERTY_FS_USE_SSL, "true");
 
     // --- Read properties: extfs.gcpsa.* with gcp_target_service_account ---
-    // use_iam=true is required to reach IamImpersonateProvider on the C++
-    // side (gcp_credential_provider.cpp:160); without it the producer falls
-    // through to HmacProvider with empty AK/SK → no Authorization header,
-    // ACCESS_DENIED on parquet data reads.
+    // The target alone selects IamImpersonateProvider in
+    // BuildGcpProviderFromConfig; use_iam=true is accepted but not required.
+    // It is kept here so the read slot cannot be mistaken for a Broker
+    // configuration (credential_endpoint without use_iam) and to pin the
+    // source identity to this VM's service account.
     api::SetValue(read_props_, "extfs.gcpsa.storage_type", "remote");
     api::SetValue(read_props_, "extfs.gcpsa.cloud_provider", "gcp");
     api::SetValue(read_props_, "extfs.gcpsa.address", address_.c_str());

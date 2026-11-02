@@ -368,8 +368,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       std::nullopt),
     REGISTER_PROPERTY(PROPERTY_FS_USE_IAM,
                       PropertyType::BOOL,
-                      "Whether to use IAM for the filesystem storage service. For Talon credential Broker requests, "
-                      "true selects the Broker's own IAM identity; false uses the supplied target identity.",
+                      "Whether to authenticate with this process's own cloud identity (AWS instance role, Azure "
+                      "workload/managed identity or service principal, GCP VM service account). For GCP, "
+                      "fs.gcp_target_service_account selects impersonation with or without use_iam, and use_iam=true "
+                      "disables the credential Broker selected by fs.credential_endpoint. For Talon credential "
+                      "Broker requests, true selects the Broker's own IAM identity; false uses the supplied target "
+                      "identity.",
                       false,
                       ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_FS_USE_VIRTUAL_HOST,
@@ -537,8 +541,11 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       std::nullopt),
     REGISTER_PROPERTY(PROPERTY_FS_CREDENTIAL_ENDPOINT,
                       PropertyType::STRING,
-                      "The HTTP(S) credential Broker endpoint for AWS STS, Azure SAS and Talon requests. "
-                      "Talon derives the Broker request and origin settings from the filesystem properties.",
+                      "The HTTP(S) credential Broker endpoint. AWS fetches STS credentials, Azure fetches SAS tokens, "
+                      "GCP fetches access "
+                      "tokens for fs.gcp_target_service_account from it (only when fs.use_iam is false), and Talon "
+                      "sends its request credentials through it. Talon derives the Broker request and origin settings "
+                      "from the filesystem properties.",
                       "",
                       std::nullopt),
     // --- writer properties define ---

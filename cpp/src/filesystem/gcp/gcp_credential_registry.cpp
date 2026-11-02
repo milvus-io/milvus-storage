@@ -15,6 +15,8 @@
 #include "milvus-storage/filesystem/gcp/gcp_credential_registry.h"
 
 #include <algorithm>
+#include <string>
+#include <string_view>
 #include <utility>
 
 namespace milvus_storage {
@@ -40,6 +42,11 @@ GcpEndpointKey EndpointFromUri(const Aws::Http::URI& uri) {
   return {uri.GetScheme(), uri.GetPort(), ToLower(uri.GetAuthority().c_str())};
 }
 
+bool IsGoogleApisHost(const std::string& host) {
+  constexpr std::string_view kGoogleApisSuffix = ".googleapis.com";
+  return host.size() > kGoogleApisSuffix.size() && host.ends_with(kGoogleApisSuffix);
+}
+
 }  // namespace
 
 GcpEndpointKey NormalizeGcpEndpoint(const std::string& address, bool use_ssl) {
@@ -55,10 +62,36 @@ GcpCredentialRegistry& GcpCredentialRegistry::Instance() {
   return instance;
 }
 
-void GcpCredentialRegistry::Register(GcpBucketKey key, std::shared_ptr<GcpCredentialProvider> provider) {
+arrow::Status GcpCredentialRegistry::Register(GcpBucketKey key,
+                                              std::shared_ptr<GcpCredentialProvider> provider,
+                                              bool trusted_endpoint) {
   key.endpoint.host = ToLower(std::move(key.endpoint.host));
   std::lock_guard<std::mutex> lock(mu_);
-  providers_[std::move(key)] = std::move(provider);
+  auto it = providers_.find(key);
+  if (it != providers_.end()) {
+    auto& entry = it->second;
+    if (entry.provider->Identity() != provider->Identity()) {
+      if (entry.trusted && !trusted_endpoint) {
+        return arrow::Status::Invalid("GCP bucket '", key.bucket_name, "' at ", key.endpoint.host,
+                                      " is this process's own storage and authenticates with a different "
+                                      "identity; an external filesystem cannot use it");
+      }
+      if (!trusted_endpoint) {
+        return arrow::Status::Invalid("GCP bucket '", key.bucket_name, "' at ", key.endpoint.host,
+                                      " is already registered with a different identity in this process; "
+                                      "one bucket maps to one identity");
+      }
+      // Operator configuration replaces a user-supplied identity.
+      entry.provider = std::move(provider);
+    }
+    entry.trusted = entry.trusted || trusted_endpoint;
+  } else {
+    providers_.emplace(key, Entry{std::move(provider), trusted_endpoint});
+  }
+  if (trusted_endpoint) {
+    trusted_endpoints_.insert(key.endpoint);
+  }
+  return arrow::Status::OK();
 }
 
 std::shared_ptr<GcpCredentialProvider> GcpCredentialRegistry::Lookup(const Aws::Http::URI& uri) const {
@@ -68,7 +101,7 @@ std::shared_ptr<GcpCredentialProvider> GcpCredentialRegistry::Lookup(const Aws::
   auto find = [this](const GcpBucketKey& key) -> std::shared_ptr<GcpCredentialProvider> {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = providers_.find(key);
-    return it == providers_.end() ? nullptr : it->second;
+    return it == providers_.end() ? nullptr : it->second.provider;
   };
 
   // Path-style: endpoint = request endpoint, bucket = first path segment.
@@ -90,6 +123,26 @@ std::shared_ptr<GcpCredentialProvider> GcpCredentialRegistry::Lookup(const Aws::
   }
 
   return nullptr;
+}
+
+bool GcpCredentialRegistry::MayCarryBearerToken(const Aws::Http::URI& uri) const {
+  auto endpoint = EndpointFromUri(uri);
+  // A Bearer token is a reusable credential, so Google hosts get it over TLS
+  // only. Operator-configured endpoints decide their own scheme.
+  if (endpoint.scheme == Aws::Http::Scheme::HTTPS && IsGoogleApisHost(endpoint.host)) {
+    return true;
+  }
+  std::lock_guard<std::mutex> lock(mu_);
+  if (trusted_endpoints_.contains(endpoint)) {
+    return true;
+  }
+  // Virtual-host-style: the first label is the bucket.
+  auto dot = endpoint.host.find('.');
+  if (dot == std::string::npos || dot == 0) {
+    return false;
+  }
+  endpoint.host.erase(0, dot + 1);
+  return trusted_endpoints_.contains(endpoint);
 }
 
 }  // namespace milvus_storage
