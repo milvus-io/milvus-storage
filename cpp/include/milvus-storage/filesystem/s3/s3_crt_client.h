@@ -46,6 +46,15 @@ template <>
 arrow::Result<std::shared_ptr<S3CrtClientHolder>> ClientBuilder<Aws::S3Crt::S3CrtClient>::BuildClient(
     std::optional<arrow::io::IOContext> io_context, std::shared_ptr<FilesystemMetrics> metrics);
 
+// Marks a native callback where running the SDK's blocking destructor is unsafe.
+class S3CrtCallbackScope {
+  public:
+  S3CrtCallbackScope();
+  ~S3CrtCallbackScope();
+  S3CrtCallbackScope(const S3CrtCallbackScope&) = delete;
+  S3CrtCallbackScope& operator=(const S3CrtCallbackScope&) = delete;
+};
+
 class S3CrtClientOperationState;
 class S3CrtClientFinalizer;
 
@@ -130,9 +139,10 @@ class S3CrtClientFinalizer;
 ///
 /// S3CrtClientHolder::Finalize() may be entered by global S3 shutdown or by
 /// holder destruction.
-/// The last holder reference must therefore be released on a thread from which
-/// waiting for outstanding native callbacks is safe, never from one of those
-/// callbacks itself.
+/// Native callbacks mark their scope with S3CrtCallbackScope. If a callback
+/// releases the last holder, or the holder dies with outstanding leases,
+/// destruction is deferred to a cleanup worker. The live-client barrier still
+/// waits for the SDK destructor before ShutdownAPI.
 
 /// Per-holder synchronization block shared by the holder and all outstanding
 /// leases. Keeping this state separate from the holder lets a lease decrement
@@ -174,8 +184,9 @@ class S3CrtClientLease {
 /// Owns one CRT client and gates its destruction on outstanding leases.
 ///
 /// The holder never lends shared ownership of client_. A raw client pointer is
-/// valid through a lease because Finalize() cannot move or destroy client_
-/// before that lease has decremented active_operations.
+/// valid through a lease because finalization cannot destroy the client before
+/// that lease has decremented active_operations. A cleanup task may take over
+/// ownership while the holder itself is being destroyed.
 class S3CrtClientHolder {
   public:
   S3CrtClientHolder(const S3CrtClientHolder&) = delete;
@@ -186,14 +197,14 @@ class S3CrtClientHolder {
   /// Acquire a non-owning client pointer protected by an operation lease.
   /// No lock is held while the caller uses the client.
   arrow::Result<S3CrtClientLease> Acquire();
-  /// The last holder reference must not be released from a native CRT callback.
+  /// Defer SDK destruction when leases remain or a native callback is active.
   ~S3CrtClientHolder();
   std::shared_ptr<FilesystemMetrics> GetMetrics() const;
 
   protected:
   friend class S3CrtClientFinalizer;
   S3CrtClientHolder(std::shared_ptr<S3CrtClientFinalizer> finalizer, std::shared_ptr<FilesystemMetrics> metrics);
-  void Finalize();
+  void Finalize(bool from_destructor = false);
 
   std::shared_ptr<S3CrtClientFinalizer> finalizer_;
   // Created once for this holder and copied into every successful lease.

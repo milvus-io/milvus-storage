@@ -27,6 +27,9 @@
 
 #include <arrow/status.h>
 #include <arrow/util/logging.h>
+#include <arrow/util/thread_pool.h>
+#include <aws/io/io.h>
+#include <aws/s3/s3_client.h>
 
 #include <aws/core/Aws.h>
 #include <aws/core/auth/signer/AWSAuthV4Signer.h>
@@ -51,9 +54,21 @@ std::shared_ptr<Aws::Client::RetryStrategy> MakeWrappedRetryStrategy(
 
 namespace {
 
+thread_local unsigned crt_callback_depth = 0;
+
+// Only SDK teardown runs here, never network operations. Keep this executor
+// independent of caller executors, which may already have rejected completion.
+const arrow::Result<std::shared_ptr<arrow::internal::ThreadPool>>& CleanupExecutor() {
+  static const auto executor = arrow::internal::ThreadPool::MakeEternal(1);
+  return executor;
+}
+
 inline arrow::Status ErrorS3Finalized() { return arrow::Status::Invalid("S3 subsystem is finalized"); }
 
 }  // namespace
+
+S3CrtCallbackScope::S3CrtCallbackScope() { ++crt_callback_depth; }
+S3CrtCallbackScope::~S3CrtCallbackScope() { --crt_callback_depth; }
 
 // Per-holder operation gate shared with every outstanding lease.
 //
@@ -181,7 +196,7 @@ S3CrtClientHolder::S3CrtClientHolder(std::shared_ptr<S3CrtClientFinalizer> final
       operation_state_(std::make_shared<S3CrtClientOperationState>()),
       metrics_(std::move(metrics)) {}
 
-S3CrtClientHolder::~S3CrtClientHolder() { Finalize(); }
+S3CrtClientHolder::~S3CrtClientHolder() { Finalize(true); }
 
 // Holder state transition guarded by operation_state_->mutex:
 //
@@ -222,11 +237,27 @@ arrow::Result<S3CrtClientLease> S3CrtClientHolder::Acquire() {
 // operation state alive and eventually wake this waiter. client.reset() is
 // outside the operation mutex because the SDK destructor may block while CRT
 // completes its own shutdown callbacks.
-void S3CrtClientHolder::Finalize() {
+void S3CrtClientHolder::Finalize(bool from_destructor) {
   std::shared_ptr<Aws::S3Crt::S3CrtClient> client;
   {
     std::unique_lock lock(operation_state_->mutex);
     operation_state_->closing = true;
+    if (client_ && (crt_callback_depth || (from_destructor && operation_state_->active_operations != 0))) {
+      auto status = CleanupExecutor().ValueOrDie()->Spawn(
+          [client = client_, state = operation_state_, finalizer = finalizer_]() mutable {
+            {
+              std::unique_lock lock(state->mutex);
+              state->cv.wait(lock, [&] { return state->active_operations == 0; });
+            }
+            client.reset();
+            finalizer->ClientDestroyed();
+          });
+      // This private executor is never shut down by callers and was checked at
+      // registration. Dropping a rejected cleanup could destroy on this callback.
+      ARROW_CHECK_OK(status);
+      client_.reset();
+      return;
+    }
     operation_state_->cv.wait(lock, [this] { return operation_state_->active_operations == 0; });
     client = std::move(client_);
   }
@@ -256,6 +287,7 @@ std::shared_ptr<FilesystemMetrics> S3CrtClientHolder::GetMetrics() const { retur
 // or multiply-owned client is never counted as live.
 arrow::Result<std::shared_ptr<S3CrtClientHolder>> S3CrtClientFinalizer::AddClient(
     ClientFactory make_client, std::shared_ptr<FilesystemMetrics> metrics) {
+  ARROW_RETURN_NOT_OK(CleanupExecutor().status());
   auto finalizer = shared_from_this();
   {
     std::lock_guard lock(mutex_);

@@ -671,7 +671,7 @@ TEST_P(FormatReaderTest, ParquetByteTasksProgressWhileEarlierReadsArePending) {
     auto properties = properties_;
     ASSERT_EQ(SetValue(properties, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY, "bytes"), std::nullopt);
     ASSERT_EQ(SetValue(properties, PROPERTY_READER_ASYNC_TASK_SPLIT_SIZE_BYTES, "2"), std::nullopt);
-    ASSERT_EQ(SetValue(properties, PROPERTY_READER_PARQUET_PREBUFFER_LAZY, "true"), std::nullopt);
+    // 3.0 uses Arrow's lazy pre-buffer cache by default.
     ASSERT_EQ(SetValue(properties, PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT, "1"), std::nullopt);
     ASSERT_EQ(SetValue(properties, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT, "2"), std::nullopt);
     auto stats = std::make_shared<FileSystemReadStats>();

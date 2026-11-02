@@ -449,7 +449,7 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_FS_S3_CRT_ASYNC_READ,
                       PropertyType::BOOL,
-                      "Whether S3 OpenInputFile should use AWS CRT-backed async random reads when built with CRT.",
+                      "Whether S3 reads and supported uploads should use AWS CRT when built with CRT.",
                       true,
                       ValidatePropertyType()),
     REGISTER_PROPERTY(
