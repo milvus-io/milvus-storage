@@ -99,13 +99,13 @@ tempfile = "3"
 cxx-build = "1.0.184"
 
 [patch.crates-io]
-lance = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-core = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-encoding = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-file = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-index = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-io = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-table = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
+lance = { git = "https://github.com/zilliztech/lance", rev = "1c00764fae424bde3a2e79a5c5d77a0557f7d31e" }
+lance-core = { git = "https://github.com/zilliztech/lance", rev = "1c00764fae424bde3a2e79a5c5d77a0557f7d31e" }
+lance-encoding = { git = "https://github.com/zilliztech/lance", rev = "1c00764fae424bde3a2e79a5c5d77a0557f7d31e" }
+lance-file = { git = "https://github.com/zilliztech/lance", rev = "1c00764fae424bde3a2e79a5c5d77a0557f7d31e" }
+lance-index = { git = "https://github.com/zilliztech/lance", rev = "1c00764fae424bde3a2e79a5c5d77a0557f7d31e" }
+lance-io = { git = "https://github.com/zilliztech/lance", rev = "1c00764fae424bde3a2e79a5c5d77a0557f7d31e" }
+lance-table = { git = "https://github.com/zilliztech/lance", rev = "1c00764fae424bde3a2e79a5c5d77a0557f7d31e" }
 
 [lints.rust]
 deprecated = "deny"
