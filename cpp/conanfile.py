@@ -56,6 +56,7 @@ class StorageConan(ConanFile):
         "grpc/*:shared": True,
         "grpc/*:secure": True,
         "aws-sdk-cpp/*:config": True,
+        "aws-sdk-cpp/*:shared": True,
         "aws-sdk-cpp/*:s3-crt": False,
         "aws-sdk-cpp/*:text-to-speech": False,
         "aws-sdk-cpp/*:transfer": False,
@@ -68,7 +69,9 @@ class StorageConan(ConanFile):
         # aws_mem_acquire because s3's private allocator is still NULL. See
         # docs/aws-sdk-cpp-multi-copy-bug.md for the full root-cause analysis.
         "aws-c-*/*:shared": True,
+        "aws-checksums/*:shared": True,
         "aws-crt-cpp/*:shared": True,
+        "s2n/*:shared": True,
         # Arrow embeds jemalloc and is loaded into an already running JVM.
         "jemalloc/*:enable_cxx": False,
         "jemalloc/*:enable_initial_exec_tls": False,
@@ -159,7 +162,11 @@ class StorageConan(ConanFile):
 
     def requirements(self):
         if self.options.with_crt:
-            self.requires("aws-c-s3/0.12.6")
+            # Native requests use HTTP and future APIs directly; shared SDK
+            # libraries do not expose these transitive link dependencies.
+            self.requires("aws-c-http/1.1.1#4ebd9cad4c949ed136f95419ce0ceee3")
+            self.requires("aws-c-io/1.1.1#2dd777871cf93ce4f35ba714a1ba87ef")
+            self.requires("aws-c-s3/1.5.1#41f018ea69dd13668a2ffe76d0731742")
         self.requires("xz_utils/5.4.5#fc4e36861e0a47ecd4a40a00e6d29ac8")
         self.requires("glog/0.7.1#a306e61d7b8311db8cb148ad62c48030")
         self.requires("zstd/1.5.5#70dc5eb8ea16708fc946fbac884c507e")
@@ -180,7 +187,9 @@ class StorageConan(ConanFile):
         # as a direct dep so CMakeDeps generates standalone cmake config files.
         # Without this, find_package(Azure) can't find include directories.
         self.requires("azure-sdk-for-cpp/1.16.4@milvus/dev#7c95e3df67cfea28b3cf6dbd60fbf137", force=True)
-        self.requires("aws-sdk-cpp/1.11.842@milvus/dev#363556887f622db23a10168c108dd55d", force=True)
+        self.requires("aws-sdk-cpp/1.11.921@milvus/dev#ceca11df1db850ab9026b2b5676488c0", force=True)
+        # Keep the SDK and native CRT consumers on the same dependency graph.
+        self.requires("aws-crt-cpp/0.44.3#a105812bfa69e4ee3e0475fd7914b01f")
         # Force override transitive deps to align with milvus-common
         self.requires("protobuf/5.27.0@milvus/dev#42f031a96d21c230a6e05bcac4bdd633", force=True)
         self.requires("grpc/1.67.1@milvus/dev#efeaa484b59bffaa579004d5e82ec4fd", force=True, override=True)
