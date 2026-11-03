@@ -99,13 +99,13 @@ tempfile = "3"
 cxx-build = "1.0.184"
 
 [patch.crates-io]
-lance = { git = "https://github.com/zilliztech/lance", branch = "7.0.0-patch-fix-meta-check" }
-lance-core = { git = "https://github.com/zilliztech/lance", branch = "7.0.0-patch-fix-meta-check" }
-lance-encoding = { git = "https://github.com/zilliztech/lance", branch = "7.0.0-patch-fix-meta-check" }
-lance-file = { git = "https://github.com/zilliztech/lance", branch = "7.0.0-patch-fix-meta-check" }
-lance-index = { git = "https://github.com/zilliztech/lance", branch = "7.0.0-patch-fix-meta-check" }
-lance-io = { git = "https://github.com/zilliztech/lance", branch = "7.0.0-patch-fix-meta-check" }
-lance-table = { git = "https://github.com/zilliztech/lance", branch = "7.0.0-patch-fix-meta-check" }
+lance = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-core = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-encoding = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-file = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-index = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-io = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-table = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
 
 [lints.rust]
 deprecated = "deny"
