@@ -206,42 +206,40 @@ jobs:
           chmod +x ./cpp/scripts/setup_minio.sh
           ./cpp/scripts/setup_minio.sh
 
-      - name: Run unittest with local filesystem
-        working-directory: ./cpp
-        run: |
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)/build/Release:$(pwd)/build/Release/libs
-          ./build/Release/test/milvus_test && ./build/Release/test/Test_FFI
-          
-      - name: Run unittest with minio
-        working-directory: ./cpp
-        run: |
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)/build/Release:$(pwd)/build/Release/libs
-          source ./scripts/minio_env.sh && ./build/Release/test/milvus_test
-
       - name: Setup RustFS
         run: bash ./cpp/scripts/setup_rustfs.sh
-
-      - name: Run unittest with RustFS
-        working-directory: ./cpp
-        run: |
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)/build/Release:$(pwd)/build/Release/libs
-          source ./scripts/rustfs_env.sh
-          ./build/Release/test/milvus_test && ./build/Release/test/Test_FFI
-
-      - name: Show RustFS logs on failure
-        if: failure()
-        run: docker logs rustfs || true
 
       - name: Setup Azurite
         run: |
           chmod +x ./cpp/scripts/setup_azurite.sh
           ./cpp/scripts/setup_azurite.sh
 
-      - name: Run unittest with azurite
-        working-directory: ./cpp
+      - name: Build unittest runtime image
+        run: docker build -t milvus-storage-ut -f cpp/scripts/ut.Dockerfile cpp/scripts
+
+      - name: Run unittest backends in parallel
+        run: bash cpp/scripts/run_parallel_tests.sh
+
+      - name: Show backend logs on failure
+        if: failure()
         run: |
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)/build/Release:$(pwd)/build/Release/libs
-          source ./scripts/azurite_env.sh && ./build/Release/test/milvus_test
+          for backend in minio rustfs azurite; do
+            echo "::group::$backend service log"
+            docker logs "$backend" || true
+            echo '::endgroup::'
+          done
+
+      - name: Upload unittest results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unittest-results-crt-${{ matrix.with_crt }}
+          path: |
+            ${{ runner.temp }}/storage-ut/summary.md
+            ${{ runner.temp }}/storage-ut/*/tests.log
+            ${{ runner.temp }}/storage-ut/*/gtest.xml
+            ${{ runner.temp }}/storage-ut/*/exit-code
+            ${{ runner.temp }}/storage-ut/*/duration-seconds
 
       - name: Run native S3 HTTP fixture tests
         if: matrix.with_crt == 'True'
@@ -251,8 +249,23 @@ jobs:
 
       - name: coverage-report
         working-directory: ./cpp
+        env:
+          WITH_CRT: ${{ matrix.with_crt }}
         run: |
-          BUILD_TYPE=Release ./scripts/coverage-report.sh
+          traces=()
+          for backend in local minio rustfs azurite; do
+            result_dir="$RUNNER_TEMP/storage-ut/$backend"
+            lcov --capture \
+              --directory "$result_dir/gcov$(pwd)/build/Release" \
+              --output-file "$result_dir/coverage.info"
+            traces+=("$result_dir/coverage.info")
+          done
+          if [[ "$WITH_CRT" == True ]]; then
+            lcov --capture --directory build/Release \
+              --output-file "$RUNNER_TEMP/storage-ut/native-s3.info"
+            traces+=("$RUNNER_TEMP/storage-ut/native-s3.info")
+          fi
+          BUILD_TYPE=Release ./scripts/coverage-report.sh "${traces[@]}"
 
       - name: Upload coverage to Codecov
         if: ${{ github.repository == 'milvus-io/milvus-storage' }}

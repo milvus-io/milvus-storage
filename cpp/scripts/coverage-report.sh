@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 # Configuration
 BUILD_TYPE=${BUILD_TYPE:-Release}
 
@@ -23,11 +25,20 @@ echo "Generating coverage report..."
 rm -rf ${COVERAGE_BASE_DIR}
 mkdir -p ${COVERAGE_BASE_DIR}
 
-# Capture coverage data (without branch coverage to avoid LLVM issues)
-lcov --capture \
-    --directory build/"${BUILD_TYPE}" \
-    --output-file ${COVERAGE_RAW_INFO} \
-    ${LCOV_IGNORE_ERRORS}
+# With arguments, merge isolated backend traces. Without arguments, retain the
+# local workflow that captures coverage from the build directory.
+if (( $# )); then
+    traces=()
+    for trace in "$@"; do
+        traces+=(--add-tracefile "$trace")
+    done
+    lcov "${traces[@]}" --output-file "${COVERAGE_RAW_INFO}" ${LCOV_IGNORE_ERRORS}
+else
+    lcov --capture \
+        --directory build/"${BUILD_TYPE}" \
+        --output-file ${COVERAGE_RAW_INFO} \
+        ${LCOV_IGNORE_ERRORS}
+fi
 
 # Filter coverage data
 # 1. Extract production code areas (broader patterns to handle different CI layouts)
