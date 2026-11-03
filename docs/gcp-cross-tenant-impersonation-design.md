@@ -742,11 +742,11 @@ Notable fixture decisions:
   storage with IAM; `GCP_IMP_TEST_ENV_*` supplies the customer-side bucket
   with HMAC (for write) + target SA (for read). This matches production
   topology and avoids IAM/HMAC collisions on one address.
-- **No `GetFileSystem()` in the GCP impersonation fixture.** Calling it with
-  `cloud_provider=aws` would install the AWS S3 HttpClientFactory, which
-  collides with the GCP factory installed later by `loon_exttable_explore`
-  ("one cloud provider per process" — see commit `b5f8eef`). Test data is
-  left in-bucket; rely on bucket lifecycle rules.
+- **No `GetFileSystem()` in the GCP impersonation fixture.** At baseline
+  `b5f8eef`, AWS and GCP installed incompatible process-wide factories. They
+  now share one registry-aware factory and support either startup order;
+  non-GCP requests pass through without GCP credentials. The fixture still
+  leaves test data in-bucket and relies on bucket lifecycle rules.
 - **`region=auto`** for the S3-compat write side. GCS S3-compat ignores the
   region value but opendal's S3 Builder rejects empty strings.
 - **Iceberg write uses `record_scheme_override = "gs"`** (§9).

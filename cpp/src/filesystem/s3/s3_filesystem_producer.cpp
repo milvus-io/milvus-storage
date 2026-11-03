@@ -59,52 +59,9 @@
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_options.h"
-#include "milvus-storage/filesystem/tls_http_client.h"
+#include "filesystem/gcp/gcp_filesystem_producer_internal.h"
 
 namespace milvus_storage {
-
-namespace {
-
-constexpr const char* kTlsFactoryAllocationTag = "TlsHttpClientFactory";
-
-// HttpClientFactory that creates TlsCurlHttpClient instances so the AWS SDK
-// honors the configured minimum TLS version for S3-compatible providers.
-class TlsHttpClientFactory : public Aws::Http::HttpClientFactory {
-  public:
-  explicit TlsHttpClientFactory(const std::string& tls_min_version) : tls_min_version_(tls_min_version) {}
-
-  [[nodiscard]] std::shared_ptr<Aws::Http::HttpClient> CreateHttpClient(
-      const Aws::Client::ClientConfiguration& config) const override {
-#ifdef BUILD_GTEST
-    // Enable curl verbose tracing in test builds so that TLS handshake details
-    // (e.g. "SSL connection using TLSv1.3 / ...") are routed through the AWS SDK logger.
-    auto traced_config = config;
-    traced_config.enableHttpClientTrace = true;
-    return Aws::MakeShared<TlsCurlHttpClient>(kTlsFactoryAllocationTag, traced_config, tls_min_version_);
-#else
-    return Aws::MakeShared<TlsCurlHttpClient>(kTlsFactoryAllocationTag, config, tls_min_version_);
-#endif
-  }
-
-  [[nodiscard]] std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(
-      const Aws::String& uri, Aws::Http::HttpMethod method, const Aws::IOStreamFactory& streamFactory) const override {
-    return CreateHttpRequest(Aws::Http::URI(uri), method, streamFactory);
-  }
-
-  [[nodiscard]] std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(
-      const Aws::Http::URI& uri,
-      Aws::Http::HttpMethod method,
-      const Aws::IOStreamFactory& streamFactory) const override {
-    auto request = Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(kTlsFactoryAllocationTag, uri, method);
-    request->SetResponseStreamFactory(streamFactory);
-    return request;
-  }
-
-  private:
-  std::string tls_min_version_;
-};
-
-}  // namespace
 
 AwsCredentialsProviderChain::AwsCredentialsProviderChain() {
   AddProvider(std::make_shared<Aws::Auth::EnvironmentAWSCredentialsProvider>());
@@ -131,14 +88,12 @@ arrow::Status S3FileSystemProducer::InitS3() {
     // tls_min_version only takes effect when use_ssl is enabled
     std::string tls_min_ver = (config_.use_ssl && !config_.tls_min_version.empty()) ? config_.tls_min_version : "";
 
-    if (!tls_min_ver.empty()) {
-      Aws::HttpOptions http_options;
-      http_options.httpClientFactory_create_fn = [tls_min_ver]() {
-        return Aws::MakeShared<TlsHttpClientFactory>(kTlsFactoryAllocationTag, tls_min_ver);
-      };
-      global_options.http_options = http_options;
-      global_options.override_default_http_options = true;
-    }
+    // Both producers share this call_once and a registry-aware factory, so the
+    // first filesystem does not determine which cloud providers can be used.
+    global_options.http_options.httpClientFactory_create_fn = [tls_min_ver]() {
+      return gcp_internal::MakeGoogleHttpClientFactory(tls_min_ver);
+    };
+    global_options.override_default_http_options = true;
 
     auto status = InitializeS3(global_options);
     if (!status.ok()) {
@@ -397,6 +352,9 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateV
 }
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateAwsCredentialsProvider() {
+  if (config_.alias.empty() && config_.aws_default_credentials_chain) {
+    return std::make_shared<Aws::Auth::DefaultAWSCredentialsProviderChain>();
+  }
   return std::make_shared<AwsCredentialsProviderChain>();
 }
 

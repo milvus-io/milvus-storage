@@ -200,6 +200,9 @@ struct ArrowFileSystemConfig {
   // Broker selected by credential_endpoint. For Talon Broker requests, true
   // selects the Broker's own IAM identity.
   bool use_iam = false;
+  // Compatibility for operator-configured primary AWS storage only. External
+  // filesystems always retain the restricted Env/WebIdentity credential chain.
+  bool aws_default_credentials_chain = false;
   bool use_virtual_host = false;
   int64_t request_timeout_ms = 3000;
   bool gcp_native_without_auth = false;  // Deprecated

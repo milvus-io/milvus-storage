@@ -39,6 +39,7 @@
 
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
 #include <aws/core/auth/STSCredentialsProvider.h>
+#include <aws/core/auth/ProfileCredentialsProvider.h>
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/HttpRequest.h>
@@ -1957,6 +1958,93 @@ TEST_F(S3ProviderTest, AwsIamCredentialsDoNotFallBackToProfileAfterEnvironmentCr
   }
   // A failed lookup must not pin the chain to another identity after recovery.
   EXPECT_EQ(options.credentials_provider->GetAWSCredentials().GetAWSAccessKeyId(), "ENV_AK");
+}
+
+TEST_F(S3ProviderTest, PrimaryAwsIamCanRetainDefaultCredentialsChain) {
+  ScopedEnvVar access_key("AWS_ACCESS_KEY_ID", "ENV_AK");
+  ScopedEnvVar secret_key("AWS_SECRET_ACCESS_KEY", "ENV_SK");
+  ScopedEnvVar region("AWS_DEFAULT_REGION", "us-east-1");
+  ScopedEnvVar metadata("AWS_EC2_METADATA_DISABLED", "false");
+  ScopedEnvUnset metadata_opt_in("AWS_EC2_METADATA_ENABLE");
+  ScopedEnvUnset container_uri("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI");
+  ScopedEnvUnset container_full_uri("AWS_CONTAINER_CREDENTIALS_FULL_URI");
+  ArrowFileSystemConfig config;
+  config.cloud_provider = kCloudProviderAWS;
+  config.storage_type = "remote";
+  config.use_iam = true;
+  config.aws_default_credentials_chain = true;
+  ASSERT_AND_ASSIGN(auto options, S3FileSystemProducer(config).CreateS3Options());
+  auto chain = std::dynamic_pointer_cast<Aws::Auth::DefaultAWSCredentialsProviderChain>(options.credentials_provider);
+  ASSERT_NE(chain, nullptr);
+  const auto& providers = chain->GetProviders();
+  ASSERT_EQ(providers.size(), 5u);
+  EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::ProfileCredentialsProvider>(providers[1]), nullptr);
+  EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::InstanceProfileCredentialsProvider>(providers.back()), nullptr);
+  EXPECT_EQ(chain->GetAWSCredentials().GetAWSAccessKeyId(), "ENV_AK");
+  const auto primary_key = config.GetCacheKey();
+  config.aws_default_credentials_chain = false;
+  EXPECT_NE(config.GetCacheKey(), primary_key);
+
+  config.aws_default_credentials_chain = true;
+  config.alias = "external-reader";
+  ASSERT_AND_ASSIGN(auto external, S3FileSystemProducer(config).CreateS3Options());
+  EXPECT_NE(std::dynamic_pointer_cast<AwsCredentialsProviderChain>(external.credentials_provider), nullptr);
+}
+
+TEST_F(S3ProviderTest, PrimaryAwsDefaultChainRetainsContainerCredentials) {
+  ScopedEnvVar access_key("AWS_ACCESS_KEY_ID", "ENV_AK");
+  ScopedEnvVar secret_key("AWS_SECRET_ACCESS_KEY", "ENV_SK");
+  ScopedEnvVar region("AWS_DEFAULT_REGION", "us-east-1");
+  ScopedEnvVar uri("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://127.0.0.1:12345/credentials");
+  ScopedEnvUnset relative_uri("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI");
+  ArrowFileSystemConfig config;
+  config.cloud_provider = kCloudProviderAWS;
+  config.storage_type = "remote";
+  config.use_iam = true;
+  config.aws_default_credentials_chain = true;
+  ASSERT_AND_ASSIGN(auto options, S3FileSystemProducer(config).CreateS3Options());
+  auto chain = std::dynamic_pointer_cast<Aws::Auth::DefaultAWSCredentialsProviderChain>(options.credentials_provider);
+  ASSERT_NE(chain, nullptr);
+  EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::GeneralHTTPCredentialsProvider>(chain->GetProviders().back()),
+            nullptr);
+  EXPECT_EQ(chain->GetAWSCredentials().GetAWSAccessKeyId(), "ENV_AK");
+}
+
+TEST_F(S3ProviderTest, PrimaryAwsDefaultChainReadsProfileAndContainerCredentials) {
+  TempFile profile("[broker-primary-compat]\naws_access_key_id = PROFILE_AK\naws_secret_access_key = PROFILE_SK\n");
+  TempFile empty("");
+  ScopedEnvVar credentials_file("AWS_SHARED_CREDENTIALS_FILE", profile.path());
+  ScopedEnvVar config_file("AWS_CONFIG_FILE", empty.path());
+  ScopedEnvVar profile_name("AWS_PROFILE", "broker-primary-compat");
+  ScopedEnvVar default_profile("AWS_DEFAULT_PROFILE", "broker-primary-compat");
+  ScopedEnvUnset access_key("AWS_ACCESS_KEY_ID");
+  ScopedEnvUnset secret_key("AWS_SECRET_ACCESS_KEY");
+  ScopedEnvUnset token("AWS_SESSION_TOKEN");
+  ScopedEnvUnset role("AWS_ROLE_ARN");
+  ScopedEnvUnset web_token("AWS_WEB_IDENTITY_TOKEN_FILE");
+  ScopedEnvVar region("AWS_DEFAULT_REGION", "us-east-1");
+  ScopedEnvVar metadata("AWS_EC2_METADATA_DISABLED", "true");
+  ScopedEnvUnset relative_uri("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI");
+  ScopedEnvUnset container_uri("AWS_CONTAINER_CREDENTIALS_FULL_URI");
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderAWS;
+  config.use_iam = true;
+  config.aws_default_credentials_chain = true;
+  ASSERT_AND_ASSIGN(auto profile_options, S3FileSystemProducer(config).CreateS3Options());
+  EXPECT_EQ(profile_options.credentials_provider->GetAWSCredentials().GetAWSAccessKeyId(), "PROFILE_AK");
+
+  // A new chain with no profile must still use the ECS/HTTP source.
+  ScopedEnvVar no_profile("AWS_PROFILE", "broker-primary-no-profile");
+  ScopedEnvVar no_default_profile("AWS_DEFAULT_PROFILE", "broker-primary-no-profile");
+  ScopedEnvVar ecs_uri("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://127.0.0.1:12345/credentials");
+  mock_client_->EnqueueResponse(
+      "/credentials", Aws::Http::HttpResponseCode::OK,
+      R"({"AccessKeyId":"ECS_AK","SecretAccessKey":"ECS_SK","Token":"ECS_TOKEN","Expiration":"2099-01-01T00:00:00Z"})");
+  ASSERT_AND_ASSIGN(auto ecs_options, S3FileSystemProducer(config).CreateS3Options());
+  const auto credentials = ecs_options.credentials_provider->GetAWSCredentials();
+  EXPECT_EQ(credentials.GetAWSAccessKeyId(), "ECS_AK");
+  EXPECT_EQ(credentials.GetSessionToken(), "ECS_TOKEN");
 }
 
 TEST_F(S3ProviderTest, AwsExplicitCredentialsTakePrecedenceOverEnvironment) {

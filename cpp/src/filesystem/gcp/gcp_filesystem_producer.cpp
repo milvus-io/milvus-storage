@@ -43,7 +43,7 @@
 #include "milvus-storage/filesystem/gcp/gcp_credential_provider.h"
 #include "milvus-storage/filesystem/gcp/gcp_credential_registry.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
-#include "milvus-storage/filesystem/s3/s3_global.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/filesystem/tls_http_client.h"
 
 namespace milvus_storage {
@@ -51,10 +51,6 @@ namespace milvus_storage {
 namespace {
 
 constexpr const char* kGoogleClientFactoryAllocationTag = "GoogleHttpClientFactory";
-
-const std::unordered_map<std::string, S3LogLevel> kLogLevelMap = {
-    {"off", S3LogLevel::Off},   {"fatal", S3LogLevel::Fatal}, {"error", S3LogLevel::Error}, {"warn", S3LogLevel::Warn},
-    {"info", S3LogLevel::Info}, {"debug", S3LogLevel::Debug}, {"trace", S3LogLevel::Trace}};
 
 // Stateless HttpClient wrapper. Holds only a reference to the registry and an
 // optional TLS floor setting. Per-request credential work is dispatched by URI
@@ -75,18 +71,11 @@ class GoogleHttpClientDelegator : public Aws::Http::HttpClient {
       Aws::Utils::RateLimits::RateLimiterInterface* readLimiter = nullptr,
       Aws::Utils::RateLimits::RateLimiterInterface* writeLimiter = nullptr) const override {
     auto provider = GcpCredentialRegistry::Instance().Lookup(request->GetUri());
-    if (!provider) {
-      // Invariant: exactly one cloud provider per process. If the GCP factory
-      // is installed, every S3-SDK request should match a registered
-      // (endpoint, bucket). A miss here indicates either a URI normalization
-      // bug in the registry or a request that escaped RegisterIdentity(). Fail
-      // fast so the bug surfaces clearly instead of a puzzling server 403.
-      return MakeSignatureErrorResponse(request, fmt::format("No GcpCredentialProvider registered for URI: {}",
-                                                             std::string(request->GetUri().GetURIString().c_str())));
-    }
-    auto status = provider->MaybeSignConditionalWrite(request);
-    if (!status.ok()) {
-      return MakeSignatureErrorResponse(request, status.message());
+    if (provider) {
+      auto status = provider->MaybeSignConditionalWrite(request);
+      if (!status.ok()) {
+        return MakeSignatureErrorResponse(request, status.message());
+      }
     }
     return underlying_client_->MakeRequest(request, readLimiter, writeLimiter);
   }
@@ -136,7 +125,14 @@ class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
 
   [[nodiscard]] std::shared_ptr<Aws::Http::HttpClient> CreateHttpClient(
       const Aws::Client::ClientConfiguration& config) const override {
+#ifdef BUILD_GTEST
+    auto traced_config = config;
+    traced_config.enableHttpClientTrace = true;
+    return Aws::MakeShared<GoogleHttpClientDelegator>(kGoogleClientFactoryAllocationTag, traced_config,
+                                                      tls_min_version_);
+#else
     return Aws::MakeShared<GoogleHttpClientDelegator>(kGoogleClientFactoryAllocationTag, config, tls_min_version_);
+#endif
   }
 
   [[nodiscard]] std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(
@@ -157,11 +153,7 @@ class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
     auto& registry = GcpCredentialRegistry::Instance();
     auto provider = registry.Lookup(uri);
     if (!provider) {
-      // Same invariant as Delegator::MakeRequest: every GCP URI should have a
-      // registered provider. This interface can only return a request (no error
-      // channel), so log here; the SDK delegator or GCS will reject it.
-      LOG_STORAGE_ERROR_ << "GoogleHttpClientFactory: no GcpCredentialProvider registered for URI: "
-                         << std::string(uri.GetURIString().c_str());
+      // This factory also serves S3, STS and credential Broker requests.
       return request;
     }
     if (!provider->IssuesBearerToken()) {
@@ -206,49 +198,7 @@ std::shared_ptr<Aws::Http::HttpClientFactory> MakeGoogleHttpClientFactory(std::s
 }  // namespace gcp_internal
 
 arrow::Status GcpFileSystemProducer::InitS3Compat(const ArrowFileSystemConfig& first_config) {
-  // FIXME: assumes no cross-cloud-provider usage in practice; if it does happen,
-  // this will produce unknown issues (InitializeS3 installs the HttpClientFactory
-  // process-globally, and whichever producer runs call_once first wins).
-  static std::once_flag s3_init_flag;
-  static arrow::Status init_status = arrow::Status::OK();
-  std::call_once(s3_init_flag, [&first_config]() {
-    S3GlobalOptions global_options;
-    auto it = kLogLevelMap.find(first_config.log_level);
-    global_options.log_level = it != kLogLevelMap.end() ? it->second : S3LogLevel::Off;
-
-    // tls_min_version only takes effect when use_ssl is enabled. The TLS floor
-    // is fixed by the first GCP Make() (the factory is installed once). This
-    // matches the pre-refactor behavior; treat it as a separate concern.
-    std::string tls_min_ver =
-        (first_config.use_ssl && !first_config.tls_min_version.empty()) ? first_config.tls_min_version : "";
-
-    Aws::HttpOptions http_options;
-    http_options.httpClientFactory_create_fn = [tls_min_ver]() {
-      return gcp_internal::MakeGoogleHttpClientFactory(tls_min_ver);
-    };
-    global_options.http_options = http_options;
-    global_options.override_default_http_options = true;
-
-    auto status = InitializeS3(global_options);
-    if (!status.ok()) {
-      // Keep the original status code and detail. Stringifying into
-      // Status::Invalid turned a credential/network init failure into a
-      // data-class error (segcore DataFormatBroken/2024) and destroyed whatever
-      // classification the cause carried.
-      init_status = arrow::Status(status.code(), "GcpFileSystemProducer failed to initialize S3: " + status.message(),
-                                  status.detail());
-      return;
-    }
-
-    // Register cleanup on exit. atexit handlers must not throw, so log on failure.
-    std::atexit([]() {
-      auto status = EnsureS3Finalized();
-      if (!status.ok()) {
-        LOG_STORAGE_ERROR_ << "GcpFileSystemProducer failed to finalize S3: " << status.ToString();
-      }
-    });
-  });
-  return init_status;
+  return S3FileSystemProducer(first_config).InitS3();
 }
 
 arrow::Result<std::shared_ptr<GcpCredentialProvider>> GcpFileSystemProducer::RegisterIdentity(

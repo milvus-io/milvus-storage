@@ -21,8 +21,8 @@
 
 namespace milvus_storage::gcp_internal {
 
-// Builds the registry-backed HTTP client factory that
-// GcpFileSystemProducer::InitS3Compat installs process-wide. Exposed from the
+// Builds the registry-backed HTTP client factory shared by S3 and GCP startup.
+// Exposed from the
 // source tree (not the public include directory) so unit tests can drive the
 // factory's Bearer delivery gate directly: CreateHttpRequest adds an
 // Authorization header only for a registered provider that issues Bearer

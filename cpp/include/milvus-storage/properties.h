@@ -85,6 +85,7 @@ struct PropertyInfo {
 #define PROPERTY_FS_USE_SSL "fs.use_ssl"
 #define PROPERTY_FS_SSL_CA_CERT "fs.ssl_ca_cert"
 #define PROPERTY_FS_USE_IAM "fs.use_iam"
+#define PROPERTY_FS_AWS_DEFAULT_CREDENTIALS_CHAIN "fs.aws_default_credentials_chain"
 #define PROPERTY_FS_USE_VIRTUAL_HOST "fs.use_virtual_host"
 #define PROPERTY_FS_REQUEST_TIMEOUT_MS "fs.request_timeout_ms"
 #define PROPERTY_FS_GCP_NATIVE_WITHOUT_AUTH "fs.gcp_native_without_auth"

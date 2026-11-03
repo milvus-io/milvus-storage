@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <folly/ScopeGuard.h>
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/fs.h"
 
@@ -20,6 +21,7 @@
 #include <cinttypes>
 #include <cstdio>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -1392,6 +1394,14 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
       return arrow::Status::OK();
     }
 
+    // Stop queued work, then drain only HTTP requests that actually started.
+    // An executor may discard queued tasks without completing their Futures.
+    {
+      std::unique_lock lock(upload_state_->mutex);
+      upload_state_->aborted = true;
+      upload_state_->active_uploads_completed.wait(lock, [this] { return upload_state_->active_uploads == 0; });
+    }
+
     if (IsMultipartCreated()) {
       ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
@@ -1477,7 +1487,10 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
 
   arrow::Status CleanupIfFailed(Status status) {
     if (!status.ok()) {
-      ARROW_RETURN_NOT_OK(CleanupAfterClose());
+      auto aborted = Abort();
+      if (!aborted.ok()) {
+        return status.WithMessage(status.message(), "; multipart cleanup failed: ", aborted.ToString());
+      }
       return status;
     }
     return arrow::Status::OK();
@@ -1517,12 +1530,14 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
     ARROW_RETURN_NOT_OK(CleanupIfFailed(EnsureReadyToFlushFromClose()));
 
     // Wait for in-progress uploads to finish (if async writes are enabled)
-    return FlushAsync().Then([self = Self()]() {
-      if (self->IsMultipartCreated()) {
-        ARROW_RETURN_NOT_OK(self->CleanupIfFailed(self->FinishPartUploadAfterFlush()));
-      }
-      return self->CleanupAfterClose();
-    });
+    return FlushAsync().Then(
+        [self = Self()]() {
+          if (self->IsMultipartCreated()) {
+            ARROW_RETURN_NOT_OK(self->CleanupIfFailed(self->FinishPartUploadAfterFlush()));
+          }
+          return self->CleanupAfterClose();
+        },
+        [self = Self()](const Status& status) { return self->CleanupIfFailed(status); });
   }
 
   bool closed() const override { return closed_; }
@@ -1717,14 +1732,33 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
         }
       }
 
-      // The closure keeps the buffer and the upload state alive
+      // The closure keeps the buffer and the upload state alive.
       auto deferred = [owned_buffer, holder = holder_, req = std::move(req), state = upload_state_,
                        async_result_callback, part_number = part_number_]() mutable -> arrow::Status {
+        {
+          std::lock_guard lock(state->mutex);
+          if (state->aborted) {
+            return Status::Cancelled("Upload aborted before execution");
+          }
+          ++state->active_uploads;
+        }
+        auto finished = folly::makeGuard([&] {
+          {
+            std::lock_guard lock(state->mutex);
+            --state->active_uploads;
+          }
+          state->active_uploads_completed.notify_all();
+        });
         ARROW_ASSIGN_OR_RAISE(auto outcome, TriggerUploadRequest(req, holder));
 
         return async_result_callback(req, state, part_number, outcome);
       };
-      ARROW_RETURN_NOT_OK(SubmitIO(io_context_, std::move(deferred)));
+      auto submitted = SubmitIO(io_context_, std::move(deferred));
+      if (!submitted.ok()) {
+        FinishBackgroundUpload(upload_state_, submitted.status());
+        return submitted.status();
+      }
+      submitted->AddCallback([state = upload_state_](const Status& status) { FinishBackgroundUpload(state, status); });
     }
 
     ++part_number_;
@@ -1824,12 +1858,6 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
     if (!outcome.IsSuccess()) {
       state->status &= UploadUsingSingleRequestError(req, outcome);
     }
-
-    // GH-41862: avoid potential deadlock if the Future's callback is called
-    // with the mutex taken.
-    auto fut = state->pending_uploads_completed;
-    lock.unlock();
-    fut.MarkFinished(state->status);
   }
 
   static void HandleUploadPartOutcome(const std::shared_ptr<UploadState>& state,
@@ -1842,18 +1870,18 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
     } else {
       AddCompletedPart(state, part_number, outcome.GetResult());
     }
+  }
 
-    // Notify completion
+  static void FinishBackgroundUpload(const std::shared_ptr<UploadState>& state, const Status& status) {
+    std::unique_lock lock(state->mutex);
+    state->status &= status;
     if (--state->uploads_in_progress == 0) {
-      // GH-41862: avoid potential deadlock if the Future's callback is called
-      // with the mutex taken.
-      auto fut = state->pending_uploads_completed;
+      auto completed = state->pending_uploads_completed;
+      const auto result = state->status;
       lock.unlock();
-      // State could be mutated concurrently if another thread writes to the
-      // stream, but in this case the Flush() call is only advisory anyway.
-      // Besides, it's not generally sound to write to an OutputStream from
-      // several threads at once.
-      fut.MarkFinished(state->status);
+      // Includes submission failure, cancellation and early client-lock errors.
+      // Never run a Close continuation while holding the upload-state mutex.
+      completed.MarkFinished(result);
     }
   }
 
@@ -1908,6 +1936,9 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
     Aws::Vector<S3Model::CompletedPart> completed_parts;
     int64_t uploads_in_progress = 0;
     arrow::Status status;
+    bool aborted = false;
+    int64_t active_uploads = 0;
+    std::condition_variable active_uploads_completed;
     arrow::Future<> pending_uploads_completed = arrow::Future<>::MakeFinished(arrow::Status::OK());
   };
   std::shared_ptr<UploadState> upload_state_;

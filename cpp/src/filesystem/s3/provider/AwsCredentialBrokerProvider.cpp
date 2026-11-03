@@ -23,6 +23,7 @@
 #include <aws/core/client/ClientConfiguration.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/HttpResponse.h>
+#include <aws/core/http/standard/StandardHttpRequest.h>
 #include <aws/core/utils/memory/stl/AWSStringStream.h>
 #include <aws/crt/Api.h>
 #include <aws/crt/DateTime.h>
@@ -109,8 +110,11 @@ arrow::Result<Aws::Auth::AWSCredentials> AwsCredentialBrokerProvider::FetchCrede
         payload[credential_broker::kExternalId] = config_.external_id;
       }
     }
-    auto request = Aws::Http::CreateHttpRequest(ToAwsString(config_.endpoint), Aws::Http::HttpMethod::HTTP_POST,
-                                                Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
+    // Broker authentication must not inherit object-store credentials from
+    // the process-wide HTTP request factory, even if its URL matches a bucket.
+    auto request = Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(
+        "AwsCredentialBroker", ToAwsString(config_.endpoint), Aws::Http::HttpMethod::HTTP_POST);
+    request->SetResponseStreamFactory(Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
     const auto serialized = payload.dump();
     auto body = Aws::MakeShared<Aws::StringStream>("AwsCredentialBroker");
     *body << serialized;

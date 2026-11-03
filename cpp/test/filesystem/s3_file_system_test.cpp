@@ -14,6 +14,8 @@
 
 #include <arrow/testing/gtest_util.h>
 #include <arrow/util/thread_pool.h>
+#include <arrow/util/cancel.h>
+#include <unistd.h>
 #include <arrow/buffer.h>
 #include <arrow/io/memory.h>
 #include <gtest/gtest.h>
@@ -22,7 +24,9 @@
 #include <array>
 #include <atomic>
 #include <cstdlib>
+#include <cstdio>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <memory>
 #include <sstream>
@@ -49,6 +53,7 @@
 #include "milvus-storage/thread_pool.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/upload_sizable.h"
+#include "milvus-storage/filesystem/async_output_stream.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/s3_options.h"
@@ -59,6 +64,10 @@
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/filesystem/util_internal.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/gcp/gcp_filesystem_producer.h"
+#include "filesystem/gcp/gcp_filesystem_producer_internal.h"
+#include "milvus-storage/filesystem/gcp/gcp_credential_registry.h"
+#include "milvus-storage/filesystem/s3/provider/AwsCredentialBrokerProvider.h"
 
 #include "test_env.h"
 
@@ -143,6 +152,8 @@ class S3ResponseServer {
   std::string endpoint() const { return "127.0.0.1:" + std::to_string(acceptor_.local_endpoint().port()); }
   size_t requests() const { return requests_.load(); }
   bool only_gets() const { return only_gets_.load(); }
+  size_t aborts() const { return aborts_.load(); }
+  bool has_bearer() const { return has_bearer_.load(); }
 
   private:
   void Accept() {
@@ -181,6 +192,13 @@ class S3ResponseServer {
       if (parser_->get().method() != boost::beast::http::verb::get) {
         only_gets_ = false;
       }
+      if (parser_->get().method() == boost::beast::http::verb::delete_ &&
+          parser_->get().target().find("uploadId=") != boost::beast::string_view::npos) {
+        ++aborts_;
+      }
+      if (parser_->get()[boost::beast::http::field::authorization].find("Bearer ") == 0) {
+        has_bearer_ = true;
+      }
       const auto index = requests_.fetch_add(1);
       auto& response = responses_[std::min(index, responses_.size() - 1)];
       response.keep_alive(false);
@@ -206,8 +224,79 @@ class S3ResponseServer {
   std::vector<Response> responses_;
   std::atomic<size_t> requests_{0};
   std::atomic<bool> only_gets_{true};
+  std::atomic<size_t> aborts_{0};
+  std::atomic<bool> has_bearer_{false};
   std::thread thread_;
 };
+
+static void CheckMixedProviderInitialization(bool gcp_first) {
+  namespace http = boost::beast::http;
+  ASSERT_EQ(setenv("AWS_EC2_METADATA_DISABLED", "true", 1), 0);
+  http::response<http::string_body> response{http::status::ok, 11};
+  response.body() =
+      R"({"success":true,"credentials":{"tempAk":"broker-ak","tempSk":"broker-sk","sessionToken":"broker-token","expiredAt":"2099-01-01T00:00:00Z"}})";
+  S3ResponseServer server({std::move(response)});
+  ArrowFileSystemConfig gcp;
+  gcp.cloud_provider = kCloudProviderGCP;
+  gcp.storage_type = "remote";
+  gcp.use_ssl = true;
+  gcp.address = "storage.googleapis.com";
+  gcp.bucket_name = "mixed-provider-gcp-bucket";
+  gcp.region = "us-east-1";
+  gcp.access_key_id = "gcp-ak";
+  gcp.access_key_value = "gcp-sk";
+  gcp.alias = "external-gcp";
+  ArrowFileSystemConfig broker;
+  broker.cloud_provider = kCloudProviderAWS;
+  broker.storage_type = "remote";
+  broker.use_ssl = true;
+  broker.address = "s3.us-east-1.amazonaws.com";
+  broker.bucket_name = "mixed-provider-s3-bucket";
+  broker.region = "us-east-1";
+  broker.use_iam = true;
+  broker.credential_endpoint = "http://" + server.endpoint() + "/broker?values=a,b&url=https://nested.example/path";
+  broker.alias = "external-broker";
+  if (gcp_first) {
+    const auto gcp_fs = GcpFileSystemProducer(gcp).Make();
+    ASSERT_TRUE(gcp_fs.ok()) << gcp_fs.status();
+    const auto broker_fs = S3FileSystemProducer(broker).Make();
+    ASSERT_TRUE(broker_fs.ok()) << broker_fs.status();
+  } else {
+    const auto broker_fs = S3FileSystemProducer(broker).Make();
+    ASSERT_TRUE(broker_fs.ok()) << broker_fs.status();
+    const auto gcp_fs = GcpFileSystemProducer(gcp).Make();
+    ASSERT_TRUE(gcp_fs.ok()) << gcp_fs.status();
+  }
+  // Use the actual globally installed HTTP client, not only the factory helper.
+  AwsCredentialBrokerProvider provider(
+      {.endpoint = broker.credential_endpoint, .region = broker.region, .use_iam = true});
+  ASSERT_AND_ASSIGN(auto credentials, provider.GetCredentials());
+  EXPECT_EQ(credentials.GetAWSAccessKeyId(), "broker-ak");
+  EXPECT_GE(server.requests(), 1);
+  EXPECT_FALSE(server.has_bearer());
+}
+
+TEST(S3MixedProviderDeathTest, GcpFirstCanCreateAndCallS3Broker) {
+  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+  ASSERT_EXIT(
+      {
+        CheckMixedProviderInitialization(true);
+        std::fflush(nullptr);
+        std::_Exit(::testing::Test::HasFailure() ? 1 : 0);
+      },
+      ::testing::ExitedWithCode(0), "");
+}
+
+TEST(S3MixedProviderDeathTest, S3FirstCanCreateGcpAndCallBroker) {
+  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+  ASSERT_EXIT(
+      {
+        CheckMixedProviderInitialization(false);
+        std::fflush(nullptr);
+        std::_Exit(::testing::Test::HasFailure() ? 1 : 0);
+      },
+      ::testing::ExitedWithCode(0), "");
+}
 
 class S3ReadResponseTest : public S3UnitTest, public ::testing::WithParamInterface<bool> {
   protected:
@@ -216,6 +305,37 @@ class S3ReadResponseTest : public S3UnitTest, public ::testing::WithParamInterfa
     std::atexit([] { (void)EnsureS3Finalized(); });
   }
 };
+
+TEST_F(S3UnitTest, BrokerDoesNotInheritRegisteredBucketBearer) {
+  class BrokerCollisionProvider : public GcpCredentialProvider {
+    std::optional<std::pair<std::string, std::string>> AuthorizationHeader() override {
+      return std::make_pair("Authorization", "Bearer bucket-token");
+    }
+    arrow::Status MaybeSignConditionalWrite(const std::shared_ptr<Aws::Http::HttpRequest>&) override {
+      return arrow::Status::OK();
+    }
+    bool IssuesBearerToken() const override { return true; }
+    std::string Identity() const override { return "broker-collision-test"; }
+  };
+  namespace http = boost::beast::http;
+  http::response<http::string_body> response{http::status::ok, 11};
+  response.body() =
+      R"({"success":true,"credentials":{"tempAk":"broker-ak","tempSk":"broker-sk","sessionToken":"broker-token","expiredAt":"2099-01-01T00:00:00Z"}})";
+  S3ResponseServer server({std::move(response)});
+  ASSERT_STATUS_OK(GcpCredentialRegistry::Instance().Register(
+      {NormalizeGcpEndpoint(server.endpoint(), false), "broker"}, std::make_shared<BrokerCollisionProvider>(), true));
+  const auto endpoint = "http://" + server.endpoint() + "/broker/credentials";
+  Aws::Http::SetHttpClientFactory(gcp_internal::MakeGoogleHttpClientFactory(""));
+  const auto object_request =
+      Aws::Http::CreateHttpRequest(Aws::String(endpoint.c_str()), Aws::Http::HttpMethod::HTTP_GET,
+                                   Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
+  EXPECT_EQ(object_request->GetHeaderValue("authorization"), "Bearer bucket-token");
+  AwsCredentialBrokerProvider broker({.endpoint = endpoint, .region = "us-east-1", .use_iam = true});
+  ASSERT_AND_ASSIGN(auto credentials, broker.GetCredentials());
+  EXPECT_EQ(credentials.GetAWSAccessKeyId(), "broker-ak");
+  EXPECT_EQ(server.requests(), 1);
+  EXPECT_FALSE(server.has_bearer());
+}
 
 TEST_F(S3UnitTest, ResponseStreamWritesDirectlyIntoCallerBuffer) {
   std::array<char, 10> guarded;
@@ -500,6 +620,184 @@ TEST_F(S3UnitTest, TruncatedUploadResponseIsNotSuccess) {
   ASSERT_NE(detail, nullptr) << status;
   EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork);
   ASSERT_STATUS_OK(stream->Abort());
+}
+
+static void CheckRejectedUploadStillAborts(bool cancelled, bool async_close) {
+  namespace http = boost::beast::http;
+  ASSERT_STATUS_OK(S3FileSystemProducer(ArrowFileSystemConfig{}).InitS3());
+  http::response<http::string_body> created{http::status::ok, 11};
+  created.body() =
+      "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>object</Key><UploadId>upload</UploadId></"
+      "InitiateMultipartUploadResult>";
+  http::response<http::string_body> uploaded{http::status::ok, 11};
+  uploaded.set(http::field::etag, "part-etag");
+  http::response<http::string_body> aborted{http::status::no_content, 11};
+  S3ResponseServer server({std::move(created), std::move(uploaded), std::move(aborted)});
+  auto options = S3Options::FromAccessKey("ak", "sk");
+  options.cloud_provider = kCloudProviderGCP;
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = server.endpoint();
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
+  options.connect_timeout = 2;
+  options.request_timeout = 5;
+  ASSERT_AND_ASSIGN(auto executor, arrow::internal::ThreadPool::Make(1));
+  arrow::StopSource stop;
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options, arrow::io::IOContext(executor.get(), stop.token())));
+  const int64_t part_size = 5 * 1024 * 1024;
+  ASSERT_AND_ASSIGN(auto stream, fs->OpenOutputStreamWithUploadSize("bucket/object", nullptr, part_size));
+  std::string data(part_size + 1, 'x');
+  ASSERT_STATUS_OK(stream->Write(data.data(), data.size()));
+  ASSERT_STATUS_OK(stream->Flush());
+  if (cancelled) {
+    stop.RequestStop();
+  } else {
+    ASSERT_STATUS_OK(executor->Shutdown());
+  }
+  const auto status = async_close ? stream->CloseAsync().status() : stream->Close();
+  EXPECT_FALSE(status.ok());
+  EXPECT_TRUE(cancelled ? status.IsCancelled() : status.IsInvalid()) << status;
+  EXPECT_TRUE(stream->closed());
+  EXPECT_EQ(server.aborts(), 1);
+  EXPECT_EQ(server.requests(), 3);
+}
+
+TEST(S3UploadFailureDeathTest, RejectedAndCancelledTasksDoNotBlockAbort) {
+  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+  for (const bool cancelled : {false, true}) {
+    for (const bool async_close : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << "cancel=" << cancelled << ", async=" << async_close);
+      ASSERT_EXIT(
+          {
+            alarm(15);
+            CheckRejectedUploadStillAborts(cancelled, async_close);
+            std::fflush(nullptr);
+            std::_Exit(::testing::Test::HasFailure() ? 1 : 0);
+          },
+          ::testing::ExitedWithCode(0), "");
+    }
+  }
+}
+
+static void CheckDiscardedUploadStillAborts() {
+  namespace http = boost::beast::http;
+  ASSERT_STATUS_OK(S3FileSystemProducer(ArrowFileSystemConfig{}).InitS3());
+  http::response<http::string_body> created{http::status::ok, 11};
+  created.body() =
+      "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>object</Key><UploadId>upload</UploadId></"
+      "InitiateMultipartUploadResult>";
+  http::response<http::string_body> aborted{http::status::no_content, 11};
+  S3ResponseServer server({std::move(created), std::move(aborted)});
+  auto options = S3Options::FromAccessKey("ak", "sk");
+  options.cloud_provider = kCloudProviderGCP;
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = server.endpoint();
+  options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
+  options.connect_timeout = 2;
+  options.request_timeout = 5;
+  ASSERT_AND_ASSIGN(auto executor, arrow::internal::ThreadPool::Make(1));
+  std::promise<void> release;
+  std::promise<void> started;
+  auto released = release.get_future();
+  ASSERT_AND_ASSIGN(auto occupied, executor->Submit([&] {
+    started.set_value();
+    released.wait();
+  }));
+  started.get_future().wait();
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options, arrow::io::IOContext(executor.get())));
+  const int64_t part_size = 5 * 1024 * 1024;
+  ASSERT_AND_ASSIGN(auto stream, fs->OpenOutputStreamWithUploadSize("bucket/object", nullptr, part_size));
+  std::string data(part_size, 'x');
+  ASSERT_STATUS_OK(stream->Write(data.data(), data.size()));
+  std::promise<void> dropped;
+  {
+    auto signal = std::shared_ptr<int>(new int(0), [&dropped](int* value) {
+      delete value;
+      dropped.set_value();
+    });
+    ASSERT_AND_ASSIGN(auto queued, executor->Submit([signal] {}));
+  }
+  // This continuation must not be invoked while Shutdown holds the pool lock.
+  auto* async_stream = dynamic_cast<AsyncOutputStream*>(stream.get());
+  ASSERT_NE(async_stream, nullptr);
+  auto flushed = async_stream->FlushAsync().Then([executor] { (void)executor->GetCapacity(); });
+  auto shutdown = std::async(std::launch::async, [&] { return executor->Shutdown(false); });
+  bool stopped = false;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (!executor->Spawn([] {}).ok()) {
+      stopped = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  release.set_value();
+  ASSERT_STATUS_OK(shutdown.get());
+  EXPECT_TRUE(stopped);
+  EXPECT_EQ(dropped.get_future().wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  ASSERT_STATUS_OK(stream->Abort());
+  EXPECT_EQ(server.aborts(), 1);
+  EXPECT_EQ(server.requests(), 2);
+}
+
+TEST(S3UploadFailureDeathTest, DiscardedQueuedTaskDoesNotBlockAbort) {
+  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+  ASSERT_EXIT(
+      {
+        alarm(15);
+        CheckDiscardedUploadStillAborts();
+        std::fflush(nullptr);
+        std::_Exit(::testing::Test::HasFailure() ? 1 : 0);
+      },
+      ::testing::ExitedWithCode(0), "");
+}
+
+TEST_F(S3UnitTest, GcpMultipartCloseFailureAbortsUpload) {
+  namespace http = boost::beast::http;
+  for (const bool async_close : {false, true}) {
+    for (const bool fail_part : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << "async=" << async_close << ", part=" << fail_part);
+      http::response<http::string_body> created{http::status::ok, 11};
+      created.body() =
+          "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>object</Key><UploadId>upload</UploadId></"
+          "InitiateMultipartUploadResult>";
+      http::response<http::string_body> uploaded{http::status::ok, 11};
+      uploaded.set(http::field::etag, "part-etag");
+      http::response<http::string_body> failed{http::status::forbidden, 11};
+      failed.body() = "<Error><Code>AccessDenied</Code><Message>upload rejected</Message></Error>";
+      http::response<http::string_body> aborted{http::status::no_content, 11};
+      std::vector<http::response<http::string_body>> responses;
+      responses.push_back(std::move(created));
+      if (!fail_part)
+        responses.push_back(std::move(uploaded));
+      responses.push_back(std::move(failed));
+      responses.push_back(std::move(aborted));
+      S3ResponseServer server(std::move(responses));
+      auto options = S3Options::FromAccessKey("ak", "sk");
+      options.cloud_provider = kCloudProviderGCP;
+      options.region = "us-east-1";
+      options.scheme = "http";
+      options.endpoint_override = server.endpoint();
+      options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
+      options.connect_timeout = 2;
+      options.request_timeout = 5;
+      options.background_writes = true;
+      ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+      const int64_t part_size = 5 * 1024 * 1024;
+      ASSERT_AND_ASSIGN(auto stream, fs->OpenOutputStreamWithUploadSize("bucket/object", nullptr, part_size));
+      std::string data(part_size, 'x');
+      ASSERT_STATUS_OK(stream->Write(data.data(), data.size()));
+      const auto status = async_close ? stream->CloseAsync().status() : stream->Close();
+      ASSERT_FALSE(status.ok());
+      EXPECT_NE(status.message().find("upload rejected"), std::string::npos) << status;
+      EXPECT_TRUE(stream->closed());
+      EXPECT_EQ(server.aborts(), 1);
+      EXPECT_EQ(server.requests(), fail_part ? 3 : 4);
+      ASSERT_STATUS_OK(stream->Abort());
+      EXPECT_EQ(server.aborts(), 1);
+    }
+  }
 }
 
 TEST_F(S3UnitTest, MultipartCompletionErrorCountsFailure) {

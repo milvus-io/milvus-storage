@@ -376,6 +376,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "true selects the Broker's own IAM identity; false uses the supplied target identity.",
                       false,
                       ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_AWS_DEFAULT_CREDENTIALS_CHAIN,
+                      PropertyType::BOOL,
+                      "Use the AWS SDK default credential chain for primary AWS IAM storage. "
+                      "Ignored for external filesystems and credential Broker requests.",
+                      false,
+                      ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_FS_USE_VIRTUAL_HOST,
                       PropertyType::BOOL,
                       "Whether to use virtual host style for the filesystem storage service.",

@@ -163,6 +163,9 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
     hash_combine(external_id);
   } else {
     hash_combine(use_iam);
+    if (use_iam && cloud_provider == kCloudProviderAWS && alias.empty()) {
+      hash_combine(aws_default_credentials_chain);
+    }
     if (!use_iam) {
       hash_combine(access_key_id);
       hash_combine(access_key_value);
@@ -340,6 +343,8 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(
   ARROW_ASSIGN_OR_RAISE(result.use_ssl, api::GetValue<bool>(properties_map, PROPERTY_FS_USE_SSL));
   ARROW_ASSIGN_OR_RAISE(result.ssl_ca_cert, api::GetValue<std::string>(properties_map, PROPERTY_FS_SSL_CA_CERT));
   ARROW_ASSIGN_OR_RAISE(result.use_iam, api::GetValue<bool>(properties_map, PROPERTY_FS_USE_IAM));
+  ARROW_ASSIGN_OR_RAISE(result.aws_default_credentials_chain,
+                        api::GetValue<bool>(properties_map, PROPERTY_FS_AWS_DEFAULT_CREDENTIALS_CHAIN));
   ARROW_ASSIGN_OR_RAISE(result.use_virtual_host, api::GetValue<bool>(properties_map, PROPERTY_FS_USE_VIRTUAL_HOST));
   ARROW_ASSIGN_OR_RAISE(result.request_timeout_ms,
                         api::GetValue<int64_t>(properties_map, PROPERTY_FS_REQUEST_TIMEOUT_MS));
