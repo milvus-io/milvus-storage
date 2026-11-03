@@ -187,9 +187,9 @@ class StorageConan(ConanFile):
         # as a direct dep so CMakeDeps generates standalone cmake config files.
         # Without this, find_package(Azure) can't find include directories.
         self.requires("azure-sdk-for-cpp/1.16.4@milvus/dev#7c95e3df67cfea28b3cf6dbd60fbf137", force=True)
-        self.requires("aws-sdk-cpp/1.11.921@milvus/dev#ceca11df1db850ab9026b2b5676488c0", force=True)
+        self.requires("aws-sdk-cpp/1.11.921@milvus/dev#0b229410d5498d3bacc19ccf57334b30", force=True)
         # Keep the SDK and native CRT consumers on the same dependency graph.
-        self.requires("aws-crt-cpp/0.44.3#a105812bfa69e4ee3e0475fd7914b01f")
+        self.requires("aws-crt-cpp/0.44.3#43f6408847655d35224320f4774bfcb9")
         # Force override transitive deps to align with milvus-common
         self.requires("protobuf/5.27.0@milvus/dev#42f031a96d21c230a6e05bcac4bdd633", force=True)
         self.requires("grpc/1.67.1@milvus/dev#efeaa484b59bffaa579004d5e82ec4fd", force=True, override=True)
