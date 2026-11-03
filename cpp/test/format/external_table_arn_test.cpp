@@ -39,6 +39,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <filesystem>
+#include <folly/ScopeGuard.h>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -111,6 +113,105 @@ static arrow::Result<ArnWriteResult> WritePlainFormatFile(const std::string& for
   auto explore_dir = uri_scheme + "://" + address + "/" + bucket + "/" + dir + "/";
   return ArnWriteResult{std::move(cgfile), std::move(schema), num_rows, std::move(explore_dir), 0};
 }
+
+// Shared data path. Authentication fixtures supply properties and URIs; this
+// scenario owns the FFI resources and checks discovery, metadata, and reads.
+using TestPropertyPairs = std::vector<std::pair<std::string, std::string>>;
+
+class ExternalTableReadScenario {
+  public:
+  explicit ExternalTableReadScenario(std::string format) : format_(std::move(format)) {}
+  ExternalTableReadScenario(const ExternalTableReadScenario&) = delete;
+  ExternalTableReadScenario& operator=(const ExternalTableReadScenario&) = delete;
+
+  ~ExternalTableReadScenario() {
+    if (manifest_) {
+      loon_manifest_destroy(manifest_);
+    }
+    std::free(manifest_path_);
+    loon_properties_free(&properties_);
+  }
+
+  void Explore(const ArnWriteResult& data, const std::string& manifest_base, TestPropertyPairs props) {
+    if (format_ == LOON_FORMAT_ICEBERG_TABLE) {
+      props.emplace_back(PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, std::to_string(data.iceberg_snapshot_id));
+    }
+    std::vector<const char*> keys, values;
+    for (const auto& [key, value] : props) {
+      keys.push_back(key.c_str());
+      values.push_back(value.c_str());
+    }
+    auto rc = loon_properties_create(keys.data(), values.data(), keys.size(), &properties_);
+    auto release_result = folly::makeGuard([&] { loon_ffi_free_result(&rc); });
+    ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+    loon_ffi_free_result(&rc);
+
+    const char* columns[] = {"id", "name", "value"};
+    uint64_t num_files = 0;
+    rc = loon_exttable_explore(columns, 3, format_.c_str(), manifest_base.c_str(), data.explore_dir.c_str(),
+                               &properties_, &num_files, &manifest_path_);
+    ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+    ASSERT_GT(num_files, 0u);
+    ASSERT_NE(manifest_path_, nullptr);
+    loon_ffi_free_result(&rc);
+    rc = loon_exttable_read_manifest(manifest_path_, &properties_, &manifest_);
+    ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+    ASSERT_NE(manifest_, nullptr);
+    ASSERT_EQ(manifest_->column_groups.num_of_column_groups, 1u);
+    const auto& group = manifest_->column_groups.column_group_array[0];
+    ASSERT_EQ(group.num_of_files, num_files);
+    for (uint64_t i = 0; i < num_files; ++i) {
+      const auto& file = group.files[i];
+      api::ColumnGroupFile cgfile{file.path, file.start_index, file.end_index, {}};
+      for (uint32_t p = 0; p < file.num_properties; ++p) {
+        cgfile.properties[file.property_keys[p]] = file.property_values[p];
+      }
+      files_.push_back(std::move(cgfile));
+    }
+  }
+
+  void CheckFileRows(const uint64_t expected_rows) const {
+    for (const auto& file : files_) {
+      SCOPED_TRACE(file.path);
+      uint64_t rows = 0;
+      auto rc = loon_exttable_get_file_info(format_.c_str(), file.path.c_str(), &properties_, &rows);
+      auto release_result = folly::makeGuard([&] { loon_ffi_free_result(&rc); });
+      ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+      ASSERT_EQ(rows, expected_rows);
+    }
+  }
+
+  void ReadAndCheck(const std::shared_ptr<arrow::Schema>& schema,
+                    const std::vector<api::ColumnGroupFile>& files,
+                    const api::Properties& read_props,
+                    const uint64_t expected_rows) {
+    batches_.clear();
+    int64_t total_rows = 0;
+    for (const auto& file : files) {
+      SCOPED_TRACE(file.path);
+      ASSERT_AND_ASSIGN(auto reader,
+                        FormatReader::create(schema, format_, file, read_props, {"id", "name", "value"}, nullptr));
+      ASSERT_AND_ASSIGN(auto row_groups, reader->get_row_group_infos());
+      for (size_t i = 0; i < row_groups.size(); ++i) {
+        ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
+        total_rows += batch->num_rows();
+        batches_.push_back(std::move(batch));
+      }
+    }
+    ASSERT_EQ(total_rows, static_cast<int64_t>(expected_rows));
+  }
+
+  const std::vector<api::ColumnGroupFile>& files() const { return files_; }
+  const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches() const { return batches_; }
+
+  private:
+  const std::string format_;
+  LoonProperties properties_{};
+  char* manifest_path_ = nullptr;
+  LoonManifest* manifest_ = nullptr;
+  std::vector<api::ColumnGroupFile> files_;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> batches_;
+};
 
 class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
   protected:
@@ -2454,5 +2555,145 @@ TEST_F(ExternalTableAliyunOIDCArnTest, ReadVortexWithOIDCChain) {
   free(out_manifest_path);
   loon_properties_free(&loon_props);
 }
+
+// ===========================================================================
+// External-table reads through an S3-compatible temporary-credential broker.
+// The cloud provider is supplied by the environment (e.g. aws, aliyun, tencent,
+// huawei); the fixture does not restrict it to AWS. The configured
+// storage provider and broker must support the requested AssumeRole contract.
+// On 3.0, Broker reads use the C++ filesystem through Parquet and Vortex.
+// Setup credentials are used only to prepare/clean up data. Manifest storage is local.
+// ===========================================================================
+#define S3_BROKER_ENV_CLOUD_PROVIDER "S3_BROKER_TEST_ENV_CLOUD_PROVIDER"
+#define S3_BROKER_ENV_ADDRESS "S3_BROKER_TEST_ENV_ADDRESS"
+#define S3_BROKER_ENV_REGION "S3_BROKER_TEST_ENV_REGION"
+#define S3_BROKER_ENV_BUCKET "S3_BROKER_TEST_ENV_BUCKET"
+#define S3_BROKER_ENV_ACCESS_KEY "S3_BROKER_TEST_ENV_ACCESS_KEY"
+#define S3_BROKER_ENV_SECRET_KEY "S3_BROKER_TEST_ENV_SECRET_KEY"
+#define S3_BROKER_ENV_ROLE_ARN "S3_BROKER_TEST_ENV_ROLE_ARN"
+#define S3_BROKER_ENV_CREDENTIAL_ENDPOINT "S3_BROKER_TEST_ENV_CREDENTIAL_ENDPOINT"
+// Optional: use the default credential chain (including session tokens) for setup.
+#define S3_BROKER_ENV_USE_IAM "S3_BROKER_TEST_ENV_USE_IAM"
+// Optional: trust-policy external ID and HTTP storage endpoints for local fixtures.
+#define S3_BROKER_ENV_EXTERNAL_ID "S3_BROKER_TEST_ENV_EXTERNAL_ID"
+#define S3_BROKER_ENV_USE_SSL "S3_BROKER_TEST_ENV_USE_SSL"
+
+class ExternalTableS3BrokerTest : public ExternalTableArnTest {
+  protected:
+  void SetUp() override {
+    cloud_provider_ = GetEnvVar(S3_BROKER_ENV_CLOUD_PROVIDER).ValueOr("");
+    address_ = GetEnvVar(S3_BROKER_ENV_ADDRESS).ValueOr("");
+    region_ = GetEnvVar(S3_BROKER_ENV_REGION).ValueOr("");
+    arn_bucket_ = GetEnvVar(S3_BROKER_ENV_BUCKET).ValueOr("");
+    arn_ak_ = GetEnvVar(S3_BROKER_ENV_ACCESS_KEY).ValueOr("");
+    arn_sk_ = GetEnvVar(S3_BROKER_ENV_SECRET_KEY).ValueOr("");
+    role_arn_ = GetEnvVar(S3_BROKER_ENV_ROLE_ARN).ValueOr("");
+    const auto endpoint = GetEnvVar(S3_BROKER_ENV_CREDENTIAL_ENDPOINT).ValueOr("");
+    const auto external_id = GetEnvVar(S3_BROKER_ENV_EXTERNAL_ID).ValueOr("");
+    const auto use_ssl = GetEnvVar(S3_BROKER_ENV_USE_SSL).ValueOr("true");
+    const auto use_iam = GetEnvVar(S3_BROKER_ENV_USE_IAM).ValueOr("false");
+    if (cloud_provider_.empty() || address_.empty() || region_.empty() || arn_bucket_.empty() ||
+        (use_iam != "true" && (arn_ak_.empty() || arn_sk_.empty())) || role_arn_.empty() || endpoint.empty()) {
+      GTEST_SKIP() << "S3 broker tests require S3_BROKER_TEST_ENV_{CLOUD_PROVIDER,ADDRESS,REGION,BUCKET,"
+                      "ROLE_ARN,CREDENTIAL_ENDPOINT} and either ACCESS_KEY/SECRET_KEY or USE_IAM=true";
+    }
+
+    const auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+    test_base_ = "zc/s3-broker-test-" + std::to_string(ts);
+    const auto manifest_root = (std::filesystem::temp_directory_path() / "milvus-storage-s3-broker-test").string();
+    FilesystemCache::getInstance().clean();
+
+    const std::vector<std::pair<std::string, std::string>> write_properties = {
+        {PROPERTY_FS_STORAGE_TYPE, "remote"},    {PROPERTY_FS_CLOUD_PROVIDER, cloud_provider_},
+        {PROPERTY_FS_ADDRESS, address_},         {PROPERTY_FS_REGION, region_},
+        {PROPERTY_FS_BUCKET_NAME, arn_bucket_},  {PROPERTY_FS_ACCESS_KEY_ID, arn_ak_},
+        {PROPERTY_FS_ACCESS_KEY_VALUE, arn_sk_}, {PROPERTY_FS_USE_SSL, use_ssl},
+        {PROPERTY_FS_USE_IAM, use_iam},
+    };
+    for (const auto& [key, value] : write_properties) {
+      const auto error = api::SetValue(write_props_, key.c_str(), value.c_str());
+      ASSERT_FALSE(error.has_value()) << error.value_or("");
+    }
+    ASSERT_AND_ASSIGN(write_fs_, GetFileSystem(write_props_));
+
+    // Only one broker response is available. Repeated reads must reuse it,
+    // and the request count detects an accidental fallback to another auth path.
+    broker_relay_ = std::make_unique<OneShotHttpPostRelay>(endpoint);
+    property_pairs_ = {
+        {PROPERTY_FS_STORAGE_TYPE, "local"},
+        {PROPERTY_FS_ROOT_PATH, manifest_root},
+        {"extfs.s3broker.storage_type", "remote"},
+        {"extfs.s3broker.cloud_provider", cloud_provider_},
+        {"extfs.s3broker.address", address_},
+        {"extfs.s3broker.region", region_},
+        {"extfs.s3broker.bucket_name", arn_bucket_},
+        {"extfs.s3broker.use_ssl", use_ssl},
+        {"extfs.s3broker.role_arn", role_arn_},
+        {"extfs.s3broker.external_id", external_id},
+        {"extfs.s3broker.credential_endpoint", broker_relay_->endpoint()},
+        {"extfs.s3broker.load_frequency", "3600"},
+        {"extfs.s3broker.request_timeout_ms", "75000"},
+    };
+    for (const auto& [key, value] : property_pairs_) {
+      const auto error = api::SetValue(read_props_, key.c_str(), value.c_str());
+      ASSERT_FALSE(error.has_value()) << error.value_or("");
+    }
+    ASSERT_AND_ASSIGN(manifest_fs_, GetFileSystem(read_props_));
+  }
+
+  void TearDown() override {
+    if (manifest_fs_) {
+      (void)DeleteTestDir(manifest_fs_, test_base_);
+    }
+    ExternalTableArnTest::TearDown();
+  }
+
+  std::string cloud_provider_;
+  std::vector<std::pair<std::string, std::string>> property_pairs_;
+  std::unique_ptr<OneShotHttpPostRelay> broker_relay_;
+  ArrowFileSystemPtr manifest_fs_;
+};
+
+TEST_P(ExternalTableS3BrokerTest, ReadWithBrokeredCredentials) {
+  const auto& format = GetParam();
+  constexpr uint64_t num_rows = 100;
+  ASSERT_AND_ASSIGN(auto result, CreateTestTable(format, num_rows));
+  if (format == LOON_FORMAT_ICEBERG_TABLE) {
+    api::SetValue(read_props_, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID,
+                  std::to_string(result.iceberg_snapshot_id).c_str());
+  }
+  ExternalTableReadScenario data(format);
+  ASSERT_NO_FATAL_FAILURE(data.Explore(result, test_base_ + "/manifest", property_pairs_));
+  ASSERT_NO_FATAL_FAILURE(data.ReadAndCheck(result.schema, data.files(), read_props_, num_rows));
+  EXPECT_EQ(broker_relay_->request_count(), 1u) << "External reads must use the configured credential broker";
+  EXPECT_TRUE(broker_relay_->error().empty()) << broker_relay_->error();
+}
+
+TEST_P(ExternalTableS3BrokerTest, CachedReadsFetchBrokerCredentialsOnce) {
+  const auto& format = GetParam();
+  constexpr uint64_t num_rows = 100;
+  ASSERT_AND_ASSIGN(auto result, CreateTestTable(format, num_rows));
+  if (format == LOON_FORMAT_ICEBERG_TABLE) {
+    const auto snapshot = std::to_string(result.iceberg_snapshot_id);
+    api::SetValue(read_props_, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, snapshot.c_str());
+  }
+  ASSERT_AND_ASSIGN(auto* format_impl, Format::get(format));
+  ASSERT_AND_ASSIGN(auto cached_fs, FilesystemCache::getInstance().get(read_props_, result.explore_dir));
+  for (size_t iteration = 0; iteration < 3; ++iteration) {
+    SCOPED_TRACE(iteration);
+    ASSERT_AND_ASSIGN(auto fs, FilesystemCache::getInstance().get(read_props_, result.explore_dir));
+    EXPECT_EQ(fs.get(), cached_fs.get());
+    ASSERT_AND_ASSIGN(auto files, format_impl->explore(result.explore_dir, read_props_));
+    ASSERT_FALSE(files.empty());
+    ExternalTableReadScenario data(format);
+    ASSERT_NO_FATAL_FAILURE(data.ReadAndCheck(result.schema, files, read_props_, num_rows));
+    EXPECT_EQ(broker_relay_->request_count(), 1u);
+    EXPECT_TRUE(broker_relay_->error().empty()) << broker_relay_->error();
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(S3BrokerFormats,
+                         ExternalTableS3BrokerTest,
+                         ::testing::Values(LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX));
 
 }  // namespace milvus_storage
