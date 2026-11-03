@@ -161,11 +161,12 @@ class StorageConan(ConanFile):
             self.options["gflags"].shared = True
 
     def requirements(self):
+        # Tests inspect CRT event loops even when S3 CRT support is disabled.
+        self.requires("aws-c-io/1.1.1#2dd777871cf93ce4f35ba714a1ba87ef")
         if self.options.with_crt:
             # Native requests use HTTP and future APIs directly; shared SDK
             # libraries do not expose these transitive link dependencies.
             self.requires("aws-c-http/1.1.1#4ebd9cad4c949ed136f95419ce0ceee3")
-            self.requires("aws-c-io/1.1.1#2dd777871cf93ce4f35ba714a1ba87ef")
             self.requires("aws-c-s3/1.5.1#41f018ea69dd13668a2ffe76d0731742")
         self.requires("xz_utils/5.4.5#fc4e36861e0a47ecd4a40a00e6d29ac8")
         self.requires("glog/0.7.1#a306e61d7b8311db8cb148ad62c48030")
