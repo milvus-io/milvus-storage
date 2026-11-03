@@ -25,22 +25,37 @@
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/utils/DateTime.h>
 
+#include "milvus-storage/filesystem/credential_broker.h"
+
 namespace milvus_storage {
 
+// Two authentication modes share the broker endpoint, region, lifetime and timeout:
+// - AssumeRole (use_iam=false): csp="aws", required role_arn and optional external_id.
+// - Pod IAM (use_iam=true): csp="aws"/"ali"/"tc" for AWS/Aliyun/Tencent. Credentials
+//   belong to the broker Pod; role_arn and external_id are ignored and never sent.
 struct AwsCredentialBrokerConfig {
   std::string endpoint;
   std::string region;
+
+  // Target identity for AssumeRole only; the IAM factory leaves both fields empty.
   std::string role_arn;
   std::string external_id;
+
+  // Requested lifetime in seconds; filesystem configuration accepts [900, 3600].
+  // Cache refresh follows the response's expiredAt rather than this requested duration.
   int32_t duration_seconds = 900;
+  // Timeout per HTTP attempt, including each retry of an initial credential fetch.
   int64_t request_timeout_ms = 3000;
+  bool use_iam = false;
+  std::string csp = credential_broker::kCspAws;
 
   bool operator==(const AwsCredentialBrokerConfig& other) const = default;
 };
 
 // Uses the same synchronous, cached provider contract as STS AssumeRole.
-// S3 and S3-compatible clouds share the AWS STS broker request/response contract
-// to obtain temporary credentials for AssumeRole.
+// S3-compatible clouds share the temporary credential response contract.
+// IAM selects the broker's own AWS, Aliyun or Tencent identity; otherwise the
+// existing AWS STS request selects a target role.
 class AwsCredentialBrokerProvider final : public Aws::Auth::AWSCredentialsProvider {
   public:
   using Clock = std::function<Aws::Utils::DateTime()>;

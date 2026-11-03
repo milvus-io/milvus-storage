@@ -29,6 +29,7 @@
 #include <nlohmann/json.hpp>
 
 #include "milvus-storage/common/log.h"
+#include "milvus-storage/filesystem/credential_broker.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 
 using ::milvus_storage::fs::internal::ToAwsString;
@@ -96,12 +97,17 @@ arrow::Result<Aws::Auth::AWSCredentials> AwsCredentialBrokerProvider::GetCredent
 
 arrow::Result<Aws::Auth::AWSCredentials> AwsCredentialBrokerProvider::FetchCredentials() const {
   try {
-    nlohmann::json payload = {{"csp", "aws"},
-                              {"region", config_.region},
-                              {"roleArn", config_.role_arn},
-                              {"durationSeconds", config_.duration_seconds}};
-    if (!config_.external_id.empty()) {
-      payload["externalId"] = config_.external_id;
+    nlohmann::json payload = {{credential_broker::kCsp, config_.csp},
+                              {credential_broker::kRegion, config_.region},
+                              {credential_broker::kDurationSeconds, config_.duration_seconds}};
+    if (config_.use_iam) {
+      // IAM credentials belong to the broker Pod; target identity fields are not allowed.
+      payload[credential_broker::kCredentialType] = credential_broker::kIam;
+    } else {
+      payload[credential_broker::kRoleArn] = config_.role_arn;
+      if (!config_.external_id.empty()) {
+        payload[credential_broker::kExternalId] = config_.external_id;
+      }
     }
     auto request = Aws::Http::CreateHttpRequest(ToAwsString(config_.endpoint), Aws::Http::HttpMethod::HTTP_POST,
                                                 Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
@@ -122,22 +128,24 @@ arrow::Result<Aws::Auth::AWSCredentials> AwsCredentialBrokerProvider::FetchCrede
     const int status = static_cast<int>(response->GetResponseCode());
     const auto json = nlohmann::json::parse(response->GetResponseBody(), nullptr, false);
     if (status < 200 || status >= 300) {
-      return arrow::Status::IOError(
-          "AWS credential broker HTTP ", status,
-          json.is_object() ? ": " + json.value("msg", std::string()) + "; " + json.value("detail", std::string()) : "");
+      return arrow::Status::IOError("AWS credential broker HTTP ", status,
+                                    json.is_object() ? ": " + json.value(credential_broker::kMsg, std::string()) +
+                                                           "; " + json.value(credential_broker::kDetail, std::string())
+                                                     : "");
     }
     if (json.is_discarded()) {
       return arrow::Status::IOError("AWS credential broker returned invalid JSON");
     }
-    if (!json.at("success").get<bool>()) {
-      return arrow::Status::IOError("AWS credential broker returned success=false: ", json.value("msg", std::string()),
-                                    "; ", json.value("detail", std::string()));
+    if (!json.at(credential_broker::kSuccess).get<bool>()) {
+      return arrow::Status::IOError(
+          "AWS credential broker returned success=false: ", json.value(credential_broker::kMsg, std::string()), "; ",
+          json.value(credential_broker::kDetail, std::string()));
     }
-    const auto& values = json.at("credentials");
-    const auto access_key = values.at("tempAk").get<std::string>();
-    const auto secret_key = values.at("tempSk").get<std::string>();
-    const auto session_token = values.at("sessionToken").get<std::string>();
-    const auto expired_at = values.at("expiredAt").get<std::string>();
+    const auto& values = json.at(credential_broker::kCredentials);
+    const auto access_key = values.at(credential_broker::kTempAk).get<std::string>();
+    const auto secret_key = values.at(credential_broker::kTempSk).get<std::string>();
+    const auto session_token = values.at(credential_broker::kSessionToken).get<std::string>();
+    const auto expired_at = values.at(credential_broker::kExpiredAt).get<std::string>();
     if (access_key.empty() || secret_key.empty() || session_token.empty() || expired_at.empty()) {
       return arrow::Status::IOError("AWS credential broker requires non-empty tempAk, tempSk, sessionToken, expiredAt");
     }
