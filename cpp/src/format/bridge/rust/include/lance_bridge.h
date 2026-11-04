@@ -53,6 +53,7 @@ struct LanceIOStats {
   uint64_t read_iops = 0;
   uint64_t read_bytes = 0;
 };
+arrow::Status ExternalizeRowIdsForTesting(const std::string& uri);
 #endif  // BUILD_GTEST
 
 /// Storage options type for S3/cloud access (key-value pairs).
@@ -65,6 +66,27 @@ enum class LanceDataStorageFormat : uint8_t {
   Stable = V2_1,  // Backward-compatible name for the default format.
   V2_2 = 2,
   V2_3 = 3,
+};
+
+/// Shared file footers, deletion state, and stable row IDs for one snapshot's fragment.
+///
+/// Obtained from BlockingFragmentReader::GetFilesMetadata() after opening a reader.
+/// Keeping this handle in the top-level Reader's cache lets later Open
+/// calls reuse footers, the deletion vector, sorted deletion positions, and the
+/// row-ID sequence across projections, even after the first reader is destroyed.
+///
+/// The Rust object maps (base_id, path) to Arc<CachedFileMetadata> and retains the
+/// decoded deletion vector, sorted positions, and row-ID sequence through shared allocations.
+/// Reuse requires the same dataset URI, snapshot version, and fragment ID, but
+/// not the original Session. Allocations are freed with their last shared owner.
+class FragmentFilesMetadata {
+  public:
+  explicit FragmentFilesMetadata(rust::Box<ffi::FragmentFilesMetadata> impl) : impl_(std::move(impl)) {}
+
+  const ffi::FragmentFilesMetadata& Impl() const { return *impl_; }
+
+  private:
+  rust::Box<ffi::FragmentFilesMetadata> impl_;
 };
 
 class BlockingDataset {
@@ -81,7 +103,8 @@ class BlockingDataset {
   static std::unique_ptr<BlockingDataset> WriteDataset(const std::string& uri,
                                                        struct ArrowArrayStream* stream,
                                                        const StorageOptions& storage_options = {},
-                                                       LanceDataStorageFormat format = LanceDataStorageFormat::Stable);
+                                                       LanceDataStorageFormat format = LanceDataStorageFormat::Stable,
+                                                       bool enable_stable_row_ids = false);
 
   explicit BlockingDataset(rust::Box<ffi::BlockingDataset> impl) : impl_(std::move(impl)) {}
 
@@ -104,11 +127,6 @@ class BlockingDataset {
   uint64_t GetFragmentPhysicalRowCount(uint64_t fragment_id) const;
 
   uint64_t GetFragmentRowCount(uint64_t fragment_id) const;
-
-  // Top-level dataset columns in schema order; returns NotImplemented when estimation is unavailable.
-  arrow::Result<std::vector<uint64_t>> EstimateFragmentColumnMemory(uint64_t fragment_id) const;
-
-  uint64_t EstimateFragmentMemory(uint64_t fragment_id) const;
 
   // Lance 7 exposes the current dataset schema through FileFragment::schema().
   // It can include evolved nullable columns that are not physically stored in this fragment.
@@ -138,7 +156,8 @@ class BlockingFragmentReader {
   public:
   static std::unique_ptr<BlockingFragmentReader> Open(const BlockingDataset& dataset,
                                                       uint64_t fragment_id,
-                                                      ArrowSchema& schema);
+                                                      ArrowSchema& schema,
+                                                      const FragmentFilesMetadata* metadata = nullptr);
 
   explicit BlockingFragmentReader(rust::Box<ffi::BlockingFragmentReader> impl) : impl_(std::move(impl)) {}
 
@@ -149,6 +168,11 @@ class BlockingFragmentReader {
   BlockingFragmentReader& operator=(const BlockingFragmentReader&) = delete;
 
   uint64_t RowCount() const;
+
+  // Reuse retained footers, deletion state and row IDs across projections.
+  std::shared_ptr<const FragmentFilesMetadata> GetFilesMetadata() const;
+  arrow::Result<std::vector<uint64_t>> EstimateFragmentColumnMemory() const;
+  arrow::Result<uint64_t> EstimateFragmentMemory() const;
 
   void TakeAsSingleBatch(const std::vector<int64_t>& indices, ArrowArray& out_array);
 

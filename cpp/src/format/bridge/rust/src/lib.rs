@@ -128,6 +128,7 @@ pub mod lance_ffi {
             storage_options_keys: Vec<String>,
             storage_options_values: Vec<String>,
             data_storage_format: LanceDataStorageFormat,
+            enable_stable_row_ids: bool,
         ) -> Result<Box<BlockingDataset>>;
 
         pub unsafe fn write_stream(self: &mut BlockingDataset, stream_ptr: *mut u8) -> Result<()>;
@@ -143,15 +144,8 @@ pub mod lance_ffi {
             fragment_id: u64,
         ) -> Result<u64>;
         pub fn get_fragment_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64>;
-        // Top-level dataset columns in schema order.
-        pub fn estimate_fragment_column_memory(
-            dataset: &BlockingDataset,
-            fragment_id: u64,
-        ) -> Result<Vec<LanceColumnMemoryEstimate>>;
-        pub fn estimate_fragment_memory(
-            dataset: &BlockingDataset,
-            fragment_id: u64,
-        ) -> Result<u64>;
+        type FragmentFilesMetadata;
+        pub fn externalize_row_ids_for_testing(uri: &str) -> Result<()>;
         pub unsafe fn get_fragment_schema(
             dataset: &BlockingDataset,
             fragment_id: u64,
@@ -163,7 +157,14 @@ pub mod lance_ffi {
             dataset: &BlockingDataset,
             fragment_id: u64,
             schema_rawptr: *mut u8,
+            metadata: *const FragmentFilesMetadata,
         ) -> Result<Box<BlockingFragmentReader>>;
+
+        pub fn get_files_metadata(self: &BlockingFragmentReader) -> Box<FragmentFilesMetadata>;
+        pub fn estimate_fragment_column_memory(
+            self: &BlockingFragmentReader,
+        ) -> Result<Vec<LanceColumnMemoryEstimate>>;
+        pub fn estimate_fragment_memory(self: &BlockingFragmentReader) -> Result<u64>;
 
         // BlockingFragmentReader functions
         pub fn number_of_rows(self: &BlockingFragmentReader) -> Result<u64>;
