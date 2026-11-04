@@ -58,8 +58,8 @@ arrow::Result<Format*> Format::get(const std::string& format) {
   }
 #else
   if (format == LOON_FORMAT_LANCE_TABLE || format == LOON_FORMAT_ICEBERG_TABLE || format == LOON_FORMAT_PAIMON_TABLE) {
-    return arrow::Status::NotImplemented(fmt::format(
-        "Format {} is not available: this build has WITH_EXTERNAL_TABLE_FORMATS=OFF", format));
+    return arrow::Status::NotImplemented(
+        fmt::format("Format {} is not available: this build has WITH_EXTERNAL_TABLE_FORMATS=OFF", format));
   }
 #endif
   return arrow::Status::Invalid(fmt::format("Unknown file format: {}", format));
