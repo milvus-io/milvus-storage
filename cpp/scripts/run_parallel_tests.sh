@@ -20,6 +20,27 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# Check both executables and their transitive dependencies before starting four
+# copies. The dynamic loader stops at its first missing library; ldd lists all.
+docker run --rm --user "$(id -u):$(id -g)" \
+    --mount "type=bind,src=$cpp_root,dst=$cpp_root,readonly" \
+    --env "BUILD_DIR=$build_dir" \
+    --env "LD_LIBRARY_PATH=$build_dir:$build_dir/libs" \
+    milvus-storage-ut bash -u -c '
+        status=0
+        for binary in "$BUILD_DIR/test/milvus_test" "$BUILD_DIR/test/Test_FFI"; do
+            if ! dependencies=$(ldd "$binary" 2>&1); then
+                status=1
+            fi
+            printf "%s\n%s\n" "$binary" "$dependencies"
+            # ldd may return success even when a dependency is missing.
+            if [[ "$dependencies" == *"not found"* ]]; then
+                status=1
+            fi
+        done
+        exit "$status"
+    '
+
 for backend in "${backends[@]}"; do
     result_dir="$results_dir/$backend"
     mkdir -p "$result_dir/work" "$result_dir/gcov"
