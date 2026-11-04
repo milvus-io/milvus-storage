@@ -190,6 +190,7 @@ struct ArrowFileSystemConfig {
   std::string gcp_credential_json = "";  // Deprecated
   bool use_custom_part_upload = true;    // Deprecated
   uint32_t max_connections = 100;
+  uint32_t crt_queue_sizes = 125;
 
   // Work on S3FileSystem, not worked on azurefs
   // To align with the old logical, set to `int64_t`(should be `uint64_t`)
@@ -252,7 +253,7 @@ struct ArrowFileSystemConfig {
   // Tencent COS, GCS S3-compat) will silently ignore the checksum header.
   bool use_crc32c_checksum = false;
 
-  // Whether S3 OpenInputFile should use the AWS CRT-backed async reader when
+  // Whether S3 reads and supported uploads should use AWS CRT when
   // WITH_CRT is enabled. Ignored by non-S3 filesystems and non-CRT builds.
   bool s3_crt_async_read = true;
 

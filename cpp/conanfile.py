@@ -66,6 +66,7 @@ class StorageConan(ConanFile):
         # aws_mem_acquire because s3's private allocator is still NULL. See
         # docs/aws-sdk-cpp-multi-copy-bug.md for the full root-cause analysis.
         "aws-c-*/*:shared": True,
+        "aws-crt-cpp/*:shared": True,
         "arrow/*:with_s3": True,
         "arrow/*:filesystem_layer": True,
         "arrow/*:dataset_modules": True,
@@ -152,6 +153,8 @@ class StorageConan(ConanFile):
             self.options["gflags"].shared = True
 
     def requirements(self):
+        if self.options.with_crt:
+            self.requires("aws-c-s3/0.12.6")
         self.requires("xz_utils/5.4.5#fc4e36861e0a47ecd4a40a00e6d29ac8")
         self.requires("glog/0.7.1#a306e61d7b8311db8cb148ad62c48030")
         self.requires("zstd/1.5.5#70dc5eb8ea16708fc946fbac884c507e")

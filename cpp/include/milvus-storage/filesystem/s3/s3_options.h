@@ -165,6 +165,7 @@ struct S3Options {
 
   /// \brief Maximum number of connections to the S3 server
   uint32_t max_connections = 100;
+  uint32_t crt_queue_sizes = 125;
 
   /// Multipart upload part size
   int64_t multi_part_upload_size = DEFAULT_MULTIPART_UPLOAD_PART_SIZE;
@@ -175,7 +176,7 @@ struct S3Options {
   /// Whether to use CRC32C checksum for S3 uploads.
   bool use_crc32c_checksum = false;
 
-  /// Whether OpenInputFile should use AWS CRT-backed async range reads when available.
+  /// Whether reads and supported uploads should use AWS CRT when available.
   bool use_crt_async_reads = true;
 
   S3Options();

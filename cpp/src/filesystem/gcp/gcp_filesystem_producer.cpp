@@ -152,12 +152,14 @@ class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
         Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(kGoogleClientFactoryAllocationTag, uri, method);
     request->SetResponseStreamFactory(streamFactory);
 
+    // S3CrtClient also calls this factory before handing the request to its
+    // native transport, so IAM Bearer headers reach CRT reads here.
     auto& registry = GcpCredentialRegistry::Instance();
     auto provider = registry.Lookup(uri);
     if (!provider) {
       // Same invariant as Delegator::MakeRequest: every GCP URI should have a
       // registered provider. This interface can only return a request (no error
-      // channel), so log here and let MakeRequest fail the request with a 403.
+      // channel), so log here; the SDK delegator or GCS will reject it.
       LOG_STORAGE_ERROR_ << "GoogleHttpClientFactory: no GcpCredentialProvider registered for URI: "
                          << std::string(uri.GetURIString().c_str());
       return request;
@@ -284,10 +286,12 @@ arrow::Result<S3Options> GcpFileSystemProducer::CreateS3Options(bool bearer_toke
   options.request_timeout = config_.request_timeout_ms <= 0 ? DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC
                                                             : config_.request_timeout_ms / 1000;
   options.max_connections = config_.max_connections;
+  options.crt_queue_sizes = config_.crt_queue_sizes;
   options.multi_part_upload_size = config_.multi_part_upload_size;
   options.cloud_provider = config_.cloud_provider;
   options.background_writes = config_.background_writes;
   options.use_crc32c_checksum = config_.use_crc32c_checksum;
+  options.use_crt_async_reads = config_.s3_crt_async_read;
 
   // GCP does not support AssumeRole
   if (!config_.role_arn.empty()) {

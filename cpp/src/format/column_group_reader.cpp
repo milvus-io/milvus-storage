@@ -199,6 +199,7 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::append_file_metadata(size_t file_i
             .global_row_end = rows_in_all_files + rows_in_file,
             .avg_memory_size = chunk_memory_size,
             .memory_size_available = row_group_in_file[j].memory_size_available,
+            .read_size = row_group_in_file[j].read_size,
         });
       }
     }
@@ -218,6 +219,7 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::append_file_metadata(size_t file_i
           .global_row_end = rows_in_all_files + rows_in_file,
           .avg_memory_size = row_group_in_file[j].memory_size,
           .memory_size_available = row_group_in_file[j].memory_size_available,
+          .read_size = row_group_in_file[j].read_size,
       });
     }
   }

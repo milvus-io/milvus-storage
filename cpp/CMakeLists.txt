@@ -43,6 +43,9 @@ find_package(opentelemetry-cpp REQUIRED)
 find_package(google-cloud-cpp REQUIRED)
 find_package(CURL REQUIRED)
 find_package(AWSSDK REQUIRED CONFIG)
+if(WITH_CRT)
+  include(ExtendS3CrtClient.cmake)
+endif()
 find_package(milvus-common REQUIRED)
 find_package(libavrocpp QUIET)
 if(NOT libavrocpp_FOUND)
@@ -106,6 +109,8 @@ list(APPEND LINK_LIBS
 )
 
 if (WITH_CRT)
+  find_package(aws-c-s3 REQUIRED CONFIG)
+  list(APPEND LINK_LIBS AWS::aws-c-s3)
   list(APPEND LINK_LIBS AWS::aws-sdk-cpp-s3-crt)
 endif()
 
@@ -261,7 +266,9 @@ if (WITH_JNI)
       -Wl,-z,lazy
     )
 
-    set(JAVA_DIR ${CMAKE_SOURCE_DIR}/../java/)
+    # java/ beside cpp/. CMAKE_SOURCE_DIR is the top-level project's source
+    # directory, which is not cpp/ when this project is added as a subproject.
+    set(JAVA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../java/)
     add_custom_command(TARGET milvus-storage-jni POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:milvus-storage-jni> ${JAVA_DIR}
       COMMAND ${CMAKE_COMMAND}

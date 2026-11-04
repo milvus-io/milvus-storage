@@ -38,7 +38,8 @@ class CloudFsMetricsTest : public ::testing::Test {
     }
     api::Properties properties;
     ASSERT_STATUS_OK(InitTestProperties(properties));
-    ASSERT_AND_ASSIGN(arrowfs_, GetFileSystem(properties));
+    properties_ = properties;
+    ASSERT_AND_ASSIGN(arrowfs_, GetFileSystem(properties_));
 
     base_path_ = GetTestBasePath("cloud-fs-metrics");
     ASSERT_STATUS_OK(CreateTestDir(arrowfs_, base_path_));
@@ -60,6 +61,7 @@ class CloudFsMetricsTest : public ::testing::Test {
 
   protected:
   ArrowFileSystemPtr arrowfs_;
+  api::Properties properties_;
   std::string base_path_;
 };
 
@@ -158,13 +160,14 @@ TEST_F(CloudFsMetricsTest, TestBatchingBelowUploadSize) {
 
   metrics = observable->GetMetrics();
   ASSERT_NE(metrics, nullptr);
-  // S3 uses PutObject for data < part_size (no multipart), so Created/Finished = 0.
-  // Azure always goes through CreateEmptyBlockBlob + StageBlock + CommitBlockList,
-  // so Created/Finished = 1.
-  auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
-  bool is_azure = provider.ok() && provider.ValueOrDie() == "azure";
-  EXPECT_EQ(is_azure ? 1 : 0, metrics->GetMultiPartUploadCreated());
-  EXPECT_EQ(is_azure ? 1 : 0, metrics->GetMultiPartUploadFinished());
+  // SDK S3 uses PutObject below part_size; CRT streams and Azure use multipart.
+  ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties_));
+  bool uses_multipart = config.cloud_provider == kCloudProviderAzure;
+#ifdef WITH_CRT
+  uses_multipart |= config.s3_crt_async_read && config.cloud_provider != kCloudProviderGCP;
+#endif
+  EXPECT_EQ(uses_multipart ? 1 : 0, metrics->GetMultiPartUploadCreated());
+  EXPECT_EQ(uses_multipart ? 1 : 0, metrics->GetMultiPartUploadFinished());
   // 9 x 1MB = 9MB < 10MB upload_size, all buffered and flushed as 1 upload
   EXPECT_EQ(1, metrics->GetWriteCount());
   EXPECT_EQ(static_cast<int64_t>(num_chunks) * chunk_size, metrics->GetWriteBytes());

@@ -192,6 +192,10 @@ TEST(ChunkReaderDefaultAsyncTest, DefaultAsyncDelegatesToSyncGetChunks) {
   EXPECT_EQ(chunks.size(), chunk_indices.size());
   EXPECT_EQ(reader.last_chunk_indices, chunk_indices);
   EXPECT_EQ(reader.last_parallelism, 7);
+
+  ASSERT_AND_ASSIGN(auto default_chunks, std::move(reader.get_chunks_async(chunk_indices)).get());
+  EXPECT_EQ(default_chunks.size(), chunk_indices.size());
+  EXPECT_EQ(reader.last_parallelism, 1);
 }
 
 TEST(ReaderDefaultAsyncTest, DefaultAsyncDelegatesToSyncMethods) {
@@ -1894,12 +1898,56 @@ TEST_P(APIWriterReaderTest, PublicGetChunksAsync) {
   ASSERT_EQ(chunks[0]->num_rows(), test_batch_->num_rows());
   ExpectStandardTestValue(chunks[0]->column(0), "id", 0);
 
+  ASSERT_AND_ASSIGN(auto default_chunks, std::move(chunk_reader->get_chunks_async({0, 0})).get());
+  ASSERT_EQ(default_chunks.size(), 2);
+  EXPECT_TRUE(default_chunks[0]->Equals(*chunks[0]));
+  EXPECT_TRUE(default_chunks[1]->Equals(*chunks[0]));
+
   ASSERT_AND_ASSIGN(auto empty_chunks, std::move(chunk_reader->get_chunks_async({}, parallelism_)).get());
   EXPECT_TRUE(empty_chunks.empty());
   ASSERT_STATUS_NOT_OK(std::move(chunk_reader->get_chunks_async({-1, 0}, parallelism_)).get());
   ASSERT_STATUS_NOT_OK(std::move(chunk_reader->get_chunks_async(
                                      {0, static_cast<int64_t>(chunk_reader->total_number_of_chunks())}, parallelism_))
                            .get());
+}
+
+TEST_P(APIWriterReaderTest, PublicGetChunksAsyncMultipleRowGroups) {
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "This test exercises independent ranges within one Parquet file.";
+  }
+
+  ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, 0, false, 10000, 512));
+  ASSERT_EQ(SetValue(properties_, PROPERTY_WRITER_FILE_ROLLING_SIZE, std::to_string(UINT64_MAX).c_str()), std::nullopt);
+  ASSERT_EQ(SetValue(properties_, PROPERTY_WRITER_COMPRESSION, "uncompressed"), std::nullopt);
+  ASSERT_EQ(SetValue(properties_, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT, "1048576"), std::nullopt);
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(batch));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  ASSERT_EQ(cgs->size(), 1);
+  ASSERT_EQ(cgs->front()->files.size(), 1);
+
+  auto columns = std::make_shared<std::vector<std::string>>(std::initializer_list<std::string>{"vector"});
+  auto reader = Reader::create(cgs, schema_, columns, properties_);
+  ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+  ASSERT_GT(chunk_reader->total_number_of_chunks(), 1);
+  std::vector<int64_t> indices(chunk_reader->total_number_of_chunks());
+  std::iota(indices.begin(), indices.end(), 0);
+  ASSERT_AND_ASSIGN(auto expected, chunk_reader->get_chunks(indices, parallelism_));
+  std::reverse(indices.begin(), indices.end());
+  indices.push_back(indices.front());
+
+  auto pool = ThreadPoolHolder::GetThreadPool(parallelism_);
+  for (const auto* strategy : {"parallelism", "none", "all"}) {
+    ASSERT_EQ(SetValue(properties_, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY, strategy), std::nullopt);
+    auto async_reader = Reader::create(cgs, schema_, columns, properties_);
+    ASSERT_AND_ASSIGN(auto async_chunks, async_reader->get_chunk_reader(0));
+    ASSERT_AND_ASSIGN(auto actual, std::move(async_chunks->get_chunks_async(indices)).via(pool.get()).get());
+    ASSERT_EQ(actual.size(), indices.size());
+    for (size_t i = 0; i < indices.size(); ++i) {
+      EXPECT_TRUE(actual[i]->Equals(*expected[indices[i]]));
+    }
+  }
 }
 
 TEST_P(APIWriterReaderTest, PublicGetChunkReaderAsync) {

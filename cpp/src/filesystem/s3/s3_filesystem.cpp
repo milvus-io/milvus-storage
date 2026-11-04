@@ -14,18 +14,23 @@
 
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/async_output_stream.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cinttypes>
 #include <cstdio>
 #include <chrono>
+#include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
 #include <thread>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <arrow/util/async_generator.h>
 #include "milvus-storage/common/extend_status.h"
@@ -35,6 +40,7 @@
 #include <arrow/result.h>
 #include <arrow/io/memory.h>
 #include <arrow/util/future.h>
+#include <arrow/util/cancel.h>
 #include <arrow/util/thread_pool.h>
 #include <arrow/filesystem/path_util.h>
 #include <arrow/io/interfaces.h>
@@ -50,9 +56,11 @@
 #include <aws/core/client/DefaultRetryStrategy.h>
 #include <aws/core/client/RetryStrategy.h>
 #include <aws/core/http/HttpResponse.h>
+#include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/utils/HashingUtils.h>
 #include <aws/core/utils/logging/ConsoleLogSystem.h>
 #include <aws/core/utils/stream/PreallocatedStreamBuf.h>
+#include <aws/core/utils/stream/ResponseStream.h>
 #include <aws/core/utils/xml/XmlSerializer.h>
 #include <aws/identity-management/auth/STSAssumeRoleCredentialsProvider.h>
 #include <aws/s3/S3Client.h>
@@ -77,6 +85,13 @@
 #ifdef WITH_CRT
 #include <aws/s3-crt/model/GetObjectRequest.h>
 #include <aws/s3-crt/model/HeadObjectRequest.h>
+#include <aws/core/http/standard/StandardHttpResponse.h>
+#include <aws/crt/http/HttpRequestResponse.h>
+#include <aws/common/uri.h>
+#include <aws/io/future.h>
+#include <aws/http/request_response.h>
+#include <aws/s3/s3_client.h>
+#include <aws/s3-crt/S3CrtErrorMarshaller.h>
 #endif
 
 #include "milvus-storage/common/fiu_local.h"
@@ -399,6 +414,123 @@ class StringViewStream : Aws::Utils::Stream::PreallocatedStreamBuf, public std::
         std::iostream(this) {}
 };
 
+// Successful range responses fit in the caller's buffer and are written there
+// directly, without an intermediate buffer. CRT also rewinds this stream to
+// write error XML, which can exceed the requested range size. This stream does
+// not inspect HTTP status: it allocates overflow storage only when a write no
+// longer fits, so a small error response can still use the caller's buffer.
+class S3ReadStream final : private std::streambuf, public std::iostream {
+  using Traits = std::char_traits<char>;
+  using Position = std::streampos;
+  using Offset = std::streamoff;
+
+  public:
+  // Borrow data; the caller keeps it writable until the read completes (including
+  // async reads). The stream never frees it, and failed reads may overwrite it.
+  S3ReadStream(void* data, int64_t capacity)
+      : std::iostream(this), data_(static_cast<char*>(data)), capacity_(capacity) {}
+
+  private:
+  // Once allocated, owned storage stays active even after a rewind.
+  char* data() { return overflow_buffer_.empty() ? data_ : overflow_buffer_.data(); }
+
+  // Save offsets rather than pointers across vector growth, which may relocate
+  // the backing memory. A new stream has no get area and starts at offset zero.
+  std::streamsize read_position() const { return gptr() ? gptr() - eback() : 0; }
+
+  // Publish only written bytes to std::streambuf's read/unget operations. This
+  // updates pointers without copying data; position must be within the new end.
+  void ResetGetArea(std::streamsize position) {
+    char* const buffer = data();
+    setg(buffer, buffer ? buffer + position : nullptr, buffer ? buffer + write_position_ : nullptr);
+  }
+
+  // Handle SDK block writes directly in the active storage. On the first write
+  // beyond capacity, preserve the existing prefix in stream-owned storage;
+  // neither that allocation nor the prefix copy occurs on normal range reads.
+  std::streamsize xsputn(const char* source, std::streamsize size) override {
+    if (size <= 0 || size > std::numeric_limits<std::streamsize>::max() - write_position_) {
+      return 0;
+    }
+    const auto position = read_position();
+    const auto end = write_position_ + size;
+    if (overflow_buffer_.empty() && end > capacity_) {
+      overflow_buffer_.resize(end);
+      if (write_position_ > 0) {
+        std::memcpy(overflow_buffer_.data(), data_, write_position_);
+      }
+    } else if (!overflow_buffer_.empty() && static_cast<size_t>(end) > overflow_buffer_.size()) {
+      overflow_buffer_.resize(end);
+    }
+    std::memcpy(data() + write_position_, source, size);
+    write_position_ = end;
+    // Rebind the standard get area after growth, which may move its storage.
+    ResetGetArea(position);
+    return size;
+  }
+
+  // Single-character writes use the same bounds checks as block writes. The
+  // standard hook name "overflow" does not itself imply a buffer allocation.
+  Traits::int_type overflow(Traits::int_type value) override {
+    if (Traits::eq_int_type(value, Traits::eof())) {
+      return Traits::not_eof(value);
+    }
+    const char byte = Traits::to_char_type(value);
+    return xsputn(&byte, 1) == 1 ? value : Traits::eof();
+  }
+
+  // Resolve relative seeks within the written response, excluding unused
+  // capacity. Input and output cursors cannot share a relative-current seek.
+  Position seekoff(Offset offset, std::ios_base::seekdir direction, std::ios_base::openmode which) override {
+    Offset base = 0;
+    if (direction == std::ios_base::end) {
+      base = write_position_;
+    } else if (direction == std::ios_base::cur) {
+      if ((which & std::ios_base::in) && (which & std::ios_base::out)) {
+        return Position(Offset(-1));
+      }
+      base = (which & std::ios_base::out) ? write_position_ : read_position();
+    } else if (direction != std::ios_base::beg) {
+      return Position(Offset(-1));
+    }
+    if (offset < -base || offset > write_position_ - base) {
+      return Position(Offset(-1));
+    }
+    return seekpos(Position(base + offset), which);
+  }
+
+  // Output seeks truncate the readable response, as required when CRT replaces
+  // an earlier body with an error. This differs from stringbuf's high-water mark.
+  Position seekpos(Position position, std::ios_base::openmode which) override {
+    const auto offset = static_cast<Offset>(position);
+    if (offset < 0 || offset > write_position_ || !(which & (std::ios_base::in | std::ios_base::out))) {
+      return Position(Offset(-1));
+    }
+    const auto position_in = (which & std::ios_base::in) ? offset : read_position();
+    if (which & std::ios_base::out) {
+      // The output cursor is the readable end, not the buffer capacity or its
+      // previous high-water mark. After CRT rewinds and writes a shorter error,
+      // XML parsing must not consume stale bytes from a successful earlier part.
+      write_position_ = offset;
+    }
+    ResetGetArea(std::min<std::streamsize>(position_in, write_position_));
+    return position;
+  }
+
+  char* const data_;
+  const std::streamsize capacity_;
+  std::streamsize write_position_ = 0;
+  // Owns overflow bytes until stream destruction, including SDK error parsing.
+  // The vector destructor releases them when the SDK deletes the stream.
+  std::vector<char> overflow_buffer_;
+};
+
+// Each invocation creates an independent stream owned by SDK ResponseStream.
+// ResponseStream uses Aws::Delete; the member vector needs no separate cleanup.
+Aws::IOStreamFactory AwsWriteableStreamFactory(void* data, int64_t nbytes) {
+  return [data, nbytes] { return Aws::New<S3ReadStream>("", data, nbytes); };
+}
+
 std::string FormatRange(int64_t start, int64_t length) {
   // Format a HTTP range header value
   std::stringstream ss;
@@ -438,10 +570,6 @@ std::optional<int64_t> GetObjectSizeFromReadResult(const ObjectResult& result, i
   return content_length;
 }
 
-Aws::IOStreamFactory AwsWriteableStreamFactory(void* data, int64_t nbytes) {
-  return [=]() { return Aws::New<StringViewStream>("", data, nbytes); };
-}
-
 arrow::Result<S3Model::GetObjectResult> GetObjectRange(
     Aws::S3::S3Client* client, const S3Path& path, int64_t start, int64_t length, void* out) {
   S3Model::GetObjectRequest req;
@@ -449,7 +577,19 @@ arrow::Result<S3Model::GetObjectResult> GetObjectRange(
   req.SetKey(ToAwsString(path.key));
   req.SetRange(ToAwsString(FormatRange(start, length)));
   req.SetResponseStreamFactory(AwsWriteableStreamFactory(out, length));
-  return OutcomeToResult("GetObject", client->GetObject(req));
+  req.SetHeadersReceivedEventHandler([](const Aws::Http::HttpRequest*, Aws::Http::HttpResponse* response) {
+    if (static_cast<int>(response->GetResponseCode()) >= 300) {
+      // Error XML is unrelated to the requested range size. Switch streams
+      // before receiving it so the SDK can parse the complete service error.
+      response->SwapResponseStreamOwnership() =
+          Aws::Utils::Stream::ResponseStream(Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
+    }
+  });
+  auto outcome = client->GetObject(req);
+  if (!outcome.IsSuccess()) {
+    return ErrorToStatus("GetObject", outcome.GetError());
+  }
+  return outcome.GetResultWithOwnership();
 }
 
 template <typename ObjectResult>
@@ -855,7 +995,9 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
 
           const auto& result = outcome.GetResult();
           const auto response_content_length = result.GetContentLength();
-          if (response_content_length < 0 || response_content_length > ctx->nbytes) {
+          const auto bytes_received = static_cast<int64_t>(result.GetBody().tellp());
+          if (response_content_length < 0 || response_content_length > ctx->nbytes ||
+              response_content_length != bytes_received) {
             ctx->metrics->IncrementFailedCount();
             ctx->future.MarkFinished(arrow::Result<int64_t>(
                 arrow::Status::IOError("Unexpected GetObject Content-Length ", response_content_length,
@@ -1078,7 +1220,38 @@ void FileObjectToInfo(const S3Model::Object& obj, FileInfo* info) {
   info->set_mtime(FromAwsDatetime(obj.GetLastModified()));
 }
 
-class CustomOutputStream final : public arrow::io::OutputStream {
+template <typename ObjectRequest>
+arrow::Status SetUploadMetadata(ObjectRequest* request,
+                                const std::shared_ptr<const arrow::KeyValueMetadata>& provided_metadata,
+                                const std::shared_ptr<const arrow::KeyValueMetadata>& default_metadata) {
+  std::shared_ptr<const arrow::KeyValueMetadata> metadata;
+
+  if (provided_metadata && provided_metadata->size() != 0) {
+    metadata = provided_metadata;
+  } else if (default_metadata && default_metadata->size() != 0) {
+    metadata = default_metadata;
+  }
+
+  bool is_content_type_set{false};
+  if (metadata) {
+    ARROW_RETURN_NOT_OK(SetObjectMetadata(metadata, request));
+
+    is_content_type_set = metadata->Contains("Content-Type");
+  }
+
+  if (!is_content_type_set) {
+    // If we do not set anything then the SDK will default to application/xml
+    // which confuses some tools (https://github.com/apache/arrow/issues/11934)
+    // So we instead default to application/octet-stream which is less misleading
+    if constexpr (HasSetContentType<ObjectRequest>::value) {
+      request->SetContentType("application/octet-stream");
+    }
+  }
+
+  return arrow::Status::OK();
+}
+
+class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOutputStream {
   protected:
   struct UploadState;
 
@@ -1100,31 +1273,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
   template <typename ObjectRequest>
   arrow::Status SetMetadataInRequest(ObjectRequest* request) {
-    std::shared_ptr<const arrow::KeyValueMetadata> metadata;
-
-    if (metadata_ && metadata_->size() != 0) {
-      metadata = metadata_;
-    } else if (default_metadata_ && default_metadata_->size() != 0) {
-      metadata = default_metadata_;
-    }
-
-    bool is_content_type_set{false};
-    if (metadata) {
-      ARROW_RETURN_NOT_OK(SetObjectMetadata(metadata, request));
-
-      is_content_type_set = metadata->Contains("Content-Type");
-    }
-
-    if (!is_content_type_set) {
-      // If we do not set anything then the SDK will default to application/xml
-      // which confuses some tools (https://github.com/apache/arrow/issues/11934)
-      // So we instead default to application/octet-stream which is less misleading
-      if constexpr (HasSetContentType<ObjectRequest>::value) {
-        request->SetContentType("application/octet-stream");
-      }
-    }
-
-    return arrow::Status::OK();
+    return SetUploadMetadata(request, metadata_, default_metadata_);
   }
 
   std::shared_ptr<CustomOutputStream> Self() {
@@ -1144,6 +1293,11 @@ class CustomOutputStream final : public arrow::io::OutputStream {
       req.SetChecksumAlgorithm(S3Model::ChecksumAlgorithm::CRC32C);
     }
     ARROW_RETURN_NOT_OK(SetMetadataInRequest(&req));
+
+    // GCS XML multipart ignores generation preconditions. Preserve the native
+    // path's rejection when restoring SDK uploads, before creating any parts.
+    if (req.GetAdditionalCustomHeaders().count("x-goog-if-generation-match"))
+      return Status::NotImplemented("GCS XML multipart uploads do not support conditional writes");
 
     auto outcome = client_lock.Move()->CreateMultipartUpload(req);
     if (!outcome.IsSuccess()) {
@@ -1384,7 +1538,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     return fut.status();
   }
 
-  Future<> FlushAsync() {
+  Future<> FlushAsync() override {
     if (closed_) {
       return arrow::Status::Invalid("Operation on closed stream");
     }
@@ -1658,6 +1812,10 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     state->completed_parts[slot] = std::move(part);
   }
 
+  Future<> AbortAsync() override {
+    return Future<>::MakeFinished(Status::NotImplemented("Stream has no native async abort"));
+  }
+
   protected:
   std::shared_ptr<S3ClientHolder> holder_;
   const arrow::io::IOContext io_context_;
@@ -1690,6 +1848,473 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   };
   std::shared_ptr<UploadState> upload_state_;
 };
+
+#ifdef WITH_CRT
+// CRT consumes streaming input and owns multipart scheduling and cleanup.
+class S3CrtOutputStream final : public arrow::io::OutputStream, public AsyncOutputStream {
+  public:
+  explicit S3CrtOutputStream(const arrow::io::IOContext& io_context)
+      : io_context_(io_context), upload_(std::make_shared<UploadState>(io_context.stop_token())) {}
+
+  ~S3CrtOutputStream() override { upload_->Cancel(); }
+
+  arrow::Status Init(const std::shared_ptr<S3ClientHolder>& holder,
+                     const std::shared_ptr<S3CrtClientHolder>& crt_holder,
+                     const S3Path& path,
+                     const S3Options& options,
+                     const std::shared_ptr<const arrow::KeyValueMetadata>& metadata,
+                     const int64_t part_size) {
+    ARROW_RETURN_NOT_OK(io_context_.stop_token().Poll());
+    // The SDK uses CRT's default memory budget, whose minimum configurable
+    // value is 1 GiB. Keep parts within half that budget: larger reservations
+    // can hit a native buffer-pool assertion instead of returning an error.
+    constexpr int64_t max_part_size = 512LL * 1024 * 1024;
+    if (part_size <= 0 || part_size > max_part_size) {
+      return arrow::Status::Invalid("CRT upload part size must be between 1 and ", max_part_size, " bytes, got ",
+                                    part_size);
+    }
+    ARROW_ASSIGN_OR_RAISE(upload_->lease, crt_holder->Acquire());
+    if (!upload_->lease->GetUnderlyingS3Client()) {
+      return arrow::Status::Invalid("SDK CRT client has no underlying native client");
+    }
+    upload_->metrics = crt_holder->GetMetrics();
+    S3Model::PutObjectRequest request;
+    request.SetBucket(ToAwsString(path.bucket));
+    request.SetKey(ToAwsString(path.key));
+    ARROW_RETURN_NOT_OK(SetUploadMetadata(&request, metadata, options.default_metadata));
+    // CRT streams always use multipart; GCS ignores generation preconditions there.
+    // Do not return NotImplemented: manifest writers would fall back to a
+    // non-atomic existence check followed by an unconditional upload.
+    if (request.GetAdditionalCustomHeaders().count("x-goog-if-generation-match")) {
+      return arrow::Status::Invalid("GCS XML multipart uploads do not support conditional writes");
+    }
+    ARROW_ASSIGN_OR_RAISE(auto client, holder->Lock());
+    auto endpoint = client->accessEndpointProvider()->ResolveEndpoint(request.GetEndpointContextParams());
+    if (!endpoint.IsSuccess()) {
+      return arrow::Status::Invalid(endpoint.GetError().GetMessage().c_str());
+    }
+    endpoint.GetResult().AddPathSegments(ToAwsString(path.key));
+    const auto& uri = endpoint.GetResult().GetURI();
+    upload_->http = Aws::Http::CreateHttpRequest(uri, Aws::Http::HttpMethod::HTTP_PUT,
+                                                 Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
+    for (const auto& header : request.GetHeaders()) {
+      upload_->http->SetHeaderValue(header.first, header.second);
+    }
+    for (const auto& header : request.GetAdditionalCustomHeaders()) {
+      upload_->http->SetHeaderValue(header.first, header.second);
+    }
+    upload_->message = upload_->http->ToCrtHttpRequest();
+    const auto target = uri.GetURLEncodedPath() + uri.GetQueryString();
+    if (!upload_->message || !upload_->message->SetPath(Aws::Crt::ByteCursorFromCString(target.c_str()))) {
+      return arrow::Status::Invalid("Cannot construct S3 upload request target");
+    }
+    // SDK conversion attaches a body stream; async writes must be the only data source.
+    aws_http_message_set_body_stream(upload_->message->GetUnderlyingMessage(), nullptr);
+    const auto url = uri.GetURIString();
+    auto cursor = aws_byte_cursor_from_array(url.data(), url.size());
+    if (aws_uri_init_parse(&upload_->endpoint, aws_default_allocator(), &cursor)) {
+      return arrow::Status::Invalid("Cannot parse S3 upload endpoint");
+    }
+    aws_s3_checksum_config checksum{};
+    checksum.checksum_algorithm = AWS_SCA_CRC32C;
+    checksum.location = AWS_SCL_TRAILER;
+    aws_s3_meta_request_options config{};
+    config.type = AWS_S3_META_REQUEST_TYPE_PUT_OBJECT;
+    config.part_size = part_size;
+    config.message = upload_->message->GetUnderlyingMessage();
+    config.endpoint = &upload_->endpoint;
+    config.send_using_async_writes = true;
+    config.checksum_config = options.use_crc32c_checksum ? &checksum : nullptr;
+    config.headers_callback = UploadState::Headers;
+    config.progress_callback = UploadState::Progress;
+    config.telemetry_callback = UploadState::Telemetry;
+    config.finish_callback = UploadState::Finish;
+    config.shutdown_callback = UploadState::Shutdown;
+    auto callback = std::make_unique<std::shared_ptr<UploadState>>(upload_);
+    config.user_data = callback.get();
+    // Publish the handle before a completion callback can retire it.
+    std::lock_guard lock(upload_->mutex);
+    upload_->meta = aws_s3_client_make_meta_request(upload_->lease->GetUnderlyingS3Client(), &config);
+    if (!upload_->meta) {
+      return arrow::Status::IOError("CRT rejected S3 upload: ", aws_error_str(aws_last_error()));
+    }
+    callback.release();
+    return arrow::Status::OK();
+  }
+
+  arrow::Status Abort() override { return AbortUpload().status(); }
+
+  Future<> AbortAsync() override { return NotifyUploadCompletion(AbortUpload()); }
+
+  arrow::Status Close() override { return FinishUpload().status(); }
+
+  Future<> CloseAsync() override {
+    // Callers may release the stream after starting CloseAsync. Keep it alive
+    // until completion so the destructor cannot cancel an in-flight upload.
+    return NotifyUploadCompletion(FinishUpload()).Then([self = shared_from_this()] {});
+  }
+
+  bool closed() const override { return closing_ && close_future_.is_finished(); }
+
+  arrow::Result<int64_t> Tell() const override {
+    if (closed()) {
+      return arrow::Status::Invalid("Operation on closed stream");
+    }
+    return pos_;
+  }
+
+  arrow::Status Write(const void* data, int64_t nbytes) override {
+    auto status = DoWrite(data, nbytes);
+    if (status.ok()) {
+      status = WaitForWrite();
+    }
+    return RecordWriteStatus(status);
+  }
+
+  arrow::Status Write(const std::shared_ptr<Buffer>& buffer) override {
+    if (!buffer) {
+      return RecordWriteStatus(arrow::Status::Invalid("Null upload buffer"));
+    }
+    return RecordWriteStatus(DoWrite(buffer->data(), buffer->size(), buffer));
+  }
+
+  arrow::Status Flush() override {
+    ARROW_RETURN_NOT_OK(CheckFlush());
+    return WaitForWrite();
+  }
+
+  Future<> FlushAsync() override {
+    auto status = CheckFlush();
+    return NotifyUploadCompletion(status.ok() ? write_future_ : Future<>::MakeFinished(status));
+  }
+
+  private:
+  struct UploadState {
+    explicit UploadState(arrow::StopToken token) : token(std::move(token)) {}
+    ~UploadState() { aws_uri_clean_up(&endpoint); }
+
+    void Cancel() {
+      aws_s3_meta_request* request = nullptr;
+      {
+        std::lock_guard lock(mutex);
+        canceled = true;
+        if (meta) {
+          request = aws_s3_meta_request_acquire(meta);
+        }
+      }
+      if (request) {
+        aws_s3_meta_request_cancel(request);
+        aws_s3_meta_request_release(request);
+      }
+    }
+
+    static UploadState& FromCallback(void* user) { return **static_cast<std::shared_ptr<UploadState>*>(user); }
+
+    static int Headers(aws_s3_meta_request*, const aws_http_headers*, int, void* user) noexcept {
+      if (!FromCallback(user).token.Poll().ok()) {
+        return aws_raise_error(AWS_ERROR_S3_CANCELED);
+      }
+      return AWS_OP_SUCCESS;
+    }
+
+    static void Progress(aws_s3_meta_request*, const aws_s3_meta_request_progress*, void* user) noexcept {
+      auto& upload = FromCallback(user);
+      if (!upload.token.Poll().ok()) {
+        upload.Cancel();
+      }
+    }
+
+    static void Telemetry(aws_s3_meta_request*, aws_s3_request_metrics* request_metrics, void* user) noexcept {
+      // Match SDK operation counts, which exclude internal HTTP retries.
+      if (aws_s3_request_metrics_get_retry_attempt(request_metrics) != 0) {
+        return;
+      }
+      auto& metrics = *FromCallback(user).metrics;
+      aws_s3_request_type type;
+      aws_s3_request_metrics_get_request_type(request_metrics, &type);
+      switch (type) {
+        case AWS_S3_REQUEST_TYPE_CREATE_MULTIPART_UPLOAD:
+          metrics.IncrementMultiPartUploadCreated();
+          break;
+        case AWS_S3_REQUEST_TYPE_UPLOAD_PART: {
+          uint64_t start, end;
+          aws_s3_request_metrics_get_part_range_start(request_metrics, &start);
+          aws_s3_request_metrics_get_part_range_end(request_metrics, &end);
+          // At an exact part boundary CRT emits an empty tail without sending HTTP.
+          // Its inclusive range is inverted; a genuinely empty first part starts at 0.
+          if (end >= start) {
+            metrics.IncrementWriteCount();
+          }
+          break;
+        }
+        case AWS_S3_REQUEST_TYPE_COMPLETE_MULTIPART_UPLOAD:
+          metrics.IncrementMultiPartUploadFinished();
+          break;
+        default:
+          break;
+      }
+    }
+
+    static void Finish(aws_s3_meta_request* meta, const aws_s3_meta_request_result* result, void* user) noexcept {
+      auto& upload = FromCallback(user);
+      try {
+        if (result->error_code) {
+          upload.status = upload.token.Poll();
+          if (upload.status.ok()) {
+            if (result->error_code == AWS_ERROR_S3_CANCELED) {
+              upload.status = arrow::Status::Cancelled("S3 upload aborted");
+            } else if (result->error_response_body) {
+              auto response = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("s3-upload", upload.http);
+              response->SetResponseCode(static_cast<Aws::Http::HttpResponseCode>(result->response_status));
+              response->GetResponseBody().write(reinterpret_cast<const char*>(result->error_response_body->buffer),
+                                                result->error_response_body->len);
+              if (result->error_response_headers) {
+                const auto* headers = result->error_response_headers;
+                for (size_t i = 0; i < aws_http_headers_count(headers); ++i) {
+                  aws_http_header header{};
+                  if (aws_http_headers_get_index(headers, i, &header) == AWS_OP_SUCCESS) {
+                    response->AddHeader(Aws::String(reinterpret_cast<char*>(header.name.ptr), header.name.len),
+                                        Aws::String(reinterpret_cast<char*>(header.value.ptr), header.value.len));
+                  }
+                }
+              }
+              auto error = Aws::Client::S3CrtErrorMarshaller().Marshall(*response);
+              error.SetResponseCode(response->GetResponseCode());
+              error.SetResponseHeaders(response->GetHeaders());
+              upload.status = ErrorToStatus("PutObject", error);
+            } else {
+              const auto message = fmt::format("CRT S3 upload failed: {} (HTTP {})", aws_error_str(result->error_code),
+                                               result->response_status);
+              // As in the SDK CRT client, no response status means the transport
+              // failed before a complete service response was available.
+              upload.status = result->response_status == 0
+                                  ? MakeExtendError(ExtendStatusCode::StorageTransientNetwork, message, message)
+                                  : arrow::Status::IOError(message);
+            }
+          }
+          upload.metrics->IncrementFailedCount();
+        } else {
+          upload.metrics->IncrementWriteBytes(upload.bytes.load());
+        }
+      } catch (const std::bad_alloc&) {
+        upload.status = arrow::Status::OutOfMemory("S3 upload completion");
+      } catch (const std::exception& e) {
+        upload.status = arrow::Status::IOError(e.what());
+      }
+      {
+        std::lock_guard lock(upload.mutex);
+        upload.meta = nullptr;
+      }
+      aws_s3_meta_request_release(meta);
+    }
+
+    static void Shutdown(void* user) noexcept {
+      S3CrtCallbackScope callback_scope;
+      std::unique_ptr<std::shared_ptr<UploadState>> callback(static_cast<std::shared_ptr<UploadState>*>(user));
+      auto& upload = **callback;
+      // Only shutdown guarantees that CRT no longer uses the request resources.
+      upload.message.reset();
+      upload.http.reset();
+      upload.lease = S3CrtClientLease();
+      upload.completed.MarkFinished(upload.status);
+    }
+
+    struct WriteContext {
+      aws_future_void* future = nullptr;
+      std::shared_ptr<Buffer> buffer;
+      Future<> upload_completed;
+      Future<> completed = Future<>::Make();
+
+      static void Complete(void* user) noexcept {
+        S3CrtCallbackScope callback_scope;
+        std::unique_ptr<WriteContext> write(static_cast<WriteContext*>(user));
+        const auto error = aws_future_void_get_error(write->future);
+        aws_future_void_release(write->future);
+        write->buffer.reset();
+        if (error) {
+          // The request outcome retains service diagnostics that a failed write
+          // may report only as AWS_ERROR_S3_REQUEST_HAS_COMPLETED.
+          write->upload_completed.AddCallback(
+              [completed = write->completed, error](const arrow::Status& status) mutable {
+                completed.MarkFinished(
+                    status.ok() ? arrow::Status::IOError("CRT upload write failed: ", aws_error_str(error)) : status);
+              });
+        } else {
+          write->completed.MarkFinished();
+        }
+      }
+    };
+
+    Future<> Write(std::shared_ptr<Buffer> buffer, bool eof) {
+      auto write = std::make_unique<WriteContext>();
+      write->buffer = std::move(buffer);
+      write->upload_completed = completed;
+      const auto data = write->buffer ? aws_byte_cursor_from_array(write->buffer->data(), write->buffer->size())
+                                      : aws_byte_cursor_from_array(nullptr, 0);
+      {
+        std::lock_guard lock(mutex);
+        if (!meta || canceled) {
+          return completed.Then([] { return arrow::Status::Invalid("Write after upload completion"); });
+        }
+        bytes.fetch_add(data.len);
+        write->future = aws_s3_meta_request_write(meta, data, eof);
+      }
+      auto result = write->completed;
+      auto* callback = write.release();
+      // CRT can finish the write inline. Register outside the handle mutex.
+      aws_future_void_register_callback(callback->future, WriteContext::Complete, callback);
+      return result;
+    }
+
+    std::mutex mutex;
+    aws_s3_meta_request* meta = nullptr;
+    bool canceled = false;
+    S3CrtClientLease lease;
+    std::shared_ptr<Aws::Http::HttpRequest> http;
+    std::shared_ptr<Aws::Crt::Http::HttpRequest> message;
+    aws_uri endpoint{};
+    const arrow::StopToken token;
+    std::shared_ptr<FilesystemMetrics> metrics;
+    std::atomic<int64_t> bytes{0};
+    arrow::Status status;
+    Future<> completed = Future<>::Make();
+  };
+
+  arrow::Status RecordWriteStatus(arrow::Status status) {
+    if (!closing_) {
+      status_ &= status;
+      if (!status.ok()) {
+        upload_->Cancel();
+      }
+    }
+    return status;
+  }
+
+  arrow::Status CheckFlush() {
+    if (closing_) {
+      return arrow::Status::Invalid("Flush on closing stream");
+    }
+    FIU_RETURN_ON(FIUKEY_S3FS_WRITER_FLUSH_FAIL,
+                  MakeExtendError(ExtendStatusCode::StorageTransientNetwork,
+                                  fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_FLUSH_FAIL),
+                                  fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_FLUSH_FAIL)));
+    ARROW_RETURN_NOT_OK(status_);
+    ARROW_RETURN_NOT_OK(io_context_.stop_token().Poll());
+    return upload_->completed.is_finished() ? upload_->completed.status() : arrow::Status::OK();
+  }
+
+  arrow::Status WaitForWrite() {
+    ARROW_RETURN_NOT_OK(status_);
+    while (!write_future_.Wait(0.1)) {
+      if (!io_context_.stop_token().Poll().ok()) {
+        upload_->Cancel();
+      }
+    }
+    ARROW_RETURN_NOT_OK(io_context_.stop_token().Poll());
+    ARROW_RETURN_NOT_OK(write_future_.status());
+    return upload_->completed.is_finished() ? upload_->completed.status() : arrow::Status::OK();
+  }
+
+  arrow::Status DoWrite(const void* data, int64_t nbytes, const std::shared_ptr<Buffer>& owned_buffer = nullptr) {
+    if (closing_) {
+      return arrow::Status::Invalid("Write on closing stream");
+    }
+    if (nbytes < 0 || (nbytes && !data) || nbytes > std::numeric_limits<int64_t>::max() - pos_) {
+      return arrow::Status::Invalid("Invalid upload buffer or position overflow");
+    }
+    ARROW_RETURN_NOT_OK(WaitForWrite());
+    FIU_RETURN_ON(FIUKEY_S3FS_WRITER_WRITE_FAIL,
+                  MakeExtendError(ExtendStatusCode::StorageTransientNetwork,
+                                  fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_WRITE_FAIL),
+                                  fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_WRITE_FAIL)));
+    if (nbytes == 0) {
+      return arrow::Status::OK();
+    }
+    std::shared_ptr<Buffer> buffer = owned_buffer;
+    if (!buffer) {
+      // Raw Write waits for consumption before returning to its caller.
+      buffer = std::make_shared<Buffer>(static_cast<const uint8_t*>(data), nbytes);
+    }
+    // CRT accepts one asynchronous write at a time, and schedules its own parts.
+    // Retain this chunk until CRT consumes it; do not assemble a whole-file body.
+    write_future_ = upload_->Write(std::move(buffer), false);
+    pos_ += nbytes;
+    return write_future_.is_finished() ? write_future_.status() : arrow::Status::OK();
+  }
+
+  Future<> FinishUpload() {
+    if (closing_) {
+      return close_future_;
+    }
+    closing_ = true;
+    auto status = status_;
+    status &= io_context_.stop_token().Poll();
+    FIU_DO_ON(FIUKEY_S3FS_WRITER_CLOSE_FAIL,
+              status = MakeExtendError(ExtendStatusCode::StorageTransientNetwork,
+                                       fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_CLOSE_FAIL),
+                                       fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_CLOSE_FAIL)));
+    FIU_DO_ON(FIUKEY_S3FS_COMPLETE_UPLOAD_FAIL,
+              status = arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_COMPLETE_UPLOAD_FAIL)));
+    if (!status.ok()) {
+      upload_->Cancel();
+      return close_future_ =
+                 WaitForUpload().Then([status] { return status; }, [status](const arrow::Status&) { return status; });
+    }
+    close_future_ = write_future_.Then(
+        [upload = upload_]() -> Future<> {
+          if (!upload->token.Poll().ok()) {
+            upload->Cancel();
+            return upload->completed;
+          }
+          return upload->Write(nullptr, true)
+              .Then([upload] { return upload->completed; },
+                    [upload](const arrow::Status&) { return upload->completed; });
+        },
+        [upload = upload_](const arrow::Status&) { return upload->completed; });
+    return close_future_;
+  }
+
+  Future<> AbortUpload() {
+    if (closed()) {
+      return Future<>::MakeFinished();
+    }
+    upload_->Cancel();
+    closing_ = true;
+    return close_future_ = WaitForUpload().Then(
+               [] { return arrow::Status::OK(); },
+               [](const arrow::Status& status) { return status.IsCancelled() ? arrow::Status::OK() : status; });
+  }
+
+  Future<> WaitForUpload() {
+    return write_future_.Then([upload = upload_] { return upload->completed; },
+                              [upload = upload_](const arrow::Status&) { return upload->completed; });
+  }
+
+  Future<> NotifyUploadCompletion(Future<> completed) {
+    auto notified = Future<>::Make();
+    completed.AddCallback([notified, executor = io_context_.executor()](const arrow::Status& status) mutable {
+      arrow::Status scheduled;
+      try {
+        scheduled = executor->Spawn([notified, status]() mutable { notified.MarkFinished(status); });
+      } catch (const std::bad_alloc&) {
+        scheduled = arrow::Status::OutOfMemory("Cannot dispatch upload completion");
+      }
+      if (!scheduled.ok()) {
+        notified.MarkFinished(scheduled);
+      }
+    });
+    return notified;
+  }
+
+  const arrow::io::IOContext io_context_;
+  std::shared_ptr<UploadState> upload_;
+  arrow::Status status_;
+  bool closing_ = false;
+  int64_t pos_ = 0;
+  Future<> write_future_ = Future<>::MakeFinished();
+  Future<> close_future_;
+};
+#endif
 
 class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Impl> {
   public:
@@ -1725,7 +2350,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
     }
     ARROW_RETURN_NOT_OK(std::move(result).Value(&holder_));
 #ifdef WITH_CRT
-    if (UseCrtReadPath()) {
+    if (use_crt_async_reads_) {
       std::shared_ptr<FilesystemMetrics> metrics;
       {
         ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
@@ -1749,10 +2374,6 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
   }
 
   const S3Options& options() const { return builder_.options(); }
-
-#ifdef WITH_CRT
-  bool UseCrtReadPath() const { return use_crt_async_reads_ && options().cloud_provider != kCloudProviderGCP; }
-#endif
 
   std::string region() const { return std::string(FromAwsString(builder_.config().region)); }
 
@@ -2498,7 +3119,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
     ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
 #ifdef WITH_CRT
-    if (UseCrtReadPath()) {
+    if (use_crt_async_reads_) {
       auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path);
       ARROW_RETURN_NOT_OK(ptr->Init());
       return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
@@ -2524,7 +3145,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
     ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
 #ifdef WITH_CRT
-    if (UseCrtReadPath()) {
+    if (use_crt_async_reads_) {
       auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, info.size());
       ARROW_RETURN_NOT_OK(ptr->Init());
       return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
@@ -2843,6 +3464,15 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenOutput
 
   ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
+#ifdef WITH_CRT
+  // GCP needs the SDK path for conditional single PUTs and per-request authentication.
+  if (impl_->use_crt_async_reads_ && impl_->options().cloud_provider != kCloudProviderGCP) {
+    auto stream = std::make_shared<S3CrtOutputStream>(io_context());
+    ARROW_RETURN_NOT_OK(
+        stream->Init(impl_->holder_, impl_->crt_holder_, path, impl_->options(), metadata, upload_size));
+    return stream;
+  }
+#endif
   auto ptr =
       std::make_shared<CustomOutputStream>(impl_->holder_, io_context(), path, impl_->options(), metadata, upload_size);
   ARROW_RETURN_NOT_OK(ptr->Init());
