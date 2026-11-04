@@ -8875,7 +8875,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vortex"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "vortex-alp",
  "vortex-array",
@@ -8909,7 +8909,7 @@ dependencies = [
 [[package]]
 name = "vortex-alp"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "itertools 0.14.0",
  "num-traits",
@@ -8927,7 +8927,7 @@ dependencies = [
 [[package]]
 name = "vortex-array"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "arc-swap",
  "arcref",
@@ -8978,7 +8978,7 @@ dependencies = [
 [[package]]
 name = "vortex-array-macros"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8988,7 +8988,7 @@ dependencies = [
 [[package]]
 name = "vortex-btrblocks"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "itertools 0.14.0",
  "num-traits",
@@ -9015,7 +9015,7 @@ dependencies = [
 [[package]]
 name = "vortex-buffer"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "arrow-buffer 58.3.0",
  "bitvec",
@@ -9028,7 +9028,7 @@ dependencies = [
 [[package]]
 name = "vortex-bytebool"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "num-traits",
  "vortex-array",
@@ -9041,7 +9041,7 @@ dependencies = [
 [[package]]
 name = "vortex-compressor"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "itertools 0.14.0",
  "num-traits",
@@ -9059,7 +9059,7 @@ dependencies = [
 [[package]]
 name = "vortex-datetime-parts"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "num-traits",
  "prost 0.14.1",
@@ -9073,7 +9073,7 @@ dependencies = [
 [[package]]
 name = "vortex-decimal-byte-parts"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "num-traits",
  "prost 0.14.1",
@@ -9087,7 +9087,7 @@ dependencies = [
 [[package]]
 name = "vortex-error"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "arrow-schema 58.3.0",
  "flatbuffers",
@@ -9099,7 +9099,7 @@ dependencies = [
 [[package]]
 name = "vortex-fastlanes"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "fastlanes",
  "itertools 0.14.0",
@@ -9116,7 +9116,7 @@ dependencies = [
 [[package]]
 name = "vortex-file"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9159,7 +9159,7 @@ dependencies = [
 [[package]]
 name = "vortex-flatbuffers"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "flatbuffers",
  "vortex-buffer",
@@ -9169,7 +9169,7 @@ dependencies = [
 [[package]]
 name = "vortex-fsst"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "fsst-rs",
  "prost 0.14.1",
@@ -9183,7 +9183,7 @@ dependencies = [
 [[package]]
 name = "vortex-io"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "async-fs",
  "async-stream",
@@ -9211,7 +9211,7 @@ dependencies = [
 [[package]]
 name = "vortex-ipc"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "bytes",
  "flatbuffers",
@@ -9228,7 +9228,7 @@ dependencies = [
 [[package]]
 name = "vortex-layout"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "arcref",
  "arrow-array 58.3.0",
@@ -9270,7 +9270,7 @@ dependencies = [
 [[package]]
 name = "vortex-mask"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "itertools 0.14.0",
  "vortex-buffer",
@@ -9280,7 +9280,7 @@ dependencies = [
 [[package]]
 name = "vortex-metrics"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "parking_lot",
  "sketches-ddsketch",
@@ -9289,7 +9289,7 @@ dependencies = [
 [[package]]
 name = "vortex-pco"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "pco",
  "prost 0.14.1",
@@ -9303,7 +9303,7 @@ dependencies = [
 [[package]]
 name = "vortex-proto"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "prost 0.14.1",
  "prost-types",
@@ -9312,7 +9312,7 @@ dependencies = [
 [[package]]
 name = "vortex-runend"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "arrow-array 58.3.0",
  "itertools 0.14.0",
@@ -9328,7 +9328,7 @@ dependencies = [
 [[package]]
 name = "vortex-scan"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "async-trait",
  "futures",
@@ -9344,7 +9344,7 @@ dependencies = [
 [[package]]
 name = "vortex-sequence"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "num-traits",
  "prost 0.14.1",
@@ -9360,7 +9360,7 @@ dependencies = [
 [[package]]
 name = "vortex-session"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "lasso",
  "parking_lot",
@@ -9371,7 +9371,7 @@ dependencies = [
 [[package]]
 name = "vortex-sparse"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "itertools 0.14.0",
  "num-traits",
@@ -9386,7 +9386,7 @@ dependencies = [
 [[package]]
 name = "vortex-utils"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "dashmap",
  "hashbrown 0.17.1",
@@ -9396,7 +9396,7 @@ dependencies = [
 [[package]]
 name = "vortex-zigzag"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "vortex-array",
  "vortex-buffer",
@@ -9409,7 +9409,7 @@ dependencies = [
 [[package]]
 name = "vortex-zstd"
 version = "0.75.0"
-source = "git+https://github.com/zilliztech/vortex?rev=e7ab4cae2983dcca33ec75e111ca8034ab8d8970#e7ab4cae2983dcca33ec75e111ca8034ab8d8970"
+source = "git+https://github.com/zilliztech/vortex?rev=059feb02ddb7463370f25a1f2416ba4def37b61a#059feb02ddb7463370f25a1f2416ba4def37b61a"
 dependencies = [
  "itertools 0.14.0",
  "prost 0.14.1",

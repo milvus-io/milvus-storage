@@ -32,8 +32,8 @@ arrow-array = { version = "58.0.0", features = ["ffi"] }
 arrow-schema = "58.0.0"
 
 # Vortex Ecosystem
-vortex = { git = "https://github.com/zilliztech/vortex", rev = "e7ab4cae2983dcca33ec75e111ca8034ab8d8970", features = ["tokio"] }
-vortex-btrblocks = { git = "https://github.com/zilliztech/vortex", rev = "e7ab4cae2983dcca33ec75e111ca8034ab8d8970" }
+vortex = { git = "https://github.com/zilliztech/vortex", rev = "059feb02ddb7463370f25a1f2416ba4def37b61a", features = ["tokio"] }
+vortex-btrblocks = { git = "https://github.com/zilliztech/vortex", rev = "059feb02ddb7463370f25a1f2416ba4def37b61a" }
 
 # Lance Ecosystem
 # Cloud features remain enabled for native Lance writers. Lance reads use the
@@ -100,7 +100,7 @@ cxx-build = "1.0.184"
 
 [patch.crates-io]
 # Keep Paimon on the same Vortex fork as the bridge.
-vortex = { git = "https://github.com/zilliztech/vortex", rev = "e7ab4cae2983dcca33ec75e111ca8034ab8d8970" }
+vortex = { git = "https://github.com/zilliztech/vortex", rev = "059feb02ddb7463370f25a1f2416ba4def37b61a" }
 
 lance = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
 lance-core = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
