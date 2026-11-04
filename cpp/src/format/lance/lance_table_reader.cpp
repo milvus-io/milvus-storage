@@ -58,7 +58,7 @@ namespace milvus_storage::lance {
 //   Payload::FragmentMetadataCache
 //     key: fragment ID
 //     value: immutable fragment schema, row groups, deletion state, and
-//            memory estimates
+//            memory estimates, shared footers, deletion vectors, and row IDs
 //
 // LanceFormat::explore() records the already-open Dataset's version in each
 // ColumnGroupFile. A reader can therefore query LanceDatasetCache before the
@@ -179,7 +179,7 @@ class LanceDatasetCache final {
 
   // Weak entries are cheap, while this larger bound absorbs normal snapshot
   // churn without allowing versioned keys to grow for the process lifetime.
-  static constexpr size_t kDatasetCacheCapacity = 4096;
+  static constexpr size_t kDatasetCacheCapacity = 512;
 
   std::mutex mutex_;
   LRUCache<Key, std::weak_ptr<BlockingDataset>> datasets_{kDatasetCacheCapacity};
@@ -198,6 +198,7 @@ class LanceDatasetCache final {
 // The cloned Dataset structs keep fragment readers alive independently, while
 // their Arc-backed ObjectStore, Session, caches, and Manifest remain shared.
 struct LanceTableReader::MetaTrait::FragmentMetadata {
+  std::shared_ptr<const FragmentFilesMetadata> files_metadata;
   std::shared_ptr<arrow::Schema> file_schema;
   std::vector<RowGroupInfo> row_group_infos;
   uint64_t num_deletions = 0;
@@ -319,8 +320,7 @@ LanceTableReader::LanceTableReader(const std::string& uri,
       needed_columns_(needed_columns),
       fragment_reader_(nullptr) {}
 
-static arrow::Result<std::vector<uint64_t>> estimate_fragment_column_memory_sizes(const BlockingDataset& dataset,
-                                                                                  uint64_t fragment_id,
+static arrow::Result<std::vector<uint64_t>> estimate_fragment_column_memory_sizes(const BlockingFragmentReader& reader,
                                                                                   size_t num_columns) {
   FIU_RETURN_ON(FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL,
                 arrow::Status::NotImplemented("Injected fault: ", FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL));
@@ -328,7 +328,7 @@ static arrow::Result<std::vector<uint64_t>> estimate_fragment_column_memory_size
   // Lance 7 returns both this estimate and FileFragment::schema() in current
   // dataset-schema order. Fields not physically present in the fragment have a
   // zero estimate, so schema evolution does not require positional remapping.
-  ARROW_ASSIGN_OR_RAISE(auto memory_sizes, dataset.EstimateFragmentColumnMemory(fragment_id));
+  ARROW_ASSIGN_OR_RAISE(auto memory_sizes, reader.EstimateFragmentColumnMemory());
   if (memory_sizes.size() != num_columns) {
     return arrow::Status::Invalid("Lance column memory estimate count does not match the file schema: ",
                                   memory_sizes.size(), " != ", num_columns);
@@ -437,13 +437,22 @@ static arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::Fragment
     ARROW_ASSIGN_OR_RAISE(file_schema, arrow::ImportSchema(&c_fragment_schema));
   }
 
+  // Open once with the complete schema so estimates and later projections share
+  // immutable footers, deletion vectors, and stable row IDs.
+  ArrowSchema c_read_schema{};
+  ARROW_RETURN_NOT_OK(arrow::ExportSchema(*file_schema, &c_read_schema));
+  std::unique_ptr<BlockingFragmentReader> fragment_reader;
   uint64_t logical_rows = 0;
   uint64_t physical_rows = 0;
   try {
-    logical_rows = dataset->GetFragmentRowCount(fragment_id);
+    fragment_reader = BlockingFragmentReader::Open(*dataset, fragment_id, c_read_schema);
+    logical_rows = fragment_reader->RowCount();
     physical_rows = dataset->GetFragmentPhysicalRowCount(fragment_id);
   } catch (const LanceException& e) {
-    return arrow::Status::IOError("Failed to get row counts for Lance fragment ", fragment_id, ": ", e.what());
+    if (c_read_schema.release) {
+      c_read_schema.release(&c_read_schema);
+    }
+    return arrow::Status::IOError("Failed to load Lance fragment metadata for ", fragment_id, ": ", e.what());
   }
   if (physical_rows < logical_rows) {
     return arrow::Status::Invalid("Fragment ", fragment_id, " has inconsistent metadata: physical_rows (",
@@ -454,7 +463,7 @@ static arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::Fragment
                         milvus_storage::api::GetValue<uint64_t>(properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
 
   auto column_memory_sizes_result =
-      estimate_fragment_column_memory_sizes(*dataset, fragment_id, static_cast<size_t>(file_schema->num_fields()));
+      estimate_fragment_column_memory_sizes(*fragment_reader, static_cast<size_t>(file_schema->num_fields()));
   const bool memory_size_available = column_memory_sizes_result.ok();
   std::vector<uint64_t> fragment_column_memory_sizes;
   if (memory_size_available) {
@@ -472,6 +481,7 @@ static arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::Fragment
       create_row_group_infos(logical_rows, logical_chunk_rows, fragment_column_memory_sizes, memory_size_available));
 
   auto fragment_metadata = std::make_shared<LanceTableReader::MetaTrait::FragmentMetadata>();
+  fragment_metadata->files_metadata = fragment_reader->GetFilesMetadata();
   fragment_metadata->file_schema = std::move(file_schema);
   fragment_metadata->row_group_infos = std::move(row_group_infos);
   fragment_metadata->num_deletions = physical_rows - logical_rows;
@@ -609,7 +619,8 @@ arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::cr
   ARROW_RETURN_NOT_OK(arrow::ExportSchema(*requested_schema, &c_arrow_schema));
 
   try {
-    reader->fragment_reader_ = BlockingFragmentReader::Open(*metadata->payload.dataset, fragment_id, c_arrow_schema);
+    reader->fragment_reader_ = BlockingFragmentReader::Open(*metadata->payload.dataset, fragment_id, c_arrow_schema,
+                                                            fragment_metadata->files_metadata.get());
   } catch (const LanceException& e) {
     if (c_arrow_schema.release) {
       c_arrow_schema.release(&c_arrow_schema);
@@ -696,7 +707,7 @@ arrow::Status LanceTableReader::open() {
   }
 
   auto column_memory_sizes_result =
-      estimate_fragment_column_memory_sizes(*dataset_, fragment_id_, static_cast<size_t>(file_schema_->num_fields()));
+      estimate_fragment_column_memory_sizes(*fragment_reader_, static_cast<size_t>(file_schema_->num_fields()));
   const bool memory_size_available = column_memory_sizes_result.ok();
   std::vector<uint64_t> fragment_column_memory_sizes;
   if (memory_size_available) {

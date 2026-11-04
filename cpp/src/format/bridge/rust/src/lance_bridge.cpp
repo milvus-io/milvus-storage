@@ -63,14 +63,15 @@ std::unique_ptr<BlockingDataset> BlockingDataset::OpenUnique(const std::string& 
 std::unique_ptr<BlockingDataset> BlockingDataset::WriteDataset(const std::string& uri,
                                                                struct ArrowArrayStream* stream,
                                                                const StorageOptions& storage_options,
-                                                               LanceDataStorageFormat format) {
+                                                               LanceDataStorageFormat format,
+                                                               bool enable_stable_row_ids) {
   try {
     rust::Vec<rust::String> keys, values;
     ConvertStorageOptions(storage_options, keys, values);
     auto ffi_format = static_cast<ffi::LanceDataStorageFormat>(format);
     return std::make_unique<BlockingDataset>(ffi::write_dataset(rust::Str(uri.data(), uri.length()),
                                                                 reinterpret_cast<uint8_t*>(stream), std::move(keys),
-                                                                std::move(values), ffi_format));
+                                                                std::move(values), ffi_format, enable_stable_row_ids));
   } catch (const rust::cxxbridge1::Error& e) {
     throw LanceException(e.what());
   }
@@ -118,28 +119,6 @@ uint64_t BlockingDataset::GetFragmentRowCount(uint64_t fragment_id) const {
   }
 }
 
-arrow::Result<std::vector<uint64_t>> BlockingDataset::EstimateFragmentColumnMemory(uint64_t fragment_id) const {
-  try {
-    auto estimates = ffi::estimate_fragment_column_memory(*impl_, fragment_id);
-    std::vector<uint64_t> memory_sizes;
-    memory_sizes.reserve(estimates.size());
-    for (const auto& estimate : estimates) {
-      memory_sizes.push_back(estimate.memory_size);
-    }
-    return memory_sizes;
-  } catch (const rust::cxxbridge1::Error& e) {
-    return arrow::Status::NotImplemented("Lance column memory size estimation is not available: ", e.what());
-  }
-}
-
-uint64_t BlockingDataset::EstimateFragmentMemory(uint64_t fragment_id) const {
-  try {
-    return ffi::estimate_fragment_memory(*impl_, fragment_id);
-  } catch (const rust::cxxbridge1::Error&) {
-    return 0;
-  }
-}
-
 void BlockingDataset::GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_schema) const {
   try {
     ffi::get_fragment_schema(*impl_, fragment_id, reinterpret_cast<uint8_t*>(&out_schema));
@@ -158,9 +137,11 @@ void BlockingDataset::WriteArrowArrayStream(struct ArrowArrayStream* stream) {
 
 std::unique_ptr<BlockingFragmentReader> BlockingFragmentReader::Open(const BlockingDataset& dataset,
                                                                      uint64_t fragment_id,
-                                                                     ArrowSchema& schema) {
+                                                                     ArrowSchema& schema,
+                                                                     const FragmentFilesMetadata* metadata) {
   try {
-    auto impl = ffi::open_fragment_reader(dataset.Impl(), fragment_id, reinterpret_cast<uint8_t*>(&schema));
+    auto impl = ffi::open_fragment_reader(dataset.Impl(), fragment_id, reinterpret_cast<uint8_t*>(&schema),
+                                          metadata ? &metadata->Impl() : nullptr);
     return std::make_unique<BlockingFragmentReader>(std::move(impl));
   } catch (const rust::cxxbridge1::Error& e) {
     throw LanceException(e.what());
@@ -173,6 +154,32 @@ uint64_t BlockingFragmentReader::RowCount() const {
   } catch (const rust::cxxbridge1::Error& e) {
     throw LanceException(e.what());
   }
+}
+
+arrow::Result<std::vector<uint64_t>> BlockingFragmentReader::EstimateFragmentColumnMemory() const {
+  try {
+    auto estimates = impl_->estimate_fragment_column_memory();
+    std::vector<uint64_t> memory_sizes;
+    memory_sizes.reserve(estimates.size());
+    for (const auto& estimate : estimates) {
+      memory_sizes.push_back(estimate.memory_size);
+    }
+    return memory_sizes;
+  } catch (const rust::cxxbridge1::Error& e) {
+    return arrow::Status::NotImplemented("Lance column memory size estimation is not available: ", e.what());
+  }
+}
+
+arrow::Result<uint64_t> BlockingFragmentReader::EstimateFragmentMemory() const {
+  try {
+    return impl_->estimate_fragment_memory();
+  } catch (const rust::cxxbridge1::Error& e) {
+    return arrow::Status::NotImplemented("Lance memory size estimation is not available: ", e.what());
+  }
+}
+
+std::shared_ptr<const FragmentFilesMetadata> BlockingFragmentReader::GetFilesMetadata() const {
+  return std::make_shared<FragmentFilesMetadata>(impl_->get_files_metadata());
 }
 
 void BlockingFragmentReader::TakeAsSingleBatch(const std::vector<int64_t>& indices, ArrowArray& out_array) {
@@ -229,6 +236,15 @@ std::unique_ptr<BlockingScanner> BlockingDataset::Scan(ArrowSchema& schema, uint
 }
 
 #ifdef BUILD_GTEST
+arrow::Status ExternalizeRowIdsForTesting(const std::string& uri) {
+  try {
+    ffi::externalize_row_ids_for_testing(rust::Str(uri.data(), uri.length()));
+    return arrow::Status::OK();
+  } catch (const rust::cxxbridge1::Error& e) {
+    return arrow::Status::IOError("Failed to externalize Lance row IDs for testing: ", e.what());
+  }
+}
+
 LanceIOStats BlockingDataset::IOStatsIncremental() {
   try {
     auto stats = impl_->io_stats_incremental();
