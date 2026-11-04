@@ -3,7 +3,6 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 #include "filesystem/s3/native_s3_transport.h"
-#ifdef WITH_CRT
 #include <mutex>
 #include <optional>
 #include <utility>
@@ -318,4 +317,3 @@ arrow::Future<Aws::Client::XmlOutcome> NativeS3Transport::Send(const Aws::Amazon
 }
 
 }  // namespace milvus_storage
-#endif

@@ -163,9 +163,7 @@ TEST_F(CloudFsMetricsTest, TestBatchingBelowUploadSize) {
   // SDK S3 uses PutObject below part_size; CRT streams and Azure use multipart.
   ASSERT_AND_ASSIGN(const auto config, GetFileSystemConfig(properties_));
   bool uses_multipart = config.cloud_provider == kCloudProviderAzure;
-#ifdef WITH_CRT
-  uses_multipart |= config.s3_crt_async_read && config.cloud_provider != kCloudProviderGCP;
-#endif
+  uses_multipart |= config.s3_use_crt && config.cloud_provider != kCloudProviderGCP;
   EXPECT_EQ(uses_multipart ? 1 : 0, metrics->GetMultiPartUploadCreated());
   EXPECT_EQ(uses_multipart ? 1 : 0, metrics->GetMultiPartUploadFinished());
   // 9 x 1MB = 9MB < 10MB upload_size, all buffered and flushed as 1 upload

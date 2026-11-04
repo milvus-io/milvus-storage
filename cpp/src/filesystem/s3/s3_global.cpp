@@ -34,7 +34,6 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
-#ifdef WITH_CRT
 #include <algorithm>
 #include <cstdint>
 #include <fstream>
@@ -43,7 +42,6 @@
 #include <aws/crt/io/EventLoopGroup.h>
 #include <aws/crt/io/HostResolver.h>
 #include "milvus-storage/filesystem/s3/s3_crt_client.h"
-#endif
 namespace milvus_storage {
 
 class GlogAwsLogger : public Aws::Utils::Logging::FormattedLogSystem {
@@ -124,27 +122,21 @@ struct AwsInstance {
       return;
     }
     auto client_finalizer = GetClientFinalizer();
-#ifdef WITH_CRT
     auto crt_client_finalizer = GetCrtClientFinalizer();
-#endif
     if (is_initialized_.exchange(false)) {
       // Was initialized
       if (from_destructor) {
         LOG_STORAGE_WARNING_ << " arrow::fs::FinalizeS3 was not called even though S3 was initialized.  "
                                 "This could lead to a segmentation fault at exit";
         auto* leaked_shared_ptr = new std::shared_ptr<S3ClientFinalizer>(client_finalizer);
-#ifdef WITH_CRT
         auto* leaked_crt_shared_ptr = new std::shared_ptr<S3CrtClientFinalizer>(crt_client_finalizer);
         ARROW_UNUSED(leaked_crt_shared_ptr);
-#endif
         ARROW_UNUSED(leaked_shared_ptr);
         return;
       }
-#ifdef WITH_CRT
       // Drain SDK client destructors and native transport shutdown callbacks
       // through the same holder registry before destroying the AWS runtime.
       crt_client_finalizer->Finalize();
-#endif
       client_finalizer->Finalize();
 #ifdef ARROW_S3_HAS_S3CLIENT_CONFIGURATION
       EndpointProviderCache::Instance()->Reset();
@@ -183,7 +175,6 @@ struct AwsInstance {
     if (options.override_default_http_options) {
       aws_options_.httpOptions = options.http_options;
     }
-#ifdef WITH_CRT
     // Reuse the caller's ConfigureStorageRuntime CPU budget only when Linux
     // confirms SMT is inactive. The bootstrap is fixed at SDK initialization.
     static const int cpu_count = [] {
@@ -206,7 +197,6 @@ struct AwsInstance {
         return bootstrap;
       };
     }
-#endif
     Aws::InitAPI(aws_options_);
   }
 
@@ -220,9 +210,7 @@ AwsInstance* GetAwsInstance() {
   // make sure ClientFinializer is initialized before the AwsInstance
   // so that the static object destructor is called later
   GetClientFinalizer();
-#ifdef WITH_CRT
   GetCrtClientFinalizer();
-#endif
   static auto instance = std::make_unique<AwsInstance>();
   return instance.get();
 }

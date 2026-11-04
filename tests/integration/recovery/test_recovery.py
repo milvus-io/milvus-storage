@@ -118,6 +118,8 @@ class TestRecovery:
         if not injector.is_enabled():
             pytest.fail("Multipart recovery test requires an FIU-enabled native library")
         properties = dict(default_properties)
+        # These fault points belong to the SDK multipart upload path.
+        properties[PropertyKeys.FS_S3_USE_CRT] = "false"
         properties["fs.use_custom_part_upload"] = "true"
         properties["fs.multi_part_upload_size"] = str(10 * 1024 * 1024)
         payload = bytes(range(251)) * 50_000

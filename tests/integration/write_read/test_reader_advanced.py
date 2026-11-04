@@ -103,7 +103,7 @@ class TestReaderAdvanced:
             num_batches=2, rows_per_batch=10,
         )
         read_properties = dict(default_properties)
-        read_properties["fs.s3.crt_async_read"] = crt_enabled
+        read_properties["fs.s3.use_crt"] = crt_enabled
         with groups, Reader(groups, simple_schema, properties=read_properties) as reader:
             scanned = pa.Table.from_batches(list(reader.scan())).to_pydict()
             assert scanned == {

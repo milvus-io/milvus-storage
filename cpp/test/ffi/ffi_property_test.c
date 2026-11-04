@@ -14,6 +14,7 @@
 
 #include "milvus-storage/ffi_c.h"
 #include "test_runner.h"
+#include "ffi_test_env.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -204,7 +205,25 @@ static void test_properties_create_dup_kv(void) {
   free((void*)test_val);
 }
 
+static void test_crt_mode_from_environment(void) {
+  const char* expected = getenv("TEST_ENV_S3_USE_CRT");
+  if (!expected) {
+    return;
+  }
+  const char* keys[32];
+  const char* vals[32];
+  const size_t count = init_test_props(keys, vals, 0, 32, FFI_TEST_ROOT_PATH);
+  LoonProperties properties;
+  LoonFFIResult rc = loon_properties_create(keys, vals, count, &properties);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  const char* actual = loon_properties_get(&properties, loon_properties_fs_s3_use_crt);
+  const bool matches = actual != NULL && strcmp(actual, expected) == 0;
+  loon_properties_free(&properties);
+  ck_assert_msg(matches, "TEST_ENV_S3_USE_CRT did not reach filesystem properties");
+}
+
 void run_properties_suite(void) {
+  RUN_TEST(test_crt_mode_from_environment);
   RUN_TEST(test_basic);
   RUN_TEST(test_properties_create_multi_kvs);
   RUN_TEST(test_properties_create_null_kvs);

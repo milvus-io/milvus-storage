@@ -81,7 +81,6 @@
 #include <aws/s3/model/ObjectCannedACL.h>
 #include <aws/s3/model/PutObjectRequest.h>
 #include <aws/s3/model/UploadPartRequest.h>
-#ifdef WITH_CRT
 #include <aws/s3-crt/model/GetObjectRequest.h>
 #include <aws/s3-crt/model/HeadObjectRequest.h>
 #include <aws/core/http/standard/StandardHttpResponse.h>
@@ -91,7 +90,6 @@
 #include <aws/http/request_response.h>
 #include <aws/s3/s3_client.h>
 #include <aws/s3-crt/S3CrtErrorMarshaller.h>
-#endif
 
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/path_util.h"
@@ -102,10 +100,8 @@
 #include "milvus-storage/filesystem/util_internal.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
 #include "milvus-storage/filesystem/s3/s3_client_builder.h"
-#ifdef WITH_CRT
 #include "milvus-storage/filesystem/s3/s3_crt_client.h"
 #include "filesystem/s3/native_s3_operations.h"
-#endif
 
 using ::arrow::Buffer;
 using ::arrow::Future;
@@ -135,9 +131,7 @@ using ::milvus_storage::fs::internal::S3Backend;
 using ::milvus_storage::fs::internal::ToAwsString;
 
 namespace S3Model = Aws::S3::Model;
-#ifdef WITH_CRT
 namespace S3CrtModel = Aws::S3Crt::Model;
-#endif
 
 namespace milvus_storage {
 
@@ -828,7 +822,6 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
   std::shared_ptr<const arrow::KeyValueMetadata> metadata_;
 };
 
-#ifdef WITH_CRT
 class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonBlockingRandomAccessFile {
   protected:
   struct ReadState {
@@ -1266,7 +1259,6 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
   int64_t pos_ = 0;
   std::shared_ptr<ReadState> read_state_;
 };
-#endif  // WITH_CRT
 
 void FileObjectToInfo(std::string_view key, const S3Model::HeadObjectResult& obj, FileInfo* info) {
   if (IsDirectory(key, obj)) {
@@ -1913,7 +1905,6 @@ class CustomOutputStream final : public arrow::io::OutputStream, public AsyncOut
   std::shared_ptr<UploadState> upload_state_;
 };
 
-#ifdef WITH_CRT
 // CRT consumes streaming input and owns multipart scheduling and cleanup.
 class S3CrtOutputStream final : public arrow::io::OutputStream, public AsyncOutputStream {
   public:
@@ -2378,20 +2369,17 @@ class S3CrtOutputStream final : public arrow::io::OutputStream, public AsyncOutp
   Future<> write_future_ = Future<>::MakeFinished();
   Future<> close_future_;
 };
-#endif
 
 class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Impl> {
   public:
   ClientBuilder<S3Client> builder_;
   const arrow::io::IOContext io_context_;
   std::shared_ptr<S3ClientHolder> holder_;
-#ifdef WITH_CRT
-  bool use_crt_async_reads_ = false;
+  bool use_crt_ = false;
   ClientBuilder<Aws::S3Crt::S3CrtClient> crt_builder_;
   std::shared_ptr<S3CrtClientHolder> crt_holder_;
   arrow::Result<std::shared_ptr<NativeS3Operations>> native_operations_{
       arrow::Status::NotImplemented("Native asynchronous S3 transport unavailable")};
-#endif
   std::optional<S3Backend> backend_;
 
   static constexpr int32_t kListObjectsMaxKeys = 1000;
@@ -2400,14 +2388,9 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
 
   explicit Impl(S3Options options, arrow::io::IOContext io_context)
       : builder_(options),
-        io_context_(std::move(io_context))
-#ifdef WITH_CRT
-        ,
-        use_crt_async_reads_(options.use_crt_async_reads),
-        crt_builder_(std::move(options))
-#endif
-  {
-  }
+        io_context_(std::move(io_context)),
+        use_crt_(options.use_crt),
+        crt_builder_(std::move(options)) {}
 
   arrow::Status Init() {
     auto result = builder_.BuildClient(io_context_);
@@ -2415,8 +2398,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
       return arrow::Status::IOError("Failed to build S3 client: ", result.status().ToString());
     }
     ARROW_RETURN_NOT_OK(std::move(result).Value(&holder_));
-#ifdef WITH_CRT
-    if (use_crt_async_reads_) {
+    if (use_crt_) {
       std::shared_ptr<FilesystemMetrics> metrics;
       {
         ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
@@ -2439,7 +2421,6 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
           return native.status();
       }
     }
-#endif
     return arrow::Status::OK();
   }
 
@@ -3197,14 +3178,12 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
 
     ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
-#ifdef WITH_CRT
-    if (use_crt_async_reads_) {
+    if (use_crt_) {
       auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, kNoSize,
                                                       native_operations_.ok() ? *native_operations_ : nullptr);
       ARROW_RETURN_NOT_OK(ptr->Init());
       return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
     }
-#endif
     auto ptr = std::make_shared<ObjectInputFile>(holder_, fs->io_context(), path);
     ARROW_RETURN_NOT_OK(ptr->Init());
     return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
@@ -3224,25 +3203,21 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
 
     ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
-#ifdef WITH_CRT
-    if (use_crt_async_reads_) {
+    if (use_crt_) {
       auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, info.size(),
                                                       native_operations_.ok() ? *native_operations_ : nullptr);
       ARROW_RETURN_NOT_OK(ptr->Init());
       return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
     }
-#endif
     auto ptr = std::make_shared<ObjectInputFile>(holder_, fs->io_context(), path, info.size());
     ARROW_RETURN_NOT_OK(ptr->Init());
     return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
   }
 
   arrow::Result<std::shared_ptr<FilesystemMetrics>> GetMetrics() {
-#ifdef WITH_CRT
     if (crt_holder_) {
       return {crt_holder_->GetMetrics()};
     }
-#endif
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
     return {client_lock.Move()->GetMetrics()};
   }
@@ -3351,10 +3326,8 @@ arrow::Result<FileInfoVector> S3FileSystem::GetFileInfo(const FileSelector& sele
 }
 
 FileInfoGenerator S3FileSystem::GetFileInfoGenerator(const FileSelector& select) {
-#ifdef WITH_CRT
   if (impl_->native_operations_.ok())
     return (*impl_->native_operations_)->GetFileInfoGenerator(select);
-#endif
   // Provider-specific signing and unsupported native options retain the SDK path.
   return impl_->GetFileInfoGenerator(select);
 }
@@ -3551,15 +3524,13 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenOutput
 
   ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
-#ifdef WITH_CRT
   // GCP needs the SDK path for conditional single PUTs and per-request authentication.
-  if (impl_->use_crt_async_reads_ && impl_->options().cloud_provider != kCloudProviderGCP) {
+  if (impl_->use_crt_ && impl_->options().cloud_provider != kCloudProviderGCP) {
     auto stream = std::make_shared<S3CrtOutputStream>(io_context());
     ARROW_RETURN_NOT_OK(
         stream->Init(impl_->holder_, impl_->crt_holder_, path, impl_->options(), metadata, upload_size));
     return stream;
   }
-#endif
   auto ptr =
       std::make_shared<CustomOutputStream>(impl_->holder_, io_context(), path, impl_->options(), metadata, upload_size);
   ARROW_RETURN_NOT_OK(ptr->Init());
@@ -3567,7 +3538,6 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenOutput
 };
 
 arrow::Future<arrow::fs::FileInfoVector> S3FileSystem::GetFileInfoAsync(const std::vector<std::string>& paths) {
-#ifdef WITH_CRT
   if (!impl_->native_operations_.ok())
     return arrow::fs::FileSystem::GetFileInfoAsync(paths);
   auto infos = std::make_shared<arrow::fs::FileInfoVector>();
@@ -3580,9 +3550,6 @@ arrow::Future<arrow::fs::FileInfoVector> S3FileSystem::GetFileInfoAsync(const st
     });
   }
   return result.Then([infos] { return std::move(*infos); });
-#else
-  return arrow::fs::FileSystem::GetFileInfoAsync(paths);
-#endif
 }
 
 S3FileSystem::S3FileSystem(const S3Options& options, const arrow::io::IOContext& io_context)

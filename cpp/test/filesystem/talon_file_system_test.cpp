@@ -1139,7 +1139,7 @@ class TalonCloudMetadataTest : public ::testing::TestWithParam<bool> {
       GTEST_SKIP() << "This provider does not use the S3 CRT reader";
     }
     config_.talon_mode = TalonMode::Disabled;
-    config_.s3_crt_async_read = GetParam();
+    config_.s3_use_crt = GetParam();
     ASSERT_AND_ASSIGN(origin_fs_, CreateArrowFileSystem(config_));
     path_ = "talon-etag-validation-" + std::to_string(getpid()) + "-" +
             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
@@ -1765,7 +1765,7 @@ TEST(TalonFileSystemTest, PreservesOuterSubtreeAndExtensionInterfaces) {
   config.access_key_id = "minioadmin";
   config.access_key_value = "minioadmin";
   config.region = "us-east-1";
-  config.s3_crt_async_read = false;
+  config.s3_use_crt = false;
   config.talon_mode = TalonMode::Full;
   config.talon_coordinator = "127.0.0.1:7000";
   config.talon_block_size = 8388608;
@@ -2880,7 +2880,7 @@ TEST_F(TalonIntegrationTest, FallsBackToConfiguredOriginWhenTalonUnavailable) {
     SCOPED_TRACE(::testing::Message() << "provider=" << config.cloud_provider << ", CRT=" << use_crt);
     auto properties = properties_;
     ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_TALON_COORDINATOR, "127.0.0.1:0"), std::nullopt);
-    ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_S3_CRT_ASYNC_READ, use_crt ? "true" : "false"), std::nullopt);
+    ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_S3_USE_CRT, use_crt ? "true" : "false"), std::nullopt);
     ASSERT_AND_ASSIGN(auto fs, GetFileSystem(std::make_shared<const api::Properties>(properties)));
     ASSERT_AND_ASSIGN(const auto talon_metrics, FindMetricsSource(fs, kTalonMetricsSource));
     ASSERT_AND_ASSIGN(const auto origin_metrics, FindMetricsSource(fs, kOriginMetricsSource));

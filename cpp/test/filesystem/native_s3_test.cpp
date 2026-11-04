@@ -31,7 +31,6 @@ template <class T>
 arrow::Result<T> Await(arrow::Future<T> future) {
   return future.result();
 }
-#ifdef WITH_CRT
 // Single-object assertions use the existing Arrow stat API with one path.
 arrow::Future<arrow::fs::FileInfo> Stat(const std::shared_ptr<arrow::fs::FileSystem>& fs, const std::string& path) {
   return fs->GetFileInfoAsync(std::vector<std::string>{path})
@@ -60,7 +59,7 @@ class NativeS3Test : public ::testing::Test {
     options_.region = "us-east-1";
     options_.endpoint_override = endpoint;
     options_.cloud_provider = "aws";
-    options_.use_crt_async_reads = true;
+    options_.use_crt = true;
     options_.max_connections = 1;
     options_.allow_bucket_creation = true;
     options_.use_crc32c_checksum = true;
@@ -173,7 +172,7 @@ TEST_F(NativeS3Test, ProviderFilesystemOperationsWithAndWithoutCrt) {
       SCOPED_TRACE(::testing::Message() << "provider=" << provider << " crt=" << crt_reads);
       auto options = options_;
       options.cloud_provider = provider;
-      options.use_crt_async_reads = crt_reads;
+      options.use_crt = crt_reads;
       ASSERT_OK_AND_ASSIGN(auto s3, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
       auto fs = std::make_shared<FileSystemProxy>(prefix_, s3);
       ASSERT_OK_AND_ASSIGN(auto infos, Await(fs->GetFileInfoAsync({"hello #?+% 中文", "missing"})));
@@ -504,7 +503,7 @@ TEST_F(NativeS3Test, MultipartCompleteAndAbort) {
   ASSERT_NE(async, nullptr);
   ASSERT_OK(stream->Flush());
   ASSERT_OK(stream->Abort());
-  if (options_.use_crt_async_reads) {
+  if (options_.use_crt) {
     // CRT Flush only waits for input consumption; Abort may race with the part request.
     EXPECT_GE(metrics->GetWriteCount(), 2);
     EXPECT_LE(metrics->GetWriteCount(), 3);
@@ -601,8 +600,8 @@ TEST_F(NativeS3Test, SmallUploadCountsOneObjectWrite) {
   metrics->Reset();
   ASSERT_OK(Write("put-metrics", arrow::Buffer::FromString("data")).status());
   // SDK uses PutObject; CRT streaming uses multipart even for one small part.
-  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), options_.use_crt_async_reads ? 1 : 0);
-  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), options_.use_crt_async_reads ? 1 : 0);
+  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), options_.use_crt ? 1 : 0);
+  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), options_.use_crt ? 1 : 0);
   EXPECT_EQ(metrics->GetWriteCount(), 1);
   EXPECT_EQ(metrics->GetWriteBytes(), 4);
   EXPECT_EQ(metrics->GetFailedCount(), 0);
@@ -623,7 +622,7 @@ TEST_F(NativeS3Test, OutputFactoriesRespectCrtAndBackgroundSettings) {
   executor_stopped_ = true;
   for (const bool crt : {false, true}) {
     auto options = options_;
-    options.use_crt_async_reads = crt;
+    options.use_crt = crt;
     for (const bool background : {false, true}) {
       options.background_writes = background;
       ASSERT_OK_AND_ASSIGN(auto raw, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
@@ -661,7 +660,7 @@ TEST_F(NativeS3Test, GcpConditionalMultipartIsRejectedBeforeCreatingAnUpload) {
   for (const bool crt : {false, true}) {
     auto options = options_;
     options.cloud_provider = kCloudProviderGCP;
-    options.use_crt_async_reads = crt;
+    options.use_crt = crt;
     ASSERT_OK_AND_ASSIGN(auto raw, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
     auto fs = std::make_shared<FileSystemProxy>(prefix_, raw);
     ASSERT_OK_AND_ASSIGN(auto metrics, raw->GetMetrics(kOriginMetricsSource));
@@ -717,7 +716,7 @@ class ParallelUploadS3Test : public NativeS3Test {
       return;
     // Register the control client before uploads acquire the SDK finalizer lock.
     auto options = options_;
-    options.use_crt_async_reads = false;
+    options.use_crt = false;
     ASSERT_OK_AND_ASSIGN(control_, S3FileSystem::Make(options));
   }
   void TearDown() override {
@@ -1010,5 +1009,4 @@ TEST_F(NativeS3ShutdownTest, DrainsPendingMetadataBeforeAwsShutdown) {
   ASSERT_OK(shutdown.get());
   EXPECT_FALSE(Read("slow-write", 0, 1).status().ok());
 }
-#endif
 }  // namespace milvus_storage

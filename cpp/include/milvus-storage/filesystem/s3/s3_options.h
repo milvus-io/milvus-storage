@@ -176,8 +176,8 @@ struct S3Options {
   /// Whether to use CRC32C checksum for S3 uploads.
   bool use_crc32c_checksum = false;
 
-  /// Whether reads and supported uploads should use AWS CRT when available.
-  bool use_crt_async_reads = true;
+  /// Whether reads and supported uploads should use AWS CRT.
+  bool use_crt = true;
 
   S3Options();
 

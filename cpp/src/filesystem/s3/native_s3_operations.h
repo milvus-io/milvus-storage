@@ -3,7 +3,6 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 #pragma once
-#ifdef WITH_CRT
 #include <arrow/filesystem/filesystem.h>
 #include "filesystem/s3/native_s3_transport.h"
 
@@ -38,4 +37,3 @@ class NativeS3Operations : public std::enable_shared_from_this<NativeS3Operation
 arrow::Result<std::shared_ptr<NativeS3Operations>> MakeNativeS3Operations(const arrow::io::IOContext& io_context,
                                                                           std::shared_ptr<NativeS3Transport> transport);
 }  // namespace milvus_storage
-#endif

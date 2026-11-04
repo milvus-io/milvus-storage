@@ -457,9 +457,9 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "Only AWS S3 and MinIO support this.",
                       false,
                       ValidatePropertyType()),
-    REGISTER_PROPERTY(PROPERTY_FS_S3_CRT_ASYNC_READ,
+    REGISTER_PROPERTY(PROPERTY_FS_S3_USE_CRT,
                       PropertyType::BOOL,
-                      "Whether S3 reads and supported uploads should use AWS CRT when built with CRT.",
+                      "Whether S3 reads and supported uploads should use AWS CRT. GCP uploads use the SDK path.",
                       true,
                       ValidatePropertyType()),
     REGISTER_PROPERTY(

@@ -191,8 +191,6 @@ class InjectedFailureFileSystem final : public arrow::fs::SubTreeFileSystem {
   int64_t minimum_failure_size_;
 };
 
-#if defined(WITH_CRT) || defined(WITH_TALON)
-
 thread_local bool async_completion_active = false;
 
 class AsyncReaderLifecycleState {
@@ -391,8 +389,6 @@ class CallbackThreadFileSystem final : public arrow::fs::SubTreeFileSystem {
   private:
   std::shared_ptr<AsyncReaderLifecycleState> state_;
 };
-
-#endif  // WITH_CRT || WITH_TALON
 
 }  // namespace
 
@@ -676,8 +672,6 @@ TEST_F(LanceBasicTest, MaterializedReadsTranslateDeferredErrors) {
   EXPECT_EQ(permission_result.status().message().find("Generic filesystem_c error"), std::string::npos)
       << permission_result.status().ToString();
 }
-
-#if defined(WITH_CRT) || defined(WITH_TALON)
 
 TEST_F(LanceBasicTest, AsyncOpenReturnsBeforeIoCompletes) {
   if (IsCloudEnv()) {
@@ -966,8 +960,6 @@ TEST_F(LanceBasicTest, AsyncReaderIsReleasedOutsideCrtCompletionCallback) {
       << "The CRT completion thread destroyed RandomAccessFile inside the CRT callback; CRT resources must be "
          "released outside the callback to avoid destruction deadlock";
 }
-
-#endif  // WITH_CRT || WITH_TALON
 
 TEST(LanceReaderAsyncTest, SupportsAsyncMetadataCache) {
   EXPECT_TRUE((FormatReaderWithAsyncMetadata<LanceTableReader>));
@@ -2640,6 +2632,8 @@ void LanceBasicTest::RunCloudWideTableDuplicatedFragmentTake(int64_t column_coun
   api::SetValue(properties_, "extfs.default.region", fs_config.region.c_str());
   api::SetValue(properties_, "extfs.default.access_key_id", fs_config.access_key_id.c_str());
   api::SetValue(properties_, "extfs.default.access_key_value", fs_config.access_key_value.c_str());
+  // Reader and IOStats must use the same backend to share the Lance scheduler.
+  api::SetValue(properties_, "extfs.default.s3.use_crt", fs_config.s3_use_crt ? "true" : "false");
   api::SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, "true");
   const auto lance_io_parallelism = std::to_string(fs_config.lance_io_parallelism);
   api::SetValue(properties_, "extfs.default.lance_io_parallelism", lance_io_parallelism.c_str());
@@ -2880,6 +2874,7 @@ TEST_F(LanceBasicTest, TestStorageOptionsIntegration) {
     api::SetValue(properties_, "extfs.default.region", fs_config.region.c_str());
     api::SetValue(properties_, "extfs.default.access_key_id", fs_config.access_key_id.c_str());
     api::SetValue(properties_, "extfs.default.access_key_value", fs_config.access_key_value.c_str());
+    api::SetValue(properties_, "extfs.default.s3.use_crt", fs_config.s3_use_crt ? "true" : "false");
     if (fs_config.use_ssl) {
       api::SetValue(properties_, "extfs.default.use_ssl", "true");
     }
