@@ -1,11 +1,13 @@
 # Copyright 2026 Zilliz
 # Licensed under the Apache License, Version 2.0.
 
-# Header-only SDK extension for the pinned 1.11.842 dependency. Add a borrowed
+# Header-only SDK extension for the pinned 1.11.921 dependency. Add a borrowed
 # native handle accessor without changing layout, virtual methods, or ownership.
 # Keep the dependency cache immutable: the overlay belongs to this build tree.
+# Refresh discovery when the SDK changes in an existing build directory.
+unset(STORAGE_S3_CRT_INCLUDE_DIR CACHE)
 find_path(STORAGE_S3_CRT_INCLUDE_DIR aws/s3-crt/S3CrtClient.h
-  HINTS ${AWSSDK_INCLUDE_DIRS} REQUIRED)
+  HINTS ${AWSSDK_INCLUDE_DIRS} NO_DEFAULT_PATH REQUIRED)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
   "${STORAGE_S3_CRT_INCLUDE_DIR}/aws/s3-crt/S3CrtClient.h")
 file(READ "${STORAGE_S3_CRT_INCLUDE_DIR}/aws/s3-crt/S3CrtClient.h" sdk_header)
