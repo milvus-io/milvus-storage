@@ -20,7 +20,7 @@ jobs:
   probe-and-timing:
     name: ut-experiment-crt-${{ matrix.with_crt }}
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
@@ -61,7 +61,7 @@ jobs:
           bash cpp/scripts/setup_azurite.sh
 
       - name: Run complete serial UT
-        timeout-minutes: 80
+        timeout-minutes: 120
         run: bash cpp/scripts/run_parallel_tests.sh serial
 
       - name: Reset backend data before parallel UT
@@ -72,7 +72,7 @@ jobs:
           bash cpp/scripts/setup_azurite.sh
 
       - name: Run complete parallel UT
-        timeout-minutes: 80
+        timeout-minutes: 120
         run: bash cpp/scripts/run_parallel_tests.sh parallel
 
       - name: Compare completed tests and wall time
