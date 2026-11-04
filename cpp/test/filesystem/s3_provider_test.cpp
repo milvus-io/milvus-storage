@@ -1381,7 +1381,9 @@ TEST_F(S3ProviderTest, AwsBrokerConcurrentRequestsShareOneRefresh) {
 }
 
 TEST_F(S3ProviderTest, AwsBrokerHonorsExpirationTimezoneOffsets) {
-  const Aws::Utils::DateTime expiration("2026-10-14T04:00:00.125Z", Aws::Utils::DateFormat::ISO_8601);
+  // CRT parses expiry at second resolution. Keep the expected instant independent
+  // of whether the SDK DateTime parser preserves fractional seconds.
+  const Aws::Utils::DateTime expiration("2026-10-14T04:00:00Z", Aws::Utils::DateFormat::ISO_8601);
   for (const auto* expired_at :
        {"2026-10-14T04:00:00.125Z", "2026-10-14T04:00:00.125+00:00", "2026-10-14T12:00:00.125+08:00",
         "2026-10-13T23:30:00.125-04:30", "2026-10-14T09:45:00.125+0545", "2026-10-13T23:30:00.125-0430"}) {
