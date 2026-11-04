@@ -20,8 +20,9 @@
 
 #include <curl/curl.h>
 #include <aws/core/auth/AWSCredentials.h>
-#include <aws/core/auth/AWSCredentialsProviderChain.h>
 #include <aws/core/auth/STSCredentialsProvider.h>
+#include <aws/core/platform/Environment.h>
+#include <aws/core/utils/StringUtils.h>
 #include <aws/core/utils/logging/ConsoleLogSystem.h>
 #include <aws/s3/model/CreateBucketRequest.h>
 #include <aws/s3/model/DeleteBucketRequest.h>
@@ -48,6 +49,17 @@
 #include "milvus-storage/filesystem/s3/s3_global.h"
 
 namespace milvus_storage {
+
+AwsCredentialsProviderChain::AwsCredentialsProviderChain() {
+  AddProvider(std::make_shared<Aws::Auth::EnvironmentAWSCredentialsProvider>());
+  AddProvider(std::make_shared<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>());
+
+  // Keep Node Role fallback opt-in: the SDK may cache it after an IRSA failure.
+  const auto metadata_enabled = Aws::Environment::GetEnv("AWS_EC2_METADATA_ENABLE");
+  if (Aws::Utils::StringUtils::ToLower(metadata_enabled.c_str()) == "true") {
+    AddProvider(std::make_shared<Aws::Auth::InstanceProfileCredentialsProvider>());
+  }
+}
 
 static std::unordered_map<std::string, S3LogLevel> LogLevel_Map = {
     {"off", S3LogLevel::Off},   {"fatal", S3LogLevel::Fatal}, {"error", S3LogLevel::Error}, {"warn", S3LogLevel::Warn},
@@ -262,7 +274,6 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
       auto credentials = provider->GetAWSCredentials();
       assert(!credentials.GetAWSAccessKeyId().empty() && "AWS Access Key ID is empty");
       assert(!credentials.GetAWSSecretKey().empty() && "AWS Secret Key is empty");
-      assert(!credentials.GetSessionToken().empty() && "AWS Session Token is empty");
       options.credentials_provider = provider;
     }
   } else {
@@ -295,8 +306,7 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateH
 }
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateAwsCredentialsProvider() {
-  static auto provider = std::make_shared<Aws::Auth::DefaultAWSCredentialsProviderChain>();
-  return provider;
+  return std::make_shared<AwsCredentialsProviderChain>();
 }
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateAliyunCredentialsProvider() {
