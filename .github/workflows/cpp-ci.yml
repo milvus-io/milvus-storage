@@ -214,8 +214,9 @@ jobs:
           chmod +x ./cpp/scripts/setup_azurite.sh
           ./cpp/scripts/setup_azurite.sh
 
-      - name: Build unittest runtime image
-        run: docker build -t milvus-storage-ut -f cpp/scripts/ut.Dockerfile cpp/scripts
+      - name: Verify filesystem isolation and backend read/write
+        timeout-minutes: 5
+        run: bash cpp/scripts/run_parallel_tests.sh probe
 
       - name: Run unittest backends in parallel
         run: bash cpp/scripts/run_parallel_tests.sh
@@ -235,11 +236,12 @@ jobs:
         with:
           name: unittest-results-crt-${{ matrix.with_crt }}
           path: |
-            ${{ runner.temp }}/storage-ut/summary.md
-            ${{ runner.temp }}/storage-ut/*/tests.log
-            ${{ runner.temp }}/storage-ut/*/gtest.xml
-            ${{ runner.temp }}/storage-ut/*/exit-code
-            ${{ runner.temp }}/storage-ut/*/duration-seconds
+            ${{ runner.temp }}/storage-ut/parallel/summary.md
+            ${{ runner.temp }}/storage-ut/parallel/wall-seconds
+            ${{ runner.temp }}/storage-ut/parallel/*/tests.log
+            ${{ runner.temp }}/storage-ut/parallel/*/gtest.xml
+            ${{ runner.temp }}/storage-ut/parallel/*/exit-code
+            ${{ runner.temp }}/storage-ut/parallel/*/duration-seconds
 
       - name: Run native S3 HTTP fixture tests
         if: matrix.with_crt == 'True'
@@ -254,7 +256,7 @@ jobs:
         run: |
           traces=()
           for backend in local minio rustfs azurite; do
-            result_dir="$RUNNER_TEMP/storage-ut/$backend"
+            result_dir="$RUNNER_TEMP/storage-ut/parallel/$backend"
             lcov --capture \
               --directory "$result_dir/gcov$(pwd)/build/Release" \
               --output-file "$result_dir/coverage.info"

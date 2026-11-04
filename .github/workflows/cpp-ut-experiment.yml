@@ -1,0 +1,135 @@
+name: cpp-ut-experiment
+
+# Temporary PR validation: reuse the already-built binaries while iterating on
+# the launcher. Remove this workflow after the serial/parallel comparison.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/cpp-ut-experiment.yml'
+      - 'cpp/scripts/run_parallel_tests.sh'
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: cpp-ut-experiment-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe-and-timing:
+    name: ut-experiment-crt-${{ matrix.with_crt }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        with_crt: ['False', 'True']
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download existing test artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.with_crt == 'True' && 'gtest-binary-crt' || 'gtest-binary' }}
+          path: ./cpp/build/Release
+          github-token: ${{ github.token }}
+          run-id: 41629723881
+
+      - name: Prepare test runtime
+        run: |
+          echo 'Artifact source: run 41629723881, commit 5fc0fb97066e1127e7c24ec65e9236dfb36de35b' >> "$GITHUB_STEP_SUMMARY"
+          chmod +x cpp/build/Release/test/milvus_test cpp/build/Release/test/Test_FFI
+          sudo apt-get update
+          sudo apt-get install -y lcov
+          bash cpp/scripts/setup_minio.sh
+          bash cpp/scripts/setup_rustfs.sh
+          bash cpp/scripts/setup_azurite.sh
+
+      - name: Verify isolation and backend read/write probes
+        timeout-minutes: 5
+        run: bash cpp/scripts/run_parallel_tests.sh probe
+
+      - name: Reset backend data before serial UT
+        run: |
+          docker rm -fv minio rustfs azurite
+          bash cpp/scripts/setup_minio.sh
+          bash cpp/scripts/setup_rustfs.sh
+          bash cpp/scripts/setup_azurite.sh
+
+      - name: Run complete serial UT
+        timeout-minutes: 80
+        run: bash cpp/scripts/run_parallel_tests.sh serial
+
+      - name: Reset backend data before parallel UT
+        run: |
+          docker rm -fv minio rustfs azurite
+          bash cpp/scripts/setup_minio.sh
+          bash cpp/scripts/setup_rustfs.sh
+          bash cpp/scripts/setup_azurite.sh
+
+      - name: Run complete parallel UT
+        timeout-minutes: 80
+        run: bash cpp/scripts/run_parallel_tests.sh parallel
+
+      - name: Compare completed tests and wall time
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'storage-ut'
+          for backend in ['local', 'minio', 'rustfs', 'azurite']:
+              runs = []
+              for mode in ['serial', 'parallel']:
+                  cases = ET.parse(root / mode / backend / 'gtest.xml').findall('.//testcase')
+                  assert cases, (mode, backend, 'no test results')
+                  assert not any(c.find('failure') is not None or c.find('error') is not None for c in cases)
+                  runs.append({(c.get('classname'), c.get('name'), c.get('status'), c.get('result')) for c in cases})
+              assert runs[0] == runs[1], (backend, 'serial/parallel test outcomes differ')
+              print(f'{backend}: identical outcomes for {len(runs[0])} C++ tests')
+          serial, parallel = [int((root / mode / 'wall-seconds').read_text()) for mode in ['serial', 'parallel']]
+          report = f'\nFull backend UT: serial {serial}s; parallel {parallel}s; speedup {serial / parallel:.2f}x.\n'
+          print(report)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(report)
+          PY
+
+      - name: Compare coverage
+        working-directory: ./cpp
+        run: |
+          for mode in serial parallel; do
+            traces=()
+            for backend in local minio rustfs azurite; do
+              result_dir="$RUNNER_TEMP/storage-ut/$mode/$backend"
+              lcov --capture --directory "$result_dir/gcov$(pwd)/build/Release" --output-file "$result_dir/coverage.info"
+              traces+=("$result_dir/coverage.info")
+            done
+            BUILD_TYPE=Release bash scripts/coverage-report.sh "${traces[@]}"
+            cp coverage/coverage_filtered.info "$RUNNER_TEMP/storage-ut/$mode/coverage.info"
+            echo "### $mode coverage" >> "$GITHUB_STEP_SUMMARY"
+            lcov --summary coverage/coverage_filtered.info 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Show backend logs on failure
+        if: failure()
+        run: |
+          for backend in minio rustfs azurite; do docker logs "$backend" || true; done
+
+      - name: Upload experiment results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ut-experiment-results-crt-${{ matrix.with_crt }}
+          path: |
+            ${{ runner.temp }}/storage-ut/*/summary.md
+            ${{ runner.temp }}/storage-ut/*/wall-seconds
+            ${{ runner.temp }}/storage-ut/*/coverage.info
+            ${{ runner.temp }}/storage-ut/*/*/tests.log
+            ${{ runner.temp }}/storage-ut/*/*/gtest.xml
+            ${{ runner.temp }}/storage-ut/*/*/exit-code
+            ${{ runner.temp }}/storage-ut/*/*/duration-seconds
