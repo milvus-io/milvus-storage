@@ -31,12 +31,16 @@ void run_filesystem_suite(void);
 void run_fiu_suite(void);
 void run_segment_suite(void);
 void run_runtime_suite(void);
+#ifndef MILVUS_STORAGE_NO_EXTERNAL_FORMATS
 void run_talon_suite(void);
+#endif
 
 int main(void) {
   loon_thread_pool_singleton(4);
   run_runtime_suite();
+#ifndef MILVUS_STORAGE_NO_EXTERNAL_FORMATS
   run_talon_suite();
+#endif
   run_manifest_suite();
   run_manifest_async_suite();
   run_properties_suite();

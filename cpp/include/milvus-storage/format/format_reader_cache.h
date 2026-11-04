@@ -183,6 +183,7 @@ class MetadataCache final {
     if (format == LOON_FORMAT_VORTEX) {
       return std::forward<Visitor>(visitor)(get<vortex::VortexFormatReader>());
     }
+#ifndef MILVUS_STORAGE_NO_EXTERNAL_FORMATS
     if (format == LOON_FORMAT_LANCE_TABLE) {
       return std::forward<Visitor>(visitor)(get<lance::LanceTableReader>());
     }
@@ -192,6 +193,7 @@ class MetadataCache final {
     if (format == LOON_FORMAT_PAIMON_TABLE) {
       return std::forward<Visitor>(visitor)(get<paimon::PaimonFormatReader>());
     }
+#endif
 
     return ReturnT(arrow::Status::Invalid("Unknown column group format: ", format));
   }

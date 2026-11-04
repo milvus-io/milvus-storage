@@ -24,7 +24,7 @@
 #include <arrow/status.h>
 
 #include "rust/cxx.h"
-#include "rust-bridge/lib.h"
+#include "rust-bridge/external_formats_ffi.h"
 
 namespace milvus_storage::lance {
 

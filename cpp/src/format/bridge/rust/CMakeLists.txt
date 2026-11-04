@@ -8,11 +8,22 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Corrosion)
 
-corrosion_import_crate(
-    MANIFEST_PATH ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml
-    FEATURES ${CORROSION_FEATURES}
-    CRATES rust-bridge
-)
+if (WITH_EXTERNAL_TABLE_FORMATS)
+    corrosion_import_crate(
+        MANIFEST_PATH ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml
+        FEATURES ${CORROSION_FEATURES}
+        CRATES rust-bridge
+    )
+    set(CXXBRIDGE_FILES lib.rs external_formats_ffi.rs talon/talon_bridge.rs)
+else()
+    corrosion_import_crate(
+        MANIFEST_PATH ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml
+        NO_DEFAULT_FEATURES
+        FEATURES ${CORROSION_FEATURES}
+        CRATES rust-bridge
+    )
+    set(CXXBRIDGE_FILES lib.rs)
+endif()
 
 corrosion_set_env_vars(rust_bridge
     "RUSTFLAGS=-C force-frame-pointers=yes"
@@ -22,7 +33,7 @@ corrosion_set_env_vars(rust_bridge
 # otherwise, `rlib` will conflict.
 corrosion_add_cxxbridge(rust-bridge
     CRATE rust_bridge
-    FILES lib.rs talon/talon_bridge.rs)
+    FILES ${CXXBRIDGE_FILES})
 
 target_include_directories(rust-bridge PUBLIC ${Arrow_INCLUDE_DIRS}
     ${CMAKE_CURRENT_BINARY_DIR}/corrosion_generated/cxxbridge/rust-bridge/include
@@ -33,6 +44,10 @@ target_include_directories(rust-bridge PUBLIC ${Arrow_INCLUDE_DIRS}
 file(GLOB_RECURSE CPP_SOURCE_FILE CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
+
+if (NOT WITH_EXTERNAL_TABLE_FORMATS)
+    list(FILTER CPP_SOURCE_FILE EXCLUDE REGEX ".*/src/(lance|iceberg|paimon|talon)/.*\\.cpp$")
+endif()
 
 add_library(prsbridge STATIC ${CPP_SOURCE_FILE})
 

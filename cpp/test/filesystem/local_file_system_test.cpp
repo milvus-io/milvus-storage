@@ -416,6 +416,9 @@ TEST(FilesystemMetricsFfiTest, UnsupportedAndEmptySources) {
 
 #if GTEST_HAS_DEATH_TEST
 TEST(FilesystemMetricsFfiTest, ReportsS3LookupFailureAfterFinalization) {
+#ifdef MILVUS_STORAGE_NO_EXTERNAL_FORMATS
+  GTEST_SKIP() << "Requires Talon, which this build compiles out";
+#endif
   // Finalize S3 in a fresh process so other filesystem tests keep their clients.
   const auto original_death_test_style = GTEST_FLAG_GET(death_test_style);
   GTEST_FLAG_SET(death_test_style, "threadsafe");

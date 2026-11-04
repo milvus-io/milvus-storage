@@ -22,9 +22,11 @@
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/format/parquet/parquet_format.h"
 #include "milvus-storage/format/vortex/vortex_format.h"
+#ifndef MILVUS_STORAGE_NO_EXTERNAL_FORMATS
 #include "milvus-storage/format/lance/lance_format.h"
 #include "milvus-storage/format/iceberg/iceberg_format.h"
 #include "milvus-storage/format/paimon/paimon_format.h"
+#endif
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage {
@@ -32,9 +34,11 @@ namespace milvus_storage {
 arrow::Result<Format*> Format::get(const std::string& format) {
   static ParquetFormat parquet_fmt;
   static VortexFormat vortex_fmt;
+#ifndef MILVUS_STORAGE_NO_EXTERNAL_FORMATS
   static LanceFormat lance_fmt;
   static IcebergFormat iceberg_fmt;
   static PaimonFormat paimon_fmt;
+#endif
 
   if (format == LOON_FORMAT_PARQUET) {
     return &parquet_fmt;
@@ -42,6 +46,7 @@ arrow::Result<Format*> Format::get(const std::string& format) {
   if (format == LOON_FORMAT_VORTEX) {
     return &vortex_fmt;
   }
+#ifndef MILVUS_STORAGE_NO_EXTERNAL_FORMATS
   if (format == LOON_FORMAT_LANCE_TABLE) {
     return &lance_fmt;
   }
@@ -51,6 +56,12 @@ arrow::Result<Format*> Format::get(const std::string& format) {
   if (format == LOON_FORMAT_PAIMON_TABLE) {
     return &paimon_fmt;
   }
+#else
+  if (format == LOON_FORMAT_LANCE_TABLE || format == LOON_FORMAT_ICEBERG_TABLE || format == LOON_FORMAT_PAIMON_TABLE) {
+    return arrow::Status::NotImplemented(fmt::format(
+        "Format {} is not available: this build has WITH_EXTERNAL_TABLE_FORMATS=OFF", format));
+  }
+#endif
   return arrow::Status::Invalid(fmt::format("Unknown file format: {}", format));
 }
 

@@ -14,6 +14,13 @@ set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall")
 
 file(GLOB_RECURSE BUSTUB_TEST_SOURCES "${PROJECT_SOURCE_DIR}/test/*.cpp")
 
+if (NOT WITH_EXTERNAL_TABLE_FORMATS)
+  list(FILTER BUSTUB_TEST_SOURCES EXCLUDE REGEX ".*/test/format/(lance|iceberg|paimon)/.*")
+  list(FILTER BUSTUB_TEST_SOURCES EXCLUDE REGEX ".*/test/filesystem/talon_file_system_test\\.cpp$")
+  list(FILTER BUSTUB_TEST_SOURCES EXCLUDE REGEX ".*/test/tools/.*")
+  list(FILTER BUSTUB_TEST_SOURCES EXCLUDE REGEX ".*/test/format/(format_reader_cache_test|format_reader_test|external_table_test|external_table_arn_test)\\.cpp$")
+endif()
+
 add_executable(milvus_test ${BUSTUB_TEST_SOURCES})
 
 target_include_directories(milvus_test PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -41,6 +48,9 @@ target_link_libraries(
 #CTest for the FFI
 enable_testing()
 file(GLOB_RECURSE FFI_TEST_FILES ffi/*.c)
+if (NOT WITH_EXTERNAL_TABLE_FORMATS)
+  list(FILTER FFI_TEST_FILES EXCLUDE REGEX ".*/ffi/ffi_talon_test\\.c$")
+endif()
 add_executable(Test_FFI ${FFI_TEST_FILES})
 
 # no need link arrow
