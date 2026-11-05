@@ -50,3 +50,8 @@ set_target_properties(Test_FFI PROPERTIES
   C_STANDARD 11
   C_STANDARD_REQUIRED YES
 )
+
+# The FFI executable also needs RPATH for transitive shared dependencies.
+if (NOT APPLE)
+  target_link_options(Test_FFI PRIVATE "LINKER:--disable-new-dtags")
+endif()
