@@ -751,9 +751,7 @@ folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>
         std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> all_rbs;
         for (size_t i = 0; i < all_results.size(); ++i) {
           auto& tryResult = all_results[i];
-          if (tryResult.hasException()) {
-            return arrow::Status::IOError(tryResult.exception().what().toStdString());
-          }
+          // value() preserves the original backend exception instead of reclassifying it as I/O.
           ARROW_ASSIGN_OR_RAISE(auto rbs, std::move(tryResult.value()));
 
           auto& chunk_list = task_chunk_lists[i];
@@ -1361,9 +1359,7 @@ folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::Table>>>> Rea
 
         for (size_t i = 0; i < all_results.size(); ++i) {
           auto& tryResult = all_results[i];
-          if (tryResult.hasException()) {
-            return arrow::Status::IOError(tryResult.exception().what().toStdString());
-          }
+          // value() preserves the original backend exception instead of reclassifying it as I/O.
           ARROW_ASSIGN_OR_RAISE(auto table, std::move(tryResult.value()));
           size_t cg_idx = task_cg_indices[i];
           per_cg_tables[cg_idx].push_back(std::move(table));

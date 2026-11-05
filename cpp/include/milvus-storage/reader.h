@@ -94,6 +94,7 @@ class ChunkReader {
    *
    * The returned future completes with the same ordered result as get_chunks().
    * Duplicate chunk indices are preserved in the output.
+   * Task aggregation preserves backend exceptions in the future and Arrow error statuses in the result.
    *
    * @note The default implementation invokes get_chunks() before returning a
    *       ready future and may therefore block. Native implementations may defer work.
@@ -354,6 +355,7 @@ class Reader {
    * @brief Asynchronously extracts specific rows by their global indices.
    *
    * The returned future completes with the same ordered table as take().
+   * Task aggregation preserves backend exceptions in the future and Arrow error statuses in the result.
    *
    * @note The default implementation invokes take() before returning a ready
    *       future and may therefore block.
