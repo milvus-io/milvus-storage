@@ -105,7 +105,7 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
   hash_combine(tls_min_version);
   hash_combine(background_writes);
   hash_combine(use_crc32c_checksum);
-  hash_combine(s3_crt_async_read);
+  hash_combine(s3_use_crt);
   hash_combine(load_frequency);
   hash_combine(talon_mode);
   // Disabled Talon settings do not affect the origin filesystem's identity.
@@ -197,8 +197,8 @@ std::string ArrowFileSystemConfig::ToString() const {
      << ", request_timeout_ms=" << request_timeout_ms << ", max_connections=" << max_connections
      << ", crt_queue_sizes=" << crt_queue_sizes
      << ", tls_min_version=" << (tls_min_version.empty() ? "(default)" : tls_min_version)
-     << ", use_crc32c_checksum=" << std::boolalpha << use_crc32c_checksum << ", s3_crt_async_read=" << std::boolalpha
-     << s3_crt_async_read << ", talon_mode=" << talon_mode_name
+     << ", use_crc32c_checksum=" << std::boolalpha << use_crc32c_checksum << ", s3_use_crt=" << std::boolalpha
+     << s3_use_crt << ", talon_mode=" << talon_mode_name
      << ", talon_small_read_threshold=" << talon_small_read_threshold << ", talon_coordinator=" << talon_coordinator
      << ", talon_block_size=" << talon_block_size << ", talon_max_idle_per_addr=" << talon_max_idle_per_addr;
   if (!alias.empty()) {
@@ -369,7 +369,7 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(
   ARROW_ASSIGN_OR_RAISE(result.background_writes, api::GetValue<bool>(properties_map, PROPERTY_FS_BACKGROUND_WRITES));
   ARROW_ASSIGN_OR_RAISE(result.use_crc32c_checksum,
                         api::GetValue<bool>(properties_map, PROPERTY_FS_USE_CRC32C_CHECKSUM));
-  ARROW_ASSIGN_OR_RAISE(result.s3_crt_async_read, api::GetValue<bool>(properties_map, PROPERTY_FS_S3_CRT_ASYNC_READ));
+  ARROW_ASSIGN_OR_RAISE(result.s3_use_crt, api::GetValue<bool>(properties_map, PROPERTY_FS_S3_USE_CRT));
   ARROW_ASSIGN_OR_RAISE(const auto talon_mode, api::GetValue<uint32_t>(properties_map, PROPERTY_FS_TALON_MODE));
   // Typed Properties can bypass SetValue; validate before narrowing to the enum.
   if (talon_mode > static_cast<uint32_t>(TalonMode::SmallReads)) {

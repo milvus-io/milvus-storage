@@ -39,6 +39,7 @@
 #define ENV_VAR_REGION "TEST_ENV_REGION"
 #define ENV_VAR_USE_IAM "TEST_ENV_USE_IAM"
 #define ENV_VAR_USE_SSL "TEST_ENV_USE_SSL"
+#define ENV_VAR_S3_USE_CRT "TEST_ENV_S3_USE_CRT"
 #define ENV_VAR_TALON_ENABLED "TEST_ENV_TALON_ENABLED"
 #define ENV_VAR_TALON_COORDINATOR "TEST_ENV_TALON_COORDINATOR"
 #define ENV_VAR_TALON_BLOCK_SIZE "TEST_ENV_TALON_BLOCK_SIZE"
@@ -78,6 +79,7 @@ bool IsTalonEnv();
 
 /// Populates filesystem properties from the TEST_ENV_* environment variables.
 ///
+/// TEST_ENV_S3_USE_CRT selects the S3 runtime backend (true/false).
 /// When Talon is enabled, remote storage and TEST_ENV_TALON_COORDINATOR are
 /// required. TEST_ENV_TALON_BLOCK_SIZE is optional and defaults to 256 MiB.
 arrow::Status InitTestProperties(api::Properties& properties);

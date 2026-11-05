@@ -17,6 +17,19 @@ class APIPropertiesTest : public ::testing::Test {};
 
 namespace milvus_storage::test {
 
+TEST_F(APIPropertiesTest, TestEnvironmentSelectsCrtMode) {
+  const auto mode = GetEnvVar("TEST_ENV_S3_USE_CRT").ValueOr("true");
+  api::Properties properties;
+  const auto status = InitTestProperties(properties);
+  if (mode != "true" && mode != "false") {
+    EXPECT_TRUE(status.IsInvalid()) << status.ToString();
+    return;
+  }
+  ASSERT_STATUS_OK(status);
+  ASSERT_AND_ASSIGN(auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(properties)));
+  EXPECT_EQ(config.s3_use_crt, mode == "true");
+}
+
 TEST_F(APIPropertiesTest, basic) {
   milvus_storage::api::Properties pp{};
 

@@ -11,8 +11,7 @@ crate-type = ["staticlib"]
 default = ["external-table-formats"]
 external-table-formats = ["dep:object_store", "dep:lance", "dep:lance-core", "dep:lance-encoding", "dep:lance-file", "dep:lance-index", "dep:lance-io", "dep:lance-table", "dep:opendal", "dep:opendal-paimon", "dep:iceberg", "dep:iceberg-storage-opendal", "dep:typetag", "dep:url", "dep:base64", "dep:crc32fast", "dep:roaring", "dep:paimon"]
 io-trace = []
-s3-crt-async = []
-talon = ["dep:talon", "s3-crt-async"]
+talon = ["dep:talon"]
 
 [dependencies]
 talon = { package = "talon-rust-client", git = "https://github.com/milvus-io/talon.git", rev = "010ab9bc9945ca21959e6e773ebd802041b5d079", optional = true }
@@ -102,13 +101,13 @@ tempfile = "3"
 cxx-build = "1.0.184"
 
 [patch.crates-io]
-lance = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-core = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-encoding = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-file = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-index = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-io = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-table = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
+lance = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-core = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-encoding = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-file = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-index = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-io = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-table = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
 
 [lints.rust]
 deprecated = "deny"

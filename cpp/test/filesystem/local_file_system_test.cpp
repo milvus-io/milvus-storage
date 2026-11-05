@@ -434,7 +434,7 @@ TEST(FilesystemMetricsFfiTest, ReportsS3LookupFailureAfterFinalization) {
         api::SetValue(properties, PROPERTY_FS_ACCESS_KEY_VALUE, "sk");
         api::SetValue(properties, PROPERTY_FS_REGION, "us-east-1");
         api::SetValue(properties, PROPERTY_FS_USE_SSL, "false");
-        api::SetValue(properties, PROPERTY_FS_S3_CRT_ASYNC_READ, "false");
+        api::SetValue(properties, PROPERTY_FS_S3_USE_CRT, "false");
         auto origin = GetFileSystem(std::make_shared<const api::Properties>(properties));
         api::SetValue(properties, PROPERTY_FS_TALON_MODE, "1");
         api::SetValue(properties, PROPERTY_FS_TALON_COORDINATOR, "127.0.0.1:0");

@@ -2137,7 +2137,9 @@ TEST_F(S3ProviderTest, AwsBrokerConcurrentRequestsShareOneRefresh) {
 }
 
 TEST_F(S3ProviderTest, AwsBrokerHonorsExpirationTimezoneOffsets) {
-  const Aws::Utils::DateTime expiration("2026-10-14T04:00:00.125Z", Aws::Utils::DateFormat::ISO_8601);
+  // CRT parses expiry at second resolution. Keep the expected instant independent
+  // of whether the SDK DateTime parser preserves fractional seconds.
+  const Aws::Utils::DateTime expiration("2026-10-14T04:00:00Z", Aws::Utils::DateFormat::ISO_8601);
   for (const auto* expired_at :
        {"2026-10-14T04:00:00.125Z", "2026-10-14T04:00:00.125+00:00", "2026-10-14T12:00:00.125+08:00",
         "2026-10-13T23:30:00.125-04:30", "2026-10-14T09:45:00.125+0545", "2026-10-13T23:30:00.125-0430"}) {
@@ -2365,7 +2367,7 @@ TEST_F(S3ProviderTest, AwsBrokerCredentialsSignS3Requests) {
   options.credentials_provider = std::make_shared<AwsCredentialBrokerProvider>(
       AwsCredentialBrokerConfig{"http://broker/v1/credentials/assume-role", "us-west-2", "role", "", 900, 1000},
       [&now] { return now; });
-  options.use_crt_async_reads = false;
+  options.use_crt = false;
   mock_client_->EnqueueResponse(
       "http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
       AwsBrokerResponse("broker-key", Aws::Utils::DateTime::Now() + std::chrono::seconds(900)));

@@ -28,6 +28,7 @@
 bool is_cloud_env(void);
 
 /// Append filesystem-related properties into the given key/value arrays.
+/// TEST_ENV_S3_USE_CRT selects the S3 runtime backend (true/false).
 /// In cloud mode, reads env vars (CLOUD_PROVIDER, ADDRESS, BUCKET_NAME, etc.).
 /// In local mode, uses root_path with fs.storage_type=local.
 ///

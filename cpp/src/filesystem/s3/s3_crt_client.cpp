@@ -14,8 +14,6 @@
 
 #include "milvus-storage/filesystem/s3/s3_crt_client.h"
 
-#ifdef WITH_CRT
-
 #include <algorithm>
 #include <condition_variable>
 #include <cstddef>
@@ -429,5 +427,3 @@ arrow::Result<std::shared_ptr<S3CrtClientHolder>> ClientBuilder<Aws::S3Crt::S3Cr
 }
 
 }  // namespace milvus_storage
-
-#endif  // WITH_CRT

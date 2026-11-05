@@ -354,7 +354,7 @@ class CrtReaderBenchmark : public FormatBenchFixtureBase<false, false> {
     auto properties = *properties_;
     api::SetValue(properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "32768");
     api::SetValue(properties, PROPERTY_READER_METADATA_CACHE_ENABLE, "true");
-    api::SetValue(properties, PROPERTY_FS_S3_CRT_ASYNC_READ, mode == CrtIoMode::AsyncCrt ? "true" : "false");
+    api::SetValue(properties, PROPERTY_FS_S3_USE_CRT, mode == CrtIoMode::AsyncCrt ? "true" : "false");
     if (format == LOON_FORMAT_VORTEX) {
       api::SetValue(properties, PROPERTY_WRITER_VORTEX_FORMAT_VERSION, "2");
     }
@@ -369,12 +369,6 @@ class CrtReaderBenchmark : public FormatBenchFixtureBase<false, false> {
     if (!CheckFormatAvailable(st, format)) {
       return false;
     }
-#ifndef WITH_CRT
-    if (mode == CrtIoMode::AsyncCrt) {
-      st.SkipWithError("Async CRT mode requires WITH_CRT=True build");
-      return false;
-    }
-#endif
     return true;
   }
 

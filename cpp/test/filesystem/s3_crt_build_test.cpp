@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifdef WITH_CRT
-
 #include <memory>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/beast/core.hpp>
@@ -583,7 +581,7 @@ TEST(S3CrtClientFinalizerTest, CallbackDestructionDefersSdkShutdownUntilLeaseRel
   finalized.get();
 }
 
-TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileWhenCrtEnabled) {
+TEST(S3CrtBuildSupportTest, OpenInputFileUsesConfiguredReadBackend) {
   if (!IsCloudEnv()) {
     GTEST_SKIP() << "CRT OpenInputFile smoke test skipped in non-cloud environment";
   }
@@ -594,7 +592,9 @@ TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileWhenCrtEnabled) {
 
   api::Properties properties;
   ASSERT_STATUS_OK(InitTestProperties(properties));
-  ASSERT_AND_ASSIGN(auto fs, GetFileSystem(std::make_shared<const api::Properties>(properties)));
+  const auto shared_properties = std::make_shared<const api::Properties>(properties);
+  ASSERT_AND_ASSIGN(auto config, GetFileSystemConfig(shared_properties));
+  ASSERT_AND_ASSIGN(auto fs, GetFileSystem(shared_properties));
 
   const std::string base_path = GetTestBasePath(
       "s3-crt-open-input-file-smoke-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -609,9 +609,9 @@ TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileWhenCrtEnabled) {
 
   ASSERT_AND_ASSIGN(auto input_file, fs->OpenInputFile(object_path));
   auto* async_file = dynamic_cast<milvus_storage::NonBlockingRandomAccessFile*>(input_file.get());
-  ASSERT_NE(async_file, nullptr);
+  ASSERT_EQ(async_file != nullptr, config.s3_use_crt);
 
-  auto size_result = async_file->GetSizeAsync().result();
+  auto size_result = async_file ? async_file->GetSizeAsync().result() : input_file->GetSize();
   ASSERT_STATUS_OK(size_result.status());
   ASSERT_EQ(size_result.ValueOrDie(), static_cast<int64_t>(data.size()));
 
@@ -824,7 +824,7 @@ TEST(S3CrtBuildSupportTest, InFlightNativeReadCompletesDuringFinalizeS3) {
     options.endpoint_override = "127.0.0.1:" + std::to_string(server.port());
     options.connect_timeout = 5;
     options.request_timeout = 5;
-    options.use_crt_async_reads = true;
+    options.use_crt = true;
 
     auto fs_result = S3FileSystem::Make(options);
     if (!fs_result.ok()) {
@@ -904,7 +904,7 @@ TEST(S3CrtBuildSupportTest, UnsupportedNativeOptionsRetainSdkMetadataAndCrtReads
   options.region = "us-east-1";
   options.scheme = "http";
   options.endpoint_override = "127.0.0.1:1";
-  options.use_crt_async_reads = true;
+  options.use_crt = true;
   // Custom retry providers have no native adapter. Existing APIs must still
   // work through the SDK rather than failing the native capability check.
   options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
@@ -934,7 +934,7 @@ TEST(S3CrtBuildSupportTest, UnsupportedNativeOptionsRetainSdkMetadataAndCrtReads
   EXPECT_FALSE(list_status.ok());
   EXPECT_FALSE(list_status.IsNotImplemented());
 
-  options.use_crt_async_reads = false;
+  options.use_crt = false;
   ASSERT_AND_ASSIGN(auto sdk_fs, S3FileSystem::Make(options));
   ASSERT_AND_ASSIGN(auto input, sdk_fs->OpenInputFile(info));
   EXPECT_EQ(dynamic_cast<NonBlockingRandomAccessFile*>(input.get()), nullptr);
@@ -985,7 +985,7 @@ TEST_P(S3CrtMetadataTest, AsyncHeadReturnsBeforeResponse) {
     options.endpoint_override = "127.0.0.1:" + std::to_string(acceptor.local_endpoint().port());
     options.connect_timeout = 2;
     options.request_timeout = 5;
-    options.use_crt_async_reads = true;
+    options.use_crt = true;
 
     auto fs_result = S3FileSystem::Make(options);
     if (!fs_result.ok()) {
@@ -1203,7 +1203,7 @@ TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileForGcpIam) {
 
   EXPECT_NE(dynamic_cast<milvus_storage::NonBlockingRandomAccessFile*>(input_file.get()), nullptr);
 
-  options.use_crt_async_reads = false;
+  options.use_crt = false;
   ASSERT_AND_ASSIGN(auto sdk_fs, S3FileSystem::Make(options));
   ASSERT_AND_ASSIGN(auto sdk_file, sdk_fs->OpenInputFile("bucket/path/object.txt"));
   EXPECT_EQ(dynamic_cast<milvus_storage::NonBlockingRandomAccessFile*>(sdk_file.get()), nullptr);
@@ -1228,7 +1228,7 @@ TEST(S3CrtBuildSupportTest, GcpHmacUploadsUseSdkWithAndWithoutCrtReads) {
     config.region = "auto";
     config.access_key_id = "test-hmac-key";
     config.access_key_value = "test-hmac-secret";
-    config.s3_crt_async_read = true;
+    config.s3_use_crt = true;
     auto result = GcpFileSystemProducer(config).Make();
     if (!result.ok()) {
       std::cerr << result.status() << std::endl;
@@ -1244,7 +1244,7 @@ TEST(S3CrtBuildSupportTest, GcpHmacUploadsUseSdkWithAndWithoutCrtReads) {
     options.region = config.region;
     options.scheme = "http";
     for (const bool crt_reads : {false, true}) {
-      options.use_crt_async_reads = crt_reads;
+      options.use_crt = crt_reads;
       auto native_fs = S3FileSystem::Make(options, arrow::io::IOContext(arrow_executor->get()));
       if (!native_fs.ok())
         return 2;
@@ -1332,7 +1332,7 @@ TEST(S3CrtBuildSupportTest, GcpIamBearerReachesCrtRangeGetAndHead) {
     config.bucket_name = "test-bucket";
     config.region = "auto";
     config.use_iam = true;
-    config.s3_crt_async_read = true;
+    config.s3_use_crt = true;
     // The registry keeps the first provider for an identity. Install the test
     // provider before Make() registers the process's real IAM credentials.
     auto provider = std::make_shared<StaticBearerProvider>();
@@ -1417,5 +1417,3 @@ TEST(S3CrtBuildSupportTest, GcpIamBearerReachesCrtRangeGetAndHead) {
 }
 
 }  // namespace milvus_storage::test
-
-#endif  // WITH_CRT

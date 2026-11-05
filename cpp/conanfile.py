@@ -32,7 +32,6 @@ class StorageConan(ConanFile):
         "with_jni": [True, False],
         "with_python_binding": [True, False],
         "with_fiu": [True, False],
-        "with_crt": [True, False],
         "with_external_table_formats": [True, False],
     }
     default_options = {
@@ -47,7 +46,6 @@ class StorageConan(ConanFile):
         "with_jni": False,
         "with_python_binding": False,
         "with_fiu": False,
-        "with_crt": False,
         "with_external_table_formats": True,
         "folly/*:shared": True,
         "glog/*:with_gflags": True,
@@ -58,7 +56,8 @@ class StorageConan(ConanFile):
         "grpc/*:shared": True,
         "grpc/*:secure": True,
         "aws-sdk-cpp/*:config": True,
-        "aws-sdk-cpp/*:s3-crt": False,
+        "aws-sdk-cpp/*:shared": True,
+        "aws-sdk-cpp/*:s3-crt": True,
         "aws-sdk-cpp/*:text-to-speech": False,
         "aws-sdk-cpp/*:transfer": False,
         # Force aws-c-* / s2n to be shared so all aws-cpp-sdk subdir .so files
@@ -70,7 +69,9 @@ class StorageConan(ConanFile):
         # aws_mem_acquire because s3's private allocator is still NULL. See
         # docs/aws-sdk-cpp-multi-copy-bug.md for the full root-cause analysis.
         "aws-c-*/*:shared": True,
+        "aws-checksums/*:shared": True,
         "aws-crt-cpp/*:shared": True,
+        "s2n/*:shared": True,
         # Arrow embeds jemalloc and is loaded into an already running JVM.
         "jemalloc/*:enable_cxx": False,
         "jemalloc/*:enable_initial_exec_tls": False,
@@ -139,10 +140,6 @@ class StorageConan(ConanFile):
         # macOS cannot build opentelemetry-cpp with shared=True.
         if self.settings.os == "Linux":
             self.options["opentelemetry-cpp"].shared = True
-        if self.options.with_crt:
-            # aws-sdk-cpp uses a hyphenated option name; package-pattern syntax
-            # sets the real option, while .s3_crt does not.
-            self.options.update(options_values={"aws-sdk-cpp/*:s3-crt": "True"})
         self.options["arrow"].with_azure = True
         if self.options.with_jni and self.settings.os != "Macos":
             self.options["arrow"].shared = True
@@ -160,8 +157,11 @@ class StorageConan(ConanFile):
             self.options["gflags"].shared = True
 
     def requirements(self):
-        if self.options.with_crt:
-            self.requires("aws-c-s3/0.12.6")
+        # Native requests use HTTP and future APIs directly; shared SDK
+        # libraries do not expose these transitive link dependencies.
+        self.requires("aws-c-io/1.1.1#2dd777871cf93ce4f35ba714a1ba87ef")
+        self.requires("aws-c-http/1.1.1#4ebd9cad4c949ed136f95419ce0ceee3")
+        self.requires("aws-c-s3/1.5.1#41f018ea69dd13668a2ffe76d0731742")
         self.requires("xz_utils/5.4.5#fc4e36861e0a47ecd4a40a00e6d29ac8")
         self.requires("glog/0.7.1#a306e61d7b8311db8cb148ad62c48030")
         self.requires("zstd/1.5.5#70dc5eb8ea16708fc946fbac884c507e")
@@ -182,7 +182,9 @@ class StorageConan(ConanFile):
         # as a direct dep so CMakeDeps generates standalone cmake config files.
         # Without this, find_package(Azure) can't find include directories.
         self.requires("azure-sdk-for-cpp/1.16.4@milvus/dev#7c95e3df67cfea28b3cf6dbd60fbf137", force=True)
-        self.requires("aws-sdk-cpp/1.11.842@milvus/dev#363556887f622db23a10168c108dd55d", force=True)
+        self.requires("aws-sdk-cpp/1.11.921@milvus/dev#0b229410d5498d3bacc19ccf57334b30", force=True)
+        # Keep the SDK and native CRT consumers on the same dependency graph.
+        self.requires("aws-crt-cpp/0.44.3#43f6408847655d35224320f4774bfcb9")
         # Force override transitive deps to align with milvus-common
         self.requires("protobuf/5.27.0@milvus/dev#42f031a96d21c230a6e05bcac4bdd633", force=True)
         self.requires("grpc/1.67.1@milvus/dev#efeaa484b59bffaa579004d5e82ec4fd", force=True, override=True)
@@ -255,7 +257,6 @@ class StorageConan(ConanFile):
         tc.variables["WITH_JNI"] = self.options.with_jni
         tc.variables["WITH_PYTHON_BINDING"] = self.options.with_python_binding
         tc.variables["WITH_FIU"] = self.options.with_fiu
-        tc.cache_variables["WITH_CRT"] = self.options.with_crt
         tc.cache_variables["WITH_EXTERNAL_TABLE_FORMATS"] = self.options.with_external_table_formats
 
         # Set JAVA_HOME for JNI compilation
