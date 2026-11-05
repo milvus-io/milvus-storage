@@ -38,6 +38,7 @@
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "runtime/bridge_util.h"
 #include "iceberg/iceberg_bridge.h"
+#include "rust-bridge/external_formats_ffi.h"
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"
 #include "test_env.h"
