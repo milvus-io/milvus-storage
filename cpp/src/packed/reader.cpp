@@ -15,7 +15,6 @@
 #include <memory>
 #include <algorithm>
 #include <exception>
-#include <stdexcept>
 #include <utility>
 
 #include <arrow/array/data.h>
@@ -100,9 +99,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(const std::shared_ptr<arrow::fs
   auto status = init(fs, paths, schema, reader_props, arrow_reader_props);
   if (!status.ok()) {
     LOG_STORAGE_ERROR_ << "Error initializing PackedRecordBatchReader: " << status.ToString();
-    // Deprecated path (see reader.h): stringifies the status and destroys its
-    // classification. Migrate to Make().
-    throw std::runtime_error(status.ToString());
+    throw ToSegcoreError(status);
   }
 }
 
