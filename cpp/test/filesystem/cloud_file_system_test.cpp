@@ -23,6 +23,7 @@
 #include <thread>
 
 #include "milvus-storage/common/extend_status.h"
+#include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/upload_sizable.h"
 #include "milvus-storage/filesystem/observable.h"
@@ -49,6 +50,41 @@ class CloudFsTest : public ::testing::Test {
   milvus_storage::api::Properties properties_;
   ArrowFileSystemPtr fs_;
 };
+
+TEST_F(CloudFsTest, AzureInputSupportsNonBlockingRandomAccess) {
+  auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
+  if (!provider.ok() || provider.ValueOrDie() != "azure") {
+    GTEST_SKIP() << "Azure-specific async input test";
+  }
+
+  const std::string path = "/test_azure_async_input.txt";
+  const std::string content = "azure async range read";
+  (void)fs_->DeleteFile(path);
+  {
+    ASSERT_AND_ASSIGN(auto out, fs_->OpenOutputStream(path));
+    ASSERT_STATUS_OK(out->Write(content.data(), content.size()));
+    ASSERT_STATUS_OK(out->Close());
+  }
+
+  ASSERT_AND_ASSIGN(auto input_file, fs_->OpenInputFile(path));
+  auto* async_file = dynamic_cast<NonBlockingRandomAccessFile*>(input_file.get());
+  ASSERT_NE(async_file, nullptr);
+  auto size_result = async_file->GetSizeAsync().result();
+  ASSERT_TRUE(size_result.ok()) << size_result.status().ToString();
+  EXPECT_EQ(size_result.ValueOrDie(), static_cast<int64_t>(content.size()));
+
+  std::string range(5, '\0');
+  auto read_result = async_file->ReadAtAsyncInto(6, range.size(), reinterpret_cast<uint8_t*>(range.data())).result();
+  ASSERT_TRUE(read_result.ok()) << read_result.status().ToString();
+  EXPECT_EQ(read_result.ValueOrDie(), static_cast<int64_t>(range.size()));
+  EXPECT_EQ(range, "async");
+
+  ASSERT_AND_ASSIGN(auto input_stream, fs_->OpenInputStream(path));
+  EXPECT_NE(dynamic_cast<NonBlockingRandomAccessFile*>(input_stream.get()), nullptr);
+  ASSERT_STATUS_OK(input_stream->Close());
+  ASSERT_STATUS_OK(input_file->Close());
+  ASSERT_STATUS_OK(fs_->DeleteFile(path));
+}
 
 TEST_F(CloudFsTest, ConditionalWrite) {
   auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
