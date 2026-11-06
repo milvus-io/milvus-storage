@@ -18,6 +18,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <exception>
+#include <new>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -31,9 +33,11 @@
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
+#include <folly/OperationCancelled.h>
 
 #include "include/test_env.h"
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
@@ -2199,6 +2203,54 @@ TEST_P(APIWriterReaderTest, GetChucksTest) {
   {  // chunk reader N not exist
     auto chunk_reader_resultn = reader->get_chunk_reader(10);
     ASSERT_FALSE(chunk_reader_resultn.ok());
+  }
+}
+
+TEST_P(APIWriterReaderTest, AsyncReadersPreserveBackendExceptions) {
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Encrypted Parquet reopens exercise exceptions inside backend futures.";
+  }
+
+  const std::string key(32, 'k');
+  const auto encoded_key = arrow::util::base64_encode(key);
+  ASSERT_EQ(SetValue(properties_, PROPERTY_WRITER_ENC_ENABLE, "true"), std::nullopt);
+  ASSERT_EQ(SetValue(properties_, PROPERTY_WRITER_ENC_KEY, encoded_key.c_str()), std::nullopt);
+  ASSERT_EQ(SetValue(properties_, PROPERTY_WRITER_ENC_META, "async-exception-test"), std::nullopt);
+  ASSERT_EQ(SetValue(properties_, PROPERTY_WRITER_ENC_ALGORITHM, ENCRYPTION_ALGORITHM_AES_GCM_V1), std::nullopt);
+  const auto properties = std::make_shared<const api::Properties>(properties_);
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  std::exception_ptr failure;
+  auto reader = Reader::create(cgs, schema_, nullptr, properties);
+  reader->set_keyretriever([&](const std::string&) {
+    if (failure) {
+      std::rethrow_exception(failure);
+    }
+    return key;
+  });
+  ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+  // Populate metadata before injecting failures in each task's independent reopen.
+  ASSERT_AND_ASSIGN(auto warm_table, std::move(reader->take_async({0}, parallelism_)).get());
+  ASSERT_EQ(warm_table->num_rows(), 1);
+
+  const auto storage_error = ToSegcoreError(arrow::Status::Invalid("corrupt backend data"));
+  for (const auto& injected :
+       {std::make_exception_ptr(std::bad_alloc()), std::make_exception_ptr(folly::OperationCancelled()),
+        std::make_exception_ptr(storage_error)}) {
+    failure = injected;
+    auto expect_original_exception = [&](auto future) {
+      try {
+        (void)std::move(future).get();
+        ADD_FAILURE() << "Backend exception was converted into an Arrow result";
+      } catch (...) {
+        EXPECT_EQ(std::current_exception(), failure);
+      }
+    };
+    expect_original_exception(chunk_reader->get_chunks_async({0}, parallelism_));
+    expect_original_exception(reader->take_async({0}, parallelism_));
   }
 }
 
