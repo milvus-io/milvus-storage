@@ -124,13 +124,13 @@ opendal-paimon = { package = "opendal-core", version = "=0.58.0" }
 cxx-build = "1.0.184"
 
 [patch.crates-io]
-lance = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-core = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-encoding = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-file = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-index = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-io = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
-lance-table = { git = "https://github.com/zilliztech/lance", rev = "71ad15939e208ca932b4875294197b8cd6725f13" }
+lance = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-core = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-encoding = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-file = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-index = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-io = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-table = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
 
 [lints.rust]
 deprecated = "deny"
