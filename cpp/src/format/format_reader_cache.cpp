@@ -21,9 +21,11 @@
 #include <folly/Try.h>
 #include <glog/raw_logging.h>
 
+#ifndef MILVUS_STORAGE_NO_EXTERNAL_FORMATS
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/format/paimon/paimon_format_reader.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
+#endif
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 
@@ -292,8 +294,10 @@ typename FormatReaderMetadataCache<ReaderT>::MetadataResult FormatReaderMetadata
 
 template class FormatReaderMetadataCache<parquet::ParquetFormatReader>;
 template class FormatReaderMetadataCache<vortex::VortexFormatReader>;
+#ifndef MILVUS_STORAGE_NO_EXTERNAL_FORMATS
 template class FormatReaderMetadataCache<lance::LanceTableReader>;
 template class FormatReaderMetadataCache<iceberg::IcebergFormatReader>;
 template class FormatReaderMetadataCache<paimon::PaimonFormatReader>;
+#endif
 
 }  // namespace milvus_storage

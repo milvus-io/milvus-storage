@@ -13,6 +13,7 @@ option(WITH_BENCHMARK "Build with micro benchmark." ON)
 option(WITH_JNI "Build with JNI library." OFF)
 option(WITH_PYTHON_BINDING "Build for Python bindings with hidden symbols." OFF)
 option(WITH_FIU "Build with fault injection support (libfiu)." OFF)
+option(WITH_EXTERNAL_TABLE_FORMATS "Build Lance, Iceberg and Paimon table formats and the Talon filesystem. OFF also removes their Rust TLS stack (rustls, ring, aws-lc)." ON)
 option(ARROW_WITH_JEMALLOC "Build with jemalloc." OFF)
 
 include(GNUInstallDirs)
@@ -61,7 +62,11 @@ include(ExtendS3CrtClient.cmake)
 
 # Rust bridge for Vortex and Lance formats (always built)
 set(RUST_BRIDGE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/format/bridge/rust)
-set(CORROSION_FEATURES talon)
+if (WITH_EXTERNAL_TABLE_FORMATS)
+  set(CORROSION_FEATURES talon)
+else()
+  set(CORROSION_FEATURES)
+endif()
 add_subdirectory(${RUST_BRIDGE_PATH})
 
 list(APPEND LINK_LIBS prsbridge)
@@ -84,8 +89,19 @@ file(GLOB_RECURSE ALL_SRC_FILES
 )
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/bridge/.*\\.(cpp|cc)$")
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
+if (WITH_EXTERNAL_TABLE_FORMATS)
+  list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/ffi/talon_c_disabled\\.cpp$")
+endif()
+if (NOT WITH_EXTERNAL_TABLE_FORMATS)
+  list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/(lance|iceberg|paimon)/.*\\.(cpp|cc)$")
+  list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/filesystem/talon/.*\\.(cpp|cc)$")
+  list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/ffi/talon_c\\.cpp$")
+endif()
 
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
+if (NOT WITH_EXTERNAL_TABLE_FORMATS)
+  target_compile_definitions(milvus-storage PUBLIC MILVUS_STORAGE_NO_EXTERNAL_FORMATS)
+endif()
 
 list(APPEND LINK_LIBS
   arrow::arrow
@@ -211,7 +227,7 @@ if (WITH_UT)
   add_subdirectory(test)
 endif()
 
-if (WITH_UT OR WITH_TOOLS)
+if ((WITH_UT OR WITH_TOOLS) AND WITH_EXTERNAL_TABLE_FORMATS)
   add_subdirectory(tools)
 endif()
 

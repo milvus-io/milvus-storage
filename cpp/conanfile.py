@@ -32,6 +32,7 @@ class StorageConan(ConanFile):
         "with_jni": [True, False],
         "with_python_binding": [True, False],
         "with_fiu": [True, False],
+        "with_external_table_formats": [True, False],
     }
     default_options = {
         "shared": True,
@@ -45,6 +46,7 @@ class StorageConan(ConanFile):
         "with_jni": False,
         "with_python_binding": False,
         "with_fiu": False,
+        "with_external_table_formats": True,
         "folly/*:shared": True,
         "glog/*:with_gflags": True,
         "glog/*:shared": True,
@@ -255,6 +257,7 @@ class StorageConan(ConanFile):
         tc.variables["WITH_JNI"] = self.options.with_jni
         tc.variables["WITH_PYTHON_BINDING"] = self.options.with_python_binding
         tc.variables["WITH_FIU"] = self.options.with_fiu
+        tc.cache_variables["WITH_EXTERNAL_TABLE_FORMATS"] = self.options.with_external_table_formats
 
         # Set JAVA_HOME for JNI compilation
         if self.options.with_jni:

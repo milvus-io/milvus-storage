@@ -14,6 +14,7 @@ use_asan := $(or $(USE_ASAN),True)
 with_ut := $(or $(WITH_UT),True)
 with_tools := $(or $(WITH_TOOLS),False)
 with_fiu := $(or $(WITH_FIU),True)
+with_external_table_formats := $(or $(WITH_EXTERNAL_TABLE_FORMATS),True)
 with_benchmark := $(or $(WITH_BENCHMARK),True)
 build_type := $(or $(BUILD_TYPE),Release)
 use_jni := $(or $(USE_JNI),False)
@@ -43,14 +44,15 @@ build:
 	@echo "use_jni: ${use_jni}"
 	@echo "use_python_binding: ${use_python_binding}"
 	@echo "with_fiu: ${with_fiu}"
+	@echo "with_external_table_formats: ${with_external_table_formats}"
 
 	mkdir -p build && cd build && \
 	${CONAN_BASE} \
 	-o "&:with_ut=${with_ut}" -o "&:with_tools=${with_tools}" -o "&:with_benchmark=${with_benchmark}" -o "&:with_asan=${use_asan}" \
-	-o "&:with_jni=${use_jni}" -o "&:with_python_binding=${use_python_binding}" -o "&:with_fiu=${with_fiu}" && \
+	-o "&:with_jni=${use_jni}" -o "&:with_python_binding=${use_python_binding}" -o "&:with_fiu=${with_fiu}" -o "&:with_external_table_formats=${with_external_table_formats}" && \
 	conan build .. ${CONAN_SETTINGS} \
 	-o "&:with_ut=${with_ut}" -o "&:with_tools=${with_tools}" -o "&:with_benchmark=${with_benchmark}" -o "&:with_asan=${use_asan}" \
-	-o "&:with_jni=${use_jni}" -o "&:with_python_binding=${use_python_binding}" -o "&:with_fiu=${with_fiu}"
+	-o "&:with_jni=${use_jni}" -o "&:with_python_binding=${use_python_binding}" -o "&:with_fiu=${with_fiu}" -o "&:with_external_table_formats=${with_external_table_formats}"
 
 package: build
 	mkdir -p build && cd build && \

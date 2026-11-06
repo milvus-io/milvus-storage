@@ -190,6 +190,9 @@ TEST_F(FileSystemCacheTest, ListReturnsRemoteDisplayKey) {
 }
 
 TEST_F(FileSystemCacheTest, ListReturnsTalonDisplayKey) {
+#ifdef MILVUS_STORAGE_NO_EXTERNAL_FORMATS
+  GTEST_SKIP() << "Requires Talon, which this build compiles out";
+#endif
   api::Properties props;
   props[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
   props[PROPERTY_FS_CLOUD_PROVIDER] = std::string(kCloudProviderAWS);

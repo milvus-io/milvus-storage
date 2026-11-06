@@ -8,6 +8,8 @@ edition = "2024"
 crate-type = ["staticlib"]
 
 [features]
+default = ["external-table-formats"]
+external-table-formats = ["dep:object_store", "dep:lance", "dep:lance-core", "dep:lance-encoding", "dep:lance-file", "dep:lance-index", "dep:lance-io", "dep:lance-table", "dep:opendal", "dep:opendal-paimon", "dep:iceberg", "dep:iceberg-storage-opendal", "dep:typetag", "dep:url", "dep:base64", "dep:crc32fast", "dep:roaring", "dep:paimon"]
 io-trace = []
 talon = ["dep:talon"]
 
@@ -27,7 +29,7 @@ snafu = "0.9"
 
 # Arrow Ecosystem
 # Lance, Vortex and Paimon use Arrow 58; Iceberg 0.9 retains Arrow 57 internally.
-arrow = "58.0.0"
+arrow = { version = "58.0.0", features = ["ffi"] }
 arrow-array = { version = "58.0.0", features = ["ffi"] }
 arrow-schema = "58.0.0"
 
@@ -38,19 +40,19 @@ vortex-btrblocks = { git = "https://github.com/zilliztech/vortex", rev = "059feb
 # Lance Ecosystem
 # Cloud features remain enabled for native Lance writers. Lance reads use the
 # filesystem-backed reader ObjectStore.
-lance = { version = "=7.0.0", default-features = false, features = ["aws", "azure", "gcp", "oss"] }
-lance-core = "=7.0.0"
-lance-encoding = "=7.0.0"
-lance-file = "=7.0.0"
-lance-index = "=7.0.0"
-lance-io = { version = "=7.0.0", default-features = false, features = ["aws", "azure", "gcp", "oss"] }
-lance-table = "=7.0.0"
+lance = { optional = true, version = "=7.0.0", default-features = false, features = ["aws", "azure", "gcp", "oss"] }
+lance-core = { version = "=7.0.0", optional = true }
+lance-encoding = { version = "=7.0.0", optional = true }
+lance-file = { version = "=7.0.0", optional = true }
+lance-index = { version = "=7.0.0", optional = true }
+lance-io = { optional = true, version = "=7.0.0", default-features = false, features = ["aws", "azure", "gcp", "oss"] }
+lance-table = { version = "=7.0.0", optional = true }
 
 # OpenDAL 0.56 interfaces used by the generic filesystem-backed bridge. No cloud
 # service is selected here: production reads delegate every operation to the C++ filesystem.
-opendal = "0.56"
+opendal = { version = "0.56", optional = true }
 # Paimon uses OpenDAL 0.58; adapt it to the shared filesystem-backed bridge.
-opendal-paimon = { package = "opendal-core", version = "=0.58.0" }
+opendal-paimon = { optional = true, package = "opendal-core", version = "=0.58.0" }
 
 # Iceberg Ecosystem
 # `iceberg-storage-opendal` is used only by the native `CreateTestTable` writer.
@@ -58,10 +60,10 @@ opendal-paimon = { package = "opendal-core", version = "=0.58.0" }
 # routes Iceberg reads through the filesystem-backed OpenDAL adapter and does not
 # construct those cloud providers.
 bytes = "1"
-iceberg = "0.9"
-iceberg-storage-opendal = { version = "0.9", features = ["opendal-s3", "opendal-gcs", "opendal-azdls", "opendal-oss"] }
+iceberg = { version = "0.9", optional = true }
+iceberg-storage-opendal = { optional = true, version = "0.9", features = ["opendal-s3", "opendal-gcs", "opendal-azdls", "opendal-oss"] }
 # Required for #[typetag::serde] on the filesystem-backed Iceberg adapter.
-typetag = "0.2"
+typetag = { version = "0.2", optional = true }
 parquet = { version = "58.0.0", features = ["arrow"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -70,21 +72,21 @@ uuid = { version = "1", features = ["v7"] }
 
 # Shared ObjectStore and path types used by the filesystem-backed Lance reader
 # adapter and the Iceberg URI binding.
-object_store = { version = "0.13", features = ["aws", "gcp"] }
+object_store = { optional = true, version = "0.13", features = ["aws", "gcp"] }
 
 # Async adapter traits are shared by the filesystem adapters and Vortex layout strategy.
 async-trait = "0.1"
 # URI parsing is shared by the Lance and Iceberg filesystem adapters.
-url = "2"
+url = { version = "2", optional = true }
 
 # Paimon split encoding, checksum validation, and roaring deletion vectors.
-base64 = "0.22"
-crc32fast = "1"
-roaring = "0.11"
+base64 = { version = "0.22", optional = true }
+crc32fast = { version = "1", optional = true }
+roaring = { version = "0.11", optional = true }
 
 # Apache Paimon planner and test writer. Keep the exact release and Cargo.lock
 # together. Paimon uses the Arrow 58 already present for Lance.
-paimon = { version = "=0.4.0", default-features = false, features = ["storage-fs", "storage-s3", "storage-oss", "storage-azdls", "storage-gcs", "vortex"] }
+paimon = { optional = true, version = "=0.4.0", default-features = false, features = ["storage-fs", "storage-s3", "storage-oss", "storage-azdls", "storage-gcs", "vortex"] }
 
 # SQL predicate parsing
 sqlparser = "0.55"

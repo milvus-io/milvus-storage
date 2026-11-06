@@ -24,7 +24,7 @@
 #include <arrow/result.h>
 #include <arrow/filesystem/filesystem.h>
 #include "rust/cxx.h"
-#include "rust-bridge/lib.h"
+#include "rust-bridge/external_formats_ffi.h"
 
 namespace arrow {
 class RecordBatchReader;

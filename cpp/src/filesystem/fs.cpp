@@ -28,7 +28,9 @@
 #include "milvus-storage/common/lrucache.h"
 
 #include "milvus-storage/filesystem/azure/azure_fs_producer.h"
+#ifndef MILVUS_STORAGE_NO_EXTERNAL_FORMATS
 #include "milvus-storage/filesystem/talon/talon_file_system_producer.h"
+#endif
 
 namespace milvus_storage {
 
@@ -251,7 +253,11 @@ arrow::Result<FileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& 
       // Talon decorates reads without depending on the concrete provider type
       // or taking ownership of bucket path rooting.
       if (config.talon_mode != TalonMode::Disabled) {
+#ifndef MILVUS_STORAGE_NO_EXTERNAL_FORMATS
         ARROW_ASSIGN_OR_RAISE(raw_fs, TalonFileSystemProducer(config, std::move(raw_fs)).Make());
+#else
+        return arrow::Status::NotImplemented("Talon is not available: this build has WITH_EXTERNAL_TABLE_FORMATS=OFF");
+#endif
       }
       // Apply the bucket subtree exactly once, after all optional decorators.
       return std::make_shared<FileSystemProxy>(config.bucket_name, std::move(raw_fs));

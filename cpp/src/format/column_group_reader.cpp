@@ -43,9 +43,11 @@
 #include "milvus-storage/common/macro.h"  // for UNLIKELY
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/filesystem/fs.h"
+#ifndef MILVUS_STORAGE_NO_EXTERNAL_FORMATS
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/paimon/paimon_format_reader.h"
+#endif
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 
