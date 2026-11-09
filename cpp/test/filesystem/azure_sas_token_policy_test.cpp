@@ -162,35 +162,49 @@ static std::unique_ptr<Azure::Core::Http::RawResponse> SendRequest(
 }
 
 TEST(AzureSasTokenPolicyTest, SendsBrokerContractAndNormalizesToken) {
-  const auto now = std::chrono::system_clock::from_time_t(1785146400);
-  auto transport = std::make_shared<MockTransport>();
-  transport->Enqueue(
-      Azure::Core::Http::HttpStatusCode::Ok,
-      SuccessResponse("account", "?sv=2026-01-01&sig=encoded%2Bsignature%3D", now + std::chrono::hours(1)));
-  AzureSasTokenPolicy policy(MakeConfig(), transport, [now] { return now; });
+  for (const bool use_iam : {false, true}) {
+    SCOPED_TRACE(use_iam);
+    const auto now = std::chrono::system_clock::from_time_t(1785146400);
+    auto transport = std::make_shared<MockTransport>();
+    transport->Enqueue(
+        Azure::Core::Http::HttpStatusCode::Ok,
+        SuccessResponse("account", "?sv=2026-01-01&sig=encoded%2Bsignature%3D", now + std::chrono::hours(1)));
+    auto config = MakeConfig();
+    config.use_iam = use_iam;
+    AzureSasTokenPolicy policy(config, transport, [now] { return now; });
 
-  bool called = false;
-  std::map<std::string, std::string> query;
-  auto response = SendRequest(policy, &called, &query);
-  EXPECT_EQ(response->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
-  EXPECT_TRUE(called);
-  EXPECT_EQ(query.at("sv"), "2026-01-01");
-  EXPECT_EQ(query.at("sig"), "encoded%2Bsignature%3D");
+    bool called = false;
+    std::map<std::string, std::string> query;
+    auto response = SendRequest(policy, &called, &query);
+    EXPECT_EQ(response->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+    EXPECT_TRUE(called);
+    EXPECT_EQ(query.at("sv"), "2026-01-01");
+    EXPECT_EQ(query.at("sig"), "encoded%2Bsignature%3D");
 
-  const auto requests = transport->Requests();
-  ASSERT_EQ(requests.size(), 1u);
-  EXPECT_EQ(requests[0].method, "POST");
-  EXPECT_EQ(requests[0].url, "http://credential-broker/v1/credentials/assume-role");
-  EXPECT_EQ(requests[0].headers.at("Content-Type"), "application/json");
+    const auto requests = transport->Requests();
+    ASSERT_EQ(requests.size(), 1u);
+    EXPECT_EQ(requests[0].method, "POST");
+    EXPECT_EQ(requests[0].url, "http://credential-broker/v1/credentials/assume-role");
+    EXPECT_EQ(requests[0].headers.at("Content-Type"), "application/json");
 
-  const auto body = nlohmann::json::parse(requests[0].body);
-  EXPECT_EQ(body["csp"].get<std::string>(), "azure");
-  EXPECT_EQ(body["region"].get<std::string>(), "westus3");
-  EXPECT_EQ(body["bucket"].get<std::string>(), "container");
-  EXPECT_EQ(body["durationSeconds"].get<int32_t>(), 3600);
-  EXPECT_EQ(body["azureClientId"].get<std::string>(), "client-id");
-  EXPECT_EQ(body["azureTenantId"].get<std::string>(), "tenant-id");
-  EXPECT_EQ(body["azureAccountName"].get<std::string>(), "account");
+    const auto body = nlohmann::json::parse(requests[0].body);
+    EXPECT_EQ(body["csp"].get<std::string>(), "azure");
+    EXPECT_EQ(body["region"].get<std::string>(), "westus3");
+    EXPECT_EQ(body["bucket"].get<std::string>(), "container");
+    EXPECT_EQ(body["durationSeconds"].get<int32_t>(), 3600);
+    if (use_iam) {
+      EXPECT_EQ(body.at("credentialType"), "iam");
+      EXPECT_FALSE(body.contains("azureClientId"));
+      EXPECT_FALSE(body.contains("azureTenantId"));
+    } else {
+      EXPECT_FALSE(body.contains("credentialType"));
+      EXPECT_EQ(body.at("azureClientId"), "client-id");
+      EXPECT_EQ(body.at("azureTenantId"), "tenant-id");
+    }
+    EXPECT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+    EXPECT_EQ(transport->Requests().size(), 1u);
+    EXPECT_EQ(body["azureAccountName"].get<std::string>(), "account");
+  }
 }
 
 TEST(AzureSasTokenPolicyTest, PerOperationPolicyKeepsSasAcrossSdkRetries) {

@@ -39,16 +39,17 @@ struct GcpBrokerConfig {
   std::string target_service_account;
   int32_t duration_seconds = 900;
   int64_t request_timeout_ms = 3000;
+  bool use_iam = false;
 };
 
-// GcpBrokerCredentialProvider gets OAuth2 access tokens for a target service
-// account from a credential Broker, instead of impersonating the target from
-// this process. The Broker holds the impersonation grant, so a deployment
-// grants roles/iam.serviceAccountTokenCreator to the Broker identity only.
+// GcpBrokerCredentialProvider gets OAuth2 access tokens from a credential
+// Broker. IAM mode uses the Broker's own identity; otherwise the Broker
+// impersonates the target service account using its own impersonation grant.
 //
 // The request uses the Broker protocol of the Azure SAS provider
-// (credential_broker.h) with csp=gcp and gcpServiceAccountEmail. The response
-// carries the access token in credentials.sessionToken.
+// (credential_broker.h) with csp=gcp and either credentialType=iam or
+// gcpServiceAccountEmail. The response carries the access token in
+// credentials.sessionToken.
 //
 // AuthorizationHeader() runs inside the AWS SDK HTTP factory callback, which
 // must not throw. A token that cannot be obtained yields std::nullopt, so the
@@ -86,7 +87,10 @@ class GcpBrokerCredentialProvider final : public GcpCredentialProvider {
 
   bool IssuesBearerToken() const override { return true; }
 
-  std::string Identity() const override { return "broker:" + config_.endpoint + "|" + config_.target_service_account; }
+  std::string Identity() const override {
+    return config_.use_iam ? "broker-iam:" + config_.endpoint
+                           : "broker:" + config_.endpoint + "|" + config_.target_service_account;
+  }
 
   private:
   struct CachedToken {

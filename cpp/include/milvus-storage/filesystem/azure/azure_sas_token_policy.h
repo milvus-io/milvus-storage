@@ -35,6 +35,7 @@ struct AzureSasBrokerConfig {
   std::string account_name;
   int32_t duration_seconds = 900;
   int64_t request_timeout_ms = 3000;
+  bool use_iam = false;
 
   bool operator==(const AzureSasBrokerConfig& other) const = default;
 };

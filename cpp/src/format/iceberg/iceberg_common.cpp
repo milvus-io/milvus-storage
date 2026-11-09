@@ -119,8 +119,8 @@ arrow::Result<std::unordered_map<std::string, std::string>> ToWriterOptions(cons
   }
   if (provider == kCloudProviderAzure) {
     // Broker-issued SAS credentials belong to the C++ filesystem read path and
-    // are not reconstructed by the native writer. Native IAM ignores Broker settings.
-    if (use_supported_credentials && (config.use_iam || !config.IsAzureCredentialBrokerEnabled())) {
+    // are not reconstructed by the native writer in either credential mode.
+    if (use_supported_credentials && !config.IsAzureCredentialBrokerEnabled()) {
       set("adls.account-name", config.access_key_id);
       set("adls.endpoint-suffix", config.address);
       if (use_ak_sk) {
@@ -132,7 +132,7 @@ arrow::Result<std::unordered_map<std::string, std::string>> ToWriterOptions(cons
   if (provider == kCloudProviderGCP) {
     // A target service account requests impersonation; only default IAM is
     // supported by this native writer path.
-    if (config.use_iam && config.gcp_target_service_account.empty()) {
+    if (config.use_iam && config.gcp_target_service_account.empty() && config.credential_endpoint.empty()) {
       return options;
     }
   }

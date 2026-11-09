@@ -184,4 +184,17 @@ TEST_F(AzureFileSystemProducerTest, ExternalBrokerSasFollowsTheSameRule) {
   EXPECT_TRUE(status.ok()) << status.ToString();
 }
 
+TEST_F(AzureFileSystemProducerTest, BrokerIamDoesNotRequireLocalIdentityOrTarget) {
+  auto config = ExternalBrokerConfig("core.windows.net");
+  config.use_iam = true;
+  config.azure_client_id.clear();
+  config.azure_tenant_id.clear();
+  EXPECT_TRUE(Make(config).ok());
+
+  config.credential_endpoint.clear();
+  const auto status = Make(config);
+  EXPECT_TRUE(status.IsInvalid()) << status;
+  EXPECT_NE(status.message().find(kManagedIdentityCheck), std::string::npos);
+}
+
 }  // namespace milvus_storage

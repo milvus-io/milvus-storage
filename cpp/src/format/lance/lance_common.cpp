@@ -77,8 +77,8 @@ arrow::Result<StorageOptions> ToWriterOptions(const ArrowFileSystemConfig& confi
     }
   }
   if (provider == kCloudProviderAzure) {
-    // Native IAM ignores Broker settings used by Talon reads.
-    if (use_supported_credentials && (config.use_iam || !config.IsAzureCredentialBrokerEnabled())) {
+    // The native writer cannot reconstruct Broker SAS credentials in either mode.
+    if (use_supported_credentials && !config.IsAzureCredentialBrokerEnabled()) {
       set("azure_storage_account_name", config.access_key_id);
       if (use_ak_sk) {
         set("azure_storage_account_key", config.access_key_value);
@@ -96,7 +96,7 @@ arrow::Result<StorageOptions> ToWriterOptions(const ArrowFileSystemConfig& confi
     }
   }
   if (provider == kCloudProviderGCP) {
-    if (config.use_iam && config.gcp_target_service_account.empty()) {
+    if (config.use_iam && config.gcp_target_service_account.empty() && config.credential_endpoint.empty()) {
       return options;
     }
   }
