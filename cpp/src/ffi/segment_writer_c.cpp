@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/ffi_c.h"
+#include "milvus-storage/ffi_internal/arrow_import.h"
 #include "milvus-storage/ffi_internal/bridge.h"
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -115,9 +116,8 @@ LoonFFIResult loon_segment_writer_write(LoonSegmentWriterHandle handle, ArrowArr
   try {
     auto* writer = reinterpret_cast<SegmentWriter*>(handle);
 
-    auto rb_result = arrow::ImportRecordBatch(array, writer->GetOriginalSchema());
+    auto rb_result = ImportWriterBatch(array, writer->GetOriginalSchema());
     if (!rb_result.ok()) {
-      array->release(array);
       RETURN_ARROW_ERROR(rb_result.status(), LOON_ARROW_ERROR, rb_result.status().ToString());
     }
     auto batch = rb_result.ValueOrDie();

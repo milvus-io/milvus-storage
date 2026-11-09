@@ -20,11 +20,16 @@
 #include <arrow/filesystem/localfs.h>
 #include <arrow/testing/gtest_util.h>
 #include <arrow/util/io_util.h>
+#include <arrow/util/key_value_metadata.h>
 
 #include "milvus-storage/ffi_c.h"
+#include "milvus-storage/ffi_internal/bridge.h"
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/constants.h"
+#include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/parquet/parquet_writer.h"
 #include "milvus-storage/reader.h"
+#include "milvus-storage/segment/segment_reader.h"
 #include "milvus-storage/writer.h"
 
 namespace milvus_storage::test {
@@ -268,6 +273,204 @@ TEST_F(WriterMemoryTest, ParquetCountsBackingBuffersOfRetainedSlices) {
   EXPECT_EQ(writer->GetRetainedBufferSize(), GetRecordBatchMemorySize(batch));
   ASSERT_OK(writer->Close().status());
   EXPECT_EQ(writer->GetRetainedBufferSize(), 0);
+}
+
+class SegmentWriterMemoryTest : public ::testing::Test {
+  protected:
+  void SetUp() override {
+    ASSERT_OK_AND_ASSIGN(directory_, arrow::internal::TemporaryDir::Make("segment-writer-memory-"));
+    root_ = directory_->path().ToString();
+    segment_path_ = "segment";
+    lob_path_ = "lobs/101";
+    schema_ = arrow::schema({
+        arrow::field("id", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"})),
+        arrow::field("content", arrow::utf8(), true, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"101"})),
+    });
+    const char* keys[] = {PROPERTY_FS_STORAGE_TYPE,         PROPERTY_FS_ROOT_PATH,
+                          PROPERTY_WRITER_POLICY,           PROPERTY_WRITER_SCHEMA_BASE_PATTERNS,
+                          PROPERTY_WRITER_FORMAT,           PROPERTY_WRITER_BUFFER_SIZE,
+                          PROPERTY_WRITER_FILE_ROLLING_SIZE};
+    // Neither the scalar tail nor the LOB references reach a row group or file
+    // rolling threshold. Releasing raw TEXT must not depend on draining them.
+    const char* values[] = {"local", root_.c_str(), "schema_based", "id,content", "parquet", "33554432", "2147483648"};
+    ASSERT_OK(CheckFFI(loon_properties_create(keys, values, 7, &properties_)));
+    LoonLobColumnConfig lob{};
+    lob.lob_base_path = lob_path_.c_str();
+    lob.field_id = 101;
+    lob.inline_threshold = 256;
+    lob.max_lob_file_bytes = 64 * kMiB;
+    lob.flush_threshold_bytes = 16 * kMiB;
+    LoonSegmentWriterConfig config{};
+    config.segment_path = segment_path_.c_str();
+    config.lob_columns = &lob;
+    config.num_lob_columns = 1;
+    ArrowSchema exported{};
+    ASSERT_OK(arrow::ExportSchema(*schema_, &exported));
+    auto status = CheckFFI(loon_segment_writer_new(&exported, &config, &properties_, &writer_));
+    ArrowSchemaRelease(&exported);
+    ASSERT_OK(status);
+  }
+
+  void TearDown() override {
+    loon_segment_writer_destroy(writer_);
+    loon_column_groups_destroy(output_.column_groups);
+    loon_segment_write_output_free(&output_);
+    loon_properties_free(&properties_);
+  }
+
+  arrow::Result<std::shared_ptr<arrow::RecordBatch>> MakeTextBatch(int64_t rows,
+                                                                   int64_t start_id = 0,
+                                                                   bool mixed = false) {
+    arrow::Int64Builder ids;
+    arrow::StringBuilder texts;
+    for (int64_t i = 0; i < rows; ++i) {
+      auto id = start_id + i;
+      ARROW_RETURN_NOT_OK(ids.Append(id));
+      if (mixed && id % 3 == 0) {
+        ARROW_RETURN_NOT_OK(texts.AppendNull());
+      } else if (mixed && id % 3 == 1) {
+        ARROW_RETURN_NOT_OK(texts.Append("inline-" + std::to_string(id)));
+      } else {
+        auto text = std::to_string(id) + std::string(128 * 1024, 'a' + id % 26);
+        ARROW_RETURN_NOT_OK(texts.Append(text));
+      }
+    }
+    ARROW_ASSIGN_OR_RAISE(auto id_array, ids.Finish());
+    ARROW_ASSIGN_OR_RAISE(auto text_array, texts.Finish());
+    return arrow::RecordBatch::Make(schema_, rows, {id_array, text_array});
+  }
+
+  void CloseAndRead(const std::shared_ptr<arrow::RecordBatch>& expected_batch) {
+    ASSERT_OK(CheckFFI(loon_segment_writer_close(writer_, &output_)));
+    EXPECT_EQ(output_.rows_written, expected_batch->num_rows());
+    EXPECT_GT(output_.num_lob_files, 0);
+    auto groups = std::make_shared<ColumnGroups>();
+    ASSERT_OK(column_groups_import(output_.column_groups, groups.get()));
+    segment::SegmentReaderConfig config;
+    auto error = ConvertFFIProperties(config.properties, &properties_);
+    ASSERT_FALSE(error.has_value()) << error.value_or("");
+    lob_column::LobColumnConfig lob;
+    lob.field_id = 101;
+    lob.lob_base_path = lob_path_;
+    lob.properties = config.properties;
+    config.lob_columns[101] = lob;
+    ASSERT_OK_AND_ASSIGN(auto fs, FilesystemCache::getInstance().get(config.properties, segment_path_));
+    ASSERT_OK_AND_ASSIGN(auto reader, segment::SegmentReader::Create(fs, groups, schema_, {}, config));
+    ASSERT_OK_AND_ASSIGN(auto actual, reader->ToTable());
+    ASSERT_OK_AND_ASSIGN(auto expected, arrow::Table::FromRecordBatches({expected_batch}));
+    EXPECT_TRUE(actual->schema()->Equals(*expected->schema()));
+    ASSERT_EQ(actual->num_rows(), expected->num_rows());
+    ASSERT_EQ(actual->num_columns(), expected->num_columns());
+    EXPECT_TRUE(actual->column(0)->Equals(expected->column(0)));
+    // LobColumnReader returns BinaryArray for resolved text. Compare its full
+    // contents and nulls through the equivalent UTF-8 view.
+    ASSERT_OK_AND_ASSIGN(auto content, actual->column(1)->View(arrow::utf8()));
+    EXPECT_TRUE(content->Equals(expected->column(1)));
+    ASSERT_OK(reader->Close());
+  }
+
+  std::unique_ptr<arrow::internal::TemporaryDir> directory_;
+  std::string root_;
+  std::string segment_path_;
+  std::string lob_path_;
+  std::shared_ptr<arrow::Schema> schema_;
+  LoonProperties properties_{};
+  LoonSegmentWriterHandle writer_{};
+  LoonSegmentWriteOutput output_{};
+};
+
+class SegmentWriterFlushMemoryTest : public SegmentWriterMemoryTest, public ::testing::WithParamInterface<bool> {};
+
+TEST_P(SegmentWriterFlushMemoryTest, ReleasesRawTextWhileScalarTailIsCached) {
+  constexpr int64_t rows = 8;
+  constexpr int batches = 8;
+  std::vector<std::shared_ptr<int>> id_releases;
+  std::vector<std::weak_ptr<arrow::Buffer>> id_buffers;
+  for (int batch_index = 0; batch_index < batches; ++batch_index) {
+    SCOPED_TRACE(batch_index);
+    ASSERT_OK_AND_ASSIGN(auto batch, MakeTextBatch(rows, batch_index * rows));
+    std::weak_ptr<arrow::Buffer> text_buffer = batch->column(1)->data()->buffers[2];
+    id_buffers.emplace_back(batch->column(0)->data()->buffers[1]);
+    ExportedBatch exported;
+    ASSERT_OK(arrow::ExportRecordBatch(*batch, &exported.array));
+    auto root = TrackRelease(&exported.array);
+    auto id = TrackRelease(exported.array.children[0]);
+    auto text = TrackRelease(exported.array.children[1]);
+    ASSERT_OK(CheckFFI(loon_segment_writer_write(writer_, &exported.array)));
+    batch.reset();
+    EXPECT_EQ(exported.array.release, nullptr);
+    EXPECT_EQ(*root, 1);
+    EXPECT_EQ(*text, 1);
+    EXPECT_TRUE(text_buffer.expired());
+    EXPECT_EQ(*id, 0);
+    EXPECT_FALSE(id_buffers.back().expired());
+    if (GetParam()) {
+      ASSERT_OK(CheckFFI(loon_segment_writer_flush(writer_)));
+      EXPECT_TRUE(text_buffer.expired());
+      EXPECT_EQ(*id, 0);
+      EXPECT_FALSE(id_buffers.back().expired());
+    }
+    id_releases.emplace_back(std::move(id));
+  }
+  // Build expected values separately so the test itself does not retain input.
+  ASSERT_OK_AND_ASSIGN(auto expected, MakeTextBatch(rows * batches));
+  ASSERT_NO_FATAL_FAILURE(CloseAndRead(expected));
+  for (size_t i = 0; i < id_releases.size(); ++i) {
+    EXPECT_EQ(*id_releases[i], 1);
+    EXPECT_TRUE(id_buffers[i].expired());
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(WithAndWithoutFlush, SegmentWriterFlushMemoryTest, ::testing::Bool());
+
+TEST_F(SegmentWriterMemoryTest, SlicedNullableAndInlineTextRoundTrip) {
+  ASSERT_OK_AND_ASSIGN(auto original, MakeTextBatch(10, 0, true));
+  auto batch = original->Slice(2, 6);
+  std::weak_ptr<arrow::Buffer> text_buffer = batch->column(1)->data()->buffers[2];
+  ExportedBatch exported;
+  ASSERT_OK(arrow::ExportRecordBatch(*batch, &exported.array));
+  exported.array.null_count = -1;
+  auto root = TrackRelease(&exported.array);
+  auto id = TrackRelease(exported.array.children[0]);
+  auto text = TrackRelease(exported.array.children[1]);
+  ASSERT_OK(CheckFFI(loon_segment_writer_write(writer_, &exported.array)));
+  original.reset();
+  batch.reset();
+  EXPECT_EQ(*root, 1);
+  EXPECT_EQ(*text, 1);
+  EXPECT_EQ(*id, 0);
+  EXPECT_TRUE(text_buffer.expired());
+  ASSERT_OK(CheckFFI(loon_segment_writer_flush(writer_)));
+  EXPECT_EQ(*id, 0);
+  ASSERT_OK_AND_ASSIGN(auto expected, MakeTextBatch(6, 2, true));
+  ASSERT_NO_FATAL_FAILURE(CloseAndRead(expected));
+  EXPECT_EQ(*id, 1);
+}
+
+TEST_F(SegmentWriterMemoryTest, ImportFailuresReleaseEachColumnExactlyOnce) {
+  ASSERT_OK_AND_ASSIGN(auto batch, MakeTextBatch(3));
+  for (int column = 0; column < batch->num_columns(); ++column) {
+    SCOPED_TRACE(column);
+    ExportedBatch exported;
+    ASSERT_OK(arrow::ExportRecordBatch(*batch, &exported.array));
+    auto root = TrackRelease(&exported.array);
+    auto id = TrackRelease(exported.array.children[0]);
+    auto text = TrackRelease(exported.array.children[1]);
+    // Exercise both failure before any column is imported and partial import.
+    exported.array.children[column]->n_buffers = 1;
+    EXPECT_FALSE(CheckFFI(loon_segment_writer_write(writer_, &exported.array)).ok());
+    EXPECT_EQ(exported.array.release, nullptr);
+    EXPECT_EQ(*root, 1);
+    EXPECT_EQ(*id, 1);
+    EXPECT_EQ(*text, 1);
+  }
+  ExportedBatch released;
+  EXPECT_FALSE(CheckFFI(loon_segment_writer_write(writer_, &released.array)).ok());
+  // A failed import must not poison subsequent writes.
+  ExportedBatch valid;
+  ASSERT_OK(arrow::ExportRecordBatch(*batch, &valid.array));
+  ASSERT_OK(CheckFFI(loon_segment_writer_write(writer_, &valid.array)));
+  ASSERT_NO_FATAL_FAILURE(CloseAndRead(batch));
 }
 }  // namespace
 }  // namespace milvus_storage::test
