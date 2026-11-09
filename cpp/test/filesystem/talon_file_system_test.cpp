@@ -734,30 +734,52 @@ TEST_F(TalonBrokerRequestTest, AzureDescriptorExpandsAccountAndCloudSuffix) {
 }
 
 class TalonBrokerIamTest : public TalonBrokerRequestTest,
-                           public ::testing::WithParamInterface<std::tuple<const char*, bool>> {};
+                           public ::testing::WithParamInterface<std::tuple<const char*, bool, bool>> {};
 
 TEST_P(TalonBrokerIamTest, UseIamSelectsBrokerIdentityAndOmitsTargetFields) {
   ScopedEnv azurite("USE_AZURITE", nullptr);
-  const auto [provider, with_target_fields] = GetParam();
+  const auto [provider, with_target_fields, use_virtual_host] = GetParam();
   api::Properties properties;
   properties[PROPERTY_FS_CLOUD_PROVIDER] = std::string(provider);
   properties[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("https://broker/credentials");
   properties[PROPERTY_FS_REGION] = std::string();
   properties[PROPERTY_FS_USE_IAM] = true;
   properties[PROPERTY_FS_USE_SSL] = true;
+  properties[PROPERTY_FS_USE_VIRTUAL_HOST] = use_virtual_host;
   properties[PROPERTY_FS_BUCKET_NAME] = std::string("bucket");
   std::string uri;
+  std::string expected_csp = provider;
+  std::string expected_endpoint;
+  bool expected_virtual_host = use_virtual_host;
   if (std::string(provider) == "aws") {
     properties[PROPERTY_FS_ADDRESS] = std::string("s3.us-west-2.amazonaws.com");
     properties[PROPERTY_FS_REGION] = std::string("us-west-2");
     uri = "s3://bucket/key";
+    expected_endpoint = "https://s3.us-west-2.amazonaws.com";
+  } else if (std::string(provider) == "aliyun") {
+    properties[PROPERTY_FS_ADDRESS] = std::string("s3.oss-cn-hangzhou.aliyuncs.com");
+    properties[PROPERTY_FS_REGION] = std::string("cn-hangzhou");
+    uri = "s3://bucket/key";
+    expected_csp = "ali";
+    expected_endpoint = "https://s3.oss-cn-hangzhou.aliyuncs.com";
+    expected_virtual_host = true;
+  } else if (std::string(provider) == "tencent") {
+    properties[PROPERTY_FS_ADDRESS] = std::string("cos.ap-beijing.myqcloud.com");
+    properties[PROPERTY_FS_REGION] = std::string("ap-beijing");
+    uri = "s3://bucket/key";
+    expected_csp = "tc";
+    expected_endpoint = "https://cos.ap-beijing.myqcloud.com";
+    expected_virtual_host = true;
   } else if (std::string(provider) == "gcp") {
     properties[PROPERTY_FS_ADDRESS] = std::string("storage.googleapis.com");
     uri = "gcs://bucket/key";
+    expected_endpoint = "https://storage.googleapis.com";
   } else {
     properties[PROPERTY_FS_ADDRESS] = std::string("core.windows.net");
     properties[PROPERTY_FS_ACCESS_KEY_ID] = std::string("account");
     uri = "az://bucket/key";
+    expected_endpoint = "https://account.blob.core.windows.net";
+    expected_virtual_host = true;
   }
   if (with_target_fields) {
     properties[PROPERTY_FS_ROLE_ARN] = std::string("unused-role");
@@ -771,8 +793,14 @@ TEST_P(TalonBrokerIamTest, UseIamSelectsBrokerIdentityAndOmitsTargetFields) {
   ASSERT_FALSE(descriptor.empty());
   const auto& request = descriptor.at("request");
   EXPECT_EQ(request.at("credentialType"), "iam");
-  EXPECT_EQ(request.at("csp"), provider);
+  EXPECT_EQ(request.at("csp"), expected_csp);
   EXPECT_EQ(request.at("bucket"), "bucket");
+  EXPECT_EQ(request.at("region"), std::get<std::string>(properties.at(PROPERTY_FS_REGION)));
+  EXPECT_EQ(descriptor.at("origin").at("endpoint"), expected_endpoint);
+  EXPECT_EQ(descriptor.at("origin").at("use_virtual_host"), expected_virtual_host);
+  if (uri.starts_with("s3://")) {
+    EXPECT_EQ(descriptor.at("origin").at("region"), std::get<std::string>(properties.at(PROPERTY_FS_REGION)));
+  }
   for (const auto* field : {"roleArn", "externalId", "gcpServiceAccountEmail", "azureClientId", "azureTenantId"}) {
     EXPECT_FALSE(request.contains(field));
   }
@@ -783,21 +811,36 @@ TEST_P(TalonBrokerIamTest, UseIamSelectsBrokerIdentityAndOmitsTargetFields) {
 
 INSTANTIATE_TEST_SUITE_P(Clouds,
                          TalonBrokerIamTest,
-                         ::testing::Combine(::testing::Values("aws", "gcp", "azure"), ::testing::Bool()));
+                         ::testing::Combine(::testing::Values("aws", "aliyun", "tencent", "gcp", "azure"),
+                                            ::testing::Bool(),
+                                            ::testing::Bool()));
 
 TEST(TalonRawBridgeTest, UseIamSelectsBrokerMode) {
-  ArrowFileSystemConfig config;
-  config.talon_coordinator = "127.0.0.1:1";
-  config.address = "s3.us-west-2.amazonaws.com";
-  config.bucket_name = "bucket";
-  config.region = "us-west-2";
-  config.credential_endpoint = "https://broker/credentials";
-  EXPECT_TRUE(talon::TalonClient::Make(config).status().IsInvalid());
-  config.use_iam = true;
-  EXPECT_TRUE(talon::TalonClient::Make(config).ok());
-  config.use_iam = false;
-  config.role_arn = "arn:aws:iam::123456789012:role/reader";
-  EXPECT_TRUE(talon::TalonClient::Make(config).ok());
+  for (const auto* provider : {kCloudProviderAWS, kCloudProviderAliyun, kCloudProviderTencent}) {
+    SCOPED_TRACE(provider);
+    ArrowFileSystemConfig config;
+    config.cloud_provider = provider;
+    config.talon_coordinator = "127.0.0.1:1";
+    config.address = "s3.us-west-2.amazonaws.com";
+    config.bucket_name = "bucket";
+    config.region = "us-west-2";
+    config.credential_endpoint = "https://broker/credentials";
+    EXPECT_TRUE(talon::TalonClient::Make(config).status().IsInvalid());
+    config.use_iam = true;
+    EXPECT_TRUE(talon::TalonClient::Make(config).ok());
+    auto missing_region = config;
+    missing_region.region.clear();
+    EXPECT_TRUE(talon::TalonClient::Make(missing_region).status().IsInvalid());
+    for (const int32_t duration : {899, 3601}) {
+      auto invalid_duration = config;
+      invalid_duration.load_frequency = duration;
+      EXPECT_TRUE(talon::TalonClient::Make(invalid_duration).status().IsInvalid());
+    }
+    config.use_iam = false;
+    config.role_arn = "arn:aws:iam::123456789012:role/reader";
+    // Non-IAM support remains unchanged.
+    EXPECT_EQ(talon::TalonClient::Make(config).ok(), config.cloud_provider == kCloudProviderAWS);
+  }
 }
 
 TEST(TalonRawBridgeTest, AzureBrokerIamValidatesActiveRequestConfiguration) {

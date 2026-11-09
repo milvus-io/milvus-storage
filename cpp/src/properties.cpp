@@ -370,9 +370,8 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       PropertyType::BOOL,
                       "Whether to authenticate with this process's own cloud identity (AWS instance role, Azure "
                       "workload/managed identity or service principal, GCP VM service account). For GCP, "
-                      "fs.gcp_target_service_account selects impersonation with or without use_iam, and use_iam=true "
-                      "disables the credential Broker selected by fs.credential_endpoint. For AWS, Aliyun, Tencent "
-                      "and Talon credential Broker requests, "
+                      "fs.gcp_target_service_account selects impersonation when no credential endpoint is set. "
+                      "For AWS, Aliyun, Tencent, GCP, Azure and Talon credential Broker requests, "
                       "true selects the Broker's own IAM identity; false uses the supplied target identity.",
                       false,
                       ValidatePropertyType()),
@@ -542,10 +541,10 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
     REGISTER_PROPERTY(PROPERTY_FS_CREDENTIAL_ENDPOINT,
                       PropertyType::STRING,
                       "The HTTP(S) credential Broker endpoint. AWS fetches STS credentials, Azure fetches SAS tokens, "
-                      "GCP fetches access "
-                      "tokens for fs.gcp_target_service_account from it (only when fs.use_iam is false), and Talon "
+                      "GCP fetches access tokens, and Talon "
                       "sends its request credentials through it. Talon derives the Broker request and origin settings "
-                      "from the filesystem properties.",
+                      "from the filesystem properties. fs.use_iam selects the Broker's own IAM identity; otherwise "
+                      "the supplied target identity is used.",
                       "",
                       std::nullopt),
     // --- writer properties define ---

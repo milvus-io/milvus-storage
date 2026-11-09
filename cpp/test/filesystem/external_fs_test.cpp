@@ -476,7 +476,7 @@ TEST_F(ExternalFilesystemTest, AzureCredentialBrokerConfigValidation) {
   EXPECT_TRUE(missing_host_result.status().IsInvalid());
 }
 
-TEST_F(ExternalFilesystemTest, AzureIamIgnoresUnusedBrokerConfiguration) {
+TEST_F(ExternalFilesystemTest, AzureBrokerIamValidatesActiveConfiguration) {
   api::Properties props;
   props[PROPERTY_FS_CLOUD_PROVIDER] = std::string(kCloudProviderAzure);
   props[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("https://broker/credentials");
@@ -490,9 +490,26 @@ TEST_F(ExternalFilesystemTest, AzureIamIgnoresUnusedBrokerConfiguration) {
   EXPECT_TRUE(config->azure_tenant_id.empty());
   EXPECT_TRUE(config->region.empty());
 
+  auto invalid_broker = props;
+  invalid_broker[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("file:///credentials");
+  EXPECT_TRUE(
+      FilesystemCache::resolve_config(std::make_shared<const api::Properties>(invalid_broker)).status().IsInvalid());
+  for (const auto* key : {PROPERTY_FS_ACCESS_KEY_ID, PROPERTY_FS_BUCKET_NAME}) {
+    auto missing = props;
+    missing[key] = std::string();
+    EXPECT_TRUE(FilesystemCache::resolve_config(std::make_shared<const api::Properties>(missing)).status().IsInvalid());
+  }
+  for (const int32_t duration : {899, 3601}) {
+    auto invalid = props;
+    invalid[PROPERTY_FS_LOAD_FREQUENCY] = duration;
+    EXPECT_TRUE(FilesystemCache::resolve_config(std::make_shared<const api::Properties>(invalid)).status().IsInvalid());
+  }
+  auto invalid_timeout = props;
+  invalid_timeout[PROPERTY_FS_REQUEST_TIMEOUT_MS] = int64_t{0};
+  EXPECT_TRUE(
+      FilesystemCache::resolve_config(std::make_shared<const api::Properties>(invalid_timeout)).status().IsInvalid());
+
   auto unused_broker = props;
-  unused_broker[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("file:///credentials");
-  EXPECT_TRUE(FilesystemCache::resolve_config(std::make_shared<const api::Properties>(unused_broker)).ok());
   unused_broker[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string();
   unused_broker[PROPERTY_FS_AZURE_CLIENT_ID] = std::string("unused-client");
   EXPECT_TRUE(FilesystemCache::resolve_config(std::make_shared<const api::Properties>(unused_broker)).ok());
@@ -523,10 +540,23 @@ TEST_F(ExternalFilesystemTest, GcpCredentialBrokerConfigValidation) {
   EXPECT_TRUE(
       FilesystemCache::resolve_config(std::make_shared<const api::Properties>(invalid_endpoint)).status().IsInvalid());
 
-  // use_iam selects this process's identity, so the Broker settings are unused.
-  auto native_iam = invalid_endpoint;
-  native_iam[PROPERTY_FS_USE_IAM] = true;
-  EXPECT_TRUE(FilesystemCache::resolve_config(std::make_shared<const api::Properties>(native_iam)).ok());
+  invalid_endpoint[PROPERTY_FS_USE_IAM] = true;
+  EXPECT_TRUE(
+      FilesystemCache::resolve_config(std::make_shared<const api::Properties>(invalid_endpoint)).status().IsInvalid());
+
+  auto broker_iam = missing_target;
+  broker_iam[PROPERTY_FS_USE_IAM] = true;
+  EXPECT_TRUE(FilesystemCache::resolve_config(std::make_shared<const api::Properties>(broker_iam)).ok());
+  auto missing_bucket = broker_iam;
+  missing_bucket[PROPERTY_FS_BUCKET_NAME] = std::string();
+  EXPECT_TRUE(
+      FilesystemCache::resolve_config(std::make_shared<const api::Properties>(missing_bucket)).status().IsInvalid());
+  auto invalid_timeout = broker_iam;
+  invalid_timeout[PROPERTY_FS_REQUEST_TIMEOUT_MS] = int64_t{0};
+  EXPECT_TRUE(
+      FilesystemCache::resolve_config(std::make_shared<const api::Properties>(invalid_timeout)).status().IsInvalid());
+  broker_iam[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string();
+  EXPECT_TRUE(FilesystemCache::resolve_config(std::make_shared<const api::Properties>(broker_iam)).ok());
 }
 
 TEST_F(ExternalFilesystemTest, GcpCacheKeySeparatesTargetIdentities) {

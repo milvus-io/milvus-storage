@@ -117,13 +117,17 @@ GcpBrokerCredentialProvider::GcpBrokerCredentialProvider(GcpBrokerConfig config,
 GcpBrokerCredentialProvider::~GcpBrokerCredentialProvider() = default;
 
 arrow::Result<std::string> GcpBrokerCredentialProvider::FetchToken(TimePoint now, TimePoint* expires_at) const {
-  const nlohmann::json request_json = {
+  nlohmann::json request_json = {
       {credential_broker::kCsp, kCloudProviderGCP},
       {credential_broker::kRegion, config_.region},
       {credential_broker::kBucket, config_.bucket},
       {credential_broker::kDurationSeconds, config_.duration_seconds},
-      {credential_broker::kGcpServiceAccountEmail, config_.target_service_account},
   };
+  if (config_.use_iam) {
+    request_json[credential_broker::kCredentialType] = credential_broker::kIam;
+  } else {
+    request_json[credential_broker::kGcpServiceAccountEmail] = config_.target_service_account;
+  }
 
   const auto request_body = request_json.dump();
   const std::vector<uint8_t> request_bytes(request_body.begin(), request_body.end());

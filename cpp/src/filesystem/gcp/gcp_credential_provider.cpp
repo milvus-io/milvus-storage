@@ -196,9 +196,9 @@ class HmacProvider : public GcpCredentialProvider {
 
 arrow::Result<std::shared_ptr<GcpCredentialProvider>> BuildGcpProviderFromConfig(const ArrowFileSystemConfig& config) {
   const bool has_hmac = !config.access_key_id.empty() && !config.access_key_value.empty();
-  const bool use_broker = !config.use_iam && !config.credential_endpoint.empty();
+  const bool use_broker = !config.credential_endpoint.empty();
   const bool has_target = !config.gcp_target_service_account.empty();
-  if (has_hmac && (use_broker || has_target)) {
+  if (has_hmac && (use_broker || has_target) && !(use_broker && config.use_iam)) {
     // With Talon, the Broker fields describe the identity Talon workers use
     // and the HMAC keys stay the origin filesystem's own credential. Without
     // Talon the config asks for two identities at once.
@@ -210,7 +210,7 @@ arrow::Result<std::shared_ptr<GcpCredentialProvider>> BuildGcpProviderFromConfig
     return std::make_shared<HmacProvider>(config.access_key_id, config.access_key_value);
   }
   if (use_broker || has_target) {
-    if (use_broker && !has_target) {
+    if (use_broker && !config.use_iam && !has_target) {
       return arrow::Status::Invalid("GCP credential broker requires fs.gcp_target_service_account");
     }
     // Reject rather than clamp: `load_frequency=7200` must fail here instead
@@ -221,16 +221,17 @@ arrow::Result<std::shared_ptr<GcpCredentialProvider>> BuildGcpProviderFromConfig
       return arrow::Status::Invalid("GCP impersonation requires load_frequency in [", kMinImpersonationTokenLifetime,
                                     ", ", kMaxImpersonationTokenLifetime, "], got ", config.load_frequency);
     }
-    // As for Azure, use_iam=true selects this process's own identity, so the
-    // Broker is used only without it.
+    // Match AWS: the endpoint selects the Broker; use_iam selects its own
+    // identity instead of a target service account.
     if (use_broker) {
       return std::make_shared<GcpBrokerCredentialProvider>(GcpBrokerConfig{
           .endpoint = config.credential_endpoint,
           .region = config.region,
           .bucket = config.bucket_name,
-          .target_service_account = config.gcp_target_service_account,
+          .target_service_account = config.use_iam ? "" : config.gcp_target_service_account,
           .duration_seconds = config.load_frequency,
           .request_timeout_ms = config.request_timeout_ms,
+          .use_iam = config.use_iam,
       });
     }
     // The target alone selects impersonation; use_iam=true is accepted but

@@ -368,10 +368,10 @@ TEST_F(FileSystemCacheTest, GcpCacheKeyUsesImpersonationIdentityOnly) {
   auto different_target_sa = base;
   different_target_sa.gcp_target_service_account = "target@project.iam.gserviceaccount.com";
   EXPECT_NE(base.GetCacheKey(), different_target_sa.GetCacheKey());
-  // Talon Broker IAM ignores the target SA, but native GCP fallback still uses it.
+  // With a Broker endpoint, both native and Talon IAM ignore the target SA.
   base.talon_mode = different_target_sa.talon_mode = TalonMode::Full;
   base.credential_endpoint = different_target_sa.credential_endpoint = "https://broker/credentials";
-  EXPECT_NE(base.GetCacheKey(), different_target_sa.GetCacheKey());
+  EXPECT_EQ(base.GetCacheKey(), different_target_sa.GetCacheKey());
 }
 
 TEST_F(FileSystemCacheTest, AwsBrokerCacheKeyUsesBrokerIdentity) {
@@ -454,12 +454,12 @@ TEST_F(FileSystemCacheTest, AzureBrokerCacheKeyUsesBrokerIdentity) {
   different_broker.access_key_value = "unused-secret";
   EXPECT_EQ(iam.GetCacheKey(), different_broker.GetCacheKey());
   different_broker.credential_endpoint = "https://other-broker/credentials";
-  EXPECT_EQ(iam.GetCacheKey(), different_broker.GetCacheKey());
+  EXPECT_NE(iam.GetCacheKey(), different_broker.GetCacheKey());
   auto no_broker = iam;
   no_broker.credential_endpoint.clear();
   no_broker.azure_client_id.clear();
   no_broker.azure_tenant_id.clear();
-  EXPECT_EQ(iam.GetCacheKey(), no_broker.GetCacheKey());
+  EXPECT_NE(iam.GetCacheKey(), no_broker.GetCacheKey());
   auto different_account = iam;
   different_account.access_key_id = "otheraccount";
   EXPECT_NE(iam.GetCacheKey(), different_account.GetCacheKey());
@@ -482,7 +482,7 @@ TEST_F(FileSystemCacheTest, AzureBrokerCacheKeyUsesBrokerIdentity) {
   EXPECT_NE(account_key.GetCacheKey(), other_key.GetCacheKey());
 }
 
-// For GCP without use_iam, credential_endpoint selects the native Broker
+// For GCP in either mode, credential_endpoint selects the native Broker
 // identity, so GetCacheKey hashes it whether or not Talon is enabled. Only
 // Talon-specific settings stay out of the origin filesystem's identity.
 TEST_F(FileSystemCacheTest, GcpBrokerEndpointIsPartOfOriginIdentityRegardlessOfTalon) {
@@ -520,14 +520,20 @@ TEST_F(FileSystemCacheTest, GcpBrokerEndpointIsPartOfOriginIdentityRegardlessOfT
   talon_only.talon_block_size = base_native.talon_block_size * 2;
   EXPECT_EQ(base_native.GetCacheKey(), talon_only.GetCacheKey());
 
-  // With use_iam the native filesystem uses this process's identity and the
-  // endpoint describes only Talon's Broker request, so it drops out of the
-  // origin identity once Talon is disabled.
+  // Broker IAM is also scoped by endpoint when Talon is disabled.
   auto iam_a = base_native;
   iam_a.use_iam = true;
   auto iam_b = different_native;
   iam_b.use_iam = true;
-  EXPECT_EQ(iam_a.GetCacheKey(), iam_b.GetCacheKey());
+  EXPECT_NE(iam_a.GetCacheKey(), iam_b.GetCacheKey());
+  auto ignored_targets = iam_a;
+  ignored_targets.gcp_target_service_account = "unused@example.com";
+  ignored_targets.access_key_id = "unused-key";
+  ignored_targets.access_key_value = "unused-secret";
+  EXPECT_EQ(iam_a.GetCacheKey(), ignored_targets.GetCacheKey());
+  auto native_iam = iam_a;
+  native_iam.credential_endpoint.clear();
+  EXPECT_NE(iam_a.GetCacheKey(), native_iam.GetCacheKey());
 }
 
 TEST_F(FileSystemCacheTest, TalonBrokerIamSeparatesClientsWithTheSameOriginRole) {

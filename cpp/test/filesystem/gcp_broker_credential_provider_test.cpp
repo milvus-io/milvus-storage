@@ -178,26 +178,40 @@ bool WaitUntil(const std::function<bool()>& done, std::chrono::milliseconds time
 }  // namespace
 
 TEST(GcpBrokerCredentialProviderTest, SendsBrokerContractAndReturnsBearer) {
-  const auto now = std::chrono::system_clock::from_time_t(1785146400);
-  auto transport = std::make_shared<MockTransport>();
-  transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse("ya29.token", now + std::chrono::hours(1)));
-  GcpBrokerCredentialProvider provider(MakeConfig(), transport, [now] { return now; });
+  for (const bool use_iam : {false, true}) {
+    SCOPED_TRACE(use_iam);
+    const auto now = std::chrono::system_clock::from_time_t(1785146400);
+    auto transport = std::make_shared<MockTransport>();
+    transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                       SuccessResponse("ya29.token", now + std::chrono::hours(1)));
+    auto config = MakeConfig();
+    config.use_iam = use_iam;
+    GcpBrokerCredentialProvider provider(config, transport, [now] { return now; });
 
-  auto header = provider.AuthorizationHeader();
-  ASSERT_TRUE(header.has_value());
-  EXPECT_EQ(header->first, "Authorization");
-  EXPECT_EQ(header->second, "Bearer ya29.token");
+    auto header = provider.AuthorizationHeader();
+    ASSERT_TRUE(header.has_value());
+    EXPECT_EQ(header->first, "Authorization");
+    EXPECT_EQ(header->second, "Bearer ya29.token");
 
-  const auto requests = transport->Requests();
-  ASSERT_EQ(requests.size(), 1u);
-  EXPECT_EQ(requests[0].method, "POST");
-  EXPECT_EQ(requests[0].url, "http://credential-broker/v1/credentials/assume-role");
-  const auto body = nlohmann::json::parse(requests[0].body);
-  EXPECT_EQ(body["csp"].get<std::string>(), "gcp");
-  EXPECT_EQ(body["region"].get<std::string>(), "us-central1");
-  EXPECT_EQ(body["bucket"].get<std::string>(), "bucket");
-  EXPECT_EQ(body["durationSeconds"].get<int32_t>(), 3600);
-  EXPECT_EQ(body["gcpServiceAccountEmail"].get<std::string>(), "reader@project.iam.gserviceaccount.com");
+    const auto requests = transport->Requests();
+    ASSERT_EQ(requests.size(), 1u);
+    EXPECT_EQ(requests[0].method, "POST");
+    EXPECT_EQ(requests[0].url, "http://credential-broker/v1/credentials/assume-role");
+    const auto body = nlohmann::json::parse(requests[0].body);
+    EXPECT_EQ(body["csp"].get<std::string>(), "gcp");
+    EXPECT_EQ(body["region"].get<std::string>(), "us-central1");
+    EXPECT_EQ(body["bucket"].get<std::string>(), "bucket");
+    EXPECT_EQ(body["durationSeconds"].get<int32_t>(), 3600);
+    if (use_iam) {
+      EXPECT_EQ(body.at("credentialType"), "iam");
+      EXPECT_FALSE(body.contains("gcpServiceAccountEmail"));
+    } else {
+      EXPECT_FALSE(body.contains("credentialType"));
+      EXPECT_EQ(body.at("gcpServiceAccountEmail"), "reader@project.iam.gserviceaccount.com");
+    }
+    EXPECT_EQ(provider.AuthorizationHeader()->second, "Bearer ya29.token");
+    EXPECT_EQ(transport->RequestCount(), 1u);
+  }
 }
 
 TEST(GcpBrokerCredentialProviderTest, CachesTokenUntilSixtySecondsBeforeExpiry) {
@@ -500,7 +514,7 @@ TEST(GcpBrokerCredentialProviderTest, TransportExceptionDoesNotEscape) {
   EXPECT_FALSE(provider.AuthorizationHeader().has_value());
 }
 
-TEST(GcpCredentialProviderSelectionTest, CredentialEndpointSelectsBrokerWithoutUseIam) {
+TEST(GcpCredentialProviderSelectionTest, CredentialEndpointSelectsBrokerInBothModes) {
   auto config = MakeGcpConfig();
   config.gcp_target_service_account = "reader@project.iam.gserviceaccount.com";
   config.credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
@@ -512,16 +526,37 @@ TEST(GcpCredentialProviderSelectionTest, CredentialEndpointSelectsBrokerWithoutU
   EXPECT_EQ(broker.ValueOrDie()->Identity(),
             "broker:http://credential-broker/v1/credentials/assume-role|reader@project.iam.gserviceaccount.com");
 
-  // use_iam selects this process's identity, which then impersonates the
-  // target directly.
+  // Like AWS, IAM selects the Broker's identity and ignores target/static credentials.
   config.use_iam = true;
+  auto iam = BuildGcpProviderFromConfig(config);
+  ASSERT_TRUE(iam.ok()) << iam.status();
+  EXPECT_NE(dynamic_cast<GcpBrokerCredentialProvider*>(iam->get()), nullptr);
+  EXPECT_NE(iam.ValueOrDie()->Identity(), broker.ValueOrDie()->Identity());
+  config.gcp_target_service_account.clear();
+  config.access_key_id = "unused-key";
+  config.access_key_value = "unused-secret";
+  auto without_target = BuildGcpProviderFromConfig(config);
+  ASSERT_TRUE(without_target.ok()) << without_target.status();
+  EXPECT_EQ(without_target.ValueOrDie()->Identity(), iam.ValueOrDie()->Identity());
+  for (const int32_t duration : {899, 3601}) {
+    config.load_frequency = duration;
+    EXPECT_TRUE(BuildGcpProviderFromConfig(config).status().IsInvalid());
+  }
+  config.load_frequency = 900;
+
+  config.credential_endpoint.clear();
+  auto native_iam = BuildGcpProviderFromConfig(config);
+  ASSERT_TRUE(native_iam.ok()) << native_iam.status();
+  EXPECT_EQ(native_iam.ValueOrDie()->Identity(), "iam");
+  config.access_key_id.clear();
+  config.access_key_value.clear();
+  config.gcp_target_service_account = "reader@project.iam.gserviceaccount.com";
   auto impersonation = BuildGcpProviderFromConfig(config);
-  ASSERT_TRUE(impersonation.ok()) << impersonation.status().ToString();
-  EXPECT_EQ(dynamic_cast<GcpBrokerCredentialProvider*>(impersonation->get()), nullptr);
+  ASSERT_TRUE(impersonation.ok()) << impersonation.status();
   EXPECT_EQ(impersonation.ValueOrDie()->Identity(), "impersonate:reader@project.iam.gserviceaccount.com");
 
   auto missing_target = MakeGcpConfig();
-  missing_target.credential_endpoint = config.credential_endpoint;
+  missing_target.credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
   EXPECT_TRUE(BuildGcpProviderFromConfig(missing_target).status().IsInvalid());
 }
 

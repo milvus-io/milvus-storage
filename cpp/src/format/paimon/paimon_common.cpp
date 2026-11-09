@@ -37,6 +37,10 @@ arrow::Result<std::unordered_map<std::string, std::string>> ToStorageOptions(con
   }
   // The native test writer does not share the C++ credential providers.
   // Reject delegated credentials instead of falling back to another source.
+  if (!config.credential_endpoint.empty() &&
+      (config.cloud_provider == kCloudProviderGCP || config.cloud_provider == kCloudProviderAzure)) {
+    return arrow::Status::NotImplemented("Paimon credential broker authentication is not supported");
+  }
   if (!config.role_arn.empty()) {
     return arrow::Status::NotImplemented("Paimon role ARN credentials are not supported");
   }
