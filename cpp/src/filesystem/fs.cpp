@@ -132,24 +132,27 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
       hash_combine(external_id);
     }
   } else if (cloud_provider == kCloudProviderAzure) {
-    const bool target_broker = IsAzureCredentialBrokerEnabled() && !UsesBrokerIam();
-    hash_combine(use_iam && !target_broker);
+    const bool broker = IsAzureCredentialBrokerEnabled();
+    hash_combine(broker ? UsesBrokerIam() : use_iam);
     hash_combine(access_key_id);
-    if (target_broker) {
+    if (broker) {
       hash_combine(GetCredentialEndpoint());
-      hash_combine(azure_client_id);
-      hash_combine(azure_tenant_id);
+      if (!UsesBrokerIam()) {
+        hash_combine(azure_client_id);
+        hash_combine(azure_tenant_id);
+      }
     } else if (!use_iam) {
       hash_combine(access_key_value);
     }
   } else if (cloud_provider == kCloudProviderGCP) {
-    // Mirrors BuildGcpProviderFromConfig: the target selects impersonation
-    // with or without use_iam, and credential_endpoint selects the Broker only
-    // without use_iam.
+    // Broker IAM ignores target/static credentials. Without a Broker, the
+    // target still selects native impersonation with or without use_iam.
     hash_combine(use_iam);
-    hash_combine(gcp_target_service_account);
+    hash_combine(credential_endpoint);
+    if (!use_iam || credential_endpoint.empty()) {
+      hash_combine(gcp_target_service_account);
+    }
     if (!use_iam) {
-      hash_combine(credential_endpoint);
       hash_combine(access_key_id);
       hash_combine(access_key_value);
     }
@@ -431,15 +434,20 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
     }
   }
 
-  // The legacy endpoint always requests a target SAS, including when use_iam is true.
-  if (result.IsAzureCredentialBrokerEnabled() && !result.UsesBrokerIam()) {
-    if (result.azure_client_id.empty() || result.azure_tenant_id.empty() || result.GetCredentialEndpoint().empty() ||
-        result.access_key_id.empty() || result.bucket_name.empty() || result.region.empty() ||
+  if (result.IsAzureCredentialBrokerEnabled()) {
+    if (result.GetCredentialEndpoint().empty() || result.access_key_id.empty() || result.bucket_name.empty() ||
         result.request_timeout_ms <= 0) {
       return arrow::Status::Invalid(
-          "Azure credential broker mode requires fs.azure_client_id, fs.azure_tenant_id, "
-          "fs.credential_endpoint, fs.access_key_id, fs.bucket_name, fs.region, and a positive "
-          "fs.request_timeout_ms");
+          "Azure credential broker mode requires fs.credential_endpoint, fs.access_key_id, fs.bucket_name, "
+          "and a positive fs.request_timeout_ms");
+    }
+    if (result.UsesBrokerIam()) {
+      if (result.load_frequency < 900 || result.load_frequency > 3600) {
+        return arrow::Status::Invalid("Azure credential broker IAM requires fs.load_frequency in [900, 3600]");
+      }
+    } else if (result.azure_client_id.empty() || result.azure_tenant_id.empty() || result.region.empty()) {
+      return arrow::Status::Invalid(
+          "Azure credential broker AssumeRole requires fs.azure_client_id, fs.azure_tenant_id, and fs.region");
     }
 
     arrow::util::Uri endpoint;
@@ -449,12 +457,13 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
       return arrow::Status::Invalid("fs.credential_endpoint must be a valid HTTP(S) URL");
     }
   }
-  // Native GCP requests target credentials from the Broker only without use_iam.
-  if (result.cloud_provider == kCloudProviderGCP && !result.use_iam && !result.credential_endpoint.empty()) {
-    if (result.gcp_target_service_account.empty() || result.bucket_name.empty() || result.request_timeout_ms <= 0) {
+  if (result.cloud_provider == kCloudProviderGCP && !result.credential_endpoint.empty()) {
+    if (result.bucket_name.empty() || result.request_timeout_ms <= 0) {
       return arrow::Status::Invalid(
-          "GCP credential broker mode requires fs.gcp_target_service_account, fs.bucket_name, and a positive "
-          "fs.request_timeout_ms");
+          "GCP credential broker mode requires fs.bucket_name and a positive fs.request_timeout_ms");
+    }
+    if (!result.use_iam && result.gcp_target_service_account.empty()) {
+      return arrow::Status::Invalid("GCP credential broker AssumeRole requires fs.gcp_target_service_account");
     }
     arrow::util::Uri endpoint;
     auto endpoint_status = endpoint.Parse(result.credential_endpoint);

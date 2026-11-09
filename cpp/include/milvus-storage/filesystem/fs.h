@@ -185,9 +185,10 @@ struct ArrowFileSystemConfig {
   std::string region = "";
   bool use_ssl = false;
   std::string ssl_ca_cert = "";
-  // With a supported S3 or Talon broker, select its own IAM identity.
-  // For native GCP, a target service account selects impersonation with or without
-  // use_iam; use_iam=false and a credential endpoint select the target-account broker.
+  // With fs.credential_endpoint, select the broker's own IAM identity instead of a target
+  // identity. Without one, authenticate with this process's cloud identity
+  // (instance role, VM service account, workload/managed identity). Native GCP
+  // gcp_target_service_account selects impersonation with or without use_iam.
   bool use_iam = false;
   bool use_virtual_host = false;
   int64_t request_timeout_ms = 3000;
@@ -201,12 +202,27 @@ struct ArrowFileSystemConfig {
   // To align with the old logical, set to `int64_t`(should be `uint64_t`)
   int64_t multi_part_upload_size = DEFAULT_MULTIPART_UPLOAD_PART_SIZE;
 
-  // S3 temporary credentials can come from this HTTP(S) broker or native cloud APIs.
-  // An empty endpoint keeps native AssumeRole, IAM or explicit AK/SK selection.
-  // S3-compatible providers share the AWS STS broker contract (csp=aws).
-  // With an endpoint and use_iam=true, AWS, Aliyun and Tencent use the broker's
-  // own IAM identity, with csp=aws/ali/tc respectively.
-  // Azure retains fs.azure_credential_endpoint on the 3.0 branch.
+  // Temporary credentials can come from this HTTP(S) broker or from native
+  // cloud APIs, such as AWS STS AssumeRole or GCP Service Account Impersonation.
+  // With an empty endpoint, S3 uses native AssumeRole when role_arn is set,
+  // otherwise IAM when use_iam=true, or explicit AK/SK. Azure broker identity
+  // fields still require an endpoint; incomplete broker settings are rejected.
+  // With an endpoint and use_iam=true, AWS, Aliyun, Tencent, GCP and Azure use
+  // the Broker's own IAM identity. Talon uses the endpoint independently.
+  // Native filesystem support:
+  //
+  // Cloud              | Native role/identity delegation   | credential_endpoint
+  // -------------------+-----------------------------------+---------------------------
+  // S3 / S3-compatible | AssumeRole / OIDC role chains [1] | AWS STS flow [2]
+  // Azure              | No target-role delegation [3]     | SAS
+  // GCP                | Service Account Impersonation     | OAuth2 access token
+  //
+  // [1] Native role_arn supports AWS and Aliyun OSS.
+  // [2] S3-compatible providers share the AWS STS broker contract (csp=aws).
+  //     Broker IAM uses csp=aws/ali/tc for AWS/Aliyun/Tencent respectively.
+  // [3] Azure supports native workload/managed identity authentication, which
+  //     is separate from target-role delegation.
+  // GCP uses gcp_target_service_account for native impersonation.
 
   // AssumeRole credentials for supported S3 / S3-compatible providers.
   // The target role is used by native STS and the shared STS broker flow. external_id
@@ -220,7 +236,22 @@ struct ArrowFileSystemConfig {
   std::string gcp_target_service_account = "";
 
   // HTTP(S) credential Broker endpoint for S3 credentials, Azure SAS tokens,
-  // GCP target-service-account access tokens and Talon request credentials.
+  // GCP access tokens, and Talon request credentials. use_iam selects the
+  // Broker's own identity; otherwise the supplied target identity is used.
+  // True indicates supported Broker authentication for that cloud and mode.
+  //
+  // Native filesystem/Talon bridge:
+  // Cloud provider | IAM Broker API | Non-IAM Broker API
+  // ---------------+----------------+-------------------
+  // aws            | True           | True
+  // aliyun         | True           | False
+  // tencent        | True           | False
+  // huawei         | False          | False
+  // gcp            | True           | True
+  // azure          | True           | True
+  // Native non-IAM configurations for aliyun/tencent/huawei still
+  // route through the AWS STS Broker contract (csp=aws). This does not provide
+  // cloud-specific non-IAM Broker support.
   std::string credential_endpoint = "";
 
   // Azure broker-backed temporary SAS authentication.
@@ -304,8 +335,8 @@ struct ArrowFileSystemConfig {
   /**
    * @brief Return whether Azure broker-specific settings were supplied.
    *
-   * Native Azure uses a target SAS for the legacy endpoint even when use_iam is true.
-   * Detect partial configurations too so active SAS Broker settings are validated.
+   * A non-empty endpoint selects the Broker in either credential mode. Without
+   * use_iam, detect partial target configurations too so they are validated.
    * Talon independently consumes credential_endpoint for its Broker requests.
    */
   [[nodiscard]] bool IsAzureCredentialBrokerEnabled() const;

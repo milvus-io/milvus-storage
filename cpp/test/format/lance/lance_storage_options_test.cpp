@@ -100,7 +100,7 @@ TEST_F(LanceStorageOptionsTest, AzureKeys) {
   EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
 }
 
-TEST_F(LanceStorageOptionsTest, AzureCredentialBrokerRespectsIamMode) {
+TEST_F(LanceStorageOptionsTest, AzureWriterRejectsBrokerCredentials) {
   ScopedUnsetAzurite no_azurite;
   ArrowFileSystemConfig config;
   config.storage_type = "remote";
@@ -122,13 +122,15 @@ TEST_F(LanceStorageOptionsTest, AzureCredentialBrokerRespectsIamMode) {
   ASSERT_FALSE(result.ok());
   EXPECT_TRUE(result.status().IsNotImplemented()) << result.status().ToString();
 
-  // Native IAM ignores Broker fields, including an endpoint used only by Talon.
+  // Broker IAM must not silently fall back to the native writer's local identity.
   config.use_iam = true;
   for (const bool include_target_identity : {false, true}) {
     SCOPED_TRACE(include_target_identity);
     config.azure_client_id = include_target_identity ? "client-id" : "";
     config.azure_tenant_id = include_target_identity ? "tenant-id" : "";
 
+    EXPECT_TRUE(ToWriterOptions(config).status().IsNotImplemented());
+    config.credential_endpoint.clear();
     ASSERT_AND_ASSIGN(const auto opts, ToWriterOptions(config));
     EXPECT_EQ(opts.at("azure_storage_account_name"), "myaccount");
     EXPECT_EQ(opts.at("azure_endpoint"), "https://myaccount.blob.core.windows.net");
@@ -136,6 +138,7 @@ TEST_F(LanceStorageOptionsTest, AzureCredentialBrokerRespectsIamMode) {
     EXPECT_EQ(opts.count("azure_broker_endpoint"), 0);
     EXPECT_EQ(opts.count("azure_broker_client_id"), 0);
     EXPECT_EQ(opts.count("azure_broker_tenant_id"), 0);
+    config.credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
   }
 }
 
@@ -271,6 +274,9 @@ TEST_F(LanceStorageOptionsTest, GcpIamUsesDefaultCredentials) {
   EXPECT_EQ(opts.count("lance_io_parallelism"), 0);
   EXPECT_EQ(opts.count("gcp_target_service_account"), 0);
   EXPECT_EQ(opts.count("gcp_credential_refresh_secs"), 0);
+
+  config.credential_endpoint = "https://broker/credentials";
+  EXPECT_TRUE(ToWriterOptions(config).status().IsNotImplemented());
 }
 
 TEST_F(LanceStorageOptionsTest, LocalWriterOptionsAreEmpty) {

@@ -361,9 +361,11 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       std::nullopt),
     REGISTER_PROPERTY(PROPERTY_FS_USE_IAM,
                       PropertyType::BOOL,
-                      "Use the process's cloud identity, or the broker's IAM identity for supported S3 and Talon "
-                      "requests. Native GCP uses a target service account for impersonation with either setting; "
-                      "fs.use_iam=false and fs.credential_endpoint select the target-account broker.",
+                      "Whether to authenticate with this process's own cloud identity (AWS instance role, Azure "
+                      "workload/managed identity, GCP VM service account). For GCP, "
+                      "fs.gcp_target_service_account selects impersonation when no credential endpoint is set. "
+                      "For AWS, Aliyun, Tencent, GCP, Azure and Talon credential Broker requests, "
+                      "true selects the Broker's own IAM identity; false uses the supplied target identity.",
                       false,
                       ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_FS_USE_VIRTUAL_HOST,
@@ -542,8 +544,11 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       std::nullopt),
     REGISTER_PROPERTY(PROPERTY_FS_CREDENTIAL_ENDPOINT,
                       PropertyType::STRING,
-                      "The HTTP(S) credential Broker endpoint for S3 credentials, Azure SAS tokens, GCP "
-                      "target-service-account access tokens and Talon requests.",
+                      "The HTTP(S) credential Broker endpoint. AWS fetches STS credentials, Azure fetches SAS tokens, "
+                      "GCP fetches access tokens, and Talon "
+                      "sends its request credentials through it. Talon derives the Broker request and origin settings "
+                      "from the filesystem properties. fs.use_iam selects the Broker's own IAM identity; otherwise "
+                      "the supplied target identity is used.",
                       "",
                       std::nullopt),
     REGISTER_PROPERTY(

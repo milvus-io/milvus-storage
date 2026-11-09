@@ -98,15 +98,19 @@ bool AzureSasTokenPolicy::IsFresh(TimePoint expires_at, TimePoint now) { return 
 
 arrow::Result<std::string> AzureSasTokenPolicy::FetchSasToken(TimePoint* expires_at, bool* retryable) const {
   *retryable = false;
-  const nlohmann::json request_json = {
+  nlohmann::json request_json = {
       {credential_broker::kCsp, kCloudProviderAzure},
       {credential_broker::kRegion, state_->config.region},
       {credential_broker::kBucket, state_->config.bucket},
       {credential_broker::kDurationSeconds, state_->config.duration_seconds},
-      {credential_broker::kAzureClientId, state_->config.client_id},
-      {credential_broker::kAzureTenantId, state_->config.tenant_id},
       {credential_broker::kAzureAccountName, state_->config.account_name},
   };
+  if (state_->config.use_iam) {
+    request_json[credential_broker::kCredentialType] = credential_broker::kIam;
+  } else {
+    request_json[credential_broker::kAzureClientId] = state_->config.client_id;
+    request_json[credential_broker::kAzureTenantId] = state_->config.tenant_id;
+  }
 
   const auto request_body = request_json.dump();
   const std::vector<uint8_t> request_bytes(request_body.begin(), request_body.end());
