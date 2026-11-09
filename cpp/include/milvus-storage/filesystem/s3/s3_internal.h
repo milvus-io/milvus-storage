@@ -266,6 +266,23 @@ arrow::Status ErrorToStatus(const std::string& prefix,
   }
   std::string message = "AWS Error " + ss.str() + " during " + operation + " operation: " + error.GetMessage() +
                         wrong_region_msg.value_or("");
+  auto request_id = error.GetRequestId();
+  if (request_id.empty()) {
+    // HEAD errors can have an empty body. Preserve request IDs returned by
+    // S3-compatible services even when the AWS marshaller does not know their
+    // provider-specific header. Do not include arbitrary response headers.
+    for (const auto& [name, value] : error.GetResponseHeaders()) {
+      const auto lower_name = Aws::Utils::StringUtils::ToLower(name.c_str());
+      if (!value.empty() && (lower_name == "x-amz-request-id" || lower_name == "x-cos-request-id" ||
+                             lower_name == "x-oss-request-id" || lower_name == "x-obs-request-id")) {
+        request_id = value;
+        break;
+      }
+    }
+  }
+  if (!request_id.empty()) {
+    message += " [request_id:" + std::string(request_id.c_str()) + "]";
+  }
   LOG_STORAGE_WARNING_ << message;
 
   if (auto permanent_status = tryMakePermanentExtendArrowError(error_type, error.GetResponseCode(), message);
