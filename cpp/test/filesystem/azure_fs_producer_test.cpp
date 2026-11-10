@@ -19,21 +19,21 @@
 
 #include <cstdlib>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 
 #include <arrow/status.h>
 
 #include "milvus-storage/filesystem/azure/azure_fs_producer.h"
+#include "milvus-storage/filesystem/azure/azurefs.h"
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage {
 
 namespace {
 
-// Clears the credential-selecting environment variables for one test so the
-// use_iam path deterministically stops at the Managed Identity check for
-// AZURE_CLIENT_ID (no network, no SDK credential construction).
+// Isolate credential selection from the test runner's Azure environment.
 class ScopedAzureEnv {
   public:
   ScopedAzureEnv() {
@@ -55,8 +55,9 @@ class ScopedAzureEnv {
   }
 
   private:
-  static constexpr const char* kNames[] = {"AZURE_FEDERATED_TOKEN_FILE", "AZURE_CLIENT_SECRET", "AZURE_CLIENT_ID",
-                                           "AZURE_TENANT_ID", "USE_AZURITE"};
+  static constexpr const char* kNames[] = {
+      "AZURE_FEDERATED_TOKEN_FILE", "AZURE_CLIENT_SECRET", "AZURE_CLIENT_ID", "AZURE_TENANT_ID",
+      "AZURE_AUTHORITY_HOST",       "USE_AZURITE"};
   std::map<std::string, std::optional<std::string>> saved_;
 };
 
@@ -153,6 +154,63 @@ TEST_F(AzureFileSystemProducerTest, PrimaryIamKeepsCustomAddressAndScheme) {
   EXPECT_NE(status.message().find(kManagedIdentityCheck), std::string::npos) << status.message();
   EXPECT_EQ(status.message().find(kAddressRule), std::string::npos) << status.message();
   EXPECT_EQ(status.message().find(kSslRule), std::string::npos) << status.message();
+}
+
+TEST_F(AzureFileSystemProducerTest, ExternalIamSelectsWorkloadIdentityWithoutAccountKey) {
+  setenv("AZURE_FEDERATED_TOKEN_FILE", "/unused/projected-token", 1);
+  setenv("AZURE_CLIENT_ID", "workload-client", 1);
+  setenv("AZURE_TENANT_ID", "workload-tenant", 1);
+  const auto config = ExternalIamConfig("");
+  ASSERT_TRUE(config.access_key_value.empty());
+
+  fs::AzureOptions expected;
+  expected.account_name = config.access_key_id;
+  ASSERT_TRUE(expected.ConfigureWorkloadIdentityCredential().ok());
+
+  // Construction is lazy: no token file or Azure endpoint is needed. Compare
+  // the credential kind as well as account/options, so a fallback to managed
+  // identity or environment credentials cannot make this test pass.
+  for (const bool with_client_secret : {false, true}) {
+    SCOPED_TRACE(with_client_secret);
+    if (with_client_secret) {
+      setenv("AZURE_CLIENT_SECRET", "unused-client-secret", 1);
+    }
+    const auto result = AzureFileSystemProducer(config).Make();
+    ASSERT_TRUE(result.ok()) << result.status();
+    const auto azure_fs = std::dynamic_pointer_cast<fs::AzureFileSystem>(result.ValueOrDie());
+    ASSERT_NE(azure_fs, nullptr);
+    EXPECT_TRUE(azure_fs->options().Equals(expected));
+  }
+}
+
+TEST_F(AzureFileSystemProducerTest, ExternalWorkloadIdentityRejectsMissingOrEmptyClientId) {
+  setenv("AZURE_FEDERATED_TOKEN_FILE", "/unused/projected-token", 1);
+  setenv("AZURE_TENANT_ID", "workload-tenant", 1);
+  for (const bool empty : {false, true}) {
+    SCOPED_TRACE(empty);
+    if (empty) {
+      setenv("AZURE_CLIENT_ID", "", 1);
+    }
+    const auto status = Make(ExternalIamConfig("core.windows.net"));
+    ASSERT_TRUE(status.IsInvalid()) << status;
+    EXPECT_NE(status.message().find("AZURE_CLIENT_ID environment variable is not set"), std::string::npos);
+  }
+}
+
+TEST_F(AzureFileSystemProducerTest, ExternalWorkloadIdentityRejectsMissingOrEmptyTenantId) {
+  setenv("AZURE_FEDERATED_TOKEN_FILE", "/unused/projected-token", 1);
+  setenv("AZURE_CLIENT_ID", "workload-client", 1);
+  for (const bool empty : {false, true}) {
+    SCOPED_TRACE(empty);
+    if (empty) {
+      setenv("AZURE_TENANT_ID", "", 1);
+    }
+    const auto status = Make(ExternalIamConfig("core.windows.net"));
+    ASSERT_TRUE(status.IsInvalid()) << status;
+    // Managed identity only needs the client ID. Requiring the tenant here
+    // proves incomplete workload identity configuration does not fall back.
+    EXPECT_NE(status.message().find("AZURE_TENANT_ID environment variable is not set"), std::string::npos);
+  }
 }
 
 TEST_F(AzureFileSystemProducerTest, ExternalSharedKeyAllowsCustomAddress) {
