@@ -2395,7 +2395,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
   arrow::Status Init() {
     auto result = builder_.BuildClient(io_context_);
     if (!result.ok()) {
-      return arrow::Status::IOError("Failed to build S3 client: ", result.status().ToString());
+      return result.status().WithMessage("Failed to build S3 client: ", result.status().message());
     }
     ARROW_RETURN_NOT_OK(std::move(result).Value(&holder_));
     if (use_crt_) {
@@ -2406,7 +2406,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
       }
       auto crt_result = crt_builder_.BuildClient(io_context_, std::move(metrics));
       if (!crt_result.ok()) {
-        return arrow::Status::IOError("Failed to build S3 CRT client: ", crt_result.status().ToString());
+        return crt_result.status().WithMessage("Failed to build S3 CRT client: ", crt_result.status().message());
       }
       ARROW_RETURN_NOT_OK(std::move(crt_result).Value(&crt_holder_));
       auto native_options = options();

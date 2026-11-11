@@ -26,9 +26,12 @@
 #include <iterator>
 #include <memory>
 #include <sstream>
+#include <string>
 #include <thread>
 #include <tuple>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
@@ -54,6 +57,7 @@
 #include "milvus-storage/filesystem/s3/s3_options.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
 #include "milvus-storage/filesystem/s3/s3_client_builder.h"
+#include "milvus-storage/filesystem/s3/s3_crt_client.h"
 #include "milvus-storage/filesystem/s3/s3_auth_signer.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
@@ -1509,6 +1513,51 @@ TEST_F(S3UnitTest, TestClientBuilder) {
 
     ClientBuilder<S3Client> builder(options);
     EXPECT_TRUE(builder.BuildClient().ok());
+  }
+
+  // Validate both explicit regions and SDK-resolved environment/profile defaults.
+  const std::vector<std::pair<std::string, bool>> region_cases = {{"", true},
+                                                                  {"us-west-2", true},
+                                                                  {"auto", true},
+                                                                  {"cn-beijing", true},
+                                                                  {"fips-us-east-1", true},
+                                                                  {"bad\"region", false},
+                                                                  {"bad\\region", false},
+                                                                  {"bad\nregion", false},
+                                                                  {std::string("bad\0region", 10), false},
+                                                                  {" us-west-2", false},
+                                                                  {"us-west-2-", false},
+                                                                  {std::string(64, 'a'), false}};
+  for (const auto& [region, valid] : region_cases) {
+    for (const bool explicit_region : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << "region=" << ::testing::PrintToString(region)
+                                        << ", explicit_region=" << explicit_region);
+      auto options = S3Options::FromAccessKey("ak", "sk");
+      options.endpoint_override = "localhost:9000";
+      options.scheme = "http";
+      options.region = explicit_region ? region : "";
+      const auto check_region = [&](auto& builder) {
+        builder.mutable_config()->region = fs::internal::ToAwsString(explicit_region ? "us-east-1" : region);
+        const auto result = builder.BuildClient();
+        if (valid) {
+          ASSERT_TRUE(result.ok()) << result.status().ToString();
+          EXPECT_EQ(fs::internal::FromAwsString(builder.config().region),
+                    explicit_region && region.empty() ? "us-east-1" : region);
+        } else {
+          ASSERT_TRUE(result.status().IsInvalid()) << result.status().ToString();
+          EXPECT_NE(result.status().message().find("Invalid S3 region"), std::string::npos);
+        }
+      };
+      ClientBuilder<S3Client> builder(options);
+      check_region(builder);
+      ClientBuilder<Aws::S3Crt::S3CrtClient> crt_builder(options);
+      check_region(crt_builder);
+      if (explicit_region && !valid) {
+        const auto result = S3FileSystem::Make(options);
+        ASSERT_TRUE(result.status().IsInvalid()) << result.status().ToString();
+        EXPECT_NE(result.status().message().find("Invalid S3 region"), std::string::npos);
+      }
+    }
   }
 
   // Build with invalid scheme
