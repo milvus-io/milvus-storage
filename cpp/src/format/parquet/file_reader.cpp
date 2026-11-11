@@ -14,6 +14,7 @@
 
 #include <cstring>
 #include <memory>
+#include <limits>
 #include <numeric>
 #include <string>
 
@@ -35,6 +36,7 @@
 #include <fmt/format.h>
 
 #include "milvus-storage/format/parquet/file_reader.h"
+#include "format/parquet/async_file_reader.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/arrow_util.h"
@@ -45,20 +47,20 @@ namespace milvus_storage {
 FileRowGroupReader::FileRowGroupReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                        const std::string& path,
                                        const int64_t buffer_size,
-                                       const parquet::ReaderProperties& reader_props) {}
+                                       const ::parquet::ReaderProperties& reader_props) {}
 
 FileRowGroupReader::FileRowGroupReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                        const std::string& path,
                                        const std::shared_ptr<arrow::Schema>& schema,
                                        const int64_t buffer_size,
-                                       const parquet::ReaderProperties& reader_props) {}
+                                       const ::parquet::ReaderProperties& reader_props) {}
 
 arrow::Result<std::shared_ptr<FileRowGroupReader>> FileRowGroupReader::Make(
     const std::shared_ptr<arrow::fs::FileSystem>& fs,
     const std::string& path,
     const int64_t buffer_size,
-    const parquet::ReaderProperties& reader_props,
-    const parquet::ArrowReaderProperties& arrow_reader_props) {
+    const ::parquet::ReaderProperties& reader_props,
+    const ::parquet::ArrowReaderProperties& arrow_reader_props) {
   auto reader = std::shared_ptr<FileRowGroupReader>(new FileRowGroupReader(fs, path, buffer_size, reader_props));
   ARROW_RETURN_NOT_OK(reader->init(fs, path, buffer_size, nullptr, reader_props, arrow_reader_props));
   return reader;
@@ -69,8 +71,8 @@ arrow::Result<std::shared_ptr<FileRowGroupReader>> FileRowGroupReader::Make(
     const std::string& path,
     const std::shared_ptr<arrow::Schema>& schema,
     const int64_t buffer_size,
-    const parquet::ReaderProperties& reader_props,
-    const parquet::ArrowReaderProperties& arrow_reader_props) {
+    const ::parquet::ReaderProperties& reader_props,
+    const ::parquet::ArrowReaderProperties& arrow_reader_props) {
   auto reader =
       std::shared_ptr<FileRowGroupReader>(new FileRowGroupReader(fs, path, schema, buffer_size, reader_props));
   ARROW_RETURN_NOT_OK(reader->init(fs, path, buffer_size, schema, reader_props, arrow_reader_props));
@@ -79,7 +81,7 @@ arrow::Result<std::shared_ptr<FileRowGroupReader>> FileRowGroupReader::Make(
 
 // Arrow DeepClone isolates key material and utilized state. Its key retriever
 // and AAD verifier remain shared callbacks, as in the existing reader path.
-static parquet::ReaderProperties CloneReaderProperties(const parquet::ReaderProperties& props) {
+static ::parquet::ReaderProperties CloneReaderProperties(const ::parquet::ReaderProperties& props) {
   auto copy = props;
   if (props.file_decryption_properties()) {
     copy.file_decryption_properties(props.file_decryption_properties()->DeepClone());
@@ -90,12 +92,12 @@ static parquet::ReaderProperties CloneReaderProperties(const parquet::ReaderProp
 // Open a parquet Arrow reader, reusing a caller-provided FileMetaData when
 // available so Arrow skips the footer read. Kept file-local so the public
 // MakeArrowFileReader utility stays unchanged.
-static arrow::Result<std::unique_ptr<parquet::arrow::FileReader>> OpenParquetFileReader(
+static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> OpenParquetFileReader(
     arrow::fs::FileSystem& fs,
     const std::string& file_path,
-    const parquet::ReaderProperties& reader_props,
-    const parquet::ArrowReaderProperties& arrow_reader_props,
-    std::shared_ptr<parquet::FileMetaData> metadata,
+    const ::parquet::ReaderProperties& reader_props,
+    const ::parquet::ArrowReaderProperties& arrow_reader_props,
+    std::shared_ptr<::parquet::FileMetaData> metadata,
     bool* encrypted_footer = nullptr) {
   ARROW_ASSIGN_OR_RAISE(auto file, fs.OpenInputFile(file_path));
   // Arrow 17 only exposes the encryption_algorithm flag for plaintext
@@ -109,8 +111,8 @@ static arrow::Result<std::unique_ptr<parquet::arrow::FileReader>> OpenParquetFil
       *encrypted_footer = magic->size() == 4 && std::memcmp(magic->data(), "PARE", 4) == 0;
     }
   }
-  parquet::arrow::FileReaderBuilder builder;
-  std::unique_ptr<parquet::arrow::FileReader> reader;
+  ::parquet::arrow::FileReaderBuilder builder;
+  std::unique_ptr<::parquet::arrow::FileReader> reader;
 
   auto reader_props_copy = CloneReaderProperties(reader_props);
 
@@ -125,9 +127,9 @@ arrow::Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs
                                        const std::string& path,
                                        const int64_t buffer_size,
                                        const std::shared_ptr<arrow::Schema>& schema,
-                                       const parquet::ReaderProperties& reader_props,
-                                       const parquet::ArrowReaderProperties& arrow_reader_props,
-                                       std::shared_ptr<parquet::FileMetaData> metadata) {
+                                       const ::parquet::ReaderProperties& reader_props,
+                                       const ::parquet::ArrowReaderProperties& arrow_reader_props,
+                                       std::shared_ptr<::parquet::FileMetaData> metadata) {
   fs_ = std::move(fs);
   path_ = path;
   buffer_size_limit_ = buffer_size <= 0 ? INT64_MAX : buffer_size;
@@ -178,11 +180,13 @@ arrow::Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs
 
 PreparedParquetFile::PreparedParquetFile(std::shared_ptr<arrow::fs::FileSystem> fs,
                                          std::string path,
-                                         const parquet::ReaderProperties& reader_props)
+                                         const ::parquet::ReaderProperties& reader_props)
     : fs_(std::move(fs)), path_(std::move(path)), reader_props_(CloneReaderProperties(reader_props)) {}
 
 arrow::Result<std::shared_ptr<PreparedParquetFile>> PreparedParquetFile::Open(
-    std::shared_ptr<arrow::fs::FileSystem> fs, const std::string& path, const parquet::ReaderProperties& reader_props) {
+    std::shared_ptr<arrow::fs::FileSystem> fs,
+    const std::string& path,
+    const ::parquet::ReaderProperties& reader_props) {
   if (!fs) {
     return arrow::Status::Invalid("Parquet filesystem must not be null");
   }
@@ -191,35 +195,168 @@ arrow::Result<std::shared_ptr<PreparedParquetFile>> PreparedParquetFile::Open(
   // plaintext/decryption policy checks. Only publish after those checks and all
   // packed layout/schema validation have succeeded.
   bool encrypted_footer = false;
-  ARROW_ASSIGN_OR_RAISE(auto probe,
-                        OpenParquetFileReader(*prepared->fs_, path, prepared->reader_props_,
-                                              parquet::default_arrow_reader_properties(), nullptr, &encrypted_footer));
-  std::shared_ptr<arrow::Schema> file_schema;
-  ARROW_RETURN_NOT_OK(probe->GetSchema(&file_schema));
-  ARROW_RETURN_NOT_OK(FieldIDList::Make(file_schema).status());
-  auto metadata = probe->parquet_reader()->metadata();
-  ARROW_ASSIGN_OR_RAISE(auto packed, PackedFileMetadata::Make(metadata));
-  prepared->row_group_metadata_ = packed->GetRowGroupMetadataVector();
-  prepared->field_id_mapping_ = packed->GetFieldIDMapping();
-  prepared->group_field_id_list_ = packed->GetGroupFieldIDList();
-  prepared->storage_version_ = packed->GetStorageVersion();
-  if (!encrypted_footer && !metadata->is_encryption_algorithm_set()) {
-    prepared->plaintext_metadata_ = metadata;
-  }
-  // Probe, packed metadata and file handle are local. Encrypted metadata is not
-  // retained by the context; only independent layout values survive.
+  ARROW_ASSIGN_OR_RAISE(
+      auto probe, OpenParquetFileReader(*prepared->fs_, path, prepared->reader_props_,
+                                        ::parquet::default_arrow_reader_properties(), nullptr, &encrypted_footer));
+  ARROW_RETURN_NOT_OK(prepared->InitMetadata(*probe, encrypted_footer));
   return prepared;
 }
 
 arrow::Result<std::shared_ptr<FileRowGroupReader>> PreparedParquetFile::MakeReader(
     const std::shared_ptr<arrow::Schema>& schema,
     int64_t buffer_size,
-    const parquet::ArrowReaderProperties& arrow_reader_props) const {
+    const ::parquet::ArrowReaderProperties& arrow_reader_props) const {
   auto reader =
       std::shared_ptr<FileRowGroupReader>(new FileRowGroupReader(fs_, path_, schema, buffer_size, reader_props_));
   ARROW_RETURN_NOT_OK(
       reader->init(fs_, path_, buffer_size, schema, reader_props_, arrow_reader_props, plaintext_metadata_));
   return reader;
+}
+
+// Validate before publishing a context; encrypted metadata is never shared across readers.
+arrow::Status PreparedParquetFile::InitMetadata(::parquet::arrow::FileReader& reader, bool encrypted_footer) {
+  std::shared_ptr<arrow::Schema> file_schema;
+  ARROW_RETURN_NOT_OK(reader.GetSchema(&file_schema));
+  ARROW_RETURN_NOT_OK(FieldIDList::Make(file_schema).status());
+  auto metadata = reader.parquet_reader()->metadata();
+  ARROW_ASSIGN_OR_RAISE(auto packed, PackedFileMetadata::Make(metadata));
+  row_group_metadata_ = packed->GetRowGroupMetadataVector();
+  field_id_mapping_ = packed->GetFieldIDMapping();
+  group_field_id_list_ = packed->GetGroupFieldIDList();
+  storage_version_ = packed->GetStorageVersion();
+  if (!encrypted_footer && !metadata->is_encryption_algorithm_set()) {
+    plaintext_metadata_ = metadata;
+  }
+  // Probe, packed metadata and file handle are local. Encrypted metadata is not
+  // retained by the context; only independent layout values survive.
+  return arrow::Status::OK();
+}
+
+folly::SemiFuture<arrow::Result<std::shared_ptr<PreparedParquetFile>>> PreparedParquetFile::OpenAsync(
+    std::shared_ptr<arrow::fs::FileSystem> fs, std::string path, const ::parquet::ReaderProperties& reader_props) {
+  if (!fs) {
+    return folly::makeSemiFuture(arrow::Result<std::shared_ptr<PreparedParquetFile>>(
+        arrow::Status::Invalid("Parquet filesystem must not be null")));
+  }
+  auto prepared = std::shared_ptr<PreparedParquetFile>(new PreparedParquetFile(std::move(fs), path, reader_props));
+  return milvus_storage::parquet::detail::OpenPackedFileAsync(prepared->fs_, prepared->path_,
+                                                              CloneReaderProperties(prepared->reader_props_),
+                                                              ::parquet::default_arrow_reader_properties())
+      .deferValue(
+          [prepared = std::move(prepared)](arrow::Result<milvus_storage::parquet::detail::OpenedPackedFile>&& result)
+              -> arrow::Result<std::shared_ptr<PreparedParquetFile>> {
+            ARROW_ASSIGN_OR_RAISE(auto opened, std::move(result));
+            ARROW_RETURN_NOT_OK(prepared->InitMetadata(*opened.reader, opened.encrypted_footer));
+            return prepared;
+          });
+}
+
+folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::Table>>>> PreparedParquetFile::ReadRowGroupsAsync(
+    int row_group_offset,
+    int row_group_count,
+    std::shared_ptr<arrow::Schema> schema,
+    ::parquet::ArrowReaderProperties arrow_props) const {
+  using Tables = std::vector<std::shared_ptr<arrow::Table>>;
+  auto self = shared_from_this();
+  return folly::makeSemiFuture().deferValue(
+      [self = std::move(self), row_group_offset, row_group_count, schema = std::move(schema),
+       arrow_props = std::move(arrow_props)](folly::Unit) mutable -> folly::SemiFuture<arrow::Result<Tables>> {
+        const auto total = self->row_group_metadata_.size();
+        if (row_group_offset < 0 || row_group_count <= 0 || static_cast<size_t>(row_group_offset) >= total ||
+            static_cast<size_t>(row_group_count) > total - static_cast<size_t>(row_group_offset)) {
+          return folly::makeSemiFuture(arrow::Result<Tables>(arrow::Status::Invalid("Invalid packed row group range")));
+        }
+        // Without pre-buffering Arrow submits blocking reads to the decode executor.
+        arrow_props.set_pre_buffer(true);
+        return milvus_storage::parquet::detail::OpenPackedFileAsync(self->fs_, self->path_,
+                                                                    CloneReaderProperties(self->reader_props_),
+                                                                    std::move(arrow_props), self->plaintext_metadata_)
+            .deferValue([self, row_group_offset, row_group_count, schema = std::move(schema)](
+                            arrow::Result<milvus_storage::parquet::detail::OpenedPackedFile>&& result)
+                            -> folly::SemiFuture<arrow::Result<Tables>> {
+              FOLLY_ARROW_ASSIGN_OR_RAISE(auto opened, std::move(result));
+              std::shared_ptr<arrow::Schema> file_schema;
+              FOLLY_ARROW_RETURN_NOT_OK(opened.reader->GetSchema(&file_schema));
+              const auto metadata = opened.reader->parquet_reader()->metadata();
+              if (metadata->num_row_groups() != self->row_group_metadata_.size()) {
+                return folly::makeSemiFuture(arrow::Result<Tables>(
+                    arrow::Status::Invalid("Packed row group metadata count does not match Parquet footer")));
+              }
+              int64_t rows = 0;
+              for (int i = 0; i < row_group_count; ++i) {
+                const auto count = self->row_group_metadata_.Get(row_group_offset + i).row_num();
+                if (count < 0 || count > std::numeric_limits<int64_t>::max() - rows ||
+                    count != metadata->RowGroup(row_group_offset + i)->num_rows()) {
+                  return folly::makeSemiFuture(
+                      arrow::Result<Tables>(arrow::Status::Invalid("Invalid packed row group row count")));
+                }
+                rows += count;
+              }
+              auto requested = schema ? schema : file_schema;
+              FOLLY_ARROW_ASSIGN_OR_RAISE(auto field_ids, FieldIDList::Make(requested));
+              std::vector<std::string> columns;
+              std::vector<std::shared_ptr<arrow::Field>> fields;
+              std::vector<bool> present;
+              std::vector<bool> selected(file_schema->num_fields(), false);
+              present.reserve(requested->num_fields());
+              columns.reserve(requested->num_fields());
+              fields.reserve(requested->num_fields());
+              for (int i = 0; i < requested->num_fields(); ++i) {
+                auto found = self->field_id_mapping_.find(field_ids.Get(i));
+                present.push_back(found != self->field_id_mapping_.end());
+                if (found == self->field_id_mapping_.end()) {
+                  fields.push_back(requested->field(i)->WithNullable(true));
+                } else {
+                  const auto& field = file_schema->field(found->second.col_index);
+                  fields.push_back(field);
+                  if (!selected[found->second.col_index]) {
+                    columns.push_back(field->name());
+                    selected[found->second.col_index] = true;
+                  }
+                }
+              }
+              auto output_schema = arrow::schema(std::move(fields));
+              std::vector<int> groups(row_group_count);
+              std::iota(groups.begin(), groups.end(), row_group_offset);
+              auto read = columns.empty() ? folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::Table>>(nullptr))
+                                          : milvus_storage::parquet::detail::ReadPackedRowGroupsAsync(
+                                                std::move(opened), std::move(groups), std::move(columns));
+              return std::move(read).deferValue(
+                  [self, row_group_offset, row_group_count, rows, output_schema = std::move(output_schema),
+                   present = std::move(present)](
+                      arrow::Result<std::shared_ptr<arrow::Table>>&& result) -> arrow::Result<Tables> {
+                    ARROW_ASSIGN_OR_RAISE(auto table, std::move(result));
+                    if (table && table->num_rows() != rows) {
+                      return arrow::Status::Invalid("Packed row group metadata does not match decoded row count");
+                    }
+                    std::vector<std::shared_ptr<arrow::ChunkedArray>> arrays;
+                    arrays.reserve(output_schema->num_fields());
+                    for (int i = 0; i < output_schema->num_fields(); ++i) {
+                      const auto& field = output_schema->field(i);
+                      const auto column = table && present[i] ? table->GetColumnByName(field->name()) : nullptr;
+                      if (present[i] && !column) {
+                        return arrow::Status::Invalid("Decoded packed field is missing: ", field->name());
+                      }
+                      if (column) {
+                        arrays.push_back(column);
+                      } else {
+                        ARROW_ASSIGN_OR_RAISE(auto nulls, arrow::MakeArrayOfNull(field->type(), rows));
+                        arrays.push_back(std::make_shared<arrow::ChunkedArray>(std::move(nulls)));
+                      }
+                    }
+                    auto materialized = arrow::Table::Make(output_schema, std::move(arrays), rows);
+                    Tables tables;
+                    tables.reserve(row_group_count);
+                    int64_t offset = 0;
+                    for (int i = 0; i < row_group_count; ++i) {
+                      const auto count = self->row_group_metadata_.Get(row_group_offset + i).row_num();
+                      tables.push_back(materialized->Slice(offset, count));
+                      offset += count;
+                    }
+                    return tables;
+                  });
+            });
+      });
 }
 
 std::shared_ptr<PackedFileMetadata> FileRowGroupReader::file_metadata() { return file_metadata_; }

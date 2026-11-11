@@ -45,6 +45,7 @@
 #include <parquet/type_fwd.h>
 
 #include "milvus-storage/format/parquet/folly_arrow_executor.h"
+#include "format/parquet/async_file_reader.h"
 #include "milvus-storage/format/parquet/key_retriever.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/arrow_util.h"
@@ -652,8 +653,12 @@ class ParquetOpenFile final : public arrow::io::RandomAccessFile {
   public:
   ParquetOpenFile(std::shared_ptr<arrow::io::RandomAccessFile> file,
                   std::shared_ptr<arrow::internal::Executor> executor,
-                  const int64_t file_size)
-      : file_(std::move(file)), executor_(std::move(executor)), file_size_(file_size) {}
+                  const int64_t file_size,
+                  std::shared_ptr<detail::PendingReads> pending_reads = nullptr)
+      : file_(std::move(file)),
+        executor_(std::move(executor)),
+        file_size_(file_size),
+        pending_reads_(std::move(pending_reads)) {}
 
   void FinishOpen() { executor_.reset(); }
 
@@ -684,10 +689,11 @@ class ParquetOpenFile final : public arrow::io::RandomAccessFile {
   arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const arrow::io::IOContext& io_context,
                                                           int64_t position,
                                                           int64_t nbytes) override {
-    if (executor_) {
-      return read_file_async_and_transfer(file_, position, nbytes, executor_);
-    }
-    return file_->ReadAsync(io_context, position, nbytes);
+    auto read = executor_ ? read_file_async_and_transfer(file_, position, nbytes, executor_)
+                          : file_->ReadAsync(io_context, position, nbytes);
+    if (pending_reads_)
+      pending_reads_->Add(arrow::Future<>(read));
+    return read;
   }
   std::vector<arrow::Future<std::shared_ptr<arrow::Buffer>>> ReadManyAsync(
       const arrow::io::IOContext& io_context, const std::vector<arrow::io::ReadRange>& ranges) override {
@@ -699,7 +705,11 @@ class ParquetOpenFile final : public arrow::io::RandomAccessFile {
       }
       return futures;
     }
-    return file_->ReadManyAsync(io_context, ranges);
+    auto reads = file_->ReadManyAsync(io_context, ranges);
+    if (pending_reads_) {
+      for (const auto& read : reads) pending_reads_->Add(arrow::Future<>(read));
+    }
+    return reads;
   }
   arrow::Status WillNeed(const std::vector<arrow::io::ReadRange>& ranges) override { return file_->WillNeed(ranges); }
 
@@ -707,6 +717,7 @@ class ParquetOpenFile final : public arrow::io::RandomAccessFile {
   std::shared_ptr<arrow::io::RandomAccessFile> file_;
   std::shared_ptr<arrow::internal::Executor> executor_;
   int64_t file_size_;
+  std::shared_ptr<detail::PendingReads> pending_reads_;
 };
 
 static std::optional<uint32_t> try_parse_footer_length(const std::shared_ptr<arrow::Buffer>& buffer,
@@ -829,7 +840,9 @@ static arrow::Future<std::shared_ptr<::parquet::arrow::FileReader>> create_file_
     const bool has_known_file_size,
     ::parquet::ReaderProperties reader_properties,
     ::parquet::ArrowReaderProperties arrow_reader_properties,
-    std::shared_ptr<arrow::internal::Executor> executor) {
+    std::shared_ptr<arrow::internal::Executor> executor,
+    std::shared_ptr<::parquet::FileMetaData> cached_metadata = nullptr,
+    std::shared_ptr<detail::PendingReads> pending_reads = nullptr) {
   using FileReaderFuture = arrow::Future<std::shared_ptr<::parquet::arrow::FileReader>>;
 
   if (file_size < 0) {
@@ -837,111 +850,112 @@ static arrow::Future<std::shared_ptr<::parquet::arrow::FileReader>> create_file_
         arrow::Status::Invalid(fmt::format("Parquet file size is negative. [file_size={}]", file_size)));
   }
 
-  auto metadata_future = read_footer_async(file, file_size, footer_size, reader_properties, executor);
-  return metadata_future.Then(
-      [file = std::move(file), file_size, has_known_file_size, reader_properties = std::move(reader_properties),
-       arrow_reader_properties = std::move(arrow_reader_properties), executor = std::move(executor)](
-          const std::shared_ptr<::parquet::FileMetaData>& metadata) mutable -> FileReaderFuture {
-        try {
-          std::shared_ptr<ParquetOpenFile> open_file;
-          std::shared_ptr<arrow::io::RandomAccessFile> source = file;
-          if (!metadata || !has_known_file_size) {
-            // Native footer parsing needs provider-native ReadAsync routing.
-            // A size resolved asynchronously must also be exposed through the
-            // synchronous GetSize() called by Parquet's reader constructor.
-            open_file = std::make_shared<ParquetOpenFile>(std::move(file), executor, file_size);
-            source = open_file;
-          }
+  auto metadata_future =
+      cached_metadata
+          ? arrow::Future<std::shared_ptr<::parquet::FileMetaData>>::MakeFinished(std::move(cached_metadata))
+          : read_footer_async(file, file_size, footer_size, reader_properties, executor);
+  return metadata_future.Then([file = std::move(file), file_size, has_known_file_size,
+                               reader_properties = std::move(reader_properties),
+                               arrow_reader_properties = std::move(arrow_reader_properties),
+                               executor = std::move(executor), pending_reads = std::move(pending_reads)](
+                                  const std::shared_ptr<::parquet::FileMetaData>& metadata) mutable
+                              -> FileReaderFuture {
+    try {
+      std::shared_ptr<ParquetOpenFile> open_file;
+      std::shared_ptr<arrow::io::RandomAccessFile> source = file;
+      if (!metadata || !has_known_file_size || pending_reads) {
+        // Native footer parsing needs provider-native ReadAsync routing.
+        // A size resolved asynchronously must also be exposed through the
+        // synchronous GetSize() called by Parquet's reader constructor.
+        open_file = std::make_shared<ParquetOpenFile>(std::move(file), executor, file_size, pending_reads);
+        source = open_file;
+      }
 
-          // Non-null metadata skips Parquet's native footer read. A nullptr is
-          // the explicit fallback signal from read_footer_async.
-          auto parquet_future = ::parquet::ParquetFileReader::OpenAsync(std::move(source), reader_properties, metadata);
-          // Arrow 17 exposes a const Result in callbacks even when T is
-          // move-only. Retain the sole Future for MoveResult() and explicitly
-          // submit the CPU work so executor rejection can complete with Status.
-          auto file_reader_future = FileReaderFuture::Make();
+      // Non-null metadata skips Parquet's native footer read. A nullptr is
+      // the explicit fallback signal from read_footer_async.
+      auto parquet_future = ::parquet::ParquetFileReader::OpenAsync(std::move(source), reader_properties, metadata);
+      // Arrow 17 exposes a const Result in callbacks even when T is
+      // move-only. Retain the sole Future for MoveResult() and explicitly
+      // submit the CPU work so executor rejection can complete with Status.
+      auto file_reader_future = FileReaderFuture::Make();
+      try {
+        parquet_future.AddCallback([parquet_future, file_reader_future, open_file = std::move(open_file),
+                                    arrow_reader_properties = std::move(arrow_reader_properties), executor](
+                                       const arrow::Result<std::unique_ptr<::parquet::ParquetFileReader>>&) mutable {
+          arrow::Status spawn_status;
           try {
-            parquet_future.AddCallback(
-                [parquet_future, file_reader_future, open_file = std::move(open_file),
-                 arrow_reader_properties = std::move(arrow_reader_properties),
-                 executor](const arrow::Result<std::unique_ptr<::parquet::ParquetFileReader>>&) mutable {
-                  arrow::Status spawn_status;
-                  try {
-                    spawn_status =
-                        executor->Spawn([parquet_future, file_reader_future, open_file = std::move(open_file),
-                                         arrow_reader_properties = std::move(arrow_reader_properties)]() mutable {
-                          try {
-                            const auto& parquet_result = parquet_future.result();
-                            if (open_file) {
-                              // The low-level reader now owns the source. Subsequent data
-                              // reads should use the underlying file without open-time routing.
-                              open_file->FinishOpen();
-                            }
-                            if (!parquet_result.ok()) {
-                              file_reader_future.MarkFinished(parquet_result.status());
-                              return;
-                            }
+            spawn_status = executor->Spawn([parquet_future, file_reader_future, open_file = std::move(open_file),
+                                            arrow_reader_properties = std::move(arrow_reader_properties)]() mutable {
+              try {
+                const auto& parquet_result = parquet_future.result();
+                if (open_file) {
+                  // The low-level reader now owns the source. Subsequent data
+                  // reads should use the underlying file without open-time routing.
+                  open_file->FinishOpen();
+                }
+                if (!parquet_result.ok()) {
+                  file_reader_future.MarkFinished(parquet_result.status());
+                  return;
+                }
 
-                            auto parquet_reader = parquet_future.MoveResult().ValueOrDie();
-                            std::unique_ptr<::parquet::arrow::FileReader> arrow_reader;
-                            // Add Arrow schema conversion and read properties around the
-                            // fully opened low-level Parquet reader.
-                            auto status = ::parquet::arrow::FileReader::Make(arrow::default_memory_pool(),
-                                                                             std::move(parquet_reader),
-                                                                             arrow_reader_properties, &arrow_reader);
-                            if (!status.ok()) {
-                              file_reader_future.MarkFinished(std::move(status));
-                              return;
-                            }
-                            file_reader_future.MarkFinished(
-                                std::shared_ptr<::parquet::arrow::FileReader>(std::move(arrow_reader)));
-                          } catch (const std::bad_alloc& e) {
-                            file_reader_future.MarkFinished(arrow::Status::OutOfMemory(
-                                fmt::format("Failed to create async parquet reader. [error={}]", e.what())));
-                          } catch (const std::exception& e) {
-                            file_reader_future.MarkFinished(arrow::Status::UnknownError(
-                                fmt::format("Exception while creating async parquet reader. [error={}]", e.what())));
-                          } catch (...) {
-                            file_reader_future.MarkFinished(
-                                arrow::Status::UnknownError("Unknown exception while creating async parquet reader"));
-                          }
-                        });
-                  } catch (const std::bad_alloc& e) {
-                    file_reader_future.MarkFinished(
-                        arrow::Status::OutOfMemory("Failed to schedule async parquet reader creation: ", e.what()));
-                    return;
-                  } catch (const std::exception& e) {
-                    file_reader_future.MarkFinished(
-                        arrow::Status::UnknownError("Failed to schedule async parquet reader creation: ", e.what()));
-                    return;
-                  } catch (...) {
-                    file_reader_future.MarkFinished(arrow::Status::UnknownError(
-                        "Unknown exception while scheduling async parquet reader creation"));
-                    return;
-                  }
-                  if (!spawn_status.ok()) {
-                    file_reader_future.MarkFinished(std::move(spawn_status));
-                  }
-                });
+                auto parquet_reader = parquet_future.MoveResult().ValueOrDie();
+                std::unique_ptr<::parquet::arrow::FileReader> arrow_reader;
+                // Add Arrow schema conversion and read properties around the
+                // fully opened low-level Parquet reader.
+                auto status = ::parquet::arrow::FileReader::Make(
+                    arrow::default_memory_pool(), std::move(parquet_reader), arrow_reader_properties, &arrow_reader);
+                if (!status.ok()) {
+                  file_reader_future.MarkFinished(std::move(status));
+                  return;
+                }
+                file_reader_future.MarkFinished(std::shared_ptr<::parquet::arrow::FileReader>(std::move(arrow_reader)));
+              } catch (const std::bad_alloc& e) {
+                file_reader_future.MarkFinished(arrow::Status::OutOfMemory(
+                    fmt::format("Failed to create async parquet reader. [error={}]", e.what())));
+              } catch (const std::exception& e) {
+                file_reader_future.MarkFinished(arrow::Status::UnknownError(
+                    fmt::format("Exception while creating async parquet reader. [error={}]", e.what())));
+              } catch (...) {
+                file_reader_future.MarkFinished(
+                    arrow::Status::UnknownError("Unknown exception while creating async parquet reader"));
+              }
+            });
           } catch (const std::bad_alloc& e) {
             file_reader_future.MarkFinished(
-                arrow::Status::OutOfMemory("Failed to register async parquet reader completion: ", e.what()));
+                arrow::Status::OutOfMemory("Failed to schedule async parquet reader creation: ", e.what()));
+            return;
           } catch (const std::exception& e) {
             file_reader_future.MarkFinished(
-                arrow::Status::UnknownError("Failed to register async parquet reader completion: ", e.what()));
+                arrow::Status::UnknownError("Failed to schedule async parquet reader creation: ", e.what()));
+            return;
           } catch (...) {
             file_reader_future.MarkFinished(
-                arrow::Status::UnknownError("Unknown exception while registering async parquet reader completion"));
+                arrow::Status::UnknownError("Unknown exception while scheduling async parquet reader creation"));
+            return;
           }
-          return file_reader_future;
-        } catch (const std::exception& e) {
-          return FileReaderFuture::MakeFinished(arrow::Status::UnknownError(
-              fmt::format("Exception while starting async parquet open. [error={}]", e.what())));
-        } catch (...) {
-          return FileReaderFuture::MakeFinished(
-              arrow::Status::UnknownError("Unknown exception while starting async parquet open"));
-        }
-      });
+          if (!spawn_status.ok()) {
+            file_reader_future.MarkFinished(std::move(spawn_status));
+          }
+        });
+      } catch (const std::bad_alloc& e) {
+        file_reader_future.MarkFinished(
+            arrow::Status::OutOfMemory("Failed to register async parquet reader completion: ", e.what()));
+      } catch (const std::exception& e) {
+        file_reader_future.MarkFinished(
+            arrow::Status::UnknownError("Failed to register async parquet reader completion: ", e.what()));
+      } catch (...) {
+        file_reader_future.MarkFinished(
+            arrow::Status::UnknownError("Unknown exception while registering async parquet reader completion"));
+      }
+      return file_reader_future;
+    } catch (const std::exception& e) {
+      return FileReaderFuture::MakeFinished(arrow::Status::UnknownError(
+          fmt::format("Exception while starting async parquet open. [error={}]", e.what())));
+    } catch (...) {
+      return FileReaderFuture::MakeFinished(
+          arrow::Status::UnknownError("Unknown exception while starting async parquet open"));
+    }
+  });
 }
 
 // lazy SemiFuture --> open file --> file size known?
@@ -1625,3 +1639,121 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> ParquetFormatRea
 }
 
 }  // namespace milvus_storage::parquet
+
+namespace milvus_storage::parquet::detail {
+
+folly::SemiFuture<arrow::Result<OpenedPackedFile>> OpenPackedFileAsync(
+    std::shared_ptr<arrow::fs::FileSystem> fs,
+    std::string path,
+    ::parquet::ReaderProperties reader_properties,
+    ::parquet::ArrowReaderProperties arrow_properties,
+    std::shared_ptr<::parquet::FileMetaData> plaintext_metadata) {
+  return folly::makeSemiFuture().deferExValue(
+      [fs = std::move(fs), path = std::move(path), reader_properties = std::move(reader_properties),
+       arrow_properties = std::move(arrow_properties), plaintext_metadata = std::move(plaintext_metadata)](
+          folly::Executor::KeepAlive<> executor,
+          folly::Unit) mutable -> folly::SemiFuture<arrow::Result<OpenedPackedFile>> {
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto cpu, MakeFollyArrowExecutor(std::move(executor)));
+        // Arrow permits OpenInputFileAsync to run synchronously. Keep even that
+        // setup off the consumer executor for backends that perform I/O on open.
+        FOLLY_ARROW_ASSIGN_OR_RAISE(
+            auto open_future, fs->io_context().executor()->Submit([fs, path] { return fs->OpenInputFile(path); }));
+        auto opened = transfer_arrow_future(std::move(open_future), cpu);
+        auto result = opened.Then(
+            [fs, cpu, reader_properties = std::move(reader_properties), arrow_properties = std::move(arrow_properties),
+             plaintext_metadata = std::move(plaintext_metadata)](
+                const std::shared_ptr<arrow::io::RandomAccessFile>& file) mutable -> arrow::Future<OpenedPackedFile> {
+              arrow::Future<int64_t> size;
+              if (auto* native = dynamic_cast<NonBlockingRandomAccessFile*>(file.get())) {
+                size = native->GetSizeAsync();
+              } else {
+                auto submitted = file->io_context().executor()->Submit([file] { return file->GetSize(); });
+                if (!submitted.ok())
+                  return arrow::Future<OpenedPackedFile>::MakeFinished(submitted.status());
+                size = std::move(submitted).ValueOrDie();
+              }
+              return transfer_arrow_future(std::move(size), cpu)
+                  .Then([fs, file, cpu, reader_properties = std::move(reader_properties),
+                         arrow_properties = std::move(arrow_properties),
+                         plaintext_metadata =
+                             std::move(plaintext_metadata)](int64_t size) mutable -> arrow::Future<OpenedPackedFile> {
+                    if (size < 8) {
+                      return arrow::Future<OpenedPackedFile>::MakeFinished(
+                          arrow::Status::Invalid("Packed Parquet file is shorter than its trailer"));
+                    }
+                    // A trusted plaintext snapshot needs no footer probe. Otherwise inspect PARE
+                    // before deciding whether metadata can be reused by independent readers.
+                    auto trailer = plaintext_metadata
+                                       ? arrow::Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(nullptr)
+                                       : read_file_async_and_transfer(file, size - 4, 4, cpu);
+                    return trailer.Then([fs, file, size, cpu, reader_properties = std::move(reader_properties),
+                                         arrow_properties = std::move(arrow_properties),
+                                         plaintext_metadata = std::move(plaintext_metadata)](
+                                            const std::shared_ptr<arrow::Buffer>& magic) mutable {
+                      const bool encrypted = magic && magic->size() == 4 && std::memcmp(magic->data(), "PARE", 4) == 0;
+                      auto pending = std::make_shared<PendingReads>();
+                      return create_file_reader_async(file, size, 0, false, std::move(reader_properties),
+                                                      std::move(arrow_properties), cpu, std::move(plaintext_metadata),
+                                                      pending)
+                          .Then([fs, encrypted, pending](const std::shared_ptr<::parquet::arrow::FileReader>& reader) {
+                            return OpenedPackedFile{reader, encrypted, pending};
+                          });
+                    });
+                  });
+            });
+        return bridge_arrow_future(std::move(result), std::move(cpu));
+      });
+}
+
+// Retain each issued read until the caller drains the operation.
+void PendingReads::Add(arrow::Future<> read) {
+  std::lock_guard lock(mutex);
+  reads.push_back(std::move(read));
+}
+
+// Called after generator completion, when no new reads can join the operation.
+arrow::Future<> PendingReads::Drain() {
+  std::vector<arrow::Future<>> issued;
+  {
+    std::lock_guard lock(mutex);
+    issued.swap(reads);
+  }
+  return arrow::AllFinished(issued);
+}
+
+folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> ReadPackedRowGroupsAsync(
+    OpenedPackedFile opened, std::vector<int> row_groups, std::vector<std::string> columns) {
+  using Batches = std::vector<std::shared_ptr<arrow::RecordBatch>>;
+  return folly::makeSemiFuture().deferExValue(
+      [opened = std::move(opened), row_groups = std::move(row_groups), columns = std::move(columns)](
+          folly::Executor::KeepAlive<> executor,
+          folly::Unit) mutable -> folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> {
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto cpu, MakeFollyArrowExecutor(std::move(executor)));
+        auto read = folly::makeSemiFuture().deferValue([reader = opened.reader, row_groups = std::move(row_groups),
+                                                        columns = std::move(columns),
+                                                        cpu](folly::Unit) -> folly::SemiFuture<arrow::Result<Batches>> {
+          std::shared_ptr<arrow::Schema> schema;
+          FOLLY_ARROW_RETURN_NOT_OK(reader->GetSchema(&schema));
+          FOLLY_ARROW_ASSIGN_OR_RAISE(auto leaves, get_leaf_column_indices(*schema, columns, "packed file"));
+          FOLLY_ARROW_ASSIGN_OR_RAISE(auto gen,
+                                      reader->GetRecordBatchGenerator(reader, row_groups, leaves, cpu.get(), 0));
+          return bridge_arrow_future(arrow::CollectAsyncGenerator(std::move(gen)), cpu);
+        });
+        return std::move(read).defer(
+            [opened = std::move(opened), cpu](folly::Try<arrow::Result<Batches>>&& result) mutable {
+              // Arrow's AllComplete can fail before sibling range reads finish.
+              // Drain issued I/O before allowing the caller to release its budget.
+              return bridge_arrow_future(opened.pending_reads->Drain(), cpu)
+                  .deferValue([reader = std::move(opened.reader), result = std::move(result)](
+                                  arrow::Status drained) mutable -> arrow::Result<std::shared_ptr<arrow::Table>> {
+                    ARROW_ASSIGN_OR_RAISE(auto batches, std::move(result).value());
+                    ARROW_RETURN_NOT_OK(drained);
+                    if (batches.empty())
+                      return arrow::Status::Invalid("Packed row groups produced no record batches");
+                    return arrow::Table::FromRecordBatches(batches);
+                  });
+            });
+      });
+}
+
+}  // namespace milvus_storage::parquet::detail
