@@ -1043,6 +1043,9 @@ FFI_EXPORT LoonFFIResult loon_segment_writer_new(struct ArrowSchema* schema,
 /**
  * @brief Writes a record batch to the segment
  *
+ * Imports top-level columns with independent ownership, without copying buffers.
+ * For a valid handle and non-null array, consumes array on success and failure.
+ *
  * @param handle SegmentWriter handle
  * @param array Arrow array representing the record batch
  * @return result of FFI
