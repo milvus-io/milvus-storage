@@ -27,6 +27,8 @@
 #include <arrow/extension_type.h>
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
+#include <arrow/util/base64.h>
+#include <arrow/util/io_util.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/ScopeGuard.h>
 #include <folly/executors/InlineExecutor.h>
@@ -44,6 +46,7 @@
 #include "milvus-storage/writer.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/talon/talon_file_system_producer.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/format/async_tasks.h"
 #include "milvus-storage/format/column_group_reader.h"
@@ -1351,6 +1354,196 @@ TEST_P(FormatReaderTest, CreateAsyncDefersPlainFormatOpen) {
   EXPECT_FALSE(weak_properties.expired());
   reader.reset();
   EXPECT_TRUE(weak_properties.expired());
+}
+
+TEST_P(FormatReaderTest, TalonStreamSwitchesToOriginAfterOpen) {
+  const auto& format = GetParam();
+  if (format != LOON_FORMAT_PARQUET && format != LOON_FORMAT_VORTEX) {
+    GTEST_SKIP() << "Requires Parquet or Vortex.";
+  }
+
+  ASSERT_AND_ASSIGN(auto dir, arrow::internal::TemporaryDir::Make("loon-talon-footer-"));
+  const auto root = dir->path().ToString();
+  api::Properties properties;
+  ASSERT_EQ(SetValue(properties, PROPERTY_FS_STORAGE_TYPE, "local"), std::nullopt);
+  ASSERT_EQ(SetValue(properties, PROPERTY_FS_ROOT_PATH, root.c_str()), std::nullopt);
+  ASSERT_AND_ASSIGN(auto root_fs, GetFileSystem(std::make_shared<const api::Properties>(properties)));
+  const auto root_observable = std::dynamic_pointer_cast<Observable>(root_fs);
+  ASSERT_NE(root_observable, nullptr);
+  ASSERT_AND_ASSIGN(auto root_metrics, root_observable->GetMetrics(kOriginMetricsSource));
+  ASSERT_NE(root_metrics, nullptr);
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderAWS;
+  config.bucket_name = "test-bucket";
+  config.talon_mode = TalonMode::Full;
+  // The unreachable coordinator makes Talon fall back to the real local origin.
+  // Its attempt counter still distinguishes footer routing from origin-only reads.
+  config.talon_coordinator = "127.0.0.1:0";
+
+  const auto bucket_root = root + "/" + config.bucket_name;
+  ASSERT_EQ(SetValue(properties, PROPERTY_FS_ROOT_PATH, bucket_root.c_str()), std::nullopt);
+  auto props = std::make_shared<const api::Properties>(std::move(properties));
+  ASSERT_AND_ASSIGN(auto origin, GetFileSystem(props));
+  ASSERT_STATUS_OK(CreateTestDir(origin, "test"));
+  // Vortex's footer read spans at least 64 KiB, and it can cache covered data.
+  // Use enough random IDs that a scan of the first row must issue an actual read.
+  constexpr std::array<bool, 4> kIdOnly{true, false, false, false};
+  ASSERT_AND_ASSIGN(auto read_schema, CreateTestSchema(kIdOnly));
+  ASSERT_AND_ASSIGN(auto batch, CreateTestData(read_schema, /*start_offset=*/0, /*randdata=*/true,
+                                               /*num_rows=*/16384, 0, 0, kIdOnly));
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, read_schema));
+  auto writer = Writer::create("test", read_schema, std::move(policy), props);
+  ASSERT_STATUS_OK(writer->write(batch));
+  ASSERT_AND_ASSIGN(auto groups, writer->close());
+  ASSERT_EQ(groups->size(), 1);
+  ASSERT_EQ(groups->front()->files.size(), 1);
+  const auto& file = groups->front()->files.front();
+  const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
+  const auto footer_size = file.Get<uint64_t>(api::kPropertyFooterSize);
+  ASSERT_GT(file_size, 96 * 1024);
+  ASSERT_GT(footer_size, 0);
+  ASSERT_AND_ASSIGN(auto uri, StorageUri::Parse(file.path));
+
+  const std::vector<std::string> columns{"id"};
+  folly::CPUThreadPoolExecutor executor{2};
+  for (const bool talon_open_only : {false, true}) {
+    SCOPED_TRACE(talon_open_only);
+    config.talon_open_only = talon_open_only;
+    ASSERT_AND_ASSIGN(auto talon_fs, TalonFileSystemProducer(config, root_fs).Make());
+    auto read_fs = std::make_shared<FileSystemProxy>(config.bucket_name, std::move(talon_fs));
+    ASSERT_AND_ASSIGN(auto metrics, read_fs->GetMetrics(kTalonMetricsSource));
+    ASSERT_NE(metrics, nullptr);
+    for (const bool async : {false, true}) {
+      SCOPED_TRACE(async);
+      std::shared_ptr<FormatReader> reader;
+      if (format == LOON_FORMAT_PARQUET) {
+        reader = std::make_shared<parquet::ParquetFormatReader>(read_fs, uri.key, props, columns, KeyRetriever{},
+                                                                file_size, footer_size);
+      } else {
+        reader = std::make_shared<vortex::VortexFormatReader>(read_fs, read_schema, uri.key, props, columns, file_size,
+                                                              footer_size);
+      }
+      const auto before_open = metrics->GetReadCount();
+      const auto status = async ? reader->open_async().via(&executor).get() : reader->open();
+      ASSERT_STATUS_OK(status);
+      const auto after_open = metrics->GetReadCount();
+      ASSERT_EQ(after_open, before_open + 1);
+
+      const auto origin_before_read = root_metrics->GetReadCount();
+      if (format == LOON_FORMAT_VORTEX) {
+        // Take uses the original small-window stream. Range reads below open a
+        // large-window view from the same filesystem and cached footer.
+        ASSERT_AND_ASSIGN(auto first, reader->take_async({0}).via(&executor).get());
+        ASSERT_EQ(first->num_rows(), 1);
+        EXPECT_TRUE(first->column(0)->Equals(arrow::ChunkedArray(batch->column(0)->Slice(0, 1))));
+        EXPECT_EQ(metrics->GetReadCount() == after_open, talon_open_only);
+        EXPECT_GT(root_metrics->GetReadCount(), origin_before_read);
+      }
+      const auto before_range = metrics->GetReadCount();
+      const auto count = batch->num_rows();
+      ASSERT_AND_ASSIGN(auto batches, async ? reader->read_with_range_async(0, count).via(&executor).get()
+                                            : reader->read_with_range(0, count));
+      ASSERT_AND_ASSIGN(auto data, batches->ToTable());
+      ASSERT_EQ(data->num_columns(), 1);
+      EXPECT_TRUE(data->column(0)->Equals(arrow::ChunkedArray(batch->column(0))));
+      EXPECT_EQ(metrics->GetReadCount() == before_range, talon_open_only);
+      EXPECT_GT(root_metrics->GetReadCount(), origin_before_read);
+    }
+  }
+}
+
+TEST_P(FormatReaderTest, TalonFilesystemSuppliesFooterOnly) {
+  const auto& format = GetParam();
+  if (!IsTalonEnv() || (format != LOON_FORMAT_PARQUET && format != LOON_FORMAT_VORTEX)) {
+    GTEST_SKIP() << "Requires Talon with Parquet or Vortex.";
+  }
+  for (const bool encrypted : {false, true}) {
+    if (encrypted && format != LOON_FORMAT_PARQUET) {
+      continue;
+    }
+    SCOPED_TRACE(encrypted);
+    auto reader_properties = properties_;
+    reader_properties[PROPERTY_FS_TALON_OPEN_ONLY] = true;
+    const auto encoded_key = arrow::util::base64_encode(std::string(16, 'k'));
+    KeyRetriever key_retriever;
+    if (encrypted) {
+      SetValue(reader_properties, PROPERTY_WRITER_ENC_ENABLE, "true");
+      SetValue(reader_properties, PROPERTY_WRITER_ENC_KEY, encoded_key.c_str());
+      SetValue(reader_properties, PROPERTY_WRITER_ENC_META, "key-id");
+      key_retriever = [encoded_key](const std::string&) { return encoded_key; };
+    }
+    auto props = std::make_shared<const api::Properties>(std::move(reader_properties));
+    ASSERT_AND_ASSIGN(auto reader_fs, GetFileSystem(props));
+    const auto observable = std::dynamic_pointer_cast<Observable>(reader_fs);
+    ASSERT_NE(observable, nullptr);
+    ASSERT_AND_ASSIGN(auto talon_metrics, observable->GetMetrics(kTalonMetricsSource));
+    ASSERT_NE(talon_metrics, nullptr);
+    ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+    auto writer = Writer::create(base_path_, schema_, std::move(policy), props);
+    ASSERT_STATUS_OK(writer->write(test_batch_));
+    ASSERT_AND_ASSIGN(auto groups, writer->close());
+    ASSERT_EQ(groups->size(), 1);
+    ASSERT_EQ(groups->front()->files.size(), 1);
+    const auto& file = groups->front()->files.front();
+    const std::vector<std::string> columns{"id"};
+    const auto read_schema = arrow::schema({schema_->field(0)});
+    folly::CPUThreadPoolExecutor executor{2};
+    auto verify_data = [&](const std::shared_ptr<FormatReader>& reader, bool async = false) {
+      const auto talon_before_read = talon_metrics->GetReadCount();
+      const auto count = test_batch_->num_rows();
+      ASSERT_AND_ASSIGN(auto batches, async ? reader->read_with_range_async(0, count).via(&executor).get()
+                                            : reader->read_with_range(0, count));
+      ASSERT_AND_ASSIGN(auto table, batches->ToTable());
+      ASSERT_EQ(table->num_columns(), 1);
+      EXPECT_TRUE(table->column(0)->Equals(arrow::ChunkedArray(test_batch_->column(0))));
+      EXPECT_EQ(talon_metrics->GetReadCount(), talon_before_read);
+    };
+
+    auto talon_before_open = talon_metrics->GetReadCount();
+    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(read_schema, format, file, props, columns, key_retriever));
+    EXPECT_GT(talon_metrics->GetReadCount(), talon_before_open);
+    ASSERT_NO_FATAL_FAILURE(verify_data(reader));
+    talon_before_open = talon_metrics->GetReadCount();
+    ASSERT_AND_ASSIGN(auto clone, reader->clone_reader());
+    EXPECT_EQ(talon_metrics->GetReadCount() > talon_before_open, encrypted);
+    ASSERT_NO_FATAL_FAILURE(verify_data(clone));
+
+    talon_before_open = talon_metrics->GetReadCount();
+    ASSERT_AND_ASSIGN(
+        auto async_reader,
+        FormatReader::create_async(read_schema, format, file, props, columns, key_retriever).via(&executor).get());
+    EXPECT_GT(talon_metrics->GetReadCount(), talon_before_open);
+    ASSERT_NO_FATAL_FAILURE(verify_data(async_reader, !encrypted));
+
+    auto verify_cached_data = [&]<typename ReaderT>() {
+      talon_before_open = talon_metrics->GetReadCount();
+      ASSERT_AND_ASSIGN(auto sync_metadata, FormatReader::load_metadata<ReaderT>(file, props, key_retriever));
+      EXPECT_GT(talon_metrics->GetReadCount(), talon_before_open);
+      talon_before_open = talon_metrics->GetReadCount();
+      ASSERT_AND_ASSIGN(auto async_metadata,
+                        ReaderT::MetaTrait::load_metadata_async(file, props, key_retriever).via(&executor).get());
+
+      EXPECT_GT(talon_metrics->GetReadCount(), talon_before_open);
+      talon_before_open = talon_metrics->GetReadCount();
+      ASSERT_AND_ASSIGN(auto cached,
+                        FormatReader::create_from_metadata<ReaderT>(sync_metadata, file, read_schema, columns, ""));
+      EXPECT_EQ(talon_metrics->GetReadCount() > talon_before_open, encrypted);
+      ASSERT_NO_FATAL_FAILURE(verify_data(cached));
+      talon_before_open = talon_metrics->GetReadCount();
+      ASSERT_AND_ASSIGN(auto async_cached,
+                        ReaderT::MetaTrait::create_from_metadata_async(async_metadata, file, read_schema, columns, "")
+                            .via(&executor)
+                            .get());
+      EXPECT_EQ(talon_metrics->GetReadCount() > talon_before_open, encrypted);
+      ASSERT_NO_FATAL_FAILURE(verify_data(async_cached, !encrypted));
+    };
+    if (format == LOON_FORMAT_PARQUET) {
+      ASSERT_NO_FATAL_FAILURE(verify_cached_data.template operator()<parquet::ParquetFormatReader>());
+    } else {
+      ASSERT_NO_FATAL_FAILURE(verify_cached_data.template operator()<vortex::VortexFormatReader>());
+    }
+  }
 }
 
 TEST_P(FormatReaderTest, ParquetLoadMetadataAsyncUsesCallerExecutor) {

@@ -30,6 +30,8 @@ use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::TOKIO_RT;
 use crate::paimon_ffi::{PaimonFileInfo, PaimonFileSystemWrapper};
@@ -724,7 +726,8 @@ pub fn paimon_plan_files(
         .map_err(classify_bridge_error)?;
     TOKIO_RT.block_on(async move {
         let snapshot_id = (snapshot_id >= 0).then_some(snapshot_id);
-        let (file_io, binding) = crate::paimon_opendal::file_io(filesystem, table_location, options)?;
+        let (file_io, binding) =
+            crate::paimon_opendal::file_io(filesystem, table_location, options, None)?;
         let table = load_table(table_location, file_io, snapshot_id).await?;
         let table_read_semantics = TableReadSemantics::from_table(&table)?;
         let plan = table.new_read_builder().new_scan().plan().await?;
@@ -997,9 +1000,11 @@ pub fn paimon_read_deletion_vector(
 ) -> Result<Vec<u64>> {
     let options = options_from_vecs(storage_options_keys, storage_options_values)
         .map_err(classify_bridge_error)?;
-    // A persisted DV path must not redefine the data file's filesystem binding.
-    let (file_io, _) = crate::paimon_opendal::file_io(filesystem, data_file_path, options)
-        .map_err(|error| classify_bridge_error(error.into()))?;
+    // Deletion vectors use the data phase, even when requested during metadata
+    // loading. Bind the filesystem to the data file rather than the DV path.
+    let (file_io, _) =
+        crate::paimon_opendal::file_io(filesystem, data_file_path, options, None)
+            .map_err(|error| classify_bridge_error(error.into()))?;
     TOKIO_RT.block_on(read_deletion_vector_at(
         path,
         offset,
@@ -1077,8 +1082,17 @@ fn open_data_split_reader_impl(
         .table_location
         .as_deref()
         .ok_or_else(|| anyhow!("Paimon data-split descriptor has no table_location"))?;
-    let (file_io, _) = crate::paimon_opendal::file_io(filesystem, table_location, options)?;
+    let disable_talon = Arc::new(AtomicBool::new(false));
+    let (file_io, _) = crate::paimon_opendal::file_io(
+        filesystem,
+        table_location,
+        options,
+        Some(disable_talon.clone()),
+    )?;
     let table = TOKIO_RT.block_on(load_table(table_location, file_io, metadata.snapshot_id))?;
+    // Table open has consumed the schema/snapshot reads. The bound filesystem
+    // decides whether to disable Talon for subsequent data handles.
+    disable_talon.store(true, Ordering::Release);
     let read = table.new_read_builder().new_read()?;
     let schema = paimon::arrow::build_target_arrow_schema(read.read_type())?;
     Ok(Box::new(BlockingPaimonDataSplitReader {
@@ -1955,6 +1969,7 @@ mod tests {
             fixture.filesystem.clone(),
             location,
             options_from_vecs(keys.clone(), values.clone()).unwrap(),
+            None,
         )
         .unwrap();
         // Positive control: the same table really resolves HTTP through Paimon,

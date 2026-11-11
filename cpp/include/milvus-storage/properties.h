@@ -107,6 +107,7 @@ struct PropertyInfo {
 
 // talon properties
 #define PROPERTY_FS_TALON_MODE "fs.talon.mode"
+#define PROPERTY_FS_TALON_OPEN_ONLY "fs.talon.open_only"
 #define PROPERTY_FS_TALON_SMALL_READ_THRESHOLD "fs.talon.small_read_threshold"
 #define PROPERTY_FS_TALON_COORDINATOR "fs.talon.coordinator"
 #define PROPERTY_FS_TALON_NAMESPACE "fs.talon.namespace"

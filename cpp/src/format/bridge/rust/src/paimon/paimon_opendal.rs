@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use opendal_paimon::raw::*;
 use opendal_paimon::{
@@ -373,11 +374,14 @@ pub(crate) fn file_io(
     filesystem: cxx::SharedPtr<PaimonFileSystemWrapper>,
     location: &str,
     options: HashMap<String, String>,
+    disable_talon: Option<Arc<AtomicBool>>,
 ) -> paimon::Result<(paimon::io::FileIO, PaimonUriBinding)> {
     // Reuse Iceberg's credential-free filesystem identity options.
     let options = FilesystemReadOptions::parse(options).map_err(invalid_binding)?;
     let binding = PaimonUriBinding::new(location, &options)?;
-    let access = FilesystemAccess::new(filesystem).map_err(translate_error)?;
+    let access = FilesystemAccess::new(filesystem)
+        .map_err(translate_error)?
+        .with_talon_phase(disable_talon);
     let operator = Operator::from_parts(
         OperationContext::default(),
         Arc::new(FilesystemService(access)),

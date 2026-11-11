@@ -382,9 +382,11 @@ static arrow::Result<std::shared_ptr<::parquet::arrow::FileReader>> create_parqu
     metadata = try_parse_footer_metadata(footer_buffer, reader_props);
   }
 
-  ARROW_RETURN_NOT_OK(builder.Open(std::move(parquet_file), reader_props, metadata));
+  ARROW_RETURN_NOT_OK(builder.Open(parquet_file, reader_props, metadata));
   ARROW_RETURN_NOT_OK(
       builder.memory_pool(arrow::default_memory_pool())->properties(arrow_reader_props)->Build(&result));
+  // Also applies on cache hits, where metadata was injected and no footer was read.
+  (void)talon::internal::ControlTalonForFile(parquet_file.get(), false);
   return std::shared_ptr<::parquet::arrow::FileReader>(std::move(result));
 }
 
@@ -986,6 +988,7 @@ folly::SemiFuture<arrow::Status> ParquetFormatReader::open_async() {
       FOLLY_ARROW_ASSIGN_OR_RAISE(file, self->fs_->OpenInputFile(self->path_));
     }
 
+    auto footer_stream = file;
     // The Arrow Future chain only constructs a complete file reader. It
     // does not publish intermediate state to this ParquetFormatReader.
     arrow::Future<std::shared_ptr<::parquet::arrow::FileReader>> file_reader_future;
@@ -1023,13 +1026,15 @@ folly::SemiFuture<arrow::Status> ParquetFormatReader::open_async() {
     // filesystem destruction cannot be triggered by the CRT callback.
     return bridge_arrow_future(std::move(file_reader_future), std::move(arrow_executor))
         .deferValue(
-            [self](arrow::Result<std::shared_ptr<::parquet::arrow::FileReader>>&& file_reader_result) -> arrow::Status {
+            [self, footer_stream = std::move(footer_stream)](
+                arrow::Result<std::shared_ptr<::parquet::arrow::FileReader>>&& file_reader_result) -> arrow::Status {
               if (!file_reader_result.ok()) {
                 const auto& status = file_reader_result.status();
                 return status.WithMessage(status.message(), " [path=", self->path_, "]");
               }
 
               auto file_reader = std::move(file_reader_result).ValueOrDie();
+              (void)talon::internal::ControlTalonForFile(footer_stream.get(), false);
               return self->finish_open(std::move(file_reader));
             });
   });

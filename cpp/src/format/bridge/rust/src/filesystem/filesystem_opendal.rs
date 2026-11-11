@@ -26,6 +26,7 @@ use std::ffi::c_void;
 use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::{Bytes, BytesMut};
 use futures::channel::oneshot;
@@ -40,7 +41,8 @@ use crate::filesystem_c::{
     loon_errcode_not_support, loon_errcode_permission_denied, loon_errcode_transient_throttling,
     loon_filesystem_free_file_info_list, loon_filesystem_get_object_info,
     loon_filesystem_list_dir, loon_filesystem_open_reader, loon_filesystem_reader_close,
-    loon_filesystem_reader_destroy, loon_filesystem_reader_readat, reader_supports_async,
+    loon_filesystem_reader_control_talon, loon_filesystem_reader_destroy,
+    loon_filesystem_reader_readat, reader_supports_async,
 };
 use crate::filesystem_c::{LoonFFIResult, loon_filesystem_reader_readat_async};
 
@@ -350,6 +352,7 @@ pub(crate) struct FilesystemAccess {
     filesystem: cxx::SharedPtr<crate::lance_ffi::FileSystemWrapper>,
     info: Arc<AccessorInfo>,
     file: Option<FileReadContext>,
+    disable_talon: Option<Arc<AtomicBool>>,
     // Counts native stat/open calls, including failed attempts.
     #[cfg(test)]
     pub(crate) io_counts: Arc<[std::sync::atomic::AtomicUsize; 2]>,
@@ -398,9 +401,15 @@ impl FilesystemAccess {
             filesystem,
             info: Arc::new(info),
             file: None,
+            disable_talon: None,
             #[cfg(test)]
             io_counts: Arc::new(Default::default()),
         }
+    }
+
+    pub(crate) fn with_talon_phase(mut self, disable_talon: Option<Arc<AtomicBool>>) -> Self {
+        self.disable_talon = disable_talon;
+        self
     }
 
     /// Finish the raw accessor without adding retry or credential layers. Those
@@ -539,7 +548,17 @@ impl FilesystemAccess {
         check_loon_ffi_result(&mut result, "open OpenDAL object reader")
             .map_err(|error| into_opendal_error(error, "read", path))?;
 
-        let supports_async = match reader_supports_async(reader_raw) {
+        let capability = if self
+            .disable_talon
+            .as_ref()
+            .is_none_or(|flag| flag.load(Ordering::Acquire))
+        {
+            // No bytes have been read. Report the underlying provider's actual async capability.
+            Ok(unsafe { loon_filesystem_reader_control_talon(reader_raw, false) })
+        } else {
+            reader_supports_async(reader_raw)
+        };
+        let supports_async = match capability {
             Ok(supported) => supported,
             Err(error) => unsafe {
                 // Ownership has not reached ReaderHandle yet. Close and

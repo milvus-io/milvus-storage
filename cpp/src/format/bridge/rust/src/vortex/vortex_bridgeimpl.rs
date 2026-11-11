@@ -1153,6 +1153,8 @@ impl VortexFile {
         )
         .map_err(VortexError::from)?;
 
+        // Other coalescing views already have the parsed footer and only read data.
+        read_source.disable_talon();
         let footer = self.inner.footer().clone();
         let file = VORTEX_RT.block_on(async move {
             VORTEX_SESSION
@@ -1588,10 +1590,13 @@ async fn open_file_impl(
         open_options =
             open_options.with_initial_read_size(footer_size as usize + vortex::file::EOF_SIZE);
     }
+    let read_source = Arc::new(read_source);
     let file = open_options
-        .open(Arc::new(read_source))
+        .open(read_source.clone())
         .await
         .map_err(VortexError::from)?;
+
+    read_source.disable_talon();
 
     Ok(Box::new(VortexFile {
         inner: file,

@@ -78,6 +78,14 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
             std::move(filesystem), std::move(origin_file), std::move(key), std::move(reader))),
         pool_(state_->filesystem->io_context.pool()) {}
 
+  bool ControlTalon(bool enable) {
+    if (!state_->filesystem->config.talon_open_only) {
+      return true;
+    }
+    talon_enabled_.store(enable, std::memory_order_release);
+    return enable || dynamic_cast<NonBlockingRandomAccessFile*>(state_->origin_file.get()) != nullptr;
+  }
+
   arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override {
     if (closed_) {
       return arrow::Status::Invalid("Operation on closed Talon input file");
@@ -282,6 +290,9 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
 
   private:
   bool ShouldUseTalon(const int64_t requested_bytes) const {
+    if (!talon_enabled_.load(std::memory_order_acquire)) {
+      return false;
+    }
     const auto& config = state_->filesystem->config;
     // Decide before EOF clamping so warming metadata cannot change routing.
     return config.talon_mode == TalonMode::Full ||
@@ -475,6 +486,9 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
   }
 
   std::shared_ptr<ReaderState> state_;
+  // Each read captures the file-local routing policy. Both routes reuse the
+  // existing origin handle for direct reads or Talon fallback.
+  std::atomic<bool> talon_enabled_{true};
   arrow::MemoryPool* const pool_;
   int64_t pos_ = 0;
   bool closed_ = false;
@@ -508,6 +522,7 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
     return talon != nullptr && state_->config.bucket_name == talon->state_->config.bucket_name &&
            state_->config.cloud_provider == talon->state_->config.cloud_provider &&
            state_->config.talon_mode == talon->state_->config.talon_mode &&
+           state_->config.talon_open_only == talon->state_->config.talon_open_only &&
            (state_->config.talon_mode != TalonMode::SmallReads ||
             state_->config.talon_small_read_threshold == talon->state_->config.talon_small_read_threshold) &&
            state_->config.talon_coordinator == talon->state_->config.talon_coordinator &&
@@ -666,6 +681,13 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
 }  // namespace
 
 namespace internal {
+
+bool ControlTalonForFile(arrow::io::RandomAccessFile* file, bool enable) {
+  if (auto* talon_file = dynamic_cast<TalonInputFile*>(file)) {
+    return talon_file->ControlTalon(enable);
+  }
+  return dynamic_cast<NonBlockingRandomAccessFile*>(file) != nullptr;
+}
 
 arrow::Result<ArrowFileSystemPtr> MakeTalonFileSystem(const ArrowFileSystemConfig& config,
                                                       ArrowFileSystemPtr origin_fs,

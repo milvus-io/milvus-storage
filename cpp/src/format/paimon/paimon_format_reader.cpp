@@ -440,7 +440,7 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
   ARROW_ASSIGN_OR_RAISE(auto parsed, ParseMetadata(metadata_json));
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, file.path));
   ARROW_ASSIGN_OR_RAISE(auto filesystem, FilesystemCache::getInstance().get(properties, file.path));
-  auto read_options = iceberg::ToReaderOptions(fs_config);
+  const auto read_options = iceberg::ToReaderOptions(fs_config);
 
   auto metadata = std::make_shared<Metadata>();
   metadata->cache_key = cache_key(file);

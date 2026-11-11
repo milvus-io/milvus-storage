@@ -102,13 +102,13 @@ cxx-build = "1.0.184"
 # Keep Paimon on the same Vortex fork as the bridge.
 vortex = { git = "https://github.com/zilliztech/vortex", rev = "059feb02ddb7463370f25a1f2416ba4def37b61a" }
 
-lance = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
-lance-core = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
-lance-encoding = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
-lance-file = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
-lance-index = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
-lance-io = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
-lance-table = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance = { git = "https://github.com/zilliztech/lance", rev = "3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9" }
+lance-core = { git = "https://github.com/zilliztech/lance", rev = "3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9" }
+lance-encoding = { git = "https://github.com/zilliztech/lance", rev = "3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9" }
+lance-file = { git = "https://github.com/zilliztech/lance", rev = "3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9" }
+lance-index = { git = "https://github.com/zilliztech/lance", rev = "3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9" }
+lance-io = { git = "https://github.com/zilliztech/lance", rev = "3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9" }
+lance-table = { git = "https://github.com/zilliztech/lance", rev = "3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9" }
 
 [lints.rust]
 deprecated = "deny"

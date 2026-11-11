@@ -427,6 +427,12 @@ LoonFFIResult loon_filesystem_reader_readat(FileSystemReaderHandle handle,
   RETURN_UNREACHABLE();
 }
 
+// Internal read policy hook. The Rust owner keeps the handle alive during the transition.
+extern "C" bool loon_filesystem_reader_control_talon(FileSystemReaderHandle handle, bool enable) noexcept {
+  auto input_file = reinterpret_cast<RandomAccessFileWrapper*>(handle)->get();
+  return talon::internal::ControlTalonForFile(input_file.get(), enable);
+}
+
 LoonFFIResult loon_filesystem_reader_supports_async(FileSystemReaderHandle handle, bool* out_supported) {
   try {
     if (!handle || !out_supported) {

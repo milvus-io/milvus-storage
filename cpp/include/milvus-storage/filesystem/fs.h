@@ -313,6 +313,9 @@ struct ArrowFileSystemConfig {
 
   // Remote read routing: disabled, full, or small_reads.
   TalonMode talon_mode = TalonMode::Disabled;
+  // Immutable read policy. Data boundaries disable Talon on individual files;
+  // unrestricted files ignore that transition. Ignored when Talon is disabled.
+  bool talon_open_only = false;
   // Inclusive limit in bytes for small_reads, applied before EOF clamping.
   uint32_t talon_small_read_threshold = 512U * 1024U;
   std::string talon_coordinator = "";

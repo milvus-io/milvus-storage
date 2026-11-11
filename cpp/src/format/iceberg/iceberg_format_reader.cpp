@@ -83,6 +83,8 @@ arrow::Status ReadPositionalDeleteFile(const std::string& delete_file_path,
 
   // Open the delete file as Parquet
   ARROW_ASSIGN_OR_RAISE(auto input_file, fs->OpenInputFile(uri.key));
+  // Position deletes are data, even when loaded as part of metadata preparation.
+  (void)talon::internal::ControlTalonForFile(input_file.get(), false);
 
   ::parquet::arrow::FileReaderBuilder builder;
   std::unique_ptr<::parquet::arrow::FileReader> file_reader;

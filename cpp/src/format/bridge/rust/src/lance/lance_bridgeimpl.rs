@@ -8,6 +8,7 @@ use futures::{FutureExt, TryStreamExt};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::result::Result as RustResult;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Handle;
 
@@ -44,6 +45,7 @@ use lance::io::ObjectStoreParams;
 use lance_io::object_store::{ObjectStoreProvider, StorageOptionsAccessor};
 use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
 
+use crate::filesystem_object_store::FooterRead;
 use crate::lance_object_store::{
     FFIObjectStoreProvider, FFIReadOptions, build_filesystem_session, native_mutation_store_params,
     shared_scan_scheduler,
@@ -390,20 +392,30 @@ async fn open_dataset_impl(
     }
     let inner = builder.load().await?;
     let object_store = inner.object_store(None).await?;
+    // FIXME: Add FooterRead Extensions to Legacy's PreviousFileReader before
+    // enabling footer-only Talon for Legacy. Its footer and data requests
+    // currently both use untagged GETs and need the original filesystem policy.
+    let is_v2 =
+        inner.manifest().data_storage_format.lance_file_version()? != LanceFileVersion::Legacy;
+    let scan_scheduler = OnceLock::new();
+    if is_v2 {
+        read_options
+            .disable_talon_by_default
+            .store(true, Ordering::Relaxed);
+        // Legacy reads bypass this scheduler and use their dataset's store.
+        // Only publish V2 stores here, so all shared schedulers use this policy.
+        scan_scheduler
+            .set(shared_scan_scheduler(
+                read_options.object_store_prefix().to_string(),
+                &object_store,
+            )?)
+            .expect("a newly opened BlockingDataset has no scan scheduler");
+    }
     let dataset = BlockingDataset {
         inner,
         object_store,
-        scan_scheduler: Arc::new(OnceLock::new()),
+        scan_scheduler: Arc::new(scan_scheduler),
     };
-
-    let scheduler = shared_scan_scheduler(
-        read_options.object_store_prefix().to_string(),
-        &dataset.object_store,
-    )?;
-    dataset
-        .scan_scheduler
-        .set(scheduler)
-        .expect("a newly opened BlockingDataset has no scan scheduler");
     Ok(Box::new(dataset))
 }
 
@@ -790,10 +802,6 @@ impl BlockingFragmentReader {
                     .unwrap_or_default();
                 sorted_deletions.sort_unstable();
                 let row_id_sequence = fragment.get_row_id_sequence().await?;
-                let default_scheduler = read_config
-                    .scan_scheduler
-                    .as_ref()
-                    .expect("fragment_read_config always installs a scheduler");
                 let mut files = FileMetadataMap::with_capacity(fragment.metadata().files.len());
                 for data_file in &fragment.metadata().files {
                     // Legacy readers use their own footer format and still open normally.
@@ -825,7 +833,11 @@ impl BlockingFragmentReader {
                     };
                     let path = data_dir.join(data_file.path.as_str());
                     let scheduler = if data_file.base_id.is_none() {
-                        default_scheduler.clone()
+                        read_config
+                            .scan_scheduler
+                            .as_ref()
+                            .expect("V2 fragment reads have a scheduler")
+                            .clone()
                     } else {
                         let object_store = dataset.inner.object_store(data_file.base_id).await?;
                         ScanScheduler::new(
@@ -833,8 +845,15 @@ impl BlockingFragmentReader {
                             SchedulerConfig::max_bandwidth(&object_store),
                         )
                     };
+                    let mut extensions = object_store::Extensions::new();
+                    extensions.insert(FooterRead);
                     let file_scheduler = scheduler
-                        .open_file_with_priority(&path, 0, &data_file.file_size_bytes)
+                        .open_file_with_priority_and_extensions(
+                            &path,
+                            0,
+                            &data_file.file_size_bytes,
+                            extensions,
+                        )
                         .await?;
                     let metadata = fragment.get_file_metadata(&file_scheduler).await?;
                     files.insert((data_file.base_id, data_file.path.clone()), metadata);
@@ -1145,11 +1164,16 @@ async fn open_fragment_reader_impl(
             location: snafu::location!(),
         })?;
 
+    let read_config = if fragment.files.iter().any(|file| !file.is_legacy_file()) {
+        dataset.fragment_read_config(FragReadConfig::default())
+    } else {
+        FragReadConfig::default()
+    };
     let reader = BlockingFragmentReader::open(
         dataset,
         fragment,
         &arrow_schema,
-        dataset.fragment_read_config(FragReadConfig::default()),
+        read_config,
         files_metadata,
     )
     .await?;
