@@ -1528,7 +1528,9 @@ TEST_F(S3UnitTest, TestClientBuilder) {
                                                                   {" us-west-2", false},
                                                                   {"us-west-2-", false},
                                                                   {std::string(64, 'a'), false}};
-  for (const auto& [region, valid] : region_cases) {
+  for (const auto& region_case : region_cases) {
+    const auto& region = region_case.first;
+    const bool valid = region_case.second;
     for (const bool explicit_region : {false, true}) {
       SCOPED_TRACE(::testing::Message() << "region=" << ::testing::PrintToString(region)
                                         << ", explicit_region=" << explicit_region);
