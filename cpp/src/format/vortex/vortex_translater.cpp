@@ -22,6 +22,8 @@
 #include <arrow/io/interfaces.h>
 #include <fmt/format.h>
 
+#include "milvus-storage/filesystem/talon/talon_file_system.h"
+
 namespace milvus_storage::vortex {
 
 namespace {
@@ -108,6 +110,8 @@ arrow::Result<std::unique_ptr<VortexTranslater>> VortexTranslater::Make(
   }
 
   ARROW_ASSIGN_OR_RAISE(auto input_file, source_fs->OpenInputFile(source_path));
+  // This handle only fills data cells; the footer was opened separately.
+  (void)talon::internal::ControlTalonForFile(input_file.get(), false);
 
   auto loader = [input_file, range_file,
                  cell_metas](const std::vector<milvus::cachinglayer::cid_t>& cids) -> arrow::Status {

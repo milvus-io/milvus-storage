@@ -32,6 +32,7 @@
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/talon/talon_file_system_producer.h"
 #include "milvus-storage/format/column_group_reader.h"
 #include "milvus-storage/format/format.h"
 #include "milvus-storage/format/format_reader.h"
@@ -1162,6 +1163,59 @@ TEST_F(PaimonIntegrationTest, DataSplitStreamRetainsSuppliedFilesystem) {
   ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatchReader(batches.get()));
   EXPECT_EQ(table->num_rows(), 17);
   EXPECT_EQ(table->num_columns(), 1);
+}
+
+TEST_F(PaimonIntegrationTest, DataSplitStreamDisablesTalonAfterTableMetadataOpen) {
+  const std::string bucket = "bucket";
+  const auto local_table = table_dir_ + "/" + bucket + "/table";
+  ASSERT_STATUS_OK(paimon::CreateTestTable(local_table, 17, "mor").status());
+
+  auto raw_origin = std::make_shared<FileSystemProxy>(table_dir_, std::make_shared<arrow::fs::LocalFileSystem>());
+  const paimon::StorageOptions options{{"milvus_fs_is_local", "false"}, {"milvus_fs_bucket", bucket}};
+  const auto location = "oss://" + bucket + "/table";
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderAWS;
+  config.bucket_name = bucket;
+  config.talon_mode = TalonMode::Full;
+  config.talon_coordinator = "127.0.0.1:0";
+  ASSERT_AND_ASSIGN(auto talon, TalonFileSystemProducer(config, raw_origin).Make());
+  auto filesystem = std::make_shared<FileSystemProxy>(bucket, std::move(talon));
+  ASSERT_AND_ASSIGN(auto files, paimon::PlanFiles(location, -1, "auto", filesystem, options));
+  ASSERT_EQ(files.size(), 1);
+
+  ASSERT_STATUS_OK(paimon::CreateTestTable(local_table + "-dv", 10, "deletion-vector", {1, 5, 9}).status());
+  ASSERT_AND_ASSIGN(auto direct_files, paimon::PlanFiles(location + "-dv", -1, "direct-file", filesystem, options));
+  ASSERT_EQ(direct_files.size(), 1);
+  const auto deletion = folly::parseJson(direct_files.front().metadata_json)["deletion_file"];
+
+  for (const bool talon_open_only : {false, true}) {
+    SCOPED_TRACE(talon_open_only);
+    config.talon_open_only = talon_open_only;
+    ASSERT_AND_ASSIGN(auto read_talon, TalonFileSystemProducer(config, raw_origin).Make());
+    auto read_fs = std::make_shared<FileSystemProxy>(bucket, std::move(read_talon));
+    ASSERT_AND_ASSIGN(auto metrics, read_fs->GetMetrics(kTalonMetricsSource));
+    ASSERT_NE(metrics, nullptr);
+    const auto before_open = metrics->GetReadCount();
+    ASSERT_AND_ASSIGN(auto reader, paimon::BlockingPaimonDataSplitReader::Open(files.front().metadata_json, location,
+                                                                               read_fs, options));
+    const auto after_open = metrics->GetReadCount();
+    ASSERT_GT(after_open, before_open);
+    ASSERT_AND_ASSIGN(auto stream, reader->OpenStream({"id"}));
+    ASSERT_AND_ASSIGN(auto batches, arrow::ImportRecordBatchReader(&stream));
+    ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatchReader(batches.get()));
+    EXPECT_EQ(table->num_rows(), 17);
+    EXPECT_EQ(table->num_columns(), 1);
+    EXPECT_EQ(metrics->GetReadCount() == after_open, talon_open_only);
+
+    // Deletion vectors are data even when fetched while loading file metadata.
+    const auto before_deletes = metrics->GetReadCount();
+    ASSERT_AND_ASSIGN(auto positions, paimon::ReadDeletionVector(deletion["path"].asString(), direct_files.front().path,
+                                                                 deletion["offset"].asInt(), deletion["length"].asInt(),
+                                                                 deletion["cardinality"].asInt(), read_fs, options));
+    EXPECT_EQ(positions, (std::vector<uint64_t>{1, 5, 9}));
+    EXPECT_EQ(metrics->GetReadCount() == before_deletes, talon_open_only);
+  }
 }
 
 TEST_F(PaimonIntegrationTest, PlanningPreservesFilesystemStatusDetails) {

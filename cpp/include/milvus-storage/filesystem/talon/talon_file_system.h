@@ -20,6 +20,10 @@
 
 #include <arrow/result.h>
 
+namespace arrow::io {
+class RandomAccessFile;
+}
+
 namespace arrow::fs {
 class FileSystem;
 }
@@ -31,6 +35,21 @@ enum class TalonMode : uint8_t { Disabled, Full, SmallReads };
 }  // namespace milvus_storage
 
 namespace milvus_storage::talon::internal {
+
+/// Update the existing file's routing flag for subsequent content reads.
+///
+/// For an open-only Talon file, enable=true restores its configured Talon mode
+/// (Full or SmallReads), and enable=false routes reads through its origin handle.
+/// Talon files with open_only=false always retain their configured Talon mode.
+///
+/// The return value is the capability used for FFI read dispatch. Talon-enabled
+/// files return true. When Talon is disabled, it reports whether the origin
+/// implements NonBlockingRandomAccessFile. Ordinary files report their own
+/// NonBlockingRandomAccessFile capability.
+///
+/// The caller keeps the file open and alive while controlling and reading it.
+/// Each read captures the routing flag when it starts.
+bool ControlTalonForFile(arrow::io::RandomAccessFile* file, bool enable);
 
 /// Creates a Talon read decorator around `origin_fs`.
 ///

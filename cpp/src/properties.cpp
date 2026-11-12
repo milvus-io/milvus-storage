@@ -494,6 +494,17 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       static_cast<uint32_t>(TalonMode::Disabled),
                       ValidatePropertyType() +
                           ValidatePropertyEnum<uint32_t>(TalonMode::Disabled, TalonMode::Full, TalonMode::SmallReads)),
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_OPEN_ONLY,
+                      PropertyType::BOOL,
+                      "Limit configured Talon routing to Parquet/Vortex reader-open metadata and Lance V2 "
+                      "manifests and data-file footers. Data reads use origin storage. Legacy Lance keeps "
+                      "fs.talon.mode for both footer and data reads. Paimon data-split readers use Talon for table "
+                      "schema/snapshot open, then origin for data-file footers and data. Paimon direct-file readers "
+                      "follow Parquet/Vortex routing. OpenDAL reads without an explicit metadata phase use origin, "
+                      "including Iceberg FileIO and Paimon planning/deletion-vector reads. "
+                      "Ignored when fs.talon.mode is 0.",
+                      false,
+                      ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_FS_TALON_SMALL_READ_THRESHOLD,
                       PropertyType::UINT32,
                       "Inclusive request size threshold in bytes for small_reads mode, before EOF clamping. "

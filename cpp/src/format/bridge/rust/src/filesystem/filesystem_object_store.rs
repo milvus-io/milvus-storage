@@ -21,6 +21,7 @@ use std::io;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::path::{Component, Path as FsPath, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -43,7 +44,8 @@ use crate::filesystem_c::{
     loon_errcode_aws_precondition_failed, loon_errcode_file_not_found, loon_errcode_not_support,
     loon_errcode_permission_denied, loon_errcode_transient_throttling,
     loon_filesystem_free_file_info_list, loon_filesystem_get_object_info, loon_filesystem_list_dir,
-    loon_filesystem_open_reader, loon_filesystem_reader_close, loon_filesystem_reader_destroy,
+    loon_filesystem_open_reader, loon_filesystem_reader_close,
+    loon_filesystem_reader_control_talon, loon_filesystem_reader_destroy,
     loon_filesystem_reader_readat, reader_supports_async,
 };
 use crate::filesystem_c::{LoonFFIResult, loon_filesystem_reader_readat_async};
@@ -426,22 +428,50 @@ fn validate_get_options(options: &GetOptions) -> object_store::Result<()> {
     }
 }
 
+/// Marks requests issued by a V2 footer reader through GetOptions::extensions.
+#[derive(Clone, Debug)]
+pub(crate) struct FooterRead;
+
+fn read_object_store_blocking(
+    reader: &ReaderHandle,
+    location: &ObjectPath,
+    offset: u64,
+    length: usize,
+) -> object_store::Result<Bytes> {
+    let mut buffer = BytesMut::with_capacity(length);
+    let out_data = buffer.spare_capacity_mut().as_mut_ptr().cast::<u8>();
+    let mut result =
+        unsafe { loon_filesystem_reader_readat(reader.as_ptr(), offset, length as u64, out_data) };
+    check_loon_ffi_result(&mut result, "read object range")
+        .map_err(|error| into_object_store_error(error, location))?;
+    // SAFETY: successful reads fill the entire requested range.
+    unsafe { buffer.set_len(length) };
+    Ok(buffer.freeze())
+}
+
 #[derive(Clone)]
 pub(crate) struct FilesystemObjectStore {
     filesystem: SharedPtr<FileSystemWrapper>,
     mapper: FFIPathMapper,
     metadata: MetadataCache,
-    // Diagnostic only: immutable benchmark objects; bounded shared native handles.
-    read_handles: Arc<Mutex<LruCache<ObjectPath, Arc<ReaderHandle>>>>,
+    // Key by path and V2 data phase so each handle keeps a fixed routing policy.
+    // Footer and data handles share the same bounded cache.
+    read_handles: Arc<Mutex<LruCache<(ObjectPath, bool), Arc<ReaderHandle>>>>,
+    disable_talon_by_default: Arc<AtomicBool>,
 }
 
 impl FilesystemObjectStore {
-    pub(crate) fn new(filesystem: SharedPtr<FileSystemWrapper>, mapper: FFIPathMapper) -> Self {
+    pub(crate) fn new(
+        filesystem: SharedPtr<FileSystemWrapper>,
+        mapper: FFIPathMapper,
+        disable_talon_by_default: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             filesystem,
             mapper,
             metadata: MetadataCache::new(),
-            read_handles: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(128).unwrap()))),
+            disable_talon_by_default,
+            read_handles: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap()))),
         }
     }
 
@@ -659,6 +689,7 @@ impl FilesystemObjectStore {
         location: &ObjectPath,
         size: u64,
         range: Range<u64>,
+        is_footer_read: bool,
     ) -> object_store::Result<Bytes> {
         let length =
             range
@@ -680,11 +711,13 @@ impl FilesystemObjectStore {
                 source: Box::new(source),
             })?;
 
+        let data_read = self.disable_talon_by_default.load(Ordering::Relaxed) && !is_footer_read;
+        let handle_key = (location.clone(), data_read);
+        let cached = self.read_handles.lock().unwrap().get(&handle_key).cloned();
+        if let Some(reader) = &cached
+            && reader.supports_async
         {
-            let cached = { self.read_handles.lock().unwrap().get(location).cloned() };
-            if let Some(reader) = cached {
-                return read_object_store_async_via_ffi(reader, location.clone(), range).await;
-            }
+            return read_object_store_async_via_ffi(reader.clone(), location.clone(), range).await;
         }
 
         enum ReadOutcome {
@@ -693,6 +726,7 @@ impl FilesystemObjectStore {
         }
 
         let filesystem = self.filesystem.clone();
+        let read_handles = self.read_handles.clone();
         let ffi_path = self.mapper.to_ffi_path(location);
         let object_path = location.clone();
         let offset = range.start;
@@ -701,6 +735,11 @@ impl FilesystemObjectStore {
         // to the existing callback path instead.
         let outcome = TOKIO_RT
             .spawn_blocking(move || {
+                if let Some(reader) = cached {
+                    return read_object_store_blocking(&reader, &object_path, offset, length_usize)
+                        .map(ReadOutcome::Complete);
+                }
+
                 let path_len = u32::try_from(ffi_path.len()).map_err(|source| {
                     object_store::Error::Generic {
                         store: "filesystem_c",
@@ -720,7 +759,11 @@ impl FilesystemObjectStore {
                 check_loon_ffi_result(&mut result, "open object reader")
                     .map_err(|error| into_object_store_error(error, &object_path))?;
 
-                let supports_async = match reader_supports_async(reader_raw) {
+                let supports_async = match if data_read {
+                    Ok(unsafe { loon_filesystem_reader_control_talon(reader_raw, false) })
+                } else {
+                    reader_supports_async(reader_raw)
+                } {
                     Ok(supported) => supported,
                     Err(error) => unsafe {
                         let mut close_result = loon_filesystem_reader_close(reader_raw);
@@ -733,26 +776,24 @@ impl FilesystemObjectStore {
                         return Err(into_object_store_error(error, &object_path));
                     },
                 };
-                let reader = ReaderHandle {
+                let reader = Arc::new(ReaderHandle {
                     ptr: reader_raw,
                     supports_async,
-                };
+                });
+                // Cache both native-async and blocking handles after setting
+                // their policy. Release evicted handles outside the mutex.
+                let evicted = read_handles
+                    .lock()
+                    .unwrap()
+                    .push(handle_key, reader.clone());
+                drop(evicted);
 
                 if reader.supports_async {
-                    return Ok(ReadOutcome::Async(Arc::new(reader)));
+                    return Ok(ReadOutcome::Async(reader));
                 }
 
-                let mut buffer = BytesMut::with_capacity(length_usize);
-                let out_data = buffer.spare_capacity_mut().as_mut_ptr().cast::<u8>();
-                let mut result = unsafe {
-                    loon_filesystem_reader_readat(reader.as_ptr(), offset, length, out_data)
-                };
-                check_loon_ffi_result(&mut result, "read object range")
-                    .map_err(|error| into_object_store_error(error, &object_path))?;
-                // SAFETY: the FFI contract returns success only after filling the
-                // entire requested range; the allocation stays inside this task.
-                unsafe { buffer.set_len(length_usize) };
-                Ok(ReadOutcome::Complete(buffer.freeze()))
+                read_object_store_blocking(&reader, &object_path, offset, length_usize)
+                    .map(ReadOutcome::Complete)
             })
             .await
             .map_err(|source| object_store::Error::Generic {
@@ -762,13 +803,6 @@ impl FilesystemObjectStore {
 
         match outcome {
             ReadOutcome::Async(reader) => {
-                // Drop replaced/evicted handles outside the cache lock and outside callbacks.
-                let evicted = self
-                    .read_handles
-                    .lock()
-                    .unwrap()
-                    .push(location.clone(), reader.clone());
-                drop(evicted);
                 read_object_store_async_via_ffi(reader, location.clone(), range).await
             }
             ReadOutcome::Complete(bytes) => Ok(bytes),
@@ -843,7 +877,10 @@ impl object_store::ObjectStore for FilesystemObjectStore {
         // FFI range reads return one complete Bytes value. Resolve it before
         // returning GetResult so the outer AIMD wrapper can classify and retry
         // throttling errors instead of losing them in the deferred payload.
-        let bytes = self.read_range(location, meta.size, range.clone()).await?;
+        let is_footer_read = options.extensions.get::<FooterRead>().is_some();
+        let bytes = self
+            .read_range(location, meta.size, range.clone(), is_footer_read)
+            .await?;
         Ok(GetResult {
             payload: GetResultPayload::Stream(stream::once(async move { Ok(bytes) }).boxed()),
             meta,

@@ -108,6 +108,7 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
   hash_combine(talon_mode);
   // Disabled Talon settings do not affect the origin filesystem's identity.
   if (talon_mode != TalonMode::Disabled) {
+    hash_combine(talon_open_only);
     hash_combine(talon_coordinator);
     hash_combine(talon_namespace);
     hash_combine(talon_block_size);
@@ -197,7 +198,7 @@ std::string ArrowFileSystemConfig::ToString() const {
      << ", crt_queue_sizes=" << crt_queue_sizes
      << ", tls_min_version=" << (tls_min_version.empty() ? "(default)" : tls_min_version)
      << ", use_crc32c_checksum=" << std::boolalpha << use_crc32c_checksum << ", s3_use_crt=" << std::boolalpha
-     << s3_use_crt << ", talon_mode=" << talon_mode_name
+     << s3_use_crt << ", talon_mode=" << talon_mode_name << ", talon_open_only=" << talon_open_only
      << ", talon_small_read_threshold=" << talon_small_read_threshold << ", talon_coordinator=" << talon_coordinator
      << ", talon_block_size=" << talon_block_size << ", talon_max_idle_per_addr=" << talon_max_idle_per_addr;
   if (!alias.empty()) {
@@ -371,6 +372,7 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(
     return arrow::Status::Invalid("fs.talon.mode must be 0 (disabled), 1 (full), or 2 (small_reads)");
   }
   result.talon_mode = static_cast<TalonMode>(talon_mode);
+  ARROW_ASSIGN_OR_RAISE(result.talon_open_only, api::GetValue<bool>(properties_map, PROPERTY_FS_TALON_OPEN_ONLY));
   ARROW_ASSIGN_OR_RAISE(result.talon_small_read_threshold,
                         api::GetValue<uint32_t>(properties_map, PROPERTY_FS_TALON_SMALL_READ_THRESHOLD));
   ARROW_ASSIGN_OR_RAISE(result.talon_coordinator,

@@ -8,7 +8,7 @@
 //! credential-free adapter options. Writes and deletes use Lance's native mutation stores and
 //! reject dynamic credential modes that cannot preserve the caller's identity safely.
 //!
-//! Every local or remote reader joins the `ScanScheduler` keyed by `milvus_fs_cache_key`. A
+//! V2 readers share a `ScanScheduler` keyed by `milvus_fs_cache_key`. A
 //! configured parallelism of zero becomes Lance's default of 64; it does not disable sharing.
 //! While a scheduler is active, the first reader's ObjectStore, AIMD settings, and parallelism
 //! remain authoritative. Later readers for the same filesystem reuse them until the last strong
@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::path::{Component, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use cxx::SharedPtr;
@@ -91,6 +92,7 @@ pub(crate) fn native_mutation_store_params(
 pub(crate) struct FFIReadOptions {
     fs_cache_key: String,
     pub(crate) is_local: bool,
+    pub(crate) disable_talon_by_default: Arc<AtomicBool>,
     root_path: Option<PathBuf>,
     pub(crate) io_parallelism: usize,
     pub(crate) aimd_options: HashMap<String, String>,
@@ -221,6 +223,7 @@ impl FFIReadOptions {
         Ok(Self {
             fs_cache_key,
             is_local,
+            disable_talon_by_default: Arc::new(AtomicBool::new(false)),
             root_path,
             io_parallelism,
             aimd_options: HashMap::from([
@@ -263,6 +266,7 @@ impl FFIReadOptions {
 pub(crate) struct FFIObjectStoreProvider {
     filesystem: SharedPtr<FileSystemWrapper>,
     mapper: FFIPathMapper,
+    disable_talon_by_default: Arc<AtomicBool>,
     fs_cache_key: String,
     block_size: usize,
     io_parallelism: usize,
@@ -278,6 +282,7 @@ impl FFIObjectStoreProvider {
         Ok(Self {
             filesystem,
             mapper: options.path_mapper(dataset_url)?,
+            disable_talon_by_default: options.disable_talon_by_default.clone(),
             fs_cache_key: options.fs_cache_key.clone(),
             block_size: if options.is_local {
                 4 * 1024
@@ -340,6 +345,7 @@ impl ObjectStoreProvider for FFIObjectStoreProvider {
         let inner = Arc::new(FilesystemObjectStore::new(
             self.filesystem.clone(),
             self.mapper.clone(),
+            self.disable_talon_by_default.clone(),
         )) as Arc<dyn object_store::ObjectStore>;
         let throttle_config = AimdThrottleConfig::from_storage_options(Some(&self.aimd_options))?;
         let inner = if throttle_config.is_disabled() {

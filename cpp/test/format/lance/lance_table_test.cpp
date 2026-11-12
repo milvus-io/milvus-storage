@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <barrier>
 #include <cerrno>
@@ -60,6 +61,7 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/talon/talon_file_system_producer.h"
 #include "milvus-storage/format/format_reader_cache.h"
 #include "milvus-storage/format/lance/lance_format.h"
 #include "milvus-storage/format/lance/lance_table_writer.h"
@@ -2065,6 +2067,189 @@ TEST_F(LanceBasicTest, TestRead) {
       verify_recordbatch(result_batch, rgs[rg_idx].start_offset, rgs[rg_idx].end_offset - rgs[rg_idx].start_offset);
     }
   }
+}
+
+TEST_F(LanceBasicTest, TalonOpenOnlyRoutesLanceV2FootersWithoutExtraReads) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "This test wraps the real local fixture in Talon.";
+  }
+  class CountingOpenFileSystem final : public FileSystemProxy {
+ public:
+    using FileSystemProxy::FileSystemProxy;
+    using FileSystemProxy::OpenInputFile;
+
+    arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(
+        const arrow::fs::FileInfo& info) override {
+      input_file_opens.fetch_add(1, std::memory_order_relaxed);
+      return FileSystemProxy::OpenInputFile(info);
+    }
+
+    std::atomic<int64_t> input_file_opens{0};
+  };
+  const auto counted_origin = std::make_shared<CountingOpenFileSystem>("", fs_);
+  const auto subtree = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs_);
+  ASSERT_NE(subtree, nullptr);
+  ArrowFileSystemConfig talon_config;
+  talon_config.storage_type = "remote";
+  talon_config.cloud_provider = kCloudProviderAWS;
+  talon_config.bucket_name = "lance-talon-bucket";
+  talon_config.talon_mode = TalonMode::Full;
+  talon_config.talon_open_only = true;
+  talon_config.talon_coordinator = "127.0.0.1:0";
+  ASSERT_AND_ASSIGN(auto raw_talon, TalonFileSystemProducer(talon_config, counted_origin).Make());
+  auto filesystem = std::make_shared<FileSystemProxy>(talon_config.bucket_name, std::move(raw_talon));
+  ASSERT_AND_ASSIGN(auto talon_metrics, filesystem->GetMetrics(kTalonMetricsSource));
+  ASSERT_AND_ASSIGN(auto origin_metrics, filesystem->GetMetrics(kOriginMetricsSource));
+  auto properties = properties_;
+  const auto bucket_root = (boost::filesystem::path(subtree->base_path()) / talon_config.bucket_name).string();
+  ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_ROOT_PATH, bucket_root.c_str()), std::nullopt);
+  auto props = std::make_shared<const api::Properties>(properties);
+  ArrowFileSystemConfig config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(props, config));
+  // This service-free fixture uses a local path mapper beneath a real Talon
+  // wrapper. Policy and identity must come from that wrapper's actual config.
+  auto options = ToReaderOptions(talon_config);
+  options["milvus_fs_is_local"] = "true";
+  options["milvus_fs_root_path"] = config.root_path;
+  auto full_config = talon_config;
+  full_config.talon_open_only = false;
+  ASSERT_AND_ASSIGN(auto full_raw_talon, TalonFileSystemProducer(full_config, counted_origin).Make());
+  auto full_filesystem = std::make_shared<FileSystemProxy>(full_config.bucket_name, std::move(full_raw_talon));
+  ASSERT_AND_ASSIGN(auto full_metrics, full_filesystem->GetMetrics(kTalonMetricsSource));
+  ASSERT_AND_ASSIGN(auto full_origin_metrics, full_filesystem->GetMetrics(kOriginMetricsSource));
+  const auto io_delta = [](const auto& before, const auto& after) {
+    return std::array{after.get_file_info_count - before.get_file_info_count, after.read_count - before.read_count,
+                      after.read_bytes - before.read_bytes};
+  };
+  auto full_options = ToReaderOptions(full_config);
+  full_options["milvus_fs_is_local"] = "true";
+  full_options["milvus_fs_root_path"] = config.root_path;
+  ASSERT_NE(options.at("milvus_fs_cache_key"), full_options.at("milvus_fs_cache_key"));
+  ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, 0, true, 32768));
+  std::shared_ptr<BlockingDataset> legacy_dataset;
+  for (const auto version : {LanceDataStorageFormat::Legacy, LanceDataStorageFormat::V2_1, LanceDataStorageFormat::V2_2,
+                             LanceDataStorageFormat::V2_3}) {
+    SCOPED_TRACE(static_cast<int>(version));
+    const auto path = arrow_base_path_ + "/table-" + std::to_string(static_cast<int>(version));
+    LanceTableWriter writer(path, schema_, props, version);
+    ASSERT_STATUS_OK(writer.Write(batch));
+    ASSERT_AND_ASSIGN(auto file, writer.Close());
+    ASSERT_AND_ASSIGN(auto parsed, ParseLanceUri(file.path));
+    const auto uri = ToStandardLanceUri(parsed.first);
+    const auto before_manifest = talon_metrics->GetReadCount();
+    ASSERT_AND_ASSIGN(auto dataset, BlockingDataset::Open(uri, filesystem, options));
+    EXPECT_GT(talon_metrics->GetReadCount(), before_manifest);
+    if (version == LanceDataStorageFormat::Legacy) {
+      legacy_dataset = dataset;
+    }
+    ASSERT_AND_ASSIGN(auto full_dataset, BlockingDataset::Open(uri, full_filesystem, full_options));
+    std::shared_ptr<const FragmentFilesMetadata> retained_footers;
+    const auto read_fragment = [&](BlockingDataset& current, auto& talon, auto& origin,
+                                   bool expect_talon_data) -> arrow::Result<std::array<std::array<int64_t, 3>, 3>> {
+      ArrowSchema exported{};
+      const auto before_cold = origin->GetSnapshot();
+      const auto before_footer = talon->GetReadCount();
+      ARROW_RETURN_NOT_OK(arrow::ExportSchema(*schema_, &exported));
+      ARROW_ASSIGN_OR_RAISE(auto reader, BlockingFragmentReader::Open(current, parsed.second, exported));
+      EXPECT_GT(talon->GetReadCount(), before_footer);
+      const auto after_footer = talon->GetReadCount();
+      const auto after_footer_opens = counted_origin->input_file_opens.load(std::memory_order_relaxed);
+
+      ARROW_ASSIGN_OR_RAISE(auto stream, reader->ReadAllAsStream(32768));
+      ARROW_ASSIGN_OR_RAISE(auto batches, arrow::ImportRecordBatchReader(&stream));
+      ARROW_ASSIGN_OR_RAISE(auto table, arrow::Table::FromRecordBatchReader(batches.get()));
+      EXPECT_EQ(table->num_rows(), batch->num_rows());
+      if (expect_talon_data) {
+        EXPECT_GT(talon->GetReadCount(), after_footer);
+      } else {
+        EXPECT_EQ(talon->GetReadCount(), after_footer);
+      }
+      const auto after_cold = origin->GetSnapshot();
+      const auto after_cold_opens = counted_origin->input_file_opens.load(std::memory_order_relaxed);
+      if (version != LanceDataStorageFormat::Legacy) {
+        EXPECT_GT(after_cold_opens, after_footer_opens);
+      }
+
+      auto metadata = reader->GetFilesMetadata();
+      if (expect_talon_data) {
+        retained_footers = metadata;
+      }
+      const auto before_warm = talon->GetReadCount();
+      ARROW_RETURN_NOT_OK(arrow::ExportSchema(*schema_, &exported));
+      ARROW_ASSIGN_OR_RAISE(auto warm_reader,
+                            BlockingFragmentReader::Open(current, parsed.second, exported, metadata.get()));
+      if (version != LanceDataStorageFormat::Legacy) {
+        EXPECT_EQ(talon->GetReadCount(), before_warm);
+      }
+      ARROW_ASSIGN_OR_RAISE(auto warm_stream, warm_reader->ReadAllAsStream(32768));
+      ARROW_ASSIGN_OR_RAISE(auto warm_batches, arrow::ImportRecordBatchReader(&warm_stream));
+      ARROW_ASSIGN_OR_RAISE(auto warm_table, arrow::Table::FromRecordBatchReader(warm_batches.get()));
+      EXPECT_TRUE(warm_table->Equals(*table));
+      if (!expect_talon_data) {
+        EXPECT_EQ(talon->GetReadCount(), after_footer);
+      }
+      const auto after_warm = origin->GetSnapshot();
+      EXPECT_EQ(counted_origin->input_file_opens.load(std::memory_order_relaxed), after_cold_opens);
+
+      // A footer cache miss reuses the footer handle independently of data reads.
+      if (version != LanceDataStorageFormat::Legacy) {
+        const auto before_reopen = talon->GetReadCount();
+        const auto before_native_opens = counted_origin->input_file_opens.load(std::memory_order_relaxed);
+        ARROW_RETURN_NOT_OK(arrow::ExportSchema(*schema_, &exported));
+        ARROW_RETURN_NOT_OK(BlockingFragmentReader::Open(current, parsed.second, exported).status());
+        EXPECT_GT(talon->GetReadCount(), before_reopen);
+        EXPECT_EQ(counted_origin->input_file_opens.load(std::memory_order_relaxed), before_native_opens);
+
+        const auto footer_reads = talon->GetReadCount() - before_reopen;
+        const auto before_parallel = talon->GetReadCount();
+        std::barrier start(2);
+        auto footer_open = std::async(std::launch::async, [&]() -> arrow::Status {
+          start.arrive_and_wait();
+          ArrowSchema footer_schema{};
+          ARROW_RETURN_NOT_OK(arrow::ExportSchema(*schema_, &footer_schema));
+          return BlockingFragmentReader::Open(current, parsed.second, footer_schema).status();
+        });
+        start.arrive_and_wait();
+        ARROW_ASSIGN_OR_RAISE(auto parallel_stream, reader->ReadAllAsStream(32768));
+        ARROW_ASSIGN_OR_RAISE(auto parallel_batches, arrow::ImportRecordBatchReader(&parallel_stream));
+        ARROW_ASSIGN_OR_RAISE(auto parallel_table, arrow::Table::FromRecordBatchReader(parallel_batches.get()));
+        ARROW_RETURN_NOT_OK(footer_open.get());
+        EXPECT_TRUE(parallel_table->Equals(*table));
+        if (!expect_talon_data) {
+          EXPECT_EQ(talon->GetReadCount() - before_parallel, footer_reads);
+        }
+        EXPECT_EQ(counted_origin->input_file_opens.load(std::memory_order_relaxed), before_native_opens);
+      }
+      return std::array{io_delta(before_cold, after_cold), io_delta(after_cold, after_warm),
+                        io_delta(after_warm, origin->GetSnapshot())};
+    };
+    ASSERT_AND_ASSIGN(auto full_io, read_fragment(*full_dataset, full_metrics, full_origin_metrics, true));
+    ASSERT_AND_ASSIGN(auto open_only_io, read_fragment(*dataset, talon_metrics, origin_metrics,
+                                                       version == LanceDataStorageFormat::Legacy));
+    EXPECT_GT(full_io[0][0], 0);
+    EXPECT_GT(full_io[0][1], 0);
+    EXPECT_GT(full_io[1][1], 0);
+    EXPECT_EQ(open_only_io, full_io);
+
+    if (version != LanceDataStorageFormat::Legacy) {
+      // Exercise a native handle cache miss with a retained footer. The
+      // exported stream must keep data routing alive after the reader drops.
+      dataset.reset();
+      ASSERT_AND_ASSIGN(dataset, BlockingDataset::Open(uri, filesystem, options));
+      const auto before_cache_miss = talon_metrics->GetReadCount();
+      ArrowSchema exported{};
+      ASSERT_STATUS_OK(arrow::ExportSchema(*schema_, &exported));
+      ASSERT_AND_ASSIGN(auto reader,
+                        BlockingFragmentReader::Open(*dataset, parsed.second, exported, retained_footers.get()));
+      ASSERT_AND_ASSIGN(auto stream, reader->ReadAllAsStream(32768));
+      reader.reset();
+      ASSERT_AND_ASSIGN(auto batches, arrow::ImportRecordBatchReader(&stream));
+      ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatchReader(batches.get()));
+      EXPECT_EQ(table->num_rows(), batch->num_rows());
+      EXPECT_EQ(talon_metrics->GetReadCount(), before_cache_miss);
+    }
+  }
+  ASSERT_STATUS_OK(fs_->DeleteDir(talon_config.bucket_name + "/" + arrow_base_path_));
 }
 
 TEST_F(LanceBasicTest, ReadsThroughBoundFilesystemMetrics) {

@@ -41,6 +41,7 @@
 
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/talon/talon_file_system_producer.h"
 #include "milvus-storage/format/vortex/vortex_footer_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_planner.h"
@@ -271,6 +272,38 @@ TEST(VortexTranslaterResourceTest, EstimatesRequestedCellsAndKeepsScratchPrivate
   EXPECT_EQ(usage.resident, (ResourceUsage{0, 0}));
   EXPECT_EQ(usage.private_overhead, (ResourceUsage{0, 0}));
   EXPECT_EQ(usage.shared_overhead, (ResourceUsage{0, 0}));
+}
+
+TEST(VortexTranslaterResourceTest, OpenOnlyPolicyDisablesDataHandleBeforeCellLoadsAndReloads) {
+  auto origin = std::make_shared<InMemoryVortexRangeFileSystem>();
+  ASSERT_AND_ASSIGN(auto source, origin->GetInMemoryFile("test-bucket/source"));
+  ASSERT_STATUS_OK(source->WriteAt(0, arrow::Buffer::FromString("cell-data")));
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderAWS;
+  config.bucket_name = "test-bucket";
+  config.talon_mode = TalonMode::Full;
+  config.talon_open_only = true;
+  config.talon_coordinator = "127.0.0.1:0";
+  ASSERT_AND_ASSIGN(auto fs, TalonFileSystemProducer(config, origin).Make());
+  auto cells = std::make_shared<VortexCellMetas>(1);
+  (*cells)[0].storage_bytes = 9;
+  (*cells)[0].flat_segment_ranges = {{0, 9}};
+  auto sparse = std::make_shared<InMemoryVortexRangeFileSystem>();
+  ASSERT_AND_ASSIGN(auto translator, VortexTranslater::Make(cells, fs, "test-bucket/source", sparse, "sparse",
+                                                            CacheWarmupPolicy::CacheWarmupPolicy_Disable));
+  ASSERT_AND_ASSIGN(auto output, sparse->GetInMemoryFile("sparse"));
+  for (int reload = 0; reload < 2; ++reload) {
+    auto loaded = translator->get_cells(nullptr, {0});
+    ASSERT_EQ(loaded.size(), 1);
+    ASSERT_AND_ASSIGN(auto data, output->ReadAt(0, 9));
+    EXPECT_EQ(data->ToString(), "cell-data");
+  }
+  auto observable = std::dynamic_pointer_cast<Observable>(fs);
+  ASSERT_NE(observable, nullptr);
+  ASSERT_AND_ASSIGN(auto metrics, observable->GetMetrics(kTalonMetricsSource));
+  ASSERT_NE(metrics, nullptr);
+  EXPECT_EQ(metrics->GetReadCount(), 0);
 }
 
 TEST(VortexTranslaterResourceTest, RejectsInvalidCellsAndOverflowingBatches) {
