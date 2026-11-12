@@ -47,6 +47,7 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"  // for UNLIKELY
 #include "milvus-storage/filesystem/async_random_access_file.h"
+#include "milvus-storage/filesystem/talon/talon_file_system.h"
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage::parquet {
@@ -316,9 +317,11 @@ static arrow::Result<std::shared_ptr<::parquet::arrow::FileReader>> create_parqu
     metadata = try_parse_footer_metadata(footer_buffer, reader_props);
   }
 
-  ARROW_RETURN_NOT_OK(builder.Open(std::move(parquet_file), reader_props, metadata));
+  ARROW_RETURN_NOT_OK(builder.Open(parquet_file, reader_props, metadata));
   ARROW_RETURN_NOT_OK(
       builder.memory_pool(arrow::default_memory_pool())->properties(arrow_reader_props)->Build(&result));
+  // Also applies on cache hits, where metadata was injected and no footer was read.
+  (void)talon::internal::ControlTalonForFile(parquet_file.get(), false);
   return std::shared_ptr<::parquet::arrow::FileReader>(std::move(result));
 }
 

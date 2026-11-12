@@ -3317,7 +3317,7 @@ checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 [[package]]
 name = "fsst"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=29e34493494a2b9ed6dbde2d5e7b33c367927999#29e34493494a2b9ed6dbde2d5e7b33c367927999"
+source = "git+https://github.com/zilliztech/lance?rev=3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9#3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9"
 dependencies = [
  "arrow-array 58.3.0",
  "rand 0.9.2",
@@ -4327,7 +4327,7 @@ dependencies = [
 [[package]]
 name = "lance"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=29e34493494a2b9ed6dbde2d5e7b33c367927999#29e34493494a2b9ed6dbde2d5e7b33c367927999"
+source = "git+https://github.com/zilliztech/lance?rev=3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9#3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9"
 dependencies = [
  "arc-swap",
  "arrow 58.3.0",
@@ -4399,7 +4399,7 @@ dependencies = [
 [[package]]
 name = "lance-arrow"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=29e34493494a2b9ed6dbde2d5e7b33c367927999#29e34493494a2b9ed6dbde2d5e7b33c367927999"
+source = "git+https://github.com/zilliztech/lance?rev=3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9#3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9"
 dependencies = [
  "arrow-array 58.3.0",
  "arrow-buffer 58.3.0",
@@ -4420,7 +4420,7 @@ dependencies = [
 [[package]]
 name = "lance-bitpacking"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=29e34493494a2b9ed6dbde2d5e7b33c367927999#29e34493494a2b9ed6dbde2d5e7b33c367927999"
+source = "git+https://github.com/zilliztech/lance?rev=3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9#3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9"
 dependencies = [
  "arrayref",
  "paste",
@@ -4430,7 +4430,7 @@ dependencies = [
 [[package]]
 name = "lance-core"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=29e34493494a2b9ed6dbde2d5e7b33c367927999#29e34493494a2b9ed6dbde2d5e7b33c367927999"
+source = "git+https://github.com/zilliztech/lance?rev=3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9#3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9"
 dependencies = [
  "arrow-array 58.3.0",
  "arrow-buffer 58.3.0",
@@ -4466,7 +4466,7 @@ dependencies = [
 [[package]]
 name = "lance-datafusion"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=29e34493494a2b9ed6dbde2d5e7b33c367927999#29e34493494a2b9ed6dbde2d5e7b33c367927999"
+source = "git+https://github.com/zilliztech/lance?rev=3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9#3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9"
 dependencies = [
  "arrow 58.3.0",
  "arrow-array 58.3.0",
@@ -4497,7 +4497,7 @@ dependencies = [
 [[package]]
 name = "lance-datagen"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=29e34493494a2b9ed6dbde2d5e7b33c367927999#29e34493494a2b9ed6dbde2d5e7b33c367927999"
+source = "git+https://github.com/zilliztech/lance?rev=3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9#3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9"
 dependencies = [
  "arrow 58.3.0",
  "arrow-array 58.3.0",
@@ -4516,7 +4516,7 @@ dependencies = [
 [[package]]
 name = "lance-encoding"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=29e34493494a2b9ed6dbde2d5e7b33c367927999#29e34493494a2b9ed6dbde2d5e7b33c367927999"
+source = "git+https://github.com/zilliztech/lance?rev=3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9#3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9"
 dependencies = [
  "arrow-arith 58.3.0",
  "arrow-array 58.3.0",
@@ -4552,7 +4552,7 @@ dependencies = [
 [[package]]
 name = "lance-file"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=29e34493494a2b9ed6dbde2d5e7b33c367927999#29e34493494a2b9ed6dbde2d5e7b33c367927999"
+source = "git+https://github.com/zilliztech/lance?rev=3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9#3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9"
 dependencies = [
  "arrow-arith 58.3.0",
  "arrow-array 58.3.0",
@@ -4584,7 +4584,7 @@ dependencies = [
 [[package]]
 name = "lance-index"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=29e34493494a2b9ed6dbde2d5e7b33c367927999#29e34493494a2b9ed6dbde2d5e7b33c367927999"
+source = "git+https://github.com/zilliztech/lance?rev=3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9#3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9"
 dependencies = [
  "arc-swap",
  "arrow 58.3.0",
@@ -4648,7 +4648,7 @@ dependencies = [
 [[package]]
 name = "lance-io"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=29e34493494a2b9ed6dbde2d5e7b33c367927999#29e34493494a2b9ed6dbde2d5e7b33c367927999"
+source = "git+https://github.com/zilliztech/lance?rev=3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9#3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9"
 dependencies = [
  "arrow 58.3.0",
  "arrow-arith 58.3.0",
@@ -4691,7 +4691,7 @@ dependencies = [
 [[package]]
 name = "lance-linalg"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=29e34493494a2b9ed6dbde2d5e7b33c367927999#29e34493494a2b9ed6dbde2d5e7b33c367927999"
+source = "git+https://github.com/zilliztech/lance?rev=3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9#3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9"
 dependencies = [
  "arrow-array 58.3.0",
  "arrow-buffer 58.3.0",
@@ -4708,7 +4708,7 @@ dependencies = [
 [[package]]
 name = "lance-namespace"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=29e34493494a2b9ed6dbde2d5e7b33c367927999#29e34493494a2b9ed6dbde2d5e7b33c367927999"
+source = "git+https://github.com/zilliztech/lance?rev=3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9#3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
@@ -4735,7 +4735,7 @@ dependencies = [
 [[package]]
 name = "lance-table"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=29e34493494a2b9ed6dbde2d5e7b33c367927999#29e34493494a2b9ed6dbde2d5e7b33c367927999"
+source = "git+https://github.com/zilliztech/lance?rev=3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9#3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9"
 dependencies = [
  "arrow 58.3.0",
  "arrow-array 58.3.0",
@@ -4773,7 +4773,7 @@ dependencies = [
 [[package]]
 name = "lance-tokenizer"
 version = "7.0.0"
-source = "git+https://github.com/zilliztech/lance?rev=29e34493494a2b9ed6dbde2d5e7b33c367927999#29e34493494a2b9ed6dbde2d5e7b33c367927999"
+source = "git+https://github.com/zilliztech/lance?rev=3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9#3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9"
 dependencies = [
  "rust-stemmers",
  "serde",
