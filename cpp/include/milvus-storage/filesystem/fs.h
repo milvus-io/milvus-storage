@@ -222,13 +222,13 @@ struct ArrowFileSystemConfig {
   //
   // Cloud              | Native role/identity delegation   | credential_endpoint
   // -------------------+-----------------------------------+---------------------------
-  // S3 / S3-compatible | AssumeRole / OIDC role chains [1] | AWS STS flow [2]
+  // S3 / S3-compatible | AssumeRole / OIDC role chains [1] | STS credentials [2]
   // Azure              | No target-role delegation [3]     | SAS
   // GCP                | Service Account Impersonation     | OAuth2 access token
   //
   // [1] Native role_arn supports AWS, Aliyun OSS, Tencent COS and Volcengine TOS.
-  // [2] S3-compatible providers share the AWS STS broker contract (csp=aws).
-  //     Broker IAM uses csp=aws/ali/tc for AWS/Aliyun/Tencent respectively.
+  // [2] IAM and target-role Broker requests use csp=aws/ali/tc for
+  //     AWS/Aliyun/Tencent respectively.
   // [3] Azure supports native workload/managed identity authentication, which
   //     is separate from target-role delegation.
   // GCP's native path uses use_iam + gcp_target_service_account, not role_arn.
@@ -249,19 +249,20 @@ struct ArrowFileSystemConfig {
   // Broker's own identity; otherwise the supplied target identity is used.
   // True indicates supported Broker authentication for that cloud and mode.
   //
-  // Native filesystem/Talon bridge:
-  // Cloud provider | IAM Broker API | Non-IAM Broker API
-  // ---------------+----------------+-------------------
-  // aws            | True           | True
-  // aliyun         | True           | False
-  // tencent        | True           | False
-  // huawei         | False          | False
-  // volcengine     | False          | False
-  // gcp            | True           | True
-  // azure          | True           | True
-  // Native non-IAM configurations for aliyun/tencent/huawei/volcengine still
-  // route through the AWS STS Broker contract (csp=aws). This does not provide
-  // cloud-specific non-IAM Broker support.
+  // Cloud provider | IAM Broker API | Non-IAM Broker API (native) | Non-IAM Broker API (Talon)
+  // ---------------+----------------+-----------------------------+---------------------------
+  // aws            | True           | True                        | True
+  // aliyun         | True           | True                        | False
+  // tencent        | True           | True                        | False
+  // huawei         | False          | False                       | False
+  // volcengine     | False          | False                       | False
+  // gcp            | True           | True                        | True
+  // azure          | True           | True                        | True
+  // Talon's Broker backend accepts S3 target roles only with csp=aws, so the
+  // Talon bridge rejects Aliyun/Tencent target-role configurations instead of
+  // sending a request the backend would refuse. Native non-IAM configurations
+  // for huawei/volcengine still route through the AWS STS Broker contract
+  // (csp=aws). This does not provide cloud-specific non-IAM Broker support.
   std::string credential_endpoint = "";
 
   // Azure broker-backed temporary SAS authentication.
