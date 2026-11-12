@@ -49,17 +49,28 @@ bool IsAzureStorageAuthority(const std::string& address) {
          kAzureStorageAuthorities.end();
 }
 
-// External filesystems (alias set) take their address from user specs. When
+// External filesystems (alias set) take their account name and address from
+// user specs. Account names must follow Azure naming rules because they are
+// interpolated into Blob/DFS hostnames. When
 // the filesystem attaches a credential to each request (workload identity or
-// managed identity bearer tokens with use_iam; SAS tokens from the credential
-// Broker), that address must be an Azure Storage authority reached over
-// HTTPS, so a spec cannot redirect the credential to another host. Shared
-// keys sign requests instead of being attached, so they are not gated.
+// managed identity bearer tokens with use_iam; SAS tokens from the
+// credential Broker), that address must be an Azure Storage authority reached
+// over HTTPS, so a spec cannot redirect the credential to another host.
+// Shared keys sign requests instead of being attached, so their address and
+// scheme are not gated.
 // Primary filesystems (alias empty) are operator configuration and keep their
 // behavior, including USE_AZURITE.
 arrow::Status ValidateExternalCredentialTarget(const ArrowFileSystemConfig& config) {
   if (config.alias.empty()) {
     return arrow::Status::OK();
+  }
+  const auto& account = config.access_key_id;
+  if (account.size() < 3 || account.size() > 24 || !std::all_of(account.begin(), account.end(), [](unsigned char c) {
+        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+      })) {
+    return arrow::Status::Invalid("Azure external filesystem '", config.alias,
+                                  "': access_key_id must be an Azure storage account name containing "
+                                  "3-24 lowercase letters or digits");
   }
   const bool attaches_credential = config.use_iam || config.IsAzureCredentialBrokerEnabled();
   if (!attaches_credential) {
