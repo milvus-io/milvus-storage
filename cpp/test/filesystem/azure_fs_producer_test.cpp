@@ -21,6 +21,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <arrow/status.h>
 
@@ -60,6 +61,7 @@ class ScopedAzureEnv {
   std::map<std::string, std::optional<std::string>> saved_;
 };
 
+constexpr const char* kAccountRule = "3-24 lowercase letters or digits";
 constexpr const char* kAddressRule = "is not an Azure Storage authority";
 constexpr const char* kSslRule = "use_ssl must be true";
 // The use_iam path with no AZURE_* environment reaches the Managed Identity
@@ -106,6 +108,77 @@ class AzureFileSystemProducerTest : public ::testing::Test {
   protected:
   ScopedAzureEnv env_;
 };
+
+TEST_F(AzureFileSystemProducerTest, ExternalRejectsInvalidAccountNamesInEveryCredentialMode) {
+  auto shared_key = BaseConfig();
+  shared_key.alias = "customer";
+  shared_key.use_iam = false;
+  shared_key.access_key_value = "c2hhcmVkLWtleQ==";
+
+  const std::vector<std::string> invalid_accounts = {"",
+                                                     "ab",
+                                                     std::string(25, 'a'),
+                                                     "Storageaccount",
+                                                     "evil.example.com/",
+                                                     "account?query",
+                                                     "account#fragment",
+                                                     "user@account",
+                                                     "account:443",
+                                                     "account name",
+                                                     "account.name",
+                                                     "account-name",
+                                                     "account_name",
+                                                     "account%2fpath",
+                                                     "account\\path",
+                                                     "account\n",
+                                                     std::string("account\0", 8),
+                                                     "accöunt"};
+  for (auto config : {ExternalIamConfig("core.windows.net"), ExternalBrokerConfig("core.windows.net"), shared_key}) {
+    SCOPED_TRACE(config.use_iam);
+    SCOPED_TRACE(config.IsAzureCredentialBrokerEnabled());
+    for (const auto& account : invalid_accounts) {
+      SCOPED_TRACE(account);
+      config.access_key_id = account;
+      const auto status = Make(config);
+      ASSERT_TRUE(status.IsInvalid()) << status;
+      EXPECT_NE(status.message().find(kAccountRule), std::string::npos) << status;
+    }
+  }
+}
+
+TEST_F(AzureFileSystemProducerTest, ExternalAcceptsValidAccountNameBoundaries) {
+  const std::vector<std::string> accounts = {"abc", "123", "storage123", std::string(24, 'a')};
+  for (const auto& account : accounts) {
+    SCOPED_TRACE(account);
+    auto iam = ExternalIamConfig("core.windows.net");
+    iam.access_key_id = account;
+    // Reaching the environment check proves the account passed validation,
+    // without obtaining a token or sending a request.
+    const auto status = Make(iam);
+    ASSERT_TRUE(status.IsInvalid()) << status;
+    EXPECT_NE(status.message().find(kManagedIdentityCheck), std::string::npos) << status;
+
+    auto broker = ExternalBrokerConfig("core.windows.net");
+    broker.access_key_id = account;
+    EXPECT_TRUE(Make(broker).ok());
+
+    auto shared_key = BaseConfig();
+    shared_key.alias = "customer";
+    shared_key.use_iam = false;
+    shared_key.access_key_id = account;
+    shared_key.access_key_value = "c2hhcmVkLWtleQ==";
+    EXPECT_TRUE(Make(shared_key).ok());
+  }
+}
+
+TEST_F(AzureFileSystemProducerTest, PrimaryKeepsOperatorConfiguredAccountName) {
+  auto config = BaseConfig();
+  config.access_key_id = "custom-account";
+  config.use_iam = true;
+  const auto status = Make(config);
+  ASSERT_TRUE(status.IsInvalid()) << status;
+  EXPECT_NE(status.message().find(kManagedIdentityCheck), std::string::npos) << status;
+}
 
 TEST_F(AzureFileSystemProducerTest, ExternalIamRejectsNonAzureAddress) {
   auto status = Make(ExternalIamConfig("storage.example.test"));
