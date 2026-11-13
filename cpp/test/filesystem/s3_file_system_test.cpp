@@ -539,6 +539,50 @@ TEST_F(S3UnitTest, TestExtendErrorInFs) {
   ASSERT_TRUE(status.ToString().find(extend_status->ToString()) != std::string::npos);
 }
 
+TEST(S3ErrorRequestIdTest, SDKRequestId) {
+  Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::ACCESS_DENIED, false);
+  error.SetResponseCode(Aws::Http::HttpResponseCode::FORBIDDEN);
+  error.SetMessage("No response body.");
+  error.SetRequestId("sdk-request-id");
+  error.SetResponseHeaders({{"x-cos-request-id", "header-request-id"}});
+  const auto status = fs::internal::ErrorToStatus("HeadObject", error);
+  EXPECT_TRUE(status.IsIOError());
+  EXPECT_NE(status.ToString().find("request_id:sdk-request-id"), std::string::npos);
+  EXPECT_EQ(status.ToString().find("header-request-id"), std::string::npos);
+}
+
+TEST(S3ErrorRequestIdTest, RequestIdFromResponseHeaders) {
+  for (const auto& header :
+       {"x-amz-request-id", "x-cos-request-id", "x-oss-request-id", "x-obs-request-id", "X-Cos-Request-Id"}) {
+    SCOPED_TRACE(header);
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::ACCESS_DENIED, false);
+    error.SetResponseCode(Aws::Http::HttpResponseCode::FORBIDDEN);
+    error.SetMessage("No response body.");
+    error.SetResponseHeaders({{header, "server-request-id"}, {"authorization", "must-not-be-logged"}});
+    const auto status = fs::internal::ErrorToStatus("HeadObject", error);
+    EXPECT_NE(status.ToString().find("request_id:server-request-id"), std::string::npos);
+    EXPECT_EQ(status.ToString().find("must-not-be-logged"), std::string::npos);
+  }
+}
+
+TEST(S3ErrorRequestIdTest, MissingRequestId) {
+  Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::ACCESS_DENIED, false);
+  error.SetResponseCode(Aws::Http::HttpResponseCode::FORBIDDEN);
+  error.SetMessage("No response body.");
+  error.SetResponseHeaders({{"x-cos-request-id", ""}, {"content-type", "application/xml"}});
+  const auto status = fs::internal::ErrorToStatus("HeadObject", error);
+  EXPECT_NE(status.ToString().find("No response body."), std::string::npos);
+  EXPECT_EQ(status.ToString().find("request_id:"), std::string::npos);
+}
+
+TEST(S3ErrorRequestIdTest, ClientErrorWithoutResponse) {
+  Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::NETWORK_CONNECTION, true);
+  error.SetMessage("Connection timed out");
+  const auto status = fs::internal::ErrorToStatus("GetObject", error);
+  EXPECT_NE(status.ToString().find("Connection timed out"), std::string::npos);
+  EXPECT_EQ(status.ToString().find("request_id:"), std::string::npos);
+}
+
 TEST_F(S3UnitTest, TestErrorToStatusPermanentVsTransient) {
   // NoSuchKey: permanent, tagged AwsErrorNotFound.
   {
