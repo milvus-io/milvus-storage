@@ -35,9 +35,13 @@ TEST_P(S3ShutdownDeathTest, ReleasesCachedCredentialsBeforeSdkShutdown) {
           ASSERT_EQ(::setenv("AWS_DEFAULT_REGION", "us-west-2", 1), 0);
           ASSERT_EQ(::setenv("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/test-irsa", 1), 0);
           ASSERT_EQ(::setenv("AWS_WEB_IDENTITY_TOKEN_FILE", "/dev/null", 1), 0);
+          ASSERT_EQ(::setenv("AWS_ACCESS_KEY_ID", "test-access-key", 1), 0);
+          ASSERT_EQ(::setenv("AWS_SECRET_ACCESS_KEY", "test-secret-key", 1), 0);
+          ASSERT_EQ(::setenv("AWS_SESSION_TOKEN", "", 1), 0);
 
-          // Construct real WebIdentity providers without fetching credentials or
-          // making any S3 requests. Their HTTP pools retain the CRT bootstrap.
+          // The IAM chain constructs a real WebIdentity provider whose HTTP pool
+          // retains the CRT bootstrap. Environment credentials satisfy lookups
+          // without STS or S3 requests.
           api::Properties properties;
           properties[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
           properties[PROPERTY_FS_CLOUD_PROVIDER] = std::string("aws");
@@ -45,7 +49,10 @@ TEST_P(S3ShutdownDeathTest, ReleasesCachedCredentialsBeforeSdkShutdown) {
           properties[PROPERTY_FS_BUCKET_NAME] = std::string("test-bucket");
           properties[PROPERTY_FS_REGION] = std::string("us-west-2");
           properties[PROPERTY_FS_USE_SSL] = false;
-          properties[PROPERTY_FS_ROLE_ARN] = std::string("arn:aws:iam::123456789012:role/test-target");
+          // The classic S3 client keeps credentials lazy; the native S3
+          // transport would fetch them while building its signing config.
+          properties[PROPERTY_FS_S3_USE_CRT] = false;
+          properties[PROPERTY_FS_USE_IAM] = true;
           const auto config = std::make_shared<const api::Properties>(std::move(properties));
 
           if (s3_first) {

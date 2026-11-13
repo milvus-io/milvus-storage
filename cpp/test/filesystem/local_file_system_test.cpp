@@ -465,12 +465,12 @@ TEST(FilesystemMetricsFfiTest, ReportsS3LookupFailureAfterFinalization) {
           }
         }
         result = loon_filesystem_list_metrics_sources(&sources);
-        const bool failed = !loon_ffi_is_success(&result) && result.message != nullptr &&
-                            std::strstr(result.message, "S3 subsystem is finalized") != nullptr &&
-                            sources.entries == nullptr && sources.count == 0;
+        // Finalization clears the cache; retained handles above still reject S3
+        // operations, but listing cached filesystems now succeeds with no entries.
+        const bool empty = loon_ffi_is_success(&result) && sources.entries == nullptr && sources.count == 0;
         loon_ffi_free_result(&result);
         loon_filesystem_free_metrics_sources(&sources);
-        std::_Exit(failed ? 0 : 5);
+        std::_Exit(empty ? 0 : 5);
       },
       ::testing::ExitedWithCode(0), "");
   GTEST_FLAG_SET(death_test_style, original_death_test_style);
