@@ -43,10 +43,9 @@ class ColumnGroupLazyReader {
 
   // Async execution of a pre-planned TakeTask (single file).
   // Asynchronously prepares the target file reader, then submits async I/O.
-  // task.row_indices are column-group logical indices and are converted to
-  // file-local offsets before the format reader is invoked.
+  // The task owns the physical offsets used by the format reader.
   // Formats without a native async implementation may still complete inline.
-  virtual folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> take_async(const TakeTask& task) = 0;
+  virtual folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> take_async(TakeTask task) = 0;
 
   static arrow::Result<std::unique_ptr<ColumnGroupLazyReader>> create(
       const std::shared_ptr<arrow::Schema>& schema,

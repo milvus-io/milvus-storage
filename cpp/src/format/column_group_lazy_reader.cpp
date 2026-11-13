@@ -17,7 +17,7 @@
 #include <algorithm>
 #include <future>
 #include <memory>
-#include <tuple>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -29,6 +29,7 @@
 #include <arrow/type.h>
 #include <arrow/type_fwd.h>
 #include <fmt/format.h>
+#include <folly/ScopeGuard.h>
 
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/constants.h"
@@ -59,11 +60,10 @@ class ColumnGroupLazyReaderImpl : public ColumnGroupLazyReader {
 
   arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices,
                                                     size_t parallelism = 1) override;
-  folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> take_async(const TakeTask& task) override;
+  folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> take_async(TakeTask task) override;
 
   private:
-  arrow::Status validate_row_indices(const std::vector<int64_t>& row_indices) const;
-  arrow::Result<std::shared_ptr<arrow::Table>> take_rows_from_files(const std::vector<int64_t>& row_indices);
+  arrow::Result<std::shared_ptr<arrow::Table>> take_files(std::span<const TakeTask> tasks);
   arrow::Result<std::shared_ptr<ReaderT>> open_reader_for_file(size_t file_index);
   folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> open_reader_for_file_async(size_t file_index);
 
@@ -74,77 +74,6 @@ class ColumnGroupLazyReaderImpl : public ColumnGroupLazyReader {
   std::function<std::string(const std::string&)> key_retriever_;
   milvus_storage::MetadataCache cache_;
 };
-
-// FIXME(jiaqizho): This single-row lookup rescans files from the beginning. Batch callers
-// with sorted row indices could carry a forward file cursor and reduce the
-// overall lookup cost from O(rows * files) to O(rows + files).
-static inline arrow::Result<std::pair<uint32_t, int64_t>> get_index_and_offset_of_file(
-    const std::vector<ColumnGroupFile>& files, const int64_t& global_row_index) {
-  int64_t row_index_remain = global_row_index;
-
-  for (uint32_t i = 0; i < files.size(); i++) {
-    if (files[i].start_index < 0 || files[i].end_index < 0) {
-      return arrow::Status::Invalid(
-          fmt::format("Invalid start/end index in [file_index={}, path={}]", i, files[i].path));
-    }
-
-    int64_t num_of_rows_in_file = files[i].end_index - files[i].start_index;
-    if (row_index_remain < num_of_rows_in_file) {
-      return std::make_pair(i, row_index_remain + files[i].start_index);
-    }
-
-    row_index_remain -= num_of_rows_in_file;
-  }
-
-  return arrow::Status::Invalid(
-      fmt::format("Row index is greater than the maximum range, [row_index={}]", global_row_index));
-}
-
-static arrow::Status validate_sorted_unique_row_indices(const std::vector<int64_t>& row_indices) {
-  for (size_t i = 1; i < row_indices.size(); i++) {
-    if (row_indices[i] <= row_indices[i - 1]) {
-      return arrow::Status::Invalid(
-          fmt::format("Input row indices is not sorted or not unique,[index={}, row_index={}]", i, row_indices[i]));
-    }
-  }
-  return arrow::Status::OK();
-}
-
-static std::vector<std::vector<int64_t>> split_row_indices(const std::vector<int64_t>& row_indices,
-                                                           uint64_t parallel_degree) {
-  if (parallel_degree == 0 || row_indices.size() < parallel_degree) {
-    return std::vector<std::vector<int64_t>>{row_indices};
-  }
-
-  uint64_t avg_rows = row_indices.size() / parallel_degree;
-  std::vector<std::vector<int64_t>> splitted_row_indices(parallel_degree);
-  for (uint64_t i = 0; i < parallel_degree; i++) {
-    uint64_t start = i * avg_rows;
-    uint64_t end = (i + 1) * avg_rows;
-    if (i == parallel_degree - 1) {
-      end = row_indices.size();
-    }
-    splitted_row_indices[i] = std::vector<int64_t>(row_indices.begin() + start, row_indices.begin() + end);
-  }
-
-  return splitted_row_indices;
-}
-
-template <typename ReaderT>
-arrow::Status ColumnGroupLazyReaderImpl<ReaderT>::validate_row_indices(const std::vector<int64_t>& row_indices) const {
-  const auto& cg_files = column_group_->files;
-  for (const auto& row_index : row_indices) {
-    uint32_t file_index;
-    [[maybe_unused]] int64_t _unused_row_index_in_file;
-
-    if (row_index < 0) {
-      return arrow::Status::Invalid(fmt::format("Row index is less than 0, [row_index={}]", row_index));
-    }
-    ARROW_ASSIGN_OR_RAISE(std::tie(file_index, _unused_row_index_in_file),
-                          get_index_and_offset_of_file(cg_files, row_index));
-  }
-  return arrow::Status::OK();
-}
 
 template <typename ReaderT>
 arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file(size_t file_index) {
@@ -224,29 +153,17 @@ ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file_async(size_t file_index
 }
 
 template <typename ReaderT>
-arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl<ReaderT>::take_rows_from_files(
-    const std::vector<int64_t>& row_indices) {
-  const auto& cg_files = column_group_->files;
-  std::vector<std::vector<int64_t>> indices_in_files(cg_files.size());
-  for (const auto& row_index : row_indices) {
-    uint32_t file_index;
-    int64_t row_index_in_file;
-    ARROW_ASSIGN_OR_RAISE(std::tie(file_index, row_index_in_file), get_index_and_offset_of_file(cg_files, row_index));
-    indices_in_files[file_index].emplace_back(row_index_in_file);
-  }
-
+arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl<ReaderT>::take_files(
+    std::span<const TakeTask> tasks) {
   std::vector<std::shared_ptr<arrow::Table>> tables;
-  for (size_t file_index = 0; file_index < indices_in_files.size(); file_index++) {
-    if (indices_in_files[file_index].empty()) {
-      continue;
-    }
-
-    ARROW_ASSIGN_OR_RAISE(auto reader, open_reader_for_file(file_index));
-    ARROW_ASSIGN_OR_RAISE(auto table, reader->take(indices_in_files[file_index]));
-    tables.emplace_back(table);
+  for (const auto& task : tasks) {
+    ARROW_ASSIGN_OR_RAISE(auto reader, open_reader_for_file(task.file_index));
+    ARROW_ASSIGN_OR_RAISE(auto table, reader->take(task.file_offsets));
+    tables.emplace_back(std::move(table));
   }
-
-  // won't copy table with same schema
+  if (tables.size() == 1) {
+    return tables.front();
+  }
   return arrow::ConcatenateTables(tables);
 }
 
@@ -256,64 +173,59 @@ arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl<ReaderT>:
   FIU_RETURN_ON(FIUKEY_TAKE_ROWS_FAIL,
                 arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_TAKE_ROWS_FAIL)));
 
-  ARROW_RETURN_NOT_OK(validate_sorted_unique_row_indices(row_indices));
-  ARROW_RETURN_NOT_OK(validate_row_indices(row_indices));
-
-  if (parallelism <= 1) {
-    return take_rows_from_files(row_indices);
+  auto pool = parallelism > 1 ? ThreadPoolHolder::GetThreadPool(parallelism) : nullptr;
+  const size_t workers = pool ? pool->numThreads() : 1;
+  const size_t rows_per_batch =
+      workers > 1 && row_indices.size() >= workers ? 1 + (row_indices.size() - 1) / workers : 0;
+  ARROW_ASSIGN_OR_RAISE(auto tasks, TakeTask::Build({column_group_}, row_indices, rows_per_batch));
+  if (rows_per_batch == 0) {
+    return take_files(tasks);
   }
 
-  auto folly_thread_pool = ThreadPoolHolder::GetThreadPool(parallelism /* parallelism_hint */);
-  auto splitted_row_indices = split_row_indices(row_indices, folly_thread_pool->numThreads());
   std::vector<std::future<arrow::Result<std::shared_ptr<arrow::Table>>>> futures;
-
-  for (const auto& task_row_indices : splitted_row_indices) {
-    std::packaged_task<arrow::Result<std::shared_ptr<arrow::Table>>()> task(
-        [this, task_row_indices]() { return take_rows_from_files(task_row_indices); });
-    futures.emplace_back(task.get_future());
-    folly_thread_pool->add(std::move(task));
+  // Workers borrow the plan and reader. Drain outstanding work even if a read fails.
+  auto drain = folly::makeGuard([&]() noexcept {
+    for (auto& future : futures) {
+      if (future.valid()) {
+        future.wait();
+      }
+    }
+  });
+  for (size_t first = 0; first < tasks.size();) {
+    const size_t batch_number = tasks[first].first_position / rows_per_batch;
+    size_t end = first + 1;
+    while (end < tasks.size() && tasks[end].first_position / rows_per_batch == batch_number) {
+      ++end;
+    }
+    auto batch = std::span<const TakeTask>(tasks).subspan(first, end - first);
+    first = end;
+    std::packaged_task<arrow::Result<std::shared_ptr<arrow::Table>>()> work(
+        [this, batch]() { return take_files(batch); });
+    futures.emplace_back(work.get_future());
+    pool->add(std::move(work));
   }
 
   std::vector<std::shared_ptr<arrow::Table>> result_tables;
-  result_tables.reserve(futures.size());
-  std::vector<arrow::Result<std::shared_ptr<arrow::Table>>> all_results;
-  all_results.reserve(futures.size());
   for (auto& future : futures) {
-    all_results.emplace_back(future.get());
-  }
-  for (auto& result : all_results) {
-    ARROW_ASSIGN_OR_RAISE(auto table, std::move(result));
+    ARROW_ASSIGN_OR_RAISE(auto table, future.get());
     result_tables.emplace_back(std::move(table));
   }
-
   return arrow::ConcatenateTables(result_tables);
 }
 
 template <typename ReaderT>
 folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> ColumnGroupLazyReaderImpl<ReaderT>::take_async(
-    const TakeTask& task) {
+    TakeTask task) {
   FIU_RETURN_ON(FIUKEY_TAKE_ROWS_FAIL,
                 folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::Table>>(
                     arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_TAKE_ROWS_FAIL)))));
 
-  const auto& cg_files = column_group_->files;
-  std::vector<int64_t> rows_in_file;
-  rows_in_file.reserve(task.row_indices.size());
-  // Planning keeps global row indices; the format reader consumes file-local offsets.
-  for (auto global_row : task.row_indices) {
-    FOLLY_ARROW_ASSIGN_OR_RAISE(auto file_and_offset, get_index_and_offset_of_file(cg_files, global_row));
-    if (file_and_offset.first != task.file_index) {
-      return folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::Table>>(arrow::Status::Invalid(
-          fmt::format("TakeTask row does not belong to task file. [row={}, expected_file={}, actual_file={}]",
-                      global_row, task.file_index, file_and_offset.first))));
-    }
-    rows_in_file.push_back(file_and_offset.second);
-  }
+  FOLLY_ARROW_RETURN_NOT_OK(task.ValidateFile(*column_group_));
 
   // Open one independent reader for this file-scoped task; no mutable format
   // reader is shared with another in-flight take.
   return open_reader_for_file_async(task.file_index)
-      .deferValue([rows_in_file = std::move(rows_in_file)](arrow::Result<std::shared_ptr<ReaderT>>&& reader_result)
+      .deferValue([rows_in_file = std::move(task.file_offsets)](arrow::Result<std::shared_ptr<ReaderT>>&& reader_result)
                       -> folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> {
         FOLLY_ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
         return reader->take_async(rows_in_file)

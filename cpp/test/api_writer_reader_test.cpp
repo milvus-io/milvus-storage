@@ -29,10 +29,12 @@
 
 #include <arrow/api.h>
 #include <arrow/util/base64.h>
+#include <arrow/util/thread_pool.h>
 #include <arrow/filesystem/localfs.h>
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
+#include <folly/executors/ManualExecutor.h>
 #include <folly/OperationCancelled.h>
 
 #include "include/test_env.h"
@@ -1933,6 +1935,56 @@ TEST_P(APIWriterReaderTest, PublicTakeAsync) {
     ExpectStandardTestValue(batch->column(0), "id", i, row_indices[i]);
     ExpectStandardTestValue(batch->column(1), "name", i, row_indices[i]);
     ExpectStandardTestValue(batch->column(2), "value", i, row_indices[i]);
+  }
+}
+
+TEST_P(APIWriterReaderTest, PublicTakeAsyncReverseCompletion) {
+  if (format != LOON_FORMAT_PARQUET || !IsLocalFileSystem(fs_)) {
+    GTEST_SKIP() << "This test controls the executors used for local Parquet reads.";
+  }
+
+  ASSERT_EQ(SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, "false"), std::nullopt);
+  auto properties = std::make_shared<const Properties>(properties_);
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  auto reader = Reader::create(cgs, schema_, nullptr, properties);
+  auto* io_pool = dynamic_cast<arrow::internal::ThreadPool*>(arrow::io::default_io_context().executor());
+  ASSERT_NE(io_pool, nullptr);
+
+  class HoldFirstExecutor : public folly::ManualExecutor {
+ public:
+    void add(folly::Func func) override {
+      if (submissions.fetch_add(1) == 0) {
+        first.add(std::move(func));
+      } else {
+        folly::ManualExecutor::add(std::move(func));
+      }
+    }
+    std::atomic<size_t> submissions{0};
+    folly::ManualExecutor first;
+  } executor;
+
+  const std::vector<int64_t> rows = {0, 3, 7, 50};
+  // Three splits submit rows {0}, {7, 50}, {3}, so submission order also differs from request order.
+  auto future = reader->take_async(rows, 3).via(&executor);
+  EXPECT_EQ(executor.submissions.load(), 3);
+  // Keep the first split queued until both later splits finish their local I/O and continuations.
+  EXPECT_GT(executor.drain(), 0);
+  do {
+    io_pool->WaitForIdle();
+    arrow::internal::GetCpuThreadPool()->WaitForIdle();
+  } while (executor.drain() != 0);
+  EXPECT_FALSE(future.isReady());
+  EXPECT_EQ(executor.first.drain(), 1);
+  executor.waitFor(future);
+
+  ASSERT_AND_ASSIGN(auto table, std::move(future).get());
+  ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
+  ASSERT_EQ(batch->num_rows(), rows.size());
+  for (size_t i = 0; i < rows.size(); ++i) {
+    ExpectStandardTestValue(batch->column(0), "id", i, rows[i]);
   }
 }
 

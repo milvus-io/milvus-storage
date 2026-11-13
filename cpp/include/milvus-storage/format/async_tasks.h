@@ -27,6 +27,7 @@
 namespace milvus_storage::api {
 
 struct ColumnGroup;
+struct ColumnGroupFile;
 struct ChunkInfo;
 
 enum class AsyncTaskSplitStrategy : size_t {
@@ -73,13 +74,16 @@ struct ChunkTask {
                                       const std::function<const ChunkInfo&(int64_t)>& get_chunk_info);
 };
 
-// One take task belongs to one column-group reader and one file. Row indices
-// remain global until execution; original_positions restores input order.
+// One task reads one file and covers consecutive positions in the input request.
 struct TakeTask {
   size_t reader_index;
   uint32_t file_index;
-  std::vector<int64_t> row_indices;
-  std::vector<size_t> original_positions;
+  std::vector<int64_t> file_offsets;
+  size_t first_position;
+  // An alias into the owning column group. Equal offsets in different files are distinct rows.
+  std::shared_ptr<const ColumnGroupFile> planned_file;
+
+  arrow::Status ValidateFile(const ColumnGroup& group) const;
 
   class SplitTraits {
  public:
@@ -87,14 +91,15 @@ struct TakeTask {
     [[nodiscard]] size_t size(const TakeTask& task) const;
     // A take task is splittable only when each half can retain at least one row.
     [[nodiscard]] bool can_split(const TakeTask& task) const;
-    // Split rows and original_positions at the same boundary; mutate left and return right.
+    // Keep the first half in left and advance the input position for the right half.
     [[nodiscard]] TakeTask split(TakeTask& left) const;
   };
 
   // Validate sorted unique logical row indices, then build one natural task for
-  // every (column-group reader, file) pair touched by the request.
+  // every touched file. A nonzero batch size also splits tasks at fixed input-row boundaries.
   static arrow::Result<std::vector<TakeTask>> Build(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
-                                                    const std::vector<int64_t>& row_indices);
+                                                    const std::vector<int64_t>& row_indices,
+                                                    size_t rows_per_batch = 0);
 };
 
 // Split natural tasks toward target_count according to strategy. target_count

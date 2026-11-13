@@ -52,6 +52,17 @@ Tests read performance for different storage formats (Parquet, Vortex):
 
 **Data config index**: 0=Small(rK rows), 1=Medium(40K rows), 2=Large(409K rows), 3=HighDim, 4=LongString
 
+### benchmark_take_routing.cpp
+
+Run `./build/Release/benchmark/benchmark --benchmark_filter=TakeRouting` from `cpp`.
+The benchmark measures CPU time to build a routing plan. Each file exposes 2,048 rows
+starting at physical offset 19. The request selects evenly spaced rows or rows in the
+last file. To compare revisions, use the same benchmark source and build settings on both.
+
+For logical row `r`, its file number is `r / 2048` (integer division). The original
+planner visits `1 + r / 2048` files for each row. The forward pass visits that many
+files once for the last selected row and maps each selected row once.
+
 ### benchmark_storage_layer.cpp
 **Storage Layer End-to-End Performance (with Transaction)**
 
