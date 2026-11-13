@@ -32,6 +32,7 @@
 #include <aws/core/utils/logging/FormattedLogSystem.h>
 
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
 #include <algorithm>
@@ -134,6 +135,10 @@ struct AwsInstance {
         ARROW_UNUSED(leaked_shared_ptr);
         return;
       }
+      // Cached filesystems also own credential providers (and their STS clients),
+      // which are not tracked by the S3 client finalizers. Release them before
+      // ShutdownAPI waits for the CRT bootstrap's remaining references.
+      FilesystemCache::getInstance().clean();
       // Drain SDK client destructors and native transport shutdown callbacks
       // through the same holder registry before destroying the AWS runtime.
       crt_client_finalizer->Finalize();
@@ -147,6 +152,9 @@ struct AwsInstance {
 
   private:
   void DoInitialize(const S3GlobalOptions& options) {
+    // Keep the cache alive until the producer's subsequently registered atexit
+    // handler has finalized S3, even when S3 is initialized before the cache is used.
+    FilesystemCache::getInstance();
     Aws::Utils::Logging::LogLevel aws_log_level;
 
 #define LOG_LEVEL_CASE(level_name)                             \

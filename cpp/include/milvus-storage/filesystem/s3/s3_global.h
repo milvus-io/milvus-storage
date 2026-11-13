@@ -83,6 +83,10 @@ arrow::Status CheckS3Initialized();
 
 /// \brief Shutdown the S3 APIs.
 ///
+/// Releases the global filesystem cache before shutting down the AWS SDK.
+/// Applications must stop creating filesystems and release their filesystem and
+/// credential-provider references before finalizing S3.
+///
 /// This can wait for some S3 concurrent calls to finish so as to avoid
 /// race conditions.
 /// After this function has been called, all S3 calls will fail with an error.
