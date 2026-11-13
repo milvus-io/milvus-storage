@@ -49,8 +49,6 @@ TEST_P(S3ShutdownDeathTest, ReleasesCachedCredentialsBeforeSdkShutdown) {
           properties[PROPERTY_FS_BUCKET_NAME] = std::string("test-bucket");
           properties[PROPERTY_FS_REGION] = std::string("us-west-2");
           properties[PROPERTY_FS_USE_SSL] = false;
-          // The classic S3 client keeps credentials lazy; the native S3
-          // transport would fetch them while building its signing config.
           properties[PROPERTY_FS_S3_USE_CRT] = false;
           properties[PROPERTY_FS_USE_IAM] = true;
           const auto config = std::make_shared<const api::Properties>(std::move(properties));
