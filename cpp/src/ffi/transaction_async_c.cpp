@@ -11,7 +11,7 @@
 
 using namespace milvus_storage;
 namespace {
-LoonFFIResult StatusResult(const AsyncStatus& status) noexcept {
+LoonFFIResult StatusResult(const AsyncStatus& status, const char* exception_message = nullptr) noexcept {
   int code = LOON_SUCCESS;
   switch (status.code) {
     case AsyncStatus::OK:
@@ -31,12 +31,15 @@ LoonFFIResult StatusResult(const AsyncStatus& status) noexcept {
     case AsyncStatus::Memory:
       return {LOON_MEMORY_ERROR, nullptr};
     case AsyncStatus::Exception:
-      return {LOON_GOT_EXCEPTION, nullptr};
+      code = LOON_GOT_EXCEPTION;
+      break;
     case AsyncStatus::Arrow:
       code = FFIErrorCodeFromExtendStatus(status.detail);
       break;
   }
   try {
+    if (exception_message)
+      return CreateFFIResult(code, exception_message);
     return CreateFFIResult(code, status.detail.ok() ? "" : status.detail.ToString());
   } catch (...) {
     return {code, nullptr};
@@ -85,7 +88,8 @@ LoonFFIResult loon_transaction_open_async(LoonAsyncContextHandle async_context,
     auto accepted =
         async_context->Submit(std::move(future), [callback, user_data](folly::Try<transaction::OpenResult>&& value) {
           if (value.hasException()) {
-            callback(user_data, StatusResult(AsyncStatus::Exception), 0);
+            const auto* error = value.exception().get_exception();
+            callback(user_data, StatusResult(AsyncStatus::Exception, error ? error->what() : nullptr), 0);
             return;
           }
           auto result = std::move(value).value();
@@ -99,7 +103,7 @@ LoonFFIResult loon_transaction_open_async(LoonAsyncContextHandle async_context,
   } catch (const std::bad_alloc&) {
     return {LOON_MEMORY_ERROR, nullptr};
   } catch (const std::exception& error) {
-    return {LOON_GOT_EXCEPTION, nullptr};
+    return StatusResult(AsyncStatus::Exception, error.what());
   } catch (...) {
     return {LOON_GOT_EXCEPTION, nullptr};
   }
@@ -127,7 +131,9 @@ LoonFFIResult loon_transaction_commit_async(LoonAsyncContextHandle async_context
     auto accepted =
         async_context->Submit(std::move(future), [callback, user_data](folly::Try<transaction::CommitResult>&& value) {
           if (value.hasException()) {
-            callback(user_data, StatusResult(AsyncStatus::Exception), LOON_COMMIT_UNKNOWN, -1, -1);
+            const auto* error = value.exception().get_exception();
+            callback(user_data, StatusResult(AsyncStatus::Exception, error ? error->what() : nullptr),
+                     LOON_COMMIT_UNKNOWN, -1, -1);
             return;
           }
           auto result = std::move(value).value();
@@ -143,7 +149,7 @@ LoonFFIResult loon_transaction_commit_async(LoonAsyncContextHandle async_context
   } catch (const std::bad_alloc&) {
     return {LOON_MEMORY_ERROR, nullptr};
   } catch (const std::exception& error) {
-    return {LOON_GOT_EXCEPTION, nullptr};
+    return StatusResult(AsyncStatus::Exception, error.what());
   } catch (...) {
     return {LOON_GOT_EXCEPTION, nullptr};
   }

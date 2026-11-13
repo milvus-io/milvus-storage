@@ -460,11 +460,11 @@ arrow::Result<int64_t> Transaction::Commit(int64_t* out_manifest_size) {
       continue;
     }
 
-    // Other errors (not conflict-related) should be returned immediately
-    return arrow::Status::IOError(
+    // Keep the storage error's code and detail so FFI callers can decide whether to retry.
+    return status.WithMessage(
         fmt::format("Commit failed: write manifest error, "
                     "[read_version={}][latest_version={}][committed_version={}]: {}",
-                    read_version_, latest_version, committed_version, status.ToString()));
+                    read_version_, latest_version, committed_version, status.message()));
   }
 
   // This should never be reached, but included for safety
