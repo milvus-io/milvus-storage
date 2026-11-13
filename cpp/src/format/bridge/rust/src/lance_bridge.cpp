@@ -246,12 +246,9 @@ arrow::Status ExternalizeRowIdsForTesting(const std::string& uri) {
 }
 
 LanceIOStats BlockingDataset::IOStatsIncremental() {
-  try {
-    auto stats = impl_->io_stats_incremental();
-    return {stats.read_iops, stats.read_bytes};
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(e.what());
-  }
+  static_assert(noexcept(impl_->io_stats_incremental()), "Lance IO statistics must remain infallible");
+  auto stats = impl_->io_stats_incremental();
+  return {stats.read_iops, stats.read_bytes};
 }
 #endif  // BUILD_GTEST
 
