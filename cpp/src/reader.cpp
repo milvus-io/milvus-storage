@@ -1333,58 +1333,55 @@ folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::Table>>>> Rea
                   GetAsyncTaskSplitStrategy(properties_),
                   GetValueNoError<uint64_t>(properties_, PROPERTY_READER_ASYNC_TASK_SPLIT_SIZE_BYTES));
 
-  std::vector<size_t> task_cg_indices;
-  std::vector<std::vector<size_t>> task_positions;
+  struct TaskRange {
+    size_t column_group;
+    size_t first;
+    size_t count;
+  };
+  std::vector<TaskRange> ranges;
   std::vector<folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>>> futures;
-  task_cg_indices.reserve(all_tasks.size());
-  task_positions.reserve(all_tasks.size());
+  ranges.reserve(all_tasks.size());
   futures.reserve(all_tasks.size());
 
-  // Submit the complete cross-column-group task set before waiting, allowing
-  // native async backends to overlap work across both files and column groups.
   for (auto& task : all_tasks) {
-    task_cg_indices.push_back(task.reader_index);
-    task_positions.push_back(std::move(task.original_positions));
-    futures.push_back(readers[task.reader_index]->take_async(task));
+    ranges.push_back({task.reader_index, task.original_position, task.file_offsets.size()});
+    futures.push_back(readers[task.reader_index]->take_async(std::move(task)));
   }
 
-  // Keep the readers alive for every in-flight task. The saved positions remove
-  // both task-splitting order and completion order from the final row order.
+  // collectAll returns results in submission order, including when reads finish out of order.
   return folly::collectAll(std::move(futures))
-      .deferValue([row_indices, lazy_readers, task_cg_indices = std::move(task_cg_indices),
-                   task_positions = std::move(task_positions)](
+      .deferValue([num_rows = row_indices.size(), lazy_readers, ranges = std::move(ranges)](
                       auto&& all_results) -> arrow::Result<std::vector<std::shared_ptr<arrow::Table>>> {
-        std::vector<std::vector<std::shared_ptr<arrow::Table>>> per_cg_tables(lazy_readers->size());
-        std::vector<std::vector<size_t>> per_cg_positions(lazy_readers->size());
-
+        struct GroupResult {
+          std::vector<std::shared_ptr<arrow::Table>> tables;
+          std::vector<int64_t> reorder;
+          int64_t rows = 0;
+        };
+        std::vector<GroupResult> groups(lazy_readers->size());
         for (size_t i = 0; i < all_results.size(); ++i) {
-          auto& tryResult = all_results[i];
-          // value() preserves the original backend exception instead of reclassifying it as I/O.
-          ARROW_ASSIGN_OR_RAISE(auto table, std::move(tryResult.value()));
-          size_t cg_idx = task_cg_indices[i];
-          per_cg_tables[cg_idx].push_back(std::move(table));
-          per_cg_positions[cg_idx].insert(per_cg_positions[cg_idx].end(), task_positions[i].begin(),
-                                          task_positions[i].end());
+          ARROW_ASSIGN_OR_RAISE(auto table, std::move(all_results[i].value()));
+          const auto& range = ranges[i];
+          if (table->num_rows() != static_cast<int64_t>(range.count)) {
+            return arrow::Status::Invalid("Async take returned ", table->num_rows(), " rows for ", range.count,
+                                          " requested positions");
+          }
+          auto& group = groups[range.column_group];
+          if (group.tables.empty()) {
+            group.reorder.resize(num_rows);
+          }
+          auto begin = group.reorder.begin() + range.first;
+          std::iota(begin, begin + range.count, group.rows);
+          group.rows += table->num_rows();
+          group.tables.push_back(std::move(table));
         }
 
         std::vector<std::shared_ptr<arrow::Table>> tables;
-        tables.reserve(lazy_readers->size());
-        for (size_t cg = 0; cg < lazy_readers->size(); ++cg) {
-          if (per_cg_tables[cg].empty()) {
+        for (auto& group : groups) {
+          if (group.tables.empty()) {
             continue;
           }
-          ARROW_ASSIGN_OR_RAISE(auto concatenated, arrow::ConcatenateTables(per_cg_tables[cg]));
-
-          auto& positions = per_cg_positions[cg];
-          if (positions.size() != row_indices.size()) {
-            return arrow::Status::Invalid(fmt::format("Async take returned {} row positions for {} requested rows",
-                                                      positions.size(), row_indices.size()));
-          }
-          std::vector<int64_t> reorder(row_indices.size());
-          for (size_t i = 0; i < positions.size(); ++i) {
-            reorder[positions[i]] = static_cast<int64_t>(i);
-          }
-          ARROW_ASSIGN_OR_RAISE(auto reordered, CopySelectedRows(concatenated, reorder));
+          ARROW_ASSIGN_OR_RAISE(auto concatenated, arrow::ConcatenateTables(group.tables));
+          ARROW_ASSIGN_OR_RAISE(auto reordered, CopySelectedRows(concatenated, group.reorder));
           tables.push_back(std::move(reordered));
         }
         return tables;

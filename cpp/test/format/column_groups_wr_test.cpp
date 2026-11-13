@@ -27,7 +27,6 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/ffi_internal/bridge.h"
 #include "milvus-storage/ffi_internal/v2_column_groups_builder.h"
-#include "milvus-storage/format/async_tasks.h"
 #include "milvus-storage/format/column_group_reader.h"
 #include "milvus-storage/format/column_group_lazy_reader.h"
 #include "milvus-storage/format/column_group_writer.h"
@@ -529,17 +528,18 @@ TEST_P(ColumnGroupsWRTest, TestTakeAsync) {
                                                                PROPERTY_READER_LOGICAL_CHUNK_ROWS));
   EXPECT_EQ(SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "256"), std::nullopt);
 
-  ASSERT_AND_ASSIGN(
-      auto take_reader,
-      ColumnGroupLazyReader::create(two_cols_schema, file_cg, std::make_shared<const api::Properties>(properties_),
-                                    {"id"}, nullptr /* key_retriever */));
+  auto groups = std::make_shared<ColumnGroups>(ColumnGroups{file_cg});
+  auto columns = std::make_shared<std::vector<std::string>>(std::initializer_list<std::string>{"id"});
+  auto reader = Reader::create(groups, two_cols_schema, columns, std::make_shared<const api::Properties>(properties_));
 
   auto verify_take_result = [](const auto& result_batch, const std::vector<int64_t>& expect_id,
                                const auto& row_indices) {
     ASSERT_EQ(result_batch->num_rows(), row_indices.size());
     ASSERT_EQ(result_batch->num_columns(), 1);
+    ASSERT_EQ(result_batch->schema()->field(0)->name(), "id");
+    ASSERT_EQ(result_batch->column(0)->type_id(), arrow::Type::INT64);
+    auto id_array = std::static_pointer_cast<arrow::Int64Array>(result_batch->column(0));
     for (size_t i = 0; i < row_indices.size(); ++i) {
-      auto id_array = std::static_pointer_cast<arrow::Int64Array>(result_batch->column(0));
       ASSERT_EQ(id_array->Value(i), expect_id[row_indices[i]])
           << "Row " << i << " mismatch. Row index " << row_indices[i] << " expect " << expect_id[row_indices[i]]
           << " but " << id_array->Value(i);
@@ -550,40 +550,17 @@ TEST_P(ColumnGroupsWRTest, TestTakeAsync) {
 
   std::vector<std::vector<int64_t>> test_row_indices = {
       {10, 500, 900},
+      {0, 999, 1000, 17788, 17789, 22788, 22789, 37788, 37789, 63388},
       random_indices,
   };
 
   for (const auto& row_indices : test_row_indices) {
-    ASSERT_AND_ASSIGN(auto tasks, TakeTask::Build({file_cg}, row_indices));
-    ASSERT_GT(tasks.size(), 0);
+    ASSERT_AND_ASSIGN(auto sync_table, reader->take(row_indices, parallelism_));
+    ASSERT_AND_ASSIGN(auto sync_batch, sync_table->CombineChunksToBatch());
+    verify_take_result(sync_batch, expected_ids, row_indices);
 
-    size_t total_rows_in_tasks = 0;
-    for (const auto& task : tasks) {
-      ASSERT_EQ(task.reader_index, 0);
-      ASSERT_GT(task.row_indices.size(), 0);
-      ASSERT_EQ(task.row_indices.size(), task.original_positions.size());
-      total_rows_in_tasks += task.row_indices.size();
-    }
-    ASSERT_EQ(total_rows_in_tasks, row_indices.size());
-
-    std::vector<std::shared_ptr<arrow::Table>> per_task_tables;
-    std::vector<size_t> all_positions;
-    for (const auto& task : tasks) {
-      auto future = take_reader->take_async(task);
-      ASSERT_AND_ASSIGN(auto table, std::move(future).get());
-      ASSERT_EQ(table->num_rows(), task.row_indices.size());
-      per_task_tables.push_back(std::move(table));
-      all_positions.insert(all_positions.end(), task.original_positions.begin(), task.original_positions.end());
-    }
-
-    ASSERT_AND_ASSIGN(auto concatenated, arrow::ConcatenateTables(per_task_tables));
-    std::vector<int64_t> reorder(row_indices.size());
-    for (size_t i = 0; i < all_positions.size(); ++i) {
-      reorder[all_positions[i]] = static_cast<int64_t>(i);
-    }
-    auto indices_array = std::make_shared<arrow::Int64Array>(row_indices.size(), arrow::Buffer::Wrap(reorder));
-    ASSERT_AND_ASSIGN(auto reordered, arrow::compute::Take(concatenated, indices_array));
-    ASSERT_AND_ASSIGN(auto batch, reordered.table()->CombineChunksToBatch());
+    ASSERT_AND_ASSIGN(auto async_table, reader->take_async(row_indices, 4).get());
+    ASSERT_AND_ASSIGN(auto batch, async_table->CombineChunksToBatch());
     verify_take_result(batch, expected_ids, row_indices);
   }
 

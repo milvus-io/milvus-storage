@@ -14,8 +14,10 @@
 
 #include "milvus-storage/format/async_tasks.h"
 
+#include <algorithm>
 #include <array>
 #include <concepts>
+#include <limits>
 #include <map>
 #include <queue>
 #include <string>
@@ -130,26 +132,25 @@ std::vector<ChunkTask> ChunkTask::Build(const std::vector<int64_t>& chunk_indice
   return tasks;
 }
 
-size_t TakeTask::SplitTraits::size(const TakeTask& task) const { return task.row_indices.size(); }
+size_t TakeTask::SplitTraits::size(const TakeTask& task) const { return task.file_offsets.size(); }
 
 bool TakeTask::SplitTraits::can_split(const TakeTask& task) const { return size(task) > 1; }
 
 TakeTask TakeTask::SplitTraits::split(TakeTask& left) const {
-  size_t mid = left.row_indices.size() / 2;
-  // Positions must be split with rows so fan-in can still restore input order.
+  size_t mid = left.file_offsets.size() / 2;
   TakeTask right{
       left.reader_index,
       left.file_index,
-      {left.row_indices.begin() + mid, left.row_indices.end()},
-      {left.original_positions.begin() + mid, left.original_positions.end()},
+      {left.file_offsets.begin() + mid, left.file_offsets.end()},
+      left.original_position + mid,
   };
-  left.row_indices.resize(mid);
-  left.original_positions.resize(mid);
+  left.file_offsets.resize(mid);
   return right;
 }
 
 arrow::Result<std::vector<TakeTask>> TakeTask::Build(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
-                                                     const std::vector<int64_t>& row_indices) {
+                                                     const std::vector<int64_t>& row_indices,
+                                                     size_t rows_per_batch) {
   for (size_t i = 0; i < row_indices.size(); ++i) {
     if (row_indices[i] < 0) {
       return arrow::Status::Invalid(fmt::format("Row index is less than 0, [row_index={}]", row_indices[i]));
@@ -170,45 +171,50 @@ arrow::Result<std::vector<TakeTask>> TakeTask::Build(const std::vector<std::shar
     }
 
     const auto& files = column_groups[reader_index]->files;
-    std::map<uint32_t, std::vector<std::pair<int64_t, size_t>>> file_groups;
-    // Resolve each column-group logical row against manifest-visible file lengths.
-    // Keep the logical value in the task; execution converts it to file-local.
-    for (size_t pos = 0; pos < row_indices.size(); ++pos) {
-      int64_t row_index_remain = row_indices[pos];
-      bool found_file = false;
-      for (uint32_t file_index = 0; file_index < files.size(); ++file_index) {
-        if (files[file_index].start_index < 0 || files[file_index].end_index < 0) {
-          return arrow::Status::Invalid(
-              fmt::format("Invalid start/end index in [file_index={}, path={}]", file_index, files[file_index].path));
-        }
-
-        int64_t num_of_rows_in_file = files[file_index].end_index - files[file_index].start_index;
-        if (row_index_remain < num_of_rows_in_file) {
-          file_groups[file_index].push_back({row_indices[pos], pos});
-          found_file = true;
-          break;
-        }
-
-        row_index_remain -= num_of_rows_in_file;
-      }
-      if (!found_file) {
+    size_t pos = 0;
+    int64_t logical_end = 0;
+    for (size_t file_index = 0; file_index < files.size() && pos < row_indices.size(); ++file_index) {
+      const auto& file = files[file_index];
+      if (file.start_index < 0 || file.end_index < file.start_index) {
         return arrow::Status::Invalid(
-            fmt::format("Row index is greater than the maximum range, [row_index={}]", row_indices[pos]));
+            fmt::format("Invalid start/end index in [file_index={}, path={}]", file_index, file.path));
+      }
+      const int64_t length = file.end_index - file.start_index;
+      if (length > std::numeric_limits<int64_t>::max() - logical_end) {
+        return arrow::Status::Invalid("Column group logical row range overflows at file ", file_index);
+      }
+      const int64_t logical_start = logical_end;
+      logical_end += length;
+      const size_t first = pos;
+      while (pos < row_indices.size() && row_indices[pos] < logical_end) {
+        ++pos;
+      }
+      if (pos == first) {
+        continue;
+      }
+
+      if (file_index > std::numeric_limits<uint32_t>::max()) {
+        return arrow::Status::Invalid("TakeTask file index out of range: ", file_index);
+      }
+      for (size_t begin = first; begin < pos;) {
+        size_t count = pos - begin;
+        if (rows_per_batch != 0) {
+          count = std::min(count, rows_per_batch - begin % rows_per_batch);
+        }
+        auto& task = all_tasks.emplace_back();
+        task.reader_index = reader_index;
+        task.file_index = static_cast<uint32_t>(file_index);
+        task.file_offsets.reserve(count);
+        for (size_t i = begin; i < begin + count; ++i) {
+          task.file_offsets.push_back(file.start_index + (row_indices[i] - logical_start));
+        }
+        task.original_position = begin;
+        begin += count;
       }
     }
-
-    all_tasks.reserve(all_tasks.size() + file_groups.size());
-    for (auto& [file_index, rows_and_positions] : file_groups) {
-      TakeTask task;
-      task.reader_index = reader_index;
-      task.file_index = file_index;
-      task.row_indices.reserve(rows_and_positions.size());
-      task.original_positions.reserve(rows_and_positions.size());
-      for (auto& [row, pos] : rows_and_positions) {
-        task.row_indices.push_back(row);
-        task.original_positions.push_back(pos);
-      }
-      all_tasks.push_back(std::move(task));
+    if (pos < row_indices.size()) {
+      return arrow::Status::Invalid(
+          fmt::format("Row index is greater than the maximum range, [row_index={}]", row_indices[pos]));
     }
   }
   return all_tasks;
