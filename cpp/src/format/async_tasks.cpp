@@ -139,8 +139,10 @@ bool TakeTask::SplitTraits::can_split(const TakeTask& task) const { return size(
 TakeTask TakeTask::SplitTraits::split(TakeTask& left) const {
   size_t mid = left.file_offsets.size() / 2;
   TakeTask right{
-      left.reader_index,         left.file_index,   {left.file_offsets.begin() + mid, left.file_offsets.end()},
-      left.first_position + mid, left.planned_file,
+      left.reader_index,
+      left.file_index,
+      {left.file_offsets.begin() + mid, left.file_offsets.end()},
+      left.original_position + mid,
   };
   left.file_offsets.resize(mid);
   return right;
@@ -202,12 +204,11 @@ arrow::Result<std::vector<TakeTask>> TakeTask::Build(const std::vector<std::shar
         auto& task = all_tasks.emplace_back();
         task.reader_index = reader_index;
         task.file_index = static_cast<uint32_t>(file_index);
-        task.planned_file = std::shared_ptr<const ColumnGroupFile>(column_groups[reader_index], &file);
         task.file_offsets.reserve(count);
         for (size_t i = begin; i < begin + count; ++i) {
           task.file_offsets.push_back(file.start_index + (row_indices[i] - logical_start));
         }
-        task.first_position = begin;
+        task.original_position = begin;
         begin += count;
       }
     }
@@ -217,18 +218,6 @@ arrow::Result<std::vector<TakeTask>> TakeTask::Build(const std::vector<std::shar
     }
   }
   return all_tasks;
-}
-
-arrow::Status TakeTask::ValidateFile(const ColumnGroup& group) const {
-  if (file_index >= group.files.size() || planned_file.get() != &group.files[file_index]) {
-    return arrow::Status::Invalid("TakeTask does not belong to the requested file: ", file_index);
-  }
-  for (const int64_t offset : file_offsets) {
-    if (offset < planned_file->start_index || offset >= planned_file->end_index) {
-      return arrow::Status::Invalid("TakeTask offset outside file range: ", offset);
-    }
-  }
-  return arrow::Status::OK();
 }
 
 template <typename Traits, typename Task>

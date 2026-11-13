@@ -17,7 +17,7 @@ The async surface covers random reads:
 - `Reader::get_chunk_reader_async()`
 - `Reader::take_async()`
 - `ColumnGroupReader::create_async()` and `get_chunks_async(ChunkTask)`
-- `ColumnGroupLazyReader::take_async(TakeTask)`
+- `ColumnGroupLazyReader::take_async(TakeTask&&)`
 - `FormatReader` async-shaped methods
 
 The following paths remain synchronous:
@@ -282,7 +282,7 @@ ReaderImpl::take_async(row_indices, parallelism, needed_columns)
   -> create one ColumnGroupLazyReader per required column group
   -> TakeTask::Build(column_groups, row_indices)
   -> SplitAsyncTasks(...)
-  -> ColumnGroupLazyReader::take_async(task) for every task
+  -> ColumnGroupLazyReader::take_async(std::move(task)) for every task
   -> folly::collectAll(...)
   -> concatenate results per column group
   -> reorder each column group by task input range
@@ -343,8 +343,7 @@ struct TakeTask {
   size_t reader_index;
   uint32_t file_index;
   std::vector<int64_t> file_offsets;
-  size_t first_position;
-  std::shared_ptr<const ColumnGroupFile> planned_file;
+  size_t original_position;
 
   class SplitTraits;
 
@@ -353,7 +352,7 @@ struct TakeTask {
 ```
 
 `reader_index` identifies the selected column-group lazy reader. `file_offsets` holds physical row offsets
-in the selected file. `first_position` identifies the first requested row in this task.
+in the selected file. `original_position` identifies the first requested row in this task.
 Each following offset corresponds to the next position in the request.
 
 `TakeTask::Build()` performs planning in this order:
@@ -419,7 +418,7 @@ The task-based async column-group interfaces execute tasks but do not plan them:
 
 ```cpp
 ColumnGroupReader::get_chunks_async(const ChunkTask& task)
-ColumnGroupLazyReader::take_async(TakeTask task)
+ColumnGroupLazyReader::take_async(TakeTask&& task)
 ```
 
 This boundary is specific to the async task path. The synchronous chunk reader splits its own input.
@@ -427,8 +426,8 @@ The synchronous take reader uses the same file-offset planner and groups its tas
 into row batches. Both methods use `ThreadPoolHolder` when `parallelism` is greater than 1. A preconfigured singleton can then
 determine the actual pool size.
 
-For each task, the implementation opens an independent format reader, validates
-that the task belongs to the expected file, and calls the corresponding `FormatReader` async method.
+Each task opens an independent format reader for its file index and calls the corresponding
+`FormatReader` async method.
 
 This independent-reader model avoids concurrent mutation of a shared
 `FormatReader`. The async task path does not currently call `clone_reader()`.

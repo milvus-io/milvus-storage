@@ -27,7 +27,6 @@
 namespace milvus_storage::api {
 
 struct ColumnGroup;
-struct ColumnGroupFile;
 struct ChunkInfo;
 
 enum class AsyncTaskSplitStrategy : size_t {
@@ -79,11 +78,7 @@ struct TakeTask {
   size_t reader_index;
   uint32_t file_index;
   std::vector<int64_t> file_offsets;
-  size_t first_position;
-  // An alias into the owning column group. Equal offsets in different files are distinct rows.
-  std::shared_ptr<const ColumnGroupFile> planned_file;
-
-  arrow::Status ValidateFile(const ColumnGroup& group) const;
+  size_t original_position;
 
   class SplitTraits {
  public:

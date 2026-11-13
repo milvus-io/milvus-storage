@@ -146,12 +146,12 @@ TEST(AsyncTasksTest, TakeTaskBuildGroupsRowsByColumnGroupAndFile) {
   EXPECT_EQ(tasks[0].reader_index, 0);
   EXPECT_EQ(tasks[0].file_index, 0);
   EXPECT_EQ(tasks[0].file_offsets, (std::vector<int64_t>{10, 12}));
-  EXPECT_EQ(tasks[0].first_position, 0);
+  EXPECT_EQ(tasks[0].original_position, 0);
 
   EXPECT_EQ(tasks[1].reader_index, 0);
   EXPECT_EQ(tasks[1].file_index, 2);
   EXPECT_EQ(tasks[1].file_offsets, (std::vector<int64_t>{20, 23}));
-  EXPECT_EQ(tasks[1].first_position, 2);
+  EXPECT_EQ(tasks[1].original_position, 2);
 }
 
 TEST(AsyncTasksTest, TakeTaskBuildMatchesExpandedFileRanges) {
@@ -176,7 +176,7 @@ TEST(AsyncTasksTest, TakeTaskBuildMatchesExpandedFileRanges) {
       ASSERT_TRUE(tasks.ok()) << tasks.status();
       size_t position = 0;
       for (const auto& task : *tasks) {
-        EXPECT_EQ(task.first_position, position);
+        EXPECT_EQ(task.original_position, position);
         for (size_t i = 0; i < task.file_offsets.size(); ++i, ++position) {
           ASSERT_LT(position, rows.size());
           const auto& [file, offset] = reference[rows[position]];
@@ -196,14 +196,11 @@ TEST(AsyncTasksTest, TakeTaskSplitKeepsFileIdentityWhenOffsetRangesOverlap) {
   ASSERT_TRUE(result.ok());
   auto& left = result->front();
   auto right = TakeTask::SplitTraits{}.split(left);
-  EXPECT_TRUE(left.ValidateFile(*group).ok());
-  EXPECT_TRUE(right.ValidateFile(*group).ok());
+  EXPECT_EQ(left.file_index, 1);
+  EXPECT_EQ(right.file_index, 1);
+  EXPECT_EQ(left.file_offsets, (std::vector<int64_t>{10}));
   EXPECT_EQ(right.file_offsets, (std::vector<int64_t>{12}));
-  EXPECT_EQ(right.first_position, 1);
-  right.file_index = 0;
-  EXPECT_FALSE(right.ValidateFile(*group).ok());
-  left.file_offsets[0] = 13;
-  EXPECT_FALSE(left.ValidateFile(*group).ok());
+  EXPECT_EQ(right.original_position, 1);
 }
 
 TEST(AsyncTasksTest, TakeTaskBuildBalancesRowsAcrossFileBoundaries) {
@@ -216,7 +213,7 @@ TEST(AsyncTasksTest, TakeTaskBuildBalancesRowsAcrossFileBoundaries) {
   EXPECT_EQ((*result)[1].file_offsets, (std::vector<int64_t>{12, 13}));
   EXPECT_EQ((*result)[2].file_offsets, (std::vector<int64_t>{14}));
   EXPECT_EQ((*result)[3].file_offsets, (std::vector<int64_t>{5}));
-  EXPECT_EQ((*result)[2].first_position / 2, (*result)[3].first_position / 2);
+  EXPECT_EQ((*result)[2].original_position / 2, (*result)[3].original_position / 2);
 }
 
 TEST(AsyncTasksTest, TakeTaskBuildRejectsInvalidRows) {
@@ -263,17 +260,17 @@ TEST(AsyncTasksTest, TakeTaskBuildAddsReaderIndex) {
   EXPECT_EQ(tasks[0].reader_index, 0);
   EXPECT_EQ(tasks[0].file_index, 0);
   EXPECT_EQ(tasks[0].file_offsets, (std::vector<int64_t>{0}));
-  EXPECT_EQ(tasks[0].first_position, 0);
+  EXPECT_EQ(tasks[0].original_position, 0);
 
   EXPECT_EQ(tasks[1].reader_index, 0);
   EXPECT_EQ(tasks[1].file_index, 1);
   EXPECT_EQ(tasks[1].file_offsets, (std::vector<int64_t>{0, 1}));
-  EXPECT_EQ(tasks[1].first_position, 1);
+  EXPECT_EQ(tasks[1].original_position, 1);
 
   EXPECT_EQ(tasks[2].reader_index, 1);
   EXPECT_EQ(tasks[2].file_index, 0);
   EXPECT_EQ(tasks[2].file_offsets, (std::vector<int64_t>{0, 2, 3}));
-  EXPECT_EQ(tasks[2].first_position, 0);
+  EXPECT_EQ(tasks[2].original_position, 0);
 }
 
 TEST(AsyncTasksTest, ChunkTaskNestedSplitTraitsSplitsChunkRange) {
@@ -307,7 +304,7 @@ TEST(AsyncTasksTest, TakeTaskNestedSplitTraitsSplitsRowsAndPositionsTogether) {
       .reader_index = 3,
       .file_index = 5,
       .file_offsets = {0, 1, 2, 3},
-      .first_position = 10,
+      .original_position = 10,
   };
 
   TakeTask::SplitTraits traits;
@@ -318,12 +315,12 @@ TEST(AsyncTasksTest, TakeTaskNestedSplitTraitsSplitsRowsAndPositionsTogether) {
   EXPECT_EQ(task.reader_index, 3);
   EXPECT_EQ(task.file_index, 5);
   EXPECT_EQ(task.file_offsets, (std::vector<int64_t>{0, 1}));
-  EXPECT_EQ(task.first_position, 10);
+  EXPECT_EQ(task.original_position, 10);
 
   EXPECT_EQ(right.reader_index, 3);
   EXPECT_EQ(right.file_index, 5);
   EXPECT_EQ(right.file_offsets, (std::vector<int64_t>{2, 3}));
-  EXPECT_EQ(right.first_position, 12);
+  EXPECT_EQ(right.original_position, 12);
 }
 
 TEST(AsyncTasksTest, SplitToParallelismPreservesLargestFirstOrder) {
@@ -331,7 +328,7 @@ TEST(AsyncTasksTest, SplitToParallelismPreservesLargestFirstOrder) {
       .reader_index = 0,
       .file_index = 0,
       .file_offsets = {0, 1, 2, 3, 4, 5, 6, 7},
-      .first_position = 10,
+      .original_position = 10,
   }};
 
   SplitAsyncTasks(tasks, 3, TakeTask::SplitTraits{}, AsyncTaskSplitStrategy::kSplitToParallelism);
@@ -340,9 +337,9 @@ TEST(AsyncTasksTest, SplitToParallelismPreservesLargestFirstOrder) {
   EXPECT_EQ(tasks[0].file_offsets, (std::vector<int64_t>{0, 1}));
   EXPECT_EQ(tasks[1].file_offsets, (std::vector<int64_t>{4, 5, 6, 7}));
   EXPECT_EQ(tasks[2].file_offsets, (std::vector<int64_t>{2, 3}));
-  EXPECT_EQ(tasks[0].first_position, 10);
-  EXPECT_EQ(tasks[1].first_position, 14);
-  EXPECT_EQ(tasks[2].first_position, 12);
+  EXPECT_EQ(tasks[0].original_position, 10);
+  EXPECT_EQ(tasks[1].original_position, 14);
+  EXPECT_EQ(tasks[2].original_position, 12);
 }
 
 TEST(AsyncTasksTest, SplitAllCreatesOneTaskPerLogicalItem) {
@@ -350,7 +347,7 @@ TEST(AsyncTasksTest, SplitAllCreatesOneTaskPerLogicalItem) {
       .reader_index = 3,
       .file_index = 5,
       .file_offsets = {0, 1, 2, 3, 4, 5, 6, 7},
-      .first_position = 10,
+      .original_position = 10,
   }};
 
   SplitAsyncTasks(tasks, 1, TakeTask::SplitTraits{}, AsyncTaskSplitStrategy::kSplitAll);
@@ -361,7 +358,7 @@ TEST(AsyncTasksTest, SplitAllCreatesOneTaskPerLogicalItem) {
     ASSERT_EQ(task.file_offsets.size(), 1);
     ASSERT_GE(task.file_offsets[0], 0);
     ASSERT_LT(task.file_offsets[0], static_cast<int64_t>(seen.size()));
-    EXPECT_EQ(task.first_position, static_cast<size_t>(task.file_offsets[0] + 10));
+    EXPECT_EQ(task.original_position, static_cast<size_t>(task.file_offsets[0] + 10));
     EXPECT_FALSE(seen[task.file_offsets[0]]);
     seen[task.file_offsets[0]] = true;
   }
@@ -432,11 +429,11 @@ TEST(AsyncTasksTest, SplitByBytesHandlesZeroAndMaximumStoredSizes) {
 
 TEST(AsyncTasksTest, SplitByBytesUsesParallelismForTakeTasks) {
   std::vector<TakeTask> tasks = {
-      {.reader_index = 0, .file_index = 0, .file_offsets = {0, 1, 2, 3}, .first_position = 0}};
+      {.reader_index = 0, .file_index = 0, .file_offsets = {0, 1, 2, 3}, .original_position = 0}};
   SplitAsyncTasks(tasks, 2, TakeTask::SplitTraits{}, AsyncTaskSplitStrategy::kSplitByBytes, 1);
   ASSERT_EQ(tasks.size(), 2);
   EXPECT_EQ(tasks[0].file_offsets, (std::vector<int64_t>{0, 1}));
-  EXPECT_EQ(tasks[1].first_position, 2);
+  EXPECT_EQ(tasks[1].original_position, 2);
 }
 
 TEST(AsyncTasksTest, BytesPropertiesKeepParallelismDefaultAndRejectZeroSize) {

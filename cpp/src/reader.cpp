@@ -1344,7 +1344,7 @@ folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::Table>>>> Rea
   futures.reserve(all_tasks.size());
 
   for (auto& task : all_tasks) {
-    ranges.push_back({task.reader_index, task.first_position, task.file_offsets.size()});
+    ranges.push_back({task.reader_index, task.original_position, task.file_offsets.size()});
     futures.push_back(readers[task.reader_index]->take_async(std::move(task)));
   }
 

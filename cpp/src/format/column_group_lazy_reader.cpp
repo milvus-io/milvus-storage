@@ -60,7 +60,7 @@ class ColumnGroupLazyReaderImpl : public ColumnGroupLazyReader {
 
   arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices,
                                                     size_t parallelism = 1) override;
-  folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> take_async(TakeTask task) override;
+  folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> take_async(TakeTask&& task) override;
 
   private:
   arrow::Result<std::shared_ptr<arrow::Table>> take_files(std::span<const TakeTask> tasks);
@@ -192,9 +192,9 @@ arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl<ReaderT>:
     }
   });
   for (size_t first = 0; first < tasks.size();) {
-    const size_t batch_number = tasks[first].first_position / rows_per_batch;
+    const size_t batch_number = tasks[first].original_position / rows_per_batch;
     size_t end = first + 1;
-    while (end < tasks.size() && tasks[end].first_position / rows_per_batch == batch_number) {
+    while (end < tasks.size() && tasks[end].original_position / rows_per_batch == batch_number) {
       ++end;
     }
     auto batch = std::span<const TakeTask>(tasks).subspan(first, end - first);
@@ -215,12 +215,10 @@ arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl<ReaderT>:
 
 template <typename ReaderT>
 folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> ColumnGroupLazyReaderImpl<ReaderT>::take_async(
-    TakeTask task) {
+    TakeTask&& task) {
   FIU_RETURN_ON(FIUKEY_TAKE_ROWS_FAIL,
                 folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::Table>>(
                     arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_TAKE_ROWS_FAIL)))));
-
-  FOLLY_ARROW_RETURN_NOT_OK(task.ValidateFile(*column_group_));
 
   // Open one independent reader for this file-scoped task; no mutable format
   // reader is shared with another in-flight take.

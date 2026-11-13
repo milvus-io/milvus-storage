@@ -45,7 +45,7 @@ class ColumnGroupLazyReader {
   // Asynchronously prepares the target file reader, then submits async I/O.
   // The task owns the physical offsets used by the format reader.
   // Formats without a native async implementation may still complete inline.
-  virtual folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> take_async(TakeTask task) = 0;
+  virtual folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> take_async(TakeTask&& task) = 0;
 
   static arrow::Result<std::unique_ptr<ColumnGroupLazyReader>> create(
       const std::shared_ptr<arrow::Schema>& schema,

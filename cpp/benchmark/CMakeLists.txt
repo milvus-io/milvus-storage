@@ -19,7 +19,6 @@ list(APPEND BENCHMARK_SOURCES
 
 # Storage Layer benchmark
 list(APPEND BENCHMARK_SOURCES
-  ${PROJECT_SOURCE_DIR}/benchmark/benchmark_take_routing.cpp
   ${PROJECT_SOURCE_DIR}/benchmark/benchmark_storage_layer.cpp
   ${PROJECT_SOURCE_DIR}/benchmark/benchmark_talon_reader.cpp
 )

@@ -30,6 +30,7 @@
 
 #include <arrow/table.h>
 #include "iceberg/iceberg_bridge.h"
+#include "milvus-storage/format/async_tasks.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
@@ -635,6 +636,31 @@ BENCHMARK_REGISTER_F(FormatReadBenchmark, ReadTake)
     })
     ->Unit(::benchmark::kMillisecond)
     ->UseRealTime();
+
+static void TakeRouting(::benchmark::State& state) {
+  constexpr int64_t rows_per_file = 2048;
+  const int64_t files = state.range(0);
+  const int64_t count = state.range(1);
+  const bool late = state.range(2) != 0;
+  ColumnGroups groups{std::make_shared<api::ColumnGroup>()};
+  groups.front()->files.resize(files, {.start_index = 19, .end_index = 19 + rows_per_file});
+  std::vector<int64_t> rows(count);
+  for (int64_t i = 0; i < count; ++i) {
+    rows[i] = late ? files * rows_per_file - count + i : i * files * rows_per_file / count;
+  }
+
+  for (auto _ : state) {
+    auto tasks = TakeTask::Build(groups, rows);
+    if (!tasks.ok()) {
+      state.SkipWithError(tasks.status().ToString().c_str());
+      break;
+    }
+    ::benchmark::DoNotOptimize(*tasks);
+  }
+  state.SetLabel(late ? "last file" : "spread");
+}
+
+BENCHMARK(TakeRouting)->ArgsProduct({{1, 32, 256}, {1, 128, 1024}, {0, 1}})->ArgNames({"files", "rows", "late"});
 
 //=============================================================================
 // FormatReader RSS Benchmark
