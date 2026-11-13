@@ -6,13 +6,18 @@
 #include <memory>
 #include "milvus-storage/transaction/transaction.h"
 #include "milvus-storage/common/layout.h"
+#include "milvus-storage/common/extend_status.h"
+#include "milvus-storage/ffi_c.h"
+#include "milvus-storage/ffi_async_context.h"
 #include <gtest/gtest.h>
 #include <arrow/filesystem/mockfs.h>
+#include <arrow/io/interfaces.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/executors/ManualExecutor.h>
 #include <folly/executors/InlineExecutor.h>
 #include <atomic>
 #include <future>
+#include <stdexcept>
 
 namespace milvus_storage::api::transaction {
 namespace {
@@ -22,6 +27,23 @@ struct CallerExecutors {
     static CallerExecutors executors;
     return executors;
   }
+};
+// Persist the bytes, then report a lost response to exercise an ambiguous commit.
+class FailedCloseStream : public arrow::io::OutputStream {
+  public:
+  FailedCloseStream(std::shared_ptr<arrow::io::OutputStream> stream, arrow::Status error)
+      : stream_(std::move(stream)), error_(std::move(error)) {}
+  arrow::Status Close() override {
+    ARROW_RETURN_NOT_OK(stream_->Close());
+    return error_;
+  }
+  bool closed() const override { return stream_->closed(); }
+  arrow::Result<int64_t> Tell() const override { return stream_->Tell(); }
+  arrow::Status Write(const void* data, int64_t size) override { return stream_->Write(data, size); }
+
+  private:
+  const std::shared_ptr<arrow::io::OutputStream> stream_;
+  const arrow::Status error_;
 };
 class MemoryFileSystem : public arrow::fs::internal::MockFileSystem {
   public:
@@ -35,6 +57,16 @@ class MemoryFileSystem : public arrow::fs::internal::MockFileSystem {
   int info_calls = 0;
   std::thread::id io_thread;
   std::function<void()> before_info;
+  arrow::Status info_error, output_error, close_error;
+  using MockFileSystem::OpenOutputStream;
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
+      const std::string& name, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override {
+    ARROW_RETURN_NOT_OK(output_error);
+    ARROW_ASSIGN_OR_RAISE(auto stream, MockFileSystem::OpenOutputStream(name, metadata));
+    if (!close_error.ok())
+      return std::make_shared<FailedCloseStream>(std::move(stream), close_error);
+    return stream;
+  }
   using MockFileSystem::OpenInputFile;
   int64_t opened_size = -1;
   arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const arrow::fs::FileInfo& info) override {
@@ -46,6 +78,7 @@ class MemoryFileSystem : public arrow::fs::internal::MockFileSystem {
     io_thread = std::this_thread::get_id();
     if (before_info)
       before_info();
+    ARROW_RETURN_NOT_OK(info_error);
     return MockFileSystem::GetFileInfo(name);
   }
 };
@@ -169,6 +202,184 @@ CommitResult Commit(Transaction* txn) {
   auto future = txn->CommitAsync(3000, operation);
   operation.reset();
   return std::move(future).via(&CallerExecutors::Get().work).get();
+}
+
+struct FFICommitResult {
+  LoonFFIResult status;
+  int64_t version;
+};
+FFICommitResult CommitFFI(Transaction* txn, bool async) {
+  const auto handle = reinterpret_cast<LoonTransactionHandle>(txn);
+  if (!async) {
+    int64_t version = -1;
+    auto status = loon_transaction_commit(handle, &version, nullptr);
+    return {status, version};
+  }
+  const LoonAsyncExecutor executor{
+      &CallerExecutors::Get().work, [](void* context, LoonAsyncTask task, void* data) -> int32_t {
+        static_cast<folly::CPUThreadPoolExecutor*>(context)->add([task, data] { task(data); });
+        return 0;
+      }};
+  LoonAsyncContextHandle context = nullptr;
+  auto status = loon_async_context_create(&executor, &context);
+  if (status.err_code != LOON_SUCCESS)
+    return {status, -1};
+  loon_ffi_free_result(&status);
+  std::promise<FFICommitResult> completion;
+  auto future = completion.get_future();
+  LoonAsyncHandle operation{};
+  status = loon_transaction_commit_async(
+      context, handle,
+      [](uintptr_t data, LoonFFIResult status, int32_t outcome, int64_t version, int64_t size) {
+        EXPECT_EQ(outcome, status.err_code == LOON_SUCCESS ? LOON_COMMIT_COMMITTED : LOON_COMMIT_UNKNOWN);
+        if (status.err_code != LOON_SUCCESS) {
+          EXPECT_EQ(version, -1);
+          EXPECT_EQ(size, -1);
+        }
+        reinterpret_cast<std::promise<FFICommitResult>*>(data)->set_value({status, version});
+      },
+      reinterpret_cast<uintptr_t>(&completion), &operation);
+  FFICommitResult result{status, -1};
+  if (status.err_code == LOON_SUCCESS) {
+    loon_ffi_free_result(&status);
+    result = future.get();
+  }
+  loon_async_release(&operation);
+  loon_async_context_destroy(context);
+  return result;
+}
+
+TEST(AsyncTransactionTest, CommitPreservesStorageErrorClassification) {
+  for (const auto& error :
+       {MakeExtendError(ExtendStatusCode::StorageTransientService, "manifest write failed", "request-id"),
+        MakeExtendError(ExtendStatusCode::AwsErrorAccessDenied, "manifest write failed", "request-id"),
+        arrow::Status::Invalid("manifest write failed")}) {
+    for (bool async : {false, true}) {
+      auto fs = std::make_shared<MemoryFileSystem>();
+      auto begun = Open(fs, 0);
+      ASSERT_TRUE(begun.status.ok());
+      begun.transaction->AddDeltaLog({get_delta_filepath(fs->path, "delete"), DeltaLogType::PRIMARY_KEY, 3});
+      fs->output_error = error;
+      const auto status = async ? Commit(begun.transaction.get()).status.detail : begun.transaction->Commit().status();
+      EXPECT_EQ(status.code(), fs->output_error.code());
+      EXPECT_EQ(status.detail(), fs->output_error.detail());
+      EXPECT_NE(status.message().find("manifest write failed"), std::string::npos);
+      EXPECT_NE(status.message().find("read_version=0"), std::string::npos);
+    }
+  }
+}
+
+TEST(AsyncTransactionTest, CommitFFIPreservesStorageErrorClassification) {
+  for (const auto code : {ExtendStatusCode::StorageTransientNetwork, ExtendStatusCode::StorageTransientTimeout,
+                          ExtendStatusCode::StorageTransientThrottling, ExtendStatusCode::StorageTransientService,
+                          ExtendStatusCode::AwsErrorNotFound, ExtendStatusCode::AwsErrorAccessDenied,
+                          ExtendStatusCode::AwsErrorNonRetryable}) {
+    const bool retryable =
+        code == ExtendStatusCode::StorageTransientNetwork || code == ExtendStatusCode::StorageTransientTimeout ||
+        code == ExtendStatusCode::StorageTransientThrottling || code == ExtendStatusCode::StorageTransientService;
+    for (bool async : {false, true}) {
+      for (const auto stage : {"metadata", "open-output", "close-output"}) {
+        SCOPED_TRACE(std::to_string(static_cast<int>(code)) + "/" + stage + (async ? "/async" : "/sync"));
+        auto fs = std::make_shared<MemoryFileSystem>();
+        auto begun = Open(fs, 0);
+        ASSERT_TRUE(begun.status.ok());
+        begun.transaction->AddDeltaLog({get_delta_filepath(fs->path, "delete"), DeltaLogType::PRIMARY_KEY, 3});
+        auto& error = std::string(stage) == "metadata"      ? fs->info_error
+                      : std::string(stage) == "open-output" ? fs->output_error
+                                                            : fs->close_error;
+        error = MakeExtendError(code, "storage request failed", "request-id-54386");
+        auto result = CommitFFI(begun.transaction.get(), async);
+        EXPECT_EQ(result.status.err_code, static_cast<int>(code));
+        EXPECT_EQ(loon_ffi_is_retryable_errcode(result.status.err_code) != 0, retryable);
+        EXPECT_NE(std::string(result.status.message ? result.status.message : "").find("request-id-54386"),
+                  std::string::npos);
+        EXPECT_EQ(result.version, -1);
+        loon_ffi_free_result(&result.status);
+        if (retryable && std::string(stage) == "open-output") {
+          fs->output_error = arrow::Status::OK();
+          auto retried = Open(fs, 0, OverwriteResolver);
+          ASSERT_TRUE(retried.status.ok());
+          retried.transaction->AddDeltaLog({get_delta_filepath(fs->path, "delete"), DeltaLogType::PRIMARY_KEY, 3});
+          auto success = CommitFFI(retried.transaction.get(), async);
+          EXPECT_EQ(success.status.err_code, LOON_SUCCESS);
+          EXPECT_EQ(success.version, 1);
+          loon_ffi_free_result(&success.status);
+        }
+      }
+    }
+  }
+}
+
+TEST(AsyncTransactionTest, RetryFromFixedVersionAfterLostCommitResponseDoesNotDuplicateUpdates) {
+  for (bool async : {false, true}) {
+    auto fs = std::make_shared<MemoryFileSystem>();
+    auto begun = Open(fs, 0, OverwriteResolver);
+    ASSERT_TRUE(begun.status.ok());
+    const auto file = fs->path + "/_data/data.parquet";
+    const auto delta = get_delta_filepath(fs->path, "delete");
+    auto group = std::make_shared<ColumnGroup>();
+    group->columns = {"100"};
+    group->format = "parquet";
+    group->files = {{.path = file, .start_index = 0, .end_index = 3}};
+    begun.transaction->AppendFiles({group});
+    begun.transaction->AddDeltaLog({delta, DeltaLogType::PRIMARY_KEY, 3});
+    const Statistics stats{{fs->path + "/_stats/bloom"}, {{"rows", "3"}}};
+    begun.transaction->UpdateStat("bloom_filter.100", stats);
+    fs->close_error = MakeExtendError(ExtendStatusCode::StorageTransientTimeout, "response lost", "request-id");
+    auto failed = CommitFFI(begun.transaction.get(), async);
+    EXPECT_EQ(failed.status.err_code, LOON_TRANSIENT_TIMEOUT);
+    loon_ffi_free_result(&failed.status);
+
+    fs->close_error = arrow::Status::OK();
+    // The caller retries with its original version and updates, never LATEST.
+    auto retried = Open(fs, 0, OverwriteResolver);
+    ASSERT_TRUE(retried.status.ok());
+    retried.transaction->AppendFiles({group});
+    retried.transaction->AddDeltaLog({delta, DeltaLogType::PRIMARY_KEY, 3});
+    retried.transaction->UpdateStat("bloom_filter.100", stats);
+    auto success = CommitFFI(retried.transaction.get(), async);
+    EXPECT_EQ(success.status.err_code, LOON_SUCCESS);
+    EXPECT_EQ(success.version, 2);
+    loon_ffi_free_result(&success.status);
+    auto read = Open(fs);
+    ASSERT_TRUE(read.status.ok());
+    const auto manifest = read.transaction->GetManifest();
+    ASSERT_TRUE(manifest.ok());
+    ASSERT_EQ((*manifest)->columnGroups().size(), 1);
+    ASSERT_EQ((*manifest)->columnGroups()[0]->files.size(), 1);
+    EXPECT_EQ((*manifest)->columnGroups()[0]->files[0].path, file);
+    EXPECT_EQ((*manifest)->columnGroups()[0]->files[0].end_index, 3);
+    ASSERT_EQ((*manifest)->deltaLogs().size(), 1);
+    EXPECT_EQ((*manifest)->deltaLogs()[0].path, delta);
+    EXPECT_EQ((*manifest)->deltaLogs()[0].num_entries, 3);
+    ASSERT_EQ((*manifest)->stats().size(), 1);
+    EXPECT_EQ((*manifest)->stats().at("bloom_filter.100").paths, stats.paths);
+    EXPECT_EQ((*manifest)->stats().at("bloom_filter.100").metadata.at("rows"), "3");
+  }
+}
+
+TEST(AsyncTransactionTest, OpenPreservesExceptionMessage) {
+  auto fs = std::make_shared<MemoryFileSystem>();
+  fs->before_info = [] { throw std::runtime_error("metadata lookup exception"); };
+  const auto result = Open(fs);
+  EXPECT_EQ(result.status.code, AsyncStatus::Exception);
+  EXPECT_NE(result.status.detail.message().find("metadata lookup exception"), std::string::npos);
+  EXPECT_EQ(result.transaction, nullptr);
+}
+
+TEST(AsyncTransactionTest, CommitFFIPreservesExceptionMessage) {
+  for (bool async : {false, true}) {
+    auto fs = std::make_shared<MemoryFileSystem>();
+    auto begun = Open(fs, 0);
+    ASSERT_TRUE(begun.status.ok());
+    begun.transaction->AddDeltaLog({get_delta_filepath(fs->path, "delete"), DeltaLogType::PRIMARY_KEY, 3});
+    fs->before_info = [] { throw std::runtime_error("commit metadata exception"); };
+    auto result = CommitFFI(begun.transaction.get(), async);
+    EXPECT_EQ(result.status.err_code, LOON_GOT_EXCEPTION);
+    EXPECT_NE(std::string(result.status.message ? result.status.message : "").find("commit metadata exception"),
+              std::string::npos);
+    loon_ffi_free_result(&result.status);
+  }
 }
 TEST(AsyncTransactionTest, DiscardedCommitReleasesReservation) {
   auto fs = std::make_shared<MemoryFileSystem>();
