@@ -206,11 +206,10 @@ arrow::Status S3FileSystemProducer::ConfigureCredentials(S3Options& options) {
   // 3. IAM — use provider-specific STS credential providers
   // 4. Explicit access key / secret key
   if (config_.IsAwsCredentialBrokerEnabled()) {
-    // Preserve the existing AssumeRole contract; IAM uses the broker's cloud aliases.
-    const char* const csp =
-        config_.use_iam && config_.cloud_provider == kCloudProviderAliyun    ? credential_broker::kCspAliyun
-        : config_.use_iam && config_.cloud_provider == kCloudProviderTencent ? credential_broker::kCspTencent
-                                                                             : credential_broker::kCspAws;
+    // Both IAM and target-role requests must identify the actual cloud provider.
+    const char* const csp = config_.cloud_provider == kCloudProviderAliyun    ? credential_broker::kCspAliyun
+                            : config_.cloud_provider == kCloudProviderTencent ? credential_broker::kCspTencent
+                                                                              : credential_broker::kCspAws;
     options.credentials_provider = std::make_shared<AwsCredentialBrokerProvider>(AwsCredentialBrokerConfig{
         .endpoint = config_.credential_endpoint,
         .region = config_.region,
