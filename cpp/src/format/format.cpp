@@ -25,6 +25,7 @@
 #include "milvus-storage/format/lance/lance_format.h"
 #include "milvus-storage/format/iceberg/iceberg_format.h"
 #include "milvus-storage/format/paimon/paimon_format.h"
+#include "milvus-storage/format/deltalake/deltalake_format.h"
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage {
@@ -35,6 +36,7 @@ arrow::Result<Format*> Format::get(const std::string& format) {
   static LanceFormat lance_fmt;
   static IcebergFormat iceberg_fmt;
   static PaimonFormat paimon_fmt;
+  static DeltaLakeFormat deltalake_fmt;
 
   if (format == LOON_FORMAT_PARQUET) {
     return &parquet_fmt;
@@ -50,6 +52,9 @@ arrow::Result<Format*> Format::get(const std::string& format) {
   }
   if (format == LOON_FORMAT_PAIMON_TABLE) {
     return &paimon_fmt;
+  }
+  if (format == LOON_FORMAT_DELTALAKE_TABLE) {
+    return &deltalake_fmt;
   }
   return arrow::Status::Invalid(fmt::format("Unknown file format: {}", format));
 }

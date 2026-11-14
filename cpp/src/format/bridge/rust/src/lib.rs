@@ -14,6 +14,12 @@
 
 #[path = "filesystem/filesystem_opendal.rs"]
 mod filesystem_opendal;
+#[path = "deltalake/deltalake_bridgeimpl.rs"]
+mod deltalake_bridgeimpl;
+#[path = "deltalake/deltalake_engine.rs"]
+mod deltalake_engine;
+#[path = "deltalake/deltalake_object_store.rs"]
+mod deltalake_object_store;
 #[path = "iceberg/iceberg_bridgeimpl.rs"]
 mod iceberg_bridgeimpl;
 #[path = "iceberg/iceberg_opendal.rs"]
@@ -50,6 +56,7 @@ mod vortex_layout_strategy_v2;
 mod filesystem_c;
 #[path = "filesystem/filesystem_object_store.rs"]
 mod filesystem_object_store;
+use deltalake_bridgeimpl::*;
 use iceberg_bridgeimpl::*;
 use iceberg_testutil::*;
 use lance_bridgeimpl::*;
@@ -320,6 +327,47 @@ pub mod lance_ffi {
 // filesystem is already used concurrently by C++ format readers.
 unsafe impl Send for lance_ffi::FileSystemWrapper {}
 unsafe impl Sync for lance_ffi::FileSystemWrapper {}
+
+#[cxx::bridge(namespace = "milvus_storage::deltalake::ffi")]
+pub mod deltalake_ffi {
+    unsafe extern "C++" {
+        #[namespace = ""]
+        #[cxx_name = "FileSystemWrapper"]
+        type DeltaFileSystemWrapper = crate::lance_ffi::FileSystemWrapper;
+    }
+
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum DeltaStorageKind {
+        Local,
+        Remote,
+    }
+
+    struct DeltaFilesystemBinding {
+        kind: DeltaStorageKind,
+        scheme: String,
+        authority: String,
+        local_root: String,
+    }
+
+    struct DeltaFileInfo {
+        path: String,
+        file_size: u64,
+        row_count: u64,
+    }
+
+    extern "Rust" {
+        type DeltaSnapshotContext;
+        fn delta_open_snapshot(
+            filesystem: SharedPtr<DeltaFileSystemWrapper>,
+            table_url: &str,
+            requested_version: i64,
+            binding: DeltaFilesystemBinding,
+        ) -> Result<Box<DeltaSnapshotContext>>;
+        fn delta_snapshot_version(self: &DeltaSnapshotContext) -> u64;
+        fn delta_snapshot_files(self: &DeltaSnapshotContext) -> &[DeltaFileInfo];
+    }
+}
 
 #[cxx::bridge(namespace = "milvus_storage::paimon::ffi")]
 pub mod paimon_ffi {
