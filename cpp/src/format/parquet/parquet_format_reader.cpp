@@ -467,6 +467,39 @@ arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::
   return metadata_ptr;
 }
 
+arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr>
+ParquetFormatReader::MetaTrait::load_metadata_with_filesystem(const api::ColumnGroupFile& file,
+                                                              const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                                                              const std::string& path,
+                                                              const std::shared_ptr<const api::Properties>& properties,
+                                                              const milvus_storage::KeyRetriever& key_retriever) {
+  auto reader = std::make_shared<ParquetFormatReader>(fs, path, properties, std::vector<std::string>{}, key_retriever,
+                                                      file.Get<uint64_t>(api::kPropertyFileSize),
+                                                      file.Get<uint64_t>(api::kPropertyFooterSize));
+  ARROW_RETURN_NOT_OK(reader->open());
+  ARROW_ASSIGN_OR_RAISE(auto metadata, create_metadata_from_reader(reader, file));
+  auto retained = std::make_shared<Metadata>(*metadata);
+  retained->payload.parquet_metadata = reader->file_reader_->parquet_reader()->metadata();
+  return MetadataPtr(std::move(retained));
+}
+
+arrow::Result<std::shared_ptr<ParquetFormatReader>> ParquetFormatReader::MetaTrait::create_with_leaf_projection(
+    MetadataPtr metadata, const api::ColumnGroupFile& file, const std::vector<int>& leaves) {
+  ARROW_ASSIGN_OR_RAISE(auto reader, create_from_metadata(metadata, file, nullptr, {}, ""));
+  const auto footer = reader->file_reader_->parquet_reader()->metadata();
+  int previous = -1;
+  for (int leaf : leaves) {
+    if (leaf <= previous || leaf >= footer->num_columns()) {
+      return arrow::Status::Invalid("Parquet leaf projection must be sorted, unique, and in bounds");
+    }
+    previous = leaf;
+  }
+  reader->projected_leaf_column_indices_ = leaves;
+  ARROW_ASSIGN_OR_RAISE(reader->row_group_infos_, create_row_group_infos_from_metadata(footer, leaves, metadata->path,
+                                                                                       metadata->row_group_infos));
+  return reader;
+}
+
 arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::MetaTrait::load_metadata(
     const api::ColumnGroupFile& file,
     const std::shared_ptr<const api::Properties>& properties,

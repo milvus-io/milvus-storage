@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright Zilliz
 
-//! Snapshot resolution and exploration only. The retained context is the
-//! foundation for Stage 2; it deliberately does not serialize Kernel state.
+//! Snapshot resolution, exploration and shared reader metadata. Retain Kernel
+//! state in memory instead of serializing it into per-file descriptors.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,8 +16,8 @@ use delta_kernel::engine::ensure_data_types::{ValidationMode, ensure_data_types}
 #[allow(deprecated)]
 use delta_kernel::parquet::arrow::async_reader::ParquetObjectReader;
 use delta_kernel::parquet::file::metadata::ParquetMetaDataReader;
-use delta_kernel::scan::StatsOptions;
 use delta_kernel::scan::state::{DvInfo, ScanFile};
+use delta_kernel::scan::{ScanMetadata, StatsOptions};
 use delta_kernel::schema::{
     ColumnMetadataKey, DataType, MetadataValue, PrimitiveType, StructField, StructType,
 };
@@ -33,6 +33,7 @@ use crate::TOKIO_RT;
 use crate::deltalake_engine::DeltaEngine;
 use crate::deltalake_ffi::{DeltaFileInfo, DeltaFilesystemBinding};
 use crate::deltalake_object_store::{DeltaObjectStore, DeltaPathBinding};
+use crate::deltalake_reader::ProjectionCache;
 use crate::lance_ffi::FileSystemWrapper;
 
 const INVALID: &str = "[delta:error=invalid]";
@@ -46,14 +47,26 @@ fn unsupported(message: impl std::fmt::Display) -> anyhow::Error {
     anyhow!("{UNSUPPORTED} {message}")
 }
 
-// The schema, cached Arrow batches and ScanFiles stay Rust-owned. Stage 2 can
-// clone Arrow batch wrappers into scan_metadata_from without copying buffers.
-#[allow(dead_code)]
+pub(crate) struct CachedScanFile {
+    pub(crate) size: u64,
+    pub(crate) num_records: Option<u64>,
+    pub(crate) dv_info: DvInfo,
+    pub(crate) batch_index: usize,
+    pub(crate) row_index: usize,
+}
+
+// The schema, cached Arrow batches and indexed file facts stay Rust-owned.
+// File plans slice one indexed row without copying the cached Arrow buffers.
 pub struct DeltaSnapshotContext {
     pub(crate) engine: Arc<DeltaEngine>,
     pub(crate) snapshot: SnapshotRef,
+    pub(crate) physical_schema: delta_kernel::schema::SchemaRef,
     pub(crate) scan_metadata: Vec<RecordBatch>,
-    pub(crate) active_files: HashMap<String, ScanFile>,
+    pub(crate) active_files: HashMap<String, CachedScanFile>,
+    pub(crate) dv_string_bytes: usize,
+    pub(crate) table_url: Url,
+    pub(crate) binding: DeltaPathBinding,
+    pub(crate) projections: std::sync::Mutex<ProjectionCache>,
     files: Vec<DeltaFileInfo>,
 }
 
@@ -73,9 +86,23 @@ pub fn delta_open_snapshot(
     requested_version: i64,
     options: DeltaFilesystemBinding,
 ) -> Result<Box<DeltaSnapshotContext>> {
-    open_snapshot_impl(filesystem, table_url, requested_version, options)
+    open_snapshot_impl(filesystem, table_url, requested_version, options, true)
         // CXX displays only the outer anyhow context. Flatten the chain so
         // filesystem status markers survive snapshot/footer context messages.
+        .map_err(|error| anyhow!("{error:#}"))
+}
+
+pub fn delta_load_snapshot(
+    filesystem: SharedPtr<FileSystemWrapper>,
+    table_url: &str,
+    version: i64,
+    options: DeltaFilesystemBinding,
+) -> Result<Box<DeltaSnapshotContext>> {
+    ensure!(
+        version >= 0,
+        "{INVALID} reader requires an exact Delta version"
+    );
+    open_snapshot_impl(filesystem, table_url, version, options, false)
         .map_err(|error| anyhow!("{error:#}"))
 }
 
@@ -84,6 +111,7 @@ fn open_snapshot_impl(
     table_url: &str,
     requested_version: i64,
     options: DeltaFilesystemBinding,
+    explore: bool,
 ) -> Result<Box<DeltaSnapshotContext>> {
     ensure!(
         !filesystem.is_null(),
@@ -154,14 +182,19 @@ fn open_snapshot_impl(
     let mut context = DeltaSnapshotContext {
         engine: engine.clone(),
         snapshot,
+        physical_schema: scan.physical_schema().clone(),
         scan_metadata: Vec::new(),
         active_files: HashMap::new(),
+        dv_string_bytes: 0,
+        table_url: table_url.clone(),
+        binding: binding.clone(),
+        projections: std::sync::Mutex::new(crate::deltalake_reader::new_projection_cache()),
         files: Vec::new(),
     };
     for batch in scan.scan_metadata(engine.as_ref())? {
-        let batch = batch?;
-        let candidates = batch.visit_scan_files(Vec::new(), |files, file| files.push(file))?;
-        for candidate in candidates {
+        let (metadata, candidates) = select_scan_metadata(batch?)?;
+        let batch_index = context.scan_metadata.len();
+        for (row_index, candidate) in candidates.into_iter().enumerate() {
             let location = table_url
                 .join(&candidate.path)
                 .map_err(|error| invalid(format!("invalid Delta data path: {error}")))?;
@@ -169,7 +202,9 @@ fn open_snapshot_impl(
                 .validate_url(&location)
                 .map_err(|error| unsupported(error))?;
             validate_partitions(&candidate, &partition_fields, mapping)?;
-            validate_deletion_location(&candidate.dv_info, &table_url, &binding)?;
+            let dv_string_bytes =
+                validate_deletion_location(&candidate.dv_info, &table_url, &binding)?;
+            context.dv_string_bytes = context.dv_string_bytes.saturating_add(dv_string_bytes);
             ensure!(
                 candidate.size >= 0,
                 "{INVALID} negative Delta file size: {location}"
@@ -182,21 +217,27 @@ fn open_snapshot_impl(
                 .unwrap_or(0);
             // Snapshot statistics describe physical rows, including rows later
             // deleted by a DV. Trust them here so normal exploration never opens
-            // data files. Stage 2 checks actual schemas/counts on reader open.
+            // data files. Reader open checks actual schemas/counts.
             let physical_rows = match &candidate.stats {
                 Some(stats) => stats.num_records,
-                None => TOKIO_RT
+                None if explore => TOKIO_RT
                     .block_on(load_footer_row_count(
                         store.clone(),
                         &location,
                         candidate.size as u64,
                     ))
                     .with_context(|| format!("Cannot count Delta file {location}"))?,
+                None => 0,
             };
-            let rows = live_rows(physical_rows, deleted)?;
+            let rows = if explore {
+                live_rows(physical_rows, deleted)?
+            } else {
+                0
+            };
             let path = location.to_string();
+            let key = delta_file_key(&location)?;
             ensure!(
-                !context.active_files.contains_key(&path),
+                !context.active_files.contains_key(&key),
                 "{INVALID} duplicate active Delta data path: {location}"
             );
             if rows != 0 {
@@ -206,14 +247,18 @@ fn open_snapshot_impl(
                     row_count: rows,
                 });
             }
-            context.active_files.insert(path, candidate);
+            context.active_files.insert(
+                key,
+                CachedScanFile {
+                    size: candidate.size as u64,
+                    num_records: candidate.stats.map(|stats| stats.num_records),
+                    dv_info: candidate.dv_info,
+                    batch_index,
+                    row_index,
+                },
+            );
         }
-        context.scan_metadata.push(
-            batch
-                .scan_files
-                .apply_selection_vector()?
-                .try_into_record_batch()?,
-        );
+        context.scan_metadata.push(metadata);
     }
     context
         .files
@@ -221,7 +266,28 @@ fn open_snapshot_impl(
     Ok(Box::new(context))
 }
 
-fn live_rows(physical: u64, deleted: u64) -> Result<u64> {
+pub(crate) fn select_scan_metadata(batch: ScanMetadata) -> Result<(RecordBatch, Vec<ScanFile>)> {
+    let files = batch.visit_scan_files(Vec::new(), |files, file| files.push(file))?;
+    let metadata = batch
+        .scan_files
+        .apply_selection_vector()?
+        .try_into_record_batch()?;
+    // Both operations retain selected rows in input order. Only active Add rows
+    // may remain, so their compacted positions are stable file-index locators.
+    ensure!(
+        metadata.num_rows() == files.len(),
+        "{INVALID} selected Delta metadata row does not identify an active file"
+    );
+    Ok((metadata, files))
+}
+
+// URL spelling can change at the external-URI boundary (percent case and
+// escaped unreserved characters). Index by decoded ObjectStore identity.
+pub(crate) fn delta_file_key(location: &Url) -> Result<String> {
+    Ok(Path::from_url_path(location.path())?.to_string())
+}
+
+pub(crate) fn live_rows(physical: u64, deleted: u64) -> Result<u64> {
     // Kernel exposes u64 statistics, but Delta counts are signed 64-bit. Check
     // before subtracting so an excessive count cannot be hidden by a large DV.
     ensure!(
@@ -337,9 +403,13 @@ struct DvEnvelope {
     deletion_vector: Option<delta_kernel::actions::deletion_vector::DeletionVectorDescriptor>,
 }
 
-fn validate_deletion_location(info: &DvInfo, root: &Url, binding: &DeltaPathBinding) -> Result<()> {
+fn validate_deletion_location(
+    info: &DvInfo,
+    root: &Url,
+    binding: &DeltaPathBinding,
+) -> Result<usize> {
     if !info.has_vector() {
-        return Ok(());
+        return Ok(0);
     }
     let envelope: DvEnvelope =
         serde_json::from_value(serde_json::to_value(info)?).map_err(invalid)?;
@@ -347,8 +417,11 @@ fn validate_deletion_location(info: &DvInfo, root: &Url, binding: &DeltaPathBind
         if let Some(location) = descriptor.absolute_path(root)? {
             binding.validate_url(&location).map_err(unsupported)?;
         }
+        // Account for the descriptor's retained path/inline bytes during this
+        // existing inspection pass instead of re-serializing it for estimates.
+        return Ok(descriptor.path_or_inline_dv.len());
     }
-    Ok(())
+    Ok(0)
 }
 
 #[derive(Deserialize)]
@@ -489,6 +562,27 @@ mod tests {
         assert!(live_rows(3, 4).is_err());
         assert!(live_rows(u64::MAX, 0).is_err());
         assert!(live_rows(i64::MAX as u64 + 1, 1).is_err());
+    }
+
+    #[test]
+    fn file_identity_normalizes_url_spelling_without_decoding_twice() {
+        let key = |path: &str| delta_file_key(&Url::parse(path).unwrap()).unwrap();
+        assert_eq!(
+            key("s3://bucket/table/%70art.parquet"),
+            key("s3://bucket/table/part.parquet")
+        );
+        assert_eq!(
+            key("s3://bucket/table/a%2fb.parquet"),
+            key("s3://bucket/table/a/b.parquet")
+        );
+        assert_eq!(
+            key("s3://bucket/table/%e9%9b%aa.parquet"),
+            key("s3://bucket/table/%E9%9B%AA.parquet")
+        );
+        assert_ne!(
+            key("s3://bucket/table/a%252Fb.parquet"),
+            key("s3://bucket/table/a%2Fb.parquet")
+        );
     }
 
     #[test]

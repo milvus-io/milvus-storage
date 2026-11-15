@@ -20,6 +20,10 @@ mod deltalake_bridgeimpl;
 mod deltalake_engine;
 #[path = "deltalake/deltalake_object_store.rs"]
 mod deltalake_object_store;
+#[path = "deltalake/deltalake_reader.rs"]
+mod deltalake_reader;
+#[path = "deltalake/deltalake_testutil.rs"]
+mod deltalake_testutil;
 #[path = "iceberg/iceberg_bridgeimpl.rs"]
 mod iceberg_bridgeimpl;
 #[path = "iceberg/iceberg_opendal.rs"]
@@ -57,6 +61,8 @@ mod filesystem_c;
 #[path = "filesystem/filesystem_object_store.rs"]
 mod filesystem_object_store;
 use deltalake_bridgeimpl::*;
+use deltalake_reader::*;
+use deltalake_testutil::*;
 use iceberg_bridgeimpl::*;
 use iceberg_testutil::*;
 use lance_bridgeimpl::*;
@@ -356,8 +362,16 @@ pub mod deltalake_ffi {
         row_count: u64,
     }
 
+    struct GeneratedDeltaDv {
+        bytes: Vec<u8>,
+        offset: i32,
+        size: i32,
+        cardinality: i64,
+    }
+
     extern "Rust" {
         type DeltaSnapshotContext;
+        fn delta_test_deletion_vector(positions: &[u64]) -> Result<GeneratedDeltaDv>;
         fn delta_open_snapshot(
             filesystem: SharedPtr<DeltaFileSystemWrapper>,
             table_url: &str,
@@ -366,6 +380,45 @@ pub mod deltalake_ffi {
         ) -> Result<Box<DeltaSnapshotContext>>;
         fn delta_snapshot_version(self: &DeltaSnapshotContext) -> u64;
         fn delta_snapshot_files(self: &DeltaSnapshotContext) -> &[DeltaFileInfo];
+        fn delta_load_snapshot(
+            filesystem: SharedPtr<DeltaFileSystemWrapper>,
+            table_url: &str,
+            version: i64,
+            binding: DeltaFilesystemBinding,
+        ) -> Result<Box<DeltaSnapshotContext>>;
+        unsafe fn delta_snapshot_export_schema(
+            self: &DeltaSnapshotContext,
+            output: usize,
+        ) -> Result<()>;
+        fn delta_snapshot_memory_size(self: &DeltaSnapshotContext) -> u64;
+        fn delta_snapshot_has_partition_columns(self: &DeltaSnapshotContext) -> bool;
+        type DeltaFileContext;
+        fn delta_load_file(
+            self: &DeltaSnapshotContext,
+            location: &str,
+            footer: &[u8],
+            physical_rows: u64,
+            expected_live: u64,
+            expected_size: u64,
+        ) -> Result<Box<DeltaFileContext>>;
+        fn delta_file_deletions(self: &DeltaFileContext) -> &[u64];
+        fn delta_file_rows(self: &DeltaFileContext) -> u64;
+        fn delta_file_live_rows(self: &DeltaFileContext) -> u64;
+        fn delta_file_plan(
+            self: &DeltaFileContext,
+            snapshot: &DeltaSnapshotContext,
+            names: Vec<String>,
+        ) -> Result<Box<DeltaReadPlan>>;
+        type DeltaReadPlan;
+        fn delta_plan_leaves(self: &DeltaReadPlan) -> &[i32];
+        unsafe fn delta_plan_export_schema(self: &DeltaReadPlan, output: usize) -> Result<()>;
+        unsafe fn delta_plan_apply(
+            self: &DeltaReadPlan,
+            input_array: usize,
+            input_schema: usize,
+            output_array: usize,
+            output_schema: usize,
+        ) -> Result<()>;
     }
 }
 

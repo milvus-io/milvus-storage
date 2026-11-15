@@ -39,6 +39,7 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/format.h"
 #include "milvus-storage/format/format_reader_cache.h"
+#include "milvus-storage/format/deltalake/deltalake_format_reader.h"
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/format/lance/lance_common.h"
@@ -62,7 +63,8 @@ using TestMetadataCaches = FormatReaderMetadataCaches<parquet::ParquetFormatRead
                                                       vortex::VortexFormatReader,
                                                       lance::LanceTableReader,
                                                       iceberg::IcebergFormatReader,
-                                                      paimon::PaimonFormatReader>;
+                                                      paimon::PaimonFormatReader,
+                                                      deltalake::DeltaLakeFormatReader>;
 
 using ParquetMetadataCache = FormatReaderMetadataCache<parquet::ParquetFormatReader>;
 static_assert(!std::is_default_constructible_v<ParquetMetadataCache>);
@@ -104,6 +106,9 @@ arrow::Status VisitFormatReaderMetadataCachesForFormat(const std::string& format
   }
   if (format == LOON_FORMAT_PAIMON_TABLE) {
     return std::forward<Visitor>(visitor)(caches.get<paimon::PaimonFormatReader>());
+  }
+  if (format == LOON_FORMAT_DELTALAKE_TABLE) {
+    return std::forward<Visitor>(visitor)(caches.get<deltalake::DeltaLakeFormatReader>());
   }
   return arrow::Status::Invalid("Unknown column group format: ", format);
 }
@@ -1149,7 +1154,8 @@ INSTANTIATE_TEST_SUITE_P(Formats,
                                            LOON_FORMAT_VORTEX,
                                            LOON_FORMAT_LANCE_TABLE,
                                            LOON_FORMAT_ICEBERG_TABLE,
-                                           LOON_FORMAT_PAIMON_TABLE));
+                                           LOON_FORMAT_PAIMON_TABLE,
+                                           LOON_FORMAT_DELTALAKE_TABLE));
 
 TEST_P(FormatReaderMetadataCacheIOTest, ProjectedReadersLoadEachFileFooterOnce) {
   constexpr int kFiles = 2;

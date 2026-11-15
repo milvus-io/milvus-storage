@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <future>
 
 #include <arrow/api.h>
 #include <arrow/filesystem/localfs.h>
@@ -14,13 +15,20 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 #include <parquet/arrow/writer.h>
+#include <parquet/encryption/encryption.h>
+#include <parquet/metadata.h>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/format.h"
 #include "milvus-storage/properties.h"
+#include "milvus-storage/reader.h"
 #include "deltalake/deltalake_bridge.h"
+#include "format/deltalake/deltalake_common.h"
+#include "milvus-storage/format/deltalake/deltalake_format_reader.h"
+#include "milvus-storage/format/parquet/parquet_format_reader.h"
+#include "milvus-storage/format/column_group_reader.h"
 #include "test_env.h"
 
 namespace milvus_storage {
@@ -82,6 +90,24 @@ arrow::Status AppendJson(const Json& value, arrow::ArrayBuilder* builder) {
     }
     case arrow::Type::STRING:
       return static_cast<arrow::StringBuilder*>(builder)->Append(value.get<std::string>());
+    case arrow::Type::BINARY:
+      return static_cast<arrow::BinaryBuilder*>(builder)->Append(value.get<std::string>());
+    case arrow::Type::INT8:
+      return static_cast<arrow::Int8Builder*>(builder)->Append(value.get<int8_t>());
+    case arrow::Type::INT16:
+      return static_cast<arrow::Int16Builder*>(builder)->Append(value.get<int16_t>());
+    case arrow::Type::FLOAT:
+      return static_cast<arrow::FloatBuilder*>(builder)->Append(value.get<float>());
+    case arrow::Type::DOUBLE:
+      return static_cast<arrow::DoubleBuilder*>(builder)->Append(value.get<double>());
+    case arrow::Type::DATE32:
+      return static_cast<arrow::Date32Builder*>(builder)->Append(value.get<int32_t>());
+    case arrow::Type::TIMESTAMP:
+      return static_cast<arrow::TimestampBuilder*>(builder)->Append(value.get<int64_t>());
+    case arrow::Type::DECIMAL128: {
+      ARROW_ASSIGN_OR_RAISE(auto decimal, arrow::Decimal128::FromString(value.get<std::string>()));
+      return static_cast<arrow::Decimal128Builder*>(builder)->Append(decimal);
+    }
     case arrow::Type::INT32:
       return static_cast<arrow::Int32Builder*>(builder)->Append(value.get<int32_t>());
     case arrow::Type::INT64:
@@ -686,8 +712,643 @@ TEST_F(DeltaExplorationTest, EmptyAndMissingTablesAndStageBoundaries) {
   EXPECT_TRUE(files.empty());
   EXPECT_FALSE(Explore(root_ + "/missing").ok());
   ASSERT_AND_ASSIGN(auto* format, Format::get(LOON_FORMAT_DELTALAKE_TABLE));
-  EXPECT_TRUE(format->create_reader(nullptr, {}, properties_, {}, nullptr).status().IsNotImplemented());
+  EXPECT_TRUE(format->create_reader(nullptr, {}, properties_, {}, nullptr).status().IsInvalid());
   EXPECT_TRUE(format->create_writer(nullptr, nullptr, "", "", properties_).status().IsNotImplemented());
+}
+
+// Exercise generated Delta histories through the C++ reader and Rust/Kernel
+// bridge. Path/arithmetic unit tests below perform no I/O.
+class DeltaReaderTest : public DeltaExplorationTest {
+  protected:
+  arrow::Result<std::shared_ptr<FormatReader>> Open(const api::ColumnGroupFile& file,
+                                                    std::vector<std::string> columns = {},
+                                                    std::shared_ptr<arrow::Schema> schema = nullptr) {
+    ARROW_ASSIGN_OR_RAISE(auto* format, Format::get(LOON_FORMAT_DELTALAKE_TABLE));
+    return format->create_reader(schema, file, properties_, columns, nullptr);
+  }
+
+  void WriteRows(const std::string& path,
+                 const std::shared_ptr<arrow::Schema>& schema,
+                 const std::vector<Json>& rows,
+                 int64_t group_size = 2,
+                 std::shared_ptr<::parquet::FileEncryptionProperties> encryption = nullptr) {
+    std::vector<std::shared_ptr<arrow::Array>> arrays;
+    for (const auto& field : schema->fields()) {
+      ASSERT_AND_ASSIGN(auto builder, arrow::MakeBuilder(field->type()));
+      for (const auto& row : rows) ASSERT_STATUS_OK(AppendJson(row.value(field->name(), Json()), builder.get()));
+      ASSERT_AND_ASSIGN(auto array, builder->Finish());
+      arrays.push_back(std::move(array));
+    }
+    auto table = arrow::Table::Make(schema, arrays, rows.size());
+    ASSERT_AND_ASSIGN(auto sink, arrow::io::FileOutputStream::Open(path));
+    ::parquet::WriterProperties::Builder properties;
+    if (encryption)
+      properties.encryption(std::move(encryption));
+    ASSERT_STATUS_OK(
+        ::parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), sink, group_size, properties.build()));
+    ASSERT_STATUS_OK(sink->Close());
+  }
+
+  Json Deletions(const std::string& table, const std::vector<uint64_t>& rows) {
+    auto dv = deltalake::ffi::delta_test_deletion_vector(rust::Slice<const uint64_t>(rows.data(), rows.size()));
+    std::ofstream output(table + "/deletions.bin", std::ios::binary);
+    output.write(reinterpret_cast<const char*>(dv.bytes.data()), dv.bytes.size());
+    output.close();
+    return Json{{"storageType", "p"},
+                {"pathOrInlineDv", "file://" + table + "/deletions.bin"},
+                {"offset", dv.offset},
+                {"sizeInBytes", dv.size},
+                {"cardinality", dv.cardinality}};
+  }
+
+  Json DvProtocol() {
+    const auto features = Json::array({"deletionVectors"});
+    return Json{{"protocol", Json{{"minReaderVersion", 3},
+                                  {"minWriterVersion", 7},
+                                  {"readerFeatures", features},
+                                  {"writerFeatures", features}}}};
+  }
+};
+
+TEST(DeltaPathTest, NormalizesLocalIdentityAndChecksContainmentBeforeOpening) {
+  deltalake::ResolvedLocation table;
+  table.config.root_path = "/bound";
+  table.binding.is_local = true;
+  const auto resolve = [&](const std::string& path) { return deltalake::ResolveDataFile(path, table, nullptr); };
+  for (const auto& url : {"file:///bound/%70art%20a%252F.parquet", "file:///bound/dir/../part%20a%252F.parquet"}) {
+    ASSERT_AND_ASSIGN(auto file, resolve(url));
+    EXPECT_EQ(file.url, "file:///bound/part%20a%252F.parquet");
+    EXPECT_EQ(file.path, "part a%2F.parquet");
+  }
+  for (const auto& url : {"file:///bound/dir/../../outside.parquet", "file:///bound/%2E%2E/outside.parquet",
+                          "file:///bound-other/part.parquet"}) {
+    EXPECT_TRUE(resolve(url).status().IsInvalid()) << url;
+  }
+}
+
+TEST(DeltaRowMappingTest, EnumeratesLivePositionsAcrossDeletionPatterns) {
+  for (unsigned mask = 0; mask < (1u << 10); ++mask) {
+    std::vector<uint64_t> deleted, live;
+    for (uint64_t row = 0; row < 10; ++row) ((mask >> row) & 1 ? deleted : live).push_back(row);
+    for (size_t logical = 0; logical < live.size(); ++logical)
+      ASSERT_EQ(deltalake::LogicalToPhysical(logical, deleted), live[logical]) << mask;
+  }
+}
+
+TEST_F(DeltaReaderTest, ReadsEveryMethodWithDeletionVectorsAcrossGroups) {
+  const auto table = Table();
+  WriteRows(table + "/part.parquet", arrow::schema({arrow::field("id", arrow::int64())}),
+            {Json{{"id", 0}}, Json{{"id", 1}}, Json{{"id", 2}}, Json{{"id", 3}}, Json{{"id", 4}}, Json{{"id", 5}}});
+  auto add = Add(table, "part.parquet", 6);
+  add["add"]["deletionVector"] = Deletions(table, {1, 2, 3});
+  Commit(table, 0, {DvProtocol(), Metadata(Schema()), add});
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  ASSERT_EQ(files.size(), 1);
+  ASSERT_AND_ASSIGN(auto reader, Open(files[0]));
+  ASSERT_AND_ASSIGN(auto groups, reader->get_row_group_infos());
+  ASSERT_EQ(groups.size(), 3);
+  EXPECT_EQ(groups[1].start_offset, groups[1].end_offset);
+  ASSERT_AND_ASSIGN(auto chunks, reader->get_chunks({0, 1, 2}));
+  EXPECT_EQ(chunks[0]->num_rows(), 1);
+  EXPECT_EQ(chunks[1]->num_rows(), 0);
+  EXPECT_EQ(chunks[2]->num_rows(), 2);
+  ASSERT_AND_ASSIGN(auto selected, reader->take({0, 2}));
+  ASSERT_EQ(selected->num_rows(), 2);
+  ASSERT_AND_ASSIGN(auto last, selected->column(0)->GetScalar(1));
+  EXPECT_EQ(last->ToString(), "5");
+  ASSERT_AND_ASSIGN(auto range, reader->read_with_range(1, 3));
+  ASSERT_AND_ASSIGN(auto ranged, range->ToTable());
+  EXPECT_EQ(ranged->num_rows(), 2);
+  ASSERT_AND_ASSIGN(auto first, ranged->column(0)->GetScalar(0));
+  EXPECT_EQ(first->ToString(), "4");
+  ASSERT_AND_ASSIGN(auto clone, reader->clone_reader());
+  ASSERT_AND_ASSIGN(auto clone_chunk, clone->get_chunk(2));
+  EXPECT_TRUE(clone_chunk->Equals(*chunks[2]));
+  EXPECT_FALSE(reader->take({2, 1}).ok());
+  EXPECT_FALSE(reader->take({0, 0}).ok());
+  EXPECT_FALSE(reader->take({3}).ok());
+  EXPECT_FALSE(reader->get_chunk(-1).ok());
+  EXPECT_FALSE(reader->read_with_range(0, 4).ok());
+}
+
+TEST_F(DeltaReaderTest, MappedWidenedMissingAndPartitionColumns) {
+  for (const auto& mode : {"name", "id"}) {
+    const auto table = Table(mode);
+    WriteData(table + "/part.parquet", 4, "physical_id", arrow::int32(),
+              arrow::key_value_metadata({"PARQUET:field_id"}, {"1"}));
+    auto schema = Schema("id", "long", TypeChange("integer", "long"));
+    schema["fields"][0]["metadata"]["delta.columnMapping.id"] = 1;
+    schema["fields"][0]["metadata"]["delta.columnMapping.physicalName"] = "physical_id";
+    schema["fields"].push_back(Json{
+        {"name", "region"},
+        {"type", "string"},
+        {"nullable", true},
+        {"metadata", Json{{"delta.columnMapping.id", 2}, {"delta.columnMapping.physicalName", "physical_region"}}}});
+    schema["fields"].push_back(
+        Json{{"name", "note"},
+             {"type", "string"},
+             {"nullable", true},
+             {"metadata", Json{{"delta.columnMapping.id", 3}, {"delta.columnMapping.physicalName", "physical_note"}}}});
+    auto add = Add(table, "part.parquet", 4);
+    add["add"]["partitionValues"] = Json{{"physical_region", "apac"}};
+    auto protocol = WideningProtocol();
+    protocol["protocol"]["readerFeatures"].push_back("columnMapping");
+    protocol["protocol"]["writerFeatures"].push_back("columnMapping");
+    Commit(table, 0,
+           {protocol,
+            Metadata(schema, Json::array({"region"}),
+                     Json{{"delta.columnMapping.mode", mode}, {"delta.columnMapping.maxColumnId", "3"}}),
+            add});
+    ASSERT_AND_ASSIGN(auto files, Explore(table));
+    ASSERT_AND_ASSIGN(auto reader, Open(files[0], {"note", "id", "region"}));
+    EXPECT_EQ(reader->get_schema()->field_names(), (std::vector<std::string>{"id", "region", "note"}));
+    ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+    EXPECT_EQ(batch->schema()->field_names(), (std::vector<std::string>{"note", "id", "region"}));
+    EXPECT_EQ(batch->column(0)->null_count(), 4);
+    EXPECT_EQ(batch->column(1)->type_id(), arrow::Type::INT64);
+    ASSERT_AND_ASSIGN(auto region, batch->column(2)->GetScalar(0));
+    EXPECT_EQ(region->ToString(), "apac");
+    ASSERT_AND_ASSIGN(auto constants, Open(files[0], {"region", "note"}));
+    ASSERT_AND_ASSIGN(auto constant_rows, constants->take({1, 3}));
+    EXPECT_EQ(constant_rows->num_rows(), 2);
+    ASSERT_AND_ASSIGN(auto zero, Open(files[0], {}, arrow::schema({})));
+    ASSERT_AND_ASSIGN(auto zero_batch, zero->get_chunk(0));
+    EXPECT_EQ(zero_batch->num_columns(), 0);
+    EXPECT_EQ(zero_batch->num_rows(), 4);
+    EXPECT_FALSE(Open(files[0], {}, arrow::schema({arrow::field("id", arrow::int32())})).ok());
+    EXPECT_FALSE(Open(files[0], {"unknown"}).ok());
+    EXPECT_FALSE(
+        Open(files[0], {}, arrow::schema({arrow::field("id", arrow::int64()), arrow::field("id", arrow::int64())}))
+            .ok());
+  }
+}
+
+TEST_F(DeltaReaderTest, NestedDroppedFieldsAndNullableChildren) {
+  const auto table = Table();
+  auto physical = arrow::schema({arrow::field(
+      "profile", arrow::struct_({arrow::field("keep", arrow::int64()), arrow::field("dropped", arrow::int64())}))});
+  WriteRows(table + "/part.parquet", physical,
+            {Json{{"profile", Json{{"keep", 7}, {"dropped", 8}}}}, Json{{"profile", nullptr}}});
+  auto schema = Schema("profile");
+  auto child = Schema("keep");
+  child["fields"].push_back(
+      Json{{"name", "added"}, {"type", "string"}, {"nullable", true}, {"metadata", Json::object()}});
+  schema["fields"][0]["type"] = child;
+  Commit(table, 0, {Protocol(), Metadata(schema), Add(table, "part.parquet", 2)});
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  ASSERT_AND_ASSIGN(auto reader, Open(files[0]));
+  ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+  auto profile = std::static_pointer_cast<arrow::StructArray>(batch->column(0));
+  EXPECT_TRUE(profile->IsNull(1));
+  EXPECT_EQ(profile->field(1)->null_count(), 2);
+  EXPECT_EQ(std::static_pointer_cast<arrow::Int64Array>(profile->field(0))->Value(0), 7);
+
+  // The pinned Kernel treats an existing parent as missing when all requested
+  // children are new. Retain this upstream behavior until Kernel fixes it.
+  child["fields"].erase(child["fields"].begin());
+  schema["fields"][0]["type"] = child;
+  Commit(table, 1, {Metadata(schema)});
+  SelectVersion(1);
+  ASSERT_AND_ASSIGN(auto replaced, Explore(table));
+  ASSERT_AND_ASSIGN(auto replacement_reader, Open(replaced[0]));
+  ASSERT_AND_ASSIGN(auto replacement_batch, replacement_reader->get_chunk(0));
+  auto replacement = std::static_pointer_cast<arrow::StructArray>(replacement_batch->column(0));
+  EXPECT_EQ(replacement->null_count(), 2);
+  ASSERT_EQ(replacement->num_fields(), 1);
+  EXPECT_EQ(replacement->field(0)->null_count(), 2);
+}
+
+TEST_F(DeltaReaderTest, ValidatesUnprojectedFieldsAndPhysicalCounts) {
+  const auto table = Table();
+  WriteRows(table + "/part.parquet",
+            arrow::schema({arrow::field("id", arrow::int64()), arrow::field("bad", arrow::utf8())}),
+            {Json{{"id", 1}, {"bad", "text"}}});
+  auto schema = Schema();
+  schema["fields"].push_back(Schema("bad")["fields"][0]);
+  Commit(table, 0, {Protocol(), Metadata(schema), Add(table, "part.parquet", 1)});
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  EXPECT_FALSE(Open(files[0], {"id"}).ok());
+  Commit(table, 0, {Protocol(), Metadata(Schema()), Add(table, "part.parquet", 2)});
+  ASSERT_AND_ASSIGN(auto wrong_count, Explore(table));
+  EXPECT_FALSE(Open(wrong_count[0]).ok());
+}
+
+TEST_F(DeltaReaderTest, SharesSnapshotAndReprojectsWithoutLogIoThenReleases) {
+  const auto table = Table();
+  WriteData(table + "/part.parquet");
+  auto schema = Schema();
+  schema["fields"].push_back(Schema("added", "string")["fields"][0]);
+  Commit(table, 0, {Protocol(), Metadata(schema), Add(table, "part.parquet", 4)});
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  using Trait = deltalake::DeltaLakeFormatReader::MetaTrait;
+  ASSERT_AND_ASSIGN(auto metadata, Trait::load_metadata(files[0], properties_, nullptr));
+  std::weak_ptr<void> context = metadata->payload.table;
+  std::filesystem::remove_all(table + "/_delta_log");
+  ASSERT_AND_ASSIGN(auto reader, Open(files[0], {"added"}));
+  ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+  EXPECT_EQ(batch->column(0)->null_count(), 4);
+  ASSERT_AND_ASSIGN(auto reused, Trait::load_metadata(files[0], properties_, nullptr));
+  EXPECT_EQ(metadata->payload.table, reused->payload.table);
+  reader.reset();
+  reused.reset();
+  metadata.reset();
+  EXPECT_TRUE(context.expired());
+  EXPECT_FALSE(Open(files[0]).ok());
+  std::filesystem::create_directories(table + "/_delta_log");
+  Commit(table, 0, {Protocol(), Metadata(schema), Add(table, "part.parquet", 4)});
+  EXPECT_TRUE(Open(files[0]).ok());  // Failed cold opens must not poison the registry.
+}
+
+TEST_F(DeltaReaderTest, ColdContextDoesNotCountUnrelatedFiles) {
+  const auto table = Table();
+  WriteData(table + "/a.parquet");
+  WriteData(table + "/b.parquet");
+  Commit(table, 0,
+         {Protocol(), Metadata(Schema()), Add(table, "a.parquet", 4, false), Add(table, "b.parquet", 4, false)});
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  ASSERT_EQ(files.size(), 2);
+  std::filesystem::remove(table + "/b.parquet");
+  ASSERT_AND_ASSIGN(auto reader, Open(files[0]));
+  ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+  EXPECT_EQ(batch->num_rows(), 4);
+}
+
+TEST_F(DeltaReaderTest, ResolvesRelativeRootsBeforeFilesystemCacheLookup) {
+  const auto first_table = Table("first/table");
+  const auto second_table = Table("second/table");
+  WriteData(first_table + "/part.parquet", 2);
+  WriteData(second_table + "/part.parquet", 3);
+  Commit(first_table, 0, {Protocol(), Metadata(Schema()), Add(first_table, "part.parquet", 2)});
+  Commit(second_table, 0, {Protocol(), Metadata(Schema()), Add(second_table, "part.parquet", 3)});
+  auto properties = std::make_shared<api::Properties>(*properties_);
+  (*properties)[PROPERTY_FS_ROOT_PATH] = std::string(".");
+  properties_ = std::move(properties);
+  const auto previous = std::filesystem::current_path();
+  auto restore = folly::makeGuard([&] { std::filesystem::current_path(previous); });
+
+  std::filesystem::current_path(std::filesystem::path(first_table).parent_path());
+  // Warm the shared cache with the original relative-root properties. A later
+  // Delta open must resolve its own absolute identity before using that cache.
+  ASSERT_AND_ASSIGN(auto warmed, FilesystemCache::getInstance().get(properties_));
+  ASSERT_AND_ASSIGN(auto first, Explore("table"));
+  ASSERT_AND_ASSIGN(auto first_reader, Open(first[0]));
+
+  std::filesystem::current_path(std::filesystem::path(second_table).parent_path());
+  ASSERT_AND_ASSIGN(auto second, Explore("table"));
+  ASSERT_EQ(second.size(), 1);
+  EXPECT_EQ(second[0].end_index, 3);
+  EXPECT_EQ(second[0].path, "file://" + std::filesystem::canonical(second_table).generic_string() + "/part.parquet");
+  ASSERT_AND_ASSIGN(auto second_reader, Open(second[0]));
+  ASSERT_AND_ASSIGN(auto second_batch, second_reader->get_chunk(0));
+  EXPECT_EQ(second_batch->num_rows(), 3);
+  ASSERT_AND_ASSIGN(auto clone, first_reader->clone_reader());
+  ASSERT_AND_ASSIGN(auto first_batch, clone->get_chunk(0));
+  EXPECT_EQ(first_batch->num_rows(), 2);
+}
+
+TEST_F(DeltaReaderTest, ResolvesPhysicalRootBeforeCollapsingSymlinkDotDot) {
+  const auto table = Table("actual/dataset/table");
+  std::filesystem::create_directories(root_ + "/actual/child");
+  std::filesystem::create_directory_symlink(root_ + "/actual/child", root_ + "/link");
+  WriteData(table + "/part.parquet", 3);
+  Commit(table, 0, {Protocol(), Metadata(Schema()), Add(table, "part.parquet", 3)});
+  auto properties = std::make_shared<api::Properties>(*properties_);
+  (*properties)[PROPERTY_FS_ROOT_PATH] = root_ + "/link/../dataset";
+  properties_ = std::move(properties);
+  const auto alias = root_ + "/link/../dataset/table";
+  for (const auto& location : {std::string("table"), alias, "file://" + alias}) {
+    ASSERT_AND_ASSIGN(auto files, Explore(location));
+    ASSERT_EQ(files.size(), 1);
+    EXPECT_EQ(files[0].path, "file://" + std::filesystem::canonical(table).generic_string() + "/part.parquet");
+    ASSERT_AND_ASSIGN(auto reader, Open(files[0]));
+    ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+    EXPECT_EQ(batch->num_rows(), 3);
+  }
+}
+
+TEST_F(DeltaReaderTest, MaterializedPartitionsKeepMemoryEstimatesUnavailable) {
+  const auto table = Table();
+  const auto physical = arrow::schema({arrow::field("id", arrow::int64()), arrow::field("region", arrow::utf8())});
+  WriteRows(table + "/part.parquet", physical,
+            {Json{{"id", 1}, {"region", "west"}}, Json{{"id", 2}, {"region", "west"}}});
+  auto schema = Schema();
+  schema["fields"].push_back(Schema("region", "string")["fields"][0]);
+  auto add = Add(table, "part.parquet", 2);
+  add["add"]["partitionValues"] = Json{{"region", "west"}};
+  Commit(table, 0, {Protocol(), Metadata(schema, Json::array({"region"})), add});
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  ASSERT_AND_ASSIGN(auto reader, Open(files[0]));
+  ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+  ASSERT_EQ(batch->num_rows(), 2);
+  EXPECT_EQ(std::static_pointer_cast<arrow::StringArray>(batch->column(1))->GetString(0), "west");
+  ASSERT_AND_ASSIGN(auto groups, reader->get_row_group_infos());
+  ASSERT_EQ(groups.size(), 1);
+  EXPECT_FALSE(groups[0].memory_size_available);
+  EXPECT_TRUE(reader->get_rg_column_memsz(0).status().IsNotImplemented());
+}
+
+TEST_F(DeltaReaderTest, DescriptorValidationAndSnapshotIsolation) {
+  const auto table = Table();
+  WriteData(table + "/part.parquet");
+  Commit(table, 0, {Protocol(), Metadata(Schema()), Add(table, "part.parquet", 4)});
+  ASSERT_AND_ASSIGN(auto old, Explore(table));
+  auto schema = Schema();
+  schema["fields"].push_back(Schema("added", "string")["fields"][0]);
+  Commit(table, 1, {Metadata(schema)});
+  ASSERT_AND_ASSIGN(auto latest, Explore(table));
+  ASSERT_AND_ASSIGN(auto reader0, Open(old[0]));
+  ASSERT_AND_ASSIGN(auto reader1, Open(latest[0]));
+  EXPECT_EQ(reader0->get_schema()->num_fields(), 1);
+  EXPECT_EQ(reader1->get_schema()->num_fields(), 2);
+  for (auto metadata : {Json{{"version", 2}, {"table_uri", "file:///"}, {"snapshot_version", 0}},
+                        Json{{"version", 1}, {"table_uri", "file:///"}, {"snapshot_version", -1}}, Json::object()}) {
+    auto bad = old[0];
+    bad.Set(api::kPropertyMetadata, metadata.dump());
+    EXPECT_FALSE(Open(bad).ok());
+  }
+  auto bad = old[0];
+  ++bad.end_index;
+  EXPECT_FALSE(Open(bad).ok());
+  bad = old[0];
+  bad.Set(api::kPropertyFileSize, uint64_t{1});
+  EXPECT_FALSE(Open(bad).ok());
+  bad = old[0];
+  bad.path += ".not-active";
+  EXPECT_FALSE(Open(bad).ok());
+}
+
+TEST_F(DeltaReaderTest, RejectsOutOfBoundsDeletionPositions) {
+  const auto table = Table();
+  WriteData(table + "/part.parquet");
+  auto add = Add(table, "part.parquet", 4);
+  add["add"]["deletionVector"] = Deletions(table, {9});
+  Commit(table, 0, {DvProtocol(), Metadata(Schema()), add});
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  EXPECT_FALSE(Open(files[0]).ok());
+}
+
+TEST_F(DeltaReaderTest, SupportedScalarLayoutsCrossArrowVersions) {
+  struct ScalarCase {
+    std::string delta;
+    std::shared_ptr<arrow::DataType> arrow;
+    Json value;
+  };
+  const std::vector<ScalarCase> cases{{"boolean", arrow::boolean(), true},
+                                      {"byte", arrow::int8(), 3},
+                                      {"short", arrow::int16(), 3},
+                                      {"integer", arrow::int32(), 3},
+                                      {"long", arrow::int64(), 3},
+                                      {"float", arrow::float32(), 1.5},
+                                      {"double", arrow::float64(), 1.5},
+                                      {"string", arrow::utf8(), "value"},
+                                      {"binary", arrow::binary(), "bytes"},
+                                      {"decimal(10,2)", arrow::decimal128(10, 2), "1230"},
+                                      {"date", arrow::date32(), 1},
+                                      {"timestamp", arrow::timestamp(arrow::TimeUnit::MICRO, "UTC"), 123456},
+                                      {"timestamp_ntz", arrow::timestamp(arrow::TimeUnit::MICRO), 123456}};
+  for (size_t i = 0; i < cases.size(); ++i) {
+    const auto& item = cases[i];
+    SCOPED_TRACE(item.delta);
+    auto table = Table("scalar-" + std::to_string(i));
+    WriteRows(table + "/part.parquet", arrow::schema({arrow::field("id", item.arrow)}),
+              {Json{{"id", item.value}}, Json{{"id", nullptr}}});
+    Commit(table, 0, {WideningProtocol(), Metadata(Schema("id", item.delta)), Add(table, "part.parquet", 2)});
+    ASSERT_AND_ASSIGN(auto files, Explore(table));
+    ASSERT_AND_ASSIGN(auto reader, Open(files[0]));
+    ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+    EXPECT_TRUE(batch->column(0)->type()->Equals(item.arrow));
+    EXPECT_FALSE(batch->column(0)->IsNull(0));
+    EXPECT_TRUE(batch->column(0)->IsNull(1));
+  }
+}
+
+TEST_F(DeltaReaderTest, AppliesSupportedWideningFamilies) {
+  struct Change {
+    std::string from, to;
+    std::shared_ptr<arrow::DataType> physical, logical;
+    Json value;
+  };
+  const std::vector<Change> changes{
+      {"byte", "short", arrow::int8(), arrow::int16(), 3},
+      {"short", "integer", arrow::int16(), arrow::int32(), 3},
+      {"integer", "long", arrow::int32(), arrow::int64(), 3},
+      {"integer", "double", arrow::int32(), arrow::float64(), 3},
+      {"float", "double", arrow::float32(), arrow::float64(), 3},
+      {"decimal(10,2)", "decimal(12,4)", arrow::decimal128(10, 2), arrow::decimal128(12, 4), "1230"},
+      {"integer", "decimal(12,2)", arrow::int32(), arrow::decimal128(12, 2), 3},
+      {"date", "timestamp_ntz", arrow::date32(), arrow::timestamp(arrow::TimeUnit::MICRO), 1}};
+  for (size_t i = 0; i < changes.size(); ++i) {
+    const auto& change = changes[i];
+    SCOPED_TRACE(change.from + " -> " + change.to);
+    const auto table = Table("cast-" + std::to_string(i));
+    WriteRows(table + "/part.parquet", arrow::schema({arrow::field("id", change.physical)}),
+              {Json{{"id", change.value}}});
+    Commit(table, 0,
+           {WideningProtocol(), Metadata(Schema("id", change.to, TypeChange(change.from, change.to))),
+            Add(table, "part.parquet", 1)});
+    ASSERT_AND_ASSIGN(auto files, Explore(table));
+    ASSERT_AND_ASSIGN(auto reader, Open(files[0]));
+    ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+    EXPECT_TRUE(batch->column(0)->type()->Equals(change.logical));
+    if (change.to == "timestamp_ntz")
+      EXPECT_EQ(std::static_pointer_cast<arrow::TimestampArray>(batch->column(0))->Value(0), 86400000000LL);
+    if (change.to == "decimal(12,4)") {
+      ASSERT_AND_ASSIGN(auto scalar, batch->column(0)->GetScalar(0));
+      EXPECT_EQ(scalar->ToString(), "12.3000");
+    }
+  }
+}
+
+TEST_F(DeltaReaderTest, AdaptsArrayAndMapValuesAndVoidColumns) {
+  const auto table = Table();
+  auto physical = arrow::schema({arrow::field("items", arrow::list(arrow::int32())),
+                                 arrow::field("lookup", arrow::map(arrow::utf8(), arrow::int32()))});
+  WriteRows(table + "/part.parquet", physical,
+            {Json{{"items", Json::array({1, 2})}, {"lookup", Json{{"a", 3}}}},
+             Json{{"items", nullptr}, {"lookup", Json::object()}}});
+  auto schema = Schema("items");
+  schema["fields"][0]["type"] = Json{{"type", "array"}, {"elementType", "long"}, {"containsNull", true}};
+  schema["fields"][0]["metadata"] =
+      Json{{"delta.typeChanges",
+            Json::array({Json{{"fromType", "integer"}, {"toType", "long"}, {"fieldPath", "element"}}})}};
+  auto map = Schema("lookup")["fields"][0];
+  map["type"] = Json{{"type", "map"}, {"keyType", "string"}, {"valueType", "long"}, {"valueContainsNull", true}};
+  map["metadata"] = Json{
+      {"delta.typeChanges", Json::array({Json{{"fromType", "integer"}, {"toType", "long"}, {"fieldPath", "value"}}})}};
+  schema["fields"].push_back(map);
+  schema["fields"].push_back(Schema("empty", "void")["fields"][0]);
+  Commit(table, 0, {WideningProtocol(), Metadata(schema), Add(table, "part.parquet", 2)});
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  ASSERT_AND_ASSIGN(auto reader, Open(files[0]));
+  ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+  auto items = std::static_pointer_cast<arrow::ListArray>(batch->column(0));
+  EXPECT_EQ(items->values()->type_id(), arrow::Type::INT64);
+  EXPECT_TRUE(items->IsNull(1));
+  auto lookup = std::static_pointer_cast<arrow::MapArray>(batch->column(1));
+  EXPECT_EQ(lookup->items()->type_id(), arrow::Type::INT64);
+  EXPECT_EQ(batch->column(2)->type_id(), arrow::Type::NA);
+  EXPECT_EQ(batch->column(2)->null_count(), 2);
+}
+
+TEST_F(DeltaReaderTest, CoalescesContextsAndIsolatesFilesystems) {
+  const auto table = Table();
+  WriteData(table + "/part.parquet");
+  Commit(table, 0, {Protocol(), Metadata(Schema()), Add(table, "part.parquet", 4)});
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  using Trait = deltalake::DeltaLakeFormatReader::MetaTrait;
+  std::vector<std::future<arrow::Result<Trait::MetadataPtr>>> pending;
+  for (int i = 0; i < 8; ++i)
+    pending.push_back(
+        std::async(std::launch::async, [&] { return Trait::load_metadata(files[0], properties_, nullptr); }));
+  ASSERT_AND_ASSIGN(auto first, pending[0].get());
+  for (size_t i = 1; i < pending.size(); ++i) {
+    ASSERT_AND_ASSIGN(auto metadata, pending[i].get());
+    EXPECT_EQ(first->payload.table, metadata->payload.table);
+    EXPECT_EQ(first->payload.files, metadata->payload.files);
+  }
+  auto equivalent_properties = std::make_shared<api::Properties>(*properties_);
+  (*equivalent_properties)[PROPERTY_FS_ROOT_PATH] = (std::filesystem::path(root_) / ".").string();
+  ASSERT_AND_ASSIGN(auto equivalent, Trait::load_metadata(files[0], equivalent_properties, nullptr));
+  EXPECT_EQ(first->payload.table, equivalent->payload.table);
+  auto properties = std::make_shared<api::Properties>(*properties_);
+  (*properties)[PROPERTY_FS_ROOT_PATH] = std::filesystem::canonical(root_).parent_path().string();
+  ASSERT_AND_ASSIGN(auto isolated, Trait::load_metadata(files[0], properties, nullptr));
+  EXPECT_NE(first->payload.table, isolated->payload.table);
+}
+
+TEST_F(DeltaReaderTest, RemoteSnapshotMatchesEquivalentEncodedFileNames) {
+  const auto table = Table();
+  WriteData(table + "/part.parquet");
+  auto add = Add(table, "part.parquet", 4);
+  add["add"]["path"] = "%70art.parquet";
+  Commit(table, 0, {Protocol(), Metadata(Schema()), add});
+  auto filesystem = std::make_shared<FileSystemProxy>(root_, std::make_shared<arrow::fs::LocalFileSystem>());
+  ASSERT_AND_ASSIGN(auto snapshot, deltalake::BlockingDeltaSnapshot::LoadForReader("s3://bucket/table/", 0, filesystem,
+                                                                                   {false, "s3", "bucket", ""}));
+  api::ColumnGroupFile file{"table/part.parquet", 0, 4, {}};
+  file.Set(api::kPropertyFileSize, std::filesystem::file_size(table + "/part.parquet"));
+  ASSERT_AND_ASSIGN(auto metadata, parquet::ParquetFormatReader::MetaTrait::load_metadata_with_filesystem(
+                                       file, filesystem, file.path, properties_, nullptr));
+  ASSERT_AND_ASSIGN(auto kernel_file, snapshot->LoadFile("s3://bucket/table/part.parquet",
+                                                         metadata->payload.parquet_metadata->SerializeToString(), 4, 4,
+                                                         file.Get<uint64_t>(api::kPropertyFileSize)));
+  EXPECT_EQ(kernel_file->LiveRows(), 4);
+}
+
+TEST_F(DeltaReaderTest, RejectsMissingRequiredFieldsAndConflictingFieldIds) {
+  const auto table = Table();
+  WriteData(table + "/part.parquet", 4, "physical_id", arrow::int64(),
+            arrow::key_value_metadata({"PARQUET:field_id"}, {"2"}));
+  auto schema =
+      Schema("id", "long", Json{{"delta.columnMapping.id", 1}, {"delta.columnMapping.physicalName", "physical_id"}});
+  const auto protocol = Json{{"protocol", Json{{"minReaderVersion", 2}, {"minWriterVersion", 5}}}};
+  Commit(table, 0,
+         {protocol,
+          Metadata(schema, Json::array(),
+                   Json{{"delta.columnMapping.mode", "id"}, {"delta.columnMapping.maxColumnId", "1"}}),
+          Add(table, "part.parquet", 4)});
+  ASSERT_AND_ASSIGN(auto mapped, Explore(table));
+  EXPECT_FALSE(Open(mapped[0]).ok());
+  schema = Schema("missing");
+  schema["fields"][0]["nullable"] = false;
+  Commit(table, 0, {Protocol(), Metadata(schema), Add(table, "part.parquet", 4)});
+  ASSERT_AND_ASSIGN(auto required, Explore(table));
+  EXPECT_FALSE(Open(required[0]).ok());
+}
+
+TEST_F(DeltaReaderTest, ColumnGroupDispatchSupportsCachedAndUncachedReads) {
+  const auto table = Table();
+  WriteData(table + "/a.parquet");
+  WriteData(table + "/b.parquet");
+  Commit(table, 0, {Protocol(), Metadata(Schema()), Add(table, "a.parquet", 4), Add(table, "b.parquet", 4)});
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  auto group = std::make_shared<api::ColumnGroup>(api::ColumnGroup{{"id"}, LOON_FORMAT_DELTALAKE_TABLE, files});
+  auto schema = arrow::schema({arrow::field("id", arrow::int64())});
+  for (bool enabled : {false, true}) {
+    ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema, group, {"id"}, properties_, nullptr, "",
+                                                                  MetadataCache(enabled)));
+    EXPECT_EQ(reader->total_rows(), 8);
+    ASSERT_AND_ASSIGN(auto batches, reader->get_chunks({0, 1}, 2));
+    ASSERT_EQ(batches.size(), 2);
+    EXPECT_EQ(batches[0]->num_rows(), 4);
+    EXPECT_EQ(batches[1]->num_rows(), 4);
+    ASSERT_AND_ASSIGN(auto sizes, reader->get_chunk_column_estimated_sizes(0));
+    EXPECT_EQ(sizes.size(), 1);
+
+    auto properties = std::make_shared<api::Properties>(*properties_);
+    (*properties)[PROPERTY_READER_METADATA_CACHE_ENABLE] = enabled;
+    auto groups = std::make_shared<api::ColumnGroups>(api::ColumnGroups{group});
+    auto public_reader = api::Reader::create(groups, schema, nullptr, properties);
+    ASSERT_AND_ASSIGN(auto selected, public_reader->take({0, 3, 4, 7}, 2));
+    ASSERT_AND_ASSIGN(auto selected_async, public_reader->take_async({0, 3, 4, 7}, 2).get());
+    EXPECT_TRUE(selected->Equals(*selected_async));
+    ASSERT_EQ(selected->num_rows(), 4);
+    for (int row = 0; row < 4; ++row) {
+      ASSERT_AND_ASSIGN(auto value, selected->column(0)->GetScalar(row));
+      EXPECT_EQ(value->ToString(), row % 2 == 0 ? "0" : "3");
+    }
+    ASSERT_AND_ASSIGN(auto chunk_reader, public_reader->get_chunk_reader(0, nullptr));
+    ASSERT_AND_ASSIGN(auto async_chunks, chunk_reader->get_chunks_async({0, 1}, 2).get());
+    ASSERT_EQ(async_chunks.size(), batches.size());
+    for (size_t index = 0; index < batches.size(); ++index) EXPECT_TRUE(async_chunks[index]->Equals(*batches[index]));
+  }
+}
+
+TEST_F(DeltaReaderTest, ReadsEncryptedFilesWithoutSharingDecryptionCallbacks) {
+  const std::string key = "0123456789abcdef0123456789abcdef";
+  const std::string column_key = "abcdef0123456789abcdef0123456789";
+  struct EncryptionLayout {
+    bool plaintext_footer;
+    bool separate_column_key;
+  };
+  for (const auto layout : {EncryptionLayout{false, false}, EncryptionLayout{true, false},
+                            EncryptionLayout{false, true}, EncryptionLayout{true, true}}) {
+    const auto table = Table(std::string(layout.plaintext_footer ? "plaintext-footer" : "encrypted-footer") +
+                             (layout.separate_column_key ? "-column-key" : "-footer-key"));
+    ::parquet::FileEncryptionProperties::Builder encryption(key);
+    encryption.footer_key_metadata("delta-key");
+    if (layout.plaintext_footer)
+      encryption.set_plaintext_footer();
+    if (layout.separate_column_key) {
+      ::parquet::ColumnPathToEncryptionPropertiesMap columns;
+      columns["id"] = ::parquet::ColumnEncryptionProperties::Builder("id")
+                          .key(column_key)
+                          ->key_metadata("delta-column-key")
+                          ->build();
+      encryption.encrypted_columns(columns);
+    }
+    WriteRows(table + "/part.parquet", arrow::schema({arrow::field("id", arrow::int64())}),
+              {Json{{"id", 0}}, Json{{"id", 1}}, Json{{"id", 2}}, Json{{"id", 3}}}, 2, encryption.build());
+    Commit(table, 0, {Protocol(), Metadata(Schema()), Add(table, "part.parquet", 4)});
+    ASSERT_AND_ASSIGN(auto files, Explore(table));
+    ASSERT_AND_ASSIGN(auto* format, Format::get(LOON_FORMAT_DELTALAKE_TABLE));
+    const KeyRetriever retrieve = [&](const std::string& metadata) {
+      if (metadata == "delta-column-key")
+        return column_key;
+      EXPECT_EQ(metadata, "delta-key");
+      return key;
+    };
+    ASSERT_AND_ASSIGN(auto reader, format->create_reader(nullptr, files[0], properties_, {"id"}, retrieve));
+    ASSERT_AND_ASSIGN(auto first, reader->get_chunk(0));
+    ASSERT_AND_ASSIGN(auto clone, reader->clone_reader());
+    ASSERT_AND_ASSIGN(auto last, clone->get_chunk(1));
+    EXPECT_EQ(std::static_pointer_cast<arrow::Int64Array>(first->column(0))->Value(1), 1);
+    EXPECT_EQ(std::static_pointer_cast<arrow::Int64Array>(last->column(0))->Value(1), 3);
+    // A live reader's decrypted metadata must not let another callback bypass
+    // key validation, even though the table-level snapshot is shared.
+    const KeyRetriever wrong_key = [](const std::string&) { return std::string(32, 'x'); };
+    EXPECT_FALSE(format->create_reader(nullptr, files[0], properties_, {"id"}, wrong_key).ok());
+    auto no_key = format->create_reader(nullptr, files[0], properties_, {"id"}, nullptr);
+    EXPECT_TRUE(!no_key.ok() || !no_key.ValueOrDie()->get_chunk(0).ok());
+    ASSERT_AND_ASSIGN(auto reopened, format->create_reader(nullptr, files[0], properties_, {"id"}, retrieve));
+    EXPECT_TRUE(reopened->get_chunk(0).ok());
+    if (!layout.plaintext_footer && !layout.separate_column_key) {
+      // Exploration has no key callback for its count fallback. An encrypted
+      // footer therefore requires usable snapshot statistics.
+      Commit(table, 1, {Add(table, "part.parquet", 4, false)});
+      EXPECT_FALSE(Explore(table).ok());
+    }
+  }
 }
 
 }  // namespace
