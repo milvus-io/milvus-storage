@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright Zilliz
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -16,11 +17,13 @@
 #include <nlohmann/json.hpp>
 #include <parquet/arrow/writer.h>
 #include <parquet/encryption/encryption.h>
+#include <parquet/file_reader.h>
 #include <parquet/metadata.h>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/format/async_tasks.h"
 #include "milvus-storage/format/format.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/reader.h"
@@ -935,6 +938,151 @@ TEST_F(DeltaReaderTest, MappedWidenedMissingAndPartitionColumns) {
   }
 }
 
+TEST_F(DeltaReaderTest, ConstantOnlyReadsPreserveLiveRangesAndValidation) {
+  const auto table = Table();
+  std::vector<Json> rows;
+  for (int64_t id = 0; id < 8; ++id) rows.push_back(Json{{"id", id}});
+  WriteRows(table + "/part.parquet", arrow::schema({arrow::field("id", arrow::int64())}), rows);
+  auto schema = Schema();
+  schema["fields"].push_back(Schema("region", "string")["fields"][0]);
+  schema["fields"].push_back(Schema("note", "string")["fields"][0]);
+  auto add = Add(table, "part.parquet", 8);
+  add["add"]["partitionValues"] = Json{{"region", "apac"}};
+  add["add"]["deletionVector"] = Deletions(table, {0, 1, 3, 4, 5});
+  Commit(table, 0, {DvProtocol(), Metadata(schema, Json::array({"region"})), add});
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  ASSERT_EQ(files.size(), 1);
+  const std::vector<int64_t> live_rows{0, 1, 0, 2};
+  struct RangeCase {
+    uint64_t start, end;
+    std::vector<int64_t> batch_rows;
+  };
+  for (const auto& names : std::vector<std::vector<std::string>>{{"region"}, {"note"}, {"region", "note"}, {}}) {
+    SCOPED_TRACE(::testing::PrintToString(names));
+    ASSERT_AND_ASSIGN(auto reader, Open(files[0], names, names.empty() ? arrow::schema({}) : nullptr));
+    const auto check = [&](const std::shared_ptr<arrow::RecordBatch>& batch, int64_t expected_rows) {
+      ASSERT_NE(batch, nullptr);
+      ASSERT_EQ(batch->num_rows(), expected_rows);
+      ASSERT_EQ(batch->schema()->field_names(), names);
+      for (size_t column = 0; column < names.size(); ++column) {
+        if (names[column] == "note") {
+          EXPECT_EQ(batch->column(column)->null_count(), expected_rows);
+        } else {
+          const auto values = std::static_pointer_cast<arrow::StringArray>(batch->column(column));
+          for (int64_t row = 0; row < expected_rows; ++row) EXPECT_EQ(values->GetString(row), "apac");
+        }
+      }
+    };
+    ASSERT_AND_ASSIGN(auto groups, reader->get_row_group_infos());
+    ASSERT_EQ(groups.size(), live_rows.size());
+    for (size_t group = 0; group < groups.size(); ++group) {
+      EXPECT_EQ(groups[group].end_offset - groups[group].start_offset, live_rows[group]);
+      EXPECT_EQ(groups[group].read_size, 0);
+      EXPECT_FALSE(groups[group].memory_size_available);
+      ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(group));
+      check(batch, live_rows[group]);
+    }
+    // Leading and middle deleted groups repeat offsets. Ranges must retain the
+    // original live-group batch boundaries while materializing only their slice.
+    for (const auto& test : {RangeCase{0, 3, {1, 2}}, RangeCase{0, 2, {1, 1}}, RangeCase{1, 2, {1}},
+                             RangeCase{1, 3, {2}}, RangeCase{0, 0, {}}, RangeCase{1, 1, {}}, RangeCase{3, 3, {}}}) {
+      SCOPED_TRACE(::testing::Message() << test.start << ':' << test.end);
+      ASSERT_AND_ASSIGN(auto range, reader->read_with_range(test.start, test.end));
+      std::shared_ptr<arrow::RecordBatch> batch;
+      for (auto expected_rows : test.batch_rows) {
+        ASSERT_STATUS_OK(range->ReadNext(&batch));
+        check(batch, expected_rows);
+      }
+      ASSERT_STATUS_OK(range->ReadNext(&batch));
+      EXPECT_EQ(batch, nullptr);
+    }
+    ASSERT_AND_ASSIGN(auto selected, reader->take({0, 2}));
+    ASSERT_AND_ASSIGN(auto selected_batch, selected->CombineChunksToBatch());
+    check(selected_batch, 2);
+    ASSERT_AND_ASSIGN(auto empty, reader->take({}));
+    EXPECT_EQ(empty->num_rows(), 0);
+    EXPECT_EQ(empty->schema()->field_names(), names);
+    EXPECT_TRUE(reader->take({-1}).status().IsInvalid());
+    EXPECT_TRUE(reader->take({1, 1}).status().IsInvalid());
+    EXPECT_TRUE(reader->take({2, 0}).status().IsInvalid());
+    EXPECT_TRUE(reader->take({3}).status().IsInvalid());
+    EXPECT_TRUE(reader->read_with_range(2, 1).status().IsInvalid());
+    EXPECT_TRUE(reader->read_with_range(0, 4).status().IsInvalid());
+  }
+}
+
+TEST_F(DeltaReaderTest, ProjectedReadBytesDriveSchedulingWithoutScalingForDeletions) {
+  const auto table = Table();
+  std::vector<Json> rows;
+  for (int64_t id = 0; id < 8; ++id) rows.push_back(Json{{"id", id}, {"payload", "payload-" + std::to_string(id)}});
+  const auto physical = arrow::schema({arrow::field("id", arrow::int64()), arrow::field("payload", arrow::utf8())});
+  WriteRows(table + "/part.parquet", physical, rows);
+  auto schema = Schema();
+  schema["fields"].push_back(Schema("payload", "string")["fields"][0]);
+  auto add = Add(table, "part.parquet", 8);
+  add["add"]["deletionVector"] = Deletions(table, {0, 1, 3, 4, 5});
+  Commit(table, 0, {DvProtocol(), Metadata(schema), add});
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  ASSERT_EQ(files.size(), 1);
+  ASSERT_AND_ASSIGN(auto input, arrow::io::ReadableFile::Open(table + "/part.parquet"));
+  const auto footer = ::parquet::ParquetFileReader::Open(input)->metadata();
+  ASSERT_AND_ASSIGN(auto narrow, Open(files[0], {"id"}));
+  ASSERT_AND_ASSIGN(auto wide, Open(files[0], {"id", "payload"}));
+  ASSERT_AND_ASSIGN(auto narrow_groups, narrow->get_row_group_infos());
+  ASSERT_AND_ASSIGN(auto wide_groups, wide->get_row_group_infos());
+  ASSERT_EQ(narrow_groups.size(), 4);
+  ASSERT_EQ(wide_groups.size(), narrow_groups.size());
+  for (size_t group = 0; group < narrow_groups.size(); ++group) {
+    const bool deleted = group == 0 || group == 2;
+    const auto row_group = footer->RowGroup(group);
+    const auto id_bytes = row_group->ColumnChunk(0)->total_compressed_size();
+    const auto payload_bytes = row_group->ColumnChunk(1)->total_compressed_size();
+    EXPECT_EQ(narrow_groups[group].read_size, deleted ? 0 : id_bytes);
+    EXPECT_EQ(wide_groups[group].read_size, deleted ? 0 : id_bytes + payload_bytes);
+    EXPECT_TRUE(narrow_groups[group].memory_size_available);
+    EXPECT_TRUE(wide_groups[group].memory_size_available);
+  }
+  ASSERT_AND_ASSIGN(auto clone, narrow->clone_reader());
+  ASSERT_AND_ASSIGN(auto cloned_groups, clone->get_row_group_infos());
+  ASSERT_EQ(cloned_groups.size(), narrow_groups.size());
+  for (size_t group = 0; group < cloned_groups.size(); ++group)
+    EXPECT_EQ(cloned_groups[group].read_size, narrow_groups[group].read_size);
+
+  std::vector<api::ChunkInfo> infos;
+  for (const auto& group : narrow_groups) {
+    infos.push_back({.file_index = 0,
+                     .row_offset_in_file = group.start_offset,
+                     .number_of_rows = group.end_offset - group.start_offset,
+                     .read_size = group.read_size});
+  }
+  const auto lookup = [&infos](int64_t index) -> const api::ChunkInfo& { return infos[index]; };
+  auto tasks = api::ChunkTask::Build({0, 1, 2, 3}, lookup);
+  ASSERT_EQ(tasks.size(), 1);
+  ASSERT_TRUE(narrow_groups[1].read_size.has_value());
+  ASSERT_TRUE(narrow_groups[3].read_size.has_value());
+  ASSERT_GT(*narrow_groups[1].read_size, 0);
+  ASSERT_GT(*narrow_groups[3].read_size, 0);
+  const auto target_bytes = std::max(*narrow_groups[1].read_size, *narrow_groups[3].read_size);
+  api::SplitAsyncTasks(tasks, 1, api::ChunkTask::SplitTraits{lookup}, api::AsyncTaskSplitStrategy::kSplitByBytes,
+                       target_bytes);
+  ASSERT_EQ(tasks.size(), 2);  // Unavailable estimates would fall back to one task.
+  std::vector<std::shared_ptr<arrow::Table>> scheduled;
+  for (const auto& task : tasks) {
+    ASSERT_AND_ASSIGN(auto range, narrow->read_with_range(task.range_start, task.range_end));
+    ASSERT_AND_ASSIGN(auto chunk, range->ToTable());
+    scheduled.push_back(std::move(chunk));
+  }
+  ASSERT_AND_ASSIGN(auto actual, arrow::ConcatenateTables(scheduled));
+  ASSERT_AND_ASSIGN(auto whole, narrow->read_with_range(0, 3));
+  ASSERT_AND_ASSIGN(auto expected, whole->ToTable());
+  EXPECT_TRUE(actual->Equals(*expected));
+  ASSERT_EQ(actual->num_rows(), 3);
+  for (int64_t row = 0; row < 3; ++row) {
+    ASSERT_AND_ASSIGN(auto value, actual->column(0)->GetScalar(row));
+    EXPECT_EQ(value->ToString(), row == 0 ? "2" : std::to_string(row + 5));
+  }
+}
+
 TEST_F(DeltaReaderTest, NestedDroppedFieldsAndNullableChildren) {
   const auto table = Table();
   auto physical = arrow::schema({arrow::field(
@@ -1159,6 +1307,8 @@ TEST_F(DeltaReaderTest, MaterializedPartitionsKeepMemoryEstimatesUnavailable) {
   ASSERT_AND_ASSIGN(auto groups, reader->get_row_group_infos());
   ASSERT_EQ(groups.size(), 1);
   EXPECT_FALSE(groups[0].memory_size_available);
+  ASSERT_TRUE(groups[0].read_size.has_value());
+  EXPECT_GT(*groups[0].read_size, 0);
   EXPECT_TRUE(reader->get_rg_column_memsz(0).status().IsNotImplemented());
 }
 

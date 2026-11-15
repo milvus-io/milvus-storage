@@ -50,11 +50,14 @@ class DeltaLakeFormatReader final : public FormatReader, public std::enable_shar
   std::shared_ptr<arrow::Schema> get_schema() const override;
 
   private:
+  class RangeReader;
+
   DeltaLakeFormatReader(MetaTrait::MetadataPtr metadata,
                         std::shared_ptr<DeltaFileMetadata> file,
                         std::shared_ptr<BlockingDeltaReadPlan> plan);
   arrow::Result<std::shared_ptr<arrow::RecordBatch>> transform(const std::shared_ptr<arrow::RecordBatch>& batch,
                                                                uint64_t physical_start) const;
+  arrow::Result<std::shared_ptr<arrow::RecordBatch>> materialize_rows(int64_t rows) const;
 
   MetaTrait::MetadataPtr metadata_;
   std::shared_ptr<DeltaFileMetadata> file_;

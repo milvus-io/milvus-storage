@@ -154,7 +154,8 @@ from directory names. Only primitive partition types are supported.
   footers for files without usable counts. On a per-file cache miss, reader
   creation loads/validates the footer and decodes DV positions even for
   partition-only/null-only projections; those projections can still avoid
-  payload-column reads.
+  payload-column reads. When no physical columns are needed, chunk/range/take
+  output is materialized only for the live/requested row count.
 - Encrypted data reads use the existing C++ key callback, including distinct
   column keys. Exploration has no key callback for its count fallback, so files
   with encrypted footers require usable row counts in the snapshot metadata.
@@ -177,6 +178,11 @@ from directory names. Only primitive partition types are supported.
   adaptation prevents reliable reuse of physical Parquet estimates, including
   mapping, widening, partition constants (even when also stored in Parquet), and
   missing columns. This does not prevent data reads.
+- Row-group read-byte estimates describe projected compressed physical payload
+  bytes for scheduling, independently of output-memory estimates. No-column or
+  fully deleted groups report zero payload bytes; partially deleted groups keep
+  their full projected physical size. Zero I/O bytes do not imply zero CPU or
+  output allocation and can leave constant-only groups in one byte-based task.
 
 ### Validation status
 

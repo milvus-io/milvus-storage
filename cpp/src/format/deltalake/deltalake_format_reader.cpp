@@ -345,7 +345,24 @@ arrow::Status DeltaLakeFormatReader::open() {
 }
 
 std::shared_ptr<arrow::Schema> DeltaLakeFormatReader::get_schema() const { return metadata_->file_schema; }
-arrow::Result<std::vector<RowGroupInfo>> DeltaLakeFormatReader::get_row_group_infos() { return file_->groups; }
+arrow::Result<std::vector<RowGroupInfo>> DeltaLakeFormatReader::get_row_group_infos() {
+  if (!parquet_) {
+    auto groups = file_->groups;
+    for (auto& group : groups) group.read_size = 0;
+    return groups;
+  }
+  ARROW_ASSIGN_OR_RAISE(auto groups, parquet_->get_row_group_infos());
+  if (groups.size() != file_->groups.size())
+    return arrow::Status::Invalid("Delta projected row group count differs from file metadata");
+  for (size_t index = 0; index < groups.size(); ++index) {
+    const auto read_size = groups[index].read_size;
+    groups[index] = file_->groups[index];
+    // Surviving rows still require the group's full projected physical bytes.
+    // Output-memory estimates and live offsets belong to the logical group.
+    groups[index].read_size = groups[index].start_offset == groups[index].end_offset ? 0 : read_size;
+  }
+  return groups;
+}
 arrow::Result<std::vector<uint64_t>> DeltaLakeFormatReader::get_rg_column_memsz(int64_t index) const {
   if (index < 0 || static_cast<size_t>(index) >= file_->groups.size())
     return arrow::Status::Invalid("Delta row group out of bounds");
@@ -376,19 +393,22 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> DeltaLakeFormatReader::transf
   return selected.record_batch();
 }
 
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> DeltaLakeFormatReader::materialize_rows(int64_t rows) const {
+  // Without physical leaves, every output field is constant/null within a file.
+  // File and DV validation already ran, so materialize only rows being returned.
+  return plan_->Apply(arrow::RecordBatch::Make(arrow::schema({}), rows, std::vector<std::shared_ptr<arrow::Array>>{}));
+}
+
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> DeltaLakeFormatReader::get_chunk(const int& index) {
   if (index < 0 || static_cast<size_t>(index) >= file_->groups.size())
     return arrow::Status::Invalid("Delta row group out of bounds");
   const auto& group = file_->groups[index];
   if (group.start_offset == group.end_offset)
     return arrow::RecordBatch::MakeEmpty(output_schema_);
-  std::shared_ptr<arrow::RecordBatch> batch;
+  if (!parquet_)
+    return materialize_rows(group.end_offset - group.start_offset);
+  ARROW_ASSIGN_OR_RAISE(auto batch, parquet_->get_chunk(index));
   const auto& physical = file_->parquet->row_group_infos[index];
-  if (parquet_) {
-    ARROW_ASSIGN_OR_RAISE(batch, parquet_->get_chunk(index));
-  } else
-    batch = arrow::RecordBatch::Make(arrow::schema({}), physical.end_offset - physical.start_offset,
-                                     std::vector<std::shared_ptr<arrow::Array>>{});
   return transform(batch, physical.start_offset);
 }
 
@@ -406,18 +426,19 @@ arrow::Result<std::shared_ptr<arrow::Table>> DeltaLakeFormatReader::take(const s
   if (indices.empty())
     return arrow::Table::MakeEmpty(output_schema_);
   std::vector<int64_t> physical;
+  if (parquet_)
+    physical.reserve(indices.size());
   int64_t previous = -1;
   for (auto index : indices) {
     if (index <= previous || index < 0 || static_cast<uint64_t>(index) >= file_->kernel->LiveRows())
       return arrow::Status::Invalid("Delta take indices must be sorted, unique, and in bounds");
     previous = index;
-    physical.push_back(LogicalToPhysical(index, file_->kernel->Deletions()));
+    if (parquet_)
+      physical.push_back(LogicalToPhysical(index, file_->kernel->Deletions()));
   }
   std::vector<std::shared_ptr<arrow::RecordBatch>> output;
   if (!parquet_) {
-    ARROW_ASSIGN_OR_RAISE(auto batch,
-                          plan_->Apply(arrow::RecordBatch::Make(arrow::schema({}), indices.size(),
-                                                                std::vector<std::shared_ptr<arrow::Array>>{})));
+    ARROW_ASSIGN_OR_RAISE(auto batch, materialize_rows(indices.size()));
     output.push_back(std::move(batch));
   } else {
     ARROW_ASSIGN_OR_RAISE(auto table, parquet_->take(physical));
@@ -434,15 +455,21 @@ arrow::Result<std::shared_ptr<arrow::Table>> DeltaLakeFormatReader::take(const s
   return arrow::Table::FromRecordBatches(output_schema_, output);
 }
 
-namespace {
-class DeltaRangeReader final : public arrow::RecordBatchReader {
+class DeltaLakeFormatReader::RangeReader final : public arrow::RecordBatchReader {
   public:
-  DeltaRangeReader(std::shared_ptr<DeltaLakeFormatReader> reader,
-                   std::shared_ptr<arrow::Schema> schema,
-                   std::span<const RowGroupInfo> groups,
-                   uint64_t start,
-                   uint64_t end)
-      : reader_(std::move(reader)), schema_(std::move(schema)), groups_(groups), start_(start), end_(end) {}
+  RangeReader(std::shared_ptr<DeltaLakeFormatReader> reader,
+              std::shared_ptr<arrow::Schema> schema,
+              std::span<const RowGroupInfo> groups,
+              uint64_t start,
+              uint64_t end)
+      : reader_(std::move(reader)), schema_(std::move(schema)), groups_(groups), start_(start), end_(end) {
+    // Empty/deleted groups may repeat offsets. Start at the first live end
+    // beyond the requested offset rather than scanning every preceding group.
+    const auto first =
+        std::upper_bound(groups_.begin(), groups_.end(), start_,
+                         [](uint64_t offset, const RowGroupInfo& group) { return offset < group.end_offset; });
+    index_ = first - groups_.begin();
+  }
   std::shared_ptr<arrow::Schema> schema() const override { return schema_; }
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* output) override {
     *output = nullptr;
@@ -453,11 +480,15 @@ class DeltaRangeReader final : public arrow::RecordBatchReader {
         ++index_;
         continue;
       }
-      ARROW_ASSIGN_OR_RAISE(auto batch, reader_->get_chunk(static_cast<int>(index)));
-      ++index_;
       const auto start = std::max(start_, uint64_t(group.start_offset));
       const auto end = std::min(end_, uint64_t(group.end_offset));
-      *output = batch->Slice(start - group.start_offset, end - start);
+      if (reader_->parquet_) {
+        ARROW_ASSIGN_OR_RAISE(auto batch, reader_->get_chunk(static_cast<int>(index)));
+        *output = batch->Slice(start - group.start_offset, end - start);
+      } else {
+        ARROW_ASSIGN_OR_RAISE(*output, reader_->materialize_rows(end - start));
+      }
+      ++index_;
       start_ = end;
       return arrow::Status::OK();
     }
@@ -472,13 +503,12 @@ class DeltaRangeReader final : public arrow::RecordBatchReader {
   uint64_t start_, end_;
   size_t index_ = 0;
 };
-}  // namespace
 
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> DeltaLakeFormatReader::read_with_range(const uint64_t& start,
                                                                                                 const uint64_t& end) {
   if (start > end || end > file_->kernel->LiveRows())
     return arrow::Status::Invalid("Delta range out of bounds");
-  return std::make_shared<DeltaRangeReader>(shared_from_this(), output_schema_, file_->groups, start, end);
+  return std::make_shared<RangeReader>(shared_from_this(), output_schema_, file_->groups, start, end);
 }
 
 arrow::Result<std::shared_ptr<FormatReader>> DeltaLakeFormatReader::clone_reader() {
