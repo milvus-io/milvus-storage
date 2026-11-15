@@ -478,6 +478,11 @@ ParquetFormatReader::MetaTrait::load_metadata_with_filesystem(const api::ColumnG
                                                       file.Get<uint64_t>(api::kPropertyFooterSize));
   ARROW_RETURN_NOT_OK(reader->open());
   ARROW_ASSIGN_OR_RAISE(auto metadata, create_metadata_from_reader(reader, file));
+  if (!key_retriever) {
+    return metadata;
+  }
+  // Keep the decoded encrypted footer for table-format schema planning; new
+  // stateful readers still initialize their own decryptors instead of reusing it.
   auto retained = std::make_shared<Metadata>(*metadata);
   retained->payload.parquet_metadata = reader->file_reader_->parquet_reader()->metadata();
   return MetadataPtr(std::move(retained));

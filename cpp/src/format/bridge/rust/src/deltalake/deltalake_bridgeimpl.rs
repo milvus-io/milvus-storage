@@ -4,7 +4,7 @@
 //! Snapshot resolution, exploration and shared reader metadata. Retain Kernel
 //! state in memory instead of serializing it into per-file descriptors.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -192,8 +192,19 @@ fn open_snapshot_impl(
         projections: std::sync::Mutex::new(crate::deltalake_reader::new_projection_cache()),
         files: Vec::new(),
     };
+    let mut explored_paths = HashSet::new();
     for batch in scan.scan_metadata(engine.as_ref())? {
-        let (metadata, candidates) = select_scan_metadata(batch?)?;
+        let batch = batch?;
+        let (metadata, candidates) = if explore {
+            // Exploration needs selected file facts, not compacted batches or
+            // row locators for future file plans. Release this batch now.
+            let files = batch.visit_scan_files(Vec::new(), |files, file| files.push(file))?;
+            drop(batch);
+            (None, files)
+        } else {
+            let (metadata, files) = select_scan_metadata(batch)?;
+            (Some(metadata), files)
+        };
         let batch_index = context.scan_metadata.len();
         for (row_index, candidate) in candidates.into_iter().enumerate() {
             let location = table_url
@@ -205,7 +216,6 @@ fn open_snapshot_impl(
             validate_partitions(&candidate, &partition_fields, mapping)?;
             let dv_string_bytes =
                 validate_deletion_location(&candidate.dv_info, &table_url, &binding)?;
-            context.dv_string_bytes = context.dv_string_bytes.saturating_add(dv_string_bytes);
             ensure!(
                 candidate.size >= 0,
                 "{INVALID} negative Delta file size: {location}"
@@ -235,31 +245,40 @@ fn open_snapshot_impl(
             } else {
                 0
             };
-            let path = location.to_string();
             let key = delta_file_key(&location)?;
+            let unique = if explore {
+                explored_paths.insert(key)
+            } else {
+                context.dv_string_bytes = context.dv_string_bytes.saturating_add(dv_string_bytes);
+                context
+                    .active_files
+                    .insert(
+                        key,
+                        CachedScanFile {
+                            size: candidate.size as u64,
+                            num_records: candidate.stats.map(|stats| stats.num_records),
+                            dv_info: candidate.dv_info,
+                            batch_index,
+                            row_index,
+                        },
+                    )
+                    .is_none()
+            };
             ensure!(
-                !context.active_files.contains_key(&key),
+                unique,
                 "{INVALID} duplicate active Delta data path: {location}"
             );
             if rows != 0 {
                 context.files.push(DeltaFileInfo {
-                    path: path.clone(),
+                    path: location.to_string(),
                     file_size: candidate.size as u64,
                     row_count: rows,
                 });
             }
-            context.active_files.insert(
-                key,
-                CachedScanFile {
-                    size: candidate.size as u64,
-                    num_records: candidate.stats.map(|stats| stats.num_records),
-                    dv_info: candidate.dv_info,
-                    batch_index,
-                    row_index,
-                },
-            );
         }
-        context.scan_metadata.push(metadata);
+        if let Some(metadata) = metadata {
+            context.scan_metadata.push(metadata);
+        }
     }
     context
         .files

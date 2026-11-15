@@ -4,13 +4,14 @@
 
 ## Known limitations
 
-### Nullable structs with no matching physical children
+### Existing containers with no matching physical leaves
 
 The reader currently retains the behavior of the pinned
 [`delta-kernel-rs` revision](https://github.com/delta-io/delta-kernel-rs/commit/913389cbf94528225c70b2a396a9408f41dd9954).
-If an existing nullable struct has no requested child fields in a data file,
-Kernel reconstructs the entire struct as null, including previously non-null
-parents. For example, reading `profile: struct<new: string>` from a file containing
+If an existing container has no matching requested physical leaves in a data
+file, Kernel can reconstruct that container as null. For nullable structs this
+loses the existing parent's validity. For example, reading
+`profile: struct<new: string>` from a file containing
 `profile: struct<old: long>` produces:
 
 | Stored value | Required value-preserving result | Current Kernel result |
@@ -19,12 +20,29 @@ parents. For example, reading `profile: struct<new: string>` from a file contain
 | `{old: null}` | `{new: null}` | `null` |
 | `null` | `null` | `null` |
 
-This is tracked in [Kernel issue #3961](https://github.com/delta-io/delta-kernel-rs/issues/3961)
-and reproduced by the ignored
-[in-memory Kernel regression test](../bridge/rust/src/deltalake/deltalake_reader.rs).
-The reader currently applies no local workaround or special rejection for this
-case. Adding nullable children alongside retained physical children does not
-trigger it. The current missing-container plan originates from
+The same zero-leaf planning affects enclosing lists. Reading
+`items: array<struct<new: string>>` from
+`items: array<struct<old: long>>` can produce:
+
+| Stored items | Required value-preserving result | Current Kernel result |
+| --- | --- | --- |
+| `[{old: 7}]` | `[{new: null}]` | `null` |
+| `[]` | `[]` | `null` |
+| `null` | `null` | `null` |
+
+This loses list lengths and the distinction between empty and null lists. The
+behavior also applies recursively to affected structs inside lists or map
+values. Maps whose key leaves remain selected retain their map boundaries;
+this does not mean every affected map loses its offsets or becomes null.
+
+The nullable-struct case is tracked in
+[Kernel issue #3961](https://github.com/delta-io/delta-kernel-rs/issues/3961).
+The [in-memory Kernel tests](../bridge/rust/src/deltalake/deltalake_reader.rs)
+record the pinned behavior; the desired-semantics struct reproduction is ignored.
+The reader retains this upstream container behavior without a local workaround
+or special rejection. Adding nullable children alongside retained physical
+children does not trigger the zero-leaf case. The missing-container plan originates
+from
 [Kernel PR #2170](https://github.com/delta-io/delta-kernel-rs/pull/2170).
 
 ### Feature and API scope
@@ -107,6 +125,12 @@ from directory names. Only primitive partition types are supported.
 - Source owners must retain the logs/checkpoints and data/DV files needed for
   that version. Missing historical sources cause errors; the reader does not
   retain source files or substitute a newer snapshot.
+- Source URLs must continue identifying the same immutable planned files.
+  Table-path aliases within a configured filesystem root must remain stable
+  while their snapshot descriptors or readers are in use. Retargeting those
+  aliases is unsupported: keeping the old physical files elsewhere does not
+  prevent cached snapshot/footer state from being combined with different
+  payloads opened through a changed alias. Source owners provide this stability.
 - All log, checkpoint/sidecar, data, and DV references must use the configured
   filesystem identity. Cross-bucket/cross-filesystem references and local paths
   outside the configured filesystem root are unsupported. Source URLs cannot
@@ -134,6 +158,11 @@ from directory names. Only primitive partition types are supported.
 - Encrypted data reads use the existing C++ key callback, including distinct
   column keys. Exploration has no key callback for its count fallback, so files
   with encrypted footers require usable row counts in the snapshot metadata.
+- A stateful Parquet payload reader created with a non-null key callback reads
+  its footer to initialize its own Arrow 17 decryptors. A cold read can therefore
+  load the footer for validation and again for payload-reader setup; clones also
+  repeat payload-reader footer setup. This applies even to plaintext files when
+  a callback is supplied. Cached decoded metadata does not eliminate these reads.
 - Snapshot caching is in memory and tied to reader-metadata ownership. Releasing
   the last owner can require a later reader to replay the pinned snapshot's logs.
   Per-file descriptors do not contain enough table metadata for a cold open

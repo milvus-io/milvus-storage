@@ -3,7 +3,6 @@
 
 //! Kernel owns schema adaptation and DV decoding; C++ owns Parquet I/O.
 
-use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -94,14 +93,9 @@ impl DeltaSnapshotContext {
         if let Some(plan) = cache.get(&names) {
             return Ok(plan.clone());
         }
-        let mut seen = HashSet::new();
         let fields = names
             .iter()
             .map(|name| {
-                ensure!(
-                    seen.insert(name),
-                    "{INVALID} duplicate requested Delta field {name}"
-                );
                 self.snapshot
                     .schema()
                     .field(name)
@@ -109,7 +103,8 @@ impl DeltaSnapshotContext {
                     .ok_or_else(|| anyhow!("{INVALID} unknown Delta field {name}"))
             })
             .collect::<Result<Vec<_>>>()?;
-        let logical = Arc::new(StructType::try_new(fields)?);
+        let logical =
+            Arc::new(StructType::try_new(fields).map_err(|error| anyhow!("{INVALID} {error}"))?);
         let scan = self
             .snapshot
             .clone()
@@ -318,8 +313,8 @@ impl DeltaReadPlan {
             let data = unsafe { from_ffi(array, &schema)? };
             let batch = RecordBatch::from(StructArray::from(data));
             let rows = batch.num_rows();
-            // Preserve upstream behavior when all requested children are missing:
-            // Kernel may replace an existing nullable parent with null. See
+            // Preserve upstream zero-leaf container behavior, including nullable
+            // struct validity and enclosing list shape loss. See
             // cpp/src/format/deltalake/README.md for this known limitation.
             let physical = fixup_parquet_read(
                 batch,
@@ -683,6 +678,88 @@ mod tests {
         }
     }
 
+    fn kernel_projected_parquet_batch(
+        input: &RecordBatch,
+        requested: Arc<StructType>,
+    ) -> (RecordBatch, RecordBatch) {
+        use delta_kernel::parquet::arrow::ArrowWriter;
+        use delta_kernel::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let mut buffer = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut buffer, input.schema(), None).unwrap();
+        writer.write(input).unwrap();
+        writer.close().unwrap();
+        let bytes = bytes::Bytes::from(buffer);
+        let metadata = ArrowReaderMetadata::load(&bytes, ArrowReaderOptions::default()).unwrap();
+        let read = |mask| {
+            ParquetRecordBatchReaderBuilder::new_with_metadata(bytes.clone(), metadata.clone())
+                .with_projection(mask)
+                .build()
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+        };
+        let control = read(ProjectionMask::all());
+        let (ordering, mask) = parquet_read_plan(&requested, &metadata).unwrap();
+        let projected = read(mask.unwrap_or_else(ProjectionMask::all));
+        let fixed = fixup_parquet_read(projected, &ordering, None, None, Some(&requested)).unwrap();
+        (control, fixed.record_batch().clone())
+    }
+
+    #[test]
+    fn deltalake_kernel_zero_leaf_lists_keep_pinned_behavior() {
+        use delta_kernel::arrow::array::ListArray;
+        use delta_kernel::arrow::buffer::{NullBuffer, OffsetBuffer};
+        use delta_kernel::schema::{ArrayType, DataType, StructField};
+
+        let values = StructArray::new(
+            vec![Arc::new(ArrowField::new("old", ArrowType::Int64, true))].into(),
+            vec![Arc::new(Int64Array::from(vec![Some(7)]))],
+            None,
+        );
+        let items = ListArray::new(
+            Arc::new(ArrowField::new("element", values.data_type().clone(), true)),
+            OffsetBuffer::new(vec![0, 1, 1, 1].into()),
+            Arc::new(values),
+            Some(NullBuffer::from(vec![true, true, false])),
+        );
+        let input = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![
+                ArrowField::new("id", ArrowType::Int64, false),
+                ArrowField::new("items", items.data_type().clone(), true),
+            ])),
+            vec![Arc::new(Int64Array::from(vec![0, 1, 2])), Arc::new(items)],
+        )
+        .unwrap();
+        let requested = Arc::new(
+            StructType::try_new([
+                StructField::not_null("id", DataType::LONG),
+                StructField::nullable(
+                    "items",
+                    ArrayType::new(
+                        StructType::try_new([StructField::nullable("new", DataType::STRING)])
+                            .unwrap(),
+                        true,
+                    ),
+                ),
+            ])
+            .unwrap(),
+        );
+        let (control, actual) = kernel_projected_parquet_batch(&input, requested);
+        assert_eq!(control, input);
+        assert_eq!(actual.num_rows(), 3);
+        let items = actual
+            .column(1)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        // Characterize the accepted pinned Kernel behavior: it replaces both
+        // an existing nonempty list and an empty list with null, losing shape.
+        assert_eq!(items.null_count(), 3);
+        assert_eq!(items.value_offsets(), &[0, 0, 0, 0]);
+    }
+
     // Run explicitly with --ignored. This asserts the desired read semantics,
     // not the incorrect output, and calls the pinned Kernel helpers directly.
     // Upstream: https://github.com/delta-io/delta-kernel-rs/issues/3961
@@ -691,8 +768,6 @@ mod tests {
     fn deltalake_kernel_preserves_existing_struct_with_only_missing_children() {
         use delta_kernel::arrow::array::Int64Array;
         use delta_kernel::arrow::buffer::NullBuffer;
-        use delta_kernel::parquet::arrow::ArrowWriter;
-        use delta_kernel::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
         use delta_kernel::schema::{DataType, StructField};
 
         // Stored profile values: {old: 7}, {old: null}, null.
@@ -710,33 +785,11 @@ mod tests {
             vec![Arc::new(Int64Array::from(vec![0, 1, 2])), Arc::new(profile)],
         )
         .unwrap();
-        let mut buffer = Vec::new();
-        let mut writer = ArrowWriter::try_new(&mut buffer, schema, None).unwrap();
-        writer.write(&input).unwrap();
-        writer.close().unwrap();
-        let bytes = bytes::Bytes::from(buffer);
-        let metadata = ArrowReaderMetadata::load(&bytes, ArrowReaderOptions::default()).unwrap();
-        let read = |mask| {
-            ParquetRecordBatchReaderBuilder::new_with_metadata(bytes.clone(), metadata.clone())
-                .with_projection(mask)
-                .build()
-                .unwrap()
-                .next()
-                .unwrap()
-                .unwrap()
-        };
         let validity = |batch: &RecordBatch| {
             (0..batch.num_rows())
                 .map(|row| batch.column(1).is_valid(row))
                 .collect::<Vec<_>>()
         };
-        // Control: Parquet contains enough information to distinguish a null
-        // child from a null parent, without involving our C++ or Rust adapter.
-        assert_eq!(
-            validity(&read(ProjectionMask::all())),
-            vec![true, true, false]
-        );
-
         let requested = Arc::new(
             StructType::try_new([
                 StructField::not_null("id", DataType::LONG),
@@ -747,19 +800,10 @@ mod tests {
             ])
             .unwrap(),
         );
-        let (ordering, mask) = parquet_read_plan(&requested, &metadata).unwrap();
-        let projected = read(mask.unwrap_or_else(ProjectionMask::all));
-        eprintln!(
-            "Kernel selected physical columns: {:?}",
-            projected
-                .schema()
-                .fields()
-                .iter()
-                .map(|field| field.name())
-                .collect::<Vec<_>>()
-        );
-        let fixed = fixup_parquet_read(projected, &ordering, None, None, Some(&requested)).unwrap();
-        let actual = fixed.record_batch();
+        let (control, actual) = kernel_projected_parquet_batch(&input, requested);
+        // Parquet contains enough information to distinguish a null child from
+        // a null parent, independently of the Kernel projection/fixup helpers.
+        assert_eq!(validity(&control), vec![true, true, false]);
         assert_eq!(actual.num_rows(), 3);
         let profile = actual
             .column(1)
@@ -768,7 +812,7 @@ mod tests {
             .unwrap();
         assert_eq!(profile.column(0).null_count(), 3);
         assert_eq!(
-            validity(actual),
+            validity(&actual),
             vec![true, true, false],
             "synthesizing profile.new must preserve the existing profile parent validity"
         );

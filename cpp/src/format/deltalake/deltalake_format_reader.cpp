@@ -30,6 +30,10 @@ struct Descriptor {
   int64_t version;
 };
 
+std::string DescriptorCacheKey(const Descriptor& descriptor) {
+  return nlohmann::json::array({descriptor.table, descriptor.version}).dump();
+}
+
 arrow::Result<Descriptor> ParseDescriptor(const api::ColumnGroupFile& file) {
   try {
     auto value = nlohmann::json::parse(file.Get<std::string>(api::kPropertyMetadata));
@@ -274,7 +278,7 @@ std::string DeltaLakeFormatReader::MetaTrait::cache_key(const api::ColumnGroupFi
   auto parsed = ParseDescriptor(file);
   if (!parsed.ok())
     return "invalid-delta:" + file.path + file.Get<std::string>(api::kPropertyMetadata);
-  return nlohmann::json::array({parsed->table, parsed->version}).dump();
+  return DescriptorCacheKey(*parsed);
 }
 
 arrow::Result<DeltaLakeFormatReader::MetaTrait::MetadataPtr> DeltaLakeFormatReader::MetaTrait::load_metadata(
@@ -284,7 +288,7 @@ arrow::Result<DeltaLakeFormatReader::MetaTrait::MetadataPtr> DeltaLakeFormatRead
   ARROW_ASSIGN_OR_RAISE(auto descriptor, ParseDescriptor(file));
   ARROW_ASSIGN_OR_RAISE(auto table, GetTable(descriptor, properties));
   auto metadata = std::make_shared<Metadata>();
-  metadata->cache_key = cache_key(file);
+  metadata->cache_key = DescriptorCacheKey(descriptor);
   metadata->path = descriptor.table;
   metadata->file_schema = table->schema;
   // Decryption callbacks remain scoped to the top-level Reader. Never share

@@ -38,10 +38,6 @@ impl DeltaPathBinding {
     pub(crate) fn new(options: &DeltaFilesystemBinding, table_url: &Url) -> Result<Self> {
         let (mapper, local_prefix) = match options.kind {
             DeltaStorageKind::Local => {
-                ensure!(
-                    table_url.scheme() == "file",
-                    "local Delta table must use a file URL"
-                );
                 let root = PathBuf::from(&options.local_root);
                 ensure!(root.is_absolute(), "Delta filesystem root must be absolute");
                 let prefix = Path::from_absolute_path(&root)?;
@@ -283,8 +279,14 @@ mod tests {
 
     #[test]
     fn kernel_local_urls_preserve_escaped_paths_and_stay_private() {
-        let binding = local_binding();
         let url = Url::parse("file:///tmp/table%252F/p%20a%252F/").unwrap();
+        let options = DeltaFilesystemBinding {
+            kind: DeltaStorageKind::Local,
+            scheme: "file".into(),
+            authority: String::new(),
+            local_root: "/tmp/table%2F".into(),
+        };
+        let binding = DeltaPathBinding::new(&options, &url).unwrap();
         let kernel = binding.kernel_table_url(&url).unwrap();
         assert_eq!(
             kernel.as_str(),
@@ -294,6 +296,7 @@ mod tests {
         binding.validate_kernel_url(&kernel).unwrap();
         binding.validate_kernel_url(&url).unwrap();
         assert!(binding.validate_url(&kernel).is_err());
+        assert!(DeltaPathBinding::new(&options, &kernel).is_err());
         assert!(binding.kernel_table_url(&kernel).is_err());
         let path = Path::from_url_path(kernel.path()).unwrap();
         assert_eq!(binding.to_inner(&path).unwrap().as_ref(), "p a%2F");
