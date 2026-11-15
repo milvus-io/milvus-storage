@@ -11,6 +11,7 @@ struct ResolvedLocation {
   ArrowFileSystemConfig config;
   std::shared_ptr<arrow::fs::FileSystem> filesystem;
   std::string url;
+  // Local URLs use the configured namespace; config.root_path is physical.
   FilesystemBinding binding;
   std::string filesystem_key;
 };

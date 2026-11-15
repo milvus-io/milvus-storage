@@ -135,7 +135,8 @@ fn open_snapshot_impl(
             .build(),
         binding.clone(),
     ));
-    let builder = Snapshot::builder_for(table_url.as_str());
+    let kernel_table_url = binding.kernel_table_url(&table_url).map_err(invalid)?;
+    let builder = Snapshot::builder_for(kernel_table_url.as_str());
     let builder = if requested_version >= 0 {
         builder.at_version(requested_version as u64)
     } else {

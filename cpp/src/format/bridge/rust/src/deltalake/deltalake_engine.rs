@@ -70,7 +70,7 @@ impl CheckpointParquetHandler {
         // The default handler turns URLs into keys and drops their authority.
         // Validate checkpoint/sidecar identities before that can rebase a URL.
         self.binding
-            .validate_url(&file.location)
+            .validate_kernel_url(&file.location)
             .map_err(|error| KernelError::unsupported(format!("[delta:error=unsupported] {error}")))
     }
 }

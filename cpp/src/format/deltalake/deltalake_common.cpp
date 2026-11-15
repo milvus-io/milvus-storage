@@ -9,22 +9,16 @@
 
 namespace milvus_storage::deltalake {
 namespace {
-arrow::Result<std::string> MakeTableUrl(const StorageUri& location,
-                                        const ArrowFileSystemConfig& config,
-                                        const std::string& scheme) {
+arrow::Result<std::string> MakeTableUrl(const StorageUri& location, const FilesystemBinding& binding) {
   std::string result;
-  if (config.storage_type == "local") {
-    auto path = std::filesystem::path(config.root_path) / location.key;
-    std::error_code error;
-    path = std::filesystem::weakly_canonical(path, error);
-    if (error)
-      return arrow::Status::IOError("Cannot resolve Delta table path: ", error.message());
+  if (binding.is_local) {
+    const auto path = (std::filesystem::path(binding.local_root) / location.key).lexically_normal();
     ARROW_ASSIGN_OR_RAISE(result, arrow::util::UriFromAbsolutePath(path.generic_string()));
   } else {
     // StorageUri decodes URI paths once; escape the resulting raw key exactly
     // once. In particular a literal "%2F" must remain an object-key component.
     ARROW_ASSIGN_OR_RAISE(auto escaped, arrow::util::UriFromAbsolutePath("/" + location.key));
-    result = scheme + "://" + config.bucket_name + escaped.substr(7);
+    result = binding.scheme + "://" + binding.bucket + escaped.substr(7);
   }
   if (result.back() != '/') {
     result += '/';
@@ -97,10 +91,17 @@ arrow::Result<ResolvedLocation> ResolveLocation(const std::string& location,
     return arrow::Status::NotImplemented("Delta local tables require a path or file URL");
   }
   auto resolved_properties = properties;
+  std::string local_root;
   if (config.storage_type == "local") {
-    // Bind relative roots to this cwd before the shared cache lookup, and use
-    // the producer's physical-root resolution to preserve symlink/.. semantics.
-    ARROW_ASSIGN_OR_RAISE(config.root_path, PrepareLocalRoot(config.root_path));
+    std::error_code error;
+    const auto root = std::filesystem::absolute(config.root_path.empty() ? "." : config.root_path, error);
+    if (error)
+      return arrow::Status::IOError("Cannot resolve Delta filesystem root: ", error.message());
+    // Keep the configured namespace in persisted URLs, as other table formats
+    // do. Resolve the filesystem separately before collapsing symlink/.., and
+    // bind relative roots to this cwd before the shared cache lookup.
+    ARROW_ASSIGN_OR_RAISE(config.root_path, PrepareLocalRoot(root.generic_string()));
+    local_root = root.lexically_normal().generic_string();
     auto local_properties = std::make_shared<api::Properties>(*properties);
     (*local_properties)[PROPERTY_FS_ROOT_PATH] = config.root_path;
     if (!config.local_durability_root.empty()) {
@@ -112,9 +113,9 @@ arrow::Result<ResolvedLocation> ResolveLocation(const std::string& location,
   const auto identity = config.GetCacheKey();
   ARROW_ASSIGN_OR_RAISE(auto filesystem, FilesystemCache::getInstance().get(resolved_properties, filesystem_path));
   auto scheme = parsed.scheme.empty() ? filesystem->type_name() : parsed.scheme;
-  ARROW_ASSIGN_OR_RAISE(auto table_url, MakeTableUrl(parsed, config, scheme));
   deltalake::FilesystemBinding binding{config.storage_type == "local", scheme, config.bucket_name,
-                                       config.storage_type == "local" ? config.root_path : ""};
+                                       std::move(local_root)};
+  ARROW_ASSIGN_OR_RAISE(auto table_url, MakeTableUrl(parsed, binding));
   return ResolvedLocation{std::move(config), std::move(filesystem), std::move(table_url), std::move(binding), identity};
 }
 
@@ -131,10 +132,10 @@ arrow::Result<ResolvedDataFile> ResolveDataFile(const std::string& path,
       return arrow::Status::Invalid("Delta local data file requires a file URL without a host");
     }
     // Normalize before checking containment: C++ opens the footer before Rust
-    // validates snapshot membership. Canonical URLs also share per-file cache
+    // validates snapshot membership. Normalized URLs also share per-file cache
     // entries across equivalent percent spellings and dot segments.
     const auto normalized = std::filesystem::path(uri.path()).lexically_normal();
-    auto relative = normalized.lexically_relative(table.config.root_path);
+    auto relative = normalized.lexically_relative(table.binding.local_root);
     if (relative.empty() || *relative.begin() == "..") {
       return arrow::Status::Invalid("Delta data file is outside its filesystem root");
     }

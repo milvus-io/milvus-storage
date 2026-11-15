@@ -409,10 +409,10 @@ TEST_F(DeltaExplorationTest, RemoteKeysUseTheBoundFilesystemAndRetainItsLease) {
 TEST_F(DeltaExplorationTest, FilesystemErrorsSurviveSnapshotResolution) {
   auto table = Table();
   Commit(table, 0, {Protocol(), Metadata(Schema())});
+  ASSERT_AND_ASSIGN(auto location, deltalake::ResolveLocation(table, properties_));
   for (auto code : {ExtendStatusCode::AwsErrorAccessDenied, ExtendStatusCode::StorageTransientThrottling}) {
-    auto filesystem = std::make_shared<FailingDeltaFileSystem>(root_, code);
-    auto result =
-        deltalake::BlockingDeltaSnapshot::Open("file://" + table + "/", -1, filesystem, {true, "file", "", root_});
+    auto filesystem = std::make_shared<FailingDeltaFileSystem>(location.config.root_path, code);
+    auto result = deltalake::BlockingDeltaSnapshot::Open(location.url, -1, filesystem, location.binding);
     ASSERT_FALSE(result.ok());
     auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
     ASSERT_NE(detail, nullptr) << result.status();
@@ -717,7 +717,7 @@ TEST_F(DeltaExplorationTest, EmptyAndMissingTablesAndStageBoundaries) {
 }
 
 // Exercise generated Delta histories through the C++ reader and Rust/Kernel
-// bridge. Path/arithmetic unit tests below perform no I/O.
+// bridge. Path units below do not open Delta logs or data files.
 class DeltaReaderTest : public DeltaExplorationTest {
   protected:
   arrow::Result<std::shared_ptr<FormatReader>> Open(const api::ColumnGroupFile& file,
@@ -772,8 +772,9 @@ class DeltaReaderTest : public DeltaExplorationTest {
 
 TEST(DeltaPathTest, NormalizesLocalIdentityAndChecksContainmentBeforeOpening) {
   deltalake::ResolvedLocation table;
-  table.config.root_path = "/bound";
+  table.config.root_path = "/physical";
   table.binding.is_local = true;
+  table.binding.local_root = "/bound";
   const auto resolve = [&](const std::string& path) { return deltalake::ResolveDataFile(path, table, nullptr); };
   for (const auto& url : {"file:///bound/%70art%20a%252F.parquet", "file:///bound/dir/../part%20a%252F.parquet"}) {
     ASSERT_AND_ASSIGN(auto file, resolve(url));
@@ -781,9 +782,60 @@ TEST(DeltaPathTest, NormalizesLocalIdentityAndChecksContainmentBeforeOpening) {
     EXPECT_EQ(file.path, "part a%2F.parquet");
   }
   for (const auto& url : {"file:///bound/dir/../../outside.parquet", "file:///bound/%2E%2E/outside.parquet",
-                          "file:///bound-other/part.parquet"}) {
+                          "file:///bound-other/part.parquet", "file:///physical/part.parquet"}) {
     EXPECT_TRUE(resolve(url).status().IsInvalid()) << url;
   }
+}
+
+TEST(DeltaPathTest, PreservesConfiguredAliasesWithPhysicalFilesystemIdentity) {
+  ASSERT_AND_ASSIGN(auto temporary, arrow::internal::TemporaryDir::Make("delta-path-"));
+  const auto root = std::filesystem::path(temporary->path().ToString());
+  const auto physical = (root / "physical").generic_string();
+  const auto alias = (root / "alias").generic_string();
+  std::filesystem::create_directories(physical + "/table");
+  std::filesystem::create_directory_symlink(physical, alias);
+  std::filesystem::create_directory_symlink(physical + "/table", physical + "/table-alias");
+  auto properties = std::make_shared<api::Properties>(
+      api::Properties{{PROPERTY_FS_STORAGE_TYPE, std::string("local")}, {PROPERTY_FS_ROOT_PATH, alias}});
+
+  ASSERT_AND_ASSIGN(auto location, deltalake::ResolveLocation("table-alias", properties));
+  EXPECT_EQ(location.config.root_path, std::filesystem::canonical(physical).generic_string());
+  EXPECT_EQ(location.binding.local_root, alias);
+  EXPECT_EQ(location.url, "file://" + alias + "/table-alias/");
+  // A usable snapshot count must not require this data file to exist.
+  const auto url = location.url + "missing.parquet";
+  ASSERT_AND_ASSIGN(auto file, deltalake::ResolveDataFile(url, location, properties));
+  EXPECT_EQ(file.url, url);
+  EXPECT_EQ(file.path, "table-alias/missing.parquet");
+  EXPECT_FALSE(std::filesystem::exists(physical + "/table/missing.parquet"));
+  EXPECT_TRUE(deltalake::ResolveDataFile("file://" + physical + "/table/missing.parquet", location, properties)
+                  .status()
+                  .IsInvalid());
+
+  (*properties)[PROPERTY_FS_ROOT_PATH] = physical;
+  ASSERT_AND_ASSIGN(auto direct, deltalake::ResolveLocation("table", properties));
+  EXPECT_EQ(direct.filesystem_key, location.filesystem_key);
+  EXPECT_EQ(direct.filesystem, location.filesystem);
+  EXPECT_NE(direct.url, location.url);
+}
+
+TEST(DeltaPathTest, RetargetedRootAliasChangesFilesystemIdentity) {
+  ASSERT_AND_ASSIGN(auto temporary, arrow::internal::TemporaryDir::Make("delta-path-"));
+  const auto root = std::filesystem::path(temporary->path().ToString());
+  std::filesystem::create_directories(root / "first");
+  std::filesystem::create_directories(root / "second");
+  const auto alias = (root / "alias").generic_string();
+  std::filesystem::create_directory_symlink(root / "first", alias);
+  auto properties = std::make_shared<api::Properties>(
+      api::Properties{{PROPERTY_FS_STORAGE_TYPE, std::string("local")}, {PROPERTY_FS_ROOT_PATH, alias}});
+  ASSERT_AND_ASSIGN(auto first, deltalake::ResolveLocation("table", properties));
+  std::filesystem::remove(alias);
+  std::filesystem::create_directory_symlink(root / "second", alias);
+  ASSERT_AND_ASSIGN(auto second, deltalake::ResolveLocation("table", properties));
+  EXPECT_EQ(first.url, second.url);
+  EXPECT_EQ(first.binding.local_root, second.binding.local_root);
+  EXPECT_NE(first.filesystem_key, second.filesystem_key);
+  EXPECT_NE(first.filesystem, second.filesystem);
 }
 
 TEST(DeltaRowMappingTest, EnumeratesLivePositionsAcrossDeletionPatterns) {
@@ -1016,14 +1068,77 @@ TEST_F(DeltaReaderTest, ResolvesPhysicalRootBeforeCollapsingSymlinkDotDot) {
   (*properties)[PROPERTY_FS_ROOT_PATH] = root_ + "/link/../dataset";
   properties_ = std::move(properties);
   const auto alias = root_ + "/link/../dataset/table";
+  const auto logical_table = std::filesystem::path(alias).lexically_normal().generic_string();
   for (const auto& location : {std::string("table"), alias, "file://" + alias}) {
     ASSERT_AND_ASSIGN(auto files, Explore(location));
     ASSERT_EQ(files.size(), 1);
-    EXPECT_EQ(files[0].path, "file://" + std::filesystem::canonical(table).generic_string() + "/part.parquet");
+    EXPECT_EQ(files[0].path, "file://" + logical_table + "/part.parquet");
+    EXPECT_EQ(Json::parse(files[0].Get<std::string>(api::kPropertyMetadata))["table_uri"],
+              "file://" + logical_table + "/");
     ASSERT_AND_ASSIGN(auto reader, Open(files[0]));
     ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
     EXPECT_EQ(batch->num_rows(), 3);
   }
+}
+
+TEST_F(DeltaReaderTest, PersistsConfiguredRootAndTableAliases) {
+  const auto table = Table("physical/table");
+  const auto root = std::filesystem::path(root_);
+  const auto alias = (root / "alias").generic_string();
+  std::filesystem::create_directory_symlink(root / "physical", alias);
+  std::filesystem::create_directory_symlink(table, root / "physical/table-alias");
+  (*properties_)[PROPERTY_FS_ROOT_PATH] = alias;
+  WriteData(table + "/relative.parquet");
+  WriteData(table + "/absolute.parquet");
+  for (const auto& name : {"table", "table-alias"}) {
+    const auto logical_table = alias + "/" + name;
+    auto absolute = Add(table, "absolute.parquet", 4);
+    absolute["add"]["path"] = "file://" + logical_table + "/absolute.parquet";
+    Commit(table, 0, {Protocol(), Metadata(Schema()), Add(table, "relative.parquet", 4), absolute});
+    ASSERT_AND_ASSIGN(auto files, Explore(logical_table));
+    ASSERT_EQ(files.size(), 2);
+    for (size_t i = 0; i < files.size(); ++i) {
+      const auto filename = i == 0 ? "absolute.parquet" : "relative.parquet";
+      EXPECT_EQ(files[i].path, "file://" + logical_table + "/" + filename);
+      EXPECT_EQ(Json::parse(files[i].Get<std::string>(api::kPropertyMetadata))["table_uri"],
+                "file://" + logical_table + "/");
+      ASSERT_AND_ASSIGN(auto reader, Open(files[i]));
+      ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+      EXPECT_EQ(batch->num_rows(), 4);
+    }
+  }
+}
+
+TEST_F(DeltaReaderTest, ReopensPersistedAliasesWithANewPhysicalRoot) {
+  const auto first_table = Table("first/table");
+  const auto second_table = Table("second/table");
+  WriteData(first_table + "/part.parquet");
+  std::filesystem::copy_file(first_table + "/part.parquet", second_table + "/part.parquet");
+  Commit(first_table, 0, {Protocol(), Metadata(Schema()), Add(first_table, "part.parquet", 4)});
+  auto second_schema = Schema();
+  second_schema["fields"].push_back(Schema("added", "string")["fields"][0]);
+  Commit(second_table, 0, {Protocol(), Metadata(second_schema), Add(second_table, "part.parquet", 4)});
+  const auto root = std::filesystem::path(root_);
+  const auto alias = (root / "alias").generic_string();
+  std::filesystem::create_directory_symlink(root / "first", alias);
+  (*properties_)[PROPERTY_FS_ROOT_PATH] = alias;
+  ASSERT_AND_ASSIGN(auto files, Explore("table"));
+  ASSERT_EQ(files.size(), 1);
+  ASSERT_AND_ASSIGN(auto first_reader, Open(files[0]));
+  EXPECT_EQ(first_reader->get_schema()->num_fields(), 1);
+
+  // A different host may expose the same configured alias at another physical
+  // path. Its exact-version context must not reuse the original filesystem.
+  std::filesystem::remove(alias);
+  std::filesystem::create_directory_symlink(root / "second", alias);
+  ASSERT_AND_ASSIGN(auto second_reader, Open(files[0]));
+  EXPECT_EQ(second_reader->get_schema()->num_fields(), 2);
+  ASSERT_AND_ASSIGN(auto batch, second_reader->get_chunk(0));
+  EXPECT_EQ(batch->column(1)->null_count(), 4);
+  ASSERT_AND_ASSIGN(auto first_clone, first_reader->clone_reader());
+  EXPECT_EQ(first_clone->get_schema()->num_fields(), 1);
+  ASSERT_AND_ASSIGN(auto first_batch, first_clone->get_chunk(0));
+  EXPECT_EQ(first_batch->num_rows(), 4);
 }
 
 TEST_F(DeltaReaderTest, MaterializedPartitionsKeepMemoryEstimatesUnavailable) {

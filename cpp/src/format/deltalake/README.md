@@ -111,9 +111,12 @@ from directory names. Only primitive partition types are supported.
   filesystem identity. Cross-bucket/cross-filesystem references and local paths
   outside the configured filesystem root are unsupported. Source URLs cannot
   embed credentials, queries, or fragments; local file URLs cannot include a host.
-- Local roots and table paths resolve to their physical paths before caching.
-  Local source entries must be relative or use absolute URLs under that resolved
-  root; absolute source URLs through a different symlink spelling are unsupported.
+- Local table/file URLs preserve the configured root and table-path spelling
+  after absolute lexical normalization, matching the other table formats. Only
+  the underlying filesystem/cache identity uses the resolved physical root.
+  Local source entries must be relative or use absolute URLs under the configured
+  logical root; other spellings outside that prefix are unsupported, even if a
+  symlink makes them physically equivalent.
 - Reader creation requires a valid snapshot descriptor, recorded file size, and
   live row count, normally supplied by exploration. A path alone is insufficient.
   The descriptor covers the whole file's live rows starting at zero; use the

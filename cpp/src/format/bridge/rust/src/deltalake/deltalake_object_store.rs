@@ -26,6 +26,8 @@ use crate::deltalake_ffi::{DeltaFilesystemBinding, DeltaStorageKind};
 use crate::filesystem_object_store::{FFIPathMapper, FilesystemObjectStore};
 use crate::lance_ffi::FileSystemWrapper;
 
+const KERNEL_LOCAL_SCHEME: &str = "milvus-delta-file";
+
 #[derive(Clone, Debug)]
 pub(crate) struct DeltaPathBinding {
     mapper: FFIPathMapper,
@@ -67,6 +69,10 @@ impl DeltaPathBinding {
 
     pub(crate) fn validate_url(&self, url: &Url) -> Result<()> {
         ensure!(
+            self.local_prefix.is_none() || url.scheme() == "file",
+            "local Delta source must use a file URL: {url}"
+        );
+        ensure!(
             url.query().is_none()
                 && url.fragment().is_none()
                 && url.username().is_empty()
@@ -76,6 +82,33 @@ impl DeltaPathBinding {
         );
         self.mapper.from_url(url)?;
         Ok(())
+    }
+
+    pub(crate) fn kernel_table_url(&self, url: &Url) -> Result<Url> {
+        self.validate_url(url)?;
+        if self.local_prefix.is_none() {
+            return Ok(url.clone());
+        }
+        // Kernel's string builder canonicalizes file URLs through the native
+        // filesystem before consulting the engine. A private scheme keeps the
+        // configured namespace and routes all I/O through our bound store.
+        Ok(Url::parse(&format!(
+            "{KERNEL_LOCAL_SCHEME}{}",
+            &url[url::Position::AfterScheme..]
+        ))?)
+    }
+
+    pub(crate) fn validate_kernel_url(&self, url: &Url) -> Result<()> {
+        if self.local_prefix.is_some() && url.scheme() == KERNEL_LOCAL_SCHEME {
+            ensure!(
+                url.host_str().is_none(),
+                "local Kernel URL must not contain an authority: {url}"
+            );
+            let external = Url::parse(&format!("file{}", &url[url::Position::AfterScheme..]))?;
+            self.validate_url(&external)
+        } else {
+            self.validate_url(url)
+        }
     }
 
     fn to_inner(&self, path: &Path) -> object_store::Result<Path> {
@@ -249,6 +282,40 @@ mod tests {
     }
 
     #[test]
+    fn kernel_local_urls_preserve_escaped_paths_and_stay_private() {
+        let binding = local_binding();
+        let url = Url::parse("file:///tmp/table%252F/p%20a%252F/").unwrap();
+        let kernel = binding.kernel_table_url(&url).unwrap();
+        assert_eq!(
+            kernel.as_str(),
+            "milvus-delta-file:///tmp/table%252F/p%20a%252F/"
+        );
+        assert_eq!(kernel.path(), url.path());
+        binding.validate_kernel_url(&kernel).unwrap();
+        binding.validate_kernel_url(&url).unwrap();
+        assert!(binding.validate_url(&kernel).is_err());
+        assert!(binding.kernel_table_url(&kernel).is_err());
+        let path = Path::from_url_path(kernel.path()).unwrap();
+        assert_eq!(binding.to_inner(&path).unwrap().as_ref(), "p a%2F");
+        for invalid in [
+            "milvus-delta-file:///tmp/table%252F-other/file",
+            "milvus-delta-file:///tmp/table%252F/../outside",
+            "milvus-delta-file:///tmp/table%252F/file?version=1",
+            "milvus-delta-file:///tmp/table%252F/file#fragment",
+            "milvus-delta-file://other/tmp/table%252F/file",
+            "milvus-delta-file://localhost/tmp/table%252F/file",
+            "milvus-delta-file://user@host/tmp/table%252F/file",
+        ] {
+            assert!(
+                binding
+                    .validate_kernel_url(&Url::parse(invalid).unwrap())
+                    .is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
     fn remote_binding_preserves_keys_and_rejects_other_filesystems() {
         let binding = DeltaPathBinding {
             mapper: FFIPathMapper::remote("s3", "bucket"),
@@ -256,6 +323,15 @@ mod tests {
         };
         let url = Url::parse("s3://bucket/table/p%252F/file.parquet").unwrap();
         binding.validate_url(&url).unwrap();
+        assert_eq!(binding.kernel_table_url(&url).unwrap(), url);
+        binding.validate_kernel_url(&url).unwrap();
+        assert!(
+            binding
+                .validate_kernel_url(
+                    &Url::parse("milvus-delta-file:///tmp/table%252F/file").unwrap()
+                )
+                .is_err()
+        );
         let path = Path::from_url_path(url.path()).unwrap();
         assert_eq!(
             binding.to_inner(&path).unwrap().as_ref(),
