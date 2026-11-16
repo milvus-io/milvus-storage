@@ -148,6 +148,13 @@ from directory names. Only primitive partition types are supported.
   reader's range API for partial reads instead of slicing the descriptor.
 - Row indices refer to live rows after DV filtering. `take` requires sorted,
   unique indices within those live-row bounds.
+- The shared collection-manifest cache currently keys remote manifests by bucket
+  and path without endpoint identity. Reading collections at identical manifest
+  paths in the same bucket name on different endpoints within one process can
+  return the other endpoint's manifest. Use distinct destination collection paths
+  until that shared cache is fixed. This affects all formats; Delta source-table
+  snapshot isolation is tested separately with identical source keys and distinct
+  destination collection paths.
 
 ### I/O, caching, and memory estimates
 
@@ -191,8 +198,8 @@ Native/Rust compilation, generated local reader/exploration tests, and existing
 Parquet/metadata-cache regressions pass. Reader tests cover Arrow 17/59 batch
 adaptation, encrypted/plaintext footers, distinct column keys, and public
 synchronous/async-fallback reads with caching enabled and disabled. Remote
-filesystem identity and encoded paths are covered through a local-backed proxy;
-live cloud services have not been validated.
+filesystem identity and encoded paths are covered through a local-backed proxy
+and actual MinIO/RustFS services. Live cloud providers have not been validated.
 
 Generated DV tests cover inline, UUID-relative (with and without a prefix), and
 absolute references; multiple vectors at distinct offsets in one container;
@@ -209,4 +216,13 @@ measurement.
 Local Python integration tests cover exploration, file-property and manifest
 round trips, scan/chunk/take reads with caching enabled and disabled, snapshot
 pinning after source replacement, and reopening old/latest imports in fresh
-processes. Delta-specific MinIO/RustFS integration coverage remains pending.
+processes. All 15 remote Delta cases pass against the repository-pinned MinIO and
+RustFS services, covering persisted imports, projected live values, snapshot
+pinning, inline/UUID-relative/absolute DVs, shared-container offsets, encoded keys,
+invalid credentials, missing-object recovery and source isolation across endpoints.
+Relevant external-format, credential, manifest, chunk-reader and lifecycle
+regressions also pass on both services.
+
+The remote fixtures generate small sparse DVs directly in Python, including
+inline encodings and multiple offsets in one external container. A unit test
+checks their bytes against reference output from the pinned Kernel writer.

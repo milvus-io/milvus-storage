@@ -6,8 +6,8 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Sequence
-from urllib.parse import quote, unquote, urlsplit
+from typing import Any, Dict, List, Optional, Sequence, Union
+from urllib.parse import quote
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -17,16 +17,43 @@ from milvus_storage.manifest import ColumnGroups
 
 
 @dataclass
+class _DeletionVector:
+    descriptor: Dict[str, Any]
+    rows: Sequence[int]
+
+
+@dataclass
 class _DeltaTable:
     """Small generated fixtures, without a Delta writer runtime or binary files."""
 
     path: Path
     schema: pa.Schema
     snapshots: Dict[int, Dict[str, pa.Table]] = field(default_factory=dict)
+    sizes: Dict[str, int] = field(default_factory=dict)
+    deletions: Dict[str, _DeletionVector] = field(default_factory=dict)
 
-    def commit(self, version: int, files: Dict[str, pa.Table], removed: Sequence[str] = ()) -> None:
-        log = self.path / "_delta_log"
-        log.mkdir(parents=True, exist_ok=True)
+    @property
+    def uri(self) -> str:
+        return self.path.as_uri()
+
+    def file_uri(self, name: str) -> str:
+        return (self.path / name).as_uri()
+
+    def write_file(self, name: str, data: bytes) -> None:
+        path = self.path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("xb") as output:
+            output.write(data)
+
+    def commit(
+        self,
+        version: int,
+        files: Dict[str, pa.Table],
+        removed: Sequence[str] = (),
+        deletions: Optional[Dict[str, _DeletionVector]] = None,
+    ) -> None:
+        assert version not in self.snapshots
+        deletions = deletions or {}
         actions = []
         active = self.snapshots.get(version - 1, {}).copy()
         if version == 0:
@@ -43,9 +70,17 @@ class _DeltaTable:
                     for column in self.schema
                 ],
             }
+            protocol = {"minReaderVersion": 1, "minWriterVersion": 2}
+            if deletions:
+                protocol = {
+                    "minReaderVersion": 3,
+                    "minWriterVersion": 7,
+                    "readerFeatures": ["deletionVectors"],
+                    "writerFeatures": ["deletionVectors"],
+                }
             actions.extend(
                 [
-                    {"protocol": {"minReaderVersion": 1, "minWriterVersion": 2}},
+                    {"protocol": protocol},
                     {
                         "metaData": {
                             "id": "00000000-0000-0000-0000-000000000001",
@@ -59,30 +94,41 @@ class _DeltaTable:
                 ]
             )
         for name in removed:
-            del active[(self.path / name).as_uri()]
-            actions.append(
-                {"remove": {"path": quote(name), "deletionTimestamp": 0, "dataChange": True}}
-            )
+            uri = self.file_uri(name)
+            del active[uri]
+            removal = {"path": quote(name), "deletionTimestamp": 0, "dataChange": True}
+            if previous := self.deletions.pop(uri, None):
+                removal["deletionVector"] = previous.descriptor
+            actions.append({"remove": removal})
         for name, data in files.items():
-            path = self.path / name
-            pq.write_table(data, path, row_group_size=2)
+            output = pa.BufferOutputStream()
+            pq.write_table(data, output, row_group_size=2)
+            payload = output.getvalue().to_pybytes()
+            self.write_file(name, payload)
+            uri = self.file_uri(name)
+            self.sizes[uri] = len(payload)
             # Retain historical files and expectations when a later snapshot removes its Add.
-            active[path.as_uri()] = data
-            actions.append(
-                {
-                    "add": {
-                        "path": quote(name),
-                        "partitionValues": {},
-                        "size": path.stat().st_size,
-                        "modificationTime": 0,
-                        "dataChange": True,
-                        "stats": json.dumps({"numRecords": data.num_rows}),
-                    }
-                }
-            )
-        with (log / f"{version:020d}.json").open("x") as output:
-            for action in actions:
-                output.write(json.dumps(action) + "\n")
+            add = {
+                "path": quote(name),
+                "partitionValues": {},
+                "size": len(payload),
+                "modificationTime": 0,
+                "dataChange": True,
+                "stats": json.dumps({"numRecords": data.num_rows}),
+            }
+            if deletion := deletions.get(name):
+                add["deletionVector"] = deletion.descriptor
+                self.deletions[uri] = deletion
+                deleted = set(deletion.rows)
+                active[uri] = data.take([row for row in range(data.num_rows) if row not in deleted])
+            else:
+                active[uri] = data
+            actions.append({"add": add})
+        # Publish the log only after every referenced data/DV object exists.
+        self.write_file(
+            f"_delta_log/{version:020d}.json",
+            "".join(json.dumps(action) + "\n" for action in actions).encode(),
+        )
         self.snapshots[version] = active
 
 
@@ -110,13 +156,16 @@ def _file_descriptors(groups: List[ColumnGroup]) -> list:
 
 
 def _import_snapshot(
-    table: _DeltaTable, target: Path, properties: Dict[str, str], version: int = -1
+    table: _DeltaTable,
+    target: Union[Path, str],
+    properties: Dict[str, str],
+    version: int = -1,
 ) -> List[ColumnGroup]:
     count, manifest_path = ExternalTable.explore(
         columns=table.schema.names,
         format="deltalake-table",
         base_dir=str(target) + "_explore",
-        explore_dir=str(table.path),
+        explore_dir=table.uri,
         properties={**properties, "reader.exttable.snapshot_id": str(version)},
     )
     explored = ExternalTable.read_manifest(manifest_path, properties=properties)
@@ -150,14 +199,11 @@ def _expected_data(table: _DeltaTable, groups: List[ColumnGroup], version: int) 
             assert file.start_index == 0
             assert file.end_index == expected.num_rows
             assert set(file.properties) == {"metadata", "file_size"}
-            assert (
-                int(file.properties["file_size"])
-                == Path(unquote(urlsplit(file.path).path)).stat().st_size
-            )
+            assert int(file.properties["file_size"]) == table.sizes[file.path]
             assert file.metadata.decode("utf-8") == file.properties["metadata"]
             assert json.loads(file.properties["metadata"]) == {
                 "version": 1,
-                "table_uri": table.path.as_uri() + "/",
+                "table_uri": table.uri + "/",
                 "snapshot_version": version,
             }
     # Delta file order is unspecified; persisted manifest order defines row indices.
@@ -165,12 +211,18 @@ def _expected_data(table: _DeltaTable, groups: List[ColumnGroup], version: int) 
 
 
 def _assert_reads(
-    target: Path, schema: pa.Schema, properties: Dict[str, str], expected: pa.Table
+    target: Union[Path, str],
+    schema: pa.Schema,
+    properties: Dict[str, str],
+    expected: pa.Table,
+    columns: Optional[List[str]] = None,
 ) -> None:
+    if columns:
+        expected = expected.select(columns)
     with Transaction(str(target), properties) as txn:
         manifest = txn.get_manifest()
     with ColumnGroups.from_list(manifest.column_groups) as groups:
-        with Reader(groups, schema, properties=properties) as reader:
+        with Reader(groups, schema, columns=columns, properties=properties) as reader:
             scanned = pa.Table.from_batches(list(reader.scan()))
             assert scanned.equals(expected)
             indices = [0, expected.num_rows // 2, expected.num_rows - 1]
@@ -281,7 +333,10 @@ assert actual.to_pydict() == expected['data']
         env["DYLD_INSERT_LIBRARIES"] = child_preload
 
     # No parent-process reader is opened: both children must resolve cold snapshots.
-    for target, groups, version in ((old_target, old_groups, 0), (new_target, new_groups, 1)):
+    for target, groups, version in (
+        (old_target, old_groups, 0),
+        (new_target, new_groups, 1),
+    ):
         expected = _expected_data(delta_table, groups, version)
         payload = {
             "target": str(target),
