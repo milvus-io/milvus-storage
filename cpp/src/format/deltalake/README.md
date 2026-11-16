@@ -192,3 +192,8 @@ adaptation, encrypted/plaintext footers, distinct column keys, and public
 synchronous/async-fallback reads with caching enabled and disabled. Remote
 filesystem identity and encoded paths are covered through a local-backed proxy;
 live cloud services have not been validated.
+
+Local Python integration tests cover exploration, file-property and manifest
+round trips, scan/chunk/take reads with caching enabled and disabled, snapshot
+pinning after source replacement, and reopening old/latest imports in fresh
+processes. Delta-specific MinIO/RustFS integration coverage remains pending.
