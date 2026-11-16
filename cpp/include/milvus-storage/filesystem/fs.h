@@ -57,10 +57,16 @@ class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
                         public Observable,
                         public UploadSizable {
   public:
-  FileSystemProxy(const std::string& base_path, std::shared_ptr<arrow::fs::FileSystem> base_fs)
-      : arrow::fs::SubTreeFileSystem(base_path, std::move(base_fs)) {}
+  FileSystemProxy(const std::string& base_path,
+                  std::shared_ptr<arrow::fs::FileSystem> base_fs,
+                  std::string cache_identity = {})
+      : arrow::fs::SubTreeFileSystem(base_path, std::move(base_fs)), cache_identity_(std::move(cache_identity)) {}
 
   std::string type_name() const override { return base_fs()->type_name(); }
+
+  // The resolved configuration's opaque cache key scopes shared metadata to its
+  // endpoint and credential context. Empty means the identity is unknown.
+  const std::string& cache_identity() const { return cache_identity_; }
 
   using arrow::fs::SubTreeFileSystem::OpenInputFile;
   using arrow::fs::SubTreeFileSystem::OpenOutputStream;
@@ -117,6 +123,9 @@ class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
     ARROW_ASSIGN_OR_RAISE(auto full_path, PrependBase(path));
     return sizable->OpenOutputStreamWithUploadSize(full_path, metadata, part_size);
   }
+
+  private:
+  const std::string cache_identity_;
 };
 
 /**

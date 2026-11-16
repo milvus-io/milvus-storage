@@ -603,34 +603,25 @@ void Manifest::ToAbsolutePaths(const std::string& base_path) {
 static constexpr size_t kManifestCacheCapacity = 1024;
 
 // Static cache accessor
-LRUCache<std::string, std::shared_ptr<Manifest>>& Manifest::getCache() {
-  static milvus_storage::LRUCache<std::string, std::shared_ptr<Manifest>> cache(kManifestCacheCapacity);
+LRUCache<Manifest::CacheKey, std::shared_ptr<Manifest>>& Manifest::getCache() {
+  static milvus_storage::LRUCache<CacheKey, std::shared_ptr<Manifest>> cache(kManifestCacheCapacity);
   return cache;
 }
 
 void Manifest::CleanCache() { getCache().clean(); }
 
-// Build a globally unique cache key from the filesystem's root path and the file path.
-// All our filesystems are SubTreeFileSystem (via FileSystemProxy), so base_path() gives
-// the root (local absolute path, or S3 bucket name, etc.).
-static std::string MakeCacheKey(const milvus_storage::ArrowFileSystemPtr& fs, const std::string& path) {
-  auto* subtree = dynamic_cast<arrow::fs::SubTreeFileSystem*>(fs.get());
-  if (subtree) {
-    return subtree->base_path() + "/" + path;
-  }
-  // Fallback for non-SubTreeFileSystem (shouldn't happen in practice)
-  return fs->type_name() + "://" + path;
-}
-
 arrow::Result<std::shared_ptr<Manifest>> Manifest::ReadFrom(const milvus_storage::ArrowFileSystemPtr& fs,
                                                             const std::string& path,
                                                             const int64_t manifest_size) {
-  std::string cache_key = MakeCacheKey(fs, path);
-
-  auto& cache = getCache();
-  auto cached = cache.get(cache_key);
-  if (cached.has_value()) {
-    return std::move(cached.value());
+  std::optional<CacheKey> cache_key;
+  const auto* proxy = dynamic_cast<FileSystemProxy*>(fs.get());
+  // Root/bucket alone cannot distinguish endpoints or credentials. Unknown
+  // filesystem identities must perform the read rather than reuse another's data.
+  if (proxy && !proxy->cache_identity().empty()) {
+    cache_key = CacheKey{proxy->cache_identity(), proxy->base_path(), path};
+    if (auto cached = getCache().get(*cache_key)) {
+      return std::move(*cached);
+    }
   }
 
   // Read file into string (single allocation, avro needs std::istream)
@@ -661,7 +652,9 @@ arrow::Result<std::shared_ptr<Manifest>> Manifest::ReadFrom(const milvus_storage
   std::string base_path = milvus_storage::base_path_for_manifest(path);
   manifest->ToAbsolutePaths(base_path);
 
-  cache.put(cache_key, manifest);
+  if (cache_key) {
+    getCache().put(*cache_key, manifest);
+  }
   return manifest;
 }
 
