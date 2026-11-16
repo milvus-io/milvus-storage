@@ -369,9 +369,28 @@ pub mod deltalake_ffi {
         cardinality: i64,
     }
 
+    struct DeltaDvPositions {
+        rows: Vec<u64>,
+    }
+
+    struct GeneratedDeltaDvDescriptor {
+        offset: i32,
+        size: i32,
+        cardinality: i64,
+        inline_data: String,
+    }
+
+    struct GeneratedDeltaDvContainer {
+        bytes: Vec<u8>,
+        descriptors: Vec<GeneratedDeltaDvDescriptor>,
+    }
+
     extern "Rust" {
         type DeltaSnapshotContext;
         fn delta_test_deletion_vector(positions: &[u64]) -> Result<GeneratedDeltaDv>;
+        fn delta_test_deletion_vectors(
+            vectors: Vec<DeltaDvPositions>,
+        ) -> Result<GeneratedDeltaDvContainer>;
         fn delta_open_snapshot(
             filesystem: SharedPtr<DeltaFileSystemWrapper>,
             table_url: &str,

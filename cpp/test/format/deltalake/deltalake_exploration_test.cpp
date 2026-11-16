@@ -754,9 +754,7 @@ class DeltaReaderTest : public DeltaExplorationTest {
 
   Json Deletions(const std::string& table, const std::vector<uint64_t>& rows) {
     auto dv = deltalake::ffi::delta_test_deletion_vector(rust::Slice<const uint64_t>(rows.data(), rows.size()));
-    std::ofstream output(table + "/deletions.bin", std::ios::binary);
-    output.write(reinterpret_cast<const char*>(dv.bytes.data()), dv.bytes.size());
-    output.close();
+    WriteDvFile(table + "/deletions.bin", {dv.bytes.data(), dv.bytes.size()});
     return Json{{"storageType", "p"},
                 {"pathOrInlineDv", "file://" + table + "/deletions.bin"},
                 {"offset", dv.offset},
@@ -770,6 +768,118 @@ class DeltaReaderTest : public DeltaExplorationTest {
                                   {"minWriterVersion", 7},
                                   {"readerFeatures", features},
                                   {"writerFeatures", features}}}};
+  }
+
+  deltalake::ffi::GeneratedDeltaDvContainer GenerateDvs(const std::vector<std::vector<uint64_t>>& rows) {
+    rust::Vec<deltalake::ffi::DeltaDvPositions> vectors;
+    for (const auto& positions : rows) {
+      deltalake::ffi::DeltaDvPositions vector;
+      for (auto row : positions) vector.rows.push_back(row);
+      vectors.push_back(std::move(vector));
+    }
+    return deltalake::ffi::delta_test_deletion_vectors(std::move(vectors));
+  }
+
+  void WriteDvFile(const std::string& path, std::span<const uint8_t> bytes) {
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    std::ofstream output(path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    output.close();
+    ASSERT_TRUE(output.good());
+  }
+
+  void WriteDvRows(const std::string& table, const std::string& name, int64_t start = 0) {
+    std::vector<Json> rows;
+    for (int64_t i = 0; i < 6; ++i) rows.push_back(Json{{"id", start + i}});
+    WriteRows(table + "/" + name, arrow::schema({arrow::field("id", arrow::int64())}), rows);
+  }
+
+  Json DvAdd(const std::string& table, const std::string& name, const Json& descriptor) {
+    auto add = Add(table, name, 6);
+    add["add"]["deletionVector"] = descriptor;
+    return add;
+  }
+
+  arrow::Result<std::shared_ptr<FormatReader>> OpenCached(const api::ColumnGroupFile& file,
+                                                          const MetadataCache& owner) {
+    using Reader = deltalake::DeltaLakeFormatReader;
+    using Trait = Reader::MetaTrait;
+    auto cache = owner.get<Reader>();
+    ARROW_ASSIGN_OR_RAISE(auto metadata, cache->get_or_open(Trait::cache_key(file), [&] {
+      return Trait::load_metadata(file, properties_, nullptr);
+    }));
+    ARROW_ASSIGN_OR_RAISE(auto reader, Trait::create_from_metadata(metadata, file, nullptr, {}, ""));
+    return std::shared_ptr<FormatReader>(std::move(reader));
+  }
+
+  void CheckDvIds(const std::shared_ptr<arrow::Table>& table, const std::vector<int64_t>& expected) {
+    ASSERT_EQ(table->num_columns(), 1);
+    ASSERT_EQ(table->num_rows(), expected.size());
+    ASSERT_EQ(table->column(0)->type()->id(), arrow::Type::INT64);
+    for (size_t i = 0; i < expected.size(); ++i) {
+      ASSERT_AND_ASSIGN(auto value, table->column(0)->GetScalar(i));
+      ASSERT_EQ(std::static_pointer_cast<arrow::Int64Scalar>(value)->value, expected[i]);
+    }
+  }
+
+  void CheckDvReads(const std::shared_ptr<FormatReader>& reader, const std::vector<int64_t>& expected) {
+    ASSERT_GE(expected.size(), 2);
+    ASSERT_AND_ASSIGN(auto groups, reader->get_row_group_infos());
+    std::vector<int> indices;
+    for (size_t i = 0; i < groups.size(); ++i) indices.push_back(i);
+    ASSERT_AND_ASSIGN(auto chunks, reader->get_chunks(indices));
+    ASSERT_AND_ASSIGN(auto chunked, arrow::Table::FromRecordBatches(chunks));
+    CheckDvIds(chunked, expected);
+    ASSERT_AND_ASSIGN(auto taken, reader->take({0, static_cast<int64_t>(expected.size() - 1)}));
+    CheckDvIds(taken, {expected.front(), expected.back()});
+    ASSERT_AND_ASSIGN(auto range, reader->read_with_range(1, expected.size()));
+    ASSERT_AND_ASSIGN(auto ranged, range->ToTable());
+    CheckDvIds(ranged, std::vector<int64_t>(expected.begin() + 1, expected.end()));
+  }
+};
+
+enum class DeltaDvStorage { Inline, Relative, PrefixedRelative, Absolute };
+
+class DeltaDvStorageTest : public DeltaReaderTest, public ::testing::WithParamInterface<DeltaDvStorage> {
+  protected:
+  std::string ContainerPath(const std::string& table) {
+    if (GetParam() == DeltaDvStorage::Relative || GetParam() == DeltaDvStorage::PrefixedRelative) {
+      return table + "/" + (GetParam() == DeltaDvStorage::PrefixedRelative ? "dv/prefix/" : "") +
+             "deletion_vector_00000000-0000-0000-0000-000000000000.bin";
+    }
+    return table + "/deletions.bin";
+  }
+
+  Json Descriptor(const std::string& table, const deltalake::ffi::GeneratedDeltaDvDescriptor& dv) {
+    Json descriptor{{"sizeInBytes", dv.size}, {"cardinality", dv.cardinality}};
+    if (GetParam() == DeltaDvStorage::Inline) {
+      descriptor["storageType"] = "i";
+      descriptor["pathOrInlineDv"] = std::string(dv.inline_data);
+    } else {
+      descriptor["offset"] = dv.offset;
+      if (GetParam() == DeltaDvStorage::Absolute) {
+        descriptor["storageType"] = "p";
+        descriptor["pathOrInlineDv"] = "file://" + ContainerPath(table);
+      } else {
+        // The all-zero UUID encodes to twenty Z85 zeroes; the prefix has no delimiter.
+        descriptor["storageType"] = "u";
+        descriptor["pathOrInlineDv"] =
+            (GetParam() == DeltaDvStorage::PrefixedRelative ? "dv/prefix" : "") + std::string(20, '0');
+      }
+    }
+    return descriptor;
+  }
+
+  void WriteContainer(const std::string& table, std::span<const uint8_t> bytes) {
+    // Inline cases deliberately have no external DV object to read.
+    if (GetParam() != DeltaDvStorage::Inline)
+      WriteDvFile(ContainerPath(table), bytes);
+  }
+
+  void WriteDvTable(const std::string& table, const Json& descriptor, std::span<const uint8_t> bytes) {
+    WriteDvRows(table, "part.parquet");
+    WriteContainer(table, bytes);
+    Commit(table, 0, {DvProtocol(), Metadata(Schema()), DvAdd(table, "part.parquet", descriptor)});
   }
 };
 
@@ -884,6 +994,190 @@ TEST_F(DeltaReaderTest, ReadsEveryMethodWithDeletionVectorsAcrossGroups) {
   EXPECT_FALSE(reader->take({3}).ok());
   EXPECT_FALSE(reader->get_chunk(-1).ok());
   EXPECT_FALSE(reader->read_with_range(0, 4).ok());
+}
+
+TEST_P(DeltaDvStorageTest, ReadsDistinctVectorsWithNormalClonedAndCachedReaders) {
+  const auto table = Table();
+  auto generated = GenerateDvs({{1, 2, 3}, {0, 4}});
+  ASSERT_EQ(generated.descriptors.size(), 2);
+  ASSERT_LT(generated.descriptors[0].offset, generated.descriptors[1].offset);
+  WriteContainer(table, {generated.bytes.data(), generated.bytes.size()});
+  WriteDvRows(table, "a.parquet");
+  WriteDvRows(table, "b.parquet", 100);
+  Commit(table, 0,
+         {DvProtocol(), Metadata(Schema()), DvAdd(table, "a.parquet", Descriptor(table, generated.descriptors[0])),
+          DvAdd(table, "b.parquet", Descriptor(table, generated.descriptors[1]))});
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  ASSERT_EQ(files.size(), 2);
+  MetadataCache cache(true);
+  for (const auto& file : files) {
+    SCOPED_TRACE(file.path);
+    const bool first = file.path.ends_with("/a.parquet");
+    const std::vector<int64_t> expected =
+        first ? std::vector<int64_t>{0, 4, 5} : std::vector<int64_t>{101, 102, 103, 105};
+    EXPECT_EQ(file.end_index, expected.size());
+    ASSERT_AND_ASSIGN(auto reader, Open(file));
+    CheckDvReads(reader, expected);
+    ASSERT_AND_ASSIGN(auto clone, reader->clone_reader());
+    CheckDvReads(clone, expected);
+    ASSERT_AND_ASSIGN(auto cached, OpenCached(file, cache));
+    CheckDvReads(cached, expected);
+    ASSERT_AND_ASSIGN(auto reopened, OpenCached(file, cache));
+    CheckDvReads(reopened, expected);
+  }
+}
+
+TEST_P(DeltaDvStorageTest, EmptyVectorKeepsRowsAndFullyDeletedFileIsOmitted) {
+  const auto table = Table();
+  auto generated = GenerateDvs({{}, {0, 1, 2, 3, 4, 5}});
+  WriteContainer(table, {generated.bytes.data(), generated.bytes.size()});
+  WriteDvRows(table, "keep.parquet");
+  WriteDvRows(table, "deleted.parquet", 100);
+  Commit(table, 0,
+         {DvProtocol(), Metadata(Schema()), DvAdd(table, "keep.parquet", Descriptor(table, generated.descriptors[0])),
+          DvAdd(table, "deleted.parquet", Descriptor(table, generated.descriptors[1]))});
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  ASSERT_EQ(files.size(), 1);
+  EXPECT_TRUE(files[0].path.ends_with("/keep.parquet"));
+  ASSERT_AND_ASSIGN(auto reader, Open(files[0]));
+  CheckDvReads(reader, {0, 1, 2, 3, 4, 5});
+}
+
+TEST_P(DeltaDvStorageTest, RejectsBitmapCardinalityMismatchAndOutOfBoundsPositions) {
+  struct InvalidVector {
+    std::vector<uint64_t> rows;
+    int64_t cardinality;
+    std::string error;
+  };
+  const std::vector<InvalidVector> cases = {{{1, 2, 3}, 2, "cardinality differs"},
+                                            {{1, 2, 3}, 4, "cardinality differs"},
+                                            {{6}, 1, "position exceeds"},
+                                            {{uint64_t{1} << 32}, 1, "position exceeds"}};
+  for (size_t i = 0; i < cases.size(); ++i) {
+    SCOPED_TRACE(i);
+    const auto table = Table("invalid-" + std::to_string(i));
+    auto generated = GenerateDvs({cases[i].rows});
+    auto descriptor = Descriptor(table, generated.descriptors[0]);
+    descriptor["cardinality"] = cases[i].cardinality;
+    WriteDvTable(table, descriptor, {generated.bytes.data(), generated.bytes.size()});
+    ASSERT_AND_ASSIGN(auto files, Explore(table));
+    ASSERT_EQ(files.size(), 1);
+    EXPECT_EQ(files[0].end_index, 6 - cases[i].cardinality);
+    auto opened = Open(files[0]);
+    ASSERT_FALSE(opened.ok());
+    EXPECT_NE(opened.status().ToString().find(cases[i].error), std::string::npos) << opened.status();
+    MetadataCache cache(true);
+    EXPECT_FALSE(OpenCached(files[0], cache).ok());
+    using Reader = deltalake::DeltaLakeFormatReader;
+    EXPECT_FALSE(cache.get<Reader>()->get(Reader::MetaTrait::cache_key(files[0])).has_value());
+  }
+}
+
+TEST_P(DeltaDvStorageTest, RejectsMalformedAndTruncatedPayloads) {
+  enum class Damage { Encoding, InlineBitmap, InlineMagic, TruncatedFile, Checksum, Size, Offset };
+  // Persisted frames also carry a size prefix and CRC; inline frames carry neither.
+  const auto cases = GetParam() == DeltaDvStorage::Inline
+                         ? std::vector<Damage>{Damage::Encoding, Damage::InlineBitmap, Damage::InlineMagic}
+                         : std::vector<Damage>{Damage::TruncatedFile, Damage::Checksum, Damage::Size, Damage::Offset};
+  for (size_t i = 0; i < cases.size(); ++i) {
+    SCOPED_TRACE(i);
+    const auto table = Table("corrupt-" + std::to_string(i));
+    auto generated = GenerateDvs({{1, 2, 3}});
+    auto descriptor = Descriptor(table, generated.descriptors[0]);
+    std::vector<uint8_t> bytes(generated.bytes.begin(), generated.bytes.end());
+    switch (cases[i]) {
+      case Damage::Encoding:
+        descriptor["pathOrInlineDv"] = "~~~";
+        break;
+      case Damage::InlineBitmap:
+        // One Z85 block retains the valid four-byte magic but drops the bitmap.
+        descriptor["pathOrInlineDv"] = std::string(generated.descriptors[0].inline_data).substr(0, 5);
+        break;
+      case Damage::InlineMagic:
+        descriptor["pathOrInlineDv"] = "00000";
+        break;
+      case Damage::TruncatedFile:
+        bytes.pop_back();
+        break;
+      case Damage::Checksum:
+        bytes.back() ^= 1;
+        break;
+      case Damage::Size:
+        descriptor["sizeInBytes"] = generated.descriptors[0].size + 1;
+        break;
+      case Damage::Offset:
+        descriptor["offset"] = bytes.size() + 100;
+        break;
+    }
+    WriteDvTable(table, descriptor, bytes);
+    // Valid Add counts do not require decoding DVs during exploration.
+    ASSERT_AND_ASSIGN(auto files, Explore(table));
+    ASSERT_EQ(files.size(), 1);
+    EXPECT_EQ(files[0].end_index, 3);
+    EXPECT_FALSE(Open(files[0]).ok());
+    MetadataCache cache(true);
+    EXPECT_FALSE(OpenCached(files[0], cache).ok());
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(StorageForms,
+                         DeltaDvStorageTest,
+                         ::testing::Values(DeltaDvStorage::Inline,
+                                           DeltaDvStorage::Relative,
+                                           DeltaDvStorage::PrefixedRelative,
+                                           DeltaDvStorage::Absolute),
+                         [](const ::testing::TestParamInfo<DeltaDvStorage>& info) {
+                           switch (info.param) {
+                             case DeltaDvStorage::Inline:
+                               return "Inline";
+                             case DeltaDvStorage::Relative:
+                               return "Relative";
+                             case DeltaDvStorage::PrefixedRelative:
+                               return "PrefixedRelative";
+                             case DeltaDvStorage::Absolute:
+                               return "Absolute";
+                           }
+                           return "Unknown";
+                         });
+
+TEST_F(DeltaReaderTest, FailedDvReadsRetryWithinAnExistingSnapshotCache) {
+  const auto table = Table();
+  WriteDvRows(table, "a.parquet");
+  WriteDvRows(table, "b.parquet", 100);
+  auto generated = GenerateDvs({{1, 2, 3}, {0, 4}});
+  const auto healthy = table + "/healthy.bin";
+  const auto failing = table + "/recover.bin";
+  const std::span<const uint8_t> bytes(generated.bytes.data(), generated.bytes.size());
+  WriteDvFile(healthy, bytes);
+  auto descriptor = [&](size_t i, const std::string& path) {
+    const auto& dv = generated.descriptors[i];
+    return Json{{"storageType", "p"},
+                {"pathOrInlineDv", "file://" + path},
+                {"offset", dv.offset},
+                {"sizeInBytes", dv.size},
+                {"cardinality", dv.cardinality}};
+  };
+  Commit(table, 0,
+         {DvProtocol(), Metadata(Schema()), DvAdd(table, "a.parquet", descriptor(0, healthy)),
+          DvAdd(table, "b.parquet", descriptor(1, failing))});
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  ASSERT_EQ(files.size(), 2);
+  std::sort(files.begin(), files.end(), [](const auto& a, const auto& b) { return a.path < b.path; });
+  MetadataCache cache(true);
+  ASSERT_AND_ASSIGN(auto first, OpenCached(files[0], cache));
+  // The snapshot remains owned by the healthy reader/cache while the other file fails.
+  EXPECT_FALSE(OpenCached(files[1], cache).ok());
+  auto corrupt = std::vector<uint8_t>(bytes.begin(), bytes.end());
+  corrupt.back() ^= 1;
+  WriteDvFile(failing, corrupt);
+  EXPECT_FALSE(OpenCached(files[1], cache).ok());
+  // Restore precisely the planned bytes; both failed loads must remain retryable.
+  WriteDvFile(failing, bytes);
+  ASSERT_AND_ASSIGN(auto recovered, OpenCached(files[1], cache));
+  CheckDvReads(recovered, {101, 102, 103, 105});
+  CheckDvReads(first, {0, 4, 5});
+  ASSERT_AND_ASSIGN(auto clone, recovered->clone_reader());
+  CheckDvReads(clone, {101, 102, 103, 105});
 }
 
 TEST_F(DeltaReaderTest, MappedWidenedMissingAndPartitionColumns) {

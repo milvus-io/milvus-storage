@@ -49,7 +49,8 @@ from
 
 - Only Parquet-backed Delta tables are supported. Writes, CDF/incremental read
   APIs, timestamp-based time travel, and catalog discovery are not implemented.
-  Column mapping in both `name` and `id` modes and deletion vectors are supported.
+  Column mapping in both `name` and `id` modes and inline, UUID-relative, and
+  absolute-URL deletion vectors are supported.
 - Predicate strings passed to the format reader are not evaluated or pushed
   down. Callers must apply their own filtering to the returned live rows.
 - Column selection uses top-level logical names. A supplied `read_schema`
@@ -192,6 +193,12 @@ adaptation, encrypted/plaintext footers, distinct column keys, and public
 synchronous/async-fallback reads with caching enabled and disabled. Remote
 filesystem identity and encoded paths are covered through a local-backed proxy;
 live cloud services have not been validated.
+
+Generated DV tests cover inline, UUID-relative (with and without a prefix), and
+absolute references; multiple vectors at distinct offsets in one container;
+empty/fully deleted files; bitmap cardinality and row bounds; malformed payloads,
+CRC/size/offset errors; and failed-read recovery with a retained snapshot cache.
+Read coverage includes chunks, ranges, take, clones and cached readers.
 
 Local Python integration tests cover exploration, file-property and manifest
 round trips, scan/chunk/take reads with caching enabled and disabled, snapshot
