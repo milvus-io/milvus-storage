@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -34,6 +35,11 @@
 
 #include <arrow/api.h>
 #include <arrow/c/bridge.h>
+#include <arrow/compute/api.h>
+#include <arrow/io/file.h>
+#include <arrow/util/uri.h>
+#include <nlohmann/json.hpp>
+#include <parquet/arrow/writer.h>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -54,6 +60,7 @@
 #include "iceberg/iceberg_bridge.h"
 #include "lance/lance_bridge.h"
 #include "paimon/paimon_bridge.h"
+#include "deltalake/deltalake_bridge.h"
 #include "test_env.h"
 
 namespace milvus_storage::test {
@@ -115,7 +122,8 @@ arrow::Status VisitFormatReaderMetadataCachesForFormat(const std::string& format
 
 arrow::Status ValidateChunkRead(const std::vector<std::shared_ptr<arrow::RecordBatch>>& chunks,
                                 const std::vector<std::string>& expected_columns,
-                                int64_t expected_rows) {
+                                int64_t expected_rows,
+                                const std::shared_ptr<arrow::RecordBatch>& expected_values = nullptr) {
   int64_t actual_rows = 0;
   for (const auto& chunk : chunks) {
     if (!chunk) {
@@ -124,12 +132,21 @@ arrow::Status ValidateChunkRead(const std::vector<std::shared_ptr<arrow::RecordB
     if (chunk->num_columns() != static_cast<int>(expected_columns.size())) {
       return arrow::Status::Invalid("unexpected column count: ", chunk->num_columns(), " != ", expected_columns.size());
     }
+    if (expected_values && chunk->num_rows() > expected_values->num_rows() - actual_rows) {
+      return arrow::Status::Invalid("chunk reader returned more rows than the expected values");
+    }
     for (int column_index = 0; column_index < chunk->num_columns(); ++column_index) {
       const auto& expected_name = expected_columns[column_index];
       const auto& actual_name = chunk->schema()->field(column_index)->name();
       if (actual_name != expected_name) {
         return arrow::Status::Invalid("unexpected column name at index ", column_index, ": ", actual_name,
                                       " != ", expected_name);
+      }
+      if (expected_values) {
+        const auto values = expected_values->GetColumnByName(expected_name);
+        if (!values || !chunk->column(column_index)->Equals(values->Slice(actual_rows, chunk->num_rows()))) {
+          return arrow::Status::Invalid("unexpected values for column ", expected_name, " at row ", actual_rows);
+        }
       }
     }
     actual_rows += chunk->num_rows();
@@ -144,7 +161,8 @@ arrow::Status ValidateChunkRead(const std::vector<std::shared_ptr<arrow::RecordB
 arrow::Status ReadProjectedChunks(api::Reader* reader,
                                   const std::vector<std::string>& projected_columns,
                                   int64_t expected_rows,
-                                  size_t parallelism) {
+                                  size_t parallelism,
+                                  const std::shared_ptr<arrow::RecordBatch>& expected_values = nullptr) {
   auto needed_columns = std::make_shared<std::vector<std::string>>(projected_columns);
   ARROW_ASSIGN_OR_RAISE(auto chunk_reader, reader->get_chunk_reader(0, needed_columns));
 
@@ -161,7 +179,132 @@ arrow::Status ReadProjectedChunks(api::Reader* reader,
     return arrow::Status::Invalid("unexpected chunk count: ", chunks.size(), " != ", chunk_indices.size());
   }
 
-  return ValidateChunkRead(chunks, projected_columns, expected_rows);
+  return ValidateChunkRead(chunks, projected_columns, expected_rows, expected_values);
+}
+
+struct DeltaCacheFixture {
+  std::shared_ptr<api::ColumnGroup> column_group;
+  std::shared_ptr<arrow::RecordBatch> expected_values;
+};
+
+// Generate a local Delta table rather than using Writer::create: Delta is read-only.
+// Each file has its own DV object so the I/O assertion does not depend on whether
+// raw bytes from a shared DV container are cached in a future implementation.
+arrow::Result<DeltaCacheFixture> WriteDeltaCacheFixture(const std::string& table_path,
+                                                        const std::shared_ptr<const api::Properties>& properties,
+                                                        int file_count,
+                                                        int64_t rows_per_file) {
+  using Json = nlohmann::json;
+  ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
+  std::filesystem::create_directories(table_path + "/_delta_log");
+  Json fields = Json::array();
+  const std::vector<std::string> types{"long", "string", "double"};
+  for (int i = 0; i < schema->num_fields(); ++i) {
+    fields.push_back(Json{
+        {"name", schema->field(i)->name()}, {"type", types[i]}, {"nullable", false}, {"metadata", Json::object()}});
+  }
+  const auto features = Json::array({"deletionVectors"});
+  std::vector<Json> actions{Json{{"protocol",
+                                  {{"minReaderVersion", 3},
+                                   {"minWriterVersion", 7},
+                                   {"readerFeatures", features},
+                                   {"writerFeatures", features}}}},
+                            Json{{"metaData",
+                                  {{"id", "00000000-0000-0000-0000-000000000003"},
+                                   {"format", {{"provider", "parquet"}, {"options", Json::object()}}},
+                                   {"schemaString", Json{{"type", "struct"}, {"fields", fields}}.dump()},
+                                   {"partitionColumns", Json::array()},
+                                   {"configuration", Json::object()},
+                                   {"createdTime", 0}}}}};
+  std::unordered_map<std::string, std::shared_ptr<arrow::RecordBatch>> live_batches;
+  for (int file_index = 0; file_index < file_count; ++file_index) {
+    const auto name = "part-" + std::to_string(file_index) + ".parquet";
+    const auto path = table_path + "/" + name;
+    ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, file_index * rows_per_file, false, rows_per_file, 4, 50,
+                                                     {true, true, true, false}));
+    ARROW_ASSIGN_OR_RAISE(auto data, arrow::Table::FromRecordBatches({batch}));
+    ARROW_ASSIGN_OR_RAISE(auto sink, arrow::io::FileOutputStream::Open(path));
+    ARROW_RETURN_NOT_OK(::parquet::arrow::WriteTable(*data, arrow::default_memory_pool(), sink, 32));
+    ARROW_RETURN_NOT_OK(sink->Close());
+
+    std::vector<uint64_t> deleted;
+    arrow::Int64Builder live;
+    for (int64_t row = 0; row < rows_per_file; ++row) {
+      // Equal cardinalities but different masks expose cross-file DV cache mixups.
+      if (row % 16 == (file_index + 1) % 16) {
+        deleted.push_back(row);
+      } else {
+        ARROW_RETURN_NOT_OK(live.Append(row));
+      }
+    }
+    auto dv = deltalake::ffi::delta_test_deletion_vector({deleted.data(), deleted.size()});
+    const auto dv_path = table_path + "/dv-" + std::to_string(file_index) + ".bin";
+    ARROW_ASSIGN_OR_RAISE(auto dv_sink, arrow::io::FileOutputStream::Open(dv_path));
+    ARROW_RETURN_NOT_OK(dv_sink->Write(dv.bytes.data(), dv.bytes.size()));
+    ARROW_RETURN_NOT_OK(dv_sink->Close());
+    ARROW_ASSIGN_OR_RAISE(auto dv_uri, arrow::util::UriFromAbsolutePath(dv_path));
+    actions.push_back(Json{{"add",
+                            {{"path", name},
+                             {"partitionValues", Json::object()},
+                             {"size", std::filesystem::file_size(path)},
+                             {"modificationTime", 0},
+                             {"dataChange", true},
+                             {"stats", Json{{"numRecords", rows_per_file}}.dump()},
+                             {"deletionVector",
+                              {{"storageType", "p"},
+                               {"pathOrInlineDv", dv_uri},
+                               {"offset", dv.offset},
+                               {"sizeInBytes", dv.size},
+                               {"cardinality", dv.cardinality}}}}}});
+    ARROW_ASSIGN_OR_RAISE(auto indices, live.Finish());
+    ARROW_ASSIGN_OR_RAISE(auto expected, arrow::compute::Take(arrow::Datum(batch), arrow::Datum(indices)));
+    ARROW_ASSIGN_OR_RAISE(auto uri, arrow::util::UriFromAbsolutePath(path));
+    live_batches.emplace(std::move(uri), expected.record_batch());
+  }
+  std::ofstream output(table_path + "/_delta_log/00000000000000000000.json");
+  for (const auto& action : actions) output << action.dump() << '\n';
+  output.close();
+  if (!output.good())
+    return arrow::Status::IOError("Cannot write Delta cache fixture log");
+  ARROW_ASSIGN_OR_RAISE(auto* format, Format::get(LOON_FORMAT_DELTALAKE_TABLE));
+  ARROW_ASSIGN_OR_RAISE(auto files, format->explore(table_path, properties));
+  std::vector<std::shared_ptr<arrow::RecordBatch>> expected;
+  for (const auto& file : files) {
+    const auto found = live_batches.find(file.path);
+    if (found == live_batches.end())
+      return arrow::Status::Invalid("Unexpected Delta fixture file: ", file.path);
+    expected.push_back(found->second);
+    live_batches.erase(found);
+  }
+  if (!live_batches.empty())
+    return arrow::Status::Invalid("Delta exploration omitted fixture files");
+  // Exploration need not preserve write order; manifest order defines logical indices.
+  ARROW_ASSIGN_OR_RAISE(auto values, arrow::ConcatenateRecordBatches(expected, arrow::default_memory_pool()));
+  return DeltaCacheFixture{std::make_shared<api::ColumnGroup>(
+                               api::ColumnGroup{schema->field_names(), LOON_FORMAT_DELTALAKE_TABLE, std::move(files)}),
+                           std::move(values)};
+}
+
+TEST(DeltaCacheValueValidationTest, ChecksEachProjectedColumnInsteadOfOnlyCounts) {
+  ASSERT_AND_ASSIGN(auto schema, CreateTestSchema({true, true, true, false}));
+  ASSERT_AND_ASSIGN(auto expected, CreateTestData(schema, 0, false, 3, 4, 50, {true, true, true, false}));
+  ASSERT_AND_ASSIGN(auto wrong_mask, CreateTestData(schema, 1, false, 3, 4, 50, {true, true, true, false}));
+  for (int i = 0; i < schema->num_fields(); ++i) {
+    const std::vector<std::string> columns{schema->field(i)->name()};
+    ASSERT_AND_ASSIGN(auto correct, expected->SelectColumns({i}));
+    ASSERT_AND_ASSIGN(auto wrong, wrong_mask->SelectColumns({i}));
+    EXPECT_TRUE(ValidateChunkRead({correct}, columns, 3, expected).ok());
+    EXPECT_FALSE(ValidateChunkRead({wrong}, columns, 3, expected).ok());
+  }
+}
+
+TEST(DeltaCacheValueValidationTest, ChecksOrderAcrossChunkBoundaries) {
+  ASSERT_AND_ASSIGN(auto schema, CreateTestSchema({true, true, true, false}));
+  ASSERT_AND_ASSIGN(auto expected, CreateTestData(schema, 0, false, 3, 4, 50, {true, true, true, false}));
+  const auto names = schema->field_names();
+  EXPECT_TRUE(ValidateChunkRead({expected->Slice(0, 1), expected->Slice(1)}, names, 3, expected).ok());
+  EXPECT_FALSE(ValidateChunkRead({expected->Slice(1), expected->Slice(0, 1)}, names, 3, expected).ok());
+  EXPECT_FALSE(ValidateChunkRead({expected, expected}, names, 6, expected).ok());
 }
 
 std::vector<std::string> StressProjection(int thread_index, int64_t iteration) {
@@ -670,6 +813,15 @@ class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std:
     if (format == LOON_FORMAT_ICEBERG_TABLE) {
       return WriteIcebergStressData();
     }
+    if (format == LOON_FORMAT_DELTALAKE_TABLE) {
+      const auto path = (LocalRootPath() / base_path_ / "delta").string();
+      ARROW_ASSIGN_OR_RAISE(
+          auto fixture, WriteDeltaCacheFixture(path, std::make_shared<const api::Properties>(properties_), kBatchCount,
+                                               kRowsPerBatch));
+      delta_expected_ = std::move(fixture.expected_values);
+      schema_ = delta_expected_->schema();
+      return std::make_shared<api::ColumnGroups>(api::ColumnGroups{std::move(fixture.column_group)});
+    }
 
     ARROW_ASSIGN_OR_RAISE(auto policy, CreateSinglePolicy(format, schema_));
     auto writer = api::Writer::create(base_path_, schema_, std::move(policy),
@@ -835,6 +987,7 @@ class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std:
     std::vector<int64_t> iterations(kThreadCount, 0);
     std::vector<std::thread> threads;
     threads.reserve(kThreadCount);
+    const auto expected_rows = delta_expected_ ? delta_expected_->num_rows() : kExpectedRows;
 
     for (int thread_index = 0; thread_index < kThreadCount; ++thread_index) {
       threads.emplace_back([&, thread_index]() {
@@ -847,8 +1000,8 @@ class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std:
 
         int64_t iteration = 0;
         do {
-          auto status =
-              ReadProjectedChunks(reader, StressProjection(thread_index, iteration), kExpectedRows, kReadParallelism);
+          auto status = ReadProjectedChunks(reader, StressProjection(thread_index, iteration), expected_rows,
+                                            kReadParallelism, delta_expected_);
           if (!status.ok()) {
             statuses[thread_index] = std::move(status);
             break;
@@ -893,6 +1046,7 @@ class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std:
 
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;
+  std::shared_ptr<arrow::RecordBatch> delta_expected_;
   std::string base_path_;
   api::Properties properties_;
   ArrowFileSystemConfig fs_config_;
@@ -1161,12 +1315,28 @@ TEST_P(FormatReaderMetadataCacheIOTest, ProjectedReadersLoadEachFileFooterOnce) 
   constexpr int kFiles = 2;
   constexpr int64_t kRowsPerFile = 16;
   const auto format = GetParam();
-  const int64_t expected_rows = kFiles * (kRowsPerFile - (format == LOON_FORMAT_LANCE_TABLE ? 1 : 0));
+  int64_t expected_rows = kFiles * (kRowsPerFile - (format == LOON_FORMAT_LANCE_TABLE ? 1 : 0));
   auto column_group = std::make_shared<api::ColumnGroup>();
   column_group->columns = schema_->field_names();
   column_group->format = format;
   const auto lance_dataset_path = base_path_ + "/dataset";
-  for (int file_index = 0; file_index < kFiles; ++file_index) {
+  std::shared_ptr<arrow::RecordBatch> delta_expected;
+  deltalake::DeltaLakeFormatReader::MetaTrait::MetadataPtr warm_delta;
+  if (format == LOON_FORMAT_DELTALAKE_TABLE) {
+    ASSERT_AND_ASSIGN(auto fixture, WriteDeltaCacheFixture(base_path_ + "/delta",
+                                                           std::make_shared<const api::Properties>(properties_), kFiles,
+                                                           kRowsPerFile));
+    column_group = std::move(fixture.column_group);
+    delta_expected = std::move(fixture.expected_values);
+    expected_rows = delta_expected->num_rows();
+    // Retain a snapshot through its first file so log replay is outside the
+    // measurement. The remaining file still needs its own footer and DV read.
+    ASSERT_EQ(column_group->files.size(), kFiles);
+    ASSERT_AND_ASSIGN(warm_delta,
+                      deltalake::DeltaLakeFormatReader::MetaTrait::load_metadata(
+                          column_group->files[0], std::make_shared<const api::Properties>(properties_), nullptr));
+  }
+  for (int file_index = 0; format != LOON_FORMAT_DELTALAKE_TABLE && file_index < kFiles; ++file_index) {
     const auto path =
         format == LOON_FORMAT_LANCE_TABLE ? lance_dataset_path : base_path_ + "/file-" + std::to_string(file_index);
     if (format == LOON_FORMAT_LANCE_TABLE) {
@@ -1251,9 +1421,14 @@ TEST_P(FormatReaderMetadataCacheIOTest, ProjectedReadersLoadEachFileFooterOnce) 
   auto first_columns = std::make_shared<std::vector<std::string>>(std::vector<std::string>{schema_->field(0)->name()});
   ASSERT_AND_ASSIGN(auto first, reader->get_chunk_reader(0, first_columns));
   // Lance reads one shared manifest, then one footer, deletion file, and external
-  // row-ID sequence per fragment. Other formats only load their file footers.
-  EXPECT_EQ(metrics->GetReadCount(), format == LOON_FORMAT_LANCE_TABLE ? 1 + 3 * kFiles : kFiles);
+  // row-ID sequence per fragment. Delta's snapshot/first file are already warm;
+  // each remaining file reads one footer and its own small DV object.
+  const int expected_reads = format == LOON_FORMAT_LANCE_TABLE       ? 1 + 3 * kFiles
+                             : format == LOON_FORMAT_DELTALAKE_TABLE ? 2 * (kFiles - 1)
+                                                                     : kFiles;
+  EXPECT_EQ(metrics->GetReadCount(), expected_reads);
   EXPECT_GT(metrics->GetReadBytes(), 0);
+  warm_delta.reset();  // From here the public Reader/cache must retain the snapshot.
   first.reset();
 
   // Reopening the same column on this Reader must also reuse its footer cache.
@@ -1273,8 +1448,15 @@ TEST_P(FormatReaderMetadataCacheIOTest, ProjectedReadersLoadEachFileFooterOnce) 
   EXPECT_EQ(metrics->GetGetFileInfoCount(), 0);
   ASSERT_AND_ASSIGN(auto chunk_rows, remaining->get_chunk_rows());
   EXPECT_EQ(std::accumulate(chunk_rows.begin(), chunk_rows.end(), uint64_t{0}), expected_rows);
-  ASSERT_STATUS_OK(ReadProjectedChunks(reader.get(), *first_columns, expected_rows, 1));
-  ASSERT_STATUS_OK(ReadProjectedChunks(reader.get(), *remaining_columns, expected_rows, 1));
+  ASSERT_STATUS_OK(ReadProjectedChunks(reader.get(), *first_columns, expected_rows, 1, delta_expected));
+  ASSERT_STATUS_OK(ReadProjectedChunks(reader.get(), *remaining_columns, expected_rows, 1, delta_expected));
+  if (delta_expected) {
+    reader.reset();
+    std::vector<int64_t> indices(remaining->total_number_of_chunks());
+    std::iota(indices.begin(), indices.end(), 0);
+    ASSERT_AND_ASSIGN(auto chunks, remaining->get_chunks(indices, 1));
+    ASSERT_STATUS_OK(ValidateChunkRead(chunks, *remaining_columns, expected_rows, delta_expected));
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(Formats,
@@ -1283,10 +1465,14 @@ INSTANTIATE_TEST_SUITE_P(Formats,
                                            LOON_FORMAT_VORTEX,
                                            LOON_FORMAT_LANCE_TABLE,
                                            LOON_FORMAT_ICEBERG_TABLE,
-                                           LOON_FORMAT_PAIMON_TABLE));
+                                           LOON_FORMAT_PAIMON_TABLE,
+                                           LOON_FORMAT_DELTALAKE_TABLE));
 
 TEST_P(FormatReaderMetadataCacheStressTest, ConcurrentReaderCacheOpenAndRead) {
   const auto format = GetParam();
+  if (format == LOON_FORMAT_DELTALAKE_TABLE && fs_config_.storage_type != "local") {
+    GTEST_SKIP() << "Delta cache stress uses local fixtures; remote validation is a separate stage";
+  }
   const auto* use_azurite = std::getenv("USE_AZURITE");
   if (format == LOON_FORMAT_ICEBERG_TABLE && fs_config_.cloud_provider == kCloudProviderAzure && use_azurite &&
       std::string(use_azurite) == "true") {
@@ -1305,9 +1491,12 @@ TEST_P(FormatReaderMetadataCacheStressTest, ConcurrentReaderCacheOpenAndRead) {
   EXPECT_EQ(iterations.size(), static_cast<size_t>(kThreadCount));
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    Formats,
-    FormatReaderMetadataCacheStressTest,
-    ::testing::Values(LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX, LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE));
+INSTANTIATE_TEST_SUITE_P(Formats,
+                         FormatReaderMetadataCacheStressTest,
+                         ::testing::Values(LOON_FORMAT_PARQUET,
+                                           LOON_FORMAT_VORTEX,
+                                           LOON_FORMAT_LANCE_TABLE,
+                                           LOON_FORMAT_ICEBERG_TABLE,
+                                           LOON_FORMAT_DELTALAKE_TABLE));
 
 }  // namespace milvus_storage::test

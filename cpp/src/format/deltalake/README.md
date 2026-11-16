@@ -200,6 +200,12 @@ empty/fully deleted files; bitmap cardinality and row bounds; malformed payloads
 CRC/size/offset errors; and failed-read recovery with a retained snapshot cache.
 Read coverage includes chunks, ranges, take, clones and cached readers.
 
+Shared I/O/cache tests verify footer and DV reuse across projections, chunk-reader
+lifetime beyond its parent, and correct projected live values under the existing
+eight-thread, 30-second stress harness. Exact I/O assertions use small plaintext
+files with recorded counts and no key callback; log replay is excluded from the
+measurement.
+
 Local Python integration tests cover exploration, file-property and manifest
 round trips, scan/chunk/take reads with caching enabled and disabled, snapshot
 pinning after source replacement, and reopening old/latest imports in fresh
