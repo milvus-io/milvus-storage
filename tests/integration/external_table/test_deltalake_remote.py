@@ -365,9 +365,8 @@ def test_remote_deltalake_same_keys_on_two_endpoints_stay_isolated(
                         **_source_properties(config.get_properties(), config),
                         "reader.metadata_cache.enable": "true",
                     }
-                    # Keep identical source keys to exercise Delta's filesystem
-                    # identity. Separate collection paths avoid the shared manifest
-                    # cache's existing bucket/path-only key (no endpoint identity).
+                    # Match source keys across endpoints to exercise Delta's
+                    # filesystem identity while both persisted readers stay alive.
                     target = f"{temp_case_path}/imported-{index}"
                     groups = _import_snapshot(table, target, properties)
                     expected = _expected_data(table, groups, 0)

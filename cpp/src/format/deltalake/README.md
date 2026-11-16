@@ -148,13 +148,6 @@ from directory names. Only primitive partition types are supported.
   reader's range API for partial reads instead of slicing the descriptor.
 - Row indices refer to live rows after DV filtering. `take` requires sorted,
   unique indices within those live-row bounds.
-- The shared collection-manifest cache currently keys remote manifests by bucket
-  and path without endpoint identity. Reading collections at identical manifest
-  paths in the same bucket name on different endpoints within one process can
-  return the other endpoint's manifest. Use distinct destination collection paths
-  until that shared cache is fixed. This affects all formats; Delta source-table
-  snapshot isolation is tested separately with identical source keys and distinct
-  destination collection paths.
 
 ### I/O, caching, and memory estimates
 
@@ -222,6 +215,8 @@ pinning, inline/UUID-relative/absolute DVs, shared-container offsets, encoded ke
 invalid credentials, missing-object recovery and source isolation across endpoints.
 Relevant external-format, credential, manifest, chunk-reader and lifecycle
 regressions also pass on both services.
+The shared manifest-cache regression verifies distinct persisted metadata and
+payloads at identical bucket and collection-manifest paths across both endpoints.
 
 The remote fixtures generate small sparse DVs directly in Python, including
 inline encodings and multiple offsets in one external container. A unit test
