@@ -70,31 +70,6 @@ class ManifestTest : public ::testing::Test {
     return cg;
   }
 
-  // Separate local backing stores expose the same bucket/root to reproduce
-  // remote endpoint collisions without connecting to an object-storage service.
-  arrow::Result<FileSystemPtr> MakeCacheFileSystem(const std::string& backing,
-                                                   const std::string& identity,
-                                                   const std::string& bucket = "same-bucket") {
-    const auto root = base_path_ + "/" + backing;
-    ARROW_RETURN_NOT_OK(fs_->CreateDir(root + "/" + bucket + "/" + get_manifest_path("collection"), true));
-    auto store = std::make_shared<arrow::fs::SubTreeFileSystem>(root, fs_);
-    return std::make_shared<FileSystemProxy>(bucket, std::move(store), identity);
-  }
-
-  static ArrowFileSystemConfig CacheConfig() {
-    ArrowFileSystemConfig config;
-    config.storage_type = "remote";
-    config.bucket_name = "same-bucket";
-    config.address = "http://first-endpoint";
-    config.access_key_id = "first-user";
-    config.access_key_value = "first-key";
-    return config;
-  }
-
-  static Manifest CacheManifest(int64_t marker) {
-    return Manifest({}, {{"delete.delta", DeltaLogType::PRIMARY_KEY, marker}});
-  }
-
   protected:
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   api::Properties properties_;
@@ -644,100 +619,6 @@ TEST_F(ManifestTest, ReadFromCachesResult) {
   ASSERT_AND_ASSIGN(auto m1, Manifest::ReadFrom(fs_, path));
   ASSERT_AND_ASSIGN(auto m2, Manifest::ReadFrom(fs_, path));
   EXPECT_EQ(m1.get(), m2.get());  // same pointer from cache
-}
-
-TEST_F(ManifestTest, CacheSeparatesEndpointsAtTheSameBucketAndPath) {
-  auto first_config = CacheConfig();
-  auto second_config = first_config;
-  second_config.address = "http://second-endpoint";
-  ASSERT_AND_ASSIGN(auto first_fs, MakeCacheFileSystem("first", first_config.GetCacheKey()));
-  ASSERT_AND_ASSIGN(auto second_fs, MakeCacheFileSystem("second", second_config.GetCacheKey()));
-  const auto path = get_manifest_filepath("collection", 1);
-  ASSERT_STATUS_OK(Manifest::WriteTo(first_fs, path, CacheManifest(11)));
-  ASSERT_STATUS_OK(Manifest::WriteTo(second_fs, path, CacheManifest(22)));
-
-  ASSERT_AND_ASSIGN(auto first, Manifest::ReadFrom(first_fs, path));
-  ASSERT_AND_ASSIGN(auto second, Manifest::ReadFrom(second_fs, path));
-  ASSERT_EQ(first->deltaLogs().size(), 1);
-  ASSERT_EQ(second->deltaLogs().size(), 1);
-  EXPECT_EQ(first->deltaLogs()[0].num_entries, 11);
-  EXPECT_EQ(second->deltaLogs()[0].num_entries, 22);
-  EXPECT_NE(first.get(), second.get());
-  ASSERT_AND_ASSIGN(auto again, Manifest::ReadFrom(first_fs, path));
-  EXPECT_EQ(first.get(), again.get());
-}
-
-TEST_F(ManifestTest, CacheSeparatesCredentialContextsAndPreservesReadErrors) {
-  class DeniedFileSystem final : public FileSystemProxy {
- public:
-    DeniedFileSystem(const FileSystemPtr& source, const std::string& identity)
-        : FileSystemProxy(source->base_path(), source->base_fs(), identity) {}
-    using FileSystemProxy::OpenInputFile;
-    arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string&) override {
-      return arrow::Status::IOError("read denied by test");
-    }
-  };
-  auto first_config = CacheConfig();
-  auto second_config = first_config;
-  second_config.access_key_id = "second-user";
-  second_config.access_key_value = "second-key";
-  ASSERT_AND_ASSIGN(auto first_fs, MakeCacheFileSystem("first", first_config.GetCacheKey()));
-  ASSERT_AND_ASSIGN(auto second_fs, MakeCacheFileSystem("second", second_config.GetCacheKey()));
-  const auto path = get_manifest_filepath("collection", 1);
-  ASSERT_STATUS_OK(Manifest::WriteTo(first_fs, path, CacheManifest(11)));
-  ASSERT_STATUS_OK(Manifest::WriteTo(second_fs, path, CacheManifest(22)));
-  ASSERT_AND_ASSIGN(auto first, Manifest::ReadFrom(first_fs, path));
-  ASSERT_AND_ASSIGN(auto second, Manifest::ReadFrom(second_fs, path));
-  ASSERT_EQ(first->deltaLogs().size(), 1);
-  ASSERT_EQ(second->deltaLogs().size(), 1);
-  EXPECT_EQ(first->deltaLogs()[0].num_entries, 11);
-  EXPECT_EQ(second->deltaLogs()[0].num_entries, 22);
-
-  auto denied_config = first_config;
-  denied_config.access_key_value = "invalid-key";
-  auto denied_fs = std::make_shared<DeniedFileSystem>(first_fs, denied_config.GetCacheKey());
-  auto denied = Manifest::ReadFrom(denied_fs, path);
-  EXPECT_TRUE(denied.status().IsIOError());
-  EXPECT_EQ(denied.status().message(), "read denied by test");
-  ASSERT_AND_ASSIGN(auto again, Manifest::ReadFrom(first_fs, path));
-  EXPECT_EQ(first.get(), again.get());
-}
-
-TEST_F(ManifestTest, CacheIdentityRetainsTheFilesystemRoot) {
-  const auto identity = CacheConfig().GetCacheKey();
-  ASSERT_AND_ASSIGN(auto first_fs, MakeCacheFileSystem("store", identity, "first-root"));
-  ASSERT_AND_ASSIGN(auto second_fs, MakeCacheFileSystem("store", identity, "second-root"));
-  const auto path = get_manifest_filepath("collection", 1);
-  ASSERT_STATUS_OK(Manifest::WriteTo(first_fs, path, CacheManifest(11)));
-  ASSERT_STATUS_OK(Manifest::WriteTo(second_fs, path, CacheManifest(22)));
-  ASSERT_AND_ASSIGN(auto first, Manifest::ReadFrom(first_fs, path));
-  ASSERT_AND_ASSIGN(auto second, Manifest::ReadFrom(second_fs, path));
-  ASSERT_EQ(first->deltaLogs().size(), 1);
-  ASSERT_EQ(second->deltaLogs().size(), 1);
-  EXPECT_EQ(first->deltaLogs()[0].num_entries, 11);
-  EXPECT_EQ(second->deltaLogs()[0].num_entries, 22);
-}
-
-TEST_F(ManifestTest, UnidentifiedFilesystemsBypassTheSharedCache) {
-  ASSERT_AND_ASSIGN(auto first_fs, MakeCacheFileSystem("first", CacheConfig().GetCacheKey()));
-  ASSERT_AND_ASSIGN(auto second_fs, MakeCacheFileSystem("second", ""));
-  const auto path = get_manifest_filepath("collection", 1);
-  ASSERT_STATUS_OK(Manifest::WriteTo(first_fs, path, CacheManifest(11)));
-  ASSERT_STATUS_OK(Manifest::WriteTo(second_fs, path, CacheManifest(22)));
-  ASSERT_AND_ASSIGN(auto first, Manifest::ReadFrom(first_fs, path));
-
-  // Both a proxy without identity and a plain Arrow filesystem must read their
-  // own manifest, even while an identified filesystem has cached the same path.
-  const std::vector<ArrowFileSystemPtr> unidentified{
-      second_fs, std::make_shared<arrow::fs::SubTreeFileSystem>(second_fs->base_path(), second_fs->base_fs())};
-  for (const auto& fs : unidentified) {
-    ASSERT_AND_ASSIGN(auto second, Manifest::ReadFrom(fs, path));
-    ASSERT_AND_ASSIGN(auto again, Manifest::ReadFrom(fs, path));
-    ASSERT_EQ(second->deltaLogs().size(), 1);
-    EXPECT_EQ(second->deltaLogs()[0].num_entries, 22);
-    EXPECT_NE(first.get(), second.get());
-    EXPECT_NE(second.get(), again.get());
-  }
 }
 
 TEST_F(ManifestTest, ManifestVersion) {

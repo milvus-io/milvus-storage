@@ -148,6 +148,13 @@ from directory names. Only primitive partition types are supported.
   reader's range API for partial reads instead of slicing the descriptor.
 - Row indices refer to live rows after DV filtering. `take` requires sorted,
   unique indices within those live-row bounds.
+- Callers must keep collection-manifest cache keys unique across distinct
+  destinations within one process. The shared manifest cache uses filesystem
+  root/bucket and manifest path, without endpoint or credential identity. Use
+  distinct destination collection paths when endpoints share a bucket name.
+  Milvus supplies uniqueness through collection/partition/segment directories;
+  this existing contract is retained following the [PR #800 discussion](https://github.com/milvus-io/milvus-storage/pull/800#issuecomment-6936593703).
+  Delta source snapshot/file caches isolate filesystem identities separately.
 
 ### I/O, caching, and memory estimates
 
@@ -215,8 +222,9 @@ pinning, inline/UUID-relative/absolute DVs, shared-container offsets, encoded ke
 invalid credentials, missing-object recovery and source isolation across endpoints.
 Relevant external-format, credential, manifest, chunk-reader and lifecycle
 regressions also pass on both services.
-The shared manifest-cache regression verifies distinct persisted metadata and
-payloads at identical bucket and collection-manifest paths across both endpoints.
+The two-endpoint Delta fixture uses identical source-table/data/DV keys and
+distinct destination collection paths, preserving the shared manifest namespace
+contract while validating Delta source-cache isolation.
 
 The remote fixtures generate small sparse DVs directly in Python, including
 inline encodings and multiple offsets in one external container. A unit test

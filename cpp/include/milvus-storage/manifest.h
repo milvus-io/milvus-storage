@@ -15,7 +15,6 @@
 #pragma once
 
 #include <cstdint>
-#include <compare>
 #include <memory>
 #include <string>
 #include <vector>
@@ -258,15 +257,7 @@ class Manifest final {
   std::vector<Index> indexes_;               ///< Index entries for columns
   std::vector<LobFileInfo> lob_files_;       ///< LOB file metadata for TEXT/BLOB columns
 
-  struct CacheKey {
-    std::string filesystem_identity;
-    std::string root;
-    std::string path;
-
-    auto operator<=>(const CacheKey&) const = default;
-  };
-
-  static milvus_storage::LRUCache<CacheKey, std::shared_ptr<Manifest>>& getCache();
+  static milvus_storage::LRUCache<std::string, std::shared_ptr<Manifest>>& getCache();
 };
 
 }  // namespace milvus_storage::api

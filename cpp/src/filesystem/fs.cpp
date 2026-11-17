@@ -256,7 +256,7 @@ arrow::Result<FileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& 
         ARROW_ASSIGN_OR_RAISE(raw_fs, TalonFileSystemProducer(config, std::move(raw_fs)).Make());
       }
       // Apply the bucket subtree exactly once, after all optional decorators.
-      return std::make_shared<FileSystemProxy>(config.bucket_name, std::move(raw_fs), config.GetCacheKey());
+      return std::make_shared<FileSystemProxy>(config.bucket_name, std::move(raw_fs));
     }
     default: {
       return arrow::Status::Invalid("Unsupported storage type: " + config.storage_type);

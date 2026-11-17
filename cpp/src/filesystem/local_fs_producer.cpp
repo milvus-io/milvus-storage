@@ -198,7 +198,7 @@ arrow::Result<ArrowFileSystemPtr> LocalFileSystemProducer::Make() {
     ARROW_ASSIGN_OR_RAISE(durability_root, PrepareLocalRoot(config_.local_durability_root));
   }
   return std::make_shared<FileSystemProxy>(
-      out_path, std::make_shared<LocalFileSystemWrapper>(option, std::move(durability_root)), config_.GetCacheKey());
+      out_path, std::make_shared<LocalFileSystemWrapper>(option, std::move(durability_root)));
 }
 
 }  // namespace milvus_storage
