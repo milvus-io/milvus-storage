@@ -152,8 +152,9 @@ struct AwsInstance {
 
   private:
   void DoInitialize(const S3GlobalOptions& options) {
-    // Keep the cache alive until the producer's subsequently registered atexit
-    // handler has finalized S3, even when S3 is initialized before the cache is used.
+    // Exit handlers run in reverse registration order. Construct the cache before
+    // InitS3 registers its atexit finalizer, so that finalizer can safely clear it
+    // before the cache's static destructor runs (also when S3 is initialized first).
     FilesystemCache::getInstance();
     Aws::Utils::Logging::LogLevel aws_log_level;
 
