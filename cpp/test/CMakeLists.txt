@@ -1,5 +1,6 @@
 
 find_package(GTest REQUIRED)
+enable_testing()
 
 if (WITH_ASAN)
   set(CMAKE_CXX_FLAGS
@@ -13,6 +14,9 @@ endif()
 set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall")
 
 file(GLOB_RECURSE BUSTUB_TEST_SOURCES "${PROJECT_SOURCE_DIR}/test/*.cpp")
+# This executable owns its AWS SDK lifecycle and runs without a storage service.
+list(FILTER BUSTUB_TEST_SOURCES EXCLUDE REGEX "/aliyun_credentials/")
+add_subdirectory(aliyun_credentials)
 
 add_executable(milvus_test ${BUSTUB_TEST_SOURCES})
 
@@ -39,7 +43,6 @@ target_link_libraries(
 )
 
 #CTest for the FFI
-enable_testing()
 file(GLOB_RECURSE FFI_TEST_FILES ffi/*.c)
 add_executable(Test_FFI ${FFI_TEST_FILES})
 

@@ -91,6 +91,7 @@ jobs:
           path: |
             cpp/build/Release/test/milvus_test
             cpp/build/Release/test/Test_FFI
+            cpp/build/Release/test/aliyun_credentials/aliyun_credentials_test
             cpp/build/Release/libs/
             cpp/build/Release/libmilvus-storage.so*
             cpp/build/Release/**/*.gcno
@@ -197,6 +198,7 @@ jobs:
         run: |
           chmod +x ./build/Release/test/milvus_test
           chmod +x ./build/Release/test/Test_FFI
+          chmod +x ./build/Release/test/aliyun_credentials/aliyun_credentials_test
 
       - name: Setup Minio
         run: |
@@ -207,6 +209,7 @@ jobs:
         working-directory: ./cpp
         run: |
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)/build/Release:$(pwd)/build/Release/libs
+          ./build/Release/test/aliyun_credentials/aliyun_credentials_test
           ./build/Release/test/milvus_test && ./build/Release/test/Test_FFI
           
       - name: Run unittest with minio
