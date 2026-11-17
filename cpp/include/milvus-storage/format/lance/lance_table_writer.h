@@ -45,6 +45,8 @@ class LanceTableWriter final : public FormatWriter {
 
   arrow::Status Flush() override;
 
+  size_t GetRetainedBufferSize() const override;
+
   arrow::Result<api::ColumnGroupFile> Close() override;
 
   private:

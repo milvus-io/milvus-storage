@@ -61,6 +61,8 @@ class ParquetFileWriter : public FormatWriter {
 
   arrow::Status Flush() override;
 
+  size_t GetRetainedBufferSize() const override;
+
   arrow::Result<api::ColumnGroupFile> Close() override;
 
   arrow::Result<size_t> Tell() const;

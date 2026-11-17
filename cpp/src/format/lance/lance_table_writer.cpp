@@ -32,6 +32,7 @@
 #include <fmt/format.h>
 
 #include "milvus-storage/format/lance/lance_common.h"
+#include "milvus-storage/common/arrow_util.h"
 
 namespace milvus_storage::lance {
 
@@ -81,6 +82,14 @@ arrow::Status LanceTableWriter::Write(const std::shared_ptr<arrow::RecordBatch> 
 }
 
 arrow::Status LanceTableWriter::Flush() { return arrow::Status::OK(); }
+
+size_t LanceTableWriter::GetRetainedBufferSize() const {
+  size_t size = 0;
+  for (const auto& batch : record_batches_) {
+    size += GetRecordBatchMemorySize(batch);
+  }
+  return size;
+}
 
 bool fids_contains(const std::vector<uint64_t>& origin, const std::vector<uint64_t>& current) {
   assert(current.size() > origin.size());
