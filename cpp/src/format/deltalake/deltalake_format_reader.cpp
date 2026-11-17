@@ -4,7 +4,6 @@
 #include "milvus-storage/format/deltalake/deltalake_format_reader.h"
 
 #include <algorithm>
-#include <atomic>
 #include <future>
 #include <mutex>
 #include <span>
@@ -26,10 +25,9 @@ namespace {
 
 // Failures are never cached. A pending result retains its value only until
 // callers leave the flight; the process registry itself owns weak references.
-template <typename T, bool Weak = false>
-class LoadCache {
+class TableContextCache {
   public:
-  using Ptr = std::shared_ptr<T>;
+  using Ptr = std::shared_ptr<DeltaTableContext>;
   using Result = arrow::Result<Ptr>;
   template <typename Loader>
   Result Get(const std::string& key, Loader&& load) {
@@ -37,17 +35,11 @@ class LoadCache {
     std::shared_ptr<std::promise<Result>> leader;
     {
       std::lock_guard lock(mutex_);
-      if constexpr (Weak) {
-        auto cached = weak_.get(key);
-        if (cached) {
-          if (auto value = cached->lock())
-            return value;
-          weak_.remove(key);
-        }
-      } else {
-        auto found = strong_.find(key);
-        if (found != strong_.end())
-          return found->second;
+      auto cached = weak_.get(key);
+      if (cached) {
+        if (auto value = cached->lock())
+          return value;
+        weak_.remove(key);
       }
       auto flight = flights_.find(key);
       if (flight != flights_.end())
@@ -75,10 +67,7 @@ class LoadCache {
       std::lock_guard lock(mutex_);
       if (result.ok()) {
         try {
-          if constexpr (Weak)
-            weak_.put(key, std::weak_ptr<T>(*result));
-          else
-            strong_.emplace(key, *result);
+          weak_.put(key, std::weak_ptr<DeltaTableContext>(*result));
         } catch (...) { /* Cache publication is best effort; always release waiters. */
         }
       }
@@ -90,8 +79,7 @@ class LoadCache {
 
   private:
   std::mutex mutex_;
-  LRUCache<std::string, std::weak_ptr<T>> weak_{512};
-  std::unordered_map<std::string, Ptr> strong_;
+  LRUCache<std::string, std::weak_ptr<DeltaTableContext>> weak_{512};
   std::unordered_map<std::string, std::shared_future<Result>> flights_;
 };
 
@@ -132,36 +120,23 @@ struct DeltaFileMetadata {
   parquet::ParquetFormatReader::MetaTrait::MetadataPtr parquet;
   api::ColumnGroupFile physical_file;
   std::shared_ptr<BlockingDeltaFile> kernel;
-  std::vector<RowGroupInfo> groups;
-  std::shared_ptr<std::atomic<uint64_t>> memory_counter;
-  uint64_t charge = 0;
-  ~DeltaFileMetadata() {
-    if (memory_counter)
-      memory_counter->fetch_sub(charge, std::memory_order_relaxed);
-  }
 };
-
-class DeltaFileCache : public LoadCache<DeltaFileMetadata> {};
 
 class DeltaTableContext {
   public:
   ResolvedLocation location;
-  int64_t version;
   std::shared_ptr<BlockingDeltaSnapshot> snapshot;
   std::shared_ptr<arrow::Schema> schema;
-  std::shared_ptr<DeltaFileCache> files = std::make_shared<DeltaFileCache>();
-  std::shared_ptr<std::atomic<uint64_t>> file_bytes = std::make_shared<std::atomic<uint64_t>>(0);
 };
 
 static arrow::Result<std::shared_ptr<DeltaTableContext>> GetTable(
     const SnapshotDescriptor& descriptor, const std::shared_ptr<const api::Properties>& properties) {
   ARROW_ASSIGN_OR_RAISE(auto location, ResolveLocation(descriptor.table_uri, properties));
   const auto key = nlohmann::json::array({location.url, descriptor.snapshot_version, location.filesystem_key}).dump();
-  static folly::Indestructible<LoadCache<DeltaTableContext, true>> registry;
+  static folly::Indestructible<TableContextCache> registry;
   return registry->Get(key, [&]() -> arrow::Result<std::shared_ptr<DeltaTableContext>> {
     auto table = std::make_shared<DeltaTableContext>();
     table->location = location;
-    table->version = descriptor.snapshot_version;
     ARROW_ASSIGN_OR_RAISE(table->snapshot,
                           BlockingDeltaSnapshot::LoadForReader(location.url, descriptor.snapshot_version,
                                                                location.filesystem, location.binding));
@@ -170,79 +145,11 @@ static arrow::Result<std::shared_ptr<DeltaTableContext>> GetTable(
   });
 }
 
-static arrow::Result<std::shared_ptr<DeltaFileMetadata>> GetFile(
-    const DeltaLakeFormatReader::MetaTrait::Payload& payload, const api::ColumnGroupFile& file) {
-  ARROW_ASSIGN_OR_RAISE(auto resolved, ResolveDataFile(file.path, payload.table->location, payload.properties));
-  auto result = payload.files->Get(resolved.url, [&]() -> arrow::Result<std::shared_ptr<DeltaFileMetadata>> {
-    auto metadata = std::make_shared<DeltaFileMetadata>();
-    metadata->physical_file = file;
-    metadata->physical_file.path = resolved.path;
-    ARROW_ASSIGN_OR_RAISE(metadata->parquet, parquet::ParquetFormatReader::MetaTrait::load_metadata_with_filesystem(
-                                                 file, payload.table->location.filesystem, resolved.path,
-                                                 payload.properties, payload.key_retriever));
-    const auto footer = metadata->parquet->payload.parquet_metadata;
-    if (footer->num_rows() < 0)
-      return arrow::Status::Invalid("Negative Delta Parquet row count");
-    // Kernel plans against the schema, not row-group payload metadata. Transfer
-    // only the schema/key-values and the C++-decoded count. Serializing an actual
-    // plaintext encrypted footer would require Arrow 17's signing encryptor;
-    // separately encrypted column metadata must also stay with the C++ reader.
-    auto schema_metadata =
-        ::parquet::FileMetaDataBuilder::Make(footer->schema(), ::parquet::default_writer_properties());
-    const auto serialized = schema_metadata->Finish(footer->key_value_metadata())->SerializeToString();
-    ARROW_ASSIGN_OR_RAISE(metadata->kernel, payload.table->snapshot->LoadFile(
-                                                resolved.url, serialized, footer->num_rows(), file.end_index,
-                                                file.Get<uint64_t>(api::kPropertyFileSize)));
-    // A changed schema can introduce data-dependent allocation (nested casts,
-    // constants, missing arrays). Preserve the existing unavailable-estimate API.
-    // Partition fields may also be materialized in Parquet. Kernel still
-    // reconstructs them from Add metadata, so schema equality alone is not enough.
-    const bool memory_available = !payload.table->snapshot->HasPartitionColumns() &&
-                                  metadata->parquet->file_schema->Equals(*payload.table->schema, false);
-    uint64_t offset = 0;
-    const auto deleted = metadata->kernel->Deletions();
-    uint64_t physical_offset = 0;
-    if (metadata->parquet->row_group_infos.size() != static_cast<size_t>(footer->num_row_groups()))
-      return arrow::Status::Invalid("Delta row group metadata count differs from footer");
-    for (size_t group_index = 0; group_index < metadata->parquet->row_group_infos.size(); ++group_index) {
-      const auto& physical = metadata->parquet->row_group_infos[group_index];
-      const auto footer_rows = footer->RowGroup(group_index)->num_rows();
-      if (footer_rows < 0 || physical.start_offset != physical_offset || physical.end_offset < physical.start_offset ||
-          physical.end_offset - physical.start_offset != static_cast<uint64_t>(footer_rows))
-        return arrow::Status::Invalid("Delta physical row group offsets differ from footer");
-      physical_offset = physical.end_offset;
-      const auto first = std::lower_bound(deleted.begin(), deleted.end(), physical.start_offset);
-      const auto last = std::lower_bound(first, deleted.end(), physical.end_offset);
-      const uint64_t rows = physical.end_offset - physical.start_offset;
-      const auto live = rows - static_cast<uint64_t>(last - first);
-      const bool available = memory_available && physical.memory_size_available;
-      const auto size = available && rows
-                            ? static_cast<uint64_t>(static_cast<unsigned __int128>(physical.memory_size) * live / rows)
-                            : 0;
-      metadata->groups.push_back(RowGroupInfo{offset, offset + live, size, available});
-      offset += live;
-    }
-    if (physical_offset != metadata->kernel->PhysicalRows() || offset != metadata->kernel->LiveRows())
-      return arrow::Status::Invalid("Delta row-group counts disagree with footer");
-    metadata->charge = metadata->parquet->cache_size + serialized.size() + deleted.size_bytes() +
-                       metadata->groups.size() * sizeof(RowGroupInfo);
-    metadata->memory_counter = payload.table->file_bytes;
-    metadata->memory_counter->fetch_add(metadata->charge, std::memory_order_relaxed);
-    return metadata;
-  });
-  ARROW_ASSIGN_OR_RAISE(auto metadata, std::move(result));
-  if (metadata->kernel->LiveRows() != static_cast<uint64_t>(file.end_index) ||
-      file.Get<uint64_t>(api::kPropertyFileSize) != metadata->physical_file.Get<uint64_t>(api::kPropertyFileSize)) {
-    return arrow::Status::Invalid("Delta file descriptor differs from cached metadata");
-  }
-  return metadata;
-}
-
 std::string DeltaLakeFormatReader::MetaTrait::cache_key(const api::ColumnGroupFile& file) {
   auto parsed = SnapshotDescriptor::Parse(file);
   if (!parsed.ok())
     return "invalid-delta:" + file.path + file.Get<std::string>(api::kPropertyMetadata);
-  return parsed->CacheKey();
+  return parsed->FileCacheKey(file);
 }
 
 arrow::Result<DeltaLakeFormatReader::MetaTrait::MetadataPtr> DeltaLakeFormatReader::MetaTrait::load_metadata(
@@ -251,16 +158,66 @@ arrow::Result<DeltaLakeFormatReader::MetaTrait::MetadataPtr> DeltaLakeFormatRead
     const KeyRetriever& key_retriever) {
   ARROW_ASSIGN_OR_RAISE(auto descriptor, SnapshotDescriptor::Parse(file));
   ARROW_ASSIGN_OR_RAISE(auto table, GetTable(descriptor, properties));
+  ARROW_ASSIGN_OR_RAISE(auto resolved, ResolveDataFile(file.path, table->location, properties));
+  auto source = std::make_shared<DeltaFileMetadata>();
+  source->physical_file = file;
+  source->physical_file.path = resolved.path;
+  ARROW_ASSIGN_OR_RAISE(source->parquet,
+                        parquet::ParquetFormatReader::MetaTrait::load_metadata_with_filesystem(
+                            file, table->location.filesystem, resolved.path, properties, key_retriever));
+  const auto footer = source->parquet->payload.parquet_metadata;
+  if (footer->num_rows() < 0)
+    return arrow::Status::Invalid("Negative Delta Parquet row count");
+  // Kernel plans against the schema, not row-group payload metadata. Transfer
+  // only the schema/key-values and the C++-decoded count. Serializing an actual
+  // plaintext encrypted footer would require Arrow 17's signing encryptor;
+  // separately encrypted column metadata must also stay with the C++ reader.
+  auto schema_metadata = ::parquet::FileMetaDataBuilder::Make(footer->schema(), ::parquet::default_writer_properties());
+  const auto serialized = schema_metadata->Finish(footer->key_value_metadata())->SerializeToString();
+  ARROW_ASSIGN_OR_RAISE(source->kernel,
+                        table->snapshot->LoadFile(resolved.url, serialized, footer->num_rows(), file.end_index,
+                                                  file.Get<uint64_t>(api::kPropertyFileSize)));
   auto metadata = std::make_shared<Metadata>();
-  metadata->cache_key = descriptor.CacheKey();
-  metadata->path = descriptor.table_uri;
+  metadata->cache_key = descriptor.FileCacheKey(file);
+  metadata->path = file.path;
   metadata->file_schema = table->schema;
-  // Decryption callbacks remain scoped to the top-level Reader. Never share
-  // decrypted per-file metadata across unrelated callback identities.
-  metadata->payload =
-      Payload{table, key_retriever ? std::make_shared<DeltaFileCache>() : table->files, properties, key_retriever};
-  ARROW_ASSIGN_OR_RAISE(auto first_file, GetFile(metadata->payload, file));
-  metadata->cache_size = sizeof(Metadata) + table->snapshot->MemorySize() + table->file_bytes->load();
+  // A changed schema can introduce data-dependent allocation (nested casts,
+  // constants, missing arrays). Preserve the existing unavailable-estimate API.
+  // Partition fields may also be materialized in Parquet. Kernel still
+  // reconstructs them from Add metadata, so schema equality alone is not enough.
+  const bool memory_available =
+      !table->snapshot->HasPartitionColumns() && source->parquet->file_schema->Equals(*table->schema, false);
+  uint64_t offset = 0;
+  const auto deleted = source->kernel->Deletions();
+  uint64_t physical_offset = 0;
+  if (source->parquet->row_group_infos.size() != static_cast<size_t>(footer->num_row_groups()))
+    return arrow::Status::Invalid("Delta row group metadata count differs from footer");
+  for (size_t group_index = 0; group_index < source->parquet->row_group_infos.size(); ++group_index) {
+    const auto& physical = source->parquet->row_group_infos[group_index];
+    const auto footer_rows = footer->RowGroup(group_index)->num_rows();
+    if (footer_rows < 0 || physical.start_offset != physical_offset || physical.end_offset < physical.start_offset ||
+        physical.end_offset - physical.start_offset != static_cast<uint64_t>(footer_rows))
+      return arrow::Status::Invalid("Delta physical row group offsets differ from footer");
+    physical_offset = physical.end_offset;
+    const auto first = std::lower_bound(deleted.begin(), deleted.end(), physical.start_offset);
+    const auto last = std::lower_bound(first, deleted.end(), physical.end_offset);
+    const uint64_t rows = physical.end_offset - physical.start_offset;
+    const auto live = rows - static_cast<uint64_t>(last - first);
+    const bool available = memory_available && physical.memory_size_available;
+    const auto size = available && rows
+                          ? static_cast<uint64_t>(static_cast<unsigned __int128>(physical.memory_size) * live / rows)
+                          : 0;
+    metadata->row_group_infos.push_back(RowGroupInfo{offset, offset + live, size, available});
+    offset += live;
+  }
+  if (physical_offset != source->kernel->PhysicalRows() || offset != source->kernel->LiveRows())
+    return arrow::Status::Invalid("Delta row-group counts disagree with footer");
+  // Charge only this file's state. The shared snapshot must not be counted
+  // once for every file entry; cache_size remains an approximate estimate.
+  metadata->cache_size = sizeof(Metadata) + sizeof(DeltaFileMetadata) + source->parquet->cache_size +
+                         serialized.size() + deleted.size_bytes() +
+                         metadata->row_group_infos.size() * sizeof(RowGroupInfo);
+  metadata->payload = Payload{std::move(table), std::move(source), properties, key_retriever};
   return MetadataPtr(std::move(metadata));
 }
 
@@ -271,22 +228,20 @@ arrow::Result<std::shared_ptr<DeltaLakeFormatReader>> DeltaLakeFormatReader::Met
     const std::vector<std::string>& needed_columns,
     const std::string&) {
   ARROW_ASSIGN_OR_RAISE(auto descriptor, SnapshotDescriptor::Parse(file));
-  if (!metadata || !metadata->payload.table || metadata->path != descriptor.table_uri ||
-      metadata->payload.table->version != descriptor.snapshot_version) {
-    return arrow::Status::Invalid("Delta metadata does not match descriptor");
+  if (!metadata || !metadata->payload.table || !metadata->payload.file ||
+      metadata->cache_key != descriptor.FileCacheKey(file)) {
+    return arrow::Status::Invalid("Delta metadata does not match file descriptor");
   }
   ARROW_ASSIGN_OR_RAISE(auto names, RequestedColumns(metadata->file_schema, read_schema, needed_columns));
-  ARROW_ASSIGN_OR_RAISE(auto source, GetFile(metadata->payload, file));
-  ARROW_ASSIGN_OR_RAISE(auto plan, source->kernel->Plan(*metadata->payload.table->snapshot, names));
-  auto reader = std::shared_ptr<DeltaLakeFormatReader>(new DeltaLakeFormatReader(metadata, source, std::move(plan)));
+  ARROW_ASSIGN_OR_RAISE(auto plan, metadata->payload.file->kernel->Plan(*metadata->payload.table->snapshot, names));
+  auto reader = std::shared_ptr<DeltaLakeFormatReader>(new DeltaLakeFormatReader(metadata, std::move(plan)));
   ARROW_RETURN_NOT_OK(reader->open());
   return reader;
 }
 
 DeltaLakeFormatReader::DeltaLakeFormatReader(MetaTrait::MetadataPtr metadata,
-                                             std::shared_ptr<DeltaFileMetadata> file,
                                              std::shared_ptr<BlockingDeltaReadPlan> plan)
-    : metadata_(std::move(metadata)), file_(std::move(file)), plan_(std::move(plan)) {}
+    : metadata_(std::move(metadata)), file_(metadata_->payload.file), plan_(std::move(plan)) {}
 
 arrow::Status DeltaLakeFormatReader::open() {
   if (!output_schema_) {
@@ -311,16 +266,16 @@ arrow::Status DeltaLakeFormatReader::open() {
 std::shared_ptr<arrow::Schema> DeltaLakeFormatReader::get_schema() const { return metadata_->file_schema; }
 arrow::Result<std::vector<RowGroupInfo>> DeltaLakeFormatReader::get_row_group_infos() {
   if (!parquet_) {
-    auto groups = file_->groups;
+    auto groups = metadata_->row_group_infos;
     for (auto& group : groups) group.read_size = 0;
     return groups;
   }
   ARROW_ASSIGN_OR_RAISE(auto groups, parquet_->get_row_group_infos());
-  if (groups.size() != file_->groups.size())
+  if (groups.size() != metadata_->row_group_infos.size())
     return arrow::Status::Invalid("Delta projected row group count differs from file metadata");
   for (size_t index = 0; index < groups.size(); ++index) {
     const auto read_size = groups[index].read_size;
-    groups[index] = file_->groups[index];
+    groups[index] = metadata_->row_group_infos[index];
     // Surviving rows still require the group's full projected physical bytes.
     // Output-memory estimates and live offsets belong to the logical group.
     groups[index].read_size = groups[index].start_offset == groups[index].end_offset ? 0 : read_size;
@@ -328,12 +283,12 @@ arrow::Result<std::vector<RowGroupInfo>> DeltaLakeFormatReader::get_row_group_in
   return groups;
 }
 arrow::Result<std::vector<uint64_t>> DeltaLakeFormatReader::get_rg_column_memsz(int64_t index) const {
-  if (index < 0 || static_cast<size_t>(index) >= file_->groups.size())
+  if (index < 0 || static_cast<size_t>(index) >= metadata_->row_group_infos.size())
     return arrow::Status::Invalid("Delta row group out of bounds");
-  if (!file_->groups[index].memory_size_available || !parquet_)
+  if (!metadata_->row_group_infos[index].memory_size_available || !parquet_)
     return arrow::Status::NotImplemented("Delta transformed column memory sizes unavailable");
   ARROW_ASSIGN_OR_RAISE(auto sizes, parquet_->get_rg_column_memsz(index));
-  return DistributeMemorySizes(file_->groups[index].memory_size, sizes);
+  return DistributeMemorySizes(metadata_->row_group_infos[index].memory_size, sizes);
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> DeltaLakeFormatReader::transform(
@@ -364,9 +319,9 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> DeltaLakeFormatReader::materi
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> DeltaLakeFormatReader::get_chunk(const int& index) {
-  if (index < 0 || static_cast<size_t>(index) >= file_->groups.size())
+  if (index < 0 || static_cast<size_t>(index) >= metadata_->row_group_infos.size())
     return arrow::Status::Invalid("Delta row group out of bounds");
-  const auto& group = file_->groups[index];
+  const auto& group = metadata_->row_group_infos[index];
   if (group.start_offset == group.end_offset)
     return arrow::RecordBatch::MakeEmpty(output_schema_);
   if (!parquet_)
@@ -472,11 +427,11 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> DeltaLakeFormatReader::
                                                                                                 const uint64_t& end) {
   if (start > end || end > file_->kernel->LiveRows())
     return arrow::Status::Invalid("Delta range out of bounds");
-  return std::make_shared<RangeReader>(shared_from_this(), output_schema_, file_->groups, start, end);
+  return std::make_shared<RangeReader>(shared_from_this(), output_schema_, metadata_->row_group_infos, start, end);
 }
 
 arrow::Result<std::shared_ptr<FormatReader>> DeltaLakeFormatReader::clone_reader() {
-  auto reader = std::shared_ptr<DeltaLakeFormatReader>(new DeltaLakeFormatReader(metadata_, file_, plan_));
+  auto reader = std::shared_ptr<DeltaLakeFormatReader>(new DeltaLakeFormatReader(metadata_, plan_));
   ARROW_RETURN_NOT_OK(reader->open());
   return reader;
 }

@@ -20,7 +20,7 @@ api::ColumnGroupFile DescriptorFile(const Json& descriptor) {
   return file;
 }
 
-TEST(DeltaDescriptorTest, PreservesLegacyWireFormatAndSnapshotIdentity) {
+TEST(DeltaDescriptorTest, PreservesLegacyWireFormat) {
   for (const auto snapshot_version : {int64_t{0}, int64_t{42}, std::numeric_limits<int64_t>::max()}) {
     // Keep the literal wire schema independent of the codec's constants.
     const Json legacy{
@@ -31,11 +31,40 @@ TEST(DeltaDescriptorTest, PreservesLegacyWireFormatAndSnapshotIdentity) {
     EXPECT_EQ(parsed->table_uri, "file:///table%252F%20space/");
     EXPECT_EQ(parsed->snapshot_version, snapshot_version);
     EXPECT_EQ(parsed->Serialize(), legacy.dump());
-    EXPECT_EQ(parsed->CacheKey(), Json::array({legacy["table_uri"], snapshot_version}).dump());
 
     const SnapshotDescriptor created{.table_uri = parsed->table_uri, .snapshot_version = snapshot_version};
     EXPECT_EQ(created.Serialize(), legacy.dump());
   }
+}
+
+TEST(DeltaDescriptorTest, FileCacheKeySeparatesFilesAndSnapshots) {
+  const Json valid{{"version", 1}, {"table_uri", "file:///table/"}, {"snapshot_version", 0}};
+  const auto file = DescriptorFile(valid);
+  const auto parsed = SnapshotDescriptor::Parse(file);
+  ASSERT_TRUE(parsed.ok()) << parsed.status();
+  const auto key = parsed->FileCacheKey(file);
+  auto changed = file;
+  changed.path = "file:///table/other.parquet";
+  EXPECT_NE(key, parsed->FileCacheKey(changed));
+  changed = file;
+  changed.Set(api::kPropertyFileSize, uint64_t{129});
+  EXPECT_NE(key, parsed->FileCacheKey(changed));
+  changed = file;
+  ++changed.end_index;
+  EXPECT_NE(key, parsed->FileCacheKey(changed));
+  auto snapshot = *parsed;
+  ++snapshot.snapshot_version;
+  EXPECT_NE(key, snapshot.FileCacheKey(file));
+  snapshot = *parsed;
+  snapshot.table_uri = "file:///other/";
+  EXPECT_NE(key, snapshot.FileCacheKey(file));
+
+  changed = file;
+  changed.Set(api::kPropertyMetadata,
+              std::string(R"({"snapshot_version":0,"table_uri":"file:///table/","version":1})"));
+  const auto reordered = SnapshotDescriptor::Parse(changed);
+  ASSERT_TRUE(reordered.ok()) << reordered.status();
+  EXPECT_EQ(key, reordered->FileCacheKey(changed));
 }
 
 TEST(DeltaDescriptorTest, RejectsMalformedAndUnsupportedMetadata) {

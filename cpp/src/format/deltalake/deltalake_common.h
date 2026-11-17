@@ -18,7 +18,7 @@ struct SnapshotDescriptor {
 
   static arrow::Result<SnapshotDescriptor> Parse(const api::ColumnGroupFile& file);
   std::string Serialize() const;
-  std::string CacheKey() const;
+  std::string FileCacheKey(const api::ColumnGroupFile& file) const;
 };
 
 struct ResolvedLocation {

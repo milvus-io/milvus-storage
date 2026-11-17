@@ -176,6 +176,21 @@ from directory names. Only primitive partition types are supported.
   the last owner can require a later reader to replay the pinned snapshot's logs.
   Per-file descriptors do not contain enough table metadata for a cold open
   without access to those logs/checkpoints.
+- Snapshot/schema/active-file/projection state can be shared across top-level
+  readers. The general reader metadata cache holds one Delta entry per table,
+  snapshot and data-file identity (path, size and live-row count). Each entry
+  directly retains that file's footer, decoded DV, logical row groups and a shared
+  snapshot reference, including for plaintext files. Projections and clones reuse
+  it; independent readers load and retain their own entries. Outstanding
+  chunk/range readers or clones can extend metadata lifetimes beyond the parent
+  reader. A snapshot reference alone does not retain other file entries.
+- This ownership can release file metadata earlier, but overlapping readers may
+  repeat footer/DV reads and retain duplicate decoded positions. Disabling the
+  metadata cache also forgoes reuse across independent file-reader opens.
+  Underlying filesystem caches may reduce actual remote traffic. The general
+  metadata cache has no byte-bounded eviction. Per-file `cache_size` estimates
+  cover file metadata; they exclude shared snapshot state to avoid counting it
+  once per file and do not represent total retained memory.
 - Snapshot loading still resolves/indexes all active files. New projections cache
   shared schema/scan state; each file plan builds its transform from one indexed
   cached metadata row. Separate reader opens can rebuild that transform, adding

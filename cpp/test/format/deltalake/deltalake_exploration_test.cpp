@@ -1453,6 +1453,81 @@ TEST_F(DeltaReaderTest, SharesSnapshotAndReprojectsWithoutLogIoThenReleases) {
   EXPECT_TRUE(Open(files[0]).ok());  // Failed cold opens must not poison the registry.
 }
 
+TEST_F(DeltaReaderTest, FileMetadataFollowsItsOwnerWhileSnapshotIsShared) {
+  const auto table = Table();
+  WriteData(table + "/a.parquet");
+  WriteData(table + "/b.parquet");
+  const auto dv = Deletions(table, {1});
+  auto first_add = Add(table, "a.parquet", 4);
+  auto second_add = Add(table, "b.parquet", 4);
+  first_add["add"]["deletionVector"] = dv;
+  second_add["add"]["deletionVector"] = dv;
+  Commit(table, 0, {DvProtocol(), Metadata(Schema()), first_add, second_add});
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  ASSERT_EQ(files.size(), 2);
+
+  using Trait = deltalake::DeltaLakeFormatReader::MetaTrait;
+  MetadataCache first_owner(true), second_owner(true);
+  int loads = 0;
+  auto load = [&](const MetadataCache& owner, const api::ColumnGroupFile& file) {
+    return owner.get<deltalake::DeltaLakeFormatReader>()->get_or_open(Trait::cache_key(file), [&] {
+      ++loads;
+      return Trait::load_metadata(file, properties_, nullptr);
+    });
+  };
+  ASSERT_AND_ASSIGN(auto first, load(first_owner, files[0]));
+  std::weak_ptr<const deltalake::DeltaFileMetadata> first_file = first->payload.file;
+  std::weak_ptr<void> snapshot = first->payload.table;
+  ASSERT_AND_ASSIGN(auto reader, Trait::create_from_metadata(first, files[0], nullptr, {}, ""));
+  ASSERT_AND_ASSIGN(auto other, load(first_owner, files[1]));
+  std::weak_ptr<const deltalake::DeltaFileMetadata> other_file = other->payload.file;
+  EXPECT_EQ(first->payload.table, other->payload.table);
+  EXPECT_NE(first->payload.file, other->payload.file);
+  EXPECT_EQ(loads, 2);
+  ASSERT_AND_ASSIGN(auto reused, load(first_owner, files[0]));
+  EXPECT_EQ(first, reused);
+  EXPECT_EQ(loads, 2);
+  reused.reset();
+  EXPECT_TRUE(Trait::create_from_metadata(first, files[1], nullptr, {}, "").status().IsInvalid());
+  auto wrong_size = files[0];
+  wrong_size.Set(api::kPropertyFileSize, files[0].Get<uint64_t>(api::kPropertyFileSize) + 1);
+  EXPECT_TRUE(Trait::create_from_metadata(first, wrong_size, nullptr, {}, "").status().IsInvalid());
+  auto wrong_rows = files[0];
+  ++wrong_rows.end_index;
+  EXPECT_TRUE(Trait::create_from_metadata(first, wrong_rows, nullptr, {}, "").status().IsInvalid());
+  ASSERT_AND_ASSIGN(auto clone, reader->clone_reader());
+  ASSERT_AND_ASSIGN(auto range, reader->read_with_range(0, 3));
+
+  ASSERT_AND_ASSIGN(auto second, load(second_owner, files[0]));
+  EXPECT_EQ(loads, 3);
+  EXPECT_EQ(first->payload.table, second->payload.table);
+  EXPECT_NE(first->payload.file, second->payload.file);
+  // Per-file estimates do not grow with other files or charge the shared snapshot.
+  EXPECT_EQ(first->cache_size, second->cache_size);
+
+  first_owner = MetadataCache(false);
+  first.reset();
+  reader.reset();
+  other.reset();
+  EXPECT_TRUE(other_file.expired());
+  EXPECT_FALSE(first_file.expired());
+  CheckDvReads(clone, {0, 2, 3});
+  clone.reset();
+  EXPECT_FALSE(first_file.expired());  // The range still retains its reader.
+  ASSERT_AND_ASSIGN(auto ranged, range->ToTable());
+  CheckDvIds(ranged, {0, 2, 3});
+  range.reset();
+  EXPECT_TRUE(first_file.expired());
+  EXPECT_FALSE(snapshot.expired());  // The independent owner retains the snapshot.
+
+  ASSERT_AND_ASSIGN(auto survivor, Trait::create_from_metadata(second, files[0], nullptr, {}, ""));
+  CheckDvReads(survivor, {0, 2, 3});
+  survivor.reset();
+  second.reset();
+  second_owner = MetadataCache(false);
+  EXPECT_TRUE(snapshot.expired());
+}
+
 TEST_F(DeltaReaderTest, ColdContextDoesNotCountUnrelatedFiles) {
   const auto table = Table();
   WriteData(table + "/a.parquet");
@@ -1763,7 +1838,7 @@ TEST_F(DeltaReaderTest, CoalescesContextsAndIsolatesFilesystems) {
   for (size_t i = 1; i < pending.size(); ++i) {
     ASSERT_AND_ASSIGN(auto metadata, pending[i].get());
     EXPECT_EQ(first->payload.table, metadata->payload.table);
-    EXPECT_EQ(first->payload.files, metadata->payload.files);
+    EXPECT_NE(first->payload.file, metadata->payload.file);
   }
   auto equivalent_properties = std::make_shared<api::Properties>(*properties_);
   (*equivalent_properties)[PROPERTY_FS_ROOT_PATH] = (std::filesystem::path(root_) / ".").string();

@@ -72,7 +72,11 @@ std::string SnapshotDescriptor::Serialize() const {
       .dump();
 }
 
-std::string SnapshotDescriptor::CacheKey() const { return nlohmann::json::array({table_uri, snapshot_version}).dump(); }
+std::string SnapshotDescriptor::FileCacheKey(const api::ColumnGroupFile& file) const {
+  return nlohmann::json::array(
+             {table_uri, snapshot_version, file.path, file.Get<uint64_t>(api::kPropertyFileSize), file.end_index})
+      .dump();
+}
 
 arrow::Result<std::string> ToExternalUri(const std::string& standard_uri, const ArrowFileSystemConfig& config) {
   if (config.storage_type == "local") {

@@ -1329,8 +1329,8 @@ TEST_P(FormatReaderMetadataCacheIOTest, ProjectedReadersLoadEachFileFooterOnce) 
     column_group = std::move(fixture.column_group);
     delta_expected = std::move(fixture.expected_values);
     expected_rows = delta_expected->num_rows();
-    // Retain a snapshot through its first file so log replay is outside the
-    // measurement. The remaining file still needs its own footer and DV read.
+    // Retain a separate owner's snapshot so log replay is outside the
+    // measurement. The measured Reader loads all of its own footers and DVs.
     ASSERT_EQ(column_group->files.size(), kFiles);
     ASSERT_AND_ASSIGN(warm_delta,
                       deltalake::DeltaLakeFormatReader::MetaTrait::load_metadata(
@@ -1421,10 +1421,10 @@ TEST_P(FormatReaderMetadataCacheIOTest, ProjectedReadersLoadEachFileFooterOnce) 
   auto first_columns = std::make_shared<std::vector<std::string>>(std::vector<std::string>{schema_->field(0)->name()});
   ASSERT_AND_ASSIGN(auto first, reader->get_chunk_reader(0, first_columns));
   // Lance reads one shared manifest, then one footer, deletion file, and external
-  // row-ID sequence per fragment. Delta's snapshot/first file are already warm;
-  // each remaining file reads one footer and its own small DV object.
+  // row-ID sequence per fragment. Delta shares only the warmed snapshot;
+  // each file in this metadata owner reads one footer and its own small DV.
   const int expected_reads = format == LOON_FORMAT_LANCE_TABLE       ? 1 + 3 * kFiles
-                             : format == LOON_FORMAT_DELTALAKE_TABLE ? 2 * (kFiles - 1)
+                             : format == LOON_FORMAT_DELTALAKE_TABLE ? 2 * kFiles
                                                                      : kFiles;
   EXPECT_EQ(metrics->GetReadCount(), expected_reads);
   EXPECT_GT(metrics->GetReadBytes(), 0);

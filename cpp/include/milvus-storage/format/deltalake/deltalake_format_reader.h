@@ -11,7 +11,6 @@ class ParquetFormatReader;
 namespace milvus_storage::deltalake {
 
 class DeltaTableContext;
-class DeltaFileCache;
 struct DeltaFileMetadata;
 class BlockingDeltaReadPlan;
 
@@ -20,7 +19,9 @@ class DeltaLakeFormatReader final : public FormatReader, public std::enable_shar
   struct MetaTrait {
     struct Payload {
       std::shared_ptr<DeltaTableContext> table;
-      std::shared_ptr<DeltaFileCache> files;
+      // One immutable file bundle per generic cache entry. Table snapshots are
+      // shared independently; projections and clones reuse this file's metadata.
+      std::shared_ptr<const DeltaFileMetadata> file;
       std::shared_ptr<const api::Properties> properties;
       KeyRetriever key_retriever;
     };
@@ -52,15 +53,13 @@ class DeltaLakeFormatReader final : public FormatReader, public std::enable_shar
   private:
   class RangeReader;
 
-  DeltaLakeFormatReader(MetaTrait::MetadataPtr metadata,
-                        std::shared_ptr<DeltaFileMetadata> file,
-                        std::shared_ptr<BlockingDeltaReadPlan> plan);
+  DeltaLakeFormatReader(MetaTrait::MetadataPtr metadata, std::shared_ptr<BlockingDeltaReadPlan> plan);
   arrow::Result<std::shared_ptr<arrow::RecordBatch>> transform(const std::shared_ptr<arrow::RecordBatch>& batch,
                                                                uint64_t physical_start) const;
   arrow::Result<std::shared_ptr<arrow::RecordBatch>> materialize_rows(int64_t rows) const;
 
   MetaTrait::MetadataPtr metadata_;
-  std::shared_ptr<DeltaFileMetadata> file_;
+  std::shared_ptr<const DeltaFileMetadata> file_;
   std::shared_ptr<BlockingDeltaReadPlan> plan_;
   std::shared_ptr<arrow::Schema> output_schema_;
   std::shared_ptr<parquet::ParquetFormatReader> parquet_;
