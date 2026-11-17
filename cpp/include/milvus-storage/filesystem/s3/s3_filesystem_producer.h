@@ -30,12 +30,16 @@ namespace milvus_storage {
 
 /// Shared AWS credential-source policy for storage filesystems and external
 /// callers such as Milvus ChunkManager.
+/// Broker and explicit target-role providers are selected separately.
 ///
-/// Initial lookup order: environment AK/SK (with an optional session token),
-/// then STS Web Identity (IRSA). EC2 instance-profile credentials are added last
-/// only when AWS_EC2_METADATA_ENABLE equals "true", ignoring case, at construction.
-/// No profile, SSO, or container credential providers are added. With EC2 enabled,
-/// an IRSA failure can fall back to the Node Role, which the SDK chain may cache.
+/// IAM mode ignores ambient AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and
+/// AWS_SESSION_TOKEN. Select one source at construction: configured STS Web
+/// Identity (IRSA), otherwise a configured container endpoint (EKS Pod Identity
+/// or ECS task role), otherwise EC2 instance credentials unless the standard
+/// AWS_EC2_METADATA_DISABLED equals "true", ignoring case.
+/// Web Identity settings retain the SDK's environment/config-profile resolution;
+/// no static environment, static-profile or SSO provider is added. Retrieval
+/// failure never switches a configured workload identity to the node's role.
 /// Construct and destroy this provider within the initialized AWS SDK lifetime.
 class AwsCredentialsProviderChain final : public Aws::Auth::AWSCredentialsProviderChain {
   public:

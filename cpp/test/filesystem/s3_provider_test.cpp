@@ -38,7 +38,9 @@
 #include <glog/logging.h>
 
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
+#include <aws/core/auth/GeneralHTTPCredentialsProvider.h>
 #include <aws/core/auth/STSCredentialsProvider.h>
+#include <aws/core/config/ConfigAndCredentialsCacheManager.h>
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/HttpRequest.h>
@@ -1855,108 +1857,278 @@ constexpr const char* kAwsStsSuccessXml = R"(<?xml version="1.0" encoding="UTF-8
 
 }  // namespace
 
-TEST_F(S3ProviderTest, AwsIamCredentialsPreferEnvironmentThenWebIdentityThenInstanceProfile) {
-  ScopedEnvVar set_access_key("AWS_ACCESS_KEY_ID", "ENV_AK");
-  ScopedEnvVar set_secret_key("AWS_SECRET_ACCESS_KEY", "ENV_SK");
-  ScopedEnvUnset unset_session_token("AWS_SESSION_TOKEN");
-  ScopedEnvVar set_region("AWS_DEFAULT_REGION", "us-east-1");
-  ScopedEnvVar enable_instance_profile("AWS_EC2_METADATA_ENABLE", "TrUe");
-  ScopedEnvVar enable_imds("AWS_EC2_METADATA_DISABLED", "false");
-  ScopedEnvUnset unset_container_uri("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI");
-  ScopedEnvUnset unset_container_full_uri("AWS_CONTAINER_CREDENTIALS_FULL_URI");
-
-  ArrowFileSystemConfig config;
-  config.cloud_provider = kCloudProviderAWS;
-  config.use_iam = true;
-
-  S3FileSystemProducer producer(config);
-  ASSERT_AND_ASSIGN(auto options, producer.CreateS3Options());
-  const auto credentials = options.credentials_provider->GetAWSCredentials();
-  EXPECT_EQ(credentials.GetAWSAccessKeyId(), "ENV_AK");
-  EXPECT_EQ(credentials.GetAWSSecretKey(), "ENV_SK");
-  EXPECT_TRUE(credentials.GetSessionToken().empty());
-
-  // Keep EC2 instance credentials behind environment credentials and Web Identity.
-  const auto chain = std::dynamic_pointer_cast<AwsCredentialsProviderChain>(options.credentials_provider);
-  ASSERT_NE(chain, nullptr);
-  const auto& providers = chain->GetProviders();
-  ASSERT_EQ(providers.size(), 3u);
-  EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::EnvironmentAWSCredentialsProvider>(providers[0]), nullptr);
-  EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>(providers[1]), nullptr);
-  EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::InstanceProfileCredentialsProvider>(providers[2]), nullptr);
-
-  // External callers can construct the same policy through the public header.
-  const auto external_chain = std::make_shared<AwsCredentialsProviderChain>();
-  EXPECT_EQ(external_chain->GetAWSCredentials().GetAWSAccessKeyId(), "ENV_AK");
-  EXPECT_TRUE(external_chain->GetAWSCredentials().GetSessionToken().empty());
-}
-
-TEST_F(S3ProviderTest, AwsIamCredentialsExcludeInstanceProfileUnlessEnabled) {
-  ScopedEnvVar set_access_key("AWS_ACCESS_KEY_ID", "ENV_AK");
-  ScopedEnvVar set_secret_key("AWS_SECRET_ACCESS_KEY", "ENV_SK");
-  ScopedEnvVar set_region("AWS_DEFAULT_REGION", "us-east-1");
-  ScopedEnvVar enable_imds("AWS_EC2_METADATA_DISABLED", "false");
-  ScopedEnvUnset restore_enable("AWS_EC2_METADATA_ENABLE");
-
-  ArrowFileSystemConfig config;
-  config.cloud_provider = kCloudProviderAWS;
-  config.use_iam = true;
-  S3FileSystemProducer producer(config);
-
-  const char* const disabled_values[] = {nullptr, "", "false", "1"};
-  for (const auto* const value : disabled_values) {
-    SCOPED_TRACE(value == nullptr ? "unset" : value);
-    if (value == nullptr) {
-      ASSERT_EQ(unsetenv("AWS_EC2_METADATA_ENABLE"), 0);
-    } else {
-      ASSERT_EQ(setenv("AWS_EC2_METADATA_ENABLE", value, 1), 0);
+class AwsIamCredentialsTest : public S3ProviderTest {
+  protected:
+  void SetUp() override {
+    S3ProviderTest::SetUp();
+    if (IsSkipped()) {
+      return;
     }
-    ASSERT_AND_ASSIGN(auto options, producer.CreateS3Options());
-    EXPECT_EQ(options.credentials_provider->GetAWSCredentials().GetAWSAccessKeyId(), "ENV_AK");
-    const auto chain = std::dynamic_pointer_cast<Aws::Auth::AWSCredentialsProviderChain>(options.credentials_provider);
-    ASSERT_NE(chain, nullptr);
-    const auto& providers = chain->GetProviders();
-    ASSERT_EQ(providers.size(), 2u);
-    EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::EnvironmentAWSCredentialsProvider>(providers[0]), nullptr);
-    EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>(providers[1]), nullptr);
+    restore_environment_ = true;
+    // These tests must not depend on credentials injected into the CI pod.
+    for (const auto* name :
+         {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_WEB_IDENTITY_TOKEN_FILE",
+          "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+          "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+          "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", "AWS_EC2_METADATA_ENABLE", "AWS_EC2_METADATA_DISABLED"}) {
+      unset_env_.push_back(std::make_unique<ScopedEnvUnset>(name));
+    }
+    SetEnv("AWS_PROFILE", "milvus-storage-container-credential-test");
+    SetEnv("AWS_DEFAULT_PROFILE", "milvus-storage-container-credential-test");
+    SetEnv("AWS_CONFIG_FILE", "/dev/null");
+    SetEnv("AWS_SHARED_CREDENTIALS_FILE", "/dev/null");
+    SetEnv("AWS_REGION", "us-east-1");
+    SetEnv("AWS_DEFAULT_REGION", "us-east-1");
+    SetEnv("AWS_EC2_METADATA_SERVICE_ENDPOINT", "http://169.254.169.254");
+    Aws::Config::ReloadCachedConfigFile();
   }
+
+  void TearDown() override {
+    // A non-AWS skip never initializes the SDK. Track setup rather than the
+    // final skip state: a test can also skip after setup and still need cleanup.
+    if (restore_environment_) {
+      set_env_.clear();
+      unset_env_.clear();
+      Aws::Config::ReloadCachedConfigFile();
+    }
+    S3ProviderTest::TearDown();
+  }
+
+  void SetEnv(const char* name, const std::string& value) {
+    set_env_.push_back(std::make_unique<ScopedEnvVar>(name, value));
+  }
+
+  static std::string CredentialsJson(const std::string& access_key,
+                                     const std::string& expiration = "2099-12-31T23:59:59Z") {
+    return nlohmann::json{{"Code", "Success"},
+                          {"AccessKeyId", access_key},
+                          {"SecretAccessKey", "TEST_SK"},
+                          {"Token", "TEST_SESSION_TOKEN"},
+                          {"Expiration", expiration}}
+        .dump();
+  }
+
+  void ExpectNoMetadataRequests() {
+    for (const auto& request : mock_client_->GetRecordedRequests()) {
+      EXPECT_NE(request->GetUri().GetAuthority(), "169.254.169.254");
+    }
+  }
+
+  void EnqueueNodeCredentials() {
+    mock_client_->EnqueueResponse("169.254.169.254/latest/api/token", Aws::Http::HttpResponseCode::OK, "imds-token");
+    mock_client_->EnqueueResponse("169.254.169.254/latest/meta-data/placement/availability-zone",
+                                  Aws::Http::HttpResponseCode::OK, "us-east-1a");
+    mock_client_->EnqueueResponse("169.254.169.254/latest/meta-data/iam/security-credentials",
+                                  Aws::Http::HttpResponseCode::OK, "test-node-role");
+    mock_client_->EnqueueResponse("169.254.169.254/latest/meta-data/iam/security-credentials/test-node-role",
+                                  Aws::Http::HttpResponseCode::OK, CredentialsJson("NODE_AK"));
+  }
+
+  bool restore_environment_ = false;
+  std::vector<std::unique_ptr<ScopedEnvVar>> set_env_;
+  std::vector<std::unique_ptr<ScopedEnvUnset>> unset_env_;
+};
+
+TEST_F(AwsIamCredentialsTest, ConfiguredWebIdentityIsExclusive) {
+  TempFile token_file("web-identity-token");
+  SetEnv("AWS_ACCESS_KEY_ID", "ENV_AK");
+  SetEnv("AWS_SECRET_ACCESS_KEY", "ENV_SK");
+  SetEnv("AWS_WEB_IDENTITY_TOKEN_FILE", token_file.path());
+  SetEnv("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/test-pod-role");
+  SetEnv("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://169.254.170.23/v1/credentials");
+
+  // Inspect selection without a real STS exchange through the SDK's CRT transport.
+  AwsCredentialsProviderChain chain;
+  const auto& providers = chain.GetProviders();
+  ASSERT_EQ(providers.size(), 1u);
+  EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>(providers[0]), nullptr);
+  EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
 }
 
-TEST_F(S3ProviderTest, AwsIamCredentialsDoNotFallBackToProfileAfterEnvironmentCredentialsDisappear) {
+TEST_F(AwsIamCredentialsTest, AmbientStaticKeysIgnoredWhenMetadataDisabled) {
+  SetEnv("AWS_ACCESS_KEY_ID", "ENV_AK");
+  SetEnv("AWS_SECRET_ACCESS_KEY", "ENV_SK");
+  SetEnv("AWS_SESSION_TOKEN", "ENV_SESSION_TOKEN");
+  SetEnv("AWS_EC2_METADATA_DISABLED", "true");
+
+  AwsCredentialsProviderChain chain;
+  EXPECT_TRUE(chain.GetProviders().empty());
+  EXPECT_TRUE(chain.GetAWSCredentials().IsEmpty());
+  EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
+}
+
+TEST_F(AwsIamCredentialsTest, IgnoresEnvironmentAndStaticProfileCredentials) {
   TempFile credentials_file(
       "[milvus-storage-credential-chain-test]\n"
       "aws_access_key_id = PROFILE_AK\n"
       "aws_secret_access_key = PROFILE_SK\n");
   TempFile config_file("");
-  ScopedEnvVar set_credentials_file("AWS_SHARED_CREDENTIALS_FILE", credentials_file.path());
-  ScopedEnvVar set_config_file("AWS_CONFIG_FILE", config_file.path());
-  ScopedEnvVar set_profile("AWS_PROFILE", "milvus-storage-credential-chain-test");
-  ScopedEnvVar set_default_profile("AWS_DEFAULT_PROFILE", "milvus-storage-credential-chain-test");
-  ScopedEnvVar set_access_key("AWS_ACCESS_KEY_ID", "ENV_AK");
-  ScopedEnvVar set_secret_key("AWS_SECRET_ACCESS_KEY", "ENV_SK");
-  ScopedEnvVar set_session_token("AWS_SESSION_TOKEN", "ENV_TOKEN");
-  ScopedEnvVar set_region("AWS_DEFAULT_REGION", "us-east-1");
-  ScopedEnvUnset unset_role("AWS_ROLE_ARN");
-  ScopedEnvUnset unset_token_file("AWS_WEB_IDENTITY_TOKEN_FILE");
-  ScopedEnvVar enable_imds("AWS_EC2_METADATA_DISABLED", "false");
-  ScopedEnvUnset disable_instance_profile("AWS_EC2_METADATA_ENABLE");
-  ScopedEnvUnset unset_container_uri("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI");
-  ScopedEnvUnset unset_container_full_uri("AWS_CONTAINER_CREDENTIALS_FULL_URI");
+  ScopedEnvVar credentials_path("AWS_SHARED_CREDENTIALS_FILE", credentials_file.path());
+  ScopedEnvVar config_path("AWS_CONFIG_FILE", config_file.path());
+  ScopedEnvVar profile("AWS_PROFILE", "milvus-storage-credential-chain-test");
+  ScopedEnvVar default_profile("AWS_DEFAULT_PROFILE", "milvus-storage-credential-chain-test");
+  SetEnv("AWS_ACCESS_KEY_ID", "ENV_AK");
+  SetEnv("AWS_SECRET_ACCESS_KEY", "ENV_SK");
+  SetEnv("AWS_EC2_METADATA_DISABLED", "true");
+  Aws::Config::ReloadCachedConfigFile();
 
-  ArrowFileSystemConfig config;
-  config.cloud_provider = kCloudProviderAWS;
-  config.use_iam = true;
+  AwsCredentialsProviderChain chain;
+  EXPECT_TRUE(chain.GetProviders().empty());
+  EXPECT_TRUE(chain.GetAWSCredentials().IsEmpty());
+  EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
+}
 
-  S3FileSystemProducer producer(config);
-  ASSERT_AND_ASSIGN(auto options, producer.CreateS3Options());
-  {
-    ScopedEnvUnset unset_access_key("AWS_ACCESS_KEY_ID");
-    ScopedEnvUnset unset_secret_key("AWS_SECRET_ACCESS_KEY");
-    ScopedEnvUnset unset_session_token("AWS_SESSION_TOKEN");
-    EXPECT_TRUE(options.credentials_provider->GetAWSCredentials().IsEmpty());
+TEST_F(AwsIamCredentialsTest, BrokenWebIdentityDoesNotFallBackToContainerOrNode) {
+  TempFile token_file("");
+  SetEnv("AWS_ACCESS_KEY_ID", "ENV_AK");
+  SetEnv("AWS_SECRET_ACCESS_KEY", "ENV_SK");
+  // An unreadable token fails locally, before the CRT provider can contact STS.
+  SetEnv("AWS_WEB_IDENTITY_TOKEN_FILE", token_file.path() + "/missing");
+  SetEnv("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/test-pod-role");
+  SetEnv("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://169.254.170.23/v1/credentials");
+
+  AwsCredentialsProviderChain chain;
+  EXPECT_TRUE(chain.GetAWSCredentials().IsEmpty());
+  EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
+  ASSERT_EQ(chain.GetProviders().size(), 1u);
+  EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>(chain.GetProviders()[0]),
+            nullptr);
+}
+
+TEST_F(AwsIamCredentialsTest, ProfileAndMixedWebIdentitySettingsAreExclusive) {
+  TempFile token_file("");
+  const auto missing_token = token_file.path() + "/missing";
+  const std::string role = "arn:aws:iam::123456789012:role/profile-pod-role";
+  SetEnv("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://169.254.170.23/v1/credentials");
+
+  // Fully profile-based, environment token + profile role, and profile token + environment role.
+  for (const int mode : {0, 1, 2}) {
+    SCOPED_TRACE(mode);
+    std::string config = "[profile milvus-storage-profile-identity]\nregion = us-east-1\n";
+    if (mode != 1) {
+      config += "web_identity_token_file = " + missing_token + "\n";
+    }
+    if (mode != 2) {
+      config += "role_arn = " + role + "\n";
+    }
+    TempFile config_file(config);
+    ScopedEnvVar config_path("AWS_CONFIG_FILE", config_file.path());
+    ScopedEnvVar profile("AWS_PROFILE", "milvus-storage-profile-identity");
+    ScopedEnvVar default_profile("AWS_DEFAULT_PROFILE", "milvus-storage-profile-identity");
+    ScopedEnvVar env_token("AWS_WEB_IDENTITY_TOKEN_FILE", mode == 1 ? missing_token : "");
+    ScopedEnvVar env_role("AWS_ROLE_ARN", mode == 2 ? role : "");
+    Aws::Config::ReloadCachedConfigFile();
+
+    AwsCredentialsProviderChain chain;
+    ASSERT_EQ(chain.GetProviders().size(), 1u);
+    EXPECT_NE(
+        std::dynamic_pointer_cast<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>(chain.GetProviders()[0]),
+        nullptr);
+    EXPECT_TRUE(chain.GetAWSCredentials().IsEmpty());
   }
-  // A failed lookup must not pin the chain to another identity after recovery.
-  EXPECT_EQ(options.credentials_provider->GetAWSCredentials().GetAWSAccessKeyId(), "ENV_AK");
+  EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
+}
+
+TEST_F(AwsIamCredentialsTest, EksPodIdentityIgnoresEnvironmentAndRefreshesTokenFile) {
+  TempFile token_file("pod-token-one");
+  SetEnv("AWS_ACCESS_KEY_ID", "ENV_AK");
+  SetEnv("AWS_SECRET_ACCESS_KEY", "ENV_SK");
+  SetEnv("AWS_SESSION_TOKEN", "ENV_SESSION_TOKEN");
+  SetEnv("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://169.254.170.23/v1/credentials");
+  SetEnv("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", token_file.path());
+  // An already-expired first response forces the next lookup to refresh without sleeping.
+  mock_client_->EnqueueResponse("169.254.170.23/v1/credentials", Aws::Http::HttpResponseCode::OK,
+                                CredentialsJson("POD_AK_ONE", "2000-01-01T00:00:00Z"));
+  mock_client_->EnqueueResponse("169.254.170.23/v1/credentials", Aws::Http::HttpResponseCode::OK,
+                                CredentialsJson("POD_AK_TWO"));
+
+  AwsCredentialsProviderChain chain;
+  EXPECT_EQ(chain.GetAWSCredentials().GetAWSAccessKeyId(), "POD_AK_ONE");
+  {
+    std::ofstream token(token_file.path(), std::ios::trunc);
+    token << "pod-token-two";
+  }
+  const auto refreshed = chain.GetAWSCredentials();
+  EXPECT_EQ(refreshed.GetAWSAccessKeyId(), "POD_AK_TWO");
+  EXPECT_EQ(refreshed.GetSessionToken(), "TEST_SESSION_TOKEN");
+  EXPECT_EQ(chain.GetAWSCredentials().GetAWSAccessKeyId(), "POD_AK_TWO");
+
+  const auto requests = mock_client_->GetRecordedRequests();
+  ASSERT_EQ(requests.size(), 2u);
+  EXPECT_EQ(requests[0]->GetHeaderValue("authorization"), "pod-token-one");
+  EXPECT_EQ(requests[1]->GetHeaderValue("authorization"), "pod-token-two");
+  ExpectNoMetadataRequests();
+}
+
+TEST_F(AwsIamCredentialsTest, EcsRelativeUriPrecedesFullUri) {
+  SetEnv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "/v2/credentials/task");
+  SetEnv("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://169.254.170.23/v1/credentials");
+  SetEnv("AWS_CONTAINER_AUTHORIZATION_TOKEN", "ecs-authorization-token");
+  mock_client_->EnqueueResponse("169.254.170.2/v2/credentials/task", Aws::Http::HttpResponseCode::OK,
+                                CredentialsJson("TASK_AK"));
+
+  AwsCredentialsProviderChain chain;
+  EXPECT_EQ(chain.GetAWSCredentials().GetAWSAccessKeyId(), "TASK_AK");
+  const auto requests = mock_client_->GetRecordedRequests();
+  ASSERT_EQ(requests.size(), 1u);
+  EXPECT_EQ(requests[0]->GetUri().GetAuthority(), "169.254.170.2");
+  EXPECT_EQ(requests[0]->GetHeaderValue("authorization"), "ecs-authorization-token");
+}
+
+TEST_F(AwsIamCredentialsTest, ContainerFailureDoesNotUseNodeRole) {
+  SetEnv("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://169.254.170.23/v1/credentials");
+  mock_client_->EnqueueResponse("169.254.170.23/v1/credentials", Aws::Http::HttpResponseCode::FORBIDDEN, "{}");
+
+  AwsCredentialsProviderChain chain;
+  EXPECT_TRUE(chain.GetAWSCredentials().IsEmpty());
+  ASSERT_EQ(chain.GetProviders().size(), 1u);
+  EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::GeneralHTTPCredentialsProvider>(chain.GetProviders()[0]), nullptr);
+  ASSERT_FALSE(mock_client_->GetRecordedRequests().empty());
+  ExpectNoMetadataRequests();
+}
+
+TEST_F(AwsIamCredentialsTest, InvalidContainerEndpointDoesNotUseNodeRole) {
+  // The HTTP container provider rejects IMDS's address. It must not cause the
+  // constructor to select an InstanceProfile provider instead.
+  SetEnv("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://169.254.169.254/latest/meta-data");
+
+  AwsCredentialsProviderChain chain;
+  EXPECT_TRUE(chain.GetProviders().empty());
+  EXPECT_TRUE(chain.GetAWSCredentials().IsEmpty());
+  EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
+}
+
+TEST_F(AwsIamCredentialsTest, NoWorkloadUsesNodeByDefaultAndIgnoresEnvironment) {
+  SetEnv("AWS_ACCESS_KEY_ID", "ENV_AK");
+  SetEnv("AWS_SECRET_ACCESS_KEY", "ENV_SK");
+  SetEnv("AWS_SESSION_TOKEN", "ENV_SESSION_TOKEN");
+  // The removed, nonstandard opt-in flag must no longer control this path.
+  SetEnv("AWS_EC2_METADATA_ENABLE", "false");
+  EnqueueNodeCredentials();
+
+  AwsCredentialsProviderChain chain;
+  ASSERT_EQ(chain.GetProviders().size(), 1u);
+  EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::InstanceProfileCredentialsProvider>(chain.GetProviders()[0]), nullptr);
+  EXPECT_EQ(chain.GetAWSCredentials().GetAWSAccessKeyId(), "NODE_AK");
+  ASSERT_FALSE(mock_client_->GetRecordedRequests().empty());
+}
+
+TEST_F(AwsIamCredentialsTest, StandardMetadataSwitchIgnoresLegacyEnableFlag) {
+  SetEnv("AWS_EC2_METADATA_ENABLE", "true");
+  for (const auto* disabled : {"true", "TrUe"}) {
+    SCOPED_TRACE(disabled);
+    ScopedEnvVar metadata_disabled("AWS_EC2_METADATA_DISABLED", disabled);
+    AwsCredentialsProviderChain chain;
+    EXPECT_TRUE(chain.GetProviders().empty());
+    EXPECT_TRUE(chain.GetAWSCredentials().IsEmpty());
+  }
+  EXPECT_TRUE(mock_client_->GetRecordedRequests().empty());
+  {
+    ScopedEnvVar metadata_disabled("AWS_EC2_METADATA_DISABLED", "false");
+    EnqueueNodeCredentials();
+    AwsCredentialsProviderChain chain;
+    EXPECT_EQ(chain.GetAWSCredentials().GetAWSAccessKeyId(), "NODE_AK");
+  }
 }
 
 TEST_F(S3ProviderTest, AwsExplicitCredentialsTakePrecedenceOverEnvironment) {

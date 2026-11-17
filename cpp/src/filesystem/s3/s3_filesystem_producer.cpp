@@ -22,7 +22,9 @@
 #include <utility>
 
 #include <aws/core/auth/AWSCredentials.h>
+#include <aws/core/auth/GeneralHTTPCredentialsProvider.h>
 #include <aws/core/auth/STSCredentialsProvider.h>
+#include <aws/core/config/ConfigAndCredentialsCacheManager.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/standard/StandardHttpRequest.h>
 #include <aws/core/platform/Environment.h>
@@ -107,12 +109,41 @@ class TlsHttpClientFactory : public Aws::Http::HttpClientFactory {
 }  // namespace
 
 AwsCredentialsProviderChain::AwsCredentialsProviderChain() {
-  AddProvider(std::make_shared<Aws::Auth::EnvironmentAWSCredentialsProvider>());
-  AddProvider(std::make_shared<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>());
+  // IAM mode uses workload identities, never ambient static AWS access keys.
+  // Configured static credentials are selected separately when use_iam is false.
+  // Match the SDK's env-first/profile fallback for Web Identity settings. A
+  // configured source remains selected when retrieval fails, so an STS outage
+  // cannot silently switch the process to the node's identity.
+  const auto token_file = Aws::Environment::GetEnv("AWS_WEB_IDENTITY_TOKEN_FILE");
+  const auto profile = Aws::Config::GetCachedConfigProfile(Aws::Auth::GetConfigProfileName());
+  if (!token_file.empty() || !profile.GetValue("web_identity_token_file").empty()) {
+    AddProvider(std::make_shared<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>());
+    return;
+  }
 
-  // Keep Node Role fallback opt-in: the SDK may cache it after an IRSA failure.
-  const auto metadata_enabled = Aws::Environment::GetEnv("AWS_EC2_METADATA_ENABLE");
-  if (Aws::Utils::StringUtils::ToLower(metadata_enabled.c_str()) == "true") {
+  // EKS Pod Identity and ECS task roles explicitly supply the credential endpoint.
+  // Unlike IMDS, this provider does not implicitly select the node's identity.
+  const auto relative_uri =
+      Aws::Environment::GetEnv(Aws::Auth::GeneralHTTPCredentialsProvider::AWS_CONTAINER_CREDENTIALS_RELATIVE_URI);
+  const auto full_uri =
+      Aws::Environment::GetEnv(Aws::Auth::GeneralHTTPCredentialsProvider::AWS_CONTAINER_CREDENTIALS_FULL_URI);
+  if (!relative_uri.empty() || !full_uri.empty()) {
+    const auto token =
+        Aws::Environment::GetEnv(Aws::Auth::GeneralHTTPCredentialsProvider::AWS_CONTAINER_AUTHORIZATION_TOKEN);
+    const auto container_token_file =
+        Aws::Environment::GetEnv(Aws::Auth::GeneralHTTPCredentialsProvider::AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE);
+    auto provider = Aws::MakeShared<Aws::Auth::GeneralHTTPCredentialsProvider>(
+        "AwsCredentialsProviderChain", relative_uri, full_uri, token, container_token_file);
+    if (provider->IsValid()) {
+      AddProvider(std::move(provider));
+    }
+    // An invalid configured endpoint must not turn into permission to use IMDS.
+    return;
+  }
+
+  // With no workload identity configured, honor the standard SDK IMDS switch.
+  const auto metadata_disabled = Aws::Environment::GetEnv("AWS_EC2_METADATA_DISABLED");
+  if (Aws::Utils::StringUtils::ToLower(metadata_disabled.c_str()) != "true") {
     AddProvider(std::make_shared<Aws::Auth::InstanceProfileCredentialsProvider>());
   }
 }
