@@ -3,6 +3,8 @@
 
 #include "milvus-storage/format/deltalake/deltalake_format.h"
 
+#include <limits>
+
 #include "deltalake/deltalake_bridge.h"
 #include "format/deltalake/deltalake_common.h"
 #include "milvus-storage/format/deltalake/deltalake_format_reader.h"
@@ -15,9 +17,13 @@ arrow::Result<std::vector<api::ColumnGroupFile>> DeltaLakeFormat::explore(
   ARROW_ASSIGN_OR_RAISE(auto snapshot, deltalake::BlockingDeltaSnapshot::Open(location.url, version,
                                                                               location.filesystem, location.binding));
   ARROW_ASSIGN_OR_RAISE(auto table_uri, deltalake::ToExternalUri(location.url, location.config));
-  const auto descriptor =
-      deltalake::SnapshotDescriptor{.table_uri = std::move(table_uri), .snapshot_version = snapshot->Version()}
-          .Serialize();
+  const auto snapshot_version = snapshot->Version();
+  if (snapshot_version > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+    return arrow::Status::Invalid("Delta snapshot version exceeds the supported int64 range");
+  }
+  const auto descriptor = deltalake::SnapshotDescriptor{.table_uri = std::move(table_uri),
+                                                        .snapshot_version = static_cast<int64_t>(snapshot_version)}
+                              .Serialize();
   std::vector<api::ColumnGroupFile> files;
   for (const auto& info : snapshot->Files()) {
     ARROW_ASSIGN_OR_RAISE(auto path, deltalake::ToExternalUri(info.path, location.config));
