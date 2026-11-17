@@ -18,6 +18,7 @@
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
 #include <arrow/type.h>
+#include <folly/CancellationToken.h>
 #include <folly/futures/Future.h>
 
 #include "milvus-storage/column_groups.h"
@@ -95,16 +96,21 @@ class ChunkReader {
    * The returned future completes with the same ordered result as get_chunks().
    * Duplicate chunk indices are preserved in the output.
    * Task aggregation preserves backend exceptions in the future and Arrow error statuses in the result.
+   * @param cancellation Caller-owned cancellation token; an empty token disables cancellation.
    *
    * @note The default implementation invokes get_chunks() before returning a
    *       ready future and may therefore block. Native implementations may defer work.
    * @note In the task-based override, parallelism is a task-granularity target,
    *       not a guaranteed concurrency limit.
+   * @note Cancellation is checked at request/task boundaries before data reads
+   *       and before returning results. File-open/footer work already handed to
+   *       the format/cache may run even if cancelled while queued. Submitted format
+   *       futures are awaited before Status::Cancelled(); real read errors take precedence.
    */
   [[nodiscard]] virtual folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>>
-  get_chunks_async(const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) {
-    return folly::makeSemiFuture(get_chunks(chunk_indices, parallelism));
-  }
+  get_chunks_async(const std::vector<int64_t>& chunk_indices,
+                   size_t parallelism = 1,
+                   folly::CancellationToken cancellation = {});
 
   /**
    * @brief Returns the estimated decoded-memory size of every chunk.
@@ -314,14 +320,18 @@ class Reader {
    *
    * The returned future includes the format-reader open/footer work needed to
    * initialize the chunk reader.
+   * @param cancellation Caller-owned cancellation token; an empty token disables cancellation.
    *
    * @note The default implementation invokes get_chunk_reader() before returning
    *       a ready future and may therefore block.
+   * @note Cancellation is checked on entry and after open. Once handed off,
+   *       file-open/footer work may finish even if cancelled while still queued.
+   *       Open errors are preserved.
    */
   [[nodiscard]] virtual folly::SemiFuture<arrow::Result<std::unique_ptr<ChunkReader>>> get_chunk_reader_async(
-      int64_t column_group_index, const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr) const {
-    return folly::makeSemiFuture(get_chunk_reader(column_group_index, needed_columns));
-  }
+      int64_t column_group_index,
+      const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr,
+      folly::CancellationToken cancellation = {}) const;
 
   /**
    * @brief Extracts specific rows by their global indices with parallel processing
@@ -356,18 +366,20 @@ class Reader {
    *
    * The returned future completes with the same ordered table as take().
    * Task aggregation preserves backend exceptions in the future and Arrow error statuses in the result.
+   * @param cancellation Caller-owned cancellation token; an empty token disables cancellation.
    *
    * @note The default implementation invokes take() before returning a ready
    *       future and may therefore block.
    * @note In the task-based override, parallelism controls task splitting;
    *       actual execution depends on the format backend and caller executor.
+   * @note Cancellation follows get_chunks_async(): submitted format futures are
+   *       awaited before returning Status::Cancelled(), and real read errors are preserved.
    */
   [[nodiscard]] virtual folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> take_async(
       const std::vector<int64_t>& row_indices,
       size_t parallelism = 1,
-      const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr) {
-    return folly::makeSemiFuture(take(row_indices, parallelism, needed_columns));
-  }
+      const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr,
+      folly::CancellationToken cancellation = {});
 
   /**
    * @brief Set a callback function to retrieve encryption keys based on metadata.

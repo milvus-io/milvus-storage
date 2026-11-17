@@ -274,6 +274,7 @@ TEST(AsyncTasksTest, TakeTaskBuildAddsReaderIndex) {
 }
 
 TEST(AsyncTasksTest, ChunkTaskNestedSplitTraitsSplitsChunkRange) {
+  folly::CancellationSource cancellation;
   std::vector<ChunkInfo> chunk_infos = {
       {.file_index = 0, .row_offset_in_file = 0, .number_of_rows = 10},
       {.file_index = 0, .row_offset_in_file = 10, .number_of_rows = 10},
@@ -286,6 +287,7 @@ TEST(AsyncTasksTest, ChunkTaskNestedSplitTraitsSplitsChunkRange) {
       .chunk_indices = {0, 1, 2, 3},
       .range_start = 0,
       .range_end = 40,
+      .cancellation = cancellation.getToken(),
   };
 
   ChunkTask::SplitTraits traits{get_chunk_info};
@@ -297,14 +299,19 @@ TEST(AsyncTasksTest, ChunkTaskNestedSplitTraitsSplitsChunkRange) {
   EXPECT_EQ(right.chunk_indices, (std::vector<int64_t>{2, 3}));
   EXPECT_EQ(right.range_start, 20);
   EXPECT_EQ(right.range_end, 40);
+  cancellation.requestCancellation();
+  EXPECT_TRUE(task.cancellation.isCancellationRequested());
+  EXPECT_TRUE(right.cancellation.isCancellationRequested());
 }
 
 TEST(AsyncTasksTest, TakeTaskNestedSplitTraitsSplitsRowsAndPositionsTogether) {
+  folly::CancellationSource cancellation;
   TakeTask task{
       .reader_index = 3,
       .file_index = 5,
       .file_offsets = {0, 1, 2, 3},
       .original_position = 10,
+      .cancellation = cancellation.getToken(),
   };
 
   TakeTask::SplitTraits traits;
@@ -321,6 +328,9 @@ TEST(AsyncTasksTest, TakeTaskNestedSplitTraitsSplitsRowsAndPositionsTogether) {
   EXPECT_EQ(right.file_index, 5);
   EXPECT_EQ(right.file_offsets, (std::vector<int64_t>{2, 3}));
   EXPECT_EQ(right.original_position, 12);
+  cancellation.requestCancellation();
+  EXPECT_TRUE(task.cancellation.isCancellationRequested());
+  EXPECT_TRUE(right.cancellation.isCancellationRequested());
 }
 
 TEST(AsyncTasksTest, SplitToParallelismPreservesLargestFirstOrder) {
@@ -379,6 +389,10 @@ TEST(AsyncTasksTest, SplitByBytesPacksWholeChunksWithinNaturalRanges) {
   };
   auto lookup = [&infos](int64_t i) -> const ChunkInfo& { return infos[i]; };
   auto tasks = ChunkTask::Build({0, 1, 2, 3, 4, 5, 6}, lookup);
+  folly::CancellationSource cancellation;
+  for (auto& task : tasks) {
+    task.cancellation = cancellation.getToken();
+  }
   SplitAsyncTasks(tasks, 1, ChunkTask::SplitTraits{lookup}, AsyncTaskSplitStrategy::kSplitByBytes, 8);
   ASSERT_EQ(tasks.size(), 5);
   EXPECT_EQ(tasks[0].chunk_indices, (std::vector<int64_t>{0, 1}));
@@ -393,6 +407,10 @@ TEST(AsyncTasksTest, SplitByBytesPacksWholeChunksWithinNaturalRanges) {
   EXPECT_EQ(tasks[3].chunk_indices, (std::vector<int64_t>{5}));
   EXPECT_EQ(tasks[3].range_start, 60);
   EXPECT_EQ(tasks[4].file_index, 1);
+  cancellation.requestCancellation();
+  for (const auto& task : tasks) {
+    EXPECT_TRUE(task.cancellation.isCancellationRequested());
+  }
 }
 
 TEST(AsyncTasksTest, SplitByBytesFallsBackWhenStoredSizesAreUnavailable) {

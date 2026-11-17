@@ -105,7 +105,8 @@ class ColumnGroupReader {
       const std::shared_ptr<const milvus_storage::api::Properties>& properties,
       const std::function<std::string(const std::string&)>& key_retriever,
       const std::string& predicate = "",
-      const milvus_storage::MetadataCache& cache = milvus_storage::MetadataCache());
+      const milvus_storage::MetadataCache& cache = milvus_storage::MetadataCache(),
+      folly::CancellationToken cancellation = {});
 };
 
 }  // namespace milvus_storage::api
