@@ -91,7 +91,7 @@ AzureSasTokenPolicy::AzureSasTokenPolicy(AzureSasBrokerConfig config,
 
 bool AzureSasTokenPolicy::IsFresh(TimePoint expires_at, TimePoint now) { return expires_at - now > kRefreshOffset; }
 
-arrow::Result<std::string> AzureSasTokenPolicy::FetchSasToken(TimePoint now, TimePoint* expires_at) const {
+arrow::Result<std::string> AzureSasTokenPolicy::FetchSasToken(TimePoint* expires_at) const {
   const nlohmann::json request_json = {
       {"csp", "azure"},
       {"region", state_->config.region},
@@ -170,10 +170,11 @@ arrow::Result<std::string> AzureSasTokenPolicy::FetchSasToken(TimePoint now, Tim
 
     const auto parsed = Azure::DateTime::Parse(broker_response.token.expired_at, Azure::DateTime::DateFormat::Rfc3339);
     const auto expiration = static_cast<std::chrono::system_clock::time_point>(parsed);
-    if (expiration <= now) {
+    const auto completed_at = state_->clock();
+    if (expiration <= completed_at) {
       return arrow::Status::IOError(
           "Azure SAS credential broker returned an expired token: expiredAt=", broker_response.token.expired_at,
-          ", current_time=", Azure::DateTime(now).ToString(Azure::DateTime::DateFormat::Rfc3339));
+          ", current_time=", Azure::DateTime(completed_at).ToString(Azure::DateTime::DateFormat::Rfc3339));
     }
 
     *expires_at = expiration;
@@ -195,6 +196,16 @@ arrow::Result<std::string> AzureSasTokenPolicy::FetchSasToken(TimePoint now, Tim
     }
     return arrow::Status::IOError("Azure SAS credential broker returned an invalid expiration time: expiredAt=",
                                   broker_response.token.expired_at, ", error=", error.what());
+  } catch (...) {
+    // SDK exceptions can cross library boundaries without matching std::exception.
+    // Preserve the cache through the same failure path in that case as well.
+    if (!request_completed) {
+      return arrow::Status::IOError("Azure SAS credential broker request failed with an unknown exception");
+    }
+    if (!response_body_read_completed) {
+      return arrow::Status::IOError("Azure SAS credential broker response body read failed with an unknown exception");
+    }
+    return arrow::Status::IOError("Azure SAS credential broker returned an invalid expiration time");
   }
 }
 
@@ -207,7 +218,10 @@ arrow::Result<std::string> AzureSasTokenPolicy::GetSasToken() const {
 
   TimePoint expires_at;
   const bool had_cached_sas = state_->cached.has_value();
-  auto fetched = FetchSasToken(now, &expires_at);
+  auto fetched = FetchSasToken(&expires_at);
+  if (fetched.ok() && expires_at <= state_->clock()) {
+    fetched = arrow::Status::IOError("Azure SAS credential broker token expired before publication");
+  }
   if (fetched.ok()) {
     state_->cached = SharedState::CachedSasToken{std::move(fetched).ValueOrDie(), expires_at};
     LOG_STORAGE_DEBUG_ << "Azure SAS credential broker refresh succeeded: endpoint=" << state_->config.endpoint
@@ -218,11 +232,11 @@ arrow::Result<std::string> AzureSasTokenPolicy::GetSasToken() const {
     return state_->cached->sas_token;
   }
 
-  const bool cached_expired = had_cached_sas && state_->cached->expires_at <= now;
+  const bool cached_expired = had_cached_sas && state_->cached->expires_at <= state_->clock();
   LOG_STORAGE_WARNING_ << "Azure SAS credential broker refresh failed: " << fetched.status().ToString()
                        << ", has_cached_sas=" << std::boolalpha << had_cached_sas
                        << ", cached_expired=" << std::boolalpha << cached_expired;
-  if (had_cached_sas) {
+  if (had_cached_sas && !cached_expired) {
     return state_->cached->sas_token;
   }
   return fetched.status();

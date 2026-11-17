@@ -43,6 +43,7 @@ find_package(opentelemetry-cpp REQUIRED)
 find_package(google-cloud-cpp REQUIRED)
 find_package(CURL REQUIRED)
 find_package(AWSSDK REQUIRED CONFIG)
+find_package(aws-crt-cpp REQUIRED CONFIG)
 find_package(aws-c-io REQUIRED CONFIG)
 if(WITH_CRT)
   include(ExtendS3CrtClient.cmake)
@@ -98,6 +99,7 @@ list(APPEND LINK_LIBS
   protobuf::protobuf
   nlohmann_json::nlohmann_json
   AWS::aws-sdk-cpp-identity-management
+  AWS::aws-crt-cpp
   # Tests inspect CRT event loops even when S3 CRT support is disabled.
   AWS::aws-c-io
   google-cloud-cpp::storage

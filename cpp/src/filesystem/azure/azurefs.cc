@@ -24,6 +24,7 @@
 
 #include "milvus-storage/filesystem/azure/azurefs.h"
 #include "milvus-storage/filesystem/azure/azure_sas_token_policy.h"
+#include "milvus-storage/filesystem/azure/refreshing_token_credential.h"
 #include "milvus-storage/filesystem/azure/azurefs_internal.h"
 #include "milvus-storage/common/extend_status.h"
 #include "arrow/io/memory.h"
@@ -460,7 +461,7 @@ std::string AzureOptions::AccountDfsUrl(const std::string& account_name) const {
 
 Status AzureOptions::ConfigureDefaultCredential() {
   credential_kind_ = CredentialKind::kDefault;
-  token_credential_ = std::make_shared<Azure::Identity::DefaultAzureCredential>();
+  token_credential_ = MakeAzureStorageCredential(std::make_shared<Azure::Identity::DefaultAzureCredential>());
   return Status::OK();
 }
 
@@ -504,33 +505,33 @@ Status AzureOptions::ConfigureClientSecretCredential(const std::string& tenant_i
                                                      const std::string& client_id,
                                                      const std::string& client_secret) {
   credential_kind_ = CredentialKind::kClientSecret;
-  token_credential_ = std::make_shared<Azure::Identity::ClientSecretCredential>(
-      tenant_id, client_id, client_secret);
+  token_credential_ = MakeAzureStorageCredential(
+      std::make_shared<Azure::Identity::ClientSecretCredential>(tenant_id, client_id, client_secret));
   return Status::OK();
 }
 
 Status AzureOptions::ConfigureManagedIdentityCredential(const std::string& client_id) {
   credential_kind_ = CredentialKind::kManagedIdentity;
   token_credential_ =
-      std::make_shared<Azure::Identity::ManagedIdentityCredential>(client_id);
+      MakeAzureStorageCredential(std::make_shared<Azure::Identity::ManagedIdentityCredential>(client_id));
   return Status::OK();
 }
 
 Status AzureOptions::ConfigureCLICredential() {
   credential_kind_ = CredentialKind::kCLI;
-  token_credential_ = std::make_shared<Azure::Identity::AzureCliCredential>();
+  token_credential_ = MakeAzureStorageCredential(std::make_shared<Azure::Identity::AzureCliCredential>());
   return Status::OK();
 }
 
 Status AzureOptions::ConfigureWorkloadIdentityCredential() {
   credential_kind_ = CredentialKind::kWorkloadIdentity;
-  token_credential_ = std::make_shared<Azure::Identity::WorkloadIdentityCredential>();
+  token_credential_ = MakeAzureStorageCredential(std::make_shared<Azure::Identity::WorkloadIdentityCredential>());
   return Status::OK();
 }
 
 Status AzureOptions::ConfigureEnvironmentCredential() {
   credential_kind_ = CredentialKind::kEnvironment;
-  token_credential_ = std::make_shared<Azure::Identity::EnvironmentCredential>();
+  token_credential_ = MakeAzureStorageCredential(std::make_shared<Azure::Identity::EnvironmentCredential>());
   return Status::OK();
 }
 
@@ -548,7 +549,7 @@ Result<std::unique_ptr<Blobs::BlobServiceClient>> AzureOptions::MakeBlobServiceC
       return std::make_unique<Blobs::BlobServiceClient>(AccountBlobUrl(account_name));
     case CredentialKind::kDefault:
       if (!token_credential_) {
-        token_credential_ = std::make_shared<Azure::Identity::DefaultAzureCredential>();
+        token_credential_ = MakeAzureStorageCredential(std::make_shared<Azure::Identity::DefaultAzureCredential>());
       }
       [[fallthrough]];
     case CredentialKind::kClientSecret:
@@ -588,7 +589,7 @@ AzureOptions::MakeDataLakeServiceClient() const {
           AccountDfsUrl(account_name));
     case CredentialKind::kDefault:
       if (!token_credential_) {
-        token_credential_ = std::make_shared<Azure::Identity::DefaultAzureCredential>();
+        token_credential_ = MakeAzureStorageCredential(std::make_shared<Azure::Identity::DefaultAzureCredential>());
       }
       [[fallthrough]];
     case CredentialKind::kClientSecret:

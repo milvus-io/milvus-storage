@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/s3/provider/AliyunOIDCAssumeRoleChainProvider.h"
+#include "milvus-storage/filesystem/s3/provider/native_sts_credentials.h"
 
 #include "milvus-storage/common/log.h"
 
@@ -57,7 +58,7 @@ AliyunOIDCAssumeRoleChainProvider::AliyunOIDCAssumeRoleChainProvider(const Aws::
 Aws::Auth::AWSCredentials AliyunOIDCAssumeRoleChainProvider::GetAWSCredentials() {
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
-  return m_credentials;
+  return native_sts::IsUsable(m_credentials) ? m_credentials : Aws::Auth::AWSCredentials{};
 }
 
 bool AliyunOIDCAssumeRoleChainProvider::ExpiresSoon() const {
@@ -83,7 +84,7 @@ void AliyunOIDCAssumeRoleChainProvider::Reload() {
 
   // Step 1: inner provider self-refreshes on call.
   Aws::Auth::AWSCredentials inner = m_innerOidc->GetAWSCredentials();
-  if (inner.IsEmpty()) {
+  if (!native_sts::IsUsable(inner)) {
     LOG_STORAGE_ERROR_ << fmt::format(
         "[{}] Inner OIDC step returned empty credentials; cannot chain to "
         "target_role_arn={}",
@@ -107,7 +108,7 @@ void AliyunOIDCAssumeRoleChainProvider::Reload() {
                                    !req.externalId.empty());
 
   auto res = m_stsClient->GetAssumeRoleCredentials(req);
-  if (res.creds.IsEmpty()) {
+  if (!native_sts::IsUsable(res.creds)) {
     LOG_STORAGE_ERROR_ << fmt::format(
         "[{}] Cross-account AssumeRole returned empty credentials; target_role_arn={} "
         "— check the target role's trust policy lists the OIDC step-1 role as Principal",

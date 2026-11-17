@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/native_sts_credentials.h"
 
 #include "milvus-storage/common/log.h"
 
@@ -140,15 +141,11 @@ bool FetchImdsCreds(ImdsCreds& out) {
     LOG_STORAGE_ERROR_ << fmt::format("[{}] IMDS credentials JSON parse failed: {}", kLogTag, json.GetErrorMessage());
     return false;
   }
-  auto view = json.View();
-  if (!view.KeyExists("AccessKeyId") || !view.KeyExists("AccessKeySecret") || !view.KeyExists("SecurityToken")) {
-    LOG_STORAGE_ERROR_ << fmt::format("[{}] IMDS credentials response missing expected fields", kLogTag);
-    return false;
-  }
-  out.access_key_id = view.GetString("AccessKeyId");
-  out.access_key_secret = view.GetString("AccessKeySecret");
-  out.security_token = view.GetString("SecurityToken");
-  return true;
+  const auto view = json.View();
+  out.access_key_id = native_sts::StringField(view, "AccessKeyId").c_str();
+  out.access_key_secret = native_sts::StringField(view, "AccessKeySecret").c_str();
+  out.security_token = native_sts::StringField(view, "SecurityToken").c_str();
+  return !out.access_key_id.empty() && !out.access_key_secret.empty() && !out.security_token.empty();
 }
 
 }  // namespace
@@ -172,7 +169,7 @@ AliyunRAMCredentialsProvider::AliyunRAMCredentialsProvider(const Aws::String& ro
 Aws::Auth::AWSCredentials AliyunRAMCredentialsProvider::GetAWSCredentials() {
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
-  return m_credentials;
+  return native_sts::IsUsable(m_credentials) ? m_credentials : Aws::Auth::AWSCredentials{};
 }
 
 bool AliyunRAMCredentialsProvider::ExpiresSoon() const {
@@ -213,7 +210,7 @@ void AliyunRAMCredentialsProvider::Reload() {
                                    !req.externalId.empty());
 
   auto res = m_stsClient->GetAssumeRoleCredentials(req);
-  if (res.creds.IsEmpty()) {
+  if (!native_sts::IsUsable(res.creds)) {
     LOG_STORAGE_ERROR_ << fmt::format("[{}] AssumeRole returned empty credentials", kLogTag);
     return;
   }

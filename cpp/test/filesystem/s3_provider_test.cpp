@@ -43,6 +43,7 @@
 
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/s3/provider/AwsCredentialBrokerProvider.h"
+#include "milvus-storage/filesystem/s3/provider/AwsCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
@@ -1439,11 +1440,9 @@ TEST_F(S3ProviderTest, AwsBrokerRefreshFailureReturnsOldCredentialsAndRetriesEve
   EXPECT_EQ(provider->GetAWSCredentials().GetAWSAccessKeyId(), "first-key");
   now = now + std::chrono::seconds(60);
   mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK, denied);
-  ASSERT_AND_ASSIGN(auto expired_credentials, provider->GetCredentials());
-  EXPECT_EQ(expired_credentials.GetAWSAccessKeyId(), "first-key");
-  EXPECT_LT(expired_credentials.GetExpiration(), now);
+  EXPECT_FALSE(provider->GetCredentials().ok());
   mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK, denied);
-  EXPECT_EQ(provider->GetAWSCredentials().GetAWSAccessKeyId(), "first-key");
+  EXPECT_TRUE(provider->GetAWSCredentials().IsEmpty());
   EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 4);
   mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
                                 AwsBrokerResponse("recovered-key", now + std::chrono::seconds(900)));
@@ -1460,6 +1459,8 @@ TEST_F(S3ProviderTest, AwsBrokerRejectsInvalidResponses) {
   for (const auto* field : {"tempAk", "tempSk", "sessionToken", "expiredAt"}) {
     auto body = valid;
     body["credentials"][field] = "";
+    bodies.push_back(body.dump());
+    body["credentials"][field] = "   ";
     bodies.push_back(body.dump());
   }
   auto invalid_date = valid;
@@ -1484,6 +1485,32 @@ TEST_F(S3ProviderTest, AwsBrokerRejectsInvalidResponses) {
   ASSERT_FALSE(result.ok());
   EXPECT_NE(result.status().ToString().find("503"), std::string::npos);
   EXPECT_NE(result.status().ToString().find("upstream timeout"), std::string::npos);
+}
+
+TEST_F(S3ProviderTest, AwsBrokerRechecksExpirationBeforePublishingRefresh) {
+  const auto start = Aws::Utils::DateTime::Now();
+  auto now = start;
+  bool refreshing = false;
+  size_t clock_calls = 0;
+  AwsCredentialBrokerProvider provider({"http://broker/v1/credentials/assume-role", "us-west-2", "role", "", 900, 1000},
+                                       [&] {
+                                         // Cache check, FetchCredentials validation, then publication validation.
+                                         if (refreshing && ++clock_calls == 3)
+                                           now = now + std::chrono::seconds(11);
+                                         return now;
+                                       });
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                AwsBrokerResponse("old-key", start + std::chrono::seconds(900)));
+  const auto old = provider.GetAWSCredentials();
+  ASSERT_EQ(old.GetAWSAccessKeyId(), "old-key");
+  now = start + std::chrono::seconds(850);
+  refreshing = true;
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                AwsBrokerResponse("too-late", now + std::chrono::seconds(10)));
+  EXPECT_EQ(provider.GetAWSCredentials(), old);
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                AwsBrokerResponse("new-key", now + std::chrono::seconds(900)));
+  EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "new-key");
 }
 
 TEST_F(S3ProviderTest, AwsBrokerRetriesAfterInitialFailure) {
@@ -1662,8 +1689,8 @@ TEST_F(S3ProviderTest, AwsIamCredentialsPreferEnvironmentThenWebIdentityThenInst
   const auto& providers = chain->GetProviders();
   ASSERT_EQ(providers.size(), 3u);
   EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::EnvironmentAWSCredentialsProvider>(providers[0]), nullptr);
-  EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>(providers[1]), nullptr);
-  EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::InstanceProfileCredentialsProvider>(providers[2]), nullptr);
+  EXPECT_NE(std::dynamic_pointer_cast<ValidatedAwsCredentialsProvider>(providers[1]), nullptr);
+  EXPECT_NE(std::dynamic_pointer_cast<ValidatedAwsCredentialsProvider>(providers[2]), nullptr);
 
   // External callers can construct the same policy through the public header.
   const auto external_chain = std::make_shared<AwsCredentialsProviderChain>();
@@ -1698,7 +1725,7 @@ TEST_F(S3ProviderTest, AwsIamCredentialsExcludeInstanceProfileUnlessEnabled) {
     const auto& providers = chain->GetProviders();
     ASSERT_EQ(providers.size(), 2u);
     EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::EnvironmentAWSCredentialsProvider>(providers[0]), nullptr);
-    EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>(providers[1]), nullptr);
+    EXPECT_NE(std::dynamic_pointer_cast<ValidatedAwsCredentialsProvider>(providers[1]), nullptr);
   }
 }
 

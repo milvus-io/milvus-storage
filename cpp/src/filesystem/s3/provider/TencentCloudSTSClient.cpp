@@ -15,6 +15,7 @@
  */
 
 #include "milvus-storage/filesystem/s3/provider/TencentCloudSTSClient.h"
+#include "milvus-storage/filesystem/s3/provider/native_sts_credentials.h"
 
 #include "milvus-storage/common/log.h"
 
@@ -99,26 +100,22 @@ TencentCloudSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
     return result;
   }
 
-  Aws::Utils::Json::JsonValue jsonValue(credentialsStr);
-  auto json = jsonValue.View();
-  auto rootNode = json.GetObject("Response");
-  if (rootNode.IsNull()) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get Response from credential result failed", STS_RESOURCE_CLIENT_LOG_TAG);
-    return result;
-  }
-
-  auto credentialsNode = rootNode.GetObject("Credentials");
-  if (credentialsNode.IsNull()) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get Credentials from Response failed", STS_RESOURCE_CLIENT_LOG_TAG);
-    return result;
-  }
-  result.creds.SetAWSAccessKeyId(credentialsNode.GetString("TmpSecretId"));
-  result.creds.SetAWSSecretKey(credentialsNode.GetString("TmpSecretKey"));
-  result.creds.SetSessionToken(credentialsNode.GetString("Token"));
-  result.creds.SetExpiration(
-      Aws::Utils::DateTime(Aws::Utils::StringUtils::Trim(rootNode.GetString("Expiration").c_str()).c_str(),
-                           Aws::Utils::DateFormat::ISO_8601));
-
+  Aws::Utils::Json::JsonValue json(credentialsStr);
+  if (!json.WasParseSuccessful())
+    return {};
+  const auto response = native_sts::ObjectField(json.View(), "Response");
+  if (response.IsObject() && response.GetAllObjects().count("Error"))
+    return {};
+  const auto fields = native_sts::ObjectField(response, "Credentials");
+  const auto expiry = native_sts::StringField(response, "Expiration");
+  if (expiry.empty())
+    return {};
+  Aws::Auth::AWSCredentials candidate(
+      native_sts::StringField(fields, "TmpSecretId"), native_sts::StringField(fields, "TmpSecretKey"),
+      native_sts::StringField(fields, "Token"), Aws::Utils::DateTime(expiry.c_str(), Aws::Utils::DateFormat::ISO_8601));
+  if (!native_sts::IsUsable(candidate))
+    return {};
+  result.creds = std::move(candidate);
   return result;
 }
 

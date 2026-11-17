@@ -21,7 +21,9 @@
 #include <azure/storage/blobs.hpp>
 #include <azure/storage/files/datalake.hpp>
 
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/azure/azurefs.h"
+#include "milvus-storage/filesystem/azure/refreshing_token_credential.h"
 
 namespace milvus_storage::fs {
 
@@ -107,7 +109,62 @@ TEST(AzureFileSystem, OptionsCompare) {
 // AzureOptions::FromUri tests (no network required)
 // ============================================================================
 
-class TestAzureOptions : public ::testing::Test {};
+class TestAzureOptions : public ::testing::Test {
+  protected:
+  static void ConfigureToken(AzureOptions& options,
+                             std::shared_ptr<Azure::Core::Credentials::TokenCredential> credential) {
+    options.token_credential_ = MakeAzureStorageCredential(std::move(credential));
+  }
+};
+
+namespace {
+class FailingTokenCredential final : public Azure::Core::Credentials::TokenCredential {
+  public:
+  explicit FailingTokenCredential(int mode) : TokenCredential("synthetic"), mode_(mode) {}
+  Azure::Core::Credentials::AccessToken GetToken(const Azure::Core::Credentials::TokenRequestContext&,
+                                                 const Azure::Core::Context&) const override {
+    if (mode_ == 0) {
+      throw Azure::Core::Credentials::AuthenticationException("synthetic-secret-must-not-leak");
+    }
+    return {mode_ == 1 ? "" : "EXPIRED",
+            Azure::DateTime(std::chrono::system_clock::now() + std::chrono::seconds(mode_ == 1 ? 3600 : -1))};
+  }
+
+  private:
+  int mode_;
+};
+}  // namespace
+
+TEST_F(TestAzureOptions, CredentialFailureReturnsArrowStatusForSyncAndAsyncReads) {
+  for (int mode = 0; mode < 3; ++mode) {
+    SCOPED_TRACE(mode);
+    AzureOptions options;
+    options.account_name = "synthetic-account";
+    ConfigureToken(options, std::make_shared<FailingTokenCredential>(mode));
+    const auto filesystem = AzureFileSystem::Make(options);
+    ASSERT_TRUE(filesystem.ok()) << filesystem.status();
+    const auto opened = filesystem.ValueOrDie()->OpenInputFile("container/blob");
+    ASSERT_TRUE(opened.ok()) << opened.status();
+    const auto file = opened.ValueOrDie();
+    auto check = [](const arrow::Status& status) {
+      EXPECT_TRUE(status.IsIOError()) << status;
+      EXPECT_NE(status.message().find("no usable cached token"), std::string::npos);
+      EXPECT_EQ(status.message().find("synthetic-secret-must-not-leak"), std::string::npos);
+      // Credential resolution failed locally. No invented remote status or
+      // retryability is attached to the existing Arrow error boundary.
+      EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
+    };
+    EXPECT_NO_THROW({
+      check(file->GetSize().status());
+      char out = 0;
+      check(file->ReadAt(0, 1, &out).status());
+      // Real Arrow executor -> Azure Blob SDK -> credential guard -> ReadAt
+      // catch -> failed Future. An escaped auth exception would kill the worker.
+      check(file->ReadAsync(0, 1).result().status());
+    });
+    ASSERT_TRUE(file->Close().ok());
+  }
+}
 
 TEST_F(TestAzureOptions, FromUriBlobStorage) {
   AzureOptions default_options;

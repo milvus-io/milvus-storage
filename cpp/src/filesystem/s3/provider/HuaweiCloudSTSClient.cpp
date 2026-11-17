@@ -1,3 +1,4 @@
+#include "milvus-storage/filesystem/s3/provider/native_sts_credentials.h"
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudSTSClient.h"
 
 #include "milvus-storage/common/log.h"
@@ -113,8 +114,8 @@ HuaweiCloudSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
                                      (result.creds.GetExpiration() - Aws::Utils::DateTime::Now()).count());
   } catch (const std::exception& e) {
     result.success = false;
-    LOG_STORAGE_ERROR_ << fmt::format("[{}] Exception during Huawei Cloud STS credential retrieval: {}",
-                                      STS_RESOURCE_CLIENT_LOG_TAG, e.what());
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] Exception during Huawei Cloud STS credential retrieval",
+                                      STS_RESOURCE_CLIENT_LOG_TAG);
   } catch (...) {
     result.success = false;
     LOG_STORAGE_ERROR_ << fmt::format("[{}] Unknown exception during Huawei Cloud STS credential retrieval",
@@ -176,17 +177,20 @@ HuaweiCloudSTSCredentialsClient::STSCallResult HuaweiCloudSTSCredentialsClient::
     return result;
   }
   Aws::Utils::Json::JsonValue jsonValue(credentialsStr);
-  auto json = jsonValue.View();
-  auto rootNode = json.GetObject("credential");
+  if (!jsonValue.WasParseSuccessful()) {
+    result.errorMessage = "Invalid STS response JSON";
+    return result;
+  }
+  auto rootNode = native_sts::ObjectField(jsonValue.View(), "credential");
   if (rootNode.IsNull()) {
     result.errorMessage = "Get credential from STS result failed";
     return result;
   }
-  result.credentials.SetAWSAccessKeyId(rootNode.GetString("access"));
-  result.credentials.SetAWSSecretKey(rootNode.GetString("secret"));
-  result.credentials.SetSessionToken(rootNode.GetString("securitytoken"));
+  result.credentials.SetAWSAccessKeyId(native_sts::StringField(rootNode, "access"));
+  result.credentials.SetAWSSecretKey(native_sts::StringField(rootNode, "secret"));
+  result.credentials.SetSessionToken(native_sts::StringField(rootNode, "securitytoken"));
 
-  auto expiresAt = rootNode.GetString("expires_at");
+  auto expiresAt = native_sts::StringField(rootNode, "expires_at");
   if (expiresAt.empty()) {
     result.errorMessage = "STS response missing 'expires_at' field, rejecting credentials";
     return result;
@@ -194,10 +198,14 @@ HuaweiCloudSTSCredentialsClient::STSCallResult HuaweiCloudSTSCredentialsClient::
   auto parsedExpiration =
       Aws::Utils::DateTime(Aws::Utils::StringUtils::Trim(expiresAt.c_str()).c_str(), Aws::Utils::DateFormat::ISO_8601);
   if (!parsedExpiration.WasParseSuccessful()) {
-    result.errorMessage = "STS response 'expires_at' field has invalid format: " + std::string(expiresAt.c_str());
+    result.errorMessage = "STS response expiration is invalid";
     return result;
   }
   result.credentials.SetExpiration(parsedExpiration);
+  if (!native_sts::IsUsable(result.credentials)) {
+    result.errorMessage = "STS returned incomplete or expired credentials";
+    return result;
+  }
   result.success = true;
   return result;
 }
