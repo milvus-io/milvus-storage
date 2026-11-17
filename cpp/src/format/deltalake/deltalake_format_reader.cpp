@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <atomic>
 #include <future>
-#include <limits>
 #include <mutex>
 #include <span>
 #include <unordered_set>
@@ -24,42 +23,6 @@
 
 namespace milvus_storage::deltalake {
 namespace {
-
-struct Descriptor {
-  std::string table;
-  int64_t version;
-};
-
-std::string DescriptorCacheKey(const Descriptor& descriptor) {
-  return nlohmann::json::array({descriptor.table, descriptor.version}).dump();
-}
-
-arrow::Result<Descriptor> ParseDescriptor(const api::ColumnGroupFile& file) {
-  try {
-    auto value = nlohmann::json::parse(file.Get<std::string>(api::kPropertyMetadata));
-    if (!value.is_object() || !value.contains("version") || !value.at("version").is_number_integer() ||
-        value.at("version") != 1 || !value.contains("table_uri") || !value.at("table_uri").is_string() ||
-        !value.contains("snapshot_version") || !value.at("snapshot_version").is_number_integer()) {
-      return arrow::Status::Invalid("Invalid Delta snapshot descriptor");
-    }
-    const auto& version = value.at("snapshot_version");
-    if ((version.is_number_unsigned() && version.get<uint64_t>() > uint64_t(std::numeric_limits<int64_t>::max())) ||
-        (!version.is_number_unsigned() && version.get<int64_t>() < 0)) {
-      return arrow::Status::Invalid("Delta descriptor requires a nonnegative signed 64-bit version");
-    }
-    auto table = value.at("table_uri").get<std::string>();
-    if (table.empty() || table.back() != '/' || file.start_index != 0 || file.end_index < 0) {
-      return arrow::Status::Invalid("Invalid Delta table location or live row range");
-    }
-    const auto size = file.properties.find(api::kPropertyFileSize);
-    if (size == file.properties.end() || !api::convert::convertFunc<uint64_t>(size->second).first) {
-      return arrow::Status::Invalid("Delta descriptor requires a valid file size");
-    }
-    return Descriptor{std::move(table), version.get<int64_t>()};
-  } catch (const std::exception& error) {
-    return arrow::Status::Invalid("Cannot parse Delta snapshot descriptor: ", error.what());
-  }
-}
 
 // Failures are never cached. A pending result retains its value only until
 // callers leave the flight; the process registry itself owns weak references.
@@ -191,16 +154,17 @@ class DeltaTableContext {
 };
 
 static arrow::Result<std::shared_ptr<DeltaTableContext>> GetTable(
-    const Descriptor& descriptor, const std::shared_ptr<const api::Properties>& properties) {
-  ARROW_ASSIGN_OR_RAISE(auto location, ResolveLocation(descriptor.table, properties));
-  const auto key = nlohmann::json::array({location.url, descriptor.version, location.filesystem_key}).dump();
+    const SnapshotDescriptor& descriptor, const std::shared_ptr<const api::Properties>& properties) {
+  ARROW_ASSIGN_OR_RAISE(auto location, ResolveLocation(descriptor.table_uri, properties));
+  const auto key = nlohmann::json::array({location.url, descriptor.snapshot_version, location.filesystem_key}).dump();
   static folly::Indestructible<LoadCache<DeltaTableContext, true>> registry;
   return registry->Get(key, [&]() -> arrow::Result<std::shared_ptr<DeltaTableContext>> {
     auto table = std::make_shared<DeltaTableContext>();
     table->location = location;
-    table->version = descriptor.version;
-    ARROW_ASSIGN_OR_RAISE(table->snapshot, BlockingDeltaSnapshot::LoadForReader(location.url, descriptor.version,
-                                                                                location.filesystem, location.binding));
+    table->version = descriptor.snapshot_version;
+    ARROW_ASSIGN_OR_RAISE(table->snapshot,
+                          BlockingDeltaSnapshot::LoadForReader(location.url, descriptor.snapshot_version,
+                                                               location.filesystem, location.binding));
     ARROW_ASSIGN_OR_RAISE(table->schema, table->snapshot->Schema());
     return table;
   });
@@ -275,21 +239,21 @@ static arrow::Result<std::shared_ptr<DeltaFileMetadata>> GetFile(
 }
 
 std::string DeltaLakeFormatReader::MetaTrait::cache_key(const api::ColumnGroupFile& file) {
-  auto parsed = ParseDescriptor(file);
+  auto parsed = SnapshotDescriptor::Parse(file);
   if (!parsed.ok())
     return "invalid-delta:" + file.path + file.Get<std::string>(api::kPropertyMetadata);
-  return DescriptorCacheKey(*parsed);
+  return parsed->CacheKey();
 }
 
 arrow::Result<DeltaLakeFormatReader::MetaTrait::MetadataPtr> DeltaLakeFormatReader::MetaTrait::load_metadata(
     const api::ColumnGroupFile& file,
     const std::shared_ptr<const api::Properties>& properties,
     const KeyRetriever& key_retriever) {
-  ARROW_ASSIGN_OR_RAISE(auto descriptor, ParseDescriptor(file));
+  ARROW_ASSIGN_OR_RAISE(auto descriptor, SnapshotDescriptor::Parse(file));
   ARROW_ASSIGN_OR_RAISE(auto table, GetTable(descriptor, properties));
   auto metadata = std::make_shared<Metadata>();
-  metadata->cache_key = DescriptorCacheKey(descriptor);
-  metadata->path = descriptor.table;
+  metadata->cache_key = descriptor.CacheKey();
+  metadata->path = descriptor.table_uri;
   metadata->file_schema = table->schema;
   // Decryption callbacks remain scoped to the top-level Reader. Never share
   // decrypted per-file metadata across unrelated callback identities.
@@ -306,9 +270,9 @@ arrow::Result<std::shared_ptr<DeltaLakeFormatReader>> DeltaLakeFormatReader::Met
     const std::shared_ptr<arrow::Schema>& read_schema,
     const std::vector<std::string>& needed_columns,
     const std::string&) {
-  ARROW_ASSIGN_OR_RAISE(auto descriptor, ParseDescriptor(file));
-  if (!metadata || !metadata->payload.table || metadata->path != descriptor.table ||
-      metadata->payload.table->version != descriptor.version) {
+  ARROW_ASSIGN_OR_RAISE(auto descriptor, SnapshotDescriptor::Parse(file));
+  if (!metadata || !metadata->payload.table || metadata->path != descriptor.table_uri ||
+      metadata->payload.table->version != descriptor.snapshot_version) {
     return arrow::Status::Invalid("Delta metadata does not match descriptor");
   }
   ARROW_ASSIGN_OR_RAISE(auto names, RequestedColumns(metadata->file_schema, read_schema, needed_columns));

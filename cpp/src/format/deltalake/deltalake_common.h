@@ -3,9 +3,23 @@
 #pragma once
 
 #include "deltalake/deltalake_bridge.h"
+#include "milvus-storage/column_groups.h"
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage::deltalake {
+
+inline constexpr int64_t kSnapshotDescriptorVersion = 1;
+
+struct SnapshotDescriptor {
+  // This describes the persisted format, independently of the Delta commit.
+  int64_t version = kSnapshotDescriptorVersion;
+  std::string table_uri;
+  int64_t snapshot_version = 0;
+
+  static arrow::Result<SnapshotDescriptor> Parse(const api::ColumnGroupFile& file);
+  std::string Serialize() const;
+  std::string CacheKey() const;
+};
 
 struct ResolvedLocation {
   ArrowFileSystemConfig config;

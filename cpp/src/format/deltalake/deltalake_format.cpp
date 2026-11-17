@@ -3,8 +3,6 @@
 
 #include "milvus-storage/format/deltalake/deltalake_format.h"
 
-#include <nlohmann/json.hpp>
-
 #include "deltalake/deltalake_bridge.h"
 #include "format/deltalake/deltalake_common.h"
 #include "milvus-storage/format/deltalake/deltalake_format_reader.h"
@@ -18,7 +16,8 @@ arrow::Result<std::vector<api::ColumnGroupFile>> DeltaLakeFormat::explore(
                                                                               location.filesystem, location.binding));
   ARROW_ASSIGN_OR_RAISE(auto table_uri, deltalake::ToExternalUri(location.url, location.config));
   const auto descriptor =
-      nlohmann::json{{"version", 1}, {"table_uri", table_uri}, {"snapshot_version", snapshot->Version()}}.dump();
+      deltalake::SnapshotDescriptor{.table_uri = std::move(table_uri), .snapshot_version = snapshot->Version()}
+          .Serialize();
   std::vector<api::ColumnGroupFile> files;
   for (const auto& info : snapshot->Files()) {
     ARROW_ASSIGN_OR_RAISE(auto path, deltalake::ToExternalUri(info.path, location.config));

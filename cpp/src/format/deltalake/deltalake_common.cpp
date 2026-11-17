@@ -3,12 +3,18 @@
 
 #include "format/deltalake/deltalake_common.h"
 #include <filesystem>
+#include <limits>
 #include <arrow/util/uri.h>
+#include <nlohmann/json.hpp>
 
 #include "milvus-storage/filesystem/local_durability.h"
 
 namespace milvus_storage::deltalake {
 namespace {
+constexpr char kDescriptorVersionKey[] = "version";
+constexpr char kDescriptorTableUriKey[] = "table_uri";
+constexpr char kDescriptorSnapshotVersionKey[] = "snapshot_version";
+
 arrow::Result<std::string> MakeTableUrl(const StorageUri& location, const FilesystemBinding& binding) {
   std::string result;
   if (binding.is_local) {
@@ -27,6 +33,46 @@ arrow::Result<std::string> MakeTableUrl(const StorageUri& location, const Filesy
 }
 
 }  // namespace
+
+arrow::Result<SnapshotDescriptor> SnapshotDescriptor::Parse(const api::ColumnGroupFile& file) {
+  try {
+    const auto value = nlohmann::json::parse(file.Get<std::string>(api::kPropertyMetadata));
+    if (!value.is_object() || !value.contains(kDescriptorVersionKey) ||
+        !value.at(kDescriptorVersionKey).is_number_integer() ||
+        value.at(kDescriptorVersionKey) != kSnapshotDescriptorVersion || !value.contains(kDescriptorTableUriKey) ||
+        !value.at(kDescriptorTableUriKey).is_string() || !value.contains(kDescriptorSnapshotVersionKey) ||
+        !value.at(kDescriptorSnapshotVersionKey).is_number_integer()) {
+      return arrow::Status::Invalid("Invalid Delta snapshot descriptor");
+    }
+    const auto& snapshot_version = value.at(kDescriptorSnapshotVersionKey);
+    if ((snapshot_version.is_number_unsigned() &&
+         snapshot_version.get<uint64_t>() > uint64_t(std::numeric_limits<int64_t>::max())) ||
+        (!snapshot_version.is_number_unsigned() && snapshot_version.get<int64_t>() < 0)) {
+      return arrow::Status::Invalid("Delta descriptor requires a nonnegative signed 64-bit version");
+    }
+    auto table_uri = value.at(kDescriptorTableUriKey).get<std::string>();
+    if (table_uri.empty() || table_uri.back() != '/' || file.start_index != 0 || file.end_index < 0) {
+      return arrow::Status::Invalid("Invalid Delta table location or live row range");
+    }
+    const auto size = file.properties.find(api::kPropertyFileSize);
+    if (size == file.properties.end() || !api::convert::convertFunc<uint64_t>(size->second).first) {
+      return arrow::Status::Invalid("Delta descriptor requires a valid file size");
+    }
+    return SnapshotDescriptor{value.at(kDescriptorVersionKey).get<int64_t>(), std::move(table_uri),
+                              snapshot_version.get<int64_t>()};
+  } catch (const std::exception& error) {
+    return arrow::Status::Invalid("Cannot parse Delta snapshot descriptor: ", error.what());
+  }
+}
+
+std::string SnapshotDescriptor::Serialize() const {
+  return nlohmann::json{{kDescriptorVersionKey, version},
+                        {kDescriptorTableUriKey, table_uri},
+                        {kDescriptorSnapshotVersionKey, snapshot_version}}
+      .dump();
+}
+
+std::string SnapshotDescriptor::CacheKey() const { return nlohmann::json::array({table_uri, snapshot_version}).dump(); }
 
 arrow::Result<std::string> ToExternalUri(const std::string& standard_uri, const ArrowFileSystemConfig& config) {
   if (config.storage_type == "local") {
