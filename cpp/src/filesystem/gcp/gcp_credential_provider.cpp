@@ -24,12 +24,12 @@
 
 #include <google/cloud/credentials.h>
 #include <google/cloud/internal/oauth2_credentials.h>
-#include <google/cloud/internal/unified_rest_credentials.h>
 #include <google/cloud/options.h>
 
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/gcp/gcp_broker_credential_provider.h"
+#include "milvus-storage/filesystem/gcp/refreshing_credentials.h"
 #include "milvus-storage/filesystem/s3/s3_auth_signer.h"
 
 namespace milvus_storage {
@@ -47,17 +47,8 @@ namespace {
 constexpr int kMaxImpersonationTokenLifetime = 3600;
 constexpr int kMinImpersonationTokenLifetime = 900;
 
-std::shared_ptr<google::cloud::oauth2_internal::Credentials> MakeInternalCredentials(
-    std::shared_ptr<google::cloud::Credentials> public_creds) {
-  // MapCredentials returns an oauth2_internal::Credentials wrapping the public
-  // credentials; the wrapper owns the state it needs and does its own token
-  // caching + refresh via the usual google-cloud-cpp machinery.
-  return google::cloud::rest_internal::MapCredentials(*public_creds);
-}
-
 // Shared base for both OAuth2-backed providers (VM IAM and Impersonation).
-// Wraps a google-cloud-cpp oauth2_internal::Credentials and delegates to its
-// built-in token caching + refresh logic.
+// Uses validated caching around a fixed SDK identity for both paths.
 class OAuth2BearerProvider : public GcpCredentialProvider {
   public:
   std::optional<std::pair<std::string, std::string>> AuthorizationHeader() override {
@@ -108,9 +99,7 @@ class OAuth2BearerProvider : public GcpCredentialProvider {
 // credentials elsewhere (GOOGLE_APPLICATION_CREDENTIALS, gcloud auth, etc).
 class IamVmProvider : public OAuth2BearerProvider {
   public:
-  IamVmProvider()
-      : OAuth2BearerProvider(
-            MakeInternalCredentials(google::cloud::MakeGoogleDefaultCredentials()), "application_default", "iam") {}
+  IamVmProvider() : OAuth2BearerProvider(MakeRefreshingGcpDefaultCredentials(), "application_default", "iam") {}
 };
 
 // Service Account Impersonation: VM/ADC identity impersonates a target SA,
@@ -118,21 +107,9 @@ class IamVmProvider : public OAuth2BearerProvider {
 class IamImpersonateProvider : public OAuth2BearerProvider {
   public:
   IamImpersonateProvider(const std::string& target_service_account, int token_lifetime_seconds)
-      : OAuth2BearerProvider(
-            MakeInternalCredentials(MakeImpersonationPublicCreds(target_service_account, token_lifetime_seconds)),
-            "service_account_impersonation",
-            "impersonate:" + target_service_account) {}
-
-  private:
-  static std::shared_ptr<google::cloud::Credentials> MakeImpersonationPublicCreds(const std::string& target_sa,
-                                                                                  int token_lifetime_seconds) {
-    google::cloud::Options opts;
-    if (token_lifetime_seconds > 0) {
-      opts.set<google::cloud::AccessTokenLifetimeOption>(std::chrono::seconds(token_lifetime_seconds));
-    }
-    return google::cloud::MakeImpersonateServiceAccountCredentials(google::cloud::MakeGoogleDefaultCredentials(),
-                                                                   target_sa, std::move(opts));
-  }
+      : OAuth2BearerProvider(MakeRefreshingGcpImpersonatedCredentials(target_service_account, token_lifetime_seconds),
+                             "service_account_impersonation",
+                             "impersonate:" + target_service_account) {}
 };
 
 // GCS HMAC ak/sk. Non-conditional requests use AWS SigV4 (handled upstream by

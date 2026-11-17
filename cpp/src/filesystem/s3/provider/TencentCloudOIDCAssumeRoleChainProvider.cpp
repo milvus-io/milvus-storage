@@ -1,4 +1,5 @@
 #include "milvus-storage/filesystem/s3/provider/TencentCloudOIDCAssumeRoleChainProvider.h"
+#include "milvus-storage/filesystem/s3/provider/native_sts_credentials.h"
 
 #include <aws/core/platform/Environment.h>
 #include <aws/core/utils/UUID.h>
@@ -44,17 +45,17 @@ Aws::Auth::AWSCredentials TencentCloudOIDCAssumeRoleChainProvider::GetAWSCredent
   }
   // A failed refresh may retain a still-valid target credential, never an
   // expired one or the more privileged machine identity from the first hop.
-  return m_credentials.IsExpiredOrEmpty() ? Aws::Auth::AWSCredentials{} : m_credentials;
+  return native_sts::IsUsable(m_credentials) ? m_credentials : Aws::Auth::AWSCredentials{};
 }
 
 void TencentCloudOIDCAssumeRoleChainProvider::Reload() {
   const auto caller = m_innerOidc->GetAWSCredentials();
-  if (caller.IsExpiredOrEmpty() || caller.GetSessionToken().empty())
+  if (!native_sts::IsUsable(caller))
     return;
   TencentCloudSTSCredentialsClient::STSAssumeRoleRequest request{caller, m_region, m_targetRoleArn, m_targetSessionName,
                                                                  m_targetExternalId};
   auto credentials = m_stsClient->GetAssumeRoleCredentials(request);
-  if (!credentials.IsExpiredOrEmpty())
+  if (native_sts::IsUsable(credentials))
     m_credentials = std::move(credentials);
 }
 }  // namespace milvus_storage

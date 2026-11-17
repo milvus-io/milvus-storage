@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "milvus-storage/filesystem/s3/provider/native_sts_credentials.h"
 #include "milvus-storage/filesystem/s3/provider/VolcengineSTSClient.h"
 #include "milvus-storage/common/log.h"
 #include <aws/core/internal/AWSHttpResourceClient.h>
@@ -183,9 +184,8 @@ class VolcengineJsonErrorMarshaller final : public Aws::Client::JsonErrorMarshal
 arrow::Status ParseStsExpiry(const Aws::String& rawExpiry, Aws::Auth::AWSCredentials& creds) {
   const Aws::String trimmed = Aws::Utils::StringUtils::Trim(rawExpiry.c_str());
   const Aws::Crt::DateTime expiration(trimmed.c_str(), Aws::Crt::DateFormat::ISO_8601);
-  if (!expiration) {
-    return arrow::Status::Invalid("ISO-8601 parser rejected STS expiry: ", trimmed.c_str(), "; ",
-                                  Aws::Crt::ErrorDebugString(expiration.GetLastError()));
+  if (!expiration || Aws::Utils::DateTime(expiration.UnderlyingTimestamp()) <= Aws::Utils::DateTime::Now()) {
+    return arrow::Status::Invalid("STS expiration is invalid or expired");
   }
   creds.SetExpiration(Aws::Utils::DateTime(expiration.UnderlyingTimestamp()));
   return arrow::Status::OK();
@@ -288,28 +288,30 @@ VolcengineSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
     return result;
   }
   auto json = jsonValue.View();
-  if (!json.ValueExists("Result")) {
+  if (!json.IsObject() || native_sts::ObjectField(json, "Result").IsNull()) {
     LOG_STORAGE_WARNING_ << fmt::format("[{}] Get 'Result' node from response failed", STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
   }
-  auto resultNode = json.GetObject("Result");
+  auto resultNode = native_sts::ObjectField(json, "Result");
 
-  if (!resultNode.ValueExists("Credentials")) {
+  if (native_sts::ObjectField(resultNode, "Credentials").IsNull()) {
     LOG_STORAGE_WARNING_ << fmt::format("[{}] Get 'Credentials' node from Result failed", STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
   }
-  auto credentialsNode = resultNode.GetObject("Credentials");
+  auto credentialsNode = native_sts::ObjectField(resultNode, "Credentials");
 
-  result.creds.SetAWSAccessKeyId(credentialsNode.GetString("AccessKeyId"));
-  result.creds.SetAWSSecretKey(credentialsNode.GetString("SecretAccessKey"));
-  result.creds.SetSessionToken(credentialsNode.GetString("SessionToken"));
-  const auto expiry_status = ParseStsExpiry(credentialsNode.GetString("Expiration"), result.creds);
+  result.creds.SetAWSAccessKeyId(native_sts::StringField(credentialsNode, "AccessKeyId"));
+  result.creds.SetAWSSecretKey(native_sts::StringField(credentialsNode, "SecretAccessKey"));
+  result.creds.SetSessionToken(native_sts::StringField(credentialsNode, "SessionToken"));
+  const auto expiry_status = ParseStsExpiry(native_sts::StringField(credentialsNode, "Expiration"), result.creds);
   if (!expiry_status.ok()) {
     LOG_STORAGE_WARNING_ << fmt::format("[{}] Rejecting AssumeRoleWithOIDC credentials: {}",
                                         STS_RESOURCE_CLIENT_LOG_TAG, expiry_status.ToString());
     return {};
   }
 
+  if (!native_sts::IsUsable(result.creds))
+    return {};
   return result;
 }
 
@@ -463,26 +465,26 @@ VolcengineSTSCredentialsClient::STSAssumeRoleResult VolcengineSTSCredentialsClie
     return result;
   }
   auto json = jsonValue.View();
-  if (!json.ValueExists("Result")) {
+  if (!json.IsObject() || native_sts::ObjectField(json, "Result").IsNull()) {
     LOG_STORAGE_WARNING_ << fmt::format("[{}] Get 'Result' node from AssumeRole response failed",
                                         STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
   }
-  auto resultNode = json.GetObject("Result");
-  if (!resultNode.ValueExists("Credentials")) {
+  auto resultNode = native_sts::ObjectField(json, "Result");
+  if (native_sts::ObjectField(resultNode, "Credentials").IsNull()) {
     LOG_STORAGE_WARNING_ << fmt::format("[{}] Get 'Credentials' node from AssumeRole Result failed",
                                         STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
   }
-  auto credentialsNode = resultNode.GetObject("Credentials");
+  auto credentialsNode = native_sts::ObjectField(resultNode, "Credentials");
 
-  result.creds.SetAWSAccessKeyId(credentialsNode.GetString("AccessKeyId"));
-  result.creds.SetAWSSecretKey(credentialsNode.GetString("SecretAccessKey"));
-  result.creds.SetSessionToken(credentialsNode.GetString("SessionToken"));
+  result.creds.SetAWSAccessKeyId(native_sts::StringField(credentialsNode, "AccessKeyId"));
+  result.creds.SetAWSSecretKey(native_sts::StringField(credentialsNode, "SecretAccessKey"));
+  result.creds.SetSessionToken(native_sts::StringField(credentialsNode, "SessionToken"));
   // AssumeRole uses "ExpiredTime"; keep accepting "Expiration" as an alias.
-  Aws::String expiredTimeStr = credentialsNode.GetString("ExpiredTime");
+  Aws::String expiredTimeStr = native_sts::StringField(credentialsNode, "ExpiredTime");
   if (expiredTimeStr.empty()) {
-    expiredTimeStr = credentialsNode.GetString("Expiration");
+    expiredTimeStr = native_sts::StringField(credentialsNode, "Expiration");
   }
   const auto expiry_status = ParseStsExpiry(expiredTimeStr, result.creds);
   if (!expiry_status.ok()) {
@@ -491,6 +493,8 @@ VolcengineSTSCredentialsClient::STSAssumeRoleResult VolcengineSTSCredentialsClie
     return {};
   }
 
+  if (!native_sts::IsUsable(result.creds))
+    return {};
   return result;
 }
 

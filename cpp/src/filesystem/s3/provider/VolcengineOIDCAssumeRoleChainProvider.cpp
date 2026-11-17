@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/s3/provider/VolcengineOIDCAssumeRoleChainProvider.h"
+#include "milvus-storage/filesystem/s3/provider/native_sts_credentials.h"
 
 #include "milvus-storage/common/log.h"
 
@@ -61,7 +62,7 @@ VolcengineOIDCAssumeRoleChainProvider::VolcengineOIDCAssumeRoleChainProvider(con
 Aws::Auth::AWSCredentials VolcengineOIDCAssumeRoleChainProvider::GetAWSCredentials() {
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
-  return m_credentials;
+  return native_sts::IsUsable(m_credentials) ? m_credentials : Aws::Auth::AWSCredentials{};
 }
 
 bool VolcengineOIDCAssumeRoleChainProvider::ExpiresSoon() const {
@@ -87,7 +88,7 @@ void VolcengineOIDCAssumeRoleChainProvider::Reload() {
 
   // Step 1: inner provider self-refreshes on call.
   Aws::Auth::AWSCredentials inner = m_innerOidc->GetAWSCredentials();
-  if (inner.IsEmpty()) {
+  if (!native_sts::IsUsable(inner)) {
     LOG_STORAGE_ERROR_ << fmt::format(
         "[{}] Inner OIDC step returned empty credentials; cannot chain to target_role_trn={}", kLogTag,
         m_targetRoleTrn);
@@ -120,7 +121,7 @@ void VolcengineOIDCAssumeRoleChainProvider::Reload() {
                                    m_targetRoleTrn);
 
   auto res = m_stsClient->GetAssumeRoleCredentials(req);
-  if (res.creds.IsEmpty()) {
+  if (!native_sts::IsUsable(res.creds)) {
     LOG_STORAGE_ERROR_ << fmt::format(
         "[{}] Cross-account AssumeRole returned empty credentials; target_role_trn={} "
         "— check the target role's trust policy lists the step-1 machine role as Principal",

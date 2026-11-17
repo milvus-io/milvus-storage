@@ -73,8 +73,9 @@ Aws::Auth::AWSCredentials ParseCredentials(const Aws::String& body) {
   }
   if (!expiration.WasParseSuccessful() || expiration <= Aws::Utils::DateTime::Now())
     return {};
-  Aws::Auth::AWSCredentials credentials(fields.at("TmpSecretId").AsString(), fields.at("TmpSecretKey").AsString(),
-                                        fields.at("Token").AsString());
+  Aws::Auth::AWSCredentials credentials(Aws::Utils::StringUtils::Trim(fields.at("TmpSecretId").AsString().c_str()),
+                                        Aws::Utils::StringUtils::Trim(fields.at("TmpSecretKey").AsString().c_str()),
+                                        Aws::Utils::StringUtils::Trim(fields.at("Token").AsString().c_str()));
   credentials.SetExpiration(expiration);
   return credentials;
 }

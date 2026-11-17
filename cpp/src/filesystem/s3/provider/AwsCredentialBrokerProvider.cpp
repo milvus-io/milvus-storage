@@ -23,6 +23,7 @@
 #include <aws/core/client/ClientConfiguration.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/HttpResponse.h>
+#include <aws/core/utils/StringUtils.h>
 #include <aws/core/utils/memory/stl/AWSStringStream.h>
 #include <aws/crt/Api.h>
 #include <aws/crt/DateTime.h>
@@ -81,15 +82,15 @@ arrow::Result<Aws::Auth::AWSCredentials> AwsCredentialBrokerProvider::GetCredent
     fetched = FetchCredentials();
     retry_delay = std::min(retry_delay * 2, std::chrono::milliseconds(1000));
   }
+  if (fetched.ok() && fetched->GetExpiration() <= clock_()) {
+    fetched = arrow::Status::IOError("AWS credential broker credentials expired before publication");
+  }
   if (fetched.ok()) {
     credentials_ = std::move(fetched).ValueUnsafe();
     return credentials_;
   }
-  if (!credentials_.IsEmpty()) {
-    // Match Azure SAS: retain the last credentials even after expiration, and
-    // retry refresh on the next request. The service decides whether to accept them.
-    LOG_STORAGE_WARNING_ << fetched.status().ToString() << "; using cached AWS credentials, expired=" << std::boolalpha
-                         << (credentials_.GetExpiration() <= clock_());
+  if (!credentials_.IsEmpty() && credentials_.GetExpiration() > clock_()) {
+    LOG_STORAGE_WARNING_ << fetched.status().ToString() << "; using unexpired cached AWS credentials";
     return credentials_;
   }
   return fetched.status();
@@ -146,7 +147,8 @@ arrow::Result<Aws::Auth::AWSCredentials> AwsCredentialBrokerProvider::FetchCrede
     const auto secret_key = values.at(credential_broker::kTempSk).get<std::string>();
     const auto session_token = values.at(credential_broker::kSessionToken).get<std::string>();
     const auto expired_at = values.at(credential_broker::kExpiredAt).get<std::string>();
-    if (access_key.empty() || secret_key.empty() || session_token.empty() || expired_at.empty()) {
+    const auto blank = [](const std::string& value) { return Aws::Utils::StringUtils::Trim(value.c_str()).empty(); };
+    if (blank(access_key) || blank(secret_key) || blank(session_token) || blank(expired_at)) {
       return arrow::Status::IOError("AWS credential broker requires non-empty tempAk, tempSk, sessionToken, expiredAt");
     }
     // CRT applies numeric timezone offsets that Aws::Utils::DateTime's parser ignores.

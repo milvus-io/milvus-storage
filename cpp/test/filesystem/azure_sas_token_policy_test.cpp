@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -72,6 +73,8 @@ class MockTransport final : public Azure::Core::Http::HttpTransport {
     responses_.emplace_back(status, std::move(body));
   }
 
+  void SetOnSend(std::function<void()> on_send) { on_send_ = std::move(on_send); }
+
   std::unique_ptr<Azure::Core::Http::RawResponse> Send(Azure::Core::Http::Request& request,
                                                        const Azure::Core::Context& context) override {
     const auto sent_at = std::chrono::system_clock::now();
@@ -86,6 +89,9 @@ class MockTransport final : public Azure::Core::Http::HttpTransport {
     std::lock_guard<std::mutex> lock(mutex_);
     requests_.push_back(RequestRecord{request.GetMethod().ToString(), request.GetUrl().GetAbsoluteUrl(),
                                       request.GetHeaders(), std::move(body), context.GetDeadline(), sent_at});
+    if (on_send_) {
+      on_send_();
+    }
     if (responses_.empty()) {
       throw Azure::Core::Http::TransportException("no queued response");
     }
@@ -112,6 +118,7 @@ class MockTransport final : public Azure::Core::Http::HttpTransport {
   std::deque<std::pair<Azure::Core::Http::HttpStatusCode, std::string>> responses_;
   std::deque<std::vector<uint8_t>> streamed_response_bodies_;
   std::vector<RequestRecord> requests_;
+  std::function<void()> on_send_;
 };
 
 static AzureSasBrokerConfig MakeConfig() {
@@ -243,7 +250,7 @@ TEST(AzureSasTokenPolicyTest, PerOperationPolicyKeepsSasAcrossSdkRetries) {
   }
 }
 
-TEST(AzureSasTokenPolicyTest, RefreshFailureReturnsOldTokenAndRetriesEveryRequest) {
+TEST(AzureSasTokenPolicyTest, RefreshFailureReturnsOldTokenOnlyUntilExpiration) {
   auto now = std::make_shared<TimePoint>(std::chrono::system_clock::from_time_t(1785146400));
   auto transport = std::make_shared<MockTransport>();
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
@@ -269,9 +276,10 @@ TEST(AzureSasTokenPolicyTest, RefreshFailureReturnsOldTokenAndRetriesEveryReques
 
   *now += std::chrono::seconds(60);
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::InternalServerError, "expired fallback");
+  called = false;
   auto expired_fallback = SendRequest(policy, &called, &query);
-  ASSERT_EQ(expired_fallback->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
-  EXPECT_EQ(query.at("sig"), "old");
+  ASSERT_EQ(expired_fallback->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Unauthorized);
+  EXPECT_FALSE(called);
 
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
                      SuccessResponse("account", "sv=2&sig=new", *now + std::chrono::hours(1)));
@@ -490,6 +498,56 @@ TEST(AzureSasTokenPolicyTest, InitialFetchFailureDoesNotSendAnonymousRequest) {
   const auto requests = transport->Requests();
   ASSERT_EQ(requests.size(), 4u);
   EXPECT_GT(requests.back().deadline, requests.front().deadline);
+}
+
+TEST(AzureSasTokenPolicyTest, SlowRefreshDoesNotPublishExpiredCandidateOrReturnExpiredCache) {
+  auto now = std::chrono::system_clock::from_time_t(1785146400);
+  auto transport = std::make_shared<MockTransport>();
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                     SuccessResponse("account", "sig=old", now + std::chrono::seconds(120)));
+  AzureSasTokenPolicy policy(MakeConfig(), transport, [&] { return now; });
+  bool called = false;
+  std::map<std::string, std::string> query;
+  ASSERT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+  now += std::chrono::seconds(90);
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                     SuccessResponse("account", "sig=short", now + std::chrono::seconds(1)));
+  transport->SetOnSend([&] { now += std::chrono::seconds(2); });
+  EXPECT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+  EXPECT_EQ(query.at("sig"), "old");
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::InternalServerError, "{}");
+  transport->SetOnSend([&] { now += std::chrono::seconds(60); });
+  called = false;
+  EXPECT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Unauthorized);
+  EXPECT_FALSE(called);
+  transport->SetOnSend({});
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                     SuccessResponse("account", "sig=new", now + std::chrono::hours(1)));
+  EXPECT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+  EXPECT_EQ(query.at("sig"), "new");
+}
+
+TEST(AzureSasTokenPolicyTest, InvalidRefreshPreservesValidCacheAndRecovers) {
+  for (const auto* invalid :
+       {"{", R"({"success":true})",
+        R"({"success":true,"credentials":{"tempAk":"account","sessionToken":"sig=x","expiredAt":"invalid"}})"}) {
+    auto now = std::chrono::system_clock::from_time_t(1785146400);
+    auto transport = std::make_shared<MockTransport>();
+    transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                       SuccessResponse("account", "sig=old", now + std::chrono::seconds(120)));
+    AzureSasTokenPolicy policy(MakeConfig(), transport, [&] { return now; });
+    bool called = false;
+    std::map<std::string, std::string> query;
+    ASSERT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+    now += std::chrono::seconds(90);
+    transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, invalid);
+    EXPECT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+    EXPECT_EQ(query.at("sig"), "old");
+    transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                       SuccessResponse("account", "sig=new", now + std::chrono::hours(1)));
+    EXPECT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+    EXPECT_EQ(query.at("sig"), "new");
+  }
 }
 
 }  // namespace milvus_storage::fs

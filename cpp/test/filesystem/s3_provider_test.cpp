@@ -29,6 +29,7 @@
 #include <queue>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <openssl/err.h>
@@ -50,6 +51,7 @@
 #include <aws/core/utils/HashingUtils.h>
 
 #include "milvus-storage/filesystem/s3/provider/AwsCredentialBrokerProvider.h"
+#include "milvus-storage/filesystem/s3/provider/AwsCredentialsProvider.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunOIDCAssumeRoleChainProvider.h"
@@ -498,6 +500,181 @@ TEST_F(S3ProviderTest, TestAliyunProvider) {
     auto creds = provider.GetAWSCredentials();
     EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
   }
+}
+
+namespace {
+
+struct AliyunRefreshEnvironment {
+  TempFile token_file{"synthetic_oidc_token"};
+  ScopedEnvVar role{"ALIBABA_CLOUD_ROLE_ARN", "acs:ram::123456:role/test-role"};
+  ScopedEnvVar token_path{"ALIBABA_CLOUD_OIDC_TOKEN_FILE", token_file.path()};
+  ScopedEnvVar oidc_provider{"ALIBABA_CLOUD_OIDC_PROVIDER_ARN", "acs:ram::123456:oidc-provider/test"};
+  ScopedEnvVar session{"ALIBABA_CLOUD_ROLE_SESSION_NAME", "test-refresh"};
+};
+
+std::string AliyunCredentialsXml(const std::string& prefix, const Aws::Utils::DateTime& expiration) {
+  return "<AssumeRoleWithOIDCResponse><Credentials><AccessKeyId>" + prefix + "_AK</AccessKeyId><AccessKeySecret>" +
+         prefix + "_SK</AccessKeySecret><SecurityToken>" + prefix + "_TOKEN</SecurityToken><Expiration>" +
+         std::string(expiration.ToGmtString(Aws::Utils::DateFormat::ISO_8601).c_str()) +
+         "</Expiration></Credentials></AssumeRoleWithOIDCResponse>";
+}
+
+std::vector<std::pair<std::string, std::string>> InvalidAliyunRefreshResponses() {
+  const auto valid = AliyunCredentialsXml("INVALID", Aws::Utils::DateTime::Now() + std::chrono::hours(1));
+  std::vector<std::pair<std::string, std::string>> responses{
+      {"empty body", ""},
+      {"malformed XML", valid.substr(0, valid.size() - 1)},
+      {"missing credentials", "<AssumeRoleWithOIDCResponse/>"},
+      {"unexpected root", "<Error><Code>InvalidIdentityToken</Code></Error>"},
+      {"expired credentials", AliyunCredentialsXml("EXPIRED", Aws::Utils::DateTime::Now() - std::chrono::hours(1))}};
+  for (const std::string field : {"AccessKeyId", "AccessKeySecret", "SecurityToken", "Expiration"}) {
+    const auto opening = "<" + field + ">";
+    const auto closing = "</" + field + ">";
+    const auto start = valid.find(opening);
+    const auto end = valid.find(closing);
+    auto missing = valid;
+    missing.erase(start, end + closing.size() - start);
+    responses.emplace_back("missing " + field, std::move(missing));
+    for (const std::string value : {"", "   "}) {
+      auto empty = valid;
+      empty.replace(start + opening.size(), end - start - opening.size(), value);
+      responses.emplace_back("empty " + field, std::move(empty));
+    }
+  }
+  auto invalid_expiration = valid;
+  const std::string opening = "<Expiration>";
+  const auto start = invalid_expiration.find(opening) + opening.size();
+  invalid_expiration.replace(start, invalid_expiration.find("</Expiration>") - start, "not-a-timestamp");
+  responses.emplace_back("invalid expiration", std::move(invalid_expiration));
+  return responses;
+}
+
+}  // namespace
+
+TEST_F(S3ProviderTest, AliyunFailedRefreshPreservesValidCredentialsAndRecovers) {
+  AliyunRefreshEnvironment env;
+  for (const auto& [name, body] : InvalidAliyunRefreshResponses()) {
+    SCOPED_TRACE(name);
+    // The old tuple is valid but already inside the 180-second refresh window.
+    mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK,
+                                  AliyunCredentialsXml("OLD", Aws::Utils::DateTime::Now() + std::chrono::seconds(120)));
+    mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, body);
+    mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK,
+                                  AliyunCredentialsXml("NEW", Aws::Utils::DateTime::Now() + std::chrono::hours(1)));
+    const auto requests_before = mock_client_->GetRecordedRequests().size();
+    AliyunSTSAssumeRoleWebIdentityCredentialsProvider provider;
+    const auto old = provider.GetAWSCredentials();
+    ASSERT_EQ(old.GetAWSAccessKeyId(), "OLD_AK");
+    EXPECT_EQ(provider.GetAWSCredentials(), old);
+    const auto rotated = provider.GetAWSCredentials();
+    EXPECT_EQ(rotated.GetAWSAccessKeyId(), "NEW_AK");
+    EXPECT_EQ(rotated.GetAWSSecretKey(), "NEW_SK");
+    EXPECT_EQ(rotated.GetSessionToken(), "NEW_TOKEN");
+    EXPECT_GT(rotated.GetExpiration(), old.GetExpiration());
+    EXPECT_EQ(provider.GetAWSCredentials(), rotated);
+    EXPECT_EQ(mock_client_->GetRecordedRequests().size(), requests_before + 3);
+  }
+}
+
+TEST_F(S3ProviderTest, AliyunInitialInvalidCredentialsAreEmptyAndRetried) {
+  AliyunRefreshEnvironment env;
+  for (const auto& [name, body] : InvalidAliyunRefreshResponses()) {
+    SCOPED_TRACE(name);
+    mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, body);
+    mock_client_->EnqueueResponse(
+        "sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK,
+        AliyunCredentialsXml("RECOVERED", Aws::Utils::DateTime::Now() + std::chrono::hours(1)));
+    const auto requests_before = mock_client_->GetRecordedRequests().size();
+    AliyunSTSAssumeRoleWebIdentityCredentialsProvider provider;
+    const auto empty = provider.GetAWSCredentials();
+    EXPECT_TRUE(empty.GetAWSAccessKeyId().empty());
+    EXPECT_TRUE(empty.GetAWSSecretKey().empty());
+    EXPECT_TRUE(empty.GetSessionToken().empty());
+    const auto recovered = provider.GetAWSCredentials();
+    EXPECT_EQ(recovered.GetAWSAccessKeyId(), "RECOVERED_AK");
+    EXPECT_EQ(recovered.GetAWSSecretKey(), "RECOVERED_SK");
+    EXPECT_EQ(recovered.GetSessionToken(), "RECOVERED_TOKEN");
+    EXPECT_FALSE(recovered.IsExpired());
+    EXPECT_EQ(mock_client_->GetRecordedRequests().size(), requests_before + 2);
+  }
+}
+
+TEST_F(S3ProviderTest, AliyunTokenFileFailurePreservesValidCredentials) {
+  AliyunRefreshEnvironment env;
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK,
+                                AliyunCredentialsXml("OLD", Aws::Utils::DateTime::Now() + std::chrono::seconds(120)));
+  AliyunSTSAssumeRoleWebIdentityCredentialsProvider provider;
+  const auto old = provider.GetAWSCredentials();
+  ASSERT_EQ(old.GetAWSAccessKeyId(), "OLD_AK");
+  const auto requests_before = mock_client_->GetRecordedRequests().size();
+  ASSERT_EQ(std::remove(env.token_file.path().c_str()), 0);
+  EXPECT_EQ(provider.GetAWSCredentials(), old);
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), requests_before);
+
+  std::ofstream(env.token_file.path()) << "rotated_synthetic_token";
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK,
+                                AliyunCredentialsXml("NEW", Aws::Utils::DateTime::Now() + std::chrono::hours(1)));
+  EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "NEW_AK");
+}
+
+TEST_F(S3ProviderTest, AliyunFailedRefreshDoesNotReturnExpiredCache) {
+  AliyunRefreshEnvironment env;
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK,
+                                AliyunCredentialsXml("OLD", Aws::Utils::DateTime::Now() + std::chrono::seconds(2)));
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK,
+                                AliyunCredentialsXml("NEW", Aws::Utils::DateTime::Now() + std::chrono::hours(1)));
+  AliyunSTSAssumeRoleWebIdentityCredentialsProvider provider;
+  const auto old = provider.GetAWSCredentials();
+  ASSERT_EQ(old.GetAWSAccessKeyId(), "OLD_AK");
+  // Wait for the actual parsed expiration, including ISO-8601 second truncation.
+  const auto expiration =
+      std::chrono::system_clock::time_point(std::chrono::milliseconds(old.GetExpiration().Millis()));
+  std::this_thread::sleep_until(expiration + std::chrono::milliseconds(100));
+  // Token-file failure leaves the old tuple in the cache, so this exercises
+  // the final expiration check independently of STS response validation.
+  ASSERT_EQ(std::remove(env.token_file.path().c_str()), 0);
+  const auto empty = provider.GetAWSCredentials();
+  EXPECT_TRUE(empty.GetAWSAccessKeyId().empty());
+  EXPECT_TRUE(empty.GetAWSSecretKey().empty());
+  EXPECT_TRUE(empty.GetSessionToken().empty());
+  std::ofstream(env.token_file.path()) << "rotated_synthetic_token";
+  EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "NEW_AK");
+}
+
+TEST_F(S3ProviderTest, AliyunConcurrentRefreshPublishesCompleteCredentials) {
+  AliyunRefreshEnvironment env;
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK,
+                                AliyunCredentialsXml("OLD", Aws::Utils::DateTime::Now() + std::chrono::seconds(120)));
+  AliyunSTSAssumeRoleWebIdentityCredentialsProvider provider;
+  const auto old = provider.GetAWSCredentials();
+  ASSERT_EQ(old.GetAWSAccessKeyId(), "OLD_AK");
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, "");
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK,
+                                AliyunCredentialsXml("NEW", Aws::Utils::DateTime::Now() + std::chrono::hours(1)));
+
+  std::promise<void> start;
+  const auto ready = start.get_future().share();
+  std::vector<std::future<Aws::Auth::AWSCredentials>> readers;
+  for (int i = 0; i < 16; ++i) {
+    readers.emplace_back(std::async(std::launch::async, [&provider, ready] {
+      ready.wait();
+      return provider.GetAWSCredentials();
+    }));
+  }
+  start.set_value();
+  std::vector<Aws::Auth::AWSCredentials> observed;
+  for (auto& reader : readers) {
+    observed.push_back(reader.get());
+  }
+  const auto rotated = provider.GetAWSCredentials();
+  ASSERT_EQ(rotated.GetAWSAccessKeyId(), "NEW_AK");
+  ASSERT_EQ(rotated.GetAWSSecretKey(), "NEW_SK");
+  ASSERT_EQ(rotated.GetSessionToken(), "NEW_TOKEN");
+  ASSERT_GT(rotated.GetExpiration(), old.GetExpiration());
+  for (const auto& credentials : observed) {
+    EXPECT_TRUE(credentials == old || credentials == rotated);
+  }
+  EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 3);
 }
 
 // ============================================================================
@@ -1882,8 +2059,8 @@ TEST_F(S3ProviderTest, AwsIamCredentialsPreferEnvironmentThenWebIdentityThenInst
   const auto& providers = chain->GetProviders();
   ASSERT_EQ(providers.size(), 3u);
   EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::EnvironmentAWSCredentialsProvider>(providers[0]), nullptr);
-  EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>(providers[1]), nullptr);
-  EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::InstanceProfileCredentialsProvider>(providers[2]), nullptr);
+  EXPECT_NE(std::dynamic_pointer_cast<ValidatedAwsCredentialsProvider>(providers[1]), nullptr);
+  EXPECT_NE(std::dynamic_pointer_cast<ValidatedAwsCredentialsProvider>(providers[2]), nullptr);
 
   // External callers can construct the same policy through the public header.
   const auto external_chain = std::make_shared<AwsCredentialsProviderChain>();
@@ -1918,7 +2095,7 @@ TEST_F(S3ProviderTest, AwsIamCredentialsExcludeInstanceProfileUnlessEnabled) {
     const auto& providers = chain->GetProviders();
     ASSERT_EQ(providers.size(), 2u);
     EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::EnvironmentAWSCredentialsProvider>(providers[0]), nullptr);
-    EXPECT_NE(std::dynamic_pointer_cast<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>(providers[1]), nullptr);
+    EXPECT_NE(std::dynamic_pointer_cast<ValidatedAwsCredentialsProvider>(providers[1]), nullptr);
   }
 }
 
@@ -2195,11 +2372,9 @@ TEST_F(S3ProviderTest, AwsBrokerRefreshFailureReturnsOldCredentialsAndRetriesEve
   EXPECT_EQ(provider->GetAWSCredentials().GetAWSAccessKeyId(), "first-key");
   now = now + std::chrono::seconds(60);
   mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK, denied);
-  ASSERT_AND_ASSIGN(auto expired_credentials, provider->GetCredentials());
-  EXPECT_EQ(expired_credentials.GetAWSAccessKeyId(), "first-key");
-  EXPECT_LT(expired_credentials.GetExpiration(), now);
+  EXPECT_FALSE(provider->GetCredentials().ok());
   mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK, denied);
-  EXPECT_EQ(provider->GetAWSCredentials().GetAWSAccessKeyId(), "first-key");
+  EXPECT_TRUE(provider->GetAWSCredentials().IsEmpty());
   EXPECT_EQ(mock_client_->GetRecordedRequests().size(), 4);
   mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
                                 AwsBrokerResponse("recovered-key", now + std::chrono::seconds(900)));
@@ -2216,6 +2391,8 @@ TEST_F(S3ProviderTest, AwsBrokerRejectsInvalidResponses) {
   for (const auto* field : {"tempAk", "tempSk", "sessionToken", "expiredAt"}) {
     auto body = valid;
     body["credentials"][field] = "";
+    bodies.push_back(body.dump());
+    body["credentials"][field] = "   ";
     bodies.push_back(body.dump());
   }
   auto invalid_date = valid;
@@ -2240,6 +2417,32 @@ TEST_F(S3ProviderTest, AwsBrokerRejectsInvalidResponses) {
   ASSERT_FALSE(result.ok());
   EXPECT_NE(result.status().ToString().find("503"), std::string::npos);
   EXPECT_NE(result.status().ToString().find("upstream timeout"), std::string::npos);
+}
+
+TEST_F(S3ProviderTest, AwsBrokerRechecksExpirationBeforePublishingRefresh) {
+  const auto start = Aws::Utils::DateTime::Now();
+  auto now = start;
+  bool refreshing = false;
+  size_t clock_calls = 0;
+  AwsCredentialBrokerProvider provider({"http://broker/v1/credentials/assume-role", "us-west-2", "role", "", 900, 1000},
+                                       [&] {
+                                         // Cache check, FetchCredentials validation, then publication validation.
+                                         if (refreshing && ++clock_calls == 3)
+                                           now = now + std::chrono::seconds(11);
+                                         return now;
+                                       });
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                AwsBrokerResponse("old-key", start + std::chrono::seconds(900)));
+  const auto old = provider.GetAWSCredentials();
+  ASSERT_EQ(old.GetAWSAccessKeyId(), "old-key");
+  now = start + std::chrono::seconds(850);
+  refreshing = true;
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                AwsBrokerResponse("too-late", now + std::chrono::seconds(10)));
+  EXPECT_EQ(provider.GetAWSCredentials(), old);
+  mock_client_->EnqueueResponse("http://broker/v1/credentials/assume-role", Aws::Http::HttpResponseCode::OK,
+                                AwsBrokerResponse("new-key", now + std::chrono::seconds(900)));
+  EXPECT_EQ(provider.GetAWSCredentials().GetAWSAccessKeyId(), "new-key");
 }
 
 TEST_F(S3ProviderTest, AwsBrokerRetriesAfterInitialFailure) {

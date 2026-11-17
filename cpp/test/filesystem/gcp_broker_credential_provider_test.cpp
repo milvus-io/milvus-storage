@@ -604,4 +604,47 @@ TEST(GcpCredentialProviderSelectionTest, HmacIsNotBearer) {
   EXPECT_EQ(provider.ValueOrDie()->Identity(), "hmac:ak");
 }
 
+TEST(GcpBrokerCredentialProviderTest, SlowRefreshRejectsCandidateExpiredDuringHttpAndRecovers) {
+  auto now = std::chrono::system_clock::from_time_t(1785146400);
+  auto transport = std::make_shared<MockTransport>();
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse("old", now + std::chrono::seconds(120)));
+  GcpBrokerCredentialProvider provider(MakeConfig(), transport, [&] { return now; });
+  ASSERT_EQ(provider.AuthorizationHeader()->second, "Bearer old");
+  now += std::chrono::seconds(90);
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse("short", now + std::chrono::seconds(1)));
+  transport->SetOnSend([&](size_t) { now += std::chrono::seconds(2); });
+  auto fallback = provider.AuthorizationHeader();
+  ASSERT_TRUE(fallback.has_value());
+  EXPECT_EQ(fallback->second, "Bearer old");
+  transport->SetOnSend({});
+  now += std::chrono::seconds(3);
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse("new", now + std::chrono::hours(1)));
+  auto recovered = provider.AuthorizationHeader();
+  ASSERT_TRUE(recovered.has_value());
+  EXPECT_EQ(recovered->second, "Bearer new");
+}
+
+TEST(GcpBrokerCredentialProviderTest, InvalidRefreshPreservesValidCacheAndRecovers) {
+  for (const auto* invalid :
+       {"{", R"({"success":true})",
+        R"({"success":true,"credentials":{"sessionToken":"","expiredAt":"2099-01-01T00:00:00Z"}})",
+        R"({"success":true,"credentials":{"sessionToken":"new","expiredAt":"invalid"}})"}) {
+    auto now = std::chrono::system_clock::from_time_t(1785146400);
+    auto transport = std::make_shared<MockTransport>();
+    transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse("old", now + std::chrono::seconds(120)));
+    GcpBrokerCredentialProvider provider(MakeConfig(), transport, [&] { return now; });
+    ASSERT_EQ(provider.AuthorizationHeader()->second, "Bearer old");
+    now += std::chrono::seconds(90);
+    transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, invalid);
+    auto fallback = provider.AuthorizationHeader();
+    ASSERT_TRUE(fallback.has_value());
+    EXPECT_EQ(fallback->second, "Bearer old");
+    now += std::chrono::seconds(3);
+    transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse("new", now + std::chrono::hours(1)));
+    auto recovered = provider.AuthorizationHeader();
+    ASSERT_TRUE(recovered.has_value());
+    EXPECT_EQ(recovered->second, "Bearer new");
+  }
+}
+
 }  // namespace milvus_storage

@@ -21,6 +21,7 @@
 #include <aws/core/auth/AWSCredentialsProvider.h>
 #include <aws/core/client/DefaultRetryStrategy.h>
 #include <aws/identity-management/auth/STSAssumeRoleCredentialsProvider.h>
+#include "milvus-storage/filesystem/s3/provider/AwsCredentialsProvider.h"
 
 #include "milvus-storage/common/log.h"
 #include <arrow/util/logging.h>
@@ -87,7 +88,7 @@ std::shared_ptr<S3RetryStrategy> S3RetryStrategy::GetAwsStandardRetryStrategy(in
 S3Options::S3Options() { DCHECK(IsS3Initialized()) << "Must initialize S3 before using S3Options"; }
 
 void S3Options::ConfigureDefaultCredentials() {
-  credentials_provider = std::make_shared<Aws::Auth::DefaultAWSCredentialsProviderChain>();
+  credentials_provider = MakeAwsDefaultCredentialsProviderChain();
   credentials_kind = S3CredentialsKind::Default;
 }
 
@@ -110,9 +111,9 @@ void S3Options::ConfigureAssumeRoleCredentials(const std::string& role_arn,
                                                const std::string& external_id,
                                                int load_frequency,
                                                const std::shared_ptr<Aws::STS::STSClient>& stsClient) {
-  credentials_provider = std::make_shared<Aws::Auth::STSAssumeRoleCredentialsProvider>(
-      fs::internal::ToAwsString(role_arn), fs::internal::ToAwsString(session_name),
-      fs::internal::ToAwsString(external_id), load_frequency, stsClient);
+  credentials_provider =
+      MakeAwsAssumeRoleCredentialsProvider(fs::internal::ToAwsString(role_arn), fs::internal::ToAwsString(session_name),
+                                           fs::internal::ToAwsString(external_id), load_frequency, stsClient);
   credentials_kind = S3CredentialsKind::Role;
 }
 
@@ -120,7 +121,7 @@ void S3Options::ConfigureAssumeRoleWithWebIdentityCredentials() {
   // The AWS SDK uses environment variables AWS_DEFAULT_REGION,
   // AWS_ROLE_ARN, AWS_WEB_IDENTITY_TOKEN_FILE and AWS_ROLE_SESSION_NAME
   // to configure the required credentials
-  credentials_provider = std::make_shared<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>();
+  credentials_provider = MakeAwsWebIdentityCredentialsProvider();
   credentials_kind = S3CredentialsKind::WebIdentity;
 }
 

@@ -46,6 +46,7 @@
 #include "milvus-storage/filesystem/credential_broker.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/provider/AwsCredentialBrokerProvider.h"
+#include "milvus-storage/filesystem/s3/provider/AwsCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudOIDCAssumeRoleChainProvider.h"
@@ -108,12 +109,12 @@ class TlsHttpClientFactory : public Aws::Http::HttpClientFactory {
 
 AwsCredentialsProviderChain::AwsCredentialsProviderChain() {
   AddProvider(std::make_shared<Aws::Auth::EnvironmentAWSCredentialsProvider>());
-  AddProvider(std::make_shared<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>());
+  AddProvider(MakeAwsWebIdentityCredentialsProvider());
 
   // Keep Node Role fallback opt-in: the SDK may cache it after an IRSA failure.
   const auto metadata_enabled = Aws::Environment::GetEnv("AWS_EC2_METADATA_ENABLE");
   if (Aws::Utils::StringUtils::ToLower(metadata_enabled.c_str()) == "true") {
-    AddProvider(std::make_shared<Aws::Auth::InstanceProfileCredentialsProvider>());
+    AddProvider(MakeAwsInstanceProfileCredentialsProvider());
   }
 }
 
@@ -251,7 +252,9 @@ arrow::Status S3FileSystemProducer::ConfigureAssumeRoleCredentials(S3Options& op
     if (!config_.region.empty()) {
       Aws::Client::ClientConfiguration sts_config;
       sts_config.region = config_.region.c_str();
-      sts_client = Aws::MakeShared<Aws::STS::STSClient>("S3FileSystemProducer", sts_config);
+      sts_client = Aws::MakeShared<Aws::STS::STSClient>(
+          "S3FileSystemProducer", MakeAwsDefaultCredentialsProviderChain(sts_config.ResolveCredentialProviderConfig()),
+          sts_config);
     }
     options.ConfigureAssumeRoleCredentials(config_.role_arn, config_.session_name, config_.external_id,
                                            config_.load_frequency, sts_client);

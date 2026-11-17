@@ -15,6 +15,7 @@
  */
 
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/native_sts_credentials.h"
 
 #include "milvus-storage/common/log.h"
 
@@ -112,7 +113,7 @@ Aws::Auth::AWSCredentials TencentCloudSTSAssumeRoleWebIdentityCredentialsProvide
   }
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
-  return m_credentials;
+  return native_sts::IsUsable(m_credentials) ? m_credentials : Aws::Auth::AWSCredentials{};
 }
 
 void TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
@@ -135,9 +136,10 @@ void TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
                                                                                 m_roleArn, m_sessionName};
 
   auto result = m_client->GetAssumeRoleWithWebIdentityCredentials(request);
-  LOG_STORAGE_DEBUG_ << fmt::format("[{}] Successfully retrieved credentials, expiration_count_diff_ms: {}",
-                                    STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                                    (result.creds.GetExpiration() - Aws::Utils::DateTime::Now()).count());
+  if (!native_sts::IsUsable(result.creds)) {
+    LOG_STORAGE_WARNING_ << "Tencent STS refresh failed; retaining cached credentials until expiration";
+    return;
+  }
   m_credentials = result.creds;
 }
 

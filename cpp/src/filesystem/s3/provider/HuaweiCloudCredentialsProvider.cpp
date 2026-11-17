@@ -1,4 +1,5 @@
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/native_sts_credentials.h"
 
 #include "milvus-storage/common/log.h"
 
@@ -109,7 +110,7 @@ Aws::Auth::AWSCredentials HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider
         STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
     return {};
   }
-  return m_credentials;
+  return native_sts::IsUsable(m_credentials) ? m_credentials : Aws::Auth::AWSCredentials{};
 }
 
 void HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
@@ -158,11 +159,11 @@ void HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
     return;
   }
 
-  if (creds.GetAWSAccessKeyId().empty() || creds.GetAWSSecretKey().empty() || creds.GetSessionToken().empty()) {
+  if (!native_sts::IsUsable(creds)) {
     ++m_stsFailureCount;
     bool hasExisting = !m_credentials.IsEmpty() && !m_credentials.IsExpired();
     LOG_STORAGE_WARNING_ << fmt::format(
-        "[{}] STS returned incomplete credentials (missing ak/sk/token). "
+        "[{}] STS returned incomplete or expired credentials. "
         "has_valid_cached={}, retaining existing credentials. sts_success={}, "
         "sts_failure={}",
         STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, hasExisting, m_stsSuccessCount.load(), m_stsFailureCount.load());

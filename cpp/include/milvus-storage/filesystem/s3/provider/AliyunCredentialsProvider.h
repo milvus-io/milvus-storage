@@ -43,7 +43,9 @@ class AWS_CORE_API AliyunSTSAssumeRoleWebIdentityCredentialsProvider : public ::
   AliyunSTSAssumeRoleWebIdentityCredentialsProvider(const ::Aws::String& role_arn, const ::Aws::String& session_name);
 
   /**
-   * Retrieves the credentials if found, otherwise returns empty credential set.
+   * Retrieves unexpired credentials. A failed refresh preserves a still-valid
+   * cached tuple. If none is available, returns an empty credential set and
+   * retries the refresh on the next call.
    */
   ::Aws::Auth::AWSCredentials GetAWSCredentials() override;
 

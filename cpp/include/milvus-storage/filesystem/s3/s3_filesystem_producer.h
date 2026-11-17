@@ -34,8 +34,10 @@ namespace milvus_storage {
 /// Initial lookup order: environment AK/SK (with an optional session token),
 /// then STS Web Identity (IRSA). EC2 instance-profile credentials are added last
 /// only when AWS_EC2_METADATA_ENABLE equals "true", ignoring case, at construction.
-/// No profile, SSO, or container credential providers are added. With EC2 enabled,
-/// an IRSA failure can fall back to the Node Role, which the SDK chain may cache.
+/// No profile, SSO, or container credential providers are added. Each temporary
+/// source preserves its unexpired credentials on refresh failure. With EC2 enabled,
+/// unavailable/expired IRSA credentials can fall back to the Node Role, which the
+/// SDK chain may cache.
 /// Construct and destroy this provider within the initialized AWS SDK lifetime.
 class AwsCredentialsProviderChain final : public Aws::Auth::AWSCredentialsProviderChain {
   public:

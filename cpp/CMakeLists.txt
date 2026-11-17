@@ -39,6 +39,7 @@ find_package(opentelemetry-cpp REQUIRED)
 find_package(google-cloud-cpp REQUIRED)
 find_package(CURL REQUIRED)
 find_package(AWSSDK REQUIRED CONFIG)
+find_package(aws-crt-cpp REQUIRED CONFIG)
 find_package(aws-c-io REQUIRED CONFIG)
 find_package(aws-c-http REQUIRED CONFIG)
 find_package(aws-c-s3 REQUIRED CONFIG)
@@ -93,6 +94,7 @@ list(APPEND LINK_LIBS
   protobuf::protobuf
   nlohmann_json::nlohmann_json
   AWS::aws-sdk-cpp-identity-management
+  AWS::aws-crt-cpp
   AWS::aws-c-io
   AWS::aws-c-http
   AWS::aws-c-s3

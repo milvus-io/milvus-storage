@@ -20,6 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: SDK exception classifier tests
+        run: python3 cpp/scripts/test_error_handling_sdk_exceptions.py
+
       - name: fetch base baseline
         if: github.event_name == 'pull_request'
         # The base branch's baseline closes the self-reference loophole:

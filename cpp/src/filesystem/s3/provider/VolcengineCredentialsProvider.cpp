@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/s3/provider/VolcengineCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/native_sts_credentials.h"
 #include "milvus-storage/filesystem/s3/provider/VolcengineSTSClient.h"
 #include "milvus-storage/common/log.h"
 #include <aws/core/internal/AWSHttpResourceClient.h>
@@ -123,7 +124,7 @@ Aws::Auth::AWSCredentials VolcengineSTSAssumeRoleWebIdentityCredentialsProvider:
   }
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
-  return m_credentials;
+  return native_sts::IsUsable(m_credentials) ? m_credentials : Aws::Auth::AWSCredentials{};
 }
 
 void VolcengineSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
@@ -145,7 +146,7 @@ void VolcengineSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
   VolcengineSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{m_token, m_roleArn, m_sessionName};
 
   auto result = m_client->GetAssumeRoleWithWebIdentityCredentials(request);
-  if (result.creds.IsEmpty()) {
+  if (!native_sts::IsUsable(result.creds)) {
     LOG_STORAGE_ERROR_ << fmt::format("[{}] Failed to retrieve valid credentials - credentials are empty",
                                       STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
   } else {

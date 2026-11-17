@@ -205,10 +205,11 @@ arrow::Result<std::string> GcpBrokerCredentialProvider::FetchToken(TimePoint now
 
     const auto parsed = Azure::DateTime::Parse(broker_response.token.expired_at, Azure::DateTime::DateFormat::Rfc3339);
     const auto expiration = static_cast<std::chrono::system_clock::time_point>(parsed);
-    if (expiration <= now) {
+    const auto completed_at = clock_();
+    if (expiration <= completed_at) {
       return arrow::Status::IOError(
           "GCP credential broker returned an expired token: expiredAt=", broker_response.token.expired_at,
-          ", current_time=", Azure::DateTime(now).ToString(Azure::DateTime::DateFormat::Rfc3339));
+          ", current_time=", Azure::DateTime(completed_at).ToString(Azure::DateTime::DateFormat::Rfc3339));
     }
 
     // The Broker cannot grant a longer lifetime than this provider asked for.
@@ -307,6 +308,9 @@ arrow::Result<std::string> GcpBrokerCredentialProvider::GetToken() {
   auto fetched = FetchTokenWithRetries(allow_retries, &expires_at);
   lock.lock();
   fetch_in_flight_ = false;
+  if (fetched.ok() && expires_at <= clock_()) {
+    fetched = arrow::Status::IOError("GCP credential broker token expired before publication");
+  }
   if (fetched.ok()) {
     cached_ = CachedToken{std::move(fetched).ValueOrDie(), expires_at};
     last_failure_at_.reset();

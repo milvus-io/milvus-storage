@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "milvus-storage/filesystem/s3/provider/native_sts_credentials.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMSTSClient.h"
 
 #include "milvus-storage/common/log.h"
@@ -175,35 +176,32 @@ AliyunRAMSTSClient::AssumeRoleResult AliyunRAMSTSClient::GetAssumeRoleCredential
   //   </Credentials>
   // </AssumeRoleResponse>
   const auto doc = Aws::Utils::Xml::XmlDocument::CreateFromXmlString(payload);
+  if (!doc.WasParseSuccessful())
+    return {};
   auto root = doc.GetRootElement();
   auto resultNode = root;
   if (!root.IsNull() && root.GetName() != "AssumeRoleResponse") {
     resultNode = root.FirstChild("AssumeRoleResponse");
   }
-  if (resultNode.IsNull()) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Unexpected AssumeRole response root: {}", kLogTag, payload);
-    return result;
-  }
+  if (resultNode.IsNull())
+    return {};
   auto credentials = resultNode.FirstChild("Credentials");
-  if (credentials.IsNull()) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Missing <Credentials> in AssumeRole response: {}", kLogTag, payload);
-    return result;
-  }
-
-  auto ak_node = credentials.FirstChild("AccessKeyId");
-  if (!ak_node.IsNull())
-    result.creds.SetAWSAccessKeyId(ak_node.GetText());
-  auto sk_node = credentials.FirstChild("AccessKeySecret");
-  if (!sk_node.IsNull())
-    result.creds.SetAWSSecretKey(sk_node.GetText());
-  auto tok_node = credentials.FirstChild("SecurityToken");
-  if (!tok_node.IsNull())
-    result.creds.SetSessionToken(tok_node.GetText());
-  auto exp_node = credentials.FirstChild("Expiration");
-  if (!exp_node.IsNull()) {
-    result.creds.SetExpiration(Aws::Utils::DateTime(Aws::Utils::StringUtils::Trim(exp_node.GetText().c_str()).c_str(),
-                                                    Aws::Utils::DateFormat::ISO_8601));
-  }
+  if (credentials.IsNull())
+    return {};
+  auto access = credentials.FirstChild("AccessKeyId");
+  auto secret = credentials.FirstChild("AccessKeySecret");
+  auto token = credentials.FirstChild("SecurityToken");
+  auto expiry = credentials.FirstChild("Expiration");
+  if (access.IsNull() || secret.IsNull() || token.IsNull() || expiry.IsNull())
+    return {};
+  Aws::Auth::AWSCredentials candidate(
+      Aws::Utils::StringUtils::Trim(access.GetText().c_str()), Aws::Utils::StringUtils::Trim(secret.GetText().c_str()),
+      Aws::Utils::StringUtils::Trim(token.GetText().c_str()),
+      Aws::Utils::DateTime(Aws::Utils::StringUtils::Trim(expiry.GetText().c_str()).c_str(),
+                           Aws::Utils::DateFormat::ISO_8601));
+  if (!native_sts::IsUsable(candidate))
+    return {};
+  result.creds = std::move(candidate);
   return result;
 }
 

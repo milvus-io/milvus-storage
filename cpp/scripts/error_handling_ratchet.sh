@@ -24,8 +24,10 @@
 # Category counted (per line, per file):
 #   throw : any `throw` statement (raw std exceptions, bridge exception types,
 #           rethrows). Ring-1 discipline: the library must not leak exceptions,
-#           so in library code ANY throw is a violation -- textual counting IS
-#           the semantic judgment for this category. Comments are stripped
+#           so library throws are violations except the two explicitly reviewed
+#           Azure SDK callback sites in error_handling_sdk_exceptions.md. That
+#           narrow classifier checks path, boundary, exact expression and count;
+#           it is not a file exemption or a raised baseline. Comments are stripped
 #           before counting (gcc -fpreprocessed -E removes comments without
 #           expanding includes), so commented mentions do not count; string
 #           literals containing `throw` would still count (none exist today).
@@ -48,9 +50,8 @@
 #
 # Known counting limits (kept simple on purpose; the gate is a ratchet, not a
 # semantic linter):
-#   * matches inside comments/strings are counted too, so a file can mask a
-#     new real site by deleting a commented one (and unrelated comment edits
-#     require a baseline regen);
+#   * string literals containing the word throw are counted too; comments are
+#     removed by the preprocessor;
 #   * grep -c counts matching LINES, not call sites: two sites on one line
 #     count once, and a site added to an already-matching line does not trip
 #     the gate.
@@ -88,7 +89,12 @@ collect() {
           *.cpp | *.cc | *.h | *.hpp) ;;
           *) continue ;;
         esac
-        throw_n=$(gcc -fpreprocessed -dD -E -P "$f" 2>/dev/null | grep -cE '\bthrow\b' || true)
+        if [ "$f" = "cpp/src/filesystem/azure/refreshing_token_credential.cpp" ]; then
+          throw_n=$(gcc -fpreprocessed -dD -E -P "$f" 2>/dev/null \
+            | python3 cpp/scripts/error_handling_sdk_exceptions.py "$f")
+        else
+          throw_n=$(gcc -fpreprocessed -dD -E -P "$f" 2>/dev/null | grep -cE '\bthrow\b' || true)
+        fi
         if [ "$throw_n" -gt 0 ]; then printf 'throw\t%s\t%s\n' "$f" "$throw_n"; fi
       done | LC_ALL=C sort
 }
