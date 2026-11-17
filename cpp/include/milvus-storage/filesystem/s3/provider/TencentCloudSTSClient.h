@@ -62,6 +62,8 @@ class AWS_CORE_API TencentCloudSTSCredentialsClient : public Aws::Internal::AWSH
     Aws::Auth::AWSCredentials creds;
   };
 
+  // Returns a complete, unexpired tuple with an explicit expiration, or empty
+  // credentials on HTTP, JSON or credential validation failure.
   STSAssumeRoleWithWebIdentityResult GetAssumeRoleWithWebIdentityCredentials(
       const STSAssumeRoleWithWebIdentityRequest& request);
 
@@ -73,6 +75,8 @@ class AWS_CORE_API TencentCloudSTSCredentialsClient : public Aws::Internal::AWSH
     Aws::String externalId;
   };
 
+  // Returns a complete, unexpired tuple with an explicit expiration, or empty
+  // credentials on HTTP, JSON or credential validation failure.
   Aws::Auth::AWSCredentials GetAssumeRoleCredentials(const STSAssumeRoleRequest& request);
 
   private:

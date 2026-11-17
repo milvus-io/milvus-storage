@@ -28,6 +28,8 @@ class AWS_CORE_API HuaweiCloudSTSCredentialsClient : public ::Aws::Internal::AWS
     Aws::Auth::AWSCredentials creds;
   };
 
+  // Returns success=true only when a complete, unexpired tuple with an explicit
+  // expiration was parsed from Stage 2.
   virtual STSAssumeRoleWithWebIdentityResult GetAssumeRoleWithWebIdentityCredentials(
       const STSAssumeRoleWithWebIdentityRequest& request);
 

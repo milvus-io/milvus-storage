@@ -61,6 +61,9 @@ VolcengineOIDCAssumeRoleChainProvider::VolcengineOIDCAssumeRoleChainProvider(con
 Aws::Auth::AWSCredentials VolcengineOIDCAssumeRoleChainProvider::GetAWSCredentials() {
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
+  if (m_credentials.IsExpired()) {
+    return {};
+  }
   return m_credentials;
 }
 
@@ -87,7 +90,7 @@ void VolcengineOIDCAssumeRoleChainProvider::Reload() {
 
   // Step 1: inner provider self-refreshes on call.
   Aws::Auth::AWSCredentials inner = m_innerOidc->GetAWSCredentials();
-  if (inner.IsEmpty()) {
+  if (inner.IsExpiredOrEmpty()) {
     LOG_STORAGE_ERROR_ << fmt::format(
         "[{}] Inner OIDC step returned empty credentials; cannot chain to target_role_trn={}", kLogTag,
         m_targetRoleTrn);
@@ -120,14 +123,14 @@ void VolcengineOIDCAssumeRoleChainProvider::Reload() {
                                    m_targetRoleTrn);
 
   auto res = m_stsClient->GetAssumeRoleCredentials(req);
-  if (res.creds.IsEmpty()) {
+  if (res.creds.IsExpiredOrEmpty()) {
     LOG_STORAGE_ERROR_ << fmt::format(
-        "[{}] Cross-account AssumeRole returned empty credentials; target_role_trn={} "
+        "[{}] Cross-account AssumeRole returned invalid or expired credentials; target_role_trn={} "
         "— check the target role's trust policy lists the step-1 machine role as Principal",
         kLogTag, m_targetRoleTrn);
     return;
   }
-  m_credentials = res.creds;
+  m_credentials = std::move(res.creds);
   LOG_STORAGE_INFO_ << fmt::format("[{}] OIDC chain succeeded; target_role_trn={} expires={}", kLogTag, m_targetRoleTrn,
                                    m_credentials.GetExpiration().ToGmtString(Aws::Utils::DateFormat::ISO_8601));
 }

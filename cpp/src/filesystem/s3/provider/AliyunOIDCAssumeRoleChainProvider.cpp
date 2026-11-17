@@ -57,6 +57,9 @@ AliyunOIDCAssumeRoleChainProvider::AliyunOIDCAssumeRoleChainProvider(const Aws::
 Aws::Auth::AWSCredentials AliyunOIDCAssumeRoleChainProvider::GetAWSCredentials() {
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
+  if (m_credentials.IsExpired()) {
+    return {};
+  }
   return m_credentials;
 }
 
@@ -83,7 +86,7 @@ void AliyunOIDCAssumeRoleChainProvider::Reload() {
 
   // Step 1: inner provider self-refreshes on call.
   Aws::Auth::AWSCredentials inner = m_innerOidc->GetAWSCredentials();
-  if (inner.IsEmpty()) {
+  if (inner.IsExpiredOrEmpty()) {
     LOG_STORAGE_ERROR_ << fmt::format(
         "[{}] Inner OIDC step returned empty credentials; cannot chain to "
         "target_role_arn={}",
@@ -107,14 +110,14 @@ void AliyunOIDCAssumeRoleChainProvider::Reload() {
                                    !req.externalId.empty());
 
   auto res = m_stsClient->GetAssumeRoleCredentials(req);
-  if (res.creds.IsEmpty()) {
+  if (res.creds.IsExpiredOrEmpty()) {
     LOG_STORAGE_ERROR_ << fmt::format(
-        "[{}] Cross-account AssumeRole returned empty credentials; target_role_arn={} "
+        "[{}] Cross-account AssumeRole returned invalid or expired credentials; target_role_arn={} "
         "— check the target role's trust policy lists the OIDC step-1 role as Principal",
         kLogTag, m_targetRoleArn);
     return;
   }
-  m_credentials = res.creds;
+  m_credentials = std::move(res.creds);
   LOG_STORAGE_INFO_ << fmt::format("[{}] OIDC chain succeeded; target_role_arn={} expires={}", kLogTag, m_targetRoleArn,
                                    m_credentials.GetExpiration().ToGmtString(Aws::Utils::DateFormat::ISO_8601));
 }

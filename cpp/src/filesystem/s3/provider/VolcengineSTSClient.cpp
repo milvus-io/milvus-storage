@@ -184,11 +184,74 @@ arrow::Status ParseStsExpiry(const Aws::String& rawExpiry, Aws::Auth::AWSCredent
   const Aws::String trimmed = Aws::Utils::StringUtils::Trim(rawExpiry.c_str());
   const Aws::Crt::DateTime expiration(trimmed.c_str(), Aws::Crt::DateFormat::ISO_8601);
   if (!expiration) {
-    return arrow::Status::Invalid("ISO-8601 parser rejected STS expiry: ", trimmed.c_str(), "; ",
+    return arrow::Status::Invalid("ISO-8601 parser rejected STS expiry: ",
                                   Aws::Crt::ErrorDebugString(expiration.GetLastError()));
   }
   creds.SetExpiration(Aws::Utils::DateTime(expiration.UnderlyingTimestamp()));
   return arrow::Status::OK();
+}
+
+bool ParseStsCredentials(const Aws::Utils::Json::JsonView& jsonView,
+                         bool allowExpiredTimeAlias,
+                         const char* opName,
+                         Aws::Auth::AWSCredentials& out) {
+  if (!jsonView.IsObject()) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] {} response is not a JSON object", STS_RESOURCE_CLIENT_LOG_TAG, opName);
+    return false;
+  }
+  auto json = jsonView.GetAllObjects();
+  if (!json.count("Result") || !json.at("Result").IsObject()) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get 'Result' object from {} response failed", STS_RESOURCE_CLIENT_LOG_TAG,
+                                        opName);
+    return false;
+  }
+  auto resultNode = json.at("Result").GetAllObjects();
+  if (!resultNode.count("Credentials") || !resultNode.at("Credentials").IsObject()) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get 'Credentials' object from {} Result failed",
+                                        STS_RESOURCE_CLIENT_LOG_TAG, opName);
+    return false;
+  }
+  auto credentialsNode = resultNode.at("Credentials").GetAllObjects();
+
+  for (const char* name : {"AccessKeyId", "SecretAccessKey", "SessionToken"}) {
+    if (!credentialsNode.count(name) || !credentialsNode.at(name).IsString() ||
+        Aws::Utils::StringUtils::Trim(credentialsNode.at(name).AsString().c_str()).empty()) {
+      LOG_STORAGE_WARNING_ << fmt::format("[{}] Rejecting {} credentials: missing or invalid '{}'",
+                                          STS_RESOURCE_CLIENT_LOG_TAG, opName, name);
+      return false;
+    }
+  }
+
+  Aws::String expiryStr;
+  if (allowExpiredTimeAlias && credentialsNode.count("ExpiredTime")) {
+    if (!credentialsNode.at("ExpiredTime").IsString() ||
+        Aws::Utils::StringUtils::Trim(credentialsNode.at("ExpiredTime").AsString().c_str()).empty()) {
+      LOG_STORAGE_WARNING_ << fmt::format("[{}] Rejecting {} credentials: invalid 'ExpiredTime'",
+                                          STS_RESOURCE_CLIENT_LOG_TAG, opName);
+      return false;
+    }
+    expiryStr = credentialsNode.at("ExpiredTime").AsString();
+  } else if (credentialsNode.count("Expiration") && credentialsNode.at("Expiration").IsString() &&
+             !Aws::Utils::StringUtils::Trim(credentialsNode.at("Expiration").AsString().c_str()).empty()) {
+    expiryStr = credentialsNode.at("Expiration").AsString();
+  } else {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Rejecting {} credentials: missing or invalid expiration",
+                                        STS_RESOURCE_CLIENT_LOG_TAG, opName);
+    return false;
+  }
+
+  Aws::Auth::AWSCredentials parsed(credentialsNode.at("AccessKeyId").AsString(),
+                                   credentialsNode.at("SecretAccessKey").AsString(),
+                                   credentialsNode.at("SessionToken").AsString());
+  const auto expiry_status = ParseStsExpiry(expiryStr, parsed);
+  if (!expiry_status.ok() || parsed.IsExpired()) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Rejecting {} credentials: {}", STS_RESOURCE_CLIENT_LOG_TAG, opName,
+                                        expiry_status.ok() ? "already expired" : expiry_status.ToString());
+    return false;
+  }
+
+  out = std::move(parsed);
+  return true;
 }
 
 int ClampDurationSeconds(int duration) {
@@ -288,25 +351,7 @@ VolcengineSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
     return result;
   }
   auto json = jsonValue.View();
-  if (!json.ValueExists("Result")) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get 'Result' node from response failed", STS_RESOURCE_CLIENT_LOG_TAG);
-    return result;
-  }
-  auto resultNode = json.GetObject("Result");
-
-  if (!resultNode.ValueExists("Credentials")) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get 'Credentials' node from Result failed", STS_RESOURCE_CLIENT_LOG_TAG);
-    return result;
-  }
-  auto credentialsNode = resultNode.GetObject("Credentials");
-
-  result.creds.SetAWSAccessKeyId(credentialsNode.GetString("AccessKeyId"));
-  result.creds.SetAWSSecretKey(credentialsNode.GetString("SecretAccessKey"));
-  result.creds.SetSessionToken(credentialsNode.GetString("SessionToken"));
-  const auto expiry_status = ParseStsExpiry(credentialsNode.GetString("Expiration"), result.creds);
-  if (!expiry_status.ok()) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Rejecting AssumeRoleWithOIDC credentials: {}",
-                                        STS_RESOURCE_CLIENT_LOG_TAG, expiry_status.ToString());
+  if (!ParseStsCredentials(json, false, "AssumeRoleWithOIDC", result.creds)) {
     return {};
   }
 
@@ -383,6 +428,14 @@ VolcengineSTSCredentialsClient::V4SignResult VolcengineSTSCredentialsClient::Sig
 VolcengineSTSCredentialsClient::STSAssumeRoleResult VolcengineSTSCredentialsClient::GetAssumeRoleCredentials(
     const STSAssumeRoleRequest& request) {
   STSAssumeRoleResult result;
+  if (Aws::Utils::StringUtils::Trim(request.callerAccessKeyId.c_str()).empty() ||
+      Aws::Utils::StringUtils::Trim(request.callerAccessKeySecret.c_str()).empty() ||
+      Aws::Utils::StringUtils::Trim(request.roleTrn.c_str()).empty() ||
+      Aws::Utils::StringUtils::Trim(request.roleSessionName.c_str()).empty()) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Rejecting AssumeRole request with empty caller or role fields",
+                                        STS_RESOURCE_CLIENT_LOG_TAG);
+    return result;
+  }
 
   // --- Request layout -----------------------------------------------------
   // Common params (Action, Version) live in the query string; the business
@@ -463,31 +516,7 @@ VolcengineSTSCredentialsClient::STSAssumeRoleResult VolcengineSTSCredentialsClie
     return result;
   }
   auto json = jsonValue.View();
-  if (!json.ValueExists("Result")) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get 'Result' node from AssumeRole response failed",
-                                        STS_RESOURCE_CLIENT_LOG_TAG);
-    return result;
-  }
-  auto resultNode = json.GetObject("Result");
-  if (!resultNode.ValueExists("Credentials")) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get 'Credentials' node from AssumeRole Result failed",
-                                        STS_RESOURCE_CLIENT_LOG_TAG);
-    return result;
-  }
-  auto credentialsNode = resultNode.GetObject("Credentials");
-
-  result.creds.SetAWSAccessKeyId(credentialsNode.GetString("AccessKeyId"));
-  result.creds.SetAWSSecretKey(credentialsNode.GetString("SecretAccessKey"));
-  result.creds.SetSessionToken(credentialsNode.GetString("SessionToken"));
-  // AssumeRole uses "ExpiredTime"; keep accepting "Expiration" as an alias.
-  Aws::String expiredTimeStr = credentialsNode.GetString("ExpiredTime");
-  if (expiredTimeStr.empty()) {
-    expiredTimeStr = credentialsNode.GetString("Expiration");
-  }
-  const auto expiry_status = ParseStsExpiry(expiredTimeStr, result.creds);
-  if (!expiry_status.ok()) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Rejecting AssumeRole credentials: {}", STS_RESOURCE_CLIENT_LOG_TAG,
-                                        expiry_status.ToString());
+  if (!ParseStsCredentials(json, true, "AssumeRole", result.creds)) {
     return {};
   }
 

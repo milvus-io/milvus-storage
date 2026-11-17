@@ -112,6 +112,9 @@ Aws::Auth::AWSCredentials TencentCloudSTSAssumeRoleWebIdentityCredentialsProvide
   }
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
+  if (m_credentials.IsExpired()) {
+    return {};
+  }
   return m_credentials;
 }
 
@@ -135,10 +138,15 @@ void TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
                                                                                 m_roleArn, m_sessionName};
 
   auto result = m_client->GetAssumeRoleWithWebIdentityCredentials(request);
+  if (result.creds.IsExpiredOrEmpty()) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] STS refresh failed; retaining cached credentials until expiration.",
+                                        STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
+    return;
+  }
+  m_credentials = std::move(result.creds);
   LOG_STORAGE_DEBUG_ << fmt::format("[{}] Successfully retrieved credentials, expiration_count_diff_ms: {}",
                                     STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                                    (result.creds.GetExpiration() - Aws::Utils::DateTime::Now()).count());
-  m_credentials = result.creds;
+                                    (m_credentials.GetExpiration() - Aws::Utils::DateTime::Now()).count());
 }
 
 bool TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::ExpiresSoon() const {

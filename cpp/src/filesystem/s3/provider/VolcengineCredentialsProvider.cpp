@@ -123,6 +123,9 @@ Aws::Auth::AWSCredentials VolcengineSTSAssumeRoleWebIdentityCredentialsProvider:
   }
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
+  if (m_credentials.IsExpired()) {
+    return {};
+  }
   return m_credentials;
 }
 
@@ -145,12 +148,12 @@ void VolcengineSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
   VolcengineSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{m_token, m_roleArn, m_sessionName};
 
   auto result = m_client->GetAssumeRoleWithWebIdentityCredentials(request);
-  if (result.creds.IsEmpty()) {
-    LOG_STORAGE_ERROR_ << fmt::format("[{}] Failed to retrieve valid credentials - credentials are empty",
+  if (result.creds.IsExpiredOrEmpty()) {
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] Failed to retrieve valid credentials - credentials are invalid or expired",
                                       STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
   } else {
     LOG_STORAGE_TRACE_ << fmt::format("[{}] Successfully retrieved credentials", STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
-    m_credentials = result.creds;
+    m_credentials = std::move(result.creds);
   }
 }
 

@@ -55,7 +55,8 @@ class AWS_CORE_API AliyunRAMSTSClient : public ::Aws::Internal::AWSHttpResourceC
     ::Aws::Auth::AWSCredentials creds;
   };
 
-  // Returns empty credentials on failure; errors are logged.
+  // Returns a complete, unexpired tuple with an explicit expiration, or empty
+  // credentials on HTTP, XML or credential validation failure.
   AssumeRoleResult GetAssumeRoleCredentials(const AssumeRoleRequest& request);
 
   private:
