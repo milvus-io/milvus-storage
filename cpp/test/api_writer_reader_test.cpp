@@ -2094,6 +2094,15 @@ TEST_P(APIWriterReaderTest, PublicGetChunkReaderAsync) {
 }
 
 TEST_P(APIWriterReaderTest, PublicQueuedCancellationPreservesOpenErrors) {
+  if (IsCloudEnv() && GetEnvVar(ENV_VAR_CLOUD_PROVIDER).ValueOr("") == kCloudProviderAzure) {
+    // Missing-blob reads parse XML errors on background workers. Azure SDK's
+    // static XML cleanup can precede worker exit and leak libxml2 TLS state.
+    // Keep this error/cancellation coverage on the other storage backends.
+    // https://github.com/apache/arrow/issues/41004
+    // https://github.com/apache/arrow/pull/41163#issuecomment-2053787467
+    GTEST_SKIP() << "Known Arrow GH-41004: Azure/libxml2 cleanup order leaks thread-local state at process exit.";
+  }
+
   for (const bool cache_enabled : {false, true}) {
     SCOPED_TRACE(cache_enabled);
     ASSERT_EQ(SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, cache_enabled ? "true" : "false"),
