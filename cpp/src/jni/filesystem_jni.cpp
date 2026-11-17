@@ -40,6 +40,19 @@ struct FileList {
   LoonFileInfoList value{nullptr, 0};
   ~FileList() { loon_filesystem_free_file_info_list(&value); }
 };
+
+bool CheckWriterResult(JNIEnv* env, LoonFFIResult result) {
+  // A write conflict can race with a delete; preserve its code for callers to decide how to retry.
+  if (result.err_code == loon_errcode_aws_precondition_failed) {
+    Throw(env, "java/nio/file/FileAlreadyExistsException", loon_ffi_get_errmsg(&result));
+  } else if (result.err_code == loon_errcode_not_support) {
+    Throw(env, "java/lang/UnsupportedOperationException", loon_ffi_get_errmsg(&result));
+  } else {
+    return CheckResult(env, result);
+  }
+  loon_ffi_free_result(&result);
+  return false;
+}
 }  // namespace
 
 extern "C" {
@@ -250,5 +263,77 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageFileSystemNative_read
                                                                                           jobject,
                                                                                           jlong handle) {
   GuardVoid(env, [&] { loon_filesystem_reader_destroy(static_cast<FileSystemReaderHandle>(handle)); });
+}
+
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageFileSystemNative_openWriter(JNIEnv* env,
+                                                                                        jobject,
+                                                                                        jlong handle,
+                                                                                        jstring path,
+                                                                                        jobjectArray metadata_keys,
+                                                                                        jobjectArray metadata_values,
+                                                                                        jboolean conditional) {
+  return Guard<jlong>(env, 0, [&] {
+    ScopedUtf8 p(env, path);
+    if (!p.valid())
+      return jlong{0};
+    std::vector<std::string> keys, values;
+    if (!ReadStrings(env, metadata_keys, &keys) || !ReadStrings(env, metadata_values, &values))
+      return jlong{0};
+    if (keys.size() != values.size()) {
+      Throw(env, "java/lang/IllegalArgumentException", "Metadata keys and values must have equal lengths");
+      return jlong{0};
+    }
+    std::vector<LoonFileSystemMeta> metadata(keys.size());
+    for (size_t i = 0; i < keys.size(); ++i) {
+      metadata[i] = {keys[i].data(), values[i].data()};
+    }
+    FileSystemWriterHandle writer = 0;
+    if (!CheckWriterResult(
+            env, loon_filesystem_open_writer(static_cast<FileSystemHandle>(handle), p.get(), p.size(), metadata.data(),
+                                             static_cast<uint32_t>(metadata.size()), conditional == JNI_TRUE, &writer)))
+      return jlong{0};
+    return static_cast<jlong>(writer);
+  });
+}
+
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageFileSystemNative_writerWrite(JNIEnv* env,
+                                                                                        jobject,
+                                                                                        jlong handle,
+                                                                                        jbyteArray data) {
+  GuardVoid(env, [&] {
+    if (data == nullptr) {
+      Throw(env, "java/lang/IllegalArgumentException", "data must not be null");
+      return;
+    }
+    const jsize size = env->GetArrayLength(data);
+    std::vector<uint8_t> buffer(static_cast<size_t>(size));
+    if (size != 0)
+      env->GetByteArrayRegion(data, 0, size, reinterpret_cast<jbyte*>(buffer.data()));
+    if (env->ExceptionCheck())
+      return;
+    const uint8_t empty = 0;
+    CheckWriterResult(env, loon_filesystem_writer_write(static_cast<FileSystemWriterHandle>(handle),
+                                                        size == 0 ? &empty : buffer.data(), size));
+  });
+}
+
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageFileSystemNative_writerFlush(JNIEnv* env,
+                                                                                        jobject,
+                                                                                        jlong handle) {
+  GuardVoid(env,
+            [&] { CheckWriterResult(env, loon_filesystem_writer_flush(static_cast<FileSystemWriterHandle>(handle))); });
+}
+
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageFileSystemNative_writerClose(JNIEnv* env,
+                                                                                        jobject,
+                                                                                        jlong handle) {
+  GuardVoid(env,
+            [&] { CheckWriterResult(env, loon_filesystem_writer_close(static_cast<FileSystemWriterHandle>(handle))); });
+}
+
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageFileSystemNative_writerDestroy(JNIEnv* env,
+                                                                                          jobject,
+                                                                                          jlong handle) {
+  GuardVoid(env, [&] { loon_filesystem_writer_destroy(static_cast<FileSystemWriterHandle>(handle)); });
 }
 }  // extern "C"
