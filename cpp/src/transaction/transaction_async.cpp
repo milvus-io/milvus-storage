@@ -9,6 +9,19 @@
 #include <folly/executors/InlineExecutor.h>
 
 namespace milvus_storage::api::transaction {
+// Formatting an exception must not turn a structured failure into an exceptional future.
+static AsyncStatus MakeExceptionStatus(const std::exception& error) noexcept {
+  try {
+    AsyncStatus status{AsyncStatus::Exception};
+    status.detail = arrow::Status::UnknownError(error.what());
+    return status;
+  } catch (const std::bad_alloc&) {
+    return AsyncStatus::Memory;
+  } catch (...) {
+    return AsyncStatus::Exception;
+  }
+}
+
 struct AsyncManifestOperation final : AsyncOperation {
   static bool Consume(Transaction* txn) { return !txn->async_consumed_.exchange(true); }
   static void Unconsume(Transaction* txn) { txn->async_consumed_.store(false); }
@@ -64,6 +77,8 @@ folly::SemiFuture<OpenResult> Transaction::OpenAsync(const std::string& path,
           return {{}, std::move(result).ValueUnsafe()};
         } catch (const std::bad_alloc&) {
           return {AsyncStatus::Memory, nullptr};
+        } catch (const std::exception& error) {
+          return {MakeExceptionStatus(error), nullptr};
         } catch (...) {
           return {AsyncStatus::Exception, nullptr};
         }
@@ -102,6 +117,8 @@ folly::SemiFuture<CommitResult> Transaction::CommitAsync(uint64_t timeout_ms,
           return {{}, CommitOutcome::Committed, *result, manifest_size};
         } catch (const std::bad_alloc&) {
           return {AsyncStatus::Memory, started ? CommitOutcome::Unknown : CommitOutcome::NotCommitted};
+        } catch (const std::exception& error) {
+          return {MakeExceptionStatus(error), started ? CommitOutcome::Unknown : CommitOutcome::NotCommitted};
         } catch (...) {
           return {AsyncStatus::Exception, started ? CommitOutcome::Unknown : CommitOutcome::NotCommitted};
         }
