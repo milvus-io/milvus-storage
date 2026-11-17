@@ -425,6 +425,13 @@ std::string BuildBaseUrl(const std::string& scheme, const std::string& authority
   return url;
 }
 
+using Azure::Core::Credentials::AuthenticationException;
+
+Status AuthenticationError() {
+  // Credential acquisition fails locally. SDK error text can contain secrets.
+  return Status::IOError("Azure authentication failed");
+}
+
 template <typename... PrefixArgs>
 Status ExceptionToStatus(const Azure::Core::RequestFailedException& exception,
                          PrefixArgs&&... prefix_args) {
@@ -1024,6 +1031,8 @@ class ObjectInputFile final : public io::RandomAccessFile {
       }
       RETURN_NOT_OK(CacheContentLengthFromRead(result.Value));
       return bytes_read;
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Azure::Core::RequestFailedException& exception) {
       return ExceptionToStatus(
           exception, "DownloadTo from '", blob_client_->GetUrl(), "' at position ",
@@ -1094,6 +1103,8 @@ class ObjectInputFile final : public io::RandomAccessFile {
       }
       SetCachedContentLength(content_length);
       return Status::OK();
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Azure::Core::RequestFailedException& exception) {
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
         return PathNotFound(location_);
@@ -1154,6 +1165,11 @@ Status CreateEmptyBlockBlob(const Blobs::BlockBlobClient& block_blob_client,
   }
   try {
     block_blob_client.UploadFrom(nullptr, 0);
+  } catch (const AuthenticationException&) {
+    if (metrics) {
+      metrics->IncrementFailedCount();
+    }
+    return AuthenticationError();
   } catch (const Storage::StorageException& exception) {
     if (metrics) {
       metrics->IncrementFailedCount();
@@ -1176,6 +1192,11 @@ Status CreateEmptyBlockBlobConditional(Blobs::BlockBlobClient& block_blob_client
     options.AccessConditions.IfNoneMatch = Azure::ETag::Any();
     auto body = Core::IO::MemoryBodyStream(nullptr, 0);
     block_blob_client.Upload(body, options);
+  } catch (const AuthenticationException&) {
+    if (metrics) {
+      metrics->IncrementFailedCount();
+    }
+    return AuthenticationError();
   } catch (const Storage::StorageException& exception) {
     if (metrics) {
       metrics->IncrementFailedCount();
@@ -1191,6 +1212,8 @@ Result<Blobs::Models::GetBlockListResult> GetBlockList(
     std::shared_ptr<Blobs::BlockBlobClient> block_blob_client) {
   try {
     return block_blob_client->GetBlockList().Value;
+  } catch (const AuthenticationException&) {
+    return AuthenticationError();
   } catch (Storage::StorageException& exception) {
     return ExceptionToStatus(
         exception, "GetBlockList failed for '", block_blob_client->GetUrl(),
@@ -1211,6 +1234,11 @@ Status CommitBlockList(std::shared_ptr<Storage::Blobs::BlockBlobClient> block_bl
     // previously committed blocks.
     // https://learn.microsoft.com/en-us/rest/api/storageservices/put-block-list?tabs=microsoft-entra-id#request-body
     block_blob_client->CommitBlockList(block_ids, options);
+  } catch (const AuthenticationException&) {
+    if (metrics) {
+      metrics->IncrementFailedCount();
+    }
+    return AuthenticationError();
   } catch (const Storage::StorageException& exception) {
     if (metrics) {
       metrics->IncrementFailedCount();
@@ -1230,6 +1258,11 @@ Status StageBlock(Blobs::BlockBlobClient* block_blob_client, const std::string& 
   }
   try {
     block_blob_client->StageBlock(id, content);
+  } catch (const AuthenticationException&) {
+    if (metrics) {
+      metrics->IncrementFailedCount();
+    }
+    return AuthenticationError();
   } catch (const Storage::StorageException& exception) {
     if (metrics) {
       metrics->IncrementFailedCount();
@@ -1305,6 +1338,8 @@ class ObjectAppendStream final : public io::OutputStream {
         }
         content_length_ = properties.Value.BlobSize;
         pos_ = content_length_;
+      } catch (const AuthenticationException&) {
+        return AuthenticationError();
       } catch (const Storage::StorageException& exception) {
         if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
           // No file exists but on flat namespace its possible there is a directory
@@ -1651,6 +1686,8 @@ Result<HNSSupport> CheckIfHierarchicalNamespaceIsEnabled(
     // Azurite issue detected.
     DCHECK(IsDfsEmulator(options));
     return HNSSupport::kDisabled;
+  } catch (const AuthenticationException&) {
+    return AuthenticationError();
   } catch (const Storage::StorageException& exception) {
     // Flat namespace storage accounts with "soft delete" enabled return
     //
@@ -1721,6 +1758,8 @@ Result<FileInfo> GetContainerPropsAsFileInfo(const AzureLocation& location,
     info.set_type(FileType::Directory);
     info.set_mtime(std::chrono::system_clock::time_point{properties.Value.LastModified});
     return info;
+  } catch (const AuthenticationException&) {
+    return AuthenticationError();
   } catch (const Storage::StorageException& exception) {
     if (IsContainerNotFound(exception)) {
       info.set_type(FileType::NotFound);
@@ -1737,6 +1776,8 @@ Status CreateContainerIfNotExists(const std::string& container_name,
   try {
     container_client.CreateIfNotExists();
     return Status::OK();
+  } catch (const AuthenticationException&) {
+    return AuthenticationError();
   } catch (const Storage::StorageException& exception) {
     return ExceptionToStatus(exception, "Failed to create a container: ", container_name,
                              ": ", container_client.GetUrl());
@@ -1830,6 +1871,8 @@ class LeaseGuard {
     DCHECK(release_attempt_pending_);
     try {
       lease_client_->Release();
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       return ExceptionToStatus(exception, "Failed to release the ",
                                lease_client_->GetLeaseId(), " lease");
@@ -1873,6 +1916,8 @@ class LeaseGuard {
       break_or_expires_at_ =
           std::min(break_or_expires_at_,
                    SteadyClock::now() + break_period.ValueOr(std::chrono::seconds{0}));
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       return ExceptionToStatus(exception, "Failed to break the ",
                                lease_client_->GetLeaseId(), " lease expiring in ",
@@ -1896,9 +1941,7 @@ class LeaseGuard {
   /// and if it's too large the only consequence is that a lease on a non-existent
   /// resource will remain in the "Breaking" state for a while blocking others
   /// from recreating the resource.
-  void BreakBeforeDeletion(std::chrono::seconds break_period) {
-    ARROW_CHECK_OK(Break(break_period));
-  }
+  Status BreakBeforeDeletion(std::chrono::seconds break_period) { return Break(break_period); }
 
   // These functions are marked ARROW_NOINLINE because they are called from
   // multiple locations, but are not performance-critical.
@@ -2071,6 +2114,8 @@ class AzureFileSystem::Impl {
       info.set_mtime(
           std::chrono::system_clock::time_point{properties.Value.LastModified});
       return info;
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
         return FileInfo{location.all, FileType::NotFound};
@@ -2146,6 +2191,8 @@ class AzureFileSystem::Impl {
       }
       info.set_type(FileType::NotFound);
       return info;
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       if (IsContainerNotFound(exception)) {
         return FileInfo{location.all, FileType::NotFound};
@@ -2206,6 +2253,8 @@ class AzureFileSystem::Impl {
           RETURN_NOT_OK(on_container(container));
         }
       }
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       return ExceptionToStatus(exception, "Failed to list account containers.");
     }
@@ -2261,6 +2310,8 @@ class AzureFileSystem::Impl {
           }
         }
       }
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       if (IsContainerNotFound(exception) || exception.ErrorCode == "PathNotFound") {
         found = false;
@@ -2374,6 +2425,8 @@ class AzureFileSystem::Impl {
           RETURN_NOT_OK(process_prefix(list_response.BlobPrefixes[blob_prefix_index]));
         }
       }
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       if (IsContainerNotFound(exception)) {
         found = false;
@@ -2513,6 +2566,8 @@ class AzureFileSystem::Impl {
       if (container_info.type() == FileType::NotFound) {
         try {
           container_client.CreateIfNotExists();
+        } catch (const AuthenticationException&) {
+          return AuthenticationError();
         } catch (const Storage::StorageException& exception) {
           return ExceptionToStatus(exception, "Failed to create directory '",
                                    location.all, "': ", container_client.GetUrl());
@@ -2540,6 +2595,8 @@ class AzureFileSystem::Impl {
         const auto& nonexistent_location = nonexistent_locations[i - 1];
         try {
           create_if_not_exists(container_client, nonexistent_location);
+        } catch (const AuthenticationException&) {
+          return AuthenticationError();
         } catch (const Storage::StorageException& exception) {
           return ExceptionToStatus(exception, "Failed to create directory '",
                                    location.all, "': ", container_client.GetUrl());
@@ -2558,6 +2615,8 @@ class AzureFileSystem::Impl {
       try {
         create_if_not_exists(container_client, location);
         return Status::OK();
+      } catch (const AuthenticationException&) {
+        return AuthenticationError();
       } catch (const Storage::StorageException& exception) {
         if (IsContainerNotFound(exception)) {
           auto parent = location.parent();
@@ -2670,6 +2729,8 @@ class AzureFileSystem::Impl {
     try {
       EnsureEmptyDirExistsImplThatThrows(container_client, location.path);
       return Status::OK();
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       return ExceptionToStatus(
           exception, operation_name, " failed to ensure empty directory marker '",
@@ -2688,6 +2749,8 @@ class AzureFileSystem::Impl {
       // Only the "*IfExists" functions ever set Deleted to false.
       // All the others either succeed or throw an exception.
       DCHECK(response.Value.Deleted);
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       if (IsContainerNotFound(exception)) {
         return PathNotFound(location);
@@ -2834,6 +2897,8 @@ class AzureFileSystem::Impl {
         }
       }
       return Status::OK();
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       return ExceptionToStatus(exception,
                                "Failed to list blobs in a directory: ", location.path,
@@ -2870,6 +2935,8 @@ class AzureFileSystem::Impl {
       // Only the "*IfExists" functions ever set Deleted to false.
       // All the others either succeed or throw an exception.
       DCHECK(response.Value.Deleted);
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       if (exception.ErrorCode == "FilesystemNotFound" ||
           exception.ErrorCode == "PathNotFound") {
@@ -2918,6 +2985,8 @@ class AzureFileSystem::Impl {
         }
       }
       return Status::OK();
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       if (missing_dir_ok && exception.StatusCode == Http::HttpStatusCode::NotFound) {
         return Status::OK();
@@ -2947,6 +3016,8 @@ class AzureFileSystem::Impl {
     try {
       [[maybe_unused]] auto result = lease_client->Acquire(lease_duration);
       DCHECK_EQ(result.Value.LeaseId, lease_client->GetLeaseId());
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       if (IsContainerNotFound(exception)) {
         if (allow_missing_container) {
@@ -2987,6 +3058,8 @@ class AzureFileSystem::Impl {
     try {
       [[maybe_unused]] auto result = lease_client->Acquire(lease_duration);
       DCHECK_EQ(result.Value.LeaseId, lease_client->GetLeaseId());
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
         if (allow_missing) {
@@ -3062,6 +3135,8 @@ class AzureFileSystem::Impl {
       // Only the "*IfExists" functions ever set Deleted to false.
       // All the others either succeed or throw an exception.
       DCHECK(response.Value.Deleted);
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
         // ErrorCode can be "FilesystemNotFound", "PathNotFound"...
@@ -3154,6 +3229,8 @@ class AzureFileSystem::Impl {
       // Only the "*IfExists" functions ever set Deleted to false.
       // All the others either succeed or throw an exception.
       DCHECK(response.Value.Deleted);
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
         return check_if_location_exists_as_dir();
@@ -3219,6 +3296,8 @@ class AzureFileSystem::Impl {
         if (!dest_is_empty) {
           return NotEmpty(dest);
         }
+      } catch (const AuthenticationException&) {
+        return AuthenticationError();
       } catch (const Storage::StorageException& exception) {
         return ExceptionToStatus(exception, "Failed to check that '", dest.container,
                                  "' is empty: ", dest_container_client.GetUrl());
@@ -3231,9 +3310,11 @@ class AzureFileSystem::Impl {
       Blobs::RenameBlobContainerOptions options;
       options.SourceAccessConditions.LeaseId = src_lease_guard.LeaseId();
       try {
-        src_lease_guard.BreakBeforeDeletion(kTimeNeededForContainerRename);
+        RETURN_NOT_OK(src_lease_guard.BreakBeforeDeletion(kTimeNeededForContainerRename));
         blob_service_client_->RenameBlobContainer(src.container, dest.container, options);
         src_lease_guard.Forget();
+      } catch (const AuthenticationException&) {
+        return AuthenticationError();
       } catch (const Storage::StorageException& exception) {
         if (exception.StatusCode == Http::HttpStatusCode::BadRequest &&
             exception.ErrorCode == "InvalidQueryParameterValue") {
@@ -3282,13 +3363,15 @@ class AzureFileSystem::Impl {
                                  "container lease expired.");
         }
         try {
-          src_lease_guard.BreakBeforeDeletion(kTimeNeededForContainerDeletion);
+          RETURN_NOT_OK(src_lease_guard.BreakBeforeDeletion(kTimeNeededForContainerDeletion));
           src_container_client.Delete(options);
           src_lease_guard.Forget();
         } catch (const Storage::StorageException& exception) {
           return ExceptionToStatus(exception, "Failed to delete empty container: '",
                                    src.container, "': ", src_container_client.GetUrl());
         }
+      } catch (const AuthenticationException&) {
+        return AuthenticationError();
       } catch (const Storage::StorageException& exception) {
         return ExceptionToStatus(exception, "Unable to replace empty container: '",
                                  dest.all, "': ", dest_container_client.GetUrl());
@@ -3427,9 +3510,11 @@ class AzureFileSystem::Impl {
       if (dest_lease_guard.has_value()) {
         options.AccessConditions.LeaseId = dest_lease_guard->LeaseId();
       }
-      src_lease_guard.BreakBeforeDeletion(kTimeNeededForFileOrDirectoryRename);
+      RETURN_NOT_OK(src_lease_guard.BreakBeforeDeletion(kTimeNeededForFileOrDirectoryRename));
       src_adlfs_client.RenameFile(src_path, dest_path, options);
       src_lease_guard.Forget();
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       // https://learn.microsoft.com/en-gb/rest/api/storageservices/datalakestoragegen2/path/create
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
@@ -3513,6 +3598,8 @@ class AzureFileSystem::Impl {
       // For large blobs, the copy operation may be slow so we need to poll until it
       // completes. We use a polling interval of 1 second.
       copy_operation.PollUntilDone(std::chrono::milliseconds(1000));
+    } catch (const AuthenticationException&) {
+      return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       // StartCopyFromUri failed or a GetProperties call inside PollUntilDone failed.
       return ExceptionToStatus(
