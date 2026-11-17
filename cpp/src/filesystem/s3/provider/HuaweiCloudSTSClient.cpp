@@ -88,8 +88,9 @@ HuaweiCloudSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
 
     auto responseHeaders = awsResult.GetHeaderValueCollection();
     auto subjectTokenIter = responseHeaders.find("x-subject-token");
-    if (subjectTokenIter == responseHeaders.end()) {
-      LOG_STORAGE_WARNING_ << fmt::format("[{}] No x-subject-token in huawei cloud sts response headers",
+    if (subjectTokenIter == responseHeaders.end() ||
+        Aws::Utils::StringUtils::Trim(subjectTokenIter->second.c_str()).empty()) {
+      LOG_STORAGE_WARNING_ << fmt::format("[{}] Missing or blank x-subject-token in huawei cloud sts response headers",
                                           STS_RESOURCE_CLIENT_LOG_TAG);
       return result;
     }
@@ -176,25 +177,36 @@ HuaweiCloudSTSCredentialsClient::STSCallResult HuaweiCloudSTSCredentialsClient::
     return result;
   }
   Aws::Utils::Json::JsonValue jsonValue(credentialsStr);
-  auto json = jsonValue.View();
-  auto rootNode = json.GetObject("credential");
-  if (rootNode.IsNull()) {
+  if (!jsonValue.WasParseSuccessful() || !jsonValue.View().IsObject()) {
+    result.errorMessage = "Failed to parse Huawei Cloud STS JSON response";
+    return result;
+  }
+  auto json = jsonValue.View().GetAllObjects();
+  if (!json.count("credential") || !json.at("credential").IsObject()) {
     result.errorMessage = "Get credential from STS result failed";
     return result;
   }
-  result.credentials.SetAWSAccessKeyId(rootNode.GetString("access"));
-  result.credentials.SetAWSSecretKey(rootNode.GetString("secret"));
-  result.credentials.SetSessionToken(rootNode.GetString("securitytoken"));
-
-  auto expiresAt = rootNode.GetString("expires_at");
-  if (expiresAt.empty()) {
-    result.errorMessage = "STS response missing 'expires_at' field, rejecting credentials";
-    return result;
+  auto rootNode = json.at("credential").GetAllObjects();
+  for (const char* name : {"access", "secret", "securitytoken", "expires_at"}) {
+    if (!rootNode.count(name) || !rootNode.at(name).IsString() ||
+        Aws::Utils::StringUtils::Trim(rootNode.at(name).AsString().c_str()).empty()) {
+      result.errorMessage = std::string("STS response missing or invalid '") + name + "' field, rejecting credentials";
+      return result;
+    }
   }
+  result.credentials.SetAWSAccessKeyId(rootNode.at("access").AsString());
+  result.credentials.SetAWSSecretKey(rootNode.at("secret").AsString());
+  result.credentials.SetSessionToken(rootNode.at("securitytoken").AsString());
+
+  auto expiresAt = rootNode.at("expires_at").AsString();
   auto parsedExpiration =
       Aws::Utils::DateTime(Aws::Utils::StringUtils::Trim(expiresAt.c_str()).c_str(), Aws::Utils::DateFormat::ISO_8601);
   if (!parsedExpiration.WasParseSuccessful()) {
-    result.errorMessage = "STS response 'expires_at' field has invalid format: " + std::string(expiresAt.c_str());
+    result.errorMessage = "STS response 'expires_at' field has invalid format";
+    return result;
+  }
+  if (parsedExpiration <= Aws::Utils::DateTime::Now()) {
+    result.errorMessage = "STS response 'expires_at' is already expired, rejecting credentials";
     return result;
   }
   result.credentials.SetExpiration(parsedExpiration);

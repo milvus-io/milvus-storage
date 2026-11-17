@@ -143,11 +143,16 @@ Aws::Auth::AWSCredentials AliyunSTSAssumeRoleWebIdentityCredentialsProvider::Get
   }
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
+  // A failed refresh may leave the old tuple cached. Use it only until expiry;
+  // an empty result signals failure and the next call will attempt another refresh.
+  if (m_credentials.IsExpired()) {
+    return {};
+  }
   return m_credentials;
 }
 
 void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
-  LOG_STORAGE_INFO_ << fmt::format("[{}] Credentials have expired, attempting to renew from STS.",
+  LOG_STORAGE_INFO_ << fmt::format("[{}] Credentials missing or expiring, attempting to renew from STS.",
                                    STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
 
   Aws::IFStream tokenFile(m_tokenFile.c_str());
@@ -162,8 +167,15 @@ void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
   AliyunSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{m_sessionName, m_roleArn, m_token};
 
   auto result = m_client->GetAssumeRoleWithWebIdentityCredentials(request);
+  // The client returns either a complete tuple with a parsed expiration or an
+  // empty result. Recheck expiry at publication while holding the writer lock.
+  if (result.creds.IsExpiredOrEmpty()) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] STS refresh failed; retaining cached credentials until expiration.",
+                                        STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
+    return;
+  }
+  m_credentials = std::move(result.creds);
   LOG_STORAGE_TRACE_ << fmt::format("[{}] Successfully retrieved credentials", STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
-  m_credentials = result.creds;
 }
 
 bool AliyunSTSAssumeRoleWebIdentityCredentialsProvider::ExpiresSoon() const {

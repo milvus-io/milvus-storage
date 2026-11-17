@@ -97,8 +97,13 @@ jobs:
           path: |
             cpp/build/Release/test/milvus_test
             cpp/build/Release/test/Test_FFI
+            cpp/build/Release/test/aliyun_credentials/aliyun_credentials_test
             cpp/build/Release/libs/
             cpp/build/Release/libmilvus-storage*
+
+      - name: Test Aliyun credential refresh
+        working-directory: ./cpp
+        run: ./build/Release/test/aliyun_credentials/aliyun_credentials_test
 
       - name: List gtest tests
         working-directory: ./cpp

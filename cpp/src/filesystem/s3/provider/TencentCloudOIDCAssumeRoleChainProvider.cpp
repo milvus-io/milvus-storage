@@ -44,12 +44,12 @@ Aws::Auth::AWSCredentials TencentCloudOIDCAssumeRoleChainProvider::GetAWSCredent
   }
   // A failed refresh may retain a still-valid target credential, never an
   // expired one or the more privileged machine identity from the first hop.
-  return m_credentials.IsExpiredOrEmpty() ? Aws::Auth::AWSCredentials{} : m_credentials;
+  return m_credentials.IsExpired() ? Aws::Auth::AWSCredentials{} : m_credentials;
 }
 
 void TencentCloudOIDCAssumeRoleChainProvider::Reload() {
   const auto caller = m_innerOidc->GetAWSCredentials();
-  if (caller.IsExpiredOrEmpty() || caller.GetSessionToken().empty())
+  if (caller.IsExpiredOrEmpty())
     return;
   TencentCloudSTSCredentialsClient::STSAssumeRoleRequest request{caller, m_region, m_targetRoleArn, m_targetSessionName,
                                                                  m_targetExternalId};

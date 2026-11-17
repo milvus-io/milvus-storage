@@ -84,8 +84,10 @@ clean:
 
 test: build
 	cd build/${build_type}/test && ./milvus_test && ./Test_FFI
+	./build/${build_type}/test/aliyun_credentials/aliyun_credentials_test
 
 test-all: build
+	./build/${build_type}/test/aliyun_credentials/aliyun_credentials_test
 	# running milvus_test and Test_FFI without minio
 	./build/${build_type}/test/milvus_test && ./build/${build_type}/test/Test_FFI
 

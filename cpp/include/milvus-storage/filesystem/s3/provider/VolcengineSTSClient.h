@@ -44,6 +44,8 @@ class AWS_CORE_API VolcengineSTSCredentialsClient : public ::Aws::Internal::AWSH
     Aws::Auth::AWSCredentials creds;
   };
 
+  // Returns a complete, unexpired tuple with an explicit expiration, or empty
+  // credentials on HTTP, JSON or credential validation failure.
   STSAssumeRoleWithWebIdentityResult GetAssumeRoleWithWebIdentityCredentials(
       const STSAssumeRoleWithWebIdentityRequest& request);
 
@@ -64,7 +66,8 @@ class AWS_CORE_API VolcengineSTSCredentialsClient : public ::Aws::Internal::AWSH
     Aws::Auth::AWSCredentials creds;
   };
 
-  // Returns empty credentials on failure; errors are logged.
+  // Returns a complete, unexpired tuple with an explicit expiration, or empty
+  // credentials on HTTP, JSON or credential validation failure.
   STSAssumeRoleResult GetAssumeRoleCredentials(const STSAssumeRoleRequest& request);
 
   // --- Volcengine V4 signing (exposed for golden-vector testing) -----------

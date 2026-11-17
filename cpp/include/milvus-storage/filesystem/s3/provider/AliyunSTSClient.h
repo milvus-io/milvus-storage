@@ -59,6 +59,8 @@ class AWS_CORE_API AliyunSTSCredentialsClient : public ::Aws::Internal::AWSHttpR
     ::Aws::Auth::AWSCredentials creds;
   };
 
+  // Returns a complete, unexpired tuple with an explicit expiration, or empty
+  // credentials on HTTP, XML or credential validation failure.
   STSAssumeRoleWithWebIdentityResult GetAssumeRoleWithWebIdentityCredentials(
       const STSAssumeRoleWithWebIdentityRequest& request);
 

@@ -148,37 +148,51 @@ AliyunSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
   //     </Credentials>
   // </AssumeRoleWithOIDCResponse>
   const Aws::Utils::Xml::XmlDocument xmlDocument = Aws::Utils::Xml::XmlDocument::CreateFromXmlString(credentialsStr);
+  if (!xmlDocument.WasParseSuccessful()) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] STS response is not valid XML", STS_RESOURCE_CLIENT_LOG_TAG);
+    return result;
+  }
   Aws::Utils::Xml::XmlNode rootNode = xmlDocument.GetRootElement();
   Aws::Utils::Xml::XmlNode resultNode = rootNode;
   if (!rootNode.IsNull() && (rootNode.GetName() != "AssumeRoleWithOIDCResponse")) {
     resultNode = rootNode.FirstChild("AssumeRoleWithOIDCResponse");  // [aliyun]
   }
 
-  if (!resultNode.IsNull()) {
-    Aws::Utils::Xml::XmlNode credentialsNode = resultNode.FirstChild("Credentials");
-    if (!credentialsNode.IsNull()) {
-      Aws::Utils::Xml::XmlNode accessKeyIdNode = credentialsNode.FirstChild("AccessKeyId");
-      if (!accessKeyIdNode.IsNull()) {
-        result.creds.SetAWSAccessKeyId(accessKeyIdNode.GetText());
-      }
-
-      Aws::Utils::Xml::XmlNode secretAccessKeyNode = credentialsNode.FirstChild("AccessKeySecret");  // [aliyun]
-      if (!secretAccessKeyNode.IsNull()) {
-        result.creds.SetAWSSecretKey(secretAccessKeyNode.GetText());
-      }
-
-      Aws::Utils::Xml::XmlNode sessionTokenNode = credentialsNode.FirstChild("SecurityToken");  // [aliyun]
-      if (!sessionTokenNode.IsNull()) {
-        result.creds.SetSessionToken(sessionTokenNode.GetText());
-      }
-
-      Aws::Utils::Xml::XmlNode expirationNode = credentialsNode.FirstChild("Expiration");
-      if (!expirationNode.IsNull()) {
-        result.creds.SetExpiration(Aws::Utils::DateTime(
-            Aws::Utils::StringUtils::Trim(expirationNode.GetText().c_str()).c_str(), Aws::Utils::DateFormat::ISO_8601));
-      }
-    }
+  if (resultNode.IsNull()) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] STS response is missing AssumeRoleWithOIDCResponse",
+                                        STS_RESOURCE_CLIENT_LOG_TAG);
+    return result;
   }
+  auto credentialsNode = resultNode.FirstChild("Credentials");
+  if (credentialsNode.IsNull()) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] STS response is missing Credentials", STS_RESOURCE_CLIENT_LOG_TAG);
+    return result;
+  }
+  auto accessKeyIdNode = credentialsNode.FirstChild("AccessKeyId");
+  auto secretAccessKeyNode = credentialsNode.FirstChild("AccessKeySecret");
+  auto sessionTokenNode = credentialsNode.FirstChild("SecurityToken");
+  auto expirationNode = credentialsNode.FirstChild("Expiration");
+  if (accessKeyIdNode.IsNull() || secretAccessKeyNode.IsNull() || sessionTokenNode.IsNull() ||
+      expirationNode.IsNull()) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] STS response is missing required credential fields",
+                                        STS_RESOURCE_CLIENT_LOG_TAG);
+    return result;
+  }
+
+  const auto accessKeyId = Aws::Utils::StringUtils::Trim(accessKeyIdNode.GetText().c_str());
+  const auto secretAccessKey = Aws::Utils::StringUtils::Trim(secretAccessKeyNode.GetText().c_str());
+  const auto sessionToken = Aws::Utils::StringUtils::Trim(sessionTokenNode.GetText().c_str());
+  const Aws::Utils::DateTime expiration(Aws::Utils::StringUtils::Trim(expirationNode.GetText().c_str()).c_str(),
+                                        Aws::Utils::DateFormat::ISO_8601);
+  // IsEmpty() only checks whether BOTH keys are empty, and AWSCredentials defaults
+  // to never expiring. Neither is sufficient to validate STS temporary credentials.
+  if (accessKeyId.empty() || secretAccessKey.empty() || sessionToken.empty() || !expiration.WasParseSuccessful() ||
+      expiration <= Aws::Utils::DateTime::Now()) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] STS response contains incomplete or expired credentials",
+                                        STS_RESOURCE_CLIENT_LOG_TAG);
+    return result;
+  }
+  result.creds = Aws::Auth::AWSCredentials(accessKeyId, secretAccessKey, sessionToken, expiration);
   return result;
 }
 

@@ -136,18 +136,32 @@ bool FetchImdsCreds(ImdsCreds& out) {
   }
 
   Aws::Utils::Json::JsonValue json(ReadBody(creds_resp).c_str());
-  if (!json.WasParseSuccessful()) {
-    LOG_STORAGE_ERROR_ << fmt::format("[{}] IMDS credentials JSON parse failed: {}", kLogTag, json.GetErrorMessage());
+  if (!json.WasParseSuccessful() || !json.View().IsObject()) {
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] IMDS credentials JSON parse failed", kLogTag);
     return false;
   }
-  auto view = json.View();
-  if (!view.KeyExists("AccessKeyId") || !view.KeyExists("AccessKeySecret") || !view.KeyExists("SecurityToken")) {
-    LOG_STORAGE_ERROR_ << fmt::format("[{}] IMDS credentials response missing expected fields", kLogTag);
+  auto fields = json.View().GetAllObjects();
+  if (fields.count("Code") && (!fields.at("Code").IsString() || fields.at("Code").AsString() != "Success")) {
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] IMDS credentials response reported non-Success Code", kLogTag);
     return false;
   }
-  out.access_key_id = view.GetString("AccessKeyId");
-  out.access_key_secret = view.GetString("AccessKeySecret");
-  out.security_token = view.GetString("SecurityToken");
+  for (const char* name : {"AccessKeyId", "AccessKeySecret", "SecurityToken", "Expiration"}) {
+    if (!fields.count(name) || !fields.at(name).IsString() ||
+        Aws::Utils::StringUtils::Trim(fields.at(name).AsString().c_str()).empty()) {
+      LOG_STORAGE_ERROR_ << fmt::format("[{}] IMDS credentials response missing or invalid '{}'", kLogTag, name);
+      return false;
+    }
+  }
+  const Aws::Utils::DateTime expiration(
+      Aws::Utils::StringUtils::Trim(fields.at("Expiration").AsString().c_str()).c_str(),
+      Aws::Utils::DateFormat::ISO_8601);
+  if (!expiration.WasParseSuccessful() || expiration <= Aws::Utils::DateTime::Now()) {
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] IMDS credentials response has invalid or expired 'Expiration'", kLogTag);
+    return false;
+  }
+  out.access_key_id = fields.at("AccessKeyId").AsString();
+  out.access_key_secret = fields.at("AccessKeySecret").AsString();
+  out.security_token = fields.at("SecurityToken").AsString();
   return true;
 }
 
@@ -172,6 +186,9 @@ AliyunRAMCredentialsProvider::AliyunRAMCredentialsProvider(const Aws::String& ro
 Aws::Auth::AWSCredentials AliyunRAMCredentialsProvider::GetAWSCredentials() {
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
+  if (m_credentials.IsExpired()) {
+    return {};
+  }
   return m_credentials;
 }
 
@@ -213,11 +230,11 @@ void AliyunRAMCredentialsProvider::Reload() {
                                    !req.externalId.empty());
 
   auto res = m_stsClient->GetAssumeRoleCredentials(req);
-  if (res.creds.IsEmpty()) {
-    LOG_STORAGE_ERROR_ << fmt::format("[{}] AssumeRole returned empty credentials", kLogTag);
+  if (res.creds.IsExpiredOrEmpty()) {
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] AssumeRole returned invalid or expired credentials", kLogTag);
     return;
   }
-  m_credentials = res.creds;
+  m_credentials = std::move(res.creds);
   LOG_STORAGE_INFO_ << fmt::format("[{}] AssumeRole succeeded; expires={}", kLogTag,
                                    m_credentials.GetExpiration().ToGmtString(Aws::Utils::DateFormat::ISO_8601));
 }

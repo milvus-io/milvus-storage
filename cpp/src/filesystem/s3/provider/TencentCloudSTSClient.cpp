@@ -60,23 +60,29 @@ Aws::Auth::AWSCredentials ParseCredentials(const Aws::String& body) {
     return {};
   auto fields = response.at("Credentials").GetAllObjects();
   for (const char* name : {"TmpSecretId", "TmpSecretKey", "Token"}) {
-    if (!fields.count(name) || !fields.at(name).IsString() || fields.at(name).AsString().empty())
+    if (!fields.count(name) || !fields.at(name).IsString() ||
+        Aws::Utils::StringUtils::Trim(fields.at(name).AsString().c_str()).empty())
       return {};
   }
   Aws::Utils::DateTime expiration;
-  if (response.count("ExpiredTime") && response.at("ExpiredTime").IsIntegerType()) {
+  if (response.count("ExpiredTime")) {
+    if (!response.at("ExpiredTime").IsIntegerType())
+      return {};
     expiration = Aws::Utils::DateTime(static_cast<double>(response.at("ExpiredTime").AsInt64()));
-  } else if (response.count("Expiration") && response.at("Expiration").IsString()) {
-    expiration = Aws::Utils::DateTime(response.at("Expiration").AsString(), Aws::Utils::DateFormat::ISO_8601);
+  } else if (response.count("Expiration")) {
+    if (!response.at("Expiration").IsString())
+      return {};
+    const auto trimmed = Aws::Utils::StringUtils::Trim(response.at("Expiration").AsString().c_str());
+    if (trimmed.empty())
+      return {};
+    expiration = Aws::Utils::DateTime(trimmed.c_str(), Aws::Utils::DateFormat::ISO_8601);
   } else {
     return {};
   }
   if (!expiration.WasParseSuccessful() || expiration <= Aws::Utils::DateTime::Now())
     return {};
-  Aws::Auth::AWSCredentials credentials(fields.at("TmpSecretId").AsString(), fields.at("TmpSecretKey").AsString(),
-                                        fields.at("Token").AsString());
-  credentials.SetExpiration(expiration);
-  return credentials;
+  return Aws::Auth::AWSCredentials(fields.at("TmpSecretId").AsString(), fields.at("TmpSecretKey").AsString(),
+                                   fields.at("Token").AsString(), expiration);
 }
 }  // namespace
 

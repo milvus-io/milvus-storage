@@ -83,6 +83,13 @@ AliyunRAMSTSClient::AliyunRAMSTSClient(const Aws::Client::ClientConfiguration& c
 
 AliyunRAMSTSClient::AssumeRoleResult AliyunRAMSTSClient::GetAssumeRoleCredentials(const AssumeRoleRequest& request) {
   AssumeRoleResult result;
+  if (Aws::Utils::StringUtils::Trim(request.callerAccessKeyId.c_str()).empty() ||
+      Aws::Utils::StringUtils::Trim(request.callerAccessKeySecret.c_str()).empty() ||
+      Aws::Utils::StringUtils::Trim(request.roleArn.c_str()).empty() ||
+      Aws::Utils::StringUtils::Trim(request.roleSessionName.c_str()).empty()) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Rejecting AssumeRole request with empty caller or role fields", kLogTag);
+    return result;
+  }
 
   // std::map sorts keys ASCII-ascending, which is what POP v1 canonical-query
   // construction needs. Values will be URL-encoded when we emit the string.
@@ -175,35 +182,52 @@ AliyunRAMSTSClient::AssumeRoleResult AliyunRAMSTSClient::GetAssumeRoleCredential
   //   </Credentials>
   // </AssumeRoleResponse>
   const auto doc = Aws::Utils::Xml::XmlDocument::CreateFromXmlString(payload);
+  if (!doc.WasParseSuccessful()) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Failed to parse AssumeRole XML response", kLogTag);
+    return result;
+  }
   auto root = doc.GetRootElement();
   auto resultNode = root;
   if (!root.IsNull() && root.GetName() != "AssumeRoleResponse") {
     resultNode = root.FirstChild("AssumeRoleResponse");
   }
   if (resultNode.IsNull()) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Unexpected AssumeRole response root: {}", kLogTag, payload);
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Unexpected AssumeRole response root", kLogTag);
     return result;
   }
   auto credentials = resultNode.FirstChild("Credentials");
   if (credentials.IsNull()) {
-    LOG_STORAGE_WARNING_ << fmt::format("[{}] Missing <Credentials> in AssumeRole response: {}", kLogTag, payload);
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Missing <Credentials> in AssumeRole response", kLogTag);
     return result;
   }
 
-  auto ak_node = credentials.FirstChild("AccessKeyId");
-  if (!ak_node.IsNull())
-    result.creds.SetAWSAccessKeyId(ak_node.GetText());
-  auto sk_node = credentials.FirstChild("AccessKeySecret");
-  if (!sk_node.IsNull())
-    result.creds.SetAWSSecretKey(sk_node.GetText());
-  auto tok_node = credentials.FirstChild("SecurityToken");
-  if (!tok_node.IsNull())
-    result.creds.SetSessionToken(tok_node.GetText());
-  auto exp_node = credentials.FirstChild("Expiration");
-  if (!exp_node.IsNull()) {
-    result.creds.SetExpiration(Aws::Utils::DateTime(Aws::Utils::StringUtils::Trim(exp_node.GetText().c_str()).c_str(),
-                                                    Aws::Utils::DateFormat::ISO_8601));
+  auto read_non_blank = [&](const char* name, Aws::String& out) -> bool {
+    auto node = credentials.FirstChild(name);
+    if (node.IsNull()) {
+      return false;
+    }
+    auto text = Aws::Utils::StringUtils::Trim(node.GetText().c_str());
+    if (text.empty()) {
+      return false;
+    }
+    out = std::move(text);
+    return true;
+  };
+
+  Aws::String ak, sk, token, exp_str;
+  if (!read_non_blank("AccessKeyId", ak) || !read_non_blank("AccessKeySecret", sk) ||
+      !read_non_blank("SecurityToken", token) || !read_non_blank("Expiration", exp_str)) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Incomplete <Credentials> in AssumeRole response", kLogTag);
+    return result;
   }
+
+  Aws::Utils::DateTime expiration(exp_str.c_str(), Aws::Utils::DateFormat::ISO_8601);
+  if (!expiration.WasParseSuccessful() || expiration <= Aws::Utils::DateTime::Now()) {
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Invalid or expired <Expiration> in AssumeRole response", kLogTag);
+    return result;
+  }
+
+  result.creds = Aws::Auth::AWSCredentials(ak, sk, token, expiration);
   return result;
 }
 

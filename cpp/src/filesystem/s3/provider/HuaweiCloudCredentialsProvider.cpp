@@ -146,25 +146,12 @@ void HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
 
   const auto& creds = result.creds;
 
-  if (!result.success) {
+  if (!result.success || creds.IsExpiredOrEmpty()) {
     ++m_stsFailureCount;
     bool hasExisting = !m_credentials.IsEmpty() && !m_credentials.IsExpired();
     LOG_STORAGE_WARNING_ << fmt::format(
-        "[{}] STS call failed. has_valid_cached={}, retaining existing credentials. "
+        "[{}] STS call failed or expired before publication. has_valid_cached={}, retaining existing credentials. "
         "sts_success={}, sts_failure={}",
-        STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, hasExisting, m_stsSuccessCount.load(), m_stsFailureCount.load());
-    m_lastReloadFailed = true;
-    m_lastFailedReloadTime = std::chrono::steady_clock::now();
-    return;
-  }
-
-  if (creds.GetAWSAccessKeyId().empty() || creds.GetAWSSecretKey().empty() || creds.GetSessionToken().empty()) {
-    ++m_stsFailureCount;
-    bool hasExisting = !m_credentials.IsEmpty() && !m_credentials.IsExpired();
-    LOG_STORAGE_WARNING_ << fmt::format(
-        "[{}] STS returned incomplete credentials (missing ak/sk/token). "
-        "has_valid_cached={}, retaining existing credentials. sts_success={}, "
-        "sts_failure={}",
         STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, hasExisting, m_stsSuccessCount.load(), m_stsFailureCount.load());
     m_lastReloadFailed = true;
     m_lastFailedReloadTime = std::chrono::steady_clock::now();
