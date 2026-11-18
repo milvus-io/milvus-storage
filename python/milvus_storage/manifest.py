@@ -385,14 +385,19 @@ class DeltaLog:
     Attributes:
         path: Path to the delta log file
         num_entries: Number of entries in the log
+        file_size_bytes: Size of the delta log file in bytes, or zero if unknown
     """
 
-    def __init__(self, path: str, num_entries: int):
+    def __init__(self, path: str, num_entries: int, file_size_bytes: int = 0):
         self.path = path
         self.num_entries = num_entries
+        self.file_size_bytes = file_size_bytes
 
     def __repr__(self) -> str:
-        return f"DeltaLog(path={self.path!r}, num_entries={self.num_entries})"
+        return (
+            f"DeltaLog(path={self.path!r}, num_entries={self.num_entries}, "
+            f"file_size_bytes={self.file_size_bytes})"
+        )
 
 
 class StatEntry:
@@ -482,7 +487,7 @@ class Manifest:
         for i in range(dl.num_delta_logs):
             path = ffi.string(dl.delta_log_paths[i]).decode("utf-8")
             num_entries = dl.delta_log_num_entries[i]
-            delta_logs.append(DeltaLog(path, num_entries))
+            delta_logs.append(DeltaLog(path, num_entries, dl.delta_log_file_sizes[i]))
 
         # Parse stats
         stats = []

@@ -67,7 +67,8 @@ class TestMixWorkflow:
 
         for i in range(3):
             delta_path = f"{temp_case_path}/delta_{i}.log"
-            fs.write_file(delta_path, f"delta_{i}".encode())
+            delta_data = f"delta_{i}".encode()
+            fs.write_file(delta_path, delta_data)
 
             txn = Transaction(temp_case_path, default_properties)
 
@@ -76,7 +77,7 @@ class TestMixWorkflow:
             new_cg = new_writer.close()
 
             txn.append_files(new_cg)
-            txn.add_delta_log(f"delta_{i}.log", i * 10 + 5)
+            txn.add_delta_log(f"delta_{i}.log", i * 10 + 5, len(delta_data))
             txn.commit()
             txn.close()
 

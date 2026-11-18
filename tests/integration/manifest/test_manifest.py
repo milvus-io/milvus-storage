@@ -28,12 +28,13 @@ class TestManifest:
             fs.create_dir(f"{temp_case_path}/_stats")
             fs.create_dir(f"{temp_case_path}/_delta")
             fs.write_file(stat_path, b"stat-v2")
-            fs.write_file(delta_path, b"delta-v2")
+            delta_data = b"delta-v2"
+            fs.write_file(delta_path, delta_data)
             with Transaction(temp_case_path, default_properties) as txn:
                 txn.update_stat(
                     "e2e.stat", ["stats.bin"], metadata={"version": "2", "label": "中文"}
                 )
-                txn.add_delta_log("delta.bin", 3)
+                txn.add_delta_log("delta.bin", 3, len(delta_data))
                 second_version = txn.commit()
             assert fs.read_file_all(stat_path) == b"stat-v2"
             assert fs.read_file_all(delta_path) == b"delta-v2"
@@ -53,6 +54,7 @@ class TestManifest:
         assert len(current.delta_logs) == 1
         assert current.delta_logs[0].path == delta_path
         assert current.delta_logs[0].num_entries == 3
+        assert current.delta_logs[0].file_size_bytes == len(delta_data)
 
     def _write_initial_data(self, path, schema, batch_generator, props, rows=1000):
         """Write initial data and commit via transaction."""

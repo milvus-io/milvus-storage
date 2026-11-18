@@ -434,11 +434,15 @@ static void test_add_delta_log(void) {
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Add delta log
-  rc = loon_transaction_add_delta_log(tranhandle, "delta_log_path_1.log", 100);
+  rc = loon_transaction_add_delta_log(tranhandle, "invalid.log", 1, -1);
+  ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
+  loon_ffi_free_result(&rc);
+
+  rc = loon_transaction_add_delta_log(tranhandle, "delta_log_path_1.log", 100, INT64_C(5000000000));
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Add another delta log
-  rc = loon_transaction_add_delta_log(tranhandle, "delta_log_path_2.log", 200);
+  rc = loon_transaction_add_delta_log(tranhandle, "delta_log_path_2.log", 200, 0);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Commit
@@ -466,6 +470,9 @@ static void test_add_delta_log(void) {
                 "Expected path %s to contain delta_log_path_2.log", cmanifest->delta_logs.delta_log_paths[1]);
   ck_assert_int_eq(cmanifest->delta_logs.delta_log_num_entries[0], 100);
   ck_assert_int_eq(cmanifest->delta_logs.delta_log_num_entries[1], 200);
+  ck_assert(cmanifest->delta_logs.delta_log_file_sizes != NULL);
+  ck_assert_int_eq(cmanifest->delta_logs.delta_log_file_sizes[0], INT64_C(5000000000));
+  ck_assert_int_eq(cmanifest->delta_logs.delta_log_file_sizes[1], 0);
 
   // Clean up - this will also test the delta_logs cleanup path in loon_manifest_destroy
   loon_manifest_destroy(cmanifest);
@@ -690,11 +697,11 @@ static void test_transaction_error_handling(void) {
   loon_ffi_free_result(&rc);
 
   // Test null arguments for loon_transaction_add_delta_log
-  rc = loon_transaction_add_delta_log(0, "path", 100);
+  rc = loon_transaction_add_delta_log(0, "path", 100, 0);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
-  rc = loon_transaction_add_delta_log((LoonTransactionHandle)1, NULL, 100);
+  rc = loon_transaction_add_delta_log((LoonTransactionHandle)1, NULL, 100, 0);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
@@ -894,6 +901,7 @@ static void test_manifest_serialization_round_trip(void) {
       .columns = columns, .num_of_columns = 2, .format = "parquet", .files = &file, .num_of_files = 1};
   const char* delta_paths[] = {"_delta/delete.log"};
   uint32_t delta_entries[] = {42};
+  int64_t delta_file_sizes[] = {8192};
   const char* stat_keys[] = {"bloom_filter.100"};
   const char* stat_paths[] = {"source/_stats/bloom.bin"};
   const char** stat_files[] = {stat_paths};
@@ -929,7 +937,7 @@ static void test_manifest_serialization_round_trip(void) {
                          .num_properties = 1};
   const LoonManifest manifest = {
       .column_groups = {&group, 1},
-      .delta_logs = {delta_paths, delta_entries, 1},
+      .delta_logs = {delta_paths, delta_entries, 1, delta_file_sizes},
       .stats = {stat_keys, stat_files, stat_counts, stat_metadata_keys, stat_metadata_values, stat_counts, 1},
       .lob_files = {&lob, 1},
       .indexes = {&index, 1}};
@@ -963,6 +971,7 @@ static void test_manifest_serialization_round_trip(void) {
   ck_assert_int_eq(restored->delta_logs.num_delta_logs, 1);
   ck_assert_str_eq(restored->delta_logs.delta_log_paths[0], "_delta/delete.log");
   ck_assert_int_eq(restored->delta_logs.delta_log_num_entries[0], 42);
+  ck_assert_int_eq(restored->delta_logs.delta_log_file_sizes[0], 8192);
   ck_assert_int_eq(restored->stats.num_stats, 1);
   ck_assert_str_eq(restored->stats.stat_keys[0], "bloom_filter.100");
   ck_assert_int_eq(restored->stats.stat_file_counts[0], 1);
@@ -999,6 +1008,13 @@ static void test_manifest_serialization_round_trip(void) {
   ck_assert_str_eq(restored_index->property_keys[0], "storage_version");
   ck_assert_str_eq(restored_index->property_values[0], "3");
   loon_manifest_destroy(restored);
+
+  delta_file_sizes[0] = -1;
+  rc = loon_manifest_serialize(&manifest, &data, &size);
+  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert(data == NULL);
+  ck_assert_int_eq(size, 0);
+  loon_ffi_free_result(&rc);
 }
 
 static void test_empty_manifest_serialization(void) {

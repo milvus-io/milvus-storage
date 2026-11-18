@@ -140,7 +140,7 @@ static void test_async_open_minio(void) {
   LoonFFIResult result = loon_transaction_open(path, &properties, 0, -1, 0, 0, &sync_transaction);
   ck_assert_msg(result.err_code == 0, "%s", result.message);
   loon_ffi_free_result(&result);
-  result = loon_transaction_add_delta_log(sync_transaction, "_delta/delete", 42);
+  result = loon_transaction_add_delta_log(sync_transaction, "_delta/delete", 42, 0);
   ck_assert_int_eq(result.err_code, 0);
   loon_ffi_free_result(&result);
   int64_t version = -1;
@@ -168,7 +168,7 @@ static void test_async_open_minio(void) {
   ck_assert_int_eq(manifest->delta_logs.num_delta_logs, 1);
   loon_manifest_destroy(manifest);
   // A transaction must retain a normal filesystem after open completes.
-  result = loon_transaction_add_delta_log(state.transaction, "_delta/sync-after-open", 1);
+  result = loon_transaction_add_delta_log(state.transaction, "_delta/sync-after-open", 1, 0);
   ck_assert_int_eq(result.err_code, 0);
   loon_ffi_free_result(&result);
   result = loon_transaction_commit(state.transaction, &version, NULL);
@@ -192,7 +192,7 @@ static void test_async_open_minio(void) {
       nanosleep(&delay, NULL);
     }
     loon_async_release(&operation);
-    result = loon_transaction_add_delta_log(state.transaction, "_delta/later-sync", 1);
+    result = loon_transaction_add_delta_log(state.transaction, "_delta/later-sync", 1, 0);
     ck_assert_int_eq(result.err_code, 0);
     loon_ffi_free_result(&result);
     result = loon_transaction_commit(state.transaction, &version, NULL);
@@ -226,7 +226,7 @@ static void test_async_commit_roundtrip(void) {
   loon_async_release(&operation);
   ck_assert_int_eq(state.code, 0);
   LoonTransactionHandle transaction = state.transaction;
-  result = loon_transaction_add_delta_log(transaction, "_delta/delete", 42);
+  result = loon_transaction_add_delta_log(transaction, "_delta/delete", 42, 0);
   ck_assert_int_eq(result.err_code, 0);
   loon_ffi_free_result(&result);
   const char* columns[] = {"vector"};
@@ -304,7 +304,7 @@ static void test_async_commit_roundtrip(void) {
   result = loon_transaction_drop_index(transaction, 7);
   ck_assert_int_eq(result.err_code, 0);
   loon_ffi_free_result(&result);
-  result = loon_transaction_add_delta_log(transaction, "_delta/second", 2);
+  result = loon_transaction_add_delta_log(transaction, "_delta/second", 2, 0);
   ck_assert_int_eq(result.err_code, 0);
   loon_ffi_free_result(&result);
   state.calls = 0;
@@ -462,7 +462,7 @@ static void test_async_context_isolation(void) {
   loon_ffi_free_result(&result);
   loon_async_context_destroy(first);
   // Rejection must leave the transaction available to another context.
-  result = loon_transaction_add_delta_log(transaction, "_delta/context", 1);
+  result = loon_transaction_add_delta_log(transaction, "_delta/context", 1, 0);
   ck_assert_int_eq(result.err_code, 0);
   loon_ffi_free_result(&result);
   state.expected_executor = &executor;

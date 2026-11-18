@@ -633,8 +633,8 @@ static int DoDescribe(int argc, char** argv) {
     // Delta logs
     folly::dynamic dl_arr = folly::dynamic::array;
     for (auto& dl : manifest->deltaLogs()) {
-      dl_arr.push_back(
-          folly::dynamic::object("path", dl.path)("type", static_cast<int>(dl.type))("num_entries", dl.num_entries));
+      dl_arr.push_back(folly::dynamic::object("path", dl.path)("type", static_cast<int>(dl.type))(
+          "num_entries", dl.num_entries)("file_size_bytes", dl.file_size_bytes));
     }
     root["delta_logs"] = std::move(dl_arr);
 

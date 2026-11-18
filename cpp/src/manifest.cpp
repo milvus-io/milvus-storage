@@ -127,14 +127,20 @@ struct codec_traits<milvus_storage::api::DeltaLog> {
     auto type_int = static_cast<int32_t>(delta_log.type);
     avro::encode(e, type_int);
     avro::encode(e, delta_log.num_entries);
+    avro::encode(e, delta_log.file_size_bytes);
   }
 
-  static void decode(Decoder& d, milvus_storage::api::DeltaLog& delta_log) {
+  static void decodeLegacyFields(Decoder& d, milvus_storage::api::DeltaLog& delta_log) {
     avro::decode(d, delta_log.path);
     int32_t type_int;
     avro::decode(d, type_int);
     delta_log.type = static_cast<milvus_storage::api::DeltaLogType>(type_int);
     avro::decode(d, delta_log.num_entries);
+  }
+
+  static void decode(Decoder& d, milvus_storage::api::DeltaLog& delta_log) {
+    decodeLegacyFields(d, delta_log);
+    avro::decode(d, delta_log.file_size_bytes);
   }
 };
 
@@ -262,7 +268,8 @@ static const char* const MANIFEST_SCHEMA_JSON = R"({
       "type": "record", "name": "DeltaLog", "fields": [
         {"name": "path", "type": "string"},
         {"name": "type", "type": "int"},
-        {"name": "num_entries", "type": "long"}
+        {"name": "num_entries", "type": "long"},
+        {"name": "file_size_bytes", "type": "long", "default": 0}
       ]
     }}},
     {"name": "stats", "type": {"type": "map", "values": {
@@ -384,6 +391,12 @@ Manifest& Manifest::operator=(const Manifest& other) {
 }
 
 arrow::Status Manifest::serialize(std::ostream& output_stream) const {
+  for (const auto& delta_log : delta_logs_) {
+    if (delta_log.file_size_bytes < 0) {
+      return arrow::Status::Invalid("Delta log file size must be nonnegative for ", delta_log.path, ", got ",
+                                    delta_log.file_size_bytes);
+    }
+  }
   try {
     auto avro_output = avro::ostreamOutputStream(output_stream);
     avro::DataFileWriter<Manifest> writer(std::move(avro_output), getManifestSchema());
@@ -483,7 +496,13 @@ void Manifest::deserializeLegacy(std::istream& input_stream) {
       column_groups_.push_back(std::move(cg));
     }
   }
-  avro::decode(*decoder, delta_logs_);
+  // The raw MILV format predates delta file sizes and has no writer schema.
+  delta_logs_.clear();
+  for (size_t n = decoder->arrayStart(); n != 0; n = decoder->arrayNext()) {
+    for (size_t i = 0; i < n; ++i) {
+      avro::codec_traits<DeltaLog>::decodeLegacyFields(*decoder, delta_logs_.emplace_back());
+    }
+  }
 
   if (version >= 3) {
     avro::decode(*decoder, stats_);

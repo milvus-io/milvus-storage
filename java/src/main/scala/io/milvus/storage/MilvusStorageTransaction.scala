@@ -207,12 +207,13 @@ class MilvusStorageTransaction extends AutoCloseable {
     transactionUpdateStat(transactionHandle, name, paths, entries.map(_._1), entries.map(_._2))
   }
 
-  /** Register a primary-key delta log. */
-  def addDeltaLog(path: String, entries: Long): Unit = {
+  /** Register a primary-key delta log. Pass its size in bytes, or 0 if the size is unknown. */
+  def addDeltaLog(path: String, entries: Long, fileSizeBytes: Long): Unit = {
     requireActive()
     require(path != null && path.nonEmpty, "Delta log path must not be empty")
     require(entries >= 0L, "Delta entry count must be nonnegative")
-    transactionAddDeltaLog(transactionHandle, path, entries)
+    require(fileSizeBytes >= 0L, "Delta log file size must be nonnegative")
+    transactionAddDeltaLog(transactionHandle, path, entries, fileSizeBytes)
   }
 
   private def requireActive(): Unit = {
@@ -228,7 +229,7 @@ class MilvusStorageTransaction extends AutoCloseable {
   // Native method declarations
   @native private def transactionUpdateStat(handle: Long, name: String, paths: Array[String],
                                             metadataKeys: Array[String], metadataValues: Array[String]): Unit
-  @native private def transactionAddDeltaLog(handle: Long, path: String, entries: Long): Unit
+  @native private def transactionAddDeltaLog(handle: Long, path: String, entries: Long, fileSizeBytes: Long): Unit
   @native private def transactionBegin(basePath: String, propertiesPtr: Long,
                                        readVersion: Long, resolveId: Int, retryLimit: Int): Long
   @native private def transactionGetColumnGroups(transactionHandle: Long): Long
