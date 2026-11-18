@@ -29,6 +29,7 @@
 #include <aws/core/auth/signer/AWSAuthV4Signer.h>
 #include <aws/core/client/RetryStrategy.h>
 #include <aws/core/http/HttpTypes.h>
+#include <aws/core/utils/DNS.h>
 #include <aws/s3/S3Client.h>
 
 #include "milvus-storage/common/log.h"
@@ -114,6 +115,13 @@ arrow::Status ClientBuilderBase::PrepareClientConfig(Aws::Client::ClientConfigur
 
   if (!options_.region.empty()) {
     client_config->region = ToAwsString(options_.region);
+  }
+  // Check the effective region, including SDK environment/profile defaults. Otherwise
+  // the SDK drops invalid regions and reports a misleading missing-region error later.
+  if (!client_config->region.empty() && !Aws::Utils::IsValidDnsLabel(client_config->region)) {
+    return Status::Invalid(
+        "Invalid S3 region: expected 1-63 letters, digits or hyphens, "
+        "with no leading or trailing hyphen");
   }
   if (options_.request_timeout > 0) {
     // Use ceil() to avoid setting it to 0 as that probably means no timeout.
