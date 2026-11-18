@@ -65,7 +65,8 @@ class ColumnGroupLazyReaderImpl : public ColumnGroupLazyReader {
   private:
   arrow::Result<std::shared_ptr<arrow::Table>> take_files(std::span<const TakeTask> tasks);
   arrow::Result<std::shared_ptr<ReaderT>> open_reader_for_file(size_t file_index);
-  folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> open_reader_for_file_async(size_t file_index);
+  folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> open_reader_for_file_async(
+      size_t file_index, folly::CancellationToken cancellation = {});
 
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<milvus_storage::api::ColumnGroup> column_group_;
@@ -105,7 +106,9 @@ arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupLazyReaderImpl<ReaderT>::open
 
 template <typename ReaderT>
 folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>>
-ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file_async(size_t file_index) {
+ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file_async(size_t file_index,
+                                                               folly::CancellationToken cancellation) {
+  FOLLY_ARROW_RETURN_IF_CANCELLED(cancellation);
   if (file_index >= column_group_->files.size()) {
     return folly::makeSemiFuture(arrow::Result<std::shared_ptr<ReaderT>>(arrow::Status::Invalid(
         "Column group file index out of range: ", file_index, " >= ", column_group_->files.size())));
@@ -138,10 +141,11 @@ ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file_async(size_t file_index
                             [file, properties = properties_, key_retriever = key_retriever_]() {
                               return ReaderT::MetaTrait::load_metadata_async(file, properties, key_retriever);
                             })
-        .deferValue([file, read_schema = schema_, needed_columns = needed_columns_](
-                        arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>&& metadata_result)
+        .deferValue([file, read_schema = schema_, needed_columns = needed_columns_,
+                     cancellation](arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>&& metadata_result)
                         -> folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> {
           FOLLY_ARROW_ASSIGN_OR_RAISE(auto metadata, std::move(metadata_result));
+          FOLLY_ARROW_RETURN_IF_CANCELLED(cancellation);
           return ReaderT::MetaTrait::create_from_metadata_async(std::move(metadata), file, read_schema, needed_columns,
                                                                 "");
         });
@@ -216,23 +220,28 @@ arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl<ReaderT>:
 template <typename ReaderT>
 folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> ColumnGroupLazyReaderImpl<ReaderT>::take_async(
     TakeTask&& task) {
+  FOLLY_ARROW_RETURN_IF_CANCELLED(task.cancellation);
   FIU_RETURN_ON(FIUKEY_TAKE_ROWS_FAIL,
                 folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::Table>>(
                     arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_TAKE_ROWS_FAIL)))));
 
   // Open one independent reader for this file-scoped task; no mutable format
   // reader is shared with another in-flight take.
-  return open_reader_for_file_async(task.file_index)
-      .deferValue([rows_in_file = std::move(task.file_offsets)](arrow::Result<std::shared_ptr<ReaderT>>&& reader_result)
+  return open_reader_for_file_async(task.file_index, task.cancellation)
+      .deferValue([rows_in_file = std::move(task.file_offsets),
+                   cancellation = task.cancellation](arrow::Result<std::shared_ptr<ReaderT>>&& reader_result)
                       -> folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> {
         FOLLY_ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
+        FOLLY_ARROW_RETURN_IF_CANCELLED(cancellation);
         return reader->take_async(rows_in_file)
-            .deferValue(
-                [reader = std::move(reader)](auto&& table_result) -> arrow::Result<std::shared_ptr<arrow::Table>> {
-                  // Lifetime-only capture: backend state must outlive the async take.
-                  (void)reader;
-                  return std::move(table_result);
-                });
+            .deferValue([reader = std::move(reader),
+                         cancellation](auto&& table_result) -> arrow::Result<std::shared_ptr<arrow::Table>> {
+              // Lifetime-only capture: backend state must outlive the async take.
+              (void)reader;
+              ARROW_RETURN_NOT_OK(table_result.status());
+              ARROW_RETURN_IF_CANCELLED(cancellation);
+              return std::move(table_result);
+            });
       });
 }
 

@@ -43,6 +43,7 @@ ChunkTask ChunkTask::SplitTraits::split(ChunkTask& left) const {
 
   ChunkTask right;
   right.file_index = left.file_index;
+  right.cancellation = left.cancellation;
   right.chunk_indices.assign(left.chunk_indices.begin() + mid, left.chunk_indices.end());
   right.range_start = mid_info.row_offset_in_file;
   right.range_end = left.range_end;
@@ -67,13 +68,15 @@ bool ChunkTask::SplitTraits::split_by_bytes(std::vector<ChunkTask>& tasks, uint6
   std::vector<ChunkTask> result;
   for (const auto& task : tasks) {
     uint64_t bytes = 0;
-    ChunkTask current{.file_index = task.file_index, .range_start = task.range_start};
+    ChunkTask current{
+        .file_index = task.file_index, .range_start = task.range_start, .cancellation = task.cancellation};
     for (auto index : task.chunk_indices) {
       const auto& info = get_chunk_info_(index);
       const auto size = *info.read_size;
       if (!current.chunk_indices.empty() && (bytes >= target_bytes || size > target_bytes - bytes)) {
         result.push_back(std::move(current));
-        current = ChunkTask{.file_index = task.file_index, .range_start = info.row_offset_in_file};
+        current = ChunkTask{
+            .file_index = task.file_index, .range_start = info.row_offset_in_file, .cancellation = task.cancellation};
         bytes = 0;
       }
       current.chunk_indices.push_back(index);
@@ -143,6 +146,7 @@ TakeTask TakeTask::SplitTraits::split(TakeTask& left) const {
       left.file_index,
       {left.file_offsets.begin() + mid, left.file_offsets.end()},
       left.original_position + mid,
+      left.cancellation,
   };
   left.file_offsets.resize(mid);
   return right;

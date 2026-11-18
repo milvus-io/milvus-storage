@@ -20,6 +20,8 @@
 #include <memory>
 #include <vector>
 
+#include <folly/CancellationToken.h>
+
 #include <arrow/result.h>
 
 #include "milvus-storage/properties.h"
@@ -47,6 +49,7 @@ struct ChunkTask {
   std::vector<int64_t> chunk_indices;
   uint64_t range_start;
   uint64_t range_end;
+  folly::CancellationToken cancellation;  // Bound by the submitting reader, after planning.
 
   class SplitTraits {
  public:
@@ -79,6 +82,7 @@ struct TakeTask {
   uint32_t file_index;
   std::vector<int64_t> file_offsets;
   size_t original_position;
+  folly::CancellationToken cancellation;
 
   class SplitTraits {
  public:

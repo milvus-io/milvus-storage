@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <new>
@@ -36,6 +37,8 @@
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/executors/ManualExecutor.h>
 #include <folly/OperationCancelled.h>
+#include <folly/executors/ManualExecutor.h>
+#include <folly/synchronization/Baton.h>
 
 #include "include/test_env.h"
 #include "milvus-storage/common/arrow_util.h"
@@ -203,6 +206,13 @@ TEST(ChunkReaderDefaultAsyncTest, DefaultAsyncDelegatesToSyncGetChunks) {
   ASSERT_AND_ASSIGN(auto default_chunks, std::move(reader.get_chunks_async(chunk_indices)).get());
   EXPECT_EQ(default_chunks.size(), chunk_indices.size());
   EXPECT_EQ(reader.last_parallelism, 1);
+
+  folly::CancellationSource cancellation;
+  cancellation.requestCancellation();
+  const auto cancelled = reader.get_chunks_async({0}, 9, cancellation.getToken()).get();
+  EXPECT_TRUE(cancelled.status().IsCancelled()) << cancelled.status();
+  EXPECT_EQ(reader.last_chunk_indices, chunk_indices);
+  EXPECT_EQ(reader.last_parallelism, 1);
 }
 
 TEST(ReaderDefaultAsyncTest, DefaultAsyncDelegatesToSyncMethods) {
@@ -220,6 +230,17 @@ TEST(ReaderDefaultAsyncTest, DefaultAsyncDelegatesToSyncMethods) {
   EXPECT_EQ(reader.last_row_indices, row_indices);
   EXPECT_EQ(reader.last_take_parallelism, 9);
   EXPECT_EQ(reader.last_take_needed_columns, needed_columns);
+
+  folly::CancellationSource cancellation;
+  cancellation.requestCancellation();
+  const auto cancelled_open = reader.get_chunk_reader_async(6, nullptr, cancellation.getToken()).get();
+  const auto cancelled_take = reader.take_async({0}, 2, nullptr, cancellation.getToken()).get();
+  EXPECT_TRUE(cancelled_open.status().IsCancelled()) << cancelled_open.status();
+  EXPECT_TRUE(cancelled_take.status().IsCancelled()) << cancelled_take.status();
+  EXPECT_EQ(reader.last_column_group_index, 5);
+  EXPECT_EQ(reader.last_chunk_needed_columns, needed_columns);
+  EXPECT_EQ(reader.last_row_indices, row_indices);
+  EXPECT_EQ(reader.last_take_parallelism, 9);
 }
 
 // Verifies arr->Value(access_row) matches the CreateTestData pattern for col_name
@@ -2072,6 +2093,125 @@ TEST_P(APIWriterReaderTest, PublicGetChunkReaderAsync) {
   ExpectStandardTestValue(chunks[0]->column(0), "id", 0);
 }
 
+TEST_P(APIWriterReaderTest, PublicQueuedCancellationPreservesOpenErrors) {
+  if (IsCloudEnv() && GetEnvVar(ENV_VAR_CLOUD_PROVIDER).ValueOr("") == kCloudProviderAzure) {
+    // Missing-blob reads parse XML errors on background workers. Azure SDK's
+    // static XML cleanup can precede worker exit and leak libxml2 TLS state.
+    // Keep this error/cancellation coverage on the other storage backends.
+    // https://github.com/apache/arrow/issues/41004
+    // https://github.com/apache/arrow/pull/41163#issuecomment-2053787467
+    GTEST_SKIP() << "Known Arrow GH-41004: Azure/libxml2 cleanup order leaks thread-local state at process exit.";
+  }
+
+  for (const bool cache_enabled : {false, true}) {
+    SCOPED_TRACE(cache_enabled);
+    ASSERT_EQ(SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, cache_enabled ? "true" : "false"),
+              std::nullopt);
+    ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+    auto writer =
+        Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
+    ASSERT_STATUS_OK(writer->write(test_batch_));
+    ASSERT_AND_ASSIGN(auto cgs, writer->close());
+    auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
+    ASSERT_AND_ASSIGN(auto chunks, reader->get_chunk_reader(0));
+    // Keep the chunk reader's warm cache, but use a cold cache for open/take.
+    reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
+
+    ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
+    folly::CancellationSource pre_cancelled;
+    pre_cancelled.requestCancellation();
+    EXPECT_TRUE(chunks->get_chunks_async({0}, parallelism_, pre_cancelled.getToken()).get().status().IsCancelled());
+    EXPECT_TRUE(reader->take_async({0}, parallelism_, nullptr, pre_cancelled.getToken()).get().status().IsCancelled());
+    EXPECT_TRUE(reader->get_chunk_reader_async(0, nullptr, pre_cancelled.getToken()).get().status().IsCancelled());
+
+    folly::CancellationSource cancellation;
+    folly::ManualExecutor executor;
+    auto range = chunks->get_chunks_async({0}, parallelism_, cancellation.getToken())
+                     .deferValue([](auto result) { return result.status(); })
+                     .via(&executor);
+    auto take = reader->take_async({0, 3, 7}, parallelism_, nullptr, cancellation.getToken())
+                    .deferValue([](auto result) { return result.status(); })
+                    .via(&executor);
+    auto open = reader->get_chunk_reader_async(0, nullptr, cancellation.getToken())
+                    .deferValue([](auto result) { return result.status(); })
+                    .via(&executor);
+    cancellation.requestCancellation();
+    // Factory/cache work already handed off may still open its files. Preserve
+    // those real open errors rather than replacing them with cancellation.
+    const auto range_status = std::move(range).getVia(&executor);
+    const auto take_status = std::move(take).getVia(&executor);
+    const auto open_status = std::move(open).getVia(&executor);
+    if (cache_enabled) {
+      // Warm metadata reaches the request's next cancellation checkpoint.
+      EXPECT_TRUE(range_status.IsCancelled()) << range_status;
+    } else {
+      EXPECT_FALSE(range_status.ok()) << range_status;
+      EXPECT_FALSE(range_status.IsCancelled()) << range_status;
+    }
+    EXPECT_FALSE(take_status.ok()) << take_status;
+    EXPECT_FALSE(take_status.IsCancelled()) << take_status;
+    EXPECT_FALSE(open_status.ok()) << open_status;
+    EXPECT_FALSE(open_status.IsCancelled()) << open_status;
+    ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_));
+  }
+}
+
+TEST_P(APIWriterReaderTest, ColumnGroupPreCancelledTasksSkipFileOpen) {
+  ASSERT_EQ(SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, "false"), std::nullopt);
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  const auto& group = (*cgs)[0];
+  ASSERT_AND_ASSIGN(auto chunks,
+                    ColumnGroupReader::create(schema_, group, group->columns,
+                                              std::make_shared<const api::Properties>(properties_), nullptr));
+  ASSERT_AND_ASSIGN(auto lazy,
+                    ColumnGroupLazyReader::create(schema_, group, std::make_shared<const api::Properties>(properties_),
+                                                  group->columns, nullptr));
+  auto tasks =
+      ChunkTask::Build({0}, [&chunks](int64_t index) -> const ChunkInfo& { return chunks->get_chunk_info(index); });
+  ASSERT_EQ(tasks.size(), 1);
+  TakeTask take_task{0, 0, {0, 3, 7}, 0};
+  folly::CancellationSource cancellation;
+  tasks[0].cancellation = cancellation.getToken();
+  take_task.cancellation = cancellation.getToken();
+  cancellation.requestCancellation();
+  ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
+  auto range = chunks->get_chunks_async(tasks[0]);
+  auto take = lazy->take_async(std::move(take_task));
+  folly::ManualExecutor executor;
+  auto range_result = std::move(range).via(&executor).getVia(&executor);
+  auto take_result = std::move(take).via(&executor).getVia(&executor);
+  EXPECT_TRUE(range_result.status().IsCancelled()) << range_result.status();
+  EXPECT_TRUE(take_result.status().IsCancelled()) << take_result.status();
+  ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_));
+}
+
+TEST_P(APIWriterReaderTest, PublicCancellationDoesNotAffectOtherOperations) {
+  ASSERT_EQ(SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, "false"), std::nullopt);
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  auto reader = Reader::create(cgs, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
+  ASSERT_AND_ASSIGN(auto chunks, reader->get_chunk_reader(0));
+  folly::CancellationSource range_cancellation;
+  folly::CancellationSource take_cancellation;
+  folly::ManualExecutor range_executor;
+  folly::ManualExecutor take_executor;
+  auto range = chunks->get_chunks_async({0}, parallelism_, range_cancellation.getToken()).via(&range_executor);
+  auto take = reader->take_async({0, 3, 7}, parallelism_, nullptr, take_cancellation.getToken()).via(&take_executor);
+  range_cancellation.requestCancellation();
+  const auto range_result = std::move(range).getVia(&range_executor);
+  const auto take_result = std::move(take).getVia(&take_executor);
+  EXPECT_TRUE(range_result.status().IsCancelled()) << range_result.status();
+  ASSERT_TRUE(take_result.ok()) << take_result.status();
+  EXPECT_EQ(take_result.ValueOrDie()->num_rows(), 3);
+}
+
 TEST_P(APIWriterReaderTest, PublicParquetAsyncAPIsPropagateCallerExecutor) {
   if (format != LOON_FORMAT_PARQUET) {
     GTEST_SKIP() << "Parquet async open and read inherit the caller executor.";
@@ -2275,9 +2415,38 @@ TEST_P(APIWriterReaderTest, AsyncReadersPreserveBackendExceptions) {
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
+  // A second file gives each public API two independently completing tasks.
+  auto second_properties = properties_;
+  ASSERT_EQ(SetValue(second_properties, PROPERTY_WRITER_ENC_META, "async-exception-second"), std::nullopt);
+  ASSERT_AND_ASSIGN(auto second_policy, CreateSinglePolicy(format, schema_));
+  auto second_writer = Writer::create(base_path_, schema_, std::move(second_policy),
+                                      std::make_shared<const api::Properties>(second_properties));
+  ASSERT_STATUS_OK(second_writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto second_cgs, second_writer->close());
+  ASSERT_EQ(cgs->front()->files.size(), 1);
+  ASSERT_EQ(second_cgs->front()->files.size(), 1);
+  cgs->front()->files.push_back(second_cgs->front()->files.front());
+
   std::exception_ptr failure;
+  bool hold_reopen = false;
+  bool multiple_children = false;
+  folly::Baton<> reopen_started;
+  folly::Baton<> allow_reopen;
+  folly::Baton<> second_reopen_started;
+  folly::Baton<> allow_second_reopen;
   auto reader = Reader::create(cgs, schema_, nullptr, properties);
-  reader->set_keyretriever([&](const std::string&) {
+  reader->set_keyretriever([&](const std::string& metadata) {
+    if (multiple_children && metadata == "async-exception-second") {
+      second_reopen_started.post();
+      allow_second_reopen.wait();
+      // A bad key produces a real Arrow decryption error after the other
+      // child has been cancelled; aggregation must retain that read error.
+      return std::string(32, 'x');
+    }
+    if (hold_reopen) {
+      reopen_started.post();
+      allow_reopen.wait();
+    }
     if (failure) {
       std::rethrow_exception(failure);
     }
@@ -2285,25 +2454,92 @@ TEST_P(APIWriterReaderTest, AsyncReadersPreserveBackendExceptions) {
   });
   ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
   // Populate metadata before injecting failures in each task's independent reopen.
-  ASSERT_AND_ASSIGN(auto warm_table, std::move(reader->take_async({0}, parallelism_)).get());
-  ASSERT_EQ(warm_table->num_rows(), 1);
+  ASSERT_EQ(chunk_reader->total_number_of_chunks(), 2);
+  ASSERT_AND_ASSIGN(auto warm_table, std::move(reader->take_async({0, test_batch_->num_rows()}, parallelism_)).get());
+  ASSERT_EQ(warm_table->num_rows(), 2);
 
+  hold_reopen = true;
+  folly::CPUThreadPoolExecutor executor(2);
   const auto storage_error = ToSegcoreError(arrow::Status::Invalid("corrupt backend data"));
   for (const auto& injected :
-       {std::make_exception_ptr(std::bad_alloc()), std::make_exception_ptr(folly::OperationCancelled()),
+       {std::exception_ptr{}, std::make_exception_ptr(std::bad_alloc()),
+        std::make_exception_ptr(folly::OperationCancelled()), std::make_exception_ptr(folly::FutureCancellation()),
         std::make_exception_ptr(storage_error)}) {
     failure = injected;
-    auto expect_original_exception = [&](auto future) {
-      try {
-        (void)std::move(future).get();
-        ADD_FAILURE() << "Backend exception was converted into an Arrow result";
-      } catch (...) {
-        EXPECT_EQ(std::current_exception(), failure);
+    auto verify_completion = [&](auto make_future) {
+      for (const std::string cancel_mode : {"none", "late", "in_flight"}) {
+        const bool cancel_in_flight = cancel_mode == "in_flight";
+        SCOPED_TRACE(::testing::Message()
+                     << "failure=" << static_cast<bool>(failure) << " cancel_mode=" << cancel_mode);
+        folly::CancellationSource cancellation;
+        reopen_started.reset();
+        allow_reopen.reset();
+        auto token = cancel_mode == "none" ? folly::CancellationToken{} : cancellation.getToken();
+        auto future = make_future(std::move(token)).via(&executor);
+        EXPECT_TRUE(reopen_started.try_wait_for(std::chrono::seconds(5)));
+        if (cancel_in_flight) {
+          cancellation.requestCancellation();
+        }
+        // The public future must retain the started operation until it finishes,
+        // even when its caller has already requested cancellation.
+        EXPECT_FALSE(future.isReady());
+        allow_reopen.post();
+        future.wait();
+        if (cancel_mode == "late") {
+          // Cancellation after completion must not replace the completed result.
+          cancellation.requestCancellation();
+        }
+        if (failure) {
+          try {
+            (void)std::move(future).get();
+            ADD_FAILURE() << "Backend exception was replaced by an Arrow result";
+          } catch (...) {
+            EXPECT_EQ(std::current_exception(), failure);
+          }
+        } else {
+          const auto result = std::move(future).get();
+          if (cancel_in_flight) {
+            EXPECT_TRUE(result.status().IsCancelled()) << result.status();
+          } else {
+            EXPECT_TRUE(result.ok()) << result.status();
+          }
+        }
       }
     };
-    expect_original_exception(chunk_reader->get_chunks_async({0}, parallelism_));
-    expect_original_exception(reader->take_async({0}, parallelism_));
+    verify_completion([&](folly::CancellationToken cancellation) {
+      return chunk_reader->get_chunks_async({0}, parallelism_, std::move(cancellation));
+    });
+    verify_completion([&](folly::CancellationToken cancellation) {
+      return reader->take_async({0}, parallelism_, nullptr, std::move(cancellation));
+    });
   }
+  multiple_children = true;
+  failure = std::make_exception_ptr(folly::FutureCancellation());
+  auto verify_multiple_children = [&](auto make_future) {
+    folly::CancellationSource cancellation;
+    reopen_started.reset();
+    allow_reopen.reset();
+    second_reopen_started.reset();
+    allow_second_reopen.reset();
+    auto future = make_future(cancellation.getToken()).via(&executor);
+    EXPECT_TRUE(reopen_started.try_wait_for(std::chrono::seconds(5)));
+    EXPECT_TRUE(second_reopen_started.try_wait_for(std::chrono::seconds(5)));
+    cancellation.requestCancellation();
+    allow_reopen.post();
+    // The second file is still opening: neither cancellation nor the first
+    // child's cancellation result can complete the aggregate early.
+    future.wait(std::chrono::milliseconds(100));
+    EXPECT_FALSE(future.isReady());
+    allow_second_reopen.post();
+    const auto result = std::move(future).get();
+    EXPECT_TRUE(result.status().IsIOError()) << result.status();
+  };
+  verify_multiple_children([&](folly::CancellationToken cancellation) {
+    return chunk_reader->get_chunks_async({0, 1}, parallelism_, std::move(cancellation));
+  });
+  verify_multiple_children([&](folly::CancellationToken cancellation) {
+    return reader->take_async({0, test_batch_->num_rows()}, parallelism_, nullptr, std::move(cancellation));
+  });
 }
 
 TEST_P(APIWriterReaderTest, EnrypytionWriterReaderTest) {

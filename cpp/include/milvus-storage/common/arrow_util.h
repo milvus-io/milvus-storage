@@ -92,6 +92,22 @@ arrow::Result<std::string> GetEnvVar(const std::string& name);
 
 }  // namespace milvus_storage
 
+// Cancellation helpers evaluate the token expression once and preserve the
+// enclosing function's Arrow or Folly/Arrow error return path.
+#define ARROW_RETURN_IF_CANCELLED(cancellation)            \
+  do {                                                     \
+    if ((cancellation).isCancellationRequested()) {        \
+      return ::arrow::Status::Cancelled("Read cancelled"); \
+    }                                                      \
+  } while (false)
+
+#define FOLLY_ARROW_RETURN_IF_CANCELLED(cancellation)                                                       \
+  do {                                                                                                      \
+    if ((cancellation).isCancellationRequested()) {                                                         \
+      return ::milvus_storage::detail::FollyArrowErrorFuture(::arrow::Status::Cancelled("Read cancelled")); \
+    }                                                                                                       \
+  } while (false)
+
 // Async counterparts of Arrow's early-return helpers. They keep validation and
 // setup failures on the same Arrow Status/Result future path as backend failures.
 #define FOLLY_ARROW_RETURN_NOT_OK(status_expr)                                                \

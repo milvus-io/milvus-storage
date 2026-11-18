@@ -3628,6 +3628,12 @@ void AzureFileSystem::ForceCachedHierarchicalNamespaceSupport(int hns_support) {
 
 Result<std::shared_ptr<AzureFileSystem>> AzureFileSystem::Make(
     const AzureOptions& options, const io::IOContext& io_context) {
+  // Known upstream issue GH-41004: Azure SDK's static xmlCleanupParser() can
+  // precede worker shutdown, leaking libxml2 thread-local state at process
+  // exit. This is independent of read cancellation. Tests that deliberately
+  // trigger missing-blob reads on background workers can expose the issue.
+  // https://github.com/apache/arrow/issues/41004
+  // https://github.com/apache/arrow/pull/41163#issuecomment-2053787467
   ARROW_ASSIGN_OR_RAISE(auto impl, AzureFileSystem::Impl::Make(options, io_context));
   return std::shared_ptr<AzureFileSystem>(new AzureFileSystem(std::move(impl)));
 }
