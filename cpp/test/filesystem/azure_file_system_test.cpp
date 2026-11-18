@@ -22,6 +22,7 @@
 #include <string>
 #include <sys/socket.h>
 #include <arrow/result.h>
+#include <arrow/util/future.h>
 #include <arrow/util/io_util.h>
 #include <azure/storage/blobs.hpp>
 #include <azure/storage/files/datalake.hpp>
@@ -152,7 +153,92 @@ TEST(AzureFileSystem, ReadOperationsReturnTransportErrors) {
 // AzureOptions::FromUri tests (no network required)
 // ============================================================================
 
-class TestAzureOptions : public ::testing::Test {};
+class TestAzureFileSystem {
+  public:
+  static void SetHierarchicalNamespaceSupport(AzureFileSystem& fs, int support) {
+    fs.ForceCachedHierarchicalNamespaceSupport(support);
+  }
+};
+
+class TestAzureOptions : public ::testing::Test {
+  protected:
+  static void ConfigureToken(AzureOptions& options,
+                             std::shared_ptr<Azure::Core::Credentials::TokenCredential> credential) {
+    options.token_credential_ = std::move(credential);
+  }
+};
+
+namespace {
+class FailingTokenCredential final : public Azure::Core::Credentials::TokenCredential {
+  public:
+  FailingTokenCredential() : TokenCredential("synthetic") {}
+  Azure::Core::Credentials::AccessToken GetToken(const Azure::Core::Credentials::TokenRequestContext&,
+                                                 const Azure::Core::Context&) const override {
+    throw Azure::Core::Credentials::AuthenticationException("synthetic-secret-must-not-leak");
+  }
+};
+
+void CheckAuthenticationFailure(const arrow::Status& status) {
+  EXPECT_TRUE(status.IsIOError()) << status;
+  EXPECT_EQ(status.message(), "Azure authentication failed");
+  EXPECT_EQ(status.message().find("synthetic-secret-must-not-leak"), std::string::npos);
+  // Authentication failed locally, without a remote response to classify.
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
+}
+}  // namespace
+
+TEST_F(TestAzureOptions, CredentialFailureReturnsStatusForReadsAndFilesystemOperations) {
+  AzureOptions options;
+  options.account_name = "synthetic-account";
+  ConfigureToken(options, std::make_shared<FailingTokenCredential>());
+  const auto filesystem = AzureFileSystem::Make(options);
+  ASSERT_TRUE(filesystem.ok()) << filesystem.status();
+  const auto fs = filesystem.ValueOrDie();
+  const auto opened = fs->OpenInputFile("container/blob");
+  ASSERT_TRUE(opened.ok()) << opened.status();
+  const auto file = opened.ValueOrDie();
+  EXPECT_NO_THROW({
+    CheckAuthenticationFailure(file->GetSize().status());
+    char out = 0;
+    CheckAuthenticationFailure(file->ReadAt(0, 1, &out).status());
+    CheckAuthenticationFailure(file->ReadMetadata().status());
+    CheckAuthenticationFailure(fs->GetFileInfo("container").status());
+    CheckAuthenticationFailure(fs->DeleteDir("container"));
+    CheckAuthenticationFailure(fs->Move("container", "other-container"));
+    arrow::fs::FileSelector select;
+    CheckAuthenticationFailure(fs->GetFileInfo(select).status());
+    // Probe unknown, flat and hierarchical namespace operation dispatch.
+    for (int hns : {0, 2, 3}) {
+      TestAzureFileSystem::SetHierarchicalNamespaceSupport(*fs, hns);
+      CheckAuthenticationFailure(fs->GetFileInfo("container/blob").status());
+      CheckAuthenticationFailure(fs->CreateDir("container/dir", true));
+      CheckAuthenticationFailure(fs->DeleteFile("container/blob"));
+      CheckAuthenticationFailure(fs->DeleteDirContents("container", false));
+      if (hns != 2)
+        CheckAuthenticationFailure(fs->Move("container/a", "container/b"));
+      CheckAuthenticationFailure(fs->CopyFile("container/a", "container/b"));
+      CheckAuthenticationFailure(fs->OpenOutputStream("container/blob", nullptr).status());
+      CheckAuthenticationFailure(fs->OpenAppendStream("container/blob", nullptr).status());
+      CheckAuthenticationFailure(fs->OpenConditionalOutputStream("container/blob", nullptr).status());
+    }
+  });
+  ASSERT_TRUE(file->Close().ok());
+}
+
+TEST_F(TestAzureOptions, CredentialFailureCompletesAsyncReadWithStatus) {
+  AzureOptions options;
+  options.account_name = "synthetic-account";
+  ConfigureToken(options, std::make_shared<FailingTokenCredential>());
+  const auto filesystem = AzureFileSystem::Make(options);
+  ASSERT_TRUE(filesystem.ok()) << filesystem.status();
+  const auto opened = filesystem.ValueOrDie()->OpenInputFile("container/blob");
+  ASSERT_TRUE(opened.ok()) << opened.status();
+  const auto file = opened.ValueOrDie();
+  // Actual Arrow executor -> Blob SDK -> raw TokenCredential failure. An
+  // escaped auth exception terminates the worker instead of completing this Future.
+  EXPECT_NO_THROW(CheckAuthenticationFailure(file->ReadAsync(0, 1).result().status()));
+  ASSERT_TRUE(file->Close().ok());
+}
 
 TEST_F(TestAzureOptions, FromUriBlobStorage) {
   AzureOptions default_options;
