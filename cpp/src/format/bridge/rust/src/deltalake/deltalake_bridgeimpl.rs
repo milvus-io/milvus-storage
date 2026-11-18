@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use cxx::SharedPtr;
+use delta_kernel::arrow::datatypes::Schema as ArrowSchema;
 use delta_kernel::arrow::record_batch::RecordBatch;
 use delta_kernel::engine::arrow_conversion::TryIntoArrow;
 use delta_kernel::engine::arrow_data::EngineDataArrowExt;
@@ -61,6 +62,7 @@ pub struct DeltaSnapshotContext {
     pub(crate) engine: Arc<DeltaEngine>,
     pub(crate) snapshot: SnapshotRef,
     pub(crate) physical_schema: delta_kernel::schema::SchemaRef,
+    pub(crate) physical_arrow_schema: ArrowSchema,
     pub(crate) scan_metadata: Vec<RecordBatch>,
     pub(crate) active_files: HashMap<String, CachedScanFile>,
     pub(crate) dv_string_bytes: usize,
@@ -184,6 +186,7 @@ fn open_snapshot_impl(
         engine: engine.clone(),
         snapshot,
         physical_schema: scan.physical_schema().clone(),
+        physical_arrow_schema: scan.physical_schema().as_ref().try_into_arrow()?,
         scan_metadata: Vec::new(),
         active_files: HashMap::new(),
         dv_string_bytes: 0,

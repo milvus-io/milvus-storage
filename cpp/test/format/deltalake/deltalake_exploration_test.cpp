@@ -1343,8 +1343,7 @@ TEST_F(DeltaReaderTest, NestedDroppedFieldsAndNullableChildren) {
   EXPECT_EQ(profile->field(1)->null_count(), 2);
   EXPECT_EQ(std::static_pointer_cast<arrow::Int64Array>(profile->field(0))->Value(0), 7);
 
-  // The pinned Kernel treats an existing parent as missing when all requested
-  // children are new. Retain this upstream behavior until Kernel fixes it.
+  // Even without a matching child, the file still carries the parent's validity.
   child["fields"].erase(child["fields"].begin());
   schema["fields"][0]["type"] = child;
   Commit(table, 1, {Metadata(schema)});
@@ -1353,7 +1352,8 @@ TEST_F(DeltaReaderTest, NestedDroppedFieldsAndNullableChildren) {
   ASSERT_AND_ASSIGN(auto replacement_reader, Open(replaced[0]));
   ASSERT_AND_ASSIGN(auto replacement_batch, replacement_reader->get_chunk(0));
   auto replacement = std::static_pointer_cast<arrow::StructArray>(replacement_batch->column(0));
-  EXPECT_EQ(replacement->null_count(), 2);
+  EXPECT_TRUE(replacement->IsValid(0));
+  EXPECT_TRUE(replacement->IsNull(1));
   ASSERT_EQ(replacement->num_fields(), 1);
   EXPECT_EQ(replacement->field(0)->null_count(), 2);
 }
@@ -1433,6 +1433,44 @@ TEST_F(DeltaReaderTest, ProjectsNestedBatchesThroughOrdinaryParquetReader) {
       expected += physical_group->ColumnChunk(leaf)->total_compressed_size();
     EXPECT_EQ(groups[group].read_size, expected);
   }
+
+  // Drop the last physical child from the requested struct, list elements and
+  // map values. The reader still needs each root to preserve its shape.
+  logical_child["fields"].erase(logical_child["fields"].begin());
+  schema["fields"][0]["type"] = logical_child;
+  schema["fields"][1]["type"]["elementType"] = logical_child;
+  schema["fields"][2]["type"]["valueType"] = logical_child;
+  Commit(table, 1, {Metadata(schema)});
+  SelectVersion(1);
+  ASSERT_AND_ASSIGN(auto evolved_files, Explore(table));
+  ASSERT_AND_ASSIGN(auto evolved_reader, Open(evolved_files[0], {"lookup", "events", "profile"}));
+  ASSERT_AND_ASSIGN(auto evolved_chunks, evolved_reader->get_chunks({0, 1}));
+  ASSERT_AND_ASSIGN(auto evolved, arrow::ConcatenateRecordBatches(evolved_chunks));
+  const auto evolved_profile = std::static_pointer_cast<arrow::StructArray>(evolved->column(2));
+  ASSERT_EQ(evolved_profile->num_fields(), 1);
+  EXPECT_TRUE(evolved_profile->IsValid(0));
+  EXPECT_TRUE(evolved_profile->IsNull(1));
+  EXPECT_EQ(evolved_profile->field(0)->null_count(), 4);
+
+  const auto evolved_list = std::static_pointer_cast<arrow::ListArray>(evolved->column(1));
+  EXPECT_EQ(evolved_list->value_length(0), 2);
+  EXPECT_TRUE(evolved_list->IsNull(1));
+  EXPECT_TRUE(evolved_list->IsValid(2));
+  EXPECT_EQ(evolved_list->value_length(2), 0);
+  EXPECT_EQ(evolved_list->value_length(3), 1);
+  const auto elements = std::static_pointer_cast<arrow::StructArray>(evolved_list->values());
+  EXPECT_EQ(elements->null_count(), 0);
+  EXPECT_EQ(elements->field(0)->null_count(), 3);
+
+  const auto evolved_map = std::static_pointer_cast<arrow::MapArray>(evolved->column(0));
+  EXPECT_TRUE(evolved_map->IsNull(1));
+  EXPECT_TRUE(evolved_map->IsValid(2));
+  EXPECT_EQ(evolved_map->value_length(2), 0);
+  EXPECT_TRUE(evolved_map->keys()->Equals(map->keys()));
+  const auto values = std::static_pointer_cast<arrow::StructArray>(evolved_map->items());
+  EXPECT_TRUE(values->IsValid(0));
+  EXPECT_TRUE(values->IsNull(1));
+  EXPECT_EQ(values->field(0)->null_count(), 2);
 }
 
 TEST_F(DeltaReaderTest, ValidatesUnprojectedFieldsAndPhysicalCounts) {
@@ -1583,7 +1621,8 @@ TEST_F(DeltaReaderTest, ReadsRelativeLocalRoot) {
   ASSERT_AND_ASSIGN(auto files, Explore("table"));
   ASSERT_EQ(files.size(), 1);
   EXPECT_EQ(files[0].end_index, 2);
-  EXPECT_EQ(files[0].path, "file://" + table + "/part.parquet");
+  const auto path = (std::filesystem::path(table) / "part.parquet").lexically_normal();
+  EXPECT_EQ(files[0].path, "file://" + path.generic_string());
   ASSERT_AND_ASSIGN(auto reader, Open(files[0]));
   ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
   EXPECT_EQ(batch->num_rows(), 2);

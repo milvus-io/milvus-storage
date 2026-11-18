@@ -1,268 +1,134 @@
 # Delta Lake format
 
-`deltalake-table` is a read-only external collection format.
+`deltalake-table` reads Parquet-backed Delta Lake tables as external collections. It resolves
+snapshot membership, column mappings, partition values, schema evolution, and deletion vectors
+from the Delta log. It supports inline, UUID-relative, and absolute-URL deletion vectors,
+including multiple vectors at distinct offsets in one file.
 
-## Known limitations
+## Snapshot and reader contract
 
-### Existing containers with no matching physical leaves
+- Set `reader.exttable.snapshot_id` to `-1` to resolve the latest snapshot during exploration,
+  or to a nonnegative version, including `0`, to select an exact snapshot.
+- Exploration records a versioned descriptor with the table URI and snapshot version alongside
+  each file's path, size, and live row count. Readers always reopen the pinned version. Source
+  owners must retain its immutable logs, checkpoints, data files, and deletion vectors.
+- Select top-level logical fields with `read_schema` or `needed_columns`. An explicit
+  `read_schema` controls field order and must use compatible types. An empty `read_schema`
+  requests zero columns. An empty `needed_columns` with no `read_schema` requests all fields.
+  `get_schema()` returns the full snapshot schema.
+- Each file descriptor covers the whole file's live rows starting at zero. Use the reader's
+  range API to read a subset. For `take`, supply sorted, unique live-row indices after deletion
+  vector filtering.
+- Async entry points use synchronous fallbacks. Apply predicates to the returned rows in the caller.
+  Writes, change data feeds, incremental reads, timestamp-based time travel, and catalog discovery
+  are outside the read API.
 
-The reader currently retains the behavior of the pinned
-[`delta-kernel-rs` revision](https://github.com/delta-io/delta-kernel-rs/commit/913389cbf94528225c70b2a396a9408f41dd9954).
-If an existing container has no matching requested physical leaves in a data
-file, Kernel can reconstruct that container as null. For nullable structs this
-loses the existing parent's validity. For example, reading
-`profile: struct<new: string>` from a file containing
-`profile: struct<old: long>` produces:
+## Schema evolution
 
-| Stored value | Required value-preserving result | Current Kernel result |
-| --- | --- | --- |
-| `{old: 7}` | `{new: null}` | `null` |
-| `{old: null}` | `{new: null}` | `null` |
-| `null` | `null` | `null` |
+Exploration validates logical types and recorded `delta.typeChanges` across the snapshot
+schema. File open validates compatibility with the full visible schema, including fields outside
+the requested projection. The reader handles `name` and `id` column mappings using the pinned
+Kernel's ID-first matching with physical-name fallback. Files with missing or conflicting field
+IDs can therefore resolve differently from strict Delta column-mapping mode rules.
 
-The same zero-leaf planning affects enclosing lists. Reading
-`items: array<struct<new: string>>` from
-`items: array<struct<old: long>>` can produce:
+When an existing struct has no matching child fields in the requested schema, the reader
+preserves its validity. For example, `{old: 7}` becomes `{new: null}`, and a null struct stays
+null. Enclosing lists and maps keep their offsets and the distinction between empty and null.
+Map keys stay associated with their values. A nullable container absent from the file yields a
+typed null. Rust aligns the physical arrays before Kernel fixup to work around the nullable
+struct behavior tracked by [Kernel issue #3961](https://github.com/delta-io/delta-kernel-rs/issues/3961).
 
-| Stored items | Required value-preserving result | Current Kernel result |
-| --- | --- | --- |
-| `[{old: 7}]` | `[{new: null}]` | `null` |
-| `[]` | `[]` | `null` |
-| `null` | `null` | `null` |
-
-This loses list lengths and the distinction between empty and null lists. The
-behavior also applies recursively to affected structs inside lists or map
-values. Partial map projection can also fail: when only key leaves remain,
-the C++ projected representation is a list, which pinned Kernel fixup rejects
-as not being a `MapArray`. This can fail file-schema validation before payload
-reads. Selecting some key leaves does not guarantee a readable map.
-
-The nullable-struct case is tracked in
-[Kernel issue #3961](https://github.com/delta-io/delta-kernel-rs/issues/3961).
-The [in-memory Kernel tests](../bridge/rust/src/deltalake/deltalake_reader.rs)
-record the pinned behavior; the desired-semantics struct reproduction is ignored.
-The [projection units](../bridge/rust/src/deltalake/deltalake_projection.rs)
-also characterize the partial-map rejection at the C++/Rust boundary.
-The reader retains this upstream container behavior without a local workaround
-or special rejection. Adding nullable children alongside retained physical
-children does not trigger the zero-leaf case. The missing-container plan originates
-from
-[Kernel PR #2170](https://github.com/delta-io/delta-kernel-rs/pull/2170).
-
-### Feature and API scope
-
-- Only Parquet-backed Delta tables are supported. Writes, CDF/incremental read
-  APIs, timestamp-based time travel, and catalog discovery are not implemented.
-  Column mapping in both `name` and `id` modes and inline, UUID-relative, and
-  absolute-URL deletion vectors are supported.
-- Predicate strings passed to the format reader are not evaluated or pushed
-  down. Callers must apply their own filtering to the returned live rows.
-- Column selection uses top-level logical names. A supplied `read_schema`
-  selects/orders fields but cannot change their types or request only part of a
-  struct. Otherwise, nonempty `needed_columns` selects fields; an empty list
-  selects the full schema. An explicit empty `read_schema` selects zero columns.
-  `get_schema()` always returns the full pinned snapshot schema.
-- Async entry points use synchronous fallbacks and may block their executing
-  thread. Native asynchronous reading is deferred.
-
-### Types and schema evolution
-
-The initial logical type and Arrow layout subset is:
-
-| Delta type | Supported representation |
+| Delta type | Supported Arrow representation |
 | --- | --- |
-| Boolean; byte/short/integer/long; float/double | Boolean; signed 8/16/32/64-bit integers; 32/64-bit floats |
-| String; binary | Ordinary Utf8/Binary layouts |
-| Decimal | Decimal128, precision 1..38 and scale 0..precision |
+| Boolean | Boolean |
+| Byte, short, integer, long | Signed 8-, 16-, 32-, and 64-bit integers |
+| Float, double | 32- and 64-bit floats |
+| String, binary | Ordinary Utf8 and Binary |
+| Decimal | Decimal128, precision 1 to 38 and scale 0 to precision |
 | Date | Date32 |
-| Timestamp; timestamp_ntz | Microseconds with UTC; microseconds without timezone |
-| Struct; array; map | Recursive Struct/List/Map, with non-null map keys |
-| Void; missing nullable fields | Null/typed-null arrays |
+| Timestamp, timestamp_ntz | Microseconds with UTC or without a timezone, respectively |
+| Struct, array, map | Recursive Struct, List, and Map with non-null map keys |
+| Void, missing nullable fields | Null and typed-null arrays |
 
-Variant/shredding, file-reference types, geospatial/UDT types, and intervals are
-outside this subset. Unsigned integers, Decimal256, fixed-size arrays, and unions
-are outside the supported layout contract. Caller-defined casts are not applied.
-Nested adaptation follows the pinned Kernel's behavior, including the limitation
-above.
+Variant and shredding, file-reference types, geospatial types, UDTs, intervals, unsigned integers,
+Decimal256, fixed-size arrays, and unions are outside the supported subset. Callers can select and
+order fields. Partial struct projections and caller-defined casts are unsupported.
 
-Supported widening is limited to these lossless families:
+These lossless widening rules apply to Parquet data fields, including nested fields.
 
-| Source | Target |
+| Source | Supported targets |
 | --- | --- |
-| Byte | Short, integer, long, double, or a sufficiently large decimal |
-| Short | Integer, long, double, or a sufficiently large decimal |
-| Integer | Long, double, or a sufficiently large decimal |
-| Long | A sufficiently large decimal |
+| Byte | Short, integer, long, double, or sufficiently large decimal |
+| Short | Integer, long, double, or sufficiently large decimal |
+| Integer | Long, double, or sufficiently large decimal |
+| Long | Sufficiently large decimal |
 | Float | Double |
-| Decimal | Greater precision/scale without losing integer digits |
+| Decimal | Greater precision or scale without reducing scale or integer digits |
 | Date | Timestamp_ntz |
-
-These rules also apply to nested data fields. Exploration validates all logical
-types and recorded `delta.typeChanges`, including unprojected fields. File open
-validates compatibility with the full visible snapshot schema, so selecting fewer
-columns does not bypass incompatible types or missing required fields. Dropped
-physical fields are ignored, and missing nullable fields are synthesized.
 
 ### Partition conversion
 
-Partition values come from snapshot metadata using mapped physical names, never
-from directory names. Only primitive partition types are supported.
+Primitive partition values come from snapshot metadata using mapped physical names.
 
-- Missing/null values become typed nulls. Empty strings remain empty for
-  string/binary partitions and become null for other primitive types.
-- Binary values use the JSON string's UTF-8 bytes; no Base64 decoding is applied.
-- Decimal text must match the declared scale exactly; values are not rounded or
-  rescaled automatically.
-- Nonempty `timestamp` values require an explicit offset/UTC suffix, for example
-  `2024-01-01T00:00:00Z`. Offset-less timestamps are rejected even though Kernel
-  can assume UTC. `timestamp_ntz` uses timezone-free text. There is no reader
-  timezone override.
-- Partition widening supports integer promotions (including byte, short, and
-  integer to double), decimal precision growth at unchanged scale, and
-  integer-to-decimal conversion at scale zero.
-- Snapshot validation rejects float-to-double partition widening because
-  parsing an older partition string as double can change the value. For
-  example, the float stored as `0.1` widens to `0.10000000149011612`, while
-  parsing `0.1` directly as double yields `0.1`.
-- Decimal scale increases, integer-to-decimal with nonzero scale, and
-  date-to-`timestamp_ntz` partition changes are also unsupported.
+- Missing values become typed nulls. Empty strings stay empty for string and binary partitions
+  and become null for other primitive types. Binary values use the UTF-8 bytes of the JSON string.
+- Decimal text must match the declared scale. Nonempty `timestamp` values require an explicit
+  offset or UTC suffix, such as `2024-01-01T00:00:00Z`. Use timezone-free text for `timestamp_ntz`.
+- Partition widening supports integer promotions, including byte, short, and integer to double,
+  decimal precision growth at the same scale, and integer-to-decimal at scale zero.
+- The reader rejects recorded float-to-double partition widening. Parsing an old float literal
+  such as `0.1` as double can change its value because the text omits the original float rounding.
+  Decimal scale increases, integer-to-decimal with nonzero scale, and date-to-`timestamp_ntz`
+  partition changes also require conversions outside the supported subset.
 
-### Snapshot, filesystem, and file-reference constraints
+## Filesystem requirements
 
-- Exploration resolves latest afresh when `reader.exttable.snapshot_id=-1`, or
-  pins a nonnegative version, including `0`. File readers always use the recorded
-  exact version; they do not refresh to latest or support timestamp selectors.
-- Source owners must retain the logs/checkpoints and data/DV files needed for
-  that version. Missing historical sources cause errors; the reader does not
-  retain source files or substitute a newer snapshot.
-- Source URLs must continue identifying the same immutable planned files.
-  Local roots and symlinks must remain stable while cached filesystems or readers
-  are in use; relative roots also require a stable working directory. Delta uses
-  the same filesystem cache policy as other formats, with local roots keyed by
-  configured spelling.
-- All log, checkpoint/sidecar, data, and DV references must use the configured
-  filesystem identity. Cross-bucket/cross-filesystem references and local paths
-  outside the configured filesystem root are unsupported. Source URLs cannot
-  embed credentials, queries, or fragments; local file URLs cannot include a host.
-- Local table/file URLs preserve the configured root and table-path spelling
-  after absolute lexical normalization, matching the other table formats. The
-  local filesystem producer resolves the physical root on creation.
-  Local source entries must be relative or use absolute URLs under the configured
-  logical root; other spellings outside that prefix are unsupported, even if a
-  symlink makes them physically equivalent.
-- Reader creation requires a valid snapshot descriptor, recorded file size, and
-  live row count, normally supplied by exploration. A path alone is insufficient.
-  The descriptor covers the whole file's live rows starting at zero; use the
-  reader's range API for partial reads instead of slicing the descriptor.
-- Row indices refer to live rows after DV filtering. `take` requires sorted,
-  unique indices within those live-row bounds.
-- Callers must keep collection-manifest cache keys unique across distinct
-  destinations within one process. The shared manifest cache uses filesystem
-  root/bucket and manifest path, without endpoint or credential identity. Use
-  distinct destination collection paths when endpoints share a bucket name.
-  Milvus supplies uniqueness through collection/partition/segment directories;
-  this existing contract is retained following the [PR #800 discussion](https://github.com/milvus-io/milvus-storage/pull/800#issuecomment-6936593703).
-  Delta source snapshot/file caches isolate filesystem identities separately.
+- Logs, checkpoints, sidecars, data files, and deletion vectors must share one configured
+  filesystem identity. Source URLs must omit credentials, queries, and fragments. Local file
+  URLs must omit a host.
+- Local URLs use the configured root and path spelling after absolute lexical normalization.
+  Keep roots and symlink aliases stable while cached filesystems or readers are in use. Relative
+  roots also require a stable working directory. Use relative source entries or absolute URLs
+  under the configured logical root.
+- When endpoints share a bucket name, give their destination collections distinct manifest
+  paths. The shared manifest cache keys on the filesystem root or bucket and manifest path.
+  Milvus supplies this uniqueness through collection, partition, and segment directories.
+  [Manifest cache discussion](https://github.com/milvus-io/milvus-storage/pull/800#issuecomment-6936593703)
 
-### I/O, caching, and memory estimates
+## I/O and caching
 
-- Exploration uses snapshot row counts when available, but may read Parquet
-  footers for files without usable counts. On a per-file cache miss, reader
-  creation loads/validates the footer and decodes DV positions even for
-  partition-only/null-only projections; those projections can still avoid
-  payload-column reads. When no physical columns are needed, chunk/range/take
-  output is materialized only for the live/requested row count.
-- C++ uses the ordinary Parquet reader to decode selected physical top-level
-  columns. Rust removes unrequested nested children before Kernel schema fixups
-  and logical transforms. Dropped children under a selected struct/list/map can
-  therefore add I/O, decoding and peak memory; scheduled read-byte estimates
-  include those children. Pruning shares Arrow value/offset/null buffers, while
-  Kernel transformations and DV filtering can allocate their own output.
-- The reader passes the decoded Arrow file schema and physical row count to
-  Rust, rather than serialized Parquet footer metadata. Rust adapts that schema
-  into an in-memory Kernel planning descriptor; it performs no data-file reads
-  through that descriptor and receives no decryption callback or keys.
-- Encrypted data reads use the existing C++ key callback, including distinct
-  column keys. Exploration has no key callback for its count fallback, so files
-  with encrypted footers require usable row counts in the snapshot metadata.
-- A stateful Parquet payload reader created with a non-null key callback reads
-  its footer to initialize its own Arrow 17 decryptors. A cold read can therefore
-  load the footer for validation and again for payload-reader setup; clones also
-  repeat payload-reader footer setup. This applies even to plaintext files when
-  a callback is supplied. The ordinary Parquet cache does not retain the footer
-  for reuse when a callback is present; schema/group metadata remain available.
-- Snapshot caching is in memory and tied to reader-metadata ownership. Releasing
-  the last owner can require a later reader to replay the pinned snapshot's logs.
-  Per-file descriptors do not contain enough table metadata for a cold open
-  without access to those logs/checkpoints. The Rust engine retains its
-  filesystem; per-file Parquet metadata independently retains the filesystem
-  selected by the ordinary Parquet loader using the original properties.
-- Snapshot/schema/active-file/projection state can be shared across top-level
-  readers. The general reader metadata cache holds one Delta entry per table,
-  snapshot and data-file identity (path, size and live-row count). Each entry
-  directly retains that file's Parquet metadata (including a reusable footer
-  without a key callback), Rust planning schema, decoded DV, logical row groups
-  and a shared snapshot reference. Projections and clones reuse
-  it; independent readers load and retain their own entries. Outstanding
-  chunk/range readers or clones can extend metadata lifetimes beyond the parent
-  reader. A snapshot reference alone does not retain other file entries.
-- This ownership can release file metadata earlier, but overlapping readers may
-  repeat footer/DV reads and retain duplicate decoded positions. Disabling the
-  metadata cache also forgoes reuse across independent file-reader opens.
-  Underlying filesystem caches may reduce actual remote traffic. The general
-  metadata cache has no byte-bounded eviction. Per-file `cache_size` estimates
-  cover file metadata; they exclude shared snapshot state to avoid counting it
-  once per file and do not represent total retained memory.
-- Snapshot loading still resolves/indexes all active files. New projections cache
-  shared schema/scan state; each file plan builds its transform from one indexed
-  cached metadata row. Separate reader opens can rebuild that transform, adding
-  per-file setup overhead when reading an entire table. Live plans and clones
-  reuse their transforms. Loaded footers and decoded DV positions also consume
-  memory; DV positions are retained as 64-bit row indices.
-- Row-group and per-column memory estimates are unavailable when schema
-  adaptation prevents reliable reuse of physical Parquet estimates, including
-  mapping, widening, partition constants (even when also stored in Parquet), and
-  missing columns. This does not prevent data reads.
-- Row-group read-byte estimates describe projected compressed physical payload
-  bytes for scheduling, independently of output-memory estimates. No-column or
-  fully deleted groups report zero payload bytes; partially deleted groups keep
-  their full projected physical size. Zero I/O bytes do not imply zero CPU or
-  output allocation and can leave constant-only groups in one byte-based task.
+- Exploration uses snapshot row counts when available, including parsed checkpoint counts, and
+  falls back to Parquet footers when needed. Files with encrypted footers require snapshot row
+  counts because exploration has no key callback.
+- On a per-file cache miss, file open validates the footer and decodes deletion vectors. C++
+  reads selected physical top-level columns using the ordinary Parquet reader and handles
+  decryption and live-row filtering. Rust aligns those arrays to Kernel's physical schema and
+  fills missing nullable fields before Kernel casts and logical transforms.
+- Recovering an existing container's shape requires reading its top-level column. A selected
+  root can also contain dropped children, so scheduling counts the full compressed bytes of all
+  selected roots. Projections that need only constants or typed nulls can skip payload reads.
+  Fully deleted groups also report zero payload bytes. Output-memory estimates can be
+  unavailable after schema adaptation.
+- A reader with a key callback initializes its own decryptors, including for plaintext files.
+  It can reread a footer after validation, and clones repeat this setup. The ordinary Parquet
+  metadata cache retains reusable footers for readers without a callback.
+- The metadata cache holds the file schema, row-group metadata, decoded deletion positions, and
+  a shared snapshot reference per file. Projections and clones reuse file metadata. Independent
+  readers can repeat footer and deletion-vector reads. Outstanding chunk, range, and clone
+  readers can extend metadata lifetimes.
+- A cold snapshot load indexes all active files. File transforms are built lazily from indexed
+  metadata rows. Once the last snapshot owner releases it, a later reader can need to replay
+  the pinned logs. Per-file `cache_size` estimates exclude shared snapshot state. The metadata
+  cache has no byte-bounded eviction.
 
-### Validation status
+## Validation
 
-Native/Rust compilation, generated local reader/exploration tests, and existing
-Parquet/metadata-cache regressions pass. Reader tests cover Arrow 17/59 batch
-adaptation, encrypted/plaintext footers, distinct column keys, and public
-synchronous/async-fallback reads with caching enabled and disabled. Remote
-filesystem identity and encoded paths are covered through a local-backed proxy
-and actual MinIO/RustFS services. Live cloud providers have not been validated.
+Generated native and Rust tests cover nested schema evolution, mapping and widening, encryption,
+deletion vectors, projected read sizes, and reader and cache lifetimes. Shared metadata-cache
+tests check footer and DV reuse and run concurrent reads across the supported formats.
 
-Generated DV tests cover inline, UUID-relative (with and without a prefix), and
-absolute references; multiple vectors at distinct offsets in one container;
-empty/fully deleted files; bitmap cardinality and row bounds; malformed payloads,
-CRC/size/offset errors; and failed-read recovery with a retained snapshot cache.
-Read coverage includes chunks, ranges, take, clones and cached readers.
-
-Shared I/O/cache tests verify footer and DV reuse across projections, chunk-reader
-lifetime beyond its parent, and correct projected live values under the existing
-eight-thread, 30-second stress harness. Exact I/O assertions use small plaintext
-files with recorded counts and no key callback; log replay is excluded from the
-measurement.
-
-Local Python integration tests cover exploration, file-property and manifest
-round trips, scan/chunk/take reads with caching enabled and disabled, snapshot
-pinning after source replacement, and reopening old/latest imports in fresh
-processes. All 15 remote Delta cases pass against the repository-pinned MinIO and
-RustFS services, covering persisted imports, projected live values, snapshot
-pinning, inline/UUID-relative/absolute DVs, shared-container offsets, encoded keys,
-invalid credentials, missing-object recovery and source isolation across endpoints.
-Relevant external-format, credential, manifest, chunk-reader and lifecycle
-regressions also pass on both services.
-The two-endpoint Delta fixture uses identical source-table/data/DV keys and
-distinct destination collection paths, preserving the shared manifest namespace
-contract while validating Delta source-cache isolation.
-
-The remote fixtures generate small sparse DVs directly in Python, including
-inline encodings and multiple offsets in one external container. A unit test
-checks their bytes against reference output from the pinned Kernel writer.
+Local Python tests cover manifest round trips and reopening pinned snapshots in fresh processes.
+Both MinIO and RustFS pass the 15 Delta integration cases and related regressions, including
+endpoint and credential isolation, encoded paths, shared DV containers, and missing-object recovery.
+These tests use generated fixtures. Independent Spark or delta-rs producers and live cloud services
+remain unvalidated.

@@ -14,9 +14,8 @@ use delta_kernel::arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema, from_ffi, to_ffi
 use delta_kernel::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use delta_kernel::engine::arrow_conversion::TryIntoArrow;
 use delta_kernel::engine::arrow_data::{ArrowEngineData, EngineDataArrowExt};
-use delta_kernel::engine::arrow_utils::{ReorderIndex, fixup_parquet_read, parquet_read_plan};
+use delta_kernel::engine::arrow_utils::fixup_parquet_read;
 use delta_kernel::expressions::ExpressionRef;
-use delta_kernel::parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use delta_kernel::scan::state::transform_to_logical;
 use delta_kernel::scan::{Scan, get_transform_for_row};
 use delta_kernel::schema::StructType;
@@ -24,7 +23,7 @@ use lru::LruCache;
 
 use crate::deltalake_bridgeimpl::{DeltaSnapshotContext, delta_file_key, live_rows};
 use crate::deltalake_engine::DeltaEngine;
-use crate::deltalake_projection::{FileProjection, planning_metadata};
+use crate::deltalake_projection::FileProjection;
 
 const INVALID: &str = "[delta:error=invalid]";
 
@@ -32,14 +31,17 @@ pub(crate) type ProjectionCache = LruCache<Vec<String>, Arc<SnapshotProjection>>
 
 pub(crate) struct SnapshotProjection {
     scan: Scan,
+    physical_schema: ArrowSchema,
     output_schema: Arc<ArrowSchema>,
 }
 
 impl SnapshotProjection {
     fn new(scan: Scan) -> Result<Self> {
         let output_schema = Arc::new(scan.logical_schema().as_ref().try_into_arrow()?);
+        let physical_schema = scan.physical_schema().as_ref().try_into_arrow()?;
         Ok(Self {
             scan,
+            physical_schema,
             output_schema,
         })
     }
@@ -165,9 +167,7 @@ impl DeltaSnapshotContext {
             );
             ensure!(file_schema != 0, "{INVALID} null Parquet file schema");
             let schema = unsafe { FFI_ArrowSchema::from_raw(file_schema as *mut _) };
-            let schema = Arc::new(ArrowSchema::try_from(&schema)?);
-            let metadata = planning_metadata(schema, rows)
-                .map_err(|error| anyhow!("{INVALID} invalid Parquet planning schema: {error:#}"))?;
+            let schema = ArrowSchema::try_from(&schema)?;
             if let Some(num_records) = file.num_records {
                 ensure!(
                     num_records == rows,
@@ -182,14 +182,12 @@ impl DeltaSnapshotContext {
             // Validate all visible data fields even for a narrower read projection.
             // The baseline scan already supplied the full physical schema; no
             // full-table transform projection is needed to validate a file schema.
-            let (ordering, mask) = parquet_read_plan(&self.physical_schema, &metadata)?;
-            // Run schema fixups on an empty projected batch as well: planning
-            // alone does not check conflicting field-ID metadata. This validates
-            // every visible nested field without reading unselected payloads.
-            let input = FileProjection::new(metadata.schema(), mask.as_ref());
+            let input = FileProjection::new(&schema, &self.physical_arrow_schema)?;
+            // Fixup validates the original types and field IDs of matched fields
+            // without reading payloads. The projection already aligns field order.
             fixup_parquet_read(
                 input.empty_batch()?,
-                &ordering,
+                &[],
                 None,
                 None,
                 Some(&self.physical_schema),
@@ -212,7 +210,7 @@ impl DeltaSnapshotContext {
             );
             Ok(Box::new(DeltaFileContext {
                 location,
-                metadata,
+                schema,
                 deletions,
                 rows,
                 live_rows: expected_live,
@@ -224,7 +222,7 @@ impl DeltaSnapshotContext {
 
 pub struct DeltaFileContext {
     location: String,
-    metadata: ArrowReaderMetadata,
+    schema: ArrowSchema,
     deletions: Vec<u64>,
     rows: u64,
     live_rows: u64,
@@ -242,19 +240,19 @@ impl DeltaFileContext {
     }
 
     pub fn delta_file_memory_size(&self) -> u64 {
-        let schema = self.metadata.schema();
-        let fields: usize = schema.fields().iter().map(|field| field.size()).sum();
-        let metadata: usize = schema
+        let fields: usize = self.schema.fields().iter().map(|field| field.size()).sum();
+        let metadata: usize = self
+            .schema
             .metadata()
             .iter()
             .map(|(key, value)| key.len() + value.len())
             .sum();
-        // Approximate Arrow fields plus the planning descriptor. Shared snapshot
-        // state is owned/accounted separately, never once per data file.
+        // Approximate file schema and DV state. The shared snapshot is accounted
+        // separately from individual data files.
         (std::mem::size_of::<Self>()
             + self.location.capacity()
             + self.deletions.capacity() * std::mem::size_of::<u64>()
-            + 2 * fields
+            + fields
             + metadata) as u64
     }
 
@@ -270,13 +268,10 @@ impl DeltaFileContext {
             })?;
             let metadata = snapshot.scan_metadata[file.batch_index].slice(file.row_index, 1);
             let transform = projection.file_transform(snapshot.engine.as_ref(), metadata)?;
-            let (ordering, mask) =
-                parquet_read_plan(projection.scan.physical_schema(), &self.metadata)?;
-            let input = FileProjection::new(self.metadata.schema(), mask.as_ref());
+            let input = FileProjection::new(&self.schema, &projection.physical_schema)?;
             Ok(Box::new(DeltaReadPlan {
                 projection,
                 transform,
-                ordering,
                 input,
                 engine: snapshot.engine.clone(),
             }))
@@ -288,7 +283,6 @@ impl DeltaFileContext {
 pub struct DeltaReadPlan {
     projection: Arc<SnapshotProjection>,
     transform: Option<ExpressionRef>,
-    ordering: Vec<ReorderIndex>,
     input: FileProjection,
     engine: Arc<DeltaEngine>,
 }
@@ -323,12 +317,12 @@ impl DeltaReadPlan {
                 .input
                 .apply(RecordBatch::from(StructArray::from(data)))?;
             let rows = batch.num_rows();
-            // Preserve upstream zero-leaf container behavior, including nullable
-            // struct validity and enclosing list shape loss. See
-            // cpp/src/format/deltalake/README.md for this known limitation.
+            // The projection preserves container validity and offsets and puts
+            // every field in physical schema order. Kernel handles casts and
+            // schema normalization without any further reordering.
             let physical = fixup_parquet_read(
                 batch,
-                &self.ordering,
+                &[],
                 None,
                 None,
                 Some(self.projection.scan.physical_schema()),
@@ -395,9 +389,10 @@ mod tests {
     use super::*;
     use delta_kernel::arrow::array::{Int64Array, StringArray};
     use delta_kernel::arrow::datatypes::{DataType as ArrowType, Field as ArrowField};
+    use delta_kernel::engine::arrow_utils::parquet_read_plan;
     use delta_kernel::engine_data::FilteredEngineData;
     use delta_kernel::parquet::arrow::ProjectionMask;
-    use delta_kernel::parquet::arrow::arrow_reader::ArrowReaderOptions;
+    use delta_kernel::parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
     use delta_kernel::scan::{ScanMetadata, StatsOptions};
     use delta_kernel::{Snapshot, SnapshotRef};
     use delta_kernel_default_engine::DefaultEngineBuilder;
@@ -766,7 +761,7 @@ mod tests {
             .as_any()
             .downcast_ref::<ListArray>()
             .unwrap();
-        // Characterize the accepted pinned Kernel behavior: it replaces both
+        // Characterize the raw Kernel behavior: it replaces both
         // an existing nonempty list and an empty list with null, losing shape.
         assert_eq!(items.null_count(), 3);
         assert_eq!(items.value_offsets(), &[0, 0, 0, 0]);
