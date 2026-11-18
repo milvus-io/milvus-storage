@@ -174,6 +174,29 @@ std::optional<milvus_storage::ExtendStatusCode> ClassifyAzureError(
       return std::nullopt;
   }
 }
+Status AzureExceptionToStatus(const Azure::Core::RequestFailedException& exception, std::string_view prefix) {
+  // StatusCode alone cannot distinguish transport failures from failed copies.
+  const bool transport_failure = dynamic_cast<const Azure::Core::Http::TransportException*>(&exception) != nullptr;
+  auto code = ClassifyAzureError(static_cast<int>(exception.StatusCode), exception.ErrorCode, transport_failure);
+  std::stringstream ss;
+  ss << prefix << " Azure Error: [" << exception.ErrorCode << "] " << exception.what();
+  auto request_id = exception.RequestId;
+  if (request_id.empty() && exception.RawResponse) {
+    const auto& headers = exception.RawResponse->GetHeaders();
+    const auto it = headers.find("x-ms-request-id");
+    if (it != headers.end()) {
+      request_id = it->second;
+    }
+  }
+  if (!request_id.empty()) {
+    ss << " [request_id:" << request_id << "]";
+  }
+  auto message = ss.str();
+  if (!code.has_value()) {
+    return Status::IOError(message);
+  }
+  return milvus_storage::MakeExtendError(*code, message, message);
+}
 }  // namespace internal
 // --- End namespace bridge ---
 
@@ -426,26 +449,10 @@ std::string BuildBaseUrl(const std::string& scheme, const std::string& authority
 }
 
 template <typename... PrefixArgs>
-Status ExceptionToStatus(const Azure::Core::RequestFailedException& exception,
-                         PrefixArgs&&... prefix_args) {
-  // Discriminate on the dynamic type: TransportException means the request
-  // never reached the service. Its StatusCode is None, but so is that of a
-  // plain RequestFailedException(std::string), which PollUntilDone raises for
-  // a failed copy -- see internal::ClassifyAzureError.
-  const bool transport_failure =
-      dynamic_cast<const Azure::Core::Http::TransportException*>(&exception) != nullptr;
-  auto code = internal::ClassifyAzureError(static_cast<int>(exception.StatusCode),
-                                           exception.ErrorCode, transport_failure);
-  if (!code.has_value()) {
-    return Status::IOError(std::forward<PrefixArgs>(prefix_args)..., " Azure Error: [",
-                           exception.ErrorCode, "] ", exception.what());
-  }
-
+Status ExceptionToStatus(const Azure::Core::RequestFailedException& exception, PrefixArgs&&... prefix_args) {
   std::stringstream ss;
   (ss << ... << std::forward<PrefixArgs>(prefix_args));
-  ss << " Azure Error: [" << exception.ErrorCode << "] " << exception.what();
-  auto message = ss.str();
-  return milvus_storage::MakeExtendError(*code, message, message);
+  return internal::AzureExceptionToStatus(exception, ss.str());
 }
 }  // namespace
 

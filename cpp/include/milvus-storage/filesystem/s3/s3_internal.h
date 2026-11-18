@@ -268,16 +268,27 @@ arrow::Status ErrorToStatus(const std::string& prefix,
                         wrong_region_msg.value_or("");
   auto request_id = error.GetRequestId();
   if (request_id.empty()) {
-    // HEAD errors can have an empty body. Preserve request IDs returned by
-    // S3-compatible services even when the AWS marshaller does not know their
-    // provider-specific header. Do not include arbitrary response headers.
+    // HEAD errors can have an empty body. Prefer known provider headers, then
+    // fall back to other *-request-id headers. GCS uses x-guploader-uploadid.
+    // Only include the selected request ID, not arbitrary response headers.
+    Aws::String fallback_request_id;
     for (const auto& [name, value] : error.GetResponseHeaders()) {
+      if (value.empty()) {
+        continue;
+      }
       const auto lower_name = Aws::Utils::StringUtils::ToLower(name.c_str());
-      if (!value.empty() && (lower_name == "x-amz-request-id" || lower_name == "x-cos-request-id" ||
-                             lower_name == "x-oss-request-id" || lower_name == "x-obs-request-id")) {
+      if (lower_name == "x-amz-request-id" || lower_name == "x-cos-request-id" || lower_name == "x-oss-request-id" ||
+          lower_name == "x-obs-request-id" || lower_name == "x-tos-request-id" || lower_name == "x-ms-request-id" ||
+          lower_name == "x-guploader-uploadid") {
         request_id = value;
         break;
       }
+      if (fallback_request_id.empty() && std::string_view(lower_name).ends_with("-request-id")) {
+        fallback_request_id = value;
+      }
+    }
+    if (request_id.empty()) {
+      request_id = std::move(fallback_request_id);
     }
   }
   if (!request_id.empty()) {

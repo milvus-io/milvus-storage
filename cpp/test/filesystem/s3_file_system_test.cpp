@@ -544,16 +544,18 @@ TEST(S3ErrorRequestIdTest, SDKRequestId) {
   error.SetResponseCode(Aws::Http::HttpResponseCode::FORBIDDEN);
   error.SetMessage("No response body.");
   error.SetRequestId("sdk-request-id");
-  error.SetResponseHeaders({{"x-cos-request-id", "header-request-id"}});
+  error.SetResponseHeaders({{"x-cos-request-id", "header-request-id"}, {"a-request-id", "generic-request-id"}});
   const auto status = fs::internal::ErrorToStatus("HeadObject", error);
   EXPECT_TRUE(status.IsIOError());
   EXPECT_NE(status.ToString().find("request_id:sdk-request-id"), std::string::npos);
   EXPECT_EQ(status.ToString().find("header-request-id"), std::string::npos);
+  EXPECT_EQ(status.ToString().find("generic-request-id"), std::string::npos);
 }
 
 TEST(S3ErrorRequestIdTest, RequestIdFromResponseHeaders) {
   for (const auto& header :
-       {"x-amz-request-id", "x-cos-request-id", "x-oss-request-id", "x-obs-request-id", "X-Cos-Request-Id"}) {
+       {"x-amz-request-id", "x-cos-request-id", "x-oss-request-id", "x-obs-request-id", "x-tos-request-id",
+        "x-guploader-uploadid", "X-Cos-Request-Id", "X-Tos-Request-Id", "X-GUploader-UploadID"}) {
     SCOPED_TRACE(header);
     Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::ACCESS_DENIED, false);
     error.SetResponseCode(Aws::Http::HttpResponseCode::FORBIDDEN);
@@ -565,11 +567,47 @@ TEST(S3ErrorRequestIdTest, RequestIdFromResponseHeaders) {
   }
 }
 
+TEST(S3ErrorRequestIdTest, KnownHeaderTakesPriorityOverGeneric) {
+  for (const auto& header : {"x-amz-request-id", "x-cos-request-id", "x-oss-request-id", "x-obs-request-id",
+                             "x-tos-request-id", "x-ms-request-id", "X-GUploader-UploadID"}) {
+    SCOPED_TRACE(header);
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::ACCESS_DENIED, false);
+    error.SetResponseHeaders(
+        {{"a-request-id", "generic-first"}, {header, "provider-request-id"}, {"z-request-id", "generic-last"}});
+    const auto status = fs::internal::ErrorToStatus("HeadObject", error);
+    EXPECT_NE(status.ToString().find("request_id:provider-request-id"), std::string::npos);
+    EXPECT_EQ(status.ToString().find("generic-first"), std::string::npos);
+    EXPECT_EQ(status.ToString().find("generic-last"), std::string::npos);
+  }
+}
+
+TEST(S3ErrorRequestIdTest, GenericRequestIdHeader) {
+  for (const auto& header : {"x-request-id", "x-provider-request-id", "X-Provider-Request-ID"}) {
+    SCOPED_TRACE(header);
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::UNKNOWN, false);
+    error.SetResponseCode(Aws::Http::HttpResponseCode::NOT_FOUND);
+    error.SetMessage("No response body.");
+    error.SetResponseHeaders({{"a-request-id", ""},
+                              {"x-cos-request-id", ""},
+                              {header, "fallback-request-id"},
+                              {"authorization", "must-not-be-logged"},
+                              {"x-request-id-extra", "not-a-request-id"}});
+    const auto status = fs::internal::ErrorToStatus("HeadObject", error);
+    EXPECT_TRUE(status.IsIOError());
+    EXPECT_NE(status.ToString().find("request_id:fallback-request-id"), std::string::npos);
+    EXPECT_EQ(status.ToString().find("must-not-be-logged"), std::string::npos);
+    EXPECT_EQ(status.ToString().find("not-a-request-id"), std::string::npos);
+  }
+}
+
 TEST(S3ErrorRequestIdTest, MissingRequestId) {
   Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::ACCESS_DENIED, false);
   error.SetResponseCode(Aws::Http::HttpResponseCode::FORBIDDEN);
   error.SetMessage("No response body.");
-  error.SetResponseHeaders({{"x-cos-request-id", ""}, {"content-type", "application/xml"}});
+  error.SetResponseHeaders({{"x-cos-request-id", ""},
+                            {"x-provider-request-id", ""},
+                            {"x-request-id-extra", "not-a-request-id"},
+                            {"content-type", "application/xml"}});
   const auto status = fs::internal::ErrorToStatus("HeadObject", error);
   EXPECT_NE(status.ToString().find("No response body."), std::string::npos);
   EXPECT_EQ(status.ToString().find("request_id:"), std::string::npos);
