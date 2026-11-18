@@ -18,6 +18,7 @@
 
 #include <gtest/gtest.h>
 #include <initializer_list>
+#include <memory>
 #include <netinet/in.h>
 #include <string>
 #include <sys/socket.h>
@@ -75,6 +76,19 @@ TEST(AzureErrorRequestIdTest, ResponseHeadersForClassifiedAndUnclassifiedErrors)
       EXPECT_EQ(detail, nullptr);
     }
   }
+}
+
+TEST(AzureErrorRequestIdTest, MappedNotFoundPreservesErrno) {
+  auto response =
+      std::make_unique<Azure::Core::Http::RawResponse>(1, 1, Azure::Core::Http::HttpStatusCode::NotFound, "Not Found");
+  response->SetHeader("x-ms-request-id", "head-blob-request-id");
+  const Azure::Core::RequestFailedException exception(response);
+  const auto not_found = arrow::Status::IOError("Path does not exist 'container/blob'")
+                             .WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
+  const auto status = internal::WithAzureRequestId(not_found, exception);
+  EXPECT_TRUE(status.IsIOError());
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
+  EXPECT_EQ(status.message(), "Path does not exist 'container/blob' [request_id:head-blob-request-id]");
 }
 
 TEST(AzureErrorRequestIdTest, MissingRequestId) {

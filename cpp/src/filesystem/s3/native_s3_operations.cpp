@@ -97,8 +97,9 @@ Future<NativeS3ObjectMetadata> NativeS3Operations::ReadMetadataAsync(const std::
   request.SetKey(parsed.key.c_str());
   return transport_->Send(request, parsed.key, HttpMethod::HTTP_HEAD, "", io_context)
       .Then([path](const Aws::Client::XmlOutcome& response) -> Result<NativeS3ObjectMetadata> {
-        if (!response.IsSuccess() && response.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND)
-          return arrow::fs::internal::PathNotFound(path);
+        if (!response.IsSuccess() && response.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
+          return fs::internal::WithS3RequestId(arrow::fs::internal::PathNotFound(path), response.GetError());
+        }
         auto status = fs::internal::OutcomeToStatus("HeadObject", response);
         if (!status.ok())
           return status.WithMessage("HeadObject for '", path, "': ", status.message());

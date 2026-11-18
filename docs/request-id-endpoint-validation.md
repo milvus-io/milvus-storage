@@ -54,10 +54,13 @@ probe validates a missing blob in that public container.
 
 - `S3ErrorRequestIdTest.*`: SDK field precedence; explicit cloud headers, including
   TOS, GCS and Azure; case-insensitive matching; explicit headers ahead of the
-  generic `*-request-id` fallback; empty values; unrelated headers; and transport
-  errors without a response.
+  generic `*-request-id` fallback; empty values; client ID echoes; unrelated
+  headers; and transport errors without a response.
+- `S3ReadResponseTest.HeadNotFoundPreservesRequestIdAndErrno`: a loopback HTTP
+  server returns an empty-body 404 with a provider ID. The S3 SDK and CRT
+  propagate the ID through failed size reads with `ENOENT`.
 - `AzureErrorRequestIdTest.*`: SDK `RequestId` precedence; `x-ms-request-id` fallback;
-  preservation in tagged and untagged Arrow errors; missing IDs; and transport
+  preservation in tagged, untagged and `ENOENT` Arrow errors; missing IDs; and transport
   classification. The client's `x-ms-client-request-id` is not substituted for
   the Azure server's ID.
 
