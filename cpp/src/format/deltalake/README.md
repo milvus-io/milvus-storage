@@ -32,13 +32,17 @@ The same zero-leaf planning affects enclosing lists. Reading
 
 This loses list lengths and the distinction between empty and null lists. The
 behavior also applies recursively to affected structs inside lists or map
-values. Maps whose key leaves remain selected retain their map boundaries;
-this does not mean every affected map loses its offsets or becomes null.
+values. Partial map projection can also fail: when only key leaves remain,
+the C++ projected representation is a list, which pinned Kernel fixup rejects
+as not being a `MapArray`. This can fail file-schema validation before payload
+reads. Selecting some key leaves does not guarantee a readable map.
 
 The nullable-struct case is tracked in
 [Kernel issue #3961](https://github.com/delta-io/delta-kernel-rs/issues/3961).
 The [in-memory Kernel tests](../bridge/rust/src/deltalake/deltalake_reader.rs)
 record the pinned behavior; the desired-semantics struct reproduction is ignored.
+The [projection units](../bridge/rust/src/deltalake/deltalake_projection.rs)
+also characterize the partial-map rejection at the C++/Rust boundary.
 The reader retains this upstream container behavior without a local workaround
 or special rejection. Adding nullable children alongside retained physical
 children does not trigger the zero-leaf case. The missing-container plan originates
@@ -127,18 +131,17 @@ from directory names. Only primitive partition types are supported.
   that version. Missing historical sources cause errors; the reader does not
   retain source files or substitute a newer snapshot.
 - Source URLs must continue identifying the same immutable planned files.
-  Table-path aliases within a configured filesystem root must remain stable
-  while their snapshot descriptors or readers are in use. Retargeting those
-  aliases is unsupported: keeping the old physical files elsewhere does not
-  prevent cached snapshot/footer state from being combined with different
-  payloads opened through a changed alias. Source owners provide this stability.
+  Local roots and symlinks must remain stable while cached filesystems or readers
+  are in use; relative roots also require a stable working directory. Delta uses
+  the same filesystem cache policy as other formats, with local roots keyed by
+  configured spelling.
 - All log, checkpoint/sidecar, data, and DV references must use the configured
   filesystem identity. Cross-bucket/cross-filesystem references and local paths
   outside the configured filesystem root are unsupported. Source URLs cannot
   embed credentials, queries, or fragments; local file URLs cannot include a host.
 - Local table/file URLs preserve the configured root and table-path spelling
-  after absolute lexical normalization, matching the other table formats. Only
-  the underlying filesystem/cache identity uses the resolved physical root.
+  after absolute lexical normalization, matching the other table formats. The
+  local filesystem producer resolves the physical root on creation.
   Local source entries must be relative or use absolute URLs under the configured
   logical root; other spellings outside that prefix are unsupported, even if a
   symlink makes them physically equivalent.
@@ -164,6 +167,16 @@ from directory names. Only primitive partition types are supported.
   partition-only/null-only projections; those projections can still avoid
   payload-column reads. When no physical columns are needed, chunk/range/take
   output is materialized only for the live/requested row count.
+- C++ uses the ordinary Parquet reader to decode selected physical top-level
+  columns. Rust removes unrequested nested children before Kernel schema fixups
+  and logical transforms. Dropped children under a selected struct/list/map can
+  therefore add I/O, decoding and peak memory; scheduled read-byte estimates
+  include those children. Pruning shares Arrow value/offset/null buffers, while
+  Kernel transformations and DV filtering can allocate their own output.
+- The reader passes the decoded Arrow file schema and physical row count to
+  Rust, rather than serialized Parquet footer metadata. Rust adapts that schema
+  into an in-memory Kernel planning descriptor; it performs no data-file reads
+  through that descriptor and receives no decryption callback or keys.
 - Encrypted data reads use the existing C++ key callback, including distinct
   column keys. Exploration has no key callback for its count fallback, so files
   with encrypted footers require usable row counts in the snapshot metadata.
@@ -171,16 +184,20 @@ from directory names. Only primitive partition types are supported.
   its footer to initialize its own Arrow 17 decryptors. A cold read can therefore
   load the footer for validation and again for payload-reader setup; clones also
   repeat payload-reader footer setup. This applies even to plaintext files when
-  a callback is supplied. Cached decoded metadata does not eliminate these reads.
+  a callback is supplied. The ordinary Parquet cache does not retain the footer
+  for reuse when a callback is present; schema/group metadata remain available.
 - Snapshot caching is in memory and tied to reader-metadata ownership. Releasing
   the last owner can require a later reader to replay the pinned snapshot's logs.
   Per-file descriptors do not contain enough table metadata for a cold open
-  without access to those logs/checkpoints.
+  without access to those logs/checkpoints. The Rust engine retains its
+  filesystem; per-file Parquet metadata independently retains the filesystem
+  selected by the ordinary Parquet loader using the original properties.
 - Snapshot/schema/active-file/projection state can be shared across top-level
   readers. The general reader metadata cache holds one Delta entry per table,
   snapshot and data-file identity (path, size and live-row count). Each entry
-  directly retains that file's footer, decoded DV, logical row groups and a shared
-  snapshot reference, including for plaintext files. Projections and clones reuse
+  directly retains that file's Parquet metadata (including a reusable footer
+  without a key callback), Rust planning schema, decoded DV, logical row groups
+  and a shared snapshot reference. Projections and clones reuse
   it; independent readers load and retain their own entries. Outstanding
   chunk/range readers or clones can extend metadata lifetimes beyond the parent
   reader. A snapshot reference alone does not retain other file entries.

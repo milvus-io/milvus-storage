@@ -20,6 +20,8 @@ mod deltalake_bridgeimpl;
 mod deltalake_engine;
 #[path = "deltalake/deltalake_object_store.rs"]
 mod deltalake_object_store;
+#[path = "deltalake/deltalake_projection.rs"]
+mod deltalake_projection;
 #[path = "deltalake/deltalake_reader.rs"]
 mod deltalake_reader;
 #[path = "deltalake/deltalake_testutil.rs"]
@@ -412,10 +414,10 @@ pub mod deltalake_ffi {
         fn delta_snapshot_memory_size(self: &DeltaSnapshotContext) -> u64;
         fn delta_snapshot_has_partition_columns(self: &DeltaSnapshotContext) -> bool;
         type DeltaFileContext;
-        fn delta_load_file(
+        unsafe fn delta_load_file(
             self: &DeltaSnapshotContext,
             location: &str,
-            footer: &[u8],
+            file_schema: usize,
             physical_rows: u64,
             expected_live: u64,
             expected_size: u64,
@@ -423,13 +425,14 @@ pub mod deltalake_ffi {
         fn delta_file_deletions(self: &DeltaFileContext) -> &[u64];
         fn delta_file_rows(self: &DeltaFileContext) -> u64;
         fn delta_file_live_rows(self: &DeltaFileContext) -> u64;
+        fn delta_file_memory_size(self: &DeltaFileContext) -> u64;
         fn delta_file_plan(
             self: &DeltaFileContext,
             snapshot: &DeltaSnapshotContext,
             names: Vec<String>,
         ) -> Result<Box<DeltaReadPlan>>;
         type DeltaReadPlan;
-        fn delta_plan_leaves(self: &DeltaReadPlan) -> &[i32];
+        fn delta_plan_columns(self: &DeltaReadPlan) -> &[String];
         unsafe fn delta_plan_export_schema(self: &DeltaReadPlan, output: usize) -> Result<()>;
         unsafe fn delta_plan_apply(
             self: &DeltaReadPlan,

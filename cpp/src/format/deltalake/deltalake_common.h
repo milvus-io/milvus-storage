@@ -25,7 +25,7 @@ struct ResolvedLocation {
   ArrowFileSystemConfig config;
   std::shared_ptr<arrow::fs::FileSystem> filesystem;
   std::string url;
-  // Local URLs use the configured namespace; config.root_path is physical.
+  // Local URLs use the absolute configured namespace; cache identity uses config.
   FilesystemBinding binding;
   std::string filesystem_key;
 };
@@ -39,7 +39,8 @@ arrow::Result<ResolvedLocation> ResolveLocation(const std::string& location,
                                                 const std::shared_ptr<const api::Properties>& properties);
 arrow::Result<std::string> ToExternalUri(const std::string& uri, const ArrowFileSystemConfig& config);
 arrow::Result<ResolvedDataFile> ResolveDataFile(const std::string& path,
-                                                const ResolvedLocation& table,
+                                                const FilesystemBinding& binding,
+                                                const std::string& filesystem_key,
                                                 const std::shared_ptr<const api::Properties>& properties);
 
 uint64_t LogicalToPhysical(uint64_t logical, std::span<const uint64_t> deleted);

@@ -7,8 +7,6 @@
 #include <arrow/util/uri.h>
 #include <nlohmann/json.hpp>
 
-#include "milvus-storage/filesystem/local_durability.h"
-
 namespace milvus_storage::deltalake {
 namespace {
 constexpr char kDescriptorVersionKey[] = "version";
@@ -115,22 +113,20 @@ arrow::Result<ResolvedLocation> ResolveLocation(const std::string& location,
     return arrow::Status::Invalid("Delta table location must not be empty");
   }
   const bool is_file_url = location.rfind("file:", 0) == 0;
+  auto filesystem_path = location;
   if (location.find("://") != std::string::npos || is_file_url) {
     arrow::util::Uri input;
     ARROW_RETURN_NOT_OK(input.Parse(location));
     if (location.find_first_of("?#") != std::string::npos || !input.username().empty() || !input.password().empty()) {
       return arrow::Status::Invalid("Delta table URI must not contain credentials, a query, or a fragment");
     }
-  }
-  // Standard file URLs use the default local filesystem, not an extfs bucket.
-  auto filesystem_path = location;
-  arrow::util::Uri local_uri;
-  if (is_file_url) {
-    ARROW_RETURN_NOT_OK(local_uri.Parse(location));
-    if (!local_uri.host().empty()) {
-      return arrow::Status::Invalid("Delta file URL must not contain a host");
+    if (is_file_url) {
+      if (!input.host().empty()) {
+        return arrow::Status::Invalid("Delta file URL must not contain a host");
+      }
+      // File URLs select the default local filesystem, not an extfs bucket.
+      filesystem_path = input.path();
     }
-    filesystem_path = local_uri.path();
   }
   ARROW_ASSIGN_OR_RAISE(auto config, FilesystemCache::resolve_config(properties, filesystem_path));
   if (is_file_url && config.storage_type != "local") {
@@ -140,28 +136,18 @@ arrow::Result<ResolvedLocation> ResolveLocation(const std::string& location,
   if (config.storage_type == "local" && parsed.IsAbsoluteUri()) {
     return arrow::Status::NotImplemented("Delta local tables require a path or file URL");
   }
-  auto resolved_properties = properties;
   std::string local_root;
   if (config.storage_type == "local") {
     std::error_code error;
     const auto root = std::filesystem::absolute(config.root_path.empty() ? "." : config.root_path, error);
     if (error)
       return arrow::Status::IOError("Cannot resolve Delta filesystem root: ", error.message());
-    // Keep the configured namespace in persisted URLs, as other table formats
-    // do. Resolve the filesystem separately before collapsing symlink/.., and
-    // bind relative roots to this cwd before the shared cache lookup.
-    ARROW_ASSIGN_OR_RAISE(config.root_path, PrepareLocalRoot(root.generic_string()));
+    // Preserve the configured namespace in URLs, as other table formats do.
+    // The shared filesystem cache/producer owns physical-root resolution.
     local_root = root.lexically_normal().generic_string();
-    auto local_properties = std::make_shared<api::Properties>(*properties);
-    (*local_properties)[PROPERTY_FS_ROOT_PATH] = config.root_path;
-    if (!config.local_durability_root.empty()) {
-      ARROW_ASSIGN_OR_RAISE(config.local_durability_root, PrepareLocalRoot(config.local_durability_root));
-      (*local_properties)[PROPERTY_FS_LOCAL_DURABILITY_ROOT] = config.local_durability_root;
-    }
-    resolved_properties = std::move(local_properties);
   }
   const auto identity = config.GetCacheKey();
-  ARROW_ASSIGN_OR_RAISE(auto filesystem, FilesystemCache::getInstance().get(resolved_properties, filesystem_path));
+  ARROW_ASSIGN_OR_RAISE(auto filesystem, FilesystemCache::getInstance().get(properties, filesystem_path));
   auto scheme = parsed.scheme.empty() ? filesystem->type_name() : parsed.scheme;
   deltalake::FilesystemBinding binding{config.storage_type == "local", scheme, config.bucket_name,
                                        std::move(local_root)};
@@ -170,14 +156,15 @@ arrow::Result<ResolvedLocation> ResolveLocation(const std::string& location,
 }
 
 arrow::Result<ResolvedDataFile> ResolveDataFile(const std::string& path,
-                                                const ResolvedLocation& table,
+                                                const FilesystemBinding& binding,
+                                                const std::string& filesystem_key,
                                                 const std::shared_ptr<const api::Properties>& properties) {
   arrow::util::Uri uri;
   ARROW_RETURN_NOT_OK(uri.Parse(path));
   if (path.find_first_of("?#") != std::string::npos || !uri.username().empty() || !uri.password().empty()) {
     return arrow::Status::Invalid("Invalid Delta data-file URI");
   }
-  if (table.binding.is_local) {
+  if (binding.is_local) {
     if (uri.scheme() != "file" || !uri.host().empty()) {
       return arrow::Status::Invalid("Delta local data file requires a file URL without a host");
     }
@@ -185,7 +172,7 @@ arrow::Result<ResolvedDataFile> ResolveDataFile(const std::string& path,
     // validates snapshot membership. Normalized URLs also share per-file cache
     // entries across equivalent percent spellings and dot segments.
     const auto normalized = std::filesystem::path(uri.path()).lexically_normal();
-    auto relative = normalized.lexically_relative(table.binding.local_root);
+    auto relative = normalized.lexically_relative(binding.local_root);
     if (relative.empty() || *relative.begin() == "..") {
       return arrow::Status::Invalid("Delta data file is outside its filesystem root");
     }
@@ -193,11 +180,11 @@ arrow::Result<ResolvedDataFile> ResolveDataFile(const std::string& path,
     return ResolvedDataFile{std::move(url), relative.generic_string()};
   }
   ARROW_ASSIGN_OR_RAISE(auto config, FilesystemCache::resolve_config(properties, path));
-  if (config.GetCacheKey() != table.filesystem_key) {
+  if (config.GetCacheKey() != filesystem_key) {
     return arrow::Status::Invalid("Delta data file uses a different filesystem from its snapshot");
   }
   ARROW_ASSIGN_OR_RAISE(auto parsed, StorageUri::Parse(path));
-  if (parsed.scheme != table.binding.scheme || parsed.bucket_name != table.binding.bucket) {
+  if (parsed.scheme != binding.scheme || parsed.bucket_name != binding.bucket) {
     return arrow::Status::Invalid("Delta data file uses a different storage identity");
   }
   ARROW_ASSIGN_OR_RAISE(auto escaped, arrow::util::UriFromAbsolutePath("/" + parsed.key));

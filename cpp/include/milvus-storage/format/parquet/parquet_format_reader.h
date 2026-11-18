@@ -47,16 +47,6 @@ class ParquetFormatReader final : public FormatReader, public std::enable_shared
     static arrow::Result<MetadataPtr> load_metadata(const api::ColumnGroupFile& file,
                                                     const std::shared_ptr<const api::Properties>& properties,
                                                     const milvus_storage::KeyRetriever& key_retriever);
-    // Table-format adapters already resolved their filesystem and need the
-    // decoded footer for physical-schema planning without another metadata read.
-    static arrow::Result<MetadataPtr> load_metadata_with_filesystem(
-        const api::ColumnGroupFile& file,
-        const std::shared_ptr<arrow::fs::FileSystem>& fs,
-        const std::string& path,
-        const std::shared_ptr<const api::Properties>& properties,
-        const KeyRetriever& key_retriever);
-    static arrow::Result<std::shared_ptr<ParquetFormatReader>> create_with_leaf_projection(
-        MetadataPtr metadata, const api::ColumnGroupFile& file, const std::vector<int>& leaves);
     // Defer footer/schema loading and return immutable metadata suitable for the cache.
     static folly::SemiFuture<arrow::Result<MetadataPtr>> load_metadata_async(
         const api::ColumnGroupFile& file,

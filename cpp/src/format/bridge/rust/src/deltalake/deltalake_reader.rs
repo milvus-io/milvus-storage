@@ -16,9 +16,7 @@ use delta_kernel::engine::arrow_conversion::TryIntoArrow;
 use delta_kernel::engine::arrow_data::{ArrowEngineData, EngineDataArrowExt};
 use delta_kernel::engine::arrow_utils::{ReorderIndex, fixup_parquet_read, parquet_read_plan};
 use delta_kernel::expressions::ExpressionRef;
-use delta_kernel::parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
-use delta_kernel::parquet::arrow::{ProjectionMask, parquet_to_arrow_schema_by_columns};
-use delta_kernel::parquet::file::metadata::ParquetMetaDataReader;
+use delta_kernel::parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use delta_kernel::scan::state::transform_to_logical;
 use delta_kernel::scan::{Scan, get_transform_for_row};
 use delta_kernel::schema::StructType;
@@ -26,6 +24,7 @@ use lru::LruCache;
 
 use crate::deltalake_bridgeimpl::{DeltaSnapshotContext, delta_file_key, live_rows};
 use crate::deltalake_engine::DeltaEngine;
+use crate::deltalake_projection::{FileProjection, planning_metadata};
 
 const INVALID: &str = "[delta:error=invalid]";
 
@@ -145,10 +144,10 @@ impl DeltaSnapshotContext {
             .saturating_add(self.dv_string_bytes) as u64
     }
 
-    pub fn delta_load_file(
+    pub unsafe fn delta_load_file(
         &self,
         location: &str,
-        footer: &[u8],
+        file_schema: usize,
         rows: u64,
         expected_live: u64,
         expected_size: u64,
@@ -164,7 +163,11 @@ impl DeltaSnapshotContext {
                 file.size == expected_size,
                 "{INVALID} Delta file size does not match snapshot"
             );
-            let metadata = ParquetMetaDataReader::decode_metadata(footer)?;
+            ensure!(file_schema != 0, "{INVALID} null Parquet file schema");
+            let schema = unsafe { FFI_ArrowSchema::from_raw(file_schema as *mut _) };
+            let schema = Arc::new(ArrowSchema::try_from(&schema)?);
+            let metadata = planning_metadata(schema, rows)
+                .map_err(|error| anyhow!("{INVALID} invalid Parquet planning schema: {error:#}"))?;
             if let Some(num_records) = file.num_records {
                 ensure!(
                     num_records == rows,
@@ -176,25 +179,16 @@ impl DeltaSnapshotContext {
                 live_rows(rows, deleted)? == expected_live,
                 "{INVALID} Delta live count does not match descriptor"
             );
-            // Derive the planning schema from the footer. Arrow 17 and Arrow 59
-            // use different map-entry wrapper names, so supplying the C++ schema
-            // as a strict Rust reader override rejects otherwise compatible maps.
-            let metadata =
-                ArrowReaderMetadata::try_new(Arc::new(metadata), ArrowReaderOptions::new())?;
             // Validate all visible data fields even for a narrower read projection.
             // The baseline scan already supplied the full physical schema; no
-            // full-table transform projection is needed just to validate a footer.
+            // full-table transform projection is needed to validate a file schema.
             let (ordering, mask) = parquet_read_plan(&self.physical_schema, &metadata)?;
             // Run schema fixups on an empty projected batch as well: planning
             // alone does not check conflicting field-ID metadata. This validates
             // every visible nested field without reading unselected payloads.
-            let projected_schema = parquet_to_arrow_schema_by_columns(
-                metadata.parquet_schema(),
-                mask.unwrap_or_else(ProjectionMask::all),
-                metadata.metadata().file_metadata().key_value_metadata(),
-            )?;
+            let input = FileProjection::new(metadata.schema(), mask.as_ref());
             fixup_parquet_read(
-                RecordBatch::new_empty(Arc::new(projected_schema)),
+                input.empty_batch()?,
                 &ordering,
                 None,
                 None,
@@ -247,6 +241,23 @@ impl DeltaFileContext {
         self.live_rows
     }
 
+    pub fn delta_file_memory_size(&self) -> u64 {
+        let schema = self.metadata.schema();
+        let fields: usize = schema.fields().iter().map(|field| field.size()).sum();
+        let metadata: usize = schema
+            .metadata()
+            .iter()
+            .map(|(key, value)| key.len() + value.len())
+            .sum();
+        // Approximate Arrow fields plus the planning descriptor. Shared snapshot
+        // state is owned/accounted separately, never once per data file.
+        (std::mem::size_of::<Self>()
+            + self.location.capacity()
+            + self.deletions.capacity() * std::mem::size_of::<u64>()
+            + 2 * fields
+            + metadata) as u64
+    }
+
     pub fn delta_file_plan(
         &self,
         snapshot: &DeltaSnapshotContext,
@@ -261,15 +272,12 @@ impl DeltaFileContext {
             let transform = projection.file_transform(snapshot.engine.as_ref(), metadata)?;
             let (ordering, mask) =
                 parquet_read_plan(projection.scan.physical_schema(), &self.metadata)?;
-            let leaves = (0..self.metadata.parquet_schema().num_columns())
-                .filter(|i| mask.as_ref().is_none_or(|mask| mask.leaf_included(*i)))
-                .map(|i| i32::try_from(i).map_err(Into::into))
-                .collect::<Result<Vec<_>>>()?;
+            let input = FileProjection::new(self.metadata.schema(), mask.as_ref());
             Ok(Box::new(DeltaReadPlan {
                 projection,
                 transform,
                 ordering,
-                leaves,
+                input,
                 engine: snapshot.engine.clone(),
             }))
         };
@@ -281,13 +289,13 @@ pub struct DeltaReadPlan {
     projection: Arc<SnapshotProjection>,
     transform: Option<ExpressionRef>,
     ordering: Vec<ReorderIndex>,
-    leaves: Vec<i32>,
+    input: FileProjection,
     engine: Arc<DeltaEngine>,
 }
 
 impl DeltaReadPlan {
-    pub fn delta_plan_leaves(&self) -> &[i32] {
-        &self.leaves
+    pub fn delta_plan_columns(&self) -> &[String] {
+        self.input.columns()
     }
 
     pub unsafe fn delta_plan_export_schema(&self, output: usize) -> Result<()> {
@@ -311,7 +319,9 @@ impl DeltaReadPlan {
             let array = unsafe { FFI_ArrowArray::from_raw(input_array as *mut _) };
             let schema = unsafe { FFI_ArrowSchema::from_raw(input_schema as *mut _) };
             let data = unsafe { from_ffi(array, &schema)? };
-            let batch = RecordBatch::from(StructArray::from(data));
+            let batch = self
+                .input
+                .apply(RecordBatch::from(StructArray::from(data)))?;
             let rows = batch.num_rows();
             // Preserve upstream zero-leaf container behavior, including nullable
             // struct validity and enclosing list shape loss. See
@@ -386,6 +396,8 @@ mod tests {
     use delta_kernel::arrow::array::{Int64Array, StringArray};
     use delta_kernel::arrow::datatypes::{DataType as ArrowType, Field as ArrowField};
     use delta_kernel::engine_data::FilteredEngineData;
+    use delta_kernel::parquet::arrow::ProjectionMask;
+    use delta_kernel::parquet::arrow::arrow_reader::ArrowReaderOptions;
     use delta_kernel::scan::{ScanMetadata, StatsOptions};
     use delta_kernel::{Snapshot, SnapshotRef};
     use delta_kernel_default_engine::DefaultEngineBuilder;

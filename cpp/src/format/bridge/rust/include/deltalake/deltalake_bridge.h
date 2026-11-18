@@ -57,7 +57,7 @@ class BlockingDeltaSnapshot {
   uint64_t MemorySize() const;
   bool HasPartitionColumns() const;
   arrow::Result<std::shared_ptr<BlockingDeltaFile>> LoadFile(const std::string& location,
-                                                             const std::string& footer,
+                                                             const std::shared_ptr<arrow::Schema>& file_schema,
                                                              uint64_t physical_rows,
                                                              uint64_t live_rows,
                                                              uint64_t size) const;
@@ -73,6 +73,7 @@ class BlockingDeltaFile {
   std::span<const uint64_t> Deletions() const;
   uint64_t PhysicalRows() const;
   uint64_t LiveRows() const;
+  uint64_t MemorySize() const;
   arrow::Result<std::shared_ptr<BlockingDeltaReadPlan>> Plan(const BlockingDeltaSnapshot& snapshot,
                                                              const std::vector<std::string>& names) const;
 
@@ -83,7 +84,7 @@ class BlockingDeltaFile {
 class BlockingDeltaReadPlan {
   public:
   explicit BlockingDeltaReadPlan(rust::Box<ffi::DeltaReadPlan> impl) : impl_(std::move(impl)) {}
-  std::vector<int> Leaves() const;
+  std::vector<std::string> Columns() const;
   arrow::Result<std::shared_ptr<arrow::Schema>> Schema() const;
   arrow::Result<std::shared_ptr<arrow::RecordBatch>> Apply(const std::shared_ptr<arrow::RecordBatch>& batch) const;
 

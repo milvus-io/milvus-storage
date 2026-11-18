@@ -79,16 +79,19 @@ uint64_t BlockingDeltaSnapshot::MemorySize() const { return impl_->delta_snapsho
 
 bool BlockingDeltaSnapshot::HasPartitionColumns() const { return impl_->delta_snapshot_has_partition_columns(); }
 
-arrow::Result<std::shared_ptr<BlockingDeltaFile>> BlockingDeltaSnapshot::LoadFile(const std::string& location,
-                                                                                  const std::string& footer,
-                                                                                  uint64_t physical_rows,
-                                                                                  uint64_t live_rows,
-                                                                                  uint64_t size) const {
+arrow::Result<std::shared_ptr<BlockingDeltaFile>> BlockingDeltaSnapshot::LoadFile(
+    const std::string& location,
+    const std::shared_ptr<arrow::Schema>& file_schema,
+    uint64_t physical_rows,
+    uint64_t live_rows,
+    uint64_t size) const {
   return CatchRustResult<std::shared_ptr<BlockingDeltaFile>>(
       DeltaErrorStatus, [&]() -> arrow::Result<std::shared_ptr<BlockingDeltaFile>> {
-        auto file = impl_->delta_load_file(
-            location, rust::Slice<const uint8_t>(reinterpret_cast<const uint8_t*>(footer.data()), footer.size()),
-            physical_rows, live_rows, size);
+        ArrowSchema schema{};
+        ArrowCDataReleaseGuard guard(&schema);
+        ARROW_RETURN_NOT_OK(arrow::ExportSchema(*file_schema, &schema));
+        auto file =
+            impl_->delta_load_file(location, reinterpret_cast<uintptr_t>(&schema), physical_rows, live_rows, size);
         return std::make_shared<BlockingDeltaFile>(std::move(file));
       });
 }
@@ -99,6 +102,7 @@ std::span<const uint64_t> BlockingDeltaFile::Deletions() const {
 }
 uint64_t BlockingDeltaFile::PhysicalRows() const { return impl_->delta_file_rows(); }
 uint64_t BlockingDeltaFile::LiveRows() const { return impl_->delta_file_live_rows(); }
+uint64_t BlockingDeltaFile::MemorySize() const { return impl_->delta_file_memory_size(); }
 
 arrow::Result<std::shared_ptr<BlockingDeltaReadPlan>> BlockingDeltaFile::Plan(
     const BlockingDeltaSnapshot& snapshot, const std::vector<std::string>& names) const {
@@ -111,9 +115,12 @@ arrow::Result<std::shared_ptr<BlockingDeltaReadPlan>> BlockingDeltaFile::Plan(
   });
 }
 
-std::vector<int> BlockingDeltaReadPlan::Leaves() const {
-  auto leaves = impl_->delta_plan_leaves();
-  return {leaves.begin(), leaves.end()};
+std::vector<std::string> BlockingDeltaReadPlan::Columns() const {
+  const auto columns = impl_->delta_plan_columns();
+  std::vector<std::string> result;
+  result.reserve(columns.size());
+  for (const auto& column : columns) result.emplace_back(column);
+  return result;
 }
 
 arrow::Result<std::shared_ptr<arrow::Schema>> BlockingDeltaReadPlan::Schema() const {
