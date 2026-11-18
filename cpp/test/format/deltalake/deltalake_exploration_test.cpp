@@ -607,7 +607,7 @@ TEST_F(DeltaExplorationTest, PartitionWideningRequiresNoAdditionalStringConversi
   };
   const std::vector<PartitionChange> changes{{"integer", "long", "42", true},
                                              {"integer", "double", "42", true},
-                                             {"float", "double", "1.5", true},
+                                             {"float", "double", "0.1", false},
                                              {"decimal(10,2)", "decimal(12,2)", "12.30", true},
                                              {"integer", "decimal(10,0)", "42", true},
                                              {"decimal(10,2)", "decimal(12,3)", "12.300", false},
@@ -1724,7 +1724,7 @@ TEST_F(DeltaReaderTest, AppliesSupportedWideningFamilies) {
       {"short", "integer", arrow::int16(), arrow::int32(), 3},
       {"integer", "long", arrow::int32(), arrow::int64(), 3},
       {"integer", "double", arrow::int32(), arrow::float64(), 3},
-      {"float", "double", arrow::float32(), arrow::float64(), 3},
+      {"float", "double", arrow::float32(), arrow::float64(), 0.1},
       {"decimal(10,2)", "decimal(12,4)", arrow::decimal128(10, 2), arrow::decimal128(12, 4), "1230"},
       {"integer", "decimal(12,2)", arrow::int32(), arrow::decimal128(12, 2), 3},
       {"date", "timestamp_ntz", arrow::date32(), arrow::timestamp(arrow::TimeUnit::MICRO), 1}};
@@ -1741,6 +1741,9 @@ TEST_F(DeltaReaderTest, AppliesSupportedWideningFamilies) {
     ASSERT_AND_ASSIGN(auto reader, Open(files[0]));
     ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
     EXPECT_TRUE(batch->column(0)->type()->Equals(change.logical));
+    if (change.from == "float" && change.to == "double") {
+      EXPECT_EQ(std::static_pointer_cast<arrow::DoubleArray>(batch->column(0))->Value(0), static_cast<double>(0.1f));
+    }
     if (change.to == "timestamp_ntz")
       EXPECT_EQ(std::static_pointer_cast<arrow::TimestampArray>(batch->column(0))->Value(0), 86400000000LL);
     if (change.to == "decimal(12,4)") {

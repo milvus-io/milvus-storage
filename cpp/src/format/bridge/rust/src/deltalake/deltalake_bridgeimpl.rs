@@ -482,6 +482,11 @@ fn supports_widening(from: &DataType, to: &DataType) -> bool {
 
 fn supports_partition_widening(change: &TypeChange) -> bool {
     match (&change.from_type, &change.to_type) {
+        // Parsing old FLOAT text such as "0.1" as DOUBLE skips the original
+        // float rounding. The partition string alone cannot identify its type.
+        (DataType::Primitive(PrimitiveType::Float), DataType::Primitive(PrimitiveType::Double)) => {
+            false
+        }
         (
             DataType::Primitive(PrimitiveType::Date),
             DataType::Primitive(PrimitiveType::TimestampNtz),
@@ -674,7 +679,8 @@ mod tests {
     fn partition_changes_preserve_the_existing_string_parser() {
         let cases = [
             ("integer", "long", true),
-            ("float", "double", true),
+            ("integer", "double", true),
+            ("float", "double", false),
             ("decimal(10,2)", "decimal(12,2)", true),
             ("integer", "decimal(10,0)", true),
             ("decimal(10,2)", "decimal(12,3)", false),

@@ -117,10 +117,15 @@ from directory names. Only primitive partition types are supported.
   `2024-01-01T00:00:00Z`. Offset-less timestamps are rejected even though Kernel
   can assume UTC. `timestamp_ntz` uses timezone-free text. There is no reader
   timezone override.
-- Partition widening supports numeric promotions, decimal precision growth at
-  unchanged scale, and integer-to-decimal conversion at scale zero. Decimal
-  scale increases, integer-to-decimal with nonzero scale, and
-  date-to-`timestamp_ntz` partition changes are not supported.
+- Partition widening supports integer promotions (including byte, short, and
+  integer to double), decimal precision growth at unchanged scale, and
+  integer-to-decimal conversion at scale zero.
+- Snapshot validation rejects float-to-double partition widening because
+  parsing an older partition string as double can change the value. For
+  example, the float stored as `0.1` widens to `0.10000000149011612`, while
+  parsing `0.1` directly as double yields `0.1`.
+- Decimal scale increases, integer-to-decimal with nonzero scale, and
+  date-to-`timestamp_ntz` partition changes are also unsupported.
 
 ### Snapshot, filesystem, and file-reference constraints
 
