@@ -37,6 +37,8 @@ class GcpFileSystemProducer : public FileSystemProducer {
   arrow::Result<ArrowFileSystemPtr> Make() override;
 
   private:
+  friend class S3RequestTimeoutTest;
+
   // One-shot: install the stateless HTTP client factory and call
   // Aws::InitializeS3. Guarded by std::call_once; the first GCP Make() wins
   // and determines process-global settings (TLS floor, log level). Returns

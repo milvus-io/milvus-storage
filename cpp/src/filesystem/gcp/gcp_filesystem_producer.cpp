@@ -284,7 +284,7 @@ arrow::Result<S3Options> GcpFileSystemProducer::CreateS3Options(bool bearer_toke
   }
 
   options.request_timeout = config_.request_timeout_ms <= 0 ? DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC
-                                                            : config_.request_timeout_ms / 1000;
+                                                            : config_.request_timeout_ms / 1000.0;
   options.max_connections = config_.max_connections;
   options.crt_queue_sizes = config_.crt_queue_sizes;
   options.multi_part_upload_size = config_.multi_part_upload_size;
