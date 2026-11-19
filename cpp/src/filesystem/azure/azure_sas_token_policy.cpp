@@ -42,6 +42,7 @@ struct AzureSasTokenPolicy::SharedState {
   struct CachedSasToken {
     std::string sas_token;
     TimePoint expires_at;
+    TimePoint refresh_at;
   };
 
   AzureSasBrokerConfig config;
@@ -92,8 +93,6 @@ AzureSasTokenPolicy::AzureSasTokenPolicy(AzureSasBrokerConfig config,
     state_->clock = [] { return std::chrono::system_clock::now(); };
   }
 }
-
-bool AzureSasTokenPolicy::IsFresh(TimePoint expires_at, TimePoint now) { return expires_at - now > kRefreshOffset; }
 
 arrow::Result<std::string> AzureSasTokenPolicy::FetchSasToken(TimePoint now,
                                                               TimePoint* expires_at,
@@ -215,7 +214,7 @@ arrow::Result<std::string> AzureSasTokenPolicy::FetchSasToken(TimePoint now,
 arrow::Result<std::string> AzureSasTokenPolicy::GetSasToken() const {
   {
     std::lock_guard<std::mutex> lock(state_->mutex);
-    if (state_->cached && IsFresh(state_->cached->expires_at, state_->clock())) {
+    if (state_->cached && state_->clock() < state_->cached->refresh_at) {
       return state_->cached->sas_token;
     }
   }
@@ -234,7 +233,7 @@ arrow::Result<std::string> AzureSasTokenPolicy::GetSasToken() const {
   }
   {
     std::lock_guard<std::mutex> lock(state_->mutex);
-    if (state_->cached && IsFresh(state_->cached->expires_at, state_->clock())) {
+    if (state_->cached && state_->clock() < state_->cached->refresh_at) {
       return state_->cached->sas_token;
     }
   }
@@ -253,7 +252,11 @@ arrow::Result<std::string> AzureSasTokenPolicy::GetSasToken() const {
           state_->cached.reset();
           return arrow::Status::IOError("Azure SAS credential broker token expired during refresh");
         }
-        state_->cached = SharedState::CachedSasToken{std::move(fetched).ValueOrDie(), expires_at};
+        // Fix the deadline at fetch completion. Short leases must not be stale
+        // immediately, nor may repeated reads move the deadline toward expiry.
+        const auto margin =
+            std::min(std::chrono::duration_cast<TimePoint::duration>(kRefreshOffset), (expires_at - now) / 2);
+        state_->cached = SharedState::CachedSasToken{std::move(fetched).ValueOrDie(), expires_at, expires_at - margin};
         LOG_STORAGE_DEBUG_ << "Azure SAS credential broker refresh succeeded: endpoint=" << state_->config.endpoint
                            << ", account=" << state_->config.account_name << ", bucket=" << state_->config.bucket
                            << ", expires_at="
