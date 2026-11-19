@@ -31,7 +31,7 @@ use iceberg_storage_opendal::OpenDalStorageFactory;
 use lance_core::error::{Error as LanceError, Result as LanceResult};
 use lance_io::object_store::StorageOptionsProvider;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
 pub(crate) const AZURE_BROKER_ENDPOINT: &str = "azure_broker_endpoint";
 pub(crate) const AZURE_BROKER_CLIENT_ID: &str = "azure_broker_client_id";
@@ -43,7 +43,7 @@ pub(crate) const AZURE_BROKER_DURATION_SECONDS: &str = "azure_broker_duration_se
 pub(crate) const AZURE_BROKER_REQUEST_TIMEOUT_MS: &str = "azure_broker_request_timeout_ms";
 
 const REFRESH_OFFSET_SECONDS: i64 = 60;
-const INITIAL_FETCH_RETRIES: u32 = 3;
+const FETCH_RETRIES: u32 = 3;
 
 // These options are private to the C++/Rust bridge. They must be consumed
 // before the remaining storage options are passed to Lance or OpenDAL.
@@ -130,6 +130,8 @@ impl AzureBrokerConfig {
 pub(crate) struct AzureSasCredential {
     pub(crate) token: String,
     pub(crate) expires_at: DateTime<Utc>,
+    // Provider-local publication order; expiry need not increase on rotation.
+    generation: u64,
 }
 
 #[derive(Clone)]
@@ -263,6 +265,12 @@ impl AzureBrokerClient {
             .map_err(|error| anyhow::Error::new(error.without_url()).context("transport_error"))?;
         let status = response.status();
         if !status.is_success() {
+            // Preserve the typed status for retry classification, without the
+            // endpoint URL or response body (which may contain credentials).
+            if let Err(error) = response.error_for_status_ref() {
+                return Err(anyhow::Error::new(error.without_url())
+                    .context(format!("http_status={}", status.as_u16())));
+            }
             bail!("http_status={}", status.as_u16());
         }
         let body = response
@@ -297,7 +305,11 @@ impl AzureBrokerClient {
         if expires_at <= now {
             bail!("expired_credential");
         }
-        Ok(AzureSasCredential { token, expires_at })
+        Ok(AzureSasCredential {
+            token,
+            expires_at,
+            generation: 0,
+        })
     }
 }
 
@@ -315,12 +327,32 @@ impl AzureSasFetcher for AzureBrokerClient {
 
 type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
+struct CachedAzureSasCredential {
+    credential: AzureSasCredential,
+    refresh_at: DateTime<Utc>,
+}
+
+impl CachedAzureSasCredential {
+    fn new(credential: AzureSasCredential, fetched_at: DateTime<Utc>) -> Self {
+        // A fixed minute of headroom would make short leases stale immediately.
+        // Compute the window once at fetch completion, so repeated cache reads
+        // cannot move it toward expiry. Never change the broker's expiration.
+        let margin = chrono::Duration::seconds(REFRESH_OFFSET_SECONDS)
+            .min((credential.expires_at - fetched_at) / 2);
+        Self {
+            refresh_at: credential.expires_at - margin,
+            credential,
+        }
+    }
+}
+
 pub(crate) struct AzureSasStorageOptionsProvider {
     provider_id: String,
     request_timeout_ms: u64,
     fetcher: Arc<dyn AzureSasFetcher>,
     clock: Clock,
-    cached: RwLock<Option<AzureSasCredential>>,
+    cached: RwLock<Option<CachedAzureSasCredential>>,
+    refresh: AsyncMutex<u64>,
 }
 
 impl fmt::Debug for AzureSasStorageOptionsProvider {
@@ -346,6 +378,7 @@ impl AzureSasStorageOptionsProvider {
             fetcher,
             clock: Arc::new(Utc::now),
             cached: RwLock::new(None),
+            refresh: AsyncMutex::new(0),
         })
     }
 
@@ -361,11 +394,8 @@ impl AzureSasStorageOptionsProvider {
             fetcher,
             clock,
             cached: RwLock::new(None),
+            refresh: AsyncMutex::new(0),
         }
-    }
-
-    fn is_fresh(credential: &AzureSasCredential, now: DateTime<Utc>) -> bool {
-        credential.expires_at - now > chrono::Duration::seconds(REFRESH_OFFSET_SECONDS)
     }
 
     fn to_options(credential: &AzureSasCredential) -> HashMap<String, String> {
@@ -388,38 +418,69 @@ impl AzureSasStorageOptionsProvider {
     }
 
     pub(crate) async fn current_credential(&self) -> AnyResult<AzureSasCredential> {
-        let mut now = (self.clock)();
         {
             let cached = self.cached.read().await;
+            let now = (self.clock)();
             if let Some(credential) = cached.as_ref()
-                && Self::is_fresh(credential, now)
+                && now < credential.refresh_at
             {
-                return Ok(credential.clone());
+                return Ok(credential.credential.clone());
             }
         }
 
-        let mut cached = self.cached.write().await;
-        now = (self.clock)();
-        if let Some(credential) = cached.as_ref()
-            && Self::is_fresh(credential, now)
+        // Serialize refreshes independently of cache access. Readers may keep
+        // using a valid SAS while another caller is talking to the broker.
+        let mut generation = match self.refresh.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                let cached = self.cached.read().await;
+                if let Some(credential) = cached.as_ref()
+                    && credential.credential.expires_at > (self.clock)()
+                {
+                    return Ok(credential.credential.clone());
+                }
+                drop(cached);
+                self.refresh.lock().await
+            }
+        };
         {
-            return Ok(credential.clone());
+            let cached = self.cached.read().await;
+            if let Some(credential) = cached.as_ref()
+                && (self.clock)() < credential.refresh_at
+            {
+                return Ok(credential.credential.clone());
+            }
         }
 
         let mut retries = 0;
         loop {
-            now = (self.clock)();
+            let now = (self.clock)();
             let started = Instant::now();
             match self.fetcher.fetch(now).await {
-                Ok(credential) => {
-                    *cached = Some(credential.clone());
+                Ok(mut credential) => {
+                    // The broker round trip can outlive a short-lived SAS. Do
+                    // not publish a credential that expired while fetching it.
+                    let fetched_at = (self.clock)();
+                    if credential.expires_at <= fetched_at {
+                        *self.cached.write().await = None;
+                        bail!("expired_credential");
+                    }
+                    *generation = generation
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow!("credential_generation_exhausted"))?;
+                    credential.generation = *generation;
+                    *self.cached.write().await = Some(CachedAzureSasCredential::new(
+                        credential.clone(),
+                        fetched_at,
+                    ));
                     return Ok(credential);
                 }
                 Err(error) => {
+                    let mut cached = self.cached.write().await;
                     let has_cached_sas = cached.is_some();
                     let cached_expired = cached
                         .as_ref()
-                        .map(|credential| credential.expires_at <= (self.clock)())
+                        .map(|credential| credential.credential.expires_at <= (self.clock)())
                         .unwrap_or(false);
                     let request_error = error.downcast_ref::<reqwest::Error>();
                     let is_timeout = request_error.is_some_and(reqwest::Error::is_timeout);
@@ -430,9 +491,15 @@ impl AzureSasStorageOptionsProvider {
                         || is_connect
                         || request_error.is_some_and(reqwest::Error::is_request)
                         || request_error.is_some_and(reqwest::Error::is_body)
-                        || request_error.is_some_and(reqwest::Error::is_decode);
-                    let will_retry =
-                        !has_cached_sas && retries < INITIAL_FETCH_RETRIES && retryable;
+                        || request_error.is_some_and(reqwest::Error::is_decode)
+                        || request_error
+                            .and_then(reqwest::Error::status)
+                            .is_some_and(|status| {
+                                status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                                    || status.is_server_error()
+                            });
+                    let fallback = retryable && has_cached_sas && !cached_expired;
+                    let will_retry = !fallback && retries < FETCH_RETRIES && retryable;
                     let retry_delay_ms = if will_retry { 200 << retries } else { 0 };
                     eprintln!(
                         "Warning: Azure SAS credential broker refresh failed: {:#}, has_cached_sas={}, cached_expired={}, attempt={}, is_timeout={}, is_connect={}, elapsed_ms={}, request_timeout_ms={}, will_retry={}, retry_delay_ms={}",
@@ -447,13 +514,22 @@ impl AzureSasStorageOptionsProvider {
                         will_retry,
                         retry_delay_ms
                     );
+                    if fallback {
+                        return Ok(cached.as_ref().unwrap().credential.clone());
+                    }
+                    if !retryable {
+                        // A denial or invalid response must not be hidden by a
+                        // later transient failure or concurrent cache reader.
+                        *cached = None;
+                    }
+                    drop(cached);
                     if !will_retry {
                         return Err(error);
                     }
 
-                    // Initial credentials are fetched before Lance's read retries apply.
-                    // Keep this single-flight and back off 200/400/800 ms; cached
-                    // credential refreshes retain their existing fail-fast behavior.
+                    // Credential failures can happen before the reader's own
+                    // retry loop. Keep both initial fetches and renewals
+                    // single-flight and bounded, with 200/400/800 ms backoff.
                     tokio::time::sleep(Duration::from_millis(retry_delay_ms)).await;
                     retries += 1;
                 }
@@ -538,6 +614,7 @@ impl StorageFactory for AzureSasStorageFactory {
 #[derive(Clone)]
 struct CachedAzureSasStorage {
     token: String,
+    generation: u64,
     storage: Arc<dyn IcebergStorage>,
 }
 
@@ -561,7 +638,7 @@ impl fmt::Debug for AzureSasStorage {
 }
 
 impl AzureSasStorage {
-    async fn current_storage(&self) -> IcebergResult<Arc<dyn IcebergStorage>> {
+    async fn current_storage(&self) -> IcebergResult<CachedAzureSasStorage> {
         let provider = self.provider.as_ref().ok_or_else(|| {
             IcebergError::new(
                 IcebergErrorKind::Unexpected,
@@ -572,30 +649,44 @@ impl AzureSasStorage {
             .current_credential()
             .await
             .map_err(azure_iceberg_credential_error)?;
+        self.storage_for_credential(credential).await
+    }
+
+    async fn storage_for_credential(
+        &self,
+        credential: AzureSasCredential,
+    ) -> IcebergResult<CachedAzureSasStorage> {
         let token = credential.token;
         {
             let cached = self.cached_storage.read().await;
             if let Some(cached) = cached.as_ref()
-                && cached.token == token
+                && (cached.generation > credential.generation
+                    || (cached.generation == credential.generation && cached.token == token))
             {
-                return Ok(cached.storage.clone());
+                return Ok(cached.clone());
             }
         }
 
         let mut cached = self.cached_storage.write().await;
-        if let Some(cached) = cached.as_ref()
-            && cached.token == token
-        {
-            return Ok(cached.storage.clone());
+        if let Some(cached) = cached.as_mut() {
+            if cached.generation > credential.generation {
+                return Ok(cached.clone());
+            }
+            if cached.token == token {
+                cached.generation = credential.generation;
+                return Ok(cached.clone());
+            }
         }
 
         let mut props = self.props.as_ref().clone();
         props.insert(ADLS_SAS_TOKEN.to_string(), token.clone());
         let storage = self.inner.build(&StorageConfig::from_props(props))?;
-        *cached = Some(CachedAzureSasStorage {
+        let storage = CachedAzureSasStorage {
             token,
-            storage: storage.clone(),
-        });
+            generation: credential.generation,
+            storage,
+        };
+        *cached = Some(storage.clone());
         Ok(storage)
     }
 }
@@ -604,35 +695,51 @@ impl AzureSasStorage {
 #[async_trait]
 impl IcebergStorage for AzureSasStorage {
     async fn exists(&self, path: &str) -> IcebergResult<bool> {
-        self.current_storage().await?.exists(path).await
+        self.current_storage().await?.storage.exists(path).await
     }
 
     async fn metadata(&self, path: &str) -> IcebergResult<FileMetadata> {
-        self.current_storage().await?.metadata(path).await
+        self.current_storage().await?.storage.metadata(path).await
     }
 
     async fn read(&self, path: &str) -> IcebergResult<bytes::Bytes> {
-        self.current_storage().await?.read(path).await
+        self.current_storage().await?.storage.read(path).await
     }
 
     async fn reader(&self, path: &str) -> IcebergResult<Box<dyn FileRead>> {
-        self.current_storage().await?.reader(path).await
+        // Validate/open now as before, but do not pin this reader's SAS for
+        // the lifetime of a scan. Each later range read resolves credentials.
+        let storage = self.current_storage().await?;
+        let reader = Arc::from(storage.storage.reader(path).await?);
+        Ok(Box::new(AzureSasFileReader {
+            storage: self.clone(),
+            path: path.to_string(),
+            cached: RwLock::new((storage, reader)),
+        }))
     }
 
     async fn write(&self, path: &str, bytes: bytes::Bytes) -> IcebergResult<()> {
-        self.current_storage().await?.write(path, bytes).await
+        self.current_storage()
+            .await?
+            .storage
+            .write(path, bytes)
+            .await
     }
 
     async fn writer(&self, path: &str) -> IcebergResult<Box<dyn FileWrite>> {
-        self.current_storage().await?.writer(path).await
+        self.current_storage().await?.storage.writer(path).await
     }
 
     async fn delete(&self, path: &str) -> IcebergResult<()> {
-        self.current_storage().await?.delete(path).await
+        self.current_storage().await?.storage.delete(path).await
     }
 
     async fn delete_prefix(&self, path: &str) -> IcebergResult<()> {
-        self.current_storage().await?.delete_prefix(path).await
+        self.current_storage()
+            .await?
+            .storage
+            .delete_prefix(path)
+            .await
     }
 
     fn new_input(&self, path: &str) -> IcebergResult<InputFile> {
@@ -641,6 +748,53 @@ impl IcebergStorage for AzureSasStorage {
 
     fn new_output(&self, path: &str) -> IcebergResult<OutputFile> {
         Ok(OutputFile::new(Arc::new(self.clone()), path.to_string()))
+    }
+}
+
+struct AzureSasFileReader {
+    storage: AzureSasStorage,
+    path: String,
+    cached: RwLock<(CachedAzureSasStorage, Arc<dyn FileRead>)>,
+}
+
+impl AzureSasFileReader {
+    async fn current_reader(&self) -> IcebergResult<Arc<dyn FileRead>> {
+        let storage = self.storage.current_storage().await?;
+        self.reader_for_storage(storage).await
+    }
+
+    async fn reader_for_storage(
+        &self,
+        storage: CachedAzureSasStorage,
+    ) -> IcebergResult<Arc<dyn FileRead>> {
+        {
+            let cached = self.cached.read().await;
+            if cached.0.generation > storage.generation
+                || (cached.0.generation == storage.generation
+                    && Arc::ptr_eq(&cached.0.storage, &storage.storage))
+            {
+                return Ok(cached.1.clone());
+            }
+        }
+        let mut cached = self.cached.write().await;
+        if cached.0.generation <= storage.generation {
+            if Arc::ptr_eq(&cached.0.storage, &storage.storage) {
+                cached.0 = storage;
+                return Ok(cached.1.clone());
+            }
+            // Preserve the reader and its HTTP connection pool between SAS
+            // rotations. Do not hold this lock during the actual range read.
+            let reader = Arc::from(storage.storage.reader(&self.path).await?);
+            *cached = (storage, reader);
+        }
+        Ok(cached.1.clone())
+    }
+}
+
+#[async_trait]
+impl FileRead for AzureSasFileReader {
+    async fn read(&self, range: std::ops::Range<u64>) -> IcebergResult<bytes::Bytes> {
+        self.current_reader().await?.read(range).await
     }
 }
 
@@ -741,9 +895,15 @@ mod tests {
 
     fn credential(now: DateTime<Utc>, signature: &str) -> AzureSasCredential {
         AzureSasCredential {
+            generation: 0,
             token: format!("sv=1&sig={signature}"),
             expires_at: now + chrono::Duration::hours(1),
         }
+    }
+
+    fn cached_credential(credential: AzureSasCredential) -> CachedAzureSasCredential {
+        let fetched_at = credential.expires_at - chrono::Duration::hours(1);
+        CachedAzureSasCredential::new(credential, fetched_at)
     }
 
     fn test_provider(
@@ -807,6 +967,59 @@ mod tests {
             }
         });
         (broker_config, requests, server)
+    }
+
+    #[tokio::test]
+    async fn transient_refresh_failure_uses_unexpired_cache_without_backoff() {
+        for status in [429, 503] {
+            let (config, requests, server) =
+                start_test_broker(vec![Some((status, "unavailable".into()))]).await;
+            let provider = AzureSasStorageOptionsProvider::new(config).unwrap();
+            *provider.cached.write().await = Some(cached_credential(AzureSasCredential {
+                generation: 0,
+                token: "sv=1&sig=old".into(),
+                expires_at: Utc::now() + chrono::Duration::seconds(30),
+            }));
+            let result = provider.current_credential().await;
+            server.abort();
+            assert_eq!(result.unwrap().token, "sv=1&sig=old");
+            assert_eq!(requests.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_cached_read_does_not_wait_for_inflight_refresh() {
+        let now = Utc::now();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let fetcher = Arc::new(MockFetcher::with_gate(
+            vec![Ok(credential(now, "new"))],
+            started.clone(),
+            release.clone(),
+        ));
+        let provider = test_provider(fetcher.clone(), now);
+        *provider.cached.write().await = Some(cached_credential(AzureSasCredential {
+            generation: 0,
+            token: "sv=1&sig=old".into(),
+            expires_at: now + chrono::Duration::seconds(30),
+        }));
+        let fetching = {
+            let provider = provider.clone();
+            tokio::spawn(async move { provider.current_credential().await })
+        };
+        started.notified().await;
+        let concurrent =
+            tokio::time::timeout(Duration::from_millis(100), provider.current_credential()).await;
+        release.notify_one();
+        assert_eq!(fetching.await.unwrap().unwrap().token, "sv=1&sig=new");
+        assert_eq!(
+            concurrent
+                .expect("valid readers must not wait for renewal")
+                .unwrap()
+                .token,
+            "sv=1&sig=old"
+        );
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -900,21 +1113,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cached_body_transfer_failure_is_not_retried_even_after_expiration() {
+    async fn cached_body_transfer_failure_retries_are_bounded_after_expiration() {
         let response = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{}";
         let (config, requests, server) =
-            start_raw_test_broker(vec![Some(response.to_string()); 2]).await;
+            start_raw_test_broker(vec![Some(response.to_string()); 8]).await;
         let provider = AzureSasStorageOptionsProvider::new(config).unwrap();
         for (index, remaining_secs) in [30, -1].into_iter().enumerate() {
-            *provider.cached.write().await = Some(AzureSasCredential {
+            *provider.cached.write().await = Some(cached_credential(AzureSasCredential {
+                generation: 0,
                 token: "sv=1&sig=old".to_string(),
                 expires_at: Utc::now() + chrono::Duration::seconds(remaining_secs),
-            });
-            let error = provider.current_credential().await.err().unwrap();
-            assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_decode());
-            assert_eq!(requests.lock().unwrap().len(), index + 1);
+            }));
+            let result = provider.current_credential().await;
+            if remaining_secs > 0 {
+                assert_eq!(result.unwrap().token, "sv=1&sig=old");
+            } else {
+                assert!(
+                    result
+                        .err()
+                        .unwrap()
+                        .downcast_ref::<reqwest::Error>()
+                        .unwrap()
+                        .is_decode()
+                );
+            }
+            assert_eq!(requests.lock().unwrap().len(), 1 + index * 4);
             assert_eq!(
-                provider.cached.read().await.as_ref().unwrap().token,
+                provider
+                    .cached
+                    .read()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .credential
+                    .token,
                 "sv=1&sig=old"
             );
         }
@@ -1202,30 +1434,44 @@ mod tests {
             drop(socket);
         });
         let provider = AzureSasStorageOptionsProvider::new(config).unwrap();
-        *provider.cached.write().await = Some(AzureSasCredential {
+        *provider.cached.write().await = Some(cached_credential(AzureSasCredential {
+            generation: 0,
             token: "sv=1&sig=old".to_string(),
             expires_at: Utc::now() + chrono::Duration::seconds(30),
-        });
+        }));
 
-        let error = provider.current_credential().await.err().unwrap();
+        let credential = provider.current_credential().await.unwrap();
         server.abort();
-        assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_timeout());
+        assert_eq!(credential.token, "sv=1&sig=old");
     }
 
     #[tokio::test]
-    async fn cached_transport_failure_is_not_retried_even_after_expiration() {
+    async fn cached_transport_failure_retries_are_bounded_after_expiration() {
         let (config, requests, server) = start_test_broker(Vec::new()).await;
         let provider = AzureSasStorageOptionsProvider::new(config).unwrap();
 
         for (index, remaining_secs) in [30, -1].into_iter().enumerate() {
-            *provider.cached.write().await = Some(AzureSasCredential {
+            *provider.cached.write().await = Some(cached_credential(AzureSasCredential {
+                generation: 0,
                 token: "sv=1&sig=old".to_string(),
                 expires_at: Utc::now() + chrono::Duration::seconds(remaining_secs),
-            });
-            assert!(provider.current_credential().await.is_err());
-            assert_eq!(requests.lock().unwrap().len(), index + 1);
+            }));
+            let result = provider.current_credential().await;
+            if remaining_secs > 0 {
+                assert_eq!(result.unwrap().token, "sv=1&sig=old");
+            } else {
+                assert!(result.is_err());
+            }
+            assert_eq!(requests.lock().unwrap().len(), 1 + index * 4);
             assert_eq!(
-                provider.cached.read().await.as_ref().unwrap().token,
+                provider
+                    .cached
+                    .read()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .credential
+                    .token,
                 "sv=1&sig=old"
             );
         }
@@ -1236,7 +1482,7 @@ mod tests {
     async fn initial_broker_rejections_are_not_retried() {
         for (status, body, expected) in [
             (403, "{}", "http_status=403"),
-            (500, "{}", "http_status=500"),
+            (401, "{}", "http_status=401"),
             (200, "not json", "invalid_json"),
             (200, r#"{"success":false}"#, "business_failure"),
         ] {
@@ -1274,7 +1520,7 @@ mod tests {
     async fn iceberg_storage_reuses_delegated_storage_until_sas_changes() {
         let now = Utc::now();
         let provider = test_provider(Arc::new(MockFetcher::new(Vec::new())), now);
-        *provider.cached.write().await = Some(credential(now, "first"));
+        *provider.cached.write().await = Some(cached_credential(credential(now, "first")));
         let storage = AzureSasStorage {
             inner: inner_factory(),
             props: Arc::new(HashMap::new()),
@@ -1284,11 +1530,413 @@ mod tests {
 
         let first = storage.current_storage().await.unwrap();
         let second = storage.current_storage().await.unwrap();
-        assert!(Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&first.storage, &second.storage));
 
-        *provider.cached.write().await = Some(credential(now, "second"));
+        *provider.cached.write().await = Some(cached_credential(credential(now, "second")));
         let refreshed = storage.current_storage().await.unwrap();
-        assert!(!Arc::ptr_eq(&first, &refreshed));
+        assert!(!Arc::ptr_eq(&first.storage, &refreshed.storage));
+    }
+
+    #[tokio::test]
+    async fn delayed_storage_and_reader_cannot_overwrite_newer_generation() {
+        let now = Utc::now();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data");
+        std::fs::write(&path, b"abcdefgh").unwrap();
+        let path = path.to_str().unwrap();
+        let storage = AzureSasStorage {
+            inner: OpenDalStorageFactory::Fs,
+            props: Arc::new(HashMap::new()),
+            provider: None,
+            cached_storage: Arc::new(RwLock::new(None)),
+        };
+        let mut old = credential(now, "old");
+        old.generation = 1;
+        let old_storage = storage.storage_for_credential(old.clone()).await.unwrap();
+        let old_reader = Arc::from(old_storage.storage.reader(path).await.unwrap());
+        let reader = AzureSasFileReader {
+            storage: storage.clone(),
+            path: path.into(),
+            cached: RwLock::new((old_storage.clone(), old_reader)),
+        };
+        let mut new = credential(now, "new");
+        new.generation = 2;
+        // Issuers may shorten the TTL: expiration is not a rotation sequence.
+        new.expires_at = old.expires_at - chrono::Duration::minutes(10);
+        let new_storage = storage.storage_for_credential(new).await.unwrap();
+        let new_reader = reader
+            .reader_for_storage(new_storage.clone())
+            .await
+            .unwrap();
+        // Resume callers paused immediately after resolving the old credential
+        // and old storage, respectively. Neither may publish backwards.
+        let late_storage = storage.storage_for_credential(old).await.unwrap();
+        assert!(Arc::ptr_eq(&late_storage.storage, &new_storage.storage));
+        let late_reader = reader.reader_for_storage(old_storage).await.unwrap();
+        assert!(Arc::ptr_eq(&late_reader, &new_reader));
+        assert_eq!(late_reader.read(2..4).await.unwrap().as_ref(), b"cd");
+        assert_eq!(
+            storage
+                .cached_storage
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .generation,
+            2
+        );
+        assert_eq!(reader.cached.read().await.0.generation, 2);
+        let mut reissued = credential(now, "new");
+        reissued.generation = 4;
+        let reissued_storage = storage.storage_for_credential(reissued).await.unwrap();
+        assert!(Arc::ptr_eq(&reissued_storage.storage, &new_storage.storage));
+        reader.reader_for_storage(reissued_storage).await.unwrap();
+        let mut delayed = credential(now, "intermediate");
+        delayed.generation = 3;
+        let latest = storage.storage_for_credential(delayed).await.unwrap();
+        assert_eq!(latest.generation, 4);
+        assert_eq!(reader.cached.read().await.0.generation, 4);
+    }
+
+    #[tokio::test]
+    async fn denial_invalidates_cache_before_later_transient_failure() {
+        let (config, requests, server) = start_test_broker(vec![
+            Some((403, "denied".into())),
+            Some((503, "unavailable".into())),
+            Some((503, "unavailable".into())),
+            Some((503, "unavailable".into())),
+            Some((503, "unavailable".into())),
+        ])
+        .await;
+        let provider = AzureSasStorageOptionsProvider::new(config).unwrap();
+        *provider.cached.write().await = Some(cached_credential(AzureSasCredential {
+            generation: 1,
+            token: "sv=1&sig=old".into(),
+            expires_at: Utc::now() + chrono::Duration::seconds(30),
+        }));
+        assert!(provider.current_credential().await.is_err());
+        assert!(provider.cached.read().await.is_none());
+        assert!(provider.current_credential().await.is_err());
+        server.abort();
+        assert_eq!(requests.lock().unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn sas_expiring_during_transient_fetch_is_not_returned() {
+        let (config, requests, server) =
+            start_test_broker(vec![Some((503, "unavailable".into())); 4]).await;
+        let now = Utc::now();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let clock_reads = reads.clone();
+        let provider = AzureSasStorageOptionsProvider::with_fetcher(
+            config.clone(),
+            Arc::new(AzureBrokerClient::new(config).unwrap()),
+            Arc::new(move || {
+                // The three pre-fetch clock samples see a valid token. All
+                // samples after the HTTP failure see its expiration boundary.
+                if clock_reads.fetch_add(1, Ordering::SeqCst) < 3 {
+                    now
+                } else {
+                    now + chrono::Duration::seconds(30)
+                }
+            }),
+        );
+        *provider.cached.write().await = Some(cached_credential(AzureSasCredential {
+            generation: 1,
+            token: "sv=1&sig=old".into(),
+            expires_at: now + chrono::Duration::seconds(30),
+        }));
+        assert!(provider.current_credential().await.is_err());
+        server.abort();
+        assert_eq!(requests.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn iceberg_open_reader_refreshes_across_multiple_expirations() {
+        // Use real range reads against a local file; the injected clock advances
+        // credential time without making the test wait for hours.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data");
+        std::fs::write(&path, b"abcdefgh").unwrap();
+        let path = path.to_str().unwrap();
+        let now = Arc::new(Mutex::new(Utc::now()));
+        let start = *now.lock().unwrap();
+        let fetcher = Arc::new(MockFetcher::new(vec![
+            Ok(credential(start, "first")),
+            Ok(credential(start + chrono::Duration::hours(2), "second")),
+            Err("permission_revoked"),
+            Ok(credential(start + chrono::Duration::hours(4), "third")),
+        ]));
+        let clock = now.clone();
+        let provider = Arc::new(AzureSasStorageOptionsProvider::with_fetcher(
+            config(),
+            fetcher.clone(),
+            Arc::new(move || *clock.lock().unwrap()),
+        ));
+        let factory = AzureSasStorageFactory {
+            inner: OpenDalStorageFactory::Fs,
+            provider: Some(provider),
+        };
+        let storage = factory.build(&StorageConfig::new()).unwrap();
+        let reader = storage.reader(path).await.unwrap();
+        assert_eq!(reader.read(0..2).await.unwrap().as_ref(), b"ab");
+
+        *now.lock().unwrap() = start + chrono::Duration::hours(2);
+        assert_eq!(reader.read(2..4).await.unwrap().as_ref(), b"cd");
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 2);
+
+        *now.lock().unwrap() = start + chrono::Duration::hours(4);
+        let error = reader.read(4..6).await.unwrap_err();
+        assert!(error.to_string().contains("permission_revoked"));
+        // Recovery uses the same open reader, without reopening the dataset.
+        assert_eq!(reader.read(4..6).await.unwrap().as_ref(), b"ef");
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn short_lived_credentials_are_reused_without_extending_expiration() {
+        let start = Utc::now();
+        let now = Arc::new(Mutex::new(start));
+        let expiry = start + chrono::Duration::seconds(60);
+        let fetcher = Arc::new(MockFetcher::new(vec![
+            Ok(AzureSasCredential {
+                generation: 0,
+                token: "sv=1&sig=first".into(),
+                expires_at: expiry,
+            }),
+            Ok(AzureSasCredential {
+                generation: 0,
+                token: "sv=1&sig=renewed".into(),
+                expires_at: expiry,
+            }),
+            Err("job_deadline_reached"),
+        ]));
+        let clock = now.clone();
+        let provider = Arc::new(AzureSasStorageOptionsProvider::with_fetcher(
+            config(),
+            fetcher.clone(),
+            Arc::new(move || *clock.lock().unwrap()),
+        ));
+        for result in join_all((0..32).map(|_| provider.current_credential())).await {
+            let credential = result.unwrap();
+            assert_eq!(credential.token, "sv=1&sig=first");
+            assert_eq!(credential.expires_at, expiry);
+        }
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+
+        *now.lock().unwrap() += chrono::Duration::seconds(29);
+        assert_eq!(
+            provider.current_credential().await.unwrap().token,
+            "sv=1&sig=first"
+        );
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+        *now.lock().unwrap() += chrono::Duration::seconds(1);
+        let renewed = provider.current_credential().await.unwrap();
+        assert_eq!(renewed.token, "sv=1&sig=renewed");
+        assert_eq!(renewed.expires_at, expiry);
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 2);
+
+        *now.lock().unwrap() = expiry;
+        assert_eq!(
+            provider
+                .current_credential()
+                .await
+                .err()
+                .unwrap()
+                .to_string(),
+            "job_deadline_reached"
+        );
+    }
+
+    #[tokio::test]
+    async fn job_deadline_denial_is_visible_to_both_readers_before_expiry() {
+        let start = Utc::now();
+        let expiry = start + chrono::Duration::seconds(120);
+        let now = Arc::new(Mutex::new(start));
+        let body = serde_json::json!({
+            "success": true,
+            "credentials": {
+                "tempAk": "account",
+                "sessionToken": "sv=1&sig=job",
+                "expiredAt": expiry.to_rfc3339(),
+            }
+        })
+        .to_string();
+        let (config, requests, server) = start_test_broker(vec![
+            Some((200, body)),
+            Some((403, "{}".into())),
+            Some((403, "{}".into())),
+        ])
+        .await;
+        let clock = now.clone();
+        let fetcher = Arc::new(AzureBrokerClient::new(config.clone()).unwrap());
+        let provider = Arc::new(AzureSasStorageOptionsProvider::with_fetcher(
+            config,
+            fetcher,
+            Arc::new(move || *clock.lock().unwrap()),
+        ));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data");
+        std::fs::write(&path, b"abcdefgh").unwrap();
+        let factory = AzureSasStorageFactory {
+            inner: OpenDalStorageFactory::Fs,
+            provider: Some(provider.clone()),
+        };
+        let storage = factory.build(&StorageConfig::new()).unwrap();
+        let reader = storage.reader(path.to_str().unwrap()).await.unwrap();
+        assert_eq!(reader.read(0..2).await.unwrap().as_ref(), b"ab");
+        *now.lock().unwrap() += chrono::Duration::seconds(59);
+        assert!(provider.fetch_storage_options().await.is_ok());
+        assert_eq!(reader.read(2..4).await.unwrap().as_ref(), b"cd");
+        assert_eq!(requests.lock().unwrap().len(), 1);
+
+        // A job-bound issuer may stop issuing at D-60. Both adapter boundaries
+        // must surface its denial, even though the previous SAS is unexpired.
+        *now.lock().unwrap() += chrono::Duration::seconds(1);
+        let iceberg_error = reader.read(4..6).await.unwrap_err();
+        assert!(iceberg_error.to_string().contains("http_status=403"));
+        let lance_error = provider.fetch_storage_options().await.unwrap_err();
+        assert!(lance_error.to_string().contains("http_status=403"));
+        assert_eq!(requests.lock().unwrap().len(), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cached_credential_renews_after_transient_broker_failures() {
+        for remaining_secs in [30, -1] {
+            let body = serde_json::json!({
+                "success": true,
+                "credentials": {
+                    "tempAk": "account",
+                    "sessionToken": "sv=1&sig=renewed",
+                    "expiredAt": (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                }
+            })
+            .to_string();
+            let (config, requests, server) = start_test_broker(vec![
+                Some((503, "unavailable".into())),
+                Some((429, "throttled".into())),
+                None,
+                Some((200, body)),
+            ])
+            .await;
+            let provider = AzureSasStorageOptionsProvider::new(config).unwrap();
+            *provider.cached.write().await = Some(cached_credential(AzureSasCredential {
+                generation: 0,
+                token: "sv=1&sig=old".into(),
+                expires_at: Utc::now() + chrono::Duration::seconds(remaining_secs),
+            }));
+            if remaining_secs > 0 {
+                for _ in 0..3 {
+                    assert_eq!(
+                        provider.current_credential().await.unwrap().token,
+                        "sv=1&sig=old"
+                    );
+                }
+            }
+            let renewed = provider.current_credential().await;
+            server.abort();
+            assert_eq!(renewed.unwrap().token, "sv=1&sig=renewed");
+            assert_eq!(requests.lock().unwrap().len(), 4);
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_credentials_do_not_hide_broker_denials_or_bad_responses() {
+        for (status, body, expected) in [
+            (401, "{}", "http_status=401"),
+            (403, "{}", "http_status=403"),
+            (200, "not json", "invalid_json"),
+        ] {
+            let (config, requests, server) =
+                start_test_broker(vec![Some((status, body.into()))]).await;
+            let provider = AzureSasStorageOptionsProvider::new(config).unwrap();
+            *provider.cached.write().await = Some(cached_credential(AzureSasCredential {
+                generation: 0,
+                token: "sv=1&sig=old".into(),
+                expires_at: Utc::now() + chrono::Duration::seconds(30),
+            }));
+            let result = provider.current_credential().await;
+            server.abort();
+            assert_eq!(result.err().unwrap().to_string(), expected);
+            assert_eq!(requests.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn waiting_caller_checks_freshness_after_refresh_finishes() {
+        let start = Utc::now();
+        let now = Arc::new(Mutex::new(start));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let fetcher = Arc::new(MockFetcher::with_gate(
+            vec![
+                Ok(AzureSasCredential {
+                    generation: 0,
+                    token: "sv=1&sig=short-lived".into(),
+                    expires_at: start + chrono::Duration::seconds(150),
+                }),
+                Ok(credential(start, "renewed")),
+            ],
+            started.clone(),
+            release.clone(),
+        ));
+        let clock = now.clone();
+        let provider = Arc::new(AzureSasStorageOptionsProvider::with_fetcher(
+            config(),
+            fetcher,
+            Arc::new(move || *clock.lock().unwrap()),
+        ));
+        let fetching = {
+            let provider = provider.clone();
+            tokio::spawn(async move { provider.current_credential().await })
+        };
+        started.notified().await;
+        let mut waiting = Box::pin(provider.current_credential());
+        assert!(futures::poll!(&mut waiting).is_pending());
+
+        // The waiting caller must use the time after the lock becomes available,
+        // not its start time, to honor the refresh window computed at fetch completion.
+        *now.lock().unwrap() += chrono::Duration::seconds(120);
+        release.notify_one();
+        assert_eq!(
+            fetching.await.unwrap().unwrap().token,
+            "sv=1&sig=short-lived"
+        );
+        *now.lock().unwrap() = start + chrono::Duration::seconds(141);
+        release.notify_one();
+        assert_eq!(waiting.await.unwrap().token, "sv=1&sig=renewed");
+    }
+
+    #[tokio::test]
+    async fn credential_expiring_during_fetch_is_not_published() {
+        let start = Utc::now();
+        let now = Arc::new(Mutex::new(start));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let fetcher = Arc::new(MockFetcher::with_gate(
+            vec![Ok(credential(start, "expired-in-flight"))],
+            started.clone(),
+            release.clone(),
+        ));
+        let clock = now.clone();
+        let provider = Arc::new(AzureSasStorageOptionsProvider::with_fetcher(
+            config(),
+            fetcher,
+            Arc::new(move || *clock.lock().unwrap()),
+        ));
+        let fetching = {
+            let provider = provider.clone();
+            tokio::spawn(async move { provider.current_credential().await })
+        };
+        started.notified().await;
+        *now.lock().unwrap() += chrono::Duration::hours(2);
+        release.notify_one();
+        assert_eq!(
+            fetching.await.unwrap().err().unwrap().to_string(),
+            "expired_credential"
+        );
+        assert!(provider.cached.read().await.is_none());
     }
 
     #[test]
@@ -1419,12 +2067,14 @@ mod tests {
         let initial_now = *now.lock().unwrap();
         let fetcher = Arc::new(MockFetcher::new(vec![
             Ok(AzureSasCredential {
+                generation: 0,
                 token: "sv=1&sig=old".to_string(),
                 expires_at: initial_now + chrono::Duration::seconds(120),
             }),
             Err("http_status=500"),
             Err("http_status=500"),
             Ok(AzureSasCredential {
+                generation: 0,
                 token: "sv=2&sig=new".to_string(),
                 expires_at: initial_now + chrono::Duration::hours(2),
             }),
@@ -1473,6 +2123,7 @@ mod tests {
         let release_fetch = Arc::new(Notify::new());
         let fetcher = Arc::new(MockFetcher::with_gate(
             vec![Ok(AzureSasCredential {
+                generation: 0,
                 token: "sv=1&sig=single-flight".to_string(),
                 expires_at: now + chrono::Duration::hours(1),
             })],
@@ -1484,10 +2135,11 @@ mod tests {
             fetcher.clone(),
             Arc::new(move || now),
         ));
-        *provider.cached.write().await = Some(AzureSasCredential {
+        *provider.cached.write().await = Some(cached_credential(AzureSasCredential {
+            generation: 0,
             token: "sv=1&sig=stale".to_string(),
-            expires_at: now + chrono::Duration::seconds(1),
-        });
+            expires_at: now,
+        }));
 
         let start = Arc::new(Barrier::new(CALLERS + 1));
         let attempted = Arc::new(AtomicUsize::new(0));
