@@ -13,6 +13,9 @@
 // limitations under the License.
 
 #include <deque>
+#include <atomic>
+#include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -56,7 +59,8 @@ static std::string SuccessResponse(const std::string& account, const std::string
 
 class MockTransport final : public Azure::Core::Http::HttpTransport {
   public:
-  explicit MockTransport(bool repeat_last_response = false) : repeat_last_response_(repeat_last_response) {}
+  explicit MockTransport(bool repeat_last_response = false, std::function<void()> before_send = {})
+      : repeat_last_response_(repeat_last_response), before_send_(std::move(before_send)) {}
 
   struct RequestRecord {
     std::string method;
@@ -74,6 +78,9 @@ class MockTransport final : public Azure::Core::Http::HttpTransport {
 
   std::unique_ptr<Azure::Core::Http::RawResponse> Send(Azure::Core::Http::Request& request,
                                                        const Azure::Core::Context& context) override {
+    if (before_send_) {
+      before_send_();
+    }
     const auto sent_at = std::chrono::system_clock::now();
     auto* stream = request.GetBodyStream();
     std::string body;
@@ -108,6 +115,7 @@ class MockTransport final : public Azure::Core::Http::HttpTransport {
 
   private:
   const bool repeat_last_response_;
+  const std::function<void()> before_send_;
   mutable std::mutex mutex_;
   std::deque<std::pair<Azure::Core::Http::HttpStatusCode, std::string>> responses_;
   std::deque<std::vector<uint8_t>> streamed_response_bodies_;
@@ -243,7 +251,7 @@ TEST(AzureSasTokenPolicyTest, PerOperationPolicyKeepsSasAcrossSdkRetries) {
   }
 }
 
-TEST(AzureSasTokenPolicyTest, RefreshFailureReturnsOldTokenAndRetriesEveryRequest) {
+TEST(AzureSasTokenPolicyTest, TransientRefreshFailureUsesOnlyUnexpiredToken) {
   auto now = std::make_shared<TimePoint>(std::chrono::system_clock::from_time_t(1785146400));
   auto transport = std::make_shared<MockTransport>();
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
@@ -269,16 +277,193 @@ TEST(AzureSasTokenPolicyTest, RefreshFailureReturnsOldTokenAndRetriesEveryReques
 
   *now += std::chrono::seconds(60);
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::InternalServerError, "expired fallback");
+  called = false;
   auto expired_fallback = SendRequest(policy, &called, &query);
-  ASSERT_EQ(expired_fallback->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
-  EXPECT_EQ(query.at("sig"), "old");
+  ASSERT_EQ(expired_fallback->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Unauthorized);
+  EXPECT_FALSE(called);
 
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
                      SuccessResponse("account", "sv=2&sig=new", *now + std::chrono::hours(1)));
   auto refreshed = SendRequest(policy, &called, &query);
   ASSERT_EQ(refreshed->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
   EXPECT_EQ(query.at("sig"), "new");
+  EXPECT_EQ(transport->Requests().size(), 8u);
+}
+
+TEST(AzureSasTokenPolicyTest, ExpiredCacheDoesNotReachStorageWhenRenewalFails) {
+  auto now = std::make_shared<TimePoint>(std::chrono::system_clock::from_time_t(1785146400));
+  auto transport = std::make_shared<MockTransport>(true);
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                     SuccessResponse("account", "sig=old", *now + std::chrono::seconds(120)));
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::ServiceUnavailable, "unavailable");
+  AzureSasTokenPolicy policy(MakeConfig(), transport, [now] { return *now; });
+  bool called = false;
+  std::map<std::string, std::string> query;
+  ASSERT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+  *now += std::chrono::seconds(120);
+  called = false;
+  auto response = SendRequest(policy, &called, &query);
+  EXPECT_EQ(response->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Unauthorized);
+  EXPECT_FALSE(called);
   EXPECT_EQ(transport->Requests().size(), 5u);
+}
+
+TEST(AzureSasTokenPolicyTest, DenialAndInvalidResponsesInvalidateUnexpiredCache) {
+  for (const auto& [status, body] : std::vector<std::pair<Azure::Core::Http::HttpStatusCode, std::string>>{
+           {Azure::Core::Http::HttpStatusCode::Unauthorized, "denied"},
+           {Azure::Core::Http::HttpStatusCode::Forbidden, "denied"},
+           {Azure::Core::Http::HttpStatusCode::Ok, R"({"success":false})"},
+           {Azure::Core::Http::HttpStatusCode::Ok, "invalid JSON"}}) {
+    auto now = std::make_shared<TimePoint>(std::chrono::system_clock::from_time_t(1785146400));
+    auto transport = std::make_shared<MockTransport>(true);
+    transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                       SuccessResponse("account", "sig=old", *now + std::chrono::seconds(120)));
+    transport->Enqueue(status, body);
+    transport->Enqueue(Azure::Core::Http::HttpStatusCode::ServiceUnavailable, "unavailable");
+    AzureSasTokenPolicy policy(MakeConfig(), transport, [now] { return *now; });
+    bool called = false;
+    std::map<std::string, std::string> query;
+    ASSERT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+    *now += std::chrono::seconds(61);
+    called = false;
+    EXPECT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Unauthorized);
+    EXPECT_FALSE(called);
+    EXPECT_EQ(transport->Requests().size(), 2u);
+    // A later outage must not revive the SAS rejected by the broker.
+    EXPECT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Unauthorized);
+    EXPECT_FALSE(called);
+    EXPECT_EQ(transport->Requests().size(), 6u);
+  }
+}
+
+TEST(AzureSasTokenPolicyTest, ExpiredCacheRenewsAfterTransientFailures) {
+  auto now = std::make_shared<TimePoint>(std::chrono::system_clock::from_time_t(1785146400));
+  auto transport = std::make_shared<MockTransport>();
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                     SuccessResponse("account", "sig=old", *now + std::chrono::seconds(120)));
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::ServiceUnavailable, "unavailable");
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::TooManyRequests, "throttled");
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                     SuccessResponse("account", "sig=new", *now + std::chrono::hours(1)));
+  AzureSasTokenPolicy policy(MakeConfig(), transport, [now] { return *now; });
+  bool called = false;
+  std::map<std::string, std::string> query;
+  ASSERT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+  *now += std::chrono::seconds(120);
+  EXPECT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+  EXPECT_EQ(query.at("sig"), "new");
+  EXPECT_EQ(transport->Requests().size(), 4u);
+}
+
+TEST(AzureSasTokenPolicyTest, ValidReadersDoNotWaitForInflightRenewal) {
+  const auto start = std::chrono::system_clock::from_time_t(1785146400);
+  std::atomic<int> seconds{0};
+  std::atomic<int> attempts{0};
+  std::promise<void> fetching;
+  std::promise<void> release;
+  auto released = release.get_future().share();
+  auto transport = std::make_shared<MockTransport>(false, [&] {
+    if (++attempts == 2) {
+      fetching.set_value();
+      released.wait();
+    }
+  });
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                     SuccessResponse("account", "sig=old", start + std::chrono::seconds(120)));
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                     SuccessResponse("account", "sig=new", start + std::chrono::hours(1)));
+  AzureSasTokenPolicy policy(MakeConfig(), transport, [&] { return start + std::chrono::seconds(seconds.load()); });
+  auto read = [&] {
+    bool called = false;
+    std::map<std::string, std::string> query;
+    auto response = SendRequest(policy, &called, &query);
+    EXPECT_EQ(response->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+    EXPECT_TRUE(called);
+    return query["sig"];
+  };
+  EXPECT_EQ(read(), "old");
+  seconds = 61;
+  auto refreshing = std::async(std::launch::async, read);
+  fetching.get_future().wait();
+  auto concurrent = std::async(std::launch::async, read);
+  const auto ready = concurrent.wait_for(std::chrono::seconds(1));
+  release.set_value();
+  EXPECT_EQ(ready, std::future_status::ready);
+  EXPECT_EQ(concurrent.get(), "old");
+  EXPECT_EQ(refreshing.get(), "new");
+  EXPECT_EQ(attempts.load(), 2);
+}
+
+TEST(AzureSasTokenPolicyTest, ExpirationIsRecheckedAfterBrokerRoundTrip) {
+  for (const bool successful_response : {false, true}) {
+    const auto start = std::chrono::system_clock::from_time_t(1785146400);
+    auto now = start;
+    int attempts = 0;
+    auto transport = std::make_shared<MockTransport>(true, [&] {
+      if (++attempts == 2) {
+        now = start + std::chrono::seconds(120);
+      }
+    });
+    transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                       SuccessResponse("account", "sig=old", start + std::chrono::seconds(120)));
+    if (successful_response) {
+      transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                         SuccessResponse("account", "sig=expired-in-flight", start + std::chrono::seconds(120)));
+    } else {
+      transport->Enqueue(Azure::Core::Http::HttpStatusCode::ServiceUnavailable, "unavailable");
+    }
+    AzureSasTokenPolicy policy(MakeConfig(), transport, [&] { return now; });
+    bool called = false;
+    std::map<std::string, std::string> query;
+    ASSERT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+    now = start + std::chrono::seconds(61);
+    called = false;
+    EXPECT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Unauthorized);
+    EXPECT_FALSE(called);
+    EXPECT_EQ(attempts, successful_response ? 2 : 5);
+  }
+}
+
+TEST(AzureSasTokenPolicyTest, RetryClassificationUsesTransportExceptionTypes) {
+  class FailingTransport final : public Azure::Core::Http::HttpTransport {
+ public:
+    int kind = 0;
+    int attempts = 0;
+    std::unique_ptr<Azure::Core::Http::RawResponse> Send(Azure::Core::Http::Request&,
+                                                         const Azure::Core::Context&) override {
+      ++attempts;
+      if (kind == 0) {
+        throw Azure::Core::Http::TransportException("connection interrupted");
+      }
+      if (kind == 1) {
+        throw Azure::Core::OperationCancelledException("request deadline");
+      }
+      throw std::invalid_argument("invalid request configuration");
+    }
+  };
+  for (int kind = 0; kind < 3; ++kind) {
+    auto transport = std::make_shared<FailingTransport>();
+    transport->kind = kind;
+    AzureSasTokenPolicy policy(MakeConfig(), transport);
+    bool called = false;
+    std::map<std::string, std::string> query;
+    EXPECT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Unauthorized);
+    EXPECT_FALSE(called);
+    EXPECT_EQ(transport->attempts, kind == 2 ? 1 : 4);
+  }
+}
+
+TEST(AzureSasTokenPolicyTest, InitialDenialsAreNotRetried) {
+  for (auto status : {Azure::Core::Http::HttpStatusCode::Unauthorized, Azure::Core::Http::HttpStatusCode::Forbidden}) {
+    auto transport = std::make_shared<MockTransport>(true);
+    transport->Enqueue(status, "denied");
+    AzureSasTokenPolicy policy(MakeConfig(), transport);
+    bool called = false;
+    std::map<std::string, std::string> query;
+    EXPECT_EQ(SendRequest(policy, &called, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Unauthorized);
+    EXPECT_FALSE(called);
+    EXPECT_EQ(transport->Requests().size(), 1u);
+  }
 }
 
 TEST(AzureSasTokenPolicyTest, DoesNotRefreshWithMoreThanSixtySecondsRemaining) {
@@ -360,8 +545,8 @@ TEST(AzureSasTokenPolicyTest, InitialFetchRetriesWithPerAttemptTimeoutAndCachesT
   const auto now = std::chrono::system_clock::from_time_t(1785146400);
   auto transport = std::make_shared<MockTransport>();
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::InternalServerError, "unavailable");
-  transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, "{invalid-json}");
-  transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, R"({"success":false})");
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::TooManyRequests, "throttled");
+  transport->Enqueue(Azure::Core::Http::HttpStatusCode::ServiceUnavailable, "unavailable");
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
                      SuccessResponse("account", "sv=1&sig=recovered", now + std::chrono::hours(1)));
   const auto config = MakeConfig();
