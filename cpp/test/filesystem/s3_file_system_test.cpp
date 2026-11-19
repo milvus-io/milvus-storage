@@ -316,6 +316,7 @@ TEST_P(S3ReadResponseTest, HeadNotFoundPreservesRequestIdAndErrno) {
     check(async_input->GetSizeAsync().result().status());
   }
   ASSERT_STATUS_OK(input->Close());
+  check(fs->DeleteFile("bucket/object"));
 }
 
 TEST_P(S3ReadResponseTest, PreservesErrorsLargerThanReadBuffer) {

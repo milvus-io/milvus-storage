@@ -338,8 +338,7 @@ arrow::Status ErrorToStatus(const std::string& prefix,
 
   // Backend-specific UNKNOWN errors without a recognizable permanent or
   // transient signal remain plain IOError.
-  return arrow::Status::IOError(prefix, "AWS Error ", ss.str(), " during ", operation,
-                                " operation: ", error.GetMessage(), wrong_region_msg.value_or(""));
+  return arrow::Status::IOError(prefix, message);
 }
 
 template <typename ErrorType, typename... Args>
