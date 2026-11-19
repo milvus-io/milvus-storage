@@ -64,7 +64,6 @@ class AzureSasTokenPolicy final : public Azure::Core::Http::Policies::HttpPolicy
 
   arrow::Result<std::string> FetchSasToken(TimePoint now, TimePoint* expires_at) const;
   arrow::Result<std::string> GetSasToken() const;
-  [[nodiscard]] static bool IsFresh(TimePoint expires_at, TimePoint now);
 
   std::shared_ptr<SharedState> state_;
 };

@@ -57,6 +57,7 @@ struct AzureSasTokenPolicy::SharedState {
   struct CachedSasToken {
     std::string sas_token;
     TimePoint expires_at;
+    TimePoint refresh_at;
   };
 
   struct RefreshAttempt {
@@ -112,8 +113,6 @@ AzureSasTokenPolicy::AzureSasTokenPolicy(AzureSasBrokerConfig config,
     state_->clock = [] { return std::chrono::system_clock::now(); };
   }
 }
-
-bool AzureSasTokenPolicy::IsFresh(TimePoint expires_at, TimePoint now) { return expires_at - now > kRefreshOffset; }
 
 arrow::Result<std::string> AzureSasTokenPolicy::FetchSasToken(TimePoint now, TimePoint* expires_at) const {
   nlohmann::json request_json = {
@@ -237,7 +236,7 @@ arrow::Result<std::string> AzureSasTokenPolicy::GetSasToken() const {
   {
     std::unique_lock<std::mutex> lock(state_->mutex);
     const auto now = state_->clock();
-    if (state_->cached && IsFresh(state_->cached->expires_at, now)) {
+    if (state_->cached && now < state_->cached->refresh_at) {
       return state_->cached->sas_token;
     }
     if (state_->refresh) {
@@ -284,7 +283,11 @@ arrow::Result<std::string> AzureSasTokenPolicy::GetSasToken() const {
         fetched = arrow::Status::IOError("Azure SAS credential broker token expired during refresh");
       }
       if (fetched.ok()) {
-        state_->cached = SharedState::CachedSasToken{std::move(fetched).ValueOrDie(), expires_at};
+        // Fix the deadline at fetch completion. Short leases must not be stale
+        // immediately, nor may repeated reads move the deadline toward expiry.
+        const auto margin =
+            std::min(std::chrono::duration_cast<TimePoint::duration>(kRefreshOffset), (expires_at - now) / 2);
+        state_->cached = SharedState::CachedSasToken{std::move(fetched).ValueOrDie(), expires_at, expires_at - margin};
         LOG_STORAGE_DEBUG_ << "Azure SAS credential broker refresh succeeded: endpoint=" << state_->config.endpoint
                            << ", account=" << state_->config.account_name << ", bucket=" << state_->config.bucket
                            << ", expires_at="
