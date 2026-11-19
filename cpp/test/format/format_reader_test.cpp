@@ -15,13 +15,24 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <array>
 #include <chrono>
+#include <cstdio>
+#include <cstring>
 #include <functional>
 #include <mutex>
 #include <numeric>
 #include <random>
 #include <stdexcept>
 #include <thread>
+
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
+
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #include <arrow/api.h>
 #include <arrow/extension_type.h>
@@ -901,6 +912,238 @@ TEST_P(FormatReaderTest, ParquetByteTasksProgressWhileEarlierReadsArePending) {
     EXPECT_TRUE(actual->column(0)->Equals(*batch->GetColumnByName("vector")->Slice(1, 998)));
     EXPECT_EQ(reads->load(), 4);
   }
+}
+
+TEST_P(FormatReaderTest, CrtPendingRangeOutlivesFailedReader) {
+  const auto format = GetParam();
+  if (format != LOON_FORMAT_PARQUET) {
+    if (format == LOON_FORMAT_LANCE_TABLE && IsCloudEnv()) {
+      GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+    }
+    // Generic survival check: dropping the FormatReader must not invalidate an
+    // in-flight async range read for formats whose runtime owns the read state.
+    ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+    auto writer =
+        Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
+    ASSERT_STATUS_OK(writer->write(test_batch_));
+    ASSERT_AND_ASSIGN(auto column_groups, writer->close());
+    ASSERT_AND_ASSIGN(auto id_schema, CreateTestSchema(std::array<bool, 4>{true, false, false, false}));
+    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(id_schema, format, column_groups->at(0)->files[0],
+                                                        std::make_shared<const api::Properties>(properties_),
+                                                        std::vector<std::string>{"id"}, nullptr));
+    folly::CPUThreadPoolExecutor executor(1);
+    auto future = reader->read_with_range_async(0, test_batch_->num_rows()).via(&executor);
+    reader.reset();
+    ASSERT_AND_ASSIGN(auto rb_reader, std::move(future).get());
+    ASSERT_AND_ASSIGN(auto batches, rb_reader->ToRecordBatches());
+    ASSERT_AND_ASSIGN(auto actual, arrow::ConcatenateRecordBatches(batches));
+    EXPECT_EQ(actual->num_rows(), test_batch_->num_rows());
+    EXPECT_EQ(actual->num_columns(), 1);
+    return;
+  }
+#if defined(_WIN32)
+  GTEST_SKIP() << "Test requires POSIX process APIs.";
+#else
+  const auto original_death_test_style = GTEST_FLAG_GET(death_test_style);
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  auto restore = folly::makeGuard([&] { GTEST_FLAG_SET(death_test_style, original_death_test_style); });
+  for (const bool late_error : {false, true}) {
+    SCOPED_TRACE(late_error ? "B fails after reader destruction" : "B succeeds after reader destruction");
+    const auto run_child = [late_error] {
+      namespace http = boost::beast::http;
+      using Tcp = boost::asio::ip::tcp;
+      constexpr int64_t kRows = 1024;
+      const auto schema = arrow::schema({arrow::field("a", arrow::int64()), arrow::field("b", arrow::int64())});
+      arrow::Int64Builder builder;
+      for (int64_t i = 0; i < kRows; ++i) {
+        ASSERT_STATUS_OK(builder.Append(i));
+      }
+      ASSERT_AND_ASSIGN(auto values, builder.Finish());
+      const auto table = arrow::Table::Make(schema, {values, values});
+      ASSERT_AND_ASSIGN(auto sink, arrow::io::BufferOutputStream::Create());
+      const auto writer_properties = ::parquet::WriterProperties::Builder()
+                                         .disable_dictionary()
+                                         ->compression(::parquet::Compression::UNCOMPRESSED)
+                                         ->build();
+      ASSERT_STATUS_OK(
+          ::parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), sink, kRows, writer_properties));
+      ASSERT_AND_ASSIGN(auto contents, sink->Finish());
+
+      boost::asio::io_context server_context;
+      Tcp::acceptor acceptor(server_context, {boost::asio::ip::address_v4::loopback(), 0});
+      api::Properties properties;
+      for (const auto& [key, value] : std::vector<std::pair<std::string, std::string>>{
+               {PROPERTY_FS_STORAGE_TYPE, "remote"},
+               {PROPERTY_FS_CLOUD_PROVIDER, "aws"},
+               {PROPERTY_FS_ADDRESS, "127.0.0.1:" + std::to_string(acceptor.local_endpoint().port())},
+               {PROPERTY_FS_BUCKET_NAME, "parquet-lifetime-test"},
+               {PROPERTY_FS_REGION, "us-east-1"},
+               {PROPERTY_FS_ACCESS_KEY_ID, "ak"},
+               {PROPERTY_FS_ACCESS_KEY_VALUE, "sk"},
+               {PROPERTY_FS_USE_SSL, "false"},
+               {PROPERTY_FS_USE_IAM, "false"},
+               {PROPERTY_FS_USE_VIRTUAL_HOST, "false"},
+               {PROPERTY_FS_S3_USE_CRT, "true"},
+               {PROPERTY_FS_REQUEST_TIMEOUT_MS, "5000"},
+               {PROPERTY_READER_PARQUET_PREBUFFER_LAZY, "false"},
+               {PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT, "1"},
+               {PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT, "2"}}) {
+        ASSERT_EQ(SetValue(properties, key.c_str(), value.c_str()), std::nullopt);
+      }
+      const auto props = std::make_shared<const api::Properties>(std::move(properties));
+      ASSERT_AND_ASSIGN(auto fs, FilesystemCache::getInstance().get(props));
+      std::weak_ptr<arrow::fs::FileSystem> cached_fs = fs;
+      ASSERT_AND_ASSIGN(auto metrics, std::dynamic_pointer_cast<Observable>(fs)->GetMetricsSources());
+      ASSERT_EQ(metrics.count(kTalonMetricsSource), 0);
+
+      auto stats = std::make_shared<FileSystemReadStats>();
+      auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs, stats);
+      // Use the real Parquet footer through the metadata-cache entry point. Only
+      // the two column ranges go over HTTP, so there is no footer GET to confuse
+      // with A or B and no dependency on a cloud service.
+      auto metadata = std::make_shared<parquet::ParquetFormatReader::MetaTrait::Metadata>();
+      metadata->path = "ranges.parquet";
+      metadata->file_schema = schema;
+      metadata->payload.fs = counting_fs;
+      metadata->payload.properties = props;
+      metadata->payload.parquet_metadata =
+          ::parquet::ParquetFileReader::Open(std::make_shared<arrow::io::BufferReader>(contents))->metadata();
+      ASSERT_EQ(metadata->payload.parquet_metadata->num_row_groups(), 1);
+      ASSERT_EQ(metadata->payload.parquet_metadata->RowGroup(0)->num_columns(), 2);
+      api::ColumnGroupFile file;
+      file.path = metadata->path;
+      file.properties[api::kPropertyFileSize] = std::to_string(contents->size());
+      ASSERT_AND_ASSIGN(auto reader,
+                        parquet::ParquetFormatReader::MetaTrait::create_from_metadata(metadata, file, schema, {}, ""));
+      std::weak_ptr<parquet::ParquetFormatReader> weak_reader = reader;
+      metadata.reset();
+      counting_fs.reset();
+      fs.reset();
+
+      arrow::ProxyMemoryPool read_pool(arrow::default_memory_pool());
+      std::weak_ptr<arrow::io::RandomAccessFile> weak_file;
+      std::vector<arrow::io::ReadRange> ranges;
+      folly::Baton<> submitted;
+      folly::Baton<> late_finished;
+      bool native_reads = true;
+      arrow::Status late_status;
+      bool late_contents_match = false;
+      stats->read_async = [&](std::shared_ptr<arrow::io::RandomAccessFile> input, int64_t position, int64_t nbytes) {
+        native_reads &= dynamic_cast<NonBlockingRandomAccessFile*>(input.get()) != nullptr;
+        weak_file = input;
+        ranges.push_back({position, nbytes});
+        // The observer retains neither input nor its Future. In particular it
+        // must not keep the cache's abandoned B buffer alive on behalf of CRT.
+        auto read = input->ReadAsync(arrow::io::IOContext(&read_pool), position, nbytes);
+        if (ranges.size() == 2) {
+          read.AddCallback([&, position, nbytes](const arrow::Result<std::shared_ptr<arrow::Buffer>>& result) {
+            late_status = result.status();
+            if (result.ok()) {
+              late_contents_match = (*result)->size() == nbytes &&
+                                    std::memcmp((*result)->data(), contents->data() + position, nbytes) == 0;
+            }
+            late_finished.post();
+          });
+          submitted.post();
+        }
+        return read;
+      };
+
+      folly::CPUThreadPoolExecutor executor(1);
+      // Mirror the task-owned reader in ColumnGroupReader: release it when the
+      // Parquet result is delivered, without keeping an extra test-side owner.
+      auto result = reader->read_with_range_async(0, kRows)
+                        .deferValue([reader](auto&& value) {
+                          (void)reader;
+                          return std::move(value);
+                        })
+                        .via(&executor);
+      reader.reset();
+      std::array<Tcp::socket, 2> sockets{Tcp::socket(server_context), Tcp::socket(server_context)};
+      std::array<int64_t, 2> positions{};
+      for (size_t i = 0; i < sockets.size(); ++i) {
+        acceptor.accept(sockets[i]);
+        boost::beast::flat_buffer buffer;
+        http::request<http::empty_body> request;
+        http::read(sockets[i], buffer, request);
+        ASSERT_EQ(request.method(), http::verb::get);
+        long long start = -1, end = -1;
+        ASSERT_EQ(std::sscanf(std::string(request[http::field::range]).c_str(), "bytes=%lld-%lld", &start, &end), 2);
+        positions[i] = start;
+        ASSERT_GE(end, start);
+      }
+      ASSERT_TRUE(submitted.try_wait_for(std::chrono::seconds(5)));
+      ASSERT_TRUE(native_reads);
+      ASSERT_EQ(ranges.size(), 2);
+      ASSERT_NE(positions[0], positions[1]);
+      const size_t a = positions[0] == ranges[0].offset ? 0 : 1;
+      const size_t b = 1 - a;
+      ASSERT_EQ(positions[a], ranges[0].offset);
+      ASSERT_EQ(positions[b], ranges[1].offset);
+      acceptor.close();
+      EXPECT_FALSE(result.isReady());
+      EXPECT_FALSE(late_finished.ready());
+
+      http::response<http::string_body> failure{http::status::forbidden, 11};
+      failure.body() = "<Error><Code>AccessDenied</Code><Message>range read failed</Message></Error>";
+      failure.prepare_payload();
+      failure.keep_alive(false);
+      http::write(sockets[a], failure);
+      sockets[a].close();
+      ASSERT_TRUE(result.wait(std::chrono::seconds(5)).isReady());
+      auto failed = std::move(result).get();
+      ASSERT_FALSE(failed.ok());
+      EXPECT_NE(failed.status().ToString().find("AccessDenied"), std::string::npos);
+      // A's error must escape CollectAsyncGenerator while B is still pending.
+      // Wait only for the finishing Folly continuation to release its captures.
+      const auto release_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+      while ((!weak_reader.expired() || !weak_file.expired()) && std::chrono::steady_clock::now() < release_deadline) {
+        std::this_thread::yield();
+      }
+      ASSERT_TRUE(weak_reader.expired());
+      ASSERT_TRUE(weak_file.expired());
+      // Drop weak references too: make_shared can otherwise retain the object's
+      // allocation after destruction and hide a stale-pointer access from ASan.
+      weak_reader.reset();
+      weak_file.reset();
+      ASSERT_FALSE(cached_fs.expired());
+      ASSERT_FALSE(late_finished.ready());
+      ASSERT_GT(read_pool.bytes_allocated(), 0) << "B lost its destination before the response arrived";
+
+      if (late_error) {
+        http::write(sockets[b], failure);
+      } else {
+        const auto& range = ranges[1];
+        http::response<http::string_body> response{http::status::partial_content, 11};
+        response.set(http::field::etag, "\"parquet-lifetime-test\"");
+        response.set(http::field::content_range, "bytes " + std::to_string(range.offset) + "-" +
+                                                     std::to_string(range.offset + range.length - 1) + "/" +
+                                                     std::to_string(contents->size()));
+        response.body().assign(reinterpret_cast<const char*>(contents->data() + range.offset), range.length);
+        response.prepare_payload();
+        response.keep_alive(false);
+        http::write(sockets[b], response);
+      }
+      sockets[b].close();
+      ASSERT_TRUE(late_finished.try_wait_for(std::chrono::seconds(5)));
+      if (late_error) {
+        EXPECT_FALSE(late_status.ok());
+        EXPECT_NE(late_status.ToString().find("AccessDenied"), std::string::npos);
+      } else {
+        ASSERT_STATUS_OK(late_status);
+        EXPECT_TRUE(late_contents_match);
+      }
+      const auto buffer_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+      while (read_pool.bytes_allocated() != 0 && std::chrono::steady_clock::now() < buffer_deadline) {
+        std::this_thread::yield();
+      }
+      EXPECT_EQ(read_pool.bytes_allocated(), 0) << "Abandoned range buffer was not released after CRT completion";
+    };
+    // Bound native deadlocks without leaving a stuck CRT callback in the test runner.
+    EXPECT_EXIT((::alarm(30), run_child(), ::_exit(::testing::Test::HasFailure() ? 1 : 0)),
+                ::testing::ExitedWithCode(0), "");
+  }
+#endif
 }
 
 TEST_P(FormatReaderTest, ParquetAsyncReadRejectsInlineExecutor) {
@@ -1786,36 +2029,29 @@ TEST_P(FormatReaderTest, S3FilesystemReaderFailureShouldPropagate) {
 }
 #endif
 
-TEST_P(FormatReaderTest, ParquetReadWithRangeReaderOutlivesFormatReader) {
+TEST_P(FormatReaderTest, ReadWithRangeReaderOutlivesFormatReader) {
   std::string format = GetParam();
-  if (format != LOON_FORMAT_PARQUET) {
-    GTEST_SKIP() << "Test parquet only.";
+  if (format == LOON_FORMAT_LANCE_TABLE && IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
   }
 
-  auto parquet_writer_props = ::parquet::WriterProperties::Builder()
-                                  .compression(::parquet::Compression::ZSTD)
-                                  ->enable_dictionary()
-                                  ->enable_statistics()
-                                  ->build();
-
-  const auto file_path = base_path_ + "/range_outlives_reader.parquet";
-  ASSERT_AND_ASSIGN(auto sink, fs_->OpenOutputStream(file_path));
-  ASSERT_AND_ASSIGN(auto parquet_writer, ::parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(),
-                                                                            sink, parquet_writer_props));
-  ASSERT_STATUS_OK(parquet_writer->NewBufferedRowGroup());
-  ASSERT_STATUS_OK(parquet_writer->WriteRecordBatch(*test_batch_));
-  ASSERT_STATUS_OK(parquet_writer->Close());
-  ASSERT_STATUS_OK(sink->Close());
+  // The range reader must keep its backend state alive for every format, not
+  // only Parquet.
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer =
+      Writer::create(base_path_, schema_, std::move(policy), std::make_shared<const api::Properties>(properties_));
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto column_groups, writer->close());
+  ASSERT_FALSE(column_groups->empty());
+  ASSERT_FALSE(column_groups->at(0)->files.empty());
+  ASSERT_AND_ASSIGN(auto id_schema, CreateTestSchema(std::array<bool, 4>{true, false, false, false}));
 
   std::shared_ptr<arrow::RecordBatchReader> rb_reader;
   {
     std::shared_ptr<FormatReader> format_reader;
-    ASSERT_AND_ASSIGN(
-        format_reader,
-        FormatReader::create(
-            schema_, LOON_FORMAT_PARQUET,
-            api::ColumnGroupFile{.path = file_path, .start_index = 0, .end_index = test_batch_->num_rows()},
-            std::make_shared<const api::Properties>(properties_), std::vector<std::string>{"id"}, nullptr));
+    ASSERT_AND_ASSIGN(format_reader, FormatReader::create(id_schema, format, column_groups->at(0)->files[0],
+                                                          std::make_shared<const api::Properties>(properties_),
+                                                          std::vector<std::string>{"id"}, nullptr));
     ASSERT_AND_ASSIGN(rb_reader, format_reader->read_with_range(1, 4));
   }
 
