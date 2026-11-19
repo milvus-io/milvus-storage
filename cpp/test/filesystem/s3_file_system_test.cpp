@@ -63,6 +63,7 @@
 #include "milvus-storage/filesystem/s3/s3_auth_signer.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
+#include "milvus-storage/filesystem/gcp/gcp_filesystem_producer.h"
 #include "milvus-storage/filesystem/util_internal.h"
 #include "milvus-storage/filesystem/fs.h"
 
@@ -225,6 +226,42 @@ class S3UnitTest : public ::testing::Test {
     ASSERT_STATUS_OK(S3FileSystemProducer(ArrowFileSystemConfig{}).InitS3());
   }
 };
+
+class S3RequestTimeoutTest : public S3UnitTest {
+  protected:
+  static arrow::Result<S3Options> CreateOptions(const ArrowFileSystemConfig& config) {
+    if (config.cloud_provider == kCloudProviderGCP) {
+      return GcpFileSystemProducer(config).CreateS3Options(false);
+    }
+    return S3FileSystemProducer(config).CreateS3Options();
+  }
+};
+
+TEST_F(S3RequestTimeoutTest, PreservesMillisecondsInClientConfiguration) {
+  ArrowFileSystemConfig config;
+  config.address = "127.0.0.1:1";
+  config.region = "us-east-1";
+  config.access_key_id = "test-key";
+  config.access_key_value = "test-secret";
+  const std::vector<int64_t> timeout_cases = {-1, 0, 500, 1500, 2000, config.request_timeout_ms};
+  for (const auto& provider : {kCloudProviderAWS, kCloudProviderGCP}) {
+    config.cloud_provider = provider;
+    for (const int64_t timeout_ms : timeout_cases) {
+      SCOPED_TRACE(::testing::Message() << "provider=" << provider << ", timeout_ms=" << timeout_ms);
+      config.request_timeout_ms = timeout_ms;
+      ASSERT_AND_ASSIGN(auto options, CreateOptions(config));
+      const auto expected_ms = timeout_ms > 0 ? timeout_ms : DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC * 1000;
+
+      ClientBuilder<S3Client> sdk_builder(options);
+      ASSERT_STATUS_OK(sdk_builder.PrepareClientConfig(std::nullopt));
+      EXPECT_EQ(sdk_builder.config().requestTimeoutMs, expected_ms);
+
+      ClientBuilder<Aws::S3Crt::S3CrtClient> crt_builder(options);
+      ASSERT_STATUS_OK(crt_builder.PrepareClientConfig(std::nullopt));
+      EXPECT_EQ(crt_builder.config().requestTimeoutMs, expected_ms);
+    }
+  }
+}
 
 // Exercise the real SDK HTTP/error parser with controlled read and upload responses.
 // Async server operations let teardown stop a failed test.
