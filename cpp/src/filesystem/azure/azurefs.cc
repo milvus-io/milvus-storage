@@ -177,7 +177,6 @@ std::optional<milvus_storage::ExtendStatusCode> ClassifyAzureError(
   }
 }
 
-namespace {
 std::string_view AzureRequestId(const Azure::Core::RequestFailedException& exception) {
   if (!exception.RequestId.empty()) {
     return exception.RequestId;
@@ -191,7 +190,6 @@ std::string_view AzureRequestId(const Azure::Core::RequestFailedException& excep
   }
   return {};
 }
-}  // namespace
 
 Status WithAzureRequestId(Status status, const Azure::Core::RequestFailedException& exception) {
   const auto request_id = AzureRequestId(exception);
@@ -201,25 +199,6 @@ Status WithAzureRequestId(Status status, const Azure::Core::RequestFailedExcepti
   return status.WithMessage(status.message(), " [request_id:", request_id, "]");
 }
 
-Status AzureExceptionToStatus(const Azure::Core::RequestFailedException& exception, std::string_view prefix) {
-  // StatusCode alone cannot distinguish transport failures from failed copies.
-  const bool transport_failure = dynamic_cast<const Azure::Core::Http::TransportException*>(&exception) != nullptr;
-  const auto code = ClassifyAzureError(static_cast<int>(exception.StatusCode), exception.ErrorCode, transport_failure);
-  std::stringstream message;
-  message << prefix << " Azure Error: [" << exception.ErrorCode << "] " << exception.what();
-  if (exception.StatusCode != Azure::Core::Http::HttpStatusCode::None) {
-    message << " http_status=" << static_cast<int>(exception.StatusCode);
-  }
-  const std::string_view original_message(exception.what());
-  if (!exception.Message.empty() && original_message.find(exception.Message) == std::string_view::npos) {
-    message << " service_message=" << exception.Message;
-  }
-  auto status = WithAzureRequestId(Status::IOError(message.str()), exception);
-  if (!code.has_value()) {
-    return status;
-  }
-  return milvus_storage::MakeExtendError(*code, status.message(), status.message());
-}
 }  // namespace internal
 // --- End namespace bridge ---
 
@@ -452,9 +431,8 @@ bool AzureOptions::Equals(const AzureOptions& other) const {
   return false;
 }
 
-namespace {
-std::string BuildBaseUrl(const std::string& scheme, const std::string& authority,
-                         const std::string& account_name) {
+static std::string BuildBaseUrl(const std::string& scheme, const std::string& authority,
+                                const std::string& account_name) {
   std::string url;
   url += scheme + "://";
   if (!authority.empty()) {
@@ -482,9 +460,25 @@ static std::string DiagnosticUrl(std::string url) {
 
 template <typename... PrefixArgs>
 Status ExceptionToStatus(const Azure::Core::RequestFailedException& exception, PrefixArgs&&... prefix_args) {
-  std::stringstream ss;
-  (ss << ... << std::forward<PrefixArgs>(prefix_args));
-  return internal::AzureExceptionToStatus(exception, ss.str());
+  // StatusCode alone cannot distinguish transport failures from failed copies.
+  const bool transport_failure = dynamic_cast<const Http::TransportException*>(&exception) != nullptr;
+  const auto code =
+      internal::ClassifyAzureError(static_cast<int>(exception.StatusCode), exception.ErrorCode, transport_failure);
+  std::stringstream message;
+  (message << ... << std::forward<PrefixArgs>(prefix_args));
+  message << " Azure Error: [" << exception.ErrorCode << "] " << exception.what();
+  if (exception.StatusCode != Http::HttpStatusCode::None) {
+    message << " http_status=" << static_cast<int>(exception.StatusCode);
+  }
+  const std::string_view original_message(exception.what());
+  if (!exception.Message.empty() && original_message.find(exception.Message) == std::string_view::npos) {
+    message << " service_message=" << exception.Message;
+  }
+  const auto status = internal::WithAzureRequestId(Status::IOError(message.str()), exception);
+  if (!code.has_value()) {
+    return status;
+  }
+  return milvus_storage::MakeExtendError(*code, status.message(), status.message());
 }
 
 template <typename... PrefixArgs>
@@ -498,7 +492,10 @@ Status ExceptionToStatus(const std::exception& exception, PrefixArgs&&... prefix
   // Typed SDK failures are handled before this last-resort boundary fallback.
   return Status::UnknownError(std::forward<PrefixArgs>(prefix_args)..., " Unexpected exception: ", exception.what());
 }
-}  // namespace
+
+#ifdef BUILD_GTEST
+template Status ExceptionToStatus<const char*>(const Azure::Core::RequestFailedException&, const char*&&);
+#endif
 
 std::string AzureOptions::AccountBlobUrl(const std::string& account_name) const {
   return BuildBaseUrl(blob_storage_scheme, blob_storage_authority, account_name);

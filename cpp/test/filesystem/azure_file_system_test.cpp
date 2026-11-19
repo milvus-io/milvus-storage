@@ -43,6 +43,10 @@
 
 namespace milvus_storage::fs {
 
+template <typename... PrefixArgs>
+arrow::Status ExceptionToStatus(const Azure::Core::RequestFailedException&, PrefixArgs&&...);
+extern template arrow::Status ExceptionToStatus<const char*>(const Azure::Core::RequestFailedException&, const char*&&);
+
 TEST(AzureErrorRequestIdTest, SDKRequestId) {
   auto response =
       std::make_unique<Azure::Core::Http::RawResponse>(1, 1, Azure::Core::Http::HttpStatusCode::Forbidden, "Forbidden");
@@ -51,7 +55,7 @@ TEST(AzureErrorRequestIdTest, SDKRequestId) {
   Azure::Core::RequestFailedException exception(response);
   exception.RequestId = "sdk-request-id";
   exception.ErrorCode = "AuthorizationFailure";
-  const auto status = internal::AzureExceptionToStatus(exception, "HeadBlob");
+  const auto status = ExceptionToStatus<const char*>(exception, "HeadBlob");
   EXPECT_TRUE(status.IsIOError());
   EXPECT_NE(status.message().find("request_id:sdk-request-id"), std::string::npos);
   EXPECT_EQ(status.message().find("header-request-id"), std::string::npos);
@@ -72,7 +76,7 @@ TEST(AzureErrorRequestIdTest, ResponseHeadersForClassifiedAndUnclassifiedErrors)
     Azure::Core::RequestFailedException exception(response);
     // Exercise the fallback independently of SDK header marshalling.
     exception.RequestId.clear();
-    const auto status = internal::AzureExceptionToStatus(exception, "HeadBlob");
+    const auto status = ExceptionToStatus<const char*>(exception, "HeadBlob");
     EXPECT_TRUE(status.IsIOError());
     EXPECT_NE(status.message().find("request_id:azure-header-request-id"), std::string::npos);
     EXPECT_EQ(status.message().find("client-id-not-server-id"), std::string::npos);
@@ -102,14 +106,14 @@ TEST(AzureErrorRequestIdTest, MappedNotFoundPreservesErrno) {
 
 TEST(AzureErrorRequestIdTest, MissingRequestId) {
   Azure::Core::RequestFailedException exception("client setup failed");
-  const auto status = internal::AzureExceptionToStatus(exception, "HeadBlob");
+  const auto status = ExceptionToStatus<const char*>(exception, "HeadBlob");
   EXPECT_EQ(status.message(), "HeadBlob Azure Error: [] client setup failed");
   EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
 }
 
 TEST(AzureErrorRequestIdTest, TransportErrorWithoutResponse) {
   Azure::Core::Http::TransportException exception("connection refused");
-  const auto status = internal::AzureExceptionToStatus(exception, "HeadBlob");
+  const auto status = ExceptionToStatus<const char*>(exception, "HeadBlob");
   EXPECT_NE(status.message().find("connection refused"), std::string::npos);
   EXPECT_EQ(status.message().find("request_id:"), std::string::npos);
   const auto detail = ExtendStatusDetail::UnwrapStatus(status);
