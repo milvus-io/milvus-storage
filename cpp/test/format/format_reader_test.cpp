@@ -22,6 +22,7 @@
 #include <numeric>
 #include <random>
 #include <thread>
+#include <utility>
 
 #include <arrow/api.h>
 #include <arrow/extension_type.h>
@@ -654,7 +655,10 @@ TEST_P(FormatReaderTest, ParquetByteTasksProgressWhileEarlierReadsArePending) {
     GTEST_SKIP() << "Test parquet only.";
   }
   ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, 0, false, 1000, 32));
-  for (auto compression : {::parquet::Compression::UNCOMPRESSED, ::parquet::Compression::ZSTD}) {
+  for (const auto& [compression, fail_first] :
+       {std::pair{::parquet::Compression::UNCOMPRESSED, false}, std::pair{::parquet::Compression::ZSTD, false},
+        std::pair{::parquet::Compression::UNCOMPRESSED, true}}) {
+    SCOPED_TRACE(fail_first);
     SCOPED_TRACE(static_cast<int>(compression));
     const auto path = base_path_ + "/async_ranges.parquet";
     auto writer_properties = ::parquet::WriterProperties::Builder().compression(compression)->build();
@@ -720,29 +724,64 @@ TEST_P(FormatReaderTest, ParquetByteTasksProgressWhileEarlierReadsArePending) {
                     GetValueNoError<uint64_t>(properties, PROPERTY_READER_ASYNC_TASK_SPLIT_SIZE_BYTES));
     ASSERT_EQ(tasks.size(), 4);
     std::vector<folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>>> futures;
+    auto failed_task = std::make_shared<folly::Baton<>>();
+    std::vector<std::weak_ptr<FormatReader>> task_readers;
     for (const auto& task : tasks) {
       ASSERT_AND_ASSIGN(auto task_reader, reader->clone_reader());
-      futures.push_back(task_reader->read_with_range_async(task.range_start, task.range_end));
+      task_readers.push_back(task_reader);
+      futures.push_back(
+          task_reader->read_with_range_async(task.range_start, task.range_end).deferValue([failed_task](auto&& result) {
+            if (!result.ok()) {
+              failed_task->post();
+            }
+            return std::move(result);
+          }));
     }
     auto result = folly::collectAll(std::move(futures)).via(&executor);
     EXPECT_TRUE(later_requested->try_wait_for(std::chrono::seconds(5)));
     EXPECT_FALSE(result.isReady());
-    second.MarkFinished();
-    EXPECT_FALSE(result.isReady());
-    first.MarkFinished();
-    auto results = std::move(result).get();
-    std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
-    for (auto& task_result : results) {
-      ASSERT_FALSE(task_result.hasException());
-      ASSERT_AND_ASSIGN(auto batch_reader, std::move(task_result.value()));
-      ASSERT_AND_ASSIGN(auto task_batches, batch_reader->ToRecordBatches());
-      batches.insert(batches.end(), task_batches.begin(), task_batches.end());
+    if (fail_first) {
+      // Each clone owns a separate lazy row-group read. Release the last format
+      // reader while the first two ranges are held by the test filesystem.
+      reader.reset();
+      for (const auto& task_reader : task_readers) {
+        EXPECT_TRUE(task_reader.expired());
+      }
+      first.MarkFinished(arrow::Status::IOError("injected row-group read failure"));
+      EXPECT_TRUE(failed_task->try_wait_for(std::chrono::seconds(5)));
+      EXPECT_FALSE(second.is_finished());
+      EXPECT_FALSE(result.isReady());
+      second.MarkFinished();
+    } else {
+      second.MarkFinished();
+      EXPECT_FALSE(result.isReady());
+      first.MarkFinished();
     }
-    ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatches(batches));
-    ASSERT_AND_ASSIGN(auto actual, table->CombineChunksToBatch());
-    ASSERT_EQ(actual->num_rows(), 998);
-    ASSERT_EQ(actual->num_columns(), 1);
-    EXPECT_TRUE(actual->column(0)->Equals(*batch->GetColumnByName("vector")->Slice(1, 998)));
+    auto results = std::move(result).get();
+    ASSERT_EQ(results.size(), tasks.size());
+    size_t failures = 0;
+    int64_t rows_read = 0;
+    size_t index = 0;
+    for (auto& task_result : results) {
+      const auto& task = tasks[index++];
+      ASSERT_FALSE(task_result.hasException());
+      auto read = std::move(task_result.value());
+      if (!read.ok()) {
+        ASSERT_TRUE(fail_first) << read.status().ToString();
+        EXPECT_NE(read.status().ToString().find("injected row-group read failure"), std::string::npos);
+        ++failures;
+        continue;
+      }
+      ASSERT_AND_ASSIGN(auto table, (*read)->ToTable());
+      ASSERT_EQ(table->num_columns(), 1);
+      rows_read += table->num_rows();
+      EXPECT_TRUE(table->column(0)->Equals(arrow::ChunkedArray(
+          batch->GetColumnByName("vector")->Slice(task.range_start, task.range_end - task.range_start))));
+    }
+    EXPECT_EQ(failures, static_cast<size_t>(fail_first));
+    if (!fail_first) {
+      EXPECT_EQ(rows_read, 998);
+    }
     EXPECT_EQ(reads->load(), 4);
   }
 }
@@ -1337,47 +1376,43 @@ TEST_P(FormatReaderTest, S3FilesystemReaderFailureShouldPropagate) {
 }
 #endif
 
-TEST_P(FormatReaderTest, ParquetReadWithRangeReaderOutlivesFormatReader) {
+TEST_P(FormatReaderTest, ReadWithRangeReaderOutlivesFormatReader) {
   std::string format = GetParam();
-  if (format != LOON_FORMAT_PARQUET) {
-    GTEST_SKIP() << "Test parquet only.";
+  if (format == LOON_FORMAT_LANCE_TABLE && IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
   }
 
-  auto parquet_writer_props = ::parquet::WriterProperties::Builder()
-                                  .compression(::parquet::Compression::ZSTD)
-                                  ->enable_dictionary()
-                                  ->enable_statistics()
-                                  ->build();
+  // The range reader must keep its backend state alive for every format, not
+  // only Parquet.
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto column_groups, writer->close());
+  ASSERT_FALSE(column_groups->empty());
+  ASSERT_FALSE(column_groups->at(0)->files.empty());
+  ASSERT_AND_ASSIGN(auto id_schema, CreateTestSchema(std::array<bool, 4>{true, false, false, false}));
 
-  const auto file_path = base_path_ + "/range_outlives_reader.parquet";
-  ASSERT_AND_ASSIGN(auto sink, fs_->OpenOutputStream(file_path));
-  ASSERT_AND_ASSIGN(auto parquet_writer, ::parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(),
-                                                                            sink, parquet_writer_props));
-  ASSERT_STATUS_OK(parquet_writer->NewBufferedRowGroup());
-  ASSERT_STATUS_OK(parquet_writer->WriteRecordBatch(*test_batch_));
-  ASSERT_STATUS_OK(parquet_writer->Close());
-  ASSERT_STATUS_OK(sink->Close());
-
-  std::shared_ptr<arrow::RecordBatchReader> rb_reader;
-  {
-    std::shared_ptr<FormatReader> format_reader;
-    ASSERT_AND_ASSIGN(format_reader, FormatReader::create(
-                                         schema_, LOON_FORMAT_PARQUET,
-                                         api::ColumnGroupFile{
-                                             .path = file_path, .start_index = 0, .end_index = test_batch_->num_rows()},
-                                         properties_, std::vector<std::string>{"id"}, nullptr));
-    ASSERT_AND_ASSIGN(rb_reader, format_reader->read_with_range(1, 4));
+  folly::CPUThreadPoolExecutor executor(1);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(id_schema, format, column_groups->at(0)->files[0], properties_,
+                                                        std::vector<std::string>{"id"}, nullptr));
+    std::weak_ptr<FormatReader> weak_reader = reader;
+    std::shared_ptr<arrow::RecordBatchReader> batches;
+    if (async) {
+      auto future = reader->read_with_range_async(1, 4).via(&executor);
+      reader.reset();
+      ASSERT_AND_ASSIGN(batches, std::move(future).get());
+    } else {
+      ASSERT_AND_ASSIGN(batches, reader->read_with_range(1, 4));
+      reader.reset();
+    }
+    ASSERT_TRUE(weak_reader.expired());
+    ASSERT_AND_ASSIGN(auto table, batches->ToTable());
+    ASSERT_EQ(table->num_columns(), 1);
+    ASSERT_EQ(table->num_rows(), 3);
+    EXPECT_TRUE(table->column(0)->Equals(arrow::ChunkedArray(test_batch_->column(0)->Slice(1, 3))));
   }
-
-  ASSERT_AND_ASSIGN(auto rbs, rb_reader->ToRecordBatches());
-  ASSERT_AND_ASSIGN(auto rb, arrow::ConcatenateRecordBatches(rbs));
-  ASSERT_EQ(3, rb->num_rows());
-  ASSERT_EQ(1, rb->num_columns());
-  auto id_array = std::dynamic_pointer_cast<arrow::Int64Array>(rb->column(0));
-  ASSERT_NE(nullptr, id_array);
-  EXPECT_EQ(1, id_array->Value(0));
-  EXPECT_EQ(2, id_array->Value(1));
-  EXPECT_EQ(3, id_array->Value(2));
 }
 
 TEST_P(FormatReaderTest, ParquetCreateFromMetadataReappliesProjection) {

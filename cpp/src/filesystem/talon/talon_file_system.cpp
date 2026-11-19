@@ -131,9 +131,8 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
       return arrow::Future<int64_t>::MakeFinished(origin_file->ReadAt(position, nbytes, out));
     }
 
-    return EnsureReaderAsync().Then([position, nbytes, out, origin_file = state_->origin_file.get(),
-                                     metrics =
-                                         state_->filesystem->metrics](const Reader& reader) -> arrow::Future<int64_t> {
+    return EnsureReaderAsync().Then([position, nbytes, out, state = state_, metrics = state_->filesystem->metrics](
+                                        const Reader& reader) -> arrow::Future<int64_t> {
       auto read_size = GetReadSize(position, nbytes, reader->KnownSize());
       if (!read_size.ok()) {
         return arrow::Future<int64_t>::MakeFinished(read_size.status());
@@ -146,8 +145,7 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
       metrics->IncrementReadCount();
       // A failed Talon read can have written a prefix. Retry the entire range.
       return WithOriginFallback(
-          reader->ReadAtAsync(static_cast<uint64_t>(position), static_cast<uint64_t>(length), out), origin_file,
-          metrics,
+          reader->ReadAtAsync(static_cast<uint64_t>(position), static_cast<uint64_t>(length), out), state, metrics,
           [position, length, out](NonBlockingRandomAccessFile& file) {
             return file.ReadAtAsyncInto(position, length, out);
           },
@@ -192,7 +190,7 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
       return state_->origin_file->ReadAsync(io_context, position, nbytes);
     }
     return EnsureReaderAsync().Then(
-        [position, nbytes, pool = io_context.pool(), origin_file = state_->origin_file.get(),
+        [position, nbytes, pool = io_context.pool(), state = state_,
          metrics = state_->filesystem->metrics](const Reader& reader) -> arrow::Future<std::shared_ptr<arrow::Buffer>> {
           // A cold open has no size yet. Resolve and clamp before allocating,
           // including when the caller supplies a large read extending past EOF.
@@ -213,8 +211,8 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
           auto* const out = buffer->mutable_data();
           metrics->IncrementReadCount();
           return WithOriginFallback(
-                     reader->ReadAtAsync(static_cast<uint64_t>(position), static_cast<uint64_t>(length), out),
-                     origin_file, metrics,
+                     reader->ReadAtAsync(static_cast<uint64_t>(position), static_cast<uint64_t>(length), out), state,
+                     metrics,
                      [position, length, out](NonBlockingRandomAccessFile& file) {
                        return file.ReadAtAsyncInto(position, length, out);
                      },
@@ -299,15 +297,17 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
            (config.talon_mode == TalonMode::SmallReads && requested_bytes <= config.talon_small_read_threshold);
   }
 
+  struct ReaderState;
+
   /// Retry a failed Talon operation once through the cached origin file.
   /// @ReadOriginAsync takes NonBlockingRandomAccessFile& and returns Future<int64_t>.
   /// @ReadOrigin takes arrow::io::RandomAccessFile& and returns Result<int64_t>.
   /// Use the async callback when supported, otherwise invoke the blocking callback.
   /// Both callbacks repeat the same operation; reads must retry the full range.
-  /// Keep the file open and destination buffer valid until the returned future completes.
+  /// Retaining ReaderState keeps the origin file open until the future completes.
   template <typename ReadOriginAsync, typename ReadOrigin>
   static arrow::Future<int64_t> WithOriginFallback(arrow::Future<int64_t> future,
-                                                   arrow::io::RandomAccessFile* const origin_file,
+                                                   std::shared_ptr<ReaderState> state,
                                                    const std::shared_ptr<FilesystemMetrics>& metrics,
                                                    ReadOriginAsync read_origin_async,
                                                    ReadOrigin read_origin) {
@@ -316,16 +316,20 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
           metrics->IncrementReadBytes(value);
           return value;
         },
-        [metrics, origin_file, read_origin_async = std::move(read_origin_async),
+        // An in-flight Talon read can outlive the TalonInputFile that issued it.
+        // Keep ReaderState (and therefore the open origin file) alive until the
+        // fallback finishes. Capturing only the origin file would keep it
+        // allocated, but ReaderState's destructor would already have closed it.
+        [metrics, state = std::move(state), read_origin_async = std::move(read_origin_async),
          read_origin = std::move(read_origin)](const arrow::Status& talon_error) -> arrow::Future<int64_t> {
           // Record the Talon failure before fallback; origin accounts for its own I/O.
           metrics->IncrementFailedCount();
           arrow::Future<int64_t> origin_future;
-          if (auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(origin_file)) {
+          if (auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(state->origin_file.get())) {
             origin_future = read_origin_async(*async_file);
           } else {
             // Origins without native async support still work through their blocking API.
-            origin_future = arrow::Future<int64_t>::MakeFinished(read_origin(*origin_file));
+            origin_future = arrow::Future<int64_t>::MakeFinished(read_origin(*state->origin_file));
           }
           // Native CRT requests own their I/O state. Keep origin owners out of
           // their completion callbacks to avoid destroying a CRT client there.

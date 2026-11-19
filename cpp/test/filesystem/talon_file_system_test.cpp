@@ -59,6 +59,22 @@
 #include "milvus-storage/writer.h"
 #include "test_env.h"
 
+#if defined(__SANITIZE_ADDRESS__)
+#define MILVUS_TEST_WITH_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define MILVUS_TEST_WITH_ASAN 1
+#endif
+#endif
+
+#ifdef MILVUS_TEST_WITH_ASAN
+// The shared test binary reports unrelated libc++ container-annotation
+// overflows. Keep ASan focused on the use-after-free this regression
+// reproduces. The same can be requested at run time with
+// ASAN_OPTIONS=detect_container_overflow=0.
+extern "C" const char* __asan_default_options() { return "detect_container_overflow=0"; }
+#endif
+
 namespace milvus_storage::talon::internal {
 arrow::Result<int64_t> ToArrowIoResult(const char* operation,
                                        int32_t error_code,
@@ -2609,6 +2625,215 @@ TEST_F(TalonIntegrationTest, ParquetReadThroughNormalStorageApi) {
   ASSERT_STATUS_OK(ValidateRowAlignment(result));
   ASSERT_STATUS_OK(batch_reader->ReadNext(&result));
   EXPECT_EQ(result, nullptr);
+}
+
+namespace {
+
+// Fake Talon coordinator for the async UAF regression: answers discovery with
+// one worker at this listener, then holds the first data read until the test
+// releases it. This makes the Talon read failure deterministic relative to
+// destruction of the TalonInputFile.
+class HoldingTalonCoordinator {
+  public:
+  HoldingTalonCoordinator() {
+    listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (listener_ < 0) {
+      throw std::runtime_error("fake Talon coordinator socket failed");
+    }
+    const int one = 1;
+    (void)::setsockopt(listener_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (::bind(listener_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0 ||
+        ::listen(listener_, 8) != 0) {
+      ::close(listener_);
+      throw std::runtime_error("fake Talon coordinator bind/listen failed");
+    }
+    socklen_t size = sizeof(address);
+    if (::getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &size) != 0) {
+      ::close(listener_);
+      throw std::runtime_error("fake Talon coordinator getsockname failed");
+    }
+    port_ = ntohs(address.sin_port);
+    thread_ = std::thread([this] { Serve(); });
+  }
+
+  ~HoldingTalonCoordinator() {
+    Release();
+    // Wake a coordinator thread parked in accept() before joining it.
+    if (listener_ >= 0) {
+      (void)::shutdown(listener_, SHUT_RDWR);
+      ::close(listener_);
+      listener_ = -1;
+    }
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+
+  HoldingTalonCoordinator(const HoldingTalonCoordinator&) = delete;
+  HoldingTalonCoordinator& operator=(const HoldingTalonCoordinator&) = delete;
+
+  [[nodiscard]] std::string Address() const { return "127.0.0.1:" + std::to_string(port_); }
+  [[nodiscard]] bool WaitForRead(double seconds) const { return read_received_.Wait(seconds); }
+  void Release() { release_.MarkFinished(); }
+
+  private:
+  static bool RecvAll(int fd, uint8_t* data, size_t size) {
+    size_t offset = 0;
+    while (offset < size) {
+      const auto received = ::recv(fd, data + offset, size - offset, 0);
+      if (received <= 0) {
+        return false;
+      }
+      offset += static_cast<size_t>(received);
+    }
+    return true;
+  }
+
+  void Serve() {
+    for (;;) {
+      const int connection = ::accept(listener_, nullptr, nullptr);
+      if (connection < 0) {
+        return;
+      }
+      std::array<uint8_t, 16> header{};
+      if (!RecvAll(connection, header.data(), header.size())) {
+        ::close(connection);
+        continue;
+      }
+      uint32_t payload_size = 0;
+      std::memcpy(&payload_size, header.data() + 12, sizeof(payload_size));
+      payload_size = ntohl(payload_size);
+      std::vector<uint8_t> payload(payload_size);
+      if (payload_size > 0 && !RecvAll(connection, payload.data(), payload.size())) {
+        ::close(connection);
+        continue;
+      }
+      size_t metadata_end = 0;
+      if (header[2] >= 2) {
+        if (payload.size() < 2) {
+          ::close(connection);
+          continue;
+        }
+        metadata_end = 2 + (static_cast<size_t>(payload[0]) << 8) + payload[1];
+      }
+      const bool membership = header[3] == 0 && payload.size() >= metadata_end + 3 && payload[metadata_end + 2] == 4;
+      std::vector<uint8_t> body;
+      if (membership) {
+        // Same membership payload as TalonBrokerRequestTest::CaptureRequest.
+        body = {6, 0, 5, 0, 0, 0};
+        auto append_u64 = [&body](uint64_t value) {
+          for (int i = 0; i < 8; ++i) {
+            body.push_back(static_cast<uint8_t>(value >> (8 * i)));
+          }
+        };
+        auto append_string = [&body, &append_u64](const std::string& value) {
+          append_u64(value.size());
+          body.insert(body.end(), value.begin(), value.end());
+        };
+        append_u64(1);      // topology token
+        append_u64(1);      // state token
+        append_u64(30000);  // discovery freshness
+        append_u64(1);      // worker count
+        append_string("worker");
+        body.insert(body.end(), {0, 0, 2, 0, 0, 0});  // no zone, not retired, Serving
+        append_string("instance");
+        append_string(Address());
+      } else {
+        // Data read: hold it open so the test can drop the TalonInputFile.
+        if (!read_received_.is_finished()) {
+          read_received_.MarkFinished();
+        }
+        release_.Wait();
+        ::close(connection);
+        continue;
+      }
+      std::vector<uint8_t> response(header.begin(), header.end());
+      const uint32_t response_size = htonl(static_cast<uint32_t>(body.size()));
+      std::memcpy(response.data() + 12, &response_size, sizeof(response_size));
+      response.insert(response.end(), body.begin(), body.end());
+      (void)::send(connection, response.data(), response.size(), 0);
+      ::close(connection);
+    }
+  }
+
+  int listener_ = -1;
+  int port_ = 0;
+  std::thread thread_;
+  arrow::Future<> read_received_ = arrow::Future<>::Make();
+  arrow::Future<> release_ = arrow::Future<>::Make();
+};
+
+}  // namespace
+
+// Regression test for the Talon async read use-after-free.
+//
+// TalonInputFile::ReadAtAsyncInto() used to capture the origin file as a raw
+// pointer (`state_->origin_file.get()`). If the TalonInputFile was destroyed
+// while the Talon read was in flight, ReaderState and the origin file were
+// released, and the WithOriginFallback error continuation dereferenced the
+// freed origin (SIGSEGV in dyn_cast_get_derived_info).
+//
+// The read now retains ReaderState until the fallback finishes, so the origin
+// file stays open and the read fails cleanly instead of crashing.
+TEST_F(TalonFileSystemServiceFreeTest, InFlightTalonReadKeepsOriginAliveAfterFileDestruction) {
+  HoldingTalonCoordinator coordinator;
+  auto config = Config();
+  config.talon_coordinator = coordinator.Address();
+
+  auto origin = std::make_shared<RecordingFileSystem>("origin");
+  auto origin_file = std::make_shared<MetadataInputFile>();
+  // Hold lazy initialization open until the TalonInputFile has been dropped.
+  auto pending_metadata = arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>>::Make();
+  origin_file->async_result = pending_metadata;
+  // The fallback must fail so the test can observe that it ran at all.
+  origin_file->read_status = arrow::Status::IOError("origin read rejected");
+  std::atomic<bool> origin_destroyed{false};
+  origin_file->on_destroy = [&origin_destroyed] { origin_destroyed.store(true, std::memory_order_release); };
+  origin->input_file = origin_file;
+
+  ASSERT_AND_ASSIGN(auto fs, Wrap(config, origin));
+  ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile("prefix/object"));
+  auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(file.get());
+  ASSERT_NE(async_file, nullptr);
+
+  uint8_t out[3] = {};
+  auto pending_read = async_file->ReadAtAsyncInto(1, 3, out);
+
+  // Drop every strong reference except ReaderState, which the pending
+  // initialization task still holds.
+  origin->input_file.reset();
+  origin_file.reset();
+  file.reset();
+  EXPECT_FALSE(origin_destroyed.load(std::memory_order_acquire));
+
+  // Finish initialization. It opens the Talon reader, submits the data read,
+  // then releases ReaderState and therefore the origin file.
+  pending_metadata.MarkFinished(std::shared_ptr<const arrow::KeyValueMetadata>(
+      arrow::key_value_metadata({"ETag", "Content-Length"}, {"\"origin-etag\"", "7"})));
+
+  ASSERT_TRUE(coordinator.WaitForRead(5.0)) << "Talon data read was never submitted";
+  // The in-flight read retains ReaderState, so the origin file must still be
+  // alive even though the TalonInputFile has been destroyed.
+  EXPECT_FALSE(origin_destroyed.load(std::memory_order_acquire));
+
+  // Failing the held read runs the origin fallback. Before the fix this
+  // dereferenced the freed origin file and crashed here.
+  coordinator.Release();
+  ASSERT_TRUE(pending_read.Wait(5.0));
+  const auto status = pending_read.result().status();
+  EXPECT_TRUE(status.IsIOError()) << status;
+  EXPECT_NE(status.message().find("origin filesystem fallback failed"), std::string::npos) << status;
+
+  // Once the read future is gone, the retained ReaderState and origin file are
+  // released.
+  pending_read = arrow::Future<int64_t>();
+  for (int i = 0; i < 500 && !origin_destroyed.load(std::memory_order_acquire); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_TRUE(origin_destroyed.load(std::memory_order_acquire));
 }
 
 }  // namespace milvus_storage::test
