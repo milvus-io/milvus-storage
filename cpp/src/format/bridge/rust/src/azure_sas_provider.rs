@@ -394,9 +394,9 @@ impl AzureSasStorageOptionsProvider {
     }
 
     pub(crate) async fn current_credential(&self) -> AnyResult<AzureSasCredential> {
-        let mut now = (self.clock)();
         {
             let cached = self.cached.read().await;
+            let now = (self.clock)();
             if let Some(credential) = cached.as_ref()
                 && Self::is_fresh(credential, now)
             {
@@ -405,7 +405,7 @@ impl AzureSasStorageOptionsProvider {
         }
 
         let mut cached = self.cached.write().await;
-        now = (self.clock)();
+        let mut now = (self.clock)();
         if let Some(credential) = cached.as_ref()
             && Self::is_fresh(credential, now)
         {
@@ -1440,6 +1440,49 @@ mod tests {
             assert_eq!(result.err().unwrap().to_string(), expected);
             assert_eq!(requests.lock().unwrap().len(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn waiting_caller_checks_freshness_after_refresh_finishes() {
+        let start = Utc::now();
+        let now = Arc::new(Mutex::new(start));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let fetcher = Arc::new(MockFetcher::with_gate(
+            vec![
+                Ok(AzureSasCredential {
+                    token: "sv=1&sig=short-lived".into(),
+                    expires_at: start + chrono::Duration::seconds(150),
+                }),
+                Ok(credential(start, "renewed")),
+            ],
+            started.clone(),
+            release.clone(),
+        ));
+        let clock = now.clone();
+        let provider = Arc::new(AzureSasStorageOptionsProvider::with_fetcher(
+            config(),
+            fetcher,
+            Arc::new(move || *clock.lock().unwrap()),
+        ));
+        let fetching = {
+            let provider = provider.clone();
+            tokio::spawn(async move { provider.current_credential().await })
+        };
+        started.notified().await;
+        let mut waiting = Box::pin(provider.current_credential());
+        assert!(futures::poll!(&mut waiting).is_pending());
+
+        // The waiting caller must use the time after the lock becomes available,
+        // not its start time, to preserve the sixty-second refresh window.
+        *now.lock().unwrap() += chrono::Duration::seconds(120);
+        release.notify_one();
+        assert_eq!(
+            fetching.await.unwrap().unwrap().token,
+            "sv=1&sig=short-lived"
+        );
+        release.notify_one();
+        assert_eq!(waiting.await.unwrap().token, "sv=1&sig=renewed");
     }
 
     #[tokio::test]
