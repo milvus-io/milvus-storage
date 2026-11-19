@@ -18,6 +18,7 @@
 #include <arrow/result.h>
 #include <arrow/status.h>
 #include <arrow/table.h>
+#include <folly/futures/Future.h>
 
 #include <cstdint>
 #include <memory>
@@ -48,7 +49,10 @@ struct EncodedRef {
 //   2. using Vortex take() API for efficient random access
 //   3. caching open file handles
 //
-// thread safety: not thread-safe, use one reader per thread
+// The native reader supports concurrent sync/async reads and cache operations.
+// Each read retains its own cache snapshot; file opens and reads run outside
+// the cache lock. Keep the object alive during each public method call; returned
+// async futures retain the resources they need independently of this object.
 class LobColumnReader {
   public:
   virtual ~LobColumnReader() = default;
@@ -62,6 +66,16 @@ class LobColumnReader {
   // read multiple entries from encoded references
   // more efficient than calling ReadData() repeatedly as it groups reads by file_id
   virtual arrow::Result<std::vector<std::vector<uint8_t>>> ReadBatchData(
+      const std::vector<EncodedRef>& encoded_refs) = 0;
+
+  // Native async reads submit one task per LOB file and preserve input order
+  // and duplicates. The caller selects an executor via via() and owns batching
+  // and admission control; this API does not impose an in-flight limit.
+  // Input references are consumed before returning. Concurrent calls need no
+  // external lock. Native futures can complete after Close or reader destruction.
+  // Arrow errors remain in Result; backend exceptions remain in the future.
+  // Strings own the returned bytes, including embedded NULs for binary columns.
+  virtual folly::SemiFuture<arrow::Result<std::vector<std::string>>> ReadBatchAsync(
       const std::vector<EncodedRef>& encoded_refs) = 0;
 
   // read data from a BinaryArray of encoded references
@@ -104,13 +118,15 @@ class LobColumnReader {
 
   // --- lifecycle methods ---
 
-  // close the reader and release resources
+  // Reject new reads and detach cached resources without waiting. Already
+  // admitted reads (including deferred futures) may finish using their snapshot.
   virtual arrow::Status Close() = 0;
 
   // check if the reader is closed
   virtual bool IsClosed() const = 0;
 
-  // clear the file handle cache
+  // Detach the current cache without interrupting admitted reads. New reads use
+  // a fresh cache; old in-flight opens cannot repopulate it. No-op after Close.
   virtual void ClearCache() = 0;
 
   protected:
