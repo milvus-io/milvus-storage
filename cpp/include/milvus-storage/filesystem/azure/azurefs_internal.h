@@ -24,6 +24,10 @@
 
 #include "milvus-storage/common/extend_status.h"
 
+namespace Azure::Core {
+class RequestFailedException;
+}  // namespace Azure::Core
+
 namespace Azure::Storage::Files::DataLake {
 class DataLakeFileSystemClient;
 class DataLakeServiceClient;
@@ -62,6 +66,12 @@ namespace internal {
 std::optional<milvus_storage::ExtendStatusCode> ClassifyAzureError(int http_status,
                                                                    std::string_view error_code,
                                                                    bool transport_failure);
+
+/// Append an Azure server ID while preserving the status code and details.
+arrow::Status WithAzureRequestId(arrow::Status status, const Azure::Core::RequestFailedException& exception);
+
+/// Convert an Azure SDK exception without discarding its server request ID.
+arrow::Status AzureExceptionToStatus(const Azure::Core::RequestFailedException& exception, std::string_view prefix);
 
 enum class HierarchicalNamespaceSupport {
   kUnknown = 0,

@@ -129,6 +129,7 @@ using ::milvus_storage::fs::internal::OutcomeToResult;
 using ::milvus_storage::fs::internal::OutcomeToStatus;
 using ::milvus_storage::fs::internal::S3Backend;
 using ::milvus_storage::fs::internal::ToAwsString;
+using ::milvus_storage::fs::internal::WithS3RequestId;
 
 namespace S3Model = Aws::S3::Model;
 namespace S3CrtModel = Aws::S3Crt::Model;
@@ -764,7 +765,7 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
     auto outcome = client_lock.Move()->HeadObject(req);
     if (!outcome.IsSuccess()) {
       if (IsNotFound(outcome.GetError())) {
-        return PathNotFound(path_);
+        return WithS3RequestId(PathNotFound(path_), outcome.GetError());
       }
       return ErrorToStatus(
           std::forward_as_tuple("When reading information for key '", path_.key, "' in bucket '", path_.bucket, "': "),
@@ -921,7 +922,7 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
                             const std::shared_ptr<const Aws::Client::AsyncCallerContext>&) mutable {
           if (!outcome.IsSuccess()) {
             if (outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
-              ctx->future.MarkFinished(PathNotFound(ctx->path));
+              ctx->future.MarkFinished(WithS3RequestId(PathNotFound(ctx->path), outcome.GetError()));
               return;
             }
             ctx->future.MarkFinished(
@@ -1188,7 +1189,7 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     auto outcome = client_lease->HeadObject(req);
     if (!outcome.IsSuccess()) {
       if (outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
-        return PathNotFound(path_);
+        return WithS3RequestId(PathNotFound(path_), outcome.GetError());
       }
       return ErrorToStatus(
           std::forward_as_tuple("When reading information for key '", path_.key, "' in bucket '", path_.bucket, "': "),
@@ -3472,7 +3473,7 @@ arrow::Status S3FileSystem::DeleteFile(const std::string& s) {
   auto outcome = client_lock.Move()->HeadObject(req);
   if (!outcome.IsSuccess()) {
     if (IsNotFound(outcome.GetError())) {
-      return PathNotFound(path);
+      return WithS3RequestId(PathNotFound(path), outcome.GetError());
     } else {
       return ErrorToStatus(
           std::forward_as_tuple("When getting information for key '", path.key, "' in bucket '", path.bucket, "': "),

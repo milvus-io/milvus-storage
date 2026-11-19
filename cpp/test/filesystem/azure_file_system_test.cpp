@@ -18,19 +18,96 @@
 
 #include <gtest/gtest.h>
 #include <initializer_list>
+#include <memory>
 #include <netinet/in.h>
 #include <string>
 #include <sys/socket.h>
 #include <arrow/result.h>
 #include <arrow/util/future.h>
 #include <arrow/util/io_util.h>
+#include <azure/core/http/http.hpp>
 #include <azure/storage/blobs.hpp>
 #include <azure/storage/files/datalake.hpp>
 
 #include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/azure/azurefs.h"
+#include "milvus-storage/filesystem/azure/azurefs_internal.h"
 
 namespace milvus_storage::fs {
+
+TEST(AzureErrorRequestIdTest, SDKRequestId) {
+  auto response =
+      std::make_unique<Azure::Core::Http::RawResponse>(1, 1, Azure::Core::Http::HttpStatusCode::Forbidden, "Forbidden");
+  response->SetHeader("x-ms-request-id", "header-request-id");
+  response->SetHeader("authorization", "must-not-be-logged");
+  Azure::Core::RequestFailedException exception(response);
+  exception.RequestId = "sdk-request-id";
+  exception.ErrorCode = "AuthorizationFailure";
+  const auto status = internal::AzureExceptionToStatus(exception, "HeadBlob");
+  EXPECT_TRUE(status.IsIOError());
+  EXPECT_NE(status.message().find("request_id:sdk-request-id"), std::string::npos);
+  EXPECT_EQ(status.message().find("header-request-id"), std::string::npos);
+  EXPECT_EQ(status.message().find("must-not-be-logged"), std::string::npos);
+  const auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr);
+  EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorAccessDenied);
+  EXPECT_NE(detail->extra_info().find("request_id:sdk-request-id"), std::string::npos);
+}
+
+TEST(AzureErrorRequestIdTest, ResponseHeadersForClassifiedAndUnclassifiedErrors) {
+  for (const auto http_status :
+       {Azure::Core::Http::HttpStatusCode::NotFound, Azure::Core::Http::HttpStatusCode::BadRequest}) {
+    SCOPED_TRACE(static_cast<int>(http_status));
+    auto response = std::make_unique<Azure::Core::Http::RawResponse>(1, 1, http_status, "error");
+    response->SetHeader("X-Ms-Request-Id", "azure-header-request-id");
+    response->SetHeader("x-ms-client-request-id", "client-id-not-server-id");
+    Azure::Core::RequestFailedException exception(response);
+    // Exercise the fallback independently of SDK header marshalling.
+    exception.RequestId.clear();
+    const auto status = internal::AzureExceptionToStatus(exception, "HeadBlob");
+    EXPECT_TRUE(status.IsIOError());
+    EXPECT_NE(status.message().find("request_id:azure-header-request-id"), std::string::npos);
+    EXPECT_EQ(status.message().find("client-id-not-server-id"), std::string::npos);
+    const auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    if (http_status == Azure::Core::Http::HttpStatusCode::NotFound) {
+      ASSERT_NE(detail, nullptr);
+      EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorNotFound);
+      EXPECT_NE(detail->extra_info().find("request_id:azure-header-request-id"), std::string::npos);
+    } else {
+      EXPECT_EQ(detail, nullptr);
+    }
+  }
+}
+
+TEST(AzureErrorRequestIdTest, MappedNotFoundPreservesErrno) {
+  auto response =
+      std::make_unique<Azure::Core::Http::RawResponse>(1, 1, Azure::Core::Http::HttpStatusCode::NotFound, "Not Found");
+  response->SetHeader("x-ms-request-id", "head-blob-request-id");
+  const Azure::Core::RequestFailedException exception(response);
+  const auto not_found = arrow::Status::IOError("Path does not exist 'container/blob'")
+                             .WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
+  const auto status = internal::WithAzureRequestId(not_found, exception);
+  EXPECT_TRUE(status.IsIOError());
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
+  EXPECT_EQ(status.message(), "Path does not exist 'container/blob' [request_id:head-blob-request-id]");
+}
+
+TEST(AzureErrorRequestIdTest, MissingRequestId) {
+  Azure::Core::RequestFailedException exception("client setup failed");
+  const auto status = internal::AzureExceptionToStatus(exception, "HeadBlob");
+  EXPECT_EQ(status.message(), "HeadBlob Azure Error: [] client setup failed");
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
+}
+
+TEST(AzureErrorRequestIdTest, TransportErrorWithoutResponse) {
+  Azure::Core::Http::TransportException exception("connection refused");
+  const auto status = internal::AzureExceptionToStatus(exception, "HeadBlob");
+  EXPECT_NE(status.message().find("connection refused"), std::string::npos);
+  EXPECT_EQ(status.message().find("request_id:"), std::string::npos);
+  const auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr);
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork);
+}
 
 // ============================================================================
 // AzureFileSystem initialization tests (no network required)

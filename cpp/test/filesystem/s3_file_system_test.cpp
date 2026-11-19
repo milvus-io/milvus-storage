@@ -41,6 +41,8 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 
+#include <arrow/util/io_util.h>
+
 #include <aws/core/Globals.h>
 #include <aws/crt/io/Bootstrap.h>
 #include <aws/io/channel_bootstrap.h>
@@ -52,6 +54,7 @@
 #include <aws/s3/model/CompleteMultipartUploadRequest.h>
 
 #include "milvus-storage/thread_pool.h"
+#include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/upload_sizable.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
@@ -425,6 +428,38 @@ TEST_F(S3UnitTest, ResponseStreamRewindHidesPreviousResponseTail) {
   EXPECT_TRUE(stream.fail());
 }
 
+TEST_P(S3ReadResponseTest, HeadNotFoundPreservesRequestIdAndErrno) {
+  namespace http = boost::beast::http;
+  http::response<http::string_body> response{http::status::not_found, 11};
+  response.set("x-oss-request-id", "head-not-found-request-id");
+  S3ResponseServer server({std::move(response)});
+  auto options = S3Options::FromAccessKey("ak", "sk");
+  options.region = "us-east-1";
+  options.scheme = "http";
+  options.endpoint_override = server.endpoint();
+  options.use_crt = GetParam();
+  options.connect_timeout = 2;
+  options.request_timeout = 5;
+  if (!GetParam()) {
+    options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(0);
+  }
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  ASSERT_AND_ASSIGN(auto input, fs->OpenInputFile("bucket/object"));
+  const auto check = [](const arrow::Status& status) {
+    EXPECT_TRUE(status.IsIOError());
+    EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
+    EXPECT_NE(status.message().find("request_id:head-not-found-request-id"), std::string::npos) << status;
+  };
+  check(input->GetSize().status());
+  auto* async_input = dynamic_cast<NonBlockingRandomAccessFile*>(input.get());
+  ASSERT_EQ(async_input != nullptr, GetParam());
+  if (async_input) {
+    check(async_input->GetSizeAsync().result().status());
+  }
+  ASSERT_STATUS_OK(input->Close());
+  check(fs->DeleteFile("bucket/object"));
+}
+
 TEST_P(S3ReadResponseTest, PreservesErrorsLargerThanReadBuffer) {
   namespace http = boost::beast::http;
   for (const auto& [http_status, code] :
@@ -678,6 +713,92 @@ TEST_F(S3UnitTest, TestExtendErrorInFs) {
   ASSERT_NE(extend_status, nullptr);
   ASSERT_EQ(extend_status->code(), ExtendStatusCode::AwsErrorNoSuchUpload);
   ASSERT_TRUE(status.ToString().find(extend_status->ToString()) != std::string::npos);
+}
+
+TEST(S3ErrorRequestIdTest, SDKRequestId) {
+  Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::ACCESS_DENIED, false);
+  error.SetResponseCode(Aws::Http::HttpResponseCode::FORBIDDEN);
+  error.SetMessage("No response body.");
+  error.SetRequestId("sdk-request-id");
+  error.SetResponseHeaders({{"x-cos-request-id", "header-request-id"}, {"a-request-id", "generic-request-id"}});
+  const auto status = fs::internal::ErrorToStatus("HeadObject", error);
+  EXPECT_TRUE(status.IsIOError());
+  EXPECT_NE(status.ToString().find("request_id:sdk-request-id"), std::string::npos);
+  EXPECT_EQ(status.ToString().find("header-request-id"), std::string::npos);
+  EXPECT_EQ(status.ToString().find("generic-request-id"), std::string::npos);
+}
+
+TEST(S3ErrorRequestIdTest, RequestIdFromResponseHeaders) {
+  for (const auto& header :
+       {"x-amz-request-id", "x-cos-request-id", "x-oss-request-id", "x-obs-request-id", "x-tos-request-id",
+        "x-guploader-uploadid", "X-Cos-Request-Id", "X-Tos-Request-Id", "X-GUploader-UploadID"}) {
+    SCOPED_TRACE(header);
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::ACCESS_DENIED, false);
+    error.SetResponseCode(Aws::Http::HttpResponseCode::FORBIDDEN);
+    error.SetMessage("No response body.");
+    error.SetResponseHeaders({{header, "server-request-id"}, {"authorization", "must-not-be-logged"}});
+    const auto status = fs::internal::ErrorToStatus("HeadObject", error);
+    EXPECT_NE(status.ToString().find("request_id:server-request-id"), std::string::npos);
+    EXPECT_EQ(status.ToString().find("must-not-be-logged"), std::string::npos);
+  }
+}
+
+TEST(S3ErrorRequestIdTest, KnownHeaderTakesPriorityOverGeneric) {
+  for (const auto& header : {"x-amz-request-id", "x-cos-request-id", "x-oss-request-id", "x-obs-request-id",
+                             "x-tos-request-id", "x-ms-request-id", "X-GUploader-UploadID"}) {
+    SCOPED_TRACE(header);
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::ACCESS_DENIED, false);
+    error.SetResponseHeaders(
+        {{"a-request-id", "generic-first"}, {header, "provider-request-id"}, {"z-request-id", "generic-last"}});
+    const auto status = fs::internal::ErrorToStatus("HeadObject", error);
+    EXPECT_NE(status.ToString().find("request_id:provider-request-id"), std::string::npos);
+    EXPECT_EQ(status.ToString().find("generic-first"), std::string::npos);
+    EXPECT_EQ(status.ToString().find("generic-last"), std::string::npos);
+  }
+}
+
+TEST(S3ErrorRequestIdTest, GenericRequestIdHeader) {
+  for (const auto& header : {"x-request-id", "x-provider-request-id", "X-Provider-Request-ID"}) {
+    SCOPED_TRACE(header);
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::UNKNOWN, false);
+    error.SetResponseCode(Aws::Http::HttpResponseCode::NOT_FOUND);
+    error.SetMessage("No response body.");
+    error.SetResponseHeaders({{"a-request-id", ""},
+                              {"x-cos-request-id", ""},
+                              {header, "fallback-request-id"},
+                              {"authorization", "must-not-be-logged"},
+                              {"client-request-id", "bare-client-echo"},
+                              {"a-client-request-id", "prefixed-client-echo"},
+                              {"x-request-id-extra", "not-a-request-id"}});
+    const auto status = fs::internal::ErrorToStatus("HeadObject", error);
+    EXPECT_TRUE(status.IsIOError());
+    EXPECT_NE(status.ToString().find("request_id:fallback-request-id"), std::string::npos);
+    EXPECT_EQ(status.ToString().find("must-not-be-logged"), std::string::npos);
+    EXPECT_EQ(status.ToString().find("not-a-request-id"), std::string::npos);
+    EXPECT_EQ(status.ToString().find("client-echo"), std::string::npos);
+  }
+}
+
+TEST(S3ErrorRequestIdTest, MissingRequestId) {
+  Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::ACCESS_DENIED, false);
+  error.SetResponseCode(Aws::Http::HttpResponseCode::FORBIDDEN);
+  error.SetMessage("No response body.");
+  error.SetResponseHeaders({{"x-cos-request-id", ""},
+                            {"x-provider-request-id", ""},
+                            {"x-request-id-extra", "not-a-request-id"},
+                            {"X-Ms-Client-Request-Id", "azure-client-echo"},
+                            {"content-type", "application/xml"}});
+  const auto status = fs::internal::ErrorToStatus("HeadObject", error);
+  EXPECT_NE(status.ToString().find("No response body."), std::string::npos);
+  EXPECT_EQ(status.ToString().find("request_id:"), std::string::npos);
+}
+
+TEST(S3ErrorRequestIdTest, ClientErrorWithoutResponse) {
+  Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::NETWORK_CONNECTION, true);
+  error.SetMessage("Connection timed out");
+  const auto status = fs::internal::ErrorToStatus("GetObject", error);
+  EXPECT_NE(status.ToString().find("Connection timed out"), std::string::npos);
+  EXPECT_EQ(status.ToString().find("request_id:"), std::string::npos);
 }
 
 TEST_F(S3UnitTest, TestErrorToStatusPermanentVsTransient) {

@@ -174,6 +174,42 @@ std::optional<milvus_storage::ExtendStatusCode> ClassifyAzureError(
       return std::nullopt;
   }
 }
+
+namespace {
+std::string_view AzureRequestId(const Azure::Core::RequestFailedException& exception) {
+  if (!exception.RequestId.empty()) {
+    return exception.RequestId;
+  }
+  if (exception.RawResponse) {
+    const auto& headers = exception.RawResponse->GetHeaders();
+    const auto it = headers.find("x-ms-request-id");
+    if (it != headers.end()) {
+      return it->second;
+    }
+  }
+  return {};
+}
+}  // namespace
+
+Status WithAzureRequestId(Status status, const Azure::Core::RequestFailedException& exception) {
+  const auto request_id = AzureRequestId(exception);
+  if (request_id.empty()) {
+    return status;
+  }
+  return status.WithMessage(status.message(), " [request_id:", request_id, "]");
+}
+
+Status AzureExceptionToStatus(const Azure::Core::RequestFailedException& exception, std::string_view prefix) {
+  // StatusCode alone cannot distinguish transport failures from failed copies.
+  const bool transport_failure = dynamic_cast<const Azure::Core::Http::TransportException*>(&exception) != nullptr;
+  const auto code = ClassifyAzureError(static_cast<int>(exception.StatusCode), exception.ErrorCode, transport_failure);
+  auto status = WithAzureRequestId(
+      Status::IOError(prefix, " Azure Error: [", exception.ErrorCode, "] ", exception.what()), exception);
+  if (!code.has_value()) {
+    return status;
+  }
+  return milvus_storage::MakeExtendError(*code, status.message(), status.message());
+}
 }  // namespace internal
 // --- End namespace bridge ---
 
@@ -433,26 +469,10 @@ Status AuthenticationError() {
 }
 
 template <typename... PrefixArgs>
-Status ExceptionToStatus(const Azure::Core::RequestFailedException& exception,
-                         PrefixArgs&&... prefix_args) {
-  // Discriminate on the dynamic type: TransportException means the request
-  // never reached the service. Its StatusCode is None, but so is that of a
-  // plain RequestFailedException(std::string), which PollUntilDone raises for
-  // a failed copy -- see internal::ClassifyAzureError.
-  const bool transport_failure =
-      dynamic_cast<const Azure::Core::Http::TransportException*>(&exception) != nullptr;
-  auto code = internal::ClassifyAzureError(static_cast<int>(exception.StatusCode),
-                                           exception.ErrorCode, transport_failure);
-  if (!code.has_value()) {
-    return Status::IOError(std::forward<PrefixArgs>(prefix_args)..., " Azure Error: [",
-                           exception.ErrorCode, "] ", exception.what());
-  }
-
+Status ExceptionToStatus(const Azure::Core::RequestFailedException& exception, PrefixArgs&&... prefix_args) {
   std::stringstream ss;
   (ss << ... << std::forward<PrefixArgs>(prefix_args));
-  ss << " Azure Error: [" << exception.ErrorCode << "] " << exception.what();
-  auto message = ss.str();
-  return milvus_storage::MakeExtendError(*code, message, message);
+  return internal::AzureExceptionToStatus(exception, ss.str());
 }
 }  // namespace
 
@@ -1107,7 +1127,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
       return AuthenticationError();
     } catch (const Azure::Core::RequestFailedException& exception) {
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
-        return PathNotFound(location_);
+        return internal::WithAzureRequestId(PathNotFound(location_), exception);
       }
       return ExceptionToStatus(exception, "GetProperties failed for '",
                                blob_client_->GetUrl(), "'.");
@@ -2620,7 +2640,7 @@ class AzureFileSystem::Impl {
       } catch (const Storage::StorageException& exception) {
         if (IsContainerNotFound(exception)) {
           auto parent = location.parent();
-          return PathNotFound(parent);
+          return internal::WithAzureRequestId(PathNotFound(parent), exception);
         }
         return ExceptionToStatus(exception, "Failed to create directory '", location.all,
                                  "': ", container_client.GetUrl());
@@ -2753,7 +2773,7 @@ class AzureFileSystem::Impl {
       return AuthenticationError();
     } catch (const Storage::StorageException& exception) {
       if (IsContainerNotFound(exception)) {
-        return PathNotFound(location);
+        return internal::WithAzureRequestId(PathNotFound(location), exception);
       }
       return ExceptionToStatus(exception,
                                "Failed to delete a container: ", location.container, ": ",
@@ -2941,7 +2961,7 @@ class AzureFileSystem::Impl {
       if (exception.ErrorCode == "FilesystemNotFound" ||
           exception.ErrorCode == "PathNotFound") {
         if (require_dir_to_exist) {
-          return PathNotFound(location);
+          return internal::WithAzureRequestId(PathNotFound(location), exception);
         }
         return Status::OK();
       }
@@ -3023,7 +3043,7 @@ class AzureFileSystem::Impl {
         if (allow_missing_container) {
           return nullptr;
         }
-        return PathNotFound(location);
+        return internal::WithAzureRequestId(PathNotFound(location), exception);
       } else if (exception.StatusCode == Http::HttpStatusCode::Conflict &&
                  exception.ErrorCode == "LeaseAlreadyPresent") {
         if (retry_allowed) {
@@ -3065,7 +3085,7 @@ class AzureFileSystem::Impl {
         if (allow_missing) {
           return nullptr;
         }
-        return PathNotFound(location);
+        return internal::WithAzureRequestId(PathNotFound(location), exception);
       } else if (exception.StatusCode == Http::HttpStatusCode::Conflict &&
                  exception.ErrorCode == "LeaseAlreadyPresent") {
         if (retry_allowed) {
@@ -3141,7 +3161,7 @@ class AzureFileSystem::Impl {
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
         // ErrorCode can be "FilesystemNotFound", "PathNotFound"...
         if (require_file_to_exist) {
-          return PathNotFound(location);
+          return internal::WithAzureRequestId(PathNotFound(location), exception);
         }
         return Status::OK();
       }
@@ -3519,7 +3539,7 @@ class AzureFileSystem::Impl {
       // https://learn.microsoft.com/en-gb/rest/api/storageservices/datalakestoragegen2/path/create
       if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
         if (exception.ErrorCode == "PathNotFound") {
-          return PathNotFound(src);
+          return internal::WithAzureRequestId(PathNotFound(src), exception);
         }
         // "FilesystemNotFound" could be triggered by the source or destination filesystem
         // not existing, but since we already checked the source filesystem exists (and
@@ -3527,13 +3547,13 @@ class AzureFileSystem::Impl {
         // doesn't exist.
         if (exception.ErrorCode == "FilesystemNotFound" ||
             exception.ErrorCode == "RenameDestinationParentPathNotFound") {
-          return DestinationParentPathNotFound(dest);
+          return internal::WithAzureRequestId(DestinationParentPathNotFound(dest), exception);
         }
       } else if (exception.StatusCode == Http::HttpStatusCode::Conflict &&
                  exception.ErrorCode == "PathAlreadyExists") {
         // "PathAlreadyExists" is only produced when the destination exists and is a
         // non-empty directory, so we produce the appropriate error.
-        return NotEmpty(dest);
+        return internal::WithAzureRequestId(NotEmpty(dest), exception);
       }
       return ExceptionToStatus(exception, "Failed to rename '", src.all, "' to '",
                                dest.all, "': ", src_adlfs_client.GetUrl());

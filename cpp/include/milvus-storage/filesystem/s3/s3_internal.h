@@ -238,6 +238,45 @@ std::optional<arrow::Status> tryMakeRetryableExtendArrowError(const Aws::Client:
   return std::nullopt;
 }
 
+template <typename ErrorType>
+Aws::String S3RequestId(const Aws::Client::AWSError<ErrorType>& error) {
+  if (!error.GetRequestId().empty()) {
+    return error.GetRequestId();
+  }
+
+  // HEAD failures can have an empty body. Prefer known provider headers,
+  // including the GCS diagnostic ID, before the generic fallback.
+  Aws::String fallback;
+  for (const auto& [name, value] : error.GetResponseHeaders()) {
+    if (value.empty()) {
+      continue;
+    }
+    const auto lower_name = Aws::Utils::StringUtils::ToLower(name.c_str());
+    const std::string_view header(lower_name.data(), lower_name.size());
+    if (header == "x-amz-request-id" || header == "x-cos-request-id" || header == "x-oss-request-id" ||
+        header == "x-obs-request-id" || header == "x-tos-request-id" || header == "x-ms-request-id" ||
+        header == "x-guploader-uploadid") {
+      return value;
+    }
+    // Client IDs can be echoed by the server and do not identify its request.
+    if (fallback.empty() && header.ends_with("-request-id") && header != "client-request-id" &&
+        !header.ends_with("-client-request-id")) {
+      fallback = value;
+    }
+  }
+  return fallback;
+}
+
+template <typename ErrorType>
+arrow::Status WithS3RequestId(arrow::Status status, const Aws::Client::AWSError<ErrorType>& error) {
+  const auto request_id = S3RequestId(error);
+  if (request_id.empty()) {
+    return status;
+  }
+  return status.WithMessage(status.message(), " [request_id:", std::string_view(request_id.data(), request_id.size()),
+                            "]");
+}
+
 // TODO qualify error messages with a prefix indicating context
 // (e.g. "When completing multipart upload to bucket 'xxx', key 'xxx': ...")
 template <typename ErrorType>
@@ -266,6 +305,10 @@ arrow::Status ErrorToStatus(const std::string& prefix,
   }
   std::string message = "AWS Error " + ss.str() + " during " + operation + " operation: " + error.GetMessage() +
                         wrong_region_msg.value_or("");
+  const auto request_id = S3RequestId(error);
+  if (!request_id.empty()) {
+    message += " [request_id:" + std::string(request_id.data(), request_id.size()) + "]";
+  }
   LOG_STORAGE_WARNING_ << message;
 
   if (auto permanent_status = tryMakePermanentExtendArrowError(error_type, error.GetResponseCode(), message);
@@ -295,8 +338,7 @@ arrow::Status ErrorToStatus(const std::string& prefix,
 
   // Backend-specific UNKNOWN errors without a recognizable permanent or
   // transient signal remain plain IOError.
-  return arrow::Status::IOError(prefix, "AWS Error ", ss.str(), " during ", operation,
-                                " operation: ", error.GetMessage(), wrong_region_msg.value_or(""));
+  return arrow::Status::IOError(prefix, message);
 }
 
 template <typename ErrorType, typename... Args>
