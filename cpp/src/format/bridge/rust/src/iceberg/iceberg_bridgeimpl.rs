@@ -18,11 +18,11 @@ use arrow_array::Array;
 use futures::TryStreamExt;
 use std::collections::HashMap;
 
+use crate::iceberg_ffi::IcebergFileInfo;
+use crate::iceberg_opendal::build_filesystem_file_io;
 use iceberg::TableIdent;
 use iceberg::scan::FileScanTask;
 use iceberg::table::StaticTable;
-use crate::iceberg_ffi::IcebergFileInfo;
-use crate::iceberg_opendal::build_filesystem_file_io;
 
 /// Internal representation for a delete file reference, serialized to JSON.
 #[derive(serde::Serialize)]
@@ -82,6 +82,7 @@ async fn count_positional_deletes(
     file_io: &iceberg::io::FileIO,
     data_file_path: &str,
     delete_refs: &[DeleteFileRef],
+    binding: &crate::iceberg_opendal::IcebergUriBinding,
 ) -> Result<u64, anyhow::Error> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -108,8 +109,17 @@ async fn count_positional_deletes(
 
             if let Some(file_path_array) = file_path_col {
                 for i in 0..file_path_array.len() {
-                    if !file_path_array.is_null(i) && file_path_array.value(i) == data_file_path {
-                        total += 1;
+                    if !file_path_array.is_null(i) {
+                        let candidate = file_path_array.value(i);
+                        let matches = if binding.is_source() {
+                            binding.relative_path(candidate)?
+                                == binding.relative_path(data_file_path)?
+                        } else {
+                            candidate == data_file_path
+                        };
+                        if matches {
+                            total += 1;
+                        }
                     }
                 }
             }
@@ -159,8 +169,9 @@ pub fn iceberg_plan_files(
 
         // Load table metadata directly from location (no catalog needed)
         let table_ident = TableIdent::from_strs(["default", "table"])?;
-        let table = StaticTable::from_metadata_file(metadata_location, table_ident, file_io.clone())
-            .await?;
+        let table =
+            StaticTable::from_metadata_file(metadata_location, table_ident, file_io.clone())
+                .await?;
         let table = table.into_table();
 
         // A negative snapshot ID selects the current snapshot.
@@ -187,6 +198,9 @@ pub fn iceberg_plan_files(
             // Reject equality deletes — they must be pre-converted to
             // positional deletes before the manifest is committed.
             for del_ref in &delete_refs {
+                if uri_binding.is_source() {
+                    uri_binding.relative_path(&del_ref.path)?;
+                }
                 if del_ref.file_type == "equality" {
                     anyhow::bail!(
                         "Equality deletes are not supported. \
@@ -203,7 +217,8 @@ pub fn iceberg_plan_files(
             let num_deleted_rows = if delete_refs.is_empty() {
                 0
             } else {
-                count_positional_deletes(&file_io, &task.data_file_path, &delete_refs).await?
+                count_positional_deletes(&file_io, &task.data_file_path, &delete_refs, &uri_binding)
+                    .await?
             };
 
             // FIXME(jiaqizho): Local planning returns absolute data and delete
@@ -216,7 +231,9 @@ pub fn iceberg_plan_files(
             let denorm_refs: Vec<DeleteFileRef> = delete_refs
                 .into_iter()
                 .map(|mut r| {
-                    r.path = denormalize_uri(&r.path);
+                    if !uri_binding.is_source() {
+                        r.path = denormalize_uri(&r.path);
+                    }
                     r
                 })
                 .collect();
@@ -234,7 +251,11 @@ pub fn iceberg_plan_files(
             // Denormalize data_file_path: strip Azure container@endpoint back to
             // scheme://container/path so C++ sees a uniform format across providers.
             result.push(IcebergFileInfo {
-                data_file_path: denormalize_uri(&task.data_file_path),
+                data_file_path: if uri_binding.is_source() {
+                    task.data_file_path.clone()
+                } else {
+                    denormalize_uri(&task.data_file_path)
+                },
                 record_count,
                 num_deleted_rows,
                 delete_metadata_json,

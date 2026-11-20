@@ -24,6 +24,16 @@
 
 namespace milvus_storage::lance {
 
+// A source binding validated before converting into Lance's account-less URI.
+struct SourceLanceLocation {
+  SourceReadFileSystem source;
+  std::string lance_uri;
+  StorageOptions options;
+};
+arrow::Result<SourceLanceLocation> ResolveSourceLanceLocation(const std::string& uri,
+                                                              const std::shared_ptr<const api::Properties>& properties,
+                                                              const std::shared_ptr<SourceReadContext>& context);
+
 // Lance-private ColumnGroupFile property written by LanceFormat::explore().
 inline constexpr const char* kDatasetVersionProperty = "dataset_version";
 
@@ -35,6 +45,10 @@ StorageOptions ToReaderOptions(const ArrowFileSystemConfig& config);
 /// Convert ArrowFileSystemConfig to native Lance writer options used by tests and benchmarks.
 /// Supports AK/SK and IAM credentials; GCP supports IAM only.
 arrow::Result<StorageOptions> ToWriterOptions(const ArrowFileSystemConfig& config);
+
+// Strict source variant: exactly one numeric fragment selector; no appended
+// query parameters or credential-bearing diagnostics.
+arrow::Result<std::pair<std::string, uint64_t>> ParseSourceLanceUri(const std::string& uri);
 
 /// Parse a Lance URI to extract the base path and fragment ID.
 /// URI format: {base_path}?fragment_id={fragment_id}

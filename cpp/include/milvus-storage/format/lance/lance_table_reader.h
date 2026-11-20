@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/source_read_context.h"
 #include "milvus-storage/format/format_reader.h"
 #include "lance/lance_bridge.h"  // from cpp/src/format/bridge/rust/include/lance
 
@@ -51,6 +52,7 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
       // projection-specific and stateful.
       std::shared_ptr<FragmentMetadataCache> fragment_metadata_cache;
       std::shared_ptr<const milvus_storage::api::Properties> properties;
+      SourceReadContextPtr source_context = nullptr;
     };
 
     using Metadata = FormatReaderMetadata<Payload>;
@@ -67,6 +69,18 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
         const milvus_storage::api::ColumnGroupFile& file,
         const std::shared_ptr<const milvus_storage::api::Properties>& properties,
         const KeyRetriever& key_retriever);
+
+    static arrow::Result<MetadataPtr> load_metadata_with_context(
+        const api::ColumnGroupFile& file,
+        const std::shared_ptr<const api::Properties>& properties,
+        const KeyRetriever& key_retriever,
+        SourceReadContextPtr context);
+
+    static folly::SemiFuture<arrow::Result<MetadataPtr>> load_metadata_with_context_async(
+        const api::ColumnGroupFile& file,
+        const std::shared_ptr<const api::Properties>& properties,
+        const KeyRetriever& key_retriever,
+        SourceReadContextPtr context);
 
     static arrow::Result<std::shared_ptr<LanceTableReader>> create_from_metadata(
         MetadataPtr metadata,
@@ -125,14 +139,16 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
       const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
       const StorageOptions& read_options,
       const std::string& filesystem_cache_key,
-      uint64_t version);
+      uint64_t version,
+      const std::string& resolved_lance_uri = "");
 
   static folly::SemiFuture<arrow::Result<std::shared_ptr<BlockingDataset>>> get_or_open_dataset_async(
       const std::string& base_uri,
       const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
       const StorageOptions& read_options,
       const std::string& filesystem_cache_key,
-      uint64_t version);
+      uint64_t version,
+      const std::string& resolved_lance_uri = "");
 
   static folly::SemiFuture<arrow::Result<std::shared_ptr<BlockingDataset>>> load_dataset_async(
       const std::string& lance_uri,

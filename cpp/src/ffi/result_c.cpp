@@ -33,6 +33,11 @@ extern FFI_EXPORT const int loon_errcode_fault_inject = LOON_FAULT_INJECT_ERROR;
 extern FFI_EXPORT const int loon_errcode_not_support = LOON_NOT_SUPPORT;
 extern FFI_EXPORT const int loon_errcode_file_not_found = LOON_FILE_NOT_FOUND;
 extern FFI_EXPORT const int loon_errcode_permission_denied = LOON_PERMISSION_DENIED;
+extern FFI_EXPORT const int loon_errcode_source_auth_denied = LOON_SOURCE_AUTH_DENIED;
+extern FFI_EXPORT const int loon_errcode_source_auth_expired = LOON_SOURCE_AUTH_EXPIRED;
+extern FFI_EXPORT const int loon_errcode_source_auth_transient = LOON_SOURCE_AUTH_TRANSIENT;
+extern FFI_EXPORT const int loon_errcode_source_auth_cancelled = LOON_SOURCE_AUTH_CANCELLED;
+extern FFI_EXPORT const int loon_errcode_source_auth_invalid_response = LOON_SOURCE_AUTH_INVALID_RESPONSE;
 extern FFI_EXPORT const int loon_errcode_aws_no_such_upload = LOON_AWS_ERROR_NO_SUCH_UPLOAD;
 extern FFI_EXPORT const int loon_errcode_aws_conflict = LOON_AWS_ERROR_CONFLICT;
 extern FFI_EXPORT const int loon_errcode_aws_precondition_failed = LOON_AWS_ERROR_PRECONDITION_FAILED;
@@ -71,6 +76,11 @@ std::string error_to_string(int code) {
       {LOON_NOT_SUPPORT, "Not supported"},
       {LOON_FILE_NOT_FOUND, "File not found"},
       {LOON_PERMISSION_DENIED, "Permission denied"},
+      {LOON_SOURCE_AUTH_DENIED, "SourceAuthDenied"},
+      {LOON_SOURCE_AUTH_EXPIRED, "SourceAuthExpired"},
+      {LOON_SOURCE_AUTH_TRANSIENT, "SourceAuthTransient"},
+      {LOON_SOURCE_AUTH_CANCELLED, "SourceAuthCancelled"},
+      {LOON_SOURCE_AUTH_INVALID_RESPONSE, "SourceAuthInvalidResponse"},
       {LOON_AWS_ERROR_NO_SUCH_UPLOAD, "AwsErrorNoSuchUpload"},
       {LOON_AWS_ERROR_CONFLICT, "AwsErrorConflict"},
       {LOON_AWS_ERROR_PRECONDITION_FAILED, "AwsErrorPreConditionFailed"},

@@ -43,6 +43,7 @@
 #include "milvus-storage/common/macro.h"  // for UNLIKELY
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/format/source_format_reader.h"
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/paimon/paimon_format_reader.h"
@@ -92,7 +93,7 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
   struct OpenedFile {
     size_t file_index;
     ColumnGroupFile file;
-    std::shared_ptr<ReaderT> reader;
+    std::shared_ptr<FormatReader> reader;
     std::vector<RowGroupInfo> row_group_infos;
     std::shared_ptr<arrow::Schema> file_schema;
   };
@@ -103,8 +104,8 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
                                                    size_t& rows_in_all_files);
 
   ChunkRBMapResult read_chunks_from_files(const std::vector<int64_t>& task_indices);
-  arrow::Result<std::shared_ptr<ReaderT>> open_reader_for_file(size_t file_index);
-  folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> open_reader_for_file_async(
+  arrow::Result<std::shared_ptr<FormatReader>> open_reader_for_file(size_t file_index);
+  folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> open_reader_for_file_async(
       size_t file_index, folly::CancellationToken cancellation = {});
 
   protected:
@@ -122,7 +123,7 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
   std::shared_ptr<arrow::Schema> file_schema_;
   size_t total_rows_ = 0;
 
-  std::vector<std::shared_ptr<ReaderT>> format_readers_;
+  std::vector<std::shared_ptr<FormatReader>> format_readers_;
   bool opened_ = false;
 };  // ColumnGroupReaderImpl
 
@@ -230,13 +231,17 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::append_file_metadata(size_t file_i
 }
 
 template <typename ReaderT>
-arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupReaderImpl<ReaderT>::open_reader_for_file(size_t file_index) {
+arrow::Result<std::shared_ptr<FormatReader>> ColumnGroupReaderImpl<ReaderT>::open_reader_for_file(size_t file_index) {
   if (file_index >= column_group_->files.size()) {
     return arrow::Status::Invalid("Column group file index out of range: ", file_index,
                                   " >= ", column_group_->files.size());
   }
 
   auto file = column_group_->files[file_index];
+  if (cache_.source_context()) {
+    return OpenSourceFormatReader<ReaderT>(cache_, column_group_->format, file, properties_, schema_, needed_columns_,
+                                           key_retriever_, predicate_);
+  }
   if (!cache_.enabled()) {
     ARROW_ASSIGN_OR_RAISE(auto reader, FormatReader::create(schema_, column_group_->format, file, properties_,
                                                             needed_columns_, key_retriever_));
@@ -261,22 +266,26 @@ arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupReaderImpl<ReaderT>::open_rea
 }
 
 template <typename ReaderT>
-folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> ColumnGroupReaderImpl<ReaderT>::open_reader_for_file_async(
-    size_t file_index, folly::CancellationToken cancellation) {
+folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>>
+ColumnGroupReaderImpl<ReaderT>::open_reader_for_file_async(size_t file_index, folly::CancellationToken cancellation) {
   FOLLY_ARROW_RETURN_IF_CANCELLED(cancellation);
   if (file_index >= column_group_->files.size()) {
-    return folly::makeSemiFuture(arrow::Result<std::shared_ptr<ReaderT>>(arrow::Status::Invalid(
+    return folly::makeSemiFuture(arrow::Result<std::shared_ptr<FormatReader>>(arrow::Status::Invalid(
         "Column group file index out of range: ", file_index, " >= ", column_group_->files.size())));
   }
 
   auto file = column_group_->files[file_index];
+  if (cache_.source_context()) {
+    return OpenSourceFormatReaderAsync<ReaderT>(cache_, column_group_->format, file, properties_, schema_,
+                                                needed_columns_, key_retriever_, predicate_, cancellation);
+  }
   if (!cache_.enabled()) {
     // Without metadata caching, create and open a fresh stateful format reader.
     return FormatReader::create_async(schema_, column_group_->format, file, properties_, needed_columns_,
                                       key_retriever_)
         .deferValue([predicate = predicate_,
                      format = column_group_->format](arrow::Result<std::shared_ptr<FormatReader>>&& reader_result)
-                        -> arrow::Result<std::shared_ptr<ReaderT>> {
+                        -> arrow::Result<std::shared_ptr<FormatReader>> {
           ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
           if (!predicate.empty()) {
             ARROW_RETURN_NOT_OK(reader->set_predicate(predicate));
@@ -302,11 +311,16 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> ColumnGroupReaderImpl
                             })
         .deferValue([file, read_schema = schema_, needed_columns = needed_columns_, predicate = predicate_,
                      cancellation](arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>&& metadata_result)
-                        -> folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> {
+                        -> folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> {
           FOLLY_ARROW_ASSIGN_OR_RAISE(auto metadata, std::move(metadata_result));
           FOLLY_ARROW_RETURN_IF_CANCELLED(cancellation);
           return ReaderT::MetaTrait::create_from_metadata_async(std::move(metadata), file, read_schema, needed_columns,
-                                                                predicate);
+                                                                predicate)
+              .deferValue(
+                  [](arrow::Result<std::shared_ptr<ReaderT>> result) -> arrow::Result<std::shared_ptr<FormatReader>> {
+                    ARROW_ASSIGN_OR_RAISE(auto reader, std::move(result));
+                    return reader;
+                  });
         });
   }
 
@@ -368,7 +382,7 @@ folly::SemiFuture<arrow::Status> ColumnGroupReaderImpl<ReaderT>::open_async(foll
     auto future =
         open_reader_for_file_async(file_idx, cancellation)
             .deferValue([file_idx, cg_file](
-                            arrow::Result<std::shared_ptr<ReaderT>>&& reader_result) -> arrow::Result<OpenedFile> {
+                            arrow::Result<std::shared_ptr<FormatReader>>&& reader_result) -> arrow::Result<OpenedFile> {
               ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
               ARROW_ASSIGN_OR_RAISE(auto row_group_infos, reader->get_row_group_infos());
               auto file_schema = reader->get_schema();
@@ -774,45 +788,46 @@ ColumnGroupReaderImpl<ReaderT>::get_chunks_async(const ChunkTask& task) {
   // Each task opens independent mutable format-reader state; immutable cached
   // metadata may still be shared across those readers.
   return open_reader_for_file_async(task.file_index, task.cancellation)
-      .deferValue([range_start = task.range_start, range_end = task.range_end, chunk_infos = std::move(chunk_infos),
-                   cancellation = task.cancellation](arrow::Result<std::shared_ptr<ReaderT>>&& reader_result) mutable
-                  -> folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>> {
-        FOLLY_ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
-        FOLLY_ARROW_RETURN_IF_CANCELLED(cancellation);
-        return reader->read_with_range_async(range_start, range_end)
-            .deferValue(
-                [reader = std::move(reader), chunk_infos = std::move(chunk_infos), cancellation](
-                    auto&& rb_reader_result) -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
-                  // Lifetime-only capture: drain the Arrow reader before releasing
-                  // the independent FormatReader that produced it.
-                  (void)reader;
-                  ARROW_ASSIGN_OR_RAISE(auto rb_reader, std::move(rb_reader_result));
-                  ARROW_ASSIGN_OR_RAISE(auto rbs, rb_reader->ToRecordBatches());
+      .deferValue(
+          [range_start = task.range_start, range_end = task.range_end, chunk_infos = std::move(chunk_infos),
+           cancellation = task.cancellation](arrow::Result<std::shared_ptr<FormatReader>>&& reader_result) mutable
+          -> folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>> {
+            FOLLY_ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
+            FOLLY_ARROW_RETURN_IF_CANCELLED(cancellation);
+            return reader->read_with_range_async(range_start, range_end)
+                .deferValue(
+                    [reader = std::move(reader), chunk_infos = std::move(chunk_infos), cancellation](
+                        auto&& rb_reader_result) -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
+                      // Lifetime-only capture: drain the Arrow reader before releasing
+                      // the independent FormatReader that produced it.
+                      (void)reader;
+                      ARROW_ASSIGN_OR_RAISE(auto rb_reader, std::move(rb_reader_result));
+                      ARROW_ASSIGN_OR_RAISE(auto rbs, rb_reader->ToRecordBatches());
 
-                  // A format may coalesce the range into different batch boundaries;
-                  // slice it back into one result per logical chunk.
-                  std::vector<std::shared_ptr<arrow::RecordBatch>> result;
-                  result.reserve(chunk_infos.size());
-                  size_t rbs_idx = 0;
-                  size_t rbs_offset = 0;
-                  for (const auto& chunk_info : chunk_infos) {
-                    if (UNLIKELY(rbs_idx >= rbs.size() ||
-                                 (rbs[rbs_idx]->num_rows() - rbs_offset) < chunk_info.number_of_rows)) {
-                      return arrow::Status::Invalid(fmt::format(
-                          "Invalid slice of record batches in async read: [chunk_info={}]", chunk_info.ToString()));
-                    }
-                    auto rb = rbs[rbs_idx]->Slice(rbs_offset, chunk_info.number_of_rows);
-                    result.push_back(std::move(rb));
-                    rbs_offset += chunk_info.number_of_rows;
-                    if (rbs_offset == rbs[rbs_idx]->num_rows()) {
-                      rbs_idx++;
-                      rbs_offset = 0;
-                    }
-                  }
-                  ARROW_RETURN_IF_CANCELLED(cancellation);
-                  return result;
-                });
-      });
+                      // A format may coalesce the range into different batch boundaries;
+                      // slice it back into one result per logical chunk.
+                      std::vector<std::shared_ptr<arrow::RecordBatch>> result;
+                      result.reserve(chunk_infos.size());
+                      size_t rbs_idx = 0;
+                      size_t rbs_offset = 0;
+                      for (const auto& chunk_info : chunk_infos) {
+                        if (UNLIKELY(rbs_idx >= rbs.size() ||
+                                     (rbs[rbs_idx]->num_rows() - rbs_offset) < chunk_info.number_of_rows)) {
+                          return arrow::Status::Invalid(fmt::format(
+                              "Invalid slice of record batches in async read: [chunk_info={}]", chunk_info.ToString()));
+                        }
+                        auto rb = rbs[rbs_idx]->Slice(rbs_offset, chunk_info.number_of_rows);
+                        result.push_back(std::move(rb));
+                        rbs_offset += chunk_info.number_of_rows;
+                        if (rbs_offset == rbs[rbs_idx]->num_rows()) {
+                          rbs_idx++;
+                          rbs_offset = 0;
+                        }
+                      }
+                      ARROW_RETURN_IF_CANCELLED(cancellation);
+                      return result;
+                    });
+          });
 }
 
 template <typename ReaderT>
@@ -874,7 +889,7 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
   };
 
   if (!cache_enabled) {
-    return create_reader(milvus_storage::MetadataCache(false));
+    return create_reader(milvus_storage::MetadataCache(false, cache.source_context()));
   }
 
   return create_reader(cache);
@@ -943,7 +958,7 @@ folly::SemiFuture<arrow::Result<std::unique_ptr<ColumnGroupReader>>> ColumnGroup
   };
 
   if (!cache_enabled) {
-    return create_reader(milvus_storage::MetadataCache(false));
+    return create_reader(milvus_storage::MetadataCache(false, cache.source_context()));
   }
 
   return create_reader(cache);

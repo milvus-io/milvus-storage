@@ -33,6 +33,7 @@
 #include <folly/futures/SharedPromise.h>
 
 #include "milvus-storage/format/format_reader.h"
+#include "milvus-storage/source_read_context.h"
 
 namespace milvus_storage {
 
@@ -155,7 +156,11 @@ class FormatReaderMetadataCaches final {
 // headers from the source tree.
 class MetadataCache final {
   public:
-  explicit MetadataCache(bool enabled = true);
+  explicit MetadataCache(bool enabled = true, SourceReadContextPtr source_context = nullptr);
+
+  // Copies retain the same authority and cache state. A new context always
+  // starts with its own state; source metadata never enters legacy caches.
+  [[nodiscard]] const SourceReadContextPtr& source_context() const { return source_context_; }
 
   [[nodiscard]] bool enabled() const { return enabled_; }
 
@@ -202,6 +207,7 @@ class MetadataCache final {
     std::unordered_map<std::type_index, std::shared_ptr<void>> caches;
   };
 
+  SourceReadContextPtr source_context_;
   bool enabled_ = true;
   std::shared_ptr<State> state_ = std::make_shared<State>();
 };

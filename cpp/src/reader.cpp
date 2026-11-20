@@ -44,6 +44,8 @@
 #include "milvus-storage/thread_pool.h"
 #include "milvus-storage/format/async_tasks.h"
 #include "milvus-storage/format/format_reader_cache.h"
+#include "milvus-storage/source_reader.h"
+#include "milvus-storage/filesystem/azure/source_sas_token_policy.h"
 #include "milvus-storage/format/column_group_reader.h"
 #include "milvus-storage/format/column_group_lazy_reader.h"
 #include "milvus-storage/properties.h"
@@ -905,13 +907,14 @@ class ReaderImpl : public Reader {
   ReaderImpl(const std::shared_ptr<ColumnGroups>& cgs,
              const std::shared_ptr<arrow::Schema>& schema,
              const std::shared_ptr<std::vector<std::string>>& needed_columns,
-             std::shared_ptr<const Properties> properties)
+             std::shared_ptr<const Properties> properties,
+             SourceReadContextPtr source_context = nullptr)
       : cgs_(cgs),
         schema_(schema),
         needed_columns_(needed_columns),
         properties_(std::move(properties)),
         key_retriever_callback_(nullptr),
-        metadata_cache_(metadata_cache_enabled(properties_)) {
+        metadata_cache_(metadata_cache_enabled(properties_), std::move(source_context)) {
     // Validate required parameters
     assert(cgs_);
   }
@@ -1300,7 +1303,7 @@ class ReaderImpl : public Reader {
 
   void set_keyretriever(const std::function<std::string(const std::string&)>& callback) override {
     std::lock_guard<std::mutex> lock(metadata_cache_mutex_);
-    metadata_cache_ = MetadataCache(metadata_cache_enabled(properties_));
+    metadata_cache_ = MetadataCache(metadata_cache_enabled(properties_), metadata_cache_.source_context());
     key_retriever_callback_ = callback;
   }
 };
@@ -1503,6 +1506,18 @@ std::unique_ptr<Reader> Reader::create(const std::shared_ptr<ColumnGroups>& cgs,
                                        std::shared_ptr<const Properties> properties) {
   assert(properties);
   return std::make_unique<ReaderImpl>(cgs, schema, needed_columns, std::move(properties));
+}
+
+arrow::Result<std::unique_ptr<Reader>> Reader::create_with_context(
+    const std::shared_ptr<ColumnGroups>& cgs,
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::shared_ptr<std::vector<std::string>>& needed_columns,
+    const std::shared_ptr<const Properties>& properties,
+    SourceReadContextPtr context) {
+  if (!cgs || !properties)
+    return arrow::Status::Invalid("Missing source reader configuration");
+  ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context ? context->CheckState() : LOON_SOURCE_CREDENTIAL_DENIED));
+  return GuardSourceReader(std::make_unique<ReaderImpl>(cgs, schema, needed_columns, properties, context), context);
 }
 
 }  // namespace milvus_storage::api

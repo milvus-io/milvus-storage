@@ -54,6 +54,11 @@ constexpr ExtendStatusCodeMetadata kExtendStatusCodeMetadata[] = {
     {ExtendStatusCode::StorageTransientService, "StorageTransientService", true},
     {ExtendStatusCode::TxnExhaustedRetry, "TxnExhaustedRetry", false},
     {ExtendStatusCode::TxnResolutionFailed, "TxnResolutionFailed", false},
+    {ExtendStatusCode::SourceAuthDenied, "SourceAuthDenied", false},
+    {ExtendStatusCode::SourceAuthExpired, "SourceAuthExpired", false},
+    {ExtendStatusCode::SourceAuthTransient, "SourceAuthTransient", true},
+    {ExtendStatusCode::SourceAuthCancelled, "SourceAuthCancelled", false},
+    {ExtendStatusCode::SourceAuthInvalidResponse, "SourceAuthInvalidResponse", false},
 };
 
 const ExtendStatusCodeMetadata* FindExtendStatusCodeMetadata(ExtendStatusCode code) {
@@ -203,11 +208,16 @@ milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
     case ExtendStatusCode::StorageTransientTimeout:
     case ExtendStatusCode::StorageTransientThrottling:
     case ExtendStatusCode::StorageTransientService:
+    case ExtendStatusCode::SourceAuthTransient:
       return milvus::StorageTransientError;  // 2045
     case ExtendStatusCode::AwsErrorConflict:
     case ExtendStatusCode::AwsErrorPreConditionFailed:
     case ExtendStatusCode::TxnExhaustedRetry:
     case ExtendStatusCode::TxnResolutionFailed:
+    case ExtendStatusCode::SourceAuthDenied:
+    case ExtendStatusCode::SourceAuthExpired:
+    case ExtendStatusCode::SourceAuthCancelled:
+    case ExtendStatusCode::SourceAuthInvalidResponse:
       // S3 precondition / transaction failures: conservatively permanent here
       // (the precondition genuinely failed, or the transaction-level retry
       // budget is already spent).

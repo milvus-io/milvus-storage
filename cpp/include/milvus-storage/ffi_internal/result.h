@@ -45,20 +45,26 @@
     return CreateFFIResult((code), ##__VA_ARGS__); \
   } while (0)
 
-#define RETURN_ARROW_ERROR(status, fallback, ...)                               \
-  do {                                                                          \
-    auto ffi_status__ = (status);                                               \
-    auto ffi_err_code__ = FFIErrorCodeFromExtendStatus(ffi_status__, fallback); \
-    RETURN_ERROR(ffi_err_code__, ##__VA_ARGS__);                                \
-  } while (0)
-
-#define RETURN_ARROW_ERROR_IF(status, fallback, ...)                              \
+#define RETURN_ARROW_ERROR(status, fallback, ...)                                 \
   do {                                                                            \
     auto ffi_status__ = (status);                                                 \
-    if (!ffi_status__.ok()) {                                                     \
-      auto ffi_err_code__ = FFIErrorCodeFromExtendStatus(ffi_status__, fallback); \
-      RETURN_ERROR(ffi_err_code__, ##__VA_ARGS__);                                \
+    auto ffi_err_code__ = FFIErrorCodeFromExtendStatus(ffi_status__, fallback);   \
+    if (milvus_storage::ffi_internal::IsSourceAuthFFIErrorCode(ffi_err_code__)) { \
+      RETURN_ERROR(ffi_err_code__);                                               \
     }                                                                             \
+    RETURN_ERROR(ffi_err_code__, ##__VA_ARGS__);                                  \
+  } while (0)
+
+#define RETURN_ARROW_ERROR_IF(status, fallback, ...)                                \
+  do {                                                                              \
+    auto ffi_status__ = (status);                                                   \
+    if (!ffi_status__.ok()) {                                                       \
+      auto ffi_err_code__ = FFIErrorCodeFromExtendStatus(ffi_status__, fallback);   \
+      if (milvus_storage::ffi_internal::IsSourceAuthFFIErrorCode(ffi_err_code__)) { \
+        RETURN_ERROR(ffi_err_code__);                                               \
+      }                                                                             \
+      RETURN_ERROR(ffi_err_code__, ##__VA_ARGS__);                                  \
+    }                                                                               \
   } while (0)
 
 #define RETURN_UNREACHABLE() RETURN_ERROR(LOON_UNREACHABLE_ERROR);
@@ -66,6 +72,13 @@
 std::string error_to_string(int code);
 
 namespace milvus_storage::ffi_internal {
+
+// Source authorization failures have a finite, non-secret vocabulary. Never
+// append a caller's path, issuer body or exception text at the C ABI boundary.
+inline bool IsSourceAuthFFIErrorCode(int code) {
+  return code == LOON_SOURCE_AUTH_DENIED || code == LOON_SOURCE_AUTH_EXPIRED || code == LOON_SOURCE_AUTH_TRANSIENT ||
+         code == LOON_SOURCE_AUTH_CANCELLED || code == LOON_SOURCE_AUTH_INVALID_RESPONSE;
+}
 
 inline int FFIErrorCodeFromExtendStatusCode(milvus_storage::ExtendStatusCode code, int fallback) {
   if (milvus_storage::ExtendStatusCodeFromInt(static_cast<int>(code)).has_value()) {

@@ -19,6 +19,19 @@
 namespace milvus_storage {
 
 class ParquetFormat final : public PlainFormat {
+  public:
+  arrow::Result<std::vector<api::ColumnGroupFile>> explore_with_context(
+      const std::string& explore_dir,
+      const std::shared_ptr<const api::Properties>& properties,
+      SourceReadContextPtr context) override;
+  arrow::Result<std::shared_ptr<FormatReader>> create_reader_with_context(
+      const std::shared_ptr<arrow::Schema>& read_schema,
+      const api::ColumnGroupFile& file,
+      const std::shared_ptr<const api::Properties>& properties,
+      const std::vector<std::string>& needed_columns,
+      const std::function<std::string(const std::string&)>& key_retriever,
+      SourceReadContextPtr context) override;
+
   protected:
   [[nodiscard]] std::shared_ptr<FormatReader> make_reader(
       const std::shared_ptr<arrow::fs::FileSystem>& fs,

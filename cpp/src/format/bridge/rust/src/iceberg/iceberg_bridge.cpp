@@ -18,6 +18,34 @@
 
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"
+#include "iceberg/source_uri_bridge.h"
+#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/ffi_internal/result.h"
+
+namespace milvus_storage::iceberg::ffi {
+SourceUriResult resolve_source_uri(const FileSystemWrapper& filesystem, rust::Str uri) noexcept {
+  SourceUriResult result{};
+  try {
+    auto source = std::dynamic_pointer_cast<SourceFileSystemProxy>(filesystem.get());
+    if (!source)
+      return result;
+    result.is_source = true;
+    auto path = source->PathFromUri(std::string(uri.data(), uri.size()));
+    if (!path.ok()) {
+      result.error_code = FFIErrorCodeFromExtendStatus(path.status());
+      if (!result.error_code)
+        result.error_code = LOON_LOGICAL_ERROR;
+      return result;
+    }
+    result.path = rust::String(*path);
+  } catch (const std::bad_alloc&) {
+    result.error_code = LOON_MEMORY_ERROR;
+  } catch (...) {
+    result.error_code = LOON_GOT_EXCEPTION;
+  }
+  return result;
+}
+}  // namespace milvus_storage::iceberg::ffi
 
 namespace milvus_storage::iceberg {
 

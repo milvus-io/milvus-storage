@@ -339,6 +339,16 @@ pub struct LoonFFIError {
     message: String,
 }
 
+impl LoonFFIError {
+    pub(crate) fn from_code(err_code: i32, context: &str, message: &str) -> Self {
+        Self {
+            err_code,
+            context: context.to_owned(),
+            message: message.to_owned(),
+        }
+    }
+}
+
 impl std::fmt::Display for LoonFFIError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
