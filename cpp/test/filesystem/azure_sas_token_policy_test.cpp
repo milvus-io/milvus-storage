@@ -27,6 +27,10 @@
 #include <azure/core/internal/client_options.hpp>
 #include <azure/core/internal/http/pipeline.hpp>
 #include <azure/core/io/body_stream.hpp>
+#include <azure/storage/blobs/blob_client.hpp>
+#include <azure/storage/common/storage_exception.hpp>
+#include <azure/storage/files/datalake/datalake_file_client.hpp>
+#include <functional>
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
@@ -56,6 +60,8 @@ static std::string SuccessResponse(const std::string& account, const std::string
 
 class MockTransport final : public Azure::Core::Http::HttpTransport {
   public:
+  explicit MockTransport(std::function<void()> on_send = {}) : on_send_(std::move(on_send)) {}
+
   struct RequestRecord {
     std::string method;
     std::string url;
@@ -70,6 +76,8 @@ class MockTransport final : public Azure::Core::Http::HttpTransport {
 
   std::unique_ptr<Azure::Core::Http::RawResponse> Send(Azure::Core::Http::Request& request,
                                                        const Azure::Core::Context& context) override {
+    if (on_send_)
+      on_send_();
     auto* stream = request.GetBodyStream();
     std::string body;
     if (stream != nullptr) {
@@ -100,6 +108,7 @@ class MockTransport final : public Azure::Core::Http::HttpTransport {
   }
 
   private:
+  const std::function<void()> on_send_;
   mutable std::mutex mutex_;
   std::deque<std::pair<Azure::Core::Http::HttpStatusCode, std::string>> responses_;
   std::deque<std::vector<uint8_t>> streamed_response_bodies_;
@@ -185,11 +194,11 @@ TEST(AzureSasTokenPolicyTest, SendsBrokerContractAndNormalizesToken) {
   EXPECT_EQ(body["azureAccountName"].get<std::string>(), "account");
 }
 
-TEST(AzureSasTokenPolicyTest, PerOperationPolicyKeepsSasAcrossSdkRetries) {
+TEST(AzureSasTokenPolicyTest, PerRetryPolicyReusesValidSasAcrossSdkRetries) {
   const auto now = std::chrono::system_clock::from_time_t(1785146400);
   auto broker_transport = std::make_shared<MockTransport>();
   broker_transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
-                            SuccessResponse("account", "sv=1&sig=retry", now + std::chrono::seconds(30)));
+                            SuccessResponse("account", "sv=1&sig=retry", now + std::chrono::seconds(120)));
   AzureSasTokenPolicy policy(MakeConfig(), broker_transport, [now] { return now; });
 
   auto storage_transport = std::make_shared<MockTransport>();
@@ -197,7 +206,7 @@ TEST(AzureSasTokenPolicyTest, PerOperationPolicyKeepsSasAcrossSdkRetries) {
   storage_transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, "");
 
   Azure::Core::_internal::ClientOptions options;
-  options.PerOperationPolicies.emplace_back(policy.Clone());
+  options.PerRetryPolicies.emplace_back(policy.Clone());
   options.Retry.MaxRetries = 1;
   options.Retry.RetryDelay = std::chrono::milliseconds(0);
   options.Retry.MaxRetryDelay = std::chrono::milliseconds(0);
@@ -396,6 +405,107 @@ TEST(AzureSasTokenPolicyTest, InitialFetchFailureDoesNotSendAnonymousRequest) {
   EXPECT_NE(response->GetReasonPhrase().find("status_code=500"), std::string::npos);
   EXPECT_EQ(response->GetReasonPhrase().find("secret response body"), std::string::npos);
   EXPECT_FALSE(called);
+}
+
+TEST(AzureSasTokenPolicyTest, RenewsSasWhenItExpiresBetweenStorageAttempts) {
+  auto now = std::make_shared<TimePoint>(std::chrono::system_clock::from_time_t(1785146400));
+  auto broker = std::make_shared<MockTransport>();
+  broker->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                  SuccessResponse("account", "sv=1&skoid=old-owner&sig=old", *now + std::chrono::seconds(120)));
+  broker->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                  SuccessResponse("account", "sv=2&sig=new", *now + std::chrono::hours(1)));
+  AzureSasTokenPolicy policy(MakeConfig(), broker, [now] { return *now; });
+
+  unsigned attempts = 0;
+  auto storage = std::make_shared<MockTransport>([&] {
+    // Model a slow failed request/backoff consuming the original lease.
+    if (++attempts == 1)
+      *now += std::chrono::seconds(121);
+  });
+  storage->Enqueue(Azure::Core::Http::HttpStatusCode::ServiceUnavailable, "");
+  storage->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, "");
+  Azure::Core::_internal::ClientOptions options;
+  options.PerRetryPolicies.emplace_back(policy.Clone());
+  options.Retry.MaxRetries = 1;
+  options.Retry.RetryDelay = std::chrono::milliseconds(0);
+  options.Retry.MaxRetryDelay = std::chrono::milliseconds(0);
+  options.Transport.Transport = storage;
+  Azure::Core::Http::_internal::HttpPipeline pipeline(options, "test", "1.0.0", {}, {});
+
+  Azure::Core::Http::Request request(
+      Azure::Core::Http::HttpMethod::Get,
+      Azure::Core::Url("https://account.blob.core.windows.net/container/file?comp=metadata"));
+  auto response = pipeline.Send(request, Azure::Core::Context());
+  ASSERT_EQ(response->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+  const auto requests = storage->Requests();
+  ASSERT_EQ(requests.size(), 2);
+  const auto first = Azure::Core::Url(requests[0].url).GetQueryParameters();
+  const auto second = Azure::Core::Url(requests[1].url).GetQueryParameters();
+  EXPECT_EQ(first.at("sig"), "old");
+  EXPECT_EQ(second.at("sig"), "new");
+  EXPECT_EQ(second.at("sv"), "2");
+  EXPECT_EQ(second.at("comp"), "metadata");
+  // Azure restores operation parameters before retry. Fields belonging only
+  // to the old SAS must not contaminate the replacement credential.
+  EXPECT_FALSE(second.contains("skoid"));
+  EXPECT_EQ(broker->Requests().size(), 2);
+}
+
+TEST(AzureSasTokenPolicyTest, BlobAndDataLakeClientsRefreshPerAttempt) {
+  for (const bool data_lake : {false, true}) {
+    for (const int scenario : {0, 1}) {  // valid lease, expired lease
+      SCOPED_TRACE(data_lake);
+      SCOPED_TRACE(scenario);
+      auto now = std::make_shared<TimePoint>(std::chrono::system_clock::from_time_t(1785146400));
+      auto broker = std::make_shared<MockTransport>();
+      broker->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                      SuccessResponse("account", "sv=1&skoid=old-owner&sig=old", *now + std::chrono::seconds(120)));
+      broker->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                      SuccessResponse("account", "sv=2&sig=new", *now + std::chrono::hours(1)));
+      AzureSasTokenPolicy policy(MakeConfig(), broker, [now] { return *now; });
+      unsigned attempts = 0;
+      auto storage = std::make_shared<MockTransport>([&] {
+        if (++attempts == 1 && scenario != 0)
+          *now += std::chrono::seconds(121);
+      });
+      storage->Enqueue(Azure::Core::Http::HttpStatusCode::ServiceUnavailable, "");
+      // Stop after a real SDK retry without depending on success-body parsing.
+      storage->Enqueue(Azure::Core::Http::HttpStatusCode::NotFound, "");
+      auto configure = [&](auto& options) {
+        options.PerRetryPolicies.emplace_back(policy.Clone());
+        options.Retry.MaxRetries = 1;
+        options.Retry.RetryDelay = std::chrono::milliseconds(0);
+        options.Retry.MaxRetryDelay = std::chrono::milliseconds(0);
+        options.Transport.Transport = storage;
+      };
+      try {
+        if (data_lake) {
+          Azure::Storage::Files::DataLake::DataLakeClientOptions options;
+          configure(options);
+          Azure::Storage::Files::DataLake::DataLakeFileClient client(
+              "https://account.dfs.core.windows.net/container/file", options);
+          client.GetProperties();
+        } else {
+          Azure::Storage::Blobs::BlobClientOptions options;
+          configure(options);
+          Azure::Storage::Blobs::BlobClient client("https://account.blob.core.windows.net/container/file", options);
+          client.GetProperties();
+        }
+        FAIL() << "Expected the injected final response";
+      } catch (const Azure::Storage::StorageException& error) {
+        EXPECT_EQ(error.StatusCode, Azure::Core::Http::HttpStatusCode::NotFound);
+      }
+      const auto requests = storage->Requests();
+      ASSERT_EQ(requests.size(), 2);
+      EXPECT_EQ(broker->Requests().size(), scenario == 0 ? 1 : 2);
+      EXPECT_EQ(Azure::Core::Url(requests[0].url).GetQueryParameters().at("sig"), "old");
+      {
+        const auto retried = Azure::Core::Url(requests[1].url).GetQueryParameters();
+        EXPECT_EQ(retried.at("sig"), scenario == 0 ? "old" : "new");
+        EXPECT_EQ(retried.contains("skoid"), scenario == 0);
+      }
+    }
+  }
 }
 
 }  // namespace milvus_storage::fs
