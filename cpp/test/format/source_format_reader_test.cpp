@@ -36,6 +36,7 @@
 #include <arrow/io/file.h>
 #include <arrow/util/io_util.h>
 #include <parquet/arrow/writer.h>
+#include <parquet/file_reader.h>
 #include <azure/core/datetime.hpp>
 #include <azure/core/io/body_stream.hpp>
 #include <gtest/gtest.h>
@@ -413,7 +414,11 @@ TEST(SourceFormatReaderTest, NativeLanceReaderRetainsContextAcrossRenewalAndIsol
   }
 }
 
-TEST(SourceFormatReaderTest, NativeIcebergPlansFullMetadataTreeAndReadsThroughSourceContext) {
+class SourceIcebergPlanTest : public ::testing::TestWithParam<bool> {};
+
+TEST_P(SourceIcebergPlanTest, PlansMetadataDataAndDeletesThroughSourceContext) {
+  const bool with_deletes = GetParam();
+  const int64_t visible_rows = with_deletes ? 17 : 20;
   auto directory = arrow::internal::TemporaryDir::Make("source-ice-");
   ASSERT_TRUE(directory.ok()) << directory.status();
   auto temporary = (*directory)->path().ToString();
@@ -421,13 +426,14 @@ TEST(SourceFormatReaderTest, NativeIcebergPlansFullMetadataTreeAndReadsThroughSo
   const std::string remote_root = kRoot;
   ASSERT_LT(temporary.size() + 1, remote_root.size());
   const auto local_root = temporary + "/" + std::string(remote_root.size() - temporary.size() - 1, 'x');
-  auto table = iceberg::CreateTestTable(local_root, 20, false, {});
+  auto table = iceberg::CreateTestTable(local_root, 20, with_deletes, {2, 5, 10});
   ASSERT_TRUE(table.ok()) << table.status();
   auto transport = std::make_shared<ParquetTransport>();
   size_t rewritten_files = 0;
-  // The test writer emits uncompressed Avro metadata. An equal-byte-length
-  // replacement preserves its string length varints and block lengths. Read
-  // the resulting metadata through the actual Rust planner below, not a stub.
+  // The test writer emits uncompressed Avro metadata and Parquet deletes.
+  // Equal-byte-length replacement preserves string lengths, offsets, statistics
+  // and file sizes. Verify delete compression before rewriting its file paths;
+  // then decode the entire tree through the actual planner and native reader.
   for (const auto& entry : std::filesystem::recursive_directory_iterator(local_root)) {
     if (!entry.is_regular_file())
       continue;
@@ -436,7 +442,16 @@ TEST(SourceFormatReaderTest, NativeIcebergPlansFullMetadataTreeAndReadsThroughSo
     auto bytes = (*input)->Read(static_cast<int64_t>(entry.file_size()));
     ASSERT_TRUE(bytes.ok());
     std::string contents = (*bytes)->ToString();
-    if (entry.path().extension() == ".json" || entry.path().extension() == ".avro") {
+    const bool delete_file = entry.path().filename() == "00000-0-pos-delete.parquet";
+    if (delete_file) {
+      auto parquet = ::parquet::ParquetFileReader::Open(std::make_shared<arrow::io::BufferReader>(*bytes));
+      for (int group = 0; group < parquet->metadata()->num_row_groups(); ++group) {
+        auto metadata = parquet->metadata()->RowGroup(group);
+        for (int column = 0; column < metadata->num_columns(); ++column)
+          ASSERT_EQ(metadata->ColumnChunk(column)->compression(), ::parquet::Compression::UNCOMPRESSED);
+      }
+    }
+    if (entry.path().extension() == ".json" || entry.path().extension() == ".avro" || delete_file) {
       size_t count = 0;
       for (size_t pos = 0; (pos = contents.find(local_root, pos)) != std::string::npos; pos += remote_root.size()) {
         contents.replace(pos, local_root.size(), remote_root);
@@ -472,7 +487,7 @@ TEST(SourceFormatReaderTest, NativeIcebergPlansFullMetadataTreeAndReadsThroughSo
     ASSERT_TRUE(files.ok()) << files.status();
     ASSERT_EQ(files->size(), 1);
     EXPECT_EQ(files->front().path, remote_root + "/data/00000-0-data.parquet");
-    EXPECT_EQ(files->front().end_index, 20);
+    EXPECT_EQ(files->front().end_index, visible_rows);
     auto groups = std::make_shared<api::ColumnGroups>();
     groups->push_back(std::make_shared<api::ColumnGroup>(
         api::ColumnGroup{{"id", "name", "value"}, LOON_FORMAT_ICEBERG_TABLE, *files}));
@@ -480,10 +495,17 @@ TEST(SourceFormatReaderTest, NativeIcebergPlansFullMetadataTreeAndReadsThroughSo
                                  arrow::field("value", arrow::float64())});
     auto reader = api::Reader::create_with_context(groups, schema, nullptr, properties, context);
     ASSERT_TRUE(reader.ok()) << reader.status();
-    auto result = std::move((*reader)->take_async({0, 19})).get();
+    auto result = std::move((*reader)->take_async({0, visible_rows - 1})).get();
     ASSERT_TRUE(result.ok()) << result.status();
     ASSERT_EQ((*result)->num_rows(), 2);
     EXPECT_EQ((*result)->column(0)->GetScalar(1).ValueOrDie()->ToString(), "19");
+    if (with_deletes) {
+      auto retained = (*reader)->take({1, 2, 3, 4, 7, 8});
+      ASSERT_TRUE(retained.ok()) << retained.status();
+      const std::vector<int64_t> expected = {1, 3, 4, 6, 9, 11};
+      for (size_t i = 0; i < expected.size(); ++i)
+        EXPECT_EQ((*retained)->column(0)->GetScalar(i).ValueOrDie()->ToString(), std::to_string(expected[i]));
+    }
   }
   EXPECT_GE(provider->calls.load(), 3);
   provider->now.fetch_add(121000);
@@ -492,6 +514,21 @@ TEST(SourceFormatReaderTest, NativeIcebergPlansFullMetadataTreeAndReadsThroughSo
   EXPECT_EQ(FFIErrorCodeFromExtendStatus(failed.status()), LOON_SOURCE_AUTH_TRANSIENT);
   provider->failure = LOON_SOURCE_CREDENTIAL_OK;
   ASSERT_TRUE((*format)->explore_with_context(metadata_uri, properties, context).ok());
+
+  if (with_deletes) {
+    auto& deletes = transport->files.at("tables/team/table/metadata/manifest-deletes-0.avro");
+    const auto original = deletes;
+    auto corrupted = deletes->ToString();
+    const auto position = corrupted.find(remote_root);
+    ASSERT_NE(position, std::string::npos);
+    auto other_root = remote_root;
+    other_root.replace(other_root.find("acct"), 4, "othr");
+    corrupted.replace(position, remote_root.size(), other_root);
+    deletes = arrow::Buffer::FromString(std::move(corrupted));
+    auto denied = (*format)->explore_with_context(metadata_uri, properties, context);
+    EXPECT_EQ(FFIErrorCodeFromExtendStatus(denied.status()), LOON_SOURCE_AUTH_DENIED);
+    deletes = original;
+  }
 
   // A manifest reference with the same container/key on another account must
   // be rejected while its original authority is still available to the planner.
@@ -506,6 +543,8 @@ TEST(SourceFormatReaderTest, NativeIcebergPlansFullMetadataTreeAndReadsThroughSo
   auto denied = (*format)->explore_with_context(metadata_uri, properties, context);
   EXPECT_EQ(FFIErrorCodeFromExtendStatus(denied.status()), LOON_SOURCE_AUTH_DENIED);
 }
+
+INSTANTIATE_TEST_SUITE_P(WithoutAndWithDeletes, SourceIcebergPlanTest, ::testing::Values(false, true));
 
 TEST(SourceFormatReaderTest, NativeIcebergReaderAppliesScopedDeletesAndRejectsWrongAccountRows) {
   auto encode = [](const std::shared_ptr<arrow::Table>& table) -> arrow::Result<std::shared_ptr<arrow::Buffer>> {
