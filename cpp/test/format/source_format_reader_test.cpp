@@ -16,6 +16,7 @@
 #include "milvus-storage/reader.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/format.h"
+#include "iceberg/iceberg_bridge.h"
 #include "milvus-storage/format/lance/lance_table_writer.h"
 #include "milvus-storage/format/lance/lance_common.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
@@ -410,6 +411,100 @@ TEST(SourceFormatReaderTest, NativeLanceReaderRetainsContextAcrossRenewalAndIsol
     ExpectSource(std::move(pending).get().status(), LOON_SOURCE_CREDENTIAL_CANCELLED);
     ExpectSource((*chunk)->get_chunk(0).status(), LOON_SOURCE_CREDENTIAL_CANCELLED);
   }
+}
+
+TEST(SourceFormatReaderTest, NativeIcebergPlansFullMetadataTreeAndReadsThroughSourceContext) {
+  auto directory = arrow::internal::TemporaryDir::Make("source-ice-");
+  ASSERT_TRUE(directory.ok()) << directory.status();
+  auto temporary = (*directory)->path().ToString();
+  while (temporary.ends_with('/')) temporary.pop_back();
+  const std::string remote_root = kRoot;
+  ASSERT_LT(temporary.size() + 1, remote_root.size());
+  const auto local_root = temporary + "/" + std::string(remote_root.size() - temporary.size() - 1, 'x');
+  auto table = iceberg::CreateTestTable(local_root, 20, false, {});
+  ASSERT_TRUE(table.ok()) << table.status();
+  auto transport = std::make_shared<ParquetTransport>();
+  size_t rewritten_files = 0;
+  // The test writer emits uncompressed Avro metadata. An equal-byte-length
+  // replacement preserves its string length varints and block lengths. Read
+  // the resulting metadata through the actual Rust planner below, not a stub.
+  for (const auto& entry : std::filesystem::recursive_directory_iterator(local_root)) {
+    if (!entry.is_regular_file())
+      continue;
+    auto input = arrow::io::ReadableFile::Open(entry.path().string());
+    ASSERT_TRUE(input.ok());
+    auto bytes = (*input)->Read(static_cast<int64_t>(entry.file_size()));
+    ASSERT_TRUE(bytes.ok());
+    std::string contents = (*bytes)->ToString();
+    if (entry.path().extension() == ".json" || entry.path().extension() == ".avro") {
+      size_t count = 0;
+      for (size_t pos = 0; (pos = contents.find(local_root, pos)) != std::string::npos; pos += remote_root.size()) {
+        contents.replace(pos, local_root.size(), remote_root);
+        ++count;
+      }
+      ASSERT_GT(count, 0) << entry.path().filename();
+      ++rewritten_files;
+    }
+    transport->files["tables/team/table/" + std::filesystem::relative(entry.path(), local_root).generic_string()] =
+        arrow::Buffer::FromString(std::move(contents));
+  }
+  ASSERT_GE(rewritten_files, 3);
+  auto provider = std::make_shared<Provider>();
+  auto context = Context(provider);
+  fs::AzureOptions options;
+  options.account_name = "acct";
+  ASSERT_TRUE(options.ConfigureSourceReadContext(context, transport).ok());
+  auto native = fs::AzureFileSystem::Make(options);
+  ASSERT_TRUE(native.ok());
+  auto binding = AzureSourceStorageBinding::Create("acct", "core.windows.net", "tables");
+  ASSERT_TRUE(binding);
+  auto filesystem = std::make_shared<SourceFileSystemProxy>("tables", *native, context, *binding);
+  auto properties = Properties();
+  const auto metadata_uri = remote_root + "/metadata/v1.metadata.json";
+  ASSERT_TRUE(SourceFilesystemTestAccess::Install(properties, metadata_uri, context, filesystem).ok());
+  auto format = Format::get(LOON_FORMAT_ICEBERG_TABLE);
+  ASSERT_TRUE(format.ok());
+  for (int round = 0; round < 3; ++round) {
+    SCOPED_TRACE(round);
+    if (round)
+      provider->now.fetch_add(121000);
+    auto files = (*format)->explore_with_context(metadata_uri, properties, context);
+    ASSERT_TRUE(files.ok()) << files.status();
+    ASSERT_EQ(files->size(), 1);
+    EXPECT_EQ(files->front().path, remote_root + "/data/00000-0-data.parquet");
+    EXPECT_EQ(files->front().end_index, 20);
+    auto groups = std::make_shared<api::ColumnGroups>();
+    groups->push_back(std::make_shared<api::ColumnGroup>(
+        api::ColumnGroup{{"id", "name", "value"}, LOON_FORMAT_ICEBERG_TABLE, *files}));
+    auto schema = arrow::schema({arrow::field("id", arrow::int64()), arrow::field("name", arrow::utf8()),
+                                 arrow::field("value", arrow::float64())});
+    auto reader = api::Reader::create_with_context(groups, schema, nullptr, properties, context);
+    ASSERT_TRUE(reader.ok()) << reader.status();
+    auto result = std::move((*reader)->take_async({0, 19})).get();
+    ASSERT_TRUE(result.ok()) << result.status();
+    ASSERT_EQ((*result)->num_rows(), 2);
+    EXPECT_EQ((*result)->column(0)->GetScalar(1).ValueOrDie()->ToString(), "19");
+  }
+  EXPECT_GE(provider->calls.load(), 3);
+  provider->now.fetch_add(121000);
+  provider->failure = LOON_SOURCE_CREDENTIAL_TRANSIENT;
+  auto failed = (*format)->explore_with_context(metadata_uri, properties, context);
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(failed.status()), LOON_SOURCE_AUTH_TRANSIENT);
+  provider->failure = LOON_SOURCE_CREDENTIAL_OK;
+  ASSERT_TRUE((*format)->explore_with_context(metadata_uri, properties, context).ok());
+
+  // A manifest reference with the same container/key on another account must
+  // be rejected while its original authority is still available to the planner.
+  auto& manifest = transport->files.at("tables/team/table/metadata/manifest-data-0.avro");
+  auto corrupted = manifest->ToString();
+  const auto position = corrupted.find(remote_root);
+  ASSERT_NE(position, std::string::npos);
+  auto other_root = remote_root;
+  other_root.replace(other_root.find("acct"), 4, "othr");
+  corrupted.replace(position, remote_root.size(), other_root);
+  manifest = arrow::Buffer::FromString(std::move(corrupted));
+  auto denied = (*format)->explore_with_context(metadata_uri, properties, context);
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(denied.status()), LOON_SOURCE_AUTH_DENIED);
 }
 
 TEST(SourceFormatReaderTest, NativeIcebergReaderAppliesScopedDeletesAndRejectsWrongAccountRows) {

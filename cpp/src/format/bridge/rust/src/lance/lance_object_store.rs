@@ -289,11 +289,33 @@ pub(crate) struct FFIObjectStoreProvider {
 }
 
 impl FFIObjectStoreProvider {
+    fn validate_source_uri(filesystem: &SharedPtr<FileSystemWrapper>, url: &Url) -> Result<()> {
+        // A URI inside a Lance manifest is not authority. Check the complete
+        // reference against the retained source binding before the generic
+        // mapper discards userinfo, query, fragment, or the container name.
+        // Ordinary filesystems return is_source=false and preserve legacy behavior.
+        if let Some(filesystem) = filesystem.as_ref() {
+            let resolved = crate::iceberg_ffi::resolve_source_uri(filesystem, url.as_str());
+            if resolved.error_code != 0 {
+                return Err(LanceError::IO {
+                    source: Box::new(crate::filesystem_c::LoonFFIError::from_code(
+                        resolved.error_code,
+                        "source URI binding",
+                        "native validation failed",
+                    )),
+                    location: snafu::location!(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn new(
         filesystem: SharedPtr<FileSystemWrapper>,
         dataset_url: &Url,
         options: &FFIReadOptions,
     ) -> Result<Self> {
+        Self::validate_source_uri(&filesystem, dataset_url)?;
         Ok(Self {
             filesystem,
             mapper: options.path_mapper(dataset_url)?,
@@ -351,9 +373,7 @@ impl std::fmt::Debug for FFIObjectStoreProvider {
 #[async_trait::async_trait]
 impl ObjectStoreProvider for FFIObjectStoreProvider {
     async fn new_store(&self, base_path: Url, _params: &ObjectStoreParams) -> Result<ObjectStore> {
-        self.mapper
-            .from_url(&base_path)
-            .map_err(|error| LanceError::invalid_input(error.to_string()))?;
+        self.extract_path(&base_path)?;
 
         // Build the read-only adapter first, then apply AIMD exactly once below.
         // The scheduler may retain that wrapped store, making its limiter shared.
@@ -380,6 +400,7 @@ impl ObjectStoreProvider for FFIObjectStoreProvider {
     }
 
     fn extract_path(&self, url: &Url) -> Result<object_store::path::Path> {
+        Self::validate_source_uri(&self.filesystem, url)?;
         self.mapper
             .from_url(url)
             .map_err(|error| LanceError::invalid_input(error.to_string()))

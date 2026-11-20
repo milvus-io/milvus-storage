@@ -216,6 +216,21 @@ TEST_F(SourceReaderTest, LanceReaderUsesSourceProviderThroughNativeRustBridge) {
   }
 }
 
+TEST_F(SourceReaderTest, LanceRustAdapterValidatesCompleteUrisBeforeCredentialAcquisition) {
+  for (const auto* uri :
+       {"az://hidden@tables/team/table", "az://tables:443/team/table", "az://tables/team/table?sig=hidden",
+        "az://tables/team/table#hidden", "az://other/team/table", "az://tables/team/other"}) {
+    SCOPED_TRACE(uri);
+    auto location = lance::ResolveSourceLanceLocation(kRoot, Properties(), Context());
+    ASSERT_TRUE(location.ok()) << location.status();
+    provider->calls = 0;
+    auto opened = lance::BlockingDataset::Open(uri, location->source.filesystem, location->options, 1);
+    ExpectSource(opened.status(), LOON_SOURCE_AUTH_DENIED);
+    EXPECT_EQ(provider->calls, 0);
+    EXPECT_EQ(opened.status().ToString().find("hidden"), std::string::npos);
+  }
+}
+
 TEST_F(SourceReaderTest, IcebergPlannerPreservesEveryProviderFailureThroughRustAndCxx) {
   auto format = Format::get(LOON_FORMAT_ICEBERG_TABLE);
   ASSERT_TRUE(format.ok());
