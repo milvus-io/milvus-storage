@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Integration tests for reading external tables (Lance, Iceberg) on S3.
+// Integration tests for reading external tables, including Lance, Iceberg, and Delta Lake.
 // These tests require:
 //   STORAGE_TYPE=remote  CLOUD_PROVIDER=aws
 //   ADDRESS=<s3-endpoint>  BUCKET_NAME=<bucket>  REGION=<region>
@@ -49,6 +49,7 @@
 #include "milvus-storage/transaction/transaction.h"
 #include "lance/lance_bridge.h"
 #include "iceberg/iceberg_bridge.h"
+#include "deltalake_test_util.h"
 #include "test_env.h"
 
 namespace milvus_storage {
@@ -217,6 +218,8 @@ class ExternalTableTest : public ::testing::TestWithParam<std::string> {
       return CreateLanceTable(num_rows);
     } else if (format == LOON_FORMAT_ICEBERG_TABLE) {
       return CreateIcebergTable(num_rows);
+    } else if (format == LOON_FORMAT_DELTALAKE_TABLE) {
+      return CreateDeltaTable(num_rows, {});
     }
     return arrow::Status::Invalid("Unknown format: " + format);
   }
@@ -229,6 +232,8 @@ class ExternalTableTest : public ::testing::TestWithParam<std::string> {
       return CreateLanceTableWithDeletes(num_rows, deleted_ids);
     } else if (format == LOON_FORMAT_ICEBERG_TABLE) {
       return CreateIcebergTableWithDeletes(num_rows, deleted_ids);
+    } else if (format == LOON_FORMAT_DELTALAKE_TABLE) {
+      return CreateDeltaTable(num_rows, deleted_ids);
     }
     return arrow::Status::Invalid("Unknown format: " + format);
   }
@@ -253,6 +258,18 @@ class ExternalTableTest : public ::testing::TestWithParam<std::string> {
   std::string test_base_;
 
   private:
+  arrow::Result<WriteResult> CreateDeltaTable(uint64_t num_rows, std::span<const int64_t> deleted_ids) {
+    const auto path = test_base_ + "/delta";
+    ARROW_ASSIGN_OR_RAISE(auto schema, deltalake::test::WriteTable(fs_, path, num_rows, 1, deleted_ids));
+    ARROW_ASSIGN_OR_RAISE(auto uri, deltalake::test::ExploreUri(fs_config_, path));
+    ARROW_ASSIGN_OR_RAISE(auto* format, Format::get(LOON_FORMAT_DELTALAKE_TABLE));
+    ARROW_ASSIGN_OR_RAISE(auto files, format->explore(uri, std::make_shared<const api::Properties>(properties_)));
+    if (files.size() != 1) {
+      return arrow::Status::Invalid("Expected exactly one Delta data file, got ", files.size());
+    }
+    return WriteResult{std::move(files.front()), std::move(schema), num_rows};
+  }
+
   arrow::Result<WriteResult> CreateLanceTable(uint64_t num_rows) {
     ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
     ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
@@ -457,6 +474,9 @@ class ExternalSplitColumnGroupTest : public ::testing::TestWithParam<std::string
     if (format == LOON_FORMAT_LANCE_TABLE) {
       return WriteLanceSplitFiles();
     }
+    if (format == LOON_FORMAT_DELTALAKE_TABLE) {
+      return WriteDeltaFiles();
+    }
 
     ARROW_ASSIGN_OR_RAISE(auto file, WriteFormatFile(format));
     auto first_file = file;
@@ -517,6 +537,15 @@ class ExternalSplitColumnGroupTest : public ::testing::TestWithParam<std::string
     }
 
     return files;
+  }
+
+  arrow::Result<std::vector<api::ColumnGroupFile>> WriteDeltaFiles() {
+    // Delta descriptors span whole data files.
+    const auto path = test_base_ + "/delta";
+    ARROW_RETURN_NOT_OK(deltalake::test::WriteTable(fs_, path, kSplitExternalRowsPerFile, 2).status());
+    ARROW_ASSIGN_OR_RAISE(auto uri, deltalake::test::ExploreUri(fs_config_, path));
+    ARROW_ASSIGN_OR_RAISE(auto* format, Format::get(LOON_FORMAT_DELTALAKE_TABLE));
+    return format->explore(uri, std::make_shared<const api::Properties>(properties_));
   }
 
   arrow::Result<api::ColumnGroupFile> WriteIcebergFile() {
@@ -630,10 +659,13 @@ TEST_P(ExternalSplitColumnGroupTest, TwoMillionRowsSplitIntoMillionRowFilesReada
   VerifyChunks(batched_chunks);
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    ExternalSplitFormats,
-    ExternalSplitColumnGroupTest,
-    ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE, LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX));
+INSTANTIATE_TEST_SUITE_P(ExternalSplitFormats,
+                         ExternalSplitColumnGroupTest,
+                         ::testing::Values(LOON_FORMAT_LANCE_TABLE,
+                                           LOON_FORMAT_ICEBERG_TABLE,
+                                           LOON_FORMAT_PARQUET,
+                                           LOON_FORMAT_VORTEX,
+                                           LOON_FORMAT_DELTALAKE_TABLE));
 
 TEST_P(ExternalTableTest, TransactionReadsManifestFromAbsoluteS3Uri) {
   if (GetParam() != LOON_FORMAT_LANCE_TABLE) {
@@ -772,7 +804,9 @@ TEST_P(ExternalTableTest, WriteAndRead) {
 
 INSTANTIATE_TEST_SUITE_P(Formats,
                          ExternalTableTest,
-                         ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE));
+                         ::testing::Values(LOON_FORMAT_LANCE_TABLE,
+                                           LOON_FORMAT_ICEBERG_TABLE,
+                                           LOON_FORMAT_DELTALAKE_TABLE));
 
 // ---------------------------------------------------------------------------
 // Parameterized: write table with deletes, read back, verify deletions
@@ -1019,12 +1053,12 @@ TEST_P(ExternalTableTest, DeleteEntireFirstRowGroup) {
 
 // ---------------------------------------------------------------------------
 // Parameterized: delete ALL rows in the file — reader should return empty data
-// Lance removes the fragment from manifest on full delete, so skip Lance.
+// Lance and Delta Lake omit fully deleted files from discovery.
 // ---------------------------------------------------------------------------
 TEST_P(ExternalTableTest, DeleteAllRows) {
   const auto& format = GetParam();
-  if (format == LOON_FORMAT_LANCE_TABLE) {
-    GTEST_SKIP() << "Lance removes fully-deleted fragments from manifest; not reachable in production";
+  if (format == LOON_FORMAT_LANCE_TABLE || format == LOON_FORMAT_DELTALAKE_TABLE) {
+    GTEST_SKIP() << "Fully deleted files are omitted from discovery for " << format;
   }
   const uint64_t num_rows = 100;
 

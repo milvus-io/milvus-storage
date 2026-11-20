@@ -387,8 +387,22 @@ pub mod deltalake_ffi {
         descriptors: Vec<GeneratedDeltaDvDescriptor>,
     }
 
+    #[repr(u8)]
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum DeltaTestTableKind {
+        Basic,
+        Appended,
+        Partitioned,
+        Checkpointed,
+    }
+
     extern "Rust" {
         type DeltaSnapshotContext;
+        fn delta_test_write_local_table(
+            path: &str,
+            num_rows: u64,
+            kind: DeltaTestTableKind,
+        ) -> Result<()>;
         fn delta_test_deletion_vector(positions: &[u64]) -> Result<GeneratedDeltaDv>;
         fn delta_test_deletion_vectors(
             vectors: Vec<DeltaDvPositions>,

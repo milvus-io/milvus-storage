@@ -32,6 +32,7 @@
 #include "milvus-storage/format/deltalake/deltalake_format_reader.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/column_group_reader.h"
+#include "runtime/bridge_util.h"
 #include "test_env.h"
 
 namespace milvus_storage {
@@ -723,11 +724,36 @@ TEST_F(DeltaExplorationTest, EmptyAndMissingTablesAndStageBoundaries) {
 // bridge. Path units below do not open Delta logs or data files.
 class DeltaReaderTest : public DeltaExplorationTest {
   protected:
+  static constexpr int64_t kKernelFixtureRows = 4;
+
   arrow::Result<std::shared_ptr<FormatReader>> Open(const api::ColumnGroupFile& file,
                                                     std::vector<std::string> columns = {},
                                                     std::shared_ptr<arrow::Schema> schema = nullptr) {
     ARROW_ASSIGN_OR_RAISE(auto* format, Format::get(LOON_FORMAT_DELTALAKE_TABLE));
     return format->create_reader(schema, file, properties_, columns, nullptr);
+  }
+
+  arrow::Result<std::string> MakeKernelTable(deltalake::ffi::DeltaTestTableKind kind) {
+    ARROW_ASSIGN_OR_RAISE(auto path, temporary_->path().Join("kernel-table"));
+    const auto table = path.ToString();
+    ARROW_RETURN_NOT_OK(arrow::fs::LocalFileSystem().CreateDir(table));
+    ARROW_RETURN_NOT_OK(CatchRustStatus("Write Delta fixture with Kernel", [&]() {
+      deltalake::ffi::delta_test_write_local_table(table, kKernelFixtureRows, kind);
+    }));
+    return table;
+  }
+
+  void CheckKernelInitialFile(const api::ColumnGroupFile& file) {
+    EXPECT_EQ(Json::parse(file.Get<std::string>(api::kPropertyMetadata))["snapshot_version"], 0);
+    EXPECT_EQ(file.start_index, 0);
+    EXPECT_EQ(file.end_index, kKernelFixtureRows);
+
+    ASSERT_AND_ASSIGN(auto reader, Open(file));
+    ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+    ASSERT_AND_ASSIGN(auto schema, CreateTestSchema({true, true, true, false}));
+    ASSERT_AND_ASSIGN(auto expected,
+                      CreateTestData(schema, 0, false, kKernelFixtureRows, 4, 50, {true, true, true, false}));
+    EXPECT_TRUE(batch->Equals(*expected)) << batch->ToString();
   }
 
   void WriteRows(const std::string& path,
@@ -904,6 +930,66 @@ TEST(DeltaRowMappingTest, EnumeratesLivePositionsAcrossDeletionPatterns) {
     for (size_t logical = 0; logical < live.size(); ++logical)
       ASSERT_EQ(deltalake::LogicalToPhysical(logical, deleted), live[logical]) << mask;
   }
+}
+
+TEST_F(DeltaReaderTest, ReadsKernelWrittenTable) {
+  ASSERT_AND_ASSIGN(auto table, MakeKernelTable(deltalake::ffi::DeltaTestTableKind::Basic));
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  ASSERT_EQ(files.size(), 1);
+  CheckKernelInitialFile(files.front());
+}
+
+TEST_F(DeltaReaderTest, ReadsKernelWrittenAppendAndHistoricalSnapshot) {
+  ASSERT_AND_ASSIGN(auto table, MakeKernelTable(deltalake::ffi::DeltaTestTableKind::Appended));
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  ASSERT_EQ(files.size(), 2);
+  std::vector<int64_t> ids;
+  for (const auto& file : files) {
+    EXPECT_EQ(Json::parse(file.Get<std::string>(api::kPropertyMetadata))["snapshot_version"], 1);
+    EXPECT_EQ(file.end_index, kKernelFixtureRows);
+    ASSERT_AND_ASSIGN(auto reader, Open(file, {"id"}));
+    ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+    auto column = std::dynamic_pointer_cast<arrow::Int64Array>(batch->column(0));
+    ASSERT_NE(column, nullptr);
+    for (int64_t row = 0; row < column->length(); ++row) {
+      ids.push_back(column->Value(row));
+    }
+  }
+  // Kernel generates the filenames, so their order need not match the commit order.
+  std::sort(ids.begin(), ids.end());
+  EXPECT_EQ(ids, (std::vector<int64_t>{0, 1, 2, 3, 4, 5, 6, 7}));
+
+  SelectVersion(0);
+  ASSERT_AND_ASSIGN(auto historical, Explore(table));
+  ASSERT_EQ(historical.size(), 1);
+  SelectVersion(-1);
+  CheckKernelInitialFile(historical.front());
+}
+
+TEST_F(DeltaReaderTest, ReadsKernelWrittenEscapedPartition) {
+  ASSERT_AND_ASSIGN(auto table, MakeKernelTable(deltalake::ffi::DeltaTestTableKind::Partitioned));
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  ASSERT_EQ(files.size(), 1);
+  ASSERT_AND_ASSIGN(auto reader, Open(files.front(), {"name", "id"}));
+  ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(0));
+  ASSERT_EQ(batch->num_rows(), kKernelFixtureRows);
+  ASSERT_EQ(batch->schema()->field_names(), (std::vector<std::string>{"name", "id"}));
+  auto names = std::dynamic_pointer_cast<arrow::StringArray>(batch->column(0));
+  auto ids = std::dynamic_pointer_cast<arrow::Int64Array>(batch->column(1));
+  ASSERT_NE(names, nullptr);
+  ASSERT_NE(ids, nullptr);
+  for (int64_t row = 0; row < kKernelFixtureRows; ++row) {
+    EXPECT_EQ(names->GetString(row), "east/west");
+    EXPECT_EQ(ids->Value(row), row);
+  }
+}
+
+TEST_F(DeltaReaderTest, ReadsKernelWrittenCheckpointWithoutJsonCommit) {
+  ASSERT_AND_ASSIGN(auto table, MakeKernelTable(deltalake::ffi::DeltaTestTableKind::Checkpointed));
+  ASSERT_TRUE(std::filesystem::remove(table + "/_delta_log/00000000000000000000.json"));
+  ASSERT_AND_ASSIGN(auto files, Explore(table));
+  ASSERT_EQ(files.size(), 1);
+  CheckKernelInitialFile(files.front());
 }
 
 TEST_F(DeltaReaderTest, ReadsEveryMethodWithDeletionVectorsAcrossGroups) {
