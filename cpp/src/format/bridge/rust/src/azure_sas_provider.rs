@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result as AnyResult, anyhow, bail};
@@ -31,7 +31,7 @@ use iceberg_storage_opendal::OpenDalStorageFactory;
 use lance_core::error::{Error as LanceError, Result as LanceResult};
 use lance_io::object_store::StorageOptionsProvider;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex as AsyncMutex, RwLock};
+use tokio::sync::{RwLock, watch};
 
 pub(crate) const AZURE_BROKER_ENDPOINT: &str = "azure_broker_endpoint";
 pub(crate) const AZURE_BROKER_CLIENT_ID: &str = "azure_broker_client_id";
@@ -327,13 +327,23 @@ impl AzureSasFetcher for AzureBrokerClient {
 
 type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
+// Share the original error rather than rendering it or wrapping it in a new
+// error type: every waiter retains the same reqwest downcast and safe chain.
+type RefreshResult = Result<(), Arc<anyhow::Error>>;
+
+#[derive(Default)]
+struct AzureSasRefreshState {
+    generation: u64,
+    in_flight: Option<watch::Receiver<Option<RefreshResult>>>,
+}
+
 pub(crate) struct AzureSasStorageOptionsProvider {
     provider_id: String,
     request_timeout_ms: u64,
     fetcher: Arc<dyn AzureSasFetcher>,
     clock: Clock,
     cached: RwLock<Option<AzureSasCredential>>,
-    refresh: AsyncMutex<u64>,
+    refresh: Mutex<AzureSasRefreshState>,
 }
 
 impl fmt::Debug for AzureSasStorageOptionsProvider {
@@ -359,7 +369,7 @@ impl AzureSasStorageOptionsProvider {
             fetcher,
             clock: Arc::new(Utc::now),
             cached: RwLock::new(None),
-            refresh: AsyncMutex::new(0),
+            refresh: Mutex::new(AzureSasRefreshState::default()),
         })
     }
 
@@ -375,7 +385,7 @@ impl AzureSasStorageOptionsProvider {
             fetcher,
             clock,
             cached: RwLock::new(None),
-            refresh: AsyncMutex::new(0),
+            refresh: Mutex::new(AzureSasRefreshState::default()),
         }
     }
 
@@ -402,32 +412,63 @@ impl AzureSasStorageOptionsProvider {
         ))))
     }
 
-    pub(crate) async fn current_credential(&self) -> AnyResult<AzureSasCredential> {
-        {
-            let cached = self.cached.read().await;
-            let now = (self.clock)();
-            if let Some(credential) = cached.as_ref()
-                && Self::is_fresh(credential, now)
+    pub(crate) async fn current_credential(
+        &self,
+    ) -> Result<AzureSasCredential, Arc<anyhow::Error>> {
+        loop {
             {
-                return Ok(credential.clone());
+                let cached = self.cached.read().await;
+                if let Some(credential) = cached.as_ref()
+                    && Self::is_fresh(credential, (self.clock)())
+                {
+                    return Ok(credential.clone());
+                }
             }
-        }
 
-        // Serialize refreshes independently of cache access. Readers may keep
-        // using a valid SAS while another caller is talking to the broker.
-        let mut generation = match self.refresh.try_lock() {
-            Ok(guard) => guard,
-            Err(_) => {
+            let (leader, mut completion) = {
+                let mut refresh = self.refresh.lock().unwrap();
+                match refresh.in_flight.as_ref() {
+                    Some(completion)
+                        if completion.has_changed().is_ok() && completion.borrow().is_none() =>
+                    {
+                        (None, completion.clone())
+                    }
+                    _ => {
+                        let (leader, completion) = watch::channel(None);
+                        refresh.in_flight = Some(completion.clone());
+                        (Some(leader), completion)
+                    }
+                }
+            };
+
+            if let Some(leader) = leader {
+                // The sender belongs to this future. Cancellation closes the
+                // attempt, allowing a waiter to take over without a detached task.
+                let result = self.refresh_credential().await.map_err(Arc::new);
+                leader.send_replace(Some(result.as_ref().map(|_| ()).map_err(Arc::clone)));
+                return result;
+            }
+
+            // Valid cached reads must not wait for another caller's broker I/O.
+            {
                 let cached = self.cached.read().await;
                 if let Some(credential) = cached.as_ref()
                     && credential.expires_at > (self.clock)()
                 {
                     return Ok(credential.clone());
                 }
-                drop(cached);
-                self.refresh.lock().await
             }
-        };
+            let result = match completion.wait_for(Option::is_some).await {
+                Ok(result) => result.as_ref().unwrap().clone(),
+                Err(_) => continue, // The leader was cancelled; elect a new one.
+            };
+            result?;
+            // Recheck the current cache and clock after success: a delayed
+            // waiter must not resurrect a token invalidated by a later attempt.
+        }
+    }
+
+    async fn refresh_credential(&self) -> AnyResult<AzureSasCredential> {
         {
             let cached = self.cached.read().await;
             if let Some(credential) = cached.as_ref()
@@ -449,10 +490,14 @@ impl AzureSasStorageOptionsProvider {
                         *self.cached.write().await = None;
                         bail!("expired_credential");
                     }
-                    *generation = generation
-                        .checked_add(1)
-                        .ok_or_else(|| anyhow!("credential_generation_exhausted"))?;
-                    credential.generation = *generation;
+                    {
+                        let mut refresh = self.refresh.lock().unwrap();
+                        refresh.generation = refresh
+                            .generation
+                            .checked_add(1)
+                            .ok_or_else(|| anyhow!("credential_generation_exhausted"))?;
+                        credential.generation = refresh.generation;
+                    }
                     *self.cached.write().await = Some(credential.clone());
                     return Ok(credential);
                 }
@@ -533,7 +578,7 @@ impl StorageOptionsProvider for AzureSasStorageOptionsProvider {
     }
 }
 
-fn azure_iceberg_credential_error(error: anyhow::Error) -> IcebergError {
+fn azure_iceberg_credential_error(error: impl fmt::Display) -> IcebergError {
     IcebergError::new(
         IcebergErrorKind::Unexpected,
         format!("Azure SAS credential resolution failed: {error:#}"),
@@ -943,6 +988,151 @@ mod tests {
             }
         });
         (broker_config, requests, server)
+    }
+
+    #[tokio::test]
+    async fn concurrent_failed_refresh_shares_one_batch_and_later_recovers() {
+        for status in [503, 429, 403, 401] {
+            for expired_cache in [false, true] {
+                let batch_size = if status == 503 || status == 429 { 4 } else { 1 };
+                let body = serde_json::json!({
+                    "success": true,
+                    "credentials": {
+                        "tempAk": "account",
+                        "sessionToken": "sv=1&sig=recovered",
+                        "expiredAt": (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                    }
+                })
+                .to_string();
+                let mut responses = vec![Some((status, "unavailable".into())); batch_size];
+                responses.push(Some((200, body)));
+                let (config, requests, server) = start_test_broker(responses).await;
+                let provider = AzureSasStorageOptionsProvider::new(config).unwrap();
+                if expired_cache {
+                    *provider.cached.write().await = Some(AzureSasCredential {
+                        generation: 0,
+                        token: "sv=1&sig=expired".into(),
+                        expires_at: Utc::now() - chrono::Duration::seconds(1),
+                    });
+                }
+                // join_all polls every caller before the local HTTP server responds.
+                let results = join_all((0..8).map(|_| provider.current_credential())).await;
+                assert_eq!(
+                    requests.lock().unwrap().len(),
+                    batch_size,
+                    "status={status}, expired_cache={expired_cache}"
+                );
+                for result in results {
+                    let error = result
+                        .err()
+                        .expect("every waiter must receive the failed attempt");
+                    assert_eq!(
+                        error
+                            .downcast_ref::<reqwest::Error>()
+                            .unwrap()
+                            .status()
+                            .unwrap()
+                            .as_u16(),
+                        status
+                    );
+                }
+                assert_eq!(
+                    provider.current_credential().await.unwrap().token,
+                    "sv=1&sig=recovered"
+                );
+                assert_eq!(requests.lock().unwrap().len(), batch_size + 1);
+                server.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_refresh_leader_does_not_strand_waiters() {
+        let now = Utc::now();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let fetcher = Arc::new(MockFetcher::with_gate(
+            vec![Ok(credential(now, "recovered"))],
+            started.clone(),
+            release.clone(),
+        ));
+        let provider = test_provider(fetcher.clone(), now);
+        let leader = {
+            let provider = provider.clone();
+            tokio::spawn(async move { provider.current_credential().await })
+        };
+        started.notified().await;
+        let mut waiter = Box::pin(provider.current_credential());
+        assert!(futures::poll!(&mut waiter).is_pending());
+        leader.abort();
+        assert!(leader.await.err().unwrap().is_cancelled());
+        release.notify_one();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), waiter)
+                .await
+                .expect("a cancelled leader must release its waiters")
+                .unwrap()
+                .token,
+            "sv=1&sig=recovered"
+        );
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn delayed_waiter_keeps_its_failure_after_an_independent_recovery() {
+        let now = Utc::now();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let fetcher = Arc::new(MockFetcher::with_gate(
+            vec![Err("broker_denied"), Ok(credential(now, "recovered"))],
+            started.clone(),
+            release.clone(),
+        ));
+        let provider = test_provider(fetcher.clone(), now);
+        let leader = {
+            let provider = provider.clone();
+            tokio::spawn(async move { provider.current_credential().await })
+        };
+        started.notified().await;
+        let mut waiter = Box::pin(provider.current_credential());
+        assert!(futures::poll!(&mut waiter).is_pending());
+        release.notify_one();
+        let original = leader.await.unwrap().err().unwrap();
+        release.notify_one();
+        assert_eq!(
+            provider.current_credential().await.unwrap().token,
+            "sv=1&sig=recovered"
+        );
+        let delayed = waiter
+            .await
+            .err()
+            .expect("waiter must retain its own attempt's error");
+        assert!(Arc::ptr_eq(&original, &delayed));
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_does_not_cancel_refresh_leader() {
+        let now = Utc::now();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let fetcher = Arc::new(MockFetcher::with_gate(
+            vec![Ok(credential(now, "recovered"))],
+            started.clone(),
+            release.clone(),
+        ));
+        let provider = test_provider(fetcher.clone(), now);
+        let leader = {
+            let provider = provider.clone();
+            tokio::spawn(async move { provider.current_credential().await })
+        };
+        started.notified().await;
+        let mut waiter = Box::pin(provider.current_credential());
+        assert!(futures::poll!(&mut waiter).is_pending());
+        drop(waiter);
+        release.notify_one();
+        assert_eq!(leader.await.unwrap().unwrap().token, "sv=1&sig=recovered");
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
