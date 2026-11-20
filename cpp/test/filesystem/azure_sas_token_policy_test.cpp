@@ -476,6 +476,96 @@ TEST(AzureSasTokenPolicyTest, ConcurrentCallersShareFailedRefreshAndLaterRecover
   }
 }
 
+TEST(AzureSasTokenPolicyTest, SerializationExceptionDoesNotLeaveRefreshInflight) {
+  auto config = MakeConfig();
+  config.region = std::string(1, static_cast<char>(0xff));
+  auto transport = std::make_shared<MockTransport>();
+  AzureSasTokenPolicy policy(config, transport);
+  bool sent = false;
+  std::map<std::string, std::string> query;
+  // The second call must attempt serialization again instead of waiting on the
+  // first call forever. No broker or storage request should be sent.
+  EXPECT_THROW(SendRequest(policy, &sent, &query), nlohmann::json::type_error);
+  auto clone = policy.Clone();
+  EXPECT_THROW(SendRequest(*clone, &sent, &query), nlohmann::json::type_error);
+  EXPECT_FALSE(sent);
+  EXPECT_TRUE(transport->Requests().empty());
+}
+
+TEST(AzureSasTokenPolicyTest, RefreshExceptionReleasesWaitersAndAllowsRecovery) {
+  for (const bool expired_cache : {false, true}) {
+    SCOPED_TRACE(expired_cache);
+    const auto start = std::chrono::system_clock::from_time_t(1785146400);
+    std::atomic<int> seconds{0};
+    std::atomic<int> attempts{0};
+    std::promise<void> fetching;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    auto transport = std::make_shared<MockTransport>(false, [&] {
+      if (++attempts == (expired_cache ? 2 : 1)) {
+        fetching.set_value();
+        released.wait();
+        // Bypass FetchSasToken's std::exception handlers and exercise unwinding.
+        throw 42;
+      }
+    });
+    if (expired_cache) {
+      transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                         SuccessResponse("account", "sig=old", start + std::chrono::seconds(120)));
+    }
+    transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                       SuccessResponse("account", "sig=recovered", start + std::chrono::hours(1)));
+    std::mutex arrival_mutex;
+    std::condition_variable arrived;
+    std::set<std::thread::id> callers;
+    AzureSasTokenPolicy policy(MakeConfig(), transport, [&] {
+      if (seconds.load() == 120) {
+        std::lock_guard<std::mutex> lock(arrival_mutex);
+        callers.insert(std::this_thread::get_id());
+        arrived.notify_all();
+      }
+      return start + std::chrono::seconds(seconds.load());
+    });
+    auto read = [&] {
+      bool sent = false;
+      std::map<std::string, std::string> query;
+      auto response = SendRequest(policy, &sent, &query);
+      EXPECT_EQ(sent, response->GetStatusCode() == Azure::Core::Http::HttpStatusCode::Ok);
+      return response;
+    };
+    if (expired_cache) {
+      ASSERT_EQ(read()->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+    }
+    seconds = 120;
+    auto leader = std::async(std::launch::async, read);
+    fetching.get_future().wait();
+    std::vector<std::future<std::unique_ptr<Azure::Core::Http::RawResponse>>> waiters;
+    for (int i = 0; i < 7; ++i) {
+      waiters.emplace_back(std::async(std::launch::async, read));
+    }
+    bool all_arrived;
+    {
+      std::unique_lock<std::mutex> lock(arrival_mutex);
+      all_arrived = arrived.wait_for(lock, std::chrono::seconds(5), [&] { return callers.size() == 8; });
+    }
+    release.set_value();
+    EXPECT_TRUE(all_arrived);
+    EXPECT_THROW(leader.get(), int);
+    for (auto& waiter : waiters) {
+      auto response = waiter.get();
+      EXPECT_EQ(response->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Unauthorized);
+      EXPECT_NE(response->GetReasonPhrase().find("refresh interrupted by exception"), std::string::npos);
+    }
+    EXPECT_EQ(attempts.load(), expired_cache ? 2 : 1);
+    bool sent = false;
+    std::map<std::string, std::string> query;
+    ASSERT_EQ(SendRequest(policy, &sent, &query)->GetStatusCode(), Azure::Core::Http::HttpStatusCode::Ok);
+    EXPECT_TRUE(sent);
+    EXPECT_EQ(query.at("sig"), "recovered");
+    EXPECT_EQ(attempts.load(), expired_cache ? 3 : 2);
+  }
+}
+
 TEST(AzureSasTokenPolicyTest, WaitersRecheckExpirationAfterRefreshCompletes) {
   const auto start = std::chrono::system_clock::from_time_t(1785146400);
   std::promise<void> fetching;

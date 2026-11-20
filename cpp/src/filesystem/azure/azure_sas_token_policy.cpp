@@ -31,6 +31,7 @@
 #include <azure/core/io/body_stream.hpp>
 #include <azure/core/url.hpp>
 #include <nlohmann/json.hpp>
+#include <folly/ScopeGuard.h>
 
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/filesystem/credential_broker.h"
@@ -62,6 +63,8 @@ struct AzureSasTokenPolicy::SharedState {
   struct RefreshAttempt {
     std::condition_variable completed;
     std::optional<arrow::Status> result;
+    // Allocate before publishing this attempt so unwind cleanup only moves it.
+    arrow::Status abandoned = arrow::Status::UnknownError("Azure SAS credential refresh interrupted by exception");
   };
 
   AzureSasBrokerConfig config;
@@ -262,6 +265,18 @@ arrow::Result<std::string> AzureSasTokenPolicy::GetSasToken() const {
     refresh = std::make_shared<SharedState::RefreshAttempt>();
     state_->refresh = refresh;
   }
+
+  // Cover every exit after publication, including request serialization and
+  // exceptions outside FetchSasToken's HTTP/response handling. Preserve the
+  // original exception for the leader; release waiters with a terminal error.
+  auto abandoned = folly::makeGuard([&]() noexcept {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (!refresh->result) {
+      refresh->result.emplace(std::move(refresh->abandoned));
+      state_->refresh.reset();
+      refresh->completed.notify_all();
+    }
+  });
 
   // Called with state_->mutex held. Waiters retain this attempt even if a
   // later caller starts another refresh before they resume.
