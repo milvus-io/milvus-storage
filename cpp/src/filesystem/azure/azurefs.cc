@@ -566,7 +566,8 @@ Result<std::unique_ptr<Blobs::BlobServiceClient>> AzureOptions::MakeBlobServiceC
                                                         sas_token_);
     case CredentialKind::kDynamicSASToken: {
       Blobs::BlobClientOptions options;
-      options.PerOperationPolicies.emplace_back(sas_token_policy_->Clone());
+      // Recheck the lease for each storage attempt: SDK backoff may outlive SAS.
+      options.PerRetryPolicies.emplace_back(sas_token_policy_->Clone());
       return std::make_unique<Blobs::BlobServiceClient>(AccountBlobUrl(account_name), options);
     }
   }
@@ -606,7 +607,8 @@ AzureOptions::MakeDataLakeServiceClient() const {
           AccountBlobUrl(account_name) + sas_token_);
     case CredentialKind::kDynamicSASToken: {
       DataLake::DataLakeClientOptions options;
-      options.PerOperationPolicies.emplace_back(sas_token_policy_->Clone());
+      // Recheck the lease for each storage attempt: SDK backoff may outlive SAS.
+      options.PerRetryPolicies.emplace_back(sas_token_policy_->Clone());
       return std::make_unique<DataLake::DataLakeServiceClient>(AccountDfsUrl(account_name), options);
     }
   }
