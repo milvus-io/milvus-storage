@@ -27,6 +27,11 @@
 #include "milvus-storage/filesystem/observable.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/upload_sizable.h"
+#include "milvus-storage/source_read_context.h"
+
+namespace Azure::Core::Http {
+class HttpTransport;
+}
 
 namespace Azure::Core::Credentials {
 class TokenCredential;
@@ -65,6 +70,7 @@ namespace io = arrow::io;
 class TestAzureFileSystem;
 class TestAzureOptions;
 class AzureSasTokenPolicy;
+class SourceSasTokenPolicy;
 
 /// Options for the AzureFileSystem implementation.
 ///
@@ -137,6 +143,7 @@ struct ARROW_EXPORT AzureOptions {
     kStorageSharedKey,
     kSASToken,
     kDynamicSASToken,
+    kSourceReadContext,
     kClientSecret,
     kManagedIdentity,
     kCLI,
@@ -147,6 +154,9 @@ struct ARROW_EXPORT AzureOptions {
   std::shared_ptr<Azure::Storage::StorageSharedKeyCredential> storage_shared_key_credential_;
   std::string sas_token_;
   std::shared_ptr<AzureSasTokenPolicy> sas_token_policy_;
+  SourceReadContextPtr source_context_;
+  std::shared_ptr<SourceSasTokenPolicy> source_policy_;
+  std::shared_ptr<Azure::Core::Http::HttpTransport> source_transport_;
   mutable std::shared_ptr<Azure::Core::Credentials::TokenCredential> token_credential_;
 
   public:
@@ -212,6 +222,13 @@ struct ARROW_EXPORT AzureOptions {
   Status ConfigureAccountKeyCredential(const std::string& account_key);
   Status ConfigureSASCredential(const std::string& sas_token);
   Status ConfigureSASTokenPolicy(std::shared_ptr<AzureSasTokenPolicy> policy);
+  // Runtime-only, read-only HNS directory authorization. Transport injection
+  // supports component testing; ordinary callers use the SDK default transport.
+  Status ConfigureSourceReadContext(SourceReadContextPtr context,
+                                    std::shared_ptr<Azure::Core::Http::HttpTransport> transport = nullptr);
+  SourceReadContextPtr source_read_context() const {
+    return credential_kind_ == CredentialKind::kSourceReadContext ? source_context_ : nullptr;
+  }
   Status ConfigureClientSecretCredential(const std::string& tenant_id,
                                          const std::string& client_id,
                                          const std::string& client_secret);

@@ -26,6 +26,7 @@
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/format/format_writer.h"
 #include "milvus-storage/properties.h"
+#include "milvus-storage/source_read_context.h"
 
 namespace arrow {
 class Schema;
@@ -56,6 +57,21 @@ class Format {
       const std::shared_ptr<const api::Properties>& properties,
       const std::vector<std::string>& needed_columns,
       const std::function<std::string(const std::string&)>& key_retriever) = 0;
+
+  // Explicit source authority is runtime state, never a singleton/property.
+  // Unsupported formats fail closed instead of calling their legacy factories.
+  [[nodiscard]] virtual arrow::Result<std::vector<api::ColumnGroupFile>> explore_with_context(
+      const std::string& explore_dir,
+      const std::shared_ptr<const api::Properties>& properties,
+      SourceReadContextPtr context);
+
+  [[nodiscard]] virtual arrow::Result<std::shared_ptr<FormatReader>> create_reader_with_context(
+      const std::shared_ptr<arrow::Schema>& read_schema,
+      const api::ColumnGroupFile& file,
+      const std::shared_ptr<const api::Properties>& properties,
+      const std::vector<std::string>& needed_columns,
+      const std::function<std::string(const std::string&)>& key_retriever,
+      SourceReadContextPtr context);
 
   // Async factory hook. Formats without a native implementation keep the
   // existing synchronous fallback.

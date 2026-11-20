@@ -295,10 +295,12 @@ arrow::Result<std::shared_ptr<BlockingDataset>> LanceTableReader::get_or_open_da
     const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
     const StorageOptions& read_options,
     const std::string& filesystem_cache_key,
-    uint64_t version) {
+    uint64_t version,
+    const std::string& resolved_lance_uri) {
   const LanceDatasetCache::Key key{version, base_uri, filesystem_cache_key};
+  const auto uri = resolved_lance_uri.empty() ? ToStandardLanceUri(base_uri) : resolved_lance_uri;
   return LanceDatasetCache::Instance().GetOrOpen(
-      key, [&]() { return BlockingDataset::Open(ToStandardLanceUri(base_uri), filesystem, read_options, version); });
+      key, [&]() { return BlockingDataset::Open(uri, filesystem, read_options, version); });
 }
 
 folly::SemiFuture<arrow::Result<std::shared_ptr<BlockingDataset>>> LanceTableReader::get_or_open_dataset_async(
@@ -306,10 +308,12 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<BlockingDataset>>> LanceTableRea
     const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
     const StorageOptions& read_options,
     const std::string& filesystem_cache_key,
-    uint64_t version) {
+    uint64_t version,
+    const std::string& resolved_lance_uri) {
   const LanceDatasetCache::Key key{version, base_uri, filesystem_cache_key};
-  return LanceDatasetCache::Instance().GetOrOpenAsync(key, [base_uri, filesystem, read_options, version]() {
-    return load_dataset_async(ToStandardLanceUri(base_uri), filesystem, read_options, version);
+  const auto uri = resolved_lance_uri.empty() ? ToStandardLanceUri(base_uri) : resolved_lance_uri;
+  return LanceDatasetCache::Instance().GetOrOpenAsync(key, [uri, filesystem, read_options, version]() {
+    return load_dataset_async(uri, filesystem, read_options, version);
   });
 }
 

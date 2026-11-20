@@ -37,6 +37,7 @@
 #include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/upload_sizable.h"
 #include "milvus-storage/properties.h"
+#include "milvus-storage/filesystem/source_read_scope.h"
 
 namespace milvus_storage {
 
@@ -51,6 +52,18 @@ inline constexpr const char* kCloudProviderVolcengine = "volcengine";
 inline constexpr const char* kAzureFileSystemName = "abfs";
 
 using ArrowFileSystemPtr = std::shared_ptr<arrow::fs::FileSystem>;
+
+class SourceReadContext;
+
+// Resolve identity and filesystem together, before legacy URI transformations
+// discard account/authority or decode path components. path is a decoded key
+// relative to the selected container; source_uri preserves canonical identity.
+struct SourceReadFileSystem {
+  ArrowFileSystemPtr filesystem;
+  std::string source_uri;
+  std::string path;
+  std::string cache_identity;
+};
 
 class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
                         public UploadConditional,
@@ -117,6 +130,22 @@ class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
     ARROW_ASSIGN_OR_RAISE(auto full_path, PrependBase(path));
     return sizable->OpenOutputStreamWithUploadSize(full_path, metadata, part_size);
   }
+};
+
+// A retained source filesystem can validate absolute metadata references before
+// a Rust adapter strips their authority. Runtime-only: never serialize this object.
+class SourceFileSystemProxy final : public FileSystemProxy {
+  public:
+  SourceFileSystemProxy(const std::string& container,
+                        ArrowFileSystemPtr filesystem,
+                        std::shared_ptr<SourceReadContext> context,
+                        AzureSourceStorageBinding binding)
+      : FileSystemProxy(container, std::move(filesystem)), context_(std::move(context)), binding_(std::move(binding)) {}
+  arrow::Result<std::string> PathFromUri(const std::string& uri) const override;
+
+  private:
+  std::shared_ptr<SourceReadContext> context_;
+  AzureSourceStorageBinding binding_;
 };
 
 /**
@@ -404,6 +433,13 @@ class FilesystemCache {
   [[nodiscard]] arrow::Result<FileSystemPtr> get(const std::shared_ptr<const api::Properties>& properties,
                                                  const std::string& path = "");
 
+  // Requires an explicit source URI, a matching extfs configuration and a live
+  // context. Never falls back to the primary filesystem or ambient credentials.
+  [[nodiscard]] arrow::Result<SourceReadFileSystem> get_with_context(
+      const std::shared_ptr<const api::Properties>& properties,
+      const std::string& path,
+      const std::shared_ptr<SourceReadContext>& context);
+
   /**
    * @brief Resolve filesystem config from properties and URI path
    *
@@ -456,6 +492,9 @@ class FilesystemCache {
   FilesystemCache& operator=(const FilesystemCache&) = delete;
 
   private:
+  // Tests install a real source filesystem with an injected SDK transport.
+  // Production has no public override for context-bound cache entries.
+  friend class SourceFilesystemTestAccess;
   struct CacheEntry {
     std::string display_key;
     FileSystemPtr filesystem;
@@ -479,6 +518,10 @@ class FilesystemCache {
   // Filesystem instance cache (LRU)
   mutable std::mutex mutex_;
   LRUCache<std::string, std::shared_ptr<CacheEntry>> cache_;
+  // Unlike the legacy LRU, this index must not retain an ended job's credential
+  // callbacks. Active filesystems/readers own the context; stale weak entries
+  // are pruned on lookup. Legacy size/list enumerate the strong LRU only.
+  std::unordered_map<std::string, std::weak_ptr<arrow::fs::FileSystem>> source_cache_;
 };
 
 }  // namespace milvus_storage

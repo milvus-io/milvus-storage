@@ -27,6 +27,7 @@
 
 #include "milvus-storage/properties.h"
 #include "milvus-storage/format/format_reader.h"
+#include "milvus-storage/source_read_context.h"
 
 namespace milvus_storage::parquet {
 
@@ -47,6 +48,11 @@ class ParquetFormatReader final : public FormatReader, public std::enable_shared
     static arrow::Result<MetadataPtr> load_metadata(const api::ColumnGroupFile& file,
                                                     const std::shared_ptr<const api::Properties>& properties,
                                                     const milvus_storage::KeyRetriever& key_retriever);
+    static arrow::Result<MetadataPtr> load_metadata_with_context(
+        const api::ColumnGroupFile& file,
+        const std::shared_ptr<const api::Properties>& properties,
+        const milvus_storage::KeyRetriever& key_retriever,
+        SourceReadContextPtr context);
     // Defer footer/schema loading and return immutable metadata suitable for the cache.
     static folly::SemiFuture<arrow::Result<MetadataPtr>> load_metadata_async(
         const api::ColumnGroupFile& file,

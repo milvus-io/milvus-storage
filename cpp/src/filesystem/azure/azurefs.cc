@@ -24,6 +24,7 @@
 
 #include "milvus-storage/filesystem/azure/azurefs.h"
 #include "milvus-storage/filesystem/azure/azure_sas_token_policy.h"
+#include "milvus-storage/filesystem/azure/source_sas_token_policy.h"
 #include "milvus-storage/filesystem/azure/azurefs_internal.h"
 #include "milvus-storage/common/extend_status.h"
 #include "arrow/io/memory.h"
@@ -200,6 +201,11 @@ Status WithAzureRequestId(Status status, const Azure::Core::RequestFailedExcepti
 }
 
 Status AzureExceptionToStatus(const Azure::Core::RequestFailedException& exception, std::string_view prefix) {
+  if (exception.RawResponse) {
+    if (auto source_status = SourcePolicyResponseStatus(*exception.RawResponse)) {
+      return *source_status;
+    }
+  }
   // StatusCode alone cannot distinguish transport failures from failed copies.
   const bool transport_failure = dynamic_cast<const Azure::Core::Http::TransportException*>(&exception) != nullptr;
   const auto code = ClassifyAzureError(static_cast<int>(exception.StatusCode), exception.ErrorCode, transport_failure);
@@ -430,6 +436,8 @@ bool AzureOptions::Equals(const AzureOptions& other) const {
       return sas_token_ == other.sas_token_;
     case CredentialKind::kDynamicSASToken:
       return sas_token_policy_->Equals(*other.sas_token_policy_);
+    case CredentialKind::kSourceReadContext:
+      return source_context_->identity() == other.source_context_->identity();
     case CredentialKind::kClientSecret:
     case CredentialKind::kCLI:
     case CredentialKind::kManagedIdentity:
@@ -526,6 +534,20 @@ Status AzureOptions::ConfigureSASTokenPolicy(std::shared_ptr<AzureSasTokenPolicy
   return Status::OK();
 }
 
+Status AzureOptions::ConfigureSourceReadContext(SourceReadContextPtr context,
+                                                std::shared_ptr<Azure::Core::Http::HttpTransport> transport) {
+  if (!context || account_name != context->account_name()) {
+    return Status::Invalid("Source-read context must match the filesystem account");
+  }
+  // This filesystem implements directory SAS (sr=d), which requires HNS. The
+  // directory context supplies that contract; it never authorizes a root ACL probe.
+  source_context_ = std::move(context);
+  source_policy_ = std::make_shared<SourceSasTokenPolicy>(source_context_);
+  source_transport_ = std::move(transport);
+  credential_kind_ = CredentialKind::kSourceReadContext;
+  return Status::OK();
+}
+
 Status AzureOptions::ConfigureClientSecretCredential(const std::string& tenant_id,
                                                      const std::string& client_id,
                                                      const std::string& client_secret) {
@@ -590,6 +612,13 @@ Result<std::unique_ptr<Blobs::BlobServiceClient>> AzureOptions::MakeBlobServiceC
     case CredentialKind::kSASToken:
       return std::make_unique<Blobs::BlobServiceClient>(AccountBlobUrl(account_name) +
                                                         sas_token_);
+    case CredentialKind::kSourceReadContext: {
+      Blobs::BlobClientOptions options;
+      options.PerRetryPolicies.emplace_back(source_policy_->Clone());
+      if (source_transport_)
+        options.Transport.Transport = source_transport_;
+      return std::make_unique<Blobs::BlobServiceClient>(AccountBlobUrl(account_name), options);
+    }
     case CredentialKind::kDynamicSASToken: {
       Blobs::BlobClientOptions options;
       options.PerOperationPolicies.emplace_back(sas_token_policy_->Clone());
@@ -630,6 +659,13 @@ AzureOptions::MakeDataLakeServiceClient() const {
     case CredentialKind::kSASToken:
       return std::make_unique<DataLake::DataLakeServiceClient>(
           AccountBlobUrl(account_name) + sas_token_);
+    case CredentialKind::kSourceReadContext: {
+      DataLake::DataLakeClientOptions options;
+      options.PerRetryPolicies.emplace_back(source_policy_->Clone());
+      if (source_transport_)
+        options.Transport.Transport = source_transport_;
+      return std::make_unique<DataLake::DataLakeServiceClient>(AccountDfsUrl(account_name), options);
+    }
     case CredentialKind::kDynamicSASToken: {
       DataLake::DataLakeClientOptions options;
       options.PerOperationPolicies.emplace_back(sas_token_policy_->Clone());
@@ -708,6 +744,29 @@ struct AzureLocation {
     return status.ok() ? status : Status::Invalid(status.message(), " in location ", all);
   }
 };
+
+// Input is a decoded filesystem path, not a URI. Check it before the legacy
+// AzureLocation normalizer can discard authority or traversal components.
+Status CheckSourcePath(const AzureOptions& options, std::string_view path) {
+  const auto context = options.source_read_context();
+  if (!context)
+    return Status::OK();
+  RETURN_NOT_OK(SourceCredentialArrowStatus(context->CheckState()));
+  constexpr std::string_view prefix = ".blob.";
+  if (options.blob_storage_scheme != "https" || !options.blob_storage_authority.starts_with(prefix))
+    return SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+  const auto separator = path.find('/');
+  if (separator == std::string_view::npos)
+    return SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+  const auto binding = AzureSourceStorageBinding::Create(
+      options.account_name, options.blob_storage_authority.substr(prefix.size()), path.substr(0, separator));
+  if (!binding)
+    return SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+  const auto resource = binding->ResolvePath(path.substr(separator + 1));
+  if (!resource)
+    return SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+  return SourceCredentialArrowStatus(context->Resolve(resource->CanonicalUri()).status);
+}
 
 Status PathNotFound(const AzureLocation& location) {
   return ::arrow::fs::internal::PathNotFound(location.all);
@@ -953,11 +1012,13 @@ class ObjectInputFile final : public io::RandomAccessFile {
  public:
   ObjectInputFile(std::shared_ptr<Blobs::BlobClient> blob_client,
                   const io::IOContext& io_context, AzureLocation location,
-                  int64_t size = kNoSize)
+                  int64_t size = kNoSize,
+                  SourceReadContextPtr source_context = nullptr)
       : blob_client_(std::move(blob_client)),
         io_context_(io_context),
         location_(std::move(location)),
-        content_length_(size) {}
+        content_length_(size),
+        source_context_(std::move(source_context)) {}
 
   Status Init() {
     const auto content_length = GetCachedContentLength();
@@ -970,6 +1031,8 @@ class ObjectInputFile final : public io::RandomAccessFile {
   }
 
   Status CheckClosed(const char* action) const {
+    if (source_context_)
+      RETURN_NOT_OK(SourceCredentialArrowStatus(source_context_->CheckState()));
     if (closed_) {
       return Status::Invalid("Cannot ", action, " on closed file.");
     }
@@ -1043,6 +1106,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
       auto result =
           blob_client_->DownloadTo(reinterpret_cast<uint8_t*>(out), nbytes,
                                    download_options);
+      RETURN_NOT_OK(CheckClosed("read"));
       const auto bytes_read = result.Value.ContentRange.Length.Value();
       if (bytes_read < 0 || bytes_read > nbytes) {
         return Status::IOError("Unexpected DownloadTo Content-Range length ",
@@ -1176,6 +1240,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
   mutable std::mutex metadata_mutex_;
   std::atomic<int64_t> content_length_{kNoSize};
   std::shared_ptr<const KeyValueMetadata> metadata_;
+  SourceReadContextPtr source_context_;
 };
 
 Status CreateEmptyBlockBlob(const Blobs::BlockBlobClient& block_blob_client,
@@ -2066,6 +2131,8 @@ class AzureFileSystem::Impl {
   /// \return kEnabled/kDisabled/kContainerNotFound (kUnknown is never returned).
   Result<HNSSupport> HierarchicalNamespaceSupport(
       const DataLake::DataLakeFileSystemClient& adlfs_client) {
+    if (options_.source_read_context())
+      return HNSSupport::kEnabled;
     switch (cached_hns_support_) {
       case HNSSupport::kEnabled:
       case HNSSupport::kDisabled:
@@ -2525,7 +2592,8 @@ class AzureFileSystem::Impl {
         GetBlobClient(location.container, location.path));
 
     auto ptr = std::make_shared<ObjectInputFile>(blob_client, fs->io_context(),
-                                                 std::move(location));
+                                                 std::move(location), kNoSize,
+                                                 options_.source_read_context());
     RETURN_NOT_OK(ptr->Init());
     return ptr;
   }
@@ -2544,7 +2612,8 @@ class AzureFileSystem::Impl {
         GetBlobClient(location.container, location.path));
 
     auto ptr = std::make_shared<ObjectInputFile>(blob_client, fs->io_context(),
-                                                 std::move(location), info.size());
+                                                 std::move(location), info.size(),
+                                                 options_.source_read_context());
     RETURN_NOT_OK(ptr->Init());
     return ptr;
   }
@@ -3673,6 +3742,7 @@ bool AzureFileSystem::Equals(const FileSystem& other) const {
 }
 
 Result<FileInfo> AzureFileSystem::GetFileInfo(const std::string& path) {
+  RETURN_NOT_OK(CheckSourcePath(options(), path));
   impl_->metrics()->IncrementGetFileInfoCount();
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   if (location.container.empty()) {
@@ -3690,6 +3760,7 @@ Result<FileInfo> AzureFileSystem::GetFileInfo(const std::string& path) {
 }
 
 Result<FileInfoVector> AzureFileSystem::GetFileInfo(const FileSelector& select) {
+  RETURN_NOT_OK(CheckSourcePath(options(), select.base_dir));
   impl_->metrics()->IncrementGetFileInfoCount();
   Core::Context context;
   Azure::Nullable<int32_t> page_size_hint;  // unspecified
@@ -3700,6 +3771,8 @@ Result<FileInfoVector> AzureFileSystem::GetFileInfo(const FileSelector& select) 
 }
 
 Status AzureFileSystem::CreateDir(const std::string& path, bool recursive) {
+  if (options().source_read_context())
+    return SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
   impl_->metrics()->IncrementCreateDirCount();
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   if (location.container.empty()) {
@@ -3744,6 +3817,8 @@ Status AzureFileSystem::CreateDir(const std::string& path, bool recursive) {
 }
 
 Status AzureFileSystem::DeleteDir(const std::string& path) {
+  if (options().source_read_context())
+    return SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
   impl_->metrics()->IncrementDeleteDirCount();
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   if (location.container.empty()) {
@@ -3773,6 +3848,8 @@ Status AzureFileSystem::DeleteDir(const std::string& path) {
 }
 
 Status AzureFileSystem::DeleteDirContents(const std::string& path, bool missing_dir_ok) {
+  if (options().source_read_context())
+    return SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
   impl_->metrics()->IncrementDeleteDirCount();
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   if (location.container.empty()) {
@@ -3797,10 +3874,14 @@ Status AzureFileSystem::DeleteDirContents(const std::string& path, bool missing_
 }
 
 Status AzureFileSystem::DeleteRootDirContents() {
+  if (options().source_read_context())
+    return SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
   return Status::NotImplemented("Cannot delete all Azure Blob Storage containers");
 }
 
 Status AzureFileSystem::DeleteFile(const std::string& path) {
+  if (options().source_read_context())
+    return SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
   impl_->metrics()->IncrementDeleteFileCount();
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   if (location.container.empty()) {
@@ -3829,6 +3910,8 @@ Status AzureFileSystem::DeleteFile(const std::string& path) {
 }
 
 Status AzureFileSystem::Move(const std::string& src, const std::string& dest) {
+  if (options().source_read_context())
+    return SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
   impl_->metrics()->IncrementMoveCount();
   ARROW_ASSIGN_OR_RAISE(auto src_location, AzureLocation::FromString(src));
   ARROW_ASSIGN_OR_RAISE(auto dest_location, AzureLocation::FromString(dest));
@@ -3851,6 +3934,8 @@ Status AzureFileSystem::Move(const std::string& src, const std::string& dest) {
 }
 
 Status AzureFileSystem::CopyFile(const std::string& src, const std::string& dest) {
+  if (options().source_read_context())
+    return SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
   impl_->metrics()->IncrementCopyFileCount();
   ARROW_ASSIGN_OR_RAISE(auto src_location, AzureLocation::FromString(src));
   ARROW_ASSIGN_OR_RAISE(auto dest_location, AzureLocation::FromString(dest));
@@ -3859,6 +3944,7 @@ Status AzureFileSystem::CopyFile(const std::string& src, const std::string& dest
 
 Result<std::shared_ptr<io::InputStream>> AzureFileSystem::OpenInputStream(
     const std::string& path) {
+  RETURN_NOT_OK(CheckSourcePath(options(), path));
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   ARROW_ASSIGN_OR_RAISE(auto stream, impl_->OpenInputFile(location, this));
   return std::make_shared<milvus_storage::MetricsInputStream>(std::move(stream),
@@ -3867,6 +3953,7 @@ Result<std::shared_ptr<io::InputStream>> AzureFileSystem::OpenInputStream(
 
 Result<std::shared_ptr<io::InputStream>> AzureFileSystem::OpenInputStream(
     const FileInfo& info) {
+  RETURN_NOT_OK(CheckSourcePath(options(), info.path()));
   ARROW_ASSIGN_OR_RAISE(auto stream, impl_->OpenInputFile(info, this));
   return std::make_shared<milvus_storage::MetricsInputStream>(std::move(stream),
                                                               impl_->metrics());
@@ -3874,6 +3961,7 @@ Result<std::shared_ptr<io::InputStream>> AzureFileSystem::OpenInputStream(
 
 Result<std::shared_ptr<io::RandomAccessFile>> AzureFileSystem::OpenInputFile(
     const std::string& path) {
+  RETURN_NOT_OK(CheckSourcePath(options(), path));
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   ARROW_ASSIGN_OR_RAISE(auto file, impl_->OpenInputFile(location, this));
   return std::make_shared<milvus_storage::MetricsRandomAccessFile>(std::move(file),
@@ -3882,6 +3970,7 @@ Result<std::shared_ptr<io::RandomAccessFile>> AzureFileSystem::OpenInputFile(
 
 Result<std::shared_ptr<io::RandomAccessFile>> AzureFileSystem::OpenInputFile(
     const FileInfo& info) {
+  RETURN_NOT_OK(CheckSourcePath(options(), info.path()));
   ARROW_ASSIGN_OR_RAISE(auto file, impl_->OpenInputFile(info, this));
   return std::make_shared<milvus_storage::MetricsRandomAccessFile>(std::move(file),
                                                                    impl_->metrics());
@@ -3889,6 +3978,8 @@ Result<std::shared_ptr<io::RandomAccessFile>> AzureFileSystem::OpenInputFile(
 
 Result<std::shared_ptr<io::OutputStream>> AzureFileSystem::OpenOutputStream(
     const std::string& path, const std::shared_ptr<const KeyValueMetadata>& metadata) {
+  if (options().source_read_context())
+    return SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   ARROW_ASSIGN_OR_RAISE(auto stream,
                         impl_->OpenAppendStream(location, metadata, true, this));
@@ -3897,6 +3988,8 @@ Result<std::shared_ptr<io::OutputStream>> AzureFileSystem::OpenOutputStream(
 
 Result<std::shared_ptr<io::OutputStream>> AzureFileSystem::OpenAppendStream(
     const std::string& path, const std::shared_ptr<const KeyValueMetadata>& metadata) {
+  if (options().source_read_context())
+    return SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   ARROW_ASSIGN_OR_RAISE(auto stream,
                         impl_->OpenAppendStream(location, metadata, false, this));
@@ -3933,6 +4026,8 @@ Result<std::string> AzureFileSystem::PathFromUri(const std::string& uri_string) 
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>>
 AzureFileSystem::OpenConditionalOutputStream(
     const std::string& path, std::shared_ptr<arrow::KeyValueMetadata> metadata) {
+  if (options().source_read_context())
+    return SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   ARROW_ASSIGN_OR_RAISE(
       auto stream,
@@ -3952,6 +4047,8 @@ AzureFileSystem::OpenOutputStreamWithUploadSize(
     const std::string& path,
     const std::shared_ptr<const arrow::KeyValueMetadata>& metadata,
     int64_t upload_size) {
+  if (options().source_read_context())
+    return SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   ARROW_ASSIGN_OR_RAISE(auto stream,
                         impl_->OpenAppendStream(location, metadata, true, this, upload_size));

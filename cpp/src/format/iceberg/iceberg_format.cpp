@@ -17,9 +17,54 @@
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/format/source_format_reader.h"
 #include "iceberg/iceberg_bridge.h"
 
 namespace milvus_storage {
+
+arrow::Result<std::vector<api::ColumnGroupFile>> IcebergFormat::explore_with_context(
+    const std::string& explore_dir,
+    const std::shared_ptr<const api::Properties>& properties,
+    SourceReadContextPtr context) {
+  ARROW_ASSIGN_OR_RAISE(auto source, FilesystemCache::getInstance().get_with_context(properties, explore_dir, context));
+  const auto resource = AzureSourceResource::Parse(source.source_uri, context->account_name());
+  if (!resource)
+    return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.bucket_name = resource->container;
+  ARROW_ASSIGN_OR_RAISE(auto snapshot, api::GetValue<int64_t>(properties, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID));
+  ARROW_ASSIGN_OR_RAISE(
+      auto infos, iceberg::PlanFiles(source.source_uri, snapshot, source.filesystem, iceberg::ToReaderOptions(config)));
+  std::vector<api::ColumnGroupFile> files;
+  for (const auto& info : infos) {
+    ARROW_ASSIGN_OR_RAISE(auto data,
+                          FilesystemCache::getInstance().get_with_context(properties, info.data_file_path, context));
+    if (info.num_deleted_rows > info.record_count)
+      return arrow::Status::Invalid("Iceberg delete count exceeds data-file row count");
+    api::ColumnGroupFile file{data.source_uri, 0, static_cast<int64_t>(info.record_count - info.num_deleted_rows), {}};
+    if (!info.delete_metadata_json.empty())
+      file.Set(api::kPropertyMetadata, std::string(info.delete_metadata_json.begin(), info.delete_metadata_json.end()));
+    files.emplace_back(std::move(file));
+  }
+  ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
+  return files;
+}
+
+arrow::Result<std::shared_ptr<FormatReader>> IcebergFormat::create_reader_with_context(
+    const std::shared_ptr<arrow::Schema>& read_schema,
+    const api::ColumnGroupFile& file,
+    const std::shared_ptr<const api::Properties>& properties,
+    const std::vector<std::string>& needed_columns,
+    const std::function<std::string(const std::string&)>& key_retriever,
+    SourceReadContextPtr context) {
+  ARROW_ASSIGN_OR_RAISE(auto metadata, iceberg::IcebergFormatReader::MetaTrait::load_metadata_with_context(
+                                           file, properties, key_retriever, context));
+  ARROW_ASSIGN_OR_RAISE(auto reader, iceberg::IcebergFormatReader::MetaTrait::create_from_metadata(
+                                         metadata, file, read_schema, needed_columns, ""));
+  ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
+  return GuardSourceFormatReader(std::move(reader), std::move(context));
+}
 
 arrow::Result<std::vector<api::ColumnGroupFile>> IcebergFormat::explore(
     const std::string& explore_dir, const std::shared_ptr<const api::Properties>& properties) {

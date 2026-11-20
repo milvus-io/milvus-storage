@@ -108,20 +108,35 @@ impl FFIReadOptions {
             .ok_or_else(|| {
                 LanceError::invalid_input(format!("missing required option: {FS_CACHE_KEY}"))
             })?;
-        fs_cache_key
-            .strip_prefix("fs:")
-            .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
-            .ok_or_else(|| {
-                LanceError::invalid_input(format!(
-                    "{FS_CACHE_KEY} must have the form fs:<unsigned integer>"
-                ))
-            })?
-            .parse::<u64>()
-            .map_err(|_| {
-                LanceError::invalid_input(format!(
-                    "{FS_CACHE_KEY} must have the form fs:<unsigned integer>"
-                ))
-            })?;
+        // Source filesystems are isolated by the native context identity and
+        // verified Azure binding. Keep a separate namespace from configuration
+        // hashes: sharing a scheduler also shares its credential-bearing store.
+        let unsigned_id = |value: &str| {
+            !value.is_empty()
+                && value.bytes().all(|byte| byte.is_ascii_digit())
+                && value.parse::<u64>().is_ok()
+        };
+        let parts: Vec<_> = fs_cache_key.split(':').collect();
+        let valid_identity = match parts.as_slice() {
+            ["fs", id] => unsigned_id(id),
+            ["source", id, account, endpoint, container] => {
+                unsigned_id(id)
+                    && [account, endpoint, container].iter().all(|part| {
+                        !part.is_empty()
+                            && part.bytes().all(|byte| {
+                                byte.is_ascii_lowercase()
+                                    || byte.is_ascii_digit()
+                                    || matches!(byte, b'-' | b'.')
+                            })
+                    })
+            }
+            _ => false,
+        };
+        if !valid_identity {
+            return Err(LanceError::invalid_input(format!(
+                "{FS_CACHE_KEY} must be a native filesystem cache identity"
+            )));
+        }
 
         let is_local_value = options.remove(FS_IS_LOCAL_KEY).ok_or_else(|| {
             LanceError::invalid_input(format!("missing required option: {FS_IS_LOCAL_KEY}"))
@@ -505,6 +520,35 @@ mod tests {
         let mut excessive_parallelism = valid_filesystem_read_options(false);
         excessive_parallelism.insert(LANCE_IO_PARALLELISM_KEY.into(), "257".into());
         assert!(FFIReadOptions::parse(excessive_parallelism).is_err());
+    }
+
+    #[test]
+    fn source_read_identity_is_preserved_and_separate_from_legacy() {
+        for key in [
+            "source:1:acct:core.windows.net:tables",
+            "source:2:acct:core.windows.net:tables",
+            "source:1:acct:core.windows.net:other",
+            "fs:1",
+        ] {
+            let mut options = valid_filesystem_read_options(false);
+            options.insert(FS_CACHE_KEY.into(), key.into());
+            let parsed = FFIReadOptions::parse(options).unwrap();
+            assert_eq!(parsed.object_store_prefix(), key);
+        }
+        for key in [
+            "source:1",
+            "source:1:acct:core.windows.net:",
+            "source:-1:acct:core.windows.net:tables",
+            "source:18446744073709551616:acct:core.windows.net:tables",
+            "source:1:acct:core.windows.net:tables:extra",
+            "source:1:acct:core.windows.net:tables?sig=secret",
+            "fs:+1",
+        ] {
+            let mut options = valid_filesystem_read_options(false);
+            options.insert(FS_CACHE_KEY.into(), key.into());
+            let error = FFIReadOptions::parse(options).unwrap_err();
+            assert!(!error.to_string().contains("secret"));
+        }
     }
 
     #[test]

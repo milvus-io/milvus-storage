@@ -20,6 +20,18 @@ namespace milvus_storage {
 
 class LanceFormat final : public Format {
   public:
+  arrow::Result<std::vector<api::ColumnGroupFile>> explore_with_context(
+      const std::string& explore_dir,
+      const std::shared_ptr<const api::Properties>& properties,
+      SourceReadContextPtr context) override;
+  arrow::Result<std::shared_ptr<FormatReader>> create_reader_with_context(
+      const std::shared_ptr<arrow::Schema>& read_schema,
+      const api::ColumnGroupFile& file,
+      const std::shared_ptr<const api::Properties>& properties,
+      const std::vector<std::string>& needed_columns,
+      const std::function<std::string(const std::string&)>& key_retriever,
+      SourceReadContextPtr context) override;
+
   [[nodiscard]] arrow::Result<std::vector<api::ColumnGroupFile>> explore(
       const std::string& explore_dir, const std::shared_ptr<const api::Properties>& properties) override;
 

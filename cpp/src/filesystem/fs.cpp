@@ -29,6 +29,8 @@
 
 #include "milvus-storage/filesystem/azure/azure_fs_producer.h"
 #include "milvus-storage/filesystem/talon/talon_file_system_producer.h"
+#include "milvus-storage/filesystem/azure/azurefs.h"
+#include "milvus-storage/filesystem/azure/source_sas_token_policy.h"
 
 namespace milvus_storage {
 
@@ -299,6 +301,7 @@ void FilesystemCache::remove(const std::string& key) {
     std::lock_guard<std::mutex> lock(mutex_);
     removed = cache_.get(key);
     cache_.remove(key);
+    source_cache_.erase(key);
   }
 }
 
@@ -309,7 +312,11 @@ arrow::Status FilesystemCache::evict(const std::shared_ptr<const api::Properties
   return arrow::Status::OK();
 }
 
-void FilesystemCache::clean() { cache_.clean(); }
+void FilesystemCache::clean() {
+  std::lock_guard lock(mutex_);
+  cache_.clean();
+  source_cache_.clear();
+}
 
 void FilesystemCache::set_capacity(size_t capacity) { cache_.set_capacity(capacity); }
 
@@ -575,6 +582,132 @@ arrow::Result<FileSystemPtr> FilesystemCache::get(const std::shared_ptr<const ap
   ARROW_ASSIGN_OR_RAISE(auto fs, CreateArrowFileSystem(config));
   cache_.put(cache_key, std::make_shared<CacheEntry>(CacheEntry{MakeDisplayKey(config, cache_key), fs}));
   return fs;
+}
+
+arrow::Result<std::string> SourceFileSystemProxy::PathFromUri(const std::string& uri) const {
+  ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context_->CheckState()));
+  const auto resource = binding_.ResolveUri(uri);
+  if (!resource)
+    return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+  ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context_->Resolve(resource->CanonicalUri()).status));
+  std::string path;
+  for (const auto& component : resource->path) {
+    if (!path.empty())
+      path += '/';
+    path += component;
+  }
+  return path;
+}
+
+arrow::Result<SourceReadFileSystem> FilesystemCache::get_with_context(
+    const std::shared_ptr<const api::Properties>& properties,
+    const std::string& path,
+    const std::shared_ptr<SourceReadContext>& context) {
+  if (!context || !properties || path.empty())
+    return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+  ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
+
+  // Inspect the original URI using each explicit Azure binding. In particular,
+  // do not run StorageUri::Parse first: it decodes escaped path separators and
+  // its legacy matching is not sufficient to authorize a source context.
+  ARROW_ASSIGN_OR_RAISE(auto external, ExtractExternalFsProperties(properties));
+  std::optional<AzureSourceResource> selected;
+  for (const auto& [alias, props] : external) {
+    // Do not call the legacy config constructor here. Its defaults include a
+    // local filesystem, HTTP and MinIO account keys; none is source authority.
+    if (!props->contains(PROPERTY_FS_CLOUD_PROVIDER) || !props->contains(PROPERTY_FS_ACCESS_KEY_ID))
+      continue;
+    ARROW_ASSIGN_OR_RAISE(auto cloud, api::GetValue<std::string>(props, PROPERTY_FS_CLOUD_PROVIDER));
+    ARROW_ASSIGN_OR_RAISE(auto account, api::GetValue<std::string>(props, PROPERTY_FS_ACCESS_KEY_ID));
+    if (cloud != kCloudProviderAzure || account != context->account_name())
+      continue;
+    if (props->contains(PROPERTY_FS_STORAGE_TYPE)) {
+      ARROW_ASSIGN_OR_RAISE(auto storage, api::GetValue<std::string>(props, PROPERTY_FS_STORAGE_TYPE));
+      if (storage != "remote")
+        return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+    }
+    if (props->contains(PROPERTY_FS_USE_SSL)) {
+      ARROW_ASSIGN_OR_RAISE(auto secure, api::GetValue<bool>(props, PROPERTY_FS_USE_SSL));
+      if (!secure)
+        return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+    }
+    if (props->contains(PROPERTY_FS_USE_IAM)) {
+      ARROW_ASSIGN_OR_RAISE(auto iam, api::GetValue<bool>(props, PROPERTY_FS_USE_IAM));
+      if (iam)
+        return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+    }
+    for (const auto* key : {PROPERTY_FS_ACCESS_KEY_VALUE, PROPERTY_FS_IAM_ENDPOINT, PROPERTY_FS_CREDENTIAL_ENDPOINT,
+                            PROPERTY_FS_AZURE_CLIENT_ID, PROPERTY_FS_AZURE_TENANT_ID, PROPERTY_FS_ROLE_ARN,
+                            PROPERTY_FS_EXTERNAL_ID, PROPERTY_FS_GCP_CREDENTIAL_JSON}) {
+      if (props->contains(key)) {
+        ARROW_ASSIGN_OR_RAISE(auto value, api::GetValue<std::string>(props, key));
+        if (!value.empty())
+          return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+      }
+    }
+    std::string address, bucket;
+    if (props->contains(PROPERTY_FS_ADDRESS)) {
+      ARROW_ASSIGN_OR_RAISE(address, api::GetValue<std::string>(props, PROPERTY_FS_ADDRESS));
+    }
+    if (props->contains(PROPERTY_FS_BUCKET_NAME)) {
+      ARROW_ASSIGN_OR_RAISE(bucket, api::GetValue<std::string>(props, PROPERTY_FS_BUCKET_NAME));
+    }
+    for (const auto& root : context->roots()) {
+      if ((!address.empty() && address != root.endpoint_suffix) || (!bucket.empty() && bucket != root.container))
+        continue;
+      const auto binding = AzureSourceStorageBinding::Create(account, root.endpoint_suffix, root.container);
+      const auto resource = binding ? binding->ResolveUri(path) : std::nullopt;
+      if (!resource)
+        continue;
+      const auto target = context->Resolve(resource->CanonicalUri());
+      ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(target.status));
+      if (selected && *selected != *resource)
+        return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+      selected = *resource;
+    }
+  }
+  if (!selected)
+    return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+
+  SourceReadFileSystem result;
+  result.source_uri = selected->CanonicalUri();
+  for (const auto& component : selected->path) {
+    if (!result.path.empty())
+      result.path += '/';
+    result.path += component;
+  }
+  result.cache_identity = "source:" + std::to_string(context->identity()) + ":" + selected->account + ":" +
+                          selected->endpoint_suffix + ":" + selected->container;
+
+  std::lock_guard lock(mutex_);
+  // State is checked again after waiting for another cache miss/cleanup.
+  ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
+  for (auto it = source_cache_.begin(); it != source_cache_.end();) {
+    if (it->second.expired())
+      it = source_cache_.erase(it);
+    else
+      ++it;
+  }
+  if (const auto found = source_cache_.find(result.cache_identity); found != source_cache_.end()) {
+    result.filesystem = found->second.lock();
+    if (result.filesystem)
+      return result;
+  }
+
+  fs::AzureOptions options;
+  options.account_name = selected->account;
+  options.blob_storage_authority = ".blob." + selected->endpoint_suffix;
+  options.dfs_storage_authority = ".dfs." + selected->endpoint_suffix;
+  ARROW_RETURN_NOT_OK(options.ConfigureSourceReadContext(context));
+  ARROW_ASSIGN_OR_RAISE(auto native, fs::AzureFileSystem::Make(options));
+  const auto binding =
+      AzureSourceStorageBinding::Create(selected->account, selected->endpoint_suffix, selected->container);
+  if (!binding)
+    return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+  result.filesystem =
+      std::make_shared<SourceFileSystemProxy>(selected->container, std::move(native), context, *binding);
+  source_cache_[result.cache_identity] = result.filesystem;
+  return result;
 }
 
 arrow::Result<ArrowFileSystemConfig> FilesystemCache::resolve_config(

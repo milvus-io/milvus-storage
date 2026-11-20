@@ -32,6 +32,7 @@
 
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/azure/source_sas_token_policy.h"
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 
 namespace milvus_storage::iceberg {
@@ -72,17 +73,29 @@ uint64_t EstimateDeleteChargeBytes(const std::vector<uint8_t>& delete_metadata,
 arrow::Status ReadPositionalDeleteFile(const std::string& delete_file_path,
                                        const std::string& data_file_uri,
                                        const std::shared_ptr<const api::Properties>& properties,
-                                       std::unordered_set<int64_t>* deleted_positions) {
+                                       std::unordered_set<int64_t>* deleted_positions,
+                                       SourceReadContextPtr context) {
   if (!deleted_positions) {
     return arrow::Status::Invalid("Deleted positions output cannot be null");
   }
 
-  // Get filesystem for the delete file
-  ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, delete_file_path));
-  ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(delete_file_path));
-
-  // Open the delete file as Parquet
-  ARROW_ASSIGN_OR_RAISE(auto input_file, fs->OpenInputFile(uri.key));
+  ArrowFileSystemPtr filesystem;
+  std::string path;
+  std::string canonical_data;
+  if (context) {
+    ARROW_ASSIGN_OR_RAISE(auto source,
+                          FilesystemCache::getInstance().get_with_context(properties, delete_file_path, context));
+    filesystem = source.filesystem;
+    path = source.path;
+    ARROW_ASSIGN_OR_RAISE(auto data,
+                          FilesystemCache::getInstance().get_with_context(properties, data_file_uri, context));
+    canonical_data = data.source_uri;
+  } else {
+    ARROW_ASSIGN_OR_RAISE(filesystem, FilesystemCache::getInstance().get(properties, delete_file_path));
+    ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(delete_file_path));
+    path = uri.key;
+  }
+  ARROW_ASSIGN_OR_RAISE(auto input_file, filesystem->OpenInputFile(path));
   // Position deletes are data, even when loaded as part of metadata preparation.
   (void)talon::internal::ControlTalonForFile(input_file.get(), false);
 
@@ -103,6 +116,10 @@ arrow::Status ReadPositionalDeleteFile(const std::string& delete_file_path,
         fmt::format("Positional delete file missing required columns (file_path, pos): {}", delete_file_path));
   }
 
+  if (context && (schema->field(file_path_idx)->type()->id() != arrow::Type::STRING ||
+                  schema->field(pos_idx)->type()->id() != arrow::Type::INT64)) {
+    return arrow::Status::Invalid("Positional delete columns have invalid types");
+  }
   std::shared_ptr<arrow::Table> table;
   ARROW_RETURN_NOT_OK(file_reader->ReadTable({file_path_idx, pos_idx}, &table));
 
@@ -111,7 +128,7 @@ arrow::Status ReadPositionalDeleteFile(const std::string& delete_file_path,
   // while the delete file's file_path column may use an Azure URI alias with
   // a recorded endpoint. MilvusURIToIcebergURI normalizes both
   // to the same scheme://bucket/key form.
-  auto normalized_data_uri = MilvusURIToIcebergURI(data_file_uri);
+  auto normalized_data_uri = context ? canonical_data : MilvusURIToIcebergURI(data_file_uri);
 
   // Filter rows where file_path matches our data file and collect pos values
   auto file_path_col = table->column(0);  // file_path (first in our projection)
@@ -127,8 +144,16 @@ arrow::Status ReadPositionalDeleteFile(const std::string& delete_file_path,
         // Match by: 1) exact match with original URI,
         //           2) direct match after Milvus address stripping (S3/GCS),
         //           3) match after Azure @endpoint stripping.
-        if (row_file_path == data_file_uri || row_file_path == normalized_data_uri ||
-            StripAbfssEndpoint(row_file_path) == normalized_data_uri) {
+        bool matches;
+        if (context) {
+          ARROW_ASSIGN_OR_RAISE(auto row_source,
+                                FilesystemCache::getInstance().get_with_context(properties, row_file_path, context));
+          matches = row_source.source_uri == canonical_data;
+        } else {
+          matches = row_file_path == data_file_uri || row_file_path == normalized_data_uri ||
+                    StripAbfssEndpoint(row_file_path) == normalized_data_uri;
+        }
+        if (matches) {
           if (!pos_array->IsNull(row)) {
             deleted_positions->insert(pos_array->Value(row));
           }
@@ -143,7 +168,10 @@ arrow::Status ReadPositionalDeleteFile(const std::string& delete_file_path,
 arrow::Result<std::shared_ptr<const std::unordered_set<int64_t>>> LoadPositionalDeletes(
     const std::vector<uint8_t>& delete_metadata,
     const std::string& data_file_uri,
-    const std::shared_ptr<const api::Properties>& properties) {
+    const std::shared_ptr<const api::Properties>& properties,
+    SourceReadContextPtr context = nullptr) {
+  if (context)
+    ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
   auto deleted_positions = std::make_shared<std::unordered_set<int64_t>>();
   if (delete_metadata.empty()) {
     return std::static_pointer_cast<const std::unordered_set<int64_t>>(deleted_positions);
@@ -154,6 +182,8 @@ arrow::Result<std::shared_ptr<const std::unordered_set<int64_t>>> LoadPositional
   try {
     parsed = folly::parseJson(json_str);
   } catch (const std::exception& e) {
+    if (context)
+      return arrow::Status::Invalid("Failed to parse source delete metadata JSON");
     return arrow::Status::Invalid(fmt::format("Failed to parse delete metadata JSON: {}", e.what()));
   }
 
@@ -162,9 +192,17 @@ arrow::Result<std::shared_ptr<const std::unordered_set<int64_t>>> LoadPositional
   }
 
   for (const auto& entry : parsed) {
+    if (context && (!entry.isObject() || !entry.getDefault("file_type", nullptr).isString() ||
+                    !entry.getDefault("path", nullptr).isString()))
+      return arrow::Status::Invalid("Invalid source delete metadata entry");
     auto file_type = entry.getDefault("file_type", "").asString();
     auto path = entry.getDefault("path", "").asString();
 
+    if (context) {
+      ARROW_ASSIGN_OR_RAISE(auto source, FilesystemCache::getInstance().get_with_context(properties, path, context));
+      if (file_type != "position")
+        return arrow::Status::NotImplemented("Source read requires positional deletes");
+    }
     if (file_type == "equality") {
       return arrow::Status::Invalid(
           fmt::format("Equality deletes not supported at read time. Delete file: {}. "
@@ -173,7 +211,7 @@ arrow::Result<std::shared_ptr<const std::unordered_set<int64_t>>> LoadPositional
     }
 
     if (file_type == "position") {
-      ARROW_RETURN_NOT_OK(ReadPositionalDeleteFile(path, data_file_uri, properties, deleted_positions.get()));
+      ARROW_RETURN_NOT_OK(ReadPositionalDeleteFile(path, data_file_uri, properties, deleted_positions.get(), context));
     }
     // Skip unknown types (forward compatibility for deletion vectors, etc.)
   }
@@ -199,14 +237,35 @@ arrow::Result<IcebergFormatReader::MetaTrait::MetadataPtr> IcebergFormatReader::
     const api::ColumnGroupFile& file,
     const std::shared_ptr<const api::Properties>& properties,
     const milvus_storage::KeyRetriever& key_retriever) {
+  return load_metadata_impl(file, properties, key_retriever, nullptr);
+}
+
+arrow::Result<IcebergFormatReader::MetaTrait::MetadataPtr> IcebergFormatReader::MetaTrait::load_metadata_with_context(
+    const api::ColumnGroupFile& file,
+    const std::shared_ptr<const api::Properties>& properties,
+    const milvus_storage::KeyRetriever& key_retriever,
+    SourceReadContextPtr context) {
+  if (!context)
+    return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+  return load_metadata_impl(file, properties, key_retriever, std::move(context));
+}
+
+arrow::Result<IcebergFormatReader::MetaTrait::MetadataPtr> IcebergFormatReader::MetaTrait::load_metadata_impl(
+    const api::ColumnGroupFile& file,
+    const std::shared_ptr<const api::Properties>& properties,
+    const milvus_storage::KeyRetriever& key_retriever,
+    SourceReadContextPtr context) {
   ARROW_ASSIGN_OR_RAISE(auto data_metadata,
-                        parquet::ParquetFormatReader::MetaTrait::load_metadata(file, properties, key_retriever));
+                        context
+                            ? parquet::ParquetFormatReader::MetaTrait::load_metadata_with_context(
+                                  file, properties, key_retriever, context)
+                            : parquet::ParquetFormatReader::MetaTrait::load_metadata(file, properties, key_retriever));
   if (!data_metadata) {
     return arrow::Status::Invalid(fmt::format("Failed to load Iceberg data metadata. [path={}]", file.path));
   }
 
   auto delete_metadata = GetDeleteMetadataBytes(file);
-  ARROW_ASSIGN_OR_RAISE(auto deleted_positions, LoadPositionalDeletes(delete_metadata, file.path, properties));
+  ARROW_ASSIGN_OR_RAISE(auto deleted_positions, LoadPositionalDeletes(delete_metadata, file.path, properties, context));
   auto sorted_deletions = MakeSortedDeletions(deleted_positions);
   ARROW_ASSIGN_OR_RAISE(auto logical_row_group_infos,
                         build_logical_row_group_infos(data_metadata->row_group_infos, *sorted_deletions));
@@ -226,6 +285,8 @@ arrow::Result<IcebergFormatReader::MetaTrait::MetadataPtr> IcebergFormatReader::
   metadata->payload.deleted_positions = std::move(deleted_positions);
   metadata->payload.sorted_deletions = std::move(sorted_deletions);
 
+  if (context)
+    ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
   MetadataPtr metadata_ptr = std::move(metadata);
   return metadata_ptr;
 }
