@@ -2282,7 +2282,9 @@ TEST_F(S3ProviderTest, AwsBrokerDispatcherSelectsBrokerInsteadOfDirectSts) {
       config.cloud_provider = cloud;
       config.region = "us-west-2";
       config.use_iam = use_iam;
-      config.role_arn = "arn:aws:iam::123456789012:role/reader";
+      config.role_arn = std::string(cloud) == kCloudProviderAliyun    ? "acs:ram::1234567890123456:role/reader"
+                        : std::string(cloud) == kCloudProviderTencent ? "qcs::cam::uin/100000000001:roleName/reader"
+                                                                      : "arn:aws:iam::123456789012:role/reader";
       config.external_id = "external-id";
       EXPECT_FALSE(config.IsAwsCredentialBrokerEnabled());
       config.credential_endpoint = "http://broker/v1/credentials/assume-role";
@@ -2301,11 +2303,12 @@ TEST_F(S3ProviderTest, AwsBrokerDispatcherSelectsBrokerInsteadOfDirectSts) {
       EXPECT_EQ(options.credentials_provider->GetAWSCredentials().GetSessionToken(), "broker-session");
       const auto requests = mock_client_->GetRecordedRequests();
       ASSERT_EQ(requests.size(), request_count + (use_iam ? 2 : 1));
-      nlohmann::json expected = {{"csp", use_iam ? iam_csp : "aws"}, {"region", "us-west-2"}, {"durationSeconds", 900}};
+      nlohmann::json expected = {
+          {"csp", iam_csp != nullptr ? iam_csp : "aws"}, {"region", "us-west-2"}, {"durationSeconds", 900}};
       if (use_iam) {
         expected["credentialType"] = "iam";
       } else {
-        expected["roleArn"] = "arn:aws:iam::123456789012:role/reader";
+        expected["roleArn"] = config.role_arn;
         expected["externalId"] = "external-id";
       }
       for (size_t i = request_count; i < requests.size(); ++i) {
