@@ -40,6 +40,7 @@
 #include <azure/core/datetime.hpp>
 #include <azure/core/io/body_stream.hpp>
 #include <gtest/gtest.h>
+#include <google/protobuf/unknown_field_set.h>
 
 namespace milvus_storage {
 class SourceFilesystemTestAccess {
@@ -107,10 +108,12 @@ class ParquetTransport final : public Azure::Core::Http::HttpTransport {
   std::mutex mutex;
   std::deque<std::vector<uint8_t>> bodies;
   std::vector<std::string> signatures;
+  std::vector<std::string> requested_paths;
   std::unique_ptr<Azure::Core::Http::RawResponse> Send(Azure::Core::Http::Request& request,
                                                        const Azure::Core::Context&) override {
     std::lock_guard lock(mutex);
     signatures.push_back(request.GetUrl().GetQueryParameters().at("sig"));
+    requested_paths.push_back(request.GetUrl().GetPath());
     auto contents = parquet;
     if (files.empty()) {
       EXPECT_EQ(request.GetUrl().GetPath(), "tables/team/table/data.parquet");
@@ -411,6 +414,142 @@ TEST(SourceFormatReaderTest, NativeLanceReaderRetainsContextAcrossRenewalAndIsol
     context->Cancel();
     ExpectSource(std::move(pending).get().status(), LOON_SOURCE_CREDENTIAL_CANCELLED);
     ExpectSource((*chunk)->get_chunk(0).status(), LOON_SOURCE_CREDENTIAL_CANCELLED);
+  }
+}
+
+// Modify only the external-base fields of an actual generated Lance manifest.
+// Field numbers follow pinned Lance 3f4cf5f protos/table.proto. UnknownFieldSet
+// preserves all other fields without maintaining a second complete schema.
+void SetLanceManifestBase(const std::string& original, const std::string& base_uri, std::string* output) {
+  ASSERT_GE(original.size(), 20);
+  ASSERT_EQ(original.substr(original.size() - 4), "LANC");
+  auto read_le = [&](size_t offset, size_t width) {
+    uint64_t value = 0;
+    for (size_t i = 0; i < width; ++i)
+      value |= static_cast<uint64_t>(static_cast<unsigned char>(original[offset + i])) << (8 * i);
+    return value;
+  };
+  const auto offset = read_le(original.size() - 16, 8);
+  ASSERT_LE(offset, original.size() - 20);
+  const auto size = read_le(offset, 4);
+  ASSERT_EQ(offset + 4 + size + 16, original.size());
+  google::protobuf::UnknownFieldSet manifest;
+  ASSERT_TRUE(manifest.ParseFromString(original.substr(offset + 4, size)));
+  int changed_files = 0;
+  for (int i = 0; i < manifest.field_count(); ++i) {
+    auto* fragment_field = manifest.mutable_field(i);
+    if (fragment_field->number() != 2)
+      continue;
+    ASSERT_EQ(fragment_field->type(), google::protobuf::UnknownField::TYPE_LENGTH_DELIMITED);
+    google::protobuf::UnknownFieldSet fragment;
+    ASSERT_TRUE(fragment.ParseFromString(fragment_field->length_delimited()));
+    for (int j = 0; j < fragment.field_count(); ++j) {
+      auto* file_field = fragment.mutable_field(j);
+      if (file_field->number() != 2)
+        continue;
+      ASSERT_EQ(file_field->type(), google::protobuf::UnknownField::TYPE_LENGTH_DELIMITED);
+      google::protobuf::UnknownFieldSet file;
+      ASSERT_TRUE(file.ParseFromString(file_field->length_delimited()));
+      file.DeleteByNumber(7);
+      file.AddVarint(7, 1);  // DataFile.base_id
+      ASSERT_TRUE(file.SerializeToString(file_field->mutable_length_delimited()));
+      ++changed_files;
+    }
+    ASSERT_TRUE(fragment.SerializeToString(fragment_field->mutable_length_delimited()));
+  }
+  ASSERT_GT(changed_files, 0);
+  google::protobuf::UnknownFieldSet base;
+  base.AddVarint(1, 1);  // BasePath.id
+  base.AddVarint(3, 1);  // BasePath.is_dataset_root
+  *base.AddLengthDelimited(4) = base_uri;
+  manifest.DeleteByNumber(18);
+  ASSERT_TRUE(base.SerializeToString(manifest.AddLengthDelimited(18)));
+  std::string encoded;
+  ASSERT_TRUE(manifest.SerializeToString(&encoded));
+  ASSERT_LE(encoded.size(), UINT32_MAX);
+  *output = original.substr(0, offset);
+  for (int i = 0; i < 4; ++i) output->push_back(static_cast<char>((encoded.size() >> (8 * i)) & 0xff));
+  *output += encoded;
+  *output += original.substr(original.size() - 16);
+}
+
+TEST(SourceFormatReaderTest, LanceRejectsInvalidEmbeddedBaseUrisBeforeReadingData) {
+  auto directory = arrow::internal::TemporaryDir::Make("source-lance-base-");
+  ASSERT_TRUE(directory.ok());
+  const auto local_root = (*directory)->path().ToString();
+  auto local_properties = std::make_shared<api::Properties>(
+      api::Properties{{PROPERTY_FS_STORAGE_TYPE, std::string("local")}, {PROPERTY_FS_ROOT_PATH, local_root}});
+  arrow::Int64Builder builder;
+  ASSERT_TRUE(builder.AppendValues({11, 22, 33}).ok());
+  auto values = builder.Finish();
+  ASSERT_TRUE(values.ok());
+  auto schema = arrow::schema({arrow::field("value", arrow::int64())});
+  lance::LanceTableWriter writer("fixture.lance", schema, local_properties);
+  ASSERT_TRUE(writer.Write(arrow::RecordBatch::Make(schema, 3, {*values})).ok());
+  auto written = writer.Close();
+  ASSERT_TRUE(written.ok()) << written.status();
+  auto parsed = lance::ParseLanceUri(written->path);
+  ASSERT_TRUE(parsed.ok());
+  const auto local_dataset = std::filesystem::path(local_root) / "fixture.lance";
+  std::unordered_map<std::string, std::shared_ptr<arrow::Buffer>> files;
+  for (const auto& entry : std::filesystem::recursive_directory_iterator(local_dataset)) {
+    if (!entry.is_regular_file())
+      continue;
+    auto input = arrow::io::ReadableFile::Open(entry.path().string());
+    ASSERT_TRUE(input.ok());
+    auto bytes = (*input)->Read(static_cast<int64_t>(entry.file_size()));
+    ASSERT_TRUE(bytes.ok());
+    files["tables/team/table/" + std::filesystem::relative(entry.path(), local_dataset).generic_string()] = *bytes;
+  }
+  const std::string manifest_path = "tables/team/table/_versions/1.manifest";
+  ASSERT_TRUE(files.contains(manifest_path));
+  for (bool cached : {false, true}) {
+    for (const auto* uri : {"az://tables/team/table", "az://hidden@tables/team/table", "az://tables:443/team/table",
+                            "az://tables/team/table?sig=hidden", "az://tables/team/table#hidden",
+                            "az://other/team/table", "az://tables/team/other"}) {
+      SCOPED_TRACE(uri);
+      SCOPED_TRACE(cached);
+      const bool valid = std::string(uri) == "az://tables/team/table";
+      auto transport = std::make_shared<ParquetTransport>();
+      transport->files = files;
+      transport->missing_files.insert("tables/team/table/_versions/18446744073709551614.manifest");
+      std::string rewritten;
+      ASSERT_NO_FATAL_FAILURE(SetLanceManifestBase(files.at(manifest_path)->ToString(), uri, &rewritten));
+      transport->files[manifest_path] = arrow::Buffer::FromString(std::move(rewritten));
+      auto provider = std::make_shared<Provider>();
+      auto context = Context(provider);
+      fs::AzureOptions options;
+      options.account_name = "acct";
+      ASSERT_TRUE(options.ConfigureSourceReadContext(context, transport).ok());
+      auto native = fs::AzureFileSystem::Make(options);
+      ASSERT_TRUE(native.ok());
+      auto binding = AzureSourceStorageBinding::Create("acct", "core.windows.net", "tables");
+      ASSERT_TRUE(binding);
+      auto filesystem = std::make_shared<SourceFileSystemProxy>("tables", *native, context, *binding);
+      auto properties = Properties();
+      (*properties)[PROPERTY_READER_METADATA_CACHE_ENABLE] = cached;
+      ASSERT_TRUE(SourceFilesystemTestAccess::Install(properties, kRoot, context, filesystem).ok());
+      auto file = *written;
+      file.path = lance::MakeLanceUri(kRoot, parsed->second);
+      file.Set(lance::kDatasetVersionProperty, uint64_t{1});
+      auto groups = std::make_shared<api::ColumnGroups>();
+      groups->push_back(
+          std::make_shared<api::ColumnGroup>(api::ColumnGroup{{"value"}, LOON_FORMAT_LANCE_TABLE, {file}}));
+      auto opened = api::Reader::create_with_context(groups, schema, nullptr, properties, context);
+      ASSERT_TRUE(opened.ok()) << opened.status();
+      auto read = (*opened)->take({0, 2});
+      if (valid) {
+        ASSERT_TRUE(read.ok()) << read.status();
+        EXPECT_EQ((*read)->column(0)->GetScalar(0).ValueOrDie()->ToString(), "11");
+        EXPECT_EQ((*read)->column(0)->GetScalar(1).ValueOrDie()->ToString(), "33");
+      } else {
+        EXPECT_EQ(FFIErrorCodeFromExtendStatus(read.status()), LOON_SOURCE_AUTH_DENIED);
+        EXPECT_EQ(read.status().ToString().find("hidden"), std::string::npos);
+      }
+      size_t data_requests = 0;
+      for (const auto& path : transport->requested_paths) data_requests += path.find("/data/") != std::string::npos;
+      EXPECT_EQ(data_requests > 0, valid);
+    }
   }
 }
 
