@@ -225,6 +225,37 @@ TEST(SourceReadContext, RejectsInvalidIssuerScopePermissionsAndActualSignedExpir
   EXPECT_EQ(response.expires_at_unix_ms, kNow + 120000);
 }
 
+TEST(SourceReadContext, RequestTimeoutDoesNotLimitSignedCredentialLifetime) {
+  const auto clock = std::make_shared<std::atomic<int64_t>>(kNow);
+  constexpr int64_t lifetime = 12 * 60 * 60 * 1000;
+  int calls = 0;
+  auto provider = std::make_shared<FunctionProvider>([&](const auto& request) {
+    ++calls;
+    EXPECT_EQ(request.request_deadline_unix_ms, clock->load() + 15000);
+    EXPECT_EQ(request.operation_deadline_unix_ms, 0);
+    auto response = Credential(request);
+    response.sas_token = "sv=2023-11-03&sr=d&sdd=2&sp=rl&se=2030-01-01T12%3A00%3A00Z&sig=test-signature";
+    response.expires_at_unix_ms = kNow + lifetime;
+    return response;
+  });
+  auto created = SourceReadContext::Create({"acct", {kRoot}, 0, 15000}, provider, [clock] { return clock->load(); });
+  ASSERT_TRUE(created.ok()) << created.status();
+  const auto context = *created;
+  auto first = context->Fetch(kFile, LOON_SOURCE_READ);
+  ASSERT_EQ(first.status, LOON_SOURCE_CREDENTIAL_OK);
+  EXPECT_EQ(first.expires_at_unix_ms, kNow + lifetime);
+  // The request deadline expires, but the retained context is still usable.
+  clock->store(kNow + 60 * 60 * 1000);
+  EXPECT_EQ(context->CheckState(), LOON_SOURCE_CREDENTIAL_OK);
+  auto later = context->Fetch(kFile, LOON_SOURCE_READ);
+  ASSERT_EQ(later.status, LOON_SOURCE_CREDENTIAL_OK);
+  EXPECT_EQ(later.expires_at_unix_ms, kNow + lifetime);
+  EXPECT_EQ(calls, 2);
+  context->Cancel();
+  EXPECT_EQ(context->Fetch(kFile, LOON_SOURCE_READ).status, LOON_SOURCE_CREDENTIAL_CANCELLED);
+  EXPECT_EQ(calls, 2);
+}
+
 TEST(SourceReadContext, DeadlineBoundsSignedAuthorityAndLateResponses) {
   const auto clock = std::make_shared<std::atomic<int64_t>>(kNow);
   const auto overlong = MakeContext(Credential, clock, kNow + 60000);
