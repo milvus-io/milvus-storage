@@ -221,13 +221,14 @@ class Transaction:
         result = self._lib.loon_transaction_append_files(self._handle, c_column_groups)
         check_result(result)
 
-    def add_delta_log(self, path: str, num_entries: int) -> None:
+    def add_delta_log(self, path: str, num_entries: int, file_size_bytes: int) -> None:
         """
         Add a delta log to the transaction.
 
         Args:
             path: Relative path to the delta log file
             num_entries: Number of entries in the delta log
+            file_size_bytes: Size of the delta log file in bytes, or zero if unknown
 
         Raises:
             ResourceError: If transaction is closed or committed
@@ -241,9 +242,13 @@ class Transaction:
 
         if num_entries < 0:
             raise InvalidArgumentError(f"num_entries must be non-negative, got {num_entries}")
+        if file_size_bytes < 0:
+            raise InvalidArgumentError(
+                f"file_size_bytes must be non-negative, got {file_size_bytes}"
+            )
 
         result = self._lib.loon_transaction_add_delta_log(
-            self._handle, path.encode("utf-8"), num_entries
+            self._handle, path.encode("utf-8"), num_entries, file_size_bytes
         )
         check_result(result)
 

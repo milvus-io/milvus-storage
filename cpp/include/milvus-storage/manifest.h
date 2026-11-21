@@ -38,7 +38,8 @@ namespace milvus_storage::api {
 // - Version 4: Changed ColumnGroupFile fields (metadata) to properties map
 // - Version 5: Added lob_files field for LOB (Large Object) file metadata
 // - Version 6: Bumped to supplement Index metadata for transaction publication
-constexpr int32_t MANIFEST_VERSION = 6;
+// - Version 7: Added the file size in bytes to each delta log
+constexpr int32_t MANIFEST_VERSION = 7;
 
 /**
  * @brief Metadata for a single LOB (Large Object) file
@@ -77,9 +78,10 @@ enum class DeltaLogType {
  * @brief Delta log entry structure
  */
 struct DeltaLog {
-  std::string path;     ///< Relative path to the delta log file
-  DeltaLogType type;    ///< Type of delta log
-  int64_t num_entries;  ///< Number of entries in the delta log
+  std::string path;             ///< Relative path to the delta log file
+  DeltaLogType type;            ///< Type of delta log
+  int64_t num_entries;          ///< Number of entries in the delta log
+  int64_t file_size_bytes = 0;  ///< Size in bytes, or zero if unknown
 };
 
 /**

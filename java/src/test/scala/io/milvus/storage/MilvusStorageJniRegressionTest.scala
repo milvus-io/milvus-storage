@@ -10,6 +10,8 @@ import org.apache.arrow.c.{ArrowArray, ArrowSchema, Data}
 import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector.{BigIntVector, VarCharVector, VectorSchemaRoot}
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
+import org.apache.avro.file.DataFileReader
+import org.apache.avro.generic.{GenericDatumReader, GenericRecord}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -122,6 +124,33 @@ class MilvusStorageJniRegressionTest extends AnyFunSuite with Matchers {
       } finally writerSchema.close()
       properties.free()
       allocator.close()
+      removeTree(work)
+    }
+  }
+
+  test("addDeltaLog persists the supplied file size") {
+    val work = Files.createTempDirectory("storage-jni-delta")
+    val properties = new MilvusStorageProperties()
+    val transaction = new MilvusStorageTransaction()
+    try {
+      val deltaDir = Files.createDirectories(work.resolve("segment/_delta"))
+      val delta = Files.write(deltaDir.resolve("delete.log"), "42\n".getBytes(UTF_8))
+      val fileSize = Files.size(delta)
+      properties.create(Map("fs.storage_type" -> "local", "fs.root_path" -> work.toString))
+      transaction.begin("segment", properties)
+      transaction.addDeltaLog(delta.getFileName.toString, 1L, fileSize)
+      val version = transaction.commit()
+
+      val file = work.resolve(s"segment/_metadata/manifest-$version.avro").toFile
+      val reader = new DataFileReader[GenericRecord](file, new GenericDatumReader[GenericRecord]())
+      try {
+        val logs = reader.next().get("delta_logs").asInstanceOf[java.util.List[GenericRecord]]
+        logs.size() shouldBe 1
+        logs.get(0).get("file_size_bytes") shouldBe fileSize
+      } finally reader.close()
+    } finally {
+      transaction.close()
+      properties.free()
       removeTree(work)
     }
   }

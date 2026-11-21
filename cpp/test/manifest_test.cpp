@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -234,8 +235,10 @@ TEST_F(ManifestTest, ColumnGroupsRoundTrip) {
 TEST_F(ManifestTest, DeltaLogsRoundTrip) {
   DeltaLog d1{
       .path = get_delta_filepath(base_path_, "del1.parquet"), .type = DeltaLogType::PRIMARY_KEY, .num_entries = 50};
-  DeltaLog d2{
-      .path = get_delta_filepath(base_path_, "del2.parquet"), .type = DeltaLogType::POSITIONAL, .num_entries = 30};
+  DeltaLog d2{.path = get_delta_filepath(base_path_, "del2.parquet"),
+              .type = DeltaLogType::POSITIONAL,
+              .num_entries = 30,
+              .file_size_bytes = INT64_C(5000000000)};
   DeltaLog d3{
       .path = get_delta_filepath(base_path_, "del3.parquet"), .type = DeltaLogType::EQUALITY, .num_entries = 10};
 
@@ -247,8 +250,35 @@ TEST_F(ManifestTest, DeltaLogsRoundTrip) {
   EXPECT_EQ(read_back->deltaLogs()[0].num_entries, 50);
   EXPECT_EQ(read_back->deltaLogs()[1].type, DeltaLogType::POSITIONAL);
   EXPECT_EQ(read_back->deltaLogs()[1].num_entries, 30);
+  EXPECT_EQ(read_back->deltaLogs()[1].file_size_bytes, d2.file_size_bytes);
   EXPECT_EQ(read_back->deltaLogs()[2].type, DeltaLogType::EQUALITY);
   EXPECT_EQ(read_back->deltaLogs()[2].num_entries, 10);
+
+  manifest.deltaLogs()[1].file_size_bytes = -1;
+  std::ostringstream output;
+  EXPECT_TRUE(manifest.serialize(output).IsInvalid());
+  EXPECT_TRUE(output.str().empty());
+}
+
+TEST_F(ManifestTest, DeltaFileSizesFromV6Manifest) {
+  // Written by the v6 DeltaLogsRoundTrip test, before the OCF schema included file_size_bytes.
+  std::ifstream input(std::filesystem::path(__FILE__).parent_path() / "data/manifest-v6.avro", std::ios::binary);
+  ASSERT_TRUE(input.is_open());
+  Manifest manifest;
+  ASSERT_STATUS_OK(manifest.deserialize(input));
+  ASSERT_EQ(manifest.deltaLogs().size(), 3);
+  EXPECT_EQ(manifest.deltaLogs()[0].num_entries, 50);
+  EXPECT_EQ(manifest.deltaLogs()[1].num_entries, 30);
+  EXPECT_EQ(manifest.deltaLogs()[2].num_entries, 10);
+  for (const auto& delta : manifest.deltaLogs()) {
+    EXPECT_EQ(delta.file_size_bytes, 0);
+  }
+
+  manifest.deltaLogs().push_back({"new.log", DeltaLogType::PRIMARY_KEY, 1, 512});
+  const auto upgraded = RoundTrip(manifest);
+  ASSERT_EQ(upgraded->deltaLogs().size(), 4);
+  EXPECT_EQ(upgraded->deltaLogs()[0].file_size_bytes, 0);
+  EXPECT_EQ(upgraded->deltaLogs()[3].file_size_bytes, 512);
 }
 
 TEST_F(ManifestTest, StatsRoundTrip) {

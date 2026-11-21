@@ -227,6 +227,7 @@ _ffi.cdef(
         const char** delta_log_paths;
         uint32_t* delta_log_num_entries;
         uint32_t num_delta_logs;
+        int64_t* delta_log_file_sizes;
     } LoonDeltaLogs;
 
     typedef struct LoonStatsLog {
@@ -399,7 +400,8 @@ _ffi.cdef(
 
     LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle,
                                                  const char* path,
-                                                 int64_t num_entries);
+                                                 int64_t num_entries,
+                                                 int64_t file_size_bytes);
 
     LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
                                                const char* key,

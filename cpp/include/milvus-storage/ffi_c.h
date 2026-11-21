@@ -228,6 +228,7 @@ typedef struct LoonDeltaLogs {
   const char** delta_log_paths;
   uint32_t* delta_log_num_entries;
   uint32_t num_delta_logs;
+  int64_t* delta_log_file_sizes;  ///< File sizes in bytes, zero if unknown
 } LoonDeltaLogs;
 
 /**
@@ -924,12 +925,14 @@ FFI_EXPORT LoonFFIResult loon_transaction_append_files(LoonTransactionHandle han
  * @param handle Transaction handle
  * @param path Relative path to the delta log file
  * @param num_entries Number of entries in the delta log
+ * @param file_size_bytes Size of the delta log file in bytes, or zero if unknown
  * @return result of FFI
  * @note Type is hardcoded to PRIMARY_KEY internally
  */
 FFI_EXPORT LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle,
                                                         const char* path,
-                                                        int64_t num_entries);
+                                                        int64_t num_entries,
+                                                        int64_t file_size_bytes);
 
 /**
  * @brief Add a stat entry to the transaction updates

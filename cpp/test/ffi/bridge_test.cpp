@@ -582,6 +582,7 @@ TEST_F(BridgeTest, DeserializeLegacyManifestBytes) {
   ASSERT_EQ(restored->delta_logs.num_delta_logs, 1);
   EXPECT_STREQ(restored->delta_logs.delta_log_paths[0], "delete.log");
   EXPECT_EQ(restored->delta_logs.delta_log_num_entries[0], 7);
+  EXPECT_EQ(restored->delta_logs.delta_log_file_sizes[0], 0);
   ASSERT_EQ(restored->stats.num_stats, 1);
   EXPECT_STREQ(restored->stats.stat_keys[0], "rows");
   ASSERT_EQ(restored->stats.stat_file_counts[0], 1);
