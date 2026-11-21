@@ -44,6 +44,7 @@
 #include <arrow/util/io_util.h>
 
 #include <aws/core/Globals.h>
+#include <aws/core/auth/STSCredentialsProvider.h>
 #include <aws/crt/io/Bootstrap.h>
 #include <aws/io/channel_bootstrap.h>
 #include <aws/io/event_loop.h>
@@ -118,6 +119,15 @@ TEST(S3SdkInitializationDeathTest, ConfiguresSharedBootstrap) {
 // Exit code, initialize S3 before using the cache, explicitly finalize S3.
 class S3ShutdownDeathTest : public ::testing::TestWithParam<std::tuple<int, bool, bool>> {};
 
+class S3ShutdownOptionsAccess : public S3FileSystem {
+  public:
+  static S3Options& Get(S3FileSystem& filesystem) {
+    // Expose the protected getter without downcasting the filesystem object.
+    auto getter = &S3ShutdownOptionsAccess::options;
+    return const_cast<S3Options&>((filesystem.*getter)());
+  }
+};
+
 TEST_P(S3ShutdownDeathTest, ReleasesCachedCredentialsBeforeSdkShutdown) {
   const auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER).ValueOr(kCloudProviderAWS);
   if (provider != kCloudProviderAWS) {
@@ -148,13 +158,17 @@ TEST_P(S3ShutdownDeathTest, ReleasesCachedCredentialsBeforeSdkShutdown) {
             region = "us-west-2";
           }
           properties[PROPERTY_FS_REGION] = region;
-          properties[PROPERTY_FS_USE_IAM] = true;
+          properties[PROPERTY_FS_USE_IAM] = false;
+          properties[PROPERTY_FS_ACCESS_KEY_ID] = std::string("test-access-key");
+          properties[PROPERTY_FS_ACCESS_KEY_VALUE] = std::string("test-secret-key");
+          // This test targets S3 SDK/cache lifetime, without a Talon wrapper.
+          properties[PROPERTY_FS_TALON_MODE] = uint32_t{0};
           const auto config = std::make_shared<const api::Properties>(std::move(properties));
 
           // Isolate credentials in this child, while preserving the configured
-          // endpoint, bucket, TLS and S3 backend from test_env.h. The IAM chain
-          // creates a real WebIdentity provider and CRT HTTP pool; dummy
-          // environment credentials satisfy lookups without STS or S3 requests.
+          // endpoint, bucket, TLS and S3 backend from test_env.h. Explicit keys
+          // satisfy signer initialization without STS or S3 requests; attach a
+          // real WebIdentity provider and CRT HTTP pool to the filesystem below.
           ASSERT_EQ(::setenv("AWS_EC2_METADATA_DISABLED", "true", 1), 0);
           ASSERT_EQ(::setenv("AWS_CONFIG_FILE", "/dev/null", 1), 0);
           ASSERT_EQ(::setenv("AWS_SHARED_CREDENTIALS_FILE", "/dev/null", 1), 0);
@@ -162,9 +176,9 @@ TEST_P(S3ShutdownDeathTest, ReleasesCachedCredentialsBeforeSdkShutdown) {
           ASSERT_EQ(::setenv("AWS_DEFAULT_REGION", region.c_str(), 1), 0);
           ASSERT_EQ(::setenv("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/test-irsa", 1), 0);
           ASSERT_EQ(::setenv("AWS_WEB_IDENTITY_TOKEN_FILE", "/dev/null", 1), 0);
-          ASSERT_EQ(::setenv("AWS_ACCESS_KEY_ID", "test-access-key", 1), 0);
-          ASSERT_EQ(::setenv("AWS_SECRET_ACCESS_KEY", "test-secret-key", 1), 0);
-          ASSERT_EQ(::setenv("AWS_SESSION_TOKEN", "", 1), 0);
+          ASSERT_EQ(::unsetenv("AWS_ACCESS_KEY_ID"), 0);
+          ASSERT_EQ(::unsetenv("AWS_SECRET_ACCESS_KEY"), 0);
+          ASSERT_EQ(::unsetenv("AWS_SESSION_TOKEN"), 0);
 
           if (s3_first) {
             ASSERT_AND_ASSIGN(auto fs_config, GetFileSystemConfig(config));
@@ -173,11 +187,20 @@ TEST_P(S3ShutdownDeathTest, ReleasesCachedCredentialsBeforeSdkShutdown) {
           }
           auto& cache = FilesystemCache::getInstance();
           std::weak_ptr<arrow::fs::FileSystem> filesystem;
+          std::weak_ptr<Aws::Auth::AWSCredentialsProvider> credentials;
           try {
-            auto result = GetFileSystem(config);
+            auto result = cache.get(config);
             ASSERT_TRUE(result.ok()) << result.status().ToString();
             auto fs = std::move(result).ValueOrDie();
             filesystem = fs;
+            auto s3fs = std::dynamic_pointer_cast<S3FileSystem>(fs->base_fs());
+            ASSERT_NE(s3fs, nullptr);
+            // The underlying options object is non-const. This test-only
+            // injection exercises cached provider ownership without asking
+            // WebIdentity for credentials; no S3 operations follow it.
+            auto& options = S3ShutdownOptionsAccess::Get(*s3fs);
+            options.credentials_provider = std::make_shared<Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider>();
+            credentials = options.credentials_provider;
             if (exit_code != 0) {
               throw std::runtime_error("simulated application failure");
             }
@@ -187,11 +210,13 @@ TEST_P(S3ShutdownDeathTest, ReleasesCachedCredentialsBeforeSdkShutdown) {
           // Both normal completion and exception unwinding release the caller's
           // handle, leaving the cache as the only owner.
           ASSERT_EQ(filesystem.use_count(), 1);
+          ASSERT_EQ(credentials.use_count(), 1);
           ASSERT_EQ(cache.size(), 1);
           if (explicit_finalize) {
             auto status = FinalizeS3();
             ASSERT_TRUE(status.ok()) << status.ToString();
             ASSERT_TRUE(filesystem.expired());
+            ASSERT_TRUE(credentials.expired());
             ASSERT_EQ(cache.size(), 0);
             status = FinalizeS3();
             ASSERT_TRUE(status.ok()) << status.ToString();
