@@ -18,6 +18,7 @@
 #include "parquet/arrow/reader.h"
 #include "parquet/properties.h"
 #include "milvus-storage/common/config.h"
+#include <folly/futures/Future.h>
 
 namespace milvus_storage {
 
@@ -146,12 +147,40 @@ class FileRowGroupReader {
  * fresh for every reader. Key retrievers/verifiers retained by Arrow DeepClone
  * must themselves support concurrent calls when readers are created in parallel.
  */
-class PreparedParquetFile {
+class PreparedParquetFile : public std::enable_shared_from_this<PreparedParquetFile> {
   public:
   static arrow::Result<std::shared_ptr<PreparedParquetFile>> Open(
       std::shared_ptr<arrow::fs::FileSystem> fs,
       const std::string& path,
       const ::parquet::ReaderProperties& reader_props = ::parquet::default_reader_properties());
+
+  /**
+   * @brief Lazily opens and validates a packed file without blocking on backend I/O.
+   * CPU continuations inherit the consuming Folly executor, which must accept work
+   * until completion. Generic filesystem
+   * reads use Arrow I/O executors. Inputs are retained until completion. Consume
+   * with a non-inline executor, or get() from a thread outside that executor.
+   */
+  static folly::SemiFuture<arrow::Result<std::shared_ptr<PreparedParquetFile>>> OpenAsync(
+      std::shared_ptr<arrow::fs::FileSystem> fs,
+      std::string path,
+      const ::parquet::ReaderProperties& reader_props = ::parquet::default_reader_properties());
+
+  /**
+   * @brief Reads a contiguous range with independent reader state, returning one table per row group.
+   * The lazy operation retains this context and inherits the consumer executor.
+   * Concurrent operations are supported; the file must remain immutable. Schema
+   * fields are matched by field ID, with absent fields returned as nullable nulls.
+   * The caller bounds the range and reserves its memory until completion. All
+   * selected groups are materialized; this is not a streaming cursor. Pre-buffering
+   * is always enabled so decode does not fall back to synchronous remote reads.
+   * Dropping the future does not cancel issued I/O or release its buffers early.
+   */
+  folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::Table>>>> ReadRowGroupsAsync(
+      int row_group_offset,
+      int row_group_count,
+      std::shared_ptr<arrow::Schema> schema = nullptr,
+      ::parquet::ArrowReaderProperties arrow_props = ::parquet::default_arrow_reader_properties()) const;
 
   arrow::Result<std::shared_ptr<FileRowGroupReader>> MakeReader(
       const std::shared_ptr<arrow::Schema>& schema = nullptr,
@@ -167,6 +196,9 @@ class PreparedParquetFile {
   PreparedParquetFile(std::shared_ptr<arrow::fs::FileSystem> fs,
                       std::string path,
                       const ::parquet::ReaderProperties& reader_props);
+
+  // Validate and snapshot packed metadata before publishing the context.
+  arrow::Status InitMetadata(::parquet::arrow::FileReader& reader, bool encrypted_footer);
 
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::string path_;
