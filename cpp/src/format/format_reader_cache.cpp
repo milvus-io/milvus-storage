@@ -22,6 +22,7 @@
 #include <glog/raw_logging.h>
 
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
+#include "milvus-storage/format/deltalake/deltalake_format_reader.h"
 #include "milvus-storage/format/paimon/paimon_format_reader.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
@@ -295,5 +296,6 @@ template class FormatReaderMetadataCache<vortex::VortexFormatReader>;
 template class FormatReaderMetadataCache<lance::LanceTableReader>;
 template class FormatReaderMetadataCache<iceberg::IcebergFormatReader>;
 template class FormatReaderMetadataCache<paimon::PaimonFormatReader>;
+template class FormatReaderMetadataCache<deltalake::DeltaLakeFormatReader>;
 
 }  // namespace milvus_storage

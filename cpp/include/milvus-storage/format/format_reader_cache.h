@@ -36,6 +36,10 @@
 
 namespace milvus_storage {
 
+namespace deltalake {
+class DeltaLakeFormatReader;
+}
+
 namespace iceberg {
 class IcebergFormatReader;
 }  // namespace iceberg
@@ -191,6 +195,9 @@ class MetadataCache final {
     }
     if (format == LOON_FORMAT_PAIMON_TABLE) {
       return std::forward<Visitor>(visitor)(get<paimon::PaimonFormatReader>());
+    }
+    if (format == LOON_FORMAT_DELTALAKE_TABLE) {
+      return std::forward<Visitor>(visitor)(get<deltalake::DeltaLakeFormatReader>());
     }
 
     return ReturnT(arrow::Status::Invalid("Unknown column group format: ", format));

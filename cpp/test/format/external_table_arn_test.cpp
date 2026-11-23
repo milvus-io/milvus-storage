@@ -34,6 +34,7 @@
 
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -67,6 +68,7 @@
 #include "milvus-storage/manifest.h"
 #include "lance/lance_bridge.h"
 #include "iceberg/iceberg_bridge.h"
+#include "deltalake_test_util.h"
 #include "test_env.h"
 
 namespace milvus_storage {
@@ -163,6 +165,20 @@ static arrow::Result<ArnWriteResult> WriteIcebergTable(const uint64_t num_rows,
     ARROW_ASSIGN_OR_RAISE(explore_dir, StorageUri::Make(uri));
   }
   return ArnWriteResult{std::move(cgfile), nullptr, num_rows, std::move(explore_dir), table_info.snapshot_id};
+}
+
+static arrow::Result<ArnWriteResult> WriteDeltaTable(uint64_t num_rows,
+                                                     const ArrowFileSystemPtr& write_fs,
+                                                     const api::Properties& write_props,
+                                                     const std::string& test_base) {
+  const auto path = test_base + "/delta";
+  // Exercise delegated reads of the Delta log, the data file and the sidecar DV.
+  constexpr std::array<int64_t, 1> deleted_rows{1};
+  ARROW_ASSIGN_OR_RAISE(auto schema,
+                        deltalake::test::WriteTable(write_fs, path, num_rows + deleted_rows.size(), 1, deleted_rows));
+  ARROW_ASSIGN_OR_RAISE(auto config, GetFileSystemConfig(std::make_shared<const api::Properties>(write_props)));
+  ARROW_ASSIGN_OR_RAISE(auto uri, deltalake::test::ExploreUri(config, path));
+  return ArnWriteResult{{}, std::move(schema), num_rows, std::move(uri), 0};
 }
 
 static arrow::Result<ArnWriteResult> WriteParquetFiles(const uint64_t num_files,
@@ -374,6 +390,8 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
       return CreateLanceTable(num_rows);
     } else if (format == LOON_FORMAT_ICEBERG_TABLE) {
       return CreateIcebergTable(num_rows);
+    } else if (format == LOON_FORMAT_DELTALAKE_TABLE) {
+      return WriteDeltaTable(num_rows, write_fs_, write_props_, test_base_);
     } else if (format == LOON_FORMAT_PARQUET || format == LOON_FORMAT_VORTEX) {
       return WritePlainFormatFile(format, num_rows, write_fs_, std::make_shared<const api::Properties>(write_props_),
                                   test_base_, "s3", address_, arn_bucket_);
@@ -426,10 +444,13 @@ TEST_P(ExternalTableArnTest, ReadWithArnRole) {
       data.ReadAndCheck(result.schema, data.files(), std::make_shared<const api::Properties>(read_props_), num_rows));
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    ArnFormats,
-    ExternalTableArnTest,
-    ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE, LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX));
+INSTANTIATE_TEST_SUITE_P(ArnFormats,
+                         ExternalTableArnTest,
+                         ::testing::Values(LOON_FORMAT_LANCE_TABLE,
+                                           LOON_FORMAT_ICEBERG_TABLE,
+                                           LOON_FORMAT_PARQUET,
+                                           LOON_FORMAT_VORTEX,
+                                           LOON_FORMAT_DELTALAKE_TABLE));
 
 // ---------------------------------------------------------------------------
 // Lance-only: verify credential refresh works with short load_frequency.
@@ -610,6 +631,9 @@ class ExternalTableGcpImpersonationTest : public ::testing::TestWithParam<std::s
       return CreateLanceTable(num_rows);
     } else if (format == LOON_FORMAT_ICEBERG_TABLE) {
       return CreateIcebergTable(num_rows);
+    } else if (format == LOON_FORMAT_DELTALAKE_TABLE) {
+      ARROW_ASSIGN_OR_RAISE(auto write_fs, GetFileSystem(std::make_shared<const api::Properties>(plain_write_props_)));
+      return WriteDeltaTable(num_rows, write_fs, plain_write_props_, test_base_);
     } else if (format == LOON_FORMAT_PARQUET || format == LOON_FORMAT_VORTEX) {
       ARROW_ASSIGN_OR_RAISE(auto write_fs, GetFileSystem(std::make_shared<const api::Properties>(plain_write_props_)));
       return WritePlainFormatFile(format, num_rows, write_fs,
@@ -684,10 +708,13 @@ TEST_P(ExternalTableGcpImpersonationTest, ReadWithImpersonation) {
       data.ReadAndCheck(result.schema, data.files(), std::make_shared<const api::Properties>(read_props_), num_rows));
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    GcpImpersonationFormats,
-    ExternalTableGcpImpersonationTest,
-    ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE, LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX));
+INSTANTIATE_TEST_SUITE_P(GcpImpersonationFormats,
+                         ExternalTableGcpImpersonationTest,
+                         ::testing::Values(LOON_FORMAT_LANCE_TABLE,
+                                           LOON_FORMAT_ICEBERG_TABLE,
+                                           LOON_FORMAT_PARQUET,
+                                           LOON_FORMAT_VORTEX,
+                                           LOON_FORMAT_DELTALAKE_TABLE));
 
 // ===========================================================================
 // Integration tests for reading external Azure tables via brokered SAS tokens.
@@ -921,6 +948,8 @@ class ExternalTableAzureArnTest : public ::testing::TestWithParam<std::string> {
       return CreateLanceTable(num_rows);
     } else if (format == LOON_FORMAT_ICEBERG_TABLE) {
       return CreateIcebergTable(num_rows);
+    } else if (format == LOON_FORMAT_DELTALAKE_TABLE) {
+      return WriteDeltaTable(num_rows, write_fs_, write_props_, test_base_);
     } else if (format == LOON_FORMAT_PARQUET || format == LOON_FORMAT_VORTEX) {
       return WritePlainFormatFile(format, num_rows, write_fs_, std::make_shared<const api::Properties>(write_props_),
                                   test_base_, "az", address_, container_);
@@ -969,8 +998,8 @@ TEST_P(ExternalTableAzureArnTest, ReadWithBrokeredSas) {
 
 TEST_P(ExternalTableAzureArnTest, CachedReadsFetchBrokeredSasOnce) {
   const auto& format = GetParam();
-  if (format != LOON_FORMAT_LANCE_TABLE && format != LOON_FORMAT_ICEBERG_TABLE) {
-    GTEST_SKIP() << "Cache reuse is covered only by Lance and Iceberg";
+  if (format == LOON_FORMAT_PARQUET || format == LOON_FORMAT_VORTEX) {
+    GTEST_SKIP() << "Cache reuse is covered by the table formats";
   }
 
   const uint64_t num_rows = 100;
@@ -1008,18 +1037,20 @@ TEST_P(ExternalTableAzureArnTest, CachedReadsFetchBrokeredSasOnce) {
     }
     ASSERT_EQ(total_rows, static_cast<int64_t>(num_rows));
   } else {
-    auto snapshot_id = std::to_string(result.iceberg_snapshot_id);
-    api::SetValue(cache_read_props, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, snapshot_id.c_str());
+    if (format == LOON_FORMAT_ICEBERG_TABLE) {
+      auto snapshot_id = std::to_string(result.iceberg_snapshot_id);
+      api::SetValue(cache_read_props, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID, snapshot_id.c_str());
 
-    auto reader_options = iceberg::ToReaderOptions(fs_config);
-    EXPECT_EQ(reader_options, (std::unordered_map<std::string, std::string>{
-                                  {"milvus_fs_is_local", "false"}, {"milvus_fs_bucket", fs_config.bucket_name}}));
+      auto reader_options = iceberg::ToReaderOptions(fs_config);
+      EXPECT_EQ(reader_options, (std::unordered_map<std::string, std::string>{
+                                    {"milvus_fs_is_local", "false"}, {"milvus_fs_bucket", fs_config.bucket_name}}));
+    }
 
-    ASSERT_AND_ASSIGN(auto* iceberg_format, Format::get(format));
+    ASSERT_AND_ASSIGN(auto* table_format, Format::get(format));
     for (size_t iteration = 0; iteration < cache_hit_iterations; ++iteration) {
       SCOPED_TRACE(::testing::Message() << "cache hit iteration " << iteration);
-      ASSERT_AND_ASSIGN(auto files, iceberg_format->explore(result.explore_dir,
-                                                            std::make_shared<const api::Properties>(cache_read_props)));
+      ASSERT_AND_ASSIGN(auto files, table_format->explore(result.explore_dir,
+                                                          std::make_shared<const api::Properties>(cache_read_props)));
       ASSERT_FALSE(files.empty());
     }
   }
@@ -1028,10 +1059,13 @@ TEST_P(ExternalTableAzureArnTest, CachedReadsFetchBrokeredSasOnce) {
   ASSERT_TRUE(broker_relay.error().empty()) << broker_relay.error();
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    AzureArnFormats,
-    ExternalTableAzureArnTest,
-    ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE, LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX));
+INSTANTIATE_TEST_SUITE_P(AzureArnFormats,
+                         ExternalTableAzureArnTest,
+                         ::testing::Values(LOON_FORMAT_LANCE_TABLE,
+                                           LOON_FORMAT_ICEBERG_TABLE,
+                                           LOON_FORMAT_PARQUET,
+                                           LOON_FORMAT_VORTEX,
+                                           LOON_FORMAT_DELTALAKE_TABLE));
 
 // ===========================================================================
 // External-table reads through an S3-compatible temporary-credential broker.
@@ -1183,10 +1217,13 @@ TEST_P(ExternalTableS3BrokerTest, CachedReadsFetchBrokerCredentialsOnce) {
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    S3BrokerFormats,
-    ExternalTableS3BrokerTest,
-    ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE, LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX));
+INSTANTIATE_TEST_SUITE_P(S3BrokerFormats,
+                         ExternalTableS3BrokerTest,
+                         ::testing::Values(LOON_FORMAT_LANCE_TABLE,
+                                           LOON_FORMAT_ICEBERG_TABLE,
+                                           LOON_FORMAT_PARQUET,
+                                           LOON_FORMAT_VORTEX,
+                                           LOON_FORMAT_DELTALAKE_TABLE));
 
 // ===========================================================================
 // Integration tests for reading external OSS/COS tables via role ARN.
@@ -1353,7 +1390,7 @@ class ExternalTableRoleArnTest : public ::testing::Test {
     FilesystemCache::getInstance().clean();
   }
 
-  // FFI properties payload shared by all four formats. Iceberg additionally
+  // FFI properties payload shared by the formats. Iceberg additionally
   // needs PROPERTY_READER_EXTTABLE_SNAPSHOT_ID; the shared scenario appends it.
   std::vector<std::pair<std::string, std::string>> BaseProps() const {
     std::vector<std::pair<std::string, std::string>> props = {
@@ -1464,6 +1501,15 @@ TEST_F(ExternalTableAliyunArnTest, ReadIcebergWithArnRole) {
   constexpr uint64_t num_rows = 100;
   ASSERT_AND_ASSIGN(auto result, CreateIcebergTable(num_rows));
   ExternalTableReadScenario data(LOON_FORMAT_ICEBERG_TABLE);
+  ASSERT_NO_FATAL_FAILURE(data.Explore(result, test_base_ + "/manifest", BaseProps()));
+  ASSERT_NO_FATAL_FAILURE(
+      data.ReadAndCheck(result.schema, data.files(), std::make_shared<const api::Properties>(read_props_), num_rows));
+}
+
+TEST_F(ExternalTableAliyunArnTest, ReadDeltaLakeWithArnRole) {
+  constexpr uint64_t num_rows = 100;
+  ASSERT_AND_ASSIGN(auto result, WriteDeltaTable(num_rows, write_fs_, write_props_, test_base_));
+  ExternalTableReadScenario data(LOON_FORMAT_DELTALAKE_TABLE);
   ASSERT_NO_FATAL_FAILURE(data.Explore(result, test_base_ + "/manifest", BaseProps()));
   ASSERT_NO_FATAL_FAILURE(
       data.ReadAndCheck(result.schema, data.files(), std::make_shared<const api::Properties>(read_props_), num_rows));
@@ -1669,7 +1715,7 @@ class ExternalTableAliyunOIDCArnTest : public ::testing::Test {
     bool had_old_value_ = false;
   };
 
-  // FFI properties payload shared by all four formats. Iceberg additionally
+  // FFI properties payload shared by the formats. Iceberg additionally
   // needs PROPERTY_READER_EXTTABLE_SNAPSHOT_ID; the shared scenario appends it.
   std::vector<std::pair<std::string, std::string>> BaseProps() const {
     std::vector<std::pair<std::string, std::string>> props = {
@@ -1799,6 +1845,15 @@ TEST_F(ExternalTableAliyunOIDCArnTest, ReadIcebergWithOIDCChain) {
   constexpr uint64_t num_rows = 100;
   ASSERT_AND_ASSIGN(auto result, CreateIcebergTable(num_rows));
   ExternalTableReadScenario data(LOON_FORMAT_ICEBERG_TABLE);
+  ASSERT_NO_FATAL_FAILURE(data.Explore(result, test_base_ + "/manifest", BaseProps()));
+  ASSERT_NO_FATAL_FAILURE(
+      data.ReadAndCheck(result.schema, data.files(), std::make_shared<const api::Properties>(read_props_), num_rows));
+}
+
+TEST_F(ExternalTableAliyunOIDCArnTest, ReadDeltaLakeWithOIDCChain) {
+  constexpr uint64_t num_rows = 100;
+  ASSERT_AND_ASSIGN(auto result, WriteDeltaTable(num_rows, write_fs_, write_props_, test_base_));
+  ExternalTableReadScenario data(LOON_FORMAT_DELTALAKE_TABLE);
   ASSERT_NO_FATAL_FAILURE(data.Explore(result, test_base_ + "/manifest", BaseProps()));
   ASSERT_NO_FATAL_FAILURE(
       data.ReadAndCheck(result.schema, data.files(), std::make_shared<const api::Properties>(read_props_), num_rows));
