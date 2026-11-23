@@ -691,6 +691,9 @@ TEST_F(LanceBasicTest, AsyncReaderIsReleasedOutsideCrtCompletionCallback) {
   auto dataset_result = open_future.get();
   lifecycle->JoinWorkers();
   ASSERT_TRUE(dataset_result.ok()) << dataset_result.status().ToString();
+  // The dataset owns the cached read handles until it is released.
+  auto dataset = std::move(dataset_result).ValueOrDie();
+  dataset.reset();
   ASSERT_TRUE(lifecycle->WaitForAllCompletedAndDestroyed(std::chrono::seconds(5)))
       << "The asynchronous readers were not all completed and destroyed";
   EXPECT_FALSE(lifecycle->close_in_completion())

@@ -250,9 +250,7 @@ TEST_F(AzureFileSystemProducerTest, ExternalIamSelectsWorkloadIdentityWithoutAcc
     }
     const auto result = AzureFileSystemProducer(config).Make();
     ASSERT_TRUE(result.ok()) << result.status();
-    const auto proxy = std::dynamic_pointer_cast<FileSystemProxy>(result.ValueOrDie());
-    ASSERT_NE(proxy, nullptr);
-    const auto azure_fs = std::dynamic_pointer_cast<fs::AzureFileSystem>(proxy->base_fs());
+    const auto azure_fs = std::dynamic_pointer_cast<fs::AzureFileSystem>(result.ValueOrDie());
     ASSERT_NE(azure_fs, nullptr);
     EXPECT_TRUE(azure_fs->options().Equals(expected));
   }
