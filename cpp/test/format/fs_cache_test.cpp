@@ -538,9 +538,9 @@ TEST_F(FileSystemCacheTest, TalonBrokerIamSeparatesClientsWithTheSameOriginRole)
   auto iam = base;
   iam.use_iam = true;
   EXPECT_NE(base.GetCacheKey(), iam.GetCacheKey());
-  // The native S3 producer still prioritizes the explicit role over use_iam.
+  // The native S3 provider also distinguishes Broker IAM from AssumeRole.
   base.talon_mode = iam.talon_mode = TalonMode::Disabled;
-  EXPECT_EQ(base.GetCacheKey(), iam.GetCacheKey());
+  EXPECT_NE(base.GetCacheKey(), iam.GetCacheKey());
 }
 
 TEST_F(FileSystemCacheTest, TalonNamespaceUsesConfiguredIdentityIndependentlyOfBroker) {
