@@ -579,6 +579,11 @@ class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std:
   void SetUp() override {
     ASSERT_STATUS_OK(InitTestProperties(properties_));
     ASSERT_AND_ASSIGN(fs_config_, GetFileSystemConfig(properties_));
+    if (fs_config_.storage_type == "local" && GetParam() == LOON_FORMAT_ICEBERG_TABLE) {
+      // Iceberg records canonical local paths. Bind the fixture to the same root when /tmp is a symlink.
+      fs_config_.root_path = LocalRootPath().string();
+      ASSERT_EQ(api::SetValue(properties_, PROPERTY_FS_ROOT_PATH, fs_config_.root_path.c_str()), std::nullopt);
+    }
     ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
     ASSERT_STATUS_OK(MirrorDefaultExternalFilesystemConfig());
 

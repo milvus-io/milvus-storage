@@ -417,9 +417,8 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreIceberg(const std::str
     ARROW_ASSIGN_OR_RAISE(iceberg_uri, StorageUri::Make(parsed_uri, false));
   }
 
-  ARROW_ASSIGN_OR_RAISE(
-      auto file_infos,
-      milvus_storage::iceberg::PlanFiles(iceberg_uri, snapshot_id, filesystem, read_options));
+  ARROW_ASSIGN_OR_RAISE(auto file_infos,
+                        milvus_storage::iceberg::PlanFiles(iceberg_uri, snapshot_id, filesystem, read_options));
 
   std::vector<ColumnGroupFile> files;
   files.reserve(file_infos.size());
