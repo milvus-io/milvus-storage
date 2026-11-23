@@ -518,7 +518,19 @@ static void test_filesystem_metrics(void) {
 
   rc = loon_filesystem_get_metrics(fs_handle, &metrics_snapshot);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
-  verify_filesystem_metrics_all_zero(&metrics_snapshot);
+  ck_assert_int_eq(metrics_snapshot.read_count, 0);
+  ck_assert_int_eq(metrics_snapshot.write_count, 0);
+  ck_assert_int_eq(metrics_snapshot.read_bytes, 0);
+  ck_assert_int_eq(metrics_snapshot.write_bytes, 0);
+  ck_assert_int_eq(metrics_snapshot.get_file_info_count, 0);
+  ck_assert_int_eq(metrics_snapshot.create_dir_count, 0);
+  ck_assert_int_eq(metrics_snapshot.delete_dir_count, 0);
+  ck_assert_int_eq(metrics_snapshot.delete_file_count, 0);
+  ck_assert_int_eq(metrics_snapshot.move_count, 0);
+  ck_assert_int_eq(metrics_snapshot.copy_file_count, 0);
+  ck_assert_int_eq(metrics_snapshot.failed_count, 0);
+  ck_assert_int_eq(metrics_snapshot.multi_part_upload_created, 0);
+  ck_assert_int_eq(metrics_snapshot.multi_part_upload_finished, 0);
 
   // do some write and read and verify metrics
   write_single_file(&fs_handle);

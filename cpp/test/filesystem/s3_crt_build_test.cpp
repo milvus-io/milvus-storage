@@ -905,7 +905,7 @@ TEST_P(S3CrtMetadataTest, AsyncHeadReturnsBeforeResponse) {
       return 1;
     };
 
-    const auto initialized = EnsureS3InitializedForTest();
+    const auto initialized = InitializeS3ForTest();
     if (!initialized.ok()) {
       return fail(initialized.ToString());
     }
