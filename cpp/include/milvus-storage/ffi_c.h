@@ -19,12 +19,7 @@ extern "C" {
 #ifndef LOON_FFI_C
 #define LOON_FFI_C
 
-// Visibility macro for FFI exports when building Python bindings
-#if defined(__GNUC__) || defined(__clang__)
-#define FFI_EXPORT __attribute__((visibility("default")))
-#else
-#define FFI_EXPORT
-#endif
+#include "milvus-storage/ffi_async_context.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -60,6 +55,11 @@ FFI_EXPORT extern const int loon_errcode_transient_service;
 FFI_EXPORT extern const int loon_errcode_txn_exhausted_retry;
 FFI_EXPORT extern const int loon_errcode_txn_resolution_failed;
 
+FFI_EXPORT extern const int loon_errcode_async_cancelled;
+FFI_EXPORT extern const int loon_errcode_async_deadline;
+FFI_EXPORT extern const int loon_errcode_async_overloaded;
+FFI_EXPORT extern const int loon_errcode_async_busy;
+
 // usage example(caller must free the message string):
 //
 // LoonFFIResult result = SomeFFIFunction(...);
@@ -68,11 +68,6 @@ FFI_EXPORT extern const int loon_errcode_txn_resolution_failed;
 //    ... // handle error, e.g. log result.message
 //    loon_ffi_free_result(&result); // free the message string
 // }
-typedef struct LoonFFIResult {
-  int err_code;
-  char* message;
-} LoonFFIResult;
-
 // check result is success
 FFI_EXPORT int loon_ffi_is_success(LoonFFIResult* result);
 
