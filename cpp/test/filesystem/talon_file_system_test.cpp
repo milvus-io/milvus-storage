@@ -43,7 +43,7 @@
 #include "milvus-storage/filesystem/fs.h"
 #ifdef WITH_TALON
 #include "milvus-storage/filesystem/talon/talon_file_system_producer.h"
-#include "talon_bridge.h"
+#include "talon/talon_bridge.h"
 #endif
 #include "milvus-storage/properties.h"
 #include "milvus-storage/reader.h"

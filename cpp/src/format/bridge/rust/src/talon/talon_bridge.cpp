@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "talon_bridge.h"
+#include "talon/talon_bridge.h"
 
 #include <exception>
 #include <limits>
@@ -22,7 +22,7 @@
 
 #include <arrow/status.h>
 
-#include "bridge_util.h"
+#include "runtime/bridge_util.h"
 
 namespace milvus_storage::talon {
 namespace {
