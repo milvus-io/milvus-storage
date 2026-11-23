@@ -1792,7 +1792,11 @@ TEST(TalonBridgeTest, MapsOpenErrorAndPreservesTalonMessage) {
 }
 
 TEST(TalonBridgeTest, OpensVolcengineObjectWithKnownMetadata) {
-  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make("127.0.0.1:7000", 8U * 1024U * 1024U, 8));
+  ArrowFileSystemConfig config;
+  config.talon_coordinator = "127.0.0.1:7000";
+  config.talon_block_size = 8U * 1024U * 1024U;
+  config.talon_max_idle_per_addr = 8;
+  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make(config));
   ASSERT_AND_ASSIGN(auto reader,
                     client->OpenObject("volcengine", "test-bucket", "path/a", talon::TalonObjectStat{7, "etag"}));
   EXPECT_EQ(reader.KnownSize(), 7);
