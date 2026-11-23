@@ -835,12 +835,14 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
 
   public:
   ObjectCrtInputFile(std::shared_ptr<S3CrtClientHolder> holder,
+                     std::shared_ptr<RequestAuthenticator> authenticator,
                      const arrow::io::IOContext& io_context,
                      const S3Path& path,
                      int64_t size,
                      std::shared_ptr<NativeS3Operations> native)
       : native_(std::move(native)),
         holder_(std::move(holder)),
+        authenticator_(std::move(authenticator)),
         io_context_(io_context),
         path_(path),
         read_state_(std::make_shared<ReadState>(size)) {}
@@ -1031,6 +1033,8 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     ctx->request.SetResponseStreamFactory(AwsWriteableStreamFactory(out, nbytes));
 
     ctx->metrics->IncrementReadCount();
+    // S3CrtClient builds the meta request synchronously in this call.
+    ScopedRequestOutsideHttpClient outside_http_client(authenticator_.get());
     ctx->client_lease->GetObjectAsync(
         ctx->request,
         [ctx](const Aws::S3Crt::S3CrtClient*, const S3CrtModel::GetObjectRequest&, S3CrtModel::GetObjectOutcome outcome,
@@ -1253,6 +1257,7 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
   };
 
   std::shared_ptr<S3CrtClientHolder> holder_;
+  std::shared_ptr<RequestAuthenticator> authenticator_;
   const arrow::io::IOContext io_context_;
   S3Path path_;
 
@@ -1951,8 +1956,11 @@ class S3CrtOutputStream final : public arrow::io::OutputStream, public AsyncOutp
     }
     endpoint.GetResult().AddPathSegments(ToAwsString(path.key));
     const auto& uri = endpoint.GetResult().GetURI();
-    upload_->http = Aws::Http::CreateHttpRequest(uri, Aws::Http::HttpMethod::HTTP_PUT,
-                                                 Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
+    {
+      ScopedRequestOutsideHttpClient outside_http_client(options.request_authenticator.get());
+      upload_->http = Aws::Http::CreateHttpRequest(uri, Aws::Http::HttpMethod::HTTP_PUT,
+                                                   Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
+    }
     for (const auto& header : request.GetHeaders()) {
       upload_->http->SetHeaderValue(header.first, header.second);
     }
@@ -3180,8 +3188,9 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
     ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
     if (use_crt_) {
-      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, kNoSize,
-                                                      native_operations_.ok() ? *native_operations_ : nullptr);
+      auto ptr =
+          std::make_shared<ObjectCrtInputFile>(crt_holder_, options().request_authenticator, fs->io_context(), path,
+                                               kNoSize, native_operations_.ok() ? *native_operations_ : nullptr);
       ARROW_RETURN_NOT_OK(ptr->Init());
       return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
     }
@@ -3205,8 +3214,9 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
     ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
     if (use_crt_) {
-      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, info.size(),
-                                                      native_operations_.ok() ? *native_operations_ : nullptr);
+      auto ptr =
+          std::make_shared<ObjectCrtInputFile>(crt_holder_, options().request_authenticator, fs->io_context(), path,
+                                               info.size(), native_operations_.ok() ? *native_operations_ : nullptr);
       ARROW_RETURN_NOT_OK(ptr->Init());
       return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
     }

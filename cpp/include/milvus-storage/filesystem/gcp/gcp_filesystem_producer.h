@@ -30,6 +30,11 @@ namespace milvus_storage {
 //   - HMAC mode: GCS HMAC ak/sk with standard AWS SigV4 for non-conditional
 //     requests, and GOOG4-HMAC-SHA256 re-signing for conditional writes
 //     (x-goog-if-generation-match), which GCS does not accept via SigV4.
+// The factory binds the SDK clients that Make() builds to that filesystem's
+// provider, and S3Options::request_authenticator carries it to CRT meta
+// requests and native transport requests. Requests keep the filesystem's
+// identity when another filesystem later registers its (endpoint, bucket) in
+// GcpCredentialRegistry.
 class GcpFileSystemProducer : public FileSystemProducer {
   public:
   explicit GcpFileSystemProducer(const ArrowFileSystemConfig& config) : config_(config) {}
@@ -38,6 +43,7 @@ class GcpFileSystemProducer : public FileSystemProducer {
 
   private:
   friend class S3RequestTimeoutTest;
+  friend class GcpClientBindingTest;
 
   // One-shot: install the stateless HTTP client factory and call
   // Aws::InitializeS3. Guarded by std::call_once; the first GCP Make() wins
@@ -45,13 +51,13 @@ class GcpFileSystemProducer : public FileSystemProducer {
   // the status captured the first time call_once actually ran.
   static arrow::Status InitS3Compat(const ArrowFileSystemConfig& first_config);
 
-  // Per-Make: build a credential provider from the given config and register
-  // it in GcpCredentialRegistry under (endpoint, bucket). Must be called
-  // after InitS3Compat. Returns Status::Invalid when the config doesn't
-  // match any supported credential mode.
-  // Builds the credential provider for config and registers it for
-  // (address, bucket). Fails when the bucket already maps to another identity.
-  static arrow::Result<std::shared_ptr<GcpCredentialProvider>> RegisterIdentity(const ArrowFileSystemConfig& config);
+  // Registers provider for (address, bucket) and binds the SDK clients this
+  // call builds to the registered provider, which is an existing provider
+  // when the identity is the same. When the bucket already maps to another
+  // identity, the filesystem uses provider without an entry if its clients
+  // are bound, and fails otherwise. Make() passes the provider built from the
+  // config.
+  arrow::Result<ArrowFileSystemPtr> MakeWithProvider(std::shared_ptr<GcpCredentialProvider> provider);
 
   // bearer_token: the provider injects Authorization, so the AWS signer must
   // not sign (anonymous credentials).

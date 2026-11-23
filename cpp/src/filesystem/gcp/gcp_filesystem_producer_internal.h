@@ -24,9 +24,12 @@ namespace milvus_storage::gcp_internal {
 // Builds the registry-backed HTTP client factory that
 // GcpFileSystemProducer::InitS3Compat installs process-wide. Exposed from the
 // source tree (not the public include directory) so unit tests can drive the
-// factory's Bearer delivery gate directly: CreateHttpRequest adds an
-// Authorization header only for a registered provider that issues Bearer
-// tokens and a URI that GcpCredentialRegistry::MayCarryBearerToken accepts.
+// factory's Bearer delivery gate directly. CreateHttpRequest authenticates
+// only requests built in a ScopedRequestOutsideHttpClient, with the scope's
+// RequestAuthenticator when it has one and otherwise with the provider
+// GcpCredentialRegistry::Lookup finds. Either way it adds a Bearer header only
+// when the provider issues Bearer tokens and
+// GcpCredentialRegistry::MayCarryBearerToken accepts the URI.
 std::shared_ptr<Aws::Http::HttpClientFactory> MakeGoogleHttpClientFactory(std::string tls_min_version);
 
 }  // namespace milvus_storage::gcp_internal

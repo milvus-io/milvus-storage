@@ -158,9 +158,10 @@ instead it is enforced:
   block size) stay out of the origin identity.
 - `GcpCredentialRegistry::Register` returns `arrow::Status` and **refuses a
   second provider with a different `Identity()` on the same `(endpoint,
-  bucket)`** (§6.3). A filesystem therefore can never authenticate with
-  another filesystem's identity, and one `(endpoint, bucket)` maps to one
-  identity per process.
+  bucket)`** (§6.3), so one `(endpoint, bucket)` maps to one registered
+  identity per process. A filesystem is still built when its registration
+  is refused, as long as its SDK clients are bound, because they and its
+  request authenticator carry its own provider (§6.9).
 
 ## 6. C++ side: multi-identity GCP filesystem producer
 
@@ -186,6 +187,11 @@ re-signing of conditional writes (which GCS refuses to accept in SigV4 form).
 The fix is to take the identity out of the factory. The factory becomes a
 thin URI dispatcher; a per-process registry maps `(endpoint_host, bucket_name)`
 to a `GcpCredentialProvider`; each outbound request looks up its own provider.
+Since §6.9, SDK requests use the provider bound to their client, and requests
+that bypass an `HttpClient` use the filesystem's request authenticator.
+Requests whose `HttpClient` the GCP factory did not build (an HTTP client
+factory installed outside milvus-storage), and requests of filesystems built
+without `GcpFileSystemProducer::Make()`, look the provider up.
 
 ```
 ┌─ GcpCredentialProvider (interface) ──────────────────────────────┐
@@ -219,22 +225,24 @@ to a `GcpCredentialProvider`; each outbound request looks up its own provider.
 ┌─ GoogleHttpClientFactory (stateless — only holds tls_min_version) ┐
 │   CreateHttpRequest(uri, …):                                       │
 │     req = StandardHttpRequest{…}                                   │
+│     if !ScopedRequestOutsideHttpClient::Active(): return req       │
+│       // SDK request: the delegator authenticates it (§6.9)        │
+│     if the scope has an authenticator: authenticate, return req    │
 │     provider = Registry::Lookup(uri);  if none: log, return req    │
-│     if !provider->IssuesBearerToken(): return req   // HMAC        │
-│     if !Registry::MayCarryBearerToken(uri): warn once, return req  │
-│     try { header = provider->AuthorizationHeader() }               │
-│     catch (...) { log }        // SDK is exception-free            │
-│     if header: req.SetHeader(header.first, header.second)          │
+│     if provider->IssuesBearerToken(): AttachBearerToken(req)       │
 │     return req                                                      │
 │                                                                      │
 │   CreateHttpClient(cfg):                                            │
-│     return new GoogleHttpClientDelegator(cfg, tls_min_version)     │
+│     bound = provider of the Make() on this thread, if any (§6.9)   │
+│     return new GoogleHttpClientDelegator(cfg, tls_min_version,     │
+│                                          bound)                    │
 └──────────────────┬───────────────────────────────────────────────┘
                    ▼
-┌─ GoogleHttpClientDelegator (stateless) ──────────────────────────┐
+┌─ GoogleHttpClientDelegator ──────────────────────────────────────┐
 │   MakeRequest(req):                                                │
-│     provider = Registry::Lookup(req.uri)                           │
+│     provider = bound ? bound : Registry::Lookup(req.uri)           │
 │     if !provider: return 403 SignatureFailed XML                   │
+│     if provider->IssuesBearerToken(): AttachBearerToken(req)       │
 │     if !provider->MaybeSignConditionalWrite(req): return 403 XML   │
 │     return underlying_.MakeRequest(req)                            │
 └────────────────────────────────────────────────────────────────────┘
@@ -267,7 +275,7 @@ to a `GcpCredentialProvider`; each outbound request looks up its own provider.
 
 - **Trusted endpoints.** `Register(key, provider, trusted_endpoint)` marks
   `key.endpoint` as operator configuration when `trusted_endpoint` is true.
-  `GcpFileSystemProducer::RegisterIdentity` passes `config.alias.empty()`:
+  `GcpFileSystemProducer::Make()` passes `config.alias.empty()`:
   only the primary filesystem's address is operator configuration; external
   filesystems (alias set by `CreateExternalFsConfig`) are never trusted. A
   trusted registration may replace an untrusted one for the same key; an
@@ -349,22 +357,30 @@ rejected rather than clamped.
 
 ```cpp
 arrow::Result<ArrowFileSystemPtr> GcpFileSystemProducer::Make() {
-  ARROW_RETURN_NOT_OK(InitS3Compat(config_));                    // call_once: stateless factory + InitializeS3
-  ARROW_ASSIGN_OR_RAISE(auto provider, RegisterIdentity(config_)); // build + Register(key, provider, alias.empty())
-  ARROW_ASSIGN_OR_RAISE(auto s3_options, CreateS3Options(provider->IssuesBearerToken()));
-  return S3FileSystem::Make(s3_options);
+  ARROW_RETURN_NOT_OK(InitS3Compat(config_));       // call_once: stateless factory + InitializeS3
+  ARROW_ASSIGN_OR_RAISE(auto provider, BuildGcpProviderFromConfig(config_));
+  return MakeWithProvider(std::move(provider));
 }
+// MakeWithProvider:
+//   registered = Register(key, provider, alias.empty(), &client_provider);
+//   options = CreateS3Options(provider->IssuesBearerToken());
+//   options.request_authenticator = GcpRequestAuthenticator(client_provider);
+//   { ScopedClientCredentials binding(client_provider);  // §6.9
+//     fs = S3FileSystem::Make(options); }
+//   if refused and the clients were not bound: return error
+//   return fs
 ```
 
-`RegisterIdentity` fails the `Make()` when the bucket is already bound to a
-different identity (§6.3). `CreateS3Options(bearer_token)` feeds the AWS SDK
+`Make()` fails when the bucket is already bound to a different identity
+(§6.3), except for the case in §6.9. `CreateS3Options(bearer_token)` feeds the AWS SDK
 anonymous credentials for Bearer providers, so SigV4 does not overwrite the
 injected header, and HMAC keys otherwise.
 
 `call_once` stays because `Aws::InitializeS3` can only be called once per
 process — that is an AWS SDK hard constraint, not something our refactor is
 trying to relax. But identity is no longer frozen by it: it now lives in the
-registry, which `RegisterIdentity` writes to on every `Make()`.
+registry, which every `Make()` writes to, and in the SDK clients each
+`Make()` binds (§6.9).
 
 The first-Make-wins settings under `call_once` are now narrowed to TLS min
 version and log level. This is deliberately not fixed in this commit; a
@@ -372,11 +388,14 @@ global-TLS-floor policy is a separate design.
 
 ### 6.6 Missing-lookup = fail fast
 
-Both the factory (`CreateHttpRequest`) and the delegator (`MakeRequest`) treat
-a registry miss as a bug:
+A registry miss is a bug wherever a lookup happens:
 
-- Factory logs an error and lets `MakeRequest` terminate the request.
-- `MakeRequest` fabricates an AWS-compatible XML error body:
+- The factory (`CreateHttpRequest`) looks up a provider only for a request
+  built outside an `HttpClient` whose scope has no request authenticator
+  (§6.9). It has no error channel, so it logs
+  the miss and sends the request unsigned, and GCS rejects it.
+- The delegator (`MakeRequest`) looks up a provider only for an unbound
+  client. On a miss it fabricates an AWS-compatible XML error body:
 
   ```xml
   <Error>
@@ -388,7 +407,7 @@ a registry miss as a bug:
   message cleanly and the upstream Arrow caller sees a usable diagnostic.
 
 Invariant: every GCP URI reaching the HTTP stack must have been registered
-by `RegisterIdentity` first. A miss indicates a URI-normalization bug in the
+by `Make()` first. A miss indicates a URI-normalization bug in the
 registry or a request path that bypassed `Make()`, both of which should
 surface loudly instead of silently hitting the server with an unsigned
 request and triggering a puzzling 403.
@@ -413,11 +432,13 @@ public in upstream google-cloud-cpp.
 ### 6.8 Bearer delivery: HTTPS Google APIs or a trusted endpoint
 
 An OAuth2 Bearer token is a reusable credential, and external filesystems
-register providers for endpoints taken from user specs. The factory
-therefore adds the `Authorization` header only when all of the following hold:
+register providers for endpoints taken from user specs. `AttachBearerToken`
+therefore adds the `Authorization` header only when all of the following
+hold. The delegator calls it for SDK requests, and the request authenticator
+or the factory for requests built outside an `HttpClient` (§6.9):
 
-1. `Lookup(uri)` finds a provider (otherwise the request goes out unsigned
-   and the delegator or GCS rejects it, §6.6);
+1. the request has a provider: the bound one, or one `Lookup(uri)` finds
+   (otherwise the delegator or GCS rejects the request, §6.6);
 2. `provider->IssuesBearerToken()` is true (HMAC providers are signed by the
    AWS SDK and the GOOG4 re-sign instead, and are never asked for a header);
 3. `MayCarryBearerToken(uri)` is true: the request is **HTTPS to a
@@ -426,12 +447,65 @@ therefore adds the `Authorization` header only when all of the following hold:
    what keeps GCS emulators over plain HTTP working).
 
 Requests that fail rule 3 are logged once per endpoint and sent without the
-header. The provider call is wrapped in `try/catch`, since the factory runs
+header. The provider call is wrapped in `try/catch`, since both callers run
 inside the exception-free AWS SDK; a throwing token fetch yields an unsigned
-request, not a crash. `GoogleHttpClientDelegator::MakeRequest` applies the
-same lookup for the GOOG4 re-sign path. The gate is covered by
+request, not a crash. The GOOG4 re-sign in `MakeRequest` uses the same
+provider. The factory side of the gate is covered by
 `cpp/test/filesystem/gcp_http_factory_test.cpp`, which builds the factory
-through `gcp_internal::MakeGoogleHttpClientFactory`.
+through `gcp_internal::MakeGoogleHttpClientFactory`, and the delegator side
+by `cpp/test/filesystem/gcp_client_binding_test.cpp`.
+
+### 6.9 Per-client credential binding
+
+The registry holds one identity per `(endpoint, bucket)` and never removes an
+entry, so URI lookup alone cannot keep filesystems on one bucket apart:
+
+- A trusted registration replaces an untrusted one. A Milvus refresh explores
+  the external source and then opens the primary filesystem to commit the
+  manifest. When both use one bucket, the primary's registration replaced the
+  external identity, and the cached external filesystem's requests carried
+  the primary's Bearer token.
+- Another identity on a registered bucket failed `Make()` until the process
+  restarted. This blocked rotating a target service account through a
+  refresh, and a second collection with another identity on that bucket.
+
+The AWS SDK builds one `HttpClient` per SDK client through the global
+factory, on the thread that constructs the client, and `S3FileSystem::Make`
+builds its clients on the calling thread. `Make()` publishes a provider in a
+thread-local slot around `S3FileSystem::Make`, and `CreateHttpClient` binds
+it to each delegator built there. When the identity matches the registered
+entry, that provider is the registered one, so a filesystem re-created with
+the same identity reuses its cached token.
+
+- SDK requests are authenticated in the delegator. Bearer filesystems give
+  the SDK anonymous credentials, so nothing has to be attached before
+  signing: `CreateHttpRequest` leaves SDK requests alone, and the delegator
+  attaches its provider's token under the §6.8 gate. An SDK request never asks
+  another identity's provider for a token, and an HMAC request never carries
+  a Bearer header that SigV4 would sign.
+- Requests that bypass an `HttpClient`, CRT meta requests (`S3CrtClient`
+  range reads) and native transport requests (HEAD/List with CRT), are built
+  in a `ScopedRequestOutsideHttpClient` that carries the filesystem's
+  `S3Options::request_authenticator`. GCP uploads always use the SDK client
+  (`S3CrtOutputStream` serves other providers only, though it opens the same
+  scope). `Make()` sets it to a
+  `GcpRequestAuthenticator` holding the bound provider, so the factory
+  attaches that provider's token under the §6.8 gate. A filesystem built
+  without an authenticator, for example by calling `S3FileSystem::Make`
+  directly, still gets its token by URI. `S3Options::Equals` compares the
+  authenticators' identities, since Bearer filesystems all give the SDK
+  anonymous credentials.
+- When `Register` refuses another identity, `Make()` still builds the
+  filesystem if its clients were bound, and the registry entry stays as it
+  was. Every request of such a filesystem carries its own identity. With no
+  entry of its own, it builds a new provider and fetches a new token each
+  time it is re-created.
+- The refusal still applies to filesystems whose clients are not bound
+  because code outside milvus-storage initialized the AWS SDK with its own
+  factory first. That factory does not see the scope's authenticator either.
+  Milvus does this on a GCP QueryNode with IAM and its legacy chunk manager,
+  and its factory looks tokens up in this registry by URI. The primary
+  filesystem's trusted registration is never refused.
 
 ## 7. Rust side: impersonation for Lance and Iceberg
 

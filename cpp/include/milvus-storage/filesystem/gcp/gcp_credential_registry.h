@@ -76,32 +76,42 @@ GcpEndpointKey NormalizeGcpEndpoint(const std::string& address, bool use_ssl);
 
 // Process-wide registry mapping (endpoint, bucket) → credential provider.
 //
-// The GCP HTTP client factory and delegator are installed once globally (AWS
-// SDK constraint via InitializeS3 + call_once). They are stateless and look
-// up the per-request provider from this registry by inspecting each request's
-// URI. Identities are registered per GcpFileSystemProducer::Make() call, so
-// any number of GCP identities can coexist in one process as long as each
-// (endpoint, bucket) pair maps to exactly one identity.
+// The GCP HTTP client factory is installed once globally (AWS SDK constraint
+// via InitializeS3 + call_once). The SDK clients that
+// GcpFileSystemProducer::Make() builds are bound to that filesystem's
+// provider, and their CRT meta requests and native transport requests carry it
+// through S3Options::request_authenticator. Requests whose HttpClient the GCP
+// factory did not build (an HTTP client factory installed outside
+// milvus-storage), and requests of filesystems built without Make(), look up
+// their provider here by request URI. The registry also records the trusted
+// endpoints that decide where Bearer tokens may go.
 class GcpCredentialRegistry {
   public:
   static GcpCredentialRegistry& Instance();
 
   // Register the provider for a (endpoint, bucket) pair.
   //
-  // One (endpoint, bucket) maps to one identity per process. A second
-  // Register with the same key keeps the existing provider when the identity
-  // (GcpCredentialProvider::Identity) is the same, and fails with Invalid when
-  // it differs, so a filesystem never authenticates with another filesystem's
-  // identity. A trusted (operator) registration may replace an untrusted one;
-  // an untrusted registration never replaces a trusted one.
+  // One (endpoint, bucket) maps to one registered identity per process. A
+  // second Register with the same key keeps the existing provider when the
+  // identity (GcpCredentialProvider::Identity) is the same, and fails with
+  // Invalid when it differs. A trusted (operator) registration may replace an
+  // untrusted one; an untrusted registration never replaces a trusted one.
+  // GcpFileSystemProducer::Make() still builds a filesystem whose registration
+  // fails when its SDK clients are bound, because every request then carries
+  // its own identity.
   //
   // trusted_endpoint marks key.endpoint as configured by the operator (the
   // primary filesystem's own address), so Bearer tokens may be sent to it even
   // when it is not an HTTPS Google API host. Endpoints of external filesystems
   // come from user specs and must not be marked.
+  //
+  // On success, a non-null registered receives the provider the entry holds:
+  // the existing one when the identity is the same, so its cached token is
+  // reused, and provider otherwise.
   arrow::Status Register(GcpBucketKey key,
                          std::shared_ptr<GcpCredentialProvider> provider,
-                         bool trusted_endpoint = false);
+                         bool trusted_endpoint = false,
+                         std::shared_ptr<GcpCredentialProvider>* registered = nullptr);
 
   // Look up the provider for an outgoing request URI. Tries both path-style
   // (request endpoint + first path segment) and virtual-host-style (first

@@ -22,6 +22,7 @@ struct NativeS3Transport::State {
   size_t inflight = 0;
   size_t limit = 0;
   std::shared_ptr<S3ClientHolder> holder;
+  std::shared_ptr<RequestAuthenticator> authenticator;
 
   void Retire(bool network_pending) {
     std::lock_guard lock(mutex);
@@ -227,6 +228,7 @@ arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(
     return arrow::Status::Invalid("SDK CRT client has no underlying native client");
   auto state = std::make_shared<State>();
   state->holder = std::move(holder);
+  state->authenticator = options.request_authenticator;
   state->limit = options.max_connections;
   return std::shared_ptr<NativeS3Transport>(new NativeS3Transport(std::move(state), std::move(crt_holder)));
 }
@@ -263,7 +265,10 @@ arrow::Future<Aws::Client::XmlOutcome> NativeS3Transport::Send(const Aws::Amazon
       resolved.SetQueryString(query.c_str());
     auto uri = resolved.GetURI();
     model.AddQueryStringParameters(uri);
-    r->http = Aws::Http::CreateHttpRequest(uri, method, Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
+    {
+      ScopedRequestOutsideHttpClient outside_http_client(state_->authenticator.get());
+      r->http = Aws::Http::CreateHttpRequest(uri, method, Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
+    }
     r->response = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("native-s3-response", r->http);
     for (const auto& h : model.GetHeaders()) r->http->SetHeaderValue(h.first, h.second);
     for (const auto& h : model.GetAdditionalCustomHeaders()) r->http->SetHeaderValue(h.first, h.second);

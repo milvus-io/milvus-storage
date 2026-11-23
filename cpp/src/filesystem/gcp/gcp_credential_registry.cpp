@@ -64,7 +64,8 @@ GcpCredentialRegistry& GcpCredentialRegistry::Instance() {
 
 arrow::Status GcpCredentialRegistry::Register(GcpBucketKey key,
                                               std::shared_ptr<GcpCredentialProvider> provider,
-                                              bool trusted_endpoint) {
+                                              bool trusted_endpoint,
+                                              std::shared_ptr<GcpCredentialProvider>* registered) {
   key.endpoint.host = ToLower(std::move(key.endpoint.host));
   std::lock_guard<std::mutex> lock(mu_);
   auto it = providers_.find(key);
@@ -85,8 +86,14 @@ arrow::Status GcpCredentialRegistry::Register(GcpBucketKey key,
       entry.provider = std::move(provider);
     }
     entry.trusted = entry.trusted || trusted_endpoint;
+    if (registered != nullptr) {
+      *registered = entry.provider;
+    }
   } else {
-    providers_.emplace(key, Entry{std::move(provider), trusted_endpoint});
+    auto inserted = providers_.emplace(key, Entry{std::move(provider), trusted_endpoint}).first;
+    if (registered != nullptr) {
+      *registered = inserted->second.provider;
+    }
   }
   if (trusted_endpoint) {
     trusted_endpoints_.insert(key.endpoint);

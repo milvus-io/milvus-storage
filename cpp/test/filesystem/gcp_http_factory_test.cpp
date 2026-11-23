@@ -33,6 +33,7 @@
 
 #include "filesystem/gcp/gcp_filesystem_producer_internal.h"
 #include "milvus-storage/filesystem/gcp/gcp_credential_registry.h"
+#include "milvus-storage/filesystem/s3/s3_global.h"
 
 namespace milvus_storage {
 
@@ -104,8 +105,12 @@ arrow::Status RegisterProvider(const std::string& address,
                                                     std::move(provider), trusted_endpoint);
 }
 
+// The factory authenticates only requests that no HttpClient sees, such as
+// CRT meta requests. Without a filesystem authenticator in the scope, it
+// finds the provider by URI.
 std::shared_ptr<Aws::Http::HttpRequest> CreateRequest(const Aws::Http::HttpClientFactory& factory,
                                                       const std::string& uri) {
+  ScopedRequestOutsideHttpClient outside_http_client(nullptr);
   return factory.CreateHttpRequest(Aws::Http::URI(uri.c_str()), Aws::Http::HttpMethod::HTTP_GET,
                                    Aws::Utils::Stream::DefaultResponseStreamFactoryMethod);
 }

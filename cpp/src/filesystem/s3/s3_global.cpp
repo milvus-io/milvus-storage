@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <utility>
 #include "milvus-storage/filesystem/s3/s3_global.h"
 
 #include <atomic>
@@ -250,6 +251,27 @@ arrow::Status FinalizeS3() {
 arrow::Status EnsureS3Finalized() { return FinalizeS3(); }
 
 bool IsS3Initialized() { return GetAwsInstance()->IsInitialized(); }
+
+namespace {
+thread_local int request_outside_http_client_depth = 0;
+thread_local RequestAuthenticator* request_outside_http_client_authenticator = nullptr;
+}  // namespace
+
+ScopedRequestOutsideHttpClient::ScopedRequestOutsideHttpClient(RequestAuthenticator* authenticator)
+    : previous_(std::exchange(request_outside_http_client_authenticator, authenticator)) {
+  ++request_outside_http_client_depth;
+}
+
+ScopedRequestOutsideHttpClient::~ScopedRequestOutsideHttpClient() {
+  --request_outside_http_client_depth;
+  request_outside_http_client_authenticator = previous_;
+}
+
+bool ScopedRequestOutsideHttpClient::Active() { return request_outside_http_client_depth > 0; }
+
+RequestAuthenticator* ScopedRequestOutsideHttpClient::Authenticator() {
+  return request_outside_http_client_authenticator;
+}
 
 bool IsS3Finalized() { return GetAwsInstance()->IsFinalized(); }
 

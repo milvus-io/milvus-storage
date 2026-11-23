@@ -26,6 +26,8 @@
 
 namespace milvus_storage {
 
+class RequestAuthenticator;
+
 class S3RetryStrategy {
   public:
   virtual ~S3RetryStrategy() = default;
@@ -178,6 +180,12 @@ struct S3Options {
 
   /// Whether reads and supported uploads should use AWS CRT.
   bool use_crt = true;
+
+  /// Credentials for the requests this filesystem sends without an SDK
+  /// client's HttpClient (CRT meta requests and native transport requests).
+  /// Set by producers whose HTTP client factory authenticates requests in its
+  /// HttpClient; null otherwise.
+  std::shared_ptr<RequestAuthenticator> request_authenticator;
 
   S3Options();
 

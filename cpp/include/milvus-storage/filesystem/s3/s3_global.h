@@ -15,6 +15,7 @@
 #pragma once
 
 #include <aws/core/Aws.h>
+#include <aws/core/http/HttpRequest.h>
 #include <aws/core/http/HttpTypes.h>
 
 #include <arrow/status.h>
@@ -102,5 +103,37 @@ bool IsS3Finalized();
 ///
 /// If necessary, this will call FinalizeS3().
 arrow::Status EnsureS3Finalized();
+
+/// \brief Attaches a filesystem's credentials to a request that no SDK
+/// client's HttpClient sends. See S3Options::request_authenticator.
+class RequestAuthenticator {
+  public:
+  virtual ~RequestAuthenticator() = default;
+  virtual void Authenticate(Aws::Http::HttpRequest& request) = 0;
+  /// Whether other authenticates requests as the same identity.
+  [[nodiscard]] virtual bool Equals(const RequestAuthenticator& other) const = 0;
+};
+
+/// \brief Marks requests built on this thread, while the scope lives, as sent
+/// without an SDK client's HttpClient: CRT meta requests and native transport
+/// requests. An HTTP client factory that authenticates requests in its
+/// HttpClient must authenticate these when it creates them, with the
+/// filesystem's authenticator when the scope has one. Scopes nest.
+class ScopedRequestOutsideHttpClient {
+  public:
+  explicit ScopedRequestOutsideHttpClient(RequestAuthenticator* authenticator);
+  ~ScopedRequestOutsideHttpClient();
+  ScopedRequestOutsideHttpClient(const ScopedRequestOutsideHttpClient&) = delete;
+  ScopedRequestOutsideHttpClient& operator=(const ScopedRequestOutsideHttpClient&) = delete;
+
+  /// Whether a scope is active on the calling thread.
+  static bool Active();
+
+  /// The authenticator of the innermost active scope, or nullptr.
+  static RequestAuthenticator* Authenticator();
+
+  private:
+  RequestAuthenticator* previous_;
+};
 
 }  // namespace milvus_storage
