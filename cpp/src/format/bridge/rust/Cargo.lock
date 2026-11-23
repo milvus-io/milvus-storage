@@ -5988,7 +5988,7 @@ dependencies = [
  "arrow-array 58.3.0",
  "arrow-buffer 58.3.0",
  "arrow-cast 58.3.0",
- "arrow-json",
+ "arrow-json 58.3.0",
  "arrow-ord 58.3.0",
  "arrow-row 58.3.0",
  "arrow-schema 58.3.0",

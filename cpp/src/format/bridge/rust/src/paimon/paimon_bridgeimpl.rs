@@ -1850,7 +1850,7 @@ mod tests {
 
     #[test]
     fn blob_reads_are_rejected_before_http_requests() {
-        use arrow_array::{ArrayRef, Int64Array, LargeBinaryArray};
+        use arrow_array58::{ArrayRef, Int64Array, LargeBinaryArray};
         use paimon::spec::{BigIntType, BlobDescriptor, BlobType, DataType, Schema, TableSchema};
         use std::sync::{
             Arc,
