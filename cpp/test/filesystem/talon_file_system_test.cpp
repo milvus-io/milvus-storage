@@ -299,7 +299,8 @@ class RejectingMemoryPool final : public arrow::ProxyMemoryPool {
   int64_t last_requested_size = -1;
 };
 
-class AsyncOriginInputFile final : public arrow::io::RandomAccessFile, public NonBlockingRandomAccessFile {
+// The 3.0 range-read API does not require a nonblocking size operation.
+class AsyncOriginInputFile final : public arrow::io::RandomAccessFile, public NonBlockingReadAtFile {
   public:
   arrow::Status Close() override { return data_.Close(); }
   bool closed() const override { return data_.closed(); }
@@ -329,8 +330,6 @@ class AsyncOriginInputFile final : public arrow::io::RandomAccessFile, public No
   arrow::Result<int64_t> ReadAt(int64_t, int64_t, void*) override {
     return arrow::Status::Invalid("Unexpected blocking ReadAt");
   }
-
-  arrow::Future<int64_t> GetSizeAsync() override { return arrow::Future<int64_t>::MakeFinished(data_.GetSize()); }
 
   arrow::Future<int64_t> ReadAtAsyncInto(int64_t position, int64_t nbytes, uint8_t* out) override {
     const auto result = data_.ReadAt(position, nbytes, out);

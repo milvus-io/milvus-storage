@@ -83,7 +83,7 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
       return true;
     }
     talon_enabled_.store(enable, std::memory_order_release);
-    return enable || dynamic_cast<NonBlockingRandomAccessFile*>(state_->origin_file.get()) != nullptr;
+    return enable || dynamic_cast<NonBlockingReadAtFile*>(state_->origin_file.get()) != nullptr;
   }
 
   arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override {
@@ -125,7 +125,7 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
     }
     if (!use_talon) {
       auto* const origin_file = state_->origin_file.get();
-      if (auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(origin_file)) {
+      if (auto* const async_file = dynamic_cast<NonBlockingReadAtFile*>(origin_file)) {
         return async_file->ReadAtAsyncInto(position, nbytes, out);
       }
       return arrow::Future<int64_t>::MakeFinished(origin_file->ReadAt(position, nbytes, out));
@@ -146,9 +146,7 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
       // A failed Talon read can have written a prefix. Retry the entire range.
       return WithOriginFallback(
           reader->ReadAtAsync(static_cast<uint64_t>(position), static_cast<uint64_t>(length), out), state, metrics,
-          [position, length, out](NonBlockingRandomAccessFile& file) {
-            return file.ReadAtAsyncInto(position, length, out);
-          },
+          [position, length, out](NonBlockingReadAtFile& file) { return file.ReadAtAsyncInto(position, length, out); },
           [position, length, out](arrow::io::RandomAccessFile& file) { return file.ReadAt(position, length, out); });
     });
   }
@@ -213,7 +211,7 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
           return WithOriginFallback(
                      reader->ReadAtAsync(static_cast<uint64_t>(position), static_cast<uint64_t>(length), out), state,
                      metrics,
-                     [position, length, out](NonBlockingRandomAccessFile& file) {
+                     [position, length, out](NonBlockingReadAtFile& file) {
                        return file.ReadAtAsyncInto(position, length, out);
                      },
                      [position, length, out](arrow::io::RandomAccessFile& file) {
@@ -300,7 +298,7 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
   struct ReaderState;
 
   /// Retry a failed Talon operation once through the cached origin file.
-  /// @ReadOriginAsync takes NonBlockingRandomAccessFile& and returns Future<int64_t>.
+  /// @ReadOriginAsync takes NonBlockingReadAtFile& and returns Future<int64_t>.
   /// @ReadOrigin takes arrow::io::RandomAccessFile& and returns Result<int64_t>.
   /// Use the async callback when supported, otherwise invoke the blocking callback.
   /// Both callbacks repeat the same operation; reads must retry the full range.
@@ -325,7 +323,7 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
           // Record the Talon failure before fallback; origin accounts for its own I/O.
           metrics->IncrementFailedCount();
           arrow::Future<int64_t> origin_future;
-          if (auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(state->origin_file.get())) {
+          if (auto* const async_file = dynamic_cast<NonBlockingReadAtFile*>(state->origin_file.get())) {
             origin_future = read_origin_async(*async_file);
           } else {
             // Origins without native async support still work through their blocking API.
@@ -687,7 +685,7 @@ bool ControlTalonForFile(arrow::io::RandomAccessFile* file, bool enable) {
   if (auto* talon_file = dynamic_cast<TalonInputFile*>(file)) {
     return talon_file->ControlTalon(enable);
   }
-  return dynamic_cast<NonBlockingRandomAccessFile*>(file) != nullptr;
+  return dynamic_cast<NonBlockingReadAtFile*>(file) != nullptr;
 }
 
 arrow::Result<ArrowFileSystemPtr> MakeTalonFileSystem(const ArrowFileSystemConfig& config,

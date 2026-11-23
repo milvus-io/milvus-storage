@@ -44,8 +44,8 @@ namespace milvus_storage::talon::internal {
 ///
 /// The return value is the capability used for FFI read dispatch. Talon-enabled
 /// files return true. When Talon is disabled, it reports whether the origin
-/// implements NonBlockingRandomAccessFile. Ordinary files report their own
-/// NonBlockingRandomAccessFile capability.
+/// implements NonBlockingReadAtFile. Ordinary files report their own
+/// NonBlockingReadAtFile capability.
 ///
 /// The caller keeps the file open and alive while controlling and reading it.
 /// Each read captures the routing flag when it starts.
