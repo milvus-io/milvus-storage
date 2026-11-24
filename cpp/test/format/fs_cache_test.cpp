@@ -13,7 +13,12 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <atomic>
+#include <cctype>
+#include <cstdint>
+#include <cstring>
+#include <functional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -23,6 +28,55 @@
 #include "test_env.h"
 
 namespace milvus_storage {
+
+namespace {
+
+// Checks `{location}#fs:{entry_id}`, where entry_id is a decimal number.
+void ExpectDisplayKey(const std::string& display_key, const std::string& location) {
+  const std::string prefix = location + "#fs:";
+  ASSERT_EQ(display_key.compare(0, prefix.size(), prefix), 0) << display_key;
+  const auto entry_id = display_key.substr(prefix.size());
+  ASSERT_FALSE(entry_id.empty()) << display_key;
+  EXPECT_TRUE(std::all_of(entry_id.begin(), entry_id.end(), [](unsigned char c) { return std::isdigit(c); }))
+      << display_key;
+}
+
+// Returns a 16-byte value different from `value` (also 16 bytes) whose
+// libstdc++ 64-bit std::hash<std::string> is equal to that of `value`.
+// libstdc++ hashes strings with MurmurHash64A; for two 8-byte blocks the state
+// after the first block can be cancelled by choosing the second block, since
+// each per-block step is invertible.
+std::string MakeValueWithEqualStdHash(const std::string& value) {
+  constexpr uint64_t kSeed = 0xc70f6907ULL;
+  constexpr uint64_t kMul = (0xc6a4a793ULL << 32U) + 0x5bd1e995ULL;
+  uint64_t inverse_mul = kMul;
+  for (int i = 0; i < 5; ++i) {
+    inverse_mul *= 2 - kMul * inverse_mul;
+  }
+  const auto shift_mix = [](uint64_t v) { return v ^ (v >> 47U); };
+  const auto mix_block = [&](uint64_t block) { return shift_mix(block * kMul) * kMul; };
+  const auto unmix_block = [&](uint64_t mixed) { return shift_mix(mixed * inverse_mul) * inverse_mul; };
+  const auto load = [](const char* bytes) {
+    uint64_t block;
+    std::memcpy(&block, bytes, sizeof(block));
+    return block;
+  };
+
+  const uint64_t initial = kSeed ^ (16 * kMul);
+  const uint64_t first = load(value.data());
+  const uint64_t second = load(value.data() + 8);
+  const uint64_t other_first = first ^ 1U;
+  const uint64_t state = (initial ^ mix_block(first)) * kMul;
+  const uint64_t other_state = (initial ^ mix_block(other_first)) * kMul;
+  const uint64_t other_second = unmix_block(state ^ mix_block(second) ^ other_state);
+
+  std::string other(16, '\0');
+  std::memcpy(other.data(), &other_first, sizeof(other_first));
+  std::memcpy(other.data() + 8, &other_second, sizeof(other_second));
+  return other;
+}
+
+}  // namespace
 
 class FileSystemCacheTest : public testing::Test {
   protected:
@@ -147,11 +201,11 @@ TEST_F(FileSystemCacheTest, List) {
   bool found_fs2 = false;
   for (const auto& [display_key, fs] : entries) {
     if (fs == fs1) {
-      EXPECT_EQ(display_key, "file:///tmp/fs_test_LIST_A#" + config1.GetCacheKey());
+      ExpectDisplayKey(display_key, "file:///tmp/fs_test_LIST_A");
       found_fs1 = true;
     }
     if (fs == fs2) {
-      EXPECT_EQ(display_key, "file:///tmp/fs_test_LIST_B#" + config2.GetCacheKey());
+      ExpectDisplayKey(display_key, "file:///tmp/fs_test_LIST_B");
       found_fs2 = true;
     }
   }
@@ -178,7 +232,7 @@ TEST_F(FileSystemCacheTest, ListReturnsRemoteDisplayKey) {
 
   auto entries = cache.list();
   ASSERT_EQ(entries.size(), 1u);
-  EXPECT_EQ(entries[0].first, "minio.example.com:9000/display-bucket#" + config.GetCacheKey());
+  ExpectDisplayKey(entries[0].first, "minio.example.com:9000/display-bucket");
   EXPECT_EQ(entries[0].second, fs);
 }
 
@@ -198,8 +252,141 @@ TEST_F(FileSystemCacheTest, ListUsesNullForEmptyRemoteAddress) {
 
   auto entries = cache.list();
   ASSERT_EQ(entries.size(), 1u);
-  EXPECT_EQ(entries[0].first, "<null>/display-bucket#" + config.GetCacheKey());
+  ExpectDisplayKey(entries[0].first, "<null>/display-bucket");
   EXPECT_EQ(entries[0].second, fs);
+}
+
+TEST_F(FileSystemCacheTest, DisplayKeyDoesNotContainCacheKeyOrCredentials) {
+  api::Properties props;
+  props[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+  props[PROPERTY_FS_CLOUD_PROVIDER] = std::string(kCloudProviderAWS);
+  props[PROPERTY_FS_ADDRESS] = std::string("minio.example.com:9000");
+  props[PROPERTY_FS_BUCKET_NAME] = std::string("display-bucket");
+  props[PROPERTY_FS_ACCESS_KEY_ID] = std::string("display-access-key");
+  props[PROPERTY_FS_ACCESS_KEY_VALUE] = std::string("display-secret-key");
+
+  auto& cache = FilesystemCache::getInstance();
+  ASSERT_AND_ASSIGN(auto config, cache.resolve_config(props));
+  ASSERT_AND_ASSIGN(auto fs, cache.get(props));
+  cache.remove(config.GetCacheKey());
+  ASSERT_AND_ASSIGN(auto recreated, cache.get(props));
+  ASSERT_NE(fs, recreated);
+
+  auto entries = cache.list();
+  ASSERT_EQ(entries.size(), 1u);
+  const auto& display_key = entries[0].first;
+  ExpectDisplayKey(display_key, "minio.example.com:9000/display-bucket");
+  EXPECT_EQ(display_key.find("display-secret-key"), std::string::npos) << display_key;
+  EXPECT_EQ(display_key.find("display-access-key"), std::string::npos) << display_key;
+  EXPECT_EQ(display_key.find(config.GetCacheKey()), std::string::npos) << display_key;
+  EXPECT_EQ(config.GetCacheKey().find("display-secret-key"), std::string::npos);
+  // The cache key, not the display key, selects the cached filesystem.
+  cache.remove(display_key);
+  EXPECT_EQ(cache.size(), 1u);
+}
+
+TEST_F(FileSystemCacheTest, CacheKeyKeepsFieldBoundaries) {
+  ArrowFileSystemConfig base;
+  base.storage_type = "remote";
+  base.cloud_provider = kCloudProviderAWS;
+  base.address = "minio.example.com:9000";
+  base.bucket_name = "bucket";
+  base.access_key_id = "ab";
+  base.access_key_value = "c";
+
+  auto shifted = base;
+  shifted.access_key_id = "a";
+  shifted.access_key_value = "bc";
+  EXPECT_NE(base.GetCacheKey(), shifted.GetCacheKey());
+
+  auto with_separator = base;
+  with_separator.access_key_id = "ab;access_key_value=1:c";
+  with_separator.access_key_value = "";
+  EXPECT_NE(base.GetCacheKey(), with_separator.GetCacheKey());
+
+  auto shifted_location = base;
+  shifted_location.address = "minio.example.com:9000/bucket";
+  shifted_location.bucket_name = "";
+  EXPECT_NE(base.GetCacheKey(), shifted_location.GetCacheKey());
+}
+
+TEST_F(FileSystemCacheTest, ConfigsWithEqualStdHashDoNotShareFilesystem) {
+#ifndef __GLIBCXX__
+  GTEST_SKIP() << "MakeValueWithEqualStdHash follows the libstdc++ std::hash implementation";
+#endif
+  static_assert(sizeof(size_t) == sizeof(uint64_t));
+  const std::string secret = "0123456789abcdef";
+  const std::string other_secret = MakeValueWithEqualStdHash(secret);
+  ASSERT_NE(secret, other_secret);
+  // Combining per-field std::hash values would give both configs the same key.
+  ASSERT_EQ(std::hash<std::string>{}(secret), std::hash<std::string>{}(other_secret));
+
+  const auto make_props = [](const std::string& secret_key) {
+    api::Properties props;
+    props[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+    props[PROPERTY_FS_CLOUD_PROVIDER] = std::string(kCloudProviderAWS);
+    props[PROPERTY_FS_ADDRESS] = std::string("minio.example.com:9000");
+    props[PROPERTY_FS_BUCKET_NAME] = std::string("hash-bucket");
+    props[PROPERTY_FS_ACCESS_KEY_ID] = std::string("ak");
+    props[PROPERTY_FS_ACCESS_KEY_VALUE] = secret_key;
+    return props;
+  };
+
+  auto& cache = FilesystemCache::getInstance();
+  ASSERT_AND_ASSIGN(auto config, cache.resolve_config(make_props(secret)));
+  ASSERT_AND_ASSIGN(auto other_config, cache.resolve_config(make_props(other_secret)));
+  EXPECT_NE(config.GetCacheKey(), other_config.GetCacheKey());
+
+  ASSERT_AND_ASSIGN(auto fs, cache.get(make_props(secret)));
+  ASSERT_AND_ASSIGN(auto other_fs, cache.get(make_props(other_secret)));
+  EXPECT_NE(fs, other_fs);
+  EXPECT_EQ(cache.size(), 2u);
+  ASSERT_AND_ASSIGN(auto fs_again, cache.get(make_props(secret)));
+  EXPECT_EQ(fs, fs_again);
+}
+
+TEST_F(FileSystemCacheTest, ExternalConfigsDoNotEvictDefaultFilesystem) {
+  auto& cache = FilesystemCache::getInstance();
+  cache.set_capacity(2);
+
+  api::Properties default_props;
+  default_props[PROPERTY_FS_STORAGE_TYPE] = std::string("local");
+  default_props[PROPERTY_FS_ROOT_PATH] = std::string("/tmp/fs_test_default");
+  ASSERT_AND_ASSIGN(auto default_fs, cache.get(default_props));
+
+  for (int i = 0; i < 5; ++i) {
+    const auto id = "EVICT_" + std::to_string(i);
+    auto props = MakeProperties(id);
+    ASSERT_AND_ASSIGN(auto fs, cache.get(props, "s3://localhost_" + id + "/bucket_" + id + "/file.parquet"));
+  }
+  EXPECT_EQ(cache.size(), 3u);
+  ASSERT_AND_ASSIGN(auto default_again, cache.get(default_props));
+  EXPECT_EQ(default_fs, default_again);
+  cache.set_capacity(16);
+}
+
+TEST_F(FileSystemCacheTest, ExternalConfigEqualToDefaultUsesSeparateFilesystem) {
+  auto& cache = FilesystemCache::getInstance();
+  // The external config has the same cache key as the default config.
+  api::Properties props;
+  props[PROPERTY_FS_STORAGE_TYPE] = std::string("local");
+  props[PROPERTY_FS_ROOT_PATH] = std::string("/tmp/fs_test_shared_root");
+  props["extfs.ext.storage_type"] = std::string("local");
+  props["extfs.ext.root_path"] = std::string("/tmp/fs_test_shared_root");
+  props["extfs.ext.address"] = std::string("localhost_ext");
+  props["extfs.ext.bucket_name"] = std::string("bucket_ext");
+  const std::string external_path = "s3://localhost_ext/bucket_ext/file.parquet";
+
+  ASSERT_AND_ASSIGN(auto default_config, cache.resolve_config(props));
+  ASSERT_AND_ASSIGN(auto external_config, cache.resolve_config(props, external_path));
+  ASSERT_EQ(default_config.GetCacheKey(), external_config.GetCacheKey());
+
+  ASSERT_AND_ASSIGN(auto external_fs, cache.get(props, external_path));
+  ASSERT_AND_ASSIGN(auto default_fs, cache.get(props));
+  EXPECT_NE(default_fs, external_fs);
+  EXPECT_EQ(cache.size(), 2u);
+  ASSERT_AND_ASSIGN(auto external_again, cache.get(props, external_path));
+  EXPECT_EQ(external_fs, external_again);
 }
 
 TEST_F(FileSystemCacheTest, CacheKeyIncludesCredentialIdentity) {
