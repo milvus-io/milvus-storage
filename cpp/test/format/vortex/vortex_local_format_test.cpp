@@ -545,6 +545,62 @@ TEST_F(VortexLocalFormatTest, TestFooterReaderMissingFilePreservesEnoent) {
   EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
 }
 
+TEST_F(VortexLocalFormatTest, TestFooterReaderRefillsLargeUnknownFooter) {
+  constexpr uint64_t kInitialTailSize = 256 * 1024;
+  constexpr const char* kSparsePath = "test-file.vx.sparse";
+  // Make the serialized schema larger than the initial tail.
+  const auto& ids = record_batches_.front()->column(0);
+  const std::string name_suffix(20 * 1024, 'x');
+  arrow::FieldVector fields;
+  arrow::ArrayVector columns;
+  for (int i = 0; i < 16; ++i) {
+    fields.push_back(arrow::field(std::to_string(i) + name_suffix, ids->type()));
+    columns.push_back(ids);
+  }
+  const auto schema = arrow::schema(std::move(fields));
+  const auto batch = arrow::RecordBatch::Make(schema, ids->length(), std::move(columns));
+  ASSERT_AND_ASSIGN(auto writer, VortexFileWriter::Open(file_system_, schema, test_file_name_,
+                                                        std::make_shared<const api::Properties>(properties_)));
+  ASSERT_STATUS_OK(writer->Write(batch));
+  ASSERT_AND_ASSIGN(auto cgfile, writer->Close());
+  const auto file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
+  const auto footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
+  const auto tail_size = footer_size + VortexEofSize();
+  ASSERT_GT(tail_size, kInitialTailSize);
+  ASSERT_LT(tail_size, file_size);
+
+  auto sparse_fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+  VortexFooterReader unknown(sparse_fs, kSparsePath, test_file_name_, file_size);
+  ASSERT_STATUS_OK(unknown.Open(file_system_, false));
+  EXPECT_EQ(unknown.footer_size(), footer_size);
+  EXPECT_EQ(unknown.rows(), static_cast<uint64_t>(batch->num_rows()));
+  ASSERT_NE(unknown.file_schema(), nullptr);
+  EXPECT_TRUE(unknown.file_schema()->Equals(*schema));
+
+  ASSERT_AND_ASSIGN(auto sparse_file, sparse_fs->GetInMemoryFile(kSparsePath));
+  const auto ranges = sparse_file->WriteRanges();
+  ASSERT_FALSE(ranges.empty());
+  EXPECT_EQ(ranges.front().length, kInitialTailSize);
+  ASSERT_GT(ranges.size(), 1u);
+  auto next_end = file_size;
+  for (const auto& range : ranges) {
+    EXPECT_GT(range.length, 0u);
+    EXPECT_EQ(range.offset + range.length, next_end);
+    next_end = range.offset;
+  }
+  EXPECT_LE(next_end, file_size - tail_size);
+
+  auto known_sparse_fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+  auto known = MakeFooterReader(cgfile, known_sparse_fs);
+  ASSERT_STATUS_OK(known->Open(file_system_, false));
+  EXPECT_EQ(known->footer_size(), footer_size);
+  ASSERT_AND_ASSIGN(auto known_sparse_file, known_sparse_fs->GetInMemoryFile(kSparsePath));
+  const auto known_ranges = known_sparse_file->WriteRanges();
+  ASSERT_EQ(known_ranges.size(), 1u);
+  EXPECT_EQ(known_ranges.front().offset, file_size - tail_size);
+  EXPECT_EQ(known_ranges.front().length, tail_size);
+}
+
 TEST_F(VortexLocalFormatTest, TestFooterReaderDoesNotPrefetchHeaderRangeWhenFooterSizeKnown) {
   ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile());
   const auto file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);

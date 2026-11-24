@@ -110,9 +110,9 @@ std::vector<ByteRange> MergeByteRanges(std::vector<ByteRange> ranges) {
 
 namespace {
 
-// Used only when the caller does not know the footer size. Vortex footer open
-// retries with a larger tail if this initial speculative read is insufficient.
-constexpr uint64_t kDefaultFooterReadSize = 2 * 1024 * 1024;
+// Keep the speculative tail for unknown footer sizes below Talon's 1 MiB
+// exact-read cutoff. Vortex expands the tail if this probe is insufficient.
+constexpr uint64_t kDefaultFooterReadSize = 256 * 1024;
 
 static arrow::Result<uint64_t> ResolveInitialFooterBodySize(uint64_t file_size,
                                                             uint64_t footer_size,
