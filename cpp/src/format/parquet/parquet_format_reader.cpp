@@ -661,15 +661,15 @@ static arrow::Future<std::shared_ptr<arrow::Buffer>> read_footer_range_async(
 // provider-native path and transfer completion to the caller's executor.
 class ParquetOpenFile final : public arrow::io::RandomAccessFile {
   public:
-     ParquetOpenFile(std::shared_ptr<arrow::io::RandomAccessFile> file,
-                     std::shared_ptr<arrow::internal::Executor> executor,
-                     std::optional<int64_t> file_size)
-         : file_(std::move(file)), executor_(std::move(executor)), file_size_(file_size) {}
+  ParquetOpenFile(std::shared_ptr<arrow::io::RandomAccessFile> file,
+                  std::shared_ptr<arrow::internal::Executor> executor,
+                  std::optional<int64_t> file_size)
+      : file_(std::move(file)), executor_(std::move(executor)), file_size_(file_size) {}
 
-     void FinishOpen() {
-       reading_footer_ = false;
-       executor_.reset();
-     }
+  void FinishOpen() {
+    reading_footer_ = false;
+    executor_.reset();
+  }
 
   arrow::Status Close() override { return file_->Close(); }
   arrow::Status Abort() override { return file_->Abort(); }

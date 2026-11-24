@@ -700,7 +700,7 @@ TEST_F(VortexLocalFormatTest, TalonFooterReaderUsesOrdinaryRoutingForZoneMaps) {
   EXPECT_EQ(reads.front().length, kProbeSize);
   for (size_t i = 1; i < reads.size(); ++i) {
     EXPECT_EQ(reads[i].msg_type, 10);  // GetVersionedRange.
-    EXPECT_LT(reads[i].length, talon::kTalonMaxExactReadBytes);
+    EXPECT_LT(reads[i].length, talon::TalonMaxExactReadBytes());
   }
   ASSERT_AND_ASSIGN(auto pruned, reader.PruneRowGroups("id >= 1000000", {0}));
   EXPECT_TRUE(pruned.empty());

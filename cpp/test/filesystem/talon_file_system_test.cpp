@@ -3635,20 +3635,20 @@ TEST_F(TalonFileSystemServiceFreeTest, InFlightTalonReadKeepsOriginAliveAfterFil
   EXPECT_TRUE(origin_destroyed.load(std::memory_order_acquire));
 }
 
-TEST(TalonBridgeTest, ExactReadAcceptsOneMiBAndRejectsLargerReads) {
+TEST(TalonBridgeTest, ExactReadAcceptsSdkLimitAndRejectsLargerReads) {
   RecordingTalonServer server;
   ArrowFileSystemConfig config;
   config.talon_coordinator = server.Address();
   config.talon_block_size = 8U * 1024U * 1024U;
   config.talon_max_idle_per_addr = 8;
   ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make(config));
-  ASSERT_AND_ASSIGN(auto reader,
-                    client->OpenObject("aws", "test-bucket", "path/a", talon::TalonObjectStat{2ULL * 1024 * 1024, ""}));
+  const auto max_exact_read_bytes = talon::TalonMaxExactReadBytes();
+  ASSERT_AND_ASSIGN(auto reader, client->OpenObject("aws", "test-bucket", "path/a",
+                                                    talon::TalonObjectStat{max_exact_read_bytes + 1, ""}));
 
-  std::vector<uint8_t> out(talon::kTalonMaxExactReadBytes + 1, 0);
-  ASSERT_AND_ASSIGN(const auto bytes_read,
-                    reader.ReadExactAtAsync(0, talon::kTalonMaxExactReadBytes, out.data()).result());
-  ASSERT_EQ(bytes_read, talon::kTalonMaxExactReadBytes);
+  std::vector<uint8_t> out(max_exact_read_bytes + 1, 0);
+  ASSERT_AND_ASSIGN(const auto bytes_read, reader.ReadExactAtAsync(0, max_exact_read_bytes, out.data()).result());
+  ASSERT_EQ(bytes_read, max_exact_read_bytes);
   EXPECT_EQ(out.front(), 0x5a);
   EXPECT_EQ(out[bytes_read - 1], 0x5a);
   EXPECT_EQ(out.back(), 0);
@@ -3656,11 +3656,13 @@ TEST(TalonBridgeTest, ExactReadAcceptsOneMiBAndRejectsLargerReads) {
   const auto result = reader.ReadExactAtAsync(0, out.size(), out.data()).result();
   ASSERT_FALSE(result.ok());
   EXPECT_TRUE(result.status().IsInvalid()) << result.status().ToString();
-  EXPECT_NE(result.status().message().find("1 MiB"), std::string::npos);
+  EXPECT_NE(result.status().message().find("Talon exact read length exceeds " + std::to_string(max_exact_read_bytes) +
+                                           " bytes"),
+            std::string::npos);
   const auto reads = server.Reads();
   ASSERT_EQ(reads.size(), 1);
   EXPECT_EQ(reads[0].msg_type, 12);
-  EXPECT_EQ(reads[0].length, talon::kTalonMaxExactReadBytes);
+  EXPECT_EQ(reads[0].length, max_exact_read_bytes);
 }
 
 TEST_F(TalonFileSystemServiceFreeTest, ManifestAndDataFileFootersWithTheSameReadSizeUseDifferentOpcodes) {
@@ -3786,11 +3788,11 @@ TEST_F(TalonFileSystemServiceFreeTest, VortexFormatReaderTagsOnlyItsFooterReques
   }
 }
 
-TEST_F(TalonFileSystemServiceFreeTest, OpenOnlyRoutesOnlyTaggedFootersBelowOneMiBThroughExactRead) {
-  constexpr int64_t kLargeSize = 2 * 1024 * 1024;
+TEST_F(TalonFileSystemServiceFreeTest, OpenOnlyRoutesOnlyTaggedFootersBelowSdkLimitThroughExactRead) {
   constexpr int64_t kSmallFooterLen = 64 * 1024;
-  constexpr int64_t kMaxExactLen = static_cast<int64_t>(talon::kTalonMaxExactReadBytes);
-  constexpr int64_t kOverExactLen = kMaxExactLen + 1;
+  const auto max_exact_len = static_cast<int64_t>(talon::TalonMaxExactReadBytes());
+  const auto over_exact_len = max_exact_len + 1;
+  const auto object_size = 2 * max_exact_len;
 
   for (const std::string& ns : {std::string(), std::string("meta-ns")}) {
     SCOPED_TRACE(ns.empty() ? "default-namespace" : ns);
@@ -3806,23 +3808,23 @@ TEST_F(TalonFileSystemServiceFreeTest, OpenOnlyRoutesOnlyTaggedFootersBelowOneMi
     config.talon_block_size = 8U * 1024U * 1024U;
 
     auto origin = std::make_shared<RecordingFileSystem>("origin");
-    origin->input_file = std::make_shared<MetadataInputFile>(kLargeSize);
+    origin->input_file = std::make_shared<MetadataInputFile>(object_size);
     ASSERT_AND_ASSIGN(auto fs, Wrap(config, origin));
 
     arrow::fs::FileInfo large_info("prefix/large.parquet", arrow::fs::FileType::File);
-    large_info.set_size(kLargeSize);
+    large_info.set_size(object_size);
     ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile(large_info));
     auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(file.get());
     ASSERT_NE(async_file, nullptr);
 
-    // 1. Footer read < 1 MiB via ReadAt -> exact read.
-    const int64_t footer_offset = kLargeSize - kSmallFooterLen;
+    // 1. Footer read below the SDK limit via ReadAt -> exact read.
+    const int64_t footer_offset = object_size - kSmallFooterLen;
     ASSERT_AND_ASSIGN(auto small_footer, talon::internal::ReadDataFileFooterAt(*file, footer_offset, kSmallFooterLen));
     ASSERT_EQ(small_footer->size(), kSmallFooterLen);
     EXPECT_EQ(small_footer->data()[0], 0x5a);
 
     // 2. Footer read one byte below the cutoff via the caller-buffer API.
-    std::vector<uint8_t> exact_out(kMaxExactLen - 1, 0);
+    std::vector<uint8_t> exact_out(max_exact_len - 1, 0);
     ASSERT_AND_ASSIGN(
         const auto exact_bytes,
         talon::internal::ReadDataFileFooterAtAsyncInto(*async_file, 1, exact_out.size(), exact_out.data()).result());
@@ -3830,22 +3832,22 @@ TEST_F(TalonFileSystemServiceFreeTest, OpenOnlyRoutesOnlyTaggedFootersBelowOneMi
     EXPECT_EQ(exact_out.back(), 0x5a);
 
     // 3. A footer request exactly at the cutoff uses ordinary routing.
-    const int64_t exact_boundary_offset = kLargeSize - kMaxExactLen;
+    const int64_t exact_boundary_offset = object_size - max_exact_len;
     ASSERT_AND_ASSIGN(auto max_footer,
-                      talon::internal::ReadDataFileFooterAt(*file, exact_boundary_offset, kMaxExactLen));
-    ASSERT_EQ(max_footer->size(), kMaxExactLen);
+                      talon::internal::ReadDataFileFooterAt(*file, exact_boundary_offset, max_exact_len));
+    ASSERT_EQ(max_footer->size(), max_exact_len);
     EXPECT_EQ(max_footer->data()[0], 0x5a);
 
     // 4. A larger range uses the ordinary versioned read.
-    std::vector<uint8_t> large_out(static_cast<size_t>(kOverExactLen), 0);
+    std::vector<uint8_t> large_out(static_cast<size_t>(over_exact_len), 0);
     ASSERT_AND_ASSIGN(
         const auto large_bytes,
-        talon::internal::ReadDataFileFooterAtAsyncInto(*async_file, 0, kOverExactLen, large_out.data()).result());
-    EXPECT_EQ(large_bytes, kOverExactLen);
+        talon::internal::ReadDataFileFooterAtAsyncInto(*async_file, 0, over_exact_len, large_out.data()).result());
+    EXPECT_EQ(large_bytes, over_exact_len);
     EXPECT_EQ(large_out[0], 0x5a);
 
     // 5. The requested size controls routing even when EOF shortens the range.
-    ASSERT_AND_ASSIGN(auto clipped, talon::internal::ReadDataFileFooterAt(*file, footer_offset, kOverExactLen));
+    ASSERT_AND_ASSIGN(auto clipped, talon::internal::ReadDataFileFooterAt(*file, footer_offset, over_exact_len));
     ASSERT_EQ(clipped->size(), kSmallFooterLen);
     EXPECT_EQ(clipped->data()[0], 0x5a);
 
@@ -3875,13 +3877,13 @@ TEST_F(TalonFileSystemServiceFreeTest, OpenOnlyRoutesOnlyTaggedFootersBelowOneMi
     EXPECT_EQ(reads[0].length, static_cast<uint64_t>(kSmallFooterLen));
     EXPECT_EQ(reads[1].msg_type, expected_exact_msg);
     EXPECT_EQ(reads[1].offset, 1);
-    EXPECT_EQ(reads[1].length, static_cast<uint64_t>(kMaxExactLen - 1));
+    EXPECT_EQ(reads[1].length, static_cast<uint64_t>(max_exact_len - 1));
     EXPECT_EQ(reads[2].msg_type, expected_versioned_msg);
     EXPECT_EQ(reads[2].offset, static_cast<uint64_t>(exact_boundary_offset));
-    EXPECT_EQ(reads[2].length, static_cast<uint64_t>(kMaxExactLen));
+    EXPECT_EQ(reads[2].length, static_cast<uint64_t>(max_exact_len));
     EXPECT_EQ(reads[3].msg_type, expected_versioned_msg);
     EXPECT_EQ(reads[3].offset, 0);
-    EXPECT_EQ(reads[3].length, static_cast<uint64_t>(kOverExactLen));
+    EXPECT_EQ(reads[3].length, static_cast<uint64_t>(over_exact_len));
     EXPECT_EQ(reads[4].msg_type, expected_versioned_msg);
     EXPECT_EQ(reads[4].offset, static_cast<uint64_t>(footer_offset));
     EXPECT_EQ(reads[4].length, static_cast<uint64_t>(kSmallFooterLen));
@@ -3904,7 +3906,7 @@ TEST_F(TalonFileSystemServiceFreeTest, AllModeKeepsOrdinaryReadsForSmallRanges) 
     auto config = Config();
     config.talon_mode = mode;
     config.talon_open_only = false;
-    config.talon_small_read_threshold = static_cast<uint32_t>(talon::kTalonMaxExactReadBytes);
+    config.talon_small_read_threshold = static_cast<uint32_t>(talon::TalonMaxExactReadBytes());
     config.talon_coordinator = server.Address();
     config.talon_block_size = 8U * 1024U * 1024U;
 

@@ -312,9 +312,9 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
   }
 
   bool ShouldUseExactRead(int64_t requested_bytes) const {
-    // Open-only routing uses a strict cutoff. The Talon SDK itself accepts 1 MiB.
+    // Open-only routing uses a strict cutoff at the SDK's inclusive limit.
     return state_->filesystem->config.talon_open_only &&
-           static_cast<uint64_t>(requested_bytes) < kTalonMaxExactReadBytes;
+           static_cast<uint64_t>(requested_bytes) < TalonMaxExactReadBytes();
   }
 
   static arrow::Future<int64_t> ReadFromTalon(

@@ -62,9 +62,8 @@ struct TalonBatchLoadResult {
   std::vector<TalonLoadFailure> failed_files;
 };
 
-/// Maximum byte length supported by Talon exact range reads (1 MiB, inclusive).
-/// Must match `talon::MAX_EXACT_READ_LEN`.
-inline constexpr uint64_t kTalonMaxExactReadBytes = 1024ULL * 1024ULL;
+/// Maximum byte length supported by the Talon SDK for an exact range read, inclusive.
+inline uint64_t TalonMaxExactReadBytes() noexcept { return ffi::talon_max_exact_read_len(); }
 
 /// Owns a Rust Talon object reader and exposes only Arrow-native results to C++ callers.
 class TalonObjectReader final {
@@ -85,7 +84,7 @@ class TalonObjectReader final {
   /// `dst` must remain valid until the returned future completes.
   arrow::Future<int64_t> ReadAtAsync(uint64_t offset, uint64_t length, uint8_t* dst) const;
 
-  /// Reads an exact range (at most `kTalonMaxExactReadBytes`) into caller-owned memory
+  /// Reads an exact range (at most `TalonMaxExactReadBytes()` bytes) into caller-owned memory
   /// using Talon's exact read API on the shared Tokio runtime.
   /// `dst` must remain valid until the returned future completes.
   arrow::Future<int64_t> ReadExactAtAsync(uint64_t offset, uint64_t length, uint8_t* dst) const;

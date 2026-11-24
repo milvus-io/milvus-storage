@@ -30,6 +30,7 @@ pub mod ffi {
         type TalonClient;
         type TalonObjectReader;
 
+        fn talon_max_exact_read_len() -> u64;
         fn new_talon_client(
             coordinator: &str,
             block_size: u32,
@@ -50,6 +51,10 @@ pub mod ffi {
         ) -> Result<Box<TalonObjectReader>>;
         fn talon_object_known_size(reader: &TalonObjectReader) -> i64;
     }
+}
+
+pub fn talon_max_exact_read_len() -> u64 {
+    MAX_EXACT_READ_LEN
 }
 
 type TalonIoCallback = unsafe extern "C" fn(
@@ -365,7 +370,7 @@ unsafe fn submit_object_read_async(
             callback,
             context,
             ffi::TalonErrorCode::InvalidArgument.repr,
-            "Talon exact read length exceeds 1 MiB",
+            format!("Talon exact read length exceeds {MAX_EXACT_READ_LEN} bytes"),
         );
         return;
     }
@@ -1117,11 +1122,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_read_limit_matches_cpp_constant() {
-        assert_eq!(MAX_EXACT_READ_LEN, 1024 * 1024);
-    }
-
-    #[test]
     fn exact_read_validates_arguments_and_empty_reads_without_io() {
         use std::sync::mpsc;
 
@@ -1165,10 +1165,14 @@ mod tests {
         let reader_ptr = &*reader as *const TalonObjectReader as *const c_void;
         let mut byte = 0u8;
 
-        let (code, value, msg) = run(reader_ptr, 0, MAX_EXACT_READ_LEN + 1, &mut byte);
+        let max_exact_read_len = talon_max_exact_read_len();
+        let (code, value, msg) = run(reader_ptr, 0, max_exact_read_len + 1, &mut byte);
         assert_eq!(code, ffi::TalonErrorCode::InvalidArgument.repr);
         assert_eq!(value, 0);
-        assert!(msg.contains("1 MiB"), "{msg}");
+        assert_eq!(
+            msg,
+            format!("Talon exact read length exceeds {max_exact_read_len} bytes")
+        );
 
         let (code, _, _) = run(reader_ptr, u64::MAX, 1, &mut byte);
         assert_eq!(code, ffi::TalonErrorCode::InvalidArgument.repr);
