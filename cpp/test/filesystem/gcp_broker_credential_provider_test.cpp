@@ -21,10 +21,14 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #include <azure/core/datetime.hpp>
 #include <azure/core/http/http.hpp>
@@ -35,6 +39,8 @@
 
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/gcp/gcp_broker_credential_provider.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
+#include <aws/s3/model/HeadObjectRequest.h>
 #include "milvus-storage/filesystem/gcp/gcp_credential_provider.h"
 
 namespace milvus_storage {
@@ -42,7 +48,7 @@ namespace milvus_storage {
 namespace {
 
 using TimePoint = GcpBrokerCredentialProvider::TimePoint;
-using Header = std::optional<std::pair<std::string, std::string>>;
+using Header = arrow::Result<std::pair<std::string, std::string>>;
 
 std::string SuccessResponse(const std::string& token, TimePoint expiration) {
   const nlohmann::json response = {
@@ -143,25 +149,49 @@ class MockTransport final : public Azure::Core::Http::HttpTransport {
   std::function<void(size_t)> on_send_;
 };
 
-GcpBrokerConfig MakeConfig() {
-  return GcpBrokerConfig{
-      .endpoint = "http://credential-broker/v1/credentials/assume-role",
-      .region = "us-central1",
-      .bucket = "bucket",
-      .target_service_account = "reader@project.iam.gserviceaccount.com",
-      .duration_seconds = 3600,
-      .request_timeout_ms = 1000,
-  };
-}
-
 ArrowFileSystemConfig MakeGcpConfig() {
   ArrowFileSystemConfig config;
+  config.storage_type = "remote";
   config.cloud_provider = kCloudProviderGCP;
   config.address = "storage.googleapis.com";
+  config.use_ssl = true;
   config.bucket_name = "bucket";
   config.load_frequency = 900;
   return config;
 }
+
+ArrowFileSystemConfig MakeConfig() {
+  auto config = MakeGcpConfig();
+  config.credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
+  config.region = "us-central1";
+  config.gcp_target_service_account = "reader@project.iam.gserviceaccount.com";
+  config.load_frequency = 3600;
+  config.request_timeout_ms = 1000;
+  return config;
+}
+
+Header ReadHeader(const std::shared_ptr<GcpBrokerCredentialProvider>& provider) {
+  Aws::Endpoint::AWSEndpoint endpoint;
+  endpoint.SetURI(Aws::Http::URI("https://storage.googleapis.com/bucket/key"));
+  Aws::S3::Model::HeadObjectRequest request;
+  const auto authorized = GcpCredentialProvider::AuthorizeRead(provider, request, std::move(endpoint), "",
+                                                               Aws::Http::HttpMethod::HTTP_HEAD);
+  EXPECT_TRUE(authorized.ok()) << authorized.status();
+  ARROW_ASSIGN_OR_RAISE(const bool handled, authorized);
+  if (!handled)
+    return arrow::Status::Invalid("Expected bearer authorization");
+  return std::make_pair(std::string("Authorization"),
+                        std::string(request.GetAdditionalCustomHeaders().at("authorization").c_str()));
+}
+
+class GcpBrokerCredentialProviderTest : public ::testing::Test {
+  protected:
+  static void SetUpTestSuite() {
+    const auto status = S3FileSystemProducer(ArrowFileSystemConfig{}).InitS3();
+    ASSERT_TRUE(status.ok()) << status;
+  }
+};
+using GcpCredentialProviderSelectionTest = GcpBrokerCredentialProviderTest;
 
 // Polls until `done` returns true or the real-clock timeout elapses.
 bool WaitUntil(const std::function<bool()>& done, std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
@@ -177,7 +207,7 @@ bool WaitUntil(const std::function<bool()>& done, std::chrono::milliseconds time
 
 }  // namespace
 
-TEST(GcpBrokerCredentialProviderTest, SendsBrokerContractAndReturnsBearer) {
+TEST_F(GcpBrokerCredentialProviderTest, SendsBrokerContractAndReturnsBearer) {
   for (const bool use_iam : {false, true}) {
     SCOPED_TRACE(use_iam);
     const auto now = std::chrono::system_clock::from_time_t(1785146400);
@@ -186,10 +216,10 @@ TEST(GcpBrokerCredentialProviderTest, SendsBrokerContractAndReturnsBearer) {
                        SuccessResponse("ya29.token", now + std::chrono::hours(1)));
     auto config = MakeConfig();
     config.use_iam = use_iam;
-    GcpBrokerCredentialProvider provider(config, transport, [now] { return now; });
+    auto provider = std::make_shared<GcpBrokerCredentialProvider>(config, transport, [now] { return now; });
 
-    auto header = provider.AuthorizationHeader();
-    ASSERT_TRUE(header.has_value());
+    auto header = ReadHeader(provider);
+    ASSERT_TRUE(header.ok());
     EXPECT_EQ(header->first, "Authorization");
     EXPECT_EQ(header->second, "Bearer ya29.token");
 
@@ -209,103 +239,151 @@ TEST(GcpBrokerCredentialProviderTest, SendsBrokerContractAndReturnsBearer) {
       EXPECT_FALSE(body.contains("credentialType"));
       EXPECT_EQ(body.at("gcpServiceAccountEmail"), "reader@project.iam.gserviceaccount.com");
     }
-    EXPECT_EQ(provider.AuthorizationHeader()->second, "Bearer ya29.token");
+    EXPECT_EQ(ReadHeader(provider)->second, "Bearer ya29.token");
     EXPECT_EQ(transport->RequestCount(), 1u);
   }
 }
 
-TEST(GcpBrokerCredentialProviderTest, CachesTokenUntilSixtySecondsBeforeExpiry) {
+TEST_F(GcpBrokerCredentialProviderTest, CachesTokenUntilSixtySecondsBeforeExpiry) {
   auto now = std::chrono::system_clock::from_time_t(1785146400);
   auto transport = std::make_shared<MockTransport>();
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse("first", now + std::chrono::minutes(10)));
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse("second", now + std::chrono::hours(1)));
-  GcpBrokerCredentialProvider provider(MakeConfig(), transport, [&now] { return now; });
+  auto provider = std::make_shared<GcpBrokerCredentialProvider>(MakeConfig(), transport, [&now] { return now; });
 
-  EXPECT_EQ(provider.AuthorizationHeader()->second, "Bearer first");
+  EXPECT_EQ(ReadHeader(provider)->second, "Bearer first");
   now += std::chrono::minutes(8);
-  EXPECT_EQ(provider.AuthorizationHeader()->second, "Bearer first");
+  EXPECT_EQ(ReadHeader(provider)->second, "Bearer first");
   EXPECT_EQ(transport->RequestCount(), 1u);
 
   // Inside the refresh window the caller that refreshes gets the new token.
   now += std::chrono::seconds(90);
-  EXPECT_EQ(provider.AuthorizationHeader()->second, "Bearer second");
+  EXPECT_EQ(ReadHeader(provider)->second, "Bearer second");
   EXPECT_EQ(transport->RequestCount(), 2u);
 }
 
-TEST(GcpBrokerCredentialProviderTest, FailedRefreshKeepsValidTokenWithSingleAttempt) {
+TEST_F(GcpBrokerCredentialProviderTest, FailedRefreshKeepsValidTokenWithSingleAttempt) {
   auto now = std::chrono::system_clock::from_time_t(1785146400);
   auto transport = std::make_shared<MockTransport>();
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse("first", now + std::chrono::minutes(2)));
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::InternalServerError, "{}");
-  GcpBrokerCredentialProvider provider(MakeConfig(), transport, [&now] { return now; });
+  auto provider = std::make_shared<GcpBrokerCredentialProvider>(MakeConfig(), transport, [&now] { return now; });
 
-  EXPECT_EQ(provider.AuthorizationHeader()->second, "Bearer first");
+  EXPECT_EQ(ReadHeader(provider)->second, "Bearer first");
   EXPECT_EQ(transport->RequestCount(), 1u);
 
   // Refresh fails with a single attempt; the still-valid token is kept.
   now += std::chrono::seconds(90);
-  EXPECT_EQ(provider.AuthorizationHeader()->second, "Bearer first");
+  EXPECT_EQ(ReadHeader(provider)->second, "Bearer first");
   EXPECT_EQ(transport->RequestCount(), 2u);
 
   // Right after the failure the Broker is left alone; the token still works.
   now += std::chrono::seconds(1);
-  EXPECT_EQ(provider.AuthorizationHeader()->second, "Bearer first");
+  EXPECT_EQ(ReadHeader(provider)->second, "Bearer first");
   EXPECT_EQ(transport->RequestCount(), 2u);
 
   // Once the backoff is over another single attempt is made (the transport
   // has nothing queued, so it throws) and the valid token is still served.
   now += std::chrono::seconds(2);
-  EXPECT_EQ(provider.AuthorizationHeader()->second, "Bearer first");
+  EXPECT_EQ(ReadHeader(provider)->second, "Bearer first");
   EXPECT_EQ(transport->RequestCount(), 3u);
 
-  // Once the token has expired it is no fallback: the request goes out
-  // without Authorization instead, after one more single attempt.
+  // An expired token cannot be a fallback; propagate the refresh failure.
   now += std::chrono::minutes(5);
-  EXPECT_FALSE(provider.AuthorizationHeader().has_value());
+  EXPECT_FALSE(ReadHeader(provider).ok());
   EXPECT_EQ(transport->RequestCount(), 4u);
 }
 
-TEST(GcpBrokerCredentialProviderTest, InitialFailureRetriesThenReturnsNoHeader) {
+TEST_F(GcpBrokerCredentialProviderTest, InitialFailureReturnsNoHeader) {
   const auto now = std::chrono::system_clock::from_time_t(1785146400);
   auto transport = std::make_shared<MockTransport>();
   for (int i = 0; i < 4; ++i) {
     transport->Enqueue(Azure::Core::Http::HttpStatusCode::ServiceUnavailable, "{}");
   }
-  GcpBrokerCredentialProvider provider(MakeConfig(), transport, [now] { return now; });
+  auto provider = std::make_shared<GcpBrokerCredentialProvider>(MakeConfig(), transport, [now] { return now; });
 
-  EXPECT_FALSE(provider.AuthorizationHeader().has_value());
+  EXPECT_FALSE(ReadHeader(provider).ok());
   EXPECT_EQ(transport->RequestCount(), 4u);
 }
 
-TEST(GcpBrokerCredentialProviderTest, NegativeCacheSuppressesFetchesAfterFailure) {
+TEST_F(GcpBrokerCredentialProviderTest, BrokerAccessDeniedUsesInitialRetriesAndBackoff) {
+  const auto now = std::chrono::system_clock::from_time_t(1785146400);
+  for (const auto status :
+       {Azure::Core::Http::HttpStatusCode::Unauthorized, Azure::Core::Http::HttpStatusCode::Forbidden}) {
+    auto transport = std::make_shared<MockTransport>();
+    for (int i = 0; i < 4; ++i) transport->Enqueue(status, "denied");
+    auto provider = std::make_shared<GcpBrokerCredentialProvider>(MakeConfig(), transport, [now] { return now; });
+    EXPECT_FALSE(ReadHeader(provider).ok());
+    EXPECT_FALSE(ReadHeader(provider).ok());
+    EXPECT_EQ(transport->RequestCount(), 4u);
+  }
+}
+
+TEST_F(GcpBrokerCredentialProviderTest, NegativeCacheSuppressesFetchesAfterFailure) {
   auto now = std::chrono::system_clock::from_time_t(1785146400);
   auto transport = std::make_shared<MockTransport>();
   for (int i = 0; i < 4; ++i) {
     transport->Enqueue(Azure::Core::Http::HttpStatusCode::ServiceUnavailable, "{}");
   }
-  GcpBrokerCredentialProvider provider(MakeConfig(), transport, [&now] { return now; });
+  auto provider = std::make_shared<GcpBrokerCredentialProvider>(MakeConfig(), transport, [&now] { return now; });
 
-  EXPECT_FALSE(provider.AuthorizationHeader().has_value());
+  EXPECT_FALSE(ReadHeader(provider).ok());
   EXPECT_EQ(transport->RequestCount(), 4u);
 
   // Within the backoff window the failure is returned without a Broker call.
   now += std::chrono::milliseconds(1500);
-  EXPECT_FALSE(provider.AuthorizationHeader().has_value());
+  EXPECT_FALSE(ReadHeader(provider).ok());
   EXPECT_EQ(transport->RequestCount(), 4u);
 
   // After the window the Broker is asked again and a recovery is picked up.
   now += std::chrono::milliseconds(1000);
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse("recovered", now + std::chrono::hours(1)));
-  EXPECT_EQ(provider.AuthorizationHeader()->second, "Bearer recovered");
+  EXPECT_EQ(ReadHeader(provider)->second, "Bearer recovered");
   EXPECT_EQ(transport->RequestCount(), 5u);
 }
 
-TEST(GcpBrokerCredentialProviderTest, ConcurrentInitialRequestsShareFetchRetries) {
+TEST_F(GcpBrokerCredentialProviderTest, InvalidBrokerRequestReturnsNoHeader) {
+  auto config = MakeConfig();
+  config.gcp_target_service_account = std::string(1, static_cast<char>(0xff));
+  auto transport = std::make_shared<MockTransport>();
+  const auto now = std::chrono::system_clock::from_time_t(1785146400);
+  auto provider = std::make_shared<GcpBrokerCredentialProvider>(config, transport, [now] { return now; });
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    EXPECT_FALSE(ReadHeader(provider).ok());
+  }
+  EXPECT_EQ(transport->RequestCount(), 0u);
+}
+
+#if !defined(_WIN32)
+TEST_F(GcpBrokerCredentialProviderTest, AnotherCallerCanRefreshAfterTheOwnerThrows) {
+  const auto previous_style = GTEST_FLAG_GET(death_test_style);
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const auto recover = [] {
+    const auto now = std::chrono::system_clock::from_time_t(1785146400);
+    auto transport = std::make_shared<MockTransport>();
+    transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok,
+                       SuccessResponse("recovered", now + std::chrono::hours(1)));
+    int clock_calls = 0;
+    auto provider = std::make_shared<GcpBrokerCredentialProvider>(MakeConfig(), transport, [&] {
+      if (++clock_calls == 2)
+        throw std::runtime_error("failed during fetch");
+      return now;
+    });
+    const auto first = ReadHeader(provider);
+    const auto second = ReadHeader(provider);
+    return !first.ok() && second.ok() && second->second == "Bearer recovered" ? 0 : 1;
+  };
+  EXPECT_EXIT((::alarm(5), ::_exit(recover())), ::testing::ExitedWithCode(0), "");
+  GTEST_FLAG_SET(death_test_style, previous_style);
+}
+#endif
+
+TEST_F(GcpBrokerCredentialProviderTest, ConcurrentInitialRequestsShareFetchRetries) {
   const auto now = std::chrono::system_clock::from_time_t(1785146400);
   auto transport = std::make_shared<MockTransport>();
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::ServiceUnavailable, "unavailable");
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse("shared", now + std::chrono::hours(1)));
-  GcpBrokerCredentialProvider provider(MakeConfig(), transport, [now] { return now; });
+  auto provider = std::make_shared<GcpBrokerCredentialProvider>(MakeConfig(), transport, [now] { return now; });
 
   // Hold the first Broker call open until every caller has been started, so
   // they all arrive while the fetch is in flight.
@@ -321,7 +399,7 @@ TEST(GcpBrokerCredentialProviderTest, ConcurrentInitialRequestsShareFetchRetries
   std::vector<Header> headers(kCallers);
   std::vector<std::thread> threads;
   for (size_t i = 0; i < kCallers; ++i) {
-    threads.emplace_back([&provider, &headers, i] { headers[i] = provider.AuthorizationHeader(); });
+    threads.emplace_back([&provider, &headers, i] { headers[i] = ReadHeader(provider); });
   }
   all_started.set_value();
   for (auto& thread : threads) {
@@ -329,19 +407,19 @@ TEST(GcpBrokerCredentialProviderTest, ConcurrentInitialRequestsShareFetchRetries
   }
 
   for (size_t i = 0; i < kCallers; ++i) {
-    ASSERT_TRUE(headers[i].has_value()) << "caller " << i;
+    ASSERT_TRUE(headers[i].ok()) << "caller " << i;
     EXPECT_EQ(headers[i]->second, "Bearer shared") << "caller " << i;
   }
   // One failure plus one successful retry, shared by all callers.
   EXPECT_EQ(transport->RequestCount(), 2u);
 }
 
-TEST(GcpBrokerCredentialProviderTest, ConcurrentCallersGetStaleTokenWhileOneRefreshes) {
+TEST_F(GcpBrokerCredentialProviderTest, ConcurrentCallersGetStaleTokenWhileOneRefreshes) {
   auto now = std::chrono::system_clock::from_time_t(1785146400);
   auto transport = std::make_shared<MockTransport>();
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse("first", now + std::chrono::minutes(2)));
-  GcpBrokerCredentialProvider provider(MakeConfig(), transport, [&now] { return now; });
-  EXPECT_EQ(provider.AuthorizationHeader()->second, "Bearer first");
+  auto provider = std::make_shared<GcpBrokerCredentialProvider>(MakeConfig(), transport, [&now] { return now; });
+  EXPECT_EQ(ReadHeader(provider)->second, "Bearer first");
   ASSERT_EQ(transport->RequestCount(), 1u);
 
   // 30 s left: valid, but inside the refresh window.
@@ -356,7 +434,7 @@ TEST(GcpBrokerCredentialProviderTest, ConcurrentCallersGetStaleTokenWhileOneRefr
   });
 
   Header refresher_header;
-  std::thread refresher([&] { refresher_header = provider.AuthorizationHeader(); });
+  std::thread refresher([&] { refresher_header = ReadHeader(provider); });
   ASSERT_TRUE(WaitUntil([&] { return transport->RequestCount() == 2; }));
 
   // While the refresh is stuck in the Broker call, other callers must get the
@@ -367,7 +445,7 @@ TEST(GcpBrokerCredentialProviderTest, ConcurrentCallersGetStaleTokenWhileOneRefr
   std::vector<std::thread> threads;
   for (size_t i = 0; i < kCallers; ++i) {
     threads.emplace_back([&, i] {
-      headers[i] = provider.AuthorizationHeader();
+      headers[i] = ReadHeader(provider);
       finished.fetch_add(1);
     });
   }
@@ -380,40 +458,40 @@ TEST(GcpBrokerCredentialProviderTest, ConcurrentCallersGetStaleTokenWhileOneRefr
 
   EXPECT_TRUE(callers_returned) << "callers blocked behind the in-flight refresh";
   for (size_t i = 0; i < kCallers; ++i) {
-    ASSERT_TRUE(headers[i].has_value()) << "caller " << i;
+    ASSERT_TRUE(headers[i].ok()) << "caller " << i;
     EXPECT_EQ(headers[i]->second, "Bearer first") << "caller " << i;
   }
-  ASSERT_TRUE(refresher_header.has_value());
+  ASSERT_TRUE(refresher_header.ok());
   EXPECT_EQ(refresher_header->second, "Bearer second");
   // Exactly one Broker call for the whole refresh.
   EXPECT_EQ(transport->RequestCount(), 2u);
-  EXPECT_EQ(provider.AuthorizationHeader()->second, "Bearer second");
+  EXPECT_EQ(ReadHeader(provider)->second, "Bearer second");
   EXPECT_EQ(transport->RequestCount(), 2u);
 }
 
-TEST(GcpBrokerCredentialProviderTest, LifetimeIsCappedAtRequestedDuration) {
+TEST_F(GcpBrokerCredentialProviderTest, LifetimeIsCappedAtRequestedDuration) {
   auto now = std::chrono::system_clock::from_time_t(1785146400);
   auto config = MakeConfig();
-  config.duration_seconds = 120;
+  config.load_frequency = 120;
   auto transport = std::make_shared<MockTransport>();
   // The Broker claims one hour; the provider asked for two minutes.
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse("first", now + std::chrono::hours(1)));
-  GcpBrokerCredentialProvider provider(config, transport, [&now] { return now; });
+  auto provider = std::make_shared<GcpBrokerCredentialProvider>(config, transport, [&now] { return now; });
 
-  EXPECT_EQ(provider.AuthorizationHeader()->second, "Bearer first");
+  EXPECT_EQ(ReadHeader(provider)->second, "Bearer first");
   now += std::chrono::seconds(30);
-  EXPECT_EQ(provider.AuthorizationHeader()->second, "Bearer first");
+  EXPECT_EQ(ReadHeader(provider)->second, "Bearer first");
   EXPECT_EQ(transport->RequestCount(), 1u);
 
   // Past the requested duration the token is treated as expired even though
   // the Broker's expiredAt is still far away.
   now += std::chrono::seconds(91);
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse("second", now + std::chrono::hours(1)));
-  EXPECT_EQ(provider.AuthorizationHeader()->second, "Bearer second");
+  EXPECT_EQ(ReadHeader(provider)->second, "Bearer second");
   EXPECT_EQ(transport->RequestCount(), 2u);
 }
 
-TEST(GcpBrokerCredentialProviderTest, OversizedResponseIsRejected) {
+TEST_F(GcpBrokerCredentialProviderTest, OversizedResponseIsRejected) {
   const auto now = std::chrono::system_clock::from_time_t(1785146400);
   constexpr size_t kLimit = 64 * 1024;
 
@@ -425,8 +503,8 @@ TEST(GcpBrokerCredentialProviderTest, OversizedResponseIsRejected) {
     for (int i = 0; i < 4; ++i) {
       transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, body);
     }
-    GcpBrokerCredentialProvider provider(MakeConfig(), transport, [now] { return now; });
-    EXPECT_FALSE(provider.AuthorizationHeader().has_value());
+    auto provider = std::make_shared<GcpBrokerCredentialProvider>(MakeConfig(), transport, [now] { return now; });
+    EXPECT_FALSE(ReadHeader(provider).ok());
     EXPECT_EQ(transport->RequestCount(), 4u);
   }
   {
@@ -436,8 +514,8 @@ TEST(GcpBrokerCredentialProviderTest, OversizedResponseIsRejected) {
       transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse("small", now + std::chrono::hours(1)),
                          {{"Content-Length", std::to_string(kLimit + 1)}});
     }
-    GcpBrokerCredentialProvider provider(MakeConfig(), transport, [now] { return now; });
-    EXPECT_FALSE(provider.AuthorizationHeader().has_value());
+    auto provider = std::make_shared<GcpBrokerCredentialProvider>(MakeConfig(), transport, [now] { return now; });
+    EXPECT_FALSE(ReadHeader(provider).ok());
   }
   {
     // Unparsable Content-Length is rejected as well.
@@ -446,8 +524,8 @@ TEST(GcpBrokerCredentialProviderTest, OversizedResponseIsRejected) {
       transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse("small", now + std::chrono::hours(1)),
                          {{"Content-Length", "-1"}});
     }
-    GcpBrokerCredentialProvider provider(MakeConfig(), transport, [now] { return now; });
-    EXPECT_FALSE(provider.AuthorizationHeader().has_value());
+    auto provider = std::make_shared<GcpBrokerCredentialProvider>(MakeConfig(), transport, [now] { return now; });
+    EXPECT_FALSE(ReadHeader(provider).ok());
   }
   {
     // A large token under the limit with a matching Content-Length passes.
@@ -456,14 +534,14 @@ TEST(GcpBrokerCredentialProviderTest, OversizedResponseIsRejected) {
     const auto body = SuccessResponse(token, now + std::chrono::hours(1));
     ASSERT_LE(body.size(), kLimit);
     transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, body, {{"Content-Length", std::to_string(body.size())}});
-    GcpBrokerCredentialProvider provider(MakeConfig(), transport, [now] { return now; });
-    auto header = provider.AuthorizationHeader();
-    ASSERT_TRUE(header.has_value());
+    auto provider = std::make_shared<GcpBrokerCredentialProvider>(MakeConfig(), transport, [now] { return now; });
+    auto header = ReadHeader(provider);
+    ASSERT_TRUE(header.ok());
     EXPECT_EQ(header->second, "Bearer " + token);
   }
 }
 
-TEST(GcpBrokerCredentialProviderTest, TokenWithDisallowedCharactersIsRejected) {
+TEST_F(GcpBrokerCredentialProviderTest, TokenWithDisallowedCharactersIsRejected) {
   const auto now = std::chrono::system_clock::from_time_t(1785146400);
   const std::vector<std::string> bad_tokens = {
       "ya29.tok en", "token\r\nX-Injected: 1", "to=ken", "\"token\"", "token;", "=abc", "tok\xC3\xA9n",
@@ -473,21 +551,21 @@ TEST(GcpBrokerCredentialProviderTest, TokenWithDisallowedCharactersIsRejected) {
     for (int i = 0; i < 4; ++i) {
       transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse(token, now + std::chrono::hours(1)));
     }
-    GcpBrokerCredentialProvider provider(MakeConfig(), transport, [now] { return now; });
-    EXPECT_FALSE(provider.AuthorizationHeader().has_value()) << token;
+    auto provider = std::make_shared<GcpBrokerCredentialProvider>(MakeConfig(), transport, [now] { return now; });
+    EXPECT_FALSE(ReadHeader(provider).ok()) << token;
   }
 
   // The full RFC 6750 b64token alphabet with trailing padding is accepted.
   auto transport = std::make_shared<MockTransport>();
   const std::string good_token = "ya29.a0Af-H_~+/AZ09==";
   transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, SuccessResponse(good_token, now + std::chrono::hours(1)));
-  GcpBrokerCredentialProvider provider(MakeConfig(), transport, [now] { return now; });
-  auto header = provider.AuthorizationHeader();
-  ASSERT_TRUE(header.has_value());
+  auto provider = std::make_shared<GcpBrokerCredentialProvider>(MakeConfig(), transport, [now] { return now; });
+  auto header = ReadHeader(provider);
+  ASSERT_TRUE(header.ok());
   EXPECT_EQ(header->second, "Bearer " + good_token);
 }
 
-TEST(GcpBrokerCredentialProviderTest, InvalidResponsesReturnNoHeader) {
+TEST_F(GcpBrokerCredentialProviderTest, InvalidResponsesReturnNoHeader) {
   const auto now = std::chrono::system_clock::from_time_t(1785146400);
   const std::vector<std::string> invalid_bodies = {
       "not json",
@@ -501,20 +579,20 @@ TEST(GcpBrokerCredentialProviderTest, InvalidResponsesReturnNoHeader) {
     for (int i = 0; i < 4; ++i) {
       transport->Enqueue(Azure::Core::Http::HttpStatusCode::Ok, body);
     }
-    GcpBrokerCredentialProvider provider(MakeConfig(), transport, [now] { return now; });
-    EXPECT_FALSE(provider.AuthorizationHeader().has_value()) << body;
+    auto provider = std::make_shared<GcpBrokerCredentialProvider>(MakeConfig(), transport, [now] { return now; });
+    EXPECT_FALSE(ReadHeader(provider).ok()) << body;
   }
 }
 
-TEST(GcpBrokerCredentialProviderTest, TransportExceptionDoesNotEscape) {
+TEST_F(GcpBrokerCredentialProviderTest, TransportExceptionDoesNotEscape) {
   const auto now = std::chrono::system_clock::from_time_t(1785146400);
   // No queued response: every Send throws TransportException.
   auto transport = std::make_shared<MockTransport>();
-  GcpBrokerCredentialProvider provider(MakeConfig(), transport, [now] { return now; });
-  EXPECT_FALSE(provider.AuthorizationHeader().has_value());
+  auto provider = std::make_shared<GcpBrokerCredentialProvider>(MakeConfig(), transport, [now] { return now; });
+  EXPECT_FALSE(ReadHeader(provider).ok());
 }
 
-TEST(GcpCredentialProviderSelectionTest, CredentialEndpointSelectsBrokerInBothModes) {
+TEST_F(GcpCredentialProviderSelectionTest, CredentialEndpointSelectsBrokerInBothModes) {
   auto config = MakeGcpConfig();
   config.gcp_target_service_account = "reader@project.iam.gserviceaccount.com";
   config.credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
@@ -522,22 +600,25 @@ TEST(GcpCredentialProviderSelectionTest, CredentialEndpointSelectsBrokerInBothMo
   auto broker = BuildGcpProviderFromConfig(config);
   ASSERT_TRUE(broker.ok()) << broker.status().ToString();
   EXPECT_NE(dynamic_cast<GcpBrokerCredentialProvider*>(broker->get()), nullptr);
-  EXPECT_TRUE(broker.ValueOrDie()->IssuesBearerToken());
-  EXPECT_EQ(broker.ValueOrDie()->Identity(),
-            "broker:http://credential-broker/v1/credentials/assume-role|reader@project.iam.gserviceaccount.com");
+  EXPECT_TRUE((*broker)->GetAWSCredentials().IsEmpty());
 
   // Like AWS, IAM selects the Broker's identity and ignores target/static credentials.
   config.use_iam = true;
   auto iam = BuildGcpProviderFromConfig(config);
   ASSERT_TRUE(iam.ok()) << iam.status();
   EXPECT_NE(dynamic_cast<GcpBrokerCredentialProvider*>(iam->get()), nullptr);
-  EXPECT_NE(iam.ValueOrDie()->Identity(), broker.ValueOrDie()->Identity());
+  S3Options target_options, iam_options;
+  target_options.credentials_provider = *broker;
+  iam_options.credentials_provider = *iam;
+  EXPECT_FALSE(iam_options.Equals(target_options));
   config.gcp_target_service_account.clear();
   config.access_key_id = "unused-key";
   config.access_key_value = "unused-secret";
   auto without_target = BuildGcpProviderFromConfig(config);
   ASSERT_TRUE(without_target.ok()) << without_target.status();
-  EXPECT_EQ(without_target.ValueOrDie()->Identity(), iam.ValueOrDie()->Identity());
+  S3Options ignored_target;
+  ignored_target.credentials_provider = *without_target;
+  EXPECT_TRUE(ignored_target.Equals(iam_options));
   for (const int32_t duration : {899, 3601}) {
     config.load_frequency = duration;
     EXPECT_TRUE(BuildGcpProviderFromConfig(config).status().IsInvalid());
@@ -547,33 +628,37 @@ TEST(GcpCredentialProviderSelectionTest, CredentialEndpointSelectsBrokerInBothMo
   config.credential_endpoint.clear();
   auto native_iam = BuildGcpProviderFromConfig(config);
   ASSERT_TRUE(native_iam.ok()) << native_iam.status();
-  EXPECT_EQ(native_iam.ValueOrDie()->Identity(), "iam");
+  EXPECT_EQ(dynamic_cast<GcpBrokerCredentialProvider*>(native_iam->get()), nullptr);
+  EXPECT_TRUE((*native_iam)->GetAWSCredentials().IsEmpty());
   config.access_key_id.clear();
   config.access_key_value.clear();
   config.gcp_target_service_account = "reader@project.iam.gserviceaccount.com";
   auto impersonation = BuildGcpProviderFromConfig(config);
   ASSERT_TRUE(impersonation.ok()) << impersonation.status();
-  EXPECT_EQ(impersonation.ValueOrDie()->Identity(), "impersonate:reader@project.iam.gserviceaccount.com");
+  S3Options adc_options, impersonation_options;
+  adc_options.credentials_provider = *native_iam;
+  impersonation_options.credentials_provider = *impersonation;
+  EXPECT_FALSE(impersonation_options.Equals(adc_options));
 
   auto missing_target = MakeGcpConfig();
   missing_target.credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
   EXPECT_TRUE(BuildGcpProviderFromConfig(missing_target).status().IsInvalid());
 }
 
-TEST(GcpCredentialProviderSelectionTest, TargetAloneSelectsImpersonation) {
+TEST_F(GcpCredentialProviderSelectionTest, TargetAloneSelectsImpersonation) {
   auto config = MakeGcpConfig();
   config.gcp_target_service_account = "reader@project.iam.gserviceaccount.com";
 
   auto provider = BuildGcpProviderFromConfig(config);
   ASSERT_TRUE(provider.ok()) << provider.status().ToString();
   EXPECT_EQ(dynamic_cast<GcpBrokerCredentialProvider*>(provider->get()), nullptr);
-  EXPECT_TRUE(provider.ValueOrDie()->IssuesBearerToken());
+  EXPECT_TRUE((*provider)->GetAWSCredentials().IsEmpty());
 
   config.load_frequency = 7200;
   EXPECT_TRUE(BuildGcpProviderFromConfig(config).status().IsInvalid());
 }
 
-TEST(GcpCredentialProviderSelectionTest, HmacWithTargetIsAmbiguousUnlessTalon) {
+TEST_F(GcpCredentialProviderSelectionTest, HmacWithTargetIsAmbiguousUnlessTalon) {
   auto config = MakeGcpConfig();
   config.access_key_id = "ak";
   config.access_key_value = "sk";
@@ -589,19 +674,18 @@ TEST(GcpCredentialProviderSelectionTest, HmacWithTargetIsAmbiguousUnlessTalon) {
   config.gcp_target_service_account = "reader@project.iam.gserviceaccount.com";
   auto provider = BuildGcpProviderFromConfig(config);
   ASSERT_TRUE(provider.ok()) << provider.status().ToString();
-  EXPECT_FALSE(provider.ValueOrDie()->IssuesBearerToken());
-  EXPECT_EQ(provider.ValueOrDie()->Identity(), "hmac:ak");
+  EXPECT_EQ((*provider)->GetAWSCredentials().GetAWSAccessKeyId(), "ak");
+  EXPECT_EQ((*provider)->GetAWSCredentials().GetAWSSecretKey(), "sk");
 }
 
-TEST(GcpCredentialProviderSelectionTest, HmacIsNotBearer) {
+TEST_F(GcpCredentialProviderSelectionTest, HmacIsNotBearer) {
   auto config = MakeGcpConfig();
   config.access_key_id = "ak";
   config.access_key_value = "sk";
   auto provider = BuildGcpProviderFromConfig(config);
   ASSERT_TRUE(provider.ok()) << provider.status().ToString();
-  EXPECT_FALSE(provider.ValueOrDie()->AuthorizationHeader().has_value());
-  EXPECT_FALSE(provider.ValueOrDie()->IssuesBearerToken());
-  EXPECT_EQ(provider.ValueOrDie()->Identity(), "hmac:ak");
+  EXPECT_EQ((*provider)->GetAWSCredentials().GetAWSAccessKeyId(), "ak");
+  EXPECT_EQ((*provider)->GetAWSCredentials().GetAWSSecretKey(), "sk");
 }
 
 }  // namespace milvus_storage

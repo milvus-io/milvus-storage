@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/s3/s3_options.h"
+#include "milvus-storage/filesystem/gcp/gcp_credential_provider.h"
 #include "milvus-storage/filesystem/s3/provider/AwsCredentialBrokerProvider.h"
 
 #include <aws/core/auth/AWSCredentials.h>
@@ -258,6 +259,13 @@ arrow::Result<S3Options> S3Options::FromUri(const std::string& uri_string, std::
 }
 
 bool S3Options::Equals(const S3Options& other) const {
+  if (credentials_provider != other.credentials_provider) {
+    const auto* gcp = dynamic_cast<const GcpCredentialProvider*>(credentials_provider.get());
+    const auto* rhs = dynamic_cast<const GcpCredentialProvider*>(other.credentials_provider.get());
+    if ((gcp || rhs) && (!gcp || !rhs || gcp->config_key_.empty() || gcp->config_key_ != rhs->config_key_)) {
+      return false;
+    }
+  }
   const auto* broker = dynamic_cast<const AwsCredentialBrokerProvider*>(credentials_provider.get());
   const auto* other_broker = dynamic_cast<const AwsCredentialBrokerProvider*>(other.credentials_provider.get());
   if ((broker || other_broker) && (!broker || !other_broker || !broker->Equals(*other_broker))) {

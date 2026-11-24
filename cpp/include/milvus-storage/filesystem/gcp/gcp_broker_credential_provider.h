@@ -16,7 +16,6 @@
 
 #include <chrono>
 #include <condition_variable>
-#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -32,16 +31,6 @@
 
 namespace milvus_storage {
 
-struct GcpBrokerConfig {
-  std::string endpoint;
-  std::string region;
-  std::string bucket;
-  std::string target_service_account;
-  int32_t duration_seconds = 900;
-  int64_t request_timeout_ms = 3000;
-  bool use_iam = false;
-};
-
 // GcpBrokerCredentialProvider gets OAuth2 access tokens from a credential
 // Broker. IAM mode uses the Broker's own identity; otherwise the Broker
 // impersonates the target service account using its own impersonation grant.
@@ -51,11 +40,7 @@ struct GcpBrokerConfig {
 // gcpServiceAccountEmail. The response carries the access token in
 // credentials.sessionToken.
 //
-// AuthorizationHeader() runs inside the AWS SDK HTTP factory callback, which
-// must not throw. A token that cannot be obtained yields std::nullopt, so the
-// request goes out without Authorization and GCS answers 401/403.
-//
-// A slow or unavailable Broker must not stall the request threads that share
+// The SDK and native read requests from a single filesystem share
 // one provider. GetToken() therefore never calls the Broker or sleeps while
 // holding the mutex, and at most one thread talks to the Broker at a time:
 //   - a fresh cached token (more than 60 s left) is returned immediately;
@@ -74,25 +59,16 @@ class GcpBrokerCredentialProvider final : public GcpCredentialProvider {
   using TimePoint = std::chrono::system_clock::time_point;
   using Clock = std::function<TimePoint()>;
 
-  explicit GcpBrokerCredentialProvider(GcpBrokerConfig config,
+  explicit GcpBrokerCredentialProvider(const ArrowFileSystemConfig& config,
                                        std::shared_ptr<Azure::Core::Http::HttpTransport> transport = nullptr,
                                        Clock clock = {});
   ~GcpBrokerCredentialProvider() override;
 
-  std::optional<std::pair<std::string, std::string>> AuthorizationHeader() override;
-
-  arrow::Status MaybeSignConditionalWrite(const std::shared_ptr<Aws::Http::HttpRequest>&) override {
-    return arrow::Status::OK();
-  }
-
-  bool IssuesBearerToken() const override { return true; }
-
-  std::string Identity() const override {
-    return config_.use_iam ? "broker-iam:" + config_.endpoint
-                           : "broker:" + config_.endpoint + "|" + config_.target_service_account;
-  }
-
   private:
+  arrow::Result<bool> AuthorizeRequest(const std::shared_ptr<Aws::Http::HttpRequest>& request) override;
+
+  struct BrokerConfig;
+
   struct CachedToken {
     std::string access_token;
     TimePoint expires_at;
@@ -109,7 +85,7 @@ class GcpBrokerCredentialProvider final : public GcpCredentialProvider {
 
   bool InFailureBackoff(TimePoint now) const;
 
-  GcpBrokerConfig config_;
+  std::unique_ptr<const BrokerConfig> config_;
   std::shared_ptr<Azure::Core::Http::HttpTransport> transport_;
   Clock clock_;
 

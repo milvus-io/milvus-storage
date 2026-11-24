@@ -45,7 +45,7 @@
 #include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
-#include "milvus-storage/filesystem/gcp/gcp_credential_registry.h"
+#include "milvus-storage/filesystem/gcp/gcp_credential_provider.h"
 #include "milvus-storage/filesystem/gcp/gcp_filesystem_producer.h"
 #include "milvus-storage/filesystem/s3/s3_crt_client.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
@@ -1158,29 +1158,31 @@ TEST(S3CrtBuildSupportTest, GcpHmacUploadsUseSdkWithAndWithoutCrtReads) {
     config.address = "127.0.0.1:" + std::to_string(acceptor.local_endpoint().port());
     config.bucket_name = "test-bucket";
     config.region = "auto";
-    config.access_key_id = "test-hmac-key";
-    config.access_key_value = "test-hmac-secret";
-    config.s3_crt_async_read = true;
-    auto result = GcpFileSystemProducer(config).Make();
-    if (!result.ok()) {
-      std::cerr << result.status() << std::endl;
-      return 1;
-    }
-    // GCP uploads keep the SDK executor and per-request signing path.
-    auto arrow_executor = arrow::internal::ThreadPool::Make(1);
-    if (!arrow_executor.ok())
-      return 2;
-    auto options = S3Options::FromAccessKey(config.access_key_id, config.access_key_value);
-    options.cloud_provider = kCloudProviderGCP;
-    options.endpoint_override = config.address;
-    options.region = config.region;
-    options.scheme = "http";
+    // Both identities must remain live while writing the same object.
+    std::vector<std::pair<std::string, std::shared_ptr<FileSystemProxy>>> filesystems;
     for (const bool crt_reads : {false, true}) {
-      options.use_crt_async_reads = crt_reads;
-      auto native_fs = S3FileSystem::Make(options, arrow::io::IOContext(arrow_executor->get()));
-      if (!native_fs.ok())
-        return 2;
-      auto fs = std::make_shared<FileSystemProxy>(config.bucket_name, *native_fs);
+      config.s3_crt_async_read = crt_reads;
+      config.alias = crt_reads ? "a" : "b";
+      config.access_key_id = "test-key-" + config.alias;
+      config.access_key_value = "test-secret-" + config.alias;
+      auto result = GcpFileSystemProducer(config).Make();
+      if (!result.ok()) {
+        std::cerr << result.status() << std::endl;
+        return 1;
+      }
+      filesystems.emplace_back(config.access_key_id, std::make_shared<FileSystemProxy>(config.bucket_name, *result));
+    }
+    // A caller can also build S3Options directly with its own GCS HMAC keys.
+    auto raw_options = S3Options::FromAccessKey("raw-key", "raw-secret");
+    raw_options.cloud_provider = kCloudProviderGCP;
+    raw_options.endpoint_override = config.address;
+    raw_options.scheme = "http";
+    raw_options.region = config.region;
+    auto raw = S3FileSystem::Make(raw_options);
+    if (!raw.ok())
+      return 1;
+    filesystems.emplace_back("raw-key", std::make_shared<FileSystemProxy>(config.bucket_name, *raw));
+    for (const auto& [key_id, fs] : filesystems) {
       for (int factory = 0; factory < 3; ++factory) {
         const auto output = factory == 0   ? fs->OpenOutputStream("object.txt", nullptr)
                             : factory == 1 ? fs->OpenConditionalOutputStream("object.txt", nullptr)
@@ -1212,8 +1214,9 @@ TEST(S3CrtBuildSupportTest, GcpHmacUploadsUseSdkWithAndWithoutCrtReads) {
         if (!close.Wait(5))
           return 3;
         const auto status = close.status();
-        if (!status.ok() || !correct_signature || !correct_request) {
-          std::cerr << status << " crt_reads=" << crt_reads << " factory=" << factory
+        if (!status.ok() || !correct_signature || !correct_request ||
+            auth.find("Credential=" + key_id + "/") == std::string::npos) {
+          std::cerr << status << " key_id=" << key_id << " factory=" << factory
                     << " correct_signature=" << correct_signature << " correct_request=" << correct_request
                     << " target=" << request.target() << " body=" << request.body()
                     << " condition=" << request["x-goog-if-generation-match"] << std::endl;
@@ -1239,109 +1242,149 @@ TEST(S3CrtBuildSupportTest, GcpIamBearerReachesCrtRangeGetAndHead) {
     using Tcp = boost::asio::ip::tcp;
     class StaticBearerProvider final : public GcpCredentialProvider {
    public:
-      std::atomic<int> authorization_calls{0};
-      std::optional<std::pair<std::string, std::string>> AuthorizationHeader() override {
-        const int call = ++authorization_calls;
-        return std::make_pair(std::string("Authorization"), "Bearer test-token-" + std::to_string(call));
+      StaticBearerProvider(const ArrowFileSystemConfig& config, std::string id)
+          : GcpCredentialProvider(config), id_(std::move(id)) {}
+
+   private:
+      arrow::Result<bool> AuthorizeRequest(const std::shared_ptr<Aws::Http::HttpRequest>& request) override {
+        const auto call = ++calls_;
+        request->SetHeaderValue("Authorization", ("Bearer " + id_ + "-" + std::to_string(call)).c_str());
+        return true;
       }
-      arrow::Status MaybeSignConditionalWrite(const std::shared_ptr<Aws::Http::HttpRequest>&) override {
-        return arrow::Status::OK();
-      }
-      bool IssuesBearerToken() const override { return true; }
-      std::string Identity() const override { return "iam"; }
+
+      const std::string id_;
+      std::atomic<int> calls_{0};
     };
     const auto fail = [](const std::string& message) {
       std::cerr << message << std::endl;
       return 1;
     };
-
     boost::asio::io_context server_context;
     Tcp::acceptor acceptor(server_context, {boost::asio::ip::address_v4::loopback(), 0});
+    const auto init = InitializeS3ForTest();
+    if (!init.ok()) {
+      return fail(init.ToString());
+    }
+    const std::string address = "127.0.0.1:" + std::to_string(acceptor.local_endpoint().port());
+    const std::string path = "test-bucket/object.txt";
     ArrowFileSystemConfig config;
     config.storage_type = "remote";
     config.cloud_provider = kCloudProviderGCP;
-    config.address = "127.0.0.1:" + std::to_string(acceptor.local_endpoint().port());
+    config.address = address;
     config.bucket_name = "test-bucket";
-    config.region = "auto";
     config.use_iam = true;
-    config.s3_crt_async_read = true;
-    // The registry keeps the first provider for an identity. Install the test
-    // provider before Make() registers the process's real IAM credentials.
-    auto provider = std::make_shared<StaticBearerProvider>();
-    const auto register_status = GcpCredentialRegistry::Instance().Register(
-        {NormalizeGcpEndpoint(config.address, config.use_ssl), config.bucket_name}, provider);
-    if (!register_status.ok()) {
-      return fail(register_status.ToString());
-    }
-    auto fs_result = GcpFileSystemProducer(config).Make();
-    if (!fs_result.ok()) {
-      return fail(fs_result.status().ToString());
-    }
-    auto fs = std::move(fs_result).ValueOrDie();
-    arrow::fs::FileInfo file_info("test-bucket/object.txt", arrow::fs::FileType::File);
+    const auto primary_status = GcpFileSystemProducer(config).Make().status();
+    if (!primary_status.ok())
+      return fail(primary_status.ToString());
+    arrow::fs::FileInfo file_info(path, arrow::fs::FileType::File);
     file_info.set_size(9);
-    auto input_result = fs->OpenInputFile(file_info);
-    if (!input_result.ok()) {
-      return fail(input_result.status().ToString());
+    auto fs_worker = arrow::internal::ThreadPool::Make(1).ValueOrDie();
+    const arrow::io::IOContext fs_io(fs_worker.get());
+    std::vector<std::shared_ptr<S3FileSystem>> filesystems;
+    std::vector<std::shared_ptr<arrow::io::RandomAccessFile>> files;
+    for (const std::string id : {"A", "B"}) {
+      auto options = S3Options::Anonymous();
+      options.endpoint_override = address;
+      options.scheme = "http";
+      options.region = "auto";
+      options.cloud_provider = kCloudProviderGCP;
+      options.use_crt_async_reads = true;
+      config.gcp_target_service_account = id;
+      options.credentials_provider = std::make_shared<StaticBearerProvider>(config, id);
+      auto fs = S3FileSystem::Make(options, fs_io);
+      if (!fs.ok()) {
+        return fail(fs.status().ToString());
+      }
+      filesystems.push_back(*fs);
+      auto file = (*fs)->OpenInputFile(file_info);
+      if (!file.ok() || !dynamic_cast<NonBlockingRandomAccessFile*>(file->get())) {
+        return fail("GCP IAM did not select the CRT input file");
+      }
+      files.push_back(*file);
     }
-    auto input = std::move(input_result).ValueOrDie();
-    if (dynamic_cast<NonBlockingReadAtFile*>(input.get()) == nullptr) {
-      return fail("GCP IAM did not select the CRT input file");
+    if (filesystems[0]->Equals(*filesystems[1])) {
+      return fail("Distinct GCP identities compared equal");
+    }
+    auto first = files[0]->ReadAsync(fs_io, 2, 4);
+    uint8_t second_bytes[4]{};
+    auto* native_file = dynamic_cast<NonBlockingRandomAccessFile*>(files[1].get());
+    auto second = native_file->ReadAtAsyncInto(2, 4, second_bytes);
+    for (int i = 0; i != 2; ++i) {
+      Tcp::socket socket(server_context);
+      acceptor.accept(socket);
+      boost::beast::flat_buffer buffer;
+      http::request<http::empty_body> request;
+      http::read(socket, buffer, request);
+      const std::string auth(request[http::field::authorization]);
+      if (request.method() != http::verb::get || !std::string(request.target()).ends_with("/" + path) ||
+          request[http::field::range] != "bytes=2-5" || (auth != "Bearer A-1" && auth != "Bearer B-1")) {
+        return fail("Unexpected CRT GET target, range or bearer");
+      }
+      http::response<http::string_body> response{http::status::partial_content, request.version()};
+      response.set(http::field::content_range, "bytes 2-5/9");
+      response.set(http::field::accept_ranges, "bytes");
+      response.set(http::field::etag, "\"etag\"");
+      // The response identifies the credential the server actually received.
+      response.body() = auth == "Bearer A-1" ? "AAAA" : "BBBB";
+      response.prepare_payload();
+      response.keep_alive(false);
+      http::write(socket, response);
+    }
+    if (!first.result().ok() || !second.result().ok() || (*first.result())->ToString() != "AAAA" ||
+        *second.result() != 4 || std::string(reinterpret_cast<char*>(second_bytes), 4) != "BBBB") {
+      return fail("A CRT read used the other filesystem's bearer");
     }
 
-    auto read = input->ReadAsync({}, 2, 4);
-    Tcp::socket get_socket(server_context);
-    acceptor.accept(get_socket);
-    boost::beast::flat_buffer get_buffer;
-    http::request<http::empty_body> get_request;
-    http::read(get_socket, get_buffer, get_request);
-    const bool get_method_ok = get_request.method() == http::verb::get;
-    const bool get_target_ok = std::string(get_request.target()).ends_with("/test-bucket/object.txt");
-    const bool get_bearer_ok = get_request[http::field::authorization] == "Bearer test-token-1";
-    const bool get_range_ok = get_request[http::field::range] == "bytes=2-5";
-    http::response<http::string_body> get_response{http::status::partial_content, get_request.version()};
-    get_response.set(http::field::content_range, "bytes 2-5/9");
-    get_response.set(http::field::accept_ranges, "bytes");
-    get_response.set(http::field::etag, "\"8aa99b1f439ff71293e95357bac6fd94\"");
-    get_response.body() = "cdef";
-    get_response.prepare_payload();
-    get_response.keep_alive(false);
-    http::write(get_socket, get_response);
-    get_socket.close();
-    auto read_result = read.result();
-    if (!get_method_ok || !get_target_ok || !get_bearer_ok || !get_range_ok) {
-      return fail("CRT GET request: method=" + std::to_string(get_method_ok) +
-                  " target=" + std::string(get_request.target()) + " target_ok=" + std::to_string(get_target_ok) +
-                  " bearer=" + std::to_string(get_bearer_ok) + " range=" + std::to_string(get_range_ok) +
-                  " provider_calls=" + std::to_string(provider->authorization_calls.load()));
+    const auto reply_head = [&](const std::string& expected) {
+      Tcp::socket socket(server_context);
+      acceptor.accept(socket);
+      boost::beast::flat_buffer buffer;
+      http::request<http::empty_body> request;
+      http::read(socket, buffer, request);
+      const bool matches = request.method() == http::verb::head &&
+                           std::string(request.target()).ends_with("/" + path) &&
+                           request[http::field::authorization] == expected;
+      http::response<http::empty_body> response{http::status::ok, request.version()};
+      response.content_length(9);
+      response.set(http::field::etag, "\"etag\"");
+      response.keep_alive(false);
+      http::write(socket, response);
+      return matches;
+    };
+    auto metadata = std::async(std::launch::async, [&] { return files[0]->ReadMetadata(); });
+    if (!reply_head("Bearer A-2") || !metadata.get().ok()) {
+      return fail("CRT client HEAD used the wrong bearer");
     }
-    if (!read_result.ok() || read_result.ValueOrDie()->ToString() != "cdef") {
-      return fail(read_result.status().ToString());
+    files[0].reset();
+    filesystems[0].reset();
+    auto sdk_head = std::async(std::launch::async, [&] { return filesystems[1]->GetFileInfo(path); });
+    if (!reply_head("Bearer B-2") || !sdk_head.get().ok()) {
+      return fail("SDK HEAD used the wrong bearer");
     }
-
-    // 3.0 still performs HEAD synchronously; let the fixture service it concurrently.
-    auto metadata = std::async(std::launch::async, [input] { return input->ReadMetadata(); });
-    Tcp::socket head_socket(server_context);
-    acceptor.accept(head_socket);
-    boost::beast::flat_buffer head_buffer;
-    http::request<http::empty_body> head_request;
-    http::read(head_socket, head_buffer, head_request);
-    const bool head_method_ok = head_request.method() == http::verb::head;
-    const bool head_target_ok = std::string(head_request.target()).ends_with("/test-bucket/object.txt");
-    const bool head_bearer_ok = head_request[http::field::authorization] == "Bearer test-token-2";
-    http::response<http::empty_body> head_response{http::status::ok, head_request.version()};
-    head_response.content_length(9);
-    head_response.set(http::field::etag, "\"8aa99b1f439ff71293e95357bac6fd94\"");
-    head_response.keep_alive(false);
-    http::write(head_socket, head_response);
-    head_socket.close();
-    auto metadata_result = metadata.get();
-    if (!head_method_ok || !head_target_ok || !head_bearer_ok || provider->authorization_calls.load() < 2) {
-      return fail("GCP HEAD did not obtain the GCP IAM bearer header");
-    }
-    if (!metadata_result.ok()) {
-      return fail(metadata_result.status().ToString());
-    }
+    // Shutdown on the caller's only worker must allow its admitted bearer GET to finish.
+    auto draining = fs_worker->Submit([&]() -> arrow::Result<std::shared_ptr<arrow::Buffer>> {
+      auto pending = files[1]->ReadAsync(fs_io, 2, 4);
+      ARROW_RETURN_NOT_OK(EnsureS3Finalized());
+      return pending.result();
+    });
+    if (!draining.ok())
+      return fail(draining.status().ToString());
+    Tcp::socket socket(server_context);
+    acceptor.accept(socket);
+    boost::beast::flat_buffer buffer;
+    http::request<http::empty_body> request;
+    http::read(socket, buffer, request);
+    if (request.method() != http::verb::get || request[http::field::authorization] != "Bearer B-3")
+      return fail("In-flight GET lost its originating credential during shutdown");
+    http::response<http::string_body> response{http::status::partial_content, request.version()};
+    response.set(http::field::content_range, "bytes 2-5/9");
+    response.set(http::field::etag, "\"etag\"");
+    response.body() = "BBBB";
+    response.prepare_payload();
+    response.keep_alive(false);
+    http::write(socket, response);
+    if (!draining->result().ok() || (*draining->result())->ToString() != "BBBB")
+      return fail("Shutdown did not drain the admitted bearer GET");
     return 0;
   };
   EXPECT_EXIT((::alarm(20), ::_exit(run_child())), ::testing::ExitedWithCode(0), "");
