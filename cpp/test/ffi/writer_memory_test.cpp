@@ -313,9 +313,14 @@ class SegmentWriterMemoryTest : public ::testing::Test {
 
   void TearDown() override {
     loon_segment_writer_destroy(writer_);
+    FreeOutput();
+    loon_properties_free(&properties_);
+  }
+
+  void FreeOutput() {
     loon_column_groups_destroy(output_.column_groups);
     loon_segment_write_output_free(&output_);
-    loon_properties_free(&properties_);
+    output_ = {};
   }
 
   arrow::Result<std::shared_ptr<arrow::RecordBatch>> MakeTextBatch(int64_t rows,
@@ -442,9 +447,37 @@ TEST_F(SegmentWriterMemoryTest, SlicedNullableAndInlineTextRoundTrip) {
   EXPECT_TRUE(text_buffer.expired());
   ASSERT_OK(CheckFFI(loon_segment_writer_flush(writer_)));
   EXPECT_EQ(*id, 0);
+
+  size_t count = 1;
+  loon_segment_writer_get_text_column_stats(writer_, &count);
+  EXPECT_EQ(count, 0);
   ASSERT_OK_AND_ASSIGN(auto expected, MakeTextBatch(6, 2, true));
   ASSERT_NO_FATAL_FAILURE(CloseAndRead(expected));
   EXPECT_EQ(*id, 1);
+
+  const auto* stats = loon_segment_writer_get_text_column_stats(writer_, &count);
+  ASSERT_EQ(count, 1);
+  ASSERT_NE(stats, nullptr);
+  FreeOutput();  // The writer owns the borrowed stats.
+  const auto texts = std::static_pointer_cast<arrow::StringArray>(expected->column(1));
+  EXPECT_EQ(stats[0].field_id, 101);
+  EXPECT_EQ(stats[0].total_entries, texts->length());
+  EXPECT_EQ(stats[0].total_bytes, texts->total_values_length());
+}
+
+TEST_F(SegmentWriterMemoryTest, TextColumnStatsWithoutWrites) {
+  ASSERT_OK(CheckFFI(loon_segment_writer_close(writer_, &output_)));
+  size_t count = 0;
+  const auto* stats = loon_segment_writer_get_text_column_stats(writer_, &count);
+  ASSERT_EQ(count, 1);
+  ASSERT_NE(stats, nullptr);
+  EXPECT_EQ(stats[0].field_id, 101);
+  EXPECT_EQ(stats[0].total_entries, 0);
+  EXPECT_EQ(stats[0].total_bytes, 0);
+
+  EXPECT_EQ(loon_segment_writer_get_text_column_stats(writer_, nullptr), nullptr);
+  EXPECT_EQ(loon_segment_writer_get_text_column_stats(0, &count), nullptr);
+  EXPECT_EQ(count, 0);
 }
 
 TEST_F(SegmentWriterMemoryTest, ImportFailuresReleaseEachColumnExactlyOnce) {

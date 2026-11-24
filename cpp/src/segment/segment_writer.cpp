@@ -178,12 +178,18 @@ class SegmentWriterImpl : public SegmentWriter {
     ARROW_RETURN_NOT_OK(Flush());
 
     // close all TEXT column writers and collect LOB file results
+    std::vector<LoonTextColumnStats> text_column_stats;
+    text_column_stats.reserve(lob_writers_.size());
     for (auto& [col_idx, writer] : lob_writers_) {
       ARROW_ASSIGN_OR_RAISE(auto lob_files, writer->Close());
       lob_file_results_[col_idx] = std::move(lob_files);
 
       auto text_stats = writer->GetStats();
       stats_.lob_files_created += text_stats.lob_files_created;
+      const auto field_id = GetFieldId(original_schema_->field(col_idx));
+      if (config_.lob_columns.at(field_id).data_type == lob_column::LobDataType::kText) {
+        text_column_stats.push_back({field_id, text_stats.total_entries, text_stats.total_bytes});
+      }
     }
 
     // close LOB readers (rewrite mode)
@@ -212,6 +218,7 @@ class SegmentWriterImpl : public SegmentWriter {
       }
     }
 
+    text_column_stats_ = std::move(text_column_stats);
     closed_ = true;
 
     SegmentWriteOutput output;
@@ -252,6 +259,8 @@ class SegmentWriterImpl : public SegmentWriter {
 
   bool IsClosed() const override { return closed_; }
 
+  const std::vector<LoonTextColumnStats>& GetTextColumnStats() const override { return text_column_stats_; }
+
   private:
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> original_schema_;
@@ -279,6 +288,7 @@ class SegmentWriterImpl : public SegmentWriter {
 
   // statistics
   SegmentWriterStats stats_;
+  std::vector<LoonTextColumnStats> text_column_stats_;
 };
 
 // factory function

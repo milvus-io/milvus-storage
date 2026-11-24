@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "milvus-storage/column_groups.h"
+#include "milvus-storage/ffi_types.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/lob_column/lob_column_manager.h"
 #include "milvus-storage/manifest.h"
@@ -166,6 +167,9 @@ class SegmentWriter {
 
   // check if the writer is closed
   virtual bool IsClosed() const = 0;
+
+  // Populated by a successful Close. The writer owns the snapshot.
+  virtual const std::vector<LoonTextColumnStats>& GetTextColumnStats() const = 0;
 
   protected:
   SegmentWriter() = default;

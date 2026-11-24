@@ -20,6 +20,7 @@
 #include <arrow/util/key_value_metadata.h>
 #include <boost/filesystem.hpp>
 
+#include <map>
 #include <random>
 #include <string>
 #include <vector>
@@ -470,7 +471,15 @@ TEST_F(SegmentWriterTest, WriterAbort) {
 
 // test writing with null values in TEXT column
 TEST_F(SegmentWriterTest, WriteWithNullText) {
-  auto writer_result = SegmentWriter::Create(fs_, schema_, config_);
+  auto summary_field =
+      arrow::field("summary", arrow::utf8(), true, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"205"}));
+  ASSERT_AND_ASSIGN(auto schema, schema_->AddField(schema_->num_fields(), summary_field));
+  auto summary_config = config_.lob_columns.at(101);
+  summary_config.field_id = 205;
+  summary_config.lob_base_path = test_dir_ + "/lobs/205";
+  config_.lob_columns[205] = summary_config;
+
+  auto writer_result = SegmentWriter::Create(fs_, schema, config_);
   ASSERT_TRUE(writer_result.ok());
   auto writer = std::move(writer_result).ValueOrDie();
 
@@ -499,14 +508,26 @@ TEST_F(SegmentWriterTest, WriteWithNullText) {
   ASSERT_STATUS_OK(content_builder.Finish(&content_array));
   ASSERT_STATUS_OK(value_builder.Finish(&value_array));
 
-  auto batch = arrow::RecordBatch::Make(schema_, 3, {id_array, content_array, value_array});
+  arrow::StringBuilder summary_builder;
+  ASSERT_STATUS_OK(summary_builder.Append(""));
+  ASSERT_STATUS_OK(summary_builder.AppendNulls(2));
+  ASSERT_AND_ASSIGN(auto summary_array, summary_builder.Finish());
+  auto batch = arrow::RecordBatch::Make(schema, 3, {id_array, content_array, value_array, summary_array});
 
-  // write batch
-  ASSERT_STATUS_OK(writer->Write(batch));
-
-  // close
+  ASSERT_STATUS_OK(writer->Write(batch->Slice(0, 2)));
+  ASSERT_STATUS_OK(writer->Write(batch->Slice(2, 1)));
   auto close_result = writer->Close();
   ASSERT_TRUE(close_result.ok()) << close_result.status().message();
+
+  const auto& stats = writer->GetTextColumnStats();
+  ASSERT_EQ(stats.size(), 2);
+  std::map<int64_t, int64_t> bytes_by_field;
+  for (const auto& stat : stats) {
+    EXPECT_EQ(stat.total_entries, batch->num_rows()) << "field " << stat.field_id;
+    bytes_by_field.emplace(stat.field_id, stat.total_bytes);
+  }
+  const std::map<int64_t, int64_t> expected_bytes{{101, 5 + 100}, {205, 0}};
+  EXPECT_EQ(bytes_by_field, expected_bytes);
 }
 
 // test schema without TEXT columns
@@ -552,6 +573,7 @@ TEST_F(SegmentWriterTest, SchemaWithoutLobColumns) {
   // close
   auto close_result = writer->Close();
   ASSERT_TRUE(close_result.ok()) << close_result.status().message();
+  EXPECT_TRUE(writer->GetTextColumnStats().empty());
 
   auto output = std::move(close_result).ValueOrDie();
   ASSERT_NE(output.column_groups, nullptr);

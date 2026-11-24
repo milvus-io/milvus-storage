@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <stdint.h>
+
 // Visibility macro for FFI exports when building Python bindings
 #if defined(__GNUC__) || defined(__clang__)
 #define FFI_EXPORT __attribute__((visibility("default")))
@@ -25,3 +27,10 @@ typedef struct LoonFFIResult {
   int err_code;
   char* message;
 } LoonFFIResult;
+
+// Counters from encoding the UTF-8 body of one segment output column.
+typedef struct LoonTextColumnStats {
+  int64_t field_id;
+  int64_t total_entries;  // includes nulls
+  int64_t total_bytes;    // excludes nulls and reference encoding
+} LoonTextColumnStats;

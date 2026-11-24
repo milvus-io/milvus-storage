@@ -1072,6 +1072,21 @@ FFI_EXPORT LoonFFIResult loon_segment_writer_flush(LoonSegmentWriterHandle handl
 FFI_EXPORT LoonFFIResult loon_segment_writer_close(LoonSegmentWriterHandle handle, LoonSegmentWriteOutput* out_output);
 
 /**
+ * @brief Returns one entry per TEXT column configured on the segment writer.
+ *
+ * Call after loon_segment_writer_close succeeds. The writer owns the array
+ * until loon_segment_writer_destroy. Look up entries by field_id.
+ * A failed write can advance the encoder before the segment accepts the batch.
+ * Check total_entries against the close output's rows_written before using total_bytes.
+ *
+ * @param handle SegmentWriter handle
+ * @param out_count Number of entries, zero before close or without TEXT columns
+ * @return Borrowed array, or NULL if handle or out_count is null
+ */
+FFI_EXPORT const LoonTextColumnStats* loon_segment_writer_get_text_column_stats(LoonSegmentWriterHandle handle,
+                                                                                size_t* out_count);
+
+/**
  * @brief Destroys a SegmentWriter handle
  *
  * @param handle SegmentWriter handle to destroy

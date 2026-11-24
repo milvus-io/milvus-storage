@@ -190,6 +190,20 @@ LoonFFIResult loon_segment_writer_close(LoonSegmentWriterHandle handle, LoonSegm
   RETURN_UNREACHABLE();
 }
 
+const LoonTextColumnStats* loon_segment_writer_get_text_column_stats(LoonSegmentWriterHandle handle,
+                                                                     size_t* out_count) {
+  if (!out_count) {
+    return nullptr;
+  }
+  *out_count = 0;
+  if (!handle) {
+    return nullptr;
+  }
+  const auto& stats = reinterpret_cast<SegmentWriter*>(handle)->GetTextColumnStats();
+  *out_count = stats.size();
+  return stats.data();
+}
+
 void loon_segment_write_output_free(LoonSegmentWriteOutput* output) {
   if (output) {
     if (output->lob_files) {
