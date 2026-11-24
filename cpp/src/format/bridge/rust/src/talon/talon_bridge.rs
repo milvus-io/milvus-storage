@@ -7,8 +7,8 @@ use std::{
 use anyhow::{Result, bail};
 use futures::FutureExt;
 use talon::{
-    BlockReadError, CacheReadError, Client, ClientBuilder, ObjectId, ObjectStat, RequestOptions,
-    UNCHECKED_VERSION, parse_uri,
+    BlockReadError, CacheReadError, Client, ClientBuilder, MAX_EXACT_READ_LEN, ObjectId,
+    ObjectStat, RequestOptions, UNCHECKED_VERSION, parse_uri,
 };
 use tokio::sync::OnceCell;
 
@@ -351,29 +351,58 @@ pub unsafe extern "C" fn talon_object_stat_async(
     });
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn talon_object_read_async(
+unsafe fn submit_object_read_async(
     reader: *const c_void,
     offset: u64,
     length: u64,
     dst: *mut u8,
+    exact: bool,
     callback: TalonIoCallback,
     context: *mut c_void,
 ) {
+    if exact && length > MAX_EXACT_READ_LEN {
+        complete_talon_error(
+            callback,
+            context,
+            ffi::TalonErrorCode::InvalidArgument.repr,
+            "Talon exact read length exceeds 1 MiB",
+        );
+        return;
+    }
     if offset.checked_add(length).is_none() {
-        complete_talon_error(callback, context, 1, "Talon read range overflows u64");
+        complete_talon_error(
+            callback,
+            context,
+            ffi::TalonErrorCode::InvalidArgument.repr,
+            "Talon read range overflows u64",
+        );
         return;
     }
     if length > isize::MAX as u64 {
-        complete_talon_error(callback, context, 1, "Talon read length exceeds isize::MAX");
+        complete_talon_error(
+            callback,
+            context,
+            ffi::TalonErrorCode::InvalidArgument.repr,
+            "Talon read length exceeds isize::MAX",
+        );
         return;
     }
     if length > 0 && dst.is_null() {
-        complete_talon_error(callback, context, 1, "Talon read destination is null");
+        complete_talon_error(
+            callback,
+            context,
+            ffi::TalonErrorCode::InvalidArgument.repr,
+            "Talon read destination is null",
+        );
         return;
     }
     let Some(reader) = (unsafe { (reader as *const TalonObjectReader).as_ref() }) else {
-        complete_talon_error(callback, context, 1, "Talon read received a null reader");
+        complete_talon_error(
+            callback,
+            context,
+            ffi::TalonErrorCode::InvalidArgument.repr,
+            "Talon read received a null reader",
+        );
         return;
     };
 
@@ -393,23 +422,47 @@ pub unsafe extern "C" fn talon_object_read_async(
             let len = stat.map_or(0, |stat| {
                 (buffer.len as u64).min(stat.size.saturating_sub(offset)) as usize
             });
-            // The SDK validates request options even for empty reads, without I/O.
-            let dst = if len == 0 {
-                &mut []
+            if exact {
+                // `read_exact` validates request options even for empty reads, without I/O.
+                let bytes = reader
+                    .client
+                    .client
+                    .read_exact(
+                        &reader.object,
+                        offset,
+                        len as u64,
+                        stat,
+                        &reader.client.request_options(),
+                    )
+                    .await?;
+                if bytes.len() > len {
+                    return Err(talon::Error::InvalidArgument(
+                        "Talon exact read returned more bytes than requested".into(),
+                    ));
+                }
+                if !bytes.is_empty() {
+                    unsafe { buffer.into_mut_slice(bytes.len()) }.copy_from_slice(&bytes);
+                }
+                Ok(bytes.len())
             } else {
-                unsafe { buffer.into_mut_slice(len) }
-            };
-            reader
-                .client
-                .client
-                .read_into(
-                    &reader.object,
-                    offset,
-                    dst,
-                    stat,
-                    &reader.client.request_options(),
-                )
-                .await
+                // The SDK validates request options even for empty reads, without I/O.
+                let dst = if len == 0 {
+                    &mut []
+                } else {
+                    unsafe { buffer.into_mut_slice(len) }
+                };
+                reader
+                    .client
+                    .client
+                    .read_into(
+                        &reader.object,
+                        offset,
+                        dst,
+                        stat,
+                        &reader.client.request_options(),
+                    )
+                    .await
+            }
         })
         .catch_unwind()
         .await;
@@ -429,6 +482,30 @@ pub unsafe extern "C" fn talon_object_read_async(
         };
         complete_talon_io(callback, context_addr as *mut c_void, result);
     });
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn talon_object_read_async(
+    reader: *const c_void,
+    offset: u64,
+    length: u64,
+    dst: *mut u8,
+    callback: TalonIoCallback,
+    context: *mut c_void,
+) {
+    unsafe { submit_object_read_async(reader, offset, length, dst, false, callback, context) };
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn talon_object_read_exact_async(
+    reader: *const c_void,
+    offset: u64,
+    length: u64,
+    dst: *mut u8,
+    callback: TalonIoCallback,
+    context: *mut c_void,
+) {
+    unsafe { submit_object_read_async(reader, offset, length, dst, true, callback, context) };
 }
 
 // These records borrow their strings and arrays until the completion callback returns.
@@ -1037,5 +1114,73 @@ mod tests {
         assert_eq!(clone.stat.get().unwrap().size, 7);
         assert_eq!(clone.stat.get().unwrap().version, "v1");
         assert_eq!(talon_object_known_size(&clone), 7);
+    }
+
+    #[test]
+    fn exact_read_limit_matches_cpp_constant() {
+        assert_eq!(MAX_EXACT_READ_LEN, 1024 * 1024);
+    }
+
+    #[test]
+    fn exact_read_validates_arguments_and_empty_reads_without_io() {
+        use std::sync::mpsc;
+
+        unsafe extern "C" fn capture_callback(
+            context: *mut c_void,
+            error_code: i32,
+            value: u64,
+            error_msg: *const c_char,
+        ) {
+            let sender = unsafe { Box::from_raw(context as *mut mpsc::Sender<(i32, u64, String)>) };
+            let message = if error_msg.is_null() {
+                String::new()
+            } else {
+                unsafe { CString::from_raw(error_msg as *mut c_char) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let _ = sender.send((error_code, value, message));
+        }
+
+        let run = |reader: *const c_void, offset: u64, length: u64, dst: *mut u8| {
+            let (tx, rx) = mpsc::channel();
+            let ctx = Box::into_raw(Box::new(tx)) as *mut c_void;
+            unsafe {
+                talon_object_read_exact_async(reader, offset, length, dst, capture_callback, ctx);
+            }
+            rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap()
+        };
+
+        let client = new_talon_client("127.0.0.1:1", 8 * 1024 * 1024, 8, "", "").unwrap();
+        let reader = open_talon_object(
+            &client,
+            "aws",
+            "test-bucket",
+            "path/a",
+            true,
+            2 * 1024 * 1024,
+            "etag-v1",
+        )
+        .unwrap();
+        let reader_ptr = &*reader as *const TalonObjectReader as *const c_void;
+        let mut byte = 0u8;
+
+        let (code, value, msg) = run(reader_ptr, 0, MAX_EXACT_READ_LEN + 1, &mut byte);
+        assert_eq!(code, ffi::TalonErrorCode::InvalidArgument.repr);
+        assert_eq!(value, 0);
+        assert!(msg.contains("1 MiB"), "{msg}");
+
+        let (code, _, _) = run(reader_ptr, u64::MAX, 1, &mut byte);
+        assert_eq!(code, ffi::TalonErrorCode::InvalidArgument.repr);
+
+        let (code, _, _) = run(reader_ptr, 0, 1, std::ptr::null_mut());
+        assert_eq!(code, ffi::TalonErrorCode::InvalidArgument.repr);
+
+        let (code, _, _) = run(std::ptr::null(), 0, 1, &mut byte);
+        assert_eq!(code, ffi::TalonErrorCode::InvalidArgument.repr);
+
+        let (code, value, msg) = run(reader_ptr, 0, 0, std::ptr::null_mut());
+        assert_eq!(code, 0, "{msg}");
+        assert_eq!(value, 0);
     }
 }

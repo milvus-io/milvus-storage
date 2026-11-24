@@ -76,6 +76,9 @@ void talon_object_stat_async(const void* reader, TalonIoCallback callback, void*
 void talon_object_read_async(
     const void* reader, uint64_t offset, uint64_t length, uint8_t* dst, TalonIoCallback callback, void* context);
 
+void talon_object_read_exact_async(
+    const void* reader, uint64_t offset, uint64_t length, uint8_t* dst, TalonIoCallback callback, void* context);
+
 void talon_raw_stat_async(
     const void* client, const uint8_t* uri, size_t uri_len, TalonRawCallback callback, void* context);
 void talon_raw_read_async(const void* client,
@@ -473,6 +476,15 @@ arrow::Future<int64_t> TalonObjectReader::ReadAtAsync(uint64_t offset, uint64_t 
   auto* const raw_completion = completion.release();
   talon_object_read_async(static_cast<const void*>(&*impl_), offset, length, dst, TalonIoCallbackImpl,
                           static_cast<void*>(raw_completion));
+  return future;
+}
+
+arrow::Future<int64_t> TalonObjectReader::ReadExactAtAsync(uint64_t offset, uint64_t length, uint8_t* dst) const {
+  auto future = arrow::Future<int64_t>::Make();
+  auto completion = std::make_unique<TalonIoCompletion>(future, "Failed to exact-read Talon object");
+  auto* const raw_completion = completion.release();
+  talon_object_read_exact_async(static_cast<const void*>(&*impl_), offset, length, dst, TalonIoCallbackImpl,
+                                static_cast<void*>(raw_completion));
   return future;
 }
 

@@ -145,7 +145,7 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
       metrics->IncrementReadCount();
       // A failed Talon read can have written a prefix. Retry the entire range.
       return WithOriginFallback(
-          reader->ReadAtAsync(static_cast<uint64_t>(position), static_cast<uint64_t>(length), out), state, metrics,
+          ReadFromTalon(reader, state->filesystem->config, position, length, out), state, metrics,
           [position, length, out](NonBlockingRandomAccessFile& file) {
             return file.ReadAtAsyncInto(position, length, out);
           },
@@ -211,8 +211,7 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
           auto* const out = buffer->mutable_data();
           metrics->IncrementReadCount();
           return WithOriginFallback(
-                     reader->ReadAtAsync(static_cast<uint64_t>(position), static_cast<uint64_t>(length), out), state,
-                     metrics,
+                     ReadFromTalon(reader, state->filesystem->config, position, length, out), state, metrics,
                      [position, length, out](NonBlockingRandomAccessFile& file) {
                        return file.ReadAtAsyncInto(position, length, out);
                      },
@@ -295,6 +294,21 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
     // Decide before EOF clamping so warming metadata cannot change routing.
     return config.talon_mode == TalonMode::Full ||
            (config.talon_mode == TalonMode::SmallReads && requested_bytes <= config.talon_small_read_threshold);
+  }
+
+  static arrow::Future<int64_t> ReadFromTalon(const Reader& reader,
+                                              const ArrowFileSystemConfig& config,
+                                              const int64_t position,
+                                              const int64_t length,
+                                              uint8_t* const out) {
+    const auto offset = static_cast<uint64_t>(position);
+    const auto nbytes = static_cast<uint64_t>(length);
+    // Open-only (-meta) mode only caches metadata/footer ranges on Talon; use exact reads
+    // up to Talon's 1 MiB limit so ranges land in small storage instead of allocating block metadata.
+    if (config.talon_open_only && nbytes <= kTalonMaxExactReadBytes) {
+      return reader->ReadExactAtAsync(offset, nbytes, out);
+    }
+    return reader->ReadAtAsync(offset, nbytes, out);
   }
 
   struct ReaderState;

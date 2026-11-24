@@ -497,7 +497,8 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
     REGISTER_PROPERTY(PROPERTY_FS_TALON_OPEN_ONLY,
                       PropertyType::BOOL,
                       "Limit configured Talon routing to Parquet/Vortex reader-open metadata and Lance V2 "
-                      "manifests and data-file footers. Data reads use origin storage. Legacy Lance keeps "
+                      "manifests and data-file footers. Open-only reads up to 1 MiB use Talon exact range "
+                      "reads backed by small storage. Data reads use origin storage. Legacy Lance keeps "
                       "fs.talon.mode for both footer and data reads. Paimon data-split readers use Talon for table "
                       "schema/snapshot open, then origin for data-file footers and data. Paimon direct-file readers "
                       "follow Parquet/Vortex routing. OpenDAL reads without an explicit metadata phase use origin, "
