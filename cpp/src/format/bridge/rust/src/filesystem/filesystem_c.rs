@@ -4,7 +4,7 @@ use std::ffi::{CString, c_void};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "io-trace")]
 use std::time::Instant;
@@ -328,6 +328,15 @@ unsafe extern "C" {
         callback: LoonFileSystemReadAsyncCallback,
         user_data: *mut std::ffi::c_void,
     ) -> LoonFFIResult;
+
+    pub(crate) unsafe fn loon_filesystem_reader_read_data_file_footer_async(
+        reader: *mut c_void,
+        offset: u64,
+        nbytes: u64,
+        out_data: *mut u8,
+        callback: LoonFileSystemReadAsyncCallback,
+        user_data: *mut c_void,
+    ) -> LoonFFIResult;
 }
 
 pub(crate) const LOON_FFI_ERRCODE_MARKER: &str = "__LOON_FFI_ERRCODE__=";
@@ -447,6 +456,7 @@ async fn read_async_via_ffi(
     start: u64,
     len: u64,
     alignment: Alignment,
+    is_footer_read: bool,
 ) -> VortexResult<ByteBuffer> {
     if len == 0 {
         return Ok(ByteBufferMut::with_capacity_aligned(0, alignment).freeze());
@@ -466,8 +476,13 @@ async fn read_async_via_ffi(
     let state_ptr = Box::into_raw(state);
 
     {
+        let read = if is_footer_read {
+            loon_filesystem_reader_read_data_file_footer_async
+        } else {
+            loon_filesystem_reader_readat_async
+        };
         let mut result = unsafe {
-            loon_filesystem_reader_readat_async(
+            read(
                 reader.as_ptr(),
                 start,
                 len,
@@ -822,7 +837,7 @@ impl Drop for ReaderHandle {
 }
 
 pub struct ObjectStoreReadSourceCpp {
-    supports_async: AtomicBool,
+    data_read_supports_async: OnceLock<bool>,
     inner: ThreadSafePtr<std::ffi::c_void>,
     reader: Arc<ReaderHandle>,
     path: String,
@@ -870,7 +885,7 @@ impl ObjectStoreReadSourceCpp {
         };
 
         Ok(Self {
-            supports_async: AtomicBool::new(supports_async),
+            data_read_supports_async: OnceLock::new(),
             inner: ThreadSafePtr::new(fs_rawptr),
             reader: Arc::new(ReaderHandle {
                 ptr: reader_raw,
@@ -883,10 +898,10 @@ impl ObjectStoreReadSourceCpp {
         })
     }
 
-    pub(crate) fn disable_talon(&self) {
-        let supports_async =
-            unsafe { loon_filesystem_reader_control_talon(self.reader.as_ptr(), false) };
-        self.supports_async.store(supports_async, Ordering::Relaxed);
+    pub(crate) fn start_data_reads(&self) {
+        self.data_read_supports_async.get_or_init(|| unsafe {
+            loon_filesystem_reader_control_talon(self.reader.as_ptr(), false)
+        });
     }
 }
 
@@ -944,14 +959,19 @@ impl VortexReadAt for ObjectStoreReadSourceCpp {
     ) -> BoxFuture<'static, VortexResult<BufferHandle>> {
         let reader = self.reader.clone();
         let handle = self.handle.clone();
-        let supports_async = self.supports_async.load(Ordering::Relaxed);
+        // Vortex reads only the footer during open. The segment source retains
+        // this reader and starts issuing data reads after open returns.
+        let data_read_supports_async = self.data_read_supports_async.get().copied();
+        let is_footer_read = data_read_supports_async.is_none();
+        let supports_async = data_read_supports_async.unwrap_or(reader.supports_async);
 
         async move {
             let len = u64::try_from(length)
                 .map_err(|_| vortex_err!("read length does not fit in u64"))?;
 
             if supports_async {
-                let buffer = read_async_via_ffi(reader, offset, len, alignment).await?;
+                let buffer =
+                    read_async_via_ffi(reader, offset, len, alignment, is_footer_read).await?;
                 return Ok(BufferHandle::new_host(buffer));
             }
 

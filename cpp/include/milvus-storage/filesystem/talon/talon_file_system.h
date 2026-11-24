@@ -19,6 +19,7 @@
 #include <string>
 
 #include <arrow/result.h>
+#include <arrow/type_fwd.h>
 
 namespace arrow::io {
 class RandomAccessFile;
@@ -30,6 +31,7 @@ class FileSystem;
 
 namespace milvus_storage {
 struct ArrowFileSystemConfig;
+class NonBlockingRandomAccessFile;
 
 enum class TalonMode : uint8_t { Disabled, Full, SmallReads };
 }  // namespace milvus_storage
@@ -50,6 +52,16 @@ namespace milvus_storage::talon::internal {
 /// The caller keeps the file open and alive while controlling and reading it.
 /// Each read captures the routing flag when it starts.
 bool ControlTalonForFile(arrow::io::RandomAccessFile* file, bool enable);
+
+/// Read a range requested by a data-file footer parser. The intent applies
+/// only to this call and leaves the file's existing routing policy in place.
+arrow::Result<std::shared_ptr<arrow::Buffer>> ReadDataFileFooterAt(arrow::io::RandomAccessFile& file,
+                                                                   int64_t offset,
+                                                                   int64_t length);
+arrow::Future<int64_t> ReadDataFileFooterAtAsyncInto(NonBlockingRandomAccessFile& file,
+                                                     int64_t offset,
+                                                     int64_t length,
+                                                     uint8_t* out);
 
 /// Creates a Talon read decorator around `origin_fs`.
 ///

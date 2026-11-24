@@ -31,6 +31,7 @@
 
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
+#include "milvus-storage/filesystem/talon/talon_file_system.h"
 #include "milvus-storage/filesystem/util_internal.h"
 #include "milvus-storage/format/vortex/vortex_field_layout_internal.h"
 #include "milvus-storage/format/vortex/vortex_types.h"
@@ -50,10 +51,11 @@ arrow::Result<std::shared_ptr<VortexRangeFile>> GetVortexRangeFile(const std::sh
   return provider->GetVortexRangeFile(path);
 }
 
-arrow::Status FillVortexRangeFile(const std::shared_ptr<arrow::io::RandomAccessFile>& source_file,
-                                  const std::shared_ptr<VortexRangeFile>& range_file,
-                                  uint64_t offset,
-                                  uint64_t length) {
+static arrow::Status FillVortexRange(const std::shared_ptr<arrow::io::RandomAccessFile>& source_file,
+                                     const std::shared_ptr<VortexRangeFile>& range_file,
+                                     uint64_t offset,
+                                     uint64_t length,
+                                     bool is_footer_read) {
   if (length == 0) {
     return arrow::Status::OK();
   }
@@ -68,13 +70,24 @@ arrow::Status FillVortexRangeFile(const std::shared_ptr<arrow::io::RandomAccessF
     return arrow::Status::Invalid(
         fmt::format("Vortex sparse range exceeds Arrow IO limits, offset={}, length={}", offset, length));
   }
-  ARROW_ASSIGN_OR_RAISE(auto data, source_file->ReadAt(static_cast<int64_t>(offset), static_cast<int64_t>(length)));
+  const auto read_offset = static_cast<int64_t>(offset);
+  const auto read_length = static_cast<int64_t>(length);
+  ARROW_ASSIGN_OR_RAISE(auto data, is_footer_read
+                                       ? talon::internal::ReadDataFileFooterAt(*source_file, read_offset, read_length)
+                                       : source_file->ReadAt(read_offset, read_length));
   if (!data || static_cast<uint64_t>(data->size()) != length) {
     return arrow::Status::IOError(
         fmt::format("Short read while filling vortex sparse file, offset={}, expect={}, got={}", offset, length,
                     data ? data->size() : 0));
   }
   return range_file->WriteAt(offset, data);
+}
+
+arrow::Status FillVortexRangeFile(const std::shared_ptr<arrow::io::RandomAccessFile>& source_file,
+                                  const std::shared_ptr<VortexRangeFile>& range_file,
+                                  uint64_t offset,
+                                  uint64_t length) {
+  return FillVortexRange(source_file, range_file, offset, length, /*is_footer_read=*/false);
 }
 
 std::vector<ByteRange> MergeByteRanges(std::vector<ByteRange> ranges) {
@@ -336,7 +349,8 @@ arrow::Status VortexFooterReader::Impl::LoadFooter(const std::shared_ptr<arrow::
     ARROW_ASSIGN_OR_RAISE(auto cached_footer_body_size, ResolveInitialFooterBodySize(file_size, footer_size, eof_size));
     footer_body_size = cached_footer_body_size;
     const auto tail_read_size = ResolveTailReadSize(file_size, footer_body_size, eof_size);
-    ARROW_RETURN_NOT_OK(FillVortexRangeFile(input_file, range_file, file_size - tail_read_size, tail_read_size));
+    ARROW_RETURN_NOT_OK(
+        FillVortexRange(input_file, range_file, file_size - tail_read_size, tail_read_size, /*is_footer_read=*/true));
     auto open_result =
         VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder.get()), sparse_path, file_size, footer_body_size);
     if (open_result.ok()) {
@@ -373,7 +387,7 @@ arrow::Status VortexFooterReader::Impl::LoadFooter(const std::shared_ptr<arrow::
     if (tail_read_size > loaded_tail_read_size) {
       const uint64_t new_bytes = tail_read_size - loaded_tail_read_size;
       const uint64_t tail_offset = file_size - tail_read_size;
-      ARROW_RETURN_NOT_OK(FillVortexRangeFile(input_file, range_file, tail_offset, new_bytes));
+      ARROW_RETURN_NOT_OK(FillVortexRange(input_file, range_file, tail_offset, new_bytes, /*is_footer_read=*/true));
       loaded_tail_read_size = tail_read_size;
     }
 

@@ -48,6 +48,8 @@
 #include "milvus-storage/format/vortex/vortex_translater.h"
 #include "milvus-storage/format/vortex/vortex_types.h"
 #include "milvus-storage/format/vortex/vortex_writer.h"
+#include "talon/talon_bridge.h"
+#include "recording_talon_server.h"
 #include "test_env.h"
 
 namespace milvus_storage {
@@ -657,6 +659,51 @@ TEST_F(VortexLocalFormatTest, TestFooterReaderOptionalZoneMapLoadControlsPruning
   ASSERT_AND_ASSIGN(auto pruned_row_groups,
                     zonemap_footer_reader->PruneRowGroups("id >= 1000000", candidate_row_group_ids));
   ASSERT_TRUE(pruned_row_groups.empty());
+}
+
+TEST_F(VortexLocalFormatTest, TalonFooterReaderUsesOrdinaryRoutingForZoneMaps) {
+  test::RecordingTalonServer server(/*fill_byte=*/0x5a, /*fail_reads=*/true);
+  ASSERT_AND_ASSIGN(auto dir, arrow::internal::TemporaryDir::Make("loon-talon-vortex-zonemap-"));
+  auto origin = std::make_shared<test::TalonFixtureOrigin>(dir->path().ToString());
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderAWS;
+  config.bucket_name = "test-bucket";
+  config.talon_mode = TalonMode::Full;
+  config.talon_open_only = true;
+  config.talon_coordinator = server.Address();
+  ASSERT_STATUS_OK(origin->CreateDir(config.bucket_name));
+  ASSERT_AND_ASSIGN(auto wrapped, TalonFileSystemProducer(config, origin).Make());
+  auto fs = std::make_shared<FileSystemProxy>(config.bucket_name, std::move(wrapped));
+  auto writer_fs = std::make_shared<FileSystemProxy>(config.bucket_name, origin);
+  api::Properties properties;
+  ASSERT_EQ(api::SetValue(properties, PROPERTY_WRITER_VORTEX_FORMAT_VERSION, "2"), std::nullopt);
+  ASSERT_EQ(api::SetValue(properties, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "true"), std::nullopt);
+  ASSERT_EQ(api::SetValue(properties, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, "131072"), std::nullopt);
+  const auto props = std::make_shared<const api::Properties>(properties);
+  ASSERT_AND_ASSIGN(auto writer, VortexFileWriter::Open(writer_fs, schema_, test_file_name_, props));
+  for (const auto& batch : record_batches_) {
+    ASSERT_STATUS_OK(writer->Write(batch));
+  }
+  ASSERT_AND_ASSIGN(auto file, writer->Close());
+  const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
+  constexpr uint64_t kProbeSize = 256 * 1024;
+  ASSERT_GT(file_size, kProbeSize);
+  auto sparse_fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+  VortexFooterReader reader(sparse_fs, "sparse.vx", test_file_name_, file_size);
+  ASSERT_STATUS_OK(reader.Open(fs, /*load_zonemap=*/true));
+  EXPECT_EQ(reader.rows(), recordBatchsRows());
+  const auto reads = server.Reads();
+  ASSERT_GT(reads.size(), 1);
+  EXPECT_EQ(reads.front().msg_type, 12);  // GetExactRange.
+  EXPECT_EQ(reads.front().offset, file_size - kProbeSize);
+  EXPECT_EQ(reads.front().length, kProbeSize);
+  for (size_t i = 1; i < reads.size(); ++i) {
+    EXPECT_EQ(reads[i].msg_type, 10);  // GetVersionedRange.
+    EXPECT_LT(reads[i].length, talon::kTalonMaxExactReadBytes);
+  }
+  ASSERT_AND_ASSIGN(auto pruned, reader.PruneRowGroups("id >= 1000000", {0}));
+  EXPECT_TRUE(pruned.empty());
 }
 
 TEST_F(VortexLocalFormatTest, TestPlannerBuildsRangeAndTakePlans) {
