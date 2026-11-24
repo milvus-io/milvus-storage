@@ -360,6 +360,11 @@ struct ArrowFileSystemConfig {
    * identity fields. This prevents sharing one cached filesystem across configs
    * that target the same bucket with different credentials (for example,
    * different role_arn values).
+   *
+   * The key has the form `fs:<64 lowercase hex digits>`: the SHA-256 digest
+   * of an injective encoding of those fields, so configs that differ in any of
+   * them get different keys. The key is derived from credential values and is
+   * not exported.
    */
   [[nodiscard]] std::string GetCacheKey() const;
 
@@ -383,6 +388,10 @@ class FileSystemProducer {
  * This singleton manages both:
  * 1. LRU cache of filesystem instances (by address+bucket combination)
  * 2. External filesystem configurations from properties (extfs.* entries)
+ *
+ * Filesystems resolved from the default fs.* configuration and from extfs.*
+ * configurations are kept in separate LRU caches of the same capacity, so
+ * external configurations cannot evict or share a default filesystem.
  *
  * Thread-safe for concurrent access.
  */
@@ -433,12 +442,14 @@ class FilesystemCache {
    *
    * Each returned pair is `{display_key, filesystem}`. See MakeDisplayKey()
    * for the display key composition. The display key is not the internal cache
-   * key accepted by remove().
+   * key accepted by remove() and does not depend on the configuration's
+   * credentials.
    */
   [[nodiscard]] std::vector<std::pair<std::string, FileSystemPtr>> list() const;
 
   /**
-   * @brief Remove a cached filesystem by key
+   * @brief Remove the cached filesystems with this cache key from both the
+   * default and the external cache
    */
   void remove(const std::string& key);
 
@@ -448,7 +459,7 @@ class FilesystemCache {
   void clean();
 
   /**
-   * @brief Set the cache capacity
+   * @brief Set the capacity of the default and of the external cache
    */
   void set_capacity(size_t capacity);
 
@@ -463,23 +474,33 @@ class FilesystemCache {
   };
 
   /**
-   * @brief Build a display key from the filesystem location and its internal cache key
+   * @brief Build a display key from the filesystem location and a cache entry ID
    *
-   * Local format: `file://{root_path}#{cache_key}`.
-   * Remote format: `{address}/{bucket_name}#{cache_key}`. An empty remote
+   * Local format: `file://{root_path}#fs:{entry_id}`.
+   * Remote format: `{address}/{bucket_name}#fs:{entry_id}`. An empty remote
    * address is rendered as `<null>`.
-   * Talon format: `{address}/{bucket_name}?talon={coordinator}#{cache_key}`.
-   * `cache_key` is the existing internal LRU key returned by
-   * ArrowFileSystemConfig::GetCacheKey().
+   * Talon format: `{address}/{bucket_name}?talon={coordinator}#fs:{entry_id}`.
+   * `entry_id` numbers the cache entries in creation order within this process.
+   * It distinguishes entries for the same location and is not derived from the
+   * configuration.
    */
-  [[nodiscard]] static std::string MakeDisplayKey(const ArrowFileSystemConfig& config, const std::string& cache_key);
+  [[nodiscard]] static std::string MakeDisplayKey(const ArrowFileSystemConfig& config, uint64_t entry_id);
 
-  explicit FilesystemCache(size_t capacity) : cache_(capacity) {}
+  /**
+   * @brief resolve_config(), also reporting whether the config came from extfs.*
+   */
+  [[nodiscard]] static arrow::Result<ArrowFileSystemConfig> ResolveConfig(
+      const std::shared_ptr<const api::Properties>& properties, const std::string& path, bool* external);
+
+  explicit FilesystemCache(size_t capacity) : cache_(capacity), external_cache_(capacity) {}
   ~FilesystemCache() = default;
 
-  // Filesystem instance cache (LRU)
+  // Filesystem instance caches (LRU): default fs.* and extfs.* configurations.
   mutable std::mutex mutex_;
   LRUCache<std::string, std::shared_ptr<CacheEntry>> cache_;
+  LRUCache<std::string, std::shared_ptr<CacheEntry>> external_cache_;
+  // ID of the most recently created cache entry; guarded by mutex_.
+  uint64_t last_entry_id_ = 0;
 };
 
 }  // namespace milvus_storage

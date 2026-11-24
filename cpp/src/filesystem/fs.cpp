@@ -19,7 +19,10 @@
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <type_traits>
+
+#include <openssl/sha.h>
 
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/filesystem/gcp/gcp_filesystem_producer.h"
@@ -73,106 +76,146 @@ bool ArrowFileSystemConfig::IsAwsCredentialBrokerEnabled() const {
           (!use_iam && (cloud_provider == kCloudProviderHuawei || cloud_provider == kCloudProviderVolcengine)));
 }
 
-std::string ArrowFileSystemConfig::GetCacheKey() const {
-  size_t seed = 0;
-  auto hash_combine = [&seed](const auto& value) {
-    using ValueType = std::decay_t<decltype(value)>;
-    seed ^= std::hash<ValueType>{}(value) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
-  };
+namespace {
 
-  hash_combine(storage_type);
+// Encodes each added field as `name=<byte length>:<bytes>;`. The encoding is
+// injective, so two configurations encode equally only when every encoded
+// field is equal. The key is `fs:` followed by the hex SHA-256 digest of the
+// encoding, which keeps credential values out of the key.
+class CacheKeyBuilder {
+  public:
+  CacheKeyBuilder() { encoding_.reserve(512); }
+
+  void Add(std::string_view name, std::string_view value) {
+    encoding_.append(name).append("=").append(std::to_string(value.size())).append(":").append(value).append(";");
+  }
+
+  void Add(std::string_view name, bool value) { Add(name, std::string_view(value ? "1" : "0")); }
+
+  void Add(std::string_view name, TalonMode value) { Add(name, static_cast<std::underlying_type_t<TalonMode>>(value)); }
+
+  template <typename T, std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool>, int> = 0>
+  void Add(std::string_view name, T value) {
+    const auto text = std::to_string(value);
+    Add(name, std::string_view(text));
+  }
+
+  [[nodiscard]] std::string Finish() const {
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(encoding_.data()), encoding_.size(), digest);
+    static constexpr char kHexDigits[] = "0123456789abcdef";
+    std::string key = "fs:";
+    key.reserve(key.size() + 2 * SHA256_DIGEST_LENGTH);
+    for (const unsigned char byte : digest) {
+      key.push_back(kHexDigits[byte >> 4U]);
+      key.push_back(kHexDigits[byte & 0x0FU]);
+    }
+    return key;
+  }
+
+  private:
+  std::string encoding_;
+};
+
+}  // namespace
+
+std::string ArrowFileSystemConfig::GetCacheKey() const {
+  CacheKeyBuilder key;
+#define ADD_CACHE_KEY_FIELD(field) key.Add(#field, field)
+
+  ADD_CACHE_KEY_FIELD(storage_type);
 
   // bypass local
   if (storage_type == "local") {
-    hash_combine(root_path);
-    hash_combine(local_durability_root);
-    return "fs:" + std::to_string(seed);
+    ADD_CACHE_KEY_FIELD(root_path);
+    ADD_CACHE_KEY_FIELD(local_durability_root);
+    return key.Finish();
   }
 
-  hash_combine(cloud_provider);
-  hash_combine(address);
-  hash_combine(bucket_name);
-  hash_combine(region);
-  hash_combine(use_ssl);
-  hash_combine(ssl_ca_cert);
-  hash_combine(use_virtual_host);
-  hash_combine(request_timeout_ms);
-  hash_combine(max_connections);
-  hash_combine(crt_queue_sizes);
-  hash_combine(multi_part_upload_size);
-  hash_combine(tls_min_version);
-  hash_combine(background_writes);
-  hash_combine(use_crc32c_checksum);
-  hash_combine(s3_use_crt);
-  hash_combine(load_frequency);
-  hash_combine(talon_mode);
+  ADD_CACHE_KEY_FIELD(cloud_provider);
+  ADD_CACHE_KEY_FIELD(address);
+  ADD_CACHE_KEY_FIELD(bucket_name);
+  ADD_CACHE_KEY_FIELD(region);
+  ADD_CACHE_KEY_FIELD(use_ssl);
+  ADD_CACHE_KEY_FIELD(ssl_ca_cert);
+  ADD_CACHE_KEY_FIELD(use_virtual_host);
+  ADD_CACHE_KEY_FIELD(request_timeout_ms);
+  ADD_CACHE_KEY_FIELD(max_connections);
+  ADD_CACHE_KEY_FIELD(crt_queue_sizes);
+  ADD_CACHE_KEY_FIELD(multi_part_upload_size);
+  ADD_CACHE_KEY_FIELD(tls_min_version);
+  ADD_CACHE_KEY_FIELD(background_writes);
+  ADD_CACHE_KEY_FIELD(use_crc32c_checksum);
+  ADD_CACHE_KEY_FIELD(s3_use_crt);
+  ADD_CACHE_KEY_FIELD(load_frequency);
+  ADD_CACHE_KEY_FIELD(talon_mode);
   // Disabled Talon settings do not affect the origin filesystem's identity.
   if (talon_mode != TalonMode::Disabled) {
-    hash_combine(talon_open_only);
-    hash_combine(talon_coordinator);
-    hash_combine(talon_namespace);
-    hash_combine(talon_block_size);
-    hash_combine(talon_max_idle_per_addr);
-    hash_combine(credential_endpoint);
+    ADD_CACHE_KEY_FIELD(talon_open_only);
+    ADD_CACHE_KEY_FIELD(talon_coordinator);
+    ADD_CACHE_KEY_FIELD(talon_namespace);
+    ADD_CACHE_KEY_FIELD(talon_block_size);
+    ADD_CACHE_KEY_FIELD(talon_max_idle_per_addr);
+    ADD_CACHE_KEY_FIELD(credential_endpoint);
     if (!credential_endpoint.empty()) {
-      hash_combine(use_iam);
-      // Broker IAM ignores target identities. Origin credentials are hashed separately below.
+      ADD_CACHE_KEY_FIELD(use_iam);
+      // Broker IAM ignores target identities. Origin credentials are encoded separately below.
       if (!use_iam) {
-        hash_combine(role_arn);
-        hash_combine(external_id);
-        hash_combine(gcp_target_service_account);
+        ADD_CACHE_KEY_FIELD(role_arn);
+        ADD_CACHE_KEY_FIELD(external_id);
+        ADD_CACHE_KEY_FIELD(gcp_target_service_account);
       }
     }
     if (talon_mode == TalonMode::SmallReads) {
-      hash_combine(talon_small_read_threshold);
+      ADD_CACHE_KEY_FIELD(talon_small_read_threshold);
     }
   }
 
   if (IsAwsCredentialBrokerEnabled()) {
-    hash_combine(credential_endpoint);
-    hash_combine(use_iam);
+    ADD_CACHE_KEY_FIELD(credential_endpoint);
+    ADD_CACHE_KEY_FIELD(use_iam);
     if (!use_iam) {
-      hash_combine(role_arn);
-      hash_combine(external_id);
+      ADD_CACHE_KEY_FIELD(role_arn);
+      ADD_CACHE_KEY_FIELD(external_id);
     }
   } else if (cloud_provider == kCloudProviderAzure) {
-    hash_combine(use_iam);
-    hash_combine(access_key_id);
+    ADD_CACHE_KEY_FIELD(use_iam);
+    ADD_CACHE_KEY_FIELD(access_key_id);
     if (IsAzureCredentialBrokerEnabled()) {
-      hash_combine(credential_endpoint);
+      ADD_CACHE_KEY_FIELD(credential_endpoint);
       if (!use_iam) {
-        hash_combine(azure_client_id);
-        hash_combine(azure_tenant_id);
+        ADD_CACHE_KEY_FIELD(azure_client_id);
+        ADD_CACHE_KEY_FIELD(azure_tenant_id);
       }
     } else if (!use_iam) {
-      hash_combine(access_key_value);
+      ADD_CACHE_KEY_FIELD(access_key_value);
     }
   } else if (cloud_provider == kCloudProviderGCP) {
     // Broker IAM ignores target/static credentials. Without a Broker, the
     // target still selects native impersonation with or without use_iam.
-    hash_combine(use_iam);
-    hash_combine(credential_endpoint);
+    ADD_CACHE_KEY_FIELD(use_iam);
+    ADD_CACHE_KEY_FIELD(credential_endpoint);
     if (!use_iam || credential_endpoint.empty()) {
-      hash_combine(gcp_target_service_account);
+      ADD_CACHE_KEY_FIELD(gcp_target_service_account);
     }
     if (!use_iam) {
-      hash_combine(access_key_id);
-      hash_combine(access_key_value);
+      ADD_CACHE_KEY_FIELD(access_key_id);
+      ADD_CACHE_KEY_FIELD(access_key_value);
     }
   } else if (!role_arn.empty()) {
-    hash_combine(role_arn);
-    hash_combine(session_name);
-    hash_combine(external_id);
+    ADD_CACHE_KEY_FIELD(role_arn);
+    ADD_CACHE_KEY_FIELD(session_name);
+    ADD_CACHE_KEY_FIELD(external_id);
   } else {
-    hash_combine(use_iam);
+    ADD_CACHE_KEY_FIELD(use_iam);
     if (!use_iam) {
-      hash_combine(access_key_id);
-      hash_combine(access_key_value);
+      ADD_CACHE_KEY_FIELD(access_key_id);
+      ADD_CACHE_KEY_FIELD(access_key_value);
     }
   }
 
-  // return the hash key
-  return "fs:" + std::to_string(seed);
+#undef ADD_CACHE_KEY_FIELD
+  return key.Finish();
 }
 
 std::string ArrowFileSystemConfig::ToString() const {
@@ -278,14 +321,14 @@ FilesystemCache& FilesystemCache::getInstance() {
   return instance;
 }
 
-size_t FilesystemCache::size() const { return cache_.size(); }
+size_t FilesystemCache::size() const { return cache_.size() + external_cache_.size(); }
 
 std::vector<std::pair<std::string, FileSystemPtr>> FilesystemCache::list() const {
-  auto cached_entries = cache_.list();
   std::vector<std::pair<std::string, FileSystemPtr>> entries;
-  entries.reserve(cached_entries.size());
-  for (const auto& cached_entry : cached_entries) {
-    entries.emplace_back(cached_entry.second->display_key, cached_entry.second->filesystem);
+  for (const auto* cache : {&cache_, &external_cache_}) {
+    for (const auto& cached_entry : cache->list()) {
+      entries.emplace_back(cached_entry.second->display_key, cached_entry.second->filesystem);
+    }
   }
   return entries;
 }
@@ -294,34 +337,52 @@ void FilesystemCache::remove(const std::string& key) {
   // Serialize with get()'s miss/create/put, so an in-flight creation cannot
   // publish the evicted entry after remove returns. Release provider clients
   // outside the cache locks; their destructors may wait for outstanding I/O.
-  std::optional<std::shared_ptr<CacheEntry>> removed;
+  std::optional<std::shared_ptr<CacheEntry>> removed_default;
+  std::optional<std::shared_ptr<CacheEntry>> removed_external;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    removed = cache_.get(key);
+    removed_default = cache_.get(key);
     cache_.remove(key);
+    removed_external = external_cache_.get(key);
+    external_cache_.remove(key);
   }
 }
 
 arrow::Status FilesystemCache::evict(const std::shared_ptr<const api::Properties>& properties,
                                      const std::string& path) {
-  ARROW_ASSIGN_OR_RAISE(const auto config, resolve_config(properties, path));
-  remove(config.GetCacheKey());
+  bool external = false;
+  ARROW_ASSIGN_OR_RAISE(const auto config, ResolveConfig(properties, path, &external));
+  const auto key = config.GetCacheKey();
+  auto& cache = external ? external_cache_ : cache_;
+  std::optional<std::shared_ptr<CacheEntry>> removed;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    removed = cache.get(key);
+    cache.remove(key);
+  }
   return arrow::Status::OK();
 }
 
-void FilesystemCache::clean() { cache_.clean(); }
+void FilesystemCache::clean() {
+  cache_.clean();
+  external_cache_.clean();
+}
 
-void FilesystemCache::set_capacity(size_t capacity) { cache_.set_capacity(capacity); }
+void FilesystemCache::set_capacity(size_t capacity) {
+  cache_.set_capacity(capacity);
+  external_cache_.set_capacity(capacity);
+}
 
-std::string FilesystemCache::MakeDisplayKey(const ArrowFileSystemConfig& config, const std::string& cache_key) {
+std::string FilesystemCache::MakeDisplayKey(const ArrowFileSystemConfig& config, uint64_t entry_id) {
+  const std::string suffix = "#fs:" + std::to_string(entry_id);
   if (config.storage_type == "local") {
-    return "file://" + config.root_path + "#" + cache_key;
+    return "file://" + config.root_path + suffix;
   }
   const std::string remote_path = (config.address.empty() ? "<null>" : config.address) + "/" + config.bucket_name;
   if (config.talon_mode != TalonMode::Disabled) {
-    return remote_path + "?talon=" + config.talon_coordinator + "#" + cache_key;
+    return remote_path + "?talon=" + config.talon_coordinator + suffix;
   }
-  return remote_path + "#" + cache_key;
+  return remote_path + suffix;
 }
 
 arrow::Status ArrowFileSystemConfig::create_file_system_config(
@@ -558,27 +619,37 @@ arrow::Status CreateExternalFsConfig(const std::string& alias,
 
 arrow::Result<FileSystemPtr> FilesystemCache::get(const std::shared_ptr<const api::Properties>& properties,
                                                   const std::string& path) {
-  ARROW_ASSIGN_OR_RAISE(auto config, resolve_config(properties, path));
+  bool external = false;
+  ARROW_ASSIGN_OR_RAISE(auto config, ResolveConfig(properties, path, &external));
 
   std::string cache_key = config.GetCacheKey();
+  auto& cache = external ? external_cache_ : cache_;
 
   // Keep the miss/create/put sequence under one FilesystemCache lock. LRUCache
   // protects each individual operation, but separate get() and put() calls would
   // still allow concurrent same-key misses to create multiple filesystems.
   std::lock_guard<std::mutex> lock(mutex_);
-  auto cached_entry = cache_.get(cache_key);
+  auto cached_entry = cache.get(cache_key);
   if (cached_entry.has_value()) {
     return cached_entry.value()->filesystem;
   }
 
   // Create and cache
   ARROW_ASSIGN_OR_RAISE(auto fs, CreateArrowFileSystem(config));
-  cache_.put(cache_key, std::make_shared<CacheEntry>(CacheEntry{MakeDisplayKey(config, cache_key), fs}));
+  cache.put(cache_key, std::make_shared<CacheEntry>(CacheEntry{MakeDisplayKey(config, ++last_entry_id_), fs}));
   return fs;
 }
 
 arrow::Result<ArrowFileSystemConfig> FilesystemCache::resolve_config(
     const std::shared_ptr<const api::Properties>& properties, const std::string& path) {
+  return ResolveConfig(properties, path, nullptr);
+}
+
+arrow::Result<ArrowFileSystemConfig> FilesystemCache::ResolveConfig(
+    const std::shared_ptr<const api::Properties>& properties, const std::string& path, bool* external) {
+  if (external != nullptr) {
+    *external = false;
+  }
   if (!properties) {
     return arrow::Status::Invalid("Properties must not be null");
   }
@@ -616,6 +687,9 @@ arrow::Result<ArrowFileSystemConfig> FilesystemCache::resolve_config(
         if (address_matches && bucket_matches) {
           ArrowFileSystemConfig config;
           ARROW_RETURN_NOT_OK(CreateExternalFsConfig(fs_alias, fs_props, config));
+          if (external != nullptr) {
+            *external = true;
+          }
           return config;
         }
       }
