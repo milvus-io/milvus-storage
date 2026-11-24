@@ -22,11 +22,12 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
 #include "milvus-storage/column_groups.h"
-#include "milvus-storage/ffi_types.h"
+#include "milvus-storage/ffi_c.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/lob_column/lob_column_manager.h"
 #include "milvus-storage/manifest.h"
@@ -168,8 +169,13 @@ class SegmentWriter {
   // check if the writer is closed
   virtual bool IsClosed() const = 0;
 
-  // Populated by a successful Close. The writer owns the snapshot.
-  virtual const std::vector<LoonTextColumnStats>& GetTextColumnStats() const = 0;
+  // If requested, the summaries from a successful close remain valid until the writer is destroyed.
+  virtual arrow::Result<SegmentWriteOutput> Close(std::span<const LoonTextWriteSummary>* text_summaries) {
+    if (text_summaries) {
+      *text_summaries = {};
+    }
+    return Close();
+  }
 
   protected:
   SegmentWriter() = default;

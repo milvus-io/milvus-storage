@@ -448,36 +448,34 @@ TEST_F(SegmentWriterMemoryTest, SlicedNullableAndInlineTextRoundTrip) {
   ASSERT_OK(CheckFFI(loon_segment_writer_flush(writer_)));
   EXPECT_EQ(*id, 0);
 
-  size_t count = 1;
-  loon_segment_writer_get_text_column_stats(writer_, &count);
-  EXPECT_EQ(count, 0);
   ASSERT_OK_AND_ASSIGN(auto expected, MakeTextBatch(6, 2, true));
   ASSERT_NO_FATAL_FAILURE(CloseAndRead(expected));
   EXPECT_EQ(*id, 1);
 
-  const auto* stats = loon_segment_writer_get_text_column_stats(writer_, &count);
-  ASSERT_EQ(count, 1);
-  ASSERT_NE(stats, nullptr);
-  FreeOutput();  // The writer owns the borrowed stats.
+  ASSERT_EQ(output_.num_text_summaries, 1);
+  const auto* summary = output_.text_summaries;
+  ASSERT_NE(summary, nullptr);
+  FreeOutput();  // The writer owns the borrowed summary.
   const auto texts = std::static_pointer_cast<arrow::StringArray>(expected->column(1));
-  EXPECT_EQ(stats[0].field_id, 101);
-  EXPECT_EQ(stats[0].total_entries, texts->length());
-  EXPECT_EQ(stats[0].total_bytes, texts->total_values_length());
+  EXPECT_EQ(summary->field_id, 101);
+  EXPECT_EQ(summary->total_entries, texts->length());
+  EXPECT_EQ(summary->total_bytes, texts->total_values_length());
 }
 
-TEST_F(SegmentWriterMemoryTest, TextColumnStatsWithoutWrites) {
+TEST_F(SegmentWriterMemoryTest, TextWriteSummaryWithoutWrites) {
+  EXPECT_FALSE(CheckFFI(loon_segment_writer_close(0, &output_)).ok());
+  EXPECT_FALSE(CheckFFI(loon_segment_writer_close(writer_, nullptr)).ok());
   ASSERT_OK(CheckFFI(loon_segment_writer_close(writer_, &output_)));
-  size_t count = 0;
-  const auto* stats = loon_segment_writer_get_text_column_stats(writer_, &count);
-  ASSERT_EQ(count, 1);
-  ASSERT_NE(stats, nullptr);
-  EXPECT_EQ(stats[0].field_id, 101);
-  EXPECT_EQ(stats[0].total_entries, 0);
-  EXPECT_EQ(stats[0].total_bytes, 0);
+  ASSERT_EQ(output_.num_text_summaries, 1);
+  ASSERT_NE(output_.text_summaries, nullptr);
+  EXPECT_EQ(output_.text_summaries[0].field_id, 101);
+  EXPECT_EQ(output_.text_summaries[0].total_entries, 0);
+  EXPECT_EQ(output_.text_summaries[0].total_bytes, 0);
 
-  EXPECT_EQ(loon_segment_writer_get_text_column_stats(writer_, nullptr), nullptr);
-  EXPECT_EQ(loon_segment_writer_get_text_column_stats(0, &count), nullptr);
-  EXPECT_EQ(count, 0);
+  LoonSegmentWriteOutput repeated{};
+  EXPECT_FALSE(CheckFFI(loon_segment_writer_close(writer_, &repeated)).ok());
+  EXPECT_EQ(repeated.text_summaries, nullptr);
+  EXPECT_EQ(repeated.num_text_summaries, 0);
 }
 
 TEST_F(SegmentWriterMemoryTest, ImportFailuresReleaseEachColumnExactlyOnce) {
@@ -504,6 +502,21 @@ TEST_F(SegmentWriterMemoryTest, ImportFailuresReleaseEachColumnExactlyOnce) {
   ASSERT_OK(arrow::ExportRecordBatch(*batch, &valid.array));
   ASSERT_OK(CheckFFI(loon_segment_writer_write(writer_, &valid.array)));
   ASSERT_NO_FATAL_FAILURE(CloseAndRead(batch));
+}
+
+// Call the symbol used by clients built with the original output layout.
+#undef loon_segment_writer_close
+extern "C" LoonFFIResult loon_segment_writer_close(LoonSegmentWriterHandle, void*);
+
+TEST_F(SegmentWriterMemoryTest, LegacyCloseWritesOnlyTheOriginalOutput) {
+  const LoonTextWriteSummary guard{};
+  output_.text_summaries = &guard;
+  output_.num_text_summaries = 42;
+  ASSERT_OK(CheckFFI(loon_segment_writer_close(writer_, &output_)));
+  EXPECT_NE(output_.column_groups, nullptr);
+  EXPECT_EQ(output_.rows_written, 0);
+  EXPECT_EQ(output_.text_summaries, &guard);
+  EXPECT_EQ(output_.num_text_summaries, 42);
 }
 }  // namespace
 }  // namespace milvus_storage::test

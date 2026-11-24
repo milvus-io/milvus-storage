@@ -1017,13 +1017,22 @@ typedef struct LoonSegmentWriterConfig {
   size_t num_lob_columns;            // number of TEXT columns
 } LoonSegmentWriterConfig;
 
-/// output of SegmentWriter close — contains column groups + LOB file info
-/// caller is responsible for committing these via Transaction
+/// Encoder counters for one TEXT column. A failed write can advance the encoder
+/// before the segment accepts the batch. Check total_entries against rows_written.
+typedef struct LoonTextWriteSummary {
+  int64_t field_id;
+  int64_t total_entries;  // includes nulls
+  int64_t total_bytes;    // UTF-8 body bytes, excluding nulls and reference encoding
+} LoonTextWriteSummary;
+
+/// output of SegmentWriter close — caller commits column groups and LOB files via Transaction
 typedef struct LoonSegmentWriteOutput {
-  LoonColumnGroups* column_groups;  // parquet column group metadata
-  LoonLobFileInfo* lob_files;       // LOB file metadata array (caller must free)
-  size_t num_lob_files;             // number of LOB files
-  int64_t rows_written;             // number of rows written
+  LoonColumnGroups* column_groups;             // parquet column group metadata
+  LoonLobFileInfo* lob_files;                  // LOB file metadata array (caller must free)
+  size_t num_lob_files;                        // number of LOB files
+  int64_t rows_written;                        // number of rows written
+  const LoonTextWriteSummary* text_summaries;  // borrowed until loon_segment_writer_destroy
+  size_t num_text_summaries;                   // one entry per configured TEXT field
 } LoonSegmentWriteOutput;
 
 /**
@@ -1060,31 +1069,20 @@ FFI_EXPORT LoonFFIResult loon_segment_writer_write(LoonSegmentWriterHandle handl
  */
 FFI_EXPORT LoonFFIResult loon_segment_writer_flush(LoonSegmentWriterHandle handle);
 
+// The original binary symbol accepts a smaller caller-allocated output.
+#define loon_segment_writer_close loon_segment_writer_close_v2
+
 /**
- * @brief Closes the writer and returns write output (does NOT commit manifest)
+ * @brief Closes the writer and returns column groups, LOB files, and TEXT summaries.
  *
- * Returns ColumnGroups + LOB file metadata. Caller must commit via Transaction.
+ * Commit the column groups and LOB files via Transaction. Look up TEXT summaries
+ * by field_id and copy them before destroying the writer.
  *
  * @param handle SegmentWriter handle
- * @param out_output Output containing column groups and LOB file info
+ * @param out_output Write output populated on success
  * @return result of FFI
  */
 FFI_EXPORT LoonFFIResult loon_segment_writer_close(LoonSegmentWriterHandle handle, LoonSegmentWriteOutput* out_output);
-
-/**
- * @brief Returns one entry per TEXT column configured on the segment writer.
- *
- * Call after loon_segment_writer_close succeeds. The writer owns the array
- * until loon_segment_writer_destroy. Look up entries by field_id.
- * A failed write can advance the encoder before the segment accepts the batch.
- * Check total_entries against the close output's rows_written before using total_bytes.
- *
- * @param handle SegmentWriter handle
- * @param out_count Number of entries, zero before close or without TEXT columns
- * @return Borrowed array, or NULL if handle or out_count is null
- */
-FFI_EXPORT const LoonTextColumnStats* loon_segment_writer_get_text_column_stats(LoonSegmentWriterHandle handle,
-                                                                                size_t* out_count);
 
 /**
  * @brief Destroys a SegmentWriter handle

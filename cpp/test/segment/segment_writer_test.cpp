@@ -516,18 +516,27 @@ TEST_F(SegmentWriterTest, WriteWithNullText) {
 
   ASSERT_STATUS_OK(writer->Write(batch->Slice(0, 2)));
   ASSERT_STATUS_OK(writer->Write(batch->Slice(2, 1)));
-  auto close_result = writer->Close();
+  std::span<const LoonTextWriteSummary> summaries;
+  auto close_result = writer->Close(&summaries);
   ASSERT_TRUE(close_result.ok()) << close_result.status().message();
 
-  const auto& stats = writer->GetTextColumnStats();
-  ASSERT_EQ(stats.size(), 2);
+  ASSERT_EQ(summaries.size(), 2);
   std::map<int64_t, int64_t> bytes_by_field;
-  for (const auto& stat : stats) {
-    EXPECT_EQ(stat.total_entries, batch->num_rows()) << "field " << stat.field_id;
-    bytes_by_field.emplace(stat.field_id, stat.total_bytes);
+  for (const auto& summary : summaries) {
+    EXPECT_EQ(summary.total_entries, batch->num_rows()) << "field " << summary.field_id;
+    bytes_by_field.emplace(summary.field_id, summary.total_bytes);
   }
   const std::map<int64_t, int64_t> expected_bytes{{101, 5 + 100}, {205, 0}};
   EXPECT_EQ(bytes_by_field, expected_bytes);
+}
+
+TEST_F(SegmentWriterTest, BinaryLobHasNoTextSummary) {
+  config_.lob_columns.at(101).data_type = lob_column::LobDataType::kBinary;
+  ASSERT_AND_ASSIGN(auto schema, schema_->SetField(1, schema_->field(1)->WithType(arrow::binary())));
+  ASSERT_AND_ASSIGN(auto writer, SegmentWriter::Create(fs_, schema, config_));
+  std::span<const LoonTextWriteSummary> summaries;
+  ASSERT_STATUS_OK(writer->Close(&summaries).status());
+  EXPECT_TRUE(summaries.empty());
 }
 
 // test schema without TEXT columns
@@ -571,9 +580,10 @@ TEST_F(SegmentWriterTest, SchemaWithoutLobColumns) {
   ASSERT_STATUS_OK(writer->Write(batch));
 
   // close
-  auto close_result = writer->Close();
+  std::span<const LoonTextWriteSummary> summaries;
+  auto close_result = writer->Close(&summaries);
   ASSERT_TRUE(close_result.ok()) << close_result.status().message();
-  EXPECT_TRUE(writer->GetTextColumnStats().empty());
+  EXPECT_TRUE(summaries.empty());
 
   auto output = std::move(close_result).ValueOrDie();
   ASSERT_NE(output.column_groups, nullptr);
