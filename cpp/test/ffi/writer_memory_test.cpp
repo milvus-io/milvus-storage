@@ -313,9 +313,14 @@ class SegmentWriterMemoryTest : public ::testing::Test {
 
   void TearDown() override {
     loon_segment_writer_destroy(writer_);
+    FreeOutput();
+    loon_properties_free(&properties_);
+  }
+
+  void FreeOutput() {
     loon_column_groups_destroy(output_.column_groups);
     loon_segment_write_output_free(&output_);
-    loon_properties_free(&properties_);
+    output_ = {};
   }
 
   arrow::Result<std::shared_ptr<arrow::RecordBatch>> MakeTextBatch(int64_t rows,
@@ -442,9 +447,35 @@ TEST_F(SegmentWriterMemoryTest, SlicedNullableAndInlineTextRoundTrip) {
   EXPECT_TRUE(text_buffer.expired());
   ASSERT_OK(CheckFFI(loon_segment_writer_flush(writer_)));
   EXPECT_EQ(*id, 0);
+
   ASSERT_OK_AND_ASSIGN(auto expected, MakeTextBatch(6, 2, true));
   ASSERT_NO_FATAL_FAILURE(CloseAndRead(expected));
   EXPECT_EQ(*id, 1);
+
+  ASSERT_EQ(output_.num_text_summaries, 1);
+  const auto* summary = output_.text_summaries;
+  ASSERT_NE(summary, nullptr);
+  FreeOutput();  // The writer owns the borrowed summary.
+  const auto texts = std::static_pointer_cast<arrow::StringArray>(expected->column(1));
+  EXPECT_EQ(summary->field_id, 101);
+  EXPECT_EQ(summary->total_entries, texts->length());
+  EXPECT_EQ(summary->total_bytes, texts->total_values_length());
+}
+
+TEST_F(SegmentWriterMemoryTest, TextWriteSummaryWithoutWrites) {
+  EXPECT_FALSE(CheckFFI(loon_segment_writer_close(0, &output_)).ok());
+  EXPECT_FALSE(CheckFFI(loon_segment_writer_close(writer_, nullptr)).ok());
+  ASSERT_OK(CheckFFI(loon_segment_writer_close(writer_, &output_)));
+  ASSERT_EQ(output_.num_text_summaries, 1);
+  ASSERT_NE(output_.text_summaries, nullptr);
+  EXPECT_EQ(output_.text_summaries[0].field_id, 101);
+  EXPECT_EQ(output_.text_summaries[0].total_entries, 0);
+  EXPECT_EQ(output_.text_summaries[0].total_bytes, 0);
+
+  LoonSegmentWriteOutput repeated{};
+  EXPECT_FALSE(CheckFFI(loon_segment_writer_close(writer_, &repeated)).ok());
+  EXPECT_EQ(repeated.text_summaries, nullptr);
+  EXPECT_EQ(repeated.num_text_summaries, 0);
 }
 
 TEST_F(SegmentWriterMemoryTest, ImportFailuresReleaseEachColumnExactlyOnce) {
@@ -472,5 +503,6 @@ TEST_F(SegmentWriterMemoryTest, ImportFailuresReleaseEachColumnExactlyOnce) {
   ASSERT_OK(CheckFFI(loon_segment_writer_write(writer_, &valid.array)));
   ASSERT_NO_FATAL_FAILURE(CloseAndRead(batch));
 }
+
 }  // namespace
 }  // namespace milvus_storage::test

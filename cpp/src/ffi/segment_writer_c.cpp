@@ -152,36 +152,36 @@ LoonFFIResult loon_segment_writer_flush(LoonSegmentWriterHandle handle) {
 }
 
 LoonFFIResult loon_segment_writer_close(LoonSegmentWriterHandle handle, LoonSegmentWriteOutput* out_output) {
-  if (!handle || !out_output) {
+  auto* writer = reinterpret_cast<SegmentWriter*>(handle);
+  if (!writer || !out_output) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_output must not be null");
   }
 
   try {
-    auto* writer = reinterpret_cast<SegmentWriter*>(handle);
     auto result = writer->Close();
     RETURN_ARROW_ERROR_IF(result.status(), LOON_ARROW_ERROR, result.status().ToString());
 
     auto output = std::move(result).ValueOrDie();
-
-    auto cgs = output.column_groups;
-    auto export_st = milvus_storage::column_groups_export(*cgs, &out_output->column_groups);
+    LoonSegmentWriteOutput c_output{};
+    auto export_st = milvus_storage::column_groups_export(*output.column_groups, &c_output.column_groups);
     RETURN_ARROW_ERROR_IF(export_st, LOON_LOGICAL_ERROR, export_st.ToString());
-    out_output->rows_written = output.rows_written;
+    c_output.rows_written = output.rows_written;
 
-    out_output->num_lob_files = output.lob_files.size();
+    c_output.num_lob_files = output.lob_files.size();
     if (!output.lob_files.empty()) {
-      out_output->lob_files = static_cast<LoonLobFileInfo*>(malloc(sizeof(LoonLobFileInfo) * output.lob_files.size()));
+      c_output.lob_files = static_cast<LoonLobFileInfo*>(malloc(sizeof(LoonLobFileInfo) * output.lob_files.size()));
       for (size_t i = 0; i < output.lob_files.size(); i++) {
-        out_output->lob_files[i].path = strdup(output.lob_files[i].path.c_str());
-        out_output->lob_files[i].field_id = output.lob_files[i].field_id;
-        out_output->lob_files[i].total_rows = output.lob_files[i].total_rows;
-        out_output->lob_files[i].valid_rows = output.lob_files[i].valid_rows;
-        out_output->lob_files[i].file_size_bytes = output.lob_files[i].file_size_bytes;
+        c_output.lob_files[i].path = strdup(output.lob_files[i].path.c_str());
+        c_output.lob_files[i].field_id = output.lob_files[i].field_id;
+        c_output.lob_files[i].total_rows = output.lob_files[i].total_rows;
+        c_output.lob_files[i].valid_rows = output.lob_files[i].valid_rows;
+        c_output.lob_files[i].file_size_bytes = output.lob_files[i].file_size_bytes;
       }
-    } else {
-      out_output->lob_files = nullptr;
     }
 
+    c_output.text_summaries = output.text_summaries.data();
+    c_output.num_text_summaries = output.text_summaries.size();
+    *out_output = c_output;
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
